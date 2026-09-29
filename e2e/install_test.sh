@@ -290,6 +290,9 @@ t_refuses_active_job() {
   write_sqlite_config "$home"
   mkdir -p "$home/.local/state/swarm/active"
   printf '{"job": "recall-latency-2026-09"}' > "$home/.local/state/swarm/active/testjob.json"
+  # migrate only checks markers when an old install is left to migrate; plant one in this HOME
+  # (the pre-0.1.0 default sqlite board) instead of relying on the machine's /tmp state
+  : > "$home/.local/state/swarm/board.sqlite3"
   set +e
   out="$(run_install "$home" "$bindir" --host claude --yes 2>&1)"
   rc=$?
@@ -308,6 +311,9 @@ t_force_overrides_active_job() {
   write_sqlite_config "$home"
   mkdir -p "$home/.local/state/swarm/active"
   printf '{"job": "recall-latency-2026-09"}' > "$home/.local/state/swarm/active/testjob.json"
+  # migrate only checks markers when an old install is left to migrate; plant one in this HOME
+  # (the pre-0.1.0 default sqlite board) instead of relying on the machine's /tmp state
+  : > "$home/.local/state/swarm/board.sqlite3"
   out="$(run_install "$home" "$bindir" --host claude --yes --force)" || fail "--force run failed: $out"
   echo "$out" | grep -q "^==> done\.$" || fail "--force run didn't finish cleanly: $out"
   echo "$out" | grep -q "recall-latency-2026-09" || fail "--force run didn't name the overridden marker: $out"

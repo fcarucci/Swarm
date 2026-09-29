@@ -356,7 +356,7 @@ class SqliteHarness:
             if tmp is None else Path(tmp)
         self.path = self.dir / "board.sqlite3"
         self.cfg = base_config(backend="sqlite")
-        self.cfg["sqlite"] = {"path": str(self.path), "busy_timeout_ms": 10000}
+        self.cfg["sqlite"] = {"path": str(self.path), "busy_timeout_ms": 60000}
         self.toml = f'[sqlite]\npath = "{self.path}"\n'
         self._unavailable = None
         self.conn = None
