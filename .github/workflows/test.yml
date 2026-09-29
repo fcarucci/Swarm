@@ -45,7 +45,9 @@ jobs:
       - name: Run tests (backend=${{ matrix.backend }})
         env:
           SWARM_TEST_BACKEND: ${{ matrix.backend }}
-        run: python -B -m unittest discover -s tests -q
+        run: |
+          set -o pipefail
+          python -B -m unittest discover -s tests -q 2>&1 | tee test.log || { python .github/scripts/annotate.py test.log; exit 1; }
 
   # install.sh must keep working under macOS's stock bash (3.2, no arrays): e2e/install_test.sh
   # exercises it end to end. Also runs the unit suite on sqlite, the backend the e2e script uses
@@ -71,7 +73,9 @@ jobs:
           .venv/bin/pip install -q -r requirements.txt
 
       - name: install.sh end to end (bash 3.2)
-        run: bash e2e/install_test.sh
+        run: |
+          set -o pipefail
+          bash e2e/install_test.sh 2>&1 | tee e2e.log || { python3 .github/scripts/annotate.py e2e.log; exit 1; }
 
       - name: Unit suite (backend=sqlite)
         env:
@@ -141,8 +145,9 @@ jobs:
 
       - name: Postgres suite (excluding the known-stall recovery tests)
         run: |
+          set -o pipefail
           cd tests
-          python -B run_postgres_suite.py
+          python -B run_postgres_suite.py 2>&1 | tee ../pg.log || { cd .. && python .github/scripts/annotate.py pg.log; exit 1; }
 
       - name: Known-stall recovery tests (swarm tail/watch vs a stalling proxy; allowed to fail)
         continue-on-error: true
