@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "SessionStart":  [{"hooks": [{"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/swarm-hook\" --host claude session-start", "timeout": 10}]}],
+    "SubagentStart": [{"hooks": [{"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/swarm-hook\" --host claude start", "timeout": 15}]}],
+    "PreToolUse":    [{"matcher": "*", "hooks": [{"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/swarm-hook\" --host claude turn", "timeout": 10}]}],
+    "PostToolUse":   [{"matcher": "*", "hooks": [{"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/swarm-hook\" --host claude done", "timeout": 10}]}],
+    "Stop":          [{"hooks": [{"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/swarm-hook\" --host claude session-stop", "timeout": 10}]}],
+    "SubagentStop":  [{"hooks": [{"type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/swarm-hook\" --host claude stop", "timeout": 10}]}]
+  }
+}

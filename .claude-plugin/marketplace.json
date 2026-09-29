@@ -1,0 +1,6 @@
+{
+  "name": "swarm",
+  "description": "The swarm plugin (this repository is its own marketplace)",
+  "owner": {"name": "Francesco Carucci"},
+  "plugins": [{"name": "swarm", "source": "./", "description": "Agents that coordinate through a shared message board"}]
+}

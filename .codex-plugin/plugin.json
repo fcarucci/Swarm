@@ -1,0 +1,12 @@
+{
+  "name": "swarm",
+  "version": "0.1.0",
+  "description": "Agents that coordinate through a shared message board, in Claude Code and Codex.",
+  "author": {
+    "name": "Francesco Carucci",
+    "email": "francesco@carucci.org"
+  },
+  "repository": "https://github.com/fcarucci/Swarm",
+  "hooks": "./hooks/codex-hooks.json",
+  "license": "Apache-2.0"
+}

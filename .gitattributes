@@ -1,0 +1,13 @@
+# Marks paths the plugin doesn't need at runtime (dev/test/CI only) so `git archive` -- used by
+# .github/workflows/release.yml to build the release tarball/zip -- leaves them out. Runtime is
+# bin/swarm's bootstrap (lib/, requirements.txt, data/ name lists) plus the plugin manifests,
+# hooks and skills; install.sh is a one-time installer, not something the plugin imports, and is
+# attached to releases separately instead of bundled in the archive.
+/.github/            export-ignore
+/tests/              export-ignore
+/e2e/                export-ignore
+/docs/superpowers/   export-ignore
+/scripts/            export-ignore
+/install.sh          export-ignore
+/.gitignore          export-ignore
+/.gitattributes      export-ignore

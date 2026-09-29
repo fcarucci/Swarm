@@ -1,0 +1,24 @@
+{
+ "agent_id": "a0000000000000001",
+ "agent_type": "general-purpose",
+ "cwd": "/home/alice/work",
+ "duration_ms": 22,
+ "hook_event_name": "PostToolUse",
+ "permission_mode": "default",
+ "prompt_id": "00000000-0000-4000-9000-000000000002",
+ "session_id": "00000000-0000-4000-9000-000000000001",
+ "tool_input": {
+  "command": "synthetic",
+  "description": "synthetic"
+ },
+ "tool_name": "Bash",
+ "tool_response": {
+  "interrupted": false,
+  "isImage": false,
+  "noOutputExpected": false,
+  "stderr": "synthetic",
+  "stdout": "synthetic"
+ },
+ "tool_use_id": "toolu_01SyntheticMemoryWrite",
+ "transcript_path": "/home/alice/.claude/projects/-home-alice-work/00000000-0000-4000-9000-000000000001.jsonl"
+}

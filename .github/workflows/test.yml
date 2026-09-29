@@ -1,0 +1,208 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Ref to test (default: the branch this was run from)"
+        required: false
+  workflow_call:
+    inputs:
+      ref:
+        description: "Ref to test (default: the ref that triggered the caller)"
+        required: false
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Backend contract + hook/CLI suite, on every offline backend and both the minimum and the
+  # latest supported Python (README "Requirements": 3.11 or newer).
+  unit:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [memory, sqlite, file]
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests (backend=${{ matrix.backend }})
+        env:
+          SWARM_TEST_BACKEND: ${{ matrix.backend }}
+        run: python -B -m unittest discover -s tests -q
+
+  # install.sh must keep working under macOS's stock bash (3.2, no arrays): e2e/install_test.sh
+  # exercises it end to end. Also runs the unit suite on sqlite, the backend the e2e script uses
+  # nowhere but that is otherwise only covered on Linux above.
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Syntax-check install.sh under bash 3.2
+        run: bash -n install.sh
+
+      - name: Build the checkout's own venv (e2e/install_test.sh expects $ROOT/.venv already built)
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install -q -r requirements.txt
+
+      - name: install.sh end to end (bash 3.2)
+        run: bash e2e/install_test.sh
+
+      - name: Unit suite (backend=sqlite)
+        env:
+          SWARM_TEST_BACKEND: sqlite
+        run: .venv/bin/python -B -m unittest discover -s tests -q
+
+  # The Postgres-backed classes (tests/support.py PostgresHarness, tests/test_stall.py's Postgres
+  # proxy tests) are skipped everywhere else because they need SWARM_TEST_CONFIG. Give them a
+  # real, throwaway database here. PostgresFollowRecoveryTests drives `swarm tail`/`swarm watch`
+  # as real subprocesses through a stalling TCP proxy and is known to hang intermittently in CI
+  # environments; it runs separately and is allowed to fail (see the last step).
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: swarm_test
+          POSTGRES_PASSWORD: swarm_test_pw
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U swarm_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write a throwaway SWARM_TEST_CONFIG
+        run: |
+          mkdir -p "$RUNNER_TEMP/swarm-pg"
+          printf 'PGPASSWORD=swarm_test_pw\n' > "$RUNNER_TEMP/swarm-pg/pg.env"
+          chmod 600 "$RUNNER_TEMP/swarm-pg/pg.env"
+          # dbname deliberately not the default "swarm_board": PostgresHarness refuses to run
+          # against the database of the live config (tests/support.py), so a throwaway database
+          # can never collide with a real board. admin_dbname is postgres (POSTGRES_DB above); the CI role is
+          # the cluster's initdb superuser, which has CREATEDB.
+          cat > "$RUNNER_TEMP/swarm-pg/test-config.toml" <<EOF
+          [database]
+          host = "127.0.0.1"
+          port = 5432
+          user = "swarm_test"
+          dbname = "swarm_ci_test"
+          admin_dbname = "postgres"
+          password_env_file = "$RUNNER_TEMP/swarm-pg/pg.env"
+          connect_timeout = 5
+          sslmode = "prefer"
+          query_timeout_seconds = 8
+          prepared_statements = false
+
+          [board]
+          backend = "postgres"
+          EOF
+          echo "SWARM_TEST_CONFIG=$RUNNER_TEMP/swarm-pg/test-config.toml" >> "$GITHUB_ENV"
+
+      - name: Postgres suite (excluding the known-stall recovery tests)
+        run: |
+          cd tests
+          python -B run_postgres_suite.py
+
+      - name: Known-stall recovery tests (swarm tail/watch vs a stalling proxy; allowed to fail)
+        continue-on-error: true
+        run: cd tests && python -B -m unittest test_stall.PostgresFollowRecoveryTests -v
+
+  install-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: bash -n install.sh
+        run: bash -n install.sh
+
+      - name: shellcheck install.sh (severity=error, non-blocking)
+        continue-on-error: true
+        run: |
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          fi
+          shellcheck --severity=error install.sh
+
+      - name: Try installing the Claude Code CLI
+        id: claude_cli
+        continue-on-error: true
+        run: npm install -g @anthropic-ai/claude-code && claude --version
+
+      - name: claude plugin validate .
+        if: steps.claude_cli.outcome == 'success'
+        run: claude plugin validate .
+
+      - name: Validate plugin manifests' JSON structure (claude CLI unavailable)
+        if: steps.claude_cli.outcome != 'success'
+        run: |
+          python3 - <<'PY'
+          import json, sys
+          from pathlib import Path
+
+          checks = [
+              ".claude-plugin/plugin.json",
+              ".claude-plugin/marketplace.json",
+              ".codex-plugin/plugin.json",
+          ]
+          ok = True
+          for rel in checks:
+              p = Path(rel)
+              try:
+                  data = json.loads(p.read_text())
+              except Exception as exc:  # noqa: BLE001
+                  print(f"INVALID JSON: {rel}: {exc}")
+                  ok = False
+                  continue
+              if "name" not in data:
+                  print(f"MISSING 'name': {rel}")
+                  ok = False
+              print(f"ok: {rel}")
+          sys.exit(0 if ok else 1)
+          PY

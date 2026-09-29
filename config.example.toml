@@ -1,0 +1,176 @@
+# swarm plugin configuration. The first session copies it to ~/.config/swarm/config.toml (or
+# point $SWARM_CONFIG elsewhere); fill in your own values. Nothing environment-specific belongs in
+# the plugin itself. Every key has a default; see docs/REFERENCE.md#configuration-reference.
+
+# Only used with [board] backend = "postgres" (below); the default board is plain files.
+[database]
+host = "db.example.internal"        # Postgres server address
+port = 5432
+user = "swarm"                      # role that owns the board (needs CREATEDB to create the database)
+dbname = "swarm_board"              # board database; created automatically (or by `swarm init`) if missing
+admin_dbname = "postgres"           # existing database used only to run CREATE DATABASE
+password_env_file = "~/.config/swarm/pg.env"   # file containing PGPASSWORD=...; keep it chmod 600
+connect_timeout = 5
+sslmode = "prefer"
+query_timeout_seconds = 8           # client-side deadline per query (0 = none); keep it below the hooks' 10 s
+prepared_statements = false         # true only without a pooler in between: it can deadlock them on LISTEN connections
+# application_name = "swarm"        # optional; shows in pg_stat_activity (unset by default)
+
+# Optional: a separate connection for the watchers only (`swarm watch`, `swarm tail`), the
+# long-lived LISTEN clients. Use it when a pooler in front of Postgres mishandles LISTEN/NOTIFY
+# (a pooler can deadlock a LISTENing connection): point the watchers at the
+# primary directly while agents, hooks and every other command keep going through [database].
+# Takes any [database] key; each key left out (or "") falls back to [database], so an empty or
+# missing section means the watchers use [database]. It must reach the PRIMARY: a hot standby
+# can't LISTEN. `watch` shows "db: <host>" in its title when this points somewhere else.
+# [watch_database]
+# host = "db-primary.example.internal"   # e.g. the primary itself, bypassing the pooler
+# port = 5432
+# application_name = "swarm-watch"      # tells the watchers apart in pg_stat_activity
+
+[board]
+backend = "file"                    # storage backend: "file" (default: plain files, one machine, no server), "sqlite" (one machine), "postgres" (shared across machines; needs [database] above), or "memory" (offline tests only; see SKILL.md)
+retention_days = 7                 # messages (and departed agents) older than this are purged
+message_max_chars = 200             # hard cap per message; sizes the varchar(N) column at first init
+                                    # (re-running init does not resize it: see SKILL.md)
+agent_stale_hours = 12              # an agent silent this long gives its name back
+read_limit = 50                     # max messages returned by one read
+join_history = 30                   # a new agent is first shown the job's newest N messages (0 = none)
+roster_refresh_minutes = 10         # full roster re-sent to each agent at least this often (diffs in between)
+watch_recent_minutes = 10           # watch / status --job hide finished agents older than this (`a` / --all-agents shows them)
+silence_nudge_calls = 15            # nudge an agent to post a status after this many tool calls without posting (0 = off)
+silence_nudge_minutes = 10          # ... or after this many minutes without posting (0 = off); once per quiet window
+spool_dir = "~/.local/state/swarm/spool"   # posts queue here when the board is unreachable; hooks deliver them.
+                                    # Must be private to this OS user: a path outside your home must name your
+                                    # uid ("/tmp/claude-{uid}/swarm-spool"; {uid} is expanded). The old shared
+                                    # "/tmp/claude/swarm-spool" is refused (`swarm migrate` moves its records).
+# agent_status thresholds (re-run `swarm init` after changing them: they are baked into the view)
+idle_minutes = 5                    # no hook contact this long -> idle
+dead_minutes = 30                   # no hook contact this long, and no SubagentStop -> dead
+tool_timeout_minutes = 60           # a single tool call longer than this stops counting as running
+
+# [board] backend = "sqlite" keeps the board in one local SQLite file instead: one machine, no
+# server ([database] is then unused; the first command creates the file). See docs/REFERENCE.md#the-sqlite-backend. The default path is outside every sandbox (sandboxed agents' posts spool, the
+# hooks deliver them). If you pick another path, use a dedicated dir no sandbox can write (not the
+# state/spool/marker dirs, a workspace, /tmp or $TMPDIR, or another writable root; `/status` in a
+# Codex session shows its writable roots): a sandboxed agent that can write the board can forge
+# rows. `swarm doctor` FAILs for a board under a writable root; see docs/REFERENCE.md#choosing-a-backend.
+# `swarm migrate` moves a board from the old default (~/.local/state/swarm/...).
+# [sqlite]
+# path = "~/.local/share/swarm-board/board.sqlite3"   # on a local filesystem (not NFS/SMB)
+# busy_timeout_ms = 10000                             # a writer waits this long for the write lock
+#
+# [board] backend = "file" keeps the board in plain files instead: one machine, no database
+# ([database] is then unused). See docs/REFERENCE.md#the-file-backend.
+# [file]
+# path = "~/.local/share/swarm-board/board"   # board directory; must be on a local filesystem
+
+[hook]
+# An agent only takes part in the board when a marker for its swarm job exists here;
+# see SKILL.md. Hooks exit silently for everyone else.
+marker_dir = "~/.local/state/swarm/active"
+
+[job]
+# An open job closes by itself (status completed, closed_by "auto") once every agent of its
+# current run is completed or left (dead ones don't hold it open) and nothing happened on it
+# (no join, no hook contact, no post) for this many minutes. 0 turns it off. `swarm activate`
+# reopens a closed job; `swarm deactivate` on it replaces the auto outcome with yours.
+auto_close_minutes = 30
+
+[codex]
+# Codex fires SubagentStop after every turn of a child (it can be sent more work). The swarm
+# counts a Codex agent as completed once no new turn came for this many minutes; a follow-up
+# task restarts the wait. status, watch and auto-close lag by this much for Codex agents.
+stop_quiet_minutes = 3
+# The swarm grants the Codex sandbox only the spool and marker dirs, never network access (posts
+# spool instead). Opt-ins, both off by default (docs/REFERENCE.md#codex-setup):
+# network_access = true    # write the `swarm` Codex profile with network access: `codex -p swarm` only
+# board_writable = true    # make the local board's dir a Codex writable root: sandboxed agents can
+#                          # then forge board rows (`swarm doctor` reports FAIL)
+
+[transcripts]
+# The transcript archive: each swarm agent's transcript (Claude Code's JSONL, or Codex's rollout,
+# .jsonl or .jsonl.zst) and the orchestrator's slice of each job, from activation to close,
+# stored on the board, secrets redacted, lzma-compressed.
+# Captured when an agent stops, at deactivate / auto-close, and every snapshot_minutes while
+# agents run (from the SubagentStart/Stop hooks and watch/tail, never per tool call). Read them
+# with `swarm transcript list|show|export`. Its table is created automatically.
+# Redaction is best effort. With one shared Postgres role for two OS users, each can read and
+# alter the other's rows, transcripts included, until a later release adds per-user roles (docs/REFERENCE.md#security-model-and-known-limits).
+enabled = false
+retention_days = 30                 # delete transcripts captured longer ago (active jobs are kept)
+max_total_mb = 2048                 # total stored (compressed); over it, whole jobs go, oldest first (0 = no limit)
+snapshot_minutes = 15               # re-capture running agents this often (0 = only at stop/close)
+max_mb = 50                         # per transcript, compressed; a larger one keeps its head and tail
+
+# [supervise]
+# The supervisor (off by default; every key in docs/REFERENCE.md#supervisor-stuck-agents-and-automatic-restarts). Replacements get a minimal
+# environment; pass_env names extra variables to pass through: a proxy (HTTPS_PROXY, HTTP_PROXY,
+# NO_PROXY), a CA bundle (SSL_CERT_FILE, NODE_EXTRA_CA_CERTS), or an API key the harness needs
+# when it isn't logged in (ANTHROPIC_API_KEY, OPENAI_API_KEY). The session can read whatever
+# is listed here: only what it must have.
+# enabled = false
+# pass_env = []
+
+[spawn]
+# Swarm agents spawning subagents of their own. The hook refuses any spawn without a
+# `[swarm spawn: <why>]` line in the child's prompt, or beyond these caps. (Codex encrypts the
+# child's prompt: there only the caps and max_depth are checked. Codex also needs
+# agents.max_depth = 2 in ~/.codex/config.toml, which the first run sets.)
+max_per_agent = 2                   # spawns per agent
+max_per_job = 4                     # spawns by all agents of a job together (0 = agents can't spawn)
+max_depth = 2                       # 1 = the orchestrator's agents; 2 = their helpers, which can't spawn
+min_justification_chars = 30        # minimum length of the [swarm spawn: ...] reason
+
+[hindsight]
+# Optional project memory (https://github.com/vectorize-io/hindsight), off by default. Leave url empty (or drop
+# this section) to keep it off completely: no calls, no instructions, no imports.
+url = ""                            # e.g. "http://hindsight.example.internal:9100"
+api_key_file = ""                   # optional file holding the API key; chmod 600, never printed
+timeout_seconds = 3                 # one short timeout per call; hooks never wait longer
+retry_after_seconds = 60            # after a failure, skip Hindsight this long (one timeout per outage)
+recall_minutes = 15                 # re-recall for each working agent this often; only unseen memories are shown
+recall_max_items = 8                # memories injected per recall
+recall_max_chars = 1500             # and at most this many characters of them
+recall_max_tokens = 1024            # max_tokens passed to Hindsight's recall
+remember_nudge_minutes = 20         # remind an agent that stored nothing for this long (once per quiet stretch)
+remember_max_chars = 1000           # cap on one `swarm remember` fact
+
+[provenance]
+# Memory provenance: when a swarm agent saves a memory (swarm remember, or any writer
+# configured under `writers` below), the PostToolUse hook records which job, agent and tool call it came from, with
+# a redacted excerpt of the agent's transcript that is kept as long as the memory exists. Read it with
+# `swarm transcript show --memory <doc_id>` or `swarm memory refs`. Works with transcripts off.
+enabled = true
+excerpt_turns = 20                 # turns up to the call that saved the memory
+excerpt_max_kb = 256               # per excerpt, compressed; the oldest turns go first
+excerpt_image_mb = 5               # images kept per excerpt (the rest stay placeholders)
+tail_mb = 8                        # how much of the end of a transcript the hook reads at most
+grace_days = 7                     # `swarm purge` never drops a ref younger than this
+check_days = 7                     # nor asks Hindsight about the same ref more often
+check_max = 200                    # refs checked per purge at most
+# Recognise other memory-writing commands besides `swarm remember`. `command` is a regex matched
+# against the shell command; `output` is a regex with named groups (?P<bank>...) and (?P<doc>...)
+# matched against what it printed.
+# writers = [
+#   { name = "my-notes", command = 'my-notes\s+save', output = 'saved (?P<doc>\S+) to (?P<bank>\S+)' },
+# ]
+
+[models]
+# Default model per role for the agents the swarm spawns. mode: "default" sets the model only
+# when the spawn didn't pick one, "enforce" always replaces it, "off" never touches it. Names
+# are passed through unchanged; the host validates them. A role left out uses `worker`; a host
+# with no section here is left alone. On Codex the role comes from the spawn's task_name
+# (verifier..., judge...). Your own (orchestrator) model is not the swarm's to set:
+# `swarm doctor` only reports it.
+mode = "default"
+
+[models.claude]
+worker = "opus"
+verifier = "sonnet"
+judge = "opus"
+helper = "haiku"
+
+# [models.codex]
+# worker = "<a model your Codex accepts, as in `model =` of ~/.codex/config.toml>"
+# helper = "<...>"

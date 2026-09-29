@@ -1,0 +1,107 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (must already exist, e.g. v0.1.1)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Full test suite must be green before anything is packaged or published -- tested at the given
+  # tag itself (workflow_dispatch), not whatever default branch the run happened to start from.
+  test:
+    uses: ./.github/workflows/test.yml
+    with:
+      ref: ${{ github.event.inputs.tag || github.ref }}
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      INPUT_TAG: ${{ github.event.inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          TAG="${INPUT_TAG:-$GITHUB_REF_NAME}"
+          if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "::error::tag $TAG does not exist"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout tag
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: git checkout "$TAG"
+
+      - name: Verify manifest versions match the tag
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          python3 - "$VERSION" <<'PY'
+          import json, sys
+          from pathlib import Path
+
+          version = sys.argv[1]
+          manifests = [".claude-plugin/plugin.json", ".codex-plugin/plugin.json"]
+          ok = True
+          for rel in manifests:
+              data = json.loads(Path(rel).read_text())
+              v = data.get("version")
+              if v != version:
+                  print(f"::error::{rel} version is {v!r}, tag says {version!r}")
+                  ok = False
+              else:
+                  print(f"ok: {rel} version == {version}")
+          sys.exit(0 if ok else 1)
+          PY
+
+      - name: Package archives
+        id: package
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          PREFIX="swarm-${VERSION}/"
+          mkdir -p dist
+          git archive --format=tar.gz --prefix="$PREFIX" -o "dist/swarm-${VERSION}.tar.gz" "$TAG"
+          git archive --format=zip --prefix="$PREFIX" -o "dist/swarm-${VERSION}.zip" "$TAG"
+          cp install.sh "dist/install.sh"
+          (cd dist && sha256sum "swarm-${VERSION}.tar.gz" "swarm-${VERSION}.zip" "install.sh" > SHA256SUMS)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Generate release notes
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: scripts/release-notes.sh "$TAG" > dist/RELEASE_NOTES.md
+
+      - name: Create GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file dist/RELEASE_NOTES.md \
+            "dist/swarm-${VERSION}.tar.gz" \
+            "dist/swarm-${VERSION}.zip" \
+            dist/install.sh \
+            dist/SHA256SUMS

@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="320" viewBox="0 0 1280 320" role="img" aria-label="swarm: agents in Claude Code and Codex coordinating through a shared message board">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1020"/>
+      <stop offset="1" stop-color="#141a33"/>
+    </linearGradient>
+    <radialGradient id="halo" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#6ea8ff" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#6ea8ff" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="hex" width="28" height="48.5" patternUnits="userSpaceOnUse" patternTransform="scale(1.1)">
+      <path d="M14 0 L28 8.08 L28 24.25 L14 32.33 L0 24.25 L0 8.08 Z M14 32.33 L14 48.5" fill="none" stroke="#ffffff" stroke-opacity="0.035" stroke-width="1"/>
+    </pattern>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="3" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1280" height="320" fill="url(#bg)"/>
+  <rect width="1280" height="320" fill="url(#hex)"/>
+
+  <!-- title -->
+  <text x="72" y="150" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="96" font-weight="700" fill="#e8ecff" letter-spacing="-2">swarm</text>
+  <text x="76" y="196" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="24" fill="#a9b4d6">Agents that coordinate through a shared board</text>
+  <text x="76" y="232" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="18" fill="#6f7aa0">for Claude Code and Codex</text>
+
+  <!-- the board -->
+  <g transform="translate(915 160) scale(0.85)">
+    <circle r="150" fill="url(#halo)"/>
+
+    <!-- links from agents to the board -->
+    <g stroke="#6ea8ff" stroke-opacity="0.45" stroke-width="1.5" fill="none">
+      <path d="M-230 -95 Q -150 -80 -86 -40"/>
+      <path d="M-250 30 Q -170 30 -92 10"/>
+      <path d="M-200 120 Q -140 80 -80 44"/>
+      <path d="M-60 -135 Q -40 -95 -30 -52"/>
+      <path d="M80 -135 Q 60 -95 40 -52"/>
+      <path d="M230 -90 Q 160 -70 90 -36"/>
+      <path d="M250 40 Q 170 36 94 16"/>
+      <path d="M190 125 Q 130 90 78 50"/>
+      <path d="M0 140 Q 0 100 0 56" stroke="#ffcc66" stroke-opacity="0.7"/>
+    </g>
+    <!-- a direct message between two agents -->
+    <path d="M-60 -135 Q 10 -175 80 -135" stroke="#b18cff" stroke-opacity="0.7" stroke-width="1.5" stroke-dasharray="4 5" fill="none"/>
+
+    <!-- board panel -->
+    <rect x="-96" y="-56" width="192" height="112" rx="14" fill="#161d3a" stroke="#6ea8ff" stroke-opacity="0.8" stroke-width="2" filter="url(#glow)"/>
+    <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11">
+      <circle cx="-78" cy="-32" r="4" fill="#7ee0a1"/><rect x="-68" y="-36" width="120" height="8" rx="4" fill="#8ea2d6" fill-opacity="0.55"/>
+      <circle cx="-78" cy="-12" r="4" fill="#6ea8ff"/><rect x="-68" y="-16" width="146" height="8" rx="4" fill="#8ea2d6" fill-opacity="0.45"/>
+      <circle cx="-78" cy="8" r="4" fill="#b18cff"/><rect x="-68" y="4" width="96" height="8" rx="4" fill="#8ea2d6" fill-opacity="0.45"/>
+      <circle cx="-78" cy="28" r="4" fill="#ffcc66"/><rect x="-68" y="24" width="84" height="8" rx="4" fill="#ffcc66" fill-opacity="0.55"/>
+      <text x="26" y="32" fill="#ffcc66">met ✓</text>
+    </g>
+
+    <!-- agents -->
+    <g filter="url(#glow)">
+      <circle cx="-230" cy="-95" r="11" fill="#7ee0a1"/>
+      <circle cx="-250" cy="30" r="9" fill="#6ea8ff"/>
+      <circle cx="-200" cy="120" r="10" fill="#7ee0a1"/>
+      <circle cx="-60" cy="-135" r="9" fill="#b18cff"/>
+      <circle cx="80" cy="-135" r="10" fill="#6ea8ff"/>
+      <circle cx="230" cy="-90" r="9" fill="#7ee0a1"/>
+      <circle cx="250" cy="40" r="11" fill="#6ea8ff"/>
+      <circle cx="190" cy="125" r="9" fill="#b18cff"/>
+      <!-- the judge -->
+      <circle cx="0" cy="140" r="14" fill="#1b2140" stroke="#ffcc66" stroke-width="3"/>
+      <path d="M-6 140 L-1 145 L7 135" stroke="#ffcc66" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+    <!-- a message in flight -->
+    <circle cx="-150" cy="-74" r="3.5" fill="#e8ecff"/>
+    <circle cx="160" cy="31" r="3.5" fill="#e8ecff"/>
+  </g>
+</svg>

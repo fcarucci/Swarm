@@ -1,0 +1,72 @@
+#!/bin/sh
+# Hook entry for Claude Code and Codex: `swarm-hook [--host H] start|turn|done|stop|session-start`
+# (hook JSON on stdin). Never fails the agent and never builds anything: session-start only
+# starts a detached `swarm bootstrap` when this plugin version hasn't been set up yet; the
+# others exit before Python unless a swarm job marker exists.
+#
+# Files: only the host-only dir ~/.local/share/swarm/host (0700, outside every sandbox writable
+# root) is written or read here: stamps, the bootstrap log, the hooks' stderr, pending notices.
+# A sandboxed agent can write the state dir ~/.local/state/swarm, so nothing there is touched,
+# appended to or shown. If the host dir is not a real 0700 directory of
+# this user (a symlink, another user's, loose), nothing is written or read in it at all.
+H=""; HOSTARG=""
+if [ "${1:-}" = "--host" ]; then
+  [ $# -ge 3 ] || { cat >/dev/null; exit 0; }   # no host or no event: nothing to do, never fail
+  H="$2"; HOSTARG="--host $2"; shift 2
+fi
+case "$H" in *[!A-Za-z0-9_-]*) cat >/dev/null; exit 0;; esac   # a host name goes into file names
+D="$(cd "$(dirname "$0")/.." && pwd)"
+V="${SWARM_VENV:-$HOME/.local/share/swarm/venv}"
+HD="$HOME/.local/share/swarm/host"
+if [ ! -e "$HD" ] && [ ! -L "$HD" ]; then
+  (umask 022; mkdir -p "${HD%/*}") 2>/dev/null
+  mkdir -m 700 "$HD" 2>/dev/null
+fi
+PRIV=""
+if [ -d "$HD" ] && [ ! -L "$HD" ] && [ -O "$HD" ]; then
+  case "$(ls -ld "$HD" 2>/dev/null)" in drwx------*) PRIV="$HD";; esac
+fi
+if [ "${1:-}" = "session-start" ]; then
+  cat >/dev/null
+  if [ -z "$PRIV" ]; then   # no safe place for the stamps: nothing runs; say so (a fixed text only)
+    MSG="[swarm] setup problem: ~/.local/share/swarm/host is not a private (0700, not a symlink) directory of yours, so the swarm hooks do nothing. See \`swarm doctor\`."
+    printf '{"systemMessage": "%s"}\n' "$MSG"
+    printf '%s\n' "$MSG" >&2
+    exit 0
+  fi
+  VER=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$D/.claude-plugin/plugin.json" 2>/dev/null | head -1)
+  case "$VER" in *[!A-Za-z0-9._+-]*) VER=0;; esac
+  KEY=$(printf '%s' "$D" | cksum | cut -d' ' -f1)
+  touch "$PRIV/hooks-ran-${H:-unknown}-${VER:-0}-$KEY" 2>/dev/null
+  # What the last bootstrap left for the user: shown by Python as a fixed template, never cat.
+  N="$PRIV/notices-${H:-unknown}.json"
+  LOOSE=""   # a group/world-writable ~/.local dir: Python can't use the host dir, or the markers,
+  # spool and state dir below ~/.local/state (it says so)
+  for L in "$HOME/.local" "$HOME/.local/share" "$HOME/.local/state" "$HOME/.local/state/swarm"; do
+    case "$(ls -ld "$L" 2>/dev/null)" in d????w*|d???????w*) LOOSE=1;; esac
+  done
+  if [ -n "$H" ] && { [ -n "$LOOSE" ] || { [ -f "$N" ] && [ ! -L "$N" ]; }; } && [ -x "$V/bin/python" ]; then
+    PYTHONPATH="$D/lib${PYTHONPATH:+:$PYTHONPATH}" "$V/bin/python" -B -m swarm.cli notices --hook-output \
+      --host "$H" </dev/null 2>>"$PRIV/hook-stderr.log"
+  fi
+  STAMP="$PRIV/bootstrap-${H:-unknown}-${VER:-0}-$KEY"
+  [ -f "$STAMP" ] && exit 0
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "$D/bin/swarm" bootstrap $HOSTARG --quiet --stamp "$STAMP" </dev/null >>"$PRIV/bootstrap.log" 2>&1 &
+  else
+    nohup "$D/bin/swarm" bootstrap $HOSTARG --quiet --stamp "$STAMP" </dev/null >>"$PRIV/bootstrap.log" 2>&1 &
+  fi
+  exit 0
+fi
+CFG="${SWARM_CONFIG:-$HOME/.config/swarm/config.toml}"
+MD=""
+[ -f "$CFG" ] && MD=$(sed -n 's/^[[:space:]]*marker_dir[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' "$CFG" | head -1)
+MD="${MD:-$HOME/.local/state/swarm/active}"
+case "$MD" in "~"*) MD="$HOME${MD#\~}";; esac
+ls "$MD"/*.json >/dev/null 2>&1 || { cat >/dev/null; exit 0; }
+# Never build the venv from a hook (slow, networked): session-start's bootstrap does that.
+[ -x "$V/bin/python" ] || { cat >/dev/null; exit 0; }
+LOG=/dev/null
+[ -n "$PRIV" ] && LOG="$PRIV/hook-stderr.log"
+PYTHONPATH="$D/lib${PYTHONPATH:+:$PYTHONPATH}" "$V/bin/python" -B -m swarm.cli hook $HOSTARG "$1" 2>>"$LOG" || true
+exit 0

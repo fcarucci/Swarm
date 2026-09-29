@@ -1,0 +1,24 @@
+#!/bin/sh
+# swarm CLI launcher. The venv lives outside the plugin, so it survives plugin updates; it is
+# (re)built only when requirements.txt changes. Then it runs the swarm package from this plugin.
+D="$(cd "$(dirname "$0")/.." && pwd)"
+V="${SWARM_VENV:-$HOME/.local/share/swarm/venv}"
+REQ="$(cksum < "$D/requirements.txt" | cut -d' ' -f1)"
+if [ ! -x "$V/bin/python" ] || [ "$(cat "$V/.swarm-requirements" 2>/dev/null)" != "$REQ" ]; then
+  mkdir -p "$(dirname "$V")"
+  i=0
+  until mkdir "$V.building" 2>/dev/null; do
+    i=$((i + 1)); [ "$i" -gt 300 ] && { echo "swarm: $V.building is stuck; remove it and retry" >&2; exit 1; }
+    sleep 1
+  done
+  trap 'rmdir "$V.building" 2>/dev/null' EXIT INT TERM
+  if [ ! -x "$V/bin/python" ] || [ "$(cat "$V/.swarm-requirements" 2>/dev/null)" != "$REQ" ]; then
+    echo "swarm: setting up $V (first run or new requirements)..." >&2
+    { [ -x "$V/bin/python" ] || python3 -m venv "$V"; } \
+      && PIP_DISABLE_PIP_VERSION_CHECK=1 "$V/bin/python" -m pip install -q -r "$D/requirements.txt" >&2 \
+      && echo "$REQ" > "$V/.swarm-requirements" \
+      || { echo "swarm: could not set up $V (need python3 >= 3.11 with venv and pip)" >&2; exit 1; }
+  fi
+  rmdir "$V.building" 2>/dev/null; trap - EXIT INT TERM
+fi
+PYTHONPATH="$D/lib${PYTHONPATH:+:$PYTHONPATH}" exec "$V/bin/python" -B -m swarm.cli "$@"

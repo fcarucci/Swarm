@@ -1,0 +1,37 @@
+{
+ "components": {
+  "schemas": {
+   "UpdateDocumentRequest": {
+    "description": "Request model for updating a document's mutable fields.",
+    "example": {
+     "tags": [
+      "team-a",
+      "team-b"
+     ]
+    },
+    "properties": {
+     "tags": {
+      "anyOf": [
+       {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "description": "New tags for the document and its memory units. Triggers observation invalidation and re-consolidation.",
+      "title": "Tags"
+     }
+    },
+    "title": "UpdateDocumentRequest",
+    "type": "object"
+   }
+  }
+ },
+ "info": {
+  "version": "0.8.6"
+ }
+}

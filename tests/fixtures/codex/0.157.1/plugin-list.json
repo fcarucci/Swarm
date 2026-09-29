@@ -1,0 +1,9 @@
+{"_provenance": "shape captured from codex-cli 0.157.1 `codex plugin list --json` on a long-lived install 2026-09-26; values synthetic",
+ "installed": [
+  {"pluginId": "gmail@openai-curated-remote", "name": "gmail", "marketplaceName": "openai-curated-remote", "version": "0.1.10",
+   "installed": true, "enabled": false, "source": {"source": "remote", "id": "plugin_connector_1p_0123456789abcdef"},
+   "installPolicy": "user", "authPolicy": "none"},
+  {"pluginId": "swarm@swarm", "name": "swarm", "marketplaceName": "swarm", "version": "0.9.0",
+   "installed": true, "enabled": true, "source": {"source": "local", "id": "swarm"},
+   "installPolicy": "user", "authPolicy": "none"}],
+ "available": []}

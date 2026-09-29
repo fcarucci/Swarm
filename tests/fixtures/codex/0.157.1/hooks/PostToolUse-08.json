@@ -1,0 +1,17 @@
+{
+ "hook_event_name": "PostToolUse",
+ "session_id": "00000000-0000-4000-8000-000000000001",
+ "agent_id": "00000000-0000-4000-8000-000000000005",
+ "agent_type": "default",
+ "turn_id": "00000000-0000-4000-8000-000000000006",
+ "model": "gpt-5.6-sol",
+ "permission_mode": "bypassPermissions",
+ "tool_name": "Bash",
+ "tool_use_id": "call_synthetic_015",
+ "transcript_path": "/home/alice/.codex/sessions/2026/09/26/rollout-2026-09-26T00-00-00-00000000-0000-4000-8000-000000000005.jsonl",
+ "cwd": "/home/alice/work",
+ "tool_input": {
+  "command": "synthetic"
+ },
+ "tool_response": "synthetic"
+}
