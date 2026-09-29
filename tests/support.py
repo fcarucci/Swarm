@@ -67,19 +67,26 @@ _VENV = None
 
 def temp_venv() -> Path:
     """A throwaway venv for the tests that need one (doctor's venv check, the launcher): its own
-    dir with its own requirements stamp, sharing the real venv's interpreter and packages by
-    symlink, so no test writes into the real venv (which may be another worktree's)."""
+    dir with its own requirements stamp, sharing the interpreter that runs the suite (and its
+    packages) by symlink, so no test writes into a real venv (which may be another worktree's).
+    It is built from the running interpreter, not from a checkout's `.venv`: CI installs the
+    requirements straight into the runner's Python and has no `.venv`."""
     global _VENV
     if _VENV is None:
         import subprocess
-        real = Path(os.path.realpath(ROOT / ".venv"))
         v = Path(SANDBOX) / "venv"
         (v / "bin").mkdir(parents=True)
-        os.symlink(os.path.realpath(real / "bin" / "python"), v / "bin" / "python")
-        (v / "pyvenv.cfg").write_text((real / "pyvenv.cfg").read_text())
-        for d in ("lib", "lib64", "include"):
-            if (real / d).exists():
-                os.symlink(real / d, v / d)
+        os.symlink(os.path.realpath(sys.executable), v / "bin" / "python")
+        if sys.prefix != sys.base_prefix:       # running in a venv: mirror it
+            src = Path(sys.prefix)
+            (v / "pyvenv.cfg").write_text((src / "pyvenv.cfg").read_text())
+            for d in ("lib", "lib64", "include"):
+                if (src / d).exists():
+                    os.symlink(src / d, v / d)
+        else:                                    # a plain interpreter with the packages installed in it
+            (v / "pyvenv.cfg").write_text(
+                f"home = {os.path.dirname(os.path.realpath(sys.executable))}\n"
+                "include-system-site-packages = true\n")
         req = subprocess.run(["sh", "-c", f"cksum < '{ROOT / 'requirements.txt'}' | cut -d' ' -f1"],
                              capture_output=True, text=True).stdout.strip()
         (v / ".swarm-requirements").write_text(req + "\n")
@@ -212,7 +219,7 @@ class FileHarness(MemoryHarness):
         self.root = Path(root or tempfile.mkdtemp(prefix="swarm-file-", dir=os.environ.get("TMPDIR")))
         self.cfg = base_config(backend="file")
         self.cfg["file"] = {"path": str(self.root / "board")}
-        self.toml = f'[file]\npath = "{self.root / 'board'}"\n'
+        self.toml = '[file]\npath = "%s"\n' % (self.root / "board")
         self.store = file.FileStore(file.board_dir(self.cfg))
 
     @classmethod

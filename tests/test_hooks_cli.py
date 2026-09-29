@@ -16,7 +16,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import HOST_ENV, ROOT, e2e_harness  # noqa: F401  (sets sys.path)
+from support import HOST_ENV, ROOT, e2e_harness, temp_venv  # noqa: F401  (sets sys.path)
 
 from swarm import spool  # noqa: E402
 from swarm import cli as swarm  # noqa: E402
@@ -420,7 +420,7 @@ class HookTests(Env):
         res = subprocess.run([str(swarm.SKILL_DIR / "bin" / "swarm-hook"), "start"], input=payload,
                              capture_output=True, text=True, timeout=30,
                              env={**os.environ, "SWARM_CONFIG": str(self.config),
-                                  "SWARM_VENV": str(ROOT / ".venv")})
+                                  "SWARM_VENV": str(temp_venv())})
         self.assertEqual(res.returncode, 0)
         self.assertIn("[swarm] You are **", json.loads(res.stdout)["hookSpecificOutput"]["additionalContext"])
 
