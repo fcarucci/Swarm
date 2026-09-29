@@ -62,7 +62,11 @@ trap cleanup EXIT INT TERM
 PYBIN="$SCRATCH_ROOT/pybin"
 mkdir -p "$PYBIN"
 command -v python3 >/dev/null 2>&1 || fail "no python3 on PATH"
-ln -s "$(command -v python3)" "$PYBIN/python3"
+py="$(command -v python3)"
+# resolve a symlinked interpreter (a venv's) to its target so the link stays valid and never
+# points at anything this script's cleanup removes
+py_real="$(python3 -c 'import os, sys; print(os.path.realpath(sys.executable))')"
+ln -s "${py_real:-$py}" "$PYBIN/python3"
 
 # ------------------------------------------------------------------------- stub claude/codex
 
