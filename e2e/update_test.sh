@@ -12,6 +12,8 @@
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
+# The venv bin/swarm runs from (the wrapper tests pass a throwaway one; CI has no checkout .venv).
+E2E_VENV="${E2E_VENV:-$ROOT/.venv}"
 [ -x "$ROOT/bin/swarm" ] || { echo "E2E FAIL: no $ROOT/bin/swarm" >&2; exit 1; }
 REAL_VERSION="$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$ROOT/.claude-plugin/plugin.json" | head -n1)"
 [ -n "$REAL_VERSION" ] || { echo "E2E FAIL: can't read this checkout's plugin version" >&2; exit 1; }
@@ -132,7 +134,7 @@ new_env() {   # $1 = scenario name -> "home:bindir:logdir"
 run_update() {   # $1 = home, $2 = bindir, then swarm update args
   home="$1"; bindir="$2"; shift 2
   env -i HOME="$home" PATH="$bindir:/usr/bin:/bin:/usr/local/bin" \
-      SWARM_VENV="$ROOT/.venv" SWARM_NO_SYSTEMD=1 SWARM_AUTO_INIT=1 \
+      SWARM_VENV="$E2E_VENV" SWARM_NO_SYSTEMD=1 SWARM_AUTO_INIT=1 \
       CLAUDE_CONFIG_DIR="$home/.claude" CODEX_HOME="$home/.codex" \
       TERM="${TERM:-dumb}" \
       "$ROOT/bin/swarm" update "$@"

@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import unittest
 
+import support
 from support import ROOT
 
 
@@ -30,6 +31,7 @@ class InstallShTests(unittest.TestCase):
         # SWARM_INSTALL_TEST_USERS or SWARM_CONFIG) can leak into the scenarios.
         env = {k: v for k, v in os.environ.items()
                if not k.startswith("SWARM_") and k not in ("CLAUDE_CONFIG_DIR", "CODEX_HOME")}
+        env["E2E_VENV"] = str(support.temp_venv())
         res = subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=600,
                              env=env)
         self.assertEqual(res.returncode, 0,

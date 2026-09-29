@@ -7,6 +7,8 @@
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
+# The venv bin/swarm runs from (the wrapper tests pass a throwaway one; CI has no checkout .venv).
+E2E_VENV="${E2E_VENV:-$ROOT/.venv}"
 INSTALL_SH="$ROOT/install.sh"
 [ -f "$INSTALL_SH" ] || { echo "E2E FAIL: no install.sh at $INSTALL_SH" >&2; exit 1; }
 [ -x "$ROOT/bin/swarm" ] || { echo "E2E FAIL: no $ROOT/bin/swarm (this checkout is the --marketplace frozen tree)" >&2; exit 1; }
@@ -176,7 +178,7 @@ new_env() {
 run_install() {   # $1 = home, $2 = bindir, then install.sh args
   home="$1"; bindir="$2"; shift 2
   env -i HOME="$home" PATH="$bindir:$PYBIN:/usr/bin:/bin:/usr/local/bin" \
-      SWARM_VENV="$ROOT/.venv" SWARM_NO_MIGRATE=1 SWARM_NO_SYSTEMD=1 SWARM_AUTO_INIT=1 \
+      SWARM_VENV="$E2E_VENV" SWARM_NO_MIGRATE=1 SWARM_NO_SYSTEMD=1 SWARM_AUTO_INIT=1 \
       TERM="${TERM:-dumb}" \
       ${SWARM_INSTALL_TEST_USERS:+SWARM_INSTALL_TEST_USERS="$SWARM_INSTALL_TEST_USERS"} \
       bash "$INSTALL_SH" --marketplace "$ROOT" "$@"
@@ -215,7 +217,7 @@ t_no_tty() {
   # clear message and touch nothing (no marketplace/plugin calls), never guess "yes".
   set +e
   out="$(_no_tty env -i HOME="$home" PATH="$bindir:$PYBIN:/usr/bin:/bin:/usr/local/bin" \
-      SWARM_VENV="$ROOT/.venv" SWARM_NO_MIGRATE=1 SWARM_NO_SYSTEMD=1 \
+      SWARM_VENV="$E2E_VENV" SWARM_NO_MIGRATE=1 SWARM_NO_SYSTEMD=1 \
       bash "$INSTALL_SH" --marketplace "$ROOT" --host claude < /dev/null 2>&1)"
   rc=$?
   set -e
@@ -474,7 +476,7 @@ snapshot_before() {   # $1 = base, then user names
 run_as_fake_root() {   # $1 = base, $2 = SWARM_INSTALL_TEST_USERS, then install.sh args
   base="$1"; users="$2"; shift 2
   env -i HOME="$base/roothome" PATH="$base/rootbin:$base/idbin:$PYBIN:/usr/bin:/bin:/usr/local/bin" \
-      SWARM_VENV="$ROOT/.venv" SWARM_NO_MIGRATE=1 SWARM_NO_SYSTEMD=1 SWARM_AUTO_INIT=1 \
+      SWARM_VENV="$E2E_VENV" SWARM_NO_MIGRATE=1 SWARM_NO_SYSTEMD=1 SWARM_AUTO_INIT=1 \
       TERM="${TERM:-dumb}" SWARM_INSTALL_TEST_USERS="$users" \
       SWARM_INSTALL_TEST_RUN_USER_DIR="$base/run/user" \
       bash "$INSTALL_SH" --marketplace "$ROOT" "$@"
@@ -583,7 +585,7 @@ t_root_piped() {
   mkdir -p "$base/cwd"
   printf '#!/bin/sh\n# swarm one-shot installer DECOY: not the real one\necho DECOY RAN\n' > "$base/cwd/main"
   out="$(cd "$base/cwd" && env -i HOME="$invoker" PATH="$base/rootbin:$base/idbin:$PYBIN:/usr/bin:/bin:/usr/local/bin" \
-      SWARM_VENV="$ROOT/.venv" SWARM_NO_MIGRATE=1 SWARM_NO_SYSTEMD=1 SWARM_AUTO_INIT=1 \
+      SWARM_VENV="$E2E_VENV" SWARM_NO_MIGRATE=1 SWARM_NO_SYSTEMD=1 SWARM_AUTO_INIT=1 \
       TERM="${TERM:-dumb}" SWARM_INSTALL_TEST_USERS="erin:$base/users/erin/home" \
       SWARM_INSTALL_TEST_RUN_USER_DIR="$base/run/user" \
       bash -s -- --marketplace "$ROOT" --host claude --yes < "$INSTALL_SH" 2>&1)" \
