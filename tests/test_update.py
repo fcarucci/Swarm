@@ -297,6 +297,54 @@ exit 0
         self.assertIn("plugin marketplace add git@example.com:configured/source.git", log)
         self.assertNotIn(update.DEFAULT_MARKETPLACE, log)
 
+    def test_update_codex_dead_local_source_falls_back_to_public_source(self):
+        # A configured source that is a local path which no longer exists (a cleaned-up codex staging
+        # dir) can never be re-added: use the public source, and don't keep the dead path.
+        stub = self.bin / "codex"
+        calls = self.home / "calls.log"
+        dead = str(self.home / "gone" / "marketplaces" / "swarm")
+        _write_stub(stub, f'''
+echo "$@" >> "{calls}"
+case "$1 $2 $3" in
+  "plugin marketplace upgrade") exit 1 ;;
+  "plugin marketplace remove") exit 0 ;;
+  "plugin marketplace add") exit 0 ;;
+  "plugin marketplace list") [ "$4" = "--json" ] && printf '{{"marketplaces": [{{"name": "swarm", "marketplaceSource": {{"sourceType": "local", "source": "{dead}"}}}}]}}'; exit 0 ;;
+esac
+case "$1 $2" in
+  "plugin list") [ "$3" = "--json" ] && printf '{{"installed": []}}'; exit 0 ;;
+  "plugin add") exit 0 ;;
+esac
+exit 0
+''')
+        update.update_codex(str(stub))
+        log = calls.read_text()
+        self.assertIn("plugin marketplace remove swarm", log)
+        self.assertIn(f"plugin marketplace add {update.DEFAULT_MARKETPLACE}", log)
+        self.assertNotIn(dead, log.split("plugin marketplace add", 1)[1])
+
+    def test_update_codex_unregistered_marketplace_is_added_from_the_public_source(self):
+        # An earlier failed remove+add left no swarm marketplace: nothing to remove, add the public one.
+        stub = self.bin / "codex"
+        calls = self.home / "calls.log"
+        _write_stub(stub, f'''
+echo "$@" >> "{calls}"
+case "$1 $2 $3" in
+  "plugin marketplace upgrade") echo "error: marketplace swarm is not installed" >&2; exit 1 ;;
+  "plugin marketplace add") exit 0 ;;
+  "plugin marketplace list") [ "$4" = "--json" ] && printf '{{"marketplaces": []}}'; exit 0 ;;
+esac
+case "$1 $2" in
+  "plugin list") [ "$3" = "--json" ] && printf '{{"installed": []}}'; exit 0 ;;
+  "plugin add") exit 0 ;;
+esac
+exit 0
+''')
+        update.update_codex(str(stub))
+        log = calls.read_text()
+        self.assertNotIn("plugin marketplace remove", log)
+        self.assertIn(f"plugin marketplace add {update.DEFAULT_MARKETPLACE}", log)
+
     def test_update_codex_marketplace_failure_stops_when_source_unknown(self):
         # "marketplace list" gives no usable source (unsupported/empty): update_codex must stop
         # with the original error, never guess a source to remove+add.

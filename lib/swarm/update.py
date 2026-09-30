@@ -222,6 +222,30 @@ def _codex_config_marketplace_field(name: str, field: str) -> str | None:
     return val if isinstance(val, str) and val else None
 
 
+def _codex_marketplace_entry(bin_: str):
+    """(listed, entry): whether `codex plugin marketplace list --json` could be read, and the swarm
+    entry in it (None when swarm isn't registered)."""
+    res = _run(bin_, ["plugin", "marketplace", "list", "--json"])
+    if res.returncode != 0:
+        return False, None
+    try:
+        data = json.loads(res.stdout)
+    except ValueError:
+        return False, None
+    entries = None
+    if isinstance(data, list):
+        entries = data
+    elif isinstance(data, dict):
+        for key in ("marketplaces", "installed"):
+            if isinstance(data.get(key), list):
+                entries = data[key]
+                break
+    for e in entries or []:
+        if isinstance(e, dict) and e.get("name") == MARKETPLACE_NAME:
+            return True, e
+    return True, None
+
+
 def _codex_marketplace_source(bin_: str) -> str | None:
     """The source (URL or path) the swarm marketplace is currently configured with, so a failed
     marketplace refresh can re-add the *same* source instead of guessing DEFAULT_MARKETPLACE --
@@ -231,29 +255,22 @@ def _codex_marketplace_source(bin_: str) -> str | None:
     from config.toml. The human table (`MARKETPLACE  ROOT`) is not used: ROOT is the local
     snapshot directory, not the source. None if nothing names it: callers must not guess in that
     case, only stop with the original error."""
-    res = _run(bin_, ["plugin", "marketplace", "list", "--json"])
-    if res.returncode == 0:
-        try:
-            data = json.loads(res.stdout)
-        except ValueError:
-            data = None
-        entries = None
-        if isinstance(data, list):
-            entries = data
-        elif isinstance(data, dict):
-            for key in ("marketplaces", "installed"):
-                if isinstance(data.get(key), list):
-                    entries = data[key]
-                    break
-        for e in entries or []:
-            if isinstance(e, dict) and e.get("name") == MARKETPLACE_NAME:
-                nested = e.get("marketplaceSource")
-                cands = [nested.get("source")] if isinstance(nested, dict) else []
-                cands += [e.get(k) for k in ("source", "url", "path", "repo")]
-                for v in cands:
-                    if isinstance(v, str) and v:
-                        return v
+    _, e = _codex_marketplace_entry(bin_)
+    if e is not None:
+        nested = e.get("marketplaceSource")
+        cands = [nested.get("source")] if isinstance(nested, dict) else []
+        cands += [e.get(k) for k in ("source", "url", "path", "repo")]
+        for v in cands:
+            if isinstance(v, str) and v:
+                return v
     return _codex_config_marketplace_field(MARKETPLACE_NAME, "source")
+
+
+def _dead_local_source(source: str) -> bool:
+    """A source that is a local path which no longer exists (e.g. a codex staging dir that was
+    cleaned up): it can never be re-added."""
+    path = os.path.expanduser(source)
+    return os.path.isabs(path) and not os.path.exists(path)
 
 
 def _codex_marketplace_refresh(bin_: str) -> subprocess.CompletedProcess:
@@ -273,12 +290,25 @@ def update_codex(bin_: str) -> dict:
     res = _codex_marketplace_refresh(bin_)
     if res.returncode != 0:
         source = _codex_marketplace_source(bin_)
-        if source is None:
+        listed, entry = _codex_marketplace_entry(bin_)
+        registered = entry is not None or source is not None
+        if source is None and listed and not registered:
+            # The marketplace isn't registered at all (an earlier failed remove+add dropped it): there
+            # is no configured source to keep, so register the public one.
+            source, need_remove = DEFAULT_MARKETPLACE, False
+        elif source is None:
             raise UpdateError(f"[codex] plugin marketplace refresh {MARKETPLACE_NAME} failed, and "
                               f"its configured source couldn't be read to safely re-add it (won't "
                               f"guess and switch to a different marketplace source):\n{_out(res)}")
-        _run(bin_, ["plugin", "marketplace", "remove", MARKETPLACE_NAME])
-        ref = _codex_config_marketplace_field(MARKETPLACE_NAME, "ref")
+        elif _dead_local_source(source):
+            # The configured source is a local path that is gone: re-adding it can only fail (and
+            # `remove` first would leave no marketplace), so use the public source instead.
+            source, need_remove = DEFAULT_MARKETPLACE, True
+        else:
+            need_remove = True
+        if need_remove:
+            _run(bin_, ["plugin", "marketplace", "remove", MARKETPLACE_NAME])
+        ref = None if source == DEFAULT_MARKETPLACE else _codex_config_marketplace_field(MARKETPLACE_NAME, "ref")
         res2 = _run(bin_, ["plugin", "marketplace", "add", source, *(["--ref", ref] if ref else [])])
         if res2.returncode != 0:
             raise UpdateError(f"[codex] plugin marketplace refresh {MARKETPLACE_NAME} failed, and "
