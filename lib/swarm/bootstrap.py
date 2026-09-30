@@ -1433,7 +1433,7 @@ def _transcripts_users_check(cfg: dict) -> list[Check]:
     from swarm.board import open_board
     users = set()
     try:
-        with open_board(cfg, init_timeout=5.0) as b:
+        with open_board(cfg, init_timeout=5.0, readers=True) as b:
             for js in b.jobs(True):
                 users |= {a.os_user for a in b.agents(js.job) if a.os_user}
     except Exception:
@@ -1470,7 +1470,7 @@ def _capture_failed_check(cfg: dict) -> list[Check]:
     from swarm import transcripts
     from swarm.board import open_board
     try:
-        with open_board(cfg, init_timeout=5.0) as b:
+        with open_board(cfg, init_timeout=5.0, readers=True) as b:
             failed = [r for r in b.transcripts() if r.failed]
             now = b.now()
             since = now - _dt.timedelta(days=float(transcripts.settings(cfg)["retention_days"]))

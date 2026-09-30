@@ -211,6 +211,39 @@ class BoardUnavailable(BoardError):
     `type(exc.__cause__ or exc).__name__` (e.g. "OperationalError"), keeping CLI output unchanged."""
 
 
+def database_hosts(db: dict) -> list[tuple[str, int]]:
+    """The Postgres servers of a [database] section as [(host, port), ...], in the order given.
+
+    `hosts` (if set) or else `host` may be one name, a comma-separated string, or a TOML array
+    (elements may themselves be comma-separated); each entry may carry its own port as host:port
+    ([v6::addr]:port for IPv6). `port` is the default for entries without one: a single port for
+    all, or a list (array or comma-separated) with one port per host. A single plain host and
+    port give exactly what the section always meant."""
+    raw = db.get("hosts") or db.get("host") or "localhost"
+    parts = [raw] if isinstance(raw, str) else list(raw)
+    tokens = [t.strip() for part in parts for t in str(part).split(",") if t.strip()]
+    port = db.get("port", 5432)
+    ports = [p for p in (str(x).strip() for q in (port if isinstance(port, (list, tuple)) else [port])
+                         for x in str(q).split(",")) if p]
+    if len(ports) > 1 and len(ports) != len(tokens):
+        raise BoardError(f"[database] port lists {len(ports)} ports for {len(tokens)} hosts; "
+                         "give one port, or one per host")
+    out = []
+    for i, tok in enumerate(tokens):
+        host, own = tok, None
+        if tok.startswith("["):
+            host, _, rest = tok[1:].partition("]")
+            own = rest[1:] if rest.startswith(":") else None
+        elif tok.count(":") == 1:
+            host, own = tok.split(":")
+        default = ports[i] if len(ports) > 1 else (ports[0] if ports else "5432")
+        try:
+            out.append((host, int(own or default)))
+        except ValueError:
+            raise BoardError(f"[database] host {tok!r}: the port is not a number") from None
+    return out
+
+
 class ReadOnlyBoard(BoardError):
     """A write on a board opened read-only (`open_read_only`: `swarm supervise --dry-run`)."""
 
@@ -844,6 +877,9 @@ class Board(abc.ABC):
     # True for a board opened by `open_read_only` on a backend that supports it (file, SQLite):
     # it creates, writes, truncates and renames nothing, and every write raises ReadOnlyBoard.
     read_only = False
+    # Set (the server's name) when the primary was unreachable and a read-only command was
+    # served by a standby instead (Postgres with several hosts): writes are not available.
+    degraded: str | None = None
 
     def __init__(self, cfg: dict):
         self.cfg = cfg

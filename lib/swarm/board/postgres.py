@@ -24,7 +24,7 @@ from typing import Mapping, Sequence
 import psycopg
 from psycopg import sql
 
-from .base import (MOVED_PREFIX, NAME_PATTERN, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, ROUTE_STATES, TOOL_NAME_MAX,
+from .base import (database_hosts, MOVED_PREFIX, NAME_PATTERN, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, ROUTE_STATES, TOOL_NAME_MAX,
                    AgentEvent, Restart,
                    AgentStatus, Board, BoardError, BoardUnavailable, IncompatibleStorage, JobStatus,
                    Member, Message, OwedReply, ReadResult, Route, RosterEntry, SCHEMA_VERSION, SetupResult,
@@ -326,6 +326,7 @@ _RESTART_COLS = ("id, job, agent_key, attempt, at, reason, old_agent_key, new_ag
 
 # The debounce drain after a wake-up: collects what is already on the wire (as watch did).
 _DRAIN_TIMEOUT = 0.01
+LIVE_RETRY_SECONDS = 15.0   # how often a degraded or polling watcher tries the primary / LISTEN again
 
 # Claim a name for an agent key: a new row, or a full reset of the key's departed row (fresh
 # cursor, counters, sync state and join time). The partial unique index rejects a name an
@@ -499,7 +500,18 @@ def _query_timeout(db: dict) -> float:
     return max(0.0, float(value if value is not None else 0))
 
 
-def _connect(cfg: dict, admin: bool = False) -> "psycopg.Connection":
+def _server_args(db: dict, any_host: bool = False) -> dict:
+    """The libpq host/port arguments. One host: exactly host and port, as ever. Several: libpq's
+    multi-host form, tried in order, and target_session_attrs=read-write so that only the primary
+    is accepted (a connection follows a switchover); any_host accepts a standby too."""
+    hosts = database_hosts(db)
+    if len(hosts) == 1:
+        return {"host": hosts[0][0], "port": hosts[0][1]}
+    return {"host": ",".join(h for h, _ in hosts), "port": ",".join(str(p) for _, p in hosts),
+            "target_session_attrs": "any" if any_host else "read-write"}
+
+
+def _connect(cfg: dict, admin: bool = False, any_host: bool = False) -> "psycopg.Connection":
     """One autocommit connection, as swarm.connect() made it, with the query deadline.
     Failure -> BoardUnavailable."""
     db = cfg["database"]
@@ -512,12 +524,16 @@ def _connect(cfg: dict, admin: bool = False) -> "psycopg.Connection":
     extra = {} if db.get("prepared_statements") else {"prepare_threshold": None}
     if db.get("application_name"):
         extra["application_name"] = db["application_name"]
+    hosts = database_hosts(db)   # a bad host or port list: BoardError, saying which
     try:
         conn = _DeadlineConnection.connect(
-            host=db["host"], port=db["port"], user=db["user"], password=_password(db),
+            **_server_args(db, any_host), user=db["user"], password=_password(db),
             dbname=db["admin_dbname"] if admin else db["dbname"],
             connect_timeout=db["connect_timeout"], sslmode=db["sslmode"], autocommit=True, **extra)
     except Exception as exc:
+        if len(hosts) > 1 and not any_host and isinstance(exc, psycopg.OperationalError):
+            raise BoardUnavailable(f"no primary reachable among {', '.join(h for h, _ in hosts)}: "
+                                   f"{exc}") from exc
         raise BoardUnavailable(str(exc)) from exc
     conn.query_timeout = _query_timeout(db)
     return conn
@@ -627,10 +643,19 @@ class PostgresBoard(Board):
     which is what the pre-refactor code relied on (a failed INSERT in allocate_name's race
     loop does not poison the connection)."""
 
-    def __init__(self, cfg: dict):
+    def __init__(self, cfg: dict, readers: bool = False):
         super().__init__(cfg)
-        self._conn = _connect(cfg)
-        self._listening: tuple[str, ...] = ()
+        self._listening: tuple[str, ...] = ()   # the channels subscribe() was asked for
+        self._polling = False                   # LISTEN is unavailable: wait_for_change polls
+        self._retry_at = 0.0
+        try:
+            self._conn = _connect(cfg)
+        except BoardUnavailable:
+            if not (readers and len(database_hosts(cfg["database"])) > 1):
+                raise
+            # no primary: a read-only command is served by whichever standby answers
+            self._conn = _connect(cfg, any_host=True)
+            self.degraded = self._conn.info.host
 
     @contextlib.contextmanager
     def op_timeout(self, seconds: float):
@@ -662,7 +687,12 @@ class PostgresBoard(Board):
     @classmethod
     def schema_version(cls, cfg: dict) -> int | None:
         try:
-            conn = _connect(cfg)
+            try:
+                conn = _connect(cfg)
+            except BoardUnavailable:
+                if len(database_hosts(cfg["database"])) < 2:
+                    raise
+                conn = _connect(cfg, any_host=True)   # a question, so a standby will do
         except BoardUnavailable as exc:
             missing = _database_missing(cfg)
             if missing is None:
@@ -686,7 +716,7 @@ class PostgresBoard(Board):
     @classmethod
     def identity(cls, cfg: dict) -> str:
         db = cfg["database"]
-        return f"{db['host']}:{db['port']}/{db['dbname']}"
+        return f"{','.join(f'{h}:{p}' for h, p in database_hosts(db))}/{db['dbname']}"
 
     @classmethod
     @contextlib.contextmanager
@@ -1322,12 +1352,45 @@ class PostgresBoard(Board):
     # ---- change notification -----------------------------------------------------------
 
     def subscribe(self, messages_only: bool = False) -> None:
-        channels = (CHANNEL_MESSAGES,) if messages_only else (CHANNEL_MESSAGES, CHANNEL_STATE)
-        for channel in channels:
-            self._conn.execute(f"LISTEN {channel}")
-        self._listening = channels
+        self._listening = (CHANNEL_MESSAGES,) if messages_only else (CHANNEL_MESSAGES, CHANNEL_STATE)
+        self._listen()
+
+    def _listen(self) -> None:
+        """LISTEN on the wanted channels, unless that can't work here: a standby refuses it, and
+        so may a pooler. Then wait_for_change polls (a short sleep) and tries again later."""
+        self._polling = bool(self.degraded)
+        if not self._polling:
+            try:
+                for channel in self._listening:
+                    self._conn.execute(f"LISTEN {channel}")
+            except psycopg.Error as exc:
+                if self._conn.closed or self._conn.broken:
+                    raise BoardUnavailable(str(exc)) from exc
+                self._polling = True
+        self._retry_at = time.monotonic() + LIVE_RETRY_SECONDS
+
+    def _retry_live(self) -> bool:
+        """While degraded or polling, now and then: is a primary reachable again (switch to it), or
+        does LISTEN work now? True if the connection changed (the caller redraws)."""
+        if time.monotonic() < self._retry_at:
+            return False
+        if self.degraded:
+            db = {**self.cfg["database"], "connect_timeout": min(2, self.cfg["database"]["connect_timeout"])}
+            try:
+                conn = _connect({**self.cfg, "database": db})
+            except BoardUnavailable:
+                self._retry_at = time.monotonic() + LIVE_RETRY_SECONDS
+                return False
+            old, self._conn, self.degraded = self._conn, conn, None
+            old.close()
+            conn.query_timeout = old.query_timeout
+        self._listen()
+        return True
 
     def wait_for_change(self, timeout: float) -> bool:
+        if self._listening and (self.degraded or self._polling):
+            time.sleep(timeout)   # polling: no notifications here; the caller re-queries anyway
+            return self._retry_live()
         woke = False
         for _ in self._conn.notifies(timeout=timeout, stop_after=1):
             woke = True

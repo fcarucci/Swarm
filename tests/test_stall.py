@@ -91,7 +91,7 @@ class ReconnectTests(unittest.TestCase):
 
     def plan(self, *boards: dict):
         """open_board returns FlakyBoards configured by `boards`, in order (the last repeats)."""
-        def opener(cfg):
+        def opener(cfg, **kw):
             spec = boards[min(len(self.opened), len(boards) - 1)]
             if spec.get("refuse"):
                 self.opened.append(None)

@@ -18,7 +18,7 @@ from .base import (AUTO_CLOSED_BY, RESTART_OUTCOMES, STUCK_PREFIX, STUCK_REASONS
                    EXCERPT_MAX_RAW, TRANSCRIPT_MAX_RAW, JOB_STATUSES, MEMORY_SEEN_MAX, MEMORY_REF_IMAGE_BYTES_MAX, MEMORY_REF_IMAGES_MAX, MemoryRef, NAME_SOURCES, TOOL_NAME_MAX, AgentEvent,
                    AgentStatus, Board, BoardError, BoardUnavailable, IncompatibleStorage, ReadOnlyBoard,
                    JobStatus, Member, Message, OwedReply, PostResult, ReadResult, ROUTE_STATES, SCHEMA_VERSION,
-                   Route, RosterEntry, SetupResult, SpawnGrant, SyncState, TRANSCRIPT_ROLES, TranscriptImage, TranscriptRow, TranscriptSummary, TranscriptTotals,
+                   Route, RosterEntry, database_hosts, SetupResult, SpawnGrant, SyncState, TRANSCRIPT_ROLES, TranscriptImage, TranscriptRow, TranscriptSummary, TranscriptTotals,
                    VERDICTS, derive_agent_status,
                    decompress_capped, decompress_transcript, derive_job_status, load_name_pool, normalize_message)
 
@@ -50,20 +50,25 @@ def backend_class(cfg: dict) -> type[Board]:
     return getattr(importlib.import_module(f".{module}", __name__), cls)
 
 
-def open_board(cfg: dict, init_timeout: float = 60.0) -> Board:
+def open_board(cfg: dict, init_timeout: float = 60.0, readers: bool = False) -> Board:
     """Connect to the configured board. Raises BoardUnavailable if it cannot be reached.
 
     If opening fails because the store itself is gone although a stamp said it was set up
     (a dropped database, a deleted file), it is set up again (autoinit.recover_missing, waiting
-    at most init_timeout for another setup) and the open is retried, once."""
+    at most init_timeout for another setup) and the open is retried, once.
+
+    readers: for a command that only reads. A Postgres board with several hosts then falls back
+    to whichever standby answers when no primary is reachable (board.degraded names it; writes
+    and LISTEN are unavailable there). Other backends and single hosts: no difference."""
     cls = backend_class(cfg)
+    kw = {"readers": True} if readers and board_backend(cfg) == "postgres" else {}
     try:
-        return cls(cfg)
+        return cls(cfg, **kw)
     except BoardUnavailable:
         from . import autoinit
         if not autoinit.recover_missing(cfg, init_timeout):
             raise
-    return cls(cfg)
+    return cls(cfg, **kw)
 
 
 def open_read_only(cfg: dict) -> Board:

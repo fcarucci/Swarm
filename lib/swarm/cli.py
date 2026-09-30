@@ -188,7 +188,10 @@ def watcher_config(cfg: dict) -> dict:
     sets (and doesn't leave empty) on top. Everything else is shared; cfg is not modified."""
     out = dict(cfg)
     overrides = {k: v for k, v in (cfg.get("watch_database") or {}).items() if v not in (None, "")}
-    out["database"] = {**cfg["database"], **overrides}
+    base = cfg["database"]
+    if "host" in overrides or "hosts" in overrides:   # its servers replace [database]'s, whichever key
+        base = {k: v for k, v in base.items() if k not in ("host", "hosts")}
+    out["database"] = {**base, **overrides}
     return out
 
 
@@ -199,9 +202,10 @@ def watcher_db_label(cfg: dict) -> str | None:
     if board_backend(cfg) != "postgres":
         return None
     swarm_db, watch_db = cfg["database"], watcher_config(cfg)["database"]
-    if all(swarm_db.get(k) == watch_db.get(k) for k in ("host", "port", "dbname")):
+    if all(swarm_db.get(k) == watch_db.get(k) for k in ("host", "hosts", "port", "dbname")):
         return None
-    label = str(watch_db["host"])
+    from swarm.board import database_hosts
+    label = ",".join(h for h, _ in database_hosts(watch_db))
     if watch_db.get("port") != swarm_db.get("port"):
         label += f":{watch_db['port']}"
     if watch_db.get("dbname") != swarm_db.get("dbname"):
@@ -602,8 +606,8 @@ class Sweeper:
 
     def __call__(self, board) -> list:
         from swarm.board import BoardUnavailable
-        if self.next is not None and self.clock() < self.next:
-            return []
+        if getattr(board, "degraded", None) or (self.next is not None and self.clock() < self.next):
+            return []   # (a standby can't write: nothing to sweep)
         self.next = self.clock() + self.every
         try:
             closed = sweep_jobs(board, self.cfg, time.monotonic() + SWEEPER_TRANSCRIPT_SECONDS)
@@ -767,7 +771,7 @@ def _follow(cfg: dict, run, notice, pause) -> None:
     board, delay = None, RECONNECT_MIN_SECONDS
     while board is None:  # the first connection
         try:
-            board = open_board(cfg)
+            board = open_board(cfg, readers=True)
         except BoardUnavailable as exc:
             notice(f"board unreachable ({_error_name(exc)}: {exc}), retrying in {delay:g}s…")
             if not pause(delay):
@@ -786,9 +790,13 @@ def _follow(cfg: dict, run, notice, pause) -> None:
                 return
             delay = min(delay * 2, RECONNECT_MAX_SECONDS)
             try:
-                board = open_board(cfg)
+                board = open_board(cfg, readers=True)
             except BoardUnavailable:
                 pass
+
+
+def degraded_notice(host: str) -> str:
+    return f"degraded: reading from {host} (no primary)"
 
 
 def cmd_tail(cfg: dict, job: str | None, backlog: int, interval: float, show_agents: bool,
@@ -826,12 +834,22 @@ def cmd_tail(cfg: dict, job: str | None, backlog: int, interval: float, show_age
                   flush=True)
         else:
             print("--- reconnected ---", flush=True)
+        state["degraded"] = None
+
+        def note_degraded() -> None:  # said when it changes: standby reached, or a primary back
+            now = board.degraded
+            if now != state["degraded"]:
+                print(f"--- {degraded_notice(now) if now else 'primary reachable again'} ---", flush=True)
+                state["degraded"] = now
+        if board.degraded:
+            note_degraded()
         while True:  # catch up first: after a reconnect, what was posted during the outage
             state["last_id"] = show(board.messages_after(state["last_id"], job), state["last_id"])
             if show_agents:
                 state["since"] = _show_agent_events(board, state["since"], job, say)
             sweeper(board)
             board.wait_for_change(interval)
+            note_degraded()
 
     def pause(seconds: float) -> bool:
         time.sleep(seconds)
@@ -2148,7 +2166,10 @@ def cmd_watch(cfg: dict, job: str | None, interval: float, color: bool, session:
     def run(board) -> None:
         def draw() -> list[str]:
             sweeper(board)
-            return _watch_frame(board, job, interval, color, interactive, view, _sup_or_none(cfg))
+            lines = _watch_frame(board, job, interval, color, interactive, view, _sup_or_none(cfg))
+            if board.degraded and len(lines) > 1 and not lines[1]:   # the blank line under the title
+                lines[1] = _bold(degraded_notice(board.degraded), color)
+            return lines
         _watch_loop(board, out, fd, interval, view, draw)
 
     def notice(text: str) -> None:  # over the frame's top line; the rest of the frame stays
@@ -3103,7 +3124,8 @@ def _sup_or_none(cfg: dict) -> dict | None:
 
 def _board_status(board, cfg: dict, args) -> None:
     color = _use_color(args)
-    _say_closed(_sweep(board, cfg))
+    if not board.degraded:   # a standby can't close anything
+        _say_closed(_sweep(board, cfg))
     enabled = transcripts_enabled(cfg)
     sup = _sup_or_none(cfg)
     if not args.job:
@@ -3257,6 +3279,12 @@ def main(argv=None) -> int:
         return 1
 
 
+def _reads_only(args) -> bool:
+    """Whether the command only reads the board, so a standby may serve it when no primary is up."""
+    return (args.cmd in ("who", "status") or (args.cmd == "read" and args.peek)
+            or (args.cmd == "transcript" and args.tcmd in TRANSCRIPT_COMMANDS))
+
+
 def _main(argv=None) -> int:
     args = _parser().parse_args(argv)
     # doctor reads (and reports on) the config itself: a broken one must not stop it
@@ -3272,7 +3300,7 @@ def _main(argv=None) -> int:
     if args.cmd == "verdict" and _verdict_text(args) is None:   # refused before anything is sent or queued
         return 1
     try:
-        board_cm = open_board(cfg)
+        board_cm = open_board(cfg, readers=_reads_only(args))
     except Exception as exc:  # BoardUnavailable in practice; any failure to open is treated alike
         if args.cmd == "post":  # sandboxed agent: queue it; the next hook call delivers it
             spool_post(cfg, args.job, args.name, " ".join(args.message), args.to)
@@ -3302,12 +3330,17 @@ def _main(argv=None) -> int:
                   f"automatically within seconds by the swarm hooks, and counts only if you are the "
                   f"judge of {args.job} (if not, you are told on the board).")
             return 0
-        print(f"cannot reach the board database: {exc}", file=sys.stderr)
+        print(f"cannot reach the board database: {exc}"
+              + (" (this command writes: it needs the primary)" if not _reads_only(args) else ""),
+              file=sys.stderr)
         return 1
     from swarm.board import BoardUnavailable
     try:
         with board_cm as board:
-            flush_spool(board, cfg)
+            if board.degraded:   # served by a standby: nothing to write (the spool waits for a primary)
+                print(degraded_notice(board.degraded), file=sys.stderr)
+            else:
+                flush_spool(board, cfg)
             return BOARD_COMMANDS[args.cmd](board, cfg, args) or 0
     except BoardUnavailable as exc:  # lost mid-command (e.g. a query past its deadline): no retry,
         # and no spooling either: a post whose reply was lost may well have been committed
