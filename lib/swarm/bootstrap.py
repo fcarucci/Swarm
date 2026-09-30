@@ -221,7 +221,8 @@ def spool_problem(cfg: dict) -> str | None:
         except OSError as exc:
             return f"can't check {cur} ({exc.strerror or type(exc).__name__})"
         import stat as _stat
-        if _stat.S_ISLNK(st.st_mode) and cur not in (home, *home.parents):
+        # a root-owned symlink (macOS /tmp -> /private/tmp) can't be swapped by another user
+        if _stat.S_ISLNK(st.st_mode) and st.st_uid != 0 and cur not in (home, *home.parents):
             return f"{cur} is a symlink"
         if st.st_uid not in (0, uid):
             return f"{cur} belongs to another user (uid {st.st_uid})"

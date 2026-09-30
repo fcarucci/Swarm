@@ -4,6 +4,8 @@ is acted on unchecked. The attacks, reproduced: each must do nothing and log a
 refusal."""
 from __future__ import annotations
 
+import unittest
+
 import json
 import os
 import stat
@@ -624,6 +626,7 @@ class CodexExposureTests(Env):
         self.assertIs(checks["supervise private dir"].ok, True)
 
 
+@unittest.skipUnless(os.path.isdir("/proc"), "the supervisor launches and reaps through /proc (Linux)")
 class WorkdirRaceTests(RunnerBase):
     """The pass checks the work dir, then the runner launches
     later; a sandbox that can write under the allowed root swaps the checked directory for a

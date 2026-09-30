@@ -138,7 +138,8 @@ class ClaudeHost(Host):
         for project in projects:   # <projects_dir>/<project>/<uuid>.jsonl, exact name, no links
             p = d / project / name
             try:
-                if stat.S_ISREG(os.lstat(p).st_mode):
+                # exact name, also on a case-insensitive filesystem (macOS): the entry must be there as is
+                if stat.S_ISREG(os.lstat(p).st_mode) and name in os.listdir(d / project):
                     return p
             except OSError:
                 continue

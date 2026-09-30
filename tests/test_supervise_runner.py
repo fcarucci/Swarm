@@ -1,6 +1,8 @@
 """The detached runner, with fake claude/codex binaries (shell scripts) and short clocks."""
 from __future__ import annotations
 
+import unittest
+
 import json
 import os
 import stat
@@ -500,6 +502,7 @@ class BoardNamespaceTests(RunnerBase):
         self.assertIsNone(self.restart().outcome)
 
 
+@unittest.skipUnless(os.path.isdir("/proc"), "the supervisor launches and reaps through /proc (Linux)")
 class RunnerTests(RunnerBase):
     def test_completed_claude(self):
         sid = "3f0c1e9a-0000-4000-8000-000000000001"
