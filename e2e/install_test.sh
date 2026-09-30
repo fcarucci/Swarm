@@ -518,6 +518,7 @@ t_root_all_users() {
   rm -f "$base/users/bob/bin/codex"
   mkdir -p "$base/users/bob/home/.local/state/swarm/active"
   printf '{"job": "bob-job-2026-09"}' > "$base/users/bob/home/.local/state/swarm/active/j.json"
+  : > "$base/users/bob/home/.local/state/swarm/board.sqlite3"   # an old install for migrate to refuse over
   # carol: codex only, no board config -> stops at "fill in", no credentials invented
   new_user "$base" carol; mkdir -p "$base/users/carol/home/.codex"
   rm -f "$base/users/carol/bin/claude"

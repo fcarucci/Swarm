@@ -3,6 +3,9 @@ checks API without downloading job logs. Usage: annotate.py LOGFILE"""
 import re, sys
 
 text = open(sys.argv[1], errors="replace").read()
+fails = [l for l in text.splitlines() if "E2E FAIL" in l]
+if fails:
+    print("::error title=E2E FAIL::" + "%0A".join(l.replace("%", "%25") for l in fails[:10])[:3500])
 blocks = re.split(r"\n(?==+\n(?:ERROR|FAIL): )", text)
 count = 0
 for b in blocks:
