@@ -83,6 +83,32 @@ class ReleaseNotesTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("feat: something", r.stdout)
 
+    def test_version_prefixes_and_prereleases_do_not_cross_match(self):
+        cl = ("# Changelog\n\n## [0.1.10] - 2026-03-01\n\n- Ten.\n\n## [0.1.1-rc1] - 2026-02-01\n\n"
+              "- Candidate.\n\n## [0.1.1] - 2026-01-01\n\n- One.\n")
+        self.commit("first", cl)
+        self.git("tag", "v0.1.1")
+        self.git("tag", "v0.1.1-rc1")
+        self.git("tag", "v0.1.10")
+        for tag, want, other in (("v0.1.1", "- One.", "Ten."), ("v0.1.10", "- Ten.", "One."),
+                                 ("v0.1.1-rc1", "- Candidate.", "One.")):
+            body = self.notes(tag).stdout.split("## What's changed", 1)[1]
+            self.assertIn(want, body, tag)
+            self.assertNotIn(other, body, tag)
+
+    def test_crlf_changelog_and_blank_edges_are_clean(self):
+        cl = "# Changelog\r\n\r\n## [0.1.0] - 2026-01-01\r\n\r\n\r\n- A.\r\n\r\n- B.\r\n\r\n\r\n## [0.0.9]\r\n- Old.\r\n"
+        (self.tmp / "CHANGELOG.md").write_bytes(cl.encode())
+        self.commit("first")
+        self.git("tag", "v0.1.0")
+        out = self.notes("v0.1.0").stdout
+        self.assertNotIn("\r", out)
+        body = out.split("## What's changed\n\n", 1)[1]
+        self.assertTrue(body.startswith("- A.\n\n- B.\n\nFull changelog:"), repr(body))
+
+    def test_script_avoids_gnu_only_sed(self):
+        self.assertNotIn("sed -e :a", SCRIPT.read_text())
+
 
 if __name__ == "__main__":
     unittest.main()

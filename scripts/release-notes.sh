@@ -96,11 +96,16 @@ changelog_section() {
   elif [ -f CHANGELOG.md ]; then
     text="$(cat CHANGELOG.md)"
   fi
+  # Plain awk only (no GNU sed tricks: this also runs on macOS/BSD). Strips CRs, matches the
+  # heading literally including the closing bracket (so 0.1.1 never matches 0.1.10), and trims
+  # leading and trailing blank lines.
   printf '%s\n' "$text" | awk -v v="$ver" '
+    { sub(/\r$/, "") }
     /^## \[/ { if (on) exit; on = (index($0, "## [" v "]") == 1); next }
-    on && !started && $0 == "" { next }
-    on { started = 1; print }
-  ' | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}'
+    !on { next }
+    $0 ~ /^[ \t]*$/ { if (started) blanks++; next }
+    { for (; blanks > 0; blanks--) print ""; started = 1; print }
+  '
 }
 
 # ------------------------------------------------------------------------------------ render
