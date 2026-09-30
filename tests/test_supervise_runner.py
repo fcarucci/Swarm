@@ -700,7 +700,31 @@ class RunnerTests(RunnerBase):
         self.assertFalse((self.bin / "codex.ran").exists())
 
 
-SURVIVOR = ("sh -c 'trap \"\" TERM; echo $$ > \"$1\"; while :; do sleep 1; done' x \"$0.pid\" &\n")
+# Ignores SIGTERM, so only SIGKILL stops it. It gives up by itself after SURVIVOR_SECONDS (default 60),
+# far longer than any test needs it: a test process killed mid-run never runs its cleanups, and an
+# unbounded survivor then lives on in whatever cgroup ran the suite, holding up that unit's stop.
+SURVIVOR = ("sh -c 'trap \"\" TERM; echo $$ > \"$1\"; i=0; while [ $i -lt ${SURVIVOR_SECONDS:-60} ]; "
+            "do sleep 1; i=$((i+1)); done' x \"$0.pid\" &\n")
+
+
+
+class SurvivorFixtureTests(unittest.TestCase):
+    def test_survivor_ends_by_itself_when_its_test_never_cleans_up(self):
+        # a test process killed mid-run never runs its cleanups: the survivor must not live on
+        import shutil, signal, subprocess, tempfile
+        d = Path(tempfile.mkdtemp(prefix="swarm-survivor-", dir=os.environ.get("TMPDIR")))
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        pidfile = d / "s.pid"
+        subprocess.run(["sh", "-c", SURVIVOR + "exit 0\n", str(d / "s")],
+                       env={**os.environ, "SURVIVOR_SECONDS": "1"}, check=True)
+        for _ in range(100):
+            if pidfile.exists() and pidfile.read_text().strip():
+                break
+            time.sleep(0.02)
+        pid = int(pidfile.read_text())
+        self.addCleanup(_kill_quietly, pid)
+        os.kill(pid, signal.SIGTERM)                       # ignored, as the fixture intends
+        self.assertTrue(_gone(pid, within=5.0))
 
 
 TAG = "r1-0123456789abcdef"
