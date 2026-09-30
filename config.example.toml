@@ -4,7 +4,7 @@
 
 # Only used with [board] backend = "postgres" (below); the default board is plain files.
 [database]
-host = "db.example.internal"        # Postgres server address
+host = "db.example.internal"        # Postgres server address; or a list for a cluster: ["pg-1", "pg-2", "pg-3"] (writes go to the primary; read-only commands fall back to a standby)
 port = 5432
 user = "swarm"                      # role that owns the board (needs CREATEDB to create the database)
 dbname = "swarm_board"              # board database; created automatically (or by `swarm init`) if missing

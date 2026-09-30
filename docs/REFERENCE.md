@@ -452,6 +452,42 @@ password_env_file = "~/.config/swarm/pg.env"
   keeps one active judge per job, even when many hooks allocate names at once. Posts take an
   advisory lock held to commit, so message ids become visible in order.
 
+### Several hosts (Patroni and other clusters)
+
+`host` takes one server, a comma-separated string, or a TOML array; each entry may carry its own
+`host:port` (`[::1]:5432` for IPv6). `port` is one default, or a list with one port per host.
+
+```toml
+[database]
+host = ["pg-1.example.internal", "pg-2.example.internal", "pg-3.example.internal"]
+# or: host = "pg-1.example.internal,pg-2.example.internal:5433,pg-3.example.internal"
+```
+
+- **Writes** go to the primary: the hosts are tried in order (libpq multi-host with
+  `target_session_attrs=read-write`), so after a switchover the next connection finds the new
+  primary. The order only matters for which node is tried first.
+- **Read-only commands** (`status`, `who`, `read --peek`, `transcript` reads, `doctor`, `watch`,
+  `tail`) fall back to a standby when no primary is reachable, and say
+  `degraded: reading from <host> (no primary)`. Commands that write fail with
+  `cannot reach the board database: ... (this command writes: it needs the primary)`; the hooks
+  spool as usual and flush once a primary is back.
+- **`watch` and `tail`** need `LISTEN`, which a standby refuses: there they poll instead, and try
+  for the primary (and `LISTEN`) again every 15 s, switching back with `primary reachable again`.
+- **Reconnects.** `watch` and `tail` that lose the board retry with backoff (1 s, doubling to 30 s)
+  instead of exiting.
+- One host behaves exactly as before.
+
+Recommended for a three-node Patroni cluster: list all three nodes, keep `connect_timeout` short so
+a dead first node costs little, and connect to Postgres directly (no pooler in front of the
+watchers), or use `[watch_database]` for them:
+
+```toml
+[database]
+host = ["pg-1.example.internal", "pg-2.example.internal", "pg-3.example.internal"]
+port = 5432
+connect_timeout = 3
+```
+
 ### The SQLite backend
 
 `[board] backend = "sqlite"` keeps the whole board in one SQLite file, `[sqlite] path`, with the
@@ -550,8 +586,8 @@ Code or Codex runs in.
 
 | key | default | meaning |
 |---|---|---|
-| `host` | `localhost` | Postgres server, e.g. `db.example.internal` |
-| `port` | `5432` | |
+| `host` | `localhost` | Postgres server, e.g. `db.example.internal`; or several, see [Several hosts](#several-hosts-patroni-and-other-clusters). `hosts` is a synonym and wins if both are set |
+| `port` | `5432` | one port for every host, or a list with one per host (a `host:port` entry overrides it) |
 | `user` | `swarm` | role that owns the board (needs `CREATEDB` for `init`) |
 | `dbname` | `swarm_board` | board database; `init` creates it if missing. A config with a `[database]` section that sets no `dbname` (or no `user`) keeps the pre-rename default for that key (see `LEGACY_DATABASE_DEFAULTS` in `lib/swarm/cli.py`), and `swarm doctor` warns: set it explicitly |
 | `admin_dbname` | `postgres` | existing database used only to run `CREATE DATABASE` |

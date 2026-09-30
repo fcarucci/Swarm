@@ -43,7 +43,7 @@ doing something another agent owns; a short status every few steps. The hooks ba
    then pick the backend with `[board] backend`:
    - `"file"` (default) or `"sqlite"`: one machine, no server; nothing else to fill in (`[file] path` /
      `[sqlite] path` have defaults). With no config at all, the file board is used;
-   - `"postgres"` (shared across machines; also what an old config with `[database]` and no `backend` keeps using): fill in the database host and port, the role, and
+   - `"postgres"` (shared across machines; also what an old config with `[database]` and no `backend` keeps using): fill in the database host (or a list of hosts for a cluster: writes follow the primary, read-only commands fall back to a standby) and port, the role, and
      `password_env_file`, a chmod 600 file containing `PGPASSWORD=...`.
      `query_timeout_seconds` (default 8, 0 = off) is the client-side deadline for every board
      query: one that gets no reply by then raises `BoardUnavailable` instead of blocking.

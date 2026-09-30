@@ -222,6 +222,8 @@ port = 5432
 user = "swarm"
 dbname = "swarm_board"
 password_env_file = "~/.config/swarm/pg.env"   # contains PGPASSWORD=...; chmod 600
+# a cluster: host = ["pg-1.example.internal", "pg-2.example.internal", "pg-3.example.internal"]
+#   writes follow the primary; status/who/watch/tail keep working from a standby when it is down
 
 # or SQLite, also on one machine:
 # [board]

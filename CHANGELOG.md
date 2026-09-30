@@ -4,6 +4,14 @@ All notable changes to swarm, newest first. Each release's notes on GitHub are t
 section here, so every release adds a `## [x.y.z] - YYYY-MM-DD` section (see `scripts/release-notes.sh`).
 Keep entries short and user-facing: one line per change, what it does, not how.
 
+## [0.1.5] - 2026-09-30
+
+### Added
+- The Postgres `host` can be a list (a cluster): writes follow the primary across a switchover.
+- `status`, `who`, `read --peek`, `doctor`, `watch` and `tail` keep working from a standby when no
+  primary is up, and say so; `watch` and `tail` poll where `LISTEN` is unavailable.
+- `watch` and `tail` reconnect with backoff instead of exiting.
+
 ## [0.1.4] - 2026-09-30
 
 ### Changed
