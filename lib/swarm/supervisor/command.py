@@ -397,8 +397,9 @@ def workdir_config_problem(dir_fd: int, where: str, approvals) -> str | None:
         return f"project configuration in {where} can't be checked ({exc.strerror or exc})"
     for rel, sha in hits:
         if (where, rel, sha) not in approvals:
-            return (f"{where}/{rel} is project configuration not approved for replacements (check "
-                    f"it, then: swarm supervise approve {where})")
+            # the command first and the path once: board posts are capped, and macOS temp paths are long
+            return (f"{rel}: unapproved project configuration; check it, then: "
+                    f"swarm supervise approve {where}")
     return None
 
 
