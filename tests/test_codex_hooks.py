@@ -64,6 +64,40 @@ class CodexHookTests(Env):
 
     # ---- enrolment and routing
 
+    def test_custom_role_from_task_name_is_visible_and_survives_followup(self):
+        self.rename_child("/root/product_manager__spec")
+        self.start_child()
+        self.replay("PreToolUse", self.child_payloads("PreToolUse")[0])
+        self.assertEqual(self.agent(self.child, job="fixture").role, "product_manager")
+        self.replay("SubagentStop", self.child_payloads("SubagentStop")[0])
+        self.replay("PreToolUse", self.child_payloads("PreToolUse")[-1])
+        self.assertEqual(self.agent(self.child, job="fixture").role, "product_manager")
+
+    def test_qa_role_can_write_tests_without_verifier_restrictions(self):
+        self.rename_child("/root/qa__acceptance")
+        self.start_child()
+        patch = {**self.child_payloads("PreToolUse")[0], "tool_name": "apply_patch",
+                 "tool_input": {"command": "*** Begin Patch\n*** End Patch\n"}}
+        self.assertIsNone(self.denied(self.replay("PreToolUse", patch)))
+        self.assertEqual(self.agent(self.child, job="fixture").role, "qa")
+
+    def test_custom_child_role_selects_model_and_remains_subject_to_caps(self):
+        self.cfg["models"] = {"codex": {"engineer": "gpt-engineer", "helper": "gpt-helper"}}
+        self.rename_child("/root/engineering_lead__plan")
+        self.start_child()
+        spawn = next(p for p in self.child_payloads("PreToolUse") if p.get("tool_name", "").endswith("spawn_agent"))
+        spawn = {**spawn, "tool_input": {**spawn["tool_input"], "task_name": "engineer__api"}}
+        out = self.replay("PreToolUse", spawn)
+        self.assertEqual(out["hookSpecificOutput"]["updatedInput"]["model"], "gpt-engineer")
+        self.assertIsNone(self.denied(self.replay("PreToolUse", spawn)))
+        self.assertIn("limit 2 per agent", self.denied(self.replay("PreToolUse", spawn)))
+
+    def test_explicit_judge_task_name_cannot_be_spawned_by_member(self):
+        self.start_child()
+        spawn = next(p for p in self.child_payloads("PreToolUse") if p.get("tool_name", "").endswith("spawn_agent"))
+        spawn = {**spawn, "tool_input": {**spawn["tool_input"], "task_name": "judge__acceptance"}}
+        self.assertIn("can't be a judge", self.denied(self.replay("PreToolUse", spawn)))
+
     def test_codex_start_enrols_and_records_host_and_model(self):
         out = self.start_child()
         self.assertIn("[swarm] You are **", self.context(out))

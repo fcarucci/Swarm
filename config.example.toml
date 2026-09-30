@@ -159,9 +159,11 @@ check_max = 200                    # refs checked per purge at most
 [models]
 # Default model per role for the agents the swarm spawns. mode: "default" sets the model only
 # when the spawn didn't pick one, "enforce" always replaces it, "off" never touches it. Names
-# are passed through unchanged; the host validates them. A role left out uses `worker`; a host
-# with no section here is left alone. On Codex the role comes from the spawn's task_name
-# (verifier..., judge...). Your own (orchestrator) model is not the swarm's to set:
+# are passed through unchanged; the host validates them. Any role identifier can be a key.
+# A role left out uses `worker`; a member's child tries `helper` first. A host with no section
+# here is left alone. Claude: [swarm role: product_manager]. Codex: task_name
+# product_manager__spec (legacy verifier... / judge... names still work).
+# Your own (orchestrator) model is not the swarm's to set:
 # `swarm doctor` only reports it.
 mode = "default"
 
@@ -170,6 +172,10 @@ worker = "opus"
 verifier = "sonnet"
 judge = "opus"
 helper = "haiku"
+# product_manager = "opus"
+# engineering_lead = "opus"
+# engineer = "sonnet"
+# qa = "sonnet"
 
 # [models.codex]
 # worker = "<a model your Codex accepts, as in `model =` of ~/.codex/config.toml>"

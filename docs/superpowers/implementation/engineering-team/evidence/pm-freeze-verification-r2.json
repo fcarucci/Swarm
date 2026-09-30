@@ -1,0 +1,10 @@
+{
+  "candidate_id": "85cd76518f3b448f67a36c061d92cadd8a18c4b5f0c8ce62d1549a9a1139087d",
+  "requirement_revision": "product-r1",
+  "included_paths": 227,
+  "manifest_bytes": 22897,
+  "verification": "PM independently re-enumerated whole project root, including untracked files, applied declared exclusions, compared every path/hash and raw manifest byte",
+  "checked_at_utc": "2026-09-30T00:45:35.580403+00:00",
+  "integrated_tests": "40 tests ran, OK: test_roles test_respawn test_board_read_only",
+  "runtime_tree": "git diff --quiet62460c5 HEAD for lib/tests/bin/hooks/.github/config.example.toml/requirements.txt returned0"
+}

@@ -68,14 +68,14 @@ def replacement_model(cfg: dict, harness: str, role: str | None, recorded: str |
     """[supervise] model_override, else the role's [models] entry, else the model the agent row
     recorded. The row is board data (writable by agents): a recorded value that isn't a plain
     model name (one starting with "-" would be read as a flag) is ignored."""
-    from swarm import models
+    from swarm import models, roles
     from swarm.supervisor.settings import settings
     override = settings(cfg)["model_override"]
     if override:
         return override
     if recorded is not None and not _MODEL.match(str(recorded)):
         recorded = None
-    return models.model_for(cfg, harness, role if role in models.ROLES else "worker") or recorded
+    return models.model_for(cfg, harness, role if roles.valid_name(role) else "worker") or recorded
 
 
 def claude_spec(cfg: dict, *, prompt: str, workdir: str, model: str | None, minutes: float,

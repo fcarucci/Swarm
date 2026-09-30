@@ -800,6 +800,13 @@ class SqliteBoard(Board):
                           "tool_started_at = NULL WHERE agent_key = ? AND left_at IS NULL",
                           (self._now(), agent_key))
 
+    def set_agent_role(self, agent_key: str, role: str) -> None:
+        from swarm.roles import custom_role
+        if custom_role(role) is None:
+            raise ValueError("role must be a custom role identifier, not judge/verifier")
+        self._c().execute("UPDATE agents SET role = ? WHERE agent_key = ? AND left_at IS NULL",
+                          (role, agent_key))
+
     def set_agent_runtime(self, agent_key: str, harness: str | None, model: str | None) -> None:
         self._c().execute("UPDATE agents SET harness = COALESCE(?, harness), model = COALESCE(?, model) "
                           "WHERE agent_key = ? AND left_at IS NULL", (harness, model, agent_key))

@@ -46,6 +46,23 @@ class BoardContract:
         return next(a for a in self.b.agents(job) if a.agent_key == key)
 
     # ---- agent host / model / Codex turn ends
+    def test_custom_role_update_preserves_identity_and_protected_roles(self):
+        name = self.b.allocate_name("k1", "j", "general-purpose")
+        self.b.set_agent_role("k1", "product_manager")
+        self.assertEqual((self.agent("k1").name, self.agent("k1").role), (name, "product_manager"))
+        self.assertEqual(self.b.roster("j")[0].role, "product_manager")
+        self.b.claim_verifier("k1", "j")
+        self.b.set_agent_role("k1", "qa")
+        self.assertEqual(self.agent("k1").role, "verifier")
+        for reserved in ("judge", "verifier"):
+            with self.assertRaises(ValueError):
+                self.b.set_agent_role("k1", reserved)
+        self.b.allocate_name("k2", "j", "engineer")
+        self.b.agent_stopped("k2")
+        self.b.set_agent_role("k2", "qa")
+        self.b.set_agent_role("missing", "qa")
+        self.assertEqual(self.agent("k2").role, "engineer")
+
     def test_set_agent_runtime_on_active_agent_only(self):
         self.b.allocate_name("k1", "j")
         self.b.set_agent_runtime("k1", "codex", "gpt-x")

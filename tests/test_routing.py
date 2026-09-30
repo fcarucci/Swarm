@@ -76,6 +76,33 @@ class RoutingEnv(Env):
 
 
 class ActivateTagTests(RoutingEnv):
+    def test_custom_role_arrives_after_blind_start_and_survives_resume(self):
+        self.activate("J")
+        self.spawn("pm", "[swarm job: J]\n[swarm role: product_manager]\nDefine acceptance criteria.")
+        self.assertEqual(self.member("pm").role, "product_manager")
+        name = self.member("pm").name
+        self.hook("stop", agent_id="pm")
+        self.start("pm")
+        self.assertEqual((self.member("pm").name, self.member("pm").role), (name, "product_manager"))
+        rc, out, err = self.cli("status", "--job", "J", "--no-color")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("product_manager", out)
+
+    def test_custom_role_on_goal_job_cannot_verdict_but_can_write(self):
+        self.activate("J", "--goal", "Ship the requested product")
+        self.spawn("qa", "[swarm job: J]\n[swarm role: qa]\nWrite acceptance tests.")
+        self.assertEqual(self.member("qa").role, "qa")
+        out = self.turn("qa", tool="Write")
+        self.assertNotEqual((out or {}).get("hookSpecificOutput", {}).get("permissionDecision"), "deny")
+        rc, _, _ = self.cli("verdict", "--job", "J", "--as", self.member("qa").name, "met", "tests pass")
+        self.assertNotEqual(rc, 0)
+
+    def test_custom_role_routes_to_correct_job_when_several_are_active(self):
+        self.activate("A")
+        self.activate("B")
+        self.spawn("lead", "[swarm job: B]\n[swarm role: engineering_lead]\nPlan the work.")
+        self.assertEqual((self.job_of("lead"), self.member("lead").role), ("B", "engineering_lead"))
+
     def test_activate_prints_the_tag_line(self):
         out = self.activate("A")
         self.assertIn("\n[swarm job: A]\n", out)

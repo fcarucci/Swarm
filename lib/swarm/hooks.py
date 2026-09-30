@@ -217,7 +217,9 @@ def _spawn_prompt(payload: dict, agent_id: str) -> str | None:
 def _role(payload: dict, agent_id: str, prompt: str | None) -> str | None:
     """The role the spawn asked for: its [swarm role: ...] tag, or where the host can't show the
     prompt's tags (Codex), the host's hint (the task name)."""
-    return _tag_of(prompt or "", ROLE_TAG) or current_host().role_hint(payload, agent_id)
+    from swarm import roles
+    host = current_host()
+    return (roles.from_prompt(prompt or "") if host.reads_prompt_tags else None) or host.role_hint(payload, agent_id)
 
 
 def _pick(tag: str | None, bound: dict, unbound: dict, session_id: str) -> tuple[str | None, str]:
@@ -330,6 +332,10 @@ def _verify_route(board, agent_id: str, sid: str, member, bound: dict, unbound: 
     tag = _tag_of(prompt)
     if tag is None or tag == member.job:
         board.claim_route(agent_id, sid, "unverified", "final", member.job)
+        from swarm.roles import custom_role
+        role = custom_role(_role(payload, agent_id, prompt))
+        if role:
+            board.set_agent_role(agent_id, role)
         if _role(payload, agent_id, prompt) == "verifier" and board.claim_verifier(agent_id, member.job):
             js = board.job_status(member.job)
             _out("PreToolUse", "[swarm] Your prompt makes you a verifier: this replaces the worker "
@@ -392,7 +398,8 @@ def _spawn_refusal(board, agent_id: str, member, payload: dict, cfg: dict) -> st
             return f"the child's prompt needs the line `{tag_line(job)}` so it joins this job's board"
     # else (Codex: the message is encrypted) only the caps and the depth can be checked; the
     # child joins this session's job anyway
-    if (_tag_of(prompt, ROLE_TAG) or host.spawn_role_hint(call)) == "judge":
+    from swarm.roles import from_prompt
+    if ((from_prompt(prompt) if host.reads_prompt_tags else None) or host.spawn_role_hint(call)) == "judge":
         return "a spawned subagent can't be a judge"
     grant = board.reserve_spawn(agent_id, job, per_agent, per_job)
     if grant.refused == "agent":
@@ -420,11 +427,13 @@ def _spawn_lines(cfg: dict, job: str) -> list[str]:
     if host.reads_prompt_tags:
         line += (f"The child's prompt must contain the lines `{tag_line(job)}` and `{SPAWN_TAG} <why it "
                  f"is strictly needed>]` (at least {sp['min_justification_chars']} characters); the "
-                 f"reason is posted on the board. Anything else is refused.")
+                 f"reason is posted on the board. Anything else is refused. Give the child a role "
+                 f"with `[swarm role: engineer]`, for example; the brief defines its responsibilities.")
     else:   # Codex: the spawn message is encrypted, only its task_name is readable
         line += ("Your child joins this job by itself, and its spawn is announced on the board: say "
-                 "there why it is needed. Its task_name sets its role: one starting with `verifier` "
-                 "makes a read-only verifier, one starting with `judge` is refused.")
+                 "there why it is needed. Use task_name `<role>__<task>` (e.g. `engineer__api`) "
+                 "to assign a role. `verifier` is read-only and `judge` is refused; legacy "
+                 "verifier/judge prefixes without `__` still work. The brief defines custom responsibilities.")
     hint = None if host.supports_spawn_model_rewrite else models.model_for(cfg, host.name, "helper")
     if hint:
         line += f" Spawn helpers with model `{hint}`."
@@ -754,12 +763,12 @@ def _set_input_rewrite(fields: dict) -> None:
     o.update(fields)
 
 
-def _apply_model(cfg: dict, payload: dict, role: str) -> None:
+def _apply_model(cfg: dict, payload: dict, role: str, *, fallback: str = "worker") -> None:
     """Set the spawn's model to the role's ([models]), where the host lets a hook rewrite it."""
     from swarm import models
     host = current_host()
     ti = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
-    model = models.choose(cfg, host.name, role, host.spawn_call(ti).model)
+    model = models.choose(cfg, host.name, role, host.spawn_call(ti).model, fallback=fallback)
     if model and host.supports_spawn_model_rewrite:
         _set_input_rewrite(host.input_rewrite_output(host.rewrite_spawn_model(ti, model)))
 
@@ -778,7 +787,8 @@ def _orchestrator_spawn(cfg: dict, sid: str | None, payload: dict) -> None:
     call = host.spawn_call(payload.get("tool_input") or {})
     tag = _tag_of(call.prompt)
     if (tag is not None and (tag in bound or tag in unbound)) or (tag is None and len(bound or unbound) == 1):
-        _apply_model(cfg, payload, models.role_of(call.prompt, False, host.spawn_role_hint(call)))
+        prompt = call.prompt if host.reads_prompt_tags else ""
+        _apply_model(cfg, payload, models.role_of(prompt, False, host.spawn_role_hint(call)))
 
 
 def _gate_spawn(board, agent_id: str, name: str, job: str, payload: dict, cfg: dict) -> bool:
@@ -788,7 +798,12 @@ def _gate_spawn(board, agent_id: str, name: str, job: str, payload: dict, cfg: d
     from swarm.board import Member
     why = _spawn_refusal(board, agent_id, Member(name, job), payload, cfg)
     if why is None:
-        _apply_model(cfg, payload, "helper")
+        from swarm import models
+        host = current_host()
+        call = host.spawn_call(payload.get("tool_input") or {})
+        prompt = call.prompt if host.reads_prompt_tags else ""
+        role = models.role_of(prompt, True, host.spawn_role_hint(call))
+        _apply_model(cfg, payload, role, fallback="helper")
         return True
     board.tool_finished(agent_id)   # a denied call gets no PostToolUse
     _deny(f"[swarm] Spawn refused: {why}. Spawn only when strictly needed: do the work yourself, "
@@ -971,7 +986,13 @@ def _enrol(board, event: str, agent_id: str, job: str, payload: dict, cfg: dict,
     decided that it belongs on `job`; `marker` is that job's marker, `prompt` the spawn prompt
     if it was read already."""
     returning = board.was_member(agent_id, job)
-    name = board.allocate_name(agent_id, job, payload.get("agent_type"))
+    if prompt is None:
+        prompt = _spawn_prompt(payload, agent_id)
+    from swarm.roles import custom_role
+    role = custom_role(_role(payload, agent_id, prompt))
+    name = board.allocate_name(agent_id, job, role or payload.get("agent_type"))
+    if role:
+        board.set_agent_role(agent_id, role)
     _record_enrolment(cfg, agent_id, job, sid, payload)
     board.set_waiting(job, None)   # an agent at work: the job is no longer waiting for anything
     if sid:
@@ -1478,6 +1499,6 @@ def _unchecked_verifier_write(payload: dict, agent_id: str) -> bool:
             if not (cmd and writes_files(cmd) is not None):
                 return False
         prompt = _spawn_prompt(payload, agent_id)
-        return prompt is None or _tag_of(prompt, ROLE_TAG) == "verifier"
+        return prompt is None or _role(payload, agent_id, prompt) == "verifier"
     except Exception:
         return True

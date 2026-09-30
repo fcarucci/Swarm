@@ -3,18 +3,15 @@ didn't pick one; enforce = always replace it; off = never touch it. [models.<hos
 model names, passed through unchanged (the host validates them)."""
 from __future__ import annotations
 
+from swarm import roles
+
 ROLES = ("worker", "verifier", "judge", "helper")
 
 
 def role_of(prompt: str, spawned_by_member: bool, hint: str | None = None) -> str:
-    """The role a spawn asks for: helper when a member spawns it, else its [swarm role: ...] tag,
-    else `hint` (the host's reading where the tags are unreadable: Codex's task name)."""
-    if spawned_by_member:
-        return "helper"
-    from swarm.cli import ROLE_TAG           # one tag parser: the hooks' own (lazy: stdlib-only import path)
-    from swarm.hooks import _tag_of
-    tag = _tag_of(prompt or "", ROLE_TAG) or hint
-    return tag if tag in ("verifier", "judge") else "worker"
+    """Explicit role, otherwise helper for a member's child or worker for a root's child."""
+    tag = roles.from_prompt(prompt or "") or hint
+    return tag if roles.valid_name(tag) else "helper" if spawned_by_member else "worker"
 
 
 def mode(cfg: dict) -> str:
@@ -22,25 +19,27 @@ def mode(cfg: dict) -> str:
     return m if m in ("default", "enforce", "off") else "default"
 
 
-def model_for(cfg: dict, host: str, role: str) -> str | None:
+def model_for(cfg: dict, host: str, role: str, *, fallback: str = "worker") -> str | None:
     if mode(cfg) == "off":
         return None
     section = (cfg.get("models") or {}).get(host)
     if not isinstance(section, dict):
         return None
-    m = section.get(role) or section.get("worker")
+    m = section.get(role) or section.get(fallback) or section.get("worker")
     return str(m) if m else None
 
 
-def choose(cfg: dict, host: str, role: str, requested: str | None) -> str | None:
-    m = model_for(cfg, host, role)
+def choose(cfg: dict, host: str, role: str, requested: str | None, *, fallback: str = "worker") -> str | None:
+    m = model_for(cfg, host, role, fallback=fallback)
     if not m or (mode(cfg) == "default" and requested) or m == requested:
         return None
     return m
 
 
 def spawn_hint(cfg: dict, host: str) -> str | None:
-    pairs = [(r, model_for(cfg, host, r)) for r in ROLES]
+    section = (cfg.get("models") or {}).get(host)
+    custom = sorted(r for r in section if roles.valid_name(r) and r not in ROLES) if isinstance(section, dict) else []
+    pairs = [(r, model_for(cfg, host, r)) for r in (*ROLES, *custom)]
     pairs = [(r, m) for r, m in pairs if m]
     if not pairs:
         return None

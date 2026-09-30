@@ -303,12 +303,8 @@ def _dig(node, path: tuple[str, ...]):
 
 
 def _role_of_name(task_name: str) -> str | None:
-    """Role by task-name prefix: verifier*, judge*."""
-    name = (task_name or "").strip().lower()
-    for role in ("verifier", "judge"):
-        if name.startswith(role):
-            return role
-    return None
+    from swarm.roles import from_task_name
+    return from_task_name(task_name)
 
 
 def _own_rollout(payload: dict, agent_id: str) -> Path | None:

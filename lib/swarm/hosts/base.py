@@ -66,7 +66,7 @@ class Host:
         return None
 
     def role_hint(self, payload: dict, agent_id: str) -> str | None:
-        """The agent's role ("verifier", "judge") where the host can't show its prompt tags; None."""
+        """The agent's role where the host can't show its prompt tags; None if unspecified."""
         return None
 
     def spawn_role_hint(self, call: SpawnCall) -> str | None:

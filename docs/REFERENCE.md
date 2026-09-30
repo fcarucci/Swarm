@@ -182,7 +182,7 @@ both at once (see [One job, both hosts](#one-job-both-hosts)). What differs, as 
 | plugin hooks | `hooks/hooks.json`, active once installed | `hooks/codex-hooks.json`; you must trust them in `/hooks`, and again after every update that changes them |
 | spawn tool | `Agent` | `spawn_agent` (the prompt is its `message`) |
 | which job a subagent joins | the job its `[swarm job: <job>]` tag names; one session can run several jobs | the session's job: Codex encrypts spawn messages, so tags can't be read, and a session runs one job at a time (`activate` refuses a second) |
-| role | `[swarm role: verifier]` / `[swarm role: judge]` in the prompt | the spawn's task name: starting with `verifier` or `judge` |
+| role | `[swarm role: <role>]` in the prompt | `<role>__<task>` task name; legacy `verifier...` / `judge...` prefixes also work |
 | an agent's own spawns | need the job's tag and a `[swarm spawn: <why>]` line, within the caps and depth | only the caps and depth are checked; the spawn is announced on the board and the agent is told to say there why |
 | verifier is refused | `Edit`, `Write`, `MultiEdit`, `NotebookEdit`, shell writes (best effort), spawning | `apply_patch`, shell writes (best effort), spawning |
 | a subagent completes | when it stops | `[codex] stop_quiet_minutes` (default 3) after its last turn, since it can be sent more work |
@@ -651,7 +651,7 @@ On Postgres, re-run `swarm init` after changing `idle_minutes`, `dead_minutes` o
 | key | default | meaning |
 |---|---|---|
 | `mode` | `default` | `default`: set the role's model only when the spawn didn't pick one; `enforce`: always replace it; `off`: never touch it |
-| `worker`, `verifier`, `judge`, `helper` | (none) | in `[models.<host>]`: the model for that role on that host; a role left out uses `worker`; a host with no section is left alone |
+| `worker`, `verifier`, `judge`, `helper`, any custom role identifier | (none) | in `[models.<host>]`: the model for that role; a missing role uses `worker` (a member's child tries `helper` first); a host with no section is left alone |
 
 **`[transcripts]`** (see [Transcript archive](#transcript-archive-optional)): `enabled` (`false`),
 `retention_days` (`30`), `max_total_mb` (`2048`), `snapshot_minutes` (`15`), `max_mb` (`50`).
@@ -883,7 +883,8 @@ subagent's spawn prompt:
 
 In Codex the spawn prompt (`spawn_agent`'s `message`) is encrypted, so none of these can be
 read there. Instead, every subagent of a Codex session joins the session's one job; a task name
-starting with `verifier` or `judge` sets the role; and a swarm agent's spawn is checked against
+`<role>__<task>` sets the role, while legacy names beginning with `verifier` or `judge` select
+those built-in roles only when the name has no `__`; and a swarm agent's spawn is checked against
 the caps and the depth only (see [Hosts](#hosts-claude-code-and-codex)).
 
 ### Several swarms in one session
@@ -1179,6 +1180,34 @@ Every agent without a role tag is a worker: it does its share of the job and coo
 board, as described above. The roster shows its agent type (from the host's hook payload, when
 it gives one) as its role.
 
+### Custom roles
+
+Any role identifier can name a worker's responsibility: `project_manager`, `product_manager`,
+`engineering_lead`, `engineer`, `qa`, `reviewer`, or another role suited to the job. No role
+registration or database migration is needed. Identifiers are 1–64 lowercase ASCII letters,
+digits or underscores, start with a letter, and contain no double underscore.
+
+| Host | How to request a role |
+|---|---|
+| Claude Code | A separate `[swarm role: product_manager]` line in the child's prompt, alongside the job tag |
+| Codex | `task_name="product_manager__spec"`: a role, two underscores, and a nonempty task suffix |
+
+In Codex, role and task parsing is the same before spawning and when reading the child's
+rollout. The explicit `__` form takes precedence; `judge_assistant__research` is a custom
+role. Without it, legacy `verifier...` and `judge...` prefixes keep their original meaning.
+Unmarked tasks keep their previous behavior; malformed custom identifiers select no custom role.
+
+The role appears in the roster, `who`, `status`, and `watch`, and is preserved when an agent
+resumes. Claude may initially show the host's agent type until the first tool call makes the
+prompt available. Children spawned by a lead retain their own requested role and all existing
+depth and spawn limits apply.
+
+Custom labels use ordinary worker permissions. `qa` can write tests and `reviewer` can apply
+fixes; neither automatically receives verifier restrictions or judge authority. The built-in
+`judge` and `verifier` roles still require their existing claims and controls. Put each custom
+role's responsibilities, deliverables, ownership and handoffs in the brief; a label does not
+load a persona or supply a workflow. Configure its model under `[models.<host>]` as below.
+
 ### The judge: goals and the completion gate
 
 `activate --goal "<what done means>"` gives a job a goal, and one agent's only task is to decide
@@ -1264,7 +1293,8 @@ without a goal; `activate` always prints the tag line.
   that joined at `SubagentStart` with worker instructions is switched to verifier at its first
   tool call, before that call runs, and told that the verifier instructions replace the others.
   A subagent that joins at its first tool call gets the verifier instructions directly. In
-  Codex the role comes from the task name (starting with `verifier`) instead of the tag.
+  Codex the role comes from the task name (`verifier__<task>`, or a legacy name beginning with
+  `verifier` and containing no `__`) instead of the tag.
 - **Storage.** `agents.verifier`. The roster and views show its role as `verifier`. The flag is
   dropped when the key claims a new name or moves job. A judge can't also be a verifier.
 
@@ -1300,7 +1330,7 @@ active job are refused. The orchestrator (the main session) is never gated, and 
 don't count. Agents are told these rules when they join.
 
 In Codex, checks 4 to 6 can't be made: the child's prompt is encrypted. A swarm agent's spawn
-there is checked for 1 to 3 and the caps; a task name starting with `judge` is refused; the
+there is checked for 1 to 3 and the caps; a task name requesting the `judge` role is refused; the
 child joins the session's job by itself; and the agent is told to say on the board why it
 spawned (the `spawning ...` post carries the task name, with no reason).
 
@@ -1324,9 +1354,12 @@ helper = "haiku"
 # helper = "<...>"
 ```
 
-- **Roles.** `verifier` and `judge` come from the prompt's `[swarm role: ...]` tag (Codex: the
-  task name's prefix); a subagent spawned by a swarm agent is a `helper`; anything else is a
-  `worker`. A role left out of a host's section uses its `worker` model.
+- **Roles.** The explicit role comes from `[swarm role: <role>]` (Codex: `<role>__<task>`,
+  plus the legacy built-in prefixes). Any custom identifier can be a `[models.<host>]` key,
+  such as `engineer = "sonnet"` under `[models.claude]`. A matching model takes priority;
+  otherwise a member's child tries `helper`, then `worker`, while an orchestrator's child
+  falls back to `worker`. Untagged spawns select `helper` or `worker` respectively. This also
+  means an explicitly tagged child verifier can use the configured `verifier` model.
 - **Hosts.** `[models.claude]` applies to Claude Code spawns, `[models.codex]` to Codex ones. A
   host with no section is left alone, so is every spawn with `mode = "off"`.
 - **How.** The `PreToolUse` hook rewrites the spawn's `model` field for the orchestrator's

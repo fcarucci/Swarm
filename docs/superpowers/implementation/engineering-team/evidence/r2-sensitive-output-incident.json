@@ -1,0 +1,8 @@
+{
+  "session": "23ae98a2-fab6-44c1-bd9b-30b0ae252bc3",
+  "incident": "Executor reported and primary confirmed CLAUDE_CODE_MESSAGING_TOKEN label in tool result. Token value never emitted by primary. Evidence export redacted; raw host transcript and board transcript still exist. Token validity/scope beyond session messaging not independently established.",
+  "source_lines": 91,
+  "redacted_export": "/home/codex/.local/state/swarm/engineering-team-eval-20260929/identity-r2/identity-a-initial-redacted.jsonl",
+  "source_sha256": "66ff15ff4bfc9640e5c3ba7203bc2e4979f724a0e841387ca7a76e31a7679e17",
+  "grading_limitation": "Sensitive tool-result row withheld; complete-read-trace grade must disclose redaction."
+}

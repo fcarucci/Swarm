@@ -9,7 +9,9 @@ When several subagents work on one job in parallel, they normally can't see each
 restarts a service another is measuring, two fix the same bug, nobody hears about a finding
 until the final reports come back. `swarm` gives them a shared board to post short messages on,
 tracks every agent and job, and adds optional roles — a judge to decide when the goal is met, and
-verifiers to re-check what other agents claim. `swarm watch` shows it all on a live dashboard.
+verifiers to re-check what other agents claim. You can also assign custom roles such as
+`product_manager`, `engineering_lead`, `engineer` and `qa`, with a model per role.
+`swarm watch` shows it all on a live dashboard.
 
 ![swarm watch: four jobs running at once, with their status, verdicts and the agents' board messages](docs/images/swarm-watch.png)
 
@@ -41,6 +43,24 @@ needed, with the CLI below.
 
 See [docs/REFERENCE.md](docs/REFERENCE.md) for the full picture: roles, the supervisor, auto-close,
 transcript archiving, memory provenance, and the security model.
+
+To assign a custom role, put `[swarm role: engineering_lead]` in a Claude agent's prompt or
+use `task_name="engineering_lead__plan"` in Codex. Role labels describe responsibilities in
+the brief and appear on the roster; `judge` and `verifier` retain their built-in controls.
+See [Custom roles](docs/REFERENCE.md#custom-roles) for the naming and model fallback rules.
+
+For software delivery, invoke `/swarm:engineering-team` (Codex: select `engineering-team`
+from `/skills`). The [engineering-team skill](skills/engineering-team/SKILL.md) guides the
+invoking project manager through product requirements, engineering lead staffing,
+implementation, independent peer review, QA, and separate product/technical/QA acceptance.
+It schedules bounded role invocations against actual host capacity. Custom role labels alone
+do not enforce that process; the PM checks its artifacts and gates. The
+[host guide](skills/engineering-team/references/hosts.md) covers installed capability checks,
+Claude/Codex routing, board polling, and recovery. Custom roles and this skill require Swarm
+`0.1.1` or later, or a source checkout with the same role-support changes. Verify the loaded
+source and role enrollment; an older cached `0.1.0` plugin will not expose this skill. Host
+behavior remains pending until an independent evaluation passes on that host; documentation
+checks are not host validation.
 
 ## Goals and the judge
 

@@ -25,10 +25,19 @@ CLAUDE = {"worker": "opus", "verifier": "sonnet", "judge": "opus", "helper": "ha
 
 
 class ModelRuleTests(unittest.TestCase):
+    def test_custom_role_models_and_helper_fallback(self):
+        cfg = cfg_with(claude={"worker": "opus", "helper": "haiku", "engineer": "sonnet"})
+        self.assertEqual(models.role_of("[swarm role: engineer]", True), "engineer")
+        self.assertEqual(models.role_of("[swarm role: product_manager]", False), "product_manager")
+        self.assertEqual(models.choose(cfg, "claude", "engineer", None, fallback="helper"), "sonnet")
+        self.assertEqual(models.choose(cfg, "claude", "qa", None, fallback="helper"), "haiku")
+        self.assertEqual(models.choose(cfg, "claude", "qa", None), "opus")
+        self.assertIn("engineer=sonnet", models.spawn_hint(cfg, "claude"))
+
     def test_role_detection(self):
         self.assertEqual(models.role_of("[swarm role: verifier]\nx", False), "verifier")
         self.assertEqual(models.role_of("[swarm role: judge]", False), "judge")
-        self.assertEqual(models.role_of("[swarm role: judge]", True), "helper")   # spawned by a member
+        self.assertEqual(models.role_of("[swarm role: judge]", True), "judge")   # spawn gate refuses it
         self.assertEqual(models.role_of("do things", False), "worker")
 
     def test_modes(self):
@@ -46,6 +55,16 @@ class ModelRuleTests(unittest.TestCase):
 
 
 class ModelHookTests(Env):
+    def test_custom_role_model_on_both_hosts(self):
+        self.activate()
+        self.cfg["models"]["claude"]["product_manager"] = "product-model"
+        out = self.orchestrator_spawn("[swarm job: J]\n[swarm role: product_manager]\nDefine the product.")
+        self.assertEqual(out["hookSpecificOutput"]["updatedInput"]["model"], "product-model")
+        self.cfg["models"]["codex"] = {"worker": "gpt-worker", "product_manager": "gpt-product"}
+        args = {"task_name": "product_manager__spec", "message": "gAAAAA", "fork_turns": "none"}
+        out = self.hook("turn", agent_id=None, host="codex", tool_name="spawn_agent", tool_input=args)
+        self.assertEqual(out["hookSpecificOutput"]["updatedInput"], {**args, "model": "gpt-product"})
+
     def setUp(self):
         super().setUp()
         self.cfg["models"] = {"mode": "default", "claude": dict(CLAUDE)}
@@ -163,6 +182,6 @@ class RoleHintTests(unittest.TestCase):
     def test_role_of_uses_the_host_hint_when_untagged(self):
         self.assertEqual(models.role_of("gAAAAA", False, "verifier"), "verifier")
         self.assertEqual(models.role_of("[swarm role: judge]", False, "verifier"), "judge")   # the tag wins
-        self.assertEqual(models.role_of("x", True, "verifier"), "helper")
-        self.assertEqual(models.role_of("x", False, "nonsense"), "worker")
-
+        self.assertEqual(models.role_of("x", True, "verifier"), "verifier")
+        self.assertEqual(models.role_of("x", False, "custom_role"), "custom_role")
+        self.assertEqual(models.role_of("x", False, "invalid role"), "worker")

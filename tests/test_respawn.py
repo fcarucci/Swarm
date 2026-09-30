@@ -3,6 +3,8 @@ the orchestrator to spawn the next round (swarm.respawn): context at PreToolUse/
 per verdict, and a Stop that refuses to end the turn, once. The judge's own hooks never carry it."""
 from __future__ import annotations
 
+import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 from test_goals import GoalEnv  # noqa: E402  (sets sys.path)
@@ -10,6 +12,14 @@ from test_goals import GoalEnv  # noqa: E402  (sets sys.path)
 from swarm import respawn  # noqa: E402
 
 REASON, NEXT = "no failover drill", "run the db-2 failover drill and post the log"
+
+
+class BriefTests(unittest.TestCase):
+    def test_codex_next_round_uses_explicit_nonempty_judge_task_name(self):
+        js = SimpleNamespace(verdict_by="Judge Simpson", verdict_reason=REASON, verdict_next=NEXT)
+        text = respawn.brief(js, "J", spawn_tags=False)
+        self.assertIn("task name `judge__<task>`", text)
+        self.assertIn("`judge__round2`", text)
 
 
 class RespawnEnv(GoalEnv):
@@ -169,7 +179,8 @@ class CodexTests(RespawnEnv):
         ctx = self.context(self.main("turn", host="codex"))
         self.assertTrue(ctx.startswith(self.expected()), ctx)
         self.assertNotIn("[swarm job: J]", ctx)
-        self.assertIn("task name starting with `judge`", ctx)
+        self.assertIn("task name `judge__<task>`", ctx)
+        self.assertIn("`judge__round2`", ctx)
 
 
 class TextTests(RespawnEnv):

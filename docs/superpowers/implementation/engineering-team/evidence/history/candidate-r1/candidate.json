@@ -1,0 +1,1238 @@
+{
+  "candidate_id": "6b414e69aaa1e87ff098a69ae2f03197c1b1eacd2e2369d03ffe3434c46b62c1",
+  "deliverable_roots": [
+    "."
+  ],
+  "excluded_observed": [
+    {
+      "path": ".git",
+      "reason": "Git worktree metadata pointer"
+    },
+    {
+      "path": ".superpowers/sdd/.gitignore",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/plan-path",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/progress.md",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/claude-f01-session.json",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/claude-launch.py",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/claude-preflight-brief.txt",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/claude-preflight-final.json",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/claude-preflight-session.json",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/claude-resume.py",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/codex-preflight-brief.txt",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/codex-preflight-result.txt",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/codex-preflight.jsonl",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/codex-preflight.stderr",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/e2-brief.txt",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/e2-fix-brief.txt",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/e2-fix-result.txt",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/e2-fix.jsonl",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/e2-fix.stderr",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/e2-result.txt",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/e2.jsonl",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/e2.stderr",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/judge-brief.txt",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/judge-session.json",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/launch.py",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/qa-brief.txt",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/qa-fix-brief.txt",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/qa-fix-result.txt",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/qa-fix.jsonl",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/qa-fix.stderr",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/qa-result.txt",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/qa-split-brief.txt",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/qa-split-result.txt",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/qa-split.jsonl",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/qa-split.stderr",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/qa.jsonl",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/qa.stderr",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/resume.py",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/review-e1-brief.txt",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/review-e1-final-brief.txt",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/review-e1-recheck-brief.txt",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/review-e1-recheck2-brief.txt",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/review-e1-session.json",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/review-e2-brief.txt",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/review-e2-recheck-brief.txt",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/review-e2-recheck.jsonl",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/review-e2-recheck.stderr",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/review-e2-result.txt",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/review-e2.jsonl",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/review-e2.stderr",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/run-claude-f01.py",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": ".superpowers/sdd/2026-09-29-engineering-team/runs/stage-claude-eval.py",
+      "reason": "orchestrator runtime scratch and transcripts"
+    },
+    {
+      "path": "docs/superpowers/evaluations/2026-09-29-engineering-team.md",
+      "reason": "mutable evaluation results"
+    },
+    {
+      "path": "docs/superpowers/evaluations/engineering-team-fixtures/fixtures-r1.tar",
+      "reason": "historical fixture snapshot evidence"
+    },
+    {
+      "path": "docs/superpowers/evaluations/engineering-team-fixtures/preregistration.sha256",
+      "reason": "fixture preregistration checksum evidence"
+    },
+    {
+      "path": "docs/superpowers/implementation/engineering-team/claude-preflight.md",
+      "reason": "mutable host preflight evidence"
+    },
+    {
+      "path": "docs/superpowers/implementation/engineering-team/codex-preflight.md",
+      "reason": "mutable host preflight evidence"
+    },
+    {
+      "path": "docs/superpowers/implementation/engineering-team/evidence/candidate.json",
+      "reason": "candidate and later acceptance evidence; operative files prohibited here"
+    },
+    {
+      "path": "docs/superpowers/implementation/engineering-team/evidence/candidate.manifest",
+      "reason": "candidate and later acceptance evidence; operative files prohibited here"
+    },
+    {
+      "path": "docs/superpowers/implementation/engineering-team/evidence/evaluation-run-registry.json",
+      "reason": "candidate and later acceptance evidence; operative files prohibited here"
+    },
+    {
+      "path": "docs/superpowers/implementation/engineering-team/pm-record.md",
+      "reason": "mutable PM status and decisions"
+    },
+    {
+      "path": "docs/superpowers/implementation/engineering-team/review-e1.md",
+      "reason": "mutable task review evidence"
+    },
+    {
+      "path": "docs/superpowers/implementation/engineering-team/review-e2.md",
+      "reason": "mutable task review evidence"
+    },
+    {
+      "path": "docs/superpowers/implementation/engineering-team/review-fixtures.md",
+      "reason": "mutable fixture review evidence"
+    },
+    {
+      "path": "docs/superpowers/reviews/2026-09-29-engineering-team/final-confirmation.md",
+      "reason": "historical design/plan review evidence; operative design and plan are elsewhere"
+    },
+    {
+      "path": "docs/superpowers/reviews/2026-09-29-engineering-team/initial-coordinator-summary.md",
+      "reason": "historical design/plan review evidence; operative design and plan are elsewhere"
+    },
+    {
+      "path": "docs/superpowers/reviews/2026-09-29-engineering-team/initial-mechanics.md",
+      "reason": "historical design/plan review evidence; operative design and plan are elsewhere"
+    },
+    {
+      "path": "docs/superpowers/reviews/2026-09-29-engineering-team/initial-product-roles.md",
+      "reason": "historical design/plan review evidence; operative design and plan are elsewhere"
+    },
+    {
+      "path": "docs/superpowers/reviews/2026-09-29-engineering-team/recheck-mechanics.md",
+      "reason": "historical design/plan review evidence; operative design and plan are elsewhere"
+    },
+    {
+      "path": "docs/superpowers/reviews/2026-09-29-engineering-team/recheck-product-roles.md",
+      "reason": "historical design/plan review evidence; operative design and plan are elsewhere"
+    },
+    {
+      "path": "docs/superpowers/reviews/2026-09-29-engineering-team/recheck-summary.md",
+      "reason": "historical design/plan review evidence; operative design and plan are elsewhere"
+    },
+    {
+      "path": "docs/superpowers/reviews/2026-09-29-engineering-team/resolution.md",
+      "reason": "historical design/plan review evidence; operative design and plan are elsewhere"
+    }
+  ],
+  "excluded_observed_count": 72,
+  "exclusion_exact": {
+    ".git": "Git worktree metadata pointer",
+    "docs/superpowers/evaluations/2026-09-29-engineering-team.md": "mutable evaluation results",
+    "docs/superpowers/evaluations/engineering-team-fixtures/fixtures-r1.tar": "historical fixture snapshot evidence",
+    "docs/superpowers/evaluations/engineering-team-fixtures/preregistration.sha256": "fixture preregistration checksum evidence",
+    "docs/superpowers/implementation/engineering-team/claude-preflight.md": "mutable host preflight evidence",
+    "docs/superpowers/implementation/engineering-team/codex-preflight.md": "mutable host preflight evidence",
+    "docs/superpowers/implementation/engineering-team/pm-record.md": "mutable PM status and decisions",
+    "docs/superpowers/implementation/engineering-team/review-e1.md": "mutable task review evidence",
+    "docs/superpowers/implementation/engineering-team/review-e2.md": "mutable task review evidence",
+    "docs/superpowers/implementation/engineering-team/review-fixtures.md": "mutable fixture review evidence"
+  },
+  "exclusion_generated": [
+    "any __pycache__ path segment",
+    "*.pyc",
+    "*.pyo"
+  ],
+  "exclusion_prefixes": {
+    ".git/": "Git metadata",
+    ".pytest_cache/": "generated test cache",
+    ".superpowers/": "orchestrator runtime scratch and transcripts",
+    ".venv/": "generated virtual environment",
+    "docs/superpowers/evaluations/engineering-team-fixtures/runs/": "evaluation run output; operative files prohibited here",
+    "docs/superpowers/implementation/engineering-team/evidence/": "candidate and later acceptance evidence; operative files prohibited here",
+    "docs/superpowers/reviews/": "historical design/plan review evidence; operative design and plan are elsewhere"
+  },
+  "frozen_at_utc": "2026-09-29T23:55:57.638105+00:00",
+  "full_root_inventory_note": "All regular paths were enumerated, including excluded scratch/evidence paths; every included path/hash matches candidate.manifest. Excluded paths are listed individually with reason.",
+  "full_root_inventory_verified_at_utc": "2026-09-29T23:56:42.849377+00:00",
+  "git_provenance": {
+    "base": "b9f8657",
+    "branch": "feature/engineering-team",
+    "head": "916282b0adadd3b741b71d9825b7a82206bbd1d0",
+    "note": "Git IDs are provenance only; source candidate includes uncommitted operative files."
+  },
+  "manifest_byte_count": 22350,
+  "manifest_entry_format": "UTF-8 project-relative POSIX path + NUL + lowercase 64-byte SHA-256 ASCII hex + LF; no header",
+  "manifest_file": "docs/superpowers/implementation/engineering-team/evidence/candidate.manifest",
+  "manifest_order": "unsigned UTF-8 path byte order",
+  "non_utf8_paths_observed": [],
+  "operative_files_in_evidence_prefix_prohibited": true,
+  "path_count": 221,
+  "path_hashes": [
+    {
+      "path": ".claude-plugin/marketplace.json",
+      "sha256": "2354203ef7cd16b34f0067f2b0820a57e9bf5ef4813d89998ffb719c1dc054cd"
+    },
+    {
+      "path": ".claude-plugin/plugin.json",
+      "sha256": "a6f4c4b6b2d48f19157d7eede52ec9796819d65988c6ea7438ff27931f904c5d"
+    },
+    {
+      "path": ".codex-plugin/plugin.json",
+      "sha256": "8628ca67e6225128c5ce732917f289463c8e24acfb3fbb5adea8c0aa296f5a8d"
+    },
+    {
+      "path": ".gitattributes",
+      "sha256": "ce99694c3ec6176c163eb65e8e4f34dd55caf10c5df4fccdef0bdb0df6ec0511"
+    },
+    {
+      "path": ".github/workflows/release.yml",
+      "sha256": "364ec6da79078bc3c0e348bdbb4f3752ea2a9ed89fe3a7875a5c26ce5f825d5e"
+    },
+    {
+      "path": ".github/workflows/test.yml",
+      "sha256": "22e4093342ac53e516aad6c38dec37120ba7809759d6c0394054d8d4f1d6ebb1"
+    },
+    {
+      "path": ".gitignore",
+      "sha256": "45a6b584b6c865cf6e069e9140b755bdf3f964a60529d4dbedc3d8b6da5ebf86"
+    },
+    {
+      "path": "LICENSE",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "path": "NOTICE",
+      "sha256": "432ae38c6e0652ea726cd4b29b408073ebd2d20669dac45da659edea4cc8ed2a"
+    },
+    {
+      "path": "README.md",
+      "sha256": "2378aba06faa83924ebd960ff2a94b35bfb0b2b2604b9c39ad1557b2853f6444"
+    },
+    {
+      "path": "bin/swarm",
+      "sha256": "125249db9eb442993c6a4bea5d82004cf528ddd094513d39f4e4bce4fceb41c7"
+    },
+    {
+      "path": "bin/swarm-hook",
+      "sha256": "6969d5bc0110d65bcb1a152f412926f906e026fb746aaea5cbab0a37d1229bbd"
+    },
+    {
+      "path": "config.example.toml",
+      "sha256": "5fffb4275c55054f46d1e12075ed1264aec54774c9bca3b4177253380924444c"
+    },
+    {
+      "path": "data/english_names.json",
+      "sha256": "63bbc4aad91e4c634af8a225d9bd156febfe11a52da8cdc269a733e38b88a368"
+    },
+    {
+      "path": "data/simpsons_names.json",
+      "sha256": "03f63914937b14e9c11cf9de1671c35e633e03f27e52055cdb55144e67cdb0b8"
+    },
+    {
+      "path": "docs/REFERENCE.md",
+      "sha256": "dd5368954e12be2e2f50d3a1d5b06188838ca288706757196aa7172748b03731"
+    },
+    {
+      "path": "docs/images/banner.svg",
+      "sha256": "cd17c0158898a28375ffccdad03bb0580d8401b3c920098e946fb01e2a39f538"
+    },
+    {
+      "path": "docs/images/swarm-watch.png",
+      "sha256": "b64de7431650a18ca903030d1f5602e3f32b16eab6efadaa7f67bb5860a4717a"
+    },
+    {
+      "path": "docs/superpowers/evaluations/engineering-team-fixtures/evaluation-baseline.md",
+      "sha256": "d82701364c00f9961479b99f8397efd6c16cc6ae97139e564488baa575a074bc"
+    },
+    {
+      "path": "docs/superpowers/evaluations/engineering-team-fixtures/executor.md",
+      "sha256": "4c217b663f69982adde7a446c1c508583425e8d5efe8a5c14877482927c73222"
+    },
+    {
+      "path": "docs/superpowers/evaluations/engineering-team-fixtures/grading.md",
+      "sha256": "89ba22e513e8d0ec373785ae852bcb5b7abaeba2e8b52a59d04249784f171dc5"
+    },
+    {
+      "path": "docs/superpowers/evaluations/engineering-team-fixtures/operator.md",
+      "sha256": "8bd24bea4ad2e0359fb315effc5e98ebbb80f93361505a719c83fce8038d50d2"
+    },
+    {
+      "path": "docs/superpowers/evaluations/engineering-team-fixtures/project/receipt.py",
+      "sha256": "60842ad5e735f906e176e75c626f5027298902198970631fbc2c9027effc612c"
+    },
+    {
+      "path": "docs/superpowers/evaluations/engineering-team-fixtures/project/test_total.py",
+      "sha256": "2a7524b9ab86528aec2a62a6bc03d8261c81d559921a846e4b05e2993cdfe891"
+    },
+    {
+      "path": "docs/superpowers/evaluations/engineering-team-fixtures/project/total.py",
+      "sha256": "471c66883123e2773c4ba608f760c61cc56b873fb83121b72d3fa1bc6a6fba38"
+    },
+    {
+      "path": "docs/superpowers/implementation/engineering-team/engineering-brief.md",
+      "sha256": "7e23361f14b05b1ca6770a12dcbed7a094f250042948766620131be172ec015c"
+    },
+    {
+      "path": "docs/superpowers/implementation/engineering-team/product-baseline.md",
+      "sha256": "4b6a4fa037338cac63d684f8604e8f3683647f19517241a039ba89e3381da7bc"
+    },
+    {
+      "path": "docs/superpowers/plans/2026-09-29-engineering-team.md",
+      "sha256": "d4c11f659686e0ebe0e12996a6845933d884d07f0a19b815f0f780b88cd59a28"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-09-29-engineering-team-design.md",
+      "sha256": "6254452803f2a05fe2434775625377006304b06aae554933fd1ac3fa0d442d44"
+    },
+    {
+      "path": "e2e/install_test.sh",
+      "sha256": "5bd0520e687ad5f243552fe32229fa8ffce4a7c4f8566dca68386bcd75d1d76c"
+    },
+    {
+      "path": "e2e/update_test.sh",
+      "sha256": "f7c67451628e1a810696c2f86bb5499b159e1e80315816cee89e06b8969aa761"
+    },
+    {
+      "path": "hooks/codex-hooks.json",
+      "sha256": "d972151c0a4bfb5b3bdcfb9cf6458fb3c793c4988f47cbdedd4d055862ca3022"
+    },
+    {
+      "path": "hooks/hooks.json",
+      "sha256": "0225c3d8c1c7a707067e23388806d9ffc7706083eafe50cf51508143d272ca5c"
+    },
+    {
+      "path": "install.sh",
+      "sha256": "73cc29f8402fb4abf541444666948e07281a3bdcfa50d975f75b44a99dd40114"
+    },
+    {
+      "path": "lib/swarm/__init__.py",
+      "sha256": "567a8cdccb481606ab4a50543185387c280ab48ae8fbb85697f44041fa6a7f5d"
+    },
+    {
+      "path": "lib/swarm/board/__init__.py",
+      "sha256": "f29b18ef757b43f9a2f48167ef9c7d5e441a24b580fa71a4e1a51a39f2775acd"
+    },
+    {
+      "path": "lib/swarm/board/autoinit.py",
+      "sha256": "4b5160c2d3a6594512519fa68fe4e233a6ad27cd2c281f5f1a211bb27dfbb756"
+    },
+    {
+      "path": "lib/swarm/board/base.py",
+      "sha256": "538e4baa18bae477f541cf9c6f2dbd4d0de8a26976f4f6d2d54ecf3647c55ac2"
+    },
+    {
+      "path": "lib/swarm/board/file.py",
+      "sha256": "d9cb396b7b3631616ceaef605e5da7db983b3d78262b1203f0d0d1982e15f23c"
+    },
+    {
+      "path": "lib/swarm/board/memory.py",
+      "sha256": "337d8557416c4c9ebc075b354b4c52cc58726d8251c59b1e76dd9bb8352fdfda"
+    },
+    {
+      "path": "lib/swarm/board/postgres.py",
+      "sha256": "1b14932f7ea082989c43859e9dee79e4684003b74b09e8e350ef0a5fe3e0a363"
+    },
+    {
+      "path": "lib/swarm/board/sqlite.py",
+      "sha256": "11f38677376077a6bf9d94b83adf291d0de1d641f69fb715d5091c390f51560d"
+    },
+    {
+      "path": "lib/swarm/bootstrap.py",
+      "sha256": "818722ae157d8b7db4d06619217b401c1dd299e236988a27ccbb0f4d6a93972d"
+    },
+    {
+      "path": "lib/swarm/cli.py",
+      "sha256": "080acd77b6a384a9bc577c22b05891585807942a49842dc402b9ab1cbcb18ba2"
+    },
+    {
+      "path": "lib/swarm/codex_config.py",
+      "sha256": "f92500514703d1d61c7c7c7664e3f32c9493ec6eae446c9c73bc77354d59fdf7"
+    },
+    {
+      "path": "lib/swarm/enrolment.py",
+      "sha256": "1979cf199e879e50f9f1f6429b933526d3f5cd1e1a98684ea2a91c337fca4383"
+    },
+    {
+      "path": "lib/swarm/hindsight.py",
+      "sha256": "6be84641d969c78276fd3c92a7ab8ccb696a57647f2ba5a7d7bf0ee0e2cc978c"
+    },
+    {
+      "path": "lib/swarm/hooks.py",
+      "sha256": "bd86cc267a614d14841a9ff4c158fe7416deadbf8778bd35f8eeb02065b71583"
+    },
+    {
+      "path": "lib/swarm/hosts/__init__.py",
+      "sha256": "5e59a3fb272b8845e284426f4f46f225a29e86ea6b74c1e35b21a14f61a1bc2c"
+    },
+    {
+      "path": "lib/swarm/hosts/base.py",
+      "sha256": "06864f19095c7850dc35994405b10f33b63d3569b75f8d5db97aae8c563277d5"
+    },
+    {
+      "path": "lib/swarm/hosts/claude.py",
+      "sha256": "3753e1667c3ea6bf9b2ff172c0a6371027bc3e5b84a3b3507e3c7783781db0f5"
+    },
+    {
+      "path": "lib/swarm/hosts/codex.py",
+      "sha256": "cd78bfe89d99f158b77285877f989647838e148e0be6249a6475cb177b22bc44"
+    },
+    {
+      "path": "lib/swarm/models.py",
+      "sha256": "7f77d27728d085337bd2c092bc3b21a553325618518a1432e6f14cced75bbd62"
+    },
+    {
+      "path": "lib/swarm/paths.py",
+      "sha256": "c6288d19d136092c9681620d405b4760b5076f68f4a3ad4098aeb5a5378dfe3e"
+    },
+    {
+      "path": "lib/swarm/provenance.py",
+      "sha256": "5d367fec0d35b20ffab483ef85659c32c31d0ea71b3279210270e21d0172ef90"
+    },
+    {
+      "path": "lib/swarm/roles.py",
+      "sha256": "4f580822deddde08b785d3693a56684a7571024c946ac73576b3ab46514ee20b"
+    },
+    {
+      "path": "lib/swarm/safefile.py",
+      "sha256": "4b8aa6b03ed540f5baea9fe2ce28b0a6661be22ba96d445659681648f26407b7"
+    },
+    {
+      "path": "lib/swarm/safefs.py",
+      "sha256": "9a27c6af322dc57ea22c3c0db630b867d261531599e5f8167260d13698d237b7"
+    },
+    {
+      "path": "lib/swarm/shellguard.py",
+      "sha256": "f1e9a0d2af775cace373b6191eeb37d8b0da109b6be17174fd865b3737dbdd38"
+    },
+    {
+      "path": "lib/swarm/spool.py",
+      "sha256": "bf38d29f84d4903af14e0f8f959a8b96d26a5caa7dc0e79e58c0793096fdcabf"
+    },
+    {
+      "path": "lib/swarm/supervisor/__init__.py",
+      "sha256": "4d896a104cdffc3880f07bba5eed42a918b0126fe41eae5d2d3db9a6a99f641f"
+    },
+    {
+      "path": "lib/swarm/supervisor/brief.py",
+      "sha256": "65b2bc2c7de02d9c13409852c7981b324efd645846e7c8fd84e166633b8844b0"
+    },
+    {
+      "path": "lib/swarm/supervisor/budget.py",
+      "sha256": "befaa426e813e2f874b46fe1cc677ecc544bbc42fd3d3d758a872648bb947950"
+    },
+    {
+      "path": "lib/swarm/supervisor/command.py",
+      "sha256": "8dc685f2944f59502874d68574c3f5cfa9866b141d329e7267ecd2252692f124"
+    },
+    {
+      "path": "lib/swarm/supervisor/launch.py",
+      "sha256": "c922b32f3fababbd91f160998de93c070ec6a88124158fa971dc869ca9cd5f6c"
+    },
+    {
+      "path": "lib/swarm/supervisor/lost.py",
+      "sha256": "d586fb2271960d5098746e9317812d32ec1c4df0b57107ee823f11142a09a40f"
+    },
+    {
+      "path": "lib/swarm/supervisor/markers.py",
+      "sha256": "d05e776c7f90d846f690570095c39a91b66d47bdd0d9aff0123ddbda710a4335"
+    },
+    {
+      "path": "lib/swarm/supervisor/outage.py",
+      "sha256": "15ce57469aacbc17dfc57ee69ba33f6ea5a36459fa6e003191cfdde76a9c640b"
+    },
+    {
+      "path": "lib/swarm/supervisor/privfs.py",
+      "sha256": "730b4e6fae4f1b55663fd96c17acda474b699a0dd136e9ab7c1b168798f770a4"
+    },
+    {
+      "path": "lib/swarm/supervisor/runner.py",
+      "sha256": "ad54b649c9663d56faf5eec0b3d575773b558ac77a5d128c5d3409a86d472beb"
+    },
+    {
+      "path": "lib/swarm/supervisor/settings.py",
+      "sha256": "1a7b01c2a1618c42a391f64a8a6a6263f71c9981a3728256edf23f1f86d9d13d"
+    },
+    {
+      "path": "lib/swarm/supervisor/stuck.py",
+      "sha256": "a38b961475888138dee151adab7c8ff2fbf2939f7b52f046a425ace6d156c785"
+    },
+    {
+      "path": "lib/swarm/supervisor/systemd.py",
+      "sha256": "0003ddb412fe08d8aa349225b7081f09b354418a769bfdbb55777ee9dc77da5e"
+    },
+    {
+      "path": "lib/swarm/textsafe.py",
+      "sha256": "28f765ac22853888cfe6fe22b6104e8c1ebc09732461429d2aca4fc59fe058e6"
+    },
+    {
+      "path": "lib/swarm/transcript_view.py",
+      "sha256": "e71efd85bcbd43411118ce393cf09aeeefcbab024ed2da984b15a9bd97c0bb45"
+    },
+    {
+      "path": "lib/swarm/transcripts.py",
+      "sha256": "b1de33e8935c2ad2a94663b0a5af2d6256a5ea93b78f7e7b825ba85ae9ac95ae"
+    },
+    {
+      "path": "lib/swarm/update.py",
+      "sha256": "44f26186e9746cdd8a25d624562a49a337d1768715f7f3813281dbe01505ab02"
+    },
+    {
+      "path": "requirements.txt",
+      "sha256": "de72c0e03eb5c399657133e2a1e920b4503463ae00be8304220c3f663ac3c10c"
+    },
+    {
+      "path": "scripts/release-notes.sh",
+      "sha256": "288a92ff4ea5f1960a25e43611e05b54e816a708add506c6433b0eb11ad14d19"
+    },
+    {
+      "path": "skills/engineering-team/SKILL.md",
+      "sha256": "0af2f0a38a6565fdcbf4d7d7bdefba461321a186743eef4b9fb2ec35177f8448"
+    },
+    {
+      "path": "skills/engineering-team/references/artifacts.md",
+      "sha256": "a85160970fea23f2542a90341f34af604ad79a43f1b166c0cd3995f213a4e076"
+    },
+    {
+      "path": "skills/engineering-team/references/hosts.md",
+      "sha256": "97e99b962851462ec11361b6dc04a5bae61362e942a51e1f1cdf25e7a0cb79f7"
+    },
+    {
+      "path": "skills/engineering-team/references/team-roles.md",
+      "sha256": "c972b5894c60f4002bd60f777487985a1c26ee885a30ad8405c78911fff6c9de"
+    },
+    {
+      "path": "skills/swarm/SKILL.md",
+      "sha256": "828306910ddac4488c005ed51fe3f2d3612fc7b1fda6ea32c7c2132a76bf5402"
+    },
+    {
+      "path": "tests/codex_fixtures.py",
+      "sha256": "7b88ff95f5ff289d083715e8d881713e93a89ca76baf7d62a9242edc3002c4d1"
+    },
+    {
+      "path": "tests/fake_hindsight.py",
+      "sha256": "8fad749ade6c6c1ae81f94805e1109e6fcaf9487c301e6343618d4fd525b2101"
+    },
+    {
+      "path": "tests/fixtures/claude/2.1.284/hooks/PostToolUse-Bash-subagent.json",
+      "sha256": "0a106479bd3e2cf7ed3f168871eeeaab43f00a0d77bbc03b80d1081dc9f1c67e"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/ANSWERS.md",
+      "sha256": "7a125c554942ea62560ed3bdcc099f5a8f44e373d35847225d6e7278adf548c2"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PostToolUse-01.json",
+      "sha256": "a892cad9bdacf378e26b97eaa0407363c3150c03d81b1f54901088d2504a0a74"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PostToolUse-02.json",
+      "sha256": "fe76833966b6bf8669fdcd722d9b2190514a8a5a6d2a1fdab66e1502ed6362c7"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PostToolUse-03.json",
+      "sha256": "cf00f9c732ba69310e4a6b65aaba98774e038070e02fe9da890593f56289b8f6"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PostToolUse-04.json",
+      "sha256": "02eae55e1b0bb7b3896335b4cdfd74adb26b4b4e75ba34c162d9e22ef232a98c"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PostToolUse-05.json",
+      "sha256": "679973aa4c46a2936ede10b6ce518e05b163f2b1d5ce4df607a707e6961c7aaf"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PostToolUse-06.json",
+      "sha256": "1d3609fc60a8faabb52ffe2647024a5d98bbff5c5a07d70f37d6835759e45bb3"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PostToolUse-07.json",
+      "sha256": "5d702f61581f1448caabde50223715f273f857802a6d23498c2153d03a759754"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PostToolUse-08.json",
+      "sha256": "1ab8dee3a8951e2fd7aa898b80a40751ce59b64fcdae98d6c70091d82fe675eb"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PostToolUse-09.json",
+      "sha256": "baf9847a36aedacc2c29b5e53c13aabc361cf26da3e1e7a4134f78b86f647bf2"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PostToolUse-10.json",
+      "sha256": "09e46688b6a1bb3ea114b3b3ba7d9cb0c819078ad348e0ca92e20e505d911c9f"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PostToolUse-11.json",
+      "sha256": "2e3479c4a4ca107ece71fa84b6f894c0085be71d3e1e28a4ba4bbe727df91f79"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PostToolUse-12.json",
+      "sha256": "22584d8edc33605f2431cdbd00773d8069104c0b3af91b8dac47544c11d8aa7b"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PostToolUse-13.json",
+      "sha256": "7c4888ce5039252006cbd9736f0c34b7eca7571e1f48ca63368047078a343d1d"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PreToolUse-01.json",
+      "sha256": "9e64fe904f14c7fc840975828b86ea9a5b9aa1622c14fae5e0e24d98a7e35cb1"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PreToolUse-01.transcript.jsonl",
+      "sha256": "3267dbb8abd2d07ce722dc94e682a440c6f9f3b9957f7a2d01f407dfc61b3a59"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PreToolUse-02.json",
+      "sha256": "7822336e38d5c88aa3f646beeb36563236deb49ff8c700bfed81902d8f5a769f"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PreToolUse-02.transcript.jsonl",
+      "sha256": "efc16b28a97a62e67a9283adc4067462d3789481f58747474b2114d74127301b"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PreToolUse-03.json",
+      "sha256": "f4817885ffa23122f9faa31bfd0ef46864f95ca03af0938eff90cbeb83fb63bf"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PreToolUse-03.transcript.jsonl",
+      "sha256": "28e85e3703c352debbde695283c02a1b01e149eb864bc6942d3eaa29c5307f72"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PreToolUse-04.json",
+      "sha256": "b3cd9bbca406b2abd108f8068ef28f01a887ab9c75b8a021e1ce1166d6be5d40"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PreToolUse-04.transcript.jsonl",
+      "sha256": "e28775aaecd480e2c89d97bb45df26a13f54ad2860b26ffd0e277d131234dcaf"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PreToolUse-05.json",
+      "sha256": "50dad7cd0d4f68be7d580ad50b31dd983180e0e82615c0a27b53b957bde00da3"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PreToolUse-05.transcript.jsonl",
+      "sha256": "3d617c66f1646f78d1179edbcf8c0572ea7b6801d71e022e02946279417f7529"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PreToolUse-06.json",
+      "sha256": "f25f3e70546b1c638104ea3048a54d57183876be04b43efb2a5bac569c4d5194"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PreToolUse-06.transcript.jsonl",
+      "sha256": "4c7e771c371fcc3c6ed44b8c936b966b88358af3a2113319d09c132afa5581fe"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PreToolUse-07.json",
+      "sha256": "b33431b17a4274c0d2e60ecb7529a3a31725ee45ae262b0ddd072ca3376c49d4"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PreToolUse-07.transcript.jsonl",
+      "sha256": "7164ab0d43a1bd7bfa5fefee956026f502e953269cb0c61b8bfebb53bc5853ea"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PreToolUse-08.json",
+      "sha256": "9ae3d04b3a65ae6b21850121926ea4b2a9cbc0921da27ce3cd8ab6be09138ffb"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PreToolUse-08.transcript.jsonl",
+      "sha256": "e65bcd3adfa1ad286d08ddece15b178e5ca4e35ae4ad369f8e7f56ac89ea4249"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PreToolUse-09.json",
+      "sha256": "1482c23248c8e54a4ae405a409016ae8d02b73ab11e30bef14b47b34b88aa8f8"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PreToolUse-09.transcript.jsonl",
+      "sha256": "cfaf662f5b2e2da873ecba5e1cb96940f44e234f5ae2ede8fd5770259865873f"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PreToolUse-10.json",
+      "sha256": "8ff400a7aef787fb9180ce96b8bcdd9fd631ec4863f75aa122d8a281772a1248"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PreToolUse-10.transcript.jsonl",
+      "sha256": "41a76c01a1444afe02bf5213ddead2081b6e529483b6f4dff690fe45d6f3476e"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PreToolUse-11.json",
+      "sha256": "38edf0af711b56a65bc55c4eb355264544b4fd9d787ab85e83a0c5d3b21ef5bf"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PreToolUse-11.transcript.jsonl",
+      "sha256": "289a21f678525581c1561cfd0e365c53fb9a3e432f4434af25b563504ff98ffb"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PreToolUse-12.json",
+      "sha256": "c148549e7e4c1b414f22315600575fda6b44b57550ba4d2f81aaa9ae3dd8cc4b"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PreToolUse-12.transcript.jsonl",
+      "sha256": "b16f0ac08197807ee24fd9be00597a189d95f2b6aa7da486400b9a2d3463228b"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PreToolUse-13.json",
+      "sha256": "2aac467511470fcfecad62b210596f6ac32ed8637eee245bfb6333b22c7d75eb"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/PreToolUse-13.transcript.jsonl",
+      "sha256": "c119b695b8358219fe0a264d9ac0cf6ef53b5bfcd131ec1e94b0d29dc8944eb5"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/SessionStart-01.json",
+      "sha256": "de50b8ded2ff82c42913fcef947d27ac714d23cf375d49f469d9f96ec6cb9c34"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/Stop-01.json",
+      "sha256": "2602a2bc8522e4ad86e4abde3fe871d6866426c6f24d59e8c4349f5bc8fbb37b"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/SubagentStart-01.json",
+      "sha256": "6b1a9a32c9672acb289711ffb3d3ce5f3046bd84b2d1b76896d1818844ed46b8"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/SubagentStart-01.transcript.jsonl",
+      "sha256": "dbfc523c3480f008fffed4dd054dc27f7dfae64eb86661b571a08932cb296bf7"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/SubagentStart-02.json",
+      "sha256": "b1969d03e07c68a06675eab4b6c2bf885829f79daa37328099a91880e002a9b2"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/SubagentStart-02.transcript.jsonl",
+      "sha256": "0e76fa08667fb42214e03d11d517e1f5dacd2e80b9c3257bfb6d2aab94b51ea2"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/SubagentStop-01.json",
+      "sha256": "b77467e7b31b8e40840019d78c4ec6a2f79617d8a1af3afeaf72f8634754af0d"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/SubagentStop-02.json",
+      "sha256": "584e3c1a59538e8ce50e5ec29d301ddd5a02c38d1598b723e8d3009a6058a9d5"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/hooks/SubagentStop-03.json",
+      "sha256": "746cfec2541dfe83eaf665750cf6b5c61c0a00b081b867a5c9d47badad66285e"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/ids.json",
+      "sha256": "ef8c5011476d2b17e2321f85034caca85c4520dbc0f4712674e9745710824cd3"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/plugin-list.json",
+      "sha256": "b3f98bf8522109b13117c646d8d749020c2c046a115e2d98b9db717e9154c47b"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/rollouts/child.jsonl",
+      "sha256": "33a2b110a2e9efac2c8189469b5843e65da0e8d4fa5963ed798cec1141e02c79"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/rollouts/grandchild.jsonl",
+      "sha256": "be2c0078eb17ac954475743f095aafa063381cf6f9deea6f86cdac62826e71a7"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/rollouts/names.json",
+      "sha256": "753d331a16dbd69b6b8d6ebeb230dabfbb00f48a7626a1e08ee5c3a939ad344f"
+    },
+    {
+      "path": "tests/fixtures/codex/0.157.1/rollouts/root.jsonl",
+      "sha256": "d3c0f26a08ebd16fa32919696e5653de7edbd788a08e1f91f540ea48eefdb47a"
+    },
+    {
+      "path": "tests/fixtures/codex/make_fixtures.py",
+      "sha256": "ff5af07e5f6ee9b9e997c3a42e4f10613f8a157f179db9987fe1a03b2bc788a1"
+    },
+    {
+      "path": "tests/fixtures/hindsight/0.8.6/openapi-UpdateDocumentRequest.json",
+      "sha256": "17545f0751e5ffd66c0a4cda08b4913934a639f9fe0fdff9a631b57dc1785f09"
+    },
+    {
+      "path": "tests/provenance_fixtures.py",
+      "sha256": "4959138d662a47c28e10e780e10009d2cdf059a538ec31eb66e47f9bfb8fb016"
+    },
+    {
+      "path": "tests/support.py",
+      "sha256": "9f1014d875d5f627267f64bf0fe5bc79baee90239debd3f4b4b015bc648eed56"
+    },
+    {
+      "path": "tests/test_auto_close.py",
+      "sha256": "f0bd1f1f6ccfe83050fc811cc5b8bdc04c4e4019b33366fdf93f0e73e7bd8bb5"
+    },
+    {
+      "path": "tests/test_autoinit.py",
+      "sha256": "d5cfc0dc798730271436226d8c5fd3e6f894a5f258348237eaa3011d5e990f9e"
+    },
+    {
+      "path": "tests/test_board_contract.py",
+      "sha256": "764cfb58e72454475b7ec2cdeb368507a00eb4cb0ab0b73ebaced5d0ef8ce135"
+    },
+    {
+      "path": "tests/test_board_read_only.py",
+      "sha256": "4c0c242edd823fb1e1a54ad675b7b1a58ff5b948490b2a314bcd8eb5d4fb24d6"
+    },
+    {
+      "path": "tests/test_bootstrap.py",
+      "sha256": "9dd412d4c4e97519962fdf06e6cfde7ee0ec488317e275fe85dc4854e473c73f"
+    },
+    {
+      "path": "tests/test_codex_config.py",
+      "sha256": "be12c06fad5e338fe158b069a6707afcec2bd4f55d798ed91326895cce06f1a4"
+    },
+    {
+      "path": "tests/test_codex_hooks.py",
+      "sha256": "3f79fa7e8265093ed22a81d4529cbfc36e0117ca02c5dde0785144eccc97524e"
+    },
+    {
+      "path": "tests/test_codex_host.py",
+      "sha256": "cb4bc8597d08c24010d48139ff70a73fd39d119017b73353eef5af276dad5b45"
+    },
+    {
+      "path": "tests/test_db_default.py",
+      "sha256": "b02422c4df462b3f876e571cd278d6d8d8ae0653066b6510070da684c5ba2857"
+    },
+    {
+      "path": "tests/test_doctor.py",
+      "sha256": "8af80d2c668708ea500f427c4519540afd6b1c7713f8e7393c53b09b422dbcc9"
+    },
+    {
+      "path": "tests/test_enrolment.py",
+      "sha256": "6711377c05558366b56eecfeee87bda3f5cee5d8724837becb122c37ef046455"
+    },
+    {
+      "path": "tests/test_file_board.py",
+      "sha256": "7c0079390ce51a86f68d89eac6dba9342ed3fbb5d26123166292c347ebd0b226"
+    },
+    {
+      "path": "tests/test_final_retry.py",
+      "sha256": "a33f6233339d59528fcaa94a71ae10df6ff615cddc0079da2f53831842c69ac6"
+    },
+    {
+      "path": "tests/test_goals.py",
+      "sha256": "6ff3afa7f9365d7dee652a3281d73514ba5fc82ecf5d989daeccde539d9507a3"
+    },
+    {
+      "path": "tests/test_hardening.py",
+      "sha256": "56277a6c58a8bb5a687c29ef5f93fdbbfc3b504ac8fcfe6dbbac3c4858329ff1"
+    },
+    {
+      "path": "tests/test_hindsight.py",
+      "sha256": "2cc671afea15a66cfd9e07b3b0e7f77194052e0a77fe10bcdb506e70e694e5e6"
+    },
+    {
+      "path": "tests/test_hindsight_documents.py",
+      "sha256": "9192feb8b57535ec434283e842ee125fbb6b0d145bea7707eefe9687d60478b5"
+    },
+    {
+      "path": "tests/test_hooks_cli.py",
+      "sha256": "df18c98dbf41a97c1b28491ed4217ee8dac2c9dac643d71e5689798bae4a3681"
+    },
+    {
+      "path": "tests/test_hosts.py",
+      "sha256": "c6e3fcf6182660d6ea82bdba0493ca83b131d5b08f5a261091ec6ea3f27d2a4f"
+    },
+    {
+      "path": "tests/test_install_sh.py",
+      "sha256": "2b92b5303e0df34af8850849d27a554d161a69930d1055ec97d1388cd728c87d"
+    },
+    {
+      "path": "tests/test_launchers.py",
+      "sha256": "3bab076edacfa72165d56432e80d89ff7b493de734f0a14bd1a256c25a861fa1"
+    },
+    {
+      "path": "tests/test_layout.py",
+      "sha256": "8c03849eba9be879dc531b3d682130f78505629bed3a0dcec73ee3e60b3a5cba"
+    },
+    {
+      "path": "tests/test_memory_refs_race.py",
+      "sha256": "f8e7373cbaba1659e966661483dc3ec962eeab2d1f988d1ee16dec8a17523f17"
+    },
+    {
+      "path": "tests/test_migrate.py",
+      "sha256": "b649f100532669fef59f9e66cdff2efc933a264b03f68dd2f52847207d67b2b5"
+    },
+    {
+      "path": "tests/test_models.py",
+      "sha256": "7cf3bca6255d8c267cd7a73b026379e9ecb340a8f6c9fb084f43f77bda16a133"
+    },
+    {
+      "path": "tests/test_plugin_manifest.py",
+      "sha256": "bef92de67f0ec8ec8291dca81d44daa40ab26833f0a2ce143e685fb108d587e2"
+    },
+    {
+      "path": "tests/test_provenance_cli.py",
+      "sha256": "414d36cbb22fcbf667d126338606d1129107729a002b0deabde3a86c098a95bd"
+    },
+    {
+      "path": "tests/test_provenance_detect.py",
+      "sha256": "23f1ff71b799dc05e59e30561213409679c5de165bdfdf6baded371be089caec"
+    },
+    {
+      "path": "tests/test_provenance_excerpt.py",
+      "sha256": "d2cadd6da3e46a785b4649c5c489b9a7bae091f5d6ab595cff73d25fff85554f"
+    },
+    {
+      "path": "tests/test_provenance_fixtures.py",
+      "sha256": "864ba07fc9fe0d79e2418ac77cd1f9f2709ff5b43798900de6404ef9c7b42ebc"
+    },
+    {
+      "path": "tests/test_provenance_hooks.py",
+      "sha256": "253f9070b34c2c54b7d5fa80078f917bc0feadf6015412fbb810ba399b4c0734"
+    },
+    {
+      "path": "tests/test_provenance_purge.py",
+      "sha256": "0c399ef69d4b151bc4096bb0e7fdacc11e915aab99fce6440ccd4d4216d4071b"
+    },
+    {
+      "path": "tests/test_provenance_remember.py",
+      "sha256": "87f2ec8c2fbfc0b04701a61f26910a83765f91278556460eb4b6d92d3afdece7"
+    },
+    {
+      "path": "tests/test_redact_budget.py",
+      "sha256": "f5a194a8f2d8ff82405c350ba9f27b1a73aed7ad0d5ac00067779febb51cbb2f"
+    },
+    {
+      "path": "tests/test_roles.py",
+      "sha256": "48544d00b50df284b279895465f34482c240846d761a8da26c0ba705ea5573ea"
+    },
+    {
+      "path": "tests/test_roster_reads.py",
+      "sha256": "2a7bc30b1d41311dc0816ca0774a229a330c50c6272944c9131e556187900c22"
+    },
+    {
+      "path": "tests/test_routing.py",
+      "sha256": "5c0d1b6f6d34eb5d945848c7fe05c898002a3d67568d9b4fcdcd342f20373c88"
+    },
+    {
+      "path": "tests/test_safefile.py",
+      "sha256": "4e5a26011d9cead2ae6422a8bbbdcf03735fd56425be81143afe5872fb3d227c"
+    },
+    {
+      "path": "tests/test_safefs.py",
+      "sha256": "1b44a4b8b0c5eca875d1ed12d256d46881250a8d0c635e033621c16ce4fcf616"
+    },
+    {
+      "path": "tests/test_shellguard.py",
+      "sha256": "75176575eb7ed3639928c76308d9b28d94a8f16268f6cd6e24ac8c4d2d05d1d4"
+    },
+    {
+      "path": "tests/test_spawn.py",
+      "sha256": "26be23f1d7dd7994308b85d64f5bea74b932ebace973806b462cc126efd06d91"
+    },
+    {
+      "path": "tests/test_spool.py",
+      "sha256": "f3acd4413673115c7745637e8657d59c8cf54044dcf8784af4c8d931a596d822"
+    },
+    {
+      "path": "tests/test_sqlite.py",
+      "sha256": "6c0dbbe2d31baf9b89f37dc3835caf19772dcb957811d8e2d352f0868ddf130b"
+    },
+    {
+      "path": "tests/test_stall.py",
+      "sha256": "86bff430da0b76c7c39828af76c59685cb9905843befa91e97aa35c19ef475b0"
+    },
+    {
+      "path": "tests/test_supervise_approve.py",
+      "sha256": "b6f9f9b0ad214254f7a1c64e44638a544c202b11a413147308dbef1933729563"
+    },
+    {
+      "path": "tests/test_supervise_brief.py",
+      "sha256": "644973c7e48e62e0c7914d68ea51dd7a0644b62fd08b0e13058f69a5f72e4a58"
+    },
+    {
+      "path": "tests/test_supervise_budget.py",
+      "sha256": "6f4abf10b49a8eb42d063f548cab12ef6822dc5fb529cee23cbf1ce413963958"
+    },
+    {
+      "path": "tests/test_supervise_close.py",
+      "sha256": "b1fd11c660fa4d53b2435351af7cc9fbc8bc243e964aaf05a710fcb7ecacce7b"
+    },
+    {
+      "path": "tests/test_supervise_command.py",
+      "sha256": "73dddee19839a2632e955bb30399f453755f208474500edf89ae83b60f1816e4"
+    },
+    {
+      "path": "tests/test_supervise_hooks.py",
+      "sha256": "b773fd4cf63b4510d74f8a88af161aba15f3a29dd2134f522c6372c97cffc001"
+    },
+    {
+      "path": "tests/test_supervise_launch.py",
+      "sha256": "1ed56a63d46cb479005380fa177cd2a1f277e6a8c3e970309b652818133a441f"
+    },
+    {
+      "path": "tests/test_supervise_markers.py",
+      "sha256": "6d7a36a732c09ec7624b2efca08844b485539e17d98308bb77f6ec7841fef21c"
+    },
+    {
+      "path": "tests/test_supervise_runner.py",
+      "sha256": "2371ef5caafd40a06a0b7df4f4c4b5075f2e186fac82651b01c3423e23f0b09e"
+    },
+    {
+      "path": "tests/test_supervise_settings.py",
+      "sha256": "7ea763a61301ddec23b3d6ed7fc414ca35a4d2e3b00e4388e6d7f7a319b1686e"
+    },
+    {
+      "path": "tests/test_supervise_setup.py",
+      "sha256": "b4ed2cedbefbd3fefcc017033c6207f9e6283ac88f20329e3c32187b351fd66e"
+    },
+    {
+      "path": "tests/test_supervise_status.py",
+      "sha256": "735a586958b72de9dc56afb3954d7c428d23bb5f5a2b5b35f14b347afaef36bf"
+    },
+    {
+      "path": "tests/test_supervise_stuck.py",
+      "sha256": "69335cad5854b80cb32e89348e97b08f96a413c88cc26362d9cb54235dae2f7a"
+    },
+    {
+      "path": "tests/test_supervise_transcript_cli.py",
+      "sha256": "1a8dcb588250bb39cf8a611f5f2b68c9130ec1269306971e49138cddf7d49aa9"
+    },
+    {
+      "path": "tests/test_supervise_trust.py",
+      "sha256": "00345575425d4fb63ea1d839460f01839632172546498daabea9c4585fe40bc8"
+    },
+    {
+      "path": "tests/test_textsafe.py",
+      "sha256": "341944b05c9ce364be7d886c6a2148f09b55507afabad242ff68c2d277dc2740"
+    },
+    {
+      "path": "tests/test_transcript_cli.py",
+      "sha256": "f936d23765723a2f827eac95587a3c0ccf1856726a38ed632ffaabc17727373c"
+    },
+    {
+      "path": "tests/test_transcript_fixes.py",
+      "sha256": "b410afd27989b479932fd3de2708cfae74ec826d44d2be3b1c335bafd6481f30"
+    },
+    {
+      "path": "tests/test_transcript_images.py",
+      "sha256": "a706827577417f25fc0e49168d18467272171f52f9c414ba102bceae2a2fb34c"
+    },
+    {
+      "path": "tests/test_transcript_view.py",
+      "sha256": "1b1e9b82435870b7c3200a07b1edabf0b5904779b6028a1efabcfb45607076f2"
+    },
+    {
+      "path": "tests/test_transcripts_capture.py",
+      "sha256": "401cca21b48a6120285460b6c75966f10eb54321a0836d21e32e01c655f73c50"
+    },
+    {
+      "path": "tests/test_transcripts_codex.py",
+      "sha256": "332c93eb1e5846182482099b624589e1b4cd1db5ecf8e08227d26879d2be88da"
+    },
+    {
+      "path": "tests/test_transcripts_store.py",
+      "sha256": "967f3e44d435b3dec06703fe7f100ac79963c34805dcbac4abb80c6d071f3161"
+    },
+    {
+      "path": "tests/test_update.py",
+      "sha256": "74750e94d84f3a0c806d432be665d9b6b44493d065ceb22d954da2c776dbf9d1"
+    },
+    {
+      "path": "tests/test_update_sh.py",
+      "sha256": "fb28eecb6ac23c9bdf459facafb3bdce6857ffc9f2d161ea8add9c94b3f1b8f8"
+    },
+    {
+      "path": "tests/test_verifier.py",
+      "sha256": "1a85df60246ef1d2b2e2e45d27fbc0363bac332af1cab475aecf2b760a27d964"
+    },
+    {
+      "path": "tests/test_waiting.py",
+      "sha256": "bc88cfc29d54c8ca15e6ca5521869c56bb238b3a93717627d1078f2f95bdbfad"
+    },
+    {
+      "path": "tests/test_watch_agents.py",
+      "sha256": "ec501d5ef524d95876c398c0d99fc09e185bae196193bdfb025ae0be7c7c88d9"
+    },
+    {
+      "path": "tests/test_watch_database.py",
+      "sha256": "60512a58783cce0aa2f3865c27c47df4d62b3cdf5bb40014ff8c82176c28c92f"
+    },
+    {
+      "path": "tests/test_watch_scroll.py",
+      "sha256": "3bb71f01d74b30dd3fc7d2d3593a815454ec292e78b6b76b2f640db32016c7c6"
+    },
+    {
+      "path": "tests/test_writer_check_migration.py",
+      "sha256": "da04792477872238d416a1606da32d8ad5ef46421d40489a8fae2835a25dac5c"
+    }
+  ],
+  "project_root": "/home/codex/sessions/homelab/swarm-engineering-team",
+  "recheck_rule": "Re-enumerate all regular files under project_root, including Git-untracked files, apply exactly these exclusions, compare full path set, hashes and candidate_id.",
+  "regular_file_count_at_inventory": 293,
+  "requirement_revision": "product-r1",
+  "review_status_at_freeze": {
+    "E1": "independent static review READY; E1-R1 through E1-R9 resolved",
+    "E2": "independent static review READY; E2-R1 resolved",
+    "QA_fixtures": "independent apparatus review READY for fixtures-r2 preregistration",
+    "host_behavior": "Claude/Codex fixture behavior pending; source candidate freeze is not final technical acceptance",
+    "product_baseline": "product-r1 compared with original U1-U7 and accepted by PM"
+  },
+  "schema": "engineering-team-candidate-v1",
+  "symlink_paths_observed": []
+}

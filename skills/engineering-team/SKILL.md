@@ -1,0 +1,21 @@
+---
+name: engineering-team
+description: Use when a software project needs a coordinated product manager, engineering lead, engineers, peer review, QA, and acceptance through a Swarm job in Claude Code or Codex.
+---
+
+# Engineering team
+
+Use `swarm:swarm` for the job and board. You, the invoking agent, are the project manager (PM): keep the original request and authorization visible, own scheduling and reports, and make host-level spawns. Custom Swarm roles identify responsibilities; they do not grant product, technical, review, or QA authority in code. The built-in `judge` and `verifier` have separate Swarm controls.
+
+Read [host procedures](references/hosts.md) before activating a job or spawning a role. They cover Claude and Codex syntax, the installed custom-role preflight, board reads, slot budgeting, and recovery. Read [role authority](references/team-roles.md) before assigning work, and [artifact contracts](references/artifacts.md) before creating baselines or freezing a candidate. Use the project's existing document layout; a small change can use compact records that preserve the same decisions.
+
+## Run the team
+
+1. Capture the user's request verbatim or by stable link, constraints, approvals already given, and a provisional size. For moderate and complex jobs, activate with a goal and schedule one root judge as recommended; record the reason if omitted. Join the board as PM and read it at each turn start and before each staffing wave. Do not wait for a subagent's board post alone: a role needing PM action must also return a structured request.
+2. Ask the product manager for a revisioned product brief: problem, applicable competitor research, prioritized `PR` requirements, observable criteria, marked inferences, and exclusions. Compare its first baseline to the original request yourself. Return unsupported inferences for correction or route a consequential ambiguity to the user before dependent work; continue unaffected work. A product manager can require escalation of a blocking ambiguity.
+3. Ask the engineering lead (EL) for architecture, `ER` requirements mapped to `PR`, implementation tasks, dependency order, final complexity tier, engineer count, and review/test plan. EL owns staffing and assignments. Schedule its requested roles through root spawns in bounded waves, within observed host capacity. Send infeasible capacity back to EL for repartitioning. Never treat Swarm's child-spawn cap as the whole team limit.
+4. Give engineers distinct owned tasks and immutable diffs or commits against named bases. PM assigns a fresh independent reviewer for every delivered change, including QA test code. Authors acknowledge findings, fix them, and return them to the reviewer for recheck. Follow the finding authority in [role authority](references/team-roles.md); no author accepts its own risk.
+5. QA may write tests before integration; another engineer reviews any test code. EL integrates reviewed tasks and freezes the candidate using the [source manifest](references/artifacts.md) **before final checks**. QA then runs applicable acceptance, integration, end-to-end, and performance checks on that candidate. Product manager directly checks its delivered behavior against each criterion; EL checks architecture and ERs; QA records test evidence and omissions with EL concurrence. Each final result names the candidate ID and requirement revision. A rejection returns to the owner for repair, independent review, a new freeze, affected retest, and refreshed acceptance.
+6. Recompute the current candidate and compare its ID and requirement revision with each final product, EL, and QA result. If the goal job has a judge, require `candidate=<id> req=<revision>` in its `met` verdict reason and compare those values before closing the job: Swarm's gate checks the latest verdict, not its freshness. Report delivered scope, checks, limits, accepted risks, and any separate authorization needed for deployment or publication.
+
+Do not call a host validated because these instructions exist or checkout unit tests pass. A host needs the installed custom-role capability and an independent behavioral run. If research tools, an independent reviewer, a safe writer handoff, or a required host capability are unavailable, record the specific blocker and continue independent work that remains possible.

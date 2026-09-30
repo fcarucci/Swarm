@@ -71,8 +71,9 @@ def brief(js, job: str, spawn_tags: bool = True) -> str:
                  f"the new judge's. Repeat until the judge rules met; tell the user only if a round "
                  f"makes no progress.")
     else:
-        text += (" Give the new judge a task name starting with `judge`. Repeat until the judge "
-                 "rules met; tell the user only if a round makes no progress.")
+        text += (" Give the new judge a task name `judge__<task>` (for example, "
+                 "`judge__round2`; the task suffix must be nonempty). Repeat until the judge rules "
+                 "met; tell the user only if a round makes no progress.")
     return text
 
 

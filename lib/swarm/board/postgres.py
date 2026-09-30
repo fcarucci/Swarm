@@ -992,6 +992,13 @@ class PostgresBoard(Board):
         self._conn.execute("UPDATE agents SET left_at = now(), state = 'completed', current_tool = NULL, "
                            "tool_started_at = NULL WHERE agent_key = %s AND left_at IS NULL", (agent_key,))
 
+    def set_agent_role(self, agent_key: str, role: str) -> None:
+        from swarm.roles import custom_role
+        if custom_role(role) is None:
+            raise ValueError("role must be a custom role identifier, not judge/verifier")
+        self._conn.execute("UPDATE agents SET role = %s WHERE agent_key = %s AND left_at IS NULL",
+                           (role, agent_key))
+
     def set_agent_runtime(self, agent_key: str, harness: str | None, model: str | None) -> None:
         self._conn.execute("UPDATE agents SET harness = COALESCE(%s, harness), model = COALESCE(%s, model) "
                            "WHERE agent_key = %s AND left_at IS NULL", (harness, model, agent_key))

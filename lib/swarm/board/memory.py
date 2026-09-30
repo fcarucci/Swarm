@@ -582,6 +582,17 @@ class MemoryBoard(Board):
                 a.update(left_at=self.now(), state="completed", current_tool=None, tool_started_at=None)
                 s.touch()
 
+    def set_agent_role(self, agent_key: str, role: str) -> None:
+        from swarm.roles import custom_role
+        if custom_role(role) is None:
+            raise ValueError("role must be a custom role identifier, not judge/verifier")
+        s = self._s()
+        with s.lock:
+            a = self._active(agent_key)
+            if a:
+                a["role"] = role
+                s.touch()
+
     def set_agent_runtime(self, agent_key: str, harness: str | None, model: str | None) -> None:
         s = self._s()
         with s.lock:

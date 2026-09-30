@@ -151,3 +151,10 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(launch.replacement_model(c, "claude", None, "opus"), "sonnet")
         self.assertEqual(launch.replacement_model(cfg(), "claude", "worker", "opus"), "opus")
         self.assertIsNone(launch.replacement_model(cfg(), "codex", "worker", None))
+
+    def test_replacement_preserves_custom_role_model_on_each_host(self):
+        c = cfg()
+        c["models"] = {"claude": {"worker": "haiku", "product_manager": "opus"},
+                       "codex": {"worker": "worker-model", "product_manager": "product-model"}}
+        self.assertEqual(launch.replacement_model(c, "claude", "product_manager", "opus"), "opus")
+        self.assertEqual(launch.replacement_model(c, "codex", "product_manager", "product-model"), "product-model")

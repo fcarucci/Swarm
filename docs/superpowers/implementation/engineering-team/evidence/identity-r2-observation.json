@@ -1,0 +1,81 @@
+{
+  "kind": "operator-observation-not-grade",
+  "candidate_id": "85cd76518f3b448f67a36c061d92cadd8a18c4b5f0c8ce62d1549a9a1139087d",
+  "skill_package_sha256": "341592f67b533be925e844178777ff9a6a9b640021e893cdc298721903541ad8",
+  "integration_commit": "53a4583e4ca829c8d908d860a54243129c1063d2",
+  "source_runs_dir": "/home/codex/sessions/homelab/swarm-engineering-team/.superpowers/sdd/2026-09-29-engineering-team/runs/identity-r2",
+  "remote_root": "/home/claude/sessions/engineering-team-eval-20260929-r2",
+  "resume_template_sha256": "ad40af69267763fca843b71395f2bc61269634ef705ea09b237c73d162567540",
+  "cases": [
+    {
+      "case": "identity-a",
+      "job": "engineering-eval-claude-identity-a-20260929-r2",
+      "session_id": "23ae98a2-fab6-44c1-bd9b-30b0ae252bc3",
+      "pm_key": "pm:engineering-eval-claude-identity-a-20260929-r2:claude:23ae98a2-fab6-44c1-bd9b-30b0ae252bc3",
+      "pm_board_name": "Mayor Quimby's bodyguards",
+      "initial_result_sha256": "69ff8a6cf5d8832c0ea4a8b0b9ddae98aae2146af12a3c4468ef2a0c161c1fab",
+      "resume_result_remote_sha256": "da4dfbc4c136ab9fc7f3528e2254ccda9598a45ce28a86c0e5de6ad48900fdc6",
+      "resume_result_remote_bytes": 4564,
+      "resume_stderr_bytes": 0,
+      "resume_terminal_reason": "completed",
+      "resume_is_error": false,
+      "checkpoint": "first E1 implementation draft ready; review not started; job waiting",
+      "own_job_join_and_read_event": "9661462b-31b2-4db8-972f-73dd5e629240",
+      "join_exit": 0,
+      "read_exit": 0,
+      "resume_own_job_read_events": ["64905f3a-1182-4f56-bfcb-3a6c68ae2ddb", "aef45c21-f0fd-47d0-9b2b-804e0c925b17", "f5be69e5-eb12-401d-aaa6-247adf165666"],
+      "continuation": "held at draft checkpoint"
+    },
+    {
+      "case": "identity-b",
+      "job": "engineering-eval-claude-identity-b-20260929-r2",
+      "session_id": "b8c9d75a-6b5e-4b58-98fd-b4fb651c529b",
+      "pm_key": "pm:engineering-eval-claude-identity-b-20260929-r2:claude:b8c9d75a-6b5e-4b58-98fd-b4fb651c529b",
+      "pm_board_name": "Mrs. Muntz",
+      "initial_result_sha256": "1525cff80399852a4eff906623c574fcdcd991b1f757244fc501aa25aa0f5c66",
+      "resume_result_remote_sha256": "5cd729d4db1a4f74174fe54208c1e0c398c1b94622b9d1d26508acd1a577ac62",
+      "resume_result_remote_bytes": 4659,
+      "resume_stderr_bytes": 0,
+      "resume_terminal_reason": "completed",
+      "resume_is_error": false,
+      "checkpoint": "first T1 implementation draft ready; review not started",
+      "own_job_join_and_read_event": "b3f43c40-444e-4140-ad36-c539e040df10",
+      "join_exit": 0,
+      "read_exit": 0,
+      "resume_own_job_read_events": ["01e1e786-85e6-4352-b9fb-3abe495fe2ba", "69dc37ff-fe58-4677-a33e-9f419e7f5744", "a14b46a7-82fd-48bc-9441-731e130aeecc"],
+      "continuation": {
+        "phase": "final",
+        "prompt_sha256": "cd2768be02c1a5902097360ba82fcac0501d5add5ea221926b34ea629d412af3",
+        "state": "waiting-on-concrete-blocker",
+        "operator_process_exit": 0,
+        "remote_result_sha256": "cd78028b670bd77010946d88f12ed665087c98910cdf14da4690ce45e49f6be7",
+        "remote_result_bytes": 8665,
+        "remote_stderr_bytes": 0,
+        "remote_terminal_reason": "completed",
+        "remote_is_error": false,
+        "board_state": "waiting",
+        "blocker_id": "B1-R-L2",
+        "blocker_record_remote_sha256": "9a7f45a4f90a282249b6a6bd4e7decbec2237d2d4d13ae849ef595d6416837cb",
+        "denied_review_tool_event": "29a4eeff-82f8-4602-927c-0f23c82ea7f3",
+        "denied_tool_result_event": "b7ba6179-920b-4764-b576-72b977e2aff3",
+        "denied_action": "review scratch mutation tests containing rm on variable-expanded path",
+        "denial_reason": "Built-in Claude Code safety check could not verify variable-expanded rm target could not resolve to filesystem root; required a person's approval, unavailable in this run; command was not executed.",
+        "root_result_permission_denials_count": 0,
+        "nested_reviewer_denial_observed": true,
+        "final_qa_product_el_judge_gates": "not run after blocker",
+        "candidate_state": "unfrozen; root reported current tree hash is not an accepted candidate"
+      }
+    }
+  ],
+  "privacy": {
+    "raw_claude_traces_exported_by_this_observer": false,
+    "raw_resume_result_json_exported_by_this_observer": false,
+    "sensitive_incident_record": "docs/superpowers/implementation/engineering-team/evidence/r2-sensitive-output-incident.json",
+    "trace_method": "remote scoped extraction of command operation, job, PM key construction, event UUID, and tool success only"
+  },
+  "limitations": [
+    "This is operator observation, not independent grading.",
+    "No filesystem read boundary is claimed.",
+    "The original packaged runs and prompt-assisted F04/F05 remain separately qualified."
+  ]
+}

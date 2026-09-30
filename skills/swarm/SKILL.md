@@ -214,6 +214,19 @@ On Postgres the same data is queryable directly as the `agent_status` and `job_s
    - With several jobs active, a subagent joins at its first tool call, not at start: Claude
      Code only makes the prompt readable then. The same goes for every subagent of a job with
      a goal.
+   - **Custom roles.** Give an agent a role with `[swarm role: product_manager]` in its prompt
+     (Codex: `task_name="product_manager__spec"`, see below). Use any identifier of 1–64
+     lowercase letters, digits or underscores, starting with a letter; double underscores
+     are reserved for the Codex separator. The roster, `status` and `watch` show that role.
+     Define its responsibilities, deliverables and handoffs in the brief: the label alone
+     supplies no product or engineering instructions. Examples: `project_manager`,
+     `product_manager`, `engineering_lead`, `engineer`, `qa`, `reviewer`.
+     Custom roles have normal worker permissions and remain subject to all spawn limits.
+     A QA engineer writing tests or a reviewer implementing fixes needs a custom role;
+     `verifier` is the built-in read-only role. Only `judge` can record the final verdict.
+     An engineering lead can spawn children tagged `engineer` or `qa`; those labels survive
+     enrolment and resume. Size the team against the host's available concurrency and the
+     configured spawn limits. The plugin's default child-spawn budget is not a total team limit.
    - **With `--goal`, spawn exactly one judge alongside the workers:** its prompt carries both
      `[swarm job: <job>]` and `[swarm role: judge]`. The judge doesn't do the work: it gathers
      evidence, asks the workers for proof and fixes with `--to`, and records its verdict with
@@ -261,12 +274,13 @@ On Postgres the same data is queryable directly as the `agent_status` and `job_s
      agents are told these rules; you don't need to repeat them. (Codex: see [Codex](#codex)
      for what the hook can check there.)
    - **Models per role.** `[models]` in the config picks the model a spawned agent gets, by
-     role (`worker`, `verifier`, `judge`, `helper`), separately per host (`[models.claude]`,
+     role (`worker`, `verifier`, `judge`, `helper`, or a custom identifier), separately per host (`[models.claude]`,
      `[models.codex]`). `mode = "default"` sets the model only when the spawn didn't pick one,
      `"enforce"` always replaces it, `"off"` never touches it. The role is the prompt's
-     `[swarm role: ...]` tag (Codex: the task name, see below); a spawn made by a swarm agent is
-     a `helper`; anything else is a `worker`. A role left out of a host's section uses its
-     `worker` model; a host with no section is left alone. Names are passed through unchanged
+     `[swarm role: ...]` tag (Codex: the task name, see below). An explicit role selects its
+     configured model; without a matching model, a member's child falls back to `helper`,
+     then `worker`, and an orchestrator's child falls back to `worker`. Untagged spawns use
+     `helper` or `worker` respectively. A host with no section is left alone. Names are passed through unchanged
      (the host validates them). The hook rewrites the spawn's `model` itself, so you don't
      have to pick one; if `activate` prints a `Spawn with these models ...` line, the host can't
      take it from the hook: set the spawn's `model` as it says. Your own (orchestrator) model is
@@ -325,13 +339,16 @@ same; what differs:
   that message, so the hooks can't read tag lines in it (leave them in or out, they have no
   effect). Instead:
   - every child of the session joins the session's job (hence one job per session);
-  - the **task name** sets the role: a `task_name` starting with `verifier` (e.g.
-    `verifier-api`) makes a read-only verifier, one starting with `judge` makes the job's judge
-    (with `--goal`, spawn exactly one); anything else is a worker, and a child spawned by a
-    swarm agent is a helper;
+  - the **task name** sets the role: use `<role>__<task>`, for example
+    `product_manager__spec`, `engineering_lead__plan`, `engineer__api`, `qa__e2e`,
+    `verifier__acceptance` or `judge__final`. Role names use the identifier syntax above;
+    the task suffix must be nonempty. The explicit form is checked first, so
+    `judge_assistant__research` is a custom worker role. Legacy names starting with
+    `verifier` or `judge` still select those built-in roles when no `__` is present.
+    Other task names keep the default behavior. With `--goal`, spawn exactly one judge;
   - a swarm agent's own spawns are checked against the caps and the depth only: the
     `[swarm spawn: <why>]` line can't be read, so agents are told to say on the board why they
-    spawned (the spawn itself is announced there), and a spawn named `judge...` is refused.
+    spawned (the spawn itself is announced there), and a spawn requesting the `judge` role is refused.
 - **Depth.** Helpers (depth 2) need `agents.max_depth = 2` in `~/.codex/config.toml`. The
   plugin's first run (once its hooks are trusted, see below) sets it, together with the swarm's
   writable directories (the spool and marker dirs only: never the state dir, `~/.local/share/swarm`

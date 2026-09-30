@@ -56,6 +56,7 @@ class _Base:
             ("allocate_name", lambda: b.allocate_name("k2", "J")),
             ("close_agent", lambda: b.close_agent("k", "stuck:dead")),
             ("tool_started", lambda: b.tool_started("k", "Bash")),
+            ("set_agent_role", lambda: b.set_agent_role("k", "qa")),
             ("set_job_supervise", lambda: b.set_job_supervise("J", False)),
             ("record_restart", lambda: b.record_restart("J", "k", "k", "stuck:dead", "claude", 30.0)),
             ("purge", lambda: b.purge()),
@@ -79,8 +80,10 @@ class _Base:
         with open_read_only(self.cfg) as b:
             for label, call in self.writes(b):
                 with self.subTest(label):
-                    with self.assertRaises(ReadOnlyBoard):
+                    with self.assertRaises(ReadOnlyBoard) as raised:
                         call()
+                    if label == "set_agent_role":
+                        self.assertIn("set_agent_role refused", str(raised.exception))
         self.assertEqual(tree(self.tmp, self.SKIP), before)
         with open_board(self.cfg) as b:
             self.assertEqual([m.message for m in b.recent_messages(10, job="J")], ["hello"])

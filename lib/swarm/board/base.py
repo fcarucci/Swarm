@@ -796,7 +796,8 @@ WRITE_METHODS = (
     "purge", "ensure_job", "open_job", "close_job", "auto_close_job", "undo_auto_close",
     "sweep_auto_close", "bind_job_session", "allocate_name", "claim_judge", "claim_verifier",
     "set_waiting", "reserve_spawn", "record_verdict", "tool_started", "record_route",
-    "claim_route", "tool_finished", "agent_stopped", "set_agent_runtime", "agent_turn_ended",
+    "claim_route", "tool_finished", "agent_stopped", "set_agent_role", "set_agent_runtime",
+    "agent_turn_ended",
     "turns_resumed", "finish_quiet_agents", "leave", "close_agent", "claim_resume",
     "set_job_supervise", "record_restart", "set_restart_agent", "finish_restart",
     "record_roster_sync", "record_memory_recall", "record_remembered", "record_nudge",
@@ -1145,6 +1146,13 @@ class Board(abc.ABC):
     def agent_stopped(self, agent_key: str) -> None:
         """SubagentStop for an ACTIVE agent (no-op otherwise): left_at = now, state completed,
         current_tool and tool_started_at None. The name becomes free."""
+
+    @abc.abstractmethod
+    def set_agent_role(self, agent_key: str, role: str) -> None:
+        """Set an ACTIVE agent's custom role label, preserving its identity and all state.
+        No-op for unknown or departed keys. ValueError for an invalid role identifier or
+        judge/verifier: those require claim_judge/claim_verifier. Existing judge/verifier
+        flags are unchanged and still override this label in the roster."""
 
     @abc.abstractmethod
     def set_agent_runtime(self, agent_key: str, harness: str | None, model: str | None) -> None:

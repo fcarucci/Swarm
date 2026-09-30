@@ -46,6 +46,19 @@ class SpawnEnv(GoalEnv):
 
 
 class SpawnGateTests(SpawnEnv):
+    def test_custom_child_keeps_role_and_uses_its_model(self):
+        self.cfg["models"] = {"claude": {"engineer": "sonnet", "helper": "haiku"}}
+        self.worker()
+        prompt = self.child() + "\n[swarm role: engineer]"
+        out = self.agent_call("w1", prompt)
+        self.assertEqual(out["hookSpecificOutput"]["updatedInput"]["model"], "sonnet")
+        self.meta("e1", 2)
+        self.spawn("e1", prompt)
+        self.assertEqual(self.member("e1").role, "engineer")
+        decision, reason = self.decision(self.agent_call("e1", self.child()))
+        self.assertEqual(decision, "deny")
+        self.assertIn("depth", reason)
+
     def granted_spawn(self):
         """A member's justified spawn (allowed); returns the hook output."""
         self.worker()

@@ -1,0 +1,23 @@
+{
+  "fixture_revision": "fixtures-r2",
+  "preregistration_commit": "916282b",
+  "requirement_revision": "product-r1",
+  "skill_package_sha256": "6db9ce7c33fb9cb13a35fba845a850ac65b206cf6a1cd649af52d5d4eb12930e",
+  "skill_files": {
+    "skills/engineering-team/SKILL.md": "0af2f0a38a6565fdcbf4d7d7bdefba461321a186743eef4b9fb2ec35177f8448",
+    "skills/engineering-team/references/artifacts.md": "a85160970fea23f2542a90341f34af604ad79a43f1b166c0cd3995f213a4e076",
+    "skills/engineering-team/references/hosts.md": "97e99b962851462ec11361b6dc04a5bae61362e942a51e1f1cdf25e7a0cb79f7",
+    "skills/engineering-team/references/team-roles.md": "c972b5894c60f4002bd60f777487985a1c26ee885a30ad8405c78911fff6c9de"
+  },
+  "claude_f01": {
+    "job": "engineering-eval-claude-f01-20260929",
+    "workspace": "/home/claude/sessions/engineering-team-eval-20260929/f01",
+    "source_plugin": "/home/claude/sessions/engineering-team-eval-20260929/plugin",
+    "state": "staged; not executed",
+    "independence": "fresh root context; evaluator materials not supplied; filesystem access not strictly confined, read trace audit required"
+  },
+  "codex": {
+    "state": "pending installed plugin refresh authorization",
+    "observed_preflight": "automatic reviewer__structure child enrolled default with old cached skill"
+  }
+}
