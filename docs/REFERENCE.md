@@ -973,6 +973,10 @@ routing and the completion gate are unaffected.
 
 ## Supervisor: stuck agents and automatic restarts
 
+**Linux only for now.** The supervisor starts sessions in the verified work dir through
+`/proc/self/fd` and reaps them through `/proc`; on macOS it refuses to launch (safely) until that
+is ported.
+
 Off by default. With `[supervise] enabled = true`, the swarm closes agents that are stuck and,
 while their job is open, restarts them as headless sessions under the same name.
 

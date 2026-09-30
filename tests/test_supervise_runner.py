@@ -52,6 +52,7 @@ esac
 
 
 
+@unittest.skipUnless(os.path.isdir("/proc"), "the supervisor launches and reaps through /proc (Linux)")
 class RunnerBase(Env):
     """The runner fixture (no tests of its own)."""
 
@@ -502,7 +503,6 @@ class BoardNamespaceTests(RunnerBase):
         self.assertIsNone(self.restart().outcome)
 
 
-@unittest.skipUnless(os.path.isdir("/proc"), "the supervisor launches and reaps through /proc (Linux)")
 class RunnerTests(RunnerBase):
     def test_completed_claude(self):
         sid = "3f0c1e9a-0000-4000-8000-000000000001"
