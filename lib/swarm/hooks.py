@@ -32,6 +32,7 @@ Hooks must never break the agent: every failure is swallowed and the hook exits 
 """
 from __future__ import annotations
 
+import dataclasses
 import re
 import json
 import os
@@ -1168,14 +1169,49 @@ def _stuck_closed(board, agent_id: str, replaced: bool = False) -> str | None:
             f"done: say that the supervisor closed you as stuck.")
 
 
-def _on_turn(board, agent_id: str, name: str, job: str, cfg: dict) -> None:
+TASK_NOTICE_CHARS = 600   # how much of the new job's task a moved agent is shown
+
+
+def _moved_notice(board, agent_id: str, name: str, job: str, old: str, roster, cfg: dict) -> str:
+    """What an agent moved to `job` (swarm move / job merge) is told on its next turn, once: where it
+    was moved from, the job's description, task and goal, the board instructions for the new job
+    (its post command), the full roster with the judge, and a request to say hello. The catch-up of
+    recent messages follows it (the move set its read cursor)."""
+    js = board.job_status(job)
+    about = []
+    if js and js.description:
+        about.append(f"- About: {_t(js.description)[:300]}")
+    if js and js.task:
+        about.append(f"- Task: {_t(js.task)[:TASK_NOTICE_CHARS]}")
+    head = (f"[swarm] You were moved from job \"{_t(old)}\" to job \"{job}\" by the orchestrator, while you "
+            f"kept running. From now on your board is job \"{job}\": post there, not on \"{_t(old)}\". "
+            f"Read the job's recent messages below to learn what it is about, then post a short hello "
+            f"saying what you are working on and your scope: `{_post_cmd(job, name)}`.")
+    board.record_roster_sync(agent_id, roster_snapshot(roster, agent_id), True)
+    return "\n".join([head, *about]) + "\n" + _instructions(
+        name, job, cfg, js.goal if js else None, js.judge if js else None) + "\n\n" + roster_text(roster, agent_id, job)
+
+
+def _on_turn(board, agent_id: str, name: str, job: str, cfg: dict, sid: str | None = None,
+             payload: dict | None = None) -> None:
+    from swarm.board.base import MOVED_PREFIX   # the board is open by now
     res = board.read_unread(agent_key=agent_id, job=job)
-    parts = [_messages_text(res, job, name, "new messages")]
     roster, state = board.turn_state(agent_id, job)
+    moved = state is not None and (state.roster_seen or "").startswith(MOVED_PREFIX)
+    parts = []
+    if moved:   # the job comes from the agent's row on every call: a move applies at once; tell it, once
+        parts.append(_moved_notice(board, agent_id, name, job, state.roster_seen[len(MOVED_PREFIX):],
+                                   roster, cfg))
+        if payload is not None:
+            _record_enrolment(cfg, agent_id, job, sid, payload)   # the local record follows the job
+        state = dataclasses.replace(state, roster_seen=None, roster_synced_at=state.now)
+    parts.append(_messages_text(res, job, name, "recent messages on this job (catch-up)" if moved
+                                else "new messages"))
     if state is not None:
         parts.append(_reply_reminders(board, agent_id, job, name, state, {m.id for m in res.messages}))
         parts.append(_silence_nudge(board, agent_id, job, name, state, cfg))
-        parts.append(_roster_update(board, agent_id, job, roster, state, cfg))
+        if not moved:
+            parts.append(_roster_update(board, agent_id, job, roster, state, cfg))
         parts += _memory_turn(board, cfg, agent_id, job, state)
     text = "\n\n".join(p for p in parts if p)
     if text:
@@ -1247,7 +1283,7 @@ def _on_event(board, event: str, agent_id: str, sid: str | None, bound: dict, un
             board.set_agent_runtime(agent_id, None, model)
     if _gate_verifier(board, agent_id, member.verifier, payload) and \
             _gate_spawn(board, agent_id, member.name, member.job, payload, cfg):
-        _on_turn(board, agent_id, member.name, member.job, cfg)
+        _on_turn(board, agent_id, member.name, member.job, cfg, sid, payload)
 
 
 def _memory_provenance(board, cfg: dict, agent_id: str, sid: str | None, bound: dict, payload: dict) -> None:

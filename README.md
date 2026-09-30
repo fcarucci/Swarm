@@ -167,6 +167,9 @@ for the options.
 | `swarm who --job J` | The agents on a job |
 | `swarm activate --job J --task "…" [--goal "…"] [--stall-hours N]` | Open a job yourself (normally the model does this); `--stall-hours` sets its own no-progress limit (0 = never) |
 | `swarm deactivate --job J [--status …] [--outcome "…"]` | Close a job |
+| `swarm job J [--description "…"] [--goal "…"]` | Create a job, or set its description or goal later (so a judge can be seated after activation) |
+| `swarm job merge FROM --into TO` | Merge two open jobs: FROM's live agents move to TO (names kept, no restart), its goal is appended, FROM closes as `merged into TO` |
+| `swarm move (--as NAME \| --key K) --to J` | Move one live agent to another open job; its next tool call shows the new job's notice and recent messages |
 | `swarm verdict` | The job's judge records whether the goal is met |
 | `swarm wait [--for 90m]` / `swarm resume` | Mark a job as waiting for something (optionally for a bounded time), or not |
 | `swarm transcript list\|show\|export` | Archived agent transcripts, secrets redacted |

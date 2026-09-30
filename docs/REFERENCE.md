@@ -811,6 +811,39 @@ sessions must use the same board (a shared Postgres, or both on one machine). Ev
 records its host, shown as HOST in `status --job` and after the name in `who`. `deactivate`
 removes this machine's markers of the job, the attached ones included.
 
+### Merging jobs and moving agents
+
+Two jobs that turn out to be one, or an agent that belongs on another job, are handled without
+spawning duplicates and without stopping anyone. Nothing here changes the schema.
+
+- `swarm move (--as NAME | --key K) --to J` moves one live agent to the open job J. Its row gets
+  the new job, keeps its name, role and counters, and loses a judge or verifier seat (a seat
+  belongs to one job). Its read cursor is set so that the newest `join_history` messages of J
+  are unread, once: it sees J's recent board, neither the old job's cursor nor a flood. Refused
+  when the agent is not active, J is missing or closed, or it is already on J. The command
+  binds J to the agent's session (an attached marker, as `activate --attach` writes) if the
+  session has none, so the hooks act for it.
+- `swarm job merge FROM --into TO` moves every active agent of FROM the same way, appends
+  FROM's goal to TO's (a new goal clears TO's old verdict, as a met verdict covered the old
+  goal), clears TO's waiting mark, posts one `swarm` message on TO naming who moved, removes
+  FROM's markers and closes FROM `completed` with the outcome `merged into TO`. TO keeps its
+  judge. FROM's judge becomes a normal member of TO and is not stopped: the command prints a
+  hint to stop it, and, when TO now has a goal but no judge, the line to spawn one. Refused for
+  FROM = TO, a missing job, or a closed FROM or TO.
+- `swarm job J --goal G|-` sets or replaces the goal of an open job after activation, so a judge
+  can be added later (`X is not the judge` was the symptom of a job without a goal). It posts a
+  notice on the board, marks the job's markers as having a goal, clears a verdict given for the
+  old goal, and prints the judge tag line when no judge is seated.
+
+The agent is not restarted: every hook call resolves its job from its board row. Its next
+PreToolUse shows, once: where it was moved from and to, the job's description, task and goal,
+the board instructions for the new job (its post command), the full roster with the judge, and
+the recent messages as a catch-up, and asks it to post a short hello with its scope. A move
+leaves `@moved <old job>` in the agent's roster snapshot until that notice is shown; it then
+resumes normal turns. A `post --job OLD --as NAME` by a moved agent (the command it was shown)
+is posted on its new job, with a note. Its local enrolment record follows the job too, so
+transcripts and the supervisor keep working. Use them instead of a second job for the same work.
+
 ### Auto-close
 
 A job the orchestrator forgot to deactivate would otherwise show `idle` forever. It closes by
@@ -1877,7 +1910,9 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `transcript export --job J [DIR]` | every transcript of the job as `.jsonl` files plus `index.tsv` |
 | `transcript show --memory DOC_ID [--format text\|jsonl] [--tail N] [--grep RE] [-o FILE]` | where a memory came from: who saved it, in which tool call, whether it is still in Hindsight, the stored excerpt, and its place in the full transcript (works with transcripts off) |
 | `memory refs [--job J] [--agent NAME]` | recorded memory references (provenance) of swarm agents; `transcript export` also writes their excerpts (`memory/`, `memory.tsv`) |
-| `job J [--description D]` | create a job record without activating it, or update its description (low level) |
+| `job J [--description D] [--goal G\|-]` | create a job record without activating it, or update its description. `--goal` sets or replaces an open job's goal (see [Merging jobs and moving agents](#merging-jobs-and-moving-agents)) |
+| `job merge FROM --into TO` | merge FROM into TO: move its active agents, append its goal, close it `completed` (outcome `merged into TO`) |
+| `move (--as NAME \| --key K) --to J` | move one live agent to another open job |
 | `hook [--host claude\|codex] start\|turn\|done\|stop\|session-start` | hook entry point, reads hook JSON on stdin (called by `swarm-hook`, not by hand) |
 
 ## Security model and known limits

@@ -27,7 +27,7 @@ import random
 import threading
 from typing import Mapping, Sequence
 
-from .base import (check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, AUTO_CLOSE_BLOCKING, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, Restart,
+from .base import (MOVED_PREFIX, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, AUTO_CLOSE_BLOCKING, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, Restart,
                    ROUTE_STATES, TOOL_NAME_MAX, AgentEvent, AgentStatus, Board, BoardError, BoardUnavailable, JobStatus, Member, Message,
                    OwedReply, ReadResult, Route, SCHEMA_VERSION, SetupResult, SpawnGrant, SyncState, TRANSCRIPT_ROLES,
                    TranscriptImage, TranscriptRow, TranscriptSummary, VERDICTS,
@@ -488,6 +488,36 @@ class MemoryBoard(Board):
             a["spawns"], j["spawns"] = mine + 1, total + 1
             s.touch()
             return SpawnGrant(True, mine + 1, total + 1)
+
+    def _move_agent_row(self, agent_key: str, job: str, keep: int) -> str | None:
+        s = self._s()
+        with s.lock:
+            a = self._active(agent_key)
+            j = s.jobs.get(job)
+            if a is None or j is None or j["status"] != "active":
+                return None
+            old = a["job"]
+            if old == job:
+                return job
+            ids = [m["id"] for m in self._messages_of(job)]
+            cursor = (ids[-keep - 1] if len(ids) > keep else 0) if ids else 0
+            top = max((m["id"] for m in self._messages_of(None)), default=0)
+            a.update(job=job, judge=False, verifier=False, last_seen=self.now(), last_read_id=cursor,
+                     reply_reminded_id=top, calls_at_post=a["tool_calls"], silence_nudged_at=None,
+                     roster_seen=MOVED_PREFIX + old, roster_synced_at=None)
+            s.touch()
+            return old
+
+    def set_job_goal(self, job: str, goal: str) -> bool:
+        s = self._s()
+        with s.lock:
+            j = s.jobs.get(job)
+            if j is None or j["status"] != "active":
+                return False
+            if j.get("goal") != goal:
+                j.update(goal=goal, **_NO_VERDICT)
+                s.touch()
+            return True
 
     def claim_verifier(self, agent_key: str, job: str) -> bool:
         s = self._s()

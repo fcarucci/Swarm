@@ -24,7 +24,7 @@ from typing import Mapping, Sequence
 import psycopg
 from psycopg import sql
 
-from .base import (NAME_PATTERN, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, ROUTE_STATES, TOOL_NAME_MAX,
+from .base import (MOVED_PREFIX, NAME_PATTERN, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, ROUTE_STATES, TOOL_NAME_MAX,
                    AgentEvent, Restart,
                    AgentStatus, Board, BoardError, BoardUnavailable, IncompatibleStorage, JobStatus,
                    Member, Message, OwedReply, ReadResult, Route, RosterEntry, SCHEMA_VERSION, SetupResult,
@@ -902,6 +902,38 @@ class PostgresBoard(Board):
         except psycopg.errors.UniqueViolation:  # agents_one_judge: the job has an active judge
             return False
         return row is not None
+
+    def _move_agent_row(self, agent_key: str, job: str, keep: int) -> str | None:
+        conn = self._conn
+        row = conn.execute(
+            "WITH old AS (SELECT job FROM agents WHERE agent_key = %s AND left_at IS NULL AND job <> %s "
+            "FOR UPDATE) "
+            "UPDATE agents a SET job = %s, judge = false, verifier = false, last_seen = now(), "
+            "last_read_id = COALESCE((SELECT id FROM messages WHERE job = %s ORDER BY id DESC "
+            "OFFSET %s LIMIT 1), 0), "
+            "reply_reminded_id = (SELECT COALESCE(MAX(id), 0) FROM messages), "
+            "calls_at_post = a.tool_calls, silence_nudged_at = NULL, "
+            "roster_seen = %s || old.job, roster_synced_at = NULL "
+            "FROM old WHERE a.agent_key = %s AND EXISTS (SELECT 1 FROM jobs WHERE job = %s AND status = 'active') "
+            "RETURNING old.job",
+            (agent_key, job, job, job, keep, MOVED_PREFIX, agent_key, job)).fetchone()
+        if row:
+            return row[0]
+        same = conn.execute("SELECT 1 FROM agents a JOIN jobs j ON j.job = a.job WHERE a.agent_key = %s "
+                            "AND a.left_at IS NULL AND a.job = %s AND j.status = 'active'",
+                            (agent_key, job)).fetchone()
+        return job if same else None
+
+    def set_job_goal(self, job: str, goal: str) -> bool:
+        conn = self._conn
+        row = conn.execute("SELECT goal FROM jobs WHERE job = %s AND status = 'active'", (job,)).fetchone()
+        if row is None:
+            return False
+        if row[0] != goal:
+            conn.execute("UPDATE jobs SET goal = %s, verdict = NULL, verdict_reason = NULL, "
+                         "verdict_next = NULL, verdict_by = NULL, verdict_at = NULL WHERE job = %s",
+                         (goal, job))
+        return True
 
     def claim_verifier(self, agent_key: str, job: str) -> bool:
         return self._conn.execute(

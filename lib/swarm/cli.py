@@ -2211,7 +2211,17 @@ def _parser() -> argparse.ArgumentParser:
                     help="pass --force to swarm migrate (see its own --force), and run bootstrap/"
                          "migrate/doctor even when the plugin version didn't change")
     up.add_argument("--no-color", action="store_true")
-    j = sub.add_parser("job"); j.add_argument("job"); j.add_argument("--description")
+    j = sub.add_parser("job", help="create a job or change its description or goal; "
+                                   "`job merge <from> --into <to>` merges two open jobs")
+    j.add_argument("job", help="the job, or the word merge (then: job merge <from> --into <to>)")
+    j.add_argument("rest", nargs="*", help=argparse.SUPPRESS)
+    j.add_argument("--description")
+    j.add_argument("--goal", help="set or replace the goal of an open job (a judge decides whether it is "
+                                  "met); '-' reads it from stdin")
+    j.add_argument("--into", metavar="JOB", help="with merge: the job that absorbs <from>")
+    mv = sub.add_parser("move", help="move one live agent to another open job without stopping it")
+    mv.add_argument("--as", dest="name"); mv.add_argument("--key")
+    mv.add_argument("--to", required=True, metavar="JOB", help="the open job it moves to")
     jn = sub.add_parser("join"); jn.add_argument("--job", required=True)
     jn.add_argument("--key", required=True, help="stable unique id of the agent (e.g. hook agent_id)")
     jn.add_argument("--role")
@@ -2822,12 +2832,206 @@ COMMANDS = {
 }
 
 
-def _board_job(board, cfg: dict, args) -> None:
+SYSTEM_NAME = "swarm"   # who posts the board notices of a move, a merge or a goal change
+
+
+def _job_markers(cfg: dict, job: str) -> list[Path]:
+    """Every marker of `job` in this machine's marker dir: <job>.json and the <job>--<session>.json
+    attachments."""
+    marker = _marker(cfg, job)
+    found = [marker] if marker.exists() else []
+    found += [m for m in sorted(marker.parent.glob(f"{safe_job(job)}--*.json")) if _read_marker(m).get("job") == job]
+    return [m for m in found if _read_marker(m).get("job") == job]
+
+
+def _bind_sessions(cfg: dict, job: str, sessions, goal: bool) -> None:
+    """Make `job` visible to the hooks of each session (an agent's hooks act only for jobs whose
+    marker is bound to its Claude session): an attached marker (`activate --attach`) for a session
+    that has none for it."""
+    have = {_read_marker(m).get("session_id") for m in _job_markers(cfg, job)}
+    for sid in sorted({x for x in sessions if x and valid_session_id(x)} - have):
+        _write_marker(_marker(cfg, job).with_name(f"{safe_job(job)}--{safe_job(sid)}.json"),
+                      {"job": job, "session_id": sid, "cwd": os.getcwd(), "adopt_running": False,
+                       "attached": True, **({"goal": True} if goal else {})})
+
+
+def _mark_goal(cfg: dict, job: str) -> None:
+    """The job has a goal now: its markers say so (the orchestrator hooks and deactivate read it)."""
+    for m in _job_markers(cfg, job):
+        data = _read_marker(m)
+        if data and not data.get("goal"):
+            _write_marker(m, {**data, "goal": True})
+
+
+def _read_goal(args) -> str | None:
+    goal = (sys.stdin.read() if args.goal == "-" else args.goal or "").strip()
+    return goal or None
+
+
+def _set_goal(board, cfg: dict, job: str, goal: str) -> int:
+    js = board.job_status(job)
+    had = js.goal if js else None
+    if not board.set_job_goal(job, goal):
+        print(f"swarm job: {job} is not an open job: its goal can't be changed", file=sys.stderr)
+        return 1
+    _mark_goal(cfg, job)
+    if had != goal:
+        board.post(job, SYSTEM_NAME, "the job's goal was " + ("changed" if had else "set")
+                   + f" (see `swarm status --job {job}`): " + goal[:100].replace("\n", " "))
+    js = board.job_status(job)
+    print(f"goal of {job} " + ("unchanged" if had == goal else "set" if not had else "updated")
+          + ("; the earlier verdict is cleared" if had and had != goal else ""))
+    if js and js.judge is None:
+        print(f"the job has no judge: spawn exactly one, with this line in its prompt (with the job's "
+              f"tag line {tag_line(job)}); the job can't complete until its verdict is met:\n{JUDGE_TAG_LINE}")
+    elif js and had != goal:
+        print(f"{js.judge} is the judge: it was told on the board that the goal changed")
+    return 0
+
+
+def _board_job(board, cfg: dict, args) -> int | None:
+    if args.job == "merge" and (args.rest or args.into):
+        return _job_merge(board, cfg, args)
+    if args.rest or args.into:
+        print("swarm job: unexpected arguments (merge: swarm job merge <from> --into <to>)", file=sys.stderr)
+        return 2
+    goal = _read_goal(args) if args.goal is not None else None
+    if args.goal is not None and goal is None:
+        print("swarm job: --goal is empty", file=sys.stderr)
+        return 2
+    js = board.job_status(args.job)
+    if goal is not None and js is not None and js.status != "active":
+        print(f"swarm job: {args.job} is {js.status}: its goal can't be changed", file=sys.stderr)
+        return 1
     board.ensure_job(args.job, args.description, os.environ.get("USER"))
     print(args.job)
+    if goal is not None:
+        return _set_goal(board, cfg, args.job, goal)
+
+
+def _active_agents(board) -> list:
+    """Every active agent of every open job."""
+    return [a for j in board.jobs() for a in board.agents(j.job, include_departed=False)]
+
+
+def _find_agent(board, name: str | None, key: str | None):
+    for a in _active_agents(board):
+        if (key and a.agent_key == key) or (name and not key and a.name == name):
+            return a
+    return None
+
+
+def _sessions_of(board, agent_keys) -> set:
+    return {board.route(k).session_id for k in agent_keys}
+
+
+def _job_merge(board, cfg: dict, args) -> int:
+    src, dst = (args.rest[0] if len(args.rest) == 1 else None), args.into
+    if src is None or not dst or args.goal is not None:
+        print("usage: swarm job merge <from> --into <to>", file=sys.stderr)
+        return 2
+    if src == dst:
+        print(f"refused: can't merge {src} into itself", file=sys.stderr)
+        return 1
+    sj, dj = board.job_status(src), board.job_status(dst)
+    for label, j, jn in (("from", sj, src), ("into", dj, dst)):
+        if j is None:
+            print(f"refused: no such job {term_safe(jn)} ({label})", file=sys.stderr)
+            return 1
+        if j.status != "active":
+            print(f"refused: {jn} is {j.status}: "
+                  + ("it is already closed" if label == "from" else "can't merge into a closed job"),
+                  file=sys.stderr)
+            return 1
+    agents = board.agents(src, include_departed=False)
+    src_markers = _job_markers(cfg, src)
+    sessions = {_read_marker(m).get("session_id") for m in src_markers} | _sessions_of(board, [a.agent_key for a in agents])
+    goal = dj.goal
+    if sj.goal and sj.goal != dj.goal:
+        goal = f"{dj.goal}\n{sj.goal}" if dj.goal else sj.goal
+        board.set_job_goal(dst, goal)
+    moved = [a for a in agents if board.move_agent(a.agent_key, dst) is not None]
+    board.set_waiting(dst, None)
+    _bind_sessions(cfg, dst, sessions, bool(goal))
+    if goal:
+        _mark_goal(cfg, dst)
+    names = ", ".join(a.name for a in moved) or "no agents"
+    board.post(dst, SYSTEM_NAME, f"merged job {src} into this job: {names} moved here"
+               + (", its goal appended" if sj.goal and sj.goal != dj.goal else ""))
+    stuck = [m for m in src_markers if not remove_marker(m)]
+    board.close_job(src, "completed", f"merged into {dst}", closed_by=os.environ.get("USER") or None)
+    if transcripts_enabled(cfg):
+        _capture_final_transcripts(board, cfg, src)
+    print(f"merged {src} into {dst}: {len(moved)} agent(s) moved ({names}); {src} is closed (completed, "
+          f"outcome \"merged into {dst}\"). The agents keep running: each sees {dst}'s board on its next tool call.")
+    if sj.goal and sj.goal != dj.goal:
+        print(f"{src}'s goal was appended to {dst}'s")
+    if sj.judge:
+        print(f"{sj.judge} was {src}'s judge: it is now a normal member of {dst} (not stopped). Stop it "
+              f"if it is no longer needed.")
+    if goal and dj.judge is None:
+        print(f"{dst} has a goal but no judge: spawn exactly one, with {tag_line(dst)} and this line "
+              f"in its prompt:\n{JUDGE_TAG_LINE}")
+    for m in stuck:
+        print(f"note: marker {term_safe(m)} stayed locked; `swarm deactivate --job {src}` removes it later",
+              file=sys.stderr)
+    print(f"put this line in every subagent prompt for the merged job from now on:\n{tag_line(dst)}")
+    return 0
+
+
+def _board_move(board, cfg: dict, args) -> int:
+    if bool(args.name) == bool(args.key):
+        print("swarm move: give exactly one of --as NAME and --key K", file=sys.stderr)
+        return 2
+    a = _find_agent(board, args.name, args.key)
+    if a is None:
+        print(f"refused: no active agent {term_safe(args.name or args.key)} on an open job", file=sys.stderr)
+        return 1
+    dj = board.job_status(args.to)
+    if dj is None or dj.status != "active":
+        print(f"refused: {term_safe(args.to)} is not an open job", file=sys.stderr)
+        return 1
+    if a.job == args.to:
+        print(f"refused: {a.name} is already on {args.to}", file=sys.stderr)
+        return 1
+    sj = board.job_status(a.job)
+    sessions = _sessions_of(board, [a.agent_key])
+    if board.move_agent(a.agent_key, args.to) is None:
+        print(f"refused: could not move {a.name} to {args.to}", file=sys.stderr)
+        return 1
+    _bind_sessions(cfg, args.to, sessions, bool(dj.goal))
+    print(f"moved {a.name} from {a.job} to {args.to}; it keeps running and sees {args.to}'s board "
+          f"(a notice and the recent messages) on its next tool call")
+    if sj and sj.judge == a.name:
+        print(f"{a.name} was the judge of {a.job}: it is a normal member of {args.to} now, and {a.job} "
+              f"has no judge (spawn one, or move it back).")
+    if not board.agents(a.job, include_departed=False):
+        print(f"{a.job} has no active agents left: deactivate it, or it auto-closes when quiet.")
+    return 0
+
+
+def _moved_job(board, job: str, name: str) -> str | None:
+    """The job `name` was moved to, when a post names the job it was moved from (the commands an
+    agent was shown carry its old job): `name` is not an active member of `job` but is one of
+    another open job. None otherwise (a member posting on its own job, or a name no agent holds)."""
+    from swarm.board.base import BoardError, valid_name
+    if not valid_name(name):   # the post itself reports it
+        return None
+    try:
+        if any(a.name == name for a in board.agents(job, include_departed=False)):
+            return None
+        a = _find_agent(board, name, None)
+    except BoardError:   # the redirect is a courtesy: never at the cost of the post
+        return None
+    return a.job if a else None
 
 
 def _board_post(board, cfg: dict, args) -> int | None:
+    job = _moved_job(board, args.job, args.name)
+    if job:
+        print(f"note: {term_safe(args.name)} is on {job} now, not on {args.job}: posting there. "
+              f"Use --job {job} from now on.", file=sys.stderr)
+        args.job = job
     try:
         res = board.post(args.job, args.name, " ".join(args.message), args.to)
     except ValueError as exc:   # a name the board refuses (board.base.valid_name)
@@ -3029,6 +3233,7 @@ def _prune_memory_refs(board, cfg: dict) -> None:
 BOARD_COMMANDS = {
     "job": _board_job,
     "join": _board_join,
+    "move": _board_move,
     "post": _board_post,
     "verdict": _board_verdict,
     "wait": _board_wait,

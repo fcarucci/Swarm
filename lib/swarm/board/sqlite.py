@@ -63,7 +63,7 @@ import time
 from pathlib import Path
 from typing import Iterator, Mapping, Sequence
 
-from .base import (NAME_MAX, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, AUTO_CLOSE_BLOCKING, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, Restart,
+from .base import (MOVED_PREFIX, NAME_MAX, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, AUTO_CLOSE_BLOCKING, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, Restart,
                    ROUTE_STATES, TOOL_NAME_MAX, AgentEvent, AgentStatus, Board, BoardError, BoardUnavailable, JobStatus, Member, Message, ReadOnlyBoard, refuse_writes,
                    OwedReply, ReadResult, Route, RosterEntry, SCHEMA_VERSION, SetupResult, SpawnGrant, SyncState,
                    TRANSCRIPT_ROLES, TranscriptImage, TranscriptRow, TranscriptSummary, VERDICTS,
@@ -711,6 +711,33 @@ class SqliteBoard(Board):
                          "AND agent_key <> ?", (job, agent_key)).fetchone():
                 return False
             c.execute("UPDATE agents SET judge = 1 WHERE agent_key = ?", (agent_key,))
+            return True
+
+    def _move_agent_row(self, agent_key: str, job: str, keep: int) -> str | None:
+        with self._tx() as c:
+            row = c.execute("SELECT job FROM agents WHERE agent_key = ? AND left_at IS NULL",
+                            (agent_key,)).fetchone()
+            if row is None or c.execute("SELECT 1 FROM jobs WHERE job = ? AND status = 'active'",
+                                        (job,)).fetchone() is None:
+                return None
+            if row[0] == job:
+                return job
+            c.execute("UPDATE agents SET job = ?, judge = 0, verifier = 0, last_seen = ?, last_read_id = ?, "
+                      "reply_reminded_id = (SELECT COALESCE(MAX(id), 0) FROM messages), "
+                      "calls_at_post = tool_calls, silence_nudged_at = NULL, roster_seen = ?, "
+                      "roster_synced_at = NULL WHERE agent_key = ?",
+                      (job, self._now(), _history_cursor(c, job, keep), MOVED_PREFIX + row[0], agent_key))
+            return row[0]
+
+    def set_job_goal(self, job: str, goal: str) -> bool:
+        with self._tx() as c:
+            row = c.execute("SELECT goal FROM jobs WHERE job = ? AND status = 'active'", (job,)).fetchone()
+            if row is None:
+                return False
+            if row[0] != goal:
+                c.execute("UPDATE jobs SET goal = ?, verdict = NULL, verdict_reason = NULL, "
+                          "verdict_next = NULL, verdict_by = NULL, verdict_at = NULL WHERE job = ?",
+                          (goal, job))
             return True
 
     def claim_verifier(self, agent_key: str, job: str) -> bool:

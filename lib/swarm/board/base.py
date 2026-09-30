@@ -102,6 +102,10 @@ RESTART_OUTCOMES = ("running", "completed", "timeout", "max_turns", "failed", "n
 # job's own stall limit, in hours) and jobs.waiting_until (when a bounded `swarm wait --for` expires).
 SCHEMA_VERSION = 11
 
+# A moved agent's roster_seen holds MOVED_PREFIX + the job it came from until its next PreToolUse
+# turn tells it (no schema change: the hooks own the text, and it never parses as a snapshot).
+MOVED_PREFIX = "@moved "
+
 # Memory provenance (Board.save_memory_ref): what a writer name may look like (the built-in
 # `swarm-remember`, or a name from [provenance] writers), and how large a stored excerpt may be
 # once decompressed (a read never trusts a row's size: see decompress_capped).
@@ -800,7 +804,7 @@ def load_name_pool(data_dir: Path = DATA_DIR) -> dict[str, list[str]]:
 WRITE_METHODS = (
     "purge", "ensure_job", "open_job", "close_job", "auto_close_job", "undo_auto_close",
     "sweep_auto_close", "bind_job_session", "allocate_name", "claim_judge", "claim_verifier",
-    "set_waiting", "set_job_max_hours", "sweep_expiry", "reserve_spawn", "record_verdict", "tool_started", "record_route",
+    "set_waiting", "set_job_max_hours", "set_job_goal", "move_agent", "sweep_expiry", "reserve_spawn", "record_verdict", "tool_started", "record_route",
     "claim_route", "tool_finished", "agent_stopped", "set_agent_role", "set_agent_runtime",
     "agent_turn_ended",
     "turns_resumed", "finish_quiet_agents", "leave", "close_agent", "claim_resume",
@@ -1130,6 +1134,39 @@ class Board(abc.ABC):
         itself). At most one active judge per job, even under concurrent claims (Postgres:
         partial unique index). A judge's derived role (roster, agents()) is "judge"; the seat
         frees when it departs."""
+
+    @abc.abstractmethod
+    def _move_agent_row(self, agent_key: str, job: str, keep: int) -> str | None:
+        """One transaction of move_agent: the ACTIVE agent with this key goes to `job`, which must
+        be an open job (status active). Returns the job it was on, or None if nothing was done
+        (the key is not active, or `job` is missing or closed). Already on `job`: returns it and
+        changes nothing. Otherwise: job = `job`; the judge and verifier seats are dropped (a
+        seat belongs to one job); last_seen = now; the read cursor is set so exactly the newest
+        `keep` messages of `job` are unread (a join's catch-up, delivered once; the old job's
+        cursor would hide or flood); reply_reminded_id = the highest message id (owed replies of
+        the old job are not nagged about), calls_at_post = tool_calls, silence_nudged_at None;
+        roster_seen = MOVED_PREFIX + the old job and roster_synced_at None (the next turn shows
+        a moved notice and the full roster). Name, role, host, tool_calls, joined_at, state and
+        the current tool are kept: a running agent is not restarted or reset."""
+
+    def move_agent(self, agent_key: str, job: str) -> str | None:
+        """Move a live agent to another open job (`swarm move`, `swarm job merge`) without
+        stopping it: its next hook call resolves the job from its row. See _move_agent_row for
+        the row and the return value. A recorded route follows it (state final, job `job`), so
+        a still-unverified route can't send it back to the job its spawn prompt names."""
+        old = self._move_agent_row(agent_key, job, max(0, int(self.board_cfg.get("join_history", 30))))
+        if old is not None and old != job:
+            r = self.route(agent_key)
+            if r.state is not None:
+                self.record_route(agent_key, r.session_id, "final", job)
+        return old
+
+    @abc.abstractmethod
+    def set_job_goal(self, job: str, goal: str) -> bool:
+        """Set or replace the goal of an OPEN job (status active); False if the job is missing or
+        closed. A goal different from the current one starts the judging afresh: verdict,
+        verdict_reason, verdict_next, verdict_by and verdict_at are cleared (a met verdict
+        covered the old goal). The same goal changes nothing. Judge seats are not touched."""
 
     @abc.abstractmethod
     def claim_verifier(self, agent_key: str, job: str) -> bool:
