@@ -168,7 +168,9 @@ first session) removes its hooks from `~/.claude/settings.json` and moves the ol
 You use swarm from Claude Code or Codex, not from the CLI: ask the model to run a swarm for the
 job, e.g. *"run a swarm to find the recall latency regression: one agent per layer, and a judge
 to confirm the fix"*. The `swarm` skill (`/swarm:swarm`) has the model open the job, spawn and
-brief the agents, follow the board, get the judge's verdict and close the job. To follow along
+brief the agents, follow the board, get the judge's verdict and close the job. It is conservative
+about it: small work it does itself, a new agent goes into a running job whose scope fits, and a
+new job is for substantial multi-agent work (a lone agent plus a judge only if you ask). To follow along
 yourself, `swarm watch` or `swarm status --job <job>`; `swarm doctor` checks the install. The
 CLI commands are listed in the README's "Managing swarms from the CLI".
 

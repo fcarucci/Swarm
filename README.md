@@ -24,6 +24,9 @@ judge to confirm the fix"*, and the model does the rest:
 
 1. **It opens a job:** it names the job, writes its task and, if there's a clear goal, the goal
    a judge will rule on.
+   Small work it does itself, and a new agent goes into a running job that fits; a new job is for
+   substantial work that needs several coordinating agents, and a lone agent plus a judge only if
+   you ask for one.
 2. **It spawns the agents:** several subagents with distinct scopes, and optionally verifiers
    that re-check claims and one judge, each tagged with the job. The plugin's hooks name each
    one (a Simpsons character, then English first names) and brief it on how to post and read
