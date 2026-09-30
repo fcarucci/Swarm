@@ -285,15 +285,15 @@ for b in memory sqlite file; do SWARM_TEST_BACKEND=$b .venv/bin/python -B -m uni
 [![Tests](https://github.com/fcarucci/Swarm/actions/workflows/test.yml/badge.svg)](https://github.com/fcarucci/Swarm/actions/workflows/test.yml)
 [![Release](https://github.com/fcarucci/Swarm/actions/workflows/release.yml/badge.svg)](https://github.com/fcarucci/Swarm/actions/workflows/release.yml)
 
-To cut a release: bump the version in both `.claude-plugin/plugin.json` and
-`.codex-plugin/plugin.json`, then:
+To cut a release ([CHANGELOG.md](CHANGELOG.md) lists every version):
 
-```sh
-git tag v0.1.0   # or the next patch, v0.1.1, v0.1.2, ...
-git push --tags
-```
+1. Bump `version` in both `.claude-plugin/plugin.json` and `.codex-plugin/plugin.json`.
+2. Add a `## [x.y.z] - YYYY-MM-DD` section at the top of `CHANGELOG.md` (short, user-facing lines).
+   The tests fail until the version and the entry agree.
+3. Push, then tag and push the tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
 
-The release GitHub Actions job builds the release packages and an automatic changelog from there.
+The release workflow builds the packages and publishes the release, using that CHANGELOG section as
+the "What's changed" notes (`scripts/release-notes.sh`; it fails if the section is missing).
 
 ## Full reference
 
