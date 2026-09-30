@@ -70,7 +70,7 @@ categorize() {
 
 LOG_FILE="$(mktemp)"
 trap 'rm -f "$LOG_FILE"' EXIT
-git log --no-merges --pretty=format:'%h%x09%s' "$RANGE" -- > "$LOG_FILE"
+git log --no-merges --pretty=tformat:'%h%x09%s' "$RANGE" -- > "$LOG_FILE"
 
 TOTAL=$(wc -l < "$LOG_FILE" | tr -d ' ')
 
@@ -81,6 +81,27 @@ while IFS=$'\t' read -r sha subject; do
   cat="$(categorize "$(printf '%s' "$subject" | tr '[:upper:]' '[:lower:]')")"
   if [ "$cat" != "Other" ]; then matched_any=1; fi
 done < "$LOG_FILE"
+
+# ------------------------------------------------------------------------------------ changelog
+#
+# The release notes' "What's changed" comes from CHANGELOG.md's `## [x.y.z]` section for this
+# tag, read as it was at the tag (falling back to the working tree for tags that predate the
+# file). A tag with no section fails: write the entry before tagging. Set
+# RELEASE_NOTES_COMMITS=1 to build the section from the commit list instead.
+
+changelog_section() {
+  local ver="${DISPLAY_TAG#v}" text=""
+  if [ "$END" != "HEAD" ] && git cat-file -e "$END:CHANGELOG.md" 2>/dev/null; then
+    text="$(git show "$END:CHANGELOG.md")"
+  elif [ -f CHANGELOG.md ]; then
+    text="$(cat CHANGELOG.md)"
+  fi
+  printf '%s\n' "$text" | awk -v v="$ver" '
+    /^## \[/ { if (on) exit; on = (index($0, "## [" v "]") == 1); next }
+    on && !started && $0 == "" { next }
+    on { started = 1; print }
+  ' | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}'
+}
 
 # ------------------------------------------------------------------------------------ render
 
@@ -96,6 +117,17 @@ echo "$UPGRADE_NOTE"
 echo
 echo "## What's changed"
 echo
+
+CL="$(changelog_section)"
+if [ -z "${RELEASE_NOTES_COMMITS:-}" ] && [ -n "$CL" ]; then
+  printf '%s\n' "$CL"
+  echo
+  echo "Full changelog: https://github.com/fcarucci/Swarm/blob/main/CHANGELOG.md"
+  exit 0
+elif [ -z "${RELEASE_NOTES_COMMITS:-}" ] && [ -n "$TAG" ]; then
+  echo "error: CHANGELOG.md has no '## [${DISPLAY_TAG#v}]' section; add one before tagging" >&2
+  exit 1
+fi
 
 if [ "$TOTAL" -eq 0 ]; then
   echo "No commits."
