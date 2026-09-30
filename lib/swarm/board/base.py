@@ -99,7 +99,7 @@ RESTART_OUTCOMES = ("running", "completed", "timeout", "max_turns", "failed", "n
 # memory_refs.agent_name, image keys through transcript_images), 9 transcripts.capture_failed
 # (a final capture that kept failing: the row is an audit marker without a body),
 # 10 jobs.verdict_next (the judge's instructions with a not_met verdict), 11 jobs.max_hours (a
-# job's own lifetime cap) and jobs.waiting_until (when a bounded `swarm wait --for` expires).
+# job's own stall limit, in hours) and jobs.waiting_until (when a bounded `swarm wait --for` expires).
 SCHEMA_VERSION = 11
 
 # Memory provenance (Board.save_memory_ref): what a writer name may look like (the built-in
@@ -341,8 +341,8 @@ class JobStatus:
     # The judge's instructions with a not_met verdict (what to change, where, what it re-checks);
     # None for met and for verdicts recorded before the column existed.
     verdict_next: str | None = None
-    # A per-job lifetime cap in hours (`activate --max-hours`; None = the [job] max_hours default,
-    # 0 = no cap) and when a bounded wait (`wait --for`) expires (None = unbounded).
+    # A per-job stall limit in hours: how long the job may go without progress (`activate
+    # --stall-hours`; column max_hours; None = the [job] stall_hours default, 0 = never) and when a bounded wait (`wait --for`) expires (None = unbounded).
     max_hours: float | None = None
     waiting_until: _dt.datetime | None = None
 
@@ -1024,14 +1024,26 @@ class Board(abc.ABC):
                 closed.append(AutoClosed(js.job, outcome))
         return closed
 
-    def sweep_expiry(self, max_hours: float, orphan_minutes: float, watch=None) -> list[AutoClosed]:
-        """Close the open jobs that outlived their welcome (`[job] max_hours`, `orphan_minutes`;
+    def progress_at(self, js: JobStatus) -> _dt.datetime:
+        """When the job last made progress: the newest of its run start, its latest verdict, an
+        agent joining, and a board message posted by an agent (not the system's own, "swarm").
+        Tool calls and hook heartbeats (last_seen) are not progress: an agent polling in a loop
+        for hours is not."""
+        times = [run_start(js)] + [a.joined_at for a in self.agents(js.job)]
+        if js.verdict_at:
+            times.append(js.verdict_at)
+        times += [m.created_at for m in self.recent_messages(20, job=js.job) if m.agent_name != "swarm"]
+        return max(t for t in times if t)
+
+    def sweep_expiry(self, stall_hours: float, orphan_minutes: float, watch=None) -> list[AutoClosed]:
+        """Close the open jobs that outlived their welcome (`[job] stall_hours`, `orphan_minutes`;
         0 or less turns a rule off). Returns what it closed. Template method, not overridden.
 
         A bounded wait (`wait --for`) past its time is cleared first, so the job is judged as
-        not waiting. Then, per open job:
-          * open longer than its cap (jobs.max_hours, else `max_hours`; run_start to now):
-            closed "failed", outcome "auto-closed: open longer than N h" plus its last verdict;
+        not waiting. A job that keeps making progress (progress_at) is never stalled, however long
+        it runs. Then, per open job:
+          * no progress for its limit (jobs.max_hours, else `stall_hours`; see progress_at):
+            closed "failed", outcome "auto-closed: no progress for N h" plus its last verdict;
           * no agent started, running or idle (dead ones don't count; none at all is fine), no
             board activity (last_activity_at, run start, an expired wait's end) for
             `orphan_minutes`, not inside an unexpired bounded wait, and `watch(job).active()`
@@ -1048,10 +1060,11 @@ class Board(abc.ABC):
                 self.set_waiting(js.job, None)   # the bounded wait ran out
                 js = replace(js, waiting_on=None, waiting_since=None,
                              last_activity_at=max(t for t in (js.last_activity_at, js.waiting_until) if t))
-            cap = max_hours if js.max_hours is None else js.max_hours
-            if cap and cap > 0 and now - run_start(js) >= _dt.timedelta(hours=cap):
+            cap = stall_hours if js.max_hours is None else js.max_hours
+            if cap and cap > 0 and now - run_start(js) >= _dt.timedelta(hours=cap) and \
+                    now - self.progress_at(js) >= _dt.timedelta(hours=cap):
                 status = "failed"
-                outcome = f"auto-closed: open longer than {cap:g} h"
+                outcome = f"auto-closed: no progress for {cap:g} h"
                 if js.verdict:
                     outcome += f"; last verdict {js.verdict}" + (f": {js.verdict_reason}" if js.verdict_reason else "")
                 outcome = outcome[:AUTO_CLOSE_OUTCOME_MAX]
@@ -1138,7 +1151,7 @@ class Board(abc.ABC):
 
     @abc.abstractmethod
     def set_job_max_hours(self, job: str, hours: float | None) -> bool:
-        """jobs.max_hours = hours (this job's own lifetime cap; 0 = none, None = the [job]
+        """jobs.max_hours = hours (this job's own stall limit; 0 = never, None = the [job]
         default). False if the job doesn't exist. open_job resets it to None."""
 
     @abc.abstractmethod

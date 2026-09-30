@@ -77,11 +77,13 @@ marker_dir = "~/.local/state/swarm/active"
 # reopens a closed job; `swarm deactivate` on it replaces the auto outcome with yours.
 auto_close_minutes = 30
 # Two more ways an open job ends, so none stays open forever (both 0 = off):
-# max_hours: a job open longer than this (from its last activation) is closed as failed, agents
-#   still on it or not; `swarm activate --max-hours N` sets one job's own cap (0 = no cap).
+# stall_hours: a job with no progress for this long is closed as failed, agents still on it or
+#   not. Progress: an agent posted on the board, recorded a verdict or joined; tool calls and
+#   heartbeats don't count. A job that keeps progressing runs as long as it likes.
+#   `swarm activate --stall-hours N` sets one job's own limit (0 = never).
 # orphan_minutes: a job with no live agent (all completed, left or dead, or none; waiting jobs
 #   included) and no board activity for this long is closed as cancelled.
-max_hours = 4
+stall_hours = 4
 orphan_minutes = 30
 
 [codex]

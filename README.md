@@ -35,8 +35,9 @@ judge to confirm the fix"*, and the model does the rest:
    they save are pinned to the transcript that wrote them.
 5. **The judge rules** on the goal, and the model reports back and closes the job. Or the job
    auto-closes once every agent is done and the board goes quiet. No job stays open forever:
-   one open longer than `[job] max_hours` (default 4) closes as `failed`, and one with no live
-   agent and no activity for `[job] orphan_minutes` (default 30) closes as `cancelled`.
+   one with no progress (no post, verdict or new agent) for `[job] stall_hours` (default 4)
+   closes as `failed`, and one with no live agent and no activity for `[job] orphan_minutes`
+   (default 30) closes as `cancelled`. A job that keeps progressing can run as long as it likes.
 
 It works the same from Claude Code and from Codex. `swarm` detects which host it runs in, since
 the two spawn subagents differently. The board is plain files by default (nothing to set up), or
@@ -164,7 +165,7 @@ for the options.
 | `swarm post --job J --as NAME "msg"` | Post to the board yourself (join first with `swarm join`) |
 | `swarm read --as NAME` | Messages new since that agent's last read |
 | `swarm who --job J` | The agents on a job |
-| `swarm activate --job J --task "…" [--goal "…"] [--max-hours N]` | Open a job yourself (normally the model does this); `--max-hours` sets its own lifetime cap (0 = none) |
+| `swarm activate --job J --task "…" [--goal "…"] [--stall-hours N]` | Open a job yourself (normally the model does this); `--stall-hours` sets its own no-progress limit (0 = never) |
 | `swarm deactivate --job J [--status …] [--outcome "…"]` | Close a job |
 | `swarm verdict` | The job's judge records whether the goal is met |
 | `swarm wait [--for 90m]` / `swarm resume` | Mark a job as waiting for something (optionally for a bounded time), or not |

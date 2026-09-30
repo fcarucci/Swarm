@@ -105,11 +105,14 @@ DEFAULTS = {
     # current run is done (completed or left; dead ones don't hold it open) and nothing happened
     # on it (no join, no hook contact, no post) for auto_close_minutes. 0 turns it off.
     #
-    # Two more ways an open job ends, so none runs forever: max_hours caps its life (measured
-    # from its last activation; closed "failed"; `activate --max-hours N` overrides it per job,
-    # 0 = no cap), and orphan_minutes closes one with no live agent (all done, dead or gone; a
-    # waiting job included) and no board activity for that long ("cancelled"). 0 turns either off.
-    "job": {"auto_close_minutes": 30, "max_hours": 4, "orphan_minutes": 30},
+    #
+    # Two more ways an open job ends, so none stays open forever. stall_hours: a job that made
+    # no progress for that long (no agent posted, joined or recorded a verdict; tool calls and
+    # heartbeats don't count) is closed "failed"; one that keeps progressing runs as long as it
+    # likes. `activate --stall-hours N` overrides it per job, 0 = never. orphan_minutes: a job
+    # with no live agent (all done, dead or gone; a waiting job included) and no board activity
+    # for that long is closed "cancelled". 0 turns either off.
+    "job": {"auto_close_minutes": 30, "stall_hours": 4, "orphan_minutes": 30},
     # Codex fires SubagentStop after every turn of a child: it counts as completed once no new
     # turn came for this long
     "codex": {"stop_quiet_minutes": 3},
@@ -275,9 +278,9 @@ def auto_close_minutes(cfg: dict) -> float:
 
 
 def job_limits(cfg: dict) -> tuple[float, float]:
-    """([job] max_hours, [job] orphan_minutes); 0 = that rule is off."""
+    """([job] stall_hours, [job] orphan_minutes); 0 = that rule is off."""
     job = cfg.get("job") or {}
-    return float(job.get("max_hours") or 0), float(job.get("orphan_minutes") or 0)
+    return float(job.get("stall_hours") or 0), float(job.get("orphan_minutes") or 0)
 
 
 def parse_duration(text: str) -> float:
@@ -352,9 +355,9 @@ def sweep_jobs(board, cfg: dict, deadline: float | None = None) -> list:
     closed = []
     if minutes > 0:
         closed = board.sweep_auto_close(minutes, lambda job: OrchestratorWatch(cfg, minutes, job))
-    max_hours, orphan_minutes = job_limits(cfg)
+    stall_hours, orphan_minutes = job_limits(cfg)
     try:   # best effort: never fails the caller (a per-job cap applies even with the defaults off)
-        closed += board.sweep_expiry(max_hours, orphan_minutes,
+        closed += board.sweep_expiry(stall_hours, orphan_minutes,
                                      lambda job: OrchestratorWatch(cfg, orphan_minutes, job))
     except Exception as exc:
         from swarm.board import BoardUnavailable
@@ -2253,9 +2256,9 @@ def _parser() -> argparse.ArgumentParser:
                     help="bind this session to an already active job without reopening it")
     ac.add_argument("--no-supervise", action="store_true",
                     help="the supervisor neither closes nor restarts this job's agents ([supervise])")
-    ac.add_argument("--max-hours", type=float, metavar="N",
-                    help="close the job (failed) once it has been open N hours, instead of [job] max_hours; "
-                         "0 = no cap")
+    ac.add_argument("--stall-hours", "--max-hours", dest="max_hours", type=float, metavar="N",
+                    help="close the job (failed) after N hours without progress, instead of [job] "
+                         "stall_hours; 0 = never (--max-hours is the old name)")
     de = sub.add_parser("deactivate", help="turn the board off for the job and close it")
     de.add_argument("--job", required=True)
     de.add_argument("--status", choices=["completed", "cancelled", "failed"], default="completed")
@@ -2441,7 +2444,7 @@ def cmd_activate(cfg: dict, args) -> int:
             f"put this line in every subagent prompt for this job:\n{tag_line(args.job)}"))
         return 0
     if args.max_hours is not None and args.max_hours < 0:
-        print("swarm activate: --max-hours must be 0 (no cap) or more", file=sys.stderr)
+        print("swarm activate: --stall-hours must be 0 (never) or more", file=sys.stderr)
         return 2
     if args.task == "-" and args.goal == "-":
         print("swarm activate: only one of --goal and --task can be - (stdin)", file=sys.stderr)

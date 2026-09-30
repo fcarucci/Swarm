@@ -615,7 +615,7 @@ On Postgres, re-run `swarm init` after changing `idle_minutes`, `dead_minutes` o
 | key | default | meaning |
 |---|---|---|
 | `auto_close_minutes` | `30` | an open job whose agents are all done closes by itself after this many quiet minutes (see [Auto-close](#auto-close)); `0` turns it off |
-| `max_hours` | `4` | an open job older than this (from its last activation) closes as `failed`, whatever its agents do; `activate --max-hours N` sets one job's own cap, `0` = no cap; `0` here turns the default off |
+| `stall_hours` | `4` | an open job with no progress (no agent post, verdict or new agent; tool calls and heartbeats don't count) for this long closes as `failed`, whatever its agents do; a job that keeps progressing is never closed by it. `activate --stall-hours N` sets one job's own limit, `0` = never; `0` here turns the default off |
 | `orphan_minutes` | `30` | an open job (waiting ones too) with no live agent and no board activity for this long closes as `cancelled`; `0` turns it off |
 
 **`[sqlite]`** (with `backend = "sqlite"`)
@@ -850,15 +850,18 @@ and `status --job J` shows `finished … (auto-closed; activate reopens it)`. Ot
 closed exactly as `deactivate --status completed` would close it: the agents still on it leave,
 their names are freed, and this machine's marker is removed.
 
-**Lifetime cap and orphans.** No job stays open forever. The same sweep closes an open job
-(`active`, `idle` or `waiting`) as `failed` with `auto-closed: open longer than N h` (plus its last
-verdict) once it has been open longer than `[job] max_hours` (default 4; per job `activate
---max-hours N`, `0` = no cap), and as `cancelled` with `auto-closed: no live agents for N min` when
+**Stall limit and orphans.** No job stays open forever. The same sweep closes an open job
+(`active`, `idle` or `waiting`) as `failed` with `auto-closed: no progress for N h` (plus its last
+verdict) once it has made no progress for `[job] stall_hours` (default 4; per job `activate
+--stall-hours N`, `0` = never), and as `cancelled` with `auto-closed: no live agents for N min` when
 no agent is started, running or idle (dead ones per `dead_minutes` don't count), nothing was
 posted or joined, and the orchestrating session made no tool call for `[job] orphan_minutes`
-(default 30). Both are recorded like a `deactivate` (`closed_by` `auto`, agents left, marker
-removed) and show in `status --all`. `swarm wait --for DURATION` bounds a wait: until it expires
-it shields the job from the orphan rule only, never from the cap.
+(default 30). Progress means a message an agent posted, a verdict, or an agent joining (the run
+start counts too): tool calls and heartbeats do not, so a watcher polling for hours is not
+progress, while a job that keeps progressing runs as long as it likes. Both closes are recorded
+like a `deactivate` (`closed_by` `auto`, agents left, marker removed) and show in `status --all`.
+`swarm wait --for DURATION` bounds a wait: until it expires it shields the job from the orphan rule
+only, never from the stall limit.
 
 **Where it runs.** No daemon: the sweep runs from commands that already run now and then:
 `status`, `purge`, `join` and `activate`, `watch` and `tail` (at most once a minute), and the

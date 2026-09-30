@@ -1,4 +1,4 @@
-"""Jobs don't stay open forever: [job] max_hours caps a job's life (failed), [job] orphan_minutes
+"""Jobs don't stay open forever: [job] stall_hours closes a job with no progress (failed), [job] orphan_minutes
 closes one nobody works on (cancelled), and `swarm wait --for` bounds a wait
 (Board.sweep_expiry, driven by swarm.sweep_jobs).
 
@@ -18,7 +18,7 @@ from swarm.board import base  # noqa: E402
 
 MIN = 60
 HOUR = 3600
-CAP, ORPHAN = 4, 30   # the defaults
+CAP, ORPHAN = 4, 30   # stall_hours, orphan_minutes   # the defaults
 
 
 class ExpiryContract:
@@ -52,33 +52,65 @@ class ExpiryContract:
     def status(self, name="j"):
         return self.b.job_status(name)
 
-    # ---- lifetime cap
-    def test_cap_closes_an_old_job_failed_even_with_live_agents(self):
-        self.job(age=5 * HOUR, agents={"a": 0})
+    # ---- stall limit: no progress for N hours
+    def test_stalled_job_is_closed_failed_even_with_live_agents(self):
+        self.job(age=5 * HOUR, agents={"a": 0})   # heartbeats only: last_seen just now
         closed = self.sweep()
         self.assertEqual([c.job for c in closed], ["j"])
         s = self.status()
         self.assertEqual((s.status, s.closed_by, s.outcome),
-                         ("failed", base.AUTO_CLOSED_BY, "auto-closed: open longer than 4 h"))
+                         ("failed", base.AUTO_CLOSED_BY, "auto-closed: no progress for 4 h"))
         self.assertIsNotNone(s.finished_at)
         self.assertEqual(self.b.agents("j", include_departed=False), [])   # left, as deactivate does
         self.assertEqual(self.sweep(), [])   # closed once
 
-    def test_cap_outcome_carries_the_last_verdict(self):
+    def test_outcome_carries_the_last_verdict(self):
         self.job(age=5 * HOUR, agents={"j1": 0}, goal="ship it")
         self.assertTrue(self.b.claim_judge("j1", "j"))
         self.assertTrue(self.b.record_verdict("j", self.b.active_agent_name("j1"), "not_met",
                                               "tests fail", "fix them"))
+        self.h.backdate_job("j", verdict_at=4 * HOUR + MIN)
         self.sweep()
-        self.assertEqual(self.status().outcome,
-                         "auto-closed: open longer than 4 h; last verdict not_met: tests fail")
+        self.assertEqual(self.status().outcome, "auto-closed: no progress for 4 h; last verdict not_met: tests fail")
 
-    def test_cap_counts_from_the_current_run_and_not_before_it(self):
+    def test_a_job_within_its_limit_stays_open(self):
         self.job(age=3 * HOUR, agents={"a": 0})
         self.assertEqual(self.sweep(), [])
         self.assertEqual(self.status().status, "active")
 
-    def test_a_per_job_cap_overrides_the_default(self):
+    def test_progress_keeps_an_old_job_open(self):
+        # a message posted by an agent, a verdict, an agent joining: each restarts the clock
+        self.job("posted", age=9 * HOUR, agents={"a": 0})
+        self.h.backdate_message(self.b.post("posted", self.b.active_agent_name("a"), "found it").id, 2 * HOUR)
+        self.job("judged", age=9 * HOUR, agents={"j1": 0}, goal="g")
+        self.b.claim_judge("j1", "judged")
+        self.b.record_verdict("judged", self.b.active_agent_name("j1"), "not_met", "no", "fix")
+        self.h.backdate_job("judged", verdict_at=3 * HOUR)
+        self.job("joined", age=9 * HOUR, agents={"b": 0})
+        self.h.backdate_agent("b", joined_at=HOUR)
+        self.assertEqual(self.sweep(), [])
+        for j in ("posted", "judged", "joined"):
+            self.assertEqual(self.status(j).status, "active", j)
+        # ...for the limit: 4 h after the progress it is stalled again
+        self.h.backdate_job("judged", verdict_at=4 * HOUR + MIN)
+        self.h.backdate_agent("b", joined_at=5 * HOUR)
+        self.assertEqual(sorted(c.job for c in self.sweep()), ["joined", "judged"])
+
+    def test_heartbeats_tool_calls_and_system_posts_are_not_progress(self):
+        self.job(age=9 * HOUR, agents={"a": 0})
+        self.b.tool_started("a", "Bash")   # a watcher polling in a loop
+        self.b.tool_finished("a")
+        self.h.backdate_agent("a", joined_at=9 * HOUR)
+        self.b.post("j", "swarm", "memory from x for bank y failed")   # the system's own post
+        self.assertEqual([c.job for c in self.sweep()], ["j"])
+
+    def test_the_run_start_counts_as_progress(self):
+        self.job(age=3 * HOUR)
+        self.assertEqual(self.sweep(orphan=0), [])
+        self.h.backdate_job("j", activated_at=5 * HOUR, created_at=5 * HOUR)
+        self.assertEqual([c.job for c in self.sweep(orphan=0)], ["j"])
+
+    def test_a_per_job_limit_overrides_the_default(self):
         self.job("short", age=2 * HOUR, agents={"a": 0})
         self.b.set_job_max_hours("short", 1.5)
         self.job("long", age=9 * HOUR, agents={"b": 0})
@@ -86,12 +118,12 @@ class ExpiryContract:
         self.job("never", age=99 * HOUR, agents={"c": 0})
         self.b.set_job_max_hours("never", 0)
         self.assertEqual([c.job for c in self.sweep()], ["short"])
-        self.assertEqual(self.status("short").outcome, "auto-closed: open longer than 1.5 h")
+        self.assertEqual(self.status("short").outcome, "auto-closed: no progress for 1.5 h")
         self.assertEqual(self.status("long").status, "active")
         self.assertEqual(self.status("never").status, "active")
         self.assertEqual(self.status("never").max_hours, 0)
 
-    def test_default_cap_zero_is_off_and_reactivation_resets_the_override(self):
+    def test_default_limit_zero_is_off_and_reactivation_resets_the_override(self):
         self.job(age=99 * HOUR, agents={"a": 0})
         self.assertEqual(self.sweep(cap=0), [])
         self.b.set_job_max_hours("j", 7)
@@ -99,7 +131,7 @@ class ExpiryContract:
         self.b.open_job("j", None, None, None, None)
         self.assertIsNone(self.status().max_hours)
 
-    def test_max_hours_of_a_missing_job(self):
+    def test_stall_limit_of_a_missing_job(self):
         self.assertFalse(self.b.set_job_max_hours("nope", 3))
 
     # ---- orphans
@@ -143,7 +175,7 @@ class ExpiryContract:
         self.job(age=2 * HOUR)
         self.assertEqual(self.sweep(orphan=0), [])
 
-    def test_watch_of_the_orchestrating_session_keeps_it_open_but_not_past_the_cap(self):
+    def test_watch_of_the_orchestrating_session_keeps_it_open_but_not_past_the_limit(self):
         class Active:
             def __init__(self, job):
                 pass
@@ -248,7 +280,7 @@ class ExpiryCliTests(Env):
         self.h.backdate_job(job, created_at=seconds + 60, activated_at=seconds)
 
     def test_defaults(self):
-        self.assertEqual(self.cfg["job"]["max_hours"], 4)
+        self.assertEqual(self.cfg["job"]["stall_hours"], 4)
         self.assertEqual(self.cfg["job"]["orphan_minutes"], 30)
 
     def test_status_closes_an_old_job_and_all_shows_it(self):
@@ -257,7 +289,7 @@ class ExpiryCliTests(Env):
         self.age()
         self.h.backdate_agent("agent-1", joined_at=5 * HOUR, last_seen=0)
         rc, out, _ = self.cli("status")
-        self.assertIn("J: auto-closed: open longer than 4 h", out)
+        self.assertIn("J: auto-closed: no progress for 4 h", out)
         s = self.job()
         self.assertEqual((s.status, s.closed_by), ("failed", "auto"))
         self.assertFalse(self.markers.joinpath("J.json").exists())
@@ -265,19 +297,19 @@ class ExpiryCliTests(Env):
         row = next(line for line in out.splitlines() if line.startswith("J "))
         self.assertIn("failed", row)
 
-    def test_activate_max_hours(self):
-        self.activate("J", "--max-hours", "10")
+    def test_activate_stall_hours(self):
+        self.activate("J", "--stall-hours", "10")
         self.assertEqual(self.job().max_hours, 10)
-        self.activate("K", "--max-hours", "0")
+        self.activate("K", "--max-hours", "0")   # the old name still works
         self.assertEqual(self.job("K").max_hours, 0)
         self.activate("L")
         self.assertIsNone(self.job("L").max_hours)
-        rc, _, err = self.cli("activate", "--job", "M", "--max-hours", "-1")
+        rc, _, err = self.cli("activate", "--job", "M", "--stall-hours", "-1")
         self.assertEqual(rc, 2)
-        self.assertIn("--max-hours", err)
+        self.assertIn("--stall-hours", err)
 
     def test_config_keys_apply(self):
-        self.config.write_text(self.config.read_text() + "[job]\nmax_hours = 1\norphan_minutes = 0\n")
+        self.config.write_text(self.config.read_text() + "[job]\nstall_hours = 1\norphan_minutes = 0\n")
         self.cfg = swarm.load_config(self.config)
         self.activate()
         self.hook("start", agent_id="agent-1")
@@ -285,7 +317,7 @@ class ExpiryCliTests(Env):
         self.age("J", 2 * HOUR)
         self.cli("purge")
         self.assertEqual(self.job().status, "failed")
-        self.assertEqual(self.job().outcome, "auto-closed: open longer than 1 h")
+        self.assertEqual(self.job().outcome, "auto-closed: no progress for 1 h")
 
     def test_purge_closes_an_orphan(self):
         self.activate()
