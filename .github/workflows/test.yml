@@ -80,7 +80,9 @@ jobs:
       - name: Unit suite (backend=sqlite)
         env:
           SWARM_TEST_BACKEND: sqlite
-        run: .venv/bin/python -B -m unittest discover -s tests -q
+        run: |
+          set -o pipefail
+          .venv/bin/python -B -m unittest discover -s tests -q 2>&1 | tee test.log || { python3 .github/scripts/annotate.py test.log; exit 1; }
 
   # The Postgres-backed classes (tests/support.py PostgresHarness, tests/test_stall.py's Postgres
   # proxy tests) are skipped everywhere else because they need SWARM_TEST_CONFIG. Give them a
