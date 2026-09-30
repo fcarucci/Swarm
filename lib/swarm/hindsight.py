@@ -5,9 +5,12 @@ Only used when `[hindsight] url` is set; with no url nothing imports this module
 
 A job's *project* (`swarm activate --project`, default the job name) names the Hindsight bank
 its memories go to, so several jobs can share one project's memory. Endpoints used (Hindsight
-HTTP API 0.8, /openapi.json):
+HTTP API 0.8.6 and 0.10.2, /openapi.json):
 
-  GET    /v1/default/banks/{bank}/profile          does the bank exist (404 if not)
+  GET    /v1/default/banks/{bank}/profile          does the bank exist (0.8: 404 if not; 0.10 removed
+                                                   it: 410)
+  GET    /v1/default/banks/{bank}/config           the same question on 0.10 (404 if not); 0.8 answers
+                                                   200 for any bank, so it is only asked after a 410
   PUT    /v1/default/banks/{bank}                  create it (only when the GET said 404)
   POST   /v1/default/banks/{bank}/memories         retain (async: returns once queued)
   POST   /v1/default/banks/{bank}/memories/recall  recall (budget "low")
@@ -241,6 +244,7 @@ class Client:
         # the circuit breaker's marker: host-only, not in the spool, which a
         # sandboxed agent can write; reached through safefs (never a link, never blocking)
         self.marker_name = "hindsight-unreachable"
+        self._profile_gone = False   # the server answered 410 to GET .../profile (0.10+)
 
     # ---- the circuit breaker
     def _marked_down(self) -> bool:
@@ -332,13 +336,24 @@ class Client:
         return self._bank_path(bank) + "/documents/" + urllib.parse.quote(document_id, safe="")
 
     # ---- the API
-    def profile(self, bank: str) -> dict | None:
-        return self._call("GET", self._bank_path(bank) + "/profile", missing_ok=True)
+    def bank_exists(self, bank: str) -> bool:
+        """Whether the bank exists, on 0.8.6 and 0.10.x alike. 0.8.6 answers GET .../profile
+        (404 for a missing bank). 0.10 removed that (410 Gone) and answers GET .../config with
+        404 for a missing bank; 0.8.6's config answers 200 for any bank, so config is only asked
+        after a 410. Decided by the answer, not by a version string."""
+        if not self._profile_gone:
+            try:
+                return self._call("GET", self._bank_path(bank) + "/profile", missing_ok=True) is not None
+            except HindsightError as exc:
+                if exc.status != 410:
+                    raise
+                self._profile_gone = True
+        return self._call("GET", self._bank_path(bank) + "/config", missing_ok=True) is not None
 
     def ensure_bank(self, bank: str) -> None:
         """Create the bank if it doesn't exist. Never PUTs an existing bank (PUT would reset
         fields it doesn't carry to their defaults)."""
-        if self.profile(bank) is None:
+        if not self.bank_exists(bank):
             self._call("PUT", self._bank_path(bank), {})
 
     def retain(self, bank: str, content: str, tags: list[str], metadata: dict[str, str],

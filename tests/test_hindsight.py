@@ -487,6 +487,73 @@ class SpoolRetryTests(HindsightEnv):
         self.assertEqual(rec["attempts"], 1)
 
 
+@unittest.skipUnless(_can_listen(), "cannot bind a loopback socket here (sandbox?) for the fake Hindsight")
+class HindsightApiShapesTest(HindsightEnv):
+    """The client against both API shapes: 0.8.6 (GET /profile answers, /config is 200 for any
+    bank) and 0.10.x (/profile is 410 Gone, /config 404s a missing bank)."""
+
+    def client_for(self, api: str):
+        from swarm import hindsight
+        self.fake.api = api
+        self.enable()
+        return hindsight.Client(self.cfg)
+
+    def test_bank_exists_and_ensure_bank_on_both_shapes(self):
+        for api in ("0.8", "0.10"):
+            with self.subTest(api=api):
+                self.fake.banks.clear()
+                self.fake.requests.clear()
+                client = self.client_for(api)
+                self.assertFalse(client.bank_exists("fresh"))
+                client.ensure_bank("fresh")
+                self.assertTrue(client.bank_exists("fresh"))
+                client.ensure_bank("fresh")   # never PUTs an existing bank
+                self.assertEqual(len(self.fake.calls("PUT", "/v1/default/banks/fresh")), 1)
+
+    def test_a_410_on_profile_is_asked_once_per_client(self):
+        client = self.client_for("0.10")
+        client.ensure_bank("a")
+        client.ensure_bank("b")
+        self.assertEqual(len(self.fake.calls("GET", "/a/profile") + self.fake.calls("GET", "/b/profile")), 1)
+        self.assertEqual(len(self.fake.calls("GET", "/config")), 2)
+
+    def test_0_8_never_asks_config(self):
+        client = self.client_for("0.8")
+        client.ensure_bank("a")
+        self.assertEqual(self.fake.calls("GET", "/config"), [])
+
+    def test_retain_and_recall_on_both_shapes(self):
+        for api in ("0.8", "0.10"):
+            with self.subTest(api=api):
+                client = self.client_for(api)
+                self.assertEqual(client.recall("absent-" + api, "q"), [])   # 404 -> []
+                client.retain("bank-" + api, "a fact", tags=["swarm"], metadata={"source": "swarm"},
+                              document_id="d1")
+                self.assertEqual([i["text"] for i in client.recall("bank-" + api, "q")], ["a fact"])
+                self.assertEqual(client.document("bank-" + api, "d1")["id"], "d1")
+                self.assertIsNone(client.document("bank-" + api, "nope"))
+                client.delete_bank("bank-" + api)
+
+    def test_other_profile_errors_are_not_mistaken_for_410(self):
+        client = self.client_for("0.10")
+        self.fake.fail(500, "boom", method="GET")
+        from swarm import hindsight
+        with self.assertRaises(hindsight.HindsightError) as cm:
+            client.bank_exists("x")
+        self.assertEqual(cm.exception.status, 500)
+
+    def test_remember_creates_the_bank_on_0_10(self):
+        self.fake.api = "0.10"
+        self.enable()
+        self.cli("activate", "--job", "J", "--project", "proj")
+        self.hook("start")
+        me = self.agent("agent-1").name
+        rc, out, err = self.cli("remember", "--job", "J", "--as", me, "a fact")
+        self.assertEqual((rc, err), (0, ""))
+        self.assertEqual(len(self.fake.calls("PUT", "/v1/default/banks/proj")), 1)
+        self.assertEqual(len(self.fake.calls("POST", "/v1/default/banks/proj/memories")), 1)
+
+
 @unittest.skipUnless(os.environ.get("SWARM_TEST_HINDSIGHT_URL"),
                      "set SWARM_TEST_HINDSIGHT_URL to run the live Hindsight smoke test")
 class LiveHindsightSmokeTest(unittest.TestCase):
@@ -502,7 +569,7 @@ class LiveHindsightSmokeTest(unittest.TestCase):
         bank = f"swarm-test-{uuid.uuid4().hex[:10]}"
         self.assertTrue(bank.startswith("swarm-test-"))
         client = hindsight.Client(cfg)
-        self.assertIsNone(client.profile(bank))  # brand new: we never touch an existing bank
+        self.assertFalse(client.bank_exists(bank))  # brand new: we never touch an existing bank
         try:
             client.retain(bank, "The swarm live smoke test stores this fact about zebras.",
                           tags=["swarm", "job:live-test"], metadata={"source": "swarm"})

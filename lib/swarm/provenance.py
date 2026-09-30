@@ -808,7 +808,7 @@ def prune(board, cfg: dict, client=None, deadline: float | None = None) -> Prune
                     break
                 asked += 1
                 try:
-                    banks[r.bank] = client.profile(r.bank) is not None
+                    banks[r.bank] = client.bank_exists(r.bank)
                 except hindsight.HindsightUnavailable:
                     raise
                 except Exception:

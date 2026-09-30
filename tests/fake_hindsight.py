@@ -28,6 +28,7 @@ class FakeHindsight:
         self.documents: dict[str, dict[str, dict]] = {}
         # whether /openapi.json advertises `metadata` in UpdateDocumentRequest (0.8.6: it doesn't)
         self.metadata_patch = False
+        self.api = "0.8"   # "0.10": profile answers 410, config 404s for a missing bank, no create-on-read
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -135,6 +136,12 @@ class FakeHindsight:
         fault = self._fault(method, bank, body, path)
         if fault:
             return fault
+        if rest in ("/profile", "/background") and self.api == "0.10":
+            return 410, {"detail": "The bank profile endpoints have been removed. Read /config instead."}
+        if method == "GET" and rest == "/config":
+            if self.api == "0.10" and bank not in self.banks:
+                return 404, {"detail": f"Bank '{bank}' not found"}
+            return 200, {"bank_id": bank, "config": {}, "overrides": {}}   # 0.8.6: 200 even for a missing bank
         if method == "GET" and rest == "/profile":
             if bank not in self.banks:
                 return 404, {"detail": f"Bank '{bank}' not found"}   # 0.8.6's wording

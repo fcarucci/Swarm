@@ -232,7 +232,7 @@ class PruneUnitTests(HindsightEnv):
 
     def client(self, answers):
         c = mock.Mock()
-        c.profile.return_value = {"bank_id": "notes"}
+        c.bank_exists.return_value = True
 
         def document(bank, doc):
             a = answers[doc]
@@ -272,7 +272,7 @@ class PruneUnitTests(HindsightEnv):
         self.cfg["provenance"]["check_max"] = 2
         c = self.client({"d1": None, "d2": None, "d3": None})
         res, left = self.prune(c)
-        self.assertEqual((c.profile.call_count, c.document.call_count), (1, 1))
+        self.assertEqual((c.bank_exists.call_count, c.document.call_count), (1, 1))
         self.assertEqual(left, {"d2", "d3"})
         self.assertEqual((res.checked, res.unknown, res.skipped), (1, 0, 2))
 
@@ -280,7 +280,7 @@ class PruneUnitTests(HindsightEnv):
         with self.board() as b:
             b.save_memory_ref(mref("m1", bank="gone-bank"))
         c = self.client({"d1": {"id": "d1"}, "d2": {"id": "d2"}, "d3": {"id": "d3"}})
-        c.profile.side_effect = lambda bank: None if bank == "gone-bank" else {"bank_id": bank}
+        c.bank_exists.side_effect = lambda bank: bank != "gone-bank"
         res, left = self.prune(c)
         self.assertIn("m1", left)
         with self.board() as b:
@@ -298,7 +298,7 @@ class PruneUnitTests(HindsightEnv):
                 b.save_memory_ref(mref(f"m{i}", bank="gone-bank", created_at=old))
             b.save_memory_ref(mref("d1"))
         c = self.client({"d1": None})
-        c.profile.side_effect = lambda bank: None if bank == "gone-bank" else {"bank_id": bank}
+        c.bank_exists.side_effect = lambda bank: bank != "gone-bank"
         res, left = self.prune(c)
         self.assertEqual(c.document.call_count, 0)   # profile gone-bank, profile notes: the cap
         self.assertEqual(res.skipped, 1)
@@ -317,7 +317,7 @@ class PruneUnitTests(HindsightEnv):
 
     def test_a_bank_profile_error_drops_nothing_in_that_bank(self):
         c = self.client({"d1": None, "d2": None, "d3": None})
-        c.profile.side_effect = hindsight.HindsightError("HTTP 500", 500)
+        c.bank_exists.side_effect = hindsight.HindsightError("HTTP 500", 500)
         res, left = self.prune(c)
         self.assertEqual(left, {"d1", "d2", "d3"})
         c.document.assert_not_called()
