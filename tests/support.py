@@ -51,6 +51,12 @@ import shutil as _shutil  # noqa: E402
 import tempfile as _tempfile  # noqa: E402
 from swarm import bootstrap as _bootstrap  # noqa: E402
 
+# The temp dir, resolved: on macOS it lives under /var, a symlink to /private/var, and the swarm's
+# safe path handling rightly refuses symlinked components. Tests (and their child processes) get
+# the real path.
+_tempfile.tempdir = os.path.realpath(_tempfile.gettempdir())
+os.environ["TMPDIR"] = _tempfile.tempdir
+
 # Child processes that import this module (the file-board tests kill some with SIGKILL, so no atexit
 # runs there) reuse the parent's sandbox, handed down in the environment; only the process that
 # made it removes it.
