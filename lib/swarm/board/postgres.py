@@ -808,9 +808,9 @@ class PostgresBoard(Board):
     def set_waiting(self, job: str, on: str | None, until: _dt.datetime | None = None) -> bool:
         return self._conn.execute(
             "UPDATE jobs SET waiting_on = %s, waiting_since = CASE WHEN %s::text IS NULL THEN NULL "
-            "ELSE now() END, waiting_until = CASE WHEN %s::text IS NULL THEN NULL ELSE %s END "
+            "ELSE now() END, waiting_until = %s::timestamptz "
             "WHERE job = %s AND status = 'active' RETURNING job",
-            (on, on, on, until, job)).fetchone() is not None
+            (on, on, until if on is not None else None, job)).fetchone() is not None
 
     def set_job_max_hours(self, job: str, hours: float | None) -> bool:
         return self._conn.execute("UPDATE jobs SET max_hours = %s WHERE job = %s RETURNING job",

@@ -194,13 +194,13 @@ class ExpiryContract:
         self.assertEqual(self.status().waiting_until, until)
         self.assertEqual(self.sweep(), [])
         self.assertEqual(self.status().waiting_on, "CI")
-        self.h.update_job("j", waiting_until=self.b.now() - base._dt.timedelta(minutes=10))
+        self.h.backdate_job("j", waiting_until=10 * MIN)
         # expired: the wait is cleared, and the orphan clock restarts from its end
         self.assertEqual(self.sweep(), [])
         s = self.status()
         self.assertEqual((s.status, s.waiting_on, s.waiting_until), ("active", None, None))
-        self.h.update_job("j", waiting_until=None)
-        self.b.set_waiting("j", "again", self.b.now() - base._dt.timedelta(minutes=31))
+        self.b.set_waiting("j", "again", self.b.now() + base._dt.timedelta(hours=1))
+        self.h.backdate_job("j", waiting_until=31 * MIN)
         self.assertEqual([c.job for c in self.sweep()], ["j"])
         self.assertEqual(self.status().outcome, "auto-closed: no live agents for 30 min")
 
