@@ -3285,8 +3285,29 @@ def _reads_only(args) -> bool:
             or (args.cmd == "transcript" and args.tcmd in TRANSCRIPT_COMMANDS))
 
 
+NEEDS_PRIMARY = "cannot reach the board database: {}{}"
+
+
 def _main(argv=None) -> int:
+    """Parse and run one command. No command dies with a traceback for want of a primary: a board
+    that can't be reached, or a server that is a standby (psycopg's read-only error, SQLSTATE
+    25006, e.g. a single-host config pointing at one), is one line on stderr and exit 1."""
+    from swarm.board import BoardUnavailable
     args = _parser().parse_args(argv)
+    note = "" if _reads_only(args) else " (this command writes: it needs the primary)"
+    try:
+        return _dispatch(args)
+    except BoardUnavailable as exc:
+        print(NEEDS_PRIMARY.format(exc, note), file=sys.stderr)
+        return 1
+    except Exception as exc:
+        if getattr(exc, "sqlstate", None) != "25006":   # read_only_sql_transaction
+            raise
+        print(NEEDS_PRIMARY.format(f"{exc} (the server is a standby)", note), file=sys.stderr)
+        return 1
+
+
+def _dispatch(args) -> int:
     # doctor reads (and reports on) the config itself: a broken one must not stop it
     cfg = {} if args.cmd == "doctor" else load_config(args.config)
     # a supervise dry run writes nothing: no board setup or migration either

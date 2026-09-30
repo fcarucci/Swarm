@@ -121,6 +121,25 @@ class ConnectionStringTests(unittest.TestCase):
     def test_any_host_accepts_a_standby(self):
         self.assertEqual(self.connect(cfg_for("a,b"), any_host=True)["target_session_attrs"], "any")
 
+    def test_a_dead_host_costs_a_few_seconds_not_the_budget(self):
+        self.assertEqual(self.connect(cfg_for("a,b", connect_timeout=10))["connect_timeout"], 3)
+        self.assertEqual(self.connect(cfg_for("a,b", connect_timeout=1))["connect_timeout"], 1)
+        self.assertEqual(self.connect(cfg_for("a", connect_timeout=10))["connect_timeout"], 10)   # as ever
+
+    def test_a_primary_later_in_the_list_is_found_before_any_fallback(self):
+        """psycopg tries the hosts one by one, each with its own timeout: a dead first host must
+        not stop the read-write attempt from reaching the primary behind it, or from being
+        preferred over the `any` fallback."""
+        tried = []
+
+        def connect(**kw):
+            tried.append(kw["target_session_attrs"])
+            return FakeConn("pg-2")
+        with mock.patch.object(pg._DeadlineConnection, "connect", side_effect=connect):
+            board = pg.PostgresBoard(cfg_for("dead,pg-2,pg-3"), readers=True)
+        self.assertIsNone(board.degraded)
+        self.assertEqual(tried, ["read-write"])
+
     def test_no_primary_is_said_so(self):
         with mock.patch.object(pg._DeadlineConnection, "connect", side_effect=psycopg.OperationalError("read-only")):
             with self.assertRaisesRegex(BoardUnavailable, "no primary reachable among a, b"):
@@ -283,6 +302,45 @@ class CliTests(unittest.TestCase):
         self.assertIn("cannot reach the board database: no primary reachable", err)
         self.assertIn("needs the primary", err)
         self.assertNotIn("Traceback", err)
+
+    def test_every_command_that_opens_the_board_fails_cleanly(self):
+        """Opened outside the main handler (activate, deactivate, job, move, remember, init...):
+        one line, exit 1, no traceback."""
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix="swarm-pghosts-", dir=os.environ.get("TMPDIR"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
+        self.cfg["hook"]["marker_dir"] = tmp
+        self.cfg["board"]["spool_dir"] = tmp
+        # (deactivate and remember say so themselves and carry on: the marker is removed, the memory spooled)
+
+        def opened(cfg, init_timeout=60.0, readers=False):
+            raise BoardUnavailable("no primary reachable among pg-1, pg-2: down")
+        for argv in (["activate", "--job", "J", "--session", "s1"], ["activate", "--job", "J", "--attach"],
+                     ["job", "J", "--description", "d"], ["move", "--as", "Homer", "--to", "K"],
+                     ["join", "--job", "J", "--key", "k"], ["leave", "--key", "k"], ["purge"]):
+            with self.subTest(argv=argv), mock.patch.object(swarm, "initialize", create=True):
+                rc, out, err = self.run_main(argv, opened)
+                self.assertEqual(rc, 1, (out, err))
+                self.assertIn("cannot reach the board database", err)
+                self.assertIn("needs the primary", err)
+
+    def test_init_without_a_primary(self):
+        with mock.patch("swarm.board.autoinit.initialize", side_effect=BoardUnavailable("down")):
+            rc, out, err = self.run_main(["init"], None)
+        self.assertEqual(rc, 1)
+        self.assertIn("cannot reach the board database: down", err)
+
+    @need_pg
+    def test_a_write_on_a_standby_is_a_message(self):
+        exc = psycopg.errors.ReadOnlySqlTransaction("cannot execute INSERT in a read-only transaction")
+        with mock.patch.object(swarm, "_dispatch", side_effect=exc):
+            rc, out, err = self.run_main(["purge"], None)
+        self.assertEqual(rc, 1)
+        self.assertIn("cannot reach the board database", err)
+        self.assertIn("standby", err)
+        with mock.patch.object(swarm, "_dispatch", side_effect=ValueError("bug")), \
+                self.assertRaises(ValueError):
+            self.run_main(["purge"], None)
 
     def test_the_sweeper_leaves_a_standby_alone(self):
         board = mock.Mock(degraded="pg-2")

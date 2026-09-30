@@ -511,6 +511,15 @@ def _server_args(db: dict, any_host: bool = False) -> dict:
             "target_session_attrs": "any" if any_host else "read-write"}
 
 
+MULTI_HOST_CONNECT_TIMEOUT = 3   # psycopg applies connect_timeout to each host in turn
+
+def _connect_timeout(db: dict, hosts: int) -> int:
+    """[database] connect_timeout, but at most MULTI_HOST_CONNECT_TIMEOUT per host when there are
+    several: a dead host costs a few seconds, not the whole budget, and the next host is tried."""
+    timeout = db["connect_timeout"]
+    return min(timeout, MULTI_HOST_CONNECT_TIMEOUT) if hosts > 1 and timeout else timeout
+
+
 def _connect(cfg: dict, admin: bool = False, any_host: bool = False) -> "psycopg.Connection":
     """One autocommit connection, as swarm.connect() made it, with the query deadline.
     Failure -> BoardUnavailable."""
@@ -529,7 +538,7 @@ def _connect(cfg: dict, admin: bool = False, any_host: bool = False) -> "psycopg
         conn = _DeadlineConnection.connect(
             **_server_args(db, any_host), user=db["user"], password=_password(db),
             dbname=db["admin_dbname"] if admin else db["dbname"],
-            connect_timeout=db["connect_timeout"], sslmode=db["sslmode"], autocommit=True, **extra)
+            connect_timeout=_connect_timeout(db, len(hosts)), sslmode=db["sslmode"], autocommit=True, **extra)
     except Exception as exc:
         if len(hosts) > 1 and not any_host and isinstance(exc, psycopg.OperationalError):
             raise BoardUnavailable(f"no primary reachable among {', '.join(h for h, _ in hosts)}: "
