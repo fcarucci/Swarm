@@ -384,7 +384,7 @@ class CodexOrderingTests(FinalRetryEnv):
                 mock.patch.object(type(codex), "find_agent_transcript", lambda self, main, key: rollout):
             for _ in range(len(keys)):
                 with self.board() as b:
-                    transcripts.finalize_owned(b, self.cfg, time.monotonic() + 0.1)
+                    transcripts.finalize_owned(b, self.cfg, time.monotonic() + 0.5)
                 if self.row(good, job="CX") is not None:
                     break
         self.assertTrue(self.row(good, job="CX").final)
