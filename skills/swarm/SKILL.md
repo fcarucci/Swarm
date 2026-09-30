@@ -204,13 +204,14 @@ it expires the wait shields the job from the orphan rule (not from the stall lim
 sweep on demand; it is best effort and never fails the command that ran it.
 
 ## Running a swarm (the orchestrating session does this)
+
 **Be conservative with jobs.** Before spawning an agent: if the work is small, do it yourself.
 Otherwise look for a running job whose scope fits (`swarm status`) and spawn into it, with that
-job's `[swarm job: <job>]` line in the prompt. Create a new job (step 1) only for substantial work
-that needs several coordinating agents. Don't create a one-agent-plus-judge job unless the user
-asks for one. Don't run duplicate jobs: merge similar ones (`swarm job merge <from> --into <to>`)
-and move agents between jobs (`swarm move`). When a job has a judge, activate it with `--goal`, so the judge gets the seat and
-can record its verdict.
+job's `[swarm job: <job>]` line in the prompt. Create a new job (step 1) only for substantial
+work that needs several coordinating agents. Don't create a one-agent-plus-judge job unless the
+user asks for one. Don't run duplicate jobs: merge similar ones (`swarm job merge <from> --into
+<to>`) and move agents between jobs (`swarm move`). When a job has a judge, activate it with
+`--goal`, so a judge can be seated and record its verdict.
 
 1. **Pick a short job id**, e.g. `recall-latency-2026-09`, and activate it:
    ```
@@ -363,7 +364,8 @@ same; what differs:
   the job to the calling Codex session by itself and prints `swarm command: <absolute path>`,
   the path to use from then on (`~/.local/bin/swarm` works too once it exists).
 - **One job per Codex session.** `activate` (and `activate --attach`) refuses a second job in
-  the same Codex session: deactivate the first, or use another session.
+  the same Codex session: deactivate the first, or use another session. Reuse means the
+  session's own job; a new job needs a new session.
 - **Spawning.** Spawn with `spawn_agent`; the child's prompt is its `message`. Codex encrypts
   that message, so the hooks can't read tag lines in it (leave them in or out, they have no
   effect). Instead:

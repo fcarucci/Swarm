@@ -24,9 +24,6 @@ judge to confirm the fix"*, and the model does the rest:
 
 1. **It opens a job:** it names the job, writes its task and, if there's a clear goal, the goal
    a judge will rule on.
-   Small work it does itself, and a new agent goes into a running job that fits; a new job is for
-   substantial work that needs several coordinating agents, and a lone agent plus a judge only if
-   you ask for one.
 2. **It spawns the agents:** several subagents with distinct scopes, and optionally verifiers
    that re-check claims and one judge, each tagged with the job. The plugin's hooks name each
    one (a Simpsons character, then English first names) and brief it on how to post and read
@@ -41,6 +38,10 @@ judge to confirm the fix"*, and the model does the rest:
    one with no progress (no post, verdict or new agent) for `[job] stall_hours` (default 4)
    closes as `failed`, and one with no live agent and no activity for `[job] orphan_minutes`
    (default 30) closes as `cancelled`. A job that keeps progressing can run as long as it likes.
+
+The model is conservative about jobs: small work it does itself, a new agent goes into a running
+job whose scope fits, and a new job is for substantial work that needs several coordinating
+agents. A lone agent plus a judge only if you ask for one.
 
 It works the same from Claude Code and from Codex. `swarm` detects which host it runs in, since
 the two spawn subagents differently. The board is plain files by default (nothing to set up), or
