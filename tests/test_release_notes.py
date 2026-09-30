@@ -63,6 +63,16 @@ class ReleaseNotesTest(unittest.TestCase):
         self.assertNotIn("0.2.0]", body)
         self.assertIn("Full changelog:", body)
 
+    def test_layout_changes_first_then_install_then_one_upgrade_line(self):
+        self.commit("first", CHANGELOG)
+        self.git("tag", "v0.1.0")
+        out = self.notes("v0.1.0").stdout
+        self.assertTrue(out.startswith("## What's changed\n"), out)
+        self.assertLess(out.index("Full changelog:"), out.index("## Install"))
+        tail = out.split("## Install", 1)[1].strip().splitlines()
+        self.assertEqual(len([l for l in tail if l.strip()]), 2, tail)
+        self.assertNotIn("schema", out)
+
     def test_the_file_is_read_as_it_was_at_the_tag(self):
         self.commit("first", CHANGELOG.replace("Second thing.", "Old wording."))
         self.git("tag", "v0.2.0")

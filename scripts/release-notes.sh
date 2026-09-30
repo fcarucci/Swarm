@@ -46,7 +46,7 @@ fi
 
 INSTALL_LINE="curl -fsSL https://raw.githubusercontent.com/fcarucci/Swarm/main/install.sh | bash"
 
-UPGRADE_NOTE="Upgrade every host sharing a board at once: once a board is upgraded, every host that shares it (another machine, or the claude/codex OS users on the same shared host) must be updated together, or an older client left behind fails in ways that are easy to miss rather than just \"old features missing\" -- see README.md's Upgrading section, or docs/REFERENCE.md#upgrading-this-version-needs-schema-v9-on-every-host-at-once for the details. Update the plugin everywhere before relying on a shared board again."
+UPGRADE_NOTE="Upgrade every host that shares a board together (\`swarm update\`); see README.md, Upgrading."
 
 # ---------------------------------------------------------------------------- classify commits
 
@@ -110,16 +110,15 @@ changelog_section() {
 
 # ------------------------------------------------------------------------------------ render
 
-echo "## Install"
-echo
-echo '```sh'
-echo "$INSTALL_LINE"
-echo '```'
-echo
-echo "## Upgrading"
-echo
-echo "$UPGRADE_NOTE"
-echo
+footer() {
+  echo
+  echo "## Install"
+  echo
+  echo "\`$INSTALL_LINE\`"
+  echo
+  echo "$UPGRADE_NOTE"
+}
+
 echo "## What's changed"
 echo
 
@@ -128,6 +127,7 @@ if [ -z "${RELEASE_NOTES_COMMITS:-}" ] && [ -n "$CL" ]; then
   printf '%s\n' "$CL"
   echo
   echo "Full changelog: https://github.com/fcarucci/Swarm/blob/main/CHANGELOG.md"
+  footer
   exit 0
 elif [ -z "${RELEASE_NOTES_COMMITS:-}" ] && [ -n "$TAG" ]; then
   echo "error: CHANGELOG.md has no '## [${DISPLAY_TAG#v}]' section; add one before tagging" >&2
@@ -165,3 +165,5 @@ if [ -z "$PREV" ]; then
   echo
   echo "_First release: every commit up to ${DISPLAY_TAG} is listed above._"
 fi
+
+footer
