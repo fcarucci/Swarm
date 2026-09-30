@@ -194,9 +194,9 @@ def spool_verdict(cfg: dict, job: str, name: str, verdict: str, reason: str,
                         "next": next_steps}, ".vrd")
 
 
-def spool_wait(cfg: dict, job: str, on: str | None) -> Path:
-    """Queue a `swarm wait --on <on>` (on None: `swarm resume`) for the hooks to apply (a Codex sandbox has no network, so a Postgres board is out of its reach)."""
-    return _spool(cfg, {"job": job, "on": on}, ".wat")
+def spool_wait(cfg: dict, job: str, on: str | None, until: float | None = None) -> Path:
+    """Queue a `swarm wait --on <on>` (on None: `swarm resume`) for the hooks to apply (a Codex sandbox has no network, so a Postgres board is out of its reach). `until`: epoch seconds when a bounded wait (`--for`) expires."""
+    return _spool(cfg, {"job": job, "on": on, **({"until": until} if until else {})}, ".wat")
 
 
 def pending_since(cfg: dict, job: str, since: float) -> bool:
@@ -287,7 +287,11 @@ def _load(d: int, claimed: str, name: str) -> tuple | None:
             if not _valid_job(m["job"]) or not (on is None or (
                     isinstance(on, str) and 0 < len(on) <= WAIT_MAX and on.strip() and not has_controls(on))):
                 raise ValueError("not a plain job name or wait text")
-            return m["job"], on
+            until = m.get("until")   # absent: an unbounded wait (and in files of older versions)
+            if until is not None and not (isinstance(until, (int, float)) and not isinstance(until, bool)
+                                          and 0 < until < 4e9):
+                raise ValueError("until is not a time")
+            return m["job"], on, until
         if not _valid_job(m["job"]) or not valid_name(m["name"]):
             raise ValueError("not a plain job or agent name")
         if suffix == ".vrd":
@@ -477,7 +481,9 @@ def _deliver(board, cfg: dict, d: int, name: str, claimed: str, rec: tuple, fail
         return "stop" if outcome == "board" else "skip"
     try:
         if suffix == ".wat":
-            accepted = bool(board.set_waiting(rec[0], rec[1]))   # False: the job isn't open
+            import datetime as dt
+            accepted = bool(board.set_waiting(   # False: the job isn't open
+                rec[0], rec[1], dt.datetime.fromtimestamp(rec[2], dt.timezone.utc) if rec[2] else None))
         elif suffix == ".vrd":
             accepted = _deliver_spooled_verdict(board, rec)
         else:

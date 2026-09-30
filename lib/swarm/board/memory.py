@@ -265,7 +265,7 @@ class MemoryBoard(Board):
                "created_by": None, "session_id": None, "created_at": self.now(),
                "activated_at": None, "finished_at": None, "project": None, "goal": None,
                **_NO_VERDICT, "completion_forced": False, "waiting_on": None, "waiting_since": None,
-               "closed_by": None}
+               "waiting_until": None, "max_hours": None, "closed_by": None}
         row.update(fields)
         return row
 
@@ -294,7 +294,7 @@ class MemoryBoard(Board):
             else:
                 j.update(status="active", activated_at=now, finished_at=None, outcome=None,
                          completion_forced=False, spawns=0, waiting_on=None, waiting_since=None,
-                         closed_by=None, **_NO_VERDICT)
+                         waiting_until=None, max_hours=None, closed_by=None, **_NO_VERDICT)
                 for k, v in (("description", description), ("task", task), ("session_id", session_id),
                              ("project", project), ("goal", goal)):
                     if v is not None:
@@ -320,7 +320,7 @@ class MemoryBoard(Board):
                 a.update(left_at=now, state="left", current_tool=None, tool_started_at=None)
         if j is not None:
             j.update(status=status, finished_at=j["finished_at"] or now, completion_forced=bool(forced),
-                     waiting_on=None, waiting_since=None, closed_by=closed_by)
+                     waiting_on=None, waiting_since=None, waiting_until=None, closed_by=closed_by)
             if outcome is not None:
                 j["outcome"] = outcome
         s.touch()
@@ -361,13 +361,24 @@ class MemoryBoard(Board):
             s.touch()
             return True
 
-    def set_waiting(self, job: str, on: str | None) -> bool:
+    def set_waiting(self, job: str, on: str | None, until: _dt.datetime | None = None) -> bool:
         s = self._s()
         with s.lock:
             j = s.jobs.get(job)
             if j is None or j["status"] != "active":
                 return False
-            j.update(waiting_on=on, waiting_since=None if on is None else self.now())
+            j.update(waiting_on=on, waiting_since=None if on is None else self.now(),
+                     waiting_until=None if on is None else until)
+            s.touch()
+            return True
+
+    def set_job_max_hours(self, job: str, hours: float | None) -> bool:
+        s = self._s()
+        with s.lock:
+            j = s.jobs.get(job)
+            if j is None:
+                return False
+            j["max_hours"] = hours
             s.touch()
             return True
 
@@ -960,7 +971,8 @@ class MemoryBoard(Board):
             judge=(self._active_judge(j["job"]) or {}).get("name"),
             waiting_on=j.get("waiting_on"), waiting_since=j.get("waiting_since"),
             closed_by=j.get("closed_by"), supervise=j.get("supervise", True),
-            verdict_next=j.get("verdict_next"))
+            verdict_next=j.get("verdict_next"), max_hours=j.get("max_hours"),
+            waiting_until=j.get("waiting_until"))
 
     def job_status(self, job: str) -> JobStatus | None:
         s = self._s()

@@ -473,7 +473,7 @@ class AutoCloseCliTests(Env):
         self.assertRegex(out, r"\nfinished   \d+s ago \(auto-closed; activate reopens it\)\n")
 
     def test_config_zero_disables(self):
-        self.config.write_text(self.config.read_text() + "[job]\nauto_close_minutes = 0\n")
+        self.config.write_text(self.config.read_text() + "[job]\nauto_close_minutes = 0\norphan_minutes = 0\n")
         self.cfg = swarm.load_config(self.config)
         self.finished_job()
         self.cli("status")

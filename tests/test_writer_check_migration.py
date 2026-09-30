@@ -54,14 +54,16 @@ class WriterCheckMigrationTests(unittest.TestCase):
     def test_a_schema_9_board_gets_both_the_check_drop_and_verdict_next_idempotently(self):
         self.make_old_board()
         c = self.h._db()
-        c.execute("ALTER TABLE jobs DROP COLUMN verdict_next")   # as a schema-9 board has it
+        for column in ("verdict_next", "max_hours", "waiting_until"):   # as a schema-9 board has it
+            c.execute(f"ALTER TABLE jobs DROP COLUMN {column}")
         c.execute("PRAGMA user_version = 9")
         for _ in range(2):   # setup twice: idempotent
             setup_board(self.h.cfg, SMALL_POOL)
         c = self.h._db()
         self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
-        self.assertEqual(SCHEMA_VERSION, 10)
-        self.assertIn("verdict_next", [r[1] for r in c.execute("PRAGMA table_info(jobs)")])
+        self.assertEqual(SCHEMA_VERSION, 11)
+        for column in ("verdict_next", "max_hours", "waiting_until"):
+            self.assertIn(column, [r[1] for r in c.execute("PRAGMA table_info(jobs)")])
         self.assertNotIn("CHECK (writer", c.execute(
             "SELECT sql FROM sqlite_master WHERE name = 'memory_refs'").fetchone()[0])
         with self.h.board() as b:

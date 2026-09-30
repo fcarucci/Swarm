@@ -70,7 +70,7 @@ class WaitCliTests(RoutingEnv):
             self.assertIsNone(b.job_status("J").waiting_on)
 
     def backdate_job_activity(self, job: str) -> None:
-        self.h.backdate_job(job, activated_at=3600, created_at=3600)
+        self.h.backdate_job(job, activated_at=600, created_at=600)   # idle, not yet an orphan (30 min)
 
 
 if __name__ == "__main__":

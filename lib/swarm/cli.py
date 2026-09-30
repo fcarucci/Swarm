@@ -45,6 +45,7 @@ import argparse
 import contextlib
 import json
 import os
+import re
 import sys
 import time
 import tomllib
@@ -103,7 +104,12 @@ DEFAULTS = {
     # An open job closes by itself (status completed, closed_by "auto") once every agent of its
     # current run is done (completed or left; dead ones don't hold it open) and nothing happened
     # on it (no join, no hook contact, no post) for auto_close_minutes. 0 turns it off.
-    "job": {"auto_close_minutes": 30},
+    #
+    # Two more ways an open job ends, so none runs forever: max_hours caps its life (measured
+    # from its last activation; closed "failed"; `activate --max-hours N` overrides it per job,
+    # 0 = no cap), and orphan_minutes closes one with no live agent (all done, dead or gone; a
+    # waiting job included) and no board activity for that long ("cancelled"). 0 turns either off.
+    "job": {"auto_close_minutes": 30, "max_hours": 4, "orphan_minutes": 30},
     # Codex fires SubagentStop after every turn of a child: it counts as completed once no new
     # turn came for this long
     "codex": {"stop_quiet_minutes": 3},
@@ -268,6 +274,33 @@ def auto_close_minutes(cfg: dict) -> float:
     return float((cfg.get("job") or {}).get("auto_close_minutes") or 0)
 
 
+def job_limits(cfg: dict) -> tuple[float, float]:
+    """([job] max_hours, [job] orphan_minutes); 0 = that rule is off."""
+    job = cfg.get("job") or {}
+    return float(job.get("max_hours") or 0), float(job.get("orphan_minutes") or 0)
+
+
+def parse_duration(text: str) -> float:
+    """Seconds in a duration like "90m", "2h", "1h30m", "45s" (a bare number is minutes).
+    ValueError if it isn't one or is zero."""
+    m = re.fullmatch(r"(?:(\d+(?:\.\d+)?)h)?(?:(\d+(?:\.\d+)?)m)?(?:(\d+(?:\.\d+)?)s)?", text.strip())
+    if re.fullmatch(r"\d+(?:\.\d+)?", text.strip()):
+        seconds = float(text) * 60
+    elif m and any(m.groups()):
+        seconds = sum(float(v) * k for v, k in zip(m.groups(), (3600, 60, 1)) if v)
+    else:
+        raise ValueError(f"not a duration: {text!r} (like 90m, 2h, 1h30m)")
+    if seconds <= 0:
+        raise ValueError("a duration must be more than zero")
+    return seconds
+
+
+def _duration_text(seconds: float) -> str:
+    h, rest = divmod(int(round(seconds)), 3600)
+    m, s = divmod(rest, 60)
+    return "".join(f"{v}{u}" for v, u in ((h, "h"), (m, "m"), (s, "s")) if v) or "0s"
+
+
 def codex_quiet_seconds(cfg: dict) -> float:
     return float((cfg.get("codex") or {}).get("stop_quiet_minutes", 3)) * 60
 
@@ -316,9 +349,19 @@ def sweep_jobs(board, cfg: dict, deadline: float | None = None) -> list:
         from swarm import transcripts as _t
         _t.log(f"supervisor: closing stuck agents failed: {type(exc).__name__}")
     minutes = auto_close_minutes(cfg)
-    if minutes <= 0:
-        return []
-    closed = board.sweep_auto_close(minutes, lambda job: OrchestratorWatch(cfg, minutes, job))
+    closed = []
+    if minutes > 0:
+        closed = board.sweep_auto_close(minutes, lambda job: OrchestratorWatch(cfg, minutes, job))
+    max_hours, orphan_minutes = job_limits(cfg)
+    try:   # best effort: never fails the caller (a per-job cap applies even with the defaults off)
+        closed += board.sweep_expiry(max_hours, orphan_minutes,
+                                     lambda job: OrchestratorWatch(cfg, orphan_minutes, job))
+    except Exception as exc:
+        from swarm.board import BoardUnavailable
+        if isinstance(exc, BoardUnavailable):
+            raise
+        from swarm import transcripts as _t
+        _t.log(f"sweep: expiry failed: {type(exc).__name__}")
     _drop_auto_closed_markers(board, cfg)
     if closed and transcripts_enabled(cfg):
         from swarm import transcripts
@@ -2210,6 +2253,9 @@ def _parser() -> argparse.ArgumentParser:
                     help="bind this session to an already active job without reopening it")
     ac.add_argument("--no-supervise", action="store_true",
                     help="the supervisor neither closes nor restarts this job's agents ([supervise])")
+    ac.add_argument("--max-hours", type=float, metavar="N",
+                    help="close the job (failed) once it has been open N hours, instead of [job] max_hours; "
+                         "0 = no cap")
     de = sub.add_parser("deactivate", help="turn the board off for the job and close it")
     de.add_argument("--job", required=True)
     de.add_argument("--status", choices=["completed", "cancelled", "failed"], default="completed")
@@ -2226,6 +2272,9 @@ def _parser() -> argparse.ArgumentParser:
                          "what the judge will re-check (required for not_met)")
     wt = sub.add_parser("wait", help="mark an open job as waiting for something (shown by status/watch)")
     wt.add_argument("--job", required=True)
+    wt.add_argument("--for", dest="for_", metavar="DURATION",
+                    help="the wait expires after this long (90m, 2h, 1h30m; a bare number is minutes); "
+                         "then the job is judged as not waiting")
     wt.add_argument("--on", nargs="+", required=True, help="what the job is waiting for")
     rs = sub.add_parser("resume", help="the job is no longer waiting (an agent joining does this too)")
     rs.add_argument("--job", required=True)
@@ -2391,6 +2440,9 @@ def cmd_activate(cfg: dict, args) -> int:
             f"attached this session to {args.job}: its subagents spawned from now on join the board\n"
             f"put this line in every subagent prompt for this job:\n{tag_line(args.job)}"))
         return 0
+    if args.max_hours is not None and args.max_hours < 0:
+        print("swarm activate: --max-hours must be 0 (no cap) or more", file=sys.stderr)
+        return 2
     if args.task == "-" and args.goal == "-":
         print("swarm activate: only one of --goal and --task can be - (stdin)", file=sys.stderr)
         return 2
@@ -2403,6 +2455,8 @@ def cmd_activate(cfg: dict, args) -> int:
         board.open_job(args.job, args.description, task, session, os.environ.get("USER"),
                        project=args.project, goal=goal)
         board.set_job_supervise(args.job, not args.no_supervise)
+        if args.max_hours is not None:
+            board.set_job_max_hours(args.job, args.max_hours)
         closed = _sweep(board, cfg)   # after open_job: never the job being activated
     _write_marker(marker, {"job": args.job, "session_id": session, "cwd": os.getcwd(),
                            "adopt_running": args.adopt_running,
@@ -2890,10 +2944,20 @@ def _board_wait(board, cfg: dict, args) -> int:
     if not on:
         print("say what the job is waiting for: --on \"<what>\"", file=sys.stderr)
         return 1
-    if not board.set_waiting(args.job, on):
+    until = None
+    if args.for_ is not None:
+        try:
+            seconds = parse_duration(args.for_)
+        except ValueError as exc:
+            print(f"swarm wait: --for: {exc}", file=sys.stderr)
+            return 2
+        import datetime as dt
+        until = board.now() + dt.timedelta(seconds=seconds)
+    if not board.set_waiting(args.job, on, until):
         print(f"{args.job} is not an open job", file=sys.stderr)
         return 1
-    print(f"{args.job} is waiting on: {on} (back to active when an agent joins, or with resume)")
+    bound = f" (for up to {_duration_text(seconds)}; " if until else " ("
+    print(f"{args.job} is waiting on: {on}{bound}back to active when an agent joins, or with resume)")
     return 0
 
 
@@ -3013,7 +3077,14 @@ def _main(argv=None) -> int:
                 print("say what the job is waiting for: --on \"<what>\"", file=sys.stderr)
                 return 1
             from swarm.spool import spool_wait
-            spool_wait(cfg, args.job, on)
+            until = None
+            if args.cmd == "wait" and args.for_ is not None:
+                try:
+                    until = time.time() + parse_duration(args.for_)
+                except ValueError as exc:
+                    print(f"swarm wait: --for: {exc}", file=sys.stderr)
+                    return 2
+            spool_wait(cfg, args.job, on, until)
             print(f"queued (board not reachable from here: {_error_name(exc)}); the swarm hooks apply "
                   f"it within seconds. This is normal inside a sandbox.")
             return 0

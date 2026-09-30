@@ -103,7 +103,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     completion_forced INTEGER NOT NULL DEFAULT 0,
     spawns            INTEGER NOT NULL DEFAULT 0,
     waiting_on        TEXT,
-    waiting_since     TEXT
+    waiting_since     TEXT,
+    waiting_until     TEXT,
+    max_hours         REAL
 );
 CREATE TABLE IF NOT EXISTS agents (
     agent_key          TEXT PRIMARY KEY,
@@ -308,6 +310,8 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("jobs", "supervise", "INTEGER NOT NULL DEFAULT 1"),   # 0: activate --no-supervise
     ("transcripts", "capture_failed", "TEXT"),   # schema 9: why the final capture failed (no body)
     ("jobs", "verdict_next", "TEXT"),   # schema 10: the judge's instructions with a not_met verdict
+    ("jobs", "waiting_until", "TEXT"),  # schema 11: when a bounded `wait --for` expires
+    ("jobs", "max_hours", "REAL"),      # schema 11: the job's own lifetime cap
 )
 
 _MESSAGE_COLS = "id, created_at, job, agent_name, to_agent, message"
@@ -580,7 +584,8 @@ class SqliteBoard(Board):
             "session_id = COALESCE(excluded.session_id, jobs.session_id), "
             "project = COALESCE(excluded.project, jobs.project), goal = COALESCE(excluded.goal, jobs.goal), "
             "verdict = NULL, verdict_reason = NULL, verdict_next = NULL, verdict_by = NULL, verdict_at = NULL, "
-            "completion_forced = 0, spawns = 0, waiting_on = NULL, waiting_since = NULL, closed_by = NULL",
+            "completion_forced = 0, spawns = 0, waiting_on = NULL, waiting_since = NULL, "
+            "waiting_until = NULL, max_hours = NULL, closed_by = NULL",
             (job, description, task, session_id, created_by, project, goal, now, now))
 
     def close_job(self, job: str, status: str, outcome: str | None, forced: bool = False,
@@ -596,7 +601,7 @@ class SqliteBoard(Board):
         return c.execute(
             "UPDATE jobs SET status = ?, outcome = COALESCE(?, outcome), "
             "finished_at = COALESCE(finished_at, ?), completion_forced = ?, waiting_on = NULL, "
-            "waiting_since = NULL, closed_by = ? WHERE job = ?",
+            "waiting_since = NULL, waiting_until = NULL, closed_by = ? WHERE job = ?",
             (status, outcome, now, int(bool(forced)), closed_by, job)).rowcount > 0
 
     def auto_close_job(self, job: str, before: _dt.datetime, outcome: str) -> _dt.datetime | None:
@@ -633,10 +638,15 @@ class SqliteBoard(Board):
             "WHERE job = ? AND status = 'completed' AND closed_by = ? AND finished_at = ?",
             (job, AUTO_CLOSED_BY, _ts(closed_at))).rowcount > 0
 
-    def set_waiting(self, job: str, on: str | None) -> bool:
+    def set_waiting(self, job: str, on: str | None, until: _dt.datetime | None = None) -> bool:
         return self._c().execute(
-            "UPDATE jobs SET waiting_on = ?, waiting_since = ? WHERE job = ? AND status = 'active'",
-            (on, None if on is None else self._now(), job)).rowcount > 0
+            "UPDATE jobs SET waiting_on = ?, waiting_since = ?, waiting_until = ? "
+            "WHERE job = ? AND status = 'active'",
+            (on, None if on is None else self._now(), None if on is None or until is None else _ts(until),
+             job)).rowcount > 0
+
+    def set_job_max_hours(self, job: str, hours: float | None) -> bool:
+        return self._c().execute("UPDATE jobs SET max_hours = ? WHERE job = ?", (hours, job)).rowcount > 0
 
     def bind_job_session(self, job: str, session_id: str) -> None:
         self._c().execute("UPDATE jobs SET session_id = ? WHERE job = ? AND session_id IS NULL",
@@ -1115,12 +1125,12 @@ class SqliteBoard(Board):
                  "(SELECT count(*) FROM messages m WHERE m.job = jobs.job), "
                  "(SELECT max(created_at) FROM messages m WHERE m.job = jobs.job), "
                  "(SELECT a.name FROM agents a WHERE a.job = jobs.job AND a.judge AND a.left_at IS NULL), "
-                 "verdict_next")
+                 "verdict_next, max_hours, waiting_until")
 
     def _job_status(self, c: sqlite3.Connection, r, now: _dt.datetime) -> JobStatus:
         (job, status, desc, task, outcome, by, session, created, activated, finished, project, goal,
          verdict, reason, verdict_by, verdict_at, forced, waiting_on, waiting_since, closed_by,
-         supervise, n_messages, last_message, judge, verdict_next) = r
+         supervise, n_messages, last_message, judge, verdict_next, max_hours, waiting_until) = r
         sts = self._agent_statuses(c, job, now, with_messages=False)
         stamps = [a.last_contact_at for a in sts] + ([_dt_(last_message)] if last_message else [])
         count = lambda *st: sum(1 for a in sts if a.status in st)  # noqa: E731
@@ -1134,7 +1144,7 @@ class SqliteBoard(Board):
             verdict=verdict, verdict_reason=reason, verdict_by=verdict_by, verdict_at=_dt_(verdict_at),
             completion_forced=bool(forced), judge=judge, waiting_on=waiting_on,
             waiting_since=_dt_(waiting_since), closed_by=closed_by, supervise=bool(supervise),
-            verdict_next=verdict_next)
+            verdict_next=verdict_next, max_hours=max_hours, waiting_until=_dt_(waiting_until))
 
     def job_status(self, job: str) -> JobStatus | None:
         with self._tx(write=False) as c:

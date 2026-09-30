@@ -77,6 +77,17 @@ class TriggerTests(RespawnEnv):
         self.assertIsNone(self.main("done"))
         self.assertIsNone(self.main("session-stop"))
 
+    def test_a_closed_job_never_nags(self):
+        # closed by hand, or by the expiry sweep, while its marker is still here
+        self.not_met()
+        self.finish("w1", "judge-1")
+        self.assertIsNotNone(self.main("turn"))    # open: it does
+        with self.board() as b:
+            b.close_job("J", "cancelled", "auto-closed: no live agents for 30 min", closed_by="auto")
+        self.assertTrue((self.markers / "J.json").exists())
+        for ev in ("turn", "done", "session-stop"):
+            self.assertIsNone(self.main(ev))
+
     def test_met_says_nothing(self):
         rc, _, _ = self.cli("verdict", "--job", "J", "--as", self.judge, "met", "all", "good")
         self.assertEqual(rc, 0)

@@ -49,7 +49,7 @@ import json
 import lzma
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Mapping, NamedTuple, Sequence
 
@@ -98,8 +98,9 @@ RESTART_OUTCOMES = ("running", "completed", "timeout", "max_turns", "failed", "n
 # triggers), 8 memory_refs and memory_ref_images (memory provenance; the name check of 7 on
 # memory_refs.agent_name, image keys through transcript_images), 9 transcripts.capture_failed
 # (a final capture that kept failing: the row is an audit marker without a body),
-# 10 jobs.verdict_next (the judge's instructions with a not_met verdict).
-SCHEMA_VERSION = 10
+# 10 jobs.verdict_next (the judge's instructions with a not_met verdict), 11 jobs.max_hours (a
+# job's own lifetime cap) and jobs.waiting_until (when a bounded `swarm wait --for` expires).
+SCHEMA_VERSION = 11
 
 # Memory provenance (Board.save_memory_ref): what a writer name may look like (the built-in
 # `swarm-remember`, or a name from [provenance] writers), and how large a stored excerpt may be
@@ -340,6 +341,10 @@ class JobStatus:
     # The judge's instructions with a not_met verdict (what to change, where, what it re-checks);
     # None for met and for verdicts recorded before the column existed.
     verdict_next: str | None = None
+    # A per-job lifetime cap in hours (`activate --max-hours`; None = the [job] max_hours default,
+    # 0 = no cap) and when a bounded wait (`wait --for`) expires (None = unbounded).
+    max_hours: float | None = None
+    waiting_until: _dt.datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -795,7 +800,7 @@ def load_name_pool(data_dir: Path = DATA_DIR) -> dict[str, list[str]]:
 WRITE_METHODS = (
     "purge", "ensure_job", "open_job", "close_job", "auto_close_job", "undo_auto_close",
     "sweep_auto_close", "bind_job_session", "allocate_name", "claim_judge", "claim_verifier",
-    "set_waiting", "reserve_spawn", "record_verdict", "tool_started", "record_route",
+    "set_waiting", "set_job_max_hours", "sweep_expiry", "reserve_spawn", "record_verdict", "tool_started", "record_route",
     "claim_route", "tool_finished", "agent_stopped", "set_agent_role", "set_agent_runtime",
     "agent_turn_ended",
     "turns_resumed", "finish_quiet_agents", "leave", "close_agent", "claim_resume",
@@ -1019,6 +1024,55 @@ class Board(abc.ABC):
                 closed.append(AutoClosed(js.job, outcome))
         return closed
 
+    def sweep_expiry(self, max_hours: float, orphan_minutes: float, watch=None) -> list[AutoClosed]:
+        """Close the open jobs that outlived their welcome (`[job] max_hours`, `orphan_minutes`;
+        0 or less turns a rule off). Returns what it closed. Template method, not overridden.
+
+        A bounded wait (`wait --for`) past its time is cleared first, so the job is judged as
+        not waiting. Then, per open job:
+          * open longer than its cap (jobs.max_hours, else `max_hours`; run_start to now):
+            closed "failed", outcome "auto-closed: open longer than N h" plus its last verdict;
+          * no agent started, running or idle (dead ones don't count; none at all is fine), no
+            board activity (last_activity_at, run start, an expired wait's end) for
+            `orphan_minutes`, not inside an unexpired bounded wait, and `watch(job).active()`
+            (the orchestrating session, cli.OrchestratorWatch) false: closed "cancelled",
+            outcome "auto-closed: no live agents for N min".
+        Both are close_job(..., closed_by=AUTO_CLOSED_BY): the remaining agents leave, and the
+        job shows as auto-closed. The job is read again right before the close, so an agent that
+        joined meanwhile keeps it open. Idempotent; costs one jobs() query when nothing qualifies."""
+        now = self.now()
+        closed = []
+        for js in self.jobs(False):
+            seen_activity = js.last_activity_at
+            if js.waiting_on and js.waiting_until is not None and js.waiting_until <= now:
+                self.set_waiting(js.job, None)   # the bounded wait ran out
+                js = replace(js, waiting_on=None, waiting_since=None,
+                             last_activity_at=max(t for t in (js.last_activity_at, js.waiting_until) if t))
+            cap = max_hours if js.max_hours is None else js.max_hours
+            if cap and cap > 0 and now - run_start(js) >= _dt.timedelta(hours=cap):
+                status = "failed"
+                outcome = f"auto-closed: open longer than {cap:g} h"
+                if js.verdict:
+                    outcome += f"; last verdict {js.verdict}" + (f": {js.verdict_reason}" if js.verdict_reason else "")
+                outcome = outcome[:AUTO_CLOSE_OUTCOME_MAX]
+            elif orphan_minutes and orphan_minutes > 0 and not (js.started or js.running or js.idle) \
+                    and not (js.waiting_on and js.waiting_until is not None) \
+                    and now - (js.last_activity_at or run_start(js)) >= _dt.timedelta(minutes=orphan_minutes) \
+                    and now - run_start(js) >= _dt.timedelta(minutes=orphan_minutes):
+                if watch is not None and watch(js.job).active():
+                    continue
+                status = "cancelled"
+                outcome = f"auto-closed: no live agents for {orphan_minutes:g} min"
+            else:
+                continue
+            now_js = self.job_status(js.job)   # nothing changed since the rollup?
+            if now_js is None or now_js.status != "active" or (status == "cancelled" and (
+                    now_js.started or now_js.running or now_js.idle or now_js.last_activity_at != seen_activity)):
+                continue
+            self.close_job(js.job, status, outcome, closed_by=AUTO_CLOSED_BY)
+            closed.append(AutoClosed(js.job, outcome))
+        return closed
+
     @abc.abstractmethod
     def bind_job_session(self, job: str, session_id: str) -> None:
         """Set the job's session_id only if it is currently None (first spawning session wins,
@@ -1076,10 +1130,16 @@ class Board(abc.ABC):
         the name of one of the job's verifiers (active or departed)."""
 
     @abc.abstractmethod
-    def set_waiting(self, job: str, on: str | None) -> bool:
-        """Record what the OPEN job is waiting for (waiting_on = on, waiting_since = now), or
-        with on=None clear it (it is working again). False if the job is missing or closed.
-        Setting a new reason restarts waiting_since; open_job and close_job clear both."""
+    def set_waiting(self, job: str, on: str | None, until: _dt.datetime | None = None) -> bool:
+        """Record what the OPEN job is waiting for (waiting_on = on, waiting_since = now,
+        waiting_until = until: when a bounded wait expires, None = unbounded), or with on=None
+        clear all three (it is working again). False if the job is missing or closed.
+        Setting a new reason restarts waiting_since; open_job and close_job clear all of them."""
+
+    @abc.abstractmethod
+    def set_job_max_hours(self, job: str, hours: float | None) -> bool:
+        """jobs.max_hours = hours (this job's own lifetime cap; 0 = none, None = the [job]
+        default). False if the job doesn't exist. open_job resets it to None."""
 
     @abc.abstractmethod
     def reserve_spawn(self, agent_key: str, job: str, per_agent: int, per_job: int) -> SpawnGrant:

@@ -34,7 +34,9 @@ judge to confirm the fix"*, and the model does the rest:
 4. **Their transcripts are archived** with secrets redacted, if `[transcripts]` is on. Memories
    they save are pinned to the transcript that wrote them.
 5. **The judge rules** on the goal, and the model reports back and closes the job. Or the job
-   auto-closes once every agent is done and the board goes quiet.
+   auto-closes once every agent is done and the board goes quiet. No job stays open forever:
+   one open longer than `[job] max_hours` (default 4) closes as `failed`, and one with no live
+   agent and no activity for `[job] orphan_minutes` (default 30) closes as `cancelled`.
 
 It works the same from Claude Code and from Codex. `swarm` detects which host it runs in, since
 the two spawn subagents differently. The board is plain files by default (nothing to set up), or
@@ -162,10 +164,10 @@ for the options.
 | `swarm post --job J --as NAME "msg"` | Post to the board yourself (join first with `swarm join`) |
 | `swarm read --as NAME` | Messages new since that agent's last read |
 | `swarm who --job J` | The agents on a job |
-| `swarm activate --job J --task "…" [--goal "…"]` | Open a job yourself (normally the model does this) |
+| `swarm activate --job J --task "…" [--goal "…"] [--max-hours N]` | Open a job yourself (normally the model does this); `--max-hours` sets its own lifetime cap (0 = none) |
 | `swarm deactivate --job J [--status …] [--outcome "…"]` | Close a job |
 | `swarm verdict` | The job's judge records whether the goal is met |
-| `swarm wait` / `swarm resume` | Mark a job as waiting for something, or not |
+| `swarm wait [--for 90m]` / `swarm resume` | Mark a job as waiting for something (optionally for a bounded time), or not |
 | `swarm transcript list\|show\|export` | Archived agent transcripts, secrets redacted |
 | `swarm memory` / `swarm remember` | Memories agents saved and where they came from; store one |
 | `swarm leave` | Release an agent's name (`--session S`: every unfinished agent of that session's jobs, e.g. after a restart killed them) |

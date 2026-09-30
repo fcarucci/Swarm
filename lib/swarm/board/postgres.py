@@ -149,6 +149,10 @@ ALTER TABLE agents ADD COLUMN IF NOT EXISTS verifier boolean NOT NULL DEFAULT fa
 -- What an open job is waiting for (`swarm wait --on`), and since when; NULL = not waiting.
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS waiting_on text;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS waiting_since timestamptz;
+-- Schema version 11: when a bounded wait (`swarm wait --for`) expires, and the job's own
+-- lifetime cap in hours (`activate --max-hours`; NULL = the [job] max_hours default).
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS waiting_until timestamptz;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS max_hours double precision;
 -- Who closed the job: 'auto' for the auto-close sweep, else who ran `swarm deactivate`.
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS closed_by text;
 -- The transcript archive ([transcripts], bin/transcripts.py): one row per (job, agent_key), the
@@ -297,7 +301,8 @@ SELECT j.job, j.status, j.description, j.task, j.outcome, j.created_by, j.sessio
                 (SELECT max(created_at) FROM messages m WHERE m.job = j.job)) AS last_activity_at,
        j.project, j.goal, j.verdict, j.verdict_reason, j.verdict_by, j.verdict_at, j.completion_forced,
        (SELECT a.name FROM agents a WHERE a.job = j.job AND a.judge AND a.left_at IS NULL) AS judge,
-       j.waiting_on, j.waiting_since, j.closed_by, j.supervise, j.verdict_next
+       j.waiting_on, j.waiting_since, j.closed_by, j.supervise, j.verdict_next,
+       j.max_hours, j.waiting_until
   FROM jobs j LEFT JOIN agent_status s ON s.job = j.job
  GROUP BY j.job;
 """
@@ -314,7 +319,7 @@ _JOB_STATUS_COLS = ("job, status, description, task, outcome, created_by, sessio
                     "activated_at, finished_at, agents, started, running, idle, completed, "
                     "dead_or_left, messages, last_activity_at, project, goal, verdict, verdict_reason, "
                     "verdict_by, verdict_at, completion_forced, judge, waiting_on, waiting_since, closed_by, "
-                    "supervise, verdict_next")
+                    "supervise, verdict_next, max_hours, waiting_until")
 _MESSAGE_COLS = "id, created_at, job, agent_name, to_agent, message"
 _RESTART_COLS = ("id, job, agent_key, attempt, at, reason, old_agent_key, new_agent_key, harness, host, "
                  "os_user, minutes_cap, ended_at, outcome")   # Restart field order
@@ -751,7 +756,7 @@ class PostgresBoard(Board):
             "project = COALESCE(EXCLUDED.project, jobs.project), goal = COALESCE(EXCLUDED.goal, jobs.goal), "
             "verdict = NULL, verdict_reason = NULL, verdict_next = NULL, verdict_by = NULL, verdict_at = NULL, "
             "completion_forced = false, spawns = 0, waiting_on = NULL, waiting_since = NULL, "
-            "closed_by = NULL",
+            "waiting_until = NULL, max_hours = NULL, closed_by = NULL",
             (job, description, task, session_id, created_by, project, goal))
 
     def close_job(self, job: str, status: str, outcome: str | None, forced: bool = False,
@@ -760,7 +765,7 @@ class PostgresBoard(Board):
         return self._conn.execute(
             "UPDATE jobs SET status = %s, outcome = COALESCE(%s, outcome), "
             "finished_at = COALESCE(finished_at, now()), completion_forced = %s, waiting_on = NULL, "
-            "waiting_since = NULL, closed_by = %s WHERE job = %s RETURNING job",
+            "waiting_since = NULL, waiting_until = NULL, closed_by = %s WHERE job = %s RETURNING job",
             (status, outcome, bool(forced), closed_by, job)).fetchone() is not None
 
     def _leave_job(self, job: str) -> None:
@@ -775,7 +780,7 @@ class PostgresBoard(Board):
             closed = self._conn.execute(
                 "UPDATE jobs j SET status = 'completed', outcome = %(outcome)s, "
                 "finished_at = now(), completion_forced = false, waiting_on = NULL, "
-                "waiting_since = NULL, closed_by = %(by)s "
+                "waiting_since = NULL, waiting_until = NULL, closed_by = %(by)s "
                 "WHERE j.job = %(job)s AND j.status = 'active' AND j.waiting_on IS NULL "
                 "AND (j.goal IS NULL OR j.verdict = 'met') "
                 "AND COALESCE(j.activated_at, j.created_at) < %(before)s "
@@ -800,11 +805,16 @@ class PostgresBoard(Board):
             "WHERE job = %s AND status = 'completed' AND closed_by = %s AND finished_at = %s "
             "RETURNING job", (job, AUTO_CLOSED_BY, closed_at)).fetchone() is not None
 
-    def set_waiting(self, job: str, on: str | None) -> bool:
+    def set_waiting(self, job: str, on: str | None, until: _dt.datetime | None = None) -> bool:
         return self._conn.execute(
             "UPDATE jobs SET waiting_on = %s, waiting_since = CASE WHEN %s::text IS NULL THEN NULL "
-            "ELSE now() END WHERE job = %s AND status = 'active' RETURNING job",
-            (on, on, job)).fetchone() is not None
+            "ELSE now() END, waiting_until = CASE WHEN %s::text IS NULL THEN NULL ELSE %s END "
+            "WHERE job = %s AND status = 'active' RETURNING job",
+            (on, on, on, until, job)).fetchone() is not None
+
+    def set_job_max_hours(self, job: str, hours: float | None) -> bool:
+        return self._conn.execute("UPDATE jobs SET max_hours = %s WHERE job = %s RETURNING job",
+                                  (hours, job)).fetchone() is not None
 
     def bind_job_session(self, job: str, session_id: str) -> None:
         self._conn.execute("UPDATE jobs SET session_id = %s WHERE job = %s AND session_id IS NULL",

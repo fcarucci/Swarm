@@ -182,6 +182,24 @@ SubagentStart and SubagentStop hooks. The per-tool-call hooks never run it. It a
 machine's marker (and `.seen` file) for the job. `auto_close_minutes = 0` turns it off.
 On Postgres the same data is queryable directly as the `agent_status` and `job_status` views.
 
+**Jobs don't stay open forever.** The same sweep applies two more rules, to every open job
+(`active`, `idle` or `waiting`); both close it as `closed_by` `auto`, its remaining agents marked
+`left`, and both show in `status --all`:
+- **Lifetime cap.** Open longer than `[job] max_hours` (default 4; from its last activation): closed
+  `failed`, outcome `auto-closed: open longer than N h` plus its last verdict, if any. Override per
+  job with `swarm activate --job J --max-hours N` (`0` = no cap, explicit only); `max_hours = 0` in
+  the config turns the default off.
+- **Orphan.** No live agent (all `completed`, `left` or `dead`, or none at all; dead per
+  `dead_minutes`) and no board activity for `[job] orphan_minutes` (default 30), and no tool call
+  of the orchestrating session in that time: closed `cancelled`, outcome
+  `auto-closed: no live agents for N min`. A goal without a `met` verdict, and a `waiting` job,
+  don't shield it (`orphan_minutes = 0` turns it off).
+
+`swarm wait --on "<what>" --for 90m` (`h`, `m`, `s`; a bare number is minutes) bounds a wait: until
+it expires the wait shields the job from the orphan rule (not from the cap); past it the job is
+`active` or `idle` again, and the orphan rule counts from the moment it expired. `purge` runs the
+sweep on demand; it is best effort and never fails the command that ran it.
+
 ## Running a swarm (the orchestrating session does this)
 1. **Pick a short job id**, e.g. `recall-latency-2026-09`, and activate it:
    ```
@@ -391,12 +409,12 @@ way its own host does it. `swarm status --job <job>` shows each agent's HOST and
 | `migrate [--force]` | retire the old pre-plugin skill install: its hook entries in `~/.claude/settings.json` (backup first) and its directory (moved to `~/.local/share/swarm/legacy-skill-<time>`); move a board at the old default path (`~/.local/state/swarm/...`) to the configured one, and records queued in the old shared spool `/tmp/claude/swarm-spool` to the per-user `spool_dir`; take back old Codex grants. Refused while a swarm job is active on this machine, unless `--force` |
 | `doctor [--host claude\|codex]` | check this machine's setup (plugin, hooks, leftovers of the old install, venv, launcher, config, board; what a sandbox may write: the state dir, `~/.local/share/swarm`, the board, a non-per-user spool, loose `~/.local` dirs; a base-table `network_access`, a Unix-socket DB host, transcripts shared between OS users; Codex: hook trust, sandbox, profiles, depth) and print the fix for each problem; exit 1 on a failure. Default host: the one it runs in (from a plain terminal: Claude Code) |
 | `update [--host claude\|codex\|both] [--force] [--no-color]` | update the swarm marketplace and plugin for whichever of claude/codex is installed (reports old → new version), then `bootstrap`, `migrate` and `doctor` from the *newly installed* plugin's own `bin/swarm` (never the code currently running); "swarm is up to date (VERSION)" and nothing else when the version didn't change, unless `--force`. `--force` also passes through to `migrate`. Ends by saying to restart Claude sessions, and for Codex to start a new session and re-trust `/hooks` when `hooks/codex-hooks.json` changed |
-| `activate --job J [--description D] [--task T\|-] [--project P] [--session S] [--adopt-running]` | open the job, bind it to this session (Claude Code or Codex) and switch the board on for newly spawned subagents; prints `swarm command: <path>` and the tag line `[swarm job: J]` for their prompts |
+| `activate --job J [--description D] [--task T\|-] [--project P] [--session S] [--adopt-running] [--max-hours N]` | open the job, bind it to this session (Claude Code or Codex) and switch the board on for newly spawned subagents; prints `swarm command: <path>` and the tag line `[swarm job: J]` for their prompts |
 | `activate --job J --attach [--session S]` | bind this session to a job that is already active (e.g. from the other host) without reopening it; see [One job, both hosts](#one-job-both-hosts) |
 | `activate … --goal G\|-` | give the job a goal: one judge (`[swarm role: judge]` in its prompt) decides when it is met; prints both tag lines |
 | `deactivate --job J [--status S] [--outcome O] [--force]` | switch the board off and close the job; `completed` needs the judge's `met` verdict when the job has a goal, unless `--force` (recorded). On a job that is already closed (e.g. auto-closed) it replaces the status and outcome |
 | `verdict --job J --as NAME met\|not_met "reason"` | the job's judge only: record the verdict on its goal and post it on the board (queued like `post` when the board is unreachable; a non-judge is refused) |
-| `wait --job J --on "<what>"` / `resume --job J` | mark an open job as waiting for something (shown as `waiting` with the reason) / working again (an agent joining does this too) |
+| `wait --job J --on "<what>" [--for DURATION]` / `resume --job J` | mark an open job as waiting for something (shown as `waiting` with the reason; `--for 90m` bounds it) / working again (an agent joining does this too) |
 | `status [--all] [--no-color]` / `status --job J [--all-agents]` | jobs overview / one job's details and agent table, with each agent's HOST and MODEL (older finished agents hidden unless `--all-agents`). With `[transcripts] enabled`: a `transcripts:` footer (stored and raw size, ratio, limits, jobs, oldest) / a `transcripts` line and a STORED column per agent |
 | `watch [--job J] [--interval S] [--no-color]` | live full-screen dashboard of jobs, agents and messages |
 | `tail [--job J] [-n N] [--interval S] [--no-agents] [--no-color]` | follow the board live (messages plus join/leave) |
@@ -461,8 +479,9 @@ the file backend keeps the same rows in `state.json` and `messages.jsonl`.
   `verdict_at` (cleared when the job is re-activated), `completion_forced` (completed with
   `--force` without a met verdict). Every verdict is also a board message, `VERDICT …`, from the
   judge: that is the history. `spawns`: subagents spawned by the job's agents in this run
-  (reset on re-activation; capped by `[spawn] max_per_job`). `waiting_on`, `waiting_since`: what
-  the open job waits for (`swarm wait`); cleared by `resume`, an agent joining, re-activation
+  (reset on re-activation; capped by `[spawn] max_per_job`). `max_hours`: the job's own lifetime cap (`activate --max-hours`; NULL = `[job] max_hours`).
+  `waiting_on`, `waiting_since`, `waiting_until`: what
+  the open job waits for (`swarm wait`) and when a bounded wait expires; cleared by `resume`, an agent joining, re-activation
   and closing. `closed_by`: `auto` when the auto-close sweep closed it, else the `$USER` who ran
   `deactivate`; cleared on re-activation (added in place by `swarm init`).
 - **`agent_routes`:** which job the hooks routed each subagent to: `agent_key`, `session_id`,

@@ -615,6 +615,8 @@ On Postgres, re-run `swarm init` after changing `idle_minutes`, `dead_minutes` o
 | key | default | meaning |
 |---|---|---|
 | `auto_close_minutes` | `30` | an open job whose agents are all done closes by itself after this many quiet minutes (see [Auto-close](#auto-close)); `0` turns it off |
+| `max_hours` | `4` | an open job older than this (from its last activation) closes as `failed`, whatever its agents do; `activate --max-hours N` sets one job's own cap, `0` = no cap; `0` here turns the default off |
+| `orphan_minutes` | `30` | an open job (waiting ones too) with no live agent and no board activity for this long closes as `cancelled`; `0` turns it off |
 
 **`[sqlite]`** (with `backend = "sqlite"`)
 
@@ -847,6 +849,16 @@ after the count when there are any, and `no posts` when the job has none). `clos
 and `status --job J` shows `finished … (auto-closed; activate reopens it)`. Otherwise it is
 closed exactly as `deactivate --status completed` would close it: the agents still on it leave,
 their names are freed, and this machine's marker is removed.
+
+**Lifetime cap and orphans.** No job stays open forever. The same sweep closes an open job
+(`active`, `idle` or `waiting`) as `failed` with `auto-closed: open longer than N h` (plus its last
+verdict) once it has been open longer than `[job] max_hours` (default 4; per job `activate
+--max-hours N`, `0` = no cap), and as `cancelled` with `auto-closed: no live agents for N min` when
+no agent is started, running or idle (dead ones per `dead_minutes` don't count), nothing was
+posted or joined, and the orchestrating session made no tool call for `[job] orphan_minutes`
+(default 30). Both are recorded like a `deactivate` (`closed_by` `auto`, agents left, marker
+removed) and show in `status --all`. `swarm wait --for DURATION` bounds a wait: until it expires
+it shields the job from the orphan rule only, never from the cap.
 
 **Where it runs.** No daemon: the sweep runs from commands that already run now and then:
 `status`, `purge`, `join` and `activate`, `watch` and `tail` (at most once a minute), and the
@@ -1841,7 +1853,7 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `activate … --goal G\|-` | give the job a goal, judged by one judge agent; the tag lines include `[swarm role: judge]` |
 | `deactivate --job J [--status completed\|cancelled\|failed] [--outcome O] [--force]` | switch the board off and close the job (default `completed`). A job with a goal completes only with the judge's `met` verdict, or with `--force` (recorded). On an already closed (e.g. auto-closed) job it replaces the status and outcome |
 | `verdict --job J --as NAME met\|not_met REASON...` | the job's judge records its verdict and posts it on the board; anyone else is refused; spooled when the board is unreachable |
-| `wait --job J --on WHAT...` | mark an open job as waiting for something; shown as `waiting` with the reason |
+| `wait --job J [--for DURATION] --on WHAT...` | mark an open job as waiting for something; shown as `waiting` with the reason. `--for 90m` (`h`/`m`/`s`, bare = minutes) bounds it: past that the wait expires and the orphan rule applies again |
 | `resume --job J` | the job is no longer waiting (an agent joining does this too) |
 | `status [--all] [--no-color]` | jobs overview |
 | `status --job J [--all-agents] [--no-color]` | one job's details and agents table |
