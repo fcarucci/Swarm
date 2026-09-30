@@ -1405,9 +1405,11 @@ active job (also when it never had one: the countdown starts at startup), after 
 which the last job's final state stays on screen; a job of the session activating meanwhile cancels
 the countdown. `--compact` is a
 narrow layout for a side pane (readable from about 50 columns, no line wider than the terminal,
-nothing wrapped): a title, then per job a line and one line per agent (name, `[judge]` or
-`[verifier]`, coloured status, short model, current tool, cut to fit), then as many recent messages
-as the height leaves, one line each. Without these flags `watch` behaves as before.
+nothing wrapped): a title, then one section per open job of the session (its id, then one line per
+agent: name in its `tail` colour, `[judge]` or `[verifier]`, coloured status, short model, current
+tool), then as many recent messages as the height leaves, one line each. Lines longer than the pane
+are cut; Right/Left scroll them sideways (Home or `0` resets; the offset is clamped to the longest
+line and kept across redraws). Without these flags `watch` behaves as before.
 
 Scrolling counts messages, not screen lines, so it works the same with wrapping on. While
 scrolled back the view stays put when new messages arrive, and the MESSAGES header shows
@@ -1852,7 +1854,7 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `spool retry` | requeue memories parked as `.stuck` after 24 hours of failing (see [The spool](#the-spool)) |
 | `notices --hook-output [--host claude\|codex]` | internal: the plugin's `SessionStart` hook prints the pending setup notice for that host as hook output (a fixed template of re-validated steps, see [First run and updates](#first-run-and-updates)) and consumes it; prints nothing when there is none |
 | `who --job J` | active agents on the job, tab-separated: exact name, host, role, status, last contact, current tool |
-| `leave (--as NAME \| --key K)` | release a name (exit 1 if no active agent matched) |
+| `leave (--as NAME \| --key K \| --session S)` | release a name (exit 1 if no active agent matched); `--session S` marks every unfinished agent of that session's jobs left ("session restarted"), for a session start after a restart killed them |
 | `purge` | apply retention now, and [auto-close](#auto-close) the jobs that are done and quiet (`status`, `join`, `activate`, `watch` and `tail` do that too) |
 | `supervise [--dry-run] [--job J]` | one supervisor pass (the systemd user timer runs it every `[supervise] timer_minutes`; off unless `[supervise] enabled = true`): close this machine's stuck agents, then restart each one headless under the same name if its budget allows, or post once why not; then print the caps. `--dry-run` prints what it would do and changes nothing |
 | `transcript list [--job J] [--agent NAME] [--color auto\|always] [--no-color]` | archived transcripts with their host (`claude`/`codex`), raw/stored size, ratio, redactions, final flag and capture time, then a total (see [Transcript archive](#transcript-archive-optional)). Coloured by kind (host, size/ratio, redactions) on a real terminal or `--color=always`; `--no-color`/`NO_COLOR` always wins |

@@ -610,9 +610,22 @@ def _bold(text: str, color: bool) -> str:
     return _sgr(1, text) if color else text
 
 
+def _name_color(name: str) -> int:
+    return NAME_PALETTE[sum(map(ord, name)) % len(NAME_PALETTE)]
+
+
 def _paint_name(name: str, color: bool) -> str:
     """An agent name in a colour derived from the name, so each author keeps one colour."""
-    return _sgr(NAME_PALETTE[sum(map(ord, name)) % len(NAME_PALETTE)], name) if color else name
+    return _sgr(_name_color(name), name) if color else name
+
+
+def _paint_head(text: str, name: str, color: bool) -> str:
+    """Colour the leading (possibly truncated) part of `text` that is `name`, as `swarm tail`
+    would colour the whole name; `text` is plain, so cutting it first is ANSI-safe."""
+    if not color or not name:
+        return text
+    n = min(len(name), len(text))
+    return _sgr(_name_color(name), text[:n]) + text[n:]
 
 
 def _paint_name_cell(name: str, padded: str, color: bool) -> str:
@@ -1857,44 +1870,61 @@ def _compact_agent_line(a, width: int, color: bool) -> str:
         model, tool = "", ""
     left = room - len(name) - 1 - len(status) - (1 + len(model) if model else 0)
     tool = _fit(tool, left - 1) if tool and left >= 6 else ""
-    line = "  " + name + " " + _paint_status(a.status, status, color)
+    line = "  " + _paint_head(name, term_safe(a.name), color) + " " + _paint_status(a.status, status, color)
     return _clip(line + (" " + model if model else "") + (" " + tool if tool else ""), width)
+
+
+NATURAL = 10 ** 6   # "no width limit": a compact line is built whole, then windowed to the pane
+
+
+def _window(line: str, offset: int, cols: int) -> str:
+    """The `cols` visible columns of `line` from `offset` on (ANSI-safe: cut by visible
+    characters); a "…" leads a scrolled line and ends one that goes on past the pane."""
+    line = _shift(line, offset)
+    if _visible_len(line) <= cols:
+        return line
+    return _clip(line, cols - 1) + "…" if cols > 1 else _clip(line, cols)
 
 
 def _compact_frame(board, job: str | None, color: bool, view: dict, rows: list | None,
                    cols: int, height: int) -> list[str]:
     """The narrow view (`watch --compact`, for a side pane of 50-70 columns): a title, then per
-    job a line and one line per agent, then as many recent messages as the height leaves, one
-    line each. No line is wider than `cols`; nothing wraps."""
+    open job (all of the session's, one section each) its id line and one line per agent, then
+    as many recent messages as the height leaves, one line each. Lines are built whole and cut
+    to `cols` visible columns after scrolling sideways by view["offset"] (Left/Right, Home
+    resets), which is clamped to the longest line and kept in the view; the title stays."""
     import datetime as dt
     now = board.now()
     recent = None if view.get("all_agents") else view.get("recent_minutes")
     scope = f"session {term_safe(view['session'])[:8]}" if view.get("session") else "active jobs"
-    out = [_clip(_bold(_fit(f"swarm · {scope} · {dt.datetime.now().strftime('%H:%M:%S')}", cols), color), cols)]
+    title = _clip(_bold(_fit(f"swarm · {scope} · {dt.datetime.now().strftime('%H:%M:%S')}", cols), color), cols)
+    out = []
     if rows is None:
         rows = [board.job_status(job)] if job else board.jobs(False)
         rows = [j for j in rows if j]
     if not rows:
-        out.append(_fit("(no jobs yet)", cols))
+        out.append("(no jobs yet)")
     for j in rows:
-        head = f"{term_safe(j.job)} [{j.status}]"
-        out.append(_clip(_bold(_fit(head, cols), color), cols))
+        out.append(_bold(f"{term_safe(j.job)} [{j.status}]", color))
         agents, hidden = _recent_agents(board.agents(j.job), now, recent)
-        out += [_compact_agent_line(a, cols, color) for a in agents]
+        out += [_compact_agent_line(a, NATURAL, color) for a in agents]
         if not agents:
-            out.append(_fit("  (no agents yet)", cols))
+            out.append("  (no agents yet)")
         if hidden:
-            out.append(_fit(f"  ({hidden} older hidden)", cols))
-    room = height - len(out) - 1  # one line for the MESSAGES heading
+            out.append(f"  ({hidden} older hidden)")
+    room = height - len(out) - 2  # the title and one line for the MESSAGES heading
     if room >= 2:
         msgs = _watch_messages(board, room, job, rows if view.get("session") else None)
         if msgs:
             out.append(_bold("MESSAGES", color))
             for m in msgs[-room:]:
-                plain = f"{m.created_at.astimezone().strftime('%H:%M')} {term_safe(m.agent_name)}: " \
-                        f"{term_safe(m.message).replace(chr(10), ' ')}"
-                out.append(_fit(plain, cols))
-    return [_clip(ln, cols) for ln in out[:height]]
+                stamp = m.created_at.astimezone().strftime('%H:%M') + " "
+                text = f"{term_safe(m.agent_name)}: {term_safe(m.message).replace(chr(10), ' ')}"
+                out.append(stamp + _paint_head(text, term_safe(m.agent_name), color))
+    out = out[:max(0, height - 1)]
+    view["max_offset"] = max(0, max((_visible_len(ln) for ln in out), default=0) - cols)
+    view["offset"] = min(max(0, view.get("offset", 0)), view["max_offset"])
+    return [title] + [_window(ln, view["offset"], cols) for ln in out]
 
 
 def _watch_frame(board, job: str | None, interval: float, color: bool, interactive: bool,
@@ -2156,7 +2186,9 @@ def _parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("spool", help="manage the spool of queued posts and memories")
     sp.add_argument("action", choices=["retry"],
                     help="retry: requeue memories parked as .stuck after 24 hours of failing")
-    lv = sub.add_parser("leave"); lv.add_argument("--as", dest="name"); lv.add_argument("--key")
+    lv = sub.add_parser("leave", help="release an agent's name; --session S: every unfinished agent of that "
+                    "session's jobs leaves (for a session start: a restart killed them without a stop)")
+    lv.add_argument("--as", dest="name"); lv.add_argument("--key"); lv.add_argument("--session")
     sub.add_parser("purge")
     tl = sub.add_parser("tail", help="follow the board live (Ctrl-C to stop)")
     tl.add_argument("--job", help="only this job (default: all jobs)")
@@ -2874,6 +2906,15 @@ def _board_resume(board, cfg: dict, args) -> int:
 
 
 def _board_leave(board, cfg: dict, args) -> int | None:
+    if args.session:
+        if args.name or args.key:
+            print("--session takes neither --as nor --key", file=sys.stderr)
+            return 2
+        n = sum(board.close_agent(a.agent_key, "session restarted")
+                for j in board.jobs(True) if j.session_id == args.session
+                for a in board.agents(j.job, include_departed=False))
+        print(f"left {n}")
+        return 0
     if not board.leave(agent_key=args.key, name=args.name):
         print("no active agent matched", file=sys.stderr)
         return 1

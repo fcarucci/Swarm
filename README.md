@@ -168,7 +168,7 @@ for the options.
 | `swarm wait` / `swarm resume` | Mark a job as waiting for something, or not |
 | `swarm transcript list\|show\|export` | Archived agent transcripts, secrets redacted |
 | `swarm memory` / `swarm remember` | Memories agents saved and where they came from; store one |
-| `swarm leave` | Release an agent's name |
+| `swarm leave` | Release an agent's name (`--session S`: every unfinished agent of that session's jobs, e.g. after a restart killed them) |
 | `swarm purge` | Apply retention now |
 | `swarm doctor` | Check this machine's setup, with a fix line for every problem |
 | `swarm update` | Update the plugin for Claude and/or Codex, then bootstrap and doctor |
