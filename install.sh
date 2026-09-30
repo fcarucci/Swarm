@@ -463,6 +463,13 @@ marketplace_add_or_update() {
     log "[$host] marketplace added"
     return 0
   fi
+  # Codex has "marketplace upgrade" (same name argument), older CLIs "marketplace update"; try upgrade
+  # first there, then the older name. Claude only has "update".
+  if [ "$host" = "codex" ] \
+     && "$bin" plugin marketplace upgrade "$MARKETPLACE_NAME" >"$TMP_DIR/mp-upgrade.$host.log" 2>&1 </dev/null; then
+    log "[$host] marketplace already present; upgraded"
+    return 0
+  fi
   if "$bin" plugin marketplace update "$MARKETPLACE_NAME" >"$TMP_DIR/mp-update.$host.log" 2>&1 </dev/null; then
     log "[$host] marketplace already present; updated"
     return 0
@@ -474,7 +481,7 @@ marketplace_add_or_update() {
     log "[$host] marketplace re-added (remove+add) after add/update failed"
     return 0
   fi
-  cat "$TMP_DIR/mp-add.$host.log" "$TMP_DIR/mp-update.$host.log" "$TMP_DIR/mp-readd.$host.log" >&2 2>/dev/null || true
+  cat "$TMP_DIR/mp-add.$host.log" "$TMP_DIR/mp-upgrade.$host.log" "$TMP_DIR/mp-update.$host.log" "$TMP_DIR/mp-readd.$host.log" >&2 2>/dev/null || true
   die "[$host] could not add or update the marketplace $MARKETPLACE (see output above)"
 }
 

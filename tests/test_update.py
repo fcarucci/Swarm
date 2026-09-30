@@ -258,7 +258,7 @@ exit 0
         stub = self.bin / "codex"
         _write_stub(stub, '''
 case "$1 $2 $3" in
-  "plugin marketplace update") exit 0 ;;
+  "plugin marketplace upgrade") exit 0 ;;
 esac
 case "$1 $2" in
   "plugin list") [ "$3" = "--json" ] && printf '{"installed": []}'; exit 0 ;;
@@ -280,7 +280,7 @@ exit 0
         _write_stub(stub, f'''
 echo "$@" >> "{calls}"
 case "$1 $2 $3" in
-  "plugin marketplace update") exit 1 ;;
+  "plugin marketplace upgrade") exit 1 ;;
   "plugin marketplace remove") exit 0 ;;
   "plugin marketplace add") exit 0 ;;
   "plugin marketplace list") [ "$4" = "--json" ] && printf '[{{"name": "swarm", "source": "git@example.com:configured/source.git"}}]'; exit 0 ;;
@@ -305,7 +305,7 @@ exit 0
         _write_stub(stub, f'''
 echo "$@" >> "{calls}"
 case "$1 $2 $3" in
-  "plugin marketplace update") echo "codex: marketplace update failed: timeout" >&2; exit 1 ;;
+  "plugin marketplace upgrade") echo "codex: marketplace update failed: timeout" >&2; exit 1 ;;
   "plugin marketplace list") exit 0 ;;
 esac
 exit 0
@@ -316,6 +316,91 @@ exit 0
         log = calls.read_text()
         self.assertNotIn("plugin marketplace remove", log)
         self.assertNotIn("plugin marketplace add", log)
+
+    def test_update_codex_prefers_upgrade_subcommand(self):
+        # Newer codex renamed `plugin marketplace update` to `upgrade` (same optional
+        # marketplace-name argument): use it, and never call the old name.
+        stub = self.bin / "codex"
+        calls = self.home / "calls.log"
+        _write_stub(stub, f'''
+echo "$@" >> "{calls}"
+case "$1 $2 $3" in
+  "plugin marketplace update") echo "error: unrecognized subcommand 'update'" >&2; exit 2 ;;
+esac
+exit 0
+''')
+        update.update_codex(str(stub))
+        log = calls.read_text()
+        self.assertIn("plugin marketplace upgrade swarm", log)
+        self.assertNotIn("plugin marketplace update", log)
+        self.assertNotIn("plugin marketplace remove", log)
+
+    def test_update_codex_falls_back_to_update_on_older_cli(self):
+        # An older CLI has no `upgrade`: clap says "unrecognized subcommand" and we retry `update`.
+        stub = self.bin / "codex"
+        calls = self.home / "calls.log"
+        _write_stub(stub, f'''
+echo "$@" >> "{calls}"
+case "$1 $2 $3" in
+  "plugin marketplace upgrade") echo "error: unrecognized subcommand 'upgrade'" >&2; exit 2 ;;
+esac
+exit 0
+''')
+        update.update_codex(str(stub))
+        log = calls.read_text()
+        self.assertIn("plugin marketplace upgrade swarm", log)
+        self.assertIn("plugin marketplace update swarm", log)
+        self.assertNotIn("plugin marketplace remove", log)
+
+    def test_update_codex_real_upgrade_failure_does_not_try_update(self):
+        # A genuine upgrade failure (network, etc.) is not an old CLI: no `update` retry, and the
+        # remove+add fallback runs off the configured source.
+        stub = self.bin / "codex"
+        calls = self.home / "calls.log"
+        _write_stub(stub, f'''
+echo "$@" >> "{calls}"
+case "$1 $2 $3" in
+  "plugin marketplace upgrade") echo "network down" >&2; exit 1 ;;
+  "plugin marketplace list") printf '{{"marketplaces":[{{"name":"swarm","root":"/r","marketplaceSource":{{"sourceType":"git","source":"https://example.com/x.git"}}}}]}}'; exit 0 ;;
+esac
+exit 0
+''')
+        update.update_codex(str(stub))
+        log = calls.read_text()
+        self.assertNotIn("plugin marketplace update", log)
+        self.assertIn("plugin marketplace add https://example.com/x.git", log)
+
+    def test_update_codex_source_from_config_toml_when_list_lacks_it(self):
+        # `marketplace list` fails or omits the source: read [marketplaces.swarm] from config.toml.
+        (self.home / ".codex").mkdir()
+        (self.home / ".codex" / "config.toml").write_text(
+            '[marketplaces.other]\nsource = "https://example.com/other.git"\n\n'
+            '[marketplaces.swarm]\nsource_type = "git"\nsource = "https://example.com/x.git"\nref = "stable"\n')
+        p = mock.patch.dict(os.environ, {"CODEX_HOME": str(self.home / ".codex")}); p.start(); self.addCleanup(p.stop)
+        stub = self.bin / "codex"
+        calls = self.home / "calls.log"
+        _write_stub(stub, f'''
+echo "$@" >> "{calls}"
+case "$1 $2 $3" in
+  "plugin marketplace upgrade") exit 1 ;;
+  "plugin marketplace list") echo "boom" >&2; exit 1 ;;
+esac
+exit 0
+''')
+        update.update_codex(str(stub))
+        self.assertIn("plugin marketplace add https://example.com/x.git --ref stable", calls.read_text())
+
+    def test_codex_table_root_is_never_taken_as_source(self):
+        # The human table is `MARKETPLACE  ROOT` (a local snapshot dir), not a source: re-adding
+        # it would silently turn a git marketplace into a local one.
+        stub = self.bin / "codex"
+        _write_stub(stub, '''
+case "$1 $2 $3" in
+  "plugin marketplace list") [ "$4" = "--json" ] && exit 1; printf 'MARKETPLACE  ROOT\nswarm        /home/u/.codex/.tmp/marketplaces/swarm\n'; exit 0 ;;
+esac
+exit 0
+''')
+        self.assertIsNone(update._codex_marketplace_source(str(stub)))
 
 
 if __name__ == "__main__":

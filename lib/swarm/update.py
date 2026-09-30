@@ -204,13 +204,33 @@ def update_claude(bin_: str) -> dict:
             "verb": verb}
 
 
+def _codex_config_marketplace_field(name: str, field: str) -> str | None:
+    """`field` of `[marketplaces.<name>]` in $CODEX_HOME/config.toml, where codex records where a
+    marketplace was added from (keys: source_type, source, ref, last_updated, ...)."""
+    try:
+        import tomllib
+    except ImportError:  # Python < 3.11
+        return None
+    cfg = Path(os.environ.get("CODEX_HOME") or (paths.home() / ".codex")) / "config.toml"
+    try:
+        data = tomllib.loads(cfg.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    mp = data.get("marketplaces")
+    entry = mp.get(name) if isinstance(mp, dict) else None
+    val = entry.get(field) if isinstance(entry, dict) else None
+    return val if isinstance(val, str) and val else None
+
+
 def _codex_marketplace_source(bin_: str) -> str | None:
-    """The source (URL or path) the swarm marketplace is currently configured with, from `codex
-    plugin marketplace list --json` (or its human table as a fallback), so a failed `marketplace
-    update` can re-add the *same* source instead of guessing DEFAULT_MARKETPLACE -- which would
-    silently switch a user who configured something else (a local frozen tree, a different
-    remote) to a different upstream. None if the command isn't supported, fails, or doesn't list
-    the marketplace: callers must not guess in that case, only stop with the original error."""
+    """The source (URL or path) the swarm marketplace is currently configured with, so a failed
+    marketplace refresh can re-add the *same* source instead of guessing DEFAULT_MARKETPLACE --
+    which would silently switch a user who configured something else (a local frozen tree, a
+    different remote) to a different upstream. Read from `codex plugin marketplace list --json`
+    (`{"marketplaces": [{"name", "root", "marketplaceSource": {"sourceType", "source"}}]}`), then
+    from config.toml. The human table (`MARKETPLACE  ROOT`) is not used: ROOT is the local
+    snapshot directory, not the source. None if nothing names it: callers must not guess in that
+    case, only stop with the original error."""
     res = _run(bin_, ["plugin", "marketplace", "list", "--json"])
     if res.returncode == 0:
         try:
@@ -227,34 +247,41 @@ def _codex_marketplace_source(bin_: str) -> str | None:
                     break
         for e in entries or []:
             if isinstance(e, dict) and e.get("name") == MARKETPLACE_NAME:
-                for key in ("source", "url", "path", "repo"):
-                    v = e.get(key)
-                    if v:
-                        return str(v)
-    res2 = _run(bin_, ["plugin", "marketplace", "list"])
-    if res2.returncode == 0:
-        for line in res2.stdout.splitlines():
-            cols = re.split(r"\s{2,}", line.strip())
-            if len(cols) >= 2 and cols[0] == MARKETPLACE_NAME:
-                return cols[1]
-    return None
+                nested = e.get("marketplaceSource")
+                cands = [nested.get("source")] if isinstance(nested, dict) else []
+                cands += [e.get(k) for k in ("source", "url", "path", "repo")]
+                for v in cands:
+                    if isinstance(v, str) and v:
+                        return v
+    return _codex_config_marketplace_field(MARKETPLACE_NAME, "source")
+
+
+def _codex_marketplace_refresh(bin_: str) -> subprocess.CompletedProcess:
+    """Refresh the swarm marketplace: `upgrade` on current codex (older CLIs call it `update`; same
+    optional marketplace-name argument, openai/codex codex-rs/cli/src/marketplace_cmd.rs), or
+    `update` when the CLI reports `upgrade` as an unrecognized subcommand (older codex)."""
+    res = _run(bin_, ["plugin", "marketplace", "upgrade", MARKETPLACE_NAME])
+    if res.returncode != 0 and re.search(r"unrecogni[sz]ed subcommand|unknown subcommand", _out(res), re.I):
+        return _run(bin_, ["plugin", "marketplace", "update", MARKETPLACE_NAME])
+    return res
 
 
 def update_codex(bin_: str) -> dict:
     old_version = _codex_plugin_version(bin_)
     old_root = newest_installed_plugin_root("codex", codex_bin=bin_)
 
-    res = _run(bin_, ["plugin", "marketplace", "update", MARKETPLACE_NAME])
+    res = _codex_marketplace_refresh(bin_)
     if res.returncode != 0:
         source = _codex_marketplace_source(bin_)
         if source is None:
-            raise UpdateError(f"[codex] plugin marketplace update {MARKETPLACE_NAME} failed, and "
+            raise UpdateError(f"[codex] plugin marketplace refresh {MARKETPLACE_NAME} failed, and "
                               f"its configured source couldn't be read to safely re-add it (won't "
                               f"guess and switch to a different marketplace source):\n{_out(res)}")
         _run(bin_, ["plugin", "marketplace", "remove", MARKETPLACE_NAME])
-        res2 = _run(bin_, ["plugin", "marketplace", "add", source])
+        ref = _codex_config_marketplace_field(MARKETPLACE_NAME, "ref")
+        res2 = _run(bin_, ["plugin", "marketplace", "add", source, *(["--ref", ref] if ref else [])])
         if res2.returncode != 0:
-            raise UpdateError(f"[codex] plugin marketplace update {MARKETPLACE_NAME} failed, and "
+            raise UpdateError(f"[codex] plugin marketplace refresh {MARKETPLACE_NAME} failed, and "
                               f"remove+add of its configured source {source!r} also failed:\n"
                               f"{_out(res)}\n{_out(res2)}")
 

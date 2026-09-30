@@ -117,7 +117,7 @@ case "\$1 \$2 \$3" in
   "plugin marketplace add")
     if [ -f "$logdir/codex.marketplace" ]; then exit 1; fi
     touch "$logdir/codex.marketplace"; exit 0 ;;
-  "plugin marketplace update")
+  "plugin marketplace upgrade")
     [ -f "$logdir/codex.marketplace" ] && exit 0 || exit 1 ;;
   "plugin marketplace remove")
     rm -f "$logdir/codex.marketplace"; exit 0 ;;
@@ -268,7 +268,7 @@ t_idempotent() {
   echo "$out2" | grep -q "^==> done\.$" || fail "second run didn't finish cleanly: $out2"
   # second run's "add" fails in the stub (already added), so it must have fallen through to update
   grep -q "^plugin marketplace update" "$logdir/claude.args" || fail "second run didn't fall back to marketplace update"
-  grep -q "^plugin marketplace update" "$logdir/codex.args" || fail "second run (codex) didn't fall back to marketplace update"
+  grep -q "^plugin marketplace upgrade" "$logdir/codex.args" || fail "second run (codex) didn't fall back to marketplace upgrade"
 
   # no "changed" status word anywhere in the second run's output (bootstrap/migrate/doctor lines)
   echo "$out2" | grep -qw "changed" && fail "second run printed a 'changed' line, not idempotent: $out2"

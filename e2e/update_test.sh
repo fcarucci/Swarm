@@ -76,7 +76,7 @@ write_codex_stub() {
 #!/bin/sh
 echo "\$@" >> "$logdir/codex.args"
 case "\$1 \$2 \$3" in
-  "plugin marketplace update")
+  "plugin marketplace upgrade")
     [ -f "$logdir/codex.mp_fail" ] && exit 1
     exit 0 ;;
   "plugin marketplace remove") exit 0 ;;
