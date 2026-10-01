@@ -374,7 +374,7 @@ def _warn_forced_migrate(sw: Path, config_path: Path | None) -> None:
         return
     if not jobs:
         return
-    print(f"swarm update: --force: overriding stale local job marker(s): {', '.join(jobs)}")
+    print(f"swarm upgrade: migrating anyway; swarm job marker(s) on this machine: {', '.join(jobs)}")
     rc, out, _ = _child(sw, ["status", "--all"], False, capture=True)
     board_status: dict[str, str] = {}
     if rc == 0:
@@ -467,7 +467,8 @@ def run_update(host_arg: str | None, force: bool, color: bool, config_path: Path
             return 1
 
     migrate_host = hosts[0]
-    mrc = _run_migrate(swarm_bins[migrate_host], force, color, config_path)
+    # Always forced: an active job only warns, it never blocks the upgrade.
+    mrc = _run_migrate(swarm_bins[migrate_host], True, color, config_path)
     if mrc != 0:
         print("swarm update: swarm migrate failed (see output above)", file=sys.stderr)
         return 1

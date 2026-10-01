@@ -4,6 +4,11 @@ All notable changes to swarm, newest first. Each release's notes on GitHub are t
 section here, so every release adds a `## [x.y.z] - YYYY-MM-DD` section (see `scripts/release-notes.sh`).
 Keep entries short and user-facing: one line per change, what it does, not how.
 
+## [0.1.11] - 2026-10-01
+
+### Changed
+- `swarm upgrade` always runs `migrate --force`: active jobs on this machine are listed as a warning and no longer block the upgrade.
+
 ## [0.1.10] - 2026-10-01
 
 ### Fixed

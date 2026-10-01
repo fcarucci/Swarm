@@ -500,3 +500,25 @@ class SourceReplacedMidUpdateTests(unittest.TestCase):
         self.assertIn("claude plugin changed  0.1.7 -> 0.1.8", out.getvalue())
         self.assertEqual(rc, 1)                     # stops at the missing bin/swarm, not a traceback
         self.assertIn("can't find the installed swarm plugin", err.getvalue())
+
+
+class UpgradeAlwaysForcesMigrateTests(unittest.TestCase):
+    """`swarm upgrade` always runs migrate with --force: an active job only warns, never blocks."""
+
+    def test_migrate_is_forced_without_force_flag(self):
+        import io
+        seen = {}
+        root = Path(tempfile.mkdtemp(prefix="swarm-upg-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        (root / "bin").mkdir()
+        _write_stub(root / "bin" / "swarm", "exit 0")
+        changed = {"changed": True, "old_version": "0.1.10", "new_version": "0.1.11",
+                   "old_root": None, "new_root": root, "verb": "update"}
+        def fake_migrate(sw, force, color, config_path):
+            seen["force"] = force
+            return 0
+        with mock.patch.object(update, "update_claude", return_value=changed), \
+                mock.patch.object(update, "_run_migrate", side_effect=fake_migrate), \
+                mock.patch.object(update, "_child", return_value=(0, "", "")):
+            update.run_update("claude", False, False, which=lambda h: f"/bin/{h}", out=io.StringIO())
+        self.assertIs(seen.get("force"), True)
