@@ -408,6 +408,12 @@ def run_update(host_arg: str | None, force: bool, color: bool, config_path: Path
     """Runs `swarm update`; returns the process exit code. Prints to `out` (default sys.stdout)
     and errors to sys.stderr. Never touches sudo/root, and never any user's home but this one's
     (every path here comes from $HOME / $CLAUDE_CONFIG_DIR / $CODEX_HOME, or a CLI's own output)."""
+    # Everything this process imports after the host CLIs run must be loaded first: they replace the
+    # plugin folder we run from, and under `python -m swarm.cli` this CLI is __main__, so a later
+    # `from swarm.cli import ...` would read a deleted file (ModuleNotFoundError).
+    import importlib
+    for mod in ("swarm.cli", "swarm.bootstrap", "swarm.safefs"):   # safefs: _warn_forced_migrate -> active_jobs
+        importlib.import_module(mod)
     from swarm import bootstrap
     out = out or sys.stdout
     which = which or shutil.which

@@ -453,3 +453,50 @@ exit 0
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _BlockModule:
+    """A meta_path finder that makes one module unimportable, like a plugin folder `swarm update`
+    just replaced under the running process."""
+
+    def __init__(self, name):
+        self.name = name
+
+    def find_spec(self, name, path=None, target=None):
+        if name == self.name:
+            raise ModuleNotFoundError(f"No module named '{name}'", name=name)
+        return None
+
+
+class SourceReplacedMidUpdateTests(unittest.TestCase):
+    """`swarm update` runs from the plugin cache it updates: once the host CLI swaps the old version
+    folder out, nothing more can be imported from it. Run as `python -m swarm.cli`, the CLI is
+    `__main__`, not `swarm.cli`, so a lazy `from swarm.cli import ...` after the swap failed with
+    ModuleNotFoundError (seen on Codex 0.1.7 -> 0.1.8)."""
+
+    def test_the_summary_prints_after_the_running_plugin_folder_is_gone(self):
+        import io
+        import sys
+        import swarm
+        saved = {k: v for k, v in sys.modules.items() if k == "swarm.cli"}
+        sys.modules.pop("swarm.cli", None)          # as under `python -m swarm.cli`
+        if hasattr(swarm, "cli"):
+            self.addCleanup(setattr, swarm, "cli", swarm.cli)
+            del swarm.cli
+        blocker = _BlockModule("swarm.cli")
+        self.addCleanup(sys.modules.update, saved)
+        self.addCleanup(lambda: blocker in sys.meta_path and sys.meta_path.remove(blocker))
+
+        def swapped_out(_bin):
+            sys.meta_path.insert(0, blocker)       # the old folder is gone from here on
+            return {"changed": True, "old_version": "0.1.7", "new_version": "0.1.8",
+                    "old_root": None, "new_root": None, "verb": "update"}
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(update, "update_claude", side_effect=swapped_out), \
+                mock.patch.object(update, "newest_installed_plugin_root", return_value=None), \
+                mock.patch("sys.stderr", err):
+            rc = update.run_update("claude", False, False, which=lambda h: f"/bin/{h}", out=out)
+        self.assertIn("claude plugin changed  0.1.7 -> 0.1.8", out.getvalue())
+        self.assertEqual(rc, 1)                     # stops at the missing bin/swarm, not a traceback
+        self.assertIn("can't find the installed swarm plugin", err.getvalue())

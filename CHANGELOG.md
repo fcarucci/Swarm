@@ -4,6 +4,12 @@ All notable changes to swarm, newest first. Each release's notes on GitHub are t
 section here, so every release adds a `## [x.y.z] - YYYY-MM-DD` section (see `scripts/release-notes.sh`).
 Keep entries short and user-facing: one line per change, what it does, not how.
 
+## [0.1.9] - 2026-10-01
+
+### Fixed
+- `swarm update` no longer fails with `No module named 'swarm.cli'` after the host replaced the plugin
+  version it was running from.
+
 ## [0.1.8] - 2026-10-01
 
 ### Fixed
