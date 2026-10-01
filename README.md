@@ -145,7 +145,7 @@ Full flag reference, all-users mode, and troubleshooting: [docs/REFERENCE.md#ins
 ### Updating
 
 ```sh
-swarm update
+swarm upgrade
 ```
 
 Updates the marketplace and plugin for whichever of `claude`/`codex` is installed (reports old →
@@ -181,7 +181,7 @@ for the options.
 | `swarm leave` | Release an agent's name (`--session S`: every unfinished agent of that session's jobs, e.g. after a restart killed them) |
 | `swarm purge` | Apply retention now |
 | `swarm doctor` | Check this machine's setup, with a fix line for every problem |
-| `swarm update` | Update the plugin for Claude and/or Codex, then bootstrap and doctor |
+| `swarm upgrade` | Update the plugin for Claude and/or Codex, then bootstrap and doctor |
 | `swarm supervise` | One pass of the supervisor: close stuck agents, restart them (`[supervise] enabled`) |
 | `swarm spool` | Posts and memories queued while the board was unreachable |
 | `swarm init` / `bootstrap` / `migrate` | Setup steps; the installer and the plugin run them for you |

@@ -14,8 +14,37 @@ from pathlib import Path
 from swarm import paths, safefs
 from swarm.board import board_backend
 
-LAUNCHER = ('#!/bin/sh\n# swarm launcher, written by `swarm bootstrap`: runs the installed swarm plugin.\n'
-            'exec "{root}/bin/swarm" "$@"\n')
+# The last line must stay `exec "<root>/bin/swarm" "$@"`: launcher_target parses it. Everything
+# before it is the self-healing fallback (POSIX sh: macOS bash 3.2, dash), used only when that
+# target is missing or not executable. Braces are doubled because callers use LAUNCHER.format(root=).
+LAUNCHER = (
+    '#!/bin/sh\n'
+    '# swarm launcher, written by `swarm bootstrap`: runs the installed swarm plugin, or the newest\n'
+    '# installed one if that plugin folder is gone (a host replaced it).\n'
+    'swarm_newest() {{\n'
+    '  best=\n'
+    '  for d in "${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}"/plugins/cache/*/swarm/* '
+    '"${{CODEX_HOME:-$HOME/.codex}}"/plugins/cache/*/swarm/*; do\n'
+    '    [ -x "$d/bin/swarm" ] || continue\n'
+    '    k=; o=$IFS; IFS=.; set -- ${{d##*/}}; IFS=$o\n'
+    '    for p in "$@"; do\n'
+    '      case $p in ""|*[!0-9]*) p=0;; esac\n'
+    '      p=00000000$p; k=$k${{p#"${{p%????????}}"}}.\n'
+    '    done\n'
+    '    best="$best$k $d/bin/swarm\n"\n'
+    '  done\n'
+    '  best=$(printf "%s" "$best" | LC_ALL=C sort | tail -n 1)\n'
+    '  best=${{best#* }}\n'
+    '}}\n'
+    'if [ ! -x "{root}/bin/swarm" ]; then\n'
+    '  swarm_newest\n'
+    '  if [ -z "$best" ]; then\n'
+    '    echo "swarm: the installed plugin is gone; rerun install.sh to reinstall it." >&2\n'
+    '    exit 127\n'
+    '  fi\n'
+    '  exec "$best" "$@"\n'
+    'fi\n'
+    'exec "{root}/bin/swarm" "$@"\n')
 FILL_IN = ("[board] backend (\"file\" is the default: nothing to fill in), or for a shared board "
            "backend = \"postgres\" with [database] host, user, dbname and password_env_file "
            "(a chmod-600 file with PGPASSWORD=...)")

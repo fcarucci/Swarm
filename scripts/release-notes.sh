@@ -46,7 +46,7 @@ fi
 
 INSTALL_LINE="curl -fsSL https://raw.githubusercontent.com/fcarucci/Swarm/main/install.sh | bash"
 
-UPGRADE_NOTE="Upgrade every host that shares a board together (\`swarm update\`); see README.md, Upgrading."
+UPGRADE_NOTE="Upgrade every host that shares a board together (\`swarm upgrade\`); see README.md, Upgrading."
 
 # ---------------------------------------------------------------------------- classify commits
 

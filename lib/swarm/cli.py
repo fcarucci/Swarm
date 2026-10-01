@@ -18,6 +18,7 @@ Subcommands (run with --help for details):
   bootstrap       set the swarm up for this host (run by the plugin at session start)
   migrate         retire the old ~/.claude/skills/swarm install (its settings.json hooks, the dir)
   doctor          check this machine's setup (plugin, hooks, leftovers, venv, launcher, config, board)
+  upgrade         upgrade the plugin for claude and/or codex, then bootstrap, migrate and doctor
   activate        open a job and switch the board on for subagents spawned from now on
   deactivate      switch the board off for a job and close it
   status          jobs overview, or one job's details and agents
@@ -234,7 +235,7 @@ def cmd_init(cfg: dict, args) -> int:
 
 # Commands that don't set the board up by themselves first (see auto_init).
 NO_AUTO_INIT = ("init", "install-hooks", "hook", "spool", "bootstrap", "migrate", "doctor", "notices",
-                "update")
+                "upgrade", "update")
 
 
 def auto_init(cfg: dict) -> None:
@@ -2224,14 +2225,17 @@ def _parser() -> argparse.ArgumentParser:
     dr = sub.add_parser("doctor", help="check this machine's swarm setup and print a fix for each problem")
     dr.add_argument("--host", choices=["claude", "codex"])
     dr.add_argument("--no-color", action="store_true")
-    up = sub.add_parser("update", help="update the swarm marketplace and plugin for claude and/or "
-                                       "codex (whichever is installed), then bootstrap, migrate and "
-                                       "doctor from the newly installed plugin")
-    up.add_argument("--host", choices=["claude", "codex", "both"])
-    up.add_argument("--force", action="store_true",
-                    help="pass --force to swarm migrate (see its own --force), and run bootstrap/"
-                         "migrate/doctor even when the plugin version didn't change")
-    up.add_argument("--no-color", action="store_true")
+    # `update` is the old name of `upgrade`: a hidden alias (no help=, and left out of the usage list).
+    for name in ("upgrade", "update"):
+        kw = {"help": "upgrade the swarm marketplace and plugin for claude and/or codex (whichever is "
+                      "installed), then bootstrap, migrate and doctor from the newly installed plugin"} \
+            if name == "upgrade" else {}
+        up = sub.add_parser(name, **kw)
+        up.add_argument("--host", choices=["claude", "codex", "both"])
+        up.add_argument("--force", action="store_true",
+                        help="run bootstrap/migrate/doctor even when the plugin version didn't change "
+                             "(migrate itself always runs with --force: active jobs only warn)")
+        up.add_argument("--no-color", action="store_true")
     j = sub.add_parser("job", help="create a job or change its description or goal; "
                                    "`job merge <from> --into <to>` merges two open jobs")
     j.add_argument("job", help="the job, or the word merge (then: job merge <from> --into <to>)")
@@ -2358,6 +2362,7 @@ def _parser() -> argparse.ArgumentParser:
     mr.add_argument("--job"); mr.add_argument("--agent", help="agent name")
     mr.add_argument("--check", action="store_true", help="ask Hindsight whether each memory still exists")
     hk = sub.add_parser("hook"); hk.add_argument("--host", choices=["claude", "codex"]); hk.add_argument("event", choices=["start", "turn", "done", "stop", "session-start", "session-stop"])
+    sub.metavar = "{" + ",".join(k for k in sub.choices if k != "update") + "}"   # hide the alias
     return p
 
 
@@ -2839,7 +2844,8 @@ COMMANDS = {
     "bootstrap": cmd_bootstrap,
     "migrate": cmd_migrate,
     "doctor": cmd_doctor,
-    "update": cmd_update,
+    "upgrade": cmd_update,
+    "update": cmd_update,      # the old name, a hidden alias
     "activate": cmd_activate,
     "deactivate": cmd_deactivate,
     "hook": _cmd_hook,

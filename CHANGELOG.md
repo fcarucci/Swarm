@@ -4,6 +4,13 @@ All notable changes to swarm, newest first. Each release's notes on GitHub are t
 section here, so every release adds a `## [x.y.z] - YYYY-MM-DD` section (see `scripts/release-notes.sh`).
 Keep entries short and user-facing: one line per change, what it does, not how.
 
+## [0.1.10] - 2026-10-01
+
+### Fixed
+- The `~/.local/bin/swarm` launcher now falls back to the newest installed swarm plugin (Claude or Codex)
+  when the plugin folder it points at is gone, instead of failing every command until bootstrap reruns.
+- `swarm update` is now `swarm upgrade`; `update` still works as an alias.
+
 ## [0.1.9] - 2026-10-01
 
 ### Fixed
