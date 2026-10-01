@@ -4,6 +4,12 @@ All notable changes to swarm, newest first. Each release's notes on GitHub are t
 section here, so every release adds a `## [x.y.z] - YYYY-MM-DD` section (see `scripts/release-notes.sh`).
 Keep entries short and user-facing: one line per change, what it does, not how.
 
+## [0.1.8] - 2026-10-01
+
+### Fixed
+- A job marked `swarm wait` no longer has the orchestrator told to spawn the next round after a not met
+  verdict; `swarm resume` (or an agent joining) turns the reminder back on.
+
 ## [0.1.7] - 2026-09-30
 
 ### Fixed

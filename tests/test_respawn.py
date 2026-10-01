@@ -88,6 +88,18 @@ class TriggerTests(RespawnEnv):
         for ev in ("turn", "done", "session-stop"):
             self.assertIsNone(self.main(ev))
 
+    def test_a_waiting_job_never_nags_until_it_resumes(self):
+        # `swarm wait`: the next round needs the user, so spawning agents can't move it
+        self.not_met()
+        self.finish("w1", "judge-1")
+        rc, _, err = self.cli("wait", "--job", "J", "--on", "the user's re-link")
+        self.assertEqual(rc, 0, err)
+        for ev in ("turn", "done", "session-stop"):
+            self.assertIsNone(self.main(ev))
+        rc, _, err = self.cli("resume", "--job", "J")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.main("session-stop")["decision"], "block")
+
     def test_met_says_nothing(self):
         rc, _, _ = self.cli("verdict", "--job", "J", "--as", self.judge, "met", "all", "good")
         self.assertEqual(rc, 0)

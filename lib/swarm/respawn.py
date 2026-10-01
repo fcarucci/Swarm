@@ -13,9 +13,9 @@ runs in the hooks that fire in the main session, the ones with no agent_id:
   itself a continuation (stop_hook_active) is let through, so an orchestrator that decides to
   escalate to the user can.
 
-The condition, from the board alone (Board.job_status): the job is open with a goal, the judge's
-latest verdict is not_met, and no agent is started, running or idle (dead, left and completed
-ones don't count). A met verdict, or any agent still at work, gives nothing.
+The condition, from the board alone (Board.job_status): the job is open with a goal, not waiting
+(`swarm wait`), the judge's latest verdict is not_met, and no agent is started, running or idle
+(dead, left and completed ones don't count). A met verdict, or any agent still at work, gives nothing.
 
 State is one small file beside the job's marker (state_path), removed with it.
 """
@@ -47,9 +47,10 @@ def _clip(text, n: int = FIELD_MAX) -> str:
 
 
 def idle_not_met(js) -> bool:
-    """Whether this JobStatus is a not_met job with no agent left at work."""
+    """Whether this JobStatus is a not_met job with no agent left at work. A waiting job
+    (`swarm wait`) is not: its next round needs something agents can't do."""
     return bool(js is not None and js.status == "active" and js.goal and js.verdict == "not_met"
-                and not (js.started or js.running or js.idle))
+                and not js.waiting_on and not (js.started or js.running or js.idle))
 
 
 def verdict_key(js) -> str:
