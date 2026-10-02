@@ -269,9 +269,11 @@ def spool_problem(cfg: dict) -> str | None:
     home = paths.home()
     uid = compat.uid()
     import re
-    if spool != home and home not in spool.parents and not re.search(rf"(?<![0-9]){uid}(?![0-9])", str(spool)):
+    # (Windows has no uid: a spool outside the profile is judged by its links alone.)
+    if not paths.IS_WINDOWS and spool != home and home not in spool.parents \
+            and not re.search(rf"(?<![0-9]){uid}(?![0-9])", str(spool)):
         return f"{spool} is outside your home and doesn't name your uid ({uid}), so it isn't per-user"
-    cur = Path("/")
+    cur = Path(spool.anchor or "/")
     for part in spool.parts[1:]:
         cur = cur / part
         try:
@@ -281,8 +283,10 @@ def spool_problem(cfg: dict) -> str | None:
         except OSError as exc:
             return f"can't check {cur} ({exc.strerror or type(exc).__name__})"
         import stat as _stat
-        # a root-owned symlink (macOS /tmp -> /private/tmp) can't be swapped by another user
-        if _stat.S_ISLNK(st.st_mode) and st.st_uid != 0 and cur not in (home, *home.parents):
+        # a root-owned symlink (macOS /tmp -> /private/tmp) can't be swapped by another user; on
+        # Windows a symlink or junction (reparse point) anywhere below the profile is refused
+        link = _stat.S_ISLNK(st.st_mode) or bool(getattr(st, "st_file_attributes", 0) & 0x400)
+        if link and (st.st_uid != 0 or paths.IS_WINDOWS) and cur not in (home, *home.parents):
             return f"{cur} is a symlink"
         if st.st_uid not in (0, uid):
             return f"{cur} belongs to another user (uid {st.st_uid})"
