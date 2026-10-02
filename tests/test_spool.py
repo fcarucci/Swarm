@@ -10,6 +10,7 @@ import threading
 from pathlib import Path
 from unittest import mock
 
+from support import posix_only  # noqa: E402
 from test_hooks_cli import Env  # noqa: E402  (sets sys.path)
 
 from swarm import spool  # noqa: E402
@@ -40,6 +41,7 @@ class SpoolFileSafetyTests(Env):
         with self.board() as b:
             return spool.flush_spool(b, self.cfg)
 
+    @posix_only("needs os.mkfifo (POSIX FIFOs)")
     def test_spool_fifo_skipped(self):
         spool.spool_post(self.cfg, "J", "Someone", "fine", None)
         os.mkfifo(self.spool_dir / "stall.json")
@@ -94,6 +96,7 @@ class SpoolFileSafetyTests(Env):
             spool.spool_post(cfg, "J", "Someone", "m", None)
         self.assertEqual(list(real.iterdir()), [])
 
+    @posix_only("needs Unix uids (no ownership checks on Windows)")
     def test_spool_parent_owned_by_other_uid_refused(self):
         # as for the old shared /tmp/claude: its owner can swap the leaf, so it is refused, with a
         # SpoolError (what the callers expect), not a PermissionError
@@ -112,12 +115,14 @@ class SpoolFileSafetyTests(Env):
         with self.assertRaises(spool.SpoolError):
             spool.spool_post(cfg, "J", "Someone", "m", None)
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_a_loose_spool_dir_of_ours_is_made_private(self):
         self.spool_dir.mkdir()
         os.chmod(self.spool_dir, 0o777)
         spool.spool_post(self.cfg, "J", "Someone", "m", None)
         self.assertEqual(self.spool_dir.stat().st_mode & 0o777, 0o700)
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_queue_files_are_private(self):
         old = os.umask(0)
         self.addCleanup(os.umask, old)

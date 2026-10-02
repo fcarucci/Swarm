@@ -4,6 +4,11 @@ is acted on unchecked. The attacks, reproduced: each must do nothing and log a
 refusal."""
 from __future__ import annotations
 
+import sys as _sys
+import unittest as _unittest
+if _sys.platform == "win32":
+    raise _unittest.SkipTest("swarm supervise is not supported on Windows")
+
 import unittest
 
 import json
@@ -14,12 +19,12 @@ from pathlib import Path
 from unittest import mock
 
 from test_hooks_cli import Env
-from support import tq
+from support import tq, posix_only
 from test_supervise_runner import RunnerBase, fake
 from test_supervise_setup import FakeRun
 
 from swarm import cli as swarm
-from swarm import codex_config, paths
+from swarm import codex_config, compat, paths
 from swarm.supervisor import command, lost, markers, outage, runner, settings as st
 
 
@@ -56,6 +61,7 @@ class PrivateDirTests(Env):
             for root in roots:
                 self.assertFalse(_under(st.private_dir(), Path(root)), f"{st.private_dir()} under {root}")
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_created_0700_and_owned(self):
         d = st.ensure_private_dir(self.cfg)
         for p in (d, st.runs_dir()):
@@ -86,12 +92,14 @@ class PrivateDirTests(Env):
             st.ensure_private_dir(self.cfg)
         self.assertTrue(d.is_dir())
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_a_loose_mode_is_refused(self):
         st.private_dir().mkdir(parents=True, mode=0o700)
         st.private_dir().chmod(0o755)
         with self.assertRaises(st.PrivateDirError):
             st.ensure_private_dir(self.cfg)
 
+    @posix_only("needs Unix uids (no ownership checks on Windows)")
     def test_another_owner_is_refused(self):
         st.ensure_private_dir(self.cfg)
         with mock.patch("os.getuid", return_value=os.getuid() + 1):
@@ -728,7 +736,7 @@ class ForgedRowTests(_SuperviseBase):
         import getpass
         name = self.forge("forged", cwd=self.work)
         a = self.agent("forged")
-        self.assertEqual((a.host, a.os_user), (os.uname().nodename, getpass.getuser()))
+        self.assertEqual((a.host, a.os_user), (compat.node(), getpass.getuser()))
         with self.board() as b:
             keys = [c.agent.agent_key for c in command.candidates(b, self.cfg, st.settings(self.cfg))]
         self.assertNotIn("forged", keys)

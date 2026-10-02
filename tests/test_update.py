@@ -15,7 +15,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import ROOT, home_env  # noqa: F401
+from support import ROOT, home_env, posix_only  # noqa: F401
 
 from swarm import update  # noqa: E402
 
@@ -213,6 +213,7 @@ class PerHostUpdateFailureTests(unittest.TestCase):
         self.bin = self.home / "bin"
         self.bin.mkdir()
 
+    @posix_only("runs a POSIX sh script (the Windows entry points are tested in test_windows_*.py)")
     def test_update_claude_raises_on_marketplace_failure(self):
         stub = self.bin / "claude"
         _write_stub(stub, 'echo "boom: no route to host" >&2; exit 1')
@@ -220,6 +221,7 @@ class PerHostUpdateFailureTests(unittest.TestCase):
             update.update_claude(str(stub))
         self.assertIn("no route to host", str(ctx.exception))
 
+    @posix_only("runs a POSIX sh script (the Windows entry points are tested in test_windows_*.py)")
     def test_update_claude_raises_on_plugin_failure_with_cli_text(self):
         stub = self.bin / "claude"
         _write_stub(stub, '''

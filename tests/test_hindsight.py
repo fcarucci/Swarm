@@ -11,6 +11,7 @@ import time
 import unittest
 import uuid
 
+from support import posix_only  # noqa: E402
 from test_hooks_cli import Env  # noqa: F401  (sets sys.path)
 from fake_hindsight import FakeHindsight, dead_url  # noqa: E402
 
@@ -269,6 +270,7 @@ class FailureScopeTests(HindsightEnv):
         with self.assertRaises(self.hs.HindsightUnavailable):
             self.client.recall("any", "q")
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_unreachable_marker_not_in_spool(self):
         self.trip()
         self.assertTrue(self.marker.is_file())

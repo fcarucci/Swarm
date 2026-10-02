@@ -657,7 +657,7 @@ class AutoCloseCliTests(Env):
     def test_a_touch_during_a_slow_close_reverts_the_close(self):
         # the close holds no lock the hook needs: even with the marker's lock taken by someone
         # else, the touch lands at once, and the sweep reverts its close right after it
-        import fcntl
+        from swarm import compat
         self.finished_job()
         self.main_session()
         old = self.seen().stat().st_mtime - QUIET
@@ -666,7 +666,7 @@ class AutoCloseCliTests(Env):
 
         def during():
             with open(self.marker()) as fh:
-                fcntl.flock(fh, fcntl.LOCK_EX)
+                compat.flock(fh, compat.LOCK_EX)
                 t = time.monotonic()
                 self.assertIsNone(self.main_session())
                 waited.append(time.monotonic() - t)
@@ -708,14 +708,14 @@ class AutoCloseCliTests(Env):
         self.assertFalse(self.seen().exists())
 
     def test_touches_of_several_busy_markers_share_one_deadline(self):
-        import fcntl
+        from swarm import compat
         for job in ("J", "K", "L"):
             rc, _, err = self.cli("activate", "--job", job, "--session", "sess-1")
             self.assertEqual(rc, 0, err)
         held = [open(self.marker(job)) for job in ("J", "K", "L")]
         try:
             for fh in held:
-                fcntl.flock(fh, fcntl.LOCK_EX)
+                compat.flock(fh, compat.LOCK_EX)
             t = time.monotonic()
             self.assertIsNone(self.main_session())
             waited = time.monotonic() - t

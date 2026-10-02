@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import ROOT, tq, home_env  # noqa: F401
+from support import ROOT, tq, home_env, posix_only  # noqa: F401
 
 from swarm import bootstrap, paths  # noqa: E402
 
@@ -112,6 +112,7 @@ class DoctorTests(unittest.TestCase):
             rc = cli.main(["--config", str(self.cfg), "doctor", "--host", "claude"])
         self.assertEqual(rc, 0, out.getvalue())
 
+    @posix_only("needs Unix uids (no ownership checks on Windows)")
     def test_malformed_or_unreadable_settings_warn_not_ok(self):
         s = self.home / ".claude/settings.json"
         s.write_text('{"model": "secret-model-value", "hooks": {')
@@ -276,6 +277,7 @@ class DoctorTests(unittest.TestCase):
         self.assertIn("can't tell", c.detail)
         self.assertIn("codex plugin list --json", c.fix)
 
+    @posix_only("needs Unix uids (no ownership checks on Windows)")
     def test_codex_session_probe_checks_every_root(self):
         ok = self.home / "ok"; ok.mkdir()
         locked = self.home / "locked"; locked.mkdir(); locked.chmod(0o500)
@@ -420,6 +422,7 @@ class ExposureDoctorTests(unittest.TestCase):
         self.assertIn("shared", c.detail)
         self.assertIn("~/.local/state/swarm/spool", c.fix)
 
+    @posix_only("needs Unix uids (no ownership checks on Windows)")
     def test_spool_in_tmp_must_name_the_uid(self):
         self.write_cfg(spool="/tmp/swarm-spool-shared")
         self.assertIs(self.checks()["spool dir"].ok, False)
@@ -428,6 +431,7 @@ class ExposureDoctorTests(unittest.TestCase):
         self.write_cfg(spool=f"/tmp/claude-{os.getuid()}/swarm-spool")
         self.assertIs(self.checks()["spool dir"].ok, True)
 
+    @posix_only("needs Unix uids (no ownership checks on Windows)")
     def test_spool_component_owned_by_another_uid_fails(self):
         real = os.getuid()
         with mock.patch("os.getuid", return_value=real + 4242):

@@ -6,7 +6,7 @@ import subprocess
 import sys
 import unittest
 
-from support import ROOT  # noqa: F401  (sets sys.path)
+from support import ROOT, posix_only  # noqa: F401  (sets sys.path)
 
 
 class LayoutTests(unittest.TestCase):
@@ -26,6 +26,7 @@ class LayoutTests(unittest.TestCase):
         out = subprocess.run([sys.executable, "-B", "-c", code], capture_output=True, text=True, check=True)
         self.assertEqual(out.stdout.strip(), "[]")
 
+    @posix_only("runs a POSIX sh script (the Windows entry points are tested in test_windows_*.py)")
     def test_cli_help_through_launcher(self):
         import support   # a throwaway venv with a matching stamp: the launcher builds nothing
         res = subprocess.run([str(ROOT / "bin" / "swarm"), "--help"], capture_output=True, text=True, timeout=60,

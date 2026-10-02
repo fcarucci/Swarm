@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import home_env  # noqa: E402
+from support import home_env, posix_only  # noqa: E402
 from test_hooks_cli import Env  # the private installation used by the hook/CLI tests
 
 from swarm import cli as swarm, transcripts
@@ -194,6 +194,7 @@ class CloseStuckTests(Env):
             swarm.sweep_jobs(b, self.cfg)
         self.assertEqual(self._final_rows(), [("a1", True)])
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_retries_rotate_so_missing_transcripts_cannot_starve_the_rest(self):
         # FINALIZE_PER_SWEEP (20) patched to 2, with 3 missing: the same shape as >20 missing
         self._archive_on()

@@ -14,6 +14,7 @@ import unittest
 
 from support import SMALL_POOL, FileHarness, fake_image, MemoryHarness, PostgresHarness, SqliteHarness  # noqa: F401  (sets sys.path)
 
+from swarm import compat  # noqa: E402
 from swarm.board import (MEMORY_SEEN_MAX, AgentEvent, AgentStatus, BoardError, JobStatus,  # noqa: E402
                    Member, MemoryRef, Message, OwedReply, PostResult, ReadResult, Route, RosterEntry,
                    SetupResult, SyncState, TranscriptImage, TranscriptRow, TranscriptSummary)
@@ -146,7 +147,7 @@ class BoardContract:
     def test_pending_final_transcripts_lists_owned_ended_agents_missing_or_unfinal(self):
         import getpass
         from swarm.transcripts import make_row
-        me, host = getpass.getuser(), os.uname().nodename
+        me, host = getpass.getuser(), compat.node()
         for k in ("ended", "norow", "active", "final", "other_user", "claude_one"):
             self.b.allocate_name(k, "j")
             self.b.set_agent_runtime(k, "claude" if k == "claude_one" else "codex", "m")
@@ -1269,7 +1270,7 @@ class BoardContract:
 
     def test_capture_failed_ends_the_pending_final(self):
         import getpass
-        me, host = getpass.getuser(), os.uname().nodename
+        me, host = getpass.getuser(), compat.node()
         self.b.allocate_name("k1", "j")
         self.b.set_agent_runtime("k1", "claude", "m")
         self.b.agent_stopped("k1")
@@ -1535,7 +1536,7 @@ class BoardContract:
         self.assertEqual((r1.outcome, r1.ended_at, r1.new_agent_key), (None, None, None))
         import getpass, os
         self.assertEqual((r1.host, r1.os_user, r1.harness, r1.minutes_cap),
-                         (os.uname().nodename, getpass.getuser(), "claude", 60.0))
+                         (compat.node(), getpass.getuser(), "claude", 60.0))
 
     def test_record_restart_once_per_closed_agent(self):
         self.assertIsNotNone(self._restart(old="k"))
@@ -1664,7 +1665,7 @@ class BoardContract:
         self._restart(old="a")
         self.b.record_restart("j2", "r2", "b", "stuck:silent", "codex", 30.0)
         self.assertEqual([r.old_agent_key for r in self.b.restarts(job="j2")], ["b"])
-        mine = self.b.restarts(host=os.uname().nodename, os_user=getpass.getuser())
+        mine = self.b.restarts(host=compat.node(), os_user=getpass.getuser())
         self.assertEqual(len(mine), 2)
         self.assertEqual(self.b.restarts(host="elsewhere"), [])
         future = self.b.now() + dt.timedelta(minutes=1)

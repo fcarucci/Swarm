@@ -16,7 +16,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import HOST_ENV, ROOT, e2e_harness, temp_venv, tq, home_env  # noqa: F401  (sets sys.path)
+from support import HOST_ENV, ROOT, e2e_harness, temp_venv, tq, home_env, posix_only  # noqa: F401  (sets sys.path)
 
 from swarm import spool  # noqa: E402
 from swarm import cli as swarm  # noqa: E402
@@ -407,6 +407,7 @@ class HookTests(Env):
         rc, out, _ = self.cli("activate", "--job", "K", "--session", "sess-9")
         self.assertIn(f"swarm command: {swarm.SKILL_DIR / 'bin' / 'swarm'}", out)
 
+    @posix_only("runs a POSIX sh script (the Windows entry points are tested in test_windows_*.py)")
     def test_shell_entry_runs_without_state_dir(self):
         # bin/swarm-hook appends stderr to ~/.local/state/swarm/hook-errors.log. With a marker_dir
         # elsewhere that directory need not exist, and sh skips a command whose redirect fails:
@@ -424,6 +425,7 @@ class HookTests(Env):
         self.assertEqual(res.returncode, 0)
         self.assertIn("[swarm] You are **", json.loads(res.stdout)["hookSpecificOutput"]["additionalContext"])
 
+    @posix_only("runs a POSIX sh script (the Windows entry points are tested in test_windows_*.py)")
     def test_shell_entry_host_flag_without_value_exits_0(self):
         # `swarm-hook --host` with no value (or no event) drains stdin and exits 0: never fails the agent.
         import subprocess
@@ -574,6 +576,7 @@ class HookFileSafetyTests(Env):
         rc, _, _ = self.cli("activate", "--job", "J", *extra)
         self.assertEqual(rc, 0)
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_hook_log_symlink_not_followed(self):
         # a sandbox plants hook-errors.log -> a .pth of the venv, then makes a hook log a
         # line holding a newline and code. Neither the old nor the new location is followed.
@@ -593,6 +596,7 @@ class HookFileSafetyTests(Env):
         swarm_hooks._log_line("turn", "a", "more")
         self.assertEqual(self.victim.read_text(), "original\n")
 
+    @posix_only("needs os.mkfifo (POSIX FIFOs)")
     def test_hook_log_hard_link_and_fifo_refused(self):
         self.host.mkdir(parents=True, mode=0o700)
         os.link(self.victim, self.host / "hook-errors.log")
@@ -631,6 +635,7 @@ class HookFileSafetyTests(Env):
         self.assertRegex((self.host / "hook-errors.log").read_text(), r"start agent-1: ConnectionError: ")
         self.assertFalse((self.state / "hook-errors.log").exists())
 
+    @posix_only("needs os.mkfifo (POSIX FIFOs)")
     def test_fifo_in_marker_dir(self):
         # a FIFO named like a marker must not block the hook (it runs on every tool call),
         # nor Start/Stop, whose auto-close sweep reads markers through cli._read_marker

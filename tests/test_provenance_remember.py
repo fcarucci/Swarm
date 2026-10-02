@@ -163,8 +163,7 @@ class RememberTests(HindsightEnv):
         meta = provenance.cli_metadata(env)
         self.assertTrue(provenance.valid_metadata(meta), meta)
         self.assertNotIn("session_id", meta)
-        with mock.patch("os.uname") as un:
-            un.return_value.nodename = "h" * 1000
+        with mock.patch("swarm.compat.node", return_value="h" * 1000):
             self.assertNotIn("host", provenance.cli_metadata({}))
 
     def test_spooled_metadata_shape(self):

@@ -10,6 +10,11 @@ shell script uses is a fresh mktemp directory of its own (see e2e/update_test.sh
 """
 from __future__ import annotations
 
+import sys as _sys
+import unittest as _unittest
+if _sys.platform == "win32":
+    raise _unittest.SkipTest("update.sh is a POSIX script")
+
 import os
 import shutil
 import subprocess

@@ -10,6 +10,11 @@ notices --hook-output prints the SessionStart hook output built by
 bootstrap.hook_output(host) from the host-private notice (a fixed template), and nothing else."""
 from __future__ import annotations
 
+import sys as _sys
+import unittest as _unittest
+if _sys.platform == "win32":
+    raise _unittest.SkipTest("swarm supervise is not supported on Windows")
+
 import contextlib
 import io
 import json

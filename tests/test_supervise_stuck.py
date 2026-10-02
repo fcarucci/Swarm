@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import base_config, home_env  # noqa: F401
+from support import base_config, home_env, posix_only  # noqa: F401
 
 from swarm.board import AgentStatus, JobStatus
 from swarm.supervisor import outage, stuck
@@ -105,6 +105,7 @@ class OutageFileTests(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_unreachable_then_reachable(self):
         self.assertIsNone(outage.current(NOW))
         o1 = outage.note_unreachable(NOW)

@@ -2,6 +2,11 @@
 job is active. All under a temp $HOME."""
 from __future__ import annotations
 
+import sys as _sys
+import unittest as _unittest
+if _sys.platform == "win32":
+    raise _unittest.SkipTest("swarm migrate retires the pre-0.1 POSIX layout; a Windows install never had it")
+
 import json
 import os
 import shutil
@@ -10,7 +15,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import ROOT, tq, home_env  # noqa: F401
+from support import ROOT, tq, home_env, posix_only  # noqa: F401
 
 from swarm import bootstrap  # noqa: E402
 
@@ -292,6 +297,7 @@ class MoveOldDefaultsTests(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in self.old_spool.iterdir()), ["notes.txt"])
         self.assertTrue(any(s.status == "changed" and "4" in s.detail for s in steps), steps)
 
+    @posix_only("needs os.mkfifo (POSIX FIFOs)")
     def test_old_spool_links_and_fifos_not_followed(self):
         self.old_spool_with(["a1.json"])
         victim = self.home / "victim.json"; victim.write_text('{"secret": 1}')
@@ -305,6 +311,7 @@ class MoveOldDefaultsTests(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in new.iterdir()), ["a1.json"])
         self.assertEqual(victim.read_text(), '{"secret": 1}')
 
+    @posix_only("needs Unix uids (no ownership checks on Windows)")
     def test_old_spool_of_another_user_left_alone(self):
         self.old_spool_with(["a1.json"])
         real = os.getuid()

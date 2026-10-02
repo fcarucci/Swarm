@@ -1,6 +1,11 @@
 """Activation switches, marker cwd, user timer setup, and supervisor doctor checks."""
 from __future__ import annotations
 
+import sys as _sys
+import unittest as _unittest
+if _sys.platform == "win32":
+    raise _unittest.SkipTest("swarm supervise and its systemd units are not supported on Windows")
+
 import datetime as dt
 import json
 import os
@@ -8,6 +13,7 @@ import subprocess
 from pathlib import Path
 from unittest import mock
 
+from support import posix_only  # noqa: E402
 from test_hooks_cli import Env
 from swarm import bootstrap, cli as swarm, paths
 from swarm.supervisor import settings as st, systemd
@@ -38,6 +44,7 @@ class ActivateTests(Env):
         with self.board() as b:
             self.assertFalse(b.job_status("J").supervise)
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_markers_record_cwd(self):
         self.cli("activate", "--job", "J")
         self.cli("activate", "--job", "J", "--attach", "--session", "other")
@@ -74,6 +81,7 @@ class SystemdTests(Env):
         self.assertNotIn("100%cpu", service)
         self.assertNotIn("50%done", service)
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_install_writes_private_units_and_enables(self):
         run = FakeRun()
         with mock.patch("shutil.which", return_value="/usr/bin/systemctl"):

@@ -7,7 +7,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from support import ROOT  # noqa: F401  (sets sys.path)
+from support import ROOT, posix_only  # noqa: F401  (sets sys.path)
 
 from swarm import cli as swarm  # noqa: E402
 from test_hooks_cli import Env  # noqa: E402
@@ -227,9 +227,11 @@ class MarkerReadTests(Env):
         self.assertFalse(t.is_alive(), f"{fn.__name__} blocked")
         return box.get("r")
 
+    @posix_only("needs os.mkfifo (POSIX FIFOs)")
     def test_fifo_marker_is_not_read(self):
         self.assertEqual(self.within(1.0, swarm._read_marker, self.fifo("J.json")), {})
 
+    @posix_only("needs os.mkfifo (POSIX FIFOs)")
     def test_status_and_deactivate_with_a_fifo_marker(self):
         self.cli("activate", "--job", "K")
         self.fifo("J.json")
@@ -239,11 +241,13 @@ class MarkerReadTests(Env):
         rc, _, err = self.within(2.0, self.cli, "deactivate", "--job", "K")
         self.assertEqual(rc, 0, err)
 
+    @posix_only("needs os.mkfifo (POSIX FIFOs)")
     def test_fifo_at_the_jobs_own_marker_name(self):
         self.fifo("J.json")
         rc, _, err = self.within(2.0, self.cli, "deactivate", "--job", "J")
         self.assertEqual(rc, 0, err)
 
+    @posix_only("needs os.mkfifo (POSIX FIFOs)")
     def test_locked_marker_on_a_fifo_or_link(self):
         fifo = self.fifo("J.json")
         outside = self.tmp / "outside.json"

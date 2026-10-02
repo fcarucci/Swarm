@@ -75,6 +75,7 @@ class InstallPs1Tests(unittest.TestCase):
                                   "-Marketplace", url, "-Yes", "-NoColor", "-NoPath", *flags],
                                  capture_output=True, text=True, env=env, timeout=300)
             out = res.stdout + res.stderr
+            self.assertEqual(res.returncode, 0, out)
             self.assertIn(want, out, out)
             args = (logs / "claude.args").read_text()
             if flags:

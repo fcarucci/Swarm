@@ -71,6 +71,12 @@ _bootstrap.OLD_SPOOL = os.path.join(SANDBOX, "old-shared-spool")
 _VENV = None
 
 
+def posix_only(reason: str):
+    """Skip a test on Windows, with the reason (only for features that are POSIX-only by nature)."""
+    import unittest
+    return unittest.skipIf(sys.platform == "win32", reason)
+
+
 def home_env(home) -> dict:
     """The environment variables that make a directory the user's home: HOME (POSIX) and
     USERPROFILE (what Windows' expanduser/Path.home read)."""
@@ -93,20 +99,30 @@ def temp_venv() -> Path:
     if _VENV is None:
         import subprocess
         v = Path(SANDBOX) / "venv"
-        (v / "bin").mkdir(parents=True)
-        os.symlink(os.path.realpath(sys.executable), v / "bin" / "python")
+        if sys.platform == "win32":
+            # Scripts/python.exe is a stand-in (a copy: no symlink privilege needed); doctor and the
+            # launcher tests only look for it, none of them runs it
+            (v / "Scripts").mkdir(parents=True)
+            _shutil.copy(os.path.realpath(sys.executable), v / "Scripts" / "python.exe")
+        else:
+            (v / "bin").mkdir(parents=True)
+            os.symlink(os.path.realpath(sys.executable), v / "bin" / "python")
         if sys.prefix != sys.base_prefix:       # running in a venv: mirror it
             src = Path(sys.prefix)
             (v / "pyvenv.cfg").write_text((src / "pyvenv.cfg").read_text())
-            for d in ("lib", "lib64", "include"):
-                if (src / d).exists():
+            for d in ("lib", "lib64", "include", "Lib"):
+                if (src / d).exists() and sys.platform != "win32":
                     os.symlink(src / d, v / d)
         else:                                    # a plain interpreter with the packages installed in it
             (v / "pyvenv.cfg").write_text(
                 f"home = {os.path.dirname(os.path.realpath(sys.executable))}\n"
                 "include-system-site-packages = true\n")
-        req = subprocess.run(["sh", "-c", f"cksum < '{ROOT / 'requirements.txt'}' | cut -d' ' -f1"],
-                             capture_output=True, text=True).stdout.strip()
+        if sys.platform == "win32":
+            from swarm.winlaunch import requirements_stamp
+            req = requirements_stamp(ROOT)
+        else:
+            req = subprocess.run(["sh", "-c", f"cksum < '{ROOT / 'requirements.txt'}' | cut -d' ' -f1"],
+                                 capture_output=True, text=True).stdout.strip()
         (v / ".swarm-requirements").write_text(req + "\n")
         _VENV = v
     return _VENV

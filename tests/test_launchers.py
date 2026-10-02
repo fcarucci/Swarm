@@ -9,7 +9,7 @@ import time
 import unittest
 from pathlib import Path
 
-from support import ROOT, home_env  # noqa: F401
+from support import ROOT, home_env, posix_only  # noqa: F401
 
 
 class LauncherTests(unittest.TestCase):
@@ -25,6 +25,7 @@ class LauncherTests(unittest.TestCase):
                              text=True, timeout=10, env=self.env)
         return res, time.monotonic() - t
 
+    @posix_only("runs a POSIX sh script (the Windows entry points are tested in test_windows_*.py)")
     def test_hook_without_venv_exits_fast_and_silently(self):
         md = self.home / ".local/state/swarm/active"; md.mkdir(parents=True)
         (md / "J.json").write_text('{"job": "J", "session_id": "s"}')      # a job is active
@@ -33,6 +34,7 @@ class LauncherTests(unittest.TestCase):
         self.assertLess(took, 1.0)
         self.assertFalse((self.home / ".local/share/swarm/venv").exists())   # nothing built
 
+    @posix_only("runs a POSIX sh script (the Windows entry points are tested in test_windows_*.py)")
     def test_session_start_spawns_bootstrap_detached(self):
         fake = self.home / "plugin"; (fake / "bin").mkdir(parents=True); (fake / ".claude-plugin").mkdir()
         (fake / ".claude-plugin/plugin.json").write_text('{"name": "swarm", "version": "1.2.3"}')
@@ -77,6 +79,7 @@ class LauncherTests(unittest.TestCase):
         (hd / f"bootstrap-{host}-{ver}-{key}").touch()
         return hd
 
+    @posix_only("runs a POSIX sh script (the Windows entry points are tested in test_windows_*.py)")
     def test_session_start_prints_pending_notices_through_python_once(self):
         hd = self.stamped("codex")
         self.fake_venv('echo \'{"systemMessage": "from python"}\'\nrm -f "$HOME/.local/share/swarm/host/notices-codex.json"\n')
@@ -88,6 +91,7 @@ class LauncherTests(unittest.TestCase):
         second, _ = self.run_hook("--host", "codex", "session-start")
         self.assertEqual(second.stdout, "")
 
+    @posix_only("runs a POSIX sh script (the Windows entry points are tested in test_windows_*.py)")
     def test_session_start_ignores_state_dir_notices(self):
         # a sandboxed agent can write the state dir: a notice there is never shown
         self.stamped("claude")
@@ -100,6 +104,7 @@ class LauncherTests(unittest.TestCase):
         self.assertFalse((self.home / "python-args").exists())
         self.assertEqual((st / "notices-claude.json").read_text(), forged)
 
+    @posix_only("runs a POSIX sh script (the Windows entry points are tested in test_windows_*.py)")
     def test_session_start_notice_symlink_is_not_followed(self):
         hd = self.stamped("claude")
         self.fake_venv("")
@@ -110,6 +115,7 @@ class LauncherTests(unittest.TestCase):
         self.assertNotIn("TOKEN", res.stdout)
         self.assertFalse((self.home / "python-args").exists())
 
+    @posix_only("runs a POSIX sh script (the Windows entry points are tested in test_windows_*.py)")
     def test_swarm_hook_no_symlink_follow(self):
         # host/ replaced by a symlink (to a dir of the same user): nothing is written through it
         outside = self.home / "outside"; outside.mkdir()
@@ -124,6 +130,7 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(list(outside.iterdir()), [])
         self.assertFalse((self.home / ".local/state/swarm/hook-errors.log").exists())
 
+    @posix_only("runs a POSIX sh script (the Windows entry points are tested in test_windows_*.py)")
     def test_loose_host_dir_is_not_used(self):
         hd = self.home / ".local/share/swarm/host"; hd.mkdir(parents=True)
         hd.chmod(0o777)
@@ -134,6 +141,7 @@ class LauncherTests(unittest.TestCase):
         self.run_hook("--host", "claude", "turn", stdin='{"agent_id": "a", "session_id": "s"}')
         self.assertEqual(list(hd.iterdir()), [])
 
+    @posix_only("runs a POSIX sh script (the Windows entry points are tested in test_windows_*.py)")
     def test_hook_stderr_goes_to_the_host_dir(self):
         md = self.home / ".local/state/swarm/active"; md.mkdir(parents=True)
         (md / "J.json").write_text('{"job": "J", "session_id": "s"}')
@@ -145,6 +153,7 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(hd.stat().st_mode & 0o777, 0o700)
         self.assertFalse((self.home / ".local/state/swarm/hook-errors.log").exists())
 
+    @posix_only("runs a POSIX sh script (the Windows entry points are tested in test_windows_*.py)")
     def test_session_start_skips_when_stamped(self):
         fake = self.home / "plugin"; (fake / "bin").mkdir(parents=True); (fake / ".claude-plugin").mkdir()
         (fake / ".claude-plugin/plugin.json").write_text('{"name": "swarm", "version": "1.2.3"}')

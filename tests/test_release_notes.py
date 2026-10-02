@@ -2,6 +2,11 @@
 read as it was at the tag; a tag with no section is an error, not a silent commit dump."""
 from __future__ import annotations
 
+import sys as _sys
+import unittest as _unittest
+if _sys.platform == "win32":
+    raise _unittest.SkipTest("release-notes script is a bash release tool (the runner `bash` is WSL)")
+
 import os
 import shutil
 import subprocess

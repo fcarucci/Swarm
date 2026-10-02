@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from support import base_config  # noqa: F401
+from support import base_config, posix_only  # noqa: F401
 
 from swarm import cli
 from swarm.supervisor import markers
@@ -29,6 +29,7 @@ class ResumeMarkerTests(unittest.TestCase):
         p = markers.resume_marker_path(self.cfg, "my job", 7)
         self.assertEqual(p.name, f"{cli.safe_job('my job')}--resume-r7.json")
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_write_unbound_then_bind_once(self):
         p = markers.write_resume_marker(self.cfg, "J", 3, resume_of="old-key", name="Homer Simpson",
                                         harness="codex")
@@ -71,6 +72,7 @@ class ResumeMarkerTests(unittest.TestCase):
         self.assertEqual(json.loads(p.read_text())["resume"]["restart_id"], 8)
         self.assertEqual(sorted(x.name for x in p.parent.iterdir()), sorted([p.name, markers.LOCK_NAME]))   # no temp file left
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_rewrite_of_an_existing_marker_waits_for_its_lock(self):
         p = markers.write_resume_marker(self.cfg, "J", 9, resume_of="k", name="N", harness="codex")
         before = p.read_text()
@@ -83,6 +85,7 @@ class ResumeMarkerTests(unittest.TestCase):
         self.assertEqual(json.loads(p2.read_text())["resume"]["resume_of"], "k2")
         self.assertEqual(stat.S_IMODE(p2.stat().st_mode), 0o600)
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_bind_keeps_the_marker_private(self):
         p = markers.write_resume_marker(self.cfg, "J", 10, resume_of="k", name="N", harness="codex")
         self.assertTrue(markers.bind_session(p, "t"))
@@ -121,6 +124,7 @@ class ResumeMarkerTests(unittest.TestCase):
             t.join(5)
         self.assertFalse(p.exists())
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_the_lock_file_is_private_and_not_a_marker(self):
         markers.write_resume_marker(self.cfg, "J", 13, resume_of="k", name="N", harness="codex")
         lock = markers.lock_path(self.tmp / "markers")
@@ -132,6 +136,7 @@ class ResumeMarkerTests(unittest.TestCase):
         d.mkdir(parents=True, exist_ok=True)
         return markers.lock_path(d)
 
+    @posix_only("needs Unix uids (no ownership checks on Windows)")
     def test_a_foreign_lock_file_is_refused(self):
         self._lock().touch(mode=0o600)
         with mock.patch.object(markers.os, "getuid", return_value=os.getuid() + 1):
@@ -139,6 +144,7 @@ class ResumeMarkerTests(unittest.TestCase):
                 markers.write_resume_marker(self.cfg, "J", 14, resume_of="k", name="N", harness="codex")
         self.assertFalse(markers.resume_marker_path(self.cfg, "J", 14).exists())
 
+    @posix_only("needs os.mkfifo (POSIX FIFOs)")
     def test_a_lock_that_is_not_a_regular_file_is_refused(self):
         os.mkfifo(self._lock())
         with self.assertRaises(PermissionError):
@@ -153,6 +159,7 @@ class ResumeMarkerTests(unittest.TestCase):
             markers.write_resume_marker(self.cfg, "J", 16, resume_of="k", name="N", harness="codex")
         self.assertFalse(markers.resume_marker_path(self.cfg, "J", 16).exists())
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_a_loose_lock_file_is_tightened(self):
         lock = self._lock()
         lock.touch()
@@ -208,6 +215,7 @@ class PlantedMarkerTests(unittest.TestCase):
         self.fifos.append(p)
         return p
 
+    @posix_only("needs os.mkfifo (POSIX FIFOs)")
     def test_fifo_marker_does_not_block(self):
         self.fifo("J--resume-r1.json")
         self.assertIsNone(_within(self, lambda: markers.resume_binding(self.cfg, "sess-x")))
@@ -244,6 +252,7 @@ class PlantedMarkerTests(unittest.TestCase):
         self.assertEqual(markers.read_marker(self.good)["resume"]["restart_id"], 9)
         self.assertIsNone(markers.read_marker(self.dir / "missing.json"))
 
+    @posix_only("needs os.mkfifo (POSIX FIFOs)")
     def test_a_marker_swapped_for_a_fifo_blocks_no_writer_or_remover(self):
         """The runner binds, tokens and removes its own marker; a sandbox swaps it for a FIFO."""
         os.unlink(self.good)

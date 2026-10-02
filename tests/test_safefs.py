@@ -3,7 +3,6 @@ is reached through a checked directory descriptor and opened without following l
 or reading unbounded data. Each case runs under a temporary HOME."""
 from __future__ import annotations
 
-import fcntl
 import os
 import shutil
 import stat
@@ -16,6 +15,7 @@ from unittest import mock
 
 from support import ROOT, home_env  # noqa: F401
 
+from swarm import compat  # noqa: E402
 from swarm import paths, safefs  # noqa: E402
 
 
@@ -356,7 +356,7 @@ class OperationTests(HomeCase):
             other = os.open(self.base / "l", os.O_RDONLY)
             try:
                 with self.assertRaises(BlockingIOError):
-                    fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    compat.flock(other, compat.LOCK_EX | compat.LOCK_NB)
             finally:
                 os.close(other)
             with self.assertRaises(BlockingIOError):

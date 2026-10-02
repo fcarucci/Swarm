@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from support import SMALL_POOL, base_config  # noqa: F401  (sets sys.path)
+from support import SMALL_POOL, base_config, posix_only  # noqa: F401  (sets sys.path)
 
 from swarm.board import MemoryRef, ReadOnlyBoard, open_board, open_read_only, setup_board  # noqa: E402
 from swarm.board import file as fileboard  # noqa: E402
@@ -136,6 +136,7 @@ class FileReadOnlyTests(_Base, unittest.TestCase):
             open_read_only(cfg)
         self.assertFalse((self.tmp / "nope").exists())
 
+    @posix_only("needs Unix uids (no ownership checks on Windows)")
     def test_read_only_directory_can_be_read(self):
         if os.geteuid() == 0:
             self.skipTest("root can write anywhere")
@@ -187,6 +188,7 @@ class SqliteReadOnlyTests(_Base, unittest.TestCase):
         self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], version - 1)
         c.close()
 
+    @posix_only("needs Unix uids (no ownership checks on Windows)")
     def test_unwritable_file_can_be_read(self):
         if os.geteuid() == 0:
             self.skipTest("root can write a read-only file")

@@ -16,7 +16,7 @@ import time
 import unittest
 from unittest import mock
 
-from support import SMALL_POOL, SqliteHarness, base_config  # noqa: F401  (sets sys.path)
+from support import SMALL_POOL, SqliteHarness, base_config, posix_only  # noqa: F401  (sets sys.path)
 
 from swarm.board import BoardUnavailable, open_board, setup_board  # noqa: E402
 
@@ -315,6 +315,7 @@ class SqliteSandboxSpoolTests(unittest.TestCase):
         self.addCleanup(self.env.doCleanups)
         self.path = self.env.h.path
 
+    @posix_only("needs Unix uids (no ownership checks on Windows)")
     def test_unwritable_file_spools_and_hook_delivers(self):
         if os.geteuid() == 0:
             self.skipTest("root can write a read-only file")

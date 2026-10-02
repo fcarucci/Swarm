@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from unittest import mock
 
-from support import MemoryHarness  # noqa: F401  (sets sys.path)
+from support import MemoryHarness, posix_only  # noqa: F401  (sets sys.path)
 
 from swarm import hosts, transcripts as T  # noqa: E402
 from swarm.hosts import resume as R  # noqa: E402
@@ -77,6 +77,7 @@ class ResumeBase(unittest.TestCase):
 
 
 class ClaudeResumeTest(ResumeBase):
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_restored_from_the_board_not_from_disk(self):
         self.store(claude_lines())
         # nothing about this agent exists on local disk: only the DB has it

@@ -10,6 +10,7 @@ import json
 import time
 from unittest import mock
 
+from support import LIB, posix_only  # noqa: E402
 from test_transcripts_capture import SESSION, CaptureEnv, line  # noqa: F401  (sets sys.path)
 
 from swarm import cli as swarm  # noqa: E402
@@ -480,9 +481,10 @@ class LockTests(FinalRetryEnv):
             pass                                               # creates the private dir and the lock
         lockp = lost.retry_state_path().parent / lost.RETRIES_LOCK
         child = subprocess.Popen([sys.executable, "-c",
-                                  "import fcntl,os,sys,time; fd=os.open(sys.argv[1], os.O_WRONLY); "
-                                  "fcntl.flock(fd, fcntl.LOCK_EX); print('held', flush=True); time.sleep(60)",
-                                  str(lockp)], stdout=subprocess.PIPE, text=True)
+                                  "import os,sys,time; sys.path.insert(0, sys.argv[2]); from swarm import compat; "
+                                  "fd=os.open(sys.argv[1], os.O_WRONLY); "
+                                  "compat.flock(fd, compat.LOCK_EX); print('held', flush=True); time.sleep(60)",
+                                  str(lockp), str(LIB)], stdout=subprocess.PIPE, text=True)
         self.addCleanup(child.stdout.close)
         self.addCleanup(child.wait)
         self.addCleanup(child.kill)
@@ -639,6 +641,7 @@ class LockModeTests(FinalRetryEnv):
     """N1 (a): the lock files are 0200 and locked through a write descriptor, so a process that
     can only read them (a sandbox) can't hold them; an existing looser lock file is tightened."""
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_retry_and_pass_locks_are_write_only(self):
         import os
         import stat as st_

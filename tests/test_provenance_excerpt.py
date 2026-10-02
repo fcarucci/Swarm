@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import fake_image  # noqa: F401  (sets sys.path)
+from support import fake_image, posix_only  # noqa: F401  (sets sys.path)
 import codex_fixtures as CF  # noqa: E402
 
 from swarm import hosts, provenance, transcript_view, transcripts  # noqa: E402
@@ -243,6 +243,7 @@ class ExcerptFixTests(unittest.TestCase):
         with self.assertRaises(provenance.UnsafeTranscript):
             provenance.read_tail(self.tmp / "linked" / "t.jsonl", 1024)
 
+    @posix_only("needs os.mkfifo (POSIX FIFOs)")
     def test_read_tail_refuses_a_fifo_without_blocking(self):
         os.mkfifo(self.tmp / "fifo.jsonl")
         t0 = time.monotonic()

@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import ROOT, tq, home_env  # noqa: F401
+from support import ROOT, tq, home_env, posix_only  # noqa: F401
 
 from swarm import bootstrap, paths  # noqa: E402
 
@@ -138,6 +138,7 @@ class BootstrapTests(unittest.TestCase):
         paths.launcher_path().write_text(bootstrap.LAUNCHER.format(root=gone))
         self.assertEqual(bootstrap.ensure_launcher().status, "changed")
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_missing_config_copied_from_example_and_needs_nothing_filled_in(self):
         import tomllib
         step = bootstrap.ensure_config(self.cfg)
@@ -227,6 +228,7 @@ class NoticeAndStampSafetyTests(unittest.TestCase):
         self.steps = [bootstrap.Step("config", "manual", "fill in the config"),
                       bootstrap.Step("board", "ok", "fine")]
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_notices_private_location(self):
         bootstrap.write_notices("claude", self.steps)
         f = self.host / "notices-claude.json"
@@ -236,6 +238,7 @@ class NoticeAndStampSafetyTests(unittest.TestCase):
         self.assertEqual(oct(self.host.stat().st_mode & 0o777), "0o700")
         self.assertFalse((paths.state_dir() / "notices-claude.json").exists())
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_write_notices_symlink_not_followed(self):
         victim = self.home / "victim"; victim.write_text("keep me\n"); victim.chmod(0o644)
         self.host.mkdir(parents=True, mode=0o700)
@@ -265,6 +268,7 @@ class NoticeAndStampSafetyTests(unittest.TestCase):
         self.assertIsNone(bootstrap.take_notices())
         self.assertIsNone(bootstrap.hook_output("claude"))
 
+    @posix_only("needs os.mkfifo (POSIX FIFOs)")
     def test_take_notices_reads_through_no_link_and_no_fifo(self):
         self.host.mkdir(parents=True, mode=0o700)
         secret = self.home / "secret"; secret.write_text(json.dumps({"v": 1, "steps": [
@@ -361,6 +365,7 @@ class ClaudeSandboxAllowlistTests(unittest.TestCase):
         self.cfg["board"]["spool_dir"] = "~/.local/state/swarm/spool"
         self.spool = str(self.home / ".local/state/swarm/spool")
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_claude_sandbox_allowlist_has_spool(self):
         self.settings.parent.mkdir(parents=True)
         self.settings.write_text(json.dumps({"model": "opus", "sandbox": {"enabled": True,

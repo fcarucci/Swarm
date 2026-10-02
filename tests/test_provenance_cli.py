@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 from unittest import mock
 
+from support import posix_only  # noqa: E402
 from test_hooks_cli import Env  # noqa: E402
 
 from swarm import provenance, transcripts  # noqa: E402
@@ -230,6 +231,7 @@ class ProvenanceCliTests(Env):
 
     # ---- transcript export
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_export_includes_memory_excerpts(self):
         self.store_transcript()
         d = Path(self.tmp) / "exp"

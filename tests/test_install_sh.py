@@ -13,6 +13,11 @@ home around the run so the script can prove root itself wrote nothing into it.
 """
 from __future__ import annotations
 
+import sys as _sys
+import unittest as _unittest
+if _sys.platform == "win32":
+    raise _unittest.SkipTest("install.sh is a POSIX script (Windows has install.ps1: test_install_ps1.py)")
+
 import os
 import shutil
 import subprocess

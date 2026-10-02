@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import base_config, home_env  # noqa: F401  (sets sys.path)
+from support import base_config, home_env, posix_only  # noqa: F401  (sets sys.path)
 
 from swarm.supervisor import settings as st
 
@@ -112,6 +112,7 @@ class SettingsTests(unittest.TestCase):
         cfg["supervise"] = {"enabled": True, "max_turns": "lots"}
         self.assertFalse(st.enabled(cfg))
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_log_appends_private_lines(self):
         st.log("closed Homer Simpson on J: stuck:dead")
         st.log("second")
@@ -120,6 +121,7 @@ class SettingsTests(unittest.TestCase):
         self.assertRegex(lines[0], r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d closed Homer Simpson on J: stuck:dead$")
         self.assertEqual(stat.S_IMODE(st.log_path().stat().st_mode), 0o600)
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_state_roundtrip_private(self):
         self.assertEqual(st.load_state(), {})
         st.save_state({"last_run_at": "x"})

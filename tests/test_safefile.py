@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from support import ROOT  # noqa: F401
+from support import ROOT, posix_only  # noqa: F401
 
 from swarm import safefile  # noqa: E402
 
@@ -39,6 +39,7 @@ class SafeFileTests(unittest.TestCase):
         safefile.write_preserving(f, "y")
         self.assertEqual(self.mode(f), 0o400)
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_new_file_is_private(self):
         f = self.d / "new.toml"
         old = os.umask(0o022)
@@ -49,6 +50,7 @@ class SafeFileTests(unittest.TestCase):
         self.assertEqual(self.mode(f), 0o600)
         self.assertIsNone(safefile.backup(self.d / "missing"))
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_explicit_wider_mode_is_capped_at_0600(self):
         f = self.d / "x.toml"
         safefile.write_preserving(f, "x", mode=0o644)
@@ -82,6 +84,7 @@ class CreateAndAppendTests(unittest.TestCase):
         self.assertEqual(p.read_text(), "theirs")
         self.assertEqual(self.leftovers(), [])
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_append_private_appends_and_caps_mode(self):
         p = self.dir / "log"
         safefile.append_private(p, "a\n")
@@ -90,6 +93,7 @@ class CreateAndAppendTests(unittest.TestCase):
         safefile.append_private(p, "b\n")
         self.assertEqual((p.read_text(), stat.S_IMODE(p.stat().st_mode)), ("a\nb\n", 0o600))
 
+    @posix_only("needs os.mkfifo (POSIX FIFOs)")
     def test_append_private_refuses_a_symlink_or_a_non_file(self):
         target = self.dir / "elsewhere"
         target.write_text("")

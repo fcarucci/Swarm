@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import ROOT, home_env  # noqa: F401
+from support import ROOT, home_env, posix_only  # noqa: F401
 
 from swarm import enrolment, paths  # noqa: E402
 
@@ -49,6 +49,7 @@ class WriteFindTests(Env):
                           got.session_id, got.cwd, got.created_at),
                          ("agent", BOARD, "job-a", "k1", "claude", "s-1", self.cwd, 1000.0))
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_location_and_modes(self):
         self.enrol()
         files = list(self.dir().iterdir())
@@ -154,6 +155,7 @@ class PlantTests(Env):
         self.assertEqual(list(elsewhere.iterdir()), [])
         self.assertIsNone(enrolment.find(BOARD, "k1"))
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_a_loose_host_dir_is_refused(self):
         paths.host_dir().mkdir(parents=True)
         paths.host_dir().chmod(0o755)
@@ -227,6 +229,7 @@ class PruneTests(Env):
         self.assertIsNotNone(enrolment.find(BOARD, "new"))
         self.assertIsNone(enrolment.find_job(BOARD, "j-old"))
 
+    @posix_only("needs os.mkfifo (POSIX FIFOs)")
     def test_prune_removes_junk_but_not_links_targets(self):
         self.enrol("keep", now=9000.0)
         victim = self.tmp / "victim"

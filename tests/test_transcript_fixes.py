@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import MemoryHarness, base_config, home_env  # noqa: F401  (sets sys.path)
+from support import MemoryHarness, base_config, home_env, posix_only  # noqa: F401  (sets sys.path)
 
 from swarm import cli as swarm  # noqa: E402
 from swarm import transcripts as T  # noqa: E402
@@ -148,6 +148,7 @@ class HostFileSafetyTest(HomeTest):
     def assert_victim_untouched(self):
         self.assertEqual(self.victim.read_text(), "original\n")
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_log_is_one_escaped_line_in_the_host_dir(self):
         T.log("x\nimport os; os.system('id')\r\x1b[2J")
         lines = self.log.read_text().splitlines()
@@ -168,6 +169,7 @@ class HostFileSafetyTest(HomeTest):
         T.log("y")
         self.assertFalse(dangling.exists())
 
+    @posix_only("needs os.mkfifo (POSIX FIFOs)")
     def test_log_hard_link_and_fifo_refused(self):
         os.link(self.victim, self.host / "hook-errors.log")
         T.log("z")
@@ -208,6 +210,7 @@ class HostFileSafetyTest(HomeTest):
         self.assertLess(self.victim.stat().st_mtime, time.time() - 3600)
         self.assertTrue(stamp.is_symlink() or not stamp.exists() or stamp.is_file())
 
+    @posix_only("needs os.mkfifo (POSIX FIFOs)")
     def test_snapshot_stamp_fifo_does_not_block(self):
         old = self.home / ".local/state/swarm"
         old.mkdir(parents=True, exist_ok=True)

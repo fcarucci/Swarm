@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import ROOT, base_config, home_env  # noqa: F401
+from support import ROOT, base_config, home_env, posix_only  # noqa: F401
 
 from swarm import codex_config as cc  # noqa: E402
 
@@ -77,6 +77,7 @@ class CodexConfigEditTests(unittest.TestCase):
         cc.apply(self.path, self.cfg)
         self.assertEqual(tomllib.loads(self.path.read_text())["agents"]["max_depth"], 4)
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_mode_kept_and_detail_shows_no_unrelated_value(self):
         secret = 'api_key = "sk-test-secret-value-0123456789"'
         self.path.write_text(USER + f"\n[mcp_servers.x.env]\n{secret}\n")
@@ -136,6 +137,7 @@ class CodexConfigEditTests(unittest.TestCase):
         written = tomllib.loads(self.path.read_text())["sandbox_workspace_write"]["writable_roots"]
         self.assertTrue(all(os.path.isabs(r) for r in written))
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_apply_creates_the_writable_root_directories(self):
         """Codex's sandbox bind-mounts each writable root at session start: a root that doesn't
         exist yet makes the mount (and so every command) fail before the swarm ever gets a chance
@@ -151,6 +153,7 @@ class CodexConfigEditTests(unittest.TestCase):
             self.assertTrue(p.is_dir(), root)
             self.assertEqual(oct(p.stat().st_mode & 0o777), "0o700", root)
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_apply_tightens_a_loose_existing_root(self):
         cfg = base_config(spool_dir=str(self.home / "scratch/spool"))
         cfg["hook"]["marker_dir"] = str(self.home / "scratch/markers")
@@ -160,6 +163,7 @@ class CodexConfigEditTests(unittest.TestCase):
         cc.apply(self.path, cfg)
         self.assertEqual(oct(spool.stat().st_mode & 0o777), "0o700")
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_apply_forces_0700_on_creation_despite_a_restrictive_umask(self):
         """mkdir's mode argument is masked by the umask: a restrictive one (e.g. 0o277) could
         leave a brand-new root without owner write if nothing forced it back to exactly 0700."""

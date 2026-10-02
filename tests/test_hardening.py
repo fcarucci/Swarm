@@ -5,7 +5,6 @@ transcript paths from hook payloads checked against the host's transcript root."
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import json
 import os
 import stat
@@ -23,6 +22,7 @@ from test_transcript_cli import TranscriptEnv  # noqa: E402
 from test_transcript_images import SAMPLE  # noqa: E402
 from test_transcripts_capture import SESSION, CaptureEnv, line  # noqa: E402
 
+from swarm import compat  # noqa: E402
 from swarm import hooks as swarm_hooks  # noqa: E402
 from swarm import hosts  # noqa: E402
 from swarm import spool  # noqa: E402
@@ -411,7 +411,7 @@ class SpoolFlushBoundsTests(Env):
                 release = lambda: (other.execute("ROLLBACK"), other.close())  # noqa: E731
             else:
                 fd = os.open(self.h.root / "board" / "lock", os.O_WRONLY)
-                fcntl.flock(fd, fcntl.LOCK_EX)
+                compat.flock(fd, compat.LOCK_EX)
                 release = lambda: os.close(fd)  # noqa: E731
             try:
                 t0 = time.monotonic()
@@ -542,7 +542,7 @@ class MarkerEnv(unittest.TestCase):
 
     def hold_lock(self):
         fh = open(self.path)
-        fcntl.flock(fh, fcntl.LOCK_EX)
+        compat.flock(fh, compat.LOCK_EX)
         return fh
 
 
@@ -720,7 +720,7 @@ class DeactivateMarkerLockTests(Env):
     def test_deactivate_reports_a_marker_it_could_not_lock_and_changes_nothing(self):
         self.cli("activate", "--job", "J", "--session", "sess-1")
         fh = open(self.marker())
-        fcntl.flock(fh, fcntl.LOCK_EX)
+        compat.flock(fh, compat.LOCK_EX)
         self.addCleanup(fh.close)
         from swarm import cli as swarm
         with mock.patch.object(swarm, "MARKER_REMOVE_WAIT", 0.2):
@@ -739,7 +739,7 @@ class DeactivateMarkerLockTests(Env):
     def test_deactivate_waits_for_a_claim_in_flight(self):
         self.cli("activate", "--job", "J", "--session", "sess-1")
         fh = open(self.marker())
-        fcntl.flock(fh, fcntl.LOCK_EX)
+        compat.flock(fh, compat.LOCK_EX)
         threading.Timer(0.2, fh.close).start()
         rc, _, _ = self.cli("deactivate", "--job", "J", "--force")
         self.assertEqual(rc, 0)

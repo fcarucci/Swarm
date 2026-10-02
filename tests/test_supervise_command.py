@@ -1,11 +1,17 @@
 """`swarm supervise`: kill switches, outage, candidates, caps posted once, launch, dry run."""
 from __future__ import annotations
 
+import sys as _sys
+import unittest as _unittest
+if _sys.platform == "win32":
+    raise _unittest.SkipTest("swarm supervise is not supported on Windows (POSIX process groups, systemd)")
+
 import json
 import os
 from pathlib import Path
 from unittest import mock
 
+from support import posix_only  # noqa: E402
 from test_transcript_cli import TranscriptEnv
 
 from swarm import cli as swarm
@@ -557,12 +563,12 @@ class SuperviseTests(SuperviseEnv):
         self.assertIsNone(outage.current())
 
     def test_another_pass_running_exits_quietly(self):
-        import fcntl
+        from swarm import compat
         path = command.lock_path()
         st.ensure_private_dir(self.cfg)
         fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
         self.addCleanup(os.close, fd)
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        compat.flock(fd, compat.LOCK_EX | compat.LOCK_NB)
         self.assertEqual(self.supervise(), 0)
         self.assertIn("another supervise pass is running", " ".join(self.out))
         self.assertEqual(self.started, [])
@@ -756,6 +762,7 @@ class SuperviseTests(SuperviseEnv):
         self.assertFalse(p.exists())
         self.assertEqual(next(x for x in self.restarts() if x.id == r.id).outcome, "failed")
 
+    @posix_only("needs os.mkfifo (POSIX FIFOs)")
     def test_a_fifo_resume_marker_blocks_no_pass(self):
         """A sandboxed agent plants a FIFO named like a leftover resume marker."""
         from test_supervise_markers import _within

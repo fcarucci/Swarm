@@ -68,7 +68,7 @@ $Script:PinActive = $false
 $Script:ConfigNeedsAttention = $false
 $Script:DoctorFailed = $false
 $Script:Status = [ordered]@{}
-$HomeDir = [Environment]::GetFolderPath('UserProfile')
+$HomeDir = if ($env:USERPROFILE) { $env:USERPROFILE } else { [Environment]::GetFolderPath('UserProfile') }   # what Python's ~ means
 $Tmp = Join-Path ([IO.Path]::GetTempPath()) ("swarm-install-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory -Path $Tmp | Out-Null
 

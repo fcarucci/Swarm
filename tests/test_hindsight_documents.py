@@ -7,6 +7,7 @@ import os
 import time
 from pathlib import Path
 
+from support import posix_only  # noqa: E402
 from test_hindsight import HindsightEnv  # noqa: E402  (sets sys.path, skips without loopback)
 
 from swarm import hindsight  # noqa: E402
@@ -35,6 +36,7 @@ class DocumentTests(HindsightEnv):
         self.fake.metadata_patch = True
         self.assertTrue(hindsight.metadata_patch_in(self.client.openapi()))
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_refresh_caps_then_supported_reads_the_cache_only(self):
         self.fake.metadata_patch = True
         self.assertTrue(hindsight.refresh_caps(self.cfg))

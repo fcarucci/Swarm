@@ -18,7 +18,7 @@ import uuid
 from pathlib import Path
 from unittest import mock
 
-from support import ROOT, tq, home_env  # noqa: F401  (sets sys.path)
+from support import ROOT, tq, home_env, posix_only  # noqa: F401  (sets sys.path)
 
 from swarm import cli as swarm  # noqa: E402
 from swarm import hooks as swarm_hooks  # noqa: E402
@@ -389,6 +389,7 @@ class AutoInitBase:
     def _host(self) -> Path:
         return self.home / ".local/share/swarm/host"
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_stamp_and_lock_live_in_the_host_dir(self):
         if self.stamp() is None:
             self.skipTest("no stamp for this backend")
@@ -411,6 +412,7 @@ class AutoInitBase:
         self.assertFalse(victim.exists())
         self.assertTrue(self.stamp().is_symlink())   # refused, left for the user to look at
 
+    @posix_only("needs os.mkfifo (POSIX FIFOs)")
     def test_a_fifo_as_the_lock_file_does_not_block(self):
         if self.stamp() is None or getattr(self.cls, "setup_lock", None):
             self.skipTest("no local lock file for this backend")

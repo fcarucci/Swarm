@@ -21,7 +21,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import E2E_BACKEND, HARNESSES, PostgresHarness, tq, home_env  # noqa: F401  (sets sys.path)
+from support import E2E_BACKEND, HARNESSES, PostgresHarness, tq, home_env, posix_only  # noqa: F401  (sets sys.path)
 
 from swarm import board as board_pkg  # noqa: E402
 from swarm import cli as swarm  # noqa: E402
@@ -123,6 +123,7 @@ class DefaultPathsTests(unittest.TestCase):
                 ("spool", cfg["board"]["spool_dir"]), ("file", cfg["file"]["path"]),
                 ("sqlite", cfg["sqlite"]["path"]))}
 
+    @posix_only("needs Unix uids (no ownership checks on Windows)")
     def test_default_spool_is_per_user(self):
         a, b = self.tmp / "a", self.tmp / "b"
         _, pa = self.load(a, uid=1000)
@@ -132,6 +133,7 @@ class DefaultPathsTests(unittest.TestCase):
         import support
         self.assertNotIn(support.REAL_OLD_SPOOL, (pa["spool"], pb["spool"]))
 
+    @posix_only("needs Unix uids (no ownership checks on Windows)")
     def test_default_boards_are_outside_the_state_dir(self):
         _, p = self.load(self.tmp)
         self.assertEqual(p["file"], str(self.tmp / ".local/share/swarm-board/board"))
@@ -140,6 +142,7 @@ class DefaultPathsTests(unittest.TestCase):
             if v != p["spool"]:
                 self.assertNotIn("/.local/state/", v)
 
+    @posix_only("needs Unix uids (no ownership checks on Windows)")
     def test_uid_is_expanded_in_a_tmp_spool(self):
         text = '[board]\nspool_dir = "/tmp/claude-{uid}/swarm-spool"\n'
         _, p1 = self.load(self.tmp, text, uid=1000)
