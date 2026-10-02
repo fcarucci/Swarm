@@ -4,9 +4,10 @@ All notable changes to swarm, newest first. Each release's notes on GitHub are t
 section here, so every release adds a `## [x.y.z] - YYYY-MM-DD` section (see `scripts/release-notes.sh`).
 Keep entries short and user-facing: one line per change, what it does, not how.
 
-## [Unreleased]
+## [0.1.14] - 2026-10-02
 
 ### Fixed
+- Windows: the first post to a board created the log empty and then appended, which a poller saw as two changes (22 of 300 posts in testing); the file board now treats an empty log as absent, so create-then-append is one change. This was the flaky Windows CI failure.
 - Project memory was missing from a joining agent's context : the hook's 2 s recall cap was shorter than a real recall (1.5-4 s with a reranker, 3 s per-call timeout also too tight for outliers). The join recall now waits up to `[hindsight] recall_start_seconds` (default 6, max 8; env `SWARM_HOOK_RECALL_SECONDS` overrides), mid-work recalls keep 2 s, and a join recall that runs out of time is retried on the agent's next turn instead of after `recall_minutes`.
 
 ## [0.1.13] - 2026-10-02
