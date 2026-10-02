@@ -251,6 +251,8 @@ else:
                 if attempt or not _stale_token(token, dir_fd):
                     raise
                 continue
+            except PermissionError as exc:   # the token is delete-pending (its holder just removed it)
+                raise FileExistsError(errno.EEXIST, "claim token is being removed", token) from exc
             break
         os.close(fd)
         try:
