@@ -11,7 +11,7 @@ from support import ROOT  # noqa: F401  (sets sys.path)
 
 class LayoutTests(unittest.TestCase):
     def test_bin_holds_only_launchers(self):
-        self.assertEqual(sorted(p.name for p in (ROOT / "bin").iterdir()), ["swarm", "swarm-hook"])
+        self.assertEqual(sorted(p.name for p in (ROOT / "bin").iterdir()), ["swarm", "swarm-hook", "swarm-hook.cmd", "swarm.cmd"])
 
     def test_package_modules_import(self):
         import swarm.cli, swarm.hooks, swarm.board, swarm.spool, swarm.transcripts  # noqa: E401,F401

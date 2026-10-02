@@ -11,3 +11,14 @@
 /install.sh          export-ignore
 /.gitignore          export-ignore
 /.gitattributes      export-ignore
+
+# Line endings are part of the executable format: the sh scripts need LF (a CRLF shebang line
+# fails on Linux/macOS and under Git Bash), the Windows batch files need CRLF (cmd's goto labels
+# misparse bare LF), whatever core.autocrlf says on the checkout machine.
+/bin/swarm           text eol=lf
+/bin/swarm-hook      text eol=lf
+/install.sh          text eol=lf
+*.sh                 text eol=lf
+*.cmd                text eol=crlf
+*.ps1                text eol=crlf
+/install.ps1         export-ignore

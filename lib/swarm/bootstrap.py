@@ -11,7 +11,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from swarm import paths, safefs
+from swarm import channel, compat, paths, safefs
 from swarm.board import board_backend
 
 # The last line must stay `exec "<root>/bin/swarm" "$@"`: launcher_target parses it. Everything
@@ -45,6 +45,30 @@ LAUNCHER = (
     '  exec "$best" "$@"\n'
     'fi\n'
     'exec "{root}/bin/swarm" "$@"\n')
+# Windows: ~/.local/bin/swarm.cmd. The `"<root>\\bin\\swarm.cmd" %*` line is the one launcher_target
+# parses; the lines after :heal are the self-healing fallback (the newest installed plugin, by
+# version, via PowerShell), used only when that target is gone.
+LAUNCHER_CMD = (
+    '@echo off\r\n'
+    'rem swarm launcher, written by `swarm bootstrap`: runs the installed swarm plugin, or the newest\r\n'
+    'rem installed one if that plugin folder is gone (a host replaced it).\r\n'
+    'if not exist "{root}\\bin\\swarm.cmd" goto heal\r\n'
+    '"{root}\\bin\\swarm.cmd" %*\r\n'
+    'exit /b %ERRORLEVEL%\r\n'
+    ':heal\r\n'
+    'set "SWARM_BEST="\r\n'
+    'for /f "usebackq delims=" %%B in (`powershell -NoProfile -Command "$c=$env:CLAUDE_CONFIG_DIR; '
+    'if(-not $c){{$c=Join-Path $HOME \'.claude\'}}; $x=$env:CODEX_HOME; if(-not $x){{$x=Join-Path $HOME \'.codex\'}}; '
+    'Get-ChildItem -Path (Join-Path $c \'plugins\\cache\\*\\swarm\\*\'),(Join-Path $x \'plugins\\cache\\*\\swarm\\*\') '
+    '-Directory -ErrorAction SilentlyContinue | Where-Object {{Test-Path (Join-Path $_.FullName \'bin\\swarm.cmd\')}} '
+    '| Sort-Object {{try{{[version]$_.Name}}catch{{[version]\'0.0\'}}}} | Select-Object -Last 1 -ExpandProperty FullName"`) '
+    'do set "SWARM_BEST=%%B"\r\n'
+    'if defined SWARM_BEST goto run\r\n'
+    'echo swarm: the installed plugin is gone; rerun install.ps1 to reinstall it. 1>&2\r\n'
+    'exit /b 127\r\n'
+    ':run\r\n'
+    '"%SWARM_BEST%\\bin\\swarm.cmd" %*\r\n'
+    'exit /b %ERRORLEVEL%\r\n')
 FILL_IN = ("[board] backend (\"file\" is the default: nothing to fill in), or for a shared board "
            "backend = \"postgres\" with [database] host, user, dbname and password_env_file "
            "(a chmod-600 file with PGPASSWORD=...)")
@@ -84,10 +108,14 @@ def _version_tuple(v: str) -> tuple:
 
 
 def launcher_target(path: Path) -> Path | None:
+    """The plugin root a launcher written by ensure_launcher runs: the `exec "<root>/bin/swarm" "$@"`
+    line of the sh launcher, or the `"<root>\\bin\\swarm.cmd" %*` line of the Windows one."""
     try:
-        for line in path.read_text().splitlines():
+        for line in path.read_text(errors="replace").splitlines():
             if line.startswith('exec "') and line.endswith('/bin/swarm" "$@"'):
                 return Path(line[len('exec "'):-len('/bin/swarm" "$@"')])
+            if line.startswith('"') and line.endswith('\\bin\\swarm.cmd" %*') and not line.startswith('"%'):
+                return Path(line[1:-len('\\bin\\swarm.cmd" %*')])
     except OSError:
         pass
     return None
@@ -183,7 +211,10 @@ def ensure_launcher(root: Path = paths.PLUGIN_ROOT) -> Step:
         return Step("launcher", "manual", f"{lp} exists and is not a swarm launcher: left alone")
     lp.parent.mkdir(parents=True, exist_ok=True)
     tmp = lp.with_name(lp.name + ".swarm-tmp")
-    tmp.write_text(LAUNCHER.format(root=root))
+    if paths.IS_WINDOWS:
+        tmp.write_text(LAUNCHER_CMD.format(root=root), newline="")   # CRLF kept: cmd's goto labels need it
+    else:
+        tmp.write_text(LAUNCHER.format(root=root))
     tmp.chmod(0o755)
     os.replace(tmp, lp)
     return Step("launcher", "changed", f"{lp} -> {root}")
@@ -236,7 +267,7 @@ def spool_problem(cfg: dict) -> str | None:
     if str(spool) == OLD_SPOOL:
         return f"{spool} is the old shared default, not per-user"
     home = paths.home()
-    uid = os.getuid()
+    uid = compat.uid()
     import re
     if spool != home and home not in spool.parents and not re.search(rf"(?<![0-9]){uid}(?![0-9])", str(spool)):
         return f"{spool} is outside your home and doesn't name your uid ({uid}), so it isn't per-user"
@@ -334,7 +365,7 @@ def _hooks_ran(host: str) -> bool:
     except (OSError, ValueError):
         return False
     try:
-        return any(n.startswith(prefix) and safefs.exists(d, n) for n in os.listdir(d))
+        return any(n.startswith(prefix) and safefs.exists(d, n) for n in compat.listdir(d))
     except OSError:
         return False
     finally:
@@ -458,7 +489,7 @@ def _old_spool_pending(cfg: dict) -> bool:
         st = os.lstat(OLD_SPOOL)
     except OSError:
         return False
-    return _stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid()
+    return _stat.S_ISDIR(st.st_mode) and st.st_uid == compat.uid()
 
 
 LOCAL_DIRS = (".local", ".local/share", ".local/state", ".local/state/swarm", ".local/share/swarm")
@@ -475,7 +506,7 @@ def _local_dirs(cfg: dict | None) -> list[str]:
     home = os.path.normpath(str(paths.home()))
     for section, key in (("hook", "marker_dir"), ("board", "spool_dir")):
         raw = (cfg.get(section) or {}).get(key) or cli.DEFAULTS[section][key]
-        p = os.path.normpath(os.path.expanduser(str(raw).replace("{uid}", str(os.getuid()))))
+        p = os.path.normpath(os.path.expanduser(str(raw).replace("{uid}", str(compat.uid()))))
         rel = os.path.relpath(p, home) if os.path.isabs(p) else ""
         parts = rel.split("/")
         if len(parts) < 2 or parts[0] != ".local" or ".." in parts:
@@ -494,12 +525,15 @@ def tighten_local_dirs(cfg: dict | None = None) -> Step | None:
     unusable. Take go-w off each of _local_dirs(cfg) that is a real directory (every component
     reached from $HOME with O_NOFOLLOW, never through a symlink) owned by this user; nothing else
     is touched, nothing is backed up (a mode change). A Step saying what changed (one line), or
-    None when there was nothing to do."""
+    None when there was nothing to do. None on Windows: there are no group/world write bits;
+    the profile's NTFS ACL is what keeps other users out."""
+    if paths.IS_WINDOWS:
+        return None
     import stat as _stat
     fixed, failed = [], []
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    flags = os.O_RDONLY | compat.O_DIRECTORY | compat.O_NOFOLLOW | compat.O_CLOEXEC
     try:
-        home_fd = os.open(paths.home(), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        home_fd = compat.open_root(paths.home())
     except OSError:
         return None
     opened = {"": home_fd}
@@ -509,17 +543,17 @@ def tighten_local_dirs(cfg: dict | None = None) -> Step | None:
             if parent not in opened:
                 continue   # its parent isn't a usable directory (missing, a symlink, another user's)
             try:
-                fd = os.open(name, flags, dir_fd=opened[parent])
+                fd = compat.open(name, flags, dir_fd=opened[parent])
             except OSError:
                 continue
             opened[rel] = fd
             st = os.fstat(fd)
-            if st.st_uid != os.getuid():
+            if st.st_uid != compat.uid():
                 os.close(opened.pop(rel))
                 continue
             if st.st_mode & 0o022 and not st.st_mode & _stat.S_ISVTX:
                 try:
-                    os.fchmod(fd, _stat.S_IMODE(st.st_mode) & ~0o022)
+                    compat.fchmod(fd, _stat.S_IMODE(st.st_mode) & ~0o022)
                     fixed.append(f"~/{rel}")
                 except OSError as exc:
                     failed.append(f"~/{rel} ({exc.strerror or type(exc).__name__})")
@@ -536,7 +570,11 @@ def tighten_local_dirs(cfg: dict | None = None) -> Step | None:
 
 
 def migrate(**kw) -> list[Step]:
-    """_migrate, after tighten_local_dirs (its line first, when it changed something)."""
+    """_migrate, after tighten_local_dirs (its line first, when it changed something). Nothing to
+    migrate on Windows: the old skill install, the old default board and the old shared spool
+    never existed there."""
+    if paths.IS_WINDOWS:
+        return [Step("migrate", "skipped", "nothing to migrate on Windows")]
     tight = tighten_local_dirs(kw.get("cfg"))
     return ([tight] if tight else []) + _migrate(**kw)
 
@@ -641,16 +679,16 @@ def _move_board(backend: str, old: Path, new: Path) -> Step:
         return Step("migrate", "manual", f"can't open {new.parent} safely ({_error_kind(exc)}): move {old} to {new} by hand")
     try:
         import stat as _stat
-        st = os.stat(old.name, dir_fd=od, follow_symlinks=False)
+        st = compat.stat(old.name, dir_fd=od, follow_symlinks=False)
         want = _stat.S_ISDIR if backend == "file" else _stat.S_ISREG
-        if not want(st.st_mode) or st.st_uid != os.getuid():
+        if not want(st.st_mode) or st.st_uid != compat.uid():
             return Step("migrate", "manual", f"{old} is not a plain {'directory' if backend == 'file' else 'file'} "
                                              f"of yours (a link?): left alone; move the board by hand if it is yours")
         if backend == "file":
             bd = safefs.open_sub(od, old.name, create=False)
             try:
                 with safefs.locked(bd, "lock"):
-                    os.rename(old.name, new.name, src_dir_fd=od, dst_dir_fd=nd)
+                    compat.rename(old.name, new.name, src_dir_fd=od, dst_dir_fd=nd)
             finally:
                 os.close(bd)
         else:
@@ -673,7 +711,7 @@ def _move_sqlite(old: Path, new: Path, od: int, nd: int, stamp: str, ident: tupl
     def same() -> bool:
         import stat as _stat
         try:
-            s = os.stat(old.name, dir_fd=od, follow_symlinks=False)
+            s = compat.stat(old.name, dir_fd=od, follow_symlinks=False)
         except OSError:
             return False
         return _stat.S_ISREG(s.st_mode) and (s.st_dev, s.st_ino) == ident
@@ -694,18 +732,18 @@ def _move_sqlite(old: Path, new: Path, od: int, nd: int, stamp: str, ident: tupl
             dst.close()
             src.close()
         if not same():
-            os.unlink(tmp, dir_fd=nd)
+            compat.unlink(tmp, dir_fd=nd)
             raise PermissionError(f"{old} changed while being moved")
         for suffix in ("-wal", "-shm", "-journal"):
             try:
-                os.unlink(tmp + suffix, dir_fd=nd)
+                compat.unlink(tmp + suffix, dir_fd=nd)
             except FileNotFoundError:
                 pass
-        os.chmod(tmp, 0o600, dir_fd=nd)
-        os.rename(tmp, new.name, src_dir_fd=nd, dst_dir_fd=nd)
+        compat.chmod(tmp, 0o600, dir_fd=nd)
+        compat.rename(tmp, new.name, src_dir_fd=nd, dst_dir_fd=nd)
         for suffix in ("", "-wal", "-shm", "-journal"):
             try:
-                os.rename(old.name + suffix, f"{old.name}.migrated-{stamp}{suffix}", src_dir_fd=od, dst_dir_fd=od)
+                compat.rename(old.name + suffix, f"{old.name}.migrated-{stamp}{suffix}", src_dir_fd=od, dst_dir_fd=od)
             except FileNotFoundError:
                 pass
     finally:
@@ -732,7 +770,7 @@ def _move_old_spool(cfg: dict) -> list[Step]:
         return []
     moved = skipped = 0
     try:
-        names = [n for n in sorted(os.listdir(od)) if re.fullmatch(SPOOL_RECORD, n)]
+        names = [n for n in sorted(compat.listdir(od)) if re.fullmatch(SPOOL_RECORD, n)]
         if not names:
             return []
         try:
@@ -782,6 +820,9 @@ def bootstrap(host: str | None, *, config: Path | None = None, stamp: Path | Non
     steps.append(ensure_launcher())
     try:
         steps.append(ensure_config(config))
+        chan = os.environ.get("SWARM_CHANNEL")   # install.sh/install.ps1 --channel: what `swarm upgrade` follows
+        if chan in channel.CHANNELS and channel.read_channel(config) != chan and channel.write_channel(chan, config):
+            steps.append(Step("channel", "changed", f"{config}: [upgrade] channel = \"{chan}\""))
         cfg = load_config(config)
         tight = tighten_local_dirs(cfg)   # the configured marker/spool dirs, if not the defaults
         if tight:
@@ -924,7 +965,7 @@ def _take(d: int, name: str) -> list[tuple[str, str]]:
     if raw is None:
         return []
     try:
-        os.rename(name, name + ".shown", src_dir_fd=d, dst_dir_fd=d)
+        compat.rename(name, name + ".shown", src_dir_fd=d, dst_dir_fd=d)
     except OSError:
         return []                    # another reader took it first
     try:
@@ -1003,7 +1044,7 @@ def take_notices() -> str | None:
         return None
     texts = []
     try:
-        for name in sorted(os.listdir(d)):
+        for name in sorted(compat.listdir(d)):
             if re.fullmatch(r"notices-[a-z]{1,16}\.json", name):
                 steps = _take(d, name)
                 if steps:
@@ -1184,11 +1225,15 @@ def _common_checks(config: Path) -> list[Check]:
     from swarm.cli import load_config
     out = []
     v = paths.venv_dir()
-    req = subprocess.run(["sh", "-c", f"cksum < '{paths.PLUGIN_ROOT / 'requirements.txt'}' | cut -d' ' -f1"],
-                         capture_output=True, text=True).stdout.strip()
+    if paths.IS_WINDOWS:   # bin/swarm.cmd's stamp: a CRC-32 of requirements.txt (winlaunch)
+        from swarm import winlaunch
+        req = winlaunch.requirements_stamp(paths.PLUGIN_ROOT)
+    else:
+        req = subprocess.run(["sh", "-c", f"cksum < '{paths.PLUGIN_ROOT / 'requirements.txt'}' | cut -d' ' -f1"],
+                             capture_output=True, text=True).stdout.strip()
     have = (v / ".swarm-requirements").read_text().strip() if (v / ".swarm-requirements").exists() else ""
-    out.append(Check("venv", (v / "bin/python").exists() and have == req, str(v),
-                     "run `~/.local/bin/swarm --help` (the launcher rebuilds it)"))
+    out.append(Check("venv", paths.venv_python(v).exists() and have == req, str(v),
+                     f"run `{paths.launcher_path()} --help` (the launcher rebuilds it)"))
     lp = paths.launcher_path()
     target = launcher_target(lp) if lp.exists() else None
     out.append(Check("launcher", bool(target and (target / "bin/swarm").exists()),
@@ -1692,7 +1737,7 @@ def _sandbox_probe(roots: list[str]) -> list[str]:
             continue
         probe = p / f".doctor-probe-{os.getpid()}-{os.urandom(4).hex()}"
         try:   # a new file only (never through something planted at the name), then removed
-            os.close(os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600))
+            os.close(os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL | compat.O_NOFOLLOW | compat.O_CLOEXEC, 0o600))
             os.unlink(probe)
         except OSError:
             failing.append(root)
