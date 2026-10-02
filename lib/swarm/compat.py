@@ -205,7 +205,43 @@ else:
 
     def rename(src, dst, *, src_dir_fd=None, dst_dir_fd=None) -> None:
         # os.rename refuses to overwrite on Windows; POSIX rename replaces atomically
-        _retry(os.replace, _path(src, src_dir_fd), _path(dst, dst_dir_fd))
+        s, d = _path(src, src_dir_fd), _path(dst, dst_dir_fd)
+        if not _posix_rename(s, d):
+            _retry(os.replace, s, d)
+
+    def _posix_rename(src: str, dst: str) -> bool:
+        """Rename with POSIX semantics (NTFS, Windows 10 1607+): replaces `dst` even while another
+        handle has it open, as rename(2) does; os.replace fails with access denied then. False if
+        this system or file system can't (the caller falls back to os.replace)."""
+        import ctypes
+        import struct
+        from ctypes import wintypes
+        if ctypes.sizeof(ctypes.c_void_p) != 8:
+            return False
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateFileW.restype = wintypes.HANDLE
+        k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                                    wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        k32.SetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        full = os.path.abspath(dst)
+        if not full.startswith("\\\\?\\"):
+            full = "\\\\?\\" + full
+        name = full.encode("utf-16-le")
+        # FILE_RENAME_INFO_EX: Flags (REPLACE_IF_EXISTS | POSIX_SEMANTICS), RootDirectory, length, name
+        buf = struct.pack("<I4xQI", 0x3, 0, len(name)) + name + b"\0\0"
+        h = k32.CreateFileW(src, 0x10000, 7, None, 3, 0, None)   # DELETE access; open existing
+        if h in (None, wintypes.HANDLE(-1).value):
+            return False
+        try:
+            if k32.SetFileInformationByHandle(h, 22, buf, len(buf)):   # FileRenameInfoEx
+                return True
+            err = ctypes.get_last_error()
+        finally:
+            k32.CloseHandle(h)
+        if err in (2, 3):   # the source is missing: the same error os.replace gives
+            raise ctypes.WinError(err)
+        return False
 
     def unlink(path, *, dir_fd=None) -> None:
         _retry(os.unlink, _path(path, dir_fd))
