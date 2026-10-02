@@ -11,6 +11,7 @@ import threading
 import time
 from pathlib import Path
 
+from support import posix_only  # noqa: E402
 from test_hooks_cli import Env
 
 from swarm import cli as swarm
@@ -709,6 +710,7 @@ SURVIVOR = ("sh -c 'trap \"\" TERM; echo $$ > \"$1\"; i=0; while [ $i -lt ${SURV
 
 
 class SurvivorFixtureTests(unittest.TestCase):
+    @posix_only("needs POSIX signals and process groups")
     def test_survivor_ends_by_itself_when_its_test_never_cleans_up(self):
         # a test process killed mid-run never runs its cleanups: the survivor must not live on
         import shutil, signal, subprocess, tempfile

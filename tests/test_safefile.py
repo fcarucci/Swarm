@@ -20,6 +20,7 @@ class SafeFileTests(unittest.TestCase):
     def mode(self, p):
         return stat.S_IMODE(p.stat().st_mode)
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_keeps_restrictive_mode_and_backs_up_with_it(self):
         f = self.d / "config.toml"; f.write_text("a = 1\n"); f.chmod(0o600)
         b = safefile.backup(f)
@@ -28,12 +29,14 @@ class SafeFileTests(unittest.TestCase):
         self.assertEqual((b.read_text(), self.mode(b)), ("a = 1\n", 0o600))
         self.assertEqual([p.name for p in self.d.iterdir() if "swarm-tmp" in p.name], [])
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_wider_mode_is_capped_at_0600_and_backup_is_0600(self):
         f = self.d / "config.toml"; f.write_text("a = 1\n"); f.chmod(0o644)
         b = safefile.backup(f)
         safefile.write_preserving(f, "a = 2\n")
         self.assertEqual((self.mode(f), self.mode(b)), (0o600, 0o600))
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_tighter_mode_is_kept(self):
         f = self.d / "secret.toml"; f.write_text("x"); f.chmod(0o400)
         safefile.write_preserving(f, "y")
@@ -70,6 +73,7 @@ class CreateAndAppendTests(unittest.TestCase):
     def leftovers(self):
         return [p.name for p in self.dir.iterdir() if p.name.endswith(".swarm-tmp")]
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_create_exclusive_writes_a_private_file(self):
         p = self.dir / "m.json"
         safefile.create_exclusive(p, "{}")

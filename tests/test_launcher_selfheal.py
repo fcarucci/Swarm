@@ -1,6 +1,11 @@
 """The ~/.local/bin/swarm launcher falls back to the newest installed plugin when its target is gone."""
 from __future__ import annotations
 
+import sys as _sys
+import unittest as _unittest
+if _sys.platform == "win32":
+    raise _unittest.SkipTest("the sh launcher self-heal is POSIX only (Windows: swarm.cmd, test_windows_entry.py)")
+
 import os
 import shutil
 import subprocess

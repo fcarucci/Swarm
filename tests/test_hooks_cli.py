@@ -402,7 +402,7 @@ class HookTests(Env):
         launcher = Path(os.environ["HOME"]) / ".local/bin/swarm"          # absent: bootstrap hasn't run yet
         self.activate()
         ctx = self.context(self.hook("start", agent_id="a1"))
-        self.assertIn(f"{paths.agent_bin()} post --job", ctx)
+        self.assertIn(f"{__import__('shlex').quote(str(paths.agent_bin()))} post --job", ctx)
         self.assertNotIn(str(launcher), ctx)
         rc, out, _ = self.cli("activate", "--job", "K", "--session", "sess-9")
         self.assertIn(f"swarm command: {paths.agent_bin()}", out)

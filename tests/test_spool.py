@@ -108,6 +108,7 @@ class SpoolFileSafetyTests(Env):
                 self.assertEqual(spool.flush_spool(b, self.cfg), 0)
         self.assertEqual(len(list(self.spool_dir.glob("*.json"))), 1)
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_permission_error_on_setup_is_a_spool_error(self):
         parent = self.tmp / "ro"; parent.mkdir(mode=0o500)
         self.addCleanup(parent.chmod, 0o700)

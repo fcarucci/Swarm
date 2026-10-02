@@ -16,13 +16,13 @@ from pathlib import Path
 from unittest import mock
 
 from test_verifier import VerifierEnv  # noqa: E402  (sets sys.path)
-from support import tq, home_env  # noqa: E402
+from support import tq, home_env, posix_only  # noqa: E402
 from test_hooks_cli import Env  # noqa: E402
 from test_transcript_cli import TranscriptEnv  # noqa: E402
 from test_transcript_images import SAMPLE  # noqa: E402
 from test_transcripts_capture import SESSION, CaptureEnv, line  # noqa: E402
 
-from swarm import compat  # noqa: E402
+from swarm import compat, paths  # noqa: E402
 from swarm import hooks as swarm_hooks  # noqa: E402
 from swarm import hosts  # noqa: E402
 from swarm import spool  # noqa: E402
@@ -97,6 +97,7 @@ class SpoolPermissionTests(Env):
         old = os.umask(0o022)
         self.addCleanup(os.umask, old)
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_queue_files_are_private_and_dir_created_0700(self):
         for f in (spool.spool_post(self.cfg, "J", "A", "m", None),
                   spool.spool_memory(self.cfg, "J", "A", "fact", None),
@@ -104,12 +105,14 @@ class SpoolPermissionTests(Env):
             self.assertEqual(mode(f), 0o600, f.name)
         self.assertEqual(mode(self.spool_dir), 0o700)
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_group_or_world_writable_dir_of_ours_is_made_private(self):
         self.spool_dir.mkdir()
         os.chmod(self.spool_dir, 0o777)
         spool.spool_post(self.cfg, "J", "A", "m", None)
         self.assertEqual(mode(self.spool_dir), 0o700)
 
+    @posix_only("needs Unix uids (no ownership checks on Windows)")
     def test_dir_owned_by_someone_else_is_refused(self):
         self.spool_dir.mkdir()
         spool.spool_post(self.cfg, "J", "A", "planted", None)
@@ -120,6 +123,7 @@ class SpoolPermissionTests(Env):
                 self.assertEqual(spool.flush_spool(b, self.cfg), 0)   # nothing read from it
         self.assertEqual(len(list(self.spool_dir.glob("*.json"))), 1)
 
+    @posix_only("needs Unix uids (no ownership checks on Windows)")
     def test_cli_post_with_a_refused_spool_says_so(self):
         self.spool_dir.mkdir()
         self.h.set_available(False)
@@ -502,6 +506,7 @@ class PrivateExportTests(TranscriptEnv):
         self.addCleanup(os.umask, old)
         self.seed("J1", "k1", "Homer Simpson", SAMPLE)
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_export_dir_0700_and_files_0600(self):
         target = self.tmp / "out" / "exp"
         rc, _, _ = self.cli("transcript", "export", "--job", "J1", str(target))
@@ -513,6 +518,7 @@ class PrivateExportTests(TranscriptEnv):
         for p in files:
             self.assertEqual(mode(p), 0o600, p.name)
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_export_over_existing_files_makes_them_private(self):
         target = self.tmp / "exp"
         target.mkdir()
@@ -521,6 +527,7 @@ class PrivateExportTests(TranscriptEnv):
         self.cli("transcript", "export", "--job", "J1", str(target))
         self.assertEqual(mode(target / "index.tsv"), 0o600)
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_show_output_file_is_private(self):
         out = self.tmp / "t.jsonl"
         rc, _, _ = self.cli("transcript", "show", "--job", "J1", "--agent", "Homer Simpson",
@@ -541,12 +548,15 @@ class MarkerEnv(unittest.TestCase):
         os.chmod(self.path, 0o640)
 
     def hold_lock(self):
-        fh = open(self.path)
+        # opened through compat.open: on Windows a plain open() lacks FILE_SHARE_DELETE, so the
+        # other session's os.replace of this file (the point of the test) could not happen
+        fh = os.fdopen(compat.open(self.path, os.O_RDONLY))
         compat.flock(fh, compat.LOCK_EX)
         return fh
 
 
 class MarkerClaimTests(MarkerEnv):
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_claim_is_atomic_and_keeps_the_mode(self):
         before = os.stat(self.path).st_ino
         self.assertEqual(swarm_hooks._try_claim(self.path, "s1"), "J")
@@ -1041,6 +1051,7 @@ class MarkerDirWriteTests(Env):
         swarm_cli.mark_orchestrator_seen(self.marker)
         self.assertFalse(target.exists())
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_seen_is_still_recorded(self):
         from swarm import cli as swarm_cli
         self.seen.unlink(missing_ok=True)
@@ -1062,6 +1073,7 @@ class MarkerDirWriteTests(Env):
         self.assertIn("marker", err)
         self.assertEqual(list(elsewhere.iterdir()), [])
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_activate_replaces_a_planted_marker_link_without_following_it(self):
         self.marker.unlink()
         self.marker.symlink_to(self.victim)
@@ -1080,6 +1092,7 @@ class MarkerDirWriteTests(Env):
         self.assertFalse(self.marker.exists())
         self.assertFalse(self.seen.exists())
 
+    @posix_only("needs os.mkfifo (POSIX FIFOs)")
     def test_migrate_marker_scan_skips_fifos_and_links(self):
         from swarm import bootstrap
         from test_hooks_cli import _run_bounded
@@ -1237,6 +1250,7 @@ class LooseLocalDirsTests(ProbeEnv):
                               capture_output=True, text=True, timeout=120, cwd=self.home,
                               env={**self.env(), **(extra_env or {})}, preexec_fn=lambda: os.umask(0o002))
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_tighten_local_dirs(self):
         from swarm import bootstrap
         self.loosen()
@@ -1247,6 +1261,7 @@ class LooseLocalDirsTests(ProbeEnv):
             self.assertEqual(self.modes(), {rel: 0o755 for rel in self.LOOSE})
             self.assertIsNone(bootstrap.tighten_local_dirs())            # nothing left to do
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_tighten_leaves_links_and_other_users_dirs_alone(self):
         from swarm import bootstrap
         real = self.home / "real-local"
@@ -1280,6 +1295,7 @@ class LooseLocalDirsTests(ProbeEnv):
     def mode(self, rel):
         return stat.S_IMODE(os.lstat(self.home / rel).st_mode)
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_tighten_covers_the_swarm_state_share_marker_and_spool_dirs(self):
         """~/.local/state/swarm, the marker and spool dirs and
         ~/.local/share/swarm are tightened too (the default config's places)."""
@@ -1293,6 +1309,7 @@ class LooseLocalDirsTests(ProbeEnv):
         for rel in self.LOOSE + self.SWARM_DIRS:
             self.assertEqual(self.mode(rel) & 0o022, 0, rel)
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_tighten_takes_the_configured_marker_and_spool_dirs_under_dot_local(self):
         from swarm import bootstrap
         self.make_at_umask_002(".local/state/custom/markers", ".local/state/myspool", "work/markers")
@@ -1308,6 +1325,7 @@ class LooseLocalDirsTests(ProbeEnv):
         self.assertEqual(self.mode("work") & 0o020, 0o020)
         self.assertEqual(self.mode("work/markers") & 0o020, 0o020)
 
+    @posix_only("needs a POSIX umask in the child (preexec_fn)")
     def test_bootstrap_sets_up_the_board_after_tightening_a_configured_marker_dir(self):
         """The second tighten step (the configured marker dir) must not make bootstrap
         skip the board step (it used to look at steps[-1] for the config step)."""
@@ -1331,6 +1349,7 @@ class LooseLocalDirsTests(ProbeEnv):
         self.assertIn(byname["board"], ("ok", "changed"), steps)
         prune.assert_called_once()
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_tighten_never_follows_a_symlinked_swarm_dir(self):
         from swarm import bootstrap
         self.make_at_umask_002(".local/state", ".local/share", "real-state/active", "real-share")
@@ -1356,6 +1375,7 @@ class LooseLocalDirsTests(ProbeEnv):
                               env={**self.env(), "SWARM_VENV": sys.prefix},
                               preexec_fn=lambda: os.umask(0o002))
 
+    @posix_only("needs a POSIX umask in the child (preexec_fn)")
     def test_session_start_reports_a_loose_local_state(self):
         """The session-start LOOSE check covers ~/.local/state (the
         markers, spool and state dir are refused through it, so the hooks go quiet)."""
@@ -1393,6 +1413,7 @@ class LooseLocalDirsTests(ProbeEnv):
         self.assertIn("unsafe marker dir", refused[0].detail)
         self.assertNotIn("job(s) active", refused[0].detail)
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_codex_private_roots_are_0700_whatever_the_umask(self):
         from swarm import codex_config
         target = self.home / ".local/state/swarm/spool"
@@ -1404,6 +1425,7 @@ class LooseLocalDirsTests(ProbeEnv):
         for d in (self.home / ".local", self.home / ".local/state", self.home / ".local/state/swarm", target):
             self.assertEqual(stat.S_IMODE(d.stat().st_mode), 0o700, d)
 
+    @posix_only("needs a POSIX umask in the child (preexec_fn)")
     def test_bootstrap_fixes_a_loose_home_then_hooks_post_and_migrate_work(self):
         self.loosen()
         (self.home / "board").mkdir(mode=0o700)
@@ -1438,6 +1460,7 @@ class HostDirProblemAtSessionStartTests(ProbeEnv):
         return subprocess.run([str(LIB.parents[1] / "bin/swarm-hook"), *args], input="{}",
                               capture_output=True, text=True, timeout=30, env=self.env())
 
+    @posix_only("runs the POSIX sh launcher")
     def test_a_symlinked_host_dir_is_reported(self):
         share = self.home / ".local/share/swarm"
         share.mkdir(parents=True)
@@ -1451,6 +1474,7 @@ class HostDirProblemAtSessionStartTests(ProbeEnv):
         self.assertIn("swarm doctor", r.stderr)
         self.assertEqual(list((self.home / "elsewhere").iterdir()), [])
 
+    @posix_only("runs the POSIX sh launcher")
     def test_hook_output_reports_an_unusable_host_dir(self):
         from swarm import bootstrap
         for rel in (".local", ".local/share"):
@@ -1559,7 +1583,7 @@ class LiveDataGuardTests(unittest.TestCase):
         import support
         v = support.temp_venv()
         self.assertTrue(str(v).startswith(support.SANDBOX + os.sep))
-        self.assertTrue((v / "bin/python").exists())
+        self.assertTrue(paths.venv_python(v).exists())
         for name in ("test_doctor.py", "test_layout.py"):
             text = (Path(__file__).resolve().parent / name).read_text()
             self.assertNotIn('ROOT / ".venv', text, name)
@@ -1610,6 +1634,7 @@ class SpooledWaitTests(Env):
 
 # --------------------------------------------------------------------------- minors
 class MinorFixTests(ProbeEnv):
+    @posix_only("needs Unix uids (no ownership checks on Windows)")
     def test_an_old_shared_spool_of_another_user_is_not_pending(self):
         # the old shared spool (bootstrap.OLD_SPOOL) of another user is not ours to empty
         from swarm import bootstrap

@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import ROOT, base_config, home_env, posix_only  # noqa: F401
+from support import ROOT, base_config, home_env, posix_only, tq  # noqa: F401
 
 from swarm import codex_config as cc  # noqa: E402
 
@@ -186,6 +186,7 @@ class CodexConfigEditTests(unittest.TestCase):
             self.assertEqual(oct(stat.S_IMODE(st.st_mode)), "0o700", root)
             self.assertTrue(os.access(root, os.W_OK), root)   # not just the bit: actually writable
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_apply_refuses_an_existing_root_the_owner_cant_write(self):
         cfg = base_config(spool_dir=str(self.home / "scratch/spool"))
         cfg["hook"]["marker_dir"] = str(self.home / "scratch/markers")
@@ -278,13 +279,13 @@ class GrantTests(unittest.TestCase):
         # the pre-0.1.0 shared spool as a writable root is taken back too (bootstrap
         # --host codex and migrate)
         from swarm import bootstrap
-        self.path.write_text(f'[sandbox_workspace_write]\nwritable_roots = ["{bootstrap.OLD_SPOOL}", "/keep/me"]\n')
+        self.path.write_text(f'[sandbox_workspace_write]\nwritable_roots = [{tq(bootstrap.OLD_SPOOL)}, "/keep/me"]\n')
         self.assertTrue(bootstrap._has_old_grants(self.path))
         status, detail = cc.remove_old_grants(self.path)
         self.assertEqual(status, "changed", detail)
         roots = tomllib.loads(self.path.read_text())["sandbox_workspace_write"]["writable_roots"]
         self.assertEqual(roots, ["/keep/me"])
-        self.path.write_text(f'[sandbox_workspace_write]\nwritable_roots = ["{bootstrap.OLD_SPOOL}"]\n')
+        self.path.write_text(f'[sandbox_workspace_write]\nwritable_roots = [{tq(bootstrap.OLD_SPOOL)}]\n')
         cc.apply(self.path, self.cfg)
         roots = tomllib.loads(self.path.read_text())["sandbox_workspace_write"]["writable_roots"]
         self.assertNotIn(bootstrap.OLD_SPOOL, roots)

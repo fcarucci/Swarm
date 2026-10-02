@@ -292,7 +292,8 @@ def _join_once(path):
         b.allocate_name("kx", "j")
 
 
-@unittest.skipIf(os.geteuid() == 0, "root ignores directory permissions")
+@unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                 "needs POSIX directory permissions (and a non-root user: root ignores them)")
 class FileBoardSandboxTests(unittest.TestCase):
     """An agent that can't write the board directory (its sandbox) can't open the board: it gets
     BoardUnavailable, so `swarm post` spools, and the next process that can deliver does."""

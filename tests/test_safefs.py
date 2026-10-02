@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import ROOT, home_env  # noqa: F401
+from support import ROOT, home_env, posix_only  # noqa: F401
 
 from swarm import compat  # noqa: E402
 from swarm import paths, safefs  # noqa: E402
@@ -62,6 +62,7 @@ class HomeCase(unittest.TestCase):
 
 
 class OpenBaseTests(HomeCase):
+    @posix_only("directory descriptors are emulated on Windows (no fstat/samestat on them)")
     def test_creates_the_path_under_home_0700(self):
         fd = self.open(strict_mode=0o700)
         st = os.fstat(fd)
@@ -97,6 +98,7 @@ class OpenBaseTests(HomeCase):
         with self.assertRaises(safefs.UnsafePathError):
             safefs.open_base(self.base)
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_a_loose_mode_is_refused_only_when_strict(self):
         self.base.mkdir(parents=True, mode=0o755)
         self.base.chmod(0o755)
@@ -104,6 +106,7 @@ class OpenBaseTests(HomeCase):
             safefs.open_base(self.base, strict_mode=0o700)
         os.close(safefs.open_base(self.base))
 
+    @posix_only("needs Unix uids (no ownership checks on Windows)")
     def test_another_owner_is_refused(self):
         self.open()
         with mock.patch("os.getuid", return_value=os.getuid() + 1):
@@ -120,11 +123,13 @@ class OpenBaseTests(HomeCase):
         with self.assertRaises(ValueError):
             safefs.open_base(self.home / "a" / ".." / ".." / "escape")
 
+    @posix_only("directory descriptors are emulated on Windows (no fstat/samestat on them)")
     def test_tilde_is_expanded(self):
         fd = safefs.open_base("~/.local/share/swarm/host")
         self.addCleanup(os.close, fd)
         self.assertTrue(os.path.samestat(os.fstat(fd), os.stat(self.base)))
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_a_path_outside_home_under_tmp(self):
         # the spool/marker dirs may live under the sticky /tmp: every component below it is ours
         target = self.tmp / "spool" / "q"
@@ -141,6 +146,7 @@ class OpenBaseTests(HomeCase):
             safefs.open_base(self.tmp / "link" / "q")
         self.assertEqual(list(real.iterdir()), [])
 
+    @posix_only("needs Unix uids (no ownership checks on Windows)")
     def test_another_users_dir_outside_home_is_refused(self):
         target = self.tmp / "spool"
         target.mkdir()
@@ -148,6 +154,7 @@ class OpenBaseTests(HomeCase):
             with self.assertRaises(safefs.UnsafePathError):
                 safefs.open_base(target)
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_a_group_or_world_writable_own_dir_is_refused(self):
         self.base.mkdir(parents=True, mode=0o700)
         for mode in (0o770, 0o707, 0o777):
@@ -166,6 +173,7 @@ class OpenBaseTests(HomeCase):
         with self.assertRaises(safefs.UnsafePathError):
             safefs.open_sub(d, "host")
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_open_sub(self):
         d = self.open()
         sub = safefs.open_sub(d, "enrolled", strict_mode=0o700)
@@ -258,6 +266,7 @@ class PlantedEntryTests(HomeCase):
             self.assertEqual(kind, "raised", (op, plant, value))
             self.assertIsInstance(value, OSError, (op, plant))
 
+    @posix_only("needs os.mkfifo (POSIX FIFOs)")
     def test_every_op_against_every_plant(self):
         for plant in self.PLANTS:
             for op, fn in self.ops().items():
@@ -266,6 +275,7 @@ class PlantedEntryTests(HomeCase):
                     getattr(self, f"plant_{plant}")()
                     self.check(op, plant, within(fn))
 
+    @posix_only("needs Unix uids (no ownership checks on Windows)")
     def test_every_op_against_another_users_file(self):
         for op, fn in self.ops().items():
             if op == "write_atomic":
@@ -309,6 +319,7 @@ class OperationTests(HomeCase):
         (self.base / "bad").write_bytes(b"\xff")
         self.assertEqual(safefs.read_text(self.d, "bad"), "�")
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_append_creates_0600_appends_and_tightens(self):
         safefs.append(self.d, "log", "a\n")
         self.assertEqual(self.mode("log"), 0o600)
@@ -317,6 +328,7 @@ class OperationTests(HomeCase):
         self.assertEqual((self.base / "log").read_text(), "a\nb\n")
         self.assertEqual(self.mode("log"), 0o600)
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_write_atomic(self):
         safefs.write_atomic(self.d, "s.json", "{}")
         safefs.write_atomic(self.d, "s.json", b"{\"a\": 1}", mode=0o640)
@@ -330,6 +342,7 @@ class OperationTests(HomeCase):
         safefs.write_atomic(self.d, "s", "new")
         self.assertNotEqual(os.stat(self.base / "s").st_ino, before)
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_new_files_get_the_mode_whatever_the_umask(self):
         old = os.umask(0o777)
         try:
@@ -343,6 +356,7 @@ class OperationTests(HomeCase):
                          [0o600, 0o640, 0o600, 0o600])
         self.assertEqual((self.base / "log").read_text(), "x")
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_touch(self):
         safefs.touch(self.d, "stamp")
         self.assertEqual(((self.base / "stamp").read_bytes(), self.mode("stamp")), (b"", 0o600))
@@ -371,6 +385,7 @@ class OperationTests(HomeCase):
                 safefs.lock(self.d, "l", blocking=False)
         os.close(safefs.lock(self.d, "l", blocking=False))
 
+    @posix_only("needs os.mkfifo (POSIX FIFOs)")
     def test_scan(self):
         (self.base / "b.json").write_text("B")
         (self.base / "a.json").write_text("A")

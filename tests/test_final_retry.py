@@ -728,6 +728,7 @@ class ZstdBombTests(FinalRetryEnv):
                 codex.read_rollout(p)
         self.assertIn("x", codex.read_rollout(p)[:200])        # under the real cap: read
 
+    @posix_only("fake zstd is a POSIX sh stub")
     def test_zstd_tool_fallback_is_capped_and_timed(self):
         import os
         import sys

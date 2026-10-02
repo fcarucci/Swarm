@@ -219,6 +219,7 @@ class CloseStuckTests(Env):
         left = {k.split("\t")[1] for k in json.loads(lost.retry_state_path().read_text())}
         self.assertEqual(left, tried)                          # the stored one is forgotten
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_lost_rollouts_file_is_private(self):
         f = self.tmp / "state" / "lost.txt"
         transcripts._write_lost(f, {"J\tk1"})

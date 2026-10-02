@@ -41,6 +41,7 @@ class DoctorTests(unittest.TestCase):
         self.assertIsNone(checks["orchestrator model"].ok)
         self.assertTrue(checks["supervise"].ok)
 
+    @posix_only("pre-0.1 skill hooks never existed on Windows")
     def test_doctor_flags_legacy_hooks_while_plugin_installed(self):
         bootstrap.bootstrap("claude", config=self.cfg)
         s = self.home / ".claude/settings.json"
@@ -91,6 +92,7 @@ class DoctorTests(unittest.TestCase):
             {"type": "command", "command": f"{self.home.as_posix()}/.claude/skills/swarm/bin/swarm-hook turn --verbose"}]}]}}))
         self.assertIs(self.by_name(bootstrap.doctor("claude", config=self.cfg))["old hooks"].ok, True)
 
+    @posix_only("pre-0.1 skill hooks never existed on Windows")
     def test_old_hooks_without_plugin_are_a_warning(self):
         (self.home / ".claude/plugins/installed_plugins.json").write_text('{"version": 2, "plugins": {}}')
         s = self.home / ".claude/settings.json"

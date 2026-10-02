@@ -125,7 +125,7 @@ def temp_venv() -> Path:
         if sys.prefix != sys.base_prefix:       # running in a venv: mirror it
             src = Path(sys.prefix)
             (v / "pyvenv.cfg").write_text((src / "pyvenv.cfg").read_text())
-            for d in ("lib", "lib64", "include", "Lib"):
+            for d in ("lib", "lib64", "include"):
                 if (src / d).exists() and sys.platform != "win32":
                     os.symlink(src / d, v / d)
         else:                                    # a plain interpreter with the packages installed in it
