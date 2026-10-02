@@ -550,6 +550,7 @@ class ExposureDoctorTests(unittest.TestCase):
         self.assertIn(self.EXCERPTS, c["transcripts users"].detail)
         self.assertIn("archived transcripts", c["transcripts users"].detail)
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_group_writable_local_dirs_fail(self):
         for d in (".local/share", ".local/state"):
             (self.home / d).mkdir(parents=True, exist_ok=True)

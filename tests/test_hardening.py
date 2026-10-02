@@ -591,7 +591,7 @@ class MarkerClaimTests(MarkerEnv):
 
         def other_claims():
             self.path.with_name("new.tmp").write_text(json.dumps({"job": "J", "session_id": "s2"}))
-            os.replace(self.path.with_name("new.tmp"), self.path)
+            compat.rename(self.path.with_name("new.tmp"), self.path)   # POSIX rename semantics on Windows too
             fh.close()
 
         timer = threading.Timer(0.1, other_claims)
@@ -1206,7 +1206,7 @@ class FileBoardChainTests(ProbeEnv):
         board = self.state / "board"
         self.assertTrue((board / "messages.jsonl").is_file(), r.stdout + r.stderr)
         rc_file = self.home / "victim_rc"          # dangling: e.g. ~/.bash_aliases
-        (board / "messages.jsonl").rename(board / "messages.old")
+        (board / "messages.jsonl").replace(board / "messages.old")
         (board / "messages.jsonl").symlink_to(rc_file)
         existing = self.home / "victim_existing_rc"
         existing.write_text("# original\n")

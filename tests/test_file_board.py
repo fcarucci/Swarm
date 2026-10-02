@@ -19,7 +19,7 @@ import time
 import unittest
 from pathlib import Path
 
-from support import SMALL_POOL, FileHarness, base_config, tq  # noqa: F401  (sets sys.path)
+from support import SMALL_POOL, FileHarness, base_config, tq, posix_only  # noqa: F401  (sets sys.path)
 
 from swarm import cli as swarm  # noqa: E402
 from swarm.board import BoardError, BoardUnavailable, open_board, setup_board  # noqa: E402
@@ -176,6 +176,7 @@ class FileBoardProcessTests(unittest.TestCase):
         self.assertEqual(len(msgs), writers * per)
         self.assertEqual(state["next_id"], writers * per + 1)
 
+    @posix_only("needs SIGKILL (POSIX signals)")
     def test_killed_writers_never_leave_a_corrupt_board(self):
         procs = [CTX.Process(target=_post_forever, args=(self.path, f"w{i}")) for i in range(6)]
         for i in range(6):
@@ -391,7 +392,7 @@ class FileBoardPlantedLinkTests(unittest.TestCase):
         target = self.dir / name
         victim = self._victim(live=kind != "dangling")
         if target.exists() or target.is_symlink():
-            target.rename(target.with_name(target.name + ".old"))
+            target.replace(target.with_name(target.name + ".old"))
         if kind == "hardlink":
             os.link(victim, target)
         else:
@@ -429,7 +430,7 @@ class FileBoardPlantedLinkTests(unittest.TestCase):
                     self._post()
                 self._check_victim(victim, kind)
                 (self.dir / "state.json").unlink(missing_ok=True)
-                (self.dir / "state.json.old").rename(self.dir / "state.json")
+                (self.dir / "state.json.old").replace(self.dir / "state.json")
 
     def test_state_tmp_name_is_not_followed(self):
         # the old fixed temp name state.json.tmp was opened O_TRUNC through a planted symlink
@@ -449,7 +450,7 @@ class FileBoardPlantedLinkTests(unittest.TestCase):
                     b.save_transcript(dataclasses.replace(self._row(), sha256="1" * 64))
                 self._check_victim(victim, kind)
                 (self.dir / "transcripts/index.json").unlink()
-                (self.dir / "transcripts/index.json.old").rename(self.dir / "transcripts/index.json")
+                (self.dir / "transcripts/index.json.old").replace(self.dir / "transcripts/index.json")
 
     def _mref(self, doc="d1", **kw):
         from swarm.board import MemoryRef
@@ -459,6 +460,7 @@ class FileBoardPlantedLinkTests(unittest.TestCase):
         fields.update(kw)
         return MemoryRef(**fields)
 
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_memory_refs_persist_in_files(self):
         with self.h.board() as b:
             self.assertEqual(b.save_memory_ref(self._mref()), "inserted")
@@ -487,7 +489,7 @@ class FileBoardPlantedLinkTests(unittest.TestCase):
                     b.save_memory_ref(self._mref("d2"))
                 self._check_victim(victim, kind)
                 (self.dir / "transcripts/memory_refs.json").unlink()
-                (self.dir / "transcripts/memory_refs.json.old").rename(self.dir / "transcripts/memory_refs.json")
+                (self.dir / "transcripts/memory_refs.json.old").replace(self.dir / "transcripts/memory_refs.json")
 
     def test_malformed_memory_refs_index_is_a_board_error(self):
         from swarm.board import BoardError
@@ -545,7 +547,7 @@ class FileBoardPlantedLinkTests(unittest.TestCase):
                     self.h.board()
                 self._check_victim(victim, kind)
                 (self.dir / "lock").unlink()
-                (self.dir / "lock.old").rename(self.dir / "lock")
+                (self.dir / "lock.old").replace(self.dir / "lock")
 
     def test_schema_version_link_is_not_followed(self):
         # schema_version() refuses it; setup replaces the entry (rename), never writes through it
@@ -557,6 +559,7 @@ class FileBoardPlantedLinkTests(unittest.TestCase):
         self.assertFalse((self.dir / "schema_version").is_symlink())
         self.assertEqual(fileboard.FileBoard.schema_version(self.h.cfg), fileboard.SCHEMA_VERSION)
 
+    @posix_only("needs os.mkfifo (POSIX FIFOs)")
     def test_fifo_at_messages_does_not_block(self):
         (self.dir / "messages.jsonl").unlink()
         os.mkfifo(self.dir / "messages.jsonl")
