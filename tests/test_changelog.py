@@ -24,7 +24,8 @@ def _version(text: str) -> tuple[int, ...]:
 class ChangelogTest(unittest.TestCase):
     def setUp(self):
         self.text = (ROOT / "CHANGELOG.md").read_text()
-        self.headings = HEADING.findall(self.text)
+        # an optional undated "## [Unreleased]" section on top collects changes until the next release
+        self.headings = [h for h in HEADING.findall(self.text) if h[0] != "Unreleased"]
 
     def test_plugin_versions_agree(self):
         versions = {m: json.loads((ROOT / m).read_text())["version"] for m in MANIFESTS}

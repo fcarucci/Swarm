@@ -693,24 +693,41 @@ def _minutes_since(state, ts) -> float:
     return float("inf") if ts is None else (state.now - ts).total_seconds() / 60
 
 
-HOOK_RECALL_SECONDS = 2.0   # a hook's Hindsight recall, all of it, takes at most this long
+HOOK_RECALL_SECONDS = 2.0   # a periodic (mid-work) recall, all of it, takes at most this long
+HOOK_RECALL_ENV = "SWARM_HOOK_RECALL_SECONDS"   # overrides [hindsight] recall_start_seconds (tests, debugging)
 
 
-def _recall(board, cfg: dict, agent_id: str, job: str, seen, heading: str) -> str | None:
+def _start_recall_seconds(cfg: dict) -> float:
+    """How long the recall made when an agent joins may take: the first recall after a long idle
+    is cold (8-10 s on a local Hindsight with a reranker), so it gets [hindsight]
+    recall_start_seconds (default 12); the env var wins over the config."""
+    for raw in (os.environ.get(HOOK_RECALL_ENV), cfg["hindsight"].get("recall_start_seconds")):
+        try:
+            if raw not in (None, "") and float(raw) > 0:
+                return float(raw)
+        except (TypeError, ValueError):
+            pass
+    return 12.0
+
+
+def _recall(board, cfg: dict, agent_id: str, job: str, seen, heading: str, *, start: bool = False) -> str | None:
     """Recall the project's memories, show the ones this agent hasn't seen, record them.
     Hindsight trouble is logged and skipped (the recall still counts, so it isn't retried
-    before recall_minutes)."""
+    before recall_minutes), except a start recall that ran out of time: that one is not
+    recorded, so the agent's next turn tries again (the cold Hindsight is warm by then)."""
     from swarm import hindsight
     js = board.job_status(job)
     project = hindsight.project_of(js, job)
     # one deadline for the whole call, name resolution included (hindsight.Client): a hook never
     # hangs an agent on Hindsight
-    bounded = {**cfg, "hindsight": {**cfg["hindsight"], "deadline": time.monotonic() + HOOK_RECALL_SECONDS}}
+    seconds = _start_recall_seconds(cfg) if start else min(HOOK_RECALL_SECONDS, _start_recall_seconds(cfg))
+    bounded = {**cfg, "hindsight": {**cfg["hindsight"], "deadline": time.monotonic() + seconds}}
     try:
         items = hindsight.Client(bounded).recall(hindsight.bank_id(project), hindsight.recall_query(js, job))
     except Exception as exc:
         _log_error("memory", agent_id, exc)
-        board.record_memory_recall(agent_id, [])
+        if not (start and isinstance(exc, hindsight.HindsightOutOfTime)):
+            board.record_memory_recall(agent_id, [])
         return None
     text, shown = hindsight.format_memories([i for i in items if i["id"] not in seen], project, cfg, heading)
     board.record_memory_recall(agent_id, shown)
@@ -1026,7 +1043,8 @@ def _welcome(board, event: str, agent_id: str, job: str, name: str, cfg: dict, *
     parts.append(roster_text(roster, agent_id, job))
     parts.append(_messages_text(board.read_unread(agent_key=agent_id, job=job), job, name, heading))
     if _memory_on(cfg):
-        parts.append(_recall(board, cfg, agent_id, job, (), "what this project's memory knows"))
+        parts.append(_recall(board, cfg, agent_id, job, (), "what this project's memory knows",
+                              start=True))
     host = current_host()
     board.set_agent_runtime(agent_id, host.name, payload.get("model") or host.agent_model(payload, agent_id))
     _out("SubagentStart" if event == "start" else "PreToolUse", "\n\n".join(p for p in parts if p))

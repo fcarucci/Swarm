@@ -4,6 +4,11 @@ All notable changes to swarm, newest first. Each release's notes on GitHub are t
 section here, so every release adds a `## [x.y.z] - YYYY-MM-DD` section (see `scripts/release-notes.sh`).
 Keep entries short and user-facing: one line per change, what it does, not how.
 
+## [Unreleased]
+
+### Fixed
+- Project memory was missing from a joining agent's context when Hindsight was cold: the hook's 2 s recall cap was shorter than a cold recall (8-10 s). The join recall now waits up to `[hindsight] recall_start_seconds` (default 12; env `SWARM_HOOK_RECALL_SECONDS` overrides), mid-work recalls keep 2 s, and a join recall that runs out of time is retried on the agent's next turn instead of after `recall_minutes`.
+
 ## [0.1.13] - 2026-10-02
 
 ### Added

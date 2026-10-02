@@ -71,6 +71,11 @@ class HindsightUnavailable(Exception):
     so). Trips the circuit breaker for every bank."""
 
 
+class HindsightOutOfTime(HindsightUnavailable):
+    """The caller's own deadline ran out (Hindsight may just be cold): not an outage, no circuit
+    breaker, and worth trying again soon."""
+
+
 class HindsightError(Exception):
     """Hindsight answered with an error about one bank (5xx) or one request (4xx). `status` is
     the HTTP status (None when not from the server, e.g. memory switched off), `detail` the
@@ -299,7 +304,7 @@ class Client:
         if self.deadline is not None:
             left = self.deadline - time.monotonic()
             if left <= 0:
-                raise HindsightUnavailable(f"out of time for {method} {path} (tried again later)")
+                raise HindsightOutOfTime(f"out of time for {method} {path} (tried again later)")
             timeout = min(timeout, left)
         try:
             data = _fetch(req, timeout) if self.deadline is None else \
@@ -317,7 +322,7 @@ class Client:
         except (urllib.error.URLError, OSError) as exc:  # refused, DNS, timeout
             reason = getattr(exc, "reason", exc)
             if self._out_of_time(reason):   # our deadline, not Hindsight's fault: no circuit breaker
-                raise HindsightUnavailable(f"out of time for {method} {path} (tried again later)") from None
+                raise HindsightOutOfTime(f"out of time for {method} {path} (tried again later)") from None
             self._mark_down()
             raise HindsightUnavailable(f"{type(reason).__name__}: {reason}") from None
         self._mark_up()

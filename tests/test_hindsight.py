@@ -9,6 +9,7 @@ import os
 import sys
 import time
 import unittest
+from unittest import mock
 import uuid
 
 from support import posix_only  # noqa: E402
@@ -253,6 +254,38 @@ class MemoryTests(HindsightEnv):
         self.start()
         rc, out, err = self.cli("remember", "--job", "J", "--as", "Nobody", "x")
         self.assertNotIn("s3cret", out + err + self.error_log.read_text())
+
+
+class ColdRecallTests(HindsightEnv):
+    """A cold Hindsight answers a recall slowly: the join recall waits for it, a mid-work one doesn't."""
+
+    def test_start_recall_waits_for_a_slow_cold_recall(self):
+        from swarm import hooks
+        self.enable(timeout_seconds=10, recall_start_seconds=5)
+        self.fake.add_memory("j", "cold fact")
+        self.fake.delays[("POST", "/memories/recall")] = hooks.HOOK_RECALL_SECONDS + 0.8   # beyond the old cap
+        self.cli("activate", "--job", "J")
+        self.assertIn("cold fact", self.start())
+
+    def test_env_overrides_the_config(self):
+        from swarm import hooks
+        cfg = {"hindsight": {"recall_start_seconds": 7}}
+        self.assertEqual(hooks._start_recall_seconds(cfg), 7.0)
+        with mock.patch.dict(os.environ, {hooks.HOOK_RECALL_ENV: "3"}):
+            self.assertEqual(hooks._start_recall_seconds(cfg), 3.0)
+        with mock.patch.dict(os.environ, {hooks.HOOK_RECALL_ENV: "junk"}):
+            self.assertEqual(hooks._start_recall_seconds(cfg), 7.0)
+        self.assertEqual(hooks._start_recall_seconds({"hindsight": {}}), 12.0)
+
+    def test_start_recall_that_runs_out_of_time_is_retried_on_the_next_turn(self):
+        self.enable(timeout_seconds=10, recall_start_seconds=0.6)
+        self.fake.add_memory("j", "late fact")
+        self.fake.delays[("POST", "/memories/recall")] = 1.5
+        self.cli("activate", "--job", "J")
+        self.assertNotIn("late fact", self.start())
+        self.assertRegex(self.error_log.read_text(), r"memory agent-1: HindsightOutOfTime: ")
+        self.fake.delays.clear()                                     # warm now; no recall_minutes wait
+        self.assertIn("late fact", self.turn())
 
 
 class FailureScopeTests(HindsightEnv):
