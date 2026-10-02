@@ -49,6 +49,38 @@ jobs:
           set -o pipefail
           python -B -m unittest discover -s tests -q 2>&1 | tee test.log || { python .github/scripts/annotate.py test.log; exit 1; }
 
+  # Native Windows: the unit suite on the offline backends. POSIX-only tests carry skip markers
+  # with a reason; nothing is skipped on Linux.
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [memory, sqlite, file]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests (backend=${{ matrix.backend }})
+        env:
+          SWARM_TEST_BACKEND: ${{ matrix.backend }}
+          PYTHONUTF8: "1"
+        run: |
+          set -o pipefail
+          python -B -m unittest discover -s tests -q 2>&1 | tee test.log || { python .github/scripts/annotate.py test.log; exit 1; }
+
   # install.sh must keep working under macOS's stock bash (3.2, no arrays): e2e/install_test.sh
   # exercises it end to end. Also runs the unit suite on sqlite, the backend the e2e script uses
   # nowhere but that is otherwise only covered on Linux above.
