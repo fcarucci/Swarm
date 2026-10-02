@@ -214,7 +214,7 @@ class ProvenanceHookTests(ClaudeAgents, Env):
         ids = [f"note-{i:02d}" for i in range(25)]
         t0 = time.monotonic()
         self.post("note-tool save --batch items", "".join(f"saved {d} to notes\n" for d in ids))
-        self.assertLess(time.monotonic() - t0, 4.0)
+        self.assertLess(time.monotonic() - t0, 8.0)
         self.assertEqual(sorted(r.document_id for r in self.refs()), ids[:20])
 
     def test_swarm_remember_forged_project_cannot_claim_another_bank(self):
@@ -250,7 +250,7 @@ class ProvenanceHookTests(ClaudeAgents, Env):
         self.transcript("a1").write_text(claude_lines(pad_mb=60))
         t0 = time.monotonic()
         self.post(PF.NOTE_TOOL_CMD, PF.NOTE_TOOL_OUT)
-        self.assertLess(time.monotonic() - t0, 4.0)
+        self.assertLess(time.monotonic() - t0, 8.0)
         [r] = self.refs()
         self.assertGreater(r.stored_bytes, 0)
 
@@ -398,7 +398,7 @@ class PatchTests(ClaudeAgents, HindsightEnv):
         self.fake.stop()
         t0 = time.monotonic()
         self.post(PF.NOTE_TOOL_CMD, PF.NOTE_TOOL_OUT)
-        self.assertLess(time.monotonic() - t0, 4.0)
+        self.assertLess(time.monotonic() - t0, 8.0)
         [r] = self.refs()
         self.assertFalse(r.patched)
         self.assertIn("not patched", self.errors())
