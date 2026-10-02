@@ -176,6 +176,7 @@ for the options.
 | `swarm move (--as NAME \| --key K) --to J` | Move one live agent to another open job; its next tool call shows the new job's notice and recent messages |
 | `swarm verdict` | The job's judge records whether the goal is met |
 | `swarm wait [--for 90m]` / `swarm resume` | Mark a job as waiting for something (optionally for a bounded time), or not |
+| `swarm pause --job J [--reason "…"]` / `swarm resume --job J [--host H]` | Pause a job (checkpoint every agent's transcript, stop them, block new joins and posts), then resume it on this or another machine from the transcripts on the board; see Pausing and resuming |
 | `swarm transcript list\|show\|export` | Archived agent transcripts, secrets redacted |
 | `swarm memory` / `swarm remember` | Memories agents saved and where they came from; store one |
 | `swarm leave` | Release an agent's name (`--session S`: every unfinished agent of that session's jobs, e.g. after a restart killed them) |
@@ -188,6 +189,22 @@ for the options.
 
 `doctor`, `transcript show` and `transcript list` are coloured on a terminal. `--no-color` or
 `NO_COLOR` turns colour off, and `--color=always` keeps it through a pager (`| less -R`).
+
+### Pausing and resuming a job
+
+`swarm pause --job J` marks the job `paused`, stores each agent's final (redacted) transcript and a resume
+manifest on the board, stops the agents, and refuses new joins and posts with a clear message. On any machine that
+reaches the same board, `swarm resume --job J [--host H] [--workdir D]` re-creates every agent from the board (not
+local disk) with the same name, role and read cursor, and tells it that it was paused and resumed.
+`--dry-run` shows the plan, `--only NAME...` resumes a subset, `--retry` redoes failed agents. Needs board
+schema 12 (`swarm migrate`) and transcripts enabled.
+
+Limits:
+- No cross-harness resume: a Claude Code transcript cannot be resumed in Codex or the reverse; that agent gets a briefing instead.
+- Subagent trees are not rebuilt: in-process subagents come back as independent sessions.
+- Codex gets a briefing by default; native Codex resume from a transcript is experimental.
+- Redactions stay redacted: hand resumed agents any credentials again.
+- File state (working tree, git) is not part of the pause: the resume machine needs the repo (`--workdir`).
 
 ## Prerequisites and configuration
 
