@@ -159,7 +159,33 @@ else:
         flags &= ~(O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         if not flags & os.O_EXCL:
             _refuse_link(p)
-        return os.open(p, flags | O_BINARY | os.O_NOINHERIT, mode | 0o200)   # 0o400 would mean read-only
+        return _create_file(p, flags)
+
+    def _create_file(p: str, flags: int) -> int:
+        """os.open through CreateFileW with FILE_SHARE_DELETE: the C runtime's open() refuses to let
+        anyone rename or delete a file while it is open, but the swarm replaces files (atomic
+        writes, markers) that another descriptor of the same process still has open, as POSIX
+        allows."""
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateFileW.restype = wintypes.HANDLE
+        k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                                    wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        acc = flags & (os.O_RDONLY | os.O_WRONLY | os.O_RDWR)
+        access = {os.O_RDONLY: 0x80000000, os.O_WRONLY: 0x40000000, os.O_RDWR: 0xC0000000}[acc]
+        if flags & os.O_APPEND:
+            access = (access & ~0x40000000) | 0x4   # FILE_APPEND_DATA instead of GENERIC_WRITE
+        creat, excl, trunc = bool(flags & os.O_CREAT), bool(flags & os.O_EXCL), bool(flags & os.O_TRUNC)
+        disp = (1 if excl else 2 if trunc else 4) if creat else (5 if trunc else 3)
+        h = k32.CreateFileW(p, access, 7, None, disp, 0x80, None)   # share read|write|delete; NORMAL
+        if h in (None, wintypes.HANDLE(-1).value):
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            return msvcrt.open_osfhandle(h, (flags & (os.O_APPEND | os.O_RDONLY)) | O_BINARY | os.O_NOINHERIT)
+        except BaseException:
+            k32.CloseHandle(h)
+            raise
 
     def stat(path, *, dir_fd=None, follow_symlinks=True):
         return os.stat(_path(path, dir_fd), follow_symlinks=follow_symlinks)
