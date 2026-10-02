@@ -15,6 +15,7 @@ import multiprocessing
 import os
 import signal
 import tempfile
+import sys
 import time
 import unittest
 from pathlib import Path
@@ -63,11 +64,14 @@ def _poster(path, who, n, barrier, out):
     out.put((who, ids))
 
 
+_SLACK = 4 if sys.platform == "win32" else 1
+
+
 def _reader(path, key, expect, barrier, out):
     """Reads with its cursor until it has `expect` messages; reports every id in read order."""
     got = []
     barrier.wait()
-    deadline = time.monotonic() + 60
+    deadline = time.monotonic() + _SLACK * 60     # slower on Windows: process start-up, file locks
     while len(got) < expect and time.monotonic() < deadline:
         with open_board(_cfg(path)) as b:
             got += [m.id for m in b.read_new(agent_key=key)]
@@ -161,7 +165,7 @@ class FileBoardProcessTests(unittest.TestCase):
                   for i in range(nreaders)]
         for p in procs:
             p.start()
-        res = dict(out.get(timeout=180) for _ in procs)
+        res = dict(out.get(timeout=180 * _SLACK) for _ in procs)
         for p in procs:
             p.join(30)
         all_ids = sorted(i for w in range(writers) for i in res[f"w{w}"])
