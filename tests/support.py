@@ -34,6 +34,15 @@ os.environ.setdefault("SWARM_NO_SYSTEMD", "1")
 # home set CODEX_HOME to a temp dir; the rest fall back to ~/.codex under their temp $HOME.
 os.environ.pop("CODEX_HOME", None)
 
+if sys.platform == "win32":
+    # The tests build their files as LF text (JSONL fixtures, scripts, configs) and compare bytes
+    # and strings; Path.write_text would turn every "\n" into "\r\n" there.
+    _write_text = Path.write_text
+
+    def _lf_write_text(self, data, encoding=None, errors=None, newline="\n"):
+        return _write_text(self, data, encoding=encoding, errors=errors, newline=newline)
+    Path.write_text = _lf_write_text
+
 ROOT = Path(__file__).resolve().parent.parent
 BIN = ROOT / "bin"
 LIB = ROOT / "lib"
@@ -69,6 +78,12 @@ else:
 REAL_OLD_SPOOL = _bootstrap.OLD_SPOOL
 _bootstrap.OLD_SPOOL = os.path.join(SANDBOX, "old-shared-spool")
 _VENV = None
+
+
+def abs_(path: str) -> str:
+    """A POSIX-looking absolute test path made absolute on this platform too: on Windows a path
+    needs a drive ("/work/x" becomes "C:\\work\\x"); on POSIX it is returned unchanged."""
+    return ("C:" + path.replace("/", "\\")) if sys.platform == "win32" else path
 
 
 def posix_only(reason: str):

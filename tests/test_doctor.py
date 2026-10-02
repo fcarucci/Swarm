@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import tempfile
 import unittest
@@ -44,7 +45,7 @@ class DoctorTests(unittest.TestCase):
         bootstrap.bootstrap("claude", config=self.cfg)
         s = self.home / ".claude/settings.json"
         s.write_text(json.dumps({"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [
-            {"type": "command", "command": f"{self.home}/.claude/skills/swarm/bin/swarm-hook turn"}]}]}}))
+            {"type": "command", "command": f"{self.home.as_posix()}/.claude/skills/swarm/bin/swarm-hook turn"}]}]}}))
         c = self.by_name(bootstrap.doctor("claude", config=self.cfg))["old hooks"]
         self.assertIs(c.ok, False)
         self.assertIn("swarm migrate", c.fix)
@@ -87,14 +88,14 @@ class DoctorTests(unittest.TestCase):
         s = self.home / ".claude/settings.json"
         s.write_text(json.dumps({"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [
             {"type": "command", "command": "/opt/tools/bin/swarm-hook turn"},              # not the old skill's
-            {"type": "command", "command": f"{self.home}/.claude/skills/swarm/bin/swarm-hook turn --verbose"}]}]}}))
+            {"type": "command", "command": f"{self.home.as_posix()}/.claude/skills/swarm/bin/swarm-hook turn --verbose"}]}]}}))
         self.assertIs(self.by_name(bootstrap.doctor("claude", config=self.cfg))["old hooks"].ok, True)
 
     def test_old_hooks_without_plugin_are_a_warning(self):
         (self.home / ".claude/plugins/installed_plugins.json").write_text('{"version": 2, "plugins": {}}')
         s = self.home / ".claude/settings.json"
         s.write_text(json.dumps({"hooks": {"SubagentStop": [{"hooks": [
-            {"type": "command", "command": f"{self.home}/.claude/skills/swarm/bin/swarm-hook stop"}]}]}}))
+            {"type": "command", "command": f"{self.home.as_posix()}/.claude/skills/swarm/bin/swarm-hook stop"}]}]}}))
         self.assertIsNone(self.by_name(bootstrap.doctor("claude", config=self.cfg))["old hooks"].ok)
 
     def test_cli_exit_code(self):
@@ -139,7 +140,7 @@ class DoctorTests(unittest.TestCase):
             rc = cli.main(["--config", str(self.cfg), "doctor", "--host", "claude"])
         text = out.getvalue()
         self.assertEqual(rc, 1)
-        self.assertRegex(text, rf"FAIL config +can't read {self.cfg}: invalid TOML at line 3 column \d+")
+        self.assertRegex(text, rf"FAIL config +can't read {re.escape(str(self.cfg))}: invalid TOML at line 3 column \d+")
         self.assertNotIn("config-value-secret", text)
         self.assertNotRegex(text, r"(?m)^\w+ +board +(schema|unreachable)")                   # needs the config: not run
         for name in ("venv", "launcher", "plugin", "old hooks"):
@@ -382,7 +383,7 @@ class ExposureDoctorTests(unittest.TestCase):
             self.roots(*case.pop("roots"), **case)
             c = self.checks()["sandbox roots"]
             self.assertIs(c.ok, False, case)
-            self.assertIn(".local/share/swarm", c.detail)
+            self.assertIn(os.path.normpath(".local/share/swarm"), c.detail)
         for f in self.codex.glob("*.toml"):
             f.unlink()
         s = self.home / ".claude/settings.json"; s.parent.mkdir()

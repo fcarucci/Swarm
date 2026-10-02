@@ -16,9 +16,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import HOST_ENV, ROOT, e2e_harness, temp_venv, tq, home_env, posix_only  # noqa: F401  (sets sys.path)
+from support import HOST_ENV, abs_, ROOT, e2e_harness, temp_venv, tq, home_env, posix_only  # noqa: F401  (sets sys.path)
 
-from swarm import spool  # noqa: E402
+from swarm import paths, spool  # noqa: E402
 from swarm import cli as swarm  # noqa: E402
 from swarm import hooks as swarm_hooks  # noqa: E402
 from swarm.board import open_board  # noqa: E402
@@ -140,7 +140,7 @@ class CliTests(Env):
         self.assertEqual(out, "no active jobs (--all includes closed ones)\n")
         rc, out, _ = self.cli("activate", "--job", "J", "--description", "the job", "--task", "-",
                               stdin="line one\nline two\n")
-        self.assertEqual((rc, out), (0, f"swarm command: {swarm.SKILL_DIR / 'bin' / 'swarm'}\n"
+        self.assertEqual((rc, out), (0, f"swarm command: {paths.agent_bin()}\n"
                                         "activated J: subagents spawned from now on join the board\n"
                                         "put this line in every subagent prompt for this job (it picks "
                                         "the job when this session runs several):\n[swarm job: J]\n"
@@ -302,7 +302,7 @@ class HookTests(Env):
             rc, out, err = self.cli("activate", "--job", "J", "--attach", "--session", "codex-sess")
         self.assertEqual(rc, 0, err)
         self.assertIn("attached", out)
-        self.assertIn(f"swarm command: {swarm.SKILL_DIR / 'bin' / 'swarm'}", out)
+        self.assertIn(f"swarm command: {paths.agent_bin()}", out)
         # Codex takes the models from the hook, so no hint; test_models covers the hint
         self.assertNotIn("Spawn with these models", out)
         self.assertNotIn("gpt-test", out)
@@ -402,10 +402,10 @@ class HookTests(Env):
         launcher = Path(os.environ["HOME"]) / ".local/bin/swarm"          # absent: bootstrap hasn't run yet
         self.activate()
         ctx = self.context(self.hook("start", agent_id="a1"))
-        self.assertIn(f"{swarm.SKILL_DIR / 'bin' / 'swarm'} post --job", ctx)
+        self.assertIn(f"{paths.agent_bin()} post --job", ctx)
         self.assertNotIn(str(launcher), ctx)
         rc, out, _ = self.cli("activate", "--job", "K", "--session", "sess-9")
-        self.assertIn(f"swarm command: {swarm.SKILL_DIR / 'bin' / 'swarm'}", out)
+        self.assertIn(f"swarm command: {paths.agent_bin()}", out)
 
     @posix_only("runs a POSIX sh script (the Windows entry points are tested in test_windows_*.py)")
     def test_shell_entry_runs_without_state_dir(self):
@@ -703,19 +703,19 @@ class EnrolmentTests(Env):
     def test_start_writes_the_agent_record(self):
         from swarm import enrolment
         self.activate()
-        self.hook("start", cwd="/work/here")
+        self.hook("start", cwd=abs_("/work/here"))
         rec = enrolment.find(self.key(), "agent-1")
         self.assertIsNotNone(rec)
         self.assertEqual((rec.job, rec.agent_key, rec.harness, rec.session_id, rec.cwd),
-                         ("J", "agent-1", "claude", "sess-1", "/work/here"))
+                         ("J", "agent-1", "claude", "sess-1", abs_("/work/here")))
         self.assertTrue(enrolment.owns(self.key(), "agent-1", "J"))
 
     def test_codex_start_records_the_codex_harness(self):
         from swarm import enrolment
         self.activate()
-        self.hook("start", host="codex", cwd="/work/cx")
+        self.hook("start", host="codex", cwd=abs_("/work/cx"))
         rec = enrolment.find(self.key(), "agent-1")
-        self.assertEqual((rec.harness, rec.cwd), ("codex", "/work/cx"))
+        self.assertEqual((rec.harness, rec.cwd), ("codex", abs_("/work/cx")))
 
     def test_the_marker_cwd_is_not_used(self):
         from swarm import enrolment
@@ -723,8 +723,8 @@ class EnrolmentTests(Env):
         m = json.loads((self.markers / "J.json").read_text())
         m["cwd"] = "/planted/by/sandbox"
         (self.markers / "J.json").write_text(json.dumps(m))
-        self.hook("start", cwd="/from/payload")
-        self.assertEqual(enrolment.find(self.key(), "agent-1").cwd, "/from/payload")
+        self.hook("start", cwd=abs_("/from/payload"))
+        self.assertEqual(enrolment.find(self.key(), "agent-1").cwd, abs_("/from/payload"))
 
     def test_a_bad_payload_cwd_falls_back_to_the_hook_process(self):
         from swarm import enrolment
@@ -741,12 +741,12 @@ class EnrolmentTests(Env):
         from swarm import enrolment
         self.activate("--session", "sess-1")
         self.assertIsNone(enrolment.find_job(self.key(), "J"))
-        self.hook("done", agent_id=None, tool_name="Bash", cwd="/orch")
+        self.hook("done", agent_id=None, tool_name="Bash", cwd=abs_("/orch"))
         rec = enrolment.find_job(self.key(), "J")
-        self.assertEqual((rec.job, rec.harness, rec.session_id, rec.cwd), ("J", "claude", "sess-1", "/orch"))
+        self.assertEqual((rec.job, rec.harness, rec.session_id, rec.cwd), ("J", "claude", "sess-1", abs_("/orch")))
         first = rec.created_at
         time.sleep(0.05)
-        self.hook("turn", agent_id=None, tool_name="Bash", cwd="/orch")
+        self.hook("turn", agent_id=None, tool_name="Bash", cwd=abs_("/orch"))
         self.assertEqual(enrolment.find_job(self.key(), "J").created_at, first)   # not rewritten
         # another session's hook writes nothing for J
         self.hook("turn", agent_id=None, session="sess-2", tool_name="Bash", cwd="/x")
@@ -755,7 +755,7 @@ class EnrolmentTests(Env):
         time.sleep(0.05)
         self.activate("--session", "sess-1")
         os.utime(self.markers / "J.json")
-        self.hook("turn", agent_id=None, tool_name="Bash", cwd="/orch")
+        self.hook("turn", agent_id=None, tool_name="Bash", cwd=abs_("/orch"))
         self.assertGreater(enrolment.find_job(self.key(), "J").created_at, first)
 
 

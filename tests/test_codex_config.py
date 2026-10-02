@@ -128,7 +128,7 @@ class CodexConfigEditTests(unittest.TestCase):
         cwd = os.getcwd()
         roots = cc.required(cfg)[("sandbox_workspace_write", "writable_roots")]
         self.assertTrue(all(os.path.isabs(r) for r in roots), roots)
-        self.assertIn(os.path.join(cwd, "rel/spool"), roots)
+        self.assertIn(os.path.join(cwd, "rel", "spool"), roots)
         self.assertIn(os.path.join(cwd, "markers"), roots)
         inside = base_config(spool_dir="~/.local/state/swarm/../swarm/spool")   # normalized, and granted itself
         self.assertEqual(cc.required(inside)[("sandbox_workspace_write", "writable_roots")],
@@ -292,7 +292,7 @@ class GrantTests(unittest.TestCase):
     def test_required_has_no_state_dir_and_no_network(self):
         req = cc.required(self.cfg)
         self.assertNotIn(("sandbox_workspace_write", "network_access"), req)
-        self.assertEqual(self.roots(), [self.state + "/spool", self.state + "/active"])
+        self.assertEqual(self.roots(), [os.path.join(self.state, "spool"), os.path.join(self.state, "active")])
         for root in self.roots():
             self.assertNotEqual(root, self.state)
             self.assertFalse(str(self.home / ".local/share/swarm").startswith(root))
@@ -343,7 +343,7 @@ class GrantTests(unittest.TestCase):
 
     def _pre_fix(self, backup_text):
         """A config.toml as 0.1.0-pre left it, with the backup it took before its first edit."""
-        self.path.write_text(PRE_FIX.format(state=self.state))
+        self.path.write_text(PRE_FIX.format(state=self.state.replace("\\", "\\\\")))
         if backup_text is not None:
             (self.path.parent / "config.toml.pre-swarm-20260901-120000").write_text(backup_text)
 
@@ -356,7 +356,7 @@ class GrantTests(unittest.TestCase):
         self.assertNotIn(self.state, sw["writable_roots"])
         self.assertNotIn("network_access", sw)
         self.assertEqual(sw["writable_roots"][0], "/home/u/work")
-        self.assertIn(self.state + "/spool", sw["writable_roots"])
+        self.assertIn(os.path.join(self.state, "spool"), sw["writable_roots"])
         self.assertIn(f"removed {self.state} from", detail)
         self.assertIn("removed network_access", detail)
         self.assertEqual(cc.apply(self.path, self.cfg)[0], "ok")          # done once

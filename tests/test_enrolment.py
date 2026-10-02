@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import ROOT, home_env, posix_only  # noqa: F401
+from support import ROOT, home_env, posix_only, abs_  # noqa: F401
 
 from swarm import enrolment, paths  # noqa: E402
 
@@ -103,7 +103,7 @@ class ValidationTests(Env):
                 with self.assertRaises(ValueError):
                     self.enrol(**kw)
         with self.assertRaises(ValueError):
-            enrolment.write("", job="j", agent_key="k", harness="claude", session_id=None, cwd="/x")
+            enrolment.write("", job="j", agent_key="k", harness="claude", session_id=None, cwd=abs_("/x"))
         self.assertFalse(self.dir().exists() and any(self.dir().iterdir()))
 
     def test_a_tampered_record_is_not_trusted(self):
@@ -191,18 +191,19 @@ class FixRound1Tests(Env):
         self.assertFalse(p.exists())
 
     def test_cwd_must_be_normalised(self):
-        for cwd in ("/a/../b", "/a/./b", "/a//b", "/a/b/", "/a/b/.."):
+        for cwd in map(abs_, ("/a/../b", "/a/./b", "/a//b", "/a/b/", "/a/b/..")):
             with self.subTest(cwd=cwd):
                 with self.assertRaises(ValueError):
                     self.enrol(cwd=cwd)
-        self.enrol(cwd="/a/b")
+        self.enrol(cwd=abs_("/a/b"))
 
     def test_a_record_with_an_unnormalised_cwd_is_not_trusted(self):
         self.enrol()
         p = self.dir() / enrolment.record_name(BOARD, "k1")
-        p.write_text(json.dumps({**json.loads(p.read_text()), "cwd": "/home/x/src/../../etc"}))
+        p.write_text(json.dumps({**json.loads(p.read_text()), "cwd": abs_("/home/x/src/../../etc")}))
         self.assertIsNone(enrolment.find(BOARD, "k1"))
 
+    @posix_only("a file name ending in a newline is not valid on Windows")
     def test_prune_names_must_match_fully(self):
         # "agent-<hex>.json\n" is not a record name: left alone, like any other name
         odd = "agent-" + "3" * 64 + ".json\n"

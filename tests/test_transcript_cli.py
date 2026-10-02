@@ -10,7 +10,7 @@ import json
 import re
 from unittest import mock
 
-from support import ROOT  # noqa: F401  (sets sys.path)
+from support import ROOT, tq  # noqa: F401  (sets sys.path)
 
 from swarm import cli as swarm  # noqa: E402
 from swarm import transcripts  # noqa: E402
@@ -352,7 +352,7 @@ class ExportSafetyTests(TranscriptEnv):
         self.assertEqual(self.outside.read_text(), "precious\n")
         self.assertFalse(os.path.exists(f"/tmp/swarm-m7-{os.getpid()}.png"))
         self.assertEqual(sorted(p.name for p in self.tmp.iterdir()), sorted(before + ["exp"]))
-        written = sorted(str(p.relative_to(self.target)) for p in self.target.rglob("*"))
+        written = sorted(p.relative_to(self.target).as_posix() for p in self.target.rglob("*"))
         self.assertEqual(written, ["Homer_Simpson.jsonl", "images", f"images/{self.GOOD}.png", "index.tsv",
                                    "orchestrator.jsonl"])
         self.assertIn("skipped", err)
@@ -406,7 +406,7 @@ class ExportSafetyTests(TranscriptEnv):
         codex.mkdir()
         shared = self.tmp / "shared"
         shared.mkdir(mode=0o700)
-        (codex / "config.toml").write_text(f'[sandbox_workspace_write]\nwritable_roots = ["{shared}"]\n')
+        (codex / "config.toml").write_text(f'[sandbox_workspace_write]\nwritable_roots = [{tq(shared)}]\n')
         with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex)}):
             for target in (self.spool_dir / "t", self.markers / "t", shared / "t"):
                 with self.subTest(target=target), self.board() as b:

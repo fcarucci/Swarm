@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import sys
 import shutil
 import tempfile
 import unittest
@@ -21,6 +22,9 @@ from swarm import update  # noqa: E402
 
 
 def _write_stub(path: Path, body: str) -> None:
+    if sys.platform == "win32" and path.name != "swarm":
+        # a fake host CLI is an sh script; on Windows the real ones are .cmd/.exe shims
+        raise unittest.SkipTest("fake host CLIs are POSIX sh stubs")
     path.write_text(f"#!/bin/sh\n{body}\n")
     path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
@@ -508,6 +512,7 @@ class SourceReplacedMidUpdateTests(unittest.TestCase):
 class UpgradeAlwaysForcesMigrateTests(unittest.TestCase):
     """`swarm upgrade` always runs migrate with --force: an active job only warns, never blocks."""
 
+    @posix_only("swarm migrate is a no-op on Windows (no pre-0.1 layout there)")
     def test_migrate_is_forced_without_force_flag(self):
         import io
         seen = {}
