@@ -36,7 +36,7 @@ def write_preserving(path: Path, text: str, mode: int | None = None) -> None:
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp, path)
+        compat.replace(tmp, path)
     except BaseException:
         try:
             os.unlink(tmp)

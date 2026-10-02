@@ -86,6 +86,9 @@ if not IS_WINDOWS:
         """Set the times of the open file `fd` to now."""
         os.utime(fd)
 
+    def replace(src, dst) -> None:
+        os.replace(src, dst)
+
     def open_root(path) -> int:
         """A descriptor of directory `path` as given (a symlink at `path` itself is followed)."""
         return os.open(path, os.O_RDONLY | O_DIRECTORY | O_CLOEXEC)
@@ -157,8 +160,7 @@ else:
         if flags & O_DIRECTORY:
             return open_dir(p)
         flags &= ~(O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
-        if not flags & os.O_EXCL:
-            _refuse_link(p)
+        _refuse_link(p)   # also with O_EXCL: CREATE_NEW through a dangling symlink creates its target
         return _create_file(p, flags)
 
     def _create_file(p: str, flags: int) -> int:
@@ -178,7 +180,7 @@ else:
             access = (access & ~0x40000000) | 0x4   # FILE_APPEND_DATA instead of GENERIC_WRITE
         creat, excl, trunc = bool(flags & os.O_CREAT), bool(flags & os.O_EXCL), bool(flags & os.O_TRUNC)
         disp = (1 if excl else 2 if trunc else 4) if creat else (5 if trunc else 3)
-        h = k32.CreateFileW(p, access, 7, None, disp, 0x80, None)   # share read|write|delete; NORMAL
+        h = k32.CreateFileW(p, access, 7, None, disp, 0x80 | 0x00200000, None)   # share rwd; NORMAL | OPEN_REPARSE_POINT
         if h in (None, wintypes.HANDLE(-1).value):
             raise ctypes.WinError(ctypes.get_last_error())
         try:
@@ -206,6 +208,11 @@ else:
     def rename(src, dst, *, src_dir_fd=None, dst_dir_fd=None) -> None:
         # os.rename refuses to overwrite on Windows; POSIX rename replaces atomically
         s, d = _path(src, src_dir_fd), _path(dst, dst_dir_fd)
+        try:   # by name and atomic when `dst` is free: of two racing claimers of `src`, one gets FileNotFoundError
+            os.rename(s, d)
+            return
+        except (FileExistsError, PermissionError):
+            pass
         if not _posix_rename(s, d):
             _retry(os.replace, s, d)
 
@@ -263,6 +270,18 @@ else:
     def utime_fd(fd: int, name=None, dir_fd=None) -> None:
         # os.utime has no fd form on Windows: by name in the directory the file was opened from
         os.utime(_path(name, dir_fd), None)
+
+    def replace(src, dst) -> None:
+        """os.replace; a read-only destination (what chmod 0o400 makes on Windows) is made writable
+        first, since POSIX lets a directory entry be replaced whatever the file's own mode."""
+        try:
+            os.replace(src, dst)
+        except PermissionError:
+            try:
+                os.chmod(dst, _stat.S_IWRITE | _stat.S_IREAD)
+            except OSError:
+                raise
+            _retry(os.replace, src, dst)
 
     def open_root(path) -> int:
         p = os.fspath(path)
