@@ -138,11 +138,16 @@ else:
         if _stat.S_ISLNK(st.st_mode) or getattr(st, "st_file_attributes", 0) & _stat.FILE_ATTRIBUTE_REPARSE_POINT:
             raise OSError(errno.ELOOP, "refusing to follow a symbolic link or junction", path)
 
+    def _need_dir(p: str) -> None:
+        if not os.path.isdir(p):
+            if not os.path.lexists(p):
+                raise FileNotFoundError(errno.ENOENT, "no such directory", p)
+            raise NotADirectoryError(errno.ENOTDIR, "not a directory", p)
+
     def open_dir(path) -> int:
         p = os.fspath(path)
         _refuse_link(p)
-        if not os.path.isdir(p):
-            raise NotADirectoryError(errno.ENOTDIR, "not a directory", p)
+        _need_dir(p)
         fd = os.open(os.devnull, os.O_RDONLY | os.O_BINARY)
         _dirs[fd] = p
         return fd
@@ -199,8 +204,7 @@ else:
 
     def open_root(path) -> int:
         p = os.fspath(path)
-        if not os.path.isdir(p):
-            raise NotADirectoryError(errno.ENOTDIR, "not a directory", p)
+        _need_dir(p)
         fd = os.open(os.devnull, os.O_RDONLY | os.O_BINARY)
         _dirs[fd] = p
         return fd
@@ -230,7 +234,7 @@ else:
                                    wintypes.DWORD, ctypes.POINTER(_Overlapped)]
         k32.UnlockFileEx.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
                                      ctypes.POINTER(_Overlapped)]
-        handle = msvcrt.get_osfhandle(fd)
+        handle = msvcrt.get_osfhandle(fd if isinstance(fd, int) else fd.fileno())
         ov = _Overlapped()
         ov.OffsetHigh = 0x100
         if op & LOCK_UN:
