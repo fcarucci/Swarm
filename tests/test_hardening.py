@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 from test_verifier import VerifierEnv  # noqa: E402  (sets sys.path)
+from support import tq  # noqa: E402
 from test_hooks_cli import Env  # noqa: E402
 from test_transcript_cli import TranscriptEnv  # noqa: E402
 from test_transcript_images import SAMPLE  # noqa: E402
@@ -908,7 +909,6 @@ REVIEWED = {
     ("bootstrap.py", "writable_roots", ".read_text"): "$CODEX_HOME config and profiles (read)",
     ("bootstrap.py", "exposure_checks", ".read_text"): "~/.claude/settings.json (read)",
     ("bootstrap.py", "_codex_checks", ".read_text"): "$CODEX_HOME/config.toml (read)",
-    ("bootstrap.py", "tighten_local_dirs", "os.open"): "$HOME itself (read-only); below it openat O_NOFOLLOW",
     ("codex_config.py", "_ensure_private_root", "os.open"): "O_DIRECTORY|O_NOFOLLOW on the dir it just created, to fchmod 0700",
     ("cli.py", "load_config", "open"): "~/.config/swarm/config.toml or --config (read)",
     ("cli.py", "locked_marker", "os.open"): "O_NOFOLLOW|O_NONBLOCK, then fstat: regular file of ours",
@@ -1138,8 +1138,8 @@ class PthChainTests(ProbeEnv):
             os.chmod(d, 0o700)
         (self.home / "board").mkdir()
         self.config.write_text(
-            f'[board]\nbackend = "sqlite"\nspool_dir = "{self.state}/spool"\n'
-            f'[sqlite]\npath = "{self.home}/board/board.db"\n'
+            f'[board]\nbackend = "sqlite"\nspool_dir = {tq(f"{self.state}/spool")}\n'
+            f'[sqlite]\npath = {tq(f"{self.home}/board/board.db")}\n'
             f'[hook]\nmarker_dir = "~/.local/state/swarm/active"\n')
         m = {"job": "j", "session_id": "SID-ATTACKER",
              "resume": {"agent_key": f"x\n{SENTINEL}\n#", "resume_of": "a", "restart_id": 1}}
@@ -1186,7 +1186,7 @@ class FileBoardChainTests(ProbeEnv):
 
     def test_fileboard_chain_blocked(self):
         self.config.write_text(
-            f'[board]\nbackend = "file"\nspool_dir = "{self.state}/spool"\n'
+            f'[board]\nbackend = "file"\nspool_dir = {tq(f"{self.state}/spool")}\n'
             f'[file]\npath = "~/.local/state/swarm/board"\n')
         env = {"SWARM_AUTO_INIT": "1"}
         r = self.swarm("post", "--job", "j", "--as", "Lisa Simpson", "first post", extra_env=env)
@@ -1316,7 +1316,7 @@ class LooseLocalDirsTests(ProbeEnv):
             os.chmod(self.home / rel, 0o755)
         (self.home / "board").mkdir(mode=0o700)
         db = self.home / "board/b.sqlite3"
-        self.config.write_text(f'[board]\nbackend = "sqlite"\n[sqlite]\npath = "{db}"\n'
+        self.config.write_text(f'[board]\nbackend = "sqlite"\n[sqlite]\npath = {tq(db)}\n'
                                '[hook]\nmarker_dir = "~/.local/state/custom/markers"\n')
         r = self.swarm("bootstrap", "--host", "claude")
         self.assertEqual(self.mode(".local/state/custom/markers") & 0o022, 0, r.stdout + r.stderr)
@@ -1407,7 +1407,7 @@ class LooseLocalDirsTests(ProbeEnv):
     def test_bootstrap_fixes_a_loose_home_then_hooks_post_and_migrate_work(self):
         self.loosen()
         (self.home / "board").mkdir(mode=0o700)
-        self.config.write_text(f'[board]\nbackend = "sqlite"\n[sqlite]\npath = "{self.home}/board/b.sqlite3"\n')
+        self.config.write_text(f'[board]\nbackend = "sqlite"\n[sqlite]\npath = {tq(f"{self.home}/board/b.sqlite3")}\n')
         r = self.swarm("bootstrap", "--host", "claude")
         self.assertEqual({rel: m & 0o022 for rel, m in self.modes().items()}, {rel: 0 for rel in self.LOOSE},
                          r.stdout + r.stderr)
@@ -1655,7 +1655,7 @@ class MinorFixTests(ProbeEnv):
         from swarm.board.autoinit import store_key
         from swarm.cli import load_config
         (self.home / "board").mkdir(mode=0o700)
-        self.config.write_text(f'[board]\nbackend = "sqlite"\n[sqlite]\npath = "{self.home}/board/b.sqlite3"\n')
+        self.config.write_text(f'[board]\nbackend = "sqlite"\n[sqlite]\npath = {tq(f"{self.home}/board/b.sqlite3")}\n')
         with mock.patch.dict(os.environ, {"HOME": str(self.home), "SWARM_CONFIG": str(self.config),
                                           "CLAUDE_SETTINGS": str(self.home / ".claude/settings.json"),
                                           "SWARM_NO_SYSTEMD": "1", "SWARM_AUTO_INIT": "1"}):
