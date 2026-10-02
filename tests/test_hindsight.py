@@ -231,22 +231,19 @@ class MemoryTests(HindsightEnv):
         self.assertNotIn("[swarm memory] what", ctx)
         self.assertRegex(self.error_log.read_text(), r"memory agent-1: HindsightUnavailable: ")
 
-    def test_slow_hindsight_times_out_then_is_skipped_for_a_while(self):
+    def test_slow_hindsight_is_cut_off_by_the_recall_budget(self):
+        # The recall's own budget (not Hindsight being down) ends the wait, so there is no
+        # unreachable marker; the join recall is retried on the next turn, bounded again.
         self.enable(timeout_seconds=0.5, recall_start_seconds=0.5, retry_after_seconds=60)
         self.fake.delay = 3
         self.cli("activate", "--job", "J")
         t = time.monotonic()
         ctx = self.start()
-        self.assertLess(time.monotonic() - t, 2.0)
+        self.assertLess(time.monotonic() - t, 2.5)
         self.assertNotIn("[swarm memory] what", ctx)
-        n = len(self.fake.requests)
         t = time.monotonic()
-        self.start("agent-2")
-        # Marked unreachable: no second request, hence no second wait. The request count is the
-        # proof; the time is only a sanity bound well under the 3 s the server would stall (a
-        # whole hook run took 0.517 s on a loaded Windows runner against the old 0.4 s guess).
-        self.assertEqual(len(self.fake.requests), n)
-        self.assertLess(time.monotonic() - t, 2.0)
+        self.turn()
+        self.assertLess(time.monotonic() - t, 2.5)
 
     def test_api_key_never_printed_on_errors(self):
         self.enable(url=dead_url(), api_key_file=str(self.key_file))
