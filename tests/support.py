@@ -71,6 +71,12 @@ _bootstrap.OLD_SPOOL = os.path.join(SANDBOX, "old-shared-spool")
 _VENV = None
 
 
+def tq(value) -> str:
+    """A TOML basic string for a path or text (backslashes and quotes escaped: Windows paths)."""
+    import json
+    return json.dumps(str(value))
+
+
 def temp_venv() -> Path:
     """A throwaway venv for the tests that need one (doctor's venv check, the launcher): its own
     dir with its own requirements stamp, sharing the interpreter that runs the suite (and its
@@ -149,7 +155,7 @@ class MemoryHarness:
         self.cfg = base_config()
         self.cfg["memory"] = {"store": store}
         self.store_name = store
-        self.toml = f'[memory]\nstore = "{store}"\n'
+        self.toml = f'[memory]\nstore = {tq(store)}\n'
 
     @classmethod
     def for_env(cls, tmp: Path, name: str) -> "MemoryHarness":
@@ -225,7 +231,7 @@ class FileHarness(MemoryHarness):
         self.root = Path(root or tempfile.mkdtemp(prefix="swarm-file-", dir=os.environ.get("TMPDIR")))
         self.cfg = base_config(backend="file")
         self.cfg["file"] = {"path": str(self.root / "board")}
-        self.toml = '[file]\npath = "%s"\n' % (self.root / "board")
+        self.toml = '[file]\npath = %s\n' % tq(self.root / "board")
         self.store = file.FileStore(file.board_dir(self.cfg))
 
     @classmethod
@@ -364,7 +370,7 @@ class SqliteHarness:
         self.path = self.dir / "board.sqlite3"
         self.cfg = base_config(backend="sqlite")
         self.cfg["sqlite"] = {"path": str(self.path), "busy_timeout_ms": 60000}
-        self.toml = f'[sqlite]\npath = "{self.path}"\n'
+        self.toml = f'[sqlite]\npath = {tq(self.path)}\n'
         self._unavailable = None
         self.conn = None
 

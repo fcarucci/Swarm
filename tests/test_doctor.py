@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import ROOT  # noqa: F401
+from support import ROOT, tq  # noqa: F401
 
 from swarm import bootstrap, paths  # noqa: E402
 
@@ -24,7 +24,7 @@ class DoctorTests(unittest.TestCase):
         self.cfg = self.home / ".config/swarm/config.toml"
         self.cfg.parent.mkdir(parents=True)
         self.cfg.write_text(f'[board]\nbackend = "sqlite"\nspool_dir = "~/.local/state/swarm/spool"\n'
-                            f'[sqlite]\npath = "{self.home}/b.sqlite3"\n')
+                            f'[sqlite]\npath = {tq(f"{self.home}/b.sqlite3")}\n')
         plugins = self.home / ".claude/plugins"; plugins.mkdir(parents=True)
         (plugins / "installed_plugins.json").write_text(json.dumps(
             {"version": 2, "plugins": {"swarm@swarm": [{"installPath": str(ROOT), "version": "0.9.0"}]}}))
@@ -285,8 +285,8 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(bootstrap._sandbox_probe([str(ok), str(locked)]), [str(locked)])
         self.assertEqual(list(ok.iterdir()), [])                      # the probe cleans up
         codex = self.home / ".codex"; codex.mkdir()
-        self.cfg.write_text(f'[board]\nbackend = "sqlite"\nspool_dir = "{self.home}/spool"\n'
-                            f'[sqlite]\npath = "{self.home}/b.sqlite3"\n[hook]\nmarker_dir = "{self.home}/markers"\n')
+        self.cfg.write_text(f'[board]\nbackend = "sqlite"\nspool_dir = {tq(f"{self.home}/spool")}\n'
+                            f'[sqlite]\npath = {tq(f"{self.home}/b.sqlite3")}\n[hook]\nmarker_dir = {tq(f"{self.home}/markers")}\n')
         with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex)}), \
                 mock.patch.object(bootstrap, "_codex_plugin_listed", return_value=True), \
                 mock.patch.object(bootstrap, "_sandbox_probe", return_value=[str(locked)]) as probe:
@@ -341,8 +341,8 @@ class ExposureDoctorTests(unittest.TestCase):
 
     def write_cfg(self, extra="", spool="~/.local/state/swarm/spool", board=None):
         board = board or f"{self.home}/.local/share/swarm-board/board.sqlite3"
-        self.cfg.write_text(f'[board]\nbackend = "sqlite"\nspool_dir = "{spool}"\n'
-                            f'[sqlite]\npath = "{board}"\n' + extra)
+        self.cfg.write_text(f'[board]\nbackend = "sqlite"\nspool_dir = {tq(spool)}\n'
+                            f'[sqlite]\npath = {tq(board)}\n' + extra)
 
     def roots(self, *roots, where="config.toml", table="sandbox_workspace_write", extra=""):
         body = extra + f"[{table}]\nwritable_roots = {json.dumps([str(r) for r in roots])}\n"

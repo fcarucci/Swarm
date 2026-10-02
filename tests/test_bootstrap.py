@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import ROOT  # noqa: F401
+from support import ROOT, tq  # noqa: F401
 
 from swarm import bootstrap, paths  # noqa: E402
 
@@ -25,7 +25,7 @@ class BootstrapTests(unittest.TestCase):
     def _sqlite_config(self):
         self.cfg.parent.mkdir(parents=True, exist_ok=True)
         self.cfg.write_text(f'[board]\nbackend = "sqlite"\nspool_dir = "~/.local/state/swarm/spool"\n'
-                            f'[sqlite]\npath = "{self.home}/b.sqlite3"\n')
+                            f'[sqlite]\npath = {tq(f"{self.home}/b.sqlite3")}\n')
 
     def test_launcher_written_and_points_at_this_plugin(self):
         step = bootstrap.ensure_launcher()
@@ -324,7 +324,7 @@ class NoticeAndStampSafetyTests(unittest.TestCase):
 
     def test_stamp_through_a_symlink_is_not_followed(self):
         cfg = self.home / ".config/swarm/config.toml"; cfg.parent.mkdir(parents=True)
-        cfg.write_text(f'[board]\nbackend = "sqlite"\n[sqlite]\npath = "{self.home}/b.sqlite3"\n')
+        cfg.write_text(f'[board]\nbackend = "sqlite"\n[sqlite]\npath = {tq(f"{self.home}/b.sqlite3")}\n')
         self.host.mkdir(parents=True, mode=0o700)
         target = self.home / "made-by-stamp"
         stamp = self.host / "bootstrap-claude-1-2"

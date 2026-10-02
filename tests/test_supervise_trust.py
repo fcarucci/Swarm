@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 from test_hooks_cli import Env
+from support import tq
 from test_supervise_runner import RunnerBase, fake
 from test_supervise_setup import FakeRun
 
@@ -99,8 +100,8 @@ class PrivateDirTests(Env):
 
     def test_a_private_dir_under_a_writable_root_is_refused(self):
         exposed = paths.share_dir()
-        self.config.write_text(self.config.read_text().replace(f'spool_dir = "{self.spool_dir}"',
-                                                               f'spool_dir = "{exposed}"'))
+        self.config.write_text(self.config.read_text().replace(f'spool_dir = {tq(self.spool_dir)}',
+                                                               f'spool_dir = {tq(exposed)}'))
         cfg = swarm.load_config(self.config)
         with self.assertRaises(st.PrivateDirError) as cm:
             st.ensure_private_dir(cfg)
@@ -613,8 +614,8 @@ class CodexExposureTests(Env):
 
     def test_a_swarm_writable_root_inside_the_share_tree_is_refused(self):
         exposed = paths.share_dir() / "venv"
-        self.config.write_text(self.config.read_text().replace(f'spool_dir = "{self.spool_dir}"',
-                                                               f'spool_dir = "{exposed}"'))
+        self.config.write_text(self.config.read_text().replace(f'spool_dir = {tq(self.spool_dir)}',
+                                                               f'spool_dir = {tq(exposed)}'))
         with self.assertRaises(st.PrivateDirError):
             st.ensure_private_dir(swarm.load_config(self.config))
 

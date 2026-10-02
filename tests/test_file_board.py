@@ -19,7 +19,7 @@ import time
 import unittest
 from pathlib import Path
 
-from support import SMALL_POOL, FileHarness, base_config  # noqa: F401  (sets sys.path)
+from support import SMALL_POOL, FileHarness, base_config, tq  # noqa: F401  (sets sys.path)
 
 from swarm import cli as swarm  # noqa: E402
 from swarm.board import BoardError, BoardUnavailable, open_board, setup_board  # noqa: E402
@@ -303,9 +303,9 @@ class FileBoardSandboxTests(unittest.TestCase):
         self.board_dir = self.tmp / "board"
         self.spool = self.tmp / "spool"
         self.config = self.tmp / "config.toml"
-        self.config.write_text(f'[board]\nbackend = "file"\nspool_dir = "{self.spool}"\n'
-                               f'[hook]\nmarker_dir = "{self.tmp / "markers"}"\n'
-                               f'[file]\npath = "{self.board_dir}"\n')
+        self.config.write_text(f'[board]\nbackend = "file"\nspool_dir = {tq(self.spool)}\n'
+                               f'[hook]\nmarker_dir = {tq(self.tmp / "markers")}\n'
+                               f'[file]\npath = {tq(self.board_dir)}\n')
         self.cfg = swarm.load_config(self.config)
         setup_board(self.cfg, SMALL_POOL)
         self.lock = self.board_dir / "lock"

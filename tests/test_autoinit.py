@@ -18,7 +18,7 @@ import uuid
 from pathlib import Path
 from unittest import mock
 
-from support import ROOT  # noqa: F401  (sets sys.path)
+from support import ROOT, tq  # noqa: F401  (sets sys.path)
 
 from swarm import cli as swarm  # noqa: E402
 from swarm import hooks as swarm_hooks  # noqa: E402
@@ -53,7 +53,7 @@ class AutoInitBase:
 
     def toml(self) -> str:
         return (f'[board]\nbackend = "{self.backend}"\nspool_dir = "{self.tmp / "spool"}"\n'
-                f'[hook]\nmarker_dir = "{self.markers}"\n')
+                f'[hook]\nmarker_dir = {tq(self.markers)}\n')
 
     def stamp(self) -> Path | None:
         return autoinit.stamp_path(self.cfg)
@@ -443,7 +443,7 @@ class MemoryAutoInitTests(AutoInitBase, unittest.TestCase):
         return cfg
 
     def toml(self) -> str:
-        return super().toml() + f'[memory]\nstore = "{self.store_name}"\n'
+        return super().toml() + f'[memory]\nstore = {tq(self.store_name)}\n'
 
     def drop_store(self) -> None:
         from swarm.board import memory
@@ -501,7 +501,7 @@ class SqliteAutoInitTests(AutoInitBase, unittest.TestCase):
         return cfg
 
     def toml(self) -> str:
-        return super().toml() + f'[sqlite]\npath = "{self.tmp / "db" / "board.sqlite3"}"\n'
+        return super().toml() + f'[sqlite]\npath = {tq(self.tmp / "db" / "board.sqlite3")}\n'
 
     def drop_store(self) -> None:
         for p in Path(self.cfg["sqlite"]["path"]).parent.glob("board.sqlite3*"):
@@ -577,7 +577,7 @@ class FileAutoInitTests(AutoInitBase, unittest.TestCase):
         return cfg
 
     def toml(self) -> str:
-        return super().toml() + f'[file]\npath = "{self.tmp / "board"}"\n'
+        return super().toml() + f'[file]\npath = {tq(self.tmp / "board")}\n'
 
     def drop_store(self) -> None:
         shutil.rmtree(self.cfg["file"]["path"])

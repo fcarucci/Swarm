@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import ROOT  # noqa: F401
+from support import ROOT, tq  # noqa: F401
 
 from swarm import bootstrap  # noqa: E402
 
@@ -117,7 +117,7 @@ class MigrateTests(unittest.TestCase):
         other = self.home / "elsewhere/active"; other.mkdir(parents=True)
         (other / "K.json").write_text('{"job": "K"}')                     # active under the other config only
         cfg = self.home / "alt.toml"
-        cfg.write_text(f'[board]\nbackend = "memory"\n[hook]\nmarker_dir = "{other}"\n')
+        cfg.write_text(f'[board]\nbackend = "memory"\n[hook]\nmarker_dir = {tq(other)}\n')
         with mock.patch.dict(os.environ, {"CLAUDE_SETTINGS": str(self.settings)}):
             rc, out, _ = self.cli("--config", str(cfg), "migrate")
         self.assertEqual(rc, 1)

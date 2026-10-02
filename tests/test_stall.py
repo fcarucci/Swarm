@@ -27,7 +27,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import BIN, E2E_BACKEND, HARNESSES, ROOT, PostgresHarness  # noqa: F401  (sets sys.path)
+from support import BIN, E2E_BACKEND, HARNESSES, ROOT, PostgresHarness, tq  # noqa: F401  (sets sys.path)
 
 from swarm import board as board_pkg  # noqa: E402
 from swarm import cli as swarm  # noqa: E402
@@ -209,7 +209,7 @@ class ReconnectTests(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp(prefix="swarm-stall-", dir=os.environ.get("TMPDIR")))
         self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
         config = tmp / "config.toml"   # its own spool dir: never the user's config or spool
-        config.write_text(f'[board]\nspool_dir = "{tmp / "spool"}"\n')
+        config.write_text(f'[board]\nspool_dir = {tq(tmp / "spool")}\n')
         with self.plan({"fail_on": ("job_status", 1)}):
             err = io.StringIO()
             with contextlib.redirect_stderr(err):

@@ -21,7 +21,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import E2E_BACKEND, HARNESSES, PostgresHarness  # noqa: F401  (sets sys.path)
+from support import E2E_BACKEND, HARNESSES, PostgresHarness, tq  # noqa: F401  (sets sys.path)
 
 from swarm import board as board_pkg  # noqa: E402
 from swarm import cli as swarm  # noqa: E402
@@ -236,7 +236,7 @@ class WatcherRoutingTests(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp(prefix="swarm-watchdb-", dir=os.environ.get("TMPDIR")))
         self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
         config = tmp / "config.toml"
-        config.write_text(f'[board]\nspool_dir = "{tmp / "spool"}"\n'
+        config.write_text(f'[board]\nspool_dir = {tq(tmp / "spool")}\n'
                           f'[watch_database]\nhost = "{self.WATCH_HOST}"\n')
         commands = (["status"], ["status", "--job", "J"], ["post", "--job", "J", "--as", self.name, "hi"],
                     ["read", "--job", "J", "--as", self.name], ["who", "--job", "J"], ["job", "J2"])
