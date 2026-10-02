@@ -277,6 +277,23 @@ class FileBoardChangeDetectionTests(unittest.TestCase):
             p.join(10)
             self.assertFalse(tail.wait_for_change(0.05))   # drained: a burst counts once
 
+    def test_the_first_post_creating_the_log_then_appending_is_one_change(self):
+        # The first post creates messages.jsonl empty and appends to it: two steps a poller in
+        # another process can see between (Windows CI did, ~7% of posts). Replay them in order.
+        log = Path(self.path) / "messages.jsonl"
+        with self.h.board() as tail:
+            tail.subscribe(messages_only=True)
+            log.unlink(missing_ok=True)
+            fd = os.open(log, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0))
+            try:
+                self.assertFalse(tail.wait_for_change(0.05))   # created, still empty: nothing yet
+                os.write(fd, b'{"id": 1}\n')
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            self.assertTrue(tail.wait_for_change(5))
+            self.assertFalse(tail.wait_for_change(0.3))   # one change, not two
+
     def test_an_agent_change_wakes_watch_but_not_tail(self):
         with self.h.board() as tail, self.h.board() as watch:
             tail.subscribe(messages_only=True)

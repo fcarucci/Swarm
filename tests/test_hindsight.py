@@ -237,8 +237,11 @@ class MemoryTests(HindsightEnv):
         n = len(self.fake.requests)
         t = time.monotonic()
         self.start("agent-2")
-        self.assertLess(time.monotonic() - t, 0.4)   # marked unreachable: no second wait
+        # Marked unreachable: no second request, hence no second wait. The request count is the
+        # proof; the time is only a sanity bound well under the 3 s the server would stall (a
+        # whole hook run took 0.517 s on a loaded Windows runner against the old 0.4 s guess).
         self.assertEqual(len(self.fake.requests), n)
+        self.assertLess(time.monotonic() - t, 2.0)
 
     def test_api_key_never_printed_on_errors(self):
         self.enable(url=dead_url(), api_key_file=str(self.key_file))

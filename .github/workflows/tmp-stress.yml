@@ -19,11 +19,7 @@ jobs:
       - run: pip install -r requirements.txt
       - name: signature sequence per post
         env: {SWARM_TEST_BACKEND: "${{ matrix.backend }}", PYTHONUTF8: "1"}
-        run: python tmpdiag/sigseq.py 300
+        run: python tmpdiag/sigseq.py 200
       - name: loop change-detection tests
         env: {SWARM_TEST_BACKEND: "${{ matrix.backend }}", PYTHONUTF8: "1"}
-        run: python tmpdiag/loop.py 250
-      - name: loop whole test_file_board
-        env: {SWARM_TEST_BACKEND: "${{ matrix.backend }}", PYTHONUTF8: "1"}
-        run: for i in 1 2 3 4 5 6 7 8; do python -B -m unittest -q test_file_board 2>&1 | tail -3 || true; done
-        working-directory: tests
+        run: python tmpdiag/loop.py 220

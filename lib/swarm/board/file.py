@@ -49,8 +49,9 @@ visible exactly when its transaction ends, after every message with a smaller id
 reader never skips one.
 
 Change detection (`watch`, `tail`): `wait_for_change` polls the (inode, mtime, size) of
-`messages.jsonl` (and of `state.json` unless messages_only) every POLL_SECONDS. Transactions that
-change nothing write nothing, so reads never wake watchers.
+`messages.jsonl` (and of `state.json` unless messages_only) every POLL_SECONDS; an empty
+`messages.jsonl` counts as absent, so the first post (create, then append) is one change.
+Transactions that change nothing write nothing, so reads never wake watchers.
 
 Scale: every transaction reads the state, and those that touch messages read all of them; a
 change rewrites the state. That is fine at the sizes the board has in practice (hundreds of
@@ -672,7 +673,10 @@ class FileStore(MemoryStore):
         for n in names:
             try:   # lstat relative to the directory: a planted link is not followed
                 st = compat.stat(n, dir_fd=self._dir_fd, follow_symlinks=False)
-                sig.append((st.st_ino, st.st_mtime_ns, st.st_size))
+                # a just-created, still empty messages.jsonl (the first post creates it, then
+                # appends: two steps another process can observe between) is no change yet
+                sig.append(None if n == _MESSAGES and st.st_size == 0
+                           else (st.st_ino, st.st_mtime_ns, st.st_size))
             except (FileNotFoundError, TypeError):
                 sig.append(None)
         return tuple(sig)

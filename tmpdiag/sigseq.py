@@ -19,6 +19,16 @@ def main(n):
                     seq.append((round((time.perf_counter()-t0)*1000,1), s)); last = s
                 time.sleep(0.001)
             p.join()
+            # second post: append to a NON-empty log
+            p = CTX.Process(target=t._post_once, args=(path,)); p.start()
+            seq2 = []; t0 = time.perf_counter()
+            while p.is_alive() or time.perf_counter() - t0 < 0.3:
+                s = st.signature(True)
+                if s != last:
+                    seq2.append((round((time.perf_counter()-t0)*1000,1), s)); last = s
+                time.sleep(0.001)
+            p.join()
+            if len(seq2) != 1: print("APPEND-NONEMPTY", i, seq2, flush=True)
         h.close()
         if len(seq) > 1:
             multi += 1
