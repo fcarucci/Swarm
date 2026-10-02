@@ -510,37 +510,11 @@ class SpoolTests(Env):
                 traceback.print_exc()   # a failure here names its frame in the CI log
                 errors.append(exc)
 
-        from swarm import compat
-        log, real_rename, real_unlink = [], compat.rename, compat.unlink   # TEMP diagnostics
-
-        def rename(src, dst, **kw):
-            try:
-                real_rename(src, dst, **kw)
-                log.append((threading.get_ident() % 1000, "rename-ok", src[:8], dst[-14:]))
-            except BaseException as exc:
-                log.append((threading.get_ident() % 1000, "rename-" + type(exc).__name__, src[:8], dst[-14:]))
-                raise
-
-        def unlink(path, **kw):
-            try:
-                real_unlink(path, **kw)
-                log.append((threading.get_ident() % 1000, "unlink-ok", path[:8]))
-            except BaseException as exc:
-                log.append((threading.get_ident() % 1000, "unlink-" + type(exc).__name__, path[:8]))
-                raise
-
-        compat.rename, compat.unlink = rename, unlink
         threads = [threading.Thread(target=flusher) for _ in range(6)]
         for t in threads:
             t.start()
         for t in threads:
             t.join(30)
-        compat.rename, compat.unlink = real_rename, real_unlink
-        if errors:
-            bad = {e[1] for e in log if e[1].startswith("unlink-File")}
-            for e in log:
-                if e[2] in {x[2] for x in log if x[1].startswith("unlink-File")}:
-                    print("DIAG", e)
         self.assertEqual(errors, [])
         self.assertEqual(sum(counts), n)
         with self.board() as b:
