@@ -221,7 +221,11 @@ class MemoryTests(HindsightEnv):
         self.cli("activate", "--job", "J")
         t = time.monotonic()
         ctx = self.start()
-        self.assertLess(time.monotonic() - t, 1.5)
+        # Quick = bounded by the hook's recall budget, not hung. Windows takes ~1-2 s to refuse a
+        # loopback connection (SYN retries; the 1 s timeout cuts that) plus the hook itself, which
+        # made the old 1.5 s guess flaky there (2.14 s seen on windows-latest).
+        from swarm import hooks
+        self.assertLess(time.monotonic() - t, hooks.HOOK_RECALL_SECONDS + 1.5)
         self.assertIn("[swarm roster]", ctx)
         self.assertNotIn("[swarm memory] what", ctx)
         self.assertRegex(self.error_log.read_text(), r"memory agent-1: HindsightUnavailable: ")
