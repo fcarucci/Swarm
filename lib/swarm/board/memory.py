@@ -20,6 +20,7 @@ rows in `MemoryStore.agents` / `.jobs` / `.messages`, which tests may backdate d
 """
 from __future__ import annotations
 
+import copy
 import datetime as _dt
 import getpass
 import os
@@ -27,7 +28,7 @@ import random
 import threading
 from typing import Mapping, Sequence
 
-from .base import (MOVED_PREFIX, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, AUTO_CLOSE_BLOCKING, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, Restart,
+from .base import (LEFT_PAUSED, MOVED_PREFIX, PauseRecord, build_manifest, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, AUTO_CLOSE_BLOCKING, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, Restart,
                    ROUTE_STATES, TOOL_NAME_MAX, AgentEvent, AgentStatus, Board, BoardError, BoardUnavailable, JobStatus, Member, Message,
                    OwedReply, ReadResult, Route, SCHEMA_VERSION, SetupResult, SpawnGrant, SyncState, TRANSCRIPT_ROLES,
                    TranscriptImage, TranscriptRow, TranscriptSummary, VERDICTS,
@@ -69,6 +70,8 @@ class MemoryStore:
         self.next_id = 1
         self.restarts: list[dict] = []         # supervisor restarts (Board.record_restart), by id
         self.next_restart_id = 1
+        self.pauses: list[dict] = []           # job pauses (Board.pause_job), by id
+        self.next_pause_id = 1
         self.schema_version: int | None = None  # set by setup (the version a real store records)
         self.msg_version = 0                   # bumped on every new message
         self.state_version = 0                 # bumped on every agent/job change
@@ -133,7 +136,7 @@ def reset_store(name: str = "default") -> MemoryStore:
         fresh = MemoryStore()
         for attr in ("available", "pool", "jobs", "agents", "messages", "routes", "transcripts",
                      "transcript_bodies", "image_bodies", "next_id", "schema_version",
-                     "restarts", "next_restart_id", "memory_refs"):
+                     "restarts", "next_restart_id", "memory_refs", "pauses", "next_pause_id"):
             setattr(store, attr, getattr(fresh, attr))
         store.touch(messages=True)
     return store
@@ -144,9 +147,15 @@ _NO_VERDICT = {"verdict": None, "verdict_reason": None, "verdict_next": None, "v
 
 # ---- purge steps (store lock held; each returns whether it changed anything) -----------
 
+def _paused_jobs(s: MemoryStore) -> set:
+    """A paused job keeps its messages and departed agents however old (resume needs them)."""
+    return {job for job, j in s.jobs.items() if j["status"] == "paused"}
+
+
 def _purge_messages(s: MemoryStore, keep: _dt.datetime) -> bool:
     before = len(s.messages)
-    s.messages = [m for m in s.messages if m["created_at"] >= keep]
+    paused = _paused_jobs(s)
+    s.messages = [m for m in s.messages if m["created_at"] >= keep or m["job"] in paused]
     return len(s.messages) != before
 
 
@@ -165,7 +174,8 @@ def _drop_agents(s: MemoryStore, doomed) -> bool:
 
 
 def _drop_departed(s: MemoryStore, keep: _dt.datetime) -> bool:
-    return _drop_agents(s, lambda a: a["left_at"] is not None and a["left_at"] < keep)
+    paused = _paused_jobs(s)
+    return _drop_agents(s, lambda a: a["left_at"] is not None and a["left_at"] < keep and a["job"] not in paused)
 
 
 def _drop_old_restarts(s: MemoryStore, keep: _dt.datetime) -> bool:
@@ -185,7 +195,8 @@ def _drop_quiet_jobs(s: MemoryStore, keep: _dt.datetime) -> bool:
     """Jobs past retention with no messages and no active agents go, with their departed agents."""
     busy = {m["job"] for m in s.messages} | {a["job"] for a in s.agents.values() if a["left_at"] is None}
     doomed = [job for job, j in s.jobs.items()
-              if (j["finished_at"] or j["activated_at"] or j["created_at"]) < keep and job not in busy]
+              if (j["finished_at"] or j["activated_at"] or j["created_at"]) < keep and job not in busy
+              and j["status"] != "paused"]
     for job in doomed:
         del s.jobs[job]
     _drop_agents(s, lambda a: a["job"] in doomed)
@@ -419,7 +430,7 @@ class MemoryBoard(Board):
             if not self._name_held(candidate):
                 return candidate
 
-    def allocate_name(self, agent_key: str, job: str, role: str | None = None) -> str:
+    def _allocate_name(self, agent_key: str, job: str, role: str | None = None) -> str:
         s = self._s()
         self.purge()
         self.ensure_job(job)
@@ -723,6 +734,88 @@ class MemoryBoard(Board):
                 **_SYNC_DEFAULTS}
             s.touch()
             return old["name"]
+
+    # ---- pause / resume ------------------------------------------------------------------
+
+    @staticmethod
+    def _pause_record(p: dict) -> PauseRecord:
+        return PauseRecord(id=p["id"], job=p["job"], paused_at=p["paused_at"], paused_by=p["paused_by"],
+                           reason=p["reason"], manifest=copy.deepcopy(p["manifest"]),
+                           resumed_at=p["resumed_at"], resumed_by=p["resumed_by"],
+                           resumed_host=p["resumed_host"], outcome=copy.deepcopy(p["outcome"]))
+
+    def _open_pause(self, job: str) -> dict | None:
+        return next((p for p in reversed(self._store.pauses) if p["job"] == job and p["resumed_at"] is None),
+                    None)
+
+    def pause_job(self, job: str, by: str | None, reason: str | None,
+                  cwds: Mapping[str, str] | None = None) -> PauseRecord | None:
+        s = self._s()
+        with s.lock:
+            j = s.jobs.get(job)
+            if j is None:
+                return None
+            if j["status"] == "paused":
+                p = self._open_pause(job)
+                return self._pause_record(p) if p else None
+            if j["status"] != "active":
+                return None
+            now = self.now()
+            rows = []
+            for a in s.agents.values():
+                if a["job"] != job or a["left_at"] is not None:
+                    continue
+                t = s.transcripts.get(transcript_key(job, a["agent_key"]))
+                rows.append({**a, "status": self._derived(a, now),
+                             "session_id": (s.routes.get(a["agent_key"]) or {}).get("session_id"),
+                             "orchestrator": bool(t and t["role"] == "orchestrator")})
+            last = max((m["id"] for m in self._messages_of(job)), default=0)
+            manifest = build_manifest(job, now, by, reason, j, rows, last, cwds)
+            for a in s.agents.values():
+                if a["job"] == job and a["left_at"] is None:
+                    a.update(left_at=now, state="left", left_reason=LEFT_PAUSED, current_tool=None,
+                             tool_started_at=None)
+            j["status"] = "paused"
+            p = {"id": s.next_pause_id, "job": job, "paused_at": now, "paused_by": by, "reason": reason,
+                 "manifest": manifest, "resumed_at": None, "resumed_by": None, "resumed_host": None,
+                 "outcome": None}
+            s.next_pause_id += 1
+            s.pauses.append(p)
+            s.touch()
+            return self._pause_record(p)
+
+    def open_pause(self, job: str) -> PauseRecord | None:
+        s = self._s()
+        with s.lock:
+            p = self._open_pause(job)
+            return self._pause_record(p) if p else None
+
+    def pauses(self, job: str) -> list[PauseRecord]:
+        s = self._s()
+        with s.lock:
+            return [self._pause_record(p) for p in s.pauses if p["job"] == job]
+
+    def begin_resume(self, job: str, pause_id: int, by: str | None, host: str | None) -> bool:
+        s = self._s()
+        with s.lock:
+            j = s.jobs.get(job)
+            p = next((p for p in s.pauses if p["id"] == pause_id and p["job"] == job), None)
+            if j is None or j["status"] != "paused" or p is None or p["resumed_at"] is not None:
+                return False
+            j["status"] = "active"
+            p.update(resumed_at=self.now(), resumed_by=by, resumed_host=host)
+            s.touch()
+            return True
+
+    def record_resume_outcome(self, pause_id: int, outcome: dict) -> bool:
+        s = self._s()
+        with s.lock:
+            p = next((p for p in s.pauses if p["id"] == pause_id), None)
+            if p is None:
+                return False
+            p["outcome"] = copy.deepcopy(outcome)
+            s.touch()
+            return True
 
     def set_job_supervise(self, job: str, on: bool) -> bool:
         s = self._s()

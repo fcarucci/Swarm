@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
+import os
 
 # Session and thread ids are UUIDs on both hosts. A board-supplied id is only ever compared
 # with this (fullmatch) and then used as an exact file name: never as a glob or a path.
@@ -14,6 +15,11 @@ SESSION_ID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-
 
 def valid_session_id(value) -> bool:
     return isinstance(value, str) and SESSION_ID.fullmatch(value) is not None
+
+
+class ResumeUnsupported(Exception):
+    """This agent can't be resumed from its stored transcript on this host (the message says why:
+    a documented limit); the caller starts a briefed fresh agent instead."""
 
 
 @dataclass(frozen=True)
@@ -95,6 +101,27 @@ class Host:
     def find_agent_transcript(self, main: Path | None, agent_id: str) -> Path | None:
         raise NotImplementedError
 
+    # -- pause/resume (swarm.hosts.resume drives these) ---------------------------------------
+    native_resume = False   # can start the agent from a stored transcript (else: digest only)
+
+    def session_text(self, text: str, *, session_id: str, cwd: str) -> tuple[str, bool]:
+        """The stored (redacted) transcript `text` rewritten as a top-level session of this host
+        under `session_id` and `cwd`; (new text, whether a swarm-truncated gap was seen)."""
+        raise NotImplementedError
+
+    def write_session(self, text: str, *, session_id: str, cwd: str, root=None) -> Path:
+        """Write a session_text result where this host's resume looks for it; the new file's path.
+        Never overwrites: an existing file is an error."""
+        raise NotImplementedError
+
+    def resume_argv(self, cfg: dict, *, session_id: str, model: str | None) -> list[str]:
+        """The non-interactive command that continues the written session; the prompt goes on stdin."""
+        raise NotImplementedError
+
+    def session_from_output(self, stdout: str) -> str | None:
+        """The session id of a finished resume run, where the host reports one (else None)."""
+        return None
+
     def cli_session_id(self, env: Mapping[str, str]) -> str | None:
         return None
 
@@ -111,3 +138,13 @@ class Host:
         Claude applies updatedInput without a permissionDecision (hooks.md, PreToolUse decision
         control), and adding "allow" would also skip its permission prompt, so it is left out."""
         return {"updatedInput": new_input}
+
+
+def write_new_file(path: Path, text: str) -> Path:
+    """Create `path` (parents too, 0700) with `text`, mode 0600: exclusive and not through a
+    symlink, so a stored transcript never overwrites or follows anything already there."""
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text if text.endswith("\n") or not text else text + "\n")
+    return path

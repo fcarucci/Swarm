@@ -63,7 +63,7 @@ MEMORY_SEEN_MAX = 500   # memory ids remembered per agent as "already shown" (ne
 
 AGENT_STATES = ("started", "running", "completed", "left", "dead")   # stored lifecycle state
 AGENT_STATUSES = ("started", "running", "idle", "dead", "completed", "left")  # derived
-JOB_STATUSES = ("active", "completed", "cancelled", "failed")
+JOB_STATUSES = ("active", "paused", "completed", "cancelled", "failed")
 CLOSED_JOB_STATUSES = ("completed", "cancelled", "failed")
 TOOL_NAME_MAX = 80   # current_tool is stored truncated to this many characters
 # How far the hooks got routing a subagent to a job (see Route): the tag in its spawn prompt was
@@ -99,8 +99,9 @@ RESTART_OUTCOMES = ("running", "completed", "timeout", "max_turns", "failed", "n
 # memory_refs.agent_name, image keys through transcript_images), 9 transcripts.capture_failed
 # (a final capture that kept failing: the row is an audit marker without a body),
 # 10 jobs.verdict_next (the judge's instructions with a not_met verdict), 11 jobs.max_hours (a
-# job's own stall limit, in hours) and jobs.waiting_until (when a bounded `swarm wait --for` expires).
-SCHEMA_VERSION = 11
+# job's own stall limit, in hours) and jobs.waiting_until (when a bounded `swarm wait --for` expires),
+# 12 jobs.status 'paused' and the job_pauses table (pause/resume manifests).
+SCHEMA_VERSION = 12
 
 # A moved agent's roster_seen holds MOVED_PREFIX + the job it came from until its next PreToolUse
 # turn tells it (no schema change: the hooks own the text, and it never parses as a snapshot).
@@ -253,6 +254,78 @@ class IncompatibleStorage(BoardError):
 
     `str()` is the complete human-readable explanation; the CLI prints "ERROR: <str>" to stderr
     and exits 1."""
+
+
+# Pause/resume (schema 12). A paused job refuses new joins and posts (JobPaused) until it is
+# resumed; PAUSE_WRITER is the name the pause/resume notices are posted under (the one writer
+# allowed to post to a paused job), LEFT_PAUSED the left_reason of the agents a pause closed.
+PAUSE_WRITER = "swarm-pause"
+LEFT_PAUSED = "paused"
+MANIFEST_VERSION = 1
+
+
+class JobPaused(BoardError):
+    """The job is paused: no agent may join it and nobody may post to it until `swarm resume`."""
+
+    def __init__(self, job: str, paused_at=None, paused_by: str | None = None, reason: str | None = None):
+        self.job, self.paused_at, self.paused_by, self.reason = job, paused_at, paused_by, reason
+        since = f" since {paused_at.strftime('%Y-%m-%d %H:%M UTC')}" if paused_at else ""
+        by = f" by {paused_by}" if paused_by else ""
+        why = f": {reason}" if reason else ""
+        super().__init__(f"job {job} is paused{since}{by}{why}. Nothing can join or post until it is "
+                         f"resumed: swarm resume --job {job}")
+
+
+@dataclass(frozen=True)
+class PauseRecord:
+    """One pause of a job (a job_pauses row). manifest: the resume manifest (version
+    MANIFEST_VERSION, see swarm.pause): {"version", "job", "paused_at", "paused_by", "reason",
+    "job_state": {...}, "agents": [{agent_key, agent_name, role, kind, host, os_user, harness,
+    model, session_id, cursor, tool_calls, last_tool, turn_ended_at, last_seen, status_at_pause,
+    judge, verifier, resume_of}]}. resumed_at None: still paused. outcome: what resume did per
+    agent ({agent_key: {"status": ..., ...}}), None until a resume recorded something."""
+    id: int
+    job: str
+    paused_at: _dt.datetime
+    paused_by: str | None
+    reason: str | None
+    manifest: dict
+    resumed_at: _dt.datetime | None = None
+    resumed_by: str | None = None
+    resumed_host: str | None = None
+    outcome: dict | None = None
+
+
+def build_manifest(job: str, paused_at: _dt.datetime, by: str | None, reason: str | None,
+                   job_row: Mapping, agents: Sequence[Mapping], last_message_id: int,
+                   cwds: Mapping[str, str] | None = None) -> dict:
+    """The resume manifest of PauseRecord, from plain rows (every backend's pause_job uses this).
+    `job_row`: goal, task, description, project, verdict, waiting_on, max_hours. `agents`: one
+    mapping per active agent with agent_key, name, role, host, os_user, harness, model, session_id,
+    last_read_id, tool_calls, current_tool, turn_ended_at, last_seen, status, judge, verifier,
+    resume_of, orchestrator (bool). Only board metadata goes in: no transcript text, no secrets."""
+    def iso(v):
+        return v.isoformat() if isinstance(v, _dt.datetime) else v
+    cwds = cwds or {}
+    return {
+        "version": MANIFEST_VERSION, "job": job, "paused_at": iso(paused_at), "paused_by": by,
+        "reason": reason,
+        "job_state": {k: job_row.get(k) for k in ("goal", "task", "description", "project", "verdict",
+                                                  "waiting_on", "max_hours")}
+                     | {"last_message_id": last_message_id},
+        "agents": [
+            {"agent_key": a["agent_key"], "agent_name": a["name"], "role": a.get("role"),
+             "kind": "orchestrator" if a.get("orchestrator") else "subagent",
+             "host": a.get("host"), "os_user": a.get("os_user"), "harness": a.get("harness"),
+             "model": a.get("model"), "session_id": a.get("session_id"),
+             "cursor": int(a.get("last_read_id") or 0), "cwd": cwds.get(a["agent_key"]),
+             "task": job_row.get("task"), "tool_calls": int(a.get("tool_calls") or 0),
+             "last_tool": a.get("current_tool"), "turn_ended_at": iso(a.get("turn_ended_at")),
+             "last_seen": iso(a.get("last_seen")), "status_at_pause": a.get("status"),
+             "judge": bool(a.get("judge")), "verifier": bool(a.get("verifier")),
+             "resume_of": a.get("resume_of")}
+            for a in agents],
+    }
 
 
 def decompress_capped(body: bytes, cap: int = EXCERPT_MAX_RAW, what: str = "excerpt") -> bytes:
@@ -846,6 +919,7 @@ WRITE_METHODS = (
     "record_silence_nudge", "record_reply_reminder", "post", "read_unread", "read_new",
     "save_transcript", "refresh_transcript", "mark_capture_failed", "rotate_transcripts",
     "save_memory_ref", "mark_memory_refs_checked", "delete_memory_refs",
+    "pause_job", "begin_resume", "record_resume_outcome",
 )
 _CURSOR_READS = {"read_unread": 3, "read_new": 3}   # method -> index of `advance` in *args
 
@@ -1133,8 +1207,28 @@ class Board(abc.ABC):
 
     # ---- agents --------------------------------------------------------------------
 
-    @abc.abstractmethod
     def allocate_name(self, agent_key: str, job: str, role: str | None = None) -> str:
+        """Join: `_allocate_name`, refused with JobPaused while the job is paused (nobody joins,
+        or is revived into, a paused job; `swarm resume` re-enrols the paused agents itself, through
+        claim_resume). The check and the join are two steps: an agent racing a pause can end up
+        active on the paused job; its next hook turn is denied by the pause notice."""
+        self.require_unpaused(job)
+        return self._allocate_name(agent_key, job, role)
+
+    def job_state(self, job: str) -> str | None:
+        """The job's stored status (JOB_STATUSES), None if there is no such job."""
+        js = self.job_status(job)
+        return js.status if js else None
+
+    def require_unpaused(self, job: str) -> None:
+        """Raise JobPaused (with who/when/why) if the job is paused."""
+        if self.job_state(job) == "paused":
+            rec = self.open_pause(job)
+            raise JobPaused(job, rec.paused_at if rec else None, rec.paused_by if rec else None,
+                            rec.reason if rec else None)
+
+    @abc.abstractmethod
+    def _allocate_name(self, agent_key: str, job: str, role: str | None = None) -> str:
         """Give `agent_key` a name on `job` and return it. Idempotent per agent_key.
 
         Runs purge() first, then ensure_job(job). Then:
@@ -1350,6 +1444,42 @@ class Board(abc.ABC):
         an agent_key already active on `job` returns its name. Atomic against concurrent
         allocate_name/claim_resume (Postgres: the partial unique index on active names)."""
 
+    # ---- pause / resume (schema 12; swarm.pause is the only caller) ------------------
+
+    @abc.abstractmethod
+    def pause_job(self, job: str, by: str | None, reason: str | None,
+                  cwds: Mapping[str, str] | None = None) -> PauseRecord | None:
+        """Pause an ACTIVE job, atomically: jobs.status = 'paused'; the manifest (MANIFEST_VERSION,
+        see PauseRecord) is built from the job and its active agents; every active agent is
+        closed (left_at now, state left, left_reason LEFT_PAUSED, current tool cleared: its name
+        is free but only claim_resume can take it, joins are refused); a job_pauses row is
+        inserted (paused_at now, paused_by = by, reason) and returned. The job's waiting state is
+        kept. An already paused job: returns its open PauseRecord, changes nothing. None if the
+        job does not exist or is closed (completed, cancelled, failed). `cwds` maps agent_key to
+        the agent's working directory where the caller knows it (manifest "cwd", else None).
+        A manifest agent's `kind` is "orchestrator" when its transcript row is the orchestrator's,
+        else "subagent" (build_manifest does the shaping for every backend)."""
+
+    @abc.abstractmethod
+    def open_pause(self, job: str) -> PauseRecord | None:
+        """The pause that has not been resumed (resumed_at None) of a paused job; else None."""
+
+    @abc.abstractmethod
+    def pauses(self, job: str) -> list[PauseRecord]:
+        """Every pause of the job, oldest first."""
+
+    @abc.abstractmethod
+    def begin_resume(self, job: str, pause_id: int, by: str | None, host: str | None) -> bool:
+        """Atomically reopen: only if the job is 'paused' and pause `pause_id` is its open pause:
+        jobs.status = 'active', activated_at kept, the pause row gets resumed_at now, resumed_by,
+        resumed_host. Goal, verdict, waiting_on and the rest of the job are untouched. False (and
+        nothing changed) otherwise, e.g. a second resume at the same time."""
+
+    @abc.abstractmethod
+    def record_resume_outcome(self, pause_id: int, outcome: dict) -> bool:
+        """Store `outcome` (JSON-able: {agent_key: {"status": ..., ...}}) on the pause row,
+        replacing the previous one. False if there is no such row."""
+
     @abc.abstractmethod
     def set_job_supervise(self, job: str, on: bool) -> bool:
         """jobs.supervise = on (the per-job kill switch). False if the job doesn't exist."""
@@ -1468,6 +1598,8 @@ class Board(abc.ABC):
         text, truncated = normalize_message(message, int(self.board_cfg["message_max_chars"]))
         if not text:
             raise ValueError("empty message")
+        if name != PAUSE_WRITER:
+            self.require_unpaused(job)
         return PostResult(self._insert_message(job, name, text, to, agent_key), truncated)
 
     @abc.abstractmethod

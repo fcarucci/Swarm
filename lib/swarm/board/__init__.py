@@ -16,7 +16,7 @@ from typing import Mapping, Sequence
 
 from .base import (AUTO_CLOSED_BY, RESTART_OUTCOMES, STUCK_PREFIX, STUCK_REASONS, AutoClosed, Restart, AGENT_STATES, AGENT_STATUSES, CLOSED_JOB_STATUSES, DATA_DIR,  # noqa: F401
                    EXCERPT_MAX_RAW, TRANSCRIPT_MAX_RAW, JOB_STATUSES, MEMORY_SEEN_MAX, MEMORY_REF_IMAGE_BYTES_MAX, MEMORY_REF_IMAGES_MAX, MemoryRef, NAME_SOURCES, TOOL_NAME_MAX, AgentEvent,
-                   AgentStatus, Board, BoardError, BoardUnavailable, IncompatibleStorage, ReadOnlyBoard,
+                   AgentStatus, Board, BoardError, JobPaused, PauseRecord, PAUSE_WRITER, LEFT_PAUSED, MANIFEST_VERSION, build_manifest, BoardUnavailable, IncompatibleStorage, ReadOnlyBoard,
                    JobStatus, Member, Message, OwedReply, PostResult, ReadResult, ROUTE_STATES, SCHEMA_VERSION,
                    Route, RosterEntry, database_hosts, SetupResult, SpawnGrant, SyncState, TRANSCRIPT_ROLES, TranscriptImage, TranscriptRow, TranscriptSummary, TranscriptTotals,
                    VERDICTS, derive_agent_status,
@@ -99,7 +99,7 @@ def ensure_initialized(cfg: dict, timeout: float = 60.0,
 __all__ = [
     "ensure_initialized", "SCHEMA_VERSION",
     "open_board", "open_read_only", "setup_board", "backend_class", "board_backend", "DEFAULT_BACKEND", "BACKENDS",
-    "Board", "BoardError", "BoardUnavailable", "IncompatibleStorage", "ReadOnlyBoard",
+    "Board", "BoardError", "JobPaused", "PauseRecord", "PAUSE_WRITER", "LEFT_PAUSED", "MANIFEST_VERSION", "build_manifest", "BoardUnavailable", "IncompatibleStorage", "ReadOnlyBoard",
     "Message", "PostResult", "SetupResult", "AgentStatus", "JobStatus", "AgentEvent",
     "ReadResult", "RosterEntry", "OwedReply", "SyncState", "Member", "Route", "MEMORY_SEEN_MAX",
     "derive_agent_status", "derive_job_status", "normalize_message", "load_name_pool", "SpawnGrant",

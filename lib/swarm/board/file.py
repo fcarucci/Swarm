@@ -576,6 +576,8 @@ class FileStore(MemoryStore):
         self.routes = state.get("routes") or {}
         self.restarts = state.get("restarts") or []
         self.next_restart_id = int(state.get("next_restart_id") or 1)
+        self.pauses = state.get("pauses") or []
+        self.next_pause_id = int(state.get("next_pause_id") or 1)
         self._next_id = state.get("next_id", 1)
         self._messages = None
         self._transcripts = None
@@ -615,7 +617,8 @@ class FileStore(MemoryStore):
     def _state_doc(self, with_next_id: bool = True) -> str:
         doc = {"format": FORMAT, "next_id": self._next_id, "pool": self.pool,
                "jobs": self.jobs, "agents": self.agents, "routes": self.routes,
-               "restarts": self.restarts, "next_restart_id": self.next_restart_id}
+               "restarts": self.restarts, "next_restart_id": self.next_restart_id,
+               "pauses": self.pauses, "next_pause_id": self.next_pause_id}
         if not with_next_id:   # loading the messages may raise it: not a change
             del doc["next_id"]
         return dumps(doc)

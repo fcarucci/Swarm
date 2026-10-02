@@ -315,6 +315,7 @@ def _own_rollout(payload: dict, agent_id: str) -> Path | None:
 
 
 class CodexHost(Host):
+    native_resume = True   # EXPERIMENTAL, see session_text; resume.restore uses a digest unless asked
     name = "codex"
     spawn_tools = ("spawn_agent",)
     followup_tools = ("followup_task", "send_input")   # V2, V1
@@ -433,3 +434,64 @@ class CodexHost(Host):
         shape fails the hook run and the call proceeds unchanged (Codex hooks docs, PreToolUse).
         For a local function tool such as spawn_agent it is the complete arguments object."""
         return {"permissionDecision": "allow", "updatedInput": new_input}
+
+    # -- pause/resume ----------------------------------------------------------------------
+    # `codex exec resume <thread-uuid> [PROMPT|-]` continues the rollout it finds under
+    # $CODEX_HOME/sessions/Y/M/D/rollout-<ts>-<uuid>.jsonl. Writing a stored rollout there is NOT
+    # verified against a live Codex here (no codex on this box; the format is documented as not a
+    # stable interface, and 0.157's thread_history sqlite may index threads), so resume.restore
+    # defaults Codex to the digest mode (a recap prompt in a fresh `codex exec`) and uses this
+    # only when asked (native="codex"). Not possible: a Codex subagent's own thread tree, and
+    # MultiAgentV2 spawn messages (encrypted in the rollout: they come back as opaque items).
+
+    def session_text(self, text: str, *, session_id: str, cwd: str) -> tuple[str, bool]:
+        out: list[str] = []
+        truncated = False
+        meta_seen = False
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(e, dict):
+                continue
+            if e.get("type") == "swarm-truncated":
+                truncated = True
+                continue
+            if e.get("type") == "session_meta":
+                if meta_seen:
+                    continue            # a forked child repeats its parent's meta
+                meta_seen = True
+                pl = e.get("payload") if isinstance(e.get("payload"), dict) else {}
+                for k in [k for k in pl if "fork" in k or "parent" in k]:
+                    pl.pop(k)
+                pl.update({"id": session_id, "cwd": cwd, "source": "exec"})
+                if "session_id" in pl:
+                    pl["session_id"] = session_id
+                e["payload"] = pl
+            out.append(json.dumps(e, ensure_ascii=False, separators=(",", ":")))
+        if not meta_seen:
+            raise ValueError("no session_meta line: not a Codex rollout")
+        return "\n".join(out), truncated
+
+    def write_session(self, text: str, *, session_id: str, cwd: str, root=None) -> Path:
+        import datetime as dt
+        from .base import write_new_file
+        if not THREAD_ID.fullmatch(session_id or ""):
+            raise ValueError("thread id must be a UUID")
+        now = dt.datetime.now()
+        name = f"rollout-{now.strftime('%Y-%m-%dT%H-%M-%S')}-{session_id}.jsonl"
+        return write_new_file((Path(root) if root else codex_home()) / "sessions" / now.strftime("%Y/%m/%d") / name, text)
+
+    def resume_argv(self, cfg: dict, *, session_id: str, model: str | None) -> list[str]:
+        from swarm.supervisor.launch import check_safe
+        from swarm.supervisor.settings import settings
+        s = settings(cfg)
+        argv = [s["codex_bin"], "exec", "resume", "--json", "--skip-git-repo-check"]
+        if model:
+            argv += ["-m", model]
+        argv += ["-c", 'sandbox_mode="workspace-write"', session_id, "-"]
+        check_safe(argv)
+        return argv

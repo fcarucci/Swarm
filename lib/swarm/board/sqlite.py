@@ -63,7 +63,7 @@ import time
 from pathlib import Path
 from typing import Iterator, Mapping, Sequence
 
-from .base import (MOVED_PREFIX, NAME_MAX, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, AUTO_CLOSE_BLOCKING, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, Restart,
+from .base import (LEFT_PAUSED, MOVED_PREFIX, PauseRecord, build_manifest, NAME_MAX, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, AUTO_CLOSE_BLOCKING, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, Restart,
                    ROUTE_STATES, TOOL_NAME_MAX, AgentEvent, AgentStatus, Board, BoardError, BoardUnavailable, JobStatus, Member, Message, ReadOnlyBoard, refuse_writes,
                    OwedReply, ReadResult, Route, RosterEntry, SCHEMA_VERSION, SetupResult, SpawnGrant, SyncState,
                    TRANSCRIPT_ROLES, TranscriptImage, TranscriptRow, TranscriptSummary, VERDICTS,
@@ -88,7 +88,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     created_at        TEXT NOT NULL,
     task              TEXT,
     status            TEXT NOT NULL DEFAULT 'active'
-                      CHECK (status IN ('active', 'completed', 'cancelled', 'failed')),
+                      CHECK (status IN ('active', 'paused', 'completed', 'cancelled', 'failed')),
     outcome           TEXT,
     session_id        TEXT,
     activated_at      TEXT,
@@ -244,6 +244,20 @@ CREATE TABLE IF NOT EXISTS restarts (
 );
 CREATE INDEX IF NOT EXISTS restarts_job ON restarts (job, agent_key);
 CREATE INDEX IF NOT EXISTS restarts_host_at ON restarts (host, os_user, at);
+-- Pause/resume (schema version 12): one row per pause of a job, with its resume manifest (JSON).
+CREATE TABLE IF NOT EXISTS job_pauses (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    job          TEXT NOT NULL,
+    paused_at    TEXT NOT NULL,
+    paused_by    TEXT,
+    reason       TEXT,
+    manifest     TEXT NOT NULL,
+    resumed_at   TEXT,
+    resumed_by   TEXT,
+    resumed_host TEXT,
+    outcome      TEXT
+);
+CREATE INDEX IF NOT EXISTS job_pauses_job ON job_pauses (job, id);
 -- Change counters for watch/tail (see the module docstring).
 CREATE TABLE IF NOT EXISTS board_changes (kind TEXT PRIMARY KEY, n INTEGER NOT NULL DEFAULT 0);
 INSERT OR IGNORE INTO board_changes (kind) VALUES ('messages'), ('state');
@@ -398,6 +412,44 @@ def _drop_writer_check(conn: sqlite3.Connection) -> None:
         raise
 
 
+def _allow_paused(conn: sqlite3.Connection) -> None:
+    """Schema 12: jobs.status may be 'paused'. SQLite can't alter a CHECK, so an older jobs table is
+    rebuilt by the documented procedure: foreign keys OFF (dropping the table with them on would
+    cascade-delete every agent and message), then in one transaction a new table with the widened
+    CHECK, copy, drop, rename, and the table's triggers again. Only when the stored CREATE statement
+    lacks 'paused'. Must run outside a transaction."""
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'jobs'").fetchone()
+    if row is None or "'paused'" in row[0]:
+        return
+    old = "'cancelled', 'failed')"
+    if old not in row[0]:
+        raise BoardUnavailable("board database: the jobs table has an unexpected status check; "
+                               "cannot add the 'paused' status")
+    new_sql = re.sub(r'CREATE TABLE "?jobs"?', "CREATE TABLE jobs_new", row[0], count=1).replace(
+        old, "'cancelled', 'failed', 'paused')", 1)
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute("DROP TABLE IF EXISTS jobs_new")
+            conn.execute(new_sql)
+            cols = ", ".join(r[1] for r in conn.execute("PRAGMA table_info(jobs)"))
+            conn.execute(f"INSERT INTO jobs_new ({cols}) SELECT {cols} FROM jobs")
+            conn.execute("DROP TABLE jobs")
+            conn.execute("ALTER TABLE jobs_new RENAME TO jobs")
+            for name, op in (("inserted", "INSERT"), ("updated", "UPDATE"), ("deleted", "DELETE")):
+                conn.execute(f"CREATE TRIGGER IF NOT EXISTS jobs_{name} AFTER {op} ON jobs BEGIN "
+                             f"UPDATE board_changes SET n = n + 1 WHERE kind = 'state'; END")
+            if conn.execute("PRAGMA foreign_key_check").fetchall():
+                raise BoardUnavailable("board database: foreign key violations after rebuilding jobs")
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+
+
 class SqliteBoard(Board):
     """A Board over one SQLite connection to the shared database file."""
 
@@ -463,6 +515,7 @@ class SqliteBoard(Board):
             _drop_writer_check(conn)
             script = (SCHEMA.replace("{max_chars}", str(int(cfg["board"]["message_max_chars"]))) + CHECKS)
             conn.executescript("BEGIN IMMEDIATE;\n" + script + "\nCOMMIT;")
+            _allow_paused(conn)
             conn.execute("BEGIN IMMEDIATE")
             try:
                 for table, column, decl in MIGRATIONS:
@@ -546,13 +599,15 @@ class SqliteBoard(Board):
         stale = _ts(now - _dt.timedelta(hours=int(b["agent_stale_hours"])))
         c = self._c()
         # Each statement is its own (autocommit) transaction: independently atomic.
-        c.execute("DELETE FROM messages WHERE created_at < ?", (keep,))
+        paused = "(SELECT job FROM jobs WHERE status = 'paused')"   # a paused job keeps its history
+        c.execute(f"DELETE FROM messages WHERE created_at < ? AND job NOT IN {paused}", (keep,))
         c.execute("UPDATE agents SET left_at = ?, state = 'dead', current_tool = NULL "
                   "WHERE left_at IS NULL AND last_seen < ?", (_ts(now), stale))
-        c.execute("DELETE FROM agents WHERE left_at < ?", (keep,))
+        c.execute(f"DELETE FROM agents WHERE left_at < ? AND job NOT IN {paused}", (keep,))
         c.execute("DELETE FROM jobs WHERE COALESCE(finished_at, activated_at, created_at) < ? "
                   "AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.job = jobs.job) "
-                  "AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.job = jobs.job AND a.left_at IS NULL)",
+                  "AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.job = jobs.job AND a.left_at IS NULL) "
+                  "AND status <> 'paused'",
                   (keep,))
         c.execute("DELETE FROM agent_routes WHERE created_at < ?", (keep,))
         c.execute("DELETE FROM restarts WHERE at < ?", (keep,))
@@ -674,7 +729,7 @@ class SqliteBoard(Board):
             if not self._name_held(c, candidate):
                 return candidate
 
-    def allocate_name(self, agent_key: str, job: str, role: str | None = None) -> str:
+    def _allocate_name(self, agent_key: str, job: str, role: str | None = None) -> str:
         self.purge()
         with self._tx() as c:
             self._ensure_job(c, job)
@@ -903,6 +958,85 @@ class SqliteBoard(Board):
                       (agent_key, name, job, role, os.uname().nodename, getpass.getuser(), now, now,
                        cursor, int(judge), int(bool(verifier)), resume_of))
             return name
+
+    # ---- pause / resume ------------------------------------------------------------------
+
+    _PAUSE_COLS = "id, job, paused_at, paused_by, reason, manifest, resumed_at, resumed_by, resumed_host, outcome"
+
+    @staticmethod
+    def _pause_record(r) -> PauseRecord:
+        (pid, job, at, by, reason, manifest, rat, rby, rhost, outcome) = r
+        return PauseRecord(id=pid, job=job, paused_at=_dt_(at), paused_by=by, reason=reason,
+                           manifest=json.loads(manifest), resumed_at=_dt_(rat), resumed_by=rby,
+                           resumed_host=rhost, outcome=None if outcome is None else json.loads(outcome))
+
+    def pause_job(self, job: str, by: str | None, reason: str | None,
+                  cwds: Mapping[str, str] | None = None) -> PauseRecord | None:
+        with self._tx() as c:
+            row = c.execute("SELECT status, goal, task, description, project, verdict, waiting_on, max_hours "
+                            "FROM jobs WHERE job = ?", (job,)).fetchone()
+            if row is None:
+                return None
+            if row[0] == "paused":
+                return self._open(c, job)
+            if row[0] != "active":
+                return None
+            now = self.now()
+            job_row = dict(zip(("status", "goal", "task", "description", "project", "verdict",
+                                "waiting_on", "max_hours"), row))
+            cols = ("agent_key, name, role, host, os_user, harness, model, last_read_id, tool_calls, "
+                    "current_tool, tool_started_at, state, last_seen, judge, verifier, resume_of, turn_ended_at")
+            names = [x.strip() for x in cols.split(",")]
+            rows = []
+            for r in c.execute(f"SELECT {cols} FROM agents WHERE job = ? AND left_at IS NULL "
+                               "ORDER BY joined_at, agent_key", (job,)).fetchall():
+                a = dict(zip(names, r))
+                a["status"] = self._derive(a["state"], a["current_tool"], _dt_(a["tool_started_at"]),
+                                           _dt_(a["last_seen"]), now)
+                a["last_seen"], a["turn_ended_at"] = _dt_(a["last_seen"]), _dt_(a["turn_ended_at"])
+                sess = c.execute("SELECT session_id FROM agent_routes WHERE agent_key = ?",
+                                 (a["agent_key"],)).fetchone()
+                a["session_id"] = sess[0] if sess else None
+                a["orchestrator"] = c.execute("SELECT 1 FROM transcripts WHERE job = ? AND agent_key = ? "
+                                              "AND role = 'orchestrator'", (job, a["agent_key"])).fetchone() is not None
+                rows.append(a)
+            last = c.execute("SELECT COALESCE(MAX(id), 0) FROM messages WHERE job = ?", (job,)).fetchone()[0]
+            manifest = build_manifest(job, now, by, reason, job_row, rows, last, cwds)
+            c.execute("UPDATE agents SET left_at = ?, state = 'left', left_reason = ?, current_tool = NULL, "
+                      "tool_started_at = NULL WHERE job = ? AND left_at IS NULL",
+                      (_ts(now), LEFT_PAUSED, job))
+            c.execute("UPDATE jobs SET status = 'paused' WHERE job = ?", (job,))
+            c.execute("INSERT INTO job_pauses (job, paused_at, paused_by, reason, manifest) "
+                      "VALUES (?, ?, ?, ?, ?)", (job, _ts(now), by, reason, json.dumps(manifest)))
+            return self._open(c, job)
+
+    def _open(self, c: sqlite3.Connection, job: str) -> PauseRecord | None:
+        r = c.execute(f"SELECT {self._PAUSE_COLS} FROM job_pauses WHERE job = ? AND resumed_at IS NULL "
+                      "ORDER BY id DESC LIMIT 1", (job,)).fetchone()
+        return self._pause_record(r) if r else None
+
+    def open_pause(self, job: str) -> PauseRecord | None:
+        return self._open(self._c(), job)
+
+    def pauses(self, job: str) -> list[PauseRecord]:
+        return [self._pause_record(r) for r in self._c().execute(
+            f"SELECT {self._PAUSE_COLS} FROM job_pauses WHERE job = ? ORDER BY id", (job,))]
+
+    def begin_resume(self, job: str, pause_id: int, by: str | None, host: str | None) -> bool:
+        with self._tx() as c:
+            if c.execute("SELECT 1 FROM job_pauses WHERE id = ? AND job = ? AND resumed_at IS NULL",
+                         (pause_id, job)).fetchone() is None:
+                return False
+            if c.execute("UPDATE jobs SET status = 'active' WHERE job = ? AND status = 'paused'",
+                         (job,)).rowcount == 0:
+                return False
+            c.execute("UPDATE job_pauses SET resumed_at = ?, resumed_by = ?, resumed_host = ? WHERE id = ?",
+                      (self._now(), by, host, pause_id))
+            return True
+
+    def record_resume_outcome(self, pause_id: int, outcome: dict) -> bool:
+        return self._c().execute("UPDATE job_pauses SET outcome = ? WHERE id = ?",
+                                 (json.dumps(outcome), pause_id)).rowcount > 0
 
     def set_job_supervise(self, job: str, on: bool) -> bool:
         return self._c().execute("UPDATE jobs SET supervise = ? WHERE job = ?",
