@@ -18,7 +18,7 @@ import uuid
 from pathlib import Path
 from unittest import mock
 
-from support import ROOT, tq  # noqa: F401  (sets sys.path)
+from support import ROOT, tq, home_env  # noqa: F401  (sets sys.path)
 
 from swarm import cli as swarm  # noqa: E402
 from swarm import hooks as swarm_hooks  # noqa: E402
@@ -38,7 +38,7 @@ class AutoInitBase:
         self.home = self.tmp / "home"
         self.home.mkdir()
         self.settings = self.home / ".claude" / "settings.json"
-        patcher = mock.patch.dict(os.environ, {"HOME": str(self.home), "SWARM_AUTO_INIT": "1",
+        patcher = mock.patch.dict(os.environ, {**home_env(self.home), "SWARM_AUTO_INIT": "1",
                                                "CLAUDE_SETTINGS": str(self.settings), "USER": "tester"})
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -52,7 +52,7 @@ class AutoInitBase:
         self.error_log = self.home / ".local/share/swarm/host/hook-errors.log"   # host-only
 
     def toml(self) -> str:
-        return (f'[board]\nbackend = "{self.backend}"\nspool_dir = "{self.tmp / "spool"}"\n'
+        return (f'[board]\nbackend = "{self.backend}"\nspool_dir = {tq(self.tmp / "spool")}\n'
                 f'[hook]\nmarker_dir = {tq(self.markers)}\n')
 
     def stamp(self) -> Path | None:

@@ -21,7 +21,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import E2E_BACKEND, HARNESSES, PostgresHarness, tq  # noqa: F401  (sets sys.path)
+from support import E2E_BACKEND, HARNESSES, PostgresHarness, tq, home_env  # noqa: F401  (sets sys.path)
 
 from swarm import board as board_pkg  # noqa: E402
 from swarm import cli as swarm  # noqa: E402
@@ -115,7 +115,7 @@ class DefaultPathsTests(unittest.TestCase):
         self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
 
     def load(self, home, text=None, uid=None):
-        env = {"HOME": str(home)}
+        env = {**home_env(home)}
         with mock.patch.dict(os.environ, env), \
                 mock.patch("os.getuid", return_value=uid if uid is not None else os.getuid()):
             cfg = swarm.load_config(_write(self.tmp, text) if text else Path("/nonexistent/swarm.toml"))
@@ -259,7 +259,7 @@ class WatcherRoutingTests(unittest.TestCase):
         # SubagentStop always opens the board (the agent's job marker may be gone)
         hook_input = '{"session_id": "s1", "agent_id": "a1", "hook_event_name": "SubagentStop"}'
         with self.plan({}), mock.patch("sys.stdin", io.StringIO(hook_input)), \
-                contextlib.redirect_stdout(io.StringIO()), mock.patch.dict(os.environ, {"HOME": str(tmp)}):
+                contextlib.redirect_stdout(io.StringIO()), mock.patch.dict(os.environ, {**home_env(tmp)}):
             swarm_hooks.run_hook("stop", cfg)
         self.assertEqual(len(self.seen), 1)
         self.assertNotIn(self.WATCH_HOST, [d["host"] for d in self.seen])

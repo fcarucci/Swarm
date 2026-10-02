@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import ROOT, tq  # noqa: F401
+from support import ROOT, tq, home_env  # noqa: F401
 
 from swarm import bootstrap  # noqa: E402
 
@@ -32,7 +32,7 @@ class MigrateTests(unittest.TestCase):
         self.home = Path(tempfile.mkdtemp(prefix="swarm-mig-"))
         self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
         # support.py turns migrate (and auto-init) off for the whole suite; these tests run them, under the temp $HOME
-        p = mock.patch.dict(os.environ, {"HOME": str(self.home), "SWARM_NO_MIGRATE": "0", "SWARM_AUTO_INIT": "1"}); p.start(); self.addCleanup(p.stop)
+        p = mock.patch.dict(os.environ, {**home_env(self.home), "SWARM_NO_MIGRATE": "0", "SWARM_AUTO_INIT": "1"}); p.start(); self.addCleanup(p.stop)
         os.environ.pop("CLAUDE_SETTINGS", None)
         self.settings = self.home / ".claude/settings.json"
         self.settings.parent.mkdir(parents=True)
@@ -189,7 +189,7 @@ class MoveOldDefaultsTests(unittest.TestCase):
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(prefix="swarm-mig-"))
         self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
-        p = mock.patch.dict(os.environ, {"HOME": str(self.home), "SWARM_NO_MIGRATE": "0"})
+        p = mock.patch.dict(os.environ, {**home_env(self.home), "SWARM_NO_MIGRATE": "0"})
         p.start(); self.addCleanup(p.stop)
         self.settings = self.home / ".claude/settings.json"            # absent: nothing of the old skill
         self.skills = self.home / ".claude/skills"

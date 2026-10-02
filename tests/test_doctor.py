@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import ROOT, tq  # noqa: F401
+from support import ROOT, tq, home_env  # noqa: F401
 
 from swarm import bootstrap, paths  # noqa: E402
 
@@ -18,7 +18,7 @@ class DoctorTests(unittest.TestCase):
         self.home = Path(tempfile.mkdtemp(prefix="swarm-doc-"))
         self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
         import support
-        p = mock.patch.dict(os.environ, {"HOME": str(self.home), "SWARM_VENV": str(support.temp_venv()),
+        p = mock.patch.dict(os.environ, {**home_env(self.home), "SWARM_VENV": str(support.temp_venv()),
                                          "SWARM_AUTO_INIT": "1"})   # a throwaway venv: never write the real one
         p.start(); self.addCleanup(p.stop)
         self.cfg = self.home / ".config/swarm/config.toml"
@@ -331,7 +331,7 @@ class ExposureDoctorTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
         self.codex = self.home / ".codex"; self.codex.mkdir()
         import support
-        p = mock.patch.dict(os.environ, {"HOME": str(self.home), "SWARM_VENV": str(support.temp_venv()),
+        p = mock.patch.dict(os.environ, {**home_env(self.home), "SWARM_VENV": str(support.temp_venv()),
                                          "CODEX_HOME": str(self.codex), "SWARM_AUTO_INIT": "1"})
         p.start(); self.addCleanup(p.stop)
         os.environ.pop("CLAUDE_SETTINGS", None)

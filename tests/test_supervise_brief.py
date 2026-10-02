@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 
 import codex_fixtures
+from support import home_env  # noqa: E402
 from test_transcript_cli import TranscriptEnv, jsonl
 
 from swarm.supervisor import brief as br
@@ -96,7 +97,7 @@ class BriefTests(TranscriptEnv):
         for d in (home, home / ".local", home / ".local/share", home / ".local/share/swarm"):
             os.chmod(d, 0o755)
         os.chmod(host, 0o700)
-        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+        with mock.patch.dict(os.environ, {**home_env(home)}):
             b = self.build()
         self.assertIn(b.transcript, ("not stored", "archive off"))
         log = host / "hook-errors.log"

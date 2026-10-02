@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import base_config  # noqa: F401  (sets sys.path)
+from support import base_config, home_env  # noqa: F401  (sets sys.path)
 
 from swarm.supervisor import settings as st
 
@@ -18,7 +18,7 @@ class SettingsTests(unittest.TestCase):
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(prefix="swarm-sup-"))
         self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
-        p = mock.patch.dict(os.environ, {"HOME": str(self.home)})
+        p = mock.patch.dict(os.environ, {**home_env(self.home)})
         p.start()
         self.addCleanup(p.stop)
 

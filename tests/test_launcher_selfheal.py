@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from support import ROOT  # noqa: F401
+from support import ROOT, home_env  # noqa: F401
 
 from swarm import bootstrap  # noqa: E402
 
@@ -17,7 +17,7 @@ class LauncherSelfHealTests(unittest.TestCase):
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(prefix="swarm-heal-"))
         self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
-        self.env = {"PATH": os.environ["PATH"], "HOME": str(self.home)}
+        self.env = {"PATH": os.environ["PATH"], **home_env(self.home)}
 
     def _plugin(self, base: Path, market: str, version: str) -> Path:
         root = base / "plugins" / "cache" / market / "swarm" / version

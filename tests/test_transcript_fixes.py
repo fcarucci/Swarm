@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import MemoryHarness, base_config  # noqa: F401  (sets sys.path)
+from support import MemoryHarness, base_config, home_env  # noqa: F401  (sets sys.path)
 
 from swarm import cli as swarm  # noqa: E402
 from swarm import transcripts as T  # noqa: E402
@@ -35,7 +35,7 @@ class HomeTest(unittest.TestCase):
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(prefix="swarm-fix-"))
         self.addCleanup(lambda: __import__("shutil").rmtree(self.home, ignore_errors=True))
-        p = mock.patch.dict(os.environ, {"HOME": str(self.home)})
+        p = mock.patch.dict(os.environ, {**home_env(self.home)})
         p.start()
         self.addCleanup(p.stop)
         self.log = self.home / ".local/share/swarm/host/hook-errors.log"

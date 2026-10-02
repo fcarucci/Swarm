@@ -5,6 +5,7 @@ import os
 import unittest
 from unittest import mock
 
+from support import home_env  # noqa: E402
 from test_hooks_cli import Env  # noqa: E402
 import codex_fixtures as F  # noqa: E402
 
@@ -238,7 +239,7 @@ class CodexCaptureTests(Env):
         empty = self.tmp / "claude-codex-home"; empty.mkdir(exist_ok=True)
         forbid = AssertionError("a non-owner touched a transcript row")
         other_home = self.tmp / "claude-home"; other_home.mkdir(exist_ok=True)
-        for p_ in (mock.patch.dict(os.environ, {"CODEX_HOME": str(empty), "HOME": str(other_home)}),
+        for p_ in (mock.patch.dict(os.environ, {"CODEX_HOME": str(empty), **home_env(other_home)}),
                    mock.patch("getpass.getuser", return_value="claude"),
                    mock.patch.object(T, "capture_subagent", side_effect=forbid),
                    mock.patch.object(board_cls, "refresh_transcript", side_effect=forbid),

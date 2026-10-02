@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import ROOT  # noqa: F401  (sets sys.path)
+from support import ROOT, home_env  # noqa: F401  (sets sys.path)
 
 from swarm import bootstrap, hindsight, hooks  # noqa: E402
 from swarm import cli as swarm  # noqa: E402
@@ -84,7 +84,7 @@ class DoctorNoteTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory(prefix="swarm-defb-")
         self.addCleanup(tmp.cleanup)
         self.home = Path(tmp.name)
-        p = mock.patch.dict(os.environ, {"HOME": str(self.home), "SWARM_VENV": str(support.temp_venv()),
+        p = mock.patch.dict(os.environ, {**home_env(self.home), "SWARM_VENV": str(support.temp_venv()),
                                          "SWARM_AUTO_INIT": "1"})
         p.start(); self.addCleanup(p.stop)
         self.config = self.home / ".config/swarm/config.toml"

@@ -15,7 +15,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import ROOT  # noqa: F401
+from support import ROOT, home_env  # noqa: F401
 
 from swarm import update  # noqa: E402
 
@@ -54,7 +54,7 @@ class VersionAndRootTests(unittest.TestCase):
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(prefix="swarm-update-"))
         self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
-        p = mock.patch.dict(os.environ, {"HOME": str(self.home)})
+        p = mock.patch.dict(os.environ, {**home_env(self.home)})
         p.start(); self.addCleanup(p.stop)
 
     def _plugin_tree(self, name: str, version: str) -> Path:
@@ -208,7 +208,7 @@ class PerHostUpdateFailureTests(unittest.TestCase):
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(prefix="swarm-update-fail-"))
         self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
-        p = mock.patch.dict(os.environ, {"HOME": str(self.home)})
+        p = mock.patch.dict(os.environ, {**home_env(self.home)})
         p.start(); self.addCleanup(p.stop)
         self.bin = self.home / "bin"
         self.bin.mkdir()

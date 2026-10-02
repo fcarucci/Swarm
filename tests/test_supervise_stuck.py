@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import base_config  # noqa: F401
+from support import base_config, home_env  # noqa: F401
 
 from swarm.board import AgentStatus, JobStatus
 from swarm.supervisor import outage, stuck
@@ -101,7 +101,7 @@ class OutageFileTests(unittest.TestCase):
     def setUp(self):
         home = tempfile.mkdtemp(prefix="swarm-out-")
         self.addCleanup(shutil.rmtree, home, ignore_errors=True)
-        p = mock.patch.dict(os.environ, {"HOME": home})
+        p = mock.patch.dict(os.environ, {**home_env(home)})
         p.start()
         self.addCleanup(p.stop)
 

@@ -16,7 +16,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import HOST_ENV, ROOT, e2e_harness, temp_venv, tq  # noqa: F401  (sets sys.path)
+from support import HOST_ENV, ROOT, e2e_harness, temp_venv, tq, home_env  # noqa: F401  (sets sys.path)
 
 from swarm import spool  # noqa: E402
 from swarm import cli as swarm  # noqa: E402
@@ -39,13 +39,13 @@ class Env(unittest.TestCase):
         self.h = e2e_harness(self.tmp, self.id())
         self.addCleanup(self.h.close)
         self.config.write_text(
-            f'[board]\nbackend = "{self.h.name}"\nspool_dir = "{self.spool_dir}"\n'
+            f'[board]\nbackend = "{self.h.name}"\nspool_dir = {tq(self.spool_dir)}\n'
             f'[hook]\nmarker_dir = {tq(self.markers)}\n' + self.h.toml)
         self.cfg = swarm.load_config(self.config)
         self.h.reset(swarm_names())
         home = self.tmp / "home"
         home.mkdir()
-        patcher = mock.patch.dict(os.environ, {"HOME": str(home), "USER": "tester",
+        patcher = mock.patch.dict(os.environ, {**home_env(home), "USER": "tester",
                                                "CLAUDE_SETTINGS": str(home / "settings.json"),
                                                "SWARM_AUTO_INIT": "1", "CODEX_THREAD_ID": "",
                                                "CODEX_SESSION_ID": ""})

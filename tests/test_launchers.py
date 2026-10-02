@@ -9,14 +9,14 @@ import time
 import unittest
 from pathlib import Path
 
-from support import ROOT  # noqa: F401
+from support import ROOT, home_env  # noqa: F401
 
 
 class LauncherTests(unittest.TestCase):
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(prefix="swarm-launch-"))
         self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
-        self.env = {"HOME": str(self.home), "PATH": os.environ["PATH"],
+        self.env = {**home_env(self.home), "PATH": os.environ["PATH"],
                     "SWARM_CONFIG": str(self.home / "none.toml")}
 
     def run_hook(self, *args, stdin="{}"):

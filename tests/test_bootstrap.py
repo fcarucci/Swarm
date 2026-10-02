@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import ROOT, tq  # noqa: F401
+from support import ROOT, tq, home_env  # noqa: F401
 
 from swarm import bootstrap, paths  # noqa: E402
 
@@ -18,7 +18,7 @@ class BootstrapTests(unittest.TestCase):
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(prefix="swarm-boot-"))
         self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
-        p = mock.patch.dict(os.environ, {"HOME": str(self.home), "SWARM_AUTO_INIT": "1"})
+        p = mock.patch.dict(os.environ, {**home_env(self.home), "SWARM_AUTO_INIT": "1"})
         p.start(); self.addCleanup(p.stop)
         self.cfg = self.home / ".config/swarm/config.toml"
 
@@ -221,7 +221,7 @@ class NoticeAndStampSafetyTests(unittest.TestCase):
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(prefix="swarm-boot-"))
         self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
-        p = mock.patch.dict(os.environ, {"HOME": str(self.home)})
+        p = mock.patch.dict(os.environ, {**home_env(self.home)})
         p.start(); self.addCleanup(p.stop)
         self.host = paths.host_dir()
         self.steps = [bootstrap.Step("config", "manual", "fill in the config"),
@@ -352,7 +352,7 @@ class ClaudeSandboxAllowlistTests(unittest.TestCase):
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(prefix="swarm-boot-"))
         self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
-        p = mock.patch.dict(os.environ, {"HOME": str(self.home)})
+        p = mock.patch.dict(os.environ, {**home_env(self.home)})
         p.start(); self.addCleanup(p.stop)
         os.environ.pop("CLAUDE_SETTINGS", None)
         self.settings = self.home / ".claude/settings.json"

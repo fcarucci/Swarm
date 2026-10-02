@@ -17,7 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 from test_verifier import VerifierEnv  # noqa: E402  (sets sys.path)
-from support import tq  # noqa: E402
+from support import tq, home_env  # noqa: E402
 from test_hooks_cli import Env  # noqa: E402
 from test_transcript_cli import TranscriptEnv  # noqa: E402
 from test_transcript_images import SAMPLE  # noqa: E402
@@ -1112,7 +1112,7 @@ class ProbeEnv(unittest.TestCase):
 
     def env(self) -> dict:
         keep = {k: os.environ[k] for k in ("PATH", "LANG", "TMPDIR") if k in os.environ}
-        return {**keep, "HOME": str(self.home), "SWARM_CONFIG": str(self.config),
+        return {**keep, **home_env(self.home), "SWARM_CONFIG": str(self.config),
                 "PYTHONPATH": str(LIB.parent), "SWARM_NO_MIGRATE": "1", "USER": "tester",
                 "CODEX_HOME": str(self.home / ".codex"), "CLAUDE_CONFIG_DIR": str(self.home / ".claude")}
 
@@ -1240,7 +1240,7 @@ class LooseLocalDirsTests(ProbeEnv):
     def test_tighten_local_dirs(self):
         from swarm import bootstrap
         self.loosen()
-        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+        with mock.patch.dict(os.environ, {**home_env(self.home)}):
             step = bootstrap.tighten_local_dirs()
             self.assertEqual(step.status, "changed")
             self.assertEqual(len(bootstrap.format_steps([step]).splitlines()), 1)
@@ -1253,13 +1253,13 @@ class LooseLocalDirsTests(ProbeEnv):
         real.mkdir()
         os.chmod(real, 0o775)
         (self.home / ".local").symlink_to(real)
-        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+        with mock.patch.dict(os.environ, {**home_env(self.home)}):
             bootstrap.tighten_local_dirs()
         self.assertEqual(stat.S_IMODE(real.stat().st_mode), 0o775)       # never through a link
         os.unlink(self.home / ".local")
         self.loosen()
         uid = os.getuid()
-        with mock.patch.dict(os.environ, {"HOME": str(self.home)}), \
+        with mock.patch.dict(os.environ, {**home_env(self.home)}), \
                 mock.patch("os.getuid", return_value=uid + 1):
             self.assertIsNone(bootstrap.tighten_local_dirs())             # not ours: left alone
         self.assertEqual(self.modes(), {rel: 0o775 for rel in self.LOOSE})
@@ -1285,7 +1285,7 @@ class LooseLocalDirsTests(ProbeEnv):
         ~/.local/share/swarm are tightened too (the default config's places)."""
         from swarm import bootstrap
         self.make_at_umask_002(*self.SWARM_DIRS)
-        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+        with mock.patch.dict(os.environ, {**home_env(self.home)}):
             step = bootstrap.tighten_local_dirs()
             self.assertEqual(step.status, "changed")
             self.assertEqual(len(bootstrap.format_steps([step]).splitlines()), 1)
@@ -1298,12 +1298,12 @@ class LooseLocalDirsTests(ProbeEnv):
         self.make_at_umask_002(".local/state/custom/markers", ".local/state/myspool", "work/markers")
         cfg = {"board": {"spool_dir": "~/.local/state/myspool"},
                "hook": {"marker_dir": "~/.local/state/custom/markers"}}
-        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+        with mock.patch.dict(os.environ, {**home_env(self.home)}):
             self.assertEqual(bootstrap.tighten_local_dirs(cfg).status, "changed")
         for rel in (".local/state/custom", ".local/state/custom/markers", ".local/state/myspool"):
             self.assertEqual(self.mode(rel) & 0o022, 0, rel)
         cfg["hook"]["marker_dir"] = str(self.home / "work/markers")       # outside ~/.local: not ours to change
-        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+        with mock.patch.dict(os.environ, {**home_env(self.home)}):
             self.assertIsNone(bootstrap.tighten_local_dirs(cfg))
         self.assertEqual(self.mode("work") & 0o020, 0o020)
         self.assertEqual(self.mode("work/markers") & 0o020, 0o020)
@@ -1336,7 +1336,7 @@ class LooseLocalDirsTests(ProbeEnv):
         self.make_at_umask_002(".local/state", ".local/share", "real-state/active", "real-share")
         (self.home / ".local/state/swarm").symlink_to(self.home / "real-state")
         (self.home / ".local/share/swarm").symlink_to(self.home / "real-share")
-        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+        with mock.patch.dict(os.environ, {**home_env(self.home)}):
             bootstrap.tighten_local_dirs()
         for rel in ("real-state", "real-state/active", "real-share"):
             self.assertEqual(self.mode(rel) & 0o020, 0o020, rel)             # never through a link
@@ -1382,7 +1382,7 @@ class LooseLocalDirsTests(ProbeEnv):
         md.symlink_to(elsewhere)
         with self.assertRaises(bootstrap.UnsafeMarkerDir):
             bootstrap.active_jobs(md)
-        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+        with mock.patch.dict(os.environ, {**home_env(self.home)}):
             skills = self.home / ".claude/skills"
             (skills / "swarm").mkdir(parents=True)                         # something to migrate
             steps = bootstrap.migrate(settings_path=self.home / ".claude/settings.json", skills_dir=skills,
@@ -1456,7 +1456,7 @@ class HostDirProblemAtSessionStartTests(ProbeEnv):
         for rel in (".local", ".local/share"):
             (self.home / rel).mkdir(exist_ok=True)
         os.chmod(self.home / ".local", 0o777)
-        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+        with mock.patch.dict(os.environ, {**home_env(self.home)}):
             out = json.loads(bootstrap.hook_output("claude"))
         self.assertIn("swarm doctor", out["systemMessage"])
         self.assertTrue(out["systemMessage"].isascii())
@@ -1656,7 +1656,7 @@ class MinorFixTests(ProbeEnv):
         from swarm.cli import load_config
         (self.home / "board").mkdir(mode=0o700)
         self.config.write_text(f'[board]\nbackend = "sqlite"\n[sqlite]\npath = {tq(f"{self.home}/board/b.sqlite3")}\n')
-        with mock.patch.dict(os.environ, {"HOME": str(self.home), "SWARM_CONFIG": str(self.config),
+        with mock.patch.dict(os.environ, {**home_env(self.home), "SWARM_CONFIG": str(self.config),
                                           "CLAUDE_SETTINGS": str(self.home / ".claude/settings.json"),
                                           "SWARM_NO_SYSTEMD": "1", "SWARM_AUTO_INIT": "1"}):
             cfg = load_config(self.config)

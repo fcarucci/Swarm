@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import ROOT  # noqa: F401
+from support import ROOT, home_env  # noqa: F401
 
 from swarm import enrolment, paths  # noqa: E402
 
@@ -25,7 +25,7 @@ class Env(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.home = self.tmp / "home"
         self.home.mkdir()
-        p = mock.patch.dict(os.environ, {"HOME": str(self.home)})
+        p = mock.patch.dict(os.environ, {**home_env(self.home)})
         p.start()
         self.addCleanup(p.stop)
         self.addCleanup(shutil.rmtree, self.tmp, True)

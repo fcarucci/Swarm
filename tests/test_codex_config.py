@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import ROOT, base_config  # noqa: F401
+from support import ROOT, base_config, home_env  # noqa: F401
 
 from swarm import codex_config as cc  # noqa: E402
 
@@ -30,7 +30,7 @@ class CodexConfigEditTests(unittest.TestCase):
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(prefix="swarm-cc-"))
         self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
-        p = mock.patch.dict(os.environ, {"HOME": str(self.home)}); p.start(); self.addCleanup(p.stop)
+        p = mock.patch.dict(os.environ, {**home_env(self.home)}); p.start(); self.addCleanup(p.stop)
         self.path = self.home / ".codex/config.toml"
         self.path.parent.mkdir(parents=True)
         self.cfg = base_config(spool_dir=str(self.home / "spool"))
@@ -260,7 +260,7 @@ class GrantTests(unittest.TestCase):
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(prefix="swarm-cc-"))
         self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
-        p = mock.patch.dict(os.environ, {"HOME": str(self.home)}); p.start(); self.addCleanup(p.stop)
+        p = mock.patch.dict(os.environ, {**home_env(self.home)}); p.start(); self.addCleanup(p.stop)
         self.path = self.home / ".codex/config.toml"
         self.path.parent.mkdir(parents=True)
         self.cfg = base_config()

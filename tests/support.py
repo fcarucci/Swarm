@@ -71,6 +71,12 @@ _bootstrap.OLD_SPOOL = os.path.join(SANDBOX, "old-shared-spool")
 _VENV = None
 
 
+def home_env(home) -> dict:
+    """The environment variables that make a directory the user's home: HOME (POSIX) and
+    USERPROFILE (what Windows' expanduser/Path.home read)."""
+    return {"HOME": str(home), "USERPROFILE": str(home)}
+
+
 def tq(value) -> str:
     """A TOML basic string for a path or text (backslashes and quotes escaped: Windows paths)."""
     import json

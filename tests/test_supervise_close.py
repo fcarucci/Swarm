@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from support import home_env  # noqa: E402
 from test_hooks_cli import Env  # the private installation used by the hook/CLI tests
 
 from swarm import cli as swarm, transcripts
@@ -278,7 +279,7 @@ class LostPathTests(unittest.TestCase):
         self.home = Path(tempfile.mkdtemp(prefix="swarm-lost-"))
         self.addCleanup(lambda: __import__("shutil").rmtree(self.home, ignore_errors=True))
         os.chmod(self.home, 0o700)
-        p = mock.patch.dict(os.environ, {"HOME": str(self.home), "CLAUDE_CONFIG_DIR": str(self.home / ".claude"),
+        p = mock.patch.dict(os.environ, {**home_env(self.home), "CLAUDE_CONFIG_DIR": str(self.home / ".claude"),
                                          "CODEX_HOME": str(self.home / ".codex")})
         p.start()
         self.addCleanup(p.stop)
