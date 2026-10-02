@@ -1,0 +1,243 @@
+"""Every platform switch of the swarm lives here; the rest of lib/swarm calls this module and never
+tests sys.platform itself.
+
+On POSIX each name below is the plain os / fcntl function (an alias, not a wrapper), so behaviour
+there is unchanged. On Windows:
+
+- `flock` is LockFileEx on a byte far beyond any data (shared or exclusive, blocking or not);
+  a failed non-blocking try raises BlockingIOError like fcntl.flock.
+- Directory "descriptors" (safefs.open_base, open_sub) cannot be real descriptors: a directory
+  descriptor is an ordinary descriptor of the null device registered in a table that maps it to
+  the directory's path, so os.close() still works on it. The fd-relative functions (`open`,
+  `stat`, `lstat`, `rename`, `unlink`, `mkdir`, `link`, `utime`, `listdir`, `chmod`) resolve a
+  `dir_fd` through that table, and refuse a symlink or reparse point (junction) where POSIX
+  uses O_NOFOLLOW.
+- Unix ownership and mode checks have no equivalent (files in the user's profile are private by
+  their NTFS ACLs): `uid()` is 0, which is what os.stat reports as st_uid there, and chmod/fchmod
+  are no-ops. The 0600/0700 mode checks are skipped by their callers through `HAS_MODES`.
+- Features that need Linux (systemd scopes, process groups, pidfd) call `require_posix`, which
+  raises Unsupported with a clear message.
+"""
+from __future__ import annotations
+
+import errno
+import os
+import sys
+
+IS_WINDOWS = sys.platform == "win32"
+HAS_MODES = not IS_WINDOWS
+
+
+class Unsupported(RuntimeError):
+    """A feature that this platform cannot provide (the message says which and what to do)."""
+
+
+def require_posix(feature: str) -> None:
+    """Raise Unsupported on Windows: `feature` needs a POSIX system (Linux with systemd, macOS)."""
+    if IS_WINDOWS:
+        raise Unsupported(f"{feature} is not supported on Windows (it needs POSIX process groups and "
+                          f"systemd); run it on Linux or WSL")
+
+
+def setup_stdio() -> None:
+    """Windows: the console's legacy code page can't carry agent names or board text; use UTF-8
+    (hook payloads on stdin are UTF-8 JSON). POSIX: unchanged."""
+    if IS_WINDOWS:
+        for s in (sys.stdin, sys.stdout, sys.stderr):
+            try:
+                s.reconfigure(encoding="utf-8", errors="replace" if s is not sys.stdin else "strict")
+            except (AttributeError, ValueError):
+                pass
+
+
+def node() -> str:
+    """The host name (os.uname().nodename on POSIX)."""
+    if IS_WINDOWS:
+        import platform
+        return platform.node()
+    return os.uname().nodename
+
+
+if not IS_WINDOWS:
+    import fcntl
+
+    uid = os.getuid
+    LOCK_SH, LOCK_EX, LOCK_NB, LOCK_UN = fcntl.LOCK_SH, fcntl.LOCK_EX, fcntl.LOCK_NB, fcntl.LOCK_UN
+    flock = fcntl.flock
+    fchmod = os.fchmod
+    fchown = os.fchown
+    chmod = os.chmod
+    O_DIRECTORY, O_NOFOLLOW, O_NONBLOCK, O_CLOEXEC, O_BINARY = (
+        os.O_DIRECTORY, os.O_NOFOLLOW, os.O_NONBLOCK, os.O_CLOEXEC, 0)
+    open = os.open            # noqa: A001  (the fd-relative family, same signatures as os.*)
+    stat = os.stat
+    lstat = os.lstat
+    rename = os.rename
+    unlink = os.unlink
+    mkdir = os.mkdir
+    link = os.link
+    utime = os.utime
+    listdir = os.listdir
+
+    def utime_fd(fd: int, name=None, dir_fd=None) -> None:
+        """Set the times of the open file `fd` to now."""
+        os.utime(fd)
+
+    def open_root(path) -> int:
+        """A descriptor of directory `path` as given (a symlink at `path` itself is followed)."""
+        return os.open(path, os.O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+
+    def fsync_dir(fd: int) -> None:
+        os.fsync(fd)
+
+    def open_dir(path) -> int:
+        """A descriptor of directory `path`, opened without following a symlink."""
+        return os.open(path, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+
+    def popen_detach() -> dict:
+        """Popen keyword arguments that start the child in its own session."""
+        return {"start_new_session": True}
+
+else:
+    import msvcrt
+    import stat as _stat
+    import time
+
+    LOCK_SH, LOCK_EX, LOCK_NB, LOCK_UN = 1, 2, 4, 8
+    O_DIRECTORY = 1 << 30     # private marker bit, stripped by open(); not an os.open flag
+    O_NOFOLLOW = O_NONBLOCK = O_CLOEXEC = 0
+    O_BINARY = os.O_BINARY
+    _dirs: dict[int, str] = {}
+
+    def uid() -> int:
+        return 0
+
+    def fchmod(fd, mode) -> None:
+        return None
+
+    def fchown(fd, uid_, gid) -> None:
+        return None
+
+    def chmod(path, mode, *, dir_fd=None, follow_symlinks=True) -> None:
+        return None
+
+    def _path(name, dir_fd) -> str:
+        if dir_fd is None:
+            return os.fspath(name)
+        return os.path.join(_dirs[dir_fd], os.fspath(name))
+
+    def _refuse_link(path: str) -> None:
+        """OSError ELOOP if `path` is a symlink or a reparse point (junction); missing is fine."""
+        try:
+            st = os.lstat(path)
+        except OSError:
+            return
+        if _stat.S_ISLNK(st.st_mode) or getattr(st, "st_file_attributes", 0) & _stat.FILE_ATTRIBUTE_REPARSE_POINT:
+            raise OSError(errno.ELOOP, "refusing to follow a symbolic link or junction", path)
+
+    def open_dir(path) -> int:
+        p = os.fspath(path)
+        _refuse_link(p)
+        if not os.path.isdir(p):
+            raise NotADirectoryError(errno.ENOTDIR, "not a directory", p)
+        fd = os.open(os.devnull, os.O_RDONLY | os.O_BINARY)
+        _dirs[fd] = p
+        return fd
+
+    def open(path, flags, mode=0o777, *, dir_fd=None) -> int:   # noqa: A001
+        p = _path(path, dir_fd)
+        if flags & O_DIRECTORY:
+            return open_dir(p)
+        flags &= ~(O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        if not flags & os.O_EXCL:
+            _refuse_link(p)
+        return os.open(p, flags | O_BINARY | os.O_NOINHERIT, mode | 0o200)   # 0o400 would mean read-only
+
+    def stat(path, *, dir_fd=None, follow_symlinks=True):
+        return os.stat(_path(path, dir_fd), follow_symlinks=follow_symlinks)
+
+    def lstat(path, *, dir_fd=None):
+        return os.lstat(_path(path, dir_fd))
+
+    def _retry(fn, *args):
+        """Windows refuses to replace or delete a file another process has open: wait briefly."""
+        for i in range(20):
+            try:
+                return fn(*args)
+            except PermissionError:
+                if i == 19:
+                    raise
+                time.sleep(0.05)
+
+    def rename(src, dst, *, src_dir_fd=None, dst_dir_fd=None) -> None:
+        # os.rename refuses to overwrite on Windows; POSIX rename replaces atomically
+        _retry(os.replace, _path(src, src_dir_fd), _path(dst, dst_dir_fd))
+
+    def unlink(path, *, dir_fd=None) -> None:
+        _retry(os.unlink, _path(path, dir_fd))
+
+    def mkdir(path, mode=0o777, *, dir_fd=None) -> None:
+        os.mkdir(_path(path, dir_fd))
+
+    def link(src, dst, *, src_dir_fd=None, dst_dir_fd=None, follow_symlinks=True) -> None:
+        os.link(_path(src, src_dir_fd), _path(dst, dst_dir_fd))
+
+    def utime(path, times=None, *, dir_fd=None, follow_symlinks=True) -> None:
+        os.utime(_path(path, dir_fd), times)
+
+    def listdir(path=".") -> list[str]:
+        if isinstance(path, int):
+            path = _dirs[path]
+        return os.listdir(path)
+
+    def utime_fd(fd: int, name=None, dir_fd=None) -> None:
+        # os.utime has no fd form on Windows: by name in the directory the file was opened from
+        os.utime(_path(name, dir_fd), None)
+
+    def open_root(path) -> int:
+        p = os.fspath(path)
+        if not os.path.isdir(p):
+            raise NotADirectoryError(errno.ENOTDIR, "not a directory", p)
+        fd = os.open(os.devnull, os.O_RDONLY | os.O_BINARY)
+        _dirs[fd] = p
+        return fd
+
+    def fsync_dir(fd: int) -> None:
+        return None   # a directory cannot be flushed on Windows
+
+    def popen_detach() -> dict:
+        import subprocess
+        return {"creationflags": subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+                "encoding": "utf-8"}
+
+    # --- file locking: LockFileEx on one byte at offset 2**40 (past any data, so a lock never
+    # blocks a reader of the file's content; Windows locks are mandatory for the locked range).
+
+    def flock(fd: int, op: int) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        class _Overlapped(ctypes.Structure):
+            _fields_ = [("Internal", ctypes.c_size_t), ("InternalHigh", ctypes.c_size_t),
+                        ("Offset", wintypes.DWORD), ("OffsetHigh", wintypes.DWORD),
+                        ("hEvent", wintypes.HANDLE)]
+
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.LockFileEx.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
+                                   wintypes.DWORD, ctypes.POINTER(_Overlapped)]
+        k32.UnlockFileEx.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
+                                     ctypes.POINTER(_Overlapped)]
+        handle = msvcrt.get_osfhandle(fd)
+        ov = _Overlapped()
+        ov.OffsetHigh = 0x100
+        if op & LOCK_UN:
+            k32.UnlockFileEx(handle, 0, 1, 0, ctypes.byref(ov))   # not locked: harmless, like flock
+            return
+        flags = 0 if op & LOCK_SH else 2          # LOCKFILE_EXCLUSIVE_LOCK
+        if op & LOCK_NB:
+            flags |= 1                            # LOCKFILE_FAIL_IMMEDIATELY
+        if not k32.LockFileEx(handle, flags, 0, 1, 0, ctypes.byref(ov)):
+            err = ctypes.get_last_error()
+            if err in (33, 32, 997):   # ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION, IO_PENDING
+                raise BlockingIOError(errno.EAGAIN, "lock held by another process")
+            raise ctypes.WinError(err)

@@ -26,6 +26,9 @@ def make_repo(root: Path) -> Path:
     """A marketplace repo: tags v0.1.1 and v0.1.2, then one more commit (0.1.3-dev) after the last tag."""
     repo = root / "repo"
     (repo / ".claude-plugin").mkdir(parents=True)
+    (repo / "bin").mkdir()
+    (repo / "bin" / "swarm").write_text("#!/bin/sh\nexit 0\n")
+    (repo / "bin" / "swarm").chmod(0o755)
     (repo / ".claude-plugin" / "marketplace.json").write_text(json.dumps(
         {"name": "swarm", "owner": {"name": "t"}, "plugins": [{"name": "swarm", "source": "./"}]}))
     git(repo, "init", "-q", "-b", "main")

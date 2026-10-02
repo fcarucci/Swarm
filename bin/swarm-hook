@@ -9,6 +9,13 @@
 # A sandboxed agent can write the state dir ~/.local/state/swarm, so nothing there is touched,
 # appended to or shown. If the host dir is not a real 0700 directory of
 # this user (a symlink, another user's, loose), nothing is written or read in it at all.
+if [ "${OS:-}" = "Windows_NT" ]; then   # Git Bash on Windows: the Python entry does the work
+  L="$(cd "$(dirname "$0")/.." && pwd)/lib/swarm/winhook.py"
+  command -v cygpath >/dev/null 2>&1 && L="$(cygpath -w "$L")"
+  if command -v py >/dev/null 2>&1; then exec py -3 "$L" "$@"; fi
+  if command -v python >/dev/null 2>&1; then exec python "$L" "$@"; fi
+  cat >/dev/null; exit 0
+fi
 H=""; HOSTARG=""
 if [ "${1:-}" = "--host" ]; then
   [ $# -ge 3 ] || { cat >/dev/null; exit 0; }   # no host or no event: nothing to do, never fail

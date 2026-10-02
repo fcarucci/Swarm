@@ -1,6 +1,13 @@
 #!/bin/sh
 # swarm CLI launcher. The venv lives outside the plugin, so it survives plugin updates; it is
 # (re)built only when requirements.txt changes. Then it runs the swarm package from this plugin.
+if [ "${OS:-}" = "Windows_NT" ]; then   # Git Bash on Windows: the Python entry does the work
+  L="$(cd "$(dirname "$0")/.." && pwd)/lib/swarm/winlaunch.py"
+  command -v cygpath >/dev/null 2>&1 && L="$(cygpath -w "$L")"
+  if command -v py >/dev/null 2>&1; then exec py -3 "$L" "$@"; fi
+  if command -v python >/dev/null 2>&1; then exec python "$L" "$@"; fi
+  echo "swarm: Python 3.11 or newer was not found on PATH" >&2; exit 1
+fi
 D="$(cd "$(dirname "$0")/.." && pwd)"
 V="${SWARM_VENV:-$HOME/.local/share/swarm/venv}"
 REQ="$(cksum < "$D/requirements.txt" | cut -d' ' -f1)"

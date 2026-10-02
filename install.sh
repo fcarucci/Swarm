@@ -80,6 +80,11 @@ docs/REFERENCE.md \"Upgrading: this version needs schema v9, on every host at on
   HOST_ARG=""
   MARKETPLACE="$DEFAULT_MARKETPLACE"
   MARKETPLACE_GIVEN=0
+  CHANNEL="release"      # release: the newest vX.Y.Z tag; main: the tip of main
+  CHANNEL_GIVEN=0
+  REF_GIVEN=""           # --ref <tag|branch>: an explicit ref, overrides the channel
+  PIN_REF=""             # what resolve_channel settled on ("" = the default branch, unpinned)
+  PIN_ACTIVE=0           # 1 when the marketplace is added pinned (not for a local path)
   ASSUME_YES=0
   ALL_USERS=0
   CURRENT_USER_ONLY=0
@@ -195,6 +200,11 @@ Flags:
                               scanning PATH plus common install locations)
   --marketplace <url|path>   marketplace to add (default: $DEFAULT_MARKETPLACE).
                               A local path is a frozen tree, for testing before a push.
+  --channel release|main     which revision to install: release = the newest vX.Y.Z tag
+                              (default), main = the tip of the main branch. If no tag can be
+                              found (or git ls-remote fails) it falls back to main with a warning.
+  --main                     shorthand for --channel main
+  --ref <tag|branch>         install exactly this tag or branch (overrides --channel)
   --yes                      never prompt; assume yes (required when there is no TTY)
   --all-users                install for every human user on this machine who has claude or
                               codex; requires root (this is also what running as root does)
@@ -263,6 +273,18 @@ parse_args() {
         MARKETPLACE="$2"; MARKETPLACE_GIVEN=1; shift 2 ;;
       --marketplace=*)
         MARKETPLACE="${1#--marketplace=}"; MARKETPLACE_GIVEN=1; shift ;;
+      --channel)
+        [ $# -ge 2 ] || die "--channel needs a value (release or main)"
+        CHANNEL="$2"; CHANNEL_GIVEN=1; shift 2 ;;
+      --channel=*)
+        CHANNEL="${1#--channel=}"; CHANNEL_GIVEN=1; shift ;;
+      --main)
+        CHANNEL="main"; CHANNEL_GIVEN=1; shift ;;
+      --ref)
+        [ $# -ge 2 ] || die "--ref needs a value (a tag or branch)"
+        REF_GIVEN="$2"; shift 2 ;;
+      --ref=*)
+        REF_GIVEN="${1#--ref=}"; shift ;;
       --yes)
         ASSUME_YES=1; shift ;;
       --all-users)
@@ -284,6 +306,13 @@ parse_args() {
     ""|claude|codex|both) : ;;
     *) die "--host must be claude, codex or both (got: $HOST_ARG)" ;;
   esac
+  case "$CHANNEL" in
+    release|main) : ;;
+    *) die "--channel must be release or main (got: $CHANNEL)" ;;
+  esac
+  case "$REF_GIVEN" in
+    ""|*[!A-Za-z0-9._/+-]*|-*) [ -z "$REF_GIVEN" ] || die "--ref must be a tag or branch name (got: $REF_GIVEN)" ;;
+  esac
   if [ "$ALL_USERS" = "1" ] && [ "$CURRENT_USER_ONLY" = "1" ]; then
     die "--all-users and --current-user contradict each other; pick one"
   fi
@@ -293,6 +322,8 @@ parse_args() {
 host_flags() {
   [ -n "$HOST_ARG" ] && printf '%s\n' --host "$HOST_ARG"
   [ "$MARKETPLACE_GIVEN" = "1" ] && printf '%s\n' --marketplace "$MARKETPLACE"
+  [ "$CHANNEL_GIVEN" = "1" ] && printf '%s\n' --channel "$CHANNEL"
+  [ -n "$REF_GIVEN" ] && printf '%s\n' --ref "$REF_GIVEN"
   [ "$FORCE" = "1" ] && printf '%s\n' --force
   return 0
 }
@@ -456,12 +487,60 @@ detect_hosts() {
 
 # --------------------------------------------------------------------------- marketplace / plugin
 
+# Which revision to install: --ref wins; channel main is the unpinned default branch; channel
+# release is the newest vX.Y.Z tag (git ls-remote works anonymously on GitHub and Gitea), falling
+# back to main with a warning when there is none. A local --marketplace path is a frozen tree:
+# nothing to pin.
+resolve_channel() {
+  PIN_REF=""; PIN_ACTIVE=0
+  if [ -d "$MARKETPLACE" ]; then
+    log "channel: the marketplace is a local path ($MARKETPLACE): installing it as is"
+    return 0
+  fi
+  PIN_ACTIVE=1
+  if [ -n "$REF_GIVEN" ]; then
+    PIN_REF="$REF_GIVEN"
+    log "channel: ref $PIN_REF (explicit --ref)"
+  elif [ "$CHANNEL" = "main" ]; then
+    log "channel: main (tip of main)"
+  else
+    tag="$(GIT_TERMINAL_PROMPT=0 git ls-remote --tags --refs --sort=-v:refname "$MARKETPLACE" 'v*' 2>/dev/null </dev/null \
+           | sed -n 's|.*refs/tags/\(v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$|\1|p' | head -n1 || true)"
+    if [ -n "$tag" ]; then
+      PIN_REF="$tag"
+      log "channel: release (newest tag $PIN_REF)"
+    else
+      warn "no release tag (vX.Y.Z) found at $MARKETPLACE, or git ls-remote failed: falling back to the tip of main"
+      CHANNEL="main"
+      log "channel: main (tip of main, fallback)"
+    fi
+  fi
+}
+
+pinned_source() {   # the marketplace source for claude: <url>#<ref> when pinned
+  host="$1"
+  if [ "$host" = "claude" ] && [ -n "$PIN_REF" ]; then printf '%s#%s' "$MARKETPLACE" "$PIN_REF"; else printf '%s' "$MARKETPLACE"; fi
+}
+
 marketplace_add_or_update() {
   host="$1"; bin="$(host_bin "$host")"
-  log "[$host] marketplace: add/update $MARKETPLACE"
-  if "$bin" plugin marketplace add "$MARKETPLACE" >"$TMP_DIR/mp-add.$host.log" 2>&1 </dev/null; then
+  src="$(pinned_source "$host")"
+  set -- "$src"
+  if [ "$host" = "codex" ] && [ -n "$PIN_REF" ]; then set -- "$src" --ref "$PIN_REF"; fi
+  log "[$host] marketplace: add/update $src${PIN_REF:+ (ref $PIN_REF)}"
+  if "$bin" plugin marketplace add "$@" >"$TMP_DIR/mp-add.$host.log" 2>&1 </dev/null; then
     log "[$host] marketplace added"
     return 0
+  fi
+  if [ "$PIN_ACTIVE" = "1" ]; then
+    # Already registered, maybe at another ref: only remove+add moves it to the chosen one (a
+    # plain update would stay on the old ref). Claude drops the plugin with its marketplace;
+    # plugin_install puts it back.
+    "$bin" plugin marketplace remove "$MARKETPLACE_NAME" >"$TMP_DIR/mp-remove.$host.log" 2>&1 </dev/null || true
+    if "$bin" plugin marketplace add "$@" >"$TMP_DIR/mp-readd.$host.log" 2>&1 </dev/null; then
+      log "[$host] marketplace re-added at ${PIN_REF:-the tip of main}"
+      return 0
+    fi
   fi
   # Codex has "marketplace upgrade" (same name argument), older CLIs "marketplace update"; try upgrade
   # first there, then the older name. Claude only has "update".
@@ -477,7 +556,7 @@ marketplace_add_or_update() {
   # Fall back to the remove+add pattern the README's rollout uses to switch marketplaces: covers
   # CLIs with no "marketplace update" subcommand, and a marketplace entry pointing somewhere else.
   "$bin" plugin marketplace remove "$MARKETPLACE_NAME" >"$TMP_DIR/mp-remove.$host.log" 2>&1 </dev/null || true
-  if "$bin" plugin marketplace add "$MARKETPLACE" >"$TMP_DIR/mp-readd.$host.log" 2>&1 </dev/null; then
+  if "$bin" plugin marketplace add "$@" >"$TMP_DIR/mp-readd.$host.log" 2>&1 </dev/null; then
     log "[$host] marketplace re-added (remove+add) after add/update failed"
     return 0
   fi
@@ -634,7 +713,10 @@ run_bootstrap() {
   # first-run step, for whoever calls bootstrap directly, e.g. the SessionStart hook). Called
   # from here that would run migrate once per host bootstrapped; this script runs it itself,
   # once per user, after every host's bootstrap (run_migrate, below) -- never both.
-  out="$(SWARM_NO_MIGRATE=1 "$sw" bootstrap --host "$host" 2>&1 </dev/null)"
+  # SWARM_CHANNEL: remember an explicitly chosen channel for `swarm upgrade` (bootstrap writes it
+  # into the config's [upgrade] section).
+  chan=""; if [ "$CHANNEL_GIVEN" = "1" ] && [ -z "$REF_GIVEN" ] && [ "$PIN_ACTIVE" = "1" ]; then chan="$CHANNEL"; fi
+  out="$(SWARM_CHANNEL="$chan" SWARM_NO_MIGRATE=1 "$sw" bootstrap --host "$host" 2>&1 </dev/null)"
   rc=$?
   set -e
   printf '%s\n' "$out" | paint_lines
@@ -1059,6 +1141,7 @@ current_user_main() {
   log "marketplace: $MARKETPLACE"
 
   preflight
+  resolve_channel
 
   confirm "Install/update/activate swarm for:$HOSTS from $MARKETPLACE ?" || die "aborted (not confirmed)"
 
@@ -1071,6 +1154,8 @@ current_user_main() {
   for host in $HOSTS; do
     sw="$(locate_swarm_bin "$host")" || die "[$host] can't find the installed swarm plugin's bin/swarm in $host's plugin cache; check '$(host_bin "$host") plugin list', then re-run install.sh"
     log "[$host] using $sw"
+    pv="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$(dirname "$(dirname "$sw")")/.claude-plugin/plugin.json" "$(dirname "$(dirname "$sw")")/.codex-plugin/plugin.json" 2>/dev/null | head -n1 || true)"
+    log "[$host] installed swarm ${pv:-unknown}: channel $CHANNEL, ref ${PIN_REF:-main (tip)}"
     run_bootstrap "$host" "$sw"
   done
 

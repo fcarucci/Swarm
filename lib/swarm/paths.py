@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
+
+IS_WINDOWS = sys.platform == "win32"
 
 LIB_DIR = Path(__file__).resolve().parent.parent
 PLUGIN_ROOT = LIB_DIR.parent
@@ -45,14 +48,31 @@ def venv_dir() -> Path:
     return Path(os.environ["SWARM_VENV"]) if os.environ.get("SWARM_VENV") else share_dir() / "venv"
 
 
+def venv_python(venv: Path | None = None) -> Path:
+    """The interpreter inside the venv: <venv>/bin/python, <venv>/Scripts/python.exe on Windows.
+    (Both names are probed on Windows: a venv made by an MSYS/Git Bash python has bin/.)"""
+    v = venv if venv is not None else venv_dir()
+    if IS_WINDOWS:
+        for cand in (v / "Scripts" / "python.exe", v / "bin" / "python.exe", v / "bin" / "python"):
+            if cand.exists():
+                return cand
+        return v / "Scripts" / "python.exe"
+    return v / "bin" / "python"
+
+
 def launcher_path() -> Path:
-    return home() / ".local" / "bin" / "swarm"
+    """The user-terminal launcher: ~/.local/bin/swarm (a sh script); ~/.local/bin/swarm.cmd on
+    Windows (cmd.exe and PowerShell resolve a bare `swarm` to it when ~/.local/bin is on PATH)."""
+    return home() / ".local" / "bin" / ("swarm.cmd" if IS_WINDOWS else "swarm")
 
 
 def agent_bin() -> Path:
     """The swarm command given to agents and the orchestrator: this plugin's own bin/swarm. It
     exists whenever a hook or the skill runs, which ~/.local/bin/swarm (written by the detached
-    bootstrap, a convenience for the user's terminal) may not yet."""
+    bootstrap, a convenience for the user's terminal) may not yet. On Windows it is bin/swarm.cmd,
+    runnable from cmd, PowerShell and Git Bash alike (the extensionless sh script is not)."""
+    if IS_WINDOWS:
+        return PLUGIN_ROOT / "bin" / "swarm.cmd"
     return PLUGIN_ROOT / "bin" / "swarm"
 
 
