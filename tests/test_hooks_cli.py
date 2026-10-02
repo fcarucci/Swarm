@@ -506,8 +506,6 @@ class SpoolTests(Env):
                     barrier.wait()
                     counts.append(spool.flush_spool(b, self.cfg))
             except Exception as exc:  # pragma: no cover
-                import traceback
-                traceback.print_exc()   # a failure here names its frame in the CI log
                 errors.append(exc)
 
         threads = [threading.Thread(target=flusher) for _ in range(6)]

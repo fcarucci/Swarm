@@ -10,7 +10,7 @@ import threading
 from pathlib import Path
 from unittest import mock
 
-from support import posix_only  # noqa: E402
+from support import ROOT, posix_only  # noqa: E402
 from test_hooks_cli import Env  # noqa: E402  (sets sys.path)
 
 from swarm import spool  # noqa: E402
@@ -209,3 +209,45 @@ class DefaultSpoolTests(Env):
         from swarm import cli
         default = cli.DEFAULTS["board"]["spool_dir"]
         self.assertTrue(default.startswith("~/") or "{uid}" in default, default)
+
+
+_FLUSHER = r"""
+import os, sys, time
+sys.path.insert(0, sys.argv[1])
+from swarm import spool
+spool_dir, out, go = sys.argv[2:5]
+
+class Board:
+    n = 0
+    def post(self, job, name, message, to=None, agent_key=None):
+        Board.n += 1   # one file per delivery, so a double delivery shows
+        with open(os.path.join(out, f"{message}.{os.getpid()}.{Board.n}"), "w"):
+            pass
+
+while not os.path.exists(go):
+    time.sleep(0.005)
+for _ in range(3):
+    spool.flush_spool(Board(), {"board": {"spool_dir": spool_dir}})
+"""
+
+
+class SpoolProcessesTests(Env):
+    def test_flushers_in_separate_processes_deliver_each_record_once(self):
+        """Hooks flush with no lock, each in its own process: one record is claimed by exactly one
+        of them, and a lost claim never leaves a record in .bad (a lost queued post)."""
+        import subprocess
+        import sys
+        n, procs = 120, 5
+        for i in range(n):
+            spool.spool_post(self.cfg, "J", "Someone", f"m{i}", None)
+        out, go = self.tmp / "out", self.tmp / "go"
+        out.mkdir()
+        lib = str(ROOT / "lib")
+        children = [subprocess.Popen([sys.executable, "-c", _FLUSHER, lib, str(self.spool_dir), str(out), str(go)],
+                                     stderr=subprocess.PIPE, text=True) for _ in range(procs)]
+        go.write_text("go")
+        errs = [c.communicate(timeout=120)[1] for c in children]
+        self.assertEqual([c.returncode for c in children], [0] * procs, errs)
+        delivered = sorted(p.name.split(".")[0] for p in out.iterdir())
+        self.assertEqual(delivered, sorted(f"m{i}" for i in range(n)))
+        self.assertEqual(sorted(p.name for p in self.spool_dir.iterdir()), [])
