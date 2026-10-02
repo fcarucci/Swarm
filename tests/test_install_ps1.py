@@ -63,13 +63,12 @@ class InstallPs1Tests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         repo = make_repo(tmp)
         home = tmp / "home"; home.mkdir()
-        logs = tmp / "logs"
         bindir = tmp / "bin"; bindir.mkdir()
         (bindir / "stub.py").write_text(STUB_PY)
         (bindir / "claude.cmd").write_text(f'@echo off\r\n"{sys.executable}" "{bindir / "stub.py"}" claude %*\r\n')
         url = repo.as_uri()
-        for flags, want in (([], "installed swarm"), (["-Main"], "channel main")):
-            shutil.rmtree(logs, ignore_errors=True); logs.mkdir()
+        for n, (flags, want) in enumerate((([], "installed swarm"), (["-Main"], "channel main"))):
+            logs = tmp / f"logs{n}"; logs.mkdir()   # a fresh one each time (git's read-only files resist rmtree)
             env = {**os.environ, "USERPROFILE": str(home), "HOME": str(home), "LOGDIR": str(logs),
                    "PATH": f"{bindir};{os.environ['PATH']}", "SWARM_CONFIG": str(home / "c.toml")}
             res = subprocess.run([PWSH, "-NoProfile", "-File", str(ROOT / "install.ps1"), "-Target", "claude",
