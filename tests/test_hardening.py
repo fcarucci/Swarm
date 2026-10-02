@@ -363,6 +363,7 @@ class SpoolFlushBoundsTests(Env):
         self.assertTrue(next(iter(ids)))
         self.assertEqual([m["text"] for m in fake.banks["proj"]], ["a fact"])   # stored once
 
+    @posix_only("on Windows localhost tries ::1 first and each refused try takes ~2s (the fake server is IPv4 only)")
     def test_a_bounded_delivery_connects_to_the_resolved_address(self):
         from fake_hindsight import FakeHindsight
         fake = FakeHindsight()
