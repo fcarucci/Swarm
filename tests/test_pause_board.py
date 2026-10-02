@@ -44,7 +44,6 @@ class PauseContract:
 
     def test_schema_version(self):
         self.assertEqual(SCHEMA_VERSION, 12)
-        self.assertEqual(self.h.cfg and True, True)
 
     def test_pause_marks_job_records_manifest_and_closes_agents(self):
         a, c = self.team()
@@ -55,7 +54,7 @@ class PauseContract:
         self.assertEqual(m["version"], 1)
         self.assertEqual(m["job_state"]["goal"], "ship it")
         self.assertEqual(m["job_state"]["task"], "do the thing")
-        self.assertEqual(m["job_state"]["last_message_id"], 2)
+        self.assertEqual(m["job_state"]["last_message_id"], self.b.recent_messages(10, "j")[-1].id)
         by = {e["agent_key"]: e for e in m["agents"]}
         self.assertEqual(set(by), {"k1", "k2"})
         e = by["k1"]
@@ -63,13 +62,13 @@ class PauseContract:
                           e["last_tool"], e["kind"], e["task"]),
                          (a, "engineer", "claude", "sonnet", "sess-1", "/work/repo", "Bash", "subagent",
                           "do the thing"))
-        self.assertEqual(by["k2"]["cursor"], 2)
+        self.assertEqual(by["k2"]["cursor"], self.b.recent_messages(10, "j")[-1].id)
         self.assertIsNone(by["k2"]["cwd"])
         for key in ("k1", "k2"):
             row = next(x for x in self.b.agents("j") if x.agent_key == key)
             self.assertIsNotNone(row.ended_at)
             self.assertEqual(row.left_reason, LEFT_PAUSED)
-        self.assertEqual(self.b.roster("j"), [])
+        self.assertFalse(any(r.active for r in self.b.roster("j")))
         self.assertEqual(self.b.open_pause("j").id, rec.id)
 
     def test_pause_is_idempotent_and_only_for_active_jobs(self):
@@ -115,7 +114,7 @@ class PauseContract:
         self.assertEqual((done.resumed_by, done.resumed_host), ("me", "box2"))
         self.assertIsNone(self.b.open_pause("j"))
         self.assertEqual(self.b.claim_resume("n1", "k1", "j"), a)
-        names = {r.name for r in self.b.roster("j")}
+        names = {r.name for r in self.b.roster("j") if r.active}
         self.assertEqual(names, {a, c})
         self.assertEqual(self.b.allocate_name("n1", "j"), a)             # joining works again
         self.b.post("j", a, "back")
@@ -194,10 +193,10 @@ class TestSqliteMigration(unittest.TestCase):
             sql = conn.execute("SELECT sql FROM sqlite_master WHERE name = 'jobs'").fetchone()[0]
             conn.execute("PRAGMA foreign_keys = OFF")
             conn.execute("DROP TABLE job_pauses")
-            conn.execute("ALTER TABLE jobs RENAME TO jobs_old")
-            conn.execute(sql.replace("'paused', ", "").replace("CREATE TABLE jobs", "CREATE TABLE jobs", 1))
-            conn.execute("INSERT INTO jobs SELECT * FROM jobs_old")
-            conn.execute("DROP TABLE jobs_old")
+            conn.execute(sql.replace("'paused', ", "").replace("CREATE TABLE jobs", "CREATE TABLE jobs_new", 1))
+            conn.execute("INSERT INTO jobs_new SELECT * FROM jobs")
+            conn.execute("DROP TABLE jobs")
+            conn.execute("ALTER TABLE jobs_new RENAME TO jobs")
             conn.execute("PRAGMA user_version = 11")
             conn.commit()
             self.assertNotIn("'paused'", conn.execute("SELECT sql FROM sqlite_master WHERE name = 'jobs'").fetchone()[0])

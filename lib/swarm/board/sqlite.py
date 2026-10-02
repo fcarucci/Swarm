@@ -959,6 +959,10 @@ class SqliteBoard(Board):
                        cursor, int(judge), int(bool(verifier)), resume_of))
             return name
 
+    def job_state(self, job: str) -> str | None:
+        r = self._c().execute("SELECT status FROM jobs WHERE job = ?", (job,)).fetchone()
+        return r[0] if r else None
+
     # ---- pause / resume ------------------------------------------------------------------
 
     _PAUSE_COLS = "id, job, paused_at, paused_by, reason, manifest, resumed_at, resumed_by, resumed_host, outcome"

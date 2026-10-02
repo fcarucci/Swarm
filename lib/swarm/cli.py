@@ -650,7 +650,7 @@ def _say_closed(closed) -> None:
 
 NAME_PALETTE = (31, 32, 33, 34, 35, 36, 91, 92, 93, 94, 95, 96)
 STATUS_COLORS = {"running": 32, "started": 36, "idle": 33, "completed": 34, "active": 32,
-                 "dead": 31, "failed": 31, "left": 90, "cancelled": 90, "waiting": 35}
+                 "dead": 31, "failed": 31, "left": 90, "cancelled": 90, "waiting": 35, "paused": 35}
 
 
 def _sgr(code: int, text: str) -> str:
@@ -940,12 +940,21 @@ def _waiting_word(j, now) -> str:
     return f"{j.waiting_on} · {since}"
 
 
+def open_and_paused(board, include_closed: bool) -> list:
+    """The jobs a listing shows: with include_closed all of them, else the active ones plus the paused
+    ones (board.jobs(False) is active only: the sweeps and the supervisor rely on that)."""
+    rows = board.jobs(include_closed)
+    if not include_closed:
+        rows = rows + [j for j in board.jobs(True) if j.status == "paused"]
+    return rows
+
+
 def jobs_overview(board, include_closed: bool, color: bool, sup: dict | None = None,
                   rows: list | None = None) -> str:
     """rows: the jobs to list (default: board.jobs(include_closed)); `watch --session` passes its own."""
     now = board.now()
     if rows is None:
-        rows = board.jobs(include_closed)
+        rows = open_and_paused(board, include_closed)
     if not rows:
         return "no active jobs" + ("" if include_closed else " (--all includes closed ones)")
     table = [[j.job, _job_status_word(board, j, now), str(j.agents), str(j.running + j.started), str(j.idle),
@@ -1965,7 +1974,7 @@ def _compact_frame(board, job: str | None, color: bool, view: dict, rows: list |
     title = _clip(_bold(_fit(f"swarm · {scope} · {dt.datetime.now().strftime('%H:%M:%S')}", cols), color), cols)
     out = []
     if rows is None:
-        rows = [board.job_status(job)] if job else board.jobs(False)
+        rows = [board.job_status(job)] if job else open_and_paused(board, False)
         rows = [j for j in rows if j]
     if not rows:
         out.append("(no jobs yet)")
@@ -2314,8 +2323,23 @@ def _parser() -> argparse.ArgumentParser:
                     help="the wait expires after this long (90m, 2h, 1h30m; a bare number is minutes); "
                          "then the job is judged as not waiting")
     wt.add_argument("--on", nargs="+", required=True, help="what the job is waiting for")
-    rs = sub.add_parser("resume", help="the job is no longer waiting (an agent joining does this too)")
+    pz = sub.add_parser("pause", help="pause a job: stop new joins and posts, record every agent and "
+                                      "store its final transcript, so `swarm resume` can continue it anywhere")
+    pz.add_argument("--job", required=True)
+    pz.add_argument("--reason", help="why (shown on the board and to the paused agents)")
+    pz.add_argument("--wait", type=float, default=15.0, metavar="SECONDS",
+                    help="how long to wait for other machines' agents to store their final transcript (default 15)")
+    rs = sub.add_parser("resume", help="resume a paused job on this machine (re-creating its agents from the "
+                                       "transcripts on the board), else: the job is no longer waiting")
     rs.add_argument("--job", required=True)
+    rs.add_argument("--host", choices=["claude", "codex"],
+                    help="run the resumed agents on this host (default: each agent's own; a different one "
+                         "resumes from a briefing, not the transcript)")
+    rs.add_argument("--workdir", help="where the agents work on this machine (default: their recorded directory "
+                                      "if it exists here, else the current directory)")
+    rs.add_argument("--only", nargs="+", metavar="NAME", help="resume only these agents")
+    rs.add_argument("--dry-run", action="store_true", help="show what would be resumed; change nothing")
+    rs.add_argument("--retry", action="store_true", help="redo the agents a previous resume of this job failed")
     st = sub.add_parser("status", help="jobs overview, or one job's agents with --job")
     st.add_argument("--job"); st.add_argument("--all", action="store_true", help="include closed jobs")
     st.add_argument("--all-agents", action="store_true",
@@ -3196,12 +3220,39 @@ def _board_wait(board, cfg: dict, args) -> int:
     return 0
 
 
-def _board_resume(board, cfg: dict, args) -> int:
-    if not board.set_waiting(args.job, None):
-        print(f"{args.job} is not an open job", file=sys.stderr)
+def _board_pause(board, cfg: dict, args) -> int:
+    from swarm import pause
+    report = pause.pause(board, cfg, args.job, args.reason, wait=max(0.0, args.wait))
+    if report is None:
+        print(f"{args.job} is not an open job (nothing to pause)", file=sys.stderr)
         return 1
-    print(f"{args.job} is no longer waiting")
+    for line in report.lines():
+        print(term_safe(line))
     return 0
+
+
+def _board_resume(board, cfg: dict, args) -> int:
+    from swarm import pause
+    rec, _ = pause.find_pause(board, args.job, args.retry)
+    advanced = args.host or args.workdir or args.only or args.dry_run or args.retry
+    if rec is None:
+        if advanced:
+            print(f"{args.job} is not paused: nothing to resume" +
+                  (" (--retry: no earlier resume of it had failed agents)" if args.retry else ""), file=sys.stderr)
+            return 1
+        if not board.set_waiting(args.job, None):
+            print(f"{args.job} is not an open job", file=sys.stderr)
+            return 1
+        print(f"{args.job} is no longer waiting")
+        return 0
+    report = pause.resume(board, cfg, args.job, host=args.host, workdir=args.workdir, only=args.only or (),
+                          dry_run=args.dry_run, retry=args.retry)
+    if report is None:
+        print(f"{args.job} is not paused: nothing to resume", file=sys.stderr)
+        return 1
+    for line in report.lines():
+        print(term_safe(line))
+    return 1 if report.failed else 0
 
 
 def _board_leave(board, cfg: dict, args) -> int | None:
@@ -3265,6 +3316,7 @@ BOARD_COMMANDS = {
     "post": _board_post,
     "verdict": _board_verdict,
     "wait": _board_wait,
+    "pause": _board_pause,
     "resume": _board_resume,
     "read": _board_read,
     "who": _board_who,
@@ -3298,13 +3350,16 @@ def _main(argv=None) -> int:
     """Parse and run one command. No command dies with a traceback for want of a primary: a board
     that can't be reached, or a server that is a standby (psycopg's read-only error, SQLSTATE
     25006, e.g. a single-host config pointing at one), is one line on stderr and exit 1."""
-    from swarm.board import BoardUnavailable
+    from swarm.board import BoardUnavailable, JobPaused
     args = _parser().parse_args(argv)
     note = "" if _reads_only(args) else " (this command writes: it needs the primary)"
     try:
         return _dispatch(args)
     except BoardUnavailable as exc:
         print(NEEDS_PRIMARY.format(exc, note), file=sys.stderr)
+        return 1
+    except JobPaused as exc:   # a join or post to a paused job: one clear line, nothing queued
+        print(f"swarm: {term_safe(str(exc))}", file=sys.stderr)
         return 1
     except Exception as exc:
         if getattr(exc, "sqlstate", None) != "25006":   # read_only_sql_transaction
@@ -3334,6 +3389,9 @@ def _dispatch(args) -> int:
             print(f"queued (board not reachable from here: {_error_name(exc)}); it is delivered "
                   f"automatically within seconds by the swarm hooks. This is normal inside a sandbox.")
             return 0
+        if args.cmd == "resume" and (args.host or args.workdir or args.only or args.dry_run or args.retry):
+            print(f"cannot reach the board database: {exc} (resuming a paused job needs the board)", file=sys.stderr)
+            return 1
         if args.cmd in ("wait", "resume"):   # likewise (no network in a Codex sandbox)
             on = " ".join(args.on).strip() if args.cmd == "wait" else None
             if args.cmd == "wait" and not on:

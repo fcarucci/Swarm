@@ -471,6 +471,7 @@ def _deliver(board, cfg: dict, d: int, name: str, claimed: str, rec: tuple, fail
     """Deliver one claimed record: "delivered" (its file is gone), "skip" (put back or parked;
     go on), "down" (Hindsight unreachable: skip memories for the rest of the flush) or "stop"
     (board trouble: put back; stop the flush)."""
+    from swarm.board.base import JobPaused
     suffix = _suffix(name)
     if suffix == ".mem":
         outcome = _deliver_memory(board, cfg, d, name, claimed, rec, failed_banks)
@@ -490,6 +491,9 @@ def _deliver(board, cfg: dict, d: int, name: str, claimed: str, rec: tuple, fail
             accepted = _deliver_post(board, rec)
     except ValueError:   # the board will never take it (a name or text it refuses): not retried
         accepted = False
+    except JobPaused:    # kept for after the resume; the rest of the spool goes on
+        _mv(d, claimed, name)
+        return "skip"
     except Exception:
         _mv(d, claimed, name)  # board trouble: put it back for the next flush
         return "stop"

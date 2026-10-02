@@ -1072,7 +1072,10 @@ def _enrol_resumed(board, agent_id: str, resume: dict, payload: dict, cfg: dict)
         _deny(f"[swarm] This session is not a restart the swarm supervisor started ({why}). Stop now: "
               f"end your turn without further tool calls.")
         return
-    off = _supervise_off(board, cfg, job)
+    from swarm.pause import PAUSE_RESUME_REASON
+    row = next((x for x in board.restarts(job=job) if x.id == r.get("restart_id")), None)
+    from_pause = row is not None and (row.reason or "").startswith(PAUSE_RESUME_REASON)
+    off = None if from_pause else _supervise_off(board, cfg, job)   # a resume the user asked for is not the supervisor's
     if off:   # the kill switches hold at the enrolment too
         _deny(f"[swarm] The swarm supervisor is switched off ({off}), so this restart won't go "
               f"ahead. Stop now: end your turn without further tool calls.")
@@ -1091,11 +1094,21 @@ def _enrol_resumed(board, agent_id: str, resume: dict, payload: dict, cfg: dict)
     goal, judge = (js.goal, js.judge) if js else (None, None)
     note = (f"[swarm] The swarm supervisor restarted you to continue the work of {name}, which "
             f"stopped responding: you are {name} now. You can't spawn subagents.")
+    if from_pause:
+        note = (f"[swarm] Job \"{job}\" was paused and resumed: you are {name} again, continuing from your "
+                f"stored transcript. You can't spawn subagents.")
     _welcome(board, "turn", agent_id, job, name, cfg, is_judge=role == "judge",
              is_verifier=role == "verifier", goal=goal, judge=judge, note=note,
              heading=f"messages since {name} stopped", payload=payload)
     if current_host().is_spawn(payload):   # not even on its first call
         _deny_replacement_spawn(board, agent_id)
+
+
+def _first_call_of_resumed(board, agent_id: str, job: str) -> bool:
+    """Whether this tool call is the first of a session `swarm resume` started: its seat (a row with
+    resume_of) was claimed up front, so it is a member already, but it has not been welcomed yet."""
+    me = next((a for a in board.agents(job, include_departed=False) if a.agent_key == agent_id), None)
+    return me is not None and me.resume_of is not None and me.tool_calls <= 1
 
 
 def _supervise_off(board, cfg: dict, job: str) -> str | None:
@@ -1140,6 +1153,23 @@ def _deny_replacement_spawn(board, agent_id: str) -> None:
     _deny("[swarm] A restarted agent can't spawn subagents: do the work yourself.")
 
 
+def _paused_stop(board, agent_id: str) -> str | None:
+    """The stop message for an agent that a `swarm pause` closed, while its job is still paused
+    (swarm.pause.paused_stop_text), else None. Once the job is resumed the agent is no longer
+    refused here: a resumed one has been replaced (the replaced-key check stops its old process),
+    one that was not resumed is simply let back in by allocate_name."""
+    from swarm.board import LEFT_PAUSED
+    from swarm.pause import paused_stop_text
+    job = board.route(agent_id).member_job
+    if not job:
+        return None
+    me = next((a for a in board.agents(job) if a.agent_key == agent_id), None)
+    if me is None or me.left_reason != LEFT_PAUSED or board.job_state(job) != "paused":
+        return None
+    rec = board.open_pause(job)
+    return paused_stop_text(job, rec.paused_by if rec else None, rec.reason if rec else None)
+
+
 def _stuck_closed(board, agent_id: str, replaced: bool = False) -> str | None:
     """The stop message for an agent the supervisor closed as stuck (a departed row with
     left_reason stuck:*, or a key a restart row names as the lost agent), else None. Such a key
@@ -1161,6 +1191,10 @@ def _stuck_closed(board, agent_id: str, replaced: bool = False) -> str | None:
             return None
     reps = [a for a in rows if a.resume_of == agent_id]
     rep = next((a for a in reps if a.ended_at is None), reps[-1] if reps else None)
+    if me.left_reason == "paused":   # paused, then resumed as another session (maybe on another box)
+        return (f"[swarm] Job \"{job}\" was paused and resumed: {rep.name if rep else 'a new session'} carries "
+                f"on your work, from your stored transcript. Stop now: end your turn without further tool "
+                f"calls, and do not report your task as done: say that the job was paused and resumed.")
     who = f"{rep.name} (restarted) has taken over your work" if rep else \
         "your work is left to a restart by the supervisor (if its budget allows)"
     why = f" ({me.left_reason})" if (me.left_reason or "").startswith(STUCK_PREFIX) else ""
@@ -1239,8 +1273,8 @@ def _on_event(board, event: str, agent_id: str, sid: str | None, bound: dict, un
         _memory_provenance(board, cfg, agent_id, sid, bound, payload)
         return
     if event == "start":
-        stop = _stuck_closed(board, agent_id)
-        if stop:   # a stuck-closed key is never enrolled again: it is only told to stop
+        stop = _paused_stop(board, agent_id) or _stuck_closed(board, agent_id)
+        if stop:   # a stuck-closed (or paused) key is never enrolled again: it is only told to stop
             _out("SubagentStart", stop)
             return
         _route_new(board, event, agent_id, sid, bound, unbound, payload, cfg)
@@ -1260,12 +1294,15 @@ def _on_event(board, event: str, agent_id: str, sid: str | None, bound: dict, un
         if resume is not None:
             _enrol_resumed(board, agent_id, resume, payload, cfg)
             return
-        stop = _stuck_closed(board, agent_id)
+        stop = _paused_stop(board, agent_id) or _stuck_closed(board, agent_id)
         if stop:
             _deny(stop)
             return
         _route_new(board, event, agent_id, sid, bound, unbound, payload, cfg)
         _gate_new_member(board, agent_id, bound, payload, cfg)
+        return
+    if resume is not None and _first_call_of_resumed(board, agent_id, member.job):
+        _enrol_resumed(board, agent_id, resume, payload, cfg)   # its seat was claimed by `swarm resume`
         return
     if resume is not None and current_host().is_spawn(payload):
         _deny_replacement_spawn(board, agent_id)
@@ -1510,6 +1547,15 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
                 pass
             _on_event(board, event, agent_id, sid, bound, unbound, payload, cfg, resume)
     except Exception as exc:  # never break the agent
+        from swarm.board.base import JobPaused
+        if isinstance(exc, JobPaused):   # a join into a paused job: tell the agent to stop, nothing else to do
+            from swarm.pause import paused_stop_text
+            text = paused_stop_text(exc.job, exc.paused_by, exc.reason)
+            if event == "turn":
+                _deny(text)
+            elif event == "start":
+                _out("SubagentStart", text)
+            return 0
         _log_error(event, agent_id, exc)
         # ...except that the spawn caps fail closed: with a job of this session active, an Agent
         # call whose limits could not be checked is refused rather than let through.

@@ -1058,6 +1058,50 @@ when the job is re-activated, and when it is closed. Only the display changes: t
 status stays `active` (`waiting_on` and `waiting_since` hold the reason), so the markers,
 routing and the completion gate are unaffected.
 
+## Pausing and resuming a job
+
+`swarm pause --job J [--reason TEXT] [--wait SECONDS]` freezes a job so it can be continued later,
+on this machine or another one that reaches the same board:
+
+- the job becomes `paused`: nobody can join it (`swarm join`, a new subagent) or post to it; they get
+  one clear line ("job J is paused since ... by ...: reason ... resume it with: swarm resume --job J").
+  Reads (`status`, `who`, `watch`, `transcript`) keep working, the hooks stay no-ops-safe, spooled posts
+  wait for the resume. A paused job is never auto-closed, expired or restarted by the supervisor, and
+  its messages, departed agents and transcripts are kept past the retention limits;
+- every active agent is recorded in a **resume manifest** (stored on the board, table `job_pauses`,
+  schema 12): name, role, host, harness, model, agent key, session id, read cursor, last tool, task,
+  working directory (where this machine knows it), judge/verifier seats. The agents are closed
+  (`left_reason = paused`); an agent that is still running is told at its next tool call to stop;
+- the final transcript of each agent is captured (this machine's directly, other machines' by their own
+  hooks, waited for up to `--wait` seconds, default 15). The report shows `final`, `snapshot` or
+  `missing` per agent. Transcripts are the already redacted copies on the board: no secret is exported.
+
+`swarm resume --job J [--host claude|codex] [--workdir DIR] [--only NAME ...] [--dry-run]` on a paused job
+re-creates the agents **on the machine it runs on**, from the board alone (no file of the old machine):
+
+1. each agent's stored transcript becomes a session of this machine's host (Claude Code `--resume`
+   of a rewritten session; Codex is a briefing unless the experimental native resume is enabled), told
+   by a note that it was paused and is resumed on host X, with its read cursor, last tool and task;
+2. its old name is claimed again with its read cursor before the job reopens, so nothing can take it,
+   then the job is `active` again and the sessions start detached; each one is enrolled by the hooks
+   under its old name on its first tool call (the same mechanism as a supervisor restart, and it works
+   with `[supervise] enabled = false`);
+3. the outcome per agent is stored on the pause; `swarm resume --job J --retry` redoes the failed ones.
+
+`--host` runs the agents on another host than they had (Claude agents on Codex or the reverse): the
+transcript cannot cross harnesses, so they start from a briefing (their task, the manifest, and a recap
+of the end of their transcript). The same fallback applies when a transcript is missing, was cut to head
+and tail, or the host cannot rewrite it. `--dry-run` shows what would happen and changes nothing.
+On a job that is not paused, `swarm resume --job J` keeps its old meaning: the job stops waiting.
+
+Known limits: the orchestrator session (your interactive Claude Code or Codex) is recorded but not
+started by `swarm resume`: it prints the command to resume it yourself. Resumed agents are independent
+headless sessions, not children of the original orchestrator, and are not capped by the supervisor's
+wall clock (Claude's `--max-turns` from `[supervise]` still applies). Files, git state and processes of
+the old machine are not part of the pause: the new machine needs the repository. Secrets redacted in
+the transcript stay redacted. Postgres boards need the schema 12 migration (`swarm init`, run
+automatically by the hooks) on one host before the others run the new code.
+
 ## Supervisor: stuck agents and automatic restarts
 
 **Linux only for now.** The supervisor starts sessions in the verified work dir through
@@ -1928,7 +1972,8 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `deactivate --job J [--status completed\|cancelled\|failed] [--outcome O] [--force]` | switch the board off and close the job (default `completed`). A job with a goal completes only with the judge's `met` verdict, or with `--force` (recorded). On an already closed (e.g. auto-closed) job it replaces the status and outcome |
 | `verdict --job J --as NAME met\|not_met REASON...` | the job's judge records its verdict and posts it on the board; anyone else is refused; spooled when the board is unreachable |
 | `wait --job J [--for DURATION] --on WHAT...` | mark an open job as waiting for something; shown as `waiting` with the reason. `--for 90m` (`h`/`m`/`s`, bare = minutes) bounds it: past that the wait expires and the orphan rule applies again |
-| `resume --job J` | the job is no longer waiting (an agent joining does this too) |
+| `pause --job J [--reason TEXT] [--wait SECONDS]` | pause a job: no joins or posts, every agent recorded in a resume manifest and closed, final transcripts captured (see Pausing and resuming a job) |
+| `resume --job J [--host claude\|codex] [--workdir DIR] [--only NAME...] [--dry-run] [--retry]` | on a paused job: re-create its agents on this machine from the transcripts on the board, same names and cursors. On any other job: the job is no longer waiting (an agent joining does this too) |
 | `status [--all] [--no-color]` | jobs overview |
 | `status --job J [--all-agents] [--no-color]` | one job's details and agents table |
 | `watch [--job J] [--session S] [--compact] [--exit-when-idle N] [--interval S] [--no-color]` | full-screen live dashboard |

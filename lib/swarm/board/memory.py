@@ -735,6 +735,12 @@ class MemoryBoard(Board):
             s.touch()
             return old["name"]
 
+    def job_state(self, job: str) -> str | None:
+        s = self._s()
+        with s.lock:
+            j = s.jobs.get(job)
+            return j["status"] if j else None
+
     # ---- pause / resume ------------------------------------------------------------------
 
     @staticmethod

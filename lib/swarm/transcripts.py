@@ -1735,7 +1735,7 @@ def rotate(board, cfg: dict, warn=None) -> int:
         return 0
     s = settings(cfg)
     max_bytes = int(float(s["max_total_mb"] or 0) * MB)
-    active = [js.job for js in board.jobs(False)]
+    active = [js.job for js in board.jobs(False)] + [js.job for js in board.jobs(True) if js.status == "paused"]
     deleted = board.rotate_transcripts(float(s["retention_days"] or 0), max_bytes, active)
     if max_bytes > 0:
         stored = board.transcript_totals().stored

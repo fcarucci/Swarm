@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import datetime as _dt
 import getpass
+import json
 import os
 import random
 import socket
@@ -24,7 +25,7 @@ from typing import Mapping, Sequence
 import psycopg
 from psycopg import sql
 
-from .base import (database_hosts, MOVED_PREFIX, NAME_PATTERN, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, ROUTE_STATES, TOOL_NAME_MAX,
+from .base import (LEFT_PAUSED, PauseRecord, build_manifest, database_hosts, MOVED_PREFIX, NAME_PATTERN, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, ROUTE_STATES, TOOL_NAME_MAX,
                    AgentEvent, Restart,
                    AgentStatus, Board, BoardError, BoardUnavailable, IncompatibleStorage, JobStatus,
                    Member, Message, OwedReply, ReadResult, Route, RosterEntry, SCHEMA_VERSION, SetupResult,
@@ -102,8 +103,18 @@ CREATE TRIGGER jobs_state_notify AFTER INSERT OR UPDATE OR DELETE ON jobs
     FOR EACH STATEMENT EXECUTE FUNCTION swarm_state_notify();
 DO $$ BEGIN
     ALTER TABLE jobs ADD CONSTRAINT jobs_status_check
-        CHECK (status IN ('active', 'completed', 'cancelled', 'failed'));
+        CHECK (status IN ('active', 'paused', 'completed', 'cancelled', 'failed'));
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+-- Schema version 12: a job can be 'paused' (swarm pause). A board set up before has the narrower check:
+-- replaced in place, once (the definition is looked at, so re-running init takes no table lock).
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'jobs'::regclass AND conname = 'jobs_status_check'
+               AND pg_get_constraintdef(oid) NOT LIKE '%paused%') THEN
+        ALTER TABLE jobs DROP CONSTRAINT jobs_status_check;
+        ALTER TABLE jobs ADD CONSTRAINT jobs_status_check
+            CHECK (status IN ('active', 'paused', 'completed', 'cancelled', 'failed'));
+    END IF;
+END $$;
 -- Per-agent sync state: what the hooks last told the agent (roster, memory recalls, reminders).
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS roster_seen text;
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS roster_synced_at timestamptz;
@@ -263,6 +274,21 @@ CREATE TABLE IF NOT EXISTS restarts (
 );
 CREATE INDEX IF NOT EXISTS restarts_job ON restarts (job, agent_key);
 CREATE INDEX IF NOT EXISTS restarts_host_at ON restarts (host, os_user, at);
+-- Pause/resume (schema version 12): one row per pause of a job, with its resume manifest (JSON text).
+-- No reference to jobs: the history outlives the job row's purge.
+CREATE TABLE IF NOT EXISTS job_pauses (
+    id           bigserial PRIMARY KEY,
+    job          text NOT NULL,
+    paused_at    timestamptz NOT NULL DEFAULT now(),
+    paused_by    text,
+    reason       text,
+    manifest     text NOT NULL,
+    resumed_at   timestamptz,
+    resumed_by   text,
+    resumed_host text,
+    outcome      text
+);
+CREATE INDEX IF NOT EXISTS job_pauses_job ON job_pauses (job, id);
 """
 
 # Thresholds are baked in from config each time `init` runs (re-run it after changing them).
@@ -762,14 +788,18 @@ class PostgresBoard(Board):
         days = int(self.board_cfg["retention_days"])
         stale = int(self.board_cfg["agent_stale_hours"])
         conn = self._conn
-        conn.execute("DELETE FROM messages WHERE created_at < now() - make_interval(days => %s)", (days,))
+        paused = "(SELECT job FROM jobs WHERE status = 'paused')"   # a paused job keeps its history
+        conn.execute(f"DELETE FROM messages WHERE created_at < now() - make_interval(days => %s) "
+                     f"AND job NOT IN {paused}", (days,))
         conn.execute("UPDATE agents SET left_at = now(), state = 'dead', current_tool = NULL "
                      "WHERE left_at IS NULL AND last_seen < now() - make_interval(hours => %s)", (stale,))
-        conn.execute("DELETE FROM agents WHERE left_at < now() - make_interval(days => %s)", (days,))
+        conn.execute(f"DELETE FROM agents WHERE left_at < now() - make_interval(days => %s) "
+                     f"AND job NOT IN {paused}", (days,))
         conn.execute("DELETE FROM jobs j WHERE COALESCE(finished_at, activated_at, created_at) "
                      "< now() - make_interval(days => %s) "
                      "AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.job = j.job) "
-                     "AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.job = j.job AND a.left_at IS NULL)",
+                     "AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.job = j.job AND a.left_at IS NULL) "
+                     "AND j.status <> 'paused'",
                      (days,))
         conn.execute("DELETE FROM agent_routes WHERE created_at < now() - make_interval(days => %s)", (days,))
         conn.execute("DELETE FROM restarts WHERE at < now() - make_interval(days => %s)", (days,))
@@ -861,7 +891,7 @@ class PostgresBoard(Board):
 
     # ---- agents --------------------------------------------------------------------
 
-    def allocate_name(self, agent_key: str, job: str, role: str | None = None) -> str:
+    def _allocate_name(self, agent_key: str, job: str, role: str | None = None) -> str:
         self.purge()
         self.ensure_job(job)
         known = self._existing_name(agent_key, job)
@@ -1140,6 +1170,85 @@ class PostgresBoard(Board):
                 return name
         except psycopg.errors.UniqueViolation:   # the name (or the judge seat) was taken meanwhile
             return None
+
+    def job_state(self, job: str) -> str | None:
+        r = self._conn.execute("SELECT status FROM jobs WHERE job = %s", (job,)).fetchone()
+        return r[0] if r else None
+
+    # ---- pause / resume ------------------------------------------------------------------
+
+    _PAUSE_COLS = "id, job, paused_at, paused_by, reason, manifest, resumed_at, resumed_by, resumed_host, outcome"
+
+    @staticmethod
+    def _pause_record(r) -> PauseRecord:
+        (pid, job, at, by, reason, manifest, rat, rby, rhost, outcome) = r
+        return PauseRecord(id=pid, job=job, paused_at=at, paused_by=by, reason=reason,
+                           manifest=json.loads(manifest), resumed_at=rat, resumed_by=rby,
+                           resumed_host=rhost, outcome=None if outcome is None else json.loads(outcome))
+
+    def _open(self, job: str) -> PauseRecord | None:
+        r = self._conn.execute(f"SELECT {self._PAUSE_COLS} FROM job_pauses WHERE job = %s AND resumed_at IS NULL "
+                               "ORDER BY id DESC LIMIT 1", (job,)).fetchone()
+        return self._pause_record(r) if r else None
+
+    def pause_job(self, job: str, by: str | None, reason: str | None,
+                  cwds: Mapping[str, str] | None = None) -> PauseRecord | None:
+        conn = self._conn
+        with conn.transaction():
+            row = conn.execute("SELECT status, goal, task, description, project, verdict, waiting_on, max_hours "
+                               "FROM jobs WHERE job = %s FOR UPDATE", (job,)).fetchone()
+            if row is None:
+                return None
+            if row[0] == "paused":
+                return self._open(job)
+            if row[0] != "active":
+                return None
+            now = conn.execute("SELECT now()").fetchone()[0]
+            job_row = dict(zip(("status", "goal", "task", "description", "project", "verdict",
+                                "waiting_on", "max_hours"), row))
+            names = ("agent_key", "name", "role", "host", "os_user", "harness", "model", "last_read_id",
+                     "tool_calls", "current_tool", "last_seen", "judge", "verifier", "resume_of", "turn_ended_at")
+            rows = []
+            for r in conn.execute(f"SELECT {', '.join('a.' + n for n in names)}, s.status, r.session_id, "
+                                  "EXISTS (SELECT 1 FROM transcripts t WHERE t.job = a.job AND t.agent_key = a.agent_key "
+                                  "AND t.role = 'orchestrator') "
+                                  "FROM agents a JOIN agent_status s ON s.agent_key = a.agent_key "
+                                  "LEFT JOIN agent_routes r ON r.agent_key = a.agent_key "
+                                  "WHERE a.job = %s AND a.left_at IS NULL ORDER BY a.joined_at, a.agent_key "
+                                  "FOR UPDATE OF a", (job,)).fetchall():
+                a = dict(zip(names, r[:len(names)]))
+                a["status"], a["session_id"], a["orchestrator"] = r[len(names):]
+                rows.append(a)
+            last = conn.execute("SELECT COALESCE(MAX(id), 0) FROM messages WHERE job = %s", (job,)).fetchone()[0]
+            manifest = build_manifest(job, now, by, reason, job_row, rows, last, cwds)
+            conn.execute("UPDATE agents SET left_at = now(), state = 'left', left_reason = %s, current_tool = NULL, "
+                         "tool_started_at = NULL WHERE job = %s AND left_at IS NULL", (LEFT_PAUSED, job))
+            conn.execute("UPDATE jobs SET status = 'paused' WHERE job = %s", (job,))
+            conn.execute("INSERT INTO job_pauses (job, paused_at, paused_by, reason, manifest) "
+                         "VALUES (%s, %s, %s, %s, %s)", (job, now, by, reason, json.dumps(manifest)))
+            return self._open(job)
+
+    def open_pause(self, job: str) -> PauseRecord | None:
+        return self._open(job)
+
+    def pauses(self, job: str) -> list[PauseRecord]:
+        return [self._pause_record(r) for r in self._conn.execute(
+            f"SELECT {self._PAUSE_COLS} FROM job_pauses WHERE job = %s ORDER BY id", (job,)).fetchall()]
+
+    def begin_resume(self, job: str, pause_id: int, by: str | None, host: str | None) -> bool:
+        conn = self._conn
+        with conn.transaction():
+            if conn.execute("UPDATE jobs SET status = 'active' WHERE job = %s AND status = 'paused' "
+                            "AND EXISTS (SELECT 1 FROM job_pauses WHERE id = %s AND job = %s AND resumed_at IS NULL) "
+                            "RETURNING job", (job, pause_id, job)).fetchone() is None:
+                return False
+            return conn.execute("UPDATE job_pauses SET resumed_at = now(), resumed_by = %s, resumed_host = %s "
+                                "WHERE id = %s AND resumed_at IS NULL RETURNING id",
+                                (by, host, pause_id)).fetchone() is not None
+
+    def record_resume_outcome(self, pause_id: int, outcome: dict) -> bool:
+        return self._conn.execute("UPDATE job_pauses SET outcome = %s WHERE id = %s RETURNING id",
+                                  (json.dumps(outcome), pause_id)).fetchone() is not None
 
     def set_job_supervise(self, job: str, on: bool) -> bool:
         return self._conn.execute("UPDATE jobs SET supervise = %s WHERE job = %s RETURNING job",

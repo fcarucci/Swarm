@@ -1216,7 +1216,8 @@ class Board(abc.ABC):
         return self._allocate_name(agent_key, job, role)
 
     def job_state(self, job: str) -> str | None:
-        """The job's stored status (JOB_STATUSES), None if there is no such job."""
+        """The job's stored status (JOB_STATUSES), None if there is no such job. One cheap lookup
+        (every join and post asks): the backends override this default."""
         js = self.job_status(job)
         return js.status if js else None
 
