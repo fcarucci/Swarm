@@ -146,7 +146,7 @@ DEFAULTS = {
     # Optional project memory in Hindsight. With `url` empty the feature is off entirely.
     "hindsight": {"url": "", "api_key_file": "", "timeout_seconds": 3,
                   "recall_max_items": 8, "recall_max_chars": 1500, "recall_max_tokens": 1024,
-                  "recall_minutes": 15, "recall_start_seconds": 12.0, "remember_nudge_minutes": 20,
+                  "recall_minutes": 15, "recall_start_seconds": 6.0, "remember_nudge_minutes": 20,
                   "remember_max_chars": 1000, "retry_after_seconds": 60},
 }
 

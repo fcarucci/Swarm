@@ -232,7 +232,7 @@ class MemoryTests(HindsightEnv):
         self.assertRegex(self.error_log.read_text(), r"memory agent-1: HindsightUnavailable: ")
 
     def test_slow_hindsight_times_out_then_is_skipped_for_a_while(self):
-        self.enable(timeout_seconds=0.5, retry_after_seconds=60)
+        self.enable(timeout_seconds=0.5, recall_start_seconds=0.5, retry_after_seconds=60)
         self.fake.delay = 3
         self.cli("activate", "--job", "J")
         t = time.monotonic()
@@ -257,11 +257,11 @@ class MemoryTests(HindsightEnv):
 
 
 class ColdRecallTests(HindsightEnv):
-    """A cold Hindsight answers a recall slowly: the join recall waits for it, a mid-work one doesn't."""
+    """A slow Hindsight answers a recall late: the join recall waits for it, a mid-work one doesn't."""
 
     def test_start_recall_waits_for_a_slow_cold_recall(self):
         from swarm import hooks
-        self.enable(timeout_seconds=10, recall_start_seconds=5)
+        self.enable(timeout_seconds=1, recall_start_seconds=5)   # per-call timeout is raised to the budget
         self.fake.add_memory("j", "cold fact")
         self.fake.delays[("POST", "/memories/recall")] = hooks.HOOK_RECALL_SECONDS + 0.8   # beyond the old cap
         self.cli("activate", "--job", "J")
@@ -275,7 +275,9 @@ class ColdRecallTests(HindsightEnv):
             self.assertEqual(hooks._start_recall_seconds(cfg), 3.0)
         with mock.patch.dict(os.environ, {hooks.HOOK_RECALL_ENV: "junk"}):
             self.assertEqual(hooks._start_recall_seconds(cfg), 7.0)
-        self.assertEqual(hooks._start_recall_seconds({"hindsight": {}}), 12.0)
+        self.assertEqual(hooks._start_recall_seconds({"hindsight": {}}), 6.0)
+        self.assertEqual(hooks._start_recall_seconds({"hindsight": {"recall_start_seconds": 60}}),
+                         hooks.HOOK_RECALL_MAX_SECONDS)
 
     def test_start_recall_that_runs_out_of_time_is_retried_on_the_next_turn(self):
         self.enable(timeout_seconds=10, recall_start_seconds=0.6)
