@@ -8,6 +8,7 @@ from __future__ import annotations
 import datetime as _dt
 import re
 from pathlib import Path
+from swarm import compat
 
 _KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")   # an agent id / session id: no path or glob characters
 
@@ -159,12 +160,11 @@ def _num(v) -> float:
 
 def _try_lock(fd: int, wait: float) -> bool:
     """A non-blocking exclusive flock on `fd`, tried for up to `wait` seconds."""
-    import fcntl
     import time
     end = time.monotonic() + wait
     while True:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            compat.flock(fd, compat.LOCK_EX | compat.LOCK_NB)
             return True
         except BlockingIOError:
             if time.monotonic() >= end:

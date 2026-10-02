@@ -23,6 +23,7 @@ import os
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
+from swarm import compat
 
 WRITE_HINT = re.compile(r"\bremember\b")
 DOC_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@+=-]{0,199}")
@@ -551,7 +552,7 @@ def record_from_hook(board, cfg, host, agent_id, sid, payload, command, bound, d
             excerpt = make_excerpt(path, host.name, call_id, mine, output, at, deadline, settings(cfg))
         except Exception as exc:          # UnsafeTranscript, OSError, OutOfTime, bad data
             why = f"{type(exc).__name__}: {exc}"
-    node, saved = os.uname().nodename, []
+    node, saved = compat.node(), []
     # patch_on: False once the patch is off (not applicable: nothing tried, nothing logged);
     # patch_error: after the first failed patch, no more tries this hook, the rest listed with it
     patch_on, patch_error, unpatched = True, None, []
@@ -644,7 +645,7 @@ def cli_metadata(env) -> dict[str, str]:
     """What `swarm remember` knows about where it runs: no tool-call id, which only
     the hook has. Empty values, and any the spool would refuse (metadata_ok), are dropped."""
     from swarm import hosts
-    m = {"harness": hosts.detect_cli_host(env) or "", "host": os.uname().nodename,
+    m = {"harness": hosts.detect_cli_host(env) or "", "host": compat.node(),
          "session_id": hosts.cli_session_id(env) or "",
          "captured_at": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")}
     return {k: v for k, v in m.items() if v and metadata_ok(k, v)}

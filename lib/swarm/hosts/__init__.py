@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib
 import os
+from swarm import compat
 import subprocess
 from typing import Callable, Mapping
 
@@ -39,6 +40,8 @@ def detect_hook_host(flag: str | None, payload: dict, env: Mapping[str, str]) ->
 def _classify(argv: list[str]) -> str | None:
     for arg in argv[:2]:
         base = os.path.basename(arg)
+        if compat.IS_WINDOWS:   # claude.exe, codex.cmd
+            base = os.path.splitext(base)[0].lower()
         if base.startswith("codex"):
             return "codex"
         if base == "claude" or "claude-code" in arg:

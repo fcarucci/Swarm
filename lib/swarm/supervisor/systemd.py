@@ -82,7 +82,7 @@ def install(config: Path, minutes: int, run=subprocess.run):
     for name, content in ((SERVICE, service_text(paths.agent_bin(), config)),
                           (TIMER, timer_text(minutes))):
         path = directory / name
-        if not path.exists() or path.read_text() != content:
+        if not path.exists() or path.read_text(encoding="utf-8") != content:
             write_preserving(path, content, mode=0o600)
             changed = True
     commands = ([["systemctl", "--user", "daemon-reload"]] if changed else []) + [

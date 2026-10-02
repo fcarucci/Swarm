@@ -42,6 +42,7 @@ from pathlib import Path
 
 from swarm.cli import JOB_TAG as TAG, ROLE_TAG, SPAWN_TAG, fmt, tag_line  # type: ignore
 from swarm import hosts  # noqa: E402  (stdlib-only: hosts imports no board)
+from swarm import compat
 
 
 def _bin() -> str:
@@ -1141,7 +1142,7 @@ def _resume_problem(board, agent_id: str, resume: dict) -> str | None:
         return "no such restart"
     if row.ended_at is not None:
         return "that restart has ended"
-    if row.host != os.uname().nodename or row.os_user != getpass.getuser():
+    if row.host != compat.node() or row.os_user != getpass.getuser():
         return "another host's or user's restart"
     if row.new_agent_key not in (None, agent_id):
         return "that restart belongs to another session"

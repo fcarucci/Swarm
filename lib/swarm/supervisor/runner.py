@@ -62,6 +62,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from swarm import compat
 
 POLL_SECONDS = 5.0
 BOARD_EVERY = 30.0
@@ -250,7 +251,7 @@ def _row_problem(board, run: dict) -> str | None:
         return f"no restart row {run['restart_id']} on job {run['job']!r}"
     if row.old_agent_key != run["resume_of"]:
         return f"restart row {row.id} replaces another agent"
-    if row.host != os.uname().nodename or row.os_user != getpass.getuser():
+    if row.host != compat.node() or row.os_user != getpass.getuser():
         return f"restart row {row.id} belongs to another host or OS user"
     return None
 
@@ -283,7 +284,6 @@ def lock_file(restart_id: int, board) -> Path:
 def own(restart_id: int, board) -> int | None:
     """Take restart_id's run lock of `board` (exclusive, non-blocking): the locked descriptor, or
     None when a runner (or a reaper) holds it."""
-    import fcntl
     from swarm.supervisor import privfs
     with _runs_fd(board) as d:
         try:
@@ -293,7 +293,7 @@ def own(restart_id: int, board) -> int | None:
             log(f"refusing run lock r{int(restart_id)}.lock: not a private regular file (a planted link?)")
             return None
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        compat.flock(fd, compat.LOCK_EX | compat.LOCK_NB)
         return fd
     except OSError:
         os.close(fd)
@@ -304,7 +304,6 @@ def _held(restart_id: int, board) -> bool:
     """Whether a runner (or a reaper) holds restart_id's run lock of `board`. Read-only: creates
     nothing (a missing lock file is a lock nobody holds). The caps count running replacements
     from the board's open restart rows instead (every OS user's, runner alive or not)."""
-    import fcntl
     from swarm.supervisor import privfs
     try:
         with _runs_fd(board, create=False) as d:
@@ -314,7 +313,7 @@ def _held(restart_id: int, board) -> bool:
     except Exception:
         return True    # can't tell: count it (the cap errs on the safe side)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        compat.flock(fd, compat.LOCK_EX | compat.LOCK_NB)
     except OSError:
         return True
     finally:
@@ -326,7 +325,7 @@ def _proc_start(pid) -> str | None:
     """The kernel start time of `pid` (/proc/<pid>/stat field 22), None when unknown. With the pid
     it identifies a process: a recycled pid has another start time."""
     try:
-        stat = Path(f"/proc/{int(pid)}/stat").read_text()
+        stat = Path(f"/proc/{int(pid)}/stat").read_text(encoding="utf-8")
         return stat.rsplit(")", 1)[1].split()[19]
     except (OSError, ValueError, TypeError, IndexError):
         return None
@@ -360,7 +359,7 @@ def _members(pgid, tag: str | None, since) -> list[int]:
     out = []
     for pid in pids:
         try:
-            fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+            fields = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()
             if int(fields[2]) != pgid or fields[0] == "Z" or int(fields[19]) < since:
                 continue
             if want in Path(f"/proc/{pid}/environ").read_bytes().split(b"\0"):
@@ -457,7 +456,7 @@ def _manager_env(env=None) -> dict:
     bus lives there) when it is missing."""
     env = _allowed_env(os.environ) if env is None else dict(env)
     if not env.get("XDG_RUNTIME_DIR"):
-        d = Path(f"/run/user/{os.getuid()}")
+        d = Path(f"/run/user/{compat.uid()}")
         if d.is_dir():
             env["XDG_RUNTIME_DIR"] = str(d)
     return env
@@ -704,11 +703,11 @@ def open_workdir(cfg: dict, path: str, check=None) -> tuple[int | None, str | No
 
         def check(fd, where):
             return command.workdir_config_problem(fd, where, approvals)
-    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    fd = compat.open("/", os.O_RDONLY | compat.O_DIRECTORY | compat.O_CLOEXEC)
     try:
         for i, part in enumerate(p.parts[1:], start=2):
             try:
-                nfd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+                nfd = compat.open(part, os.O_RDONLY | compat.O_DIRECTORY | compat.O_NOFOLLOW | compat.O_CLOEXEC, dir_fd=fd)
             except OSError as exc:
                 os.close(fd)
                 return None, f"{bad} ({part!r} is a symlink or not a directory now: {exc.strerror})"
@@ -720,7 +719,7 @@ def open_workdir(cfg: dict, path: str, check=None) -> tuple[int | None, str | No
                     os.close(fd)
                     return None, why
         st = os.fstat(fd)
-        if st.st_uid != os.getuid():
+        if st.st_uid != compat.uid():
             os.close(fd)
             return None, f"{bad} (it belongs to another user)"
         return fd, None
@@ -1092,7 +1091,7 @@ def _prune_outputs(days: int, board) -> None:
     now = time.time()
     try:
         with _runs_fd(board, create=False) as d:
-            names = os.listdir(d)
+            names = compat.listdir(d)
             for n in names:   # kept tails, and output moved aside (privfs.fresh_file)
                 if re.match(r"^r\d+\.(tail\.txt|(out|err)\.stale-[0-9a-f]+)$", n):
                     m = privfs.mtime(d, n)
@@ -1121,7 +1120,7 @@ def _run_paths(board) -> list[tuple[int, Path]]:
     from swarm.supervisor.settings import PrivateDirError
     try:
         with _runs_fd(board, create=False) as d:
-            names = os.listdir(d)
+            names = compat.listdir(d)
     except (OSError, PrivateDirError):
         return []
     out = []
@@ -1158,7 +1157,7 @@ def _adopt_legacy(here: str) -> int:
                         continue
                     for name in (f"r{rid}.out", f"r{rid}.err", f"r{rid}.tail.txt", p.name):
                         if privfs.exists(src, name):
-                            os.rename(name, name, src_dir_fd=src, dst_dir_fd=dst)
+                            compat.rename(name, name, src_dir_fd=src, dst_dir_fd=dst)
                     privfs.unlink(src, f"r{rid}.lock")
                 n += 1
                 log(f"adopted legacy run file {p.name} into this board's runs directory")

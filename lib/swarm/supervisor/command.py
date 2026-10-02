@@ -40,6 +40,7 @@ from pathlib import Path
 
 from swarm.board import AgentStatus, JobStatus, board_backend
 from swarm.supervisor.budget import Decision
+from swarm import compat
 
 NO_MANAGER_NOTE = "not restarting: no user systemd manager (fix: loginctl enable-linger $USER)"
 BUSY = "another supervise pass is running: nothing done"
@@ -80,7 +81,7 @@ def enrolment_of(cfg: dict, a, job: str):
 
 
 def _host() -> str:
-    return os.uname().nodename
+    return compat.node()
 
 
 def exposure_refusal() -> str | None:
@@ -104,13 +105,12 @@ def lock_path() -> Path:
 
 def _take_pass_lock() -> int | None:
     """The pass lock (exclusive, non-blocking): its descriptor, or None when another pass has it."""
-    import fcntl
     from swarm.supervisor import privfs
     from swarm import safefs
     with privfs.dir_fd() as d:
         fd = safefs.open_wlock(d, lock_path().name)   # 0200, write-only: a reader can't hold it
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        compat.flock(fd, compat.LOCK_EX | compat.LOCK_NB)
         return fd
     except OSError:
         os.close(fd)
@@ -255,7 +255,7 @@ def workdir_problem(cfg: dict, workdir: str) -> str | None:
             return f"{bad} (it doesn't exist)"
         if not _stat.S_ISDIR(st.st_mode):
             return f"{bad} (not a directory)"
-        if st.st_uid != os.getuid():
+        if st.st_uid != compat.uid():
             return f"{bad} (it belongs to another user)"
         return None
     return bad
@@ -283,10 +283,10 @@ class Unapprovable(ValueError):
 def _file_sha(d: int, name: str, where: str) -> str:
     import hashlib
     import stat as _stat
-    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=d)
+    fd = compat.open(name, os.O_RDONLY | compat.O_NOFOLLOW | compat.O_NONBLOCK | compat.O_CLOEXEC, dir_fd=d)
     try:
         st = os.fstat(fd)
-        if not _stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_uid != os.getuid():
+        if not _stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_uid != compat.uid():
             raise Unapprovable(f"{where} is not a regular file of this user with one link")
         if st.st_size > CONFIG_MAX:
             raise Unapprovable(f"{where} is larger than {CONFIG_MAX} bytes")
@@ -308,15 +308,15 @@ def _tree(fd: int, rel: bytes, where: str, h, seen: list, depth: int) -> None:
     import stat as _stat
     if depth > TREE_MAX_DEPTH:
         raise Unapprovable(f"{where} is nested too deep")
-    for name in sorted(os.listdir(fd)):
+    for name in sorted(compat.listdir(fd)):
         seen.append(name)
         if len(seen) > TREE_MAX_ENTRIES:
             raise Unapprovable(f"{where} has more than {TREE_MAX_ENTRIES} entries")
         sub = rel + b"/" + os.fsencode(name)
-        st = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        st = compat.stat(name, dir_fd=fd, follow_symlinks=False)
         if _stat.S_ISDIR(st.st_mode):
             h.update(b"d\0" + sub + b"\0")
-            nfd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+            nfd = compat.open(name, os.O_RDONLY | compat.O_DIRECTORY | compat.O_NOFOLLOW | compat.O_CLOEXEC, dir_fd=fd)
             try:
                 _tree(nfd, sub, f"{where}/{name}", h, seen, depth + 1)
             finally:
@@ -333,14 +333,14 @@ def _entry_sha(d: int, name: str, where: str) -> str | None:
     import hashlib
     import stat as _stat
     try:
-        st = os.stat(name, dir_fd=d, follow_symlinks=False)
+        st = compat.stat(name, dir_fd=d, follow_symlinks=False)
     except FileNotFoundError:
         return None
     if _stat.S_ISREG(st.st_mode):
         return _file_sha(d, name, where)
     if _stat.S_ISDIR(st.st_mode):
         h = hashlib.sha256(b"tree\0")
-        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=d)
+        fd = compat.open(name, os.O_RDONLY | compat.O_DIRECTORY | compat.O_NOFOLLOW | compat.O_CLOEXEC, dir_fd=d)
         try:
             _tree(fd, b"", where, h, [], 1)
         finally:
@@ -361,7 +361,7 @@ def config_hits(dir_fd: int, where: str) -> list[tuple[str, str]]:
         try:
             for i, part in enumerate(parts[:-1]):
                 try:
-                    st = os.stat(part, dir_fd=d, follow_symlinks=False)
+                    st = compat.stat(part, dir_fd=d, follow_symlinks=False)
                 except FileNotFoundError:
                     d = None
                     break
@@ -370,7 +370,7 @@ def config_hits(dir_fd: int, where: str) -> list[tuple[str, str]]:
                 if not _stat.S_ISDIR(st.st_mode):
                     d = None   # nothing is loaded from inside a non-directory
                     break
-                d = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=d)
+                d = compat.open(part, os.O_RDONLY | compat.O_DIRECTORY | compat.O_NOFOLLOW | compat.O_CLOEXEC, dir_fd=d)
                 opened.append(d)
             if d is None:
                 continue
@@ -452,7 +452,6 @@ def save_approvals(entries: list[dict]) -> None:
     """Record `entries` (approval_candidates) in the private approval store, replacing earlier
     approvals of the same (dir, file), under its lock (privfs: a planted link at the store's name
     is replaced, never written through). ValueError for a malformed entry."""
-    import fcntl
     import json
     import time
     from swarm.supervisor import privfs
@@ -463,7 +462,7 @@ def save_approvals(entries: list[dict]) -> None:
     with privfs.dir_fd() as d:
         lk = privfs.lock(d, APPROVALS_LOCK)
         try:
-            fcntl.flock(lk, fcntl.LOCK_EX)
+            compat.flock(lk, compat.LOCK_EX)
             keys = {(e["dir"], e["file"]) for e in entries}
             cur = [e for e in _raw_approvals(privfs.read(d, APPROVALS)) if (e["dir"], e["file"]) not in keys]
             now = time.time()

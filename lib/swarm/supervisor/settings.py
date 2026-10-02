@@ -232,7 +232,7 @@ def codex_exposure() -> list[Path]:
         return []
     from swarm.hosts.codex import codex_home
     try:
-        data = tomllib.loads((codex_home() / "config.toml").read_text())
+        data = tomllib.loads((codex_home() / "config.toml").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
     return [Path(r) for r in _codex_roots(data) if _overlaps(Path(os.path.expanduser(r)))]

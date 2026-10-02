@@ -32,6 +32,7 @@ import json
 import os
 import time
 from pathlib import Path
+from swarm import compat
 
 RESUME = "resume"
 TOKEN_ENV = "SWARM_RESUME_TOKEN"   # a Codex replacement's token (the runner sets it for codex exec)
@@ -52,7 +53,6 @@ def _dir_lock(marker_dir: Path, timeout: float):
     safefs (no symlink anywhere below $HOME, this user's), and a lock that is a symlink (OSError),
     not a regular file, a hard link or another user's file (PermissionError) is never used; a
     looser mode is tightened to 0600."""
-    import fcntl
     from swarm import safefs
     d = safefs.open_base(marker_dir, create=True)
     try:
@@ -63,7 +63,7 @@ def _dir_lock(marker_dir: Path, timeout: float):
         deadline = time.monotonic() + timeout
         while True:
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                compat.flock(fd, compat.LOCK_EX | compat.LOCK_NB)
                 break
             except BlockingIOError:
                 if time.monotonic() >= deadline:
@@ -115,16 +115,16 @@ def _create(path: Path, text: str) -> None:
         fd = safefs.create(d, tmp, 0o600)
         try:
             try:
-                os.fchmod(fd, 0o600)
+                compat.fchmod(fd, 0o600)
                 os.write(fd, text.encode("utf-8"))
                 os.fsync(fd)
             finally:
                 os.close(fd)
-            os.link(tmp, path.name, src_dir_fd=d, dst_dir_fd=d, follow_symlinks=False)
+            compat.link(tmp, path.name, src_dir_fd=d, dst_dir_fd=d, follow_symlinks=False)
         finally:
             safefs.unlink(d, tmp)
         with contextlib.suppress(OSError):
-            os.fsync(d)
+            compat.fsync_dir(d)
 
 
 def _planted(path: Path) -> bool:
@@ -136,7 +136,7 @@ def _planted(path: Path) -> bool:
         st = os.lstat(path)
     except OSError:
         return False
-    return not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_nlink != 1
+    return not stat.S_ISREG(st.st_mode) or st.st_uid != compat.uid() or st.st_nlink != 1
 
 
 def read_marker(path: Path) -> dict | None:

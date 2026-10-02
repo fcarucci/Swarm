@@ -33,6 +33,7 @@ from .base import (LEFT_PAUSED, MOVED_PREFIX, PauseRecord, build_manifest, check
                    OwedReply, ReadResult, Route, SCHEMA_VERSION, SetupResult, SpawnGrant, SyncState, TRANSCRIPT_ROLES,
                    TranscriptImage, TranscriptRow, TranscriptSummary, VERDICTS,
                    derive_agent_status, load_name_pool)
+from swarm import compat
 
 # Per-agent sync state (SyncState), reset on a fresh row.
 _SYNC_DEFAULTS = {"roster_seen": None, "roster_synced_at": None, "memory_recalled_at": None,
@@ -455,7 +456,7 @@ class MemoryBoard(Board):
             name = self._free_name()
             s.agents[agent_key] = {
                 "agent_key": agent_key, "name": name, "job": job, "role": role,
-                "host": os.uname().nodename, "os_user": getpass.getuser(),
+                "host": compat.node(), "os_user": getpass.getuser(),
                 "harness": None, "model": None, "turn_ended_at": None,
                 "joined_at": now, "last_seen": now,
                 "last_read_id": self._history_cursor(job), "left_at": None, "state": "started",
@@ -725,7 +726,7 @@ class MemoryBoard(Board):
                 o.get("judge") and o["left_at"] is None and o["job"] == job for o in s.agents.values())
             s.agents[agent_key] = {
                 "agent_key": agent_key, "name": old["name"], "job": job, "role": old["role"],
-                "host": os.uname().nodename, "os_user": getpass.getuser(),
+                "host": compat.node(), "os_user": getpass.getuser(),
                 "harness": None, "model": None, "turn_ended_at": None,
                 "joined_at": now, "last_seen": now, "last_read_id": old.get("last_read_id", 0),
                 "left_at": None, "state": "started", "tool_calls": 0, "current_tool": None,
@@ -848,7 +849,7 @@ class MemoryBoard(Board):
                 return None
             if max_per_job is not None and sum(1 for r in s.restarts if r["job"] == job) >= int(max_per_job):
                 return None
-            host = os.uname().nodename
+            host = compat.node()
             if outcome is None and restart_over_limits(
                     [Restart(**r) for r in s.restarts if r["job"] == job],
                     [Restart(**r) for r in s.restarts if r["host"] == host], float(minutes_cap),
@@ -859,7 +860,7 @@ class MemoryBoard(Board):
             row = {"id": s.next_restart_id, "job": job, "agent_key": agent_key,
                    "attempt": 1 + sum(1 for r in s.restarts if r["job"] == job and r["agent_key"] == agent_key),
                    "at": now, "reason": reason, "old_agent_key": old_agent_key, "new_agent_key": None,
-                   "harness": harness, "host": os.uname().nodename, "os_user": getpass.getuser(),
+                   "harness": harness, "host": compat.node(), "os_user": getpass.getuser(),
                    "minutes_cap": float(minutes_cap), "ended_at": now if outcome else None,
                    "outcome": outcome}
             s.next_restart_id += 1
@@ -1034,7 +1035,7 @@ class MemoryBoard(Board):
             s.next_id += 1
             s.messages.append({"id": msg_id, "job": job, "agent_name": name, "created_at": now,
                                "message": text, "to_agent": to, "agent_key": agent_key,
-                               "host": os.uname().nodename})
+                               "host": compat.node()})
             poster = self._active_named(name)
             if poster is not None:
                 poster.update(last_seen=now, last_post_at=now, calls_at_post=poster["tool_calls"])

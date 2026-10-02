@@ -12,6 +12,7 @@ import stat
 import tempfile
 import time
 from pathlib import Path
+from swarm import compat
 
 
 CAP = 0o600   # user files the swarm rewrites may hold secrets: never looser than this
@@ -25,13 +26,13 @@ def write_preserving(path: Path, text: str, mode: int | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".swarm-tmp")   # created 0600
     try:
-        os.fchmod(fd, mode)
+        compat.fchmod(fd, mode)
         if st is not None:
             try:
-                os.fchown(fd, st.st_uid, st.st_gid)
+                compat.fchown(fd, st.st_uid, st.st_gid)
             except PermissionError:
                 pass
-        with os.fdopen(fd, "w") as fh:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
@@ -47,7 +48,9 @@ def write_preserving(path: Path, text: str, mode: int | None = None) -> None:
 
 def _fsync_dir(d: Path) -> None:
     try:
-        dfd = os.open(d, os.O_RDONLY)
+        if compat.IS_WINDOWS:
+            return
+        dfd = compat.open(d, os.O_RDONLY)
         try:
             os.fsync(dfd)
         finally:
@@ -60,8 +63,8 @@ def _temp_with(path: Path, text: str, mode: int) -> str:
     """A fsynced temp file beside `path` (name .<name>.*.swarm-tmp) holding `text`, mode capped."""
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".swarm-tmp")   # created 0600
     try:
-        os.fchmod(fd, mode & CAP)
-        with os.fdopen(fd, "w") as fh:
+        compat.fchmod(fd, mode & CAP)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
@@ -92,15 +95,15 @@ def append_private(path: Path, text: str) -> None:
     of another user, or a hard link (more than one link: it passes O_NOFOLLOW); a looser mode
     is tightened to 0600 first."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
-                 | os.O_CLOEXEC, CAP)
+    fd = compat.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | compat.O_NOFOLLOW | compat.O_NONBLOCK
+                 | compat.O_CLOEXEC, CAP)
     try:
         st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_nlink != 1:
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != compat.uid() or st.st_nlink != 1:
             raise PermissionError(f"{path} is not a regular file of this user with one link (a "
                                   f"planted hard link?); not writing to it")
         if stat.S_IMODE(st.st_mode) & ~CAP:
-            os.fchmod(fd, stat.S_IMODE(st.st_mode) & CAP)
+            compat.fchmod(fd, stat.S_IMODE(st.st_mode) & CAP)
         data = text.encode("utf-8")
         while data:
             data = data[os.write(fd, data):]
@@ -112,5 +115,5 @@ def backup(path: Path) -> Path | None:
     if not path.exists():
         return None
     dst = path.with_name(f"{path.name}.pre-swarm-{time.strftime('%Y%m%d-%H%M%S')}")
-    write_preserving(dst, path.read_text(), mode=CAP)
+    write_preserving(dst, path.read_text(encoding="utf-8"), mode=CAP)
     return dst

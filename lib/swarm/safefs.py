@@ -28,14 +28,14 @@ supervisor/privfs.py is this module applied to the supervisor's private director
 from __future__ import annotations
 
 import contextlib
-import fcntl
+from swarm import compat
 import os
 import re
 import secrets
 import stat
 from pathlib import Path
 
-DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+DIR_FLAGS = os.O_RDONLY | compat.O_DIRECTORY | compat.O_NOFOLLOW | compat.O_CLOEXEC
 MAX_READ = 1 << 20          # read()'s default limit: 1 MiB
 
 
@@ -66,12 +66,12 @@ def _open_component(parent: int, name: str, where: str, create: bool, mode: int)
     created = False
     if create:
         try:
-            os.mkdir(name, mode, dir_fd=parent)
+            compat.mkdir(name, mode, dir_fd=parent)
             created = True
         except FileExistsError:
             pass
     try:
-        fd = os.open(name, DIR_FLAGS, dir_fd=parent)
+        fd = compat.open(name, DIR_FLAGS, dir_fd=parent)
     except FileNotFoundError:
         raise
     except OSError as exc:   # ELOOP (a symlink) or ENOTDIR
@@ -81,8 +81,10 @@ def _open_component(parent: int, name: str, where: str, create: bool, mode: int)
 
 
 def _check_dir(fd: int, where: str, *, own: bool, strict_mode: int | None, created: bool) -> None:
+    if not compat.HAS_MODES:   # Windows: no uid/mode model; the profile's NTFS ACLs are the privacy
+        return
     st = os.fstat(fd)
-    uid = os.getuid()
+    uid = compat.uid()
     if own:
         if st.st_uid != uid:
             raise UnsafePathError(f"{where} belongs to another user (uid {st.st_uid}): refusing to use it")
@@ -93,7 +95,7 @@ def _check_dir(fd: int, where: str, *, own: bool, strict_mode: int | None, creat
                               f"path through it")
     if strict_mode is not None:
         if created:
-            os.fchmod(fd, strict_mode)
+            compat.fchmod(fd, strict_mode)
         mode = stat.S_IMODE(os.fstat(fd).st_mode)
         if mode != strict_mode:
             raise UnsafePathError(f"{where} has mode {oct(mode)}, not {oct(strict_mode)}: refusing to "
@@ -125,8 +127,8 @@ def open_base(path, *, create: bool = True, strict_mode: int | None = None) -> i
     if target == home or home in target.parents:
         start, rel, inside_home = home, target.relative_to(home).parts, True
     else:
-        start, rel, inside_home = Path("/"), target.parts[1:], False
-    fd = os.open(start, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        start, rel, inside_home = Path(target.anchor), target.parts[1:], False
+    fd = compat.open_root(start)
     where = start
     try:
         if not rel:
@@ -139,7 +141,7 @@ def open_base(path, *, create: bool = True, strict_mode: int | None = None) -> i
             nfd, created = _open_component(fd, part, str(where), create, 0o700)
             os.close(fd)
             fd = nfd
-            if not mine and os.fstat(fd).st_uid == os.getuid():
+            if not mine and os.fstat(fd).st_uid == compat.uid():
                 mine = True
             _check_dir(fd, str(where), own=mine or last, strict_mode=strict_mode if last else None,
                        created=created)
@@ -178,7 +180,7 @@ def dir_fd(path, *, create: bool = True, strict_mode: int | None = None):
 def _check(fd: int, name: str, limit: int | None = None) -> None:
     """The open file is a regular file of this user with one link (and at most `limit` bytes)."""
     st = os.fstat(fd)
-    if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_nlink != 1:
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != compat.uid() or st.st_nlink != 1:
         raise UnsafePathError(f"{name} is not a private regular file of this user (a planted link?): "
                               f"not using it")
     if limit is not None and st.st_size > limit:
@@ -189,7 +191,7 @@ def open_existing(d: int, name: str, flags: int) -> int:
     """`name` in directory `d`, opened without following a symlink or blocking (O_NOFOLLOW |
     O_NONBLOCK) and checked (_check); never created, never truncated."""
     flags &= ~(os.O_CREAT | os.O_TRUNC | os.O_EXCL)
-    fd = os.open(_entry(name), flags | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=d)
+    fd = compat.open(_entry(name), flags | compat.O_NOFOLLOW | compat.O_NONBLOCK | compat.O_CLOEXEC, dir_fd=d)
     try:
         _check(fd, name)
     except BaseException:
@@ -201,7 +203,7 @@ def open_existing(d: int, name: str, flags: int) -> int:
 def create(d: int, name: str, mode: int = 0o600) -> int:
     """A new file `name` in `d` open for writing (O_CREAT | O_EXCL | O_NOFOLLOW): FileExistsError
     if anything is there."""
-    return os.open(_entry(name), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+    return compat.open(_entry(name), os.O_WRONLY | os.O_CREAT | os.O_EXCL | compat.O_NOFOLLOW | compat.O_CLOEXEC,
                    mode, dir_fd=d)
 
 
@@ -274,36 +276,36 @@ def write_atomic(d: int, name: str, data: bytes | str, mode: int = 0o600) -> Non
     tmp = f".{name[:200]}.{secrets.token_hex(6)}.swarm-tmp"
     fd = create(d, tmp, mode)
     try:
-        os.fchmod(fd, mode)
+        compat.fchmod(fd, mode)
         _write_all(fd, data)
         os.fsync(fd)
         os.close(fd)
         fd = -1
-        os.rename(tmp, name, src_dir_fd=d, dst_dir_fd=d)
+        compat.rename(tmp, name, src_dir_fd=d, dst_dir_fd=d)
     except BaseException:
         if fd >= 0:
             os.close(fd)
         with contextlib.suppress(OSError):
-            os.unlink(tmp, dir_fd=d)
+            compat.unlink(tmp, dir_fd=d)
         raise
     with contextlib.suppress(OSError):
-        os.fsync(d)
+        compat.fsync_dir(d)
 
 
 def _open_or_create(d: int, name: str, flags: int, mode: int) -> int:
     """`name` in `d` opened with `flags` | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, after the _check.
     Created if missing (O_EXCL) and then fchmod'ed to exactly `mode`, whatever the umask; an
     existing file looser than `mode` is tightened."""
-    flags |= os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    flags |= compat.O_NOFOLLOW | compat.O_NONBLOCK | compat.O_CLOEXEC
     _entry(name)
     for _ in range(3):   # an entry removed between the two opens: try again
         try:
-            fd, created = os.open(name, flags | os.O_CREAT | os.O_EXCL, mode, dir_fd=d), True
+            fd, created = compat.open(name, flags | os.O_CREAT | os.O_EXCL, mode, dir_fd=d), True
             break
         except FileExistsError:
             pass
         try:
-            fd, created = os.open(name, flags, dir_fd=d), False
+            fd, created = compat.open(name, flags, dir_fd=d), False
             break
         except FileNotFoundError:
             continue
@@ -312,11 +314,11 @@ def _open_or_create(d: int, name: str, flags: int, mode: int) -> int:
     try:
         _check(fd, name)
         if created:
-            os.fchmod(fd, mode)
+            compat.fchmod(fd, mode)
         else:
             cur = stat.S_IMODE(os.fstat(fd).st_mode)
             if cur & ~mode:
-                os.fchmod(fd, cur & mode)
+                compat.fchmod(fd, cur & mode)
     except BaseException:
         os.close(fd)
         raise
@@ -345,13 +347,13 @@ def touch(d: int, name: str, mode: int = 0o600) -> None:
         pass
     else:
         try:
-            os.fchmod(fd, mode)
+            compat.fchmod(fd, mode)
         finally:
             os.close(fd)
         return
     fd = open_existing(d, name, os.O_RDONLY)
     try:
-        os.utime(fd)
+        compat.utime_fd(fd, name, d)
     finally:
         os.close(fd)
 
@@ -377,7 +379,7 @@ def lock(d: int, name: str, *, blocking: bool = True) -> int:
     blocking=False raises BlockingIOError when another holder has it."""
     fd = open_lock(d, name)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        compat.flock(fd, compat.LOCK_EX | (0 if blocking else compat.LOCK_NB))
     except BaseException:
         os.close(fd)
         raise
@@ -392,7 +394,7 @@ def locked(d: int, name: str, *, blocking: bool = True):
         yield fd
     finally:
         with contextlib.suppress(OSError):
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            compat.flock(fd, compat.LOCK_UN)
         os.close(fd)
 
 
@@ -403,7 +405,7 @@ def scan(d: int, suffix: str = "", *, limit: int = MAX_READ, match=None,
     private regular file with one link of at most `limit` bytes is left out, and its name added
     to `skipped` if given. Never blocks, never follows a link."""
     out = []
-    for name in sorted(os.listdir(d)):
+    for name in sorted(compat.listdir(d)):
         if not name.endswith(suffix) or (match is not None and not match(name)):
             continue
         data = read(d, name, limit)
@@ -423,20 +425,20 @@ def fresh_file(d: int, name: str) -> tuple[int, str | None]:
         return create(d, name), None
     except FileExistsError:
         moved = f"{name}.stale-{secrets.token_hex(6)}"
-        os.rename(name, moved, src_dir_fd=d, dst_dir_fd=d)
+        compat.rename(name, moved, src_dir_fd=d, dst_dir_fd=d)
     return create(d, name), moved
 
 
 def unlink(d: int, name: str) -> None:
     """Remove the entry `name` of `d` (a link is removed, not followed); missing is fine."""
     with contextlib.suppress(FileNotFoundError):
-        os.unlink(_entry(name), dir_fd=d)
+        compat.unlink(_entry(name), dir_fd=d)
 
 
 def exists(d: int, name: str) -> bool:
     """Whether `d` has an entry `name` of any kind (a dangling symlink counts)."""
     try:
-        os.stat(_entry(name), dir_fd=d, follow_symlinks=False)
+        compat.stat(_entry(name), dir_fd=d, follow_symlinks=False)
         return True
     except FileNotFoundError:
         return False
@@ -445,7 +447,7 @@ def exists(d: int, name: str) -> bool:
 def mtime(d: int, name: str) -> float | None:
     """The entry's own modification time (lstat), or None."""
     try:
-        return os.stat(_entry(name), dir_fd=d, follow_symlinks=False).st_mtime
+        return compat.stat(_entry(name), dir_fd=d, follow_symlinks=False).st_mtime
     except OSError:
         return None
 

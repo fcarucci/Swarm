@@ -283,7 +283,7 @@ class Client:
     def _key(self) -> str | None:
         if not self.key_file:
             return None
-        text = Path(self.key_file).expanduser().read_text().strip()
+        text = Path(self.key_file).expanduser().read_text(encoding="utf-8").strip()
         return text.split("=", 1)[1].strip().strip("'\"") if "=" in text.splitlines()[0] else text.splitlines()[0]
 
     def _call(self, method: str, path: str, body=None, missing_ok: bool = False):

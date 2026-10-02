@@ -14,6 +14,7 @@ import tomllib
 from pathlib import Path
 
 from swarm import paths, safefile
+from swarm import compat
 
 READ_ONLY_STEP = ('Codex runs with sandbox_mode = "read-only" here, so swarm agents can\'t post or reach the '
                   'board. Set sandbox_mode = "workspace-write" in ~/.codex/config.toml (or start swarm '
@@ -49,7 +50,7 @@ def profile_overrides(codex_home: Path, data: dict) -> list[str]:
         if name == SWARM_PROFILE and _ours(f):
             continue                 # the swarm's own opt-in network profile: not a user override
         try:
-            d = tomllib.loads(f.read_text())
+            d = tomllib.loads(f.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
             names.add(name)          # can't tell: report it
             continue
@@ -188,9 +189,9 @@ def _ensure_private_root(d: Path) -> str | None:
                     p.mkdir(mode=0o700)
                 except FileExistsError:
                     continue
-                fd = os.open(p, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                fd = compat.open(p, os.O_RDONLY | compat.O_DIRECTORY | compat.O_NOFOLLOW | compat.O_CLOEXEC)
                 try:
-                    os.fchmod(fd, 0o700)
+                    compat.fchmod(fd, 0o700)
                 finally:
                     os.close(fd)
         except OSError as exc:
@@ -202,8 +203,10 @@ def _ensure_private_root(d: Path) -> str | None:
         st = d.stat()
     except OSError as exc:
         return f"can't stat it ({exc.strerror or exc})"
-    if st.st_uid != os.getuid():
+    if st.st_uid != compat.uid():
         return f"it belongs to another user (uid {st.st_uid})"
+    if not compat.HAS_MODES:   # Windows: no mode bits; the profile's ACLs apply
+        return None
     mode = stat.S_IMODE(st.st_mode)
     if created:
         if mode != 0o700:   # the umask masked mkdir's own mode: force it to what we asked for
@@ -233,7 +236,7 @@ def _ours(f: Path) -> bool:
 
 def spool_path(cfg: dict) -> Path:
     """The configured spool dir, absolute ({uid} expanded, as the config loader does)."""
-    return _absolute(str(cfg["board"]["spool_dir"]).replace("{uid}", str(os.getuid())))
+    return _absolute(str(cfg["board"]["spool_dir"]).replace("{uid}", str(compat.uid())))
 
 
 def board_dir(cfg: dict) -> Path | None:
@@ -303,7 +306,7 @@ def apply(path: Path, cfg: dict) -> tuple[str, str]:
     """Set the swarm's keys in the base Codex config. ("ok" | "changed" | "manual", detail); the
     detail names only what the swarm changed or what the user must do."""
     try:
-        text = path.read_text() if path.exists() else ""
+        text = path.read_text(encoding="utf-8") if path.exists() else ""
         data = tomllib.loads(text)
     except (OSError, UnicodeDecodeError) as exc:
         return "manual", f"can't read {path} ({getattr(exc, 'strerror', None) or type(exc).__name__}); fix it, then run `swarm bootstrap --host codex`"
@@ -391,7 +394,7 @@ def _apply_profile(codex_home: Path, cfg: dict) -> tuple[str, str]:
             f.unlink()
             return "changed", f"removed {f} ([codex] network_access is off)"
         return "ok", ""
-    if exists and f.read_text() == PROFILE_HEADER + PROFILE_BODY:
+    if exists and f.read_text(encoding="utf-8") == PROFILE_HEADER + PROFILE_BODY:
         return "ok", ""
     safefile.write_preserving(f, PROFILE_HEADER + PROFILE_BODY, mode=0o600)
     return "changed", (f"wrote {f}: sessions started with `codex -p swarm` get network access "
@@ -412,7 +415,7 @@ def _swarm_set_network(path: Path) -> bool | None:
     if not backups:
         return None
     try:
-        before = tomllib.loads(backups[0].read_text())
+        before = tomllib.loads(backups[0].read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
         return None
     sw = before.get("sandbox_workspace_write")
@@ -458,7 +461,7 @@ def remove_old_grants(path: Path) -> tuple[str, str]:
     """For `swarm migrate`: only the 0.1.0-pre grants taken back (see _without_old_grants).
     ("ok" | "changed" | "manual", detail)."""
     try:
-        text = path.read_text() if path.exists() else ""
+        text = path.read_text(encoding="utf-8") if path.exists() else ""
         data = tomllib.loads(text)
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
         return "manual", f"can't read {path}: {old_grants_step(path)}"

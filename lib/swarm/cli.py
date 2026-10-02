@@ -56,6 +56,7 @@ from swarm.paths import PLUGIN_ROOT as SKILL_DIR  # noqa: E402  (the old name, k
 # Every board-derived string is shown through term_safe: a control character in a post,
 # a name or a job becomes visible notation instead of terminal input or a forged line.
 from swarm.textsafe import term_safe  # noqa: E402  (stdlib-only)
+from swarm import compat
 DEFAULT_CONFIG = Path(os.environ.get("SWARM_CONFIG", "~/.config/swarm/config.toml")).expanduser()
 
 # The Postgres defaults before they became "swarm" / "swarm_board". A config that has a
@@ -180,7 +181,7 @@ def load_config(path: Path = DEFAULT_CONFIG) -> dict:
             cfg["board"]["backend_implied"] = True
     spool = cfg.get("board", {}).get("spool_dir")
     if isinstance(spool, str) and "{uid}" in spool:   # a per-user /tmp spool
-        cfg["board"]["spool_dir"] = spool.replace("{uid}", str(os.getuid()))
+        cfg["board"]["spool_dir"] = spool.replace("{uid}", str(compat.uid()))
     return cfg
 
 
@@ -400,28 +401,27 @@ def locked_marker(path: Path, timeout: float):
     `path` (a claim replaces it rather than rewriting it). Whoever changes or removes a marker
     holds this, so a claim (swarm.hooks) and a removal never interleave. Yields None if the
     lock isn't had within `timeout`; raises FileNotFoundError if there is no marker."""
-    import fcntl
     import stat
     deadline = time.monotonic() + timeout
     while True:
         # The marker dir is sandbox-writable: never follow a link, never block opening a
         # FIFO; anything but a plain file of ours is no marker.
         try:
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+            fd = compat.open(path, os.O_RDONLY | compat.O_NOFOLLOW | compat.O_NONBLOCK | compat.O_CLOEXEC)
         except FileNotFoundError:
             raise
         except OSError as exc:   # ELOOP: a symlink
             raise FileNotFoundError(f"not a marker: {path}") from exc
         st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != compat.uid():
             os.close(fd)
             raise FileNotFoundError(f"not a marker: {path}")
-        fh = os.fdopen(fd)
+        fh = os.fdopen(fd, encoding="utf-8")
         try:
             locked = False
             while not locked:
                 try:
-                    fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    compat.flock(fh, compat.LOCK_EX | compat.LOCK_NB)
                     locked = True
                 except BlockingIOError:
                     if time.monotonic() >= deadline:
@@ -465,7 +465,7 @@ def mark_orchestrator_seen(marker: Path, deadline: float | None = None) -> bool:
             return False
         else:
             try:
-                os.utime(fd)
+                compat.utime_fd(fd, seen.name, d)
             finally:
                 os.close(fd)
             return True
@@ -1436,10 +1436,10 @@ def _private_mkdir(d: Path) -> None:
 def _write_private(path: Path, data: bytes) -> None:
     """Write a file readable by this user only (0600, also when it already existed)."""
     import stat
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd = compat.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "wb") as fh:
         if stat.S_ISREG(os.fstat(fd).st_mode):   # not a device like /dev/stdout
-            os.fchmod(fd, 0o600)
+            compat.fchmod(fd, 0o600)
         fh.write(data)
 
 
@@ -1650,10 +1650,10 @@ def _plain_file(d: int, name: str) -> bool:
     """Whether `name` in dir fd `d` is a regular, single-link file of this user (not followed)."""
     import stat
     try:
-        st = os.lstat(name, dir_fd=d)
+        st = compat.lstat(name, dir_fd=d)
     except FileNotFoundError:
         return False
-    return stat.S_ISREG(st.st_mode) and st.st_uid == os.getuid() and st.st_nlink == 1
+    return stat.S_ISREG(st.st_mode) and st.st_uid == compat.uid() and st.st_nlink == 1
 
 
 TRANSCRIPT_COMMANDS = {"list": _transcript_list, "show": _transcript_show, "export": _transcript_export}
@@ -2167,7 +2167,7 @@ def cmd_watch(cfg: dict, job: str | None, interval: float, color: bool, session:
             "db_label": watcher_db_label(cfg), "session": session, "compact": compact,
             "idle_exit": IdleExit(exit_when_idle) if session and exit_when_idle is not None else None}
     out = sys.stdout
-    interactive = out.isatty() and sys.stdin.isatty()
+    interactive = out.isatty() and sys.stdin.isatty() and not compat.IS_WINDOWS   # no termios: Ctrl-C quits
     fd = sys.stdin.fileno() if interactive else None
     saved = _screen_on(out, fd)
 
@@ -2244,6 +2244,9 @@ def _parser() -> argparse.ArgumentParser:
         up.add_argument("--force", action="store_true",
                         help="run bootstrap/migrate/doctor even when the plugin version didn't change "
                              "(migrate itself always runs with --force: active jobs only warn)")
+        up.add_argument("--channel", choices=["release", "main"],
+                        help="release: the newest vX.Y.Z tag (default); main: the tip of main. Remembered "
+                             "in the config ([upgrade] channel), so a plain `swarm upgrade` keeps following it")
         up.add_argument("--no-color", action="store_true")
     j = sub.add_parser("job", help="create a job or change its description or goal; "
                                    "`job merge <from> --into <to>` merges two open jobs")
@@ -2651,6 +2654,11 @@ def _cmd_install_hooks(cfg: dict, args) -> int:
 
 
 def _cmd_supervise(cfg: dict, args) -> int:
+    try:
+        compat.require_posix("swarm supervise")
+    except compat.Unsupported as exc:
+        print(f"swarm supervise: {exc}", file=sys.stderr)
+        return 1
     if getattr(args, "scmd", None) == "approve":
         return cmd_supervise_approve(cfg, args)
     from swarm.supervisor.command import cmd_supervise
@@ -2751,7 +2759,8 @@ def cmd_doctor(cfg: dict, args) -> int:
 
 def cmd_update(cfg: dict, args) -> int:
     from swarm import update
-    return update.run_update(args.host, args.force, _use_color(args), config_path=args.config)
+    return update.run_update(args.host, args.force, _use_color(args), config_path=args.config,
+                             channel=args.channel)
 
 
 def cmd_migrate(cfg: dict, args) -> int:
@@ -3166,7 +3175,7 @@ def _board_status(board, cfg: dict, args) -> None:
             from swarm.supervisor import budget
             from swarm.supervisor.settings import today_start
             now = board.now()   # the host's (every OS user's) runs that overlap today, as the cap counts them
-            day = budget.day_rows(board.restarts(host=os.uname().nodename), today_start())
+            day = budget.day_rows(board.restarts(host=compat.node()), today_start())
             used = sum(budget.charged_minutes(r, now) for r in day)
             print(f"supervisor: on, today {used:.0f}/{sup['daily_restart_minutes']} restart minutes "
                   f"on this host")
@@ -3330,6 +3339,7 @@ BOARD_COMMANDS = {
 
 def main(argv=None) -> int:
     from swarm.spool import SpoolError
+    compat.setup_stdio()
     try:
         return _main(argv)
     except SpoolError as exc:   # a post or memory that had to be queued, with no private spool

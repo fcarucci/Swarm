@@ -31,6 +31,7 @@ from .base import (LEFT_PAUSED, PauseRecord, build_manifest, database_hosts, MOV
                    Member, Message, OwedReply, ReadResult, Route, RosterEntry, SCHEMA_VERSION, SetupResult,
                    SpawnGrant, SyncState, TRANSCRIPT_ROLES, TranscriptImage, TranscriptRow, TranscriptSummary,
                    VERDICTS, load_name_pool)
+from swarm import compat
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS name_pool (
@@ -422,7 +423,7 @@ def _password(db: dict) -> str | None:
     if env_file:
         p = Path(env_file).expanduser()
         if p.exists():
-            for line in p.read_text().splitlines():
+            for line in p.read_text(encoding="utf-8").splitlines():
                 if line.strip().startswith("PGPASSWORD="):
                     return line.split("=", 1)[1].strip().strip("'\"")
     return None
@@ -897,7 +898,7 @@ class PostgresBoard(Board):
         known = self._existing_name(agent_key, job)
         if known:
             return known
-        host = os.uname().nodename
+        host = compat.node()
         return (self._claim_pool_name(agent_key, job, role, host)
                 or self._claim_fallback_name(agent_key, job, role, host))
 
@@ -1165,7 +1166,7 @@ class PostgresBoard(Board):
                 judge = bool(judge) and conn.execute(
                     "SELECT 1 FROM agents WHERE job = %s AND judge AND left_at IS NULL",
                     (job,)).fetchone() is None
-                conn.execute(_CLAIM_RESUME, (agent_key, name, job, role, os.uname().nodename,
+                conn.execute(_CLAIM_RESUME, (agent_key, name, job, role, compat.node(),
                                              getpass.getuser(), cursor, judge, bool(verifier), resume_of))
                 return name
         except psycopg.errors.UniqueViolation:   # the name (or the judge seat) was taken meanwhile
@@ -1264,7 +1265,7 @@ class PostgresBoard(Board):
         if outcome is not None and outcome not in RESTART_OUTCOMES:
             raise ValueError(outcome)
         conn = self._conn
-        host = os.uname().nodename
+        host = compat.node()
         with conn.transaction():
             # One job's inserts in turn (every lineage, host and user), so two at once can't both
             # count the same attempt, nor both pass the job cap. Each statement below runs after
@@ -1290,7 +1291,7 @@ class PostgresBoard(Board):
                 "WHERE job = %s AND agent_key = %s), %s, %s, %s, %s, %s, %s, "
                 "CASE WHEN %s::text IS NULL THEN NULL ELSE now() END, %s) "
                 f"ON CONFLICT (old_agent_key) DO NOTHING RETURNING {_RESTART_COLS}",
-                (job, agent_key, job, agent_key, reason, old_agent_key, harness, os.uname().nodename,
+                (job, agent_key, job, agent_key, reason, old_agent_key, harness, compat.node(),
                  getpass.getuser(), float(minutes_cap), outcome, outcome)).fetchone()
         return Restart(*row) if row else None
 
@@ -1403,7 +1404,7 @@ class PostgresBoard(Board):
             msg_id = self._conn.execute(
                 "INSERT INTO messages (job, agent_name, message, to_agent, agent_key, host) "
                 "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
-                (job, name, text, to, agent_key, os.uname().nodename)).fetchone()[0]
+                (job, name, text, to, agent_key, compat.node())).fetchone()[0]
         self._conn.execute("UPDATE agents SET last_seen = now(), last_post_at = now(), "
                            "calls_at_post = tool_calls WHERE name = %s AND left_at IS NULL", (name,))
         return msg_id

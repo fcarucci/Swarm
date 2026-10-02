@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+from swarm import compat
 import shutil
 import subprocess
 from pathlib import Path
@@ -72,6 +73,35 @@ def _too_large(p: Path, size: int, limit: int, what: str) -> RolloutTooLarge:
     return RolloutTooLarge(f"{p}: {what} over the {limit} byte read limit", size, limit)
 
 
+class _PipeReader:
+    """Windows: a pipe can't be select()ed, so a thread reads it and get() waits with a timeout
+    (None: nothing yet; b"" at the end)."""
+
+    def __init__(self, fd: int):
+        import queue
+        import threading
+        self._q: queue.Queue = queue.Queue()
+        self._fd = fd
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self) -> None:
+        while True:
+            try:
+                chunk = os.read(self._fd, _CHUNK)
+            except OSError:
+                chunk = b""
+            self._q.put(chunk)
+            if not chunk:
+                return
+
+    def get(self, timeout: float):
+        import queue
+        try:
+            return self._q.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+
 def _zstd_tool(p: Path, limit: int, deadline: float | None) -> bytes:
     """`zstd -dc` with its output read up to limit + 1 bytes, within ZSTD_TOOL_SECONDS or the
     deadline (whichever is sooner); killed past either."""
@@ -86,6 +116,7 @@ def _zstd_tool(p: Path, limit: int, deadline: float | None) -> bytes:
     except OSError as exc:
         raise RolloutUnreadable(f"{p}: zstd failed ({exc})") from exc
     out, n, timed_out = [], 0, False
+    pipe = _PipeReader(proc.stdout.fileno()) if compat.IS_WINDOWS else None   # select() is sockets-only there
     try:
         fd = proc.stdout.fileno()
         while True:
@@ -93,10 +124,15 @@ def _zstd_tool(p: Path, limit: int, deadline: float | None) -> bytes:
             if left <= 0:
                 timed_out = True
                 break
-            ready, _, _ = select.select([fd], [], [], left)
-            if not ready:
-                continue
-            chunk = os.read(fd, _CHUNK)
+            if pipe is not None:
+                chunk = pipe.get(left)
+                if chunk is None:
+                    continue
+            else:
+                ready, _, _ = select.select([fd], [], [], left)
+                if not ready:
+                    continue
+                chunk = os.read(fd, _CHUNK)
             if not chunk:
                 break
             out.append(chunk)

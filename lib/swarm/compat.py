@@ -61,23 +61,26 @@ def node() -> str:
 if not IS_WINDOWS:
     import fcntl
 
-    uid = os.getuid
     LOCK_SH, LOCK_EX, LOCK_NB, LOCK_UN = fcntl.LOCK_SH, fcntl.LOCK_EX, fcntl.LOCK_NB, fcntl.LOCK_UN
-    flock = fcntl.flock
-    fchmod = os.fchmod
-    fchown = os.fchown
-    chmod = os.chmod
     O_DIRECTORY, O_NOFOLLOW, O_NONBLOCK, O_CLOEXEC, O_BINARY = (
         os.O_DIRECTORY, os.O_NOFOLLOW, os.O_NONBLOCK, os.O_CLOEXEC, 0)
-    open = os.open            # noqa: A001  (the fd-relative family, same signatures as os.*)
-    stat = os.stat
-    lstat = os.lstat
-    rename = os.rename
-    unlink = os.unlink
-    mkdir = os.mkdir
-    link = os.link
-    utime = os.utime
-    listdir = os.listdir
+
+    def _late(name):
+        # looked up on os at call time (not an alias bound at import), so a test patching os.<name>
+        # still reaches the code that goes through here
+        def call(*args, **kwargs):
+            return getattr(os, name)(*args, **kwargs)
+        call.__name__ = name
+        return call
+
+    uid = _late("getuid")
+    fchmod, fchown, chmod = _late("fchmod"), _late("fchown"), _late("chmod")
+    open = _late("open")      # noqa: A001  (the fd-relative family, same signatures as os.*)
+    stat, lstat, rename, unlink = _late("stat"), _late("lstat"), _late("rename"), _late("unlink")
+    mkdir, link, utime, listdir = _late("mkdir"), _late("link"), _late("utime"), _late("listdir")
+
+    def flock(fd, op):
+        return fcntl.flock(fd, op)
 
     def utime_fd(fd: int, name=None, dir_fd=None) -> None:
         """Set the times of the open file `fd` to now."""

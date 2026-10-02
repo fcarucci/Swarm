@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 import os
+from swarm import compat
 
 # Session and thread ids are UUIDs on both hosts. A board-supplied id is only ever compared
 # with this (fullmatch) and then used as an exact file name: never as a glob or a path.
@@ -144,7 +145,7 @@ def write_new_file(path: Path, text: str) -> Path:
     """Create `path` (parents too, 0700) with `text`, mode 0600: exclusive and not through a
     symlink, so a stored transcript never overwrites or follows anything already there."""
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    fd = compat.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | compat.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write(text if text.endswith("\n") or not text else text + "\n")
     return path

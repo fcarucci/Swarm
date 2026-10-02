@@ -28,6 +28,7 @@ import hashlib
 import json
 import math
 import os
+from swarm import compat
 import re
 import time
 from dataclasses import asdict, dataclass
@@ -235,7 +236,7 @@ def prune(max_age: float, *, now: float | None = None, keep=None) -> int:
     removed = 0
     try:
         with _dir(create=False) as d:
-            for name in sorted(os.listdir(d)):
+            for name in sorted(compat.listdir(d)):
                 if not _FILE.fullmatch(name):
                     continue
                 rec = _parse(safefs.read(d, name, RECORD_MAX))

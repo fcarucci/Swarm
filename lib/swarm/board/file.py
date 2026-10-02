@@ -10,7 +10,7 @@ Semantics are not re-implemented here. `FileBoard` IS a `MemoryBoard` whose stor
 `FileStore`, keeps its rows on disk: every `with store.lock:` block of the memory backend
 becomes one transaction that
 
-  1. takes an exclusive `fcntl.flock` on `<path>/lock` (plus a thread lock, for threads that
+  1. takes an exclusive `compat.flock` on `<path>/lock` (plus a thread lock, for threads that
      share a store);
   2. loads the rows from disk (messages lazily: only when the block touches them);
   3. runs the memory backend's code unchanged over them;
@@ -84,7 +84,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime as _dt
-import fcntl
+from swarm import compat
 import hashlib
 import json
 import os
@@ -205,7 +205,7 @@ def _append(d: int, name: str, data: bytes) -> None:
         raise _refused(name) from exc
     try:
         if created:
-            os.fchmod(fd, 0o600)
+            compat.fchmod(fd, 0o600)
         view = memoryview(data)
         while view:
             view = view[os.write(fd, view):]
@@ -213,7 +213,7 @@ def _append(d: int, name: str, data: bytes) -> None:
     finally:
         os.close(fd)
     if created:
-        os.fsync(d)
+        compat.fsync_dir(d)
 
 
 def _sub(d: int, name: str, *, create: bool) -> int | None:
@@ -521,19 +521,19 @@ class FileStore(MemoryStore):
 
     def _unlock(self) -> None:
         if self._lock_fd is not None:
-            fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+            compat.flock(self._lock_fd, compat.LOCK_UN)
 
     def _take_flock(self) -> None:
         if self._lock_fd is None:   # read-only without a lock file: nothing to lock
             return
-        mode = fcntl.LOCK_SH if self.read_only else fcntl.LOCK_EX
+        mode = compat.LOCK_SH if self.read_only else compat.LOCK_EX
         if self.lock_wait is None:
-            fcntl.flock(self._lock_fd, mode)
+            compat.flock(self._lock_fd, mode)
             return
         deadline = time.monotonic() + self.lock_wait
         while True:
             try:
-                fcntl.flock(self._lock_fd, mode | fcntl.LOCK_NB)
+                compat.flock(self._lock_fd, mode | compat.LOCK_NB)
                 return
             except BlockingIOError:
                 if time.monotonic() >= deadline:
@@ -671,7 +671,7 @@ class FileStore(MemoryStore):
         sig = []
         for n in names:
             try:   # lstat relative to the directory: a planted link is not followed
-                st = os.stat(n, dir_fd=self._dir_fd, follow_symlinks=False)
+                st = compat.stat(n, dir_fd=self._dir_fd, follow_symlinks=False)
                 sig.append((st.st_ino, st.st_mtime_ns, st.st_size))
             except (FileNotFoundError, TypeError):
                 sig.append(None)

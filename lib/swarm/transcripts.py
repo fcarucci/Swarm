@@ -47,6 +47,7 @@ from pathlib import Path
 from swarm import enrolment, paths, safefs
 from swarm.board import TranscriptImage, TranscriptRow, TranscriptSummary  # noqa: F401  (re-exported for the CLI)
 from swarm.board import TRANSCRIPT_MAX_RAW  # what Board.transcript_body reads back at most
+from swarm import compat
 
 DEFAULTS = {"enabled": False, "retention_days": 30, "max_total_mb": 2048, "snapshot_minutes": 15,
             "max_mb": 50}
@@ -1277,7 +1278,7 @@ def agent_transcript(main: Path | None, agent_key: str, harness: str | None) -> 
 # --------------------------------------------------------------------------- capture
 
 def _host() -> str:
-    return os.uname().nodename
+    return compat.node()
 
 
 def _existing(board, job: str, agent_key: str):
@@ -1687,7 +1688,7 @@ def run_snapshots(board, cfg: dict, deadline: float | None = None, hints=None) -
     except OSError:
         pass
     try:
-        os.utime(fd)
+        compat.utime_fd(fd, str(paths.host_dir() / snapshot_stamp(cfg).name))
         n = 0
         mains: dict = {}
         for js in board.jobs(False):

@@ -24,7 +24,7 @@ symlink, hard link or FIFO planted there is refused, never followed or waited on
 from __future__ import annotations
 
 import contextlib
-import fcntl
+from swarm import compat
 import hashlib
 import os
 import re
@@ -154,7 +154,7 @@ def _local_lock(cfg: dict, cls, timeout: float):
         deadline = time.monotonic() + timeout
         while True:
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                compat.flock(fd, compat.LOCK_EX | compat.LOCK_NB)
                 break
             except BlockingIOError:
                 if time.monotonic() >= deadline:

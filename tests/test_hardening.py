@@ -971,7 +971,7 @@ def plain_file_calls(lib: Path = LIB) -> set[tuple[str, str, str]]:
                     call = fn.id
                 elif isinstance(fn, ast.Attribute):
                     base = fn.value
-                    if isinstance(base, ast.Name) and base.id == "os":
+                    if isinstance(base, ast.Name) and base.id in ("os", "compat"):   # compat: the os call, portable
                         if fn.attr in _OS_CALLS and not kws & {"dir_fd", "src_dir_fd", "dst_dir_fd"}:
                             call = f"os.{fn.attr}"
                     elif isinstance(base, ast.Name) and base.id == "shutil":

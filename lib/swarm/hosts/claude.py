@@ -113,7 +113,7 @@ class ClaudeHost(Host):
         if path is None:
             return None
         try:
-            depth = json.loads(path.with_suffix("").with_name(f"agent-{agent_id}.meta.json").read_text()).get("spawnDepth")
+            depth = json.loads(path.with_suffix("").with_name(f"agent-{agent_id}.meta.json").read_text(encoding="utf-8")).get("spawnDepth")
         except (OSError, ValueError, AttributeError):
             return None
         return depth if isinstance(depth, int) and not isinstance(depth, bool) else None

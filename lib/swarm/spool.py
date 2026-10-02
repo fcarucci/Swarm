@@ -24,6 +24,7 @@ import stat
 import time
 import uuid
 from pathlib import Path
+from swarm import compat
 
 STUCK_AFTER = 24 * 3600  # seconds a memory may keep failing before it is parked as .stuck
 RECORD_MAX = 256 * 1024  # a spooled record larger than this is not read (it goes to .bad)
@@ -69,22 +70,22 @@ def _open_dir(cfg: dict, create: bool) -> int | None:
     try:
         if create:
             try:
-                os.mkdir(d.name, 0o700, dir_fd=parent)
+                compat.mkdir(d.name, 0o700, dir_fd=parent)
             except FileExistsError:
                 pass
         try:
-            fd = os.open(d.name, safefs.DIR_FLAGS, dir_fd=parent)
+            fd = compat.open(d.name, safefs.DIR_FLAGS, dir_fd=parent)
         except FileNotFoundError:
             if create:
                 raise
             return None
         try:
             st = os.fstat(fd)
-            if st.st_uid != os.getuid():
+            if st.st_uid != compat.uid():
                 raise SpoolError(f"spool directory {d} belongs to another user (uid {st.st_uid}); "
                                  f"set [board] spool_dir to a private directory")
             if stat.S_IMODE(st.st_mode) & 0o077:
-                os.fchmod(fd, 0o700)
+                compat.fchmod(fd, 0o700)
         except BaseException:
             os.close(fd)
             raise
@@ -109,7 +110,7 @@ def _spool_dir(cfg: dict, create: bool):
 
 
 def _mv(d: int, src: str, dst: str) -> None:
-    os.rename(src, dst, src_dir_fd=d, dst_dir_fd=d)
+    compat.rename(src, dst, src_dir_fd=d, dst_dir_fd=d)
 
 
 def _stem(name: str) -> str:
@@ -148,12 +149,12 @@ def _spool(cfg: dict, record: dict, suffix: str) -> Path:
         except OSError as exc:
             raise SpoolError(f"spool directory {_dir_path(cfg)}: can't write in it ({exc})") from exc
         try:
-            os.fchmod(fd, 0o600)
+            compat.fchmod(fd, 0o600)
             safefs._write_all(fd, json.dumps({**record, "ts": time.time()}).encode())
         except BaseException:
             os.close(fd)
             with contextlib.suppress(OSError):
-                os.unlink(tmp, dir_fd=d)
+                compat.unlink(tmp, dir_fd=d)
             raise
         os.close(fd)
         final = tmp[1:].replace(".tmp", suffix)
@@ -209,7 +210,7 @@ def pending_since(cfg: dict, job: str, since: float) -> bool:
                 return False
             for name in _oldest_first(d, (".json", ".wat")):
                 try:
-                    if os.stat(name, dir_fd=d, follow_symlinks=False).st_mtime < since:
+                    if compat.stat(name, dir_fd=d, follow_symlinks=False).st_mtime < since:
                         continue
                     if _read_json(d, name).get("job") == job:
                         return True
@@ -246,12 +247,12 @@ def _oldest_first(d: int, suffixes=SUFFIXES) -> list[str]:
     """The queued records, oldest first: regular files of this user with one link only (a
     symlink, hard link, FIFO or another user's file is left alone, never claimed)."""
     dated = []
-    uid = os.getuid()
-    for name in os.listdir(d):
+    uid = compat.uid()
+    for name in compat.listdir(d):
         if not name.endswith(suffixes) or name.startswith("."):
             continue
         try:
-            st = os.stat(name, dir_fd=d, follow_symlinks=False)
+            st = compat.stat(name, dir_fd=d, follow_symlinks=False)
         except FileNotFoundError:
             continue  # claimed by a parallel flusher between the listing and the stat
         if not stat.S_ISREG(st.st_mode) or st.st_uid != uid or st.st_nlink != 1:
@@ -339,9 +340,9 @@ def _rewrite(d: int, claimed: str, record: dict) -> None:
     """Replace a claimed record (a fresh file renamed over it: nothing is written through a
     link), keeping its mtime (its place in the queue)."""
     from swarm import safefs
-    st = os.stat(claimed, dir_fd=d, follow_symlinks=False)
+    st = compat.stat(claimed, dir_fd=d, follow_symlinks=False)
     safefs.write_atomic(d, claimed, json.dumps(record))
-    os.utime(claimed, (st.st_atime, st.st_mtime), dir_fd=d, follow_symlinks=False)
+    compat.utime(claimed, (st.st_atime, st.st_mtime), dir_fd=d, follow_symlinks=False)
 
 
 def _record_failure(board, d: int, name: str, claimed: str, rec: tuple, bank: str, exc) -> str:
@@ -476,7 +477,7 @@ def _deliver(board, cfg: dict, d: int, name: str, claimed: str, rec: tuple, fail
     if suffix == ".mem":
         outcome = _deliver_memory(board, cfg, d, name, claimed, rec, failed_banks)
         if outcome == "delivered":
-            os.unlink(claimed, dir_fd=d)
+            compat.unlink(claimed, dir_fd=d)
         if outcome in ("delivered", "down"):
             return outcome
         return "stop" if outcome == "board" else "skip"
@@ -500,7 +501,7 @@ def _deliver(board, cfg: dict, d: int, name: str, claimed: str, rec: tuple, fail
     if not accepted:
         _mv(d, claimed, _with_suffix(name, ".bad"))
         return "skip"
-    os.unlink(claimed, dir_fd=d)
+    compat.unlink(claimed, dir_fd=d)
     return "delivered"
 
 

@@ -68,6 +68,7 @@ from .base import (LEFT_PAUSED, MOVED_PREFIX, PauseRecord, build_manifest, NAME_
                    OwedReply, ReadResult, Route, RosterEntry, SCHEMA_VERSION, SetupResult, SpawnGrant, SyncState,
                    TRANSCRIPT_ROLES, TranscriptImage, TranscriptRow, TranscriptSummary, VERDICTS,
                    derive_agent_status, load_name_pool)
+from swarm import compat
 
 _UTC = _dt.timezone.utc
 # PRAGMA user_version records base.SCHEMA_VERSION once setup has run. A board older than this
@@ -753,7 +754,7 @@ class SqliteBoard(Board):
             c.execute("DELETE FROM agents WHERE agent_key = ?", (agent_key,))   # full reset
             c.execute("INSERT INTO agents (agent_key, name, job, role, host, os_user, joined_at, last_seen, "
                       "last_read_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                      (agent_key, name, job, role, os.uname().nodename, getpass.getuser(), now, now,
+                      (agent_key, name, job, role, compat.node(), getpass.getuser(), now, now,
                        _history_cursor(c, job, int(self.board_cfg.get("join_history", 30)))))
             return name
 
@@ -955,7 +956,7 @@ class SqliteBoard(Board):
             c.execute("INSERT INTO agents (agent_key, name, job, role, host, os_user, joined_at, last_seen, "
                       "last_read_id, state, judge, verifier, resume_of) "
                       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'started', ?, ?, ?)",
-                      (agent_key, name, job, role, os.uname().nodename, getpass.getuser(), now, now,
+                      (agent_key, name, job, role, compat.node(), getpass.getuser(), now, now,
                        cursor, int(judge), int(bool(verifier)), resume_of))
             return name
 
@@ -1070,7 +1071,7 @@ class SqliteBoard(Board):
                                                                 max_host_minutes)):
                 rows = lambda col, v: [self._restart(r) for r in c.execute(
                     f"SELECT {_RESTART_COLS} FROM restarts WHERE {col} = ?", (v,))]
-                if restart_over_limits(rows("job", job), rows("host", os.uname().nodename), float(minutes_cap),
+                if restart_over_limits(rows("job", job), rows("host", compat.node()), float(minutes_cap),
                                        max_job_minutes=max_job_minutes, max_host_running=max_host_running,
                                        max_host_minutes=max_host_minutes, day_start=day_start):
                     return None
@@ -1080,7 +1081,7 @@ class SqliteBoard(Board):
                 "os_user, minutes_cap, ended_at, outcome) VALUES (?, ?, 1 + (SELECT count(*) FROM restarts "
                 "WHERE job = ? AND agent_key = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 f"ON CONFLICT (old_agent_key) DO NOTHING RETURNING {_RESTART_COLS}",
-                (job, agent_key, job, agent_key, now, reason, old_agent_key, harness, os.uname().nodename,
+                (job, agent_key, job, agent_key, now, reason, old_agent_key, harness, compat.node(),
                  getpass.getuser(), float(minutes_cap), now if outcome else None, outcome)).fetchone()
             return self._restart(row) if row else None
 
@@ -1226,7 +1227,7 @@ class SqliteBoard(Board):
             now = self._now()
             msg_id = c.execute("INSERT INTO messages (job, agent_name, created_at, message, to_agent, "
                                "agent_key, host) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                               (job, name, now, text, to, agent_key, os.uname().nodename)).lastrowid
+                               (job, name, now, text, to, agent_key, compat.node())).lastrowid
             c.execute("UPDATE agents SET last_seen = ?, last_post_at = ?, calls_at_post = tool_calls "
                       "WHERE name = ? AND left_at IS NULL", (now, now, name))
             return msg_id

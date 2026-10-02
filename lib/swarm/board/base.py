@@ -55,6 +55,7 @@ from typing import Mapping, NamedTuple, Sequence
 
 from ..paths import DATA_DIR, PLUGIN_ROOT as SKILL_DIR  # noqa: E402,F401  (SKILL_DIR: old name)
 from ..textsafe import strip_controls
+from swarm import compat
 
 # Name sources in allocation order: every free Simpsons name is tried before any English one.
 NAME_SOURCES = ("simpsons", "english")
@@ -898,7 +899,7 @@ def load_name_pool(data_dir: Path = DATA_DIR) -> dict[str, list[str]]:
     """The shipped name lists, {source: [names]} in NAME_SOURCES order (data/<source>_names.json).
     The CLI passes this to `Board.setup`; backends also use the "english" list for the
     last-resort "<name> <NNN>" fallback in allocate_name."""
-    return {s: json.loads((data_dir / f"{s}_names.json").read_text()) for s in NAME_SOURCES}
+    return {s: json.loads((data_dir / f"{s}_names.json").read_text(encoding="utf-8")) for s in NAME_SOURCES}
 
 
 # --------------------------------------------------------------------------- the board
@@ -1247,7 +1248,7 @@ class Board(abc.ABC):
             order and take the first one that can be claimed, "simpsons" exhausted before
             "english"; if none is free, "<random english name> <random 100..999>". The row
             is created or fully reset: name, job, role as given, host = this machine
-            (os.uname().nodename), joined_at = last_seen = now, left_at None, state started,
+            (compat.node()), joined_at = last_seen = now, left_at None, state started,
             not the judge, left_reason and resume_of None,
             tool_calls 0, current_tool/tool_started_at/last_post_at None, sync state empty
             (SyncState defaults: calls_at_post 0, reply_reminded_id 0, timestamps None). The read cursor is set so that exactly the job's newest
@@ -1607,7 +1608,7 @@ class Board(abc.ABC):
     def _insert_message(self, job: str, name: str, text: str, to: str | None,
                         agent_key: str | None) -> int:
         """Store an already-normalised message and return its new id. Steps: ensure_job(job);
-        insert (created_at now, host = os.uname().nodename, agent_key as given); then the
+        insert (created_at now, host = compat.node(), agent_key as given); then the
         ACTIVE agent named `name`, if any (on any job), gets last_seen = last_post_at = now and
         calls_at_post = its tool_calls.
         The insert wakes wait_for_change() waiters."""

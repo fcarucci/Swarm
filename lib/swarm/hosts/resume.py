@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import os
+from swarm import compat
 import socket
 import subprocess
 import uuid
@@ -176,7 +177,7 @@ def start(restored: Restored, env: dict | None = None, popen=subprocess.Popen):
     from swarm.supervisor.launch import check_safe
     check_safe(restored.argv)
     proc = popen(list(restored.argv), cwd=restored.cwd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                 stderr=subprocess.DEVNULL, env=env, start_new_session=True, text=True)
+                 stderr=subprocess.DEVNULL, env=env, text=True, **compat.popen_detach())
     proc.stdin.write(restored.stdin)
     proc.stdin.close()
     return proc
