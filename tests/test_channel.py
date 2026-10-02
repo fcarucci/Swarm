@@ -29,6 +29,7 @@ def make_repo(root: Path) -> Path:
     (repo / "bin").mkdir()
     (repo / "bin" / "swarm").write_text("#!/bin/sh\nexit 0\n")
     (repo / "bin" / "swarm").chmod(0o755)
+    (repo / "bin" / "swarm.cmd").write_text("@echo off\r\nexit /b 0\r\n")   # for the Windows installer test
     (repo / ".claude-plugin" / "marketplace.json").write_text(json.dumps(
         {"name": "swarm", "owner": {"name": "t"}, "plugins": [{"name": "swarm", "source": "./"}]}))
     git(repo, "init", "-q", "-b", "main")
