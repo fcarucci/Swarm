@@ -798,7 +798,10 @@ def _move_old_spool(cfg: dict) -> list[Step]:
 
 
 def supervisor_step(cfg: dict, config: Path, run=None) -> Step:
-    """Install the user timer when [supervise] is enabled."""
+    """Install the user timer when [supervise] is enabled. Skipped on Windows: the supervisor is
+    Linux only (systemd user timers)."""
+    if paths.IS_WINDOWS:
+        return Step("supervisor", "skipped", "not available on Windows (needs a systemd user timer)")
     import subprocess
     from swarm.supervisor import settings as st, systemd
     try:
@@ -1000,7 +1003,7 @@ def _loose_state_dirs() -> list[str]:
             st = os.lstat(paths.home() / rel)
         except OSError:
             continue
-        if _stat.S_ISDIR(st.st_mode) and st.st_mode & 0o022 and not st.st_mode & _stat.S_ISVTX:
+        if not paths.IS_WINDOWS and _stat.S_ISDIR(st.st_mode) and st.st_mode & 0o022 and not st.st_mode & _stat.S_ISVTX:
             out.append(f"~/{rel}")
     return out
 
@@ -1090,6 +1093,8 @@ def format_checks(checks: list[Check], color: bool = False) -> str:
 
 
 def supervisor_checks(cfg: dict, host: str | None, run=None, which=None) -> list[Check]:
+    if paths.IS_WINDOWS:
+        return [Check("supervise", True, "not available on Windows (Linux systemd only)")]
     import datetime as dt
     import subprocess
     from swarm.supervisor import settings as st, systemd
@@ -1460,7 +1465,7 @@ def exposure_checks(cfg: dict) -> list[Check]:
             st = os.lstat(d)
         except OSError:
             continue
-        if _stat.S_ISDIR(st.st_mode) and st.st_mode & 0o022 and not st.st_mode & _stat.S_ISVTX:
+        if not paths.IS_WINDOWS and _stat.S_ISDIR(st.st_mode) and st.st_mode & 0o022 and not st.st_mode & _stat.S_ISVTX:
             loose.append(str(d))
     out.append(Check("local dirs", not loose,
                      (f"group- or world-writable: {', '.join(loose)}; the swarm refuses to keep its files "

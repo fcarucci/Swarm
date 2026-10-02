@@ -16,7 +16,7 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 - The installers and `swarm upgrade` now install the newest release tag (vX.Y.Z) by default, not the tip of main. With no tag found (or `git ls-remote` failing) they fall back to main with a warning. Use `--channel main` for the old behaviour.
 
 ### Limits
-- On Windows the supervisor (`swarm supervise`: stuck-agent restarts) is not available, there is no `0700`/ownership permission checking (your profile's NTFS permissions apply instead), and the files live under `%USERPROFILE%\\.local` like on Linux. Claude Code on Windows runs the hooks through Git Bash; Codex's Windows hook command is not verified on a real Codex yet.
+- On Windows the supervisor (`swarm supervise`: stuck-agent restarts) is not available, there is no `0700`/ownership permission checking (your profile's NTFS permissions apply instead), and the files live under `%USERPROFILE%\\.local` like on Linux. `swarm watch` has no key controls, and Codex `.zst` rollouts need `zstd` on PATH. Claude Code on Windows runs the hooks through Git Bash; Codex's Windows hook command is not verified on a real Codex yet.
 
 ## [0.1.12] - 2026-10-02
 

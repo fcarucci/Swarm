@@ -65,6 +65,15 @@ class VenvPathTests(unittest.TestCase):
             self.assertEqual(paths.agent_bin().name, "swarm.cmd")
 
 
+class SupervisorOnWindowsTests(unittest.TestCase):
+    def test_bootstrap_and_doctor_say_not_available_without_touching_systemd(self):
+        with mock.patch.object(paths, "IS_WINDOWS", True):
+            step = bootstrap.supervisor_step({}, Path("c.toml"))
+            checks = bootstrap.supervisor_checks({}, None)
+        self.assertEqual((step.name, step.status), ("supervisor", "skipped"))
+        self.assertEqual([(c.name, c.ok) for c in checks], [("supervise", True)])
+
+
 class ChannelStepTests(unittest.TestCase):
     def test_bootstrap_records_the_channel_from_the_installer(self):
         tmp = Path(tempfile.mkdtemp(prefix="swarm-wininst-"))

@@ -220,6 +220,10 @@ codex` reports the hooks as not running, tell us which shell Codex used.
 - The `0700`/`0600` mode and owner checks of the host and state directories do not exist: the
   profile's NTFS permissions apply. Symlinks and junctions in those directories are still refused.
 - `swarm migrate` has nothing to do (the old skill install never existed there).
+- `swarm watch` has no key controls on Windows (Ctrl-C quits).
+- Codex `.zst` rollouts (transcript capture) need the `zstd` binary on `PATH`.
+- Files are locked with `LockFileEx`: the board, spool and state directories must be on a local
+  NTFS drive (not a network share).
 - Commands shown to agents are shell-quoted for a POSIX shell (Git Bash under Claude Code).
   Codex agents on Windows run PowerShell: a path in single quotes needs `&` in front to run.
 - The Codex sandbox model (writable roots, `swarm doctor` exposure checks) is the Linux/macOS one;
