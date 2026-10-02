@@ -50,7 +50,7 @@ class FakeHindsight:
                                       "auth": self.headers.get("Authorization")})
                 if fake.delay:
                     time.sleep(fake.delay)
-                for (m, suffix), seconds in fake.delays.items():
+                for (m, suffix), seconds in list(fake.delays.items()):   # a test may change delays meanwhile
                     if m == method and self.path.endswith(suffix):
                         time.sleep(seconds)
                 with fake.lock:   # e.g. a late retain and its retry: replace-then-append is one step
