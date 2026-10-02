@@ -197,7 +197,7 @@ manifest on the board, stops the agents, and refuses new joins and posts with a 
 reaches the same board, `swarm resume --job J [--host H] [--workdir D]` re-creates every agent from the board (not
 local disk) with the same name, role and read cursor, and tells it that it was paused and resumed.
 `--dry-run` shows the plan, `--only NAME...` resumes a subset, `--retry` redoes failed agents. Needs board
-schema 12 (`swarm migrate`) and transcripts enabled.
+schema 12 (upgrades itself on the next `swarm init` or ordinary command) and transcripts enabled.
 
 Limits:
 - No cross-harness resume: a Claude Code transcript cannot be resumed in Codex or the reverse; that agent gets a briefing instead.

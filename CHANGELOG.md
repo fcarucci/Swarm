@@ -9,7 +9,7 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 ### Added
 - `swarm pause --job J [--reason ...]` pauses a job: every agent's transcript is checkpointed to the board with a resume manifest (name, role, host, model, read cursor, last tool, task), live agents are stopped, and joins and posts on the job are refused with a clear message while hooks stay safe no-ops.
 - `swarm resume --job J [--host H] [--workdir D] [--only NAME...] [--dry-run] [--retry]` re-creates each agent on this machine from the transcript stored on the board (same names, roles and cursors, board history intact) and tells it it was paused and resumed. Claude Code resumes natively; Codex resumes experimentally or gets a briefing. `--retry` redoes agents a previous resume failed.
-- Board schema 12: `paused` job status and a `job_pauses` table (run `swarm migrate`; Postgres, SQLite and file boards).
+- Board schema 12: `paused` job status and a `job_pauses` table (applied by `swarm init`; Postgres, SQLite and file boards).
 
 ### Limits
 - No cross-harness resume (a Claude transcript on Codex or the reverse gets a briefing instead); subagent trees are not rebuilt (they return as independent sessions); redacted secrets stay redacted; files and git state are not part of the pause.
