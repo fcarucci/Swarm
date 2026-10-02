@@ -78,6 +78,7 @@ if not IS_WINDOWS:
     open = _late("open")      # noqa: A001  (the fd-relative family, same signatures as os.*)
     stat, lstat, rename, unlink = _late("stat"), _late("lstat"), _late("rename"), _late("unlink")
     mkdir, link, utime, listdir = _late("mkdir"), _late("link"), _late("utime"), _late("listdir")
+    rename_new = rename   # POSIX has no no-replace rename by name; claims there are by process id
 
     def flock(fd, op):
         return fcntl.flock(fd, op)
@@ -224,6 +225,21 @@ else:
                 time.sleep(0.025)
         if not _posix_rename(s, d):
             _retry(os.replace, s, d)
+
+    def rename_new(src, dst, *, src_dir_fd=None, dst_dir_fd=None) -> None:
+        """Rename by name only, never replacing: FileNotFoundError if `src` is gone, FileExistsError if
+        `dst` exists. Of several racing claimers of one `src` exactly one succeeds (a handle-based
+        rename could succeed for all of them)."""
+        s, d = _path(src, src_dir_fd), _path(dst, dst_dir_fd)
+        for _ in range(40):
+            try:
+                os.rename(s, d)
+                return
+            except PermissionError:   # src busy for a moment (another rename of it, a scanner)
+                if os.path.lexists(d):
+                    raise FileExistsError(errno.EEXIST, "file exists", d) from None
+                time.sleep(0.025)
+        os.rename(s, d)
 
     def _posix_rename(src: str, dst: str) -> bool:
         """Rename with POSIX semantics (NTFS, Windows 10 1607+): replaces `dst` even while another
