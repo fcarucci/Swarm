@@ -140,7 +140,33 @@ codex plugin marketplace add https://github.com/fcarucci/Swarm.git
 codex plugin add swarm@swarm
 ```
 
+By default the installer installs the **newest release** (the latest `vX.Y.Z` tag), not whatever
+`main` holds right now. `--channel main` (or `--main`) installs the tip of `main` instead, and
+`--ref <tag|branch>` installs exactly that ref. It prints the channel, the ref and the installed
+plugin version. If no release tag can be found, it falls back to `main` with a warning.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/fcarucci/Swarm/main/install.sh | bash -s -- --main
+curl -fsSL https://raw.githubusercontent.com/fcarucci/Swarm/main/install.sh | bash -s -- --ref v0.1.12
+```
+
 Full flag reference, all-users mode, and troubleshooting: [docs/REFERENCE.md#install](docs/REFERENCE.md#install).
+
+### Windows
+
+Swarm runs natively on Windows 10/11 with Claude Code and Codex (Python 3.11+ and git on `PATH`).
+From PowerShell, as yourself (no administrator rights):
+
+```powershell
+irm https://raw.githubusercontent.com/fcarucci/Swarm/main/install.ps1 -OutFile install.ps1
+.\install.ps1              # newest release; -Main for the tip of main, -Ref v0.1.12 for a tag, -Target codex for one host
+```
+
+It does what `install.sh` does (marketplace, plugin, bootstrap, migrate, doctor) and adds
+`%USERPROFILE%\.local\bin` to your user PATH, where `swarm.cmd` lives. Files go where they do on
+Linux, under `%USERPROFILE%` (`.local\share\swarm`, `.local\state\swarm`, `.config\swarm\config.toml`).
+Limits: the supervisor (`swarm supervise`) is not available, and there are no Unix permission
+checks (your profile's NTFS permissions apply). Details: [docs/REFERENCE.md#windows](docs/REFERENCE.md#windows).
 
 ### Updating
 
@@ -152,7 +178,10 @@ Updates the marketplace and plugin for whichever of `claude`/`codex` is installe
 new version), then runs `bootstrap`, `migrate` and `doctor` from the *newly installed* plugin's
 own `bin/swarm` — never the code that was already running. Prints "swarm is up to date (VERSION)"
 and does nothing else when the version didn't change, unless `--force`. Flags: `--host
-claude|codex|both`, `--force` (also passed through to `migrate`), `--no-color`. Restart Claude
+claude|codex|both`, `--force` (also passed through to `migrate`), `--channel release|main`,
+`--no-color`. By default it moves to the newest release tag; `--channel main` follows the tip of
+`main`. The channel you pass is remembered in the config (`[upgrade] channel`), so a plain
+`swarm upgrade` keeps following it. Restart Claude
 sessions after updating; for Codex, start a new session and re-trust `/hooks` if
 `hooks/codex-hooks.json` changed.
 

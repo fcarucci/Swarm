@@ -189,3 +189,8 @@ helper = "haiku"
 # [models.codex]
 # worker = "<a model your Codex accepts, as in `model =` of ~/.codex/config.toml>"
 # helper = "<...>"
+
+# Which revision `swarm upgrade` follows: "release" (the newest vX.Y.Z tag, the default) or
+# "main" (the tip of main). `swarm upgrade --channel ...` and the installers write it.
+# [upgrade]
+# channel = "release"

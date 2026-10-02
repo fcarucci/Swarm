@@ -163,6 +163,68 @@ Coming from the old `~/.claude/skills/swarm` install: `swarm migrate` (run autom
 first session) removes its hooks from `~/.claude/settings.json` and moves the old directory away
 (see [Moving from the old skill install](#moving-from-the-old-skill-install)).
 
+### Which revision gets installed
+
+`install.sh` and `install.ps1` install the newest release by default: they resolve the newest
+`vX.Y.Z` tag with `git ls-remote --tags --refs --sort=-v:refname <marketplace> 'v*'` (anonymous, so
+it works on GitHub and Gitea) and add the marketplace pinned to it (Claude Code:
+`claude plugin marketplace add <url>#<tag>`; Codex: `codex plugin marketplace add <url> --ref
+<tag>`). Re-running with another ref removes and re-adds the marketplace at the new one.
+
+| Flag (PowerShell) | Effect |
+|---|---|
+| `--channel release` (`-Channel release`) | The default: the newest `vX.Y.Z` tag. With no tag found, or `git ls-remote` failing, falls back to `main` with a warning |
+| `--channel main`, `--main` (`-Channel main`, `-Main`) | The tip of the `main` branch (unpinned) |
+| `--ref <tag\|branch>` (`-Ref`) | Exactly this tag or branch; wins over `--channel` |
+
+A local `--marketplace` path is a frozen tree and is never pinned. The installer prints
+`channel: <channel> (<ref>)` and, per host, `installed swarm <version>: channel ..., ref ...`.
+An explicit `--channel` is stored as `[upgrade] channel = "release" | "main"` in the config, which
+`swarm upgrade` reads (see [First run and updates](#first-run-and-updates)); `swarm upgrade
+--channel main` stores it too.
+
+## Windows
+
+Native Windows 10/11 is supported with Claude Code and Codex for Windows. Install with
+`install.ps1` (README "Windows"): the same steps as `install.sh`, for the current user only. It
+needs Python 3.11+ (`py -3` or `python` on `PATH`) and git.
+
+**Layout.** The same as on Linux, under `%USERPROFILE%` (what `~` means): the venv at
+`.local\share\swarm\venv` (interpreter `Scripts\python.exe`; `SWARM_VENV` overrides it), host-only
+files in `.local\share\swarm\host`, markers and the spool under `.local\state\swarm`, the
+config at `.config\swarm\config.toml` (`SWARM_CONFIG`), the default file/SQLite board under
+`.local\share\swarm-board`. `%APPDATA%`/`%LOCALAPPDATA%` are not used: one layout on every
+platform keeps the sandbox, doctor and test model the same. Put these on a local NTFS drive of
+your own profile, not a network share.
+
+**Launchers.** `bin\swarm.cmd` (found by `py -3`, else `python`) runs `lib\swarm\winlaunch.py`,
+which builds the venv under a lock directory (`<venv>.building`) when `requirements.txt` changed,
+then runs the swarm package from the plugin. `swarm bootstrap` writes `~\.local\bin\swarm.cmd`
+(on your user PATH after `install.ps1`), which runs the installed plugin and, when that plugin
+folder has been replaced, falls back to the newest installed one. Agents and the orchestrator
+are given `bin\swarm.cmd`. Under Git Bash, `bin/swarm` and `bin/swarm-hook` (the sh scripts)
+hand over to the same Python entry points.
+
+**Hooks.** Claude Code on Windows runs hook commands through Git Bash (PowerShell only when Git
+Bash is not installed): `hooks/hooks.json` is unchanged and `bin/swarm-hook` hands over to
+`lib\swarm\winhook.py`, the Python port of that script. Without Git Bash (PowerShell fallback) the
+hook command line, a quoted path, is not valid PowerShell: install Git for Windows. Codex hooks
+carry a `commandWindows` next to `command`: `cmd /d /s /c ""%PLUGIN_ROOT%\bin\swarm-hook.cmd" ..."`.
+The `cmd /c` wrapper is used because Codex documents `PLUGIN_ROOT` as an environment variable but
+not which shell runs the command; `cmd` expands `%PLUGIN_ROOT%` itself whichever shell calls it.
+This could not be verified on a real Codex for Windows (CI has none): if `swarm doctor --host
+codex` reports the hooks as not running, tell us which shell Codex used.
+
+**Not available or different on Windows.**
+- `swarm supervise` (stuck-agent restarts, systemd timer) is Linux only and says so.
+- The `0700`/`0600` mode and owner checks of the host and state directories do not exist: the
+  profile's NTFS permissions apply. Symlinks and junctions in those directories are still refused.
+- `swarm migrate` has nothing to do (the old skill install never existed there).
+- Commands shown to agents are shell-quoted for a POSIX shell (Git Bash under Claude Code).
+  Codex agents on Windows run PowerShell: a path in single quotes needs `&` in front to run.
+- The Codex sandbox model (writable roots, `swarm doctor` exposure checks) is the Linux/macOS one;
+  how Codex's Windows sandbox treats these paths is not covered.
+
 ## Quick start
 
 You use swarm from Claude Code or Codex, not from the CLI: ask the model to run a swarm for the
@@ -581,6 +643,10 @@ only needs what differs; `config.example.toml` lists them all. The CLI reads `--
 else `$SWARM_CONFIG`, else `~/.config/swarm/config.toml`. The hooks read `$SWARM_CONFIG` or the
 default path: if you keep the config elsewhere, set `$SWARM_CONFIG` in the environment Claude
 Code or Codex runs in.
+
+`[upgrade]` has one key, `channel = "release" | "main"`: which revision `swarm upgrade` follows
+(default `release`, the newest `vX.Y.Z` tag). `swarm upgrade --channel ...` and the installers'
+`--channel` write it; the rest of the file is left as it is.
 
 **`[database]`** (Postgres only)
 
@@ -1963,7 +2029,7 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `init [--no-hooks]` | create the storage if missing, the schema and the name pool. Every other command does this by itself when needed (see [Automatic initialisation](#automatic-initialisation)). The hooks ship with the plugin; `--no-hooks` is ignored |
 | `install-hooks` | obsolete: the hooks ship with the plugin (`hooks/hooks.json`, `hooks/codex-hooks.json`); prints that and writes nothing. `migrate` removes the old install's entries |
 | `bootstrap [--host claude\|codex] [--quiet]` | set the swarm up for this host: venv, launcher, config, board, host setup, migrate (see [First run and updates](#first-run-and-updates)); run automatically in the background at the first session of each plugin version. `--quiet` prints only the steps that need you |
-| `upgrade [--host claude\|codex\|both] [--force] [--no-color]` | update the swarm marketplace and plugin for whichever of claude/codex is installed (reports old → new version), then `bootstrap`, `migrate` and `doctor` from the *newly installed* plugin's own `bin/swarm` (never the code currently running); "swarm is up to date (VERSION)" and nothing else when the version didn't change, unless `--force`. `--force` also passes through to `migrate`. Ends by saying to restart Claude sessions, and for Codex to start a new session and re-trust `/hooks` when `hooks/codex-hooks.json` changed. `update` is a hidden alias |
+| `upgrade [--host claude\|codex\|both] [--channel release\|main] [--force] [--no-color]` | update the swarm marketplace and plugin for whichever of claude/codex is installed (reports old → new version) to the newest release tag, or with `--channel main` the tip of main (`--channel` is stored as `[upgrade] channel` in the config, so a plain `swarm upgrade` keeps following it; a local-path marketplace is followed as is), then `bootstrap`, `migrate` and `doctor` from the *newly installed* plugin's own `bin/swarm` (never the code currently running); "swarm is up to date (VERSION)" and nothing else when the version didn't change, unless `--force`. `--force` also passes through to `migrate`. Ends by saying to restart Claude sessions, and for Codex to start a new session and re-trust `/hooks` when `hooks/codex-hooks.json` changed. `update` is a hidden alias |
 | `migrate [--force]` | retire the old `~/.claude/skills/swarm` install: its hooks in `~/.claude/settings.json` (backup first) and its directory (see [Moving from the old skill install](#moving-from-the-old-skill-install)). Refused while a job is active on this machine, unless `--force` |
 | `doctor [--host claude\|codex] [--no-color]` | check this machine's setup and print the fix for each problem; exit 1 if a check fails. Default host: the one it runs in (a plain terminal: Claude Code) |
 | `activate --job J [--description D] [--task T\|-] [--project P] [--session S] [--adopt-running]` | open or re-open the job and switch the board on for subagents spawned from now on; bind it to `--session`, default the calling Claude Code or Codex session; print `swarm command: <path>` and the tag lines. In Codex, refused while another job is active in the session |
