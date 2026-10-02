@@ -97,7 +97,7 @@ def _validate(rec: Record) -> Record:
     _text(rec.session_id, "session_id", MAX_NAME, optional=True)
     _text(rec.cwd, "cwd", MAX_CWD)
     if (not os.path.isabs(rec.cwd) or os.path.normpath(rec.cwd) != rec.cwd
-            or ".." in rec.cwd.split("/")):
+            or ".." in rec.cwd.replace(os.sep, "/").split("/")):
         raise ValueError(f"enrolment: cwd must be an absolute, normalised path, not {rec.cwd!r:.80}")
     if (not isinstance(rec.created_at, (int, float)) or isinstance(rec.created_at, bool)
             or not math.isfinite(rec.created_at)):

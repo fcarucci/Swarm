@@ -931,7 +931,7 @@ def _payload_cwd(payload: dict) -> str:
     from swarm.textsafe import has_controls
     c = payload.get("cwd")
     if (isinstance(c, str) and 0 < len(c) <= 4096 and os.path.isabs(c) and os.path.normpath(c) == c
-            and ".." not in c.split("/") and not has_controls(c)):
+            and ".." not in c.replace(os.sep, "/").split("/") and not has_controls(c)):
         return c
     return os.getcwd()
 

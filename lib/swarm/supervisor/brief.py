@@ -12,6 +12,7 @@ and the header says the supervisor never speaks through posts."""
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 
@@ -75,7 +76,7 @@ def codex_task_name(jsonl: str) -> str | None:
     path = spawn.get("agent_path")
     if not path:
         return None
-    return str(path).rstrip("/").rsplit("/", 1)[-1] or None
+    return str(path).replace(os.sep, "/").rstrip("/").rsplit("/", 1)[-1] or None
 
 
 def workdir_of(jsonl: str) -> str | None:

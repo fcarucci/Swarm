@@ -56,7 +56,8 @@ def _abs(path) -> Path:
 
 
 def _entry(name: str) -> str:
-    if not isinstance(name, str) or name in ("", ".", "..") or "/" in name or "\0" in name:
+    if not isinstance(name, str) or name in ("", ".", "..") or "/" in name or "\0" in name \
+            or (compat.IS_WINDOWS and ("\\" in name or ":" in name)):
         raise ValueError(f"{name!r} is not a single directory entry name")
     return name
 
