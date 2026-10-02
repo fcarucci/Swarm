@@ -393,6 +393,7 @@ def legacy_hook_set(skills_dir: Path | None = None) -> set[str]:
         dirs.add(str(base.resolve()))
     except OSError:
         pass
+    dirs |= {Path(d).as_posix() for d in dirs}   # Windows: the same path with forward slashes
     return {f"{d}/bin/swarm-hook {a}" for d in dirs for a in LEGACY_HOOK_ARGS}
 
 
