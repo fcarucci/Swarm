@@ -212,11 +212,16 @@ else:
     def rename(src, dst, *, src_dir_fd=None, dst_dir_fd=None) -> None:
         # os.rename refuses to overwrite on Windows; POSIX rename replaces atomically
         s, d = _path(src, src_dir_fd), _path(dst, dst_dir_fd)
-        try:   # by name and atomic when `dst` is free: of two racing claimers of `src`, one gets FileNotFoundError
-            os.rename(s, d)
-            return
-        except (FileExistsError, PermissionError):
-            pass
+        for _ in range(40):   # by name and atomic when `dst` is free: of two racing claimers of `src`, one gets FileNotFoundError
+            try:
+                os.rename(s, d)
+                return
+            except FileExistsError:
+                break
+            except PermissionError:   # src busy for a moment (another rename of it, a scanner), or dst exists
+                if os.path.lexists(d):
+                    break
+                time.sleep(0.025)
         if not _posix_rename(s, d):
             _retry(os.replace, s, d)
 
