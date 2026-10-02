@@ -268,8 +268,8 @@ def _claim(d: int, name: str) -> str | None:
     them post the same message."""
     claimed = f"{_stem(name)}.sending-{os.getpid()}"
     try:
-        compat.rename_new(name, claimed, src_dir_fd=d, dst_dir_fd=d)
-    except (FileNotFoundError, FileExistsError):   # FileExistsError: Windows, a thread of this process holds it
+        compat.claim_rename(name, claimed, dir_fd=d)
+    except (FileNotFoundError, FileExistsError):   # FileExistsError: Windows, another claimer holds the token
         return None
     return claimed
 

@@ -7,16 +7,17 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 ## [0.1.13] - 2026-10-02
 
 ### Added
-- Windows support (native, with Claude Code and Codex on Windows): `bin/swarm.cmd` launcher (venv in `Scripts\\python.exe`), `bin/swarm-hook.cmd` hook entry, a Windows `swarm` launcher written by `swarm bootstrap` at `~\\.local\\bin\\swarm.cmd`, Codex hooks with a `commandWindows`, and Git Bash shims for the sh scripts. See README "Windows" and docs/REFERENCE.md "Windows".
-- `install.ps1`, the PowerShell installer: the same steps as `install.sh` (marketplace, plugin, bootstrap, migrate, doctor) for the current user, and puts `~\\.local\\bin` on your user PATH.
+- Windows support (native, with Claude Code and Codex on Windows): `bin/swarm.cmd` launcher (venv in `Scripts\python.exe`), `bin/swarm-hook.cmd` hook entry, a Windows `swarm` launcher written by `swarm bootstrap` at `~\.local\bin\swarm.cmd`, Codex hooks with a `commandWindows`, and Git Bash shims for the sh scripts. See README "Windows" and docs/REFERENCE.md "Windows".
+- `install.ps1`, the PowerShell installer: the same steps as `install.sh` (marketplace, plugin, bootstrap, migrate, doctor) for the current user, and puts `~\.local\bin` on your user PATH.
 - `install.sh` and `install.ps1` take `--channel release|main` (`-Channel` in PowerShell), `--main` and `--ref <tag|branch>`; the marketplace is added pinned to the chosen ref, and the channel, ref and installed plugin version are printed.
 - `swarm upgrade --channel release|main`: follow the newest release tag or the tip of main; the choice is kept in the config (`[upgrade] channel`), so a plain `swarm upgrade` keeps following it.
+- A plain `swarm upgrade` now re-pins an existing install to the newest release tag (for Claude this removes and re-adds the marketplace and reinstalls the plugin).
 
 ### Changed
 - The installers and `swarm upgrade` now install the newest release tag (vX.Y.Z) by default, not the tip of main. With no tag found (or `git ls-remote` failing) they fall back to main with a warning. Use `--channel main` for the old behaviour.
 
 ### Limits
-- On Windows the supervisor (`swarm supervise`: stuck-agent restarts) is not available, there is no `0700`/ownership permission checking (your profile's NTFS permissions apply instead), and the files live under `%USERPROFILE%\\.local` like on Linux. `swarm watch` has no key controls, and Codex `.zst` rollouts need `zstd` on PATH. Claude Code on Windows runs the hooks through Git Bash; Codex's Windows hook command is not verified on a real Codex yet.
+- On Windows the supervisor (`swarm supervise`: stuck-agent restarts) is not available, there is no `0700`/ownership permission checking (your profile's NTFS permissions apply instead), and the files live under `%USERPROFILE%\.local` like on Linux. `swarm watch` has no key controls, and Codex `.zst` rollouts need `zstd` on PATH. Claude Code on Windows runs the hooks through Git Bash; Codex's Windows hook command is not verified on a real Codex yet.
 
 ## [0.1.12] - 2026-10-02
 

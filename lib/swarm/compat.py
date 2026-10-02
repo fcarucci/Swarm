@@ -78,7 +78,11 @@ if not IS_WINDOWS:
     open = _late("open")      # noqa: A001  (the fd-relative family, same signatures as os.*)
     stat, lstat, rename, unlink = _late("stat"), _late("lstat"), _late("rename"), _late("unlink")
     mkdir, link, utime, listdir = _late("mkdir"), _late("link"), _late("utime"), _late("listdir")
-    rename_new = rename   # POSIX has no no-replace rename by name; claims there are by process id
+
+    def claim_rename(src, dst, *, dir_fd) -> None:
+        """Claim the record `src` by renaming it to `dst` (a name that differs per process): of
+        several racing claimers exactly one succeeds, the rest get FileNotFoundError."""
+        os.rename(src, dst, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
 
     def flock(fd, op):
         return fcntl.flock(fd, op)
@@ -226,25 +230,48 @@ else:
         if not _posix_rename(s, d):
             _retry(os.replace, s, d)
 
-    def rename_new(src, dst, *, src_dir_fd=None, dst_dir_fd=None) -> None:
-        """Move `src` to a new name `dst`, never replacing, and exclusively: of several racing
-        claimers of one `src` exactly one succeeds, the others get FileNotFoundError or
-        FileExistsError. (On Windows os.rename is not exclusive: concurrent renames of one file
-        to one name can all report success. Creating a hard link fails if the name exists, so
-        the link decides the winner and the old name is then removed.) Falls back to os.rename
-        where hard links are not available (not NTFS)."""
-        s, d = _path(src, src_dir_fd), _path(dst, dst_dir_fd)
+    CLAIM_STALE = 120.0   # seconds after which a claim token is taken to be a crashed claimer's
+
+    def claim_rename(src, dst, *, dir_fd) -> None:
+        """Claim the record `src` by renaming it to `dst` (a name that differs per process): of
+        several racing claimers exactly one succeeds, the rest get FileNotFoundError or
+        FileExistsError.
+
+        On Windows os.rename is not exclusive (concurrent renames of one file to different names
+        can all report success, and so can hard links to different names), so the winner is
+        decided by creating a token file with a name that is the same for every process,
+        `<stem>.claim` (create-exclusive: it fails if it exists). Only the holder of the token
+        renames `src`, then removes the token. A token left by a crashed holder (older than
+        CLAIM_STALE) is removed by the next claimer, which then tries again."""
+        token = src.rsplit(".", 1)[0] + ".claim"
+        for attempt in (0, 1):
+            try:
+                fd = open(token, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dir_fd)
+            except FileExistsError:
+                if attempt or not _stale_token(token, dir_fd):
+                    raise
+                continue
+            break
+        os.close(fd)
         try:
-            os.link(s, d)
-        except (FileNotFoundError, FileExistsError):
-            raise
-        except (OSError, NotImplementedError):   # no hard links here: the plain rename
-            os.rename(s, d)
-            return
+            rename(src, dst, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)   # nobody else holds the token
+        finally:
+            try:
+                unlink(token, dir_fd=dir_fd)
+            except FileNotFoundError:
+                pass
+
+    def _stale_token(token: str, dir_fd) -> bool:
+        """Remove `token` if it is older than CLAIM_STALE; True if it is gone now."""
         try:
-            _retry(os.unlink, s)
+            if time.time() - os.lstat(_path(token, dir_fd)).st_mtime < CLAIM_STALE:
+                return False
+            unlink(token, dir_fd=dir_fd)
         except FileNotFoundError:
             pass
+        except OSError:
+            return False
+        return True
 
     def _posix_rename(src: str, dst: str) -> bool:
         """Rename with POSIX semantics (NTFS, Windows 10 1607+): replaces `dst` even while another
