@@ -246,6 +246,7 @@ function ConvertTo-Ver([string]$v) { try { [version]($v -replace '[^0-9.].*$', '
 
 function Find-PluginRoot([string]$h) {
   $reported = @(); $cacheOnly = @()
+  $Script:Looked = ''
   if ($h -eq 'claude') {
     $ccd = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $HomeDir '.claude' }
     try {
@@ -265,6 +266,7 @@ function Find-PluginRoot([string]$h) {
     }
     if ($iv) { $reported = @($cacheOnly | Where-Object { (Get-PluginVersion $_) -eq $iv }); $cacheOnly = @($cacheOnly | Where-Object { $reported -notcontains $_ }) }
   }
+  $Script:Looked = "reported: $($reported -join ', '); cache: $($cacheOnly -join ', ')"
   foreach ($set in @($reported, $cacheOnly)) {
     $ok = @($set | Where-Object { $_ -and (Test-Path -LiteralPath (Join-Path $_ 'bin\swarm.cmd')) })
     if ($ok.Count -gt 0) { return ($ok | Sort-Object { ConvertTo-Ver (Get-PluginVersion $_) } | Select-Object -Last 1) }
@@ -346,7 +348,7 @@ try {
   $roots = @{}
   foreach ($h in $Hosts) {
     $root = Find-PluginRoot $h
-    if (-not $root) { Die "[$h] can't find the installed swarm plugin's bin\swarm.cmd in $h's plugin cache; check '$($Bins[$h]) plugin list', then re-run install.ps1" }
+    if (-not $root) { Die "[$h] can't find the installed swarm plugin's bin\swarm.cmd in $h's plugin cache; check '$($Bins[$h]) plugin list' ($($Script:Looked)), then re-run install.ps1" }
     $roots[$h] = $root
     $pv = Get-PluginVersion $root
     Log "[$h] using $root\bin\swarm.cmd"

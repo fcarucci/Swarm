@@ -570,11 +570,9 @@ def tighten_local_dirs(cfg: dict | None = None) -> Step | None:
 
 
 def migrate(**kw) -> list[Step]:
-    """_migrate, after tighten_local_dirs (its line first, when it changed something). Nothing to
-    migrate on Windows: the old skill install, the old default board and the old shared spool
-    never existed there."""
-    if paths.IS_WINDOWS:
-        return [Step("migrate", "skipped", "nothing to migrate on Windows")]
+    """_migrate, after tighten_local_dirs (its line first, when it changed something). On Windows
+    there is nothing old to retire (no old skill install, old default board or shared spool), so
+    it finds nothing to do."""
     tight = tighten_local_dirs(kw.get("cfg"))
     return ([tight] if tight else []) + _migrate(**kw)
 
