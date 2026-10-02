@@ -227,19 +227,24 @@ else:
             _retry(os.replace, s, d)
 
     def rename_new(src, dst, *, src_dir_fd=None, dst_dir_fd=None) -> None:
-        """Rename by name only, never replacing: FileNotFoundError if `src` is gone, FileExistsError if
-        `dst` exists. Of several racing claimers of one `src` exactly one succeeds (a handle-based
-        rename could succeed for all of them)."""
+        """Move `src` to a new name `dst`, never replacing, and exclusively: of several racing
+        claimers of one `src` exactly one succeeds, the others get FileNotFoundError or
+        FileExistsError. (On Windows os.rename is not exclusive: concurrent renames of one file
+        to one name can all report success. Creating a hard link fails if the name exists, so
+        the link decides the winner and the old name is then removed.) Falls back to os.rename
+        where hard links are not available (not NTFS)."""
         s, d = _path(src, src_dir_fd), _path(dst, dst_dir_fd)
-        for _ in range(40):
-            try:
-                os.rename(s, d)
-                return
-            except PermissionError:   # src busy for a moment (another rename of it, a scanner)
-                if os.path.lexists(d):
-                    raise FileExistsError(errno.EEXIST, "file exists", d) from None
-                time.sleep(0.025)
-        os.rename(s, d)
+        try:
+            os.link(s, d)
+        except (FileNotFoundError, FileExistsError):
+            raise
+        except (OSError, NotImplementedError):   # no hard links here: the plain rename
+            os.rename(s, d)
+            return
+        try:
+            _retry(os.unlink, s)
+        except FileNotFoundError:
+            pass
 
     def _posix_rename(src: str, dst: str) -> bool:
         """Rename with POSIX semantics (NTFS, Windows 10 1607+): replaces `dst` even while another
