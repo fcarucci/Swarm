@@ -160,7 +160,11 @@ else:
         if flags & O_DIRECTORY:
             return open_dir(p)
         flags &= ~(O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
-        _refuse_link(p)   # also with O_EXCL: CREATE_NEW through a dangling symlink creates its target
+        if flags & os.O_EXCL and flags & os.O_CREAT:
+            if os.path.lexists(p):   # a link counts too (POSIX: EEXIST); CREATE_NEW would follow a dangling one
+                raise FileExistsError(errno.EEXIST, "file exists", p)
+        else:
+            _refuse_link(p)
         return _create_file(p, flags)
 
     def _create_file(p: str, flags: int) -> int:
