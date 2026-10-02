@@ -12,6 +12,10 @@
 /.gitignore          export-ignore
 /.gitattributes      export-ignore
 
+# Text is LF in every checkout, Windows included (core.autocrlf would otherwise turn the sh
+# launcher and the test fixtures into CRLF, which sh and the byte-exact tests refuse).
+* text=auto eol=lf
+
 # Line endings are part of the executable format: the sh scripts need LF (a CRLF shebang line
 # fails on Linux/macOS and under Git Bash), the Windows batch files need CRLF (cmd's goto labels
 # misparse bare LF), whatever core.autocrlf says on the checkout machine.
