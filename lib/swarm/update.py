@@ -20,7 +20,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+from swarm import channel as channels
 from swarm import paths
+
+_UNSET = object()   # "don't re-pin the marketplace": the pre-channel behaviour (tests, local sources)
 
 MARKETPLACE_NAME = "swarm"
 PLUGIN_SPEC = "swarm@swarm"
@@ -183,16 +186,48 @@ def _claude_plugin_has_update_subcommand(bin_: str) -> bool:
     return bool(re.search(r"(?m)^\s*update\b", text))
 
 
-def update_claude(bin_: str) -> dict:
+def _claude_marketplace_source(plugins_dir: Path) -> tuple[str | None, str | None] | None:
+    """(url, ref) the swarm marketplace was added from, per Claude's known_marketplaces.json; None
+    when it isn't registered or is a local directory/file (which can't be pinned to a ref)."""
+    try:
+        data = json.loads((plugins_dir / "known_marketplaces.json").read_text())
+        src = data[MARKETPLACE_NAME]["source"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not isinstance(src, dict):
+        return None
+    kind, ref = src.get("source"), src.get("ref")
+    ref = ref if isinstance(ref, str) and ref else None
+    if kind == "github" and isinstance(src.get("repo"), str):
+        return f"https://github.com/{src['repo']}.git", ref
+    if kind == "git" and isinstance(src.get("url"), str):
+        return src["url"], ref
+    return None
+
+
+def update_claude(bin_: str, ref=_UNSET, url: str | None = None) -> dict:
+    """ref: the ref to pin the marketplace at (a tag, or None for the default branch); _UNSET leaves
+    the marketplace as it is. url: the git URL it is (re-)added from when the ref changes."""
     plugins_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR") or (paths.home() / ".claude")) / "plugins"
     old_version = _claude_plugin_version(plugins_dir)
     old_root = _claude_plugin_root(plugins_dir)
 
-    res = _run(bin_, ["plugin", "marketplace", "update", MARKETPLACE_NAME])
-    if res.returncode != 0:
-        raise UpdateError(f"[claude] plugin marketplace update {MARKETPLACE_NAME} failed:\n{_out(res)}")
-
-    verb = "update" if _claude_plugin_has_update_subcommand(bin_) else "install"
+    cur = _claude_marketplace_source(plugins_dir) if ref is not _UNSET else None
+    repin = ref is not _UNSET and (cur is None or cur[1] != ref)
+    if repin:
+        # Claude takes the ref as `<url>#<ref>`. Removing the marketplace uninstalls its plugin, so
+        # the plugin is installed again below.
+        src = (cur[0] if cur else None) or url or DEFAULT_MARKETPLACE
+        _run(bin_, ["plugin", "marketplace", "remove", MARKETPLACE_NAME])
+        res = _run(bin_, ["plugin", "marketplace", "add", f"{src}#{ref}" if ref else src])
+        if res.returncode != 0:
+            raise UpdateError(f"[claude] plugin marketplace add {src}{'#' + ref if ref else ''} failed:\n{_out(res)}")
+        verb = "install"
+    else:
+        res = _run(bin_, ["plugin", "marketplace", "update", MARKETPLACE_NAME])
+        if res.returncode != 0:
+            raise UpdateError(f"[claude] plugin marketplace update {MARKETPLACE_NAME} failed:\n{_out(res)}")
+        verb = "update" if _claude_plugin_has_update_subcommand(bin_) else "install"
     res2 = _run(bin_, ["plugin", verb, PLUGIN_SPEC])
     if res2.returncode != 0:
         raise UpdateError(f"[claude] plugin {verb} {PLUGIN_SPEC} failed:\n{_out(res2)}")
@@ -283,12 +318,22 @@ def _codex_marketplace_refresh(bin_: str) -> subprocess.CompletedProcess:
     return res
 
 
-def update_codex(bin_: str) -> dict:
+def update_codex(bin_: str, ref=_UNSET, url: str | None = None) -> dict:
+    """ref/url: as for update_claude (Codex takes the ref as `marketplace add <url> --ref <ref>`)."""
     old_version = _codex_plugin_version(bin_)
     old_root = newest_installed_plugin_root("codex", codex_bin=bin_)
 
-    res = _codex_marketplace_refresh(bin_)
-    if res.returncode != 0:
+    repin = ref is not _UNSET and (_codex_config_marketplace_field(MARKETPLACE_NAME, "ref") or None) != ref
+    if repin:
+        src = url or _codex_marketplace_source(bin_) or DEFAULT_MARKETPLACE
+        _run(bin_, ["plugin", "marketplace", "remove", MARKETPLACE_NAME])
+        res = _run(bin_, ["plugin", "marketplace", "add", src, *(["--ref", ref] if ref else [])])
+        if res.returncode != 0:
+            raise UpdateError(f"[codex] plugin marketplace add {src}{' --ref ' + ref if ref else ''} "
+                              f"failed:\n{_out(res)}")
+    else:
+        res = _codex_marketplace_refresh(bin_)
+    if not repin and res.returncode != 0:
         source = _codex_marketplace_source(bin_)
         listed, entry = _codex_marketplace_entry(bin_)
         registered = entry is not None or source is not None
@@ -403,8 +448,32 @@ def _run_migrate(sw: Path, force: bool, color: bool, config_path: Path | None) -
 
 # --------------------------------------------------------------------------- main entry point
 
+def _host_source(host: str, bin_: str) -> tuple[str | None, bool]:
+    """(git url, pinnable): where this host's swarm marketplace comes from. A local path (a frozen
+    tree, a checkout) is not pinnable: the channel does not apply to it."""
+    if host == "claude":
+        plugins_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR") or (paths.home() / ".claude")) / "plugins"
+        cur = _claude_marketplace_source(plugins_dir)
+        if cur is not None:
+            return cur[0], True
+        try:
+            data = json.loads((plugins_dir / "known_marketplaces.json").read_text())
+            registered = isinstance(data, dict) and MARKETPLACE_NAME in data
+        except (OSError, ValueError):
+            registered = False
+        return (None, False) if registered else (DEFAULT_MARKETPLACE, True)
+    src = _codex_marketplace_source(bin_)
+    if src is None:
+        return DEFAULT_MARKETPLACE, True
+    if os.path.isabs(os.path.expanduser(src)) or src.startswith((".", "~")) or re.match(r"^[A-Za-z]:[\\/]", src):
+        return None, False
+    if re.match(r"^[\w.-]+/[\w.-]+$", src):   # owner/repo shorthand
+        return f"https://github.com/{src}.git", True
+    return src, True
+
+
 def run_update(host_arg: str | None, force: bool, color: bool, config_path: Path | None = None,
-               which=None, out=None) -> int:
+               which=None, out=None, channel: str | None = None) -> int:
     """Runs `swarm update`; returns the process exit code. Prints to `out` (default sys.stdout)
     and errors to sys.stderr. Never touches sudo/root, and never any user's home but this one's
     (every path here comes from $HOME / $CLAUDE_CONFIG_DIR / $CODEX_HOME, or a CLI's own output)."""
@@ -425,14 +494,29 @@ def run_update(host_arg: str | None, force: bool, color: bool, config_path: Path
         return 1
     print(f"hosts: {' '.join(hosts)}", file=out)
 
+    want = channel or channels.read_channel(config_path) or channels.DEFAULT_CHANNEL
     results: dict[str, dict] = {}
     for host in hosts:
         bin_ = which(host)
         try:
-            results[host] = update_claude(bin_) if host == "claude" else update_codex(bin_)
+            url, pinnable = _host_source(host, bin_)
+            if not pinnable:
+                print(f"[{host}] channel: the swarm marketplace is a local path: following it as is "
+                      f"(--channel does not apply)", file=out)
+                results[host] = update_claude(bin_) if host == "claude" else update_codex(bin_)
+                continue
+            chan, ref, warning = channels.resolve(want, url)
+            if warning:
+                print(f"swarm upgrade: [{host}] warning: {warning}", file=sys.stderr)
+            print(f"[{host}] channel: {chan} ({ref or 'tip of main'})", file=out)
+            results[host] = (update_claude(bin_, ref, url) if host == "claude"
+                             else update_codex(bin_, ref, url))
         except UpdateError as exc:
             print(f"swarm update: {exc}", file=sys.stderr)
             return 1
+
+    if channel:   # an explicit choice is remembered: a plain `swarm upgrade` keeps following it
+        channels.write_channel(channel, config_path)
 
     steps = []
     for host in hosts:
@@ -453,12 +537,13 @@ def run_update(host_arg: str | None, force: bool, color: bool, config_path: Path
     swarm_bins: dict[str, Path] = {}
     for host in hosts:
         root = results[host]["new_root"] or newest_installed_plugin_root(host)
-        if root is None or not os.access(root / "bin" / "swarm", os.X_OK):
+        launcher = "swarm.cmd" if paths.IS_WINDOWS else "swarm"
+        if root is None or not os.access(root / "bin" / launcher, os.X_OK):
             print(f"swarm update: [{host}] can't find the installed swarm plugin's bin/swarm after "
                   f"updating; check '{which(host)} plugin list', then re-run swarm update",
                   file=sys.stderr)
             return 1
-        swarm_bins[host] = root / "bin" / "swarm"
+        swarm_bins[host] = root / "bin" / launcher
 
     for host in hosts:
         rc, _, _ = _child(swarm_bins[host], ["bootstrap", "--host", host], color)

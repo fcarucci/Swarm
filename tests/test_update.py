@@ -487,13 +487,14 @@ class SourceReplacedMidUpdateTests(unittest.TestCase):
         self.addCleanup(sys.modules.update, saved)
         self.addCleanup(lambda: blocker in sys.meta_path and sys.meta_path.remove(blocker))
 
-        def swapped_out(_bin):
+        def swapped_out(_bin, *_pin):
             sys.meta_path.insert(0, blocker)       # the old folder is gone from here on
             return {"changed": True, "old_version": "0.1.7", "new_version": "0.1.8",
                     "old_root": None, "new_root": None, "verb": "update"}
 
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.object(update, "update_claude", side_effect=swapped_out), \
+                mock.patch.object(update.channels, "latest_tag", return_value=None), \
                 mock.patch.object(update, "newest_installed_plugin_root", return_value=None), \
                 mock.patch("sys.stderr", err):
             rc = update.run_update("claude", False, False, which=lambda h: f"/bin/{h}", out=out)
@@ -518,6 +519,7 @@ class UpgradeAlwaysForcesMigrateTests(unittest.TestCase):
             seen["force"] = force
             return 0
         with mock.patch.object(update, "update_claude", return_value=changed), \
+                mock.patch.object(update.channels, "latest_tag", return_value=None), \
                 mock.patch.object(update, "_run_migrate", side_effect=fake_migrate), \
                 mock.patch.object(update, "_child", return_value=(0, "", "")):
             update.run_update("claude", False, False, which=lambda h: f"/bin/{h}", out=io.StringIO())
