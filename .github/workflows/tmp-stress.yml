@@ -17,9 +17,6 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: "3.13", cache: pip}
       - run: pip install -r requirements.txt
-      - name: signature sequence per post
-        env: {SWARM_TEST_BACKEND: "${{ matrix.backend }}", PYTHONUTF8: "1"}
-        run: python tmpdiag/sigseq.py 200
       - name: loop change-detection tests
         env: {SWARM_TEST_BACKEND: "${{ matrix.backend }}", PYTHONUTF8: "1"}
-        run: python tmpdiag/loop.py 220
+        run: python tmpdiag/loop.py 250
