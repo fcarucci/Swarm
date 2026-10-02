@@ -73,6 +73,7 @@ class WinLaunchTests(Base):
                 winlaunch.ensure_venv()
         self.assertIn("could not set up", str(cm.exception))
 
+    @unittest.skipIf(os.name == "nt", "the fake venv interpreter is an sh script")
     def test_main_runs_the_swarm_package_from_the_plugin(self):
         fake_python(self.py, self.log)
         (self.venv / ".swarm-requirements").write_text(winlaunch.requirements_stamp() + "\n")
@@ -114,6 +115,7 @@ class WinHookTests(Base):
         with mock.patch.object(winhook.subprocess, "run", side_effect=AssertionError("ran")):
             self.assertEqual(self.run_hook("--host", "claude", "turn"), (0, ""))
 
+    @unittest.skipIf(os.name == "nt", "the fake venv interpreter is an sh script")
     def test_other_events_run_the_hook_in_the_venv_when_a_job_is_active(self):
         fake_python(self.py, self.log)
         md = self.tmp / ".local/state/swarm/active"; md.mkdir(parents=True)

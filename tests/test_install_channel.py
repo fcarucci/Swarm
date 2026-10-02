@@ -39,6 +39,7 @@ exit 0
 '''
 
 
+@unittest.skipIf(sys.platform == "win32", "install.sh with sh stub CLIs: install.ps1 is the Windows installer (test_install_ps1)")
 class InstallChannelTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="swarm-instchan-"))

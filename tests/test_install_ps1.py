@@ -18,8 +18,8 @@ PWSH = shutil.which("pwsh") or shutil.which("powershell")
 
 STUB_PY = r'''
 import os, subprocess, sys, json, shutil
-log = os.environ["LOGDIR"]; name = os.path.basename(sys.argv[0]).split(".")[0]
-args = sys.argv[1:]
+log = os.environ["LOGDIR"]; name = sys.argv[1]
+args = sys.argv[2:]
 open(os.path.join(log, name + ".args"), "a").write(" ".join(args) + "\n")
 mp = os.path.join(log, "mp")
 if args[:3] == ["plugin", "marketplace", "add"]:
@@ -66,7 +66,7 @@ class InstallPs1Tests(unittest.TestCase):
         logs = tmp / "logs"
         bindir = tmp / "bin"; bindir.mkdir()
         (bindir / "stub.py").write_text(STUB_PY)
-        (bindir / "claude.cmd").write_text(f'@echo off\r\n"{sys.executable}" "{bindir / "stub.py"}" %*\r\n')
+        (bindir / "claude.cmd").write_text(f'@echo off\r\n"{sys.executable}" "{bindir / "stub.py"}" claude %*\r\n')
         url = repo.as_uri()
         for flags, want in (([], "installed swarm"), (["-Main"], "channel main")):
             shutil.rmtree(logs, ignore_errors=True); logs.mkdir()
