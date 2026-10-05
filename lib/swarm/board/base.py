@@ -827,6 +827,12 @@ def run_agents(agents: Sequence[AgentStatus], start: _dt.datetime) -> list[Agent
     return [a for a in agents if a.ended_at is None or a.ended_at >= start]
 
 
+def goal_unmet(js: "JobStatus") -> bool:
+    """A job with a goal whose latest verdict is not `met`: only the judge's `met` (or a person:
+    deactivate, --force) may end it, never a quiet-time sweep."""
+    return bool(js.goal) and js.verdict != "met"
+
+
 def auto_close_candidate(js: JobStatus, before: _dt.datetime) -> bool:
     """A cheap first look, from the rollup alone, at whether the sweep should examine a job:
     open, not waiting, its goal (if any) met, agents but none started/running/idle, and nothing
@@ -1161,11 +1167,17 @@ class Board(abc.ABC):
             closed "failed", outcome "auto-closed: no progress for N h" plus its last verdict;
           * no agent started, running or idle (dead ones don't count; none at all is fine), no
             board activity (last_activity_at, run start, an expired wait's end) for
-            `orphan_minutes`, not inside an unexpired bounded wait, and `watch(job).active()`
-            (the orchestrating session, cli.OrchestratorWatch) false: closed "cancelled",
+            `orphan_minutes`, not inside an unexpired bounded wait, and the watch of the
+            orchestrating session (cli.OrchestratorWatch) able to tell (this sweep has the job's
+            marker) and not active(): closed "cancelled",
             outcome "auto-closed: no live agents for N min".
         Both are close_job(..., closed_by=AUTO_CLOSED_BY): the remaining agents leave, and the
-        job shows as auto-closed. The job is read again right before the close, so an agent that
+        job shows as auto-closed. A job
+        with a goal and no `met` verdict (goal_unmet) is never touched by the orphan rule, nor by
+        the stall limit unless the job has its own (jobs.max_hours, outcome "...; goal not met"): its orchestrator may wait with no live
+        subagent for hours, between rounds or on a person, and agents look dead when their hooks
+        can't reach the board; such a job shows as idle in status until the judge says met or
+        someone closes it. The job is read again right before the close, so an agent that
         joined meanwhile keeps it open. Idempotent; costs one jobs() query when nothing qualifies."""
         now = self.now()
         closed = []
@@ -1175,20 +1187,34 @@ class Board(abc.ABC):
                 self.set_waiting(js.job, None)   # the bounded wait ran out
                 js = replace(js, waiting_on=None, waiting_since=None,
                              last_activity_at=max(t for t in (js.last_activity_at, js.waiting_until) if t))
-            cap = stall_hours if js.max_hours is None else js.max_hours
+            if goal_unmet(js):
+                # a job with a goal ends with the judge's `met` (or a person): the orphan rule
+                # never applies, and the stall limit only if this job was given its own
+                # (activate --stall-hours N), never the config default
+                if not js.max_hours or js.max_hours < 0:
+                    continue
+                cap = js.max_hours
+            else:
+                cap = stall_hours if js.max_hours is None else js.max_hours
             if cap and cap > 0 and now - run_start(js) >= _dt.timedelta(hours=cap) and \
                     now - self.progress_at(js) >= _dt.timedelta(hours=cap):
                 status = "failed"
                 outcome = f"auto-closed: no progress for {cap:g} h"
+                if goal_unmet(js):
+                    outcome += "; goal not met"
                 if js.verdict:
                     outcome += f"; last verdict {js.verdict}" + (f": {js.verdict_reason}" if js.verdict_reason else "")
                 outcome = outcome[:AUTO_CLOSE_OUTCOME_MAX]
-            elif orphan_minutes and orphan_minutes > 0 and not (js.started or js.running or js.idle) \
+            elif not goal_unmet(js) and orphan_minutes and orphan_minutes > 0 and not (js.started or js.running or js.idle) \
                     and not (js.waiting_on and js.waiting_until is not None) \
                     and now - (js.last_activity_at or run_start(js)) >= _dt.timedelta(minutes=orphan_minutes) \
                     and now - run_start(js) >= _dt.timedelta(minutes=orphan_minutes):
-                if watch is not None and watch(js.job).active():
-                    continue
+                if watch is not None:
+                    seen = watch(js.job)
+                    # a sweep that has no marker of the job (another user's or machine's: it
+                    # can't see the orchestrating session) can't tell the job is orphaned
+                    if not getattr(seen, "can_tell", lambda: True)() or seen.active():
+                        continue
                 status = "cancelled"
                 outcome = f"auto-closed: no live agents for {orphan_minutes:g} min"
             else:
