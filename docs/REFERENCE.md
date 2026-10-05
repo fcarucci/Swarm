@@ -652,6 +652,9 @@ Code or Codex runs in.
 (default `release`, the newest `vX.Y.Z` tag). `swarm upgrade --channel ...` and the installers'
 `--channel` write it; the rest of the file is left as it is.
 
+`[plugins]` has one key, `disabled = ["name", ...]`: CLI plugins to skip (shown as `disabled` by
+`swarm plugins`). See [CLI plugins](#cli-plugins).
+
 **`[database]`** (Postgres only)
 
 | key | default | meaning |
@@ -1138,6 +1141,13 @@ open job as one of four words:
 | `idle` | nobody is at work and no reason is recorded: give it one, or close the job (once every agent is done it [auto-closes](#auto-close) after `auto_close_minutes`) |
 | `waiting (goal not met)` | the job has a goal without a `met` verdict and no agent is started, running or idle on it. No sweep closes it (see [Jobs with a goal](#auto-close)): spawn an agent, seat the judge, or `swarm deactivate` it |
 
+`swarm wait --job J --on "<what>" --for 2h` (or `--until 17:30`, or `--until "2026-10-06 09:00"`)
+bounds the wait. A bounded wait that has not ended protects the job from the orphan rule and from
+the stall limits, including `goal_stall_hours`, and `status` shows its end. When it ends the job is
+judged as not waiting and the end counts as progress, so the job is not stalled that instant. An
+unbounded wait is shown but protects nothing: say how long you will wait. A board read by the
+orchestrating session (`status --job`, `who`, `read`, `tail --job`) counts as contact for liveness.
+
 The wait ends with `swarm resume --job J`. It also ends by itself when an agent joins the job,
 when the job is re-activated, and when it is closed. Only the display changes: the stored
 status stays `active` (`waiting_on` and `waiting_since` hold the reason), so the markers,
@@ -1423,6 +1433,23 @@ fixes; neither automatically receives verifier restrictions or judge authority. 
 role's responsibilities, deliverables, ownership and handoffs in the brief; a label does not
 load a persona or supply a workflow. Configure its model under `[models.<host>]` as below.
 
+### Addressing a role
+
+`swarm post --to @EL "..."` addresses a seat instead of a display name: the message goes to the
+agents that hold that role on the job now (a role is the `[swarm role: ...]` tag, or `join --role`;
+`@judge` and `@verifier` are the job's judge and verifiers). Matching ignores case. Three short
+aliases name the usual seats of the engineering team: `@EL` is `engineering_lead`, `@QA` is `qa`,
+and `@PM` is `product_manager`, else `project_manager`, else `orchestrator` (the first seat with a
+holder). A seat held by several agents (`@engineer`) gets one message each, up to 8. The post
+confirmation shows who it reached, and a reader sees the resolved name (`A -> B`), because the
+stored recipient is the name, not the role.
+
+A post is refused, with one line on stderr and exit status 1 and nothing stored, when the recipient
+is not an agent of the job, when the seat has no holder (the error lists the seats that have one),
+or when the author (`--as` or `--key`) is not an agent of `--job`. An agent that was moved to
+another job is redirected to it as before. A post that is queued because the board is unreachable
+is checked when it is delivered, not before.
+
 ### The judge: goals and the completion gate
 
 `activate --goal "<what done means>"` gives a job a goal, and one agent's only task is to decide
@@ -1548,6 +1575,29 @@ In Codex, checks 4 to 6 can't be made: the child's prompt is encrypted. A swarm 
 there is checked for 1 to 3 and the caps; a task name requesting the `judge` role is refused; the
 child joins the session's job by itself; and the agent is told to say on the board why it
 spawned (the `spawning ...` post carries the task name, with no reason).
+
+## CLI plugins
+
+Commands outside the core live in plugins. A plugin is a Python module with a `register(api)`
+function; core swarm finds them when it parses a command line (never in the hooks), works with none
+installed, and never fails a core command because of one. `swarm plugins` lists what was found,
+the commands and options each adds, and why one failed to load. The plugin API and where plugins
+are searched are in [docs/PLUGINS.md](PLUGINS.md); `[plugins] disabled = ["name"]` skips one.
+
+The engineering-team skill ships one (`skills/engineering-team/swarm_plugin.py`):
+
+| command | what it does |
+|---|---|
+| `team --job J [--show]` | print the job's team: the always-present seats, the optional seats on, and who carries the duties of an absent one |
+| `team --job J --add ROLE` / `--remove ROLE` | change the optional seats of the job (repeatable). A mandatory seat (`engineering_lead`, `qa`, `engineer`, `judge`) can't be removed: exit status 2 |
+| `activate ... --team ROLES` | the job's optional roles at activation, comma separated (`''` for none); a bad name stops the activation |
+
+Optional seats: `product_manager` (on by default), `build_engineer` (off), `reviewer`, `verifier`.
+The default comes from `team.toml`: `$SWARM_TEAM_CONFIG`, else next to the swarm config
+(`~/.config/swarm/team.toml`); a missing file means the defaults; see `team.example.toml`. A job's
+own composition (set with `--team` or `team --add/--remove`) is kept with the job, survives
+re-activation, wins over the file, and shows as a `team` line in `status --job J`. It is stored with
+the job on the board (`Board.job_data`, schema 15), so every host sees it.
 
 ## Models per role
 
@@ -2056,7 +2106,7 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `activate … --goal G\|-` | give the job a goal, judged by one judge agent; the tag lines include `[swarm role: judge]` |
 | `deactivate --job J [--status completed\|cancelled\|failed] [--outcome O] [--force]` | switch the board off and close the job (default `completed`). A job with a goal completes only with the judge's `met` verdict, or with `--force` (recorded). On an already closed (e.g. auto-closed) job it replaces the status and outcome |
 | `verdict --job J --as NAME met\|not_met REASON...` | the job's judge records its verdict and posts it on the board; anyone else is refused; spooled when the board is unreachable |
-| `wait --job J [--for DURATION] --on WHAT...` | mark an open job as waiting for something; shown as `waiting` with the reason. `--for 90m` (`h`/`m`/`s`, bare = minutes) bounds it: past that the wait expires and the orphan rule applies again |
+| `wait --job J [--for DURATION \| --until TIME] --on WHAT...` | mark an open job as waiting for something; shown as `waiting` with the reason and, when bounded, its end. `--for 90m` (`h`/`m`/`s`, bare = minutes) or `--until` (a duration, a time of day such as `17:30`, or `2026-10-06 09:00`) bounds it. A bounded wait that has not ended protects the job from the orphan rule and the stall limits (including `goal_stall_hours`); once it ends the job is judged as not waiting, and the end counts as progress. An unbounded wait is shown but protects nothing. A board read by the orchestrating session (`status --job`, `who`, `read`, `tail --job`) counts as contact for liveness |
 | `pause --job J [--reason TEXT] [--wait SECONDS]` | pause a job: no joins or posts, every agent recorded in a resume manifest and closed, final transcripts captured (see Pausing and resuming a job) |
 | `resume --job J [--host claude\|codex] [--workdir DIR] [--only NAME...] [--dry-run] [--retry]` | on a paused job: re-create its agents on this machine from the transcripts on the board, same names and cursors. On any other job: the job is no longer waiting (an agent joining does this too) |
 | `status [--all] [--no-color]` | jobs overview |
@@ -2064,9 +2114,10 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `watch [--job J] [--session S] [--compact] [--exit-when-idle N] [--interval S] [--no-color]` | full-screen live dashboard |
 | `tail [--job J] [-n N] [--interval S] [--no-agents] [--no-color]` | follow the board live |
 | `join --job J --key K [--role R] [--judge\|--verifier]` | allocate a unique name for agent key K, or return the one it already has. `--judge` takes the job's judge seat (refused if another agent holds it) and `--verifier` makes it a verifier: for agents without the swarm's hooks, such as a one-off `codex exec` judge. They read the board with `read --key K`, and post and record verdicts with the CLI. |
-| `post --job J --as NAME [--to NAME] MESSAGE...` | post a message; whitespace is collapsed and the text capped at `message_max_chars`; spooled when the board is unreachable |
+| `post --job J (--as NAME \| --key K) [--to NAME\|@ROLE] MESSAGE...` | post a message; whitespace is collapsed and the text capped at `message_max_chars`; spooled when the board is unreachable. `--to @EL`, `@PM`, `@QA`, `@judge` or `@<role>` goes to whoever holds that seat on the job now (one message each); a name that is not on the job, a seat nobody holds, or an author who is not an agent of `--job` is refused with an error and nothing is stored. `@EL` is `engineering_lead`, `@PM` is `product_manager` (else `project_manager`, else `orchestrator`) |
 | `read (--as NAME \| --key K) [--job J] [--peek]` | messages new since the last read, excluding your own, `read_limit` at a time with a count of what is left; `--peek` doesn't advance the cursor |
 | `remember --job J --as NAME [--project P] FACT...` | store a durable fact in the project memory (needs `[hindsight] url`); spooled when unreachable |
+| `plugins` | list the CLI plugins found, the commands and options they add, and why one failed to load (a broken plugin never breaks the core commands; see [CLI plugins](#cli-plugins)) |
 | `spool retry` | requeue memories parked as `.stuck` after 24 hours of failing (see [The spool](#the-spool)) |
 | `notices --hook-output [--host claude\|codex]` | internal: the plugin's `SessionStart` hook prints the pending setup notice for that host as hook output (a fixed template of re-validated steps, see [First run and updates](#first-run-and-updates)) and consumes it; prints nothing when there is none |
 | `who --job J` | active agents on the job, tab-separated: exact name, host, role, status, last contact, current tool |

@@ -199,7 +199,7 @@ for the options.
 | `swarm watch [--job J] [--session S] [--compact] [--exit-when-idle N]` | Live full-screen view of jobs, agents (HOST, MODEL, status, tool) and messages; `--session` scopes it to one session's jobs, `--compact` fits a narrow side pane, `--exit-when-idle` closes it after the session has no active job |
 | `swarm status [--all]` / `status --job J` | All open jobs, or one job's task, goal, verdict and agent table |
 | `swarm tail [--job J]` | Follow the board's messages live |
-| `swarm post --job J --as NAME "msg"` | Post to the board yourself (join first with `swarm join`) |
+| `swarm post --job J --as NAME [--to NAME\|@ROLE] "msg"` | Post to the board yourself (join first with `swarm join`); `--to @EL`, `@PM`, `@QA`, `@judge` or `@<role>` reaches whoever holds that seat now, and an unknown recipient is refused |
 | `swarm read --as NAME` | Messages new since that agent's last read |
 | `swarm who --job J` | The agents on a job |
 | `swarm activate --job J --task "…" [--goal "…"] [--stall-hours N]` | Open a job yourself (normally the model does this); `--stall-hours` sets its own no-progress limit (0 = never) |
@@ -208,7 +208,8 @@ for the options.
 | `swarm job merge FROM --into TO` | Merge two open jobs: FROM's live agents move to TO (names kept, no restart), its goal is appended, FROM closes as `merged into TO` |
 | `swarm move (--as NAME \| --key K) --to J` | Move one live agent to another open job; its next tool call shows the new job's notice and recent messages |
 | `swarm verdict` | The job's judge records whether the goal is met |
-| `swarm wait [--for 90m]` / `swarm resume` | Mark a job as waiting for something (optionally for a bounded time), or not |
+| `swarm wait --on "…" [--for 90m \| --until 17:30]` / `swarm resume` | Mark a job as waiting for something (a bounded wait also protects it from auto-close until it ends), or not |
+| `swarm plugins` | List the CLI plugins and any that failed to load; `swarm team` (below) is one |
 | `swarm pause --job J [--reason "…"]` / `swarm resume --job J [--host H]` | Pause a job (checkpoint every agent's transcript, stop them, block new joins and posts), then resume it on this or another machine from the transcripts on the board; see Pausing and resuming |
 | `swarm transcript list\|show\|export` | Archived agent transcripts, secrets redacted |
 | `swarm memory` / `swarm remember` | Memories agents saved and where they came from; store one |
@@ -219,6 +220,20 @@ for the options.
 | `swarm supervise` | One pass of the supervisor: close stuck agents, restart them (`[supervise] enabled`) |
 | `swarm spool` | Posts and memories queued while the board was unreachable |
 | `swarm init` / `bootstrap` / `migrate` | Setup steps; the installer and the plugin run them for you |
+
+### Plugins and the engineering team
+
+Commands can be added without changing swarm: a CLI plugin is a Python file with a `register(api)`
+function, found in `~/.config/swarm/plugins/`, in `$SWARM_PLUGIN_PATH`, in a skill's `swarm_plugin.py`,
+or as a `swarm.plugins` entry point. `swarm plugins` lists them and their load errors, and a broken
+plugin never breaks the core commands. See [docs/PLUGINS.md](docs/PLUGINS.md).
+
+The engineering-team skill ships one. It adds `swarm team --job J [--show | --add ROLE | --remove ROLE]`,
+`swarm activate ... --team product_manager,build_engineer` and a `team` line in `swarm status --job J`.
+Always present: engineering lead, QA, one or more engineers and an independent judge (they cannot be
+removed). Optional: `product_manager` (on by default), `build_engineer` (off), `reviewer`, `verifier`.
+The default is set in `~/.config/swarm/team.toml` (`$SWARM_TEAM_CONFIG`; copy `team.example.toml`);
+a missing file means the defaults, and one job can differ.
 
 `doctor`, `transcript show` and `transcript list` are coloured on a terminal. `--no-color` or
 `NO_COLOR` turns colour off, and `--color=always` keeps it through a pager (`| less -R`).
