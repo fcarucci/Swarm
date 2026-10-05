@@ -103,9 +103,9 @@ RESTART_OUTCOMES = ("running", "completed", "timeout", "max_turns", "failed", "n
 # 12 jobs.status 'paused' and the job_pauses table (pause/resume manifests), 13 the job_status
 # view's shown_status column (what `status` shows, incl. "waiting (goal not met)"; view only),
 # 14 the index messages(job, created_at) (job_status's per-job max(created_at);
-# `swarm watch` redraws read it), 15 jobs.plugin_data (a JSON object of per-job settings that CLI
+# `swarm watch` redraws read it), 16 jobs.plugin_data (a JSON object of per-job settings that CLI
 # plugins keep with the job: Board.job_data / set_job_data).
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 JOB_DATA_KEY = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}")
 JOB_DATA_VALUE_MAX = 2000

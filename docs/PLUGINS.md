@@ -45,7 +45,7 @@ A plugin is a module with `register(api)`:
 | `ctx.config_dir`, `ctx.config_path` | where the config is |
 | `ctx.plugin` | the plugin's name |
 | `ctx.open_board()` | the board, as a context manager: `with ctx.open_board() as board:` (inside a status hook, the board `status` already holds open) |
-| `ctx.job_data(board, job)` / `ctx.set_job_data(board, job, key, value)` | settings the plugin keeps with a job, under the plugin's own prefix; `value=None` removes a key. Stored on the board (`Board.job_data` / `set_job_data`, schema 15), so they follow the job to every host and survive re-activation. Keys are 1-64 of `a-z 0-9 _ . -`, values at most 2000 characters |
+| `ctx.job_data(board, job)` / `ctx.set_job_data(board, job, key, value)` | settings the plugin keeps with a job, under the plugin's own prefix; `value=None` removes a key. Stored on the board (`Board.job_data` / `set_job_data`, schema 16), so they follow the job to every host and survive re-activation. Keys are 1-64 of `a-z 0-9 _ . -`, values at most 2000 characters |
 
 The board methods a plugin may call are those of `swarm.board.Board`; stay with reads and
 `job_data` unless the plugin's purpose needs more. The API is versioned: a plugin can check

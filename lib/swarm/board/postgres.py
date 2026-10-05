@@ -169,7 +169,7 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS waiting_since timestamptz;
 -- lifetime cap in hours (`activate --max-hours`; NULL = the [job] max_hours default).
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS waiting_until timestamptz;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS max_hours double precision;
--- Schema version 15: per-job settings that CLI plugins keep with the job (a JSON object as text).
+-- Schema version 16: per-job settings that CLI plugins keep with the job (a JSON object as text).
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS plugin_data text;
 -- Who closed the job: 'auto' for the auto-close sweep, else who ran `swarm deactivate`.
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS closed_by text;

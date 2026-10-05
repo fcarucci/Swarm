@@ -1597,7 +1597,7 @@ The default comes from `team.toml`: `$SWARM_TEAM_CONFIG`, else next to the swarm
 (`~/.config/swarm/team.toml`); a missing file means the defaults; see `team.example.toml`. A job's
 own composition (set with `--team` or `team --add/--remove`) is kept with the job, survives
 re-activation, wins over the file, and shows as a `team` line in `status --job J`. It is stored with
-the job on the board (`Board.job_data`, schema 15), so every host sees it.
+the job on the board (`Board.job_data`, schema 16), so every host sees it.
 
 ## Models per role
 
