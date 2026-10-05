@@ -4,15 +4,20 @@ All notable changes to swarm, newest first. Each release's notes on GitHub are t
 section here, so every release adds a `## [x.y.z] - YYYY-MM-DD` section (see `scripts/release-notes.sh`).
 Keep entries short and user-facing: one line per change, what it does, not how.
 
-## [Unreleased]
+## [0.1.15] - 2026-10-05
 
 ### Fixed
+- `swarm watch` answered keys late on a busy board (seconds per keypress): keys are now handled the moment they arrive and only redraw from a cached snapshot; queries, the expiry sweep and the change listener run on a refresh thread, a key no longer triggers a refresh, history scrolling and a terminal resize redraw from the snapshot, and `q` quits at once.
 - A job with a goal is no longer auto-closed before the judge's `met` verdict: the "no live agents for 30 min" close (`cancelled`) skips it, and so does the "no progress for N h" close (`failed`) unless the job has its own `--stall-hours` or `[job] goal_stall_hours` is set. An orchestrator waiting on a question, or between rounds with every subagent finished, no longer loses its job. Jobs without a goal behave exactly as before.
 - The sweeps re-check the goal at the moment of the close, so a goal set (or a verdict changed to `not_met`) while a sweep was running keeps the job open.
 
 ### Added
 - `[job] goal_stall_hours` (default 0 = never): the one backstop for a goal job without a `met` verdict; no progress for that long closes it as `failed` ("auto-closed: no progress for N h; goal not met"). A job's own `--stall-hours` takes precedence.
-- `status`, `status --job`, `watch` and the Postgres `job_status` view (new `shown_status` column; applied by the automatic schema upgrade, version 13) show a goal job with no live agent and no `met` verdict as `waiting (goal not met)`.
+- `status`, `status --job`, `watch` and the Postgres `job_status` view (new `shown_status` column; applied by the automatic schema upgrade, version 13) show a goal job with no live agent and no `met` verdict as `waiting (goal not met)`. `watch --compact` shows that word only for such a job and the job's stored status otherwise.
+- `Board.session_jobs(session_id)`: the jobs of one session in one query (`watch --session` no longer lists every job's status).
+
+### Changed
+- Schema 14 (applied by the automatic schema upgrade on first use by the new version): the index `messages(job, created_at)`, which `job_status` and `watch` read. A plain `CREATE INDEX`: on a very large Postgres board create it by hand with `CONCURRENTLY` first. Schema 13 is the `job_status` view change above.
 
 ## [0.1.14] - 2026-10-02
 
