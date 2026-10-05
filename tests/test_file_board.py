@@ -350,8 +350,10 @@ class FileBoardSandboxTests(unittest.TestCase):
         self.assertIsInstance(cm.exception.__cause__, OSError)
 
     def test_post_spools_when_the_board_is_read_only_and_is_delivered_later(self):
+        with open_board(self.cfg) as b:
+            sender = b.allocate_name("sandboxed", "J")
         self.lock.chmod(0o400)
-        rc, out, _ = self.cli("post", "--job", "J", "--as", "Homer Simpson", "from the sandbox")
+        rc, out, _ = self.cli("post", "--job", "J", "--as", sender, "from the sandbox")
         self.assertEqual(rc, 0)
         self.assertTrue(out.startswith("queued (board not reachable from here: PermissionError)"), out)
         self.assertEqual(len(list(self.spool.glob("*.json"))), 1)
