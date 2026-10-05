@@ -855,7 +855,8 @@ class CloseGuard:
     the sweep read it. settled: the job had no goal or a met verdict, and still must (a goal set,
     or a verdict changed to not_met, since is refused). Not settled: the job had `goal`, unmet,
     stalled by `max_hours` (its own limit, None = the config's goal_stall_hours), and still must:
-    same goal, no met verdict, same limit."""
+    same goal, no met verdict, same per-job limit (`max_hours` is the job's own row value, None
+    when the cap came from the config's goal_stall_hours: the config is not re-read at close)."""
     settled: bool = True
     goal: str | None = None
     max_hours: float | None = None
