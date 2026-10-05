@@ -68,6 +68,8 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS messages_job_id ON messages (job, id);
 CREATE INDEX IF NOT EXISTS messages_created_at ON messages (created_at);
+-- job_status's last_activity_at: max(created_at) per job (was a backward scan of the index above, filtered by job)
+CREATE INDEX IF NOT EXISTS messages_job_created_at ON messages (job, created_at);
 -- `swarm tail` LISTENs on this channel so new messages show up instantly.
 CREATE OR REPLACE FUNCTION swarm_notify() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN PERFORM pg_notify('swarm_board', NEW.id::text); RETURN NEW; END $$;
@@ -1487,6 +1489,18 @@ class PostgresBoard(Board):
         return self._fetch(
             JobStatus, f"SELECT {_JOB_STATUS_COLS} FROM job_status {where}"
             "ORDER BY (status = 'active') DESC, COALESCE(activated_at, created_at), job")
+
+    def session_jobs(self, session: str) -> list[JobStatus]:
+        # job_status is a GROUP BY view: a filter on session_id is not pushed into it (only one on
+        # the grouping column job is), so rolling up every job of the board costs seconds. Find
+        # the session's jobs first, then roll up just those.
+        names = [r[0] for r in self._conn.execute(
+            "SELECT job FROM jobs WHERE session_id = %s", (session,)).fetchall()]
+        if not names:
+            return []
+        return self._fetch(
+            JobStatus, f"SELECT {_JOB_STATUS_COLS} FROM job_status WHERE job = ANY(%s) "
+            "ORDER BY (status = 'active') DESC, COALESCE(activated_at, created_at), job", (names,))
 
     # ---- change notification -----------------------------------------------------------
 

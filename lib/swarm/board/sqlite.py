@@ -152,6 +152,8 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS messages_job_id ON messages (job, id);
 CREATE INDEX IF NOT EXISTS messages_created_at ON messages (created_at);
+-- job_status's last_activity_at: max(created_at) per job (was a backward scan of the index above, filtered by job)
+CREATE INDEX IF NOT EXISTS messages_job_created_at ON messages (job, created_at);
 CREATE INDEX IF NOT EXISTS messages_to_agent ON messages (to_agent, id) WHERE to_agent IS NOT NULL;
 CREATE TABLE IF NOT EXISTS agent_routes (
     agent_key  TEXT PRIMARY KEY,

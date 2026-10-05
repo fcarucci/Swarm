@@ -101,8 +101,9 @@ RESTART_OUTCOMES = ("running", "completed", "timeout", "max_turns", "failed", "n
 # 10 jobs.verdict_next (the judge's instructions with a not_met verdict), 11 jobs.max_hours (a
 # job's own stall limit, in hours) and jobs.waiting_until (when a bounded `swarm wait --for` expires),
 # 12 jobs.status 'paused' and the job_pauses table (pause/resume manifests), 13 the job_status
-# view's shown_status column (what `status` shows, incl. "waiting (goal not met)"; view only).
-SCHEMA_VERSION = 13
+# view's shown_status column (what `status` shows, incl. "waiting (goal not met)"; view only),
+# 14 the index messages(job, created_at) (job_status's per-job max(created_at); `swarm watch` redraws read it).
+SCHEMA_VERSION = 14
 
 # A moved agent's roster_seen holds MOVED_PREFIX + the job it came from until its next PreToolUse
 # turn tells it (no schema change: the hooks own the text, and it never parses as a snapshot).
@@ -1769,6 +1770,11 @@ class Board(abc.ABC):
         """Job rollups: only status active unless include_closed. Order: active first, then
         coalesce(activated_at, created_at) ascending, then job name -- stable, so a live view
         does not reshuffle as jobs become active."""
+
+    def session_jobs(self, session: str) -> list[JobStatus]:
+        """Every job (closed too) activated by host session `session`, in jobs() order. Backends
+        whose jobs() is expensive for the whole board (postgres) override it to read only these."""
+        return [j for j in self.jobs(True) if j.session_id == session]
 
     # ---- transcripts ([transcripts]; bin/transcripts.py does the capturing) ---------------
 
