@@ -523,9 +523,9 @@ password_env_file = "~/.config/swarm/pg.env"
   longest message would let one old message block the change, and cutting history would destroy data.
   Postgres lock behaviour: the change is one `ALTER TABLE ... DROP CONSTRAINT, ADD CONSTRAINT ... NOT VALID`
   (ACCESS EXCLUSIVE, but metadata only: no scan, no rewrite) plus the meta row, in one transaction under
-  `lock_timeout = 3s`, retried with back-off on a lock timeout or deadlock, so a waiting ALTER never
-  queues posters for long. A poster that read the old cap just before a change is cut to the new one
-  and retried once.
+  `lock_timeout = 3s`, retried with back-off on a lock timeout or deadlock, so a waiting ALTER
+  queues posters for at most a few seconds at a time. A poster that read the old cap just before a
+  change is cut to the new one and retried once.
 - **Concurrency.** A partial unique index keeps names unique among active agents, another
   keeps one active judge per job, even when many hooks allocate names at once. Posts take an
   advisory lock held to commit, so message ids become visible in order.

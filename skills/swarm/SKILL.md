@@ -542,7 +542,7 @@ the file backend keeps the same rows in `state.json` and `messages.jsonl`.
   stored: they stay readable, and only new posts obey the lower cap. If a client's config says another
   value, the board's still wins. Postgres: the column is `text` plus a `CHECK (length(message) <= N) NOT VALID`
   constraint that is swapped in one quick `ALTER TABLE` (metadata only, no row scan or rewrite; it waits
-  for the table lock at most a few seconds at a time and retries, so posters are never stuck behind it);
+  for the table lock and retries, so posters can queue for at most a few seconds at a time);
   SQLite: a trigger reading the stored value; file/memory: a field of the board's state.
 
 ## Transcript archive (optional)

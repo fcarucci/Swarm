@@ -689,15 +689,19 @@ _CAP_CONSTRAINT = "messages_message_cap"      # CHECK (length(message) <= cap), 
 _NONEMPTY_CONSTRAINT = "messages_message_nonempty"
 _LOCK_TIMEOUT = "3s"   # how long an ALTER waits for the table lock before it gives up and retries
 _LOCK_TRIES = 20
+_SETUP_LOCK_TRIES = 3   # schema setup has its own outer retry loop
 
 
-def _alter_quickly(conn: psycopg.Connection, statements: Sequence[str], params: Sequence = ()) -> None:
+def _alter_quickly(conn: psycopg.Connection, statements: Sequence[str], params: Sequence = (),
+                   *, attempts: int | None = None) -> None:
     """Run `statements` in one transaction under a short lock_timeout, retrying when the table lock
     is not granted. An ALTER TABLE waits for ACCESS EXCLUSIVE, and while it waits every later
     statement on the table queues behind it (a hook posting, a watcher reading): so it never waits
-    long (_LOCK_TIMEOUT), backs off and tries again, and a live board only ever sees a pause of a
-    few milliseconds once the lock is free. LockNotAvailable and DeadlockDetected are retried."""
-    for attempt in range(_LOCK_TRIES):
+    long (_LOCK_TIMEOUT), backs off and tries again: posters can queue for at most a few seconds
+    at a time. LockNotAvailable and DeadlockDetected are retried. Schema setup uses fewer inner
+    attempts because its outer retry loop owns the setup budget."""
+    tries = _LOCK_TRIES if attempts is None else attempts
+    for attempt in range(tries):
         try:
             with conn.transaction():
                 conn.execute(f"SET LOCAL lock_timeout = '{_LOCK_TIMEOUT}'")
@@ -705,7 +709,7 @@ def _alter_quickly(conn: psycopg.Connection, statements: Sequence[str], params: 
                     conn.execute(stmt, p or None)
             return
         except (psycopg.errors.LockNotAvailable, psycopg.errors.DeadlockDetected):
-            if attempt == _LOCK_TRIES - 1:
+            if attempt == tries - 1:
                 raise
             time.sleep(min(0.2 * (attempt + 1), 2.0) + random.random() * 0.2)
 
@@ -736,7 +740,7 @@ def _install_message_cap(conn: psycopg.Connection, b: dict, legacy_width: int | 
         _cap_statement(cap),
         "INSERT INTO board_meta (key, value) VALUES ('message_max_chars', %s) ON CONFLICT (key) DO NOTHING",
     ]
-    _alter_quickly(conn, statements, [(), (), (str(cap),)])
+    _alter_quickly(conn, statements, [(), (), (str(cap),)], attempts=_SETUP_LOCK_TRIES)
 
 
 def _message_width(conn: psycopg.Connection) -> int | None:
