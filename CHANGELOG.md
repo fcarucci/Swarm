@@ -7,8 +7,12 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 ## [Unreleased]
 
 ### Fixed
-- A job with a goal is never auto-closed before the judge's `met` verdict: the "no live agents for 30 min" (cancelled) close skips it and the "no progress for N h" (failed) close skips it unless the job has its own `--stall-hours`, so an orchestrator waiting on a question or between rounds no longer loses its job.
-- "No live agents" no longer closes a job whose orchestrating Claude Code session is still running, one this sweep has no marker for (another user's or machine's hook sweeps), or while hooks on this machine log board connection failures.
+- A job with a goal is no longer auto-closed before the judge's `met` verdict: the "no live agents for 30 min" close (`cancelled`) skips it, and so does the "no progress for N h" close (`failed`) unless the job has its own `--stall-hours` or `[job] goal_stall_hours` is set. An orchestrator waiting on a question, or between rounds with every subagent finished, no longer loses its job. Jobs without a goal behave exactly as before.
+- The sweeps re-check the goal at the moment of the close, so a goal set (or a verdict changed to `not_met`) while a sweep was running keeps the job open.
+
+### Added
+- `[job] goal_stall_hours` (default 0 = never): the one backstop for a goal job without a `met` verdict; no progress for that long closes it as `failed` ("auto-closed: no progress for N h; goal not met"). A job's own `--stall-hours` takes precedence.
+- `status`, `status --job`, `watch` and the Postgres `job_status` view (new `shown_status` column; applied by the automatic schema upgrade, version 13) show a goal job with no live agent and no `met` verdict as `waiting (goal not met)`.
 
 ## [0.1.14] - 2026-10-02
 

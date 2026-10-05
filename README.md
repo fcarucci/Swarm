@@ -38,9 +38,10 @@ judge to confirm the fix"*, and the model does the rest:
    one with no progress (no post, verdict or new agent) for `[job] stall_hours` (default 4)
    closes as `failed`, and one with no live agent and no activity for `[job] orphan_minutes`
    (default 30) closes as `cancelled`. A job that keeps progressing can run as long as it likes.
-   A job with a goal is the exception: it is never orphan-closed, and the stall limit only
-   applies if you gave that job its own `--stall-hours`; otherwise only the judge's `met` verdict
-   or you (`swarm deactivate`) end it.
+   A job with a goal is the exception: no sweep closes it before the judge's `met` verdict
+   (`status` shows `waiting (goal not met)` while nobody works on it), unless you set
+   `[job] goal_stall_hours` or gave that job its own `--stall-hours`; otherwise only `met` or
+   you (`swarm deactivate`) end it.
 
 The model is conservative about jobs: small work it does itself, a new agent goes into a running
 job whose scope fits, and a new job is for substantial work that needs several coordinating

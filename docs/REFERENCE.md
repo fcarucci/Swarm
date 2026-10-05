@@ -723,8 +723,9 @@ On Postgres, re-run `swarm init` after changing `idle_minutes`, `dead_minutes` o
 | key | default | meaning |
 |---|---|---|
 | `auto_close_minutes` | `30` | an open job whose agents are all done closes by itself after this many quiet minutes (see [Auto-close](#auto-close)); `0` turns it off |
-| `stall_hours` | `4` | an open job with no progress (no agent post, verdict or new agent; tool calls and heartbeats don't count) for this long closes as `failed`, whatever its agents do; a job that keeps progressing is never closed by it, nor is a job with a goal and no `met` verdict. `activate --stall-hours N` sets one job's own limit, `0` = never; `0` here turns the default off |
-| `orphan_minutes` | `30` | an open job (waiting ones too) with no live agent and no board activity for this long closes as `cancelled` (never one with a goal and no `met` verdict; never one whose orchestrating session this sweep can't see or that is still running); `0` turns it off |
+| `stall_hours` | `4` | an open job with no progress (no agent post, verdict or new agent; tool calls and heartbeats don't count) for this long closes as `failed`, whatever its agents do; a job that keeps progressing is never closed by it. `activate --stall-hours N` sets one job's own limit, `0` = never; `0` here turns the default off. Not applied to a job with a goal and no `met` verdict (see `goal_stall_hours`) |
+| `orphan_minutes` | `30` | an open job (waiting ones too) with no live agent and no board activity for this long closes as `cancelled`; `0` turns it off. Never closes a job with a goal and no `met` verdict |
+| `goal_stall_hours` | `0` | the stall limit of a job with a goal and no `met` verdict, which `stall_hours` and `orphan_minutes` never close: no progress for this long closes it as `failed`, `auto-closed: no progress for N h; goal not met` (plus its last verdict); `0` = never. The job's own `activate --stall-hours N` takes precedence (`0` = never) |
 
 **`[sqlite]`** (with `backend = "sqlite"`)
 
@@ -1005,17 +1006,17 @@ like a `deactivate` (`closed_by` `auto`, agents left, marker removed) and show i
 `swarm wait --for DURATION` bounds a wait: until it expires it shields the job from the orphan rule
 only, never from the stall limit.
 
-The orphan rule never applies to a job with a goal and no `met` verdict, and neither does the
-stall limit unless that job was given its own (`activate --stall-hours N`; then it closes as
-`failed`, `auto-closed: no progress for N h; goal not met`): its orchestrator may sit between
-rounds or on a question for hours with no live subagent, so otherwise only the judge's `met` or a
-person (`swarm deactivate`) ends it; `status` shows it as `idle`. Anyone can resume it
-(`activate --attach`, spawning agents, the judge seat) without the orchestrator. For the other jobs "no live agents" is kept honest: the orphan rule closes only when the
-sweep has the job's marker (another user's or machine's sweep can't see the orchestrating session),
-the session's process is not running (Claude Code's `~/.claude/sessions/<pid>.json`; a session
-blocked on a question makes no tool call, so its `.seen` heartbeat goes stale), and no hook on this
-machine logged a board connection failure within the window (agents whose hooks couldn't reach the
-database look dead).
+**Jobs with a goal.** A job with a goal and no `met` verdict is never closed by the orphan rule,
+and the stall limit does not apply to it either, unless that job has its own limit (`activate
+--stall-hours N`) or `[job] goal_stall_hours` is set; then it closes as `failed` with
+`auto-closed: no progress for N h; goal not met` (plus its last verdict). Its orchestrator may
+sit between rounds, or on a question for a person, for hours with no live subagent, so otherwise
+only the judge's `met` or a person (`swarm deactivate`) ends it. While no agent is started,
+running or idle on it, `status`, `watch` and the Postgres `job_status` view's `shown_status`
+column show it as `waiting (goal not met)`. Anyone can resume it, with no orchestrator:
+`activate --attach`, spawning agents, taking the judge seat; a `met` verdict then lets the
+ordinary rules close it. The sweep re-checks the goal at the moment of the close (a goal set, or
+a verdict changed, since it looked keeps the job open).
 
 **Where it runs.** No daemon: the sweep runs from commands that already run now and then:
 `status`, `purge`, `join` and `activate`, `watch` and `tail` (at most once a minute), and the
@@ -1128,13 +1129,14 @@ once the agent joins, in its agent row, so the transcript is read at most once p
 
 An open job whose agents have all finished isn't necessarily done: it may be waiting for the
 user's answer, an approval, or an event such as a scheduled run. `status` and `watch` show an
-open job as one of three words:
+open job as one of four words:
 
 | shown | when |
 |---|---|
 | `active` | an agent is started or running, or anything happened within `idle_minutes` |
 | `waiting` | the orchestrator said what the job waits for: `swarm wait --job J --on "<what>"`. The reason and how long it has waited are shown in the WAITING ON column, and in `status --job J` |
 | `idle` | nobody is at work and no reason is recorded: give it one, or close the job (once every agent is done it [auto-closes](#auto-close) after `auto_close_minutes`) |
+| `waiting (goal not met)` | the job has a goal without a `met` verdict and no agent is started, running or idle on it. No sweep closes it (see [Jobs with a goal](#auto-close)): spawn an agent, seat the judge, or `swarm deactivate` it |
 
 The wait ends with `swarm resume --job J`. It also ends by itself when an agent joins the job,
 when the job is re-activated, and when it is closed. Only the display changes: the stored
@@ -1655,7 +1657,7 @@ colour. Ctrl-C stops it.
 ### `swarm status`
 
 With no arguments, `status` lists the active jobs (`--all` adds closed ones) with these columns:
-STATUS (`active`/`waiting`/`idle` for open jobs, else the closed status), AGENTS, RUNNING
+STATUS (`active`/`waiting`/`waiting (goal not met)`/`idle` for open jobs, else the closed status), AGENTS, RUNNING
 (started or running), IDLE, DONE (completed), LEFT/DEAD, MSGS, ACTIVATED, LAST ACTIVITY,
 FINISHED, VERDICT (`-` no goal, `none` none yet, `met`, `not_met`; `*` completed with
 `--force`), WAITING ON and DESCRIPTION. Before the table it runs the [auto-close](#auto-close)
