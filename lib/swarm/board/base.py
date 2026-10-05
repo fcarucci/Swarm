@@ -102,7 +102,8 @@ RESTART_OUTCOMES = ("running", "completed", "timeout", "max_turns", "failed", "n
 # job's own stall limit, in hours) and jobs.waiting_until (when a bounded `swarm wait --for` expires),
 # 12 jobs.status 'paused' and the job_pauses table (pause/resume manifests), 13 the job_status
 # view's shown_status column (what `status` shows, incl. "waiting (goal not met)"; view only),
-# 14 the index messages(job, created_at) (job_status's per-job max(created_at); `swarm watch` redraws read it).
+# 14 the index messages(job, created_at) (job_status's per-job max(created_at);
+# `swarm watch` redraws read it).
 SCHEMA_VERSION = 14
 
 # A moved agent's roster_seen holds MOVED_PREFIX + the job it came from until its next PreToolUse

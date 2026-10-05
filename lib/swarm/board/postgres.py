@@ -68,7 +68,9 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS messages_job_id ON messages (job, id);
 CREATE INDEX IF NOT EXISTS messages_created_at ON messages (created_at);
--- job_status's last_activity_at: max(created_at) per job (was a backward scan of the index above, filtered by job)
+-- job_status's last_activity_at: max(created_at) per job (was a backward scan of the index above, filtered by job).
+-- A plain CREATE INDEX locks writes to messages while it builds: milliseconds at the board's size (~14k rows).
+-- A board with millions of rows needs CREATE INDEX CONCURRENTLY by hand first (same name; this is then a no-op).
 CREATE INDEX IF NOT EXISTS messages_job_created_at ON messages (job, created_at);
 -- `swarm tail` LISTENs on this channel so new messages show up instantly.
 CREATE OR REPLACE FUNCTION swarm_notify() RETURNS trigger LANGUAGE plpgsql AS $$

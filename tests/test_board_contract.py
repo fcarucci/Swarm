@@ -776,6 +776,19 @@ class BoardContract:
         self.assertEqual(self.b.agents("j", include_departed=False), [])
         self.assertEqual(self.status_of("elsewhere", "other"), "started")
 
+    def test_session_jobs_is_the_sessions_jobs_closed_ones_included_in_jobs_order(self):
+        self.b.open_job("a", "A", None, "S1", None)
+        self.b.open_job("b", "B", None, "S2", None)
+        self.b.open_job("c", "C", None, "S1", None)
+        self.b.open_job("d", "D", None, None, None)
+        self.b.post("a", "X", "m1")
+        self.b.close_job("c", "completed", None)
+        mine = self.b.session_jobs("S1")
+        self.assertEqual([j.job for j in mine], ["a", "c"])
+        self.assertEqual(mine, [j for j in self.b.jobs(True) if j.session_id == "S1"])   # same rollups
+        self.assertEqual(mine[0].messages, 1)
+        self.assertEqual(self.b.session_jobs("nobody"), [])
+
     def test_jobs_listing_and_rollup(self):
         self.b.open_job("a", "A", None, None, None)
         self.b.open_job("b", "B", None, None, None)

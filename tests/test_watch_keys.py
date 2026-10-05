@@ -1,5 +1,7 @@
-"""watch is event driven: a key is dispatched by the keymap and rendered from the cached snapshot,
-with no board call on the input path, even while a refresh (a slow query) is still running."""
+"""watch is event driven: a key is dispatched by the keymap and rendered from the last snapshot, with
+no board call on the input path, even while a refresh (a slow query) is in flight. The behavioural
+tests run the real `cmd_watch` on a pty, so against the old single-thread loop they fail on the
+assertion (the key waits for the query), not on an import."""
 from __future__ import annotations
 
 import io
@@ -7,43 +9,118 @@ import os
 import threading
 import time
 import unittest
+from unittest import mock
 
-from support import ROOT  # noqa: F401  (sets sys.path)
+from support import MemoryHarness  # noqa: F401  (also sets sys.path)
 
 from swarm import cli as swarm  # noqa: E402
+from swarm.board import BoardUnavailable  # noqa: E402
+from swarm.board.memory import MemoryBoard  # noqa: E402
+
+JOB = "ABCDEFGH-" + "x" * 80
+SESSION = "11111111-aaaa-bbbb-cccc-000000000001"
 
 
-class SlowBoard:
-    """subscribe/wait_for_change/now like a board; `query` blocks while `gate` is cleared."""
+class PtyWatch(unittest.TestCase):
+    """cmd_watch --compact --session on a pty; recent_messages blocks on `gate` once it is cleared."""
 
-    degraded = None
-
-    def __init__(self):
+    def setUp(self):
+        self.h = MemoryHarness("watch-keys")
+        self.addCleanup(self.h.close)
+        self.h.reset()
+        with self.h.board() as b:
+            b.ensure_job(JOB, "d")
+            b.bind_job_session(JOB, SESSION)
         self.gate = threading.Event()
         self.gate.set()
-        self.queries = 0
+        real = MemoryBoard.recent_messages
+        gate = self.gate
 
-    def subscribe(self, messages_only=False):
-        pass
+        def slow(board, *a, **k):
+            gate.wait(20)
+            return real(board, *a, **k)
+        for p in (mock.patch.object(MemoryBoard, "recent_messages", slow),
+                  mock.patch.object(swarm, "Sweeper", lambda cfg, *a, **k: (lambda board: [])),
+                  mock.patch.dict(os.environ, {"COLUMNS": "60", "LINES": "40"})):
+            p.start()
+            self.addCleanup(p.stop)
+        self.master, slave = os.openpty()
+        self.stdin = os.fdopen(os.dup(slave), "r")
+        self.stdout = os.fdopen(slave, "w")
+        self.addCleanup(self.stdin.close)
+        self.addCleanup(self.stdout.close)
+        self.addCleanup(os.close, self.master)
+        self.seen = b""
+        self.result = {}
 
-    def wait_for_change(self, timeout):
-        time.sleep(min(timeout, 0.02))
-        return False
+        def run():
+            with mock.patch("sys.stdin", self.stdin), mock.patch("sys.stdout", self.stdout):
+                self.result["rc"] = swarm.cmd_watch(self.h.cfg, None, 60.0, False, session=SESSION, compact=True)
+        self.thread = threading.Thread(target=run, daemon=True)
+        self.thread.start()
+        self.addCleanup(self.shutdown)
 
-    def now(self):
-        import datetime as dt
-        return dt.datetime.now(dt.timezone.utc)
+    def shutdown(self):
+        import select
+        self.gate.set()
+        if self.thread.is_alive():
+            os.write(self.master, b"q")
+        end = time.monotonic() + 5
+        while self.thread.is_alive() and time.monotonic() < end:   # drain: tcsetattr(DRAIN) waits for the reader
+            if select.select([self.master], [], [], 0.01)[0]:
+                os.read(self.master, 65536)
 
-    def query(self):
-        self.queries += 1
-        self.gate.wait(10)
-        return ["row"]
+    def frames(self):
+        return [f for f in self.seen.split(b"\x1b[H")[1:] if f.endswith(b"\x1b[J")]
+
+    def wait_screen(self, pred, limit, what):
+        end = time.monotonic() + limit
+        import select
+        while time.monotonic() < end:
+            if select.select([self.master], [], [], 0.01)[0]:
+                self.seen += os.read(self.master, 65536)
+            fr = self.frames()
+            if fr and pred(fr[-1]):
+                return time.monotonic()
+        self.fail(f"{what}: no such frame within {limit}s; last: {self.frames()[-1:]}")
+
+    def type(self, data: bytes):
+        os.write(self.master, data)
+
+    def test_key_shifts_the_view_at_once_while_a_query_is_in_flight(self):
+        self.wait_screen(lambda f: b"ABCDEFGH" in f, 10, "first frame")
+        self.gate.clear()                                    # the next refresh hangs in its query
+        with self.h.board() as b:
+            b.post(JOB, "Alice", "wakes the refresh")        # a change: refresh (old code: redraw) starts
+        time.sleep(0.3)
+        self.seen = b""
+        t0 = time.monotonic()
+        self.type(b"\x1b[C")                                 # Right
+        t1 = self.wait_screen(lambda f: b"ABCDEFGH" not in f and b"xxxx" in f, 3, "shifted frame")
+        self.assertLess(t1 - t0, 0.3)
+
+    def test_quit_does_not_wait_for_a_query_in_flight(self):
+        self.wait_screen(lambda f: b"ABCDEFGH" in f, 10, "first frame")
+        self.gate.clear()
+        with self.h.board() as b:
+            b.post(JOB, "Alice", "wakes the refresh")
+        time.sleep(0.3)
+        t0 = time.monotonic()
+        self.type(b"q")
+        import select
+        end = time.monotonic() + 3
+        while self.thread.is_alive() and time.monotonic() < end:   # drain: tcsetattr(DRAIN) waits for the reader
+            if select.select([self.master], [], [], 0.01)[0]:
+                os.read(self.master, 65536)
+        self.assertFalse(self.thread.is_alive())
+        self.assertLess(time.monotonic() - t0, 1.5)
+        self.assertEqual(self.result.get("rc"), 0)
 
 
 class KeymapTests(unittest.TestCase):
     def test_keymap_is_declarative_and_every_action_has_a_handler(self):
         for seq, action in swarm.WATCH_KEYS:
-            self.assertIn(action, swarm.VIEW_ACTIONS if action != "quit" else {"quit": 1}, seq)
+            self.assertTrue(action == "quit" or action in swarm.VIEW_ACTIONS, seq)
 
     def test_right_and_left_move_the_offset(self):
         view = {"offset": 0, "max_offset": 100}
@@ -54,76 +131,81 @@ class KeymapTests(unittest.TestCase):
         self.assertFalse(swarm._apply_keys("q", view))
 
 
-class EventLoopTests(unittest.TestCase):
-    def run_loop(self, script):
-        board = SlowBoard()
-        view = {"offset": 0, "max_offset": 100}
+class LoopTests(unittest.TestCase):
+    """_watch_loop_threaded with a stub board and refresh."""
+
+    class Board:
+        degraded = None
+
+        def subscribe(self, messages_only=False):
+            pass
+
+        def wait_for_change(self, timeout):
+            time.sleep(min(timeout, 0.02))
+            return False
+
+    def run_loop(self, refresh, draw=None, keys=b"", quit_after=0.5):
         rfd, wfd = os.pipe()
         out = io.StringIO()
         out.flush = lambda: None
-        draws = []
-
-        def refresh():
-            return {"rows": board.query()}
-
-        def draw(snap):
-            draws.append((view["offset"], board.queries))
-            snap.now()   # replay answers locally
-            return [f"offset={view['offset']}"]
-
-        result = {}
+        view = {"offset": 0, "max_offset": 100}
+        err = {}
 
         def loop():
             try:
-                swarm._watch_loop(board, out, rfd, 60.0, view, draw,
-                                  lambda: _Snap(refresh()))
-            except BaseException as exc:  # pragma: no cover
-                result["error"] = exc
+                swarm._watch_loop(self.Board(), out, rfd, 60.0, view, draw or (lambda snap: ["x"]), refresh)
+            except BaseException as exc:
+                err["e"] = exc
         t = threading.Thread(target=loop)
         t.start()
-        try:
-            script(board, view, wfd, out, draws)
-        finally:
-            board.gate.set()
+        time.sleep(quit_after)
+        if keys:
+            os.write(wfd, keys)
+        if t.is_alive():
             os.write(wfd, b"q")
-            t.join(5)
-            os.close(rfd)
-            os.close(wfd)
+        t.join(5)
+        os.close(rfd)
+        os.close(wfd)
         self.assertFalse(t.is_alive())
-        self.assertNotIn("error", result)
+        return out.getvalue(), err.get("e")
 
-    def wait_for(self, cond, what, limit=3.0):
-        end = time.monotonic() + limit
-        while time.monotonic() < end:
-            if cond():
-                return
-            time.sleep(0.005)
-        self.fail(what)
+    def test_board_unavailable_in_the_refresh_reaches_the_caller(self):
+        def refresh():
+            raise BoardUnavailable("gone")
+        _out, err = self.run_loop(refresh, quit_after=0.3)
+        self.assertIsInstance(err, BoardUnavailable)
 
-    def test_key_renders_at_once_while_a_refresh_is_blocked_in_a_query(self):
-        def script(board, view, wfd, out, draws):
-            self.wait_for(lambda: draws, "first frame")
-            board.gate.clear()                      # the next refresh will hang in its query
-            os.write(wfd, b"a")                     # any key: wakes a refresh that blocks
-            self.wait_for(lambda: board.queries >= 2, "refresh started")
-            n, queries = len(draws), board.queries
-            t0 = time.monotonic()
-            os.write(wfd, b"\x1b[C")                # Right
-            self.wait_for(lambda: len(draws) > n and draws[-1][0] > 0, "render after key")
-            self.assertLess(time.monotonic() - t0, 0.2)
-            self.assertEqual(board.queries, queries)   # the render made no query
-            self.assertIn("offset=", out.getvalue())
+    def test_other_refresh_errors_propagate_too(self):
+        def refresh():
+            raise RuntimeError("boom")
+        _out, err = self.run_loop(refresh, quit_after=0.3)
+        self.assertIsInstance(err, RuntimeError)
 
-        self.run_loop(script)
+    def test_snapshot_miss_requests_a_refresh_and_keeps_the_old_frame(self):
+        n = {"refreshes": 0, "draws": 0}
 
+        def refresh():
+            n["refreshes"] += 1
+            return swarm._Recorder(mock.Mock(now=lambda: __import__("datetime").datetime.now(__import__("datetime").timezone.utc)))
 
-class _Snap(swarm._Recorder):
-    def __init__(self, data):
-        class B:
-            def now(self_inner):
-                import datetime as dt
-                return dt.datetime.now(dt.timezone.utc)
-        super().__init__(B())
+        def draw(snap):
+            n["draws"] += 1
+            if n["refreshes"] < 3:
+                raise swarm.SnapshotMiss("recent_messages")
+            return ["fresh"]
+        out, err = self.run_loop(refresh, draw, quit_after=1.0)
+        self.assertIsNone(err)
+        self.assertGreaterEqual(n["refreshes"], 3)       # each miss woke a refresh
+        self.assertIn("fresh", out)
+
+    def test_a_key_does_not_trigger_a_refresh(self):
+        n = {"refreshes": 0}
+
+        def refresh():
+            n["refreshes"] += 1
+            return swarm._Recorder(mock.Mock(now=lambda: __import__("datetime").datetime.now(__import__("datetime").timezone.utc)))
+        self.run_loop(refresh, keys=b"\x1b[C\x1b[D\x1b[C", quit_after=0.5)
+        self.assertEqual(n["refreshes"], 1)              # the first, at start; keys added none
 
 
 if __name__ == "__main__":

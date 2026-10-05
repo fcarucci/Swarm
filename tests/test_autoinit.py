@@ -99,6 +99,40 @@ class AutoInitBase:
             self.assertIn("before the upgrade",
                           [m.message for m in b.read_unread(agent_key="k2", job="J").messages])
 
+    # ---- schema 14: the index messages(job, created_at) (job_status's per-job max(created_at))
+
+    def job_created_index(self) -> bool | None:
+        """Whether messages(job, created_at) exists; None where the backend has no indexes."""
+        return None
+
+    def drop_job_created_index(self) -> None:
+        pass
+
+    def check_gains_the_messages_job_index(self, old: int):
+        ensure_initialized(self.cfg)
+        with open_board(self.cfg) as b:
+            b.ensure_job("J")
+            name = b.allocate_name("k1", "J")
+            b.post("J", name, "before the upgrade")
+        self.drop_job_created_index()
+        self.set_version(old)
+        self.forget_stamp()
+        if self.job_created_index() is not None:
+            self.assertFalse(self.job_created_index())
+        self.assertEqual(ensure_initialized(self.cfg).action, "initialized")
+        self.assertEqual(self.cls.schema_version(self.cfg), SCHEMA_VERSION)
+        if self.job_created_index() is not None:
+            self.assertTrue(self.job_created_index())
+        ensure_initialized(self.cfg)   # and again: nothing to do, nothing fails
+        with open_board(self.cfg) as b:
+            self.assertEqual([m.message for m in b.messages_after(0)], ["before the upgrade"])
+
+    def test_a_schema_12_store_gains_the_messages_job_index_keeping_data(self):
+        self.check_gains_the_messages_job_index(12)
+
+    def test_a_schema_13_store_gains_the_messages_job_index_keeping_data(self):
+        self.check_gains_the_messages_job_index(13)
+
     def test_v5_store_migrates_to_v8_keeping_data(self):
         """A store as schema 5 left it (no agents.left_reason/resume_of, no jobs.supervise, no
         restarts, no memory_refs/memory_ref_images) is migrated in place: rows kept, the new columns at their defaults, and the
@@ -523,6 +557,22 @@ class SqliteAutoInitTests(AutoInitBase, unittest.TestCase):
         finally:
             db.close()
 
+    def job_created_index(self) -> bool:
+        import sqlite3
+        db = sqlite3.connect(self.cfg["sqlite"]["path"])
+        try:
+            return db.execute("SELECT 1 FROM sqlite_master WHERE name = 'messages_job_created_at'").fetchone() is not None
+        finally:
+            db.close()
+
+    def drop_job_created_index(self) -> None:
+        import sqlite3
+        db = sqlite3.connect(self.cfg["sqlite"]["path"], isolation_level=None)
+        try:
+            db.execute("DROP INDEX IF EXISTS messages_job_created_at")
+        finally:
+            db.close()
+
     def make_v5(self) -> None:
         import sqlite3
         db = sqlite3.connect(self.cfg["sqlite"]["path"], isolation_level=None)
@@ -683,6 +733,14 @@ class PostgresAutoInitTests(AutoInitBase, unittest.TestCase):
                              "transcript_images, transcripts")
             else:
                 conn.execute("UPDATE board_meta SET value = %s WHERE key = 'schema_version'", (str(version),))
+
+    def job_created_index(self) -> bool:
+        with self._pg() as conn:
+            return conn.execute("SELECT 1 FROM pg_indexes WHERE indexname = 'messages_job_created_at'").fetchone() is not None
+
+    def drop_job_created_index(self) -> None:
+        with self._pg() as conn:
+            conn.execute("DROP INDEX IF EXISTS messages_job_created_at")
 
     def make_v5(self) -> None:
         import psycopg
