@@ -330,7 +330,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("jobs", "verdict_next", "TEXT"),   # schema 10: the judge's instructions with a not_met verdict
     ("jobs", "waiting_until", "TEXT"),  # schema 11: when a bounded `wait --for` expires
     ("jobs", "max_hours", "REAL"),      # schema 11: the job's own lifetime cap
-    ("jobs", "plugin_data", "TEXT"),    # schema 15: per-job settings kept by CLI plugins (JSON)
+    ("jobs", "plugin_data", "TEXT"),    # schema 16: per-job settings kept by CLI plugins (JSON)
 )
 
 _MESSAGE_COLS = "id, created_at, job, agent_name, to_agent, message"
