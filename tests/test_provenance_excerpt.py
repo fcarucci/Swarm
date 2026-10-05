@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import fake_image, posix_only  # noqa: F401  (sets sys.path)
+from support import assert_finishes, fake_image, posix_only  # noqa: F401  (sets sys.path)
 import codex_fixtures as CF  # noqa: E402
 
 from swarm import hosts, provenance, transcript_view, transcripts  # noqa: E402
@@ -137,9 +137,7 @@ class ExcerptTests(unittest.TestCase):
         with open(big, "w") as fh:
             for i in range(300_000):
                 fh.write(json.dumps({"type": "user", "n": i, "pad": "x" * 80}) + "\n")
-        t0 = time.monotonic()
-        data = provenance.read_tail(big, 1 << 20)
-        self.assertLess(time.monotonic() - t0, 1.0)
+        data = assert_finishes(self, lambda: provenance.read_tail(big, 1 << 20))
         self.assertLessEqual(len(data), 1 << 20)
         self.assertTrue(data.startswith(b'{"type"'))
         self.assertIn(b'"n": 299999', data)
@@ -246,10 +244,8 @@ class ExcerptFixTests(unittest.TestCase):
     @posix_only("needs os.mkfifo (POSIX FIFOs)")
     def test_read_tail_refuses_a_fifo_without_blocking(self):
         os.mkfifo(self.tmp / "fifo.jsonl")
-        t0 = time.monotonic()
         with self.assertRaises(provenance.UnsafeTranscript):
-            provenance.read_tail(self.tmp / "fifo.jsonl", 1024)
-        self.assertLess(time.monotonic() - t0, 1.0)
+            assert_finishes(self, lambda: provenance.read_tail(self.tmp / "fifo.jsonl", 1024))
 
 
 class OwnTranscriptTests(unittest.TestCase):

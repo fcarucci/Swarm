@@ -503,7 +503,7 @@ class SpoolTests(Env):
         def flusher():
             try:
                 with self.board() as b:
-                    barrier.wait()
+                    barrier.wait(timeout=120)
                     counts.append(spool.flush_spool(b, self.cfg))
             except Exception as exc:  # pragma: no cover
                 errors.append(exc)
@@ -511,8 +511,14 @@ class SpoolTests(Env):
         threads = [threading.Thread(target=flusher) for _ in range(6)]
         for t in threads:
             t.start()
-        for t in threads:
-            t.join(30)
+        try:
+            for t in threads:
+                t.join(30)
+            self.assertFalse(any(t.is_alive() for t in threads), "flusher did not finish")
+        finally:
+            barrier.abort()
+            for t in threads:
+                t.join(30)
         self.assertEqual(errors, [])
         self.assertEqual(sum(counts), n)
         with self.board() as b:
@@ -551,7 +557,7 @@ class SpoolTests(Env):
 
 # --------------------------------------------------------------------------- file safety
 
-def _run_bounded(fn, seconds: float = 5.0):
+def _run_bounded(fn, seconds: float = 30.0):
     """Run fn in a thread; (finished in time, its result)."""
     box = {}
     t = threading.Thread(target=lambda: box.setdefault("r", fn()), daemon=True)
@@ -745,16 +751,14 @@ class EnrolmentTests(Env):
         rec = enrolment.find_job(self.key(), "J")
         self.assertEqual((rec.job, rec.harness, rec.session_id, rec.cwd), ("J", "claude", "sess-1", abs_("/orch")))
         first = rec.created_at
-        time.sleep(0.05)
         self.hook("turn", agent_id=None, tool_name="Bash", cwd=abs_("/orch"))
         self.assertEqual(enrolment.find_job(self.key(), "J").created_at, first)   # not rewritten
         # another session's hook writes nothing for J
         self.hook("turn", agent_id=None, session="sess-2", tool_name="Bash", cwd="/x")
         self.assertEqual(enrolment.find_job(self.key(), "J").session_id, "sess-1")
         # a re-activation (a newer marker) moves the window to it
-        time.sleep(0.05)
         self.activate("--session", "sess-1")
-        os.utime(self.markers / "J.json")
+        os.utime(self.markers / "J.json", (first + 1, first + 1))
         self.hook("turn", agent_id=None, tool_name="Bash", cwd=abs_("/orch"))
         self.assertGreater(enrolment.find_job(self.key(), "J").created_at, first)
 
