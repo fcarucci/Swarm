@@ -212,8 +212,8 @@ class TwoJobsOneSessionTests(RoutingEnv):
     def test_resumed_member_gets_back_into_its_own_job(self):
         self.spawn("b1", "[swarm job: B]\nwork")
         name = self.member("b1").name
-        self.hook("stop", agent_id="b1")
         peer = self.cli("join", "--job", "B", "--key", "peer-b")[1].strip()
+        self.hook("stop", agent_id="b1")
         self.cli("post", "--job", "B", "--as", peer, "while you were away")
         out = self.start("b1")  # resumed through SendMessage: the transcript exists already
         self.assertIn(f'You are **{name}**, a member of the swarm working on job "B"', self.context(out))
