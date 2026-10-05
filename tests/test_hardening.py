@@ -172,12 +172,14 @@ class SpoolFlushBoundsTests(Env):
             spool.spool_post(self.cfg, "J", "A", f"m{i}", None)
         items, seconds, each = swarm_hooks.HOOK_FLUSH_TOOL
         self.assertLessEqual((items, seconds, each), (2, 1.0, 1.0))
-        self.hook("turn", tool_name="Bash")
-        self.assertEqual(len(self.queued()), 25 - items)
-        self.hook("done", tool_name="Bash")
-        self.assertEqual(len(self.queued()), 25 - 2 * items)
-        self.hook("start", agent_id="agent-2")
-        self.assertEqual(len(self.queued()), max(0, 25 - 2 * items - swarm_hooks.HOOK_FLUSH_AGENT[0]))
+        # This is the item-cap contract; deadline exhaustion has separate clock tests.
+        with mock.patch("time.monotonic", ManualClock()):
+            self.hook("turn", tool_name="Bash")
+            self.assertEqual(len(self.queued()), 25 - items)
+            self.hook("done", tool_name="Bash")
+            self.assertEqual(len(self.queued()), 25 - 2 * items)
+            self.hook("start", agent_id="agent-2")
+            self.assertEqual(len(self.queued()), max(0, 25 - 2 * items - swarm_hooks.HOOK_FLUSH_AGENT[0]))
 
     def queued(self):
         return list(self.spool_dir.glob("*.json"))

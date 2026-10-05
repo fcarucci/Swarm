@@ -67,6 +67,7 @@ Inject elapsed budget consumption at redaction/capture/open boundaries, includin
 
 Inject clocks for flush budgets and operation timeouts; gate stalled resolvers/connects; wait for actual retain completion and actual lock contention.
 
+- `SpoolFlushBoundsTests.test_per_tool_hooks_deliver_a_couple_the_agent_hooks_the_backlog`
 - `SpoolFlushBoundsTests.test_deadline_stops_a_slow_flush`
 - `SpoolFlushBoundsTests.test_a_blocking_delivery_is_cut_to_the_budget`
 - `SpoolFlushBoundsTests.test_a_memory_delivery_stays_within_the_budget_over_several_calls`
@@ -269,3 +270,5 @@ The method list above identifies direct test edits. Shared fixtures also affect 
 ## Audit disposition
 
 Searched all of `tests/` for time.time/monotonic/perf_counter, duration assertions, sleeps, joins, waits, barriers, and timers. Remaining waits have generous fixture/deadlock bounds; remaining sleeps poll actual conditions, simulate wait_for_change, or await eventual consistency in the opt-in live Hindsight smoke test. Constants compared with configured hook/systemd budgets are configuration invariants. `test_autoinit.py` and `test_memory_refs_race.py` are assigned to the Postgres engineer. Its contract barrier cleanup overlaps this branch only in the shared `test_board_contract.py`; integration must preserve both edits.
+
+A late finder baseline also reproduced an implicit timing assumption in the per-tool/agent backlog test (9 queued instead of1 on file IO). Its exact item-cap oracle now runs under a fixed clock; separate deadline tests cover exhaustion. This final edit was compiled/reviewed but could not be executed here because all three test slots had transferred to baseline; integration must run it against memory/file/SQLite.
