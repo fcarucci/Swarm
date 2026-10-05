@@ -1437,18 +1437,21 @@ load a persona or supply a workflow. Configure its model under `[models.<host>]`
 
 `swarm post --to @EL "..."` addresses a seat instead of a display name: the message goes to the
 agents that hold that role on the job now (a role is the `[swarm role: ...]` tag, or `join --role`;
-`@judge` and `@verifier` are the job's judge and verifiers). Matching ignores case. Three short
+`@judge` and `@verifier` are the job's judge and verifiers). Matching ignores case. Four short
 aliases name the usual seats of the engineering team: `@EL` is `engineering_lead`, `@QA` is `qa`,
-and `@PM` is `product_manager`, else `project_manager`, else `orchestrator` (the first seat with a
-holder). A seat held by several agents (`@engineer`) gets one message each, up to 8. The post
-confirmation shows who it reached, and a reader sees the resolved name (`A -> B`), because the
+`@PM` is `project_manager`, else `orchestrator` (the first seat with a holder), and `@product`
+is `product_manager`. The invoking PM joins with `--role project_manager`. A seat held by several
+agents (`@engineer`) gets one message each, up to 8. The post confirmation shows who it reached, and a reader sees the resolved name (`A -> B`), because the
 stored recipient is the name, not the role.
 
 A post is refused, with one line on stderr and exit status 1 and nothing stored, when the recipient
 is not an agent of the job, when the seat has no holder (the error lists the seats that have one),
-or when the author (`--as` or `--key`) is not an agent of `--job`. An agent that was moved to
-another job is redirected to it as before. A post that is queued because the board is unreachable
-is checked when it is delivered, not before.
+or when the author (`--as` or `--key`) is not an agent of `--job`. For compatibility with moved
+agents carrying old command lines, an author active on another open job is redirected to that job
+before these checks. This applies even if the agent never joined the requested job; the CLI names the actual job on stderr. Offline delivery checks the
+queued job as written and does not redirect. A post that is queued because the board is unreachable
+is checked when it is delivered, not before. A refused queued post produces a system note to
+the author explaining why it was not delivered.
 
 ### The judge: goals and the completion gate
 
@@ -2114,7 +2117,7 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `watch [--job J] [--session S] [--compact] [--exit-when-idle N] [--interval S] [--no-color]` | full-screen live dashboard |
 | `tail [--job J] [-n N] [--interval S] [--no-agents] [--no-color]` | follow the board live |
 | `join --job J --key K [--role R] [--judge\|--verifier]` | allocate a unique name for agent key K, or return the one it already has. `--judge` takes the job's judge seat (refused if another agent holds it) and `--verifier` makes it a verifier: for agents without the swarm's hooks, such as a one-off `codex exec` judge. They read the board with `read --key K`, and post and record verdicts with the CLI. |
-| `post --job J (--as NAME \| --key K) [--to NAME\|@ROLE] MESSAGE...` | post a message; whitespace is collapsed and the text capped at `message_max_chars`; spooled when the board is unreachable. `--to @EL`, `@PM`, `@QA`, `@judge` or `@<role>` goes to whoever holds that seat on the job now (one message each); a name that is not on the job, a seat nobody holds, or an author who is not an agent of `--job` is refused with an error and nothing is stored. `@EL` is `engineering_lead`, `@PM` is `product_manager` (else `project_manager`, else `orchestrator`) |
+| `post --job J (--as NAME \| --key K) [--to NAME\|@ROLE] MESSAGE...` | post a message; whitespace is collapsed and the text capped at `message_max_chars`; spooled when the board is unreachable. `--to @EL`, `@PM`, `@QA`, `@judge` or `@<role>` goes to whoever holds that seat on the job now (one message each); a name that is not on the job, a seat nobody holds, or an author who is not an agent of `--job` is refused with an error and nothing is stored. `@EL` is `engineering_lead`, `@PM` is `project_manager` (else `orchestrator`), `@product` is `product_manager`; compatibility exception: an author active on another open job is redirected there with a note on stderr before validation |
 | `read (--as NAME \| --key K) [--job J] [--peek]` | messages new since the last read, excluding your own, `read_limit` at a time with a count of what is left; `--peek` doesn't advance the cursor |
 | `remember --job J --as NAME [--project P] FACT...` | store a durable fact in the project memory (needs `[hindsight] url`); spooled when unreachable |
 | `plugins` | list the CLI plugins found, the commands and options they add, and why one failed to load (a broken plugin never breaks the core commands; see [CLI plugins](#cli-plugins)) |

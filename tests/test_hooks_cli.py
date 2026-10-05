@@ -224,8 +224,9 @@ class CliTests(Env):
         self.assertEqual(self.cli("job", "J2", "--description", "d")[1], "J2\n")
 
     def test_post_spools_when_unreachable_and_next_command_delivers_once(self):
+        sender = self.peer()
         self.h.set_available(False)
-        rc, out, _ = self.cli("post", "--job", "J", "--as", "Homer Simpson", "queued", "msg")
+        rc, out, _ = self.cli("post", "--job", "J", "--as", sender, "queued", "msg")
         self.assertEqual(rc, 0)
         self.assertEqual(out, "queued (board not reachable from here: ConnectionError); it is delivered "
                               "automatically within seconds by the swarm hooks. This is normal inside a sandbox.\n")
@@ -487,9 +488,10 @@ class HookTests(Env):
 
     def test_hook_flushes_spool_exactly_once_in_order(self):
         self.activate()
+        sender = self.peer()
         self.hook("start")
         for i in range(3):
-            spool.spool_post(self.cfg, "J", "Someone", f"spooled {i}", None)
+            spool.spool_post(self.cfg, "J", sender, f"spooled {i}", None)
             os.utime(sorted(self.spool_dir.glob("*.json"), key=lambda p: p.stat().st_mtime)[-1],
                      (1000 + i, 1000 + i))
         # a per-tool hook delivers two at most (swarm_hooks.HOOK_FLUSH_TOOL); the next one the rest
@@ -506,10 +508,14 @@ class HookTests(Env):
 
 
 class SpoolTests(Env):
+    def setUp(self):
+        super().setUp()
+        self.sender = self.peer()
+
     def test_concurrent_flushers_deliver_exactly_once(self):
         n = 40
         for i in range(n):
-            spool.spool_post(self.cfg, "J", "Someone", f"m{i}", None)
+            spool.spool_post(self.cfg, "J", self.sender, f"m{i}", None)
         barrier = threading.Barrier(6)
         counts, errors = [], []
 
@@ -536,8 +542,8 @@ class SpoolTests(Env):
     def test_malformed_and_empty_go_to_bad(self):
         self.spool_dir.mkdir(parents=True)
         (self.spool_dir / "broken.json").write_text("{not json")
-        spool.spool_post(self.cfg, "J", "Someone", "  \n ", None)
-        spool.spool_post(self.cfg, "J", "Someone", "fine", None)
+        spool.spool_post(self.cfg, "J", self.sender, "  \n ", None)
+        spool.spool_post(self.cfg, "J", self.sender, "fine", None)
         with self.board() as b:
             self.assertEqual(spool.flush_spool(b, self.cfg), 1)
             self.assertEqual([m.message for m in b.recent_messages(10, "J")], ["fine"])
@@ -545,7 +551,7 @@ class SpoolTests(Env):
         self.assertEqual(list(self.spool_dir.glob("*.json")), [])
 
     def test_failed_delivery_is_put_back(self):
-        spool.spool_post(self.cfg, "J", "Someone", "later", None)
+        spool.spool_post(self.cfg, "J", self.sender, "later", None)
 
         class Failing:
             def post(self, *a, **k):

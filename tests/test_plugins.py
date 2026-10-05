@@ -6,6 +6,7 @@ import os
 import textwrap
 from unittest import mock
 
+from support import posix_only
 from test_hooks_cli import Env  # noqa: E402  (sets sys.path)
 
 GOOD = '''
@@ -139,6 +140,64 @@ class PluginTests(PluginEnv):
             rc, out, _ = self.cli("plugins")
         self.assertIn("shadowed", out)
         self.assertEqual(out.count("loaded"), 1)
+
+    @posix_only("POSIX file ownership and permissions; Windows uses ACLs")
+    def test_writable_plugin_files_are_refused_without_execution(self):
+        for mode in (0o620, 0o602):
+            with self.subTest(mode=mode):
+                self.plugin("unsafe", "raise RuntimeError('executed unsafe code')")
+                (self.pdir / "unsafe.py").chmod(mode)
+                rc, out, _ = self.cli("plugins")
+                self.assertEqual(rc, 0)
+                self.assertIn("refused: group/world-writable", out)
+                self.assertNotIn("executed unsafe code", out)
+
+    @posix_only("POSIX ownership checks; Windows uses ACLs")
+    def test_plugin_owned_by_another_user_is_refused(self):
+        self.plugin("unsafe", "raise RuntimeError('executed unsafe code')")
+        with mock.patch("swarm.plugins.os.getuid", return_value=os.getuid() + 1):
+            rc, out, _ = self.cli("plugins")
+        self.assertEqual(rc, 0)
+        self.assertIn("refused: owned by another user", out)
+        self.assertNotIn("executed unsafe code", out)
+
+    @posix_only("POSIX symlinks; Windows skips file trust checks")
+    def test_symlink_plugin_is_refused(self):
+        target = self.tmp / "target.py"
+        target.write_text("raise RuntimeError('executed unsafe code')")
+        (self.pdir / "unsafe.py").symlink_to(target)
+        rc, out, _ = self.cli("plugins")
+        self.assertEqual(rc, 0)
+        self.assertIn("refused: symlink", out)
+        self.assertNotIn("executed unsafe code", out)
+
+    @posix_only("POSIX symlinks; Windows skips file trust checks")
+    def test_broken_plugin_symlink_is_reported_as_refused(self):
+        (self.pdir / "unsafe.py").symlink_to(self.tmp / "missing.py")
+        rc, out, _ = self.cli("plugins")
+        self.assertEqual(rc, 0)
+        self.assertIn("unsafe\tERROR", out)
+        self.assertIn("refused: symlink", out)
+
+    @posix_only("POSIX symlinks; Windows skips file trust checks")
+    def test_symlink_package_directory_is_refused(self):
+        target = self.tmp / "package"
+        target.mkdir()
+        (target / "__init__.py").write_text("raise RuntimeError('executed unsafe code')")
+        (self.pdir / "unsafe").symlink_to(target, target_is_directory=True)
+        rc, out, _ = self.cli("plugins")
+        self.assertEqual(rc, 0)
+        self.assertIn("refused: symlink", out)
+        self.assertNotIn("executed unsafe code", out)
+
+    def test_discovery_failure_is_reported_and_core_still_runs(self):
+        with mock.patch("swarm.plugins.Registry._discover", side_effect=RuntimeError("discovery boom")):
+            rc, out, _ = self.cli("plugins")
+            self.assertEqual(rc, 0)
+            self.assertIn("discovery failed: RuntimeError: discovery boom", out)
+            self.assertNotIn("no plugins found", out)
+            self.assertEqual(self.cli("activate", "--job", "J")[0], 0)
+        self.assertNotIn("discovery failed", self.cli("plugins")[1])
 
     def test_a_broken_config_still_runs_core(self):
         self.plugin("good", GOOD)

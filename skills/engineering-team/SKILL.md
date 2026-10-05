@@ -21,7 +21,7 @@ Read [host procedures](references/hosts.md) before activating a job or spawning 
 
 ## Rules of the road
 
-- Address by role: `swarm post --to @EL|@PM|@QA|@judge|@build_engineer`, never by display name; an unknown role or one with no holder is rejected. Send trivial messages straight to the peer, not through EL.
+- Address by role: `swarm post --to @EL|@PM|@product|@QA|@judge|@build_engineer`, `@PM` means the invoking project manager and `@product` the optional product manager; never by display name; an unknown role or one with no holder is rejected. Send trivial messages straight to the peer, not through EL.
 - Long text goes in a file; the post is a one-line pointer (posts are 200 characters).
 - When the team is only waiting on CI, reviews, or a user, run `swarm wait --job J --on "<what>" --for <duration>` (or `--until <time>`) so the job reads as waiting, not orphaned; the end time is what protects it, so renew it before it passes and `swarm resume --job J` when work resumes.
 - Verdicts are bound to a head sha and posted on the change record, not only the board; merge on the current head's verdict, green CI, and no later changes-required ([gates](references/gates.md)).

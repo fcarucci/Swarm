@@ -2662,6 +2662,7 @@ def _parser() -> argparse.ArgumentParser:
     return p
 
 
+PLUGIN_DISCOVERY_ERROR = None
 PLUGINS = None   # the plugins.Registry of this run (set by _main; None: no plugins, e.g. in a hook)
 
 
@@ -2669,9 +2670,10 @@ def _load_plugins(argv, parser: argparse.ArgumentParser):
     """Find the CLI plugins (swarm.plugins) and add their commands and arguments to `parser`.
     Nothing here may fail a core command: not for the hooks (they load none), not for a broken
     config (then no plugin is disabled), not for a plugin."""
-    global PLUGINS
+    global PLUGINS, PLUGIN_DISCOVERY_ERROR
     from swarm import plugins
     PLUGINS = None
+    PLUGIN_DISCOVERY_ERROR = None
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     try:
@@ -2688,12 +2690,16 @@ def _load_plugins(argv, parser: argparse.ArgumentParser):
         PLUGINS = reg
     except Exception as exc:   # discovery itself broke: run without plugins
         PLUGINS = None
+        PLUGIN_DISCOVERY_ERROR = f"discovery failed: {type(exc).__name__}: {exc}"[:300]
         from swarm import transcripts as _t
         _t.log(f"plugins: discovery failed: {type(exc).__name__}")
     return PLUGINS
 
 
 def cmd_plugins(cfg: dict, args) -> int:
+    if PLUGIN_DISCOVERY_ERROR:
+        print(term_safe(f"plugins: {PLUGIN_DISCOVERY_ERROR}"))
+        return 0
     from swarm import plugins
     reg = PLUGINS or plugins.Registry(cfg)
     for line in reg.report():
@@ -3768,7 +3774,8 @@ def _run_command(cfg: dict, args) -> int:
             if not args.name:
                 print("swarm post: give --as NAME (the board can't be reached to look the key up)", file=sys.stderr)
                 return 2
-            spool_post(cfg, args.job, args.name, " ".join(args.message), args.to)
+            spool_post(cfg, args.job, args.name, " ".join(args.message), args.to,
+                       agent_key=getattr(args, "key", None))
             print(f"queued (board not reachable from here: {_error_name(exc)}); it is delivered "
                   f"automatically within seconds by the swarm hooks. This is normal inside a sandbox.")
             return 0

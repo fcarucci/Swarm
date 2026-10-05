@@ -60,7 +60,7 @@ Claude initially uses `${CLAUDE_PLUGIN_ROOT}/bin/swarm`; Codex uses
 swarm activate --job J --description "Bounded engineering delivery" --task "Brief: docs/team/request.md" --goal "Meet the recorded requirements with independent review and product, EL, and QA acceptance"
 # Set once for this job and root host session; record the exact key in the PM run record.
 PM_KEY="pm:<job>:<root-host>:<root-session-id>"
-swarm join --job J --key "$PM_KEY"
+swarm join --job J --key "$PM_KEY" --role project_manager
 swarm read --job J --key "$PM_KEY"
 ```
 
@@ -143,7 +143,7 @@ Own only the files named in that brief. Finish the bounded task, post a handoff,
 and return action, task_id, artifact_path, blocker, and result to PM.
 ```
 
-Change the role tag per seat: `engineering_lead`, `product_manager`, `build_engineer`, `qa`, `engineer`, `reviewer`, `verifier`, `judge`. `swarm post --to @EL` and the other role addresses resolve to the agents holding that tag now, so the tag must be exact; an orchestrating agent that should receive `@PM` when there is no product manager joins with `[swarm role: project_manager]`. The tag determines
+Change the role tag per seat: `engineering_lead`, `product_manager`, `build_engineer`, `qa`, `engineer`, `reviewer`, `verifier`, `judge`. `swarm post --to @EL` and the other role addresses resolve to the agents holding that tag now, so the tag must be exact; the invoking PM joins with `swarm join --job J --key "$PM_KEY" --role project_manager` so `@PM` reaches it; address the optional product manager with `@product`. The tag determines
 the Swarm role; the host's agent type does not substitute for it. A member's exceptional
 synchronous helper also needs `[swarm spawn: <why strictly needed>]` and the job tag;
 meet configured `min_justification_chars` and all child caps.

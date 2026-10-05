@@ -107,7 +107,7 @@ class WaitUntilTests(RoutingEnv):
         rc, out, _ = self.cli("status", "--job", "J", "--no-color")
         self.assertRegex(out, r"waiting    on the build slot, since \d+s ago, until \d{4}-\d\d-\d\d \d\d:\d\d \(protected from auto-close\)")
         rc, out, _ = self.cli("status", "--no-color")
-        self.assertRegex(next(l for l in out.splitlines() if l.startswith("J ")), r"the build slot · \d+s · until \d\d:\d\d")
+        self.assertRegex(next(l for l in out.splitlines() if l.startswith("J ")), r"the build slot · \d+[smh] · until \d\d:\d\d")
 
     def test_wait_rejects_for_with_until_and_a_past_time(self):
         self.activate("J")

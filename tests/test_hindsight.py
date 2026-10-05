@@ -208,9 +208,10 @@ class MemoryTests(HindsightEnv):
         rc, out, _ = self.cli("remember", "--job", "J", "--as", me, "kept for later")
         self.assertEqual(rc, 0)
         self.assertTrue(out.startswith("queued (memory not reachable from here"))
-        spool.spool_post(self.cfg, "J", "Someone", "a post", None)
+        sender = self.peer()
+        spool.spool_post(self.cfg, "J", sender, "a post", None)
         ctx = self.turn()
-        self.assertIn("Someone: a post", ctx)
+        self.assertIn(f"{sender}: a post", ctx)
         self.assertEqual(len(list(self.spool_dir.glob("*.mem"))), 1)  # still waiting
         self.enable(retry_after_seconds=0)  # Hindsight is back
         self.hook("start", agent_id="courier")  # memories go out from the agent hooks only

@@ -134,9 +134,13 @@ class SpoolPermissionTests(Env):
 
 
 class SpoolFlushBoundsTests(Env):
+    def setUp(self):
+        super().setUp()
+        self.sender = self.peer()
+
     def test_item_limit(self):
         for i in range(30):
-            spool.spool_post(self.cfg, "J", "A", f"m{i}", None)
+            spool.spool_post(self.cfg, "J", self.sender, f"m{i}", None)
         with self.board() as b:
             self.assertEqual(spool.flush_spool(b, self.cfg, max_items=20), 20)
             self.assertEqual(len(list(self.spool_dir.glob("*.json"))), 10)
@@ -144,14 +148,14 @@ class SpoolFlushBoundsTests(Env):
 
     def test_deadline(self):
         for i in range(3):
-            spool.spool_post(self.cfg, "J", "A", f"m{i}", None)
+            spool.spool_post(self.cfg, "J", self.sender, f"m{i}", None)
         with self.board() as b:
             self.assertEqual(spool.flush_spool(b, self.cfg, deadline=time.monotonic() - 1), 0)
             self.assertEqual(len(list(self.spool_dir.glob("*.json"))), 3)
 
     def test_deadline_stops_a_slow_flush(self):
         for i in range(5):
-            spool.spool_post(self.cfg, "J", "A", f"m{i}", None)
+            spool.spool_post(self.cfg, "J", self.sender, f"m{i}", None)
         with self.board() as b:
             real = b.post
 
@@ -168,7 +172,7 @@ class SpoolFlushBoundsTests(Env):
         self.cli("activate", "--job", "J", "--session", "sess-1")
         self.hook("start")
         for i in range(25):
-            spool.spool_post(self.cfg, "J", "A", f"m{i}", None)
+            spool.spool_post(self.cfg, "J", self.sender, f"m{i}", None)
         items, seconds, each = swarm_hooks.HOOK_FLUSH_TOOL
         self.assertLessEqual((items, seconds, each), (2, 1.0, 1.0))
         self.hook("turn", tool_name="Bash")
@@ -182,10 +186,16 @@ class SpoolFlushBoundsTests(Env):
         return list(self.spool_dir.glob("*.json"))
 
     def test_a_blocking_delivery_is_cut_to_the_budget(self):
-        spool.spool_post(self.cfg, "J", "A", "stuck", None)
+        spool.spool_post(self.cfg, "J", self.sender, "stuck", None)
+
+        sender = self.sender
 
         class Blocking:
             limit = None
+
+            def agents(self, job):
+                from types import SimpleNamespace
+                return [SimpleNamespace(name=sender)]
 
             @contextlib.contextmanager
             def op_timeout(self, seconds):
@@ -250,7 +260,7 @@ class SpoolFlushBoundsTests(Env):
         self.cli("activate", "--job", "J", "--session", "sess-1")
         self.hook("start")
         spool.spool_memory(self.cfg, "J", "A", "a fact", "proj")
-        spool.spool_post(self.cfg, "J", "A", "a post", None)
+        spool.spool_post(self.cfg, "J", self.sender, "a post", None)
         from swarm import hindsight
         boom = mock.Mock(side_effect=AssertionError("Hindsight called from a per-tool hook"))
         with mock.patch.object(hindsight, "remember", boom), \

@@ -35,6 +35,7 @@ import dataclasses
 import importlib
 import importlib.util
 import os
+import stat
 import sys
 from pathlib import Path
 from typing import Callable
@@ -44,6 +45,19 @@ from . import paths
 API_VERSION = 1
 ENTRY_POINT_GROUP = "swarm.plugins"
 SHIPPED_FILE = "swarm_plugin.py"
+
+
+def _check_file_trust(path: Path) -> None:
+    """Cheap POSIX checks, not a sandbox: same-user writers remain trusted (docs/PLUGINS.md)."""
+    if os.name == "nt":
+        return
+    st = path.lstat()
+    if stat.S_ISLNK(st.st_mode):
+        raise ValueError("refused: symlink")
+    if st.st_uid != os.getuid():
+        raise ValueError("refused: owned by another user")
+    if st.st_mode & 0o022:
+        raise ValueError("refused: group/world-writable")
 
 
 @dataclasses.dataclass
@@ -190,7 +204,7 @@ class Registry:
             except OSError:
                 continue
             for p in entries:
-                if p.suffix == ".py" and p.is_file() and not p.name.startswith("_"):
+                if p.suffix == ".py" and (p.is_file() or p.is_symlink()) and not p.name.startswith("_"):
                     yield p.stem, str(p), self._file_loader(p, p.stem)
                 elif p.is_dir() and (p / "__init__.py").is_file() and not p.name.startswith(("_", ".")):
                     yield p.name, str(p), self._file_loader(p / "__init__.py", p.name)
@@ -215,6 +229,9 @@ class Registry:
     @staticmethod
     def _file_loader(path: Path, name: str) -> Callable:
         def load():
+            if path.name == "__init__.py":
+                _check_file_trust(path.parent)
+            _check_file_trust(path)
             mod_name = f"swarm_plugin_{name.replace('-', '_')}"
             spec = importlib.util.spec_from_file_location(
                 mod_name, path, submodule_search_locations=[str(path.parent)] if path.name == "__init__.py" else None)
