@@ -17,6 +17,7 @@ import json
 import os
 import random
 import socket
+import sys
 import threading
 import time
 from pathlib import Path
@@ -678,6 +679,34 @@ def _install_schema(conn: psycopg.Connection, b: dict) -> None:
                                     tool_timeout=int(b["tool_timeout_minutes"])))
 
 
+SETUP_ATTEMPTS = 5
+SETUP_LOCK_TIMEOUT_MS = 5000
+
+
+def _install_schema_retrying(conn: psycopg.Connection, b: dict, attempts: int = SETUP_ATTEMPTS) -> None:
+    """_install_schema against a live board: its ALTER/CREATE take locks that running hooks'
+    statements can deadlock with (psycopg DeadlockDetected). The schema is idempotent, so a
+    short lock_timeout keeps a blocked step from waiting long, and a deadlock or lock timeout
+    is retried with a growing, jittered pause (each retry is noted on stderr), `attempts` times."""
+    conn.execute(f"SET lock_timeout = {int(SETUP_LOCK_TIMEOUT_MS)}")
+    try:
+        for attempt in range(1, attempts + 1):
+            try:
+                return _install_schema(conn, b)
+            except (psycopg.errors.DeadlockDetected, psycopg.errors.LockNotAvailable) as exc:
+                if attempt == attempts:
+                    raise
+                pause = min(5.0, 0.25 * 2 ** (attempt - 1)) * (0.5 + random.random())
+                print(f"swarm: board schema setup hit {type(exc).__name__} (attempt {attempt}/{attempts}); "
+                      f"retrying in {pause:.1f}s", file=sys.stderr)
+                time.sleep(pause)
+    finally:
+        try:
+            conn.execute("RESET lock_timeout")
+        except psycopg.Error:
+            pass
+
+
 def _add_names(conn: psycopg.Connection, source: str, names: Sequence[str]) -> int:
     """Add a source's names to the pool (existing ones are skipped); returns its new size."""
     with conn.cursor() as cur:
@@ -729,7 +758,7 @@ class PostgresBoard(Board):
         names = valid_pool(names)   # a name that could forge context is never handed out
         notes = _ensure_database(cfg)
         with _connect_new(cfg) if notes else _connect(cfg) as conn:
-            _install_schema(conn, cfg["board"])
+            _install_schema_retrying(conn, cfg["board"])
             pool = {source: _add_names(conn, source, source_names) for source, source_names in names.items()}
             # last, so a setup that failed half-way is retried; never lowered
             conn.execute("INSERT INTO board_meta (key, value) VALUES ('schema_version', %s) "

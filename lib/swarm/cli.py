@@ -2313,7 +2313,7 @@ def _watch_loop_threaded(board, out, fd, interval: float, view: dict, draw, refr
 
     sel = selectors.DefaultSelector()
     sel.register(rd_sock, selectors.EVENT_READ, on_event)
-    if fd is not None:
+    if fd is not None and not compat.IS_WINDOWS:   # Windows cannot select() on stdin (cmd_watch passes fd=None there)
         sel.register(fd, selectors.EVENT_READ, on_keys)
     winch_set, old_winch = False, None
     if hasattr(signal, "SIGWINCH") and threading.current_thread() is threading.main_thread():

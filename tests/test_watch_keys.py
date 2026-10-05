@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import io
 import os
+import sys
 import threading
 import time
 import unittest
@@ -21,6 +22,10 @@ JOB = "ABCDEFGH-" + "x" * 80
 SESSION = "11111111-aaaa-bbbb-cccc-000000000001"
 
 
+WIN = "Windows has no pty (os.openpty) and cannot select() on a pipe or stdin; cmd_watch is not interactive there (fd None) and uses the plain redraw loop"
+
+
+@unittest.skipIf(sys.platform == "win32", WIN)
 class PtyWatch(unittest.TestCase):
     """cmd_watch --compact --session on a pty; recent_messages blocks on `gate` once it is cleared."""
 
@@ -131,6 +136,7 @@ class KeymapTests(unittest.TestCase):
         self.assertFalse(swarm._apply_keys("q", view))
 
 
+@unittest.skipIf(sys.platform == "win32", WIN)
 class LoopTests(unittest.TestCase):
     """_watch_loop_threaded with a stub board and refresh."""
 
