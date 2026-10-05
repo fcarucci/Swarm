@@ -479,6 +479,49 @@ class ExpiryContract:
         self.b.close_job("j", "completed", None)
         self.assertIsNone(self.status().waiting_until)
 
+    def test_a_bounded_wait_shields_a_goal_job_from_its_stall_limit_then_grants_a_grace(self):
+        self.job("g", age=99 * HOUR, agents={"a": 0}, goal="g")
+        self.b.set_job_max_hours("g", 1)
+        self.b.set_waiting("g", "CI", self.b.now() + base._dt.timedelta(minutes=45))
+        self.assertEqual(self.sweep(), [])
+        self.assertEqual(self.status("g").status, "active")
+        self.h.backdate_job("g", waiting_until=10 * MIN)   # ran out 10 minutes ago: not stalled yet
+        self.assertEqual(self.sweep(), [])
+        self.assertIsNone(self.status("g").waiting_on)
+        self.h.backdate_job("g", waiting_until=90 * MIN)   # ran out long ago, no progress since
+        self.b.set_waiting("g", "CI", self.b.now() - base._dt.timedelta(minutes=90))
+        self.assertEqual([c.job for c in self.sweep()], ["g"])
+
+    def test_an_unbounded_wait_does_not_shield_a_stalled_job(self):
+        self.job("g", age=99 * HOUR, agents={"a": 0}, goal="g")
+        self.b.set_job_max_hours("g", 1)
+        self.b.set_waiting("g", "the user")
+        self.assertEqual([c.job for c in self.sweep()], ["g"])
+
+    # ---- per-job plugin data
+    def test_job_data_is_kept_per_job_and_survives_reactivation(self):
+        self.job("a")
+        self.job("b")
+        self.assertEqual(self.b.job_data("a"), {})
+        self.assertTrue(self.b.set_job_data("a", "team.optional_roles", "qa,x"))
+        self.assertTrue(self.b.set_job_data("a", "other", "1"))
+        self.assertEqual(self.b.job_data("a"), {"team.optional_roles": "qa,x", "other": "1"})
+        self.assertEqual(self.b.job_data("b"), {})
+        self.assertTrue(self.b.set_job_data("a", "other", None))
+        self.assertEqual(self.b.job_data("a"), {"team.optional_roles": "qa,x"})
+        self.b.close_job("a", "completed", "done")
+        self.b.open_job("a", "d", None, None, "me")
+        self.assertEqual(self.b.job_data("a"), {"team.optional_roles": "qa,x"})
+
+    def test_job_data_of_a_missing_job_and_bad_input(self):
+        self.assertEqual(self.b.job_data("nope"), {})
+        self.assertFalse(self.b.set_job_data("nope", "k", "v"))
+        self.job("a")
+        for key, value in (("", "v"), ("Bad Key", "v"), ("k", "x" * 2001), ("k", 5)):
+            with self.subTest(key=key):
+                with self.assertRaises(ValueError):
+                    self.b.set_job_data("a", key, value)
+
 
 class MemoryExpiry(ExpiryContract, unittest.TestCase):
     harness_factory = MemoryHarness
