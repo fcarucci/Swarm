@@ -42,6 +42,7 @@ def suite_child(failure_file, backend, run):
             if err is not None:
                 self.record(subtest, err)
     suite = unittest.defaultTestLoader.discover(str(ROOT / 'tests'))
+    print(f'Discovered {suite.countTestCases()} tests for {backend} run {run}', flush=True)
     result = unittest.TextTestRunner(verbosity=2, resultclass=RecordedResult).run(suite)
     summary = dict(tests_run=result.testsRun, failures=len(result.failures),
                    errors=len(result.errors), skipped=len(result.skipped))
