@@ -81,12 +81,16 @@ auto_close_minutes = 30
 #   not. Progress: an agent posted on the board, recorded a verdict or joined; tool calls and
 #   heartbeats don't count. A job that keeps progressing runs as long as it likes.
 #   `swarm activate --stall-hours N` sets one job's own limit (0 = never).
-#   A job with a goal and no `met` verdict is never closed by the orphan rule, nor by the
-#   stall limit unless it has its own `--stall-hours`.
 # orphan_minutes: a job with no live agent (all completed, left or dead, or none; waiting jobs
 #   included) and no board activity for this long is closed as cancelled.
 stall_hours = 4
 orphan_minutes = 30
+# A job with a goal and no `met` verdict is never closed by either rule: only the judge's `met`
+# or `swarm deactivate` ends it, and status shows it as "waiting (goal not met)".
+# goal_stall_hours: the one backstop for such a job: no progress for this long closes it as
+#   failed ("goal not met"). 0 = never (default). A job's own `swarm activate --stall-hours N`
+#   takes precedence (0 = never).
+goal_stall_hours = 0
 
 [codex]
 # Codex fires SubagentStop after every turn of a child (it can be sent more work). The swarm

@@ -65,13 +65,25 @@ class ExpiryContract:
         self.assertEqual(self.sweep(), [])   # closed once
 
     def test_outcome_carries_the_last_verdict(self):
-        # (a met verdict: a job whose goal is not met is never closed by the sweep, see below)
+        # a met goal: the default limit applies
         self.job(age=5 * HOUR, agents={"j1": 0}, goal="ship it")
         self.assertTrue(self.b.claim_judge("j1", "j"))
         self.assertTrue(self.b.record_verdict("j", self.b.active_agent_name("j1"), "met", "tests pass", None))
         self.h.backdate_job("j", verdict_at=4 * HOUR + MIN)
         self.sweep()
         self.assertEqual(self.status().outcome, "auto-closed: no progress for 4 h; last verdict met: tests pass")
+
+    def test_outcome_of_an_unmet_goal_carries_goal_not_met_and_the_last_verdict(self):
+        # an unmet goal is only ever stalled by its own limit (here the job's own 4 h)
+        self.job(age=5 * HOUR, agents={"j1": 0}, goal="ship it")
+        self.b.set_job_max_hours("j", 4)
+        self.assertTrue(self.b.claim_judge("j1", "j"))
+        self.assertTrue(self.b.record_verdict("j", self.b.active_agent_name("j1"), "not_met",
+                                              "tests fail", "fix them"))
+        self.h.backdate_job("j", verdict_at=4 * HOUR + MIN)
+        self.sweep()
+        self.assertEqual((self.status().status, self.status().outcome),
+                         ("failed", "auto-closed: no progress for 4 h; goal not met; last verdict not_met: tests fail"))
 
     def test_a_job_within_its_limit_stays_open(self):
         self.job(age=3 * HOUR, agents={"a": 0})
@@ -83,6 +95,7 @@ class ExpiryContract:
         self.job("posted", age=9 * HOUR, agents={"a": 0})
         self.h.backdate_message(self.b.post("posted", self.b.active_agent_name("a"), "found it").id, 2 * HOUR)
         self.job("judged", age=9 * HOUR, agents={"j1": 0}, goal="g")
+        self.b.set_job_max_hours("judged", 4)   # an unmet goal is stalled by its own limit only
         self.b.claim_judge("j1", "judged")
         self.b.record_verdict("judged", self.b.active_agent_name("j1"), "not_met", "no", "fix")
         self.h.backdate_job("judged", verdict_at=3 * HOUR)
@@ -94,8 +107,7 @@ class ExpiryContract:
         # ...for the limit: 4 h after the progress it is stalled again
         self.h.backdate_job("judged", verdict_at=4 * HOUR + MIN)
         self.h.backdate_agent("b", joined_at=5 * HOUR)
-        self.assertEqual(sorted(c.job for c in self.sweep()), ["joined"])   # "judged" has a goal: never
-        self.assertEqual(self.status("judged").status, "active")
+        self.assertEqual(sorted(c.job for c in self.sweep()), ["joined", "judged"])
 
     def test_heartbeats_tool_calls_and_system_posts_are_not_progress(self):
         self.job(age=9 * HOUR, agents={"a": 0})
@@ -205,20 +217,17 @@ class ExpiryContract:
         self.assertEqual(self.b.sweep_auto_close(30), [])
         self.assertEqual(self.status().status, "active")
 
-    def test_goal_job_stays_open_when_the_sweep_cannot_see_or_the_orchestrator_is_gone(self):
-        class Blind:
+    def test_goal_job_stays_open_whatever_the_orchestrator_watch_says(self):
+        class Gone:
             def __init__(self, job):
                 pass
-
-            def can_tell(self):
-                return False
 
             def active(self):
                 return False
 
         self.job(age=3 * HOUR, goal="ship it")
-        self.assertEqual(self.sweep(watch=Blind), [])
-        self.assertEqual(self.b.sweep_auto_close(30, Blind), [])
+        self.assertEqual(self.sweep(watch=Gone), [])
+        self.assertEqual(self.b.sweep_auto_close(30, Gone), [])
         self.assertEqual(self.status().status, "active")
 
     def test_goal_job_empty_for_hours_stays_open_and_anyone_can_resume_it(self):
@@ -245,20 +254,155 @@ class ExpiryContract:
         self.b.set_job_goal("m", "now with a goal")
         self.assertEqual(self.sweep(), [])
 
-    def test_a_watch_that_cannot_tell_never_closes(self):
-        class Blind:
-            def __init__(self, job):
-                pass
+    # ---- a goal set, or a verdict changed, between the read and the close is checked at the close
+    def racing(self, change, when="after"):
+        """self.b.job_status (the sweep's second read, right before the close) runs `change()`
+        after it returned its row (when="after": the close then has stale data) or before it."""
+        real = self.b.job_status
 
-            def can_tell(self):
-                return False
+        def job_status(name):
+            if when == "before":
+                change()
+            row = real(name)
+            if when == "after":
+                change()
+            return row
+        self.b.job_status = job_status
+        self.addCleanup(delattr, self.b, "job_status")
 
-            def active(self):
-                return False
-
+    def test_a_goal_set_between_the_read_and_an_orphan_close_keeps_the_job_open(self):
         self.job(age=2 * HOUR)
-        self.assertEqual(self.sweep(watch=Blind), [])
+        self.racing(lambda: self.b.set_job_goal("j", "now with a goal"))
+        self.assertEqual(self.sweep(), [])
         self.assertEqual(self.status().status, "active")
+
+    def test_a_goal_set_between_the_read_and_a_stall_close_keeps_the_job_open(self):
+        self.job(age=9 * HOUR, agents={"a": 0})
+        self.racing(lambda: self.b.set_job_goal("j", "now with a goal"))
+        self.assertEqual(self.sweep(), [])
+        self.assertEqual(self.status().status, "active")
+        self.assertEqual([a.status for a in self.b.agents("j")], ["started"])   # nobody was made to leave
+
+    def test_a_goal_set_before_the_second_read_keeps_the_job_open_too(self):
+        self.job(age=2 * HOUR)
+        self.racing(lambda: self.b.set_job_goal("j", "now with a goal"), when="before")
+        self.assertEqual(self.sweep(), [])
+        self.assertEqual(self.status().status, "active")
+
+    def test_a_met_verdict_replaced_by_not_met_between_the_read_and_the_close_keeps_the_job_open(self):
+        self.job(age=2 * HOUR, agents={"jj": 0}, goal="ship it")
+        self.assertTrue(self.b.claim_judge("jj", "j"))
+        judge = self.b.active_agent_name("jj")
+        self.assertTrue(self.b.record_verdict("j", judge, "met", "ok", None))
+        self.h.backdate_agent("jj", last_seen=2 * HOUR)
+        self.racing(lambda: self.b.record_verdict("j", judge, "not_met", "regressed", "fix it"))
+        self.assertEqual(self.sweep(), [])
+        self.assertEqual((self.status().status, self.status().verdict), ("active", "not_met"))
+
+    def test_progress_between_the_read_and_the_stall_close_of_a_goal_job_keeps_it_open(self):
+        self.job(age=9 * HOUR, agents={"a": 0}, goal="ship it")
+        self.b.set_job_max_hours("j", 4)
+        name = self.b.active_agent_name("a")
+        self.racing(lambda: self.b.post("j", name, "found it"))
+        self.assertEqual(self.sweep(), [])
+        self.assertEqual(self.status().status, "active")
+
+    def test_the_own_limit_removed_between_the_read_and_a_goal_job_stall_close_keeps_it_open(self):
+        self.job(age=9 * HOUR, agents={"a": 0}, goal="ship it")
+        self.b.set_job_max_hours("j", 4)
+        self.racing(lambda: self.b.set_job_max_hours("j", 0))     # `activate --stall-hours 0`
+        self.assertEqual(self.sweep(), [])
+        self.assertEqual(self.status().status, "active")
+
+    def test_close_job_guard_is_atomic_with_the_close(self):
+        CloseGuard = base.CloseGuard
+        self.job("goalless")
+        self.job("unmet", agents={"a": 0}, goal="g")
+        self.job("own", goal="g")
+        self.b.set_job_max_hours("own", 1)
+        for guard in (CloseGuard(), CloseGuard(False, "other goal", None), CloseGuard(False, "g", 3)):
+            self.assertFalse(self.b.close_job("unmet", "cancelled", "x", guard=guard))
+        self.assertEqual((self.status("unmet").status, [a.status for a in self.b.agents("unmet")]),
+                         ("active", ["started"]))   # nothing changed, nobody left
+        self.assertFalse(self.b.close_job("own", "cancelled", "x", guard=CloseGuard()))
+        self.assertFalse(self.b.close_job("nope", "cancelled", "x", guard=CloseGuard()))
+        self.assertTrue(self.b.close_job("own", "failed", "x", guard=CloseGuard(False, "g", 1)))
+        self.assertTrue(self.b.close_job("goalless", "cancelled", "x", guard=CloseGuard()))
+        self.assertEqual(self.status("goalless").status, "cancelled")
+
+    # ---- [job] goal_stall_hours: the opt-in backstop for a goal job
+    def test_goal_stall_hours_closes_an_unmet_goal_job_as_failed(self):
+        self.job("g", age=6 * HOUR, agents={"a": 0}, goal="ship it")
+        self.assertEqual(self.sweep(), [])                       # off by default
+        self.assertEqual(self.b.sweep_expiry(CAP, ORPHAN, None, goal_stall_hours=0), [])
+        self.assertEqual(self.b.sweep_expiry(CAP, ORPHAN, None, goal_stall_hours=7), [])   # not long enough
+        self.assertEqual([c.job for c in self.b.sweep_expiry(CAP, ORPHAN, None, goal_stall_hours=5)], ["g"])
+        s = self.status("g")
+        self.assertEqual((s.status, s.closed_by, s.outcome),
+                         ("failed", base.AUTO_CLOSED_BY, "auto-closed: no progress for 5 h; goal not met"))
+
+    def test_a_jobs_own_stall_hours_beat_goal_stall_hours(self):
+        self.job("never", age=99 * HOUR, goal="g")
+        self.b.set_job_max_hours("never", 0)     # its own: never
+        self.job("own", age=3 * HOUR, goal="g")
+        self.b.set_job_max_hours("own", 2)
+        self.job("plain", age=3 * HOUR, goal="g")
+        self.assertEqual(sorted(c.job for c in self.b.sweep_expiry(CAP, ORPHAN, None, goal_stall_hours=1)),
+                         ["own", "plain"])
+        self.assertEqual(self.status("never").status, "active")
+        self.assertEqual(self.status("own").outcome, "auto-closed: no progress for 2 h; goal not met")
+
+    def test_goal_stall_hours_spares_a_met_goal_and_progress(self):
+        self.job("met", age=9 * HOUR, agents={"jj": 0}, goal="g")
+        self.assertTrue(self.b.claim_judge("jj", "met"))
+        self.assertTrue(self.b.record_verdict("met", self.b.active_agent_name("jj"), "met", "ok", None))
+        self.h.backdate_job("met", verdict_at=9 * HOUR)
+        self.job("busy", age=9 * HOUR, agents={"a": 0}, goal="g")
+        self.h.backdate_message(self.b.post("busy", self.b.active_agent_name("a"), "working").id, MIN)
+        # the met job falls under the ordinary limit (4 h), the busy goal job under neither
+        self.assertEqual([c.job for c in self.b.sweep_expiry(CAP, ORPHAN, None, goal_stall_hours=1)], ["met"])
+        self.assertEqual(self.status("busy").status, "active")
+
+    # ---- a goal job nobody works on shows as waiting (goal not met), on every backend
+    def shown(self, name="j", idle_minutes=5):
+        js = self.b.job_status(name)
+        word = base.derive_job_status(js, idle_minutes, self.b.now())
+        view = self.h.shown_status(name) if hasattr(self.h, "shown_status") else word
+        self.assertEqual(view, word, "the job_status view and derive_job_status disagree")
+        return word
+
+    def test_a_goal_job_with_no_live_agent_shows_waiting_goal_not_met(self):
+        self.job("none", age=2 * HOUR, goal="g")                     # no agent at all
+        self.job("done", age=2 * HOUR, agents={"w": 0}, goal="g")
+        self.b.agent_stopped("w")                                    # all workers completed, no judge
+        self.job("dead", age=2 * HOUR, agents={"d": 3 * HOUR}, goal="g")
+        for j in ("none", "done", "dead"):
+            self.assertEqual(self.shown(j), base.WAITING_GOAL, j)
+            self.assertEqual(self.shown(j, idle_minutes=10000), base.WAITING_GOAL, j)   # not "idle"
+
+    def test_the_shown_status_of_other_jobs_is_unchanged(self):
+        self.job("goalless", age=2 * HOUR)
+        self.assertEqual(self.shown("goalless"), "idle")
+        self.job("live", age=2 * HOUR, agents={"a": 0}, goal="g")    # a started agent
+        self.assertEqual(self.shown("live"), "active")
+        self.job("quiet", age=2 * HOUR, agents={"i": 6 * MIN}, goal="g")   # an idle agent: nobody is gone yet
+        self.assertEqual(self.shown("quiet"), "idle")
+        self.job("waits", age=2 * HOUR, goal="g")
+        self.b.set_waiting("waits", "the user")
+        self.assertEqual(self.shown("waits"), "waiting")
+        self.job("met", age=2 * HOUR, agents={"jj": 0}, goal="g")
+        self.assertTrue(self.b.claim_judge("jj", "met"))
+        self.assertTrue(self.b.record_verdict("met", self.b.active_agent_name("jj"), "met", "ok", None))
+        self.b.agent_stopped("jj")
+        self.assertEqual(self.shown("met"), "active")                # a met goal is not waiting (just active)
+        self.b.close_job("met", "completed", "done")
+        self.assertEqual(self.shown("met"), "completed")
+
+    def test_a_joining_agent_takes_a_goal_job_out_of_waiting(self):
+        self.job("j", age=2 * HOUR, goal="g")
+        self.assertEqual(self.shown(), base.WAITING_GOAL)
+        self.b.allocate_name("late", "j")
+        self.assertEqual(self.shown(), "active")
 
     def test_orphan_rule_off_at_zero(self):
         self.job(age=2 * HOUR)
@@ -353,6 +497,18 @@ class FileExpiry(ExpiryContract, unittest.TestCase):
 class PostgresExpiry(ExpiryContract, unittest.TestCase):
     harness_factory = staticmethod(lambda: PostgresHarness(os.environ["SWARM_TEST_CONFIG"]))
 
+    def test_a_schema_12_board_gets_the_shown_status_column_on_upgrade(self):
+        from support import SMALL_POOL, setup_board
+        conn = self.h.conn
+        conn.execute("DROP VIEW job_status")           # the schema-12 view: no shown_status
+        conn.execute("CREATE VIEW job_status AS SELECT j.job, j.status FROM jobs j")
+        conn.execute("UPDATE board_meta SET value = '12' WHERE key = 'schema_version'")
+        self.assertEqual(type(self.b).schema_version(self.h.cfg), 12)
+        setup_board(self.h.cfg, SMALL_POOL)              # what ensure_initialized runs for an older board
+        self.assertEqual(type(self.b).schema_version(self.h.cfg), base.SCHEMA_VERSION)
+        self.job("g", age=2 * HOUR, goal="ship it")
+        self.assertEqual(self.h.shown_status("g"), base.WAITING_GOAL)
+
 
 # --------------------------------------------------------------------------- CLI and hooks
 
@@ -415,7 +571,7 @@ class ExpiryCliTests(Env):
         self.assertIn("J: auto-closed: no live agents for 30 min", out)
         self.assertEqual(self.job().status, "cancelled")
 
-    # ---- a goal job is never closed by a sweep; "no live agents" needs evidence the orchestrator is gone
+    # ---- a goal job is never closed by a sweep
     def test_a_goal_job_survives_every_sweep(self):
         self.activate("J", "--goal", "ship it")
         self.age("J", 40 * MIN)
@@ -436,54 +592,68 @@ class ExpiryCliTests(Env):
         self.assertEqual(rc, 0, err)
         self.assertEqual(self.job().status, "active")
 
-    def test_a_sweep_that_cannot_see_the_orchestrator_does_not_orphan_close(self):
-        # another OS user's (or machine's) hooks sweep too, and have no marker of this job
-        self.activate()
-        self.age("J", 40 * MIN)
-        self.markers.joinpath("J.json").unlink()
-        self.cli("purge")
-        self.assertEqual(self.job().status, "active")
+    def test_a_sweep_from_another_user_or_machine_spares_a_goal_job_and_closes_a_goalless_one_as_before(self):
+        # a sweep with no marker of the jobs (another OS user's HOME, another machine's hooks):
+        # the orphan rule's evidence is unchanged for a job without a goal, and never applies to a goal job
+        self.activate("G", "--goal", "ship it")
+        self.activate("P")
+        for j in ("G", "P"):
+            self.age(j, 40 * MIN)
+        other = self.tmp / "other-user-markers"
+        other.mkdir()
+        self.config.write_text(self.config.read_text().replace(str(self.markers), str(other)))
+        _, out, _ = self.cli("purge")
+        self.assertEqual((self.job("G").status, self.job("P").status), ("active", "cancelled"))
+        self.assertIn("P: auto-closed: no live agents for 30 min", out)
 
-    def test_a_board_outage_in_the_hook_log_keeps_the_job_open(self):
-        import time
-        self.activate()
-        self.age("J", 40 * MIN)
-        self.error_log.parent.mkdir(parents=True, exist_ok=True)
-        os.chmod(self.error_log.parent, 0o700)
-        old = time.strftime("%F %T", time.localtime(time.time() - 3 * HOUR))
-        self.error_log.write_text(f"{old} turn a1: OperationalError: no reply from the server\n")
+    def test_goal_stall_hours_in_the_config_closes_a_stalled_goal_job_as_failed(self):
+        self.assertEqual(self.cfg["job"]["goal_stall_hours"], 0)   # never, by default
+        self.config.write_text(self.config.read_text() + "[job]\ngoal_stall_hours = 6\n")
+        self.activate("G", "--goal", "ship it")
+        self.activate("O", "--goal", "ship it", "--stall-hours", "0")   # its own: never
+        self.age("G", 5 * HOUR)
+        self.age("O", 99 * HOUR)
         self.cli("purge")
-        self.assertEqual(self.job().status, "cancelled")           # an old outage proves nothing
-        self.activate()                                              # reopen
-        self.age("J", 40 * MIN)
-        now = time.strftime("%F %T", time.localtime(time.time() - 5 * MIN))
-        self.error_log.write_text(f"{now} turn a1: OperationalError: no reply from the server\n")
-        self.cli("purge")
-        self.assertEqual(self.job().status, "active")
+        self.assertEqual(self.job("G").status, "active")           # within the limit
+        self.age("G", 7 * HOUR)
+        _, out, _ = self.cli("purge")
+        self.assertEqual((self.job("G").status, self.job("G").outcome),
+                         ("failed", "auto-closed: no progress for 6 h; goal not met"))
+        self.assertIn("G: auto-closed: no progress for 6 h; goal not met", out)
+        self.assertEqual(self.job("O").status, "active")
 
-    def test_a_live_orchestrator_session_keeps_the_job_open(self):
-        import json
-        from swarm import liveness
-        sid = "11111111-2222-3333-4444-555555555555"
-        cfgdir = self.tmp / "claude"
-        (cfgdir / "sessions").mkdir(parents=True)
-        os.environ["CLAUDE_CONFIG_DIR"] = str(cfgdir)
-        self.addCleanup(os.environ.pop, "CLAUDE_CONFIG_DIR", None)
-        self.activate("J", "--session", sid)
-        self.age("J", 40 * MIN)
-        reg = cfgdir / "sessions" / f"{os.getpid()}.json"
-        reg.write_text(json.dumps({"pid": os.getpid(), "sessionId": sid,
-                                   "procStart": liveness._proc_start(os.getpid())}))
-        self.assertTrue(liveness.claude_session_alive(sid))
+    # ---- a goal job nobody works on shows as waiting (goal not met) in status and watch
+    def frame(self, job=None, compact=False):
+        import shutil
+        from unittest import mock
+        view = {"offset": 0, "wrap": False, "max_offset": 0, "all_agents": False, "anchor": None,
+                "scroll": 0, "mark": None, "page": 1, "recent_minutes": None, "compact": compact}
+        with self.board() as b, mock.patch.object(shutil, "get_terminal_size", return_value=os.terminal_size((200, 40))):
+            return "\n".join(swarm._watch_frame(b, job, 2.0, False, True, view))
+
+    def test_status_and_watch_show_a_goal_job_without_agents_as_waiting_goal_not_met(self):
+        self.activate("G", "--goal", "ship it")
+        self.activate("P")                             # no goal: nothing new
+        self.age("G", 2 * HOUR)
+        self.age("P", 10 * MIN)                        # idle, but not yet an orphan
+        _, out, _ = self.cli("status", "--no-color")
+        row = next(ln for ln in out.splitlines() if ln.startswith("G "))
+        self.assertRegex(row, r"^G\s+waiting \(goal not met\)\s")
+        self.assertRegex(next(ln for ln in out.splitlines() if ln.startswith("P ")), r"^P\s+idle\s")
+        _, out, _ = self.cli("status", "--job", "G", "--no-color")
+        self.assertIn("job        G  [waiting (goal not met)]", out)
+        self.assertIn("not auto-closed", out)
+        self.assertIn("job        P  [idle]", self.cli("status", "--job", "P", "--no-color")[1])
+        self.assertIn("waiting (goal not met)", self.frame())              # watch: all jobs
+        self.assertIn("[waiting (goal not met)]", self.frame("G"))         # watch --job
+        self.assertIn("G [waiting (goal not met)]", self.frame(compact=True))
         self.cli("purge")
-        self.assertEqual(self.job().status, "active")   # blocked on a question: no tool call, still alive
-        # the process is gone (or the pid was recycled): nobody is there
-        gone = cfgdir / "sessions" / "999999.json"
-        reg.unlink()
-        gone.write_text(json.dumps({"pid": 999999, "sessionId": sid, "procStart": "1"}))
-        self.assertFalse(liveness.claude_session_alive(sid))
-        self.cli("purge")
-        self.assertEqual(self.job().status, "cancelled")
+        self.assertEqual(self.job("G").status, "active")                    # shown as waiting, never closed
+        # an agent joining takes it out of waiting
+        with self.board() as b:
+            b.allocate_name("newcomer", "G")
+        self.assertRegex(next(ln for ln in self.cli("status", "--no-color")[1].splitlines() if ln.startswith("G ")),
+                         r"^G\s+active\s")
 
     def test_wait_for_bounds_the_wait(self):
         self.activate()

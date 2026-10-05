@@ -28,7 +28,7 @@ import random
 import threading
 from typing import Mapping, Sequence
 
-from .base import (LEFT_PAUSED, MOVED_PREFIX, PauseRecord, build_manifest, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, AUTO_CLOSE_BLOCKING, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, Restart,
+from .base import (LEFT_PAUSED, MOVED_PREFIX, PauseRecord, build_manifest, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, AUTO_CLOSE_BLOCKING, CloseGuard, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, Restart,
                    ROUTE_STATES, TOOL_NAME_MAX, AgentEvent, AgentStatus, Board, BoardError, BoardUnavailable, JobStatus, Member, Message,
                    OwedReply, ReadResult, Route, SCHEMA_VERSION, SetupResult, SpawnGrant, SyncState, TRANSCRIPT_ROLES,
                    TranscriptImage, TranscriptRow, TranscriptSummary, VERDICTS,
@@ -314,10 +314,12 @@ class MemoryBoard(Board):
             s.touch()
 
     def close_job(self, job: str, status: str, outcome: str | None, forced: bool = False,
-                  closed_by: str | None = None) -> bool:
+                  closed_by: str | None = None, guard: CloseGuard | None = None) -> bool:
         s = self._s()
         with s.lock:
             j = s.jobs.get(job)
+            if guard and not (j and guard.allows(j["goal"], j["verdict"], j.get("max_hours"))):
+                return False
             self._close(job, j, status, outcome, forced, closed_by)
             return j is not None
 

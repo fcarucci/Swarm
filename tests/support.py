@@ -385,6 +385,10 @@ class PostgresHarness:
     def backdate_job(self, job: str, **fields_seconds_ago) -> None:
         self._backdate("jobs", "job", job, fields_seconds_ago)
 
+    def shown_status(self, job: str) -> str:
+        """The job_status view's own shown_status column (base.derive_job_status in SQL)."""
+        return self.conn.execute("SELECT shown_status FROM job_status WHERE job = %s", (job,)).fetchone()[0]
+
     def backdate_route(self, agent_key: str, seconds_ago: float) -> None:
         self._backdate("agent_routes", "agent_key", agent_key, {"created_at": seconds_ago})
 

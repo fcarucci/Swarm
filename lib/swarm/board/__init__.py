@@ -20,7 +20,7 @@ from .base import (AUTO_CLOSED_BY, RESTART_OUTCOMES, STUCK_PREFIX, STUCK_REASONS
                    JobStatus, Member, Message, OwedReply, PostResult, ReadResult, ROUTE_STATES, SCHEMA_VERSION,
                    Route, RosterEntry, database_hosts, SetupResult, SpawnGrant, SyncState, TRANSCRIPT_ROLES, TranscriptImage, TranscriptRow, TranscriptSummary, TranscriptTotals,
                    VERDICTS, derive_agent_status,
-                   decompress_capped, decompress_transcript, derive_job_status, load_name_pool, normalize_message)
+                   decompress_capped, decompress_transcript, derive_job_status, WAITING_GOAL, load_name_pool, normalize_message)
 
 # backend name -> (module under this package, class name)
 BACKENDS = {
@@ -102,7 +102,7 @@ __all__ = [
     "Board", "BoardError", "JobPaused", "PauseRecord", "PAUSE_WRITER", "LEFT_PAUSED", "MANIFEST_VERSION", "build_manifest", "BoardUnavailable", "IncompatibleStorage", "ReadOnlyBoard",
     "Message", "PostResult", "SetupResult", "AgentStatus", "JobStatus", "AgentEvent",
     "ReadResult", "RosterEntry", "OwedReply", "SyncState", "Member", "Route", "MEMORY_SEEN_MAX",
-    "derive_agent_status", "derive_job_status", "normalize_message", "load_name_pool", "SpawnGrant",
+    "derive_agent_status", "derive_job_status", "WAITING_GOAL", "normalize_message", "load_name_pool", "SpawnGrant",
     "AGENT_STATES", "AGENT_STATUSES", "JOB_STATUSES", "CLOSED_JOB_STATUSES", "NAME_SOURCES",
     "TOOL_NAME_MAX", "DATA_DIR", "ROUTE_STATES", "VERDICTS",
     "TRANSCRIPT_ROLES", "TranscriptImage", "TranscriptRow", "TranscriptSummary", "TranscriptTotals",

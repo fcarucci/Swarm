@@ -25,7 +25,7 @@ from typing import Mapping, Sequence
 import psycopg
 from psycopg import sql
 
-from .base import (LEFT_PAUSED, PauseRecord, build_manifest, database_hosts, MOVED_PREFIX, NAME_PATTERN, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, ROUTE_STATES, TOOL_NAME_MAX,
+from .base import (LEFT_PAUSED, PauseRecord, build_manifest, database_hosts, MOVED_PREFIX, NAME_PATTERN, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, CloseGuard, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, ROUTE_STATES, TOOL_NAME_MAX,
                    AgentEvent, Restart,
                    AgentStatus, Board, BoardError, BoardUnavailable, IncompatibleStorage, JobStatus,
                    Member, Message, OwedReply, ReadResult, Route, RosterEntry, SCHEMA_VERSION, SetupResult,
@@ -329,7 +329,20 @@ SELECT j.job, j.status, j.description, j.task, j.outcome, j.created_by, j.sessio
        j.project, j.goal, j.verdict, j.verdict_reason, j.verdict_by, j.verdict_at, j.completion_forced,
        (SELECT a.name FROM agents a WHERE a.job = j.job AND a.judge AND a.left_at IS NULL) AS judge,
        j.waiting_on, j.waiting_since, j.closed_by, j.supervise, j.verdict_next,
-       j.max_hours, j.waiting_until
+       j.max_hours, j.waiting_until,
+       -- what `status` shows (base.derive_job_status): closed jobs their status, open ones waiting /
+       -- active / waiting (goal not met: a goal without a met verdict and nobody started, running
+       -- or idle; no sweep closes it) / idle
+       CASE WHEN j.status <> 'active' THEN j.status
+            WHEN COALESCE(j.waiting_on, '') <> '' THEN 'waiting'
+            WHEN count(*) FILTER (WHERE s.status IN ('started', 'running')) > 0 THEN 'active'
+            WHEN COALESCE(j.goal, '') <> '' AND j.verdict IS DISTINCT FROM 'met'
+                 AND count(*) FILTER (WHERE s.status = 'idle') = 0 THEN 'waiting (goal not met)'
+            WHEN COALESCE(greatest(max(s.last_contact_at),
+                                   (SELECT max(created_at) FROM messages m WHERE m.job = j.job)),
+                          j.activated_at, j.created_at) > now() - make_interval(mins => {idle}) THEN 'active'
+            ELSE 'idle'
+       END AS shown_status
   FROM jobs j LEFT JOIN agent_status s ON s.job = j.job
  GROUP BY j.job;
 """
@@ -830,7 +843,14 @@ class PostgresBoard(Board):
             (job, description, task, session_id, created_by, project, goal))
 
     def close_job(self, job: str, status: str, outcome: str | None, forced: bool = False,
-                  closed_by: str | None = None) -> bool:
+                  closed_by: str | None = None, guard: CloseGuard | None = None) -> bool:
+        if guard:   # the guard and the close in one transaction, the job row locked
+            with self._conn.transaction():
+                row = self._conn.execute("SELECT goal, verdict, max_hours FROM jobs WHERE job = %s FOR UPDATE",
+                                         (job,)).fetchone()
+                if not row or not guard.allows(*row):
+                    return False
+                return self.close_job(job, status, outcome, forced, closed_by)
         self._leave_job(job)
         return self._conn.execute(
             "UPDATE jobs SET status = %s, outcome = COALESCE(%s, outcome), "

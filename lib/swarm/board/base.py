@@ -101,8 +101,9 @@ RESTART_OUTCOMES = ("running", "completed", "timeout", "max_turns", "failed", "n
 # (a final capture that kept failing: the row is an audit marker without a body),
 # 10 jobs.verdict_next (the judge's instructions with a not_met verdict), 11 jobs.max_hours (a
 # job's own stall limit, in hours) and jobs.waiting_until (when a bounded `swarm wait --for` expires),
-# 12 jobs.status 'paused' and the job_pauses table (pause/resume manifests).
-SCHEMA_VERSION = 12
+# 12 jobs.status 'paused' and the job_pauses table (pause/resume manifests), 13 the job_status
+# view's shown_status column (what `status` shows, incl. "waiting (goal not met)"; view only).
+SCHEMA_VERSION = 13
 
 # A moved agent's roster_seen holds MOVED_PREFIX + the job it came from until its next PreToolUse
 # turn tells it (no schema change: the hooks own the text, and it never parses as a snapshot).
@@ -800,17 +801,25 @@ def transcript_totals_of(summaries: Sequence[TranscriptSummary]) -> TranscriptTo
                             min((s.captured_at for s in summaries), default=None), img, len(images))
 
 
+WAITING_GOAL = "waiting (goal not met)"   # the shown status of a goal job nobody is working on
+
+
 def derive_job_status(js: JobStatus, idle_minutes: float, now: _dt.datetime) -> str:
     """What `status` and `watch` show for a job. A closed job shows its stored status. An open
     (stored "active") one shows "waiting" while it waits for something (Board.set_waiting),
-    "active" while an agent is started or running or anything happened within idle_minutes,
-    else "idle": open, but nobody is working on it and nobody said what it waits for."""
+    "active" while an agent is started or running, WAITING_GOAL when it has a goal without a
+    met verdict and no agent started, running or idle (no sweep closes it: it waits for an
+    agent, the judge or a person), else "active" if anything happened within idle_minutes, else
+    "idle": open, but nobody is working on it and nobody said what it waits for. (The Postgres
+    job_status view's shown_status column is the same rule.)"""
     if js.status != "active":
         return js.status
     if js.waiting_on:
         return "waiting"
     if js.started or js.running:
         return "active"
+    if goal_unmet(js) and not js.idle:
+        return WAITING_GOAL
     last = js.last_activity_at or js.activated_at or js.created_at
     return "active" if (now - last).total_seconds() < idle_minutes * 60 else "idle"
 
@@ -831,6 +840,23 @@ def goal_unmet(js: "JobStatus") -> bool:
     """A job with a goal whose latest verdict is not `met`: only the judge's `met` (or a person:
     deactivate, --force) may end it, never a quiet-time sweep."""
     return bool(js.goal) and js.verdict != "met"
+
+
+@dataclass(frozen=True)
+class CloseGuard:
+    """What close_job re-checks, atomically with the close, for a sweep: the job's goal state as
+    the sweep read it. settled: the job had no goal or a met verdict, and still must (a goal set,
+    or a verdict changed to not_met, since is refused). Not settled: the job had `goal`, unmet,
+    stalled by `max_hours` (its own limit, None = the config's goal_stall_hours), and still must:
+    same goal, no met verdict, same limit."""
+    settled: bool = True
+    goal: str | None = None
+    max_hours: float | None = None
+
+    def allows(self, goal: str | None, verdict: str | None, max_hours: float | None) -> bool:
+        if self.settled:
+            return not goal or verdict == "met"
+        return goal == self.goal and verdict != "met" and max_hours == self.max_hours
 
 
 def auto_close_candidate(js: JobStatus, before: _dt.datetime) -> bool:
@@ -1066,8 +1092,12 @@ class Board(abc.ABC):
 
     @abc.abstractmethod
     def close_job(self, job: str, status: str, outcome: str | None, forced: bool = False,
-                  closed_by: str | None = None) -> bool:
+                  closed_by: str | None = None, guard: CloseGuard | None = None) -> bool:
         """Close a job (`swarm deactivate`). status is one of CLOSED_JOB_STATUSES.
+
+        guard (the sweeps pass one): the close happens only if guard.allows() the job's goal,
+        verdict and max_hours as read atomically with the close (write lock or row lock held);
+        otherwise nothing changes (no agent leaves) and the result is False.
 
         First every active agent of the job leaves (left_at now, state left, current_tool and
         tool_started_at None): with the marker gone the hooks stop tracking them, so they would
@@ -1075,7 +1105,7 @@ class Board(abc.ABC):
         only if not None, finished_at now unless the job is already closed (then kept: closing
         a closed job again, e.g. to replace the auto-close outcome with a real summary, does not
         move when it ended), completion_forced = forced (the CLI passes True for a completion
-        without a met verdict), closed_by as given. Returns whether the job existed."""
+        without a met verdict), closed_by as given. Returns whether the job existed (and passed the guard)."""
 
     @abc.abstractmethod
     def auto_close_job(self, job: str, before: _dt.datetime, outcome: str) -> _dt.datetime | None:
@@ -1156,7 +1186,8 @@ class Board(abc.ABC):
         times += [m.created_at for m in self.recent_messages(20, job=js.job) if m.agent_name != "swarm"]
         return max(t for t in times if t)
 
-    def sweep_expiry(self, stall_hours: float, orphan_minutes: float, watch=None) -> list[AutoClosed]:
+    def sweep_expiry(self, stall_hours: float, orphan_minutes: float, watch=None,
+                     goal_stall_hours: float = 0) -> list[AutoClosed]:
         """Close the open jobs that outlived their welcome (`[job] stall_hours`, `orphan_minutes`;
         0 or less turns a rule off). Returns what it closed. Template method, not overridden.
 
@@ -1167,18 +1198,23 @@ class Board(abc.ABC):
             closed "failed", outcome "auto-closed: no progress for N h" plus its last verdict;
           * no agent started, running or idle (dead ones don't count; none at all is fine), no
             board activity (last_activity_at, run start, an expired wait's end) for
-            `orphan_minutes`, not inside an unexpired bounded wait, and the watch of the
-            orchestrating session (cli.OrchestratorWatch) able to tell (this sweep has the job's
-            marker) and not active(): closed "cancelled",
+            `orphan_minutes`, not inside an unexpired bounded wait, and `watch(job).active()`
+            (the orchestrating session, cli.OrchestratorWatch) false: closed "cancelled",
             outcome "auto-closed: no live agents for N min".
         Both are close_job(..., closed_by=AUTO_CLOSED_BY): the remaining agents leave, and the
-        job shows as auto-closed. A job
-        with a goal and no `met` verdict (goal_unmet) is never touched by the orphan rule, nor by
-        the stall limit unless the job has its own (jobs.max_hours, outcome "...; goal not met"): its orchestrator may wait with no live
-        subagent for hours, between rounds or on a person, and agents look dead when their hooks
-        can't reach the board; such a job shows as idle in status until the judge says met or
-        someone closes it. The job is read again right before the close, so an agent that
-        joined meanwhile keeps it open. Idempotent; costs one jobs() query when nothing qualifies."""
+        job shows as auto-closed.
+
+        A job with a goal and no `met` verdict (goal_unmet) is never touched by the orphan rule,
+        and its stall limit is its own (jobs.max_hours) or, without one, `goal_stall_hours` (0 =
+        never); then it is closed "failed", outcome "auto-closed: no progress for N h; goal not
+        met" plus its last verdict. Its orchestrator may wait with no live subagent for hours,
+        between rounds or on a person: status shows it as "waiting (goal not met)" until the
+        judge says met or someone closes it.
+
+        The job is read again right before the close, so an agent that joined (or progress made)
+        meanwhile keeps it open, and close_job re-checks the goal atomically with the close
+        (a goal set, or a verdict changed, since the first read). Idempotent; costs one jobs()
+        query when nothing qualifies."""
         now = self.now()
         closed = []
         for js in self.jobs(False):
@@ -1187,44 +1223,48 @@ class Board(abc.ABC):
                 self.set_waiting(js.job, None)   # the bounded wait ran out
                 js = replace(js, waiting_on=None, waiting_since=None,
                              last_activity_at=max(t for t in (js.last_activity_at, js.waiting_until) if t))
-            if goal_unmet(js):
+            unmet = goal_unmet(js)
+            if unmet:
                 # a job with a goal ends with the judge's `met` (or a person): the orphan rule
                 # never applies, and the stall limit only if this job was given its own
-                # (activate --stall-hours N), never the config default
-                if not js.max_hours or js.max_hours < 0:
+                # (activate --stall-hours N) or [job] goal_stall_hours is set, never stall_hours
+                cap = goal_stall_hours if js.max_hours is None else js.max_hours
+                if not cap or cap < 0:
                     continue
-                cap = js.max_hours
             else:
                 cap = stall_hours if js.max_hours is None else js.max_hours
             if cap and cap > 0 and now - run_start(js) >= _dt.timedelta(hours=cap) and \
                     now - self.progress_at(js) >= _dt.timedelta(hours=cap):
                 status = "failed"
                 outcome = f"auto-closed: no progress for {cap:g} h"
-                if goal_unmet(js):
+                if unmet:
                     outcome += "; goal not met"
                 if js.verdict:
                     outcome += f"; last verdict {js.verdict}" + (f": {js.verdict_reason}" if js.verdict_reason else "")
                 outcome = outcome[:AUTO_CLOSE_OUTCOME_MAX]
-            elif not goal_unmet(js) and orphan_minutes and orphan_minutes > 0 and not (js.started or js.running or js.idle) \
+                guard = CloseGuard(False, js.goal, js.max_hours) if unmet else CloseGuard()
+            elif not unmet and orphan_minutes and orphan_minutes > 0 and not (js.started or js.running or js.idle) \
                     and not (js.waiting_on and js.waiting_until is not None) \
                     and now - (js.last_activity_at or run_start(js)) >= _dt.timedelta(minutes=orphan_minutes) \
                     and now - run_start(js) >= _dt.timedelta(minutes=orphan_minutes):
-                if watch is not None:
-                    seen = watch(js.job)
-                    # a sweep that has no marker of the job (another user's or machine's: it
-                    # can't see the orchestrating session) can't tell the job is orphaned
-                    if not getattr(seen, "can_tell", lambda: True)() or seen.active():
-                        continue
+                if watch is not None and watch(js.job).active():
+                    continue
                 status = "cancelled"
                 outcome = f"auto-closed: no live agents for {orphan_minutes:g} min"
+                guard = CloseGuard()
             else:
                 continue
             now_js = self.job_status(js.job)   # nothing changed since the rollup?
-            if now_js is None or now_js.status != "active" or (status == "cancelled" and (
-                    now_js.started or now_js.running or now_js.idle or now_js.last_activity_at != seen_activity)):
+            if now_js is None or now_js.status != "active":
                 continue
-            self.close_job(js.job, status, outcome, closed_by=AUTO_CLOSED_BY)
-            closed.append(AutoClosed(js.job, outcome))
+            if status == "cancelled":
+                if now_js.started or now_js.running or now_js.idle or now_js.last_activity_at != seen_activity:
+                    continue
+            elif goal_unmet(now_js) and now - self.progress_at(now_js) < _dt.timedelta(hours=cap):
+                continue   # a post, verdict or new agent since the rollup
+            # a goal set, or a verdict changed, since the read is checked again, atomically with the close
+            if self.close_job(js.job, status, outcome, closed_by=AUTO_CLOSED_BY, guard=guard):
+                closed.append(AutoClosed(js.job, outcome))
         return closed
 
     @abc.abstractmethod

@@ -63,7 +63,7 @@ import time
 from pathlib import Path
 from typing import Iterator, Mapping, Sequence
 
-from .base import (LEFT_PAUSED, MOVED_PREFIX, PauseRecord, build_manifest, NAME_MAX, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, AUTO_CLOSE_BLOCKING, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, Restart,
+from .base import (LEFT_PAUSED, MOVED_PREFIX, PauseRecord, build_manifest, NAME_MAX, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, AUTO_CLOSE_BLOCKING, CloseGuard, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, Restart,
                    ROUTE_STATES, TOOL_NAME_MAX, AgentEvent, AgentStatus, Board, BoardError, BoardUnavailable, JobStatus, Member, Message, ReadOnlyBoard, refuse_writes,
                    OwedReply, ReadResult, Route, RosterEntry, SCHEMA_VERSION, SetupResult, SpawnGrant, SyncState,
                    TRANSCRIPT_ROLES, TranscriptImage, TranscriptRow, TranscriptSummary, VERDICTS,
@@ -645,8 +645,12 @@ class SqliteBoard(Board):
             (job, description, task, session_id, created_by, project, goal, now, now))
 
     def close_job(self, job: str, status: str, outcome: str | None, forced: bool = False,
-                  closed_by: str | None = None) -> bool:
-        with self._tx() as c:
+                  closed_by: str | None = None, guard: CloseGuard | None = None) -> bool:
+        with self._tx() as c:   # (the write lock: nothing changes between the guard and the close)
+            if guard:
+                row = c.execute("SELECT goal, verdict, max_hours FROM jobs WHERE job = ?", (job,)).fetchone()
+                if not row or not guard.allows(*row):
+                    return False
             return self._close(c, job, status, outcome, forced, closed_by)
 
     def _close(self, c: sqlite3.Connection, job: str, status: str, outcome: str | None,

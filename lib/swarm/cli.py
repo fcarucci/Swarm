@@ -113,8 +113,9 @@ DEFAULTS = {
     # heartbeats don't count) is closed "failed"; one that keeps progressing runs as long as it
     # likes. `activate --stall-hours N` overrides it per job, 0 = never. orphan_minutes: a job
     # with no live agent (all done, dead or gone; a waiting job included) and no board activity
-    # for that long is closed "cancelled". 0 turns either off.
-    "job": {"auto_close_minutes": 30, "stall_hours": 4, "orphan_minutes": 30},
+    # for that long is closed "cancelled". 0 turns either off. Neither closes a job with a goal
+    # and no met verdict; goal_stall_hours is that job's own stall limit (0 = never, the default).
+    "job": {"auto_close_minutes": 30, "stall_hours": 4, "orphan_minutes": 30, "goal_stall_hours": 0},
     # Codex fires SubagentStop after every turn of a child: it counts as completed once no new
     # turn came for this long
     "codex": {"stop_quiet_minutes": 3},
@@ -283,10 +284,11 @@ def auto_close_minutes(cfg: dict) -> float:
     return float((cfg.get("job") or {}).get("auto_close_minutes") or 0)
 
 
-def job_limits(cfg: dict) -> tuple[float, float]:
-    """([job] stall_hours, [job] orphan_minutes); 0 = that rule is off."""
+def job_limits(cfg: dict) -> tuple[float, float, float]:
+    """([job] stall_hours, [job] orphan_minutes, [job] goal_stall_hours); 0 = that rule is off."""
     job = cfg.get("job") or {}
-    return float(job.get("stall_hours") or 0), float(job.get("orphan_minutes") or 0)
+    return (float(job.get("stall_hours") or 0), float(job.get("orphan_minutes") or 0),
+            float(job.get("goal_stall_hours") or 0))
 
 
 def parse_duration(text: str) -> float:
@@ -361,10 +363,11 @@ def sweep_jobs(board, cfg: dict, deadline: float | None = None) -> list:
     closed = []
     if minutes > 0:
         closed = board.sweep_auto_close(minutes, lambda job: OrchestratorWatch(cfg, minutes, job))
-    stall_hours, orphan_minutes = job_limits(cfg)
+    stall_hours, orphan_minutes, goal_stall_hours = job_limits(cfg)
     try:   # best effort: never fails the caller (a per-job cap applies even with the defaults off)
         closed += board.sweep_expiry(stall_hours, orphan_minutes,
-                                     lambda job: OrchestratorWatch(cfg, orphan_minutes, job, live_session=True))
+                                     lambda job: OrchestratorWatch(cfg, orphan_minutes, job),
+                                     goal_stall_hours=goal_stall_hours)
     except Exception as exc:
         from swarm.board import BoardUnavailable
         if isinstance(exc, BoardUnavailable):
@@ -503,34 +506,16 @@ class OrchestratorWatch:
     touches never wait for it. Only this machine's markers: another machine's sweep can't see
     them (a job waiting on something there says so with `swarm wait`)."""
 
-    def __init__(self, cfg: dict, minutes: float, job: str, live_session: bool = False):
-        self.cfg, self.job, self.live_session, self.minutes = cfg, job, live_session, minutes
+    def __init__(self, cfg: dict, minutes: float, job: str):
+        self.cfg, self.job = cfg, job
         mdir = Path(cfg["hook"]["marker_dir"]).expanduser()
         self.since_ns = int((time.time() - minutes * 60) * 1e9)
         self.markers = [p for p in (sorted(mdir.glob("*.json")) if mdir.is_dir() else [])
                         if _read_marker(p).get("job") == job]
         self.stamps = {p: _mtime_ns(orchestrator_seen_path(p)) for p in self.markers}
-        self.sessions = [m.get("session_id") for m in map(_read_marker, self.markers)
-                         if isinstance(m, dict) and "resume" not in m and m.get("session_id")]
-
-    def can_tell(self) -> bool:
-        """Whether this sweep can see the job's orchestrating session at all: it has a marker
-        of the job. Another user's or machine's sweep has none, and an orchestrator it can't see
-        is not one it may call gone."""
-        return bool(self.markers)
 
     def active(self) -> bool:
         if any(ns is not None and ns >= self.since_ns for ns in self.stamps.values()):
-            return True
-        # Agents that look dead may be alive behind a hook that couldn't reach the database:
-        # while hooks on this machine logged a board connection failure within the window, the
-        # rows prove nothing.
-        from swarm import liveness
-        if liveness.board_outage_since(self.since_ns / 1e9):
-            return True
-        # The orchestrating session itself, blocked on a question or waiting for a person at the
-        # prompt, makes no tool call (no .seen touch) but is the job's owner, and alive.
-        if self.live_session and any(liveness.claude_session_alive(sid) for sid in self.sessions):
             return True
         # a post (or wait) queued here within the window and not delivered yet: a sandboxed
         # agent without network is still at work
@@ -668,7 +653,8 @@ def _say_closed(closed) -> None:
 
 NAME_PALETTE = (31, 32, 33, 34, 35, 36, 91, 92, 93, 94, 95, 96)
 STATUS_COLORS = {"running": 32, "started": 36, "idle": 33, "completed": 34, "active": 32,
-                 "dead": 31, "failed": 31, "left": 90, "cancelled": 90, "waiting": 35, "paused": 35}
+                 "dead": 31, "failed": 31, "left": 90, "cancelled": 90, "waiting": 35, "paused": 35,
+                 "waiting (goal not met)": 35}   # (board.WAITING_GOAL)
 
 
 def _sgr(code: int, text: str) -> str:
@@ -1027,6 +1013,7 @@ def job_detail(board, job: str, color: bool, recent_minutes: int | None = None, 
     block = lambda text: ts((text or "").strip(), keep_newlines=True).replace("\n", "\n           ")  # noqa: E731
     activated = (f"activated  {_ago(j.activated_at, now)}" + (f" by {ts(j.created_by)}" if j.created_by else "")
                  + (f", session {ts(j.session_id)}" if j.session_id else ""))
+    from swarm.board import WAITING_GOAL
     shown = _job_status_word(board, j, now)
     verifications = board.verification_counts(job)
     sup_line = _supervise_line(board, j, sup)
@@ -1034,6 +1021,7 @@ def job_detail(board, job: str, color: bool, recent_minutes: int | None = None, 
             f"activity   {j.messages} messages, last {_ago(j.last_activity_at, now)}"]
     # (field value, its line): a line is shown only when its field is set.
     optional = ((j.waiting_on, f"waiting    on {ts(j.waiting_on)}, since {_ago(j.waiting_since, now)}"),
+                (shown == WAITING_GOAL, "waiting    for an agent, the judge's met or a person (not auto-closed)"),
                 (j.finished_at, f"finished   {_ago(j.finished_at, now)}" + _closed_by_note(j)),
                 (j.description, f"about      {ts(j.description)}"),
                 (j.project, f"project    {ts(j.project)} (memory)"),
@@ -1997,7 +1985,7 @@ def _compact_frame(board, job: str | None, color: bool, view: dict, rows: list |
     if not rows:
         out.append("(no jobs yet)")
     for j in rows:
-        out.append(_bold(f"{term_safe(j.job)} [{j.status}]", color))
+        out.append(_bold(f"{term_safe(j.job)} [{_job_status_word(board, j, now)}]", color))
         agents, hidden = _recent_agents(board.agents(j.job), now, recent)
         out += [_compact_agent_line(a, NATURAL, color) for a in agents]
         if not agents:
