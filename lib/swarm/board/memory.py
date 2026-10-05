@@ -28,7 +28,7 @@ import random
 import threading
 from typing import Mapping, Sequence
 
-from .base import (LEFT_PAUSED, MOVED_PREFIX, PauseRecord, build_manifest, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, AUTO_CLOSE_BLOCKING, CloseGuard, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, Restart,
+from .base import (LEFT_PAUSED, MOVED_PREFIX, PauseRecord, build_manifest, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, AUTO_CLOSE_BLOCKING, CloseGuard, goal_is_unmet, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, Restart,
                    ROUTE_STATES, TOOL_NAME_MAX, AgentEvent, AgentStatus, Board, BoardError, BoardUnavailable, JobStatus, Member, Message,
                    OwedReply, ReadResult, Route, SCHEMA_VERSION, SetupResult, SpawnGrant, SyncState, TRANSCRIPT_ROLES,
                    TranscriptImage, TranscriptRow, TranscriptSummary, VERDICTS,
@@ -344,25 +344,28 @@ class MemoryBoard(Board):
         with s.lock:
             j = s.jobs.get(job)
             if j is None or j["status"] != "active" or j.get("waiting_on") or \
-                    (j["goal"] and j["verdict"] != "met"):
+                    goal_is_unmet(j["goal"], j["verdict"]):
                 return None
-            start = j["activated_at"] or j["created_at"]
-            if start >= before:
-                return None
-            now = self.now()
-            rows = [a for a in s.agents.values() if a["job"] == job]
-            if not any(a["state"] in ("completed", "left") and a["left_at"] is not None
-                       and a["left_at"] >= start for a in rows):
-                return None
-            if any(self._derived(a, now) in AUTO_CLOSE_BLOCKING for a in rows):
-                return None
-            if any(t is not None and t >= before for a in rows
-                   for t in (a["joined_at"], a["last_seen"], a["left_at"])):
-                return None
-            if any(m["job"] == job and m["created_at"] >= before for m in s.messages):
+            if not self._auto_close_ready(j, before):
                 return None
             self._close(job, j, "completed", outcome, False, AUTO_CLOSED_BY)
             return j["finished_at"]
+
+    def _auto_close_ready(self, j: dict, before: _dt.datetime) -> bool:
+        """auto_close_job's checks 2-4 (store lock held): the run started before `before`, one of its
+        agents finished, none is started/running/idle, and nothing happened at or after `before`."""
+        s, job = self._store, j["job"]
+        start = j["activated_at"] or j["created_at"]
+        if start >= before:
+            return False
+        now = self.now()
+        rows = [a for a in s.agents.values() if a["job"] == job]
+        return (any(a["state"] in ("completed", "left") and a["left_at"] is not None and a["left_at"] >= start
+                    for a in rows)
+                and not any(self._derived(a, now) in AUTO_CLOSE_BLOCKING for a in rows)
+                and not any(t is not None and t >= before for a in rows
+                            for t in (a["joined_at"], a["last_seen"], a["left_at"]))
+                and not any(m["job"] == job and m["created_at"] >= before for m in s.messages))
 
     def undo_auto_close(self, job: str, closed_at: _dt.datetime) -> bool:
         s = self._s()

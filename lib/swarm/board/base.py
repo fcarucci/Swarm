@@ -836,10 +836,16 @@ def run_agents(agents: Sequence[AgentStatus], start: _dt.datetime) -> list[Agent
     return [a for a in agents if a.ended_at is None or a.ended_at >= start]
 
 
-def goal_unmet(js: "JobStatus") -> bool:
-    """A job with a goal whose latest verdict is not `met`: only the judge's `met` (or a person:
-    deactivate, --force) may end it, never a quiet-time sweep."""
-    return bool(js.goal) and js.verdict != "met"
+def goal_is_unmet(goal: str | None, verdict: str | None) -> bool:
+    """The one definition, on raw columns (backend rows, CloseGuard): a goal whose latest verdict
+    is not `met`. Only the judge's `met` (or a person: deactivate, --force) may end such a job,
+    never a quiet-time sweep."""
+    return bool(goal) and verdict != "met"
+
+
+def goal_unmet(js: JobStatus) -> bool:
+    """goal_is_unmet of a job's rollup."""
+    return goal_is_unmet(js.goal, js.verdict)
 
 
 @dataclass(frozen=True)
@@ -855,8 +861,8 @@ class CloseGuard:
 
     def allows(self, goal: str | None, verdict: str | None, max_hours: float | None) -> bool:
         if self.settled:
-            return not goal or verdict == "met"
-        return goal == self.goal and verdict != "met" and max_hours == self.max_hours
+            return not goal_is_unmet(goal, verdict)
+        return goal == self.goal and goal_is_unmet(goal, verdict) and max_hours == self.max_hours
 
 
 @dataclass(frozen=True)
@@ -902,7 +908,7 @@ def auto_close_candidate(js: JobStatus, before: _dt.datetime) -> bool:
     """A cheap first look, from the rollup alone, at whether the sweep should examine a job:
     open, not waiting, its goal (if any) met, agents but none started/running/idle, and nothing
     in the rollup newer than `before`. Board.auto_close_job decides for real."""
-    return (js.status == "active" and not js.waiting_on and (not js.goal or js.verdict == "met")
+    return (js.status == "active" and not js.waiting_on and not goal_unmet(js)
             and js.agents > 0 and not (js.started or js.running or js.idle)
             and run_start(js) < before
             and (js.last_activity_at is None or js.last_activity_at < before))

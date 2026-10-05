@@ -2576,7 +2576,8 @@ def _read_marker(path: Path) -> dict:
 
 def _completion_refusal(js) -> str | None:
     """Why a job with a goal can't be completed yet (None if it can)."""
-    if js is None or not js.goal or js.verdict == "met":
+    from swarm.board import goal_unmet
+    if js is None or not goal_unmet(js):
         return None
     latest = (f"latest verdict: {term_safe(js.verdict)} by {term_safe(js.verdict_by)}: "
               f"{term_safe(js.verdict_reason)}"
