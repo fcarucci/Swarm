@@ -859,6 +859,45 @@ class CloseGuard:
         return goal == self.goal and verdict != "met" and max_hours == self.max_hours
 
 
+@dataclass(frozen=True)
+class ExpiryAction:
+    """What sweep_expiry decided for a job: close it as `status` with `outcome`; cap = the stall
+    limit in hours behind a "failed" close (None for "cancelled"); guard = what close_job re-checks."""
+    status: str
+    outcome: str
+    cap: float | None
+    guard: CloseGuard
+
+
+def stall_cap(js: JobStatus, stall_hours: float, goal_stall_hours: float) -> float | None:
+    """The job's stall limit in hours, None when the rule is off for it: its own (jobs.max_hours,
+    0 = never), else `stall_hours`, or for a goal job without a met verdict `goal_stall_hours`."""
+    default = goal_stall_hours if goal_unmet(js) else stall_hours
+    cap = default if js.max_hours is None else js.max_hours
+    return cap if cap and cap > 0 else None
+
+
+def stall_outcome(js: JobStatus, cap: float) -> str:
+    """The outcome of a stall close: the limit, "goal not met" for an unmet goal, the last verdict."""
+    outcome = f"auto-closed: no progress for {cap:g} h"
+    if goal_unmet(js):
+        outcome += "; goal not met"
+    if js.verdict:
+        outcome += f"; last verdict {js.verdict}" + (f": {js.verdict_reason}" if js.verdict_reason else "")
+    return outcome[:AUTO_CLOSE_OUTCOME_MAX]
+
+
+def orphaned(js: JobStatus, now: _dt.datetime, orphan_minutes: float) -> bool:
+    """The orphan rule's test on the rollup: no agent started, running or idle, not inside an
+    unexpired bounded wait, and no board activity for `orphan_minutes` (the run's start counts)."""
+    if not orphan_minutes or orphan_minutes <= 0 or js.started or js.running or js.idle:
+        return False
+    if js.waiting_on and js.waiting_until is not None:
+        return False
+    quiet = _dt.timedelta(minutes=orphan_minutes)
+    return now - (js.last_activity_at or run_start(js)) >= quiet and now - run_start(js) >= quiet
+
+
 def auto_close_candidate(js: JobStatus, before: _dt.datetime) -> bool:
     """A cheap first look, from the rollup alone, at whether the sweep should examine a job:
     open, not waiting, its goal (if any) met, agents but none started/running/idle, and nothing
@@ -1219,53 +1258,48 @@ class Board(abc.ABC):
         closed = []
         for js in self.jobs(False):
             seen_activity = js.last_activity_at
-            if js.waiting_on and js.waiting_until is not None and js.waiting_until <= now:
-                self.set_waiting(js.job, None)   # the bounded wait ran out
-                js = replace(js, waiting_on=None, waiting_since=None,
-                             last_activity_at=max(t for t in (js.last_activity_at, js.waiting_until) if t))
-            unmet = goal_unmet(js)
-            if unmet:
-                # a job with a goal ends with the judge's `met` (or a person): the orphan rule
-                # never applies, and the stall limit only if this job was given its own
-                # (activate --stall-hours N) or [job] goal_stall_hours is set, never stall_hours
-                cap = goal_stall_hours if js.max_hours is None else js.max_hours
-                if not cap or cap < 0:
-                    continue
-            else:
-                cap = stall_hours if js.max_hours is None else js.max_hours
-            if cap and cap > 0 and now - run_start(js) >= _dt.timedelta(hours=cap) and \
-                    now - self.progress_at(js) >= _dt.timedelta(hours=cap):
-                status = "failed"
-                outcome = f"auto-closed: no progress for {cap:g} h"
-                if unmet:
-                    outcome += "; goal not met"
-                if js.verdict:
-                    outcome += f"; last verdict {js.verdict}" + (f": {js.verdict_reason}" if js.verdict_reason else "")
-                outcome = outcome[:AUTO_CLOSE_OUTCOME_MAX]
-                guard = CloseGuard(False, js.goal, js.max_hours) if unmet else CloseGuard()
-            elif not unmet and orphan_minutes and orphan_minutes > 0 and not (js.started or js.running or js.idle) \
-                    and not (js.waiting_on and js.waiting_until is not None) \
-                    and now - (js.last_activity_at or run_start(js)) >= _dt.timedelta(minutes=orphan_minutes) \
-                    and now - run_start(js) >= _dt.timedelta(minutes=orphan_minutes):
-                if watch is not None and watch(js.job).active():
-                    continue
-                status = "cancelled"
-                outcome = f"auto-closed: no live agents for {orphan_minutes:g} min"
-                guard = CloseGuard()
-            else:
-                continue
-            now_js = self.job_status(js.job)   # nothing changed since the rollup?
-            if now_js is None or now_js.status != "active":
-                continue
-            if status == "cancelled":
-                if now_js.started or now_js.running or now_js.idle or now_js.last_activity_at != seen_activity:
-                    continue
-            elif goal_unmet(now_js) and now - self.progress_at(now_js) < _dt.timedelta(hours=cap):
-                continue   # a post, verdict or new agent since the rollup
+            js = self._clear_expired_wait(js, now)
+            action = self._expiry_action(js, now, stall_hours, orphan_minutes, goal_stall_hours, watch)
+            if action is None or not self._expiry_holds(action, self.job_status(js.job), seen_activity, now):
+                continue   # (the job is read again: nothing changed since the rollup?)
             # a goal set, or a verdict changed, since the read is checked again, atomically with the close
-            if self.close_job(js.job, status, outcome, closed_by=AUTO_CLOSED_BY, guard=guard):
-                closed.append(AutoClosed(js.job, outcome))
+            if self.close_job(js.job, action.status, action.outcome, closed_by=AUTO_CLOSED_BY, guard=action.guard):
+                closed.append(AutoClosed(js.job, action.outcome))
         return closed
+
+    def _clear_expired_wait(self, js: JobStatus, now: _dt.datetime) -> JobStatus:
+        """The job as the sweep judges it: a bounded wait that ran out is cleared (stored too)."""
+        if not (js.waiting_on and js.waiting_until is not None and js.waiting_until <= now):
+            return js
+        self.set_waiting(js.job, None)
+        return replace(js, waiting_on=None, waiting_since=None,
+                       last_activity_at=max(t for t in (js.last_activity_at, js.waiting_until) if t))
+
+    def _expiry_action(self, js: JobStatus, now: _dt.datetime, stall_hours: float, orphan_minutes: float,
+                       goal_stall_hours: float, watch) -> "ExpiryAction | None":
+        """What sweep_expiry should do with this job from the rollup alone: the stall close, else
+        the orphan close, else nothing. The stall rule is checked first; a goal job has no orphan rule."""
+        unmet = goal_unmet(js)
+        cap = stall_cap(js, stall_hours, goal_stall_hours)
+        if cap and now - run_start(js) >= _dt.timedelta(hours=cap) and \
+                now - self.progress_at(js) >= _dt.timedelta(hours=cap):
+            guard = CloseGuard(False, js.goal, js.max_hours) if unmet else CloseGuard()
+            return ExpiryAction("failed", stall_outcome(js, cap), cap, guard)
+        if not unmet and orphaned(js, now, orphan_minutes) and not (watch is not None and watch(js.job).active()):
+            return ExpiryAction("cancelled", f"auto-closed: no live agents for {orphan_minutes:g} min", None,
+                                CloseGuard())
+        return None
+
+    def _expiry_holds(self, action: "ExpiryAction", now_js: JobStatus | None, seen_activity,
+                      now: _dt.datetime) -> bool:
+        """Whether the close still applies to the job as read again right before it: still open and,
+        for the orphan close, nobody joined or posted since the rollup; for the stall close of a
+        goal job, no progress (a post, verdict or new agent) since."""
+        if now_js is None or now_js.status != "active":
+            return False
+        if action.status == "cancelled":
+            return not (now_js.started or now_js.running or now_js.idle or now_js.last_activity_at != seen_activity)
+        return not (goal_unmet(now_js) and now - self.progress_at(now_js) < _dt.timedelta(hours=action.cap))
 
     @abc.abstractmethod
     def bind_job_session(self, job: str, session_id: str) -> None:

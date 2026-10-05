@@ -510,6 +510,53 @@ class PostgresExpiry(ExpiryContract, unittest.TestCase):
         self.assertEqual(self.h.shown_status("g"), base.WAITING_GOAL)
 
 
+class ExpiryRulesTests(unittest.TestCase):
+    """The pure decisions behind Board.sweep_expiry, on JobStatus rows (no board)."""
+    NOW = __import__("datetime").datetime(2026, 10, 5, 12, 0, tzinfo=__import__("datetime").timezone.utc)
+
+    def js(self, **kw):
+        import datetime as dt
+        at = self.NOW - dt.timedelta(hours=kw.pop("age_hours", 2))
+        base_kw = dict(job="J", status="active", description=None, task=None, outcome=None, created_by=None,
+                       session_id=None, created_at=at, activated_at=at, finished_at=None, agents=0, started=0,
+                       running=0, idle=0, completed=0, dead_or_left=0, messages=0, last_activity_at=at)
+        return base.JobStatus(**{**base_kw, **kw})
+
+    def test_stall_cap(self):
+        goalless, unmet = self.js(), self.js(goal="g")
+        met = self.js(goal="g", verdict="met")
+        self.assertEqual([base.stall_cap(j, 4, 0) for j in (goalless, unmet, met)], [4, None, 4])
+        self.assertEqual([base.stall_cap(j, 4, 9) for j in (goalless, unmet, met)], [4, 9, 4])
+        for j, want in ((self.js(max_hours=2), 2), (self.js(max_hours=0), None),
+                        (self.js(goal="g", max_hours=2), 2), (self.js(goal="g", max_hours=0), None)):
+            self.assertEqual(base.stall_cap(j, 4, 9), want)
+        self.assertIsNone(base.stall_cap(goalless, 0, 9))    # the default off for a goal-less job
+
+    def test_stall_outcome(self):
+        self.assertEqual(base.stall_outcome(self.js(), 4), "auto-closed: no progress for 4 h")
+        self.assertEqual(base.stall_outcome(self.js(goal="g"), 1.5), "auto-closed: no progress for 1.5 h; goal not met")
+        self.assertEqual(base.stall_outcome(self.js(goal="g", verdict="not_met", verdict_reason="no"), 4),
+                         "auto-closed: no progress for 4 h; goal not met; last verdict not_met: no")
+        self.assertEqual(base.stall_outcome(self.js(goal="g", verdict="met"), 4),
+                         "auto-closed: no progress for 4 h; last verdict met")
+        self.assertEqual(len(base.stall_outcome(self.js(verdict="met", verdict_reason="x" * 999), 4)),
+                         base.AUTO_CLOSE_OUTCOME_MAX)
+
+    def test_orphaned(self):
+        import datetime as dt
+        old = self.NOW - dt.timedelta(hours=1)
+        self.assertTrue(base.orphaned(self.js(), self.NOW, 30))
+        self.assertFalse(base.orphaned(self.js(), self.NOW, 0))                          # rule off
+        self.assertFalse(base.orphaned(self.js(), self.NOW, 180))                        # not long enough
+        for live in ("started", "running", "idle"):
+            self.assertFalse(base.orphaned(self.js(**{live: 1}), self.NOW, 30), live)
+        self.assertFalse(base.orphaned(self.js(last_activity_at=self.NOW), self.NOW, 30))   # just active
+        self.assertTrue(base.orphaned(self.js(waiting_on="x"), self.NOW, 30))            # unbounded wait: no shield
+        self.assertFalse(base.orphaned(self.js(waiting_on="x", waiting_until=self.NOW + dt.timedelta(hours=1)),
+                                       self.NOW, 30))
+        self.assertTrue(base.orphaned(self.js(last_activity_at=None, activated_at=old), self.NOW, 30))
+
+
 # --------------------------------------------------------------------------- CLI and hooks
 
 class ExpiryCliTests(Env):
