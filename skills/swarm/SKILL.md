@@ -195,8 +195,11 @@ On Postgres the same data is queryable directly as the `agent_status` and `job_s
 - **Orphan.** No live agent (all `completed`, `left` or `dead`, or none at all; dead per
   `dead_minutes`) and no board activity for `[job] orphan_minutes` (default 30), and no tool call
   of the orchestrating session in that time: closed `cancelled`, outcome
-  `auto-closed: no live agents for N min`. A goal without a `met` verdict, and a `waiting` job,
-  don't shield it (`orphan_minutes = 0` turns it off).
+  `auto-closed: no live agents for N min`. A `waiting` job doesn't shield it (`orphan_minutes = 0`
+  turns it off). The orphan rule never closes a job with a goal and no `met` verdict, nor does the stall limit
+  unless the job has its own `--stall-hours` (then `failed`, "goal not met"); the judge's `met`
+  or `swarm deactivate` ends it. The orphan rule also spares one whose orchestrating session is still running or
+  that this sweep has no marker for, nor one while hooks on this machine can't reach the board.
 
 `swarm wait --on "<what>" --for 90m` (`h`, `m`, `s`; a bare number is minutes) bounds a wait: until
 it expires the wait shields the job from the orphan rule (not from the stall limit); past it the job is

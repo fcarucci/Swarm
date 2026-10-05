@@ -723,8 +723,8 @@ On Postgres, re-run `swarm init` after changing `idle_minutes`, `dead_minutes` o
 | key | default | meaning |
 |---|---|---|
 | `auto_close_minutes` | `30` | an open job whose agents are all done closes by itself after this many quiet minutes (see [Auto-close](#auto-close)); `0` turns it off |
-| `stall_hours` | `4` | an open job with no progress (no agent post, verdict or new agent; tool calls and heartbeats don't count) for this long closes as `failed`, whatever its agents do; a job that keeps progressing is never closed by it. `activate --stall-hours N` sets one job's own limit, `0` = never; `0` here turns the default off |
-| `orphan_minutes` | `30` | an open job (waiting ones too) with no live agent and no board activity for this long closes as `cancelled`; `0` turns it off |
+| `stall_hours` | `4` | an open job with no progress (no agent post, verdict or new agent; tool calls and heartbeats don't count) for this long closes as `failed`, whatever its agents do; a job that keeps progressing is never closed by it, nor is a job with a goal and no `met` verdict. `activate --stall-hours N` sets one job's own limit, `0` = never; `0` here turns the default off |
+| `orphan_minutes` | `30` | an open job (waiting ones too) with no live agent and no board activity for this long closes as `cancelled` (never one with a goal and no `met` verdict; never one whose orchestrating session this sweep can't see or that is still running); `0` turns it off |
 
 **`[sqlite]`** (with `backend = "sqlite"`)
 
@@ -1004,6 +1004,18 @@ progress, while a job that keeps progressing runs as long as it likes. Both clos
 like a `deactivate` (`closed_by` `auto`, agents left, marker removed) and show in `status --all`.
 `swarm wait --for DURATION` bounds a wait: until it expires it shields the job from the orphan rule
 only, never from the stall limit.
+
+The orphan rule never applies to a job with a goal and no `met` verdict, and neither does the
+stall limit unless that job was given its own (`activate --stall-hours N`; then it closes as
+`failed`, `auto-closed: no progress for N h; goal not met`): its orchestrator may sit between
+rounds or on a question for hours with no live subagent, so otherwise only the judge's `met` or a
+person (`swarm deactivate`) ends it; `status` shows it as `idle`. Anyone can resume it
+(`activate --attach`, spawning agents, the judge seat) without the orchestrator. For the other jobs "no live agents" is kept honest: the orphan rule closes only when the
+sweep has the job's marker (another user's or machine's sweep can't see the orchestrating session),
+the session's process is not running (Claude Code's `~/.claude/sessions/<pid>.json`; a session
+blocked on a question makes no tool call, so its `.seen` heartbeat goes stale), and no hook on this
+machine logged a board connection failure within the window (agents whose hooks couldn't reach the
+database look dead).
 
 **Where it runs.** No daemon: the sweep runs from commands that already run now and then:
 `status`, `purge`, `join` and `activate`, `watch` and `tail` (at most once a minute), and the

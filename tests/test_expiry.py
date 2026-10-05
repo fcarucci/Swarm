@@ -65,13 +65,13 @@ class ExpiryContract:
         self.assertEqual(self.sweep(), [])   # closed once
 
     def test_outcome_carries_the_last_verdict(self):
+        # (a met verdict: a job whose goal is not met is never closed by the sweep, see below)
         self.job(age=5 * HOUR, agents={"j1": 0}, goal="ship it")
         self.assertTrue(self.b.claim_judge("j1", "j"))
-        self.assertTrue(self.b.record_verdict("j", self.b.active_agent_name("j1"), "not_met",
-                                              "tests fail", "fix them"))
+        self.assertTrue(self.b.record_verdict("j", self.b.active_agent_name("j1"), "met", "tests pass", None))
         self.h.backdate_job("j", verdict_at=4 * HOUR + MIN)
         self.sweep()
-        self.assertEqual(self.status().outcome, "auto-closed: no progress for 4 h; last verdict not_met: tests fail")
+        self.assertEqual(self.status().outcome, "auto-closed: no progress for 4 h; last verdict met: tests pass")
 
     def test_a_job_within_its_limit_stays_open(self):
         self.job(age=3 * HOUR, agents={"a": 0})
@@ -94,7 +94,8 @@ class ExpiryContract:
         # ...for the limit: 4 h after the progress it is stalled again
         self.h.backdate_job("judged", verdict_at=4 * HOUR + MIN)
         self.h.backdate_agent("b", joined_at=5 * HOUR)
-        self.assertEqual(sorted(c.job for c in self.sweep()), ["joined", "judged"])
+        self.assertEqual(sorted(c.job for c in self.sweep()), ["joined"])   # "judged" has a goal: never
+        self.assertEqual(self.status("judged").status, "active")
 
     def test_heartbeats_tool_calls_and_system_posts_are_not_progress(self):
         self.job(age=9 * HOUR, agents={"a": 0})
@@ -167,9 +168,97 @@ class ExpiryContract:
         self.assertEqual([c.job for c in self.sweep()], ["j"])
         self.assertEqual(self.status().status, "cancelled")
 
-    def test_an_unmet_goal_does_not_shield_an_orphan(self):
+    # ---- a job with a goal ends with the judge's met verdict (or a person), never in a sweep
+    def test_an_unmet_goal_job_is_never_orphan_closed(self):
+        # the regression: astroloom-m0 (goal, orchestrator waiting on a person, every subagent
+        # finished) was cancelled with "no live agents for 30 min"
         self.job(age=2 * HOUR, goal="ship it")
+        self.assertEqual(self.sweep(), [])
+        self.assertEqual(self.sweep(orphan=1), [])
+        self.assertEqual(self.status().status, "active")
+        self.assertIsNone(self.status().outcome)
+
+    def test_an_unmet_goal_job_is_never_orphan_closed_with_dead_agents_or_not_met_verdict(self):
+        self.job(age=3 * HOUR, agents={"jj": 0, "dead": 3 * HOUR}, goal="ship it")
+        self.assertTrue(self.b.claim_judge("jj", "j"))
+        self.assertTrue(self.b.record_verdict("j", self.b.active_agent_name("jj"), "not_met", "no", "fix"))
+        self.h.backdate_agent("jj", last_seen=3 * HOUR)
+        self.assertEqual(self.sweep(), [])
+        self.assertEqual(self.status().status, "active")
+
+    def test_an_unmet_goal_job_is_stall_closed_only_by_its_own_explicit_limit_and_as_failed(self):
+        self.job("default", age=99 * HOUR, agents={"a": 0}, goal="g")
+        self.job("own", age=99 * HOUR, agents={"b": 0}, goal="g")
+        self.b.set_job_max_hours("own", 1)
+        self.assertEqual([c.job for c in self.sweep()], ["own"])
+        self.assertEqual(self.status("default").status, "active")
+        self.assertEqual((self.status("own").status, self.status("own").outcome),
+                         ("failed", "auto-closed: no progress for 1 h; goal not met"))
+
+    def test_goal_job_with_all_workers_completed_and_no_judge_stays_open(self):
+        self.job(age=3 * HOUR, agents={"w1": 0, "w2": 0}, goal="ship it")
+        for k in ("w1", "w2"):
+            self.b.agent_stopped(k)   # completed
+            self.h.backdate_agent(k, last_seen=3 * HOUR)
+        self.assertEqual({a.status for a in self.b.agents("j")}, {"completed"})
+        self.assertEqual(self.sweep(), [])
+        self.assertEqual(self.b.sweep_auto_close(30), [])
+        self.assertEqual(self.status().status, "active")
+
+    def test_goal_job_stays_open_when_the_sweep_cannot_see_or_the_orchestrator_is_gone(self):
+        class Blind:
+            def __init__(self, job):
+                pass
+
+            def can_tell(self):
+                return False
+
+            def active(self):
+                return False
+
+        self.job(age=3 * HOUR, goal="ship it")
+        self.assertEqual(self.sweep(watch=Blind), [])
+        self.assertEqual(self.b.sweep_auto_close(30, Blind), [])
+        self.assertEqual(self.status().status, "active")
+
+    def test_goal_job_empty_for_hours_stays_open_and_anyone_can_resume_it(self):
+        self.job(age=99 * HOUR, goal="ship it")
+        self.h.backdate_job("j", created_at=100 * HOUR)
+        self.assertEqual(self.sweep(), [])
+        self.assertEqual(self.sweep(cap=0), [])
+        self.assertEqual(self.status().status, "active")
+        # no orchestrator: a new agent joins, takes the judge seat, and a met verdict is recorded
+        self.b.allocate_name("late", "j")
+        self.assertTrue(self.b.claim_judge("late", "j"))
+        self.assertTrue(self.b.record_verdict("j", self.b.active_agent_name("late"), "met", "done", None))
+        self.assertEqual(self.status().verdict, "met")
+
+    def test_a_met_goal_job_is_still_swept_and_a_changed_goal_is_guarded_again(self):
+        self.job(age=2 * HOUR, agents={"jj": 0}, goal="ship it")
+        self.assertTrue(self.b.claim_judge("jj", "j"))
+        self.assertTrue(self.b.record_verdict("j", self.b.active_agent_name("jj"), "met", "ok", None))
+        self.h.backdate_agent("jj", last_seen=2 * HOUR)
         self.assertEqual([c.job for c in self.sweep()], ["j"])
+        self.job("k", age=2 * HOUR)            # no goal: the orphan rule still applies
+        self.assertEqual([c.job for c in self.sweep()], ["k"])
+        self.job("m", age=2 * HOUR)
+        self.b.set_job_goal("m", "now with a goal")
+        self.assertEqual(self.sweep(), [])
+
+    def test_a_watch_that_cannot_tell_never_closes(self):
+        class Blind:
+            def __init__(self, job):
+                pass
+
+            def can_tell(self):
+                return False
+
+            def active(self):
+                return False
+
+        self.job(age=2 * HOUR)
+        self.assertEqual(self.sweep(watch=Blind), [])
+        self.assertEqual(self.status().status, "active")
 
     def test_orphan_rule_off_at_zero(self):
         self.job(age=2 * HOUR)
@@ -324,6 +413,76 @@ class ExpiryCliTests(Env):
         self.age("J", 40 * MIN)
         rc, out, _ = self.cli("purge")
         self.assertIn("J: auto-closed: no live agents for 30 min", out)
+        self.assertEqual(self.job().status, "cancelled")
+
+    # ---- a goal job is never closed by a sweep; "no live agents" needs evidence the orchestrator is gone
+    def test_a_goal_job_survives_every_sweep(self):
+        self.activate("J", "--goal", "ship it")
+        self.age("J", 40 * MIN)
+        _, out, _ = self.cli("purge")
+        self.assertNotIn("auto-closed", out)
+        self.age("J", 99 * HOUR)
+        self.cli("status")
+        self.assertEqual(self.job().status, "active")
+
+    def test_an_idle_goal_job_can_be_attached_to_by_any_session(self):
+        self.activate("J", "--goal", "ship it")
+        self.age("J", 99 * HOUR)
+        self.markers.joinpath("J.json").unlink()      # the orchestrator's session is gone
+        self.cli("purge")
+        self.cli("status")
+        self.assertEqual(self.job().status, "active")
+        rc, _, err = self.cli("activate", "--job", "J", "--attach", "--session", "22222222-3333-4444-5555-666666666666")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.job().status, "active")
+
+    def test_a_sweep_that_cannot_see_the_orchestrator_does_not_orphan_close(self):
+        # another OS user's (or machine's) hooks sweep too, and have no marker of this job
+        self.activate()
+        self.age("J", 40 * MIN)
+        self.markers.joinpath("J.json").unlink()
+        self.cli("purge")
+        self.assertEqual(self.job().status, "active")
+
+    def test_a_board_outage_in_the_hook_log_keeps_the_job_open(self):
+        import time
+        self.activate()
+        self.age("J", 40 * MIN)
+        self.error_log.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.error_log.parent, 0o700)
+        old = time.strftime("%F %T", time.localtime(time.time() - 3 * HOUR))
+        self.error_log.write_text(f"{old} turn a1: OperationalError: no reply from the server\n")
+        self.cli("purge")
+        self.assertEqual(self.job().status, "cancelled")           # an old outage proves nothing
+        self.activate()                                              # reopen
+        self.age("J", 40 * MIN)
+        now = time.strftime("%F %T", time.localtime(time.time() - 5 * MIN))
+        self.error_log.write_text(f"{now} turn a1: OperationalError: no reply from the server\n")
+        self.cli("purge")
+        self.assertEqual(self.job().status, "active")
+
+    def test_a_live_orchestrator_session_keeps_the_job_open(self):
+        import json
+        from swarm import liveness
+        sid = "11111111-2222-3333-4444-555555555555"
+        cfgdir = self.tmp / "claude"
+        (cfgdir / "sessions").mkdir(parents=True)
+        os.environ["CLAUDE_CONFIG_DIR"] = str(cfgdir)
+        self.addCleanup(os.environ.pop, "CLAUDE_CONFIG_DIR", None)
+        self.activate("J", "--session", sid)
+        self.age("J", 40 * MIN)
+        reg = cfgdir / "sessions" / f"{os.getpid()}.json"
+        reg.write_text(json.dumps({"pid": os.getpid(), "sessionId": sid,
+                                   "procStart": liveness._proc_start(os.getpid())}))
+        self.assertTrue(liveness.claude_session_alive(sid))
+        self.cli("purge")
+        self.assertEqual(self.job().status, "active")   # blocked on a question: no tool call, still alive
+        # the process is gone (or the pid was recycled): nobody is there
+        gone = cfgdir / "sessions" / "999999.json"
+        reg.unlink()
+        gone.write_text(json.dumps({"pid": 999999, "sessionId": sid, "procStart": "1"}))
+        self.assertFalse(liveness.claude_session_alive(sid))
+        self.cli("purge")
         self.assertEqual(self.job().status, "cancelled")
 
     def test_wait_for_bounds_the_wait(self):

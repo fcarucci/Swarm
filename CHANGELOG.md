@@ -4,6 +4,12 @@ All notable changes to swarm, newest first. Each release's notes on GitHub are t
 section here, so every release adds a `## [x.y.z] - YYYY-MM-DD` section (see `scripts/release-notes.sh`).
 Keep entries short and user-facing: one line per change, what it does, not how.
 
+## [Unreleased]
+
+### Fixed
+- A job with a goal is never auto-closed before the judge's `met` verdict: the "no live agents for 30 min" (cancelled) close skips it and the "no progress for N h" (failed) close skips it unless the job has its own `--stall-hours`, so an orchestrator waiting on a question or between rounds no longer loses its job.
+- "No live agents" no longer closes a job whose orchestrating Claude Code session is still running, one this sweep has no marker for (another user's or machine's hook sweeps), or while hooks on this machine log board connection failures.
+
 ## [0.1.14] - 2026-10-02
 
 ### Fixed

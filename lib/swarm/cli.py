@@ -364,7 +364,7 @@ def sweep_jobs(board, cfg: dict, deadline: float | None = None) -> list:
     stall_hours, orphan_minutes = job_limits(cfg)
     try:   # best effort: never fails the caller (a per-job cap applies even with the defaults off)
         closed += board.sweep_expiry(stall_hours, orphan_minutes,
-                                     lambda job: OrchestratorWatch(cfg, orphan_minutes, job))
+                                     lambda job: OrchestratorWatch(cfg, orphan_minutes, job, live_session=True))
     except Exception as exc:
         from swarm.board import BoardUnavailable
         if isinstance(exc, BoardUnavailable):
@@ -503,16 +503,34 @@ class OrchestratorWatch:
     touches never wait for it. Only this machine's markers: another machine's sweep can't see
     them (a job waiting on something there says so with `swarm wait`)."""
 
-    def __init__(self, cfg: dict, minutes: float, job: str):
-        self.cfg, self.job = cfg, job
+    def __init__(self, cfg: dict, minutes: float, job: str, live_session: bool = False):
+        self.cfg, self.job, self.live_session, self.minutes = cfg, job, live_session, minutes
         mdir = Path(cfg["hook"]["marker_dir"]).expanduser()
         self.since_ns = int((time.time() - minutes * 60) * 1e9)
         self.markers = [p for p in (sorted(mdir.glob("*.json")) if mdir.is_dir() else [])
                         if _read_marker(p).get("job") == job]
         self.stamps = {p: _mtime_ns(orchestrator_seen_path(p)) for p in self.markers}
+        self.sessions = [m.get("session_id") for m in map(_read_marker, self.markers)
+                         if isinstance(m, dict) and "resume" not in m and m.get("session_id")]
+
+    def can_tell(self) -> bool:
+        """Whether this sweep can see the job's orchestrating session at all: it has a marker
+        of the job. Another user's or machine's sweep has none, and an orchestrator it can't see
+        is not one it may call gone."""
+        return bool(self.markers)
 
     def active(self) -> bool:
         if any(ns is not None and ns >= self.since_ns for ns in self.stamps.values()):
+            return True
+        # Agents that look dead may be alive behind a hook that couldn't reach the database:
+        # while hooks on this machine logged a board connection failure within the window, the
+        # rows prove nothing.
+        from swarm import liveness
+        if liveness.board_outage_since(self.since_ns / 1e9):
+            return True
+        # The orchestrating session itself, blocked on a question or waiting for a person at the
+        # prompt, makes no tool call (no .seen touch) but is the job's owner, and alive.
+        if self.live_session and any(liveness.claude_session_alive(sid) for sid in self.sessions):
             return True
         # a post (or wait) queued here within the window and not delivered yet: a sandboxed
         # agent without network is still at work

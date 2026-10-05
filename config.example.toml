@@ -81,6 +81,8 @@ auto_close_minutes = 30
 #   not. Progress: an agent posted on the board, recorded a verdict or joined; tool calls and
 #   heartbeats don't count. A job that keeps progressing runs as long as it likes.
 #   `swarm activate --stall-hours N` sets one job's own limit (0 = never).
+#   A job with a goal and no `met` verdict is never closed by the orphan rule, nor by the
+#   stall limit unless it has its own `--stall-hours`.
 # orphan_minutes: a job with no live agent (all completed, left or dead, or none; waiting jobs
 #   included) and no board activity for this long is closed as cancelled.
 stall_hours = 4
