@@ -25,6 +25,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def suite_child(failure_file, backend, run):
+    import tempfile
+    run_temp = Path(failure_file).parent / 'tmp' / f'{backend}-{run:02d}'
+    run_temp.mkdir(parents=True, exist_ok=True)
+    os.environ['TMPDIR'] = str(run_temp)
+    tempfile.tempdir = None
     sys.path.insert(0, str(ROOT / 'tests'))
     class RecordedResult(unittest.TextTestResult):
         def record(self, test, err):
