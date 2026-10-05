@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Three independent offline suites; PostgreSQL follows them. Shared CPU load lasts throughout.
+# Three offline suites; PostgreSQL reuses the memory slot when it finishes. Shared load lasts throughout.
 set -u
 if [[ "${1:-}" == "--help" || $# -lt 1 || $# -gt 3 ]]; then
     echo 'Usage: PYTHON=/path/to/python PG_BIN=/path/to/pg/bin scripts/stress-tests.sh OUTPUT [OFFLINE_RUNS=15] [POSTGRES_RUNS=8]'
@@ -42,15 +42,15 @@ for backend in memory file sqlite; do
         > "$output/$backend-console.log" 2>&1 &
     test_pids+=("$!")
 done
-for pid in "${test_pids[@]}"; do wait "$pid" || failed=1; done
-test_pids=()
+wait "${test_pids[0]}" || failed=1
+test_pids=("${test_pids[1]}" "${test_pids[2]}")
 pg_args=()
 if [[ -n "${PG_BIN:-}" ]]; then pg_args=(--pg-bin "$PG_BIN"); fi
 "$python" "$root/scripts/stress-tests.py" --backends postgres --postgres-runs "$pg_runs" \
     --load-workers 0 --timeout "$timeout" --output "$output/postgres" "${pg_args[@]}" \
     > "$output/postgres-console.log" 2>&1 &
-test_pids=("$!")
-wait "${test_pids[0]}" || failed=1
+test_pids+=("$!")
+for pid in "${test_pids[@]}"; do wait "$pid" || failed=1; done
 test_pids=()
 "$python" - "$output" <<'PY' || failed=1
 from collections import Counter
