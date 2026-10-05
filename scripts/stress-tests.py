@@ -127,6 +127,8 @@ def main():
         metadata = dict(commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT,
                         text=True).strip(), load_workers=args.load_workers,
                         load_pids=[worker.pid for worker in workers], backends=args.backends,
+                        no_color_present='NO_COLOR' in os.environ,
+                        no_color_nonempty=bool(os.environ.get('NO_COLOR')),
                         runs=args.runs, postgres_runs=args.postgres_runs)
         (output / 'metadata.json').write_text(json.dumps(metadata, indent=2))
         for backend in args.backends:
