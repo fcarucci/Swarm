@@ -4,6 +4,20 @@ All notable changes to swarm, newest first. Each release's notes on GitHub are t
 section here, so every release adds a `## [x.y.z] - YYYY-MM-DD` section (see `scripts/release-notes.sh`).
 Keep entries short and user-facing: one line per change, what it does, not how.
 
+## [0.1.16] - 2026-10-05
+
+0.1.15's binary release (GitHub assets) was skipped because its CI failed on Windows; 0.1.16 carries everything in 0.1.15 plus these fixes.
+
+### Fixed
+- `swarm watch` on Windows: the event-driven loop used `select()` on stdin, which Windows does not support (OSError 10038). Windows keeps the plain redraw loop (no keys; Ctrl-C quits, the footer says so); the pty/pipe watch tests are skipped there.
+- `swarm init`/`upgrade` against a busy Postgres board failed with DeadlockDetected: the schema setup now sets a short `lock_timeout` and retries a deadlock or lock timeout up to 5 times with a growing pause, noting each retry on stderr.
+- A goal job without a met verdict was closed "auto-closed: no live agents" by an older client still running (a `swarm watch` pane or session on an earlier version): the Postgres board now refuses that close itself (trigger `jobs_keep_goal_jobs`, installed by the next `swarm init`).
+
+### Known limits
+- Windows `watch` has no key input yet.
+- The setup's `lock_timeout` is session-level, so behind a transaction-mode pooler it may not apply (the deadlock retry still does).
+- The schema-retry tests mock the deadlock; none provokes a real one.
+
 ## [0.1.15] - 2026-10-05
 
 ### Fixed

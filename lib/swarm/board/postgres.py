@@ -107,6 +107,20 @@ CREATE TRIGGER agents_state_notify AFTER INSERT OR UPDATE OR DELETE ON agents
 DROP TRIGGER IF EXISTS jobs_state_notify ON jobs;
 CREATE TRIGGER jobs_state_notify AFTER INSERT OR UPDATE OR DELETE ON jobs
     FOR EACH STATEMENT EXECUTE FUNCTION swarm_state_notify();
+-- Older clients (still running: a `swarm watch` pane, a session's hooks) sweep with the old orphan rule
+-- and would close a goal job without a met verdict as "auto-closed: no live agents". The board refuses
+-- that one close itself (the row is left as it is), whatever version asks.
+CREATE OR REPLACE FUNCTION swarm_keep_goal_jobs() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.status <> 'active' AND OLD.status = 'active' AND NEW.goal IS NOT NULL AND length(NEW.goal) > 0
+       AND NEW.verdict IS DISTINCT FROM 'met' AND NEW.closed_by = 'auto'
+       AND NEW.outcome LIKE 'auto-closed: no live agents%' THEN
+        RETURN NULL;
+    END IF;
+    RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS jobs_keep_goal_jobs ON jobs;
+CREATE TRIGGER jobs_keep_goal_jobs BEFORE UPDATE ON jobs FOR EACH ROW EXECUTE FUNCTION swarm_keep_goal_jobs();
 DO $$ BEGIN
     ALTER TABLE jobs ADD CONSTRAINT jobs_status_check
         CHECK (status IN ('active', 'paused', 'completed', 'cancelled', 'failed'));

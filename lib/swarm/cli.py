@@ -1819,7 +1819,8 @@ def _watch_header(board, job: str | None, interval: float, color: bool, interact
         scope = f"session {term_safe(session)[:8]}" + (f" · job {term_safe(job)}" if job else "")
     agents_key = "v show agents" if hide_agents else "v hide agents"
     keys = (f"↑/↓ PgUp/PgDn history, G live, ←/→ Home/End sideways, w wrap, a all agents, "
-            f"{agents_key}, q quit" if interactive else "Ctrl-C to quit")
+            f"{agents_key}, q quit" if interactive else
+            "Ctrl-C to quit (keys unavailable on Windows)" if compat.IS_WINDOWS else "Ctrl-C to quit")
     db = f" · db: {db_label}" if db_label else ""
     out = [_bold(f"swarm watch · {scope}{db} · {dt.datetime.now().strftime('%H:%M:%S')}", color)
            + f"   (refresh ≤{interval:g}s · {keys})", ""]
@@ -2313,7 +2314,7 @@ def _watch_loop_threaded(board, out, fd, interval: float, view: dict, draw, refr
 
     sel = selectors.DefaultSelector()
     sel.register(rd_sock, selectors.EVENT_READ, on_event)
-    if fd is not None and not compat.IS_WINDOWS:   # Windows cannot select() on stdin (cmd_watch passes fd=None there)
+    if fd is not None:   # (cmd_watch passes fd=None on Windows, which cannot select() on stdin)
         sel.register(fd, selectors.EVENT_READ, on_keys)
     winch_set, old_winch = False, None
     if hasattr(signal, "SIGWINCH") and threading.current_thread() is threading.main_thread():
