@@ -853,7 +853,8 @@ class BoundedRecallTests(HindsightEnv):
         self.assertIn("old fact", self.start())
         self.enable(url=self.fake.url.replace("127.0.0.1", "hindsight.test"))
         self.backdate("agent-1", memory_recalled_at=16)             # a recall is due
-        self.cli("post", "--job", "J", "--as", "Someone", "hello")
+        someone = self.peer()
+        self.cli("post", "--job", "J", "--as", someone, "hello")
         import socket
         real = socket.getaddrinfo
 
@@ -869,7 +870,7 @@ class BoundedRecallTests(HindsightEnv):
             elapsed = time.monotonic() - t0
         self.assertLess(elapsed, swarm_hooks.HOOK_RECALL_SECONDS + 0.7)
         self.assertLessEqual(swarm_hooks.HOOK_RECALL_SECONDS, 2)
-        self.assertIn("Someone: hello", ctx)                        # the hook carried on
+        self.assertIn(f"{someone}: hello", ctx)                        # the hook carried on
         self.assertNotIn("[swarm memory] new memories", ctx)
         self.assertEqual(len(self.fake.calls("POST", "/memories/recall")), recalls)
         self.assertFalse((self.spool_dir / ".hindsight-unreachable").exists())
@@ -1203,7 +1204,8 @@ class FileBoardChainTests(ProbeEnv):
             f'[board]\nbackend = "file"\nspool_dir = {tq(f"{self.state}/spool")}\n'
             f'[file]\npath = "~/.local/state/swarm/board"\n')
         env = {"SWARM_AUTO_INIT": "1"}
-        r = self.swarm("post", "--job", "j", "--as", "Lisa Simpson", "first post", extra_env=env)
+        lisa = self.swarm("join", "--job", "j", "--key", "k1", extra_env=env).stdout.strip()
+        r = self.swarm("post", "--job", "j", "--as", lisa, "first post", extra_env=env)
         board = self.state / "board"
         self.assertTrue((board / "messages.jsonl").is_file(), r.stdout + r.stderr)
         rc_file = self.home / "victim_rc"          # dangling: e.g. ~/.bash_aliases
@@ -1212,11 +1214,11 @@ class FileBoardChainTests(ProbeEnv):
         existing = self.home / "victim_existing_rc"
         existing.write_text("# original\n")
         (board / "state.json.tmp").unlink(missing_ok=True)
-        self.swarm("post", "--job", "j", "--as", "Lisa Simpson", f"hello $({SENTINEL})", extra_env=env)
+        self.swarm("post", "--job", "j", "--as", lisa, f"hello $({SENTINEL})", extra_env=env)
         self.assertFalse(rc_file.exists(), "the post was appended through the dangling link")
         (board / "messages.jsonl").unlink()
         (board / "messages.jsonl").symlink_to(existing)
-        self.swarm("post", "--job", "j", "--as", "Lisa Simpson", f"again $({SENTINEL})", extra_env=env)
+        self.swarm("post", "--job", "j", "--as", lisa, f"again $({SENTINEL})", extra_env=env)
         self.assertEqual(existing.read_text(), "# original\n", "the post was appended through the link")
         self.assertNotIn(SENTINEL, (board / "messages.old").read_text())
 
@@ -1446,7 +1448,8 @@ class LooseLocalDirsTests(ProbeEnv):
                    "cwd": str(self.home)}
         r = self.swarm("hook", "--host", "claude", "start", stdin=json.dumps(payload))
         self.assertIn("[swarm] You are", r.stdout, r.stderr)                  # the hooks are not inert
-        r = self.swarm("post", "--job", "J", "--as", "Somebody", "hello")
+        somebody = self.swarm("join", "--job", "J", "--key", "k1").stdout.strip()
+        r = self.swarm("post", "--job", "J", "--as", somebody, "hello")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("queued", r.stdout)
         r = self.swarm("read", "--job", "J", "--key", "agent-1")          # joined before the post

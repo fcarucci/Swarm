@@ -236,7 +236,7 @@ def cmd_init(cfg: dict, args) -> int:
 
 
 # Commands that don't set the board up by themselves first (see auto_init).
-NO_AUTO_INIT = ("init", "install-hooks", "hook", "spool", "bootstrap", "migrate", "doctor", "notices",
+NO_AUTO_INIT = ("plugins", "init", "install-hooks", "hook", "spool", "bootstrap", "migrate", "doctor", "notices",
                 "upgrade", "update")
 
 
@@ -304,6 +304,44 @@ def parse_duration(text: str) -> float:
     if seconds <= 0:
         raise ValueError("a duration must be more than zero")
     return seconds
+
+
+def wait_deadline(for_: str | None, until: str | None, now: float | None = None) -> float | None:
+    """The epoch time a `swarm wait` ends: now + --for, or --until (a duration like --for, a local
+    time of day "17:30" (the next one), or a date and time "2026-10-06 09:00" / ISO with an
+    offset). None when neither is given. ValueError for both, a bad value, or a time in the past."""
+    import datetime as dt
+    now = time.time() if now is None else now
+    if for_ is not None and until is not None:
+        raise ValueError("give --for or --until, not both")
+    if for_ is not None:
+        try:
+            return now + parse_duration(for_)
+        except ValueError as exc:
+            raise ValueError(f"--for: {exc}") from None
+    if until is None:
+        return None
+    text = until.strip()
+    try:
+        return now + parse_duration(text)
+    except ValueError:
+        pass
+    here = dt.datetime.fromtimestamp(now).astimezone()
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", text)
+    try:
+        if m:
+            at = here.replace(hour=int(m[1]), minute=int(m[2]), second=0, microsecond=0)
+            if at <= here:
+                at += dt.timedelta(days=1)
+        else:
+            at = dt.datetime.fromisoformat(text)
+            if at.tzinfo is None:
+                at = at.astimezone()
+    except ValueError:
+        raise ValueError(f"not a time or duration: {text!r} (like 90m, 2h, 17:30, 2026-10-06 09:00)") from None
+    if at.timestamp() <= now:
+        raise ValueError("that time is in the past")
+    return at.timestamp()
 
 
 def _duration_text(seconds: float) -> str:
@@ -944,12 +982,20 @@ def _compact_status(board, j, now) -> str:
     return word if word == WAITING_GOAL else j.status
 
 
+def _until_note(j, now) -> str:
+    """", until HH:MM" for a bounded wait (it shields the job from auto-close until then), else ""."""
+    if not j.waiting_on or j.waiting_until is None:
+        return ""
+    left = (j.waiting_until - now).total_seconds()
+    return f" · until {j.waiting_until.astimezone().strftime('%H:%M')}" + ("" if left > 0 else " (expired)")
+
+
 def _waiting_word(j, now) -> str:
     """The WAITING ON column: what the job waits for and for how long, "" if it isn't waiting."""
     if not j.waiting_on:
         return ""
     since = _ago(j.waiting_since, now).removesuffix(" ago")
-    return f"{j.waiting_on} · {since}"
+    return f"{j.waiting_on} · {since}" + _until_note(j, now)
 
 
 def open_and_paused(board, include_closed: bool) -> list:
@@ -1028,7 +1074,9 @@ def job_detail(board, job: str, color: bool, recent_minutes: int | None = None, 
     head = [f"job        {ts(job)}  [{_paint_status(shown, shown, color)}]", activated,
             f"activity   {j.messages} messages, last {_ago(j.last_activity_at, now)}"]
     # (field value, its line): a line is shown only when its field is set.
-    optional = ((j.waiting_on, f"waiting    on {ts(j.waiting_on)}, since {_ago(j.waiting_since, now)}"),
+    optional = ((j.waiting_on, f"waiting    on {ts(j.waiting_on)}, since {_ago(j.waiting_since, now)}"
+                                   + (f", until {j.waiting_until.astimezone().strftime('%Y-%m-%d %H:%M')} "
+                                      f"(protected from auto-close)" if j.waiting_until else "")),
                 (shown == WAITING_GOAL, "waiting    for an agent, the judge's met or a person (not auto-closed)"),
                 (j.finished_at, f"finished   {_ago(j.finished_at, now)}" + _closed_by_note(j)),
                 (j.description, f"about      {ts(j.description)}"),
@@ -2479,8 +2527,12 @@ def _parser() -> argparse.ArgumentParser:
                       help="take the job's judge seat (for agents outside Claude Code, which get no hooks)")
     seat.add_argument("--verifier", action="store_true",
                       help="join as a read-only verifier (for agents outside Claude Code)")
-    po = sub.add_parser("post"); po.add_argument("--job", required=True); po.add_argument("--as", dest="name", required=True)
-    po.add_argument("--to"); po.add_argument("message", nargs="+")
+    po = sub.add_parser("post", help="post a message; --to NAME, or --to @EL|@PM|@QA|@judge|@<role> for "
+                                     "whoever holds that seat now (rejected if nobody does)")
+    po.add_argument("--job", required=True); po.add_argument("--as", dest="name")
+    po.add_argument("--key", help="the agent's key (instead of --as: its name is looked up)")
+    po.add_argument("--to", help="an agent's name, or @role (@EL, @PM, @QA, @judge, @build_engineer, ...)")
+    po.add_argument("message", nargs="+")
     rd = sub.add_parser("read"); rd.add_argument("--as", dest="name"); rd.add_argument("--key")
     rd.add_argument("--job"); rd.add_argument("--peek", action="store_true", help="don't advance the cursor")
     w = sub.add_parser("who"); w.add_argument("--job", required=True)
@@ -2537,6 +2589,9 @@ def _parser() -> argparse.ArgumentParser:
     wt.add_argument("--for", dest="for_", metavar="DURATION",
                     help="the wait expires after this long (90m, 2h, 1h30m; a bare number is minutes); "
                          "then the job is judged as not waiting")
+    wt.add_argument("--until", metavar="TIME",
+                    help="like --for, but a time: a duration, a time of day (17:30, the next one) or a date "
+                         "and time (2026-10-06 09:00)")
     wt.add_argument("--on", nargs="+", required=True, help="what the job is waiting for")
     pz = sub.add_parser("pause", help="pause a job: stop new joins and posts, record every agent and "
                                       "store its final transcript, so `swarm resume` can continue it anywhere")
@@ -2600,9 +2655,50 @@ def _parser() -> argparse.ArgumentParser:
     mr = mems.add_parser("refs", help="recorded memory references (provenance)")
     mr.add_argument("--job"); mr.add_argument("--agent", help="agent name")
     mr.add_argument("--check", action="store_true", help="ask Hindsight whether each memory still exists")
+    sub.add_parser("plugins", help="list the CLI plugins found, the commands they add and why one failed to load")
     hk = sub.add_parser("hook"); hk.add_argument("--host", choices=["claude", "codex"]); hk.add_argument("event", choices=["start", "turn", "done", "stop", "session-start", "session-stop"])
+    p._swarm_subparsers = sub   # for plugins.Registry.apply
     sub.metavar = "{" + ",".join(k for k in sub.choices if k != "update") + "}"   # hide the alias
     return p
+
+
+PLUGINS = None   # the plugins.Registry of this run (set by _main; None: no plugins, e.g. in a hook)
+
+
+def _load_plugins(argv, parser: argparse.ArgumentParser):
+    """Find the CLI plugins (swarm.plugins) and add their commands and arguments to `parser`.
+    Nothing here may fail a core command: not for the hooks (they load none), not for a broken
+    config (then no plugin is disabled), not for a plugin."""
+    global PLUGINS
+    from swarm import plugins
+    PLUGINS = None
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    try:
+        known, rest = pre.parse_known_args(argv)
+        if rest[:1] == ["hook"]:
+            return None
+        try:
+            cfg = load_config(known.config)
+        except Exception:
+            cfg = {}
+        sub = parser._swarm_subparsers
+        reg = plugins.Registry(cfg, known.config, core_commands=tuple(sub.choices)).load()
+        reg.apply(sub)
+        PLUGINS = reg
+    except Exception as exc:   # discovery itself broke: run without plugins
+        PLUGINS = None
+        from swarm import transcripts as _t
+        _t.log(f"plugins: discovery failed: {type(exc).__name__}")
+    return PLUGINS
+
+
+def cmd_plugins(cfg: dict, args) -> int:
+    from swarm import plugins
+    reg = PLUGINS or plugins.Registry(cfg)
+    for line in reg.report():
+        print(term_safe(line))
+    return 0
 
 
 def _use_color(args) -> bool:
@@ -3093,6 +3189,7 @@ COMMANDS = {
     "upgrade": cmd_update,
     "update": cmd_update,      # the old name, a hidden alias
     "activate": cmd_activate,
+    "plugins": cmd_plugins,
     "deactivate": cmd_deactivate,
     "hook": _cmd_hook,
     "notices": cmd_notices,
@@ -3300,17 +3397,28 @@ def _moved_job(board, job: str, name: str) -> str | None:
 
 
 def _board_post(board, cfg: dict, args) -> int | None:
+    if not args.name and args.key:
+        args.name = board.active_agent_name(getattr(args, "key", None))
+    if not args.name:
+        print("swarm post: give --as NAME (or a --key that belongs to an agent)", file=sys.stderr)
+        return 2
     job = _moved_job(board, args.job, args.name)
     if job:
         print(f"note: {term_safe(args.name)} is on {job} now, not on {args.job}: posting there. "
               f"Use --job {job} from now on.", file=sys.stderr)
         args.job = job
+    from swarm import addressing
     try:
-        res = board.post(args.job, args.name, " ".join(args.message), args.to)
-    except ValueError as exc:   # a name the board refuses (board.base.valid_name)
+        addressing.check_author(board, args.job, args.name, getattr(args, "key", None))
+        targets = addressing.resolve(board, args.job, args.to) if args.to else [None]
+        results = [board.post(args.job, args.name, " ".join(args.message), t) for t in targets]
+    except ValueError as exc:   # a refused name (board.base.valid_name) or an AddressError
         print(f"not posted: {term_safe(exc)}", file=sys.stderr)
         return 1
-    print(f"posted #{res.id}" + (f" (truncated to {cfg['board']['message_max_chars']} chars)" if res.truncated else ""))
+    ids = ", ".join(f"#{r.id}" for r in results)
+    to = f" to {args.to} ({', '.join(term_safe(t) for t in targets)})" if args.to and args.to.startswith("@") else ""
+    print(f"posted {ids}{to}" + (f" (truncated to {cfg['board']['message_max_chars']} chars)"
+                                  if any(r.truncated for r in results) else ""))
 
 
 def _verdict_text(args) -> tuple[str, str | None] | None:
@@ -3396,6 +3504,8 @@ def _board_status(board, cfg: dict, args) -> None:
     recent = None if args.all_agents else int(cfg["board"]["watch_recent_minutes"])
     rows = board.transcripts(job=args.job) if enabled and board.job_status(args.job) else None
     print(job_detail(board, args.job, color, recent, "--all-agents to show", rows, sup=sup))
+    for line in (PLUGINS.status_lines(args.job, board) if PLUGINS is not None else ()):
+        print(term_safe(line))
 
 
 def _board_join(board, cfg: dict, args) -> int:
@@ -3425,19 +3535,22 @@ def _board_wait(board, cfg: dict, args) -> int:
     if not on:
         print("say what the job is waiting for: --on \"<what>\"", file=sys.stderr)
         return 1
-    until = None
-    if args.for_ is not None:
-        try:
-            seconds = parse_duration(args.for_)
-        except ValueError as exc:
-            print(f"swarm wait: --for: {exc}", file=sys.stderr)
-            return 2
-        import datetime as dt
-        until = board.now() + dt.timedelta(seconds=seconds)
+    import datetime as dt
+    try:
+        end = wait_deadline(args.for_, args.until)
+    except ValueError as exc:
+        print(f"swarm wait: {exc}", file=sys.stderr)
+        return 2
+    until = None if end is None else dt.datetime.fromtimestamp(end, dt.timezone.utc)
     if not board.set_waiting(args.job, on, until):
         print(f"{args.job} is not an open job", file=sys.stderr)
         return 1
-    bound = f" (for up to {_duration_text(seconds)}; " if until else " ("
+    if until is None:
+        bound = " ("
+    elif args.for_ is not None:
+        bound = f" (for up to {_duration_text(parse_duration(args.for_))}; "
+    else:
+        bound = f" (until {until.astimezone().strftime('%Y-%m-%d %H:%M')}; "
     print(f"{args.job} is waiting on: {on}{bound}back to active when an agent joins, or with resume)")
     return 0
 
@@ -3560,6 +3673,32 @@ def main(argv=None) -> int:
         return 1
 
 
+def _read_job(args) -> str | None:
+    """The job a board-reading command looks at (read, who, status --job, tail --job), else None."""
+    return getattr(args, "job", None) if args.cmd in ("read", "who", "status", "tail") else None
+
+
+def note_orchestrator_read(cfg: dict, args) -> None:
+    """A board read by the orchestrating session counts as contact for liveness: touch the "seen"
+    file of this session's markers of the job read (what its tool-call hooks do too, but hooks are
+    not there on every host or sandbox). Never fails the command."""
+    job = _read_job(args)
+    if not job:
+        return
+    try:
+        from swarm import hosts
+        sid = hosts.cli_session_id(os.environ)
+        if not sid:
+            return
+        mdir = Path(cfg["hook"]["marker_dir"]).expanduser()
+        for path in sorted(mdir.glob("*.json")) if mdir.is_dir() else ():
+            m = _read_marker(path)
+            if m.get("job") == job and m.get("session_id") == sid:
+                mark_orchestrator_seen(path)
+    except Exception:
+        pass
+
+
 def _reads_only(args) -> bool:
     """Whether the command only reads the board, so a standby may serve it when no primary is up."""
     return (args.cmd in ("who", "status") or (args.cmd == "read" and args.peek)
@@ -3574,7 +3713,9 @@ def _main(argv=None) -> int:
     that can't be reached, or a server that is a standby (psycopg's read-only error, SQLSTATE
     25006, e.g. a single-host config pointing at one), is one line on stderr and exit 1."""
     from swarm.board import BoardUnavailable, JobPaused
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    _load_plugins(sys.argv[1:] if argv is None else argv, parser)
+    args = parser.parse_args(argv)
     note = "" if _reads_only(args) else " (this command writes: it needs the primary)"
     try:
         return _dispatch(args)
@@ -3597,17 +3738,36 @@ def _dispatch(args) -> int:
     # a supervise dry run writes nothing: no board setup or migration either
     if args.cmd not in NO_AUTO_INIT and not (args.cmd == "supervise" and (args.dry_run or args.scmd)):
         auto_init(cfg)
+    if PLUGINS is not None:
+        PLUGINS.cfg = cfg
+        if args.cmd in PLUGINS.commands:
+            return PLUGINS.run_command(args.cmd, args)
+        rc = PLUGINS.run_before(args.cmd, args)
+        if rc:
+            return rc
+        rc = _run_command(cfg, args)
+        if not rc:
+            PLUGINS.run_after(args.cmd, args)
+        return rc
+    return _run_command(cfg, args)
+
+
+def _run_command(cfg: dict, args) -> int:
     if args.cmd in COMMANDS:
         return COMMANDS[args.cmd](cfg, args)
 
     from swarm.board import open_board
     from swarm.spool import flush_spool, spool_post, spool_verdict
+    note_orchestrator_read(cfg, args)
     if args.cmd == "verdict" and _verdict_text(args) is None:   # refused before anything is sent or queued
         return 1
     try:
         board_cm = open_board(cfg, readers=_reads_only(args))
     except Exception as exc:  # BoardUnavailable in practice; any failure to open is treated alike
         if args.cmd == "post":  # sandboxed agent: queue it; the next hook call delivers it
+            if not args.name:
+                print("swarm post: give --as NAME (the board can't be reached to look the key up)", file=sys.stderr)
+                return 2
             spool_post(cfg, args.job, args.name, " ".join(args.message), args.to)
             print(f"queued (board not reachable from here: {_error_name(exc)}); it is delivered "
                   f"automatically within seconds by the swarm hooks. This is normal inside a sandbox.")
@@ -3622,11 +3782,11 @@ def _dispatch(args) -> int:
                 return 1
             from swarm.spool import spool_wait
             until = None
-            if args.cmd == "wait" and args.for_ is not None:
+            if args.cmd == "wait":
                 try:
-                    until = time.time() + parse_duration(args.for_)
+                    until = wait_deadline(args.for_, args.until)
                 except ValueError as exc:
-                    print(f"swarm wait: --for: {exc}", file=sys.stderr)
+                    print(f"swarm wait: {exc}", file=sys.stderr)
                     return 2
             spool_wait(cfg, args.job, on, until)
             print(f"queued (board not reachable from here: {_error_name(exc)}); the swarm hooks apply "

@@ -345,7 +345,8 @@ class AutoInitBase:
         self.assertNotIn("hooks", err)
         self.assertEqual(self.settings.read_text(), before)       # the plugin's hooks.json replaces it
         self.assertFalse(list(self.settings.parent.glob("settings.json.pre-swarm-*")))
-        rc, out, err = self.cli("post", "--job", "J", "--as", "Homer Simpson", "hi")
+        name = self.cli("join", "--job", "J", "--key", "k1")[1].strip()
+        rc, out, err = self.cli("post", "--job", "J", "--as", name, "hi")
         self.assertEqual((rc, err), (0, ""))            # nothing to do the second time
 
     def test_cli_init_stays_explicit_and_stamps(self):
