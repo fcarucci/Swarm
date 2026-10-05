@@ -18,6 +18,7 @@ import signal
 import socket
 import subprocess
 import sys
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,9 +44,11 @@ def suite_child(failure_file, backend, run):
                 self.record(subtest, err)
     suite = unittest.defaultTestLoader.discover(str(ROOT / 'tests'))
     print(f'Discovered {suite.countTestCases()} tests for {backend} run {run}', flush=True)
+    suite_started = time.perf_counter()
     result = unittest.TextTestRunner(verbosity=2, resultclass=RecordedResult).run(suite)
     summary = dict(tests_run=result.testsRun, failures=len(result.failures),
-                   errors=len(result.errors), skipped=len(result.skipped))
+                   errors=len(result.errors), skipped=len(result.skipped),
+                   elapsed_seconds=time.perf_counter() - suite_started)
     Path(failure_file).with_name(f'{backend}-{run:02d}-result.json').write_text(
         json.dumps(summary, indent=2))
     return 0 if result.wasSuccessful() else 1
@@ -129,7 +132,8 @@ def main():
                         load_pids=[worker.pid for worker in workers], backends=args.backends,
                         no_color_present='NO_COLOR' in os.environ,
                         no_color_nonempty=bool(os.environ.get('NO_COLOR')),
-                        runs=args.runs, postgres_runs=args.postgres_runs)
+                        runs=args.runs, postgres_runs=args.postgres_runs,
+                        timeout_seconds=args.timeout)
         (output / 'metadata.json').write_text(json.dumps(metadata, indent=2))
         for backend in args.backends:
             for run in range(1, (args.postgres_runs if backend == 'postgres' else args.runs) + 1):
