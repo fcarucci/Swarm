@@ -702,6 +702,17 @@ class ExpiryCliTests(Env):
         self.assertRegex(next(ln for ln in self.cli("status", "--no-color")[1].splitlines() if ln.startswith("G ")),
                          r"^G\s+active\s")
 
+    def test_compact_watch_shows_the_derived_word_only_for_a_waiting_goal_job(self):
+        self.activate("G", "--goal", "ship it")
+        self.activate("P")                             # no goal, idle since 10 minutes: stored status "active"
+        self.age("G", 2 * HOUR)
+        self.age("P", 10 * MIN)
+        self.assertIn("[idle]", self.cli("status", "--job", "P", "--no-color")[1])   # status derives it
+        compact = self.frame(compact=True)
+        self.assertIn("G [waiting (goal not met)]", compact)
+        self.assertIn("P [active]", compact)
+        self.assertNotIn("P [idle]", compact)
+
     def test_wait_for_bounds_the_wait(self):
         self.activate()
         rc, out, _ = self.cli("wait", "--job", "J", "--for", "90m", "--on", "the", "review")

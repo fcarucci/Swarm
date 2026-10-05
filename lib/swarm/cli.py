@@ -936,6 +936,14 @@ def _job_status_word(board, j, now) -> str:
     return derive_job_status(j, float(board.board_cfg.get("idle_minutes", 5)), now)
 
 
+def _compact_status(board, j, now) -> str:
+    """The compact watch's status word: the derived one only for a waiting goal job, else the stored
+    status (a goal-less job keeps showing what it showed before)."""
+    from swarm.board import WAITING_GOAL
+    word = _job_status_word(board, j, now)
+    return word if word == WAITING_GOAL else j.status
+
+
 def _waiting_word(j, now) -> str:
     """The WAITING ON column: what the job waits for and for how long, "" if it isn't waiting."""
     if not j.waiting_on:
@@ -1985,7 +1993,7 @@ def _compact_frame(board, job: str | None, color: bool, view: dict, rows: list |
     if not rows:
         out.append("(no jobs yet)")
     for j in rows:
-        out.append(_bold(f"{term_safe(j.job)} [{_job_status_word(board, j, now)}]", color))
+        out.append(_bold(f"{term_safe(j.job)} [{_compact_status(board, j, now)}]", color))
         agents, hidden = _recent_agents(board.agents(j.job), now, recent)
         out += [_compact_agent_line(a, NATURAL, color) for a in agents]
         if not agents:
