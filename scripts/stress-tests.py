@@ -42,7 +42,7 @@ def suite_child(failure_file, backend, run):
             if err is not None:
                 self.record(subtest, err)
     suite = unittest.defaultTestLoader.discover(str(ROOT / 'tests'))
-    result = unittest.TextTestRunner(verbosity=1, resultclass=RecordedResult).run(suite)
+    result = unittest.TextTestRunner(verbosity=2, resultclass=RecordedResult).run(suite)
     summary = dict(tests_run=result.testsRun, failures=len(result.failures),
                    errors=len(result.errors), skipped=len(result.skipped))
     Path(failure_file).with_name(f'{backend}-{run:02d}-result.json').write_text(
