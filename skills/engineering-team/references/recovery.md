@@ -13,4 +13,4 @@ Each brief states what is authorized and what is not. Secrets are referenced by 
 - Persist every brief as a file and post `BRIEF: <path> tasks: <IDs>`.
 - Keep a roster file mapping each agent ID to its branch and task.
 - Relaunch is idempotent: a replacement resumes the existing branch from its brief and last commit instead of starting over.
-- PM's periodic guard, at each wake: `swarm status --job J`, `swarm activate --job J` again if the job closed early, relaunch lost agents from the roster, and rejoin the board. While truly waiting on CI or a user, set `swarm waiting --job J --reason "<what>" --until <duration>`.
+- PM's periodic guard, at each wake: `swarm status --job J`, `swarm activate --job J` again if the job closed early, relaunch lost agents from the roster, and rejoin the board. While truly waiting on CI or a user, set `swarm wait --job J --on "<what>" --for <duration>` (bounded: only a bounded wait protects the job from auto-close).
