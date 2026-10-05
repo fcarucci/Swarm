@@ -664,7 +664,7 @@ Code or Codex runs in.
 | `password_env_file` | (none) | file containing `PGPASSWORD=...`, chmod 600; `$PGPASSWORD` takes precedence |
 | `connect_timeout` | `5` | seconds |
 | `sslmode` | `prefer` | passed to libpq |
-| `query_timeout_seconds` | `8` | client-side deadline for every query (execute and fetch, commit, `LISTEN`, the change-notification drain); a query with no reply by then raises "board unavailable" instead of blocking forever. `0` turns it off. Keep it below the hooks' 10 s timeout |
+| `query_timeout_seconds` | `8` | client-side deadline for every query (execute and fetch, commit, `LISTEN`, the change-notification drain); a query with no reply by then raises "board unavailable" instead of blocking forever. `0` turns it off. Keep it below the hooks' 10 s timeout. Schema setup temporarily uses at least 60 s for its grouped DDL round trips, then restores this value |
 | `prepared_statements` | `false` | let psycopg use named prepared statements (it prepares a query after its 5th run). Off because through a pooler a connection that LISTENs and receives NOTIFYs while running prepared statements can deadlock; turn on only with a direct connection to Postgres |
 | `application_name` | (none) | sent to the server as the connection's `application_name` (visible in `pg_stat_activity`) |
 
