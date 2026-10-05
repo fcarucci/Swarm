@@ -28,10 +28,12 @@ Derived agent/job status is computed in Python with `derive_agent_status`, from 
 of the config the board was opened with (unlike Postgres, nothing is baked in at `setup`: no
 re-init after changing them). There are no status views in the file.
 
-message_max_chars: SQLite has no varchar(N); the cap is a CHECK (length(message) BETWEEN 1 AND
-N) on the messages table, sized at the FIRST setup. Like Postgres's varchar(N), re-running setup
-does not resize it (SQLite cannot alter a CHECK in place). length() counts characters, as the cap
-does. Raising the cap later means posts longer than the old N fail the CHECK.
+Message cap (schema 15): the board's cap is the board_meta row 'message_max_chars', enforced by
+the BEFORE INSERT trigger check_messages_cap (length() counts characters, as the cap does), so it
+changes with one UPDATE and no table rewrite. Setup seeds it once ([board] message_max_chars for a
+new board; the old table CHECK's N for a board upgraded from schema 14 or earlier, whose table is
+rebuilt once without that CHECK, keeping every row and id) and never resets it. A lowered cap
+leaves stored messages alone: it governs new posts only.
 
 Change notification (watch/tail): no LISTEN/NOTIFY, so triggers bump counters in a one-row-per-
 kind table `board_changes` ("messages" on every message insert, "state" on every agent or job
@@ -67,7 +69,7 @@ from .base import (LEFT_PAUSED, MOVED_PREFIX, PauseRecord, build_manifest, NAME_
                    ROUTE_STATES, TOOL_NAME_MAX, AgentEvent, AgentStatus, Board, BoardError, BoardUnavailable, JobStatus, Member, Message, ReadOnlyBoard, refuse_writes,
                    OwedReply, ReadResult, Route, RosterEntry, SCHEMA_VERSION, SetupResult, SpawnGrant, SyncState,
                    TRANSCRIPT_ROLES, TranscriptImage, TranscriptRow, TranscriptSummary, VERDICTS,
-                   derive_agent_status, load_name_pool)
+                   CapExceeded, configured_message_cap, derive_agent_status, load_name_pool)
 from swarm import compat
 
 _UTC = _dt.timezone.utc
@@ -145,7 +147,7 @@ CREATE TABLE IF NOT EXISTS messages (
     job        TEXT NOT NULL REFERENCES jobs(job) ON DELETE CASCADE,
     agent_name TEXT NOT NULL CHECK (length(agent_name) > 0),
     created_at TEXT NOT NULL,
-    message    TEXT NOT NULL CHECK (length(message) BETWEEN 1 AND {max_chars}),
+    message    TEXT NOT NULL CHECK (length(message) >= 1),
     to_agent   TEXT,
     agent_key  TEXT,
     host       TEXT
@@ -261,6 +263,11 @@ CREATE TABLE IF NOT EXISTS job_pauses (
     outcome      TEXT
 );
 CREATE INDEX IF NOT EXISTS job_pauses_job ON job_pauses (job, id);
+-- Per-board settings (schema 15): 'message_max_chars', the message cap (see the module docstring).
+CREATE TABLE IF NOT EXISTS board_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TRIGGER IF NOT EXISTS check_messages_cap BEFORE INSERT ON messages
+    WHEN length(NEW.message) > (SELECT CAST(value AS INTEGER) FROM board_meta WHERE key = 'message_max_chars')
+    BEGIN SELECT RAISE(ABORT, 'message too long'); END;
 -- Change counters for watch/tail (see the module docstring).
 CREATE TABLE IF NOT EXISTS board_changes (kind TEXT PRIMARY KEY, n INTEGER NOT NULL DEFAULT 0);
 INSERT OR IGNORE INTO board_changes (kind) VALUES ('messages'), ('state');
@@ -415,6 +422,52 @@ def _drop_writer_check(conn: sqlite3.Connection) -> None:
         raise
 
 
+_OLD_CAP = re.compile(r"CHECK\s*\(\s*length\s*\(\s*message\s*\)\s*BETWEEN\s+1\s+AND\s+(\d+)\s*\)", re.I)
+
+
+def _drop_message_check(conn: sqlite3.Connection) -> int | None:
+    """Schema 15: the cap is no longer a table CHECK. A messages table that still has
+    CHECK (length(message) BETWEEN 1 AND N) is rebuilt without it (documented procedure: foreign
+    keys OFF, one transaction: new table, copy every row with its id, drop, rename; the table's
+    indexes and triggers are recreated by the schema script that runs next) and N is returned
+    (the cap that board really enforced, which seeds board_meta). None when there is no such
+    CHECK, so setup can run any number of times. Message ids are preserved, and so is the
+    AUTOINCREMENT counter (an id is never reused). Must run outside a transaction."""
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'messages'").fetchone()
+    if row is None:
+        return None
+    m = _OLD_CAP.search(row[0])
+    if m is None:
+        return None
+    old = int(m.group(1))
+    ddl = _OLD_CAP.sub("CHECK (length(message) >= 1)", row[0], count=1)
+    ddl = re.sub(r'CREATE TABLE (IF NOT EXISTS )?"?messages"?', "CREATE TABLE messages_new", ddl, count=1, flags=re.I)
+    cols = ", ".join(r[1] for r in conn.execute("PRAGMA table_info(messages)"))
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute("DROP TABLE IF EXISTS messages_new")
+            conn.execute(ddl)
+            seq = conn.execute("SELECT seq FROM sqlite_sequence WHERE name = 'messages'").fetchone()
+            conn.execute(f"INSERT INTO messages_new ({cols}) SELECT {cols} FROM messages ORDER BY id")
+            conn.execute("DROP TABLE messages")
+            conn.execute("ALTER TABLE messages_new RENAME TO messages")
+            top = conn.execute("SELECT max(id) FROM messages").fetchone()[0] or 0
+            keep = max(top, seq[0] if seq else 0)
+            if conn.execute("UPDATE sqlite_sequence SET seq = ? WHERE name = 'messages'", (keep,)).rowcount == 0:
+                conn.execute("INSERT INTO sqlite_sequence (name, seq) VALUES ('messages', ?)", (keep,))
+            if conn.execute("PRAGMA foreign_key_check").fetchall():
+                raise BoardUnavailable("board database: foreign key violations after rebuilding messages")
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+    return old
+
+
 def _allow_paused(conn: sqlite3.Connection) -> None:
     """Schema 12: jobs.status may be 'paused'. SQLite can't alter a CHECK, so an older jobs table is
     rebuilt by the documented procedure: foreign keys OFF (dropping the table with them on would
@@ -516,8 +569,13 @@ class SqliteBoard(Board):
             if conn.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal":
                 conn.execute("PRAGMA journal_mode = WAL")     # persistent in the file
             _drop_writer_check(conn)
-            script = (SCHEMA.replace("{max_chars}", str(int(cfg["board"]["message_max_chars"]))) + CHECKS)
-            conn.executescript("BEGIN IMMEDIATE;\n" + script + "\nCOMMIT;")
+            seed = configured_message_cap(cfg)   # ValueError: refused before anything changes
+            old_cap = _drop_message_check(conn)
+            conn.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + CHECKS + "\nCOMMIT;")
+            # the cap is set once: an upgraded board keeps the one it enforced, a new one starts
+            # with the config's; setup never resets it
+            conn.execute("INSERT OR IGNORE INTO board_meta (key, value) VALUES ('message_max_chars', ?)",
+                         (str(old_cap or seed),))
             _allow_paused(conn)
             conn.execute("BEGIN IMMEDIATE")
             try:
@@ -541,6 +599,14 @@ class SqliteBoard(Board):
             raise BoardUnavailable(str(exc)) from exc
         finally:
             conn.close()
+
+    def _read_message_cap(self) -> int | None:
+        row = self._conn.execute("SELECT value FROM board_meta WHERE key = 'message_max_chars'").fetchone()
+        return int(row[0]) if row else None
+
+    def _write_message_cap(self, cap: int) -> None:
+        self._conn.execute("INSERT INTO board_meta (key, value) VALUES ('message_max_chars', ?) "
+                           "ON CONFLICT (key) DO UPDATE SET value = excluded.value", (str(cap),))
 
     @classmethod
     def schema_version(cls, cfg: dict) -> int | None:
@@ -1228,15 +1294,20 @@ class SqliteBoard(Board):
     def _insert_message(self, job: str, name: str, text: str, to: str | None,
                         agent_key: str | None) -> int:
         # One write transaction: the write lock serialises inserts, so ids commit in id order.
-        with self._tx() as c:
-            self._ensure_job(c, job)
-            now = self._now()
-            msg_id = c.execute("INSERT INTO messages (job, agent_name, created_at, message, to_agent, "
-                               "agent_key, host) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                               (job, name, now, text, to, agent_key, compat.node())).lastrowid
-            c.execute("UPDATE agents SET last_seen = ?, last_post_at = ?, calls_at_post = tool_calls "
-                      "WHERE name = ? AND left_at IS NULL", (now, now, name))
-            return msg_id
+        try:
+            with self._tx() as c:
+                self._ensure_job(c, job)
+                now = self._now()
+                msg_id = c.execute("INSERT INTO messages (job, agent_name, created_at, message, to_agent, "
+                                   "agent_key, host) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                   (job, name, now, text, to, agent_key, compat.node())).lastrowid
+                c.execute("UPDATE agents SET last_seen = ?, last_post_at = ?, calls_at_post = tool_calls "
+                          "WHERE name = ? AND left_at IS NULL", (now, now, name))
+                return msg_id
+        except sqlite3.IntegrityError as exc:
+            if "message too long" not in str(exc):
+                raise
+            raise CapExceeded(self.message_cap()) from exc   # the cap was lowered since it was read
 
     def read_unread(self, agent_key: str | None = None, name: str | None = None,
                     job: str | None = None, advance: bool = True) -> ReadResult:

@@ -291,6 +291,7 @@ class FileHarness(MemoryHarness):
             s.memory_refs = {}
             s.restarts, s.next_restart_id = [], 1
             s.pauses, s.next_pause_id = [], 1
+            s.message_max_chars = None   # setup seeds it from the config again
         setup_board(self.cfg, pool)
 
     def close(self) -> None:
@@ -344,6 +345,12 @@ class PostgresHarness:
         with self.conn.cursor() as cur:
             cur.executemany("INSERT INTO name_pool (name, source) VALUES (%s, %s)",
                             [(n, s) for s, names in pool.items() for n in names])
+        # a test may have changed the cap: back to the config's (what a new board starts with)
+        from swarm.board import postgres
+        cap = int(self.cfg["board"]["message_max_chars"])
+        self.conn.execute(postgres._cap_statement(cap))
+        self.conn.execute("INSERT INTO board_meta (key, value) VALUES ('message_max_chars', %s) "
+                          "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (str(cap),))
 
     def board(self, **board_overrides):
         cfg = copy.deepcopy(self.cfg)
@@ -434,7 +441,8 @@ class SqliteHarness:
                                      "DELETE FROM jobs; DELETE FROM name_pool; "
                                      "DELETE FROM agent_routes; DELETE FROM transcripts; DELETE FROM restarts; DELETE FROM job_pauses; "
                                      "DELETE FROM memory_ref_images; DELETE FROM memory_refs; "
-                                     "DELETE FROM transcript_image_refs; DELETE FROM transcript_images; COMMIT;")
+                                     "DELETE FROM transcript_image_refs; DELETE FROM transcript_images; "
+                                     "DELETE FROM board_meta; COMMIT;")
         setup_board(self.cfg, pool)
 
     def board(self, **board_overrides):
