@@ -695,6 +695,10 @@ def _install_schema(conn: psycopg.Connection, b: dict) -> None:
 
 SETUP_ATTEMPTS = 5
 SETUP_LOCK_TIMEOUT_MS = 5000
+# SCHEMA is a grouped round trip, unlike ordinary board queries. Allow ten successful
+# lock waits below 5s each plus 10s for DDL and client scheduling. This is a bounded
+# setup budget, not a guarantee for arbitrarily long migrations; 0 still disables it.
+SETUP_QUERY_TIMEOUT = 60.0
 
 
 def _install_schema_retrying(conn: psycopg.Connection, b: dict, attempts: int = SETUP_ATTEMPTS) -> None:
@@ -702,8 +706,11 @@ def _install_schema_retrying(conn: psycopg.Connection, b: dict, attempts: int = 
     statements can deadlock with (psycopg DeadlockDetected). The schema is idempotent, so a
     short lock_timeout keeps a blocked step from waiting long, and a deadlock or lock timeout
     is retried with a growing, jittered pause (each retry is noted on stderr), `attempts` times."""
-    conn.execute(f"SET lock_timeout = {int(SETUP_LOCK_TIMEOUT_MS)}")
+    original_timeout = conn.query_timeout
+    if original_timeout:
+        conn.query_timeout = max(original_timeout, SETUP_QUERY_TIMEOUT)
     try:
+        conn.execute(f"SET lock_timeout = {int(SETUP_LOCK_TIMEOUT_MS)}")
         for attempt in range(1, attempts + 1):
             try:
                 return _install_schema(conn, b)
@@ -717,8 +724,10 @@ def _install_schema_retrying(conn: psycopg.Connection, b: dict, attempts: int = 
     finally:
         try:
             conn.execute("RESET lock_timeout")
-        except psycopg.Error:
-            pass
+        except (psycopg.Error, BoardUnavailable):
+            pass   # a deadline/lost socket must not be masked by cleanup on the closed connection
+        finally:
+            conn.query_timeout = original_timeout
 
 
 def _add_names(conn: psycopg.Connection, source: str, names: Sequence[str]) -> int:

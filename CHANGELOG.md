@@ -4,6 +4,10 @@ All notable changes to swarm, newest first. Each release's notes on GitHub are t
 section here, so every release adds a `## [x.y.z] - YYYY-MM-DD` section (see `scripts/release-notes.sh`).
 Keep entries short and user-facing: one line per change, what it does, not how.
 
+## [Unreleased]
+
+- Postgres schema setup allows cumulative lock waits within a separate 60s query budget and preserves the original connection failure when cleanup fails.
+
 ## [0.1.16] - 2026-10-05
 
 0.1.15's binary release (GitHub assets) was skipped because its CI failed on Windows; 0.1.16 carries everything in 0.1.15 plus these fixes.

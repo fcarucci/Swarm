@@ -212,7 +212,7 @@ class BoardContract:
     def test_concurrent_allocation_gives_unique_names(self):
         n = 12
         results, errors = {}, []
-        barrier = threading.Barrier(n)
+        barrier = threading.Barrier(n, timeout=120)
 
         def worker(i):
             try:
@@ -226,7 +226,8 @@ class BoardContract:
         for t in threads:
             t.start()
         for t in threads:
-            t.join(60)
+            t.join(120)
+            self.assertFalse(t.is_alive(), "board worker did not finish before fixture cleanup")
         self.assertEqual(errors, [])
         self.assertEqual(len(results), n)
         self.assertEqual(len(set(results.values())), n, results)
@@ -424,11 +425,15 @@ class BoardContract:
         posters = [threading.Thread(target=poster) for _ in range(3)]
         for t in readers + posters:
             t.start()
-        for t in posters:
-            t.join(60)
-        done.set()
-        for t in readers:
-            t.join(60)
+        try:
+            for t in posters:
+                t.join(120)
+        finally:
+            done.set()
+            for t in readers:
+                t.join(120)
+        self.assertFalse(any(t.is_alive() for t in posters + readers),
+                         "board workers did not finish before fixture cleanup")
         # drain whatever the last round left (a lost compare-and-set returns nothing)
         with self.h.board(read_limit=1000) as b:
             delivered.extend(m.id for m in b.read_unread(agent_key="k1").messages)
@@ -511,7 +516,7 @@ class BoardContract:
 
     def test_claim_route_has_one_winner_under_concurrency(self):
         self.b.record_route("k", "sess", "pending")
-        barrier, wins, errors = threading.Barrier(6), [], []
+        barrier, wins, errors = threading.Barrier(6, timeout=120), [], []
 
         def claimer(i):
             try:
@@ -525,7 +530,8 @@ class BoardContract:
         for t in threads:
             t.start()
         for t in threads:
-            t.join(30)
+            t.join(120)
+            self.assertFalse(t.is_alive(), "board worker did not finish before fixture cleanup")
         self.assertEqual(errors, [])
         self.assertEqual(sorted(wins), [False] * 5 + [True])
 
@@ -922,7 +928,8 @@ class BoardContract:
             try:
                 self.assertTrue(watcher.wait_for_change(10))
             finally:
-                t.join()
+                t.join(120)
+                self.assertFalse(t.is_alive(), "board worker did not finish before fixture cleanup")
 
     def test_wait_for_change_drains_burst(self):
         with self.h.board() as watcher:
@@ -983,7 +990,7 @@ class BoardContract:
         keys = [f"k{i}" for i in range(5)]
         for k in keys:
             self.b.allocate_name(k, "j")
-        barrier, wins, errors = threading.Barrier(5), [], []
+        barrier, wins, errors = threading.Barrier(5, timeout=120), [], []
 
         def claimer(k):
             try:
@@ -997,7 +1004,8 @@ class BoardContract:
         for t in threads:
             t.start()
         for t in threads:
-            t.join(30)
+            t.join(120)
+            self.assertFalse(t.is_alive(), "board worker did not finish before fixture cleanup")
         self.assertEqual(errors, [])
         self.assertEqual(sorted(wins), [False] * 4 + [True])
 
@@ -1107,7 +1115,7 @@ class BoardContract:
         keys = [f"k{i}" for i in range(6)]
         for k in keys:
             self.b.allocate_name(k, "j")
-        barrier, grants, errors = threading.Barrier(6), [], []
+        barrier, grants, errors = threading.Barrier(6, timeout=120), [], []
 
         def spawner(k):
             try:
@@ -1120,7 +1128,8 @@ class BoardContract:
         for t in threads:
             t.start()
         for t in threads:
-            t.join()
+            t.join(120)
+            self.assertFalse(t.is_alive(), "board worker did not finish before fixture cleanup")
         self.assertEqual(errors, [])
         self.assertEqual(sorted(grants), [False] * 4 + [True] * 2)
 
@@ -1580,7 +1589,8 @@ class BoardContract:
         for t in ts:
             t.start()
         for t in ts:
-            t.join()
+            t.join(120)
+            self.assertFalse(t.is_alive(), "board worker did not finish before fixture cleanup")
         self.assertEqual(errors, [])
         self.assertEqual(sum(1 for r in got if r is not None), 1)
         self.assertEqual(len(self.b.restarts(job="j")), 1)
@@ -1615,7 +1625,8 @@ class BoardContract:
         for t in ts:
             t.start()
         for t in ts:
-            t.join()
+            t.join(120)
+            self.assertFalse(t.is_alive(), "board worker did not finish before fixture cleanup")
         self.assertEqual(errors, [])
         self.assertEqual(sum(1 for r in got if r is not None), 3)   # 3 x 50 = 150; a 4th would be 200
         self.assertEqual(len(self.b.restarts(job="j")), 3)
@@ -1653,7 +1664,8 @@ class BoardContract:
         for t in ts:
             t.start()
         for t in ts:
-            t.join()
+            t.join(120)
+            self.assertFalse(t.is_alive(), "board worker did not finish before fixture cleanup")
         self.assertEqual(errors, [])
         self.assertEqual(sum(1 for r in got if r is not None), 2)
 
