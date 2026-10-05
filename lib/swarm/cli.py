@@ -2315,9 +2315,10 @@ def _watch_loop_threaded(board, out, fd, interval: float, view: dict, draw, refr
     sel.register(rd_sock, selectors.EVENT_READ, on_event)
     if fd is not None:
         sel.register(fd, selectors.EVENT_READ, on_keys)
-    old_winch = None
+    winch_set, old_winch = False, None
     if hasattr(signal, "SIGWINCH") and threading.current_thread() is threading.main_thread():
         old_winch = signal.signal(signal.SIGWINCH, lambda *_: poke(b"r"))   # a resize re-renders
+        winch_set = True
     out.write("\033[H" + _bold("loading…", False) + "\033[K")
     out.flush()
     thread = threading.Thread(target=worker, name="watch-refresh", daemon=True)
@@ -2335,8 +2336,8 @@ def _watch_loop_threaded(board, out, fd, interval: float, view: dict, draw, refr
                 return
     finally:
         stop.set()
-        if old_winch is not None:
-            signal.signal(signal.SIGWINCH, old_winch)
+        if winch_set:   # signal() returns None for a handler not set from Python: that is SIG_DFL
+            signal.signal(signal.SIGWINCH, signal.SIG_DFL if old_winch is None else old_winch)
         thread.join(timeout=0.3)   # not for a query in flight: it is a daemon, the process is leaving
         sel.close()
         rd_sock.close()
