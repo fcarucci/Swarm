@@ -2,7 +2,7 @@
 
 Each role invocation has a bounded deliverable, a durable brief path, task IDs, and a return to PM. PM may resume a compatible same-role agent where the host supports it; a return alone does not prove its slot is free. Roles can run in waves. A separate reviewer/QA/product context must never be manufactured by renaming or reusing the author. The shared Swarm board may show author messages to everyone; independent reviewers inspect the requirement and change directly instead of relying on those messages.
 
-Seats: **mandatory** (always present): PM (the invoking agent), EL, QA, at least one engineer, and an independent judge. **Optional** (user's choice via config `[team]` or `swarm team --job J --add/--remove/--show`; check the effective set before staffing): `product_manager`, `build_engineer`, `reviewer`, `verifier`. Removing a mandatory seat is rejected.
+Seats: **mandatory** (always present): PM (the invoking agent), EL, QA, at least one engineer, and an independent judge. **Optional** (user's choice via `team.toml` or `swarm team --job J --add/--remove/--show`; check the effective set before staffing): `product_manager`, `build_engineer`, `reviewer`, `verifier`. Removing a mandatory seat is rejected.
 
 | Role | Seat | Decision and deliverable | Handoff |
 |---|---|---|---|
@@ -42,3 +42,9 @@ For moderate and complex jobs, a Swarm goal and one root-spawned judge are recom
 - **Rejection:** PM maps product, EL, QA, reviewer, verifier `FAILED`, or judge `not_met` to a task owner. Repair returns through affected review and tests. Changed requirements or candidate content reopen the affected task review and all final signoffs as defined in [artifact contracts](artifacts.md). PM never forces completion to hide a blocker.
 
 For any PM action, a subagent posts a concise board update **and** returns a request containing `action`, `task_id`, `artifact_path`, and `blocker` to the invoking PM. It does not wait indefinitely for the main session to notice a post; the main session has no member hook injection.
+
+## Configuring the team
+
+- **Default and file.** Without a file, `product_manager` is on and `build_engineer` is off. The user sets the default in `team.toml` next to the swarm config (`~/.config/swarm/team.toml`, or the path in `$SWARM_TEAM_CONFIG`); `team.example.toml` ships as a template. There is no team section in the swarm `config.toml`.
+- **Per job.** `swarm activate --job J --team product_manager,build_engineer` sets the composition at activation; `swarm team --job J --show|--add ROLE|--remove ROLE` changes it later. PM runs `--show` before every staffing wave and staffs the effective set. Removing a mandatory role is an error.
+- **Plugin.** These commands are provided by the team plugin that ships inside this skill, not by swarm core; the plugin also loads `team.toml` and handles `activate --team`. Core swarm works without it. `swarm plugins` lists loaded plugins and load errors; if `swarm team` is unknown or the plugin failed to load, run `swarm plugins`, report the error to the user, and assume the default composition only after recording that assumption. The plugin API is documented with the swarm plugin documentation, not here.
