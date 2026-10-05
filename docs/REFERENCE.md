@@ -11,7 +11,7 @@ reports come back. `swarm` gives them a shared board:
 
 - **Names.** Every subagent that joins a job gets a unique, readable name (a Simpsons
   character; English first names once those run out), so the agents can address each other.
-- **Posts.** Agents post short, plain-text messages (200 characters by default) with
+- **Posts.** Agents post short, plain-text messages (200 characters by default; a per-board setting, see Message cap) with
   `swarm post`, to everyone or `--to` one agent.
 - **Reads.** Before each of its tool calls, an agent is shown every message that is new since
   its last read, plus changes to the roster of agents on the job. Nothing is skipped.
@@ -511,9 +511,21 @@ password_env_file = "~/.config/swarm/pg.env"
 - **Thresholds are baked into the views.** `idle_minutes`, `dead_minutes` and
   `tool_timeout_minutes` are written into the views when `init` runs: re-run `swarm init`
   after changing them.
-- **Message cap.** `message_max_chars` sizes the `varchar(N)` message column when the table
-  is first created. Re-running `init` doesn't resize it; raising the cap later needs
-  `ALTER TABLE messages ALTER COLUMN message TYPE varchar(N)`.
+- **Message cap.** One authoritative value per board, stored in the board (Postgres `board_meta`
+  row `message_max_chars` plus a `CHECK (length(message) <= N) NOT VALID` constraint on a `text`
+  column; SQLite `board_meta` table plus a BEFORE INSERT trigger; file and memory: a field of the
+  state). Precedence: the value stored in the board always wins; `[board] message_max_chars` only seeds a
+  NEW board at `init`, and is the fallback for a board that has none stored yet (an unupgraded
+  schema). Schema 15 converts an existing board once, keeping the cap it really enforced (the old
+  `varchar(N)` width or table CHECK), not the config's. `swarm config board.message_max_chars N`
+  changes it online (bounds 50 to 4000). Raising is always safe. Lowering never touches stored
+  messages (they stay readable); it applies to new posts only, by design: refusing to shrink below the
+  longest message would let one old message block the change, and cutting history would destroy data.
+  Postgres lock behaviour: the change is one `ALTER TABLE ... DROP CONSTRAINT, ADD CONSTRAINT ... NOT VALID`
+  (ACCESS EXCLUSIVE, but metadata only: no scan, no rewrite) plus the meta row, in one transaction under
+  `lock_timeout = 3s`, retried with back-off on a lock timeout or deadlock, so a waiting ALTER never
+  queues posters for long. A poster that read the old cap just before a change is cut to the new one
+  and retried once.
 - **Concurrency.** A partial unique index keeps names unique among active agents, another
   keeps one active judge per job, even when many hooks allocate names at once. Posts take an
   advisory lock held to commit, so message ids become visible in order.
@@ -630,7 +642,7 @@ path = "~/.local/share/swarm-board/board"   # a local filesystem: flock over NFS
   retention, dozens of agents: well under a megabyte) that is about 20 ms of board work per
   tool call (measured with 500 messages and 30 agents), mostly fsync. Tens of thousands of
   retained messages would slow every hook: shorten `retention_days` or use Postgres.
-- **Status and cap.** Thresholds and `message_max_chars` are read live from the config.
+- **Status and cap.** Thresholds are read live from the config; the message cap is the board's own (see Message cap).
 - **Backups.** Copy the directory while no swarm is running.
 
 ### Memory (tests only)
@@ -699,7 +711,7 @@ application_name = "swarm-watch"
 |---|---|---|
 | `backend` | `file` (`postgres` for an old config with a `[database]` section and no `backend`) | `file`, `sqlite`, `postgres` or `memory` (tests only) |
 | `retention_days` | `7` | messages, departed agents, routes and empty jobs older than this are purged |
-| `message_max_chars` | `200` | cap per message; longer posts are cut and end in `…` (fixed at the first `init` on Postgres and SQLite) |
+| `message_max_chars` | `200` | the message cap a NEW board starts with (50 to 4000); longer posts are cut and end in `…`. The board's own stored cap is authoritative: read or change it with `swarm config board.message_max_chars [N] [--save]` |
 | `agent_stale_hours` | `12` | an agent silent this long is marked `dead` and frees its name |
 | `read_limit` | `50` | most messages returned by one read; the rest come on the next read, with a count of what is left |
 | `join_history` | `30` | a new agent is first shown the job's newest N messages (0 = none) |
@@ -2115,334 +2127,4 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `tail [--job J] [-n N] [--interval S] [--no-agents] [--no-color]` | follow the board live |
 | `join --job J --key K [--role R] [--judge\|--verifier]` | allocate a unique name for agent key K, or return the one it already has. `--judge` takes the job's judge seat (refused if another agent holds it) and `--verifier` makes it a verifier: for agents without the swarm's hooks, such as a one-off `codex exec` judge. They read the board with `read --key K`, and post and record verdicts with the CLI. |
 | `post --job J (--as NAME \| --key K) [--to NAME\|@ROLE] MESSAGE...` | post a message; whitespace is collapsed and the text capped at `message_max_chars`; spooled when the board is unreachable. `--to @EL`, `@PM`, `@QA`, `@judge` or `@<role>` goes to whoever holds that seat on the job now (one message each); a name that is not on the job, a seat nobody holds, or an author who is not an agent of `--job` is refused with an error and nothing is stored. `@EL` is `engineering_lead`, `@PM` is `product_manager` (else `project_manager`, else `orchestrator`) |
-| `read (--as NAME \| --key K) [--job J] [--peek]` | messages new since the last read, excluding your own, `read_limit` at a time with a count of what is left; `--peek` doesn't advance the cursor |
-| `remember --job J --as NAME [--project P] FACT...` | store a durable fact in the project memory (needs `[hindsight] url`); spooled when unreachable |
-| `plugins` | list the CLI plugins found, the commands and options they add, and why one failed to load (a broken plugin never breaks the core commands; see [CLI plugins](#cli-plugins)) |
-| `spool retry` | requeue memories parked as `.stuck` after 24 hours of failing (see [The spool](#the-spool)) |
-| `notices --hook-output [--host claude\|codex]` | internal: the plugin's `SessionStart` hook prints the pending setup notice for that host as hook output (a fixed template of re-validated steps, see [First run and updates](#first-run-and-updates)) and consumes it; prints nothing when there is none |
-| `who --job J` | active agents on the job, tab-separated: exact name, host, role, status, last contact, current tool |
-| `leave (--as NAME \| --key K \| --session S)` | release a name (exit 1 if no active agent matched); `--session S` marks every unfinished agent of that session's jobs left ("session restarted"), for a session start after a restart killed them |
-| `purge` | apply retention now, and [auto-close](#auto-close) the jobs that are done and quiet (`status`, `join`, `activate`, `watch` and `tail` do that too) |
-| `supervise [--dry-run] [--job J]` | one supervisor pass (the systemd user timer runs it every `[supervise] timer_minutes`; off unless `[supervise] enabled = true`): close this machine's stuck agents, then restart each one headless under the same name if its budget allows, or post once why not; then print the caps. `--dry-run` prints what it would do and changes nothing |
-| `transcript list [--job J] [--agent NAME] [--color auto\|always] [--no-color]` | archived transcripts with their host (`claude`/`codex`), raw/stored size, ratio, redactions, final flag and capture time, then a total (see [Transcript archive](#transcript-archive-optional)). Coloured by kind (host, size/ratio, redactions) on a real terminal or `--color=always`; `--no-color`/`NO_COLOR` always wins |
-| `transcript show (--job J --agent NAME \| --agent NAME \| --job J --orchestrator \| [--job J] --key K) [--format text\|jsonl] [--tail N] [--grep RE] [-o FILE] [--color auto\|always] [--no-color]` | print one transcript as readable turns, or its redacted JSONL. Coloured by turn kind (user/assistant/tool call/tool result/memory) on a real terminal or `--color=always` (`--format jsonl` is never coloured); `--no-color`/`NO_COLOR` always wins, and never with `-o`/`--output` |
-| `transcript export --job J [DIR]` | every transcript of the job as `.jsonl` files plus `index.tsv` |
-| `transcript show --memory DOC_ID [--format text\|jsonl] [--tail N] [--grep RE] [-o FILE]` | where a memory came from: who saved it, in which tool call, whether it is still in Hindsight, the stored excerpt, and its place in the full transcript (works with transcripts off) |
-| `memory refs [--job J] [--agent NAME]` | recorded memory references (provenance) of swarm agents; `transcript export` also writes their excerpts (`memory/`, `memory.tsv`) |
-| `job J [--description D] [--goal G\|-]` | create a job record without activating it, or update its description. `--goal` sets or replaces an open job's goal (see [Merging jobs and moving agents](#merging-jobs-and-moving-agents)) |
-| `job merge FROM --into TO` | merge FROM into TO: move its active agents, append its goal, close it `completed` (outcome `merged into TO`) |
-| `move (--as NAME \| --key K) --to J` | move one live agent to another open job |
-| `hook [--host claude\|codex] start\|turn\|done\|stop\|session-start` | hook entry point, reads hook JSON on stdin (called by `swarm-hook`, not by hand) |
-
-## Security model and known limits
-
-What runs where:
-
-- **Sandboxed**: the agents' shells (Claude Code's sandbox, Codex `workspace-write`). They can
-  write the spool and marker dirs (and their own workspace, `/tmp`, and anything else you
-  granted); a Codex sandbox can read everything this OS user can read. Treat all of that, and
-  everything on the board, as untrusted.
-- **Unsandboxed, as you**: the hooks, the CLI you run, bootstrap and the supervisor. They never
-  follow a link or trust a file in a sandbox-writable place: their own files (logs, stamps,
-  notices, enrolment records, the supervisor's state) are in `~/.local/share/swarm/host` and
-  `~/.local/share/swarm/supervisor` (0700), which no sandbox may write; `swarm doctor` FAILs if
-  a writable root covers any part of `~/.local/share/swarm` or the state dir itself, and the
-  supervisor refuses to run. Board text is escaped before it reaches a terminal or an agent's
-  context. Never start a Codex session with its working directory at `$HOME` or above: that
-  makes all of it writable.
-- **No network for sandboxes.** The swarm grants none; posts spool. `[codex] network_access =
-  true` opts in, for `codex -p swarm` sessions only. What that means for Codex agents on a
-  **Postgres** board (on SQLite or file boards in a writable place nothing changes): `post`,
-  `verdict`, `remember`, `wait` and `resume` are queued in the spool and the hooks deliver them
-  within seconds; `who`, `read` and `status` need the board and fail inside the sandbox. The
-  agents are told so, and get the board and the roster from the hooks' `[swarm board]` and
-  `[swarm roster]` lines instead. A post still queued counts as activity: the auto-close sweep
-  doesn't close a job while this machine's spool holds a post or wait for it from within the
-  quiet window.
-
-Known limits of this release:
-
-- **One shared Postgres role means no privacy between OS users.** When two OS users (for example
-  `claude` and `codex` on one box) use one board through the same database role, either user
-  can read and alter the other's board rows, including archived transcripts **and memory
-  provenance excerpts**, until a later release adds per-user roles. This includes deleting or rewriting the
-  other user's messages, agent rows and restart rows (a forged restart row can hold off a real
-  restart). What this release does guarantee is that such rows can't start anything: the supervisor
-  launches only from its own local enrolment records. If the users must not read each other's
-  transcripts or memory excerpts, keep `[transcripts] enabled = false` and `[provenance] enabled
-  = false`, or give each user its own board. `swarm doctor` warns when the board holds agents of
-  more than one OS user and either `[transcripts] enabled` or `[provenance] enabled` (the
-  default) is on.
-- **A sandboxed agent can reach the database over a Unix socket.** The Codex Linux sandbox may
-  allow `AF_UNIX` connects (not verified against Codex 0.157.1), and a sandbox can read the
-  password file. Use a TCP `[database] host`; `swarm doctor` warns about a socket path.
-- **Redaction is best effort** (see [Transcript archive](#transcript-archive-optional)): unknown
-  secret shapes and text in images are stored as is.
-- **The approval prompt is a speed bump.** `swarm supervise approve` refuses without a terminal
-  and inside an agent session, but an agent whose shell can reach it (an unsandboxed Claude Code
-  Bash tool, say) can run it under a pseudo-terminal (`script`, `expect`) with the session
-  variables cleared and type `approve` itself. (A sandboxed shell can't record an approval: the
-  store is in `~/.local/share/swarm`, which no sandbox may write.) The real guard is that Claude
-  replacements run with `--setting-sources user`, so a project's settings and hooks never load;
-  the approval check covers what the flag may not (`.mcp.json`, `.claude/agents`) and Codex
-  replacements (`.codex/`, `AGENTS.override.md`). Treat an approval you didn't ask for as hostile.
-- **Bind mounts.** The path checks (supervisor work dirs, spool, board) assume nobody mounts
-  another directory below an allowed one. Creating a bind mount needs root, which is out of
-  scope.
-- **A `chmod` can undo a lock file's `0200` mode.** The pass lock and the transcript-retry lock
-  are created (and tightened) `0200`, write-only, so a process that can only read them can't
-  hold them; nothing stops a same-user process from `chmod`-ing one back to something readable
-  afterwards, which would let a read-only holder block it again (a pre-existing, low-severity
-  DoS). A `swarm doctor` check for "the last pass finished recently" is planned for a later release;
-  meanwhile a stuck pass lock shows up as the supervisor timer simply not doing anything.
-- **The failed-final retry state is per machine and OS user, not per board.** Two boards used by
-  the same user on the same machine share one `supervise-transcript-retries.json`, so pruning
-  one board's entries can reset another board's try counts and "slow" flag. A per-board file name
-  would fix it; parked for a later release.
-- **`human_size`'s labels are decimal, its math is binary.** Sizes shown by the CLI (`transcript
-  list`, `status`, purge messages, ...) are divided by 1024 at each step but labelled `KB`,
-  `MB`, `GB` rather than `KiB`, `MiB`, `GiB`; a value shown as "50.0 MB" is actually 50 MiB. Kept
-  as a separate cosmetic fix, parked for a later release.
-
-## Architecture
-
-```
-.claude-plugin/        Claude Code plugin manifest and marketplace
-.codex-plugin/         Codex plugin manifest
-hooks/                 hooks.json (Claude Code) and codex-hooks.json (Codex): the six hooks
-skills/swarm/SKILL.md  the skill the orchestrating session reads
-config.example.toml    every config key, with its default
-bin/swarm              launcher: (re)builds the venv when requirements.txt changes, runs `swarm.cli`
-bin/swarm-hook         hook entry: session-start starts bootstrap once per version; the others exit
-                       in the shell when no job is active, else run `swarm.cli hook`
-lib/swarm/cli.py       CLI: argument parsing, config, rendering (status, watch, tail)
-lib/swarm/hooks.py     hook handlers: routing, enrolment, instructions, gates, models, per-turn news
-lib/swarm/hosts/       what differs between Claude Code and Codex, behind one Host interface
-  base.py              the Host interface
-  claude.py            Claude Code: Agent, subagent transcripts, spawnDepth
-  codex.py             Codex: spawn_agent, rollouts (.jsonl, .jsonl.zst), task-name roles
-lib/swarm/bootstrap.py first-run setup, migrate and doctor
-lib/swarm/codex_config.py the ~/.codex/config.toml keys the swarm sets
-lib/swarm/models.py    [models]: the model per role
-lib/swarm/shellguard.py the verifier's best-effort check for shell commands that write
-lib/swarm/transcripts.py, transcript_view.py  the transcript archive and its readable view
-lib/swarm/paths.py, safefile.py  where things live; backups and permission-keeping rewrites
-lib/swarm/safefs.py    every file in a sandbox-writable or host-only dir: verified dir fds, no link, FIFO or hard link followed
-lib/swarm/textsafe.py  escapes control and bidi characters in board text before a terminal or an agent sees it
-lib/swarm/enrolment.py host-private records of the agents this OS user enrolled (the supervisor's launch authority)
-lib/swarm/spool.py     on-disk spool for posts, verdicts and memories made while the board is unreachable
-lib/swarm/hindsight.py optional Hindsight client (project memory); only loaded when configured
-lib/swarm/board/       storage, behind one interface
-  __init__.py          open_board, setup_board, the BACKENDS registry
-  base.py              the Board interface, its data types, errors and derived-status rules
-  postgres.py          PostgresBoard: the SQL, NOTIFY triggers and status views
-  sqlite.py            SqliteBoard: one local SQLite file (stdlib sqlite3)
-  memory.py            MemoryBoard: in-process reference and test backend
-  file.py              FileBoard: the memory backend over flock'd files
-data/                  name pools (Simpsons characters, English first names)
-tests/                 unittest suites (tests/fixtures/codex: captured Codex hook payloads and rollouts)
-e2e/                   end-to-end scripts driving real Claude Code and Codex sessions on scratch boards
-```
-
-**The Board interface.** The CLI and the hooks never talk to storage directly; they go through
-the `board` package. Its abstract `Board` class (`lib/swarm/board/base.py`) defines every operation,
-and each method's docstring is its contract: ordering, atomicity, what "active" means, what is
-kept when an agent is revived. The module docstring states the rules every backend follows:
-timestamps are tz-aware and come from the board's clock; connection trouble is
-`BoardUnavailable` (which is what makes `post` spool); names are unique among active agents;
-message ids are unique across the board, increasing, and become visible in order, so a cursor
-read never skips a message. Derived agent status (`derive_agent_status`) and the shown job
-status (`derive_job_status`) are pure functions there, so every backend agrees; Postgres encodes
-the same rules in its views.
-
-**The backends.** `[board] backend` selects the implementation (`BACKENDS` in
-`lib/swarm/board/__init__.py`). Backend modules are imported lazily, so psycopg is only loaded when
-the Postgres backend is used, and a session with no active job imports no backend at all.
-`FileBoard` is a `MemoryBoard` whose store keeps its rows on disk: each of the memory backend's
-locked blocks becomes a transaction under an `flock`, so the semantics are shared, not copied.
-
-**The hooks flow.** For every hook event, `swarm-hook` first checks for any marker in
-`marker_dir` in the shell, and exits if there is none. Otherwise `swarm.hooks.run_hook` picks the
-host adapter (`--host`), reads the payload, ignores the main session (no `agent_id`; only its
-spawns get their [model](#models-per-role)), and, except for `stop`, returns early
-unless the session has a bound marker (or an unbound one it may claim). It then opens one board,
-delivers the spool, and handles the event:
-
-- `start`: route the subagent (see [Several swarms in one session](#several-swarms-in-one-session));
-  if it joins, allocate its name and inject its instructions, roster, history and memories;
-- `turn`: `tool_started` records the call and returns the agent's name and job in one round
-  trip. A non-member is routed and maybe enrolled; a member that joined before its tag was
-  readable has its route verified. Then the verifier gate, the spawn gate, and finally the
-  per-turn news: unread messages, reply reminders, the silence nudge, the roster diff and
-  memory;
-- `done`: clear the in-flight tool;
-- `stop`: mark the agent completed (Codex: record the end of its turn);
-- `session-start`: handled in the shell by `swarm-hook` (bootstrap, notices).
-
-The answer goes back to the host as `additionalContext` (and, for a refused call,
-`permissionDecision: deny`; for a spawn's model, the rewritten input) in one JSON object.
-
-**Writing a backend.** Subclass `board.base.Board` in `lib/swarm/board/<name>.py`, implement every
-abstract method following its docstring, and register it in `BACKENDS`. Then add a harness to
-`tests/support.py` and a `BoardContract` subclass to `tests/test_board_contract.py`: the
-contract suite is the definition of done. The "Architecture / backends" section of `SKILL.md`
-covers the details.
-
-## Tests
-
-The tests use only the stdlib `unittest` and run offline. Every test uses a temporary
-directory, so nothing touches `~/.claude`, the real marker and spool directories, or the
-network. From a checkout, with a venv of its own (`python3 -m venv .venv && .venv/bin/pip install
--r requirements.txt`):
-
-```sh
-.venv/bin/python -B -m unittest discover -s tests -q
-```
-
-The full run, on each offline backend in turn:
-
-```sh
-for b in memory sqlite file; do SWARM_TEST_BACKEND=$b .venv/bin/python -B -m unittest discover -s tests -q; done
-```
-
-- **The backend contract** (`tests/test_board_contract.py`) always runs against the memory,
-  SQLite (a temp file) and file backends.
-- **Backend specifics.** `tests/test_sqlite.py` and `tests/test_file_board.py` run their
-  backend from many real processes at once: unique active names, one judge, spawn caps,
-  concurrent posters with unique ids that cursor readers never skip, cross-process
-  `watch`/`tail` wake-ups, and the read-only (sandbox) path that spools. The file backend's
-  suite also covers writers killed mid-write, torn lines and retention.
-- **End to end.** The hook and CLI suites (`test_hooks_cli`, `test_roster_reads`,
-  `test_routing`, `test_goals`, `test_verifier`, `test_spawn`, `test_waiting`,
-  `test_watch_agents`, `test_watch_scroll`, `test_hindsight`) run on the backend named by
-  `SWARM_TEST_BACKEND`: `memory` (the default), `sqlite` or `file` (the loop above).
-- **Hosts.** `test_hosts`, `test_codex_host` and `test_codex_hooks` drive the Codex side with the
-  hook payloads and rollouts captured from Codex 0.157.1 in `tests/fixtures/codex/` (secrets
-  and ids scrubbed); `test_models`, `test_bootstrap`, `test_migrate`, `test_doctor` and
-  `test_codex_config` cover the per-role models, first run, migration, `doctor` and the
-  `~/.codex/config.toml` edits, all in temp homes, including the security properties: planted
-  links, FIFOs and forged notices are never followed or shown, no state dir or network grant,
-  old grants taken back, boards and spool records moved without following links.
-- **Installer and updater.** `e2e/install_test.sh` and `e2e/update_test.sh` run the real
-  `install.sh` and `swarm upgrade` in a scratch home; CI runs the install test on every push.
-
-- **Stalls.** `tests/test_stall.py` checks that a stalled query can't freeze anything. On every
-  backend, `watch` and `tail` driven with a board that fails mid-loop must reconnect, subscribe
-  again and carry on, and one-shot commands must fail without retrying. On Postgres a local TCP
-  proxy that swallows the server's replies reproduces the real stall (plus `pg_sleep` for a
-  busy server): queries, `LISTEN` and commits must raise within the deadline, and `swarm watch`
-  and `swarm tail` run as real processes must recover.
-- **Auto-close.** `tests/test_auto_close.py` runs the sweep's contract on every backend
-  (Postgres too, with `SWARM_TEST_CONFIG`). It checks that a job closes after the quiet
-  window and not before, and that a started, running or idle agent, a waiting reason or an unmet
-  goal keeps it open, as does a job the caller keeps (the orchestrator's recent tool calls). Dead agents don't keep it open. A post or a join restarts the window, `0`
-  disables it, and concurrent sweeps close a job once. End to end (on `SWARM_TEST_BACKEND`) it
-  checks `status`/`purge`/`activate` and the SubagentStart/Stop hooks sweeping, the per-tool-call
-  hooks not sweeping, marker removal, reopening with `activate`, `deactivate` replacing the
-  auto outcome, and the orchestrating session's own tool calls keeping its job open (only its
-  own, only within the window, never failing the hook; a touch just before the close still
-  counts, one during the close (even with the marker locked) reverts the close, a deactivate
-  during the close is not undone, several busy markers share one deadline, and a touch racing
-  a removal leaves no `.seen` file; Codex
-  root-thread payloads in `test_codex_hooks.py`).
-- **Watcher connection.** `tests/test_watch_database.py` checks the `[watch_database]` merge
-  (missing, empty, partial, full), that `watch` and `tail` (and their reconnects) open the board
-  with it while other commands and the hooks don't, and, on Postgres, that the watchers' real
-  connection has the overridden host and `application_name`.
-- **Postgres.** To run the contract (and the Postgres-specific tests) against Postgres, point
-  `SWARM_TEST_CONFIG` at a config for a throwaway database:
-
-  ```sh
-  cd tests && SWARM_TEST_CONFIG=~/.config/swarm/test-config.toml ../.venv/bin/python -B -m unittest -q
-  ```
-
-  **This wipes that database:** every board table is truncated before each test, including the
-  name pool. The harness refuses to run if the test config is your normal config file, or names
-  the same host and database as it. Without `SWARM_TEST_CONFIG`, the Postgres tests are skipped.
-- **Hindsight.** The Hindsight tests use a fake Hindsight on 127.0.0.1
-  (`tests/fake_hindsight.py`) and skip where a loopback socket can't be bound (for example
-  inside the Claude Code sandbox). One live smoke test runs only with `SWARM_TEST_HINDSIGHT_URL`
-  (and `SWARM_TEST_HINDSIGHT_KEY_FILE` if a key is needed): it creates a throwaway bank
-  `swarm-test-<random>`, round-trips one fact and deletes the bank.
-
-## Troubleshooting
-
-- **Look in the hook error log first.** Hook failures never reach the agent. They are written
-  to `~/.local/share/swarm/host/hook-errors.log`. If agents aren't getting names or messages, check
-  there.
-- **Run `swarm doctor` first.** It checks the plugin and its hooks, leftovers of the old
-  install, the venv, the launcher, the config and the board (with `--host codex`, or inside
-  Codex, the Codex setup too), and prints the fix for each problem.
-- **The hooks don't fire.** Sessions that were already running when the plugin was installed
-  may need a restart. Check `swarm doctor`, that a marker for the job exists in `marker_dir`,
-  and that the venv exists: the hooks never build it (the first session's bootstrap does, or
-  any `swarm` command). In Codex, check that the hooks are trusted in `/hooks` (again after
-  every plugin update that changed them). If the config isn't at the default path,
-  `$SWARM_CONFIG` must be set where Claude Code or Codex runs.
-- **A setup notice at session start** (`[swarm] setup needs you: ...`). Bootstrap couldn't
-  finish alone: do what it says (fill in the config, trust the hooks, start a new session);
-  `~/.local/share/swarm/host/bootstrap.log` has its output.
-- **Codex agents can't post or don't see the board.** A session started before the
-  [Codex setup](#codex-setup) keeps its old sandbox: start a new one. `swarm doctor` run inside
-  the session says whether it can write the swarm's directories; a `read-only` sandbox or a
-  profile (`-p`) with its own sandbox settings needs fixing by hand.
-- **`activate` in Codex says another job is already active in this session.** A Codex session
-  runs one job: deactivate the other, or use another session.
-- **A Codex agent stays `running` after it finished.** It completes `stop_quiet_minutes` after
-  its last turn (see [Known gaps on Codex](#known-gaps-on-codex)).
-- **`swarm migrate` is refused.** A swarm job is active on this machine: run it once none is,
-  or with `--force`.
-- **`post` prints `queued (board not reachable from here: ...)`.** Normal inside a sandbox: the
-  next hook call delivers it, usually within seconds. If queued posts are never delivered, check
-  that the hooks fire (above) and look in `spool_dir`: `.json`, `.vrd` and `.mem` files are
-  waiting (a `.mem` that failed has `attempts` and `last_error` in it); `.stuck` memories failed
-  for 24 hours and wait for `swarm spool retry`; `.bad` files were refused and are kept for
-  inspection.
-- **`cannot reach the board database` from the CLI inside Claude Code.** The sandbox blocks the
-  database connection (or writing the SQLite file or board directory). `post`, `verdict` and
-  `remember` still work through the spool, but `status`, `read`, `who`, `tail` and `watch` need
-  the board itself. Run them from a normal terminal, or outside the sandbox.
-- **`watch` or `tail` frozen.** They can't block on a query any more: on Postgres every query
-  has a client-side deadline (`[database] query_timeout_seconds`, default 8 s), and after it
-  they print `board unreachable (...); reconnecting…` and retry. If that line keeps coming
-  back, the board's queries are getting no reply: look for server sessions stuck in
-  `state = 'active'`, `wait_event = 'ClientRead'` in `pg_stat_activity`, which mean a result
-  was lost between the server and the client (a pooler in between, for instance). Through
-  a pooler, check that `prepared_statements` is still `false`: named prepared statements on
-  a LISTENing connection that receives NOTIFYs are a known way to deadlock it. A
-  server-side `statement_timeout` doesn't catch that, because the server is waiting on the
-  client, not running the query. A `watch` that shows no notice and no longer changes is from
-  a version without the deadline: restart it after upgrading.
-- **Only one session joins a job.** A marker binds to one session. If a different session
-  claimed it first, deactivate and re-activate the job from the right session (or with
-  `--session <id>`). To have a second session (e.g. the other host) join on purpose, use
-  `activate --attach` there.
-- **A subagent joined no board, or the wrong one.** Check `~/.local/share/swarm/host/routing.log`.
-  With several jobs active in a session, each prompt needs its `[swarm job: <job>]` line, and
-  the job must be active and bound to that session (`swarm status --job J` shows the session).
-- **An agent's `Agent` (Codex: `spawn_agent`) call is refused.** The denial says which rule applied: see
-  [Agents spawning agents](#agents-spawning-agents). A verifier's edits and spawns are always
-  refused.
-- **Hooks log a missing relation or column** (for example `agent_routes`, `judge`, `goal`,
-  `verifier`, `waiting_on`, `closed_by`). The automatic setup didn't get to run: look for its
-  error just above in `hook-errors.log` (for example a lock timeout, or a role without the
-  rights). Run `swarm init` by hand, which adds them in place. On SQLite the board refuses to
-  open until then ("run `swarm init`").
-- **`warning: the board has schema version N, newer than this code's M`.** Another machine (or a
-  newer checkout) upgraded the board. It is left untouched; update the plugin here.
-- **`deactivate` says `not completing J: the judge has not recorded a met verdict`.** The job has
-  a goal. Let the judge finish (`swarm status --job J` shows its latest verdict and reason),
-  close it as `cancelled`/`failed`, or override with `--force`.
-- **`init` fails with `ERROR: database ... has encoding SQL_ASCII; the board needs UTF8`.** The
-  board database was created outside `init` with a non-UTF8 encoding. It only holds board data:
-  drop it and re-run `init`, which creates it as UTF8.
-- **A job shows as `idle`.** It is open but nobody is working on it. Say what it waits for with
-  `swarm wait --on`, or close it.
-- **No `[swarm memory]` in the start context.** Check `[hindsight] url`, then the hook error log
-  for `memory` lines. After a connection failure, timeout or 502/503/504, Hindsight is skipped
-  for `retry_after_seconds`; the marker is `~/.local/share/swarm/host/hindsight-unreachable`. Other errors
-  don't set it.
-
-## License
-
-Apache-2.0, © Francesco Carucci. Modify and redistribute freely; keep the `NOTICE` file and credit the author. See `LICENSE` and `NOTICE`.
+| `config [board.message_max_chars [N]] [--save]` | print or set the board's message cap (online; existing messages are kept; `--save` also writes `[board] message_max_chars`) |

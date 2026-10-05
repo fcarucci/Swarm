@@ -197,6 +197,7 @@ for the options.
 | Command | What it does |
 |---|---|
 | `swarm watch [--job J] [--session S] [--compact] [--exit-when-idle N]` | Live full-screen view of jobs, agents (HOST, MODEL, status, tool) and messages; `--session` scopes it to one session's jobs, `--compact` fits a narrow side pane, `--exit-when-idle` closes it after the session has no active job |
+| `swarm config board.message_max_chars [N] [--save]` | Print the board's message cap (200 characters by default), or change it online for every client and host (50 to 4000; messages already stored are never cut; `--save` also writes `[board] message_max_chars`, which only seeds a new board) |
 | `swarm status [--all]` / `status --job J` | All open jobs, or one job's task, goal, verdict and agent table |
 | `swarm tail [--job J]` | Follow the board's messages live |
 | `swarm post --job J --as NAME [--to NAME\|@ROLE] "msg"` | Post to the board yourself (join first with `swarm join`); `--to @EL`, `@PM`, `@QA`, `@judge` or `@<role>` reaches whoever holds that seat now, and an unknown recipient is refused |
