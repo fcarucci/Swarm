@@ -26,7 +26,7 @@ from typing import Mapping, Sequence
 import psycopg
 from psycopg import sql
 
-from .base import (LEFT_PAUSED, PauseRecord, build_manifest, database_hosts, MOVED_PREFIX, NAME_PATTERN, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, CloseGuard, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, ROUTE_STATES, TOOL_NAME_MAX,
+from .base import (check_job_data, merged_job_data, parse_job_data, LEFT_PAUSED, PauseRecord, build_manifest, database_hosts, MOVED_PREFIX, NAME_PATTERN, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, CloseGuard, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, ROUTE_STATES, TOOL_NAME_MAX,
                    AgentEvent, Restart,
                    AgentStatus, Board, BoardError, BoardUnavailable, IncompatibleStorage, JobStatus,
                    Member, Message, OwedReply, ReadResult, Route, RosterEntry, SCHEMA_VERSION, SetupResult,
@@ -184,6 +184,8 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS waiting_since timestamptz;
 -- lifetime cap in hours (`activate --max-hours`; NULL = the [job] max_hours default).
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS waiting_until timestamptz;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS max_hours double precision;
+-- Schema version 15: per-job settings that CLI plugins keep with the job (a JSON object as text).
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS plugin_data text;
 -- Who closed the job: 'auto' for the auto-close sweep, else who ran `swarm deactivate`.
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS closed_by text;
 -- The transcript archive ([transcripts], bin/transcripts.py): one row per (job, agent_key), the
@@ -1317,6 +1319,21 @@ class PostgresBoard(Board):
     def record_resume_outcome(self, pause_id: int, outcome: dict) -> bool:
         return self._conn.execute("UPDATE job_pauses SET outcome = %s WHERE id = %s RETURNING id",
                                   (json.dumps(outcome), pause_id)).fetchone() is not None
+
+    def job_data(self, job: str) -> dict[str, str]:
+        row = self._conn.execute("SELECT plugin_data FROM jobs WHERE job = %s", (job,)).fetchone()
+        return parse_job_data(row[0] if row else None)
+
+    def set_job_data(self, job: str, key: str, value: str | None) -> bool:
+        check_job_data(key, value)
+        conn = self._conn
+        with conn.transaction():
+            row = conn.execute("SELECT plugin_data FROM jobs WHERE job = %s FOR UPDATE", (job,)).fetchone()
+            if row is None:
+                return False
+            conn.execute("UPDATE jobs SET plugin_data = %s WHERE job = %s",
+                         (merged_job_data(row[0], key, value), job))
+            return True
 
     def set_job_supervise(self, job: str, on: bool) -> bool:
         return self._conn.execute("UPDATE jobs SET supervise = %s WHERE job = %s RETURNING job",
