@@ -560,7 +560,7 @@ def _connect_timeout(db: dict, hosts: int) -> int:
     return min(timeout, MULTI_HOST_CONNECT_TIMEOUT) if hosts > 1 and timeout else timeout
 
 
-def _connect(cfg: dict, admin: bool = False, any_host: bool = False) -> "psycopg.Connection":
+def _connect(cfg: dict, admin: bool = False, any_host: bool = False) -> psycopg.Connection:
     """One autocommit connection, as swarm.connect() made it, with the query deadline.
     Failure -> BoardUnavailable."""
     db = cfg["database"]
@@ -621,7 +621,7 @@ def _database_missing(cfg: dict) -> bool | None:
         return None
 
 
-def _connect_new(cfg: dict, wait: float = 10.0) -> "psycopg.Connection":
+def _connect_new(cfg: dict, wait: float = 10.0) -> psycopg.Connection:
     """_connect to a database just created: through a connection pooler the first connections can fail
     ("kind does not match between main and slot") until every node has it. Retries until `wait`."""
     deadline = time.monotonic() + wait
@@ -652,7 +652,7 @@ CHECKS = (
 )
 
 
-def _install_checks(conn: "psycopg.Connection") -> None:
+def _install_checks(conn: psycopg.Connection) -> None:
     for table, name, expr, before in CHECKS:
         conn.execute(
             "DO $$ BEGIN\n"
@@ -665,7 +665,7 @@ def _install_checks(conn: "psycopg.Connection") -> None:
             "END $$")
 
 
-def _install_schema(conn: "psycopg.Connection", b: dict) -> None:
+def _install_schema(conn: psycopg.Connection, b: dict) -> None:
     conn.execute(SCHEMA.replace("{max_chars}", str(int(b["message_max_chars"]))))
     # boards created before writers became configurable restrict memory_refs.writer to three names
     conn.execute("ALTER TABLE memory_refs DROP CONSTRAINT IF EXISTS memory_refs_writer_check")
@@ -674,7 +674,7 @@ def _install_schema(conn: "psycopg.Connection", b: dict) -> None:
                                     tool_timeout=int(b["tool_timeout_minutes"])))
 
 
-def _add_names(conn: "psycopg.Connection", source: str, names: Sequence[str]) -> int:
+def _add_names(conn: psycopg.Connection, source: str, names: Sequence[str]) -> int:
     """Add a source's names to the pool (existing ones are skipped); returns its new size."""
     with conn.cursor() as cur:
         cur.executemany("INSERT INTO name_pool (name, source) VALUES (%s, %s) ON CONFLICT DO NOTHING",

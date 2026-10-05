@@ -55,7 +55,6 @@ from typing import Mapping, NamedTuple, Sequence
 
 from ..paths import DATA_DIR, PLUGIN_ROOT as SKILL_DIR  # noqa: E402,F401  (SKILL_DIR: old name)
 from ..textsafe import strip_controls
-from swarm import compat
 
 # Name sources in allocation order: every free Simpsons name is tried before any English one.
 NAME_SOURCES = ("simpsons", "english")
@@ -479,7 +478,7 @@ class Restart:
     outcome: str | None       # RESTART_OUTCOMES; None while running
 
 
-def restart_reserved_minutes(r: "Restart") -> float:
+def restart_reserved_minutes(r: Restart) -> float:
     """What a restart holds of the minute caps: a running one its whole cap, an ended one what it
     used (at most its cap), a refused one nothing."""
     if r.outcome == "refused":
@@ -489,7 +488,7 @@ def restart_reserved_minutes(r: "Restart") -> float:
     return max(0.0, min((r.ended_at - r.at).total_seconds() / 60, float(r.minutes_cap)))
 
 
-def restart_overlaps(r: "Restart", since: _dt.datetime) -> bool:
+def restart_overlaps(r: Restart, since: _dt.datetime) -> bool:
     """Whether a restart ran at any time since `since` (began after it, still runs, or ended after it)."""
     return r.at >= since or r.ended_at is None or r.ended_at >= since
 
@@ -658,7 +657,7 @@ class TranscriptRow:
     sha256: str
     body: bytes
     captured_at: _dt.datetime | None = None
-    images: tuple["TranscriptImage", ...] = ()   # the images the body refers to, with data
+    images: tuple[TranscriptImage, ...] = ()   # the images the body refers to, with data
     harness: str | None = None
     failed: str | None = None
 
@@ -702,7 +701,7 @@ class MemoryRef:
     excerpt: bytes | None = None
     raw_bytes: int = 0
     redactions: int = 0
-    images: tuple["TranscriptImage", ...] = ()
+    images: tuple[TranscriptImage, ...] = ()
     created_at: _dt.datetime | None = None
     checked_at: _dt.datetime | None = None
     patched: bool = False
@@ -914,7 +913,7 @@ def auto_close_candidate(js: JobStatus, before: _dt.datetime) -> bool:
             and (js.last_activity_at is None or js.last_activity_at < before))
 
 
-def auto_close_outcome(agents: Sequence[AgentStatus], last: "Message | None") -> str:
+def auto_close_outcome(agents: Sequence[AgentStatus], last: Message | None) -> str:
     """The outcome the sweep records: "auto-closed: 3/3 agents completed; last post <name>:
     <text>" (", N dead" / ", N left" after the count when there are any; "no posts" if the job
     has none), the post cut with "…" so the whole fits AUTO_CLOSE_OUTCOME_MAX characters."""
@@ -1002,7 +1001,7 @@ WRITE_METHODS = (
 _CURSOR_READS = {"read_unread": 3, "read_new": 3}   # method -> index of `advance` in *args
 
 
-def refuse_writes(board: "Board", what: str) -> None:
+def refuse_writes(board: Board, what: str) -> None:
     """Make `board` read-only: every WRITE_METHODS method raises ReadOnlyBoard naming `what`."""
     def refuse(name):
         real = getattr(board, name)
@@ -1079,7 +1078,7 @@ class Board(abc.ABC):
     def close(self) -> None:
         """Release the connection. Idempotent; the Board is unusable afterwards."""
 
-    def __enter__(self) -> "Board":
+    def __enter__(self) -> Board:
         return self
 
     @contextlib.contextmanager
@@ -1282,7 +1281,7 @@ class Board(abc.ABC):
                        last_activity_at=max(t for t in (js.last_activity_at, js.waiting_until) if t))
 
     def _expiry_action(self, js: JobStatus, now: _dt.datetime, stall_hours: float, orphan_minutes: float,
-                       goal_stall_hours: float, watch) -> "ExpiryAction | None":
+                       goal_stall_hours: float, watch) -> ExpiryAction | None:
         """What sweep_expiry should do with this job from the rollup alone: the stall close, else
         the orphan close, else nothing. The stall rule is checked first; a goal job has no orphan rule."""
         unmet = goal_unmet(js)
@@ -1296,7 +1295,7 @@ class Board(abc.ABC):
                                 CloseGuard())
         return None
 
-    def _expiry_holds(self, action: "ExpiryAction", now_js: JobStatus | None, seen_activity,
+    def _expiry_holds(self, action: ExpiryAction, now_js: JobStatus | None, seen_activity,
                       now: _dt.datetime) -> bool:
         """Whether the close still applies to the job as read again right before it: still open and,
         for the orphan close, nobody joined or posted since the rollup; for the stall close of a
@@ -1599,7 +1598,7 @@ class Board(abc.ABC):
                        minutes_cap: float, outcome: str | None = None,
                        max_per_job: int | None = None, max_job_minutes: float | None = None,
                        max_host_running: int | None = None, max_host_minutes: float | None = None,
-                       day_start: _dt.datetime | None = None) -> "Restart | None":
+                       day_start: _dt.datetime | None = None) -> Restart | None:
         """Record a replacement for the closed agent old_agent_key (lineage root agent_key):
         attempt = 1 + the rows of (job, agent_key); at = now; host and os_user of this process.
         outcome given (only "refused") records it ended at once. At most one row per
@@ -1629,7 +1628,7 @@ class Board(abc.ABC):
 
     @abc.abstractmethod
     def restarts(self, job: str | None = None, agent_key: str | None = None, host: str | None = None,
-                 os_user: str | None = None, since: _dt.datetime | None = None) -> list["Restart"]:
+                 os_user: str | None = None, since: _dt.datetime | None = None) -> list[Restart]:
         """Rows matching every filter given (since: at >= since), by id."""
 
     @abc.abstractmethod
