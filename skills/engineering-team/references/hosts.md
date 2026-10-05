@@ -56,6 +56,7 @@ Claude initially uses `${CLAUDE_PLUGIN_ROOT}/bin/swarm`; Codex uses
 `<plugin root>/bin/swarm` (three directories above this reference).
 
 ```sh
+# Optional: add --team product_manager,build_engineer to override the configured [team] composition
 swarm activate --job J --description "Bounded engineering delivery" --task "Brief: docs/team/request.md" --goal "Meet the recorded requirements with independent review and product, EL, and QA acceptance"
 # Set once for this job and root host session; record the exact key in the PM run record.
 PM_KEY="pm:<job>:<root-host>:<root-session-id>"
@@ -166,6 +167,7 @@ session job, and `task_name` selects the role:
 |---|---|
 | `project_manager__report` | Bounded PM delegate; custom worker metadata |
 | `product_manager__spec` | Product baseline and later product acceptance; custom |
+| `build_engineer__gate` | Optional: build/CI gating and scoped fix rounds; custom |
 | `engineering_lead__plan` | Technical plan/staffing and later technical acceptance; custom |
 | `engineer__e1` | Assigned implementation; custom |
 | `reviewer__e1` | PM-assigned independent review; custom, not read-only |

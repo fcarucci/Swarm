@@ -2,16 +2,21 @@
 
 Each role invocation has a bounded deliverable, a durable brief path, task IDs, and a return to PM. PM may resume a compatible same-role agent where the host supports it; a return alone does not prove its slot is free. Roles can run in waves. A separate reviewer/QA/product context must never be manufactured by renaming or reusing the author. The shared Swarm board may show author messages to everyone; independent reviewers inspect the requirement and change directly instead of relying on those messages.
 
-| Role | Decision and deliverable | Handoff |
-|---|---|---|
-| PM, the invoking agent | Own job activation, board join/read, schedule, root spawns, dependency/status record, original-request comparison, user questions and reports | Give product manager the request and scope; give EL the checked product baseline; route returned requests and findings |
-| Product manager (`product_manager`) | Own product brief, competitor research disposition, PR criteria, and product acceptance by criterion | Mark every inference; require PM to route a blocking ambiguity; hand revisioned baseline to EL; examine final candidate directly |
-| EL (`engineering_lead`) | Own architecture, ER-to-PR map, final complexity tier, engineer count, assignments, integration order, and technical acceptance | Return a staffing request with task IDs, owners, dependencies, and risk; ask PM to launch roles; integrate reviewed tasks and freeze candidate |
-| Engineer (`engineer`) | Implement assigned task, produce immutable diff/commit and focused evidence, acknowledge and fix findings | Return change and evidence for PM-assigned review; return repaired change to the same reviewer for recheck |
-| Peer reviewer (`reviewer` or another `engineer`) | Inspect another agent's delivered code and tests against requirement IDs, architecture, diff, and checks | Record severity and evidence before accepting author explanations; confirm every fix or valid disposition |
-| QA (`qa`) | Write or extend relevant tests, run applicable categories, record defects/retests and quality result | Hand test code to an independent engineer for review; send failures to PM for owner assignment; sign off only on frozen candidate |
-| Verifier (`verifier`, optional) | Independently check a specific `DONE` claim, read only | Reply `VERIFIED` or `FAILED` with evidence; this does not replace peer review or product acceptance |
-| Judge (`judge`, when a goal is active) | Independently decide whether the Swarm goal is met | Record `met` or `not_met` with `candidate=<id> req=<revision>`; PM handles a `not_met` gap and checks verdict freshness |
+Seats: **mandatory** (always present): PM (the invoking agent), EL, QA, at least one engineer, and an independent judge. **Optional** (user's choice via config `[team]` or `swarm team --job J --add/--remove/--show`; check the effective set before staffing): `product_manager`, `build_engineer`, `reviewer`, `verifier`. Removing a mandatory seat is rejected.
+
+| Role | Seat | Decision and deliverable | Handoff |
+|---|---|---|---|
+| PM, the invoking agent | mandatory | Own job activation, board join/read, schedule, root spawns, dependency/status record, original-request comparison, user questions and reports | Give product manager the request and scope; give EL the checked product baseline; route returned requests and findings |
+| Product manager (`product_manager`) | optional | Own product brief, competitor research disposition, PR criteria, and product acceptance by criterion | Mark every inference; require PM to route a blocking ambiguity; hand revisioned baseline to EL; examine final candidate directly |
+| Build engineer (`build_engineer`) | optional | Own build/CI and gating: gate on the merge result, scoped fix rounds with CI as the parallel full gate, build-slot use, head-bound merge checks | Report gate results with the head sha; EL decides on a re-gate when main moved. Without this role EL owns these duties |
+| EL (`engineering_lead`) | mandatory | Own architecture, ER-to-PR map, final complexity tier, engineer count, assignments, integration order, and technical acceptance | Return a staffing request with task IDs, owners, dependencies, and risk; ask PM to launch roles; integrate reviewed tasks and freeze candidate |
+| Engineer (`engineer`) | mandatory | Implement assigned task, produce immutable diff/commit and focused evidence, acknowledge and fix findings | Return change and evidence for PM-assigned review; return repaired change to the same reviewer for recheck |
+| Peer reviewer (`reviewer` or another `engineer`) | optional (or another engineer) | Inspect another agent's delivered code and tests against requirement IDs, architecture, diff, and checks | Record severity and evidence before accepting author explanations; confirm every fix or valid disposition |
+| QA (`qa`) | mandatory | Write or extend relevant tests, run applicable categories, record defects/retests and quality result | Hand test code to an independent engineer for review; send failures to PM for owner assignment; sign off only on frozen candidate |
+| Verifier (`verifier`) | optional | Independently check a specific `DONE` claim, read only | Reply `VERIFIED` or `FAILED` with evidence; this does not replace peer review or product acceptance |
+| Judge (`judge`) | mandatory | Independently decide whether the Swarm goal is met | Record `met` or `not_met` with `candidate=<id> req=<revision>`; PM handles a `not_met` gap and checks verdict freshness |
+
+**Absent optional roles.** No `product_manager`: EL writes the PR criteria compactly (same `PR-n` IDs, observable criteria, exclusions), PM compares them with the request, and product acceptance is done by EL and QA together and recorded as such per criterion. No `build_engineer`: EL owns build/CI gating, merge-result checks, and scoped fix rounds. Never silently drop a duty because its role is absent.
 
 Custom-role signoffs are workflow evidence checked by PM. Only Swarm's built-in judge/verifier restrictions and spawn controls are enforced by code. A custom `reviewer` is an ordinary worker, not a read-only verifier. PM assigns reviewers, never the author.
 
@@ -19,8 +24,8 @@ Custom-role signoffs are workflow evidence checked by PM. Only Swarm's built-in 
 
 | Tier | Allocation | Review and QA |
 |---|---|---|
-| Tiny: one bounded, low-risk component change | Three distinct contexts: PM combines product and EL duties in one compact brief; engineer authors; separate reviewer checks | Reviewer performs applicable QA checks. If that reviewer writes test code, PM/EL or another engineer reviews those tests. Author gives neither review nor product acceptance. |
-| Moderate: user-visible behavior, integration, or several criteria | Distinct product manager, EL, engineer pool, reviewer, QA; PM schedules waves | Review every delivered change. QA covers affected flows and directly reports quality; product and EL accept separately. |
+| Tiny: one bounded, low-risk component change | Three distinct contexts: PM combines product and EL duties in one compact brief (the tiny tier needs no product manager); engineer authors; separate reviewer checks | Reviewer performs applicable QA checks. If that reviewer writes test code, PM/EL or another engineer reviews those tests. Author gives neither review nor product acceptance. |
+| Moderate: user-visible behavior, integration, or several criteria | Distinct EL, engineer pool, reviewer, QA, plus `product_manager` and `build_engineer` when the composition includes them (otherwise EL carries those duties); PM schedules waves | Review every delivered change. QA covers affected flows and directly reports quality; product (product manager, or EL+QA when absent) and EL accept separately. |
 | Complex: multiple streams, sensitive data/security, migrations, public interfaces, or difficult recovery | Distinct roles; EL adds engineers and review/QA coverage per independent stream | Review each stream and integrated candidate; plan recovery and performance checks proportional to risk. |
 
 PM's intake size is provisional. EL confirms or upgrades it after product and architecture discovery, recording why the staffing and review depth fit. A four-slot session is a scheduling constraint, not a four-person team. PM root-spawns team roles by default. Member nested spawns are only for synchronously needed short helpers within nonrefundable Swarm caps; never use them to probe host capacity. No host slot is assumed free merely because a role returned.
