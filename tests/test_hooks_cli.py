@@ -27,7 +27,10 @@ LINE = re.compile(r"^\[\d\d:\d\d\] ")
 
 
 class Env(unittest.TestCase):
-    """A private swarm installation: config, marker dir, spool dir, board storage, $HOME."""
+    """A private swarm installation: config, marker dir, spool dir, board storage, $HOME.
+    The CLI plugins shipped with the skills are disabled (core runs on its own, its output is the
+    core's); a test of a plugin lists none in `plugins_disabled`."""
+    plugins_disabled = ("engineering-team",)
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="swarm-test-", dir=os.environ.get("TMPDIR")))
@@ -40,7 +43,8 @@ class Env(unittest.TestCase):
         self.addCleanup(self.h.close)
         self.config.write_text(
             f'[board]\nbackend = "{self.h.name}"\nspool_dir = {tq(self.spool_dir)}\n'
-            f'[hook]\nmarker_dir = {tq(self.markers)}\n' + self.h.toml)
+            f'[hook]\nmarker_dir = {tq(self.markers)}\n'
+            f'[plugins]\ndisabled = {json.dumps(list(self.plugins_disabled))}\n' + self.h.toml)
         self.cfg = swarm.load_config(self.config)
         self.h.reset(swarm_names())
         home = self.tmp / "home"
@@ -75,6 +79,13 @@ class Env(unittest.TestCase):
 
     def board(self):
         return open_board(self.cfg)
+
+    def peer(self, job: str = "J", key: str = "peer", role: str | None = None) -> str:
+        """Another agent of `job` (joined through the CLI): its name, to post as."""
+        args = ["join", "--job", job, "--key", key] + (["--role", role] if role else [])
+        rc, out, err = self.cli(*args)
+        self.assertEqual(rc, 0, err)
+        return out.strip()
 
     def agent(self, key: str, job: str = "J"):
         with self.board() as b:
@@ -356,22 +367,23 @@ class HookTests(Env):
 
     def test_turn_marks_tool_and_delivers_new_messages_once(self):
         self.activate()
+        someone = self.peer()
         self.hook("start")
         me = self.agent("agent-1").name
         self.assertIsNone(self.hook("turn", tool_name="Bash"))
         a = self.agent("agent-1")
         self.assertEqual((a.status, a.current_tool, a.tool_calls), ("running", "Bash", 1))
-        self.cli("post", "--job", "J", "--as", "Someone", "--to", me, "look", "here")
+        self.cli("post", "--job", "J", "--as", someone, "--to", me, "look", "here")
         self.cli("post", "--job", "J", "--as", me, "my own")
         out = self.hook("turn", tool_name="Read")
         self.assertEqual(out["hookSpecificOutput"]["hookEventName"], "PreToolUse")
         lines = self.context(out).split("\n")
         self.assertEqual(lines[0], "[swarm board] new messages:")
         self.assertEqual(len(lines), 3)
-        self.assertRegex(lines[1], rf"^\[\d\d:\d\d\] Someone → {re.escape(me)}: look here$")
+        self.assertRegex(lines[1], rf"^\[\d\d:\d\d\] {re.escape(someone)} → {re.escape(me)}: look here$")
         self.assertTrue(lines[2].startswith("[swarm board] 1 addressed to you: reply with `"))
         # not answered: reminded once on the next call, then quiet
-        self.assertIn("[swarm] Someone asked you something at ",
+        self.assertIn(f"[swarm] {someone} asked you something at ",
                       self.context(self.hook("turn", tool_name="Read")))
         self.assertIsNone(self.hook("turn", tool_name="Read"))
         self.hook("done")
@@ -447,10 +459,11 @@ class HookTests(Env):
 
     def test_resumed_member_rejoins_with_same_name(self):
         self.activate()
+        someone = self.peer()
         self.hook("start")
         name = self.agent("agent-1").name
         self.hook("stop")
-        self.cli("post", "--job", "J", "--as", "Someone", "while you were away")
+        self.cli("post", "--job", "J", "--as", someone, "while you were away")
         out = self.hook("turn", tool_name="Bash")
         self.assertIn(f"You are **{name}**", self.context(out))
         self.assertIn("while you were away", self.context(out))  # caught up on rejoining
@@ -641,7 +654,7 @@ class HookFileSafetyTests(Env):
         # nor Start/Stop, whose auto-close sweep reads markers through cli._read_marker
         self.activate()
         self.hook("start")
-        self.cli("post", "--job", "J", "--as", "Someone", "hello")
+        self.cli("post", "--job", "J", "--as", self.peer(), "hello")
         os.mkfifo(self.markers / "stall.json")
         done, out = _run_bounded(lambda: self.hook("turn", tool_name="Bash"), 5.0)
         self.assertTrue(done, "a FIFO in the marker dir blocked the hook")

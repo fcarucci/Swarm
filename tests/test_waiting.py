@@ -4,8 +4,11 @@ hooks and the marker don't change); status and watch show the derived word."""
 from __future__ import annotations
 
 import datetime as dt
+import os
 import re
+import time
 import unittest
+from unittest import mock
 
 from test_routing import RoutingEnv  # noqa: E402  (sets sys.path)
 
@@ -75,3 +78,63 @@ class WaitCliTests(RoutingEnv):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WaitUntilTests(RoutingEnv):
+    def test_wait_deadline_forms(self):
+        from swarm.cli import wait_deadline
+        now = dt.datetime(2026, 10, 5, 12, 0).astimezone().timestamp()
+        self.assertIsNone(wait_deadline(None, None, now))
+        self.assertEqual(wait_deadline("90m", None, now), now + 5400)
+        self.assertEqual(wait_deadline(None, "2h", now), now + 7200)       # --until takes a duration too
+        self.assertEqual(wait_deadline(None, "17:30", now), dt.datetime(2026, 10, 5, 17, 30).astimezone().timestamp())
+        self.assertEqual(wait_deadline(None, "09:00", now), dt.datetime(2026, 10, 6, 9, 0).astimezone().timestamp())   # the next one
+        self.assertEqual(wait_deadline(None, "2026-10-06 09:00", now), dt.datetime(2026, 10, 6, 9, 0).astimezone().timestamp())
+        self.assertEqual(wait_deadline(None, "2026-10-06T09:00:00+00:00", now),
+                         dt.datetime(2026, 10, 6, 9, 0, tzinfo=dt.timezone.utc).timestamp())
+        for for_, until in (("1h", "2h"), ("soon", None), (None, "tomorrow-ish"), (None, "2026-10-01 09:00"), (None, "25:99")):
+            with self.subTest(for_=for_, until=until), self.assertRaises(ValueError):
+                wait_deadline(for_, until, now)
+
+    def test_wait_until_protects_and_shows_in_status_and_the_listing(self):
+        self.activate("J")
+        rc, out, _ = self.cli("wait", "--job", "J", "--until", "3h", "--on", "the", "build", "slot")
+        self.assertEqual(rc, 0)
+        self.assertIn("J is waiting on: the build slot (until ", out)
+        with self.board() as b:
+            js = b.job_status("J")
+            self.assertAlmostEqual((js.waiting_until - b.now()).total_seconds(), 3 * 3600, delta=30)
+        rc, out, _ = self.cli("status", "--job", "J", "--no-color")
+        self.assertRegex(out, r"waiting    on the build slot, since \d+s ago, until \d{4}-\d\d-\d\d \d\d:\d\d \(protected from auto-close\)")
+        rc, out, _ = self.cli("status", "--no-color")
+        self.assertRegex(next(l for l in out.splitlines() if l.startswith("J ")), r"the build slot · \d+s · until \d\d:\d\d")
+
+    def test_wait_rejects_for_with_until_and_a_past_time(self):
+        self.activate("J")
+        rc, _, err = self.cli("wait", "--job", "J", "--for", "1h", "--until", "2h", "--on", "x")
+        self.assertEqual(rc, 2)
+        self.assertIn("not both", err)
+        rc, _, err = self.cli("wait", "--job", "J", "--until", "2000-01-01 00:00", "--on", "x")
+        self.assertEqual(rc, 2)
+        self.assertIn("in the past", err)
+        with self.board() as b:
+            self.assertIsNone(b.job_status("J").waiting_on)
+
+
+class OrchestratorReadTests(RoutingEnv):
+    def test_a_board_read_by_the_orchestrating_session_counts_as_contact(self):
+        from swarm import cli as swarm_cli
+        self.activate("J", session="sess-9")
+        markers = [p for p in self.markers.glob("*.json")]
+        self.assertEqual(len(markers), 1)
+        seen = swarm_cli.orchestrator_seen_path(markers[0])
+        swarm_cli.mark_orchestrator_seen(markers[0])
+        old = time.time() - 3600
+        os.utime(seen, (old, old))
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "sess-9"}):
+            self.assertEqual(self.cli("status", "--job", "J")[0], 0)
+        self.assertGreater(seen.stat().st_mtime, old + 3000)
+        os.utime(seen, (old, old))
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "another-session"}):
+            self.cli("who", "--job", "J")
+        self.assertAlmostEqual(seen.stat().st_mtime, old, delta=2)   # someone else's read is no contact
