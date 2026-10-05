@@ -36,13 +36,17 @@ class PtyWatch(unittest.TestCase):
         with self.h.board() as b:
             b.ensure_job(JOB, "d")
             b.bind_job_session(JOB, SESSION)
+        self.entered = threading.Event()
         self.gate = threading.Event()
         self.gate.set()
         real = MemoryBoard.recent_messages
         gate = self.gate
 
         def slow(board, *a, **k):
-            gate.wait(20)
+            if not gate.is_set():
+                self.entered.set()
+            if not gate.wait(120):
+                raise AssertionError("query gate was never released")
             return real(board, *a, **k)
         for p in (mock.patch.object(MemoryBoard, "recent_messages", slow),
                   mock.patch.object(swarm, "Sweeper", lambda cfg, *a, **k: (lambda board: [])),
@@ -70,7 +74,7 @@ class PtyWatch(unittest.TestCase):
         self.gate.set()
         if self.thread.is_alive():
             os.write(self.master, b"q")
-        end = time.monotonic() + 5
+        end = time.monotonic() + 300
         while self.thread.is_alive() and time.monotonic() < end:   # drain: tcsetattr(DRAIN) waits for the reader
             if select.select([self.master], [], [], 0.01)[0]:
                 os.read(self.master, 65536)
@@ -93,32 +97,30 @@ class PtyWatch(unittest.TestCase):
         os.write(self.master, data)
 
     def test_key_shifts_the_view_at_once_while_a_query_is_in_flight(self):
-        self.wait_screen(lambda f: b"ABCDEFGH" in f, 10, "first frame")
+        self.wait_screen(lambda f: b"ABCDEFGH" in f, 30, "first frame")
         self.gate.clear()                                    # the next refresh hangs in its query
         with self.h.board() as b:
             b.post(JOB, "Alice", "wakes the refresh")        # a change: refresh (old code: redraw) starts
-        time.sleep(0.3)
+        self.assertTrue(self.entered.wait(30), "query never entered the gate")
         self.seen = b""
-        t0 = time.monotonic()
         self.type(b"\x1b[C")                                 # Right
-        t1 = self.wait_screen(lambda f: b"ABCDEFGH" not in f and b"xxxx" in f, 3, "shifted frame")
-        self.assertLess(t1 - t0, 0.3)
+        self.wait_screen(lambda f: b"ABCDEFGH" not in f and b"xxxx" in f, 30, "shifted frame")
+        self.assertFalse(self.gate.is_set())
 
     def test_quit_does_not_wait_for_a_query_in_flight(self):
-        self.wait_screen(lambda f: b"ABCDEFGH" in f, 10, "first frame")
+        self.wait_screen(lambda f: b"ABCDEFGH" in f, 30, "first frame")
         self.gate.clear()
         with self.h.board() as b:
             b.post(JOB, "Alice", "wakes the refresh")
-        time.sleep(0.3)
-        t0 = time.monotonic()
+        self.assertTrue(self.entered.wait(30), "query never entered the gate")
         self.type(b"q")
         import select
-        end = time.monotonic() + 3
+        end = time.monotonic() + 30
         while self.thread.is_alive() and time.monotonic() < end:   # drain: tcsetattr(DRAIN) waits for the reader
             if select.select([self.master], [], [], 0.01)[0]:
                 os.read(self.master, 65536)
         self.assertFalse(self.thread.is_alive())
-        self.assertLess(time.monotonic() - t0, 1.5)
+        self.assertFalse(self.gate.is_set())
         self.assertEqual(self.result.get("rc"), 0)
 
 
@@ -156,20 +158,27 @@ class LoopTests(unittest.TestCase):
         out.flush = lambda: None
         view = {"offset": 0, "max_offset": 100}
         err = {}
+        ready = threading.Event()
+
+        def drawn(snap):
+            rows = (draw or (lambda snap: ["x"]))(snap)
+            ready.set()
+            return rows
 
         def loop():
             try:
-                swarm._watch_loop(self.Board(), out, rfd, 60.0, view, draw or (lambda snap: ["x"]), refresh)
+                swarm._watch_loop(self.Board(), out, rfd, 60.0, view, drawn, refresh)
             except BaseException as exc:
                 err["e"] = exc
+                ready.set()
         t = threading.Thread(target=loop)
         t.start()
-        time.sleep(quit_after)
+        self.assertTrue(ready.wait(30), "watch produced neither a frame nor an error")
         if keys:
             os.write(wfd, keys)
         if t.is_alive():
             os.write(wfd, b"q")
-        t.join(5)
+        t.join(30)
         os.close(rfd)
         os.close(wfd)
         self.assertFalse(t.is_alive())

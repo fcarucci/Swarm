@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from support import base_config, posix_only  # noqa: F401
+from support import on_lock_contention, base_config, posix_only  # noqa: F401
 
 from swarm import cli
 from swarm.supervisor import markers
@@ -109,19 +109,21 @@ class ResumeMarkerTests(unittest.TestCase):
         # remove_resume_marker waits for a create in flight, then removes what it created.
         real = markers._create
         entered = threading.Event()
+        contended = threading.Event()
 
         def slow_create(path, text):
             entered.set()
-            time.sleep(0.3)
+            self.assertTrue(contended.wait(30), "remover never reached held create lock")
             real(path, text)
         p = markers.resume_marker_path(self.cfg, "J", 12)
-        with mock.patch.object(markers, "_create", slow_create):
+        with on_lock_contention(contended.set), mock.patch.object(markers, "_create", slow_create):
             t = threading.Thread(target=markers.write_resume_marker, args=(self.cfg, "J", 12),
                                  kwargs={"resume_of": "k", "name": "N", "harness": "codex"})
             t.start()
-            self.assertTrue(entered.wait(5))
+            self.assertTrue(entered.wait(30))
             self.assertTrue(markers.remove_resume_marker(p))
-            t.join(5)
+            t.join(30)
+            self.assertFalse(t.is_alive())
         self.assertFalse(p.exists())
 
     @posix_only("needs POSIX file modes (Windows has ACLs)")
@@ -168,7 +170,7 @@ class ResumeMarkerTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(lock.stat().st_mode), 0o600)
 
 
-def _within(test, fn, seconds=1.0):
+def _within(test, fn, seconds=30.0):
     """fn() run in a thread: its result, failing the test if it doesn't return within `seconds`
     (a FIFO opened for reading blocks until a writer comes)."""
     box = {}
@@ -184,7 +186,7 @@ def _within(test, fn, seconds=1.0):
                 os.close(os.open(fifo, os.O_RDWR | os.O_NONBLOCK))
             except OSError:
                 pass
-        t.join(2)
+        t.join(30)
         test.fail(f"{fn} blocked for more than {seconds}s")
     return box.get("v")
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import datetime as dt
+from contextlib import contextmanager
 import os
 import sys
 from pathlib import Path
@@ -514,3 +515,90 @@ HARNESSES = {"memory": MemoryHarness, "file": FileHarness, "sqlite": SqliteHarne
 def e2e_harness(tmp: Path, name: str):
     """A fresh harness of E2E_BACKEND for one end-to-end test (temp dir `tmp`, unique `name`)."""
     return HARNESSES[E2E_BACKEND].for_env(tmp, name)
+
+
+class ManualClock:
+    """An injected monotonic clock; advance only at the boundary being tested."""
+    def __init__(self, now=1000.0, step=0.0):
+        self.now, self.step, self.calls = now, step, 0
+
+    def __call__(self):
+        self.calls += 1
+        now = self.now
+        self.now += self.step
+        return now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+def assert_finishes(test, fn, timeout=30):
+    """A generous deadlock guard, with worker failures re-raised in the test thread."""
+    import threading
+    result = {}
+
+    def run():
+        try:
+            result["value"] = fn()
+        except BaseException as exc:
+            result["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    test.assertFalse(worker.is_alive(), "operation did not finish (possible deadlock)")
+    if "error" in result:
+        raise result["error"]
+    return result.get("value")
+
+
+@contextmanager
+def on_lock_contention(callback):
+    """Run a callback at the first real failed nonblocking lock attempt."""
+    from unittest import mock
+    from swarm import compat
+    real, fired = compat.flock, False
+
+    def flock(*args, **kwargs):
+        nonlocal fired
+        try:
+            return real(*args, **kwargs)
+        except BlockingIOError:
+            if not fired:
+                fired = True
+                callback()
+            raise
+
+    with mock.patch.object(compat, "flock", side_effect=flock):
+        yield
+
+
+def wait_until(predicate, timeout=30, interval=0.02):
+    """Poll a real condition with a generous deadlock guard, never a fixed sleep count."""
+    import time
+    deadline = time.monotonic() + timeout
+    while True:
+        value = predicate()
+        if value:
+            return value
+        if time.monotonic() >= deadline:
+            raise AssertionError("condition did not become true")
+        time.sleep(interval)
+
+
+def join_processes(processes, timeout=60):
+    """Join workers under one cleanup deadline; never leak them after a failed guard."""
+    import time
+    deadline = time.monotonic() + timeout
+    for process in processes:
+        process.join(max(0, deadline - time.monotonic()))
+    stranded = [process for process in processes if process.is_alive()]
+    for process in stranded:
+        process.terminate()
+    for process in stranded:
+        process.join(30)
+        if process.is_alive():
+            process.kill()
+            process.join(30)
+    if stranded:
+        raise AssertionError(f"workers did not finish: {[process.pid for process in stranded]}")

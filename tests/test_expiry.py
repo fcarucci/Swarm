@@ -715,12 +715,17 @@ class ExpiryCliTests(Env):
 
     def test_wait_for_bounds_the_wait(self):
         self.activate()
+        with self.board() as b:
+            before = b.now()
         rc, out, _ = self.cli("wait", "--job", "J", "--for", "90m", "--on", "the", "review")
         self.assertEqual(rc, 0)
         self.assertIn("J is waiting on: the review (for up to 1h30m; ", out)
         with self.board() as b:
             js = b.job_status("J")
-            self.assertAlmostEqual((js.waiting_until - b.now()).total_seconds(), 90 * MIN, delta=30)
+            import datetime as dt
+            duration = dt.timedelta(seconds=90 * MIN)
+            self.assertGreaterEqual(js.waiting_until, before + duration)
+            self.assertLessEqual(js.waiting_until, b.now() + duration)
         rc, _, err = self.cli("wait", "--job", "J", "--for", "soon", "--on", "x")
         self.assertEqual(rc, 2)
         self.assertIn("--for", err)
@@ -739,12 +744,14 @@ class ExpiryCliTests(Env):
         import time
         from swarm import spool
         self.activate()
-        spool.spool_wait(self.cfg, "J", "CI", time.time() + 3600)
+        until = time.time() + 3600
+        spool.spool_wait(self.cfg, "J", "CI", until)
         with self.board() as b:
             spool.flush_spool(b, self.cfg)
             js = b.job_status("J")
             self.assertEqual(js.waiting_on, "CI")
-            self.assertAlmostEqual((js.waiting_until - b.now()).total_seconds(), 3600, delta=30)
+            import datetime as dt
+            self.assertEqual(js.waiting_until, dt.datetime.fromtimestamp(until, dt.timezone.utc))
 
     def test_a_failing_expiry_sweep_does_not_break_the_caller(self):
         from unittest import mock
