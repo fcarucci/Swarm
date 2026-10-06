@@ -20,7 +20,9 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 - File plugins with unsafe POSIX ownership, world-write access, write access by a foreign group or symlinks are refused and listed; primary-group writable plugins (umask `002`) are accepted; the plugin trust boundary and Windows exception are documented. `swarm plugins` also reports discovery failures.
 
 ### Changed
+- Schema 17 restricts PostgreSQL agent message counts to the requested job and rolls up jobs without per-agent message counts, preserving status columns and historical counts (automatic migration).
 - Schema 16 (applied by the automatic schema upgrade on first use by the new version): `jobs.plugin_data`, a small JSON object of per-job settings that plugins keep with a job (`Board.job_data` / `set_job_data`). A plain `ADD COLUMN`.
+
 
 ## [0.1.17] - 2026-10-05
 
