@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import json
+import io
 import re
+import subprocess
+import tarfile
 import unittest
 
 from support import ROOT  # noqa: F401
@@ -45,6 +48,42 @@ class ManifestTests(unittest.TestCase):
         self.assertNotIn("~/.claude/skills/swarm", text)
         # the reference doc must name the old install dir (migrate section), just never as the command path
         self.assertNotIn("~/.claude/skills/swarm/bin/swarm", (ROOT / "docs/REFERENCE.md").read_text())
+
+    def test_refactoring_skill_name_and_paths(self):
+        skill = ROOT / "skills/refactoring"
+        text = (skill / "SKILL.md").read_text()
+        self.assertTrue(text.startswith("---\nname: refactoring\n"))
+        self.assertIn("Suggest Mode", text)
+        self.assertIn("Apply Mode", text)
+        prompt = (skill / "agents/openai.yaml").read_text()
+        self.assertIn("Use $refactoring to refactor", prompt)
+        for path in skill.rglob("*"):
+            if path.is_file():
+                with self.subTest(path=path.relative_to(skill)):
+                    self.assertNotIn("refactoring-fowler", path.read_text())
+                    self.assertNotIn("~/.claude", path.read_text())
+        # Loading the generator must resolve its outputs against the skill, regardless of cwd.
+        import runpy
+        namespace = runpy.run_path(str(skill / "scripts/generate_refactoring_contexts.py"))
+        self.assertEqual(namespace["ROOT"], skill)
+        self.assertEqual(namespace["OUT"], skill / "references/refactorings")
+
+    def test_release_archive_ships_refactoring_skill(self):
+        # Match release.yml: git archive applies export-ignore. The root /scripts exclusion
+        # must never strip a skill's own scripts or reference/language context files.
+        archive = subprocess.check_output(["git", "archive", "--format=tar", "HEAD"], cwd=ROOT)
+        with tarfile.open(fileobj=io.BytesIO(archive)) as packaged:
+            for manifest in (".claude-plugin/plugin.json", ".codex-plugin/plugin.json"):
+                self.assertEqual(json.load(packaged.extractfile(manifest))["name"], "swarm")
+            packaged.getmember("skills/engineering-team/SKILL.md")
+            skill = ROOT / "skills/refactoring"
+            for path in skill.rglob("*"):
+                if path.is_file():
+                    rel = path.relative_to(ROOT).as_posix()
+                    with self.subTest(path=rel):
+                        self.assertEqual(packaged.extractfile(rel).read(), path.read_bytes())
+                        if path.parent.name == "scripts":
+                            self.assertTrue(packaged.getmember(rel).mode & 0o111)
 
     def test_plugin_version_helper(self):
         from swarm import paths

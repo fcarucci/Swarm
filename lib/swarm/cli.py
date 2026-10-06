@@ -187,6 +187,7 @@ def load_config(path: Path = DEFAULT_CONFIG) -> dict:
     spool = cfg.get("board", {}).get("spool_dir")
     if isinstance(spool, str) and "{uid}" in spool:   # a per-user /tmp spool
         cfg["board"]["spool_dir"] = spool.replace("{uid}", str(compat.uid()))
+    cfg["_config_path"] = str(path)
     return cfg
 
 
@@ -375,6 +376,10 @@ def sweep_jobs(board, cfg: dict, deadline: float | None = None) -> list:
     [supervise] enabled, this machine+user's stuck agents are closed (swarm.supervisor.stuck).
     Never unbounded: with no `deadline`, transcripts.SWEEP_SECONDS from now (an
     agent's transcript can be made to redact for as long as it likes)."""
+    if getattr(board, 'plugin_registry', None) is None:
+        from swarm import plugins
+        board.plugin_registry = PLUGINS or plugins.Registry(
+            cfg, cfg.get('_config_path'), core_commands=tuple(BOARD_COMMANDS) + tuple(COMMANDS)).load()
     if deadline is None:
         from swarm import transcripts as _tr
         deadline = time.monotonic() + _tr.SWEEP_SECONDS
@@ -1091,6 +1096,8 @@ def job_detail(board, job: str, color: bool, recent_minutes: int | None = None, 
                 (sup_line, sup_line or ""),
                 (transcripts is not None, _transcripts_line(transcripts or [])))
     head += [line for value, line in optional if value]
+    if j.open_blockers:
+        head += ['blockers   ' + _blocker_line(board, b) for b in board.blockers(job)]
     if not include_agents:
         return "\n".join(head)
     stored = None if transcripts is None else _stored_by_key(transcripts)
@@ -2053,6 +2060,9 @@ def _compact_frame(board, job: str | None, color: bool, view: dict, rows: list |
             out.append("  (no agents yet)")
         if hidden:
             out.append(f"  ({hidden} older hidden)")
+        out += ['  ' + _blocker_line(board, blocker) for blocker in board.blockers(j.job)]
+        if PLUGINS is not None:
+            out += [term_safe(line) for line in PLUGINS.watch_panes(j.job, board)]
     room = height - len(out) - 2  # the title and one line for the MESSAGES heading
     if room >= 2:
         msgs = _watch_messages(board, room, job, rows if view.get("session") else None)
@@ -2088,6 +2098,11 @@ def _watch_frame(board, job: str | None, interval: float, color: bool, interacti
     out, pinned = _watch_header(board, job, interval, color, interactive, now, recent,
                                 bool(view.get("hide_agents")), view.get("db_label"), sup,
                                 session, srows)
+    blocker_rows = board.blockers(job)
+    if blocker_rows:
+        out += ['', _bold('BLOCKERS', color)] + [_blocker_line(board, b) for b in blocker_rows]
+    if PLUGINS is not None:
+        out += [term_safe(line) for line in PLUGINS.watch_panes(job, board)]
     header = len(out)
     table_width = max((_visible_len(ln) for i, ln in enumerate(out) if i not in pinned), default=0)
     # Messages fill whatever height is left (at least 5 lines).
@@ -2731,6 +2746,16 @@ def _parser() -> argparse.ArgumentParser:
     mr.add_argument("--job"); mr.add_argument("--agent", help="agent name")
     mr.add_argument("--check", action="store_true", help="ask Hindsight whether each memory still exists")
     sub.add_parser("plugins", help="list the CLI plugins found, the commands they add and why one failed to load")
+    bs = sub.add_parser('blockers', help='list durable blockers')
+    bs.add_argument('--job', required=True)
+    group = bs.add_mutually_exclusive_group()
+    group.add_argument('--open', action='store_true'); group.add_argument('--all', action='store_true')
+    bl = sub.add_parser('blocker', help='resolve or comment on a blocker')
+    actions = bl.add_subparsers(dest='bcmd', required=True)
+    resolve = actions.add_parser('resolve'); resolve.add_argument('id', type=int)
+    resolve.add_argument('--how')
+    comment = actions.add_parser('comment'); comment.add_argument('id', type=int)
+    comment.add_argument('text', nargs='+')
     hk = sub.add_parser("hook"); hk.add_argument("--host", choices=["claude", "codex"]); hk.add_argument("event", choices=["start", "turn", "done", "stop", "session-start", "session-stop", "session-end"])
     p._swarm_subparsers = sub   # for plugins.Registry.apply
     sub.metavar = "{" + ",".join(k for k in sub.choices if k != "update") + "}"   # hide the alias
@@ -3818,6 +3843,45 @@ def _sup_or_none(cfg: dict) -> dict | None:
         return None
 
 
+def _blocker_line(board, blocker):
+    text = (PLUGINS.blocker_display(board, blocker) if PLUGINS is not None else
+            f'{blocker.id} {blocker.kind} -> {blocker.waiting_on}: {blocker.reason}')
+    overdue = blocker.state == 'open' and blocker.until is not None and blocker.until <= board.now()
+    return term_safe(text) + f' [{blocker.state}]' + (' OVERDUE' if overdue else '')
+
+
+def _board_blockers(board, cfg, args):
+    rows = board.blockers(args.job, include_closed=args.all)
+    for blocker in rows: print(_blocker_line(board, blocker))
+    if not rows: print('(no blockers)')
+
+
+def _board_blocker(board, cfg, args):
+    blocker = board.blocker(args.id)
+    if blocker is None:
+        print(f'no such blocker: {args.id}', file=sys.stderr); return 1
+    actor = _blocker_actor(board)
+    if args.bcmd == 'resolve':
+        changed = board.resolve_blocker(args.id, args.how, actor=actor)
+        print(f'blocker {args.id} resolved' if changed else f'blocker {args.id} is already {blocker.state}')
+    else:
+        board.comment_blocker(args.id, ' '.join(args.text), actor=actor)
+        print(f'commented on blocker {args.id}')
+    return 0
+
+
+def _blocker_actor(board):
+    # Same identity boundary the ask/answer plugin uses: the host session's member, else human.
+    from swarm import hosts
+    sid = hosts.cli_session_id(os.environ)
+    if sid:
+        for job in board.jobs():
+            for agent in board.agents(job.job, include_departed=False):
+                if board.route(agent.agent_key).session_id == sid:
+                    return agent.name
+    return 'human'
+
+
 def _board_status(board, cfg: dict, args) -> None:
     color = _use_color(args)
     if not board.degraded:   # a standby can't close anything
@@ -3993,6 +4057,8 @@ BOARD_COMMANDS = {
     "read": _board_read,
     "who": _board_who,
     "status": _board_status,
+    "blockers": _board_blockers,
+    "blocker": _board_blocker,
     "leave": _board_leave,
     "purge": _board_purge,
     "transcript": _board_transcript,
@@ -4038,7 +4104,7 @@ def note_orchestrator_read(cfg: dict, args) -> None:
 
 def _reads_only(args) -> bool:
     """Whether the command only reads the board, so a standby may serve it when no primary is up."""
-    return (args.cmd in ("who", "status", "recall") or (args.cmd == "read" and args.peek)
+    return (args.cmd in ("who", "status", "blockers", "recall") or (args.cmd == "read" and args.peek)
             or (args.cmd == "config" and args.value is None and not args.save)
             or (args.cmd == "learn" and args.list_banks)
             or (args.cmd == "transcript" and args.tcmd in TRANSCRIPT_COMMANDS))
@@ -4149,6 +4215,7 @@ def _run_command(cfg: dict, args) -> int:
     from swarm.board import BoardUnavailable
     try:
         with board_cm as board:
+            board.plugin_registry = PLUGINS
             if board.degraded:   # served by a standby: nothing to write (the spool waits for a primary)
                 print(degraded_notice(board.degraded), file=sys.stderr)
             else:

@@ -361,10 +361,17 @@ SELECT j.job, j.status, j.description, j.task, j.outcome, j.created_by, j.sessio
        (SELECT a.name FROM agents a WHERE a.job = j.job AND a.judge AND a.left_at IS NULL) AS judge,
        j.waiting_on, j.waiting_since, j.closed_by, j.supervise, j.verdict_next,
        j.max_hours, j.waiting_until,
+       COALESCE((SELECT json_agg(row_to_json(b) ORDER BY b.id) FROM blockers b
+                 WHERE b.job=j.job AND b.state='open'), '[]'::json) AS blockers,
+       (SELECT count(*) FROM blockers b WHERE b.job=j.job AND b.state='open') AS open_blockers,
+       (SELECT count(*) FROM blockers b WHERE b.job=j.job AND b.state='open'
+         AND (b.protection_rule='always' OR (b.protection_rule='addressed' AND b.waiting_on <> 'external')
+              OR b.until>now())) AS protected_blockers,
        -- what `status` shows (base.derive_job_status): closed jobs their status, open ones waiting /
        -- active / waiting (goal not met: a goal without a met verdict and nobody started, running
        -- or idle; no sweep closes it) / idle
        CASE WHEN j.status <> 'active' THEN j.status
+            WHEN EXISTS (SELECT 1 FROM blockers b WHERE b.job=j.job AND b.state='open') THEN 'waiting'
             WHEN COALESCE(j.waiting_on, '') <> '' THEN 'waiting'
             WHEN COALESCE(s.started, 0) + COALESCE(s.running, 0) > 0 THEN 'active'
             WHEN COALESCE(j.goal, '') <> '' AND j.verdict IS DISTINCT FROM 'met'
@@ -397,7 +404,9 @@ SELECT j.job, j.status, j.description, j.task, j.outcome, j.created_by, j.sessio
   ) s ON true
   LEFT JOIN LATERAL (
     -- Keep totals parameterized by the selected job even in multi-job listings.
-    SELECT count(*) AS messages, max(created_at) AS last_post_at
+    -- Expiry notices count as messages but do not renew job activity.
+    SELECT count(*) AS messages, max(created_at) FILTER
+             (WHERE NOT (agent_name = 'swarm' AND message LIKE 'Blocker % expired:%')) AS last_post_at
       FROM messages m WHERE m.job = j.job
   ) m ON true;
 """.replace("{agent_status}", _AGENT_STATUS_SQL)
@@ -414,7 +423,7 @@ _JOB_STATUS_COLS = ("job, status, description, task, outcome, created_by, sessio
                     "activated_at, finished_at, agents, started, running, idle, completed, "
                     "dead_or_left, messages, last_activity_at, project, goal, verdict, verdict_reason, "
                     "verdict_by, verdict_at, completion_forced, judge, waiting_on, waiting_since, closed_by, "
-                    "supervise, verdict_next, max_hours, waiting_until")
+                    "supervise, verdict_next, max_hours, waiting_until, open_blockers, protected_blockers")
 _MESSAGE_COLS = "id, created_at, job, agent_name, to_agent, message"
 _RESTART_COLS = ("id, job, agent_key, attempt, at, reason, old_agent_key, new_agent_key, harness, host, "
                  "os_user, minutes_cap, ended_at, outcome")   # Restart field order
@@ -767,15 +776,27 @@ def _install_message_cap(conn: psycopg.Connection, b: dict, legacy_width: int | 
     if conn.execute("SELECT 1 FROM board_meta WHERE key = 'message_max_chars'").fetchone():
         return
     cap = int(legacy_width or configured_message_cap({"board": b}))
+    # A recreated board_meta can accompany an already-text column whose status
+    # view depends on message. Reapplying its type is unnecessary and Postgres
+    # refuses that ALTER while the view exists.
+    convert = "ALTER COLUMN message TYPE text, " if legacy_width is not None else ""
     statements = [
         "ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_message_check, "
-        "ALTER COLUMN message TYPE text, "
-        f"DROP CONSTRAINT IF EXISTS {_NONEMPTY_CONSTRAINT}, "
+        + convert
+        + f"DROP CONSTRAINT IF EXISTS {_NONEMPTY_CONSTRAINT}, "
         f"ADD CONSTRAINT {_NONEMPTY_CONSTRAINT} CHECK (length(message) > 0) NOT VALID",
         _cap_statement(cap),
         "INSERT INTO board_meta (key, value) VALUES ('message_max_chars', %s) ON CONFLICT (key) DO NOTHING",
     ]
-    _alter_quickly(conn, statements, [(), (), (str(cap),)], attempts=_SETUP_LOCK_TRIES)
+    params = [(), (), (str(cap),)]
+    if legacy_width is not None:
+        view = conn.execute("SELECT pg_get_viewdef(to_regclass('job_status'))").fetchone()[0]
+        if view is not None:
+            # A status view may depend on message's type. Keep its removal, the
+            # conversion and its restoration atomic under the usual lock retries.
+            statements = ["DROP VIEW job_status", *statements, "CREATE VIEW job_status AS " + view]
+            params = [(), *params, ()]
+    _alter_quickly(conn, statements, params, attempts=_SETUP_LOCK_TRIES)
 
 
 def _message_width(conn: psycopg.Connection) -> int | None:
@@ -794,8 +815,24 @@ def _install_schema(conn: psycopg.Connection, b: dict) -> None:
     _install_message_cap(conn, b, legacy)
     # boards created before writers became configurable restrict memory_refs.writer to three names
     conn.execute("ALTER TABLE memory_refs DROP CONSTRAINT IF EXISTS memory_refs_writer_check")
+    with conn.transaction():
+        conn.execute(sql_schema(True))
+        migrate_sql(conn, True)
+        conn.execute("""
+    CREATE OR REPLACE FUNCTION swarm_keep_blocked_jobs() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+        IF OLD.status='active' AND NEW.status<>'active' AND NEW.closed_by='auto'
+           AND EXISTS (SELECT 1 FROM blockers b WHERE b.job=OLD.job AND b.state='open'
+                       AND (b.protection_rule='always' OR (b.protection_rule='addressed' AND b.waiting_on <> 'external') OR b.until>now())) THEN RETURN NULL; END IF;
+        RETURN NEW;
+    END $$;
+    DROP TRIGGER IF EXISTS jobs_keep_blocked_jobs ON jobs;
+    CREATE TRIGGER jobs_keep_blocked_jobs BEFORE UPDATE ON jobs FOR EACH ROW
+        EXECUTE FUNCTION swarm_keep_blocked_jobs();
+    """)
     _install_checks(conn)
-    # Schema 17: replace schema-16 status views; repeated setup is idempotent.
+    # Schema 19 (18 -> 19): recreate status views with per-job LATERAL totals,
+    # retaining schema-18 blocker columns and expiry activity rules. Idempotent on re-init.
     conn.execute(STATUS_VIEW.format(idle=int(b["idle_minutes"]), dead=int(b["dead_minutes"]),
                                     tool_timeout=int(b["tool_timeout_minutes"])))
 
@@ -850,7 +887,11 @@ def _agent_match(agent_key: str | None, name: str | None) -> tuple[str, tuple]:
     return ("agent_key = %s", (agent_key,)) if agent_key else ("name = %s", (name,))
 
 
-class PostgresBoard(Board):
+from .blockers import SqlBlockers, sql_schema, migrate_sql, rollup, protects
+
+
+class PostgresBoard(SqlBlockers, Board):
+    _blocker_pg = True
     """A Board over one autocommit psycopg connection. Every statement commits on its own,
     which is what the pre-refactor code relied on (a failed INSERT in allocate_name's race
     loop does not poison the connection)."""
@@ -1005,15 +1046,20 @@ class PostgresBoard(Board):
             "waiting_until = NULL, max_hours = NULL, closed_by = NULL",
             (job, description, task, session_id, created_by, project, goal))
 
+        self.set_waiting(job, None)
+
     def close_job(self, job: str, status: str, outcome: str | None, forced: bool = False,
                   closed_by: str | None = None, guard: CloseGuard | None = None) -> bool:
         if guard:   # the guard and the close in one transaction, the job row locked
             with self._conn.transaction():
                 row = self._conn.execute("SELECT goal, verdict, max_hours FROM jobs WHERE job = %s FOR UPDATE",
                                          (job,)).fetchone()
-                if not row or not guard.allows(*row):
+                if not row or not guard.allows(*row) or any(protects(b, self.now()) for b in self.blockers(job)):
                     return False
                 return self.close_job(job, status, outcome, forced, closed_by)
+        for blocker in self.blockers(job):
+            if blocker.kind == 'wait':
+                self.resolve_blocker(blocker.id, 'job closed', actor=closed_by or 'swarm')
         self._leave_job(job)
         return self._conn.execute(
             "UPDATE jobs SET status = %s, outcome = COALESCE(%s, outcome), "
@@ -1057,13 +1103,6 @@ class PostgresBoard(Board):
             "UPDATE jobs SET status = 'active', finished_at = NULL, outcome = NULL, closed_by = NULL "
             "WHERE job = %s AND status = 'completed' AND closed_by = %s AND finished_at = %s "
             "RETURNING job", (job, AUTO_CLOSED_BY, closed_at)).fetchone() is not None
-
-    def set_waiting(self, job: str, on: str | None, until: _dt.datetime | None = None) -> bool:
-        return self._conn.execute(
-            "UPDATE jobs SET waiting_on = %s, waiting_since = CASE WHEN %s::text IS NULL THEN NULL "
-            "ELSE now() END, waiting_until = %s::timestamptz "
-            "WHERE job = %s AND status = 'active' RETURNING job",
-            (on, on, until if on is not None else None, job)).fetchone() is not None
 
     def set_job_max_hours(self, job: str, hours: float | None) -> bool:
         return self._conn.execute("UPDATE jobs SET max_hours = %s WHERE job = %s RETURNING job",
@@ -1295,7 +1334,9 @@ class PostgresBoard(Board):
             (SELECT jsonb_agg(to_jsonb(m) ORDER BY id) FROM recent m),
             (SELECT jsonb_agg(to_jsonb(r) ORDER BY id) FROM restarts r WHERE job IN (SELECT job FROM selected)),
             (SELECT jsonb_object_agg(job,n) FROM hidden),
-            (SELECT jsonb_object_agg(job,jsonb_build_array(verified,failed)) FROM checks)
+            (SELECT jsonb_object_agg(job,jsonb_build_array(verified,failed)) FROM checks),
+            (SELECT jsonb_agg(to_jsonb(b) ORDER BY id) FROM blockers b WHERE job IN (SELECT job FROM selected)),
+            (SELECT jsonb_object_agg(job,plugin_data) FROM jobs WHERE job IN (SELECT job FROM selected))
         """.replace('{agent_cols}', agent_cols)
         row = self._conn.execute(query, (job,job,job,session,session,session,session,recent_minutes,recent_minutes,
                                         recent_minutes,recent_minutes,limit)).fetchone()

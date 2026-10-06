@@ -23,3 +23,10 @@ class StatusViewShapeTests(unittest.TestCase):
         self.assertEqual(job_view.count('LEFT JOIN LATERAL'), 2)
         self.assertIn('WHERE a.job = j.job', job_view)
         self.assertIn('WHERE m.job = j.job', job_view)
+
+    def test_job_rollups_keep_blocker_columns_and_expiry_activity_filter(self):
+        job_view = STATUS_VIEW.split('CREATE VIEW job_status AS')[1]
+        for column in ('AS blockers', 'AS open_blockers', 'AS protected_blockers'):
+            self.assertIn(column, job_view)
+        self.assertIn("message LIKE 'Blocker % expired:%'", job_view)
+        self.assertIn("WHEN EXISTS (SELECT 1 FROM blockers", job_view)

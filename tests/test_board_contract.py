@@ -404,26 +404,32 @@ class BoardContract:
         # Parallel tool calls fire parallel PreToolUse hooks for the same agent.
         self.b.allocate_name("k1", "j")
         total, delivered, errors = 60, [], []
-        done = threading.Event()
+        # Seed a page so concurrent readers have work even before the posters run.
+        for i in range(3):
+            self.b.post("j", "Other", f"seed{i}")
+        start = threading.Barrier(7)
 
         def reader():
             try:
                 with self.h.board(read_limit=7) as b:
-                    while True:
-                        finished = done.is_set()
+                    start.wait()
+                    # A finite workload avoids idle readers continually writing last_seen
+                    # and starving posters until the database busy timeout.
+                    for _ in range(total):
                         delivered.extend(m.id for m in b.read_unread(agent_key="k1").messages)
-                        if finished:
-                            return
             except Exception as exc:  # pragma: no cover
-                errors.append(exc)
+                import traceback
+                errors.append((exc, traceback.format_exc()))
 
         def poster():
             try:
                 with self.h.board() as b:
-                    for i in range(total // 3):
+                    start.wait()
+                    for i in range((total - 3) // 3):
                         b.post("j", "Other", f"p{i}")
             except Exception as exc:  # pragma: no cover
-                errors.append(exc)
+                import traceback
+                errors.append((exc, traceback.format_exc()))
 
         readers = [threading.Thread(target=reader) for _ in range(4)]
         posters = [threading.Thread(target=poster) for _ in range(3)]
@@ -433,7 +439,6 @@ class BoardContract:
             for t in posters:
                 t.join(120)
         finally:
-            done.set()
             for t in readers:
                 t.join(120)
         self.assertFalse(any(t.is_alive() for t in posters + readers),
@@ -2136,11 +2141,14 @@ class PostgresSpecificTests(unittest.TestCase):
         self.assertEqual([j.job for j in self.b.watch_snapshot(None, "S1", 10, 60).job_rows], ["two"])
         self.assertEqual(self.b.watch_snapshot(None, "missing", 10, 60).job_rows, [])
 
-    def test_schema16_to_18_recreates_status_views_without_changing_results(self):
+    def test_schema16_to_19_recreates_status_views_without_changing_results(self):
         self._assert_status_view_migration(16, "schema15_status_views.sql")
 
-    def test_schema17_to_18_recreates_status_views_without_changing_results(self):
+    def test_schema17_to_19_recreates_status_views_without_changing_results(self):
         self._assert_status_view_migration(17, "schema17_status_views.sql")
+
+    def test_schema18_to_19_preserves_blocker_views_and_results(self):
+        self._assert_status_view_migration(18, "schema18_status_views.sql")
 
     def _assert_status_view_migration(self, version, fixture):
         from pathlib import Path
@@ -2161,25 +2169,33 @@ class PostgresSpecificTests(unittest.TestCase):
         self.b.close_job("closed", "completed", "kept")
         self.b.post("j", self.b.active_agent_name("started"), "counted")
         self.b.post("closed", "X", "historical")
+        if version == 18:
+            blocker = self.b.open_blocker("j", "question", "human", "choose")
+            self.b.comment_blocker(blocker.id, "pending", actor="human")
+            self.b.post("j", "swarm", "Blocker 99 expired: default")
         old_views = (Path(__file__).parent / "fixtures" / fixture).read_text()
         conn.execute(old_views.format(idle=5, dead=30, tool_timeout=60))
         conn.execute("UPDATE board_meta SET value = %s WHERE key = 'schema_version'", (str(version),))
         self.b.set_job_data("j", "engineering-team.optional", "build_engineer")
+        legacy_job_cols = ", ".join(c.strip() for c in _JOB_STATUS_COLS.split(",")
+                                    if version == 18 or c.strip() not in {"open_blockers", "protected_blockers"})
         queries = (f"SELECT {_AGENT_STATUS_COLS} FROM agent_status ORDER BY job, agent_key",
-                   f"SELECT {_JOB_STATUS_COLS}, shown_status FROM job_status ORDER BY job")
+                   f"SELECT {legacy_job_cols}, shown_status FROM job_status ORDER BY job")
         before = [conn.execute(q).fetchall() for q in queries]
         columns = conn.execute("SELECT table_name, column_name, data_type FROM information_schema.columns "
                                "WHERE table_name IN ('agent_status', 'job_status') "
+                               "AND column_name NOT IN ('blockers', 'open_blockers', 'protected_blockers') "
                                "ORDER BY table_name, ordinal_position").fetchall()
         for _ in range(2):  # migration and idempotent re-init
             type(self.b).setup(self.h.cfg, SMALL_POOL)
-            self.assertEqual(SCHEMA_VERSION, 18)
-            self.assertEqual(type(self.b).schema_version(self.h.cfg), 18)
+            self.assertEqual(SCHEMA_VERSION, 19)
+            self.assertEqual(type(self.b).schema_version(self.h.cfg), 19)
             self.assertEqual(self.b.job_data("j"), {"engineering-team.optional": "build_engineer"})
             self.assertEqual([conn.execute(q).fetchall() for q in queries], before)
             self.assertEqual(conn.execute("SELECT table_name, column_name, data_type "
                                           "FROM information_schema.columns "
                                           "WHERE table_name IN ('agent_status', 'job_status') "
+                                          "AND column_name NOT IN ('blockers', 'open_blockers', 'protected_blockers') "
                                           "ORDER BY table_name, ordinal_position").fetchall(), columns)
 
     def test_ids_become_visible_in_order(self):

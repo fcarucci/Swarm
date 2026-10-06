@@ -13,6 +13,7 @@ import json
 import lzma
 import multiprocessing
 import os
+import queue
 import signal
 import tempfile
 import time

@@ -579,6 +579,10 @@ class FileStore(MemoryStore):
         self.next_restart_id = int(state.get("next_restart_id") or 1)
         self.pauses = state.get("pauses") or []
         self.next_pause_id = int(state.get("next_pause_id") or 1)
+        self.blockers = state.get("blockers") or []
+        self.blocker_events = state.get("blocker_events") or []
+        self.next_blocker_id = int(state.get("next_blocker_id") or 1)
+        self.next_blocker_event_id = int(state.get("next_blocker_event_id") or 1)
         self._next_id = state.get("next_id", 1)
         self.message_max_chars = state.get("message_max_chars")
         self._messages = None
@@ -620,7 +624,9 @@ class FileStore(MemoryStore):
         doc = {"format": FORMAT, "next_id": self._next_id, "pool": self.pool,
                "jobs": self.jobs, "agents": self.agents, "routes": self.routes,
                "restarts": self.restarts, "next_restart_id": self.next_restart_id,
-               "pauses": self.pauses, "next_pause_id": self.next_pause_id}
+               "pauses": self.pauses, "next_pause_id": self.next_pause_id,
+               "blockers": self.blockers, "blocker_events": self.blocker_events,
+               "next_blocker_id": self.next_blocker_id, "next_blocker_event_id": self.next_blocker_event_id}
         if self.message_max_chars is not None:   # schema 15: the board's message cap
             doc["message_max_chars"] = self.message_max_chars
         if not with_next_id:   # loading the messages may raise it: not a change
