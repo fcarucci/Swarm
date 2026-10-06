@@ -971,5 +971,3 @@ ALTER TABLE ONLY public.transcript_image_refs
 --
 -- PostgreSQL database dump complete
 --
-
-
