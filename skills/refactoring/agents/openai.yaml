@@ -1,0 +1,4 @@
+interface:
+  display_name: "Fowler Refactoring"
+  short_description: "Fowler-style verified refactoring"
+  default_prompt: "Use $refactoring to refactor this file while running unit and integration tests after each refactoring."
