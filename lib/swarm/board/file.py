@@ -580,6 +580,7 @@ class FileStore(MemoryStore):
         self.pauses = state.get("pauses") or []
         self.next_pause_id = int(state.get("next_pause_id") or 1)
         self._next_id = state.get("next_id", 1)
+        self.message_max_chars = state.get("message_max_chars")
         self._messages = None
         self._transcripts = None
         self._memory_refs = None
@@ -620,6 +621,8 @@ class FileStore(MemoryStore):
                "jobs": self.jobs, "agents": self.agents, "routes": self.routes,
                "restarts": self.restarts, "next_restart_id": self.next_restart_id,
                "pauses": self.pauses, "next_pause_id": self.next_pause_id}
+        if self.message_max_chars is not None:   # schema 15: the board's message cap
+            doc["message_max_chars"] = self.message_max_chars
         if not with_next_id:   # loading the messages may raise it: not a change
             del doc["next_id"]
         return dumps(doc)

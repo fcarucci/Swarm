@@ -11,7 +11,7 @@ reports come back. `swarm` gives them a shared board:
 
 - **Names.** Every subagent that joins a job gets a unique, readable name (a Simpsons
   character; English first names once those run out), so the agents can address each other.
-- **Posts.** Agents post short, plain-text messages (200 characters by default) with
+- **Posts.** Agents post short, plain-text messages (200 characters by default; a per-board setting, see Message cap) with
   `swarm post`, to everyone or `--to` one agent.
 - **Reads.** Before each of its tool calls, an agent is shown every message that is new since
   its last read, plus changes to the roster of agents on the job. Nothing is skipped.
@@ -511,9 +511,21 @@ password_env_file = "~/.config/swarm/pg.env"
 - **Thresholds are baked into the views.** `idle_minutes`, `dead_minutes` and
   `tool_timeout_minutes` are written into the views when `init` runs: re-run `swarm init`
   after changing them.
-- **Message cap.** `message_max_chars` sizes the `varchar(N)` message column when the table
-  is first created. Re-running `init` doesn't resize it; raising the cap later needs
-  `ALTER TABLE messages ALTER COLUMN message TYPE varchar(N)`.
+- **Message cap.** One authoritative value per board, stored in the board (Postgres `board_meta`
+  row `message_max_chars` plus a `CHECK (length(message) <= N) NOT VALID` constraint on a `text`
+  column; SQLite `board_meta` table plus a BEFORE INSERT trigger; file and memory: a field of the
+  state). Precedence: the value stored in the board always wins; `[board] message_max_chars` only seeds a
+  NEW board at `init`, and is the fallback for a board that has none stored yet (an unupgraded
+  schema). Schema 15 converts an existing board once, keeping the cap it really enforced (the old
+  `varchar(N)` width or table CHECK), not the config's. `swarm config board.message_max_chars N`
+  changes it online (bounds 50 to 4000). Raising is always safe. Lowering never touches stored
+  messages (they stay readable); it applies to new posts only, by design: refusing to shrink below the
+  longest message would let one old message block the change, and cutting history would destroy data.
+  Postgres lock behaviour: the change is one `ALTER TABLE ... DROP CONSTRAINT, ADD CONSTRAINT ... NOT VALID`
+  (ACCESS EXCLUSIVE, but metadata only: no scan, no rewrite) plus the meta row, in one transaction under
+  `lock_timeout = 3s`, retried with back-off on a lock timeout or deadlock, so a waiting ALTER
+  queues posters for at most a few seconds at a time. A poster that read the old cap just before a
+  change is cut to the new one and retried once.
 - **Concurrency.** A partial unique index keeps names unique among active agents, another
   keeps one active judge per job, even when many hooks allocate names at once. Posts take an
   advisory lock held to commit, so message ids become visible in order.
@@ -630,7 +642,7 @@ path = "~/.local/share/swarm-board/board"   # a local filesystem: flock over NFS
   retention, dozens of agents: well under a megabyte) that is about 20 ms of board work per
   tool call (measured with 500 messages and 30 agents), mostly fsync. Tens of thousands of
   retained messages would slow every hook: shorten `retention_days` or use Postgres.
-- **Status and cap.** Thresholds and `message_max_chars` are read live from the config.
+- **Status and cap.** Thresholds are read live from the config; the message cap is the board's own (see Message cap).
 - **Backups.** Copy the directory while no swarm is running.
 
 ### Memory (tests only)
@@ -696,7 +708,7 @@ application_name = "swarm-watch"
 |---|---|---|
 | `backend` | `file` (`postgres` for an old config with a `[database]` section and no `backend`) | `file`, `sqlite`, `postgres` or `memory` (tests only) |
 | `retention_days` | `7` | messages, departed agents, routes and empty jobs older than this are purged |
-| `message_max_chars` | `200` | cap per message; longer posts are cut and end in `…` (fixed at the first `init` on Postgres and SQLite) |
+| `message_max_chars` | `200` | the message cap a NEW board starts with (50 to 4000); longer posts are cut and end in `…`. The board's own stored cap is authoritative: read or change it with `swarm config board.message_max_chars [N] [--save]` |
 | `agent_stale_hours` | `12` | an agent silent this long is marked `dead` and frees its name |
 | `read_limit` | `50` | most messages returned by one read; the rest come on the next read, with a count of what is left |
 | `join_history` | `30` | a new agent is first shown the job's newest N messages (0 = none) |
@@ -2064,7 +2076,8 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `watch [--job J] [--session S] [--compact] [--exit-when-idle N] [--interval S] [--no-color]` | full-screen live dashboard |
 | `tail [--job J] [-n N] [--interval S] [--no-agents] [--no-color]` | follow the board live |
 | `join --job J --key K [--role R] [--judge\|--verifier]` | allocate a unique name for agent key K, or return the one it already has. `--judge` takes the job's judge seat (refused if another agent holds it) and `--verifier` makes it a verifier: for agents without the swarm's hooks, such as a one-off `codex exec` judge. They read the board with `read --key K`, and post and record verdicts with the CLI. |
-| `post --job J --as NAME [--to NAME] MESSAGE...` | post a message; whitespace is collapsed and the text capped at `message_max_chars`; spooled when the board is unreachable |
+| `config [board.message_max_chars [N]] [--save]` | print or set the board's message cap (online; existing messages are kept; `--save` also writes `[board] message_max_chars`) |
+| `post --job J --as NAME [--to NAME] MESSAGE...` | post a message; whitespace is collapsed and the text capped at the board's message cap; spooled when the board is unreachable |
 | `read (--as NAME \| --key K) [--job J] [--peek]` | messages new since the last read, excluding your own, `read_limit` at a time with a count of what is left; `--peek` doesn't advance the cursor |
 | `remember --job J --as NAME [--project P] FACT...` | store a durable fact in the project memory (needs `[hindsight] url`); spooled when unreachable |
 | `spool retry` | requeue memories parked as `.stuck` after 24 hours of failing (see [The spool](#the-spool)) |

@@ -277,10 +277,10 @@ class SqliteBackendTests(unittest.TestCase):
             self.assertTrue(b.record_verdict("j", judge, "not_met", "r", "n"))
             self.assertEqual(b.job_status("j").verdict_next, "n")
 
-    def test_message_cap_is_a_check_sized_at_first_setup(self):
-        with self.h.board(message_max_chars=500) as b:   # a cap raised after init: CHECK still 200
-            with self.assertRaises(sqlite3.IntegrityError):
-                b.post("j", "A", "x" * 300)
+    def test_message_cap_is_the_boards_not_the_clients(self):
+        with self.h.board(message_max_chars=500) as b:   # a client's own config no longer matters
+            self.assertEqual(b.message_cap(), 200)
+            self.assertTrue(b.post("j", "A", "x" * 300).truncated)
         self.assertTrue(self.b.post("j", "A", "é" * 250).truncated)   # characters, not bytes
         self.assertEqual(len(self.b.recent_messages(1, "j")[0].message), 200)
 

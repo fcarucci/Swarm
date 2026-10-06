@@ -3,7 +3,7 @@
 
 Every agent in a swarm gets a unique, human-readable name (Simpsons characters first,
 random English first names once those run out), posts short unstructured messages
-(<= message_max_chars) to the board for its job, and reads only the messages that are
+(<= the board's message cap, [board] message_max_chars at init) to the board for its job, and reads only the messages that are
 new since its last read. Messages older than retention_days are purged.
 
 Nothing in this file is environment-specific. Connection details, the database name and
@@ -80,7 +80,8 @@ DEFAULTS = {
     # directly when a pooler in front of it mishandles LISTEN/NOTIFY. Any [database] key; each
     # one left unset or empty falls back to [database]. Empty: the watchers use [database].
     "watch_database": {},
-    "board": {"retention_days": 7, "message_max_chars": 200, "agent_stale_hours": 12,
+    "board": {"retention_days": 7, "message_max_chars": 200,   # a NEW board's cap (the board's own is authoritative)
+               "agent_stale_hours": 12,
               "read_limit": 50,
               # a new agent's first read: the job's newest join_history messages (0 = none)
               "join_history": 30,
@@ -2481,6 +2482,11 @@ def _parser() -> argparse.ArgumentParser:
                       help="join as a read-only verifier (for agents outside Claude Code)")
     po = sub.add_parser("post"); po.add_argument("--job", required=True); po.add_argument("--as", dest="name", required=True)
     po.add_argument("--to"); po.add_argument("message", nargs="+")
+    cf = sub.add_parser("config", help="show or change a setting: `config board.message_max_chars` prints "
+                        "the board's message cap, `config board.message_max_chars 500` changes it")
+    cf.add_argument("key", nargs="?", help="board.message_max_chars (omit to list the settings)")
+    cf.add_argument("value", nargs="?", help="the new value (omit to print the current one)")
+    cf.add_argument("--save", action="store_true", help="also write it to the config file")
     rd = sub.add_parser("read"); rd.add_argument("--as", dest="name"); rd.add_argument("--key")
     rd.add_argument("--job"); rd.add_argument("--peek", action="store_true", help="don't advance the cursor")
     w = sub.add_parser("who"); w.add_argument("--job", required=True)
@@ -3310,7 +3316,100 @@ def _board_post(board, cfg: dict, args) -> int | None:
     except ValueError as exc:   # a name the board refuses (board.base.valid_name)
         print(f"not posted: {term_safe(exc)}", file=sys.stderr)
         return 1
-    print(f"posted #{res.id}" + (f" (truncated to {cfg['board']['message_max_chars']} chars)" if res.truncated else ""))
+    print(f"posted #{res.id}" + (f" (truncated to {board.message_cap()} chars)" if res.truncated else ""))
+
+
+# Settings `swarm config` can read and change: "section.key" -> (what it is, how to check a value).
+# board.message_max_chars lives in the BOARD (Board.message_cap), the others would live in the file.
+CONFIG_KEYS = {"board.message_max_chars": "the longest board message, in characters"}
+
+
+def _save_config_value(path: Path, section: str, key: str, value: int) -> None:
+    """Write `key = value` into [section] of the TOML config at `path` (created if missing),
+    changing nothing else: the line is replaced in place (keeping its trailing comment) or added
+    under the header, or a new section is appended. The result is parsed again before it replaces
+    the file (atomic rename, same permissions); ValueError when it would not read back as asked."""
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    lines = text.splitlines(keepends=True)
+    head = next((i for i, l in enumerate(lines) if re.fullmatch(rf"\s*\[{section}\]\s*(#.*)?\s*", l)), None)
+    new = f"{key} = {value}\n"
+    if head is None:
+        sep = "" if not text or text.endswith("\n\n") else ("\n" if text.endswith("\n") else "\n\n")
+        lines.append(f"{sep}[{section}]\n{new}" if text else f"[{section}]\n{new}")
+    else:
+        end = next((i for i in range(head + 1, len(lines)) if re.match(r"\s*\[", lines[i])), len(lines))
+        at = next((i for i in range(head + 1, end) if re.match(rf"\s*{key}\s*=", lines[i])), None)
+        if at is None:
+            if lines[head].endswith(("\n", "\r\n")) is False:
+                lines[head] += "\n"
+            lines.insert(head + 1, new)
+        else:
+            comment = re.search(r"(\s+#.*)$", lines[at].rstrip("\r\n"))
+            lines[at] = f"{key} = {value}" + (comment.group(1) if comment else "") + "\n"
+    out = "".join(lines)
+    try:
+        ok = tomllib.loads(out).get(section, {}).get(key) == value
+    except tomllib.TOMLDecodeError:
+        ok = False
+    if not ok:
+        raise ValueError(f"cannot edit {path} safely: set {key} = {value} under [{section}] by hand")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(out, encoding="utf-8")
+        if path.exists():
+            os.chmod(tmp, path.stat().st_mode & 0o7777)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _board_config(board, cfg: dict, args) -> int:
+    """`swarm config [KEY [VALUE]] [--save]`: show or change a setting. board.message_max_chars is
+    the board's message cap: with no value it prints the live cap (the board's, which every client
+    obeys); with a value it changes it on the board (online, existing messages are never cut),
+    and --save also writes it to the config file ([board] message_max_chars: the value a NEW board
+    starts with)."""
+    from swarm.board import check_message_cap
+    key = args.key
+    if key is None:
+        for k, what in CONFIG_KEYS.items():
+            print(f"{k} = {board.message_cap()}\t{what}")
+        return 0
+    if key not in CONFIG_KEYS:
+        print(f"swarm config: unknown setting {term_safe(key)!r}; known: {', '.join(CONFIG_KEYS)}", file=sys.stderr)
+        return 2
+    if args.value is None:
+        if args.save:
+            print("swarm config: --save needs a value", file=sys.stderr)
+            return 2
+        cap = board.message_cap()
+        print(cap)
+        try:
+            configured = check_message_cap(cfg["board"].get("message_max_chars"))
+        except ValueError:
+            configured = None
+        if configured != cap:
+            print(f"(the config file says {cfg['board'].get('message_max_chars')}: it only sizes a new board; "
+                  f"the board's {cap} applies. `swarm config {key} {cap} --save` makes the file agree)",
+                  file=sys.stderr)
+        return 0
+    try:
+        old, new = board.set_message_cap(args.value)
+    except ValueError as exc:
+        print(f"swarm config: {exc}", file=sys.stderr)
+        return 2
+    print(f"{key}: {old} -> {new}" if old != new else f"{key}: {new} (unchanged)")
+    if new < old:
+        print("messages already on the board are kept as they are; the new cap applies to posts from now on")
+    if args.save:
+        try:
+            _save_config_value(args.config, "board", "message_max_chars", new)
+        except (ValueError, OSError) as exc:
+            print(f"swarm config: the board was updated but the config file was not: {exc}", file=sys.stderr)
+            return 1
+        print(f"saved to {args.config}")
+    return 0
 
 
 def _verdict_text(args) -> tuple[str, str | None] | None:
@@ -3536,6 +3635,7 @@ BOARD_COMMANDS = {
     "join": _board_join,
     "move": _board_move,
     "post": _board_post,
+    "config": _board_config,
     "verdict": _board_verdict,
     "wait": _board_wait,
     "pause": _board_pause,
@@ -3563,6 +3663,7 @@ def main(argv=None) -> int:
 def _reads_only(args) -> bool:
     """Whether the command only reads the board, so a standby may serve it when no primary is up."""
     return (args.cmd in ("who", "status") or (args.cmd == "read" and args.peek)
+            or (args.cmd == "config" and args.value is None and not args.save)
             or (args.cmd == "transcript" and args.tcmd in TRANSCRIPT_COMMANDS))
 
 

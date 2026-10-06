@@ -6,7 +6,15 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 ## [Unreleased]
 
+### Added
+- The board message length is configurable: one cap per board, stored in the board so every client and host agrees (`[board] message_max_chars` only seeds a new board). Read it with `swarm config board.message_max_chars`, change it online with `swarm config board.message_max_chars 500` (50 to 4000; `--save` also writes the config file). Lowering it never cuts or refuses messages already stored; it applies to new posts. The start hook shows the live cap.
+
+### Changed
+- Schema 15: the cap moves from the `varchar(N)` column / table CHECK into the board (Postgres: `text` column, a replaceable `NOT VALID` check and a `board_meta` row, converted online in one quick, retried `ALTER`; SQLite: a trigger and a `board_meta` table). Boards keep the cap they enforced and every message.
+
+### Fixed
 - Postgres schema setup allows cumulative lock waits within a separate 60s query budget and preserves the original connection failure when cleanup fails.
+- Timing tests use controlled clocks and synchronization, with isolated fixtures and hook spool assertions independent of IO time; test-only stress tooling helps reproduce scheduling failures.
 
 ## [0.1.16] - 2026-10-05
 
