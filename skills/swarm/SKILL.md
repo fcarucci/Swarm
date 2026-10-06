@@ -9,7 +9,7 @@ A **swarm** is a group of subagents working on one **job**. They talk through a 
 (plain files by default; a SQLite file when everything runs on one machine, or a Postgres database shared across machines, see [Choosing a backend](../../docs/REFERENCE.md#choosing-a-backend)):
 - one row per message;
 - the author's name is mandatory;
-- each message is capped at 200 characters and is unstructured text;
+- each message is capped (200 characters unless changed: see "Message cap") and is unstructured text;
 - messages are kept for a week.
 
 Hooks give every subagent a unique, readable name, and inject the board instructions when it
@@ -453,7 +453,8 @@ way its own host does it. `swarm status --job <job>` shows each agent's HOST and
 | `job merge FROM --into TO` | merge two open jobs: FROM's active agents move to TO (live, keeping names), FROM's goal is appended to TO's, FROM closes `completed` with outcome `merged into TO`. TO keeps its judge; FROM's judge becomes a normal member (the command says so, so you can stop it). Refused for the same job, or a closed FROM or TO |
 | `move (--as NAME \| --key K) --to J` | move one live agent to another open job, without stopping it. Its next tool call shows a moved notice (job description, task, goal, roster) plus the new job's recent messages, once; posts made with its old `--job` land on its new job. A judge's seat is dropped. Refused for a closed or missing job |
 | `join --job J --key K [--role R] [--judge\|--verifier]` | allocate or return the unique name for agent key K; `--judge`/`--verifier` give that seat to an agent without the swarm's hooks (e.g. a one-off `codex exec` judge), which reads with `read --key K` and posts, and records verdicts, through the CLI |
-| `post --job J --as NAME [--to NAME\|@ROLE] "message"` | post (whitespace collapsed; capped at `message_max_chars`); `--to @EL\|@PM\|@QA\|@judge\|@<role>` goes to the current holders of that seat, and an unknown name, an empty seat or an author outside the job is refused |
+| `post --job J --as NAME [--to NAME\|@ROLE] "message"` | post (whitespace collapsed; capped at the board's message cap); `--to @EL\|@PM\|@QA\|@judge\|@<role>` goes to the current holders of that seat, and an unknown name, an empty seat or an author outside the job is refused |
+| `config board.message_max_chars [N] [--save]` | print the board's message cap, or set it to N (50-4000). When a user says "make board messages 500 characters", run `swarm config board.message_max_chars 500` (add `--save` to keep it in the config file too) |
 | `read --as NAME \| --key K [--job J] [--peek]` | messages new since the last read, excluding your own (`read_limit` at a time, then "(N more unread: run read again)"); `--peek` doesn't advance the cursor |
 | `learn --job J [--bank B] [--create-bank] -` / `learn --list-banks` | retain distilled learnings with provenance; list existing banks to choose the best topic match |
 | `recall --job J QUERY` | query general banks plus the explicit project bank |
@@ -479,7 +480,7 @@ the file backend keeps the same rows in `state.json` and `messages.jsonl`.
   - `job` (required);
   - `agent_name` (required);
   - `created_at`;
-  - `message` (varchar(200), required);
+  - `message` (text, required; at most the board's message cap characters);
   - `to_agent` (optional addressee);
   - `agent_key`;
   - `host`.
@@ -548,11 +549,16 @@ the file backend keeps the same rows in `state.json` and `messages.jsonl`.
   that commits late. A spooled post gets its id when delivered, so it lands after every
   cursor and is never missed. A new agent's cursor starts `join_history` (default 30) messages
   back: it gets the job's recent history at start, not the whole backlog.
-- **Message cap:** `message_max_chars` sizes the `varchar` column when the table is first created.
-  Re-running `init` does not resize it, so raising the cap later needs a manual
-  `ALTER TABLE messages ALTER COLUMN message TYPE varchar(N)`. On the SQLite backend the cap is a
-  `CHECK (length(message) BETWEEN 1 AND N)`, also fixed at the first `init` (SQLite can't alter a CHECK:
-  raising it means a new board file). The file backend reads the cap live from the config.
+- **Message cap:** one value per board, stored in the board itself, so every client and host agrees.
+  `[board] message_max_chars` (default 200) is only what a NEW board starts with. Read it with
+  `swarm config board.message_max_chars`; change it with `swarm config board.message_max_chars 500`
+  (50 to 4000, validated; add `--save` to also write it to the config file). It takes effect at once for
+  every client, on every backend, with no downtime. Lowering it never deletes or cuts messages already
+  stored: they stay readable, and only new posts obey the lower cap. If a client's config says another
+  value, the board's still wins. Postgres: the column is `text` plus a `CHECK (length(message) <= N) NOT VALID`
+  constraint that is swapped in one quick `ALTER TABLE` (metadata only, no row scan or rewrite; it waits
+  for the table lock and retries, so posters can queue for at most a few seconds at a time);
+  SQLite: a trigger reading the stored value; file/memory: a field of the board's state.
 
 ## Transcript archive (optional)
 Off by default. With `[transcripts] enabled = true` (the `transcripts` table is created by setup, automatically) the

@@ -103,7 +103,11 @@ RESTART_OUTCOMES = ("running", "completed", "timeout", "max_turns", "failed", "n
 # 12 jobs.status 'paused' and the job_pauses table (pause/resume manifests), 13 the job_status
 # view's shown_status column (what `status` shows, incl. "waiting (goal not met)"; view only),
 # 14 the index messages(job, created_at) (job_status's per-job max(created_at);
-# `swarm watch` redraws read it), 15 grouped status counts and message/agent indexes,
+# `swarm watch` redraws read it), 15 the message cap is a per-board setting stored in the board
+# (Postgres board_meta 'message_max_chars' and a replaceable NOT VALID CHECK on a text column
+# instead of varchar(N); SQLite board_meta table and a trigger instead of the table CHECK;
+# file/memory: a field of the store), see Board.message_cap; grouped status counts
+# and message/agent indexes.
 # 16 jobs.plugin_data (a JSON object of per-job settings that CLI
 # plugins keep with the job: Board.job_data / set_job_data).
 SCHEMA_VERSION = 16
@@ -140,6 +144,14 @@ def merged_job_data(raw: str | None, key: str, value: str | None) -> str:
         data[key] = value
     return json.dumps(data, sort_keys=True)
 
+
+# The message cap: the longest a board message may be, in characters. One authoritative value per
+# board, stored in the board (Board.message_cap); [board] message_max_chars is only the value a NEW
+# board starts with (and the fallback while a board has none stored). Changed with
+# `swarm config board.message_max_chars N` (Board.set_message_cap).
+MESSAGE_CAP_DEFAULT = 200
+MESSAGE_CAP_MIN = 50
+MESSAGE_CAP_MAX = 4000
 
 # A moved agent's roster_seen holds MOVED_PREFIX + the job it came from until its next PreToolUse
 # turn tells it (no schema change: the hooks own the text, and it never parses as a snapshot).
@@ -281,6 +293,15 @@ def database_hosts(db: dict) -> list[tuple[str, int]]:
         except ValueError:
             raise BoardError(f"[database] host {tok!r}: the port is not a number") from None
     return out
+
+
+class CapExceeded(BoardError):
+    """A backend refused a message longer than the board's cap as it is NOW (it was lowered after the
+    poster read it). `cap` is the current value; Board.post cuts the text to it and retries once."""
+
+    def __init__(self, cap: int):
+        super().__init__(f"message longer than the board's cap of {cap} characters")
+        self.cap = cap
 
 
 class ReadOnlyBoard(BoardError):
@@ -972,6 +993,27 @@ def auto_close_outcome(agents: Sequence[AgentStatus], last: Message | None) -> s
     return (head + text)[:AUTO_CLOSE_OUTCOME_MAX]
 
 
+def check_message_cap(value) -> int:
+    """`value` as a valid message cap (an int, or a string/float of one, within MESSAGE_CAP_MIN..
+    MESSAGE_CAP_MAX), else ValueError naming the bounds. A bool is not a number here."""
+    try:
+        if isinstance(value, bool) or (isinstance(value, float) and value != int(value)):
+            raise ValueError
+        n = int(str(value).strip()) if isinstance(value, str) else int(value)
+    except (ValueError, TypeError, OverflowError):
+        raise ValueError(f"message cap must be a whole number of characters between "
+                         f"{MESSAGE_CAP_MIN} and {MESSAGE_CAP_MAX}, not {str(value)[:40]!r}") from None
+    if not MESSAGE_CAP_MIN <= n <= MESSAGE_CAP_MAX:
+        raise ValueError(f"message cap must be between {MESSAGE_CAP_MIN} and {MESSAGE_CAP_MAX} "
+                         f"characters, not {n}")
+    return n
+
+
+def configured_message_cap(cfg: dict) -> int:
+    """[board] message_max_chars of `cfg`, validated (ValueError when out of bounds)."""
+    return check_message_cap(cfg["board"].get("message_max_chars", MESSAGE_CAP_DEFAULT))
+
+
 def normalize_message(message: str, cap: int) -> tuple[str, bool]:
     """Collapse all whitespace runs to single spaces and strip, drop terminal controls (C0, DEL,
     C1, U+2028/U+2029, bidi overrides and isolates: textsafe.strip_controls), then collapse
@@ -1041,7 +1083,7 @@ WRITE_METHODS = (
     "record_silence_nudge", "record_reply_reminder", "post", "read_unread", "read_new",
     "save_transcript", "refresh_transcript", "mark_capture_failed", "rotate_transcripts",
     "save_memory_ref", "mark_memory_refs_checked", "delete_memory_refs",
-    "pause_job", "begin_resume", "record_resume_outcome",
+    "pause_job", "begin_resume", "record_resume_outcome", "set_message_cap",
 )
 _CURSOR_READS = {"read_unread": 3, "read_new": 3}   # method -> index of `advance` in *args
 
@@ -1788,12 +1830,53 @@ class Board(abc.ABC):
         check_name(name, "agent name")
         if to is not None:
             check_name(to, "addressee name")
-        text, truncated = normalize_message(message, int(self.board_cfg["message_max_chars"]))
+        text, truncated = normalize_message(message, self.message_cap())
         if not text:
             raise ValueError("empty message")
         if name != PAUSE_WRITER:
             self.require_unpaused(job)
-        return PostResult(self._insert_message(job, name, text, to, agent_key), truncated)
+        try:
+            return PostResult(self._insert_message(job, name, text, to, agent_key), truncated)
+        except CapExceeded as exc:   # lowered since we read it: cut to the new cap, once
+            text, cut = normalize_message(text, exc.cap)
+            return PostResult(self._insert_message(job, name, text, to, agent_key), truncated or cut)
+
+    # ---- the message cap -----------------------------------------------------------
+
+    def message_cap(self) -> int:
+        """The board's message cap (characters): the value stored in the board, read fresh (not
+        cached: another client may have changed it), else, for a board that has none stored (not
+        yet upgraded), [board] message_max_chars, else MESSAGE_CAP_DEFAULT when that is invalid.
+        Everything that truncates or announces the cap uses this, never the config directly."""
+        stored = self._read_message_cap()
+        if stored is not None:
+            return stored
+        try:
+            return configured_message_cap(self.cfg)
+        except ValueError:
+            return MESSAGE_CAP_DEFAULT
+
+    def set_message_cap(self, value) -> tuple[int, int]:
+        """Set the board's cap to `value` (ValueError when outside MESSAGE_CAP_MIN..MESSAGE_CAP_MAX);
+        returns (old, new). Online and safe on every backend: existing messages are NEVER cut or
+        refused, whether the cap grows or shrinks; the new cap governs posts made from now on (a
+        shrink below the length of stored messages leaves them readable as they are). Concurrent
+        posts either see the old or the new cap (a poster holding the old one is cut to the new
+        by CapExceeded in post)."""
+        new = check_message_cap(value)
+        old = self.message_cap()
+        self._write_message_cap(new)
+        return old, new
+
+    @abc.abstractmethod
+    def _read_message_cap(self) -> int | None:
+        """The cap stored in the board, None when the board has none (schema before 15)."""
+
+    @abc.abstractmethod
+    def _write_message_cap(self, cap: int) -> None:
+        """Store `cap` (already validated) as the board's cap, so that the backend itself refuses
+        longer messages from now on; existing rows are untouched. `_insert_message` raises
+        CapExceeded(current cap) for a text longer than the stored cap."""
 
     @abc.abstractmethod
     def _insert_message(self, job: str, name: str, text: str, to: str | None,

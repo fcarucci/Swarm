@@ -16,7 +16,7 @@ import time
 import unittest
 from unittest import mock
 
-from support import SMALL_POOL, SqliteHarness, base_config, posix_only  # noqa: F401  (sets sys.path)
+from support import join_processes, SMALL_POOL, SqliteHarness, base_config, posix_only  # noqa: F401  (sets sys.path)
 
 from swarm.board import BoardUnavailable, open_board, setup_board  # noqa: E402
 
@@ -54,18 +54,24 @@ def _post(cfg, writer, count, start, out):
             out.put((writer, b.post("j", writer, f"{writer} {i}").id))
 
 
-def _read(cfg, key, expect, start, out):
-    """Read with advance until `expect` messages were delivered; report every id in order."""
+def _read(cfg, key, expect, start, out, writers_done):
+    """Read through writer completion, then drain the cursor once more."""
     start.wait(TIMEOUT)
-    seen, deadline = [], time.monotonic() + TIMEOUT
-    while len(seen) < expect and time.monotonic() < deadline:
-        with open_board(cfg) as b:
+    seen = []
+    with open_board(cfg) as b:
+        b.subscribe(messages_only=True)
+        while len(seen) < expect:
             seen += [m.id for m in b.read_new(agent_key=key)]
+            if writers_done.is_set():
+                while page := b.read_new(agent_key=key):
+                    seen += [m.id for m in page]
+                break
+            if len(seen) < expect:
+                b.wait_for_change(1)
     out.put((key, seen))
 
 
-def _post_later(cfg, delay):
-    time.sleep(delay)
+def _post_later(cfg):
     with open_board(cfg) as b:
         b.post("j", "Child", "from another process")
 
@@ -83,11 +89,11 @@ def _run(target, argsets):
     while any(p.is_alive() for p in procs) or not out.empty():
         try:
             results.append(out.get(timeout=0.5))
+            deadline = time.monotonic() + TIMEOUT
         except Exception:
             if time.monotonic() > deadline:
                 break
-    for p in procs:
-        p.join(10)
+    join_processes(procs)
     codes = [p.exitcode for p in procs]
     if codes != [0] * len(procs):
         raise AssertionError(f"worker exit codes {codes}")
@@ -147,23 +153,25 @@ class SqliteProcessConcurrencyTests(unittest.TestCase):
         cfg["board"]["read_limit"] = 7          # small pages: readers page while writers write
         start, out = CTX.Event(), CTX.Queue()
         procs = [CTX.Process(target=_post, args=(cfg, f"W{w}", per_writer, start, out)) for w in range(writers)]
-        procs += [CTX.Process(target=_read, args=(cfg, k, writers * per_writer, start, out)) for k in reader_keys]
+        writers_done = CTX.Event()
+        procs += [CTX.Process(target=_read, args=(cfg, k, writers * per_writer, start, out, writers_done)) for k in reader_keys]
         for p in procs:
             p.start()
         start.set()
         posted, reads = [], {}
-        deadline = time.monotonic() + TIMEOUT
-        while (len(posted) < writers * per_writer or len(reads) < readers) and time.monotonic() < deadline:
-            try:
-                item = out.get(timeout=1)
-            except Exception:
-                continue
-            if isinstance(item[1], list):
-                reads[item[0]] = item[1]
-            else:
-                posted.append(item)
-        for p in procs:
-            p.join(10)
+        try:
+            while len(posted) < writers * per_writer or len(reads) < readers:
+                item = out.get(timeout=TIMEOUT)  # a generous inactivity guard, not a workload cutoff
+                if isinstance(item[1], list):
+                    reads[item[0]] = item[1]
+                else:
+                    posted.append(item)
+                    if len(posted) == writers * per_writer:
+                        writers_done.set()
+        finally:
+            writers_done.set()
+            join_processes(procs)
+            out.close()
         self.assertEqual([p.exitcode for p in procs], [0] * len(procs))
         ids = [i for _, i in posted]
         self.assertEqual(len(ids), writers * per_writer)
@@ -195,7 +203,7 @@ class SqliteBackendTests(unittest.TestCase):
         self.assertTrue(raw.endswith("+00:00"), raw)
         m = self.b.recent_messages(1, "j")[0]
         self.assertEqual(m.created_at.utcoffset(), dt.timedelta(0))
-        self.assertLess(abs((m.created_at - dt.datetime.now(dt.timezone.utc)).total_seconds()), 60)
+        self.assertEqual(m.created_at, dt.datetime.fromisoformat(raw))
 
     def test_uninitialised_or_missing_file_is_unavailable(self):
         cfg = base_config(backend="sqlite")
@@ -269,10 +277,10 @@ class SqliteBackendTests(unittest.TestCase):
             self.assertTrue(b.record_verdict("j", judge, "not_met", "r", "n"))
             self.assertEqual(b.job_status("j").verdict_next, "n")
 
-    def test_message_cap_is_a_check_sized_at_first_setup(self):
-        with self.h.board(message_max_chars=500) as b:   # a cap raised after init: CHECK still 200
-            with self.assertRaises(sqlite3.IntegrityError):
-                b.post("j", "A", "x" * 300)
+    def test_message_cap_is_the_boards_not_the_clients(self):
+        with self.h.board(message_max_chars=500) as b:   # a client's own config no longer matters
+            self.assertEqual(b.message_cap(), 200)
+            self.assertTrue(b.post("j", "A", "x" * 300).truncated)
         self.assertTrue(self.b.post("j", "A", "é" * 250).truncated)   # characters, not bytes
         self.assertEqual(len(self.b.recent_messages(1, "j")[0].message), 200)
 
@@ -286,7 +294,7 @@ class SqliteBackendTests(unittest.TestCase):
     def test_wait_for_change_sees_a_post_from_another_process(self):
         self.b.subscribe(messages_only=True)
         self.assertFalse(self.b.wait_for_change(0.2))
-        p = CTX.Process(target=_post_later, args=(self.h.cfg, 0.3))
+        p = CTX.Process(target=_post_later, args=(self.h.cfg,))
         p.start()
         try:
             self.assertTrue(self.b.wait_for_change(TIMEOUT))

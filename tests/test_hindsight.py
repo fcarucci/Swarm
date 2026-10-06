@@ -12,7 +12,7 @@ import unittest
 from unittest import mock
 import uuid
 
-from support import posix_only  # noqa: E402
+from support import posix_only, assert_finishes, ManualClock  # noqa: E402
 from test_hooks_cli import Env  # noqa: F401  (sets sys.path)
 from fake_hindsight import FakeHindsight, dead_url  # noqa: E402
 
@@ -223,14 +223,7 @@ class MemoryTests(HindsightEnv):
     def test_hindsight_down_start_is_quick_and_logged(self):
         self.enable(url=dead_url())
         self.cli("activate", "--job", "J")
-        t = time.monotonic()
-        ctx = self.start()
-        # Quick = bounded by the join recall's budget (recall_start_seconds, default 6 s), not hung.
-        # Windows takes ~2 s per refused loopback connect (SYN retries), so a dead Hindsight costs
-        # it several seconds there (4.9 s seen on windows-latest); bounding by the mid-work 2 s cap
-        # was the wrong budget for a join.
-        from swarm import hooks
-        self.assertLess(time.monotonic() - t, hooks._start_recall_seconds(self.cfg) + 1.5)
+        ctx = assert_finishes(self, self.start)
         self.assertIn("[swarm roster]", ctx)
         self.assertNotIn("[swarm memory] what", ctx)
         self.assertRegex(self.error_log.read_text(), r"memory agent-1: HindsightUnavailable: ")
@@ -239,15 +232,26 @@ class MemoryTests(HindsightEnv):
         # The recall's own budget (not Hindsight being down) ends the wait, so there is no
         # unreachable marker; the join recall is retried on the next turn, bounded again.
         self.enable(timeout_seconds=0.5, recall_start_seconds=0.5, retry_after_seconds=60)
-        self.fake.delay = 3
+        from swarm import hindsight
+        clock, recalls = ManualClock(), []
+        real = hindsight._fetch_within
+
+        def slow(req, timeout, seconds):
+            self.assertAlmostEqual(seconds, 0.5)
+            if req.full_url.endswith("/memories/recall"):
+                recalls.append(req.full_url)
+                clock.advance(0.6)
+                raise TimeoutError("injected recall deadline")
+            return real(req, 30, 30)
+
         self.cli("activate", "--job", "J")
-        t = time.monotonic()
-        ctx = self.start()
-        self.assertLess(time.monotonic() - t, 2.5)
-        self.assertNotIn("[swarm memory] what", ctx)
-        t = time.monotonic()
-        self.turn()
-        self.assertLess(time.monotonic() - t, 2.5)
+        with mock.patch("time.monotonic", clock), \
+                mock.patch.object(hindsight, "_fetch_within", side_effect=slow):
+            ctx = self.start()
+            self.assertNotIn("[swarm memory] what", ctx)
+            self.turn()
+        self.assertEqual(len(recalls), 2)  # no unreachable breaker; the next turn retried
+        self.assertRegex(self.error_log.read_text(), r"memory agent-1: HindsightOutOfTime: ")
 
     def test_api_key_never_printed_on_errors(self):
         self.enable(url=dead_url(), api_key_file=str(self.key_file))
@@ -264,9 +268,19 @@ class ColdRecallTests(HindsightEnv):
         from swarm import hooks
         self.enable(timeout_seconds=1, recall_start_seconds=5)   # per-call timeout is raised to the budget
         self.fake.add_memory("coding", "cold fact")
-        self.fake.delays[("POST", "/memories/recall")] = hooks.HOOK_RECALL_SECONDS + 0.8   # beyond the old cap
+        from swarm import hindsight
+        real, budgets = hindsight._fetch_within, []
+
+        def fetch(req, timeout, seconds):
+            budgets.append((timeout, seconds))
+            return real(req, timeout, seconds)
+
         self.cli("activate", "--job", "J")
-        self.assertIn("cold fact", self.start())
+        with mock.patch("time.monotonic", ManualClock()), mock.patch.object(hindsight, "_fetch_within", side_effect=fetch):
+            self.assertIn("cold fact", assert_finishes(self, self.start))
+        self.assertTrue(budgets)
+        self.assertGreater(budgets[0][0], hooks.HOOK_RECALL_SECONDS)
+        self.assertGreater(budgets[0][1], hooks.HOOK_RECALL_SECONDS)
 
     def test_env_overrides_the_config(self):
         from swarm import hooks
@@ -281,14 +295,20 @@ class ColdRecallTests(HindsightEnv):
                          hooks.HOOK_RECALL_MAX_SECONDS)
 
     def test_start_recall_that_runs_out_of_time_is_retried_on_the_next_turn(self):
-        self.enable(timeout_seconds=10, recall_start_seconds=0.6)
+        self.enable(timeout_seconds=10, recall_start_seconds=5)
         self.fake.add_memory("coding", "late fact")
-        self.fake.delays[("POST", "/memories/recall")] = 1.5
+        import threading
+        entered, release = threading.Event(), threading.Event()
+        self.fake.gates[("POST", "/memories/recall")] = (entered, release)
+        self.addCleanup(release.set)
         self.cli("activate", "--job", "J")
-        self.assertNotIn("late fact", self.start())
+        self.assertNotIn("late fact", assert_finishes(self, self.start))
+        self.assertTrue(entered.wait(30))
+        self.assertFalse(release.is_set())
         self.assertRegex(self.error_log.read_text(), r"memory agent-1: HindsightOutOfTime: ")
-        self.fake.delays.clear()                                     # warm now; no recall_minutes wait
-        self.assertIn("late fact", self.turn())
+        release.set()
+        self.fake.gates.clear()
+        self.assertIn("late fact", assert_finishes(self, self.turn))
 
 
 class FailureScopeTests(HindsightEnv):
@@ -399,9 +419,14 @@ class SpoolRetryTests(HindsightEnv):
         self.hook("start")
 
     def spool_mem(self, text: str, project: str) -> None:
+        before = set(self.spool_dir.glob("*.mem"))
         self.fake.banks.setdefault(project, [])
         spool.spool_memory(self.cfg, "J", "Someone", text, project)
-        time.sleep(0.01)  # distinct mtimes: oldest first
+        # Filesystem timestamp resolution and scheduler speed cannot define queue order.
+        files = list(self.spool_dir.glob("*.mem"))
+        [latest] = set(files) - before
+        stamp = max((p.stat().st_mtime for p in files if p != latest), default=1000) + 1
+        os.utime(latest, (stamp, stamp))
 
     def records(self, suffix: str = ".mem") -> list[dict]:
         return [json.loads(f.read_text()) for f in sorted(self.spool_dir.glob("*" + suffix))]
@@ -424,12 +449,15 @@ class SpoolRetryTests(HindsightEnv):
         self.fake.fail(500, "bank broken is corrupt", bank="broken")
         self.spool_mem("for the broken bank", "broken")
         self.spool_mem("for the healthy bank", "healthy")
+        before = time.time()
         self.assertEqual(self.flush(), 1)
+        after = time.time()
         self.assertEqual(self.fake.banks["healthy"][0]["text"], "for the healthy bank")
         [rec] = self.records()
         self.assertEqual(rec["text"], "for the broken bank")
         self.assertEqual(rec["attempts"], 1)
-        self.assertAlmostEqual(rec["first_failed"], time.time(), delta=5)
+        self.assertGreaterEqual(rec["first_failed"], before)
+        self.assertLessEqual(rec["first_failed"], after)
         self.assertIn("HTTP 500", rec["last_error"])
         self.assertIn("bank broken is corrupt", rec["last_error"])
         self.assertEqual(list(self.spool_dir.glob("*.bad")), [])

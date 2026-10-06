@@ -12,8 +12,8 @@ to follow it.
 - [`engineering-team`](skills/engineering-team/SKILL.md): a configurable team with an
   engineering lead, QA, engineers, and an independent judge. Separate `team.toml`
   configuration and team CLI commands come through the plugin system.
-- `ask-answer` — coming in 0.2.0: a separate skill for blockers and human questions,
-  using `swarm ask`, `swarm answer`, and `swarm questions`. It is absent from this branch.
+- `ask-answer` ships as its own skill in 0.2.0 for blockers and human questions,
+  using `swarm ask`, `swarm answer`, and `swarm questions`.
 
 In Claude Code, invoke `/swarm:swarm` or `/swarm:engineering-team`.
 In Codex, select the skill from `/skills`.
