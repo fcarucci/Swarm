@@ -253,7 +253,7 @@ class CloseStuckTests(Env):
         with self.board() as b:
             b.set_waiting("J", "ci run")
         self._age()
-        self.assertEqual(len(self.sweep()), 1)
+        self.assertEqual(len(self.sweep()), 0)
         with self.board() as b:
             self.assertEqual(b.job_status("J").waiting_on, "ci run")
 

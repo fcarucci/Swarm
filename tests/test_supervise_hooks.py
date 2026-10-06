@@ -57,6 +57,19 @@ class ResumeHookTests(SupervisedEnv):
         self.assertTrue(out is None or "Stop now" not in str(out))
         self.assertEqual(self.agent(sid).tool_calls, 2)
 
+    def test_restarted_coordinator_can_spawn_on_first_and_later_calls(self):
+        self.h.update_agent("orig", role="coordinator")
+        self.resume()
+        sid = "11111111-2222-4333-8444-555555555555"
+        for n in range(2):
+            out = self.hook("turn", agent_id=None, session=sid, tool_name="Agent",
+                            tool_input={"prompt": "[swarm job: J]\n[swarm spawn: independent parser helper needed for scoped implementation]\nBuild parser",
+                                        "description": f"engineer__parser{n}"})
+            detail = (out or {}).get("hookSpecificOutput", {})
+            self.assertNotEqual(detail.get("permissionDecision"), "deny", out)
+            self.hook("done", agent_id=None, session=sid, tool_name="Agent")
+        self.assertEqual(self.agent(sid).role,"coordinator")
+
     def test_replacement_cannot_spawn(self):
         self.resume()
         sid = "11111111-2222-4333-8444-555555555555"

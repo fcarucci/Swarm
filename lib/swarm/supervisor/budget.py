@@ -61,7 +61,9 @@ def decide(sup: dict, *, lineage: str, job_restarts: list[Restart],
     if running >= cap_n:
         return Decision(False, f"{running}/{cap_n} replacements already running on this host")
 
-    mine = sorted((r for r in job_restarts if r.agent_key == lineage), key=lambda r: r.id)
+    cutoff = now - _dt.timedelta(hours=24)
+    mine = sorted((r for r in job_restarts if r.agent_key == lineage and r.at > cutoff),
+                  key=lambda r: r.id)
     if outage_started is not None and any(
             r.reason == "outage" and r.at >= outage_started for r in mine):
         return Decision(False, "already restarted once after the board outage", cap="outage")

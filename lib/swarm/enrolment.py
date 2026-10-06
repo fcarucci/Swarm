@@ -38,12 +38,12 @@ from swarm import paths, safefs, textsafe
 SUBDIR = "enrolled"
 FORMAT = 1
 HARNESSES = ("claude", "codex")
-KINDS = ("agent", "job")
-RECORD_MAX = 16 * 1024
+KINDS = ("agent", "job", "owner")
+RECORD_MAX = 96 * 1024
 MAX_BOARD_KEY = 1024
 MAX_NAME = 256            # job, agent_key, session_id
 MAX_CWD = 4096
-_FILE = re.compile(r"(agent|job)-[0-9a-f]{64}\.json")   # always fullmatch
+_FILE = re.compile(r"(agent|job|owner)-[0-9a-f]{64}\.json")   # always fullmatch
 
 
 @dataclass(frozen=True)
@@ -56,6 +56,7 @@ class Record:
     session_id: str | None
     cwd: str
     created_at: float
+    prompt: str | None = None
 
 
 # --- names and validation ----------------------------------------------------------------------
@@ -92,7 +93,7 @@ def _validate(rec: Record) -> Record:
         _text(rec.agent_key, "agent_key", MAX_NAME)
     elif rec.agent_key is not None:
         raise ValueError("enrolment: a job record has no agent_key")
-    if rec.harness not in HARNESSES:
+    if rec.harness not in HARNESSES and not (rec.kind == "owner" and rec.harness is None):
         raise ValueError(f"enrolment: harness must be one of {HARNESSES}, not {rec.harness!r:.40}")
     _text(rec.session_id, "session_id", MAX_NAME, optional=True)
     _text(rec.cwd, "cwd", MAX_CWD)
@@ -102,6 +103,8 @@ def _validate(rec: Record) -> Record:
     if (not isinstance(rec.created_at, (int, float)) or isinstance(rec.created_at, bool)
             or not math.isfinite(rec.created_at)):
         raise ValueError("enrolment: created_at must be a number")
+    if rec.prompt is not None and (not isinstance(rec.prompt, str) or len(rec.prompt) > 12000):
+        raise ValueError("enrolment: prompt must be at most 12000 characters")
     return rec
 
 
@@ -115,7 +118,7 @@ def _parse(data: bytes | None) -> Record | None:
         return _validate(Record(kind=obj["kind"], board_key=obj["board_key"], job=obj["job"],
                                 agent_key=obj["agent_key"], harness=obj["harness"],
                                 session_id=obj["session_id"], cwd=obj["cwd"],
-                                created_at=obj["created_at"]))
+                                created_at=obj["created_at"], prompt=obj.get("prompt")))
     except (ValueError, KeyError, TypeError, ArithmeticError):   # ArithmeticError: 10**400
         return None
 
@@ -169,12 +172,12 @@ def _delete(name: str) -> None:
 # --- agent records -----------------------------------------------------------------------------
 
 def write(board_key: str, *, job: str, agent_key: str, harness: str, session_id: str | None,
-          cwd: str, now: float | None = None) -> Record:
+          cwd: str, now: float | None = None, prompt: str | None = None) -> Record:
     """Record that this host user enrolled `agent_key` of `job` on board `board_key` (replacing
     any earlier record for the pair). ValueError for an invalid field (nothing written); OSError
     (safefs.UnsafePathError) when the host dir is unsafe."""
     rec = Record("agent", board_key, job, agent_key, harness, session_id, cwd,
-                 time.time() if now is None else float(now))
+                 time.time() if now is None else float(now), prompt)
     return _store(rec, record_name(board_key, agent_key) if isinstance(board_key, str)
                   and isinstance(agent_key, str) else "invalid")
 
@@ -246,3 +249,15 @@ def prune(max_age: float, *, now: float | None = None, keep=None) -> int:
     except FileNotFoundError:
         return 0
     return removed
+
+
+def write_job_owner(board_key: str, *, job: str, harness: str, session_id: str | None, cwd: str, now=None):
+    """Creation proof, independent of attached coordinators; written only for new jobs."""
+    rec = Record("owner", board_key, job, None, harness, session_id, cwd,
+                 time.time() if now is None else float(now))
+    return _store(rec, f"owner-{_digest('owner', board_key, job)}.json")
+
+
+def find_job_owner(board_key: str, job: str):
+    rec = _load(f"owner-{_digest('owner', board_key, job)}.json")
+    return rec if rec and rec.kind == "owner" and rec.board_key == board_key and rec.job == job else None

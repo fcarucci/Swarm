@@ -22,6 +22,8 @@ def effective_contact(last_contact: _dt.datetime, out, dead: _dt.timedelta) -> _
 def stuck_reason(a, js, now: _dt.datetime, board_cfg: dict, sup: dict, out=None) -> str | None:
     if a.ended_at is not None:
         return None
+    if js.status != "active" or js.verdict == "met" or (js.waiting_on and not str(js.waiting_on).startswith(WAITING_PREFIX)):
+        return None
     dead = _dt.timedelta(minutes=float(board_cfg["dead_minutes"]))
     silent = _dt.timedelta(minutes=float(sup["silent_minutes"]))
     contact = effective_contact(a.last_contact_at, out, dead)
@@ -98,9 +100,21 @@ def find_stuck_owned(board, cfg: dict, now=None, deadline: float | None = None) 
             break
         if not js.supervise or js.status != "active":
             continue
+        from swarm.supervisor.orphans import human_question
+        if human_question(board, js):
+            continue
         now_j = now or board.now()
         active = board.agents(js.job, include_departed=False)
-        reasons = {a.agent_key: stuck_reason(a, js, now_j, bcfg, sup, out) for a in active}
+        posts = board.recent_messages(100, job=js.job)
+        latest = {}
+        for m in sorted(posts, key=lambda m: m.id):
+            latest[m.agent_name] = m
+        finished = {a.name for a in active if a.name in latest
+                    and latest[a.name].created_at >= a.joined_at
+                    and (latest[a.name].message.strip().upper() == "DONE"
+                         or latest[a.name].message.strip().upper().startswith("DONE "))}
+        reasons = {a.agent_key: (None if a.name in finished else stuck_reason(a, js, now_j, bcfg, sup, out))
+                   for a in active}
         # orphaned: every agent dead at once plus no .seen heartbeat. An agent in
         # a timed-out tool call is a live process, so the job isn't orphaned: it stays "tool"
         if active and all(r == "dead" for r in reasons.values()) and \

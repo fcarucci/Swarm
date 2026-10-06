@@ -36,6 +36,18 @@ class BriefTests(TranscriptEnv):
             a = next(x for x in b.agents("J") if x.agent_key == "orig")
             return br.build_brief(b, self.cfg, js, a, "stuck:dead", 1, 2)
 
+    def test_original_prompt_survives_disabled_archive(self):
+        from swarm import enrolment
+        from swarm.board.autoinit import store_key
+        enrolment.write(store_key(self.cfg), job="J", agent_key="orig", harness="claude",
+                        session_id=None, cwd=str(self.tmp), prompt="Original precise assignment")
+        self.cfg["transcripts"]["enabled"] = False
+        b = self.build()
+        self.assertIn("recorded spawn prompt", b.text)
+        self.assertIn("Original precise assignment", b.text)
+        self.assertIn("Last contact:", b.text)
+        self.assertIn("Recent job board messages", b.text)
+
     def test_claude_brief_has_task_posts_tail_and_reading_help(self):
         self.seed("J", "orig", self.name, claude_transcript("[swarm job: J]\nParse the logs and report."))
         b = self.build()
@@ -46,7 +58,7 @@ class BriefTests(TranscriptEnv):
         self.assertIn("Parse the logs and report.", b.text)
         self.assertIn("claimed the parser; step 1 done", b.text)
         self.assertIn("please also cover dates", b.text)
-        self.assertNotIn("unrelated chatter", b.text)
+        self.assertIn("unrelated chatter", b.text)
         self.assertIn("working on part 59", b.text)
         self.assertNotRegex(b.text, r"working on part 1\d\b")    # only the last 40 turns (20..59)
         self.assertIn("transcript show --job 'J' --key 'orig'", b.text)

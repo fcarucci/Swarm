@@ -169,6 +169,7 @@ class ResumeTest(Base):
         self.assertEqual(cursors["k2"], max(m.id for m in self.b.recent_messages(10, "j") if m.agent_name == self.n1))
 
     def test_a_resumed_hook_enrolment_accepts_the_restart_without_the_supervisor_switch(self):
+        self.cfg["supervise"] = {"enabled": False}
         from swarm import hooks
         self.paused()
         self.resume()
