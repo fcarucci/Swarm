@@ -85,8 +85,12 @@ class HiddenAgentsCliTests(Env):
         self.assertEqual(swarm.load_config(self.config)["board"]["watch_recent_minutes"], 10)
 
     def test_order_and_columns_unchanged(self):
-        _, shown, _ = self.cli("status", "--job", "J", "--all-agents")
-        _, hidden, _ = self.cli("status", "--job", "J")
+        # Both renders describe the same instant, regardless of CLI/storage latency.
+        with self.board() as b:
+            board_type, now = type(b), b.now()
+        with mock.patch.object(board_type, "now", return_value=now):
+            _, shown, _ = self.cli("status", "--job", "J", "--all-agents")
+            _, hidden, _ = self.cli("status", "--job", "J")
         # Compare cells, not padding: names are random, so a hidden agent with a longer name
         # widens the --all-agents table's columns (a flaky failure about 1 run in 10).
         cells = lambda lines: [ln.split() for ln in lines]
