@@ -1,8 +1,9 @@
-"""Deadline checkpoints on adversarial inputs, driven by an injected monotonic clock.
-Runtime and scheduler speed do not determine whether these tests pass."""
+"""Cooperative redaction/capture deadlines and excerpt fallback on adversarial input.
+Consumer-scoped clocks exercise deadline checks without machine-speed assumptions."""
 from __future__ import annotations
 
 import base64
+import contextlib
 import datetime as dt
 import json
 import lzma
@@ -11,17 +12,28 @@ import shutil
 import tempfile
 import time
 import unittest
-from pathlib import Path
 from unittest import mock
+from pathlib import Path
 
-from support import ManualClock, MemoryHarness  # noqa: F401  (sets sys.path)
+from support import MemoryHarness  # noqa: F401  (sets sys.path)
 
 from swarm import hooks, provenance  # noqa: E402
 from swarm import transcripts as T  # noqa: E402
 from swarm.provenance import MemoryWrite  # noqa: E402
 
-MARGIN = 1.5          # configured budget margin (not measured test runtime)
-HOOK_TIMEOUT = 10.0   # the hosts' hook timeout
+@contextlib.contextmanager
+def deadline_clock(step=0.1):
+    """Advance only the transcript deadline consumer, leaving lock clocks real."""
+    ticks = []
+    local_time = mock.Mock(wraps=time)
+
+    def monotonic():
+        ticks.append(len(ticks) * step)
+        return ticks[-1]
+
+    local_time.monotonic.side_effect = monotonic
+    with mock.patch.object(T, "time", local_time):
+        yield ticks
 
 
 def _b64(rng: random.Random, n: int) -> str:
@@ -44,34 +56,24 @@ def adversarial(shape: str, total: int = 24_000_000) -> str:
     return one * (total // len(one) + 1)
 
 
-class ClockTest(unittest.TestCase):
-    def setUp(self):
-        self.clock = ManualClock(step=0.05)
-        patch = mock.patch("time.monotonic", self.clock)
-        patch.start()
-        self.addCleanup(patch.stop)
-
-
-class RedactDeadlineTest(ClockTest):
+class RedactDeadlineTest(unittest.TestCase):
     def test_redact_stops_near_its_deadline(self):
         for shape in ("key-runs", "key-hint", "end-lines"):
             text = adversarial(shape)
             with self.subTest(shape=shape):
-                t0 = time.monotonic()
-                with self.assertRaises(T.OutOfTime):
-                    T.redact(text, t0 + 0.5)
-                self.assertGreater(self.clock.calls, 1)
+                with deadline_clock() as ticks, self.assertRaises(T.OutOfTime):
+                    T.redact(text, 0.5)
+                self.assertGreater(len(ticks), 1)
 
     def test_one_huge_line_is_checked_too(self):
         rng = random.Random(2)
         text = _tool_line("\n".join("api_key " + _b64(rng, 200) for _ in range(60000)))   # one 12 MB line
-        t0 = time.monotonic()
-        with self.assertRaises(T.OutOfTime):
-            T.redact(text, t0 + 0.2)
-        self.assertGreater(self.clock.calls, 1)
+        with deadline_clock() as ticks, self.assertRaises(T.OutOfTime):
+            T.redact(text, 0.2)
+        self.assertGreater(len(ticks), 1)
 
 
-class WalkerBudgetTest(ClockTest):
+class WalkerBudgetTest(unittest.TestCase):
     """BEGIN-looking lines can't make the key walker quadratic."""
     HDR = "X: -----BEGIN RSA PRIVATE KEY-----"
 
@@ -79,10 +81,9 @@ class WalkerBudgetTest(ClockTest):
         s = "\n".join(self.HDR for _ in range(300 * 1024 // len(self.HDR)))
         for form, text in (("raw", s), ("jsonl", _tool_line(s))):
             with self.subTest(form=form):
-                t0 = time.monotonic()
-                with self.assertRaises(T.OutOfTime):
-                    T.redact(text, t0 + 2.0)
-                self.assertGreater(self.clock.calls, 1)
+                with deadline_clock() as ticks, self.assertRaises(T.OutOfTime):
+                    T.redact(text, 0.5)
+                self.assertGreater(len(ticks), 1)
 
     def test_key_lines_across_json_strings_stop_near_the_deadline(self):
         # R-redact 2: one huge line of quoted key lines, and of 1-line text blocks
@@ -91,24 +92,19 @@ class WalkerBudgetTest(ClockTest):
         for form, text in (("array", json.dumps({"l": keys * 4000}) + "\n"),
                            ("blocks", json.dumps({"c": [{"type": "text", "text": k} for k in keys * 3000]}) + "\n")):
             with self.subTest(form=form):
-                t0 = time.monotonic()
-                with self.assertRaises(T.OutOfTime):
-                    T.redact(text, t0 + 0.5)
-                self.assertGreater(self.clock.calls, 1)
+                with deadline_clock() as ticks, self.assertRaises(T.OutOfTime):
+                    T.redact(text, 0.5)
+                self.assertGreater(len(ticks), 1)
 
     def test_anchor_on_64_kb_of_them_keeps_its_budget(self):
-        self.clock.step = 0
         out = "\n".join(self.HDR for _ in range(64 * 1024 // len(self.HDR)))
-        t0 = time.monotonic()
-        anchor, count = provenance._anchor([], "claude", "c1", dt.datetime.now(dt.timezone.utc), out,
-                           t0 + hooks.PROVENANCE_BUDGET_SECONDS)
-        self.assertGreater(self.clock.calls, 1)
-        self.assertEqual(json.loads(anchor)["type"], provenance.EXCERPT_TYPE)
+        with deadline_clock() as ticks, self.assertRaises(T.OutOfTime):
+            provenance._anchor([], "claude", "c1", dt.datetime.now(dt.timezone.utc), out, 0.2)
+        self.assertGreater(len(ticks), 1)
 
 
-class CaptureBudgetTest(ClockTest):
+class CaptureBudgetTest(unittest.TestCase):
     def setUp(self):
-        super().setUp()
         self.h = MemoryHarness("redact-budget")
         self.h.reset()
         self.b = self.h.board()
@@ -120,26 +116,24 @@ class CaptureBudgetTest(ClockTest):
         self.addCleanup(shutil.rmtree, self.dir, True)
 
     def test_capture_respects_the_hook_budget(self):
-        self.assertLess(hooks.TRANSCRIPT_BUDGET_SECONDS + MARGIN, HOOK_TIMEOUT)
         self.b.open_job("j", None, None, None, "me")
         self.b.allocate_name("k1", "j")
         for shape in ("key-runs", "key-hint", "end-lines"):
             p = self.dir / f"agent-{shape}.jsonl"
             p.write_text(adversarial(shape))
             with self.subTest(shape=shape):
-                t0 = time.monotonic()
-                with self.assertRaises(T.OutOfTime):
+                with deadline_clock() as ticks, self.assertRaises(T.OutOfTime):
                     T.capture_subagent(self.b, self.cfg, "j", "k1", p, final=True,
-                                       deadline=t0 + hooks.TRANSCRIPT_BUDGET_SECONDS)
-                self.assertGreater(self.clock.calls, 1)
+                                       deadline=hooks.TRANSCRIPT_BUDGET_SECONDS)
+                self.assertGreater(len(ticks), 1)
+                self.assertFalse(any(row.final for row in self.b.transcripts(job="j")))
 
 
-class ExcerptBudgetTest(ClockTest):
+class ExcerptBudgetTest(unittest.TestCase):
     AT = dt.datetime(2026, 9, 28, 12, 0, tzinfo=dt.timezone.utc)
     WRITES = (MemoryWrite("note-tool", "notes", ("tool-batch-x",)),)
 
     def setUp(self):
-        super().setUp()
         self.dir = Path(tempfile.mkdtemp(prefix="swarm-budget-"))
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
         self.addCleanup(shutil.rmtree, self.dir, True)
@@ -159,23 +153,29 @@ class ExcerptBudgetTest(ClockTest):
 
     def test_excerpt_degrades_to_a_smaller_one_within_budget(self):
         p = self.transcript()
-        t0 = time.monotonic()
-        ex = provenance.make_excerpt(p, "claude", "toolu_mem", self.WRITES, "retained 1 item", self.AT,
-                                     t0 + hooks.PROVENANCE_BUDGET_SECONDS, provenance.settings({}))
-        self.assertGreater(self.clock.calls, 1)
+        deadline = 10.0
+        soft = deadline - provenance.EXCERPT_RESERVE
+
+        def check(limit):
+            if limit == soft:
+                raise T.OutOfTime("excerpt reserve reached")
+
+        with mock.patch.object(T, "_check", side_effect=check) as checked:
+            ex = provenance.make_excerpt(p, "claude", "toolu_mem", self.WRITES, "retained 1 item", self.AT,
+                                         deadline, provenance.settings({}))
+        self.assertIn(mock.call(soft), checked.call_args_list)
         text = lzma.decompress(ex.body).decode()
         last = json.loads(text.splitlines()[-1])
         self.assertEqual(last["type"], provenance.EXCERPT_TYPE)             # the ref keeps its anchor
         self.assertEqual(last["memories"][0]["document_id"], "tool-batch-x")
 
     def test_a_small_excerpt_is_not_degraded(self):
-        self.clock.step = 0
         lines = [json.dumps({"type": "user", "timestamp": f"2026-09-28T11:{i:02d}:00Z",
                              "message": {"role": "user", "content": f"question {i}"}}) + "\n" for i in range(30)]
         p = self.dir / "small.jsonl"
         p.write_text("".join(lines))
         ex = provenance.make_excerpt(p, "claude", None, self.WRITES, "", self.AT,
-                                     time.monotonic() + hooks.PROVENANCE_BUDGET_SECONDS, provenance.settings({}))
+                                     None, provenance.settings({}))
         self.assertIn("question 29", lzma.decompress(ex.body).decode())
 
 

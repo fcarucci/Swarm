@@ -8,6 +8,11 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 ### Added
 - refactoring skill.
+- The `ask-answer` plugin: structured questions to the human, roles or agents; answers, comments and corrections; full answer delivery, a watch questions pane and pending human questions in orchestrator context.
+- Question changes invalidate local hook leases; PostgreSQL watch snapshots include blocker state and plugin settings, and pending human questions keep surfacing on each orchestrator turn.
+- Optional `[notify] on_question` commands run detached with a five-second timeout, safe arguments/environment values and failures reported by `swarm doctor`.
+- Generic blockers and append-only event history (schema 18): `swarm blockers`, `swarm blocker resolve`, and `swarm blocker comment`; several decisions can wait independently on a job.
+- Core plugin hooks for blocker kinds, expiry, notification events, watch panes, and orchestrator context. Decision deadlines expire in the existing sweep, including paused and closed jobs; unanswered blockers without defaults are flagged overdue once.
 - Automatic recovery of crashed agents and orphaned coordinators through the existing supervisor, with recorded host/workdir, continuation briefs, human-wait and pause exclusions, owner checks, backoff, rolling 24-hour caps and `GAVE UP` notices. Recovery defaults on; `swarm init`/upgrade installs the user timer (every 5 minutes). Explicit `enabled = false` remains respected.
 - Role addressing: `swarm post --to @EL|@PM|@QA|@judge|@<role>` goes to whoever holds that seat on the job now. An unknown recipient, a seat nobody holds, or an author who is not an agent of `--job` is refused with an error and nothing is stored (it used to be stored for nobody to read). `post` also takes `--key` instead of `--as`. See [Addressing a role](docs/REFERENCE.md#addressing-a-role).
 - `swarm wait` takes `--until` (a duration, a time of day such as `17:30`, or a date and time) as well as `--for`. A bounded wait that has not ended now protects a job from the stall limits (including `goal_stall_hours`) as well as the orphan rule, and its end is shown in `status` and `watch`; an ended wait counts as progress. A board read by the orchestrating session counts as contact for liveness.
@@ -23,9 +28,16 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 - File plugins with unsafe POSIX ownership, world-write access, write access by a foreign group or symlinks are refused and listed; primary-group writable plugins (umask `002`) are accepted; the plugin trust boundary and Windows exception are documented. `swarm plugins` also reports discovery failures.
 
 ### Changed
+- `wait` and `resume` use blockers; upgrades preserve existing waits and plugin data. Status and watch list open blockers. Wait blockers retain protection only while bounded by a future deadline; question/person/role blockers protect until resolved, even overdue ones.
 - Schema 17 restricts PostgreSQL agent message counts to the requested job and rolls up jobs without per-agent message counts, preserving status columns and historical counts (automatic migration).
 - Schema 16 (applied by the automatic schema upgrade on first use by the new version): `jobs.plugin_data`, a small JSON object of per-job settings that plugins keep with a job (`Board.job_data` / `set_job_data`). A plain `ADD COLUMN`.
 
+### Fixed
+- Postgres setup can reconstruct missing board metadata while retaining its status view and messages; legacy message-width upgrades preserve dependent status views within the retried conversion transaction.
+- Test fixtures work with the `codex` OS user and inherited `NO_COLOR`; concurrency, retry, and hook checks use work completion and injected clocks instead of machine-speed assumptions.
+- Queued role-addressed posts resolve recipients and validate the author and `--key` on delivery; a refused queued post tells its author why.
+- `@PM` reaches the invoking project manager (or orchestrator); `@product` addresses the optional product manager. The engineering-team PM joins with `--role project_manager`.
+- File plugins with unsafe POSIX ownership, world-write access, write access by a foreign group or symlinks are refused and listed; primary-group writable plugins (umask `002`) are accepted; the plugin trust boundary and Windows exception are documented. `swarm plugins` also reports discovery failures.
 
 ## [0.1.17] - 2026-10-05
 

@@ -220,3 +220,9 @@ helper = "haiku"
 # "main" (the tip of main). `swarm upgrade --channel ...` and the installers write it.
 # [upgrade]
 # channel = "release"
+
+# Optional detached notifications for structured questions. Split into arguments before values
+# are substituted: no shell is used. Leave unset to disable. Timeout is 5 seconds.
+# The same values are available as SWARM_EVENT, SWARM_JOB, SWARM_ID, SWARM_TO, SWARM_SUMMARY.
+[notify]
+# on_question = "your-command {event} {job} {id} {to} {summary}"

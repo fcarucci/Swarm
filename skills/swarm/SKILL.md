@@ -195,8 +195,8 @@ On Postgres the same data is queryable directly as the `agent_status` and `job_s
 - **Orphan.** No live agent (all `completed`, `left` or `dead`, or none at all; dead per
   `dead_minutes`) and no board activity for `[job] orphan_minutes` (default 30), and no tool call
   of the orchestrating session in that time: closed `cancelled`, outcome
-  `auto-closed: no live agents for N min`. A `waiting` job doesn't shield it (`orphan_minutes = 0`
-  turns it off).
+  `auto-closed: no live agents for N min`. A bounded wait with a future deadline, or an open question/person/role blocker, shields it (`orphan_minutes = 0`
+  turns the rule off).
 - **A job with a goal** and no `met` verdict is the exception: no sweep closes it, so an
   orchestrator waiting on a question or between rounds keeps its job (`status` shows
   `waiting (goal not met)` while no agent works on it). Only the judge's `met` or `swarm
@@ -204,8 +204,11 @@ On Postgres the same data is queryable directly as the `agent_status` and `job_s
   set: then no progress for that long closes it `failed`, outcome `...; goal not met`.
 
 `swarm wait --on "<what>" --for 90m` (`h`, `m`, `s`; a bare number is minutes) bounds a wait: until
-it expires the wait shields the job from the orphan rule (not from the stall limit); past it the job is
-`active` or `idle` again, and the orphan rule counts from the moment it expired. `purge` runs the
+it expires the wait shields the job from orphan and stall rules, including `goal_stall_hours`; past it
+the job is `active` or `idle` again, and the grace clock counts from the moment it expired. An unbounded
+wait is shown as waiting but protects nothing. Several plugin blockers may coexist; `resume` resolves only
+wait blockers. An overdue question without a default stays open and protects against automatic closing
+until resolved. `purge` runs the
 sweep on demand; it is best effort and never fails the command that ran it.
 
 ## Running a swarm (the orchestrating session does this)
@@ -444,7 +447,9 @@ way its own host does it. `swarm status --job <job>` shows each agent's HOST and
 | `activate … --goal G\|-` | give the job a goal: one judge (`[swarm role: judge]` in its prompt) decides when it is met; prints both tag lines |
 | `deactivate --job J [--status S] [--outcome O] [--force] [--delete-bank]` | switch the board off and close the job; `completed` needs the judge's `met` verdict when the job has a goal, unless `--force` (recorded). On a job that is already closed (e.g. auto-closed) it replaces the status and outcome |
 | `verdict --job J --as NAME met\|not_met "reason"` | the job's judge only: record the verdict on its goal and post it on the board (queued like `post` when the board is unreachable; a non-judge is refused) |
-| `wait --job J --on "<what>" [--for DURATION\|--until TIME]` / `resume --job J` | mark an open job as waiting for something (shown as `waiting` with the reason; `--for 90m` or `--until 17:30` bounds it, and a bounded wait that has not ended protects the job from auto-close) / working again (an agent joining does this too) |
+| `wait --job J --on "<what>" [--for DURATION\|--until TIME]` / `resume --job J` | mark an open job as waiting for something (shown as `waiting` with the reason; `--for 90m` or `--until 17:30` bounds it, and a bounded wait with a future deadline protects the job from auto-close) / working again (an agent joining does this too) |
+| `blockers --job J [--open\|--all]` | list open blockers, or include resolved/expired history with `--all` |
+| `blocker resolve ID [--how TEXT]` / `blocker comment ID TEXT...` | resolve a blocker with an audit reason, or append a comment |
 | `pause --job J [--reason TEXT]` / `resume --job J [--host H]` | pause a whole job (nobody can join or post; every agent and its final transcript are saved) / resume it on this or another machine: the agents come back under their own names from the transcripts on the board |
 | `status [--all] [--no-color]` / `status --job J [--all-agents]` | jobs overview / one job's details and agent table, with each agent's HOST and MODEL (older finished agents hidden unless `--all-agents`). With `[transcripts] enabled`: a `transcripts:` footer (stored and raw size, ratio, limits, jobs, oldest) / a `transcripts` line and a STORED column per agent |
 | `watch [--job J] [--interval S] [--no-color]` | live full-screen dashboard of jobs, agents and messages |

@@ -1,7 +1,7 @@
 """A complete PostgreSQL watch draw, fetched in one statement and rendered locally."""
 from dataclasses import fields
 from datetime import datetime
-from swarm.board.base import AgentStatus, JobStatus, Message, Restart
+from swarm.board.base import AgentStatus, JobStatus, Message, Restart, Blocker, parse_job_data
 
 
 def rows(cls, data):
@@ -10,7 +10,7 @@ def rows(cls, data):
     for row in data or []:
         values = {k: v for k,v in row.items() if k in names}
         for key, value in values.items():
-            if value is not None and (key.endswith('_at') or key in ('at','last_contact_at','waiting_until')):
+            if value is not None and (key.endswith('_at') or key in ('at','last_contact_at','waiting_until','until')):
                 values[key] = datetime.fromisoformat(value) if isinstance(value,str) else value
         result.append(cls(**values))
     return result
@@ -26,6 +26,8 @@ class SnapshotBoard:
         self.message_rows = rows(Message,row[3])
         self.restart_rows = rows(Restart,row[4])
         self.hidden, self.checks = row[5] or {}, row[6] or {}
+        self.blocker_rows = rows(Blocker, row[7]) if len(row) > 7 else []
+        self.plugin_data = row[8] or {} if len(row) > 8 else {}
 
     def now(self):
         return self.stamp
@@ -56,3 +58,10 @@ class SnapshotBoard:
         messages = [m for m in self.message_rows if (job is None or m.job == job)
                     and (not active_jobs_only or m.job in active)]
         return messages[-limit:] if limit > 0 else []
+
+    def blockers(self, job=None, include_closed=False):
+        return [b for b in self.blocker_rows if (job is None or b.job == job)
+                and (include_closed or b.state == 'open')]
+
+    def job_data(self, job):
+        return parse_job_data(self.plugin_data.get(job))

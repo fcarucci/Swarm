@@ -403,26 +403,32 @@ class BoardContract:
         # Parallel tool calls fire parallel PreToolUse hooks for the same agent.
         self.b.allocate_name("k1", "j")
         total, delivered, errors = 60, [], []
-        done = threading.Event()
+        # Seed a page so concurrent readers have work even before the posters run.
+        for i in range(3):
+            self.b.post("j", "Other", f"seed{i}")
+        start = threading.Barrier(7)
 
         def reader():
             try:
                 with self.h.board(read_limit=7) as b:
-                    while True:
-                        finished = done.is_set()
+                    start.wait()
+                    # A finite workload avoids idle readers continually writing last_seen
+                    # and starving posters until the database busy timeout.
+                    for _ in range(total):
                         delivered.extend(m.id for m in b.read_unread(agent_key="k1").messages)
-                        if finished:
-                            return
             except Exception as exc:  # pragma: no cover
-                errors.append(exc)
+                import traceback
+                errors.append((exc, traceback.format_exc()))
 
         def poster():
             try:
                 with self.h.board() as b:
-                    for i in range(total // 3):
+                    start.wait()
+                    for i in range((total - 3) // 3):
                         b.post("j", "Other", f"p{i}")
             except Exception as exc:  # pragma: no cover
-                errors.append(exc)
+                import traceback
+                errors.append((exc, traceback.format_exc()))
 
         readers = [threading.Thread(target=reader) for _ in range(4)]
         posters = [threading.Thread(target=poster) for _ in range(3)]
@@ -432,7 +438,6 @@ class BoardContract:
             for t in posters:
                 t.join(120)
         finally:
-            done.set()
             for t in readers:
                 t.join(120)
         self.assertFalse(any(t.is_alive() for t in posters + readers),
@@ -2074,21 +2079,25 @@ class PostgresSpecificTests(unittest.TestCase):
         conn.execute(old_views.format(idle=5, dead=30, tool_timeout=60))
         conn.execute("UPDATE board_meta SET value = '16' WHERE key = 'schema_version'")
         self.b.set_job_data("j", "engineering-team.optional", "build_engineer")
+        legacy_job_cols = ", ".join(c.strip() for c in _JOB_STATUS_COLS.split(",")
+                                    if c.strip() not in {"open_blockers", "protected_blockers"})
         queries = (f"SELECT {_AGENT_STATUS_COLS} FROM agent_status ORDER BY job, agent_key",
-                   f"SELECT {_JOB_STATUS_COLS}, shown_status FROM job_status ORDER BY job")
+                   f"SELECT {legacy_job_cols}, shown_status FROM job_status ORDER BY job")
         before = [conn.execute(q).fetchall() for q in queries]
         columns = conn.execute("SELECT table_name, column_name, data_type FROM information_schema.columns "
                                "WHERE table_name IN ('agent_status', 'job_status') "
+                               "AND column_name NOT IN ('blockers', 'open_blockers', 'protected_blockers') "
                                "ORDER BY table_name, ordinal_position").fetchall()
         for _ in range(2):  # migration and idempotent re-init
             type(self.b).setup(self.h.cfg, SMALL_POOL)
-            self.assertEqual(SCHEMA_VERSION, 17)
-            self.assertEqual(type(self.b).schema_version(self.h.cfg), 17)
+            self.assertEqual(SCHEMA_VERSION, 18)
+            self.assertEqual(type(self.b).schema_version(self.h.cfg), 18)
             self.assertEqual(self.b.job_data("j"), {"engineering-team.optional": "build_engineer"})
             self.assertEqual([conn.execute(q).fetchall() for q in queries], before)
             self.assertEqual(conn.execute("SELECT table_name, column_name, data_type "
                                           "FROM information_schema.columns "
                                           "WHERE table_name IN ('agent_status', 'job_status') "
+                                          "AND column_name NOT IN ('blockers', 'open_blockers', 'protected_blockers') "
                                           "ORDER BY table_name, ordinal_position").fetchall(), columns)
 
     def test_ids_become_visible_in_order(self):

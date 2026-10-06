@@ -241,6 +241,10 @@ class MemoryHarness:
         with self.store.lock:
             for field, secs in fields_seconds_ago.items():
                 self.store.jobs[job][field] = self._ago(secs)
+                if field == "waiting_until":
+                    for b in self.store.blockers:
+                        if b["job"] == job and b["kind"] == "wait" and b["state"] == "open":
+                            b["until"] = self._ago(secs)
 
     def backdate_route(self, agent_key: str, seconds_ago: float) -> None:
         with self.store.lock:
@@ -297,6 +301,8 @@ class FileHarness(MemoryHarness):
             s.memory_refs = {}
             s.restarts, s.next_restart_id = [], 1
             s.pauses, s.next_pause_id = [], 1
+            s.blockers, s.next_blocker_id = [], 1
+            s.blocker_events, s.next_blocker_event_id = [], 1
             s.message_max_chars = None   # setup seeds it from the config again
         setup_board(self.cfg, pool)
 
@@ -347,7 +353,7 @@ class PostgresHarness:
 
     def reset(self, pool=SMALL_POOL) -> None:
         self.conn.execute("TRUNCATE messages, agents, jobs, name_pool, agent_routes, transcripts, transcript_image_refs, "
-                          "memory_ref_images, memory_refs, transcript_images, restarts, job_pauses")
+                          "memory_ref_images, memory_refs, transcript_images, restarts, job_pauses, blocker_events, blockers")
         with self.conn.cursor() as cur:
             cur.executemany("INSERT INTO name_pool (name, source) VALUES (%s, %s)",
                             [(n, s) for s, names in pool.items() for n in names])
@@ -397,6 +403,10 @@ class PostgresHarness:
 
     def backdate_job(self, job: str, **fields_seconds_ago) -> None:
         self._backdate("jobs", "job", job, fields_seconds_ago)
+        if "waiting_until" in fields_seconds_ago:
+            self.conn.execute("UPDATE blockers SET until=now()-make_interval(secs => %s) "
+                              "WHERE job=%s AND kind='wait' AND state='open'",
+                              (fields_seconds_ago["waiting_until"],job))
 
     def shown_status(self, job: str) -> str:
         """The job_status view's own shown_status column (base.derive_job_status in SQL)."""
@@ -444,7 +454,7 @@ class SqliteHarness:
             if self.sqlite_board.SqliteBoard.schema_version(self.cfg) != self.sqlite_board.SCHEMA_VERSION:
                 setup_board(self.cfg, pool)   # a store from before the newest tables: add them first
             self._db().executescript("BEGIN IMMEDIATE; DELETE FROM messages; DELETE FROM agents; "
-                                     "DELETE FROM jobs; DELETE FROM name_pool; "
+                                     "DELETE FROM blocker_events; DELETE FROM blockers; DELETE FROM jobs; DELETE FROM name_pool; "
                                      "DELETE FROM agent_routes; DELETE FROM transcripts; DELETE FROM restarts; DELETE FROM job_pauses; "
                                      "DELETE FROM memory_ref_images; DELETE FROM memory_refs; "
                                      "DELETE FROM transcript_image_refs; DELETE FROM transcript_images; "
@@ -490,6 +500,9 @@ class SqliteHarness:
 
     def backdate_job(self, job: str, **fields_seconds_ago) -> None:
         self._set("jobs", "job", job, {f: self._ago(s) for f, s in fields_seconds_ago.items()})
+        if "waiting_until" in fields_seconds_ago:
+            self._db().execute("UPDATE blockers SET until=? WHERE job=? AND kind='wait' AND state='open'",
+                               (self._ago(fields_seconds_ago["waiting_until"]),job))
 
     def backdate_route(self, agent_key: str, seconds_ago: float) -> None:
         self._set("agent_routes", "agent_key", agent_key, {"created_at": self._ago(seconds_ago)})

@@ -170,6 +170,8 @@ class PureTests(unittest.TestCase):
         def execute(statement, params=None):
             if statement.startswith("SELECT 1 FROM board_meta"):
                 return Mock(fetchone=lambda: None)
+            if statement.startswith("SELECT pg_get_viewdef"):
+                return Mock(fetchone=lambda: (None,))
             if statement.startswith("ALTER TABLE messages"):
                 attempts.append(statement)
                 raise postgres.psycopg.errors.LockNotAvailable("held table lock")
@@ -187,7 +189,7 @@ class PureTests(unittest.TestCase):
     def test_check_message_cap(self):
         self.assertEqual(check_message_cap(" 500 "), 500)
         self.assertEqual(check_message_cap(500.0), 500)
-        self.assertEqual(SCHEMA_VERSION, 17)
+        self.assertEqual(SCHEMA_VERSION, 18)
 
 
 class CliTests(Env):
@@ -328,7 +330,7 @@ class SqliteUpgrade(unittest.TestCase):
         db.execute(f"PRAGMA user_version = {version}")
         db.close()
 
-    def test_schema_15_to_17_keeps_the_cap_and_adds_plugin_data(self):
+    def test_schema_15_to_18_keeps_the_cap_and_adds_plugin_data(self):
         self.h.reset()
         with self.h.board() as b:
             b.ensure_job("j")
@@ -338,7 +340,7 @@ class SqliteUpgrade(unittest.TestCase):
             c.execute("ALTER TABLE jobs DROP COLUMN plugin_data")
             c.execute("PRAGMA user_version = 15")
         setup_board(self.h.cfg, SMALL_POOL)
-        self.assertEqual(self.h.sqlite_board.SqliteBoard.schema_version(self.h.cfg), 17)
+        self.assertEqual(self.h.sqlite_board.SqliteBoard.schema_version(self.h.cfg), 18)
         with self.h.board() as b:
             self.assertEqual(b.message_cap(), 777)
             self.assertEqual([m.message for m in b.recent_messages(10, "j")], ["before schema 16"])
@@ -408,14 +410,22 @@ class PostgresUpgrade(unittest.TestCase):
         c.execute("DELETE FROM board_meta WHERE key = 'message_max_chars'")
         c.execute("ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_message_cap")
         c.execute("ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_message_nonempty")
-        c.execute(f"ALTER TABLE messages ALTER COLUMN message TYPE varchar({width})")
+        c.execute("ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_message_check")
+        # The current view filters blocker expiry messages, so it depends on message's
+        # type. Preserve it while constructing the old varchar-backed fixture: the
+        # migration itself must still handle both status views being present.
+        with c.transaction():
+            view = c.execute("SELECT pg_get_viewdef('job_status'::regclass)").fetchone()[0]
+            c.execute("DROP VIEW job_status")
+            c.execute(f"ALTER TABLE messages ALTER COLUMN message TYPE varchar({width})")
+            c.execute("CREATE VIEW job_status AS " + view)
         c.execute("ALTER TABLE messages ADD CONSTRAINT messages_message_check CHECK (length(message) > 0)")
         c.execute("UPDATE board_meta SET value = %s WHERE key = 'schema_version'", (str(version),))
         c.execute("TRUNCATE messages, agents, jobs CASCADE")
         c.execute("INSERT INTO jobs (job) VALUES ('j')")
         c.execute("INSERT INTO messages (job, agent_name, message) VALUES ('j', 'A', 'old one'), ('j', 'A', 'old two')")
 
-    def test_schema_15_to_17_keeps_the_cap_and_adds_plugin_data(self):
+    def test_schema_15_to_18_keeps_the_cap_and_adds_plugin_data(self):
         with self.h.board() as b:
             b.ensure_job("j")
             b.set_message_cap(777)
@@ -424,7 +434,7 @@ class PostgresUpgrade(unittest.TestCase):
         c.execute("ALTER TABLE jobs DROP COLUMN plugin_data")
         c.execute("UPDATE board_meta SET value = '15' WHERE key = 'schema_version'")
         setup_board(self.h.cfg, SMALL_POOL)
-        self.assertEqual(c.execute("SELECT value FROM board_meta WHERE key = 'schema_version'").fetchone()[0], "17")
+        self.assertEqual(c.execute("SELECT value FROM board_meta WHERE key = 'schema_version'").fetchone()[0], "18")
         with self.h.board() as b:
             self.assertEqual(b.message_cap(), 777)
             self.assertEqual([m.message for m in b.recent_messages(10, "j")], ["before schema 16"])

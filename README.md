@@ -13,7 +13,7 @@ to follow it.
   engineering lead, QA, engineers, and an independent judge. Separate `team.toml`
   configuration and team CLI commands come through the plugin system.
 - [`refactoring`](skills/refactoring/SKILL.md): Fowler-style refactoring in Suggest or Apply mode.
-- `ask-answer` ships as its own skill in 0.2.0 for blockers and human questions,
+- [`ask-answer`](skills/ask-answer/SKILL.md): blockers and human questions,
   using `swarm ask`, `swarm answer`, and `swarm questions`.
 
 In Claude Code, invoke `/swarm:swarm` or `/swarm:engineering-team`.
