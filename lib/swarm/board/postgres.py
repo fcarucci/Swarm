@@ -1030,16 +1030,15 @@ class PostgresBoard(Board):
         # then finds status no longer 'active' and changes nothing. The derived statuses come
         # from the agent_status view, so the thresholds are the ones `status` shows.
         with self._conn.transaction():
-            row = self._conn.execute("SELECT goal FROM jobs WHERE job = %s FOR UPDATE", (job,)).fetchone()
-            from swarm.review import auto_close_pending
-            if row and row[0] and auto_close_pending(self, job):
+            row = self._conn.execute("SELECT goal, verdict FROM jobs WHERE job = %s FOR UPDATE", (job,)).fetchone()
+            from swarm.review import completion_pending
+            if row and completion_pending(self, job, row[0], row[1]):
                 return None
             closed = self._conn.execute(
                 "UPDATE jobs j SET status = 'completed', outcome = %(outcome)s, "
                 "finished_at = now(), completion_forced = false, waiting_on = NULL, "
                 "waiting_since = NULL, waiting_until = NULL, closed_by = %(by)s "
                 "WHERE j.job = %(job)s AND j.status = 'active' AND j.waiting_on IS NULL "
-                "AND (j.goal IS NULL OR j.verdict = 'met') "
                 "AND COALESCE(j.activated_at, j.created_at) < %(before)s "
                 "AND EXISTS (SELECT 1 FROM agents a WHERE a.job = j.job "
                 "AND a.state IN ('completed', 'left') "

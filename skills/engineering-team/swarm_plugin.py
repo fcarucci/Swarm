@@ -290,7 +290,7 @@ def coding_recipe(ctx, board, job: str, artifact: str | None) -> dict | None:
         "for the supervisor to hand back to a worker. "
         + (f"After every target push succeeds, delete {branch} from every configured remote and locally; "
            if config["delete_branch"] else "Keep the source branch; ")
-        + f"post INTEGRATED {artifact} only after all required operations succeed. "
+        + f"run swarm learn and confirm durable outcome/learnings are retained; then post INTEGRATED {artifact} only after all required operations and learning succeed. "
         "Retain distilled learnings with swarm learn."
     )
     return {"evidence_command": evidence, "evidence_check": evidence_check,

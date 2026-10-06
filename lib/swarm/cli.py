@@ -2947,8 +2947,13 @@ def cmd_activate(cfg: dict, args) -> int:
               f"put this line in every subagent prompt for this job (it picks the job when this "
               f"session runs several):\n{tag_line(args.job)}")
         if goal:
-            print(f"the job has a goal: spawn exactly one judge, with this line too in its prompt; it "
-                  f"can't complete until the judge's verdict is met:\n{JUDGE_TAG_LINE}")
+            from swarm.supervisor import pipeline, settings as supervise_settings
+            if pipeline.settings(cfg)["enabled"] and supervise_settings.enabled(cfg) and not args.no_supervise:
+                print(f"the job has a goal: publish a worker hand-off with swarm done; the supervisor "
+                      f"starts the judge. An explicitly seated judge uses:\n{JUDGE_TAG_LINE}")
+            else:
+                print(f"the job has a goal: spawn exactly one judge, with this line too in its prompt; it "
+                      f"can't complete until the judge's verdict is met:\n{JUDGE_TAG_LINE}")
         print(f"optional: read-only verifiers that check the others' claims carry this line too:\n"
               f"{VERIFIER_TAG_LINE}")
 

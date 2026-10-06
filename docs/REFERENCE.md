@@ -1479,8 +1479,10 @@ runtime budgets and concurrency caps are shared with ordinary replacements.
    The worker publishes a fresh hand-off when ready. Main-session reminders are informational
    while the pipeline is enabled.
 5. `met` starts a separate executing FINALIZER, which carries out the job's finalize
-   instructions, posts `FINALIZED REF`, retains distilled learnings with `swarm learn`, and
+   instructions, retains distilled learnings with `swarm learn`, posts `FINALIZED REF`, and
    deactivates completed only after every handed-off artifact is finalized and no work remains.
+   If it exits after posting success but before deactivation, the owner supervisor recovers
+   completion without repeating the finalization action.
    An execution problem posts `FINALIZE_BLOCKED REF <actionable fix instructions>` and stops;
    the supervisor routes that brief to a fix worker. Judges never execute finalization.
 

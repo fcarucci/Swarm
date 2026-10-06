@@ -37,7 +37,8 @@ class PipelineTests(unittest.TestCase):
                             ('swarm.supervisor.settings.save_state', None),
                             ('swarm.supervisor.markers.write_resume_marker', Path('/unused-marker')),
                             ('swarm.supervisor.markers.remove_resume_marker', True),
-                            ('swarm.plugins.pipeline_recipe', {})]:
+                            ('swarm.plugins.pipeline_recipe', {}),
+                            ('swarm.cli._drop_auto_closed_markers', None)]:
             patch = mock.patch(name, return_value=value)
             patch.start(); self.addCleanup(patch.stop)
         self.recipe = mock.patch('swarm.plugins.pipeline_recipe', return_value={}).start()
@@ -94,7 +95,7 @@ class PipelineTests(unittest.TestCase):
         self.finish_latest('FINALIZED reports/outage.md')
         self.tick()
         self.assertEqual(len(self.launched), 2)
-        self.assertTrue(self.b.close_job('J', 'completed', 'Report published; learnings recorded'))
+        self.assertEqual(self.b.job_status('J').status, 'completed')
         self.tick()
         self.assertEqual(len(self.launched), 2)
 
@@ -366,6 +367,76 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(review.auto_close_pending(self.b, 'J'))
         self.finish_latest('FINALIZED report A')
         self.assertFalse(review.auto_close_pending(self.b, 'J'))
+
+
+    def test_finalization_executor_exit_completes_job_on_next_timer(self):
+        self.done(); self.tick(); self.conclude(); self.tick()
+        self.assertEqual(self.b.job_status('J').status, 'active')
+        self.finish_latest('FINALIZED reports/outage.md', outcome='failed')
+        with mock.patch('swarm.cli._drop_auto_closed_markers') as cleanup:
+            self.tick()
+        self.assertEqual(self.b.job_status('J').status, 'completed')
+        self.assertFalse(self.b.job_status('J').completion_forced)
+        cleanup.assert_called_once_with(self.b, self.cfg)
+        self.assertEqual(len(self.launched), 2)
+
+    def test_completion_waits_for_live_executor_and_pending_runner(self):
+        self.done(); self.tick(); self.conclude(); self.tick()
+        key, run = self.enroll_latest()
+        self.b.post('J', run['name'], 'FINALIZED reports/outage.md')
+        self.tick()
+        self.assertEqual(self.b.job_status('J').status, 'active')
+        self.b.close_agent(key, 'exited'); self.tick()
+        self.assertEqual(self.b.job_status('J').status, 'active')
+        self.b.finish_restart(run['restart_id'], 'failed'); self.tick()
+        self.assertEqual(self.b.job_status('J').status, 'completed')
+
+    def test_completion_dry_run_and_failed_close_retry_without_merge(self):
+        self.done(); self.tick(); self.conclude(); self.tick()
+        self.finish_latest('FINALIZED reports/outage.md')
+        self.tick(dry_run=True)
+        self.assertEqual(self.b.job_status('J').status, 'active')
+        with mock.patch.object(self.b, 'auto_close_job', return_value=None):
+            self.tick()
+        self.assertEqual(self.b.job_status('J').status, 'active')
+        self.assertEqual(len(self.launched), 2)
+        self.tick()
+        self.assertEqual(self.b.job_status('J').status, 'completed')
+
+    def test_finalization_prompt_learning_precedes_success_marker(self):
+        self.done(); self.tick(); self.conclude(); self.tick()
+        prompt = self.launched[-1]['stdin']
+        self.assertLess(prompt.index('First run swarm learn'), prompt.index('Only after learning succeeds'))
+
+
+    def test_completion_ignores_latest_not_met_for_superseded_revision(self):
+        self.recipe.side_effect = lambda cfg, board, job, artifact, **kw: {'artifact_group': 'branch'}
+        self.done('S'); self.tick(); self.conclude(ref='S')
+        self.done('T'); self.tick(); self.conclude(ref='T'); self.tick()
+        self.finish_latest('FINALIZED T')
+        name = self.b.allocate_name('stale-judge', 'J', 'judge')
+        self.assertTrue(self.b.claim_judge('stale-judge', 'J'))
+        self.b.record_verdict('J', name, 'not_met', 'Old S rejected', 'Fix old S', artifact='S')
+        self.b.close_agent('stale-judge', 'done')
+        self.assertEqual(self.b.job_status('J').verdict, 'not_met')
+        self.tick()
+        self.assertEqual(self.b.job_status('J').status, 'completed')
+        self.assertFalse(self.b.job_status('J').completion_forced)
+
+
+    def test_racing_handoff_prevents_completion_and_starts_new_judge(self):
+        self.done(); self.tick(); self.conclude(); self.tick()
+        self.finish_latest('FINALIZED reports/outage.md')
+        close = self.b.auto_close_job
+        def racing_close(job, before, outcome):
+            self.done('new-report')
+            return close(job, before, outcome)
+        with mock.patch.object(self.b, 'auto_close_job', side_effect=racing_close):
+            self.tick()
+        self.assertEqual(self.b.job_status('J').status, 'active')
+        self.tick()
+        self.assertIn('[swarm role: judge]', self.launched[-1]['stdin'])
+        self.assertIn('artifact: new-report', self.launched[-1]['stdin'])
 
 
 

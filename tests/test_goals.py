@@ -35,7 +35,7 @@ class GoalCliTests(GoalEnv):
         out = self.activate_goal()
         self.assertIn("\n[swarm job: J]\n", out)
         self.assertIn("\n[swarm role: judge]\n", out)
-        self.assertIn("spawn exactly one judge", out)
+        self.assertIn("the supervisor starts the judge", out)
         self.assertEqual(self.job().goal, GOAL)
         self.assertTrue(json.loads((self.markers / "J.json").read_text())["goal"])
 

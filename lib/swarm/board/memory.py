@@ -360,11 +360,10 @@ class MemoryBoard(Board):
         s = self._s()
         with s.lock:
             j = s.jobs.get(job)
-            if j is None or j["status"] != "active" or j.get("waiting_on") or \
-                    goal_is_unmet(j["goal"], j["verdict"]):
+            if j is None or j["status"] != "active" or j.get("waiting_on"):
                 return None
-            from swarm.review import auto_close_pending
-            if j.get("goal") and auto_close_pending(self, job):
+            from swarm.review import completion_pending
+            if completion_pending(self, job, j.get("goal"), j.get("verdict")):
                 return None
             if not self._auto_close_ready(j, before):
                 return None

@@ -742,13 +742,12 @@ class SqliteBoard(Board):
         # Under the write lock (BEGIN IMMEDIATE): nothing can change between the checks and
         # the close, and a concurrent sweep sees the job closed once it gets the lock.
         with self._tx() as c:
-            row = c.execute("SELECT COALESCE(activated_at, created_at) FROM jobs WHERE job = ? "
-                            "AND status = 'active' AND waiting_on IS NULL "
-                            "AND (goal IS NULL OR verdict = 'met')", (job,)).fetchone()
+            row = c.execute("SELECT COALESCE(activated_at, created_at), goal, verdict FROM jobs WHERE job = ? "
+                            "AND status = 'active' AND waiting_on IS NULL", (job,)).fetchone()
             if not row or _dt_(row[0]) >= before:
                 return None
-            from swarm.review import auto_close_pending
-            if c.execute("SELECT goal FROM jobs WHERE job = ?", (job,)).fetchone()[0] and auto_close_pending(self, job):
+            from swarm.review import completion_pending
+            if completion_pending(self, job, row[1], row[2]):
                 return None
             start, now = _dt_(row[0]), self.now()
             rows = c.execute("SELECT state, current_tool, tool_started_at, joined_at, last_seen, "

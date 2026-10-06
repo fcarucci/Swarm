@@ -205,8 +205,10 @@ def prompt_for(action, recipe):
         lines.extend([recipe.get("finalize") or "Record the outcome and durable learnings.",
                       "If execution needs substantial fixes or non-trivial conflicts, publish "
                       f"FINALIZE_BLOCKED {h.artifact} <actionable fix instructions> and stop.",
-                      f"On success post FINALIZED {h.artifact} (a coding integrator posts INTEGRATED).",
-                      "Run swarm learn with durable outcome/learnings. Only deactivate the job completed "
+                      "First run swarm learn and confirm durable outcome/learnings were successfully retained.",
+                      f"Only after learning succeeds, post FINALIZED {h.artifact} "
+                      "(a coding integrator posts INTEGRATED). This marker certifies execution AND learning succeeded.",
+                      "Then deactivate the job completed "
                       "once every current handed-off artifact is finalized and no other work remains. "
                       "References recorded as pipeline.superseded in job data are older revisions and do not count."])
     if action.role == "judge" and previous.get("verdict") == "not_met":
@@ -279,6 +281,48 @@ def _finalized(board, job, artifact, since):
     return False
 
 
+def complete_finalized(board, cfg, js, handoffs, *, dry_run=False, say=print):
+    """Recover an executor that recorded learned success but exited before deactivate.
+
+    The ordinary auto-close transaction rechecks current artifact verdicts/finalizations
+    and agent activity under the board lock. A racing hand-off keeps the job open.
+    """
+    from swarm import cli, review
+    if not handoffs or any(a.status in LIVE and a.ended_at is None for a in board.agents(js.job)):
+        return False
+    if any(r.ended_at is None for r in board.restarts(job=js.job)):
+        return False
+    verdicts = review.artifact_verdicts(board, js.job)
+    for h in handoffs:
+        v = verdicts.get(h.artifact)
+        if (not review.covered(h, v) or v.get("verdict") != "met"
+                or not _finalized(board, js.job, h.artifact, max(h.created_at, _stamp(v.get("at"))))):
+            return False
+    if dry_run:
+        say(f"would complete pipeline {js.job}: all artifacts finalized with learnings")
+        return True
+    from swarm.supervisor import command
+    if command._switched_off_now(cfg, board, js.job):
+        return False
+    closed = board.auto_close_job(js.job, board.now(), "pipeline completed: all artifacts finalized with learnings")
+    if closed is None:
+        say(f"pipeline completion held {js.job}: board state changed; retry next timer")
+        return False
+    say(f"completed pipeline {js.job}: all artifacts finalized with learnings")
+    # Existing cleanup preserves markers rewritten by a concurrent new activation; locked
+    # markers remain for the next ordinary sweep. Closure is durable even if cleanup fails.
+    try:
+        cli._drop_auto_closed_markers(board, cfg)
+        from swarm import transcripts
+        if transcripts.enabled(cfg):
+            import time
+            transcripts.capture_job(board, cfg, js.job, True, deadline=time.monotonic() + 5,
+                                    warn=lambda msg: say(f"pipeline transcripts {js.job}: {msg}"))
+    except Exception as exc:
+        say(f"pipeline completion cleanup {js.job}: {type(exc).__name__}; next sweep retries")
+    return True
+
+
 def run(board, cfg, sup, state, *, job=None, now=None, dry_run=False, say=print,
         start_runner=None, which=None, scope_ok=lambda: True, config_path=""):
     """Return owned pipeline jobs, so orphan/replacement passes do not duplicate their work."""
@@ -303,7 +347,7 @@ def run(board, cfg, sup, state, *, job=None, now=None, dry_run=False, say=print,
             continue
         try:
             actions = transitions(board, js, cfg, config_path=config_path)
-            _, superseded = effective_handoffs(board, cfg, js, config_path=config_path)
+            handoffs, superseded = effective_handoffs(board, cfg, js, config_path=config_path)
         except Exception as exc:
             say(f"pipeline held {js.job}: recipe failed ({type(exc).__name__})")
             continue
@@ -315,6 +359,8 @@ def run(board, cfg, sup, state, *, job=None, now=None, dry_run=False, say=print,
                     board.set_job_data(js.job, key, None)
             for old_ref, new_ref in superseded.items():
                 board.set_job_data(js.job, "pipeline.superseded." + hashlib.sha256(old_ref.encode()).hexdigest()[:32], new_ref)
+        if complete_finalized(board, cfg, js, handoffs, dry_run=dry_run, say=say):
+            continue
         for action in actions:
             try:
                 recipe = recipe_for(cfg, board, js, action.handoff.artifact, config_path=config_path)

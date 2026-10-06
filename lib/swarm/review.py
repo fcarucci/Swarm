@@ -164,3 +164,12 @@ def clear_verdict_data(raw: str | None) -> str:
     return json.dumps({k: v for k, v in parse_job_data(raw).items()
                        if not k.startswith(('pipeline.verdict.', 'pipeline.judge.', 'pipeline.superseded.'))
                        and k != 'pipeline.verdict_artifact'}, ensure_ascii=False)
+
+
+def completion_pending(board, job: str, goal: str | None, verdict: str | None) -> bool:
+    """Current artifacts govern acceptance; legacy verdicts govern jobs without hand-offs."""
+    if not goal:
+        return False
+    if latest_handoffs(board, job):
+        return auto_close_pending(board, job)
+    return verdict != 'met'
