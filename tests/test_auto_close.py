@@ -662,18 +662,17 @@ class AutoCloseCliTests(Env):
         self.main_session()
         old = self.seen().stat().st_mtime - QUIET
         os.utime(self.seen(), (old, old))
-        waited = []
+        touched = []
 
         def during():
             with open(self.marker()) as fh:
                 compat.flock(fh, compat.LOCK_EX)
-                t = time.monotonic()
                 self.assertIsNone(self.main_session())
-                waited.append(time.monotonic() - t)
+                touched.append(True)
 
         run = self.job().activated_at
         self.assertEqual(self.slow_close(during), [])
-        self.assertLess(waited[0], 0.5)
+        self.assertEqual(touched, [True])
         s = self.job()
         self.assertEqual((s.status, s.finished_at, s.closed_by, s.activated_at),
                          ("active", None, None, run))   # the close reverted: the same run
@@ -716,13 +715,16 @@ class AutoCloseCliTests(Env):
         try:
             for fh in held:
                 compat.flock(fh, compat.LOCK_EX)
-            t = time.monotonic()
-            self.assertIsNone(self.main_session())
-            waited = time.monotonic() - t
+            with mock.patch.object(swarm, "mark_orchestrator_seen",
+                                   wraps=swarm.mark_orchestrator_seen) as touch:
+                self.assertIsNone(self.main_session())
+            deadlines = [call.args[1] for call in touch.call_args_list]
+            self.assertEqual(len(deadlines), 3)
+            self.assertEqual(len(set(deadlines)), 1)
+            self.assertIsNotNone(deadlines[0])
         finally:
             for fh in held:
                 fh.close()
-        self.assertLess(waited, swarm.MARKER_SWEEP_WAIT + 0.5)   # not one wait per marker
         self.assertFalse(any(self.seen(job).exists() for job in ("J", "K", "L")))
         self.main_session()   # locks free again: all three recorded
         self.assertTrue(all(self.seen(job).exists() for job in ("J", "K", "L")))

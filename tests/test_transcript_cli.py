@@ -7,6 +7,7 @@ import datetime as dt
 import contextlib
 import io
 import json
+import os
 import re
 from unittest import mock
 
@@ -461,6 +462,10 @@ class ColorTests(TranscriptEnv):
 
     def setUp(self):
         super().setUp()
+        env = mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("NO_COLOR", None)
         self.seed("J1", "k1", "Homer Simpson", jsonl(("user", "hi there")))
         # a distinct key (not overwriting k1: save_transcript is a no-op for an unchanged sha256
         # on an already-final row), with a harness and a real secret so redactions is > 0.

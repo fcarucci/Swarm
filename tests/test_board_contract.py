@@ -399,36 +399,39 @@ class BoardContract:
         # Parallel tool calls fire parallel PreToolUse hooks for the same agent.
         self.b.allocate_name("k1", "j")
         total, delivered, errors = 60, [], []
-        done = threading.Event()
+        # Seed a page so concurrent readers have work even before the posters run.
+        for i in range(3):
+            self.b.post("j", "Other", f"seed{i}")
+        start = threading.Barrier(7)
 
         def reader():
             try:
                 with self.h.board(read_limit=7) as b:
-                    while True:
-                        finished = done.is_set()
+                    start.wait()
+                    # A finite workload avoids idle readers continually writing last_seen
+                    # and starving posters until the database busy timeout.
+                    for _ in range(total):
                         delivered.extend(m.id for m in b.read_unread(agent_key="k1").messages)
-                        if finished:
-                            return
             except Exception as exc:  # pragma: no cover
-                errors.append(exc)
+                import traceback
+                errors.append((exc, traceback.format_exc()))
 
         def poster():
             try:
                 with self.h.board() as b:
-                    for i in range(total // 3):
+                    start.wait()
+                    for i in range((total - 3) // 3):
                         b.post("j", "Other", f"p{i}")
             except Exception as exc:  # pragma: no cover
-                errors.append(exc)
+                import traceback
+                errors.append((exc, traceback.format_exc()))
 
         readers = [threading.Thread(target=reader) for _ in range(4)]
         posters = [threading.Thread(target=poster) for _ in range(3)]
         for t in readers + posters:
             t.start()
-        for t in posters:
-            t.join(60)
-        done.set()
-        for t in readers:
-            t.join(60)
+        for t in posters + readers:
+            t.join()
         # drain whatever the last round left (a lost compare-and-set returns nothing)
         with self.h.board(read_limit=1000) as b:
             delivered.extend(m.id for m in b.read_unread(agent_key="k1").messages)

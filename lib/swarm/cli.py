@@ -184,6 +184,7 @@ def load_config(path: Path = DEFAULT_CONFIG) -> dict:
     spool = cfg.get("board", {}).get("spool_dir")
     if isinstance(spool, str) and "{uid}" in spool:   # a per-user /tmp spool
         cfg["board"]["spool_dir"] = spool.replace("{uid}", str(compat.uid()))
+    cfg["_config_path"] = str(path)
     return cfg
 
 
@@ -370,6 +371,10 @@ def sweep_jobs(board, cfg: dict, deadline: float | None = None) -> list:
     [supervise] enabled, this machine+user's stuck agents are closed (swarm.supervisor.stuck).
     Never unbounded: with no `deadline`, transcripts.SWEEP_SECONDS from now (an
     agent's transcript can be made to redact for as long as it likes)."""
+    if getattr(board, 'plugin_registry', None) is None:
+        from swarm import plugins
+        board.plugin_registry = PLUGINS or plugins.Registry(
+            cfg, cfg.get('_config_path'), core_commands=tuple(BOARD_COMMANDS) + tuple(COMMANDS)).load()
     if deadline is None:
         from swarm import transcripts as _tr
         deadline = time.monotonic() + _tr.SWEEP_SECONDS
@@ -1091,6 +1096,8 @@ def job_detail(board, job: str, color: bool, recent_minutes: int | None = None, 
                 (sup_line, sup_line or ""),
                 (transcripts is not None, _transcripts_line(transcripts or [])))
     head += [line for value, line in optional if value]
+    if j.open_blockers:
+        head += ['blockers   ' + _blocker_line(board, b) for b in board.blockers(job)]
     stored = None if transcripts is None else _stored_by_key(transcripts)
     return "\n".join(head) + "\n\n" + agents_table(board, job, color, now, recent_minutes, hint, stored)
 
@@ -2050,6 +2057,9 @@ def _compact_frame(board, job: str | None, color: bool, view: dict, rows: list |
             out.append("  (no agents yet)")
         if hidden:
             out.append(f"  ({hidden} older hidden)")
+        out += ['  ' + _blocker_line(board, blocker) for blocker in board.blockers(j.job)]
+        if PLUGINS is not None:
+            out += [term_safe(line) for line in PLUGINS.watch_panes(j.job, board)]
     room = height - len(out) - 2  # the title and one line for the MESSAGES heading
     if room >= 2:
         msgs = _watch_messages(board, room, job, rows if view.get("session") else None)
@@ -2085,6 +2095,11 @@ def _watch_frame(board, job: str | None, interval: float, color: bool, interacti
     out, pinned = _watch_header(board, job, interval, color, interactive, now, recent,
                                 bool(view.get("hide_agents")), view.get("db_label"), sup,
                                 session, srows)
+    blocker_rows = board.blockers(job)
+    if blocker_rows:
+        out += ['', _bold('BLOCKERS', color)] + [_blocker_line(board, b) for b in blocker_rows]
+    if PLUGINS is not None:
+        out += [term_safe(line) for line in PLUGINS.watch_panes(job, board)]
     header = len(out)
     table_width = max((_visible_len(ln) for i, ln in enumerate(out) if i not in pinned), default=0)
     # Messages fill whatever height is left (at least 5 lines).
@@ -2539,3 +2554,1435 @@ def _parser() -> argparse.ArgumentParser:
     cf.add_argument("key", nargs="?", help="board.message_max_chars (omit to list the settings)")
     cf.add_argument("value", nargs="?", help="the new value (omit to print the current one)")
     cf.add_argument("--save", action="store_true", help="also write it to the config file")
+    rd = sub.add_parser("read"); rd.add_argument("--as", dest="name"); rd.add_argument("--key")
+    rd.add_argument("--job"); rd.add_argument("--peek", action="store_true", help="don't advance the cursor")
+    w = sub.add_parser("who"); w.add_argument("--job", required=True)
+    rm = sub.add_parser("remember", help="store a durable fact in the project's memory (needs [hindsight] url)")
+    rm.add_argument("--job", required=True); rm.add_argument("--as", dest="name", required=True)
+    rm.add_argument("--project", help="default: the job's project, else the job name")
+    rm.add_argument("fact", nargs="+")
+    sp = sub.add_parser("spool", help="manage the spool of queued posts and memories")
+    sp.add_argument("action", choices=["retry"],
+                    help="retry: requeue memories parked as .stuck after 24 hours of failing")
+    lv = sub.add_parser("leave", help="release an agent's name; --session S: every unfinished agent of that "
+                    "session's jobs leaves (for a session start: a restart killed them without a stop)")
+    lv.add_argument("--as", dest="name"); lv.add_argument("--key"); lv.add_argument("--session")
+    sub.add_parser("purge")
+    tl = sub.add_parser("tail", help="follow the board live (Ctrl-C to stop)")
+    tl.add_argument("--job", help="only this job (default: all jobs)")
+    tl.add_argument("-n", "--backlog", type=int, default=20, help="show the last N messages first")
+    tl.add_argument("--interval", type=float, default=2.0, help="poll interval in seconds (LISTEN wakes it early)")
+    tl.add_argument("--no-agents", action="store_true", help="don't show agents joining/leaving")
+    tl.add_argument("--no-color", action="store_true")
+    ac = sub.add_parser("activate", help="turn the board on for subagents spawned from now on")
+    ac.add_argument("--job", required=True); ac.add_argument("--description", help="one line")
+    ac.add_argument("--task", help="the full brief; '-' reads it from stdin")
+    ac.add_argument("--session", help="bind to this host session id (default: the calling Claude Code or Codex session)")
+    ac.add_argument("--project", help="memory project (Hindsight bank) shared by jobs; default the job name "
+                    "(1-64 letters, digits, spaces and . ' _ -)")
+    ac.add_argument("--goal", help="what \"done\" means; one judge agent decides whether it is met, "
+                                   "and completion waits for its met verdict; '-' reads it from stdin")
+    ac.add_argument("--adopt-running", action="store_true",
+                    help="also enrol subagents that were already running (default: only ones spawned from now on)")
+    ac.add_argument("--attach", action="store_true",
+                    help="bind this session to an already active job without reopening it")
+    ac.add_argument("--no-supervise", action="store_true",
+                    help="the supervisor neither closes nor restarts this job's agents ([supervise])")
+    ac.add_argument("--stall-hours", "--max-hours", dest="max_hours", type=float, metavar="N",
+                    help="close the job (failed) after N hours without progress, instead of [job] "
+                         "stall_hours; 0 = never (--max-hours is the old name)")
+    de = sub.add_parser("deactivate", help="turn the board off for the job and close it")
+    de.add_argument("--job", required=True)
+    de.add_argument("--status", choices=["completed", "cancelled", "failed"], default="completed")
+    de.add_argument("--outcome", help="short summary of how it ended")
+    de.add_argument("--force", action="store_true",
+                    help="complete a job with a goal without the judge's met verdict (recorded as forced)")
+    vd = sub.add_parser("verdict", help="the job's judge records whether the goal is met (posted on the board)")
+    vd.add_argument("--job", required=True); vd.add_argument("--as", dest="name", required=True)
+    vd.add_argument("verdict", choices=["met", "not_met"])
+    vd.add_argument("reason", nargs="*", help="why (met: the words after the verdict; not_met: use --reason)")
+    vd.add_argument("--reason", dest="reason_opt", help="why the judge ruled so (required for not_met)")
+    vd.add_argument("--next", dest="next_steps",
+                    help="not_met: concrete instructions to meet the goal: what to change, where, and "
+                         "what the judge will re-check (required for not_met)")
+    wt = sub.add_parser("wait", help="mark an open job as waiting for something (shown by status/watch)")
+    wt.add_argument("--job", required=True)
+    wt.add_argument("--for", dest="for_", metavar="DURATION",
+                    help="the wait expires after this long (90m, 2h, 1h30m; a bare number is minutes); "
+                         "then the job is judged as not waiting")
+    wt.add_argument("--until", metavar="TIME",
+                    help="like --for, but a time: a duration, a time of day (17:30, the next one) or a date "
+                         "and time (2026-10-06 09:00)")
+    wt.add_argument("--on", nargs="+", required=True, help="what the job is waiting for")
+    pz = sub.add_parser("pause", help="pause a job: stop new joins and posts, record every agent and "
+                                      "store its final transcript, so `swarm resume` can continue it anywhere")
+    pz.add_argument("--job", required=True)
+    pz.add_argument("--reason", help="why (shown on the board and to the paused agents)")
+    pz.add_argument("--wait", type=float, default=15.0, metavar="SECONDS",
+                    help="how long to wait for other machines' agents to store their final transcript (default 15)")
+    rs = sub.add_parser("resume", help="resume a paused job on this machine (re-creating its agents from the "
+                                       "transcripts on the board), else: the job is no longer waiting")
+    rs.add_argument("--job", required=True)
+    rs.add_argument("--host", choices=["claude", "codex"],
+                    help="run the resumed agents on this host (default: each agent's own; a different one "
+                         "resumes from a briefing, not the transcript)")
+    rs.add_argument("--workdir", help="where the agents work on this machine (default: their recorded directory "
+                                      "if it exists here, else the current directory)")
+    rs.add_argument("--only", nargs="+", metavar="NAME", help="resume only these agents")
+    rs.add_argument("--dry-run", action="store_true", help="show what would be resumed; change nothing")
+    rs.add_argument("--retry", action="store_true", help="redo the agents a previous resume of this job failed")
+    st = sub.add_parser("status", help="jobs overview, or one job's agents with --job")
+    st.add_argument("--job"); st.add_argument("--all", action="store_true", help="include closed jobs")
+    st.add_argument("--all-agents", action="store_true",
+                    help="with --job: also list finished agents older than board.watch_recent_minutes")
+    st.add_argument("--no-color", action="store_true")
+    wa = sub.add_parser("watch", help="live full-screen view of jobs, agents and messages (Ctrl-C to quit)")
+    wa.add_argument("--job", help="focus on one job (default: all active jobs)")
+    wa.add_argument("--interval", type=float, default=2.0, help="max seconds between redraws")
+    wa.add_argument("--session", help="show only the jobs activated by this host session id")
+    wa.add_argument("--exit-when-idle", type=float, metavar="SECONDS",
+                    help="with --session: once it has no active job, exit 0 after "
+                         "SECONDS (a job activating meanwhile keeps it going)")
+    wa.add_argument("--compact", action="store_true",
+                    help="narrow layout for a side pane (50-70 columns): jobs, one line per agent, a few messages")
+    wa.add_argument("--no-color", action="store_true")
+    tr = sub.add_parser("transcript", help="archived agent transcripts ([transcripts] enabled)")
+    trs = tr.add_subparsers(dest="tcmd", required=True)
+    tls = trs.add_parser("list", help="stored transcripts: sizes, redactions, capture time")
+    tls.add_argument("--job"); tls.add_argument("--agent", help="agent name")
+    tls.add_argument("--no-color", action="store_true", help="never colour the table")
+    tls.add_argument("--color", choices=["auto", "always"], default="auto",
+                     help="colour even when stdout isn't a TTY (e.g. piped to `less -R`)")
+    tsh = trs.add_parser("show", help="one transcript, as readable turns or raw JSONL")
+    tsh.add_argument("--job"); tsh.add_argument("--agent", help="agent name (without --job: across jobs)")
+    tsh.add_argument("--orchestrator", action="store_true", help="the orchestrating session's slice (needs --job)")
+    tsh.add_argument("--key", help="agent key")
+    tsh.add_argument("--format", choices=["text", "jsonl"], default="text")
+    tsh.add_argument("--tail", type=int, help="only the last N turns (jsonl: lines)")
+    tsh.add_argument("--grep", help="only turns (jsonl: lines) matching this regex, case-insensitive")
+    tsh.add_argument("-o", "--output", help="write to this file instead of stdout")
+    tsh.add_argument("--memory", metavar="DOC_ID",
+                     help="the transcript excerpt a memory was saved from, and where it is in the full transcript")
+    tsh.add_argument("--no-color", action="store_true", help="never colour the output (--format jsonl: never coloured anyway)")
+    tsh.add_argument("--color", choices=["auto", "always"], default="auto",
+                     help="colour even when stdout isn't a TTY (e.g. piped to `less -R`)")
+    tex = trs.add_parser("export", help="every transcript of a job as .jsonl files plus index.tsv")
+    tex.add_argument("--job", required=True)
+    tex.add_argument("dir", nargs="?", help="default: ./transcripts-<job>")
+    tex.add_argument("--force", action="store_true",
+                     help="export into a directory sandboxed agents can write (refused by default)")
+    mem = sub.add_parser("memory", help="memories swarm agents saved, and where they came from")
+    mems = mem.add_subparsers(dest="mcmd", required=True)
+    mr = mems.add_parser("refs", help="recorded memory references (provenance)")
+    mr.add_argument("--job"); mr.add_argument("--agent", help="agent name")
+    mr.add_argument("--check", action="store_true", help="ask Hindsight whether each memory still exists")
+    sub.add_parser("plugins", help="list the CLI plugins found, the commands they add and why one failed to load")
+    bs = sub.add_parser('blockers', help='list durable blockers')
+    bs.add_argument('--job', required=True)
+    group = bs.add_mutually_exclusive_group()
+    group.add_argument('--open', action='store_true'); group.add_argument('--all', action='store_true')
+    bl = sub.add_parser('blocker', help='resolve or comment on a blocker')
+    actions = bl.add_subparsers(dest='bcmd', required=True)
+    resolve = actions.add_parser('resolve'); resolve.add_argument('id', type=int)
+    resolve.add_argument('--how')
+    comment = actions.add_parser('comment'); comment.add_argument('id', type=int)
+    comment.add_argument('text', nargs='+')
+    hk = sub.add_parser("hook"); hk.add_argument("--host", choices=["claude", "codex"]); hk.add_argument("event", choices=["start", "turn", "done", "stop", "session-start", "session-stop"])
+    p._swarm_subparsers = sub   # for plugins.Registry.apply
+    sub.metavar = "{" + ",".join(k for k in sub.choices if k != "update") + "}"   # hide the alias
+    return p
+
+
+PLUGINS = None   # the plugins.Registry of this run (set by _main; None: no plugins, e.g. in a hook)
+
+
+def _load_plugins(argv, parser: argparse.ArgumentParser):
+    """Find the CLI plugins (swarm.plugins) and add their commands and arguments to `parser`.
+    Nothing here may fail a core command: not for the hooks (they load none), not for a broken
+    config (then no plugin is disabled), not for a plugin."""
+    global PLUGINS
+    from swarm import plugins
+    PLUGINS = None
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    try:
+        known, rest = pre.parse_known_args(argv)
+        if rest[:1] == ["hook"]:
+            return None
+        try:
+            cfg = load_config(known.config)
+        except Exception:
+            cfg = {}
+        sub = parser._swarm_subparsers
+        reg = plugins.Registry(cfg, known.config, core_commands=tuple(sub.choices)).load()
+        reg.apply(sub)
+        PLUGINS = reg
+    except Exception as exc:   # discovery itself broke: run without plugins
+        PLUGINS = None
+        from swarm import transcripts as _t
+        _t.log(f"plugins: discovery failed: {type(exc).__name__}")
+    return PLUGINS
+
+
+def cmd_plugins(cfg: dict, args) -> int:
+    from swarm import plugins
+    reg = PLUGINS or plugins.Registry(cfg)
+    for line in reg.report():
+        print(term_safe(line))
+    return 0
+
+
+def _use_color(args) -> bool:
+    if os.environ.get("NO_COLOR"):   # https://no-color.org: any non-empty value opts out
+        return False
+    return sys.stdout.isatty() and not args.no_color
+
+
+def _transcript_use_color(args) -> bool:
+    """TTY only (or --color=always), never with NO_COLOR/--no-color, never writing to --output
+    (a file, not a terminal), and never for --format jsonl (checked by the callers, not here)."""
+    if os.environ.get("NO_COLOR") or args.no_color:
+        return False
+    if getattr(args, "output", None):
+        return False
+    return args.color == "always" or sys.stdout.isatty()
+
+
+def _marker(cfg: dict, job: str) -> Path:
+    """The marker file that switches the hooks on for `job` (nothing is created: _write_marker
+    creates the directory, through safefs)."""
+    mdir = Path(cfg["hook"]["marker_dir"]).expanduser()
+    return mdir / (safe_job(job) + ".json")
+
+
+def _print_model_hint(cfg: dict) -> None:
+    """When the calling host can't rewrite spawn input (Codex before it was confirmed to,
+    or a Codex build without it), tell the orchestrator which model each role should get."""
+    from swarm import hosts as _hosts, models
+    h = _hosts.detect_cli_host(os.environ)
+    try:
+        rewrite = _hosts.get(h).supports_spawn_model_rewrite if h else True
+    except KeyError:
+        rewrite = True
+    hint = models.spawn_hint(cfg, h) if h and not rewrite else None
+    if hint:
+        print(hint)
+
+
+def _print_activation_footer(cfg: dict, details_fn) -> None:
+    """The `swarm command:` line, then the activation-specific lines printed by `details_fn`,
+    then the spawn-model hint when the calling host can't take the models from the hook.
+    Shared by plain activate and --attach."""
+    from swarm import hosts, paths
+    print(f"swarm command: {paths.agent_bin()}")
+    details_fn()
+    _print_model_hint(cfg)
+
+
+# A host session id as `activate` accepts it: Claude Code and Codex use UUIDs; this also keeps
+# the plain ids the tests and scripts use. Never a glob character, a dot, a slash or a control.
+SESSION_ID = None
+
+
+def valid_session_id(session: str) -> bool:
+    import re
+    global SESSION_ID
+    SESSION_ID = SESSION_ID or re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
+    return isinstance(session, str) and SESSION_ID.fullmatch(session) is not None
+
+
+def cmd_activate(cfg: dict, args) -> int:
+    from swarm.board import open_board
+    from swarm import hosts, safefs
+    from swarm.hooks import JOB_NAME
+    if not JOB_NAME.fullmatch(args.job or ""):
+        # the name is shown to agents inside shell commands and names marker files
+        print(f"swarm activate: --job must be 1-64 letters, digits, '.', '_' or '-', starting with a "
+              f"letter or digit, not {term_safe(args.job)[:80]!r}", file=sys.stderr)
+        return 2
+    if args.project is not None:
+        from swarm.board.base import check_name
+        try:   # the project names the job's Hindsight bank and is printed in the [memory ...] tag
+            check_name(args.project, "project")   # the hook reads: no quote, bracket, control
+        except ValueError as exc:
+            print(f"swarm activate: --project: {term_safe(exc)}", file=sys.stderr)
+            return 2
+    marker = _marker(cfg, args.job)
+    session = args.session or hosts.cli_session_id(os.environ)
+    if session is not None and not valid_session_id(session):
+        # the id is later looked up as a transcript file name: a plain id only
+        print(f"swarm activate: --session must be a session id (a UUID: letters, digits, - and _, "
+              f"at most 128), not {term_safe(session)[:80]!r}", file=sys.stderr)
+        return 2
+    try:   # the marker dir is sandbox-writable: refuse a symlinked or foreign one before any change
+        os.close(safefs.open_base(marker.parent, create=True))
+    except (OSError, ValueError) as exc:
+        print(f"swarm activate: can't use the marker dir {term_safe(marker.parent)}: {term_safe(exc)}",
+              file=sys.stderr)
+        return 1
+    if session and hosts.detect_cli_host(os.environ) == "codex":
+        # Codex encrypts spawn messages, so a child's job tag can't be read: one job per session
+        # (activate and --attach alike)
+        other = next((m.get("job") for m in map(_read_marker, sorted(marker.parent.glob("*.json")))
+                      if m.get("session_id") == session and m.get("job") not in (None, args.job)), None)
+        if other:
+            print(f'swarm activate: "{term_safe(other)}" is already active in this Codex session, and Codex '
+                  f"subagents can't say which job they belong to (their prompts are encrypted); "
+                  f"deactivate it first, or activate {args.job} from another session",
+                  file=sys.stderr)
+            return 1
+    if args.attach:
+        with open_board(cfg) as board:
+            js = board.job_status(args.job)
+        if js is None or js.status != "active":
+            print(f"swarm activate --attach: job {args.job} is not active", file=sys.stderr)
+            return 1
+        marker = marker.with_name(f"{safe_job(args.job)}--{safe_job(session or 'unbound')}.json")
+        _write_marker(marker, {"job": args.job, "session_id": session, "cwd": os.getcwd(),
+                               "adopt_running": args.adopt_running, "attached": True,
+                               **({"goal": True} if js.goal else {})})   # a new binding starts unseen
+        _print_activation_footer(cfg, lambda: print(
+            f"attached this session to {args.job}: its subagents spawned from now on join the board\n"
+            f"put this line in every subagent prompt for this job:\n{tag_line(args.job)}"))
+        return 0
+    if args.max_hours is not None and args.max_hours < 0:
+        print("swarm activate: --stall-hours must be 0 (never) or more", file=sys.stderr)
+        return 2
+    if args.task == "-" and args.goal == "-":
+        print("swarm activate: only one of --goal and --task can be - (stdin)", file=sys.stderr)
+        return 2
+    task = sys.stdin.read() if args.task == "-" else args.task
+    goal = (sys.stdin.read() if args.goal == "-" else args.goal or "").strip() or None
+    # Run from Claude Code (the orchestrator's Bash tool), the job is bound to the calling
+    # session at once: no other session can claim it, and it can share the session with others.
+    with open_board(cfg) as board:
+        board.purge()
+        board.open_job(args.job, args.description, task, session, os.environ.get("USER"),
+                       project=args.project, goal=goal)
+        board.set_job_supervise(args.job, not args.no_supervise)
+        if args.max_hours is not None:
+            board.set_job_max_hours(args.job, args.max_hours)
+        closed = _sweep(board, cfg)   # after open_job: never the job being activated
+    _write_marker(marker, {"job": args.job, "session_id": session, "cwd": os.getcwd(),
+                           "adopt_running": args.adopt_running,
+                           **({"goal": True} if goal else {})})   # a new run starts unseen
+    _say_closed(closed)
+
+    def _details():
+        print(f"activated {args.job}: subagents spawned from now on join the board\n"
+              f"put this line in every subagent prompt for this job (it picks the job when this "
+              f"session runs several):\n{tag_line(args.job)}")
+        if goal:
+            print(f"the job has a goal: spawn exactly one judge, with this line too in its prompt; it "
+                  f"can't complete until the judge's verdict is met:\n{JUDGE_TAG_LINE}")
+        print(f"optional: read-only verifiers that check the others' claims carry this line too:\n"
+              f"{VERIFIER_TAG_LINE}")
+
+    _print_activation_footer(cfg, _details)
+    return 0
+
+
+MARKER_MAX_BYTES = 64 * 1024
+
+
+def _read_marker(path: Path) -> dict:
+    """The marker's JSON object, or {} (missing, not JSON, not an object, or not a plain file
+    of ours). The marker dir is sandbox-writable: read through safefs, so a FIFO doesn't
+    block, a link isn't followed, and hard-linked or oversized files are skipped."""
+    from swarm import safefs
+    try:
+        d = safefs.open_base(str(Path(path).parent), create=False)
+    except (OSError, ValueError):
+        return {}
+    try:
+        data = safefs.read(d, Path(path).name, limit=MARKER_MAX_BYTES)
+    except ValueError:
+        data = None
+    finally:
+        os.close(d)
+    try:
+        out = json.loads(data) if data is not None else {}
+    except ValueError:
+        return {}
+    return out if isinstance(out, dict) else {}
+
+
+def _completion_refusal(js) -> str | None:
+    """Why a job with a goal can't be completed yet (None if it can)."""
+    from swarm.board import goal_unmet
+    if js is None or not goal_unmet(js):
+        return None
+    latest = (f"latest verdict: {term_safe(js.verdict)} by {term_safe(js.verdict_by)}: "
+              f"{term_safe(js.verdict_reason)}"
+              + (f"; next: {term_safe(js.verdict_next)}" if js.verdict_next and js.verdict == "not_met" else "")
+              if js.verdict
+              else "no verdict yet" + ("" if js.judge else "; no judge on the job"))
+    return (f"not completing {js.job}: the judge has not recorded a met verdict ({latest}). "
+            f"Keep working until it does, close it with --status cancelled or failed, or "
+            f"override with --force (recorded).")
+
+
+def cmd_deactivate(cfg: dict, args) -> int:
+    from swarm.board import AUTO_CLOSED_BY, open_board
+    marker = _marker(cfg, args.job)
+    completing = args.status == "completed"
+    board = None
+    try:
+        board = open_board(cfg)
+        js = board.job_status(args.job)
+    except Exception as exc:
+        if board is not None:
+            board.close()
+        board, js, down = None, None, exc
+        # Without the database the verdict is unknown: a job with a goal stays open unless forced.
+        if completing and _read_marker(marker).get("goal") and not args.force:
+            print(f"not completing {args.job}: cannot check the judge's verdict (board not reachable: "
+                  f"{_error_name(exc)}). Retry, or override with --force.", file=sys.stderr)
+            return 1
+    refusal = _completion_refusal(js) if completing else None
+    if refusal and not args.force:
+        board.close()
+        print(refusal, file=sys.stderr)
+        return 1
+    # first, so the board goes quiet even if the db write fails; never unlinked without its lock
+    markers = [marker] + [m for m in marker.parent.glob(f"{safe_job(args.job)}--*.json")
+                          if _read_marker(m).get("job") == args.job]
+    stuck = [m for m in markers if not remove_marker(m)]
+    if stuck:
+        if board is not None:
+            board.close()
+        print(f"not deactivated: the marker{'s' if len(stuck) > 1 else ''} "
+              f"{', '.join(term_safe(m) for m in stuck)} stayed locked for {MARKER_REMOVE_WAIT:g}s "
+              f"(a hook holding it?); job {args.job} is still active. Retry.", file=sys.stderr)
+        return 1
+    if board is None:
+        print(f"deactivated {args.job}; could not record status ({_error_name(down)})", file=sys.stderr)
+        return 0
+    forced = bool(refusal)
+    try:
+        with board:
+            known = board.close_job(args.job, args.status, args.outcome, forced=forced,
+                                    closed_by=os.environ.get("USER") or None)
+            if known and transcripts_enabled(cfg):
+                _capture_final_transcripts(board, cfg, args.job)
+        how = args.status + (", forced without a met verdict" if forced else "")
+        if js is not None and js.status != "active":   # e.g. replacing an auto-close outcome
+            how += f"; it was already {js.status}" + (", auto-closed" if js.closed_by == AUTO_CLOSED_BY else "")
+        print(f"deactivated {args.job} ({how})" if known
+              else f"deactivated {args.job} (no such job in the database)")
+    except Exception as exc:
+        print(f"deactivated {args.job}; could not record status ({_error_name(exc)})",
+              file=sys.stderr)
+    return 0
+
+
+def _capture_final_transcripts(board, cfg: dict, job: str) -> None:
+    """Deactivate: the job's final transcripts (orchestrator slice and this machine's agents).
+    A failure is reported on stderr; the job is closed either way."""
+    from swarm import transcripts
+    try:
+        transcripts.capture_job(board, cfg, job, True,
+                                warn=lambda msg: print(term_safe(msg), file=sys.stderr))
+    except Exception as exc:
+        print(f"transcripts of {job} not captured ({_error_name(exc)}: {exc})", file=sys.stderr)
+
+
+def _cmd_install_hooks(cfg: dict, args) -> int:
+    print("swarm: the hooks come from the plugin now (Claude Code: /plugin; Codex: codex plugin); "
+          "nothing written. `swarm migrate` removes old settings.json entries.")
+    return 0
+
+
+def _cmd_supervise(cfg: dict, args) -> int:
+    try:
+        compat.require_posix("swarm supervise")
+    except compat.Unsupported as exc:
+        print(f"swarm supervise: {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "scmd", None) == "approve":
+        return cmd_supervise_approve(cfg, args)
+    from swarm.supervisor.command import cmd_supervise
+    return cmd_supervise(cfg, args)
+
+
+# Set in a harness session (Claude Code, Codex): approval is refused there. An agent's shell can
+# unset them, but has no terminal on stdin: the TTY check is the real gate.
+HARNESS_SESSION_VARS = ("CLAUDE_CODE_SESSION_ID", "CLAUDECODE", "CODEX_THREAD_ID", "CODEX_SESSION_ID")
+APPROVE_WORD = "approve"
+
+
+def cmd_supervise_approve(cfg: dict, args) -> int:
+    """Approve the project configuration files of a work dir for supervisor launches. The
+    supervisor refuses to start a replacement in a dir holding project config it has no approval
+    for, because a sandboxed agent could have planted it; this is the out-of-band consent. So it
+    must come from the user at a terminal: stdin a TTY, no harness session in the environment,
+    and the word typed back. The listing and the store are the supervisor's
+    (command.approval_candidates / save_approvals)."""
+    def refuse(why: str) -> int:
+        print(f"swarm supervise approve: not approved: {why}", file=sys.stderr)
+        return 1
+
+    in_session = [v for v in HARNESS_SESSION_VARS if os.environ.get(v)]
+    if in_session:
+        return refuse(f"run it yourself in a terminal, not from an agent session ({', '.join(in_session)} set)")
+    if not sys.stdin.isatty():
+        return refuse("it needs you at a terminal (stdin is not a TTY)")
+    from swarm.supervisor import command
+    try:
+        entries = command.approval_candidates(cfg, args.dir)
+    except (OSError, ValueError, RuntimeError) as exc:   # not an allowed dir, unapprovable, unsafe
+        print(f"swarm supervise approve: {term_safe(exc)}", file=sys.stderr)
+        return 1
+    if not entries:
+        print(f"nothing to approve in {term_safe(args.dir)}: no project configuration files there")
+        return 0
+    print("These files configure Claude Code or Codex sessions started in this directory:")
+    for e in entries:
+        print(f"  {term_safe(e.get('dir'))}/{term_safe(e.get('file'))}  sha256 {term_safe(e.get('sha256'))}")
+    print("Approve them only if you wrote them or reviewed them: a supervisor replacement will run with "
+          "them, unsandboxed. A later change to any of them needs a new approval.")
+    print(f"Type {APPROVE_WORD} to approve: ", end="", flush=True)
+    answer = sys.stdin.readline().strip()
+    if answer != APPROVE_WORD:
+        print()
+        return refuse(f"you typed {term_safe(answer)[:40]!r}, not {APPROVE_WORD!r}")
+    try:
+        command.save_approvals(entries)
+    except (OSError, ValueError, RuntimeError) as exc:   # PrivateDirError, or an entry it won't store
+        print(f"swarm supervise approve: could not save the approval ({term_safe(exc)})", file=sys.stderr)
+        return 1
+    print(f"approved {len(entries)} file{'s' if len(entries) != 1 else ''}")
+    return 0
+
+
+def _hook_output_ok(text: str) -> bool:
+    """Whether `text` is one line of SessionStart hook output: a JSON object with only
+    systemMessage and hookSpecificOutput (anything else is not printed)."""
+    if not isinstance(text, str) or "\n" in text.strip():
+        return False
+    try:
+        out = json.loads(text)
+    except ValueError:
+        return False
+    return isinstance(out, dict) and bool(out) and set(out) <= {"systemMessage", "hookSpecificOutput"}
+
+
+def cmd_notices(cfg: dict, args) -> int:
+    """SessionStart: print what the last bootstrap left for the user as hook output. The
+    notice lives in the host-private dir and bootstrap.hook_output re-validates it into a fixed
+    template; this only prints it. Never fails the hook."""
+    try:
+        from swarm import bootstrap
+        text = bootstrap.hook_output(args.host)
+    except Exception:
+        return 0
+    if text is not None and _hook_output_ok(text):
+        print(text.strip())
+    return 0
+
+
+def cmd_bootstrap(cfg: dict, args) -> int:
+    from swarm import bootstrap
+    steps = bootstrap.bootstrap(args.host, config=args.config, stamp=Path(args.stamp) if args.stamp else None)
+    shown = [s for s in steps if not args.quiet or s.status not in ("ok", "skipped")]
+    if shown:
+        print(bootstrap.format_steps(shown, _use_color(args)))
+    return 1 if any(s.status == "failed" for s in steps) else 0
+
+
+def cmd_doctor(cfg: dict, args) -> int:
+    from swarm import bootstrap, hosts
+    checks = bootstrap.doctor(args.host or hosts.detect_cli_host(os.environ), config=args.config)
+    print(bootstrap.format_checks(checks, _use_color(args)))
+    return 1 if any(c.ok is False for c in checks) else 0
+
+
+def cmd_update(cfg: dict, args) -> int:
+    from swarm import update
+    return update.run_update(args.host, args.force, _use_color(args), config_path=args.config,
+                             channel=args.channel)
+
+
+def cmd_migrate(cfg: dict, args) -> int:
+    from swarm import bootstrap
+    settings = claude_settings_path()
+    try:   # the markers of the config in use (--config), so an active job there is seen
+        # cfg: the old-default board and spool moves
+        steps = bootstrap.migrate(force=args.force, settings_path=settings, marker_dir=bootstrap.marker_dir_of(cfg),
+                                  cfg=cfg)
+    except json.JSONDecodeError as exc:
+        # a malformed settings.json: which file and where, never its content; nothing was written
+        print(f"swarm migrate: {settings} is not valid JSON ({exc.msg} at line {exc.lineno} "
+              f"column {exc.colno}); fix it and retry", file=sys.stderr)
+        return 1
+    except (OSError, ValueError) as exc:
+        detail = f"{exc.strerror}: {exc.filename}" if isinstance(exc, OSError) and exc.strerror else type(exc).__name__
+        print(f"swarm migrate: failed ({detail})", file=sys.stderr)
+        return 1
+    print(bootstrap.format_steps(steps, _use_color(args)))
+    return 1 if any(s.status in ("failed", "refused") for s in steps) else 0
+
+
+def cmd_remember(cfg: dict, args) -> int:
+    """Store one fact in the job's project memory; spool it when the board or Hindsight can't
+    be reached from here (the hooks deliver it, like a spooled post). The memory gets a document
+    id picked here and the provenance this process knows; every line that stored or
+    queued it ends with `[memory <document_id> project "<project>"]`, which the PostToolUse hook
+    reads to pin the memory to this tool call."""
+    if not str((cfg.get("hindsight") or {}).get("url") or "").strip():
+        print("project memory is off: set [hindsight] url in the swarm config", file=sys.stderr)
+        return 1
+    from swarm import hindsight, provenance
+    from swarm.board import open_board
+    from swarm.spool import flush_spool, spool_memory
+    text = " ".join(" ".join(args.fact).split())
+    cap = int(cfg["hindsight"]["remember_max_chars"])
+    truncated = len(text) > cap
+    text = text[: cap - 1] + "…" if truncated else text
+    if not text:
+        print("nothing to remember", file=sys.stderr)
+        return 1
+    from swarm.board.base import valid_name
+    if args.project is not None and not valid_name(args.project):
+        # the project is printed in the [memory ...] tag the hook reads: nothing that could forge one
+        print(term_safe(f"invalid project {args.project!r}: use 1-64 letters, digits, spaces and "
+                        f". ' _ - (no leading or trailing space)"), file=sys.stderr)
+        return 1
+    meta = provenance.cli_metadata(os.environ)
+    doc = provenance.new_document_id()
+
+    def queue(project: str | None) -> str:
+        f = spool_memory(cfg, args.job, args.name, text, args.project, metadata=meta)
+        return " " + provenance.output_tag(f"swarm-spool-{f.stem}", project or "")
+
+    try:
+        board_cm = open_board(cfg)
+    except Exception as exc:
+        tag = queue(args.project)
+        print(term_safe(f"queued (board not reachable from here: {_error_name(exc)}); it is stored "
+                        f"automatically within seconds by the swarm hooks. This is normal inside a "
+                        f"sandbox.{tag}"))
+        return 0
+    with board_cm as board:
+        flush_spool(board, cfg)
+        project = args.project
+        try:
+            project = project or hindsight.project_of(board.job_status(args.job), args.job)
+            if not valid_name(project):   # set by `swarm activate --project` before this check existed
+                print(term_safe(f"invalid project {project!r} of job {args.job}: pass --project with "
+                                f"1-64 letters, digits, spaces and . ' _ -"), file=sys.stderr)
+                return 1
+            project = hindsight.remember(board, cfg, args.job, args.name, text, project,
+                                         document_id=doc, metadata=meta)
+        except hindsight.HindsightUnavailable as exc:
+            tag = queue(project)
+            board.record_remembered(args.name)
+            print(term_safe(f"queued (memory not reachable from here: {exc}); the swarm hooks store it "
+                            f"once Hindsight answers.{tag}"))
+            return 0
+        except hindsight.HindsightError as exc:
+            if not exc.bank_scoped:  # a 4xx: this fact as sent is refused; say why
+                print(term_safe(f"memory refused it: {exc}"), file=sys.stderr)
+                return 1
+            tag = queue(project)  # the bank's trouble
+            board.record_remembered(args.name)
+            print(term_safe(f"queued (memory refused it for now: {exc}); the swarm hooks retry it.{tag}"))
+            return 0
+    print(term_safe(f'remembered in project "{project}"' + (f" (truncated to {cap} chars)" if truncated else "")
+                    + " " + provenance.output_tag(doc, project)))
+    return 0
+
+
+def cmd_spool_retry(cfg: dict) -> int:
+    """Requeue the memories parked as .stuck; the next flush (any hook call) delivers them. Works
+    on the spool directory only, so it runs inside a sandbox too."""
+    from swarm.spool import retry_stuck
+    n = retry_stuck(cfg)
+    print(f"requeued {n} stuck {'memory' if n == 1 else 'memories'}")
+    return 0
+
+
+def _cmd_hook(cfg: dict, args) -> int:
+    if args.event == "session-start":
+        return 0   # handled by bin/swarm-hook's shell part
+    from swarm.hooks import run_hook
+    return run_hook(args.event, cfg, args.host)
+
+
+# Commands that manage their own board connection (or need none).
+COMMANDS = {
+    "init": cmd_init,
+    "install-hooks": _cmd_install_hooks,
+    "supervise": _cmd_supervise,
+    "bootstrap": cmd_bootstrap,
+    "migrate": cmd_migrate,
+    "doctor": cmd_doctor,
+    "upgrade": cmd_update,
+    "update": cmd_update,      # the old name, a hidden alias
+    "activate": cmd_activate,
+    "plugins": cmd_plugins,
+    "deactivate": cmd_deactivate,
+    "hook": _cmd_hook,
+    "notices": cmd_notices,
+    "remember": cmd_remember,
+    "spool": lambda cfg, args: cmd_spool_retry(cfg),
+    "tail": lambda cfg, args: cmd_tail(cfg, args.job, args.backlog, args.interval, not args.no_agents,
+                                       _use_color(args)),
+    "watch": lambda cfg, args: cmd_watch(cfg, args.job, args.interval, _use_color(args),
+                                       args.session, args.exit_when_idle, args.compact),
+}
+
+
+SYSTEM_NAME = "swarm"   # who posts the board notices of a move, a merge or a goal change
+
+
+def _job_markers(cfg: dict, job: str) -> list[Path]:
+    """Every marker of `job` in this machine's marker dir: <job>.json and the <job>--<session>.json
+    attachments."""
+    marker = _marker(cfg, job)
+    found = [marker] if marker.exists() else []
+    found += [m for m in sorted(marker.parent.glob(f"{safe_job(job)}--*.json")) if _read_marker(m).get("job") == job]
+    return [m for m in found if _read_marker(m).get("job") == job]
+
+
+def _bind_sessions(cfg: dict, job: str, sessions, goal: bool) -> None:
+    """Make `job` visible to the hooks of each session (an agent's hooks act only for jobs whose
+    marker is bound to its Claude session): an attached marker (`activate --attach`) for a session
+    that has none for it."""
+    have = {_read_marker(m).get("session_id") for m in _job_markers(cfg, job)}
+    for sid in sorted({x for x in sessions if x and valid_session_id(x)} - have):
+        _write_marker(_marker(cfg, job).with_name(f"{safe_job(job)}--{safe_job(sid)}.json"),
+                      {"job": job, "session_id": sid, "cwd": os.getcwd(), "adopt_running": False,
+                       "attached": True, **({"goal": True} if goal else {})})
+
+
+def _mark_goal(cfg: dict, job: str) -> None:
+    """The job has a goal now: its markers say so (the orchestrator hooks and deactivate read it)."""
+    for m in _job_markers(cfg, job):
+        data = _read_marker(m)
+        if data and not data.get("goal"):
+            _write_marker(m, {**data, "goal": True})
+
+
+def _read_goal(args) -> str | None:
+    goal = (sys.stdin.read() if args.goal == "-" else args.goal or "").strip()
+    return goal or None
+
+
+def _set_goal(board, cfg: dict, job: str, goal: str) -> int:
+    js = board.job_status(job)
+    had = js.goal if js else None
+    if not board.set_job_goal(job, goal):
+        print(f"swarm job: {job} is not an open job: its goal can't be changed", file=sys.stderr)
+        return 1
+    _mark_goal(cfg, job)
+    if had != goal:
+        board.post(job, SYSTEM_NAME, "the job's goal was " + ("changed" if had else "set")
+                   + f" (see `swarm status --job {job}`): " + goal[:100].replace("\n", " "))
+    js = board.job_status(job)
+    print(f"goal of {job} " + ("unchanged" if had == goal else "set" if not had else "updated")
+          + ("; the earlier verdict is cleared" if had and had != goal else ""))
+    if js and js.judge is None:
+        print(f"the job has no judge: spawn exactly one, with this line in its prompt (with the job's "
+              f"tag line {tag_line(job)}); the job can't complete until its verdict is met:\n{JUDGE_TAG_LINE}")
+    elif js and had != goal:
+        print(f"{js.judge} is the judge: it was told on the board that the goal changed")
+    return 0
+
+
+def _board_job(board, cfg: dict, args) -> int | None:
+    if args.job == "merge" and (args.rest or args.into):
+        return _job_merge(board, cfg, args)
+    if args.rest or args.into:
+        print("swarm job: unexpected arguments (merge: swarm job merge <from> --into <to>)", file=sys.stderr)
+        return 2
+    goal = _read_goal(args) if args.goal is not None else None
+    if args.goal is not None and goal is None:
+        print("swarm job: --goal is empty", file=sys.stderr)
+        return 2
+    js = board.job_status(args.job)
+    if goal is not None and js is not None and js.status != "active":
+        print(f"swarm job: {args.job} is {js.status}: its goal can't be changed", file=sys.stderr)
+        return 1
+    board.ensure_job(args.job, args.description, os.environ.get("USER"))
+    print(args.job)
+    if goal is not None:
+        return _set_goal(board, cfg, args.job, goal)
+
+
+def _active_agents(board) -> list:
+    """Every active agent of every open job."""
+    return [a for j in board.jobs() for a in board.agents(j.job, include_departed=False)]
+
+
+def _find_agent(board, name: str | None, key: str | None):
+    for a in _active_agents(board):
+        if (key and a.agent_key == key) or (name and not key and a.name == name):
+            return a
+    return None
+
+
+def _sessions_of(board, agent_keys) -> set:
+    return {board.route(k).session_id for k in agent_keys}
+
+
+def _job_merge(board, cfg: dict, args) -> int:
+    src, dst = (args.rest[0] if len(args.rest) == 1 else None), args.into
+    if src is None or not dst or args.goal is not None:
+        print("usage: swarm job merge <from> --into <to>", file=sys.stderr)
+        return 2
+    if src == dst:
+        print(f"refused: can't merge {src} into itself", file=sys.stderr)
+        return 1
+    sj, dj = board.job_status(src), board.job_status(dst)
+    for label, j, jn in (("from", sj, src), ("into", dj, dst)):
+        if j is None:
+            print(f"refused: no such job {term_safe(jn)} ({label})", file=sys.stderr)
+            return 1
+        if j.status != "active":
+            print(f"refused: {jn} is {j.status}: "
+                  + ("it is already closed" if label == "from" else "can't merge into a closed job"),
+                  file=sys.stderr)
+            return 1
+    agents = board.agents(src, include_departed=False)
+    src_markers = _job_markers(cfg, src)
+    sessions = {_read_marker(m).get("session_id") for m in src_markers} | _sessions_of(board, [a.agent_key for a in agents])
+    goal = dj.goal
+    if sj.goal and sj.goal != dj.goal:
+        goal = f"{dj.goal}\n{sj.goal}" if dj.goal else sj.goal
+        board.set_job_goal(dst, goal)
+    moved = [a for a in agents if board.move_agent(a.agent_key, dst) is not None]
+    board.set_waiting(dst, None)
+    _bind_sessions(cfg, dst, sessions, bool(goal))
+    if goal:
+        _mark_goal(cfg, dst)
+    names = ", ".join(a.name for a in moved) or "no agents"
+    board.post(dst, SYSTEM_NAME, f"merged job {src} into this job: {names} moved here"
+               + (", its goal appended" if sj.goal and sj.goal != dj.goal else ""))
+    stuck = [m for m in src_markers if not remove_marker(m)]
+    board.close_job(src, "completed", f"merged into {dst}", closed_by=os.environ.get("USER") or None)
+    if transcripts_enabled(cfg):
+        _capture_final_transcripts(board, cfg, src)
+    print(f"merged {src} into {dst}: {len(moved)} agent(s) moved ({names}); {src} is closed (completed, "
+          f"outcome \"merged into {dst}\"). The agents keep running: each sees {dst}'s board on its next tool call.")
+    if sj.goal and sj.goal != dj.goal:
+        print(f"{src}'s goal was appended to {dst}'s")
+    if sj.judge:
+        print(f"{sj.judge} was {src}'s judge: it is now a normal member of {dst} (not stopped). Stop it "
+              f"if it is no longer needed.")
+    if goal and dj.judge is None:
+        print(f"{dst} has a goal but no judge: spawn exactly one, with {tag_line(dst)} and this line "
+              f"in its prompt:\n{JUDGE_TAG_LINE}")
+    for m in stuck:
+        print(f"note: marker {term_safe(m)} stayed locked; `swarm deactivate --job {src}` removes it later",
+              file=sys.stderr)
+    print(f"put this line in every subagent prompt for the merged job from now on:\n{tag_line(dst)}")
+    return 0
+
+
+def _board_move(board, cfg: dict, args) -> int:
+    if bool(args.name) == bool(args.key):
+        print("swarm move: give exactly one of --as NAME and --key K", file=sys.stderr)
+        return 2
+    a = _find_agent(board, args.name, args.key)
+    if a is None:
+        print(f"refused: no active agent {term_safe(args.name or args.key)} on an open job", file=sys.stderr)
+        return 1
+    dj = board.job_status(args.to)
+    if dj is None or dj.status != "active":
+        print(f"refused: {term_safe(args.to)} is not an open job", file=sys.stderr)
+        return 1
+    if a.job == args.to:
+        print(f"refused: {a.name} is already on {args.to}", file=sys.stderr)
+        return 1
+    sj = board.job_status(a.job)
+    sessions = _sessions_of(board, [a.agent_key])
+    if board.move_agent(a.agent_key, args.to) is None:
+        print(f"refused: could not move {a.name} to {args.to}", file=sys.stderr)
+        return 1
+    _bind_sessions(cfg, args.to, sessions, bool(dj.goal))
+    print(f"moved {a.name} from {a.job} to {args.to}; it keeps running and sees {args.to}'s board "
+          f"(a notice and the recent messages) on its next tool call")
+    if sj and sj.judge == a.name:
+        print(f"{a.name} was the judge of {a.job}: it is a normal member of {args.to} now, and {a.job} "
+              f"has no judge (spawn one, or move it back).")
+    if not board.agents(a.job, include_departed=False):
+        print(f"{a.job} has no active agents left: deactivate it, or it auto-closes when quiet.")
+    return 0
+
+
+def _moved_job(board, job: str, name: str) -> str | None:
+    """The job `name` was moved to, when a post names the job it was moved from (the commands an
+    agent was shown carry its old job): `name` is not an active member of `job` but is one of
+    another open job. None otherwise (a member posting on its own job, or a name no agent holds)."""
+    from swarm.board.base import BoardError, valid_name
+    if not valid_name(name):   # the post itself reports it
+        return None
+    try:
+        if any(a.name == name for a in board.agents(job, include_departed=False)):
+            return None
+        a = _find_agent(board, name, None)
+    except BoardError:   # the redirect is a courtesy: never at the cost of the post
+        return None
+    return a.job if a else None
+
+
+def _board_post(board, cfg: dict, args) -> int | None:
+    if not args.name and args.key:
+        args.name = board.active_agent_name(getattr(args, "key", None))
+    if not args.name:
+        print("swarm post: give --as NAME (or a --key that belongs to an agent)", file=sys.stderr)
+        return 2
+    job = _moved_job(board, args.job, args.name)
+    if job:
+        print(f"note: {term_safe(args.name)} is on {job} now, not on {args.job}: posting there. "
+              f"Use --job {job} from now on.", file=sys.stderr)
+        args.job = job
+    from swarm import addressing
+    try:
+        addressing.check_author(board, args.job, args.name, getattr(args, "key", None))
+        targets = addressing.resolve(board, args.job, args.to) if args.to else [None]
+        results = [board.post(args.job, args.name, " ".join(args.message), t) for t in targets]
+    except ValueError as exc:   # a refused name (board.base.valid_name) or an AddressError
+        print(f"not posted: {term_safe(exc)}", file=sys.stderr)
+        return 1
+    ids = ", ".join(f"#{r.id}" for r in results)
+    to = f" to {args.to} ({', '.join(term_safe(t) for t in targets)})" if args.to and args.to.startswith("@") else ""
+    print(f"posted {ids}{to}" + (f" (truncated to {board.message_cap()} chars)"
+                                  if any(r.truncated for r in results) else ""))
+
+
+# Settings `swarm config` can read and change: "section.key" -> (what it is, how to check a value).
+# board.message_max_chars lives in the BOARD (Board.message_cap), the others would live in the file.
+CONFIG_KEYS = {"board.message_max_chars": "the longest board message, in characters"}
+
+
+def _save_config_value(path: Path, section: str, key: str, value: int) -> None:
+    """Write `key = value` into [section] of the TOML config at `path` (created if missing),
+    changing nothing else: the line is replaced in place (keeping its trailing comment) or added
+    under the header, or a new section is appended. The result is parsed again before it replaces
+    the file (atomic rename, same permissions); ValueError when it would not read back as asked."""
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    lines = text.splitlines(keepends=True)
+    head = next((i for i, l in enumerate(lines) if re.fullmatch(rf"\s*\[{section}\]\s*(#.*)?\s*", l)), None)
+    new = f"{key} = {value}\n"
+    if head is None:
+        sep = "" if not text or text.endswith("\n\n") else ("\n" if text.endswith("\n") else "\n\n")
+        lines.append(f"{sep}[{section}]\n{new}" if text else f"[{section}]\n{new}")
+    else:
+        end = next((i for i in range(head + 1, len(lines)) if re.match(r"\s*\[", lines[i])), len(lines))
+        at = next((i for i in range(head + 1, end) if re.match(rf"\s*{key}\s*=", lines[i])), None)
+        if at is None:
+            if lines[head].endswith(("\n", "\r\n")) is False:
+                lines[head] += "\n"
+            lines.insert(head + 1, new)
+        else:
+            comment = re.search(r"(\s+#.*)$", lines[at].rstrip("\r\n"))
+            lines[at] = f"{key} = {value}" + (comment.group(1) if comment else "") + "\n"
+    out = "".join(lines)
+    try:
+        ok = tomllib.loads(out).get(section, {}).get(key) == value
+    except tomllib.TOMLDecodeError:
+        ok = False
+    if not ok:
+        raise ValueError(f"cannot edit {path} safely: set {key} = {value} under [{section}] by hand")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(out, encoding="utf-8")
+        if path.exists():
+            os.chmod(tmp, path.stat().st_mode & 0o7777)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _board_config(board, cfg: dict, args) -> int:
+    """`swarm config [KEY [VALUE]] [--save]`: show or change a setting. board.message_max_chars is
+    the board's message cap: with no value it prints the live cap (the board's, which every client
+    obeys); with a value it changes it on the board (online, existing messages are never cut),
+    and --save also writes it to the config file ([board] message_max_chars: the value a NEW board
+    starts with)."""
+    from swarm.board import check_message_cap
+    key = args.key
+    if key is None:
+        for k, what in CONFIG_KEYS.items():
+            print(f"{k} = {board.message_cap()}\t{what}")
+        return 0
+    if key not in CONFIG_KEYS:
+        print(f"swarm config: unknown setting {term_safe(key)!r}; known: {', '.join(CONFIG_KEYS)}", file=sys.stderr)
+        return 2
+    if args.value is None:
+        if args.save:
+            print("swarm config: --save needs a value", file=sys.stderr)
+            return 2
+        cap = board.message_cap()
+        print(cap)
+        try:
+            configured = check_message_cap(cfg["board"].get("message_max_chars"))
+        except ValueError:
+            configured = None
+        if configured != cap:
+            print(f"(the config file says {cfg['board'].get('message_max_chars')}: it only sizes a new board; "
+                  f"the board's {cap} applies. `swarm config {key} {cap} --save` makes the file agree)",
+                  file=sys.stderr)
+        return 0
+    try:
+        old, new = board.set_message_cap(args.value)
+    except ValueError as exc:
+        print(f"swarm config: {exc}", file=sys.stderr)
+        return 2
+    print(f"{key}: {old} -> {new}" if old != new else f"{key}: {new} (unchanged)")
+    if new < old:
+        print("messages already on the board are kept as they are; the new cap applies to posts from now on")
+    if args.save:
+        try:
+            _save_config_value(args.config, "board", "message_max_chars", new)
+        except (ValueError, OSError) as exc:
+            print(f"swarm config: the board was updated but the config file was not: {exc}", file=sys.stderr)
+            return 1
+        print(f"saved to {args.config}")
+    return 0
+
+
+def _verdict_text(args) -> tuple[str, str | None] | None:
+    """(reason, next steps) of a `swarm verdict`, or None (after saying why on stderr) when a
+    not_met verdict lacks its --reason or --next: the judge must say why and what would meet the goal."""
+    reason = (getattr(args, "reason_opt", None) or " ".join(args.reason or ())).strip()
+    nxt = (getattr(args, "next_steps", None) or "").strip()
+    if args.verdict == "met":
+        if not reason:
+            print("a verdict needs a reason: swarm verdict --job J --as NAME met \"<why>\"", file=sys.stderr)
+            return None
+        return reason, None
+    missing = [flag for flag, v in (("--reason \"<why it is not met>\"", reason),
+                                    ("--next \"<what to change, where, and what you will re-check>\"", nxt)) if not v]
+    if missing:
+        print("refused: a not_met verdict must say why and what to do to meet the goal; missing "
+              + " and ".join(missing) + ". The workers are spawned with these instructions.", file=sys.stderr)
+        return None
+    return reason, nxt
+
+
+def _board_verdict(board, cfg: dict, args) -> int:
+    from swarm.spool import deliver_verdict
+    text = _verdict_text(args)
+    if text is None:
+        return 1
+    try:
+        recorded = deliver_verdict(board, args.job, args.name, args.verdict, text[0], text[1])
+    except ValueError as exc:   # a name the board refuses (board.base.valid_name)
+        print(f"verdict not recorded: {term_safe(exc)}", file=sys.stderr)
+        return 1
+    if not recorded:
+        print(f"refused: {term_safe(args.name)} is not the judge of job {term_safe(args.job)}", file=sys.stderr)
+        return 1
+    print(f"verdict {args.verdict} recorded for {args.job}, and posted on the board")
+    return 0
+
+
+def _board_read(board, cfg: dict, args) -> None:
+    res = board.read_unread(agent_key=args.key, name=args.name, job=args.job, advance=not args.peek)
+    print(fmt(res.messages) if res.messages else "(no new messages)")
+    if res.remaining:
+        print(f"({res.remaining} more unread: run read again)")
+
+
+def _board_who(board, cfg: dict, args) -> None:
+    for a in board.agents(args.job, include_departed=False):
+        # Tab-separated, the name first and exact (so it can be pasted into --to '<name>'),
+        # then the harness in its own field so the name field is never altered.
+        tool = f"in {term_safe(a.current_tool)}" if a.current_tool else ""
+        print(f"{term_safe(a.name)}\t{term_safe(a.harness)}\t{term_safe(a.role)}\t{term_safe(a.status)}\t"
+              f"last contact {a.last_contact_at.astimezone().strftime('%H:%M')}\t{tool}")
+
+
+def _sup_or_none(cfg: dict) -> dict | None:
+    """[supervise] settings, or None if [supervise] is missing or invalid (never raises)."""
+    from swarm.supervisor.settings import SettingsError, settings
+    try:
+        return settings(cfg)
+    except SettingsError:
+        return None
+
+
+def _blocker_line(board, blocker):
+    text = (PLUGINS.blocker_display(board, blocker) if PLUGINS is not None else
+            f'{blocker.id} {blocker.kind} -> {blocker.waiting_on}: {blocker.reason}')
+    overdue = blocker.state == 'open' and blocker.until is not None and blocker.until <= board.now()
+    return term_safe(text) + f' [{blocker.state}]' + (' OVERDUE' if overdue else '')
+
+
+def _board_blockers(board, cfg, args):
+    rows = board.blockers(args.job, include_closed=args.all)
+    for blocker in rows: print(_blocker_line(board, blocker))
+    if not rows: print('(no blockers)')
+
+
+def _board_blocker(board, cfg, args):
+    blocker = board.blocker(args.id)
+    if blocker is None:
+        print(f'no such blocker: {args.id}', file=sys.stderr); return 1
+    actor = _blocker_actor(board)
+    if args.bcmd == 'resolve':
+        changed = board.resolve_blocker(args.id, args.how, actor=actor)
+        print(f'blocker {args.id} resolved' if changed else f'blocker {args.id} is already {blocker.state}')
+    else:
+        board.comment_blocker(args.id, ' '.join(args.text), actor=actor)
+        print(f'commented on blocker {args.id}')
+    return 0
+
+
+def _blocker_actor(board):
+    # Same identity boundary the ask/answer plugin uses: the host session's member, else human.
+    from swarm import hosts
+    sid = hosts.cli_session_id(os.environ)
+    if sid:
+        for job in board.jobs():
+            for agent in board.agents(job.job, include_departed=False):
+                if board.route(agent.agent_key).session_id == sid:
+                    return agent.name
+    return 'human'
+
+
+def _board_status(board, cfg: dict, args) -> None:
+    color = _use_color(args)
+    if not board.degraded:   # a standby can't close anything
+        _say_closed(_sweep(board, cfg))
+    enabled = transcripts_enabled(cfg)
+    sup = _sup_or_none(cfg)
+    if not args.job:
+        print(jobs_overview(board, args.all, color, sup=sup))
+        if enabled:
+            print(transcripts_footer(board, cfg))
+        if sup and sup["enabled"]:
+            from swarm.supervisor import budget
+            from swarm.supervisor.settings import today_start
+            now = board.now()   # the host's (every OS user's) runs that overlap today, as the cap counts them
+            day = budget.day_rows(board.restarts(host=compat.node()), today_start())
+            used = sum(budget.charged_minutes(r, now) for r in day)
+            print(f"supervisor: on, today {used:.0f}/{sup['daily_restart_minutes']} restart minutes "
+                  f"on this host")
+        return
+    recent = None if args.all_agents else int(cfg["board"]["watch_recent_minutes"])
+    rows = board.transcripts(job=args.job) if enabled and board.job_status(args.job) else None
+    print(job_detail(board, args.job, color, recent, "--all-agents to show", rows, sup=sup))
+    for line in (PLUGINS.status_lines(args.job, board) if PLUGINS is not None else ()):
+        print(term_safe(line))
+
+
+def _board_join(board, cfg: dict, args) -> int:
+    """Allocate (or return) the agent's name. --judge / --verifier give agents that run outside
+    Claude Code the seat the hooks give a tagged subagent: they have no hooks, so the CLI is how
+    they read, post and record verdicts."""
+    name = board.allocate_name(args.key, args.job, args.role)
+    if board.active_agent_name(args.key) is None:   # allocate_name never revives a stuck close
+        print(f"refused: {name} ({args.key}) was closed as stuck by the swarm supervisor and "
+              f"can't rejoin: its replacement does the work", file=sys.stderr)
+        return 1
+    if args.judge and not board.claim_judge(args.key, args.job):
+        js = board.job_status(args.job)
+        print(f"refused: {term_safe(js.judge) if js and js.judge else 'another agent'} is already the judge of "
+              f"job {args.job} (one per job)", file=sys.stderr)
+        return 1
+    if args.verifier and not board.claim_verifier(args.key, args.job):
+        print(f"refused: could not make {name} a verifier of job {args.job}", file=sys.stderr)
+        return 1
+    _sweep(board, cfg)   # prints nothing on stdout: scripts read the name from it
+    print(name)
+    return 0
+
+
+def _board_wait(board, cfg: dict, args) -> int:
+    on = " ".join(args.on).strip()
+    if not on:
+        print("say what the job is waiting for: --on \"<what>\"", file=sys.stderr)
+        return 1
+    import datetime as dt
+    try:
+        end = wait_deadline(args.for_, args.until)
+    except ValueError as exc:
+        print(f"swarm wait: {exc}", file=sys.stderr)
+        return 2
+    until = None if end is None else dt.datetime.fromtimestamp(end, dt.timezone.utc)
+    if not board.set_waiting(args.job, on, until):
+        print(f"{args.job} is not an open job", file=sys.stderr)
+        return 1
+    if until is None:
+        bound = " ("
+    elif args.for_ is not None:
+        bound = f" (for up to {_duration_text(parse_duration(args.for_))}; "
+    else:
+        bound = f" (until {until.astimezone().strftime('%Y-%m-%d %H:%M')}; "
+    print(f"{args.job} is waiting on: {on}{bound}back to active when an agent joins, or with resume)")
+    return 0
+
+
+def _board_pause(board, cfg: dict, args) -> int:
+    from swarm import pause
+    report = pause.pause(board, cfg, args.job, args.reason, wait=max(0.0, args.wait))
+    if report is None:
+        print(f"{args.job} is not an open job (nothing to pause)", file=sys.stderr)
+        return 1
+    for line in report.lines():
+        print(term_safe(line))
+    return 0
+
+
+def _board_resume(board, cfg: dict, args) -> int:
+    from swarm import pause
+    rec, _ = pause.find_pause(board, args.job, args.retry)
+    advanced = args.host or args.workdir or args.only or args.dry_run or args.retry
+    if rec is None:
+        if advanced:
+            print(f"{args.job} is not paused: nothing to resume" +
+                  (" (--retry: no earlier resume of it had failed agents)" if args.retry else ""), file=sys.stderr)
+            return 1
+        if not board.set_waiting(args.job, None):
+            print(f"{args.job} is not an open job", file=sys.stderr)
+            return 1
+        print(f"{args.job} is no longer waiting")
+        return 0
+    report = pause.resume(board, cfg, args.job, host=args.host, workdir=args.workdir, only=args.only or (),
+                          dry_run=args.dry_run, retry=args.retry)
+    if report is None:
+        print(f"{args.job} is not paused: nothing to resume", file=sys.stderr)
+        return 1
+    for line in report.lines():
+        print(term_safe(line))
+    return 1 if report.failed else 0
+
+
+def _board_leave(board, cfg: dict, args) -> int | None:
+    if args.session:
+        if args.name or args.key:
+            print("--session takes neither --as nor --key", file=sys.stderr)
+            return 2
+        n = sum(board.close_agent(a.agent_key, "session restarted")
+                for j in board.jobs(True) if j.session_id == args.session
+                for a in board.agents(j.job, include_departed=False))
+        print(f"left {n}")
+        return 0
+    if not board.leave(agent_key=args.key, name=args.name):
+        print("no active agent matched", file=sys.stderr)
+        return 1
+    print("left")
+
+
+def _board_purge(board, cfg: dict, args) -> None:
+    board.purge()
+    if transcripts_enabled(cfg):
+        from swarm import transcripts
+        transcripts.rotate(board, cfg, warn=lambda m: print(m, file=sys.stderr))
+    _prune_memory_refs(board, cfg)
+    _say_closed(_sweep(board, cfg))
+    print("purged")
+
+
+PRUNE_LISTED = 20   # dropped memory refs `swarm purge` lists one by one at most
+
+
+def _prune_memory_refs(board, cfg: dict) -> None:
+    """`swarm purge`: drop the memory refs whose memory Hindsight says is gone (provenance.prune:
+    only on proof, never when Hindsight is down or unsure); the summary goes to stderr."""
+    import time
+    from swarm import provenance
+    _refresh_hindsight_caps(cfg)
+    res = provenance.prune(board, cfg, deadline=time.monotonic() + provenance.PRUNE_SECONDS)
+    if res.note:
+        print(term_safe(res.note), file=sys.stderr)
+        return
+    if not (res.checked or res.unknown or res.skipped):
+        return
+    print(f"memory references: {res.checked} checked, {len(res.dropped)} dropped (their memory is gone "
+          f"from Hindsight)"
+          + (f", {res.kept_missing_bank} kept (their bank is not in Hindsight)" if res.kept_missing_bank else "")
+          + (f", {res.unknown} kept without a clear answer (Hindsight down or unsure)" if res.unknown else "")
+          + (f", {res.skipped} left for a later purge" if res.skipped else ""), file=sys.stderr)
+    for r in res.dropped_refs[:PRUNE_LISTED]:   # board data: term_safe (a forged row's job, say)
+        print(term_safe(f"  dropped memory ref {r.document_id} (job {r.job}, agent {r.agent_name}, bank {r.bank})"),
+              file=sys.stderr)
+    if len(res.dropped_refs) > PRUNE_LISTED:
+        print(f"  … and {len(res.dropped_refs) - PRUNE_LISTED} more", file=sys.stderr)
+
+
+# Commands that run on one board opened by main (which first delivers any spooled posts).
+BOARD_COMMANDS = {
+    "job": _board_job,
+    "join": _board_join,
+    "move": _board_move,
+    "post": _board_post,
+    "config": _board_config,
+    "verdict": _board_verdict,
+    "wait": _board_wait,
+    "pause": _board_pause,
+    "resume": _board_resume,
+    "read": _board_read,
+    "who": _board_who,
+    "status": _board_status,
+    "blockers": _board_blockers,
+    "blocker": _board_blocker,
+    "leave": _board_leave,
+    "purge": _board_purge,
+    "transcript": _board_transcript,
+    "memory": _board_memory,
+}
+
+
+def main(argv=None) -> int:
+    from swarm.spool import SpoolError
+    compat.setup_stdio()
+    try:
+        return _main(argv)
+    except SpoolError as exc:   # a post or memory that had to be queued, with no private spool
+        print(f"cannot queue it (board not reachable from here): {exc}", file=sys.stderr)
+        return 1
+
+
+def _read_job(args) -> str | None:
+    """The job a board-reading command looks at (read, who, status --job, tail --job), else None."""
+    return getattr(args, "job", None) if args.cmd in ("read", "who", "status", "tail") else None
+
+
+def note_orchestrator_read(cfg: dict, args) -> None:
+    """A board read by the orchestrating session counts as contact for liveness: touch the "seen"
+    file of this session's markers of the job read (what its tool-call hooks do too, but hooks are
+    not there on every host or sandbox). Never fails the command."""
+    job = _read_job(args)
+    if not job:
+        return
+    try:
+        from swarm import hosts
+        sid = hosts.cli_session_id(os.environ)
+        if not sid:
+            return
+        mdir = Path(cfg["hook"]["marker_dir"]).expanduser()
+        for path in sorted(mdir.glob("*.json")) if mdir.is_dir() else ():
+            m = _read_marker(path)
+            if m.get("job") == job and m.get("session_id") == sid:
+                mark_orchestrator_seen(path)
+    except Exception:
+        pass
+
+
+def _reads_only(args) -> bool:
+    """Whether the command only reads the board, so a standby may serve it when no primary is up."""
+    return (args.cmd in ("who", "status", "blockers") or (args.cmd == "read" and args.peek)
+            or (args.cmd == "config" and args.value is None and not args.save)
+            or (args.cmd == "transcript" and args.tcmd in TRANSCRIPT_COMMANDS))
+
+
+NEEDS_PRIMARY = "cannot reach the board database: {}{}"
+
+
+def _main(argv=None) -> int:
+    """Parse and run one command. No command dies with a traceback for want of a primary: a board
+    that can't be reached, or a server that is a standby (psycopg's read-only error, SQLSTATE
+    25006, e.g. a single-host config pointing at one), is one line on stderr and exit 1."""
+    from swarm.board import BoardUnavailable, JobPaused
+    parser = _parser()
+    _load_plugins(sys.argv[1:] if argv is None else argv, parser)
+    args = parser.parse_args(argv)
+    note = "" if _reads_only(args) else " (this command writes: it needs the primary)"
+    try:
+        return _dispatch(args)
+    except BoardUnavailable as exc:
+        print(NEEDS_PRIMARY.format(exc, note), file=sys.stderr)
+        return 1
+    except JobPaused as exc:   # a join or post to a paused job: one clear line, nothing queued
+        print(f"swarm: {term_safe(str(exc))}", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        if getattr(exc, "sqlstate", None) != "25006":   # read_only_sql_transaction
+            raise
+        print(NEEDS_PRIMARY.format(f"{exc} (the server is a standby)", note), file=sys.stderr)
+        return 1
+
+
+def _dispatch(args) -> int:
+    # doctor reads (and reports on) the config itself: a broken one must not stop it
+    cfg = {} if args.cmd == "doctor" else load_config(args.config)
+    # a supervise dry run writes nothing: no board setup or migration either
+    if args.cmd not in NO_AUTO_INIT and not (args.cmd == "supervise" and (args.dry_run or args.scmd)):
+        auto_init(cfg)
+    if PLUGINS is not None:
+        PLUGINS.cfg = cfg
+        if args.cmd in PLUGINS.commands:
+            return PLUGINS.run_command(args.cmd, args)
+        rc = PLUGINS.run_before(args.cmd, args)
+        if rc:
+            return rc
+        rc = _run_command(cfg, args)
+        if not rc:
+            PLUGINS.run_after(args.cmd, args)
+        return rc
+    return _run_command(cfg, args)
+
+
+def _run_command(cfg: dict, args) -> int:
+    if args.cmd in COMMANDS:
+        return COMMANDS[args.cmd](cfg, args)
+
+    from swarm.board import open_board
+    from swarm.spool import flush_spool, spool_post, spool_verdict
+    note_orchestrator_read(cfg, args)
+    if args.cmd == "verdict" and _verdict_text(args) is None:   # refused before anything is sent or queued
+        return 1
+    try:
+        board_cm = open_board(cfg, readers=_reads_only(args))
+    except Exception as exc:  # BoardUnavailable in practice; any failure to open is treated alike
+        if args.cmd == "post":  # sandboxed agent: queue it; the next hook call delivers it
+            if not args.name:
+                print("swarm post: give --as NAME (the board can't be reached to look the key up)", file=sys.stderr)
+                return 2
+            spool_post(cfg, args.job, args.name, " ".join(args.message), args.to)
+            print(f"queued (board not reachable from here: {_error_name(exc)}); it is delivered "
+                  f"automatically within seconds by the swarm hooks. This is normal inside a sandbox.")
+            return 0
+        if args.cmd == "resume" and (args.host or args.workdir or args.only or args.dry_run or args.retry):
+            print(f"cannot reach the board database: {exc} (resuming a paused job needs the board)", file=sys.stderr)
+            return 1
+        if args.cmd in ("wait", "resume"):   # likewise (no network in a Codex sandbox)
+            on = " ".join(args.on).strip() if args.cmd == "wait" else None
+            if args.cmd == "wait" and not on:
+                print("say what the job is waiting for: --on \"<what>\"", file=sys.stderr)
+                return 1
+            from swarm.spool import spool_wait
+            until = None
+            if args.cmd == "wait":
+                try:
+                    until = wait_deadline(args.for_, args.until)
+                except ValueError as exc:
+                    print(f"swarm wait: {exc}", file=sys.stderr)
+                    return 2
+            spool_wait(cfg, args.job, on, until)
+            print(f"queued (board not reachable from here: {_error_name(exc)}); the swarm hooks apply "
+                  f"it within seconds. This is normal inside a sandbox.")
+            return 0
+        if args.cmd == "verdict":  # likewise; whether args.name is the judge is checked on delivery
+            spool_verdict(cfg, args.job, args.name, args.verdict, *_verdict_text(args))
+            print(f"queued (board not reachable from here: {_error_name(exc)}); it is delivered "
+                  f"automatically within seconds by the swarm hooks, and counts only if you are the "
+                  f"judge of {args.job} (if not, you are told on the board).")
+            return 0
+        print(f"cannot reach the board database: {exc}"
+              + (" (this command writes: it needs the primary)" if not _reads_only(args) else ""),
+              file=sys.stderr)
+        return 1
+    from swarm.board import BoardUnavailable
+    try:
+        with board_cm as board:
+            board.plugin_registry = PLUGINS
+            if board.degraded:   # served by a standby: nothing to write (the spool waits for a primary)
+                print(degraded_notice(board.degraded), file=sys.stderr)
+            else:
+                flush_spool(board, cfg)
+            return BOARD_COMMANDS[args.cmd](board, cfg, args) or 0
+    except BoardUnavailable as exc:  # lost mid-command (e.g. a query past its deadline): no retry,
+        # and no spooling either: a post whose reply was lost may well have been committed
+        print(f"cannot reach the board database: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

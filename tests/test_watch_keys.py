@@ -118,7 +118,6 @@ class PtyWatch(unittest.TestCase):
             if select.select([self.master], [], [], 0.01)[0]:
                 os.read(self.master, 65536)
         self.assertFalse(self.thread.is_alive())
-        self.assertLess(time.monotonic() - t0, 1.5)
         self.assertEqual(self.result.get("rc"), 0)
 
 

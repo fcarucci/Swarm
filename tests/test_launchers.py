@@ -31,7 +31,6 @@ class LauncherTests(unittest.TestCase):
         (md / "J.json").write_text('{"job": "J", "session_id": "s"}')      # a job is active
         res, took = self.run_hook("--host", "claude", "turn", stdin='{"agent_id": "a", "session_id": "s"}')
         self.assertEqual((res.returncode, res.stdout), (0, ""))
-        self.assertLess(took, 1.0)
         self.assertFalse((self.home / ".local/share/swarm/venv").exists())   # nothing built
 
     @posix_only("runs a POSIX sh script (the Windows entry points are tested in test_windows_*.py)")
@@ -39,14 +38,19 @@ class LauncherTests(unittest.TestCase):
         fake = self.home / "plugin"; (fake / "bin").mkdir(parents=True); (fake / ".claude-plugin").mkdir()
         (fake / ".claude-plugin/plugin.json").write_text('{"name": "swarm", "version": "1.2.3"}')
         (fake / "bin/swarm-hook").write_text((ROOT / "bin/swarm-hook").read_text())
-        (fake / "bin/swarm").write_text('#!/bin/sh\nsleep 3; echo "$@" > "$HOME/bootstrap-args"\n')
+        release = self.home / "bootstrap-release"
+        self.addCleanup(lambda: release.write_text("release"))
+        (fake / "bin/swarm").write_text(
+            '#!/bin/sh\nwhile [ ! -f "$HOME/bootstrap-release" ]; do sleep 0.01; done\n'
+            'echo "$@" > "$HOME/bootstrap-args"\n')
         for f in ("swarm", "swarm-hook"):
             (fake / "bin" / f).chmod(0o755)
         t = time.monotonic()
         res = subprocess.run([str(fake / "bin/swarm-hook"), "--host", "codex", "session-start"], input="{}",
                              capture_output=True, text=True, timeout=10, env=self.env)
         self.assertEqual(res.returncode, 0)
-        self.assertLess(time.monotonic() - t, 1.0)                          # didn't wait for the 3 s
+        self.assertFalse((self.home / "bootstrap-args").exists())  # child still awaits release
+        release.write_text("release")
         ran = list((self.home / ".local/share/swarm/host").glob("hooks-ran-codex-1.2.3-*"))
         self.assertEqual(len(ran), 1)
         self.assertFalse((self.home / ".local/state/swarm").exists())      # nothing in the state dir

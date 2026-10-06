@@ -13,6 +13,7 @@ import json
 import lzma
 import multiprocessing
 import os
+import queue
 import signal
 import tempfile
 import sys
@@ -71,8 +72,9 @@ def _reader(path, key, expect, barrier, out):
     """Reads with its cursor until it has `expect` messages; reports every id in read order."""
     got = []
     barrier.wait()
-    deadline = time.monotonic() + _SLACK * 60     # slower on Windows: process start-up, file locks
-    while len(got) < expect and time.monotonic() < deadline:
+    # Completion depends on message count, not machine speed. The parent retains
+    # its process-liveness watchdog; slow disk commits must not truncate a reader.
+    while len(got) < expect:
         with open_board(_cfg(path)) as b:
             got += [m.id for m in b.read_new(agent_key=key)]
     out.put((key, got))
@@ -165,9 +167,22 @@ class FileBoardProcessTests(unittest.TestCase):
                   for i in range(nreaders)]
         for p in procs:
             p.start()
-        res = dict(out.get(timeout=180 * _SLACK) for _ in procs)
-        for p in procs:
-            p.join(30)
+        res = {}
+        try:
+            while len(res) < len(procs):
+                try:
+                    who, ids = out.get(timeout=0.1)
+                    res[who] = ids
+                except queue.Empty:
+                    failed = [p for p in procs if p.exitcode not in (None, 0)]
+                    self.assertFalse(failed, [(p.pid, p.exitcode) for p in failed])
+                    self.assertTrue(any(p.is_alive() for p in procs),
+                                    "all workers exited without reporting their results")
+        finally:
+            for p in procs:
+                if len(res) < len(procs) and p.is_alive():
+                    p.terminate()
+                p.join()
         all_ids = sorted(i for w in range(writers) for i in res[f"w{w}"])
         self.assertEqual(all_ids, list(range(1, writers * per + 1)))      # unique, no gaps
         for w in range(writers):

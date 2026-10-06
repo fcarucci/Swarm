@@ -61,4 +61,20 @@ class WriterCheckMigrationTests(unittest.TestCase):
             setup_board(self.h.cfg, SMALL_POOL)
         c = self.h._db()
         self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
-        self.assertEqual(SCHEMA_VERSION, 16)
+        self.assertEqual(SCHEMA_VERSION, 17)
+        for column in ("verdict_next", "max_hours", "waiting_until"):
+            self.assertIn(column, [r[1] for r in c.execute("PRAGMA table_info(jobs)")])
+        self.assertNotIn("CHECK (writer", c.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'memory_refs'").fetchone()[0])
+        with self.h.board() as b:
+            self.assertEqual(b.save_memory_ref(ref("new-2", "note-tool")), "inserted")
+            self.assertEqual([r.document_id for r in b.memory_refs()].count("old-1"), 1)
+
+    def test_a_bad_writer_name_is_still_refused(self):
+        setup_board(self.h.cfg, SMALL_POOL)
+        with self.h.board() as b, self.assertRaises(ValueError):
+            b.save_memory_ref(ref("d", "bad name!"))
+
+
+if __name__ == "__main__":
+    unittest.main()

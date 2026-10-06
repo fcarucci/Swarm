@@ -1,9 +1,9 @@
-"""Redaction, transcript capture and the provenance excerpt stay within their time
-budgets on adversarial input (adversarial ~24 MB shapes). Margins are generous: these test
-that the deadline is honoured at all, not how fast a machine is."""
+"""Cooperative redaction/capture deadlines and excerpt fallback on adversarial input.
+Consumer-scoped clocks exercise deadline checks without machine-speed assumptions."""
 from __future__ import annotations
 
 import base64
+import contextlib
 import datetime as dt
 import json
 import lzma
@@ -12,6 +12,7 @@ import shutil
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from support import MemoryHarness  # noqa: F401  (sets sys.path)
@@ -20,8 +21,19 @@ from swarm import hooks, provenance  # noqa: E402
 from swarm import transcripts as T  # noqa: E402
 from swarm.provenance import MemoryWrite  # noqa: E402
 
-MARGIN = 1.5          # seconds past a deadline that still counts as honouring it
-HOOK_TIMEOUT = 10.0   # the hosts' hook timeout
+@contextlib.contextmanager
+def deadline_clock(step=0.1):
+    """Advance only the transcript deadline consumer, leaving lock clocks real."""
+    ticks = []
+    local_time = mock.Mock(wraps=time)
+
+    def monotonic():
+        ticks.append(len(ticks) * step)
+        return ticks[-1]
+
+    local_time.monotonic.side_effect = monotonic
+    with mock.patch.object(T, "time", local_time):
+        yield ticks
 
 
 def _b64(rng: random.Random, n: int) -> str:
@@ -49,20 +61,16 @@ class RedactDeadlineTest(unittest.TestCase):
         for shape in ("key-runs", "key-hint", "end-lines"):
             text = adversarial(shape)
             with self.subTest(shape=shape):
-                t0 = time.monotonic()
-                try:
-                    T.redact(text, t0 + 0.5)
-                except T.OutOfTime:
-                    pass
-                self.assertLess(time.monotonic() - t0, 0.5 + MARGIN)
+                with deadline_clock() as ticks, self.assertRaises(T.OutOfTime):
+                    T.redact(text, 0.5)
+                self.assertGreater(len(ticks), 1)
 
     def test_one_huge_line_is_checked_too(self):
         rng = random.Random(2)
         text = _tool_line("\n".join("api_key " + _b64(rng, 200) for _ in range(60000)))   # one 12 MB line
-        t0 = time.monotonic()
-        with self.assertRaises(T.OutOfTime):
-            T.redact(text, t0 + 0.2)
-        self.assertLess(time.monotonic() - t0, 0.2 + MARGIN)
+        with deadline_clock() as ticks, self.assertRaises(T.OutOfTime):
+            T.redact(text, 0.2)
+        self.assertGreater(len(ticks), 1)
 
 
 class WalkerBudgetTest(unittest.TestCase):
@@ -73,14 +81,9 @@ class WalkerBudgetTest(unittest.TestCase):
         s = "\n".join(self.HDR for _ in range(300 * 1024 // len(self.HDR)))
         for form, text in (("raw", s), ("jsonl", _tool_line(s))):
             with self.subTest(form=form):
-                t0 = time.monotonic()
-                try:
-                    out, _ = T.redact(text, t0 + 2.0)
-                    if form == "jsonl":
-                        json.loads(out)
-                except T.OutOfTime:
-                    pass
-                self.assertLess(time.monotonic() - t0, 2.0 + 0.5)
+                with deadline_clock() as ticks, self.assertRaises(T.OutOfTime):
+                    T.redact(text, 0.5)
+                self.assertGreater(len(ticks), 1)
 
     def test_key_lines_across_json_strings_stop_near_the_deadline(self):
         # R-redact 2: one huge line of quoted key lines, and of 1-line text blocks
@@ -89,19 +92,15 @@ class WalkerBudgetTest(unittest.TestCase):
         for form, text in (("array", json.dumps({"l": keys * 4000}) + "\n"),
                            ("blocks", json.dumps({"c": [{"type": "text", "text": k} for k in keys * 3000]}) + "\n")):
             with self.subTest(form=form):
-                t0 = time.monotonic()
-                try:
-                    T.redact(text, t0 + 0.5)
-                except T.OutOfTime:
-                    pass
-                self.assertLess(time.monotonic() - t0, 0.5 + MARGIN)
+                with deadline_clock() as ticks, self.assertRaises(T.OutOfTime):
+                    T.redact(text, 0.5)
+                self.assertGreater(len(ticks), 1)
 
     def test_anchor_on_64_kb_of_them_keeps_its_budget(self):
         out = "\n".join(self.HDR for _ in range(64 * 1024 // len(self.HDR)))
-        t0 = time.monotonic()
-        provenance._anchor([], "claude", "c1", dt.datetime.now(dt.timezone.utc), out,
-                           t0 + hooks.PROVENANCE_BUDGET_SECONDS)
-        self.assertLess(time.monotonic() - t0, hooks.PROVENANCE_BUDGET_SECONDS)
+        with deadline_clock() as ticks, self.assertRaises(T.OutOfTime):
+            provenance._anchor([], "claude", "c1", dt.datetime.now(dt.timezone.utc), out, 0.2)
+        self.assertGreater(len(ticks), 1)
 
 
 class CaptureBudgetTest(unittest.TestCase):
@@ -117,21 +116,17 @@ class CaptureBudgetTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.dir, True)
 
     def test_capture_respects_the_hook_budget(self):
-        self.assertLess(hooks.TRANSCRIPT_BUDGET_SECONDS + MARGIN, HOOK_TIMEOUT)
         self.b.open_job("j", None, None, None, "me")
         self.b.allocate_name("k1", "j")
         for shape in ("key-runs", "key-hint", "end-lines"):
             p = self.dir / f"agent-{shape}.jsonl"
             p.write_text(adversarial(shape))
             with self.subTest(shape=shape):
-                t0 = time.monotonic()
-                try:
+                with deadline_clock() as ticks, self.assertRaises(T.OutOfTime):
                     T.capture_subagent(self.b, self.cfg, "j", "k1", p, final=True,
-                                       deadline=t0 + hooks.TRANSCRIPT_BUDGET_SECONDS)
-                except T.OutOfTime:
-                    pass
-                self.assertLess(time.monotonic() - t0, hooks.TRANSCRIPT_BUDGET_SECONDS + MARGIN)
-                self.assertLess(time.monotonic() - t0, HOOK_TIMEOUT)
+                                       deadline=hooks.TRANSCRIPT_BUDGET_SECONDS)
+                self.assertGreater(len(ticks), 1)
+                self.assertFalse(any(row.final for row in self.b.transcripts(job="j")))
 
 
 class ExcerptBudgetTest(unittest.TestCase):
@@ -158,10 +153,17 @@ class ExcerptBudgetTest(unittest.TestCase):
 
     def test_excerpt_degrades_to_a_smaller_one_within_budget(self):
         p = self.transcript()
-        t0 = time.monotonic()
-        ex = provenance.make_excerpt(p, "claude", "toolu_mem", self.WRITES, "retained 1 item", self.AT,
-                                     t0 + hooks.PROVENANCE_BUDGET_SECONDS, provenance.settings({}))
-        self.assertLess(time.monotonic() - t0, hooks.PROVENANCE_BUDGET_SECONDS + MARGIN)
+        deadline = 10.0
+        soft = deadline - provenance.EXCERPT_RESERVE
+
+        def check(limit):
+            if limit == soft:
+                raise T.OutOfTime("excerpt reserve reached")
+
+        with mock.patch.object(T, "_check", side_effect=check) as checked:
+            ex = provenance.make_excerpt(p, "claude", "toolu_mem", self.WRITES, "retained 1 item", self.AT,
+                                         deadline, provenance.settings({}))
+        self.assertIn(mock.call(soft), checked.call_args_list)
         text = lzma.decompress(ex.body).decode()
         last = json.loads(text.splitlines()[-1])
         self.assertEqual(last["type"], provenance.EXCERPT_TYPE)             # the ref keeps its anchor
@@ -173,7 +175,7 @@ class ExcerptBudgetTest(unittest.TestCase):
         p = self.dir / "small.jsonl"
         p.write_text("".join(lines))
         ex = provenance.make_excerpt(p, "claude", None, self.WRITES, "", self.AT,
-                                     time.monotonic() + hooks.PROVENANCE_BUDGET_SECONDS, provenance.settings({}))
+                                     None, provenance.settings({}))
         self.assertIn("question 29", lzma.decompress(ex.body).decode())
 
 

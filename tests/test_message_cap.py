@@ -160,7 +160,7 @@ class PureTests(unittest.TestCase):
     def test_check_message_cap(self):
         self.assertEqual(check_message_cap(" 500 "), 500)
         self.assertEqual(check_message_cap(500.0), 500)
-        self.assertEqual(SCHEMA_VERSION, 15)
+        self.assertEqual(SCHEMA_VERSION, 17)
 
 
 class CliTests(Env):

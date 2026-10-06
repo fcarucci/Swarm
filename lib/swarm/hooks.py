@@ -1489,6 +1489,28 @@ def _orchestrator_seen(event: str, cfg: dict, sid: str | None, payload: dict) ->
         _log_error(event, "main", exc)
 
 
+def _orchestrator_plugin_lines(event, cfg, sid):
+    if not sid or event != 'turn':
+        return
+    markers = [m for m in _markers(cfg) if m.get('session_id') == sid and 'resume' not in m]
+    if not markers:
+        return
+    try:
+        from swarm import plugins, paths, cli
+        from swarm.board import open_board
+        reg = plugins.Registry(cfg, cfg.get("_config_path") or paths.config_path(),
+                               core_commands=tuple(cli.BOARD_COMMANDS) + tuple(cli.COMMANDS)).load()
+        if not reg.orchestrator_hooks:
+            return
+        with open_board(cfg, init_timeout=HOOK_INIT_TIMEOUT) as board:
+            board.plugin_registry = reg
+            lines = [line for m in markers for line in reg.orchestrator_lines(m['job'], board)]
+            if lines:
+                _out('PreToolUse', '\n'.join(_t(line) for line in lines))
+    except Exception as exc:
+        _log_error(event, 'main', exc)
+
+
 def _orchestrator_respawn(event: str, cfg: dict, sid: str | None, payload: dict) -> None:
     """A not_met verdict with nobody left at work: tell the orchestrator (the only one who can
     spawn) to start the next round (swarm.respawn). Tool-call hooks add context; Stop refuses to
@@ -1550,6 +1572,7 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
     if not agent_id:  # main session: note that it is at work; its spawns get models per role
         if event != "session-stop":
             _orchestrator_seen(event, cfg, sid, payload)
+        _orchestrator_plugin_lines(event, cfg, sid)
         _orchestrator_respawn(event, cfg, sid, payload)
         if event == "turn" and current_host().is_spawn(payload):
             try:

@@ -497,7 +497,7 @@ class ExposureDoctorTests(unittest.TestCase):
             b.allocate_name("k2", "J")
         self.assertIs(self.checks()["transcripts users"].ok, True)
         db = sqlite3.connect(cfg["sqlite"]["path"])
-        db.execute("UPDATE agents SET os_user = 'codex' WHERE agent_key = 'k2'"); db.commit(); db.close()
+        db.execute("UPDATE agents SET os_user = os_user || '-other' WHERE agent_key = 'k2'"); db.commit(); db.close()
         c = self.checks()["transcripts users"]
         self.assertIsNone(c.ok)
         self.assertIn("2 OS users", c.detail)
@@ -516,7 +516,7 @@ class ExposureDoctorTests(unittest.TestCase):
             b.allocate_name("k1", "J")
             b.allocate_name("k2", "J")
         db = sqlite3.connect(cfg["sqlite"]["path"])
-        db.execute("UPDATE agents SET os_user = 'codex' WHERE agent_key = 'k2'"); db.commit(); db.close()
+        db.execute("UPDATE agents SET os_user = os_user || '-other' WHERE agent_key = 'k2'"); db.commit(); db.close()
         return self.checks()
 
     EXCERPTS = "memory excerpts are readable by every OS user sharing the board role"

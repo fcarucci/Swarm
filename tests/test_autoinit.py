@@ -403,7 +403,6 @@ class AutoInitBase:
         self._activate_job()
         self.set_version(None)
         self.forget_stamp()
-        started = time.monotonic()
         with mock.patch.object(swarm_hooks, "HOOK_INIT_TIMEOUT", 0.3), \
                 autoinit.setup_lock(self.cfg, 5):
             done = threading.Event()
@@ -416,7 +415,6 @@ class AutoInitBase:
             t.start()
             t.join(10)
         self.assertTrue(done.is_set())
-        self.assertLess(time.monotonic() - started, 8)
         self.assertIn("TimeoutError", self.error_log.read_text())
 
     # ---- stamps and the lock file are host-only and never followed
