@@ -141,7 +141,8 @@ class OrphansTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="swarm-orphan-enrolled-") as td, \
              mock.patch("swarm.paths.host_dir", return_value=Path(td) / "host"), \
              mock.patch("swarm.board.autoinit.store_key", return_value="board"):
-            rec = enrolment.write_job("board", job="J", harness="codex", session_id="sid", cwd="/work")
+            rec = enrolment.write_job("board", job="J", harness="codex", session_id="sid",
+                                      cwd=str(Path(td).resolve()))
             self.assertIsNone(enrolment.find_job_owner("board", "J"))
             with mock.patch.object(orphans, "local_record", side_effect=LOCAL_RECORD):
                 self.run_pass()
