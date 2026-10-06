@@ -22,6 +22,7 @@ The API handed to register(api) is deliberately small and stable (see docs/PLUGI
     api.add_command(name, run, setup=None, help=None)
     api.extend_command(name, setup=None, before=None, after=None)
     api.add_status_lines(fn)
+    api.add_pipeline_recipe(fn)
 
 run(ctx, args) -> int | None is a new command; setup(parser) adds its arguments. extend_command
 adds arguments to an existing core command and hooks around it: before(ctx, args) -> int | None
@@ -150,6 +151,12 @@ class PluginAPI:
             raise TypeError("fn must be callable")
         self._r.status_hooks.append((self.name, fn))
 
+    def add_pipeline_recipe(self, fn: Callable) -> None:
+        """fn(ctx, board, job, artifact) -> dict | None; first matching recipe wins."""
+        if not callable(fn):
+            raise TypeError("fn must be callable")
+        self._r.pipeline_hooks.append((self.name, fn))
+
 
 class Registry:
     def __init__(self, cfg: dict | None = None, config_path: Path | None = None,
@@ -161,6 +168,7 @@ class Registry:
         self.commands: dict[str, _Command] = {}
         self.extensions: list[_Extension] = []
         self.status_hooks: list[tuple[str, Callable]] = []
+        self.pipeline_hooks: list[tuple[str, Callable]] = []
 
     # ---- loading
 
@@ -193,6 +201,7 @@ class Registry:
                 del self.commands[cmd]
             self.extensions[:] = [e for e in self.extensions if e.plugin != name]
             self.status_hooks[:] = [h for h in self.status_hooks if h[0] != name]
+            self.pipeline_hooks[:] = [h for h in self.pipeline_hooks if h[0] != name]
             return
         info.commands = sorted(c for c, v in self.commands.items() if v.plugin == name)
         info.extends = sorted({e.command for e in self.extensions if e.plugin == name})
@@ -287,6 +296,7 @@ class Registry:
             if info.name == plugin and info.error is None:
                 info.error = why[:300]
         self.status_hooks[:] = [h for h in self.status_hooks if h[0] != plugin]
+        self.pipeline_hooks[:] = [h for h in self.pipeline_hooks if h[0] != plugin]
         self.commands = {k: v for k, v in self.commands.items() if v.plugin != plugin}
         self.extensions[:] = [e for e in self.extensions if e.plugin != plugin]
 
@@ -333,6 +343,15 @@ class Registry:
                 self._warn(name, "status", exc)
         return out
 
+    def pipeline_recipe(self, board, job: str, artifact: str | None) -> dict:
+        for name, fn in self.pipeline_hooks:
+            recipe = fn(self.context(name, board), board, job, artifact)
+            if recipe is not None:
+                if not isinstance(recipe, dict):
+                    raise ValueError(f"plugin {name}: pipeline recipe must return a dict or None")
+                return recipe
+        return {}
+
     @staticmethod
     def _warn(plugin: str, what: str, exc: Exception) -> None:
         print(f"swarm: plugin {plugin}: {what} hook failed: {type(exc).__name__}: {exc}", file=sys.stderr)
@@ -360,3 +379,14 @@ def _register_of(mod) -> Callable:
     if not callable(fn):
         raise AttributeError("no register(api) function")
     return fn
+
+
+def pipeline_recipe(cfg: dict, board, job: str, artifact: str | None, config_path=None) -> dict:
+    """Load trusted plugins for a pipeline transition; recipe errors hold the transition.
+
+    No command runs here. Evidence commands and finalization instructions go in the
+    agent's brief, under its ordinary permissions.
+    """
+    from swarm.cli import _parser
+    commands = tuple(_parser()._swarm_subparsers.choices)
+    return Registry(cfg, config_path=config_path, core_commands=commands).load().pipeline_recipe(board, job, artifact)

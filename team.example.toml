@@ -14,3 +14,18 @@
 # One job can differ: `swarm activate --job J --team product_manager,build_engineer` or
 # `swarm team --job J --add build_engineer` / `--remove product_manager` / `--show`.
 optional_roles = ["product_manager"]
+
+# The coding recipe matches DONE branch@<full SHA>. Other artifacts use the generic pipeline.
+[pipeline]
+integrate = true
+merge_target = "main"
+delete_branch = true
+# Empty: gh run list checks all runs on the exact SHA; no runs/pending/red holds integration.
+# A custom judge/finalizer command can use shell-quoted {artifact}, {branch}, {sha} placeholders.
+evidence_command = ""
+repository = "" # optional OWNER/REPO for gh; otherwise inferred from the work directory
+
+# Optional overrides keyed by the owner's recorded absolute repository directory:
+# [repositories."/home/me/src/my-repo"]
+# merge_target = "main"
+# repository = "me/my-repo"

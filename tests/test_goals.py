@@ -101,7 +101,7 @@ class JudgeHookTests(GoalEnv):
         self.assertIn(f"verdict --job 'J' --as '{name}' not_met --reason \"<why it is not met>\" "
                       f"--next \"<what to change, where, and what you will re-check>\"", ctx)
         self.assertIn("REFUSED without both --reason", ctx)
-        self.assertIn("Only after you have recorded a not_met verdict may you spawn subagents", ctx)
+        self.assertIn("Judges only judge: never edit, fix, merge, push or spawn workers", ctx)
         self.assertIn("Spawning subagents: only when strictly needed", ctx)
         self.assertIn("--to", ctx)
         self.assertEqual(self.job().judge, name)
@@ -145,6 +145,7 @@ class JudgeHookTests(GoalEnv):
     def test_resumed_judge_gets_its_seat_back(self):
         self.spawn_judge()
         name = self.member("judge-1").name
+        self.cli("verdict", "--job", "J", "--as", name, "met", "checked")
         self.hook("stop", agent_id="judge-1")
         self.assertIsNone(self.job().judge)
         out = self.start("judge-1")  # resumed through SendMessage: the transcript exists

@@ -180,31 +180,17 @@ class JudgeSpawnTests(GoalEnv):
                         tool_input={"prompt": prompt}, transcript_path=self.main_transcript())
         return (out or {}).get("hookSpecificOutput", {})
 
-    def test_the_judge_spawns_only_after_a_not_met_verdict(self):
+    def test_the_judge_never_spawns_even_after_not_met(self):
         self.activate_goal()
-        path = self.projects / "sess-1" / "subagents" / "agent-judge-1.meta.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"spawnDepth": 1}))
         _, turn = self.spawn_judge()
-        self.assertIn("Only after you have recorded a not_met verdict may you spawn subagents", self.context(turn))
-        o = self.judge_spawn(f"[swarm job: J]\n{WHY}")
-        self.assertEqual(o["permissionDecision"], "deny")
-        self.assertIn("only after it has recorded a not_met verdict", o["permissionDecisionReason"])
+        self.assertIn("Judges only judge", self.context(turn))
         judge = self.member("judge-1").name
-        rc, _, _ = self.cli("verdict", "--job", "J", "--as", judge, "not_met",
-                            "--reason", "no test", "--next", "add tests/test_x.py")
-        self.assertEqual(rc, 0)
-        o = self.judge_spawn(f"[swarm job: J]\n{WHY}\nadd tests/test_x.py")
-        self.assertNotEqual(o.get("permissionDecision"), "deny", o)
-        # never another judge, and never past the caps
-        o = self.judge_spawn(f"[swarm job: J]\n[swarm role: judge]\n{WHY}")
-        self.assertEqual(o["permissionDecision"], "deny")
-        self.assertIn("can't be a judge", o["permissionDecisionReason"])
-        self.judge_spawn(f"[swarm job: J]\n{WHY}")
-        o = self.judge_spawn(f"[swarm job: J]\n{WHY}")
-        self.assertEqual(o["permissionDecision"], "deny")
-        self.assertIn("limit 2 per agent", o["permissionDecisionReason"])
-        # a met verdict closes the door again
-        self.cli("verdict", "--job", "J", "--as", judge, "met", "fixed")
-        o = self.judge_spawn(f"[swarm job: J]\n{WHY}")
-        self.assertEqual(o["permissionDecision"], "deny")
+        for verdict in (None, "not_met", "met"):
+            if verdict == "not_met":
+                self.cli("verdict", "--job", "J", "--as", judge, verdict,
+                         "--reason", "no test", "--next", "add tests")
+            elif verdict:
+                self.cli("verdict", "--job", "J", "--as", judge, verdict, "checked")
+            out = self.judge_spawn(f"[swarm job: J]\n{WHY}")
+            self.assertEqual(out["permissionDecision"], "deny")
+            self.assertIn("Judges only judge", out["permissionDecisionReason"])

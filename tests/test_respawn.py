@@ -25,6 +25,7 @@ class BriefTests(unittest.TestCase):
 class RespawnEnv(GoalEnv):
     def setUp(self):
         super().setUp()
+        self.cfg["pipeline"] = {"enabled": False}
         p = mock.patch.object(respawn, "CHECK_SECONDS", 0.0)
         p.start()
         self.addCleanup(p.stop)

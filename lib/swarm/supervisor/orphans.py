@@ -75,13 +75,13 @@ def restart_note(board, js, sup, now):
 
 
 def run(board, cfg, sup, state, *, job=None, now=None, dry_run=False, say=print,
-        start_runner=None, which=None, scope_ok=lambda: True, config_path=""):
+        start_runner=None, which=None, scope_ok=lambda: True, config_path="", skip_jobs=()):
     from swarm.supervisor import command
     from swarm.pause import resume
     now = now or board.now()
     histories = state.setdefault("orphan_restarts", {}) if not dry_run else state.get("orphan_restarts", {})
     for js in board.jobs(False):
-        if job and js.job != job:
+        if (job and js.job != job) or js.job in skip_jobs:
             continue
         rec = local_record(cfg, js)
         if rec is None or not eligible(board, cfg, js, sup, now):

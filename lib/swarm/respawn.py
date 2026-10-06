@@ -57,13 +57,16 @@ def verdict_key(js) -> str:
     return f"{js.verdict_by}|{js.verdict_at.isoformat() if js.verdict_at else ''}"
 
 
-def brief(js, job: str, spawn_tags: bool = True) -> str:
+def brief(js, job: str, spawn_tags: bool = True, informational: bool = False) -> str:
     """The text the orchestrator is shown. `spawn_tags`: name the tag lines the children's
     prompts need to join the job (Claude Code reads them; Codex doesn't need them)."""
     judge = _clip(js.verdict_by or "the judge", 200)
     reason = _clip(js.verdict_reason or "no reason recorded")
     nxt = _clip(js.verdict_next or "(the judge gave no instructions: read the board and the verdict "
                 "reason to decide what is missing)")
+    if informational:
+        return (f'[swarm] job "{job}": judge {judge} ruled not met: {reason}. '
+                f'The supervisor review pipeline starts the fix worker with: {nxt}.')
     text = (f"[swarm] job \"{job}\": judge {judge} ruled not met: {reason}. Spawn agents now with "
             f"these instructions: {nxt}, plus a new judge for the same goal; spawn more agents if "
             f"the work needs it. Don't leave the job idle.")
@@ -93,7 +96,7 @@ def _write_state(d, name: str, state: dict) -> None:
 
 
 def check(marker: Path, job: str, *, force: bool, host, open_board,
-          now: float | None = None) -> str | None:
+          now: float | None = None, informational: bool = False) -> str | None:
     """The brief for `job` if it is due, else None; a brief returned is recorded as shown.
     `force` (Stop): no throttle and no already-shown test. `open_board`: a callable giving the
     board's context manager. Raises on board or file trouble: the caller logs it."""
@@ -112,7 +115,7 @@ def check(marker: Path, job: str, *, force: bool, host, open_board,
         if idle_not_met(js):
             key = verdict_key(js)
             if force or st.get("key") != key or now - float(st.get("shown") or 0) >= REMIND_SECONDS:
-                text = brief(js, job, host.reads_prompt_tags)
+                text = brief(js, job, host.reads_prompt_tags, informational)
                 st["key"], st["shown"] = key, now
         with contextlib.suppress(OSError):   # if it can't be remembered, better said twice than never
             _write_state(d, name, st)

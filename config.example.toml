@@ -220,3 +220,15 @@ helper = "haiku"
 # "main" (the tip of main). `swarm upgrade --channel ...` and the installers write it.
 # [upgrade]
 # channel = "release"
+
+[pipeline]
+# Generic owner-only hand-off review, on the same default-on supervisor timer.
+enabled = true
+judge_host = "claude"                 # claude or codex
+judge_model = ""                      # empty uses the configured role model
+# Optional generic external evidence command, carried in the judge/finalizer brief.
+evidence_wait_command = ""
+# Explicit activate --evidence-cmd/--finalize overrides recipes and these defaults.
+finalize = ""                         # empty: outcome + learnings + completed
+finalize_enabled = true
+# Coding CI/merge settings live in the engineering-team plugin's team config.

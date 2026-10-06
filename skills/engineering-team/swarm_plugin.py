@@ -12,6 +12,9 @@ which wins over the built-in default.
 from __future__ import annotations
 
 import os
+import re
+import shlex
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -180,8 +183,124 @@ def status_lines(ctx, job: str) -> list[str]:
     return [f"team       {', '.join((*MANDATORY, *optional))}  ({source})"]
 
 
+def coding_artifact(artifact: str | None) -> tuple[str, str] | None:
+    """Engineering artifacts are branch@full-sha; other references are generic."""
+    if not isinstance(artifact, str):
+        return None
+    match = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9_./-]*)@([0-9a-fA-F]{40})", artifact)
+    if not match:
+        return None
+    branch, sha = match.groups()
+    if any(part.startswith(".") or part.endswith(".lock") or not part for part in branch.split("/")) or ".." in branch or branch.endswith("."):
+        return None
+    return branch, sha.lower()
+
+
+def coding_settings(ctx, workdir: str | None = None) -> dict:
+    """Team defaults, optional repository override by absolute work directory."""
+    path = team_file(ctx.config_dir)
+    data = {}
+    if path.is_file():
+        with path.open("rb") as stream:
+            data = tomllib.load(stream)
+    section = data.get("pipeline", {})
+    if not isinstance(section, dict):
+        raise TeamError("team [pipeline] must be a table")
+    config = {"integrate": True, "merge_target": "main", "delete_branch": True,
+              "evidence_command": "", "repository": "", **section}
+    repos = data.get("repositories", {})
+    if workdir and isinstance(repos, dict):
+        override = repos.get(os.path.realpath(workdir), {})
+        if not isinstance(override, dict):
+            raise TeamError("team repository pipeline settings must be a table")
+        config.update(override)
+    for key in ("integrate", "delete_branch"):
+        if not isinstance(config[key], bool):
+            raise TeamError(f"team pipeline {key} must be true or false")
+    if not coding_artifact(str(config["merge_target"]) + "@" + "0" * 40):
+        raise TeamError("team pipeline merge_target must be a branch name")
+    for key in ("evidence_command", "repository"):
+        if not isinstance(config[key], str):
+            raise TeamError(f"team pipeline {key} must be text")
+    return config
+
+
+def github_repository(cwd: str | None) -> str:
+    """Find GitHub even when the fetch remote is Gitea and GitHub is a push URL."""
+    if not cwd:
+        return ""
+    result = subprocess.run(["git", "config", "--get-regexp", r"^remote\..*\.(url|pushurl)$"],
+                            cwd=cwd, capture_output=True, text=True, timeout=5)
+    repositories = set()
+    if result.returncode == 0:
+        for line in result.stdout.splitlines():
+            _, _, url = line.partition(" ")
+            match = re.fullmatch(r"(?:git@github\.com:|https://github\.com/|ssh://git@github\.com/)([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?", url.strip())
+            if match:
+                repositories.add(match.group(1))
+    # Several distinct repos require the explicit team/repository setting.
+    return next(iter(repositories)) if len(repositories) == 1 else ""
+
+
+def coding_recipe(ctx, board, job: str, artifact: str | None) -> dict | None:
+    parsed = coding_artifact(artifact)
+    if parsed is None:
+        return None
+    branch, sha = parsed
+    # The activation record is host-private; a board/transcript cwd never selects config.
+    from swarm.supervisor.orphans import local_record
+    js = board.job_status(job)
+    record = local_record(ctx.cfg, js) if js else None
+    workdir = getattr(record, "workdir", None) or getattr(record, "cwd", None)
+    config = coding_settings(ctx, workdir)
+    repository = config["repository"] or github_repository(workdir)
+    repo_args = ["--repo", repository] if repository else []
+    argv = ["gh", "run", "list", "--commit", sha, "--limit", "100", *repo_args,
+            "--json", "headSha,status,conclusion"]
+    query = ('if length > 0 and all(.[]; .headSha == "' + sha + '" and '
+             '.status == "completed" and .conclusion == "success") then "green" else "pending/red" end')
+    default_command = '[ "$(' + shlex.join([*argv, "--jq", query]) + ')" = green ]'
+    template = config["evidence_command"]
+    evidence = template or default_command
+    for key, value in (("artifact", artifact), ("branch", branch), ("sha", sha)):
+        evidence = evidence.replace("{" + key + "}", shlex.quote(value))
+
+    def evidence_check(cwd: str) -> bool:
+        # A custom wait/check is handled by the judge and finalizer under their permissions.
+        # The automatic launch gate always independently checks GitHub's exact SHA.
+        import json
+        result = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=30)
+        if result.returncode:
+            return False
+        runs = json.loads(result.stdout)
+        return bool(isinstance(runs, list) and runs and all(
+            r.get("headSha") == sha and r.get("status") == "completed" and r.get("conclusion") == "success"
+            for r in runs))
+
+    finalize = (
+        f"You are the INTEGRATOR for {artifact}, an executing role separate from the judge. "
+        f"Recheck evidence on exact SHA {sha} before changing refs. Fetch every configured remote. "
+        f"Verify branch {branch} still names {sha} on every remote that has it; a moved branch needs a new "
+        "DONE and judge verdict, so stop integration and post the updated handoff. "
+        f"In an isolated worktree on disk, fast-forward or ordinarily merge exact {sha} into "
+        f"{config['merge_target']}; incorporate the latest target from all remotes without rebasing, "
+        "squashing or force pushes. Verify the merge result with the repository's required targeted checks "
+        "and remote CI before completing. Push the target to every configured remote and push URL. "
+        "If conflicts require design or code changes, abort the merge and post FINALIZE_BLOCKED <artifact> <next steps> "
+        "for the supervisor to hand back to a worker. "
+        + (f"After every target push succeeds, delete {branch} from every configured remote and locally; "
+           if config["delete_branch"] else "Keep the source branch; ")
+        + f"post INTEGRATED {artifact} only after all required operations succeed. "
+        "Retain distilled learnings with swarm learn."
+    )
+    return {"evidence_command": evidence, "evidence_check": evidence_check,
+            "finalize": finalize, "finalizer_role": "integrator", "enabled": config["integrate"],
+            "artifact_group": branch}
+
+
 def register(api) -> None:
     api.add_command("team", run_team, setup=setup_team,
                     help="show or change a job's team composition (engineering-team plugin)")
     api.extend_command("activate", setup=setup_activate, before=before_activate, after=after_activate)
     api.add_status_lines(status_lines)
+    api.add_pipeline_recipe(coding_recipe)

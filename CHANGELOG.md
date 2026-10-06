@@ -6,7 +6,10 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 ## [Unreleased]
 
+Planned release: 0.2.0.
+
 ### Added
+- Automatic artifact review pipeline: worker hand-offs start judges, `not_met` starts bounded fix rounds, and `met` starts separate finalizers without an orchestrator session. Artifact verdicts remain independent; judges must record a verdict before stopping and cannot execute fixes. Engineering-team supplies exact-SHA CI and an ordinary-merge integrator recipe.
 - Automatic recovery of crashed agents and orphaned coordinators through the existing supervisor, with recorded host/workdir, continuation briefs, human-wait and pause exclusions, owner checks, backoff, rolling 24-hour caps and `GAVE UP` notices. Recovery defaults on; `swarm init`/upgrade installs the user timer (every 5 minutes). Explicit `enabled = false` remains respected.
 - Role addressing: `swarm post --to @EL|@PM|@QA|@judge|@<role>` goes to whoever holds that seat on the job now. An unknown recipient, a seat nobody holds, or an author who is not an agent of `--job` is refused with an error and nothing is stored (it used to be stored for nobody to read). `post` also takes `--key` instead of `--as`. See [Addressing a role](docs/REFERENCE.md#addressing-a-role).
 - `swarm wait` takes `--until` (a duration, a time of day such as `17:30`, or a date and time) as well as `--for`. A bounded wait that has not ended now protects a job from the stall limits (including `goal_stall_hours`) as well as the orphan rule, and its end is shown in `status` and `watch`; an ended wait counts as progress. A board read by the orchestrating session counts as contact for liveness.

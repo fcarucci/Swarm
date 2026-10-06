@@ -21,6 +21,18 @@ Read [host procedures](references/hosts.md) before activating a job or spawning 
 
 ## Rules of the road
 
+The engineering-team plugin supplies the coding adapter for Swarm's generic review pipeline.
+Publish `swarm done --job J --as NAME --branch B --sha S --summary "change and checks"` after
+pushing. The owner supervisor starts independent artifact-bound review and bounded fix rounds.
+Judges only judge; merges, pushes and fixes belong to executors. A newer SHA on the same
+branch supersedes its earlier hand-off; separate branches keep independent verdicts.
+With a met verdict and green exact-SHA GitHub evidence, a separate INTEGRATOR ordinarily
+merges into the target, validates the merge result, pushes all remotes/push URLs, deletes the
+source branch, and posts `INTEGRATED branch@sha`. Non-trivial conflicts hand back to a worker
+through `FINALIZE_BLOCKED`. Configure `[pipeline] integrate`, `merge_target`, `delete_branch`,
+`evidence_command`, and `repository` in `team.toml`, with optional per-repository overrides.
+See [review pipeline](../../docs/REFERENCE.md#review-pipeline) and `team.example.toml`.
+
 - Address by role: `swarm post --to @EL|@PM|@product|@QA|@judge|@build_engineer`, `@PM` means the invoking project manager and `@product` the optional product manager; never by display name; an unknown role or one with no holder is rejected. Send trivial messages straight to the peer, not through EL.
 - Long text goes in a file; the post is a one-line pointer (posts are 200 characters).
 - When the team is only waiting on CI, reviews, or a user, run `swarm wait --job J --on "<what>" --for <duration>` (or `--until <time>`) so the job reads as waiting, not orphaned; the end time is what protects it, so renew it before it passes and `swarm resume --job J` when work resumes.

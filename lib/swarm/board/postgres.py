@@ -1009,6 +1009,10 @@ class PostgresBoard(Board):
                                          (job,)).fetchone()
                 if not row or not guard.allows(*row):
                     return False
+                if guard.settled and row[0] and row[2] is None:
+                    from swarm.review import auto_close_pending
+                    if auto_close_pending(self, job):
+                        return False
                 return self.close_job(job, status, outcome, forced, closed_by)
         self._leave_job(job)
         return self._conn.execute(
@@ -1026,6 +1030,10 @@ class PostgresBoard(Board):
         # then finds status no longer 'active' and changes nothing. The derived statuses come
         # from the agent_status view, so the thresholds are the ones `status` shows.
         with self._conn.transaction():
+            row = self._conn.execute("SELECT goal FROM jobs WHERE job = %s FOR UPDATE", (job,)).fetchone()
+            from swarm.review import auto_close_pending
+            if row and row[0] and auto_close_pending(self, job):
+                return None
             closed = self._conn.execute(
                 "UPDATE jobs j SET status = 'completed', outcome = %(outcome)s, "
                 "finished_at = now(), completion_forced = false, waiting_on = NULL, "
@@ -1174,15 +1182,17 @@ class PostgresBoard(Board):
         return job if same else None
 
     def set_job_goal(self, job: str, goal: str) -> bool:
-        conn = self._conn
-        row = conn.execute("SELECT goal FROM jobs WHERE job = %s AND status = 'active'", (job,)).fetchone()
-        if row is None:
-            return False
-        if row[0] != goal:
-            conn.execute("UPDATE jobs SET goal = %s, verdict = NULL, verdict_reason = NULL, "
-                         "verdict_next = NULL, verdict_by = NULL, verdict_at = NULL WHERE job = %s",
-                         (goal, job))
-        return True
+        from swarm.review import clear_verdict_data
+        with self._conn.transaction():
+            row = self._conn.execute("SELECT goal, plugin_data FROM jobs WHERE job = %s "
+                                     "AND status = 'active' FOR UPDATE", (job,)).fetchone()
+            if row is None:
+                return False
+            if row[0] != goal:
+                self._conn.execute("UPDATE jobs SET goal = %s, verdict = NULL, verdict_reason = NULL, "
+                    "verdict_next = NULL, verdict_by = NULL, verdict_at = NULL, plugin_data = %s WHERE job = %s",
+                    (goal, clear_verdict_data(row[1]), job))
+            return True
 
     def claim_verifier(self, agent_key: str, job: str) -> bool:
         return self._conn.execute(
@@ -1214,15 +1224,23 @@ class PostgresBoard(Board):
             return SpawnGrant(True, mine + 1, total + 1)
 
     def record_verdict(self, job: str, judge_name: str, verdict: str, reason: str,
-                       next_steps: str | None = None) -> bool:
+                       next_steps: str | None = None, artifact: str | None = None) -> bool:
         check_name(judge_name, "judge name")
         if verdict not in VERDICTS:
             raise BoardError(f"unknown verdict {verdict!r}")
-        return self._conn.execute(
-            "UPDATE jobs SET verdict = %s, verdict_reason = %s, verdict_next = %s, verdict_by = %s, verdict_at = now() "
-            "WHERE job = %s AND EXISTS (SELECT 1 FROM agents a WHERE a.job = %s AND a.name = %s "
-            "AND a.judge AND a.left_at IS NULL) RETURNING 1",
-            (verdict, reason, next_steps, judge_name, job, job, judge_name)).fetchone() is not None
+        from swarm.review import verdict_data
+        with self._conn.transaction():
+            row = self._conn.execute("SELECT plugin_data FROM jobs WHERE job = %s AND EXISTS "
+                "(SELECT 1 FROM agents WHERE job = %s AND name = %s AND judge AND left_at IS NULL) "
+                "FOR UPDATE", (job, job, judge_name)).fetchone()
+            if row is None:
+                return False
+            at = self.now()
+            self._conn.execute("UPDATE jobs SET verdict = %s, verdict_reason = %s, verdict_next = %s, "
+                "verdict_by = %s, verdict_at = %s, plugin_data = %s WHERE job = %s",
+                (verdict, reason, next_steps, judge_name, at,
+                 verdict_data(row[0], artifact, verdict, reason, next_steps, judge_name, at), job))
+            return True
 
     def active_agent_name(self, agent_key: str) -> str | None:
         row = self._conn.execute("SELECT name FROM agents WHERE agent_key = %s AND left_at IS NULL",
@@ -1743,13 +1761,22 @@ class PostgresBoard(Board):
     def job_status(self, job: str) -> JobStatus | None:
         row = self._conn.execute(f"SELECT {_JOB_STATUS_COLS} FROM job_status WHERE job = %s",
                                  (job,)).fetchone()
-        return JobStatus(*row) if row else None
+        if not row:
+            return None
+        from dataclasses import replace
+        from swarm.review import pipeline_status
+        raw = self._conn.execute("SELECT plugin_data FROM jobs WHERE job = %s", (job,)).fetchone()
+        return replace(JobStatus(*row), **pipeline_status(raw[0] if raw else None))
 
     def jobs(self, include_closed: bool = False) -> list[JobStatus]:
         where = "" if include_closed else "WHERE status = 'active' "
-        return self._fetch(
+        rows = self._fetch(
             JobStatus, f"SELECT {_JOB_STATUS_COLS} FROM job_status {where}"
             "ORDER BY (status = 'active') DESC, COALESCE(activated_at, created_at), job")
+        from dataclasses import replace
+        from swarm.review import pipeline_status
+        data = dict(self._conn.execute("SELECT job, plugin_data FROM jobs").fetchall())
+        return [replace(row, **pipeline_status(data.get(row.job))) for row in rows]
 
     def session_jobs(self, session: str) -> list[JobStatus]:
         # The rollup subqueries group by job: find session jobs first so their job filters
