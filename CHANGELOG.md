@@ -6,6 +6,10 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 ## [Unreleased]
 
+### Fixed
+- Codex agents stay active between turns and complete only at session end or confirmed runner exit; quiet time no longer reports a running session as completed.
+- Orchestrator reminders share verdict/session state across Stop and tool hooks, stay silent while agents work or have recent activity, and repeat only after the configured orphan interval.
+
 ## [0.1.17] - 2026-10-05
 
 ### Added

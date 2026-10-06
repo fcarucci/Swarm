@@ -246,7 +246,7 @@ class CodexCaptureTests(Env):
                    mock.patch.object(board_cls, "save_transcript", side_effect=forbid)):
             stack.enter_context(p_)
 
-    def test_non_owner_sweep_completes_agent_but_never_touches_its_row(self):
+    def test_non_owner_sweep_keeps_agent_active_and_never_touches_its_row(self):
         from swarm import cli as swarm
         child = self._owned_codex_agent_with_stop_capture()
         before = self._row(child)
@@ -255,7 +255,7 @@ class CodexCaptureTests(Env):
             self._as_claude_user(stack)
             with self.board() as b:
                 swarm.sweep_jobs(b, self.cfg)
-        self.assertEqual(self.agent(child, job="fixture").status, "completed")
+        self.assertIsNone(self.agent(child, job="fixture").ended_at)
         after = self._row(child)
         self.assertEqual((after.final, after.captured_at), (False, before.captured_at))
 
@@ -264,7 +264,7 @@ class CodexCaptureTests(Env):
         child = self._owned_codex_agent_with_stop_capture()
         self.h.backdate_agent(child, turn_ended_at=600)
         with mock.patch("getpass.getuser", return_value="claude"), self.board() as b:
-            b.finish_quiet_agents(60)                                 # completed by the claude user's sweep
+            b.agent_stopped(child)                                  # process-exit bookkeeping
         with mock.patch("getpass.getuser", return_value="codex"), self.board() as b:
             swarm.sweep_jobs(b, self.cfg)                             # the owner's next sweep
         self.assertTrue(self._row(child).final)

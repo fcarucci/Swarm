@@ -6,7 +6,7 @@ judge's own SubagentStop hook can't help (its output goes to the judge, not the 
 runs in the hooks that fire in the main session, the ones with no agent_id:
 
 - PreToolUse / PostToolUse (event "turn" / "done"): additionalContext, at most once per verdict
-  (and again after REMIND_SECONDS while the job still sits idle); checked at most every
+  (and again after [supervise] orphan_minutes while the job still sits idle); checked at most every
   CHECK_SECONDS, since it reads the board;
 - Stop (event "session-stop"): `decision: block` with the brief as the reason, when the
   orchestrator is about to end its turn with the job idle. Once per continuation: a Stop that is
@@ -15,7 +15,8 @@ runs in the hooks that fire in the main session, the ones with no agent_id:
 
 The condition, from the board alone (Board.job_status): the job is open with a goal, not waiting
 (`swarm wait`), the judge's latest verdict is not_met, and no agent is started, running or idle
-(dead, left and completed ones don't count). A met verdict, or any agent still at work, gives nothing.
+(dead, left and completed ones don't count). A met verdict, any live agent, or non-judge activity after the verdict within the orphan
+window gives nothing. The window also bounds repeat reminders.
 
 State is one small file beside the job's marker (state_path), removed with it.
 """
@@ -30,12 +31,12 @@ from pathlib import Path
 from swarm.textsafe import term_safe
 
 CHECK_SECONDS = 15.0     # the tool-call hooks look at the board at most this often per job
-REMIND_SECONDS = 300.0   # ...and say it again after this long if the job is still idle
+REMIND_SECONDS = 300.0   # fallback if [supervise] orphan_minutes is absent
 FIELD_MAX = 3000         # characters of the judge's reason / instructions shown
 
 
 def state_path(marker: Path) -> Path:
-    """Beside a job's marker: {"checked": epoch, "key": which verdict was shown, "shown": epoch}
+    """Beside a job's marker: session_id, checked epoch, verdict key, shown epoch
     (swarm.cli.respawn_state_path, which also removes it with the marker)."""
     from swarm.cli import respawn_state_path
     return respawn_state_path(marker)
@@ -93,9 +94,9 @@ def _write_state(d, name: str, state: dict) -> None:
 
 
 def check(marker: Path, job: str, *, force: bool, host, open_board,
-          now: float | None = None) -> str | None:
+          now: float | None = None, cfg: dict | None = None, session_id: str | None = None) -> str | None:
     """The brief for `job` if it is due, else None; a brief returned is recorded as shown.
-    `force` (Stop): no throttle and no already-shown test. `open_board`: a callable giving the
+    `force` (Stop): bypass the check throttle, never the already-shown test. `open_board`: a callable giving the
     board's context manager. Raises on board or file trouble: the caller logs it."""
     from swarm import safefs
     now = time.time() if now is None else now
@@ -103,15 +104,33 @@ def check(marker: Path, job: str, *, force: bool, host, open_board,
     try:
         name = state_path(marker).name
         st = _read_state(d, name)
+        if st.get("session_id") != session_id:
+            st = {"session_id": session_id}
+        # Keep the existing five-minute default when supervise has no orphan setting.
+        interval = float(((cfg or {}).get("supervise") or {}).get("orphan_minutes", REMIND_SECONDS / 60)) * 60
         if not force and now - float(st.get("checked") or 0) < CHECK_SECONDS:
             return None
+        activity = None
         with open_board() as board:
             js = board.job_status(job)
+            if idle_not_met(js) and js.verdict_at:
+                agents = board.agents(job)
+                judges = {a.name for a in agents if a.role == "judge"} | {js.verdict_by}
+                times = [t for a in agents if a.name not in judges
+                         for t in (a.joined_at, a.last_contact_at, a.last_post_at) if t and t > js.verdict_at]
+                times += [m.created_at for m in board.messages_after(0, job)
+                          if m.agent_name not in judges and m.created_at > js.verdict_at]
+                activity = max(times, default=None)
         st["checked"] = now
         text = None
         if idle_not_met(js):
             key = verdict_key(js)
-            if force or st.get("key") != key or now - float(st.get("shown") or 0) >= REMIND_SECONDS:
+            recent_activity = activity is not None and (interval <= 0 or now - activity.timestamp() < interval)
+            already_shown = st.get("key") == key
+            due_again = interval > 0 and now - float(st.get("shown") or 0) >= interval
+            # Stop must observe the same suppression as tool hooks. A later worker contact
+            # starts a new idle window even if that worker has already left the board.
+            if not recent_activity and (not already_shown or due_again):
                 text = brief(js, job, host.reads_prompt_tags)
                 st["key"], st["shown"] = key, now
         with contextlib.suppress(OSError):   # if it can't be remembered, better said twice than never

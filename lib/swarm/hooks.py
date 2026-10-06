@@ -1307,9 +1307,9 @@ def _on_event(board, event: str, agent_id: str, sid: str | None, bound: dict, un
             board.set_agent_runtime(agent_id, None, payload.get("model") or host.agent_model(payload, agent_id))
         except Exception as exc:   # never at the cost of the stop itself
             _log_error("stop model", agent_id, exc)
-        if host.stop_is_final:
+        if host.completes_on(event):
             board.agent_stopped(agent_id)
-        else:   # Codex: this turn ended; the agent completes once no new turn comes (sweep_jobs)
+        else:   # Codex: this turn ended; only session/process exit completes the agent
             board.agent_turn_ended(agent_id)
         deadline = time.monotonic() + TRANSCRIPT_BUDGET_SECONDS
         _capture_stopped(board, cfg, agent_id, sid, payload, deadline)
@@ -1535,7 +1535,8 @@ def _orchestrator_respawn(event: str, cfg: dict, sid: str | None, payload: dict)
             if m.get("session_id") != sid or not m.get("goal") or "resume" in m:
                 continue
             text = respawn.check(m["_path"], m["job"], force=stop, host=current_host(),
-                                 open_board=lambda: open_board(cfg, init_timeout=HOOK_INIT_TIMEOUT))
+                                 open_board=lambda: open_board(cfg, init_timeout=HOOK_INIT_TIMEOUT),
+                                 cfg=cfg, session_id=sid)
             if not text:
                 continue
             if stop:
@@ -1544,6 +1545,37 @@ def _orchestrator_respawn(event: str, cfg: dict, sid: str | None, payload: dict)
                 _out("PreToolUse" if event == "turn" else "PostToolUse", text)
     except Exception as exc:
         _log_error(event, "main", exc)
+
+
+def _codex_session_end(cfg: dict, sid: str | None, agent_id: str | None, payload: dict) -> None:
+    """Complete only this user's enrolled Codex threads belonging to the ended session.
+    A child SessionEnd completes that child alone; the root's ends its entire session.
+    No marker is required: the session may outlive its job marker.
+    """
+    if not sid:
+        return
+    try:
+        from swarm import enrolment
+        from swarm.board import open_board
+        from swarm.board.autoinit import store_key
+        key = store_key(cfg)
+        deadline = time.monotonic() + TRANSCRIPT_BUDGET_SECONDS
+        with open_board(cfg, init_timeout=HOOK_INIT_TIMEOUT) as board:
+            for js in board.jobs(include_closed=True):
+                for a in board.agents(js.job, include_departed=False):
+                    if agent_id and a.agent_key != agent_id:
+                        continue
+                    rec = enrolment.find(key, a.agent_key)
+                    if not (rec and rec.job == js.job and rec.harness == "codex" and rec.session_id == sid):
+                        continue
+                    board.agent_stopped(a.agent_key)
+                    # The root's payload names the root rollout, not each child's.
+                    path = current_host().find_agent_transcript(None, a.agent_key)
+                    _capture_stopped(board, cfg, a.agent_key, sid,
+                                     {**payload, "agent_transcript_path": str(path) if path else None}, deadline)
+            _sweep(board, cfg, "session-end", agent_id or sid, payload, deadline)
+    except Exception as exc:
+        _log_error("session-end", agent_id or sid, exc)
 
 
 def run_hook(event: str, cfg: dict, host: str | None = None) -> int:
@@ -1570,7 +1602,7 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
         _CURRENT["host"] = hosts.get(hosts.detect_hook_host(host_flag, payload, os.environ))
     except KeyError:   # a host this version has no adapter for: do nothing
         return 0
-    if event in ('start', 'stop', 'session-stop') and os.environ.get('SWARM_HOOK_FASTPATH'):
+    if event in ('start', 'stop', 'session-stop', 'session-end') and os.environ.get('SWARM_HOOK_FASTPATH'):
         from swarm.fastpath import invalidate
         invalidate(payload)
     if event in ('turn', 'done') and os.environ.get('SWARM_HOOK_FASTPATH'):
@@ -1585,6 +1617,9 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
         agent_id = resume["resume"].get("agent_key") or sid
     elif not agent_id and _replacement_token():
         return 0   # a session started by (or inside) a replacement that isn't it: never an orchestrator
+    if event == "session-end" and current_host().completes_on(event):
+        _codex_session_end(cfg, sid, agent_id if resume is None and agent_id != sid else None, payload)
+        return 0
     if event == "session-stop" and (agent_id or resume is not None):
         return 0   # the end of a subagent's (or a replacement's) turn: SubagentStop is theirs
     lease = _CURRENT.get('lease')

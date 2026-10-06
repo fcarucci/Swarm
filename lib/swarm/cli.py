@@ -328,8 +328,7 @@ def sweep_jobs(board, cfg: dict, deadline: float | None = None) -> list:
     on SubagentStart and SubagentStop (never on the per-tool-call ones). A no-op when disabled.
     With [transcripts] on, the jobs it closed get their final transcripts (bounded by
     `deadline`, a time.monotonic() value; failures are logged, never raised). First, whatever
-    auto-close says: Codex agents quiet since their last turn for [codex] stop_quiet_minutes are
-    completed (bookkeeping, any user's sweep), and this machine+user's ended Codex agents get
+    auto-close says: this machine+user's ended Codex agents get
     their final transcripts (only the owner can read them). Then this machine+user's ended Claude
     agents missing a final transcript get it (swarm.supervisor.lost: pending finals), and, with
     [supervise] enabled, this machine+user's stuck agents are closed (swarm.supervisor.stuck).
@@ -338,13 +337,8 @@ def sweep_jobs(board, cfg: dict, deadline: float | None = None) -> list:
     if deadline is None:
         from swarm import transcripts as _tr
         deadline = time.monotonic() + _tr.SWEEP_SECONDS
-    # Agent bookkeeping, not job closing: it runs with auto-close off too, so status/watch stop
-    # showing a finished Codex agent as working and its owner can finalize its transcript.
-    try:
-        board.finish_quiet_agents(codex_quiet_seconds(cfg))  # any user's sweep may do it
-    except Exception as exc:                                 # never fails status/join/activate
-        from swarm import transcripts as _t
-        _t.log(f"sweep: finishing quiet Codex agents failed: {type(exc).__name__}")
+    # A Codex turn ending (or staying quiet) does not prove that its process exited.
+    # Completion comes from SessionEnd or the supervisor runner's exit bookkeeping.
     try:
         from swarm import transcripts
         transcripts.finalize_owned(board, cfg, deadline)     # only this machine+user's own agents
@@ -2670,7 +2664,7 @@ def _parser() -> argparse.ArgumentParser:
     mr = mems.add_parser("refs", help="recorded memory references (provenance)")
     mr.add_argument("--job"); mr.add_argument("--agent", help="agent name")
     mr.add_argument("--check", action="store_true", help="ask Hindsight whether each memory still exists")
-    hk = sub.add_parser("hook"); hk.add_argument("--host", choices=["claude", "codex"]); hk.add_argument("event", choices=["start", "turn", "done", "stop", "session-start", "session-stop"])
+    hk = sub.add_parser("hook"); hk.add_argument("--host", choices=["claude", "codex"]); hk.add_argument("event", choices=["start", "turn", "done", "stop", "session-start", "session-stop", "session-end"])
     sub.metavar = "{" + ",".join(k for k in sub.choices if k != "update") + "}"   # hide the alias
     return p
 

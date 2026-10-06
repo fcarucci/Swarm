@@ -123,6 +123,23 @@ class WinHookTests(Base):
         self.assertEqual(self.run_hook("--host", "claude", "turn")[0], 0)
         self.assertEqual(self.log.read_text().split(), ["-B", "-m", "swarm.cli", "hook", "--host", "claude", "turn"])
 
+    def test_codex_session_end_runs_without_a_marker(self):
+        fake_python(self.py, self.log)
+        with mock.patch.object(winhook.subprocess, "run", return_value=mock.Mock(returncode=0)) as run:
+            self.assertEqual(self.run_hook("--host", "codex", "session-end"), (0, ""))
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0][-3:], ["--host", "codex", "session-end"])
+
+    @unittest.skipIf(os.name == "nt", "POSIX shell entry")
+    def test_posix_codex_session_end_runs_without_a_marker(self):
+        import subprocess
+        fake_python(self.venv / "bin/python", self.log)
+        out = subprocess.run([str(ROOT / "bin/swarm-hook"), "--host", "codex", "session-end"],
+                             input="{}", text=True, capture_output=True, timeout=10)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(self.log.read_text().splitlines()[-1].split(),
+                         ["-B", "-m", "swarm.cli", "hook", "--host", "codex", "session-end"])
+
     def test_marker_dir_comes_from_the_config(self):
         cfg = self.tmp / "c.toml"
         cfg.write_text('[hook]\nmarker_dir = "~/m"\n')

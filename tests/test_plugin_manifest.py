@@ -61,8 +61,9 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual((c["name"], c["version"]), ("swarm", self.load(".claude-plugin/plugin.json")["version"]))
         self.assertEqual(c["hooks"], "./hooks/codex-hooks.json")
         hooks = self.load("hooks/codex-hooks.json")["hooks"]
-        self.assertEqual(set(hooks), set(HOOK_EVENTS))
-        for event, (arg, timeout, matcher) in HOOK_EVENTS.items():
+        events = {**HOOK_EVENTS, "SessionEnd": ("session-end", 10, None)}
+        self.assertEqual(set(hooks), set(events))
+        for event, (arg, timeout, matcher) in events.items():
             (group,) = hooks[event]
             self.assertEqual(group.get("matcher"), matcher)
             (h,) = group["hooks"]

@@ -98,8 +98,8 @@ goal_stall_hours = 0
 
 [codex]
 # Codex fires SubagentStop after every turn of a child (it can be sent more work). The swarm
-# counts a Codex agent as completed once no new turn came for this many minutes; a follow-up
-# task restarts the wait. status, watch and auto-close lag by this much for Codex agents.
+# completes agents only at SessionEnd or confirmed runner exit, never after a quiet turn.
+# Deprecated compatibility setting; ignored by the completion sweep.
 stop_quiet_minutes = 3
 # The swarm grants the Codex sandbox only the spool and marker dirs, never network access (posts
 # spool instead). Opt-ins, both off by default (docs/REFERENCE.md#codex-setup):

@@ -2,7 +2,7 @@
 # Hook entry for Claude Code and Codex: `swarm-hook [--host H] start|turn|done|stop|session-start`
 # (hook JSON on stdin). Never fails the agent and never builds anything: session-start only
 # starts a detached `swarm bootstrap` when this plugin version hasn't been set up yet; the
-# others exit before Python unless a swarm job marker exists.
+# others exit before Python unless a swarm job marker exists (Codex SessionEnd always runs).
 #
 # Files: only the host-only dir ~/.local/share/swarm/host (0700, outside every sandbox writable
 # root) is written or read here: stamps, the bootstrap log, the hooks' stderr, pending notices.
@@ -143,7 +143,7 @@ fi
 MD="${MD:-$HOME/.local/state/swarm/active}"
 ACTIVE=""
 for MARKER in "$MD"/*.json; do [ -f "$MARKER" ] && { ACTIVE=1; break; }; done
-[ -n "$ACTIVE" ] || exit 0
+[ -n "$ACTIVE" ] || { [ "$H" = codex ] && [ "${1:-}" = session-end ]; } || exit 0
 # Never build the venv from a hook (slow, networked): session-start's bootstrap does that.
 [ -x "$V/bin/python" ] || { cat >/dev/null; exit 0; }
 LOG=/dev/null
