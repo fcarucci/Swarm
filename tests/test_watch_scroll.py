@@ -223,7 +223,7 @@ class WatchTablesScrollTests(Env):
         self.frame()
         lines = self.frame("l")
         self.assertTrue(lines[0].startswith("swarm watch"))
-        for heading in ("JOBS", "AGENTS · J"):
+        for heading in ("JOBS", "AGENTS · J [active]"):
             self.assertIn(heading, lines)
         self.assertTrue(any(ln.startswith("MESSAGES") for ln in lines))
         self.assertEqual(lines[-1].count(":"), 3)  # the message prefix (time, author) never scrolls
