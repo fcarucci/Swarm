@@ -1173,6 +1173,14 @@ class MemoryBoard(Board):
             rows.sort(key=lambda r: (r.status != "active", r.activated_at or r.created_at, r.job))
             return rows
 
+    def session_jobs(self, session: str) -> list[JobStatus]:
+        s = self._s()
+        with s.lock:
+            now = self.now()
+            rows = [self._job_status(j, now) for j in s.jobs.values() if j["session_id"] == session]
+            rows.sort(key=lambda r: (r.status != "active", r.activated_at or r.created_at, r.job))
+            return rows
+
     # ---- transcripts ---------------------------------------------------------------------
     # Rows live in store.transcripts; a row's "body" is read and written through
     # store.transcript_body / put_transcript_body / drop_transcript_body, so the file backend

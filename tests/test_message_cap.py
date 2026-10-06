@@ -187,7 +187,7 @@ class PureTests(unittest.TestCase):
     def test_check_message_cap(self):
         self.assertEqual(check_message_cap(" 500 "), 500)
         self.assertEqual(check_message_cap(500.0), 500)
-        self.assertEqual(SCHEMA_VERSION, 17)
+        self.assertEqual(SCHEMA_VERSION, 18)
 
 
 class CliTests(Env):
@@ -328,7 +328,7 @@ class SqliteUpgrade(unittest.TestCase):
         db.execute(f"PRAGMA user_version = {version}")
         db.close()
 
-    def test_schema_15_to_17_keeps_the_cap_and_adds_plugin_data(self):
+    def test_schema_15_to_18_keeps_the_cap_and_adds_plugin_data(self):
         self.h.reset()
         with self.h.board() as b:
             b.ensure_job("j")
@@ -338,7 +338,7 @@ class SqliteUpgrade(unittest.TestCase):
             c.execute("ALTER TABLE jobs DROP COLUMN plugin_data")
             c.execute("PRAGMA user_version = 15")
         setup_board(self.h.cfg, SMALL_POOL)
-        self.assertEqual(self.h.sqlite_board.SqliteBoard.schema_version(self.h.cfg), 17)
+        self.assertEqual(self.h.sqlite_board.SqliteBoard.schema_version(self.h.cfg), 18)
         with self.h.board() as b:
             self.assertEqual(b.message_cap(), 777)
             self.assertEqual([m.message for m in b.recent_messages(10, "j")], ["before schema 16"])
@@ -415,7 +415,7 @@ class PostgresUpgrade(unittest.TestCase):
         c.execute("INSERT INTO jobs (job) VALUES ('j')")
         c.execute("INSERT INTO messages (job, agent_name, message) VALUES ('j', 'A', 'old one'), ('j', 'A', 'old two')")
 
-    def test_schema_15_to_17_keeps_the_cap_and_adds_plugin_data(self):
+    def test_schema_15_to_18_keeps_the_cap_and_adds_plugin_data(self):
         with self.h.board() as b:
             b.ensure_job("j")
             b.set_message_cap(777)
@@ -424,7 +424,7 @@ class PostgresUpgrade(unittest.TestCase):
         c.execute("ALTER TABLE jobs DROP COLUMN plugin_data")
         c.execute("UPDATE board_meta SET value = '15' WHERE key = 'schema_version'")
         setup_board(self.h.cfg, SMALL_POOL)
-        self.assertEqual(c.execute("SELECT value FROM board_meta WHERE key = 'schema_version'").fetchone()[0], "17")
+        self.assertEqual(c.execute("SELECT value FROM board_meta WHERE key = 'schema_version'").fetchone()[0], "18")
         with self.h.board() as b:
             self.assertEqual(b.message_cap(), 777)
             self.assertEqual([m.message for m in b.recent_messages(10, "j")], ["before schema 16"])

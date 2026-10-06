@@ -111,7 +111,8 @@ RESTART_OUTCOMES = ("running", "completed", "timeout", "max_turns", "failed", "n
 # 16 jobs.plugin_data (a JSON object of per-job settings that CLI
 # plugins keep with the job: Board.job_data / set_job_data).
 # 17 indexed job-restricted agent message counts and message-free agent rollups in job_status.
-SCHEMA_VERSION = 17
+# 18 per-job LATERAL job_status totals for filtered multi-job listings.
+SCHEMA_VERSION = 18
 
 JOB_DATA_KEY = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}")
 JOB_DATA_VALUE_MAX = 2000

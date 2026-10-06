@@ -1428,6 +1428,14 @@ class SqliteBoard(Board):
                              "COALESCE(activated_at, created_at), job").fetchall()
             return [self._job_status(c, r, now) for r in rows]
 
+    def session_jobs(self, session: str) -> list[JobStatus]:
+        with self._tx(write=False) as c:
+            now = self.now()
+            rows = c.execute(f"SELECT {self._JOB_COLS} FROM jobs WHERE session_id = ? "
+                             "ORDER BY status <> 'active', COALESCE(activated_at, created_at), job",
+                             (session,)).fetchall()
+            return [self._job_status(c, r, now) for r in rows]
+
     # ---- change notification -----------------------------------------------------------
 
     def _counter(self) -> tuple[int, int]:

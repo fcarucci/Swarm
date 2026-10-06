@@ -375,7 +375,7 @@ SELECT j.job, j.status, j.description, j.task, j.outcome, j.created_by, j.sessio
             ELSE 'idle'
        END AS shown_status
   FROM jobs j
-  LEFT JOIN (
+  LEFT JOIN LATERAL (
     -- Job listings need no per-agent message counts, including for closed jobs.
     SELECT a.job, sum(a.n)::bigint AS agents,
            COALESCE(sum(a.n) FILTER (WHERE a.status = 'started'), 0)::bigint AS started,
@@ -390,12 +390,16 @@ SELECT j.job, j.status, j.description, j.task, j.outcome, j.created_by, j.sessio
         SELECT a.job, {agent_status} AS status, count(*) AS n,
                max(a.last_seen) AS last_contact_at
           FROM agents a
+         WHERE a.job = j.job
          GROUP BY a.job, status
       ) a
      GROUP BY a.job
-  ) s ON s.job = j.job
-  LEFT JOIN (SELECT job, count(*) AS messages, max(created_at) AS last_post_at
-               FROM messages GROUP BY job) m ON m.job = j.job;
+  ) s ON true
+  LEFT JOIN LATERAL (
+    -- Keep totals parameterized by the selected job even in multi-job listings.
+    SELECT count(*) AS messages, max(created_at) AS last_post_at
+      FROM messages m WHERE m.job = j.job
+  ) m ON true;
 """.replace("{agent_status}", _AGENT_STATUS_SQL)
 
 # NOTIFY channels, fixed by the triggers above (and by any tail/watch already running).
@@ -1752,15 +1756,10 @@ class PostgresBoard(Board):
             "ORDER BY (status = 'active') DESC, COALESCE(activated_at, created_at), job")
 
     def session_jobs(self, session: str) -> list[JobStatus]:
-        # The rollup subqueries group by job: find session jobs first so their job filters
-        # can restrict the aggregates as well.
-        names = [r[0] for r in self._conn.execute(
-            "SELECT job FROM jobs WHERE session_id = %s", (session,)).fetchall()]
-        if not names:
-            return []
+        # Filter jobs before the view's per-job LATERAL aggregates, in one snapshot.
         return self._fetch(
-            JobStatus, f"SELECT {_JOB_STATUS_COLS} FROM job_status WHERE job = ANY(%s) "
-            "ORDER BY (status = 'active') DESC, COALESCE(activated_at, created_at), job", (names,))
+            JobStatus, f"SELECT {_JOB_STATUS_COLS} FROM job_status WHERE session_id = %s "
+            "ORDER BY (status = 'active') DESC, COALESCE(activated_at, created_at), job", (session,))
 
     # ---- change notification -----------------------------------------------------------
 
