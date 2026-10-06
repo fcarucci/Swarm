@@ -77,10 +77,14 @@ class DecideTests(unittest.TestCase):
                                        now=NOW, running=0).go)
 
     def test_agent_budget(self):
-        two = [r(), r()]
+        two = [r(), r(), r()]
         d = decide(job_restarts=two, host_restarts=two)
         self.assertEqual((d.go, d.cap), (False, "agent"))
-        self.assertIn("2/2", d.why)
+        self.assertIn("3/3", d.why)
+
+    def test_agent_cap_resets_after_rolling_24_hours(self):
+        old = [r(at_min=25 * 60), r(at_min=26 * 60), r(at_min=27 * 60)]
+        self.assertTrue(decide(job_restarts=old, host_restarts=[]).go)
 
     def test_job_budget(self):
         six = [r(root=f"x{i}") for i in range(6)]

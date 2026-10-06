@@ -23,10 +23,12 @@ from pathlib import Path
 from swarm import paths
 
 DEFAULTS = {
-    "enabled": False,                  # kill switch (off by default); also gates closing
+    "enabled": True,                   # kill switch; explicit false also gates closing
+    "orphan_minutes": 15,
+    "orphan_max_restarts": 3,
     "silent_minutes": 90,              # no post and no tool call for this long -> stuck:silent
                                        # (90, above tool_timeout 60; 45 was too short in practice)
-    "max_restarts_per_agent": 2,
+    "max_restarts_per_agent": 3,
     "max_restarts_per_job": 6,
     "backoff_minutes": [2, 10, 30],    # wait before attempt 1, 2, 3+ (last value repeats)
     "max_concurrent_replacements": 2,  # per host (every OS user's open restart rows)
@@ -49,9 +51,9 @@ DEFAULTS = {
     "run_output_days": 7,              # a replacement's redacted output tail is kept this long
     "allowed_workdirs": ["~/src"],     # a replacement's work dir must be under one of these
     "pass_env": [],                    # extra environment variables a replacement gets (an allowlist)
-    "timer_minutes": 2,                # the systemd timer's period (spec: every 2 minutes)
+    "timer_minutes": 5,                # the systemd timer's period (every 5 minutes)
 }
-_INTS = ("silent_minutes", "max_restarts_per_agent", "max_restarts_per_job",
+_INTS = ("orphan_minutes", "orphan_max_restarts", "silent_minutes", "max_restarts_per_agent", "max_restarts_per_job",
          "max_concurrent_replacements", "max_turns", "max_minutes", "max_restart_minutes",
          "daily_restart_minutes", "min_minutes", "codex_token_limit", "enrol_minutes",
          "brief_posts", "brief_turns", "brief_max_chars", "timer_minutes", "run_output_days")

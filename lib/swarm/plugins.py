@@ -158,17 +158,21 @@ class PluginAPI:
         self._r.status_hooks.append((self.name, fn))
 
     def register_blocker_kind(self, kind: str, display: Callable | None = None,
-                              expiry: Callable | None = None) -> None:
+                              expiry: Callable | None = None, protection: str = "addressed") -> None:
         """display(ctx, blocker)->str; expiry(ctx, blocker) after a default expires it.
+        Protection is persisted on each blocker: addressed protects person/role waits,
+        always protects until resolution, deadline protects only before a future until.
         Core owns state and audit events. A plugin callback cannot veto or replace that state.
         """
         from .board.blockers import check_blocker
         check_blocker(kind, 'external', 'registration')
         if kind == 'wait' or kind in self._r.blocker_kinds:
             raise ValueError(f'blocker kind {kind!r} is already registered')
+        if protection not in ("addressed", "always", "deadline"):
+            raise ValueError(f'unknown blocker protection rule {protection!r}')
         for fn in (display, expiry):
             if fn is not None and not callable(fn): raise TypeError('callback must be callable')
-        self._r.blocker_kinds[kind] = (self.name, display, expiry)
+        self._r.blocker_kinds[kind] = (self.name, display, expiry, protection)
 
     def add_blocker_event_hook(self, fn: Callable) -> None:
         """fn(ctx, BlockerEvent) after commit; notification adapters subscribe here."""
@@ -414,10 +418,14 @@ class Registry:
             try: fn(self.context(name, board), event)
             except Exception as exc: self._warn(name, 'blocker event', exc)
 
+    def blocker_protection(self, kind):
+        registered = self.blocker_kinds.get(kind)
+        return registered[3] if registered else "addressed"
+
     def blocker_display(self, board, blocker):
         registered = self.blocker_kinds.get(blocker.kind)
         if registered and registered[1]:
-            name, fn, _ = registered
+            name, fn, _, _ = registered
             try: return str(fn(self.context(name, board), blocker))
             except Exception as exc: self._warn(name, 'blocker display', exc)
         return f'{blocker.id} {blocker.kind} -> {blocker.waiting_on}: {blocker.reason}'
@@ -425,7 +433,7 @@ class Registry:
     def blocker_expired(self, board, blocker):
         registered = self.blocker_kinds.get(blocker.kind)
         if registered and registered[2]:
-            name, _, fn = registered
+            name, _, fn, _ = registered
             try: fn(self.context(name, board), blocker)
             except Exception as exc: self._warn(name, 'blocker expiry', exc)
 

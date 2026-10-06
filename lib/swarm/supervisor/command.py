@@ -7,7 +7,7 @@ if unsafe); the pass lock (supervise.lock in it, flock: one pass at
 a time per machine and user, so the once-only posts and the host caps are decided by one pass);
 the board (unreachable: the outage is noted and nothing is done); the runner's dead runs reaped,
 leftover resume markers cleaned and the sweep (closes stuck agents); then each candidate (a
-stuck-closed agent of this machine+user on an open, supervised job without a verdict, not
+stuck-closed agent of this machine+user on an open, supervised job without a met verdict, not
 replaced yet, whose name is free) is decided again right before acting, with the restarts and
 launches of this pass, and revalidated right before its restart row is recorded. The job cap
 holds across hosts: Board.record_restart counts it atomically. A cap is posted once per host
@@ -156,8 +156,12 @@ def candidates(board, cfg: dict, sup: dict, *, job: str | None = None, now=None,
     host_rs = _host_restarts(board)
     found = []
     for js in board.jobs(False):
-        # the job is active, with no verdict and supervise not off
-        if (job and js.job != job) or not js.supervise or js.status != "active" or js.verdict is not None:
+        # The job still needs work and supervise is enabled.
+        if (job and js.job != job) or not js.supervise or js.status != "active" or js.verdict == "met" or \
+                (js.waiting_on and not js.waiting_on.startswith("supervisor: restarting ")):
+            continue
+        from swarm.supervisor.orphans import human_question
+        if human_question(board, js):
             continue
         rows = board.agents(js.job)
         job_rs = board.restarts(job=js.job)
@@ -186,10 +190,15 @@ def _invalid(board, job: str, agent_key: str, cfg: dict | None = None):
     js = board.job_status(job)
     if js is None or js.status != "active":
         return "the job is closed", js, None
-    if js.verdict is not None:
-        return "the job has a verdict", js, None
+    if js.verdict == "met":
+        return "the job has a met verdict", js, None
+    if js.waiting_on and not js.waiting_on.startswith("supervisor: restarting "):
+        return "the job is waiting on a human or external event", js, None
     if not js.supervise:
         return "supervise is off for the job", js, None
+    from swarm.supervisor.orphans import human_question
+    if human_question(board, js):
+        return "the job has an unanswered owner question", js, None
     rows = board.agents(job)
     a = next((x for x in rows if x.agent_key == agent_key), None)
     if a is None or a.ended_at is None:
@@ -526,7 +535,7 @@ def _clear_wait(board, job: str, name: str) -> None:
 
 def clear_stale_waits(board) -> int:
     """The job's "supervisor: restarting <name>" wait flag is cleared once no
-    restart of <name> can come any more: the job has a verdict, supervise is off for it, or the
+    restart of <name> can come any more: the job has a met verdict, supervise is off for it, or the
     name is active again. Otherwise it would stay set forever and keep the job from auto-closing.
     Other wait reasons are left alone. How many were cleared."""
     from swarm.supervisor.settings import log
@@ -538,7 +547,7 @@ def clear_stale_waits(board) -> int:
             continue
         name = w[len(WAITING_PREFIX):]
         taken = any(a.name == name and a.ended_at is None for a in board.agents(js.job))
-        why = ("the job has a verdict" if js.verdict is not None else
+        why = ("the job has a verdict" if js.verdict == "met" else
                "supervise is off for the job" if not js.supervise else
                f"{name} is active again" if taken else None)
         if why and board.set_waiting(js.job, None):
@@ -651,7 +660,7 @@ def _act(board, cfg: dict, sup: dict, c: Candidate, state: dict, *, start_runner
     if not d.go:
         if d.cap:
             _post_once(board, state, _cap_key(d.cap, js.job, c.lineage), js.job,
-                       f"not restarting {a.name}: {d.why}")
+                       f"GAVE UP {a.name}: {d.why}" if d.cap == "agent" else f"not restarting {a.name}: {d.why}")
             _clear_wait(board, js.job, a.name)
             log(f"not restarting {a.name} on {js.job}: {d.why}")
         else:   # a wait (backoff, concurrency): it clears by itself; logged, not posted
@@ -673,13 +682,21 @@ def _act(board, cfg: dict, sup: dict, c: Candidate, state: dict, *, start_runner
     workdir = workdir_for(cfg, rec)
     binary = sup.get(f"{harness}_bin") if harness in ("claude", "codex") else None
     row_harness = a.harness or "claude"
+    if binary and not which(binary):
+        # A shared host may install each harness for a different OS user. Hold until
+        # this user's harness is available; do not spend a permanent refusal attempt.
+        why = f"host executable unavailable for {harness}"
+        if _post_once(board, state, f"executable|{_host()}|{js.job}|{harness}", js.job,
+                      f"not restarting {a.name}: {why}"):
+            log(f"not restarting {a.name} on {js.job}: {why}")
+        _clear_wait(board, js.job, a.name)
+        return False
     why = (None if rec is not None else NOT_ENROLLED) or \
           (None if row_harness == harness else
            f"its board row's harness {row_harness!r} is not the one it was enrolled with here "
            f"({harness!r})") or \
           (None if binary else f"its recorded harness {harness!r} is unknown") or \
           (None if workdir else "its work directory is unknown or gone") or \
-          (None if which(binary) else f"{binary} not found on PATH") or \
           (workdir_problem(cfg, workdir) if workdir else None)
     if not why and workdir:   # project configuration: wait (posted once) until approved, record nothing
         config_why = _workdir_hold(cfg, workdir)
@@ -857,6 +874,9 @@ def _dry_run(board, cfg: dict, sup: dict, job, now, say, scope_ok) -> None:
     for js, a, why in stuck.find_stuck_owned(board, cfg, now):
         if not job or js.job == job:
             say(f"would close {a.name} on {js.job}: stuck:{why}")
+    from swarm.supervisor import orphans
+    from swarm.supervisor.settings import load_state
+    orphans.run(board, cfg, sup, load_state(), job=job, now=now, dry_run=True, say=say, scope_ok=scope_ok)
     running = _host_running(board)
     unenrolled: list = []
     for c in candidates(board, cfg, sup, job=job, now=now, running=running, unenrolled=unenrolled):
@@ -915,6 +935,9 @@ def _pass(board, cfg: dict, sup: dict, state: dict, job, now, say, start_runner,
     outage.note_reachable()
     runner.reap(cfg, board)
     clean_resume_markers(board, cfg)
+    from swarm.supervisor import orphans
+    orphans.run(board, cfg, sup, state, job=job, now=now, say=say,
+                start_runner=start_runner, which=which, scope_ok=scope_ok, config_path=config_path)
     cli.sweep_jobs(board, cfg, time.monotonic() + PASS_SWEEP_SECONDS)
     clear_stale_waits(board)
     unenrolled: list = []

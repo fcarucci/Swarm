@@ -228,9 +228,10 @@ class StatusTests(TranscriptEnv):
         self.seed("J", "orch", "orchestrator", jsonl(("user", "o")), role="orchestrator")
         self.seed("OLD", "k0", "Alice", jsonl(("user", "old")), captured_days_ago=3)
         _, out, _ = self.cli("status")
-        self.assertRegex(out.splitlines()[-1],
-                         r"^transcripts: \S+ \S+ stored \(\S+ \S+ raw, ratio [\d.]+x\), limit 2048 MB/30d, "
+        self.assertRegex(out,
+                         r"(?m)^transcripts: \S+ \S+ stored \(\S+ \S+ raw, ratio [\d.]+x\), limit 2048 MB/30d, "
                          r"2 jobs, oldest \d{4}-\d\d-\d\d$")
+        self.assertRegex(out.splitlines()[-1], r"^supervisor: on, ")
         _, out, _ = self.cli("status", "--job", "J")
         self.assertRegex(out, r"(?m)^transcripts 2 stored, \S+ \S+ \(\S+ \S+ raw\)$")
         self.assertRegex(out, r"\nAGENT\s+ROLE\s+HOST\s+MODEL\s+STATUS\s+CALLS\s+MSGS\s+JOINED\s+LAST CONTACT\s+STORED\s+TOOL\n")
@@ -241,7 +242,8 @@ class StatusTests(TranscriptEnv):
 
     def test_empty_archive(self):
         _, out, _ = self.cli("status")
-        self.assertEqual(out.splitlines()[-1], "transcripts: none stored, limit 2048 MB/30d")
+        self.assertIn("transcripts: none stored, limit 2048 MB/30d", out.splitlines())
+        self.assertRegex(out.splitlines()[-1], r"^supervisor: on, ")
 
 
 

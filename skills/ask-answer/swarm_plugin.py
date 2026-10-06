@@ -31,13 +31,24 @@ def save_question(ctx, board, blocker, data):
     ctx.set_job_data(board, blocker.job, f'q{blocker.id}.count', str(len(pieces)))
 
 
-def identity(board):
+def identity(board, cfg=None):
     sid = hosts.cli_session_id(os.environ)
     if sid:
         for job in board.jobs(True):
             for agent in board.agents(job.job, include_departed=False):
                 if board.route(agent.agent_key).session_id == sid:
                     return agent.name
+        # An activated root coordinator records answers on the human's behalf.
+        # Both the local trusted activation marker and the board session must agree;
+        # an unknown child thread has neither identity nor that activation binding.
+        if not os.environ.get('CLAUDE_CODE_CHILD_SESSION') and cfg:
+            marker_dir = Path((cfg.get('hook') or {}).get('marker_dir', '')).expanduser()
+            for path in sorted(marker_dir.glob('*.json')) if marker_dir.is_dir() else ():
+                marker = cli._read_marker(path)
+                if marker.get('session_id') == sid and marker.get('job'):
+                    job = board.job_status(marker['job'])
+                    if job and job.status == 'active' and job.session_id == sid:
+                        return 'human'
         # An orchestrator is the human's interface, but an unregistered child must not impersonate it.
         if os.environ.get('CLAUDE_CODE_CHILD_SESSION') or os.environ.get('CODEX_THREAD_ID'):
             raise ValueError('agent session has no active board identity; join the job first')
@@ -260,7 +271,7 @@ def doctor(ctx, args):
 
 def run_ask(ctx, args):
     with ctx.open_board() as board:
-        b = open_question(ctx, board, args.job, identity(board), args.to, ' '.join(args.text),
+        b = open_question(ctx, board, args.job, identity(board, ctx.cfg), args.to, ' '.join(args.text),
                           options=args.options.split(',') if args.options else None,
                           default=args.default, expires=args.expires, blocks=args.blocks)
         print(f'Q{b.id}')
@@ -268,7 +279,7 @@ def run_ask(ctx, args):
 
 def run_answer(ctx, args):
     with ctx.open_board() as board:
-        b = answer_question(ctx, board, args.id, identity(board),
+        b = answer_question(ctx, board, args.id, identity(board, ctx.cfg),
                             text=' '.join(args.text) if args.text else None, option=args.option,
                             use_default=args.default, comment=args.comment, reopen=args.reopen)
         print(f'Q{b.id} {b.state}')
@@ -276,7 +287,7 @@ def run_answer(ctx, args):
 
 def run_questions(ctx, args):
     with ctx.open_board() as board:
-        to = identity(board) if args.to == 'me' else args.to
+        to = identity(board, ctx.cfg) if args.to == 'me' else args.to
         for b in question_rows(ctx, board, args.job, args.all, to):
             data = question_data(ctx, board, b)
             print(cli.term_safe(f'Q{b.id} [{b.state}] -> {b.waiting_on}: {data.get("text", b.reason)}'))
@@ -325,7 +336,7 @@ def guard_core_resolution(ctx, args):
         return
     with ctx.open_board() as board:
         b = board.blocker(args.id)
-        if b and b.kind == 'question' and not authorized(board, b, identity(board)):
+        if b and b.kind == 'question' and not authorized(board, b, identity(board, ctx.cfg)):
             print(f'Q{b.id} is addressed to {b.waiting_on}; you may only comment', file=sys.stderr)
             return 1
 
@@ -334,7 +345,7 @@ def register(api):
     api.add_command('ask', run_ask, setup_ask, 'ask a person or role for a decision')
     api.add_command('answer', run_answer, setup_answer, 'answer or comment on a question')
     api.add_command('questions', run_questions, setup_questions, 'list structured questions')
-    api.register_blocker_kind('question', display=lambda ctx,b: f'Q{b.id} -> {b.waiting_on}: {b.reason}')
+    api.register_blocker_kind('question', protection='always', display=lambda ctx,b: f'Q{b.id} -> {b.waiting_on}: {b.reason}')
     api.add_blocker_event_hook(event_hook)
     api.add_watch_pane(watch_pane)
     api.add_orchestrator_lines(orchestrator_lines)

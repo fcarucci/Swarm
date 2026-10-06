@@ -1,0 +1,1 @@
+{"id":1,"job":"j","agent_name":"swarm","created_at":{"$dt":"2026-10-06T15:15:36.509366+00:00"},"message":"message from schema 17","to_agent":null,"agent_key":null,"host":"coder"}

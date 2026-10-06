@@ -155,6 +155,38 @@ class BlockerContract:
                     not protected,
                 )
 
+    def test_plugin_protection_is_generic_and_survives_plugin_absence(self):
+        from pathlib import Path
+        from swarm.plugins import Registry, PluginAPI
+        registry = Registry(self.h.cfg, Path('/work/config.toml'))
+        api = PluginAPI(registry, 'custom', registry.config_path.parent)
+        api.register_blocker_kind('approval', protection='always')
+        api.register_blocker_kind('timer', protection='deadline')
+        self.b.plugin_registry = registry
+        for kind, addressee, expected in [('approval', 'external', True), ('timer', 'human', False)]:
+            job = 'custom-' + kind
+            self.b.open_job(job, None, None, None, None, goal='ship')
+            blocker = self.b.open_blocker(job, kind, addressee, 'pending')
+            with self.h.board() as reopened:
+                # Registry is absent here; the rule lives in durable storage.
+                self.assertIsNone(getattr(reopened, 'plugin_registry', None))
+                self.assertEqual(reopened.blocker(blocker.id).protection_rule,
+                                 'always' if expected else 'deadline')
+                self.assertEqual(reopened.job_status(job).protected_blockers, int(expected))
+                self.assertEqual(reopened.close_job(job, 'failed', 'stall',
+                                 guard=CloseGuard(False, 'ship')), not expected)
+            if expected:
+                self.b.resolve_blocker(blocker.id, 'approved')
+                self.assertTrue(self.b.close_job(job, 'failed', 'stall', guard=CloseGuard(False, 'ship')))
+
+    def test_unregistered_kind_has_no_name_specific_protection(self):
+        for kind in ('question', 'approval'):
+            job = 'unregistered-' + kind
+            self.b.open_job(job, None, None, None, None, goal='ship')
+            self.b.open_blocker(job, kind, 'external', 'pending')
+            self.assertEqual(self.b.job_status(job).protected_blockers, 0)
+            self.assertTrue(self.b.close_job(job, 'failed', 'stall', guard=CloseGuard(False, 'ship')))
+
     def test_overdue_question_still_protects_goal_stall(self):
         self.h.backdate_job("j", created_at=86400, activated_at=86400)
         with mock.patch.object(self.b, "now", return_value=NOW):
@@ -191,6 +223,21 @@ class SqliteBlockers(BlockerContract, unittest.TestCase):
 class PostgresBlockers(BlockerContract, unittest.TestCase):
     harness_factory = staticmethod(lambda: PostgresHarness(os.environ["SWARM_TEST_CONFIG"]))
 
+    def test_keep_blocked_trigger_uses_registered_protection_rule(self):
+        from pathlib import Path
+        from swarm.plugins import Registry, PluginAPI
+        registry = Registry(self.h.cfg, Path('/work/config.toml'))
+        api = PluginAPI(registry, 'custom', registry.config_path.parent)
+        api.register_blocker_kind('approval', protection='always')
+        api.register_blocker_kind('timer', protection='deadline')
+        self.b.plugin_registry = registry
+        for kind, expected in [('approval', 'active'), ('timer', 'completed')]:
+            job = 'trigger-' + kind
+            self.b.open_job(job, None, None, None, None)
+            self.b.open_blocker(job, kind, 'human', 'pending')
+            self.h.conn.execute("UPDATE jobs SET status='completed', closed_by='auto' WHERE job=%s", (job,))
+            self.assertEqual(self.b.job_status(job).status, expected)
+
 
 class BlockerCliTests(unittest.TestCase):
     def test_parser_and_dispatch(self):
@@ -206,6 +253,21 @@ class BlockerCliTests(unittest.TestCase):
 
 
 class PluginBlockerApiTests(unittest.TestCase):
+    def test_invalid_rule_rejected_and_failed_plugin_registration_removed(self):
+        from pathlib import Path
+        from swarm.plugins import Registry, PluginAPI
+        registry = Registry({}, Path('/work/config.toml'))
+        api = PluginAPI(registry, 'custom', registry.config_path.parent)
+        with self.assertRaises(ValueError):
+            api.register_blocker_kind('approval', protection='invalid')
+        self.assertNotIn('approval', registry.blocker_kinds)
+        def register(plugin_api):
+            plugin_api.register_blocker_kind('approval', protection='always')
+            raise RuntimeError('failed')
+        registry._load_one('broken', 'synthetic', lambda: register)
+        self.assertNotIn('approval', registry.blocker_kinds)
+        self.assertEqual(registry.blocker_protection('approval'), 'addressed')
+
     def test_hooks_with_snapshot_replay_and_failure_isolation(self):
         from pathlib import Path
         from swarm import plugins, cli
@@ -334,7 +396,67 @@ class MigrationContract:
                     self.assertEqual(b.job_status("j").description, "description")
                     if version == 16:
                         self.assertEqual(b.job_data("j")["demo.setting"], "kept")
-                self.assertEqual(SCHEMA_VERSION, 17)
+                self.assertEqual(SCHEMA_VERSION, 18)
+
+    def test_main_schema_17_auto_upgrades_to_18_with_blockers(self):
+        """Main's schema 17 has plugin_data and status views, but no blocker storage."""
+        from pathlib import Path
+        from swarm.board import backend_class, ensure_initialized, SCHEMA_VERSION
+        from swarm.board import autoinit
+        from support import home_env
+        import tempfile
+
+        self.h.reset()
+        fixtures = Path(__file__).parent / "fixtures"
+        if self.h.name == "memory":
+            # Main FileBoard uses main MemoryBoard's setup and serializes its state.
+            from swarm.board.file import loads
+            state = loads((fixtures / "schema17_state.json").read_text())
+            with self.h.store.lock:
+                for key in ("pool", "jobs", "agents", "routes", "restarts", "next_restart_id",
+                            "pauses", "next_pause_id", "message_max_chars", "next_id"):
+                    setattr(self.h.store, key, state[key])
+                self.h.store.messages = [loads(line) for line in
+                    (fixtures / "schema17_messages.jsonl").read_text().splitlines()]
+                self.h.store.blockers = []
+                self.h.store.blocker_events = []
+                self.h.store.schema_version = 17
+        elif self.h.name == "file":
+            board_dir = self.h.root / "board"
+            for name in ("state.json", "messages.jsonl"):
+                source = "schema17_state.json" if name == "state.json" else "schema17_messages.jsonl"
+                (board_dir / name).write_text((fixtures / source).read_text())
+            (board_dir / "schema_version").write_text("17\n")
+        elif self.h.name == "sqlite":
+            self.h.close()
+            self.h.conn = None
+            self.h.path.parent.mkdir(parents=True, exist_ok=True)
+            self.h._db().executescript((fixtures / "schema17_sqlite.sql").read_text())
+            self.assertEqual(self.h._db().execute(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='blockers'"
+            ).fetchone()[0], 0)
+        else:
+            c = self.h.conn
+            c.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+            c.execute((fixtures / "schema17_postgres.sql").read_text())
+            c.execute("SET search_path TO public")
+            self.assertIsNone(c.execute("SELECT to_regclass('public.blockers')").fetchone()[0])
+        self.assertEqual(backend_class(self.h.cfg).schema_version(self.h.cfg), 17)
+        with tempfile.TemporaryDirectory(prefix="swarm-schema18-", dir=os.environ.get("TMPDIR")) as tmp:
+            with mock.patch.dict(os.environ, {**home_env(Path(tmp)), "SWARM_AUTO_INIT": "1"}):
+                stamp = autoinit.stamp_path(self.h.cfg)
+                if stamp is not None:
+                    stamp.unlink(missing_ok=True)
+                self.assertEqual(ensure_initialized(self.h.cfg).action, "initialized")
+        self.assertEqual(SCHEMA_VERSION, 18)
+        self.assertEqual(backend_class(self.h.cfg).schema_version(self.h.cfg), 18)
+        with self.h.board() as b:
+            self.assertEqual(b.blockers("j"), [])
+            self.assertEqual(b.job_data("j"), {"demo.setting": "kept"})
+            self.assertEqual(b.recent_messages(10, "j")[0].message, "message from schema 17")
+            blocker = b.open_blocker("j", "review", "@EL", "new blocker")
+            self.assertEqual([row.id for row in b.blockers("j")], [blocker.id])
+            self.assertEqual([event.event for event in b.blocker_events(blocker.id)], ["opened"])
 
     @classmethod
     def setUpClass(cls):

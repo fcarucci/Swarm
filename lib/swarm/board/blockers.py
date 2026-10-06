@@ -10,7 +10,7 @@ import datetime as dt
 import re
 from .base import Blocker, BlockerEvent, CapExceeded, normalize_message
 
-FIELDS = "id, job, kind, waiting_on, reason, until, default_value, state, created_by, created_at, resolved_by, resolved_how, resolved_at"
+FIELDS = "id, job, kind, waiting_on, reason, until, default_value, state, created_by, created_at, resolved_by, resolved_how, resolved_at, protection_rule"
 EVENT_FIELDS = "id, blocker, at, actor, event, detail"
 
 
@@ -24,11 +24,10 @@ def check_blocker(kind, waiting_on, reason):
 
 
 def protects(blocker, now):
-    """Waits require a future deadline; decisions addressed to people protect until resolved."""
+    """Apply the durable protection rule selected when the blocker was opened."""
     bounded = blocker.until is not None and blocker.until > now
-    if blocker.kind == "wait":
-        return bounded
-    return blocker.kind == "question" or blocker.waiting_on != "external" or bounded
+    rule = blocker.protection_rule
+    return rule == "always" or (rule == "addressed" and blocker.waiting_on != "external") or bounded
 
 
 def rollup(js, rows, now):
@@ -46,6 +45,14 @@ def rollup(js, rows, now):
 
 
 class BlockerLifecycle:
+    def _blocker_protection_rule(self, kind):
+        # Wait is the built-in bounded blocker. Plugin rules are captured on each
+        # record, so closing guards work when the creating plugin is unavailable.
+        if kind == "wait":
+            return "deadline"
+        registry = getattr(self, "plugin_registry", None)
+        return registry.blocker_protection(kind) if registry else "addressed"
+
     def set_waiting(self, job, on, until=None):
         """Replace the job-level wait; resume resolves only waits, never plugin blockers."""
         with self._blocker_lock(job):
@@ -174,6 +181,7 @@ class MemoryBlockers(BlockerLifecycle):
                 resolved_by=None,
                 resolved_how=None,
                 resolved_at=None,
+                protection_rule=self._blocker_protection_rule(kind),
             )
             s.next_blocker_id += 1
             s.blockers.append(row)
@@ -339,7 +347,7 @@ class SqlBlockers(BlockerLifecycle):
                 raise ValueError(f"{job} is not an open job")
             row = self._blocker_execute(
                 c,
-                "INSERT INTO blockers (job,kind,waiting_on,reason,until,default_value,state,created_by,created_at) VALUES (?,?,?,?,?,?,'open',?,?) RETURNING "
+                "INSERT INTO blockers (job,kind,waiting_on,reason,until,default_value,state,created_by,created_at,protection_rule) VALUES (?,?,?,?,?,?,'open',?,?,?) RETURNING "
                 + FIELDS,
                 (
                     job,
@@ -350,6 +358,7 @@ class SqlBlockers(BlockerLifecycle):
                     default_value,
                     created_by,
                     self._blocker_time(self.now()),
+                    self._blocker_protection_rule(kind),
                 ),
             ).fetchone()
             result = self._blocker_row(row)
@@ -422,7 +431,8 @@ CREATE TABLE IF NOT EXISTS blockers (
  id {id_type}, job TEXT NOT NULL, kind TEXT NOT NULL, waiting_on TEXT NOT NULL,
  reason TEXT NOT NULL, until {timestamp}, default_value TEXT,
  state TEXT NOT NULL CHECK(state IN ('open','resolved','expired')), created_by TEXT,
- created_at {timestamp} NOT NULL, resolved_by TEXT, resolved_how TEXT, resolved_at {timestamp});
+ created_at {timestamp} NOT NULL, resolved_by TEXT, resolved_how TEXT, resolved_at {timestamp},
+ protection_rule TEXT NOT NULL DEFAULT 'addressed' CHECK(protection_rule IN ('addressed','always','deadline')));
 CREATE INDEX IF NOT EXISTS blockers_job_state ON blockers(job,state,id);
 CREATE TABLE IF NOT EXISTS blocker_events (
  id {id_type}, blocker BIGINT NOT NULL REFERENCES blockers(id), at {timestamp} NOT NULL,
@@ -433,11 +443,17 @@ CREATE INDEX IF NOT EXISTS blocker_events_blocker ON blocker_events(blocker,id);
 
 def migrate_sql(c, pg=False):
     # The caller's existing setup transaction/retry owns these statements.
+    # Also repair development boards already containing the pre-18 blockers table.
+    if pg:
+        c.execute("ALTER TABLE blockers ADD COLUMN IF NOT EXISTS protection_rule TEXT NOT NULL DEFAULT 'addressed' CHECK(protection_rule IN ('addressed','always','deadline'))")
+    elif "protection_rule" not in {r[1] for r in c.execute("PRAGMA table_info(blockers)")}:
+        c.execute("ALTER TABLE blockers ADD COLUMN protection_rule TEXT NOT NULL DEFAULT 'addressed' CHECK(protection_rule IN ('addressed','always','deadline'))")
+    c.execute("UPDATE blockers SET protection_rule='deadline' WHERE kind='wait'")
     if pg:
         c.execute("SELECT job FROM jobs WHERE waiting_on IS NOT NULL FOR UPDATE")
     c.execute(
-        "INSERT INTO blockers (job,kind,waiting_on,reason,until,default_value,state,created_by,created_at) "
-        "SELECT job,'wait','external',waiting_on,waiting_until,'','open','swarm',COALESCE(waiting_since,activated_at,created_at) "
+        "INSERT INTO blockers (job,kind,waiting_on,reason,until,default_value,state,created_by,created_at,protection_rule) "
+        "SELECT job,'wait','external',waiting_on,waiting_until,'','open','swarm',COALESCE(waiting_since,activated_at,created_at),'deadline' "
         "FROM jobs j WHERE waiting_on IS NOT NULL AND NOT EXISTS (SELECT 1 FROM blockers b WHERE b.job=j.job)"
     )
     c.execute(

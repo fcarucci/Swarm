@@ -253,10 +253,12 @@ class MemoryBoard(MemoryBlockers, Board):
                     store.next_blocker_id += 1
                     store.blockers.append(dict(id=bid, job=j['job'], kind='wait', waiting_on='external',
                         reason=j['waiting_on'], until=j.get('waiting_until'), default_value='', state='open',
-                        created_by='swarm', created_at=at, resolved_by=None, resolved_how=None, resolved_at=None))
+                        created_by='swarm', created_at=at, resolved_by=None, resolved_how=None, resolved_at=None, protection_rule='deadline'))
                     store.blocker_events.append(dict(id=store.next_blocker_event_id, blocker=bid,
                         at=at, actor='swarm', event='opened', detail=j['waiting_on']))
                     store.next_blocker_event_id += 1
+            for blocker in store.blockers:
+                blocker.setdefault('protection_rule', 'deadline' if blocker['kind'] == 'wait' else 'addressed')
             store.schema_version = max(store.schema_version or 0, SCHEMA_VERSION)
             return SetupResult(notes=(), pool={s: len(store.pool.get(s, [])) for s in NAME_SOURCES})
 

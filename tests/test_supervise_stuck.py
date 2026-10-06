@@ -68,6 +68,18 @@ class StuckReasonTests(unittest.TestCase):
     def test_waiting_job_is_never_silent(self):
         self.assertIsNone(self.reason(agent(50, tool="Bash", status="running"), job(waiting="ci run")))
 
+    def test_dead_agent_waiting_on_human_is_excluded(self):
+        self.assertIsNone(self.reason(agent(100, status="dead"), job(waiting="owner answer")))
+
+    def test_paused_and_met_jobs_are_excluded(self):
+        import dataclasses
+        for js in (dataclasses.replace(job(), status="paused"), dataclasses.replace(job(), verdict="met")):
+            self.assertIsNone(self.reason(agent(100, status="dead"), js))
+
+    def test_not_met_job_can_recover_crashed_worker(self):
+        import dataclasses
+        self.assertEqual(self.reason(agent(31, status="dead"), dataclasses.replace(job(), verdict="not_met")), "dead")
+
     def test_supervisor_wait_does_not_hide_silence(self):
         w = stuck.WAITING_PREFIX + "Bart Simpson"
         self.assertEqual(self.reason(agent(50, tool="Bash", status="running"), job(waiting=w)), "silent")

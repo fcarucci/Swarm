@@ -131,9 +131,9 @@ DEFAULTS = {
     # re-captured every snapshot_minutes; one over max_mb compressed keeps its head and tail.
     "transcripts": {"enabled": False, "retention_days": 30, "max_total_mb": 2048,
                     "snapshot_minutes": 15, "max_mb": 50},
-    # The supervisor (swarm.supervisor): closes stuck agents and restarts them headless. Off by
+    # The supervisor (swarm.supervisor): closes stuck agents and restarts them headless. On by
     # default; every key and its default is in swarm/supervisor/settings.py (DEFAULTS).
-    "supervise": {"enabled": False},
+    "supervise": {"enabled": True},
     # [board] backend = "sqlite": one database file shared by every agent on this machine.
     # Outside the sandboxes on purpose; sandboxed agents' posts spool (see bin/board/sqlite.py).
     # Not under ~/.local/state/swarm, which Codex sandboxes may write.
@@ -237,6 +237,9 @@ def cmd_init(cfg: dict, args) -> int:
     for note in result.notes:
         print(note)
     print(f"schema ready; name pool: {result.pool}")
+    from swarm import bootstrap, paths
+    step = bootstrap.supervisor_step(cfg, getattr(args, "config", None) or paths.config_path())
+    print(f"supervisor: {step.status}: {step.detail}")
     return 0
 
 
@@ -2927,8 +2930,17 @@ def cmd_activate(cfg: dict, args) -> int:
     # session at once: no other session can claim it, and it can share the session with others.
     with open_board(cfg) as board:
         board.purge()
+        new_job = board.job_status(args.job) is None
         board.open_job(args.job, args.description, task, session, os.environ.get("USER"),
                        project=args.project or "", goal=goal)
+        if new_job:
+            from swarm import enrolment
+            from swarm.board.autoinit import store_key
+            try:
+                enrolment.write_job_owner(store_key(cfg), job=args.job,
+                    harness=hosts.detect_cli_host(os.environ), session_id=session, cwd=os.getcwd())
+            except (OSError, ValueError):
+                pass  # missing creation proof fails closed in the supervisor
         board.set_job_supervise(args.job, not args.no_supervise)
         if args.max_hours is not None:
             board.set_job_max_hours(args.job, args.max_hours)
@@ -3514,6 +3526,14 @@ def _board_job(board, cfg: dict, args) -> int | None:
         print(f"swarm job: {args.job} is {js.status}: its goal can't be changed", file=sys.stderr)
         return 1
     board.ensure_job(args.job, args.description, os.environ.get("USER"))
+    if js is None:
+        from swarm import enrolment, hosts
+        from swarm.board.autoinit import store_key
+        try:
+            enrolment.write_job_owner(store_key(cfg), job=args.job,
+                harness=hosts.detect_cli_host(os.environ), session_id=hosts.cli_session_id(os.environ), cwd=os.getcwd())
+        except (OSError, ValueError):
+            pass
     print(args.job)
     if goal is not None:
         return _set_goal(board, cfg, args.job, goal)

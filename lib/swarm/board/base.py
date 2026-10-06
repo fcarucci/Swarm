@@ -103,9 +103,16 @@ RESTART_OUTCOMES = ("running", "completed", "timeout", "max_turns", "failed", "n
 # 12 jobs.status 'paused' and the job_pauses table (pause/resume manifests), 13 the job_status
 # view's shown_status column (what `status` shows, incl. "waiting (goal not met)"; view only),
 # 14 the index messages(job, created_at) (job_status's per-job max(created_at);
-# `swarm watch` redraws read it), 15 per-board message cap, 16 jobs.plugin_data
-# (per-job CLI plugin settings), 17 blockers and their append-only audit events.
-SCHEMA_VERSION = 17
+# `swarm watch` redraws read it), 15 the message cap is a per-board setting stored in the board
+# (Postgres board_meta 'message_max_chars' and a replaceable NOT VALID CHECK on a text column
+# instead of varchar(N); SQLite board_meta table and a trigger instead of the table CHECK;
+# file/memory: a field of the store), see Board.message_cap; grouped status counts
+# and message/agent indexes.
+# 16 jobs.plugin_data (a JSON object of per-job settings that CLI
+# plugins keep with the job: Board.job_data / set_job_data).
+# 17 indexed job-restricted agent message counts and message-free agent rollups in job_status.
+# 18 blockers and their append-only audit events.
+SCHEMA_VERSION = 18
 
 JOB_DATA_KEY = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}")
 JOB_DATA_VALUE_MAX = 2000
@@ -138,12 +145,6 @@ def merged_job_data(raw: str | None, key: str, value: str | None) -> str:
     else:
         data[key] = value
     return json.dumps(data, sort_keys=True)
-
-# 15 the message cap is a per-board setting stored in the board
-# (Postgres board_meta 'message_max_chars' and a replaceable NOT VALID CHECK on a text column
-# instead of varchar(N); SQLite board_meta table and a trigger instead of the table CHECK;
-# file/memory: a field of the store), see Board.message_cap; grouped status counts
-# and message/agent indexes.
 
 # The message cap: the longest a board message may be, in characters. One authoritative value per
 # board, stored in the board (Board.message_cap); [board] message_max_chars is only the value a NEW
@@ -478,6 +479,7 @@ class Blocker:
     resolved_by: str | None = None
     resolved_how: str | None = None
     resolved_at: _dt.datetime | None = None
+    protection_rule: str = "addressed"
 
 
 @dataclass(frozen=True)
@@ -1399,7 +1401,7 @@ class Board(abc.ABC):
         return closed
 
     def _clear_expired_wait(self, js: JobStatus, now: _dt.datetime) -> JobStatus:
-        # An expired wait's end is grace for the orphan clock, just as before schema 17.
+        # An expired wait's end is grace for the orphan clock, just as before schema 18.
         expired = [b for b in self.blockers(js.job, include_closed=True)
                    if b.kind == 'wait' and b.state == 'expired' and b.until and b.until >= run_start(js)]
         if not js.waiting_on and expired:

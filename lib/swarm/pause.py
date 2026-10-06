@@ -223,12 +223,16 @@ def _briefing(cfg: dict, flat: dict, target: str, workdir, label: str, why: str)
 def resume(board, cfg: dict, job: str, *, host: str | None = None, workdir: str | None = None,
            dest_root=None, only=(), dry_run: bool = False, retry: bool = False, label: str | None = None,
            by: str | None = None, start=None, enrol_wait: float | None = None,
-           sleep=time.sleep, clock=time.monotonic) -> ResumeReport | None:
+           sleep=time.sleep, clock=time.monotonic, orphan=None, restart_note=None,
+           start_runner=None, config_path="") -> ResumeReport | None:
     """Resume the open pause of `job` here (None: nothing to resume). See the module docstring.
     `start(restored, env)` launches a session (default hosts.resume.start); tests pass a fake."""
     from swarm.board import PAUSE_WRITER
     from swarm.hosts import resume as hr
     from swarm.supervisor import markers, runner
+    if orphan is not None:
+        return _resume_orphan(board, cfg, job, orphan, restart_note or "",
+                              start_runner=start_runner, config_path=config_path)
     rec, reopen = find_pause(board, job, retry)
     if rec is None:
         return None
@@ -355,3 +359,66 @@ def resume(board, cfg: dict, job: str, *, host: str | None = None, workdir: str 
         outcome[r.agent_key] = r.as_dict()
     board.record_resume_outcome(rec.id, outcome)
     return report
+
+
+def _resume_orphan(board, cfg, job, record, note, *, start_runner=None, config_path=""):
+    """An orphan coordinator uses the same restore, fallback, marker and runner as resumes."""
+    import uuid
+    from swarm.board.autoinit import store_key
+    from swarm.hosts import resume as hr
+    from swarm.supervisor import markers, runner, settings, command
+    from swarm.supervisor.stuck import SUPERVISOR_NAME, WAITING_PREFIX
+    from swarm.supervisor.orphans import human_question
+    sup = settings.settings(cfg)
+    # Every coordinator attempt has its own predecessor, including jobs that never had a
+    # coordinator agent row (main sessions normally only have a private activation record).
+    old = f"orphan-{uuid.uuid4()}"
+    name = board.allocate_name(old, job, "coordinator")
+    board.close_agent(old, "orphan coordinator")
+    flat = {"job": job, "agent_key": "orchestrator", "agent_name": name,
+            "role": "coordinator", "harness": record.harness, "cwd": record.cwd,
+            "note": note, "minutes": sup["max_minutes"]}
+    try:
+        restored = hr.restore(board, flat, record.harness, cfg=cfg, workdir=record.cwd)
+    except hr.ResumeUnsupported as exc:
+        restored = _briefing(cfg, flat, record.harness, record.cwd, socket.gethostname(), str(exc))
+        restored = dataclasses.replace(restored, stdin=note + "\n\n" + restored.stdin)
+    def allowed():
+        js = board.job_status(job)
+        return (js is not None and js.status == "active" and js.supervise
+                and js.verdict != "met" and not (js.waiting_on and not js.waiting_on.startswith(WAITING_PREFIX))
+                and not human_question(board, js)
+                and not any(a.status in ("started", "running", "idle") for a in board.agents(job))
+                and not command._switched_off_now(cfg, board, job))
+    if not allowed():
+        return None
+    row = board.record_restart(job, old, old, "orphan-coordinator:" + old, record.harness,
+                               sup["max_minutes"],
+                               max_per_job=sup["max_restarts_per_job"],
+                               max_job_minutes=sup["max_restart_minutes"],
+                               max_host_running=sup["max_concurrent_replacements"],
+                               max_host_minutes=sup["daily_restart_minutes"],
+                               day_start=settings.today_start())
+    if row is None:
+        return None
+    marker = markers.write_resume_marker(cfg, job, row.id, resume_of=old, name=name,
+                                        harness=record.harness, session_id=restored.session_id)
+    if restored.session_id:
+        board.set_restart_agent(row.id, restored.session_id)
+    board.post(job, SUPERVISOR_NAME, f"restarted orphan coordinator {name} on {record.harness}")
+    run = {"restart_id": row.id, "job": job, "name": name, "harness": record.harness,
+           "resume_of": old, "marker": str(marker), "argv": list(restored.argv), "cwd": restored.cwd,
+           "stdin": restored.stdin, "session_id": restored.session_id,
+           "limit_seconds": sup["max_minutes"] * 60, "enrol_seconds": sup["enrol_minutes"] * 60,
+           "config": config_path, "board": store_key(cfg)}
+    try:
+        if not allowed():
+            board.finish_restart(row.id, "cancelled")
+            markers.remove_resume_marker(marker)
+            return None
+        (start_runner or runner.start)(cfg, run)
+    except Exception:
+        board.finish_restart(row.id, "failed")
+        markers.remove_resume_marker(marker)
+        raise
+    return run

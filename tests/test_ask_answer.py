@@ -35,6 +35,13 @@ class QuestionContract:
         self.ctx = self.reg.context('ask-answer', self.b)
     def ask(self, to='human', text='Choose a colour?', **kw):
         return self.p.open_question(self.ctx, self.b, 'j', self.asker, to, text, **kw)
+    def test_question_plugin_registers_durable_protection_rule(self):
+        q = self.ask()
+        self.assertEqual(q.protection_rule, 'always')
+        with self.h.board() as reopened:
+            self.assertEqual(reopened.blocker(q.id).protection_rule, 'always')
+            self.assertEqual(reopened.job_status('j').protected_blockers, 1)
+
     def test_full_payload_and_pointer_with_several_blockers(self):
         text = 'Question with substantial context. ' * 180
         q = self.ask(text=text, options=['blue', 'red'], default='blue', blocks='rendering')
@@ -153,6 +160,46 @@ import tempfile
 
 class QuestionCli(RoutingEnv):
     plugins_disabled = ('engineering-team',)
+    def test_activated_codex_root_records_human_answers(self):
+        self.activate('J', session='root-session')
+        with mock.patch.dict(os.environ, {'SWARM_HOST': 'codex', 'CODEX_SESSION_ID': 'root-session',
+                                         'CODEX_THREAD_ID': 'root-session'}, clear=True):
+            rc, out, err = self.cli('ask', '--job', 'J', '--to', 'human', 'Choose?')
+            self.assertEqual((rc, err), (0, ''))
+            id = int(out.strip().removeprefix('Q'))
+            self.assertEqual(self.cli('answer', str(id), 'blue')[0], 0)
+        with self.board() as board:
+            self.assertEqual(board.blocker(id).resolved_by, 'human')
+
+    def test_codex_root_requires_marker_and_matching_board_session(self):
+        self.activate('J', session='root-session')
+        p = load_plugin(self)
+        with self.board() as board:
+            board.open_job('J', None, None, 'other-session', 'human')
+            with mock.patch.dict(os.environ, {'SWARM_HOST': 'codex', 'CODEX_SESSION_ID': 'root-session',
+                                             'CODEX_THREAD_ID': 'root-session'}, clear=True):
+                with self.assertRaises(ValueError):
+                    p.identity(board, self.cfg)
+            board.open_job('J', None, None, 'root-session', 'human')
+            cli.remove_marker(cli._marker(self.cfg, 'J'))
+            with mock.patch.dict(os.environ, {'SWARM_HOST': 'codex', 'CODEX_SESSION_ID': 'root-session',
+                                             'CODEX_THREAD_ID': 'root-session'}, clear=True):
+                with self.assertRaises(ValueError):
+                    p.identity(board, self.cfg)
+
+    def test_unregistered_codex_child_cannot_answer_as_human(self):
+        self.activate('J', session='root-session')
+        rc, out, err = self.cli('ask', '--job', 'J', '--to', 'human', 'Choose?')
+        self.assertEqual((rc, err), (0, ''))
+        id = int(out.strip().removeprefix('Q'))
+        with mock.patch.dict(os.environ, {'SWARM_HOST': 'codex', 'CODEX_SESSION_ID': 'child-session',
+                                         'CODEX_THREAD_ID': 'child-session'}, clear=True):
+            rc, _, err = self.cli('answer', str(id), 'blue')
+            self.assertEqual(rc, 1)
+            self.assertIn('no active board identity', err)
+        with self.board() as board:
+            self.assertEqual(board.blocker(id).state, 'open')
+
     def test_commands_filter_and_full_answer_injected_before_next_tool(self):
         self.activate('J')
         self.spawn('asker', '[swarm job: J]\n[swarm role: engineer]\nBuild.')
