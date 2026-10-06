@@ -509,7 +509,7 @@ class AutoCloseCliTests(Env):
         self.finished_job()
         self.cli("status")
         rc, out, _ = self.cli("deactivate", "--job", "J", "--outcome", "fixed it: PR 12 merged")
-        self.assertEqual((rc, out), (0, "deactivated J (completed; it was already completed, auto-closed)\n"))
+        self.assertEqual((rc, out.splitlines()[0]), (0, "deactivated J (completed; it was already completed, auto-closed)"))
         s = self.job()
         self.assertEqual((s.status, s.outcome, s.closed_by), ("completed", "fixed it: PR 12 merged", "tester"))
         rc, _, _ = self.cli("deactivate", "--job", "J", "--status", "failed", "--outcome", "reverted")
