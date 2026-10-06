@@ -8,6 +8,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+from support import ManualClock
 from test_goals import GoalEnv  # noqa: E402  (sets sys.path)
 
 from swarm import respawn, hosts  # noqa: E402
@@ -40,13 +41,17 @@ class RespawnEnv(GoalEnv):
         self.assertEqual(rc, 0, err)
 
     def finish(self, *keys):
+        with self.board() as b:
+            before_verdict = b.job_status('J').verdict_at or b.now()
         for k in keys:
             self.hook("stop", agent_id=k, session="sess-1", agent_type="general-purpose",
                       transcript_path=self.main_transcript())
             # These fixtures model the verdict arriving after the workers' last activity.
             # Tests for activity after a verdict add that contact explicitly.
             if k.startswith("w"):
-                self.h.backdate_agent(k, joined_at=2, last_seen=1, left_at=1)
+                self.h.update_agent(k, joined_at=before_verdict - dt.timedelta(seconds=2),
+                                    last_seen=before_verdict - dt.timedelta(seconds=1),
+                                    left_at=before_verdict - dt.timedelta(seconds=1))
 
     def main(self, event="turn", host=None, **extra):
         return self.hook(event, agent_id=None, session="sess-1", host=host, tool_name="Bash", **extra)
@@ -222,15 +227,22 @@ class StopTests(RespawnEnv):
 
     def test_idle_window_restarts_after_worker_activity(self):
         self.cfg["supervise"] = {"orphan_minutes": 10}
-        self.assertIsNotNone(self.main("session-stop"))
-        with mock.patch.object(respawn.time, "time", return_value=respawn.time.time() + 601):
+        clock = ManualClock(self.job().verdict_at.timestamp() + 1)
+        with mock.patch.object(respawn.time, "time", side_effect=clock):
+            self.assertIsNotNone(self.main("session-stop"))
+            clock.advance(601)
             with self.board() as b:
                 post = b.post("J", self.agent("w1").name, "fix round started")
-            self.h.backdate_message(post.id, -601)
+            # Store the contact at precisely the same instant used by the reminder clock.
+            contact = dt.datetime.fromtimestamp(clock(), dt.timezone.utc)
+            with mock.patch.object(self.h, "_ago", return_value=contact):
+                self.h.backdate_message(post.id, 0)
             self.assertIsNone(self.main("session-stop"))
-            with mock.patch.object(respawn.time, "time", return_value=respawn.time.time() + 601):
-                self.assertIsNotNone(self.main("session-stop"))
-                self.assertIsNone(self.main("session-stop"))
+            clock.advance(599)
+            self.assertIsNone(self.main("session-stop"))
+            clock.advance(1)
+            self.assertIsNotNone(self.main("session-stop"))
+            self.assertIsNone(self.main("session-stop"))
 
     def test_judge_activity_after_verdict_does_not_suppress_reminder(self):
         with self.board() as b:
@@ -280,6 +292,15 @@ class StopTests(RespawnEnv):
 
 
 class CodexTests(RespawnEnv):
+    def test_brief_after_slow_cleanup_uses_activity_before_the_verdict(self):
+        self.not_met()
+        # Emulate cleanup taking longer than the old fixture's one-second backdate.
+        ago = self.h._ago
+        with mock.patch.object(self.h, '_ago', side_effect=lambda seconds: ago(seconds - 10)):
+            self.finish('w1', 'judge-1')
+        ctx = self.context(self.main('turn', host='codex'))
+        self.assertTrue(ctx.startswith(self.expected()), ctx)
+
     def test_the_same_brief_without_claude_tag_lines(self):
         self.not_met()
         self.finish("w1", "judge-1")
