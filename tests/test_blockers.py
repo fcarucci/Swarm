@@ -246,7 +246,16 @@ class PluginBlockerApiTests(unittest.TestCase):
             reg.blocker_expired(b, q)
             self.assertIn(("expiry", q.id), seen)
             api.add_blocker_event_hook(lambda ctx, e: 1 / 0)
-            self.assertTrue(b.resolve_blocker(q.id, "blue"))
+            from contextlib import redirect_stderr
+            from io import StringIO
+
+            warnings = StringIO()
+            with redirect_stderr(warnings):
+                self.assertTrue(b.resolve_blocker(q.id, "blue"))
+            self.assertIn("plugin demo: blocker event hook failed: ZeroDivisionError",
+                          warnings.getvalue())
+            self.assertIn(("resolved", q.id), seen)
+            self.assertEqual(b.blocker(q.id).state, "resolved")
 
 
 class MigrationContract:

@@ -438,7 +438,6 @@ class BoardContract:
             for t in posters:
                 t.join(120)
         finally:
-            done.set()
             for t in readers:
                 t.join(120)
         self.assertFalse(any(t.is_alive() for t in posters + readers),

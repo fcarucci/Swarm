@@ -662,11 +662,6 @@ class PassClockTests(FinalRetryEnv):
         real_open = command._open
         clock = ManualClock()
 
-        began = time.monotonic()
-        clock = [began]
-        local_time = mock.Mock(wraps=time)
-        local_time.monotonic.side_effect = lambda: clock[0]
-
         def slow_open(cfg, dry_run):
             clock.advance(0.5)
             return real_open(cfg, dry_run)
