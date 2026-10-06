@@ -27,10 +27,20 @@ It is packaged as a plugin for Claude Code and Codex. The orchestrating session 
 (`skills/swarm/SKILL.md`) and drives the `swarm` CLI; the plugin's hooks take care of the
 subagents.
 
-## Upgrading: this version needs schema v9, on every host at once
+## Upgrading shared boards
 
-The board's schema is at version 9 (memory provenance's `memory_refs`/`memory_ref_images`
-tables, and failed-final-capture tracking on `transcripts`). Updating the plugin on one host
+0.2.0 uses board schema 16. Ordinary commands migrate older boards automatically;
+upgrade every host sharing a board together, including separate Claude/Codex OS users.
+Run `swarm upgrade` to follow the configured channel; its flags and setup steps are in the
+[command reference](#command-reference). Restart host sessions afterwards and re-trust Codex
+hooks if they changed.
+
+<a id="upgrading-this-version-needs-schema-v9-on-every-host-at-once"></a>
+
+### Migration from clients predating schema v9
+
+By schema 9, the board included memory provenance's `memory_refs`/`memory_ref_images`
+tables and failed-final-capture tracking on `transcripts`. Updating the plugin on one host
 upgrades the board the first time that host opens it (see [Automatic
 initialisation](#automatic-initialisation)) — but once a board is upgraded, **every host that
 shares it must be updated together**: on a shared host that means both the `claude` and the
@@ -47,8 +57,8 @@ features missing":
   column exists to clear it), so a perfectly good, freshly-captured transcript shows as failed
   until something newer touches that row again.
 
-Update the plugin everywhere before relying on a shared board again. This release also folds in
-two small hardening items: the **job-name rule** (job names are
+Update the plugin everywhere before relying on a shared board again. That migration also included
+two hardening items: the **job-name rule** (job names are
 `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`, checked at `activate` and for markers; every job or agent name
 shown to an agent, or run through a shell, is quoted) and the **tightening of the swarm's own
 `~/.local` directories** (`~/.local/state/swarm`, `~/.local/share/swarm`, and any configured
@@ -70,12 +80,7 @@ marker/spool directory under `~/.local` are now covered by both bootstrap's tigh
 
 ## Install
 
-> **Upgrading to 0.1.0?** This release moves the board's schema to v9. If the board is shared by
-> other hosts (another machine, or the claude/codex OS users on the same host), install/
-> upgrade all of them at around the same time: an older client left behind on the old schema
-> fails in specific ways, not just "old features missing" -- see
-> [Upgrading](#upgrading-this-version-needs-schema-v9-on-every-host-at-once). `install.sh` prints
-> this same reminder.
+> Upgrade every host sharing a board together; see [Upgrading shared boards](#upgrading-shared-boards).
 
 The fastest way, for your own OS user, every host it finds (`claude` and/or `codex` on `PATH` or
 in a common install location):
@@ -186,8 +191,18 @@ An explicit `--channel` is stored as `[upgrade] channel = "release" | "main"` in
 ## Windows
 
 Native Windows 10/11 is supported with Claude Code and Codex for Windows. Install with
-`install.ps1` (README "Windows"): the same steps as `install.sh`, for the current user only. It
+`install.ps1`: the same steps as `install.sh`, for the current user only. It
 needs Python 3.11+ (`py -3` or `python` on `PATH`) and git.
+
+From PowerShell, as yourself (no administrator rights):
+
+```powershell
+irm https://raw.githubusercontent.com/fcarucci/Swarm/main/install.ps1 -OutFile install.ps1
+.\install.ps1  # newest release; -Main for main, -Ref v0.2.0 for a tag, -Target codex for one host
+```
+
+The installer runs marketplace/plugin setup, bootstrap, migrate, and doctor. It adds
+`%USERPROFILE%\.local\bin` to your user PATH, where `swarm.cmd` lives.
 
 **Layout.** The same as on Linux, under `%USERPROFILE%` (what `~` means): the venv at
 `.local\share\swarm\venv` (interpreter `Scripts\python.exe`; `SWARM_VENV` overrides it), host-only
@@ -238,7 +253,7 @@ brief the agents, follow the board, get the judge's verdict and close the job. I
 about it: small work it does itself, a new agent goes into a running job whose scope fits, and a
 new job is for substantial multi-agent work (a lone agent plus a judge only if you ask). To
 follow along yourself, `swarm watch` or `swarm status --job <job>`; `swarm doctor` checks the install. The
-CLI commands are listed in the README's "Managing swarms from the CLI".
+CLI commands are listed in the [command reference](#command-reference).
 
 ## Hosts (Claude Code and Codex)
 
@@ -664,6 +679,9 @@ Code or Codex runs in.
 (default `release`, the newest `vX.Y.Z` tag). `swarm upgrade --channel ...` and the installers'
 `--channel` write it; the rest of the file is left as it is.
 
+`[plugins]` has one key, `disabled = ["name", ...]`: CLI plugins to skip (shown as `disabled` by
+`swarm plugins`). See [CLI plugins](#cli-plugins).
+
 **`[database]`** (Postgres only)
 
 | key | default | meaning |
@@ -713,6 +731,8 @@ application_name = "swarm-watch"
 | `read_limit` | `50` | most messages returned by one read; the rest come on the next read, with a count of what is left |
 | `join_history` | `30` | a new agent is first shown the job's newest N messages (0 = none) |
 | `roster_refresh_minutes` | `10` | each agent gets the full roster at least this often; changes in between come as a diff |
+| `watch_interval_s` | `10` | seconds between quiet dashboard refreshes; `watch --interval` overrides it |
+| `watch_min_redraw_s` | `2` | minimum seconds between notification or snapshot-miss refreshes |
 | `watch_recent_minutes` | `10` | `watch` and `status --job` hide finished agents that ended (or were last seen) longer ago than this |
 | `silence_nudge_calls` | `15` | nudge an agent to post a status after this many tool calls without posting (0 = off) |
 | `silence_nudge_minutes` | `10` | ... or after this many minutes without posting (0 = off); once per quiet window |
@@ -728,6 +748,7 @@ On Postgres, re-run `swarm init` after changing `idle_minutes`, `dead_minutes` o
 
 | key | default | meaning |
 |---|---|---|
+| `hook_min_interval_s` | `15` | Linux tool-hook bookkeeping interval; `0` restores per-call bookkeeping, capped at one tenth of idle/dead thresholds |
 | `marker_dir` | `~/.local/state/swarm/active` | where `activate` writes job markers. The hook wrapper reads it from the config with a simple text match, so keep it a plain quoted string on one line |
 
 **`[job]`**
@@ -846,9 +867,15 @@ Hooks never fail the agent. Every error is swallowed and appended to
 job of the session active, a swarm agent's spawn (`Agent`, Codex `spawn_agent`) whose limits
 can't be checked is refused.
 
+### Linux hook fast path
+
+Tool hooks on Linux use a shell fast path: an unchanged board and a fresh per-agent lease start no Python process. `[hook] hook_min_interval_s` defaults to 15 seconds (0 restores per-call bookkeeping), capped at one tenth of the idle/dead thresholds. Heartbeats, tool names and tool-call counts are sampled; the tool name is the last sample, not evidence a call remains in flight. Start, stop, session-stop, spawn checks, verifier restrictions and judge reminders retain their ordinary path. Optional provenance tracking retains per-call hooks.
+
+A shared LISTEN notifier per configuration relays remote messages into host-only stamps (normally within 2 seconds). Local posts invalidate their job immediately. A post racing a read stays dirty, and a paged backlog continues on the next tool call. A stale notifier forces cursor reads; config, plugin and boot identity changes invalidate leases. Shell and Python deadlines share the Linux uptime clock, including inside containers. Marker paths are parsed once per config mtime. Other platforms keep the ordinary hooks.
+
 ### Automatic initialisation
 
-See [Upgrading](#upgrading-this-version-needs-schema-v9-on-every-host-at-once) first: this
+See [Upgrading](#upgrading-shared-boards) first: this
 migrates the board automatically, but every host sharing it needs to be on this version too.
 
 `swarm init` is never required. The board records the schema version its setup installed
@@ -1150,6 +1177,13 @@ open job as one of four words:
 | `idle` | nobody is at work and no reason is recorded: give it one, or close the job (once every agent is done it [auto-closes](#auto-close) after `auto_close_minutes`) |
 | `waiting (goal not met)` | the job has a goal without a `met` verdict and no agent is started, running or idle on it. No sweep closes it (see [Jobs with a goal](#auto-close)): spawn an agent, seat the judge, or `swarm deactivate` it |
 
+`swarm wait --job J --on "<what>" --for 2h` (or `--until 17:30`, or `--until "2026-10-06 09:00"`)
+bounds the wait. A bounded wait that has not ended protects the job from the orphan rule and from
+the stall limits, including `goal_stall_hours`, and `status` shows its end. When it ends the job is
+judged as not waiting and the end counts as progress, so the job is not stalled that instant. An
+unbounded wait is shown but protects nothing: say how long you will wait. A board read by the
+orchestrating session (`status --job`, `who`, `read`, `tail --job`) counts as contact for liveness.
+
 The wait ends with `swarm resume --job J`. It also ends by itself when an agent joins the job,
 when the job is re-activated, and when it is closed. Only the display changes: the stored
 status stays `active` (`waiting_on` and `waiting_since` hold the reason), so the markers,
@@ -1236,7 +1270,7 @@ doctor` reports that as WARN, same fix. Linger has to be enabled for every OS us
 agents (for example, both `claude` and `codex` on a shared host). It starts a replacement on the same
 harness: `claude -p --max-turns … --permission-mode auto` or `codex exec --sandbox
 workspace-write`, never with a bypass flag (refused by `[supervise] claude_permission_mode`).
-Replacements never spawn subagents. It runs in the agent's work directory, with a brief: the
+Worker replacements never spawn subagents. Each runs in the agent's work directory, with a brief: the
 original task, taken from the first agent of the chain (Claude: its spawn prompt; Codex: the task
 name and first post), so a second restart is not briefed with the first one's brief; the agent's
 recent posts and those addressed to it; the last `brief_turns` turns of the latest attempt's
@@ -1453,6 +1487,26 @@ fixes; neither automatically receives verifier restrictions or judge authority. 
 role's responsibilities, deliverables, ownership and handoffs in the brief; a label does not
 load a persona or supply a workflow. Configure its model under `[models.<host>]` as below.
 
+### Addressing a role
+
+`swarm post --to @EL "..."` addresses a seat instead of a display name: the message goes to the
+agents that hold that role on the job now (a role is the `[swarm role: ...]` tag, or `join --role`;
+`@judge` and `@verifier` are the job's judge and verifiers). Matching ignores case. Four short
+aliases name the usual seats of the engineering team: `@EL` is `engineering_lead`, `@QA` is `qa`,
+`@PM` is `project_manager`, else `orchestrator` (the first seat with a holder), and `@product`
+is `product_manager`. The invoking PM joins with `--role project_manager`. A seat held by several
+agents (`@engineer`) gets one message each, up to 8. The post confirmation shows who it reached, and a reader sees the resolved name (`A -> B`), because the
+stored recipient is the name, not the role.
+
+A post is refused, with one line on stderr and exit status 1 and nothing stored, when the recipient
+is not an agent of the job, when the seat has no holder (the error lists the seats that have one),
+or when the author (`--as` or `--key`) is not an agent of `--job`. For compatibility with moved
+agents carrying old command lines, an author active on another open job is redirected to that job
+before these checks. This applies even if the agent never joined the requested job; the CLI names the actual job on stderr. Offline delivery checks the
+queued job as written and does not redirect. A post that is queued because the board is unreachable
+is checked when it is delivered, not before. A refused queued post produces a system note to
+the author explaining why it was not delivered.
+
 ### The judge: goals and the completion gate
 
 `activate --goal "<what done means>"` gives a job a goal, and one agent's only task is to decide
@@ -1579,6 +1633,47 @@ there is checked for 1 to 3 and the caps; a task name requesting the `judge` rol
 child joins the session's job by itself; and the agent is told to say on the board why it
 spawned (the `spawning ...` post carries the task name, with no reason).
 
+## CLI plugins
+
+Commands outside the core live in plugins. A plugin is a Python module with a `register(api)`
+function; core swarm finds them when it parses a command line (never in the hooks), works with none
+installed, and never fails a core command because of one. `swarm plugins` lists what was found,
+the commands and options each adds, and why one failed to load. The plugin API and where plugins
+are searched are in [docs/PLUGINS.md](PLUGINS.md); `[plugins] disabled = ["name"]` skips one.
+
+The engineering-team skill ships one (`skills/engineering-team/swarm_plugin.py`):
+
+| command | what it does |
+|---|---|
+| `team --job J [--show]` | print the job's team: the always-present seats, the optional seats on, and who carries the duties of an absent one |
+| `team --job J --add ROLE` / `--remove ROLE` | change the optional seats of the job (repeatable). A mandatory seat (`engineering_lead`, `qa`, `engineer`, `judge`) can't be removed: exit status 2 |
+| `activate ... --team ROLES` | the job's optional roles at activation, comma separated (`''` for none); a bad name stops the activation |
+
+Optional seats: `product_manager` (on by default), `build_engineer` (off), `reviewer`, `verifier`.
+The default comes from `team.toml`: `$SWARM_TEAM_CONFIG`, else next to the swarm config
+(`~/.config/swarm/team.toml`); a missing file means the defaults; see `team.example.toml`. A job's
+own composition (set with `--team` or `team --add/--remove`) is kept with the job, survives
+re-activation, wins over the file, and shows as a `team` line in `status --job J`. It is stored with
+the job on the board (`Board.job_data`, schema 16), so every host sees it.
+
+### Engineering-team workflow
+
+Invoke `/swarm:engineering-team` in Claude Code or select `engineering-team` from Codex's
+`/skills`. The [skill](../skills/engineering-team/SKILL.md) guides requirements, engineering
+lead staffing, implementation, independent peer review, QA, and separate product, technical,
+and QA acceptance. It schedules bounded role invocations against actual host capacity;
+role labels alone do not enforce the process, so the coordinator checks artifacts and gates.
+The [host guide](../skills/engineering-team/references/hosts.md) covers capability checks,
+Claude/Codex routing, board polling, and recovery. Custom roles and this skill require Swarm
+0.1.1 or later; check the loaded plugin and role enrollment if an older cache hides the skill.
+Documentation checks do not validate host behavior; independent evaluation on each host is
+still required before treating that host's behavior as validated.
+
+### Ask-answer skill (0.2.0)
+
+Ask-answer ships as its own skill in 0.2.0. It handles blockers and human questions
+with `swarm ask`, `swarm answer`, and `swarm questions`.
+
 ## Models per role
 
 `[models]` in the config sets the model a spawned agent gets, by role and per host:
@@ -1628,7 +1723,11 @@ An agents table lists the active agents and the finished ones (completed, left, 
 or were last seen within `watch_recent_minutes`; a dim line under it counts the older finished
 agents it hides. `watch` redraws the moment a message, agent or job changes (see the backend
 table for how each backend detects changes), and at least every `--interval` seconds (default
-2), so agents turn idle or dead on screen as time passes.
+10), so agents turn idle or dead on screen as time passes.
+
+`swarm watch` refreshes quiet boards every 10 seconds, configured by `[board] watch_interval_s` or overridden by `--interval`. `watch_min_redraw_s` (default 2 seconds) bounds notification/snapshot-miss refreshes, even with a shorter interval. Keys and resizing still render cached data immediately. Full and `--compact --session ... --exit-when-idle 30` panes use the same one-statement PostgreSQL snapshot with grouped counts and only visible agent rows. Schema 15 installs the optimized status views and supporting indexes automatically.
+
+![Live jobs, agents, verdicts, and messages](images/swarm-watch.png)
 
 | key | action |
 |---|---|
@@ -1870,6 +1969,16 @@ With `[hindsight] url` set, the swarm keeps a project memory in
 [Hindsight](https://github.com/vectorize-io/hindsight). Memory is off by default: with `url` empty (the default) the
 feature is off: no calls, no instructions, and the client isn't even imported.
 
+Example configuration:
+
+```toml
+[hindsight]
+url = "http://hindsight.example.internal:9100"
+api_key_file = "~/.config/swarm/hindsight.key"  # optional; chmod 600
+default_bank = "coding"
+recall_banks = ["coding", "hermes"]
+```
+
 - **Where:** writes use `[hindsight] default_bank` (default `coding`). An explicit
   `activate --project NAME` selects a project bank, normalized to lower-case `a-z0-9_-` (max
   64). No implicit bank creation: a missing bank fails unless the write has `--create-bank`.
@@ -2091,7 +2200,7 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `init [--no-hooks]` | create the storage if missing, the schema and the name pool. Every other command does this by itself when needed (see [Automatic initialisation](#automatic-initialisation)). The hooks ship with the plugin; `--no-hooks` is ignored |
 | `install-hooks` | obsolete: the hooks ship with the plugin (`hooks/hooks.json`, `hooks/codex-hooks.json`); prints that and writes nothing. `migrate` removes the old install's entries |
 | `bootstrap [--host claude\|codex] [--quiet]` | set the swarm up for this host: venv, launcher, config, board, host setup, migrate (see [First run and updates](#first-run-and-updates)); run automatically in the background at the first session of each plugin version. `--quiet` prints only the steps that need you |
-| `upgrade [--host claude\|codex\|both] [--channel release\|main] [--force] [--no-color]` | update the swarm marketplace and plugin for whichever of claude/codex is installed (reports old → new version) to the newest release tag, or with `--channel main` the tip of main (`--channel` is stored as `[upgrade] channel` in the config, so a plain `swarm upgrade` keeps following it; a local-path marketplace is followed as is), then `bootstrap`, `migrate` and `doctor` from the *newly installed* plugin's own `bin/swarm` (never the code currently running); "swarm is up to date (VERSION)" and nothing else when the version didn't change, unless `--force`. `--force` also passes through to `migrate`. Ends by saying to restart Claude sessions, and for Codex to start a new session and re-trust `/hooks` when `hooks/codex-hooks.json` changed. `update` is a hidden alias |
+| `upgrade [--host claude\|codex\|both] [--channel release\|main] [--force] [--no-color]` | update the swarm marketplace and plugin for whichever of claude/codex is installed (reports old → new version) to the newest release tag, or with `--channel main` the tip of main (`--channel` is stored as `[upgrade] channel` in the config, so a plain `swarm upgrade` keeps following it; a local-path marketplace is followed as is), then `bootstrap`, `migrate` and `doctor` from the *newly installed* plugin's own `bin/swarm` (never the code currently running); "swarm is up to date (VERSION)" and nothing else when the version didn't change, unless `--force`. `migrate` always runs with `--force`; active local jobs produce a warning. Ends by saying to restart Claude sessions, and for Codex to start a new session and re-trust `/hooks` when `hooks/codex-hooks.json` changed. `update` is a hidden alias |
 | `migrate [--force]` | retire the old `~/.claude/skills/swarm` install: its hooks in `~/.claude/settings.json` (backup first) and its directory (see [Moving from the old skill install](#moving-from-the-old-skill-install)). Refused while a job is active on this machine, unless `--force` |
 | `doctor [--host claude\|codex] [--no-color]` | check this machine's setup and print the fix for each problem; exit 1 if a check fails. Default host: the one it runs in (a plain terminal: Claude Code) |
 | `activate --job J [--description D] [--task T\|-] [--project P] [--session S] [--adopt-running]` | open or re-open the job and switch the board on for subagents spawned from now on; bind it to `--session`, default the calling Claude Code or Codex session; print `swarm command: <path>` and the tag lines. In Codex, refused while another job is active in the session |
@@ -2099,7 +2208,7 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `activate … --goal G\|-` | give the job a goal, judged by one judge agent; the tag lines include `[swarm role: judge]` |
 | `deactivate --job J [--status completed\|cancelled\|failed] [--outcome O] [--force] [--delete-bank]` | switch the board off and close the job (default `completed`). A job with a goal completes only with the judge's `met` verdict, or with `--force` (recorded). On an already closed (e.g. auto-closed) job it replaces the status and outcome |
 | `verdict --job J --as NAME met\|not_met REASON...` | the job's judge records its verdict and posts it on the board; anyone else is refused; spooled when the board is unreachable |
-| `wait --job J [--for DURATION] --on WHAT...` | mark an open job as waiting for something; shown as `waiting` with the reason. `--for 90m` (`h`/`m`/`s`, bare = minutes) bounds it: past that the wait expires and the orphan rule applies again |
+| `wait --job J [--for DURATION \| --until TIME] --on WHAT...` | mark an open job as waiting for something; shown as `waiting` with the reason and, when bounded, its end. `--for 90m` (`h`/`m`/`s`, bare = minutes) or `--until` (a duration, a time of day such as `17:30`, or `2026-10-06 09:00`) bounds it. A bounded wait that has not ended protects the job from the orphan rule and the stall limits (including `goal_stall_hours`); once it ends the job is judged as not waiting, and the end counts as progress. An unbounded wait is shown but protects nothing. A board read by the orchestrating session (`status --job`, `who`, `read`, `tail --job`) counts as contact for liveness |
 | `pause --job J [--reason TEXT] [--wait SECONDS]` | pause a job: no joins or posts, every agent recorded in a resume manifest and closed, final transcripts captured (see Pausing and resuming a job) |
 | `resume --job J [--host claude\|codex] [--workdir DIR] [--only NAME...] [--dry-run] [--retry]` | on a paused job: re-create its agents on this machine from the transcripts on the board, same names and cursors. On any other job: the job is no longer waiting (an agent joining does this too) |
 | `status [--all] [--no-color]` | jobs overview |
@@ -2107,12 +2216,13 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `watch [--job J] [--session S] [--compact] [--exit-when-idle N] [--interval S] [--no-color]` | full-screen live dashboard |
 | `tail [--job J] [-n N] [--interval S] [--no-agents] [--no-color]` | follow the board live |
 | `join --job J --key K [--role R] [--judge\|--verifier]` | allocate a unique name for agent key K, or return the one it already has. `--judge` takes the job's judge seat (refused if another agent holds it) and `--verifier` makes it a verifier: for agents without the swarm's hooks, such as a one-off `codex exec` judge. They read the board with `read --key K`, and post and record verdicts with the CLI. |
-| `config [board.message_max_chars [N]] [--save]` | print or set the board's message cap (online; existing messages are kept; `--save` also writes `[board] message_max_chars`) |
-| `post --job J --as NAME [--to NAME] MESSAGE...` | post a message; whitespace is collapsed and the text capped at the board's message cap; spooled when the board is unreachable |
+| `config [board.message_max_chars [N]] [--save]` | print or set the board's message cap (200 by default, 50 to 4000; online; existing messages are kept; `--save` also writes `[board] message_max_chars`, which only seeds a new board) |
+| `post --job J (--as NAME \| --key K) [--to NAME\|@ROLE] MESSAGE...` | post a message; whitespace is collapsed and the text capped at the board's message cap; spooled when the board is unreachable. `--to @EL`, `@PM`, `@QA`, `@judge` or `@<role>` goes to whoever holds that seat on the job now (one message each); a name that is not on the job, a seat nobody holds, or an author who is not an agent of `--job` is refused with an error and nothing is stored. `@EL` is `engineering_lead`, `@PM` is `project_manager` (else `orchestrator`), `@product` is `product_manager`; compatibility exception: an author active on another open job is redirected there with a note on stderr before validation |
 | `read (--as NAME \| --key K) [--job J] [--peek]` | messages new since the last read, excluding your own, `read_limit` at a time with a count of what is left; `--peek` doesn't advance the cursor |
 | `learn --job J [--bank B] [--create-bank] -` / `learn --list-banks` | retain self-contained job learnings with provenance in an existing bank (default_bank if omitted), one fact per nonblank stdin line; list existing banks |
 | `recall --job J [QUERY...]` | query recall_banks plus an explicit project bank, deduplicated within existing budgets |
 | `remember --job J --as NAME [--project P] [--create-bank] FACT...` | store a durable fact in its explicit project bank or default_bank (needs `[hindsight] url`); spooled when unreachable |
+| `plugins` | list the CLI plugins found, the commands and options they add, and why one failed to load (a broken plugin never breaks the core commands; see [CLI plugins](#cli-plugins)) |
 | `spool retry` | requeue memories parked as `.stuck` after 24 hours of failing (see [The spool](#the-spool)) |
 | `notices --hook-output [--host claude\|codex]` | internal: the plugin's `SessionStart` hook prints the pending setup notice for that host as hook output (a fixed template of re-validated steps, see [First run and updates](#first-run-and-updates)) and consumes it; prints nothing when there is none |
 | `who --job J` | active agents on the job, tab-separated: exact name, host, role, status, last contact, current tool |
@@ -2285,16 +2395,21 @@ covers the details.
 
 ## Tests
 
-The tests use only the stdlib `unittest` and run offline. Every test uses a temporary
-directory, so nothing touches `~/.claude`, the real marker and spool directories, or the
-network. From a checkout, with a venv of its own (`python3 -m venv .venv && .venv/bin/pip install
--r requirements.txt`):
+The tests use stdlib `unittest` and run offline. Test fixtures isolate host settings, markers,
+spools, and board state. Set up a checkout venv with `python3 -m venv .venv` and
+`.venv/bin/pip install -r requirements.txt`.
+
+Run targeted tests for the files you changed locally; full suites run on GitHub Actions.
+For documentation changes:
 
 ```sh
-.venv/bin/python -B -m unittest discover -s tests -q
+cd tests
+../.venv/bin/python -B -m unittest test_plugin_manifest -q
 ```
 
-The full run, on each offline backend in turn:
+Full suites run only on GitHub Actions: push the authorized branch to the GitHub mirror and
+inspect the [Test workflow](https://github.com/fcarucci/Swarm/actions/workflows/test.yml).
+CI runs the suite on each offline backend, including this Linux matrix command:
 
 ```sh
 for b in memory sqlite file; do SWARM_TEST_BACKEND=$b .venv/bin/python -B -m unittest discover -s tests -q; done
@@ -2344,11 +2459,12 @@ for b in memory sqlite file; do SWARM_TEST_BACKEND=$b .venv/bin/python -B -m uni
   (missing, empty, partial, full), that `watch` and `tail` (and their reconnects) open the board
   with it while other commands and the hooks don't, and, on Postgres, that the watchers' real
   connection has the overridden host and `application_name`.
-- **Postgres.** To run the contract (and the Postgres-specific tests) against Postgres, point
+- **Postgres.** For a targeted Postgres test locally, point
   `SWARM_TEST_CONFIG` at a config for a throwaway database:
 
   ```sh
-  cd tests && SWARM_TEST_CONFIG=~/.config/swarm/test-config.toml ../.venv/bin/python -B -m unittest -q
+  cd tests
+  SWARM_TEST_CONFIG=~/.config/swarm/test-config.toml ../.venv/bin/python -B -m unittest test_pg_hosts -q
   ```
 
   **This wipes that database:** every board table is truncated before each test, including the
@@ -2359,6 +2475,18 @@ for b in memory sqlite file; do SWARM_TEST_BACKEND=$b .venv/bin/python -B -m uni
   inside the Claude Code sandbox). One live smoke test runs only with `SWARM_TEST_HINDSIGHT_URL`
   (and `SWARM_TEST_HINDSIGHT_KEY_FILE` if a key is needed): it creates a throwaway bank
   `swarm-test-<random>`, round-trips one fact and deletes the bank.
+
+## Release process
+
+To cut a release ([CHANGELOG.md](../CHANGELOG.md) lists every version):
+
+1. Bump `version` in both `.claude-plugin/plugin.json` and `.codex-plugin/plugin.json`.
+2. Add a `## [x.y.z] - YYYY-MM-DD` section at the top of `CHANGELOG.md` (short, user-facing lines).
+   The tests fail until the version and the entry agree.
+3. Push, then tag and push the tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+
+The release workflow builds the packages and publishes the release, using that CHANGELOG section as
+the "What's changed" notes (`scripts/release-notes.sh`; it fails if the section is missing).
 
 ## Troubleshooting
 

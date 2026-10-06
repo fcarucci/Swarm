@@ -187,7 +187,7 @@ class PureTests(unittest.TestCase):
     def test_check_message_cap(self):
         self.assertEqual(check_message_cap(" 500 "), 500)
         self.assertEqual(check_message_cap(500.0), 500)
-        self.assertEqual(SCHEMA_VERSION, 15)
+        self.assertEqual(SCHEMA_VERSION, 16)
 
 
 class CliTests(Env):
@@ -209,6 +209,19 @@ class CliTests(Env):
         self.assertEqual(self.cli("post", "--job", "J", "--as", a, "x" * 400)[1].count("truncated"), 0)
         _, out, _ = self.cli("post", "--job", "J", "--as", a, "x" * 600)
         self.assertRegex(out, r"^posted #\d+ \(truncated to 500 chars\)\n$")
+
+    def test_role_addressed_posts_report_the_live_board_cap(self):
+        self.cli("init")
+        author = self.peer()
+        judge = self.cli("join", "--job", "J", "--key", "judge", "--judge")[1].strip()
+        self.cli("config", "board.message_max_chars", "500")
+        rc, out, err = self.cli("post", "--job", "J", "--as", author, "--to", "@judge", "x" * 600)
+        self.assertEqual(rc, 0, err)
+        self.assertIn(f"to @judge ({judge})", out)
+        self.assertIn("truncated to 500 chars", out)
+        with self.board() as b:
+            message = b.recent_messages(1, "J")[0]
+            self.assertEqual((message.to_agent, len(message.message)), (judge, 500))
 
     def test_a_client_with_another_config_value_still_sees_the_board_cap(self):
         self.cli("init")
@@ -315,6 +328,27 @@ class SqliteUpgrade(unittest.TestCase):
         db.execute(f"PRAGMA user_version = {version}")
         db.close()
 
+    def test_schema_15_to_16_keeps_the_cap_and_adds_plugin_data(self):
+        self.h.reset()
+        with self.h.board() as b:
+            b.ensure_job("j")
+            b.set_message_cap(777)
+            b.post("j", "A", "before schema 16")
+        with sqlite3.connect(self.h.path) as c:
+            c.execute("ALTER TABLE jobs DROP COLUMN plugin_data")
+            c.execute("PRAGMA user_version = 15")
+        setup_board(self.h.cfg, SMALL_POOL)
+        self.assertEqual(self.h.sqlite_board.SqliteBoard.schema_version(self.h.cfg), 16)
+        with self.h.board() as b:
+            self.assertEqual(b.message_cap(), 777)
+            self.assertEqual([m.message for m in b.recent_messages(10, "j")], ["before schema 16"])
+            self.assertEqual(b.job_data("j"), {})
+            self.assertTrue(b.set_job_data("j", "engineering-team.optional", "build_engineer"))
+        setup_board(self.h.cfg, SMALL_POOL)
+        with self.h.board() as b:
+            self.assertEqual(b.message_cap(), 777)
+            self.assertEqual(b.job_data("j"), {"engineering-team.optional": "build_engineer"})
+
     def test_upgrade_keeps_rows_ids_and_the_cap_the_board_enforced(self):
         for version in (12, 13, 14):
             with self.subTest(version=version):
@@ -380,6 +414,26 @@ class PostgresUpgrade(unittest.TestCase):
         c.execute("TRUNCATE messages, agents, jobs CASCADE")
         c.execute("INSERT INTO jobs (job) VALUES ('j')")
         c.execute("INSERT INTO messages (job, agent_name, message) VALUES ('j', 'A', 'old one'), ('j', 'A', 'old two')")
+
+    def test_schema_15_to_16_keeps_the_cap_and_adds_plugin_data(self):
+        with self.h.board() as b:
+            b.ensure_job("j")
+            b.set_message_cap(777)
+            b.post("j", "A", "before schema 16")
+        c = self.h.conn
+        c.execute("ALTER TABLE jobs DROP COLUMN plugin_data")
+        c.execute("UPDATE board_meta SET value = '15' WHERE key = 'schema_version'")
+        setup_board(self.h.cfg, SMALL_POOL)
+        self.assertEqual(c.execute("SELECT value FROM board_meta WHERE key = 'schema_version'").fetchone()[0], "16")
+        with self.h.board() as b:
+            self.assertEqual(b.message_cap(), 777)
+            self.assertEqual([m.message for m in b.recent_messages(10, "j")], ["before schema 16"])
+            self.assertEqual(b.job_data("j"), {})
+            self.assertTrue(b.set_job_data("j", "engineering-team.optional", "build_engineer"))
+        setup_board(self.h.cfg, SMALL_POOL)
+        with self.h.board() as b:
+            self.assertEqual(b.message_cap(), 777)
+            self.assertEqual(b.job_data("j"), {"engineering-team.optional": "build_engineer"})
 
     def test_upgrade_from_12_13_14_is_online_and_keeps_every_message(self):
         for version in (12, 13, 14):

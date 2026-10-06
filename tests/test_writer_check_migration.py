@@ -61,7 +61,7 @@ class WriterCheckMigrationTests(unittest.TestCase):
             setup_board(self.h.cfg, SMALL_POOL)
         c = self.h._db()
         self.assertEqual(c.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
-        self.assertEqual(SCHEMA_VERSION, 15)
+        self.assertEqual(SCHEMA_VERSION, 16)
         for column in ("verdict_next", "max_hours", "waiting_until"):
             self.assertIn(column, [r[1] for r in c.execute("PRAGMA table_info(jobs)")])
         self.assertNotIn("CHECK (writer", c.execute(

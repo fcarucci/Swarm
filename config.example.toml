@@ -96,6 +96,13 @@ orphan_minutes = 30
 #   takes precedence (0 = never).
 goal_stall_hours = 0
 
+[plugins]
+# CLI plugins (see docs/PLUGINS.md) are found in <config dir>/plugins/, $SWARM_PLUGIN_PATH, the skills'
+# swarm_plugin.py and the "swarm.plugins" entry points. `swarm plugins` lists them. Skip some by name:
+# disabled = ["engineering-team"]
+# (The engineering team's composition is not set here: it lives in team.toml next to this file,
+# or $SWARM_TEAM_CONFIG; copy team.example.toml.)
+
 [codex]
 # Codex fires SubagentStop after every turn of a child (it can be sent more work). The swarm
 # counts a Codex agent as completed once no new turn came for this many minutes; a follow-up

@@ -65,7 +65,7 @@ import time
 from pathlib import Path
 from typing import Iterator, Mapping, Sequence
 
-from .base import (LEFT_PAUSED, MOVED_PREFIX, PauseRecord, build_manifest, NAME_MAX, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, AUTO_CLOSE_BLOCKING, CloseGuard, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, Restart,
+from .base import (check_job_data, merged_job_data, parse_job_data, LEFT_PAUSED, MOVED_PREFIX, PauseRecord, build_manifest, NAME_MAX, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, AUTO_CLOSE_BLOCKING, CloseGuard, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, Restart,
                    ROUTE_STATES, TOOL_NAME_MAX, AgentEvent, AgentStatus, Board, BoardError, BoardUnavailable, JobStatus, Member, Message, ReadOnlyBoard, refuse_writes,
                    OwedReply, ReadResult, Route, RosterEntry, SCHEMA_VERSION, SetupResult, SpawnGrant, SyncState,
                    TRANSCRIPT_ROLES, TranscriptImage, TranscriptRow, TranscriptSummary, VERDICTS,
@@ -108,7 +108,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     waiting_on        TEXT,
     waiting_since     TEXT,
     waiting_until     TEXT,
-    max_hours         REAL
+    max_hours         REAL,
+    plugin_data       TEXT
 );
 CREATE TABLE IF NOT EXISTS agents (
     agent_key          TEXT PRIMARY KEY,
@@ -336,6 +337,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("jobs", "verdict_next", "TEXT"),   # schema 10: the judge's instructions with a not_met verdict
     ("jobs", "waiting_until", "TEXT"),  # schema 11: when a bounded `wait --for` expires
     ("jobs", "max_hours", "REAL"),      # schema 11: the job's own lifetime cap
+    ("jobs", "plugin_data", "TEXT"),    # schema 16: per-job settings kept by CLI plugins (JSON)
 )
 
 _MESSAGE_COLS = "id, created_at, job, agent_name, to_agent, message"
@@ -1124,6 +1126,20 @@ class SqliteBoard(Board):
     def record_resume_outcome(self, pause_id: int, outcome: dict) -> bool:
         return self._c().execute("UPDATE job_pauses SET outcome = ? WHERE id = ?",
                                  (json.dumps(outcome), pause_id)).rowcount > 0
+
+    def job_data(self, job: str) -> dict[str, str]:
+        row = self._c().execute("SELECT plugin_data FROM jobs WHERE job = ?", (job,)).fetchone()
+        return parse_job_data(row[0] if row else None)
+
+    def set_job_data(self, job: str, key: str, value: str | None) -> bool:
+        check_job_data(key, value)
+        with self._tx() as c:
+            row = c.execute("SELECT plugin_data FROM jobs WHERE job = ?", (job,)).fetchone()
+            if row is None:
+                return False
+            c.execute("UPDATE jobs SET plugin_data = ? WHERE job = ?",
+                      (merged_job_data(row[0], key, value), job))
+            return True
 
     def set_job_supervise(self, job: str, on: bool) -> bool:
         return self._c().execute("UPDATE jobs SET supervise = ? WHERE job = ?",

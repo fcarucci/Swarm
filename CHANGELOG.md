@@ -8,6 +8,19 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 ### Added
 - Automatic recovery of crashed agents and orphaned coordinators through the existing supervisor, with recorded host/workdir, continuation briefs, human-wait and pause exclusions, owner checks, backoff, rolling 24-hour caps and `GAVE UP` notices. Recovery defaults on; `swarm init`/upgrade installs the user timer (every 5 minutes). Explicit `enabled = false` remains respected.
+- Role addressing: `swarm post --to @EL|@PM|@QA|@judge|@<role>` goes to whoever holds that seat on the job now. An unknown recipient, a seat nobody holds, or an author who is not an agent of `--job` is refused with an error and nothing is stored (it used to be stored for nobody to read). `post` also takes `--key` instead of `--as`. See [Addressing a role](docs/REFERENCE.md#addressing-a-role).
+- `swarm wait` takes `--until` (a duration, a time of day such as `17:30`, or a date and time) as well as `--for`. A bounded wait that has not ended now protects a job from the stall limits (including `goal_stall_hours`) as well as the orphan rule, and its end is shown in `status` and `watch`; an ended wait counts as progress. A board read by the orchestrating session counts as contact for liveness.
+- CLI plugins: core discovers command plugins (a plugins directory next to the config, `$SWARM_PLUGIN_PATH`, `skills/*/swarm_plugin.py`, `swarm.plugins` entry points), `swarm plugins` lists them and any load error, and a broken plugin never breaks a core command. `[plugins] disabled` skips plugins by name. Documented in `docs/PLUGINS.md`.
+- Engineering-team plugin (ships with the skill): `swarm team --job J [--show|--add ROLE|--remove ROLE]`, `swarm activate --team product_manager,build_engineer`, and a `team` line in `status --job J`. Always present: engineering lead, QA, engineers, judge (not removable). Optional: `product_manager` (on by default), `build_engineer` (new, off by default), reviewer, verifier. The default composition is read from `team.toml` (`$SWARM_TEAM_CONFIG`, else next to `config.toml`; a missing file means the defaults; template `team.example.toml`).
+- engineering-team skill: head-bound verdicts, gating on the merge result, scoped fix rounds, goals as checkable queries, a hand-off contract, a secrets protocol, an authorization ledger, a recovery runbook, a "don't" list, and the team composition rules (who carries the duties of an absent product manager or build engineer).
+
+### Fixed
+- Queued role-addressed posts resolve recipients and validate the author and `--key` on delivery; a refused queued post tells its author why.
+- `@PM` reaches the invoking project manager (or orchestrator); `@product` addresses the optional product manager. The engineering-team PM joins with `--role project_manager`.
+- File plugins with unsafe POSIX ownership, world-write access, write access by a foreign group or symlinks are refused and listed; primary-group writable plugins (umask `002`) are accepted; the plugin trust boundary and Windows exception are documented. `swarm plugins` also reports discovery failures.
+
+### Changed
+- Schema 16 (applied by the automatic schema upgrade on first use by the new version): `jobs.plugin_data`, a small JSON object of per-job settings that plugins keep with a job (`Board.job_data` / `set_job_data`). A plain `ADD COLUMN`.
 
 ## [0.1.17] - 2026-10-05
 

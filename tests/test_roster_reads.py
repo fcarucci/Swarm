@@ -94,9 +94,10 @@ class CatchUpReadTests(Env):
     def setUp(self):
         super().setUp()
         self.cli("activate", "--job", "J")
+        self.someone = self.peer()
 
-    def post(self, text: str, who: str = "Someone") -> None:
-        self.cli("post", "--job", "J", "--as", who, text)
+    def post(self, text: str, who: str | None = None) -> None:
+        self.cli("post", "--job", "J", "--as", who or self.someone, text)
 
     def set_board(self, **values) -> None:
         text = self.config.read_text().replace(
@@ -144,9 +145,10 @@ class CatchUpReadTests(Env):
     def test_spooled_post_delivered_late_is_still_shown(self):
         self.hook("start")
         self.hook("turn", tool_name="Bash")
-        spool.spool_post(self.cfg, "J", "Sandboxed", "written while offline", None)
+        sender = self.peer(key="sandboxed")
+        spool.spool_post(self.cfg, "J", sender, "written while offline", None)
         ctx = self.context(self.hook("turn", tool_name="Bash"))  # this hook flushes, then reads
-        self.assertIn("Sandboxed: written while offline", ctx)
+        self.assertIn(f"{sender}: written while offline", ctx)
 
     def test_resumed_agent_gets_what_it_missed_when_it_rejoins(self):
         self.hook("start")
@@ -174,11 +176,12 @@ class BoardGuidanceTests(Env):
         self.cli("activate", "--job", "J")
         self.hook("start")
         me = self.agent("agent-1").name
-        self.cli("post", "--job", "J", "--as", "Someone", "--to", me, "can you check X?")
-        self.cli("post", "--job", "J", "--as", "Someone", "broadcast")
+        someone = self.peer()
+        self.cli("post", "--job", "J", "--as", someone, "--to", me, "can you check X?")
+        self.cli("post", "--job", "J", "--as", someone, "broadcast")
         ctx = self.context(self.hook("turn", tool_name="Bash"))
         self.assertIn("[swarm board] 1 addressed to you: reply with `", ctx)
-        self.assertIn("--to 'Someone'", ctx)
+        self.assertIn(f"--to '{someone}'", ctx)
 
 
 class CliReadTests(Env):
@@ -186,8 +189,9 @@ class CliReadTests(Env):
         text = self.config.read_text().replace("[board]\n", "[board]\nread_limit = 2\njoin_history = 0\n")
         self.config.write_text(text)
         me = self.cli("join", "--job", "J", "--key", "k")[1].strip()
+        other = self.peer()
         for i in range(3):
-            self.cli("post", "--job", "J", "--as", "Other", f"m{i}")
+            self.cli("post", "--job", "J", "--as", other, f"m{i}")
         out = self.cli("read", "--as", me)[1]
         self.assertTrue(out.endswith("\n(1 more unread: run read again)\n"), out)
         self.assertNotIn("more unread", self.cli("read", "--as", me)[1])

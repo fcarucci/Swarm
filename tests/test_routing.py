@@ -139,8 +139,10 @@ class TwoJobsOneSessionTests(RoutingEnv):
         a1 = self.member("a1")
         self.assertEqual((a1.status, a1.current_tool, a1.tool_calls), ("running", "Bash", 1))
         # the boards stay apart: a1 sees A's posts only, b1 B's only
-        self.cli("post", "--job", "B", "--as", "Someone", "network news")
-        self.cli("post", "--job", "A", "--as", "Someone", "database news")
+        peer_b = self.cli("join", "--job", "B", "--key", "peer-b")[1].strip()
+        peer_a = self.cli("join", "--job", "A", "--key", "peer-a")[1].strip()
+        self.cli("post", "--job", "B", "--as", peer_b, "network news")
+        self.cli("post", "--job", "A", "--as", peer_a, "database news")
         ctx_a = self.context(self.turn("a1"))
         self.assertIn("database news", ctx_a)
         self.assertNotIn("network news", ctx_a)
@@ -210,8 +212,9 @@ class TwoJobsOneSessionTests(RoutingEnv):
     def test_resumed_member_gets_back_into_its_own_job(self):
         self.spawn("b1", "[swarm job: B]\nwork")
         name = self.member("b1").name
+        peer = self.cli("join", "--job", "B", "--key", "peer-b")[1].strip()
         self.hook("stop", agent_id="b1")
-        self.cli("post", "--job", "B", "--as", "Someone", "while you were away")
+        self.cli("post", "--job", "B", "--as", peer, "while you were away")
         out = self.start("b1")  # resumed through SendMessage: the transcript exists already
         self.assertIn(f'You are **{name}**, a member of the swarm working on job "B"', self.context(out))
         self.assertIn("while you were away", self.context(out))
