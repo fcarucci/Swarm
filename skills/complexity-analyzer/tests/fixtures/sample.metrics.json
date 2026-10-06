@@ -1,0 +1,1567 @@
+{
+  "closures": [
+    {
+      "cognitive": 7,
+      "end_line": 25,
+      "file": "crates/core/src/util.rs",
+      "lang": "rust",
+      "line": 15,
+      "name": "signs::<closure@15>",
+      "own_ploc": 11,
+      "parent": "signs",
+      "scope": "production"
+    },
+    {
+      "cognitive": 1,
+      "end_line": 16,
+      "file": "ts/app.ts",
+      "lang": "js",
+      "line": 16,
+      "name": "classify::<closure@16>",
+      "own_ploc": 1,
+      "parent": "classify",
+      "scope": "production"
+    }
+  ],
+  "crates": [
+    {
+      "abstractness": null,
+      "ca": 0,
+      "ce": 1,
+      "deps": [
+        "core-lib"
+      ],
+      "dev_deps": [],
+      "dir": "crates/app",
+      "distance": null,
+      "distance_eligible": false,
+      "in_scc": false,
+      "instability": 1.0,
+      "items": 0,
+      "kind": "bin",
+      "name": "app",
+      "sloc": 7
+    },
+    {
+      "abstractness": 0.3333,
+      "ca": 1,
+      "ce": 0,
+      "deps": [],
+      "dev_deps": [],
+      "dir": "crates/core",
+      "distance": 0.6667,
+      "distance_eligible": true,
+      "in_scc": false,
+      "instability": 0.0,
+      "items": 6,
+      "kind": "lib",
+      "name": "core-lib",
+      "sloc": 158
+    }
+  ],
+  "cross_check": {
+    "js": {
+      "cognitive_largest_disagreements": [],
+      "cognitive_max_abs_diff": 0,
+      "cognitive_mean_abs_diff": 0.0,
+      "cyclomatic_max_abs_diff": 0,
+      "cyclomatic_mean_abs_diff": 0.0,
+      "files": 7,
+      "matched": 8,
+      "only_primary": 0,
+      "only_rca": 0,
+      "primary": "eslint complexity + sonarjs",
+      "primary_functions": 8,
+      "rca_functions": 8
+    },
+    "python": {
+      "cyclomatic_max_abs_diff": 0,
+      "cyclomatic_mean_abs_diff": 0.0,
+      "files": 3,
+      "matched": 7,
+      "only_primary": 0,
+      "only_rca": 0,
+      "primary": "radon (cc)",
+      "primary_functions": 7,
+      "rca_functions": 7
+    }
+  },
+  "duplication": {
+    "available": true,
+    "clones": [
+      {
+        "a": {
+          "end": 23,
+          "file": "crates/core/src/a.rs",
+          "start": 10
+        },
+        "b": {
+          "end": 23,
+          "file": "crates/core/src/b.rs",
+          "start": 10
+        },
+        "lines": 14
+      }
+    ],
+    "clones_count": 1,
+    "duplicated_lines": 14,
+    "min_lines": 5,
+    "min_tokens": 50,
+    "percentage": 5.81,
+    "tool": "jscpd@5.4.0",
+    "total_lines": 241
+  },
+  "functions": [
+    {
+      "cognitive": 0,
+      "cyclomatic": 1,
+      "end_line": 7,
+      "file": "crates/app/src/main.rs",
+      "halstead_volume": 151.3,
+      "lang": "rust",
+      "line": 3,
+      "mi_vs": 69.35,
+      "name": "main",
+      "nargs": 0,
+      "nargs_adj": 0,
+      "nexits": 0,
+      "own_ploc": 5,
+      "ploc": 5,
+      "scope": "production",
+      "sloc": 5,
+      "unit_ploc": 5
+    },
+    {
+      "cognitive": 1,
+      "cyclomatic": 2,
+      "end_line": 8,
+      "file": "crates/core/src/a.rs",
+      "halstead_volume": 92.0,
+      "lang": "rust",
+      "line": 3,
+      "mi_vs": 69.01,
+      "name": "from_a",
+      "nargs": 1,
+      "nargs_adj": 1,
+      "nexits": 2,
+      "own_ploc": 6,
+      "ploc": 6,
+      "scope": "production",
+      "sloc": 6,
+      "unit_ploc": 6
+    },
+    {
+      "cognitive": 5,
+      "cyclomatic": 4,
+      "end_line": 23,
+      "file": "crates/core/src/a.rs",
+      "halstead_volume": 294.41,
+      "lang": "rust",
+      "line": 10,
+      "mi_vs": 57.17,
+      "name": "dup_block",
+      "nargs": 1,
+      "nargs_adj": 1,
+      "nexits": 1,
+      "own_ploc": 14,
+      "ploc": 14,
+      "scope": "production",
+      "sloc": 14,
+      "unit_ploc": 14
+    },
+    {
+      "cognitive": 1,
+      "cyclomatic": 2,
+      "end_line": 8,
+      "file": "crates/core/src/b.rs",
+      "halstead_volume": 92.0,
+      "lang": "rust",
+      "line": 3,
+      "mi_vs": 69.01,
+      "name": "from_b",
+      "nargs": 1,
+      "nargs_adj": 1,
+      "nexits": 2,
+      "own_ploc": 6,
+      "ploc": 6,
+      "scope": "production",
+      "sloc": 6,
+      "unit_ploc": 6
+    },
+    {
+      "cognitive": 5,
+      "cyclomatic": 4,
+      "end_line": 23,
+      "file": "crates/core/src/b.rs",
+      "halstead_volume": 294.41,
+      "lang": "rust",
+      "line": 10,
+      "mi_vs": 57.17,
+      "name": "dup_block_copy",
+      "nargs": 1,
+      "nargs_adj": 1,
+      "nexits": 1,
+      "own_ploc": 14,
+      "ploc": 14,
+      "scope": "production",
+      "sloc": 14,
+      "unit_ploc": 14
+    },
+    {
+      "cognitive": 0,
+      "cyclomatic": 1,
+      "end_line": 17,
+      "file": "crates/core/src/lib.rs",
+      "halstead_volume": 92.51,
+      "lang": "rust",
+      "line": 15,
+      "mi_vs": 75.69,
+      "name": "MemStorage::put",
+      "nargs": 3,
+      "nargs_adj": 2,
+      "nexits": 0,
+      "own_ploc": 3,
+      "ploc": 3,
+      "scope": "production",
+      "sloc": 3,
+      "unit_ploc": 3
+    },
+    {
+      "cognitive": 0,
+      "cyclomatic": 1,
+      "end_line": 31,
+      "file": "crates/core/src/lib.rs",
+      "halstead_volume": 51.89,
+      "lang": "rust",
+      "line": 29,
+      "mi_vs": 77.45,
+      "name": "Square::area",
+      "nargs": 1,
+      "nargs_adj": 0,
+      "nexits": 1,
+      "own_ploc": 3,
+      "ploc": 3,
+      "scope": "production",
+      "sloc": 3,
+      "unit_ploc": 3
+    },
+    {
+      "cognitive": 0,
+      "cyclomatic": 1,
+      "end_line": 37,
+      "file": "crates/core/src/lib.rs",
+      "halstead_volume": 60.94,
+      "lang": "rust",
+      "line": 35,
+      "mi_vs": 76.96,
+      "name": "Circle::area",
+      "nargs": 1,
+      "nargs_adj": 0,
+      "nexits": 1,
+      "own_ploc": 3,
+      "ploc": 3,
+      "scope": "production",
+      "sloc": 3,
+      "unit_ploc": 3
+    },
+    {
+      "cognitive": 0,
+      "cyclomatic": 1,
+      "end_line": 47,
+      "file": "crates/core/src/lib.rs",
+      "halstead_volume": 25.85,
+      "lang": "rust",
+      "line": 45,
+      "mi_vs": 79.57,
+      "name": "Repo::new",
+      "nargs": 0,
+      "nargs_adj": 0,
+      "nexits": 1,
+      "own_ploc": 3,
+      "ploc": 3,
+      "scope": "production",
+      "sloc": 3,
+      "unit_ploc": 3
+    },
+    {
+      "cognitive": 0,
+      "cyclomatic": 1,
+      "end_line": 52,
+      "file": "crates/core/src/lib.rs",
+      "halstead_volume": 75.28,
+      "lang": "rust",
+      "line": 50,
+      "mi_vs": 76.32,
+      "name": "Repo::insert",
+      "nargs": 3,
+      "nargs_adj": 2,
+      "nexits": 0,
+      "own_ploc": 3,
+      "ploc": 3,
+      "scope": "production",
+      "sloc": 3,
+      "unit_ploc": 3
+    },
+    {
+      "cognitive": 0,
+      "cyclomatic": 1,
+      "end_line": 57,
+      "file": "crates/core/src/lib.rs",
+      "halstead_volume": 58.81,
+      "lang": "rust",
+      "line": 55,
+      "mi_vs": 77.07,
+      "name": "forward",
+      "nargs": 2,
+      "nargs_adj": 2,
+      "nexits": 1,
+      "own_ploc": 3,
+      "ploc": 3,
+      "scope": "production",
+      "sloc": 3,
+      "unit_ploc": 3
+    },
+    {
+      "cognitive": 15,
+      "cyclomatic": 9,
+      "end_line": 78,
+      "file": "crates/core/src/lib.rs",
+      "halstead_volume": 340.0,
+      "lang": "rust",
+      "line": 59,
+      "mi_vs": 52.68,
+      "name": "classify",
+      "nargs": 2,
+      "nargs_adj": 2,
+      "nexits": 4,
+      "own_ploc": 20,
+      "ploc": 20,
+      "scope": "production",
+      "sloc": 20,
+      "unit_ploc": 20
+    },
+    {
+      "cognitive": 0,
+      "cyclomatic": 1,
+      "end_line": 3,
+      "file": "crates/core/src/util.rs",
+      "halstead_volume": 68.11,
+      "lang": "rust",
+      "line": 1,
+      "mi_vs": 76.62,
+      "name": "add_checked",
+      "nargs": 2,
+      "nargs_adj": 2,
+      "nexits": 1,
+      "own_ploc": 3,
+      "ploc": 3,
+      "scope": "production",
+      "sloc": 3,
+      "unit_ploc": 3
+    },
+    {
+      "cognitive": 0,
+      "cyclomatic": 1,
+      "end_line": 7,
+      "file": "crates/core/src/util.rs",
+      "halstead_volume": 34.87,
+      "lang": "rust",
+      "line": 5,
+      "mi_vs": 78.66,
+      "name": "never_used_elsewhere",
+      "nargs": 1,
+      "nargs_adj": 1,
+      "nexits": 1,
+      "own_ploc": 3,
+      "ploc": 3,
+      "scope": "production",
+      "sloc": 3,
+      "unit_ploc": 3
+    },
+    {
+      "cognitive": 0,
+      "cyclomatic": 1,
+      "end_line": 11,
+      "file": "crates/core/src/util.rs",
+      "halstead_volume": 103.96,
+      "lang": "rust",
+      "line": 9,
+      "mi_vs": 75.34,
+      "name": "merge_all",
+      "nargs": 3,
+      "nargs_adj": 3,
+      "nexits": 1,
+      "own_ploc": 3,
+      "ploc": 3,
+      "scope": "production",
+      "sloc": 3,
+      "unit_ploc": 3
+    },
+    {
+      "cognitive": 0,
+      "cyclomatic": 3,
+      "end_line": 27,
+      "file": "crates/core/src/util.rs",
+      "halstead_volume": 187.3,
+      "lang": "rust",
+      "line": 13,
+      "mi_vs": 57.89,
+      "name": "signs",
+      "nargs": 1,
+      "nargs_adj": 1,
+      "nexits": 1,
+      "own_ploc": 4,
+      "ploc": 15,
+      "scope": "production",
+      "sloc": 15,
+      "unit_ploc": 15
+    },
+    {
+      "cognitive": 1,
+      "cyclomatic": 2,
+      "end_line": 8,
+      "file": "js/a.js",
+      "halstead_volume": 87.57,
+      "lang": "js",
+      "line": 3,
+      "mi_vs": 69.16,
+      "name": "a",
+      "nargs": 1,
+      "nargs_adj": 1,
+      "nexits": 2,
+      "own_ploc": 6,
+      "ploc": 6,
+      "scope": "production",
+      "sloc": 6,
+      "source": "eslint+sonarjs",
+      "unit_ploc": 6
+    },
+    {
+      "cognitive": 1,
+      "cyclomatic": 2,
+      "end_line": 8,
+      "file": "js/b.js",
+      "halstead_volume": 87.57,
+      "lang": "js",
+      "line": 3,
+      "mi_vs": 69.16,
+      "name": "b",
+      "nargs": 1,
+      "nargs_adj": 1,
+      "nexits": 2,
+      "own_ploc": 6,
+      "ploc": 6,
+      "scope": "production",
+      "sloc": 6,
+      "source": "eslint+sonarjs",
+      "unit_ploc": 6
+    },
+    {
+      "cognitive": 0,
+      "cyclomatic": 1,
+      "cyclomatic_rca": 1,
+      "end_line": 5,
+      "file": "py/pkg/x.py",
+      "halstead_volume": 38.04,
+      "lang": "python",
+      "line": 4,
+      "mi_vs": 82.23,
+      "name": "use_y",
+      "nargs": 2,
+      "nargs_adj": 2,
+      "nexits": 1,
+      "own_ploc": 2,
+      "ploc": 2,
+      "scope": "production",
+      "sloc": 2,
+      "source": "radon+rca",
+      "unit_ploc": 2
+    },
+    {
+      "cognitive": 11,
+      "cyclomatic": 6,
+      "cyclomatic_rca": 6,
+      "end_line": 15,
+      "file": "py/pkg/x.py",
+      "halstead_volume": 140.55,
+      "lang": "python",
+      "line": 8,
+      "mi_vs": 64.45,
+      "name": "decide",
+      "nargs": 2,
+      "nargs_adj": 2,
+      "nexits": 3,
+      "own_ploc": 8,
+      "ploc": 8,
+      "scope": "production",
+      "sloc": 8,
+      "source": "radon+rca",
+      "unit_ploc": 8
+    },
+    {
+      "cognitive": 0,
+      "cyclomatic": 1,
+      "cyclomatic_rca": 1,
+      "end_line": 9,
+      "file": "py/pkg/y.py",
+      "halstead_volume": 11.61,
+      "lang": "python",
+      "line": 8,
+      "mi_vs": 85.84,
+      "name": "Base.run",
+      "nargs": 2,
+      "nargs_adj": 1,
+      "nexits": 0,
+      "own_ploc": 2,
+      "ploc": 2,
+      "scope": "production",
+      "sloc": 2,
+      "source": "radon+rca",
+      "unit_ploc": 2
+    },
+    {
+      "cognitive": 0,
+      "cyclomatic": 1,
+      "cyclomatic_rca": 1,
+      "end_line": 14,
+      "file": "py/pkg/y.py",
+      "halstead_volume": 39.86,
+      "lang": "python",
+      "line": 13,
+      "mi_vs": 82.09,
+      "name": "OnlyImpl.run",
+      "nargs": 2,
+      "nargs_adj": 1,
+      "nexits": 1,
+      "own_ploc": 2,
+      "ploc": 2,
+      "scope": "production",
+      "sloc": 2,
+      "source": "radon+rca",
+      "unit_ploc": 2
+    },
+    {
+      "cognitive": 0,
+      "cyclomatic": 1,
+      "cyclomatic_rca": 1,
+      "end_line": 18,
+      "file": "py/pkg/y.py",
+      "halstead_volume": 25.27,
+      "lang": "python",
+      "line": 17,
+      "mi_vs": 83.48,
+      "name": "helper",
+      "nargs": 2,
+      "nargs_adj": 2,
+      "nexits": 1,
+      "own_ploc": 2,
+      "ploc": 2,
+      "scope": "production",
+      "sloc": 2,
+      "source": "radon+rca",
+      "unit_ploc": 2
+    },
+    {
+      "cognitive": 7,
+      "cyclomatic": 5,
+      "cyclomatic_rca": 5,
+      "end_line": 26,
+      "file": "py/pkg/y.py",
+      "halstead_volume": 106.27,
+      "lang": "python",
+      "line": 21,
+      "mi_vs": 68.16,
+      "name": "unused_py_helper",
+      "nargs": 3,
+      "nargs_adj": 3,
+      "nexits": 2,
+      "own_ploc": 6,
+      "ploc": 6,
+      "scope": "production",
+      "sloc": 6,
+      "source": "radon+rca",
+      "unit_ploc": 6
+    },
+    {
+      "cognitive": 8,
+      "cyclomatic": 6,
+      "end_line": 18,
+      "file": "ts/app.ts",
+      "halstead_volume": 461.23,
+      "lang": "js",
+      "line": 5,
+      "mi_vs": 55.4,
+      "name": "classify",
+      "nargs": 2,
+      "nargs_adj": 2,
+      "nexits": 1,
+      "own_ploc": 13,
+      "ploc": 14,
+      "scope": "production",
+      "sloc": 14,
+      "source": "eslint+sonarjs",
+      "unit_ploc": 14
+    },
+    {
+      "cognitive": 1,
+      "cyclomatic": 2,
+      "end_line": 5,
+      "file": "ts/lib/foo.ts",
+      "halstead_volume": 59.21,
+      "lang": "js",
+      "line": 3,
+      "mi_vs": 76.91,
+      "name": "score",
+      "nargs": 1,
+      "nargs_adj": 1,
+      "nexits": 1,
+      "own_ploc": 3,
+      "ploc": 3,
+      "scope": "production",
+      "sloc": 3,
+      "source": "eslint+sonarjs",
+      "unit_ploc": 3
+    },
+    {
+      "cognitive": 0,
+      "cyclomatic": 1,
+      "end_line": 9,
+      "file": "ts/lib/foo.ts",
+      "halstead_volume": 53.77,
+      "lang": "js",
+      "line": 7,
+      "mi_vs": 77.34,
+      "name": "describe",
+      "nargs": 1,
+      "nargs_adj": 1,
+      "nexits": 1,
+      "own_ploc": 3,
+      "ploc": 3,
+      "scope": "production",
+      "sloc": 3,
+      "source": "eslint+sonarjs",
+      "unit_ploc": 3
+    },
+    {
+      "cognitive": 0,
+      "cyclomatic": 1,
+      "end_line": 8,
+      "file": "ts/lib/shape.ts",
+      "halstead_volume": 68.53,
+      "lang": "js",
+      "line": 6,
+      "mi_vs": 76.6,
+      "name": "area",
+      "nargs": 1,
+      "nargs_adj": 1,
+      "nexits": 1,
+      "own_ploc": 3,
+      "ploc": 3,
+      "scope": "production",
+      "sloc": 3,
+      "source": "eslint+sonarjs",
+      "unit_ploc": 3
+    },
+    {
+      "cognitive": 0,
+      "cyclomatic": 1,
+      "end_line": 12,
+      "file": "ts/lib/shape.ts",
+      "halstead_volume": 68.11,
+      "lang": "js",
+      "line": 10,
+      "mi_vs": 76.62,
+      "name": "unusedRectHelper",
+      "nargs": 2,
+      "nargs_adj": 2,
+      "nexits": 1,
+      "own_ploc": 3,
+      "ploc": 3,
+      "scope": "production",
+      "sloc": 3,
+      "source": "eslint+sonarjs",
+      "unit_ploc": 3
+    },
+    {
+      "cognitive": 0,
+      "cyclomatic": 1,
+      "end_line": 1,
+      "file": "ts/orphan.ts",
+      "halstead_volume": 16.25,
+      "lang": "js",
+      "line": 1,
+      "mi_vs": 91.39,
+      "name": "orphan",
+      "nargs": 1,
+      "nargs_adj": 1,
+      "nexits": 0,
+      "own_ploc": 1,
+      "ploc": 1,
+      "scope": "production",
+      "sloc": 1,
+      "source": "eslint+sonarjs",
+      "unit_ploc": 1
+    },
+    {
+      "cognitive": 0,
+      "cyclomatic": 1,
+      "end_line": 87,
+      "file": "crates/core/src/lib.rs",
+      "halstead_volume": 44.97,
+      "lang": "rust",
+      "line": 85,
+      "mi_vs": 77.88,
+      "name": "classify_zero",
+      "nargs": 0,
+      "nargs_adj": 0,
+      "nexits": 0,
+      "own_ploc": 3,
+      "ploc": 3,
+      "scope": "test",
+      "sloc": 3,
+      "unit_ploc": 3
+    },
+    {
+      "cognitive": 0,
+      "cyclomatic": 1,
+      "end_line": 6,
+      "file": "crates/core/tests/smoke.rs",
+      "halstead_volume": 44.97,
+      "lang": "rust",
+      "line": 4,
+      "mi_vs": 77.88,
+      "name": "forwards",
+      "nargs": 0,
+      "nargs_adj": 0,
+      "nexits": 0,
+      "own_ploc": 3,
+      "ploc": 3,
+      "scope": "test",
+      "sloc": 3,
+      "unit_ploc": 3
+    },
+    {
+      "cognitive": 0,
+      "cyclomatic": 2,
+      "cyclomatic_rca": 2,
+      "end_line": 5,
+      "file": "py/test_pkg.py",
+      "halstead_volume": 28.53,
+      "lang": "python",
+      "line": 4,
+      "mi_vs": 82.97,
+      "name": "test_decide",
+      "nargs": 0,
+      "nargs_adj": 0,
+      "nexits": 0,
+      "own_ploc": 2,
+      "ploc": 2,
+      "scope": "test",
+      "sloc": 2,
+      "source": "radon+rca",
+      "unit_ploc": 2
+    }
+  ],
+  "header": {
+    "degraded": [],
+    "include_tests": true,
+    "languages": [
+      "js",
+      "python",
+      "rust"
+    ],
+    "schema_version": 2,
+    "skipped_or_partial_files": [],
+    "thresholds_version": "2.1.0",
+    "tool_table": [
+      [
+        "Rust",
+        "cognitive, cyclomatic, SLOC, Halstead, MI",
+        "rust-code-analysis"
+      ],
+      [
+        "Rust",
+        "module graph, abstractions, unused pub",
+        "tree-sitter-rust + Cargo.toml (builtin)"
+      ],
+      [
+        "Python",
+        "function inventory, cyclomatic, MI, Halstead, raw LOC",
+        "radon 6.0.1"
+      ],
+      [
+        "Python",
+        "cognitive, SLOC (cross-check of cyclomatic)",
+        "rust-code-analysis"
+      ],
+      [
+        "Python",
+        "import graph",
+        "ast (builtin)"
+      ],
+      [
+        "Python",
+        "unused code (OEI)",
+        "vulture 2.16"
+      ],
+      [
+        "JS/TS",
+        "cognitive complexity",
+        "eslint 9.39.5 + eslint-plugin-sonarjs 4.2.2"
+      ],
+      [
+        "JS/TS",
+        "cyclomatic, parameters",
+        "eslint 9.39.5 (complexity rule), parser @typescript-eslint/parser 8.71.1"
+      ],
+      [
+        "JS/TS",
+        "SLOC, Halstead, MI (cross-check)",
+        "rust-code-analysis"
+      ],
+      [
+        "JS/TS",
+        "module graph, cycles, instability",
+        "dependency-cruiser 17.4.3"
+      ],
+      [
+        "JS/TS",
+        "unused exports and files (OEI)",
+        "knip 5.88.1"
+      ],
+      [
+        "all",
+        "duplication",
+        "jscpd@5.4.0"
+      ]
+    ],
+    "tools": {
+      "@typescript-eslint/parser": "8.71.1",
+      "dependency-cruiser": "17.4.3",
+      "eslint": "9.39.5",
+      "eslint-plugin-sonarjs": "4.2.2",
+      "js-import-graph": "dependency-cruiser 17.4.3",
+      "jscpd": "jscpd@5.4.0",
+      "knip": "5.88.1",
+      "node": "available",
+      "radon": "6.0.1",
+      "rust-code-analysis": "0.0.25",
+      "tree-sitter": "0.26.0",
+      "tree-sitter-rust": "0.24.2",
+      "typescript": "5.9.3",
+      "vulture": "2.16"
+    }
+  },
+  "js_graph": {
+    "aliased": 2,
+    "circular": 2,
+    "dynamic": 0,
+    "edges": 8,
+    "reexport": 3,
+    "tool": "dependency-cruiser 17.4.3",
+    "tsconfig": "tsconfig.json",
+    "type_only": 1,
+    "unresolved": 0
+  },
+  "modules": [
+    {
+      "ca": 0,
+      "ce": 1,
+      "crate": "app",
+      "file": "crates/app/src/main.rs",
+      "henry_kafura": 0,
+      "imports": [
+        "crates/core/src/lib.rs"
+      ],
+      "in_scc": false,
+      "instability": 1.0,
+      "lang": "rust",
+      "scc": null,
+      "sloc": 7
+    },
+    {
+      "ca": 1,
+      "ce": 1,
+      "crate": "core-lib",
+      "file": "crates/core/src/a.rs",
+      "henry_kafura": 23,
+      "imports": [
+        "crates/core/src/b.rs"
+      ],
+      "in_scc": true,
+      "instability": 0.5,
+      "lang": "rust",
+      "scc": 0,
+      "sloc": 23
+    },
+    {
+      "ca": 1,
+      "ce": 1,
+      "crate": "core-lib",
+      "file": "crates/core/src/b.rs",
+      "henry_kafura": 23,
+      "imports": [
+        "crates/core/src/a.rs"
+      ],
+      "in_scc": true,
+      "instability": 0.5,
+      "lang": "rust",
+      "scc": 0,
+      "sloc": 23
+    },
+    {
+      "ca": 1,
+      "ce": 0,
+      "crate": "core-lib",
+      "file": "crates/core/src/lib.rs",
+      "henry_kafura": 0,
+      "imports": [],
+      "in_scc": false,
+      "instability": 0.0,
+      "lang": "rust",
+      "scc": null,
+      "sloc": 85
+    },
+    {
+      "ca": 0,
+      "ce": 0,
+      "crate": "core-lib",
+      "file": "crates/core/src/util.rs",
+      "henry_kafura": 0,
+      "imports": [],
+      "in_scc": false,
+      "instability": null,
+      "lang": "rust",
+      "scc": null,
+      "sloc": 27
+    },
+    {
+      "ca": 1,
+      "ce": 1,
+      "crate": null,
+      "file": "js/a.js",
+      "henry_kafura": 8,
+      "imports": [
+        "js/b.js"
+      ],
+      "in_scc": true,
+      "instability": 0.5,
+      "lang": "js",
+      "scc": 1,
+      "sloc": 8
+    },
+    {
+      "ca": 1,
+      "ce": 1,
+      "crate": null,
+      "file": "js/b.js",
+      "henry_kafura": 8,
+      "imports": [
+        "js/a.js"
+      ],
+      "in_scc": true,
+      "instability": 0.5,
+      "lang": "js",
+      "scc": 1,
+      "sloc": 8
+    },
+    {
+      "ca": 1,
+      "ce": 2,
+      "crate": null,
+      "file": "py/pkg/x.py",
+      "henry_kafura": 60,
+      "imports": [
+        "py/pkg/__init__.py",
+        "py/pkg/y.py"
+      ],
+      "in_scc": true,
+      "instability": 0.6667,
+      "lang": "python",
+      "scc": 2,
+      "sloc": 15
+    },
+    {
+      "ca": 1,
+      "ce": 2,
+      "crate": null,
+      "file": "py/pkg/y.py",
+      "henry_kafura": 104,
+      "imports": [
+        "py/pkg/__init__.py",
+        "py/pkg/x.py"
+      ],
+      "in_scc": true,
+      "instability": 0.6667,
+      "lang": "python",
+      "scc": 2,
+      "sloc": 26
+    },
+    {
+      "ca": 1,
+      "ce": 2,
+      "crate": null,
+      "file": "ts/app.ts",
+      "henry_kafura": 72,
+      "imports": [
+        "ts/lib/foo.ts",
+        "ts/lib/shape.ts"
+      ],
+      "in_scc": false,
+      "instability": 0.6667,
+      "lang": "js",
+      "scc": null,
+      "sloc": 18
+    },
+    {
+      "ca": 0,
+      "ce": 3,
+      "crate": null,
+      "file": "ts/index.ts",
+      "henry_kafura": 0,
+      "imports": [
+        "ts/app.ts",
+        "ts/lib/foo.ts",
+        "ts/lib/shape.ts"
+      ],
+      "in_scc": false,
+      "instability": 1.0,
+      "lang": "js",
+      "scc": null,
+      "sloc": 3
+    },
+    {
+      "ca": 2,
+      "ce": 1,
+      "crate": null,
+      "file": "ts/lib/foo.ts",
+      "henry_kafura": 36,
+      "imports": [
+        "ts/lib/shape.ts"
+      ],
+      "in_scc": false,
+      "instability": 0.3333,
+      "lang": "js",
+      "scc": null,
+      "sloc": 9
+    },
+    {
+      "ca": 3,
+      "ce": 0,
+      "crate": null,
+      "file": "ts/lib/shape.ts",
+      "henry_kafura": 0,
+      "imports": [],
+      "in_scc": false,
+      "instability": 0.0,
+      "lang": "js",
+      "scc": null,
+      "sloc": 14
+    },
+    {
+      "ca": 0,
+      "ce": 0,
+      "crate": null,
+      "file": "ts/orphan.ts",
+      "henry_kafura": 0,
+      "imports": [],
+      "in_scc": false,
+      "instability": null,
+      "lang": "js",
+      "scc": null,
+      "sloc": 1
+    }
+  ],
+  "over_engineering": {
+    "counts": {
+      "abstraction_candidates": 4,
+      "abstractions": 4,
+      "functions": 18,
+      "generic_capable_items": 26,
+      "generic_heavy": 1,
+      "markers": 0,
+      "markers_per_kloc": 0.0,
+      "pass_through": 3,
+      "public_items": 34,
+      "single_impl_weighted": 3.0,
+      "single_use": 3,
+      "unused_public": 13
+    },
+    "dead_code": {
+      "python": {
+        "class": 1,
+        "function": 2,
+        "method": 2
+      }
+    },
+    "generic_heavy": [
+      {
+        "file": "crates/core/src/util.rs",
+        "generics": 3,
+        "line": 9,
+        "name": "merge_all",
+        "where": 0
+      }
+    ],
+    "markers": [],
+    "pass_through": [
+      {
+        "file": "crates/core/src/lib.rs",
+        "lang": "rust",
+        "line": 50,
+        "name": "insert"
+      },
+      {
+        "file": "crates/core/src/lib.rs",
+        "lang": "rust",
+        "line": 55,
+        "name": "forward"
+      },
+      {
+        "file": "py/pkg/x.py",
+        "lang": "python",
+        "line": 4,
+        "name": "use_y"
+      }
+    ],
+    "ratios": {
+      "abs": 0.75,
+      "gen": 0.0385,
+      "pt": 0.1667,
+      "sg": 0.0,
+      "st": 0.75,
+      "up": 0.3824
+    },
+    "single_impl": [
+      {
+        "class": "single-impl",
+        "file": "crates/core/src/lib.rs",
+        "impls_prod": 1,
+        "impls_test": 0,
+        "lang": "rust",
+        "line": 6,
+        "name": "Storage"
+      },
+      {
+        "class": "single-impl",
+        "file": "py/pkg/y.py",
+        "impls_prod": 1,
+        "impls_test": 0,
+        "lang": "python",
+        "line": 6,
+        "name": "Base"
+      },
+      {
+        "class": "single-impl",
+        "file": "ts/lib/shape.ts",
+        "impls_prod": 0,
+        "impls_test": 0,
+        "lang": "js",
+        "line": 0,
+        "name": "Rect"
+      }
+    ],
+    "single_use": [
+      {
+        "file": "crates/core/src/lib.rs",
+        "kind": "trait",
+        "lang": "rust",
+        "line": 6,
+        "name": "Storage",
+        "refs": 1
+      },
+      {
+        "file": "crates/core/src/util.rs",
+        "kind": "fn",
+        "lang": "rust",
+        "line": 9,
+        "name": "merge_all",
+        "refs": 0
+      },
+      {
+        "file": "py/pkg/y.py",
+        "kind": "abstract class",
+        "lang": "python",
+        "line": 6,
+        "name": "Base",
+        "refs": 1
+      }
+    ],
+    "unused_files": [
+      "ts/orphan.ts"
+    ],
+    "unused_pub": [
+      {
+        "file": "crates/core/src/a.rs",
+        "lang": "rust",
+        "line": 10,
+        "name": "dup_block"
+      },
+      {
+        "file": "crates/core/src/b.rs",
+        "lang": "rust",
+        "line": 10,
+        "name": "dup_block_copy"
+      },
+      {
+        "file": "crates/core/src/lib.rs",
+        "lang": "rust",
+        "line": 6,
+        "name": "Storage"
+      },
+      {
+        "file": "crates/core/src/lib.rs",
+        "lang": "rust",
+        "line": 10,
+        "name": "MemStorage"
+      },
+      {
+        "file": "crates/core/src/lib.rs",
+        "lang": "rust",
+        "line": 26,
+        "name": "Circle"
+      },
+      {
+        "file": "crates/core/src/util.rs",
+        "lang": "rust",
+        "line": 5,
+        "name": "never_used_elsewhere"
+      },
+      {
+        "file": "crates/core/src/util.rs",
+        "lang": "rust",
+        "line": 9,
+        "name": "merge_all"
+      },
+      {
+        "file": "crates/core/src/util.rs",
+        "lang": "rust",
+        "line": 13,
+        "name": "signs"
+      },
+      {
+        "confidence": 60,
+        "file": "py/pkg/x.py",
+        "kind": "function",
+        "lang": "python",
+        "line": 4,
+        "name": "use_y"
+      },
+      {
+        "confidence": 60,
+        "file": "py/pkg/y.py",
+        "kind": "class",
+        "lang": "python",
+        "line": 12,
+        "name": "OnlyImpl"
+      },
+      {
+        "confidence": 60,
+        "file": "py/pkg/y.py",
+        "kind": "function",
+        "lang": "python",
+        "line": 21,
+        "name": "unused_py_helper"
+      },
+      {
+        "file": "ts/lib/shape.ts",
+        "lang": "js",
+        "line": 0,
+        "name": "UnusedAlias"
+      },
+      {
+        "file": "ts/lib/shape.ts",
+        "lang": "js",
+        "line": 0,
+        "name": "unusedRectHelper"
+      }
+    ]
+  },
+  "python_files": [
+    {
+      "comments": 0,
+      "difficulty": 0.0,
+      "effort": 0.0,
+      "file": "py/pkg/__init__.py",
+      "mi": 100.0,
+      "sloc": 0,
+      "volume": 0.0
+    },
+    {
+      "comments": 0,
+      "difficulty": 2.5,
+      "effort": 134.4,
+      "file": "py/pkg/x.py",
+      "mi": 64.36,
+      "sloc": 11,
+      "volume": 53.77
+    },
+    {
+      "comments": 0,
+      "difficulty": 2.29,
+      "effort": 94.9,
+      "file": "py/pkg/y.py",
+      "mi": 60.89,
+      "sloc": 17,
+      "volume": 41.51
+    },
+    {
+      "comments": 0,
+      "difficulty": 0.5,
+      "effort": 2.4,
+      "file": "py/test_pkg.py",
+      "mi": 84.58,
+      "sloc": 3,
+      "volume": 4.75
+    }
+  ],
+  "repo": {
+    "closures": {
+      "production": 2,
+      "test": 0
+    },
+    "crates": 2,
+    "files": {
+      "production": 15,
+      "test": 2
+    },
+    "languages": [
+      "js",
+      "python",
+      "rust"
+    ],
+    "modules": 14,
+    "production": {
+      "functions": 30,
+      "loc": 168,
+      "sloc": 168
+    },
+    "production_sloc_files": 267,
+    "test": {
+      "functions": 3,
+      "loc": 8,
+      "sloc": 8
+    }
+  },
+  "rust_use_resolution": {
+    "uses_external": 0,
+    "uses_reexport_skipped": 0,
+    "uses_resolved": 6
+  },
+  "sccs": {
+    "crates": [],
+    "modules": [
+      [
+        "crates/core/src/a.rs",
+        "crates/core/src/b.rs"
+      ],
+      [
+        "js/a.js",
+        "js/b.js"
+      ],
+      [
+        "py/pkg/x.py",
+        "py/pkg/y.py"
+      ]
+    ]
+  },
+  "scores": {
+    "production": {
+      "COI": {
+        "components": {
+          "cyc_crate": 0.0,
+          "cyc_mod": 0.4286,
+          "dist_norm": 0.9524,
+          "distance_crates": 1,
+          "fan": 0.0,
+          "hk_p90": 72.0,
+          "hub": 0.0,
+          "mean_D": 0.6667
+        },
+        "grade": "B",
+        "modules": 14,
+        "modules_in_cycles": 6,
+        "score": 70.7
+      },
+      "CXI": {
+        "closures": 2,
+        "cognitive_per_100_loc": 38.1,
+        "functions": 30,
+        "grade": "A",
+        "max_cognitive": 15,
+        "mean_cognitive": 1.87,
+        "mi_vs_red_share": 0.0,
+        "mi_vs_yellow_share": 0.0,
+        "over_15": 0,
+        "over_25": 0,
+        "p90_cognitive": 7.0,
+        "p95_cognitive": 11.0,
+        "profile": {
+          "high": 0.119,
+          "low": 0.6488,
+          "moderate": 0.2321,
+          "very_high": 0.0
+        },
+        "risk_density_R": 0.5893,
+        "score": 89.1,
+        "tail_T": 0.0,
+        "tail_V": 0.0,
+        "units_over_very_high": 0
+      },
+      "MAI": {
+        "grade": "B",
+        "mean_rating": 4.73,
+        "mean_stars": 4.6,
+        "missing": [],
+        "partial": false,
+        "score": 84.6,
+        "sub_ratings": {
+          "duplication": {
+            "percentage": 5.81,
+            "rating": 3.338,
+            "stars": 3
+          },
+          "module_coupling": {
+            "profile": {
+              "high": 0.0,
+              "low": 1.0,
+              "moderate": 0.0,
+              "very_high": 0.0
+            },
+            "rating": 5.5,
+            "stars": 5
+          },
+          "unit_complexity": {
+            "profile": {
+              "high": 0.0,
+              "low": 0.75,
+              "moderate": 0.25,
+              "very_high": 0.0
+            },
+            "rating": 4.5,
+            "stars": 5
+          },
+          "unit_interfacing": {
+            "profile": {
+              "high": 0.0,
+              "low": 0.9464,
+              "moderate": 0.0536,
+              "very_high": 0.0
+            },
+            "rating": 5.286,
+            "stars": 5
+          },
+          "unit_size": {
+            "profile": {
+              "high": 0.0,
+              "low": 0.881,
+              "moderate": 0.119,
+              "very_high": 0.0
+            },
+            "rating": 5.024,
+            "stars": 5
+          }
+        }
+      },
+      "OEI": {
+        "components": {
+          "abs": 0.75,
+          "gen": 0.0385,
+          "pt": 0.1667,
+          "sg": 0.0,
+          "st": 0.75,
+          "up": 0.3824
+        },
+        "grade": "E",
+        "heuristic": true,
+        "score": 24.4,
+        "weighted_mean": 0.3781
+      },
+      "by_language": {
+        "js": {
+          "CXI": 100.0,
+          "functions": 8
+        },
+        "python": {
+          "CXI": 100.0,
+          "functions": 6
+        },
+        "rust": {
+          "CXI": 82.9,
+          "functions": 16
+        }
+      }
+    },
+    "test": {
+      "CXI": {
+        "closures": 0,
+        "cognitive_per_100_loc": 0.0,
+        "functions": 3,
+        "grade": "A",
+        "max_cognitive": 0,
+        "mean_cognitive": 0.0,
+        "mi_vs_red_share": 0.0,
+        "mi_vs_yellow_share": 0.0,
+        "over_15": 0,
+        "over_25": 0,
+        "p90_cognitive": 0.0,
+        "p95_cognitive": 0.0,
+        "profile": {
+          "high": 0.0,
+          "low": 1.0,
+          "moderate": 0.0,
+          "very_high": 0.0
+        },
+        "risk_density_R": 0.0,
+        "score": 100.0,
+        "tail_T": 0.0,
+        "tail_V": 0.0,
+        "units_over_very_high": 0
+      },
+      "MAI": {
+        "grade": "A",
+        "mean_rating": 5.5,
+        "mean_stars": 5.0,
+        "missing": [
+          "duplication",
+          "module_coupling"
+        ],
+        "partial": true,
+        "score": 100.0,
+        "sub_ratings": {
+          "unit_complexity": {
+            "profile": {
+              "high": 0.0,
+              "low": 1.0,
+              "moderate": 0.0,
+              "very_high": 0.0
+            },
+            "rating": 5.5,
+            "stars": 5
+          },
+          "unit_interfacing": {
+            "profile": {
+              "high": 0.0,
+              "low": 1.0,
+              "moderate": 0.0,
+              "very_high": 0.0
+            },
+            "rating": 5.5,
+            "stars": 5
+          },
+          "unit_size": {
+            "profile": {
+              "high": 0.0,
+              "low": 1.0,
+              "moderate": 0.0,
+              "very_high": 0.0
+            },
+            "rating": 5.5,
+            "stars": 5
+          }
+        }
+      },
+      "note": "COI and OEI are not computed for test code; duplication and module coupling are not part of the test MAI."
+    }
+  }
+}

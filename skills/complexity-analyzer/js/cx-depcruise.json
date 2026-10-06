@@ -1,0 +1,13 @@
+{
+  "options": {
+    "doNotFollow": { "path": "node_modules" },
+    "exclude": { "path": "(^|/)(\\.git|node_modules|target|dist|build|\\.next|coverage|vendor|\\.venv|venv|__pycache__)(/|$)|\\.d\\.ts$" },
+    "tsPreCompilationDeps": true,
+    "moduleSystems": ["es6", "cjs"],
+    "enhancedResolveOptions": {
+      "exportsFields": ["exports"],
+      "conditionNames": ["import", "require", "node", "default", "types"],
+      "extensions": [".ts", ".tsx", ".js", ".mjs", ".cjs", ".jsx", ".mts", ".cts"]
+    }
+  }
+}

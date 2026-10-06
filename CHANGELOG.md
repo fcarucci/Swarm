@@ -10,7 +10,7 @@ Planned release: 0.2.0.
 
 ### Added
 - Automatic artifact review pipeline: worker hand-offs start judges, `not_met` starts bounded fix rounds, and `met` starts separate finalizers without an orchestrator session. Artifact verdicts remain independent; judges must record a verdict before stopping and cannot execute fixes. Engineering-team supplies exact-SHA CI and an ordinary-merge integrator recipe.
-
+- complexity-analyzer skill.
 - refactoring skill.
 - The `ask-answer` plugin: structured questions to the human, roles or agents; answers, comments and corrections; full answer delivery, a watch questions pane and pending human questions in orchestrator context.
 - Question changes invalidate local hook leases; PostgreSQL watch snapshots include blocker state and plugin settings, and pending human questions keep surfacing on each orchestrator turn.
@@ -32,6 +32,7 @@ Planned release: 0.2.0.
 - File plugins with unsafe POSIX ownership, world-write access, write access by a foreign group or symlinks are refused and listed; primary-group writable plugins (umask `002`) are accepted; the plugin trust boundary and Windows exception are documented. `swarm plugins` also reports discovery failures.
 
 ### Changed
+- Session watches roll up only open jobs (or the last finished job), coalesce notification bursts, and render keys from cached snapshots; schema 19 keeps PostgreSQL job totals restricted to the displayed jobs during multi-job refreshes (automatic migration).
 - `wait` and `resume` use blockers; upgrades preserve existing waits and plugin data. Status and watch list open blockers. Wait blockers retain protection only while bounded by a future deadline; question/person/role blockers protect until resolved, even overdue ones.
 - Schema 17 restricts PostgreSQL agent message counts to the requested job and rolls up jobs without per-agent message counts, preserving status columns and historical counts (automatic migration).
 - Schema 16 (applied by the automatic schema upgrade on first use by the new version): `jobs.plugin_data`, a small JSON object of per-job settings that plugins keep with a job (`Board.job_data` / `set_job_data`). A plain `ADD COLUMN`.

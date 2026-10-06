@@ -1,0 +1,15 @@
+{
+  "name": "cxmetrics-node-tools",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pinned node tools for the complexity-analyzer skill (installed by bin/install_tools.py).",
+  "dependencies": {
+    "@typescript-eslint/parser": "8.71.1",
+    "dependency-cruiser": "17.4.3",
+    "eslint": "9.39.5",
+    "eslint-plugin-sonarjs": "4.2.2",
+    "jscpd": "5.4.0",
+    "knip": "5.88.1",
+    "typescript": "5.9.3"
+  }
+}

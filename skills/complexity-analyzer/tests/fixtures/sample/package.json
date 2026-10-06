@@ -1,0 +1,9 @@
+{
+  "name": "sample",
+  "private": true,
+  "version": "0.0.0",
+  "knip": {
+    "entry": ["js/a.js", "ts/index.ts"],
+    "project": ["js/**/*.js", "ts/**/*.ts"]
+  }
+}
