@@ -16,7 +16,7 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 ### Fixed
 - Queued role-addressed posts resolve recipients and validate the author and `--key` on delivery; a refused queued post tells its author why.
 - `@PM` reaches the invoking project manager (or orchestrator); `@product` addresses the optional product manager. The engineering-team PM joins with `--role project_manager`.
-- File plugins with unsafe POSIX ownership, write permissions or symlinks are refused and listed; the plugin trust boundary and Windows exception are documented. `swarm plugins` also reports discovery failures.
+- File plugins with unsafe POSIX ownership, world-write access, write access by a foreign group or symlinks are refused and listed; primary-group writable plugins (umask `002`) are accepted; the plugin trust boundary and Windows exception are documented. `swarm plugins` also reports discovery failures.
 
 ### Changed
 - Schema 16 (applied by the automatic schema upgrade on first use by the new version): `jobs.plugin_data`, a small JSON object of per-job settings that plugins keep with a job (`Board.job_data` / `set_job_data`). A plain `ADD COLUMN`.

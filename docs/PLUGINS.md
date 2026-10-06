@@ -37,8 +37,10 @@ code into the orchestrator's next command. Only install trusted plugins and prot
 locations. The OS user is the trust boundary; the checks below do not isolate agents sharing it.
 Python entry points are trusted installed packages and are not inspected by these file checks.
 
-On POSIX, file plugins are refused if they are symlinks, owned by another user, or group/world
-writable. Package plugins also check their package directory and `__init__.py`. Refusals appear
+On POSIX, file plugins are refused if they are symlinks, owned by another user, world-writable,
+or group-writable with a group other than the caller's primary group. Files writable by the
+caller's primary group are accepted, including installations made with umask `002`. Package
+plugins also check their package directory and `__init__.py`. Refusals appear
 in `swarm plugins`. These cheap checks do not protect against a same-user writer or a writable
 ancestor directory, and do not prevent file replacement races. On Windows these checks are
 skipped because POSIX ownership and mode bits do not express Windows ACLs; secure plugin

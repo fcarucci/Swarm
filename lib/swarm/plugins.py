@@ -56,8 +56,10 @@ def _check_file_trust(path: Path) -> None:
         raise ValueError("refused: symlink")
     if st.st_uid != os.getuid():
         raise ValueError("refused: owned by another user")
-    if st.st_mode & 0o022:
-        raise ValueError("refused: group/world-writable")
+    if st.st_mode & 0o002:
+        raise ValueError("refused: world-writable")
+    if st.st_mode & 0o020 and st.st_gid != os.getgid():
+        raise ValueError("refused: writable by another group")
 
 
 @dataclasses.dataclass
