@@ -379,7 +379,7 @@ class PostgresDeadlineTests(unittest.TestCase):
         self.addCleanup(b.close)
         self.proxy.stall()
         self.assert_gives_up(lambda: b.job_status("j"), DEADLINE)
-        with self.assertRaises(BoardUnavailable), mock.patch("swarm.board.postgres._DeadlineConnection.execute", side_effect=AssertionError("failed connection queried again")):
+        with self.assertRaises(BoardUnavailable), mock.patch("swarm.board.postgres._DeadlineConnection.wait", side_effect=AssertionError("failed connection queried again")):
             b.jobs()
 
     def test_stalled_listen_raises_unavailable(self):

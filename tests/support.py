@@ -228,6 +228,11 @@ class MemoryHarness:
             for field, secs in fields_seconds_ago.items():
                 row[field] = self._ago(secs)
 
+    def backdate_transcript(self, job: str, agent_key: str, seconds_ago: float) -> None:
+        from swarm.board.memory import transcript_key
+        with self.store.lock:
+            self.store.transcripts[transcript_key(job, agent_key)]["captured_at"] = self._ago(seconds_ago)
+
     def backdate_message(self, msg_id: int, seconds_ago: float) -> None:
         with self.store.lock:
             next(m for m in self.store.messages if m["id"] == msg_id)["created_at"] = self._ago(seconds_ago)
@@ -472,6 +477,10 @@ class SqliteHarness:
         import sqlite3
         self._db().execute("UPDATE memory_refs SET excerpt = ? WHERE document_id = ?",
                            (sqlite3.Binary(blob), document_id))
+
+    def backdate_transcript(self, job: str, agent_key: str, seconds_ago: float) -> None:
+        self._db().execute("UPDATE transcripts SET captured_at = ? WHERE job = ? AND agent_key = ?",
+                           (self.sqlite_board._ts(self._ago(seconds_ago)), job, agent_key))
 
     def backdate_agent(self, agent_key: str, **fields_seconds_ago) -> None:
         self._set("agents", "agent_key", agent_key, {f: self._ago(s) for f, s in fields_seconds_ago.items()})

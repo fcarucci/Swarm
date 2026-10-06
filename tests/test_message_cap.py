@@ -142,7 +142,8 @@ class PostgresCap(CapContract, unittest.TestCase):
         from swarm.board import postgres
         c = self.h.conn
         with psycopg.connect(**{k: v for k, v in c.info.get_parameters().items() if k in
-                                ("host", "port", "user", "dbname")}, autocommit=False) as blocker:
+                                ("host", "port", "user", "dbname")},
+                             password=self.h._password(self.h.cfg["database"]), autocommit=False) as blocker:
             blocker.execute("LOCK TABLE messages IN ACCESS SHARE MODE")   # an open reader
             old = (postgres._LOCK_TRIES, postgres._LOCK_TIMEOUT)
             postgres._LOCK_TRIES, postgres._LOCK_TIMEOUT = 2, "100ms"

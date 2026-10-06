@@ -691,6 +691,7 @@ class RunnerTests(RunnerBase):
             self.assertIsNotNone(markers.resume_by_token(self.cfg, tok.read_text(), tid))
             with self.board() as b:
                 b.claim_resume(tid, "orig", "J")
+            wait_until(lambda: run.get("agent_key") == tid)  # runner adopted the hook-bound session
             (self.bin / "codex.bound").touch()
         t = threading.Thread(target=hook_binds_first)
         t.start()
