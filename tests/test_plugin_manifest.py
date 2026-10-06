@@ -100,7 +100,8 @@ class ManifestTests(unittest.TestCase):
                 self.assertEqual(json.load(packaged.extractfile(manifest))["name"], "swarm")
             for rel in tracked:
                 if rel.startswith("skills/complexity-analyzer/") and not rel.endswith((".gitignore", ".gitattributes")):
-                    self.assertEqual(packaged.extractfile(rel).read(), (ROOT / rel).read_bytes().replace(b"\r\n", b"\n"), rel)
+                    self.assertEqual(packaged.extractfile(rel).read().replace(b"\r\n", b"\n"),
+                                     (ROOT / rel).read_bytes().replace(b"\r\n", b"\n"), rel)
                     if (ROOT / rel).stat().st_mode & 0o111:
                         self.assertTrue(packaged.getmember(rel).mode & 0o111, rel)
             for member in packaged.getmembers():
