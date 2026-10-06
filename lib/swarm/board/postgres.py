@@ -410,7 +410,7 @@ SELECT j.job, j.status, j.description, j.task, j.outcome, j.created_by, j.sessio
 CHANNEL_MESSAGES = "swarm_board"
 CHANNEL_STATE = "swarm_state"
 
-# Column lists in dataclass field order, so rows map positionally.
+# Column lists for status queries. JobStatus rows map by column name.
 _AGENT_STATUS_COLS = ("job, name, role, status, current_tool, tool_calls, messages, joined_at, "
                       "last_contact_at, last_post_at, ended_at, host, agent_key, harness, model, os_user, "
                       "left_reason, resume_of")
@@ -1797,23 +1797,31 @@ class PostgresBoard(SqlBlockers, Board):
     # ---- status ----------------------------------------------------------------------
 
     def job_status(self, job: str) -> JobStatus | None:
-        row = self._conn.execute(f"SELECT {_JOB_STATUS_COLS} FROM job_status WHERE job = %s",
-                                 (job,)).fetchone()
+        cursor = self._conn.execute(f"SELECT {_JOB_STATUS_COLS} FROM job_status WHERE job = %s",
+                                    (job,))
+        row = cursor.fetchone()
         if not row:
             return None
         from dataclasses import replace
         from swarm.review import pipeline_status
         raw = self._conn.execute("SELECT plugin_data FROM jobs WHERE job = %s", (job,)).fetchone()
-        return replace(JobStatus(*row), **pipeline_status(raw[0] if raw else None))
+        status = JobStatus(**dict(zip((column.name for column in cursor.description), row, strict=True)))
+        return replace(status, **pipeline_status(raw[0] if raw else None))
 
     def jobs(self, include_closed: bool = False) -> list[JobStatus]:
         where = "" if include_closed else "WHERE status = 'active' "
         rows = self._fetch(
             JobStatus, f"SELECT {_JOB_STATUS_COLS} FROM job_status {where}"
             "ORDER BY (status = 'active') DESC, COALESCE(activated_at, created_at), job")
+        return self._pipeline_job_statuses(rows)
+
+    def _pipeline_job_statuses(self, rows: list[JobStatus]) -> list[JobStatus]:
         from dataclasses import replace
         from swarm.review import pipeline_status
-        data = dict(self._conn.execute("SELECT job, plugin_data FROM jobs").fetchall())
+        if not rows:
+            return []
+        data = dict(self._conn.execute("SELECT job, plugin_data FROM jobs WHERE job = ANY(%s)",
+                                      ([row.job for row in rows],)).fetchall())
         return [replace(row, **pipeline_status(data.get(row.job))) for row in rows]
 
     def session_jobs(self, session: str) -> list[JobStatus]:
@@ -1823,9 +1831,10 @@ class PostgresBoard(SqlBlockers, Board):
             "SELECT job FROM jobs WHERE session_id = %s", (session,)).fetchall()]
         if not names:
             return []
-        return self._fetch(
+        rows = self._fetch(
             JobStatus, f"SELECT {_JOB_STATUS_COLS} FROM job_status WHERE job = ANY(%s) "
             "ORDER BY (status = 'active') DESC, COALESCE(activated_at, created_at), job", (names,))
+        return self._pipeline_job_statuses(rows)
 
     # ---- change notification -----------------------------------------------------------
 
@@ -1880,8 +1889,12 @@ class PostgresBoard(SqlBlockers, Board):
     # ---- helpers -----------------------------------------------------------------------
 
     def _fetch(self, cls: type, query: str, params: Sequence | None = None) -> list:
-        """Rows of `query` as `cls` instances; the SELECT lists columns in the dataclass's field order."""
-        return [cls(*r) for r in self._conn.execute(query, params).fetchall()]
+        """Rows as `cls`; JobStatus uses column names, other SELECTs use dataclass field order."""
+        cursor = self._conn.execute(query, params)
+        if cls is JobStatus:
+            names = [column.name for column in cursor.description]
+            return [cls(**dict(zip(names, row, strict=True))) for row in cursor.fetchall()]
+        return [cls(*r) for r in cursor.fetchall()]
 
     @staticmethod
     def _job_filter(job: str | None) -> tuple[str, tuple]:

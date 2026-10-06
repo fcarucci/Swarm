@@ -302,7 +302,10 @@ class LostPathTests(unittest.TestCase):
 
     def _js(self, sid=SID):
         t = dt.datetime(2026, 9, 27, tzinfo=UTC)
-        return JobStatus("J", "active", None, None, None, None, sid, t, None, None, 1, 0, 0, 0, 0, 0, 0, None)
+        return JobStatus(job="J", status="active", description=None, task=None, outcome=None,
+                         created_by=None, session_id=sid, created_at=t, activated_at=None,
+                         finished_at=None, agents=1, started=0, running=0, idle=0, completed=0,
+                         dead_or_left=0, messages=0, last_activity_at=None)
 
     def test_claude_subagent_under_orchestrator_session(self):
         (self.proj / f"{SID}.jsonl").write_text("{}\n")

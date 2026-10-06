@@ -543,12 +543,12 @@ class JobStatus:
     # --stall-hours`; column max_hours; None = the [job] stall_hours default, 0 = never) and when a bounded wait (`wait --for`) expires (None = unbounded).
     max_hours: float | None = None
     waiting_until: _dt.datetime | None = None
+    open_blockers: int = 0
+    protected_blockers: int = 0
+
     evidence_command: str | None = None
     finalize: str | None = None
     verdict_artifact: str | None = None
-
-    open_blockers: int = 0
-    protected_blockers: int = 0
 
 
 @dataclass(frozen=True)
