@@ -1463,6 +1463,10 @@ runtime budgets and concurrency caps are shared with ordinary replacements.
 1. A worker posts `DONE REF`, or runs `swarm done --job J --as NAME --artifact REF --summary TEXT`.
    Core treats REF as opaque: a report path, deployment id, or URL is as valid as a code artifact.
    `swarm done --branch B --sha S` and the legacy board convention `DONE B S` produce `B@S`.
+   Only the latest hand-off per branch counts, including abbreviated SHAs. Multi-word opaque
+   references must be JSON-quoted; unquoted trailing prose is rejected. `pipeline.started_at`
+   excludes earlier posts. Attaching, completion checks, or the first supervisor pass adopt
+   a pre-pipeline job with a cutoff at that point, without replaying historical DONE posts.
 2. For a goal job, a hand-off newer than its artifact's verdict starts a judge when the judge
    seat is free. The brief includes the task, goal, hand-off and previous fix instructions.
    Artifacts retain independent verdict histories; a job's judge seat is reused sequentially.
@@ -1470,7 +1474,9 @@ runtime budgets and concurrency caps are shared with ordinary replacements.
    and a repeated hand-off of A after its verdict also needs review. The coding adapter groups
    revisions by branch: a newer SHA supersedes only that branch's earlier hand-offs.
 3. A judge records `swarm verdict --job J --as NAME --artifact REF met --reason TEXT`, or
-   `not_met --reason TEXT --next TEXT`. Judges only judge: tool restrictions block writes,
+   `not_met --reason TEXT --next TEXT`. **Include `--artifact REF` on every hand-off verdict.**
+   When omitted, a leading `branch@sha:` in the reason supplies the artifact before the
+   assigned/latest hand-off fallback; the explicit flag takes precedence. Judges only judge: tool restrictions block writes,
    merges, pushes and fix-agent spawns. The judge Stop hook refuses an exit without a verdict
    for the assigned hand-off. Evidence checks run under the agent's ordinary permissions:
    wait with the configured command or conclude `not_met` with reason `evidence pending/red`
@@ -1504,6 +1510,10 @@ Without custom instructions, the finalizer records outcome/learnings and closes 
 ### Engineering-team coding recipe
 
 The engineering-team plugin registers a recipe for `branch@<40-character SHA>` artifacts.
+The recipe treats an artifact as integrated when its SHA is an ancestor of `origin/<merge_target>`
+in the owner checkout, or a successful `git ls-remote` confirms its branch is absent from origin.
+Lookup failures keep it pending. These facts apply to both completion gates and automatic
+launches, including abbreviated SHAs; integrated artifacts require no judge or finalizer.
 Core has no CI or git logic. The recipe checks GitHub Actions with `gh run list --commit SHA`:
 at least one run must exist, and every returned run must have the exact SHA, completed status,
 and success conclusion. Missing, queued, running, red or mismatched evidence holds integrator

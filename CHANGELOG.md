@@ -6,6 +6,11 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 ## [Unreleased]
 
+### Fixed
+- Review and completion ignore pre-pipeline hand-offs, superseded branch revisions and malformed DONE posts; merged or deleted branches count as integrated without launching judges.
+- Verdicts infer an omitted artifact from a leading `branch@sha:` reason; judge instructions prominently show `--artifact`.
+- `swarm who` shows waiting jobs whose goal is not met; the orphan-rule comment excludes waiting and paused jobs.
+
 ## [0.2.0] - 2026-10-06
 
 ### Added

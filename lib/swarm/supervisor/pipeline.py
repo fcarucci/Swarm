@@ -144,12 +144,36 @@ def effective_handoffs(board, cfg, js, config_path=None):
     from swarm import review
     found, superseded = {}, {}
     for h in review.latest_handoffs(board, js.job):
-        group = recipe_for(cfg, board, js, h.artifact, config_path=config_path).get("artifact_group")
+        recipe = recipe_for(cfg, board, js, h.artifact, config_path=config_path)
+        if recipe.get("integrated") or review.integrated(board, js.job, h.artifact):
+            continue
+        group = recipe.get("artifact_group")
         key = ("recipe", group) if isinstance(group, str) and group else ("artifact", h.artifact)
         if key in found:
             superseded[found[key].artifact] = h.artifact
         found[key] = h
     return sorted(found.values(), key=lambda h: h.id), superseded
+
+
+def sync_handoffs(board, cfg, js, config_path=None):
+    """Persist recipe integration facts for the storage completion guards as well."""
+    from swarm import review
+    grouped = set()
+    for h in review.latest_handoffs(board, js.job):
+        recipe = recipe_for(cfg, board, js, h.artifact, config_path=config_path)
+        if recipe.get('artifact_group'):
+            grouped.add('pipeline.superseded.' + hashlib.sha256(h.artifact.encode()).hexdigest()[:32])
+        if recipe.get('integrated'):
+            key = 'pipeline.integrated.' + hashlib.sha256(h.artifact.encode()).hexdigest()[:32]
+            board.set_job_data(js.job, key, h.artifact)
+    handoffs, superseded = effective_handoffs(board, cfg, js, config_path=config_path)
+    desired = {'pipeline.superseded.' + hashlib.sha256(ref.encode()).hexdigest()[:32]: replacement
+               for ref, replacement in superseded.items()}
+    for key in grouped - desired.keys():
+        board.set_job_data(js.job, key, None)
+    for key, value in desired.items():
+        board.set_job_data(js.job, key, value)
+    return handoffs
 
 
 def recipe_for(cfg, board, js, artifact, config_path=None):
@@ -288,7 +312,7 @@ def complete_finalized(board, cfg, js, handoffs, *, dry_run=False, say=print):
     and agent activity under the board lock. A racing hand-off keeps the job open.
     """
     from swarm import cli, review
-    if not handoffs or any(a.status in LIVE and a.ended_at is None for a in board.agents(js.job)):
+    if not review.latest_handoffs(board, js.job) or any(a.status in LIVE and a.ended_at is None for a in board.agents(js.job)):
         return False
     if any(r.ended_at is None for r in board.restarts(job=js.job)):
         return False
@@ -340,6 +364,10 @@ def run(board, cfg, sup, state, *, job=None, now=None, dry_run=False, say=print,
         if owner is None:
             continue
         from swarm import review
+        if not board.job_data(js.job).get("pipeline.started_at"):
+            if dry_run:
+                continue  # first adoption ignores historical hand-offs
+            review.ensure_started(board, js.job)
         if not review.latest_handoffs(board, js.job):
             continue
         managed.add(js.job)
@@ -347,18 +375,16 @@ def run(board, cfg, sup, state, *, job=None, now=None, dry_run=False, say=print,
             continue
         try:
             actions = transitions(board, js, cfg, config_path=config_path)
-            handoffs, superseded = effective_handoffs(board, cfg, js, config_path=config_path)
+            handoffs, _ = effective_handoffs(board, cfg, js, config_path=config_path)
         except Exception as exc:
             say(f"pipeline held {js.job}: recipe failed ({type(exc).__name__})")
             continue
         if not dry_run:
-            desired = {"pipeline.superseded." + hashlib.sha256(ref.encode()).hexdigest()[:32]: replacement
-                       for ref, replacement in superseded.items()}
-            for key in board.job_data(js.job):
-                if key.startswith("pipeline.superseded.") and key not in desired:
-                    board.set_job_data(js.job, key, None)
-            for old_ref, new_ref in superseded.items():
-                board.set_job_data(js.job, "pipeline.superseded." + hashlib.sha256(old_ref.encode()).hexdigest()[:32], new_ref)
+            try:
+                handoffs = sync_handoffs(board, cfg, js, config_path=config_path)
+            except Exception as exc:
+                say(f"pipeline held {js.job}: recipe failed ({type(exc).__name__})")
+                continue
         if complete_finalized(board, cfg, js, handoffs, dry_run=dry_run, say=say):
             continue
         for action in actions:

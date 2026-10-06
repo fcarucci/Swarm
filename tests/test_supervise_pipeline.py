@@ -21,6 +21,7 @@ class PipelineTests(unittest.TestCase):
         self.addCleanup(self.b.close)
         self.b.open_job('J', 'Investigate outages', 'Produce a report', 'owner', None)
         self.b.set_job_goal('J', 'A reviewed report with learnings')
+        self.b.set_job_data('J', 'pipeline.started_at', self.b.now().isoformat())
         self.cfg = self.h.cfg
         self.cfg['pipeline'] = {}
         self.sup = settings.settings(self.cfg)
@@ -76,6 +77,36 @@ class PipelineTests(unittest.TestCase):
             self.b.post('J', run['name'], post)
         self.b.close_agent(key, 'done')
         self.b.finish_restart(run['restart_id'], outcome)
+
+    def test_legacy_job_does_not_spawn_judge_for_historical_done(self):
+        self.done('old-report')
+        self.b.set_job_data('J', 'pipeline.started_at', None)
+        self.tick()
+        self.assertEqual(self.launched, [])
+        self.done('new-report')
+        self.tick()
+        self.assertEqual(len(self.launched), 1)
+        self.assertIn('artifact: new-report', self.launched[0]['stdin'])
+
+    def test_no_judge_for_old_or_malformed_or_superseded_handoffs(self):
+        self.done('old-report')
+        self.b.set_job_data('J', 'pipeline.started_at', self.b.now().isoformat())
+        self.b.post('J', self.worker, 'DONE feat/review abcdef0 CI green (fix)')
+        self.done('feat/review@abcdef0')
+        self.done('feat/review@abcdef1')
+        self.tick()
+        self.assertEqual(len(self.launched), 1)
+        self.assertIn('artifact: feat/review@abcdef1', self.launched[0]['stdin'])
+        self.assertNotIn('abcdef0', self.launched[0]['stdin'])
+
+    def test_integrated_artifact_needs_neither_judge_nor_finalizer(self):
+        self.recipe.return_value = {'integrated': True}
+        self.done('feat/merged@' + 'a' * 40)
+        self.done('feat/deleted@' + 'b' * 40)
+        self.tick()
+        self.assertEqual(self.launched, [])
+        self.assertFalse(review.pending_artifacts(self.b, 'J'))
+        self.assertFalse(review.auto_close_pending(self.b, 'J'))
 
     def test_report_flow_judge_then_finalizer_and_completion(self):
         self.done()
@@ -280,6 +311,7 @@ class PipelineTests(unittest.TestCase):
         self.done()
         self.b.open_job('Other', 'Other investigation', 'Report', 'owner', None)
         self.b.set_job_goal('Other', 'Reviewed report')
+        self.b.set_job_data('Other', 'pipeline.started_at', self.b.now().isoformat())
         self.b.post('Other', 'Worker', 'DONE other-report')
         def broken(cfg, board, job, artifact, **kw):
             if job == 'J':

@@ -115,7 +115,7 @@ DEFAULTS = {
     # no progress for that long (no agent posted, joined or recorded a verdict; tool calls and
     # heartbeats don't count) is closed "failed"; one that keeps progressing runs as long as it
     # likes. `activate --stall-hours N` overrides it per job, 0 = never. orphan_minutes: a job
-    # with no live agent (all done, dead or gone; a waiting job included) and no board activity
+    # with no live agent (all done, dead or gone; waiting and paused jobs excluded) and no board activity
     # for that long is closed "cancelled". 0 turns either off. Neither closes a job with a goal
     # and no met verdict; goal_stall_hours is that job's own stall limit (0 = never, the default).
     "job": {"auto_close_minutes": 30, "stall_hours": 4, "orphan_minutes": 30, "goal_stall_hours": 0},
@@ -2940,6 +2940,9 @@ def cmd_activate(cfg: dict, args) -> int:
             print(f"swarm activate --attach: job {args.job} is not active", file=sys.stderr)
             return 1
         marker = marker.with_name(f"{safe_job(args.job)}--{safe_job(session or 'unbound')}.json")
+        from swarm.review import ensure_started
+        with open_board(cfg) as board:
+            ensure_started(board, args.job)
         _write_marker(marker, {"job": args.job, "session_id": session, "cwd": os.getcwd(),
                                "adopt_running": args.adopt_running, "attached": True,
                                **({"goal": True} if js.goal else {})})   # a new binding starts unseen
@@ -3059,8 +3062,17 @@ def cmd_deactivate(cfg: dict, args) -> int:
                   f"{_error_name(exc)}). Retry, or override with --force.", file=sys.stderr)
             return 1
     refusal = _completion_refusal(js) if completing else None
-    if completing and board is not None and js is not None and js.goal:
+    if completing and board is not None and js is not None and js.goal and not args.force:
         from swarm.review import latest_handoffs, pending_artifacts, auto_close_pending
+        from swarm.supervisor.pipeline import sync_handoffs
+        from swarm.review import ensure_started
+        ensure_started(board, args.job)
+        try:
+            sync_handoffs(board, cfg, js, config_path=getattr(args, "config", None))
+        except Exception as exc:
+            board.close()
+            print(f"not completing {args.job}: recipe check failed ({_error_name(exc)})", file=sys.stderr)
+            return 1
         if latest_handoffs(board, args.job):
             pending = pending_artifacts(board, args.job)
             refusal = (f"not completing {args.job}: artifacts await a met verdict: " + ', '.join(pending)
@@ -3896,9 +3908,9 @@ def _board_read(board, cfg: dict, args) -> None:
 def _board_who(board, cfg: dict, args) -> None:
     rows = board.agents(args.job, include_departed=False)
     if not rows:
-        js = board.job_status(args.job)
-        if js is not None and _job_status_word(board, js, board.now()) in ("waiting", "paused"):
-            print(_job_heading(board, js, board.now()))
+        note = _empty_agents_note(board, args.job, board.now())
+        if note != "(no agents yet)":
+            print(note[1:-1])
     for a in rows:
         # Tab-separated, the name first and exact (so it can be pasted into --to '<name>'),
         # then the harness in its own field so the name field is never altered.

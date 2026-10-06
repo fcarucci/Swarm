@@ -242,8 +242,28 @@ def github_repository(cwd: str | None) -> str:
     return next(iter(repositories)) if len(repositories) == 1 else ""
 
 
+def coding_integrated(workdir: str | None, branch: str, sha: str, target: str) -> bool:
+    """Read Git facts only. Failed lookups never certify integration or branch deletion."""
+    if not workdir:
+        return False
+    def git(*args):
+        return subprocess.run(['git', *args], cwd=workdir, capture_output=True,
+                              text=True, timeout=5)
+    try:
+        # A local tracking ref is sufficient positive ancestry evidence, even before fetch.
+        main = git('rev-parse', '--verify', 'refs/remotes/origin/' + target)
+        if main.returncode == 0 and git('merge-base', '--is-ancestor', sha, main.stdout.strip()).returncode == 0:
+            return True
+        # Exit 2 means a successful remote query found no matching branch. Auth/network
+        # failures and missing origin use other codes and must keep the artifact pending.
+        return git('ls-remote', '--exit-code', '--heads', 'origin', 'refs/heads/' + branch).returncode == 2
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def coding_recipe(ctx, board, job: str, artifact: str | None) -> dict | None:
-    parsed = coding_artifact(artifact)
+    from swarm.review import branch_revision
+    parsed = branch_revision(artifact) if isinstance(artifact, str) else None
     if parsed is None:
         return None
     branch, sha = parsed
@@ -253,6 +273,11 @@ def coding_recipe(ctx, board, job: str, artifact: str | None) -> dict | None:
     record = local_record(ctx.cfg, js) if js else None
     workdir = getattr(record, "workdir", None) or getattr(record, "cwd", None)
     config = coding_settings(ctx, workdir)
+    if coding_integrated(workdir, branch, sha, config["merge_target"]):
+        return {"artifact_group": branch, "integrated": True}
+    if coding_artifact(artifact) is None:
+        return None  # exact-SHA evidence requires the full SHA
+    sha = sha.lower()
     repository = config["repository"] or github_repository(workdir)
     repo_args = ["--repo", repository] if repository else []
     argv = ["gh", "run", "list", "--commit", sha, "--limit", "100", *repo_args,

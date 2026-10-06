@@ -273,6 +273,8 @@ user asks for one. Don't run duplicate jobs: merge similar ones (`swarm job merg
      between artifacts. You may also seat a judge explicitly with `[swarm role: judge]`.
      Judges only inspect and record `swarm verdict --job J --as NAME --artifact REF met
      --reason "evidence"` or `not_met --reason "missing" --next "fix brief"`.
+     **Always include `--artifact REF` for the exact hand-off inspected.** For compatibility,
+     a reason beginning `branch@sha:` supplies the artifact when the flag is omitted.
      They never fix, merge, push, or spawn fix workers. Their Stop hook blocks an exit
      without an artifact-bound verdict. Pending external evidence means wait using the
      configured command or record `not_met` with actionable next steps.
@@ -762,6 +764,11 @@ and `swarm supervise approve` checks apply to automatic recovery.
 and private owner enrolment records. New `DONE REF` board posts (or `swarm done`) start
 artifact-bound review; multiple artifacts keep independent verdict histories shown in `status`.
 `swarm done --branch B --sha S` and `DONE B S` remain coding hand-off aliases.
+Only the newest SHA per branch counts. Multi-word references must be JSON-quoted;
+unquoted prose after a branch/SHA is ignored. Posts before `pipeline.started_at` are ignored;
+attaching or the first supervisor pass adopts an older job with a cutoff at that point.
+The coding recipe treats SHAs reachable from the target tracking ref, or branches confirmed
+absent from origin, as integrated; they need no new judge or finalizer.
 Set `judge_host = "claude"|"codex"` and optional `judge_model` (empty uses the judge's
 configured role model). `swarm activate --evidence-cmd "check evidence" --finalize "publish result"`
 sets per-job instructions. `[pipeline] evidence_wait_command` and `finalize` supply defaults;

@@ -514,8 +514,8 @@ def _verifier_instructions(name: str, job: str, cfg: dict, goal: str | None = No
 
 def _judge_instructions(name: str, job: str, goal: str, cfg: dict, cap: int | None = None) -> str:
     cap = _cap(cfg, cap)
-    met = f"{_bin()} verdict --job {_q(job)} --as {_q(name)} met \"<short reason>\""
-    not_met = (f"{_bin()} verdict --job {_q(job)} --as {_q(name)} not_met --reason \"<why it is not met>\" "
+    met = f"{_bin()} verdict --job {_q(job)} --as {_q(name)} --artifact REF met \"<short reason>\""
+    not_met = (f"{_bin()} verdict --job {_q(job)} --as {_q(name)} --artifact REF not_met --reason \"<why it is not met>\" "
                f"--next \"<what to change, where, and what you will re-check>\"")
     lines = [
         f"[swarm] You are **{name}**, the JUDGE of job \"{job}\". Your only job is to decide whether "

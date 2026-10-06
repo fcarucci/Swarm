@@ -24,6 +24,9 @@ Read [host procedures](references/hosts.md) before activating a job or spawning 
 The engineering-team plugin supplies the coding adapter for Swarm's generic review pipeline.
 Publish `swarm done --job J --as NAME --branch B --sha S --summary "change and checks"` after
 pushing. The owner supervisor starts independent artifact-bound review and bounded fix rounds.
+Judges must record `swarm verdict --job J --as NAME --artifact branch@sha met --reason "evidence"`
+(or `not_met --reason "missing" --next "fix brief"`). **Always pass `--artifact` for the exact
+hand-off inspected.** A leading `branch@sha:` in the reason is accepted for compatibility.
 Judges only judge; merges, pushes and fixes belong to executors. A newer SHA on the same
 branch supersedes its earlier hand-off; separate branches keep independent verdicts.
 With a met verdict and green exact-SHA GitHub evidence, a separate INTEGRATOR ordinarily

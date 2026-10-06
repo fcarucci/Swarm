@@ -1,6 +1,7 @@
 """Generic hand-offs and artifact-bound review records stored with a job.
 
-Artifacts are opaque references; core never interprets them as branches or SHAs.
+Artifacts are opaque references, with a branch@sha compatibility convention.
+Repository checks remain in plugin recipes.
 """
 from __future__ import annotations
 
@@ -22,8 +23,31 @@ class Handoff:
     agent_name: str
 
 
+def branch_revision(artifact: str) -> tuple[str, str] | None:
+    """Recognize the coding hand-off convention, including abbreviated Git SHAs."""
+    match = re.fullmatch(r'([A-Za-z0-9][A-Za-z0-9._/-]*)@([0-9a-fA-F]{7,64})', artifact)
+    if not match:
+        return None
+    branch, sha = match.groups()
+    if ('..' in branch or '//' in branch or branch.endswith(('/', '.', '.lock'))
+            or any(part.startswith('.') or part.endswith('.lock') for part in branch.split('/'))):
+        return None
+    return branch, sha
+
+
+def ensure_started(board, job: str) -> None:
+    """Adopt a pre-pipeline job from now, without replaying its historical DONE posts."""
+    if not board.job_data(job).get('pipeline.started_at'):
+        board.set_job_data(job, 'pipeline.started_at', board.now().isoformat())
+
+
+def integrated(board, job: str, artifact: str) -> bool:
+    key = 'pipeline.integrated.' + hashlib.sha256(artifact.encode()).hexdigest()[:32]
+    return bool(board.job_data(job).get(key))
+
+
 def latest_handoffs(board, job: str) -> list[Handoff]:
-    """Newest worker hand-off for each artifact, in board order. DONE: claims aren't hand-offs."""
+    """Newest worker hand-off for each artifact or coding branch, in board order. DONE: claims aren't hand-offs."""
     found = {}
     stamp = board.job_data(job).get("pipeline.started_at")
     try:
@@ -44,15 +68,22 @@ def latest_handoffs(board, job: str) -> list[Handoff]:
                 if not isinstance(artifact, str):
                     continue
                 suffix = first[5:].strip()[end:].strip()
-                summary = suffix[1:].strip() if suffix.startswith('|') else summary
+                if suffix and not suffix.startswith('|'):
+                    continue
+                summary = suffix[1:].strip() if suffix else summary
             except ValueError:
                 continue
         # Compatibility with the original DONE branch sha convention.
-        parts = artifact.split()
-        if len(parts) == 2 and re.fullmatch(r'[0-9a-fA-F]{7,64}', parts[1]):
-            artifact = '@'.join(parts)
+        if not first[5:].strip().startswith('"'):
+            parts = artifact.split()
+            if len(parts) == 2 and branch_revision('@'.join(parts)):
+                artifact = '@'.join(parts)
+            elif len(parts) != 1:
+                continue  # multi-word refs must be JSON-quoted; prose isn't an artifact
+        revision = branch_revision(artifact)
+        key = ('branch', revision[0]) if revision else ('artifact', artifact)
         if artifact:
-            found[artifact] = Handoff(artifact, summary.strip(), message.id,
+            found[key] = Handoff(artifact, summary.strip(), message.id,
                                      message.created_at, message.agent_name)
     return sorted(found.values(), key=lambda item: item.id)
 
@@ -133,7 +164,7 @@ def pending_artifacts(board, job: str) -> list[str]:
     pending = []
     for h in latest_handoffs(board, job):
         key = 'pipeline.superseded.' + hashlib.sha256(h.artifact.encode()).hexdigest()[:32]
-        if data.get(key):
+        if data.get(key) or integrated(board, job, h.artifact):
             continue
         verdict = verdicts.get(h.artifact)
         if not covered(h, verdict) or verdict['verdict'] != 'met':
@@ -150,7 +181,7 @@ def auto_close_pending(board, job: str) -> bool:
     verdicts = artifact_verdicts(board, job)
     for h in latest_handoffs(board, job):
         superseded = 'pipeline.superseded.' + hashlib.sha256(h.artifact.encode()).hexdigest()[:32]
-        if data.get(superseded):
+        if data.get(superseded) or integrated(board, job, h.artifact):
             continue
         since = dt.datetime.fromisoformat(verdicts[h.artifact]['at'])
         if not any(m.created_at >= since and m.message.startswith(('FINALIZED ', 'INTEGRATED '))

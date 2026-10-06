@@ -75,6 +75,57 @@ class PipelineRecipeTests(TeamEnv):
         self.assertIn("owner/repo", recipe["evidence_command"])
         self.assertIn("into release", recipe["finalize"])
 
+    def test_git_merged_deleted_and_unmerged_branch_facts(self):
+        import subprocess
+        from swarm import plugins
+        from swarm import review
+        with self.board() as board:
+            plugins.pipeline_recipe(self.cfg, board, 'J', None, self.config)
+        import swarm_plugin_engineering_team as adapter
+        remote = self.tmp / 'remote.git'
+        repo = self.tmp / 'repo'
+        def run(*args, cwd=None):
+            return subprocess.run(['git', *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+        run('init', '--bare', str(remote))
+        run('init', '-b', 'main', str(repo))
+        run('config', 'user.name', 'Test', cwd=repo)
+        run('config', 'user.email', 'test@example.invalid', cwd=repo)
+        run('commit', '--allow-empty', '-m', 'main', cwd=repo)
+        main_sha = run('rev-parse', 'HEAD', cwd=repo)
+        run('remote', 'add', 'origin', str(remote), cwd=repo)
+        run('push', 'origin', 'main', cwd=repo)
+        run('switch', '-c', 'feat/pending', cwd=repo)
+        run('commit', '--allow-empty', '-m', 'pending', cwd=repo)
+        sha = run('rev-parse', 'HEAD', cwd=repo)
+        run('push', 'origin', 'feat/pending', cwd=repo)
+        self.assertTrue(adapter.coding_integrated(str(repo), 'main', main_sha[:7], 'main'))
+        self.assertFalse(adapter.coding_integrated(str(repo), 'feat/pending', sha, 'main'))
+        with mock.patch('swarm.supervisor.orphans.local_record', return_value=mock.Mock(cwd=str(repo), workdir=None)):
+            self.assertNotIn('integrated', self.recipe('feat/pending@' + sha))
+            run('push', 'origin', '--delete', 'feat/pending', cwd=repo)
+            self.assertTrue(self.recipe('feat/pending@' + sha)['integrated'])
+            self.assertTrue(self.recipe('feat/pending@' + sha[:7])['integrated'])
+            # The deactivate path must persist Git facts before checking storage guards.
+            with self.board() as board:
+                board.post('J', 'Worker', 'DONE main@' + main_sha)
+                board.post('J', 'Worker', 'DONE feat/pending@' + sha)
+            rc, _, err = self.cli('deactivate', '--job', 'J', '--status', 'completed')
+            self.assertEqual(rc, 0, err)
+            with self.board() as board:
+                self.assertFalse(review.pending_artifacts(board, 'J'))
+                self.assertFalse(review.auto_close_pending(board, 'J'))
+
+    def test_git_lookup_failures_do_not_certify_integration(self):
+        import subprocess
+        self.recipe('feat/result@' + self.sha)
+        import swarm_plugin_engineering_team as adapter
+        for result in (mock.Mock(returncode=128, stdout=''),
+                       mock.Mock(returncode=1, stdout='')):
+            with mock.patch('subprocess.run', return_value=result):
+                self.assertFalse(adapter.coding_integrated(str(self.tmp), 'feat/result', self.sha, 'main'))
+        with mock.patch('subprocess.run', side_effect=subprocess.TimeoutExpired('git', 5)):
+            self.assertFalse(adapter.coding_integrated(str(self.tmp), 'feat/result', self.sha, 'main'))
+
     def test_invalid_coding_refs_stay_opaque_and_bad_config_holds(self):
         for branch in ("-bad", "a/../b", "a/.hidden", "a//b", "a.lock", "a."):
             self.assertEqual(self.recipe(branch + "@" + self.sha), {})

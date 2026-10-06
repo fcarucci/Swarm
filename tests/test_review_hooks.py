@@ -87,6 +87,80 @@ class ReviewHookTests(GoalEnv):
             self.assertEqual([h.artifact for h in review.latest_handoffs(b, 'J')],
                              ['feature@abcdef0', 'other@abcdef1'])
 
+    def test_only_latest_sha_per_branch_counts_without_recipe(self):
+        self.done('feat/review@abcdef0')
+        self.done('other@abcdef1')
+        self.done('feat/review@abcdef2')
+        with self.board() as b:
+            self.assertEqual(review.pending_artifacts(b, 'J'),
+                             ['other@abcdef1', 'feat/review@abcdef2'])
+
+    def test_latest_branch_verdict_completes_despite_old_failed_revision(self):
+        self.done('feat/review@abcdef0')
+        self.verdict('feat/review@abcdef0', 'not_met')
+        self.done('feat/review@abcdef1')
+        self.verdict('feat/review@abcdef1')
+        with self.board() as b:
+            b.post('J', 'executor', 'FINALIZED feat/review@abcdef1')
+        rc, _, err = self.cli('deactivate', '--job', 'J', '--status', 'completed')
+        self.assertEqual(rc, 0, err)
+
+    def test_malformed_unquoted_done_is_not_an_artifact(self):
+        for text in ('DONE feat/review abcdef0 CI green (fix)',
+                     'DONE feat/review@abcdef0 CI green', 'DONE "ref" trailing garbage'):
+            self.cli('post', '--job', 'J', '--as', self.worker, text)
+        with self.board() as b:
+            self.assertEqual(review.latest_handoffs(b, 'J'), [])
+
+    def test_leading_reason_ref_binds_verdict_instead_of_latest_handoff(self):
+        self.done('first@abcdef0')
+        self.done('second@abcdef1')
+        rc, _, err = self.cli('verdict', '--job', 'J', '--as', self.judge,
+                             'met', 'first@abcdef0: CI green and reviewed')
+        self.assertEqual(rc, 0, err)
+        with self.board() as b:
+            self.assertEqual(b.job_status('J').verdict_artifact, 'first@abcdef0')
+            self.assertEqual(review.pending_artifacts(b, 'J'), ['second@abcdef1'])
+
+    def test_reason_ref_not_met_and_spooled_delivery_bind_same_artifact(self):
+        from swarm.spool import deliver_verdict
+        self.done('first@abcdef0')
+        self.done('second@abcdef1')
+        with self.board() as b:
+            self.assertTrue(deliver_verdict(b, 'J', self.judge, 'not_met',
+                                           'first@abcdef0: failed CI', 'fix CI'))
+            self.assertEqual(review.artifact_verdicts(b, 'J')['first@abcdef0']['verdict'], 'not_met')
+        self.assertEqual(self.job().verdict_artifact, 'first@abcdef0')
+
+    def test_attach_preserves_existing_pipeline_cutoff(self):
+        self.done()
+        with self.board() as b:
+            stamp = b.job_data('J')['pipeline.started_at']
+        self.cli('activate', '--job', 'J', '--attach')
+        with self.board() as b:
+            self.assertEqual(b.job_data('J')['pipeline.started_at'], stamp)
+            self.assertEqual(review.pending_artifacts(b, 'J'), ['report.md'])
+
+    def test_explicit_artifact_overrides_leading_reason_ref(self):
+        self.done('first@abcdef0')
+        self.done('second@abcdef1')
+        rc, _, err = self.cli('verdict', '--job', 'J', '--as', self.judge,
+                             '--artifact', 'second@abcdef1', 'met', 'first@abcdef0: checked')
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.job().verdict_artifact, 'second@abcdef1')
+
+    def test_legacy_attach_starts_pipeline_without_replaying_history(self):
+        self.done('old-report')
+        with self.board() as b:
+            b.set_job_data('J', 'pipeline.started_at', None)
+        rc, _, err = self.cli('activate', '--job', 'J', '--attach')
+        self.assertEqual(rc, 0, err)
+        with self.board() as b:
+            self.assertEqual(review.latest_handoffs(b, 'J'), [])
+        self.done('new-report')
+        with self.board() as b:
+            self.assertEqual(review.pending_artifacts(b, 'J'), ['new-report'])
+
     def test_opaque_reference_with_spaces_and_pipe(self):
         self.done('reports/health | overview.pdf')
         with self.board() as b:

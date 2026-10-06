@@ -37,6 +37,13 @@ class DeriveJobStatusTests(unittest.TestCase):
 
 
 class WaitCliTests(RoutingEnv):
+    def test_who_shows_waiting_goal_not_met_without_agents(self):
+        rc, _, err = self.cli('activate', '--job', 'J', '--goal', 'deliver report')
+        self.assertEqual(rc, 0, err)
+        rc, out, err = self.cli('who', '--job', 'J')
+        self.assertEqual(rc, 0, err)
+        self.assertIn('J [waiting (goal not met)]', out)
+
     def status_row(self) -> str:
         rc, out, _ = self.cli("status", "--no-color")
         self.assertEqual(rc, 0)

@@ -448,8 +448,10 @@ def deliver_verdict(board, job: str, name: str, verdict: str, reason: str,
     """Record a judge's verdict and post it on the job's board; False (nothing recorded or
     posted) if `name` is not the job's active judge. Shared by `swarm verdict` and the spool."""
     if artifact is None:
-        from swarm.review import latest_handoffs, judge_artifact
-        artifact = judge_artifact(board, job, name=name)
+        from swarm.review import latest_handoffs, judge_artifact, branch_revision
+        leading, separator, _ = reason.partition(':')
+        artifact = leading if separator and branch_revision(leading) else None
+        artifact = artifact or judge_artifact(board, job, name=name)
         handoffs = latest_handoffs(board, job)
         if artifact is None and handoffs:
             artifact = handoffs[-1].artifact
