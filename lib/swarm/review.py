@@ -154,8 +154,7 @@ def auto_close_pending(board, job: str) -> bool:
             continue
         since = dt.datetime.fromisoformat(verdicts[h.artifact]['at'])
         if not any(m.created_at >= since and m.message.startswith(('FINALIZED ', 'INTEGRATED '))
-                   and (m.message.partition(' ')[2] == h.artifact
-                        or m.message.partition(' ')[2].startswith(h.artifact + ' ')) for m in messages):
+                   and m.message.partition(' ')[2] == h.artifact for m in messages):
             return True
     return False
 

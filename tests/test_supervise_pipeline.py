@@ -358,6 +358,16 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn('Fix B only', self.launched[-1]['stdin'])
 
 
+    def test_finalization_for_prefix_artifact_does_not_cover_other_ref(self):
+        self.done('report A'); self.done('report A B'); self.tick()
+        self.conclude(ref='report A'); self.tick(); self.conclude(ref='report A B'); self.tick()
+        self.finish_latest('FINALIZED report A B'); self.tick()
+        self.assertIn('Hand-off artifact: report A\n', self.launched[-1]['stdin'])
+        self.assertTrue(review.auto_close_pending(self.b, 'J'))
+        self.finish_latest('FINALIZED report A')
+        self.assertFalse(review.auto_close_pending(self.b, 'J'))
+
+
 
 if __name__ == '__main__':
     unittest.main()

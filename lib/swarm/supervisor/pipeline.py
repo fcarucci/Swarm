@@ -274,7 +274,7 @@ def _finalized(board, job, artifact, since):
         if m.created_at < since:
             continue
         for prefix in ("FINALIZED ", "INTEGRATED "):
-            if m.message.startswith(prefix) and (m.message[len(prefix):].strip() == artifact or m.message[len(prefix):].startswith(artifact + " ")):
+            if m.message.startswith(prefix) and m.message[len(prefix):] == artifact:
                 return True
     return False
 
