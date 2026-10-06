@@ -22,6 +22,7 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 - engineering-team skill: head-bound verdicts, gating on the merge result, scoped fix rounds, goals as checkable queries, a hand-off contract, a secrets protocol, an authorization ledger, a recovery runbook, a "don't" list, and the team composition rules (who carries the duties of an absent product manager or build engineer).
 
 ### Fixed
+- Waiting and paused jobs show as waiting/paused in watch and status views, not active.
 - Codex agents stay active between turns and complete only at session end or confirmed runner exit; quiet time no longer reports a running session as completed.
 - Orchestrator reminders share verdict/session state across Stop and tool hooks, stay silent while agents work or have recent activity, and repeat only after the configured orphan interval.
 - Queued role-addressed posts resolve recipients and validate the author and `--key` on delivery; a refused queued post tells its author why.

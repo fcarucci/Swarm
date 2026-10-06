@@ -10,7 +10,7 @@ def rows(cls, data):
     for row in data or []:
         values = {k: v for k,v in row.items() if k in names}
         for key, value in values.items():
-            if value is not None and (key.endswith('_at') or key in ('at','last_contact_at','waiting_until','until')):
+            if value is not None and (key.endswith('_at') or key in ('at','last_contact_at','waiting_since','waiting_until','until')):
                 values[key] = datetime.fromisoformat(value) if isinstance(value,str) else value
         result.append(cls(**values))
     return result

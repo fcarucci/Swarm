@@ -6,6 +6,7 @@ $SWARM_TEST_CONFIG names a config file for a THROWAWAY database (every table is 
 """
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import os
 import re
@@ -47,6 +48,104 @@ class BoardContract:
 
     def agent(self, key: str, job: str = "j") -> AgentStatus:
         return next(a for a in self.b.agents(job) if a.agent_key == key)
+
+    # Every display consumes the same rollup, including the PostgreSQL watch snapshot.
+    def parked_job(self, paused=False):
+        self.b.open_job("parked", "30-minute watch", None, "session-parked", "Francesco")
+        self.b.set_waiting("parked", "30-minute watch")
+        if paused:
+            self.b.pause_job("parked", "Francesco", "hold")
+        return "paused" if paused else "waiting"
+
+    def test_parked_jobs_overview(self):
+        from swarm.cli import jobs_overview
+        for paused in (False, True):
+            word = self.parked_job(paused)
+            with self.subTest(word=word):
+                text = jobs_overview(self.b, False, False)
+                self.assertRegex(text, rf"parked\s+{word}\s")
+                self.assertNotRegex(text, r"parked\s+active\s")
+
+    def test_parked_job_detail_header(self):
+        from swarm.cli import job_detail
+        for paused in (False, True):
+            word = self.parked_job(paused)
+            with self.subTest(word=word):
+                text = job_detail(self.b, "parked", False)
+                self.assertIn(f"job        parked  [{word}]", text)
+                self.assertNotIn("no agents yet", text)
+                self.assertIn("30-minute watch", text)
+
+    def test_parked_compact_watch(self):
+        from swarm.cli import _compact_frame
+        for paused in (False, True):
+            word = self.parked_job(paused)
+            with self.subTest(word=word):
+                text = "\n".join(_compact_frame(self.b, None, False, {}, None, 160, 40))
+                self.assertIn(f"parked [{word}]", text)
+                self.assertNotIn("parked [active]", text)
+                self.assertNotIn("no agents yet", text)
+                if not paused:
+                    self.assertRegex(text, r"30-minute watch · \d+s")
+
+    def test_parked_session_watch_headers_and_rollups(self):
+        from swarm.cli import _watch_header
+        for paused in (False, True):
+            word = self.parked_job(paused)
+            self.b.open_job("working", None, None, "session-parked", "Francesco")
+            with self.subTest(word=word):
+                rows = self.b.session_shown_jobs("session-parked")
+                self.assertEqual({j.job for j in rows}, {"parked", "working"})
+                text = "\n".join(_watch_header(self.b, None, 10, False, False, self.b.now(),
+                                            session="session-parked", session_rows=rows)[0])
+                self.assertIn(f"AGENTS · parked [{word}]", text)
+                parked_section = text.split(f"AGENTS · parked [{word}]", 1)[1].split("AGENTS ·", 1)[0]
+                self.assertNotIn("no agents yet", parked_section)
+
+    def test_parked_who_with_no_live_agents(self):
+        import contextlib
+        import io
+        from types import SimpleNamespace
+        from swarm.cli import _board_who
+        for paused in (False, True):
+            word = self.parked_job(paused)
+            with self.subTest(word=word), contextlib.redirect_stdout(io.StringIO()) as out:
+                _board_who(self.b, self.h.cfg, SimpleNamespace(job="parked"))
+                self.assertIn(f"parked [{word}]", out.getvalue())
+                self.assertNotIn("orphan", out.getvalue())
+
+    def test_parked_job_is_not_an_orphan_or_respawn_candidate(self):
+        from swarm.board.base import orphaned
+        from swarm.respawn import idle_not_met
+        from swarm.supervisor.orphans import eligible
+        for paused in (False, True):
+            word = self.parked_job(paused)
+            self.h.backdate_job("parked", created_at=7200, activated_at=7200)
+            js = self.b.job_status("parked")
+            with self.subTest(word=word):
+                self.assertFalse(orphaned(js, self.b.now(), 30))
+                self.assertFalse(eligible(self.b, self.h.cfg, js, {"orphan_minutes": 30}, self.b.now()))
+                self.assertFalse(idle_not_met(dataclasses.replace(js, goal="ship", verdict="not_met")))
+
+    def test_parked_postgres_watch_snapshot(self):
+        if not hasattr(self.b, "watch_snapshot"):
+            self.skipTest("PostgreSQL single-statement watch snapshot")
+        from swarm.cli import _compact_frame, _watch_header
+        for paused in (False, True):
+            word = self.parked_job(paused)
+            self.b.open_job("working", None, None, "session-parked", "Francesco")
+            with self.subTest(word=word):
+                snapshot = self.b.watch_snapshot(None, "session-parked", 10, 20)
+                self.assertEqual({j.job for j in snapshot.job_rows}, {"parked", "working"})
+                self.assertIsInstance(snapshot.job_status("parked").waiting_since, dt.datetime)
+                for compact in (False, True):
+                    if compact:
+                        text = "\n".join(_compact_frame(snapshot, None, False, {}, snapshot.job_rows, 160, 40))
+                        self.assertIn(f"parked [{word}]", text)
+                    else:
+                        text = "\n".join(_watch_header(snapshot, None, 10, False, False, snapshot.now(),
+                                            session="session-parked", session_rows=snapshot.job_rows)[0])
+                        self.assertIn(f"AGENTS · parked [{word}]", text)
 
     # ---- agent host / model / Codex turn ends
     def test_custom_role_update_preserves_identity_and_protected_roles(self):

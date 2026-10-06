@@ -757,7 +757,7 @@ On Postgres, re-run `swarm init` after changing `idle_minutes`, `dead_minutes` o
 |---|---|---|
 | `auto_close_minutes` | `30` | an open job whose agents are all done closes by itself after this many quiet minutes (see [Auto-close](#auto-close)); `0` turns it off |
 | `stall_hours` | `4` | an open job with no progress (no agent post, verdict or new agent; tool calls and heartbeats don't count) for this long closes as `failed`, whatever its agents do; a job that keeps progressing is never closed by it. `activate --stall-hours N` sets one job's own limit, `0` = never; `0` here turns the default off. Not applied to a job with a goal and no `met` verdict (see `goal_stall_hours`) |
-| `orphan_minutes` | `30` | an open job (waiting ones too) with no live agent and no board activity for this long closes as `cancelled`; `0` turns it off. Never closes a job with a goal and no `met` verdict |
+| `orphan_minutes` | `30` | an open job that is not waiting, with no live agent and no board activity for this long closes as `cancelled`; `0` turns it off. Never closes a job with a goal and no `met` verdict |
 | `goal_stall_hours` | `0` | the stall limit of a job with a goal and no `met` verdict, which `stall_hours` and `orphan_minutes` never close: no progress for this long closes it as `failed`, `auto-closed: no progress for N h; goal not met` (plus its last verdict); `0` = never. The job's own `activate --stall-hours N` takes precedence (`0` = never) |
 
 **`[sqlite]`** (with `backend = "sqlite"`)
@@ -1039,12 +1039,12 @@ verdict) once it has made no progress for `[job] stall_hours` (default 4; per jo
 --stall-hours N`, `0` = never), and as `cancelled` with `auto-closed: no live agents for N min` when
 no agent is started, running or idle (dead ones per `dead_minutes` don't count), nothing was
 posted or joined, and the orchestrating session made no tool call for `[job] orphan_minutes`
-(default 30). Progress means a message an agent posted, a verdict, or an agent joining (the run
+(default 30). Waiting and paused jobs are not orphaned. Progress means a message an agent posted, a verdict, or an agent joining (the run
 start counts too): tool calls and heartbeats do not, so a watcher polling for hours is not
 progress, while a job that keeps progressing runs as long as it likes. Both closes are recorded
 like a `deactivate` (`closed_by` `auto`, agents left, marker removed) and show in `status --all`.
-`swarm wait --for DURATION` bounds a wait: until it expires it shields the job from the orphan rule
-only, never from the stall limit.
+`swarm wait --for DURATION` bounds a wait: until it expires it shields the job from orphan
+and stall closing. An unbounded wait is not orphaned; stall limits still apply.
 
 **Jobs with a goal.** A job with a goal and no `met` verdict is never closed by the orphan rule,
 and the stall limit does not apply to it either, unless that job has its own limit (`activate
@@ -1182,7 +1182,7 @@ open job as one of four words:
 bounds the wait. A bounded wait that has not ended protects the job from the orphan rule and from
 the stall limits, including `goal_stall_hours`, and `status` shows its end. When it ends the job is
 judged as not waiting and the end counts as progress, so the job is not stalled that instant. An
-unbounded wait is shown but protects nothing: say how long you will wait. A board read by the
+unbounded wait is shown as waiting and is not orphaned; stall limits still apply. A board read by the
 orchestrating session (`status --job`, `who`, `read`, `tail --job`) counts as contact for liveness.
 
 The wait ends with `swarm resume --job J`. It also ends by itself when an agent joins the job,
@@ -2211,7 +2211,7 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `activate … --goal G\|-` | give the job a goal, judged by one judge agent; the tag lines include `[swarm role: judge]` |
 | `deactivate --job J [--status completed\|cancelled\|failed] [--outcome O] [--force] [--delete-bank]` | switch the board off and close the job (default `completed`). A job with a goal completes only with the judge's `met` verdict, or with `--force` (recorded). On an already closed (e.g. auto-closed) job it replaces the status and outcome |
 | `verdict --job J --as NAME met\|not_met REASON...` | the job's judge records its verdict and posts it on the board; anyone else is refused; spooled when the board is unreachable |
-| `wait --job J [--for DURATION \| --until TIME] --on WHAT...` | mark an open job as waiting for something; shown as `waiting` with the reason and, when bounded, its end. `--for 90m` (`h`/`m`/`s`, bare = minutes) or `--until` (a duration, a time of day such as `17:30`, or `2026-10-06 09:00`) bounds it. A bounded wait that has not ended protects the job from the orphan rule and the stall limits (including `goal_stall_hours`); once it ends the job is judged as not waiting, and the end counts as progress. An unbounded wait does not protect against automatic closing. A board read by the orchestrating session (`status --job`, `who`, `read`, `tail --job`) counts as contact for liveness |
+| `wait --job J [--for DURATION \| --until TIME] --on WHAT...` | mark an open job as waiting for something; shown as `waiting` with the reason and, when bounded, its end. `--for 90m` (`h`/`m`/`s`, bare = minutes) or `--until` (a duration, a time of day such as `17:30`, or `2026-10-06 09:00`) bounds it. A bounded wait that has not ended protects the job from the orphan rule and the stall limits (including `goal_stall_hours`); once it ends the job is judged as not waiting, and the end counts as progress. An unbounded wait is not orphaned; stall limits still apply. A board read by the orchestrating session (`status --job`, `who`, `read`, `tail --job`) counts as contact for liveness |
 | `blockers --job J [--open\|--all]` | list open blockers, or include resolved/expired history with `--all` |
 | `blocker resolve ID [--how TEXT]` / `blocker comment ID TEXT...` | resolve a blocker with an audit reason, or append a comment |
 | `pause --job J [--reason TEXT] [--wait SECONDS]` | pause a job: no joins or posts, every agent recorded in a resume manifest and closed, final transcripts captured (see Pausing and resuming a job) |

@@ -101,7 +101,7 @@ doing something another agent owns; a short status every few steps. The hooks ba
 
 ## Watching a swarm
 `${CLAUDE_PLUGIN_ROOT}/bin/swarm watch [--job J] [--interval 10]` is a full-screen live dashboard:
-- the jobs table;
+- the jobs table, with waiting/paused jobs shown as waiting/paused (a waiting job with no live agents is normal);
 - the agents table for each active job (or just `--job J`, with its task): active agents, plus
   finished ones (completed/left/dead) that ended or were last seen within
   `watch_recent_minutes` (default 10); a dim line counts the older ones hidden;
@@ -195,7 +195,7 @@ On Postgres the same data is queryable directly as the `agent_status` and `job_s
 - **Orphan.** No live agent (all `completed`, `left` or `dead`, or none at all; dead per
   `dead_minutes`) and no board activity for `[job] orphan_minutes` (default 30), and no tool call
   of the orchestrating session in that time: closed `cancelled`, outcome
-  `auto-closed: no live agents for N min`. A bounded wait with a future deadline, or an open question/person/role blocker, shields it (`orphan_minutes = 0`
+  `auto-closed: no live agents for N min`. An explicit wait or an open blocker shields it (`orphan_minutes = 0`
   turns the rule off).
 - **A job with a goal** and no `met` verdict is the exception: no sweep closes it, so an
   orchestrator waiting on a question or between rounds keeps its job (`status` shows
@@ -206,7 +206,7 @@ On Postgres the same data is queryable directly as the `agent_status` and `job_s
 `swarm wait --on "<what>" --for 90m` (`h`, `m`, `s`; a bare number is minutes) bounds a wait: until
 it expires the wait shields the job from orphan and stall rules, including `goal_stall_hours`; past it
 the job is `active` or `idle` again, and the grace clock counts from the moment it expired. An unbounded
-wait is shown as waiting but protects nothing. Several plugin blockers may coexist; `resume` resolves only
+wait is shown as waiting and is not orphaned; stall limits still apply. Several plugin blockers may coexist; `resume` resolves only
 wait blockers. An overdue question without a default stays open and protects against automatic closing
 until resolved. `purge` runs the
 sweep on demand; it is best effort and never fails the command that ran it.
@@ -745,7 +745,8 @@ Recovery continues existing work; the brief includes the last contact, tool and 
 Only jobs with a private activation enrolment record for this machine and OS user are eligible
 for coordinator recovery, including existing jobs recorded before automatic recovery. Agent recovery
 uses this user's local enrolment records. Paused or closed jobs, human/external waits and open
-questions are excluded. An unanswered `?` message addressed to the owner, user, human or
+questions are excluded. Waiting jobs with zero live agents are normal, not orphaned; watch,
+status and an empty who listing show the derived waiting/paused state and wait context. An unanswered `?` message addressed to the owner, user, human or
 Francesco among the last 100 board messages counts as a question wait. Use `swarm wait --on`
 for other external waits. Jobs without a private enrolment record are skipped.
 A met verdict gets one board reminder to close the job.

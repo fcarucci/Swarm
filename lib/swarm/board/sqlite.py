@@ -1449,8 +1449,8 @@ class SqliteBoard(SqlBlockers, Board):
     def session_shown_jobs(self, session: str) -> list[JobStatus]:
         with self._tx(write=False) as c:
             rows = c.execute(f"SELECT {self._JOB_COLS} FROM jobs WHERE session_id = ? "
-                             "AND (status = 'active' OR job = (SELECT job FROM jobs WHERE session_id = ? "
-                             "AND NOT EXISTS (SELECT 1 FROM jobs WHERE session_id = ? AND status = 'active') "
+                             "AND (status IN ('active', 'paused') OR job = (SELECT job FROM jobs WHERE session_id = ? "
+                             "AND NOT EXISTS (SELECT 1 FROM jobs WHERE session_id = ? AND status IN ('active', 'paused')) "
                              "ORDER BY COALESCE(finished_at, created_at) DESC, job DESC LIMIT 1)) "
                              "ORDER BY COALESCE(activated_at, created_at), job",
                              (session, session, session)).fetchall()

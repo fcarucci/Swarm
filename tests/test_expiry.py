@@ -443,13 +443,13 @@ class ExpiryContract:
         self.assertEqual(self.status().outcome, "done by hand")
 
     # ---- bounded waits
-    def test_a_waiting_job_is_covered_by_both_rules(self):
+    def test_an_unbounded_wait_is_not_orphaned_but_stall_limits_still_apply(self):
         self.job("orphaned", age=2 * HOUR)
         self.b.set_waiting("orphaned", "the user")
         self.job("old", age=5 * HOUR, agents={"a": 0})
         self.b.set_waiting("old", "the user")
-        self.assertEqual(sorted(c.job for c in self.sweep()), ["old", "orphaned"])
-        self.assertEqual((self.status("orphaned").status, self.status("old").status), ("cancelled", "failed"))
+        self.assertEqual(sorted(c.job for c in self.sweep()), ["old"])
+        self.assertEqual((self.status("orphaned").status, self.status("old").status), ("active", "failed"))
         self.assertIsNone(self.status("old").waiting_on)
 
     def test_a_bounded_wait_shields_from_the_orphan_rule_until_it_expires(self):
@@ -594,7 +594,7 @@ class ExpiryRulesTests(unittest.TestCase):
         for live in ("started", "running", "idle"):
             self.assertFalse(base.orphaned(self.js(**{live: 1}), self.NOW, 30), live)
         self.assertFalse(base.orphaned(self.js(last_activity_at=self.NOW), self.NOW, 30))   # just active
-        self.assertTrue(base.orphaned(self.js(waiting_on="x"), self.NOW, 30))            # unbounded wait: no shield
+        self.assertFalse(base.orphaned(self.js(waiting_on="x"), self.NOW, 30))           # waiting is not orphaned
         self.assertFalse(base.orphaned(self.js(waiting_on="x", waiting_until=self.NOW + dt.timedelta(hours=1)),
                                        self.NOW, 30))
         self.assertTrue(base.orphaned(self.js(last_activity_at=None, activated_at=old), self.NOW, 30))
@@ -745,7 +745,7 @@ class ExpiryCliTests(Env):
         self.assertRegex(next(ln for ln in self.cli("status", "--no-color")[1].splitlines() if ln.startswith("G ")),
                          r"^G\s+active\s")
 
-    def test_compact_watch_shows_the_derived_word_only_for_a_waiting_goal_job(self):
+    def test_compact_watch_shows_the_shared_derived_word_for_every_job(self):
         self.activate("G", "--goal", "ship it")
         self.activate("P")                             # no goal, idle since 10 minutes: stored status "active"
         self.age("G", 2 * HOUR)
@@ -753,8 +753,8 @@ class ExpiryCliTests(Env):
         self.assertIn("[idle]", self.cli("status", "--job", "P", "--no-color")[1])   # status derives it
         compact = self.frame(compact=True)
         self.assertIn("G [waiting (goal not met)]", compact)
-        self.assertIn("P [active]", compact)
-        self.assertNotIn("P [idle]", compact)
+        self.assertIn("P [idle]", compact)
+        self.assertNotIn("P [active]", compact)
 
     def test_wait_for_bounds_the_wait(self):
         self.activate()

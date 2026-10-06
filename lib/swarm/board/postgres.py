@@ -1294,9 +1294,9 @@ class PostgresBoard(SqlBlockers, Board):
           WITH scope AS MATERIALIZED (
             SELECT job FROM jobs WHERE (%s::text IS NOT NULL AND job = %s)
                 OR (%s::text IS NULL AND (%s::text IS NULL AND status IN ('active','paused')
-                                         OR (session_id = %s AND (status = 'active' OR job = (
+                                         OR (session_id = %s AND (status IN ('active','paused') OR job = (
                                            SELECT job FROM jobs WHERE session_id = %s
-                                            AND NOT EXISTS (SELECT 1 FROM jobs WHERE session_id = %s AND status='active')
+                                            AND NOT EXISTS (SELECT 1 FROM jobs WHERE session_id = %s AND status IN ('active','paused'))
                                             ORDER BY COALESCE(finished_at,created_at) DESC, job DESC LIMIT 1)))))
           ), selected AS MATERIALIZED (
             SELECT {_JOB_STATUS_COLS} FROM job_status WHERE job IN (SELECT job FROM scope)
@@ -1807,9 +1807,9 @@ class PostgresBoard(SqlBlockers, Board):
         return self._fetch(JobStatus, f"""
             WITH shown AS MATERIALIZED (
                 SELECT job FROM jobs WHERE session_id = %s
-                  AND (status = 'active' OR job = (
+                  AND (status IN ('active','paused') OR job = (
                     SELECT job FROM jobs WHERE session_id = %s
-                      AND NOT EXISTS (SELECT 1 FROM jobs WHERE session_id = %s AND status = 'active')
+                      AND NOT EXISTS (SELECT 1 FROM jobs WHERE session_id = %s AND status IN ('active','paused'))
                     ORDER BY COALESCE(finished_at, created_at) DESC, job DESC LIMIT 1))
             )
             SELECT {_JOB_STATUS_COLS} FROM job_status WHERE job IN (SELECT job FROM shown)

@@ -993,10 +993,10 @@ def wait_protects(js: JobStatus) -> bool:
 
 def orphaned(js: JobStatus, now: _dt.datetime, orphan_minutes: float) -> bool:
     """The orphan rule's test on the rollup: no agent started, running or idle, not inside an
-    unexpired bounded wait, and no board activity for `orphan_minutes` (the run's start counts)."""
+    explicit wait, and no board activity for `orphan_minutes` (the run's start counts)."""
     if not orphan_minutes or orphan_minutes <= 0 or js.started or js.running or js.idle:
         return False
-    if wait_protects(js):
+    if derive_job_status(js, 0, now) in ("waiting", "paused") or js.status != "active":
         return False
     quiet = _dt.timedelta(minutes=orphan_minutes)
     return now - (js.last_activity_at or run_start(js)) >= quiet and now - run_start(js) >= quiet
@@ -1370,7 +1370,7 @@ class Board(abc.ABC):
             closed "failed", outcome "auto-closed: no progress for N h" plus its last verdict;
           * no agent started, running or idle (dead ones don't count; none at all is fine), no
             board activity (last_activity_at, run start, an expired wait's end) for
-            `orphan_minutes`, not inside an unexpired bounded wait, and `watch(job).active()`
+            `orphan_minutes`, not waiting or paused, and `watch(job).active()`
             (the orchestrating session, cli.OrchestratorWatch) false: closed "cancelled",
             outcome "auto-closed: no live agents for N min".
         Both are close_job(..., closed_by=AUTO_CLOSED_BY): the remaining agents leave, and the
@@ -2028,7 +2028,7 @@ class Board(abc.ABC):
         """Only open jobs of the session, in jobs() order; if none, its last finished job
         by (coalesce(finished_at, created_at), job). Select before computing status rollups."""
         rows = self.session_jobs(session)
-        active = [j for j in rows if j.status == "active"]
+        active = [j for j in rows if j.status in ("active", "paused")]
         return active or ([max(rows, key=lambda j: (j.finished_at or j.created_at, j.job))] if rows else [])
 
     # ---- transcripts ([transcripts]; bin/transcripts.py does the capturing) ---------------

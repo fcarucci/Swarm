@@ -1201,7 +1201,7 @@ class MemoryBoard(MemoryBlockers, Board):
         s = self._s()
         with s.lock:
             jobs = [j for j in s.jobs.values() if j["session_id"] == session]
-            selected = [j for j in jobs if j["status"] == "active"]
+            selected = [j for j in jobs if j["status"] in ("active", "paused")]
             if not selected and jobs:
                 selected = [max(jobs, key=lambda j: (j["finished_at"] or j["created_at"], j["job"]))]
             selected.sort(key=lambda j: (j["activated_at"] or j["created_at"], j["job"]))

@@ -41,6 +41,17 @@ class SnapshotTests(unittest.TestCase):
         with mock.patch("shutil.get_terminal_size", return_value=size):
             return swarm._watch_frame(swarm._Replay(snap), None, 2.0, False, True, view)
 
+    def test_postgres_json_waiting_since_is_a_datetime(self):
+        import dataclasses
+        from swarm.watchdata import SnapshotBoard
+        self.board.set_waiting("J1", "30-minute watch")
+        job = self.board.job_status("J1")
+        data = dataclasses.asdict(job)
+        data = {k: v.isoformat() if isinstance(v, dt.datetime) else v for k, v in data.items()}
+        snapshot = SnapshotBoard(self.board, [self.board.now(), [data], [], [], [], {}, {}, [], {}])
+        self.assertEqual(snapshot.job_status("J1").waiting_since, job.waiting_since)
+        self.assertIn("waiting", swarm.jobs_overview(snapshot, False, False))
+
     def test_every_key_and_a_resize_render_from_the_snapshot(self):
         for compact in (True, False):
             snap = self.snapshot(compact)

@@ -980,12 +980,22 @@ def _job_status_word(board, j, now) -> str:
     return derive_job_status(j, float(board.board_cfg.get("idle_minutes", 5)), now)
 
 
-def _compact_status(board, j, now) -> str:
-    """The compact watch's status word: the derived one only for a waiting goal job, else the stored
-    status (a goal-less job keeps showing what it showed before)."""
-    from swarm.board import WAITING_GOAL
-    word = _job_status_word(board, j, now)
-    return word if word == WAITING_GOAL else j.status
+def _job_heading(board, j, now, color: bool = False) -> str:
+    """A job and its shared display state, plus the wait context when present."""
+    shown = _job_status_word(board, j, now)
+    waiting = _waiting_word(j, now)
+    return (f"{term_safe(j.job)} [{_paint_status(shown, shown, color)}]"
+            + (f" · {term_safe(waiting)}" if waiting else ""))
+
+
+def _empty_agents_note(board, job, now) -> str:
+    """Empty agent panes are normal for waiting or paused jobs."""
+    j = board.job_status(job)
+    if j is not None:
+        shown = _job_status_word(board, j, now)
+        if shown.startswith("waiting") or shown == "paused":
+            return "(" + _job_heading(board, j, now) + ")"
+    return "(no agents yet)"
 
 
 def _until_note(j, now) -> str:
@@ -1144,7 +1154,7 @@ def agents_table(board, job: str, color: bool, now, recent_minutes: int | None =
     else:
         rows, hidden = _recent_agents(board.agents(job), now, recent_minutes)
     if not rows and not hidden:
-        return "(no agents yet)"
+        return _empty_agents_note(board, job, now)
     attempts = {r.new_agent_key: r.attempt for r in board.restarts(job=job) if r.new_agent_key}
 
     def _status_cell(a):
@@ -1826,7 +1836,7 @@ def _shift(line: str, offset: int) -> str:
 def _active_jobs_by_activity(board) -> list[str]:
     """Active job names in the job table's own stable order (by start, then name): ordering
     by recent activity swapped the agent sections around on every refresh."""
-    return [j.job for j in board.jobs(False)]
+    return [j.job for j in open_and_paused(board, False)]
 
 
 def session_jobs(board, session: str) -> tuple[list, list]:
@@ -1896,7 +1906,9 @@ def _watch_header(board, job: str | None, interval: float, color: bool, interact
         return out + ["", _sgr(2, note) if color else note], pinned
     for jb in jobs:
         pinned.add(len(out) + 1)
-        out += ["", _bold(f"AGENTS · {term_safe(jb)}", color)] + agents_table(
+        j = board.job_status(jb)
+        heading = _job_heading(board, j, now, color) if j else term_safe(jb)
+        out += ["", _bold(f"AGENTS · {heading}", color)] + agents_table(
             board, jb, color, now, recent_minutes, "press a to show all").splitlines()
     return out, pinned
 
@@ -2050,14 +2062,14 @@ def _compact_frame(board, job: str | None, color: bool, view: dict, rows: list |
     if not rows:
         out.append("(no jobs yet)")
     for j in rows:
-        out.append(_bold(f"{term_safe(j.job)} [{_compact_status(board, j, now)}]", color))
+        out.append(_bold(_job_heading(board, j, now, color), color))
         if hasattr(board, 'watch_agents'):
             agents, hidden = board.watch_agents(j.job, recent)
         else:
             agents, hidden = _recent_agents(board.agents(j.job), now, recent)
         out += [_compact_agent_line(a, NATURAL, color) for a in agents]
         if not agents:
-            out.append("  (no agents yet)")
+            out.append("  " + _empty_agents_note(board, j.job, now))
         if hidden:
             out.append(f"  ({hidden} older hidden)")
         out += ['  ' + _blocker_line(board, blocker) for blocker in board.blockers(j.job)]
@@ -3826,7 +3838,12 @@ def _board_read(board, cfg: dict, args) -> None:
 
 
 def _board_who(board, cfg: dict, args) -> None:
-    for a in board.agents(args.job, include_departed=False):
+    rows = board.agents(args.job, include_departed=False)
+    if not rows:
+        js = board.job_status(args.job)
+        if js is not None and _job_status_word(board, js, board.now()) in ("waiting", "paused"):
+            print(_job_heading(board, js, board.now()))
+    for a in rows:
         # Tab-separated, the name first and exact (so it can be pasted into --to '<name>'),
         # then the harness in its own field so the name field is never altered.
         tool = f"in {term_safe(a.current_tool)}" if a.current_tool else ""
