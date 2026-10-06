@@ -127,7 +127,9 @@ class HookOutOfTimeTests(FinalRetryEnv):
         self.start("a1")
         size = self.slow_agent("a1").stat().st_size
         self.stop("a1")
-        with mock.patch.object(transcripts, "FINAL_RETRY_SECONDS", 0.02):   # "never finishes", scaled
+        with mock.patch.object(transcripts, "capture_subagent",
+                                  side_effect=transcripts.OutOfTime("transcript capture ran out of time")), \
+                mock.patch.object(transcripts, "FINAL_RETRY_SECONDS", 0.02):
             for tries in range(1, transcripts.FINAL_RETRY_MAX):
                 self.supervise()
                 self.assertIsNone(self.row("a1"))
@@ -420,7 +422,7 @@ class CodexOrderingTests(FinalRetryEnv):
                 mock.patch.object(type(codex), "find_agent_transcript", lambda self, main, key: rollout):
             for _ in range(len(keys)):
                 with self.board() as b:
-                    transcripts.finalize_owned(b, self.cfg, time.monotonic() + 0.5)
+                    transcripts.finalize_owned(b, self.cfg, None)
                 if self.row(good, job="CX") is not None:
                     break
         self.assertTrue(self.row(good, job="CX").final)
@@ -524,6 +526,7 @@ class LockTests(FinalRetryEnv):
                                   str(lockp), str(LIB)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         self.addCleanup(child.stdin.close)
         self.addCleanup(child.stdout.close)
+        self.addCleanup(child.stdin.close)
         self.addCleanup(child.wait)
         self.addCleanup(child.kill)
         self.assertEqual(child.stdout.readline().strip(), "held")
@@ -710,6 +713,8 @@ class LockHeldForeverTests(FinalRetryEnv):
         self.hold_lock()
         self.stop("a1")                                        # the hook can't record it
         with mock.patch.object(transcripts, "FINAL_RETRY_SECONDS", 0.02), \
+                mock.patch.object(transcripts, "capture_subagent",
+                                  side_effect=transcripts.OutOfTime("transcript capture ran out of time")), \
                 mock.patch.object(command, "PASS_SWEEP_SECONDS", 0.02):
             for _ in range(transcripts.FINAL_RETRY_MAX + 1):
                 lost._contended[0] = float("-inf")

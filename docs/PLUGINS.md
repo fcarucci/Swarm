@@ -99,3 +99,13 @@ It adds `swarm team`, `swarm activate --team` and a `team` line in `swarm status
 the reference use of this API: `skills/engineering-team/swarm_plugin.py`. It also registers the
 coding pipeline recipe for `branch@sha`: exact-SHA GitHub evidence and an INTEGRATOR executor.
 Configure it under `[pipeline]` in `team.toml`; see [review pipeline](REFERENCE.md#review-pipeline).
+
+### Blocker protection rules
+
+`api.register_blocker_kind(kind, display=None, expiry=None, protection="addressed")`
+registers a plugin kind and its protection rule. `addressed` protects blockers addressed
+somewhere other than `external`; `always` protects until resolution; `deadline` protects
+only while a future `until` exists. All rules protect a future deadline. The rule is
+stored on each opened blocker, so status and automatic close guards agree even when
+the plugin is unavailable. The built-in `wait` kind uses `deadline`; unregistered
+plugin kinds use `addressed`.

@@ -72,6 +72,10 @@ class MemoryStore:
         self.next_restart_id = 1
         self.pauses: list[dict] = []           # job pauses (Board.pause_job), by id
         self.next_pause_id = 1
+        self.blockers: list[dict] = []
+        self.blocker_events: list[dict] = []
+        self.next_blocker_id = 1
+        self.next_blocker_event_id = 1
         self.message_max_chars: int | None = None   # the board's message cap (None: not set yet)
         self.schema_version: int | None = None  # set by setup (the version a real store records)
         self.msg_version = 0                   # bumped on every new message
@@ -138,7 +142,7 @@ def reset_store(name: str = "default") -> MemoryStore:
         for attr in ("available", "pool", "jobs", "agents", "messages", "routes", "transcripts",
                      "transcript_bodies", "image_bodies", "next_id", "schema_version",
                      "restarts", "next_restart_id", "memory_refs", "pauses", "next_pause_id",
-                     "message_max_chars"):
+                     "message_max_chars", "blockers", "blocker_events", "next_blocker_id", "next_blocker_event_id"):
             setattr(store, attr, getattr(fresh, attr))
         store.touch(messages=True)
     return store
@@ -205,7 +209,10 @@ def _drop_quiet_jobs(s: MemoryStore, keep: _dt.datetime) -> bool:
     return bool(doomed)
 
 
-class MemoryBoard(Board):
+from .blockers import MemoryBlockers, rollup, protects
+
+
+class MemoryBoard(MemoryBlockers, Board):
     """In-process Board over a shared MemoryStore. Reference/test backend only."""
 
     def __init__(self, cfg: dict):
@@ -239,6 +246,19 @@ class MemoryBoard(Board):
                 known.update(new)
             if store.message_max_chars is None:   # a board's cap is set once; never reset by setup
                 store.message_max_chars = configured_message_cap(cfg)
+            for j in store.jobs.values():
+                if j.get('waiting_on') and not any(b['job'] == j['job'] for b in store.blockers):
+                    at = j.get('waiting_since') or j.get('activated_at') or j['created_at']
+                    bid = store.next_blocker_id
+                    store.next_blocker_id += 1
+                    store.blockers.append(dict(id=bid, job=j['job'], kind='wait', waiting_on='external',
+                        reason=j['waiting_on'], until=j.get('waiting_until'), default_value='', state='open',
+                        created_by='swarm', created_at=at, resolved_by=None, resolved_how=None, resolved_at=None, protection_rule='deadline'))
+                    store.blocker_events.append(dict(id=store.next_blocker_event_id, blocker=bid,
+                        at=at, actor='swarm', event='opened', detail=j['waiting_on']))
+                    store.next_blocker_event_id += 1
+            for blocker in store.blockers:
+                blocker.setdefault('protection_rule', 'deadline' if blocker['kind'] == 'wait' else 'addressed')
             store.schema_version = max(store.schema_version or 0, SCHEMA_VERSION)
             return SetupResult(notes=(), pool={s: len(store.pool.get(s, [])) for s in NAME_SOURCES})
 
@@ -324,6 +344,7 @@ class MemoryBoard(Board):
                              ("project", project), ("goal", goal)):
                     if v is not None:
                         j[k] = v
+            self.set_waiting(job, None)
             s.touch()
 
     def close_job(self, job: str, status: str, outcome: str | None, forced: bool = False,
@@ -331,7 +352,7 @@ class MemoryBoard(Board):
         s = self._s()
         with s.lock:
             j = s.jobs.get(job)
-            if guard and not (j and guard.allows(j["goal"], j["verdict"], j.get("max_hours"))):
+            if guard and not (j and guard.allows(j["goal"], j["verdict"], j.get("max_hours")) and not any(protects(b, self.now()) for b in self.blockers(job))):
                 return False
             if guard and guard.settled and j and j.get("goal") and j.get("max_hours") is None:
                 from swarm.review import auto_close_pending
@@ -346,6 +367,9 @@ class MemoryBoard(Board):
         row (if any) is closed."""
         s = self._store
         now = self.now()
+        for blocker in self.blockers(job):
+            if blocker.kind == 'wait':
+                self.resolve_blocker(blocker.id, 'job closed', actor=closed_by or 'swarm')
         for a in s.agents.values():
             if a["job"] == job and a["left_at"] is None:
                 a.update(left_at=now, state="left", current_tool=None, tool_started_at=None)
@@ -360,7 +384,7 @@ class MemoryBoard(Board):
         s = self._s()
         with s.lock:
             j = s.jobs.get(job)
-            if j is None or j["status"] != "active" or j.get("waiting_on"):
+            if j is None or j["status"] != "active" or j.get("waiting_on") or self.blockers(job):
                 return None
             from swarm.review import completion_pending
             if completion_pending(self, job, j.get("goal"), j.get("verdict")):
@@ -394,17 +418,6 @@ class MemoryBoard(Board):
                     or j["finished_at"] != closed_at:
                 return False
             j.update(status="active", finished_at=None, outcome=None, closed_by=None)
-            s.touch()
-            return True
-
-    def set_waiting(self, job: str, on: str | None, until: _dt.datetime | None = None) -> bool:
-        s = self._s()
-        with s.lock:
-            j = s.jobs.get(job)
-            if j is None or j["status"] != "active":
-                return False
-            j.update(waiting_on=on, waiting_since=None if on is None else self.now(),
-                     waiting_until=None if on is None else until)
             s.touch()
             return True
 
@@ -1148,10 +1161,11 @@ class MemoryBoard(Board):
         s = self._store
         sts = [self._status(a, now) for a in s.agents.values() if a["job"] == j["job"]]
         msgs = self._messages_of(j["job"])
-        stamps = [a.last_contact_at for a in sts] + [m["created_at"] for m in msgs]
+        stamps = [a.last_contact_at for a in sts] + [m["created_at"] for m in msgs
+            if not (m["agent_name"] == "swarm" and m["message"].startswith("Blocker ") and " expired:" in m["message"])]
         count = lambda *st: sum(1 for a in sts if a.status in st)  # noqa: E731
         from swarm.review import pipeline_status
-        return JobStatus(
+        js = JobStatus(
             job=j["job"], status=j["status"], description=j["description"], task=j["task"],
             outcome=j["outcome"], created_by=j["created_by"], session_id=j["session_id"],
             created_at=j["created_at"], activated_at=j["activated_at"], finished_at=j["finished_at"],
@@ -1166,6 +1180,8 @@ class MemoryBoard(Board):
             closed_by=j.get("closed_by"), supervise=j.get("supervise", True),
             verdict_next=j.get("verdict_next"), max_hours=j.get("max_hours"),
             waiting_until=j.get("waiting_until"), **pipeline_status(j.get("plugin_data")))
+
+        return rollup(js, self.blockers(j["job"]), now)
 
     def job_status(self, job: str) -> JobStatus | None:
         s = self._s()

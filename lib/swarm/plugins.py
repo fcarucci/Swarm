@@ -1,7 +1,8 @@
 """Command plugins: extensions of the swarm CLI that live outside the core.
 
 A plugin is a Python module with a `register(api)` function. Core swarm discovers plugins when it
-parses a command line, never in the hooks, and works with none installed. Where it looks, in order
+parses a command line, and for blocker expiry/orchestrator hooks on an active job; it works
+with none installed. Where it looks, in order
 (a name loaded earlier wins; the rest are reported by `swarm plugins`):
 
   1. a plugins directory next to the swarm config: <config dir>/plugins/<name>.py (or <name>/__init__.py),
@@ -80,19 +81,25 @@ class PluginInfo:
 class PluginContext:
     """What a command or hook of a plugin gets: the loaded config, and the board on demand."""
 
-    def __init__(self, cfg: dict, config_path: Path, plugin: str, board=None):
+    def __init__(self, cfg: dict, config_path: Path, plugin: str, board=None, registry=None):
         self.cfg, self.config_path, self.plugin = cfg, Path(config_path), plugin
         self.config_dir = self.config_path.parent
         self._board = board
+        self.registry = registry
 
     def open_board(self):
-        """The board as a context manager: `with ctx.open_board() as board:`. Inside a hook the core
-        already holds the board open: that one is handed out (and left open on exit)."""
-        if self._board is not None:
-            import contextlib
-            return contextlib.nullcontext(self._board)
+        """A board context manager with the registry attached for durable blocker events."""
+        import contextlib
         from swarm.board import open_board
-        return open_board(self.cfg)
+        @contextlib.contextmanager
+        def opened():
+            if self._board is not None:
+                yield self._board
+            else:
+                with open_board(self.cfg) as board:
+                    board.plugin_registry = self.registry
+                    yield board
+        return opened()
 
     def job_data(self, board, job: str) -> dict[str, str]:
         """This plugin's settings of `job` (Board.job_data keys it kept, without the prefix)."""
@@ -157,6 +164,43 @@ class PluginAPI:
             raise TypeError("fn must be callable")
         self._r.pipeline_hooks.append((self.name, fn))
 
+    def register_blocker_kind(self, kind: str, display: Callable | None = None,
+                              expiry: Callable | None = None, protection: str = "addressed") -> None:
+        """display(ctx, blocker)->str; expiry(ctx, blocker) after a default expires it.
+        Protection is persisted on each blocker: addressed protects person/role waits,
+        always protects until resolution, deadline protects only before a future until.
+        Core owns state and audit events. A plugin callback cannot veto or replace that state.
+        """
+        from .board.blockers import check_blocker
+        check_blocker(kind, 'external', 'registration')
+        if kind == 'wait' or kind in self._r.blocker_kinds:
+            raise ValueError(f'blocker kind {kind!r} is already registered')
+        if protection not in ("addressed", "always", "deadline"):
+            raise ValueError(f'unknown blocker protection rule {protection!r}')
+        for fn in (display, expiry):
+            if fn is not None and not callable(fn): raise TypeError('callback must be callable')
+        self._r.blocker_kinds[kind] = (self.name, display, expiry, protection)
+
+    def add_blocker_event_hook(self, fn: Callable) -> None:
+        """fn(ctx, BlockerEvent) after commit; notification adapters subscribe here."""
+        self._add_hook(self._r.blocker_event_hooks, fn)
+
+    def add_watch_pane(self, fn: Callable) -> None:
+        """fn(ctx, job|None)->list[str], queried during snapshot capture, replayed for keys."""
+        self._add_hook(self._r.watch_hooks, fn)
+
+    def add_orchestrator_lines(self, fn: Callable) -> None:
+        """fn(ctx, job)->list[str] appended to the orchestrator's tool-call context."""
+        self._add_hook(self._r.orchestrator_hooks, fn)
+
+    def add_agent_lines(self, fn: Callable) -> None:
+        """fn(ctx, job, agent_key)->list[str], injected before the agent's next tool call."""
+        self._add_hook(self._r.agent_hooks, fn)
+
+    def _add_hook(self, hooks, fn):
+        if not callable(fn): raise TypeError('fn must be callable')
+        hooks.append((self.name, fn))
+
 
 class Registry:
     def __init__(self, cfg: dict | None = None, config_path: Path | None = None,
@@ -169,6 +213,12 @@ class Registry:
         self.extensions: list[_Extension] = []
         self.status_hooks: list[tuple[str, Callable]] = []
         self.pipeline_hooks: list[tuple[str, Callable]] = []
+
+        self.blocker_kinds: dict[str, tuple] = {}
+        self.blocker_event_hooks: list[tuple[str, Callable]] = []
+        self.watch_hooks: list[tuple[str, Callable]] = []
+        self.orchestrator_hooks: list[tuple[str, Callable]] = []
+        self.agent_hooks: list[tuple[str, Callable]] = []
 
     # ---- loading
 
@@ -202,6 +252,8 @@ class Registry:
             self.extensions[:] = [e for e in self.extensions if e.plugin != name]
             self.status_hooks[:] = [h for h in self.status_hooks if h[0] != name]
             self.pipeline_hooks[:] = [h for h in self.pipeline_hooks if h[0] != name]
+
+            self._drop_blocker_hooks(name)
             return
         info.commands = sorted(c for c, v in self.commands.items() if v.plugin == name)
         info.extends = sorted({e.command for e in self.extensions if e.plugin == name})
@@ -297,11 +349,13 @@ class Registry:
                 info.error = why[:300]
         self.status_hooks[:] = [h for h in self.status_hooks if h[0] != plugin]
         self.pipeline_hooks[:] = [h for h in self.pipeline_hooks if h[0] != plugin]
+
+        self._drop_blocker_hooks(plugin)
         self.commands = {k: v for k, v in self.commands.items() if v.plugin != plugin}
         self.extensions[:] = [e for e in self.extensions if e.plugin != plugin]
 
     def context(self, plugin: str, board=None) -> PluginContext:
-        return PluginContext(self.cfg, self.config_path, plugin, board)
+        return PluginContext(self.cfg, self.config_path, plugin, board, self)
 
     def run_command(self, name: str, args) -> int:
         cmd = self.commands[name]
@@ -351,6 +405,59 @@ class Registry:
                     raise ValueError(f"plugin {name}: pipeline recipe must return a dict or None")
                 return recipe
         return {}
+
+    def _drop_blocker_hooks(self, plugin):
+        for hooks in (self.blocker_event_hooks, self.watch_hooks, self.orchestrator_hooks, self.agent_hooks):
+            hooks[:] = [h for h in hooks if h[0] != plugin]
+        self.blocker_kinds = {k:v for k,v in self.blocker_kinds.items() if v[0] != plugin}
+
+    def _lines(self, hooks, what, job, board):
+        out = []
+        for name, fn in hooks:
+            try:
+                out.extend(str(line) for line in fn(self.context(name, board), job) or ())
+            except Exception as exc:
+                self._warn(name, what, exc)
+        return out
+
+    def watch_panes(self, job=None, board=None):
+        return self._lines(self.watch_hooks, 'watch', job, board)
+
+    def orchestrator_lines(self, job, board=None):
+        return self._lines(self.orchestrator_hooks, 'orchestrator', job, board)
+
+    def agent_lines(self, job, agent_key, board=None):
+        out = []
+        for name, fn in self.agent_hooks:
+            try:
+                out.extend(str(line) for line in fn(self.context(name, board), job, agent_key) or ())
+            except Exception as exc:
+                self._warn(name, 'agent context', exc)
+        return out
+
+    def blocker_event(self, board, event):
+        for name, fn in self.blocker_event_hooks:
+            try: fn(self.context(name, board), event)
+            except Exception as exc: self._warn(name, 'blocker event', exc)
+
+    def blocker_protection(self, kind):
+        registered = self.blocker_kinds.get(kind)
+        return registered[3] if registered else "addressed"
+
+    def blocker_display(self, board, blocker):
+        registered = self.blocker_kinds.get(blocker.kind)
+        if registered and registered[1]:
+            name, fn, _, _ = registered
+            try: return str(fn(self.context(name, board), blocker))
+            except Exception as exc: self._warn(name, 'blocker display', exc)
+        return f'{blocker.id} {blocker.kind} -> {blocker.waiting_on}: {blocker.reason}'
+
+    def blocker_expired(self, board, blocker):
+        registered = self.blocker_kinds.get(blocker.kind)
+        if registered and registered[2]:
+            name, _, fn, _ = registered
+            try: fn(self.context(name, board), blocker)
+            except Exception as exc: self._warn(name, 'blocker expiry', exc)
 
     @staticmethod
     def _warn(plugin: str, what: str, exc: Exception) -> None:

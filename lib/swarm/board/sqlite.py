@@ -508,7 +508,11 @@ def _allow_paused(conn: sqlite3.Connection) -> None:
         conn.execute("PRAGMA foreign_keys = ON")
 
 
-class SqliteBoard(Board):
+from .blockers import SqlBlockers, sql_schema, migrate_sql, rollup, protects
+
+
+class SqliteBoard(SqlBlockers, Board):
+    _blocker_pg = False
     """A Board over one SQLite connection to the shared database file."""
 
     def __init__(self, cfg: dict, read_only: bool = False):
@@ -585,6 +589,9 @@ class SqliteBoard(Board):
                     have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
                     if column not in have:
                         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+                for statement in sql_schema().split(";"):
+                    if statement.strip(): conn.execute(statement)
+                migrate_sql(conn)
                 for source in NAME_SOURCES:
                     conn.executemany("INSERT OR IGNORE INTO name_pool (name, source) VALUES (?, ?)",
                                      [(n, source) for n in names.get(source, ())])
@@ -647,6 +654,9 @@ class SqliteBoard(Board):
         c = self._c()
         if write and self.read_only:
             raise ReadOnlyBoard(f"board database {db_path(self.cfg)} is open read-only")
+        if c.in_transaction:
+            yield c
+            return
         c.execute("BEGIN IMMEDIATE" if write else "BEGIN")
         try:
             yield c
@@ -714,12 +724,14 @@ class SqliteBoard(Board):
             "waiting_until = NULL, max_hours = NULL, closed_by = NULL",
             (job, description, task, session_id, created_by, project, goal, now, now))
 
+        self.set_waiting(job, None)
+
     def close_job(self, job: str, status: str, outcome: str | None, forced: bool = False,
                   closed_by: str | None = None, guard: CloseGuard | None = None) -> bool:
         with self._tx() as c:   # (the write lock: nothing changes between the guard and the close)
             if guard:
                 row = c.execute("SELECT goal, verdict, max_hours FROM jobs WHERE job = ?", (job,)).fetchone()
-                if not row or not guard.allows(*row):
+                if not row or not guard.allows(*row) or any(protects(b, self.now()) for b in self.blockers(job)):
                     return False
                 if guard.settled and row[0] and row[2] is None:
                     from swarm.review import auto_close_pending
@@ -729,6 +741,9 @@ class SqliteBoard(Board):
 
     def _close(self, c: sqlite3.Connection, job: str, status: str, outcome: str | None,
                forced: bool, closed_by: str | None) -> bool:
+        for blocker in self.blockers(job):
+            if blocker.kind == 'wait':
+                self.resolve_blocker(blocker.id, 'job closed', actor=closed_by or 'swarm')
         now = self._now()
         c.execute("UPDATE agents SET left_at = ?, state = 'left', current_tool = NULL, "
                   "tool_started_at = NULL WHERE job = ? AND left_at IS NULL", (now, job))
@@ -773,13 +788,6 @@ class SqliteBoard(Board):
             "UPDATE jobs SET status = 'active', finished_at = NULL, outcome = NULL, closed_by = NULL "
             "WHERE job = ? AND status = 'completed' AND closed_by = ? AND finished_at = ?",
             (job, AUTO_CLOSED_BY, _ts(closed_at))).rowcount > 0
-
-    def set_waiting(self, job: str, on: str | None, until: _dt.datetime | None = None) -> bool:
-        return self._c().execute(
-            "UPDATE jobs SET waiting_on = ?, waiting_since = ?, waiting_until = ? "
-            "WHERE job = ? AND status = 'active'",
-            (on, None if on is None else self._now(), None if on is None or until is None else _ts(until),
-             job)).rowcount > 0
 
     def set_job_max_hours(self, job: str, hours: float | None) -> bool:
         return self._c().execute("UPDATE jobs SET max_hours = ? WHERE job = ?", (hours, job)).rowcount > 0
@@ -1407,7 +1415,7 @@ class SqliteBoard(Board):
                  "activated_at, finished_at, project, goal, verdict, verdict_reason, verdict_by, "
                  "verdict_at, completion_forced, waiting_on, waiting_since, closed_by, supervise, "
                  "(SELECT count(*) FROM messages m WHERE m.job = jobs.job), "
-                 "(SELECT max(created_at) FROM messages m WHERE m.job = jobs.job), "
+                 "(SELECT max(created_at) FROM messages m WHERE m.job = jobs.job AND NOT (m.agent_name = 'swarm' AND m.message LIKE 'Blocker % expired:%')), "
                  "(SELECT a.name FROM agents a WHERE a.job = jobs.job AND a.judge AND a.left_at IS NULL), "
                  "verdict_next, max_hours, waiting_until, plugin_data")
 
@@ -1419,7 +1427,7 @@ class SqliteBoard(Board):
         stamps = [a.last_contact_at for a in sts] + ([_dt_(last_message)] if last_message else [])
         count = lambda *st: sum(1 for a in sts if a.status in st)  # noqa: E731
         from swarm.review import pipeline_status
-        return JobStatus(
+        js = JobStatus(
             job=job, status=status, description=desc, task=task, outcome=outcome, created_by=by,
             session_id=session, created_at=_dt_(created), activated_at=_dt_(activated),
             finished_at=_dt_(finished), agents=len(sts), started=count("started"),
@@ -1431,6 +1439,8 @@ class SqliteBoard(Board):
             waiting_since=_dt_(waiting_since), closed_by=closed_by, supervise=bool(supervise),
             verdict_next=verdict_next, max_hours=max_hours, waiting_until=_dt_(waiting_until),
             **pipeline_status(plugin_data))
+
+        return rollup(js, self.blockers(job), now)
 
     def job_status(self, job: str) -> JobStatus | None:
         with self._tx(write=False) as c:

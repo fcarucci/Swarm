@@ -1334,6 +1334,7 @@ def _on_turn(board, agent_id: str, name: str, job: str, cfg: dict, sid: str | No
         if not moved:
             parts.append(_roster_update(board, agent_id, job, roster, state, cfg))
         parts += _memory_turn(board, cfg, agent_id, job, state)
+    parts.extend(_agent_plugin_lines(board, cfg, job, agent_id))
     text = "\n\n".join(p for p in parts if p)
     if lease and lease.enabled:
         lease.allowed = getattr(lease, 'eligible', False)
@@ -1385,6 +1386,17 @@ def _judge_stop(board, agent_id: str, cfg: dict, payload: dict) -> bool:
         + (f' --artifact "{artifact}"' if artifact else '')
         + ' before stopping. Record met with evidence or not_met with --reason and --next.'})
     return False
+
+def _agent_plugin_lines(board, cfg, job, agent_key):
+    try:
+        from swarm import plugins, paths, cli
+        reg = plugins.Registry(cfg, cfg.get("_config_path") or paths.config_path(),
+                               core_commands=tuple(cli.BOARD_COMMANDS) + tuple(cli.COMMANDS)).load()
+        board.plugin_registry = reg
+        return [_t(line) for line in reg.agent_lines(job, agent_key, board)]
+    except Exception as exc:
+        _log_error('agent plugin context', agent_key, exc)
+        return []
 
 
 def _on_event(board, event: str, agent_id: str, sid: str | None, bound: dict, unbound: dict,
@@ -1619,6 +1631,31 @@ def _orchestrator_seen(event: str, cfg: dict, sid: str | None, payload: dict) ->
         _log_error(event, "main", exc)
 
 
+def _orchestrator_plugin_lines(event, cfg, sid):
+    if not sid or event != 'turn':
+        return
+    markers = [m for m in _markers(cfg) if m.get('session_id') == sid and 'resume' not in m]
+    if not markers:
+        return
+    try:
+        from swarm import plugins, paths, cli
+        from swarm.board import open_board
+        reg = plugins.Registry(cfg, cfg.get("_config_path") or paths.config_path(),
+                               core_commands=tuple(cli.BOARD_COMMANDS) + tuple(cli.COMMANDS)).load()
+        if not reg.orchestrator_hooks:
+            return
+        with open_board(cfg, init_timeout=HOOK_INIT_TIMEOUT) as board:
+            board.plugin_registry = reg
+            lines = [line for m in markers for line in reg.orchestrator_lines(m['job'], board)]
+            if lines:
+                lease = _CURRENT.get('lease')
+                if lease:
+                    lease.allowed = False  # pending decisions must surface on every turn
+                _out('PreToolUse', '\n'.join(_t(line) for line in lines))
+    except Exception as exc:
+        _log_error(event, 'main', exc)
+
+
 def _orchestrator_respawn(event: str, cfg: dict, sid: str | None, payload: dict) -> None:
     """A not_met verdict with nobody left at work: tell the orchestrator (the only one who can
     spawn) to start the next round (swarm.respawn). Tool-call hooks add context; Stop refuses to
@@ -1738,6 +1775,7 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
             _orchestrator_seen(event, cfg, sid, payload)
             if lease:
                 lease.contacted = True
+        _orchestrator_plugin_lines(event, cfg, sid)
         _orchestrator_respawn(event, cfg, sid, payload)
         if event == "turn" and current_host().is_spawn(payload):
             try:

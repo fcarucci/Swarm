@@ -16,7 +16,7 @@ class CoalescingTests(unittest.TestCase):
         data = verdict_data(None, 'plan:1', 'met', 'reviewed', None, 'Judge', now)
         import json
         board = SimpleNamespace(cfg=cli.DEFAULTS, degraded=None)
-        snap = SnapshotBoard(board, (now, [], [], [], [], {}, {}, {'J': json.loads(data), 'empty': None}))
+        snap = SnapshotBoard(board, (now, [], [], [], [], {}, {}, [], {'J': data, 'empty': None}))
         self.assertEqual(artifact_verdicts(snap, 'J')['plan:1']['verdict'], 'met')
         self.assertEqual(snap.job_data('missing'), {})
         self.assertEqual(snap.job_data('empty'), {})
@@ -52,7 +52,7 @@ class CoalescingTests(unittest.TestCase):
         board.cfg=cli.DEFAULTS
         board.degraded=None
         board._conn=mock.Mock()
-        board._conn.execute.return_value.fetchone.return_value=(dt.datetime.now(dt.timezone.utc),[],[],[],[],{}, {}, {})
+        board._conn.execute.return_value.fetchone.return_value=(dt.datetime.now(dt.timezone.utc),[],[],[],[],{}, {}, [], {})
         snap=board.watch_snapshot(None,'session',10,60)
         self.assertIsInstance(snap,SnapshotBoard)
         board._conn.execute.assert_called_once()

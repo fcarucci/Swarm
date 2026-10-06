@@ -2273,6 +2273,8 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `verdict --job J --as NAME [--artifact REF] met\|not_met REASON...` | the job's judge records an artifact-bound verdict and posts it; anyone else is refused; spooled when the board is unreachable |
 | `done --job J --as NAME [--artifact REF] [--summary TEXT]` | hand off work for independent judging; `--branch B --sha S` is the coding alias |
 | `wait --job J [--for DURATION \| --until TIME] --on WHAT...` | mark an open job as waiting for something; shown as `waiting` with the reason and, when bounded, its end. `--for 90m` (`h`/`m`/`s`, bare = minutes) or `--until` (a duration, a time of day such as `17:30`, or `2026-10-06 09:00`) bounds it. A bounded wait that has not ended protects the job from the orphan rule and the stall limits (including `goal_stall_hours`); once it ends the job is judged as not waiting, and the end counts as progress. An unbounded wait is shown but protects nothing. A board read by the orchestrating session (`status --job`, `who`, `read`, `tail --job`) counts as contact for liveness |
+| `blockers --job J [--open\|--all]` | list open blockers, or include resolved/expired history with `--all` |
+| `blocker resolve ID [--how TEXT]` / `blocker comment ID TEXT...` | resolve a blocker with an audit reason, or append a comment |
 | `pause --job J [--reason TEXT] [--wait SECONDS]` | pause a job: no joins or posts, every agent recorded in a resume manifest and closed, final transcripts captured (see Pausing and resuming a job) |
 | `resume --job J [--host claude\|codex] [--workdir DIR] [--only NAME...] [--dry-run] [--retry]` | on a paused job: re-create its agents on this machine from the transcripts on the board, same names and cursors. On any other job: the job is no longer waiting (an agent joining does this too) |
 | `status [--all] [--no-color]` | jobs overview |
@@ -2630,6 +2632,137 @@ the "What's changed" notes (`scripts/release-notes.sh`; it fails if the section 
   for `memory` lines. After a connection failure, timeout or 502/503/504, Hindsight is skipped
   for `retry_after_seconds`; the marker is `~/.local/share/swarm/host/hindsight-unreachable`. Other errors
   don't set it.
+
+## Generic blockers (schema 18)
+
+`swarm blockers --job J` (or `--open`) lists open blockers; `--all` also lists resolved and
+expired ones. `swarm blocker resolve ID [--how TEXT]` records a resolution, and
+`swarm blocker comment ID TEXT...` appends a comment without changing its state. Both record the
+calling agent's host session identity when available, otherwise `human`.
+
+Several blockers may be open on a job. The shown job state is `waiting` while any is open;
+without blockers, an unmet goal with nobody working still shows `waiting (goal not met)`.
+Each blocker stores the protection rule its kind registered through the plugin API:
+`addressed` (the default) protects person/role addressees until resolved, while an `external`
+addressee needs a future deadline; `always` protects every addressee until resolved; `deadline`
+protects only while its deadline is in the future, regardless of addressee. Protection covers
+automatic stall and orphan closing, including `goal_stall_hours`. Core `wait` uses `deadline`,
+and the `ask-answer` plugin registers `question` with `always`, including overdue questions
+without defaults. Stored rules keep applying when a plugin is disabled or unavailable.
+Manual job closing remains available. Decision deadlines continue in paused and closed jobs;
+legacy wait expiry remains deferred while paused.
+
+`wait` replaces only the job's `wait` blocker; `resume` on an active job and a joining agent
+resolve only that kind, leaving plugin blockers open. Pausing a job preserves its blockers.
+An unbounded wait retains its previous behavior: shown as waiting, with no automatic-close protection.
+A bounded wait expires automatically and keeps the previous grace from its deadline for stall
+and orphan checks. Expiry board notices themselves are bookkeeping, not renewed job activity.
+
+Schema 18 adds `blockers` and append-only `blocker_events` on every backend. Existing waits are
+copied once, retaining their reason, deadline and creation time. The old waiting columns remain a
+compatibility projection. Both setup and migration are idempotent; Postgres uses the existing
+lock-timeout/deadlock retry path. Blocker history is retained when a job's retention cleanup runs.
+
+The board API returns immutable `Blocker` and `BlockerEvent` records (exported by `swarm.board`):
+
+- `open_blocker(job, kind, waiting_on, reason, until=None, default_value=None, created_by=None)`
+  returns the opened blocker with its registered `protection_rule`, or raises `ValueError` for a
+  missing/closed job or invalid fields. Plugins register kinds through
+  `api.register_blocker_kind(kind, display=None, expiry=None, protection="addressed")`; see [the plugin API](PLUGINS.md).
+- `blockers(job=None, include_closed=False)`, `blocker(id)` (record or `None`), and
+  `blocker_events(id)` read records in increasing id order.
+- `resolve_blocker(id, how=None, actor=None, state="resolved")`,
+  `reopen_blocker(id, detail=None, actor=None)`, and `comment_blocker(id, text, actor=None)`
+  append audit events and return whether a change was made. Resolution accepts `resolved` or
+  `expired`; repeated resolution/reopening of an already-open blocker is a no-op. Comments may
+  be added to closed blockers. Reopening requires an active job.
+- The existing `sweep_expiry` uses `board.now()` as its clock: defaults resolve past-deadline
+  blockers as `expired` with the default in `resolved_how`, post an expiry notice, and invoke
+  the registered expiry hook. Without a default it emits `overdue` once and keeps the blocker
+  open. The empty default on a legacy wait means end the wait; no new daemon is needed.
+
+CLI plugins register these optional hooks in `register(api)`:
+
+```python
+api.register_blocker_kind("question", display=display, expiry=expired)
+api.add_blocker_event_hook(notify)
+api.add_watch_pane(questions_pane)
+api.add_orchestrator_lines(pending_questions)
+```
+
+`display(ctx, blocker) -> str` supplies a blocker display line. `expired(ctx, blocker)` runs after
+core applies a default (the record supplied is the pre-expiry blocker so its default/addressee
+remain available). Core owns the state transition; expiry callbacks cannot veto it.
+`notify(ctx, event)` receives each durable event, with `ctx.open_board()` available to look up its
+blocker or plugin job data. This is the hook for a notification-command adapter; core does not
+interpret `[notify]` configuration. The event names are `opened`, `commented`, `resolved`,
+`expired`, `overdue`, and `reopened`.
+
+`questions_pane(ctx, job_or_none) -> list[str]` adds lines to watch. Its board reads are captured
+by the existing recorded-snapshot harness and replayed during key redraws without database reads.
+`pending_questions(ctx, job) -> list[str]` adds context before the orchestrator's next tool call
+for a job bound to its session. Empty lists add nothing. Hooks receive the same `PluginContext`
+used by commands, with per-job plugin data and a borrowed board. Registration rejects duplicate
+kinds and reserves `wait` for core. Failed registration removes all of a plugin's partial hooks;
+callback errors are reported on stderr and cannot undo a blocker or break core commands.
+
+## Structured questions (ask/answer plugin)
+
+The shipped `ask-answer` CLI plugin uses schema-18 blockers and schema-16 per-job plugin data.
+Disable it with `[plugins] disabled = ["ask-answer"]` when structured questions are not wanted.
+Core blockers remain usable without the plugin.
+
+```sh
+swarm ask --job J --to human "Choose a format?" --options json,toml --default json --expires 2h --blocks "the exporter"
+swarm ask --job J --to @EL "Which interface should the exporter expose?"
+swarm answer 12 "Use JSON"
+swarm answer 12 --option json --comment "Matches the consumer"
+swarm answer 12 --default
+swarm answer 12 --comment "Suggestion only"
+swarm answer 12 --reopen "Use TOML instead"
+swarm questions --job J --open --to me
+swarm questions --all
+```
+
+Questions retain their full text, options, default and blocked-work description in the plugin's
+job data. Values are chunked within the existing per-value storage bound, without a board-message
+length limit. A short board summary preserves an `answer: swarm answer ID` pointer. Each ask opens
+one blocker: only dependent work waits, and agents continue independent work.
+
+A role address uses the current seat holder at answer time, including when the seat has changed
+since asking. Named agents and the human are also valid addressees. Only the addressee may answer;
+the human can answer any question; everyone else can comment. Agents cannot answer human questions,
+including through `blocker resolve` while this plugin is loaded. Agent identity comes from the host
+session's active roster/route; calls outside an agent session are recorded as `human`. This is an
+OS-user/shared-session audit boundary, not cryptographic authentication.
+
+`--reopen TEXT` corrects an answered question or an applied default, records reopened/resolved audit
+events, and delivers the replacement to the asker. It does not simply leave the question open.
+Defaults are optional. Expiry applies one or flags the question overdue once and leaves it open.
+The core expiry sweep also works in paused/closed jobs; its answer notices are bookkeeping.
+
+The asker receives an addressed summary through existing board-message hooks and full answer text
+through `api.add_agent_lines(fn)`: `fn(ctx, job, agent_key) -> list[str]` runs before each agent tool
+call. Callback failures are isolated and reported; partial plugin registrations remove these hooks.
+The question plugin records a delivery cursor in its job data to avoid repeating full answers.
+Answers received while an agent is absent remain durable for its next turn.
+
+The orchestrator sees `N open questions for you (oldest Nm): Q12 Q15` for questions addressed to the
+human. Watch adds a `QUESTIONS` pane with id, addressee, age, default yes/no and time remaining;
+`OVERDUE` marks elapsed unanswered deadlines. `status --job` lists the open blockers.
+
+```toml
+[notify]
+on_question = "your-command {event} {job} {id} {to} {summary}"
+```
+
+The events are `opened`, `answered`, `expired`, `overdue`. The command is split into argv tokens
+before substitution, then executed without a shell: each token stays one argument even when text
+contains spaces or shell syntax. The values also appear in `SWARM_EVENT`, `SWARM_JOB`, `SWARM_ID`,
+`SWARM_TO`, `SWARM_SUMMARY`. Use an executable or script for pipelines and shell features. The worker
+runs detached, has a five-second timeout and discards command output. Launch/timeout/exit failures
+are isolated from ask/answer, logged in `question-notify-errors.log` next to the config, and shown
+by `swarm doctor`. No notification command means no worker is launched.
 
 ## License
 

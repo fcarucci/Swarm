@@ -680,17 +680,17 @@ class AutoCloseCliTests(Env):
         self.main_session()
         old = self.seen().stat().st_mtime - QUIET
         os.utime(self.seen(), (old, old))
-        waited = []
+        touched = []
 
         def during():
             with open(self.marker()) as fh:
                 compat.flock(fh, compat.LOCK_EX)
                 self.assertIsNone(assert_finishes(self, self.main_session))
-                waited.append(True)
+                touched.append(True)
 
         run = self.job().activated_at
         self.assertEqual(self.slow_close(during), [])
-        self.assertEqual(waited, [True])
+        self.assertEqual(touched, [True])
         s = self.job()
         self.assertEqual((s.status, s.finished_at, s.closed_by, s.activated_at),
                          ("active", None, None, run))   # the close reverted: the same run

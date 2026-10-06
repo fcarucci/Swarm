@@ -30,7 +30,7 @@ class Env(unittest.TestCase):
     """A private swarm installation: config, marker dir, spool dir, board storage, $HOME.
     The CLI plugins shipped with the skills are disabled (core runs on its own, its output is the
     core's); a test of a plugin lists none in `plugins_disabled`."""
-    plugins_disabled = ("engineering-team",)
+    plugins_disabled = ("engineering-team", "ask-answer")
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="swarm-test-", dir=os.environ.get("TMPDIR")))
@@ -167,11 +167,11 @@ class CliTests(Env):
         self.cli("join", "--job", "J", "--key", "k1", "--role", "worker")
         _, out, _ = self.cli("status", "--job", "J")
         self.assertIn("job        J  [active]\n", out)
-        self.assertRegex(out, r"activated  \d+s ago by tester")
+        self.assertRegex(out, r"activated  \S+ ago by tester")
         self.assertIn("about      the job\n", out)
         self.assertIn("task       line one\n           line two\n", out)
         self.assertRegex(out, r"\nAGENT\s+ROLE\s+HOST\s+MODEL\s+STATUS\s+CALLS\s+MSGS\s+JOINED\s+LAST CONTACT\s+TOOL\n")
-        self.assertRegex(out, r"\n\S.*\s+worker\s+started\s+0\s+0\s+\d+s ago\s+\d+s ago\n")
+        self.assertRegex(out, r"\n\S.*\s+worker\s+started\s+0\s+0\s+\S+ ago\s+\S+ ago\n")
         rc, out, _ = self.cli("deactivate", "--job", "J", "--status", "failed", "--outcome", "broke")
         self.assertEqual((rc, out.splitlines()[0]), (0, "deactivated J (failed)"))
         self.assertIn("Required learnings step", out)

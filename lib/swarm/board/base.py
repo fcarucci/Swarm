@@ -111,7 +111,8 @@ RESTART_OUTCOMES = ("running", "completed", "timeout", "max_turns", "failed", "n
 # 16 jobs.plugin_data (a JSON object of per-job settings that CLI
 # plugins keep with the job: Board.job_data / set_job_data).
 # 17 indexed job-restricted agent message counts and message-free agent rollups in job_status.
-SCHEMA_VERSION = 17
+# 18 blockers and their append-only audit events.
+SCHEMA_VERSION = 18
 
 JOB_DATA_KEY = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}")
 JOB_DATA_VALUE_MAX = 2000
@@ -144,8 +145,6 @@ def merged_job_data(raw: str | None, key: str, value: str | None) -> str:
     else:
         data[key] = value
     return json.dumps(data, sort_keys=True)
-
-
 
 # The message cap: the longest a board message may be, in characters. One authoritative value per
 # board, stored in the board (Board.message_cap); [board] message_max_chars is only the value a NEW
@@ -466,6 +465,34 @@ class AgentStatus:
 
 
 @dataclass(frozen=True)
+class Blocker:
+    id: int
+    job: str
+    kind: str
+    waiting_on: str
+    reason: str
+    until: _dt.datetime | None
+    default_value: str | None
+    state: str
+    created_by: str | None
+    created_at: _dt.datetime
+    resolved_by: str | None = None
+    resolved_how: str | None = None
+    resolved_at: _dt.datetime | None = None
+    protection_rule: str = "addressed"
+
+
+@dataclass(frozen=True)
+class BlockerEvent:
+    id: int
+    blocker: int
+    at: _dt.datetime
+    actor: str | None
+    event: str
+    detail: str | None
+
+
+@dataclass(frozen=True)
 class JobStatus:
     """One job with its rollup (the Postgres `job_status` view, row for row).
 
@@ -519,6 +546,9 @@ class JobStatus:
     evidence_command: str | None = None
     finalize: str | None = None
     verdict_artifact: str | None = None
+
+    open_blockers: int = 0
+    protected_blockers: int = 0
 
 
 @dataclass(frozen=True)
@@ -876,7 +906,7 @@ def derive_job_status(js: JobStatus, idle_minutes: float, now: _dt.datetime) -> 
     job_status view's shown_status column is the same rule.)"""
     if js.status != "active":
         return js.status
-    if js.waiting_on:
+    if js.open_blockers or js.waiting_on:
         return "waiting"
     if js.started or js.running:
         return "active"
@@ -957,9 +987,10 @@ def stall_outcome(js: JobStatus, cap: float) -> str:
 
 
 def wait_protects(js: JobStatus) -> bool:
-    """Whether the job's wait marker shields it from the expiry sweep: it is waiting (`swarm wait`)
-    and bounded (`--for`/`--until`). The sweep clears an expired marker before it asks, so a
-    marker that is still here is valid; an unbounded one (and the supervisor's own) never protects."""
+    """Kind/addressee protection: bounded waits and open decisions for people. The rollup counts these;
+    older callers constructing a JobStatus with just waiting columns keep the legacy rule."""
+    if js.open_blockers:
+        return bool(js.protected_blockers)
     return bool(js.waiting_on) and js.waiting_until is not None
 
 
@@ -1088,6 +1119,7 @@ WRITE_METHODS = (
     "record_silence_nudge", "record_reply_reminder", "post", "read_unread", "read_new",
     "save_transcript", "refresh_transcript", "mark_capture_failed", "rotate_transcripts",
     "save_memory_ref", "mark_memory_refs_checked", "delete_memory_refs",
+    "open_blocker", "resolve_blocker", "reopen_blocker", "comment_blocker", "expire_blockers", "_overdue_blocker",
     "pause_job", "begin_resume", "record_resume_outcome", "set_message_cap",
 )
 _CURSOR_READS = {"read_unread": 3, "read_new": 3}   # method -> index of `advance` in *args
@@ -1320,6 +1352,10 @@ class Board(abc.ABC):
         times = [run_start(js)] + [a.joined_at for a in self.agents(js.job)]
         if grace:
             times.append(grace)
+        expired = [b for b in self.blockers(js.job, include_closed=True)
+                   if b.state == "expired" and b.until and b.until >= run_start(js)]
+        if expired:
+            times.append(expired[-1].until)
         if js.verdict_at:
             times.append(js.verdict_at)
         times += [m.created_at for m in self.recent_messages(20, job=js.job) if m.agent_name != "swarm"]
@@ -1355,6 +1391,7 @@ class Board(abc.ABC):
         (a goal set, or a verdict changed, since the first read). Idempotent; costs one jobs()
         query when nothing qualifies."""
         now = self.now()
+        self.expire_blockers(now)
         closed = []
         for js in self.jobs(False):
             seen_activity = js.last_activity_at
@@ -1368,12 +1405,14 @@ class Board(abc.ABC):
         return closed
 
     def _clear_expired_wait(self, js: JobStatus, now: _dt.datetime) -> JobStatus:
-        """The job as the sweep judges it: a bounded wait that ran out is cleared (stored too)."""
-        if not (js.waiting_on and js.waiting_until is not None and js.waiting_until <= now):
-            return js
-        self.set_waiting(js.job, None)
-        return replace(js, waiting_on=None, waiting_since=None,
-                       last_activity_at=max(t for t in (js.last_activity_at, js.waiting_until) if t))
+        # An expired wait's end is grace for the orphan clock, just as before schema 18.
+        expired = [b for b in self.blockers(js.job, include_closed=True)
+                   if b.kind == 'wait' and b.state == 'expired' and b.until and b.until >= run_start(js)]
+        if not js.waiting_on and expired:
+            grace = expired[-1].until
+            return replace(js, waiting_until=grace,
+                           last_activity_at=max(t for t in (js.last_activity_at, grace) if t))
+        return js
 
     def _expiry_action(self, js: JobStatus, now: _dt.datetime, stall_hours: float, orphan_minutes: float,
                        goal_stall_hours: float, watch) -> ExpiryAction | None:
@@ -1383,7 +1422,7 @@ class Board(abc.ABC):
         if js.goal and js.max_hours is None and auto_close_pending(self, js.job):
             return None
         unmet = goal_unmet(js)
-        if wait_protects(js):   # a valid bounded wait (an expired one was cleared): neither rule applies
+        if wait_protects(js):   # a protected wait/question/person blocker: neither rule applies
             return None
         cap = stall_cap(js, stall_hours, goal_stall_hours)
         if cap and now - run_start(js) >= _dt.timedelta(hours=cap) and \
@@ -1516,12 +1555,51 @@ class Board(abc.ABC):
         """(verified, failed): the job's messages starting "VERIFIED" / "FAILED", posted under
         the name of one of the job's verifiers (active or departed)."""
 
+    # ---- durable generic blockers -------------------------------------------------
+
+    @abc.abstractmethod
+    def open_blocker(self, job: str, kind: str, waiting_on: str, reason: str,
+                     until: _dt.datetime | None = None, default_value: str | None = None,
+                     created_by: str | None = None) -> Blocker:
+        """Open a blocker on an active job, append opened, and return its immutable record."""
+
+    @abc.abstractmethod
+    def blockers(self, job: str | None = None, include_closed: bool = False) -> list[Blocker]:
+        """Blockers in id order; default open only. Historical records outlive job retention."""
+
+    @abc.abstractmethod
+    def blocker(self, id: int) -> Blocker | None:
+        """The blocker with this id, or None."""
+
+    @abc.abstractmethod
+    def blocker_events(self, id: int) -> list[BlockerEvent]:
+        """Append-only history of the blocker in event id order."""
+
+    @abc.abstractmethod
+    def resolve_blocker(self, id: int, how: str | None = None, actor: str | None = None,
+                        state: str = 'resolved') -> bool:
+        """Resolve an open blocker once, as resolved or expired, with its audit event."""
+
+    @abc.abstractmethod
+    def reopen_blocker(self, id: int, detail: str | None = None, actor: str | None = None) -> bool:
+        """Reopen a closed blocker on an active job, retaining every earlier event."""
+
+    @abc.abstractmethod
+    def comment_blocker(self, id: int, text: str, actor: str | None = None) -> bool:
+        """Append a comment without changing the blocker's state; False for an unknown id."""
+
+    @abc.abstractmethod
+    def expire_blockers(self, now: _dt.datetime) -> None:
+        """Apply defaults or append overdue once, through the existing sweep's injected clock."""
+
+    @abc.abstractmethod
+    def _overdue_blocker(self, id: int) -> bool:
+        """Append overdue once to an open blocker (the backend serializes this transition)."""
+
     @abc.abstractmethod
     def set_waiting(self, job: str, on: str | None, until: _dt.datetime | None = None) -> bool:
-        """Record what the OPEN job is waiting for (waiting_on = on, waiting_since = now,
-        waiting_until = until: when a bounded wait expires, None = unbounded), or with on=None
-        clear all three (it is working again). False if the job is missing or closed.
-        Setting a new reason restarts waiting_since; open_job and close_job clear all of them."""
+        """Replace the active job's wait blocker (None resolves waits only). Plugin blockers
+        remain open. The waiting columns are the first open blocker's compatibility projection."""
 
     @abc.abstractmethod
     def set_job_max_hours(self, job: str, hours: float | None) -> bool:

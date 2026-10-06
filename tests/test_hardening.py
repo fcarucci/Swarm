@@ -313,7 +313,7 @@ class SpoolFlushBoundsTests(Env):
         self.assertFalse((self.spool_dir / ".hindsight-unreachable").exists())
 
     def stalled_delivery(self, patch_target, stall, env=None, host="127.0.0.1"):
-        """Flush one memory with a 0.5 s budget while `patch_target` stalls; returns elapsed."""
+        """Flush one memory with a 0.5 s budget while `patch_target` stalls; checks timeout outcomes."""
         from fake_hindsight import FakeHindsight
         fake = FakeHindsight()
         self.addCleanup(fake.stop)
@@ -342,7 +342,7 @@ class SpoolFlushBoundsTests(Env):
                 release.wait(120)
             return real(host, *a, **k)
 
-        elapsed = self.stalled_delivery("socket.getaddrinfo", stalled,
+        self.stalled_delivery("socket.getaddrinfo", stalled,
                                         env={"http_proxy": "http://proxy.test:3128",
                                              "HTTP_PROXY": "http://proxy.test:3128"},
                                         host="hindsight.test")
@@ -456,7 +456,6 @@ class SpoolFlushBoundsTests(Env):
                 compat.flock(fd, compat.LOCK_EX)
                 release = lambda: os.close(fd)  # noqa: E731
             try:
-                t0 = time.monotonic()
                 limit = b.op_timeout(0.3)
                 with self.assertRaises(Exception):
                     with limit:
@@ -607,7 +606,6 @@ class MarkerClaimTests(MarkerEnv):
     def test_a_held_lock_does_not_block_past_the_deadline(self):
         fh = self.hold_lock()
         self.addCleanup(fh.close)
-        t0 = time.monotonic()
         with mock.patch.object(swarm_hooks, "MARKER_LOCK_SECONDS", 0.2):
             self.assertIsNone(swarm_hooks._try_claim(self.path, "s1"))
         self.assertLessEqual(swarm_hooks.MARKER_LOCK_SECONDS, 2)
@@ -681,7 +679,6 @@ class MarkerRemovalTests(MarkerEnv):
         from swarm import cli as swarm
         fh = self.hold_lock()
         self.addCleanup(fh.close)
-        t0 = time.monotonic()
         self.assertFalse(swarm.remove_marker(self.path, wait=0.2))
         self.assertTrue(self.path.exists())
 

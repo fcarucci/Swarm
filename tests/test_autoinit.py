@@ -704,6 +704,10 @@ class PostgresAutoInitTests(AutoInitBase, unittest.TestCase):
         cfg = swarm.load_config(Path(os.environ["SWARM_TEST_CONFIG"]).expanduser())
         cfg["board"]["backend"] = "postgres"
         live = swarm.load_config(Path(os.environ.get("SWARM_CONFIG", "~/.config/swarm/config.toml")).expanduser())
+        # These cases test retained schema/data, not the real network deadline. A busy
+        # test host can spend more than eight seconds installing the synthetic old schema.
+        # Dedicated deadline/held-lock tests still exercise their explicit budgets.
+        cfg["database"]["query_timeout_seconds"] = 0
         cfg["database"]["dbname"] = self.dbname = f"{cfg['database']['dbname'][:25]}_autoinit_{uuid.uuid4().hex[:12]}"
         if self.dbname == live["database"]["dbname"]:
             raise RuntimeError("refusing to test against the production board database")
@@ -727,7 +731,7 @@ class PostgresAutoInitTests(AutoInitBase, unittest.TestCase):
     def toml(self) -> str:
         db = self.cfg["database"]
         lines = [f'{k} = {json.dumps(db[k])}' for k in ("host", "port", "user", "dbname", "admin_dbname",
-                                                          "password_env_file", "sslmode")]
+                                                          "password_env_file", "sslmode", "query_timeout_seconds")]
         return super().toml() + "[database]\n" + "\n".join(lines) + "\n"
 
     def _admin(self):

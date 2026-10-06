@@ -159,6 +159,8 @@ class PurgeTests(HindsightEnv):
         self.assertFalse(release.is_set())
         self.assertEqual(set(self.docs()), {"alive", "gone"})
         self.assertEqual(res.dropped, ())
+        self.assertEqual(res.checked, 0)
+        self.assertGreater(res.unknown + res.skipped, 0)
 
     def test_statuses_client_keeps_the_deadline(self):
         self.enable(timeout_seconds=5)
