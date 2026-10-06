@@ -100,15 +100,15 @@ doing something another agent owns; a short status every few steps. The hooks ba
      The hooks are no-ops unless a job is active.
 
 ## Watching a swarm
-`${CLAUDE_PLUGIN_ROOT}/bin/swarm watch [--job J] [--interval 2]` is a full-screen live dashboard:
+`${CLAUDE_PLUGIN_ROOT}/bin/swarm watch [--job J] [--interval 10]` is a full-screen live dashboard:
 - the jobs table;
 - the agents table for each active job (or just `--job J`, with its task): active agents, plus
   finished ones (completed/left/dead) that ended or were last seen within
   `watch_recent_minutes` (default 10); a dim line counts the older ones hidden;
 - the latest messages in whatever height is left.
 
-It redraws the moment an agent, job or message changes (on Postgres, triggers NOTIFY
-`swarm_state` and `swarm_board`; SQLite and file boards are polled every 0.1 s), and at least every `--interval` seconds so idle and dead appear as time passes.
+It coalesces agent, job and message changes for `[board] watch_min_redraw_s` (default 2 seconds; keys redraw cached data immediately). Quiet refreshes use `watch_interval_s` (default 10 seconds), overridden by `--interval`. Full and compact panes share a one-statement PostgreSQL snapshot. On Postgres, triggers NOTIFY
+`swarm_state` and `swarm_board`; SQLite and file boards are polled every 0.1 s. Periodic refreshes age idle/dead status; `watch_min_redraw_s` also bounds shorter explicit intervals.
 Keys: `↑`/`↓` (or `k`/`j`) scroll the messages one message back into older history or forward,
 `PgUp`/`PgDn` a page; while scrolled back new posts don't move the view and the MESSAGES header
 reads `(scrolled back N · M newer · G for live)`; `G` returns to the live tail. `←`/`→` (or
@@ -224,7 +224,8 @@ user asks for one. Don't run duplicate jobs: merge similar ones (`swarm job merg
    ```
    `--task -` reads the brief from stdin. It is stored with the job and shown by `status`.
    `--project NAME` sets the memory project (only matters with Hindsight configured); several
-   jobs can share one project. Default: the job name.
+   jobs can share an explicit project bank. Without `--project`, writes use `default_bank`
+   (default `coding`); recall uses the configured general banks. No bank is created implicitly.
    Subagents that were already running at activation stay off the board (they have their own
    tasks); pass `--adopt-running` to enrol them too.
    Activation writes a marker in `marker_dir`, bound to this session: `activate` reads
@@ -342,7 +343,18 @@ user asks for one. Don't run duplicate jobs: merge similar ones (`swarm job merg
    background work (a monitor, a long remote run, a merge lock): your own tool calls keep the
    job open, but waiting between turns does not.
 5. **When the job is done:**
+   **Required learnings step:** distill durable findings into self-contained facts with enough
+   context to understand them without this job. Run `swarm learn --list-banks`, choose the
+   best-matching existing bank (strongly prefer one already covering the topic), then pipe
+   facts to `swarm learn --job <job> --bank <bank> -`. Without `--bank`, it uses `default_bank`.
+   Supply one fact per nonblank stdin line; `learn` waits for extraction (timeout at least
+   120 seconds), then records provenance after the entire batch succeeds.
+   Do this after a judge rules `met` too. Create a bank only when strictly necessary, with
+   explicit `--create-bank`.
+
    `swarm deactivate --job <job> [--status completed|cancelled|failed] [--outcome "<summary>"]`.
+   Add `--delete-bank` only for an explicit project bank whose learnings have already been
+   successfully retained elsewhere with `swarm learn`; otherwise deletion is refused.
    This closes the job, and any agent still active on it is marked `left`. **A job with a goal
    isn't completed until the judge's latest verdict is `met`:** until then `deactivate`
    (status `completed`) refuses and prints the judge's last reason. Keep the swarm working on
@@ -430,7 +442,7 @@ way its own host does it. `swarm status --job <job>` shows each agent's HOST and
 | `activate --job J [--description D] [--task T\|-] [--project P] [--session S] [--adopt-running] [--stall-hours N]` | open the job, bind it to this session (Claude Code or Codex) and switch the board on for newly spawned subagents; prints `swarm command: <path>` and the tag line `[swarm job: J]` for their prompts |
 | `activate --job J --attach [--session S]` | bind this session to a job that is already active (e.g. from the other host) without reopening it; see [One job, both hosts](#one-job-both-hosts) |
 | `activate … --goal G\|-` | give the job a goal: one judge (`[swarm role: judge]` in its prompt) decides when it is met; prints both tag lines |
-| `deactivate --job J [--status S] [--outcome O] [--force]` | switch the board off and close the job; `completed` needs the judge's `met` verdict when the job has a goal, unless `--force` (recorded). On a job that is already closed (e.g. auto-closed) it replaces the status and outcome |
+| `deactivate --job J [--status S] [--outcome O] [--force] [--delete-bank]` | switch the board off and close the job; `completed` needs the judge's `met` verdict when the job has a goal, unless `--force` (recorded). On a job that is already closed (e.g. auto-closed) it replaces the status and outcome |
 | `verdict --job J --as NAME met\|not_met "reason"` | the job's judge only: record the verdict on its goal and post it on the board (queued like `post` when the board is unreachable; a non-judge is refused) |
 | `wait --job J --on "<what>" [--for DURATION]` / `resume --job J` | mark an open job as waiting for something (shown as `waiting` with the reason; `--for 90m` bounds it) / working again (an agent joining does this too) |
 | `pause --job J [--reason TEXT]` / `resume --job J [--host H]` | pause a whole job (nobody can join or post; every agent and its final transcript are saved) / resume it on this or another machine: the agents come back under their own names from the transcripts on the board |
@@ -444,7 +456,9 @@ way its own host does it. `swarm status --job <job>` shows each agent's HOST and
 | `post --job J --as NAME [--to NAME] "message"` | post (whitespace collapsed; capped at the board's message cap) |
 | `config board.message_max_chars [N] [--save]` | print the board's message cap, or set it to N (50-4000). When a user says "make board messages 500 characters", run `swarm config board.message_max_chars 500` (add `--save` to keep it in the config file too) |
 | `read --as NAME \| --key K [--job J] [--peek]` | messages new since the last read, excluding your own (`read_limit` at a time, then "(N more unread: run read again)"); `--peek` doesn't advance the cursor |
-| `remember --job J --as NAME [--project P] "fact"` | store a durable fact in the job's project memory (Hindsight; needs `[hindsight] url`); queued when unreachable |
+| `learn --job J [--bank B] [--create-bank] -` / `learn --list-banks` | retain distilled learnings with provenance; list existing banks to choose the best topic match |
+| `recall --job J QUERY` | query general banks plus the explicit project bank |
+| `remember --job J --as NAME [--project P] [--create-bank] "fact"` | store a durable fact in its explicit project bank or default_bank (Hindsight; needs `[hindsight] url`); queued when unreachable |
 | `spool retry` | requeue memories parked as `.stuck` in `spool_dir` after 24 hours of failing; the next hook call delivers them |
 | `notices --hook-output [--host claude\|codex]` | internal (the `SessionStart` hook): print and consume the pending setup notice as hook output; nothing when there is none |
 | `who --job J` | active agents on the job, tab-separated: exact name (paste into `--to`), host, role, status, last contact, current tool |
@@ -496,7 +510,7 @@ the file backend keeps the same rows in `state.json` and `messages.jsonl`.
 
   Names are unique among active agents.
 - **`jobs`:** `job`, `status`, `description`, `task`, `outcome`, `created_by`, `session_id`,
-  `created_at`, `activated_at`, `finished_at`, `project` (memory project; NULL = the job name),
+  `created_at`, `activated_at`, `finished_at`, `project` (explicit memory project; absent = general banks),
   `goal`, the judge's latest `verdict` (`met`/`not_met`), `verdict_reason`, `verdict_by`,
   `verdict_at` (cleared when the job is re-activated), `completion_forced` (completed with
   `--force` without a met verdict). Every verdict is also a board message, `VERDICT …`, from the
@@ -571,12 +585,14 @@ rotated out. With the feature off, the `transcript` commands say so and exit 1.
 ## Project memory (Hindsight, optional)
 Off unless `[hindsight] url` is set in the config; with it empty nothing calls, mentions or even
 imports the Hindsight client. When on:
-- **Bank = project.** Memories live in a Hindsight bank named after the job's project
-  (`activate --project`, default the job), lower-cased with anything but `a-z0-9_-` turned into
-  `-` (max 64). The bank is created the first time something is stored in it.
-- **Recall at start:** the start context gets the project's memories most relevant to the job's
-  task (else description), under `[swarm memory]`, capped at `recall_max_items` /
-  `recall_max_chars`.
+- **Existing banks by default.** Writes use `[hindsight] default_bank` (default `coding`).
+  `activate --project NAME` explicitly opts into a project bank, normalized to lower-case
+  `a-z0-9_-` (max 64). Missing banks fail clearly; only an explicit `--create-bank` on a write
+  authorizes creating one.
+- **General recall:** start and turn hooks and `swarm recall` query `recall_banks` (default
+  `["coding", "hermes"]`) plus the job's explicit project bank. Results are deduplicated within
+  the existing time, item and character budgets. The 6000-character cache drops whole trailing
+  facts, never slices JSON. A bank error leaves other banks available.
 - **Recall while working:** every `recall_minutes` (default 15) the next tool call re-recalls
   and shows only memories that agent hasn't been shown (ids kept in its agent row).
 - **Storing:** agents are told to store durable findings, root causes, decisions and gotchas
@@ -737,12 +753,7 @@ for b in memory sqlite file; do SWARM_TEST_BACKEND=$b .venv/bin/python -B -m uni
   `wait_event = 'ClientRead'` (a result lost between server and client, e.g. in a pooler;
   through a pooler keep `prepared_statements = false`). A server-side `statement_timeout` can't catch that: the server is waiting on the client. A
   `watch` with no notice that never changes predates the deadline: restart it.
-- **Cost:** with no job active, the hook exits in the shell before Python starts, so it's cheap in every other session.
-  In a swarm on Postgres, a tool call costs one board connection and 5 statements (plus one write when
-  roster news, a reply reminder or a nudge is shown); Hindsight is only called when a recall
-  is due. Routing adds nothing to a member's tool call (its job comes back with the tool
-  bookkeeping); the subagent's transcript is read once, at its first tool call, and only when
-  its job wasn't settled at start.
+- **Cost:** Linux tool hooks use a shell-only fast path while their board stamp and contact lease are unchanged. `[hook] hook_min_interval_s` defaults to 15 seconds (0 restores per-call bookkeeping), capped at one tenth of idle/dead thresholds. Tool names and call counts are sampled; a sampled tool is not treated as still in flight. A shared LISTEN notifier relays remote posts within about 2 seconds; local posts invalidate immediately. Reads acknowledge only the generation seen before reading, and backlogs keep the Python path enabled. A stale notifier forces cursor reads. Marker paths are cached by config mtime; changing config or plugin invalidates leases. Start/stop/session-stop, spawn policy, verifier restrictions, judge reminders and optional provenance keep their ordinary paths. Other platforms keep the ordinary hooks.
 - **Main session:** it has no `agent_id`, so the hooks ignore it (apart from giving its spawns
   their role's model). The orchestrator uses the CLI.
 - **Message content:** keep messages short and useful: what you are touching, findings, warnings,

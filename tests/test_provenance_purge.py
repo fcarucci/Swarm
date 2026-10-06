@@ -25,7 +25,7 @@ class PurgeTests(HindsightEnv):
         super().setUp()
         self.enable()
         self.set_provenance("grace_days = 0")
-        hindsight.Client(self.cfg).retain("notes", "kept fact", [], {}, document_id="alive")
+        hindsight.Client(self.cfg).retain("notes", "kept fact", [], {}, document_id="alive", create_bank=True)
         with self.board() as b:
             for doc in ("alive", "gone"):
                 b.save_memory_ref(mref(doc))
@@ -344,7 +344,7 @@ class DocumentAnswerTests(HindsightEnv):
         super().setUp()
         self.enable()
         self.c = hindsight.Client(self.cfg)
-        self.c.retain("notes", "a fact", [], {}, document_id="here")
+        self.c.retain("notes", "a fact", [], {}, document_id="here", create_bank=True)
 
     def test_document_answers(self):
         self.assertEqual(self.c.document("notes", "here")["id"], "here")

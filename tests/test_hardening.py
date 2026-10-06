@@ -217,7 +217,7 @@ class SpoolFlushBoundsTests(Env):
         self.assertEqual(len(self.queued()), 1)   # put back
 
     def test_memory_delivery_gets_a_short_http_timeout(self):
-        spool.spool_memory(self.cfg, "J", "A", "a fact", "proj")
+        spool.spool_memory(self.cfg, "J", "A", "a fact", "proj", create_bank=True)
         cfg = {**self.cfg, "hindsight": {**self.cfg.get("hindsight", {}), "url": "http://hindsight.invalid",
                                           "timeout_seconds": 3}}
         seen = []
@@ -243,7 +243,7 @@ class SpoolFlushBoundsTests(Env):
         clock = ManualClock()
         fake.on_request = lambda *a: clock.advance(0.4)
         cfg = self.hindsight_cfg(fake)
-        spool.spool_memory(self.cfg, "J", "A", "a fact", "proj")
+        spool.spool_memory(self.cfg, "J", "A", "a fact", "proj", create_bank=True)
         with mock.patch("time.monotonic", clock), self.board() as b:
             n = spool.flush_spool(b, cfg, max_items=2, deadline=clock() + 0.6, op_timeout=1.0)
         self.assertEqual(n, 0)
@@ -257,7 +257,7 @@ class SpoolFlushBoundsTests(Env):
     def test_per_tool_hooks_never_deliver_memories(self):
         self.cli("activate", "--job", "J", "--session", "sess-1")
         self.hook("start")
-        spool.spool_memory(self.cfg, "J", "A", "a fact", "proj")
+        spool.spool_memory(self.cfg, "J", "A", "a fact", "proj", create_bank=True)
         spool.spool_post(self.cfg, "J", "A", "a post", None)
         from swarm import hindsight
         boom = mock.Mock(side_effect=AssertionError("Hindsight called from a per-tool hook"))
@@ -283,7 +283,7 @@ class SpoolFlushBoundsTests(Env):
         self.addCleanup(fake.stop)
         cfg = self.hindsight_cfg(fake)
         cfg["hindsight"]["url"] = fake.url.replace("127.0.0.1", "hindsight.test")
-        spool.spool_memory(self.cfg, "J", "A", "a fact", "proj")
+        spool.spool_memory(self.cfg, "J", "A", "a fact", "proj", create_bank=True)
         import socket
         real = socket.getaddrinfo
 
@@ -307,7 +307,7 @@ class SpoolFlushBoundsTests(Env):
         self.addCleanup(fake.stop)
         cfg = self.hindsight_cfg(fake)
         cfg["hindsight"]["url"] = fake.url.replace("127.0.0.1", host)
-        spool.spool_memory(self.cfg, "J", "A", "a fact", "proj")
+        spool.spool_memory(self.cfg, "J", "A", "a fact", "proj", create_bank=True)
         import urllib.request   # urlopen's opener reads the proxy env once: a fresh one here
         with mock.patch.dict(os.environ, env or {}), mock.patch(patch_target, side_effect=stall), \
                 mock.patch.object(urllib.request, "_opener", None), self.board() as b:
@@ -358,7 +358,7 @@ class SpoolFlushBoundsTests(Env):
         fake.banks["proj"] = []
         fake.delays[("POST", "/memories")] = 0.8
         cfg = self.hindsight_cfg(fake)
-        spool.spool_memory(self.cfg, "J", "A", "a fact", "proj")
+        spool.spool_memory(self.cfg, "J", "A", "a fact", "proj", create_bank=True)
         with self.board() as b:
             self.assertEqual(spool.flush_spool(b, cfg, max_items=2, deadline=time.monotonic() + 0.5,
                                                op_timeout=1.0), 0)
@@ -381,7 +381,7 @@ class SpoolFlushBoundsTests(Env):
         self.addCleanup(fake.stop)
         cfg = self.hindsight_cfg(fake)
         cfg["hindsight"]["url"] = fake.url.replace("127.0.0.1", "localhost")
-        spool.spool_memory(self.cfg, "J", "A", "a fact", "proj")
+        spool.spool_memory(self.cfg, "J", "A", "a fact", "proj", create_bank=True)
         with self.board() as b:
             self.assertEqual(spool.flush_spool(b, cfg, max_items=2, deadline=time.monotonic() + 2.0,
                                                op_timeout=2.0), 1)
@@ -860,7 +860,7 @@ class BoundedRecallTests(HindsightEnv):
         release = threading.Event()
         self.addCleanup(release.set)
         self.enable()
-        self.fake.add_memory("j", "old fact")
+        self.fake.add_memory("coding", "old fact")
         self.cli("activate", "--job", "J")
         self.assertIn("old fact", self.start())
         self.enable(url=self.fake.url.replace("127.0.0.1", "hindsight.test"))

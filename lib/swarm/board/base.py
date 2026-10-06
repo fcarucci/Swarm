@@ -106,7 +106,8 @@ RESTART_OUTCOMES = ("running", "completed", "timeout", "max_turns", "failed", "n
 # `swarm watch` redraws read it), 15 the message cap is a per-board setting stored in the board
 # (Postgres board_meta 'message_max_chars' and a replaceable NOT VALID CHECK on a text column
 # instead of varchar(N); SQLite board_meta table and a trigger instead of the table CHECK;
-# file/memory: a field of the store), see Board.message_cap.
+# file/memory: a field of the store), see Board.message_cap; grouped status counts
+# and message/agent indexes.
 SCHEMA_VERSION = 15
 
 # The message cap: the longest a board message may be, in characters. One authoritative value per
@@ -453,7 +454,7 @@ class JobStatus:
     dead_or_left: int
     messages: int
     last_activity_at: _dt.datetime | None
-    project: str | None = None   # the memory project (Hindsight bank); None = use the job name
+    project: str | None = None   # the memory project (Hindsight bank); None/empty = use configured general banks
     # Goal and judge: what "done" means (None = no goal), the judge's latest verdict (VERDICTS,
     # None = none yet) with its reason, judge name and time, the name of the job's ACTIVE judge
     # (None if none), and whether it was closed completed without a met verdict (--force).
@@ -1505,6 +1506,21 @@ class Board(abc.ABC):
         row, verify_tag = its recorded route's state is "unverified"), or None if no active
         agent has this key: everything the hook needs, in one round trip."""
 
+    def hook_member(self, agent_key: str) -> Member | None:
+        """Read membership without touching heartbeat/counters (unread-only hooks)."""
+        route = self.route(agent_key)
+        if not route.member_job:
+            return None
+        row = next((a for a in self.agents(route.member_job) if a.agent_key == agent_key
+                    and a.ended_at is None), None)
+        return Member(row.name, row.job, route.state == 'unverified', row.role == 'verifier', row.model) if row else None
+
+    def tool_contact(self, agent_key: str, tool_name: str | None) -> Member | None:
+        """Sampled contact. current_tool is a sample, not proof a tool is still in flight."""
+        member = self.tool_started(agent_key, tool_name)
+        self.tool_finished(agent_key)
+        return member
+
     # ---- routes (which of a session's jobs a subagent belongs to) ----------------------
 
     @abc.abstractmethod
@@ -1680,6 +1696,16 @@ class Board(abc.ABC):
         """Agents of a job with derived status. Order: active ones first, then by joined_at
         ascending. include_departed=False returns only active ones (`swarm who`)."""
 
+    def watch_agents(self, job: str, recent_minutes: int | None) -> tuple[list[AgentStatus], int]:
+        """Visible rows and the count of older finished rows, for watch snapshots."""
+        rows = self.agents(job)
+        if recent_minutes is None:
+            return rows, 0
+        cutoff = self.now() - _dt.timedelta(minutes=recent_minutes)
+        visible = [a for a in rows if a.status not in ('completed', 'left', 'dead')
+                   or max(a.last_contact_at, a.ended_at or a.last_contact_at) >= cutoff]
+        return visible, len(rows) - len(visible)
+
     def roster(self, job: str) -> list[RosterEntry]:
         """Every agent of the job (active and departed) in agents() order. Backends may
         override it with something cheaper; the default derives it from agents()."""
@@ -1810,7 +1836,7 @@ class Board(abc.ABC):
 
     @abc.abstractmethod
     def read_unread(self, agent_key: str | None = None, name: str | None = None,
-                    job: str | None = None, advance: bool = True) -> ReadResult:
+                    job: str | None = None, advance: bool = True, *, touch: bool = True) -> ReadResult:
         """Messages new to an agent since its last read, oldest first, and how many are left.
 
         The reader is the ACTIVE agent with agent_key (if given) else with name; if there is
@@ -1823,7 +1849,7 @@ class Board(abc.ABC):
         advance=True then moves the cursor, never back: to the job's highest id in that view
         when nothing is left (so the reader's own posts are skipped for good), else to the id
         of the last message returned (the rest come on the next reads, nothing skipped); and
-        sets last_seen = now. The move is a compare-and-set against the cursor the read
+        sets last_seen = now unless touch=False (sampled hooks update contact separately). The move is a compare-and-set against the cursor the read
         started from: if a concurrent read of the same agent moved it first, this read changes
         nothing and returns ReadResult([], 0), so no message is delivered twice and none is
         lost. advance=False (`read --peek`) changes nothing. The cursor is one per agent row,

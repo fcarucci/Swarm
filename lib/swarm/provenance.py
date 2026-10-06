@@ -499,7 +499,7 @@ def record_from_hook(board, cfg, host, agent_id, sid, payload, command, bound, d
         return []
     for problem in det.problems:
         log(f"memory provenance ({agent_id}): {problem}")
-    project = hindsight.project_of(board.job_status(job), job)
+    project = hindsight.project_of(board.job_status(job), job, cfg)
     job_bank = hindsight.bank_id(project)
     writes = []
     for w in det.writes:

@@ -926,6 +926,16 @@ class SqliteBoard(Board):
             ((tool_name or "?")[:TOOL_NAME_MAX], now, now, agent_key)).fetchone()
         return Member(row[0], row[1], bool(row[2]), bool(row[3]), row[4]) if row else None
 
+    def tool_contact(self, agent_key: str, tool_name: str | None) -> Member | None:
+        now = self._now()
+        row = self._c().execute(
+            "UPDATE agents SET state = 'running', current_tool = ?, tool_started_at = NULL, turn_ended_at = NULL, "
+            "tool_calls = tool_calls + 1, last_seen = ? WHERE agent_key = ? AND left_at IS NULL "
+            "RETURNING name, job, EXISTS (SELECT 1 FROM agent_routes r "
+            "WHERE r.agent_key = agents.agent_key AND r.state = 'unverified'), verifier, model",
+            ((tool_name or "?")[:TOOL_NAME_MAX], now, agent_key)).fetchone()
+        return Member(row[0], row[1], bool(row[2]), bool(row[3]), row[4]) if row else None
+
     # ---- routes ---------------------------------------------------------------------
 
     def record_route(self, agent_key: str, session_id: str | None, state: str,
@@ -1310,7 +1320,7 @@ class SqliteBoard(Board):
             raise CapExceeded(self.message_cap()) from exc   # the cap was lowered since it was read
 
     def read_unread(self, agent_key: str | None = None, name: str | None = None,
-                    job: str | None = None, advance: bool = True) -> ReadResult:
+                    job: str | None = None, advance: bool = True, *, touch: bool = True) -> ReadResult:
         match, param = ("agent_key = ?", agent_key) if agent_key else ("name = ?", name)
         # The page, the count and the job's top id come from one snapshot (a read transaction,
         # which takes no lock); the cursor then moves by compare-and-set, as in Postgres. Reading
@@ -1332,8 +1342,8 @@ class SqliteBoard(Board):
         if not advance:
             return ReadResult(messages, remaining)
         new = messages[-1].id if remaining else max(last, top)
-        moved = self._c().execute("UPDATE agents SET last_read_id = ?, last_seen = ? WHERE agent_key = ? "
-                                  "AND last_read_id = ?", (new, self._now(), key, last)).rowcount
+        moved = self._c().execute("UPDATE agents SET last_read_id = ?, last_seen = CASE WHEN ? THEN ? ELSE last_seen END WHERE agent_key = ? "
+                                  "AND last_read_id = ?", (new, touch, self._now(), key, last)).rowcount
         # A parallel read of this agent moved the cursor first and owns these messages.
         return ReadResult(messages, remaining) if moved else ReadResult([], 0)
 

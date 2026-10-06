@@ -11,6 +11,13 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 ### Changed
 - Schema 15: the cap moves from the `varchar(N)` column / table CHECK into the board (Postgres: `text` column, a replaceable `NOT VALID` check and a `board_meta` row, converted online in one quick, retried `ALTER`; SQLite: a trigger and a `board_meta` table). Boards keep the cap they enforced and every message.
+- Linux tool hooks skip Python while the board is unchanged and contact is not due (`[hook] hook_min_interval_s`, default 15 seconds). Shared message notifications invalidate read stamps; notifier failures fall back to cursor reads. Start, stop and session-stop hooks keep their behavior.
+- `watch` defaults to 10-second periodic refreshes (`[board] watch_interval_s`); notifications and snapshot misses coalesce for `watch_min_redraw_s` (default 2 seconds), including compact panes. Keys still render immediately from cached data.
+- PostgreSQL watch snapshots use one statement with grouped message counts. Schema 15 replaces correlated status counts and adds message/agent indexes (automatic migration).
+- Hindsight writes default to the existing `coding` bank (`default_bank`), rather than creating a bank per job; missing banks require explicit `--create-bank`.
+- Recall uses `recall_banks` (default `coding` and `hermes`) plus an explicit project bank, with deduplication, bounded whole-fact caches and isolated bank failures.
+- Job completion instructions require distilled learnings in the best-matching existing bank; `swarm learn` retains them with provenance and `--list-banks` lists choices.
+- `swarm deactivate --delete-bank` deletes an explicit project bank only after successful learning retention elsewhere.
 
 ### Fixed
 - Postgres schema setup allows cumulative lock waits within a separate 60s query budget and preserves the original connection failure when cleanup fails.
