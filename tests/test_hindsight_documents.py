@@ -20,6 +20,7 @@ class DocumentTests(HindsightEnv):
         super().setUp()
         self.enable()
         self.client = hindsight.Client(self.cfg)
+        self.client.ensure_bank("notes")
         self.client.retain("notes", "a fact", ["t"], {"source": "claude-code-session", "host": "x"},
                            document_id="doc-1")
 

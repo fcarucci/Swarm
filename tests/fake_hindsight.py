@@ -129,6 +129,8 @@ class FakeHindsight:
             props = {"tags": {}, **({"metadata": {}} if self.metadata_patch else {})}
             return 200, {"info": {"version": "fake"},
                          "components": {"schemas": {"UpdateDocumentRequest": {"properties": props}}}}
+        if method == "GET" and path == "/v1/default/banks":
+            return 200, {"banks": [{"bank_id": b} for b in sorted(self.banks)]}
         m = BANK.match(path)
         if not m:
             return 404, {"detail": "Not Found"}

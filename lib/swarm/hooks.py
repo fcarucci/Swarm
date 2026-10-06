@@ -714,26 +714,30 @@ def _start_recall_seconds(cfg: dict) -> float:
 
 
 def _recall(board, cfg: dict, agent_id: str, job: str, seen, heading: str, *, start: bool = False) -> str | None:
-    """Recall the project's memories, show the ones this agent hasn't seen, record them.
+    """Recall configured banks, show facts this agent has not seen, and record them.
     Hindsight trouble is logged and skipped (the recall still counts, so it isn't retried
     before recall_minutes), except a start recall that ran out of time: that one is not
     recorded, so the agent's next turn tries again (Hindsight is usually warm by then)."""
     from swarm import hindsight
     js = board.job_status(job)
-    project = hindsight.project_of(js, job)
+    banks = hindsight.recall_banks(cfg, js)
+    project = ", ".join(banks)
     # one deadline for the whole call, name resolution included (hindsight.Client): a hook never
     # hangs an agent on Hindsight
     seconds = _start_recall_seconds(cfg) if start else min(HOOK_RECALL_SECONDS, _start_recall_seconds(cfg))
     # a call may use the whole budget: the per-call timeout is never shorter than it
     bounded = {**cfg, "hindsight": {**cfg["hindsight"], "deadline": time.monotonic() + seconds,
                                     "timeout_seconds": max(float(cfg["hindsight"]["timeout_seconds"]), seconds)}}
-    try:
-        items = hindsight.Client(bounded).recall(hindsight.bank_id(project), hindsight.recall_query(js, job))
-    except Exception as exc:
+    errors = []
+
+    def failed(bank, exc):
+        errors.append(exc)
         _log_error("memory", agent_id, exc)
-        if not (start and isinstance(exc, hindsight.HindsightOutOfTime)):
-            board.record_memory_recall(agent_id, [])
-        return None
+
+    items = hindsight.Client(bounded).recall_many(
+        banks, hindsight.recall_query(js, job), on_error=failed)
+    if not items and start and any(isinstance(exc, hindsight.HindsightOutOfTime) for exc in errors):
+        return None  # retry a cold join recall on the next turn
     text, shown = hindsight.format_memories([i for i in items if i["id"] not in seen], project, cfg, heading)
     board.record_memory_recall(agent_id, shown)
     return text
@@ -746,7 +750,7 @@ def _memory_turn(board, cfg: dict, agent_id: str, job: str, state) -> list[str]:
     h = cfg["hindsight"]
     out = []
     if _minutes_since(state, state.memory_recalled_at) >= float(h["recall_minutes"]):
-        text = _recall(board, cfg, agent_id, job, set(state.memory_seen), "new memories for this project")
+        text = _recall(board, cfg, agent_id, job, set(state.memory_seen), "new memories from configured banks")
         if text:
             out.append(text)
     quiet_since = max(t for t in (state.remembered_at, state.nudged_at, state.joined_at) if t is not None)
@@ -1048,7 +1052,7 @@ def _welcome(board, event: str, agent_id: str, job: str, name: str, cfg: dict, *
     parts.append(roster_text(roster, agent_id, job))
     parts.append(_messages_text(board.read_unread(agent_key=agent_id, job=job), job, name, heading))
     if _memory_on(cfg):
-        parts.append(_recall(board, cfg, agent_id, job, (), "what this project's memory knows",
+        parts.append(_recall(board, cfg, agent_id, job, (), "what the configured memory banks know",
                               start=True))
     host = current_host()
     board.set_agent_runtime(agent_id, host.name, payload.get("model") or host.agent_model(payload, agent_id))
