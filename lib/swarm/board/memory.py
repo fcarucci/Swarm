@@ -31,7 +31,7 @@ from .base import (LEFT_PAUSED, MOVED_PREFIX, PauseRecord, build_manifest, check
                    ROUTE_STATES, TOOL_NAME_MAX, AgentEvent, AgentStatus, Board, BoardError, BoardUnavailable, JobStatus, Member, Message,
                    OwedReply, ReadResult, Route, SCHEMA_VERSION, SetupResult, SpawnGrant, SyncState, TRANSCRIPT_ROLES,
                    TranscriptImage, TranscriptRow, TranscriptSummary, VERDICTS,
-                   derive_agent_status, load_name_pool)
+                   CapExceeded, configured_message_cap, derive_agent_status, load_name_pool)
 from swarm import compat
 
 # Per-agent sync state (SyncState), reset on a fresh row.
@@ -72,6 +72,7 @@ class MemoryStore:
         self.next_restart_id = 1
         self.pauses: list[dict] = []           # job pauses (Board.pause_job), by id
         self.next_pause_id = 1
+        self.message_max_chars: int | None = None   # the board's message cap (None: not set yet)
         self.schema_version: int | None = None  # set by setup (the version a real store records)
         self.msg_version = 0                   # bumped on every new message
         self.state_version = 0                 # bumped on every agent/job change
@@ -136,7 +137,8 @@ def reset_store(name: str = "default") -> MemoryStore:
         fresh = MemoryStore()
         for attr in ("available", "pool", "jobs", "agents", "messages", "routes", "transcripts",
                      "transcript_bodies", "image_bodies", "next_id", "schema_version",
-                     "restarts", "next_restart_id", "memory_refs", "pauses", "next_pause_id"):
+                     "restarts", "next_restart_id", "memory_refs", "pauses", "next_pause_id",
+                     "message_max_chars"):
             setattr(store, attr, getattr(fresh, attr))
         store.touch(messages=True)
     return store
@@ -235,6 +237,8 @@ class MemoryBoard(Board):
                 new = [n for n in dict.fromkeys(names.get(source, ())) if n not in known]
                 store.pool.setdefault(source, []).extend(new)
                 known.update(new)
+            if store.message_max_chars is None:   # a board's cap is set once; never reset by setup
+                store.message_max_chars = configured_message_cap(cfg)
             store.schema_version = max(store.schema_version or 0, SCHEMA_VERSION)
             return SetupResult(notes=(), pool={s: len(store.pool.get(s, [])) for s in NAME_SOURCES})
 
@@ -244,6 +248,16 @@ class MemoryBoard(Board):
 
     def close(self) -> None:
         self._closed = True
+
+    def _read_message_cap(self) -> int | None:
+        s = self._s()
+        with s.lock:
+            return s.message_max_chars
+
+    def _write_message_cap(self, cap: int) -> None:
+        s = self._s()
+        with s.lock:
+            s.message_max_chars = cap
 
     def _s(self) -> MemoryStore:
         if self._closed:
@@ -1048,6 +1062,8 @@ class MemoryBoard(Board):
         s = self._s()
         self.ensure_job(job)
         with s.lock:
+            if s.message_max_chars is not None and len(text) > s.message_max_chars:
+                raise CapExceeded(s.message_max_chars)
             now = self.now()
             msg_id = s.next_id
             s.next_id += 1

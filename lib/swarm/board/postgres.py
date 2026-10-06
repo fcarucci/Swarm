@@ -16,6 +16,7 @@ import getpass
 import json
 import os
 import random
+import re
 import socket
 import sys
 import threading
@@ -26,7 +27,7 @@ from typing import Mapping, Sequence
 import psycopg
 from psycopg import sql
 
-from .base import (LEFT_PAUSED, PauseRecord, build_manifest, database_hosts, MOVED_PREFIX, NAME_PATTERN, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, CloseGuard, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, ROUTE_STATES, TOOL_NAME_MAX,
+from .base import (LEFT_PAUSED, PauseRecord, build_manifest, database_hosts, MOVED_PREFIX, NAME_PATTERN, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, CloseGuard, CapExceeded, configured_message_cap, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, ROUTE_STATES, TOOL_NAME_MAX,
                    AgentEvent, Restart,
                    AgentStatus, Board, BoardError, BoardUnavailable, IncompatibleStorage, JobStatus,
                    Member, Message, OwedReply, ReadResult, Route, RosterEntry, SCHEMA_VERSION, SetupResult,
@@ -62,7 +63,7 @@ CREATE TABLE IF NOT EXISTS messages (
     job        text NOT NULL REFERENCES jobs(job) ON DELETE CASCADE,
     agent_name text NOT NULL CHECK (length(agent_name) > 0),
     created_at timestamptz NOT NULL DEFAULT now(),
-    message    varchar({max_chars}) NOT NULL CHECK (length(message) > 0),
+    message    text NOT NULL,
     to_agent   text,
     agent_key  text,
     host       text
@@ -713,8 +714,78 @@ def _install_checks(conn: psycopg.Connection) -> None:
             "END $$")
 
 
+_CAP_CONSTRAINT = "messages_message_cap"      # CHECK (length(message) <= cap), always NOT VALID
+_NONEMPTY_CONSTRAINT = "messages_message_nonempty"
+_LOCK_TIMEOUT = "3s"   # how long an ALTER waits for the table lock before it gives up and retries
+_LOCK_TRIES = 20
+_SETUP_LOCK_TRIES = 3   # schema setup has its own outer retry loop
+
+
+def _alter_quickly(conn: psycopg.Connection, statements: Sequence[str], params: Sequence = (),
+                   *, attempts: int | None = None) -> None:
+    """Run `statements` in one transaction under a short lock_timeout, retrying when the table lock
+    is not granted. An ALTER TABLE waits for ACCESS EXCLUSIVE, and while it waits every later
+    statement on the table queues behind it (a hook posting, a watcher reading): so it never waits
+    long (_LOCK_TIMEOUT), backs off and tries again: posters can queue for at most a few seconds
+    at a time. LockNotAvailable and DeadlockDetected are retried. Schema setup uses fewer inner
+    attempts because its outer retry loop owns the setup budget."""
+    tries = _LOCK_TRIES if attempts is None else attempts
+    for attempt in range(tries):
+        try:
+            with conn.transaction():
+                conn.execute(f"SET LOCAL lock_timeout = '{_LOCK_TIMEOUT}'")
+                for stmt, p in zip(statements, params or [()] * len(statements)):
+                    conn.execute(stmt, p or None)
+            return
+        except (psycopg.errors.LockNotAvailable, psycopg.errors.DeadlockDetected):
+            if attempt == tries - 1:
+                raise
+            time.sleep(min(0.2 * (attempt + 1), 2.0) + random.random() * 0.2)
+
+
+def _cap_statement(cap: int) -> str:
+    """ONE ALTER TABLE that replaces the cap constraint (one lock acquisition, no scan: NOT VALID
+    judges only rows written from now on, so a lowered cap never blocks on, or rejects, old rows)."""
+    return (f"ALTER TABLE messages DROP CONSTRAINT IF EXISTS {_CAP_CONSTRAINT}, "
+            f"ADD CONSTRAINT {_CAP_CONSTRAINT} CHECK (length(message) <= {int(cap)}) NOT VALID")
+
+
+def _install_message_cap(conn: psycopg.Connection, b: dict, legacy_width: int | None) -> None:
+    """Schema 15: the cap lives in board_meta and in the replaceable NOT VALID check above (see
+    PostgresBoard._write_message_cap), not in a varchar(N) width. A board whose column is still
+    varchar(N) is converted ONCE, in one transaction together with seeding the cap with that N (what
+    it really enforced) and the new constraints: ALTER COLUMN TYPE text from varchar is a
+    metadata-only change in Postgres (no table rewrite), and the old inline CHECK (length > 0), which
+    that ALTER would re-verify with a scan, is swapped for a NOT VALID one in the same statement.
+    A board that already has a stored cap is never touched (setup never resets it)."""
+    if conn.execute("SELECT 1 FROM board_meta WHERE key = 'message_max_chars'").fetchone():
+        return
+    cap = int(legacy_width or configured_message_cap({"board": b}))
+    statements = [
+        "ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_message_check, "
+        "ALTER COLUMN message TYPE text, "
+        f"DROP CONSTRAINT IF EXISTS {_NONEMPTY_CONSTRAINT}, "
+        f"ADD CONSTRAINT {_NONEMPTY_CONSTRAINT} CHECK (length(message) > 0) NOT VALID",
+        _cap_statement(cap),
+        "INSERT INTO board_meta (key, value) VALUES ('message_max_chars', %s) ON CONFLICT (key) DO NOTHING",
+    ]
+    _alter_quickly(conn, statements, [(), (), (str(cap),)], attempts=_SETUP_LOCK_TRIES)
+
+
+def _message_width(conn: psycopg.Connection) -> int | None:
+    """N of a legacy messages.message varchar(N); None for text/unbounded or no table."""
+    row = conn.execute("SELECT format_type(atttypid, atttypmod) FROM pg_attribute "
+                       "WHERE attrelid = to_regclass('messages') AND attname = 'message' AND NOT attisdropped"
+                       ).fetchone()
+    m = re.fullmatch(r"character varying\((\d+)\)", row[0]) if row else None
+    return int(m.group(1)) if m else None
+
+
 def _install_schema(conn: psycopg.Connection, b: dict) -> None:
-    conn.execute(SCHEMA.replace("{max_chars}", str(int(b["message_max_chars"]))))
+    configured_message_cap({"board": b})   # ValueError: refused before anything changes
+    legacy = _message_width(conn)   # before SCHEMA creates the table as text
+    conn.execute(SCHEMA)
+    _install_message_cap(conn, b, legacy)
     # boards created before writers became configurable restrict memory_refs.writer to three names
     conn.execute("ALTER TABLE memory_refs DROP CONSTRAINT IF EXISTS memory_refs_writer_check")
     _install_checks(conn)
@@ -724,6 +795,10 @@ def _install_schema(conn: psycopg.Connection, b: dict) -> None:
 
 SETUP_ATTEMPTS = 5
 SETUP_LOCK_TIMEOUT_MS = 5000
+# SCHEMA is a grouped round trip, unlike ordinary board queries. Allow ten successful
+# lock waits below 5s each plus 10s for DDL and client scheduling. This is a bounded
+# setup budget, not a guarantee for arbitrarily long migrations; 0 still disables it.
+SETUP_QUERY_TIMEOUT = 60.0
 
 
 def _install_schema_retrying(conn: psycopg.Connection, b: dict, attempts: int = SETUP_ATTEMPTS) -> None:
@@ -731,8 +806,11 @@ def _install_schema_retrying(conn: psycopg.Connection, b: dict, attempts: int = 
     statements can deadlock with (psycopg DeadlockDetected). The schema is idempotent, so a
     short lock_timeout keeps a blocked step from waiting long, and a deadlock or lock timeout
     is retried with a growing, jittered pause (each retry is noted on stderr), `attempts` times."""
-    conn.execute(f"SET lock_timeout = {int(SETUP_LOCK_TIMEOUT_MS)}")
+    original_timeout = conn.query_timeout
+    if original_timeout:
+        conn.query_timeout = max(original_timeout, SETUP_QUERY_TIMEOUT)
     try:
+        conn.execute(f"SET lock_timeout = {int(SETUP_LOCK_TIMEOUT_MS)}")
         for attempt in range(1, attempts + 1):
             try:
                 return _install_schema(conn, b)
@@ -746,8 +824,10 @@ def _install_schema_retrying(conn: psycopg.Connection, b: dict, attempts: int = 
     finally:
         try:
             conn.execute("RESET lock_timeout")
-        except psycopg.Error:
-            pass
+        except (psycopg.Error, BoardUnavailable):
+            pass   # a deadline/lost socket must not be masked by cleanup on the closed connection
+        finally:
+            conn.query_timeout = original_timeout
 
 
 def _add_names(conn: psycopg.Connection, source: str, names: Sequence[str]) -> int:
@@ -1563,15 +1643,33 @@ class PostgresBoard(Board):
 
     # ---- messages ------------------------------------------------------------------
 
+    def _read_message_cap(self) -> int | None:
+        row = self._conn.execute("SELECT value FROM board_meta WHERE key = 'message_max_chars'").fetchone()
+        return int(row[0]) if row else None
+
+    def _write_message_cap(self, cap: int) -> None:
+        """Lowering or raising the cap: one ALTER TABLE swapping the NOT VALID check, then the
+        board_meta row, in one transaction (see _alter_quickly for the lock behaviour). Metadata
+        only: no row is read or rewritten, whatever the table's size."""
+        _alter_quickly(self._conn, [
+            _cap_statement(cap),
+            "INSERT INTO board_meta (key, value) VALUES ('message_max_chars', %s) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"], [(), (str(cap),)])
+
     def _insert_message(self, job: str, name: str, text: str, to: str | None,
                         agent_key: str | None) -> int:
         self.ensure_job(job)
-        with self._conn.transaction():  # the lock is held to commit: ids commit in order
-            self._conn.execute("SELECT pg_advisory_xact_lock(%s)", (POST_LOCK,))
-            msg_id = self._conn.execute(
-                "INSERT INTO messages (job, agent_name, message, to_agent, agent_key, host) "
-                "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
-                (job, name, text, to, agent_key, compat.node())).fetchone()[0]
+        try:
+            with self._conn.transaction():  # the lock is held to commit: ids commit in order
+                self._conn.execute("SELECT pg_advisory_xact_lock(%s)", (POST_LOCK,))
+                msg_id = self._conn.execute(
+                    "INSERT INTO messages (job, agent_name, message, to_agent, agent_key, host) "
+                    "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+                    (job, name, text, to, agent_key, compat.node())).fetchone()[0]
+        except psycopg.errors.CheckViolation as exc:
+            if getattr(exc.diag, "constraint_name", None) != _CAP_CONSTRAINT:
+                raise
+            raise CapExceeded(self.message_cap()) from exc   # the cap was lowered since it was read
         self._conn.execute("UPDATE agents SET last_seen = now(), last_post_at = now(), "
                            "calls_at_post = tool_calls WHERE name = %s AND left_at IS NULL", (name,))
         return msg_id

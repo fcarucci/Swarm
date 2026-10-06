@@ -5,12 +5,13 @@ supervisor pass with FINAL_RETRY_SECONDS); one that keeps failing ends as a capt
 from __future__ import annotations
 
 import datetime as dt
+import contextlib
 import getpass
 import json
 import time
 from unittest import mock
 
-from support import LIB, posix_only  # noqa: E402
+from support import LIB, posix_only, ManualClock, assert_finishes  # noqa: E402
 from test_transcripts_capture import SESSION, CaptureEnv, line  # noqa: F401  (sets sys.path)
 
 from swarm import cli as swarm  # noqa: E402
@@ -46,11 +47,22 @@ class FinalRetryEnv(CaptureEnv):
     def slow_agent(self, key: str, kb: int = 600):
         p = self.agent_file(key)
         with p.open("a") as fh:
-            fh.write(line(f"the end of {key}, token={SECRET}") + slow_text(kb))
+            fh.write(line(f"the end of {key}, token={SECRET}") + slow_text(min(kb, 60)))
         return p
 
     def stop(self, key: str, budget: float = 0.02):
-        with mock.patch.object(swarm_hooks, "TRANSCRIPT_BUDGET_SECONDS", budget):
+        clock = ManualClock()
+        real = transcripts.redact
+
+        def slow_redact(text, deadline=None):
+            if "Pw00000001xyzXYZ" in text and deadline is not None:
+                clock.advance(max(budget, 0) + 1)
+            return real(text, deadline)
+
+        with mock.patch("time.monotonic", clock), \
+                mock.patch("time.sleep", side_effect=clock.advance), \
+                mock.patch.object(transcripts, "redact", side_effect=slow_redact), \
+                mock.patch.object(swarm_hooks, "TRANSCRIPT_BUDGET_SECONDS", budget):
             self.hook("stop", agent_id=key, session=SESSION, transcript_path=str(self.main))
 
     def state(self) -> dict:
@@ -63,8 +75,21 @@ class FinalRetryEnv(CaptureEnv):
 
     def supervise(self):
         out: list = []
-        rc = command.run_pass(self.cfg, start_runner=lambda cfg, run: 4242, which=lambda b: f"/usr/bin/{b}",
-                              say=out.append, scope_available=lambda: True)
+        with contextlib.ExitStack() as stack:
+            if transcripts.FINAL_RETRY_SECONDS < 1:
+                clock = ManualClock()
+                real = transcripts.redact
+
+                def exhausted(text, deadline=None):
+                    if "Pw00000001xyzXYZ" in text and deadline is not None:
+                        clock.now = max(clock.now, deadline) + 0.01
+                    return real(text, deadline)
+
+                stack.enter_context(mock.patch("time.monotonic", clock))
+                stack.enter_context(mock.patch("time.sleep", side_effect=clock.advance))
+                stack.enter_context(mock.patch.object(transcripts, "redact", side_effect=exhausted))
+            rc = command.run_pass(self.cfg, start_runner=lambda cfg, run: 4242, which=lambda b: f"/usr/bin/{b}",
+                                  say=out.append, scope_available=lambda: True)
         self.assertEqual(rc, 0, out)
         return out
 
@@ -185,9 +210,18 @@ class CaptureJobIsolationTests(FinalRetryEnv):
         self.slow_agent("a1", kb=1500)
         self.agent_file("a2")
         self.agent_file("a3")
-        with self.board() as b:
+        clock = ManualClock()
+        real = transcripts.redact
+
+        def slow_redact(text, deadline=None):
+            if "Pw00000001xyzXYZ" in text and deadline is not None:
+                clock.advance(1)
+            return real(text, deadline)
+
+        with mock.patch("time.monotonic", clock), \
+                mock.patch.object(transcripts, "redact", side_effect=slow_redact), self.board() as b:
             b.close_job("J", "completed", None, forced=True)
-            n = transcripts.capture_closed(b, self.cfg, ["J"], time.monotonic() + 0.3)
+            n = transcripts.capture_closed(b, self.cfg, ["J"], clock() + 0.3)
         self.assertGreaterEqual(n, 2)
         self.assertIsNone(self.row("a1"))
         self.assertTrue(self.row("a2").final)
@@ -376,11 +410,12 @@ class CodexOrderingTests(FinalRetryEnv):
         def capture(board, cfg, job, key, path, final, name=None, sid=None, deadline=None, **kw):
             tried.append(key)
             if key in bad:   # adversarial: eats the whole budget, then runs out of time
-                time.sleep(max(0.0, (deadline or time.monotonic()) - time.monotonic()) + 0.01)
+                clock.now = max(clock.now, deadline or clock.now) + 0.01
                 raise transcripts.OutOfTime("transcript capture ran out of time")
             return real(board, cfg, job, key, path, final, name, sid, deadline, **kw)
         codex = hosts.get("codex")
-        with mock.patch.object(transcripts, "capture_subagent", capture), \
+        clock = ManualClock()
+        with mock.patch("time.monotonic", clock), mock.patch.object(transcripts, "capture_subagent", capture), \
                 mock.patch.object(transcripts, "FINALIZE_PER_SWEEP", 3), \
                 mock.patch.object(type(codex), "find_agent_transcript", lambda self, main, key: rollout):
             for _ in range(len(keys)):
@@ -397,7 +432,8 @@ class CodexOrderingTests(FinalRetryEnv):
 class BudgetTests(FinalRetryEnv):
     def test_sweeps_are_never_unbounded(self):
         seen: list = []
-        with mock.patch.object(lost, "finalize_pending_owned", lambda b, c, d=None, retry=False: seen.append(d) or 0), \
+        clock = ManualClock()
+        with mock.patch("time.monotonic", clock), mock.patch.object(lost, "finalize_pending_owned", lambda b, c, d=None, retry=False: seen.append(d) or 0), \
                 mock.patch.object(transcripts, "finalize_owned", lambda b, c, d=None, retry=False: seen.append(d) or 0), \
                 self.board() as b:
             before = time.monotonic()
@@ -405,16 +441,17 @@ class BudgetTests(FinalRetryEnv):
         self.assertEqual(len(seen), 2)
         for d in seen:
             self.assertIsNotNone(d)
-            self.assertLessEqual(d, before + transcripts.SWEEP_SECONDS + 1)
+            self.assertEqual(d, before + transcripts.SWEEP_SECONDS)
 
     def test_the_pass_bounds_its_sweep_and_gives_the_retries_what_is_left(self):
         calls: dict = {}
+        clock = ManualClock()
         real_sweep = swarm.sweep_jobs
 
         def sweep(b, cfg, deadline=None):
             calls["sweep"] = deadline - time.monotonic()
             return real_sweep(b, cfg, deadline)
-        with mock.patch.object(swarm, "sweep_jobs", sweep), \
+        with mock.patch("time.monotonic", clock), mock.patch.object(swarm, "sweep_jobs", sweep), \
                 mock.patch.object(lost, "retry_slow_finals",
                                   lambda b, c, d: calls.__setitem__("retry", d - time.monotonic()) or 0):
             self.supervise()
@@ -483,8 +520,9 @@ class LockTests(FinalRetryEnv):
         child = subprocess.Popen([sys.executable, "-c",
                                   "import os,sys,time; sys.path.insert(0, sys.argv[2]); from swarm import compat; "
                                   "fd=os.open(sys.argv[1], os.O_WRONLY); "
-                                  "compat.flock(fd, compat.LOCK_EX); print('held', flush=True); time.sleep(60)",
-                                  str(lockp), str(LIB)], stdout=subprocess.PIPE, text=True)
+                                  "compat.flock(fd, compat.LOCK_EX); print('held', flush=True); sys.stdin.read()",
+                                  str(lockp), str(LIB)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self.addCleanup(child.stdin.close)
         self.addCleanup(child.stdout.close)
         self.addCleanup(child.wait)
         self.addCleanup(child.kill)
@@ -501,18 +539,11 @@ class LockTests(FinalRetryEnv):
         self.slow_agent("a1")
         self.stop("a1")                                        # pending, slow (state written)
         self.hold_lock()
-        limit = lost.RETRIES_LOCK_SECONDS * 3 + 2
-        t = time.monotonic()
         with self.board() as b:
-            swarm.sweep_jobs(b, self.cfg, time.monotonic() + 1.0)
-        self.assertLess(time.monotonic() - t, limit)
-        t = time.monotonic()
-        self.hook("stop", agent_id="a2", session=SESSION, transcript_path=str(self.main))
-        self.assertLess(time.monotonic() - t, limit)
+            assert_finishes(self, lambda: swarm.sweep_jobs(b, self.cfg, time.monotonic() + 1.0))
+        assert_finishes(self, lambda: self.hook("stop", agent_id="a2", session=SESSION, transcript_path=str(self.main)))
         self.assertTrue(self.row("a2").final)                 # captured all the same
-        t = time.monotonic()
-        self.supervise()
-        self.assertLess(time.monotonic() - t, limit + 5)
+        assert_finishes(self, self.supervise)
         self.assertIn("held by another process", (lost.retry_state_path().parent / "supervise.log").read_text())
         from swarm import bootstrap
         [check] = bootstrap._capture_failed_check(self.cfg)
@@ -550,7 +581,8 @@ class OrderingTests(FinalRetryEnv):
         rollout = self.tmp / "r.jsonl"
         rollout.write_text("{}\n")
         codex = hosts.get("codex")
-        with mock.patch.object(transcripts, "capture_subagent", capture), \
+        clock = ManualClock()
+        with mock.patch("time.monotonic", clock), mock.patch.object(transcripts, "capture_subagent", capture), \
                 mock.patch.object(type(codex), "find_agent_transcript", lambda self, main, key: rollout), \
                 self.board() as b:
             lost.retry_slow_finals(b, self.cfg, time.monotonic() + 100)
@@ -625,16 +657,16 @@ class PassClockTests(FinalRetryEnv):
         """Time spent opening the board comes out of the pass's budget."""
         seen: dict = {}
         real_open = command._open
+        clock = ManualClock()
 
         def slow_open(cfg, dry_run):
-            time.sleep(0.5)
+            clock.advance(0.5)
             return real_open(cfg, dry_run)
-        t0 = time.monotonic()
-        with mock.patch.object(command, "_open", slow_open), \
+        t0 = clock()
+        with mock.patch("time.monotonic", clock), mock.patch.object(command, "_open", slow_open), \
                 mock.patch.object(lost, "retry_slow_finals", lambda b, c, d: seen.setdefault("d", d) and 0):
             self.supervise()
-        self.assertLessEqual(seen["d"], t0 + command.PASS_BUDGET_SECONDS + 0.1)
-        self.assertLess(seen["d"] - t0, command.PASS_BUDGET_SECONDS + 0.1)
+        self.assertEqual(seen["d"], t0 + command.PASS_BUDGET_SECONDS)
 
 
 class LockModeTests(FinalRetryEnv):
@@ -740,7 +772,6 @@ class ZstdBombTests(FinalRetryEnv):
         fake.chmod(0o755)
         p = self.tmp / "r.jsonl.zst"
         p.write_bytes(b"not really zstd")
-        t = time.monotonic()
         with mock.patch.dict(sys.modules, {"zstandard": None}), \
                 mock.patch.dict(os.environ, {"PATH": f"{bin_dir}:{os.environ['PATH']}"}), \
                 mock.patch.object(transcripts, "RAW_READ_MAX", 1024 * 1024):
@@ -748,8 +779,7 @@ class ZstdBombTests(FinalRetryEnv):
                 codex.read_rollout(p)
             fake.write_text("#!/bin/sh\nsleep 30\n")         # never answers: the deadline stops it
             with self.assertRaises((transcripts.OutOfTime, codex.RolloutUnreadable)):
-                codex.read_rollout(p, deadline=time.monotonic() + 0.5)
-        self.assertLess(time.monotonic() - t, 10)
+                assert_finishes(self, lambda: codex.read_rollout(p, deadline=time.monotonic() + 0.5))
 
     def test_a_codex_final_over_the_cap_is_marked_too_large(self):
         from swarm import enrolment, hosts

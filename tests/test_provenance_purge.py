@@ -6,6 +6,7 @@ import datetime as dt
 import time
 from unittest import mock
 
+from support import assert_finishes
 from test_hindsight import HindsightEnv  # noqa: E402
 from fake_hindsight import dead_url  # noqa: E402
 
@@ -148,22 +149,28 @@ class PurgeTests(HindsightEnv):
     def test_prune_client_keeps_the_deadline(self):
         """Every question shares prune's deadline: a slow Hindsight can't hold purge longer."""
         self.enable(timeout_seconds=5)
-        self.fake.delays[("GET", "/documents/alive")] = 3
+        import threading
+        entered, release = threading.Event(), threading.Event()
+        self.fake.gates[("GET", "/documents/alive")] = (entered, release)
+        self.addCleanup(release.set)
         with self.board() as b:
-            t = time.monotonic()
-            res = provenance.prune(b, self.cfg, deadline=time.monotonic() + 0.5)
-        self.assertLess(time.monotonic() - t, 2)
+            res = assert_finishes(self, lambda: provenance.prune(b, self.cfg, deadline=time.monotonic() + 0.5))
+        self.assertTrue(entered.wait(30))
+        self.assertFalse(release.is_set())
         self.assertEqual(set(self.docs()), {"alive", "gone"})
         self.assertEqual(res.dropped, ())
 
     def test_statuses_client_keeps_the_deadline(self):
         self.enable(timeout_seconds=5)
-        self.fake.delays[("GET", "/documents/alive")] = 3
+        import threading
+        entered, release = threading.Event(), threading.Event()
+        self.fake.gates[("GET", "/documents/alive")] = (entered, release)
+        self.addCleanup(release.set)
         with self.board() as b:
             refs = b.memory_refs()
-        t = time.monotonic()
-        out = provenance.statuses(self.cfg, refs, deadline=time.monotonic() + 0.5)
-        self.assertLess(time.monotonic() - t, 2)
+        out = assert_finishes(self, lambda: provenance.statuses(self.cfg, refs, deadline=time.monotonic() + 0.5))
+        self.assertTrue(entered.wait(30))
+        self.assertFalse(release.is_set())
         self.assertTrue(out["alive"].startswith("unknown"), out)
 
     # ---- memory refs --check

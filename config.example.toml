@@ -31,8 +31,9 @@ prepared_statements = false         # true only without a pooler in between: it 
 [board]
 backend = "file"                    # storage backend: "file" (default: plain files, one machine, no server), "sqlite" (one machine), "postgres" (shared across machines; needs [database] above), or "memory" (offline tests only; see SKILL.md)
 retention_days = 7                 # messages (and departed agents) older than this are purged
-message_max_chars = 200             # hard cap per message; sizes the varchar(N) column at first init
-                                    # (re-running init does not resize it: see SKILL.md)
+message_max_chars = 200             # message cap (50..4000): the value a NEW board starts with. The cap itself lives in the
+                                    # board (every client and host obeys that one); change it later, online, with
+                                    # `swarm config board.message_max_chars 500` (add --save to write this line too)
 agent_stale_hours = 12              # an agent silent this long gives its name back
 read_limit = 50                     # max messages returned by one read
 join_history = 30                   # a new agent is first shown the job's newest N messages (0 = none)

@@ -207,7 +207,7 @@ class HostFileSafetyTest(HomeTest):
             T.run_snapshots(b, self.cfg)
             T.snapshot_due(b, self.cfg)
         self.assert_victim_untouched()
-        self.assertLess(self.victim.stat().st_mtime, time.time() - 3600)
+        self.assertAlmostEqual(self.victim.stat().st_mtime, old, places=5)
         self.assertTrue(stamp.is_symlink() or not stamp.exists() or stamp.is_file())
 
     @posix_only("needs os.mkfifo (POSIX FIFOs)")

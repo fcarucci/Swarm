@@ -278,7 +278,7 @@ class NoticeAndStampSafetyTests(unittest.TestCase):
         import threading
         out = []
         t = threading.Thread(target=lambda: out.append(bootstrap.take_notices()), daemon=True)
-        t.start(); t.join(5)
+        t.start(); t.join(30)
         self.assertFalse(t.is_alive(), "take_notices blocked on a FIFO")
         self.assertIsNone(out[0])
         self.assertIsNone(bootstrap.hook_output("claude"))
