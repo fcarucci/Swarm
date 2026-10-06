@@ -28,6 +28,7 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 - File plugins with unsafe POSIX ownership, world-write access, write access by a foreign group or symlinks are refused and listed; primary-group writable plugins (umask `002`) are accepted; the plugin trust boundary and Windows exception are documented. `swarm plugins` also reports discovery failures.
 
 ### Changed
+- Session watches roll up only open jobs (or the last finished job), coalesce notification bursts, and render keys from cached snapshots; schema 19 keeps PostgreSQL job totals restricted to the displayed jobs during multi-job refreshes (automatic migration).
 - `wait` and `resume` use blockers; upgrades preserve existing waits and plugin data. Status and watch list open blockers. Wait blockers retain protection only while bounded by a future deadline; question/person/role blockers protect until resolved, even overdue ones.
 - Schema 17 restricts PostgreSQL agent message counts to the requested job and rolls up jobs without per-agent message counts, preserving status columns and historical counts (automatic migration).
 - Schema 16 (applied by the automatic schema upgrade on first use by the new version): `jobs.plugin_data`, a small JSON object of per-job settings that plugins keep with a job (`Board.job_data` / `set_job_data`). A plain `ADD COLUMN`.

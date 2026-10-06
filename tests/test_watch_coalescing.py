@@ -35,6 +35,68 @@ class CoalescingTests(unittest.TestCase):
         self.assertFalse(gate.due(22.9))
         self.assertTrue(gate.due(23))
 
+    def test_plain_session_watch_keys_and_notifications_share_refresh_gate(self):
+        import io
+        h = MemoryHarness("watch-frequency")
+        self.addCleanup(h.close)
+        h.reset()
+        board = h.board()
+        self.addCleanup(board.close)
+        board.open_job("shown", None, None, "S", None)
+        now = [0.0]
+        reads = []
+        real = board.session_shown_jobs
+        def read(session):
+            reads.append(now[0])
+            return real(session)
+        view = {'session': 'S', 'min_redraw': 2, 'offset': 0}
+        def refresh():
+            return cli._take_snapshot(board, lambda b: cli.session_jobs(b, 'S'), view, None)
+        def wait(timeout):
+            now[0] = round(now[0] + .1, 1)
+            return True
+        keys = iter(['l'] * 45 + ['q'])
+        with mock.patch.object(board, 'session_shown_jobs', side_effect=read), \
+             mock.patch.object(board, 'wait_for_change', side_effect=wait), \
+             mock.patch.object(board, 'subscribe'), \
+             mock.patch.object(cli, '_watch_loop_threaded', side_effect=AssertionError('plain watch must coalesce without selector')), \
+             mock.patch.object(cli.time, 'monotonic', side_effect=lambda: now[0]), \
+             mock.patch.object(cli, '_read_keys', side_effect=lambda fd: next(keys)):
+            cli._watch_loop(board, io.StringIO(), None, .1, view,
+                            lambda snap: [','.join(j.job for j in cli.session_jobs(snap, 'S')[0])], refresh)
+        self.assertEqual(reads, [0.0, 2.0, 4.0])
+
+    def test_threaded_session_watch_coalesces_notifications(self):
+        # Drive the real refresh worker with a numeric clock, then let its error
+        # terminate the selector loop. No wall-clock delay or load generator.
+        import io
+        h = MemoryHarness("watch-thread-frequency")
+        self.addCleanup(h.close)
+        h.reset()
+        board = h.board()
+        self.addCleanup(board.close)
+        board.open_job('shown', None, None, 'S', None)
+        now, reads = [0.0], []
+        real = board.session_shown_jobs
+        def read(session):
+            reads.append(now[0])
+            return real(session)
+        def wait(timeout):
+            now[0] = round(now[0] + .1, 1)
+            if now[0] > 4.6:
+                raise RuntimeError('clock finished')
+            return True
+        view = {'session': 'S', 'min_redraw': 2}
+        def refresh():
+            return cli._take_snapshot(board, lambda b: cli.session_jobs(b, 'S'), view, None)
+        with mock.patch.object(board, 'session_shown_jobs', side_effect=read), \
+             mock.patch.object(board, 'wait_for_change', side_effect=wait), \
+             mock.patch.object(cli.time, 'monotonic', side_effect=lambda: now[0]):
+            with self.assertRaisesRegex(RuntimeError, 'clock finished'):
+                cli._watch_loop_threaded(board, io.StringIO(), None, .1, view,
+                                         lambda snap: ['shown'], refresh)
+        self.assertEqual(reads, [.1, 2.1, 4.1])
+
     def test_postgres_draw_has_one_round_trip(self):
         board=object.__new__(PostgresBoard)
         board.cfg=cli.DEFAULTS
@@ -84,6 +146,36 @@ class PostgresSnapshotTests(unittest.TestCase):
             clock = r"\d{2}:\d{2}:\d{2}"
             self.assertEqual(re.sub(clock, '', actual[0]), re.sub(clock, '', expected[0]))
             self.assertEqual(actual[1:], expected[1:])
+
+    def test_session_shown_rollups_are_bounded_by_displayed_jobs(self):
+        # A long-lived session has much more history than the dashboard displays.
+        c = self.board._conn
+        c.execute("INSERT INTO jobs (job, session_id, status, finished_at) "
+                  "SELECT 'history-' || n, 'snapshot-session', 'completed', now() - interval '1 day' "
+                  "FROM generate_series(1, 143) n")
+        c.execute("INSERT INTO messages (job, agent_name, message) "
+                  "SELECT job, 'X', 'history' FROM jobs WHERE job LIKE 'history-%'")
+        self.board.open_job('K', None, None, 'snapshot-session', None)
+        self.board.post('K', 'X', 'live')
+        for expected in (['J', 'K'], ['K']):
+            with mock.patch.object(self.board._conn, 'execute', wraps=c.execute) as execute:
+                shown = self.board.session_shown_jobs('snapshot-session')
+                query, params = execute.call_args.args
+            self.assertEqual([j.job for j in shown], expected)
+            plan = c.execute('EXPLAIN (ANALYZE, FORMAT JSON) ' + query, params).fetchone()[0][0]['Plan']
+            self.assertEqual(plan['Actual Rows'], len(expected))
+            def scans(node):
+                if node.get('Relation Name') == 'messages':
+                    yield node
+                for child in node.get('Plans', []):
+                    yield from scans(child)
+            message_scans = list(scans(plan))
+            self.assertTrue(message_scans)
+            for scan in message_scans:
+                self.assertEqual(scan['Actual Loops'], len(expected))
+            self.board.close_job('J', 'completed', None)
+            self.board.close_job('K', 'completed', None)
+            c.execute("UPDATE jobs SET finished_at = now() + interval '1 second' WHERE job = 'K'")
 
     def test_hidden_rows_do_not_receive_message_counts(self):
         self.board.allocate_name('old','J'); self.board.agent_stopped('old')

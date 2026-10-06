@@ -112,7 +112,8 @@ RESTART_OUTCOMES = ("running", "completed", "timeout", "max_turns", "failed", "n
 # plugins keep with the job: Board.job_data / set_job_data).
 # 17 indexed job-restricted agent message counts and message-free agent rollups in job_status.
 # 18 blockers and their append-only audit events.
-SCHEMA_VERSION = 18
+# 19 per-job LATERAL job_status totals for filtered multi-job listings.
+SCHEMA_VERSION = 19
 
 JOB_DATA_KEY = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}")
 JOB_DATA_VALUE_MAX = 2000
@@ -2022,6 +2023,13 @@ class Board(abc.ABC):
         """Every job (closed too) activated by host session `session`, in jobs() order. Backends
         whose jobs() is expensive for the whole board (postgres) override it to read only these."""
         return [j for j in self.jobs(True) if j.session_id == session]
+
+    def session_shown_jobs(self, session: str) -> list[JobStatus]:
+        """Only open jobs of the session, in jobs() order; if none, its last finished job
+        by (coalesce(finished_at, created_at), job). Select before computing status rollups."""
+        rows = self.session_jobs(session)
+        active = [j for j in rows if j.status == "active"]
+        return active or ([max(rows, key=lambda j: (j.finished_at or j.created_at, j.job))] if rows else [])
 
     # ---- transcripts ([transcripts]; bin/transcripts.py does the capturing) ---------------
 

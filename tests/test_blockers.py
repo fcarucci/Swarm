@@ -396,9 +396,9 @@ class MigrationContract:
                     self.assertEqual(b.job_status("j").description, "description")
                     if version == 16:
                         self.assertEqual(b.job_data("j")["demo.setting"], "kept")
-                self.assertEqual(SCHEMA_VERSION, 18)
+                self.assertEqual(SCHEMA_VERSION, 19)
 
-    def test_main_schema_17_auto_upgrades_to_18_with_blockers(self):
+    def test_main_schema_17_auto_upgrades_to_19_with_blockers(self):
         """Main's schema 17 has plugin_data and status views, but no blocker storage."""
         from pathlib import Path
         from swarm.board import backend_class, ensure_initialized, SCHEMA_VERSION
@@ -448,14 +448,88 @@ class MigrationContract:
                 if stamp is not None:
                     stamp.unlink(missing_ok=True)
                 self.assertEqual(ensure_initialized(self.h.cfg).action, "initialized")
-        self.assertEqual(SCHEMA_VERSION, 18)
-        self.assertEqual(backend_class(self.h.cfg).schema_version(self.h.cfg), 18)
+        self.assertEqual(SCHEMA_VERSION, 19)
+        self.assertEqual(backend_class(self.h.cfg).schema_version(self.h.cfg), 19)
         with self.h.board() as b:
             self.assertEqual(b.blockers("j"), [])
             self.assertEqual(b.job_data("j"), {"demo.setting": "kept"})
             self.assertEqual(b.recent_messages(10, "j")[0].message, "message from schema 17")
             blocker = b.open_blocker("j", "review", "@EL", "new blocker")
             self.assertEqual([row.id for row in b.blockers("j")], [blocker.id])
+            self.assertEqual([event.event for event in b.blocker_events(blocker.id)], ["opened"])
+
+    def test_main_schema_18_auto_upgrades_to_19_preserving_blockers(self):
+        """Main c206c89 fixtures include an open question and its audit history."""
+        from pathlib import Path
+        from swarm.board import backend_class, ensure_initialized, SCHEMA_VERSION
+        from swarm.board import autoinit
+        from support import home_env
+        import tempfile
+
+        self.h.reset()
+        fixtures = Path(__file__).parent / "fixtures"
+        if self.h.name == "memory":
+            # Main FileBoard uses main MemoryBoard's setup and serializes its state.
+            from swarm.board.file import loads
+            state = loads((fixtures / "schema18_state.json").read_text())
+            with self.h.store.lock:
+                for key in ("pool", "jobs", "agents", "routes", "restarts", "next_restart_id",
+                            "pauses", "next_pause_id", "message_max_chars", "next_id",
+                            "blockers", "blocker_events", "next_blocker_id", "next_blocker_event_id"):
+                    setattr(self.h.store, key, state[key])
+                self.h.store.messages = [loads(line) for line in
+                    (fixtures / "schema18_messages.jsonl").read_text().splitlines()]
+                self.h.store.schema_version = 18
+        elif self.h.name == "file":
+            board_dir = self.h.root / "board"
+            for name in ("state.json", "messages.jsonl"):
+                source = "schema18_state.json" if name == "state.json" else "schema18_messages.jsonl"
+                (board_dir / name).write_text((fixtures / source).read_text())
+            (board_dir / "schema_version").write_text("18\n")
+        elif self.h.name == "sqlite":
+            self.h.close()
+            self.h.conn = None
+            self.h.path.parent.mkdir(parents=True, exist_ok=True)
+            self.h._db().executescript((fixtures / "schema18_sqlite.sql").read_text())
+            self.assertEqual(self.h._db().execute("SELECT count(*) FROM blockers").fetchone()[0], 1)
+        else:
+            c = self.h.conn
+            c.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
+            c.execute((fixtures / "schema18_postgres.sql").read_text())
+            c.execute("SET search_path TO public")
+            self.assertEqual(c.execute("SELECT count(*) FROM blockers").fetchone()[0], 1)
+        self.assertEqual(backend_class(self.h.cfg).schema_version(self.h.cfg), 18)
+        # SQLite refuses opening an older schema; read its pre-upgrade snapshot
+        # using the fixture's version, without running setup or changing storage.
+        from contextlib import nullcontext
+        old_version = (mock.patch("swarm.board.sqlite.SCHEMA_VERSION", 18)
+                       if self.h.name == "sqlite" else nullcontext())
+        with old_version, self.h.board() as b:
+            before = (b.blockers("j"), b.blocker_events(1), b.job_status("j"),
+                      b.recent_messages(10, "j"))
+        with tempfile.TemporaryDirectory(prefix="swarm-schema19-", dir=os.environ.get("TMPDIR")) as tmp:
+            with mock.patch.dict(os.environ, {**home_env(Path(tmp)), "SWARM_AUTO_INIT": "1"}):
+                stamp = autoinit.stamp_path(self.h.cfg)
+                if stamp is not None:
+                    stamp.unlink(missing_ok=True)
+                self.assertEqual(ensure_initialized(self.h.cfg).action, "initialized")
+        self.assertEqual(SCHEMA_VERSION, 19)
+        self.assertEqual(backend_class(self.h.cfg).schema_version(self.h.cfg), 19)
+        from swarm.board import setup_board
+        from support import SMALL_POOL
+        for _ in range(2):  # automatic migration, then idempotent setup
+            with self.h.board() as b:
+                self.assertEqual((b.blockers("j"), b.blocker_events(1), b.job_status("j"),
+                                  b.recent_messages(10, "j")), before)
+                self.assertEqual(b.job_data("j"), {"demo.setting": "kept"})
+                self.assertEqual([j.job for j in b.session_shown_jobs("S18")], ["j"])
+                self.assertEqual(derive_job_status(b.job_status("j"), 5, b.now()), "waiting")
+                self.assertEqual((b.job_status("j").open_blockers,
+                                  b.job_status("j").protected_blockers), (1, 1))
+            setup_board(self.h.cfg, SMALL_POOL)
+        with self.h.board() as b:
+            blocker = b.open_blocker("j", "review", "@EL", "new blocker")
+            self.assertGreater(blocker.id, 1)
             self.assertEqual([event.event for event in b.blocker_events(blocker.id)], ["opened"])
 
     @classmethod

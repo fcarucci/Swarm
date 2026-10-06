@@ -11,6 +11,7 @@ import os
 import re
 import threading
 import unittest
+from unittest import mock
 
 from support import wait_until, SMALL_POOL, FileHarness, fake_image, MemoryHarness, PostgresHarness, SqliteHarness  # noqa: F401  (sets sys.path)
 
@@ -803,6 +804,41 @@ class BoardContract:
         self.assertEqual(mine, [j for j in self.b.jobs(True) if j.session_id == "S1"])   # same rollups
         self.assertEqual(mine[0].messages, 1)
         self.assertEqual(self.b.session_jobs("nobody"), [])
+
+    def test_session_jobs_does_not_load_unrelated_job_rollups(self):
+        self.b.open_job("mine", None, None, "S1", None)
+        self.b.open_job("old", None, None, "S1", None)
+        self.b.open_job("other", None, None, "S2", None)
+        self.b.close_job("old", "completed", None)
+        self.b.post("mine", "X", "local")
+        self.b.post("old", "X", "history")
+        self.b.post("other", "X", "unrelated")
+        expected = [self.b.job_status(j) for j in ("mine", "old")]
+        with mock.patch.object(self.b, "jobs", side_effect=AssertionError("whole-board rollups")):
+            self.assertEqual(self.b.session_jobs("S1"), expected)
+            self.assertEqual(self.b.session_jobs("missing"), [])
+
+    def test_session_shown_jobs_excludes_history_and_keeps_last_finished(self):
+        from swarm import cli
+        for job in ("old-a", "old-b", "live-a", "live-b"):
+            self.b.open_job(job, None, None, "S1", None)
+        self.b.open_job("other", None, None, "S2", None)
+        self.b.close_job("old-a", "completed", None)
+        self.b.close_job("old-b", "completed", None)
+        for expected in (["live-a", "live-b"], ["live-b"], ["live-b"]):
+            ever = self.b.session_jobs("S1")
+            active = [j for j in ever if j.status == "active"]
+            shown = active or [max(ever, key=lambda j: (j.finished_at or j.created_at, j.job))]
+            with mock.patch.object(self.b, "session_jobs", side_effect=AssertionError("history rollups")):
+                rows = self.b.session_shown_jobs("S1")
+                self.assertEqual([j.job for j in rows], expected)
+                self.assertEqual(rows, shown)
+                self.assertEqual(cli.session_jobs(self.b, "S1")[0], shown)
+                self.assertEqual(self.b.session_shown_jobs("missing"), [])
+            if expected == ["live-a", "live-b"]:
+                self.b.close_job("live-a", "completed", None)
+            elif rows[0].status == "active":
+                self.b.close_job("live-b", "completed", None)
 
     def test_jobs_listing_and_rollup(self):
         self.b.open_job("a", "A", None, None, None)
@@ -2056,7 +2092,65 @@ class PostgresSpecificTests(unittest.TestCase):
                                   for field in ("Filter", "Index Cond", "Recheck Cond"))
             self.assertIn("'j'", conditions, plan)
 
-    def test_schema16_to_17_recreates_status_views_without_changing_results(self):
+    def test_multi_job_listing_totals_are_parameterized_by_job(self):
+        from swarm.board.postgres import _JOB_STATUS_COLS
+        for job in ("one", "two", "other"):
+            self.b.open_job(job, None, None, "S1" if job != "other" else "S2", None)
+            self.b.allocate_name(job, job)
+            self.b.post(job, self.b.active_agent_name(job), "counted")
+        queries = (
+            f"SELECT {_JOB_STATUS_COLS} FROM job_status WHERE job = ANY(%s)",
+            f"SELECT {_JOB_STATUS_COLS} FROM job_status WHERE session_id = %s",
+            f"SELECT {_JOB_STATUS_COLS} FROM job_status WHERE status = 'active'",
+        )
+        for query, params in zip(queries, ((["one", "two"],), ("S1",), ())):
+            with self.subTest(query=query):
+                plan = self.h.conn.execute("EXPLAIN (FORMAT JSON) " + query, params).fetchone()[0][0]["Plan"]
+
+                def nodes(node):
+                    yield node
+                    for child in node.get("Plans", []):
+                        yield from nodes(child)
+
+                for relation in ("messages", "agents"):
+                    scans = [n for n in nodes(plan) if n.get("Relation Name") == relation]
+                    self.assertTrue(scans, plan)
+                    for scan in scans:
+                        conditions = " ".join(str(n.get(field, "")) for n in nodes(scan)
+                                              for field in ("Filter", "Index Cond", "Recheck Cond"))
+                        self.assertIn("j.job", conditions, plan)
+
+    def test_session_watch_snapshot_reads_only_selected_jobs(self):
+        from swarm import cli
+        self.b.open_job("old", None, None, "S1", None)
+        self.b.close_job("old", "completed", None)
+        for job, session in (("one", "S1"), ("two", "S1"), ("other", "S2")):
+            self.b.open_job(job, None, None, session, None)
+            self.b.allocate_name(job, job)
+            self.b.post(job, self.b.active_agent_name(job), job)
+        for compact in (False, True):
+            view = {"session": "S1", "compact": compact, "recent_minutes": 10}
+            with mock.patch.object(self.b._conn, "execute", wraps=self.b._conn.execute) as execute:
+                snap = cli._take_snapshot(self.b, lambda b: b.session_jobs("S1"), view, None)
+                self.assertEqual(execute.call_count, 1)
+            self.assertEqual([j.job for j in snap._board.job_rows], ["one", "two"])
+            self.assertEqual({a.job for a in snap._board.agent_rows}, {"one", "two"})
+            self.assertEqual({m.job for m in snap._board.message_rows}, {"one", "two"})
+        self.b.close_job("one", "completed", None)
+        self.b.close_job("two", "completed", None)
+        self.assertEqual([j.job for j in self.b.watch_snapshot(None, "S1", 10, 60).job_rows], ["two"])
+        self.assertEqual(self.b.watch_snapshot(None, "missing", 10, 60).job_rows, [])
+
+    def test_schema16_to_19_recreates_status_views_without_changing_results(self):
+        self._assert_status_view_migration(16, "schema15_status_views.sql")
+
+    def test_schema17_to_19_recreates_status_views_without_changing_results(self):
+        self._assert_status_view_migration(17, "schema17_status_views.sql")
+
+    def test_schema18_to_19_preserves_blocker_views_and_results(self):
+        self._assert_status_view_migration(18, "schema18_status_views.sql")
+
+    def _assert_status_view_migration(self, version, fixture):
         from pathlib import Path
         from swarm.board.base import SCHEMA_VERSION
         from swarm.board.postgres import _AGENT_STATUS_COLS, _JOB_STATUS_COLS
@@ -2075,12 +2169,16 @@ class PostgresSpecificTests(unittest.TestCase):
         self.b.close_job("closed", "completed", "kept")
         self.b.post("j", self.b.active_agent_name("started"), "counted")
         self.b.post("closed", "X", "historical")
-        old_views = (Path(__file__).parent / "fixtures/schema15_status_views.sql").read_text()
+        if version == 18:
+            blocker = self.b.open_blocker("j", "question", "human", "choose")
+            self.b.comment_blocker(blocker.id, "pending", actor="human")
+            self.b.post("j", "swarm", "Blocker 99 expired: default")
+        old_views = (Path(__file__).parent / "fixtures" / fixture).read_text()
         conn.execute(old_views.format(idle=5, dead=30, tool_timeout=60))
-        conn.execute("UPDATE board_meta SET value = '16' WHERE key = 'schema_version'")
+        conn.execute("UPDATE board_meta SET value = %s WHERE key = 'schema_version'", (str(version),))
         self.b.set_job_data("j", "engineering-team.optional", "build_engineer")
         legacy_job_cols = ", ".join(c.strip() for c in _JOB_STATUS_COLS.split(",")
-                                    if c.strip() not in {"open_blockers", "protected_blockers"})
+                                    if version == 18 or c.strip() not in {"open_blockers", "protected_blockers"})
         queries = (f"SELECT {_AGENT_STATUS_COLS} FROM agent_status ORDER BY job, agent_key",
                    f"SELECT {legacy_job_cols}, shown_status FROM job_status ORDER BY job")
         before = [conn.execute(q).fetchall() for q in queries]
@@ -2090,8 +2188,8 @@ class PostgresSpecificTests(unittest.TestCase):
                                "ORDER BY table_name, ordinal_position").fetchall()
         for _ in range(2):  # migration and idempotent re-init
             type(self.b).setup(self.h.cfg, SMALL_POOL)
-            self.assertEqual(SCHEMA_VERSION, 18)
-            self.assertEqual(type(self.b).schema_version(self.h.cfg), 18)
+            self.assertEqual(SCHEMA_VERSION, 19)
+            self.assertEqual(type(self.b).schema_version(self.h.cfg), 19)
             self.assertEqual(self.b.job_data("j"), {"engineering-team.optional": "build_engineer"})
             self.assertEqual([conn.execute(q).fetchall() for q in queries], before)
             self.assertEqual(conn.execute("SELECT table_name, column_name, data_type "

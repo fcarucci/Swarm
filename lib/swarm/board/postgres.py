@@ -382,7 +382,7 @@ SELECT j.job, j.status, j.description, j.task, j.outcome, j.created_by, j.sessio
             ELSE 'idle'
        END AS shown_status
   FROM jobs j
-  LEFT JOIN (
+  LEFT JOIN LATERAL (
     -- Job listings need no per-agent message counts, including for closed jobs.
     SELECT a.job, sum(a.n)::bigint AS agents,
            COALESCE(sum(a.n) FILTER (WHERE a.status = 'started'), 0)::bigint AS started,
@@ -397,13 +397,18 @@ SELECT j.job, j.status, j.description, j.task, j.outcome, j.created_by, j.sessio
         SELECT a.job, {agent_status} AS status, count(*) AS n,
                max(a.last_seen) AS last_contact_at
           FROM agents a
+         WHERE a.job = j.job
          GROUP BY a.job, status
       ) a
      GROUP BY a.job
-  ) s ON s.job = j.job
-  LEFT JOIN (SELECT job, count(*) AS messages, max(created_at) FILTER
-                 (WHERE NOT (agent_name = 'swarm' AND message LIKE 'Blocker % expired:%')) AS last_post_at
-               FROM messages GROUP BY job) m ON m.job = j.job;
+  ) s ON true
+  LEFT JOIN LATERAL (
+    -- Keep totals parameterized by the selected job even in multi-job listings.
+    -- Expiry notices count as messages but do not renew job activity.
+    SELECT count(*) AS messages, max(created_at) FILTER
+             (WHERE NOT (agent_name = 'swarm' AND message LIKE 'Blocker % expired:%')) AS last_post_at
+      FROM messages m WHERE m.job = j.job
+  ) m ON true;
 """.replace("{agent_status}", _AGENT_STATUS_SQL)
 
 # NOTIFY channels, fixed by the triggers above (and by any tail/watch already running).
@@ -826,7 +831,8 @@ def _install_schema(conn: psycopg.Connection, b: dict) -> None:
         EXECUTE FUNCTION swarm_keep_blocked_jobs();
     """)
     _install_checks(conn)
-    # Schema 17: replace schema-16 status views; repeated setup is idempotent.
+    # Schema 19 (18 -> 19): recreate status views with per-job LATERAL totals,
+    # retaining schema-18 blocker columns and expiry activity rules. Idempotent on re-init.
     conn.execute(STATUS_VIEW.format(idle=int(b["idle_minutes"]), dead=int(b["dead_minutes"]),
                                     tool_timeout=int(b["tool_timeout_minutes"])))
 
@@ -1791,15 +1797,24 @@ class PostgresBoard(SqlBlockers, Board):
             "ORDER BY (status = 'active') DESC, COALESCE(activated_at, created_at), job")
 
     def session_jobs(self, session: str) -> list[JobStatus]:
-        # The rollup subqueries group by job: find session jobs first so their job filters
-        # can restrict the aggregates as well.
-        names = [r[0] for r in self._conn.execute(
-            "SELECT job FROM jobs WHERE session_id = %s", (session,)).fetchall()]
-        if not names:
-            return []
+        # Filter jobs before the view's per-job LATERAL aggregates, in one snapshot.
         return self._fetch(
-            JobStatus, f"SELECT {_JOB_STATUS_COLS} FROM job_status WHERE job = ANY(%s) "
-            "ORDER BY (status = 'active') DESC, COALESCE(activated_at, created_at), job", (names,))
+            JobStatus, f"SELECT {_JOB_STATUS_COLS} FROM job_status WHERE session_id = %s "
+            "ORDER BY (status = 'active') DESC, COALESCE(activated_at, created_at), job", (session,))
+
+    def session_shown_jobs(self, session: str) -> list[JobStatus]:
+        # Materialize the cheap jobs selection before entering any status aggregates.
+        return self._fetch(JobStatus, f"""
+            WITH shown AS MATERIALIZED (
+                SELECT job FROM jobs WHERE session_id = %s
+                  AND (status = 'active' OR job = (
+                    SELECT job FROM jobs WHERE session_id = %s
+                      AND NOT EXISTS (SELECT 1 FROM jobs WHERE session_id = %s AND status = 'active')
+                    ORDER BY COALESCE(finished_at, created_at) DESC, job DESC LIMIT 1))
+            )
+            SELECT {_JOB_STATUS_COLS} FROM job_status WHERE job IN (SELECT job FROM shown)
+            ORDER BY COALESCE(activated_at, created_at), job
+        """, (session, session, session))
 
     # ---- change notification -----------------------------------------------------------
 
