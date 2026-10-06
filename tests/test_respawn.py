@@ -8,6 +8,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+from support import ManualClock
 from test_goals import GoalEnv  # noqa: E402  (sets sys.path)
 
 from swarm import respawn, hosts  # noqa: E402
@@ -227,15 +228,22 @@ class StopTests(RespawnEnv):
 
     def test_idle_window_restarts_after_worker_activity(self):
         self.cfg["supervise"] = {"orphan_minutes": 10}
-        self.assertIsNotNone(self.main("session-stop"))
-        with mock.patch.object(respawn.time, "time", return_value=respawn.time.time() + 601):
+        clock = ManualClock(self.job().verdict_at.timestamp() + 1)
+        with mock.patch.object(respawn.time, "time", side_effect=clock):
+            self.assertIsNotNone(self.main("session-stop"))
+            clock.advance(601)
             with self.board() as b:
                 post = b.post("J", self.agent("w1").name, "fix round started")
-            self.h.backdate_message(post.id, -601)
+            # Store the contact at precisely the same instant used by the reminder clock.
+            contact = dt.datetime.fromtimestamp(clock(), dt.timezone.utc)
+            with mock.patch.object(self.h, "_ago", return_value=contact):
+                self.h.backdate_message(post.id, 0)
             self.assertIsNone(self.main("session-stop"))
-            with mock.patch.object(respawn.time, "time", return_value=respawn.time.time() + 601):
-                self.assertIsNotNone(self.main("session-stop"))
-                self.assertIsNone(self.main("session-stop"))
+            clock.advance(599)
+            self.assertIsNone(self.main("session-stop"))
+            clock.advance(1)
+            self.assertIsNotNone(self.main("session-stop"))
+            self.assertIsNone(self.main("session-stop"))
 
     def test_judge_activity_after_verdict_does_not_suppress_reminder(self):
         with self.board() as b:
