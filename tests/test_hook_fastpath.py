@@ -89,6 +89,7 @@ class LeaseIntegrationTests(Env):
         notifier.start(); self.addCleanup(notifier.stop)
         self.cli('activate','--job','J','--session','sess-1')
         self.cli('join','--job','J','--key','agent-1')
+        self.sender = self.peer(key='fastpath-sender')
 
     def lease(self):
         return fastpath.read('agent-agent-1')
@@ -97,7 +98,8 @@ class LeaseIntegrationTests(Env):
         self.hook('turn',tool_name='Bash')
         first=self.agent('agent-1')
         deadline=self.lease()[0]
-        self.cli('post','--job','J','--as','Alice','--to',first.name,'addressed-message')
+        rc, _, err = self.cli('post','--job','J','--as',self.sender,'--to',first.name,'addressed-message')
+        self.assertEqual(rc, 0, err)
         result=self.hook('turn',tool_name='Bash')
         self.assertIn('addressed-message',self.context(result))
         second=self.agent('agent-1')
@@ -123,7 +125,8 @@ class LeaseIntegrationTests(Env):
     def test_backlog_keeps_python_reads_enabled(self):
         self.cfg['board']['read_limit']=1
         for i in range(3):
-            self.cli('post','--job','J','--as','Alice',f'backlog-{i}')
+            rc, _, err = self.cli('post','--job','J','--as',self.sender,f'backlog-{i}')
+            self.assertEqual(rc, 0, err)
         result=self.hook('turn',tool_name='Bash')
         self.assertIn('more unread',self.context(result))
         self.assertEqual(self.lease()[0],'0')
@@ -134,7 +137,8 @@ class LeaseIntegrationTests(Env):
     def test_done_preserves_the_unread_stamp(self):
         self.hook('turn',tool_name='Bash')
         previous=self.lease()
-        self.cli('post','--job','J','--as','Alice','next-turn-message')
+        rc, _, err = self.cli('post','--job','J','--as',self.sender,'next-turn-message')
+        self.assertEqual(rc, 0, err)
         with mock.patch.dict(os.environ,SWARM_HOOK_EVENT='done'):
             self.hook('done')
         self.assertEqual(self.lease()[1:],previous[1:])
@@ -178,6 +182,7 @@ class ShellDeliveryTests(Env):
         patch.start(); self.addCleanup(patch.stop)
         self.cli('activate','--job','J','--session','sess-1')
         self.cli('join','--job','J','--key','agent-1')
+        self.sender = self.peer(key='fastpath-sender')
         fastpath.write('live',[9999999999])
         venv=self.tmp/'venv';(venv/'bin').mkdir(parents=True)
         (venv/'bin/python').symlink_to(__import__('sys').executable)
@@ -196,7 +201,8 @@ class ShellDeliveryTests(Env):
         first=self.agent('agent-1')
         result=self.shell(quiet=True)
         self.assertEqual((result.stdout,result.stderr),('',''))
-        self.cli('post','--job','J','--as','Alice','--to',first.name,'shell-delivery')
+        rc, _, err = self.cli('post','--job','J','--as',self.sender,'--to',first.name,'shell-delivery')
+        self.assertEqual(rc, 0, err)
         result=self.shell('done',quiet=True)
         self.assertEqual((result.stdout,result.stderr),('',''))
         result=self.shell()
