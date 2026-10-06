@@ -92,6 +92,8 @@ class ManifestTests(unittest.TestCase):
         self.assertNotIn("~/.claude/skills/complexity-analyzer", text)
         self.assertFalse((skill / "docs").exists())
         tracked = subprocess.check_output(["git", "ls-files", "-z"], cwd=ROOT).decode().split("\0")
+        staged = subprocess.check_output(["git", "ls-files", "--stage", "-z"], cwd=ROOT).decode().split("\0")
+        executable = {entry.split("\t", 1)[1] for entry in staged if entry.startswith("100755 ")}
         for rel in filter(None, tracked):
             self.assertTrue({"tools", "node_modules"}.isdisjoint(rel.split("/")), rel)
         archive = subprocess.check_output(["git", "archive", "--format=tar", "HEAD"], cwd=ROOT)
@@ -102,7 +104,7 @@ class ManifestTests(unittest.TestCase):
                 if rel.startswith("skills/complexity-analyzer/") and not rel.endswith((".gitignore", ".gitattributes")):
                     self.assertEqual(packaged.extractfile(rel).read().replace(b"\r\n", b"\n"),
                                      (ROOT / rel).read_bytes().replace(b"\r\n", b"\n"), rel)
-                    if (ROOT / rel).stat().st_mode & 0o111:
+                    if rel in executable:
                         self.assertTrue(packaged.getmember(rel).mode & 0o111, rel)
             for member in packaged.getmembers():
                 self.assertTrue({"tools", "node_modules"}.isdisjoint(member.name.split("/")), member.name)
