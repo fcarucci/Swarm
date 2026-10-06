@@ -142,7 +142,8 @@ class PostgresCap(CapContract, unittest.TestCase):
         from swarm.board import postgres
         c = self.h.conn
         with psycopg.connect(**{k: v for k, v in c.info.get_parameters().items() if k in
-                                ("host", "port", "user", "dbname")}, autocommit=False) as blocker:
+                                ("host", "port", "user", "dbname")},
+                             password=self.h._password(self.h.cfg["database"]), autocommit=False) as blocker:
             blocker.execute("LOCK TABLE messages IN ACCESS SHARE MODE")   # an open reader
             old = (postgres._LOCK_TRIES, postgres._LOCK_TIMEOUT)
             postgres._LOCK_TRIES, postgres._LOCK_TIMEOUT = 2, "100ms"
@@ -157,6 +158,32 @@ class PostgresCap(CapContract, unittest.TestCase):
 
 
 class PureTests(unittest.TestCase):
+    def test_schema_setup_leaves_the_outer_retry_in_charge_of_the_lock_budget(self):
+        from contextlib import nullcontext
+        from unittest.mock import Mock, patch
+        from swarm.board import postgres
+
+        conn = Mock(query_timeout=8.0)
+        conn.transaction.side_effect = lambda: nullcontext()
+        attempts = []
+
+        def execute(statement, params=None):
+            if statement.startswith("SELECT 1 FROM board_meta"):
+                return Mock(fetchone=lambda: None)
+            if statement.startswith("ALTER TABLE messages"):
+                attempts.append(statement)
+                raise postgres.psycopg.errors.LockNotAvailable("held table lock")
+            return Mock()
+
+        conn.execute.side_effect = execute
+        # Keep both real retry loops, replacing only database I/O and sleeps.
+        with patch.object(postgres, "_message_width", return_value=200), \
+                patch.object(postgres.time, "sleep"), \
+                patch.object(postgres.sys, "stderr"), \
+                self.assertRaises(postgres.psycopg.errors.LockNotAvailable):
+            postgres._install_schema_retrying(conn, {"message_max_chars": 200})
+        self.assertEqual(len(attempts), 15)  # five setup attempts, three lock attempts each
+
     def test_check_message_cap(self):
         self.assertEqual(check_message_cap(" 500 "), 500)
         self.assertEqual(check_message_cap(500.0), 500)
@@ -241,7 +268,6 @@ class CliTests(Env):
     def test_the_start_hook_shows_the_live_cap(self):
         self.cli("init")
         self.cli("config", "board.message_max_chars", "750")
-        self.cli("activate", "--job", "J") if False else None
         from swarm import hooks
         from swarm.board import open_board
         with open_board(self.cfg) as b:
@@ -277,7 +303,7 @@ class SqliteUpgrade(unittest.TestCase):
         old = sb.SCHEMA.replace("CHECK (length(message) >= 1)", f"CHECK (length(message) BETWEEN 1 AND {cap})")
         old = old.split("-- Per-board settings")[0] + old[old.index("-- Change counters"):]   # no board_meta
         db = sqlite3.connect(self.h.path, isolation_level=None)
-        db.executescript(old.replace("check_messages_cap", "x") if False else old)
+        db.executescript(old)
         db.execute("DROP TABLE IF EXISTS board_meta")
         db.execute("DROP TRIGGER IF EXISTS check_messages_cap")
         now = "2026-01-01T00:00:00.000000+00:00"
@@ -303,7 +329,7 @@ class SqliteUpgrade(unittest.TestCase):
                     self.assertFalse(b.post("j", "A", "z" * 333).truncated)
                     self.assertEqual(b.set_message_cap(2000), (333, 2000))
                     self.assertFalse(b.post("j", "A", "z" * 1500).truncated)
-                self.assertEqual(SqliteHarness.__mro__ and self.h.sqlite_board.SqliteBoard.schema_version(self.h.cfg),
+                self.assertEqual(self.h.sqlite_board.SqliteBoard.schema_version(self.h.cfg),
                                  SCHEMA_VERSION)
                 setup_board(self.h.cfg, SMALL_POOL)                       # idempotent, cap not reset
                 with self.h.board() as b:
@@ -348,7 +374,6 @@ class PostgresUpgrade(unittest.TestCase):
         c.execute("DELETE FROM board_meta WHERE key = 'message_max_chars'")
         c.execute("ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_message_cap")
         c.execute("ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_message_nonempty")
-        c.execute("DROP VIEW IF EXISTS job_status CASCADE")
         c.execute(f"ALTER TABLE messages ALTER COLUMN message TYPE varchar({width})")
         c.execute("ALTER TABLE messages ADD CONSTRAINT messages_message_check CHECK (length(message) > 0)")
         c.execute("UPDATE board_meta SET value = %s WHERE key = 'schema_version'", (str(version),))
@@ -360,6 +385,8 @@ class PostgresUpgrade(unittest.TestCase):
         for version in (12, 13, 14):
             with self.subTest(version=version):
                 self.old_board(version, width=250)
+                self.assertEqual(self.h.conn.execute("SELECT count(*) FROM pg_views WHERE schemaname = 'public' "
+                                                     "AND viewname IN ('agent_status', 'job_status')").fetchone()[0], 2)
                 self.h.cfg["board"]["message_max_chars"] = 200
                 setup_board(self.h.cfg, SMALL_POOL)
                 with self.h.board() as b:
@@ -378,18 +405,20 @@ class PostgresUpgrade(unittest.TestCase):
 
     def test_a_dml_stream_is_not_blocked_while_the_cap_changes(self):
         import threading
-        stop, errors, posted = threading.Event(), [], []
+        stop, first_post, errors, posted = threading.Event(), threading.Event(), [], []
 
         def poster():
             try:
                 with self.h.board() as b:
                     while not stop.is_set():
                         posted.append(b.post("j", "P", "p" * 120).id)
+                        first_post.set()
             except Exception as exc:   # noqa: BLE001
                 errors.append(exc)
         t = threading.Thread(target=poster)
         t.start()
         try:
+            self.assertTrue(first_post.wait(10), "poster did not complete its first post")
             with self.h.board() as b:
                 for cap in (300, 60, 1000, 200):
                     b.set_message_cap(cap)

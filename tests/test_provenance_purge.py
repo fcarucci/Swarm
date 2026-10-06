@@ -6,6 +6,7 @@ import datetime as dt
 import time
 from unittest import mock
 
+from support import assert_finishes
 from test_hindsight import HindsightEnv  # noqa: E402
 from fake_hindsight import dead_url  # noqa: E402
 
@@ -24,7 +25,7 @@ class PurgeTests(HindsightEnv):
         super().setUp()
         self.enable()
         self.set_provenance("grace_days = 0")
-        hindsight.Client(self.cfg).retain("notes", "kept fact", [], {}, document_id="alive")
+        hindsight.Client(self.cfg).retain("notes", "kept fact", [], {}, document_id="alive", create_bank=True)
         with self.board() as b:
             for doc in ("alive", "gone"):
                 b.save_memory_ref(mref(doc))
@@ -148,9 +149,14 @@ class PurgeTests(HindsightEnv):
     def test_prune_client_keeps_the_deadline(self):
         """Every question shares prune's deadline: a slow Hindsight can't hold purge longer."""
         self.enable(timeout_seconds=5)
-        self.fake.delays[("GET", "/documents/alive")] = 3
+        import threading
+        entered, release = threading.Event(), threading.Event()
+        self.fake.gates[("GET", "/documents/alive")] = (entered, release)
+        self.addCleanup(release.set)
         with self.board() as b:
-            res = provenance.prune(b, self.cfg, deadline=time.monotonic() + 0.5)
+            res = assert_finishes(self, lambda: provenance.prune(b, self.cfg, deadline=time.monotonic() + 0.5))
+        self.assertTrue(entered.wait(30))
+        self.assertFalse(release.is_set())
         self.assertEqual(set(self.docs()), {"alive", "gone"})
         self.assertEqual(res.dropped, ())
         self.assertEqual(res.checked, 0)
@@ -158,10 +164,15 @@ class PurgeTests(HindsightEnv):
 
     def test_statuses_client_keeps_the_deadline(self):
         self.enable(timeout_seconds=5)
-        self.fake.delays[("GET", "/documents/alive")] = 3
+        import threading
+        entered, release = threading.Event(), threading.Event()
+        self.fake.gates[("GET", "/documents/alive")] = (entered, release)
+        self.addCleanup(release.set)
         with self.board() as b:
             refs = b.memory_refs()
-        out = provenance.statuses(self.cfg, refs, deadline=time.monotonic() + 0.5)
+        out = assert_finishes(self, lambda: provenance.statuses(self.cfg, refs, deadline=time.monotonic() + 0.5))
+        self.assertTrue(entered.wait(30))
+        self.assertFalse(release.is_set())
         self.assertTrue(out["alive"].startswith("unknown"), out)
 
     # ---- memory refs --check
@@ -335,7 +346,7 @@ class DocumentAnswerTests(HindsightEnv):
         super().setUp()
         self.enable()
         self.c = hindsight.Client(self.cfg)
-        self.c.retain("notes", "a fact", [], {}, document_id="here")
+        self.c.retain("notes", "a fact", [], {}, document_id="here", create_bank=True)
 
     def test_document_answers(self):
         self.assertEqual(self.c.document("notes", "here")["id"], "here")

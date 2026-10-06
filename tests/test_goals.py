@@ -205,7 +205,7 @@ class VerdictTests(GoalEnv):
         self.assertEqual(rc, 1)
         self.assertIsNone(self.job().verdict)
         rc, out, _ = self.cli("verdict", "--job", "J", "--as", self.judge, "met", "drills", "pass")
-        self.assertEqual((rc, out), (0, "verdict met recorded for J, and posted on the board\n"))
+        self.assertEqual((rc, out.splitlines()[0]), (0, "verdict met recorded for J, and posted on the board"))
         j = self.job()
         self.assertEqual((j.verdict, j.verdict_reason, j.verdict_by), ("met", "drills pass", self.judge))
 
@@ -299,14 +299,14 @@ class CompletionGateTests(GoalEnv):
         self.cli("verdict", "--job", "J", "--as", self.judge, "not_met", "--reason", "first", "--next", "n")
         self.cli("verdict", "--job", "J", "--as", self.judge, "met", "all", "drills", "pass")
         rc, out, _ = self.cli("deactivate", "--job", "J")
-        self.assertEqual((rc, out), (0, "deactivated J (completed)\n"))
+        self.assertEqual((rc, out.splitlines()[0]), (0, "deactivated J (completed)"))
         j = self.job()
         self.assertEqual((j.status, j.completion_forced), ("completed", False))
         self.assertFalse((self.markers / "J.json").exists())
 
     def test_force_completes_and_records_the_override(self):
         rc, out, _ = self.cli("deactivate", "--job", "J", "--force")
-        self.assertEqual((rc, out), (0, "deactivated J (completed, forced without a met verdict)\n"))
+        self.assertEqual((rc, out.splitlines()[0]), (0, "deactivated J (completed, forced without a met verdict)"))
         j = self.job()
         self.assertEqual((j.status, j.completion_forced), ("completed", True))
         _, out, _ = self.cli("status", "--job", "J", "--no-color")
@@ -314,16 +314,16 @@ class CompletionGateTests(GoalEnv):
 
     def test_cancelled_and_failed_are_always_allowed(self):
         rc, out, _ = self.cli("deactivate", "--job", "J", "--status", "cancelled")
-        self.assertEqual((rc, out), (0, "deactivated J (cancelled)\n"))
+        self.assertEqual((rc, out.splitlines()[0]), (0, "deactivated J (cancelled)"))
         self.activate_goal()
         rc, out, _ = self.cli("deactivate", "--job", "J", "--status", "failed")
-        self.assertEqual((rc, out), (0, "deactivated J (failed)\n"))
+        self.assertEqual((rc, out.splitlines()[0]), (0, "deactivated J (failed)"))
         self.assertFalse(self.job().completion_forced)
 
     def test_jobs_without_goal_complete_as_before(self):
         self.activate("K")
         rc, out, _ = self.cli("deactivate", "--job", "K")
-        self.assertEqual((rc, out), (0, "deactivated K (completed)\n"))
+        self.assertEqual((rc, out.splitlines()[0]), (0, "deactivated K (completed)"))
 
     def test_unreachable_board_refuses_a_goal_job_unless_forced(self):
         self.h.set_available(False)

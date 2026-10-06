@@ -91,6 +91,10 @@ class BlockerLifecycle:
                         registry.blocker_expired(self, b)
 
     def _emit_blocker_event(self, event):
+        from swarm.fastpath import changed
+        blocker = self.blocker(event.blocker)
+        if blocker:
+            changed(blocker.job)
         registry = getattr(self, "plugin_registry", None)
         if registry:
             registry.blocker_event(self, event)

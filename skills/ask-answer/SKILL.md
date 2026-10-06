@@ -1,5 +1,5 @@
 ---
-name: swarm-ask
+name: ask-answer
 description: Ask and answer structured decisions in a Swarm job when the human or a role must choose, while continuing independent work.
 ---
 

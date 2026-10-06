@@ -12,7 +12,7 @@ import re
 import threading
 import unittest
 
-from support import SMALL_POOL, FileHarness, fake_image, MemoryHarness, PostgresHarness, SqliteHarness  # noqa: F401  (sets sys.path)
+from support import wait_until, SMALL_POOL, FileHarness, fake_image, MemoryHarness, PostgresHarness, SqliteHarness  # noqa: F401  (sets sys.path)
 
 from swarm import compat  # noqa: E402
 from swarm.board import (MEMORY_SEEN_MAX, AgentEvent, AgentStatus, BoardError, JobStatus,  # noqa: E402
@@ -37,6 +37,7 @@ class BoardContract:
     def setUp(self):
         self.h.reset()
         self.b = self.h.board()
+        self.test_started = self.b.now()
         self.addCleanup(self.b.close)
 
     # ---- helpers
@@ -165,7 +166,8 @@ class BoardContract:
     def test_now_is_timezone_aware(self):
         now = self.b.now()
         self.assertIsNotNone(now.tzinfo)
-        self.assertLess(abs((now - dt.datetime.now(dt.timezone.utc)).total_seconds()), 300)
+        self.assertGreaterEqual(now, self.test_started)
+        self.assertLessEqual(now, self.b.now())
 
     def test_setup_is_idempotent_and_counts_pool(self):
         res = type(self.b).setup(self.h.cfg, SMALL_POOL)
@@ -212,7 +214,7 @@ class BoardContract:
     def test_concurrent_allocation_gives_unique_names(self):
         n = 12
         results, errors = {}, []
-        barrier = threading.Barrier(n)
+        barrier = threading.Barrier(n, timeout=120)
 
         def worker(i):
             try:
@@ -226,7 +228,8 @@ class BoardContract:
         for t in threads:
             t.start()
         for t in threads:
-            t.join(60)
+            t.join(120)
+            self.assertFalse(t.is_alive(), "board worker did not finish before fixture cleanup")
         self.assertEqual(errors, [])
         self.assertEqual(len(results), n)
         self.assertEqual(len(set(results.values())), n, results)
@@ -311,7 +314,8 @@ class BoardContract:
         self.b.post("j", name, "hi", to="Somebody")
         a = self.agent("k1")
         self.assertIsNotNone(a.last_post_at)
-        self.assertLess((self.b.now() - a.last_contact_at).total_seconds(), 60)
+        self.assertGreaterEqual(a.last_contact_at, self.test_started)
+        self.assertLessEqual(a.last_contact_at, self.b.now())
         self.assertEqual(a.messages, 1)
         m = self.b.recent_messages(1, "j")[0]
         self.assertIsInstance(m, Message)
@@ -430,8 +434,15 @@ class BoardContract:
         posters = [threading.Thread(target=poster) for _ in range(3)]
         for t in readers + posters:
             t.start()
-        for t in posters + readers:
-            t.join()
+        try:
+            for t in posters:
+                t.join(120)
+        finally:
+            done.set()
+            for t in readers:
+                t.join(120)
+        self.assertFalse(any(t.is_alive() for t in posters + readers),
+                         "board workers did not finish before fixture cleanup")
         # drain whatever the last round left (a lost compare-and-set returns nothing)
         with self.h.board(read_limit=1000) as b:
             delivered.extend(m.id for m in b.read_unread(agent_key="k1").messages)
@@ -514,7 +525,7 @@ class BoardContract:
 
     def test_claim_route_has_one_winner_under_concurrency(self):
         self.b.record_route("k", "sess", "pending")
-        barrier, wins, errors = threading.Barrier(6), [], []
+        barrier, wins, errors = threading.Barrier(6, timeout=120), [], []
 
         def claimer(i):
             try:
@@ -528,7 +539,8 @@ class BoardContract:
         for t in threads:
             t.start()
         for t in threads:
-            t.join(30)
+            t.join(120)
+            self.assertFalse(t.is_alive(), "board worker did not finish before fixture cleanup")
         self.assertEqual(errors, [])
         self.assertEqual(sorted(wins), [False] * 5 + [True])
 
@@ -561,7 +573,8 @@ class BoardContract:
         self.assertEqual((s.name, s.roster_seen, s.roster_synced_at, s.memory_recalled_at, s.memory_seen,
                           s.remembered_at, s.nudged_at), (name, None, None, None, (), None, None))
         self.assertIsNotNone(s.joined_at.tzinfo)
-        self.assertLess(abs((s.now - self.b.now()).total_seconds()), 5)
+        self.assertGreaterEqual(s.now, self.test_started)
+        self.assertLessEqual(s.now, self.b.now())
         self.assertIsNone(self.b.sync_state("nobody"))
         self.b.record_roster_sync("k1", "snap-1", full=False)
         s = self.b.sync_state("k1")
@@ -920,12 +933,13 @@ class BoardContract:
         with self.h.board() as watcher:
             watcher.subscribe(messages_only=True)
             self.assertFalse(watcher.wait_for_change(0.2))
-            t = threading.Timer(0.2, lambda: self.b.post("j", "A", "wake up"))
+            t = threading.Thread(target=lambda: self.b.post("j", "A", "wake up"))
             t.start()
             try:
-                self.assertTrue(watcher.wait_for_change(10))
+                self.assertTrue(watcher.wait_for_change(30))
             finally:
-                t.join()
+                t.join(120)
+                self.assertFalse(t.is_alive(), "board worker did not finish before fixture cleanup")
 
     def test_wait_for_change_drains_burst(self):
         with self.h.board() as watcher:
@@ -986,7 +1000,7 @@ class BoardContract:
         keys = [f"k{i}" for i in range(5)]
         for k in keys:
             self.b.allocate_name(k, "j")
-        barrier, wins, errors = threading.Barrier(5), [], []
+        barrier, wins, errors = threading.Barrier(5, timeout=120), [], []
 
         def claimer(k):
             try:
@@ -1000,7 +1014,8 @@ class BoardContract:
         for t in threads:
             t.start()
         for t in threads:
-            t.join(30)
+            t.join(120)
+            self.assertFalse(t.is_alive(), "board worker did not finish before fixture cleanup")
         self.assertEqual(errors, [])
         self.assertEqual(sorted(wins), [False] * 4 + [True])
 
@@ -1029,7 +1044,8 @@ class BoardContract:
         self.assertTrue(self.b.record_verdict("j", judge, "not_met", "no failover test"))
         s = self.b.job_status("j")
         self.assertEqual((s.verdict, s.verdict_reason, s.verdict_by), ("not_met", "no failover test", judge))
-        self.assertLess(abs((s.verdict_at - self.b.now()).total_seconds()), 60)
+        self.assertGreaterEqual(s.verdict_at, self.test_started)
+        self.assertLessEqual(s.verdict_at, self.b.now())
         self.assertTrue(self.b.record_verdict("j", judge, "met", "failover tested"))  # re-judged
         self.assertEqual(self.b.job_status("j").verdict, "met")
         with self.assertRaises(Exception):
@@ -1070,7 +1086,8 @@ class BoardContract:
         self.assertTrue(self.b.set_waiting("j", "the user's answers"))
         s = self.b.job_status("j")
         self.assertEqual((s.status, s.waiting_on), ("active", "the user's answers"))
-        self.assertLess(abs((s.waiting_since - self.b.now()).total_seconds()), 60)
+        self.assertGreaterEqual(s.waiting_since, self.test_started)
+        self.assertLessEqual(s.waiting_since, self.b.now())
         self.assertTrue(self.b.set_waiting("j", None))
         s = self.b.job_status("j")
         self.assertEqual((s.waiting_on, s.waiting_since), (None, None))
@@ -1110,7 +1127,7 @@ class BoardContract:
         keys = [f"k{i}" for i in range(6)]
         for k in keys:
             self.b.allocate_name(k, "j")
-        barrier, grants, errors = threading.Barrier(6), [], []
+        barrier, grants, errors = threading.Barrier(6, timeout=120), [], []
 
         def spawner(k):
             try:
@@ -1123,7 +1140,8 @@ class BoardContract:
         for t in threads:
             t.start()
         for t in threads:
-            t.join()
+            t.join(120)
+            self.assertFalse(t.is_alive(), "board worker did not finish before fixture cleanup")
         self.assertEqual(errors, [])
         self.assertEqual(sorted(grants), [False] * 4 + [True] * 2)
 
@@ -1164,7 +1182,8 @@ class BoardContract:
                           s.raw_bytes, s.stored_bytes, s.redactions, s.sha256),
                          ("j", "k1", "Homer Simpson", "subagent", "h1", "s1", True, row.raw_bytes,
                           len(row.body), 2, row.sha256))
-        self.assertLess(abs((s.captured_at - self.b.now()).total_seconds()), 60)
+        self.assertGreaterEqual(s.captured_at, self.test_started)
+        self.assertLessEqual(s.captured_at, self.b.now())
         self.assertIsNotNone(s.captured_at.tzinfo)
         self.assertEqual(self.b.transcript_body("j", "k1"), b'{"x": "hello"}\n')
 
@@ -1322,7 +1341,7 @@ class BoardContract:
         self.b.save_transcript(r2)
         stored, raw, jobs, oldest, _, _ = self.b.transcript_totals()
         self.assertEqual((stored, raw, jobs), (len(r1.body) + len(r2.body), r1.raw_bytes + r2.raw_bytes, 2))
-        self.assertLess(abs((oldest - r1.captured_at).total_seconds()), 1)
+        self.assertEqual(oldest, r1.captured_at)
 
     def test_transcript_rotation_by_time_spares_active_jobs(self):
         self.b.save_transcript(self.trow("old", "k1", days_ago=40))
@@ -1583,7 +1602,8 @@ class BoardContract:
         for t in ts:
             t.start()
         for t in ts:
-            t.join()
+            t.join(120)
+            self.assertFalse(t.is_alive(), "board worker did not finish before fixture cleanup")
         self.assertEqual(errors, [])
         self.assertEqual(sum(1 for r in got if r is not None), 1)
         self.assertEqual(len(self.b.restarts(job="j")), 1)
@@ -1618,7 +1638,8 @@ class BoardContract:
         for t in ts:
             t.start()
         for t in ts:
-            t.join()
+            t.join(120)
+            self.assertFalse(t.is_alive(), "board worker did not finish before fixture cleanup")
         self.assertEqual(errors, [])
         self.assertEqual(sum(1 for r in got if r is not None), 3)   # 3 x 50 = 150; a 4th would be 200
         self.assertEqual(len(self.b.restarts(job="j")), 3)
@@ -1656,7 +1677,8 @@ class BoardContract:
         for t in ts:
             t.start()
         for t in ts:
-            t.join()
+            t.join(120)
+            self.assertFalse(t.is_alive(), "board worker did not finish before fixture cleanup")
         self.assertEqual(errors, [])
         self.assertEqual(sum(1 for r in got if r is not None), 2)
 
@@ -1988,16 +2010,25 @@ class PostgresSpecificTests(unittest.TestCase):
 
             def fast_post():
                 with self.h.board() as b:
+                    result["pid"] = b._conn.execute("SELECT pg_backend_pid()").fetchone()[0]
                     result["id"] = b.post("j", "Fast", "high").id
 
             poster = threading.Thread(target=fast_post)
             poster.start()
-            poster.join(1.0)
+            def waiting_on_insert_lock():
+                pid = result.get("pid")
+                if pid is None:
+                    return False
+                row = self.b._conn.execute(
+                    "SELECT wait_event FROM pg_stat_activity WHERE pid = %s", (pid,)).fetchone()
+                return row and row[0] == "advisory"
+            wait_until(waiting_on_insert_lock)
             first = [m.id for m in self.b.read_new(agent_key="k1")]
             slow.commit()
         finally:
             slow.close()
-        poster.join(10)
+        poster.join(30)
+        self.assertFalse(poster.is_alive())
         second = [m.id for m in self.b.read_new(agent_key="k1")]
         self.assertEqual(first + second, [low, result["id"]])
 

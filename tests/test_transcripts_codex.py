@@ -283,8 +283,10 @@ class CodexCaptureTests(Env):
 
     def test_stop_hook_on_unchanged_untouched_file_refreshes_captured_at(self):
         child = self._owned_codex_agent_with_stop_capture()
-        first = self._row(child)
-        import time; time.sleep(0.01)                                 # the file is NOT touched: same bytes, same mtime
+        original = self._row(child)
+        self.h.backdate_transcript("fixture", child, 60)
+        first = self._row(child)                                      # file bytes and mtime unchanged
+        self.assertLess(first.captured_at, original.captured_at)
         sid = F.payloads("SubagentStart")[0]["session_id"]
         with mock.patch("getpass.getuser", return_value="codex"):
             self.hook("stop", agent_id=child, session=sid, host="codex", turn_id="t9", model="m",

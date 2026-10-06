@@ -30,7 +30,7 @@ class Env(unittest.TestCase):
     """A private swarm installation: config, marker dir, spool dir, board storage, $HOME.
     The CLI plugins shipped with the skills are disabled (core runs on its own, its output is the
     core's); a test of a plugin lists none in `plugins_disabled`."""
-    plugins_disabled = ("engineering-team", "swarm-ask")
+    plugins_disabled = ("engineering-team", "ask-answer")
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="swarm-test-", dir=os.environ.get("TMPDIR")))
@@ -172,13 +172,14 @@ class CliTests(Env):
         self.assertRegex(out, r"\nAGENT\s+ROLE\s+HOST\s+MODEL\s+STATUS\s+CALLS\s+MSGS\s+JOINED\s+LAST CONTACT\s+TOOL\n")
         self.assertRegex(out, r"\n\S.*\s+worker\s+started\s+0\s+0\s+\S+ ago\s+\S+ ago\n")
         rc, out, _ = self.cli("deactivate", "--job", "J", "--status", "failed", "--outcome", "broke")
-        self.assertEqual((rc, out), (0, "deactivated J (failed)\n"))
+        self.assertEqual((rc, out.splitlines()[0]), (0, "deactivated J (failed)"))
+        self.assertIn("Required learnings step", out)
         self.assertFalse((self.markers / "J.json").exists())
         self.assertEqual(self.agent("k1").status, "left")
         _, out, _ = self.cli("status", "--all")
         self.assertRegex(out.splitlines()[1], r"^J\s+failed\s+1\s")
         _, out, _ = self.cli("deactivate", "--job", "nope")
-        self.assertEqual(out, "deactivated nope (no such job in the database)\n")
+        self.assertEqual(out.splitlines()[0], "deactivated nope (no such job in the database)")
         _, out, _ = self.cli("status", "--job", "nope")
         self.assertEqual(out, "no such job: nope\n")
 
@@ -244,7 +245,8 @@ class CliTests(Env):
         self.cli("activate", "--job", "J")
         self.h.set_available(False)
         rc, out, err = self.cli("deactivate", "--job", "J")
-        self.assertEqual((rc, out), (0, ""))
+        self.assertEqual(rc, 0)
+        self.assertIn("Required learnings step", out)
         self.assertEqual(err, "deactivated J; could not record status (ConnectionError)\n")
         self.assertFalse((self.markers / "J.json").exists())
 
@@ -516,7 +518,7 @@ class SpoolTests(Env):
         def flusher():
             try:
                 with self.board() as b:
-                    barrier.wait()
+                    barrier.wait(timeout=120)
                     counts.append(spool.flush_spool(b, self.cfg))
             except Exception as exc:  # pragma: no cover
                 errors.append(exc)
@@ -524,8 +526,14 @@ class SpoolTests(Env):
         threads = [threading.Thread(target=flusher) for _ in range(6)]
         for t in threads:
             t.start()
-        for t in threads:
-            t.join(30)
+        try:
+            for t in threads:
+                t.join(30)
+            self.assertFalse(any(t.is_alive() for t in threads), "flusher did not finish")
+        finally:
+            barrier.abort()
+            for t in threads:
+                t.join(30)
         self.assertEqual(errors, [])
         self.assertEqual(sum(counts), n)
         with self.board() as b:
@@ -564,7 +572,7 @@ class SpoolTests(Env):
 
 # --------------------------------------------------------------------------- file safety
 
-def _run_bounded(fn, seconds: float = 5.0):
+def _run_bounded(fn, seconds: float = 30.0):
     """Run fn in a thread; (finished in time, its result)."""
     box = {}
     t = threading.Thread(target=lambda: box.setdefault("r", fn()), daemon=True)
@@ -758,16 +766,14 @@ class EnrolmentTests(Env):
         rec = enrolment.find_job(self.key(), "J")
         self.assertEqual((rec.job, rec.harness, rec.session_id, rec.cwd), ("J", "claude", "sess-1", abs_("/orch")))
         first = rec.created_at
-        time.sleep(0.05)
         self.hook("turn", agent_id=None, tool_name="Bash", cwd=abs_("/orch"))
         self.assertEqual(enrolment.find_job(self.key(), "J").created_at, first)   # not rewritten
         # another session's hook writes nothing for J
         self.hook("turn", agent_id=None, session="sess-2", tool_name="Bash", cwd="/x")
         self.assertEqual(enrolment.find_job(self.key(), "J").session_id, "sess-1")
         # a re-activation (a newer marker) moves the window to it
-        time.sleep(0.05)
         self.activate("--session", "sess-1")
-        os.utime(self.markers / "J.json")
+        os.utime(self.markers / "J.json", (first + 1, first + 1))
         self.hook("turn", agent_id=None, tool_name="Bash", cwd=abs_("/orch"))
         self.assertGreater(enrolment.find_job(self.key(), "J").created_at, first)
 

@@ -16,7 +16,7 @@ from pathlib import Path
 from unittest import mock
 
 from test_verifier import VerifierEnv  # noqa: E402  (sets sys.path)
-from support import tq, home_env, posix_only  # noqa: E402
+from support import on_lock_contention, ManualClock, assert_finishes, tq, home_env, posix_only  # noqa: E402
 from test_hooks_cli import Env  # noqa: E402
 from test_transcript_cli import TranscriptEnv  # noqa: E402
 from test_transcript_images import SAMPLE  # noqa: E402
@@ -152,22 +152,18 @@ class SpoolFlushBoundsTests(Env):
     def test_deadline_stops_a_slow_flush(self):
         for i in range(5):
             spool.spool_post(self.cfg, "J", "A", f"m{i}", None)
-        clock = [0.0]
-        local_time = mock.Mock(wraps=time)
-        local_time.monotonic.side_effect = lambda: clock[0]
-        with self.board() as b:
+        clock = ManualClock()
+        with mock.patch("time.monotonic", clock), self.board() as b:
             real = b.post
 
             def slow(*a, **k):
-                clock[0] += 0.2
+                clock.advance(0.2)
                 return real(*a, **k)
 
-            with mock.patch.object(b, "post", side_effect=slow), \
-                    mock.patch.object(b, "op_timeout", side_effect=lambda seconds: contextlib.nullcontext()), \
-                    mock.patch.object(spool, "time", local_time):
-                n = spool.flush_spool(b, self.cfg, deadline=0.3)
+            b.post = slow
+            n = spool.flush_spool(b, self.cfg, deadline=time.monotonic() + 0.3)
         self.assertEqual(n, 2)
-        self.assertEqual(len(list(self.spool_dir.glob("*.json"))), 3)
+        self.assertEqual(len(list(self.spool_dir.glob("*.json"))), 5 - n)
 
     def test_per_tool_hooks_deliver_a_couple_the_agent_hooks_the_backlog(self):
         self.cli("activate", "--job", "J", "--session", "sess-1")
@@ -176,15 +172,8 @@ class SpoolFlushBoundsTests(Env):
             spool.spool_post(self.cfg, "J", "A", f"m{i}", None)
         items, seconds, each = swarm_hooks.HOOK_FLUSH_TOOL
         self.assertLessEqual((items, seconds, each), (2, 1.0, 1.0))
-        # Exercise item quotas independently of filesystem latency.
-        real_flush = spool.flush_spool
-
-        def quota_flush(board, cfg, **kwargs):
-            kwargs["deadline"] = None
-            kwargs["op_timeout"] = None
-            return real_flush(board, cfg, **kwargs)
-
-        with mock.patch.object(spool, "flush_spool", side_effect=quota_flush):
+        # This is the item-cap contract; deadline exhaustion has separate clock tests.
+        with mock.patch("time.monotonic", ManualClock()):
             self.hook("turn", tool_name="Bash")
             self.assertEqual(len(self.queued()), 25 - items)
             self.hook("done", tool_name="Bash")
@@ -198,10 +187,8 @@ class SpoolFlushBoundsTests(Env):
     def test_a_blocking_delivery_is_cut_to_the_budget(self):
         spool.spool_post(self.cfg, "J", "A", "stuck", None)
 
-        clock = [0.0]
         limits = []
-        local_time = mock.Mock(wraps=time)
-        local_time.monotonic.side_effect = lambda: clock[0]
+        clock = ManualClock()
 
         class Blocking:
             limit = None
@@ -209,26 +196,28 @@ class SpoolFlushBoundsTests(Env):
             @contextlib.contextmanager
             def op_timeout(self, seconds):
                 self.limit = seconds
+                limits.append(seconds)
                 try:
                     yield
                 finally:
                     self.limit = None
 
-            def post(self, *a, **k):
-                limits.append(self.limit)
-                clock[0] += self.limit
+            def post(self, *a, **k):   # a board that blocks until its operation timeout
+                if self.limit is None:
+                    raise AssertionError("delivery did not set an operation timeout")
+                clock.advance(self.limit)
                 raise TimeoutError("no reply")
 
-        board = Blocking()
-        with mock.patch.object(spool, "time", local_time):
-            n = spool.flush_spool(board, self.cfg, max_items=2, deadline=0.3, op_timeout=1.0)
+        with mock.patch("time.monotonic", clock):
+            n = spool.flush_spool(Blocking(), self.cfg, max_items=2, deadline=clock() + 0.3,
+                                  op_timeout=1.0)
+        self.assertEqual(len(limits), 1)
+        self.assertAlmostEqual(limits[0], 0.3)
         self.assertEqual(n, 0)
-        self.assertEqual(limits, [0.3])
-        self.assertIsNone(board.limit)
-        self.assertEqual(len(self.queued()), 1)
+        self.assertEqual(len(self.queued()), 1)   # put back
 
     def test_memory_delivery_gets_a_short_http_timeout(self):
-        spool.spool_memory(self.cfg, "J", "A", "a fact", "proj")
+        spool.spool_memory(self.cfg, "J", "A", "a fact", "proj", create_bank=True)
         cfg = {**self.cfg, "hindsight": {**self.cfg.get("hindsight", {}), "url": "http://hindsight.invalid",
                                           "timeout_seconds": 3}}
         seen = []
@@ -251,23 +240,24 @@ class SpoolFlushBoundsTests(Env):
         from fake_hindsight import FakeHindsight
         fake = FakeHindsight()
         self.addCleanup(fake.stop)
-        fake.delay = 0.4
+        clock = ManualClock()
+        fake.on_request = lambda *a: clock.advance(0.4)
         cfg = self.hindsight_cfg(fake)
-        spool.spool_memory(self.cfg, "J", "A", "a fact", "proj")
-        with self.board() as b:
-            n = spool.flush_spool(b, cfg, max_items=2, deadline=time.monotonic() + 0.6, op_timeout=1.0)
+        spool.spool_memory(self.cfg, "J", "A", "a fact", "proj", create_bank=True)
+        with mock.patch("time.monotonic", clock), self.board() as b:
+            n = spool.flush_spool(b, cfg, max_items=2, deadline=clock() + 0.6, op_timeout=1.0)
         self.assertEqual(n, 0)
         self.assertGreaterEqual(len(fake.requests), 2)            # it did get past the first call
         self.assertEqual(len(list(self.spool_dir.glob("*.mem"))), 1)   # put back, not failed
         self.assertFalse((self.spool_dir / ".hindsight-unreachable").exists())
-        fake.delay = 0
+        fake.on_request = None
         with self.board() as b:
             self.assertEqual(spool.flush_spool(b, cfg), 1)          # delivered once there is time
 
     def test_per_tool_hooks_never_deliver_memories(self):
         self.cli("activate", "--job", "J", "--session", "sess-1")
         self.hook("start")
-        spool.spool_memory(self.cfg, "J", "A", "a fact", "proj")
+        spool.spool_memory(self.cfg, "J", "A", "a fact", "proj", create_bank=True)
         spool.spool_post(self.cfg, "J", "A", "a post", None)
         from swarm import hindsight
         boom = mock.Mock(side_effect=AssertionError("Hindsight called from a per-tool hook"))
@@ -286,23 +276,26 @@ class SpoolFlushBoundsTests(Env):
         self.assertEqual(list(self.spool_dir.glob("*.mem")), [])
 
     def test_a_stalled_resolver_is_cut_off_within_the_budget(self):
+        release = threading.Event()
+        self.addCleanup(release.set)
         from fake_hindsight import FakeHindsight
         fake = FakeHindsight()
         self.addCleanup(fake.stop)
         cfg = self.hindsight_cfg(fake)
         cfg["hindsight"]["url"] = fake.url.replace("127.0.0.1", "hindsight.test")
-        spool.spool_memory(self.cfg, "J", "A", "a fact", "proj")
+        spool.spool_memory(self.cfg, "J", "A", "a fact", "proj", create_bank=True)
         import socket
         real = socket.getaddrinfo
 
         def stalled(host, *a, **k):
             if host == "hindsight.test":
-                time.sleep(3)
+                release.wait(120)
             return real(host, *a, **k)
 
         with mock.patch("socket.getaddrinfo", side_effect=stalled), self.board() as b:
-            n = spool.flush_spool(b, cfg, max_items=2, deadline=time.monotonic() + 0.5, op_timeout=1.0)
+            n = assert_finishes(self, lambda: spool.flush_spool(b, cfg, max_items=2, deadline=time.monotonic() + 0.5, op_timeout=1.0))
         self.assertEqual(n, 0)
+        self.assertFalse(release.is_set())
         self.assertEqual(fake.requests, [])
         self.assertEqual(len(list(self.spool_dir.glob("*.mem"))), 1)   # still queued
         self.assertFalse((self.spool_dir / ".hindsight-unreachable").exists())
@@ -314,40 +307,47 @@ class SpoolFlushBoundsTests(Env):
         self.addCleanup(fake.stop)
         cfg = self.hindsight_cfg(fake)
         cfg["hindsight"]["url"] = fake.url.replace("127.0.0.1", host)
-        spool.spool_memory(self.cfg, "J", "A", "a fact", "proj")
+        spool.spool_memory(self.cfg, "J", "A", "a fact", "proj", create_bank=True)
         import urllib.request   # urlopen's opener reads the proxy env once: a fresh one here
         with mock.patch.dict(os.environ, env or {}), mock.patch(patch_target, side_effect=stall), \
                 mock.patch.object(urllib.request, "_opener", None), self.board() as b:
             for k in ("no_proxy", "NO_PROXY"):
                 os.environ.pop(k, None)
-            n = spool.flush_spool(b, cfg, max_items=2, deadline=time.monotonic() + 0.5, op_timeout=1.0)
+            n = assert_finishes(self, lambda: spool.flush_spool(b, cfg, max_items=2, deadline=time.monotonic() + 0.5, op_timeout=1.0))
         self.assertEqual(n, 0)
         self.assertEqual(len(list(self.spool_dir.glob("*.mem"))), 1)        # still queued
         self.assertFalse((self.spool_dir / ".hindsight-unreachable").exists())
+        return None
 
     def test_proxy_path_with_a_stalled_resolver_is_cut_off(self):
+        release = threading.Event()
+        self.addCleanup(release.set)
         import socket
         real = socket.getaddrinfo
 
         def stalled(host, *a, **k):
             if host == "proxy.test":
-                time.sleep(3)
+                release.wait(120)
             return real(host, *a, **k)
 
         self.stalled_delivery("socket.getaddrinfo", stalled,
                                         env={"http_proxy": "http://proxy.test:3128",
                                              "HTTP_PROXY": "http://proxy.test:3128"},
                                         host="hindsight.test")
+        self.assertFalse(release.is_set())
 
     def test_slow_connect_after_fast_resolution_is_cut_off(self):
+        release = threading.Event()
+        self.addCleanup(release.set)
         import socket
         real = socket.create_connection
 
         def slow(*a, **k):
-            time.sleep(3)
+            release.wait(120)
             return real(*a, **k)
 
         self.stalled_delivery("socket.create_connection", slow)
+        self.assertFalse(release.is_set())
 
     def test_a_resent_memory_keeps_its_document_id(self):
         """The retain completes on the server after the delivery gave up: sending it again
@@ -358,12 +358,12 @@ class SpoolFlushBoundsTests(Env):
         fake.banks["proj"] = []
         fake.delays[("POST", "/memories")] = 0.8
         cfg = self.hindsight_cfg(fake)
-        spool.spool_memory(self.cfg, "J", "A", "a fact", "proj")
+        spool.spool_memory(self.cfg, "J", "A", "a fact", "proj", create_bank=True)
         with self.board() as b:
             self.assertEqual(spool.flush_spool(b, cfg, max_items=2, deadline=time.monotonic() + 0.5,
                                                op_timeout=1.0), 0)
         self.assertEqual(len(list(self.spool_dir.glob("*.mem"))), 1)
-        time.sleep(0.6)                        # the server finishes the first retain
+        self.assertTrue(fake.wait_for_calls("POST", "/memories", 1, completed=True))
         fake.delays.clear()
         with self.board() as b:
             self.assertEqual(spool.flush_spool(b, cfg), 1)
@@ -381,7 +381,7 @@ class SpoolFlushBoundsTests(Env):
         self.addCleanup(fake.stop)
         cfg = self.hindsight_cfg(fake)
         cfg["hindsight"]["url"] = fake.url.replace("127.0.0.1", "localhost")
-        spool.spool_memory(self.cfg, "J", "A", "a fact", "proj")
+        spool.spool_memory(self.cfg, "J", "A", "a fact", "proj", create_bank=True)
         with self.board() as b:
             self.assertEqual(spool.flush_spool(b, cfg, max_items=2, deadline=time.monotonic() + 2.0,
                                                op_timeout=2.0), 1)
@@ -392,9 +392,7 @@ class SpoolFlushBoundsTests(Env):
         """A verdict takes two board calls (record, post): each is bounded by what is left."""
         spool.spool_verdict(self.cfg, "J", "A", "met", "done")
         limits = []
-        clock = [0.0]
-        local_time = mock.Mock(wraps=time)
-        local_time.monotonic.side_effect = lambda: clock[0]
+        clock = ManualClock()
 
         class Recording:
             @contextlib.contextmanager
@@ -403,14 +401,15 @@ class SpoolFlushBoundsTests(Env):
                 yield
 
             def record_verdict(self, *a):
-                clock[0] += 0.3
+                clock.advance(0.3)
                 return True
 
             def post(self, *a, **k):
                 pass
 
-        with mock.patch.object(spool, "time", local_time):
-            self.assertEqual(spool.flush_spool(Recording(), self.cfg, deadline=1.0, op_timeout=1.0), 1)
+        with mock.patch("time.monotonic", clock):
+            self.assertEqual(spool.flush_spool(Recording(), self.cfg, deadline=clock() + 1.0,
+                                               op_timeout=1.0), 1)
         self.assertEqual(len(limits), 2)
         self.assertLessEqual(limits[0], 1.0)
         self.assertLessEqual(limits[1], limits[0] - 0.25)
@@ -590,10 +589,8 @@ class MarkerClaimTests(MarkerEnv):
 
     def test_a_lock_released_in_time_is_taken(self):
         fh = self.hold_lock()
-        timer = threading.Timer(0.1, fh.close)
-        timer.start()
-        self.addCleanup(timer.cancel)
-        self.assertEqual(swarm_hooks._try_claim(self.path, "s1"), "J")
+        with on_lock_contention(fh.close):
+            self.assertEqual(swarm_hooks._try_claim(self.path, "s1"), "J")
 
     def test_a_marker_replaced_while_waiting_is_read_again(self):
         """Another session claims (replaces the file) while this one waits for the lock on the
@@ -605,10 +602,8 @@ class MarkerClaimTests(MarkerEnv):
             compat.rename(self.path.with_name("new.tmp"), self.path)   # POSIX rename semantics on Windows too
             fh.close()
 
-        timer = threading.Timer(0.1, other_claims)
-        timer.start()
-        self.addCleanup(timer.cancel)
-        self.assertIsNone(swarm_hooks._try_claim(self.path, "s1"))
+        with on_lock_contention(other_claims):
+            self.assertIsNone(swarm_hooks._try_claim(self.path, "s1"))
         self.assertEqual(json.loads(self.path.read_text())["session_id"], "s2")
 
 
@@ -619,36 +614,40 @@ class MarkerRemovalTests(MarkerEnv):
     def test_removal_during_a_claim_wins(self):
         from swarm import cli as swarm
         real = swarm_hooks._replace_marker
+        contended = threading.Event()
         remover = threading.Thread(target=swarm.remove_marker, args=(self.path,))
 
         def replace_while_a_removal_waits(*a, **k):
             remover.start()
-            time.sleep(0.2)          # the remover is now waiting for the claim's lock
+            self.assertTrue(contended.wait(30), "remover never contended on claim lock")
             return real(*a, **k)
 
-        with mock.patch.object(swarm_hooks, "_replace_marker", side_effect=replace_while_a_removal_waits):
+        with on_lock_contention(contended.set), mock.patch.object(swarm_hooks, "_replace_marker", side_effect=replace_while_a_removal_waits):
             self.assertEqual(swarm_hooks._try_claim(self.path, "s1"), "J")
-        remover.join(5)
+        remover.join(30)
+        self.assertFalse(remover.is_alive())
         self.assertFalse(self.path.exists())
 
     def test_claim_during_a_removal_finds_nothing(self):
         from swarm import cli as swarm
         results = []
+        contended = threading.Event()
         claimer = threading.Thread(target=lambda: results.append(swarm_hooks._try_claim(self.path, "s1")))
-        with swarm.locked_marker(self.path, 1.0) as fh:
+        with on_lock_contention(contended.set), swarm.locked_marker(self.path, 1.0) as fh:
             self.assertIsNotNone(fh)
             claimer.start()
-            time.sleep(0.2)          # the claim is now waiting for the removal's lock
+            self.assertTrue(contended.wait(30), "claim never contended on removal lock")
             self.path.unlink()
-        claimer.join(5)
+        claimer.join(30)
+        self.assertFalse(claimer.is_alive())
         self.assertEqual(results, [None])
         self.assertFalse(self.path.exists())
 
     def test_removal_waits_for_a_short_lock_and_skips_a_missing_marker(self):
         from swarm import cli as swarm
         fh = self.hold_lock()
-        threading.Timer(0.1, fh.close).start()
-        self.assertTrue(swarm.remove_marker(self.path))
+        with on_lock_contention(fh.close):
+            self.assertTrue(swarm.remove_marker(self.path))
         self.assertFalse(self.path.exists())
         self.assertTrue(swarm.remove_marker(self.path))   # gone already: nothing to do
 
@@ -759,8 +758,8 @@ class DeactivateMarkerLockTests(Env):
         self.cli("activate", "--job", "J", "--session", "sess-1")
         fh = open(self.marker())
         compat.flock(fh, compat.LOCK_EX)
-        threading.Timer(0.2, fh.close).start()
-        rc, _, _ = self.cli("deactivate", "--job", "J", "--force")
+        with on_lock_contention(fh.close):
+            rc, _, _ = self.cli("deactivate", "--job", "J", "--force")
         self.assertEqual(rc, 0)
         self.assertEqual(list(self.markers.glob("*.json")), [])
 
@@ -855,8 +854,10 @@ from test_hindsight import HindsightEnv  # noqa: E402
 
 class BoundedRecallTests(HindsightEnv):
     def test_a_stalled_resolver_during_a_per_tool_recall_is_cut_off(self):
+        release = threading.Event()
+        self.addCleanup(release.set)
         self.enable()
-        self.fake.add_memory("j", "old fact")
+        self.fake.add_memory("coding", "old fact")
         self.cli("activate", "--job", "J")
         self.assertIn("old fact", self.start())
         self.enable(url=self.fake.url.replace("127.0.0.1", "hindsight.test"))
@@ -868,12 +869,13 @@ class BoundedRecallTests(HindsightEnv):
 
         def stalled(host, *a, **k):
             if host == "hindsight.test":
-                time.sleep(5)
+                release.wait(120)
             return real(host, *a, **k)
 
         recalls = len(self.fake.calls("POST", "/memories/recall"))
         with mock.patch("socket.getaddrinfo", side_effect=stalled):
-            ctx = self.turn()
+            ctx = assert_finishes(self, self.turn)
+        self.assertFalse(release.is_set())
         self.assertLessEqual(swarm_hooks.HOOK_RECALL_SECONDS, 2)
         self.assertIn(f"{someone}: hello", ctx)                        # the hook carried on
         self.assertNotIn("[swarm memory] new memories", ctx)

@@ -7,7 +7,8 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 ## [Unreleased]
 
 ### Added
-- The `swarm-ask` plugin: structured questions to the human, roles or agents; answers, comments and corrections; full answer delivery, a watch questions pane and pending human questions in orchestrator context.
+- The `ask-answer` plugin: structured questions to the human, roles or agents; answers, comments and corrections; full answer delivery, a watch questions pane and pending human questions in orchestrator context.
+- Question changes invalidate local hook leases; PostgreSQL watch snapshots include blocker state and plugin settings, and pending human questions keep surfacing on each orchestrator turn.
 - Optional `[notify] on_question` commands run detached with a five-second timeout, safe arguments/environment values and failures reported by `swarm doctor`.
 - Generic blockers and append-only event history (schema 17): `swarm blockers`, `swarm blocker resolve`, and `swarm blocker comment`; several decisions can wait independently on a job.
 - Core plugin hooks for blocker kinds, expiry, notification events, watch panes, and orchestrator context. Decision deadlines expire in the existing sweep, including paused and closed jobs; unanswered blockers without defaults are flagged overdue once.
@@ -18,8 +19,6 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 ### Fixed
 - Postgres setup can reconstruct missing board metadata while retaining its status view and messages.
 - Test fixtures work with the `codex` OS user and inherited `NO_COLOR`; concurrency, retry, and hook checks use work completion and injected clocks instead of machine-speed assumptions.
-
-## [0.1.18] - 2026-10-05
 
 ### Added
 - Role addressing: `swarm post --to @EL|@PM|@QA|@judge|@<role>` goes to whoever holds that seat on the job now. An unknown recipient, a seat nobody holds, or an author who is not an agent of `--job` is refused with an error and nothing is stored (it used to be stored for nobody to read). `post` also takes `--key` instead of `--as`. See [Addressing a role](docs/REFERENCE.md#addressing-a-role).
@@ -38,6 +37,17 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 ### Changed
 - Schema 15: the cap moves from the `varchar(N)` column / table CHECK into the board (Postgres: `text` column, a replaceable `NOT VALID` check and a `board_meta` row, converted online in one quick, retried `ALTER`; SQLite: a trigger and a `board_meta` table). Boards keep the cap they enforced and every message.
+- Linux tool hooks skip Python while the board is unchanged and contact is not due (`[hook] hook_min_interval_s`, default 15 seconds). Shared message notifications invalidate read stamps; notifier failures fall back to cursor reads. Start, stop and session-stop hooks keep their behavior.
+- `watch` defaults to 10-second periodic refreshes (`[board] watch_interval_s`); notifications and snapshot misses coalesce for `watch_min_redraw_s` (default 2 seconds), including compact panes. Keys still render immediately from cached data.
+- PostgreSQL watch snapshots use one statement with grouped message counts. Schema 15 replaces correlated status counts and adds message/agent indexes (automatic migration).
+- Hindsight writes default to the existing `coding` bank (`default_bank`), rather than creating a bank per job; missing banks require explicit `--create-bank`.
+- Recall uses `recall_banks` (default `coding` and `hermes`) plus an explicit project bank, with deduplication, bounded whole-fact caches and isolated bank failures.
+- Job completion instructions require distilled learnings in the best-matching existing bank; `swarm learn` retains them with provenance and `--list-banks` lists choices.
+- `swarm deactivate --delete-bank` deletes an explicit project bank only after successful learning retention elsewhere.
+
+### Fixed
+- Postgres schema setup allows cumulative lock waits within a separate 60s query budget and preserves the original connection failure when cleanup fails.
+- Timing tests use controlled clocks and synchronization, with isolated fixtures and hook spool assertions independent of IO time; test-only stress tooling helps reproduce scheduling failures.
 
 ## [0.1.16] - 2026-10-05
 

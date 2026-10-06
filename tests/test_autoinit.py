@@ -2,7 +2,7 @@
 for this code's SCHEMA_VERSION, once per machine (stamp), under a lock; the CLI also registers
 missing hooks, the hooks never do. Runs on memory, sqlite and file; on Postgres too when
 SWARM_TEST_CONFIG names a throwaway server (a scratch database `<its dbname>_autoinit` is
-created and dropped)."""
+created and dropped with a unique name per test)."""
 from __future__ import annotations
 
 import contextlib
@@ -261,16 +261,21 @@ class AutoInitBase:
     def test_concurrent_opens_migrate_once(self):
         calls = []
         real = self.cls.setup.__func__
+        ready = threading.Barrier(7, timeout=60)
+        entered, release = threading.Event(), threading.Event()
 
         def slow_setup(cls, cfg, names):
             calls.append(1)
-            time.sleep(0.3)
+            entered.set()
+            if not release.wait(60):
+                raise TimeoutError("test did not release schema setup")
             return real(cls, cfg, names)
 
         results, errors = [], []
 
         def worker():
             try:
+                ready.wait()
                 results.append(ensure_initialized(self.cfg).action)
             except Exception as exc:  # pragma: no cover (reported below)
                 errors.append(exc)
@@ -279,8 +284,14 @@ class AutoInitBase:
             threads = [threading.Thread(target=worker) for _ in range(6)]
             for t in threads:
                 t.start()
-            for t in threads:
-                t.join(30)
+            try:
+                ready.wait()
+                self.assertTrue(entered.wait(60), "no worker entered schema setup")
+            finally:
+                release.set()
+                for t in threads:
+                    t.join(60)
+            self.assertFalse(any(t.is_alive() for t in threads), "schema setup workers did not finish")
         self.assertEqual(errors, [])
         self.assertEqual(len(calls), 1)
         self.assertEqual(results.count("initialized"), 1)
@@ -413,8 +424,12 @@ class AutoInitBase:
                 done.set()
             t = threading.Thread(target=run)
             t.start()
-            t.join(10)
+            t.join(60)
+            completed_while_locked = done.is_set()
+        t.join(60)   # finish the worker before any fixture cleanup can drop its store
+        self.assertFalse(t.is_alive(), "hook worker did not finish")
         self.assertTrue(done.is_set())
+        self.assertTrue(completed_while_locked, "hook waited for lock release instead of its deadline")
         self.assertIn("TimeoutError", self.error_log.read_text())
 
     # ---- stamps and the lock file are host-only and never followed
@@ -693,7 +708,7 @@ class PostgresAutoInitTests(AutoInitBase, unittest.TestCase):
         # test host can spend more than eight seconds installing the synthetic old schema.
         # Dedicated deadline/held-lock tests still exercise their explicit budgets.
         cfg["database"]["query_timeout_seconds"] = 0
-        cfg["database"]["dbname"] = self.dbname = f"{cfg['database']['dbname']}_autoinit"
+        cfg["database"]["dbname"] = self.dbname = f"{cfg['database']['dbname'][:25]}_autoinit_{uuid.uuid4().hex[:12]}"
         if self.dbname == live["database"]["dbname"]:
             raise RuntimeError("refusing to test against the production board database")
         # $HOME is the test's own by now: hand the password over in the environment
@@ -703,6 +718,15 @@ class PostgresAutoInitTests(AutoInitBase, unittest.TestCase):
         self._drop()
         self.addCleanup(self._drop)
         return cfg
+
+    def test_another_fixture_does_not_drop_this_tests_database(self):
+        ensure_initialized(self.cfg)
+        peer = type(self)("test_missing_store_is_set_up_on_first_open")
+        self.addCleanup(peer.doCleanups)
+        with self._pg() as conn:
+            peer.make_cfg()
+            self.assertEqual(conn.execute("SELECT 1").fetchone()[0], 1)
+            self.assertNotEqual(peer.dbname, self.dbname)
 
     def toml(self) -> str:
         db = self.cfg["database"]

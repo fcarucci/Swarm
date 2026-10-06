@@ -13,7 +13,7 @@ import time
 import unittest
 from unittest import mock
 
-from support import FileHarness, MemoryHarness, PostgresHarness, SqliteHarness  # noqa: F401  (sets sys.path)
+from support import ManualClock, assert_finishes, FileHarness, MemoryHarness, PostgresHarness, SqliteHarness  # noqa: F401  (sets sys.path)
 from test_hooks_cli import Env  # noqa: E402
 
 from swarm import cli as swarm  # noqa: E402
@@ -296,7 +296,7 @@ class AutoCloseContract:
         def worker():
             try:
                 with self.h.board() as b:
-                    barrier.wait()
+                    barrier.wait(timeout=120)
                     results.extend(c.job for c in b.sweep_auto_close(WINDOW))
             except Exception as exc:  # pragma: no cover - reported below
                 errors.append(exc)
@@ -509,7 +509,7 @@ class AutoCloseCliTests(Env):
         self.finished_job()
         self.cli("status")
         rc, out, _ = self.cli("deactivate", "--job", "J", "--outcome", "fixed it: PR 12 merged")
-        self.assertEqual((rc, out), (0, "deactivated J (completed; it was already completed, auto-closed)\n"))
+        self.assertEqual((rc, out.splitlines()[0]), (0, "deactivated J (completed; it was already completed, auto-closed)"))
         s = self.job()
         self.assertEqual((s.status, s.outcome, s.closed_by), ("completed", "fixed it: PR 12 merged", "tester"))
         rc, _, _ = self.cli("deactivate", "--job", "J", "--status", "failed", "--outcome", "reverted")
@@ -667,12 +667,12 @@ class AutoCloseCliTests(Env):
         def during():
             with open(self.marker()) as fh:
                 compat.flock(fh, compat.LOCK_EX)
-                self.assertIsNone(self.main_session())
-                touched.append(True)
+                self.assertIsNone(assert_finishes(self, self.main_session))
+                waited.append(True)
 
         run = self.job().activated_at
         self.assertEqual(self.slow_close(during), [])
-        self.assertEqual(touched, [True])
+        self.assertEqual(waited, [True])
         s = self.job()
         self.assertEqual((s.status, s.finished_at, s.closed_by, s.activated_at),
                          ("active", None, None, run))   # the close reverted: the same run
@@ -715,16 +715,25 @@ class AutoCloseCliTests(Env):
         try:
             for fh in held:
                 compat.flock(fh, compat.LOCK_EX)
-            with mock.patch.object(swarm, "mark_orchestrator_seen",
-                                   wraps=swarm.mark_orchestrator_seen) as touch:
+            clock = ManualClock()
+            deadlines = []
+            real = swarm.mark_orchestrator_seen
+
+            def touch(marker, deadline=None):
+                deadlines.append(deadline)
+                result = real(marker, deadline)
+                clock.advance(swarm.MARKER_SWEEP_WAIT)
+                return result
+
+            with mock.patch("time.monotonic", clock), \
+                    mock.patch("time.sleep", side_effect=clock.advance), \
+                    mock.patch.object(swarm, "mark_orchestrator_seen", side_effect=touch):
                 self.assertIsNone(self.main_session())
-            deadlines = [call.args[1] for call in touch.call_args_list]
-            self.assertEqual(len(deadlines), 3)
-            self.assertEqual(len(set(deadlines)), 1)
-            self.assertIsNotNone(deadlines[0])
         finally:
             for fh in held:
                 fh.close()
+        self.assertEqual(len(deadlines), 3)
+        self.assertEqual(deadlines, [deadlines[0]] * 3)
         self.assertFalse(any(self.seen(job).exists() for job in ("J", "K", "L")))
         self.main_session()   # locks free again: all three recorded
         self.assertTrue(all(self.seen(job).exists() for job in ("J", "K", "L")))

@@ -125,8 +125,8 @@ class PluginTests(PluginEnv):
         (extra / "pkg" / "__init__.py").write_text("def register(api):\n    api.add_command('pk', lambda c, a: print('pk'))\n")
         with mock.patch.dict(os.environ, {"SWARM_PLUGIN_PATH": str(extra)}):
             self.assertEqual(self.cli("pk")[1], "pk\n")
-            self.config.write_text(self.config.read_text().replace('disabled = ["engineering-team", "swarm-ask"]',
-                                                                   'disabled = ["engineering-team", "swarm-ask", "pkg"]'))
+            self.config.write_text(self.config.read_text().replace('disabled = ["engineering-team", "ask-answer"]',
+                                                                   'disabled = ["engineering-team", "ask-answer", "pkg"]'))
             rc, out, _ = self.cli("plugins")
             self.assertRegex(out, r"pkg\tdisabled")
 

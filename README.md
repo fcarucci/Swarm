@@ -213,6 +213,8 @@ for the options.
 | `swarm plugins` | List the CLI plugins and any that failed to load; `swarm team` (below) is one |
 | `swarm pause --job J [--reason "…"]` / `swarm resume --job J [--host H]` | Pause a job (checkpoint every agent's transcript, stop them, block new joins and posts), then resume it on this or another machine from the transcripts on the board; see Pausing and resuming |
 | `swarm transcript list\|show\|export` | Archived agent transcripts, secrets redacted |
+| `swarm learn --job J [--bank B] -` / `learn --list-banks` | Retain distilled learnings; list existing banks |
+| `swarm recall --job J QUERY` | Recall from general banks and any explicit project bank |
 | `swarm memory` / `swarm remember` | Memories agents saved and where they came from; store one |
 | `swarm leave` | Release an agent's name (`--session S`: every unfinished agent of that session's jobs, e.g. after a restart killed them) |
 | `swarm purge` | Apply retention now |
@@ -309,7 +311,23 @@ memory is pinned to the transcript that wrote it. To turn it on, set a URL:
 [hindsight]
 url = "http://hindsight.example.internal:9100"
 api_key_file = "~/.config/swarm/hindsight.key"   # optional; chmod 600
+default_bank = "coding"
+recall_banks = ["coding", "hermes"]
 ```
+
+Writes use the existing `default_bank`. `activate --project NAME` explicitly opts into a
+project bank; jobs never get a bank just from their name. Missing banks fail unless a write
+includes `--create-bank`. Recall queries `recall_banks` plus any explicit project bank,
+deduplicating within the existing budgets; one bank's error does not hide other banks.
+
+At job completion, including a judge's `met` verdict, the orchestrator must distill learnings
+into self-contained facts. Use `swarm learn --list-banks` and prefer an existing bank already
+covering the topic, then pipe facts to `swarm learn --job J --bank B -`. Omitting `--bank` uses
+`default_bank`. Supply one self-contained fact per nonblank stdin line. Learning waits for
+extraction with a timeout of at least 120 seconds (or the configured timeout, if larger), and
+records provenance only after all facts succeed. Learnings retain the usual memory provenance. A new bank requires explicit
+`--create-bank` and should be strictly necessary. `swarm deactivate --job J --delete-bank`
+removes an explicit project bank only after learnings were successfully retained elsewhere.
 
 Leave `url` empty, or drop the section, and no Hindsight calls are made.
 
@@ -374,4 +392,10 @@ project memory, the security model, and the full command and configuration refer
 Apache-2.0, © Francesco Carucci. You can use, modify and redistribute it; keep the
 [NOTICE](NOTICE) file and credit the author. See [LICENSE](LICENSE).
 
-Structured decisions use the shipped `swarm-ask` CLI plugin: `swarm ask --job J --to human "Question?" --options a,b --default a --expires 2h --blocks "dependent work"`. Answer with `swarm answer ID --option b`, or list them with `swarm questions --job J --open`. Questions show in the orchestrator context and watch pane; full answers reach the asker before its next tool call. Optional `[notify] on_question` runs a detached command without a shell. See [ask/answer](docs/REFERENCE.md#structured-questions-askanswer-plugin).
+Structured decisions use the shipped `ask-answer` CLI plugin: `swarm ask --job J --to human "Question?" --options a,b --default a --expires 2h --blocks "dependent work"`. Answer with `swarm answer ID --option b`, or list them with `swarm questions --job J --open`. Questions show in the orchestrator context and watch pane; full answers reach the asker before its next tool call. Optional `[notify] on_question` runs a detached command without a shell. See [ask/answer](docs/REFERENCE.md#structured-questions-askanswer-plugin).
+
+Tool hooks on Linux use a shell fast path: an unchanged board and a fresh per-agent lease start no Python process. `[hook] hook_min_interval_s` defaults to 15 seconds (0 restores per-call bookkeeping), capped at one tenth of the idle/dead thresholds. Heartbeats, tool names and tool-call counts are sampled; the tool name is the last sample, not evidence a call remains in flight. Start, stop, session-stop, spawn checks, verifier restrictions and judge reminders retain their ordinary path. Optional provenance tracking retains per-call hooks.
+
+A shared LISTEN notifier per configuration relays remote messages into host-only stamps (normally within 2 seconds). Local posts invalidate their job immediately. A post racing a read stays dirty, and a paged backlog continues on the next tool call. A stale notifier forces cursor reads; config, plugin and boot identity changes invalidate leases. Shell and Python deadlines share the Linux uptime clock, including inside containers. Marker paths are parsed once per config mtime. Other platforms keep the ordinary hooks.
+
+`swarm watch` refreshes quiet boards every 10 seconds, configured by `[board] watch_interval_s` or overridden by `--interval`. `watch_min_redraw_s` (default 2 seconds) bounds notification/snapshot-miss refreshes, even with a shorter interval. Keys and resizing still render cached data immediately. Full and `--compact --session ... --exit-when-idle 30` panes use the same one-statement PostgreSQL snapshot with grouped counts and only visible agent rows. Schema 15 installs the optimized status views and supporting indexes automatically.

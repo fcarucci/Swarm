@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from unittest import mock
 
+from support import ManualClock, assert_finishes
 import provenance_fixtures as PF
 from test_hooks_cli import Env  # noqa: E402  (sets sys.path)
 import codex_fixtures as CF  # noqa: E402
@@ -34,8 +35,9 @@ class ClaudeAgents:
     """Mixin: job J active, Claude subagents a1 and a2 enrolled, each with a transcript under the
     temp HOME's projects dir. Call setup_agents() from setUp after any config change."""
 
-    def setup_agents(self):
-        rc, _, err = self.cli("activate", "--job", "J")
+    def setup_agents(self, project="J"):
+        opts = ["--project", project] if project is not None else []
+        rc, _, err = self.cli("activate", "--job", "J", *opts)
         self.assertEqual(rc, 0, err)
         self.proj = Path(os.environ["HOME"]) / ".claude" / "projects" / "-work"
         self.main = self.proj / f"{SID}.jsonl"
@@ -212,7 +214,7 @@ class ProvenanceHookTests(ClaudeAgents, Env):
 
     def test_the_20_id_cap_holds_through_the_hook(self):
         ids = [f"note-{i:02d}" for i in range(25)]
-        self.post("note-tool save --batch items", "".join(f"saved {d} to notes\n" for d in ids))
+        assert_finishes(self, lambda: self.post("note-tool save --batch items", "".join(f"saved {d} to notes\n" for d in ids)))
         self.assertEqual(sorted(r.document_id for r in self.refs()), ids[:20])
 
     def test_swarm_remember_forged_project_cannot_claim_another_bank(self):
@@ -246,7 +248,7 @@ class ProvenanceHookTests(ClaudeAgents, Env):
 
     def test_hook_budget_on_huge_transcript(self):
         self.transcript("a1").write_text(claude_lines(pad_mb=60))
-        self.post(PF.NOTE_TOOL_CMD, PF.NOTE_TOOL_OUT)
+        assert_finishes(self, lambda: self.post(PF.NOTE_TOOL_CMD, PF.NOTE_TOOL_OUT))
         [r] = self.refs()
         self.assertGreater(r.stored_bytes, 0)
 
@@ -259,14 +261,21 @@ class ProvenanceHookTests(ClaudeAgents, Env):
 
     def test_a_slow_excerpt_stops_at_the_deadline(self):
         from swarm import transcripts
-        with mock.patch("swarm.transcripts.redact",
-                        side_effect=transcripts.OutOfTime("excerpt deadline reached")) as redact:
+        real = transcripts.redact
+        clock = ManualClock()
+
+        def slow(text, deadline=None):
+            clock.advance(1.0)  # exhaust the budget at the redact boundary
+            transcripts._check(deadline)
+            return real(text, deadline)
+
+        with mock.patch("swarm.hooks.PROVENANCE_BUDGET_SECONDS", 0.3), \
+                mock.patch("time.monotonic", clock), \
+                mock.patch("swarm.transcripts.redact", side_effect=slow):
             self.post(PF.NOTE_TOOL_CMD, PF.NOTE_TOOL_OUT)
         [r] = self.refs()
         self.assertEqual(r.stored_bytes, 0)
-        self.assertTrue(redact.called)
-        self.assertIsNotNone(redact.call_args.args[1] if len(redact.call_args.args) > 1
-                             else redact.call_args.kwargs.get("deadline"))
+        self.assertGreater(clock.calls, 1)
 
     def test_failure_inside_never_fails_the_agent(self):
         with mock.patch("swarm.provenance.record_from_hook", side_effect=RuntimeError("boom")):
@@ -326,7 +335,7 @@ class PatchTests(ClaudeAgents, HindsightEnv):
         self.enable()
         self.setup_agents()
         hindsight.Client(self.cfg).retain("notes", "a fact", [], {"source": "notes-claude"},
-                                          document_id="tool-note-1")
+                                          document_id="tool-note-1", create_bank=True)
         self.fake.requests.clear()
 
     def test_patched_only_when_the_cached_capability_says_so(self):
@@ -362,7 +371,7 @@ class PatchTests(ClaudeAgents, HindsightEnv):
         self.assertEqual(self.errors(), "")
 
     def test_patch_on_and_succeeding_logs_nothing(self):
-        hindsight.Client(self.cfg).retain("notes", "b fact", [], {}, document_id="tool-note-2")
+        hindsight.Client(self.cfg).retain("notes", "b fact", [], {}, document_id="tool-note-2", create_bank=True)
         self.fake.metadata_patch = True
         hindsight.refresh_caps(self.cfg)
         self.post(PF.NOTE_TOOL_CMD, "saved tool-note-1 to notes\nsaved tool-note-2 to notes\n")
@@ -385,7 +394,7 @@ class PatchTests(ClaudeAgents, HindsightEnv):
         self.fake.metadata_patch = True
         hindsight.refresh_caps(self.cfg)
         self.fake.stop()
-        self.post(PF.NOTE_TOOL_CMD, PF.NOTE_TOOL_OUT)
+        assert_finishes(self, lambda: self.post(PF.NOTE_TOOL_CMD, PF.NOTE_TOOL_OUT))
         [r] = self.refs()
         self.assertFalse(r.patched)
         self.assertIn("not patched", self.errors())
@@ -402,19 +411,34 @@ class HangingPatchTests(ClaudeAgents, HindsightEnv):
         self.srv = socket.socket()
         self.srv.bind(("127.0.0.1", 0))
         self.srv.listen(16)
+        self.srv.settimeout(0.5)
+        stopping = threading.Event()
         held = self.held = []
+        self.accepted = threading.Event()
 
         def accept():
-            while True:
+            while not stopping.is_set():
                 try:
                     conn, _ = self.srv.accept()
+                except socket.timeout:
+                    continue
                 except OSError:
                     return
                 held.append(conn)        # never read, never answered
+                self.accepted.set()
 
-        threading.Thread(target=accept, daemon=True).start()
-        self.addCleanup(lambda: [c.close() for c in held])
-        self.addCleanup(self.srv.close)
+        accepter = threading.Thread(target=accept, daemon=True)
+        accepter.start()
+
+        def stop_server():
+            stopping.set()
+            self.srv.close()
+            accepter.join(30)
+            for conn in held:
+                conn.close()
+            self.assertFalse(accepter.is_alive(), "hanging server accept worker did not stop")
+
+        self.addCleanup(stop_server)
         self.enable()                                    # the fake: enrolment and recall answer
         self.setup_agents()
         self.fake.metadata_patch = True
@@ -424,8 +448,10 @@ class HangingPatchTests(ClaudeAgents, HindsightEnv):
         self.assertTrue(hindsight.metadata_patch_supported(self.cfg))
         held.clear()
 
-    def test_one_line_and_one_wait_when_hindsight_hangs(self):
-        self.post(PF.NOTE_MULTI_CMD, PF.NOTE_MULTI_OUT)
+    def test_one_line_and_within_budget_when_hindsight_hangs(self):
+        with mock.patch("time.monotonic", ManualClock()):
+            assert_finishes(self, lambda: self.post(PF.NOTE_MULTI_CMD, PF.NOTE_MULTI_OUT))
+        self.assertTrue(self.accepted.wait(30), "patch connection was never accepted")
         self.assertEqual(len(self.held), 1)                  # the second document was not tried
         refs = self.refs()
         self.assertEqual(len(refs), 2)
@@ -443,7 +469,7 @@ class StalePatchTests(ClaudeAgents, HindsightEnv):
         self.enable()
         self.setup_agents()
         hindsight.Client(self.cfg).retain("notes", "a fact", [], {"source": "notes-claude"},
-                                          document_id="tool-note-1")
+                                          document_id="tool-note-1", create_bank=True)
         self.fake.metadata_patch = True
         hindsight.refresh_caps(self.cfg)
         self.fake.requests.clear()

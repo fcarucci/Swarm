@@ -39,7 +39,7 @@ class RaceBase:
         self.h.reset()
 
     def test_exactly_one_process_inserts_and_its_row_is_stored(self):
-        barrier, out = CTX.Barrier(N), CTX.Queue()
+        barrier, out = CTX.Barrier(N, timeout=120), CTX.Queue()
         procs = [CTX.Process(target=_save, args=(self.h.cfg, f"k{i}", barrier, out)) for i in range(N)]
         for p in procs:
             p.start()
@@ -48,6 +48,12 @@ class RaceBase:
         finally:
             for p in procs:
                 p.join(120)
+            for p in procs:
+                if p.is_alive():
+                    p.terminate()   # a failed child must not keep writing across fixture reset
+                    p.join(30)
+            out.close()
+            out.join_thread()
         self.assertEqual([p.exitcode for p in procs], [0] * N)
         winners = [k for k, r in results.items() if r == "inserted"]
         self.assertEqual(len(winners), 1, results)

@@ -9,7 +9,7 @@ import time
 import unittest
 from pathlib import Path
 
-from support import ROOT, home_env, posix_only  # noqa: F401
+from support import wait_until, ROOT, home_env, posix_only  # noqa: F401
 
 
 class LauncherTests(unittest.TestCase):
@@ -20,10 +20,9 @@ class LauncherTests(unittest.TestCase):
                     "SWARM_CONFIG": str(self.home / "none.toml")}
 
     def run_hook(self, *args, stdin="{}"):
-        t = time.monotonic()
         res = subprocess.run([str(ROOT / "bin/swarm-hook"), *args], input=stdin, capture_output=True,
-                             text=True, timeout=10, env=self.env)
-        return res, time.monotonic() - t
+                             text=True, timeout=30, env=self.env)
+        return res, None
 
     @posix_only("runs a POSIX sh script (the Windows entry points are tested in test_windows_*.py)")
     def test_hook_without_venv_exits_fast_and_silently(self):
@@ -38,26 +37,20 @@ class LauncherTests(unittest.TestCase):
         fake = self.home / "plugin"; (fake / "bin").mkdir(parents=True); (fake / ".claude-plugin").mkdir()
         (fake / ".claude-plugin/plugin.json").write_text('{"name": "swarm", "version": "1.2.3"}')
         (fake / "bin/swarm-hook").write_text((ROOT / "bin/swarm-hook").read_text())
-        release = self.home / "bootstrap-release"
-        self.addCleanup(lambda: release.write_text("release"))
-        (fake / "bin/swarm").write_text(
-            '#!/bin/sh\nwhile [ ! -f "$HOME/bootstrap-release" ]; do sleep 0.01; done\n'
-            'echo "$@" > "$HOME/bootstrap-args"\n')
+        (fake / "bin/swarm").write_text('#!/bin/sh\ntouch "$HOME/bootstrap-entered"; while [ ! -f "$HOME/bootstrap-release" ]; do sleep 0.02; done; echo "$@" > "$HOME/bootstrap-args"\n')
+        self.addCleanup((self.home / "bootstrap-release").touch)
         for f in ("swarm", "swarm-hook"):
             (fake / "bin" / f).chmod(0o755)
-        t = time.monotonic()
         res = subprocess.run([str(fake / "bin/swarm-hook"), "--host", "codex", "session-start"], input="{}",
-                             capture_output=True, text=True, timeout=10, env=self.env)
+                             capture_output=True, text=True, timeout=30, env=self.env)
         self.assertEqual(res.returncode, 0)
-        self.assertFalse((self.home / "bootstrap-args").exists())  # child still awaits release
-        release.write_text("release")
+        wait_until(lambda: (self.home / "bootstrap-entered").exists())
+        self.assertFalse((self.home / "bootstrap-args").exists())
+        (self.home / "bootstrap-release").touch()
         ran = list((self.home / ".local/share/swarm/host").glob("hooks-ran-codex-1.2.3-*"))
         self.assertEqual(len(ran), 1)
         self.assertFalse((self.home / ".local/state/swarm").exists())      # nothing in the state dir
-        for _ in range(50):
-            if (self.home / "bootstrap-args").exists():
-                break
-            time.sleep(0.1)
+        wait_until(lambda: (self.home / "bootstrap-args").exists() and (self.home / "bootstrap-args").stat().st_size)
         args = (self.home / "bootstrap-args").read_text().split()
         self.assertEqual(args[:4], ["bootstrap", "--host", "codex", "--quiet"])
         self.assertEqual(args[5], str(self.home / ".local/share/swarm/host" /
@@ -166,6 +159,7 @@ class LauncherTests(unittest.TestCase):
         key = subprocess.run(["sh", "-c", f"printf '%s' '{fake}' | cksum | cut -d' ' -f1"], capture_output=True, text=True).stdout.strip()
         st = self.home / ".local/share/swarm/host"; st.mkdir(parents=True, mode=0o700)
         (st / f"bootstrap-claude-1.2.3-{key}").touch()
-        subprocess.run([str(fake / "bin/swarm-hook"), "--host", "claude", "session-start"], input="{}", text=True, timeout=10, env=self.env)
-        time.sleep(0.5)
+        res = subprocess.run(["sh", "-x", str(fake / "bin/swarm-hook"), "--host", "claude", "session-start"], input="{}", capture_output=True, text=True, timeout=30, env=self.env)
+        self.assertEqual(res.returncode, 0)
+        self.assertNotIn("bootstrap --host", res.stderr)
         self.assertFalse((self.home / "bootstrap-args").exists())

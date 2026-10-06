@@ -393,7 +393,9 @@ class OrchestratorHookApi(unittest.TestCase):
         plugins.PluginAPI(reg, "demo", Path("/work")).add_orchestrator_lines(
             lambda ctx, job: [f"{job}: one pending question"]
         )
-        with mock.patch.object(
+        from types import SimpleNamespace
+        lease = SimpleNamespace(allowed=True)
+        with mock.patch.dict(hooks._CURRENT, {"lease": lease}), mock.patch.object(
             hooks,
             "_markers",
             return_value=[
@@ -405,6 +407,7 @@ class OrchestratorHookApi(unittest.TestCase):
         ) as out:
             hooks._orchestrator_plugin_lines("turn", h.cfg, "s")
             out.assert_called_once_with("PreToolUse", "mine: one pending question")
+            self.assertFalse(lease.allowed)
             out.reset_mock()
             hooks._orchestrator_plugin_lines("done", h.cfg, "s")
             out.assert_not_called()

@@ -9,7 +9,7 @@ from unittest import mock
 from support import ROOT, MemoryHarness, FileHarness, SqliteHarness, PostgresHarness
 from swarm import cli, plugins
 NOW = dt.datetime(2026, 10, 5, 12, tzinfo=dt.timezone.utc)
-PLUGIN = ROOT / 'skills' / 'swarm-ask' / 'swarm_plugin.py'
+PLUGIN = ROOT / 'skills' / 'ask-answer' / 'swarm_plugin.py'
 def load_plugin(test):
     test.assertTrue(PLUGIN.is_file(), 'ask/answer must ship as a CLI plugin')
     spec = importlib.util.spec_from_file_location('question_test_plugin', PLUGIN)
@@ -30,9 +30,9 @@ class QuestionContract:
         self.asker = self.b.active_agent_name('asker')
         self.lead = self.b.active_agent_name('lead')
         self.reg = plugins.Registry(self.h.cfg, Path('/work/config.toml'), core_commands=('doctor', 'blocker'))
-        self.p.register(plugins.PluginAPI(self.reg, 'swarm-ask', self.reg.config_path.parent))
+        self.p.register(plugins.PluginAPI(self.reg, 'ask-answer', self.reg.config_path.parent))
         self.b.plugin_registry = self.reg
-        self.ctx = self.reg.context('swarm-ask', self.b)
+        self.ctx = self.reg.context('ask-answer', self.b)
     def ask(self, to='human', text='Choose a colour?', **kw):
         return self.p.open_question(self.ctx, self.b, 'j', self.asker, to, text, **kw)
     def test_full_payload_and_pointer_with_several_blockers(self):
@@ -98,6 +98,26 @@ class QuestionContract:
         q = self.ask()
         self.ask('@EL')
         self.assertEqual([b.id for b in self.p.question_rows(self.ctx, self.b, 'j', to='human')], [q.id])
+
+    def test_blocker_events_invalidate_local_hook_lease(self):
+        from swarm import fastpath
+        with mock.patch.object(fastpath, 'changed') as changed:
+            q = self.ask()
+            self.p.answer_question(self.ctx, self.b, q.id, 'human', text='blue')
+        self.assertIn(mock.call('j'), changed.call_args_list)
+
+    def test_optimized_watch_snapshot_contains_blockers_and_plugin_context(self):
+        if not hasattr(self.b, 'watch_snapshot'):
+            self.skipTest('Postgres optimized snapshot')
+        q = self.ask(default='blue')
+        snapshot = self.b.watch_snapshot('j', None, None, 60)
+        self.assertEqual([b.id for b in snapshot.blockers('j')], [q.id])
+        self.assertEqual(snapshot.job_data('j'), self.b.job_data('j'))
+        with mock.patch.object(cli.time, 'monotonic', return_value=0):
+            recorder = cli._Recorder(snapshot)
+            pane = self.reg.watch_panes('j', recorder)
+            self.assertEqual(pane, self.reg.watch_panes('j', cli._Replay(recorder)))
+        self.assertIn('QUESTIONS', '\n'.join(pane))
 
     def test_orchestrator_and_watch_recorded_snapshot(self):
         self.ask(default='blue', expires='1h')
@@ -166,7 +186,7 @@ class NotificationTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.path = Path(self.tmp.name)
         self.ctx = plugins.Registry({'notify':{'on_question':'notify {event} {job} {id} {to} {summary}'}},
-                                    self.path / 'config.toml').context('swarm-ask')
+                                    self.path / 'config.toml').context('ask-answer')
         from swarm.board.base import Blocker
         self.b = Blocker(12,'j','question','human','$(touch forbidden); hello',None,None,'open',
                          'Alice',NOW,None,None,None)

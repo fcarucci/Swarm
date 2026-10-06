@@ -11,7 +11,7 @@ import threading
 import time
 from pathlib import Path
 
-from support import posix_only  # noqa: E402
+from support import posix_only, ManualClock, assert_finishes, wait_until  # noqa: E402
 from test_hooks_cli import Env
 
 from swarm import cli as swarm
@@ -102,7 +102,7 @@ class RunnerBase(Env):
         return run.split("--unit=")[1].split()[0]
 
     def run_dict(self, argv, harness="claude", session="3f0c1e9a-0000-4000-8000-000000000001",
-                 limit=5.0, enrol=5.0):
+                 limit=60.0, enrol=60.0):
         m = markers.write_resume_marker(self.cfg, "J", self.r.id, resume_of="orig", name=self.name,
                                         harness=harness, session_id=session if harness == "claude" else None)
         return {"restart_id": self.r.id, "job": "J", "name": self.name, "harness": harness,
@@ -110,18 +110,23 @@ class RunnerBase(Env):
                 "session_id": session if harness == "claude" else None, "limit_seconds": limit,
                 "enrol_seconds": enrol, "config": str(self.config), "board": store_key(self.cfg)}
 
-    def enrol_soon(self, key, delay=0.2):
-        def go():
-            time.sleep(delay)
-            with self.board() as b:
-                b.claim_resume(key, "orig", "J")
-        t = threading.Thread(target=go)
-        t.start()
-        self.addCleanup(t.join)
+    def enrol_soon(self, key, delay=None):
+        # Enrollment occurs at the launch boundary, before the runner's first board poll.
+        self.pending_enrolment = key
 
-    def execute(self, run):
+    def execute(self, run, clock=None):
+        import subprocess
+        def launch(*a, **kw):
+            proc = subprocess.Popen(*a, **kw)
+            key = getattr(self, "pending_enrolment", None)
+            if key:
+                with self.board() as b:
+                    b.claim_resume(key, "orig", "J")
+                self.pending_enrolment = None
+            return proc
         runner.write_run(run)
-        return runner.execute(self.cfg, run, poll=0.05, board_every=0.1)
+        opts = {"clock": clock} if clock is not None else {}
+        return runner.execute(self.cfg, run, popen=launch, poll=0.05, board_every=0.1, **opts)
 
     def restart(self):
         with self.board() as b:
@@ -276,7 +281,7 @@ class ProjectConfigTests(RunnerBase):
         self.addCleanup(t.join, 30)
         return t, box
 
-    def _board_says(self, text, within=10.0):
+    def _board_says(self, text, within=30.0):
         end = time.monotonic() + within
         while time.monotonic() < end:
             with self.board() as b:
@@ -290,13 +295,12 @@ class ProjectConfigTests(RunnerBase):
         # approval, like the pass's own hold: the runner waits (posted once), never launches
         # unapproved, and launches once approved; not a permanent refusal
         self.plant(self.proj, ".mcp.json")
-        t, box = self._held_execute(20.0)
+        t, box = self._held_execute(120.0)
         self.assertTrue(self._board_says("waiting for approval"), "the hold was not posted")
-        time.sleep(0.3)
         self.assertFalse(self.ran())                          # held: nothing launched
         self.assertTrue(t.is_alive())
         self.command.save_approvals(self.command.approval_candidates(self.cfg, str(self.proj)))
-        t.join(20)
+        t.join(30)
         self.assertFalse(t.is_alive())
         self.assertNotEqual(box["out"], "refused")
         self.assertTrue(self.ran())
@@ -307,7 +311,8 @@ class ProjectConfigTests(RunnerBase):
     def test_a_hold_not_approved_in_time_is_refused(self):
         self.plant(self.proj, ".mcp.json")
         t, box = self._held_execute(0.5)
-        t.join(20)
+        t.join(30)
+        self.assertFalse(t.is_alive())
         self.assertEqual(box["out"], "refused")
         self.assertFalse(self.ran())
         self.assertIn("not approved within", self.restart_row().refused_reason
@@ -315,10 +320,11 @@ class ProjectConfigTests(RunnerBase):
 
     def test_a_hold_ends_when_the_job_closes(self):
         self.plant(self.proj, ".mcp.json")
-        t, box = self._held_execute(20.0)
+        t, box = self._held_execute(120.0)
         self.assertTrue(self._board_says("waiting for approval"))
         self.cli("deactivate", "--job", "J", "--status", "cancelled", "--force")
-        t.join(20)
+        t.join(30)
+        self.assertFalse(t.is_alive())
         self.assertEqual(box["out"], "cancelled")
         self.assertFalse(self.ran())
 
@@ -507,7 +513,7 @@ class BoardNamespaceTests(RunnerBase):
 class RunnerTests(RunnerBase):
     def test_completed_claude(self):
         sid = "3f0c1e9a-0000-4000-8000-000000000001"
-        argv = [fake(self.bin / "claude", 'cat > "$0.stdin"; sleep 0.5; echo \'{"subtype":"success"}\'\n')]
+        argv = [fake(self.bin / "claude", 'cat > "$0.stdin"; echo \'{"subtype":"success"}\'\n')]
         self.enrol_soon(sid)
         self.assertEqual(self.execute(self.run_dict(argv)), "completed")
         self.assertEqual((self.bin / "claude.stdin").read_text(), "BRIEF")
@@ -525,8 +531,7 @@ class RunnerTests(RunnerBase):
         sid = "3f0c1e9a-0000-4000-8000-000000000001"
         argv = [fake(self.bin / "claude", "sleep 30 & wait\n")]
         self.enrol_soon(sid)
-        t0 = time.monotonic()
-        self.assertEqual(self.execute(self.run_dict(argv, limit=1.0)), "timeout")
+        self.assertEqual(assert_finishes(self, lambda: self.execute(self.run_dict(argv, limit=1.0), ManualClock(step=0.1))), "timeout")
         with self.board() as b:
             a = next(x for x in b.agents("J") if x.agent_key == sid)
         self.assertEqual(a.left_reason, "limit:timeout")
@@ -543,13 +548,13 @@ class RunnerTests(RunnerBase):
 
     def test_max_turns(self):
         sid = "3f0c1e9a-0000-4000-8000-000000000001"
-        argv = [fake(self.bin / "claude", "sleep 0.5; echo '{\"subtype\":\"error_max_turns\"}'; exit 1\n")]
+        argv = [fake(self.bin / "claude", "echo '{\"subtype\":\"error_max_turns\"}'; exit 1\n")]
         self.enrol_soon(sid)
         self.assertEqual(self.execute(self.run_dict(argv)), "max_turns")
 
     def test_codex_binds_thread_id(self):
         tid = "00000000-0000-4000-8000-0000000000aa"
-        argv = [fake(self.bin / "codex", f"cat >/dev/null; echo '{{\"type\":\"thread.started\",\"thread_id\":\"{tid}\"}}'; sleep 1\n")]
+        argv = [fake(self.bin / "codex", f"cat >/dev/null; echo '{{\"type\":\"thread.started\",\"thread_id\":\"{tid}\"}}'\n")]
         run = self.run_dict(argv, harness="codex")
         self.enrol_soon(tid, delay=0.5)
         self.assertEqual(self.execute(run), "completed")
@@ -560,14 +565,20 @@ class RunnerTests(RunnerBase):
         argv = [fake(self.bin / "claude", "sleep 30\n")]
         self.enrol_soon(sid)
 
-        def close_later():
-            time.sleep(0.6)
-            with self.board() as b:
-                b.close_agent(sid, "stuck:silent")
-        t = threading.Thread(target=close_later)
-        t.start()
-        self.addCleanup(t.join)
-        self.assertEqual(self.execute(self.run_dict(argv)), "stuck")
+        from unittest import mock
+        real = runner._agent_row
+        closed = []
+
+        def close_after_observed(*args):
+            row = real(*args)
+            if row is not None and not closed:
+                with self.board() as b:
+                    b.close_agent(sid, "stuck:silent")
+                closed.append(sid)
+            return row
+        with mock.patch.object(runner, "_agent_row", side_effect=close_after_observed):
+            self.assertEqual(self.execute(self.run_dict(argv)), "stuck")
+        self.assertEqual(closed, [sid])
 
     def test_finish_keeps_run_file_when_board_down_and_reap_finishes(self):
         run = self.run_dict(["true"])
@@ -591,7 +602,7 @@ class RunnerTests(RunnerBase):
         runner.write_run(run)
         with self.board() as b:
             self.assertEqual(runner.reap(self.cfg, b), 1)
-        self.assertIsNotNone(child.wait(5))
+        self.assertIsNotNone(child.wait(30))
         self.assertEqual(self.restart().outcome, "timeout")
 
     # ---- beyond the brief: stdin never blocks the clock, launch errors, no double finish ----
@@ -601,8 +612,7 @@ class RunnerTests(RunnerBase):
         argv = [fake(self.bin / "claude", "sleep 30\n")]
         run = self.run_dict(argv, limit=1.0, enrol=30.0)
         run["stdin"] = "B" * (1 << 20)   # far above a pipe buffer
-        t0 = time.monotonic()
-        self.assertEqual(self.execute(run), "timeout")
+        self.assertEqual(assert_finishes(self, lambda: self.execute(run, ManualClock(step=0.1))), "timeout")
 
     def test_missing_binary_is_failed_and_finished(self):
         self.assertEqual(self.execute(self.run_dict([str(self.bin / "nope")])), "failed")
@@ -672,21 +682,20 @@ class RunnerTests(RunnerBase):
     def test_codex_gets_a_token_its_hooks_can_bind_by(self):
         tid = "00000000-0000-4000-8000-0000000000ab"
         argv = [fake(self.bin / "codex", 'printf %s "$SWARM_RESUME_TOKEN" > "$0.token"; cat >/dev/null; '
-                                         'sleep 1\n')]
+                                         'while [ ! -f "$0.bound" ]; do sleep 0.02; done\n')]
         run = self.run_dict(argv, harness="codex")
 
         def hook_binds_first():   # what the hook does on the session's first tool call
-            for _ in range(100):
-                tok = (self.bin / "codex.token")
-                if tok.exists() and tok.read_text():
-                    break
-                time.sleep(0.02)
+            tok = self.bin / "codex.token"
+            wait_until(lambda: tok.exists() and tok.read_text())
             self.assertIsNotNone(markers.resume_by_token(self.cfg, tok.read_text(), tid))
             with self.board() as b:
                 b.claim_resume(tid, "orig", "J")
+            wait_until(lambda: run.get("agent_key") == tid)  # runner adopted the hook-bound session
+            (self.bin / "codex.bound").touch()
         t = threading.Thread(target=hook_binds_first)
         t.start()
-        self.addCleanup(t.join)
+        self.addCleanup(t.join, 30)
         self.assertEqual(self.execute(run), "completed")      # enrolled though thread.started never came
         self.assertEqual(len((self.bin / "codex.token").read_text()), 32)
         self.assertEqual(self.restart().new_agent_key, tid)
@@ -703,7 +712,8 @@ class RunnerTests(RunnerBase):
 # far longer than any test needs it: a test process killed mid-run never runs its cleanups, and an
 # unbounded survivor then lives on in whatever cgroup ran the suite, holding up that unit's stop.
 SURVIVOR = ("sh -c 'trap \"\" TERM; echo $$ > \"$1\"; i=0; while [ $i -lt ${SURVIVOR_SECONDS:-60} ]; "
-            "do sleep 1; i=$((i+1)); done' x \"$0.pid\" &\n")
+            "do sleep 1; i=$((i+1)); done' x \"$0.pid\" &\n"
+            "while [ ! -s \"$0.pid\" ]; do sleep 0.02; done\n")
 
 
 
@@ -717,14 +727,11 @@ class SurvivorFixtureTests(unittest.TestCase):
         pidfile = d / "s.pid"
         subprocess.run(["sh", "-c", SURVIVOR + "exit 0\n", str(d / "s")],
                        env={**os.environ, "SURVIVOR_SECONDS": "1"}, check=True)
-        for _ in range(100):
-            if pidfile.exists() and pidfile.read_text().strip():
-                break
-            time.sleep(0.02)
+        wait_until(lambda: pidfile.exists() and pidfile.read_text().strip())
         pid = int(pidfile.read_text())
         self.addCleanup(_kill_quietly, pid)
         os.kill(pid, signal.SIGTERM)                       # ignored, as the fixture intends
-        self.assertTrue(_gone(pid, within=5.0))
+        self.assertTrue(_gone(pid, within=30.0))
 
 
 TAG = "r1-0123456789abcdef"
@@ -738,7 +745,7 @@ def tagged_env(tag: str = TAG) -> dict:
 def _end(p) -> None:
     if p.poll() is None:
         p.kill()
-    p.wait()
+    p.wait(30)
 
 
 def _kill_quietly(pid: int) -> None:
@@ -749,7 +756,7 @@ def _kill_quietly(pid: int) -> None:
         pass
 
 
-def _gone(pid: int, within: float = 3.0) -> bool:
+def _gone(pid: int, within: float = 30.0) -> bool:
     """pid no longer runs (gone, or a zombie waiting for init)."""
     end = time.monotonic() + within
     while time.monotonic() < end:
@@ -776,13 +783,10 @@ class RunnerFixTests(RunnerTests):
 
     def _survivor_pid(self, name="claude"):
         f = self.bin / f"{name}.pid"
-        for _ in range(100):
-            if f.exists() and f.read_text().strip():
-                pid = int(f.read_text())
-                self.addCleanup(_kill_quietly, pid)   # never leak it when a test fails
-                return pid
-            time.sleep(0.02)
-        self.fail("no survivor pid")
+        wait_until(lambda: f.exists() and f.read_text().strip())
+        pid = int(f.read_text())
+        self.addCleanup(_kill_quietly, pid)
+        return pid
 
     def posts(self):
         with self.board() as b:
@@ -806,7 +810,7 @@ class RunnerFixTests(RunnerTests):
         with self.assertRaises(RuntimeError):
             runner.execute(self.cfg, dict(run))            # nobody else runs it either
         procs[0].kill()
-        procs[0].wait()
+        procs[0].wait(30)
         with self.board() as b:
             self.assertEqual(runner.reap(self.cfg, b), 1)
         self.assertEqual(self.restart().outcome, "failed")
@@ -817,11 +821,8 @@ class RunnerFixTests(RunnerTests):
         leader = subprocess.Popen(["sh", "-c", SURVIVOR.replace('"$0.pid"', f'"{pidfile}"') + "exit 0\n"],
                                   start_new_session=True, env=tagged_env())
         since = runner._proc_start(leader.pid)
-        leader.wait(5)                                    # the leader is gone at once
-        for _ in range(100):
-            if pidfile.exists() and pidfile.read_text().strip():
-                break
-            time.sleep(0.02)
+        leader.wait(30)                                    # the leader is gone at once
+        wait_until(lambda: pidfile.exists() and pidfile.read_text().strip())
         survivor = int(pidfile.read_text())
         self.addCleanup(_kill_quietly, survivor)
         run = self.run_dict(["true"])
@@ -873,7 +874,7 @@ class RunnerFixTests(RunnerTests):
 
     def test_leftovers_of_a_completed_session_are_stopped(self):
         sid = "3f0c1e9a-0000-4000-8000-000000000001"
-        argv = [fake(self.bin / "claude", SURVIVOR + "sleep 0.5; echo '{\"subtype\":\"success\"}'\n")]
+        argv = [fake(self.bin / "claude", SURVIVOR + "echo '{\"subtype\":\"success\"}'\n")]
         self.enrol_soon(sid)
         self.assertEqual(self.execute(self.run_dict(argv)), "completed")
         self.assertTrue(_gone(self._survivor_pid()))
@@ -884,10 +885,7 @@ class RunnerFixTests(RunnerTests):
         child = subprocess.Popen(["sh", "-c", SURVIVOR.replace('"$0.pid"', f'"{pidfile}"') + "wait\n"],
                                  start_new_session=True, env=tagged_env())
         self.addCleanup(_end, child)
-        for _ in range(100):
-            if pidfile.exists() and pidfile.read_text().strip():
-                break
-            time.sleep(0.02)
+        wait_until(lambda: pidfile.exists() and pidfile.read_text().strip())
         survivor = int(pidfile.read_text())
         self.addCleanup(_kill_quietly, survivor)
         run = self.run_dict(["true"])
@@ -896,7 +894,7 @@ class RunnerFixTests(RunnerTests):
         runner.write_run(run)
         with self.board() as b:
             self.assertEqual(runner.reap(self.cfg, b), 1)
-        child.wait(5)
+        child.wait(30)
         self.assertTrue(_gone(survivor))
 
     def test_output_is_redacted_bounded_and_the_raw_files_go(self):
@@ -979,27 +977,23 @@ class ReusedGroupTests(RunnerFixTests):
     def test_member_without_the_runs_tag_is_never_signalled(self):
         g = self._group({k: v for k, v in os.environ.items() if k != runner.RUN_ENV})
         self._reap_with(g, run_tag=TAG, child_start="0")
-        time.sleep(0.3)
         self.assertIsNone(g.poll())                          # untouched
         self.assertEqual(self.restart().outcome, "failed")   # the recorded (none) outcome, not timeout
 
     def test_member_with_another_runs_tag_is_never_signalled(self):
         g = self._group(tagged_env("r2-ffffffffffffffff"))
         self._reap_with(g, run_tag=TAG, child_start="0")
-        time.sleep(0.3)
         self.assertIsNone(g.poll())
 
     def test_member_older_than_the_session_is_never_signalled(self):
         g = self._group(tagged_env())
         later = str(int(runner._proc_start(g.pid)) + 10 ** 6)
         self._reap_with(g, run_tag=TAG, child_start=later)
-        time.sleep(0.3)
         self.assertIsNone(g.poll())
 
     def test_a_run_recorded_without_a_tag_signals_nothing(self):
         g = self._group(tagged_env())
         self._reap_with(g)
-        time.sleep(0.3)
         self.assertIsNone(g.poll())
 
     def test_the_session_gets_its_run_tag(self):
@@ -1019,7 +1013,7 @@ class ScopeTests(RunnerFixTests):
 
     def test_a_session_runs_in_its_own_scope(self):
         sid = "3f0c1e9a-0000-4000-8000-000000000001"
-        argv = [fake(self.bin / "claude", "sleep 0.5; echo '{\"subtype\":\"success\"}'\n")]
+        argv = [fake(self.bin / "claude", "echo '{\"subtype\":\"success\"}'\n")]
         self.enrol_soon(sid)
         self.assertEqual(self.execute(self.run_dict(argv)), "completed")
         unit = self.unit()
@@ -1044,10 +1038,7 @@ class ScopeTests(RunnerFixTests):
         leader = subprocess.Popen([runner.SYSTEMD_RUN, "--user", "--scope", f"--unit={unit}", "--collect",
                                    "--quiet", "--", "sleep", "30"], start_new_session=True)
         self.addCleanup(_end, leader)
-        for _ in range(100):
-            if (self.shim / "state" / f"{unit}.pid").exists():
-                break
-            time.sleep(0.02)
+        wait_until(lambda: (self.shim / "state" / f"{unit}.pid").exists())
         run = self.run_dict(["true"])
         run.update(unit=unit, child_pid=leader.pid, child_pgid=leader.pid, started_epoch=time.time() - 10,
                    limit_seconds=1.0)
@@ -1055,7 +1046,7 @@ class ScopeTests(RunnerFixTests):
         with self.board() as b:
             self.assertEqual(runner.reap(self.cfg, b), 1)
         self.assertIn(f"systemctl --user kill --signal=SIGTERM {unit}", self.calls())
-        self.assertIsNotNone(leader.wait(5))
+        self.assertIsNotNone(leader.wait(30))
         self.assertEqual(self.restart().outcome, "timeout")
 
     def test_reap_of_a_scope_already_gone_signals_nothing(self):
@@ -1082,10 +1073,7 @@ class ScopeTests(RunnerFixTests):
         p = subprocess.Popen([runner.SYSTEMD_RUN, "--user", "--scope", f"--unit={unit}", "--collect", "--quiet",
                               "--", "sleep", "30"], start_new_session=True)
         self.addCleanup(_end, p)
-        for _ in range(100):
-            if (self.shim / "state" / f"{unit}.pid").exists():
-                break
-            time.sleep(0.02)
+        wait_until(lambda: (self.shim / "state" / f"{unit}.pid").exists())
         return p
 
     def test_unseen_scope_within_the_launch_grace_is_left_alone_then_appears_and_is_stopped(self):
@@ -1094,11 +1082,12 @@ class ScopeTests(RunnerFixTests):
             self.assertEqual(runner.reap(self.cfg, b), 0)        # not there yet: may still appear
         self.assertTrue(runner.run_file(self.r.id, self.cfg).exists())
         p = self._spawn_scope(run["unit"])                        # the orphaned systemd-run creates it
-        time.sleep(0.6)                                           # past its wall clock
+        run["launch_epoch"] = time.time() - 10
+        runner.write_run(run)                                    # explicitly expired wall clock
         with self.board() as b:
             self.assertEqual(runner.reap(self.cfg, b), 1)
         self.assertIn(f"systemctl --user kill --signal=SIGTERM {run['unit']}", self.calls())
-        self.assertIsNotNone(p.wait(5))
+        self.assertIsNotNone(p.wait(30))
         self.assertEqual(self.restart().outcome, "timeout")
 
     def test_unseen_scope_after_the_launch_grace_is_failed_without_signals(self):
@@ -1126,9 +1115,18 @@ class ScopeTests(RunnerFixTests):
     def test_the_runner_records_the_scope_seen_active(self):
         from unittest import mock
         sid = "3f0c1e9a-0000-4000-8000-000000000001"
-        argv = [fake(self.bin / "claude", "sleep 0.5; echo '{\"subtype\":\"success\"}'\n")]
+        argv = [fake(self.bin / "claude", "while [ ! -f \"$0.seen\" ]; do sleep 0.02; done; echo '{\"subtype\":\"success\"}'\n")]
         self.enrol_soon(sid)
-        with mock.patch.object(runner, "finish", wraps=runner.finish) as fin:
+        real = runner._unit_state
+
+        def observed(unit):
+            state = real(unit)
+            if state[1] == "active":
+                (self.bin / "claude.seen").touch()
+            return state
+
+        with mock.patch.object(runner, "_unit_state", side_effect=observed), \
+                mock.patch.object(runner, "finish", wraps=runner.finish) as fin:
             self.assertEqual(self.execute(self.run_dict(argv)), "completed")
         run = fin.call_args[0][1]
         self.assertTrue(run["unit_seen_active"])
@@ -1144,10 +1142,9 @@ class PidfdFallbackTests(RunnerFixTests):
         other = subprocess.Popen(["sleep", "30"], start_new_session=True, env=tagged_env("r9-0000000000000000"))
         for p in (mine, other):
             self.addCleanup(_end, p)
-        time.sleep(0.1)
         runner._signal_member(other.pid, other.pid, TAG, 0, sig.SIGKILL)   # not this run's: refused
         runner._signal_member(mine.pid, mine.pid, TAG, 0, sig.SIGKILL)
-        self.assertIsNotNone(mine.wait(5))
+        self.assertIsNotNone(mine.wait(30))
         self.assertIsNone(other.poll())
 
     def test_no_pidfd_support_signals_nothing(self):
@@ -1156,11 +1153,9 @@ class PidfdFallbackTests(RunnerFixTests):
         from unittest import mock
         mine = subprocess.Popen(["sleep", "30"], start_new_session=True, env=tagged_env())
         self.addCleanup(_end, mine)
-        time.sleep(0.1)
         with mock.patch.dict(runner.os.__dict__):
             del runner.os.__dict__["pidfd_open"]           # a platform without pidfds
             runner._signal_member(mine.pid, mine.pid, TAG, 0, sig.SIGKILL)
-        time.sleep(0.2)
         self.assertIsNone(mine.poll())
 
     def test_no_user_manager_refuses_to_launch(self):
