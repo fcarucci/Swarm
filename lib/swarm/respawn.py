@@ -116,7 +116,9 @@ def check(marker: Path, job: str, *, force: bool, host, open_board,
             if idle_not_met(js) and js.verdict_at:
                 agents = board.agents(job)
                 judges = {a.name for a in agents if a.role == "judge"} | {js.verdict_by}
-                times = [t for a in agents if a.name not in judges
+                # Display names are recycled after departure. Classify contacts by the
+                # recorded agent role, so a worker reusing a judge's name still counts.
+                times = [t for a in agents if a.role != "judge"
                          for t in (a.joined_at, a.last_contact_at, a.last_post_at) if t and t > js.verdict_at]
                 times += [m.created_at for m in board.messages_after(0, job)
                           if m.agent_name not in judges and m.created_at > js.verdict_at]

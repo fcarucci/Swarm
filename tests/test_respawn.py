@@ -3,6 +3,7 @@ the orchestrator to spawn the next round (swarm.respawn): context at PreToolUse/
 per verdict, and a Stop that refuses to end the turn, once. The judge's own hooks never carry it."""
 from __future__ import annotations
 
+import datetime as dt
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -198,13 +199,26 @@ class StopTests(RespawnEnv):
             b.post("J", self.agent("w1").name, "fix round started")
         self.assertIsNone(self.main("session-stop"))
 
-    def test_worker_contact_after_verdict_suppresses_reminder(self):
+    def worker_contact_after_verdict(self, name):
         with self.board() as b:
             # A fix worker can finish before the orchestrator's next Stop.
             b.allocate_name("fix", "J")
             b.tool_started("fix", "Bash")
             b.agent_stopped("fix")
-        self.assertIsNone(self.main("session-stop"))
+        contact = self.job().verdict_at + dt.timedelta(seconds=1)
+        self.h.update_agent("fix", name=name, joined_at=contact, last_seen=contact,
+                            left_at=contact)
+        return contact.timestamp()
+
+    def test_worker_contact_after_verdict_suppresses_reminder(self):
+        now = self.worker_contact_after_verdict("Fix Worker")
+        with mock.patch.object(respawn.time, "time", return_value=now):
+            self.assertIsNone(self.main("session-stop"))
+
+    def test_worker_reusing_judge_name_suppresses_reminder(self):
+        now = self.worker_contact_after_verdict(self.judge)
+        with mock.patch.object(respawn.time, "time", return_value=now):
+            self.assertIsNone(self.main("session-stop"))
 
     def test_idle_window_restarts_after_worker_activity(self):
         self.cfg["supervise"] = {"orphan_minutes": 10}
