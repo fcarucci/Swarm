@@ -6,44 +6,33 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 ## [Unreleased]
 
-Planned release: 0.2.0.
+## [0.2.0] - 2026-10-06
 
 ### Added
-- Automatic artifact review pipeline: worker hand-offs start judges, `not_met` starts bounded fix rounds, and `met` starts separate finalizers without an orchestrator session. Artifact verdicts remain independent; judges must record a verdict before stopping and cannot execute fixes. Engineering-team supplies exact-SHA CI and an ordinary-merge integrator recipe.
-- complexity-analyzer skill.
-- refactoring skill.
-- The `ask-answer` plugin: structured questions to the human, roles or agents; answers, comments and corrections; full answer delivery, a watch questions pane and pending human questions in orchestrator context.
-- Question changes invalidate local hook leases; PostgreSQL watch snapshots include blocker state and plugin settings, and pending human questions keep surfacing on each orchestrator turn.
-- Optional `[notify] on_question` commands run detached with a five-second timeout, safe arguments/environment values and failures reported by `swarm doctor`.
-- Generic blockers and append-only event history (schema 18): `swarm blockers`, `swarm blocker resolve`, and `swarm blocker comment`; several decisions can wait independently on a job.
-- Core plugin hooks for blocker kinds, expiry, notification events, watch panes, and orchestrator context. Decision deadlines expire in the existing sweep, including paused and closed jobs; unanswered blockers without defaults are flagged overdue once.
-- Automatic recovery of crashed agents and orphaned coordinators through the existing supervisor, with recorded host/workdir, continuation briefs, human-wait and pause exclusions, owner checks, backoff, rolling 24-hour caps and `GAVE UP` notices. Recovery defaults on; `swarm init`/upgrade installs the user timer (every 5 minutes). Explicit `enabled = false` remains respected.
-- Role addressing: `swarm post --to @EL|@PM|@QA|@judge|@<role>` goes to whoever holds that seat on the job now. An unknown recipient, a seat nobody holds, or an author who is not an agent of `--job` is refused with an error and nothing is stored (it used to be stored for nobody to read). `post` also takes `--key` instead of `--as`. See [Addressing a role](docs/REFERENCE.md#addressing-a-role).
-- `swarm wait` takes `--until` (a duration, a time of day such as `17:30`, or a date and time) as well as `--for`. A bounded wait that has not ended now protects a job from the stall limits (including `goal_stall_hours`) as well as the orphan rule, and its end is shown in `status` and `watch`; an ended wait counts as progress. A board read by the orchestrating session counts as contact for liveness.
-- CLI plugins: core discovers command plugins (a plugins directory next to the config, `$SWARM_PLUGIN_PATH`, `skills/*/swarm_plugin.py`, `swarm.plugins` entry points), `swarm plugins` lists them and any load error, and a broken plugin never breaks a core command. `[plugins] disabled` skips plugins by name. Documented in `docs/PLUGINS.md`.
-- Engineering-team plugin (ships with the skill): `swarm team --job J [--show|--add ROLE|--remove ROLE]`, `swarm activate --team product_manager,build_engineer`, and a `team` line in `status --job J`. Always present: engineering lead, QA, engineers, judge (not removable). Optional: `product_manager` (on by default), `build_engineer` (new, off by default), reviewer, verifier. The default composition is read from `team.toml` (`$SWARM_TEAM_CONFIG`, else next to `config.toml`; a missing file means the defaults; template `team.example.toml`).
-- engineering-team skill: head-bound verdicts, gating on the merge result, scoped fix rounds, goals as checkable queries, a hand-off contract, a secrets protocol, an authorization ledger, a recovery runbook, a "don't" list, and the team composition rules (who carries the duties of an absent product manager or build engineer).
+- The `engineering-team` skill and plugin: a product manager, engineering lead, engineers, QA and judge on one job, with optional build engineer, reviewer and verifier. `swarm team --job J [--show|--add ROLE|--remove ROLE]` and `swarm activate --team ...` set the team; defaults come from `team.toml`.
+- The `ask-answer` plugin: structured questions to the human, a role or an agent, with answers, comments and corrections, a questions pane in `watch`, and pending human questions in the orchestrator's context. Optional `[notify] on_question` command.
+- Automatic review pipeline: a worker's hand-off starts a judge, `not_met` starts a bounded fix round, `met` starts a finalizer, with no orchestrator session needed.
+- The `refactoring` and `complexity-analyzer` skills.
+- Generic blockers (schema 18): `swarm blockers`, `swarm blocker resolve` and `swarm blocker comment`; several decisions can wait independently on one job, with deadlines and overdue flags.
+- Automatic recovery of crashed agents and orphaned coordinators, with backoff, a 24-hour cap and a `GAVE UP` notice. On by default; `swarm init`/`upgrade` installs a 5-minute user timer; `enabled = false` turns it off.
+- Role addressing: `swarm post --to @EL|@PM|@QA|@judge|@<role>` reaches whoever holds that seat now. An unknown recipient or seat is refused instead of stored for nobody. `post` also takes `--key` instead of `--as`.
+- `swarm wait --until` (a duration, a time of day or a date and time). A bounded wait protects the job from stall limits and is shown in `status` and `watch`.
+- CLI plugins: `swarm plugins` lists discovered command plugins and load errors; a broken plugin never breaks a core command; `[plugins] disabled` skips plugins. See `docs/PLUGINS.md`.
 
 ### Fixed
-- Waiting and paused jobs show as waiting/paused in watch and status views, not active.
-- Codex agents stay active between turns and complete only at session end or confirmed runner exit; quiet time no longer reports a running session as completed.
-- Orchestrator reminders share verdict/session state across Stop and tool hooks, stay silent while agents work or have recent activity, and repeat only after the configured orphan interval.
-- Queued role-addressed posts resolve recipients and validate the author and `--key` on delivery; a refused queued post tells its author why.
-- `@PM` reaches the invoking project manager (or orchestrator); `@product` addresses the optional product manager. The engineering-team PM joins with `--role project_manager`.
-- File plugins with unsafe POSIX ownership, world-write access, write access by a foreign group or symlinks are refused and listed; primary-group writable plugins (umask `002`) are accepted; the plugin trust boundary and Windows exception are documented. `swarm plugins` also reports discovery failures.
+- Waiting and paused jobs show as waiting/paused in `watch` and `status`, not active.
+- Codex agents stay active between turns and complete only when the session ends.
+- Orchestrator reminders stay silent while agents work and repeat only after the orphan interval.
+- Queued role-addressed posts are validated on delivery; a refused post tells its author why.
+- `@PM` reaches the project manager (or orchestrator); `@product` reaches the optional product manager.
+- File plugins with unsafe ownership, world or foreign-group write access, or symlinks are refused and listed; `swarm plugins` reports discovery failures.
+- Postgres setup rebuilds missing board metadata without losing messages; old message-width upgrades keep dependent status views.
+- The test suite works as the `codex` user and with `NO_COLOR` set, and no longer depends on machine speed.
 
 ### Changed
-- Session watches roll up only open jobs (or the last finished job), coalesce notification bursts, and render keys from cached snapshots; schema 19 keeps PostgreSQL job totals restricted to the displayed jobs during multi-job refreshes (automatic migration).
-- `wait` and `resume` use blockers; upgrades preserve existing waits and plugin data. Status and watch list open blockers. Wait blockers retain protection only while bounded by a future deadline; question/person/role blockers protect until resolved, even overdue ones.
-- Schema 17 restricts PostgreSQL agent message counts to the requested job and rolls up jobs without per-agent message counts, preserving status columns and historical counts (automatic migration).
-- Schema 16 (applied by the automatic schema upgrade on first use by the new version): `jobs.plugin_data`, a small JSON object of per-job settings that plugins keep with a job (`Board.job_data` / `set_job_data`). A plain `ADD COLUMN`.
-
-### Fixed
-- Postgres setup can reconstruct missing board metadata while retaining its status view and messages; legacy message-width upgrades preserve dependent status views within the retried conversion transaction.
-- Test fixtures work with the `codex` OS user and inherited `NO_COLOR`; concurrency, retry, and hook checks use work completion and injected clocks instead of machine-speed assumptions.
-- Queued role-addressed posts resolve recipients and validate the author and `--key` on delivery; a refused queued post tells its author why.
-- `@PM` reaches the invoking project manager (or orchestrator); `@product` addresses the optional product manager. The engineering-team PM joins with `--role project_manager`.
-- File plugins with unsafe POSIX ownership, world-write access, write access by a foreign group or symlinks are refused and listed; primary-group writable plugins (umask `002`) are accepted; the plugin trust boundary and Windows exception are documented. `swarm plugins` also reports discovery failures.
+- Session watches show only open jobs (or the last finished one), coalesce notification bursts and redraw from cached snapshots.
+- `wait` and `resume` use blockers; upgrades keep existing waits and plugin data. `status` and `watch` list open blockers.
+- Schemas 16-19 (applied automatically on first use): per-job plugin data, per-job PostgreSQL message counts, blockers and event history, and faster multi-job status totals.
 
 ## [0.1.17] - 2026-10-05
 
