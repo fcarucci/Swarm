@@ -185,7 +185,12 @@ class PostgresSnapshotTests(unittest.TestCase):
         for expected in (['J', 'K'], ['K']):
             with mock.patch.object(self.board._conn, 'execute', wraps=c.execute) as execute:
                 shown = self.board.session_shown_jobs('snapshot-session')
-                query, params = execute.call_args.args
+            # session_shown_jobs also looks up pipeline plugin_data after the rollup;
+            # EXPLAIN the rollup statement itself, not whichever query ran last.
+            rollups = [call.args for call in execute.call_args_list
+                       if 'WITH shown AS MATERIALIZED' in call.args[0]]
+            self.assertEqual(len(rollups), 1, execute.call_args_list)
+            query, params = rollups[0]
             self.assertEqual([j.job for j in shown], expected)
             plan = c.execute('EXPLAIN (ANALYZE, FORMAT JSON) ' + query, params).fetchone()[0][0]['Plan']
             self.assertEqual(plan['Actual Rows'], len(expected))
