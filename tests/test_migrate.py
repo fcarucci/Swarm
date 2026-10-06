@@ -305,7 +305,7 @@ class MoveOldDefaultsTests(unittest.TestCase):
         os.mkfifo(self.old_spool / "c3.json")
         import threading
         t = threading.Thread(target=lambda: self.migrate(self.cfg()), daemon=True)
-        t.start(); t.join(10)
+        t.start(); t.join(30)
         self.assertFalse(t.is_alive(), "migrate blocked on a FIFO")
         new = self.home / ".local/state/swarm/spool"
         self.assertEqual(sorted(p.name for p in new.iterdir()), ["a1.json"])

@@ -15,12 +15,11 @@ import multiprocessing
 import os
 import signal
 import tempfile
-import sys
 import time
 import unittest
 from pathlib import Path
 
-from support import SMALL_POOL, FileHarness, base_config, tq, posix_only  # noqa: F401  (sets sys.path)
+from support import join_processes, SMALL_POOL, FileHarness, base_config, tq, posix_only  # noqa: F401  (sets sys.path)
 
 from swarm import cli as swarm  # noqa: E402
 from swarm.board import BoardError, BoardUnavailable, open_board, setup_board  # noqa: E402
@@ -39,50 +38,56 @@ def _cfg(path: str, **board) -> dict:
 
 def _allocate(path, key, barrier, out):
     with open_board(_cfg(path)) as b:
-        barrier.wait()
+        barrier.wait(timeout=120)
         out.put((key, b.allocate_name(key, "j")))
 
 
 def _claim_judge(path, key, barrier, out):
     with open_board(_cfg(path)) as b:
-        barrier.wait()
+        barrier.wait(timeout=120)
         out.put((key, b.claim_judge(key, "j")))
 
 
 def _spawn(path, key, tries, barrier, out):
     with open_board(_cfg(path)) as b:
-        barrier.wait()
+        barrier.wait(timeout=120)
         out.put((key, [b.reserve_spawn(key, "j", 2, 5).granted for _ in range(tries)]))
 
 
 def _poster(path, who, n, barrier, out):
     ids = []
-    barrier.wait()
+    barrier.wait(timeout=120)
     for i in range(n):
         with open_board(_cfg(path)) as b:   # a fresh board per post, like one CLI call each
             ids.append(b.post("j", who, f"{who} {i}").id)
+            out.put((None, None))  # liveness progress; never used as a correctness oracle
     out.put((who, ids))
 
 
-_SLACK = 4 if sys.platform == "win32" else 1
 
-
-def _reader(path, key, expect, barrier, out):
-    """Reads with its cursor until it has `expect` messages; reports every id in read order."""
+def _reader(path, key, expect, barrier, out, writers_done):
+    """Drain through writer completion, including a final read after its publication."""
     got = []
-    barrier.wait()
-    deadline = time.monotonic() + _SLACK * 60     # slower on Windows: process start-up, file locks
-    while len(got) < expect and time.monotonic() < deadline:
-        with open_board(_cfg(path)) as b:
+    with open_board(_cfg(path)) as b:
+        b.subscribe(messages_only=True)
+        barrier.wait(timeout=120)
+        while len(got) < expect:
             got += [m.id for m in b.read_new(agent_key=key)]
+            if writers_done.is_set():
+                while page := b.read_new(agent_key=key):
+                    got += [m.id for m in page]
+                break
+            if len(got) < expect:
+                b.wait_for_change(1)
     out.put((key, got))
 
 
-def _post_forever(path, who):
+def _post_forever(path, who, ready):
     i = 0
     while True:
         with open_board(_cfg(path)) as b:
             b.post("j", who, f"{who} {i}")
+            ready.set()
             b.tool_started(who, "Bash")
         i += 1
 
@@ -97,8 +102,7 @@ def _run(target, argsets, timeout=120):
     try:
         results = dict(out.get(timeout=timeout) for _ in procs)
     finally:
-        for p in procs:
-            p.join(timeout)
+        join_processes(procs, timeout)
     return results
 
 
@@ -159,15 +163,27 @@ class FileBoardProcessTests(unittest.TestCase):
         for i in range(nreaders):
             self.b.allocate_name(f"r{i}", "j")
         barrier, out = CTX.Barrier(writers + nreaders), CTX.Queue()
+        writers_done = CTX.Event()
         procs = [CTX.Process(target=_poster, args=(self.path, f"w{i}", per, barrier, out))
                  for i in range(writers)]
-        procs += [CTX.Process(target=_reader, args=(self.path, f"r{i}", writers * per, barrier, out))
+        procs += [CTX.Process(target=_reader, args=(self.path, f"r{i}", writers * per, barrier, out, writers_done))
                   for i in range(nreaders)]
         for p in procs:
             p.start()
-        res = dict(out.get(timeout=180 * _SLACK) for _ in procs)
-        for p in procs:
-            p.join(30)
+        res = {}
+        try:
+            while len(res) < len(procs):
+                who, ids = out.get(timeout=120)
+                if who is None:  # a committed post; keep waiting while writers make progress
+                    continue
+                res[who] = ids
+                if sum(k.startswith("w") for k in res) == writers:
+                    writers_done.set()
+        finally:
+            writers_done.set()
+            join_processes(procs)
+            out.close()
+        self.assertEqual([p.exitcode for p in procs], [0] * len(procs))
         all_ids = sorted(i for w in range(writers) for i in res[f"w{w}"])
         self.assertEqual(all_ids, list(range(1, writers * per + 1)))      # unique, no gaps
         for w in range(writers):
@@ -182,16 +198,20 @@ class FileBoardProcessTests(unittest.TestCase):
 
     @posix_only("needs SIGKILL (POSIX signals)")
     def test_killed_writers_never_leave_a_corrupt_board(self):
-        procs = [CTX.Process(target=_post_forever, args=(self.path, f"w{i}")) for i in range(6)]
+        ready = [CTX.Event() for _ in range(6)]
+        procs = [CTX.Process(target=_post_forever, args=(self.path, f"w{i}", ready[i])) for i in range(6)]
         for i in range(6):
             self.b.allocate_name(f"w{i}", "j")
         for p in procs:
             p.start()
-        time.sleep(2.0)
-        for p in procs:
-            os.kill(p.pid, signal.SIGKILL)
-        for p in procs:
-            p.join(10)
+        try:
+            for event in ready:
+                self.assertTrue(event.wait(60), "writer never completed its first post")
+        finally:
+            for p in procs:
+                if p.is_alive():
+                    os.kill(p.pid, signal.SIGKILL)
+            join_processes(procs)
         # whatever instant they died at, the next transaction finds a sound board
         before = self.b.last_message_id("j")
         self.assertGreater(before, 0)
@@ -264,6 +284,7 @@ class FileBoardChangeDetectionTests(unittest.TestCase):
     def _in_other_process(self, target, *args):
         p = CTX.Process(target=target, args=args)
         p.start()
+        self.addCleanup(join_processes, [p])
         return p
 
     def test_a_post_from_another_process_wakes_tail_and_watch(self):
@@ -274,7 +295,7 @@ class FileBoardChangeDetectionTests(unittest.TestCase):
             p = self._in_other_process(_post_once, self.path)
             self.assertTrue(tail.wait_for_change(30))
             self.assertTrue(watch.wait_for_change(30))
-            p.join(10)
+            p.join(60)
             self.assertFalse(tail.wait_for_change(0.05))   # drained: a burst counts once
 
     def test_the_first_post_creating_the_log_then_appending_is_one_change(self):
@@ -300,7 +321,7 @@ class FileBoardChangeDetectionTests(unittest.TestCase):
             watch.subscribe(messages_only=False)
             p = self._in_other_process(_join_once, self.path)
             self.assertTrue(watch.wait_for_change(30))
-            p.join(10)
+            p.join(60)
             self.assertFalse(tail.wait_for_change(0.2))
 
 

@@ -1,0 +1,30 @@
+--- a/tests/test_message_cap.py
++++ b/tests/test_message_cap.py
+@@ -379,23 +379,27 @@
+     def test_a_dml_stream_is_not_blocked_while_the_cap_changes(self):
+         import threading
+         stop, errors, posted = threading.Event(), [], []
++        first_post = threading.Event()
+ 
+         def poster():
+             try:
+                 with self.h.board() as b:
+                     while not stop.is_set():
+                         posted.append(b.post("j", "P", "p" * 120).id)
++                        first_post.set()
+             except Exception as exc:   # noqa: BLE001
+                 errors.append(exc)
+         t = threading.Thread(target=poster)
+         t.start()
+         try:
++            self.assertTrue(first_post.wait(60), f"poster never completed a post: {errors}")
+             with self.h.board() as b:
+                 for cap in (300, 60, 1000, 200):
+                     b.set_message_cap(cap)
+         finally:
+             stop.set()
+             t.join(30)
++        self.assertFalse(t.is_alive(), "poster failed to stop")
+         self.assertEqual(errors, [])
+         self.assertTrue(posted)
+ 

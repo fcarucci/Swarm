@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import datetime as dt
+from contextlib import contextmanager
 import os
 import sys
 from pathlib import Path
@@ -227,6 +228,11 @@ class MemoryHarness:
             for field, secs in fields_seconds_ago.items():
                 row[field] = self._ago(secs)
 
+    def backdate_transcript(self, job: str, agent_key: str, seconds_ago: float) -> None:
+        from swarm.board.memory import transcript_key
+        with self.store.lock:
+            self.store.transcripts[transcript_key(job, agent_key)]["captured_at"] = self._ago(seconds_ago)
+
     def backdate_message(self, msg_id: int, seconds_ago: float) -> None:
         with self.store.lock:
             next(m for m in self.store.messages if m["id"] == msg_id)["created_at"] = self._ago(seconds_ago)
@@ -291,6 +297,7 @@ class FileHarness(MemoryHarness):
             s.memory_refs = {}
             s.restarts, s.next_restart_id = [], 1
             s.pauses, s.next_pause_id = [], 1
+            s.message_max_chars = None   # setup seeds it from the config again
         setup_board(self.cfg, pool)
 
     def close(self) -> None:
@@ -344,6 +351,12 @@ class PostgresHarness:
         with self.conn.cursor() as cur:
             cur.executemany("INSERT INTO name_pool (name, source) VALUES (%s, %s)",
                             [(n, s) for s, names in pool.items() for n in names])
+        # a test may have changed the cap: back to the config's (what a new board starts with)
+        from swarm.board import postgres
+        cap = int(self.cfg["board"]["message_max_chars"])
+        self.conn.execute(postgres._cap_statement(cap))
+        self.conn.execute("INSERT INTO board_meta (key, value) VALUES ('message_max_chars', %s) "
+                          "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (str(cap),))
 
     def board(self, **board_overrides):
         cfg = copy.deepcopy(self.cfg)
@@ -434,7 +447,8 @@ class SqliteHarness:
                                      "DELETE FROM jobs; DELETE FROM name_pool; "
                                      "DELETE FROM agent_routes; DELETE FROM transcripts; DELETE FROM restarts; DELETE FROM job_pauses; "
                                      "DELETE FROM memory_ref_images; DELETE FROM memory_refs; "
-                                     "DELETE FROM transcript_image_refs; DELETE FROM transcript_images; COMMIT;")
+                                     "DELETE FROM transcript_image_refs; DELETE FROM transcript_images; "
+                                     "DELETE FROM board_meta; COMMIT;")
         setup_board(self.cfg, pool)
 
     def board(self, **board_overrides):
@@ -463,6 +477,10 @@ class SqliteHarness:
         import sqlite3
         self._db().execute("UPDATE memory_refs SET excerpt = ? WHERE document_id = ?",
                            (sqlite3.Binary(blob), document_id))
+
+    def backdate_transcript(self, job: str, agent_key: str, seconds_ago: float) -> None:
+        self._db().execute("UPDATE transcripts SET captured_at = ? WHERE job = ? AND agent_key = ?",
+                           (self.sqlite_board._ts(self._ago(seconds_ago)), job, agent_key))
 
     def backdate_agent(self, agent_key: str, **fields_seconds_ago) -> None:
         self._set("agents", "agent_key", agent_key, {f: self._ago(s) for f, s in fields_seconds_ago.items()})
@@ -514,3 +532,90 @@ HARNESSES = {"memory": MemoryHarness, "file": FileHarness, "sqlite": SqliteHarne
 def e2e_harness(tmp: Path, name: str):
     """A fresh harness of E2E_BACKEND for one end-to-end test (temp dir `tmp`, unique `name`)."""
     return HARNESSES[E2E_BACKEND].for_env(tmp, name)
+
+
+class ManualClock:
+    """An injected monotonic clock; advance only at the boundary being tested."""
+    def __init__(self, now=1000.0, step=0.0):
+        self.now, self.step, self.calls = now, step, 0
+
+    def __call__(self):
+        self.calls += 1
+        now = self.now
+        self.now += self.step
+        return now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+def assert_finishes(test, fn, timeout=30):
+    """A generous deadlock guard, with worker failures re-raised in the test thread."""
+    import threading
+    result = {}
+
+    def run():
+        try:
+            result["value"] = fn()
+        except BaseException as exc:
+            result["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    test.assertFalse(worker.is_alive(), "operation did not finish (possible deadlock)")
+    if "error" in result:
+        raise result["error"]
+    return result.get("value")
+
+
+@contextmanager
+def on_lock_contention(callback):
+    """Run a callback at the first real failed nonblocking lock attempt."""
+    from unittest import mock
+    from swarm import compat
+    real, fired = compat.flock, False
+
+    def flock(*args, **kwargs):
+        nonlocal fired
+        try:
+            return real(*args, **kwargs)
+        except BlockingIOError:
+            if not fired:
+                fired = True
+                callback()
+            raise
+
+    with mock.patch.object(compat, "flock", side_effect=flock):
+        yield
+
+
+def wait_until(predicate, timeout=30, interval=0.02):
+    """Poll a real condition with a generous deadlock guard, never a fixed sleep count."""
+    import time
+    deadline = time.monotonic() + timeout
+    while True:
+        value = predicate()
+        if value:
+            return value
+        if time.monotonic() >= deadline:
+            raise AssertionError("condition did not become true")
+        time.sleep(interval)
+
+
+def join_processes(processes, timeout=60):
+    """Join workers under one cleanup deadline; never leak them after a failed guard."""
+    import time
+    deadline = time.monotonic() + timeout
+    for process in processes:
+        process.join(max(0, deadline - time.monotonic()))
+    stranded = [process for process in processes if process.is_alive()]
+    for process in stranded:
+        process.terminate()
+    for process in stranded:
+        process.join(30)
+        if process.is_alive():
+            process.kill()
+            process.join(30)
+    if stranded:
+        raise AssertionError(f"workers did not finish: {[process.pid for process in stranded]}")
