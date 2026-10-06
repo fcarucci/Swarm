@@ -4,6 +4,14 @@ All notable changes to swarm, newest first. Each release's notes on GitHub are t
 section here, so every release adds a `## [x.y.z] - YYYY-MM-DD` section (see `scripts/release-notes.sh`).
 Keep entries short and user-facing: one line per change, what it does, not how.
 
+## [Unreleased]
+
+### Changed
+- Hindsight writes default to the existing `coding` bank (`default_bank`), rather than creating a bank per job; missing banks require explicit `--create-bank`.
+- Recall uses `recall_banks` (default `coding` and `hermes`) plus an explicit project bank, with deduplication, bounded whole-fact caches and isolated bank failures.
+- Job completion instructions require distilled learnings in the best-matching existing bank; `swarm learn` retains them with provenance and `--list-banks` lists choices.
+- `swarm deactivate --delete-bank` deletes an explicit project bank only after successful learning retention elsewhere.
+
 ## [0.1.16] - 2026-10-05
 
 0.1.15's binary release (GitHub assets) was skipped because its CI failed on Windows; 0.1.16 carries everything in 0.1.15 plus these fixes.

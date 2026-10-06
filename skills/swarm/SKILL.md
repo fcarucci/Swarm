@@ -224,7 +224,8 @@ user asks for one. Don't run duplicate jobs: merge similar ones (`swarm job merg
    ```
    `--task -` reads the brief from stdin. It is stored with the job and shown by `status`.
    `--project NAME` sets the memory project (only matters with Hindsight configured); several
-   jobs can share one project. Default: the job name.
+   jobs can share an explicit project bank. Without `--project`, writes use `default_bank`
+   (default `coding`); recall uses the configured general banks. No bank is created implicitly.
    Subagents that were already running at activation stay off the board (they have their own
    tasks); pass `--adopt-running` to enrol them too.
    Activation writes a marker in `marker_dir`, bound to this session: `activate` reads
@@ -342,7 +343,18 @@ user asks for one. Don't run duplicate jobs: merge similar ones (`swarm job merg
    background work (a monitor, a long remote run, a merge lock): your own tool calls keep the
    job open, but waiting between turns does not.
 5. **When the job is done:**
+   **Required learnings step:** distill durable findings into self-contained facts with enough
+   context to understand them without this job. Run `swarm learn --list-banks`, choose the
+   best-matching existing bank (strongly prefer one already covering the topic), then pipe
+   facts to `swarm learn --job <job> --bank <bank> -`. Without `--bank`, it uses `default_bank`.
+   Supply one fact per nonblank stdin line; `learn` waits for extraction (timeout at least
+   120 seconds), then records provenance after the entire batch succeeds.
+   Do this after a judge rules `met` too. Create a bank only when strictly necessary, with
+   explicit `--create-bank`.
+
    `swarm deactivate --job <job> [--status completed|cancelled|failed] [--outcome "<summary>"]`.
+   Add `--delete-bank` only for an explicit project bank whose learnings have already been
+   successfully retained elsewhere with `swarm learn`; otherwise deletion is refused.
    This closes the job, and any agent still active on it is marked `left`. **A job with a goal
    isn't completed until the judge's latest verdict is `met`:** until then `deactivate`
    (status `completed`) refuses and prints the judge's last reason. Keep the swarm working on
@@ -443,7 +455,9 @@ way its own host does it. `swarm status --job <job>` shows each agent's HOST and
 | `join --job J --key K [--role R] [--judge\|--verifier]` | allocate or return the unique name for agent key K; `--judge`/`--verifier` give that seat to an agent without the swarm's hooks (e.g. a one-off `codex exec` judge), which reads with `read --key K` and posts, and records verdicts, through the CLI |
 | `post --job J --as NAME [--to NAME] "message"` | post (whitespace collapsed; capped at `message_max_chars`) |
 | `read --as NAME \| --key K [--job J] [--peek]` | messages new since the last read, excluding your own (`read_limit` at a time, then "(N more unread: run read again)"); `--peek` doesn't advance the cursor |
-| `remember --job J --as NAME [--project P] "fact"` | store a durable fact in the job's project memory (Hindsight; needs `[hindsight] url`); queued when unreachable |
+| `learn --job J [--bank B] [--create-bank] -` / `learn --list-banks` | retain distilled learnings with provenance; list existing banks to choose the best topic match |
+| `recall --job J QUERY` | query general banks plus the explicit project bank |
+| `remember --job J --as NAME [--project P] [--create-bank] "fact"` | store a durable fact in its explicit project bank or default_bank (Hindsight; needs `[hindsight] url`); queued when unreachable |
 | `spool retry` | requeue memories parked as `.stuck` in `spool_dir` after 24 hours of failing; the next hook call delivers them |
 | `notices --hook-output [--host claude\|codex]` | internal (the `SessionStart` hook): print and consume the pending setup notice as hook output; nothing when there is none |
 | `who --job J` | active agents on the job, tab-separated: exact name (paste into `--to`), host, role, status, last contact, current tool |
@@ -495,7 +509,7 @@ the file backend keeps the same rows in `state.json` and `messages.jsonl`.
 
   Names are unique among active agents.
 - **`jobs`:** `job`, `status`, `description`, `task`, `outcome`, `created_by`, `session_id`,
-  `created_at`, `activated_at`, `finished_at`, `project` (memory project; NULL = the job name),
+  `created_at`, `activated_at`, `finished_at`, `project` (explicit memory project; absent = general banks),
   `goal`, the judge's latest `verdict` (`met`/`not_met`), `verdict_reason`, `verdict_by`,
   `verdict_at` (cleared when the job is re-activated), `completion_forced` (completed with
   `--force` without a met verdict). Every verdict is also a board message, `VERDICT …`, from the
@@ -565,12 +579,14 @@ rotated out. With the feature off, the `transcript` commands say so and exit 1.
 ## Project memory (Hindsight, optional)
 Off unless `[hindsight] url` is set in the config; with it empty nothing calls, mentions or even
 imports the Hindsight client. When on:
-- **Bank = project.** Memories live in a Hindsight bank named after the job's project
-  (`activate --project`, default the job), lower-cased with anything but `a-z0-9_-` turned into
-  `-` (max 64). The bank is created the first time something is stored in it.
-- **Recall at start:** the start context gets the project's memories most relevant to the job's
-  task (else description), under `[swarm memory]`, capped at `recall_max_items` /
-  `recall_max_chars`.
+- **Existing banks by default.** Writes use `[hindsight] default_bank` (default `coding`).
+  `activate --project NAME` explicitly opts into a project bank, normalized to lower-case
+  `a-z0-9_-` (max 64). Missing banks fail clearly; only an explicit `--create-bank` on a write
+  authorizes creating one.
+- **General recall:** start and turn hooks and `swarm recall` query `recall_banks` (default
+  `["coding", "hermes"]`) plus the job's explicit project bank. Results are deduplicated within
+  the existing time, item and character budgets. The 6000-character cache drops whole trailing
+  facts, never slices JSON. A bank error leaves other banks available.
 - **Recall while working:** every `recall_minutes` (default 15) the next tool call re-recalls
   and shows only memories that agent hasn't been shown (ids kept in its agent row).
 - **Storing:** agents are told to store durable findings, root causes, decisions and gotchas

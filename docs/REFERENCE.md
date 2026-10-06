@@ -1840,10 +1840,21 @@ With `[hindsight] url` set, the swarm keeps a project memory in
 [Hindsight](https://github.com/vectorize-io/hindsight). Memory is off by default: with `url` empty (the default) the
 feature is off: no calls, no instructions, and the client isn't even imported.
 
-- **Where:** one Hindsight bank per project. The project is `activate --project NAME`, or the
-  job name; it is lower-cased, with runs of anything but `a-z0-9_-` turned into `-` (max 64),
-  for the bank id. Several jobs can share a project. The bank is created on first store if it
-  doesn't exist.
+- **Where:** writes use `[hindsight] default_bank` (default `coding`). An explicit
+  `activate --project NAME` selects a project bank, normalized to lower-case `a-z0-9_-` (max
+  64). No implicit bank creation: a missing bank fails unless the write has `--create-bank`.
+  Recall queries `recall_banks` (default `["coding", "hermes"]`) plus the explicit project
+  bank; results are deduplicated within the existing budgets, with independent bank errors.
+  The 6000-character cache drops whole trailing facts and always remains valid JSON.
+- **Job-end learnings:** after completion or a judge's `met` verdict, the orchestrator must
+  distill self-contained facts into the best-matching existing bank. List choices with
+  `swarm learn --list-banks`; pipe facts to `swarm learn --job J [--bank B] -` (default:
+  `default_bank`), one fact per nonblank line. Learning waits for extraction with a timeout
+  of at least 120 seconds, or the configured timeout if larger, and records provenance after
+  all facts succeed. Strongly prefer an existing bank already covering the topic; create a new
+  bank only when strictly necessary, explicitly with `--create-bank`. Learnings carry memory
+  provenance. `deactivate --delete-bank` only deletes an explicit project bank after learnings
+  have successfully been retained elsewhere.
 - **What is stored:** what agents choose to store with `swarm remember`: durable findings, root
   causes, decisions and gotchas, one fact per call, never secrets or narration. Each is tagged
   `swarm`, `job:<job>`, `agent:<name>`, with metadata `source=swarm`, `job`, `agent`, `project`.
@@ -1868,7 +1879,9 @@ feature is off: no calls, no instructions, and the client isn't even imported.
   Hindsight.
 
 Endpoints used: `GET /v1/default/banks/{bank}/profile` (does the bank exist),
-`PUT /v1/default/banks/{bank}` (create it), `POST /v1/default/banks/{bank}/memories` (retain),
+`GET /v1/default/banks` (list existing banks),
+`DELETE /v1/default/banks/{bank}` (explicit cleanup),
+`PUT /v1/default/banks/{bank}` (explicit creation only), `POST /v1/default/banks/{bank}/memories` (retain),
 `POST /v1/default/banks/{bank}/memories/recall` (recall, budget `low`); with `[provenance]`
 also `GET /v1/default/banks/{bank}/documents/{id}` (does a memory still exist: `memory refs
 --check`, `transcript show --memory`, `swarm purge`), `GET /openapi.json` (cached: does this

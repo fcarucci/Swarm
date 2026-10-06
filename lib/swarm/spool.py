@@ -174,11 +174,11 @@ def spool_post(cfg: dict, job: str, name: str, message: str, to: str | None,
 
 
 def spool_memory(cfg: dict, job: str, name: str, text: str, project: str | None,
-                 metadata: dict[str, str] | None = None) -> Path:
+                 metadata: dict[str, str] | None = None, create_bank: bool = False) -> Path:
     """Queue a `swarm remember` for the hooks to deliver to Hindsight, with the provenance
     metadata the CLI knew (provenance.cli_metadata); it is stored as `swarm-spool-<stem>`."""
     return _spool(cfg, {"job": job, "name": name, "text": text, "project": project,
-                        "metadata": dict(metadata or {})}, ".mem")
+                        "metadata": dict(metadata or {}), "create_bank": create_bank}, ".mem")
 
 
 def _valid_metadata(m) -> bool:
@@ -310,7 +310,10 @@ def _load(d: int, claimed: str, name: str) -> tuple | None:
             meta = m.get("metadata", {})   # absent (an older record) or a dict, nothing else
             if not _valid_metadata(meta):
                 raise ValueError("metadata is not a small dict of plain strings")
-            rec = (*rec, meta)
+            create_bank = m.get("create_bank", False)
+            if not isinstance(create_bank, bool):
+                raise ValueError("create_bank is not a boolean")
+            rec = (*rec, meta, create_bank)
         else:
             if rec[3] is not None and not valid_name(rec[3]):
                 raise ValueError("not a plain agent name")
@@ -376,9 +379,9 @@ def _deliver_memory(board, cfg: dict, d: int, name: str, claimed: str, rec: tupl
     already failed in this flush); "stuck"; "down" (Hindsight unreachable: put back, not
     counted as an attempt); or "board" (board trouble: put back)."""
     from swarm import hindsight  # only when a memory is waiting
-    job, who, text, project, meta = rec
+    job, who, text, project, meta, create_bank = rec
     try:
-        project = project or hindsight.project_of(board.job_status(job), job)
+        project = project or hindsight.project_of(board.job_status(job), job, cfg)
     except Exception:
         _mv(d, claimed, name)
         return "board"
@@ -391,7 +394,7 @@ def _deliver_memory(board, cfg: dict, d: int, name: str, claimed: str, rec: tupl
             raise hindsight.HindsightError("memory is off ([hindsight] url is empty)")
         # the record's own id: a retry after a reply that never came replaces, not duplicates
         hindsight.remember(board, cfg, job, who, text, project, document_id=f"swarm-spool-{_stem(name)}",
-                           metadata=meta)
+                           metadata=meta, create_bank=create_bank)
     except hindsight.HindsightUnavailable:
         _mv(d, claimed, name)
         return "down"

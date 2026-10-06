@@ -16,7 +16,9 @@ class RememberTests(HindsightEnv):
     def setUp(self):
         super().setUp()
         self.enable()
-        rc, _, err = self.cli("activate", "--job", "J")
+        self.fake.banks["j"] = []
+        self.fake.banks["pg-ha"] = []
+        rc, _, err = self.cli("activate", "--job", "J", "--project", "J")
         self.assertEqual(rc, 0, err)
 
     def items(self):
@@ -151,7 +153,7 @@ class RememberTests(HindsightEnv):
     def test_detect_yields_exactly_the_real_document_id(self):
         for project in ("PG HA", "my.proj_1", "O'Brien-2"):
             self.fake.requests.clear()
-            rc, out, err = self.cli("remember", "--job", "J", "--as", "Homer Simpson", "--project", project,
+            rc, out, err = self.cli("remember", "--job", "J", "--as", "Homer Simpson", "--project", project, "--create-bank",
                                     "a fact")
             self.assertEqual(rc, 0, err)
             [item] = self.items()
