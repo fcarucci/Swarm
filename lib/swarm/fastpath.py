@@ -20,6 +20,16 @@ import uuid
 from swarm import paths, safefs
 
 SAFE = re.compile(r'[A-Za-z0-9_.-]{1,128}\Z')
+CLOCK = 'uptime-v1'
+
+
+def now():
+    # lxcfs can virtualize uptime while CLOCK_MONOTONIC still uses the host clock.
+    # Match the shell hook's /proc/uptime deadlines inside containers.
+    try:
+        return float(Path('/proc/uptime').read_text().split()[0])
+    except (OSError, ValueError, IndexError):
+        return time.monotonic()
 
 
 def interval(cfg):
@@ -32,7 +42,7 @@ def interval(cfg):
 def directory():
     config = paths.config_path()
     stamp = config.stat().st_mtime_ns if config.exists() else 0
-    identity = f'{config.absolute()}:{paths.PLUGIN_ROOT}:{stamp}'
+    identity = f'{config.absolute()}:{paths.PLUGIN_ROOT}:{stamp}:{CLOCK}'
     key = hashlib.sha256(identity.encode()).hexdigest()[:16]
     return paths.host_dir() / ('hook-fastpath-' + key)
 
@@ -89,7 +99,7 @@ def cache_config(cfg, host):
     with opened():
         pass
     body = [str(path), str(paths.PLUGIN_ROOT), str(directory()),
-            str(Path(cfg['hook']['marker_dir']).expanduser()), int(stamp is not None)]
+            str(Path(cfg['hook']['marker_dir']).expanduser()), int(stamp is not None), CLOCK]
     if any('\n' in x for x in map(str, body)):
         return
     base = safefs.open_base(paths.host_dir(), strict_mode=0o700)
@@ -109,7 +119,7 @@ class Lease:
         self.key = payload.get('agent_id') or ('session-' + str(payload.get('session_id', '')))
         self.name = 'agent-' + self.key
         self.enabled = bool(os.environ.get('SWARM_HOOK_FASTPATH')) and bool(SAFE.fullmatch(self.key)) and interval(cfg) > 0
-        self.now = time.monotonic()
+        self.now = now()
         self.contact_name = 'contact-' + self.key
         old = read(self.contact_name) if self.enabled else []
         self.contacted = False
@@ -181,7 +191,7 @@ def ensure_notifier(cfg):
     if cfg['board'].get('backend') == 'memory':
         return
     live = read('live')
-    if live and int(live[0]) > time.monotonic():
+    if live and int(live[0]) > now():
         return
     # flock inside the child guarantees at most one persistent notifier per config.
     subprocess.Popen([sys.executable, '-B', '-m', 'swarm.fastpath'], stdin=subprocess.DEVNULL,
@@ -196,30 +206,32 @@ def notifier():
     original_directory = directory()
     with opened() as fd:
         with safefs.locked(fd, 'notifier.lock', blocking=False):
-            # Exit after the marker set disappears; no permanent daemon outside a job.
-            md = Path(cfg['hook']['marker_dir']).expanduser()
-            with open_board(watcher_config(cfg)) as board:
-                board.subscribe(messages_only=True)
-                if board.degraded or getattr(board, '_polling', False):
-                    write('live', [0])
-                    return
-                # Close the read-to-LISTEN startup gap before advertising a healthy relay.
-                from swarm.hooks import _markers
-                for marker in _markers(cfg):
-                    changed(marker['job'])
-                while directory() == original_directory and list(md.glob('*.json')):
-                    write('live', [int(time.monotonic()) + 5])
-                    if board.wait_for_change(2):
-                        # Payload is only an id on Postgres. Invalidating local jobs needs
-                        # no board query; spurious reads are safe, lost notifications aren't.
-                        from swarm.hooks import _markers
-                        for marker in _markers(cfg):
-                            changed(marker['job'])
-                    # Non-LISTEN backends cheaply report their trigger counter changes.
-                write('live', [0])
+            try:
+                # Exit after the marker set disappears; no permanent daemon outside a job.
+                md = Path(cfg['hook']['marker_dir']).expanduser()
+                with open_board(watcher_config(cfg)) as board:
+                    board.subscribe(messages_only=True)
+                    if board.degraded or getattr(board, '_polling', False):
+                        return
+                    # Close the read-to-LISTEN startup gap before advertising a healthy relay.
+                    from swarm.hooks import _markers
+                    for marker in _markers(cfg):
+                        changed(marker['job'])
+                    while directory() == original_directory and list(md.glob('*.json')):
+                        write('live', [int(now()) + 5])
+                        if board.wait_for_change(2):
+                            # Payload is only an id on Postgres. Invalidating local jobs needs
+                            # no board query; spurious reads are safe, lost notifications aren't.
+                            from swarm.hooks import _markers
+                            for marker in _markers(cfg):
+                                changed(marker['job'])
+                        # Non-LISTEN backends cheaply report their trigger counter changes.
+            finally:
+                # Clear the directory whose lock we own, even if config mtime changed.
+                safefs.write_atomic(fd, 'live', '0\n')
 
 
-if __name__ == '__main__':
+def main():
     try:
         if len(sys.argv) == 3 and sys.argv[1] == '--cache':
             from swarm.cli import load_config
@@ -227,6 +239,13 @@ if __name__ == '__main__':
             cache_config(cfg, sys.argv[2])
             print(Path(cfg['hook']['marker_dir']).expanduser())
         else:
-            notifier()
+            try:
+                notifier()
+            except Exception:
+                pass
     except (OSError, ValueError):
         pass
+
+
+if __name__ == '__main__':
+    main()

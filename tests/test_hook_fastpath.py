@@ -15,8 +15,8 @@ class ShellFastPathTests(unittest.TestCase):
             home=Path(td); hd=home/'.local/share/swarm/host'; hd.mkdir(parents=True,mode=0o700)
             fp=hd/'fastpath'; fp.mkdir(mode=0o700)
             cfg=home/'config.toml'; cfg.write_text('[hook]\nhook_min_interval_s=15\n')
-            # A future monotonic deadline and the exact generation already consumed.
-            cache=hd/'hook-config-claude'; cache.write_text(f'{cfg}\n{ROOT}\n{fp}\n{home}/active\n1\n')
+            # A future uptime deadline and the exact generation already consumed.
+            cache=hd/'hook-config-claude'; cache.write_text(f'{cfg}\n{ROOT}\n{fp}\n{home}/active\n1\nuptime-v1\n')
             os.utime(cache, ns=(cfg.stat().st_atime_ns,cfg.stat().st_mtime_ns))
             (fp/'live').write_text('9999999999\n')
             (fp/'board-J').write_text('generation-1\n')
@@ -27,6 +27,14 @@ class ShellFastPathTests(unittest.TestCase):
             self.assertEqual(r.returncode,0,r.stderr)
             self.assertEqual(r.stdout,'')
             self.assertEqual(r.stderr,'', 'fast path launched an external command')
+            # Old monotonic-clock caches cannot authorize a shell skip after upgrade.
+            current_cache = cache.read_text()
+            cache.write_text(current_cache.rsplit('uptime-v1\n', 1)[0])
+            os.utime(cache, ns=(cfg.stat().st_atime_ns,cfg.stat().st_mtime_ns))
+            r=subprocess.run([str(ROOT/'bin/swarm-hook'),'--host','claude','turn'],input=payload,text=True,capture_output=True,env=env)
+            self.assertNotEqual(r.stderr,'', 'old clock cache authorized a skipping lease')
+            cache.write_text(current_cache)
+            os.utime(cache, ns=(cfg.stat().st_atime_ns,cfg.stat().st_mtime_ns))
             (fp/'agent-session-s').write_text('9999999999\nJ\ngeneration-1\n')
             payload=json.dumps({'session_id':'s','tool_name':'Bash','tool_input':{},'agent_id':'unknown'})
             r=subprocess.run([str(ROOT/'bin/swarm-hook'),'--host','claude','turn'],input=payload,text=True,capture_output=True,env=env)
@@ -38,6 +46,24 @@ from swarm import fastpath, paths, hooks
 from swarm.board.base import derive_agent_status
 import datetime as dt
 import time
+
+class ClockTests(unittest.TestCase):
+    @unittest.skipUnless(Path('/proc/uptime').exists(), 'requires /proc/uptime')
+    def test_now_agrees_with_shell_uptime(self):
+        uptime = float(Path('/proc/uptime').read_text().split()[0])
+        self.assertLess(abs(fastpath.now() - uptime), 1)
+
+    def test_now_falls_back_when_uptime_is_unavailable_or_invalid(self):
+        for error in (OSError('unavailable'), ValueError('invalid')):
+            with self.subTest(error=error), \
+                 mock.patch.object(Path, 'read_text', side_effect=error), \
+                 mock.patch.object(fastpath.time, 'monotonic', return_value=123.5):
+                self.assertEqual(fastpath.now(), 123.5)
+        for content in ('', 'invalid 100'):
+            with self.subTest(content=content), \
+                 mock.patch.object(Path, 'read_text', return_value=content), \
+                 mock.patch.object(fastpath.time, 'monotonic', return_value=123.5):
+                self.assertEqual(fastpath.now(), 123.5)
 
 @unittest.skipUnless(sys.platform.startswith("linux"), "the shell fast path uses Linux /proc/uptime")
 class LeaseIntegrationTests(Env):
@@ -193,6 +219,55 @@ class ShellDeliveryTests(Env):
 
 @unittest.skipUnless(sys.platform.startswith("linux"), "the shell fast path uses Linux /proc/uptime")
 class NotifierTests(unittest.TestCase):
+    def test_runtime_failure_clears_health_and_is_silent_at_entry(self):
+        from swarm.board import setup_board
+        from swarm.board.file import FileBoard
+        from swarm.cli import load_config
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            cfgfile = home / 'config.toml'
+            markers = home / 'markers'
+            markers.mkdir()
+            (markers / 'J.json').write_text(json.dumps({'job': 'J'}))
+            cfgfile.write_text(f'[board]\nbackend="file"\n[file]\npath="{home}/board"\n[hook]\nmarker_dir="{markers}"\n')
+            observed = []
+            def fail_relay(timeout):
+                observed.append(fastpath.read('live'))
+                # A second notifier loses the lock and must not clear the owner's health.
+                fastpath.main()
+                observed.append(fastpath.read('live'))
+                raise RuntimeError('relay failed')
+            with mock.patch.dict(os.environ, HOME=td, SWARM_CONFIG=str(cfgfile)), \
+                 mock.patch.object(sys, 'argv', ['swarm.fastpath']), \
+                 mock.patch.object(fastpath, 'now', return_value=100.25), \
+                 mock.patch.object(FileBoard, 'wait_for_change', side_effect=fail_relay):
+                setup_board(load_config(cfgfile))
+                fastpath.write('live', [9999999999])
+                fastpath.main()
+                self.assertEqual(fastpath.read('live'), ['0'])
+                self.assertEqual(observed, [['105'], ['105']])
+
+    def test_config_change_clears_original_notifier_health(self):
+        from swarm.board import setup_board
+        from swarm.board.file import FileBoard
+        from swarm.cli import load_config
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            cfgfile = home / 'config.toml'
+            markers = home / 'markers'
+            markers.mkdir()
+            (markers / 'J.json').write_text(json.dumps({'job': 'J'}))
+            cfgfile.write_text(f'[board]\nbackend="file"\n[file]\npath="{home}/board"\n[hook]\nmarker_dir="{markers}"\n')
+            with mock.patch.dict(os.environ, HOME=td, SWARM_CONFIG=str(cfgfile)):
+                setup_board(load_config(cfgfile))
+                original = fastpath.directory()
+                def change_config(timeout):
+                    cfgfile.write_text(cfgfile.read_text() + '\n')
+                    return False
+                with mock.patch.object(FileBoard, 'wait_for_change', side_effect=change_config):
+                    fastpath.notifier()
+                self.assertEqual((original / 'live').read_text(), '0\n')
+
     def test_startup_invalidates_read_to_listen_gap_and_crash_expires_health(self):
         with tempfile.TemporaryDirectory() as td:
             home=Path(td); cfgfile=home/'config.toml'
@@ -258,9 +333,22 @@ class FastStopTests(respawn_tests.StopTests):
 
 @unittest.skipUnless(sys.platform.startswith("linux"), "the shell fast path uses Linux /proc/uptime")
 class ContactBoundaryTests(Env):
+    def test_notifier_health_uses_the_same_clock_as_its_deadline(self):
+        with mock.patch.dict(os.environ, SWARM_CONFIG=str(self.config)), \
+             mock.patch.object(fastpath, 'now', return_value=100.25), \
+             mock.patch.object(fastpath.time, 'monotonic', return_value=900), \
+             mock.patch.object(fastpath.subprocess, 'Popen') as spawn:
+            cfg = {**self.cfg, 'board': {**self.cfg['board'], 'backend': 'file'}}
+            fastpath.write('live', [105])
+            fastpath.ensure_notifier(cfg)
+            self.assertEqual(spawn.call_count, 0)
+            fastpath.write('live', [100])
+            fastpath.ensure_notifier(cfg)
+            self.assertEqual(spawn.call_count, 1)
+
     def test_fractional_clock_and_concurrent_hooks_cannot_shorten_the_window(self):
         with mock.patch.dict(os.environ,SWARM_CONFIG=str(self.config),SWARM_HOOK_FASTPATH='1'), \
-             mock.patch.object(fastpath.time,'monotonic',return_value=100.9), \
+             mock.patch.object(fastpath,'now',return_value=100.9), \
              mock.patch.object(fastpath,'ensure_notifier'):
             first=fastpath.Lease(self.cfg,'claude',{'agent_id':'agent-1'})
             second=fastpath.Lease(self.cfg,'claude',{'agent_id':'agent-1'})
@@ -270,7 +358,7 @@ class ContactBoundaryTests(Env):
             second.finish()
             first.contacted=True
             first.finish()
-            with mock.patch.object(fastpath.time,'monotonic',return_value=115.8):
+            with mock.patch.object(fastpath,'now',return_value=115.8):
                 third=fastpath.Lease(self.cfg,'claude',{'agent_id':'agent-1'})
                 self.assertFalse(third.due)
                 third.finish()
