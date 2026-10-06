@@ -7,6 +7,8 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 ## [Unreleased]
 
 ### Added
+- The `swarm-ask` plugin: structured questions to the human, roles or agents; answers, comments and corrections; full answer delivery, a watch questions pane and pending human questions in orchestrator context.
+- Optional `[notify] on_question` commands run detached with a five-second timeout, safe arguments/environment values and failures reported by `swarm doctor`.
 - Generic blockers and append-only event history (schema 17): `swarm blockers`, `swarm blocker resolve`, and `swarm blocker comment`; several decisions can wait independently on a job.
 - Core plugin hooks for blocker kinds, expiry, notification events, watch panes, and orchestrator context. Decision deadlines expire in the existing sweep, including paused and closed jobs; unanswered blockers without defaults are flagged overdue once.
 

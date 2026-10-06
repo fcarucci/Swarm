@@ -373,3 +373,5 @@ project memory, the security model, and the full command and configuration refer
 
 Apache-2.0, © Francesco Carucci. You can use, modify and redistribute it; keep the
 [NOTICE](NOTICE) file and credit the author. See [LICENSE](LICENSE).
+
+Structured decisions use the shipped `swarm-ask` CLI plugin: `swarm ask --job J --to human "Question?" --options a,b --default a --expires 2h --blocks "dependent work"`. Answer with `swarm answer ID --option b`, or list them with `swarm questions --job J --open`. Questions show in the orchestrator context and watch pane; full answers reach the asker before its next tool call. Optional `[notify] on_question` runs a detached command without a shell. See [ask/answer](docs/REFERENCE.md#structured-questions-askanswer-plugin).

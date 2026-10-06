@@ -30,7 +30,7 @@ class Env(unittest.TestCase):
     """A private swarm installation: config, marker dir, spool dir, board storage, $HOME.
     The CLI plugins shipped with the skills are disabled (core runs on its own, its output is the
     core's); a test of a plugin lists none in `plugins_disabled`."""
-    plugins_disabled = ("engineering-team",)
+    plugins_disabled = ("engineering-team", "swarm-ask")
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="swarm-test-", dir=os.environ.get("TMPDIR")))

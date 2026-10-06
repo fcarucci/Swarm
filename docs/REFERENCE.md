@@ -2526,6 +2526,64 @@ used by commands, with per-job plugin data and a borrowed board. Registration re
 kinds and reserves `wait` for core. Failed registration removes all of a plugin's partial hooks;
 callback errors are reported on stderr and cannot undo a blocker or break core commands.
 
+## Structured questions (ask/answer plugin)
+
+The shipped `swarm-ask` CLI plugin uses schema-17 blockers and schema-16 per-job plugin data.
+Disable it with `[plugins] disabled = ["swarm-ask"]` when structured questions are not wanted.
+Core blockers remain usable without the plugin.
+
+```sh
+swarm ask --job J --to human "Choose a format?" --options json,toml --default json --expires 2h --blocks "the exporter"
+swarm ask --job J --to @EL "Which interface should the exporter expose?"
+swarm answer 12 "Use JSON"
+swarm answer 12 --option json --comment "Matches the consumer"
+swarm answer 12 --default
+swarm answer 12 --comment "Suggestion only"
+swarm answer 12 --reopen "Use TOML instead"
+swarm questions --job J --open --to me
+swarm questions --all
+```
+
+Questions retain their full text, options, default and blocked-work description in the plugin's
+job data. Values are chunked within the existing per-value storage bound, without a board-message
+length limit. A short board summary preserves an `answer: swarm answer ID` pointer. Each ask opens
+one blocker: only dependent work waits, and agents continue independent work.
+
+A role address uses the current seat holder at answer time, including when the seat has changed
+since asking. Named agents and the human are also valid addressees. Only the addressee may answer;
+the human can answer any question; everyone else can comment. Agents cannot answer human questions,
+including through `blocker resolve` while this plugin is loaded. Agent identity comes from the host
+session's active roster/route; calls outside an agent session are recorded as `human`. This is an
+OS-user/shared-session audit boundary, not cryptographic authentication.
+
+`--reopen TEXT` corrects an answered question or an applied default, records reopened/resolved audit
+events, and delivers the replacement to the asker. It does not simply leave the question open.
+Defaults are optional. Expiry applies one or flags the question overdue once and leaves it open.
+The core expiry sweep also works in paused/closed jobs; its answer notices are bookkeeping.
+
+The asker receives an addressed summary through existing board-message hooks and full answer text
+through `api.add_agent_lines(fn)`: `fn(ctx, job, agent_key) -> list[str]` runs before each agent tool
+call. Callback failures are isolated and reported; partial plugin registrations remove these hooks.
+The question plugin records a delivery cursor in its job data to avoid repeating full answers.
+Answers received while an agent is absent remain durable for its next turn.
+
+The orchestrator sees `N open questions for you (oldest Nm): Q12 Q15` for questions addressed to the
+human. Watch adds a `QUESTIONS` pane with id, addressee, age, default yes/no and time remaining;
+`OVERDUE` marks elapsed unanswered deadlines. `status --job` lists the open blockers.
+
+```toml
+[notify]
+on_question = "your-command {event} {job} {id} {to} {summary}"
+```
+
+The events are `opened`, `answered`, `expired`, `overdue`. The command is split into argv tokens
+before substitution, then executed without a shell: each token stays one argument even when text
+contains spaces or shell syntax. The values also appear in `SWARM_EVENT`, `SWARM_JOB`, `SWARM_ID`,
+`SWARM_TO`, `SWARM_SUMMARY`. Use an executable or script for pipelines and shell features. The worker
+runs detached, has a five-second timeout and discards command output. Launch/timeout/exit failures
+are isolated from ask/answer, logged in `question-notify-errors.log` next to the config, and shown
+by `swarm doctor`. No notification command means no worker is launched.
+
 ## License
 
 Apache-2.0, © Francesco Carucci. Modify and redistribute freely; keep the `NOTICE` file and credit the author. See `LICENSE` and `NOTICE`.

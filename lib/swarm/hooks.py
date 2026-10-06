@@ -1281,9 +1281,22 @@ def _on_turn(board, agent_id: str, name: str, job: str, cfg: dict, sid: str | No
         if not moved:
             parts.append(_roster_update(board, agent_id, job, roster, state, cfg))
         parts += _memory_turn(board, cfg, agent_id, job, state)
+    parts.extend(_agent_plugin_lines(board, cfg, job, agent_id))
     text = "\n\n".join(p for p in parts if p)
     if text:
         _out("PreToolUse", text)
+
+
+def _agent_plugin_lines(board, cfg, job, agent_key):
+    try:
+        from swarm import plugins, paths, cli
+        reg = plugins.Registry(cfg, cfg.get("_config_path") or paths.config_path(),
+                               core_commands=tuple(cli.BOARD_COMMANDS) + tuple(cli.COMMANDS)).load()
+        board.plugin_registry = reg
+        return [_t(line) for line in reg.agent_lines(job, agent_key, board)]
+    except Exception as exc:
+        _log_error('agent plugin context', agent_key, exc)
+        return []
 
 
 def _on_event(board, event: str, agent_id: str, sid: str | None, bound: dict, unbound: dict,

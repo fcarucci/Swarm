@@ -166,6 +166,10 @@ class PluginAPI:
         """fn(ctx, job)->list[str] appended to the orchestrator's tool-call context."""
         self._add_hook(self._r.orchestrator_hooks, fn)
 
+    def add_agent_lines(self, fn: Callable) -> None:
+        """fn(ctx, job, agent_key)->list[str], injected before the agent's next tool call."""
+        self._add_hook(self._r.agent_hooks, fn)
+
     def _add_hook(self, hooks, fn):
         if not callable(fn): raise TypeError('fn must be callable')
         hooks.append((self.name, fn))
@@ -185,6 +189,7 @@ class Registry:
         self.blocker_event_hooks: list[tuple[str, Callable]] = []
         self.watch_hooks: list[tuple[str, Callable]] = []
         self.orchestrator_hooks: list[tuple[str, Callable]] = []
+        self.agent_hooks: list[tuple[str, Callable]] = []
 
     # ---- loading
 
@@ -357,7 +362,7 @@ class Registry:
         return out
 
     def _drop_blocker_hooks(self, plugin):
-        for hooks in (self.blocker_event_hooks, self.watch_hooks, self.orchestrator_hooks):
+        for hooks in (self.blocker_event_hooks, self.watch_hooks, self.orchestrator_hooks, self.agent_hooks):
             hooks[:] = [h for h in hooks if h[0] != plugin]
         self.blocker_kinds = {k:v for k,v in self.blocker_kinds.items() if v[0] != plugin}
 
@@ -375,6 +380,15 @@ class Registry:
 
     def orchestrator_lines(self, job, board=None):
         return self._lines(self.orchestrator_hooks, 'orchestrator', job, board)
+
+    def agent_lines(self, job, agent_key, board=None):
+        out = []
+        for name, fn in self.agent_hooks:
+            try:
+                out.extend(str(line) for line in fn(self.context(name, board), job, agent_key) or ())
+            except Exception as exc:
+                self._warn(name, 'agent context', exc)
+        return out
 
     def blocker_event(self, board, event):
         for name, fn in self.blocker_event_hooks:
