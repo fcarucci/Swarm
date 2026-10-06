@@ -1,4 +1,4 @@
-"""Recover locally-created jobs whose last coordinator and workers disappeared."""
+"""Recover locally-enrolled jobs whose last coordinator and workers disappeared."""
 from __future__ import annotations
 import datetime as dt
 from swarm.supervisor.stuck import SUPERVISOR_NAME, WAITING_PREFIX
@@ -10,9 +10,10 @@ def local_record(cfg, js):
     from swarm import enrolment
     from swarm.board.autoinit import store_key
     key = store_key(cfg)
-    owner = enrolment.find_job_owner(key, js.job)
-    rec = enrolment.find_job(key, js.job)
-    return rec if owner and rec else None
+    # The unsandboxed activation hook writes job records in this machine/user's
+    # private enrolment directory. Existing records predate separate owner records
+    # and already prove local ownership; board rows alone never authorize a launch.
+    return enrolment.find_job(key, js.job)
 
 
 def human_question(board, js):
@@ -110,7 +111,7 @@ def run(board, cfg, sup, state, *, job=None, now=None, dry_run=False, say=print,
         why = (None if wd else "coordinator work directory is gone") or \
               (command.workdir_problem(cfg, wd) if wd else None) or \
               (command._workdir_hold(cfg, wd) if wd else None) or \
-              (None if binary and (which or shutil.which)(binary) else "host executable unavailable") or \
+              (None if binary and (which or shutil.which)(binary) else f"host executable unavailable for {rec.harness}") or \
               (None if scope_ok() else command.NO_MANAGER_NOTE)
         if why:
             say(f"not restarting orphan {js.job}: {why}")

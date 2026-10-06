@@ -1229,7 +1229,7 @@ restart.
 **Restarts.** `swarm supervise` runs every `timer_minutes` (5) from a systemd user timer that
 `swarm init`, `swarm bootstrap` or `swarm upgrade` installs. Each replacement launches in its own systemd user scope
 (`systemd-run --user --scope`); with no user systemd manager at all, no replacement can be
-launched, a notice is posted once per job, and `swarm doctor` reports FAIL with the fix
+launched, a notice is posted once per job, and `swarm doctor` reports WARN with the fix
 `loginctl enable-linger $USER`. A manager that is up but with linger off is a separate, milder
 case: replacements still launch, but they stop when the last login session ends, so `swarm
 doctor` reports that as WARN, same fix. Linger has to be enabled for every OS user that hosts
@@ -1263,8 +1263,11 @@ gets one close reminder. The coordinator resumes through the existing restore/br
 runner machinery on its recorded Claude/Codex host and work directory, with its task, goal,
 last verdict and recent `brief_posts` board messages. It can spawn workers to continue the job.
 Attempts back off for 15, 30 and 60 minutes and are capped by `orphan_max_restarts` (3) per
-rolling 24 hours. A cap posts `GAVE UP` once. Creation proof is local and private; jobs without
-that proof are skipped. All the existing launch, approval and budget checks still apply.
+rolling 24 hours. A cap posts `GAVE UP` once. The host-private job activation enrolment record
+proves local ownership, including for existing jobs without a separate owner record; jobs without that enrolment record are skipped. A missing
+Claude/Codex executable for this OS user holds recovery with one board notice
+(`host executable unavailable for <host>`); doctor reports WARN until the harness is installed.
+All the existing launch, approval and budget checks still apply.
 
 **Launch authority.** A board row never decides whether, where or how a replacement starts: rows
 can be written by any agent and, through a shared database role, by the other OS user. The

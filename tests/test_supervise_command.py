@@ -213,11 +213,19 @@ class SuperviseTests(SuperviseEnv):
         self.assertIsNone(command.workdir_for(self.cfg, enrol(self.cfg, "x", cwd="/")))
         self.assertIsNone(command.workdir_for(self.cfg, enrol(self.cfg, "y", cwd=self.tmp / "gone")))
 
-    def test_missing_binary_refused(self):
-        self.supervise(which=lambda b: None)
-        self.assertEqual(self.restarts()[0].outcome, "refused")
-        self.assertTrue(any("claude not found" in p for p in self.posts()))
-        self.assertIn("permanent", st.log_path().read_text())     # refused is final: logged clearly
+    def test_missing_host_executable_is_held_once(self):
+        for harness in ("claude", "codex"):
+            with self.subTest(harness=harness):
+                enrol(self.cfg, "orig", harness=harness, cwd=self.work)
+                self.h.update_agent("orig", harness=harness)
+                self.assertEqual(self.supervise(which=lambda b: None), 0)
+                self.assertEqual(self.supervise(which=lambda b: None), 0)
+                self.assertEqual(self.restarts(), [])
+                self.assertEqual(self.started, [])
+                held = [p for p in self.posts() if f"host executable unavailable for {harness}" in p]
+                self.assertEqual(len(held), 1)
+        self.supervise()
+        self.assertEqual(len(self.started), 1)
 
     def test_other_users_agents_are_not_restarted(self):
         self.supervise(start_runner=lambda c, r: 1)       # closes and restarts ours

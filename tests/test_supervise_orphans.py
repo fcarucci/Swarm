@@ -1,10 +1,14 @@
 """Orphan job eligibility, bounded retries, and coordinator restart context."""
 import datetime as dt
 import unittest
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest import mock
 from support import MemoryHarness  # sets import path
 from swarm.supervisor import orphans, settings
+
+LOCAL_RECORD = orphans.local_record
 
 NOW = dt.datetime(2026, 10, 5, 12, tzinfo=dt.timezone.utc)
 
@@ -48,7 +52,7 @@ class OrphansTest(unittest.TestCase):
         self.resume = patch.start(); self.addCleanup(patch.stop)
     def run_pass(self, **kw):
         orphans.run(self.b, self.cfg, self.sup, self.state, now=NOW,
-                    which=lambda binary: binary, say=self.out.append, **kw)
+                    which=kw.pop("which", lambda binary: binary), say=self.out.append, **kw)
     def test_active_restarts_with_last_host_and_context(self):
         self.run_pass()
         self.assertEqual(self.resume.call_count, 1)
@@ -132,13 +136,33 @@ class OrphansTest(unittest.TestCase):
         self.assertEqual(run["argv"],["codex","exec","-"])
         self.assertTrue(b.restarts(job="J")[0].reason.startswith("orphan-coordinator:"))
         self.assertEqual(b.agents("J")[0].role,"coordinator")
-    def test_owner_and_coordinator_both_required(self):
-        with mock.patch("swarm.enrolment.find_job_owner",return_value=None), \
-             mock.patch("swarm.enrolment.find_job",return_value=self.rec):
-            # bypass setUp's local_record mock to exercise implementation
-            from importlib import reload
-            real = reload(orphans).local_record
-            with mock.patch("swarm.board.autoinit.store_key",return_value="board"):
-                self.assertIsNone(real(self.cfg,self.b.js))
+    def test_job_record_alone_is_eligible(self):
+        from swarm import enrolment
+        with tempfile.TemporaryDirectory(prefix="swarm-orphan-enrolled-") as td, \
+             mock.patch("swarm.paths.host_dir", return_value=Path(td) / "host"), \
+             mock.patch("swarm.board.autoinit.store_key", return_value="board"):
+            rec = enrolment.write_job("board", job="J", harness="codex", session_id="sid", cwd="/work")
+            self.assertIsNone(enrolment.find_job_owner("board", "J"))
+            with mock.patch.object(orphans, "local_record", side_effect=LOCAL_RECORD):
+                self.run_pass()
+            self.resume.assert_called_once()
+            self.assertEqual(self.resume.call_args.kwargs["orphan"], rec)
+            self.assertIsNone(LOCAL_RECORD(self.cfg, NS(job="foreign")))
+
+    def test_owner_record_without_coordinator_is_ineligible(self):
+        with mock.patch("swarm.enrolment.find_job_owner", return_value=self.rec), \
+             mock.patch("swarm.enrolment.find_job", return_value=None), \
+             mock.patch("swarm.board.autoinit.store_key", return_value="board"):
+            self.assertIsNone(LOCAL_RECORD(self.cfg, self.b.js))
+
+    def test_missing_codex_is_held_once_without_spending_attempts(self):
+        self.run_pass(which=lambda binary: None)
+        self.run_pass(which=lambda binary: None)
+        self.resume.assert_not_called()
+        self.assertEqual(self.state["orphan_restarts"], {})
+        self.assertEqual(len(self.b.posts), 1)
+        self.assertIn("host executable unavailable for codex", self.b.posts[0][1])
+        self.run_pass()
+        self.resume.assert_called_once()
 
 if __name__ == "__main__": unittest.main()

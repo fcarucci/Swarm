@@ -726,20 +726,22 @@ for b in memory sqlite file; do SWARM_TEST_BACKEND=$b .venv/bin/python -B -m uni
 
 ## Supervisor (automatic crash recovery)
 
-Automatic crash recovery is enabled by default. Set `[supervise] enabled = true` in
-`~/.config/swarm/config.toml`, then run `swarm init` or `swarm upgrade` to install the existing
+Automatic crash recovery is enabled by default. `swarm init` or `swarm upgrade` installs the
 systemd user timer. It runs every 5 minutes (`timer_minutes`); an explicit `enabled = false`
-keeps recovery off. The timer needs a user systemd manager; `swarm doctor` checks it.
+keeps recovery off. The timer needs a user systemd manager; `swarm doctor` warns when it or the
+harness is missing.
+Recovery holds with one board notice when the recorded harness is unavailable for this OS user.
 
 The supervisor restarts crashed agents under their previous name and role, using their recorded
 host and working directory. A job with no live agents and no recent activity for `orphan_minutes`
 (default 15) gets a coordinator restart using its stored task and recent board messages.
 Recovery continues existing work; the brief includes the last contact, tool and board context.
-Only jobs created by this machine and user are eligible for coordinator recovery. Agent recovery
+Only jobs with a private activation enrolment record for this machine and OS user are eligible
+for coordinator recovery, including existing jobs recorded before automatic recovery. Agent recovery
 uses this user's local enrolment records. Paused or closed jobs, human/external waits and open
 questions are excluded. An unanswered `?` message addressed to the owner, user, human or
 Francesco among the last 100 board messages counts as a question wait. Use `swarm wait --on`
-for other external waits. Jobs without private creation proof (including older jobs) are skipped.
+for other external waits. Jobs without a private enrolment record are skipped.
 A met verdict gets one board reminder to close the job.
 
 Coordinator retries back off for 15, 30 and 60 minutes and stop after `orphan_max_restarts`

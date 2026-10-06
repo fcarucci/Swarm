@@ -148,7 +148,7 @@ class DoctorSupervisorTests(Env):
         self.assertFalse(checks["supervise last run"].ok)
         self.assertIn("never", checks["supervise last run"].detail)
         self.assertIsNone(checks["linger"].ok)
-        self.assertFalse(checks["supervise harness"].ok)
+        self.assertIsNone(checks["supervise harness"].ok)
 
     def test_off_file_and_stale_run(self):
         self.cfg["supervise"] = {"enabled": True, "timer_minutes": 2}
@@ -176,16 +176,16 @@ class DoctorSupervisorTests(Env):
         self.cfg["supervise"] = {"enabled": True}
         self.assertIsNone(self.checks(host="codex")["supervise codex hooks"].ok)
 
-    def test_no_user_manager_is_one_fail_and_skips_bus_dependent_checks(self):
+    def test_no_user_manager_is_one_warning_and_skips_bus_dependent_checks(self):
         """Reconciles with the containment check: with no user manager, doctor prints one
-        FAIL (fix: loginctl enable-linger $USER), not a contradictory pile of timer/last-run/
+        WARN (fix: loginctl enable-linger $USER), not a contradictory pile of timer/last-run/
         linger lines that can never succeed without a manager."""
         self.cfg["supervise"] = {"enabled": True}
         checks = self.checks(scope=False)
         self.assertNotIn("supervise timer", checks)
         self.assertNotIn("supervise last run", checks)
         self.assertNotIn("linger", checks)
-        self.assertIs(checks["replacement scope"].ok, False)
+        self.assertIsNone(checks["replacement scope"].ok)
         self.assertIn("loginctl enable-linger $USER", checks["replacement scope"].fix)
         # unrelated checks (not bus-dependent) still run
         self.assertIn("supervise harness", checks)
@@ -219,10 +219,10 @@ class DoctorSupervisorTests(Env):
         only_codex = lambda b, path=None: "/usr/bin/codex" if b == "codex" else None
         self.assertTrue(self.checks(host=None, which=only_codex)["supervise harness"].ok)
 
-    def test_no_host_and_no_harness_at_all_fails(self):
+    def test_no_host_and_no_harness_at_all_warns(self):
         self.cfg["supervise"] = {"enabled": True}
         c = self.checks(host=None, which=lambda b, path=None: None)["supervise harness"]
-        self.assertFalse(c.ok)
+        self.assertIsNone(c.ok)
         self.assertIn("claude", c.detail)
         self.assertIn("codex", c.detail)
 
@@ -230,7 +230,7 @@ class DoctorSupervisorTests(Env):
         self.cfg["supervise"] = {"enabled": True}
         self._hooks_ran("claude")
         only_codex = lambda b, path=None: "/usr/bin/codex" if b == "codex" else None
-        self.assertFalse(self.checks(host=None, which=only_codex)["supervise harness"].ok)
+        self.assertIsNone(self.checks(host=None, which=only_codex)["supervise harness"].ok)
 
     def test_harness_check_uses_the_service_units_path(self):
         self.cfg["supervise"] = {"enabled": True}

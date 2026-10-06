@@ -682,13 +682,21 @@ def _act(board, cfg: dict, sup: dict, c: Candidate, state: dict, *, start_runner
     workdir = workdir_for(cfg, rec)
     binary = sup.get(f"{harness}_bin") if harness in ("claude", "codex") else None
     row_harness = a.harness or "claude"
+    if binary and not which(binary):
+        # A shared host may install each harness for a different OS user. Hold until
+        # this user's harness is available; do not spend a permanent refusal attempt.
+        why = f"host executable unavailable for {harness}"
+        if _post_once(board, state, f"executable|{_host()}|{js.job}|{harness}", js.job,
+                      f"not restarting {a.name}: {why}"):
+            log(f"not restarting {a.name} on {js.job}: {why}")
+        _clear_wait(board, js.job, a.name)
+        return False
     why = (None if rec is not None else NOT_ENROLLED) or \
           (None if row_harness == harness else
            f"its board row's harness {row_harness!r} is not the one it was enrolled with here "
            f"({harness!r})") or \
           (None if binary else f"its recorded harness {harness!r} is unknown") or \
           (None if workdir else "its work directory is unknown or gone") or \
-          (None if which(binary) else f"{binary} not found on PATH") or \
           (workdir_problem(cfg, workdir) if workdir else None)
     if not why and workdir:   # project configuration: wait (posted once) until approved, record nothing
         config_why = _workdir_hold(cfg, workdir)
