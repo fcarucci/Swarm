@@ -284,4 +284,7 @@ class PluginTests(PluginEnv):
         ''')
         self.cli("activate", "--job", "J")
         rc, out, _ = self.cli("put")
-        self.assertEqual(out.strip(), "{'k': 'v'} {'kv.k': 'v'}")
+        # Core pipeline metadata shares job_data; the plugin's view remains namespaced.
+        self.assertTrue(out.startswith("{'k': 'v'} "), out)
+        self.assertIn("'kv.k': 'v'", out)
+        self.assertIn("'pipeline.started_at':", out)

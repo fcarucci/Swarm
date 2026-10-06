@@ -733,6 +733,10 @@ class SqliteBoard(SqlBlockers, Board):
                 row = c.execute("SELECT goal, verdict, max_hours FROM jobs WHERE job = ?", (job,)).fetchone()
                 if not row or not guard.allows(*row) or any(protects(b, self.now()) for b in self.blockers(job)):
                     return False
+                if guard.settled and row[0] and row[2] is None:
+                    from swarm.review import auto_close_pending
+                    if auto_close_pending(self, job):
+                        return False
             return self._close(c, job, status, outcome, forced, closed_by)
 
     def _close(self, c: sqlite3.Connection, job: str, status: str, outcome: str | None,
@@ -753,10 +757,12 @@ class SqliteBoard(SqlBlockers, Board):
         # Under the write lock (BEGIN IMMEDIATE): nothing can change between the checks and
         # the close, and a concurrent sweep sees the job closed once it gets the lock.
         with self._tx() as c:
-            row = c.execute("SELECT COALESCE(activated_at, created_at) FROM jobs WHERE job = ? "
-                            "AND status = 'active' AND waiting_on IS NULL "
-                            "AND (goal IS NULL OR verdict = 'met')", (job,)).fetchone()
+            row = c.execute("SELECT COALESCE(activated_at, created_at), goal, verdict FROM jobs WHERE job = ? "
+                            "AND status = 'active' AND waiting_on IS NULL", (job,)).fetchone()
             if not row or _dt_(row[0]) >= before:
+                return None
+            from swarm.review import completion_pending
+            if completion_pending(self, job, row[1], row[2]):
                 return None
             start, now = _dt_(row[0]), self.now()
             rows = c.execute("SELECT state, current_tool, tool_started_at, joined_at, last_seen, "
@@ -869,13 +875,14 @@ class SqliteBoard(SqlBlockers, Board):
 
     def set_job_goal(self, job: str, goal: str) -> bool:
         with self._tx() as c:
-            row = c.execute("SELECT goal FROM jobs WHERE job = ? AND status = 'active'", (job,)).fetchone()
+            row = c.execute("SELECT goal, plugin_data FROM jobs WHERE job = ? AND status = 'active'", (job,)).fetchone()
             if row is None:
                 return False
             if row[0] != goal:
+                from swarm.review import clear_verdict_data
                 c.execute("UPDATE jobs SET goal = ?, verdict = NULL, verdict_reason = NULL, "
-                          "verdict_next = NULL, verdict_by = NULL, verdict_at = NULL WHERE job = ?",
-                          (goal, job))
+                          "verdict_next = NULL, verdict_by = NULL, verdict_at = NULL, plugin_data = ? WHERE job = ?",
+                          (goal, clear_verdict_data(row[1]), job))
             return True
 
     def claim_verifier(self, agent_key: str, job: str) -> bool:
@@ -907,15 +914,23 @@ class SqliteBoard(SqlBlockers, Board):
             return SpawnGrant(True, mine + 1, total + 1)
 
     def record_verdict(self, job: str, judge_name: str, verdict: str, reason: str,
-                       next_steps: str | None = None) -> bool:
+                       next_steps: str | None = None, artifact: str | None = None) -> bool:
         check_name(judge_name, "judge name")
         if verdict not in VERDICTS:
             raise BoardError(f"unknown verdict {verdict!r}")
-        return self._c().execute(
-            "UPDATE jobs SET verdict = ?, verdict_reason = ?, verdict_next = ?, verdict_by = ?, verdict_at = ? "
-            "WHERE job = ? AND EXISTS (SELECT 1 FROM agents a WHERE a.job = ? AND a.name = ? "
-            "AND a.judge AND a.left_at IS NULL)",
-            (verdict, reason, next_steps, judge_name, self._now(), job, job, judge_name)).rowcount > 0
+        from swarm.review import verdict_data
+        with self._tx() as c:
+            row = c.execute("SELECT plugin_data FROM jobs WHERE job = ? AND EXISTS "
+                "(SELECT 1 FROM agents WHERE job = ? AND name = ? AND judge AND left_at IS NULL)",
+                (job, job, judge_name)).fetchone()
+            if row is None:
+                return False
+            at = self.now()
+            c.execute("UPDATE jobs SET verdict = ?, verdict_reason = ?, verdict_next = ?, verdict_by = ?, "
+                "verdict_at = ?, plugin_data = ? WHERE job = ?",
+                (verdict, reason, next_steps, judge_name, at.isoformat(),
+                 verdict_data(row[0], artifact, verdict, reason, next_steps, judge_name, at), job))
+            return True
 
     def active_agent_name(self, agent_key: str) -> str | None:
         row = self._c().execute("SELECT name FROM agents WHERE agent_key = ? AND left_at IS NULL",
@@ -1402,15 +1417,16 @@ class SqliteBoard(SqlBlockers, Board):
                  "(SELECT count(*) FROM messages m WHERE m.job = jobs.job), "
                  "(SELECT max(created_at) FROM messages m WHERE m.job = jobs.job AND NOT (m.agent_name = 'swarm' AND m.message LIKE 'Blocker % expired:%')), "
                  "(SELECT a.name FROM agents a WHERE a.job = jobs.job AND a.judge AND a.left_at IS NULL), "
-                 "verdict_next, max_hours, waiting_until")
+                 "verdict_next, max_hours, waiting_until, plugin_data")
 
     def _job_status(self, c: sqlite3.Connection, r, now: _dt.datetime) -> JobStatus:
         (job, status, desc, task, outcome, by, session, created, activated, finished, project, goal,
          verdict, reason, verdict_by, verdict_at, forced, waiting_on, waiting_since, closed_by,
-         supervise, n_messages, last_message, judge, verdict_next, max_hours, waiting_until) = r
+         supervise, n_messages, last_message, judge, verdict_next, max_hours, waiting_until, plugin_data) = r
         sts = self._agent_statuses(c, job, now, with_messages=False)
         stamps = [a.last_contact_at for a in sts] + ([_dt_(last_message)] if last_message else [])
         count = lambda *st: sum(1 for a in sts if a.status in st)  # noqa: E731
+        from swarm.review import pipeline_status
         js = JobStatus(
             job=job, status=status, description=desc, task=task, outcome=outcome, created_by=by,
             session_id=session, created_at=_dt_(created), activated_at=_dt_(activated),
@@ -1421,7 +1437,8 @@ class SqliteBoard(SqlBlockers, Board):
             verdict=verdict, verdict_reason=reason, verdict_by=verdict_by, verdict_at=_dt_(verdict_at),
             completion_forced=bool(forced), judge=judge, waiting_on=waiting_on,
             waiting_since=_dt_(waiting_since), closed_by=closed_by, supervise=bool(supervise),
-            verdict_next=verdict_next, max_hours=max_hours, waiting_until=_dt_(waiting_until))
+            verdict_next=verdict_next, max_hours=max_hours, waiting_until=_dt_(waiting_until),
+            **pipeline_status(plugin_data))
 
         return rollup(js, self.blockers(job), now)
 

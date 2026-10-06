@@ -547,6 +547,10 @@ class JobStatus:
     open_blockers: int = 0
     protected_blockers: int = 0
 
+    evidence_command: str | None = None
+    finalize: str | None = None
+    verdict_artifact: str | None = None
+
 
 @dataclass(frozen=True)
 class Restart:
@@ -1111,7 +1115,7 @@ WRITE_METHODS = (
     "claim_route", "tool_finished", "agent_stopped", "set_agent_role", "set_agent_runtime",
     "agent_turn_ended",
     "turns_resumed", "finish_quiet_agents", "leave", "close_agent", "claim_resume",
-    "set_job_supervise", "set_job_data", "record_restart", "set_restart_agent", "finish_restart",
+    "set_job_supervise", "set_job_data", "set_job_pipeline", "record_restart", "set_restart_agent", "finish_restart",
     "record_roster_sync", "record_memory_recall", "record_remembered", "record_nudge",
     "record_silence_nudge", "record_reply_reminder", "post", "read_unread", "read_new",
     "save_transcript", "refresh_transcript", "mark_capture_failed", "rotate_transcripts",
@@ -1415,6 +1419,9 @@ class Board(abc.ABC):
                        goal_stall_hours: float, watch) -> ExpiryAction | None:
         """What sweep_expiry should do with this job from the rollup alone: the stall close, else
         the orphan close, else nothing. The stall rule is checked first; a goal job has no orphan rule."""
+        from swarm.review import auto_close_pending
+        if js.goal and js.max_hours is None and auto_close_pending(self, js.job):
+            return None
         unmet = goal_unmet(js)
         if wait_protects(js):   # a protected wait/question/person blocker: neither rule applies
             return None
@@ -1610,7 +1617,7 @@ class Board(abc.ABC):
 
     @abc.abstractmethod
     def record_verdict(self, job: str, judge_name: str, verdict: str, reason: str,
-                       next_steps: str | None = None) -> bool:
+                       next_steps: str | None = None, artifact: str | None = None) -> bool:
         """The judge's verdict on the job's goal: only if `judge_name` is the job's ACTIVE judge
         (else False, nothing stored). Sets verdict (one of VERDICTS, anything else raises),
         verdict_reason, verdict_next = next_steps (None for met), verdict_by = judge_name, verdict_at = now; a later verdict replaces it.
@@ -1784,6 +1791,11 @@ class Board(abc.ABC):
         """Set one key of the job's plugin data (value None removes it), atomically with the read of
         the others. `key` is 1-64 of [a-z0-9_.-], `value` at most JOB_DATA_VALUE_MAX characters
         (ValueError otherwise). False if the job doesn't exist. Survives reactivation of the job."""
+
+    def set_job_pipeline(self, job: str, evidence_command: str | None, finalize: str | None) -> bool:
+        """Set the generic evidence and finalization instructions for a job."""
+        return (self.set_job_data(job, 'pipeline.evidence_command', evidence_command)
+                and self.set_job_data(job, 'pipeline.finalize', finalize))
 
     @abc.abstractmethod
     def set_job_supervise(self, job: str, on: bool) -> bool:

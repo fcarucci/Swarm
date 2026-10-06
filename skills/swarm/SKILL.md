@@ -266,24 +266,22 @@ user asks for one. Don't run duplicate jobs: merge similar ones (`swarm job merg
      An engineering lead can spawn children tagged `engineer` or `qa`; those labels survive
      enrolment and resume. Size the team against the host's available concurrency and the
      configured spawn limits. The plugin's default child-spawn budget is not a total team limit.
-   - **With `--goal`, spawn exactly one judge alongside the workers:** its prompt carries both
-     `[swarm job: <job>]` and `[swarm role: judge]`. The judge doesn't do the work: it gathers
-     evidence, asks the workers for proof and fixes with `--to`, and records its verdict with
-     `swarm verdict`. A second agent tagged as judge is refused (it joins as a worker and is told
-     why). Workers are told who the judge is and that the job isn't done until the verdict is
-     `met`; a `not_met` verdict is posted on the board, with its reason and the judge's
-     instructions (`--reason`, `--next`), for them to act on.
-   - **After a `not_met`, the next round is spawned, never left idle.** The judge records
-     `not_met` with `--reason` and `--next` (its instructions for the fixes). It may then spawn
-     the fix agents itself with that brief (workers or verifiers, never a judge), and more as
-     the work needs, within the spawn limits; it judges again when they finish. If no agent is
-     left at work (it stopped, or its spawns were refused), the swarm hooks tell you, on your
-     next tool call or when you try to end your turn: "judge <name> ruled not met: <reason>.
-     Spawn agents now with these instructions: <next>, plus a new judge for the same goal;
-     spawn more agents if the work needs it. Don't leave the job idle." Do that at once: fix
-     agents carrying the judge's instructions and a fresh judge (`[swarm role: judge]`), all
-     tagged `[swarm job: <job>]`. Repeat until the judge records `met`. Tell the user only when
-     a round makes no progress (the same verdict again, nothing fixed).
+   - **Hand off to the judge:** with `--goal` and the default supervisor pipeline, workers
+     publish `swarm done --job J --as NAME --artifact REF --summary "what changed"`.
+     References are opaque: a report path, deployment id, URL, or coding `branch@sha`.
+     The supervisor starts a judge on each new hand-off, reusing the job's single judge seat
+     between artifacts. You may also seat a judge explicitly with `[swarm role: judge]`.
+     Judges only inspect and record `swarm verdict --job J --as NAME --artifact REF met
+     --reason "evidence"` or `not_met --reason "missing" --next "fix brief"`.
+     They never fix, merge, push, or spawn fix workers. Their Stop hook blocks an exit
+     without an artifact-bound verdict. Pending external evidence means wait using the
+     configured command or record `not_met` with actionable next steps.
+   - **After a verdict:** the supervisor starts a fix worker for `not_met`, carrying `--next`,
+     or a separate finalizer for `met`. The finalizer executes the job's `--finalize`
+     instructions, records learnings, and completes the job after all hand-offs are finalized.
+     A newer artifact needs a fresh verdict. Retries use supervisor backoff and caps;
+     exhausted attempts post `GAVE UP`. Orchestrator reminders are informational while
+     the pipeline is enabled; no orchestrator session is needed for these transitions.
 
    - **Verifiers (optional, any number, with or without a goal):** an agent whose prompt also
      carries `[swarm role: verifier]` checks the others' claims instead of working. Workers
@@ -306,8 +304,7 @@ user asks for one. Don't run duplicate jobs: merge similar ones (`swarm job merg
      - at most `max_per_job` for the whole job (default 4; your own spawns don't count);
      - no deeper than `max_depth` (default 2: your agents can spawn helpers, the helpers can't).
 
-     Also refused: the judge spawning before it has recorded `not_met` (after that it may spawn
-     the fix agents, never a judge), a spawned judge, and any spawn when the board can't be
+     Also refused: any judge spawning helpers, a spawned judge, and any spawn when the board cannot be
      reached to check the limits. A granted spawn is posted on the board with its reason; a
      refused one is denied, and the agent is shown why. `max_per_job = 0` turns it off. The
      agents are told these rules; you don't need to repeat them. (Codex: see [Codex](#codex)
@@ -396,7 +393,7 @@ same; what differs:
     the task suffix must be nonempty. The explicit form is checked first, so
     `judge_assistant__research` is a custom worker role. Legacy names starting with
     `verifier` or `judge` still select those built-in roles when no `__` is present.
-    Other task names keep the default behavior. With `--goal`, spawn exactly one judge;
+    Other task names keep the default behavior. With `--goal`, the pipeline seats a judge on hand-off;
   - a swarm agent's own spawns are checked against the caps and the depth only: the
     `[swarm spawn: <why>]` line can't be read, so agents are told to say on the board why they
     spawned (the spawn itself is announced there), and a spawn requesting the `judge` role is refused.
@@ -446,8 +443,8 @@ way its own host does it. `swarm status --job <job>` shows each agent's HOST and
 | `activate --job J --attach [--session S]` | bind this session to a job that is already active (e.g. from the other host) without reopening it; see [One job, both hosts](#one-job-both-hosts) |
 | `activate … --goal G\|-` | give the job a goal: one judge (`[swarm role: judge]` in its prompt) decides when it is met; prints both tag lines |
 | `deactivate --job J [--status S] [--outcome O] [--force] [--delete-bank]` | switch the board off and close the job; `completed` needs the judge's `met` verdict when the job has a goal, unless `--force` (recorded). On a job that is already closed (e.g. auto-closed) it replaces the status and outcome |
-| `verdict --job J --as NAME met\|not_met "reason"` | the job's judge only: record the verdict on its goal and post it on the board (queued like `post` when the board is unreachable; a non-judge is refused) |
-| `wait --job J --on "<what>" [--for DURATION\|--until TIME]` / `resume --job J` | mark an open job as waiting for something (shown as `waiting` with the reason; `--for 90m` or `--until 17:30` bounds it, and a bounded wait with a future deadline protects the job from auto-close) / working again (an agent joining does this too) |
+| `verdict --job J --as NAME [--artifact REF] met\|not_met "reason"` | the job's judge only: record the verdict on its goal and post it on the board (queued like `post` when the board is unreachable; a non-judge is refused) |
+| `wait --job J --on "<what>" [--for DURATION\|--until TIME]` / `resume --job J` | mark an open job as waiting for something (shown as `waiting` with the reason; `--for 90m` or `--until 17:30` bounds it, and a bounded wait that has not ended protects the job from auto-close) / working again (an agent joining does this too) |
 | `blockers --job J [--open\|--all]` | list open blockers, or include resolved/expired history with `--all` |
 | `blocker resolve ID [--how TEXT]` / `blocker comment ID TEXT...` | resolve a blocker with an audit reason, or append a comment |
 | `pause --job J [--reason TEXT]` / `resume --job J [--host H]` | pause a whole job (nobody can join or post; every agent and its final transcript are saved) / resume it on this or another machine: the agents come back under their own names from the transcripts on the board |
@@ -458,6 +455,7 @@ way its own host does it. `swarm status --job <job>` shows each agent's HOST and
 | `job merge FROM --into TO` | merge two open jobs: FROM's active agents move to TO (live, keeping names), FROM's goal is appended to TO's, FROM closes `completed` with outcome `merged into TO`. TO keeps its judge; FROM's judge becomes a normal member (the command says so, so you can stop it). Refused for the same job, or a closed FROM or TO |
 | `move (--as NAME \| --key K) --to J` | move one live agent to another open job, without stopping it. Its next tool call shows a moved notice (job description, task, goal, roster) plus the new job's recent messages, once; posts made with its old `--job` land on its new job. A judge's seat is dropped. Refused for a closed or missing job |
 | `join --job J --key K [--role R] [--judge\|--verifier]` | allocate or return the unique name for agent key K; `--judge`/`--verifier` give that seat to an agent without the swarm's hooks (e.g. a one-off `codex exec` judge), which reads with `read --key K` and posts, and records verdicts, through the CLI |
+| `done --job J --as NAME [--artifact REF] [--summary TEXT]` | worker hand-off for artifact-bound review; `--branch B --sha S` is the coding alias |
 | `post --job J --as NAME [--to NAME\|@ROLE] "message"` | post (whitespace collapsed; capped at the board's message cap); `--to @EL\|@PM\|@QA\|@judge\|@<role>` goes to the current holders of that seat, and an unknown name, an empty seat or an author outside the job is refused |
 | `config board.message_max_chars [N] [--save]` | print the board's message cap, or set it to N (50-4000). When a user says "make board messages 500 characters", run `swarm config board.message_max_chars 500` (add `--save` to keep it in the config file too) |
 | `read --as NAME \| --key K [--job J] [--peek]` | messages new since the last read, excluding your own (`read_limit` at a time, then "(N more unread: run read again)"); `--peek` doesn't advance the cursor |
@@ -749,7 +747,7 @@ questions are excluded. Waiting jobs with zero live agents are normal, not orpha
 status and an empty who listing show the derived waiting/paused state and wait context. An unanswered `?` message addressed to the owner, user, human or
 Francesco among the last 100 board messages counts as a question wait. Use `swarm wait --on`
 for other external waits. Jobs without a private enrolment record are skipped.
-A met verdict gets one board reminder to close the job.
+A met artifact verdict goes to a separate finalizer when the review pipeline is enabled.
 
 Coordinator retries back off for 15, 30 and 60 minutes and stop after `orphan_max_restarts`
 (default 3) in 24 hours. Crashed agents have `max_restarts_per_agent` (default 3) in 24 hours,
@@ -757,6 +755,24 @@ alongside the existing job, runtime and host limits. A spent restart cap posts `
 All actions appear on the board as `swarm supervisor`. Use `swarm supervise --dry-run` to
 preview actions without changing the board or restart state. Existing work directory allowlists
 and `swarm supervise approve` checks apply to automatic recovery.
+
+### Review pipeline
+
+`[pipeline] enabled = true` is the default alongside the supervisor. It uses the same timer
+and private owner enrolment records. New `DONE REF` board posts (or `swarm done`) start
+artifact-bound review; multiple artifacts keep independent verdict histories shown in `status`.
+`swarm done --branch B --sha S` and `DONE B S` remain coding hand-off aliases.
+Set `judge_host = "claude"|"codex"` and optional `judge_model` (empty uses the judge's
+configured role model). `swarm activate --evidence-cmd "check evidence" --finalize "publish result"`
+sets per-job instructions. `[pipeline] evidence_wait_command` and `finalize` supply defaults;
+no evidence command is required for a report or investigation. `finalize_enabled = false`
+holds finalization while keeping judge/fix transitions on.
+
+The engineering-team plugin recognizes `branch@<full SHA>` and supplies exact-SHA GitHub CI
+and an INTEGRATOR recipe. Configure `[pipeline] integrate`, `merge_target`, `delete_branch`,
+`evidence_command`, and `repository` in `team.toml`; see `team.example.toml`.
+Generic core never interprets branches or CI. See [review pipeline](../../docs/REFERENCE.md#review-pipeline)
+for protocols and limits.
 
 
 - Stuck agents (dead, one tool call too long, silent 90 min) are closed and restarted headless

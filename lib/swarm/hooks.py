@@ -33,6 +33,7 @@ Hooks must never break the agent: every failure is swallowed and the hook exits 
 from __future__ import annotations
 
 import dataclasses
+import datetime as dt
 import re
 import json
 import os
@@ -383,9 +384,9 @@ def _spawn_refusal(board, agent_id: str, member, payload: dict, cfg: dict) -> st
     if per_job <= 0 or per_agent <= 0:
         return "spawning subagents is switched off for swarm agents"
     js = board.job_status(job)
-    if js and js.judge == member.name and js.verdict != "not_met":
-        return ("the judge spawns subagents only after it has recorded a not_met verdict (with --reason "
-                "and --next): it spawns the fix agents with that brief")
+    if (js and js.judge == member.name) or any(a.agent_key == agent_id and a.role == "judge"
+                                            for a in board.agents(job, include_departed=False)):
+        return "judges only judge; the supervisor spawns fix workers after a not_met verdict"
     # A recovered coordinator is a main host session, not a harness subagent. Its
     # private job activation record (written at enrolment) proves that root depth.
     from swarm import enrolment
@@ -531,10 +532,12 @@ def _judge_instructions(name: str, job: str, goal: str, cfg: dict, cap: int | No
         f"instructions become the brief the fix agents are spawned with, so make them complete on "
         f"their own. It is broadcast and shown by `swarm status --job`; judge again once the "
         f"workers have fixed it. The job can't be completed until your verdict is met.",
-        "- Only after you have recorded a not_met verdict may you spawn subagents: spawn the fix agents "
-        "yourself, each given your --next brief (plus its own part of it), and as many extra agents "
-        "as the work needs, within the spawn rules below. Never spawn a judge. Before a not_met "
-        "verdict, and after met, your spawns are refused: judging is yours alone.",
+        "- Judges only judge: never edit, fix, merge, push or spawn workers. The supervisor "
+        "starts fix workers from your --next brief, and a separate executor finalizes accepted work.",
+        "- You must record a verdict before stopping. Bind it with --artifact REF to the exact "
+        "hand-off you inspected; acceptance of one artifact never covers another. If external "
+        "evidence is pending or red, wait using the configured evidence command or record "
+        "not_met with reason 'evidence pending' and --next describing what is needed.",
         "- Verifiers, if the job has any, post VERIFIED/FAILED results: use them as evidence, but "
         "check anything the verdict rests on yourself.",
     ]
@@ -852,6 +855,24 @@ def _gate_spawn(board, agent_id: str, name: str, job: str, payload: dict, cfg: d
     return False
 
 
+def _gate_judge(board, agent_id: str, job: str, payload: dict) -> bool:
+    me = next((a for a in board.agents(job, include_departed=False) if a.agent_key == agent_id), None)
+    if me is None or me.role != "judge":
+        return True
+    lease = _CURRENT.get("lease")
+    if lease:
+        lease.eligible = False  # judges must never receive a lease bypassing write policy
+    host = current_host()
+    from swarm.shellguard import writes_files
+    command = host.shell_command(payload)
+    if host.denies_verifier(payload) or (command and writes_files(command)):
+        board.tool_finished(agent_id)
+        _deny("[swarm] Judges only judge: no editing, fixing, merging, pushing or spawning. "
+              "Record not_met with --next for the supervisor's fix worker.")
+        return False
+    return True
+
+
 def _gate_verifier(board, agent_id: str, is_verifier: bool, payload: dict) -> bool:
     """A verifier's writing tools and spawns are refused, and so are shell commands that look like
     they write (best effort, swarm.shellguard). True = go ahead."""
@@ -882,7 +903,7 @@ def _gate_new_member(board, agent_id: str, bound: dict, payload: dict, cfg: dict
         return
     verifier = any(a.agent_key == agent_id and a.role == "verifier"
                    for a in board.agents(job, include_departed=False))
-    if _gate_verifier(board, agent_id, verifier, payload):
+    if _gate_judge(board, agent_id, job, payload) and _gate_verifier(board, agent_id, verifier, payload):
         _gate_spawn(board, agent_id, name, job, payload, cfg)
 
 
@@ -1321,6 +1342,51 @@ def _on_turn(board, agent_id: str, name: str, job: str, cfg: dict, sid: str | No
         _out("PreToolUse", text)
 
 
+def _judge_stop(board, agent_id: str, cfg: dict, payload: dict) -> bool:
+    """A judge cannot silently disappear without concluding the assigned hand-off."""
+    route = board.route(agent_id)
+    job = route.member_job
+    if not job:
+        return True
+    me = next((a for a in board.agents(job, include_departed=False) if a.agent_key == agent_id), None)
+    if me is None or me.role != 'judge':
+        return True
+    from swarm.review import latest_handoffs, artifact_verdicts, judge_artifact, covered
+    js = board.job_status(job)
+    if js is None or js.status != 'active':
+        return True
+    artifact = judge_artifact(board, job, agent_id)
+    handoffs = latest_handoffs(board, job)
+    handoff = next((h for h in reversed(handoffs) if artifact is None or h.artifact == artifact), None)
+    artifact = artifact or (handoff.artifact if handoff else None)
+    if artifact is not None:
+        verdict = artifact_verdicts(board, job).get(artifact)
+        if (verdict and verdict.get('judge') == me.name and
+                dt.datetime.fromisoformat(verdict['at']) >= me.joined_at and
+                (handoff is None or covered(handoff, verdict))):
+            return True
+    elif js.verdict_by == me.name and js.verdict_at and js.verdict_at >= me.joined_at:
+        return True
+    from swarm import plugins
+    try:
+        recipe = plugins.pipeline_recipe(cfg, board, job, artifact)
+    except Exception as exc:
+        _log_error('judge evidence recipe', agent_id, exc)
+        recipe = {}  # failing recipes never allow a judge to stop silently
+    command = js.evidence_command or recipe.get('evidence_command') or (cfg.get('pipeline') or {}).get('evidence_wait_command')
+    if command:
+        # Evidence commands belong in the agent's ordinary permission boundary. Hooks run
+        # unsandboxed and must never execute board-supplied shell commands here.
+        from swarm.spool import deliver_verdict
+        if deliver_verdict(board, job, me.name, 'not_met', 'evidence pending',
+                           f'Run external evidence command {command}, resolve failures, and hand off the artifact again.', artifact):
+            return True
+    _OUTPUT.update({'decision': 'block', 'reason':
+        f'[swarm] Judge {me.name} must record swarm verdict --job {job} --as "{me.name}"'
+        + (f' --artifact "{artifact}"' if artifact else '')
+        + ' before stopping. Record met with evidence or not_met with --reason and --next.'})
+    return False
+
 def _agent_plugin_lines(board, cfg, job, agent_key):
     try:
         from swarm import plugins, paths, cli
@@ -1336,6 +1402,12 @@ def _agent_plugin_lines(board, cfg, job, agent_key):
 def _on_event(board, event: str, agent_id: str, sid: str | None, bound: dict, unbound: dict,
               payload: dict, cfg: dict, resume: dict | None = None) -> None:
     if event == "stop":
+        if resume is not None and board.active_agent_name(agent_id) is None:
+            # A headless agent may finish before its first tool call. Its authenticated
+            # restart marker must take the seat before the mandatory judge conclusion gate.
+            _enrol_resumed(board, agent_id, resume, payload, cfg)
+        if not _judge_stop(board, agent_id, cfg, payload):
+            return
         host = current_host()
         try:        # before the stop: set_agent_runtime only touches active rows
             board.set_agent_runtime(agent_id, None, payload.get("model") or host.agent_model(payload, agent_id))
@@ -1421,7 +1493,8 @@ def _on_event(board, event: str, agent_id: str, sid: str | None, bound: dict, un
         model = payload.get("model") or current_host().agent_model(payload, agent_id)
         if model:
             board.set_agent_runtime(agent_id, None, model)
-    if _gate_verifier(board, agent_id, member.verifier, payload) and \
+    if _gate_judge(board, agent_id, member.job, payload) and \
+            _gate_verifier(board, agent_id, member.verifier, payload) and \
             _gate_spawn(board, agent_id, member.name, member.job, payload, cfg):
         _on_turn(board, agent_id, member.name, member.job, cfg, sid, payload)
 
@@ -1592,6 +1665,8 @@ def _orchestrator_respawn(event: str, cfg: dict, sid: str | None, payload: dict)
     try:
         from swarm import respawn
         from swarm.board import open_board
+        pipeline_on = bool((cfg.get('supervise') or {}).get('enabled', True) and
+                           (cfg.get('pipeline') or {}).get('enabled', True))
         stop = event == "session-stop"
         if stop and payload.get("stop_hook_active"):
             return
@@ -1600,10 +1675,10 @@ def _orchestrator_respawn(event: str, cfg: dict, sid: str | None, payload: dict)
                 continue
             text = respawn.check(m["_path"], m["job"], force=stop, host=current_host(),
                                  open_board=lambda: open_board(cfg, init_timeout=HOOK_INIT_TIMEOUT),
-                                 cfg=cfg, session_id=sid)
+                                 cfg=cfg, session_id=sid, informational=pipeline_on)
             if not text:
                 continue
-            if stop:
+            if stop and not pipeline_on:
                 _OUTPUT.update({"decision": "block", "reason": text})
             else:
                 _out("PreToolUse" if event == "turn" else "PostToolUse", text)
@@ -1684,8 +1759,11 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
     if event == "session-end" and current_host().completes_on(event):
         _codex_session_end(cfg, sid, agent_id if resume is None and agent_id != sid else None, payload)
         return 0
-    if event == "session-stop" and (agent_id or resume is not None):
-        return 0   # the end of a subagent's (or a replacement's) turn: SubagentStop is theirs
+    if event == "session-stop" and resume is not None:
+        event = "stop"  # headless pipeline judges must conclude at their root Stop hook
+    elif event == "session-stop" and agent_id:
+        return 0   # harness subagents use SubagentStop
+
     lease = _CURRENT.get('lease')
     if not agent_id and lease and lease.enabled:
         markers, _ = _session_markers(cfg, sid) if sid else ({}, {})
@@ -1739,7 +1817,13 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
                 _out("SubagentStart", text)
             return 0
         _log_error(event, agent_id, exc)
-        # ...except that the spawn caps fail closed: with a job of this session active, an Agent
+        if event == "stop":
+            prompt = _spawn_prompt(payload, agent_id)
+            if resume is not None or _role(payload, agent_id, prompt) == "judge":
+                _OUTPUT.update({'decision': 'block', 'reason':
+                    '[swarm] Judge cannot stop while the board is unavailable: retry and record a verdict.'})
+        # ...except that the spawn caps fail closed:
+        # With a job of this session active, an Agent
         # call whose limits could not be checked is refused rather than let through.
         if event == "turn" and current_host().is_spawn(payload) and bound:
             _deny("[swarm] Spawn refused: the swarm board could not be reached to check the "
@@ -1763,6 +1847,6 @@ def _unchecked_verifier_write(payload: dict, agent_id: str) -> bool:
             if not (cmd and writes_files(cmd) is not None):
                 return False
         prompt = _spawn_prompt(payload, agent_id)
-        return prompt is None or _role(payload, agent_id, prompt) == "verifier"
+        return prompt is None or _role(payload, agent_id, prompt) in ("verifier", "judge")
     except Exception:
         return True

@@ -401,7 +401,7 @@ class SpoolFlushBoundsTests(Env):
         self.assertTrue(all(r["method"] for r in fake.requests))
 
     def test_every_board_call_of_a_delivery_shares_the_budget(self):
-        """A verdict takes two board calls (record, post): each is bounded by what is left."""
+        """Artifact lookup, verdict and post all share one decreasing delivery budget."""
         spool.spool_verdict(self.cfg, "J", "A", "met", "done")
         limits = []
         clock = ManualClock()
@@ -411,6 +411,18 @@ class SpoolFlushBoundsTests(Env):
             def op_timeout(self, seconds):
                 limits.append(seconds)
                 yield
+
+            def job_data(self, job):
+                clock.advance(0.05)
+                return {}
+
+            def agents(self, job):
+                clock.advance(0.05)
+                return []
+
+            def messages_after(self, after_id, job):
+                clock.advance(0.05)
+                return []
 
             def record_verdict(self, *a):
                 clock.advance(0.3)
@@ -422,9 +434,9 @@ class SpoolFlushBoundsTests(Env):
         with mock.patch("time.monotonic", clock):
             self.assertEqual(spool.flush_spool(Recording(), self.cfg, deadline=clock() + 1.0,
                                                op_timeout=1.0), 1)
-        self.assertEqual(len(limits), 2)
-        self.assertLessEqual(limits[0], 1.0)
-        self.assertLessEqual(limits[1], limits[0] - 0.25)
+        self.assertEqual(len(limits), 6)  # data, agents, data, hand-offs, record, post
+        for actual, expected in zip(limits, (1.0, 0.95, 0.90, 0.85, 0.80, 0.50)):
+            self.assertAlmostEqual(actual, expected)
 
     def test_board_op_timeout_bounds_a_wait_on_the_store(self):
         """On the backend under test: a post while another process holds the store's lock fails

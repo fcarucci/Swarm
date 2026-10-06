@@ -1,5 +1,5 @@
 """A complete PostgreSQL watch draw, fetched in one statement and rendered locally."""
-from dataclasses import fields
+from dataclasses import fields, replace
 from datetime import datetime
 from swarm.board.base import AgentStatus, JobStatus, Message, Restart, Blocker, parse_job_data
 
@@ -28,6 +28,9 @@ class SnapshotBoard:
         self.hidden, self.checks = row[5] or {}, row[6] or {}
         self.blocker_rows = rows(Blocker, row[7]) if len(row) > 7 else []
         self.plugin_data = row[8] or {} if len(row) > 8 else {}
+        from swarm.review import pipeline_status
+        self.job_rows = [replace(job, **pipeline_status(self.plugin_data.get(job.job)))
+                         for job in self.job_rows]
 
     def now(self):
         return self.stamp

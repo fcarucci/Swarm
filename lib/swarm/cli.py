@@ -1106,6 +1106,10 @@ def job_detail(board, job: str, color: bool, recent_minutes: int | None = None, 
                 (sup_line, sup_line or ""),
                 (transcripts is not None, _transcripts_line(transcripts or [])))
     head += [line for value, line in optional if value]
+    from swarm.review import artifact_verdicts
+    for artifact, verdict in artifact_verdicts(board, job).items():
+        head.append(f"artifact   {ts(artifact)}: {ts(verdict['verdict'])} by {ts(verdict['judge'])}")
+
     if j.open_blockers:
         head += ['blockers   ' + _blocker_line(board, b) for b in board.blockers(job)]
     if not include_agents:
@@ -2661,6 +2665,8 @@ def _parser() -> argparse.ArgumentParser:
                     "(1-64 letters, digits, spaces and . ' _ -)")
     ac.add_argument("--goal", help="what \"done\" means; one judge agent decides whether it is met, "
                                    "and completion waits for its met verdict; '-' reads it from stdin")
+    ac.add_argument("--evidence-cmd", help="command to wait for external evidence before judging")
+    ac.add_argument("--finalize", help="instructions for a separate executor after an artifact is accepted")
     ac.add_argument("--adopt-running", action="store_true",
                     help="also enrol subagents that were already running (default: only ones spawned from now on)")
     ac.add_argument("--attach", action="store_true",
@@ -2680,12 +2686,21 @@ def _parser() -> argparse.ArgumentParser:
                     help="delete an explicit project bank only after learnings are retained elsewhere")
     vd = sub.add_parser("verdict", help="the job's judge records whether the goal is met (posted on the board)")
     vd.add_argument("--job", required=True); vd.add_argument("--as", dest="name", required=True)
+    vd.add_argument("--artifact", help="opaque reference being judged (defaults to this judge hand-off)")
     vd.add_argument("verdict", choices=["met", "not_met"])
     vd.add_argument("reason", nargs="*", help="why (met: the words after the verdict; not_met: use --reason)")
     vd.add_argument("--reason", dest="reason_opt", help="why the judge ruled so (required for not_met)")
     vd.add_argument("--next", dest="next_steps",
                     help="not_met: concrete instructions to meet the goal: what to change, where, and "
                          "what the judge will re-check (required for not_met)")
+    dn = sub.add_parser("done", help="hand off work for independent judging")
+    dn.add_argument("--job", required=True)
+    dn.add_argument("--as", dest="name")
+    dn.add_argument("--key")
+    dn.add_argument("--artifact", help="opaque reference to the result")
+    dn.add_argument("--summary", default="", help="what was done and how to inspect it")
+    dn.add_argument("--branch", help="compatibility: branch part of a branch@sha artifact")
+    dn.add_argument("--sha", help="compatibility: commit part of a branch@sha artifact")
     wt = sub.add_parser("wait", help="mark an open job as waiting for something (shown by status/watch)")
     wt.add_argument("--job", required=True)
     wt.add_argument("--for", dest="for_", metavar="DURATION",
@@ -2947,6 +2962,7 @@ def cmd_activate(cfg: dict, args) -> int:
         new_job = board.job_status(args.job) is None
         board.open_job(args.job, args.description, task, session, os.environ.get("USER"),
                        project=args.project or "", goal=goal)
+        board.set_job_data(args.job, "pipeline.started_at", board.now().isoformat())
         if new_job:
             from swarm import enrolment
             from swarm.board.autoinit import store_key
@@ -2955,6 +2971,8 @@ def cmd_activate(cfg: dict, args) -> int:
                     harness=hosts.detect_cli_host(os.environ), session_id=session, cwd=os.getcwd())
             except (OSError, ValueError):
                 pass  # missing creation proof fails closed in the supervisor
+        if args.evidence_cmd is not None or args.finalize is not None:
+            board.set_job_pipeline(args.job, args.evidence_cmd, args.finalize)
         board.set_job_supervise(args.job, not args.no_supervise)
         if args.max_hours is not None:
             board.set_job_max_hours(args.job, args.max_hours)
@@ -2969,8 +2987,13 @@ def cmd_activate(cfg: dict, args) -> int:
               f"put this line in every subagent prompt for this job (it picks the job when this "
               f"session runs several):\n{tag_line(args.job)}")
         if goal:
-            print(f"the job has a goal: spawn exactly one judge, with this line too in its prompt; it "
-                  f"can't complete until the judge's verdict is met:\n{JUDGE_TAG_LINE}")
+            from swarm.supervisor import pipeline, settings as supervise_settings
+            if pipeline.settings(cfg)["enabled"] and supervise_settings.enabled(cfg) and not args.no_supervise:
+                print(f"the job has a goal: publish a worker hand-off with swarm done; the supervisor "
+                      f"starts the judge. An explicitly seated judge uses:\n{JUDGE_TAG_LINE}")
+            else:
+                print(f"the job has a goal: spawn exactly one judge, with this line too in its prompt; it "
+                      f"can't complete until the judge's verdict is met:\n{JUDGE_TAG_LINE}")
         print(f"optional: read-only verifiers that check the others' claims carry this line too:\n"
               f"{VERIFIER_TAG_LINE}")
 
@@ -3036,6 +3059,14 @@ def cmd_deactivate(cfg: dict, args) -> int:
                   f"{_error_name(exc)}). Retry, or override with --force.", file=sys.stderr)
             return 1
     refusal = _completion_refusal(js) if completing else None
+    if completing and board is not None and js is not None and js.goal:
+        from swarm.review import latest_handoffs, pending_artifacts, auto_close_pending
+        if latest_handoffs(board, args.job):
+            pending = pending_artifacts(board, args.job)
+            refusal = (f"not completing {args.job}: artifacts await a met verdict: " + ', '.join(pending)
+                       if pending else None)
+            if not refusal and auto_close_pending(board, args.job):
+                refusal = f'not completing {args.job}: accepted artifacts await finalization'
     if refusal and not args.force:
         board.close()
         print(refusal, file=sys.stderr)
@@ -3670,6 +3701,31 @@ def _moved_job(board, job: str, name: str) -> str | None:
     return a.job if a else None
 
 
+def _done_post_args(args):
+    import uuid
+    if bool(args.branch) != bool(args.sha) or (args.artifact and args.branch):
+        raise ValueError("use --artifact REF, or both --branch B and --sha S")
+    artifact = args.artifact or (f"{args.branch}@{args.sha}" if args.branch else 'handoff-' + uuid.uuid4().hex)
+    if not artifact.strip() or any(c in artifact for c in '\r\n'):
+        raise ValueError("artifact must be a nonempty single-line reference")
+    args.artifact = artifact
+    args.message = ["DONE " + json.dumps(artifact, ensure_ascii=False) + (" | " + args.summary if args.summary else '')]
+    args.to = None
+    return args
+
+
+def _board_done(board, cfg: dict, args) -> int | None:
+    try:
+        _done_post_args(args)
+    except ValueError as exc:
+        print(f"swarm done: {exc}", file=sys.stderr)
+        return 2
+    if len('DONE ' + json.dumps(args.artifact, ensure_ascii=False)) > board.message_cap():
+        print("swarm done: artifact exceeds the board message cap", file=sys.stderr)
+        return 2
+    return _board_post(board, cfg, args)
+
+
 def _board_post(board, cfg: dict, args) -> int | None:
     if not args.name and args.key:
         args.name = board.active_agent_name(getattr(args, "key", None))
@@ -3815,7 +3871,7 @@ def _board_verdict(board, cfg: dict, args) -> int:
     if text is None:
         return 1
     try:
-        recorded = deliver_verdict(board, args.job, args.name, args.verdict, text[0], text[1])
+        recorded = deliver_verdict(board, args.job, args.name, args.verdict, text[0], text[1], getattr(args, "artifact", None))
     except ValueError as exc:   # a name the board refuses (board.base.valid_name)
         print(f"verdict not recorded: {term_safe(exc)}", file=sys.stderr)
         return 1
@@ -4066,6 +4122,7 @@ BOARD_COMMANDS = {
     "join": _board_join,
     "move": _board_move,
     "post": _board_post,
+    "done": _board_done,
     "config": _board_config,
     "verdict": _board_verdict,
     "wait": _board_wait,
@@ -4188,6 +4245,13 @@ def _run_command(cfg: dict, args) -> int:
     try:
         board_cm = open_board(cfg, readers=_reads_only(args))
     except Exception as exc:  # BoardUnavailable in practice; any failure to open is treated alike
+        if args.cmd == "done":
+            try:
+                _done_post_args(args)
+            except ValueError as error:
+                print(f"swarm done: {error}", file=sys.stderr)
+                return 2
+            args.cmd = "post"
         if args.cmd == "post":  # sandboxed agent: queue it; the next hook call delivers it
             if not args.name:
                 print("swarm post: give --as NAME (the board can't be reached to look the key up)", file=sys.stderr)
@@ -4218,7 +4282,7 @@ def _run_command(cfg: dict, args) -> int:
                   f"it within seconds. This is normal inside a sandbox.")
             return 0
         if args.cmd == "verdict":  # likewise; whether args.name is the judge is checked on delivery
-            spool_verdict(cfg, args.job, args.name, args.verdict, *_verdict_text(args))
+            spool_verdict(cfg, args.job, args.name, args.verdict, *_verdict_text(args), artifact=args.artifact)
             print(f"queued (board not reachable from here: {_error_name(exc)}); it is delivered "
                   f"automatically within seconds by the swarm hooks, and counts only if you are the "
                   f"judge of {args.job} (if not, you are told on the board).")

@@ -869,17 +869,21 @@ def _dry_run_hold(cfg: dict, c: Candidate) -> str | None:
         return f"its work dir can't be checked ({type(exc).__name__})"
 
 
-def _dry_run(board, cfg: dict, sup: dict, job, now, say, scope_ok) -> None:
+def _dry_run(board, cfg: dict, sup: dict, job, now, say, scope_ok, config_path="") -> None:
     from swarm.supervisor import runner, stuck
     for js, a, why in stuck.find_stuck_owned(board, cfg, now):
         if not job or js.job == job:
             say(f"would close {a.name} on {js.job}: stuck:{why}")
-    from swarm.supervisor import orphans
+    from swarm.supervisor import orphans, pipeline
     from swarm.supervisor.settings import load_state
-    orphans.run(board, cfg, sup, load_state(), job=job, now=now, dry_run=True, say=say, scope_ok=scope_ok)
+    state = load_state()
+    managed = pipeline.run(board, cfg, sup, state, job=job, now=now, dry_run=True, say=say, scope_ok=scope_ok, config_path=config_path)
+    orphans.run(board, cfg, sup, state, job=job, now=now, dry_run=True, say=say, scope_ok=scope_ok, skip_jobs=managed)
     running = _host_running(board)
     unenrolled: list = []
     for c in candidates(board, cfg, sup, job=job, now=now, running=running, unenrolled=unenrolled):
+        if c.js.job in managed:
+            continue
         d = c.decision
         if d.go and not scope_ok():
             say(f"not restarting {c.agent.name} on {c.js.job}: no user systemd manager "
@@ -935,9 +939,11 @@ def _pass(board, cfg: dict, sup: dict, state: dict, job, now, say, start_runner,
     outage.note_reachable()
     runner.reap(cfg, board)
     clean_resume_markers(board, cfg)
-    from swarm.supervisor import orphans
+    from swarm.supervisor import orphans, pipeline
+    managed = pipeline.run(board, cfg, sup, state, job=job, now=now, say=say,
+                           start_runner=start_runner, which=which, scope_ok=scope_ok, config_path=config_path)
     orphans.run(board, cfg, sup, state, job=job, now=now, say=say,
-                start_runner=start_runner, which=which, scope_ok=scope_ok, config_path=config_path)
+                start_runner=start_runner, which=which, scope_ok=scope_ok, config_path=config_path, skip_jobs=managed)
     cli.sweep_jobs(board, cfg, time.monotonic() + PASS_SWEEP_SECONDS)
     clear_stale_waits(board)
     unenrolled: list = []
@@ -946,6 +952,8 @@ def _pass(board, cfg: dict, sup: dict, state: dict, job, now, say, start_runner,
         _note_once(state, f"unenrolled|{js.job}|{a.agent_key}", js.job,
                    f"not restarting {a.name} ({a.agent_key}) on {js.job}: {NOT_ENROLLED}")
     for c in found:
+        if c.js.job in managed:
+            continue
         fresh, why = _recheck(board, cfg, sup, c, now)   # this pass's launches count (open rows)
         if fresh is None:
             from swarm.supervisor.settings import log
@@ -985,7 +993,9 @@ def run_pass(cfg: dict, *, dry_run: bool = False, job: str | None = None, say=pr
                                            save_state, settings, switched_off)
     try:
         sup = settings(cfg)
-    except SettingsError as exc:
+        from swarm.supervisor import pipeline
+        pipeline.settings(cfg)
+    except (SettingsError, ValueError) as exc:
         print(f"swarm supervise: {exc}", file=sys.stderr)
         return 1
     if not sup["enabled"]:
@@ -1022,7 +1032,7 @@ def run_pass(cfg: dict, *, dry_run: bool = False, job: str | None = None, say=pr
             return 0
         try:
             with _open(cfg, True) as board:
-                _dry_run(board, cfg, sup, job, now, say, scope_ok)
+                _dry_run(board, cfg, sup, job, now, say, scope_ok, config or str(paths.config_path()))
         except BoardUnavailable as exc:
             if _missing_database(exc):
                 say(NOT_INITIALISED)

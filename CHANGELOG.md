@@ -6,7 +6,10 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 ## [Unreleased]
 
+Planned release: 0.2.0.
+
 ### Added
+- Automatic artifact review pipeline: worker hand-offs start judges, `not_met` starts bounded fix rounds, and `met` starts separate finalizers without an orchestrator session. Artifact verdicts remain independent; judges must record a verdict before stopping and cannot execute fixes. Engineering-team supplies exact-SHA CI and an ordinary-merge integrator recipe.
 - complexity-analyzer skill.
 - refactoring skill.
 - The `ask-answer` plugin: structured questions to the human, roles or agents; answers, comments and corrections; full answer delivery, a watch questions pane and pending human questions in orchestrator context.

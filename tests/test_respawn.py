@@ -27,6 +27,7 @@ class BriefTests(unittest.TestCase):
 class RespawnEnv(GoalEnv):
     def setUp(self):
         super().setUp()
+        self.cfg["pipeline"] = {"enabled": False}
         p = mock.patch.object(respawn, "CHECK_SECONDS", 0.0)
         p.start()
         self.addCleanup(p.stop)
@@ -300,6 +301,16 @@ class CodexTests(RespawnEnv):
             self.finish('w1', 'judge-1')
         ctx = self.context(self.main('turn', host='codex'))
         self.assertTrue(ctx.startswith(self.expected()), ctx)
+
+    def test_informational_brief_after_slow_cleanup(self):
+        self.cfg['pipeline']['enabled'] = True
+        self.not_met()
+        ago = self.h._ago
+        with mock.patch.object(self.h, '_ago', side_effect=lambda seconds: ago(seconds - 10)):
+            self.finish('w1', 'judge-1')
+        ctx = self.context(self.main('turn', host='codex'))
+        self.assertIn('The supervisor review pipeline starts the fix worker with:', ctx)
+        self.assertNotIn('Spawn agents now', ctx)
 
     def test_the_same_brief_without_claude_tag_lines(self):
         self.not_met()

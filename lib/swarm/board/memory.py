@@ -354,6 +354,10 @@ class MemoryBoard(MemoryBlockers, Board):
             j = s.jobs.get(job)
             if guard and not (j and guard.allows(j["goal"], j["verdict"], j.get("max_hours")) and not any(protects(b, self.now()) for b in self.blockers(job))):
                 return False
+            if guard and guard.settled and j and j.get("goal") and j.get("max_hours") is None:
+                from swarm.review import auto_close_pending
+                if auto_close_pending(self, job):
+                    return False
             self._close(job, j, status, outcome, forced, closed_by)
             return j is not None
 
@@ -380,8 +384,10 @@ class MemoryBoard(MemoryBlockers, Board):
         s = self._s()
         with s.lock:
             j = s.jobs.get(job)
-            if j is None or j["status"] != "active" or j.get("waiting_on") or self.blockers(job) or \
-                    goal_is_unmet(j["goal"], j["verdict"]):
+            if j is None or j["status"] != "active" or j.get("waiting_on") or self.blockers(job):
+                return None
+            from swarm.review import completion_pending
+            if completion_pending(self, job, j.get("goal"), j.get("verdict")):
                 return None
             if not self._auto_close_ready(j, before):
                 return None
@@ -558,7 +564,8 @@ class MemoryBoard(MemoryBlockers, Board):
             if j is None or j["status"] != "active":
                 return False
             if j.get("goal") != goal:
-                j.update(goal=goal, **_NO_VERDICT)
+                from swarm.review import clear_verdict_data
+                j.update(goal=goal, plugin_data=clear_verdict_data(j.get("plugin_data")), **_NO_VERDICT)
                 s.touch()
             return True
 
@@ -584,7 +591,7 @@ class MemoryBoard(MemoryBlockers, Board):
                      if a.get("judge") and a["left_at"] is None and a["job"] == job), None)
 
     def record_verdict(self, job: str, judge_name: str, verdict: str, reason: str,
-                       next_steps: str | None = None) -> bool:
+                       next_steps: str | None = None, artifact: str | None = None) -> bool:
         check_name(judge_name, "judge name")
         if verdict not in VERDICTS:
             raise BoardError(f"unknown verdict {verdict!r}")
@@ -593,7 +600,10 @@ class MemoryBoard(MemoryBlockers, Board):
             judge, j = self._active_judge(job), s.jobs.get(job)
             if j is None or judge is None or judge["name"] != judge_name:
                 return False
-            j.update(verdict=verdict, verdict_reason=reason, verdict_next=next_steps, verdict_by=judge_name, verdict_at=self.now())
+            from swarm.review import verdict_data
+            at = self.now()
+            j.update(verdict=verdict, verdict_reason=reason, verdict_next=next_steps, verdict_by=judge_name, verdict_at=at,
+                     plugin_data=verdict_data(j.get('plugin_data'), artifact, verdict, reason, next_steps, judge_name, at))
             s.touch()
             return True
 
@@ -1154,6 +1164,7 @@ class MemoryBoard(MemoryBlockers, Board):
         stamps = [a.last_contact_at for a in sts] + [m["created_at"] for m in msgs
             if not (m["agent_name"] == "swarm" and m["message"].startswith("Blocker ") and " expired:" in m["message"])]
         count = lambda *st: sum(1 for a in sts if a.status in st)  # noqa: E731
+        from swarm.review import pipeline_status
         js = JobStatus(
             job=j["job"], status=j["status"], description=j["description"], task=j["task"],
             outcome=j["outcome"], created_by=j["created_by"], session_id=j["session_id"],
@@ -1168,7 +1179,7 @@ class MemoryBoard(MemoryBlockers, Board):
             waiting_on=j.get("waiting_on"), waiting_since=j.get("waiting_since"),
             closed_by=j.get("closed_by"), supervise=j.get("supervise", True),
             verdict_next=j.get("verdict_next"), max_hours=j.get("max_hours"),
-            waiting_until=j.get("waiting_until"))
+            waiting_until=j.get("waiting_until"), **pipeline_status(j.get("plugin_data")))
 
         return rollup(js, self.blockers(j["job"]), now)
 

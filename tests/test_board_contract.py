@@ -904,6 +904,29 @@ class BoardContract:
         self.assertEqual(mine[0].messages, 1)
         self.assertEqual(self.b.session_jobs("nobody"), [])
 
+    def test_status_read_paths_preserve_blockers_and_pipeline_metadata(self):
+        self.b.open_job("j", None, None, "S1", None)
+        self.b.open_blocker("j", "question", "human", "choose")
+        metadata = {"evidence_command": "check report", "finalize": "publish report",
+                    "verdict_artifact": "report:v1"}
+        for key, value in metadata.items():
+            self.b.set_job_data("j", "pipeline." + key, value)
+        expected = self.b.job_status("j")
+        self.assertEqual((expected.open_blockers, expected.protected_blockers), (1, 1))
+        for key, value in metadata.items():
+            self.assertEqual(getattr(expected, key), value)
+        self.assertEqual(self.b.jobs(), [expected])
+        self.assertEqual(self.b.session_jobs("S1"), [expected])
+        self.assertEqual(self.b.session_shown_jobs("S1"), [expected])
+        if hasattr(self.b, "watch_snapshot"):
+            snapshot = self.b.watch_snapshot("j", None, None, 20)
+            from dataclasses import fields
+            for field in fields(expected):
+                self.assertEqual(getattr(snapshot.job_status("j"), field.name),
+                                 getattr(expected, field.name), field.name)
+            self.assertEqual(snapshot.jobs(), [expected])
+            self.assertEqual(snapshot.session_jobs("S1"), [expected])
+
     def test_session_jobs_does_not_load_unrelated_job_rollups(self):
         self.b.open_job("mine", None, None, "S1", None)
         self.b.open_job("old", None, None, "S1", None)
@@ -2161,6 +2184,20 @@ class PostgresSpecificTests(unittest.TestCase):
         self.h.reset()
         self.b = self.h.board()
         self.addCleanup(self.b.close)
+
+    def test_job_status_maps_columns_by_name(self):
+        from unittest import mock
+        from swarm.board import postgres
+        self.b.open_job("j", None, None, "S1", None)
+        self.b.open_blocker("j", "question", "human", "choose")
+        self.b.set_job_data("j", "pipeline.evidence_command", "check report")
+        expected = self.b.job_status("j")
+        reordered = ", ".join(reversed(postgres._JOB_STATUS_COLS.split(", ")))
+        with mock.patch.object(postgres, "_JOB_STATUS_COLS", reordered):
+            self.assertEqual(self.b.job_status("j"), expected)
+            self.assertEqual(self.b.jobs(), [expected])
+            self.assertEqual(self.b.session_jobs("S1"), [expected])
+            self.assertEqual(self.b.watch_snapshot("j", None, None, 20).jobs(), [expected])
 
     def test_agent_status_job_filter_reaches_message_scan(self):
         from swarm.board.postgres import _AGENT_STATUS_COLS

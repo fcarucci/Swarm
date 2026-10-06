@@ -1452,6 +1452,88 @@ host's, otherwise the harnesses whose hooks have run for this OS user, else whic
 trusted (`/hooks`); one that never joins is killed after `enrol_minutes`. Logs:
 `~/.local/share/swarm/supervisor/supervise.log`, `journalctl --user -u swarm-supervise.service`.
 
+## Review pipeline
+
+The owner supervisor drives review on the same timer as crash recovery. `[pipeline] enabled`
+defaults to true; `[supervise] enabled = false`, an off file, a paused/closed job,
+`--no-supervise`, or an explicit human/external wait holds it. Only this machine/user's private
+activation enrolment record authorizes launches. Work directory approvals, launch permissions,
+runtime budgets and concurrency caps are shared with ordinary replacements.
+
+1. A worker posts `DONE REF`, or runs `swarm done --job J --as NAME --artifact REF --summary TEXT`.
+   Core treats REF as opaque: a report path, deployment id, or URL is as valid as a code artifact.
+   `swarm done --branch B --sha S` and the legacy board convention `DONE B S` produce `B@S`.
+2. For a goal job, a hand-off newer than its artifact's verdict starts a judge when the judge
+   seat is free. The brief includes the task, goal, hand-off and previous fix instructions.
+   Artifacts retain independent verdict histories; a job's judge seat is reused sequentially.
+   `status --job J` shows each artifact's verdict. A met for reference A never covers reference B,
+   and a repeated hand-off of A after its verdict also needs review. The coding adapter groups
+   revisions by branch: a newer SHA supersedes only that branch's earlier hand-offs.
+3. A judge records `swarm verdict --job J --as NAME --artifact REF met --reason TEXT`, or
+   `not_met --reason TEXT --next TEXT`. Judges only judge: tool restrictions block writes,
+   merges, pushes and fix-agent spawns. The judge Stop hook refuses an exit without a verdict
+   for the assigned hand-off. Evidence checks run under the agent's ordinary permissions:
+   wait with the configured command or conclude `not_met` with reason `evidence pending/red`
+   and actionable next steps. No pending evidence is required for a plain report.
+4. `not_met` starts a worker on the last worker's host, briefed with `--next`. Retries use
+   supervisor backoff and existing restart limits, including `GAVE UP` after exhaustion.
+   The worker publishes a fresh hand-off when ready. Main-session reminders are informational
+   while the pipeline is enabled.
+5. `met` starts a separate executing FINALIZER, which carries out the job's finalize
+   instructions, retains distilled learnings with `swarm learn`, posts `FINALIZED REF`, and
+   deactivates completed only after every handed-off artifact is finalized and no work remains.
+   If it exits after posting success but before deactivation, the owner supervisor recovers
+   completion without repeating the finalization action.
+   An execution problem posts `FINALIZE_BLOCKED REF <actionable fix instructions>` and stops;
+   the supervisor routes that brief to a fix worker. Judges never execute finalization.
+
+`swarm activate --job J --goal "deliver a report" --finalize "publish the report"` configures
+job-specific execution. `--evidence-cmd "check deployment health"` sets an optional evidence
+command. Per-job instructions override a matching plugin recipe and then the global defaults.
+Without custom instructions, the finalizer records outcome/learnings and closes the job.
+
+| `[pipeline]` key | default | purpose |
+|---|---|---|
+| `enabled` | true | automatic hand-off/judge/fix/finalize transitions |
+| `judge_host` | claude | judge harness: claude or codex |
+| `judge_model` | empty | use the configured judge role model unless explicitly set |
+| `evidence_wait_command` | empty | optional external evidence command in the judge/finalizer brief |
+| `finalize` | empty | default finalize instructions; empty means outcome, learnings and completion |
+| `finalize_enabled` | true | false holds finalization while review/fix continues |
+
+### Engineering-team coding recipe
+
+The engineering-team plugin registers a recipe for `branch@<40-character SHA>` artifacts.
+Core has no CI or git logic. The recipe checks GitHub Actions with `gh run list --commit SHA`:
+at least one run must exist, and every returned run must have the exact SHA, completed status,
+and success conclusion. Missing, queued, running, red or mismatched evidence holds integrator
+launch. The independent judge also receives the exact-SHA evidence command; the integrator
+rechecks it before execution.
+
+The INTEGRATOR verifies that every remote source ref still names the judged SHA, then
+fast-forwards or ordinarily merges that exact SHA into the latest target, validates the merge
+result, pushes every configured remote and push URL, deletes the source branch after successful
+pushes, and posts `INTEGRATED REF`. It never rebases, squashes, or force-pushes. A moved source
+ref needs a new hand-off and verdict. Non-trivial conflicts use `FINALIZE_BLOCKED` for a worker
+fix round. The executing agent performs this recipe under its ordinary permissions.
+
+Coding settings live in `team.toml` (`$SWARM_TEAM_CONFIG`, otherwise beside swarm's config),
+under `[pipeline]`: `integrate = true`, `merge_target = "main"`, `delete_branch = true`,
+`repository = ""` (gh infers the repo), `evidence_command = ""` (built-in exact-SHA check).
+A custom command can use `{artifact}`, `{branch}`, `{sha}`, substituted as shell-quoted values.
+The launch gate still independently checks GitHub's exact SHA. `[repositories."/absolute/repo"]`
+overrides team defaults for the owner's recorded repository directory. `integrate = false`
+holds coding finalization. Disabling the plugin leaves the generic pipeline available.
+
+The coding adapter requires `gh` with repository read access. It recognizes GitHub push URLs
+even when the fetch remote is Gitea; set `repository` explicitly when several GitHub repos are
+configured. Evidence commands execute under agent permissions, never in the privileged Stop hook.
+
+Known limits: the coding adapter checks the first 100 workflow runs returned for a SHA and
+requires them all to succeed; it does not implement repository-specific required-check rules.
+Finalizer instructions execute through an agent, so launch authority and permissions still
+apply. Report/file refs should identify an immutable revision when contents can change.
+
 ## Roles
 
 ### Workers
@@ -1511,13 +1593,14 @@ the author explaining why it was not delivered.
 ### The judge: goals and the completion gate
 
 `activate --goal "<what done means>"` gives a job a goal, and one agent's only task is to decide
-whether it has been met. `activate` then also prints `[swarm role: judge]`. Spawn exactly one
-judge, with both tag lines in its prompt, alongside the workers.
+whether it has been met. `activate` also prints `[swarm role: judge]` for explicit judges.
+With the default review pipeline, a worker hand-off starts the judge automatically.
 
 - **One judge per job.** The seat is taken atomically (a partial unique index on active judges).
   A second agent tagged as judge joins as a worker, and is told who the judge is and that its
   verdicts will be refused. A judge that leaves frees the seat; resumed, it takes it back if it
-  is still free. A spawned subagent can't be a judge, and the judge can't spawn until it has recorded `not_met` (see "After a `not_met` verdict" below).
+  is still free. A spawned helper cannot be a judge. Judges never spawn fix agents;
+  the supervisor starts them from the verdict brief.
 - **What the judge is told.** It doesn't do the work. It gathers evidence: reads what the
   workers post, inspects results, runs its own checks. It asks workers for proof and requests
   fixes with `--to`. It judges strictly against the goal text, including what the goal implies
@@ -1528,45 +1611,22 @@ judge, with both tag lines in its prompt, alongside the workers.
   job isn't done until the judge's verdict is `met`.
 - **Verdicts.** Only the job's active judge can record one; anyone else is refused (exit 1).
   The verdict is stored on the job and posted on the board as `VERDICT not_met: <reason>` (or
-  `met`), so the workers see what's missing. The judge can judge again later; the latest
-  verdict counts, and the board messages are the history. From a sandbox, `verdict` is spooled
+  `met`), so the workers see what's missing. The judge can judge again later;
+  artifact-bound verdicts are retained independently in job metadata, with board messages as history. From a sandbox, `verdict` is spooled
   like `post`; if the sender turns out not to be the judge, it is told on the board.
-- **After a `not_met` verdict, the next round starts by itself.** The rule: when the judge
-  rules not met, agents are spawned with the judge's instructions (`--next`), and more as the
-  work needs; the job never sits idle with a `not_met` verdict. Two paths, in this order:
-  1. *The judge spawns the fix agents.* Once the judge has recorded `not_met` (with its
-     `--reason` and `--next`), the spawn gate lets it spawn workers or verifiers (never a
-     judge) to carry out that brief, and more as the work needs, within `max_depth` and the
-     [spawn limits](#agents-spawning-agents). It keeps its seat and judges again when they are
-     done. Before it has ruled not met, or after a `met`, its spawns are still refused.
-  2. *The orchestrator is told to.* If no agent is left at work (the judge finished without
-     spawning, or its spawns were refused: depth, limits, spawning switched off), the
-     orchestrator is the one who can. `SubagentStop` output can't reach it: per Claude Code's
-     hook docs its `additionalContext` and `decision: block` go to the stopping subagent (they
-     would only keep the judge running), and a PostToolUse hook on the `Agent` tool fires when
-     a background spawn *launches* (subagents run in the background by default), not when it
-     ends. What does reach the model is the hooks that fire in the main session (no
-     `agent_id`). When the job has a goal, its latest verdict is `not_met` and no agent is
-     started, running or idle (dead, left and completed ones don't count), the main session's
-     `PreToolUse`/`PostToolUse` hooks add context, at most once per verdict per session, and its
-     `Stop` hook shares that reminder state (`decision: block`). Non-judge posts or agent contact
-     after the verdict suppress reminders until the job has been idle for `orphan_minutes`
-     in `[supervise]` (five minutes if absent). Only then may the same verdict be shown again;
-     zero disables repeats. The board is read at most every 15 s except on Stop. A Stop that is itself such a
-     continuation, `stop_hook_active`, is let through so the orchestrator can tell the user.
-     The text: `judge <name> ruled not met: <reason>. Spawn agents now with these instructions:
-     <next>, plus a new judge for the same goal; spawn more agents if the work needs it.
-     Don't leave the job idle.` (Claude Code adds the tag lines for the children's prompts;
-     Codex, whose spawn message is encrypted, the task-name rule.) A `met` verdict, no verdict,
-     or an agent still at work gives nothing. Codex gets it from the same hooks (its `Stop`
-     `block` starts a continuation prompt).
-  The orchestrator, told or not, spawns fix agents plus a fresh judge and repeats until the
-  verdict is `met`; it tells the user only when a round makes no progress (the same verdict
-  again, nothing fixed). The supervisor can recover crashed agents and orphaned coordinators
-  after `not_met`; a `met` verdict prevents further work restarts. What was shown is remembered in
-  `<marker>.respawn` beside the job's marker (removed with it).
+- **After a `not_met` verdict, the next round starts by itself.** The owner supervisor starts
+  a fix worker carrying `--next`, under its existing backoff and budget limits. Workers hand off
+  their repaired artifact for fresh review. Judges only judge. Main-session reminders are
+  informational while the pipeline is enabled and do not block the orchestrator's Stop.
+  Explicitly disabling the pipeline keeps the legacy orchestrator reminder as a manual fallback.
+  See [review pipeline](#review-pipeline) for artifact histories, evidence, finalization and caps.
+  Manual fallback reminders share state between tool and Stop hooks, once per verdict per
+  session. Worker posts or agent contact after a verdict suppress reminders until the job
+  is idle for `[supervise] orphan_minutes` (five minutes if absent); zero disables repeats.
+  `<marker>.respawn` retains reminder state and is removed with the job marker.
 - **The completion gate.** `deactivate --status completed` (the default) refuses a job with a
-  goal until the judge's latest verdict is `met`, and prints the judge's last reason. It also
+  goal until every current hand-off has its own fresh `met` verdict, and prints what remains.
+  Superseded revisions do not gate completion. Jobs without hand-offs use the latest job verdict. It also
   refuses when the board is unreachable and the verdict can't be checked. `--force` completes it
   anyway and records `completion_forced` (shown as `forced` in `status --job`, and `*` in the
   VERDICT column). `cancelled` and `failed` are always allowed. Re-activating a job clears its
@@ -2210,7 +2270,8 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `activate --job J --attach [--session S] [--adopt-running]` | bind this session to a job that is already active, without reopening it (see [One job, both hosts](#one-job-both-hosts)) |
 | `activate … --goal G\|-` | give the job a goal, judged by one judge agent; the tag lines include `[swarm role: judge]` |
 | `deactivate --job J [--status completed\|cancelled\|failed] [--outcome O] [--force] [--delete-bank]` | switch the board off and close the job (default `completed`). A job with a goal completes only with the judge's `met` verdict, or with `--force` (recorded). On an already closed (e.g. auto-closed) job it replaces the status and outcome |
-| `verdict --job J --as NAME met\|not_met REASON...` | the job's judge records its verdict and posts it on the board; anyone else is refused; spooled when the board is unreachable |
+| `verdict --job J --as NAME [--artifact REF] met\|not_met REASON...` | the job's judge records an artifact-bound verdict and posts it; anyone else is refused; spooled when the board is unreachable |
+| `done --job J --as NAME [--artifact REF] [--summary TEXT]` | hand off work for independent judging; `--branch B --sha S` is the coding alias |
 | `wait --job J [--for DURATION \| --until TIME] --on WHAT...` | mark an open job as waiting for something; shown as `waiting` with the reason and, when bounded, its end. `--for 90m` (`h`/`m`/`s`, bare = minutes) or `--until` (a duration, a time of day such as `17:30`, or `2026-10-06 09:00`) bounds it. A bounded wait that has not ended protects the job from the orphan rule and the stall limits (including `goal_stall_hours`); once it ends the job is judged as not waiting, and the end counts as progress. An unbounded wait is not orphaned; stall limits still apply. A board read by the orchestrating session (`status --job`, `who`, `read`, `tail --job`) counts as contact for liveness |
 | `blockers --job J [--open\|--all]` | list open blockers, or include resolved/expired history with `--all` |
 | `blocker resolve ID [--how TEXT]` / `blocker comment ID TEXT...` | resolve a blocker with an audit reason, or append a comment |

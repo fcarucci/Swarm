@@ -68,6 +68,24 @@ class AutoCloseContract:
         return self.b.sweep_auto_close(minutes)
 
     # ---- closing
+    def test_current_artifact_can_close_despite_superseded_legacy_not_met(self):
+        import hashlib
+        self.b.open_job('j', 'Review revisions', None, None, 'owner', goal='Accepted result')
+        worker = self.b.allocate_name('worker', 'j', 'worker')
+        self.b.post('j', worker, 'DONE old-ref')
+        self.b.post('j', worker, 'DONE current-ref')
+        self.b.close_agent('worker', 'done')
+        judge = self.b.allocate_name('judge', 'j', 'judge')
+        self.assertTrue(self.b.claim_judge('judge', 'j'))
+        self.assertTrue(self.b.record_verdict('j', judge, 'met', 'Current accepted', artifact='current-ref'))
+        self.b.post('j', worker, 'FINALIZED current-ref')
+        self.assertTrue(self.b.record_verdict('j', judge, 'not_met', 'Old rejected', 'Fix old', artifact='old-ref'))
+        self.b.close_agent('judge', 'done')
+        self.b.set_job_data('j', 'pipeline.superseded.' + hashlib.sha256(b'old-ref').hexdigest()[:32], 'current-ref')
+        self.assertEqual(self.b.job_status('j').verdict, 'not_met')
+        self.assertIsNotNone(self.b.auto_close_job('j', self.b.now(), 'Pipeline completed'))
+        self.assertEqual(self.b.job_status('j').status, 'completed')
+
     def test_closes_after_the_quiet_period(self):
         names, ids = self.run_job()
         self.age("j", "abc", ids)

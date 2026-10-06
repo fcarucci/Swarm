@@ -103,7 +103,7 @@ Transcripts are off by default. Set `[transcripts] enabled = true` to archive th
 redaction is best effort, and board readers can read them.
 See [transcript settings and provenance](docs/REFERENCE.md#transcript-archive-optional).
 
-On Linux, [crash auto-restart](docs/REFERENCE.md#supervisor-stuck-agents-and-automatic-restarts) is on by default for agents and orphaned coordinators.
+On Linux, [automatic recovery](docs/REFERENCE.md#supervisor-stuck-agents-and-automatic-restarts) and the [review pipeline](docs/REFERENCE.md#review-pipeline) are on by default: hand-off → judge → fix or finalizer.
 
 The engineering team uses `~/.config/swarm/team.toml` (or `$SWARM_TEAM_CONFIG`), separately
 from core configuration. `swarm team --job J --show` displays the effective team;

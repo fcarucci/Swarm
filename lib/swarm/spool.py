@@ -189,10 +189,10 @@ def _valid_metadata(m) -> bool:
 
 
 def spool_verdict(cfg: dict, job: str, name: str, verdict: str, reason: str,
-                  next_steps: str | None = None) -> Path:
+                  next_steps: str | None = None, artifact: str | None = None) -> Path:
     """Queue a `swarm verdict`; whether `name` is the job's judge is checked on delivery."""
     return _spool(cfg, {"job": job, "name": name, "verdict": verdict, "reason": reason,
-                        "next": next_steps}, ".vrd")
+                        "next": next_steps, "artifact": artifact}, ".vrd")
 
 
 def spool_wait(cfg: dict, job: str, on: str | None, until: float | None = None) -> Path:
@@ -296,9 +296,11 @@ def _load(d: int, claimed: str, name: str) -> tuple | None:
         if not _valid_job(m["job"]) or not valid_name(m["name"]):
             raise ValueError("not a plain job or agent name")
         if suffix == ".vrd":
-            rec = m["job"], m["name"], m["verdict"], m["reason"], m.get("next")   # "next": absent in old files
+            rec = m["job"], m["name"], m["verdict"], m["reason"], m.get("next"), m.get("artifact")   # optional in older files
             if rec[4] is not None and not isinstance(rec[4], str):
                 raise ValueError("next is not text")
+            if rec[5] is not None and (not isinstance(rec[5], str) or not rec[5].strip()):
+                raise ValueError("artifact is not a nonempty reference")
             if rec[2] not in ("met", "not_met"):
                 raise ValueError("unknown verdict")
             return rec
@@ -442,10 +444,16 @@ def retry_stuck(cfg: dict) -> int:
 
 
 def deliver_verdict(board, job: str, name: str, verdict: str, reason: str,
-                    next_steps: str | None = None) -> bool:
+                    next_steps: str | None = None, artifact: str | None = None) -> bool:
     """Record a judge's verdict and post it on the job's board; False (nothing recorded or
     posted) if `name` is not the job's active judge. Shared by `swarm verdict` and the spool."""
-    if not board.record_verdict(job, name, verdict, reason, next_steps):
+    if artifact is None:
+        from swarm.review import latest_handoffs, judge_artifact
+        artifact = judge_artifact(board, job, name=name)
+        handoffs = latest_handoffs(board, job)
+        if artifact is None and handoffs:
+            artifact = handoffs[-1].artifact
+    if not board.record_verdict(job, name, verdict, reason, next_steps, artifact):
         return False
     board.post(job, name, f"VERDICT {verdict}: {reason}")
     if next_steps:   # the board caps a message; the full text is what `swarm status --job J` shows
@@ -456,8 +464,8 @@ def deliver_verdict(board, job: str, name: str, verdict: str, reason: str,
 def _deliver_spooled_verdict(board, rec: tuple) -> bool:
     """A spooled verdict from someone who isn't the judge is refused; the sender is told on the
     board (it can't see the CLI's answer: the CLI only queued it)."""
-    job, name, verdict, reason, next_steps = rec
-    if deliver_verdict(board, job, name, verdict, reason, next_steps):
+    job, name, verdict, reason, next_steps, artifact = rec
+    if deliver_verdict(board, job, name, verdict, reason, next_steps, artifact):
         return True
     board.post(job, "swarm", f"verdict refused: {name} is not the judge of job {job}", to=name)
     return False

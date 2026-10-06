@@ -3,7 +3,7 @@
 Core swarm discovers command plugins when it parses a command line. A plugin adds a subcommand,
 adds options to or hooks around a core command, or adds lines to `swarm status --job J`. Core works
 with none installed, `swarm plugins` lists what was found and why one failed, and a broken plugin
-never breaks a core command. The hooks (`swarm hook ...`) load no plugins.
+never breaks a core command. The supervisor and judge evidence hook also resolve pipeline recipes.
 
 ## Where plugins are found
 
@@ -27,7 +27,7 @@ exits 1; a hook that raises is a warning on stderr and the core command goes on.
 ## Trust model
 
 Plugins execute with the current user's full OS privileges on every CLI invocation except
-`swarm hook`. `ctx.open_board()` provides the full Board API, including writes; namespaced
+ordinary tool bookkeeping hooks. `ctx.open_board()` provides the full Board API, including writes; namespaced
 job settings are a convenience, not an access restriction. Plugins are trusted Python code,
 not sandboxed extensions.
 
@@ -44,7 +44,7 @@ plugins also check their package directory and `__init__.py`. Refusals appear
 in `swarm plugins`. These cheap checks do not protect against a same-user writer or a writable
 ancestor directory, and do not prevent file replacement races. On Windows these checks are
 skipped because POSIX ownership and mode bits do not express Windows ACLs; secure plugin
-locations with Windows ACLs. Hooks load no plugins.
+locations with Windows ACLs.
 
 ## The API
 
@@ -58,6 +58,7 @@ A plugin is a module with `register(api)`:
 | `api.add_command(name, run, setup=None, help=None)` | a new subcommand. `setup(parser)` adds its arguments (an `argparse` parser); `run(ctx, args) -> int \| None` runs it (None is 0). A name that is a core command or another plugin's is an error |
 | `api.extend_command(name, setup=None, before=None, after=None)` | add arguments to a core command, and run `before(ctx, args) -> int \| None` ahead of it (a non-zero status stops the command and is its exit status: how a plugin rejects an argument) and `after(ctx, args)` once it succeeded |
 | `api.add_status_lines(fn)` | `fn(ctx, job) -> list[str]`: lines `swarm status --job J` prints after the job's own details |
+| `api.add_pipeline_recipe(fn)` | `fn(ctx, board, job, artifact) -> dict \| None`: first matching recipe wins; None leaves the artifact generic. Recipes return `evidence_command`, `finalize`, `finalizer_role`, `enabled`, optional `evidence_check(cwd) -> bool`, and optional `artifact_group` (new hand-offs in a group supersede older ones). Recipe errors hold the transition |
 
 `ctx` (`PluginContext`) is what a command or hook receives:
 
@@ -95,7 +96,9 @@ def register(api):
 
 It adds `swarm team`, `swarm activate --team` and a `team` line in `swarm status --job J`, and reads
 `team.toml` (`$SWARM_TEAM_CONFIG`, else next to the swarm config; see `team.example.toml`). It is
-the reference use of this API: `skills/engineering-team/swarm_plugin.py`.
+the reference use of this API: `skills/engineering-team/swarm_plugin.py`. It also registers the
+coding pipeline recipe for `branch@sha`: exact-SHA GitHub evidence and an INTEGRATOR executor.
+Configure it under `[pipeline]` in `team.toml`; see [review pipeline](REFERENCE.md#review-pipeline).
 
 ### Blocker protection rules
 
