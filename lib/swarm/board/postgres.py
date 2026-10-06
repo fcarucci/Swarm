@@ -1308,7 +1308,8 @@ class PostgresBoard(Board):
             (SELECT jsonb_agg(to_jsonb(m) ORDER BY id) FROM recent m),
             (SELECT jsonb_agg(to_jsonb(r) ORDER BY id) FROM restarts r WHERE job IN (SELECT job FROM selected)),
             (SELECT jsonb_object_agg(job,n) FROM hidden),
-            (SELECT jsonb_object_agg(job,jsonb_build_array(verified,failed)) FROM checks)
+            (SELECT jsonb_object_agg(job,jsonb_build_array(verified,failed)) FROM checks),
+            (SELECT jsonb_object_agg(job,plugin_data::jsonb) FROM jobs WHERE job IN (SELECT job FROM selected))
         """.replace('{agent_cols}', agent_cols)
         row = self._conn.execute(query, (job,job,job,session,session,session,session,recent_minutes,recent_minutes,
                                         recent_minutes,recent_minutes,limit)).fetchone()

@@ -7,8 +7,20 @@ from support import MemoryHarness
 from swarm import cli
 from swarm.board.postgres import PostgresBoard
 from swarm.watchdata import SnapshotBoard
+from swarm.review import artifact_verdicts, verdict_data
+from types import SimpleNamespace
 
 class CoalescingTests(unittest.TestCase):
+    def test_snapshot_keeps_artifact_verdicts_without_querying_the_live_board(self):
+        now = dt.datetime.now(dt.timezone.utc)
+        data = verdict_data(None, 'plan:1', 'met', 'reviewed', None, 'Judge', now)
+        import json
+        board = SimpleNamespace(cfg=cli.DEFAULTS, degraded=None)
+        snap = SnapshotBoard(board, (now, [], [], [], [], {}, {}, {'J': json.loads(data), 'empty': None}))
+        self.assertEqual(artifact_verdicts(snap, 'J')['plan:1']['verdict'], 'met')
+        self.assertEqual(snap.job_data('missing'), {})
+        self.assertEqual(snap.job_data('empty'), {})
+
     def test_notify_burst_does_not_reset_the_deadline(self):
         gate=cli._RefreshGate(10,2)
         self.assertTrue(gate.due(0))
@@ -40,7 +52,7 @@ class CoalescingTests(unittest.TestCase):
         board.cfg=cli.DEFAULTS
         board.degraded=None
         board._conn=mock.Mock()
-        board._conn.execute.return_value.fetchone.return_value=(dt.datetime.now(dt.timezone.utc),[],[],[],[],{}, {})
+        board._conn.execute.return_value.fetchone.return_value=(dt.datetime.now(dt.timezone.utc),[],[],[],[],{}, {}, {})
         snap=board.watch_snapshot(None,'session',10,60)
         self.assertIsInstance(snap,SnapshotBoard)
         board._conn.execute.assert_called_once()
@@ -69,6 +81,19 @@ class PostgresSnapshotTests(unittest.TestCase):
         self.board.bind_job_session('J','snapshot-session')
         self.name=self.board.allocate_name('agent-a','J')
         self.board.post('J',self.name,'hello')
+
+    def test_job_detail_keeps_artifact_verdicts_in_the_single_statement_snapshot(self):
+        import json
+        data = verdict_data(None, 'plan:1', 'met', 'reviewed', None, 'Judge', self.board.now())
+        for key, value in json.loads(data).items():
+            self.board.set_job_data('J', key, value)
+        expected = cli.job_detail(self.board, 'J', False, include_agents=False)
+        with mock.patch.object(self.board._conn, 'execute', wraps=self.board._conn.execute) as execute:
+            snap = self.board.watch_snapshot('J', None, 10, 1)
+            actual = cli.job_detail(snap, 'J', False, include_agents=False)
+            self.assertEqual(execute.call_count, 1)
+        self.assertIn('artifact   plan:1: met by Judge', actual)
+        self.assertEqual(actual, expected)
 
     def test_full_and_compact_frames_match_and_one_statement_per_snapshot(self):
         for compact in (False,True):

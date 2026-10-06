@@ -26,6 +26,7 @@ class SnapshotBoard:
         self.message_rows = rows(Message,row[3])
         self.restart_rows = rows(Restart,row[4])
         self.hidden, self.checks = row[5] or {}, row[6] or {}
+        self.job_data_rows = row[7] or {}
 
     def now(self):
         return self.stamp
@@ -38,6 +39,9 @@ class SnapshotBoard:
 
     def job_status(self, job):
         return next((j for j in self.job_rows if j.job == job),None)
+
+    def job_data(self, job):
+        return dict(self.job_data_rows.get(job) or {})
 
     def agents(self, job, include_departed=True):
         return [a for a in self.agent_rows if a.job == job and (include_departed or a.ended_at is None)]

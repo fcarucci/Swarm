@@ -41,13 +41,17 @@ class RespawnEnv(GoalEnv):
         self.assertEqual(rc, 0, err)
 
     def finish(self, *keys):
+        with self.board() as b:
+            before_verdict = b.job_status('J').verdict_at or b.now()
         for k in keys:
             self.hook("stop", agent_id=k, session="sess-1", agent_type="general-purpose",
                       transcript_path=self.main_transcript())
             # These fixtures model the verdict arriving after the workers' last activity.
             # Tests for activity after a verdict add that contact explicitly.
             if k.startswith("w"):
-                self.h.backdate_agent(k, joined_at=2, last_seen=1, left_at=1)
+                self.h.update_agent(k, joined_at=before_verdict - dt.timedelta(seconds=2),
+                                    last_seen=before_verdict - dt.timedelta(seconds=1),
+                                    left_at=before_verdict - dt.timedelta(seconds=1))
 
     def main(self, event="turn", host=None, **extra):
         return self.hook(event, agent_id=None, session="sess-1", host=host, tool_name="Bash", **extra)
@@ -281,6 +285,25 @@ class StopTests(RespawnEnv):
 
 
 class CodexTests(RespawnEnv):
+    def test_brief_after_slow_cleanup_uses_activity_before_the_verdict(self):
+        self.not_met()
+        # Emulate cleanup taking longer than the old fixture's one-second backdate.
+        ago = self.h._ago
+        with mock.patch.object(self.h, '_ago', side_effect=lambda seconds: ago(seconds - 10)):
+            self.finish('w1', 'judge-1')
+        ctx = self.context(self.main('turn', host='codex'))
+        self.assertTrue(ctx.startswith(self.expected()), ctx)
+
+    def test_informational_brief_after_slow_cleanup(self):
+        self.cfg['pipeline']['enabled'] = True
+        self.not_met()
+        ago = self.h._ago
+        with mock.patch.object(self.h, '_ago', side_effect=lambda seconds: ago(seconds - 10)):
+            self.finish('w1', 'judge-1')
+        ctx = self.context(self.main('turn', host='codex'))
+        self.assertIn('The supervisor review pipeline starts the fix worker with:', ctx)
+        self.assertNotIn('Spawn agents now', ctx)
+
     def test_the_same_brief_without_claude_tag_lines(self):
         self.not_met()
         self.finish("w1", "judge-1")
