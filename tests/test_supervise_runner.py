@@ -1189,13 +1189,13 @@ for _n in [n for n in vars(RunnerTests) if n.startswith("test_")]:
 
 
 class DoctorContainmentTests(RunnerTests):
-    def test_doctor_fails_without_a_user_manager_and_is_quiet_when_off(self):
+    def test_doctor_warns_without_a_user_manager_and_is_quiet_when_off(self):
         from unittest import mock
         from swarm import bootstrap
         cfg = dict(self.cfg)
         with mock_env(SWARM_NO_SYSTEMD="1"):
             (c,) = bootstrap._containment_checks(cfg)        # no user manager: replacements refused
-        self.assertIs(c.ok, False)
+        self.assertIsNone(c.ok)
         self.assertIn("loginctl enable-linger", c.fix)
         with mock.patch.object(runner, "scope_available", return_value=True):
             (c,) = bootstrap._containment_checks(cfg)

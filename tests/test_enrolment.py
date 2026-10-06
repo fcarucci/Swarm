@@ -41,6 +41,17 @@ class Env(unittest.TestCase):
 
 
 class WriteFindTests(Env):
+    def test_original_prompt_round_trip(self):
+        rec = self.enrol(prompt="[swarm job: job-a]\nBuild parser")
+        self.assertEqual(enrolment.find(BOARD,"k1").prompt, rec.prompt)
+
+    def test_creation_proof_is_separate_from_coordinator_attachment(self):
+        owner = enrolment.write_job_owner(BOARD,job="job-a",harness=None,session_id=None,cwd=self.cwd)
+        enrolment.write_job(BOARD,job="job-a",harness="codex",session_id="other",cwd=self.cwd)
+        self.assertEqual(enrolment.find_job_owner(BOARD,"job-a"),owner)
+        self.assertEqual(enrolment.find_job(BOARD,"job-a").session_id,"other")
+        self.assertIsNone(enrolment.find_job_owner("other-board","job-a"))
+
     def test_round_trip(self):
         rec = self.enrol(now=1000.0)
         got = enrolment.find(BOARD, "k1")

@@ -39,7 +39,19 @@ class DoctorTests(unittest.TestCase):
         failing = {n: c.detail for n, c in checks.items() if c.ok is False}
         self.assertEqual(failing, {})
         self.assertIsNone(checks["orchestrator model"].ok)
-        self.assertTrue(checks["supervise"].ok)
+        self.assertTrue(checks["supervise" if paths.IS_WINDOWS else "supervise config"].ok)
+
+    @posix_only("supervisor uses Linux systemd")
+    def test_clean_install_without_manager_or_harness_warns(self):
+        bootstrap.bootstrap("claude", config=self.cfg)
+        with mock.patch("swarm.supervisor.runner.scope_available", return_value=False), \
+             mock.patch("swarm.bootstrap.shutil.which", return_value=None):
+            checks = self.by_name(bootstrap.doctor("claude", config=self.cfg))
+        self.assertIsNone(checks["replacement scope"].ok)
+        self.assertIsNone(checks["supervise harness"].ok)
+        self.assertIn("auto-restart inactive until", checks["replacement scope"].detail)
+        self.assertIn("auto-restart inactive until", checks["supervise harness"].detail)
+        self.assertFalse(any(c.ok is False for c in checks.values()))
 
     @posix_only("pre-0.1 skill hooks never existed on Windows")
     def test_doctor_flags_legacy_hooks_while_plugin_installed(self):
@@ -497,7 +509,7 @@ class ExposureDoctorTests(unittest.TestCase):
             b.allocate_name("k2", "J")
         self.assertIs(self.checks()["transcripts users"].ok, True)
         db = sqlite3.connect(cfg["sqlite"]["path"])
-        db.execute("UPDATE agents SET os_user = 'codex' WHERE agent_key = 'k2'"); db.commit(); db.close()
+        db.execute("UPDATE agents SET os_user = 'another-test-user' WHERE agent_key = 'k2'"); db.commit(); db.close()
         c = self.checks()["transcripts users"]
         self.assertIsNone(c.ok)
         self.assertIn("2 OS users", c.detail)
@@ -516,7 +528,7 @@ class ExposureDoctorTests(unittest.TestCase):
             b.allocate_name("k1", "J")
             b.allocate_name("k2", "J")
         db = sqlite3.connect(cfg["sqlite"]["path"])
-        db.execute("UPDATE agents SET os_user = 'codex' WHERE agent_key = 'k2'"); db.commit(); db.close()
+        db.execute("UPDATE agents SET os_user = 'another-test-user' WHERE agent_key = 'k2'"); db.commit(); db.close()
         return self.checks()
 
     EXCERPTS = "memory excerpts are readable by every OS user sharing the board role"

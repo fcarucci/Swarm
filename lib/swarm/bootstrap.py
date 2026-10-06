@@ -1116,11 +1116,11 @@ def supervisor_checks(cfg: dict, host: str | None, run=None, which=None) -> list
         out.append(Check("supervise off file", True, "absent"))
     # One place for every supervise check (the containment check included): with no user
     # systemd manager, the timer can never be active and linger is moot (it only controls whether
-    # that same manager survives logout), so one FAIL here replaces what would otherwise be three
+    # that same manager survives logout), so one WARN here replaces what would otherwise be three
     # contradictory timer/last-run/linger lines for the same root cause.
     scope = _containment_checks(cfg)
     out += scope
-    no_manager = bool(scope) and scope[0].ok is False
+    no_manager = bool(scope) and scope[0].ok is not True
     if not no_manager:
         state = systemd.timer_state(run)
         active = state.get("ActiveState") == "active" and state.get("UnitFileState") == "enabled"
@@ -1160,13 +1160,15 @@ def supervisor_checks(cfg: dict, host: str | None, run=None, which=None) -> list
     hs = [host] if host else [h for h in ("claude", "codex") if _hooks_ran(h)] or \
         [h for h in ("claude", "codex") if found[h]]
     if not hs:
-        out.append(Check("supervise harness", False,
-                         f"{sup['claude_bin']}, {sup['codex_bin']}: neither claude nor codex is on PATH",
+        out.append(Check("supervise harness", None,
+                         f"{sup['claude_bin']}, {sup['codex_bin']}: neither claude nor codex is on PATH; "
+                         "auto-restart inactive until harness installed",
                          "install the harness this user runs agents with, or set [supervise] "
                          "claude_bin / codex_bin"))
     for h in hs:
-        out.append(Check("supervise harness" if len(hs) == 1 else f"supervise harness ({h})", bool(found[h]),
-                         f"{h}: {sup[f'{h}_bin']}: {found[h] or 'not on PATH'}",
+        out.append(Check("supervise harness" if len(hs) == 1 else f"supervise harness ({h})", True if found[h] else None,
+                         f"{h}: {sup[f'{h}_bin']}: {found[h] or 'not on PATH'}"
+                         + ("" if found[h] else "; auto-restart inactive until harness installed"),
                          f"install {h} or set [supervise] {h}_bin"))
     if "codex" in hs:
         out.append(Check("supervise codex hooks", None,
@@ -1290,9 +1292,9 @@ def _containment_checks(cfg: dict) -> list[Check]:
     from swarm.supervisor.runner import scope_available
     if scope_available():
         return [Check("replacement scope", True, "systemd user scopes (systemd-run --user --scope)")]
-    return [Check("replacement scope", False,
-                  "no systemd user manager: the supervisor refuses to start replacements (each runs in "
-                  "its own systemd scope)",
+    return [Check("replacement scope", None,
+                  "no systemd user manager: auto-restart inactive until loginctl enable-linger "
+                  "$USER (each replacement runs in its own systemd scope)",
                   "loginctl enable-linger $USER, so the user manager (and the supervisor timer) always runs")]
 
 

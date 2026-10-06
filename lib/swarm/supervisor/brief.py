@@ -202,6 +202,12 @@ def build_brief(board, cfg: dict, js, a, reason: str, attempt: int, max_attempts
         task = _task_from_brief(prev) if prev and _previous_brief(prev) else None
         source = "previous brief" if task else source
     if task is None:
+        from swarm.supervisor.command import enrolment_of
+        rec = enrolment_of(cfg, root, js.job)
+        task = getattr(rec, "prompt", None)
+        if task:
+            source = "recorded spawn prompt"
+    if task is None:
         name = codex_task_name(root_text) if root_text else None
         first = first_posts[0] if first_posts else None
         if name or first:
@@ -211,6 +217,8 @@ def build_brief(board, cfg: dict, js, a, reason: str, attempt: int, max_attempts
                       f"This is restart {attempt} of at most {max_attempts}. You run headless: nobody "
                       f"answers questions, so decide and act; post progress on the board. You cannot "
                       f"spawn subagents.", UNTRUSTED])
+    if a.role == "coordinator":
+        head = head.replace("You cannot spawn subagents.", "You may spawn workers to continue this job.")
     cap = sup["brief_max_chars"]
     task_part = _Part(f"## Your original task ({source})",
                       _keep_start(_scrub(task), max(cap // TASK_SHARE, 200)) if task else
@@ -243,7 +251,12 @@ def build_brief(board, cfg: dict, js, a, reason: str, attempt: int, max_attempts
                    + f"{swarm} transcript list --job {_q(js.job)} --agent {_q(a.name)}"
                    f"   (every run of {a.name})\n"
                    f"{swarm} transcript export --job {_q(js.job)} <dir>   (all transcripts with their images)")
-    parts = [task_part, first_part, mine_part, to_me_part, tail_part]
+    restart_part = _Part("## Crash recovery state",
+                         f"Last contact: {a.last_contact_at.isoformat()}; last tool: {_scrub(a.current_tool or 'none')}. "
+                         "Check files and processes before repeating work; continue from the board.")
+    board_part = _Part("## Recent job board messages", _post_text([m for m in msgs[-sup["brief_posts"]:] if m not in mine and m not in to_me]),
+                       "JOB BOARD")
+    parts = [task_part, first_part, restart_part, board_part, mine_part, to_me_part, tail_part]
     nonce = secrets.token_hex(6)
 
     def block(p: _Part) -> str:
@@ -263,7 +276,7 @@ def build_brief(board, cfg: dict, js, a, reason: str, attempt: int, max_attempts
     # them: MIN_BRIEF_CHARS). The task was held to a share of the cap above, so the latest tail keeps
     # room. Trim order: the transcript tail, own posts, posts to me (each keeps its newest lines),
     # then the first post and the task (keep their start). A section trimmed to nothing is dropped.
-    for part, keep in ((tail_part, _keep_end), (mine_part, _keep_end), (to_me_part, _keep_end),
+    for part, keep in ((tail_part, _keep_end), (board_part, _keep_end), (mine_part, _keep_end), (to_me_part, _keep_end),
                        (first_part, _keep_start), (task_part, _keep_start)):
         over = len(render()) - cap
         if over <= 0:
