@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.json text eol=lf
+tools/ export-ignore
+node_modules/ export-ignore
+*.cmd text eol=crlf

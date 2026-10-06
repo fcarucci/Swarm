@@ -1,0 +1,79 @@
+{
+  "version": "2.1.0",
+  "grades": {"A": 85, "B": 70, "C": 55, "D": 40},
+  "cxi": {
+    "cognitive_above": {"moderate": 3, "high": 7, "very_high": 16},
+    "cognitive_above_by_language": {
+      "rust": {"moderate": 3, "high": 7, "very_high": 16},
+      "python": {"moderate": 11, "high": 17, "very_high": 31},
+      "js": {"moderate": 8, "high": 13, "very_high": 26}
+    },
+    "risk_weights": {"moderate": 1, "high": 3, "very_high": 9},
+    "profile_cap": 4.06,
+    "tail_cap": 0.064,
+    "profile_weight": 0.75,
+    "tail_weight": 0.25,
+    "report_high_over": [15, 25]
+  },
+  "coi": {
+    "weights": {"cyc_mod": 0.35, "cyc_crate": 0.15, "fan": 0.20, "hub": 0.15, "dist": 0.15},
+    "fan_ce_over": 12,
+    "hub_percentile": 90,
+    "hub_min_ca": 5,
+    "dist_cap": 0.7,
+    "dist_min_items": 3
+  },
+  "oei": {
+    "weights": {"st": 0.25, "pt": 0.20, "gen": 0.15, "up": 0.20, "sg": 0.10, "abs": 0.10},
+    "cap": 0.5,
+    "mock_only_weight": 0.5,
+    "generic_min_params": 3,
+    "generic_min_where": 3,
+    "markers_cap_per_kloc": 10
+  },
+  "mai": {
+    "star_table": [
+      {"stars": 5, "moderate": 0.25, "high": 0.0, "very_high": 0.0},
+      {"stars": 4, "moderate": 0.30, "high": 0.05, "very_high": 0.0},
+      {"stars": 3, "moderate": 0.40, "high": 0.10, "very_high": 0.0},
+      {"stars": 2, "moderate": 0.50, "high": 0.15, "very_high": 0.05}
+    ],
+    "unit_size_loc_above": {"moderate": 15, "high": 30, "very_high": 60},
+    "unit_complexity_cyclomatic_above": {"moderate": 5, "high": 10, "very_high": 25},
+    "unit_interfacing_params_above": {"moderate": 2, "high": 4, "very_high": 6},
+    "module_coupling_ca_above": {"moderate": 10, "high": 20, "very_high": 40},
+    "duplication_pct_stars": [[3, 5], [5, 4], [10, 3], [20, 2]],
+    "mi_vs_red_below": 10,
+    "mi_vs_yellow_below": 20
+  },
+  "interpretation": {
+    "CXI": {
+      "A": "Functions are small and flat; almost no branching-heavy code.",
+      "B": "Mostly easy functions with a few branching-heavy spots.",
+      "C": "A meaningful share of code sits in hard-to-follow functions.",
+      "D": "Many hard functions or a heavy tail of very complex ones.",
+      "E": "Most code lives in very complex functions; refactor before extending."
+    },
+    "COI": {
+      "A": "Dependency structure is layered, acyclic and well spread.",
+      "B": "Healthy structure with minor cycles or hubs.",
+      "C": "Noticeable cycles, wide fan-out or hubs; changes ripple.",
+      "D": "Tangled dependencies; cycles and hubs dominate the graph.",
+      "E": "Pervasive cycles and hubs; modules cannot change independently."
+    },
+    "OEI": {
+      "A": "Little speculative abstraction detected (heuristic).",
+      "B": "A few abstractions without clear payoff (heuristic).",
+      "C": "Several single-use or pass-through abstractions (heuristic).",
+      "D": "Much indirection that is not paid for by use (heuristic).",
+      "E": "Abstraction-heavy relative to actual use (heuristic)."
+    },
+    "MAI": {
+      "A": "SIG-style profile is excellent: small units, low branching, little duplication.",
+      "B": "Good maintainability profile with some larger units.",
+      "C": "Average maintainability; size, branching or duplication need attention.",
+      "D": "Below average; large or complex units and/or duplication are common.",
+      "E": "Poor maintainability profile across most sub-ratings."
+    }
+  }
+}

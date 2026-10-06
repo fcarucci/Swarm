@@ -26,3 +26,6 @@
 *.cmd                text eol=crlf
 *.ps1                text eol=crlf
 /install.ps1         export-ignore
+
+/skills/complexity-analyzer/tools/ export-ignore
+**/node_modules/ export-ignore

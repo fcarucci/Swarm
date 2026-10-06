@@ -85,6 +85,30 @@ class ManifestTests(unittest.TestCase):
                         if path.parent.name == "scripts":
                             self.assertTrue(packaged.getmember(rel).mode & 0o111)
 
+    def test_complexity_analyzer_skill_ships_for_both_hosts(self):
+        skill = ROOT / "skills/complexity-analyzer"
+        text = (skill / "SKILL.md").read_text()
+        self.assertTrue(text.startswith("---\nname: complexity-analyzer\n"))
+        self.assertNotIn("~/.claude/skills/complexity-analyzer", text)
+        self.assertFalse((skill / "docs").exists())
+        tracked = subprocess.check_output(["git", "ls-files", "-z"], cwd=ROOT).decode().split("\0")
+        staged = subprocess.check_output(["git", "ls-files", "--stage", "-z"], cwd=ROOT).decode().split("\0")
+        executable = {entry.split("\t", 1)[1] for entry in staged if entry.startswith("100755 ")}
+        for rel in filter(None, tracked):
+            self.assertTrue({"tools", "node_modules"}.isdisjoint(rel.split("/")), rel)
+        archive = subprocess.check_output(["git", "archive", "--format=tar", "HEAD"], cwd=ROOT)
+        with tarfile.open(fileobj=io.BytesIO(archive)) as packaged:
+            for manifest in (".claude-plugin/plugin.json", ".codex-plugin/plugin.json"):
+                self.assertEqual(json.load(packaged.extractfile(manifest))["name"], "swarm")
+            for rel in tracked:
+                if rel.startswith("skills/complexity-analyzer/") and not rel.endswith((".gitignore", ".gitattributes")):
+                    self.assertEqual(packaged.extractfile(rel).read().replace(b"\r\n", b"\n"),
+                                     (ROOT / rel).read_bytes().replace(b"\r\n", b"\n"), rel)
+                    if rel in executable:
+                        self.assertTrue(packaged.getmember(rel).mode & 0o111, rel)
+            for member in packaged.getmembers():
+                self.assertTrue({"tools", "node_modules"}.isdisjoint(member.name.split("/")), member.name)
+
     def test_plugin_version_helper(self):
         from swarm import paths
         self.assertEqual(paths.plugin_version(), self.load(".claude-plugin/plugin.json")["version"])

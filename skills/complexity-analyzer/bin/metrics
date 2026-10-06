@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+# Thin wrapper: runs bin/metrics.py through uv with the pinned tree-sitter packages.
+D="$(cd "$(dirname "$0")" && pwd)"
+exec uv run --no-project --quiet --with tree-sitter==0.26.0 --with tree-sitter-rust==0.24.2 --with radon==6.0.1 --with vulture==2.16 python "$D/metrics.py" "$@"
