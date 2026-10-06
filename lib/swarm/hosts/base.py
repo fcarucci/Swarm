@@ -41,6 +41,10 @@ class Host:
     supports_spawn_model_rewrite = False
     reads_prompt_tags = True            # the swarm's [swarm ...] tags in spawn prompts are readable
 
+    def completes_on(self, event: str) -> bool:
+        """Whether this hook proves that an agent has finished."""
+        return event == "stop" and self.stop_is_final
+
     @property
     def verifier_denied(self) -> tuple[str, ...]:
         return self.write_tools + self.spawn_tools

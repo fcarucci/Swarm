@@ -18,6 +18,8 @@ Planned release: 0.2.0.
 - engineering-team skill: head-bound verdicts, gating on the merge result, scoped fix rounds, goals as checkable queries, a hand-off contract, a secrets protocol, an authorization ledger, a recovery runbook, a "don't" list, and the team composition rules (who carries the duties of an absent product manager or build engineer).
 
 ### Fixed
+- Codex agents stay active between turns and complete only at session end or confirmed runner exit; quiet time no longer reports a running session as completed.
+- Orchestrator reminders share verdict/session state across Stop and tool hooks, stay silent while agents work or have recent activity, and repeat only after the configured orphan interval.
 - Queued role-addressed posts resolve recipients and validate the author and `--key` on delivery; a refused queued post tells its author why.
 - `@PM` reaches the invoking project manager (or orchestrator); `@product` addresses the optional product manager. The engineering-team PM joins with `--role project_manager`.
 - File plugins with unsafe POSIX ownership, world-write access, write access by a foreign group or symlinks are refused and listed; primary-group writable plugins (umask `002`) are accepted; the plugin trust boundary and Windows exception are documented. `swarm plugins` also reports discovery failures.

@@ -159,6 +159,22 @@ class ReviewHookTests(GoalEnv):
         self.assertEqual(out['decision'], 'block')
         self.assertIn('must record swarm verdict', out['reason'])
 
+    def test_headless_codex_judge_concludes_at_stop_but_completes_at_session_end(self):
+        from swarm import hooks, enrolment
+        from swarm.board.autoinit import store_key
+        self.done()
+        self.verdict()
+        marker = {'job': 'J', 'resume': {'agent_key': 'judge-1', 'resume_of': 'previous-seat'}}
+        with self.board() as b:
+            b.set_agent_runtime('judge-1', 'codex', None)
+        enrolment.write(store_key(self.cfg), job='J', agent_key='judge-1',
+                        harness='codex', session_id='sess-1', cwd=str(self.tmp))
+        with mock.patch.object(hooks, '_resume_binding', return_value=marker):
+            self.hook('session-stop', agent_id=None, host='codex')
+            self.assertIsNone(self.agent('judge-1').ended_at)
+            self.hook('session-end', agent_id=None, host='codex')
+        self.assertEqual(self.agent('judge-1').status, 'completed')
+
     def test_headless_judge_session_stop_blocks_when_board_is_down(self):
         from swarm import hooks
         from swarm.board.base import BoardUnavailable

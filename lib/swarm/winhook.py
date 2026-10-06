@@ -122,7 +122,7 @@ def main(argv: list[str] | None = None) -> int:
         if event == "session-start":
             return session_start(host, priv)
         md = marker_dir()
-        if not md.is_dir() or not any(md.glob("*.json")):
+        if not (host == "codex" and event == "session-end") and (not md.is_dir() or not any(md.glob("*.json"))):
             sys.stdin.read()
             return 0
         vpy = winlaunch.venv_python(winlaunch.venv_dir())

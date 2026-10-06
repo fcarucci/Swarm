@@ -268,7 +268,7 @@ both at once (see [One job, both hosts](#one-job-both-hosts)). What differs, as 
 | role | `[swarm role: <role>]` in the prompt | `<role>__<task>` task name; legacy `verifier...` / `judge...` prefixes also work |
 | an agent's own spawns | need the job's tag and a `[swarm spawn: <why>]` line, within the caps and depth | only the caps and depth are checked; the spawn is announced on the board and the agent is told to say there why |
 | verifier is refused | `Edit`, `Write`, `MultiEdit`, `NotebookEdit`, shell writes (best effort), spawning | `apply_patch`, shell writes (best effort), spawning |
-| a subagent completes | when it stops | `[codex] stop_quiet_minutes` (default 3) after its last turn, since it can be sent more work |
+| a subagent completes | when it stops | at SessionEnd or confirmed runner exit; a turn ending never proves completion |
 | sandbox | the first run adds the per-user spool dir to `sandbox.filesystem.allowWrite` in `~/.claude/settings.json`; posts from the sandbox spool | the first run edits `~/.codex/config.toml` (below); applies to new sessions. Posts from the sandbox spool, as in Claude Code; no network access is granted |
 | transcripts (optional archive) | the session's JSONL transcripts | the rollouts in `$CODEX_HOME/sessions` (`.jsonl` or `.jsonl.zst`) |
 | model per role (`[models]`) | set on the spawn by the hook | set on the spawn by the hook |
@@ -337,10 +337,10 @@ the base table still has `network_access = true`.
   once, and again after every plugin update that changes `hooks/codex-hooks.json`. Until then
   the hooks don't run and the board is silent for Codex agents; `swarm doctor --host codex`
   warns about it.
-- **The completion delay.** Codex fires its stop hook after every turn of a subagent, which can
-  be sent more work (`followup_task`). So a Codex agent counts as `completed` only
-  `[codex] stop_quiet_minutes` (default 3) after its last turn, a follow-up restarts the wait,
-  and `status`, `watch` and auto-close lag by that much.
+- **Completion follows session exit.** Codex fires its stop hook after every turn of a
+  subagent, which can be sent more work (`followup_task`). Only SessionEnd or confirmed runner
+  exit completes a Codex agent. Quiet time never proves completion; `stop_quiet_minutes` is
+  retained as an ignored compatibility setting.
 - **No readable spawn prompts.** The tag lines and the `[swarm spawn: <why>]` justification
   can't be checked (see the table above).
 - **Codex's own agent board.** Codex has an `agent_message_board` of its own under development;
@@ -786,7 +786,7 @@ On Postgres, re-run `swarm init` after changing `idle_minutes`, `dead_minutes` o
 
 | key | default | meaning |
 |---|---|---|
-| `stop_quiet_minutes` | `3` | a Codex agent counts as `completed` once no new turn came for this many minutes after its last one |
+| `stop_quiet_minutes` | `3` | deprecated compatibility setting, ignored; completion requires SessionEnd or confirmed runner exit |
 | `network_access` | `false` | `true`: bootstrap writes the `swarm` Codex profile (`$CODEX_HOME/swarm.config.toml`) with network access, for sessions started with `codex -p swarm` only; never the base table |
 | `board_writable` | `false` | `true`: the local board's directory becomes a Codex writable root, so agents open it directly. Sandboxed agents can then forge and alter board rows: `swarm doctor` reports FAIL |
 
@@ -856,7 +856,8 @@ for Codex (the same events; Codex hooks also need [trusting](#codex-setup)). Eac
 | `PreToolUse` (matcher `*`) | `swarm-hook turn` | Records the agent as `running` with this tool in flight. Routes and enrols it if it hasn't joined yet. Applies the verifier and spawn gates, and sets a spawn's [model](#models-per-role). Injects what is new for the agent (unread messages, reply reminders, a silence nudge, roster changes, new memories); nothing if nothing is new. |
 | `PostToolUse` (matcher `*`) | `swarm-hook done` | Clears the in-flight tool, so an agent in a long command shows as running rather than idle. With `[provenance] enabled` (default), also runs one cheap regex over the shell command; only on a match does it read the call's output and pin any memory it saved (see [Memory provenance](#memory-provenance-optional)), bounded to about 2.5 s. |
 | `Stop` | `swarm-hook session-stop` | The main session only (a subagent's end is `SubagentStop`). After a `not_met` verdict with no agent left at work, refuses to let the orchestrator end its turn, once, with the next-round brief (see "After a `not_met` verdict" under Goals) as the reason. Nothing otherwise. |
-| `SubagentStop` | `swarm-hook stop` | Marks the agent `completed` and frees its name (Codex: records the end of its turn; it completes `stop_quiet_minutes` later if no new turn comes). |
+| `SessionEnd` (Codex) | `swarm-hook session-end` | Completes this user's locally enrolled Codex agents of the ended session; a child event completes only that child. |
+| `SubagentStop` | `swarm-hook stop` | Marks the agent `completed` and frees its name (Codex: records only the end of its turn). |
 
 The main session has no `agent_id`, so the hooks ignore it, apart from setting the model of the
 subagents it spawns into a job, and the next-round brief (see "After a `not_met` verdict" under Goals) after a
@@ -1619,6 +1620,10 @@ With the default review pipeline, a worker hand-off starts the judge automatical
   informational while the pipeline is enabled and do not block the orchestrator's Stop.
   Explicitly disabling the pipeline keeps the legacy orchestrator reminder as a manual fallback.
   See [review pipeline](#review-pipeline) for artifact histories, evidence, finalization and caps.
+  Manual fallback reminders share state between tool and Stop hooks, once per verdict per
+  session. Worker posts or agent contact after a verdict suppress reminders until the job
+  is idle for `[supervise] orphan_minutes` (five minutes if absent); zero disables repeats.
+  `<marker>.respawn` retains reminder state and is removed with the job marker.
 - **The completion gate.** `deactivate --status completed` (the default) refuses a job with a
   goal until every current hand-off has its own fresh `met` verdict, and prints what remains.
   Superseded revisions do not gate completion. Jobs without hand-offs use the latest job verdict. It also
@@ -2570,8 +2575,9 @@ the "What's changed" notes (`scripts/release-notes.sh`; it fails if the section 
   profile (`-p`) with its own sandbox settings needs fixing by hand.
 - **`activate` in Codex says another job is already active in this session.** A Codex session
   runs one job: deactivate the other, or use another session.
-- **A Codex agent stays `running` after it finished.** It completes `stop_quiet_minutes` after
-  its last turn (see [Known gaps on Codex](#known-gaps-on-codex)).
+- **A Codex agent stays active after its turn finishes.** It completes at SessionEnd or
+  confirmed runner exit. A missing exit hook can leave it active until dead-agent detection;
+  quiet time alone does not mark it completed.
 - **`swarm migrate` is refused.** A swarm job is active on this machine: run it once none is,
   or with `--force`.
 - **`post` prints `queued (board not reachable from here: ...)`.** Normal inside a sandbox: the

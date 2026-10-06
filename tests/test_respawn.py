@@ -3,13 +3,14 @@ the orchestrator to spawn the next round (swarm.respawn): context at PreToolUse/
 per verdict, and a Stop that refuses to end the turn, once. The judge's own hooks never carry it."""
 from __future__ import annotations
 
+import datetime as dt
 import unittest
 from types import SimpleNamespace
 from unittest import mock
 
 from test_goals import GoalEnv  # noqa: E402  (sets sys.path)
 
-from swarm import respawn  # noqa: E402
+from swarm import respawn, hosts  # noqa: E402
 
 REASON, NEXT = "no failover drill", "run the db-2 failover drill and post the log"
 
@@ -43,6 +44,10 @@ class RespawnEnv(GoalEnv):
         for k in keys:
             self.hook("stop", agent_id=k, session="sess-1", agent_type="general-purpose",
                       transcript_path=self.main_transcript())
+            # These fixtures model the verdict arriving after the workers' last activity.
+            # Tests for activity after a verdict add that contact explicitly.
+            if k.startswith("w"):
+                self.h.backdate_agent(k, joined_at=2, last_seen=1, left_at=1)
 
     def main(self, event="turn", host=None, **extra):
         return self.hook(event, agent_id=None, session="sess-1", host=host, tool_name="Bash", **extra)
@@ -136,7 +141,8 @@ class TriggerTests(RespawnEnv):
         self.finish("w1", "judge-1")
         self.assertIsNotNone(self.main("turn"))
         self.assertIsNone(self.main("turn"))
-        with mock.patch.object(respawn, "REMIND_SECONDS", 0.0):
+        self.cfg["supervise"] = {"orphan_minutes": 1}
+        with mock.patch.object(respawn.time, "time", return_value=respawn.time.time() + 61):
             self.assertIsNotNone(self.main("turn"))
 
     def test_checks_are_throttled(self):
@@ -149,7 +155,7 @@ class TriggerTests(RespawnEnv):
             self.assertIsNone(self.main("turn"))
         # the throttled look is skipped, but Stop always looks
         with mock.patch.object(respawn, "CHECK_SECONDS", 3600.0):
-            self.assertIsNotNone(self.main("session-stop"))
+            self.assertIsNone(self.main("session-stop"))
 
     def test_a_job_without_a_goal_never_opens_the_board(self):
         self.activate("K", session="sess-2")
@@ -181,9 +187,87 @@ class StopTests(RespawnEnv):
         self.assertEqual(out["decision"], "block")
         self.assertTrue(out["reason"].startswith(self.expected()), out["reason"])
 
-    def test_stop_blocks_even_after_the_tool_hooks_said_it(self):
+    def test_stop_does_not_repeat_the_tool_hooks_reminder(self):
         self.assertIsNotNone(self.main("turn"))
-        self.assertEqual(self.main("session-stop")["decision"], "block")
+        self.assertIsNone(self.main("session-stop"))
+
+    def test_repeated_stops_say_it_once_per_verdict(self):
+        self.assertIsNotNone(self.main("session-stop"))
+        self.assertIsNone(self.main("session-stop"))
+
+    def test_worker_post_after_verdict_suppresses_reminder(self):
+        with self.board() as b:
+            b.post("J", self.agent("w1").name, "fix round started")
+        self.assertIsNone(self.main("session-stop"))
+
+    def worker_contact_after_verdict(self, name):
+        with self.board() as b:
+            # A fix worker can finish before the orchestrator's next Stop.
+            b.allocate_name("fix", "J")
+            b.tool_started("fix", "Bash")
+            b.agent_stopped("fix")
+        contact = self.job().verdict_at + dt.timedelta(seconds=1)
+        self.h.update_agent("fix", name=name, joined_at=contact, last_seen=contact,
+                            left_at=contact)
+        return contact.timestamp()
+
+    def test_worker_contact_after_verdict_suppresses_reminder(self):
+        now = self.worker_contact_after_verdict("Fix Worker")
+        with mock.patch.object(respawn.time, "time", return_value=now):
+            self.assertIsNone(self.main("session-stop"))
+
+    def test_worker_reusing_judge_name_suppresses_reminder(self):
+        now = self.worker_contact_after_verdict(self.judge)
+        with mock.patch.object(respawn.time, "time", return_value=now):
+            self.assertIsNone(self.main("session-stop"))
+
+    def test_idle_window_restarts_after_worker_activity(self):
+        self.cfg["supervise"] = {"orphan_minutes": 10}
+        self.assertIsNotNone(self.main("session-stop"))
+        with mock.patch.object(respawn.time, "time", return_value=respawn.time.time() + 601):
+            with self.board() as b:
+                post = b.post("J", self.agent("w1").name, "fix round started")
+            self.h.backdate_message(post.id, -601)
+            self.assertIsNone(self.main("session-stop"))
+            with mock.patch.object(respawn.time, "time", return_value=respawn.time.time() + 601):
+                self.assertIsNotNone(self.main("session-stop"))
+                self.assertIsNone(self.main("session-stop"))
+
+    def test_judge_activity_after_verdict_does_not_suppress_reminder(self):
+        with self.board() as b:
+            b.post("J", self.judge, "verdict details")
+        self.assertIsNotNone(self.main("session-stop"))
+
+    def test_repeated_stop_waits_for_configured_orphan_window(self):
+        self.cfg["supervise"] = {"orphan_minutes": 10}
+        self.assertIsNotNone(self.main("session-stop"))
+        now = respawn.time.time()
+        with mock.patch.object(respawn.time, "time", return_value=now + 301):
+            self.assertIsNone(self.main("session-stop"))
+        with mock.patch.object(respawn.time, "time", return_value=now + 601):
+            self.assertIsNotNone(self.main("session-stop"))
+            self.assertIsNone(self.main("session-stop"))
+
+    def test_new_session_can_receive_same_verdict(self):
+        self.assertIsNotNone(self.main("session-stop"))
+        marker = self.markers / "J.json"
+        with self.board() as b:
+            text = respawn.check(marker, "J", force=True,
+                                 host=hosts.get("claude"),
+                                 open_board=self.board, cfg=self.cfg, session_id="new-session")
+        self.assertIsNotNone(text)
+
+    def test_live_started_running_and_idle_workers_suppress_reminder(self):
+        self.spawn_worker("w2")
+        self.assertIsNone(self.main("session-stop"))
+        with self.board() as b:
+            b.tool_started("w2", "Bash")
+        self.assertIsNone(self.main("session-stop"))
+        with self.board() as b:
+            b.tool_finished("w2")
+        self.h.backdate_agent("w2", last_seen=6 * 60)
+        self.assertEqual(self.agent("w2").status, "idle")
+        self.assertIsNone(self.main("session-stop"))
 
     def test_a_continued_stop_is_let_through_so_the_user_can_be_told(self):
         self.assertIsNone(self.main("session-stop", stop_hook_active=True))

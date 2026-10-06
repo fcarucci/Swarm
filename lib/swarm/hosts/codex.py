@@ -363,6 +363,11 @@ class CodexHost(Host):
     supports_spawn_model_rewrite = True
     reads_prompt_tags = False     # V2 encrypts the spawn message: roles come from the task name
 
+    def completes_on(self, event: str) -> bool:
+        # Stop and SubagentStop end turns, even for a root running under codex exec.
+        # Quiet time is not evidence of exit; SessionEnd and runner exit are.
+        return event == "session-end"
+
     def tool_matches(self, tool_name, names: tuple[str, ...]) -> bool:
         """Codex prefixes a tool's namespace with no separator ("collaborationspawn_agent")."""
         return isinstance(tool_name, str) and any(tool_name == n or tool_name.endswith(n) for n in names)

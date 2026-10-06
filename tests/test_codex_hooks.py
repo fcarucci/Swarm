@@ -272,15 +272,65 @@ class CodexHookTests(Env):
         self.assertNotIn("[swarm] You are **", self.context(out) if out else "")
         self.assertEqual(self.agent(self.child, job="fixture").name, a.name)
 
-    def test_codex_agent_completes_after_quiet_window(self):
+    def test_codex_agent_stays_active_after_quiet_window(self):
         self.start_child()
         self.replay("SubagentStop", self.child_payloads("SubagentStop")[0])
         self.h.backdate_agent(self.child, turn_ended_at=4 * 60)
         with self.board() as b:
             swarm.sweep_jobs(b, self.cfg)
+        self.assertIsNone(self.agent(self.child, job="fixture").ended_at)
+
+    def test_codex_session_end_completes_owned_agents(self):
+        self.start_child()
+        self.hook("session-stop", agent_id=None, session=self.sid, host="codex")
+        self.assertIsNone(self.agent(self.child, job="fixture").ended_at)
+        (self.markers / "fixture.json").unlink()
+        self.hook("session-end", agent_id=None, session=self.sid, host="codex")
         self.assertEqual(self.agent(self.child, job="fixture").status, "completed")
 
-    def test_codex_followup_restarts_the_quiet_window(self):
+    def test_codex_child_session_end_keeps_sibling_active(self):
+        from swarm import enrolment
+        from swarm.board.autoinit import store_key
+        self.start_child()
+        with self.board() as b:
+            b.allocate_name("sibling", "fixture")
+            b.set_agent_runtime("sibling", "codex", None)
+        enrolment.write(store_key(self.cfg), job="fixture", agent_key="sibling",
+                        harness="codex", session_id=self.sid, cwd=str(self.tmp))
+        self.hook("session-end", agent_id=self.child, session=self.sid, host="codex")
+        self.assertEqual(self.agent(self.child, job="fixture").status, "completed")
+        self.assertIsNone(self.agent("sibling", job="fixture").ended_at)
+
+    def test_codex_attached_root_completes_only_at_session_end(self):
+        from swarm import enrolment
+        from swarm.board.autoinit import store_key
+        self.activate_fixture_job()
+        with self.board() as b:
+            b.allocate_name(self.sid, "fixture")
+            b.set_agent_runtime(self.sid, "codex", None)
+            b.record_route(self.sid, self.sid, "final", "fixture")
+        enrolment.write(store_key(self.cfg), job="fixture", agent_key=self.sid,
+                        harness="codex", session_id=self.sid, cwd=str(self.tmp))
+        self.hook("session-stop", agent_id=None, session=self.sid, host="codex")
+        self.hook("stop", agent_id=self.sid, session=self.sid, host="codex")
+        self.h.backdate_agent(self.sid, turn_ended_at=9 * 60)
+        with self.board() as b:
+            swarm.sweep_jobs(b, self.cfg)
+        self.assertIsNone(self.agent(self.sid, job="fixture").ended_at)
+        self.hook("session-end", agent_id=None, session=self.sid, host="codex")
+        self.assertEqual(self.agent(self.sid, job="fixture").status, "completed")
+
+    def test_codex_session_end_ignores_other_sessions_and_unowned_agents(self):
+        self.start_child()
+        with self.board() as b:
+            b.allocate_name("foreign", "fixture")
+            b.set_agent_runtime("foreign", "codex", None)
+        self.hook("session-end", agent_id=None, session="other-session", host="codex")
+        self.assertIsNone(self.agent(self.child, job="fixture").ended_at)
+        self.hook("session-end", agent_id=None, session=self.sid, host="codex")
+        self.assertIsNone(self.agent("foreign", job="fixture").ended_at)
+
+    def test_codex_followup_keeps_the_agent_active(self):
         # the root's followup_task fires no hook for the child until its next tool call: the
         # follow-up itself must keep a quiet-window sweep from completing a child that is working
         self.start_child()
@@ -290,12 +340,13 @@ class CodexHookTests(Env):
         self.assertNotIn("agent_id", followup)                     # recorded from the root thread
         self.assertIsNone(self.replay("PreToolUse", followup))
         with self.board() as b:
-            self.assertEqual(b.finish_quiet_agents(swarm.codex_quiet_seconds(self.cfg)), [])
+            swarm.sweep_jobs(b, self.cfg)
         self.assertIsNone(self.agent(self.child, job="fixture").ended_at)
         self.replay("SubagentStop", self.child_payloads("SubagentStop")[-1])   # the follow-up turn ended
         self.h.backdate_agent(self.child, turn_ended_at=4 * 60)
         with self.board() as b:
-            self.assertEqual(b.finish_quiet_agents(swarm.codex_quiet_seconds(self.cfg)), [self.child])
+            swarm.sweep_jobs(b, self.cfg)
+        self.assertIsNone(self.agent(self.child, job="fixture").ended_at)
 
     # ---- auto-close: the root thread at work keeps its job open
 
@@ -304,9 +355,8 @@ class CodexHookTests(Env):
         than the default auto-close window (30 minutes)."""
         self.start_child()
         self.replay("SubagentStop", self.child_payloads("SubagentStop")[0])
-        self.h.backdate_agent(self.child, turn_ended_at=4 * 60)
-        with self.board() as b:
-            self.assertEqual(b.finish_quiet_agents(swarm.codex_quiet_seconds(self.cfg)), [self.child])
+        self.hook("session-end", agent_id=None, session=self.sid, host="codex")
+        self.assertIsNotNone(self.agent(self.child, job="fixture").ended_at)
         quiet = 31 * 60
         self.h.backdate_job("fixture", created_at=quiet + 60, activated_at=quiet + 60)
         self.h.backdate_agent(self.child, joined_at=quiet + 30, last_seen=quiet, left_at=quiet,
@@ -354,7 +404,9 @@ class CodexHookTests(Env):
         self.assertFalse(row.final)                              # a Codex turn: more may come
         self.h.backdate_agent(self.child, turn_ended_at=4 * 60)
         with self.board() as b:
-            swarm.sweep_jobs(b, self.cfg)                        # completes it, then finalizes (owner)
+            swarm.sweep_jobs(b, self.cfg)
+            self.assertFalse(b.transcripts()[0].final)
+        self.hook("session-end", agent_id=None, session=self.sid, host="codex")
         with self.board() as b:
             (row,) = [t for t in b.transcripts() if t.agent_key == self.child]
             self.assertTrue(row.final)
@@ -481,10 +533,11 @@ class CodexHookTests(Env):
             (row,) = [t for t in b.transcripts() if t.agent_key == self.child]
             self.assertTrue(row.final)
 
-    def test_sweep_survives_a_failing_quiet_check(self):
+    def test_sweep_never_uses_quiet_time_to_complete_agents(self):
         self.activate_fixture_job()
-        with self.board() as b, mock.patch.object(type(b), "finish_quiet_agents", side_effect=RuntimeError("down")):
-            swarm.sweep_jobs(b, self.cfg)                            # logged, not raised
+        with self.board() as b, mock.patch.object(type(b), "finish_quiet_agents") as finish:
+            swarm.sweep_jobs(b, self.cfg)
+            finish.assert_not_called()
         rc, _, err = self.cli("status")
         self.assertEqual(rc, 0, err)
 
