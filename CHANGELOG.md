@@ -6,6 +6,8 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 ## [Unreleased]
 
+## [0.1.17] - 2026-10-05
+
 ### Added
 - The board message length is configurable: one cap per board, stored in the board so every client and host agrees (`[board] message_max_chars` only seeds a new board). Read it with `swarm config board.message_max_chars`, change it online with `swarm config board.message_max_chars 500` (50 to 4000; `--save` also writes the config file). Lowering it never cuts or refuses messages already stored; it applies to new posts. The start hook shows the live cap.
 
