@@ -12,6 +12,7 @@ to follow it.
 - [`engineering-team`](skills/engineering-team/SKILL.md): a configurable team with an
   engineering lead, QA, engineers, and an independent judge. Separate `team.toml`
   configuration and team CLI commands come through the plugin system.
+- [`complexity-analyzer`](skills/complexity-analyzer/SKILL.md): complexity, coupling and maintainability metrics for Rust, Python and JS/TS.
 - [`refactoring`](skills/refactoring/SKILL.md): Fowler-style refactoring in Suggest or Apply mode.
 - [`ask-answer`](skills/ask-answer/SKILL.md): blockers and human questions,
   using `swarm ask`, `swarm answer`, and `swarm questions`.

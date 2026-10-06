@@ -7,6 +7,7 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 ## [Unreleased]
 
 ### Added
+- complexity-analyzer skill.
 - refactoring skill.
 - The `ask-answer` plugin: structured questions to the human, roles or agents; answers, comments and corrections; full answer delivery, a watch questions pane and pending human questions in orchestrator context.
 - Question changes invalidate local hook leases; PostgreSQL watch snapshots include blocker state and plugin settings, and pending human questions keep surfacing on each orchestrator turn.

@@ -1,0 +1,44 @@
+{
+  "rust-code-analysis": {
+    "version": "0.0.25",
+    "tag": "v0.0.25",
+    "repo": "mozilla/rust-code-analysis",
+    "assets": {
+      "linux-x86_64": {
+        "asset": "rust-code-analysis-linux-cli-x86_64.tar.gz",
+        "asset_sha256": "9ec2a217b8ff191e02dab5d5f2eee6158b63fd975c532b2c5d67c2e6c7249894",
+        "member": "rust-code-analysis-cli",
+        "binary_sha256": "59eb8762ccd0dc18fc08d1aa8ef34a43c3e650993bca51ec58e642bb38cb41ee"
+      },
+      "windows-x86_64": {
+        "asset": "rust-code-analysis-win-cli-x86_64.zip",
+        "asset_sha256": "592e9adb0cd66c333043addd8beaa04ea692a4d531e3b6dc54a2de1f27159623",
+        "member": "rust-code-analysis-cli.exe",
+        "binary_sha256": "a5a359c7ce120c30e5b8ef89a6c96bc4a88c62713084effacc9cc7f637a2a3ef"
+      }
+    },
+    "note": "No prebuilt macOS or linux-aarch64 asset exists on the v0.0.25 release; those platforms use `cargo install rust-code-analysis-cli --version 0.0.25 --locked`."
+  },
+  "python-packages": {
+    "tree-sitter": "0.26.0",
+    "tree-sitter-rust": "0.24.2",
+    "radon": "6.0.1",
+    "vulture": "2.16"
+  },
+  "node-packages": {
+    "@typescript-eslint/parser": "8.71.1",
+    "dependency-cruiser": "17.4.3",
+    "eslint": "9.39.5",
+    "eslint-plugin-sonarjs": "4.2.2",
+    "jscpd": "5.4.0",
+    "knip": "5.88.1",
+    "typescript": "5.9.3"
+  },
+  "node-install": {
+    "dir": "node-tools",
+    "prefix": "tools/node",
+    "command": "npm ci --ignore-scripts --no-audit --no-fund --prefix tools/node",
+    "min_node": "20.19",
+    "note": "package.json pins exact top-level versions; package-lock.json (committed) pins every transitive package with integrity hashes. Must equal node-packages (checked by install_tools.py --check and selftest)."
+  }
+}
