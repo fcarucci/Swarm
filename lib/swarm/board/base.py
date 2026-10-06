@@ -103,8 +103,9 @@ RESTART_OUTCOMES = ("running", "completed", "timeout", "max_turns", "failed", "n
 # 12 jobs.status 'paused' and the job_pauses table (pause/resume manifests), 13 the job_status
 # view's shown_status column (what `status` shows, incl. "waiting (goal not met)"; view only),
 # 14 the index messages(job, created_at) (job_status's per-job max(created_at);
-# `swarm watch` redraws read it), 15 grouped status counts and message/agent indexes.
-SCHEMA_VERSION = 15
+# `swarm watch` redraws read it), 15 grouped status counts and message/agent indexes,
+# 16 indexed job-restricted agent message counts and message-free agent rollups in job_status.
+SCHEMA_VERSION = 16
 
 # A moved agent's roster_seen holds MOVED_PREFIX + the job it came from until its next PreToolUse
 # turn tells it (no schema change: the hooks own the text, and it never parses as a snapshot).

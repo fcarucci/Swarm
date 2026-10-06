@@ -899,6 +899,43 @@ class BoardContract:
         self.h.backdate_message(before.id, 3600)  # before it joined: not counted
         self.assertEqual(self.agent("k").messages, 0)
 
+    def test_agent_message_counts_preserve_reused_name_incarnations(self):
+        self.h.reset({"simpsons": ["A"]})
+        name = self.b.allocate_name("old", "j")
+        self.h.backdate_agent("old", joined_at=3600)
+        old_post = self.b.post("j", name, "old incarnation")
+        self.h.backdate_message(old_post.id, 120)
+        self.b.agent_stopped("old")
+        self.assertEqual(self.b.allocate_name("new", "j"), name)
+        self.h.backdate_agent("new", joined_at=60)
+        self.b.post("j", name, "new incarnation")
+        self.b.post("other", name, "same name, other job")
+        self.assertEqual(self.agent("old").messages, 2)
+        self.assertEqual(self.agent("new").messages, 1)
+        self.assertEqual(self.b.job_status("j").messages, 2)
+
+    def test_closed_job_rollups_remain_live_and_match_agent_status(self):
+        self.b.open_job("j", "closed", None, None, None)
+        self.b.open_job("other", None, None, None, None)
+        for key in ("done", "left", "quiet"):
+            self.b.allocate_name(key, "j")
+        self.b.agent_stopped("done")
+        self.b.close_job("j", "completed", "kept")
+        for key in ("done", "left", "quiet"):
+            self.h.backdate_agent(key, last_seen=DAY)
+        self.b.post("j", "X", "post after closure")
+        self.b.allocate_name("other-agent", "other")
+        self.b.post("other", "X", "unrelated")
+        js = self.b.job_status("j")
+        self.assertEqual((js.agents, js.started, js.running, js.idle,
+                          js.completed, js.dead_or_left, js.messages),
+                         (3, 0, 0, 0, 1, 2, 1))
+        self.assertEqual(js.last_activity_at, self.b.recent_messages(1, "j")[0].created_at)
+        self.assertEqual(js.status, "completed")
+        self.assertEqual(js.outcome, "kept")
+        self.assertEqual(next(row for row in self.b.jobs(True) if row.job == "j"), js)
+        self.assertEqual([row.job for row in self.b.jobs()], ["other"])
+
     def test_agent_events(self):
         since = self.b.now()
         self.b.allocate_name("a", "j", "worker")
@@ -1965,6 +2002,72 @@ class PostgresSpecificTests(unittest.TestCase):
         self.h.reset()
         self.b = self.h.board()
         self.addCleanup(self.b.close)
+
+    def test_agent_status_job_filter_reaches_message_scan(self):
+        from swarm.board.postgres import _AGENT_STATUS_COLS
+        self.b.allocate_name("one", "j")
+        self.b.allocate_name("two", "other")
+        self.b.post("j", self.b.active_agent_name("one"), "local")
+        self.b.post("other", self.b.active_agent_name("two"), "unrelated")
+        plan = self.h.conn.execute(f"EXPLAIN (FORMAT JSON) SELECT {_AGENT_STATUS_COLS} "
+                                   "FROM agent_status WHERE job = 'j'").fetchone()[0][0]["Plan"]
+
+        def nodes(node):
+            yield node
+            for child in node.get("Plans", []):
+                yield from nodes(child)
+
+        scans = [node for node in nodes(plan) if node.get("Relation Name") == "messages"]
+        self.assertTrue(scans, plan)
+        for scan in scans:
+            # A bitmap scan may carry the condition on its child index scan instead.
+            conditions = " ".join(str(n.get(field, "")) for n in nodes(scan)
+                                  for field in ("Filter", "Index Cond", "Recheck Cond"))
+            self.assertIn("job", conditions, plan)
+            self.assertTrue("'j'" in conditions or "a.job" in conditions, plan)
+        agent_scans = [node for node in nodes(plan) if node.get("Relation Name") == "agents"]
+        self.assertTrue(agent_scans, plan)
+        for scan in agent_scans:
+            conditions = " ".join(str(n.get(field, "")) for n in nodes(scan)
+                                  for field in ("Filter", "Index Cond", "Recheck Cond"))
+            self.assertIn("'j'", conditions, plan)
+
+    def test_schema16_recreates_status_views_without_changing_results(self):
+        from pathlib import Path
+        from swarm.board.base import SCHEMA_VERSION
+        from swarm.board.postgres import _AGENT_STATUS_COLS, _JOB_STATUS_COLS
+        conn = self.h.conn
+        self.b.open_job("j", "open", None, None, None)
+        self.b.open_job("closed", "old", None, None, None)
+        self.b.ensure_job("empty")
+        for key in ("started", "running", "idle", "dead", "done", "left"):
+            self.b.allocate_name(key, "j")
+        self.b.tool_started("running", "Read")
+        self.h.backdate_agent("idle", last_seen=6 * MIN)
+        self.h.backdate_agent("dead", last_seen=31 * MIN)
+        self.b.agent_stopped("done")
+        self.b.leave(agent_key="left")
+        self.b.allocate_name("old", "closed")
+        self.b.close_job("closed", "completed", "kept")
+        self.b.post("j", self.b.active_agent_name("started"), "counted")
+        self.b.post("closed", "X", "historical")
+        old_views = (Path(__file__).parent / "fixtures/schema15_status_views.sql").read_text()
+        conn.execute(old_views.format(idle=5, dead=30, tool_timeout=60))
+        conn.execute("UPDATE board_meta SET value = '15' WHERE key = 'schema_version'")
+        queries = (f"SELECT {_AGENT_STATUS_COLS} FROM agent_status ORDER BY job, agent_key",
+                   f"SELECT {_JOB_STATUS_COLS}, shown_status FROM job_status ORDER BY job")
+        before = [conn.execute(q).fetchall() for q in queries]
+        columns = conn.execute("SELECT table_name, column_name, data_type FROM information_schema.columns "
+                               "WHERE table_name IN ('agent_status', 'job_status') "
+                               "ORDER BY table_name, ordinal_position").fetchall()
+        for _ in range(2):  # migration and idempotent re-init
+            type(self.b).setup(self.h.cfg, SMALL_POOL)
+            self.assertEqual(type(self.b).schema_version(self.h.cfg), SCHEMA_VERSION)
+            self.assertEqual([conn.execute(q).fetchall() for q in queries], before)
+            self.assertEqual(conn.execute("SELECT table_name, column_name, data_type "
+                                          "FROM information_schema.columns "
+                                          "WHERE table_name IN ('agent_status', 'job_status') "
+                                          "ORDER BY table_name, ordinal_position").fetchall(), columns)
 
     def test_ids_become_visible_in_order(self):
         """A poster whose id is lower but whose commit is later must not be skipped. Another

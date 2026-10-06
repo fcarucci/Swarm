@@ -7,6 +7,7 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 ## [Unreleased]
 
 ### Changed
+- Schema 16 restricts PostgreSQL agent message counts to the requested job and rolls up jobs without per-agent message counts, preserving status columns and historical counts (automatic migration).
 - Linux tool hooks skip Python while the board is unchanged and contact is not due (`[hook] hook_min_interval_s`, default 15 seconds). Shared message notifications invalidate read stamps; notifier failures fall back to cursor reads. Start, stop and session-stop hooks keep their behavior.
 - `watch` defaults to 10-second periodic refreshes (`[board] watch_interval_s`); notifications and snapshot misses coalesce for `watch_min_redraw_s` (default 2 seconds), including compact panes. Keys still render immediately from cached data.
 - PostgreSQL watch snapshots use one statement with grouped message counts. Schema 15 replaces correlated status counts and adds message/agent indexes (automatic migration).
