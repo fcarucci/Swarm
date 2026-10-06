@@ -36,6 +36,9 @@ class SnapshotBoard:
     def session_jobs(self, session):
         return [j for j in self.job_rows if j.session_id == session]
 
+    def session_shown_jobs(self, session):
+        return self.session_jobs(session)
+
     def job_status(self, job):
         return next((j for j in self.job_rows if j.job == job),None)
 

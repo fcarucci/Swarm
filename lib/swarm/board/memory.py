@@ -1181,6 +1181,17 @@ class MemoryBoard(Board):
             rows.sort(key=lambda r: (r.status != "active", r.activated_at or r.created_at, r.job))
             return rows
 
+    def session_shown_jobs(self, session: str) -> list[JobStatus]:
+        s = self._s()
+        with s.lock:
+            jobs = [j for j in s.jobs.values() if j["session_id"] == session]
+            selected = [j for j in jobs if j["status"] == "active"]
+            if not selected and jobs:
+                selected = [max(jobs, key=lambda j: (j["finished_at"] or j["created_at"], j["job"]))]
+            selected.sort(key=lambda j: (j["activated_at"] or j["created_at"], j["job"]))
+            now = self.now()
+            return [self._job_status(j, now) for j in selected]
+
     # ---- transcripts ---------------------------------------------------------------------
     # Rows live in store.transcripts; a row's "body" is read and written through
     # store.transcript_body / put_transcript_body / drop_transcript_body, so the file backend

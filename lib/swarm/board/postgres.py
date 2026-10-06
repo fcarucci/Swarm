@@ -1761,6 +1761,20 @@ class PostgresBoard(Board):
             JobStatus, f"SELECT {_JOB_STATUS_COLS} FROM job_status WHERE session_id = %s "
             "ORDER BY (status = 'active') DESC, COALESCE(activated_at, created_at), job", (session,))
 
+    def session_shown_jobs(self, session: str) -> list[JobStatus]:
+        # Materialize the cheap jobs selection before entering any status aggregates.
+        return self._fetch(JobStatus, f"""
+            WITH shown AS MATERIALIZED (
+                SELECT job FROM jobs WHERE session_id = %s
+                  AND (status = 'active' OR job = (
+                    SELECT job FROM jobs WHERE session_id = %s
+                      AND NOT EXISTS (SELECT 1 FROM jobs WHERE session_id = %s AND status = 'active')
+                    ORDER BY COALESCE(finished_at, created_at) DESC, job DESC LIMIT 1))
+            )
+            SELECT {_JOB_STATUS_COLS} FROM job_status WHERE job IN (SELECT job FROM shown)
+            ORDER BY COALESCE(activated_at, created_at), job
+        """, (session, session, session))
+
     # ---- change notification -----------------------------------------------------------
 
     def subscribe(self, messages_only: bool = False) -> None:

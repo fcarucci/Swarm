@@ -1823,15 +1823,11 @@ def _active_jobs_by_activity(board) -> list[str]:
 
 
 def session_jobs(board, session: str) -> tuple[list, list]:
-    """(shown, ever) for `watch --session S`: the jobs of session S that are shown, and every job
-    S has had (closed ones too). shown = S's active jobs; when none is active, the job S
-    finished last, so the final state stays on screen while the linger runs. A job's session is
-    JobStatus.session_id (set by `activate`, kept by all backends)."""
-    ever = board.session_jobs(session)
-    active = [j for j in ever if j.status == "active"]
-    if active or not ever:
-        return active, ever
-    return [max(ever, key=lambda j: (j.finished_at or j.created_at, j.job))], ever
+    """(shown, fetched) for session watches. Fetch only open jobs, or the last finished job.
+    The second slot is retained for callers of the former (shown, ever) helper; it no longer
+    loads historical rollups that the dashboard cannot display."""
+    shown = board.session_shown_jobs(session)
+    return shown, shown
 
 
 class IdleExit:
@@ -2084,7 +2080,7 @@ def _watch_frame(board, job: str | None, interval: float, color: bool, interacti
     session = view.get("session")
     srows = None
     if session:
-        srows, _ever = session_jobs(board, session)
+        srows, _fetched = session_jobs(board, session)
         if view.get("idle_exit") is not None:
             view["idle_exit"].observe(any(j.status == "active" for j in srows))
     if view.get("compact"):
@@ -2312,22 +2308,37 @@ def _watch_loop(board, out, fd: int | None, interval: float, view: dict, draw, r
     when view["idle_exit"] (an IdleExit, set by --exit-when-idle) has expired.
 
     refresh=None: draw() queries the board and the loop waits for it (tests, simple callers).
-    With refresh (cmd_watch): a background thread owns the board: it waits for changes and calls
+    With refresh (cmd_watch) and a terminal: a background thread owns the board. It waits for
+    changes and calls
     refresh() -> snapshot (queries; may take seconds), and draw(snapshot) renders one frame from
     that snapshot without touching the board. Keys are read on this thread and redraw at once
     from the last snapshot, so they never wait for a query. A view change that needs data the
-    snapshot lacks (history) shows the old frame until the next refresh, which is requested."""
+    snapshot lacks (history) shows the old frame until the next refresh, which is requested.
+    Without a terminal, the same refresh gate feeds a cached snapshot on this thread; key
+    redraws never bypass the database refresh deadline."""
     board.subscribe()
-    if refresh is not None:
+    if refresh is not None and fd is not None:
         return _watch_loop_threaded(board, out, fd, interval, view, draw, refresh)
     dirty, changed = True, False
     gate = _RefreshGate(interval, view.get('min_redraw', 2))
+    snap = None
     while True:
-        if dirty or gate.due(time.monotonic(), changed):
-            out.write("\033[H" + "\n".join(line + "\033[K" for line in draw()) + "\033[J")
-            out.flush()
-            dirty = False
+        due = gate.due(time.monotonic(), changed)
+        if refresh is not None and due:
+            snap = refresh()
             gate.refreshed(time.monotonic())
+            dirty = True
+        if dirty or due:
+            try:
+                lines = draw(_Replay(snap)) if refresh is not None else draw()
+            except SnapshotMiss:
+                gate.dirty = True
+            else:
+                out.write("\033[H" + "\n".join(line + "\033[K" for line in lines) + "\033[J")
+                out.flush()
+            dirty = False
+            if refresh is None:
+                gate.refreshed(time.monotonic())
         # Poll keys and board changes in short slices: a keypress redraws at once, and a
         # burst of hook updates lands in one slice, so it costs one redraw, not dozens.
         keys = _read_keys(fd)
@@ -2488,10 +2499,7 @@ def cmd_watch(cfg: dict, job: str | None, interval: float, color: bool, session:
 
         def draw(snap) -> list[str]:  # on the key thread: no query, only the last snapshot
             return frame(snap, view)
-        if fd is None:   # no keys to wait on (not a terminal): the plain redraw loop is enough
-            _watch_loop(board, out, fd, interval, view, lambda: draw(_Replay(refresh())))
-        else:
-            _watch_loop(board, out, fd, interval, view, draw, refresh)
+        _watch_loop(board, out, fd, interval, view, draw, refresh)
 
     def notice(text: str) -> None:  # over the frame's top line; the rest of the frame stays
         out.write("\033[H" + _bold(text, color) + "\033[K")

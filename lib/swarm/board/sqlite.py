@@ -1436,6 +1436,17 @@ class SqliteBoard(Board):
                              (session,)).fetchall()
             return [self._job_status(c, r, now) for r in rows]
 
+    def session_shown_jobs(self, session: str) -> list[JobStatus]:
+        with self._tx(write=False) as c:
+            rows = c.execute(f"SELECT {self._JOB_COLS} FROM jobs WHERE session_id = ? "
+                             "AND (status = 'active' OR job = (SELECT job FROM jobs WHERE session_id = ? "
+                             "AND NOT EXISTS (SELECT 1 FROM jobs WHERE session_id = ? AND status = 'active') "
+                             "ORDER BY COALESCE(finished_at, created_at) DESC, job DESC LIMIT 1)) "
+                             "ORDER BY COALESCE(activated_at, created_at), job",
+                             (session, session, session)).fetchall()
+            now = self.now()
+            return [self._job_status(c, r, now) for r in rows]
+
     # ---- change notification -----------------------------------------------------------
 
     def _counter(self) -> tuple[int, int]:

@@ -813,6 +813,28 @@ class BoardContract:
             self.assertEqual(self.b.session_jobs("S1"), expected)
             self.assertEqual(self.b.session_jobs("missing"), [])
 
+    def test_session_shown_jobs_excludes_history_and_keeps_last_finished(self):
+        from swarm import cli
+        for job in ("old-a", "old-b", "live-a", "live-b"):
+            self.b.open_job(job, None, None, "S1", None)
+        self.b.open_job("other", None, None, "S2", None)
+        self.b.close_job("old-a", "completed", None)
+        self.b.close_job("old-b", "completed", None)
+        for expected in (["live-a", "live-b"], ["live-b"], ["live-b"]):
+            ever = self.b.session_jobs("S1")
+            active = [j for j in ever if j.status == "active"]
+            shown = active or [max(ever, key=lambda j: (j.finished_at or j.created_at, j.job))]
+            with mock.patch.object(self.b, "session_jobs", side_effect=AssertionError("history rollups")):
+                rows = self.b.session_shown_jobs("S1")
+                self.assertEqual([j.job for j in rows], expected)
+                self.assertEqual(rows, shown)
+                self.assertEqual(cli.session_jobs(self.b, "S1")[0], shown)
+                self.assertEqual(self.b.session_shown_jobs("missing"), [])
+            if expected == ["live-a", "live-b"]:
+                self.b.close_job("live-a", "completed", None)
+            elif rows[0].status == "active":
+                self.b.close_job("live-b", "completed", None)
+
     def test_jobs_listing_and_rollup(self):
         self.b.open_job("a", "A", None, None, None)
         self.b.open_job("b", "B", None, None, None)

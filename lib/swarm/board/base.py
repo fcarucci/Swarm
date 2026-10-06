@@ -1947,6 +1947,13 @@ class Board(abc.ABC):
         whose jobs() is expensive for the whole board (postgres) override it to read only these."""
         return [j for j in self.jobs(True) if j.session_id == session]
 
+    def session_shown_jobs(self, session: str) -> list[JobStatus]:
+        """Only open jobs of the session, in jobs() order; if none, its last finished job
+        by (coalesce(finished_at, created_at), job). Select before computing status rollups."""
+        rows = self.session_jobs(session)
+        active = [j for j in rows if j.status == "active"]
+        return active or ([max(rows, key=lambda j: (j.finished_at or j.created_at, j.job))] if rows else [])
+
     # ---- transcripts ([transcripts]; bin/transcripts.py does the capturing) ---------------
 
     @abc.abstractmethod
