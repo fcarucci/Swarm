@@ -6,6 +6,7 @@ import os
 import textwrap
 from unittest import mock
 
+from support import posix_only
 from test_hooks_cli import Env  # noqa: E402  (sets sys.path)
 
 GOOD = '''
@@ -139,6 +140,133 @@ class PluginTests(PluginEnv):
             rc, out, _ = self.cli("plugins")
         self.assertIn("shadowed", out)
         self.assertEqual(out.count("loaded"), 1)
+
+    @posix_only("POSIX file ownership and permissions; Windows uses ACLs")
+    def test_own_group_writable_plugin_file_loads(self):
+        self.plugin("good", GOOD)
+        (self.pdir / "good.py").chmod(0o664)
+        self.assertIn("good\tloaded", self.cli("plugins")[1])
+        self.assertEqual(self.cli("hello"), (0, "hello world good\n", ""))
+
+    @posix_only("POSIX file ownership and permissions; Windows uses ACLs")
+    def test_writable_plugin_files_are_refused_without_execution(self):
+        from pathlib import Path
+        lstat = Path.lstat
+        for mode in (0o620, 0o602, 0o622):
+            with self.subTest(mode=mode):
+                self.plugin("unsafe", "raise RuntimeError('executed unsafe code')")
+                unsafe = self.pdir / "unsafe.py"
+                unsafe.chmod(mode)
+
+                def foreign_group(path):
+                    st = lstat(path)
+                    if path == unsafe:
+                        fields = list(st)
+                        fields[5] = os.getgid() + 1
+                        return os.stat_result(fields)
+                    return st
+
+                with mock.patch.object(Path, "lstat", foreign_group):
+                    rc, out, _ = self.cli("plugins")
+                self.assertEqual(rc, 0)
+                self.assertIn("refused:", out)
+                self.assertNotIn("executed unsafe code", out)
+
+    @posix_only("POSIX file ownership and permissions; Windows uses ACLs")
+    def test_world_writable_own_group_plugin_is_refused(self):
+        self.plugin("unsafe", "raise RuntimeError('executed unsafe code')")
+        (self.pdir / "unsafe.py").chmod(0o666)
+        rc, out, _ = self.cli("plugins")
+        self.assertEqual(rc, 0)
+        self.assertIn("refused:", out)
+        self.assertNotIn("executed unsafe code", out)
+
+    @posix_only("POSIX package ownership and permissions; Windows uses ACLs")
+    def test_own_group_writable_package_and_init_load(self):
+        package = self.pdir / "good"
+        package.mkdir()
+        init = package / "__init__.py"
+        init.write_text(GOOD)
+        package.chmod(0o775)
+        init.chmod(0o664)
+        self.assertIn("good\tloaded", self.cli("plugins")[1])
+        self.assertEqual(self.cli("hello"), (0, "hello world good\n", ""))
+
+    @posix_only("POSIX package ownership and permissions; Windows uses ACLs")
+    def test_unsafe_package_directory_or_init_is_refused_without_execution(self):
+        from pathlib import Path
+        lstat = Path.lstat
+        package = self.pdir / "unsafe"
+        package.mkdir()
+        init = package / "__init__.py"
+        init.write_text("raise RuntimeError('executed unsafe code')")
+        for target in (package, init):
+            for mode in (0o620, 0o602, 0o622):
+                with self.subTest(target=target.name, mode=mode):
+                    package.chmod(0o755)
+                    init.chmod(0o644)
+                    target.chmod(mode | (0o111 if target == package else 0))
+
+                    def foreign_group(path):
+                        st = lstat(path)
+                        if path == target:
+                            fields = list(st)
+                            fields[5] = os.getgid() + 1
+                            return os.stat_result(fields)
+                        return st
+
+                    with mock.patch.object(Path, "lstat", foreign_group):
+                        rc, out, _ = self.cli("plugins")
+                    self.assertEqual(rc, 0)
+                    self.assertIn("refused:", out)
+                    self.assertNotIn("executed unsafe code", out)
+
+    @posix_only("POSIX ownership checks; Windows uses ACLs")
+    def test_plugin_owned_by_another_user_is_refused(self):
+        self.plugin("unsafe", "raise RuntimeError('executed unsafe code')")
+        with mock.patch("swarm.plugins.os.getuid", return_value=os.getuid() + 1):
+            rc, out, _ = self.cli("plugins")
+        self.assertEqual(rc, 0)
+        self.assertIn("refused: owned by another user", out)
+        self.assertNotIn("executed unsafe code", out)
+
+    @posix_only("POSIX symlinks; Windows skips file trust checks")
+    def test_symlink_plugin_is_refused(self):
+        target = self.tmp / "target.py"
+        target.write_text("raise RuntimeError('executed unsafe code')")
+        (self.pdir / "unsafe.py").symlink_to(target)
+        rc, out, _ = self.cli("plugins")
+        self.assertEqual(rc, 0)
+        self.assertIn("refused: symlink", out)
+        self.assertNotIn("executed unsafe code", out)
+
+    @posix_only("POSIX symlinks; Windows skips file trust checks")
+    def test_broken_plugin_symlink_is_reported_as_refused(self):
+        (self.pdir / "unsafe.py").symlink_to(self.tmp / "missing.py")
+        rc, out, _ = self.cli("plugins")
+        self.assertEqual(rc, 0)
+        self.assertIn("unsafe\tERROR", out)
+        self.assertIn("refused: symlink", out)
+
+    @posix_only("POSIX symlinks; Windows skips file trust checks")
+    def test_symlink_package_directory_is_refused(self):
+        target = self.tmp / "package"
+        target.mkdir()
+        (target / "__init__.py").write_text("raise RuntimeError('executed unsafe code')")
+        (self.pdir / "unsafe").symlink_to(target, target_is_directory=True)
+        rc, out, _ = self.cli("plugins")
+        self.assertEqual(rc, 0)
+        self.assertIn("refused: symlink", out)
+        self.assertNotIn("executed unsafe code", out)
+
+    def test_discovery_failure_is_reported_and_core_still_runs(self):
+        with mock.patch("swarm.plugins.Registry._discover", side_effect=RuntimeError("discovery boom")):
+            rc, out, _ = self.cli("plugins")
+            self.assertEqual(rc, 0)
+            self.assertIn("discovery failed: RuntimeError: discovery boom", out)
+            self.assertNotIn("no plugins found", out)
+            self.assertEqual(self.cli("activate", "--job", "J")[0], 0)
+        self.assertNotIn("discovery failed", self.cli("plugins")[1])
 
     def test_a_broken_config_still_runs_core(self):
         self.plugin("good", GOOD)

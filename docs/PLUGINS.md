@@ -24,6 +24,28 @@ A plugin that fails to import, or whose `register` raises or exits, is recorded 
 whatever it had registered is dropped. A plugin command that raises prints one line on stderr and
 exits 1; a hook that raises is a warning on stderr and the core command goes on.
 
+## Trust model
+
+Plugins execute with the current user's full OS privileges on every CLI invocation except
+`swarm hook`. `ctx.open_board()` provides the full Board API, including writes; namespaced
+job settings are a convenience, not an access restriction. Plugins are trusted Python code,
+not sandboxed extensions.
+
+Agents share the orchestrator's OS user. An agent that can write a plugin location (the config
+plugins directory, skill/plugin cache, or a directory selected by `SWARM_PLUGIN_PATH`) can inject
+code into the orchestrator's next command. Only install trusted plugins and protect these
+locations. The OS user is the trust boundary; the checks below do not isolate agents sharing it.
+Python entry points are trusted installed packages and are not inspected by these file checks.
+
+On POSIX, file plugins are refused if they are symlinks, owned by another user, world-writable,
+or group-writable with a group other than the caller's primary group. Files writable by the
+caller's primary group are accepted, including installations made with umask `002`. Package
+plugins also check their package directory and `__init__.py`. Refusals appear
+in `swarm plugins`. These cheap checks do not protect against a same-user writer or a writable
+ancestor directory, and do not prevent file replacement races. On Windows these checks are
+skipped because POSIX ownership and mode bits do not express Windows ACLs; secure plugin
+locations with Windows ACLs. Hooks load no plugins.
+
 ## The API
 
 A plugin is a module with `register(api)`:

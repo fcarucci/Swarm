@@ -170,6 +170,8 @@ class PureTests(unittest.TestCase):
         def execute(statement, params=None):
             if statement.startswith("SELECT 1 FROM board_meta"):
                 return Mock(fetchone=lambda: None)
+            if statement.startswith("SELECT pg_get_viewdef"):
+                return Mock(fetchone=lambda: (None,))
             if statement.startswith("ALTER TABLE messages"):
                 attempts.append(statement)
                 raise postgres.psycopg.errors.LockNotAvailable("held table lock")
@@ -209,6 +211,19 @@ class CliTests(Env):
         self.assertEqual(self.cli("post", "--job", "J", "--as", a, "x" * 400)[1].count("truncated"), 0)
         _, out, _ = self.cli("post", "--job", "J", "--as", a, "x" * 600)
         self.assertRegex(out, r"^posted #\d+ \(truncated to 500 chars\)\n$")
+
+    def test_role_addressed_posts_report_the_live_board_cap(self):
+        self.cli("init")
+        author = self.peer()
+        judge = self.cli("join", "--job", "J", "--key", "judge", "--judge")[1].strip()
+        self.cli("config", "board.message_max_chars", "500")
+        rc, out, err = self.cli("post", "--job", "J", "--as", author, "--to", "@judge", "x" * 600)
+        self.assertEqual(rc, 0, err)
+        self.assertIn(f"to @judge ({judge})", out)
+        self.assertIn("truncated to 500 chars", out)
+        with self.board() as b:
+            message = b.recent_messages(1, "J")[0]
+            self.assertEqual((message.to_agent, len(message.message)), (judge, 500))
 
     def test_a_client_with_another_config_value_still_sees_the_board_cap(self):
         self.cli("init")
@@ -315,6 +330,27 @@ class SqliteUpgrade(unittest.TestCase):
         db.execute(f"PRAGMA user_version = {version}")
         db.close()
 
+    def test_schema_15_upgrade_keeps_the_cap_and_adds_plugin_data(self):
+        self.h.reset()
+        with self.h.board() as b:
+            b.ensure_job("j")
+            b.set_message_cap(777)
+            b.post("j", "A", "before schema 16")
+        with sqlite3.connect(self.h.path) as c:
+            c.execute("ALTER TABLE jobs DROP COLUMN plugin_data")
+            c.execute("PRAGMA user_version = 15")
+        setup_board(self.h.cfg, SMALL_POOL)
+        self.assertEqual(self.h.sqlite_board.SqliteBoard.schema_version(self.h.cfg), SCHEMA_VERSION)
+        with self.h.board() as b:
+            self.assertEqual(b.message_cap(), 777)
+            self.assertEqual([m.message for m in b.recent_messages(10, "j")], ["before schema 16"])
+            self.assertEqual(b.job_data("j"), {})
+            self.assertTrue(b.set_job_data("j", "engineering-team.optional", "build_engineer"))
+        setup_board(self.h.cfg, SMALL_POOL)
+        with self.h.board() as b:
+            self.assertEqual(b.message_cap(), 777)
+            self.assertEqual(b.job_data("j"), {"engineering-team.optional": "build_engineer"})
+
     def test_upgrade_keeps_rows_ids_and_the_cap_the_board_enforced(self):
         for version in (12, 13, 14):
             with self.subTest(version=version):
@@ -374,12 +410,40 @@ class PostgresUpgrade(unittest.TestCase):
         c.execute("DELETE FROM board_meta WHERE key = 'message_max_chars'")
         c.execute("ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_message_cap")
         c.execute("ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_message_nonempty")
-        c.execute(f"ALTER TABLE messages ALTER COLUMN message TYPE varchar({width})")
+        c.execute("ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_message_check")
+        # The current view filters blocker expiry messages, so it depends on message's
+        # type. Preserve it while constructing the old varchar-backed fixture: the
+        # migration itself must still handle both status views being present.
+        with c.transaction():
+            view = c.execute("SELECT pg_get_viewdef('job_status'::regclass)").fetchone()[0]
+            c.execute("DROP VIEW job_status")
+            c.execute(f"ALTER TABLE messages ALTER COLUMN message TYPE varchar({width})")
+            c.execute("CREATE VIEW job_status AS " + view)
         c.execute("ALTER TABLE messages ADD CONSTRAINT messages_message_check CHECK (length(message) > 0)")
         c.execute("UPDATE board_meta SET value = %s WHERE key = 'schema_version'", (str(version),))
         c.execute("TRUNCATE messages, agents, jobs CASCADE")
         c.execute("INSERT INTO jobs (job) VALUES ('j')")
         c.execute("INSERT INTO messages (job, agent_name, message) VALUES ('j', 'A', 'old one'), ('j', 'A', 'old two')")
+
+    def test_schema_15_upgrade_keeps_the_cap_and_adds_plugin_data(self):
+        with self.h.board() as b:
+            b.ensure_job("j")
+            b.set_message_cap(777)
+            b.post("j", "A", "before schema 16")
+        c = self.h.conn
+        c.execute("ALTER TABLE jobs DROP COLUMN plugin_data")
+        c.execute("UPDATE board_meta SET value = '15' WHERE key = 'schema_version'")
+        setup_board(self.h.cfg, SMALL_POOL)
+        self.assertEqual(c.execute("SELECT value FROM board_meta WHERE key = 'schema_version'").fetchone()[0], str(SCHEMA_VERSION))
+        with self.h.board() as b:
+            self.assertEqual(b.message_cap(), 777)
+            self.assertEqual([m.message for m in b.recent_messages(10, "j")], ["before schema 16"])
+            self.assertEqual(b.job_data("j"), {})
+            self.assertTrue(b.set_job_data("j", "engineering-team.optional", "build_engineer"))
+        setup_board(self.h.cfg, SMALL_POOL)
+        with self.h.board() as b:
+            self.assertEqual(b.message_cap(), 777)
+            self.assertEqual(b.job_data("j"), {"engineering-team.optional": "build_engineer"})
 
     def test_upgrade_from_12_13_14_is_online_and_keeps_every_message(self):
         for version in (12, 13, 14):

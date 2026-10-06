@@ -24,7 +24,7 @@ import stat
 import time
 import uuid
 from pathlib import Path
-from swarm import compat
+from swarm import compat, roles
 
 STUCK_AFTER = 24 * 3600  # seconds a memory may keep failing before it is parked as .stuck
 RECORD_MAX = 256 * 1024  # a spooled record larger than this is not read (it goes to .bad)
@@ -168,7 +168,7 @@ def spool_post(cfg: dict, job: str, name: str, message: str, to: str | None,
     With `agent_key` (the posting agent, when the caller knows it) the post is delivered only if
     `name` is that agent's allocated name."""
     record = {"job": job, "name": name, "message": message, "to": to}
-    if agent_key:
+    if agent_key is not None:
         record["agent_key"] = agent_key
     return _spool(cfg, record, ".json")
 
@@ -315,8 +315,10 @@ def _load(d: int, claimed: str, name: str) -> tuple | None:
                 raise ValueError("create_bank is not a boolean")
             rec = (*rec, meta, create_bank)
         else:
-            if rec[3] is not None and not valid_name(rec[3]):
-                raise ValueError("not a plain agent name")
+            if rec[3] is not None and not (valid_name(rec[3]) or
+                    (isinstance(rec[3], str) and rec[3].startswith("@") and
+                     roles.valid_name(rec[3][1:].lower()))):
+                raise ValueError("not an agent name or role address")
             key = m.get("agent_key")
             if key is not None and not isinstance(key, str):
                 raise ValueError("bad agent_key")
@@ -462,12 +464,18 @@ def _deliver_spooled_verdict(board, rec: tuple) -> bool:
 
 
 def _deliver_post(board, rec: tuple) -> bool:
-    """A spooled post; one bound to an agent (agent_key) is refused unless its name is that
-    agent's allocated name (no posting under another agent's name)."""
+    """Validate a queued author and resolve recipients against the roster at delivery time.
+    A refused post tells its author why on the board before the record is parked."""
     job, name, message, to, key = rec
-    if key is not None and board.active_agent_name(key) != name:
+    from swarm import addressing
+    try:
+        addressing.check_author(board, job, name, key)
+        targets = addressing.resolve(board, job, to) if to else [None]
+    except addressing.AddressError as exc:
+        board.post(job, "swarm", f"not delivered: {exc}", to=name)
         return False
-    board.post(job, name, message, to=to, agent_key=key)
+    for target in targets:
+        board.post(job, name, message, to=target, agent_key=key)
     return True
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from unittest import mock
 
+from support import posix_only
 from test_hooks_cli import Env  # noqa: E402  (sets sys.path)
 
 
@@ -21,6 +22,32 @@ class TeamEnv(Env):
 
     def team(self, *args):
         return self.cli("team", "--job", "J", *args)
+
+
+class TeamInstallTests(TeamEnv):
+    @posix_only("POSIX umask and primary groups; Windows uses ACLs")
+    def test_shipped_team_plugin_installed_with_umask_002_loads(self):
+        from swarm import paths
+        source = paths.PLUGIN_ROOT / "skills" / "engineering-team" / "swarm_plugin.py"
+        body = source.read_text()
+        root = self.tmp / "installed-plugin"
+        old_umask = os.umask(0o002)
+        try:
+            skill = root / "skills" / "engineering-team"
+            skill.mkdir(parents=True)
+            installed = skill / "swarm_plugin.py"
+            installed.write_text(body)
+        finally:
+            os.umask(old_umask)
+        self.assertEqual(installed.stat().st_mode & 0o777, 0o664)
+        with mock.patch.object(paths, "PLUGIN_ROOT", root):
+            self.assertIn("engineering-team\tloaded", self.cli("plugins")[1])
+            rc, out, err = self.cli("activate", "--job", "J", "--team", "build_engineer")
+            self.assertEqual(rc, 0, err)
+            self.assertIn("optional build_engineer", out)
+            rc, out, err = self.team("--show")
+            self.assertEqual(rc, 0, err)
+            self.assertIn("optional   build_engineer", out)
 
 
 class TeamCommandTests(TeamEnv):

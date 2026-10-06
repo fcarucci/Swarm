@@ -7,14 +7,15 @@ plus "judge" and "verifier" (the board derives those). Matching ignores case, an
 aliases name the usual seats of the engineering team:
 
     @EL  -> engineering_lead        @QA -> qa
-    @PM  -> product_manager, else project_manager, else orchestrator (the first seat with a holder)
+    @PM  -> project_manager, else orchestrator (the first seat with a holder)
+    @product -> product_manager
 """
 from __future__ import annotations
 
 from swarm import roles
 
 ALIASES = {"el": ("engineering_lead",), "qa": ("qa",),
-           "pm": ("product_manager", "project_manager", "orchestrator")}
+           "pm": ("project_manager", "orchestrator"), "product": ("product_manager",)}
 MAX_RECIPIENTS = 8   # one stored message per holder: a seat held by more agents than this is refused
 
 

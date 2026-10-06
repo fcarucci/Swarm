@@ -145,9 +145,10 @@ class CatchUpReadTests(Env):
     def test_spooled_post_delivered_late_is_still_shown(self):
         self.hook("start")
         self.hook("turn", tool_name="Bash")
-        spool.spool_post(self.cfg, "J", "Sandboxed", "written while offline", None)
+        sender = self.peer(key="sandboxed")
+        spool.spool_post(self.cfg, "J", sender, "written while offline", None)
         ctx = self.context(self.hook("turn", tool_name="Bash"))  # this hook flushes, then reads
-        self.assertIn("Sandboxed: written while offline", ctx)
+        self.assertIn(f"{sender}: written while offline", ctx)
 
     def test_resumed_agent_gets_what_it_missed_when_it_rejoins(self):
         self.hook("start")

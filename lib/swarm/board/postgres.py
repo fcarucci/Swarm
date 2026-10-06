@@ -759,7 +759,15 @@ def _install_message_cap(conn: psycopg.Connection, b: dict, legacy_width: int | 
         _cap_statement(cap),
         "INSERT INTO board_meta (key, value) VALUES ('message_max_chars', %s) ON CONFLICT (key) DO NOTHING",
     ]
-    _alter_quickly(conn, statements, [(), (), (str(cap),)], attempts=_SETUP_LOCK_TRIES)
+    params = [(), (), (str(cap),)]
+    if legacy_width is not None:
+        view = conn.execute("SELECT pg_get_viewdef(to_regclass('job_status'))").fetchone()[0]
+        if view is not None:
+            # A status view may depend on message's type. Keep its removal, the
+            # conversion and its restoration atomic under the usual lock retries.
+            statements = ["DROP VIEW job_status", *statements, "CREATE VIEW job_status AS " + view]
+            params = [(), *params, ()]
+    _alter_quickly(conn, statements, params, attempts=_SETUP_LOCK_TRIES)
 
 
 def _message_width(conn: psycopg.Connection) -> int | None:
