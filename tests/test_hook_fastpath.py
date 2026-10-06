@@ -16,7 +16,8 @@ class ShellFastPathTests(unittest.TestCase):
             fp=hd/'fastpath'; fp.mkdir(mode=0o700)
             cfg=home/'config.toml'; cfg.write_text('[hook]\nhook_min_interval_s=15\n')
             # A future uptime deadline and the exact generation already consumed.
-            cache=hd/'hook-config-claude'; cache.write_text(f'{cfg}\n{ROOT}\n{fp}\n{home}/active\n1\nuptime-v1\n')
+            boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+            cache=hd/'hook-config-claude'; cache.write_text(f'{cfg}\n{ROOT}\n{fp}\n{home}/active\n1\nuptime-v1\n{boot_id}\n')
             os.utime(cache, ns=(cfg.stat().st_atime_ns,cfg.stat().st_mtime_ns))
             (fp/'live').write_text('9999999999\n')
             (fp/'board-J').write_text('generation-1\n')
@@ -29,10 +30,16 @@ class ShellFastPathTests(unittest.TestCase):
             self.assertEqual(r.stderr,'', 'fast path launched an external command')
             # Old monotonic-clock caches cannot authorize a shell skip after upgrade.
             current_cache = cache.read_text()
-            cache.write_text(current_cache.rsplit('uptime-v1\n', 1)[0])
+            cache.write_text(current_cache.split('uptime-v1\n', 1)[0])
             os.utime(cache, ns=(cfg.stat().st_atime_ns,cfg.stat().st_mtime_ns))
             r=subprocess.run([str(ROOT/'bin/swarm-hook'),'--host','claude','turn'],input=payload,text=True,capture_output=True,env=env)
             self.assertNotEqual(r.stderr,'', 'old clock cache authorized a skipping lease')
+            cache.write_text(current_cache)
+            os.utime(cache, ns=(cfg.stat().st_atime_ns,cfg.stat().st_mtime_ns))
+            cache.write_text(current_cache.replace(boot_id, 'previous-boot'))
+            os.utime(cache, ns=(cfg.stat().st_atime_ns,cfg.stat().st_mtime_ns))
+            r=subprocess.run([str(ROOT/'bin/swarm-hook'),'--host','claude','turn'],input=payload,text=True,capture_output=True,env=env)
+            self.assertNotEqual(r.stderr,'', 'previous boot authorized a skipping lease')
             cache.write_text(current_cache)
             os.utime(cache, ns=(cfg.stat().st_atime_ns,cfg.stat().st_mtime_ns))
             (fp/'agent-session-s').write_text('9999999999\nJ\ngeneration-1\n')
@@ -48,6 +55,12 @@ import datetime as dt
 import time
 
 class ClockTests(unittest.TestCase):
+    def test_boot_identity_invalidates_persistent_deadlines(self):
+        with mock.patch.object(fastpath, 'boot_id', return_value='first-boot'):
+            first=fastpath.directory()
+        with mock.patch.object(fastpath, 'boot_id', return_value='second-boot'):
+            self.assertNotEqual(first,fastpath.directory())
+
     @unittest.skipUnless(Path('/proc/uptime').exists(), 'requires /proc/uptime')
     def test_now_agrees_with_shell_uptime(self):
         uptime = float(Path('/proc/uptime').read_text().split()[0])

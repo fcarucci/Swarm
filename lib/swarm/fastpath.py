@@ -23,6 +23,13 @@ SAFE = re.compile(r'[A-Za-z0-9_.-]{1,128}\Z')
 CLOCK = 'uptime-v1'
 
 
+def boot_id():
+    try:
+        return Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+    except OSError:
+        return ''
+
+
 def now():
     # lxcfs can virtualize uptime while CLOCK_MONOTONIC still uses the host clock.
     # Match the shell hook's /proc/uptime deadlines inside containers.
@@ -42,7 +49,7 @@ def interval(cfg):
 def directory():
     config = paths.config_path()
     stamp = config.stat().st_mtime_ns if config.exists() else 0
-    identity = f'{config.absolute()}:{paths.PLUGIN_ROOT}:{stamp}:{CLOCK}'
+    identity = f'{config.absolute()}:{paths.PLUGIN_ROOT}:{stamp}:{CLOCK}:{boot_id()}'
     key = hashlib.sha256(identity.encode()).hexdigest()[:16]
     return paths.host_dir() / ('hook-fastpath-' + key)
 
@@ -99,7 +106,7 @@ def cache_config(cfg, host):
     with opened():
         pass
     body = [str(path), str(paths.PLUGIN_ROOT), str(directory()),
-            str(Path(cfg['hook']['marker_dir']).expanduser()), int(stamp is not None), CLOCK]
+            str(Path(cfg['hook']['marker_dir']).expanduser()), int(stamp is not None), CLOCK, boot_id()]
     if any('\n' in x for x in map(str, body)):
         return
     base = safefs.open_base(paths.host_dir(), strict_mode=0o700)

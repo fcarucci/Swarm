@@ -35,9 +35,14 @@ case "${1:-}" in turn|done)
   if [ -r /proc/uptime ] && [ -d "$HD" ] && [ ! -L "$HD" ] && [ -O "$HD" ] &&
      [ -f "$CACHE" ] && [ ! -L "$CACHE" ]; then
     { IFS= read -r CCFG; IFS= read -r CROOT; IFS= read -r FP;
-      IFS= read -r MD; IFS= read -r CEXISTS; IFS= read -r CLOCK; } < "$CACHE"
+      IFS= read -r MD; IFS= read -r CEXISTS; IFS= read -r CLOCK; IFS= read -r BOOT; } < "$CACHE"
     VALID=""
-    if [ "$CLOCK" = uptime-v1 ] && [ "$CCFG" = "$CFG" ] && [ "$0" = "$CROOT/bin/swarm-hook" ]; then
+    CURRENT_BOOT=""
+    if [ -r /proc/sys/kernel/random/boot_id ]; then
+      IFS= read -r CURRENT_BOOT < /proc/sys/kernel/random/boot_id
+    fi
+    if [ -n "$CURRENT_BOOT" ] && [ "$BOOT" = "$CURRENT_BOOT" ] &&
+       [ "$CLOCK" = uptime-v1 ] && [ "$CCFG" = "$CFG" ] && [ "$0" = "$CROOT/bin/swarm-hook" ]; then
       if [ "$CEXISTS" = 1 ] && [ -f "$CFG" ] &&
          [ ! "$CFG" -nt "$CACHE" ] && [ ! "$CACHE" -nt "$CFG" ]; then VALID=1; fi
       if [ "$CEXISTS" = 0 ] && [ ! -e "$CFG" ]; then VALID=1; fi
