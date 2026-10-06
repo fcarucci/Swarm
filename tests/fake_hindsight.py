@@ -19,6 +19,10 @@ class FakeHindsight:
     def __init__(self):
         self.banks: dict[str, list[dict]] = {}
         self.requests: list[dict] = []   # {"method", "path", "body", "auth"}
+        self.on_request = None
+        self.completed = []
+        self.changed = threading.Condition()
+        self.gates: dict = {}            # (method, suffix) -> (entered, release) Events
         self.delay = 0.0                 # seconds to stall every request
         self.delays: dict = {}           # (method, path suffix) -> seconds, for some requests only
         self.faults: list[dict] = []     # see fail()
@@ -46,8 +50,17 @@ class FakeHindsight:
             def _handle(self, method: str) -> None:
                 n = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(n)) if n else None
-                fake.requests.append({"method": method, "path": self.path, "body": body,
-                                      "auth": self.headers.get("Authorization")})
+                with fake.changed:
+                    fake.requests.append({"method": method, "path": self.path, "body": body,
+                                          "auth": self.headers.get("Authorization")})
+                    fake.changed.notify_all()
+                for (m, suffix), (entered, release) in list(fake.gates.items()):
+                    if m == method and self.path.endswith(suffix):
+                        entered.set()
+                        if not release.wait(120):
+                            return
+                if fake.on_request:
+                    fake.on_request(method, self.path)
                 if fake.delay:
                     time.sleep(fake.delay)
                 for (m, suffix), seconds in list(fake.delays.items()):   # a test may change delays meanwhile
@@ -55,6 +68,9 @@ class FakeHindsight:
                         time.sleep(seconds)
                 with fake.lock:   # e.g. a late retain and its retry: replace-then-append is one step
                     code, reply = fake.route(method, self.path, body)
+                with fake.changed:
+                    fake.completed.append({"method": method, "path": self.path})
+                    fake.changed.notify_all()
                 try:
                     self._reply(code, reply)
                 except OSError:  # the client gave up (timeout)
@@ -82,8 +98,17 @@ class FakeHindsight:
         self.thread.start()
 
     def stop(self) -> None:
+        for entered, release in self.gates.values():
+            release.set()
         self.server.shutdown()
         self.server.server_close()
+
+    def wait_for_calls(self, method, suffix, count, completed=False, timeout=30):
+        rows = self.completed if completed else self.requests
+        with self.changed:
+            return self.changed.wait_for(
+                lambda: sum(r["method"] == method and r["path"].endswith(suffix) for r in rows) >= count,
+                timeout=timeout)
 
     # ---- state helpers
     def add_memory(self, bank: str, text: str) -> str:

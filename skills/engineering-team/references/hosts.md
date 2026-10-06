@@ -110,7 +110,7 @@ brief path, requirement revision, inputs, exclusive files, checks, and return co
 Its first board post is `BRIEF: <durable path> tasks: <IDs>` using the hook-assigned
 name; make a local tool call so enrollment can resolve. Read the brief and board,
 claim files before edits, and post findings and handoffs. Keep board posts within the
-configured cap (default 200 characters); put details in artifacts.
+board's message cap (default 200 characters; `swarm config board.message_max_chars`); put details in artifacts.
 
 Every invocation returns directly to PM after its bounded deliverable, including on
 a blocker. Post the request to PM on the board **and** return this structure:

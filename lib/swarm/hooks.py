@@ -342,7 +342,8 @@ def _verify_route(board, agent_id: str, sid: str, member, bound: dict, unbound: 
             js = board.job_status(member.job)
             _out("PreToolUse", "[swarm] Your prompt makes you a verifier: this replaces the worker "
                  "instructions you were given.\n" + _verifier_instructions(
-                     member.name, member.job, cfg, js.goal if js else None, js.judge if js else None))
+                     member.name, member.job, cfg, js.goal if js else None, js.judge if js else None,
+                     board.message_cap()))
             from dataclasses import replace
             return replace(member, verifier=True)
         return member
@@ -456,8 +457,15 @@ def _post_cmd(job: str, name: str, to: str | None = None) -> str:
     return f"{_bin()} post --job {_q(job)} --as {_q(name)}{to_part} \"<message>\""
 
 
-def _instructions(name: str, job: str, cfg: dict, goal: str | None = None, judge: str | None = None) -> str:
-    cap = cfg["board"]["message_max_chars"]
+def _cap(cfg: dict, cap: int | None) -> int:
+    """The message cap to announce: the board's (callers pass board.message_cap()), else the config's
+    value as the fallback of a caller that has no board at hand."""
+    return int(cap if cap is not None else cfg["board"]["message_max_chars"])
+
+
+def _instructions(name: str, job: str, cfg: dict, goal: str | None = None, judge: str | None = None,
+                  cap: int | None = None) -> str:
+    cap = _cap(cfg, cap)
     lines = [
         f"[swarm] You are **{name}**, a member of the swarm working on job \"{job}\". "
         f"Other agents on this job share a message board with you.",
@@ -481,8 +489,8 @@ def _instructions(name: str, job: str, cfg: dict, goal: str | None = None, judge
 
 
 def _verifier_instructions(name: str, job: str, cfg: dict, goal: str | None = None,
-                           judge: str | None = None) -> str:
-    cap = cfg["board"]["message_max_chars"]
+                           judge: str | None = None, cap: int | None = None) -> str:
+    cap = _cap(cfg, cap)
     lines = [
         f"[swarm] You are **{name}**, a VERIFIER on job \"{job}\". You check the other agents' "
         f"work independently. You don't do it and you don't fix it.",
@@ -503,8 +511,8 @@ def _verifier_instructions(name: str, job: str, cfg: dict, goal: str | None = No
     return "\n".join(lines)
 
 
-def _judge_instructions(name: str, job: str, goal: str, cfg: dict) -> str:
-    cap = cfg["board"]["message_max_chars"]
+def _judge_instructions(name: str, job: str, goal: str, cfg: dict, cap: int | None = None) -> str:
+    cap = _cap(cfg, cap)
     met = f"{_bin()} verdict --job {_q(job)} --as {_q(name)} met \"<short reason>\""
     not_met = (f"{_bin()} verdict --job {_q(job)} --as {_q(name)} not_met --reason \"<why it is not met>\" "
                f"--next \"<what to change, where, and what you will re-check>\"")
@@ -1056,9 +1064,10 @@ def _welcome(board, event: str, agent_id: str, job: str, name: str, cfg: dict, *
              is_verifier: bool, goal, judge, note, heading: str, payload: dict) -> None:
     """The board instructions (judge's, verifier's or worker's), the roster, the unread messages
     under `heading`, memories, the runtime, then the output: what a (re)joining agent is shown."""
-    parts = [_judge_instructions(name, job, goal, cfg) if is_judge
-             else _verifier_instructions(name, job, cfg, goal, judge) if is_verifier
-             else _instructions(name, job, cfg, goal, judge), note]
+    cap = board.message_cap()   # the board's own, which every client obeys
+    parts = [_judge_instructions(name, job, goal, cfg, cap) if is_judge
+             else _verifier_instructions(name, job, cfg, goal, judge, cap) if is_verifier
+             else _instructions(name, job, cfg, goal, judge, cap), note]
     roster = board.roster(job)
     board.record_roster_sync(agent_id, roster_snapshot(roster, agent_id), True)
     parts.append(roster_text(roster, agent_id, job))
@@ -1272,7 +1281,8 @@ def _moved_notice(board, agent_id: str, name: str, job: str, old: str, roster, c
             f"saying what you are working on and your scope: `{_post_cmd(job, name)}`.")
     board.record_roster_sync(agent_id, roster_snapshot(roster, agent_id), True)
     return "\n".join([head, *about]) + "\n" + _instructions(
-        name, job, cfg, js.goal if js else None, js.judge if js else None) + "\n\n" + roster_text(roster, agent_id, job)
+        name, job, cfg, js.goal if js else None, js.judge if js else None, board.message_cap()
+    ) + "\n\n" + roster_text(roster, agent_id, job)
 
 
 def _on_turn(board, agent_id: str, name: str, job: str, cfg: dict, sid: str | None = None,

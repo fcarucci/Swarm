@@ -155,6 +155,7 @@ class HookCaptureTests(CaptureEnv):
         self.start("a1")
         self.agent_file("a1", "still running")
         self.old_stamp()
+        before = self.stamp.stat().st_mtime
         self.start("a2")   # its sweep runs the due round
         rows = {r.agent_key: r for r in self.rows()}
         self.assertEqual(set(rows), {"a1", "orchestrator"})
@@ -164,7 +165,7 @@ class HookCaptureTests(CaptureEnv):
         self.assertIn("orchestrating the job", orch)
         self.assertNotIn("before the job", orch)
         self.assertNotIn("abcd1234efgh5678", orch)
-        self.assertGreater(self.stamp.stat().st_mtime, time.time() - 60)
+        self.assertGreater(self.stamp.stat().st_mtime, before)
         # not due again right away: a new line is not picked up by the next start
         with self.main.open("a") as fh:
             fh.write(line("later"))

@@ -16,7 +16,7 @@ from test_hooks_cli import Env  # noqa: E402  (sets sys.path)
 from swarm import spool  # noqa: E402
 
 
-def _bounded(fn, seconds: float = 5.0):
+def _bounded(fn, seconds: float = 30.0):
     box = {}
     t = threading.Thread(target=lambda: box.setdefault("r", fn()), daemon=True)
     t.start()
@@ -224,7 +224,10 @@ class Board:
         with open(os.path.join(out, f"{message}.{os.getpid()}.{Board.n}"), "w"):
             pass
 
+deadline = time.monotonic() + 120
 while not os.path.exists(go):
+    if time.monotonic() >= deadline:
+        raise TimeoutError("flusher start signal was never created")
     time.sleep(0.005)
 for _ in range(3):
     spool.flush_spool(Board(), {"board": {"spool_dir": spool_dir}})

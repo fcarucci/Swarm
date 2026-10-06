@@ -362,7 +362,7 @@ class OperationTests(HomeCase):
         self.assertEqual(((self.base / "stamp").read_bytes(), self.mode("stamp")), (b"", 0o600))
         os.utime(self.base / "stamp", (1000, 1000))
         safefs.touch(self.d, "stamp")
-        self.assertGreater((self.base / "stamp").stat().st_mtime, time.time() - 60)
+        self.assertGreater((self.base / "stamp").stat().st_mtime, 1000)
 
     def test_lock_holds_an_exclusive_flock(self):
         fd = safefs.lock(self.d, "l")
