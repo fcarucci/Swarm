@@ -1193,7 +1193,7 @@ automatically by the hooks) on one host before the others run the new code.
 `/proc/self/fd` and reaps them through `/proc`; on macOS it refuses to launch (safely) until that
 is ported.
 
-Off by default. With `[supervise] enabled = true`, the swarm closes agents that are stuck and,
+On by default (an explicit `[supervise] enabled = false` disables it). With recovery enabled, the swarm closes agents that are stuck and,
 while their job is open, restarts them as headless sessions under the same name.
 
 **What counts as stuck** (checked by every sweep: `status`, `watch`, joins, the hooks' start and
@@ -1214,8 +1214,8 @@ is logged and a later sweep retries it (see [failed finals](#transcript-archive-
 restart can be briefed from a partial or (rarely) absent transcript. Either way the board says why the agent was closed, and the job waits for the
 restart.
 
-**Restarts.** `swarm supervise` runs every `timer_minutes` (2) from a systemd user timer that
-`swarm bootstrap` installs. Each replacement launches in its own systemd user scope
+**Restarts.** `swarm supervise` runs every `timer_minutes` (5) from a systemd user timer that
+`swarm init`, `swarm bootstrap` or `swarm upgrade` installs. Each replacement launches in its own systemd user scope
 (`systemd-run --user --scope`); with no user systemd manager at all, no replacement can be
 launched, a notice is posted once per job, and `swarm doctor` reports FAIL with the fix
 `loginctl enable-linger $USER`. A manager that is up but with linger off is a separate, milder
@@ -1240,6 +1240,19 @@ same name (`swarm transcript show --job J --agent <name>` shows every run). An a
 stuck never rejoins the board: if it comes back (its hung tool call returns, say), each of its
 tool calls is refused with an order to stop, whether its replacement is at work, has finished, or
 hasn't started yet, and its row keeps the `stuck:*` close.
+
+**Orphaned coordinators.** Before the normal sweep, the supervisor checks local-owned open
+jobs with no started/running/idle agents and no recent activity for `orphan_minutes` (15).
+A goal job waiting between rounds is eligible; explicit human/external wait markers, open
+questions, pauses, closed jobs and live coordinator heartbeats prevent recovery. Question waits
+are unanswered `?` messages addressed to the owner, user, human or Francesco among the last
+100 board messages; use `swarm wait --on` for other external waits. A met verdict
+gets one close reminder. The coordinator resumes through the existing restore/briefing and
+runner machinery on its recorded Claude/Codex host and work directory, with its task, goal,
+last verdict and recent `brief_posts` board messages. It can spawn workers to continue the job.
+Attempts back off for 15, 30 and 60 minutes and are capped by `orphan_max_restarts` (3) per
+rolling 24 hours. A cap posts `GAVE UP` once. Creation proof is local and private; jobs without
+that proof are skipped. All the existing launch, approval and budget checks still apply.
 
 **Launch authority.** A board row never decides whether, where or how a replacement starts: rows
 can be written by any agent and, through a shared database role, by the other OS user. The
@@ -1350,9 +1363,11 @@ they hold across passes, OS users and hosts:
 
 | key | default | what |
 |---|---|---|
-| `enabled` | false | the supervisor at all (closing and restarting) |
+| `enabled` | true | the supervisor at all (closing and restarting) |
+| `orphan_minutes` | 15 | quiet time with no live agents before coordinator recovery |
+| `orphan_max_restarts` | 3 | coordinator attempts per job in a rolling 24-hour window |
 | `silent_minutes` | 90 | the silent rule |
-| `max_restarts_per_agent` | 2 | restarts of one agent (its chain of replacements) |
+| `max_restarts_per_agent` | 3 | restarts of one agent chain in a rolling 24-hour window |
 | `max_restarts_per_job` | 6 | restarts in one job (board-enforced, across hosts and users) |
 | `backoff_minutes` | [2, 10, 30] | wait before restart 1, 2, 3+ |
 | `max_concurrent_replacements` | 2 | running at once on this host, every OS user's together (open restart rows, whether or not their runner is alive) |
@@ -1372,7 +1387,7 @@ they hold across passes, OS users and hosts:
 | `run_output_days` | 7 | a replacement's redacted output tail is kept this long |
 | `pass_env` | [] | extra environment variable names passed to replacements (they get a minimal allowlisted environment otherwise; never the supervisor's `PGPASSWORD`) |
 | `allowed_workdirs` | ["~/src"] | a replacement only runs in a directory under one of these (real path, no dot-directory below the root, owned by you, never home or above); anything else is refused with `can't restart <name>: work dir <d> not under [supervise] allowed_workdirs` |
-| `timer_minutes` | 2 | the timer's period |
+| `timer_minutes` | 5 | the timer's period |
 
 **After a board outage**, only agents whose last contact falls inside the outage window (from
 just before it started to when it recovered) get `dead_minutes` of grace once the board is back;
@@ -1475,8 +1490,8 @@ judge, with both tag lines in its prompt, alongside the workers.
      `block` starts a continuation prompt).
   The orchestrator, told or not, spawns fix agents plus a fresh judge and repeats until the
   verdict is `met`; it tells the user only when a round makes no progress (the same verdict
-  again, nothing fixed). The supervisor's auto-restart is unchanged: it never acts on a job that
-  has a verdict, and it replaces one stuck agent, not a round. What was shown is remembered in
+  again, nothing fixed). The supervisor can recover crashed agents and orphaned coordinators
+  after `not_met`; a `met` verdict prevents further work restarts. What was shown is remembered in
   `<marker>.respawn` beside the job's marker (removed with it).
 - **The completion gate.** `deactivate --status completed` (the default) refuses a job with a
   goal until the judge's latest verdict is `met`, and prints the judge's last reason. It also
@@ -1786,7 +1801,7 @@ max_mb = 50                # per transcript after compression; bigger ones keep 
   left to the supervisor pass, which retries those of both hosts in one oldest-first list, 60 s
   each (only while `[supervise]` is enabled and no off file exists, within the pass's own time
   budget: in practice one such retry per pass, so a never-finishing agent gets its capture-failed
-  row after about 3 passes, N of them after about 3N). `[supervise]` is off by default, so with no
+  row after about 3 passes, N of them after about 3N). `[supervise]` can be explicitly disabled, so with no
   supervisor running, those slow finals are never retried automatically: they stay pending until
   `swarm deactivate` (which retries with no time limit) or until you turn the supervisor on;
   `swarm doctor` warns when such finals are waiting and the supervisor is off. After 3 full-budget
@@ -2087,7 +2102,7 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `who --job J` | active agents on the job, tab-separated: exact name, host, role, status, last contact, current tool |
 | `leave (--as NAME \| --key K \| --session S)` | release a name (exit 1 if no active agent matched); `--session S` marks every unfinished agent of that session's jobs left ("session restarted"), for a session start after a restart killed them |
 | `purge` | apply retention now, and [auto-close](#auto-close) the jobs that are done and quiet (`status`, `join`, `activate`, `watch` and `tail` do that too) |
-| `supervise [--dry-run] [--job J]` | one supervisor pass (the systemd user timer runs it every `[supervise] timer_minutes`; off unless `[supervise] enabled = true`): close this machine's stuck agents, then restart each one headless under the same name if its budget allows, or post once why not; then print the caps. `--dry-run` prints what it would do and changes nothing |
+| `supervise [--dry-run] [--job J]` | one supervisor pass (the systemd user timer runs it every `[supervise] timer_minutes`; on unless `[supervise] enabled = false`): recover this machine's crashed agents and orphaned coordinators within budgets, or post once why not; then print the caps. `--dry-run` prints what it would do and changes nothing |
 | `transcript list [--job J] [--agent NAME] [--color auto\|always] [--no-color]` | archived transcripts with their host (`claude`/`codex`), raw/stored size, ratio, redactions, final flag and capture time, then a total (see [Transcript archive](#transcript-archive-optional)). Coloured by kind (host, size/ratio, redactions) on a real terminal or `--color=always`; `--no-color`/`NO_COLOR` always wins |
 | `transcript show (--job J --agent NAME \| --agent NAME \| --job J --orchestrator \| [--job J] --key K) [--format text\|jsonl] [--tail N] [--grep RE] [-o FILE] [--color auto\|always] [--no-color]` | print one transcript as readable turns, or its redacted JSONL. Coloured by turn kind (user/assistant/tool call/tool result/memory) on a real terminal or `--color=always` (`--format jsonl` is never coloured); `--no-color`/`NO_COLOR` always wins, and never with `-o`/`--output` |
 | `transcript export --job J [DIR]` | every transcript of the job as `.jsonl` files plus `index.tsv` |

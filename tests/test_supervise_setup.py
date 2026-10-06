@@ -112,6 +112,7 @@ class SystemdTests(Env):
         self.assertEqual(step.detail, "no user systemd manager (fix: loginctl enable-linger $USER)")
 
     def test_bootstrap_step_only_when_enabled(self):
+        self.cfg["supervise"] = {"enabled": False}
         self.assertEqual(bootstrap.supervisor_step(self.cfg, self.config, run=FakeRun()).status, "skipped")
         self.cfg["supervise"] = {"enabled": True}
         with mock.patch("shutil.which", return_value="/usr/bin/systemctl"):
@@ -125,6 +126,7 @@ class DoctorSupervisorTests(Env):
             return {c.name: c for c in bootstrap.supervisor_checks(self.cfg, host, run=run or FakeRun(), which=which)}
 
     def test_off_is_one_ok_line(self):
+        self.cfg["supervise"] = {"enabled": False}
         checks = self.checks()
         self.assertEqual(list(checks), ["supervise"])
         self.assertTrue(checks["supervise"].ok)

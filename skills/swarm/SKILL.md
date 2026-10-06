@@ -463,7 +463,7 @@ way its own host does it. `swarm status --job <job>` shows each agent's HOST and
 | `who --job J` | active agents on the job, tab-separated: exact name (paste into `--to`), host, role, status, last contact, current tool |
 | `leave --as NAME \| --key K` | release a name (exit 1 if no active agent matched) |
 | `purge` | apply retention now (it also runs on every join and activate), and auto-close the jobs that are done and quiet |
-| `supervise [--dry-run] [--job J]` | one supervisor pass (the systemd user timer runs it every `[supervise] timer_minutes`; off unless `[supervise] enabled = true`): close this machine's stuck agents, then restart each one headless under the same name if its budget allows, or post once why not; then print the caps. `--dry-run` prints what it would do and changes nothing |
+| `supervise [--dry-run] [--job J]` | one supervisor pass (the systemd user timer runs it every `[supervise] timer_minutes`; on by default unless `[supervise] enabled = false`): recover this machine's crashed agents and orphaned coordinators within budgets, or post once why not; then print the caps. `--dry-run` prints what it would do and changes nothing |
 | `transcript list [--job J] [--agent NAME]` | archived transcripts: job, agent, role, host (`claude`/`codex`), raw/stored size, ratio, redactions, final, captured, key; then a total line |
 | `transcript show --job J --agent NAME \| --agent NAME \| --job J --orchestrator \| [--job J] --key K [--format text\|jsonl] [--tail N] [--grep RE] [-o FILE]` | one transcript: `text` (default) = readable turns (user, assistant, tool call, tool result; long tool output trimmed, thinking left out), `jsonl` = the stored redacted JSONL. `--agent` alone searches every job; several matches are listed (job, role, date, size) and it exits 1 asking for `--job`. `--tail`/`--grep` (case-insensitive regex) work on turns, or lines with `jsonl` |
 | `transcript export --job J [DIR]` | write every transcript of the job as `<agent>.jsonl` (`orchestrator.jsonl`) plus `index.tsv` into DIR (default `./transcripts-<job>`) |
@@ -718,7 +718,31 @@ for b in memory sqlite file; do SWARM_TEST_BACKEND=$b .venv/bin/python -B -m uni
   SWARM_TEST_CONFIG=~/.config/swarm/test-config.toml .venv/bin/python -B -m unittest discover -s tests -v
   ```
 
-## Supervisor (when `[supervise] enabled`)
+## Supervisor (automatic crash recovery)
+
+Automatic crash recovery is enabled by default. Set `[supervise] enabled = true` in
+`~/.config/swarm/config.toml`, then run `swarm init` or `swarm upgrade` to install the existing
+systemd user timer. It runs every 5 minutes (`timer_minutes`); an explicit `enabled = false`
+keeps recovery off. The timer needs a user systemd manager; `swarm doctor` checks it.
+
+The supervisor restarts crashed agents under their previous name and role, using their recorded
+host and working directory. A job with no live agents and no recent activity for `orphan_minutes`
+(default 15) gets a coordinator restart using its stored task and recent board messages.
+Recovery continues existing work; the brief includes the last contact, tool and board context.
+Only jobs created by this machine and user are eligible for coordinator recovery. Agent recovery
+uses this user's local enrolment records. Paused or closed jobs, human/external waits and open
+questions are excluded. An unanswered `?` message addressed to the owner, user, human or
+Francesco among the last 100 board messages counts as a question wait. Use `swarm wait --on`
+for other external waits. Jobs without private creation proof (including older jobs) are skipped.
+A met verdict gets one board reminder to close the job.
+
+Coordinator retries back off for 15, 30 and 60 minutes and stop after `orphan_max_restarts`
+(default 3) in 24 hours. Crashed agents have `max_restarts_per_agent` (default 3) in 24 hours,
+alongside the existing job, runtime and host limits. A spent restart cap posts `GAVE UP`.
+All actions appear on the board as `swarm supervisor`. Use `swarm supervise --dry-run` to
+preview actions without changing the board or restart state. Existing work directory allowlists
+and `swarm supervise approve` checks apply to automatic recovery.
+
 
 - Stuck agents (dead, one tool call too long, silent 90 min) are closed and restarted headless
   under the same name, within budgets. You don't need to respawn them yourself; watch the board

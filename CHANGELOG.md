@@ -6,6 +6,9 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 ## [Unreleased]
 
+### Added
+- Automatic recovery of crashed agents and orphaned coordinators through the existing supervisor, with recorded host/workdir, continuation briefs, human-wait and pause exclusions, owner checks, backoff, rolling 24-hour caps and `GAVE UP` notices. Recovery defaults on; `swarm init`/upgrade installs the user timer (every 5 minutes). Explicit `enabled = false` remains respected.
+
 ### Changed
 - Linux tool hooks skip Python while the board is unchanged and contact is not due (`[hook] hook_min_interval_s`, default 15 seconds). Shared message notifications invalidate read stamps; notifier failures fall back to cursor reads. Start, stop and session-stop hooks keep their behavior.
 - `watch` defaults to 10-second periodic refreshes (`[board] watch_interval_s`); notifications and snapshot misses coalesce for `watch_min_redraw_s` (default 2 seconds), including compact panes. Keys still render immediately from cached data.

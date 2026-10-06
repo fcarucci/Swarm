@@ -91,8 +91,24 @@ class SuperviseTests(SuperviseEnv):
         self.assertEqual(run["config"], str(Path(os.environ.get("SWARM_CONFIG") or "~/.config/swarm/config.toml").expanduser()))
         [r] = self.restarts()
         self.assertEqual((r.attempt, r.old_agent_key, r.new_agent_key, r.outcome), (1, "orig", run["session_id"], None))
-        self.assertTrue(any(p.startswith(f"restarted {self.name} (attempt 1/2): stuck:dead") for p in self.posts()))
+        self.assertTrue(any(p.startswith(f"restarted {self.name} (attempt 1/3): stuck:dead") for p in self.posts()))
         self.assertIn("last_run_at", st.load_state())
+
+    def test_open_owner_question_prevents_worker_recovery(self):
+        with self.board() as b:
+            b.post("J", self.name, "May I deploy this?", "Francesco")
+        self.h.backdate_agent("orig", last_seen=31 * 60)
+        self.supervise()
+        self.assertEqual(self.started, [])
+        self.assertIsNone(self.agent("orig").left_reason)
+
+    def test_explicit_done_post_is_not_a_crash(self):
+        with self.board() as b:
+            b.post("J", self.name, "DONE feat/parser abcdef")
+        self.h.backdate_agent("orig", last_seen=31 * 60)
+        self.supervise()
+        self.assertEqual(self.started, [])
+        self.assertIsNone(self.agent("orig").left_reason)
 
     def test_second_pass_does_not_relaunch(self):
         self.supervise()
@@ -138,7 +154,7 @@ class SuperviseTests(SuperviseEnv):
         self.cfg["supervise"]["max_restarts_per_agent"] = 0
         self.supervise()
         self.supervise()
-        caps = [p for p in self.posts() if p.startswith(f"not restarting {self.name}")]
+        caps = [p for p in self.posts() if p.startswith(f"GAVE UP {self.name}")]
         self.assertEqual(len(caps), 1, caps)
         with self.board() as b:
             self.assertIsNone(b.job_status("J").waiting_on)   # the job may auto-close now
@@ -229,7 +245,7 @@ class SuperviseTests(SuperviseEnv):
         with self.board() as b:
             b.close_agent("orig", "stuck:dead")
         self.supervise(dry_run=True)
-        self.assertIn(f"would restart {self.name} on J (attempt 1/2", "\n".join(self.out))
+        self.assertIn(f"would restart {self.name} on J (attempt 1/3", "\n".join(self.out))
         self.assertEqual((self.started, self.restarts()), ([], []))
 
     def test_the_pass_prunes_old_records_of_closed_jobs(self):
@@ -287,7 +303,7 @@ class SuperviseTests(SuperviseEnv):
         command.save_approvals(command.approval_candidates(self.cfg, str(self.work)))
         self.out.clear()
         self.supervise(dry_run=True)
-        self.assertIn(f"would restart {self.name} on J (attempt 1/2", "\n".join(self.out))
+        self.assertIn(f"would restart {self.name} on J (attempt 1/3", "\n".join(self.out))
 
     def test_launch_failure_after_record_is_finished_failed(self):
         def boom(cfg, run):
@@ -298,11 +314,11 @@ class SuperviseTests(SuperviseEnv):
         self.assertFalse(any(self.markers.glob("*--resume-r*.json")))
         self.assertTrue(any(p.startswith(f"restart of {self.name} failed to start") for p in self.posts()))
 
-    def test_job_with_verdict_is_not_restarted(self):
-        self.h.update_job("J", verdict="not_met")
+    def test_job_with_met_verdict_is_not_restarted(self):
+        self.h.update_job("J", verdict="met")
         self.supervise()
         self.assertEqual(self.started, [])
-        self.assertEqual(self.agent("orig").left_reason, "stuck:dead")   # still closed: closing ignores verdicts
+        self.assertIsNone(self.agent("orig").left_reason)
 
     def test_cli_entry(self):
         rc, out, err = self.cli("supervise", "--dry-run")
@@ -851,12 +867,12 @@ class SuperviseTests(SuperviseEnv):
         self.assertIn("Do the thing.", brief2)                     # the original task
         self.assertIn("REP1 step 59", brief2)                      # attempt 1's work
         self.assertIn("REP1: pushed the parser branch", brief2)
-        self.assertIn("restart 2 of at most 2", brief2)
+        self.assertIn("restart 2 of at most 3", brief2)
         self.assertNotIn("restart 1 of at most 2", brief2)
         self.assertEqual(brief2.count("You are resuming"), 1)
         [r1, r2] = self.restarts()
         self.assertEqual((r1.attempt, r2.attempt, r2.old_agent_key, r2.agent_key), (1, 2, sid1, "orig"))
-        self.assertTrue(any(p.startswith(f"restarted {self.name} (attempt 2/2): stuck:silent") for p in self.posts()))
+        self.assertTrue(any(p.startswith(f"restarted {self.name} (attempt 2/3): stuck:silent") for p in self.posts()))
 
     def test_another_boards_run_file_does_not_hold_this_boards_row(self):
         """Restart ids collide across boards; a run file of board B is not this row's run."""

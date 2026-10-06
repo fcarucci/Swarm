@@ -385,7 +385,12 @@ def _spawn_refusal(board, agent_id: str, member, payload: dict, cfg: dict) -> st
     if js and js.judge == member.name and js.verdict != "not_met":
         return ("the judge spawns subagents only after it has recorded a not_met verdict (with --reason "
                 "and --next): it spawns the fix agents with that brief")
-    depth = _spawn_depth(payload, agent_id)
+    # A recovered coordinator is a main host session, not a harness subagent. Its
+    # private job activation record (written at enrolment) proves that root depth.
+    from swarm import enrolment
+    from swarm.board.autoinit import store_key
+    rec = enrolment.find_job(store_key(cfg), job)
+    depth = 0 if rec is not None and rec.session_id == agent_id else _spawn_depth(payload, agent_id)
     if depth is None:
         return "your spawn depth can't be determined, so spawning is refused"
     if depth >= max_depth:
@@ -962,13 +967,20 @@ def _payload_cwd(payload: dict) -> str:
     return os.getcwd()
 
 
-def _record_enrolment(cfg: dict, agent_id: str, job: str, sid: str | None, payload: dict) -> None:
+def _record_enrolment(cfg: dict, agent_id: str, job: str, sid: str | None, payload: dict,
+                      prompt: str | None = None) -> None:
     """Write (or replace) the local enrolment record of agent_id on job. Never raises."""
     try:
         from swarm import enrolment
         from swarm.board.autoinit import store_key
-        enrolment.write(store_key(cfg), job=job, agent_key=agent_id, harness=current_host().name,
-                        session_id=sid, cwd=_payload_cwd(payload))
+        key = store_key(cfg)
+        prior = enrolment.find(key, agent_id)
+        original = getattr(prior, "prompt", None) or prompt or _spawn_prompt(payload, agent_id)
+        if original:
+            from swarm.transcripts import redact
+            original = redact(original)[0][:12000]
+        enrolment.write(key, job=job, agent_key=agent_id, harness=current_host().name,
+                        session_id=sid, cwd=_payload_cwd(payload), prompt=original)
     except Exception as exc:
         _log_error("enrol", agent_id, exc)
 
@@ -1021,7 +1033,7 @@ def _enrol(board, event: str, agent_id: str, job: str, payload: dict, cfg: dict,
     name = board.allocate_name(agent_id, job, role or payload.get("agent_type"))
     if role:
         board.set_agent_role(agent_id, role)
-    _record_enrolment(cfg, agent_id, job, sid, payload)
+    _record_enrolment(cfg, agent_id, job, sid, payload, prompt)
     board.set_waiting(job, None)   # an agent at work: the job is no longer waiting for anything
     if sid:
         board.bind_job_session(job, sid)
@@ -1103,6 +1115,8 @@ def _enrol_resumed(board, agent_id: str, resume: dict, payload: dict, cfg: dict)
     from swarm.pause import PAUSE_RESUME_REASON
     row = next((x for x in board.restarts(job=job) if x.id == r.get("restart_id")), None)
     from_pause = row is not None and (row.reason or "").startswith(PAUSE_RESUME_REASON)
+    coordinator = row is not None and ((row.reason or "").startswith("orphan-coordinator:")
+        or any(a.agent_key == row.old_agent_key and a.role == "coordinator" for a in board.agents(job)))
     off = None if from_pause else _supervise_off(board, cfg, job)   # a resume the user asked for is not the supervisor's
     if off:   # the kill switches hold at the enrolment too
         _deny(f"[swarm] The swarm supervisor is switched off ({off}), so this restart won't go "
@@ -1114,6 +1128,11 @@ def _enrol_resumed(board, agent_id: str, resume: dict, payload: dict, cfg: dict)
               f"restart isn't needed. Stop now: end your turn without further tool calls.")
         return
     _record_enrolment(cfg, agent_id, job, payload.get("session_id"), payload)
+    if coordinator:
+        from swarm import enrolment
+        from swarm.board.autoinit import store_key
+        enrolment.write_job(store_key(cfg), job=job, harness=current_host().name,
+                            session_id=agent_id, cwd=_payload_cwd(payload))
     board.set_waiting(job, None)
     board.tool_started(agent_id, payload.get("tool_name"))
     js = board.job_status(job)
@@ -1122,13 +1141,15 @@ def _enrol_resumed(board, agent_id: str, resume: dict, payload: dict, cfg: dict)
     goal, judge = (js.goal, js.judge) if js else (None, None)
     note = (f"[swarm] The swarm supervisor restarted you to continue the work of {name}, which "
             f"stopped responding: you are {name} now. You can't spawn subagents.")
+    if coordinator:
+        note = f"[swarm] You are the restarted coordinator of job {job}. Continue existing work; you may spawn workers."
     if from_pause:
         note = (f"[swarm] Job \"{job}\" was paused and resumed: you are {name} again, continuing from your "
                 f"stored transcript. You can't spawn subagents.")
     _welcome(board, "turn", agent_id, job, name, cfg, is_judge=role == "judge",
              is_verifier=role == "verifier", goal=goal, judge=judge, note=note,
              heading=f"messages since {name} stopped", payload=payload)
-    if current_host().is_spawn(payload):   # not even on its first call
+    if not coordinator and current_host().is_spawn(payload):   # workers cannot spawn even on first call
         _deny_replacement_spawn(board, agent_id)
 
 
@@ -1359,8 +1380,13 @@ def _on_event(board, event: str, agent_id: str, sid: str | None, bound: dict, un
         _enrol_resumed(board, agent_id, resume, payload, cfg)   # its seat was claimed by `swarm resume`
         return
     if resume is not None and current_host().is_spawn(payload):
-        _deny_replacement_spawn(board, agent_id)
-        return
+        row = next((r for r in board.restarts(job=member.job)
+                    if r.id == resume["resume"].get("restart_id")), None)
+        coordinator = row is not None and ((row.reason or "").startswith("orphan-coordinator:")
+            or any(a.agent_key == agent_id and a.role == "coordinator" for a in board.agents(member.job)))
+        if not coordinator:
+            _deny_replacement_spawn(board, agent_id)
+            return
     if member.job not in bound:  # its job is not (or no longer) one of this session's
         return
     if member.verify_tag:

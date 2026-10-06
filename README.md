@@ -218,12 +218,37 @@ for the options.
 | `swarm purge` | Apply retention now |
 | `swarm doctor` | Check this machine's setup, with a fix line for every problem |
 | `swarm upgrade` | Update the plugin for Claude and/or Codex, then bootstrap and doctor |
-| `swarm supervise` | One pass of the supervisor: close stuck agents, restart them (`[supervise] enabled`) |
+| `swarm supervise` | One supervisor pass: recover crashed agents and orphaned coordinators (`--dry-run` previews) |
 | `swarm spool` | Posts and memories queued while the board was unreachable |
 | `swarm init` / `bootstrap` / `migrate` | Setup steps; the installer and the plugin run them for you |
 
 `doctor`, `transcript show` and `transcript list` are coloured on a terminal. `--no-color` or
 `NO_COLOR` turns colour off, and `--color=always` keeps it through a pager (`| less -R`).
+
+### Automatic crash recovery
+
+Automatic crash recovery is enabled by default. Set `[supervise] enabled = true` in
+`~/.config/swarm/config.toml`, then run `swarm init` or `swarm upgrade` to install the existing
+systemd user timer. It runs every 5 minutes (`timer_minutes`); an explicit `enabled = false`
+keeps recovery off. The timer needs a user systemd manager; `swarm doctor` checks it.
+
+The supervisor restarts crashed agents under their previous name and role, using their recorded
+host and working directory. A job with no live agents and no recent activity for `orphan_minutes`
+(default 15) gets a coordinator restart using its stored task and recent board messages.
+Recovery continues existing work; the brief includes the last contact, tool and board context.
+Only jobs created by this machine and user are eligible for coordinator recovery. Agent recovery
+uses this user's local enrolment records. Paused or closed jobs, human/external waits and open
+questions are excluded. An unanswered `?` message addressed to the owner, user, human or
+Francesco among the last 100 board messages counts as a question wait. Use `swarm wait --on`
+for other external waits. Jobs without private creation proof (including older jobs) are skipped.
+A met verdict gets one board reminder to close the job.
+
+Coordinator retries back off for 15, 30 and 60 minutes and stop after `orphan_max_restarts`
+(default 3) in 24 hours. Crashed agents have `max_restarts_per_agent` (default 3) in 24 hours,
+alongside the existing job, runtime and host limits. A spent restart cap posts `GAVE UP`.
+All actions appear on the board as `swarm supervisor`. Use `swarm supervise --dry-run` to
+preview actions without changing the board or restart state. Existing work directory allowlists
+and `swarm supervise approve` checks apply to automatic recovery.
 
 ### Pausing and resuming a job
 

@@ -103,7 +103,8 @@ class CliTests(Env):
         self.h.reset({})
         rc, out, _ = self.cli("init", "--no-hooks")
         self.assertEqual(rc, 0)
-        self.assertRegex(out, r"^schema ready; name pool: \{'simpsons': \d+, 'english': \d+\}\n$")
+        self.assertRegex(out, r"^schema ready; name pool: \{'simpsons': \d+, 'english': \d+\}\n")
+        self.assertIn("supervisor: skipped: SWARM_NO_SYSTEMD set\n", out)
         self.assertFalse((Path(os.environ["HOME"]) / "settings.json").exists())
 
     def test_auto_init_never_writes_claude_settings(self):
@@ -137,7 +138,7 @@ class CliTests(Env):
 
     def test_activate_status_deactivate(self):
         rc, out, _ = self.cli("status")
-        self.assertEqual(out, "no active jobs (--all includes closed ones)\n")
+        self.assertTrue(out.startswith("no active jobs (--all includes closed ones)\n"))
         rc, out, _ = self.cli("activate", "--job", "J", "--description", "the job", "--task", "-",
                               stdin="line one\nline two\n")
         self.assertEqual((rc, out), (0, f"swarm command: {paths.agent_bin()}\n"
