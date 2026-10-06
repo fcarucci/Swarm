@@ -22,6 +22,74 @@ if [ "${1:-}" = "--host" ]; then
   H="$2"; HOSTARG="--host $2"; shift 2
 fi
 case "$H" in *[!A-Za-z0-9_-]*) cat >/dev/null; exit 0;; esac   # a host name goes into file names
+# Linux provides a monotonic clock without starting date or an interpreter. Other POSIX
+# systems retain the ordinary hook. Cache contents are data, never sourced as shell code.
+CFG="${SWARM_CONFIG:-$HOME/.config/swarm/config.toml}"
+HD="$HOME/.local/share/swarm/host"
+CACHE="$HD/hook-config-${H:-unknown}"
+PAYLOAD=""; HAVE_PAYLOAD=""
+case "${1:-}" in turn|done)
+  HAVE_PAYLOAD=1
+  while IFS= read -r LINE || [ -n "$LINE" ]; do PAYLOAD="$PAYLOAD$LINE
+"; done
+  if [ -r /proc/uptime ] && [ -d "$HD" ] && [ ! -L "$HD" ] && [ -O "$HD" ] &&
+     [ -f "$CACHE" ] && [ ! -L "$CACHE" ]; then
+    { IFS= read -r CCFG; IFS= read -r CROOT; IFS= read -r FP;
+      IFS= read -r MD; IFS= read -r CEXISTS; IFS= read -r CLOCK; IFS= read -r BOOT; } < "$CACHE"
+    VALID=""
+    CURRENT_BOOT=""
+    if [ -r /proc/sys/kernel/random/boot_id ]; then
+      IFS= read -r CURRENT_BOOT < /proc/sys/kernel/random/boot_id
+    fi
+    if [ -n "$CURRENT_BOOT" ] && [ "$BOOT" = "$CURRENT_BOOT" ] &&
+       [ "$CLOCK" = uptime-v1 ] && [ "$CCFG" = "$CFG" ] && [ "$0" = "$CROOT/bin/swarm-hook" ]; then
+      if [ "$CEXISTS" = 1 ] && [ -f "$CFG" ] &&
+         [ ! "$CFG" -nt "$CACHE" ] && [ ! "$CACHE" -nt "$CFG" ]; then VALID=1; fi
+      if [ "$CEXISTS" = 0 ] && [ ! -e "$CFG" ]; then VALID=1; fi
+    fi
+    # Restrict the parser to the flat header before arguments. Unsupported formatting,
+    # escaped identifiers and policy tools always fall through to the JSON parser.
+    HEAD=${PAYLOAD%%\"tool_input\"*}
+    field() {
+      VALUE=""
+      case "$HEAD" in *\"$1\"*)
+        REST=${HEAD#*\"$1\"}
+        case "$REST" in *\"$1\"*) return;; esac
+        REST=${REST#*:}
+        while :; do case "$REST" in ' '*|'	'*|'
+'*) REST=${REST#?};; *) break;; esac; done
+        case "$REST" in \"*) REST=${REST#\"}; VALUE=${REST%%\"*};; esac
+      esac
+    }
+    field agent_id; KEY=$VALUE
+    if [ -z "$KEY" ]; then
+      # An agent identity after tool_input must never borrow its parent's session lease.
+      case "$PAYLOAD" in *\"agent_id\"*) VALID="";; esac
+      field session_id; KEY="session-$VALUE"
+    fi
+    case "$KEY" in ''|session-|*[!A-Za-z0-9_.-]*) VALID="";; esac
+    # Spawn limits/model selection, follow-ups, judge/verifier checks and provenance retain
+    # the ordinary path. Verifiers are never issued a skipping lease.
+    case "$PAYLOAD" in *spawn_agent*|*followup_task*|*SendMessage*|*\"Agent\"*|*\"Task\"*|*memory*|*remember*) VALID="";; esac
+    if [ -n "$VALID" ] && [ -d "$FP" ] && [ ! -L "$FP" ] && [ -O "$FP" ] &&
+       [ -f "$FP/agent-$KEY" ] && [ ! -L "$FP/agent-$KEY" ] &&
+       [ -f "$FP/live" ] && [ ! -L "$FP/live" ]; then
+      { IFS= read -r UNTIL; IFS= read -r JOB; IFS= read -r SEEN; } < "$FP/agent-$KEY"
+      IFS=' ' read -r NOW UNUSED < /proc/uptime; NOW=${NOW%%.*}
+      IFS= read -r LIVE < "$FP/live"
+      case "$UNTIL:$LIVE" in *[!0-9:]*|:|*::* ) VALID="";; esac
+      case "$JOB" in ''|*[!A-Za-z0-9_.-]*) VALID="";; esac
+      if [ -n "$VALID" ] && [ "$NOW" -lt "$UNTIL" ] && [ "$NOW" -lt "$LIVE" ]; then
+        # done doesn't consume a message stamp: it must remain visible at the next turn.
+        [ "$1" = done ] && exit 0
+        if [ -f "$FP/board-$JOB" ] && [ ! -L "$FP/board-$JOB" ]; then
+          IFS= read -r CHANGED < "$FP/board-$JOB"
+          [ "$SEEN" = "$CHANGED" ] && exit 0
+        fi
+      fi
+    fi
+  fi
+esac
 D="$(cd "$(dirname "$0")/.." && pwd)"
 V="${SWARM_VENV:-$HOME/.local/share/swarm/venv}"
 HD="$HOME/.local/share/swarm/host"
@@ -65,15 +133,24 @@ if [ "${1:-}" = "session-start" ]; then
   fi
   exit 0
 fi
-CFG="${SWARM_CONFIG:-$HOME/.config/swarm/config.toml}"
-MD=""
-[ -f "$CFG" ] && MD=$(sed -n 's/^[[:space:]]*marker_dir[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' "$CFG" | head -1)
+# TOML is parsed once per config mtime; no per-call ls or sed for marker discovery.
+if [ -z "${VALID:-}" ] || [ -z "${MD:-}" ]; then
+  MD=""
+  if [ -x "$V/bin/python" ] && [ -n "$PRIV" ]; then
+    MD=$(PYTHONPATH="$D/lib${PYTHONPATH:+:$PYTHONPATH}" "$V/bin/python" -B -m swarm.fastpath --cache "${H:-unknown}" 2>/dev/null)
+  fi
+fi
 MD="${MD:-$HOME/.local/state/swarm/active}"
-case "$MD" in "~"*) MD="$HOME${MD#\~}";; esac
-ls "$MD"/*.json >/dev/null 2>&1 || { cat >/dev/null; exit 0; }
+ACTIVE=""
+for MARKER in "$MD"/*.json; do [ -f "$MARKER" ] && { ACTIVE=1; break; }; done
+[ -n "$ACTIVE" ] || exit 0
 # Never build the venv from a hook (slow, networked): session-start's bootstrap does that.
 [ -x "$V/bin/python" ] || { cat >/dev/null; exit 0; }
 LOG=/dev/null
 [ -n "$PRIV" ] && LOG="$PRIV/hook-stderr.log"
-PYTHONPATH="$D/lib${PYTHONPATH:+:$PYTHONPATH}" "$V/bin/python" -B -m swarm.cli hook $HOSTARG "$1" 2>>"$LOG" || true
+if [ -n "$HAVE_PAYLOAD" ]; then
+  printf '%s' "$PAYLOAD" | SWARM_HOOK_FASTPATH=1 SWARM_HOOK_EVENT="$1" PYTHONPATH="$D/lib${PYTHONPATH:+:$PYTHONPATH}" "$V/bin/python" -B -m swarm.cli hook $HOSTARG "$1" 2>>"$LOG" || true
+else
+  SWARM_HOOK_FASTPATH=1 SWARM_HOOK_EVENT="$1" PYTHONPATH="$D/lib${PYTHONPATH:+:$PYTHONPATH}" "$V/bin/python" -B -m swarm.cli hook $HOSTARG "$1" 2>>"$LOG" || true
+fi
 exit 0

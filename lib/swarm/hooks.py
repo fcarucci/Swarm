@@ -714,26 +714,30 @@ def _start_recall_seconds(cfg: dict) -> float:
 
 
 def _recall(board, cfg: dict, agent_id: str, job: str, seen, heading: str, *, start: bool = False) -> str | None:
-    """Recall the project's memories, show the ones this agent hasn't seen, record them.
+    """Recall configured banks, show facts this agent has not seen, and record them.
     Hindsight trouble is logged and skipped (the recall still counts, so it isn't retried
     before recall_minutes), except a start recall that ran out of time: that one is not
     recorded, so the agent's next turn tries again (Hindsight is usually warm by then)."""
     from swarm import hindsight
     js = board.job_status(job)
-    project = hindsight.project_of(js, job)
+    banks = hindsight.recall_banks(cfg, js)
+    project = ", ".join(banks)
     # one deadline for the whole call, name resolution included (hindsight.Client): a hook never
     # hangs an agent on Hindsight
     seconds = _start_recall_seconds(cfg) if start else min(HOOK_RECALL_SECONDS, _start_recall_seconds(cfg))
     # a call may use the whole budget: the per-call timeout is never shorter than it
     bounded = {**cfg, "hindsight": {**cfg["hindsight"], "deadline": time.monotonic() + seconds,
                                     "timeout_seconds": max(float(cfg["hindsight"]["timeout_seconds"]), seconds)}}
-    try:
-        items = hindsight.Client(bounded).recall(hindsight.bank_id(project), hindsight.recall_query(js, job))
-    except Exception as exc:
+    errors = []
+
+    def failed(bank, exc):
+        errors.append(exc)
         _log_error("memory", agent_id, exc)
-        if not (start and isinstance(exc, hindsight.HindsightOutOfTime)):
-            board.record_memory_recall(agent_id, [])
-        return None
+
+    items = hindsight.Client(bounded).recall_many(
+        banks, hindsight.recall_query(js, job), on_error=failed)
+    if not items and start and any(isinstance(exc, hindsight.HindsightOutOfTime) for exc in errors):
+        return None  # retry a cold join recall on the next turn
     text, shown = hindsight.format_memories([i for i in items if i["id"] not in seen], project, cfg, heading)
     board.record_memory_recall(agent_id, shown)
     return text
@@ -746,7 +750,7 @@ def _memory_turn(board, cfg: dict, agent_id: str, job: str, state) -> list[str]:
     h = cfg["hindsight"]
     out = []
     if _minutes_since(state, state.memory_recalled_at) >= float(h["recall_minutes"]):
-        text = _recall(board, cfg, agent_id, job, set(state.memory_seen), "new memories for this project")
+        text = _recall(board, cfg, agent_id, job, set(state.memory_seen), "new memories from configured banks")
         if text:
             out.append(text)
     quiet_since = max(t for t in (state.remembered_at, state.nudged_at, state.joined_at) if t is not None)
@@ -1048,7 +1052,7 @@ def _welcome(board, event: str, agent_id: str, job: str, name: str, cfg: dict, *
     parts.append(roster_text(roster, agent_id, job))
     parts.append(_messages_text(board.read_unread(agent_key=agent_id, job=job), job, name, heading))
     if _memory_on(cfg):
-        parts.append(_recall(board, cfg, agent_id, job, (), "what this project's memory knows",
+        parts.append(_recall(board, cfg, agent_id, job, (), "what the configured memory banks know",
                               start=True))
     host = current_host()
     board.set_agent_runtime(agent_id, host.name, payload.get("model") or host.agent_model(payload, agent_id))
@@ -1253,7 +1257,11 @@ def _moved_notice(board, agent_id: str, name: str, job: str, old: str, roster, c
 def _on_turn(board, agent_id: str, name: str, job: str, cfg: dict, sid: str | None = None,
              payload: dict | None = None) -> None:
     from swarm.board.base import MOVED_PREFIX   # the board is open by now
-    res = board.read_unread(agent_key=agent_id, job=job)
+    lease = _CURRENT.get('lease')
+    if lease and lease.enabled:
+        res = board.read_unread(agent_key=agent_id, job=job, touch=False)
+    else:
+        res = board.read_unread(agent_key=agent_id, job=job)
     roster, state = board.turn_state(agent_id, job)
     moved = state is not None and (state.roster_seen or "").startswith(MOVED_PREFIX)
     parts = []
@@ -1263,6 +1271,9 @@ def _on_turn(board, agent_id: str, name: str, job: str, cfg: dict, sid: str | No
         if payload is not None:
             _record_enrolment(cfg, agent_id, job, sid, payload)   # the local record follows the job
         state = dataclasses.replace(state, roster_seen=None, roster_synced_at=state.now)
+    lease = _CURRENT.get('lease')
+    if lease and lease.enabled:
+        lease.backlog = bool(res.remaining)
     parts.append(_messages_text(res, job, name, "recent messages on this job (catch-up)" if moved
                                 else "new messages"))
     if state is not None:
@@ -1272,6 +1283,8 @@ def _on_turn(board, agent_id: str, name: str, job: str, cfg: dict, sid: str | No
             parts.append(_roster_update(board, agent_id, job, roster, state, cfg))
         parts += _memory_turn(board, cfg, agent_id, job, state)
     text = "\n\n".join(p for p in parts if p)
+    if lease and lease.enabled:
+        lease.allowed = getattr(lease, 'eligible', False)
     if text:
         _out("PreToolUse", text)
 
@@ -1293,7 +1306,15 @@ def _on_event(board, event: str, agent_id: str, sid: str | None, bound: dict, un
         _sweep(board, cfg, event, agent_id, payload, deadline)
         return
     if event == "done":  # PostToolUse: the tool call finished; bookkeeping, and memory provenance
-        board.tool_finished(agent_id)
+        lease = _CURRENT.get('lease')
+        if lease and lease.enabled:
+            member = board.tool_contact(agent_id, None) if lease.due else board.hook_member(agent_id)
+            if member:
+                lease.contacted = lease.due
+                lease.capture(member.job)
+                lease.allowed = False  # done never advances the last-read stamp
+        else:
+            board.tool_finished(agent_id)
         _memory_provenance(board, cfg, agent_id, sid, bound, payload)
         return
     if event == "start":
@@ -1313,7 +1334,16 @@ def _on_event(board, event: str, agent_id: str, sid: str | None, bound: dict, un
         if stop:
             _deny(stop)
             return
-    member = board.tool_started(agent_id, payload.get("tool_name"))
+    lease = _CURRENT.get('lease')
+    if lease and lease.enabled:
+        member = (board.tool_contact(agent_id, payload.get('tool_name')) if lease.due
+                  else board.hook_member(agent_id))
+        if member:
+            lease.contacted = lease.due
+            lease.capture(member.job)
+            lease.eligible = not member.verify_tag and not member.verifier
+    else:
+        member = board.tool_started(agent_id, payload.get("tool_name"))
     if member is None:  # not an active member (yet): route it, maybe enrol it
         if resume is not None:
             _enrol_resumed(board, agent_id, resume, payload, cfg)
@@ -1509,9 +1539,13 @@ def _orchestrator_respawn(event: str, cfg: dict, sid: str | None, payload: dict)
 def run_hook(event: str, cfg: dict, host: str | None = None) -> int:
     _OUTPUT.clear()
     _CURRENT["host"] = None
+    _CURRENT["lease"] = None
     try:
         _handle(event, cfg, host)
     finally:
+        lease = _CURRENT.get('lease')
+        if lease:
+            lease.finish()
         if _OUTPUT:
             print(json.dumps(_OUTPUT))
     return 0
@@ -1526,6 +1560,12 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
         _CURRENT["host"] = hosts.get(hosts.detect_hook_host(host_flag, payload, os.environ))
     except KeyError:   # a host this version has no adapter for: do nothing
         return 0
+    if event in ('start', 'stop', 'session-stop') and os.environ.get('SWARM_HOOK_FASTPATH'):
+        from swarm.fastpath import invalidate
+        invalidate(payload)
+    if event in ('turn', 'done') and os.environ.get('SWARM_HOOK_FASTPATH'):
+        from swarm.fastpath import Lease
+        _CURRENT['lease'] = Lease(cfg, current_host().name, payload)
     agent_id = payload.get("agent_id")
     sid = payload.get("session_id")
     if event == "turn" and sid and current_host().is_followup(payload):
@@ -1537,9 +1577,17 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
         return 0   # a session started by (or inside) a replacement that isn't it: never an orchestrator
     if event == "session-stop" and (agent_id or resume is not None):
         return 0   # the end of a subagent's (or a replacement's) turn: SubagentStop is theirs
+    lease = _CURRENT.get('lease')
+    if not agent_id and lease and lease.enabled:
+        markers, _ = _session_markers(cfg, sid) if sid else ({}, {})
+        if len(markers) == 1:
+            lease.capture(next(iter(markers)))
+            lease.allowed = True
     if not agent_id:  # main session: note that it is at work; its spawns get models per role
-        if event != "session-stop":
+        if event != "session-stop" and (not lease or not lease.enabled or lease.due):
             _orchestrator_seen(event, cfg, sid, payload)
+            if lease:
+                lease.contacted = True
         _orchestrator_respawn(event, cfg, sid, payload)
         if event == "turn" and current_host().is_spawn(payload):
             try:

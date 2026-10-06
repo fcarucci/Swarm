@@ -596,6 +596,20 @@ class MemoryBoard(Board):
             return Member(a["name"], a["job"], bool(route and route["state"] == "unverified"),
                           bool(a.get("verifier")), a.get("model"))
 
+    def tool_contact(self, agent_key: str, tool_name: str | None) -> Member | None:
+        s = self._s()
+        with s.lock:
+            a = self._active(agent_key)
+            if not a:
+                return None
+            now = self.now()
+            a.update(state="running", current_tool=(tool_name or "?")[:TOOL_NAME_MAX],
+                     tool_started_at=None, turn_ended_at=None, tool_calls=a["tool_calls"] + 1, last_seen=now)
+            s.touch()
+            route = s.routes.get(agent_key)
+            return Member(a["name"], a["job"], bool(route and route["state"] == "unverified"),
+                          bool(a.get("verifier")), a.get("model"))
+
     def record_route(self, agent_key: str, session_id: str | None, state: str,
                      job: str | None = None) -> None:
         if state not in ROUTE_STATES:
@@ -1063,7 +1077,7 @@ class MemoryBoard(Board):
             return msg_id
 
     def read_unread(self, agent_key: str | None = None, name: str | None = None,
-                    job: str | None = None, advance: bool = True) -> ReadResult:
+                    job: str | None = None, advance: bool = True, *, touch: bool = True) -> ReadResult:
         s = self._s()
         with s.lock:  # the lock makes the read and the cursor move one atomic step
             reader = self._find_active(agent_key, name)
@@ -1076,7 +1090,9 @@ class MemoryBoard(Board):
             remaining = len(unread) - len(rows)
             if advance:
                 top = rows[-1]["id"] if remaining else max((m["id"] for m in of_job), default=last)
-                reader.update(last_read_id=max(last, top), last_seen=self.now())
+                reader.update(last_read_id=max(last, top))
+                if touch:
+                    reader["last_seen"] = self.now()
                 s.touch()
             return ReadResult([self._msg(m) for m in rows], remaining)
 

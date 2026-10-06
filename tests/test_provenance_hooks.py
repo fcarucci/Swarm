@@ -34,8 +34,9 @@ class ClaudeAgents:
     """Mixin: job J active, Claude subagents a1 and a2 enrolled, each with a transcript under the
     temp HOME's projects dir. Call setup_agents() from setUp after any config change."""
 
-    def setup_agents(self):
-        rc, _, err = self.cli("activate", "--job", "J")
+    def setup_agents(self, project="J"):
+        opts = ["--project", project] if project is not None else []
+        rc, _, err = self.cli("activate", "--job", "J", *opts)
         self.assertEqual(rc, 0, err)
         self.proj = Path(os.environ["HOME"]) / ".claude" / "projects" / "-work"
         self.main = self.proj / f"{SID}.jsonl"
@@ -337,7 +338,7 @@ class PatchTests(ClaudeAgents, HindsightEnv):
         self.enable()
         self.setup_agents()
         hindsight.Client(self.cfg).retain("notes", "a fact", [], {"source": "notes-claude"},
-                                          document_id="tool-note-1")
+                                          document_id="tool-note-1", create_bank=True)
         self.fake.requests.clear()
 
     def test_patched_only_when_the_cached_capability_says_so(self):
@@ -373,7 +374,7 @@ class PatchTests(ClaudeAgents, HindsightEnv):
         self.assertEqual(self.errors(), "")
 
     def test_patch_on_and_succeeding_logs_nothing(self):
-        hindsight.Client(self.cfg).retain("notes", "b fact", [], {}, document_id="tool-note-2")
+        hindsight.Client(self.cfg).retain("notes", "b fact", [], {}, document_id="tool-note-2", create_bank=True)
         self.fake.metadata_patch = True
         hindsight.refresh_caps(self.cfg)
         self.post(PF.NOTE_TOOL_CMD, "saved tool-note-1 to notes\nsaved tool-note-2 to notes\n")
@@ -458,7 +459,7 @@ class StalePatchTests(ClaudeAgents, HindsightEnv):
         self.enable()
         self.setup_agents()
         hindsight.Client(self.cfg).retain("notes", "a fact", [], {"source": "notes-claude"},
-                                          document_id="tool-note-1")
+                                          document_id="tool-note-1", create_bank=True)
         self.fake.metadata_patch = True
         hindsight.refresh_caps(self.cfg)
         self.fake.requests.clear()

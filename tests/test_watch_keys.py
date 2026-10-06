@@ -187,22 +187,13 @@ class LoopTests(unittest.TestCase):
         _out, err = self.run_loop(refresh, quit_after=0.3)
         self.assertIsInstance(err, RuntimeError)
 
-    def test_snapshot_miss_requests_a_refresh_and_keeps_the_old_frame(self):
-        n = {"refreshes": 0, "draws": 0}
-
-        def refresh():
-            n["refreshes"] += 1
-            return swarm._Recorder(mock.Mock(now=lambda: __import__("datetime").datetime.now(__import__("datetime").timezone.utc)))
-
-        def draw(snap):
-            n["draws"] += 1
-            if n["refreshes"] < 3:
-                raise swarm.SnapshotMiss("recent_messages")
-            return ["fresh"]
-        out, err = self.run_loop(refresh, draw, quit_after=1.0)
-        self.assertIsNone(err)
-        self.assertGreaterEqual(n["refreshes"], 3)       # each miss woke a refresh
-        self.assertIn("fresh", out)
+    def test_snapshot_miss_marks_next_data_window_dirty(self):
+        gate = swarm._RefreshGate(60)
+        gate.refreshed(10)
+        self.assertFalse(gate.due(10.1, changed=True))
+        self.assertTrue(gate.due(12))
+        gate.refreshed(12)
+        self.assertFalse(gate.due(12.1))
 
     def test_a_key_does_not_trigger_a_refresh(self):
         n = {"refreshes": 0}

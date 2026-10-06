@@ -73,6 +73,8 @@ CREATE INDEX IF NOT EXISTS messages_created_at ON messages (created_at);
 -- A plain CREATE INDEX locks writes to messages while it builds: milliseconds at the board's size (~14k rows).
 -- A board with millions of rows needs CREATE INDEX CONCURRENTLY by hand first (same name; this is then a no-op).
 CREATE INDEX IF NOT EXISTS messages_job_created_at ON messages (job, created_at);
+CREATE INDEX IF NOT EXISTS messages_job_agent_created_at ON messages (job, agent_name, created_at);
+CREATE INDEX IF NOT EXISTS agents_job ON agents (job);
 -- `swarm tail` LISTENs on this channel so new messages show up instantly.
 CREATE OR REPLACE FUNCTION swarm_notify() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN PERFORM pg_notify('swarm_board', NEW.id::text); RETURN NEW; END $$;
@@ -142,7 +144,7 @@ ALTER TABLE agents ADD COLUMN IF NOT EXISTS memory_recalled_at timestamptz;
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS memory_seen text[] NOT NULL DEFAULT '{}';
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS remembered_at timestamptz;
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS nudged_at timestamptz;
--- The memory project (Hindsight bank) of a job; NULL means the job name.
+-- The memory project (Hindsight bank) of a job; NULL/empty means configured general banks.
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS project text;
 -- Talking on the board: replies owed (reminded once) and the "post a status" nudge.
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS reply_reminded_id bigint NOT NULL DEFAULT 0;
@@ -328,11 +330,17 @@ SELECT a.job, a.name, CASE WHEN a.judge THEN 'judge' WHEN a.verifier THEN 'verif
          ELSE a.state
        END AS status,
        a.current_tool, a.tool_calls,
-       (SELECT count(*) FROM messages m
-         WHERE m.job = a.job AND m.agent_name = a.name AND m.created_at >= a.joined_at) AS messages,
+       COALESCE(mc.messages, 0::bigint) AS messages,
        a.joined_at, a.last_seen AS last_contact_at, a.last_post_at, a.left_at AS ended_at,
        a.host, a.agent_key, a.harness, a.model, a.os_user, a.left_reason, a.resume_of
-  FROM agents a;
+  FROM agents a
+  LEFT JOIN (
+    -- Group by incarnation, not just name: names can be reused after departure.
+    SELECT a.agent_key, count(*) AS messages
+      FROM agents a JOIN messages m
+        ON m.job = a.job AND m.agent_name = a.name AND m.created_at >= a.joined_at
+     GROUP BY a.agent_key
+  ) mc ON mc.agent_key = a.agent_key;
 
 DROP VIEW IF EXISTS job_status;
 CREATE VIEW job_status AS
@@ -344,9 +352,8 @@ SELECT j.job, j.status, j.description, j.task, j.outcome, j.created_by, j.sessio
        count(*) FILTER (WHERE s.status = 'idle')           AS idle,
        count(*) FILTER (WHERE s.status = 'completed')      AS completed,
        count(*) FILTER (WHERE s.status IN ('dead', 'left')) AS dead_or_left,
-       (SELECT count(*) FROM messages m WHERE m.job = j.job) AS messages,
-       greatest(max(s.last_contact_at),
-                (SELECT max(created_at) FROM messages m WHERE m.job = j.job)) AS last_activity_at,
+       COALESCE(m.messages, 0::bigint) AS messages,
+       greatest(max(s.last_contact_at), m.last_post_at) AS last_activity_at,
        j.project, j.goal, j.verdict, j.verdict_reason, j.verdict_by, j.verdict_at, j.completion_forced,
        (SELECT a.name FROM agents a WHERE a.job = j.job AND a.judge AND a.left_at IS NULL) AS judge,
        j.waiting_on, j.waiting_since, j.closed_by, j.supervise, j.verdict_next,
@@ -360,12 +367,14 @@ SELECT j.job, j.status, j.description, j.task, j.outcome, j.created_by, j.sessio
             WHEN COALESCE(j.goal, '') <> '' AND j.verdict IS DISTINCT FROM 'met'
                  AND count(*) FILTER (WHERE s.status = 'idle') = 0 THEN 'waiting (goal not met)'
             WHEN COALESCE(greatest(max(s.last_contact_at),
-                                   (SELECT max(created_at) FROM messages m WHERE m.job = j.job)),
+                                   m.last_post_at),
                           j.activated_at, j.created_at) > now() - make_interval(mins => {idle}) THEN 'active'
             ELSE 'idle'
        END AS shown_status
   FROM jobs j LEFT JOIN agent_status s ON s.job = j.job
- GROUP BY j.job;
+  LEFT JOIN (SELECT job, count(*) AS messages, max(created_at) AS last_post_at
+               FROM messages GROUP BY job) m ON m.job = j.job
+ GROUP BY j.job, m.messages, m.last_post_at;
 """
 
 # NOTIFY channels, fixed by the triggers above (and by any tail/watch already running).
@@ -1132,6 +1141,77 @@ class PostgresBoard(Board):
             ((tool_name or "?")[:TOOL_NAME_MAX], agent_key)).fetchone()
         return Member(*row) if row else None
 
+    def watch_snapshot(self, job, session, recent_minutes, limit):
+        from swarm.watchdata import SnapshotBoard
+        # The view's message-count join is pruned when its messages column is unused.
+        # Aggregate counts only for visible incarnations, never a subquery per agent.
+        agent_cols = _AGENT_STATUS_COLS.replace('tool_calls, messages,', 'tool_calls, 0::bigint AS messages,')
+        query = f"""
+          WITH scope AS MATERIALIZED (
+            SELECT job FROM jobs WHERE (%s::text IS NOT NULL AND job = %s)
+                OR (%s::text IS NULL AND (%s::text IS NULL AND status IN ('active','paused')
+                                         OR (session_id = %s AND (status = 'active' OR job = (
+                                           SELECT job FROM jobs WHERE session_id = %s
+                                            AND NOT EXISTS (SELECT 1 FROM jobs WHERE session_id = %s AND status='active')
+                                            ORDER BY COALESCE(finished_at,created_at) DESC, job DESC LIMIT 1)))))
+          ), selected AS MATERIALIZED (
+            SELECT {_JOB_STATUS_COLS} FROM job_status WHERE job IN (SELECT job FROM scope)
+          ), visible AS MATERIALIZED (
+            SELECT {{agent_cols}} FROM agent_status
+             WHERE job IN (SELECT job FROM selected)
+               AND (%s::float IS NULL OR status NOT IN ('completed','left','dead')
+                    OR greatest(ended_at,last_contact_at) >= now() - %s * interval '1 minute')
+          ), counts AS (
+            SELECT a.agent_key, count(m.id) AS messages FROM visible a LEFT JOIN messages m
+              ON m.job = a.job AND m.agent_name = a.name AND m.created_at >= a.joined_at
+             GROUP BY a.agent_key
+          ), hidden AS (
+            SELECT job, count(*) AS n FROM agent_status
+             WHERE job IN (SELECT job FROM selected) AND %s::float IS NOT NULL
+               AND status IN ('completed','left','dead')
+               AND greatest(ended_at,last_contact_at) < now() - %s * interval '1 minute'
+             GROUP BY job
+          ), recent AS (
+            SELECT {_MESSAGE_COLS} FROM (
+              SELECT {_MESSAGE_COLS}, row_number() OVER (PARTITION BY job ORDER BY id DESC) AS rn
+                FROM messages WHERE job IN (SELECT job FROM selected)
+            ) m WHERE rn <= %s
+          ), checks AS (
+            SELECT m.job, count(*) FILTER (WHERE m.message LIKE 'VERIFIED%%') AS verified,
+                   count(*) FILTER (WHERE m.message LIKE 'FAILED%%') AS failed
+              FROM messages m JOIN (SELECT DISTINCT job,name FROM agents WHERE verifier) a
+                ON a.job=m.job AND a.name=m.agent_name
+             WHERE m.job IN (SELECT job FROM selected) GROUP BY m.job
+          )
+          SELECT now(),
+            (SELECT jsonb_agg(to_jsonb(j) ORDER BY activated_at,job) FROM selected j),
+            (SELECT jsonb_agg(to_jsonb(a) || jsonb_build_object('messages',c.messages)
+                     ORDER BY (ended_at IS NULL) DESC,joined_at) FROM visible a JOIN counts c USING(agent_key)),
+            (SELECT jsonb_agg(to_jsonb(m) ORDER BY id) FROM recent m),
+            (SELECT jsonb_agg(to_jsonb(r) ORDER BY id) FROM restarts r WHERE job IN (SELECT job FROM selected)),
+            (SELECT jsonb_object_agg(job,n) FROM hidden),
+            (SELECT jsonb_object_agg(job,jsonb_build_array(verified,failed)) FROM checks)
+        """.replace('{agent_cols}', agent_cols)
+        row = self._conn.execute(query, (job,job,job,session,session,session,session,recent_minutes,recent_minutes,
+                                        recent_minutes,recent_minutes,limit)).fetchone()
+        return SnapshotBoard(self, row)
+
+    def hook_member(self, agent_key: str) -> Member | None:
+        row = self._conn.execute(
+            "SELECT name, job, EXISTS (SELECT 1 FROM agent_routes r WHERE r.agent_key = a.agent_key "
+            "AND r.state = 'unverified'), verifier, model FROM agents a "
+            "WHERE agent_key = %s AND left_at IS NULL", (agent_key,)).fetchone()
+        return Member(*row) if row else None
+
+    def tool_contact(self, agent_key: str, tool_name: str | None) -> Member | None:
+        row = self._conn.execute(
+            "UPDATE agents a SET state = 'running', current_tool = %s, tool_started_at = NULL, "
+            "turn_ended_at = NULL, tool_calls = tool_calls + 1, last_seen = now() "
+            "WHERE agent_key = %s AND left_at IS NULL RETURNING name, job, "
+            "EXISTS (SELECT 1 FROM agent_routes r WHERE r.agent_key = a.agent_key "
+            "AND r.state = 'unverified'), verifier, model", (tool_name, agent_key)).fetchone()
+        return Member(*row) if row else None
+
     def record_route(self, agent_key: str, session_id: str | None, state: str,
                      job: str | None = None) -> None:
         if state not in ROUTE_STATES:
@@ -1494,7 +1574,7 @@ class PostgresBoard(Board):
         return msg_id
 
     def read_unread(self, agent_key: str | None = None, name: str | None = None,
-                    job: str | None = None, advance: bool = True) -> ReadResult:
+                    job: str | None = None, advance: bool = True, *, touch: bool = True) -> ReadResult:
         match, params = _agent_match(agent_key, name)
         row = self._conn.execute(f"SELECT agent_key, name, job, last_read_id FROM agents WHERE {match} "
                                  "AND left_at IS NULL", params).fetchone()
@@ -1512,8 +1592,8 @@ class PostgresBoard(Board):
             return ReadResult(messages, remaining)
         new = messages[-1].id if remaining else max(last, top or 0)
         moved = self._conn.execute(
-            "UPDATE agents SET last_read_id = %s, last_seen = now() WHERE agent_key = %s "
-            "AND last_read_id = %s", (new, key, last)).rowcount
+            "UPDATE agents SET last_read_id = %s, last_seen = CASE WHEN %s THEN now() ELSE last_seen END WHERE agent_key = %s "
+            "AND last_read_id = %s", (new, touch, key, last)).rowcount
         # A parallel read of this agent moved the cursor first and owns these messages.
         return ReadResult(messages, remaining) if moved else ReadResult([], 0)
 

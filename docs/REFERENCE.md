@@ -1893,10 +1893,21 @@ With `[hindsight] url` set, the swarm keeps a project memory in
 [Hindsight](https://github.com/vectorize-io/hindsight). Memory is off by default: with `url` empty (the default) the
 feature is off: no calls, no instructions, and the client isn't even imported.
 
-- **Where:** one Hindsight bank per project. The project is `activate --project NAME`, or the
-  job name; it is lower-cased, with runs of anything but `a-z0-9_-` turned into `-` (max 64),
-  for the bank id. Several jobs can share a project. The bank is created on first store if it
-  doesn't exist.
+- **Where:** writes use `[hindsight] default_bank` (default `coding`). An explicit
+  `activate --project NAME` selects a project bank, normalized to lower-case `a-z0-9_-` (max
+  64). No implicit bank creation: a missing bank fails unless the write has `--create-bank`.
+  Recall queries `recall_banks` (default `["coding", "hermes"]`) plus the explicit project
+  bank; results are deduplicated within the existing budgets, with independent bank errors.
+  The 6000-character cache drops whole trailing facts and always remains valid JSON.
+- **Job-end learnings:** after completion or a judge's `met` verdict, the orchestrator must
+  distill self-contained facts into the best-matching existing bank. List choices with
+  `swarm learn --list-banks`; pipe facts to `swarm learn --job J [--bank B] -` (default:
+  `default_bank`), one fact per nonblank line. Learning waits for extraction with a timeout
+  of at least 120 seconds, or the configured timeout if larger, and records provenance after
+  all facts succeed. Strongly prefer an existing bank already covering the topic; create a new
+  bank only when strictly necessary, explicitly with `--create-bank`. Learnings carry memory
+  provenance. `deactivate --delete-bank` only deletes an explicit project bank after learnings
+  have successfully been retained elsewhere.
 - **What is stored:** what agents choose to store with `swarm remember`: durable findings, root
   causes, decisions and gotchas, one fact per call, never secrets or narration. Each is tagged
   `swarm`, `job:<job>`, `agent:<name>`, with metadata `source=swarm`, `job`, `agent`, `project`.
@@ -1921,7 +1932,9 @@ feature is off: no calls, no instructions, and the client isn't even imported.
   Hindsight.
 
 Endpoints used: `GET /v1/default/banks/{bank}/profile` (does the bank exist),
-`PUT /v1/default/banks/{bank}` (create it), `POST /v1/default/banks/{bank}/memories` (retain),
+`GET /v1/default/banks` (list existing banks),
+`DELETE /v1/default/banks/{bank}` (explicit cleanup),
+`PUT /v1/default/banks/{bank}` (explicit creation only), `POST /v1/default/banks/{bank}/memories` (retain),
 `POST /v1/default/banks/{bank}/memories/recall` (recall, budget `low`); with `[provenance]`
 also `GET /v1/default/banks/{bank}/documents/{id}` (does a memory still exist: `memory refs
 --check`, `transcript show --memory`, `swarm purge`), `GET /openapi.json` (cached: does this
@@ -2107,7 +2120,7 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `activate --job J [--description D] [--task T\|-] [--project P] [--session S] [--adopt-running]` | open or re-open the job and switch the board on for subagents spawned from now on; bind it to `--session`, default the calling Claude Code or Codex session; print `swarm command: <path>` and the tag lines. In Codex, refused while another job is active in the session |
 | `activate --job J --attach [--session S] [--adopt-running]` | bind this session to a job that is already active, without reopening it (see [One job, both hosts](#one-job-both-hosts)) |
 | `activate … --goal G\|-` | give the job a goal, judged by one judge agent; the tag lines include `[swarm role: judge]` |
-| `deactivate --job J [--status completed\|cancelled\|failed] [--outcome O] [--force]` | switch the board off and close the job (default `completed`). A job with a goal completes only with the judge's `met` verdict, or with `--force` (recorded). On an already closed (e.g. auto-closed) job it replaces the status and outcome |
+| `deactivate --job J [--status completed\|cancelled\|failed] [--outcome O] [--force] [--delete-bank]` | switch the board off and close the job (default `completed`). A job with a goal completes only with the judge's `met` verdict, or with `--force` (recorded). On an already closed (e.g. auto-closed) job it replaces the status and outcome |
 | `verdict --job J --as NAME met\|not_met REASON...` | the job's judge records its verdict and posts it on the board; anyone else is refused; spooled when the board is unreachable |
 | `wait --job J [--for DURATION \| --until TIME] --on WHAT...` | mark an open job as waiting for something; shown as `waiting` with the reason and, when bounded, its end. `--for 90m` (`h`/`m`/`s`, bare = minutes) or `--until` (a duration, a time of day such as `17:30`, or `2026-10-06 09:00`) bounds it. A bounded wait that has not ended protects the job from the orphan rule and the stall limits (including `goal_stall_hours`); once it ends the job is judged as not waiting, and the end counts as progress. An unbounded wait is shown but protects nothing. A board read by the orchestrating session (`status --job`, `who`, `read`, `tail --job`) counts as contact for liveness |
 | `pause --job J [--reason TEXT] [--wait SECONDS]` | pause a job: no joins or posts, every agent recorded in a resume manifest and closed, final transcripts captured (see Pausing and resuming a job) |
@@ -2119,7 +2132,9 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `join --job J --key K [--role R] [--judge\|--verifier]` | allocate a unique name for agent key K, or return the one it already has. `--judge` takes the job's judge seat (refused if another agent holds it) and `--verifier` makes it a verifier: for agents without the swarm's hooks, such as a one-off `codex exec` judge. They read the board with `read --key K`, and post and record verdicts with the CLI. |
 | `post --job J (--as NAME \| --key K) [--to NAME\|@ROLE] MESSAGE...` | post a message; whitespace is collapsed and the text capped at `message_max_chars`; spooled when the board is unreachable. `--to @EL`, `@PM`, `@QA`, `@judge` or `@<role>` goes to whoever holds that seat on the job now (one message each); a name that is not on the job, a seat nobody holds, or an author who is not an agent of `--job` is refused with an error and nothing is stored. `@EL` is `engineering_lead`, `@PM` is `project_manager` (else `orchestrator`), `@product` is `product_manager`; compatibility exception: an author active on another open job is redirected there with a note on stderr before validation |
 | `read (--as NAME \| --key K) [--job J] [--peek]` | messages new since the last read, excluding your own, `read_limit` at a time with a count of what is left; `--peek` doesn't advance the cursor |
-| `remember --job J --as NAME [--project P] FACT...` | store a durable fact in the project memory (needs `[hindsight] url`); spooled when unreachable |
+| `learn --job J [--bank B] [--create-bank] -` / `learn --list-banks` | retain self-contained job learnings with provenance in an existing bank (default_bank if omitted), one fact per nonblank stdin line; list existing banks |
+| `recall --job J [QUERY...]` | query recall_banks plus an explicit project bank, deduplicated within existing budgets |
+| `remember --job J --as NAME [--project P] [--create-bank] FACT...` | store a durable fact in its explicit project bank or default_bank (needs `[hindsight] url`); spooled when unreachable |
 | `plugins` | list the CLI plugins found, the commands and options they add, and why one failed to load (a broken plugin never breaks the core commands; see [CLI plugins](#cli-plugins)) |
 | `spool retry` | requeue memories parked as `.stuck` after 24 hours of failing (see [The spool](#the-spool)) |
 | `notices --hook-output [--host claude\|codex]` | internal: the plugin's `SessionStart` hook prints the pending setup notice for that host as hook output (a fixed template of re-validated steps, see [First run and updates](#first-run-and-updates)) and consumes it; prints nothing when there is none |
