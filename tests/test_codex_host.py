@@ -71,6 +71,9 @@ class CodexHostTests(unittest.TestCase):
         self.assertEqual(self.h.spawn_tools, ("spawn_agent",))
         self.assertEqual(self.h.verifier_denied, ("apply_patch", "spawn_agent"))
         self.assertFalse(self.h.stop_is_final)
+        self.assertFalse(self.h.completes_on("stop"))
+        self.assertFalse(self.h.completes_on("session-stop"))
+        self.assertTrue(self.h.completes_on("session-end"))
 
     def test_namespaced_tool_names_match_by_suffix(self):
         spawn = _spawns()[0]

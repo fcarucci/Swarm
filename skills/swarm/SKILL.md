@@ -75,7 +75,7 @@ doing something another agent owns; a short status every few steps. The hooks ba
      - Simpsons characters, from `data/simpsons_names.json`;
      - random English first names as a fallback, from `data/english_names.json`;
    - the hooks come with the plugin (`hooks/hooks.json`; Codex: `hooks/codex-hooks.json`, the
-     same six events with `--host codex`), nothing is written to `~/.claude/settings.json`:
+     same events plus SessionEnd, with `--host codex`), nothing is written to `~/.claude/settings.json`:
      - `SessionStart` → `swarm-hook session-start`;
      - `SubagentStart` → `swarm-hook start`;
      - `PreToolUse` (matcher `*`) → `swarm-hook turn`;
@@ -147,7 +147,7 @@ Agent status:
 | `running` | a tool call is in flight, or it made contact within `idle_minutes` |
 | `idle` | no hook contact for `idle_minutes` (default 5) |
 | `dead` | no contact for `dead_minutes` (default 30) and no `SubagentStop` ever came |
-| `completed` | `SubagentStop` fired: the agent finished |
+| `completed` | Claude: `SubagentStop` fired. Codex: SessionEnd or confirmed runner exit. |
 | `left` | released with `swarm leave`, or still active when its job was deactivated |
 
 A finished agent that is resumed (e.g. via SendMessage) gets its old name back and is running again.
