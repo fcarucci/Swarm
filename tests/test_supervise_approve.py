@@ -19,6 +19,7 @@ import contextlib
 import io
 import json
 import os
+from pathlib import Path
 import unittest
 from unittest import mock
 
@@ -47,9 +48,11 @@ class ApproveTests(Env):
 
         def candidates(cfg, d):
             self.asked.append(d)
-            if "bad" in d:
+            # The random temporary parent may contain either fixture word.
+            name = Path(d).name
+            if name == "bad":
                 raise ValueError("not under an allowed root")
-            return [] if "empty" in d else [dict(e) for e in ENTRIES]
+            return [] if name == "empty" else [dict(e) for e in ENTRIES]
 
         for name, fn in (("approval_candidates", candidates),
                          ("save_approvals", lambda entries: self.saved.append(entries))):
@@ -100,7 +103,7 @@ class ApproveTests(Env):
         self.assertEqual(self.saved, [])
 
     def test_nothing_to_approve(self):
-        rc, out, _ = self.approve(TtyInput("approve\n"), d=str(self.tmp / "empty"))
+        rc, out, _ = self.approve(TtyInput("approve\n"), d=str(self.tmp / "bad-parent" / "empty"))
         self.assertEqual(rc, 0)
         self.assertIn("nothing to approve", out)
         self.assertEqual(self.saved, [])
