@@ -155,7 +155,8 @@ def _run_tools(work, mapping):
     for ln in (so + "\n" + se).splitlines():  # e.g. "stage/prod/f00003.py: invalid syntax at line 3"
         m = re.match(r"^(?P<f>[^:]+\.py):.*(invalid syntax|syntax error|Error)", ln.strip().replace("\\", "/"))
         if m and m["f"].rsplit("/", 1)[-1] in mapping and not _VULTURE_RE.match(ln.strip()):
-            errors.append(f"{mapping[m['f'].rsplit('/', 1)[-1]]} (vulture: {re.sub(r'^\d+:\s*', '', ln.split(':', 1)[1].strip())[:80]})")
+            message = re.sub(r'^\d+:\s*', '', ln.split(':', 1)[1].strip())[:80]
+            errors.append(f"{mapping[m['f'].rsplit('/', 1)[-1]]} (vulture: {message})")
     files = {}
     for key, v in parse_radon_file_metrics(outs["mi"], outs["hal"], outs["raw"]).items():
         if key in mapping:
