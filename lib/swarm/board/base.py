@@ -108,8 +108,44 @@ RESTART_OUTCOMES = ("running", "completed", "timeout", "max_turns", "failed", "n
 # instead of varchar(N); SQLite board_meta table and a trigger instead of the table CHECK;
 # file/memory: a field of the store), see Board.message_cap; grouped status counts
 # and message/agent indexes.
-# 16 indexed job-restricted agent message counts and message-free agent rollups in job_status.
-SCHEMA_VERSION = 16
+# 16 jobs.plugin_data (a JSON object of per-job settings that CLI
+# plugins keep with the job: Board.job_data / set_job_data).
+# 17 indexed job-restricted agent message counts and message-free agent rollups in job_status.
+SCHEMA_VERSION = 17
+
+JOB_DATA_KEY = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}")
+JOB_DATA_VALUE_MAX = 2000
+
+
+def check_job_data(key: str, value: str | None) -> None:
+    """ValueError unless (key, value) may be stored by set_job_data."""
+    if not isinstance(key, str) or JOB_DATA_KEY.fullmatch(key) is None:
+        raise ValueError("job data key must be 1-64 of a-z, 0-9, _, ., - (starting with a letter or digit)")
+    if value is not None and (not isinstance(value, str) or len(value) > JOB_DATA_VALUE_MAX):
+        raise ValueError(f"job data value must be a string of at most {JOB_DATA_VALUE_MAX} characters")
+
+
+def parse_job_data(raw: str | None) -> dict[str, str]:
+    """A job's stored plugin data as a dict; a damaged value counts as empty."""
+    try:
+        data = json.loads(raw) if raw else {}
+    except ValueError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
+
+
+def merged_job_data(raw: str | None, key: str, value: str | None) -> str:
+    """The JSON text of a job's plugin data `raw` with `key` set to `value` (None removes it)."""
+    data = parse_job_data(raw)
+    if value is None:
+        data.pop(key, None)
+    else:
+        data[key] = value
+    return json.dumps(data, sort_keys=True)
+
+
 
 # The message cap: the longest a board message may be, in characters. One authoritative value per
 # board, stored in the board (Board.message_cap); [board] message_max_chars is only the value a NEW
@@ -917,12 +953,19 @@ def stall_outcome(js: JobStatus, cap: float) -> str:
     return outcome[:AUTO_CLOSE_OUTCOME_MAX]
 
 
+def wait_protects(js: JobStatus) -> bool:
+    """Whether the job's wait marker shields it from the expiry sweep: it is waiting (`swarm wait`)
+    and bounded (`--for`/`--until`). The sweep clears an expired marker before it asks, so a
+    marker that is still here is valid; an unbounded one (and the supervisor's own) never protects."""
+    return bool(js.waiting_on) and js.waiting_until is not None
+
+
 def orphaned(js: JobStatus, now: _dt.datetime, orphan_minutes: float) -> bool:
     """The orphan rule's test on the rollup: no agent started, running or idle, not inside an
     unexpired bounded wait, and no board activity for `orphan_minutes` (the run's start counts)."""
     if not orphan_minutes or orphan_minutes <= 0 or js.started or js.running or js.idle:
         return False
-    if js.waiting_on and js.waiting_until is not None:
+    if wait_protects(js):
         return False
     quiet = _dt.timedelta(minutes=orphan_minutes)
     return now - (js.last_activity_at or run_start(js)) >= quiet and now - run_start(js) >= quiet
@@ -1037,7 +1080,7 @@ WRITE_METHODS = (
     "claim_route", "tool_finished", "agent_stopped", "set_agent_role", "set_agent_runtime",
     "agent_turn_ended",
     "turns_resumed", "finish_quiet_agents", "leave", "close_agent", "claim_resume",
-    "set_job_supervise", "record_restart", "set_restart_agent", "finish_restart",
+    "set_job_supervise", "set_job_data", "record_restart", "set_restart_agent", "finish_restart",
     "record_roster_sync", "record_memory_recall", "record_remembered", "record_nudge",
     "record_silence_nudge", "record_reply_reminder", "post", "read_unread", "read_new",
     "save_transcript", "refresh_transcript", "mark_capture_failed", "rotate_transcripts",
@@ -1265,12 +1308,15 @@ class Board(abc.ABC):
                 closed.append(AutoClosed(js.job, outcome))
         return closed
 
-    def progress_at(self, js: JobStatus) -> _dt.datetime:
+    def progress_at(self, js: JobStatus, grace: _dt.datetime | None = None) -> _dt.datetime:
         """When the job last made progress: the newest of its run start, its latest verdict, an
         agent joining, and a board message posted by an agent (not the system's own, "swarm").
         Tool calls and hook heartbeats (last_seen) are not progress: an agent polling in a loop
-        for hours is not."""
+        for hours is not. `grace`: when a bounded wait ended (it counts as progress, so the job isn't
+        stalled the moment its wait runs out)."""
         times = [run_start(js)] + [a.joined_at for a in self.agents(js.job)]
+        if grace:
+            times.append(grace)
         if js.verdict_at:
             times.append(js.verdict_at)
         times += [m.created_at for m in self.recent_messages(20, job=js.job) if m.agent_name != "swarm"]
@@ -1311,7 +1357,7 @@ class Board(abc.ABC):
             seen_activity = js.last_activity_at
             js = self._clear_expired_wait(js, now)
             action = self._expiry_action(js, now, stall_hours, orphan_minutes, goal_stall_hours, watch)
-            if action is None or not self._expiry_holds(action, self.job_status(js.job), seen_activity, now):
+            if action is None or not self._expiry_holds(action, self.job_status(js.job), seen_activity, now, js.waiting_until):
                 continue   # (the job is read again: nothing changed since the rollup?)
             # a goal set, or a verdict changed, since the read is checked again, atomically with the close
             if self.close_job(js.job, action.status, action.outcome, closed_by=AUTO_CLOSED_BY, guard=action.guard):
@@ -1331,9 +1377,11 @@ class Board(abc.ABC):
         """What sweep_expiry should do with this job from the rollup alone: the stall close, else
         the orphan close, else nothing. The stall rule is checked first; a goal job has no orphan rule."""
         unmet = goal_unmet(js)
+        if wait_protects(js):   # a valid bounded wait (an expired one was cleared): neither rule applies
+            return None
         cap = stall_cap(js, stall_hours, goal_stall_hours)
         if cap and now - run_start(js) >= _dt.timedelta(hours=cap) and \
-                now - self.progress_at(js) >= _dt.timedelta(hours=cap):
+                now - self.progress_at(js, grace=js.waiting_until) >= _dt.timedelta(hours=cap):
             guard = CloseGuard(False, js.goal, js.max_hours) if unmet else CloseGuard()
             return ExpiryAction("failed", stall_outcome(js, cap), cap, guard)
         if not unmet and orphaned(js, now, orphan_minutes) and not (watch is not None and watch(js.job).active()):
@@ -1342,15 +1390,15 @@ class Board(abc.ABC):
         return None
 
     def _expiry_holds(self, action: ExpiryAction, now_js: JobStatus | None, seen_activity,
-                      now: _dt.datetime) -> bool:
+                      now: _dt.datetime, grace: _dt.datetime | None = None) -> bool:
         """Whether the close still applies to the job as read again right before it: still open and,
         for the orphan close, nobody joined or posted since the rollup; for the stall close of a
         goal job, no progress (a post, verdict or new agent) since."""
-        if now_js is None or now_js.status != "active":
+        if now_js is None or now_js.status != "active" or wait_protects(now_js):
             return False
         if action.status == "cancelled":
             return not (now_js.started or now_js.running or now_js.idle or now_js.last_activity_at != seen_activity)
-        return not (goal_unmet(now_js) and now - self.progress_at(now_js) < _dt.timedelta(hours=action.cap))
+        return not (goal_unmet(now_js) and now - self.progress_at(now_js, grace) < _dt.timedelta(hours=action.cap))
 
     @abc.abstractmethod
     def bind_job_session(self, job: str, session_id: str) -> None:
@@ -1647,6 +1695,17 @@ class Board(abc.ABC):
     def record_resume_outcome(self, pause_id: int, outcome: dict) -> bool:
         """Store `outcome` (JSON-able: {agent_key: {"status": ..., ...}}) on the pause row,
         replacing the previous one. False if there is no such row."""
+
+    @abc.abstractmethod
+    def job_data(self, job: str) -> dict[str, str]:
+        """The per-job settings plugins keep with the job (set_job_data), {} when none or the job
+        doesn't exist. Values are short strings; the store is opaque to the core."""
+
+    @abc.abstractmethod
+    def set_job_data(self, job: str, key: str, value: str | None) -> bool:
+        """Set one key of the job's plugin data (value None removes it), atomically with the read of
+        the others. `key` is 1-64 of [a-z0-9_.-], `value` at most JOB_DATA_VALUE_MAX characters
+        (ValueError otherwise). False if the job doesn't exist. Survives reactivation of the job."""
 
     @abc.abstractmethod
     def set_job_supervise(self, job: str, on: bool) -> bool:

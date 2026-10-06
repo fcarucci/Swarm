@@ -1,0 +1,16 @@
+# Default team composition for the engineering-team skill. Copy to ~/.config/swarm/team.toml
+# (or point $SWARM_TEAM_CONFIG at it). A missing file means: product_manager on, build_engineer off.
+#
+# Always present, whatever this says (they cannot be removed): engineering_lead (EL), qa, engineer
+# (one or more) and an independent judge.
+#
+# optional_roles lists the optional seats that are on by default:
+#   product_manager  owns the user-facing requirements and the acceptance
+#   build_engineer   owns build, CI and gating, merge-result gating, scoped fix rounds, build-slot use
+#   reviewer, verifier  the existing optional peer-review and checking roles
+# Without product_manager, engineering_lead writes the change criteria and engineering_lead + qa
+# record the product acceptance. Without build_engineer, engineering_lead owns its duties.
+#
+# One job can differ: `swarm activate --job J --team product_manager,build_engineer` or
+# `swarm team --job J --add build_engineer` / `--remove product_manager` / `--show`.
+optional_roles = ["product_manager"]

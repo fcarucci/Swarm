@@ -27,7 +27,7 @@ from typing import Mapping, Sequence
 import psycopg
 from psycopg import sql
 
-from .base import (LEFT_PAUSED, PauseRecord, build_manifest, database_hosts, MOVED_PREFIX, NAME_PATTERN, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, CloseGuard, CapExceeded, configured_message_cap, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, ROUTE_STATES, TOOL_NAME_MAX,
+from .base import (check_job_data, merged_job_data, parse_job_data, LEFT_PAUSED, PauseRecord, build_manifest, database_hosts, MOVED_PREFIX, NAME_PATTERN, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, CloseGuard, CapExceeded, configured_message_cap, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, ROUTE_STATES, TOOL_NAME_MAX,
                    AgentEvent, Restart,
                    AgentStatus, Board, BoardError, BoardUnavailable, IncompatibleStorage, JobStatus,
                    Member, Message, OwedReply, ReadResult, Route, RosterEntry, SCHEMA_VERSION, SetupResult,
@@ -187,6 +187,8 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS waiting_since timestamptz;
 -- lifetime cap in hours (`activate --max-hours`; NULL = the [job] max_hours default).
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS waiting_until timestamptz;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS max_hours double precision;
+-- Schema version 16: per-job settings that CLI plugins keep with the job (a JSON object as text).
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS plugin_data text;
 -- Who closed the job: 'auto' for the auto-close sweep, else who ran `swarm deactivate`.
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS closed_by text;
 -- The transcript archive ([transcripts], bin/transcripts.py): one row per (job, agent_key), the
@@ -789,6 +791,7 @@ def _install_schema(conn: psycopg.Connection, b: dict) -> None:
     # boards created before writers became configurable restrict memory_refs.writer to three names
     conn.execute("ALTER TABLE memory_refs DROP CONSTRAINT IF EXISTS memory_refs_writer_check")
     _install_checks(conn)
+    # Schema 17: replace schema-16 status views; repeated setup is idempotent.
     conn.execute(STATUS_VIEW.format(idle=int(b["idle_minutes"]), dead=int(b["dead_minutes"]),
                                     tool_timeout=int(b["tool_timeout_minutes"])))
 
@@ -1497,6 +1500,21 @@ class PostgresBoard(Board):
     def record_resume_outcome(self, pause_id: int, outcome: dict) -> bool:
         return self._conn.execute("UPDATE job_pauses SET outcome = %s WHERE id = %s RETURNING id",
                                   (json.dumps(outcome), pause_id)).fetchone() is not None
+
+    def job_data(self, job: str) -> dict[str, str]:
+        row = self._conn.execute("SELECT plugin_data FROM jobs WHERE job = %s", (job,)).fetchone()
+        return parse_job_data(row[0] if row else None)
+
+    def set_job_data(self, job: str, key: str, value: str | None) -> bool:
+        check_job_data(key, value)
+        conn = self._conn
+        with conn.transaction():
+            row = conn.execute("SELECT plugin_data FROM jobs WHERE job = %s FOR UPDATE", (job,)).fetchone()
+            if row is None:
+                return False
+            conn.execute("UPDATE jobs SET plugin_data = %s WHERE job = %s",
+                         (merged_job_data(row[0], key, value), job))
+            return True
 
     def set_job_supervise(self, job: str, on: bool) -> bool:
         return self._conn.execute("UPDATE jobs SET supervise = %s WHERE job = %s RETURNING job",

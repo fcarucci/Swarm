@@ -2051,7 +2051,7 @@ class PostgresSpecificTests(unittest.TestCase):
                                   for field in ("Filter", "Index Cond", "Recheck Cond"))
             self.assertIn("'j'", conditions, plan)
 
-    def test_schema16_recreates_status_views_without_changing_results(self):
+    def test_schema16_to_17_recreates_status_views_without_changing_results(self):
         from pathlib import Path
         from swarm.board.base import SCHEMA_VERSION
         from swarm.board.postgres import _AGENT_STATUS_COLS, _JOB_STATUS_COLS
@@ -2072,7 +2072,8 @@ class PostgresSpecificTests(unittest.TestCase):
         self.b.post("closed", "X", "historical")
         old_views = (Path(__file__).parent / "fixtures/schema15_status_views.sql").read_text()
         conn.execute(old_views.format(idle=5, dead=30, tool_timeout=60))
-        conn.execute("UPDATE board_meta SET value = '15' WHERE key = 'schema_version'")
+        conn.execute("UPDATE board_meta SET value = '16' WHERE key = 'schema_version'")
+        self.b.set_job_data("j", "engineering-team.optional", "build_engineer")
         queries = (f"SELECT {_AGENT_STATUS_COLS} FROM agent_status ORDER BY job, agent_key",
                    f"SELECT {_JOB_STATUS_COLS}, shown_status FROM job_status ORDER BY job")
         before = [conn.execute(q).fetchall() for q in queries]
@@ -2081,7 +2082,9 @@ class PostgresSpecificTests(unittest.TestCase):
                                "ORDER BY table_name, ordinal_position").fetchall()
         for _ in range(2):  # migration and idempotent re-init
             type(self.b).setup(self.h.cfg, SMALL_POOL)
-            self.assertEqual(type(self.b).schema_version(self.h.cfg), SCHEMA_VERSION)
+            self.assertEqual(SCHEMA_VERSION, 17)
+            self.assertEqual(type(self.b).schema_version(self.h.cfg), 17)
+            self.assertEqual(self.b.job_data("j"), {"engineering-team.optional": "build_engineer"})
             self.assertEqual([conn.execute(q).fetchall() for q in queries], before)
             self.assertEqual(conn.execute("SELECT table_name, column_name, data_type "
                                           "FROM information_schema.columns "

@@ -329,6 +329,7 @@ class SqliteSandboxSpoolTests(unittest.TestCase):
             self.skipTest("root can write a read-only file")
         env = self.env
         env.cli("activate", "--job", "J")
+        sender = env.peer(key="sandboxed")
         env.h.close()      # no connection open: the WAL side files are gone
         self.assertEqual(sorted(p.name for p in self.path.parent.iterdir()), [self.path.name])
         # What a sandbox does to the default path: the file and its directory are readable,
@@ -339,7 +340,7 @@ class SqliteSandboxSpoolTests(unittest.TestCase):
         try:
             with self.assertRaises(BoardUnavailable):
                 open_board(env.cfg)
-            rc, out, _ = env.cli("post", "--job", "J", "--as", "Homer Simpson", "from", "the", "sandbox")
+            rc, out, _ = env.cli("post", "--job", "J", "--as", sender, "from", "the", "sandbox")
             self.assertEqual(rc, 0)
             self.assertTrue(out.startswith("queued (board not reachable from here: OperationalError)"), out)
             self.assertEqual(len(list(env.spool_dir.glob("*.json"))), 1)

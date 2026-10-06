@@ -27,7 +27,7 @@ import random
 import threading
 from typing import Mapping, Sequence
 
-from .base import (LEFT_PAUSED, MOVED_PREFIX, PauseRecord, build_manifest, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, AUTO_CLOSE_BLOCKING, CloseGuard, goal_is_unmet, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, Restart,
+from .base import (check_job_data, merged_job_data, parse_job_data, LEFT_PAUSED, MOVED_PREFIX, PauseRecord, build_manifest, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, AUTO_CLOSE_BLOCKING, CloseGuard, goal_is_unmet, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, Restart,
                    ROUTE_STATES, TOOL_NAME_MAX, AgentEvent, AgentStatus, Board, BoardError, BoardUnavailable, JobStatus, Member, Message,
                    OwedReply, ReadResult, Route, SCHEMA_VERSION, SetupResult, SpawnGrant, SyncState, TRANSCRIPT_ROLES,
                    TranscriptImage, TranscriptRow, TranscriptSummary, VERDICTS,
@@ -853,6 +853,22 @@ class MemoryBoard(Board):
             if p is None:
                 return False
             p["outcome"] = copy.deepcopy(outcome)
+            s.touch()
+            return True
+
+    def job_data(self, job: str) -> dict[str, str]:
+        with self._s().lock:
+            j = self._s().jobs.get(job)
+            return parse_job_data(j.get("plugin_data") if j else None)
+
+    def set_job_data(self, job: str, key: str, value: str | None) -> bool:
+        check_job_data(key, value)
+        s = self._s()
+        with s.lock:
+            j = s.jobs.get(job)
+            if j is None:
+                return False
+            j["plugin_data"] = merged_job_data(j.get("plugin_data"), key, value)
             s.touch()
             return True
 

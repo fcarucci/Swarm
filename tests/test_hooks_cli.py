@@ -27,7 +27,10 @@ LINE = re.compile(r"^\[\d\d:\d\d\] ")
 
 
 class Env(unittest.TestCase):
-    """A private swarm installation: config, marker dir, spool dir, board storage, $HOME."""
+    """A private swarm installation: config, marker dir, spool dir, board storage, $HOME.
+    The CLI plugins shipped with the skills are disabled (core runs on its own, its output is the
+    core's); a test of a plugin lists none in `plugins_disabled`."""
+    plugins_disabled = ("engineering-team",)
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="swarm-test-", dir=os.environ.get("TMPDIR")))
@@ -40,7 +43,8 @@ class Env(unittest.TestCase):
         self.addCleanup(self.h.close)
         self.config.write_text(
             f'[board]\nbackend = "{self.h.name}"\nspool_dir = {tq(self.spool_dir)}\n'
-            f'[hook]\nmarker_dir = {tq(self.markers)}\n' + self.h.toml)
+            f'[hook]\nmarker_dir = {tq(self.markers)}\n'
+            f'[plugins]\ndisabled = {json.dumps(list(self.plugins_disabled))}\n' + self.h.toml)
         self.cfg = swarm.load_config(self.config)
         self.h.reset(swarm_names())
         home = self.tmp / "home"
@@ -75,6 +79,13 @@ class Env(unittest.TestCase):
 
     def board(self):
         return open_board(self.cfg)
+
+    def peer(self, job: str = "J", key: str = "peer", role: str | None = None) -> str:
+        """Another agent of `job` (joined through the CLI): its name, to post as."""
+        args = ["join", "--job", job, "--key", key] + (["--role", role] if role else [])
+        rc, out, err = self.cli(*args)
+        self.assertEqual(rc, 0, err)
+        return out.strip()
 
     def agent(self, key: str, job: str = "J"):
         with self.board() as b:
@@ -214,8 +225,9 @@ class CliTests(Env):
         self.assertEqual(self.cli("job", "J2", "--description", "d")[1], "J2\n")
 
     def test_post_spools_when_unreachable_and_next_command_delivers_once(self):
+        sender = self.peer()
         self.h.set_available(False)
-        rc, out, _ = self.cli("post", "--job", "J", "--as", "Homer Simpson", "queued", "msg")
+        rc, out, _ = self.cli("post", "--job", "J", "--as", sender, "queued", "msg")
         self.assertEqual(rc, 0)
         self.assertEqual(out, "queued (board not reachable from here: ConnectionError); it is delivered "
                               "automatically within seconds by the swarm hooks. This is normal inside a sandbox.\n")
@@ -358,22 +370,23 @@ class HookTests(Env):
 
     def test_turn_marks_tool_and_delivers_new_messages_once(self):
         self.activate()
+        someone = self.peer()
         self.hook("start")
         me = self.agent("agent-1").name
         self.assertIsNone(self.hook("turn", tool_name="Bash"))
         a = self.agent("agent-1")
         self.assertEqual((a.status, a.current_tool, a.tool_calls), ("running", "Bash", 1))
-        self.cli("post", "--job", "J", "--as", "Someone", "--to", me, "look", "here")
+        self.cli("post", "--job", "J", "--as", someone, "--to", me, "look", "here")
         self.cli("post", "--job", "J", "--as", me, "my own")
         out = self.hook("turn", tool_name="Read")
         self.assertEqual(out["hookSpecificOutput"]["hookEventName"], "PreToolUse")
         lines = self.context(out).split("\n")
         self.assertEqual(lines[0], "[swarm board] new messages:")
         self.assertEqual(len(lines), 3)
-        self.assertRegex(lines[1], rf"^\[\d\d:\d\d\] Someone → {re.escape(me)}: look here$")
+        self.assertRegex(lines[1], rf"^\[\d\d:\d\d\] {re.escape(someone)} → {re.escape(me)}: look here$")
         self.assertTrue(lines[2].startswith("[swarm board] 1 addressed to you: reply with `"))
         # not answered: reminded once on the next call, then quiet
-        self.assertIn("[swarm] Someone asked you something at ",
+        self.assertIn(f"[swarm] {someone} asked you something at ",
                       self.context(self.hook("turn", tool_name="Read")))
         self.assertIsNone(self.hook("turn", tool_name="Read"))
         self.hook("done")
@@ -449,10 +462,11 @@ class HookTests(Env):
 
     def test_resumed_member_rejoins_with_same_name(self):
         self.activate()
+        someone = self.peer()
         self.hook("start")
         name = self.agent("agent-1").name
         self.hook("stop")
-        self.cli("post", "--job", "J", "--as", "Someone", "while you were away")
+        self.cli("post", "--job", "J", "--as", someone, "while you were away")
         out = self.hook("turn", tool_name="Bash")
         self.assertIn(f"You are **{name}**", self.context(out))
         self.assertIn("while you were away", self.context(out))  # caught up on rejoining
@@ -476,9 +490,10 @@ class HookTests(Env):
 
     def test_hook_flushes_spool_exactly_once_in_order(self):
         self.activate()
+        sender = self.peer()
         self.hook("start")
         for i in range(3):
-            spool.spool_post(self.cfg, "J", "Someone", f"spooled {i}", None)
+            spool.spool_post(self.cfg, "J", sender, f"spooled {i}", None)
             os.utime(sorted(self.spool_dir.glob("*.json"), key=lambda p: p.stat().st_mtime)[-1],
                      (1000 + i, 1000 + i))
         # a per-tool hook delivers two at most (swarm_hooks.HOOK_FLUSH_TOOL); the next one the rest
@@ -495,10 +510,14 @@ class HookTests(Env):
 
 
 class SpoolTests(Env):
+    def setUp(self):
+        super().setUp()
+        self.sender = self.peer()
+
     def test_concurrent_flushers_deliver_exactly_once(self):
         n = 40
         for i in range(n):
-            spool.spool_post(self.cfg, "J", "Someone", f"m{i}", None)
+            spool.spool_post(self.cfg, "J", self.sender, f"m{i}", None)
         barrier = threading.Barrier(6)
         counts, errors = [], []
 
@@ -531,8 +550,8 @@ class SpoolTests(Env):
     def test_malformed_and_empty_go_to_bad(self):
         self.spool_dir.mkdir(parents=True)
         (self.spool_dir / "broken.json").write_text("{not json")
-        spool.spool_post(self.cfg, "J", "Someone", "  \n ", None)
-        spool.spool_post(self.cfg, "J", "Someone", "fine", None)
+        spool.spool_post(self.cfg, "J", self.sender, "  \n ", None)
+        spool.spool_post(self.cfg, "J", self.sender, "fine", None)
         with self.board() as b:
             self.assertEqual(spool.flush_spool(b, self.cfg), 1)
             self.assertEqual([m.message for m in b.recent_messages(10, "J")], ["fine"])
@@ -540,7 +559,7 @@ class SpoolTests(Env):
         self.assertEqual(list(self.spool_dir.glob("*.json")), [])
 
     def test_failed_delivery_is_put_back(self):
-        spool.spool_post(self.cfg, "J", "Someone", "later", None)
+        spool.spool_post(self.cfg, "J", self.sender, "later", None)
 
         class Failing:
             def post(self, *a, **k):
@@ -649,7 +668,7 @@ class HookFileSafetyTests(Env):
         # nor Start/Stop, whose auto-close sweep reads markers through cli._read_marker
         self.activate()
         self.hook("start")
-        self.cli("post", "--job", "J", "--as", "Someone", "hello")
+        self.cli("post", "--job", "J", "--as", self.peer(), "hello")
         os.mkfifo(self.markers / "stall.json")
         done, out = _run_bounded(lambda: self.hook("turn", tool_name="Bash"), 5.0)
         self.assertTrue(done, "a FIFO in the marker dir blocked the hook")
