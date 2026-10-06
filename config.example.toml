@@ -37,6 +37,8 @@ agent_stale_hours = 12              # an agent silent this long gives its name b
 read_limit = 50                     # max messages returned by one read
 join_history = 30                   # a new agent is first shown the job's newest N messages (0 = none)
 roster_refresh_minutes = 10         # full roster re-sent to each agent at least this often (diffs in between)
+watch_interval_s = 10               # periodic watch refresh; --interval overrides
+watch_min_redraw_s = 2              # coalesce notifications/snapshot misses, also in compact panes
 watch_recent_minutes = 10           # watch / status --job hide finished agents older than this (`a` / --all-agents shows them)
 silence_nudge_calls = 15            # nudge an agent to post a status after this many tool calls without posting (0 = off)
 silence_nudge_minutes = 10          # ... or after this many minutes without posting (0 = off); once per quiet window
@@ -66,6 +68,7 @@ tool_timeout_minutes = 60           # a single tool call longer than this stops 
 # path = "~/.local/share/swarm-board/board"   # board directory; must be on a local filesystem
 
 [hook]
+hook_min_interval_s = 15            # Linux shell fast path; 0 restores per-call bookkeeping
 # An agent only takes part in the board when a marker for its swarm job exists here;
 # see SKILL.md. Hooks exit silently for everyone else.
 marker_dir = "~/.local/state/swarm/active"

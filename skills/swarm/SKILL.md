@@ -100,15 +100,15 @@ doing something another agent owns; a short status every few steps. The hooks ba
      The hooks are no-ops unless a job is active.
 
 ## Watching a swarm
-`${CLAUDE_PLUGIN_ROOT}/bin/swarm watch [--job J] [--interval 2]` is a full-screen live dashboard:
+`${CLAUDE_PLUGIN_ROOT}/bin/swarm watch [--job J] [--interval 10]` is a full-screen live dashboard:
 - the jobs table;
 - the agents table for each active job (or just `--job J`, with its task): active agents, plus
   finished ones (completed/left/dead) that ended or were last seen within
   `watch_recent_minutes` (default 10); a dim line counts the older ones hidden;
 - the latest messages in whatever height is left.
 
-It redraws the moment an agent, job or message changes (on Postgres, triggers NOTIFY
-`swarm_state` and `swarm_board`; SQLite and file boards are polled every 0.1 s), and at least every `--interval` seconds so idle and dead appear as time passes.
+It coalesces agent, job and message changes for `[board] watch_min_redraw_s` (default 2 seconds; keys redraw cached data immediately). Quiet refreshes use `watch_interval_s` (default 10 seconds), overridden by `--interval`. Full and compact panes share a one-statement PostgreSQL snapshot. On Postgres, triggers NOTIFY
+`swarm_state` and `swarm_board`; SQLite and file boards are polled every 0.1 s. Periodic refreshes age idle/dead status; `watch_min_redraw_s` also bounds shorter explicit intervals.
 Keys: `↑`/`↓` (or `k`/`j`) scroll the messages one message back into older history or forward,
 `PgUp`/`PgDn` a page; while scrolled back new posts don't move the view and the MESSAGES header
 reads `(scrolled back N · M newer · G for live)`; `G` returns to the live tail. `←`/`→` (or
@@ -731,12 +731,7 @@ for b in memory sqlite file; do SWARM_TEST_BACKEND=$b .venv/bin/python -B -m uni
   `wait_event = 'ClientRead'` (a result lost between server and client, e.g. in a pooler;
   through a pooler keep `prepared_statements = false`). A server-side `statement_timeout` can't catch that: the server is waiting on the client. A
   `watch` with no notice that never changes predates the deadline: restart it.
-- **Cost:** with no job active, the hook exits in the shell before Python starts, so it's cheap in every other session.
-  In a swarm on Postgres, a tool call costs one board connection and 5 statements (plus one write when
-  roster news, a reply reminder or a nudge is shown); Hindsight is only called when a recall
-  is due. Routing adds nothing to a member's tool call (its job comes back with the tool
-  bookkeeping); the subagent's transcript is read once, at its first tool call, and only when
-  its job wasn't settled at start.
+- **Cost:** Linux tool hooks use a shell-only fast path while their board stamp and contact lease are unchanged. `[hook] hook_min_interval_s` defaults to 15 seconds (0 restores per-call bookkeeping), capped at one tenth of idle/dead thresholds. Tool names and call counts are sampled; a sampled tool is not treated as still in flight. A shared LISTEN notifier relays remote posts within about 2 seconds; local posts invalidate immediately. Reads acknowledge only the generation seen before reading, and backlogs keep the Python path enabled. A stale notifier forces cursor reads. Marker paths are cached by config mtime; changing config or plugin invalidates leases. Start/stop/session-stop, spawn policy, verifier restrictions, judge reminders and optional provenance keep their ordinary paths. Other platforms keep the ordinary hooks.
 - **Main session:** it has no `agent_id`, so the hooks ignore it (apart from giving its spawns
   their role's model). The orchestrator uses the CLI.
 - **Message content:** keep messages short and useful: what you are touching, findings, warnings,

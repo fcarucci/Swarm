@@ -1253,7 +1253,11 @@ def _moved_notice(board, agent_id: str, name: str, job: str, old: str, roster, c
 def _on_turn(board, agent_id: str, name: str, job: str, cfg: dict, sid: str | None = None,
              payload: dict | None = None) -> None:
     from swarm.board.base import MOVED_PREFIX   # the board is open by now
-    res = board.read_unread(agent_key=agent_id, job=job)
+    lease = _CURRENT.get('lease')
+    if lease and lease.enabled:
+        res = board.read_unread(agent_key=agent_id, job=job, touch=False)
+    else:
+        res = board.read_unread(agent_key=agent_id, job=job)
     roster, state = board.turn_state(agent_id, job)
     moved = state is not None and (state.roster_seen or "").startswith(MOVED_PREFIX)
     parts = []
@@ -1263,6 +1267,9 @@ def _on_turn(board, agent_id: str, name: str, job: str, cfg: dict, sid: str | No
         if payload is not None:
             _record_enrolment(cfg, agent_id, job, sid, payload)   # the local record follows the job
         state = dataclasses.replace(state, roster_seen=None, roster_synced_at=state.now)
+    lease = _CURRENT.get('lease')
+    if lease and lease.enabled:
+        lease.backlog = bool(res.remaining)
     parts.append(_messages_text(res, job, name, "recent messages on this job (catch-up)" if moved
                                 else "new messages"))
     if state is not None:
@@ -1272,6 +1279,8 @@ def _on_turn(board, agent_id: str, name: str, job: str, cfg: dict, sid: str | No
             parts.append(_roster_update(board, agent_id, job, roster, state, cfg))
         parts += _memory_turn(board, cfg, agent_id, job, state)
     text = "\n\n".join(p for p in parts if p)
+    if lease and lease.enabled:
+        lease.allowed = getattr(lease, 'eligible', False)
     if text:
         _out("PreToolUse", text)
 
@@ -1293,7 +1302,15 @@ def _on_event(board, event: str, agent_id: str, sid: str | None, bound: dict, un
         _sweep(board, cfg, event, agent_id, payload, deadline)
         return
     if event == "done":  # PostToolUse: the tool call finished; bookkeeping, and memory provenance
-        board.tool_finished(agent_id)
+        lease = _CURRENT.get('lease')
+        if lease and lease.enabled:
+            member = board.tool_contact(agent_id, None) if lease.due else board.hook_member(agent_id)
+            if member:
+                lease.contacted = lease.due
+                lease.capture(member.job)
+                lease.allowed = False  # done never advances the last-read stamp
+        else:
+            board.tool_finished(agent_id)
         _memory_provenance(board, cfg, agent_id, sid, bound, payload)
         return
     if event == "start":
@@ -1313,7 +1330,16 @@ def _on_event(board, event: str, agent_id: str, sid: str | None, bound: dict, un
         if stop:
             _deny(stop)
             return
-    member = board.tool_started(agent_id, payload.get("tool_name"))
+    lease = _CURRENT.get('lease')
+    if lease and lease.enabled:
+        member = (board.tool_contact(agent_id, payload.get('tool_name')) if lease.due
+                  else board.hook_member(agent_id))
+        if member:
+            lease.contacted = lease.due
+            lease.capture(member.job)
+            lease.eligible = not member.verify_tag and not member.verifier
+    else:
+        member = board.tool_started(agent_id, payload.get("tool_name"))
     if member is None:  # not an active member (yet): route it, maybe enrol it
         if resume is not None:
             _enrol_resumed(board, agent_id, resume, payload, cfg)
@@ -1509,9 +1535,13 @@ def _orchestrator_respawn(event: str, cfg: dict, sid: str | None, payload: dict)
 def run_hook(event: str, cfg: dict, host: str | None = None) -> int:
     _OUTPUT.clear()
     _CURRENT["host"] = None
+    _CURRENT["lease"] = None
     try:
         _handle(event, cfg, host)
     finally:
+        lease = _CURRENT.get('lease')
+        if lease:
+            lease.finish()
         if _OUTPUT:
             print(json.dumps(_OUTPUT))
     return 0
@@ -1526,6 +1556,12 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
         _CURRENT["host"] = hosts.get(hosts.detect_hook_host(host_flag, payload, os.environ))
     except KeyError:   # a host this version has no adapter for: do nothing
         return 0
+    if event in ('start', 'stop', 'session-stop') and os.environ.get('SWARM_HOOK_FASTPATH'):
+        from swarm.fastpath import invalidate
+        invalidate(payload)
+    if event in ('turn', 'done') and os.environ.get('SWARM_HOOK_FASTPATH'):
+        from swarm.fastpath import Lease
+        _CURRENT['lease'] = Lease(cfg, current_host().name, payload)
     agent_id = payload.get("agent_id")
     sid = payload.get("session_id")
     if event == "turn" and sid and current_host().is_followup(payload):
@@ -1537,9 +1573,17 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
         return 0   # a session started by (or inside) a replacement that isn't it: never an orchestrator
     if event == "session-stop" and (agent_id or resume is not None):
         return 0   # the end of a subagent's (or a replacement's) turn: SubagentStop is theirs
+    lease = _CURRENT.get('lease')
+    if not agent_id and lease and lease.enabled:
+        markers, _ = _session_markers(cfg, sid) if sid else ({}, {})
+        if len(markers) == 1:
+            lease.capture(next(iter(markers)))
+            lease.allowed = True
     if not agent_id:  # main session: note that it is at work; its spawns get models per role
-        if event != "session-stop":
+        if event != "session-stop" and (not lease or not lease.enabled or lease.due):
             _orchestrator_seen(event, cfg, sid, payload)
+            if lease:
+                lease.contacted = True
         _orchestrator_respawn(event, cfg, sid, payload)
         if event == "turn" and current_host().is_spawn(payload):
             try:

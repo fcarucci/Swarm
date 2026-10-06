@@ -88,7 +88,7 @@ DEFAULTS = {
               "roster_refresh_minutes": 10,
               # `watch` and `status --job` hide finished agents (completed/left/dead) whose end
               # or last contact is older than this; `a` / --all-agents shows them
-              "watch_recent_minutes": 10,
+              "watch_recent_minutes": 10, "watch_interval_s": 10, "watch_min_redraw_s": 2,
               # nudge an agent to post a status after this many tool calls or minutes without
               # posting (once per quiet window; 0 disables that trigger)
               "silence_nudge_calls": 15, "silence_nudge_minutes": 10,
@@ -102,7 +102,7 @@ DEFAULTS = {
               # path like /tmp/claude/swarm-spool lets another OS user deny or redirect it. A
               # path under /tmp must name the user: {uid} expands to the numeric uid.
               "spool_dir": "~/.local/state/swarm/spool"},
-    "hook": {"marker_dir": "~/.local/state/swarm/active"},
+    "hook": {"marker_dir": "~/.local/state/swarm/active", "hook_min_interval_s": 15},
     # An open job closes by itself (status completed, closed_by "auto") once every agent of its
     # current run is done (completed or left; dead ones don't hold it open) and nothing happened
     # on it (no join, no hook contact, no post) for auto_close_minutes. 0 turns it off.
@@ -1009,7 +1009,7 @@ def _supervise_line(board, j, sup: dict | None) -> str | None:
 
 
 def job_detail(board, job: str, color: bool, recent_minutes: int | None = None, hint: str = "",
-               transcripts: list | None = None, sup: dict | None = None) -> str:
+               transcripts: list | None = None, sup: dict | None = None, include_agents: bool = True) -> str:
     """The job's head lines and agents table. transcripts (the job's TranscriptSummary rows, only
     when the archive is on) adds a transcripts line and a STORED column to the table. sup ([supervise]
     settings, or None) adds a `supervise` line."""
@@ -1042,6 +1042,8 @@ def job_detail(board, job: str, color: bool, recent_minutes: int | None = None, 
                 (sup_line, sup_line or ""),
                 (transcripts is not None, _transcripts_line(transcripts or [])))
     head += [line for value, line in optional if value]
+    if not include_agents:
+        return "\n".join(head)
     stored = None if transcripts is None else _stored_by_key(transcripts)
     return "\n".join(head) + "\n\n" + agents_table(board, job, color, now, recent_minutes, hint, stored)
 
@@ -1081,10 +1083,12 @@ def agents_table(board, job: str, color: bool, now, recent_minutes: int | None =
     """The job's agents table. With recent_minutes, older finished agents are left out and a
     dim "(N older finished agents hidden · <hint>)" line follows the table. stored (agent_key ->
     stored transcript bytes) adds a STORED column ("-" for an agent without a transcript)."""
-    rows = board.agents(job)
-    if not rows:
+    if hasattr(board, 'watch_agents'):
+        rows, hidden = board.watch_agents(job, recent_minutes)
+    else:
+        rows, hidden = _recent_agents(board.agents(job), now, recent_minutes)
+    if not rows and not hidden:
         return "(no agents yet)"
-    rows, hidden = _recent_agents(rows, now, recent_minutes)
     attempts = {r.new_agent_key: r.attempt for r in board.restarts(job=job) if r.new_agent_key}
 
     def _status_cell(a):
@@ -1827,7 +1831,7 @@ def _watch_header(board, job: str | None, interval: float, color: bool, interact
     pinned = {0}
     if job:
         jobs = [job]
-        out += job_detail(board, job, color, sup=sup).split("\n\n", 1)[0].splitlines()
+        out += job_detail(board, job, color, sup=sup, include_agents=False).splitlines()
     else:
         pinned.add(len(out))
         out += [_bold("JOBS", color)] + jobs_overview(board, False, color, rows=session_rows).splitlines()
@@ -1995,7 +1999,10 @@ def _compact_frame(board, job: str | None, color: bool, view: dict, rows: list |
         out.append("(no jobs yet)")
     for j in rows:
         out.append(_bold(f"{term_safe(j.job)} [{_compact_status(board, j, now)}]", color))
-        agents, hidden = _recent_agents(board.agents(j.job), now, recent)
+        if hasattr(board, 'watch_agents'):
+            agents, hidden = board.watch_agents(j.job, recent)
+        else:
+            agents, hidden = _recent_agents(board.agents(j.job), now, recent)
         out += [_compact_agent_line(a, NATURAL, color) for a in agents]
         if not agents:
             out.append("  (no agents yet)")
@@ -2146,6 +2153,7 @@ class _Recorder:
 
     def __init__(self, board):
         self._board, self.data, self.attrs, self.msgs = board, {}, {}, []
+        self.agent_windows = []
         self.taken, self.taken_mono = board.now(), time.monotonic()
 
     def __getattr__(self, name):
@@ -2155,8 +2163,19 @@ class _Recorder:
             return value
 
         def call(*args, **kwargs):
+            key = (name, repr((args, sorted(kwargs.items()))))
+            if key in self.data:
+                result = self.data[key]
+                return list(result) if isinstance(result, list) else result
+            if name == 'recent_messages' and len(args) == 1:
+                kw = repr(sorted(kwargs.items()))
+                for limit, saved_kw, rows in self.msgs:
+                    if kw == saved_kw and limit >= args[0]:
+                        return list(rows[-args[0]:]) if args[0] > 0 else []
             result = value(*args, **kwargs)
-            self.data[(name, repr((args, sorted(kwargs.items()))))] = result
+            self.data[key] = result
+            if name == 'watch_agents' and len(args) == 2:
+                self.agent_windows.append((args[0], result))
             if name == "recent_messages" and len(args) == 1:
                 self.msgs.append((args[0], repr(sorted(kwargs.items())), result))
             return result
@@ -2195,6 +2214,11 @@ class _Replay:
                         if kw2 == kw and limit >= args[0]:
                             result = rows[-args[0]:] if args[0] > 0 else []
                             break
+                if result is None and name == 'watch_agents' and len(args) == 2 and args[1] is None:
+                    for saved_job, saved in snap.agent_windows:
+                        if saved_job == args[0] and saved[1] == 0:
+                            result = saved
+                            break
                 if result is None:
                     raise SnapshotMiss(name) from None
             return list(result) if isinstance(result, list) else result
@@ -2205,12 +2229,33 @@ def _take_snapshot(board, frame, view: dict, job: str | None) -> _Recorder:
     """Run frame(recorder): every board answer the frame used is kept. Then also the newest
     WATCH_HISTORY messages (60 in the compact view, which has no history), of which every other
     window (scrolling back, a taller terminal) is a slice, so those keys need no query either."""
+    if hasattr(board, 'watch_snapshot'):
+        recent = None if view.get('all_agents') else view.get('recent_minutes')
+        board = board.watch_snapshot(job, view.get('session'), recent,
+                                     60 if view.get('compact') else WATCH_HISTORY)
     rec = _Recorder(board)
-    frame(rec)
     session = view.get("session")
-    srows = session_jobs(_Replay(rec), session)[0] if session else None
+    srows = session_jobs(rec, session)[0] if session else None
     _watch_messages(rec, 60 if view.get("compact") else WATCH_HISTORY, job, srows)
+    frame(rec)
     return rec
+
+
+class _RefreshGate:
+    """Burst notifications mark dirty; they never move the existing redraw deadline."""
+    def __init__(self, interval, minimum=2):
+        self.interval = max(float(interval), float(minimum))
+        self.minimum = max(0.01, float(minimum))
+        self.last = None
+        self.dirty = False
+
+    def due(self, now, changed=False):
+        self.dirty |= changed
+        return self.last is None or now >= self.last + self.interval or (
+            self.dirty and now >= self.last + self.minimum)
+
+    def refreshed(self, now):
+        self.last, self.dirty = now, False
 
 
 def _watch_loop(board, out, fd: int | None, interval: float, view: dict, draw, refresh=None) -> None:
@@ -2226,12 +2271,14 @@ def _watch_loop(board, out, fd: int | None, interval: float, view: dict, draw, r
     board.subscribe()
     if refresh is not None:
         return _watch_loop_threaded(board, out, fd, interval, view, draw, refresh)
-    dirty, next_draw = True, 0.0
+    dirty, changed = True, False
+    gate = _RefreshGate(interval, view.get('min_redraw', 2))
     while True:
-        if dirty or time.monotonic() >= next_draw:
+        if dirty or gate.due(time.monotonic(), changed):
             out.write("\033[H" + "\n".join(line + "\033[K" for line in draw()) + "\033[J")
             out.flush()
-            dirty, next_draw = False, time.monotonic() + interval
+            dirty = False
+            gate.refreshed(time.monotonic())
         # Poll keys and board changes in short slices: a keypress redraws at once, and a
         # burst of hook updates lands in one slice, so it costs one redraw, not dozens.
         keys = _read_keys(fd)
@@ -2239,8 +2286,7 @@ def _watch_loop(board, out, fd: int | None, interval: float, view: dict, draw, r
             if not _apply_keys(keys, view):
                 return
             dirty = True
-        if board.wait_for_change(0.01):  # drains every pending change notification
-            dirty = True
+        changed = board.wait_for_change(0.1)  # coalesce bursts; keys still render immediately
         idle = view.get("idle_exit")
         if idle is not None and idle.expired():
             return
@@ -2272,14 +2318,14 @@ def _watch_loop_threaded(board, out, fd, interval: float, view: dict, draw, refr
             pass
 
     def worker() -> None:
-        next_refresh = 0.0
+        gate = _RefreshGate(interval, view.get('min_redraw', 2))
         try:
             while not stop.is_set():
                 changed = board.wait_for_change(0.1)   # drains pending notifications; stop checked between
-                if wake.is_set() or changed or time.monotonic() >= next_refresh:
+                if gate.due(time.monotonic(), wake.is_set() or changed):
                     wake.clear()
                     state["snap"] = refresh()
-                    next_refresh = time.monotonic() + interval
+                    gate.refreshed(time.monotonic())
                     poke(b"s")
         except BaseException as exc:   # the loop re-raises it (BoardUnavailable: _follow reconnects)
             state["error"] = exc
@@ -2331,7 +2377,7 @@ def _watch_loop_threaded(board, out, fd, interval: float, view: dict, draw, refr
                 key.data()
             if time.monotonic() >= next_tick:   # the clock and idle/dead ageing: a render, no query
                 render()
-                next_tick = time.monotonic() + min(interval, 1.0)
+                next_tick = time.monotonic() + max(interval, view.get('min_redraw', 2))
             idle = view.get("idle_exit")
             if idle is not None and idle.expired():
                 return
@@ -2364,7 +2410,11 @@ def cmd_watch(cfg: dict, job: str | None, interval: float, color: bool, session:
     On a terminal the loop is event driven (_watch_loop_threaded): keys are callbacks from the
     WATCH_KEYS/VIEW_ACTIONS keymap, rendered at once from the last snapshot; queries, the sweep
     and LISTEN/NOTIFY run on a background refresh thread, so no key waits for the database."""
-    view = {"offset": 0, "wrap": False, "max_offset": 0, "all_agents": False,
+    interval = float(cfg['board'].get('watch_interval_s', 10)) if interval is None else interval
+    if interval <= 0:
+        raise ValueError('watch interval must be positive')
+    view = {"min_redraw": cfg['board'].get('watch_min_redraw_s', 2),
+            "offset": 0, "wrap": False, "max_offset": 0, "all_agents": False,
             "anchor": None, "scroll": 0, "mark": None, "page": 1,
             "recent_minutes": int(cfg["board"]["watch_recent_minutes"]),
             "db_label": watcher_db_label(cfg), "session": session, "compact": compact,
@@ -2390,7 +2440,7 @@ def cmd_watch(cfg: dict, job: str | None, interval: float, color: bool, session:
         def draw(snap) -> list[str]:  # on the key thread: no query, only the last snapshot
             return frame(snap, view)
         if fd is None:   # no keys to wait on (not a terminal): the plain redraw loop is enough
-            _watch_loop(board, out, fd, interval, view, lambda: (sweeper(board), frame(board, view))[1])
+            _watch_loop(board, out, fd, interval, view, lambda: draw(_Replay(refresh())))
         else:
             _watch_loop(board, out, fd, interval, view, draw, refresh)
 
@@ -2562,7 +2612,7 @@ def _parser() -> argparse.ArgumentParser:
     st.add_argument("--no-color", action="store_true")
     wa = sub.add_parser("watch", help="live full-screen view of jobs, agents and messages (Ctrl-C to quit)")
     wa.add_argument("--job", help="focus on one job (default: all active jobs)")
-    wa.add_argument("--interval", type=float, default=2.0, help="max seconds between redraws")
+    wa.add_argument("--interval", type=float, default=None, help="seconds between quiet refreshes (config watch_interval_s, default 10)")
     wa.add_argument("--session", help="show only the jobs activated by this host session id")
     wa.add_argument("--exit-when-idle", type=float, metavar="SECONDS",
                     help="with --session: once it has no active job, exit 0 after "
@@ -3310,6 +3360,8 @@ def _board_post(board, cfg: dict, args) -> int | None:
     except ValueError as exc:   # a name the board refuses (board.base.valid_name)
         print(f"not posted: {term_safe(exc)}", file=sys.stderr)
         return 1
+    from swarm.fastpath import changed
+    changed(args.job)
     print(f"posted #{res.id}" + (f" (truncated to {cfg['board']['message_max_chars']} chars)" if res.truncated else ""))
 
 
@@ -3345,6 +3397,8 @@ def _board_verdict(board, cfg: dict, args) -> int:
     if not recorded:
         print(f"refused: {term_safe(args.name)} is not the judge of job {term_safe(args.job)}", file=sys.stderr)
         return 1
+    from swarm.fastpath import changed
+    changed(args.job)
     print(f"verdict {args.verdict} recorded for {args.job}, and posted on the board")
     return 0
 
