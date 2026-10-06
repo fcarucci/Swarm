@@ -162,7 +162,7 @@ class PureTests(unittest.TestCase):
         from unittest.mock import Mock, patch
         from swarm.board import postgres
 
-        conn = Mock()
+        conn = Mock(query_timeout=8.0)
         conn.transaction.side_effect = lambda: nullcontext()
         attempts = []
 
