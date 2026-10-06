@@ -144,7 +144,7 @@ ALTER TABLE agents ADD COLUMN IF NOT EXISTS memory_recalled_at timestamptz;
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS memory_seen text[] NOT NULL DEFAULT '{}';
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS remembered_at timestamptz;
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS nudged_at timestamptz;
--- The memory project (Hindsight bank) of a job; NULL means the job name.
+-- The memory project (Hindsight bank) of a job; NULL/empty means configured general banks.
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS project text;
 -- Talking on the board: replies owed (reminded once) and the "post a status" nudge.
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS reply_reminded_id bigint NOT NULL DEFAULT 0;

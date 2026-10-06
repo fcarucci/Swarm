@@ -29,7 +29,9 @@ Subcommands (run with --help for details):
   post            post a message as a named agent
   read            print messages new since this agent's last read (advances its cursor)
   who             list active agents on a job
-  remember        store a durable fact in the job's project memory (Hindsight; optional)
+  remember        store a durable fact in an existing memory bank (Hindsight; optional)
+  learn           retain job learnings in an existing bank, or list available banks
+  recall          query the configured general banks and any explicit project bank
   spool retry     requeue memories parked as .stuck after 24 hours of failing
   leave           release an agent's name
   purge           apply retention now
@@ -146,6 +148,7 @@ DEFAULTS = {
     "spawn": {"max_per_agent": 2, "max_per_job": 4, "max_depth": 2, "min_justification_chars": 30},
     # Optional project memory in Hindsight. With `url` empty the feature is off entirely.
     "hindsight": {"url": "", "api_key_file": "", "timeout_seconds": 3,
+                  "default_bank": "coding", "recall_banks": ["coding", "hermes"],
                   "recall_max_items": 8, "recall_max_chars": 1500, "recall_max_tokens": 1024,
                   "recall_minutes": 15, "recall_start_seconds": 6.0, "remember_nudge_minutes": 20,
                   "remember_max_chars": 1000, "retry_after_seconds": 60},
@@ -2536,8 +2539,17 @@ def _parser() -> argparse.ArgumentParser:
     w = sub.add_parser("who"); w.add_argument("--job", required=True)
     rm = sub.add_parser("remember", help="store a durable fact in the project's memory (needs [hindsight] url)")
     rm.add_argument("--job", required=True); rm.add_argument("--as", dest="name", required=True)
-    rm.add_argument("--project", help="default: the job's project, else the job name")
+    rm.add_argument("--project", help="default: the job's explicit project, else [hindsight] default_bank")
+    rm.add_argument("--create-bank", action="store_true", help="explicitly create the target bank if missing")
     rm.add_argument("fact", nargs="+")
+    le = sub.add_parser("learn", help="retain self-contained job learnings in an existing bank")
+    le.add_argument("--job"); le.add_argument("--bank", help="default: [hindsight] default_bank")
+    le.add_argument("--list-banks", action="store_true", help="list existing Hindsight banks")
+    le.add_argument("--create-bank", action="store_true", help="explicitly create the target bank if strictly necessary")
+    le.add_argument("facts", nargs="?", help="use - to read facts from stdin; one fact per nonempty line")
+    rc = sub.add_parser("recall", help="query configured recall_banks and any explicit job project")
+    rc.add_argument("--job", required=True)
+    rc.add_argument("query", nargs="*", help="default: the job task or description")
     sp = sub.add_parser("spool", help="manage the spool of queued posts and memories")
     sp.add_argument("action", choices=["retry"],
                     help="retry: requeue memories parked as .stuck after 24 hours of failing")
@@ -2555,7 +2567,7 @@ def _parser() -> argparse.ArgumentParser:
     ac.add_argument("--job", required=True); ac.add_argument("--description", help="one line")
     ac.add_argument("--task", help="the full brief; '-' reads it from stdin")
     ac.add_argument("--session", help="bind to this host session id (default: the calling Claude Code or Codex session)")
-    ac.add_argument("--project", help="memory project (Hindsight bank) shared by jobs; default the job name "
+    ac.add_argument("--project", help="explicit memory project (Hindsight bank); omitted: configured general banks "
                     "(1-64 letters, digits, spaces and . ' _ -)")
     ac.add_argument("--goal", help="what \"done\" means; one judge agent decides whether it is met, "
                                    "and completion waits for its met verdict; '-' reads it from stdin")
@@ -2574,6 +2586,8 @@ def _parser() -> argparse.ArgumentParser:
     de.add_argument("--outcome", help="short summary of how it ended")
     de.add_argument("--force", action="store_true",
                     help="complete a job with a goal without the judge's met verdict (recorded as forced)")
+    de.add_argument("--delete-bank", action="store_true",
+                    help="delete an explicit project bank only after learnings are retained elsewhere")
     vd = sub.add_parser("verdict", help="the job's judge records whether the goal is met (posted on the board)")
     vd.add_argument("--job", required=True); vd.add_argument("--as", dest="name", required=True)
     vd.add_argument("verdict", choices=["met", "not_met"])
@@ -2781,7 +2795,7 @@ def cmd_activate(cfg: dict, args) -> int:
     with open_board(cfg) as board:
         board.purge()
         board.open_job(args.job, args.description, task, session, os.environ.get("USER"),
-                       project=args.project, goal=goal)
+                       project=args.project or "", goal=goal)
         board.set_job_supervise(args.job, not args.no_supervise)
         if args.max_hours is not None:
             board.set_job_max_hours(args.job, args.max_hours)
@@ -2867,6 +2881,14 @@ def cmd_deactivate(cfg: dict, args) -> int:
         board.close()
         print(refusal, file=sys.stderr)
         return 1
+    if args.delete_bank:
+        try:
+            _delete_learned_bank(board, cfg, js, args.job)
+        except Exception as exc:
+            if board is not None:
+                board.close()
+            print(f"bank not deleted; job remains unchanged: {term_safe(exc)}", file=sys.stderr)
+            return 1
     # first, so the board goes quiet even if the db write fails; never unlinked without its lock
     markers = [marker] + [m for m in marker.parent.glob(f"{safe_job(args.job)}--*.json")
                           if _read_marker(m).get("job") == args.job]
@@ -2880,6 +2902,7 @@ def cmd_deactivate(cfg: dict, args) -> int:
         return 1
     if board is None:
         print(f"deactivated {args.job}; could not record status ({_error_name(down)})", file=sys.stderr)
+        _learning_instructions(args.job)
         return 0
     forced = bool(refusal)
     try:
@@ -2896,7 +2919,42 @@ def cmd_deactivate(cfg: dict, args) -> int:
     except Exception as exc:
         print(f"deactivated {args.job}; could not record status ({_error_name(exc)})",
               file=sys.stderr)
+    _learning_instructions(args.job)
     return 0
+
+
+def _learning_instructions(job: str) -> None:
+    print(f"Required learnings step for {job}: distill what the job learned into self-contained facts. "
+          "Run `swarm learn --list-banks` and retain them in the best-matching EXISTING bank, "
+          f"strongly preferring banks that already cover the topic: `swarm learn --job {job} --bank BANK -`. "
+          "Create a bank only when strictly necessary, with explicit --create-bank.")
+
+
+def _delete_learned_bank(board, cfg: dict, js, job: str) -> None:
+    """Only explicit project banks with confirmed exported learnings may be deleted.
+    The durable provenance survives marker removal and reopening a CLI process. Check
+    its Hindsight document too: a queued, failed or subsequently deleted export is no proof.
+    """
+    from swarm import hindsight
+    if board is None or js is None or not js.project:
+        raise ValueError("--delete-bank requires a job with an explicit --project bank")
+    bank = hindsight.bank_id(js.project)
+    general = hindsight.recall_banks(cfg)
+    general.append(hindsight.bank_id(cfg["hindsight"].get("default_bank", "coding")))
+    if bank in general:
+        raise ValueError("refusing to delete a configured general memory bank")
+    client = hindsight.Client(cfg)
+    start = js.activated_at or js.created_at
+    refs = [r for r in board.memory_refs(job=job)
+            if r.writer == "swarm-learn" and r.bank != bank and r.created_at >= start]
+    for ref in refs:
+        doc = client.document(ref.bank, ref.document_id)
+        meta = (doc or {}).get("document_metadata") or {}
+        if meta.get("job") == job and meta.get("learning") == "true":
+            client.delete_bank(bank)
+            print(f'deleted explicit project bank "{bank}"; learnings retained in "{ref.bank}"')
+            return
+    raise ValueError(f"retain learnings elsewhere first: swarm learn --job {job} --bank EXISTING_BANK -")
 
 
 def _capture_final_transcripts(board, cfg: dict, job: str) -> None:
@@ -3075,7 +3133,8 @@ def cmd_remember(cfg: dict, args) -> int:
     doc = provenance.new_document_id()
 
     def queue(project: str | None) -> str:
-        f = spool_memory(cfg, args.job, args.name, text, args.project, metadata=meta)
+        f = spool_memory(cfg, args.job, args.name, text, project, metadata=meta,
+                         create_bank=args.create_bank)
         return " " + provenance.output_tag(f"swarm-spool-{f.stem}", project or "")
 
     try:
@@ -3090,13 +3149,14 @@ def cmd_remember(cfg: dict, args) -> int:
         flush_spool(board, cfg)
         project = args.project
         try:
-            project = project or hindsight.project_of(board.job_status(args.job), args.job)
+            project = project or hindsight.project_of(board.job_status(args.job), args.job, cfg)
             if not valid_name(project):   # set by `swarm activate --project` before this check existed
                 print(term_safe(f"invalid project {project!r} of job {args.job}: pass --project with "
                                 f"1-64 letters, digits, spaces and . ' _ -"), file=sys.stderr)
                 return 1
             project = hindsight.remember(board, cfg, args.job, args.name, text, project,
-                                         document_id=doc, metadata=meta)
+                                         document_id=doc, metadata=meta,
+                                         create_bank=args.create_bank)
         except hindsight.HindsightUnavailable as exc:
             tag = queue(project)
             board.record_remembered(args.name)
@@ -3113,6 +3173,97 @@ def cmd_remember(cfg: dict, args) -> int:
             return 0
     print(term_safe(f'remembered in project "{project}"' + (f" (truncated to {cap} chars)" if truncated else "")
                     + " " + provenance.output_tag(doc, project)))
+    return 0
+
+
+def cmd_learn(cfg: dict, args) -> int:
+    """Retain one self-contained fact per stdin line with durable provenance.
+    Unlike remember, this never queues or truncates: success certifies a completed
+    retain, which is required before a disposable project bank may be deleted.
+    """
+    from swarm import hindsight, provenance, hosts
+    from swarm.board import open_board
+    from swarm.board.base import MemoryRef, valid_name
+    if not hindsight.enabled(cfg):
+        print("memory is off: set [hindsight] url in the swarm config", file=sys.stderr)
+        return 1
+    client = hindsight.Client(cfg)
+    if args.list_banks:
+        if args.job or args.bank or args.facts or args.create_bank:
+            print("swarm learn --list-banks cannot be combined with retain options", file=sys.stderr)
+            return 2
+        try:
+            print("\n".join(client.list_banks()))
+        except (hindsight.HindsightError, hindsight.HindsightUnavailable) as exc:
+            print(f"cannot list banks: {term_safe(exc)}", file=sys.stderr)
+            return 1
+        return 0
+    if not args.job or args.facts != "-":
+        print("usage: swarm learn --job JOB [--bank BANK] [--create-bank] -", file=sys.stderr)
+        return 2
+    bank = args.bank or cfg["hindsight"].get("default_bank", "coding")
+    if not valid_name(bank):
+        print("invalid bank: use 1-64 letters, digits, spaces and . ' _ -", file=sys.stderr)
+        return 2
+    facts = [line.strip() for line in sys.stdin.read().splitlines() if line.strip()]
+    cap = int(cfg["hindsight"]["remember_max_chars"])
+    if not facts:
+        print("no learnings supplied", file=sys.stderr)
+        return 1
+    if any(len(fact) > cap for fact in facts):
+        print(f"learning exceeds {cap} characters; split it into self-contained facts", file=sys.stderr)
+        return 1
+    # The hook's short timeout is unsuitable for synchronous fact extraction. This
+    # explicit CLI step can wait; recall and normal remember keep their own budgets.
+    learn_cfg = {**cfg, "hindsight": {**cfg["hindsight"], "timeout_seconds":
+                                    max(120.0, float(cfg["hindsight"]["timeout_seconds"]))}}
+    try:
+        with open_board(cfg) as board:
+            js = board.job_status(args.job)
+            if js is None:
+                print(f"no such job: {term_safe(args.job)}", file=sys.stderr)
+                return 1
+            meta = {**provenance.cli_metadata(os.environ), "learning": "true"}
+            name = "orchestrator"
+            retained = []
+            for fact in facts:
+                doc = provenance.new_document_id()
+                hindsight.remember(board, learn_cfg, args.job, name, fact, bank,
+                                   document_id=doc, metadata=meta, create_bank=args.create_bank,
+                                   synchronous=True)
+                retained.append(doc)
+            # A partial batch must not authorise deletion: publish the durable evidence
+            # only after every fact in this invocation has been retained successfully.
+            for doc in retained:
+                board.save_memory_ref(MemoryRef(
+                    document_id=doc, bank=hindsight.bank_id(bank), job=args.job,
+                    agent_key=f"learn:{js.session_id or args.job}", agent_name=name,
+                    harness=hosts.detect_cli_host(os.environ), host=compat.node(),
+                    session_id=hosts.cli_session_id(os.environ) or js.session_id,
+                    tool_call_id=None, writer="swarm-learn"))
+                print(term_safe(f'learned in bank "{bank}" ' + provenance.output_tag(doc, bank)))
+    except (hindsight.HindsightError, hindsight.HindsightUnavailable) as exc:
+        print(f"learning not retained: {term_safe(exc)}; retry before deleting the project bank",
+              file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_recall(cfg: dict, args) -> int:
+    from swarm import hindsight
+    from swarm.board import open_board
+    if not hindsight.enabled(cfg):
+        print("memory is off: set [hindsight] url in the swarm config", file=sys.stderr)
+        return 1
+    with open_board(cfg, readers=True) as board:
+        js = board.job_status(args.job)
+    banks = hindsight.recall_banks(cfg, js)
+    query = " ".join(args.query) or hindsight.recall_query(js, args.job)
+    items = hindsight.Client(cfg).recall_many(
+        banks, query, on_error=lambda bank, exc: print(
+            f'recall bank "{bank}" failed: {term_safe(exc)}', file=sys.stderr))
+    text, _ = hindsight.format_memories(items, ", ".join(banks), cfg, "recalled memories")
+    print(text or "(no memories)")
     return 0
 
 
@@ -3147,6 +3298,8 @@ COMMANDS = {
     "hook": _cmd_hook,
     "notices": cmd_notices,
     "remember": cmd_remember,
+    "learn": cmd_learn,
+    "recall": cmd_recall,
     "spool": lambda cfg, args: cmd_spool_retry(cfg),
     "tail": lambda cfg, args: cmd_tail(cfg, args.job, args.backlog, args.interval, not args.no_agents,
                                        _use_color(args)),
@@ -3400,6 +3553,8 @@ def _board_verdict(board, cfg: dict, args) -> int:
     from swarm.fastpath import changed
     changed(args.job)
     print(f"verdict {args.verdict} recorded for {args.job}, and posted on the board")
+    if args.verdict == "met":
+        _learning_instructions(args.job)
     return 0
 
 
@@ -3616,7 +3771,8 @@ def main(argv=None) -> int:
 
 def _reads_only(args) -> bool:
     """Whether the command only reads the board, so a standby may serve it when no primary is up."""
-    return (args.cmd in ("who", "status") or (args.cmd == "read" and args.peek)
+    return (args.cmd in ("who", "status", "recall") or (args.cmd == "read" and args.peek)
+            or (args.cmd == "learn" and args.list_banks)
             or (args.cmd == "transcript" and args.tcmd in TRANSCRIPT_COMMANDS))
 
 
@@ -3649,7 +3805,9 @@ def _dispatch(args) -> int:
     # doctor reads (and reports on) the config itself: a broken one must not stop it
     cfg = {} if args.cmd == "doctor" else load_config(args.config)
     # a supervise dry run writes nothing: no board setup or migration either
-    if args.cmd not in NO_AUTO_INIT and not (args.cmd == "supervise" and (args.dry_run or args.scmd)):
+    if (args.cmd not in NO_AUTO_INIT
+            and not (args.cmd == "supervise" and (args.dry_run or args.scmd))
+            and not (args.cmd == "learn" and args.list_banks)):
         auto_init(cfg)
     if args.cmd in COMMANDS:
         return COMMANDS[args.cmd](cfg, args)
@@ -3691,6 +3849,8 @@ def _dispatch(args) -> int:
             print(f"queued (board not reachable from here: {_error_name(exc)}); it is delivered "
                   f"automatically within seconds by the swarm hooks, and counts only if you are the "
                   f"judge of {args.job} (if not, you are told on the board).")
+            if args.verdict == "met":
+                _learning_instructions(args.job)
             return 0
         print(f"cannot reach the board database: {exc}"
               + (" (this command writes: it needs the primary)" if not _reads_only(args) else ""),

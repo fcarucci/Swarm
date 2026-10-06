@@ -433,7 +433,7 @@ class JobStatus:
     dead_or_left: int
     messages: int
     last_activity_at: _dt.datetime | None
-    project: str | None = None   # the memory project (Hindsight bank); None = use the job name
+    project: str | None = None   # the memory project (Hindsight bank); None/empty = use configured general banks
     # Goal and judge: what "done" means (None = no goal), the judge's latest verdict (VERDICTS,
     # None = none yet) with its reason, judge name and time, the name of the job's ACTIVE judge
     # (None if none), and whether it was closed completed without a met verdict (--force).

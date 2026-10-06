@@ -211,6 +211,8 @@ for the options.
 | `swarm wait [--for 90m]` / `swarm resume` | Mark a job as waiting for something (optionally for a bounded time), or not |
 | `swarm pause --job J [--reason "…"]` / `swarm resume --job J [--host H]` | Pause a job (checkpoint every agent's transcript, stop them, block new joins and posts), then resume it on this or another machine from the transcripts on the board; see Pausing and resuming |
 | `swarm transcript list\|show\|export` | Archived agent transcripts, secrets redacted |
+| `swarm learn --job J [--bank B] -` / `learn --list-banks` | Retain distilled learnings; list existing banks |
+| `swarm recall --job J QUERY` | Recall from general banks and any explicit project bank |
 | `swarm memory` / `swarm remember` | Memories agents saved and where they came from; store one |
 | `swarm leave` | Release an agent's name (`--session S`: every unfinished agent of that session's jobs, e.g. after a restart killed them) |
 | `swarm purge` | Apply retention now |
@@ -293,7 +295,23 @@ memory is pinned to the transcript that wrote it. To turn it on, set a URL:
 [hindsight]
 url = "http://hindsight.example.internal:9100"
 api_key_file = "~/.config/swarm/hindsight.key"   # optional; chmod 600
+default_bank = "coding"
+recall_banks = ["coding", "hermes"]
 ```
+
+Writes use the existing `default_bank`. `activate --project NAME` explicitly opts into a
+project bank; jobs never get a bank just from their name. Missing banks fail unless a write
+includes `--create-bank`. Recall queries `recall_banks` plus any explicit project bank,
+deduplicating within the existing budgets; one bank's error does not hide other banks.
+
+At job completion, including a judge's `met` verdict, the orchestrator must distill learnings
+into self-contained facts. Use `swarm learn --list-banks` and prefer an existing bank already
+covering the topic, then pipe facts to `swarm learn --job J --bank B -`. Omitting `--bank` uses
+`default_bank`. Supply one self-contained fact per nonblank stdin line. Learning waits for
+extraction with a timeout of at least 120 seconds (or the configured timeout, if larger), and
+records provenance only after all facts succeed. Learnings retain the usual memory provenance. A new bank requires explicit
+`--create-bank` and should be strictly necessary. `swarm deactivate --job J --delete-bank`
+removes an explicit project bank only after learnings were successfully retained elsewhere.
 
 Leave `url` empty, or drop the section, and no Hindsight calls are made.
 

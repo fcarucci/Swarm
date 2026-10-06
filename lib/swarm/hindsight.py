@@ -1,10 +1,10 @@
-"""Optional project memory in Hindsight (https://github.com/vectorize-io/hindsight).
+"""Optional shared memory in Hindsight (https://github.com/vectorize-io/hindsight).
 
 Only used when `[hindsight] url` is set; with no url nothing imports this module. Stdlib only
 (urllib), and imported lazily by the hooks and the CLI.
 
-A job's *project* (`swarm activate --project`, default the job name) names the Hindsight bank
-its memories go to, so several jobs can share one project's memory. Endpoints used (Hindsight
+Jobs retain into configured general memory banks unless `--project` explicitly opts into
+a project bank. Retaining never creates a bank without explicit authorization. Endpoints used (Hindsight
 HTTP API 0.8.6 and 0.10.2, /openapi.json):
 
   GET    /v1/default/banks/{bank}/profile          does the bank exist (0.8: 404 if not; 0.10 removed
@@ -14,7 +14,8 @@ HTTP API 0.8.6 and 0.10.2, /openapi.json):
   PUT    /v1/default/banks/{bank}                  create it (only when the GET said 404)
   POST   /v1/default/banks/{bank}/memories         retain (async: returns once queued)
   POST   /v1/default/banks/{bank}/memories/recall  recall (budget "low")
-  DELETE /v1/default/banks/{bank}                  tests only (throwaway banks)
+  GET    /v1/default/banks                         list existing banks
+  DELETE /v1/default/banks/{bank}                  explicit project cleanup
   GET    /v1/default/banks/{bank}/documents/{id}   provenance checks (None only on 404 "Document not found")
   GET    /openapi.json                             capability probe (CLI only, cached for CAPS_TTL)
   PATCH  /v1/default/banks/{bank}/documents/{id}   only when the schema advertises `metadata` in
@@ -48,6 +49,7 @@ ITEM_MAX = 300   # characters of one memory shown to an agent
 DETAIL_MAX = 200  # characters of a server's error detail kept in messages
 GATEWAY_DOWN = (502, 503, 504)  # a proxy saying the Hindsight behind it is down
 CAPS_TTL = 86400   # seconds a capability probe is trusted
+RECALL_CACHE_MAX = 6000  # serialized fact cache: drop whole trailing facts
 CAPS_MAX = 4096    # bytes of a capability cache file read at most
 DOCUMENT_NOT_FOUND = "Document not found"   # 0.8.6's detail on GET /documents/{id} of a missing
                                             # document
@@ -121,9 +123,22 @@ def bank_id(project: str) -> str:
     return bank or "swarm"
 
 
-def project_of(job_status, job: str) -> str:
-    """The job's project, or the job name when it has none."""
-    return (getattr(job_status, "project", None) or job) if job_status else job
+def project_of(job_status, job: str, cfg: dict | None = None) -> str:
+    """Explicit project, otherwise the configured general retention bank."""
+    return (getattr(job_status, "project", None)
+            or str(((cfg or {}).get("hindsight") or {}).get("default_bank") or "coding"))
+
+
+def recall_banks(cfg: dict, job_status=None, project: str | None = None) -> list[str]:
+    """Configured general banks plus an explicit project, without duplicates."""
+    configured = (cfg.get("hindsight") or {}).get("recall_banks", ["coding", "hermes"])
+    if isinstance(configured, str):
+        configured = [configured]
+    explicit = project or getattr(job_status, "project", None)
+    banks = [bank_id(str(b)) for b in configured if str(b).strip()]
+    if explicit:
+        banks.append(bank_id(explicit))
+    return list(dict.fromkeys(banks))
 
 
 def recall_query(job_status, job: str) -> str:
@@ -149,7 +164,7 @@ def format_memories(items: list[dict], project: str, cfg: dict, heading: str) ->
         shown.append(str(item["id"]))
     if not lines:
         return None, []
-    return f"[swarm memory] {heading} (project \"{project}\"):\n" + "\n".join(lines), shown
+    return f"[swarm memory] {heading} (banks \"{project}\"):\n" + "\n".join(lines), shown
 
 
 def metadata_patch_in(openapi: dict) -> bool:
@@ -362,22 +377,57 @@ class Client:
             self._call("PUT", self._bank_path(bank), {})
 
     def retain(self, bank: str, content: str, tags: list[str], metadata: dict[str, str],
-               context: str | None = None, document_id: str | None = None) -> None:
+               context: str | None = None, document_id: str | None = None,
+               create_bank: bool = False, synchronous: bool = False) -> None:
         """Store one memory. With `document_id`, sending it again replaces that document rather
         than adding a second copy (a retry after a reply that never came)."""
-        self.ensure_bank(bank)
+        if create_bank:
+            self.ensure_bank(bank)
+        elif not self.bank_exists(bank):
+            raise HindsightError(f"bank {bank!r} does not exist; choose an existing bank "
+                                 "or pass --create-bank explicitly", 404)
         item = {"content": content, "tags": tags, "metadata": metadata}
         if context:
             item["context"] = context
         if document_id:
             item["document_id"] = document_id
-        self._call("POST", self._bank_path(bank) + "/memories", {"items": [item], "async": True})
+        self._call("POST", self._bank_path(bank) + "/memories", {"items": [item], "async": not synchronous})
 
     def recall(self, bank: str, query: str) -> list[dict]:
         """[{"id", "text"}] most relevant first; [] if the bank doesn't exist yet."""
         body = {"query": query[:QUERY_MAX], "budget": "low", "max_tokens": self.max_tokens}
         reply = self._call("POST", self._bank_path(bank) + "/memories/recall", body, missing_ok=True)
         return [{"id": str(r["id"]), "text": r.get("text", "")} for r in (reply or {}).get("results", [])]
+
+    def list_banks(self) -> list[str]:
+        """Existing bank IDs, sorted; this read never creates a bank."""
+        reply = self._call("GET", "/v1/default/banks") or {}
+        entries = reply if isinstance(reply, list) else reply.get("banks", [])
+        return sorted({str(b.get("bank_id") or b.get("id")) if isinstance(b, dict) else str(b)
+                       for b in entries if not isinstance(b, dict) or b.get("bank_id") or b.get("id")})
+
+    def recall_many(self, banks: list[str], query: str, on_error=None) -> list[dict]:
+        """Recall banks independently, dedupe facts, and bound serialized cache size.
+        The client's deadline and global outage breaker apply to the whole call;
+        errors about a bank or request never hide results from other banks."""
+        items, seen_ids, seen_text = [], set(), set()
+        for bank in dict.fromkeys(banks):
+            try:
+                recalled = self.recall(bank, query)
+            except (HindsightError, HindsightUnavailable) as exc:
+                if on_error:
+                    on_error(bank, exc)
+                continue
+            for item in recalled:
+                text = " ".join(str(item.get("text") or "").split())
+                if not text or item["id"] in seen_ids or text in seen_text:
+                    continue
+                seen_ids.add(item["id"])
+                seen_text.add(text)
+                items.append(item)
+        while items and len(json.dumps(items)) > RECALL_CACHE_MAX:
+            items.pop()
+        return items
 
     def document(self, bank: str, document_id: str) -> dict | None:
         """The document (Hindsight's DocumentResponse), or None when Hindsight itself says it is
@@ -419,21 +469,23 @@ class Client:
 
 
 def remember(board, cfg: dict, job: str, name: str, text: str, project: str | None = None,
-             document_id: str | None = None, metadata: dict[str, str] | None = None) -> str:
-    """Store one fact in the job's project bank, tagged with job and agent; marks the agent as
+             document_id: str | None = None, metadata: dict[str, str] | None = None,
+             create_bank: bool = False, synchronous: bool = False) -> str:
+    """Store one fact in the explicit project or general bank, tagged with job and agent; marks the agent as
     having stored something. Returns the project. Raises HindsightUnavailable/HindsightError.
     `document_id`: stable across retries of the same fact (the spool passes its record's).
     `metadata`: provenance the caller knows (provenance.cli_metadata), merged under the four
     keys source, job, agent and project, which always win."""
-    project = project or project_of(board.job_status(job), job)
+    project = project or project_of(board.job_status(job), job, cfg)
     Client(cfg).retain(bank_id(project), text, tags=["swarm", f"job:{job}", f"agent:{name}"],
                        metadata={**(metadata or {}), "source": "swarm", "job": job, "agent": name,
                                  "project": project},
-                       context=f"swarm job {job}", document_id=document_id)
+                       context=f"swarm job {job}", document_id=document_id,
+                       create_bank=create_bank, synchronous=synchronous)
     board.record_remembered(name)
     return project
 
 
 __all__ = ["CAPS_TTL", "Client", "HindsightError", "HindsightUnavailable", "bank_id", "caps_path",
            "enabled", "format_memories", "metadata_patch_in", "metadata_patch_supported",
-           "project_of", "recall_query", "refresh_caps", "remember"]
+           "project_of", "recall_banks", "recall_query", "refresh_caps", "remember"]

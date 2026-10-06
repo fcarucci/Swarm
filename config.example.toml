@@ -144,6 +144,9 @@ min_justification_chars = 30        # minimum length of the [swarm spawn: ...] r
 # Optional project memory (https://github.com/vectorize-io/hindsight), off by default. Leave url empty (or drop
 # this section) to keep it off completely: no calls, no instructions, no imports.
 url = ""                            # e.g. "http://hindsight.example.internal:9100"
+default_bank = "coding"            # existing bank for jobs without an explicit --project
+recall_banks = ["coding", "hermes"] # general recall, plus any explicit project bank
+# Banks are never created implicitly; pass --create-bank only when a new bank is necessary.
 api_key_file = ""                   # optional file holding the API key; chmod 600, never printed
 timeout_seconds = 3                 # one short timeout per call; hooks never wait longer
 retry_after_seconds = 60            # after a failure, skip Hindsight this long (one timeout per outage)
