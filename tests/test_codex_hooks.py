@@ -175,24 +175,24 @@ class CodexHookTests(Env):
         with self.board() as b:
             self.assertEqual(b.job_status("fixture").judge, self.agent(self.child, job="fixture").name)
 
-    def test_codex_judge_may_spawn_fix_agents_only_after_not_met(self):
+    def test_codex_judge_never_spawns_fix_agents(self):
         self.rename_child("/root/judge")
         self.activate_fixture_job("fixture", "--goal", "the fixture is recorded")
         self.replay("SubagentStart", F.payloads("SubagentStart")[0])
         out = self.replay("PreToolUse", self.child_payloads("PreToolUse")[0])
         ctx = self.context(out)
-        self.assertIn("Only after you have recorded a not_met verdict may you spawn subagents", ctx)
+        self.assertIn("Judges only judge: never edit, fix, merge, push or spawn workers", ctx)
         self.assertIn("Spawning subagents: only when strictly needed", ctx)
         self.assertIn("not_met --reason", ctx)
         spawn = next(p for p in self.child_payloads("PreToolUse") if p.get("tool_name", "").endswith("spawn_agent"))
-        self.assertIn("only after it has recorded a not_met verdict", self.denied(self.replay("PreToolUse", spawn)))
+        self.assertIn("Judges only judge", self.denied(self.replay("PreToolUse", spawn)))
         judge = self.agent(self.child, job="fixture").name
         with self.board() as b:
             self.assertTrue(b.record_verdict("fixture", judge, "not_met", "why", "do this"))
-        self.assertIsNone(self.denied(self.replay("PreToolUse", spawn)))
+        self.assertIn("Judges only judge", self.denied(self.replay("PreToolUse", spawn)))
         # still never a judge
         as_judge = {**spawn, "tool_input": {**spawn["tool_input"], "task_name": "judge"}}
-        self.assertIn("can't be a judge", self.denied(self.replay("PreToolUse", as_judge)))
+        self.assertIn("Judges only judge", self.denied(self.replay("PreToolUse", as_judge)))
 
     # ---- gates
 

@@ -3831,7 +3831,7 @@ def _board_verdict(board, cfg: dict, args) -> int:
     if text is None:
         return 1
     try:
-        recorded = deliver_verdict(board, args.job, args.name, args.verdict, text[0], text[1], args.artifact)
+        recorded = deliver_verdict(board, args.job, args.name, args.verdict, text[0], text[1], getattr(args, "artifact", None))
     except ValueError as exc:   # a name the board refuses (board.base.valid_name)
         print(f"verdict not recorded: {term_safe(exc)}", file=sys.stderr)
         return 1
