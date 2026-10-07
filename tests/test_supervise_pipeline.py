@@ -117,7 +117,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIn('A reviewed report', run['stdin'])
         self.assertIn('Includes evidence', run['stdin'])
         self.assertNotIn('gh ', run['stdin'])
-        self.assertIn('do not fix, merge, push', run['stdin'])
+        self.assertIn('do not fix, integrate, push', run['stdin'])
         self.conclude()
         self.tick()
         self.assertEqual(len(self.launched), 2)
@@ -134,7 +134,7 @@ class PipelineTests(unittest.TestCase):
         ref = 'feat/report@' + 'a' * 40
         green = mock.Mock(return_value=False)
         self.recipe.return_value = dict(evidence_command='fake-ci-watch exact-head',
-                                        evidence_check=green, finalize='Merge exact artifact; push both remotes',
+                                        evidence_check=green, finalize='Rebase exact artifact; push configured remotes',
                                         finalizer_role='integrator')
         self.done(ref)
         self.tick()
@@ -147,7 +147,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(len(self.launched), 2)
         green.assert_called_with('/work/project')
         self.assertIn('[swarm role: integrator]', self.launched[-1]['stdin'])
-        self.assertIn('push both remotes', self.launched[-1]['stdin'])
+        self.assertIn('push configured remotes', self.launched[-1]['stdin'])
         self.finish_latest('INTEGRATED ' + ref)
         self.tick()
         self.assertEqual(len(self.launched), 2)
@@ -356,12 +356,12 @@ class PipelineTests(unittest.TestCase):
         self.b.set_job_data('J', 'pipeline.evidence_command', '')
         self.b.set_job_data('J', 'pipeline.finalize', '')
         self.recipe.return_value = dict(evidence_command='plugin-ci', evidence_check=lambda cwd: True,
-                                        finalize='plugin-merge')
+                                        finalize='plugin-integrate')
         self.done(); self.tick()
         self.assertNotIn('plugin-ci', self.launched[-1]['stdin'])
         self.conclude(); self.tick()
         self.assertIn('[swarm role: finalizer]', self.launched[-1]['stdin'])
-        self.assertNotIn('plugin-merge', self.launched[-1]['stdin'])
+        self.assertNotIn('plugin-integrate', self.launched[-1]['stdin'])
 
 
     def test_open_executor_without_first_hook_suppresses_new_artifact_judge(self):

@@ -7,7 +7,7 @@ description: Use when a software project needs a coordinated engineering lead, e
 
 Use `swarm:swarm` for the job and board. You, the invoking agent, are the project manager (PM): keep the original request and authorization visible, own scheduling and reports, and make host-level spawns. Custom Swarm roles identify responsibilities; they do not grant product, technical, review, or QA authority in code. The built-in `judge` and `verifier` have separate Swarm controls.
 
-Read [host procedures](references/hosts.md) before activating a job or spawning a role. They cover Claude and Codex syntax, the installed custom-role preflight, board reads, slot budgeting, and recovery. Read [role authority](references/team-roles.md) before assigning work, [artifact contracts](references/artifacts.md) before creating baselines or freezing a candidate, [merge gates and hand-offs](references/gates.md) before the first change is opened for review, and [authorization and recovery](references/recovery.md) before writing briefs and when an agent is lost. Use the project's existing document layout; a small change can use compact records that preserve the same decisions.
+Read [host procedures](references/hosts.md) before activating a job or spawning a role. They cover Claude and Codex syntax, the installed custom-role preflight, board reads, slot budgeting, and recovery. Read [role authority](references/team-roles.md) before assigning work, [artifact contracts](references/artifacts.md) before creating baselines or freezing a candidate, [integration gates and hand-offs](references/gates.md) before the first change is opened for review, and [authorization and recovery](references/recovery.md) before writing briefs and when an agent is lost. Use the project's existing document layout; a small change can use compact records that preserve the same decisions.
 
 ## Run the team
 
@@ -27,31 +27,47 @@ pushing. The owner supervisor starts independent artifact-bound review and bound
 Judges must record `swarm verdict --job J --as NAME --artifact branch@sha met --reason "evidence"`
 (or `not_met --reason "missing" --next "fix brief"`). **Always pass `--artifact` for the exact
 hand-off inspected.** A leading `branch@sha:` in the reason is accepted for compatibility.
-Judges only judge; merges, pushes and fixes belong to executors. A newer SHA on the same
+Judges only judge; integration, pushes and fixes belong to executors. A newer SHA on the same
 branch supersedes its earlier hand-off; separate branches keep independent verdicts.
-With a met verdict and green exact-SHA GitHub evidence, a separate INTEGRATOR ordinarily
-merges into the target, validates the merge result, pushes all remotes/push URLs, deletes the
-source branch, and posts `INTEGRATED branch@sha`. Non-trivial conflicts hand back to a worker
-through `FINALIZE_BLOCKED`. Configure `[pipeline] integrate`, `merge_target`, `delete_branch`,
-`evidence_command`, and `repository` in `team.toml`, with optional per-repository overrides.
+A separate INTEGRATOR rebases the branch onto the latest target locally with `git rebase`,
+then uses fast-forward/push of the rebased branch. Open a Merge Request / Pull Request where
+supported as the review and CI vehicle; without a forge/request, push the rebased branch directly.
+A changed SHA needs a new hand-off and judge verdict. Require a met verdict and the project's
+CI green on the exact rebased SHA before advancing the target. Push all remotes/push URLs,
+delete the source branch after successful integration, and post `INTEGRATED branch@sha`.
+Non-trivial conflicts hand back to a worker through `FINALIZE_BLOCKED`. Configure `[pipeline]
+integrate`, `target_branch`, `delete_branch` and a separate `[forge]` adapter in `team.toml`,
+with optional per-repository overrides. Select the forge explicitly; commands belong to its adapter.
 See [review pipeline](../../docs/REFERENCE.md#review-pipeline) and `team.example.toml`.
 
 - Address by role: `swarm post --to @EL|@PM|@product|@QA|@judge|@build_engineer`, `@PM` means the invoking project manager and `@product` the optional product manager; never by display name; an unknown role or one with no holder is rejected. Send trivial messages straight to the peer, not through EL.
 - Long text goes in a file; the post is a one-line pointer (posts are 200 characters).
 - When the team is only waiting on CI, reviews, or a user, run `swarm wait --job J --on "<what>" --for <duration>` (or `--until <time>`) so the job reads as waiting, not orphaned; the end time is what protects it, so renew it before it passes and `swarm resume --job J` when work resumes.
-- Verdicts are bound to a head sha and posted on the change record, not only the board; merge on the current head's verdict, green CI, and no later changes-required ([gates](references/gates.md)).
+- Verdicts are bound to a head sha and posted on the change record, not only the board; integrate on the current head's verdict, green CI, and no later changes-required ([gates](references/gates.md)).
 - Briefs state what is authorized and what is not; secrets are referenced by path only ([recovery](references/recovery.md)).
 - Final reports and `DONE:` lines follow the hand-off contract in [gates](references/gates.md).
 
 Don't:
 
-- use PM polling as the primary trigger for review or merge; react to change events and keep polling only as a safety net;
-- pin a merge watcher per change by hand; run one loop keyed on the head sha;
+- use PM polling as the primary trigger for review or integration; react to change events and keep polling only as a safety net;
+- pin an integration watcher per change by hand; run one loop keyed on the head sha;
 - keep verdicts only on the board;
 - run the full gate on every fix round;
 - address agents by random display names;
 - create a one-agent job plus a judge as ceremony (small work: do it yourself);
-- merge by hand or bypass review as PM;
+- integrate by hand or bypass review as PM;
 - relay "review posted" without the head sha.
 
 Do not call a host validated because these instructions exist or checkout unit tests pass. A host needs the installed custom-role capability and an independent behavioral run. If research tools, an independent reviewer, a safe writer handoff, or a required host capability are unavailable, record the specific blocker and continue independent work that remains possible.
+
+
+## Forge adapters
+
+`[forge] kind = "github"|"gitea"|"gitlab"|"none"` selects the adapter explicitly; the default
+is `none`. Set `evidence_command` to the project's CI checker with `{sha}`; zero exit status
+must mean all required checks passed on that exact rebased SHA, never a latest-branch run.
+GitHub has a built-in `gh run list --commit SHA` checker and uses `gh pr create/view` for PRs.
+Gitea uses `tea`/API for MRs/PRs and configured CI checks; GitLab uses `glab`/API for MRs and
+configured CI checks. `none` uses a configured project CI command and direct pushes.
+An absent CI checker holds integration. Request completion must preserve the approved rebased
+SHA and linear history. Commands and authentication belong to the adapter, never generic core.

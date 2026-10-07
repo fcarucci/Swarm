@@ -6,7 +6,7 @@
 #
 # optional_roles lists the optional seats that are on by default:
 #   product_manager  owns the user-facing requirements and the acceptance
-#   build_engineer   owns build, CI and gating, merge-result gating, scoped fix rounds, build-slot use
+#   build_engineer   owns build, CI and gating, rebased-result gating, scoped fix rounds, build-slot use
 #   reviewer, verifier  the existing optional peer-review and checking roles
 # Without product_manager, engineering_lead writes the change criteria and engineering_lead + qa
 # record the product acceptance. Without build_engineer, engineering_lead owns its duties.
@@ -18,14 +18,26 @@ optional_roles = ["product_manager"]
 # The coding recipe matches DONE branch@<full SHA>. Other artifacts use the generic pipeline.
 [pipeline]
 integrate = true
-merge_target = "main"
+target_branch = "main" # legacy merge_target is accepted as an alias
 delete_branch = true
-# Empty: gh run list checks all runs on the exact SHA; no runs/pending/red holds integration.
-# A custom judge/finalizer command can use shell-quoted {artifact}, {branch}, {sha} placeholders.
+
+# Forge adapters: explicit choice, never inferred from a mirror/push URL.
+[forge]
+kind = "none" # github | gitea | gitlab | none
+repository = "" # optional adapter-specific repository identifier
+# Required for gitea/gitlab/none. Exit zero only for green project CI on this exact SHA.
+# Supports shell-quoted {artifact}, {branch}, {sha}; {sha} is mandatory.
+# Missing CI configuration holds integration. github alone has a built-in checker.
 evidence_command = ""
-repository = "" # optional OWNER/REPO for gh; otherwise inferred from the work directory
+# GitHub adapter: gh run list --commit SHA; gh pr create/view for PRs.
+# Gitea adapter: tea/API for MRs/PRs and an exact-SHA CI command.
+# GitLab adapter: glab/API for MRs and an exact-SHA CI command.
+# none: configured project CI and direct push of the locally rebased branch.
 
 # Optional overrides keyed by the owner's recorded absolute repository directory:
 # [repositories."/home/me/src/my-repo"]
-# merge_target = "main"
+# target_branch = "main"
+# [repositories."/home/me/src/my-repo".forge]
+# kind = "gitea"
 # repository = "me/my-repo"
+# evidence_command = "project-ci --commit {sha}"

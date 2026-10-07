@@ -275,7 +275,7 @@ user asks for one. Don't run duplicate jobs: merge similar ones (`swarm job merg
      --reason "evidence"` or `not_met --reason "missing" --next "fix brief"`.
      **Always include `--artifact REF` for the exact hand-off inspected.** For compatibility,
      a reason beginning `branch@sha:` supplies the artifact when the flag is omitted.
-     They never fix, merge, push, or spawn fix workers. Their Stop hook blocks an exit
+     They never fix, integrate, push, or spawn fix workers. Their Stop hook blocks an exit
      without an artifact-bound verdict. Pending external evidence means wait using the
      configured command or record `not_met` with actionable next steps.
    - **After a verdict:** the supervisor starts a fix worker for `not_met`, carrying `--next`,
@@ -342,7 +342,7 @@ user asks for one. Don't run duplicate jobs: merge similar ones (`swarm job merg
    agent joins it, or with `swarm resume --job <job>`. An open job with no agent at work and
    no reason shows as `idle`: either give it a reason or close it. When there is no next step,
    close it (below). The same goes for you or an agent that ends the turn to wait for
-   background work (a monitor, a long remote run, a merge lock): your own tool calls keep the
+   background work (a monitor, a long remote run, an integration lock): your own tool calls keep the
    job open, but waiting between turns does not.
 5. **When the job is done:**
    **Required learnings step:** distill durable findings into self-contained facts with enough
@@ -775,11 +775,14 @@ sets per-job instructions. `[pipeline] evidence_wait_command` and `finalize` sup
 no evidence command is required for a report or investigation. `finalize_enabled = false`
 holds finalization while keeping judge/fix transitions on.
 
-The engineering-team plugin recognizes `branch@<full SHA>` and supplies exact-SHA GitHub CI
-and an INTEGRATOR recipe. Configure `[pipeline] integrate`, `merge_target`, `delete_branch`,
-`evidence_command`, and `repository` in `team.toml`; see `team.example.toml`.
-Generic core never interprets branches or CI. See [review pipeline](../../docs/REFERENCE.md#review-pipeline)
-for protocols and limits.
+The engineering-team plugin recognizes `branch@<full SHA>` and supplies the project's CI
+on the exact rebased SHA and an INTEGRATOR recipe: rebase locally, then fast-forward/push
+the rebased branch; open a Merge Request / Pull Request where supported as the review and
+CI vehicle, or push directly when no forge/request exists. A changed SHA requires a fresh
+hand-off, judge verdict and CI. Configure `[pipeline] integrate`, `target_branch`, `delete_branch`
+and a separate `[forge]` adapter in `team.toml`; see `team.example.toml`.
+Generic core never interprets branches, CI or forges. See [review pipeline](../../docs/REFERENCE.md#review-pipeline)
+for protocols, forge adapters and limits.
 
 
 - Stuck agents (dead, one tool call too long, silent 90 min) are closed and restarted headless

@@ -532,7 +532,7 @@ def _judge_instructions(name: str, job: str, goal: str, cfg: dict, cap: int | No
         f"instructions become the brief the fix agents are spawned with, so make them complete on "
         f"their own. It is broadcast and shown by `swarm status --job`; judge again once the "
         f"workers have fixed it. The job can't be completed until your verdict is met.",
-        "- Judges only judge: never edit, fix, merge, push or spawn workers. The supervisor "
+        "- Judges only judge: never edit, fix, integrate, push or spawn workers. The supervisor "
         "starts fix workers from your --next brief, and a separate executor finalizes accepted work.",
         "- You must record a verdict before stopping. Bind it with --artifact REF to the exact "
         "hand-off you inspected; acceptance of one artifact never covers another. If external "

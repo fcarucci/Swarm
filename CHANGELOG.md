@@ -6,6 +6,9 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 ## [Unreleased]
 
+### Changed
+- Review pipeline integration is forge-agnostic: rebase locally, MR/PR where supported; GitHub is a forge adapter, not assumed.
+
 ### Fixed
 - Review and completion ignore pre-pipeline hand-offs, superseded branch revisions and malformed DONE posts; merged or deleted branches count as integrated without launching judges.
 - Verdicts infer an omitted artifact from a leading `branch@sha:` reason; judge instructions prominently show `--artifact`.

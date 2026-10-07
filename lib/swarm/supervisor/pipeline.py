@@ -205,7 +205,7 @@ def prompt_for(action, recipe):
              f"Hand-off #{h.id} from {_clean(h.agent_name)}: {_clean(h.summary, 8000)}"]
     previous = action.verdict or {}
     if action.role == "judge":
-        lines.extend(["You are the independent judge. Inspect only; do not fix, merge, push, or finalize.",
+        lines.extend(["You are the independent judge. Inspect only; do not fix, integrate, push, or finalize.",
                       f"You MUST conclude with swarm verdict --job {shlex.quote(js.job)} --as YOUR_JOINED_NAME "
                       f"met|not_met --artifact {ref_arg} "
                       "--reason REASON (not_met also requires --next NEXT). Do not stop without recording it."])

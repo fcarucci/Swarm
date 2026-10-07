@@ -1477,7 +1477,7 @@ runtime budgets and concurrency caps are shared with ordinary replacements.
    `not_met --reason TEXT --next TEXT`. **Include `--artifact REF` on every hand-off verdict.**
    When omitted, a leading `branch@sha:` in the reason supplies the artifact before the
    assigned/latest hand-off fallback; the explicit flag takes precedence. Judges only judge: tool restrictions block writes,
-   merges, pushes and fix-agent spawns. The judge Stop hook refuses an exit without a verdict
+   integration, pushes and fix-agent spawns. The judge Stop hook refuses an exit without a verdict
    for the assigned hand-off. Evidence checks run under the agent's ordinary permissions:
    wait with the configured command or conclude `not_met` with reason `evidence pending/red`
    and actionable next steps. No pending evidence is required for a plain report.
@@ -1510,39 +1510,64 @@ Without custom instructions, the finalizer records outcome/learnings and closes 
 ### Engineering-team coding recipe
 
 The engineering-team plugin registers a recipe for `branch@<40-character SHA>` artifacts.
-The recipe treats an artifact as integrated when its SHA is an ancestor of `origin/<merge_target>`
+The recipe treats an artifact as integrated when its SHA is an ancestor of `origin/<target_branch>`
 in the owner checkout, or a successful `git ls-remote` confirms its branch is absent from origin.
 Lookup failures keep it pending. These facts apply to both completion gates and automatic
 launches, including abbreviated SHAs; integrated artifacts require no judge or finalizer.
-Core has no CI or git logic. The recipe checks GitHub Actions with `gh run list --commit SHA`:
-at least one run must exist, and every returned run must have the exact SHA, completed status,
-and success conclusion. Missing, queued, running, red or mismatched evidence holds integrator
-launch. The independent judge also receives the exact-SHA evidence command; the integrator
-rechecks it before execution.
+Core has no CI, git or forge logic. The recipe requires the project's CI on the exact rebased
+SHA, checked by the configured forge adapter. Missing, pending, red or mismatched evidence
+holds integrator launch. The independent judge receives the exact-SHA evidence command;
+the integrator rechecks it before execution.
 
-The INTEGRATOR verifies that every remote source ref still names the judged SHA, then
-fast-forwards or ordinarily merges that exact SHA into the latest target, validates the merge
-result, pushes every configured remote and push URL, deletes the source branch after successful
-pushes, and posts `INTEGRATED REF`. It never rebases, squashes, or force-pushes. A moved source
-ref needs a new hand-off and verdict. Non-trivial conflicts use `FINALIZE_BLOCKED` for a worker
-fix round. The executing agent performs this recipe under its ordinary permissions.
+The INTEGRATOR verifies every remote source ref still names the judged SHA, fetches every
+remote and rebases the branch onto the latest target locally with `git rebase`. Integration
+uses fast-forward/push of the rebased branch. Open a Merge Request / Pull Request where the
+forge supports it as the review and CI vehicle; without a forge/request, push the rebased
+branch directly. If rebasing changes the SHA, publish a fresh branch without rewriting
+published history, open/reuse the request where supported, post a new hand-off and stop the
+old finalization. Require a fresh judge verdict and the project's CI on that exact rebased
+SHA before advancing the target. If the target moves, repeat rebase, review and CI.
+Push every configured remote and push URL, delete the source branch after successful target
+pushes and post `INTEGRATED REF`. Never create merge commits, squash or force-push.
+A moved source ref also needs a new hand-off and verdict. Non-trivial conflicts use
+`FINALIZE_BLOCKED` for a worker fix round. The executor uses its ordinary permissions.
 
 Coding settings live in `team.toml` (`$SWARM_TEAM_CONFIG`, otherwise beside swarm's config),
-under `[pipeline]`: `integrate = true`, `merge_target = "main"`, `delete_branch = true`,
-`repository = ""` (gh infers the repo), `evidence_command = ""` (built-in exact-SHA check).
-A custom command can use `{artifact}`, `{branch}`, `{sha}`, substituted as shell-quoted values.
-The launch gate still independently checks GitHub's exact SHA. `[repositories."/absolute/repo"]`
-overrides team defaults for the owner's recorded repository directory. `integrate = false`
-holds coding finalization. Disabling the plugin leaves the generic pipeline available.
+under `[pipeline]`: `integrate = true`, `target_branch = "main"`, `delete_branch = true`.
+`merge_target` remains a compatibility alias for `target_branch`; the explicit new key wins.
+`[repositories."/absolute/repo"]` overrides defaults for the owner's recorded directory;
+its nested `.forge` table overrides the forge adapter. `integrate = false` holds coding
+finalization. Disabling the plugin leaves the generic pipeline available.
 
-The coding adapter requires `gh` with repository read access. It recognizes GitHub push URLs
-even when the fetch remote is Gitea; set `repository` explicitly when several GitHub repos are
-configured. Evidence commands execute under agent permissions, never in the privileged Stop hook.
+### Forge adapters
 
-Known limits: the coding adapter checks the first 100 workflow runs returned for a SHA and
-requires them all to succeed; it does not implement repository-specific required-check rules.
-Finalizer instructions execute through an agent, so launch authority and permissions still
-apply. Report/file refs should identify an immutable revision when contents can change.
+Forge-specific commands belong only to the engineering-team adapter/configuration.
+`[forge] kind = "github"|"gitea"|"gitlab"|"none"` selects one explicitly (default `none`).
+`repository = ""` is an optional adapter-specific identifier. `evidence_command = ""` selects
+the adapter's built-in checker if available; otherwise integration holds until configured.
+A custom command uses shell-quoted `{artifact}`, `{branch}`, `{sha}` placeholders and must
+include `{sha}`. It runs for the independent launch gate as well as the judge/finalizer;
+exit zero must mean all required project CI checks passed on that exact SHA. It must reject
+absent, queued, running, red or mismatched evidence. Legacy `[pipeline] evidence_command` and
+`repository` settings are accepted as defaults for `[forge]`.
+
+- **GitHub** (`github`): built-in `gh run list --commit SHA`; at least one run must exist,
+  and all returned runs must have that SHA, completed status and success conclusion.
+  `gh pr create/view` opens/reuses a PR. Repository lookup recognizes GitHub push URLs even
+  when the fetch remote is another forge; set `repository` explicitly for multiple repositories.
+- **Gitea** (`gitea`): `tea pr create` or the API opens/reuses an MR/PR; configure a project
+  CI command using `tea`/API that checks the exact SHA.
+- **GitLab** (`gitlab`): `glab mr create` or the API opens/reuses an MR; configure a project
+  CI command using `glab`/API that checks the exact SHA.
+- **No forge** (`none`): configure a project CI command and push the locally rebased branch
+  directly. There is no MR/PR step.
+
+Request completion must preserve the approved rebased SHA and linear history. Evidence
+commands execute under ordinary permissions, never in the privileged Stop hook.
+Known limits: the GitHub adapter checks the first 100 runs and requires all to succeed;
+it does not implement repository-specific required-check rules. Other adapters require
+project-specific CI commands. Finalizer instructions execute through an agent, so launch
+authority and permissions still apply. Report/file refs should name immutable revisions.
 
 ## Roles
 
