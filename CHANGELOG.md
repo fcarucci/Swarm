@@ -6,15 +6,7 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 ## [Unreleased]
 
-### Changed
-- Review pipeline integration is forge-agnostic: rebase locally, MR/PR where supported; GitHub is a forge adapter, not assumed.
-
-### Fixed
-- Review and completion ignore pre-pipeline hand-offs, superseded branch revisions and malformed DONE posts; merged or deleted branches count as integrated without launching judges.
-- Verdicts infer an omitted artifact from a leading `branch@sha:` reason; judge instructions prominently show `--artifact`.
-- `swarm who` shows waiting jobs whose goal is not met; the orphan-rule comment excludes waiting and paused jobs.
-
-## [0.2.0] - 2026-10-06
+## [0.2.0] - 2026-10-07
 
 ### Added
 - The `engineering-team` skill and plugin: a product manager, engineering lead, engineers, QA and judge on one job, with optional build engineer, reviewer and verifier. `swarm team --job J [--show|--add ROLE|--remove ROLE]` and `swarm activate --team ...` set the team; defaults come from `team.toml`.
@@ -36,11 +28,15 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 - File plugins with unsafe ownership, world or foreign-group write access, or symlinks are refused and listed; `swarm plugins` reports discovery failures.
 - Postgres setup rebuilds missing board metadata without losing messages; old message-width upgrades keep dependent status views.
 - The test suite works as the `codex` user and with `NO_COLOR` set, and no longer depends on machine speed.
+- Review and completion ignore pre-pipeline hand-offs, superseded branch revisions and malformed DONE posts; merged or deleted branches count as integrated without launching judges.
+- Verdicts infer an omitted artifact from a leading `branch@sha:` reason; judge instructions prominently show `--artifact`.
+- `swarm who` shows waiting jobs whose goal is not met; the orphan-rule comment excludes waiting and paused jobs.
 
 ### Changed
 - Session watches show only open jobs (or the last finished one), coalesce notification bursts and redraw from cached snapshots.
 - `wait` and `resume` use blockers; upgrades keep existing waits and plugin data. `status` and `watch` list open blockers.
 - Schemas 16-19 (applied automatically on first use): per-job plugin data, per-job PostgreSQL message counts, blockers and event history, and faster multi-job status totals.
+- Review pipeline integration is forge-agnostic: rebase locally, MR/PR where supported; GitHub is a forge adapter, not assumed.
 
 ## [0.1.17] - 2026-10-05
 
