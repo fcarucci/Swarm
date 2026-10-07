@@ -181,7 +181,7 @@ class CodexHookTests(Env):
         self.replay("SubagentStart", F.payloads("SubagentStart")[0])
         out = self.replay("PreToolUse", self.child_payloads("PreToolUse")[0])
         ctx = self.context(out)
-        self.assertIn("Judges only judge: never edit, fix, merge, push or spawn workers", ctx)
+        self.assertIn("Judges only judge: never edit, fix, integrate, push or spawn workers", ctx)
         self.assertIn("Spawning subagents: only when strictly needed", ctx)
         self.assertIn("not_met --reason", ctx)
         spawn = next(p for p in self.child_payloads("PreToolUse") if p.get("tool_name", "").endswith("spawn_agent"))

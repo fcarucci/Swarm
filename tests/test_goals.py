@@ -101,7 +101,7 @@ class JudgeHookTests(GoalEnv):
         self.assertIn(f"verdict --job 'J' --as '{name}' --artifact REF not_met --reason \"<why it is not met>\" "
                       f"--next \"<what to change, where, and what you will re-check>\"", ctx)
         self.assertIn("REFUSED without both --reason", ctx)
-        self.assertIn("Judges only judge: never edit, fix, merge, push or spawn workers", ctx)
+        self.assertIn("Judges only judge: never edit, fix, integrate, push or spawn workers", ctx)
         self.assertIn("Spawning subagents: only when strictly needed", ctx)
         self.assertIn("--to", ctx)
         self.assertEqual(self.job().judge, name)
