@@ -97,8 +97,9 @@ def register(api):
 It adds `swarm team`, `swarm activate --team` and a `team` line in `swarm status --job J`, and reads
 `team.toml` (`$SWARM_TEAM_CONFIG`, else next to the swarm config; see `team.example.toml`). It is
 the reference use of this API: `skills/engineering-team/swarm_plugin.py`. It also registers the
-coding pipeline recipe for `branch@sha`: exact-SHA GitHub evidence and an INTEGRATOR executor.
-Configure it under `[pipeline]` in `team.toml`; see [review pipeline](REFERENCE.md#review-pipeline).
+coding pipeline recipe for `branch@sha`: the project's CI on the exact rebased SHA via the configured
+`[forge]` adapter, and an INTEGRATOR executor (rebase locally, MR/PR where supported).
+Configure it under `[pipeline]` and `[forge]` in `team.toml`; see [review pipeline](REFERENCE.md#review-pipeline).
 
 ### Blocker protection rules
 
