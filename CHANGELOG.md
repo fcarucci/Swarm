@@ -6,10 +6,24 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-10-08
+## [0.2.1] - 2026-10-08
 
 ### Added
 - Stale waiting jobs: a job waiting for any reason (a goal's verdict included) with no live agent and no activity for `[job] stale_waiting_minutes` (120) gets one board notice, and at `[job] stale_waiting_close_minutes` (240) is auto-closed (`completed` with a met verdict, else `failed`).
+
+### Fixed
+- The board view no longer misleads. `who`, `status` and `watch` show an agent that posted DONE/VERIFIED/FAILED, recorded a met verdict, or went quiet before the goal was met as `finished` (not `dead` or `idle`); `dead` is kept for agents silent while they still owed work. An idle agent shows `waiting` (and on what) when the job has a wait or blocker or its last post says it waits. A CLI member joined as `orchestrator` (the role defaults from a key named `orchestrator...`) shows as `standby`/`away` and is not counted as a worker. `status --job` and `watch` add an `agents` line (N working, N waiting, N finished, N lost), the job list a WORKERS column.
+- One agent, one row: when a hook-registered Claude subagent runs `swarm join --key X`, its hook rewrites the call to use the agent's own key, so it no longer appears twice (an idle ghost beside the running agent).
+- `swarm deactivate` no longer asks for learnings again after `swarm learn --job J` recorded them. A pipeline job whose accepted artifacts await finalization still refuses until FINALIZED/INTEGRATED is posted; the refusal says so. A stale waiting job with a met verdict but unfinalized accepted work closes `failed`.
+- A new judge takes the judge seat itself when the previous judge has completed or died (a fix round after `not_met`), through the hook, `join --judge` and the pipeline, so it records `swarm verdict` under its own name; a live judge is never displaced and `--as` another agent is still refused.
+- `swarm verdict` no longer asks for `swarm learn`; the learnings reminder comes when the job closes (`deactivate`).
+
+### Changed
+- The skill text says a judge run outside the board must record `swarm verdict`, and that the job is closed as soon as the goal is met.
+
+## [0.2.0] - 2026-10-07
+
+### Added
 - The `engineering-team` skill and plugin: a product manager, engineering lead, engineers, QA and judge on one job, with optional build engineer, reviewer and verifier. `swarm team --job J [--show|--add ROLE|--remove ROLE]` and `swarm activate --team ...` set the team; defaults come from `team.toml`.
 - The `ask-answer` plugin: structured questions to the human, a role or an agent, with answers, comments and corrections, a questions pane in `watch`, and pending human questions in the orchestrator's context. Optional `[notify] on_question` command.
 - Automatic review pipeline: a worker's hand-off starts a judge, `not_met` starts a bounded fix round, `met` starts a finalizer, with no orchestrator session needed.
@@ -21,11 +35,6 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 - CLI plugins: `swarm plugins` lists discovered command plugins and load errors; a broken plugin never breaks a core command; `[plugins] disabled` skips plugins. See `docs/PLUGINS.md`.
 
 ### Fixed
-- The board view no longer misleads. `who`, `status` and `watch` show an agent that posted DONE/VERIFIED/FAILED, recorded a met verdict, or went quiet before the goal was met as `finished` (not `dead` or `idle`); `dead` is kept for agents silent while they still owed work. An idle agent shows `waiting` (and on what) when the job has a wait or blocker or its last post says it waits. A CLI member joined as `orchestrator` (the role defaults from a key named `orchestrator...`) shows as `standby`/`away` and is not counted as a worker. `status --job` and `watch` add an `agents` line (N working, N waiting, N finished, N lost), the job list a WORKERS column.
-- One agent, one row: when a hook-registered Claude subagent runs `swarm join --key X`, its hook rewrites the call to use the agent's own key, so it no longer appears twice (an idle ghost beside the running agent).
-- `swarm deactivate` no longer asks for learnings again after `swarm learn --job J` recorded them. A pipeline job whose accepted artifacts await finalization still refuses until FINALIZED/INTEGRATED is posted; the refusal says so. A stale waiting job with a met verdict but unfinalized accepted work closes `failed`.
-- A new judge takes the judge seat itself when the previous judge has completed or died (a fix round after `not_met`), through the hook, `join --judge` and the pipeline, so it records `swarm verdict` under its own name; a live judge is never displaced and `--as` another agent is still refused.
-- `swarm verdict` no longer asks for `swarm learn`; the learnings reminder comes when the job closes (`deactivate`).
 - Waiting and paused jobs show as waiting/paused in `watch` and `status`, not active.
 - Codex agents stay active between turns and complete only when the session ends.
 - Orchestrator reminders stay silent while agents work and repeat only after the orphan interval.
@@ -39,7 +48,6 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 - `swarm who` shows waiting jobs whose goal is not met; the orphan-rule comment excludes waiting and paused jobs.
 
 ### Changed
-- The skill text says a judge run outside the board must record `swarm verdict`, and that the job is closed as soon as the goal is met.
 - Session watches show only open jobs (or the last finished one), coalesce notification bursts and redraw from cached snapshots.
 - `wait` and `resume` use blockers; upgrades keep existing waits and plugin data. `status` and `watch` list open blockers.
 - Schemas 16-19 (applied automatically on first use): per-job plugin data, per-job PostgreSQL message counts, blockers and event history, and faster multi-job status totals.
