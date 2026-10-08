@@ -185,3 +185,36 @@ class RoleHintTests(unittest.TestCase):
         self.assertEqual(models.role_of("x", True, "verifier"), "verifier")
         self.assertEqual(models.role_of("x", False, "custom_role"), "custom_role")
         self.assertEqual(models.role_of("x", False, "invalid role"), "worker")
+
+
+class TeamTomlModelPolicyTests(unittest.TestCase):
+    TEAM = ('[models.claude]\nwatcher = "haiku"\nengineer = "sonnet"\njudge = "opus"\n'
+            '[models.codex]\nengineer = "gpt-team"\n')
+
+    def load(self, config_text, team_text=None):
+        import tempfile
+        from pathlib import Path
+        from swarm import cli
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "config.toml").write_text(config_text)
+            env = {"SWARM_TEAM_CONFIG": ""}
+            if team_text is not None:
+                (Path(d) / "team.toml").write_text(team_text)
+            with mock.patch.dict(os.environ, env):
+                return cli.load_config(Path(d) / "config.toml")
+
+    def test_team_toml_supplies_role_models(self):
+        cfg = self.load("", self.TEAM)
+        self.assertEqual(models.model_for(cfg, "claude", "watcher"), "haiku")
+        self.assertEqual(models.model_for(cfg, "codex", "engineer"), "gpt-team")
+        self.assertEqual(models.choose(cfg, "claude", "judge", None), "opus")
+
+    def test_config_toml_wins_and_missing_role_has_no_model(self):
+        cfg = self.load('[models.claude]\nengineer = "opus"\n', self.TEAM)
+        self.assertEqual(models.model_for(cfg, "claude", "engineer"), "opus")
+        self.assertEqual(models.model_for(cfg, "claude", "judge"), "opus")
+        self.assertIsNone(models.model_for(cfg, "claude", "qa"))   # session default
+
+    def test_no_team_file_or_broken_file_changes_nothing(self):
+        self.assertIsNone(self.load("", None)["models"].get("claude"))
+        self.assertIsNone(self.load("", "[models\n")["models"].get("claude"))

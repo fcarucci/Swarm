@@ -174,6 +174,23 @@ def implicit_legacy_database_keys(user: dict) -> list[str]:
     return [k for k in LEGACY_DATABASE_DEFAULTS if k not in db]
 
 
+def merge_team_models(cfg: dict, config_path: Path) -> None:
+    """team.toml's [models.<host>] role -> model tables fill the roles config.toml leaves out
+    (config.toml wins). Only those tables are read; a missing or broken file is ignored."""
+    team = Path(os.environ.get("SWARM_TEAM_CONFIG") or config_path.parent / "team.toml").expanduser()
+    try:
+        with open(team, "rb") as fh:
+            tables = tomllib.load(fh).get("models")
+    except (OSError, tomllib.TOMLDecodeError):
+        return
+    for host, roles in (tables.items() if isinstance(tables, dict) else ()):
+        if isinstance(roles, dict):
+            mine = cfg["models"].setdefault(host, {})
+            for role, model in roles.items():
+                if isinstance(model, str) and model:
+                    mine.setdefault(role, model)
+
+
 def load_config(path: Path = DEFAULT_CONFIG) -> dict:
     cfg = json.loads(json.dumps(DEFAULTS))
     if path.exists():
@@ -190,6 +207,7 @@ def load_config(path: Path = DEFAULT_CONFIG) -> dict:
             # default, so it stays on it (`swarm doctor` says to set it explicitly)
             cfg["board"]["backend"] = "postgres"
             cfg["board"]["backend_implied"] = True
+    merge_team_models(cfg, path)
     spool = cfg.get("board", {}).get("spool_dir")
     if isinstance(spool, str) and "{uid}" in spool:   # a per-user /tmp spool
         cfg["board"]["spool_dir"] = spool.replace("{uid}", str(compat.uid()))

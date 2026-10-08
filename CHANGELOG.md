@@ -17,6 +17,9 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 - `swarm upgrade --force` reinstalls the plugin from the tip of main (or the current release) even when the version is unchanged, and reports the installed commit before and after; without it, a main-channel install that is behind the tip at the same version says so instead of "up to date".
 
+### Added
+- Model policy per role in `team.toml`: `[models.claude]` / `[models.codex]` map `watcher`, `reviewer`, `engineer`, `qa`, `judge`, `engineering_lead`, `product_manager` to a model, and spawns pick it from config (config.toml's `[models]` wins; a role left out gets the session default).
+
 ## [0.2.1] - 2026-10-08
 
 ### Added
