@@ -821,6 +821,7 @@ def _install_schema(conn: psycopg.Connection, b: dict) -> None:
     with conn.transaction():
         conn.execute(sql_schema(True))
         migrate_sql(conn, True)
+        conn.execute(events_schema(True))
         conn.execute("""
     CREATE OR REPLACE FUNCTION swarm_keep_blocked_jobs() RETURNS trigger LANGUAGE plpgsql AS $$
     BEGIN
@@ -891,10 +892,12 @@ def _agent_match(agent_key: str | None, name: str | None) -> tuple[str, tuple]:
 
 
 from .blockers import SqlBlockers, sql_schema, migrate_sql, rollup, protects
+from .events import SqlEvents, sql_schema as events_schema
 
 
-class PostgresBoard(SqlBlockers, Board):
+class PostgresBoard(SqlBlockers, SqlEvents, Board):
     _blocker_pg = True
+    _event_pg = True
     """A Board over one autocommit psycopg connection. Every statement commits on its own,
     which is what the pre-refactor code relied on (a failed INSERT in allocate_name's race
     loop does not poison the connection)."""
@@ -1024,6 +1027,8 @@ class PostgresBoard(SqlBlockers, Board):
                      (days,))
         conn.execute("DELETE FROM agent_routes WHERE created_at < now() - make_interval(days => %s)", (days,))
         conn.execute("DELETE FROM restarts WHERE at < now() - make_interval(days => %s)", (days,))
+        conn.execute("DELETE FROM events WHERE created_at < now() - make_interval(days => %s) "
+                     "AND (acked_at IS NOT NULL OR job NOT IN (SELECT job FROM jobs))", (days,))
 
     # ---- jobs --------------------------------------------------------------------
 
@@ -1870,6 +1875,32 @@ class PostgresBoard(SqlBlockers, Board):
             ORDER BY COALESCE(activated_at, created_at), job
         """, (session, session, session))
         return self._pipeline_job_statuses(rows)
+
+    # ---- external events ---------------------------------------------------------------
+
+    @contextlib.contextmanager
+    def _event_tx(self, write: bool = True):
+        with self._conn.transaction():
+            yield self._conn
+
+    def _events_listen(self) -> None:
+        """LISTEN swarm_events before wait_event's first look, so a post between the look and the
+        sleep is not missed. A standby (or a pooler) refuses LISTEN: then wait_event polls."""
+        self._listening_events = False
+        if self.degraded:
+            return
+        try:
+            self._conn.execute("LISTEN swarm_events")
+            self._listening_events = True
+        except psycopg.Error as exc:
+            if self._conn.closed or self._conn.broken:
+                raise BoardUnavailable(str(exc)) from exc
+
+    def _events_sleep(self, seconds: float) -> None:
+        if not getattr(self, "_listening_events", False):
+            return Board._events_sleep(self, seconds)
+        for _ in self._conn.notifies(timeout=max(0.0, seconds), stop_after=1):
+            pass
 
     # ---- change notification -----------------------------------------------------------
 

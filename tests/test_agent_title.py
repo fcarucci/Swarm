@@ -165,8 +165,12 @@ class Schema20Migration:
         self.addCleanup(self.h.close)
         self.h.reset()
 
-    def test_the_schema_is_20(self):
-        self.assertEqual(SCHEMA_VERSION, 20)
+    def test_the_schema_is_at_least_20(self):
+        self.assertGreaterEqual(SCHEMA_VERSION, 20)
+        with self.h.board() as b:
+            name = b.allocate_name("k", "j")
+            self.assertTrue(b.set_agent_title("k", "EL"))   # the title column exists
+            self.assertEqual(b.agents("j")[0].title, "EL")
 
     def test_a_schema_19_board_upgrades_and_keeps_its_agents(self):
         with self.h.board() as b:
@@ -177,7 +181,7 @@ class Schema20Migration:
         self.assertEqual(cls.schema_version(self.h.cfg), 19)
         for _ in range(2):   # the migration, then an idempotent re-run
             setup_board(self.h.cfg, SMALL_POOL)
-            self.assertEqual(cls.schema_version(self.h.cfg), 20)
+            self.assertGreaterEqual(cls.schema_version(self.h.cfg), 20)
             with self.h.board() as b:
                 (a,) = b.agents("j")
                 self.assertEqual((a.name, a.role, a.title), (name, "engineer", None))

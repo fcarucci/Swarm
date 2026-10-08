@@ -685,6 +685,47 @@ def _messages_text(res, job: str, me: str, heading: str) -> str | None:
     return "\n".join(parts)
 
 
+EVENT_SHOWN_MAX = 5      # pending events listed per tool call; the rest are only counted
+EVENT_LINE_MAX = 160     # characters of one event line
+
+
+def _event_targets_of(name: str, role: str | None) -> tuple[str, ...]:
+    """What an agent's events are addressed to: its name, its role ("@engineering_lead") and the
+    short aliases of that seat ("@el"; addressing.ALIASES)."""
+    from swarm.addressing import ALIASES
+    tokens = {role} if role else set()
+    tokens |= {alias for alias, seats in ALIASES.items() if role in seats}
+    return (name, *sorted("@" + t for t in tokens))
+
+
+def _event_text(board, job: str, targets, ack_cmd: str, keep=None) -> str | None:
+    """The pending events for `targets` as compact lines (one per event, EVENT_SHOWN_MAX at most,
+    the rest counted), shown on every call until they are acked. None when nothing is pending.
+    `keep(event)` drops events another seat takes (see _orchestrator_event_lines)."""
+    events = board.pending_events(job, to=targets)
+    if keep is not None:
+        events = [e for e in events if keep(e)]
+    if not events:
+        return None
+    lines = [f"[swarm events] {len(events)} pending (ack when handled: {ack_cmd} ID...):"]
+    for e in events[:EVENT_SHOWN_MAX]:
+        line = _t(f"[swarm events] #{e.id} {e.kind} {e.key}: {e.text}")
+        lines.append(line if len(line) <= EVENT_LINE_MAX else line[:EVENT_LINE_MAX - 1] + "…")
+    if len(events) > EVENT_SHOWN_MAX:
+        lines.append(f"[swarm events] {len(events) - EVENT_SHOWN_MAX} more pending: they stay until acked.")
+    return "\n".join(lines)
+
+
+def _agent_events(board, agent_id: str, job: str, name: str, roster) -> str | None:
+    try:
+        role = next((r.role for r in roster if r.agent_key == agent_id), None)
+        return _event_text(board, job, _event_targets_of(name, role),
+                           f"{_bin()} event ack --job {_q(job)} --as {_q(name)}")
+    except Exception as exc:   # events never cost an agent its tool call
+        _log_error("events", agent_id, exc)
+        return None
+
+
 def _reply_reminders(board, agent_id: str, job: str, name: str, state, delivered) -> str | None:
     """Messages addressed to the agent that it was shown on an earlier call and hasn't answered
     (no --to reply to the sender since): one reminder per sender, each message only once."""
@@ -1495,9 +1536,11 @@ def _on_turn(board, agent_id: str, name: str, job: str, cfg: dict, sid: str | No
             parts.append(_roster_update(board, agent_id, job, roster, state, cfg))
         parts += _memory_turn(board, cfg, agent_id, job, state)
     parts.extend(_agent_plugin_lines(board, cfg, job, agent_id))
+    events = _agent_events(board, agent_id, job, name, roster)
+    parts.append(events)
     text = "\n\n".join(p for p in parts if p)
     if lease and lease.enabled:
-        lease.allowed = getattr(lease, 'eligible', False)
+        lease.allowed = getattr(lease, 'eligible', False) and not events   # pending events show on every call
     if text:
         _out("PreToolUse", text)
 
@@ -1818,6 +1861,72 @@ def _orchestrator_plugin_lines(event, cfg, sid):
         _log_error(event, 'main', exc)
 
 
+EVENT_CHECK_SECONDS = 5.0   # the orchestrator's hooks look at the board for events at most this often
+
+
+def _orchestrator_events_text(cfg: dict, markers: list[dict]) -> str | None:
+    """The pending-event lines for these markers' jobs, read from the board (never raises: a board
+    that is unreachable simply shows nothing, silently: the other hooks report that)."""
+    from swarm.board import BoardUnavailable, open_board
+    out = []
+    try:
+        with open_board(cfg, init_timeout=HOOK_INIT_TIMEOUT) as board:
+            for m in markers:
+                job = m['job']
+                pm_seated = None
+
+                def keep(e, job=job):
+                    nonlocal pm_seated
+                    if e.to != '@pm':
+                        return True
+                    if pm_seated is None:
+                        pm_seated = any(r.active and r.role == 'project_manager' for r in board.roster(job))
+                    return not pm_seated
+                text = _event_text(board, job, (None, '@orchestrator', '@pm'),
+                                   f"{_bin()} event ack --job {_q(job)}", keep)
+                if text:
+                    out.append(text)
+    except BoardUnavailable:
+        return None
+    return '\n'.join(out) or None
+
+
+def _orchestrator_event_lines(event, cfg, sid):
+    """Pending events for the orchestrating session: those addressed to nobody in particular, to
+    "@orchestrator", or to "@pm" while no agent holds the project_manager seat. Listed on every
+    tool call of the session until acked. The board is read at most every EVENT_CHECK_SECONDS
+    (sooner when this host's board generation changed: a local post or ack); in between, the last
+    result is shown again. Never raises."""
+    if not sid or event != 'turn':
+        return
+    markers = [m for m in _markers(cfg) if m.get('session_id') == sid and 'resume' not in m]
+    if not markers:
+        return
+    try:
+        import hashlib
+        from swarm import fastpath
+        name = 'events-' + hashlib.sha256(sid.encode()).hexdigest()[:32]
+        gens = '|'.join((fastpath.read('board-' + m['job']) or ['-'])[0] for m in markers)
+        now = fastpath.now()
+        old = fastpath.read(name)
+        text = None
+        if len(old) == 3 and old[1] == gens and 0 <= now - float(old[0]) < EVENT_CHECK_SECONDS:
+            text = json.loads(old[2])
+        else:
+            text = _orchestrator_events_text(cfg, markers)
+            try:
+                fastpath.write(name, [now, gens, json.dumps(text)])
+            except (OSError, ValueError):
+                pass
+        if text:
+            lease = _CURRENT.get('lease')
+            if lease:
+                lease.allowed = False   # pending events must surface on every turn
+            _out('PreToolUse', text)
+    except Exception as exc:
+        _log_error(event, 'main', exc)
+
+
 def _orchestrator_respawn(event: str, cfg: dict, sid: str | None, payload: dict) -> None:
     """A not_met verdict with nobody left at work: tell the orchestrator (the only one who can
     spawn) to start the next round (swarm.respawn). Tool-call hooks add context; Stop refuses to
@@ -1938,6 +2047,7 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
             if lease:
                 lease.contacted = True
         _orchestrator_plugin_lines(event, cfg, sid)
+        _orchestrator_event_lines(event, cfg, sid)
         _orchestrator_respawn(event, cfg, sid, payload)
         if event == "turn" and current_host().is_spawn(payload):
             try:

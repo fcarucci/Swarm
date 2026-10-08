@@ -43,7 +43,7 @@ class PauseContract:
         return a, c
 
     def test_schema_version(self):
-        self.assertEqual(SCHEMA_VERSION, 20)
+        self.assertEqual(SCHEMA_VERSION, 21)
 
     def test_pause_marks_job_records_manifest_and_closes_agents(self):
         a, c = self.team()

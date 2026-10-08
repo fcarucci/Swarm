@@ -219,6 +219,14 @@ wait blockers. An overdue question without a default stays open and protects aga
 until resolved. `purge` runs the
 sweep on demand; it is best effort and never fails the command that ran it.
 
+**External events.** Something outside the board (a listener, a poller, a person) can wake the
+orchestrator: `swarm event post --job J --kind K --key KEY [--to @role|NAME] TEXT` records it
+(a repeat of the same job, kind and key is a no-op), pending events show in your context as
+`[swarm events] #ID KIND KEY: text` on every tool call until you `swarm event ack --job J ID...`
+them, and `swarm event wait --job J --to @pm` (run as a background command; re-arm it after it
+returns) blocks until one is pending (exit 124 on timeout). Core never interprets `kind`: what to
+do with an event is the business of the plugin or skill that posts it.
+
 ## Running a swarm (the orchestrating session does this)
 
 **Be conservative with jobs.** Before spawning an agent: if the work is small, do it yourself.
@@ -474,6 +482,10 @@ way its own host does it. `swarm status --job <job>` shows each agent's HOST and
 | `wait --job J --on "<what>" [--for DURATION\|--until TIME]` / `resume --job J` | mark an open job as waiting for something (shown as `waiting` with the reason; `--for 90m` or `--until 17:30` bounds it, and a bounded wait that has not ended protects the job from auto-close) / working again (an agent joining does this too) |
 | `blockers --job J [--open\|--all]` | list open blockers, or include resolved/expired history with `--all` |
 | `blocker resolve ID [--how TEXT]` / `blocker comment ID TEXT...` | resolve a blocker with an audit reason, or append a comment |
+| `event post --job J --kind K --key KEY [--to @role\|NAME] [--source S] [--json] TEXT...` | record an external event (a PR opened, a CI run failed...) for the orchestrator, a role or an agent; idempotent per job, kind and key: a repeat prints `event ID exists` and changes nothing |
+| `event list --job J [--to T]... [--pending] [--json]` | list a job's events (all, or only the unacked) |
+| `event ack --job J [--as NAME] ID...` | mark events handled: they stop showing in the hooks |
+| `event wait --job J [--to T]... [--timeout S] [--json]` | block until an event addressed to `T` is pending, print every pending one and exit 0; exit 124 on timeout. Run it as a background command the orchestrator re-arms |
 | `pause --job J [--reason TEXT]` / `resume --job J [--host H]` | pause a whole job (nobody can join or post; every agent and its final transcript are saved) / resume it on this or another machine: the agents come back under their own names from the transcripts on the board |
 | `status [--all] [--no-color]` / `status --job J [--all-agents]` | jobs overview / one job's details and agent table, with each agent's HOST and MODEL (older finished agents hidden unless `--all-agents`). With `[transcripts] enabled`: a `transcripts:` footer (stored and raw size, ratio, limits, jobs, oldest) / a `transcripts` line and a STORED column per agent |
 | `watch [--job J] [--interval S] [--no-color]` | live full-screen dashboard of jobs, agents and messages |

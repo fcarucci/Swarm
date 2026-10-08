@@ -118,7 +118,9 @@ RESTART_OUTCOMES = ("running", "completed", "timeout", "max_turns", "failed", "n
 # the agent_status view's title column (last, so the previous release's explicit column lists
 # keep reading it). Nullable and read with .get() / explicit column lists, so old clients and
 # old file/memory rows keep working; every host sharing a board still upgrades together.
-SCHEMA_VERSION = 20
+# 21 external events (the events table: a generic "something happened" record that wakes the
+# orchestrator; see Board.post_event).
+SCHEMA_VERSION = 21
 
 TITLE_MAX = 60
 
@@ -509,6 +511,25 @@ class BlockerEvent:
     actor: str | None
     event: str
     detail: str | None
+
+
+@dataclass(frozen=True)
+class Event:
+    """An external event (schema 21): something outside the board happened (a PR opened, a CI run
+    failed...) and a listener or poller recorded it for the orchestrator, an agent or a role. The
+    core never interprets `kind`, `key` or `text`; `key` dedupes: (job, kind, key) is unique, so a
+    redelivered webhook posts nothing new. `to` is None (the orchestrator), an agent name, or a
+    role address like "@pm" (stored lower-case)."""
+    id: int
+    job: str
+    kind: str
+    key: str
+    to: str | None
+    text: str
+    source: str | None
+    created_at: _dt.datetime
+    acked_at: _dt.datetime | None = None
+    acked_by: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1096,6 +1117,69 @@ def normalize_message(message: str, cap: int) -> tuple[str, bool]:
     return message, truncated
 
 
+EVENT_TEXT_MAX = 500
+EVENT_KEY_MAX = 200
+EVENT_KIND = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}")
+EVENT_SOURCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}")
+EVENT_POLL_SECONDS = 1.0         # wait_event's check interval where there is no push (SQLite, file)
+EVENT_HEARTBEAT_SECONDS = 15.0   # how often a waiting wait_event refreshes its job_data marker
+EVENT_WAITER_PREFIX = "events.waiter."   # job_data key prefix: events.waiter.<slug>, a UTC ISO time
+
+
+def event_target(to) -> str | None:
+    """`to` as stored: None, an agent name, or "@role" in lower case. ValueError otherwise."""
+    from swarm import roles
+    if to is None:
+        return None
+    if isinstance(to, str) and to.startswith("@"):
+        if not roles.valid_name(to[1:].lower()) and to[1:].lower() not in ("orchestrator",):
+            raise ValueError(f"invalid event target {to!r}: use @role (lower-case letters, digits, _) or an agent name")
+        return to.lower()
+    return check_name(to, "event target")
+
+
+def event_targets(to) -> frozenset | None:
+    """The stored `to` values a filter matches; None: no filter (every event). A string is one
+    target; a tuple/list/set holds several, None among them meaning "addressed to nobody in
+    particular" (the orchestrator's). The PM seat and the orchestrator hear each other's events:
+    "@pm" and "@orchestrator" also match the unaddressed ones."""
+    if to is None:
+        return None
+    items = (to,) if isinstance(to, str) else tuple(to)
+    out = {event_target(t) for t in items}
+    if out & {"@pm", "@orchestrator"}:
+        out.add(None)
+    return frozenset(out)
+
+
+def event_waiter_key(to) -> str:
+    """The job_data key a waiter for `to` keeps fresh (its heartbeat): events.waiter.pm for "@pm",
+    events.waiter.orchestrator for None (everything), the slugged lower-cased name otherwise."""
+    items = (None,) if to is None else ((to,) if isinstance(to, str) else tuple(to))
+    slugs = sorted(re.sub(r"[^a-z0-9_.-]+", "-", ("orchestrator" if t is None else event_target(t).lstrip("@")).lower())
+                   .strip("-") or "x" for t in items)
+    return (EVENT_WAITER_PREFIX + "-".join(slugs))[:64]
+
+
+def check_event(kind, key, text, to, source) -> tuple[str, str, str, str | None, str | None]:
+    """The (kind, key, text, to, source) post_event stores, or ValueError. kind: 1-64 of letters,
+    digits, _ and - starting with a letter (NEEDS-REVIEW); key: 1-EVENT_KEY_MAX characters, one
+    line, no controls (the dedupe key; refused, never cut); text: normalized like a message
+    (one clean line) and cut to EVENT_TEXT_MAX; to: event_target; source: a short handler name."""
+    if not isinstance(kind, str) or EVENT_KIND.fullmatch(kind) is None:
+        raise ValueError("event kind must be 1-64 letters, digits, _ or - (starting with a letter)")
+    if not isinstance(key, str) or not key.strip() or key != strip_controls(key).strip() or len(key) > EVENT_KEY_MAX:
+        raise ValueError(f"event key must be 1-{EVENT_KEY_MAX} characters on one line, without control characters")
+    if not isinstance(text, str):
+        raise ValueError("event text must be a string")
+    text, _ = normalize_message(text, EVENT_TEXT_MAX)
+    if not text:
+        raise ValueError("event text must not be empty")
+    if source is not None and (not isinstance(source, str) or EVENT_SOURCE.fullmatch(source) is None):
+        raise ValueError("event source must be 1-64 letters, digits, . _ : or - (a handler name)")
+    return kind, key, text, event_target(to), source
+
+
 def derive_agent_status(state: str, current_tool: str | None, tool_started_at: _dt.datetime | None,
                         last_contact_at: _dt.datetime, now: _dt.datetime, *, idle_minutes: int,
                         dead_minutes: int, tool_timeout_minutes: int) -> str:
@@ -1154,6 +1238,7 @@ WRITE_METHODS = (
     "save_transcript", "refresh_transcript", "mark_capture_failed", "rotate_transcripts",
     "save_memory_ref", "mark_memory_refs_checked", "delete_memory_refs",
     "open_blocker", "resolve_blocker", "reopen_blocker", "comment_blocker", "expire_blockers", "_overdue_blocker",
+    "post_event", "ack_events",
     "pause_job", "begin_resume", "record_resume_outcome", "set_message_cap",
 )
 _CURSOR_READS = {"read_unread": 3, "read_new": 3}   # method -> index of `advance` in *args
@@ -1714,6 +1799,93 @@ class Board(abc.ABC):
     @abc.abstractmethod
     def _overdue_blocker(self, id: int) -> bool:
         """Append overdue once to an open blocker (the backend serializes this transition)."""
+
+    # ---- external events (schema 21) ----------------------------------------------------
+
+    def post_event(self, job: str, kind: str, key: str, text: str, to: str | None = None,
+                   source: str | None = None) -> tuple[int, bool]:
+        """Record an external event for the orchestrator (to None), an agent (its name) or a role
+        ("@pm", "@EL"...; stored lower-case); returns (id, created). Idempotent: (job, kind, key)
+        is unique, so a duplicate (even an acked one) changes nothing and returns the existing id
+        with created False; the first text stands. Template method: check_event (ValueError, nothing
+        stored, for a bad kind/key/to/source, empty text, or a job that doesn't exist; text is
+        normalized to one line and cut to EVENT_TEXT_MAX), then _insert_event; a new event wakes
+        every waiter (Postgres NOTIFY; the others poll) and invalidates the hooks' fast-path lease."""
+        kind, key, text, to, source = check_event(kind, key, text, to, source)
+        result = self._insert_event(job, kind, key, text, to, source)
+        if result[1]:
+            from swarm.fastpath import changed
+            changed(job)
+        return result
+
+    @abc.abstractmethod
+    def _insert_event(self, job: str, kind: str, key: str, text: str, to: str | None,
+                      source: str | None) -> tuple[int, bool]:
+        """post_event after its checks: one atomic insert-or-find of (job, kind, key)."""
+
+    @abc.abstractmethod
+    def events(self, job: str, to=None, pending: bool = False) -> list[Event]:
+        """The job's events in id order, acked or not (pending: only the unacked). `to` filters by
+        target (see event_targets): None no filter, a string or a collection of strings."""
+
+    def pending_events(self, job: str, to=None) -> list[Event]:
+        """The job's unacked events, oldest first (events(job, to, pending=True))."""
+        return self.events(job, to=to, pending=True)
+
+    def ack_events(self, job: str, ids: Sequence[int], by: str) -> int:
+        """Mark these events of `job` acked by `by` (an agent name, "human"...); returns how many
+        changed. Already acked and unknown ids are ignored; an ack is final (a repost of the same
+        (kind, key) stays acked, so nothing is told twice)."""
+        check_name(by, "acked_by")
+        n = self._ack_events(job, [int(i) for i in ids], by)
+        if n:
+            from swarm.fastpath import changed
+            changed(job)   # the hooks stop showing them at once
+        return n
+
+    @abc.abstractmethod
+    def _ack_events(self, job: str, ids: list[int], by: str) -> int:
+        """ack_events after its checks."""
+
+    def wait_event(self, job: str, to=None, timeout: float | None = None) -> list[Event]:
+        """Block until an unacked event matching `to` exists (see event_targets) and return all of
+        them, oldest first; [] if `timeout` seconds pass first (None: wait forever). Returns at
+        once when something is already pending. Postgres sleeps in LISTEN (a post wakes it at
+        once); the others poll every EVENT_POLL_SECONDS. While it waits it keeps the job_data key
+        event_waiter_key(to) set to the UTC time of its last heartbeat (every EVENT_HEARTBEAT_SECONDS)
+        and removes it on the way out, so a supervisor can tell whether anybody is armed."""
+        self._events_listen()
+        end = None if timeout is None else time.monotonic() + max(0.0, timeout)
+        key = event_waiter_key(to)
+        beat = 0.0
+        try:
+            while True:
+                now = time.monotonic()
+                if now >= beat:
+                    self._event_heartbeat(job, key, True)
+                    beat = now + EVENT_HEARTBEAT_SECONDS
+                got = self.pending_events(job, to)
+                if got:
+                    return got
+                if end is not None and now >= end:
+                    return []
+                self._events_sleep(min(EVENT_HEARTBEAT_SECONDS, beat - now,
+                                       float("inf") if end is None else end - now))
+        finally:
+            self._event_heartbeat(job, key, False)
+
+    def _event_heartbeat(self, job: str, key: str, alive: bool) -> None:
+        try:
+            self.set_job_data(job, key, self.now().strftime("%Y-%m-%dT%H:%M:%SZ") if alive else None)
+        except (BoardError, ValueError):
+            pass   # a read-only (or briefly unreachable) board can wait; it just isn't tracked
+
+    def _events_listen(self) -> None:
+        """Before wait_event's first look: arm whatever wakes _events_sleep (default: nothing)."""
+
+    def _events_sleep(self, seconds: float) -> None:
+        """Sleep at most `seconds` or until a post may have happened (default: a poll tick)."""
+        time.sleep(max(0.0, min(seconds, EVENT_POLL_SECONDS)))
 
     @abc.abstractmethod
     def set_waiting(self, job: str, on: str | None, until: _dt.datetime | None = None) -> bool:

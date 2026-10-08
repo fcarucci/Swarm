@@ -76,6 +76,8 @@ class MemoryStore:
         self.blocker_events: list[dict] = []
         self.next_blocker_id = 1
         self.next_blocker_event_id = 1
+        self.events: list[dict] = []           # external events (Board.post_event), by id
+        self.next_event_id = 1
         self.message_max_chars: int | None = None   # the board's message cap (None: not set yet)
         self.schema_version: int | None = None  # set by setup (the version a real store records)
         self.msg_version = 0                   # bumped on every new message
@@ -142,7 +144,8 @@ def reset_store(name: str = "default") -> MemoryStore:
         for attr in ("available", "pool", "jobs", "agents", "messages", "routes", "transcripts",
                      "transcript_bodies", "image_bodies", "next_id", "schema_version",
                      "restarts", "next_restart_id", "memory_refs", "pauses", "next_pause_id",
-                     "message_max_chars", "blockers", "blocker_events", "next_blocker_id", "next_blocker_event_id"):
+                     "message_max_chars", "blockers", "blocker_events", "next_blocker_id", "next_blocker_event_id",
+                     "events", "next_event_id"):
             setattr(store, attr, getattr(fresh, attr))
         store.touch(messages=True)
     return store
@@ -210,9 +213,10 @@ def _drop_quiet_jobs(s: MemoryStore, keep: _dt.datetime) -> bool:
 
 
 from .blockers import MemoryBlockers, rollup, protects
+from .events import MemoryEvents, drop_old_events
 
 
-class MemoryBoard(MemoryBlockers, Board):
+class MemoryBoard(MemoryBlockers, MemoryEvents, Board):
     """In-process Board over a shared MemoryStore. Reference/test backend only."""
 
     def __init__(self, cfg: dict):
@@ -299,7 +303,7 @@ class MemoryBoard(MemoryBlockers, Board):
             # Every step runs (a list, not a short-circuiting `or`), in the documented order.
             changed = [_purge_messages(s, keep), _mark_stale_dead(s, now, stale),
                        _drop_departed(s, keep), _drop_quiet_jobs(s, keep), _drop_old_routes(s, keep),
-                       _drop_old_restarts(s, keep)]
+                       _drop_old_restarts(s, keep), drop_old_events(s, keep)]
             if any(changed):
                 s.touch()
 

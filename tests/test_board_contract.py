@@ -2315,24 +2315,23 @@ class PostgresSpecificTests(unittest.TestCase):
         self.b.set_job_data("j", "engineering-team.optional", "build_engineer")
         legacy_job_cols = ", ".join(c.strip() for c in _JOB_STATUS_COLS.split(",")
                                     if version == 18 or c.strip() not in {"open_blockers", "protected_blockers"})
-        legacy_agent_cols = _AGENT_STATUS_COLS.replace(", title", "")   # the view before schema 20
-        queries = (f"SELECT {legacy_agent_cols} FROM agent_status ORDER BY job, agent_key",
+        queries = (f"SELECT {_AGENT_STATUS_COLS} FROM agent_status ORDER BY job, agent_key",
                    f"SELECT {legacy_job_cols}, shown_status FROM job_status ORDER BY job")
         before = [conn.execute(q).fetchall() for q in queries]
         columns = conn.execute("SELECT table_name, column_name, data_type FROM information_schema.columns "
                                "WHERE table_name IN ('agent_status', 'job_status') "
-                               "AND column_name NOT IN ('blockers', 'open_blockers', 'protected_blockers', 'title') "
+                               "AND column_name NOT IN ('blockers', 'open_blockers', 'protected_blockers') "
                                "ORDER BY table_name, ordinal_position").fetchall()
         for _ in range(2):  # migration and idempotent re-init
             type(self.b).setup(self.h.cfg, SMALL_POOL)
-            self.assertEqual(SCHEMA_VERSION, 20)
-            self.assertEqual(type(self.b).schema_version(self.h.cfg), 20)
+            self.assertEqual(SCHEMA_VERSION, 21)
+            self.assertEqual(type(self.b).schema_version(self.h.cfg), 21)
             self.assertEqual(self.b.job_data("j"), {"engineering-team.optional": "build_engineer"})
             self.assertEqual([conn.execute(q).fetchall() for q in queries], before)
             self.assertEqual(conn.execute("SELECT table_name, column_name, data_type "
                                           "FROM information_schema.columns "
                                           "WHERE table_name IN ('agent_status', 'job_status') "
-                                          "AND column_name NOT IN ('blockers', 'open_blockers', 'protected_blockers', 'title') "
+                                          "AND column_name NOT IN ('blockers', 'open_blockers', 'protected_blockers') "
                                           "ORDER BY table_name, ordinal_position").fetchall(), columns)
 
     def test_ids_become_visible_in_order(self):

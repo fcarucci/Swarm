@@ -2353,6 +2353,10 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `wait --job J [--for DURATION \| --until TIME] --on WHAT...` | mark an open job as waiting for something; shown as `waiting` with the reason and, when bounded, its end. `--for 90m` (`h`/`m`/`s`, bare = minutes) or `--until` (a duration, a time of day such as `17:30`, or `2026-10-06 09:00`) bounds it. A bounded wait that has not ended protects the job from the orphan rule and the stall limits (including `goal_stall_hours`); once it ends the job is judged as not waiting, and the end counts as progress. An unbounded wait is not orphaned; stall limits still apply. A board read by the orchestrating session (`status --job`, `who`, `read`, `tail --job`) counts as contact for liveness |
 | `blockers --job J [--open\|--all]` | list open blockers, or include resolved/expired history with `--all` |
 | `blocker resolve ID [--how TEXT]` / `blocker comment ID TEXT...` | resolve a blocker with an audit reason, or append a comment |
+| `event post --job J --kind K --key KEY [--to @role\|NAME] [--source S] [--json] TEXT...` | record an external event (a PR opened, a CI run failed...) for the orchestrator, a role or an agent; idempotent per job, kind and key: a repeat prints `event ID exists` and changes nothing |
+| `event list --job J [--to T]... [--pending] [--json]` | list a job's events (all, or only the unacked) |
+| `event ack --job J [--as NAME] ID...` | mark events handled: they stop showing in the hooks |
+| `event wait --job J [--to T]... [--timeout S] [--json]` | block until an event addressed to `T` is pending, print every pending one and exit 0; exit 124 on timeout. Run it as a background command the orchestrator re-arms |
 | `pause --job J [--reason TEXT] [--wait SECONDS]` | pause a job: no joins or posts, every agent recorded in a resume manifest and closed, final transcripts captured (see Pausing and resuming a job) |
 | `resume --job J [--host claude\|codex] [--workdir DIR] [--only NAME...] [--dry-run] [--retry]` | on a paused job: re-create its agents on this machine from the transcripts on the board, same names and cursors. On any other job: the job is no longer waiting (an agent joining does this too) |
 | `status [--all] [--no-color]` | jobs overview |
@@ -2784,6 +2788,52 @@ for a job bound to its session. Empty lists add nothing. Hooks receive the same 
 used by commands, with per-job plugin data and a borrowed board. Registration rejects duplicate
 kinds and reserves `wait` for core. Failed registration removes all of a plugin's partial hooks;
 callback errors are reported on stderr and cannot undo a blocker or break core commands.
+
+## External events (schema 21)
+
+An *event* is a generic "something happened outside the board" record that wakes the
+orchestrator. Core knows nothing about code, pull requests or CI: a listener, a poller or a person
+posts events; plugins give them meaning. Each event has `kind` (free text such as `NEEDS-REVIEW`),
+a dedupe `key`, an optional target `to`, one line of `text` (at most 500 characters, never put a
+secret in it), a `source` (the handler's name) and ack data.
+
+```sh
+swarm event post --job J --kind NEEDS-REVIEW --key 7@3f9a1c --to @pm --source gitea "PR 7 opened"
+swarm event wait --job J --to @pm --timeout 3600      # blocks; prints what is pending; 124 on timeout
+swarm event list --job J --pending --json
+swarm event ack  --job J 12 13
+```
+
+- **Idempotent.** `(job, kind, key)` is unique: a redelivered webhook, a re-run poll or a retry
+  posts nothing new and reports the existing id. An acked event stays acked when the same
+  `(kind, key)` is posted again, so nothing is told twice. Use a key that names the thing and its
+  version (`kind:N@sha`).
+- **Targets.** `--to` is a role address (`@pm`, `@EL`; stored lower-case), an agent name, or
+  omitted for the orchestrator. The PM seat and the orchestrator hear each other's events:
+  a filter or wait for `@pm` (or `@orchestrator`) also matches events with no target.
+  Other roles and agent names match exactly (names are case-sensitive). `--to` may be repeated.
+- **Wait.** `event wait` returns at once when something is already pending. On Postgres it sleeps
+  in `LISTEN`, so a post wakes it at once; SQLite and file boards poll about once a second. While it
+  waits it keeps the job data key `events.waiter.<target>` (`pm` for `@pm`, `orchestrator` when no
+  target is given) set to the UTC time of its last heartbeat, refreshed every 15 seconds and
+  removed on exit: a supervisor that finds the key missing or older than about 45 seconds knows nobody is armed.
+- **In the hooks.** Pending events show in the PreToolUse context, one compact line each
+  (`[swarm events] #12 NEEDS-REVIEW 7@3f9a1c: PR 7 opened`), at most five lines and a count of the
+  rest, on every tool call until they are acked. The orchestrating session sees the events addressed
+  to nobody, to `@orchestrator`, or to `@pm` while no agent holds the project_manager seat; an agent
+  sees those for its name, its role and the short aliases of its seat (`@el` for `engineering_lead`).
+  Agents ack with `swarm event ack --job J --as NAME ID...`.
+- **Retention.** Acked events older than `[board] retention_days` are removed with the other history,
+  as are the events of jobs that no longer exist; a pending event is kept.
+
+Schema 21 adds the `events` table (a `UNIQUE (job, kind, key)` constraint and a partial index on
+the unacked rows) on every backend; the file and memory backends keep them in the state document.
+Schema 20 is reserved for `agents.title`. The board API (`Board.post_event(job, kind, key, text,
+to=None, source=None) -> (id, created)`, `events(job, to=None, pending=False)`,
+`pending_events(job, to=None)`, `ack_events(job, ids, by) -> int`,
+`wait_event(job, to=None, timeout=None) -> list[Event]`) returns immutable `Event` records
+(exported by `swarm.board`); `ValueError` for a bad kind, key, target or source, empty text, or an
+unknown job.
 
 ## Structured questions (ask/answer plugin)
 

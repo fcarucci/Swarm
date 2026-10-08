@@ -2858,6 +2858,23 @@ def _parser() -> argparse.ArgumentParser:
     resolve.add_argument('--how')
     comment = actions.add_parser('comment'); comment.add_argument('id', type=int)
     comment.add_argument('text', nargs='+')
+    ev = sub.add_parser("event", help="external events: post, list, ack, or wait for the ones addressed to you")
+    evs = ev.add_subparsers(dest="ecmd", required=True)
+    ep = evs.add_parser("post", help="record an event (idempotent per job, kind and key)")
+    ep.add_argument("--job", required=True); ep.add_argument("--kind", required=True, help="e.g. NEEDS-REVIEW")
+    ep.add_argument("--key", required=True, help="dedupe key: a second post with the same job, kind and key is a no-op")
+    ep.add_argument("--to", help="@role or an agent name; omitted: the orchestrator")
+    ep.add_argument("--source", help="who posts it (a handler name)")
+    ep.add_argument("--json", action="store_true"); ep.add_argument("text", nargs="+")
+    el = evs.add_parser("list", help="list a job's events")
+    el.add_argument("--job", required=True); el.add_argument("--to", action="append")
+    el.add_argument("--pending", action="store_true"); el.add_argument("--json", action="store_true")
+    ea = evs.add_parser("ack", help="mark events handled (they stop showing in the hooks)")
+    ea.add_argument("--job", required=True); ea.add_argument("--as", dest="name", help="who acks (default: you, or human)")
+    ea.add_argument("ids", nargs="+", type=int)
+    ew = evs.add_parser("wait", help="block until an event for you is pending (exit 124 on timeout)")
+    ew.add_argument("--job", required=True); ew.add_argument("--to", action="append", help="@role or agent name (default: any)")
+    ew.add_argument("--timeout", type=float, help="seconds (default: wait forever)"); ew.add_argument("--json", action="store_true")
     hk = sub.add_parser("hook"); hk.add_argument("--host", choices=["claude", "codex"]); hk.add_argument("event", choices=["start", "turn", "done", "stop", "session-start", "session-stop", "session-end"])
     p._swarm_subparsers = sub   # for plugins.Registry.apply
     sub.metavar = "{" + ",".join(k for k in sub.choices if k != "update") + "}"   # hide the alias
@@ -4050,6 +4067,53 @@ def _board_blocker(board, cfg, args):
     return 0
 
 
+def _event_json(e) -> dict:
+    return {"id": e.id, "job": e.job, "kind": e.kind, "key": e.key, "to": e.to, "text": e.text,
+            "source": e.source, "created_at": e.created_at.isoformat(),
+            "acked_at": e.acked_at.isoformat() if e.acked_at else None, "acked_by": e.acked_by}
+
+
+def _event_line(e, status: bool = True) -> str:
+    return term_safe(f"{e.id} " + (("acked " if e.acked_at else "pending ") if status else "")
+                     + f"{e.kind} {e.key}" + (f" {e.to}" if e.to else "") + f": {e.text}")
+
+
+def _board_event(board, cfg, args):
+    """swarm event post|list|ack|wait (Board.post_event, events, ack_events, wait_event)."""
+    to = tuple(args.to) if getattr(args, "to", None) and args.ecmd != "post" else None
+    try:
+        if args.ecmd == "post":
+            eid, created = board.post_event(args.job, args.kind, args.key, " ".join(args.text),
+                                            to=args.to, source=args.source)
+            print(json.dumps({"id": eid, "created": created}) if args.json
+                  else f"event {eid} {'posted' if created else 'exists'}")
+        elif args.ecmd == "list":
+            rows = board.events(args.job, to=to, pending=args.pending)
+            if args.json:
+                print(json.dumps([_event_json(e) for e in rows]))
+            else:
+                for e in rows:
+                    print(_event_line(e))
+                if not rows:
+                    print("(no events)")
+        elif args.ecmd == "ack":
+            n = board.ack_events(args.job, args.ids, args.name or _blocker_actor(board))
+            print(f"acked {n} event{'' if n == 1 else 's'}")
+        else:
+            rows = board.wait_event(args.job, to=to, timeout=args.timeout)
+            if not rows:
+                return 124
+            if args.json:
+                print(json.dumps([_event_json(e) for e in rows]))
+            else:
+                for e in rows:
+                    print(_event_line(e, status=False))
+    except ValueError as exc:
+        print(f"swarm event {args.ecmd}: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def _blocker_actor(board):
     # Same identity boundary the ask/answer plugin uses: the host session's member, else human.
     from swarm import hosts
@@ -4265,6 +4329,7 @@ BOARD_COMMANDS = {
     "status": _board_status,
     "blockers": _board_blockers,
     "blocker": _board_blocker,
+    "event": _board_event,
     "leave": _board_leave,
     "purge": _board_purge,
     "transcript": _board_transcript,
@@ -4311,6 +4376,7 @@ def note_orchestrator_read(cfg: dict, args) -> None:
 def _reads_only(args) -> bool:
     """Whether the command only reads the board, so a standby may serve it when no primary is up."""
     return (args.cmd in ("who", "status", "blockers", "recall") or (args.cmd == "read" and args.peek)
+            or (args.cmd == "event" and args.ecmd == "list")
             or (args.cmd == "config" and args.value is None and not args.save)
             or (args.cmd == "learn" and args.list_banks)
             or (args.cmd == "transcript" and args.tcmd in TRANSCRIPT_COMMANDS))

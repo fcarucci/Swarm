@@ -96,7 +96,7 @@ from pathlib import Path
 
 from .. import safefs
 
-from .base import (SCHEMA_VERSION, SHA256_RULE, BoardError, BoardUnavailable, NAME_SOURCES, ReadOnlyBoard,
+from .base import (SCHEMA_VERSION, Board, SHA256_RULE, BoardError, BoardUnavailable, NAME_SOURCES, ReadOnlyBoard,
                    SetupResult, refuse_writes)
 from .memory import MemoryBoard, MemoryStore
 
@@ -583,6 +583,8 @@ class FileStore(MemoryStore):
         self.blocker_events = state.get("blocker_events") or []
         self.next_blocker_id = int(state.get("next_blocker_id") or 1)
         self.next_blocker_event_id = int(state.get("next_blocker_event_id") or 1)
+        self.events = state.get("events") or []
+        self.next_event_id = int(state.get("next_event_id") or 1)
         self._next_id = state.get("next_id", 1)
         self.message_max_chars = state.get("message_max_chars")
         self._messages = None
@@ -626,7 +628,8 @@ class FileStore(MemoryStore):
                "restarts": self.restarts, "next_restart_id": self.next_restart_id,
                "pauses": self.pauses, "next_pause_id": self.next_pause_id,
                "blockers": self.blockers, "blocker_events": self.blocker_events,
-               "next_blocker_id": self.next_blocker_id, "next_blocker_event_id": self.next_blocker_event_id}
+               "next_blocker_id": self.next_blocker_id, "next_blocker_event_id": self.next_blocker_event_id,
+               "events": self.events, "next_event_id": self.next_event_id}
         if self.message_max_chars is not None:   # schema 15: the board's message cap
             doc["message_max_chars"] = self.message_max_chars
         if not with_next_id:   # loading the messages may raise it: not a change
@@ -712,6 +715,9 @@ class FileBoard(MemoryBoard):
 
     def _make_store(self, cfg: dict) -> FileStore:
         return self._open_store(cfg, read_only=self._read_only)
+
+    def _events_sleep(self, seconds: float) -> None:
+        Board._events_sleep(self, seconds)   # other processes post: poll, there is no condition to wait on
 
     @classmethod
     def _open_store(cls, cfg: dict, read_only: bool = False) -> FileStore:

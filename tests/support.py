@@ -250,6 +250,11 @@ class MemoryHarness:
         with self.store.lock:
             self.store.routes[agent_key]["created_at"] = self._ago(seconds_ago)
 
+    def backdate_event(self, event_id: int, seconds_ago: float) -> None:
+        with self.store.lock:
+            next(e for e in self.store.events if e["id"] == event_id)["created_at"] = self._ago(seconds_ago)
+            self.store.touch()
+
     def update_agent(self, agent_key: str, **values) -> None:
         with self.store.lock:
             self.store.agents[agent_key].update(values)
@@ -303,6 +308,7 @@ class FileHarness(MemoryHarness):
             s.pauses, s.next_pause_id = [], 1
             s.blockers, s.next_blocker_id = [], 1
             s.blocker_events, s.next_blocker_event_id = [], 1
+            s.events, s.next_event_id = [], 1
             s.message_max_chars = None   # setup seeds it from the config again
         setup_board(self.cfg, pool)
 
@@ -353,7 +359,7 @@ class PostgresHarness:
 
     def reset(self, pool=SMALL_POOL) -> None:
         self.conn.execute("TRUNCATE messages, agents, jobs, name_pool, agent_routes, transcripts, transcript_image_refs, "
-                          "memory_ref_images, memory_refs, transcript_images, restarts, job_pauses, blocker_events, blockers")
+                          "memory_ref_images, memory_refs, transcript_images, restarts, job_pauses, blocker_events, blockers, events")
         with self.conn.cursor() as cur:
             cur.executemany("INSERT INTO name_pool (name, source) VALUES (%s, %s)",
                             [(n, s) for s, names in pool.items() for n in names])
@@ -415,6 +421,9 @@ class PostgresHarness:
     def backdate_route(self, agent_key: str, seconds_ago: float) -> None:
         self._backdate("agent_routes", "agent_key", agent_key, {"created_at": seconds_ago})
 
+    def backdate_event(self, event_id: int, seconds_ago: float) -> None:
+        self._backdate("events", "id", event_id, {"created_at": seconds_ago})
+
     def close(self) -> None:
         self.conn.close()
 
@@ -454,7 +463,7 @@ class SqliteHarness:
             if self.sqlite_board.SqliteBoard.schema_version(self.cfg) != self.sqlite_board.SCHEMA_VERSION:
                 setup_board(self.cfg, pool)   # a store from before the newest tables: add them first
             self._db().executescript("BEGIN IMMEDIATE; DELETE FROM messages; DELETE FROM agents; "
-                                     "DELETE FROM blocker_events; DELETE FROM blockers; DELETE FROM jobs; DELETE FROM name_pool; "
+                                     "DELETE FROM events; DELETE FROM blocker_events; DELETE FROM blockers; DELETE FROM jobs; DELETE FROM name_pool; "
                                      "DELETE FROM agent_routes; DELETE FROM transcripts; DELETE FROM restarts; DELETE FROM job_pauses; "
                                      "DELETE FROM memory_ref_images; DELETE FROM memory_refs; "
                                      "DELETE FROM transcript_image_refs; DELETE FROM transcript_images; "
@@ -506,6 +515,9 @@ class SqliteHarness:
 
     def backdate_route(self, agent_key: str, seconds_ago: float) -> None:
         self._set("agent_routes", "agent_key", agent_key, {"created_at": self._ago(seconds_ago)})
+
+    def backdate_event(self, event_id: int, seconds_ago: float) -> None:
+        self._set("events", "id", event_id, {"created_at": self._ago(seconds_ago)})
 
     def update_agent(self, agent_key: str, **values) -> None:
         self._set("agents", "agent_key", agent_key, values)

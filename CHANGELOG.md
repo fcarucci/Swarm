@@ -14,6 +14,9 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 - Agent titles: an optional short label per agent (at most 60 characters, such as `EL`, `PM`, `Eng: board view`), separate from the role and display only. Set it with a `[swarm title: ...]` line in a subagent's prompt, `swarm join --title` or `swarm title --job J (--as NAME | --key K) "text"` (empty text clears it); `who`, `status` and `watch` show it (a TITLE field in `who`, a TITLE column in the agents table when any agent has one, `Name (title)` in compact `watch`), board messages do not. A supervisor replacement or resumed agent keeps its title. Codex spawn messages are encrypted, so a Codex agent uses `swarm title`.
 - The engineering-team plugin tags every seat with its title (`EL`, `PM`, `Product`, `QA`, `Judge`, `Build`, `Reviewer`, `Verifier`, `Eng`, optionally `Eng: scope`), including the review pipeline's judge, fix worker and integrator; `swarm team --show` lists them and the skill tells the EL to keep them current.
 
+### Added
+- External events (schema 21): `swarm event post|list|ack|wait` record "something happened outside the board" for the orchestrator, a role or an agent. Posts are idempotent per job, kind and key; `event wait` blocks until one is pending (Postgres `LISTEN`, a one-second poll elsewhere; exit 124 on timeout). Pending events show in the hook context, a compact line each, until acked. Python API: `Board.post_event`, `events`, `pending_events`, `ack_events`, `wait_event`.
+
 ### Changed
 - Schema 20 (applied automatically on first use, on every backend): a nullable `agents.title` and a last `title` column of the `agent_status` view. Boards stay readable by the previous release, which shows no titles; as always, upgrade every host sharing a board together. `swarm who` gains a TITLE field after the role (empty without one).
 - CI: tag and release-branch pushes no longer re-run the full test matrix (the Release workflow tests the tag).

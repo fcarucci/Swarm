@@ -510,10 +510,12 @@ def _allow_paused(conn: sqlite3.Connection) -> None:
 
 
 from .blockers import SqlBlockers, sql_schema, migrate_sql, rollup, protects
+from .events import SqlEvents, sql_schema as events_schema
 
 
-class SqliteBoard(SqlBlockers, Board):
+class SqliteBoard(SqlBlockers, SqlEvents, Board):
     _blocker_pg = False
+    _event_pg = False
     """A Board over one SQLite connection to the shared database file."""
 
     def __init__(self, cfg: dict, read_only: bool = False):
@@ -590,7 +592,7 @@ class SqliteBoard(SqlBlockers, Board):
                     have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
                     if column not in have:
                         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
-                for statement in sql_schema().split(";"):
+                for statement in (sql_schema() + events_schema()).split(";"):
                     if statement.strip(): conn.execute(statement)
                 migrate_sql(conn)
                 for source in NAME_SOURCES:
@@ -648,6 +650,9 @@ class SqliteBoard(SqlBlockers, Board):
             raise BoardError("board is closed")
         return self._conn
 
+    def _event_tx(self, write: bool = True):
+        return self._tx(write)
+
     @contextlib.contextmanager
     def _tx(self, write: bool = True) -> Iterator[sqlite3.Connection]:
         """One transaction: BEGIN IMMEDIATE (the write lock, taken up front) or a deferred
@@ -693,6 +698,8 @@ class SqliteBoard(SqlBlockers, Board):
                   (keep,))
         c.execute("DELETE FROM agent_routes WHERE created_at < ?", (keep,))
         c.execute("DELETE FROM restarts WHERE at < ?", (keep,))
+        c.execute("DELETE FROM events WHERE created_at < ? AND (acked_at IS NOT NULL "
+                  "OR job NOT IN (SELECT job FROM jobs))", (keep,))
 
     # ---- jobs --------------------------------------------------------------------
 
