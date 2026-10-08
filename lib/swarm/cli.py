@@ -2628,8 +2628,11 @@ def _parser() -> argparse.ArgumentParser:
         up = sub.add_parser(name, **kw)
         up.add_argument("--host", choices=["claude", "codex", "both"])
         up.add_argument("--force", action="store_true",
-                        help="run bootstrap/migrate/doctor even when the plugin version didn't change "
-                             "(migrate itself always runs with --force: active jobs only warn)")
+                        help="reinstall the plugin even when its version didn't change (a re-cut version is not "
+                             "refetched otherwise): on the main channel from the tip of main, on release "
+                             "the current release; then run bootstrap/migrate/doctor. Board data and "
+                             "config are kept (migrate itself always runs with --force: active jobs "
+                             "only warn)")
         up.add_argument("--channel", choices=["release", "main"],
                         help="release: the newest vX.Y.Z tag (default); main: the tip of main. Remembered "
                              "in the config ([upgrade] channel), so a plain `swarm upgrade` keeps following it")

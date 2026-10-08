@@ -83,6 +83,18 @@ def _claude_plugin_root(plugins_dir: Path) -> Path | None:
     return None
 
 
+def _claude_plugin_commit(plugins_dir: Path) -> str | None:
+    """The git commit the installed swarm plugin was fetched at (installed_plugins.json's
+    gitCommitSha), or None when it isn't recorded."""
+    try:
+        data = json.loads((plugins_dir / "installed_plugins.json").read_text())
+        installs = (data.get("plugins") or {}).get(PLUGIN_SPEC) or []
+        sha = installs[-1].get("gitCommitSha")
+    except (OSError, ValueError, AttributeError, IndexError, TypeError):
+        return None
+    return sha if isinstance(sha, str) and sha else None
+
+
 def _claude_plugin_version(plugins_dir: Path) -> str | None:
     root = _claude_plugin_root(plugins_dir)
     if root is None or not root.exists():
@@ -205,11 +217,14 @@ def _claude_marketplace_source(plugins_dir: Path) -> tuple[str | None, str | Non
     return None
 
 
-def update_claude(bin_: str, ref=_UNSET, url: str | None = None) -> dict:
+def update_claude(bin_: str, ref=_UNSET, url: str | None = None, force: bool = False) -> dict:
     """ref: the ref to pin the marketplace at (a tag, or None for the default branch); _UNSET leaves
-    the marketplace as it is. url: the git URL it is (re-)added from when the ref changes."""
+    the marketplace as it is. url: the git URL it is (re-)added from when the ref changes.
+    force: reinstall the plugin even when its version is unchanged (a plugin install is a versioned
+    cache, so `plugin update` refetches nothing when a version was re-cut at a new commit)."""
     plugins_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR") or (paths.home() / ".claude")) / "plugins"
     old_version = _claude_plugin_version(plugins_dir)
+    old_commit = _claude_plugin_commit(plugins_dir)
     old_root = _claude_plugin_root(plugins_dir)
 
     cur = _claude_marketplace_source(plugins_dir) if ref is not _UNSET else None
@@ -228,6 +243,12 @@ def update_claude(bin_: str, ref=_UNSET, url: str | None = None) -> dict:
         if res.returncode != 0:
             raise UpdateError(f"[claude] plugin marketplace update {MARKETPLACE_NAME} failed:\n{_out(res)}")
         verb = "update" if _claude_plugin_has_update_subcommand(bin_) else "install"
+        if force:
+            # --keep-data: only the plugin cache is replaced, never the plugin's data directory.
+            res = _run(bin_, ["plugin", "uninstall", "--keep-data", PLUGIN_SPEC])
+            if res.returncode != 0:
+                raise UpdateError(f"[claude] plugin uninstall {PLUGIN_SPEC} failed:\n{_out(res)}")
+            verb = "install"
     res2 = _run(bin_, ["plugin", verb, PLUGIN_SPEC])
     if res2.returncode != 0:
         raise UpdateError(f"[claude] plugin {verb} {PLUGIN_SPEC} failed:\n{_out(res2)}")
@@ -236,7 +257,7 @@ def update_claude(bin_: str, ref=_UNSET, url: str | None = None) -> dict:
     new_root = _claude_plugin_root(plugins_dir)
     return {"host": "claude", "old_version": old_version, "new_version": new_version,
             "changed": old_version != new_version, "old_root": old_root, "new_root": new_root,
-            "verb": verb}
+            "verb": verb, "old_commit": old_commit, "new_commit": _claude_plugin_commit(plugins_dir)}
 
 
 def _codex_config_marketplace_field(name: str, field: str) -> str | None:
@@ -318,10 +339,27 @@ def _codex_marketplace_refresh(bin_: str) -> subprocess.CompletedProcess:
     return res
 
 
-def update_codex(bin_: str, ref=_UNSET, url: str | None = None) -> dict:
-    """ref/url: as for update_claude (Codex takes the ref as `marketplace add <url> --ref <ref>`)."""
+def _codex_plugin_commit(root: Path | None) -> str | None:
+    """The commit of the installed Codex plugin copy at `root`, read from the copy itself (it is a git
+    checkout only when Codex kept its .git). None when it can't be told: the marketplace's own
+    state (config.toml last_revision) is never used, as it tracks the marketplace, not what is
+    installed."""
+    if root is None or not (root / ".git").exists():
+        return None
+    try:
+        res = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True,
+                             timeout=30, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    sha = res.stdout.strip()
+    return sha if res.returncode == 0 and re.fullmatch(r"[0-9a-f]{40,64}", sha) else None
+
+
+def update_codex(bin_: str, ref=_UNSET, url: str | None = None, force: bool = False) -> dict:
+    """ref/url/force: as for update_claude (Codex takes the ref as `marketplace add <url> --ref <ref>`)."""
     old_version = _codex_plugin_version(bin_)
     old_root = newest_installed_plugin_root("codex", codex_bin=bin_)
+    old_commit = _codex_plugin_commit(old_root)   # before any refresh, from the installed copy
 
     repin = ref is not _UNSET and (_codex_config_marketplace_field(MARKETPLACE_NAME, "ref") or None) != ref
     if repin:
@@ -360,6 +398,8 @@ def update_codex(bin_: str, ref=_UNSET, url: str | None = None) -> dict:
                               f"remove+add of its configured source {source!r} also failed:\n"
                               f"{_out(res)}\n{_out(res2)}")
 
+    if force:
+        _run(bin_, ["plugin", "remove", PLUGIN_SPEC])   # best effort: `plugin add` below installs it anyway
     res3 = _run(bin_, ["plugin", "add", PLUGIN_SPEC])
     if res3.returncode != 0:
         raise UpdateError(f"[codex] plugin add {PLUGIN_SPEC} failed:\n{_out(res3)}")
@@ -368,7 +408,7 @@ def update_codex(bin_: str, ref=_UNSET, url: str | None = None) -> dict:
     new_root = newest_installed_plugin_root("codex", codex_bin=bin_)
     return {"host": "codex", "old_version": old_version, "new_version": new_version,
             "changed": old_version != new_version, "old_root": old_root, "new_root": new_root,
-            "verb": "add"}
+            "verb": "add", "old_commit": old_commit, "new_commit": _codex_plugin_commit(new_root)}
 
 
 # --------------------------------------------------------------------------- hooks-changed detection
@@ -472,6 +512,38 @@ def _host_source(host: str, bin_: str) -> tuple[str | None, bool]:
     return src, True
 
 
+def _short(sha: str | None) -> str:
+    return sha[:7] if sha else "unknown"
+
+
+def _commit_moved(r: dict | None) -> bool:
+    return bool(r and r.get("old_commit") and r.get("new_commit") and r["old_commit"] != r["new_commit"])
+
+
+def _behind_notes(hosts: list[str], results: dict[str, dict], tips: dict[str, str | None]) -> list[str]:
+    """Lines to print instead of "swarm is up to date" on the main channel when the installed
+    plugin may be older than the tip of main although its version matches (a version re-cut at a new
+    commit is not refetched). Empty when every host is known to be at the tip, or this is not the
+    main channel."""
+    notes = []
+    for host in hosts:
+        if host not in tips:
+            continue
+        have, tip = results[host].get("new_commit"), tips[host]
+        ver = results[host]["new_version"] or results[host]["old_version"] or "unknown"
+        if not have:
+            notes.append(f"[{host}] swarm {ver}: the installed commit can't be determined, so it can't "
+                         f"be compared with the tip of main; run `swarm upgrade --force` to reinstall "
+                         f"from the tip of main")
+        elif not tip:
+            notes.append(f"[{host}] swarm {ver} at {_short(have)}: the tip of main can't be read "
+                         f"(git ls-remote failed), so it can't be compared")
+        elif not (have.startswith(tip) or tip.startswith(have)):
+            notes.append(f"[{host}] swarm {ver} is behind main: installed {_short(have)}, tip of main "
+                         f"{_short(tip)}; run `swarm upgrade --force` to reinstall from the tip")
+    return notes
+
+
 def run_update(host_arg: str | None, force: bool, color: bool, config_path: Path | None = None,
                which=None, out=None, channel: str | None = None) -> int:
     """Runs `swarm update`; returns the process exit code. Prints to `out` (default sys.stdout)
@@ -496,6 +568,8 @@ def run_update(host_arg: str | None, force: bool, color: bool, config_path: Path
 
     want = channel or channels.read_channel(config_path) or channels.DEFAULT_CHANNEL
     results: dict[str, dict] = {}
+    tips: dict[str, str | None] = {}   # host -> tip of main, on the main channel only
+    fkw = {"force": True} if force else {}
     for host in hosts:
         bin_ = which(host)
         try:
@@ -503,14 +577,16 @@ def run_update(host_arg: str | None, force: bool, color: bool, config_path: Path
             if not pinnable:
                 print(f"[{host}] channel: the swarm marketplace is a local path: following it as is "
                       f"(--channel does not apply)", file=out)
-                results[host] = update_claude(bin_) if host == "claude" else update_codex(bin_)
+                results[host] = update_claude(bin_, **fkw) if host == "claude" else update_codex(bin_, **fkw)
                 continue
             chan, ref, warning = channels.resolve(want, url)
             if warning:
                 print(f"swarm upgrade: [{host}] warning: {warning}", file=sys.stderr)
             print(f"[{host}] channel: {chan} ({ref or 'tip of main'})", file=out)
-            results[host] = (update_claude(bin_, ref, url) if host == "claude"
-                             else update_codex(bin_, ref, url))
+            if chan == "main" and url:
+                tips[host] = channels.tip_commit(url)
+            results[host] = (update_claude(bin_, ref, url, **fkw) if host == "claude"
+                             else update_codex(bin_, ref, url, **fkw))
         except UpdateError as exc:
             print(f"swarm update: {exc}", file=sys.stderr)
             return 1
@@ -527,8 +603,19 @@ def run_update(host_arg: str | None, force: bool, color: bool, config_path: Path
         steps.append(bootstrap.Step(f"{host} plugin", status, f"{old} -> {new}"))
     print(bootstrap.format_steps(steps, color), file=out)
 
+    if force:
+        for host in hosts:
+            r = results[host]
+            print(f"[{host}] commit: {_short(r.get('old_commit'))} -> {_short(r.get('new_commit'))}"
+                  + (f" (tip of main {_short(tips[host])})" if tips.get(host) else ""), file=out)
+
     any_changed = any(r["changed"] for r in results.values())
     if not any_changed and not force:
+        behind = _behind_notes(hosts, results, tips)
+        if behind:
+            for line in behind:
+                print(line, file=out)
+            return 0
         versions = {r["new_version"] or r["old_version"] or "unknown" for r in results.values()}
         v = versions.pop() if len(versions) == 1 else "/".join(sorted(versions))
         print(f"swarm is up to date ({v})", file=out)
@@ -564,7 +651,8 @@ def run_update(host_arg: str | None, force: bool, color: bool, config_path: Path
         if rc != 0:
             doctor_failed = True
 
-    if results.get("claude", {}).get("changed"):
+    if results.get("claude", {}).get("changed") or (
+            force and _commit_moved(results.get("claude"))):
         print("Restart your Claude sessions to pick up the new plugin.", file=out)
     codex_r = results.get("codex")
     if codex_r and codex_r["changed"] and codex_hooks_changed(codex_r["old_root"], codex_r["new_root"]):

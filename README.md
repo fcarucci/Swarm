@@ -116,6 +116,7 @@ All keys are in [config.example.toml](config.example.toml) and the
 ## Upgrading
 
 Run `swarm upgrade`, then start new host sessions; re-trust Codex `/hooks` if they changed.
+If a version was re-cut and `swarm upgrade` says you are behind main (or can't tell), run `swarm upgrade --force`: it reinstalls the plugin from the tip of main (on the release channel, the current release) for every host, keeping the board and your config.
 Upgrade every host sharing a board together. See [upgrade and migration details](docs/REFERENCE.md#upgrading-shared-boards).
 
 ## Development

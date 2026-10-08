@@ -38,6 +38,24 @@ def latest_tag(url: str, timeout: int = 30) -> str | None:
     return None
 
 
+def tip_commit(url: str, timeout: int = 30) -> str | None:
+    """The commit at the tip of main at `url` (a git URL or local repository path), or None when
+    git ls-remote fails or knows no such branch."""
+    try:
+        res = subprocess.run(["git", "ls-remote", url, "refs/heads/main"],
+                             capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL,
+                             env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if res.returncode != 0:
+        return None
+    for line in res.stdout.splitlines():
+        sha = line.split("\t")[0].strip()
+        if re.fullmatch(r"[0-9a-f]{40,64}", sha):
+            return sha
+    return None
+
+
 def resolve(channel: str, url: str, ref: str | None = None) -> tuple[str, str | None, str | None]:
     """(channel, ref, warning): the ref to pin the marketplace at (None = the default branch).
     An explicit `ref` wins. A release channel with no resolvable tag falls back to main, with a

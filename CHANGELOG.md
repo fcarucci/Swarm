@@ -13,6 +13,10 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 ### Changed
 - CI: tag and release-branch pushes no longer re-run the full test matrix (the Release workflow tests the tag).
 
+### Fixed
+
+- `swarm upgrade --force` reinstalls the plugin from the tip of main (or the current release) even when the version is unchanged, and reports the installed commit before and after; without it, a main-channel install that is behind the tip at the same version says so instead of "up to date".
+
 ## [0.2.1] - 2026-10-08
 
 ### Added

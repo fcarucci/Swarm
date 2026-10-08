@@ -188,6 +188,15 @@ An explicit `--channel` is stored as `[upgrade] channel = "release" | "main"` in
 `swarm upgrade` reads (see [First run and updates](#first-run-and-updates)); `swarm upgrade
 --channel main` stores it too.
 
+A plugin install is a versioned cache, so a version re-cut at a new commit is not refetched. On the main
+channel a plain `swarm upgrade` compares the installed plugin's commit (Claude: `gitCommitSha` in
+`installed_plugins.json`; Codex: the installed copy's own git commit, unknown when it has none; never the marketplace state) with the tip of main; when they differ at
+the same version it says it is behind and to run `swarm upgrade --force`, and when the installed commit can't
+be determined it says so. `--force` refreshes the marketplace, reinstalls the plugin for every configured host
+(Claude: `plugin uninstall --keep-data` then `install`; Codex: `plugin remove` then `plugin add`) even at an
+unchanged version, prints `[host] commit: OLD -> NEW`, then runs bootstrap/migrate/doctor. On the release
+channel it reinstalls the current release. Board data, hooks and config are kept.
+
 ## Windows
 
 Native Windows 10/11 is supported with Claude Code and Codex for Windows. Install with
@@ -2303,7 +2312,7 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `init [--no-hooks]` | create the storage if missing, the schema and the name pool. Every other command does this by itself when needed (see [Automatic initialisation](#automatic-initialisation)). The hooks ship with the plugin; `--no-hooks` is ignored |
 | `install-hooks` | obsolete: the hooks ship with the plugin (`hooks/hooks.json`, `hooks/codex-hooks.json`); prints that and writes nothing. `migrate` removes the old install's entries |
 | `bootstrap [--host claude\|codex] [--quiet]` | set the swarm up for this host: venv, launcher, config, board, host setup, migrate (see [First run and updates](#first-run-and-updates)); run automatically in the background at the first session of each plugin version. `--quiet` prints only the steps that need you |
-| `upgrade [--host claude\|codex\|both] [--channel release\|main] [--force] [--no-color]` | update the swarm marketplace and plugin for whichever of claude/codex is installed (reports old → new version) to the newest release tag, or with `--channel main` the tip of main (`--channel` is stored as `[upgrade] channel` in the config, so a plain `swarm upgrade` keeps following it; a local-path marketplace is followed as is), then `bootstrap`, `migrate` and `doctor` from the *newly installed* plugin's own `bin/swarm` (never the code currently running); "swarm is up to date (VERSION)" and nothing else when the version didn't change, unless `--force`. `migrate` always runs with `--force`; active local jobs produce a warning. Ends by saying to restart Claude sessions, and for Codex to start a new session and re-trust `/hooks` when `hooks/codex-hooks.json` changed. `update` is a hidden alias |
+| `upgrade [--host claude\|codex\|both] [--channel release\|main] [--force] [--no-color]` | update the swarm marketplace and plugin for whichever of claude/codex is installed (reports old → new version) to the newest release tag, or with `--channel main` the tip of main (`--channel` is stored as `[upgrade] channel` in the config, so a plain `swarm upgrade` keeps following it; a local-path marketplace is followed as is), then `bootstrap`, `migrate` and `doctor` from the *newly installed* plugin's own `bin/swarm` (never the code currently running); "swarm is up to date (VERSION)" and nothing else when the version didn't change, unless `--force` (which reinstalls the plugin from the tip of main, or the current release, and prints each host's commit before and after) or, on the main channel, the installed commit is behind the tip (it then says so and to run `--force`). `migrate` always runs with `--force`; active local jobs produce a warning. Ends by saying to restart Claude sessions, and for Codex to start a new session and re-trust `/hooks` when `hooks/codex-hooks.json` changed. `update` is a hidden alias |
 | `migrate [--force]` | retire the old `~/.claude/skills/swarm` install: its hooks in `~/.claude/settings.json` (backup first) and its directory (see [Moving from the old skill install](#moving-from-the-old-skill-install)). Refused while a job is active on this machine, unless `--force` |
 | `doctor [--host claude\|codex] [--no-color]` | check this machine's setup and print the fix for each problem; exit 1 if a check fails. Default host: the one it runs in (a plain terminal: Claude Code) |
 | `activate --job J [--description D] [--task T\|-] [--project P] [--session S] [--adopt-running]` | open or re-open the job and switch the board on for subagents spawned from now on; bind it to `--session`, default the calling Claude Code or Codex session; print `swarm command: <path>` and the tag lines. In Codex, refused while another job is active in the session |
