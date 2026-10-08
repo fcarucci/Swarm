@@ -24,9 +24,28 @@ The host comes from `[ci] kind = "github" | "gitea"` in `team.toml` (Gitea also 
 `token_file`, a path). Nothing is inferred. An old-style section is rewritten to `[ci]` once by
 `swarm upgrade` or `swarm init`, with a `.bak` next to it.
 
+## Events
+
+GitHub webhooks come first. The `github` source takes pushed `workflow_run`, `check_suite`, `pull_request`,
+`pull_request_review` and `issue_comment` payloads (HMAC `X-Hub-Signature-256`, checked on the raw body) and
+raises `NEEDS-REVIEW`, `REVIEW-CHANGES`, `CI-FAILED`, `CI-GREEN` and `READY-TO-LAND` with no API call,
+from the payload plus remembered state. Deliver them with `gh webhook forward` (the listener supervises it
+when `forward = true`) or a normal repo webhook when the box is public. The `gitea` source verifies HMAC
+webhooks and polls commit status as a fallback, since Gitea sends no CI webhooks. Board posts
+`BRANCH READY <branch> <sha>` become `BRANCH-READY`. Polling never runs faster than 600 s.
+
+Config, in the swarm `config.toml` (paths only, never secret values):
+
+    [ci.github]            # or [ci.gitea]; active only when `repo` is set
+    repo = "owner/name"
+    secret_file = "~/.config/me/webhook-secret"
+    token_file = "~/.config/me/ci-token"
+    forward = true         # github: run `gh webhook forward`
+    api_url = "..."        # gitea; github defaults to api.github.com
+    job = "my-job"         # optional: default every active job
+
 ## Layout
 
-- `swarm_plugin.py` registers `swarm ci`.
+- `swarm_plugin.py` registers `swarm ci` and the event sources.
 - `ci_wait.py` is the shared poller and the `status`/`wait` commands.
-- Host adapters (GitHub webhooks first, Gitea), webhook event sources and BRANCH-READY arrive from
-  the adapters branch, next to these files.
+- `ci_events.py` holds the GitHub and Gitea adapters, the webhook state machine and BRANCH-READY.

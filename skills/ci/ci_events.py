@@ -1,4 +1,4 @@
-"""CI event sources of the engineering-team plugin: Gitea, GitHub and BRANCH-READY board posts.
+"""CI event sources of the ci plugin: GitHub (callbacks first), Gitea (polled status) and BRANCH-READY board posts.
 
 Core swarm never interprets these kinds. Each source maps CI host facts to event specs
 (`dict(job, kind, key, text, to)`), addressed to the PM (`@pm`), keyed `kind:N@sha`, so a
@@ -8,6 +8,7 @@ duplicate is a no-op in `swarm event post`:
   REVIEW-CHANGES N@sha   the latest verdict for this head is CHANGES REQUIRED
   CI-FAILED N@sha ctx..  CI on the current head failed (failing contexts listed)
   READY-TO-LAND N@sha    verdict VERIFIED and CI success agree on the EXACT current head sha
+  CI-GREEN sha           every recorded CI run of a commit succeeded (ends `swarm ci wait`, no API call)
   BRANCH-READY b@sha     a board post `BRANCH READY <branch> <sha> ...`
 
 Verdicts are PR comments / reviews whose first line is `REVIEW #N @ <40 hex>: VERIFIED|CHANGES
@@ -67,6 +68,18 @@ def decide(job, n, sha, title, comments, ci, *, new_head=True):
     if state == "success" and verdict == "VERIFIED":
         out.append(spec(job, "READY-TO-LAND", n, sha))
     return out
+
+
+def ci_events(job, sha, ci, *, has_pr):
+    """Commit-level CI events straight from pushed payloads: CI-GREEN when every recorded run of
+    `sha` succeeded, and CI-FAILED when it failed and no PR is known to carry it (a PR gets the
+    PR-keyed CI-FAILED from `decide`)."""
+    state, failing = ci
+    if state == "success":
+        return [spec(job, "CI-GREEN", "", sha)]
+    if state == "failure" and not has_pr:
+        return [spec(job, "CI-FAILED", "", sha, failing[:200])]
+    return []
 
 
 def _json(req, timeout=20):
@@ -263,7 +276,7 @@ def handle_push(state, job, headers, body: bytes):
     except ValueError:
         return []
     ev = {k.lower(): v for k, v in headers.items()}.get("x-github-event", "")
-    touched, new_head = [], False
+    touched, new_head, sha_events = [], False, []
     if ev == "pull_request" and p.get("action") in NEW_HEAD_ACTIONS:
         pr = p.get("pull_request", {})
         n, sha = pr.get("number"), pr.get("head", {}).get("sha")
@@ -284,9 +297,12 @@ def handle_push(state, job, headers, body: bytes):
         sha, concl = run.get("head_sha"), run.get("conclusion")
         if sha and concl:
             state.ci.setdefault(sha, {})[str(run.get("name") or ev)] = concl
-            touched = [q.get("number") for q in run.get("pull_requests", []) if q.get("number")]
-            touched += [n for n, h in state.heads.items() if h == sha and n not in touched]
-    out = []
+            listed = [q.get("number") for q in run.get("pull_requests") or [] if q.get("number")]
+            for n in listed:   # the run itself names its PR: its head is known without any API call
+                state.heads.setdefault(n, sha)
+            touched = listed + [n for n, h in state.heads.items() if h == sha and n not in listed]
+            sha_events = ci_events(job, sha, state.ci_state(sha), has_pr=bool(touched))
+    out = list(sha_events)
     for n in touched:
         sha = state.heads.get(n)
         if sha:
@@ -300,7 +316,7 @@ def forward_argv(section, port, route="/github"):
     """argv of `gh webhook forward` (cli/gh-webhook): GitHub pushes events over an outbound websocket
     to the local listener, so a box with no public endpoint still gets callbacks. The secret is read
     from `secret_file` at launch; the config never holds the value. For the supervisor to run when
-    `[events.sources.github] forward = true`."""
+    `[ci.github] forward = true`."""
     events = section.get("forward_events") or "workflow_run,check_suite,pull_request,pull_request_review,issue_comment"
     argv = ["gh", "webhook", "forward", f"--repo={section['repo']}", f"--events={events}",
             f"--url=http://127.0.0.1:{int(port)}{route}"]

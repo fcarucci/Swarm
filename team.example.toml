@@ -49,12 +49,12 @@ evidence_command = ""
 # repository = "me/my-repo"
 # evidence_command = "project-ci --commit {sha}"
 
-# CI EVENTS (PR opened, verdict, CI result -> NEEDS-REVIEW / REVIEW-CHANGES / CI-FAILED / READY-TO-LAND,
-# and BRANCH READY board posts -> BRANCH-READY) reach the PM through `swarm event wait --to @pm`.
-# The source follows [ci] kind (gitea | github). Its listener settings live in the swarm config.toml,
-# paths only, never secret values:
-#   [events.sources.gitea]          # or [events.sources.github]
-#   repo = "owner/name"             # defaults to [ci] repository
+# CI EVENTS (PR opened, verdict, CI result -> NEEDS-REVIEW / REVIEW-CHANGES / CI-FAILED / CI-GREEN / READY-TO-LAND,
+# and BRANCH READY board posts -> BRANCH-READY) come from the `ci` plugin (skills/ci) and reach the PM
+# through `swarm event wait --to @pm`. They are configured in the swarm config.toml, NOT here: paths only,
+# never secret values:
+#   [ci.github]                     # or [ci.gitea]; the source is active only when the section has a repo
+#   repo = "owner/name"
 #   api_url = "https://git.example/api/v1"   # github: https://api.github.com by default
 #   token_file = "~/.config/me/ci-token"
 #   secret_file = "~/.config/me/webhook-secret"   # HMAC secret of the webhook

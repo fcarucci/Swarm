@@ -94,8 +94,8 @@ SHA and linear history. Commands and authentication belong to the adapter, never
 
 The PM does not poll. Keep `swarm event wait --job J --to @pm --json` armed as a harness-tracked
 background command; when it returns an event, act, `swarm event ack --job J ID`, then re-arm
-it at once. CI events come from the `gitea` or `github` event source (selected by `[ci] kind`,
-never assumed) and from `BRANCH READY ...` board posts; the dedupe key is `kind:N@sha`, so an
+it at once. CI events come from the `ci` plugin's `gitea` or `github` event source (enabled by `[ci.gitea]` /
+`[ci.github]` in the swarm config, never assumed) and from `BRANCH READY ...` board posts; the dedupe key is `kind:N@sha`, so an
 event is never raised twice for the same head. Full steps: [PM event procedure](references/pm-events.md).
 
 - `NEEDS-REVIEW N@sha`: dispatch a fresh independent reviewer from the review template and record the dispatch.

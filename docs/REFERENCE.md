@@ -1639,19 +1639,19 @@ authority and permissions still apply. Report/file refs should name immutable re
 
 ### CI events and land strategy
 
-The engineering-team plugin registers event sources `gitea`, `github` (active only when `[ci] kind`
-in `team.toml` selects it) and `branch-ready`. Each maps CI host facts to events addressed to `@pm`, key
+The `ci` plugin (`skills/ci`) registers event sources `gitea`, `github` (each active only when its `[ci.gitea]` /
+`[ci.github]` section with a `repo` exists in `config.toml`) and `branch-ready`. Each maps CI host facts to events addressed to `@pm`, key
 `kind:N@sha`: `NEEDS-REVIEW` (new head without a verdict for it), `REVIEW-CHANGES` (latest verdict for the
 head is CHANGES REQUIRED), `CI-FAILED N@sha <contexts>`, `READY-TO-LAND` (a VERIFIED verdict and CI success
 on the exact current head), and `BRANCH-READY` (a board post `BRANCH READY <branch> <sha> ...`). Verdicts are
 PR comments or reviews whose first line is `REVIEW #N @ <full-sha>: VERIFIED|CHANGES REQUIRED`. State is
 re-read from the CI host on every webhook and poll. Gitea sends no CI webhooks, so its source polls each open
-PR head's combined commit status. Config: `[events.sources.<gitea|github>]` in `config.toml`
+PR head's combined commit status. Config: `[ci.gitea]` / `[ci.github]` in `config.toml`
 (`repo`, `api_url`, `token_file`, `secret_file`, optional `job`; paths only). Webhook routes: `/gitea`,
 `/github`. GitHub is callback-first: it consumes pushed `workflow_run` (completed), `check_suite`, `pull_request`,
-`pull_request_review` and `issue_comment` webhooks and raises `CI-FAILED` / `READY-TO-LAND` from the payloads plus
+`pull_request_review` and `issue_comment` webhooks and raises `CI-FAILED`, `CI-GREEN` (every recorded run of the commit succeeded; this ends `swarm ci wait` with no API call) and `READY-TO-LAND` from the payloads plus
 remembered state (`ci-github-state.json` next to `config.toml`: PR heads, verdict lines, CI conclusions per sha;
-no secrets), with no API call. With `forward = true` in `[events.sources.github]` the listener keeps
+no secrets), with no API call. With `forward = true` in `[ci.github]` the listener keeps
 `gh webhook forward --repo=<owner/repo> --events=workflow_run,check_suite,pull_request,pull_request_review,issue_comment
 --url=http://127.0.0.1:<[events] port>/github --secret <secret_file content>` running (GitHub's cli/gh-webhook
 extension: an outbound websocket, so no public endpoint). `secret_file` is a path; its value is read at launch and is

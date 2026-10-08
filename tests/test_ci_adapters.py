@@ -1,4 +1,4 @@
-"""CI event sources of the engineering-team plugin: Gitea, GitHub, BRANCH-READY, [land] strategy."""
+"""CI adapters of the ci plugin: GitHub webhooks (callbacks first), Gitea, BRANCH-READY."""
 from __future__ import annotations
 
 import hashlib
@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent / "skills" / "engineering-team"
+ROOT = Path(__file__).resolve().parent.parent / "skills" / "ci"
 
 
 def load(name):
@@ -199,6 +199,10 @@ class PushTests(unittest.TestCase):
         return self.push("pull_request_review", {"action": "submitted", "pull_request": {"number": 3}, "review": {"body": text}})
 
     def wfrun(self, concl, sha=SHA, name="Test", prs=({"number": 3},)):
+        """PR-keyed events only; wfrun_all keeps the commit-level CI-GREEN too."""
+        return [e for e in self.wfrun_all(concl, sha, name, prs) if e["kind"] != "CI-GREEN"]
+
+    def wfrun_all(self, concl, sha=SHA, name="Test", prs=({"number": 3},)):
         return self.push("workflow_run", {"action": "completed", "workflow_run": {
             "head_sha": sha, "conclusion": concl, "name": name, "pull_request": None, "pull_requests": list(prs)}})
 
@@ -208,6 +212,12 @@ class PushTests(unittest.TestCase):
     def test_workflow_run_failure_is_ci_failed_without_api(self):
         self.opened()
         self.assertEqual(kinds(self.wfrun("failure")), [f"CI-FAILED:3@{SHA}"])
+
+    def test_workflow_run_alone_yields_ci_events_before_any_pr_event(self):
+        # no pull_request webhook seen yet: the run's own pull_requests list is enough
+        self.assertEqual(kinds(self.wfrun("failure")), [f"CI-FAILED:3@{SHA}"])
+        self.assertEqual(kinds(self.wfrun("failure", sha=OLD, prs=())), [f"CI-FAILED:@{OLD}"])
+        self.assertEqual(kinds(self.wfrun_all("success", sha="c" * 40, prs=())), [f"CI-GREEN:@{'c' * 40}"])
 
     def test_verdict_then_green_run_is_ready_to_land_either_order(self):
         self.opened()
@@ -221,7 +231,7 @@ class PushTests(unittest.TestCase):
             "head_sha": SHA, "conclusion": "success", "name": "Test", "pull_requests": [{"number": 3}]}}).encode())
         out = fe.handle_push(other, "J", {"X-GitHub-Event": "pull_request_review"}, json.dumps(
             {"action": "submitted", "pull_request": {"number": 3}, "review": {"body": f"REVIEW #3 @ {SHA}: VERIFIED"}}).encode())
-        self.assertEqual(kinds(out), [f"READY-TO-LAND:3@{SHA}"])
+        self.assertEqual([k for k in kinds(out) if not k.startswith("CI-GREEN")], [f"READY-TO-LAND:3@{SHA}"])
 
     def test_a_green_run_on_an_old_head_is_not_ready(self):
         self.opened(OLD)
@@ -241,7 +251,7 @@ class PushTests(unittest.TestCase):
         again = fe.PushState(self.state.path)
         out = fe.handle_push(again, "J", {"X-GitHub-Event": "workflow_run"}, json.dumps({"action": "completed", "workflow_run": {
             "head_sha": SHA, "conclusion": "success", "name": "Test", "pull_requests": [{"number": 3}]}}).encode())
-        self.assertEqual(kinds(out), [f"READY-TO-LAND:3@{SHA}"])
+        self.assertEqual([k for k in kinds(out) if not k.startswith("CI-GREEN")], [f"READY-TO-LAND:3@{SHA}"])
         self.assertNotIn("secret", self.state.path.read_text())
 
     def test_bad_json_and_unknown_events_are_ignored(self):
@@ -270,16 +280,15 @@ class PushTests(unittest.TestCase):
 
             def register_event_source(self, name, **kw):
                 seen[name] = kw
-        (Path(self.dir.name) / "config.toml").write_text('[events]\nport = 9000\n[events.sources.github]\nforward = true\n')
-        (Path(self.dir.name) / "team.toml").write_text('[ci]\nkind = "github"\nrepository = "o/r"\n')
-        import os
-        os.environ.pop("SWARM_TEAM_CONFIG", None)
+        (Path(self.dir.name) / "config.toml").write_text(
+            '[events]\nport = 9000\n[ci.github]\nrepo = "o/r"\nforward = true\n')
         sp.register_event_sources(Api())
         self.assertGreaterEqual(seen["github"]["poll_interval_s"], 600)
         self.assertGreaterEqual(seen["gitea"]["poll_interval_s"], 600)
         helpers = seen["github"]["helpers"]({"forward": True})
         self.assertEqual(helpers[0]["name"], "forward")
         self.assertIn("--url=http://127.0.0.1:9000/github", helpers[0]["argv"])
+        (Path(self.dir.name) / "config.toml").write_text('[ci.github]\nrepo = "o/r"\n')   # forward off
         self.assertEqual(seen["github"]["helpers"]({}), [])
 
 
@@ -291,6 +300,10 @@ class BranchReadyTests(unittest.TestCase):
 
 
 class RegistrationTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+
     def test_registers_sources_through_core_interface_and_not_without_it(self):
         sp = load("swarm_plugin")
         sources = {}
@@ -306,30 +319,39 @@ class RegistrationTests(unittest.TestCase):
         self.assertFalse(sources["gitea"]["verify"]({}, b""))      # no secret configured: reject
         sp.register_event_sources(object())                          # a core without the interface
 
-    def test_land_strategy_default_and_validation(self):
+    def test_sources_follow_ci_sections_and_a_workflow_run_needs_no_api_call(self):
+        """[ci.github] activates the source; a signed workflow_run yields CI events, urlopen never called."""
+        import unittest.mock
         sp = load("swarm_plugin")
-        with tempfile.TemporaryDirectory() as d:
-            ctx = type("C", (), {"config_dir": Path(d)})()
-            import os
-            old = os.environ.pop("SWARM_TEAM_CONFIG", None)
-            try:
-                self.assertEqual(sp.coding_settings(ctx)["land_strategy"], "rebase-ff")
-                (Path(d) / "team.toml").write_text('[land]\nstrategy = "squash-ff"\n')
-                self.assertEqual(sp.coding_settings(ctx)["land_strategy"], "squash-ff")
-                (Path(d) / "team.toml").write_text('[land]\nstrategy = "merge"\n')
-                with self.assertRaises(sp.TeamError):
-                    sp.coding_settings(ctx)
-            finally:
-                if old is not None:
-                    os.environ["SWARM_TEAM_CONFIG"] = old
+        seen = {}
 
+        class Api:
+            config_dir = Path(self.dir.name)
 
-class SkillTextTests(unittest.TestCase):
-    def test_pm_procedure_covers_every_event(self):
-        text = (ROOT / "SKILL.md").read_text()
-        for word in ("NEEDS-REVIEW", "READY-TO-LAND", "CI-FAILED", "BRANCH-READY", "swarm event wait --job J --to @pm",
-                     "rebase-ff", "squash-ff"):
-            self.assertIn(word, text)
+            def register_event_source(self, name, **kw):
+                seen[name] = kw
+        secret = Path(self.dir.name, "sec")
+        secret.write_text("s3cret\n")
+        cfg = Path(self.dir.name, "config.toml")
+        cfg.write_text("")
+        sp.register_event_sources(Api())
+        github = seen["github"]
+        body = json.dumps({"action": "completed", "workflow_run": {
+            "head_sha": SHA, "conclusion": "failure", "name": "Test", "pull_requests": [{"number": 3}]}}).encode()
+        sig = "sha256=" + hmac.new(b"s3cret", body, hashlib.sha256).hexdigest()
+        headers = {"X-GitHub-Event": "workflow_run", "X-Hub-Signature-256": sig}
+        self.assertFalse(github["verify"](headers, body))          # no [ci.github]: inactive
+        self.assertEqual(github["helpers"]({}), [])
+        cfg.write_text(f'[ci.github]\nrepo = "o/r"\nsecret_file = {json.dumps(str(secret))}\n')
+        self.assertTrue(github["verify"](headers, body))
+        self.assertFalse(github["verify"](dict(headers, **{"X-Hub-Signature-256": "sha256=00"}), body))
+        ctx = type("Ctx", (), {"board": type("B", (), {"jobs": lambda self: [type("J", (), {"job": "J", "status": "active"})()]})()})()
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=AssertionError("API call")):
+            out = github["handle"](headers, body, ctx)
+            green = github["handle"](headers, body.replace(b"failure", b"success"), ctx)
+        self.assertEqual(kinds(out), [f"CI-FAILED:3@{SHA}"])
+        self.assertEqual(kinds(green), [f"CI-GREEN:@{SHA}"])
+        self.assertTrue(all(e["job"] == "J" and e["to"] == "@pm" for e in out + green))
 
 
 if __name__ == "__main__":
