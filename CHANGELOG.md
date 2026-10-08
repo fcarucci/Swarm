@@ -6,6 +6,8 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-10-08
+
 ### Changed
 - Faster commands: the launchers (`bin/swarm`, `bin/swarm-hook`) now keep Python bytecode in `~/.local/share/swarm/pyc` (a private directory of yours; `SWARM_PYCACHE` overrides it; if it is a symlink, shared or has an ACL nothing is cached or written) instead of recompiling about 1 MB of source on every run, which took 0.2 s of each command and of each hook that reaches Python. `swarm who` drops from about 0.45 s to 0.17 s. Bootstrap removes cached bytecode of plugin versions and modules that are gone.
 - `swarm status` no longer takes 2-5 s on a large board. The auto-close sweep it runs read every message of a job up to six times to look for hand-offs, wrote the transcript retry state once per missing transcript (an fsync each) and read each idle agent's last post in its own query; hand-offs now come from one filtered query, the retry state is written once per sweep, last posts are fetched in one query and expiring blockers in one query for the whole board. About 3.2 s to 0.7 s on the live board.
