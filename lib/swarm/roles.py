@@ -17,12 +17,18 @@ def custom_role(value: object) -> str | None:
 
 
 def from_prompt(prompt: str) -> str | None:
+    """The role a spawn prompt asks for: its `[swarm role: X]` line, else a `[swarm title: Judge]`
+    line (the title the orchestrator gives the judge) means judge."""
+    title = None
     for line in prompt.splitlines():
         line = line.strip()
         if line.startswith("[swarm role:") and line.endswith("]"):
             value = line[len("[swarm role:"):-1].strip()
             return value if valid_name(value) else None
-    return None
+        if title is None and line.startswith("[swarm title:") and line.endswith("]") \
+                and line[len("[swarm title:"):-1].strip().lower() == "judge":
+            title = "judge"
+    return title
 
 
 def from_task_name(task_name: str) -> str | None:

@@ -70,7 +70,9 @@ case "${1:-}" in turn|done)
     case "$KEY" in ''|session-|*[!A-Za-z0-9_.-]*) VALID="";; esac
     # Spawn limits/model selection, follow-ups, judge/verifier checks and provenance retain
     # the ordinary path. Verifiers are never issued a skipping lease.
+    # `swarm join` and `swarm verdict` are rewritten to the caller's own identity by the Python hook.
     case "$PAYLOAD" in *spawn_agent*|*followup_task*|*SendMessage*|*\"Agent\"*|*\"Task\"*|*memory*|*remember*) VALID="";; esac
+    case "$PAYLOAD" in *swarm*join*|*swarm*verdict*) VALID="";; esac
     if [ -n "$VALID" ] && [ -d "$FP" ] && [ ! -L "$FP" ] && [ -O "$FP" ] &&
        [ -f "$FP/agent-$KEY" ] && [ ! -L "$FP/agent-$KEY" ] &&
        [ -f "$FP/live" ] && [ ! -L "$FP/live" ]; then

@@ -2646,7 +2646,7 @@ def _parser() -> argparse.ArgumentParser:
     mv.add_argument("--as", dest="name"); mv.add_argument("--key")
     mv.add_argument("--to", required=True, metavar="JOB", help="the open job it moves to")
     jn = sub.add_parser("join"); jn.add_argument("--job", required=True)
-    jn.add_argument("--key", required=True, help="stable unique id of the agent (e.g. hook agent_id)")
+    jn.add_argument("--key", help="stable unique id of the agent (e.g. hook agent_id); required")
     jn.add_argument("--role")
     seat = jn.add_mutually_exclusive_group()
     seat.add_argument("--judge", action="store_true",
@@ -2721,7 +2721,9 @@ def _parser() -> argparse.ArgumentParser:
     de.add_argument("--delete-bank", action="store_true",
                     help="delete an explicit project bank only after learnings are retained elsewhere")
     vd = sub.add_parser("verdict", help="the job's judge records whether the goal is met (posted on the board)")
-    vd.add_argument("--job", required=True); vd.add_argument("--as", dest="name", required=True)
+    vd.add_argument("--job", required=True)
+    vd.add_argument("--as", dest="name",
+                    help="the judge's name; a hook-registered subagent leaves it out (its hooks add it)")
     vd.add_argument("--artifact", help="opaque reference being judged (defaults to this judge hand-off)")
     vd.add_argument("verdict", choices=["met", "not_met"])
     vd.add_argument("reason", nargs="*", help="why (met: the words after the verdict; not_met: use --reason)")
@@ -3921,7 +3923,7 @@ def _verdict_text(args) -> tuple[str, str | None] | None:
     nxt = (getattr(args, "next_steps", None) or "").strip()
     if args.verdict == "met":
         if not reason:
-            print("a verdict needs a reason: swarm verdict --job J --as NAME met \"<why>\"", file=sys.stderr)
+            print("a verdict needs a reason: swarm verdict --job J met \"<why>\"", file=sys.stderr)
             return None
         return reason, None
     missing = [flag for flag, v in (("--reason \"<why it is not met>\"", reason),
@@ -4307,6 +4309,19 @@ def _run_command(cfg: dict, args) -> int:
 
     from swarm.board import open_board
     from swarm.spool import flush_spool, spool_post, spool_verdict
+    if args.cmd == "join" and not args.key:
+        print("swarm join: --key is required (a stable id for this agent).\n"
+              "A judge in Claude Code does NOT join: its hooks seated it when it started (the spawn "
+              "prompt carries [swarm role: judge]). Record the verdict with no join and no --as:\n"
+              f"  swarm verdict --job {args.job} met \"<reason>\"   (or not_met --reason ... --next ...)",
+              file=sys.stderr)
+        return 2
+    if args.cmd == "verdict" and not args.name:
+        print("swarm verdict: the judge's name is unknown here. A judge spawned with Claude Code hooks "
+              f"just runs `swarm verdict --job {args.job} met|not_met ...` (the hooks add its own name); "
+              "from a shell without hooks (a human, Codex) pass --as NAME, the name `swarm who` shows "
+              "for the judge.", file=sys.stderr)
+        return 2
     note_orchestrator_read(cfg, args)
     if args.cmd == "verdict" and _verdict_text(args) is None:   # refused before anything is sent or queued
         return 1

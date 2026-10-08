@@ -24,12 +24,12 @@ Read [host procedures](references/hosts.md) before activating a job or spawning 
 The engineering-team plugin supplies the coding adapter for Swarm's generic review pipeline.
 Publish `swarm done --job J --as NAME --branch B --sha S --summary "change and checks"` after
 pushing. The owner supervisor starts independent artifact-bound review and bounded fix rounds.
-Judges must record `swarm verdict --job J --as NAME --artifact branch@sha met --reason "evidence"`
+A hook-registered judge (spawned with `[swarm role: judge]` or `[swarm title: Judge]`) is seated by its hooks and records `swarm verdict --job J --artifact branch@sha met --reason "evidence"`
 (or `not_met --reason "missing" --next "fix brief"`). **Always pass `--artifact` for the exact
 hand-off inspected.** A leading `branch@sha:` in the reason is accepted for compatibility.
 A judge run outside the board (a one-off `codex exec`, a person) must still record its result with
 `swarm verdict --job J --as NAME --artifact REF met|not_met ...` (`swarm join --job J --key K --judge`
-first); otherwise the goal stays unmet and the job waits until the stale-waiting sweep closes it. Close
+first; a judge with hooks never joins and never passes `--as`: its hooks add its own name); otherwise the goal stays unmet and the job waits until the stale-waiting sweep closes it. Close
 the job as soon as the verdict is `met`.
 Judges only judge; integration, pushes and fixes belong to executors. A newer SHA on the same
 branch supersedes its earlier hand-off; separate branches keep independent verdicts.

@@ -36,6 +36,7 @@ import dataclasses
 import datetime as dt
 import re
 import json
+import shlex
 import os
 import sys
 import time
@@ -514,8 +515,9 @@ def _verifier_instructions(name: str, job: str, cfg: dict, goal: str | None = No
 
 def _judge_instructions(name: str, job: str, goal: str, cfg: dict, cap: int | None = None) -> str:
     cap = _cap(cfg, cap)
-    met = f"{_bin()} verdict --job {_q(job)} --as {_q(name)} --artifact REF met \"<short reason>\""
-    not_met = (f"{_bin()} verdict --job {_q(job)} --as {_q(name)} --artifact REF not_met --reason \"<why it is not met>\" "
+    who = "" if current_host().supports_shell_rewrite else f" --as {_q(name)}"   # the hook adds --as
+    met = f"{_bin()} verdict --job {_q(job)}{who} --artifact REF met \"<short reason>\""
+    not_met = (f"{_bin()} verdict --job {_q(job)}{who} --artifact REF not_met --reason \"<why it is not met>\" "
                f"--next \"<what to change, where, and what you will re-check>\"")
     lines = [
         f"[swarm] You are **{name}**, the JUDGE of job \"{job}\". Your only job is to decide whether "
@@ -892,18 +894,13 @@ def _shell_words(command: str):
     return words
 
 
-def own_key_command(command: str, agent_id: str, job: str | None = None) -> str | None:
-    """`command` with the --key of each real `swarm join` invocation in it replaced by
-    `agent_id`, or None when there is nothing to change. A join invocation is a command whose
-    program is `swarm` (any path) and whose first argument is `join`, found by taking the line
-    apart (quotes, echo arguments, heredocs and substitutions are never one). A join that names
-    another --job than `job` is left alone: the rewrite never moves the caller. A key that
-    is not plain text (a variable, say) is left alone too."""
+def _swarm_calls(command: str, sub: str):
+    """The argument words (see _shell_words) of each real `swarm <sub>` invocation in `command`: a
+    command whose program is `swarm` (any path) and whose first argument is `sub`. Quotes, echo
+    arguments, heredocs and substitutions are never one."""
     words = _shell_words(command)
-    if not words:
-        return None
-    edits, k = [], 0
-    while k < len(words):
+    k = 0
+    while words and k < len(words):
         end = k
         while end < len(words) and words[end] is not None:
             end += 1
@@ -911,22 +908,36 @@ def own_key_command(command: str, agent_id: str, job: str | None = None) -> str 
         k = end + 1
         while seg and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", seg[0][2]):   # VAR=value prefixes
             seg = seg[1:]
-        if len(seg) < 2 or os.path.basename(seg[0][2]) != "swarm" or seg[1][2] != "join":
-            continue
+        if len(seg) >= 2 and os.path.basename(seg[0][2]) == "swarm" and seg[1][2] == sub:
+            yield seg[2:]
+
+
+def _flag_value(args: list, m: int, flag: str):
+    """(value, token) of `flag VALUE` or `flag=VALUE` at word m of args, else (None, None)."""
+    text = args[m][2]
+    nxt = args[m + 1] if m + 1 < len(args) else None
+    if text.startswith(flag + "="):
+        return text[len(flag) + 1:], args[m]
+    if text == flag and nxt:
+        return nxt[2], nxt
+    return None, None
+
+
+def own_key_command(command: str, agent_id: str, job: str | None = None) -> str | None:
+    """`command` with the --key of each real `swarm join` invocation in it replaced by
+    `agent_id`, or None when there is nothing to change. A join that names another --job than
+    `job` is left alone: the rewrite never moves the caller. A key that is not plain text (a
+    variable, say) is left alone too."""
+    edits = []
+    for args in _swarm_calls(command, "join"):
         key = other_job = None
-        args = seg[2:]
-        for m, (_, _, text, plain) in enumerate(args):
-            nxt = args[m + 1] if m + 1 < len(args) else None
-            for flag in ("--key", "--job"):
-                value = text[len(flag) + 1:] if text.startswith(flag + "=") else \
-                    (nxt[2] if text == flag and nxt else None)
-                tok = args[m] if text.startswith(flag + "=") else nxt
-                if value is None:
-                    continue
-                if flag == "--job" and job is not None and value != job:
-                    other_job = value
-                if flag == "--key" and tok is not None and tok[3] and value != agent_id:
-                    key = (tok, text.startswith("--key="))
+        for m, (_, _, text, _) in enumerate(args):
+            value, tok = _flag_value(args, m, "--job")
+            if value is not None and job is not None and value != job:
+                other_job = value
+            value, tok = _flag_value(args, m, "--key")
+            if value is not None and tok[3] and value != agent_id:
+                key = (tok, text.startswith("--key="))
         if key is not None and other_job is None:
             tok, joined = key
             edits.append((tok[0] + (len("--key=") if joined else 0), tok[1]))
@@ -935,20 +946,57 @@ def own_key_command(command: str, agent_id: str, job: str | None = None) -> str 
     return command if edits else None
 
 
-def _reuse_identity(agent_id: str, job: str, payload: dict) -> None:
+def own_name_verdict_command(command: str, name: str, job: str | None = None) -> str | None:
+    """`command` with every real `swarm verdict` invocation made to run as `name`: a call with no
+    --as gets `--as NAME` (a judge needs no join and no --as: the hook knows who is calling), and
+    a plain --as naming someone else is replaced (it would be refused anyway). None when there is
+    nothing to change. A verdict for another --job than `job` is left alone."""
+    inserts, edits = [], []
+    for args in _swarm_calls(command, "verdict"):
+        has_as, other_job, bad = False, False, None
+        for m, (_, _, text, _) in enumerate(args):
+            value, tok = _flag_value(args, m, "--job")
+            other_job = other_job or (value is not None and job is not None and value != job)
+            value, tok = _flag_value(args, m, "--as")
+            if value is not None:
+                has_as = True
+                if tok[3] and value != name:
+                    bad = (tok, text.startswith("--as="))
+        if other_job:
+            continue
+        if bad is not None:
+            tok, joined = bad
+            edits.append((tok[0] + (len("--as=") if joined else 0), tok[1]))
+        elif not has_as and args:   # (no arguments at all: the CLI refuses it anyway)
+            inserts.append(args[0][0])
+    if not (inserts or edits):
+        return None
+    q = shlex.quote(name)
+    for a, b in sorted(edits, reverse=True):
+        command = command[:a] + q + command[b:]
+    for at in sorted(inserts, reverse=True):
+        command = command[:at] + f"--as {q} " + command[at:]
+    return command
+
+
+def _reuse_identity(agent_id: str, job: str, payload: dict, name: str | None = None) -> None:
     """A member that runs `swarm join --key X` itself would get a SECOND row (its hook identity,
     keyed by agent_id, plus X): the board would list one agent twice, one of them an idle ghost. The
     hook knows who is calling, so the call runs with --key <agent_id> instead: join then returns
-    the name the agent already has. Only where the host lets a hook rewrite a shell call, only a
-    real join invocation (own_key_command), and never a join of another job."""
+    the name the agent already has. Likewise `swarm verdict` runs as the caller's own name, so a
+    judge never needs `--as`. Only where the host lets a hook rewrite a shell call, only a real
+    join or verdict invocation, and never one of another job."""
     host = current_host()
     command = host.shell_command(payload) if agent_id and host.supports_shell_rewrite else None
     new = own_key_command(command, agent_id, job) if command else None
+    if command and name:
+        new = own_name_verdict_command(new or command, name, job) or new
     if new:
         ti = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
         _set_input_rewrite(host.input_rewrite_output({**ti, "command": new}))
-        _out("PreToolUse", "[swarm] You already have a swarm identity (your hooks joined you), so "
-                           "`swarm join` ran with it: no second name. You don't need to run join.")
+        _out("PreToolUse", "[swarm] You already have a swarm identity (your hooks joined you): "
+                           "`swarm join` runs with it (no second name) and `swarm verdict` records "
+                           "as you. You don't need to run join or pass --as.")
 
 
 def _gate_judge(board, agent_id: str, job: str, payload: dict) -> bool:
@@ -999,7 +1047,7 @@ def _gate_new_member(board, agent_id: str, bound: dict, payload: dict, cfg: dict
         return
     verifier = any(a.agent_key == agent_id and a.role == "verifier"
                    for a in board.agents(job, include_departed=False))
-    _reuse_identity(agent_id, job, payload)
+    _reuse_identity(agent_id, job, payload, name)
     if _gate_judge(board, agent_id, job, payload) and _gate_verifier(board, agent_id, verifier, payload):
         _gate_spawn(board, agent_id, name, job, payload, cfg)
 
@@ -1479,7 +1527,8 @@ def _judge_stop(board, agent_id: str, cfg: dict, payload: dict) -> bool:
                            f'Run external evidence command {command}, resolve failures, and hand off the artifact again.', artifact):
             return True
     _OUTPUT.update({'decision': 'block', 'reason':
-        f'[swarm] Judge {me.name} must record swarm verdict --job {job} --as "{me.name}"'
+        f'[swarm] Judge {me.name} must record swarm verdict --job {job}'
+        + ('' if current_host().supports_shell_rewrite else f' --as "{me.name}"')
         + (f' --artifact "{artifact}"' if artifact else '')
         + ' before stopping. Record met with evidence or not_met with --reason and --next.'})
     return False
@@ -1590,7 +1639,7 @@ def _on_event(board, event: str, agent_id: str, sid: str | None, bound: dict, un
         model = payload.get("model") or current_host().agent_model(payload, agent_id)
         if model:
             board.set_agent_runtime(agent_id, None, model)
-    _reuse_identity(agent_id, member.job, payload)
+    _reuse_identity(agent_id, member.job, payload, member.name)
     if _gate_judge(board, agent_id, member.job, payload) and \
             _gate_verifier(board, agent_id, member.verifier, payload) and \
             _gate_spawn(board, agent_id, member.name, member.job, payload, cfg):

@@ -1475,7 +1475,7 @@ runtime budgets and concurrency caps are shared with ordinary replacements.
    `status --job J` shows each artifact's verdict. A met for reference A never covers reference B,
    and a repeated hand-off of A after its verdict also needs review. The coding adapter groups
    revisions by branch: a newer SHA supersedes only that branch's earlier hand-offs.
-3. A judge records `swarm verdict --job J --as NAME --artifact REF met --reason TEXT`, or
+3. A judge records `swarm verdict --job J --artifact REF met --reason TEXT` (`--as NAME` only outside Claude Code hooks), or
    `not_met --reason TEXT --next TEXT`. **Include `--artifact REF` on every hand-off verdict.**
    When omitted, a leading `branch@sha:` in the reason supplies the artifact before the
    assigned/latest hand-off fallback; the explicit flag takes precedence. Judges only judge: tool restrictions block writes,
@@ -1643,7 +1643,7 @@ With the default review pipeline, a worker hand-off starts the judge automatical
   fixes with `--to`. It judges strictly against the goal text, including what the goal implies
   but the workers skipped. Verifiers' results are evidence, but it checks what its verdict rests
   on itself. When confident, it records a verdict:
-  `swarm verdict --job J --as NAME met|not_met "<short reason>"`.
+  `swarm verdict --job J met|not_met "<short reason>"` (the hooks run it as the judge's own name; where they cannot rewrite a call, e.g. Codex, `--as NAME` is added).
 - **What workers are told.** The goal, who the judge is (or that one is coming), and that the
   job isn't done until the judge's verdict is `met`.
 - **Verdicts.** Only the job's active judge can record one; anyone else is refused (exit 1).
@@ -2310,7 +2310,7 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `activate --job J --attach [--session S] [--adopt-running]` | bind this session to a job that is already active, without reopening it (see [One job, both hosts](#one-job-both-hosts)) |
 | `activate … --goal G\|-` | give the job a goal, judged by one judge agent; the tag lines include `[swarm role: judge]` |
 | `deactivate --job J [--status completed\|cancelled\|failed] [--outcome O] [--force] [--delete-bank]` | switch the board off and close the job (default `completed`). A job with a goal completes only with the judge's `met` verdict, or with `--force` (recorded). On an already closed (e.g. auto-closed) job it replaces the status and outcome |
-| `verdict --job J --as NAME [--artifact REF] met\|not_met REASON...` | the job's judge records an artifact-bound verdict and posts it; anyone else is refused; spooled when the board is unreachable |
+| `verdict --job J [--as NAME] [--artifact REF] met\|not_met REASON...` | the job's judge records an artifact-bound verdict and posts it; anyone else is refused; spooled when the board is unreachable |
 | `done --job J --as NAME [--artifact REF] [--summary TEXT]` | hand off work for independent judging; `--branch B --sha S` is the coding alias |
 | `wait --job J [--for DURATION \| --until TIME] --on WHAT...` | mark an open job as waiting for something; shown as `waiting` with the reason and, when bounded, its end. `--for 90m` (`h`/`m`/`s`, bare = minutes) or `--until` (a duration, a time of day such as `17:30`, or `2026-10-06 09:00`) bounds it. A bounded wait that has not ended protects the job from the orphan rule and the stall limits (including `goal_stall_hours`); once it ends the job is judged as not waiting, and the end counts as progress. An unbounded wait is not orphaned; stall limits still apply. A board read by the orchestrating session (`status --job`, `who`, `read`, `tail --job`) counts as contact for liveness |
 | `blockers --job J [--open\|--all]` | list open blockers, or include resolved/expired history with `--all` |

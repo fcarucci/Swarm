@@ -97,8 +97,8 @@ class JudgeHookTests(GoalEnv):
         self.assertIn(f"Goal: {GOAL}", ctx)
         self.assertIn("You don't do the work", ctx)
         self.assertIn("Judge strictly against the goal text", ctx)
-        self.assertIn(f"verdict --job 'J' --as '{name}' --artifact REF met \"<short reason>\"", ctx)
-        self.assertIn(f"verdict --job 'J' --as '{name}' --artifact REF not_met --reason \"<why it is not met>\" "
+        self.assertIn(f"verdict --job 'J' --artifact REF met \"<short reason>\"", ctx)
+        self.assertIn(f"verdict --job 'J' --artifact REF not_met --reason \"<why it is not met>\" "
                       f"--next \"<what to change, where, and what you will re-check>\"", ctx)
         self.assertIn("REFUSED without both --reason", ctx)
         self.assertIn("Judges only judge: never edit, fix, integrate, push or spawn workers", ctx)

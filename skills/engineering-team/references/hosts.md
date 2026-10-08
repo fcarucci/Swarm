@@ -262,10 +262,10 @@ before dispatch. Report an unrecoverable blocker with evidence and the decision 
 ## 6. Complete only on matching evidence
 
 Use one built-in judge only for a job activated with `--goal`; PM schedules it at root.
-The judge posts its verdict through the CLI under its assigned name, for example:
+The judge posts its verdict through the CLI under its assigned name. In Claude Code its hooks add the name (no `join`, no `--as`); on a host without hooks add `--as "Judge name"`. For example:
 
 ```sh
-swarm verdict --job J --as "Judge name" met "candidate=<manifest-id> req=<revision>; evidence docs/team/acceptance.md"
+swarm verdict --job J met "candidate=<manifest-id> req=<revision>; evidence docs/team/acceptance.md"
 ```
 
 A `not_met` verdict returns to PM for owner assignment, repair, review, and recheck.

@@ -279,12 +279,12 @@ user asks for one. Don't run duplicate jobs: merge similar ones (`swarm job merg
      References are opaque: a report path, deployment id, URL, or coding `branch@sha`.
      The supervisor starts a judge on each new hand-off, reusing the job's single judge seat
      between artifacts. You may also seat a judge explicitly with `[swarm role: judge]`.
-     **A judge run outside the board** (a one-off `codex exec`, another tool, a person) **MUST
+     **A judge spawned in Claude Code** (prompt carries `[swarm role: judge]` or `[swarm title: Judge]`) is seated by its hooks at its first tool call. It runs **no `swarm join` and no `--as`**: `swarm verdict --job J --artifact REF met "reason"` is the whole command, and the hooks run it as the judge's own name. (`join --key` without `--key` stays an error.) **A judge run outside the board** (a one-off `codex exec`, another tool, a person) **MUST
      record its result with `swarm verdict --job J --as NAME ...`** (seat it first with
      `swarm join --job J --key K --judge`). A verdict only in its own output is invisible to the
      job: the goal stays unmet and the job waits for ever. As soon as the verdict is `met`, the
      orchestrator closes the job (`learn`, then `deactivate`); do not leave it waiting.
-     **Judge seat handover:** a new judge (a fix round's, tagged `[swarm role: judge]` or `swarm join --judge`)
+     **Judge seat handover:** a new judge (a fix round's, tagged `[swarm role: judge]` or `[swarm title: Judge]`, or `swarm join --judge`)
      takes the seat itself when the previous judge completed, left or died (no contact for `dead_minutes`);
      a live judge keeps it. Always record as yourself: never use `--as` another agent.
      Judges only inspect and record `swarm verdict --job J --as NAME --artifact REF met
@@ -465,7 +465,7 @@ way its own host does it. `swarm status --job <job>` shows each agent's HOST and
 | `activate --job J --attach [--session S]` | bind this session to a job that is already active (e.g. from the other host) without reopening it; see [One job, both hosts](#one-job-both-hosts) |
 | `activate … --goal G\|-` | give the job a goal: one judge (`[swarm role: judge]` in its prompt) decides when it is met; prints both tag lines |
 | `deactivate --job J [--status S] [--outcome O] [--force] [--delete-bank]` | switch the board off and close the job; `completed` needs the judge's `met` verdict when the job has a goal, unless `--force` (recorded). On a job that is already closed (e.g. auto-closed) it replaces the status and outcome |
-| `verdict --job J --as NAME [--artifact REF] met\|not_met "reason"` | the job's judge only (a judge outside the board must run this too, or the job waits): record the verdict on its goal and post it on the board (queued like `post` when the board is unreachable; a non-judge is refused) |
+| `verdict --job J [--as NAME] [--artifact REF] met\|not_met "reason"` | the job's judge only (a judge with Claude Code hooks leaves `--as` out: its hooks add its own name; other hosts and humans pass it) (a judge outside the board must run this too, or the job waits): record the verdict on its goal and post it on the board (queued like `post` when the board is unreachable; a non-judge is refused) |
 | `wait --job J --on "<what>" [--for DURATION\|--until TIME]` / `resume --job J` | mark an open job as waiting for something (shown as `waiting` with the reason; `--for 90m` or `--until 17:30` bounds it, and a bounded wait that has not ended protects the job from auto-close) / working again (an agent joining does this too) |
 | `blockers --job J [--open\|--all]` | list open blockers, or include resolved/expired history with `--all` |
 | `blocker resolve ID [--how TEXT]` / `blocker comment ID TEXT...` | resolve a blocker with an audit reason, or append a comment |
