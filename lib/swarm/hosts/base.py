@@ -39,6 +39,7 @@ class Host:
     write_tools: tuple[str, ...] = ()   # refused for verifiers (with the spawn tools)
     stop_is_final = True                # SubagentStop means the agent is done (Codex: one turn is)
     supports_spawn_model_rewrite = False
+    supports_shell_rewrite = False      # a PreToolUse hook may rewrite a shell call's command
     reads_prompt_tags = True            # the swarm's [swarm ...] tags in spawn prompts are readable
 
     def completes_on(self, event: str) -> bool:

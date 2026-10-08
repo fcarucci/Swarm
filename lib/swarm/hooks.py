@@ -855,6 +855,31 @@ def _gate_spawn(board, agent_id: str, name: str, job: str, payload: dict, cfg: d
     return False
 
 
+_JOIN_KEY = re.compile(r"""(?P<head>\bswarm\s+join\b[^;&|\n]*?--key(?:=|[ \t]+))(?P<q>['"]?)(?P<key>[^\s'";&|]+)(?P=q)""")
+
+
+def own_key_command(command: str, agent_id: str) -> str | None:
+    """`command` with the --key of every `swarm join` in it replaced by `agent_id`, or None when
+    there is nothing to change (no join, or it already uses agent_id)."""
+    new = _JOIN_KEY.sub(lambda m: m["head"] + agent_id if m["key"] != agent_id else m[0], command)
+    return new if new != command else None
+
+
+def _reuse_identity(agent_id: str, payload: dict) -> None:
+    """A member that runs `swarm join --key X` itself would get a SECOND row (its hook identity,
+    keyed by agent_id, plus X): the board would list one agent twice, one of them an idle ghost. The
+    hook knows who is calling, so the call runs with --key <agent_id> instead: join then returns
+    the name the agent already has. Only where the host lets a hook rewrite a shell call."""
+    host = current_host()
+    command = host.shell_command(payload) if agent_id and host.supports_shell_rewrite else None
+    new = own_key_command(command, agent_id) if command else None
+    if new:
+        ti = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
+        _set_input_rewrite(host.input_rewrite_output({**ti, "command": new}))
+        _out("PreToolUse", f"[swarm] You already have a swarm identity (your hooks joined you), so "
+                           f"`swarm join` ran with it: no second name. You don't need to run join.")
+
+
 def _gate_judge(board, agent_id: str, job: str, payload: dict) -> bool:
     me = next((a for a in board.agents(job, include_departed=False) if a.agent_key == agent_id), None)
     if me is None or me.role != "judge":
@@ -903,6 +928,7 @@ def _gate_new_member(board, agent_id: str, bound: dict, payload: dict, cfg: dict
         return
     verifier = any(a.agent_key == agent_id and a.role == "verifier"
                    for a in board.agents(job, include_departed=False))
+    _reuse_identity(agent_id, payload)
     if _gate_judge(board, agent_id, job, payload) and _gate_verifier(board, agent_id, verifier, payload):
         _gate_spawn(board, agent_id, name, job, payload, cfg)
 
@@ -1493,6 +1519,7 @@ def _on_event(board, event: str, agent_id: str, sid: str | None, bound: dict, un
         model = payload.get("model") or current_host().agent_model(payload, agent_id)
         if model:
             board.set_agent_runtime(agent_id, None, model)
+    _reuse_identity(agent_id, payload)
     if _gate_judge(board, agent_id, member.job, payload) and \
             _gate_verifier(board, agent_id, member.verifier, payload) and \
             _gate_spawn(board, agent_id, member.name, member.job, payload, cfg):

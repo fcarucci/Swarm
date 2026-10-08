@@ -59,6 +59,7 @@ from swarm.paths import PLUGIN_ROOT as SKILL_DIR  # noqa: E402  (the old name, k
 # a name or a job becomes visible notation instead of terminal input or a forged line.
 from swarm.textsafe import term_safe  # noqa: E402  (stdlib-only)
 from swarm import compat
+from swarm import agentview  # noqa: E402  (stdlib-only)
 DEFAULT_CONFIG = Path(os.environ.get("SWARM_CONFIG", "~/.config/swarm/config.toml")).expanduser()
 
 # The Postgres defaults before they became "swarm" / "swarm_board". A config that has a
@@ -713,7 +714,7 @@ def _say_closed(closed) -> None:
 NAME_PALETTE = (31, 32, 33, 34, 35, 36, 91, 92, 93, 94, 95, 96)
 STATUS_COLORS = {"running": 32, "started": 36, "idle": 33, "completed": 34, "active": 32,
                  "dead": 31, "failed": 31, "left": 90, "cancelled": 90, "waiting": 35, "paused": 35,
-                 "waiting (goal not met)": 35}   # (board.WAITING_GOAL)
+                 "waiting (goal not met)": 35, "finished": 34, "standby": 90, "away": 90}   # (board.WAITING_GOAL; agentview)
 
 
 def _sgr(code: int, text: str) -> str:
@@ -1049,11 +1050,24 @@ def jobs_overview(board, include_closed: bool, color: bool, sup: dict | None = N
     table = [[j.job, _job_status_word(board, j, now), str(j.agents), str(j.running + j.started), str(j.idle),
               str(j.completed), str(j.dead_or_left), str(j.messages), _ago(j.activated_at, now),
               _ago(j.last_activity_at, now), _ago(j.finished_at, now), _verdict_word(j),
-              _waiting_word(j, now), j.description or ""]
+              _waiting_word(j, now), _workers_cell(board, j), j.description or ""]
              for j in rows]
     return _table(["JOB", "STATUS", "AGENTS", "RUNNING", "IDLE", "DONE", "LEFT/DEAD", "MSGS",
-                   "ACTIVATED", "LAST ACTIVITY", "FINISHED", "VERDICT", "WAITING ON", "DESCRIPTION"],
+                   "ACTIVATED", "LAST ACTIVITY", "FINISHED", "VERDICT", "WAITING ON", "WORKERS", "DESCRIPTION"],
                   table, color, status_col=1)
+
+
+def _rollup_text(board, job: str, now=None) -> str:
+    """The truthful agents rollup of a job: "agents: 1 working, 1 waiting (on CI), 3 finished, 0 lost"."""
+    rows = agentview.annotate(board, job, board.agents(job), now)
+    return "agents: " + agentview.rollup(rows).text()
+
+
+def _workers_cell(board, j) -> str:
+    """The WORKERS column: the rollup of an open job's agents (orchestrators not counted), "-" once closed."""
+    if j.status not in ("active", "paused"):
+        return "-"
+    return agentview.rollup(agentview.annotate(board, j.job, board.agents(j.job))).short()
 
 
 def _verdict_word(j) -> str:
@@ -1104,6 +1118,8 @@ def job_detail(board, job: str, color: bool, recent_minutes: int | None = None, 
     sup_line = _supervise_line(board, j, sup)
     head = [f"job        {ts(job)}  [{_paint_status(shown, shown, color)}]", activated,
             f"activity   {j.messages} messages, last {_ago(j.last_activity_at, now)}"]
+    if j.agents:
+        head.append("agents     " + _rollup_text(board, job, now).removeprefix("agents: "))
     # (field value, its line): a line is shown only when its field is set.
     optional = ((j.waiting_on, f"waiting    on {ts(j.waiting_on)}, since {_ago(j.waiting_since, now)}"
                                    + (f", until {j.waiting_until.astimezone().strftime('%Y-%m-%d %H:%M')} "
@@ -1174,6 +1190,7 @@ def agents_table(board, job: str, color: bool, now, recent_minutes: int | None =
         rows, hidden = _recent_agents(board.agents(job), now, recent_minutes)
     if not rows and not hidden:
         return _empty_agents_note(board, job, now)
+    rows = agentview.annotate(board, job, rows, now)   # the shown status: finished, waiting, orchestrator
     attempts = {r.new_agent_key: r.attempt for r in board.restarts(job=job) if r.new_agent_key}
 
     def _status_cell(a):
@@ -2036,7 +2053,7 @@ def _fit(text: str, width: int) -> str:
 def _compact_agent_line(a, width: int, color: bool) -> str:
     """One agent, at most `width` columns: name [judge|verifier] status model tool. Under
     pressure the tool is cut (or dropped) first, then the model, then the name is cut."""
-    name = term_safe(a.name) + (f" [{a.role}]" if a.role in ("judge", "verifier") else "")
+    name = term_safe(a.name) + (f" [{a.role}]" if a.role in ("judge", "verifier", agentview.ORCHESTRATOR) else "")
     status = term_safe(a.left_reason if a.ended_at is not None and a.left_reason else a.status)
     model, tool = term_safe(_short_model(a.model)), term_safe(a.current_tool or "")
     room = width - 2
@@ -2086,7 +2103,11 @@ def _compact_frame(board, job: str | None, color: bool, view: dict, rows: list |
             agents, hidden = board.watch_agents(j.job, recent)
         else:
             agents, hidden = _recent_agents(board.agents(j.job), now, recent)
+        agents = agentview.annotate(board, j.job, agents, now)
         out += [_compact_agent_line(a, NATURAL, color) for a in agents]
+        if agents:
+            line = _rollup_text(board, j.job, now)
+            out.append("  " + (_sgr(2, line) if color else line))
         if not agents:
             out.append("  " + _empty_agents_note(board, j.job, now))
         if hidden:
@@ -3939,7 +3960,7 @@ def _board_read(board, cfg: dict, args) -> None:
 
 
 def _board_who(board, cfg: dict, args) -> None:
-    rows = board.agents(args.job, include_departed=False)
+    rows = agentview.annotate(board, args.job, board.agents(args.job, include_departed=False))
     if not rows:
         note = _empty_agents_note(board, args.job, board.now())
         if note != "(no agents yet)":
@@ -4030,7 +4051,7 @@ def _board_join(board, cfg: dict, args) -> int:
     """Allocate (or return) the agent's name. --judge / --verifier give agents that run outside
     Claude Code the seat the hooks give a tagged subagent: they have no hooks, so the CLI is how
     they read, post and record verdicts."""
-    name = board.allocate_name(args.key, args.job, args.role)
+    name = board.allocate_name(args.key, args.job, agentview.default_role(args.key, args.role))
     if board.active_agent_name(args.key) is None:   # allocate_name never revives a stuck close
         print(f"refused: {name} ({args.key}) was closed as stuck by the swarm supervisor and "
               f"can't rejoin: its replacement does the work", file=sys.stderr)

@@ -1892,6 +1892,9 @@ FINISHED, VERDICT (`-` no goal, `none` none yet, `met`, `not_met`; `*` completed
 `--force`), WAITING ON and DESCRIPTION. Before the table it runs the [auto-close](#auto-close)
 sweep and prints one `<job>: <outcome>` line for each job it closed.
 
+What an agent's status column and the `agents` rollup show is decided from more than hook contact (`lib/swarm/agentview.py`; nothing extra is stored). For an agent the clock calls idle or dead:
+`finished` if its last post starts with DONE, VERIFIED or FAILED, if it is the judge that recorded a `met` verdict, or if the job's goal was met after its last contact; `waiting` if it is idle and the job waits on something (`swarm wait --on`, an open blocker) or its last post says it waits (a bounded, unexpired `swarm wait --for/--until` also covers a long-silent agent); `dead` only when it was silent while it still owed work (no hand-off, no verdict, no wait); otherwise `idle`. Role `orchestrator` (a `swarm join` key named `orchestrator` or `orchestrator-N` gets it unless `--role` says otherwise) shows `standby`/`away` and is not counted as a worker. The rollup is `N working, N waiting (on what), N finished, N lost`, plus `N idle (no reason given)` when there are some. A hook-registered Claude subagent that runs `swarm join --key X` is joined with its own key instead (its hook rewrites the call), so it keeps one row.
+
 `status --job J` shows the job's header: status, when and by whom it was activated and its
 session, activity, what it waits on, when it finished (and who closed it: `(auto-closed; activate
 reopens it)` or `by <user>`), the description, project, task, goal and the judge's latest

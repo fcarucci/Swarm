@@ -68,6 +68,7 @@ class ClaudeHost(Host):
     write_tools = ("Edit", "Write", "MultiEdit", "NotebookEdit")
     stop_is_final = True
     supports_spawn_model_rewrite = True
+    supports_shell_rewrite = True
 
     def spawn_call(self, tool_input: dict) -> SpawnCall:
         ti = tool_input if isinstance(tool_input, dict) else {}
