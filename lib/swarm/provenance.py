@@ -630,7 +630,7 @@ def new_document_id() -> str:
 def output_tag(document_id: str, project: str | None) -> str:
     """What `swarm remember` appends to every line that stored or queued a memory; detect()
     reads it back from the tool call's output. ValueError for a document id or project that
-    could forge a second tag (quotes, brackets, control characters): cmd_remember checks the
+    could fake a second tag (quotes, brackets, control characters): cmd_remember checks the
     project before storing anything, this is the second line of defence."""
     from swarm.textsafe import has_controls
     project = project or ""

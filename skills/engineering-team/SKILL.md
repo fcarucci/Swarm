@@ -35,13 +35,13 @@ Judges only judge; integration, pushes and fixes belong to executors. A newer SH
 branch supersedes its earlier hand-off; separate branches keep independent verdicts.
 A separate INTEGRATOR rebases the branch onto the latest target locally with `git rebase`,
 then uses fast-forward/push of the rebased branch. Open a Merge Request / Pull Request where
-supported as the review and CI vehicle; without a forge/request, push the rebased branch directly.
+supported as the review and CI vehicle; without a CI host/request, push the rebased branch directly.
 A changed SHA needs a new hand-off and judge verdict. Require a met verdict and the project's
 CI green on the exact rebased SHA before advancing the target. Push all remotes/push URLs,
 delete the source branch after successful integration, and post `INTEGRATED branch@sha`.
 Non-trivial conflicts hand back to a worker through `FINALIZE_BLOCKED`. Configure `[pipeline]
-integrate`, `target_branch`, `delete_branch` and a separate `[forge]` adapter in `team.toml`,
-with optional per-repository overrides. Select the forge explicitly; commands belong to its adapter.
+integrate`, `target_branch`, `delete_branch` and a separate `[ci]` adapter in `team.toml`,
+with optional per-repository overrides. Select the CI host explicitly; commands belong to its adapter.
 See [review pipeline](../../docs/REFERENCE.md#review-pipeline) and `team.example.toml`.
 
 - Address by role: `swarm post --to @EL|@PM|@product|@QA|@judge|@build_engineer`, `@PM` means the invoking project manager and `@product` the optional product manager; never by display name; an unknown role or one with no holder is rejected. Send trivial messages straight to the peer, not through EL.
@@ -51,8 +51,22 @@ See [review pipeline](../../docs/REFERENCE.md#review-pipeline) and `team.example
 - Briefs state what is authorized and what is not; secrets are referenced by path only ([recovery](references/recovery.md)).
 - Final reports and `DONE:` lines follow the hand-off contract in [gates](references/gates.md).
 
+## Waiting for CI
+
+Agents never watch CI with `gh`. Every agent on a box that ran its own `gh run watch` (3 s polling) burned the
+whole 5000/h GitHub API budget in minutes. **wait for CI ONLY with `swarm ci wait --repo OWNER/REPO --sha <exact head> [--timeout 90m]` (exit 0 green, 1 failed with the failing jobs, 124 timeout); `swarm ci status` for a one-off look. Never `gh run watch`, never a `gh run list` loop.**
+`swarm ci` is budget-safe: one shared cache and one poller per box (`~/.cache/swarm/ci/OWNER/REPO/SHA.json`), at most
+one CI host call per repo per 60 s across all agents, backoff 60/120/300 s on queued runs, 10 min when under 500 calls
+remain, and a fall back to the public API on a 403 (it says so). When the event core is installed and a CI event
+(`CI-FAILED`, `READY-TO-LAND`) for that exact SHA arrives, the wait returns from the event without polling.
+The CI host comes from `[ci] kind` (`github` or `gitea`; for Gitea set `api_url` and `token_file`, a path).
+Pass the exact head SHA of the change (never a branch name), and re-run it with the new SHA after every push.
+Put this rule in **every worker, engineer and reviewer brief** and in every spawn prompt that mentions CI:
+`CI: wait for CI ONLY with swarm ci wait --repo OWNER/REPO --sha <exact head> [--timeout 90m] (exit 0 green, 1 failed with the failing jobs, 124 timeout); swarm ci status for a one-off look. Never gh run watch, never a gh run list loop.`
+
 Don't:
 
+- watch CI with `gh run watch`, a `gh run list` loop or any direct `gh`/API polling: use `swarm ci wait`;
 - use PM polling as the primary trigger for review or integration; react to change events and keep polling only as a safety net;
 - pin an integration watcher per change by hand; run one loop keyed on the head sha;
 - keep verdicts only on the board;
@@ -65,9 +79,9 @@ Don't:
 Do not call a host validated because these instructions exist or checkout unit tests pass. A host needs the installed custom-role capability and an independent behavioral run. If research tools, an independent reviewer, a safe writer handoff, or a required host capability are unavailable, record the specific blocker and continue independent work that remains possible.
 
 
-## Forge adapters
+## CI adapters
 
-`[forge] kind = "github"|"gitea"|"gitlab"|"none"` selects the adapter explicitly; the default
+`[ci] kind = "github"|"gitea"|"gitlab"|"none"` selects the adapter explicitly; the default
 is `none`. Set `evidence_command` to the project's CI checker with `{sha}`; zero exit status
 must mean all required checks passed on that exact rebased SHA, never a latest-branch run.
 GitHub has a built-in `gh run list --commit SHA` checker and uses `gh pr create/view` for PRs.
@@ -75,3 +89,21 @@ Gitea uses `tea`/API for MRs/PRs and configured CI checks; GitLab uses `glab`/AP
 configured CI checks. `none` uses a configured project CI command and direct pushes.
 An absent CI checker holds integration. Request completion must preserve the approved rebased
 SHA and linear history. Commands and authentication belong to the adapter, never generic core.
+
+## PM procedure per event
+
+The PM does not poll. Keep `swarm event wait --job J --to @pm --json` armed as a harness-tracked
+background command; when it returns an event, act, `swarm event ack --job J ID`, then re-arm
+it at once. CI events come from the `gitea` or `github` event source (selected by `[ci] kind`,
+never assumed) and from `BRANCH READY ...` board posts; the dedupe key is `kind:N@sha`, so an
+event is never raised twice for the same head. Full steps: [PM event procedure](references/pm-events.md).
+
+- `NEEDS-REVIEW N@sha`: dispatch a fresh independent reviewer from the review template and record the dispatch.
+- `BRANCH-READY branch@sha`: start review, as for NEEDS-REVIEW.
+- `REVIEW-CHANGES N@sha`: send the findings back to the coder.
+- `CI-FAILED N@sha <contexts>`: read the failing logs, diagnose, then send it back to the coder with the cause.
+- `READY-TO-LAND N@sha`: land per `[land] strategy`, verify the landed tree equals the reviewed head's tree, close the PR and its issue.
+
+`[land] strategy` in `team.toml` is per project: `rebase-ff` (default; rebase, then fast-forward, no
+squash and no merge commit) or `squash-ff` (one squashed commit, then fast-forward). Never force-push
+the target branch.

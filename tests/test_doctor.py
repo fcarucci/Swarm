@@ -413,7 +413,7 @@ class ExposureDoctorTests(unittest.TestCase):
         c = self.checks()["board location"]
         self.assertIs(c.ok, False)
         self.assertIn(str(work), c.detail)
-        self.assertIn("forge", c.detail)
+        self.assertIn("fake", c.detail)
         self.roots(self.home / ".local/state/swarm/spool")
         self.assertIs(self.checks()["board location"].ok, True)
         self.write_cfg(extra="[codex]\nboard_writable = true\n")           # opted in: still a FAIL, explained

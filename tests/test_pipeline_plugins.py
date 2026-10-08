@@ -36,7 +36,7 @@ class PipelineRecipeTests(TeamEnv):
         self.assertTrue(recipe["enabled"])
         self.assertEqual(recipe["artifact_group"], "feat/result")
 
-    def test_default_recipe_is_forge_agnostic_and_rebases_before_integration(self):
+    def test_default_recipe_is_ci_agnostic_and_rebases_before_integration(self):
         recipe = self.recipe("feat/result@" + self.sha)
         text = recipe["finalize"]
         self.assertIn("git rebase", text)
@@ -50,10 +50,10 @@ class PipelineRecipeTests(TeamEnv):
             self.assertFalse(recipe["evidence_check"](str(self.tmp)))
         run.assert_not_called()
 
-    def test_configured_forges_use_project_ci_command_on_exact_sha(self):
+    def test_configured_ci_hosts_use_project_ci_command_on_exact_sha(self):
         for kind in ("gitea", "gitlab", "none"):
             with self.subTest(kind=kind):
-                self.team_toml.write_text('[forge]\nkind = "' + kind +
+                self.team_toml.write_text('[ci]\nkind = "' + kind +
                                           '"\nevidence_command = "project-ci {sha}"\n')
                 recipe = self.recipe("feat/result@" + self.sha)
                 self.assertEqual(recipe["evidence_command"], "project-ci " + self.sha)
@@ -64,7 +64,7 @@ class PipelineRecipeTests(TeamEnv):
                     self.assertFalse(recipe["evidence_check"](str(self.tmp)))
                 self.assertNotIn("gh ", recipe["finalize"])
                 if kind != "none":
-                    self.assertIn("Forge adapter: " + kind, recipe["finalize"])
+                    self.assertIn("CI adapter: " + kind, recipe["finalize"])
 
     def test_project_ci_command_executes_and_rejects_wrong_sha(self):
         import sys
@@ -72,25 +72,25 @@ class PipelineRecipeTests(TeamEnv):
         checker.write_text("import sys\nsys.exit(0 if sys.argv[1] == " + repr(self.sha) + " else 1)\n")
         # Double quotes also work with the native Windows command shell.
         command = '"' + Path(sys.executable).as_posix() + '" "' + checker.as_posix() + '" {sha}'
-        self.team_toml.write_text('[forge]\nkind = "none"\nevidence_command = ' + json.dumps(command) + '\n')
+        self.team_toml.write_text('[ci]\nkind = "none"\nevidence_command = ' + json.dumps(command) + '\n')
         self.assertTrue(self.recipe("feat/result@" + self.sha)["evidence_check"](str(self.tmp)))
         self.assertFalse(self.recipe("feat/result@" + "b" * 40)["evidence_check"](str(self.tmp)))
 
-    def test_new_target_key_and_repository_forge_override(self):
+    def test_new_target_key_and_repository_ci_override(self):
         self.team_toml.write_text('[pipeline]\nmerge_target = "old"\ntarget_branch = "main"\n'
-                                  '[forge]\nkind = "github"\n'
-                                  '[repositories.' + json.dumps(str(self.tmp)) + '.forge]\n'
+                                  '[ci]\nkind = "github"\n'
+                                  '[repositories.' + json.dumps(str(self.tmp)) + '.ci]\n'
                                   'kind = "gitea"\nevidence_command = "ci {sha}"\n')
         with mock.patch("swarm.supervisor.orphans.local_record", return_value=mock.Mock(cwd=str(self.tmp), workdir=None)):
             recipe = self.recipe("feat/result@" + self.sha)
         self.assertIn("onto main", recipe["finalize"])
-        self.assertIn("Forge adapter: gitea", recipe["finalize"])
+        self.assertIn("CI adapter: gitea", recipe["finalize"])
         self.assertNotIn("gh ", recipe["finalize"] + recipe["evidence_command"])
         self.assertEqual(recipe["evidence_command"], "ci " + self.sha)
 
-    def test_bad_forge_config_and_ci_without_sha_fail_closed(self):
-        for content in ('[forge]\nkind = "unknown"\n',
-                        '[forge]\nkind = "gitea"\nevidence_command = "check-latest"\n'):
+    def test_bad_ci_config_and_ci_without_sha_fail_closed(self):
+        for content in ('[ci]\nkind = "unknown"\n',
+                        '[ci]\nkind = "gitea"\nevidence_command = "check-latest"\n'):
             self.team_toml.write_text(content)
             with self.assertRaises(ValueError):
                 self.recipe("feat/result@" + self.sha)
@@ -107,7 +107,7 @@ class PipelineRecipeTests(TeamEnv):
             self.assertEqual(adapter.github_repository(str(self.tmp)), 'fcarucci/Swarm')
 
     def test_pending_red_absent_and_wrong_sha_never_pass_launch_gate(self):
-        self.team_toml.write_text('[forge]\nkind = "github"\n')
+        self.team_toml.write_text('[ci]\nkind = "github"\n')
         check = self.recipe("feat/result@" + self.sha)["evidence_check"]
         for runs in ([], [{"headSha": self.sha, "status": "queued", "conclusion": None}],
                      [{"headSha": self.sha, "status": "completed", "conclusion": "failure"}],
@@ -128,7 +128,7 @@ class PipelineRecipeTests(TeamEnv):
         self.assertIn("onto release", recipe["finalize"])
         self.assertEqual(recipe["evidence_command"], "check " + self.sha)
         self.assertNotIn("delete feat/result", recipe["finalize"])
-        self.team_toml.write_text('[pipeline]\nmerge_target = "main"\n[forge]\nkind = "github"\n'
+        self.team_toml.write_text('[pipeline]\nmerge_target = "main"\n[ci]\nkind = "github"\n'
                                   '[repositories."' + str(self.tmp).replace('\\', '\\\\') + '"]\n'
                                   'repository = "owner/repo"\nmerge_target = "release"\n')
         with mock.patch("swarm.supervisor.orphans.local_record", return_value=mock.Mock(cwd=str(self.tmp), workdir=None)):

@@ -932,7 +932,7 @@ class PostgresBoard(SqlBlockers, SqlEvents, Board):
 
     @classmethod
     def setup(cls, cfg: dict, names: Mapping[str, Sequence[str]]) -> SetupResult:
-        names = valid_pool(names)   # a name that could forge context is never handed out
+        names = valid_pool(names)   # a name that could fake context is never handed out
         notes = _ensure_database(cfg)
         with _connect_new(cfg) if notes else _connect(cfg) as conn:
             _install_schema_retrying(conn, cfg["board"])

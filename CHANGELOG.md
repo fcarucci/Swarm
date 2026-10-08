@@ -19,9 +19,17 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 - `swarm events serve`: an HTTP listener for external event sources that plugins register with `api.register_event_source` (routes, `verify` before parse, `handle`, optional `poll`). Signature checked on the raw body, body size capped, nothing of a request logged. Off by default (`[events] enabled`); `swarm supervise` keeps it running.
 - Event sources can declare helper processes (e.g. `gh webhook forward`): the listener keeps them running with backoff and a `forwarder-down` alert; source polls have a 600 s floor (`[events] min_poll_interval_s`) unless the source's config lowers it.
 - Safety-net checks in the supervisor pass and `swarm events check`: listener up, orchestrator `event wait` armed, job stalled, events or messages for the orchestrator unacked too long. One `SWARM-ALERT` per job; an optional Haiku summary uses `[events] model`, never the orchestrator's.
+- engineering-team CI event sources (plugin only, no core change): `gitea` and `github` register through the event-source interface and raise `NEEDS-REVIEW`, `REVIEW-CHANGES`, `CI-FAILED` and `READY-TO-LAND` (verdict and CI success must agree on the exact current head sha; key `kind:N@sha`); `BRANCH READY` board posts become `BRANCH-READY` events. The GitHub source is callback-first: it works from pushed `workflow_run`, `check_suite`, `pull_request` and review webhooks with no API call (delivered by a supervised `gh webhook forward` when `[events.sources.github] forward = true`); API polling is a fallback no faster than every 600 s. Gitea CI is polled from the commit status. The PM's per-event procedure is in the skill. `[land] strategy = "rebase-ff" | "squash-ff"` in `team.toml` (default `rebase-ff`) sets how a PR lands.
+- `swarm ci status|wait --repo OWNER/REPO --sha SHA` (new `ci` plugin, skills/ci): the CI state of an exact SHA that every agent on a box shares, so agents stop running `gh run watch` and exhausting the GitHub API budget. One cached poller per box, at most one CI host call per repo per 60 s (backoff 60/120/300 s on queued runs, 10 min under 500 calls left, public-API fallback on a 403), and a CI event for the SHA ends the wait without polling. `wait` exits 0 green, 1 failed (failing jobs and log tail), 124 on timeout. GitHub and Gitea (`[ci] kind`). The engineering-team skill, its briefs and `swarm team --show` tell agents to use it.
+- New `ci` plugin (`skills/ci`): everything that talks to a CI or repo host. `swarm ci status|wait` and the shared poller live there; core Swarm and engineering-team do not.
+
+### Fixed
+- `swarm watch` no longer crashes with `AttributeError: 'SnapshotBoard' object has no attribute 'last_post'` (0.2.1, PostgreSQL boards): the watch snapshot now carries each idle or dead agent's last post, fetched in the same single statement.
 
 ### Changed
 - Schema 20 (applied automatically on first use, on every backend): a nullable `agents.title` and a last `title` column of the `agent_status` view. Boards stay readable by the previous release, which shows no titles; as always, upgrade every host sharing a board together. `swarm who` gains a TITLE field after the role (empty without one).
+
+- The old `[forge]` name is gone, with no alias: the `team.toml` section is `[ci]` (`[repositories."p".ci]` for overrides), the `swarm ci --kind` option replaces the old host flag, and event-source state files, modules and docs say CI host. `swarm upgrade` and `swarm init` rewrite an existing `[forge]` section to `[ci]` once, keeping `team.toml.bak` next to it and saying so.
 - CI: tag and release-branch pushes no longer re-run the full test matrix (the Release workflow tests the tag).
 
 ### Fixed
@@ -76,7 +84,7 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 - Session watches show only open jobs (or the last finished one), coalesce notification bursts and redraw from cached snapshots.
 - `wait` and `resume` use blockers; upgrades keep existing waits and plugin data. `status` and `watch` list open blockers.
 - Schemas 16-19 (applied automatically on first use): per-job plugin data, per-job PostgreSQL message counts, blockers and event history, and faster multi-job status totals.
-- Review pipeline integration is forge-agnostic: rebase locally, MR/PR where supported; GitHub is a forge adapter, not assumed.
+- Review pipeline integration is ci-agnostic: rebase locally, MR/PR where supported; GitHub is a CI adapter, not assumed.
 
 ## [0.1.17] - 2026-10-05
 

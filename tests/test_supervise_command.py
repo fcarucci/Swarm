@@ -996,7 +996,7 @@ class SuperviseTests(SuperviseEnv):
 
     def test_workdirs_are_allowed_only_under_allowed_workdirs(self):
         """The work directory comes from board or marker data an
-        agent can forge, and a replacement may write it: an allowlist ([supervise]
+        agent can fake, and a replacement may write it: an allowlist ([supervise]
         allowed_workdirs, default ~/src), no dot-directory below the root, a directory of this
         user, never home or above."""
         from swarm import paths

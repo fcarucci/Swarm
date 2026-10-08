@@ -295,7 +295,7 @@ changes to `~/.codex/config.toml` (`$CODEX_HOME/config.toml`), after a backup ne
 - `[sandbox_workspace_write] writable_roots` += `spool_dir` and `marker_dir`, each named on its
   own. Never the swarm's state directory itself, never `~/.local/share/swarm` (the venv, the
   host-only files and the supervisor's files) and never the board: a sandboxed agent that can
-  write those can forge what the unsandboxed hooks and supervisor trust;
+  write those can fake what the unsandboxed hooks and supervisor trust;
 - `[agents] max_depth = 2` (only raised, never lowered), so swarm agents can spawn helpers.
 
 It sets **no** `network_access`. Swarm agents don't need it: their posts, verdicts and memories
@@ -310,7 +310,7 @@ exfiltration path from a sandbox that has no read boundary). Two opt-ins in the 
   sandbox. Turning it off again deletes that file (only if the swarm wrote it).
 - `board_writable = true`: the SQLite board's directory or the file board's directory becomes a
   writable root too, so Codex agents open the board directly. `swarm doctor` reports it as a
-  FAIL: a sandboxed agent can then forge and alter board rows and plant links in the board.
+  FAIL: a sandboxed agent can then fake and alter board rows and plant links in the board.
 
 **Upgrading from an earlier pre-release.** Earlier versions granted the whole state directory and set
 `network_access = true` in the base table. Bootstrap (and `swarm migrate`) take the state
@@ -469,7 +469,7 @@ default SQLite file (`~/.local/share/swarm-board/board.sqlite3`) and board direc
 the board behind the hooks' backs. `swarm post` then queues the message in the
 [spool](#the-spool) and the hooks, which run outside the sandbox, deliver it within seconds.
 Don't move the board into a sandbox-writable directory to avoid that: a sandboxed agent that
-can write the board's files can forge rows and plant links the unsandboxed hooks would follow.
+can write the board's files can fake rows and plant links the unsandboxed hooks would follow.
 `swarm doctor` reports a board under any writable root as a FAIL.
 
 In `workspace-write` mode Codex can write more than the swarm's directories: the session's
@@ -800,7 +800,7 @@ On Postgres, re-run `swarm init` after changing `idle_minutes`, `dead_minutes` o
 |---|---|---|
 | `stop_quiet_minutes` | `3` | deprecated compatibility setting, ignored; completion requires SessionEnd or confirmed runner exit |
 | `network_access` | `false` | `true`: bootstrap writes the `swarm` Codex profile (`$CODEX_HOME/swarm.config.toml`) with network access, for sessions started with `codex -p swarm` only; never the base table |
-| `board_writable` | `false` | `true`: the local board's directory becomes a Codex writable root, so agents open it directly. Sandboxed agents can then forge and alter board rows: `swarm doctor` reports FAIL |
+| `board_writable` | `false` | `true`: the local board's directory becomes a Codex writable root, so agents open it directly. Sandboxed agents can then fake and alter board rows: `swarm doctor` reports FAIL |
 
 **`[models]`**, **`[models.claude]`**, **`[models.codex]`** (see [Models per role](#models-per-role))
 
@@ -1467,7 +1467,7 @@ trusted (`/hooks`); one that never joins is killed after `enrol_minutes`. Logs:
 
 ## External events: the listener and the safety nets
 
-A plugin can register an **event source** (the engineering-team forge adapters are the first). Core
+A plugin can register an **event source** (the engineering-team CI adapters are the first). Core
 never interprets an event: a source turns a request or a poll into `EventSpec`s
 (`dict(job, kind, key, text, to=None)`) and core posts them with `Board.post_event`, idempotent per
 job + kind + key, for the orchestrator (or `to`) to wake on (`swarm event wait`).
@@ -1581,15 +1581,15 @@ The recipe treats an artifact as integrated when its SHA is an ancestor of `orig
 in the owner checkout, or a successful `git ls-remote` confirms its branch is absent from origin.
 Lookup failures keep it pending. These facts apply to both completion gates and automatic
 launches, including abbreviated SHAs; integrated artifacts require no judge or finalizer.
-Core has no CI, git or forge logic. The recipe requires the project's CI on the exact rebased
-SHA, checked by the configured forge adapter. Missing, pending, red or mismatched evidence
+Core has no CI or git logic. The recipe requires the project's CI on the exact rebased
+SHA, checked by the configured CI adapter. Missing, pending, red or mismatched evidence
 holds integrator launch. The independent judge receives the exact-SHA evidence command;
 the integrator rechecks it before execution.
 
 The INTEGRATOR verifies every remote source ref still names the judged SHA, fetches every
 remote and rebases the branch onto the latest target locally with `git rebase`. Integration
 uses fast-forward/push of the rebased branch. Open a Merge Request / Pull Request where the
-forge supports it as the review and CI vehicle; without a forge/request, push the rebased
+CI host supports it as the review and CI vehicle; without a CI host/request, push the rebased
 branch directly. If rebasing changes the SHA, publish a fresh branch without rewriting
 published history, open/reuse the request where supported, post a new hand-off and stop the
 old finalization. Require a fresh judge verdict and the project's CI on that exact rebased
@@ -1603,30 +1603,30 @@ Coding settings live in `team.toml` (`$SWARM_TEAM_CONFIG`, otherwise beside swar
 under `[pipeline]`: `integrate = true`, `target_branch = "main"`, `delete_branch = true`.
 `merge_target` remains a compatibility alias for `target_branch`; the explicit new key wins.
 `[repositories."/absolute/repo"]` overrides defaults for the owner's recorded directory;
-its nested `.forge` table overrides the forge adapter. `integrate = false` holds coding
+its nested `.ci` table overrides the CI adapter. `integrate = false` holds coding
 finalization. Disabling the plugin leaves the generic pipeline available.
 
-### Forge adapters
+### CI adapters
 
-Forge-specific commands belong only to the engineering-team adapter/configuration.
-`[forge] kind = "github"|"gitea"|"gitlab"|"none"` selects one explicitly (default `none`).
+CI host-specific commands belong only to the engineering-team adapter/configuration.
+`[ci] kind = "github"|"gitea"|"gitlab"|"none"` selects one explicitly (default `none`).
 `repository = ""` is an optional adapter-specific identifier. `evidence_command = ""` selects
 the adapter's built-in checker if available; otherwise integration holds until configured.
 A custom command uses shell-quoted `{artifact}`, `{branch}`, `{sha}` placeholders and must
 include `{sha}`. It runs for the independent launch gate as well as the judge/finalizer;
 exit zero must mean all required project CI checks passed on that exact SHA. It must reject
 absent, queued, running, red or mismatched evidence. Legacy `[pipeline] evidence_command` and
-`repository` settings are accepted as defaults for `[forge]`.
+`repository` settings are accepted as defaults for `[ci]`.
 
 - **GitHub** (`github`): built-in `gh run list --commit SHA`; at least one run must exist,
   and all returned runs must have that SHA, completed status and success conclusion.
   `gh pr create/view` opens/reuses a PR. Repository lookup recognizes GitHub push URLs even
-  when the fetch remote is another forge; set `repository` explicitly for multiple repositories.
+  when the fetch remote is another CI host; set `repository` explicitly for multiple repositories.
 - **Gitea** (`gitea`): `tea pr create` or the API opens/reuses an MR/PR; configure a project
   CI command using `tea`/API that checks the exact SHA.
 - **GitLab** (`gitlab`): `glab mr create` or the API opens/reuses an MR; configure a project
   CI command using `glab`/API that checks the exact SHA.
-- **No forge** (`none`): configure a project CI command and push the locally rebased branch
+- **No CI host** (`none`): configure a project CI command and push the locally rebased branch
   directly. There is no MR/PR step.
 
 Request completion must preserve the approved rebased SHA and linear history. Evidence
@@ -1635,6 +1635,28 @@ Known limits: the GitHub adapter checks the first 100 runs and requires all to s
 it does not implement repository-specific required-check rules. Other adapters require
 project-specific CI commands. Finalizer instructions execute through an agent, so launch
 authority and permissions still apply. Report/file refs should name immutable revisions.
+
+
+### CI events and land strategy
+
+The engineering-team plugin registers event sources `gitea`, `github` (active only when `[ci] kind`
+in `team.toml` selects it) and `branch-ready`. Each maps CI host facts to events addressed to `@pm`, key
+`kind:N@sha`: `NEEDS-REVIEW` (new head without a verdict for it), `REVIEW-CHANGES` (latest verdict for the
+head is CHANGES REQUIRED), `CI-FAILED N@sha <contexts>`, `READY-TO-LAND` (a VERIFIED verdict and CI success
+on the exact current head), and `BRANCH-READY` (a board post `BRANCH READY <branch> <sha> ...`). Verdicts are
+PR comments or reviews whose first line is `REVIEW #N @ <full-sha>: VERIFIED|CHANGES REQUIRED`. State is
+re-read from the CI host on every webhook and poll. Gitea sends no CI webhooks, so its source polls each open
+PR head's combined commit status. Config: `[events.sources.<gitea|github>]` in `config.toml`
+(`repo`, `api_url`, `token_file`, `secret_file`, optional `job`; paths only). Webhook routes: `/gitea`,
+`/github`. GitHub is callback-first: it consumes pushed `workflow_run` (completed), `check_suite`, `pull_request`,
+`pull_request_review` and `issue_comment` webhooks and raises `CI-FAILED` / `READY-TO-LAND` from the payloads plus
+remembered state (`ci-github-state.json` next to `config.toml`: PR heads, verdict lines, CI conclusions per sha;
+no secrets), with no API call. With `forward = true` in `[events.sources.github]` the listener keeps
+`gh webhook forward --repo=<owner/repo> --events=workflow_run,check_suite,pull_request,pull_request_review,issue_comment
+--url=http://127.0.0.1:<[events] port>/github --secret <secret_file content>` running (GitHub's cli/gh-webhook
+extension: an outbound websocket, so no public endpoint). `secret_file` is a path; its value is read at launch and is
+the webhook HMAC secret, not a token. Polling the API is a fallback only (also the only CI path for Gitea, which
+sends no CI webhooks): never faster than 600 s (`poll_interval_s` can only raise it). `[land] strategy` in `team.toml` is `rebase-ff` (default) or `squash-ff`.
 
 ## Roles
 
@@ -1860,6 +1882,34 @@ Claude/Codex routing, board polling, and recovery. Custom roles and this skill r
 0.1.1 or later; check the loaded plugin and role enrollment if an older cache hides the skill.
 Documentation checks do not validate host behavior; independent evaluation on each host is
 still required before treating that host's behavior as validated.
+
+### Waiting for CI: `swarm ci`
+
+ci plugin command (skills/ci); agents call it instead of `gh run watch` or a `gh run list` loop.
+
+    swarm ci status --repo OWNER/REPO --sha SHA [--json]
+    swarm ci wait   --repo OWNER/REPO --sha SHA [--timeout 90m] [--job J] [--json]
+
+`status` prints the state of that exact SHA: `none`, `queued`, `running`, `green` or `failed` (with the
+failing jobs). `wait` blocks until a run result is final: exit 0 green, 1 failed (failing jobs and the tail of
+the first failure's log), 124 on timeout, 2 on a usage or config error. A failed run is reported as soon as
+one run fails; it does not wait for the rest.
+
+The CI host comes from `[ci] kind` in team.toml (`github`, or `gitea` with `api_url` and `token_file`, a
+path to the token; `--kind` overrides). `none` is an error: no CI host is assumed.
+
+Budget protection, shared by every agent on the box:
+
+- one cache, `~/.cache/swarm/ci/OWNER/REPO/SHA.json` (override with `$SWARM_CI_CACHE`), with a poll state
+  file and a lock. One process holds the lock and polls; the other waiters and `status` calls read the cache.
+- at most one CI host call per repo per 60 s across all agents. Queued or not-yet-started runs back off 60,
+  then 120, then 300 s. A final result is served from the cache (green 10 min, failed 2 min).
+- a 403 or an `X-RateLimit-Remaining` under 500 reads `gh api rate_limit` (it costs nothing). Under 500
+  calls left the poll slows to 10 min. On a 403 the poller switches to the unauthenticated public API
+  (60/h per IP) under the same floor and the output says so.
+- events first: with the event core installed (`swarm event` exists), a `CI-FAILED`, `READY-TO-LAND` or
+  `CI-*` event whose key or text names `@SHA` ends the wait at once without a CI host call, for `--job J` or
+  `$SWARM_JOB`, else every active job. Without the event core it prints a note and polls.
 
 ### Ask-answer skill (0.2.0)
 

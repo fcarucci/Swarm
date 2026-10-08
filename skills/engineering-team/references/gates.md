@@ -15,7 +15,7 @@ A verdict is stale as soon as the change has a new head. Integrate only when all
 Rebase the branch onto current main locally with `git rebase` and test that exact rebased SHA.
 Use an MR/PR as the review and CI vehicle where supported; otherwise push directly.
 If rebasing changes the SHA, refresh the hand-off, verdict and CI before fast-forward/pushing
-the approved rebased branch. Never create merge commits, squash or force-push. If main moved, repeat the rebase and refresh
+the approved rebased branch. Never create merge commits or force-push the target; squash only where `[land] strategy = "squash-ff"` says so (default `rebase-ff`). If main moved, repeat the rebase and refresh
 review and CI for any changed SHA. `build_engineer` runs this when present, otherwise EL.
 
 ## Scoped fix rounds

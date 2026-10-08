@@ -817,11 +817,11 @@ holds finalization while keeping judge/fix transitions on.
 The engineering-team plugin recognizes `branch@<full SHA>` and supplies the project's CI
 on the exact rebased SHA and an INTEGRATOR recipe: rebase locally, then fast-forward/push
 the rebased branch; open a Merge Request / Pull Request where supported as the review and
-CI vehicle, or push directly when no forge/request exists. A changed SHA requires a fresh
+CI vehicle, or push directly when no CI host/request exists. A changed SHA requires a fresh
 hand-off, judge verdict and CI. Configure `[pipeline] integrate`, `target_branch`, `delete_branch`
-and a separate `[forge]` adapter in `team.toml`; see `team.example.toml`.
-Generic core never interprets branches, CI or forges. See [review pipeline](../../docs/REFERENCE.md#review-pipeline)
-for protocols, forge adapters and limits.
+and a separate `[ci]` adapter in `team.toml`; see `team.example.toml`.
+Generic core never interprets branches, CI or CI hosts. See [review pipeline](../../docs/REFERENCE.md#review-pipeline)
+for protocols, CI adapters and limits.
 
 
 - Stuck agents (dead, one tool call too long, silent 90 min) are closed and restarted headless

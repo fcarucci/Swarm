@@ -239,7 +239,7 @@ def workdir_for(cfg: dict, record) -> str | None:
 
 def workdir_problem(cfg: dict, workdir: str) -> str | None:
     """Why a replacement may not run in `workdir`, or None. The
-    work directory came from board data agents can forge (it now comes from the enrolment
+    work directory came from board data agents can fake (it now comes from the enrolment
     record; this stays as defence in depth), and a replacement trusts it (a Codex one may write all of it, a Claude one
     loads its project settings). So an allowlist: its real path lies under one of [supervise]
     allowed_workdirs (default ~/src), with no dot-directory below that root, is a directory of

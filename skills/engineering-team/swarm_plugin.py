@@ -34,6 +34,12 @@ SEAT_TITLES = {"project_manager": "PM", "engineering_lead": "EL", "product_manag
                "engineer": "Eng"}
 # The review pipeline's own seats (a plugin recipe's `titles`, keyed by the seat's role).
 PIPELINE_TITLES = {"judge": "Judge", "worker": "Eng: fix", "integrator": "Eng: integrate"}
+
+LAND_STRATEGIES = ("rebase-ff", "squash-ff")   # [land] strategy; rebase-ff is the default
+
+
+CI_RULE = ("ci         brief every worker: wait for CI only with `swarm ci wait --repo OWNER/REPO --sha <exact head>`; "
+           "never `gh run watch` or a `gh run list` loop")
 DATA_KEY = "optional_roles"
 FILE_ENV = "SWARM_TEAM_CONFIG"
 
@@ -104,6 +110,8 @@ def describe(optional: list[str], source: str) -> list[str]:
             lines.append(f"absent     {role}: {ABSENT[role]}")
     lines.append("titles     " + ", ".join(f"{r}={SEAT_TITLES[r]}" for r in ("project_manager", *MANDATORY, *optional)) +
                  "  (tag each spawn `[swarm title: <title>]`)")
+
+    lines.append(CI_RULE)
     return lines
 
 
@@ -229,21 +237,27 @@ def coding_settings(ctx, workdir: str | None = None) -> dict:
     config["target_branch"] = config.get("target_branch", config["merge_target"])
     if not coding_artifact(str(config["target_branch"]) + "@" + "0" * 40):
         raise TeamError("team pipeline target_branch must be a branch name")
-    forge = data.get("forge", {})
-    if not isinstance(forge, dict):
-        raise TeamError("team [forge] must be a table")
-    override_forge = config.get("forge", {})
-    if not isinstance(override_forge, dict):
-        raise TeamError("team repository forge settings must be a table")
-    config["forge"] = {"kind": "none", "repository": config["repository"],
-                       "evidence_command": config["evidence_command"], **forge, **override_forge}
-    if config["forge"]["kind"] not in ("github", "gitea", "gitlab", "none"):
-        raise TeamError("team forge kind must be github, gitea, gitlab or none")
+    ci = data.get("ci", {})
+    if not isinstance(ci, dict):
+        raise TeamError("team [ci] must be a table")
+    override_ci = config.get("ci", {})
+    if not isinstance(override_ci, dict):
+        raise TeamError("team repository ci settings must be a table")
+    config["ci"] = {"kind": "none", "repository": config["repository"],
+                       "evidence_command": config["evidence_command"], **ci, **override_ci}
+    if config["ci"]["kind"] not in ("github", "gitea", "gitlab", "none"):
+        raise TeamError("team ci kind must be github, gitea, gitlab or none")
     for key in ("repository", "evidence_command"):
-        if not isinstance(config["forge"][key], str):
-            raise TeamError(f"team forge {key} must be text")
-    if config["forge"]["evidence_command"] and "{sha}" not in config["forge"]["evidence_command"]:
-        raise TeamError("team forge evidence_command must check the exact {sha}")
+        if not isinstance(config["ci"][key], str):
+            raise TeamError(f"team ci {key} must be text")
+    land = data.get("land", {})
+    if not isinstance(land, dict):
+        raise TeamError("team [land] must be a table")
+    config["land_strategy"] = land.get("strategy", "rebase-ff")
+    if config["land_strategy"] not in LAND_STRATEGIES:
+        raise TeamError("team land strategy must be rebase-ff or squash-ff")
+    if config["ci"]["evidence_command"] and "{sha}" not in config["ci"]["evidence_command"]:
+        raise TeamError("team ci evidence_command must check the exact {sha}")
     for key in ("evidence_command", "repository"):
         if not isinstance(config[key], str):
             raise TeamError(f"team pipeline {key} must be text")
@@ -286,7 +300,7 @@ def coding_recipe(ctx, board, job: str, artifact: str | None) -> dict | None:
     if coding_artifact(artifact) is None:
         return None  # exact-SHA evidence requires the full SHA
     sha = sha.lower()
-    evidence, evidence_check, forge_instructions = forge_adapter(config["forge"], workdir, artifact, branch, sha)
+    evidence, evidence_check, ci_instructions = ci_adapter(config["ci"], workdir, artifact, branch, sha)
 
     finalize = (
         f"You are the INTEGRATOR for {artifact}, an executing role separate from the judge. "
@@ -295,14 +309,18 @@ def coding_recipe(ctx, board, job: str, artifact: str | None) -> dict | None:
         "DONE and judge verdict, so stop integration and post the updated handoff. "
         f"In an isolated worktree on disk, rebase branch {branch} onto {config['target_branch']} "
         "using git rebase after fetching and reconciling the latest target from every remote. "
-        "Integration always uses local rebase, then a fast-forward/push of the rebased branch; "
-        "never create a merge commit, squash or force-push. If rebasing changes the SHA, push a fresh "
+        + ("Integration always uses local rebase, then a fast-forward/push of the rebased branch; "
+           "never create a merge commit, squash or force-push. " if config["land_strategy"] == "rebase-ff" else
+           "This project lands with [land] strategy squash-ff: squash the approved branch into ONE commit "
+           "on the latest target locally, then fast-forward/push it; never create a merge commit or force-push. "
+           "The reviewed head's tree must equal the landed tree. ")
+        + "If rebasing changes the SHA, push a fresh "
         "branch without rewriting published history, open/reuse a Merge Request / Pull Request where supported, "
         "then post a new DONE and judge verdict request for "
         "that exact rebased SHA, and stop this finalization. The old verdict and CI do not cover it. "
-        "Open a Merge Request / Pull Request where the configured forge supports it; this is the "
-        "review and CI vehicle. When no forge or request support exists, the rebased branch is pushed directly. "
-        "Verify targeted checks and the project's CI on the exact rebased SHA using the configured forge adapter. "
+        "Open a Merge Request / Pull Request where the configured CI host supports it; this is the "
+        "review and CI vehicle. When no CI host or request support exists, the rebased branch is pushed directly. "
+        "Verify targeted checks and the project's CI on the exact rebased SHA using the configured CI adapter. "
         "Require a met verdict for that same SHA before advancing the target. If the target moves, rebase "
         "again and refresh the handoff, review and CI. Advance the target only by fast-forward/push of "
         "the approved rebased branch to every configured remote and push URL. "
@@ -311,14 +329,14 @@ def coding_recipe(ctx, board, job: str, artifact: str | None) -> dict | None:
         + (f"After every target push succeeds, delete {branch} from every configured remote and locally; "
            if config["delete_branch"] else "Keep the source branch; ")
         + f"run swarm learn and confirm durable outcome/learnings are retained; then post INTEGRATED {artifact} only after all required operations and learning succeed. "
-        "Retain distilled learnings with swarm learn." + forge_instructions
+        "Retain distilled learnings with swarm learn." + ci_instructions
     )
     return {"evidence_command": evidence, "evidence_check": evidence_check,
             "finalize": finalize, "finalizer_role": "integrator", "enabled": config["integrate"],
             "artifact_group": branch, "titles": PIPELINE_TITLES}
 
 
-# Forge adapters: platform commands belong here, never in the generic coding recipe/core.
+# CI adapters: platform commands belong here, never in the generic coding recipe/core.
 def github_repository(cwd: str | None) -> str:
     """Find GitHub even when the fetch remote is Gitea and GitHub is a push URL."""
     if not cwd:
@@ -336,21 +354,21 @@ def github_repository(cwd: str | None) -> str:
     return next(iter(repositories)) if len(repositories) == 1 else ""
 
 
-def forge_adapter(forge: dict, workdir: str | None, artifact: str, branch: str, sha: str):
-    """Exact revision CI and request procedures selected explicitly by [forge].
+def ci_adapter(ci: dict, workdir: str | None, artifact: str, branch: str, sha: str):
+    """Exact revision CI and request procedures selected explicitly by [ci].
 
     Other adapters supply a project command: exit zero only for green CI on {sha}.
     An unconfigured checker holds integration; none still requires project CI evidence.
     """
-    kind = forge["kind"]
-    template = forge["evidence_command"]
+    kind = ci["kind"]
+    template = ci["evidence_command"]
     instructions = {
-        "github": "\nForge adapter: github. Open/reuse a PR with gh pr create/view; inspect CI with gh run list --commit SHA. "
+        "github": "\nCI adapter: github. Open/reuse a PR with gh pr create/view; inspect CI with gh run list --commit SHA. "
                   "Complete the PR only using a method that preserves the approved rebased SHA and linear history.",
-        "gitea": "\nForge adapter: gitea. Open/reuse an MR/PR with tea pr create or the Gitea API; "
+        "gitea": "\nCI adapter: gitea. Open/reuse an MR/PR with tea pr create or the Gitea API; "
                  "check the project's CI for the exact SHA with the configured tea/API command. "
                  "Complete the request only using a method that preserves the approved rebased SHA and linear history.",
-        "gitlab": "\nForge adapter: gitlab. Open/reuse an MR with glab mr create or the GitLab API; "
+        "gitlab": "\nCI adapter: gitlab. Open/reuse an MR with glab mr create or the GitLab API; "
                   "check the project's CI for the exact SHA with the configured glab/API command. "
                   "Complete the MR only using a method that preserves the approved rebased SHA and linear history.",
         "none": "",
@@ -366,9 +384,9 @@ def forge_adapter(forge: dict, workdir: str | None, artifact: str, branch: str, 
 
         return command, check, instructions
     if kind != "github":
-        return ("false # Configure [forge] evidence_command for the project's CI on exact SHA " + sha,
+        return ("false # Configure [ci] evidence_command for the project's CI on exact SHA " + sha,
                 lambda cwd: False, instructions)
-    repository = forge["repository"] or github_repository(workdir)
+    repository = ci["repository"] or github_repository(workdir)
     repo_args = ["--repo", repository] if repository else []
     argv = ["gh", "run", "list", "--commit", sha, "--limit", "100", *repo_args,
             "--json", "headSha,status,conclusion"]
@@ -388,9 +406,128 @@ def forge_adapter(forge: dict, workdir: str | None, artifact: str, branch: str, 
 
     return command, check, instructions
 
+def _ci_events():
+    """The sibling module, loaded by path: a plugin file is not imported as part of a package."""
+    import importlib.util
+    name = "swarm_engineering_team_ci_events"
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name("ci_events.py"))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _jobs(ctx, section) -> list[str]:
+    """The job(s) events go to: `job` in the source config, else every active job on the board."""
+    if section.get("job"):
+        return [str(section["job"])]
+    return [j.job for j in ctx.board.jobs() if j.status == "active"]
+
+
+def _team_ci(ctx) -> dict:
+    return coding_settings(ctx)["ci"]
+
+
+def _source_config(config_dir: Path, name: str) -> dict:
+    """`[events.sources.<name>]` of the swarm config: verify() runs before any context exists."""
+    try:
+        with (config_dir / "config.toml").open("rb") as stream:
+            section = tomllib.load(stream).get("events", {}).get("sources", {}).get(name, {})
+    except (OSError, ValueError):
+        return {}
+    return section if isinstance(section, dict) else {}
+
+
+def ci_source(kind: str, config_dir: Path):
+    """Event-source callbacks for one CI host kind (gitea|github); active only when team.toml
+    `[ci] kind` selects it, never assumed."""
+    fe = _ci_events()
+    push_state = fe.PushState(config_dir / f"ci-{kind}-state.json")
+
+    def section(ctx) -> dict | None:
+        ci = _team_ci(ctx)
+        if ci["kind"] != kind:
+            return None
+        return {"repo": ci["repository"], **dict(getattr(ctx, "config", None) or {})}
+
+    def make(ctx):
+        sec = section(ctx)
+        return (fe.CI_HOSTS[kind](sec), sec) if sec is not None else (None, None)
+
+    def verify(headers, body) -> bool:
+        class _Ctx:   # verify gets no context: read the same two config files directly
+            pass
+        ctx = _Ctx()
+        ctx.config_dir, ctx.config = config_dir, _source_config(config_dir, kind)
+        try:
+            ci, _ = make(ctx)
+            return bool(ci and ci.verify(headers, body))
+        except (OSError, TeamError, ValueError, KeyError):
+            return False   # a missing secret file or a bad team.toml never accepts a request
+
+    def handle(headers, body, ctx):
+        ci, sec = make(ctx)
+        if ci is None:
+            return []
+        if kind == "github":   # callbacks first: pushed payloads plus remembered state, no API call
+            return [e for job in _jobs(ctx, sec) for e in fe.handle_push(push_state, job, headers, body)]
+        return [e for job in _jobs(ctx, sec) for e in fe.handle_webhook(ci, job, headers, body)]
+
+    def poll(ctx):
+        ci, sec = make(ctx)
+        if ci is None or not sec.get("repo"):
+            return None
+        return [e for job in _jobs(ctx, sec) for e in fe.poll_prs(ci, job)]
+
+    def helpers(cfg):
+        """`gh webhook forward` for the supervisor to keep running when `forward = true`."""
+        if kind != "github" or not cfg.get("forward"):
+            return []
+        try:
+            with (config_dir / "config.toml").open("rb") as stream:
+                port = tomllib.load(stream).get("events", {}).get("port", 8923)
+            team = _team_ci(type("C", (), {"config_dir": config_dir})())
+            argv = fe.forward_argv({"repo": cfg.get("repo") or team["repository"], **cfg}, port)
+        except (OSError, ValueError, KeyError, TeamError):
+            return []
+        return [{"name": "forward", "argv": argv}]
+
+    return verify, handle, poll, helpers
+
+
+def branch_ready_poll(ctx):
+    """BRANCH-READY events from `BRANCH READY ...` board posts (no model scans the board)."""
+    fe = _ci_events()
+    section = dict(getattr(ctx, "config", None) or {})
+    out = []
+    for job in _jobs(ctx, section):
+        out += fe.branch_ready_specs(job, [m.message for m in ctx.board.recent_messages(100, job)])
+    return out
+
+
+def register_event_sources(api) -> None:
+    """Register through core's event-source interface when this swarm has it."""
+    register = getattr(api, "register_event_source", None)
+    if register is None:
+        return
+    for kind, routes in (("gitea", ["/gitea"]), ("github", ["/github"])):
+        verify, handle, poll, helpers = ci_source(kind, api.config_dir)
+        interval = _ci_events().poll_interval(_source_config(api.config_dir, kind))
+        extra = {"helpers": helpers} if kind == "github" else {}
+        try:   # polling is only a fallback (the API budget is shared): never faster than 10 minutes
+            register(kind, routes=routes, verify=verify, handle=handle, poll=poll, poll_interval_s=interval, **extra)
+        except TypeError:   # a core without helper support
+            register(kind, routes=routes, verify=verify, handle=handle, poll=poll, poll_interval_s=interval)
+    register("branch-ready", routes=["/branch-ready"], verify=lambda headers, body: False,
+             handle=lambda headers, body, ctx: [], poll=branch_ready_poll, poll_interval_s=60)
+
+
 def register(api) -> None:
     api.add_command("team", run_team, setup=setup_team,
                     help="show or change a job's team composition (engineering-team plugin)")
     api.extend_command("activate", setup=setup_activate, before=before_activate, after=after_activate)
     api.add_status_lines(status_lines)
     api.add_pipeline_recipe(coding_recipe)
+    register_event_sources(api)

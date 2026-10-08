@@ -717,7 +717,7 @@ class ForgedRowTests(_SuperviseBase):
     the shared database role, by the other OS user. Ownership, work dir and harness of a
     replacement come only from this host user's private enrolment records."""
 
-    def forge(self, key, *, harness="claude", cwd=None, job="J"):
+    def spoof(self, key, *, harness="claude", cwd=None, job="J"):
         """A stuck-closed row claiming this host and OS user, with a transcript whose cwd is `cwd`
         (what a forger writes), and no enrolment record."""
         self.hook("start", agent_id=key, session="sess-1")
@@ -734,7 +734,7 @@ class ForgedRowTests(_SuperviseBase):
 
     def test_forged_os_user_not_replaced(self):
         import getpass
-        name = self.forge("forged", cwd=self.work)
+        name = self.spoof("forged", cwd=self.work)
         a = self.agent("forged")
         self.assertEqual((a.host, a.os_user), (compat.node(), getpass.getuser()))
         with self.board() as b:
@@ -747,7 +747,7 @@ class ForgedRowTests(_SuperviseBase):
         self.assertIn(f"not restarting {name} on J: no local enrolment record", "\n".join(self.out))
 
     def test_a_record_of_another_job_is_not_ownership(self):
-        name = self.forge("forged", cwd=self.work)
+        name = self.spoof("forged", cwd=self.work)
         enrol(self.cfg, "forged", job="other-job", cwd=self.work)
         self.supervise()
         self.assertFalse([r for r in self.started if r["name"] == name])

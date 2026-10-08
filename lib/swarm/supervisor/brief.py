@@ -7,7 +7,7 @@ its first user turn, left out), and how to read the rest. Only archived (redacte
 board posts go in; with [transcripts] off it says so and relies on the board.
 
 Board text is untrusted: posts are redacted with the transcript redactor and
-fenced between BEGIN/END lines carrying a random id (a post can't forge the end of its section),
+fenced between BEGIN/END lines carrying a random id (a post can't fake the end of its section),
 and the header says the supervisor never speaks through posts."""
 from __future__ import annotations
 

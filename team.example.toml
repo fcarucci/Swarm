@@ -21,8 +21,15 @@ integrate = true
 target_branch = "main" # legacy merge_target is accepted as an alias
 delete_branch = true
 
-# Forge adapters: explicit choice, never inferred from a mirror/push URL.
-[forge]
+# How a reviewed, CI-green PR lands. Per project, never hardcoded; the default is rebase-ff.
+#   rebase-ff  rebase the branch onto the target locally, then fast-forward. No squash, no merge commit.
+#   squash-ff  squash the branch into one commit on the target locally, then fast-forward.
+# Never a force-push of the target branch. The landed tree must equal the reviewed head's tree.
+[land]
+strategy = "rebase-ff"
+
+# CI adapters: explicit choice, never inferred from a mirror/push URL.
+[ci]
 kind = "none" # github | gitea | gitlab | none
 repository = "" # optional adapter-specific repository identifier
 # Required for gitea/gitlab/none. Exit zero only for green project CI on this exact SHA.
@@ -37,7 +44,22 @@ evidence_command = ""
 # Optional overrides keyed by the owner's recorded absolute repository directory:
 # [repositories."/home/me/src/my-repo"]
 # target_branch = "main"
-# [repositories."/home/me/src/my-repo".forge]
+# [repositories."/home/me/src/my-repo".ci]
 # kind = "gitea"
 # repository = "me/my-repo"
 # evidence_command = "project-ci --commit {sha}"
+
+# CI EVENTS (PR opened, verdict, CI result -> NEEDS-REVIEW / REVIEW-CHANGES / CI-FAILED / READY-TO-LAND,
+# and BRANCH READY board posts -> BRANCH-READY) reach the PM through `swarm event wait --to @pm`.
+# The source follows [ci] kind (gitea | github). Its listener settings live in the swarm config.toml,
+# paths only, never secret values:
+#   [events.sources.gitea]          # or [events.sources.github]
+#   repo = "owner/name"             # defaults to [ci] repository
+#   api_url = "https://git.example/api/v1"   # github: https://api.github.com by default
+#   token_file = "~/.config/me/ci-token"
+#   secret_file = "~/.config/me/webhook-secret"   # HMAC secret of the webhook
+#   forward = true                  # github: the listener runs `gh webhook forward` (no public endpoint needed)
+#   poll_interval_s = 600           # fallback polling; never faster than 600
+#   job = "my-job"                  # optional; default: every active job
+# Point the CI host webhook at <listener>/gitea or <listener>/github. Gitea sends no CI webhooks, so the
+# source polls the commit status of every open PR head.

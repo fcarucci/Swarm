@@ -258,7 +258,7 @@ def required(cfg: dict) -> dict:
     """What the swarm needs in the base Codex config: the spool and marker dirs as writable
     roots, each named explicitly, and never the state dir itself (the host-trusted files next to
     them) nor network access. The board dir only when the user opts in ([codex] board_writable,
-    which doctor reports as a FAIL: sandboxed agents can then forge and tamper with board rows)."""
+    which doctor reports as a FAIL: sandboxed agents can then fake and tamper with board rows)."""
     roots = []
     wanted = [spool_path(cfg), _absolute(cfg["hook"]["marker_dir"])]
     if _opt(cfg, "board_writable") and board_dir(cfg) is not None:

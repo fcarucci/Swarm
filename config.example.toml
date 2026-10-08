@@ -56,7 +56,7 @@ tool_timeout_minutes = 60           # a single tool call longer than this stops 
 # server ([database] is then unused; the first command creates the file). See docs/REFERENCE.md#the-sqlite-backend. The default path is outside every sandbox (sandboxed agents' posts spool, the
 # hooks deliver them). If you pick another path, use a dedicated dir no sandbox can write (not the
 # state/spool/marker dirs, a workspace, /tmp or $TMPDIR, or another writable root; `/status` in a
-# Codex session shows its writable roots): a sandboxed agent that can write the board can forge
+# Codex session shows its writable roots): a sandboxed agent that can write the board can fake
 # rows. `swarm doctor` FAILs for a board under a writable root; see docs/REFERENCE.md#choosing-a-backend.
 # `swarm migrate` moves a board from the old default (~/.local/state/swarm/...).
 # [sqlite]
@@ -119,7 +119,7 @@ stop_quiet_minutes = 3
 # spool instead). Opt-ins, both off by default (docs/REFERENCE.md#codex-setup):
 # network_access = true    # write the `swarm` Codex profile with network access: `codex -p swarm` only
 # board_writable = true    # make the local board's dir a Codex writable root: sandboxed agents can
-#                          # then forge board rows (`swarm doctor` reports FAIL)
+#                          # then fake board rows (`swarm doctor` reports FAIL)
 
 [transcripts]
 # The transcript archive: each swarm agent's transcript (Claude Code's JSONL, or Codex's rollout,

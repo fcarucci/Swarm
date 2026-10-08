@@ -240,7 +240,7 @@ class MemoryBoard(MemoryBlockers, MemoryEvents, Board):
 
     @classmethod
     def setup(cls, cfg: dict, names: Mapping[str, Sequence[str]]) -> SetupResult:
-        names = valid_pool(names)   # a name that could forge context is never handed out
+        names = valid_pool(names)   # a name that could fake context is never handed out
         store = cls._open_store(cfg)
         with store.lock:
             known = {n for lst in store.pool.values() for n in lst}

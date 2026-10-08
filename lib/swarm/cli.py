@@ -265,7 +265,9 @@ def cmd_init(cfg: dict, args) -> int:
     for note in result.notes:
         print(note)
     print(f"schema ready; name pool: {result.pool}")
-    from swarm import bootstrap, paths
+    from swarm import bootstrap, ci_migrate, paths
+    for note in ci_migrate.migrate_team_config(getattr(args, "config", None) or paths.config_path()):
+        print(note)
     step = bootstrap.supervisor_step(cfg, getattr(args, "config", None) or paths.config_path())
     print(f"supervisor: {step.status}: {step.detail}")
     return 0
@@ -3428,9 +3430,12 @@ def cmd_doctor(cfg: dict, args) -> int:
 
 
 def cmd_update(cfg: dict, args) -> int:
-    from swarm import update
-    return update.run_update(args.host, args.force, _use_color(args), config_path=args.config,
-                             channel=args.channel)
+    from swarm import ci_migrate, paths, update
+    rc = update.run_update(args.host, args.force, _use_color(args), config_path=args.config,
+                           channel=args.channel)
+    for note in ci_migrate.migrate_team_config(args.config or paths.config_path()):
+        print(note)   # the one-time old-section -> [ci] rewrite of team.toml
+    return rc
 
 
 def cmd_migrate(cfg: dict, args) -> int:
@@ -3474,7 +3479,7 @@ def cmd_remember(cfg: dict, args) -> int:
         return 1
     from swarm.board.base import valid_name
     if args.project is not None and not valid_name(args.project):
-        # the project is printed in the [memory ...] tag the hook reads: nothing that could forge one
+        # the project is printed in the [memory ...] tag the hook reads: nothing that could fake one
         print(term_safe(f"invalid project {args.project!r}: use 1-64 letters, digits, spaces and "
                         f". ' _ - (no leading or trailing space)"), file=sys.stderr)
         return 1

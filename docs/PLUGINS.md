@@ -100,8 +100,8 @@ It adds `swarm team`, `swarm activate --team` and a `team` line in `swarm status
 `team.toml` (`$SWARM_TEAM_CONFIG`, else next to the swarm config; see `team.example.toml`). It is
 the reference use of this API: `skills/engineering-team/swarm_plugin.py`. It also registers the
 coding pipeline recipe for `branch@sha`: the project's CI on the exact rebased SHA via the configured
-`[forge]` adapter, and an INTEGRATOR executor (rebase locally, MR/PR where supported).
-Configure it under `[pipeline]` and `[forge]` in `team.toml`; see [review pipeline](REFERENCE.md#review-pipeline).
+`[ci]` adapter, and an INTEGRATOR executor (rebase locally, MR/PR where supported).
+Configure it under `[pipeline]` and `[ci]` in `team.toml`; see [review pipeline](REFERENCE.md#review-pipeline).
 
 ### Event sources
 

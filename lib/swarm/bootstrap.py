@@ -1451,7 +1451,7 @@ def exposure_checks(cfg: dict) -> list[Check]:
         opted = (cfg.get("codex") or {}).get("board_writable") is True
         out.append(Check("board location", not under,
                          (f"the {board_backend(cfg)} board {bdir} is under {', '.join(str(r) for _, r in under)}"
-                          f" ({', '.join(w for w, _ in under)}): a sandboxed agent can forge and tamper with board "
+                          f" ({', '.join(w for w, _ in under)}): a sandboxed agent can fake and tamper with board "
                           f"rows and plant links in it" + (" ([codex] board_writable = true grants it)" if opted else ""))
                          if under else f"{bdir}: under no sandbox writable root",
                          ("set [codex] board_writable = false, then " if opted else "")
