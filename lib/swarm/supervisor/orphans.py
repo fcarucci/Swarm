@@ -68,6 +68,8 @@ def restart_note(board, js, sup, now):
              f"Latest verdict: {_clean(js.verdict)} {_clean(getattr(js, 'verdict_reason', None), 2000)}"]
     if js.verdict_next:
         lines.append(f"Judge's next steps: {_clean(js.verdict_next, 2000)}")
+    if board.verdict_details(js.job) is not None:
+        lines.append(f"The judge's full report: swarm verdict show --job {js.job}")
     lines.append("Last board messages:")
     for m in board.recent_messages(sup["brief_posts"], job=js.job):
         lines.append(f"#{m.id} {_clean(m.agent_name)}: {_clean(m.message, 1000)}")

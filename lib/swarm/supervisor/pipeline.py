@@ -193,7 +193,7 @@ def recipe_for(cfg, board, js, artifact, config_path=None):
     return recipe
 
 
-def prompt_for(action, recipe):
+def prompt_for(action, recipe, board=None):
     import shlex
     from swarm.hosts.resume import _clean
     js, h = action.job, action.handoff
@@ -220,6 +220,11 @@ def prompt_for(action, recipe):
                       f"Verdict reason: {_clean(previous.get('reason'), 8000)}",
                       f"Your brief: {_clean(previous.get('next_steps') or previous.get('next'), 12000)}",
                       "When ready, publish a new hand-off with swarm done --artifact REF --summary TEXT."])
+        report = board.verdict_details(js.job, h.artifact) if board is not None else None
+        if report is not None:   # the judge's full report: pointed to, and the start of it included
+            lines.extend([f"The judge's full report: swarm verdict show --job {shlex.quote(js.job)} "
+                          f"--artifact {ref_arg} (read it before you start). Its start:",
+                          _clean(report.details, 6000)])
     else:
         lines.extend(["You are a FINALIZER, a separate executing role. The judge only judged.",
                       "Before execution, read current hand-offs and artifact verdicts. This met verdict "
@@ -273,7 +278,7 @@ def launch_action(board, cfg, sup, action, owner, recipe, decision, *, start_run
             model = model or models.model_for(cfg, harness, "judge")
         else:
             model = model or launch.replacement_model(cfg, harness, role, None)
-        spec = launch.spec_for(cfg, harness, prompt=prompt_for(action, recipe), workdir=owner.cwd,
+        spec = launch.spec_for(cfg, harness, prompt=prompt_for(action, recipe, board), workdir=owner.cwd,
                                model=model, minutes=decision.minutes)
         board.set_job_data(action.job.job, "pipeline.judge." + hashlib.sha256(old.encode()).hexdigest()[:32], action.handoff.artifact)
         marker = markers.write_resume_marker(cfg, action.job.job, row.id, resume_of=old, name=name,

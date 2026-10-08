@@ -25,7 +25,7 @@ The engineering-team plugin supplies the coding adapter for Swarm's generic revi
 Publish `swarm done --job J --as NAME --branch B --sha S --summary "change and checks"` after
 pushing. The owner supervisor starts independent artifact-bound review and bounded fix rounds.
 A hook-registered judge (spawned with `[swarm role: judge]` or `[swarm title: Judge]`) is seated by its hooks and records `swarm verdict --job J --artifact branch@sha met --reason "evidence"`
-(or `not_met --reason "missing" --next "fix brief"`). **Always pass `--artifact` for the exact
+(or `not_met --reason "missing" --next "fix brief"`; a long report goes in `--details -` on stdin, never in a file: judges cannot write files, and `swarm verdict show --job J` prints it). **Always pass `--artifact` for the exact
 hand-off inspected.** A leading `branch@sha:` in the reason is accepted for compatibility.
 A judge run outside the board (a one-off `codex exec`, a person) must still record its result with
 `swarm verdict --job J --as NAME --artifact REF met|not_met ...` (`swarm join --job J --key K --judge`

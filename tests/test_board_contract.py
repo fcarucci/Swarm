@@ -2369,8 +2369,8 @@ class PostgresSpecificTests(unittest.TestCase):
                                "ORDER BY table_name, ordinal_position").fetchall()
         for _ in range(2):  # migration and idempotent re-init
             type(self.b).setup(self.h.cfg, SMALL_POOL)
-            self.assertEqual(SCHEMA_VERSION, 22)
-            self.assertEqual(type(self.b).schema_version(self.h.cfg), 22)
+            self.assertGreaterEqual(SCHEMA_VERSION, 21)
+            self.assertEqual(type(self.b).schema_version(self.h.cfg), SCHEMA_VERSION)
             self.assertEqual(self.b.job_data("j"), {"engineering-team.optional": "build_engineer"})
             self.assertEqual([conn.execute(q).fetchall() for q in queries], before)
             self.assertEqual(conn.execute("SELECT table_name, column_name, data_type "

@@ -1148,6 +1148,7 @@ def job_detail(board, job: str, color: bool, recent_minutes: int | None = None, 
     shown = _job_status_word(board, j, now)
     verifications = board.verification_counts(job)
     sup_line = _supervise_line(board, j, sup)
+    details_line = _verdict_details_line(board, job) if j.verdict else None
     head = [f"job        {ts(job)}  [{_paint_status(shown, shown, color)}]", activated,
             f"activity   {j.messages} messages, last {_ago(j.last_activity_at, now)}"]
     if j.agents:
@@ -1163,6 +1164,7 @@ def job_detail(board, job: str, color: bool, recent_minutes: int | None = None, 
                 (j.task, "task       " + block(j.task)),
                 (j.goal, "goal       " + block(j.goal)),
                 (j.goal, _verdict_line(j, now)),
+                (details_line, details_line or ""),
                 (j.completion_forced, "forced     completed without a met verdict"),
                 (any(verifications), "checks     {} verified, {} failed (verifiers)".format(*verifications)),
                 (j.outcome, f"outcome    {ts(j.outcome)}"),
@@ -2780,8 +2782,14 @@ def _parser() -> argparse.ArgumentParser:
     vd.add_argument("--as", dest="name",
                     help="the judge's name; a hook-registered subagent leaves it out (its hooks add it)")
     vd.add_argument("--artifact", help="opaque reference being judged (defaults to this judge hand-off)")
-    vd.add_argument("verdict", choices=["met", "not_met"])
+    vd.add_argument("verdict", choices=["met", "not_met", "show"],
+                    help="met or not_met records the verdict; `show` prints the latest full report "
+                         "(--details) of the job's verdict, for anyone (--artifact REF: only if it is bound to REF)")
     vd.add_argument("reason", nargs="*", help="why (met: the words after the verdict; not_met: use --reason)")
+    vd.add_argument("--details", metavar="-|PATH",
+                    help="the full report in Markdown, read from stdin (-, e.g. a quoted heredoc) or from "
+                         "PATH; kept with the verdict (met or not_met) and shown by `swarm verdict show`. "
+                         "At most 64 KiB. Use it instead of writing a report file: judges cannot write files")
     vd.add_argument("--reason", dest="reason_opt", help="why the judge ruled so (required for not_met)")
     vd.add_argument("--next", dest="next_steps",
                     help="not_met: concrete instructions to meet the goal: what to change, where, and "
@@ -4018,9 +4026,42 @@ def _board_config(board, cfg: dict, args) -> int:
     return 0
 
 
+def _read_details(source: str) -> str:
+    """The --details report: stdin for "-", else the file at `source`. ValueError (to show) when it
+    can't be read, isn't text, is empty or is over the board's cap (VERDICT_DETAILS_MAX bytes)."""
+    from swarm.board import VERDICT_DETAILS_MAX
+    try:
+        if source == "-":
+            buf = getattr(sys.stdin, "buffer", None)
+            raw = (buf.read(VERDICT_DETAILS_MAX + 1) if buf is not None
+                   else sys.stdin.read(VERDICT_DETAILS_MAX + 1).encode("utf-8"))
+        else:
+            with open(os.path.expanduser(source), "rb") as fh:
+                raw = fh.read(VERDICT_DETAILS_MAX + 1)
+    except OSError as exc:
+        raise ValueError(f"--details: cannot read {'stdin' if source == '-' else source}: {exc.strerror or exc}")
+    if len(raw) > VERDICT_DETAILS_MAX:
+        raise ValueError(f"--details: the report is over {VERDICT_DETAILS_MAX} bytes "
+                         f"({VERDICT_DETAILS_MAX // 1024} KiB); shorten it (evidence and defects, not logs)")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ValueError("--details: the report is not UTF-8 text")
+    if not text.strip():
+        raise ValueError("--details: the report is empty")
+    return text
+
+
 def _verdict_text(args) -> tuple[str, str | None] | None:
     """(reason, next steps) of a `swarm verdict`, or None (after saying why on stderr) when a
-    not_met verdict lacks its --reason or --next: the judge must say why and what would meet the goal."""
+    not_met verdict lacks its --reason or --next: the judge must say why and what would meet the goal.
+    Also reads --details once, into args.details_text."""
+    if getattr(args, "details", None) and not hasattr(args, "details_text"):
+        try:
+            args.details_text = _read_details(args.details)
+        except ValueError as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return None
     reason = (getattr(args, "reason_opt", None) or " ".join(args.reason or ())).strip()
     nxt = (getattr(args, "next_steps", None) or "").strip()
     if args.verdict == "met":
@@ -4037,13 +4078,39 @@ def _verdict_text(args) -> tuple[str, str | None] | None:
     return reason, nxt
 
 
+def _verdict_details_line(board, job: str) -> str | None:
+    """The status line announcing the job's full verdict report, or None without one."""
+    d = board.verdict_details(job)
+    if d is None:
+        return None
+    n = len(d.details.strip().splitlines())
+    return f"details    {n} line{'s' if n != 1 else ''}, `swarm verdict show --job {job}`"
+
+
+def _verdict_show(board, args) -> int:
+    d = board.verdict_details(args.job, getattr(args, "artifact", None))
+    if d is None:
+        which = f" bound to {term_safe(args.artifact)}" if getattr(args, "artifact", None) else ""
+        print(f"no verdict details{which} for job {term_safe(args.job)} (a judge adds them with "
+              f"`swarm verdict ... --details -`)", file=sys.stderr)
+        return 1
+    head = (f"verdict {d.verdict} by {term_safe(d.by)}" + (f", {_ago(d.at, board.now())}" if d.at else "")
+            + (f", artifact {term_safe(d.artifact)}" if d.artifact else ""))
+    print(head + "\n")
+    print(term_safe(d.details.rstrip(), keep_newlines=True))
+    return 0
+
+
 def _board_verdict(board, cfg: dict, args) -> int:
     from swarm.spool import deliver_verdict
+    if args.verdict == "show":
+        return _verdict_show(board, args)
     text = _verdict_text(args)
     if text is None:
         return 1
     try:
-        recorded = deliver_verdict(board, args.job, args.name, args.verdict, text[0], text[1], getattr(args, "artifact", None))
+        recorded = deliver_verdict(board, args.job, args.name, args.verdict, text[0], text[1],
+                                   getattr(args, "artifact", None), getattr(args, "details_text", None))
     except ValueError as exc:   # a name the board refuses (board.base.valid_name)
         print(f"verdict not recorded: {term_safe(exc)}", file=sys.stderr)
         return 1
@@ -4425,6 +4492,7 @@ def _reads_only(args) -> bool:
     """Whether the command only reads the board, so a standby may serve it when no primary is up."""
     return (args.cmd in ("who", "status", "blockers", "recall") or (args.cmd == "read" and args.peek)
             or (args.cmd == "event" and args.ecmd == "list")
+            or (args.cmd == "verdict" and args.verdict == "show")
             or (args.cmd == "config" and args.value is None and not args.save)
             or (args.cmd == "learn" and args.list_banks)
             or (args.cmd == "transcript" and args.tcmd in TRANSCRIPT_COMMANDS))
@@ -4492,14 +4560,14 @@ def _run_command(cfg: dict, args) -> int:
               f"  swarm verdict --job {args.job} met \"<reason>\"   (or not_met --reason ... --next ...)",
               file=sys.stderr)
         return 2
-    if args.cmd == "verdict" and not args.name:
+    if args.cmd == "verdict" and not args.name and args.verdict != "show":
         print("swarm verdict: the judge's name is unknown here. A judge spawned with Claude Code hooks "
               f"just runs `swarm verdict --job {args.job} met|not_met ...` (the hooks add its own name); "
               "from a shell without hooks (a human, Codex) pass --as NAME, the name `swarm who` shows "
               "for the judge.", file=sys.stderr)
         return 2
     note_orchestrator_read(cfg, args)
-    if args.cmd == "verdict" and _verdict_text(args) is None:   # refused before anything is sent or queued
+    if args.cmd == "verdict" and args.verdict != "show" and _verdict_text(args) is None:   # refused before anything is sent or queued
         return 1
     try:
         board_cm = open_board(cfg, readers=_reads_only(args))
@@ -4540,8 +4608,12 @@ def _run_command(cfg: dict, args) -> int:
             print(f"queued (board not reachable from here: {_error_name(exc)}); the swarm hooks apply "
                   f"it within seconds. This is normal inside a sandbox.")
             return 0
+        if args.cmd == "verdict" and args.verdict == "show":
+            print(f"cannot reach the board database: {exc}", file=sys.stderr)
+            return 1
         if args.cmd == "verdict":  # likewise; whether args.name is the judge is checked on delivery
-            spool_verdict(cfg, args.job, args.name, args.verdict, *_verdict_text(args), artifact=args.artifact)
+            spool_verdict(cfg, args.job, args.name, args.verdict, *_verdict_text(args), artifact=args.artifact,
+                          details=getattr(args, "details_text", None))
             print(f"queued (board not reachable from here: {_error_name(exc)}); it is delivered "
                   f"automatically within seconds by the swarm hooks, and counts only if you are the "
                   f"judge of {args.job} (if not, you are told on the board).")

@@ -28,9 +28,54 @@ _ON_RAW = (
 )
 
 
+# A here-document's body is data, and is dropped from the examined text, ONLY in one strict shape and
+# otherwise never (fail closed: a judge whose report is refused retries, a bypass is a hole): the whole
+# command starts with a `swarm verdict ... --details - <<'WORD'` line (the delimiter one fully quoted
+# word, so bash expands nothing in the body), every word of that line is a plain word or a quoted
+# string with no `$`, backtick or backslash inside, and the body ends at the exact terminator line.
+# Anything uncertain before the body (`$((`, `$'`, a `#`, parentheses, ;&|<>, an unbalanced quote) makes
+# the line not match, so nothing is hidden. What follows the terminator is still examined.
+_WORD = r"(?:[\w./:=@%+,~-]|'[^'\n]*'|\"[^\"\\$`\n]*\")+"
+_SEP = r"(?:[ \t]|\\\n)+"
+_VERDICT_HEREDOC = re.compile(
+    rf"[ \t]*(?:[\w./~-]*/)?swarm{_SEP}verdict(?:{_SEP}{_WORD})*{_SEP}--details{_SEP}-{_SEP}"
+    r"<<(?:'(\w+)'|\"(\w+)\")[ \t]*\n")
+
+
+def _heredoc_spans(command: str) -> list[tuple[int, int, int]]:
+    """[(operator start, body start, body end incl. the terminator line)] of the one hideable
+    `swarm verdict --details - <<'WORD'` heredoc at the start of `command`, else []."""
+    m = _VERDICT_HEREDOC.match(command)
+    if not m:
+        return []
+    word = m.group(1) or m.group(2)
+    body = pos = m.end()
+    while True:
+        nl = command.find("\n", pos)
+        if (command[pos:] if nl < 0 else command[pos:nl]) == word:
+            return [(command.rfind("<<", 0, body), body, len(command) if nl < 0 else nl)]
+        if nl < 0:
+            return []
+        pos = nl + 1
+
+
+def mask_heredocs(command: str) -> str:
+    """`command` with the `<<` operator and the body of each `swarm verdict --details -` heredoc
+    blanked to spaces (newlines kept), the same length so word offsets still point into the original:
+    what a word-splitter that refuses `<<` can take apart."""
+    out = list(command)
+    for start, body, end in _heredoc_spans(command):
+        for k in list(range(start, start + 2)) + list(range(body, end)):
+            if out[k] != "\n":
+                out[k] = " "
+    return "".join(out)
+
+
 def writes_files(command: str) -> str | None:
     if not command:
         return None
+    for _, body, end in reversed(_heredoc_spans(command)):
+        command = command[:body] + command[end:]
     stripped = _QUOTED.sub("''", command)
     for why, rx in _ON_STRIPPED:
         if rx.search(stripped):

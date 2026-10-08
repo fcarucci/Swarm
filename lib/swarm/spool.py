@@ -25,6 +25,7 @@ import time
 import uuid
 from pathlib import Path
 from swarm import compat, roles
+from swarm.board.base import VERDICT_DETAILS_MAX
 
 STUCK_AFTER = 24 * 3600  # seconds a memory may keep failing before it is parked as .stuck
 RECORD_MAX = 256 * 1024  # a spooled record larger than this is not read (it goes to .bad)
@@ -189,10 +190,12 @@ def _valid_metadata(m) -> bool:
 
 
 def spool_verdict(cfg: dict, job: str, name: str, verdict: str, reason: str,
-                  next_steps: str | None = None, artifact: str | None = None) -> Path:
+                  next_steps: str | None = None, artifact: str | None = None,
+                  details: str | None = None) -> Path:
     """Queue a `swarm verdict`; whether `name` is the job's judge is checked on delivery."""
     return _spool(cfg, {"job": job, "name": name, "verdict": verdict, "reason": reason,
-                        "next": next_steps, "artifact": artifact}, ".vrd")
+                        "next": next_steps, "artifact": artifact,
+                        **({"details": details} if details else {})}, ".vrd")
 
 
 def spool_wait(cfg: dict, job: str, on: str | None, until: float | None = None) -> Path:
@@ -296,7 +299,11 @@ def _load(d: int, claimed: str, name: str) -> tuple | None:
         if not _valid_job(m["job"]) or not valid_name(m["name"]):
             raise ValueError("not a plain job or agent name")
         if suffix == ".vrd":
-            rec = m["job"], m["name"], m["verdict"], m["reason"], m.get("next"), m.get("artifact")   # optional in older files
+            rec = (m["job"], m["name"], m["verdict"], m["reason"], m.get("next"), m.get("artifact"),
+                   m.get("details"))   # artifact and details are optional (older files lack them)
+            if rec[6] is not None and (not isinstance(rec[6], str)
+                                       or len(rec[6].encode("utf-8", "replace")) > VERDICT_DETAILS_MAX):
+                raise ValueError("details is not text, or is over the cap")
             if rec[4] is not None and not isinstance(rec[4], str):
                 raise ValueError("next is not text")
             if rec[5] is not None and (not isinstance(rec[5], str) or not rec[5].strip()):
@@ -444,7 +451,8 @@ def retry_stuck(cfg: dict) -> int:
 
 
 def deliver_verdict(board, job: str, name: str, verdict: str, reason: str,
-                    next_steps: str | None = None, artifact: str | None = None) -> bool:
+                    next_steps: str | None = None, artifact: str | None = None,
+                    details: str | None = None) -> bool:
     """Record a judge's verdict and post it on the job's board; False (nothing recorded or
     posted) if `name` is not the job's active judge. Shared by `swarm verdict` and the spool."""
     if artifact is None:
@@ -455,9 +463,11 @@ def deliver_verdict(board, job: str, name: str, verdict: str, reason: str,
         handoffs = latest_handoffs(board, job)
         if artifact is None and handoffs:
             artifact = handoffs[-1].artifact
-    if not board.record_verdict(job, name, verdict, reason, next_steps, artifact):
+    if not board.record_verdict(job, name, verdict, reason, next_steps, artifact, details):
         return False
     board.post(job, name, f"VERDICT {verdict}: {reason}")
+    if details and details.strip():   # the report itself is not posted (the board caps a message)
+        board.post(job, name, f"DETAILS ({len(details.strip().splitlines())} lines): swarm verdict show --job {job}")
     if next_steps:   # the board caps a message; the full text is what `swarm status --job J` shows
         board.post(job, name, f"NEXT (to meet the goal; full text in swarm status): {next_steps}")
     return True
@@ -466,8 +476,8 @@ def deliver_verdict(board, job: str, name: str, verdict: str, reason: str,
 def _deliver_spooled_verdict(board, rec: tuple) -> bool:
     """A spooled verdict from someone who isn't the judge is refused; the sender is told on the
     board (it can't see the CLI's answer: the CLI only queued it)."""
-    job, name, verdict, reason, next_steps, artifact = rec
-    if deliver_verdict(board, job, name, verdict, reason, next_steps, artifact):
+    job, name, verdict, reason, next_steps, artifact, details = rec
+    if deliver_verdict(board, job, name, verdict, reason, next_steps, artifact, details):
         return True
     board.post(job, "swarm", f"verdict refused: {name} is not the judge of job {job}", to=name)
     return False

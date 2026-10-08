@@ -58,13 +58,15 @@ def verdict_key(js) -> str:
     return f"{js.verdict_by}|{js.verdict_at.isoformat() if js.verdict_at else ''}"
 
 
-def brief(js, job: str, spawn_tags: bool = True, informational: bool = False) -> str:
+def brief(js, job: str, spawn_tags: bool = True, informational: bool = False, details: bool = False) -> str:
     """The text the orchestrator is shown. `spawn_tags`: name the tag lines the children's
     prompts need to join the job (Claude Code reads them; Codex doesn't need them)."""
     judge = _clip(js.verdict_by or "the judge", 200)
     reason = _clip(js.verdict_reason or "no reason recorded")
     nxt = _clip(js.verdict_next or "(the judge gave no instructions: read the board and the verdict "
                 "reason to decide what is missing)")
+    if details:   # the judge left a full report (swarm verdict --details): the workers should read it
+        nxt += f" (the judge's full report: `swarm verdict show --job {job}`; tell the workers to read it)"
     if informational:
         return (f'[swarm] job "{job}": judge {judge} ruled not met: {reason}. '
                 f'The supervisor review pipeline starts the fix worker with: {nxt}.')
@@ -114,9 +116,10 @@ def check(marker: Path, job: str, *, force: bool, host, open_board,
         interval = float(((cfg or {}).get("supervise") or {}).get("orphan_minutes", REMIND_SECONDS / 60)) * 60
         if not force and now - float(st.get("checked") or 0) < CHECK_SECONDS:
             return None
-        activity = None
+        activity, has_details = None, False
         with open_board() as board:
             js = board.job_status(job)
+            has_details = idle_not_met(js) and board.verdict_details(job) is not None
             if idle_not_met(js) and js.verdict_at:
                 agents = board.agents(job)
                 judges = {a.name for a in agents if a.role == "judge"} | {js.verdict_by}
@@ -136,7 +139,7 @@ def check(marker: Path, job: str, *, force: bool, host, open_board,
             due_again = interval > 0 and now - float(st.get("shown") or 0) >= interval
             # Stop observes tool-hook suppression; a later worker contact starts a new idle window.
             if not recent_activity and (not already_shown or due_again):
-                text = brief(js, job, host.reads_prompt_tags, informational)
+                text = brief(js, job, host.reads_prompt_tags, informational, has_details)
                 st["key"], st["shown"] = key, now
         with contextlib.suppress(OSError):   # if it can't be remembered, better said twice than never
             _write_state(d, name, st)

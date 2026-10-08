@@ -6,6 +6,12 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 ## [Unreleased]
 
+### Added
+- `swarm verdict --details -|PATH`: a judge records its full Markdown report (evidence, numbered defects, fix list; at most 64 KiB) with a met or not_met verdict, bound to the same `--artifact`, instead of writing a `verdict.md` that judges are not allowed to create. `swarm verdict show --job J [--artifact REF]` prints it, `status --job J` shows `details: N lines`, and the fix worker's brief points to it. Needs schema 23 (nullable `jobs.verdict_details`; the board upgrades itself on first use).
+
+### Fixed
+- The judge instructions and the judge gate's refusal now tell a judge to put its report in `--details` (a heredoc body is no longer mistaken for a file write by the shell guard), so a verdict's `--reason` no longer points at a file that was never written.
+
 ## [0.2.3] - 2026-10-08
 
 ### Changed

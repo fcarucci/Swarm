@@ -124,7 +124,23 @@ RESTART_OUTCOMES = ("running", "completed", "timeout", "max_turns", "failed", "n
 # view and the watch snapshot read it instead of counting per agent on every read), kept by triggers
 # on Postgres and SQLite and by the post on the file/memory stores (a row without it is counted once);
 # per-table autovacuum settings on Postgres' messages and agents.
-SCHEMA_VERSION = 22
+# 23 jobs.verdict_details and verdict_details_at (the judge's full Markdown report with a verdict and the verdict_at it belongs to, at most
+# VERDICT_DETAILS_MAX bytes; nullable, read with .get() so old rows and clients keep working).
+SCHEMA_VERSION = 23
+
+VERDICT_DETAILS_MAX = 64 * 1024   # bytes of UTF-8: the largest `swarm verdict --details` report
+
+
+def check_verdict_details(details: str | None) -> str | None:
+    """The details as stored: None for none (or only whitespace); a BoardError naming the cap
+    for a report over VERDICT_DETAILS_MAX bytes. Every backend's record_verdict runs it."""
+    if details is None or not details.strip():
+        return None
+    size = len(details.encode("utf-8", "replace"))
+    if size > VERDICT_DETAILS_MAX:
+        raise BoardError(f"verdict details are {size} bytes; the limit is {VERDICT_DETAILS_MAX} "
+                         f"({VERDICT_DETAILS_MAX // 1024} KiB). Shorten the report.")
+    return details
 
 TITLE_MAX = 60
 
@@ -593,6 +609,28 @@ class JobStatus:
     evidence_command: str | None = None
     finalize: str | None = None
     verdict_artifact: str | None = None
+
+
+def details_if_bound(details: str, verdict: str, by: str | None, at, plugin_data: str | None,
+                     artifact: str | None) -> "VerdictDetails | None":
+    """Board.verdict_details from a job's raw columns: the artifact the latest verdict is bound to
+    (job data `pipeline.verdict_artifact`, '' for none) must equal `artifact` when one is asked for."""
+    bound = parse_job_data(plugin_data).get("pipeline.verdict_artifact") or None
+    if artifact is not None and artifact != bound:
+        return None
+    return VerdictDetails(details, verdict, by, at, bound)
+
+
+@dataclass(frozen=True)
+class VerdictDetails:
+    """A judge's full report (Board.verdict_details): the Markdown text stored with the job's
+    latest verdict, which verdict it came with, who recorded it and when, and the artifact it is
+    bound to (None: the verdict named none)."""
+    details: str
+    verdict: str
+    by: str | None
+    at: _dt.datetime | None
+    artifact: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1911,11 +1949,20 @@ class Board(abc.ABC):
 
     @abc.abstractmethod
     def record_verdict(self, job: str, judge_name: str, verdict: str, reason: str,
-                       next_steps: str | None = None, artifact: str | None = None) -> bool:
+                       next_steps: str | None = None, artifact: str | None = None,
+                       details: str | None = None) -> bool:
         """The judge's verdict on the job's goal: only if `judge_name` is the job's ACTIVE judge
         (else False, nothing stored). Sets verdict (one of VERDICTS, anything else raises),
         verdict_reason, verdict_next = next_steps (None for met), verdict_by = judge_name, verdict_at = now; a later verdict replaces it.
+        `details`: the judge's full report (Markdown), stored with the verdict and replaced (cleared
+        when absent) by the next one; over VERDICT_DETAILS_MAX bytes raises BoardError (see
+        check_verdict_details). Read it back with verdict_details.
         A judge_name that fails valid_name raises ValueError. Returns True if stored. Posting it on the board is the caller's business."""
+
+    @abc.abstractmethod
+    def verdict_details(self, job: str, artifact: str | None = None) -> VerdictDetails | None:
+        """The full report stored with the job's latest verdict, or None: no verdict, a verdict
+        without details, or (with `artifact`) a latest verdict bound to a different artifact."""
 
     @abc.abstractmethod
     def active_agent_name(self, agent_key: str) -> str | None:

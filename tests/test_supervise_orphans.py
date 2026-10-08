@@ -29,6 +29,7 @@ class FakeBoard:
     def recent_messages(self, n, job=None):
         return [NS(id=42, agent_name="Homer", message="Already pushed parser branch")][-n:]
     def post(self, job, author, message): self.posts.append((author, message))
+    def verdict_details(self, job, artifact=None): return None
 
 
 class OrphansTest(unittest.TestCase):

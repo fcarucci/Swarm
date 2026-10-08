@@ -304,6 +304,12 @@ user asks for one. Don't run duplicate jobs: merge similar ones (`swarm job merg
      --reason "evidence"` or `not_met --reason "missing" --next "fix brief"`.
      **Always include `--artifact REF` for the exact hand-off inspected.** For compatibility,
      a reason beginning `branch@sha:` supplies the artifact when the flag is omitted.
+     A long verdict (evidence, numbered defects, the fix list) goes in `--details -` (the Markdown
+     report on stdin, e.g. a quoted heredoc; or `--details PATH`; at most 64 KiB), kept with the
+     verdict for met and not_met and bound to the same `--artifact`. Keep `--reason`/`--next` short.
+     **Judges cannot write files**, so never point a `--reason` at a `verdict.md`: put the report in
+     `--details`. Anyone reads it with `swarm verdict show --job J [--artifact REF]`; `status --job J` shows
+     `details: N lines`, and the supervisor's fix worker is told to read it.
      They never fix, integrate, push, or spawn fix workers. Their Stop hook blocks an exit
      without an artifact-bound verdict. Pending external evidence means wait using the
      configured command or record `not_met` with actionable next steps.
@@ -478,7 +484,7 @@ way its own host does it. `swarm status --job <job>` shows each agent's HOST and
 | `activate --job J --attach [--session S]` | bind this session to a job that is already active (e.g. from the other host) without reopening it; see [One job, both hosts](#one-job-both-hosts) |
 | `activate … --goal G\|-` | give the job a goal: one judge (`[swarm role: judge]` in its prompt) decides when it is met; prints both tag lines |
 | `deactivate --job J [--status S] [--outcome O] [--force] [--delete-bank]` | switch the board off and close the job; `completed` needs the judge's `met` verdict when the job has a goal, unless `--force` (recorded). On a job that is already closed (e.g. auto-closed) it replaces the status and outcome |
-| `verdict --job J [--as NAME] [--artifact REF] met\|not_met "reason"` | the job's judge only (a judge with Claude Code hooks leaves `--as` out: its hooks add its own name; other hosts and humans pass it) (a judge outside the board must run this too, or the job waits): record the verdict on its goal and post it on the board (queued like `post` when the board is unreachable; a non-judge is refused) |
+| `verdict --job J [--as NAME] [--artifact REF] [--details -\|PATH] met\|not_met "reason"` | the job's judge only (a judge with Claude Code hooks leaves `--as` out: its hooks add its own name; other hosts and humans pass it) (a judge outside the board must run this too, or the job waits): record the verdict on its goal and post it on the board (queued like `post` when the board is unreachable; a non-judge is refused); `--details` is the full Markdown report (stdin or a file, at most 64 KiB, stored with the verdict). `verdict --job J [--artifact REF] show` prints the latest report (anyone; read-only) |
 | `wait --job J --on "<what>" [--for DURATION\|--until TIME]` / `resume --job J` | mark an open job as waiting for something (shown as `waiting` with the reason; `--for 90m` or `--until 17:30` bounds it, and a bounded wait that has not ended protects the job from auto-close) / working again (an agent joining does this too) |
 | `blockers --job J [--open\|--all]` | list open blockers, or include resolved/expired history with `--all` |
 | `blocker resolve ID [--how TEXT]` / `blocker comment ID TEXT...` | resolve a blocker with an audit reason, or append a comment |

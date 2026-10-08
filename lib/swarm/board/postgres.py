@@ -27,7 +27,7 @@ from typing import Mapping, Sequence
 import psycopg
 from psycopg import sql
 
-from .base import (check_job_data, merged_job_data, parse_job_data, LEFT_PAUSED, PauseRecord, build_manifest, database_hosts, MOVED_PREFIX, NAME_PATTERN, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, CloseGuard, CapExceeded, configured_message_cap, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, ROUTE_STATES, TOOL_NAME_MAX,
+from .base import (check_verdict_details, details_if_bound, VerdictDetails, check_job_data, merged_job_data, parse_job_data, LEFT_PAUSED, PauseRecord, build_manifest, database_hosts, MOVED_PREFIX, NAME_PATTERN, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, CloseGuard, CapExceeded, configured_message_cap, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, ROUTE_STATES, TOOL_NAME_MAX,
                    AgentEvent, Restart,
                    AgentStatus, Board, BoardError, BoardUnavailable, IncompatibleStorage, JobStatus,
                    Member, Message, OwedReply, ReadResult, Route, RosterEntry, SCHEMA_VERSION, SetupResult,
@@ -167,6 +167,11 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS goal text;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS verdict text;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS verdict_reason text;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS verdict_next text;
+-- Schema version 23: the judge's full Markdown report (nullable; swarm verdict --details).
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS verdict_details text;
+-- ... and the verdict_at it belongs to (an older client updates the verdict columns only: a report whose
+-- verdict_details_at differs from verdict_at is stale and not shown).
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS verdict_details_at timestamptz;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS verdict_by text;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS verdict_at timestamptz;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS completion_forced boolean NOT NULL DEFAULT false;
@@ -1096,7 +1101,7 @@ class PostgresBoard(SqlBlockers, SqlEvents, Board):
             "outcome = NULL, description = COALESCE(EXCLUDED.description, jobs.description), "
             "task = COALESCE(EXCLUDED.task, jobs.task), session_id = COALESCE(EXCLUDED.session_id, jobs.session_id), "
             "project = COALESCE(EXCLUDED.project, jobs.project), goal = COALESCE(EXCLUDED.goal, jobs.goal), "
-            "verdict = NULL, verdict_reason = NULL, verdict_next = NULL, verdict_by = NULL, verdict_at = NULL, "
+            "verdict = NULL, verdict_reason = NULL, verdict_next = NULL, verdict_by = NULL, verdict_at = NULL, verdict_details = NULL, "
             "completion_forced = false, spawns = 0, waiting_on = NULL, waiting_since = NULL, "
             "waiting_until = NULL, max_hours = NULL, closed_by = NULL",
             (job, description, task, session_id, created_by, project, goal))
@@ -1287,7 +1292,7 @@ class PostgresBoard(SqlBlockers, SqlEvents, Board):
                 return False
             if row[0] != goal:
                 self._conn.execute("UPDATE jobs SET goal = %s, verdict = NULL, verdict_reason = NULL, "
-                    "verdict_next = NULL, verdict_by = NULL, verdict_at = NULL, plugin_data = %s WHERE job = %s",
+                    "verdict_next = NULL, verdict_by = NULL, verdict_at = NULL, verdict_details = NULL, plugin_data = %s WHERE job = %s",
                     (goal, clear_verdict_data(row[1]), job))
             return True
 
@@ -1321,10 +1326,12 @@ class PostgresBoard(SqlBlockers, SqlEvents, Board):
             return SpawnGrant(True, mine + 1, total + 1)
 
     def record_verdict(self, job: str, judge_name: str, verdict: str, reason: str,
-                       next_steps: str | None = None, artifact: str | None = None) -> bool:
+                       next_steps: str | None = None, artifact: str | None = None,
+                       details: str | None = None) -> bool:
         check_name(judge_name, "judge name")
         if verdict not in VERDICTS:
             raise BoardError(f"unknown verdict {verdict!r}")
+        details = check_verdict_details(details)
         from swarm.review import verdict_data
         with self._conn.transaction():
             row = self._conn.execute("SELECT plugin_data FROM jobs WHERE job = %s AND EXISTS "
@@ -1334,10 +1341,17 @@ class PostgresBoard(SqlBlockers, SqlEvents, Board):
                 return False
             at = self.now()
             self._conn.execute("UPDATE jobs SET verdict = %s, verdict_reason = %s, verdict_next = %s, "
-                "verdict_by = %s, verdict_at = %s, plugin_data = %s WHERE job = %s",
-                (verdict, reason, next_steps, judge_name, at,
+                "verdict_by = %s, verdict_at = %s, verdict_details = %s, verdict_details_at = %s, plugin_data = %s WHERE job = %s",
+                (verdict, reason, next_steps, judge_name, at, details, at if details else None,
                  verdict_data(row[0], artifact, verdict, reason, next_steps, judge_name, at), job))
             return True
+
+    def verdict_details(self, job: str, artifact: str | None = None) -> VerdictDetails | None:
+        row = self._conn.execute("SELECT verdict_details, verdict, verdict_by, verdict_at, plugin_data, "
+                                 "verdict_details_at FROM jobs WHERE job = %s", (job,)).fetchone()
+        if row is None or not row[0] or not row[1] or row[5] != row[3]:   # none, or left by an older verdict
+            return None
+        return details_if_bound(*row[:5], artifact)
 
     def active_agent_name(self, agent_key: str) -> str | None:
         row = self._conn.execute("SELECT name FROM agents WHERE agent_key = %s AND left_at IS NULL",

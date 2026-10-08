@@ -550,6 +550,13 @@ def _judge_instructions(name: str, job: str, goal: str, cfg: dict, cap: int | No
         f"workers have fixed it. The job can't be completed until your verdict is met.",
         "- Judges only judge: never edit, fix, integrate, push or spawn workers. The supervisor "
         "starts fix workers from your --next brief, and a separate executor finalizes accepted work.",
+        f"- Put a long verdict (evidence, numbered defects, the fix list) in the verdict itself with "
+        f"`--details -`, the full Markdown report on stdin (a heredoc with a QUOTED delimiter: "
+        f"`{_bin()} verdict --job {_q(job)}{who} --artifact REF not_met --reason ... --next ... "
+        f"--details - <<'EOF'` ... `EOF`; at most 64 KiB). Keep --reason and --next short. Never "
+        f"write the report to a file such as verdict.md: file writes are refused for judges, so "
+        f"such a file never exists, and a --reason pointing at it leaves everyone with a dead "
+        f"reference. Anyone reads it with `{_bin()} verdict show --job {_q(job)}`.",
         "- You must record a verdict before stopping. Bind it with --artifact REF to the exact "
         "hand-off you inspected; acceptance of one artifact never covers another. If external "
         "evidence is pending or red, wait using the configured evidence command or record "
@@ -1006,8 +1013,9 @@ def own_name_verdict_command(command: str, name: str, job: str | None = None) ->
     --as gets `--as NAME` (a judge needs no join and no --as: the hook knows who is calling), and
     a plain --as naming someone else is replaced (it would be refused anyway). None when there is
     nothing to change. A verdict for another --job than `job` is left alone."""
+    from swarm.shellguard import mask_heredocs
     inserts, edits = [], []
-    for args in _swarm_calls(command, "verdict"):
+    for args in _swarm_calls(mask_heredocs(command), "verdict"):   # a heredoc report is not shell
         has_as, other_job, bad = False, False, None
         for m, (_, _, text, _) in enumerate(args):
             value, tok = _flag_value(args, m, "--job")
@@ -1066,8 +1074,10 @@ def _gate_judge(board, agent_id: str, job: str, payload: dict) -> bool:
     command = host.shell_command(payload)
     if host.denies_verifier(payload) or (command and writes_files(command)):
         board.tool_finished(agent_id)
-        _deny("[swarm] Judges only judge: no editing, fixing, merging, pushing or spawning. "
-              "Record not_met with --next for the supervisor's fix worker.")
+        _deny("[swarm] Judges only judge: no editing, fixing, merging, pushing or spawning, and no "
+              "writing files (not even a verdict.md). Record not_met with --next for the "
+              "supervisor's fix worker, and put your full report in the verdict: "
+              "`swarm verdict ... --details -` with the Markdown on stdin (a heredoc with a quoted delimiter: --details - <<'EOF').")
         return False
     return True
 

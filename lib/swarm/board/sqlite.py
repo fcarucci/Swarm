@@ -65,7 +65,7 @@ import time
 from pathlib import Path
 from typing import Iterator, Mapping, Sequence
 
-from .base import (check_job_data, merged_job_data, parse_job_data, LEFT_PAUSED, MOVED_PREFIX, PauseRecord, build_manifest, NAME_MAX, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, AUTO_CLOSE_BLOCKING, CloseGuard, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, Restart,
+from .base import (check_verdict_details, details_if_bound, VerdictDetails, check_job_data, merged_job_data, parse_job_data, LEFT_PAUSED, MOVED_PREFIX, PauseRecord, build_manifest, NAME_MAX, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, AUTO_CLOSE_BLOCKING, CloseGuard, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, Restart,
                    ROUTE_STATES, TOOL_NAME_MAX, AgentEvent, AgentStatus, Board, BoardError, BoardUnavailable, JobStatus, Member, Message, ReadOnlyBoard, refuse_writes,
                    OwedReply, ReadResult, Route, RosterEntry, SCHEMA_VERSION, SetupResult, SpawnGrant, SyncState,
                    TRANSCRIPT_ROLES, TranscriptImage, TranscriptRow, TranscriptSummary, VERDICTS,
@@ -101,6 +101,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     verdict           TEXT CHECK (verdict IN ('met', 'not_met')),
     verdict_reason    TEXT,
     verdict_next      TEXT,
+    verdict_details   TEXT,
+    verdict_details_at TEXT,
     verdict_by        TEXT,
     verdict_at        TEXT,
     completion_forced INTEGER NOT NULL DEFAULT 0,
@@ -340,6 +342,8 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("jobs", "plugin_data", "TEXT"),    # schema 16: per-job settings kept by CLI plugins (JSON)
     ("agents", "title", "TEXT"),        # schema 20: the optional display title (NULL: none)
     ("agents", "message_count", "INTEGER NOT NULL DEFAULT 0"),   # schema 22: see COUNT_TRIGGERS
+    ("jobs", "verdict_details_at", "TEXT"),   # schema 23: the verdict_at the report belongs to
+    ("jobs", "verdict_details", "TEXT"),   # schema 23: the judge's full Markdown report
 )
 
 # Schema 22: agents.message_count = the messages the agent posted to its job since it joined (what
@@ -750,7 +754,7 @@ class SqliteBoard(SqlBlockers, SqlEvents, Board):
             "task = COALESCE(excluded.task, jobs.task), "
             "session_id = COALESCE(excluded.session_id, jobs.session_id), "
             "project = COALESCE(excluded.project, jobs.project), goal = COALESCE(excluded.goal, jobs.goal), "
-            "verdict = NULL, verdict_reason = NULL, verdict_next = NULL, verdict_by = NULL, verdict_at = NULL, "
+            "verdict = NULL, verdict_reason = NULL, verdict_next = NULL, verdict_by = NULL, verdict_at = NULL, verdict_details = NULL, "
             "completion_forced = 0, spawns = 0, waiting_on = NULL, waiting_since = NULL, "
             "waiting_until = NULL, max_hours = NULL, closed_by = NULL",
             (job, description, task, session_id, created_by, project, goal, now, now))
@@ -912,7 +916,7 @@ class SqliteBoard(SqlBlockers, SqlEvents, Board):
             if row[0] != goal:
                 from swarm.review import clear_verdict_data
                 c.execute("UPDATE jobs SET goal = ?, verdict = NULL, verdict_reason = NULL, "
-                          "verdict_next = NULL, verdict_by = NULL, verdict_at = NULL, plugin_data = ? WHERE job = ?",
+                          "verdict_next = NULL, verdict_by = NULL, verdict_at = NULL, verdict_details = NULL, plugin_data = ? WHERE job = ?",
                           (goal, clear_verdict_data(row[1]), job))
             return True
 
@@ -945,10 +949,12 @@ class SqliteBoard(SqlBlockers, SqlEvents, Board):
             return SpawnGrant(True, mine + 1, total + 1)
 
     def record_verdict(self, job: str, judge_name: str, verdict: str, reason: str,
-                       next_steps: str | None = None, artifact: str | None = None) -> bool:
+                       next_steps: str | None = None, artifact: str | None = None,
+                       details: str | None = None) -> bool:
         check_name(judge_name, "judge name")
         if verdict not in VERDICTS:
             raise BoardError(f"unknown verdict {verdict!r}")
+        details = check_verdict_details(details)
         from swarm.review import verdict_data
         with self._tx() as c:
             row = c.execute("SELECT plugin_data FROM jobs WHERE job = ? AND EXISTS "
@@ -958,10 +964,17 @@ class SqliteBoard(SqlBlockers, SqlEvents, Board):
                 return False
             at = self.now()
             c.execute("UPDATE jobs SET verdict = ?, verdict_reason = ?, verdict_next = ?, verdict_by = ?, "
-                "verdict_at = ?, plugin_data = ? WHERE job = ?",
-                (verdict, reason, next_steps, judge_name, at.isoformat(),
+                "verdict_at = ?, verdict_details = ?, verdict_details_at = ?, plugin_data = ? WHERE job = ?",
+                (verdict, reason, next_steps, judge_name, at.isoformat(), details, at.isoformat() if details else None,
                  verdict_data(row[0], artifact, verdict, reason, next_steps, judge_name, at), job))
             return True
+
+    def verdict_details(self, job: str, artifact: str | None = None) -> VerdictDetails | None:
+        row = self._c().execute("SELECT verdict_details, verdict, verdict_by, verdict_at, plugin_data, "
+                                "verdict_details_at FROM jobs WHERE job = ?", (job,)).fetchone()
+        if row is None or not row[0] or not row[1] or row[5] != row[3]:   # none, or left by an older verdict
+            return None
+        return details_if_bound(row[0], row[1], row[2], _dt_(row[3]), row[4], artifact)
 
     def active_agent_name(self, agent_key: str) -> str | None:
         row = self._c().execute("SELECT name FROM agents WHERE agent_key = ? AND left_at IS NULL",

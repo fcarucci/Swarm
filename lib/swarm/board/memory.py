@@ -27,7 +27,7 @@ import random
 import threading
 from typing import Mapping, Sequence
 
-from .base import (check_job_data, merged_job_data, parse_job_data, LEFT_PAUSED, MOVED_PREFIX, PauseRecord, build_manifest, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, AUTO_CLOSE_BLOCKING, CloseGuard, goal_is_unmet, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, Restart,
+from .base import (check_verdict_details, details_if_bound, VerdictDetails, check_job_data, merged_job_data, parse_job_data, LEFT_PAUSED, MOVED_PREFIX, PauseRecord, build_manifest, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, AUTO_CLOSE_BLOCKING, CloseGuard, goal_is_unmet, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, Restart,
                    ROUTE_STATES, TOOL_NAME_MAX, AgentEvent, AgentStatus, Board, BoardError, BoardUnavailable, JobStatus, Member, Message,
                    OwedReply, ReadResult, Route, SCHEMA_VERSION, SetupResult, SpawnGrant, SyncState, TRANSCRIPT_ROLES,
                    TranscriptImage, TranscriptRow, TranscriptSummary, VERDICTS,
@@ -152,7 +152,8 @@ def reset_store(name: str = "default") -> MemoryStore:
 
 
 # Verdict fields of a job, cleared when it is (re-)opened.
-_NO_VERDICT = {"verdict": None, "verdict_reason": None, "verdict_next": None, "verdict_by": None, "verdict_at": None}
+_NO_VERDICT = {"verdict": None, "verdict_reason": None, "verdict_next": None, "verdict_by": None, "verdict_at": None,
+               "verdict_details": None}
 
 # ---- purge steps (store lock held; each returns whether it changed anything) -----------
 
@@ -602,10 +603,12 @@ class MemoryBoard(MemoryBlockers, MemoryEvents, Board):
                      if a.get("judge") and a["left_at"] is None and a["job"] == job), None)
 
     def record_verdict(self, job: str, judge_name: str, verdict: str, reason: str,
-                       next_steps: str | None = None, artifact: str | None = None) -> bool:
+                       next_steps: str | None = None, artifact: str | None = None,
+                       details: str | None = None) -> bool:
         check_name(judge_name, "judge name")
         if verdict not in VERDICTS:
             raise BoardError(f"unknown verdict {verdict!r}")
+        details = check_verdict_details(details)
         s = self._s()
         with s.lock:
             judge, j = self._active_judge(job), s.jobs.get(job)
@@ -614,9 +617,20 @@ class MemoryBoard(MemoryBlockers, MemoryEvents, Board):
             from swarm.review import verdict_data
             at = self.now()
             j.update(verdict=verdict, verdict_reason=reason, verdict_next=next_steps, verdict_by=judge_name, verdict_at=at,
+                     verdict_details=details, verdict_details_at=at if details else None,
                      plugin_data=verdict_data(j.get('plugin_data'), artifact, verdict, reason, next_steps, judge_name, at))
             s.touch()
             return True
+
+    def verdict_details(self, job: str, artifact: str | None = None) -> VerdictDetails | None:
+        s = self._s()
+        with s.lock:
+            j = s.jobs.get(job)
+            if (j is None or not j.get("verdict") or not j.get("verdict_details")
+                    or j.get("verdict_details_at") != j.get("verdict_at")):   # none, or left by an older verdict
+                return None
+            return details_if_bound(j["verdict_details"], j["verdict"], j.get("verdict_by"),
+                                    j.get("verdict_at"), j.get("plugin_data"), artifact)
 
     def active_agent_name(self, agent_key: str) -> str | None:
         s = self._s()

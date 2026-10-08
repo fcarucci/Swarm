@@ -961,6 +961,7 @@ REVIEWED = {
     ("cli.py", "_save_config_value", ".write_text"): "config set --save: the operator's own ~/.config/swarm/config.toml or --config (temp then replace)",
     ("cli.py", "_save_config_value", "os.chmod"): "config set --save: the operator's own ~/.config/swarm/config.toml or --config (temp then replace)",
     ("cli.py", "_save_config_value", "os.replace"): "config set --save: the operator's own ~/.config/swarm/config.toml or --config (temp then replace)",
+    ("cli.py", "_read_details", "open"): "verdict --details PATH: a report file the judge itself names (read-only, bounded to the cap)",
     ("cli.py", "load_config", "open"): "~/.config/swarm/config.toml or --config (read)",
     ("cli.py", "locked_marker", "os.open"): "O_NOFOLLOW|O_NONBLOCK, then fstat: regular file of ours",
     ("cli.py", "_private_mkdir", ".mkdir"): "transcript show -o: a path the operator names (accepted)",
