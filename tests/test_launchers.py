@@ -151,6 +151,32 @@ class LauncherTests(unittest.TestCase):
         self.assertFalse((self.home / ".local/state/swarm/hook-errors.log").exists())
 
     @posix_only("runs a POSIX sh script (the Windows entry points are tested in test_windows_*.py)")
+    def test_bin_swarm_reinstalls_a_venv_missing_psycopg(self):
+        # the venv's python records its args; pip is that python, so nothing touches the network
+        v = self.home / "venv"; (v / "bin").mkdir(parents=True)
+        (v / "bin/python").write_text(f'#!/bin/sh\necho "$@" >> "{self.home}/python-args"\n')
+        (v / "bin/python").chmod(0o755)
+        pkgs = v / "lib/python3.12/site-packages"
+        for pkg in ("psycopg", "zstandard"):
+            (pkgs / pkg).mkdir(parents=True); (pkgs / pkg / "__init__.py").write_text("")
+        req = subprocess.run(["sh", "-c", f"cksum < '{ROOT / 'requirements.txt'}' | cut -d' ' -f1"],
+                             capture_output=True, text=True).stdout.strip()
+        (v / ".swarm-requirements").write_text(req + "\n")
+        self.env["SWARM_VENV"] = str(v)
+        log = self.home / "python-args"
+        subprocess.run([str(ROOT / "bin/swarm"), "status"], capture_output=True, text=True, env=self.env, timeout=30)
+        self.assertEqual(log.read_text().splitlines()[-1].split(), ["-B", "-m", "swarm.cli", "status"])
+        self.assertNotIn("pip", log.read_text())                           # complete venv: no pip
+        shutil.rmtree(pkgs / "psycopg")
+        log.unlink()
+        subprocess.run([str(ROOT / "bin/swarm"), "status"], capture_output=True, text=True, env=self.env, timeout=30)
+        lines = log.read_text().splitlines()
+        self.assertEqual(lines[0].split()[:4], ["-m", "pip", "install", "-q"])   # pip restores the package
+        self.assertEqual(lines[0].split()[-1], str(ROOT / "requirements.txt"))
+        self.assertEqual((v / ".swarm-requirements").read_text().strip(), req)
+        self.assertFalse(Path(str(v) + ".building").exists())
+
+    @posix_only("runs a POSIX sh script (the Windows entry points are tested in test_windows_*.py)")
     def test_session_start_skips_when_stamped(self):
         fake = self.home / "plugin"; (fake / "bin").mkdir(parents=True); (fake / ".claude-plugin").mkdir()
         (fake / ".claude-plugin/plugin.json").write_text('{"name": "swarm", "version": "1.2.3"}')

@@ -11,7 +11,19 @@ fi
 D="$(cd "$(dirname "$0")/.." && pwd)"
 V="${SWARM_VENV:-$HOME/.local/share/swarm/venv}"
 REQ="$(cksum < "$D/requirements.txt" | cut -d' ' -f1)"
-if [ ! -x "$V/bin/python" ] || [ "$(cat "$V/.swarm-requirements" 2>/dev/null)" != "$REQ" ]; then
+# Needs (re)install: no interpreter, another requirements stamp, or a required package missing
+# from the venv (a glob, no Python start: an unmatched glob leaves the literal path, which fails -f).
+stale() {
+  [ -x "$V/bin/python" ] || return 0
+  [ "$(cat "$V/.swarm-requirements" 2>/dev/null)" = "$REQ" ] || return 0
+  for p in psycopg zstandard; do
+    f=0
+    for init in "$V"/lib/python3*/site-packages/$p/__init__.py; do [ -f "$init" ] && f=1; done
+    [ "$f" = 1 ] || return 0
+  done
+  return 1
+}
+if stale; then
   mkdir -p "$(dirname "$V")"
   i=0
   until mkdir "$V.building" 2>/dev/null; do
@@ -19,7 +31,7 @@ if [ ! -x "$V/bin/python" ] || [ "$(cat "$V/.swarm-requirements" 2>/dev/null)" !
     sleep 1
   done
   trap 'rmdir "$V.building" 2>/dev/null' EXIT INT TERM
-  if [ ! -x "$V/bin/python" ] || [ "$(cat "$V/.swarm-requirements" 2>/dev/null)" != "$REQ" ]; then
+  if stale; then
     echo "swarm: setting up $V (first run or new requirements)..." >&2
     { [ -x "$V/bin/python" ] || python3 -m venv "$V"; } \
       && PIP_DISABLE_PIP_VERSION_CHECK=1 "$V/bin/python" -m pip install -q -r "$D/requirements.txt" >&2 \

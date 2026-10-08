@@ -7,6 +7,7 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 ## [Unreleased]
 
 ### Fixed
+- The launchers (`bin/swarm`, `bin/swarm.cmd` via `lib/swarm/winlaunch.py`) reinstall requirements when `psycopg` or `zstandard` is missing from the venv, even when the requirements stamp matches. Before, swarm crashed on import until the venv was deleted by hand.
 - Judges can record a verdict again with no `join` and no `--as`. A judge spawned with `[swarm title: Judge]` was seated as a plain worker, and the shell fast path then skipped the hook that rewrites `swarm join --key` to the caller's own identity, so `join --judge` made a second identity that `--as` could not (rightly) use. Now `[swarm title: Judge]` seats the judge like `[swarm role: judge]` (a live judge is never displaced; a finished or dead one is replaced), `swarm join`/`swarm verdict` calls always reach the hook, and `swarm verdict` with no `--as` runs as the caller. `swarm join` without `--key` says so and points judges at `swarm verdict --job J met ...`.
 - `swarm watch` no longer crashes with `AttributeError: 'SnapshotBoard' object has no attribute 'last_post'` (0.2.1, PostgreSQL boards): the watch snapshot now carries each idle or dead agent's last post, fetched in the same single statement.
 

@@ -37,6 +37,14 @@ class Base(unittest.TestCase):
         self.log = self.tmp / "py.log"
         self.py = winlaunch.venv_python(self.venv)
 
+    def full_venv(self):
+        """A fake venv with its stamp and both required packages (pip is never run)."""
+        fake_python(self.py, self.log)
+        for pkg in winlaunch.PACKAGES:
+            (self.venv / "lib" / "python3.12" / "site-packages" / pkg).mkdir(parents=True)
+            (self.venv / "lib" / "python3.12" / "site-packages" / pkg / "__init__.py").write_text("")
+        (self.venv / ".swarm-requirements").write_text(winlaunch.requirements_stamp() + "\n")
+
 
 class WinLaunchTests(Base):
     def test_requirements_stamp_ignores_line_endings(self):
@@ -47,8 +55,7 @@ class WinLaunchTests(Base):
         self.assertEqual(winlaunch.requirements_stamp(a), winlaunch.requirements_stamp(b))
 
     def test_up_to_date_venv_is_not_rebuilt(self):
-        fake_python(self.py, self.log)
-        (self.venv / ".swarm-requirements").write_text(winlaunch.requirements_stamp() + "\n")
+        self.full_venv()
         with mock.patch.object(winlaunch.subprocess, "run", side_effect=AssertionError("rebuilt")):
             self.assertEqual(winlaunch.ensure_venv(), self.py)
 
@@ -67,6 +74,24 @@ class WinLaunchTests(Base):
         self.assertEqual((self.venv / ".swarm-requirements").read_text().strip(), winlaunch.requirements_stamp())
         self.assertFalse(Path(str(self.venv) + ".building").exists())      # lock released
 
+    def test_complete_venv_is_not_rebuilt(self):
+        self.full_venv()
+        with mock.patch.object(winlaunch.subprocess, "run", side_effect=AssertionError("rebuilt")):
+            self.assertEqual(winlaunch.ensure_venv(), self.py)
+
+    def test_missing_psycopg_is_reinstalled_even_with_a_matching_stamp(self):
+        self.full_venv()
+        shutil.rmtree(self.venv / "lib" / "python3.12" / "site-packages" / "psycopg")
+        calls = []
+        def run(cmd, **kw):
+            calls.append(cmd)
+            return mock.Mock(returncode=0)
+        with mock.patch.object(winlaunch.subprocess, "run", run):
+            self.assertEqual(winlaunch.ensure_venv(), self.py)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1:4], ["-m", "pip", "install"])          # pip only, no new venv
+        self.assertEqual((self.venv / ".swarm-requirements").read_text().strip(), winlaunch.requirements_stamp())
+
     def test_failed_setup_exits_with_a_message(self):
         with mock.patch.object(winlaunch.subprocess, "run", return_value=mock.Mock(returncode=1)):
             with self.assertRaises(SystemExit) as cm:
@@ -75,8 +100,7 @@ class WinLaunchTests(Base):
 
     @unittest.skipIf(os.name == "nt", "the fake venv interpreter is an sh script")
     def test_main_runs_the_swarm_package_from_the_plugin(self):
-        fake_python(self.py, self.log)
-        (self.venv / ".swarm-requirements").write_text(winlaunch.requirements_stamp() + "\n")
+        self.full_venv()
         self.assertEqual(winlaunch.main(["status", "--all"]), 0)
         self.assertEqual(self.log.read_text().split(), ["-B", "-m", "swarm.cli", "status", "--all"])
 

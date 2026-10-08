@@ -4,7 +4,8 @@ keep the venv (outside the plugin, so it survives plugin updates) matching requi
 run the swarm package from this plugin in it.
 
   venv:   %SWARM_VENV%, else %USERPROFILE%\\.local\\share\\swarm\\venv  (interpreter: Scripts\\python.exe)
-  stamp:  <venv>\\.swarm-requirements holds a CRC-32 of requirements.txt (line endings normalised)
+  stamp:  <venv>\\.swarm-requirements holds a CRC-32 of requirements.txt (line endings normalised);
+          the venv also needs psycopg and zstandard present, else it is refreshed
   lock:   the directory <venv>.building, taken with mkdir (atomic), waited for up to 300 s
 """
 from __future__ import annotations
@@ -39,9 +40,18 @@ def requirements_stamp(root: Path = PLUGIN_ROOT) -> str:
     return str(zlib.crc32(data))
 
 
+PACKAGES = ("psycopg", "zstandard")   # a venv missing one of these is rebuilt (pip restores it)
+
+
+def _packages_ok(v: Path) -> bool:
+    sites = [v / "Lib" / "site-packages", *v.glob("lib/python3*/site-packages")]
+    return all(any((s / pkg / "__init__.py").exists() for s in sites) for pkg in PACKAGES)
+
+
 def _stamp_ok(v: Path, want: str) -> bool:
     try:
-        return venv_python(v).exists() and (v / ".swarm-requirements").read_text().strip() == want
+        return (venv_python(v).exists() and (v / ".swarm-requirements").read_text().strip() == want
+                and _packages_ok(v))
     except OSError:
         return False
 
