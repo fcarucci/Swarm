@@ -6,16 +6,11 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 ## [Unreleased]
 
-### Fixed
-- The launchers (`bin/swarm`, `bin/swarm.cmd` via `lib/swarm/winlaunch.py`) reinstall requirements when `psycopg` or `zstandard` is missing from the venv, even when the requirements stamp matches. Before, swarm crashed on import until the venv was deleted by hand.
-- Judges can record a verdict again with no `join` and no `--as`. A judge spawned with `[swarm title: Judge]` was seated as a plain worker, and the shell fast path then skipped the hook that rewrites `swarm join --key` to the caller's own identity, so `join --judge` made a second identity that `--as` could not (rightly) use. Now `[swarm title: Judge]` seats the judge like `[swarm role: judge]` (a live judge is never displaced; a finished or dead one is replaced), `swarm join`/`swarm verdict` calls always reach the hook, and `swarm verdict` with no `--as` runs as the caller. `swarm join` without `--key` says so and points judges at `swarm verdict --job J met ...`.
-- `swarm watch` no longer crashes with `AttributeError: 'SnapshotBoard' object has no attribute 'last_post'` (0.2.1, PostgreSQL boards): the watch snapshot now carries each idle or dead agent's last post, fetched in the same single statement.
+## [0.2.2] - 2026-10-08
 
 ### Added
 - Agent titles: an optional short label per agent (at most 60 characters, such as `EL`, `PM`, `Eng: board view`), separate from the role and display only. Set it with a `[swarm title: ...]` line in a subagent's prompt, `swarm join --title` or `swarm title --job J (--as NAME | --key K) "text"` (empty text clears it); `who`, `status` and `watch` show it (a TITLE field in `who`, a TITLE column in the agents table when any agent has one, `Name (title)` in compact `watch`), board messages do not. A supervisor replacement or resumed agent keeps its title. Codex spawn messages are encrypted, so a Codex agent uses `swarm title`.
 - The engineering-team plugin tags every seat with its title (`EL`, `PM`, `Product`, `QA`, `Judge`, `Build`, `Reviewer`, `Verifier`, `Eng`, optionally `Eng: scope`), including the review pipeline's judge, fix worker and integrator; `swarm team --show` lists them and the skill tells the EL to keep them current.
-
-### Added
 - External events (schema 21): `swarm event post|list|ack|wait` record "something happened outside the board" for the orchestrator, a role or an agent. Posts are idempotent per job, kind and key; `event wait` blocks until one is pending (Postgres `LISTEN`, a one-second poll elsewhere; exit 124 on timeout). Pending events show in the hook context, a compact line each, until acked. Python API: `Board.post_event`, `events`, `pending_events`, `ack_events`, `wait_event`.
 - `swarm events serve`: an HTTP listener for external event sources that plugins register with `api.register_event_source` (routes, `verify` before parse, `handle`, optional `poll`). Signature checked on the raw body, body size capped, nothing of a request logged. Off by default (`[events] enabled`); `swarm supervise` keeps it running.
 - Event sources can declare helper processes (e.g. `gh webhook forward`): the listener keeps them running with backoff and a `forwarder-down` alert; source polls have a 600 s floor (`[events] min_poll_interval_s`) unless the source's config lowers it.
@@ -23,23 +18,19 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 - CI event sources (`ci` plugin, no core change; configured under `[ci.github]` / `[ci.gitea]` in `config.toml`, a `CI-GREEN` event per green commit): `gitea` and `github` register through the event-source interface and raise `NEEDS-REVIEW`, `REVIEW-CHANGES`, `CI-FAILED` and `READY-TO-LAND` (verdict and CI success must agree on the exact current head sha; key `kind:N@sha`); `BRANCH READY` board posts become `BRANCH-READY` events. The GitHub source is callback-first: it works from pushed `workflow_run`, `check_suite`, `pull_request` and review webhooks with no API call (delivered by a supervised `gh webhook forward` when `[ci.github] forward = true`); API polling is a fallback no faster than every 600 s. Gitea CI is polled from the commit status. The PM's per-event procedure is in the skill. `[land] strategy = "rebase-ff" | "squash-ff"` in `team.toml` (default `rebase-ff`) sets how a PR lands.
 - `swarm ci status|wait --repo OWNER/REPO --sha SHA` (new `ci` plugin, skills/ci): the CI state of an exact SHA that every agent on a box shares, so agents stop running `gh run watch` and exhausting the GitHub API budget. One cached poller per box, at most one CI host call per repo per 60 s (backoff 60/120/300 s on queued runs, 10 min under 500 calls left, public-API fallback on a 403), and a CI event for the SHA ends the wait without polling. `wait` exits 0 green, 1 failed (failing jobs and log tail), 124 on timeout. GitHub and Gitea (`[ci] kind`). The engineering-team skill, its briefs and `swarm team --show` tell agents to use it.
 - New `ci` plugin (`skills/ci`): everything that talks to a CI or repo host. `swarm ci status|wait` and the shared poller live there; core Swarm and engineering-team do not.
-
-### Fixed
-- `swarm watch` no longer crashes with `AttributeError: 'SnapshotBoard' object has no attribute 'last_post'` (0.2.1, PostgreSQL boards): the watch snapshot now carries each idle or dead agent's last post, fetched in the same single statement.
+- Model policy per role in `team.toml`: `[models.claude]` / `[models.codex]` map `watcher`, `reviewer`, `engineer`, `qa`, `judge`, `engineering_lead`, `product_manager` to a model, and spawns pick it from config (config.toml's `[models]` wins; a role left out gets the session default).
 
 ### Changed
 - Schema 20 (applied automatically on first use, on every backend): a nullable `agents.title` and a last `title` column of the `agent_status` view. Boards stay readable by the previous release, which shows no titles; as always, upgrade every host sharing a board together. `swarm who` gains a TITLE field after the role (empty without one).
-
 - engineering-team is now process only (PM, reviewer and integrator steps per CI event, `[land] strategy`, models per role, seat titles). It waits with `swarm ci wait`, reacts to the `ci` skill's events (including `CI-GREEN`), and makes no CI host call of its own; the integrator's evidence check uses `swarm ci wait`. A test fails if the retired word returns outside the rename line.
 - The old `[forge]` name is gone, with no alias: the `team.toml` section is `[ci]` (`[repositories."p".ci]` for overrides), the `swarm ci --kind` option replaces the old host flag, and event-source state files, modules and docs say CI host. `swarm upgrade` and `swarm init` rewrite an existing `[forge]` section to `[ci]` once, keeping `team.toml.bak` next to it and saying so.
 - CI: tag and release-branch pushes no longer re-run the full test matrix (the Release workflow tests the tag).
 
 ### Fixed
-
+- The launchers (`bin/swarm`, `bin/swarm.cmd` via `lib/swarm/winlaunch.py`) reinstall requirements when `psycopg` or `zstandard` is missing from the venv, even when the requirements stamp matches. Before, swarm crashed on import until the venv was deleted by hand.
+- Judges can record a verdict again with no `join` and no `--as`. A judge spawned with `[swarm title: Judge]` was seated as a plain worker, and the shell fast path then skipped the hook that rewrites `swarm join --key` to the caller's own identity, so `join --judge` made a second identity that `--as` could not (rightly) use. Now `[swarm title: Judge]` seats the judge like `[swarm role: judge]` (a live judge is never displaced; a finished or dead one is replaced), `swarm join`/`swarm verdict` calls always reach the hook, and `swarm verdict` with no `--as` runs as the caller. `swarm join` without `--key` says so and points judges at `swarm verdict --job J met ...`.
+- `swarm watch` no longer crashes with `AttributeError: 'SnapshotBoard' object has no attribute 'last_post'` (0.2.1, PostgreSQL boards): the watch snapshot now carries each idle or dead agent's last post, fetched in the same single statement.
 - `swarm upgrade --force` reinstalls the plugin from the tip of main (or the current release) even when the version is unchanged, and reports the installed commit before and after; without it, a main-channel install that is behind the tip at the same version says so instead of "up to date".
-
-### Added
-- Model policy per role in `team.toml`: `[models.claude]` / `[models.codex]` map `watcher`, `reviewer`, `engineer`, `qa`, `judge`, `engineering_lead`, `product_manager` to a model, and spawns pick it from config (config.toml's `[models]` wins; a role left out gets the session default).
 
 ## [0.2.1] - 2026-10-08
 
