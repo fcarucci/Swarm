@@ -6,6 +6,13 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 ## [Unreleased]
 
+### Changed
+- Faster commands: the launchers (`bin/swarm`, `bin/swarm-hook`) now keep Python bytecode in `~/.local/share/swarm/pyc` (a private directory of yours; `SWARM_PYCACHE` overrides it; if it is a symlink, shared or has an ACL nothing is cached or written) instead of recompiling about 1 MB of source on every run, which took 0.2 s of each command and of each hook that reaches Python. `swarm who` drops from about 0.45 s to 0.17 s. Bootstrap removes cached bytecode of plugin versions and modules that are gone.
+- `swarm status` no longer takes 2-5 s on a large board. The auto-close sweep it runs read every message of a job up to six times to look for hand-offs, wrote the transcript retry state once per missing transcript (an fsync each) and read each idle agent's last post in its own query; hand-offs now come from one filtered query, the retry state is written once per sweep, last posts are fetched in one query and expiring blockers in one query for the whole board. About 3.2 s to 0.7 s on the live board.
+- Schema 22 (applied automatically on first use, on every backend): `agents.message_count`, the messages an agent posted to its job since it joined. The `agent_status` view and the watch snapshot read it instead of counting messages per agent on every read (on Postgres and SQLite triggers keep it exact whichever client posts, so hosts need not upgrade in lockstep; the file and memory stores count it at post time). `agent_status` for a 713-agent job goes from 26 ms to 1 ms and the watch counts join no longer scans messages.
+- Postgres: the watch snapshot reads each idle agent's last post with an index lookup per agent instead of scanning every message of those agents (32 ms to 3 ms).
+- Postgres: `messages` and `agents` vacuum and analyze after 2% to 5% of their rows change instead of 20%, so the visibility map stays fresh and index-only scans stop fetching heap pages (set by schema setup, idempotent).
+
 ## [0.2.2] - 2026-10-08
 
 ### Added

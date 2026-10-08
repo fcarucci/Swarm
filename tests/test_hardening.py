@@ -420,7 +420,7 @@ class SpoolFlushBoundsTests(Env):
                 clock.advance(0.05)
                 return []
 
-            def messages_after(self, after_id, job):
+            def pipeline_messages(self, job):
                 clock.advance(0.05)
                 return []
 
@@ -934,6 +934,8 @@ _PATH_HELPERS = {"write_preserving", "append_private", "create_exclusive"}   # s
 REVIEWED = {
     ("bootstrap.py", "launcher_target", ".read_text"): "~/.local/bin/swarm: no sandbox writes there",
     ("bootstrap.py", "ensure_launcher", ".mkdir"): "~/.local/bin (the launcher)",
+    ("bootstrap.py", "prune_pycache", ".rmdir"): "the launchers' own 0700 bytecode cache, outside every sandbox root; symlinks never followed",
+    ("bootstrap.py", "prune_pycache", ".unlink"): "the launchers' own 0700 bytecode cache, outside every sandbox root; symlinks never followed",
     ("bootstrap.py", "ensure_launcher", ".write_text"): "~/.local/bin (the launcher), temp then replace",
     ("bootstrap.py", "ensure_launcher", ".chmod"): "~/.local/bin (the launcher)",
     ("bootstrap.py", "ensure_launcher", "os.replace"): "~/.local/bin (the launcher)",

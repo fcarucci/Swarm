@@ -377,6 +377,22 @@ def _finalize(board, cfg: dict, sources: list, deadline: float | None = None, re
                 todo.append((_num(e.get("at")), src, job, key))
     todo.sort(key=lambda t: t[0])   # stable: never-tried ones in the board's order (left_at)
     n = tried = 0
+    noted: list = []   # (entry key, harness, time, not ours, transcript missing) not yet written
+
+    def flush() -> None:
+        """Write the noted tries to the retry state: one locked read and fsynced write for all."""
+        if not noted:
+            return
+        with _Retries() as state:
+            for nk, harness, at, skip, missing in noted:
+                entry = state.setdefault(nk, {})
+                entry["harness"], entry["at"] = harness, at
+                if skip:
+                    entry["skip"] = True
+                else:
+                    entry.pop("skip", None)
+                    entry["missing"] = missing
+        noted.clear()
     for _at, src, job, key in todo:
         if tried >= transcripts.FINALIZE_PER_SWEEP:
             break
@@ -391,22 +407,18 @@ def _finalize(board, cfg: dict, sources: list, deadline: float | None = None, re
             cap = deadline
         k = _entry_key(job, key)
         found = src.locate(job, key)
-        with _Retries() as state:
-            entry = state.setdefault(k, {})
-            entry["harness"], entry["at"] = src.harness, time.time()
-            if found is None:
-                entry["skip"] = True
-            else:
-                entry.pop("skip", None)
-                entry["missing"] = found[2] is None
-        if found is None:
+        note = (k, src.harness, time.time(), found is None, found is not None and found[2] is None)
+        if found is None or found[2] is None:
+            noted.append(note)   # nothing is captured: written with the others, in one fsync
+            if found is not None:
+                tried += 1
+                if src.log_missing is not None and not view.get(k, {}).get("missing"):
+                    src.log_missing(job, key, found[0])
             continue
+        noted.append(note)
+        flush()                  # before a capture, which may be slow or killed
         tried += 1
         name, session_id, path = found
-        if path is None:
-            if src.log_missing is not None and not view.get(k, {}).get("missing"):
-                src.log_missing(job, key, name)
-            continue
         try:
             n += bool(transcripts.capture_subagent(board, cfg, job, key, path, True, name, session_id, cap,
                                                    harness=src.harness, use_mtime=False))
@@ -428,6 +440,7 @@ def _finalize(board, cfg: dict, sources: list, deadline: float | None = None, re
                     continue
                 with _Retries() as state:
                     state.pop(k, None)
+    flush()
     return n
 
 

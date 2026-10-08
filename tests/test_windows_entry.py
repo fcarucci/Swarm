@@ -162,7 +162,7 @@ class WinHookTests(Base):
                              input="{}", text=True, capture_output=True, timeout=10)
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(self.log.read_text().splitlines()[-1].split(),
-                         ["-B", "-m", "swarm.cli", "hook", "--host", "codex", "session-end"])
+                         ["-m", "swarm.cli", "hook", "--host", "codex", "session-end"])
 
     def test_marker_dir_comes_from_the_config(self):
         cfg = self.tmp / "c.toml"

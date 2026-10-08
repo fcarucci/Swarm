@@ -227,6 +227,13 @@ class MemoryHarness:
             row = self.store.agents[agent_key]
             for field, secs in fields_seconds_ago.items():
                 row[field] = self._ago(secs)
+            self._recount()
+
+    def _recount(self) -> None:
+        """agents.message_count follows posts as they are made; backdating rewrites history behind it."""
+        for a in self.store.agents.values():
+            a["message_count"] = sum(1 for m in self.store.messages if m["job"] == a["job"]
+                                     and m["agent_name"] == a["name"] and m["created_at"] >= a["joined_at"])
 
     def backdate_transcript(self, job: str, agent_key: str, seconds_ago: float) -> None:
         from swarm.board.memory import transcript_key
@@ -236,6 +243,7 @@ class MemoryHarness:
     def backdate_message(self, msg_id: int, seconds_ago: float) -> None:
         with self.store.lock:
             next(m for m in self.store.messages if m["id"] == msg_id)["created_at"] = self._ago(seconds_ago)
+            self._recount()
 
     def backdate_job(self, job: str, **fields_seconds_ago) -> None:
         with self.store.lock:
@@ -406,6 +414,8 @@ class PostgresHarness:
 
     def backdate_message(self, msg_id: int, seconds_ago: float) -> None:
         self._backdate("messages", "id", msg_id, {"created_at": seconds_ago})
+        self.conn.execute("UPDATE agents a SET message_count = (SELECT count(*) FROM messages m WHERE m.job = a.job "
+                          "AND m.agent_name = a.name AND m.created_at >= a.joined_at)")   # history rewritten
 
     def backdate_job(self, job: str, **fields_seconds_ago) -> None:
         self._backdate("jobs", "job", job, fields_seconds_ago)
@@ -506,6 +516,7 @@ class SqliteHarness:
 
     def backdate_message(self, msg_id: int, seconds_ago: float) -> None:
         self._set("messages", "id", msg_id, {"created_at": self._ago(seconds_ago)})
+        self._db().execute(self.sqlite_board.COUNT_BACKFILL)   # history rewritten behind the counter
 
     def backdate_job(self, job: str, **fields_seconds_ago) -> None:
         self._set("jobs", "job", job, {f: self._ago(s) for f, s in fields_seconds_ago.items()})

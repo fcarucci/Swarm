@@ -165,7 +165,12 @@ def _purge_messages(s: MemoryStore, keep: _dt.datetime) -> bool:
     before = len(s.messages)
     paused = _paused_jobs(s)
     s.messages = [m for m in s.messages if m["created_at"] >= keep or m["job"] in paused]
-    return len(s.messages) != before
+    if len(s.messages) == before:
+        return False
+    for a in s.agents.values():   # the counts follow the stored messages (schema 22)
+        a["message_count"] = sum(1 for m in s.messages if m["job"] == a["job"]
+                                 and m["agent_name"] == a["name"] and m["created_at"] >= a["joined_at"])
+    return True
 
 
 def _mark_stale_dead(s: MemoryStore, now: _dt.datetime, stale: _dt.datetime) -> bool:
@@ -492,6 +497,7 @@ class MemoryBoard(MemoryBlockers, MemoryEvents, Board):
                 row.update(left_at=None, state="started", job=job, last_seen=now,
                            current_tool=None, tool_started_at=None, turn_ended_at=None,
                            judge=False, verifier=False, left_reason=None)
+                row["message_count"] = self._count_messages(row)   # the job may be another one
                 s.touch()
                 return row["name"]
             name = self._free_name()
@@ -503,7 +509,7 @@ class MemoryBoard(MemoryBlockers, MemoryEvents, Board):
                 "last_read_id": self._history_cursor(job), "left_at": None, "state": "started",
                 "tool_calls": 0, "current_tool": None, "tool_started_at": None,
                 "last_post_at": None, "judge": False, "verifier": False, "left_reason": None,
-                "resume_of": None, "title": None, **_SYNC_DEFAULTS}
+                "resume_of": None, "title": None, "message_count": 0, **_SYNC_DEFAULTS}
             s.touch()
             return name
 
@@ -558,6 +564,7 @@ class MemoryBoard(MemoryBlockers, MemoryEvents, Board):
             a.update(job=job, judge=False, verifier=False, last_seen=self.now(), last_read_id=cursor,
                      reply_reminded_id=top, calls_at_post=a["tool_calls"], silence_nudged_at=None,
                      roster_seen=MOVED_PREFIX + old, roster_synced_at=None)
+            a["message_count"] = self._count_messages(a)   # what it posted to this job since it joined
             s.touch()
             return old
 
@@ -802,7 +809,7 @@ class MemoryBoard(MemoryBlockers, MemoryEvents, Board):
                 "left_at": None, "state": "started", "tool_calls": 0, "current_tool": None,
                 "tool_started_at": None, "last_post_at": None, "judge": judge,
                 "verifier": bool(old.get("verifier")), "left_reason": None, "resume_of": resume_of,
-                "title": old.get("title"), **_SYNC_DEFAULTS}
+                "title": old.get("title"), "message_count": 0, **_SYNC_DEFAULTS}
             s.touch()
             return old["name"]
 
@@ -997,10 +1004,15 @@ class MemoryBoard(MemoryBlockers, MemoryEvents, Board):
             idle_minutes=int(b["idle_minutes"]), dead_minutes=int(b["dead_minutes"]),
             tool_timeout_minutes=int(b["tool_timeout_minutes"]))
 
+    def _count_messages(self, a: dict) -> int:
+        """The messages `a` posted to its job since it joined (what agents.message_count keeps)."""
+        return sum(1 for m in self._store.messages if m["job"] == a["job"]
+                   and m["agent_name"] == a["name"] and m["created_at"] >= a["joined_at"])
+
     def _status(self, a: dict, now: _dt.datetime) -> AgentStatus:
         status = self._derived(a, now)
-        msgs = sum(1 for m in self._store.messages if m["job"] == a["job"]
-                   and m["agent_name"] == a["name"] and m["created_at"] >= a["joined_at"])
+        # schema 22: kept per agent at post time; a row stored before it (file backend) is counted once
+        msgs = a["message_count"] if "message_count" in a else self._count_messages(a)
         role = "judge" if a.get("judge") else "verifier" if a.get("verifier") else a["role"]
         return AgentStatus(job=a["job"], name=a["name"], role=role,
                            status=status,
@@ -1128,6 +1140,10 @@ class MemoryBoard(MemoryBlockers, MemoryEvents, Board):
             poster = self._active_named(name)
             if poster is not None:
                 poster.update(last_seen=now, last_post_at=now, calls_at_post=poster["tool_calls"])
+            for a in s.agents.values():   # every row of this name that joined before it, as the old count read
+                if a["job"] == job and a["name"] == name and a["joined_at"] <= now:
+                    a["message_count"] = (a["message_count"] + 1 if "message_count" in a
+                                          else self._count_messages(a))   # this message included
             s.touch(messages=True)
             return msg_id
 

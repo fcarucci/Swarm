@@ -46,15 +46,16 @@ def integrated(board, job: str, artifact: str) -> bool:
     return bool(board.job_data(job).get(key))
 
 
-def latest_handoffs(board, job: str) -> list[Handoff]:
-    """Newest worker hand-off for each artifact or coding branch, in board order. DONE: claims aren't hand-offs."""
+def latest_handoffs(board, job: str, messages=None) -> list[Handoff]:
+    """Newest worker hand-off for each artifact or coding branch, in board order. DONE: claims aren't hand-offs.
+    `messages`: the job's Board.pipeline_messages, when the caller has them already."""
     found = {}
     stamp = board.job_data(job).get("pipeline.started_at")
     try:
         since = dt.datetime.fromisoformat(stamp) if stamp else None
     except ValueError:
         since = None
-    for message in board.messages_after(0, job):
+    for message in (board.pipeline_messages(job) if messages is None else messages):
         if since and message.created_at < since:
             continue
         text = message.message
@@ -157,12 +158,12 @@ def judge_artifact(board, job: str, agent_key: str | None = None, *, name: str |
     return None
 
 
-def pending_artifacts(board, job: str) -> list[str]:
+def pending_artifacts(board, job: str, handoffs=None) -> list[str]:
     """Unaccepted current hand-offs; recipes may persist explicit revision supersessions."""
     data = board.job_data(job)
     verdicts = artifact_verdicts(board, job)
     pending = []
-    for h in latest_handoffs(board, job):
+    for h in (latest_handoffs(board, job) if handoffs is None else handoffs):
         key = 'pipeline.superseded.' + hashlib.sha256(h.artifact.encode()).hexdigest()[:32]
         if data.get(key) or integrated(board, job, h.artifact):
             continue
@@ -174,12 +175,13 @@ def pending_artifacts(board, job: str) -> list[str]:
 
 def auto_close_pending(board, job: str) -> bool:
     """A pipeline hand-off stays open until a separate executor records finalization."""
-    if pending_artifacts(board, job):
+    messages = board.pipeline_messages(job)   # read once: a long job has thousands of messages
+    handoffs = latest_handoffs(board, job, messages)
+    if pending_artifacts(board, job, handoffs):
         return True
     data = board.job_data(job)
-    messages = board.messages_after(0, job)
     verdicts = artifact_verdicts(board, job)
-    for h in latest_handoffs(board, job):
+    for h in handoffs:
         superseded = 'pipeline.superseded.' + hashlib.sha256(h.artifact.encode()).hexdigest()[:32]
         if data.get(superseded) or integrated(board, job, h.artifact):
             continue

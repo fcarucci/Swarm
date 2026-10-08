@@ -189,6 +189,34 @@ def _registered_plugin_roots() -> set[Path]:
     return out
 
 
+def prune_pycache(root: Path | None = None) -> int:
+    """Delete cached bytecode whose source no longer exists (an old plugin version, a removed
+    module) from the launchers' cache; returns how many files went. Never follows symlinks and
+    never leaves the cache directory; best effort."""
+    root = root or paths.pycache_dir()
+    gone = 0
+    if root.is_symlink() or not root.is_dir():
+        return 0
+    for d, dirs, files in os.walk(root, topdown=False, followlinks=False):
+        here = Path(d)
+        src = Path("/") / here.relative_to(root)
+        for name in files:
+            if not name.endswith(".pyc"):
+                continue
+            if not (src / (name.split(".")[0] + ".py")).exists():
+                try:
+                    (here / name).unlink()
+                    gone += 1
+                except OSError:
+                    pass
+        try:
+            if here != root and not any(here.iterdir()):
+                here.rmdir()
+        except OSError:
+            pass
+    return gone
+
+
 def ensure_launcher(root: Path = paths.PLUGIN_ROOT) -> Step:
     """~/.local/bin/swarm runs this plugin: written when missing, when its target is gone, or
     when its target is another tree that isn't a newer, currently-installed plugin root. A
@@ -824,6 +852,10 @@ def bootstrap(host: str | None, *, config: Path | None = None, stamp: Path | Non
     if tight:
         steps.append(tight)
     steps.append(ensure_launcher())
+    try:   # once per bootstrap (a new plugin version): bytecode of versions that are gone
+        prune_pycache()
+    except Exception:
+        pass
     try:
         steps.append(ensure_config(config))
         chan = os.environ.get("SWARM_CHANNEL")   # install.sh/install.ps1 --channel: what `swarm upgrade` follows

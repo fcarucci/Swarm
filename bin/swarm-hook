@@ -94,6 +94,20 @@ case "${1:-}" in turn|done)
 esac
 D="$(cd "$(dirname "$0")/.." && pwd)"
 V="${SWARM_VENV:-$HOME/.local/share/swarm/venv}"
+# Bytecode cache: without one every run recompiles ~1 MB of source (~0.2 s of each command, and of
+# each hook that reaches Python). It lives beside the venv, which already holds code this user runs,
+# and is used only when it is this user's own, unshared directory (a sandboxed agent can't plant
+# bytecode there: no symlink, no group/world access, no ACL entries). Otherwise nothing is cached and
+# nothing is written (PYTHONDONTWRITEBYTECODE), so the plugin tree and the venv stay clean.
+PYC="${SWARM_PYCACHE:-$HOME/.local/share/swarm/pyc}"
+if { [ -d "$PYC" ] || mkdir -p -m 700 "$PYC" 2>/dev/null; } && [ -O "$PYC" ] && [ ! -L "$PYC" ]; then
+  case "$(ls -ld "$PYC" 2>/dev/null)" in
+    d???------\ *|d???------.\ *) export PYTHONPYCACHEPREFIX="$PYC";;
+    *) export PYTHONDONTWRITEBYTECODE=1;;
+  esac
+else
+  export PYTHONDONTWRITEBYTECODE=1
+fi
 HD="$HOME/.local/share/swarm/host"
 if [ ! -e "$HD" ] && [ ! -L "$HD" ]; then
   (umask 022; mkdir -p "${HD%/*}") 2>/dev/null
@@ -123,7 +137,7 @@ if [ "${1:-}" = "session-start" ]; then
     case "$(ls -ld "$L" 2>/dev/null)" in d????w*|d???????w*) LOOSE=1;; esac
   done
   if [ -n "$H" ] && { [ -n "$LOOSE" ] || { [ -f "$N" ] && [ ! -L "$N" ]; }; } && [ -x "$V/bin/python" ]; then
-    PYTHONPATH="$D/lib${PYTHONPATH:+:$PYTHONPATH}" "$V/bin/python" -B -m swarm.cli notices --hook-output \
+    PYTHONPATH="$D/lib${PYTHONPATH:+:$PYTHONPATH}" "$V/bin/python" -m swarm.cli notices --hook-output \
       --host "$H" </dev/null 2>>"$PRIV/hook-stderr.log"
   fi
   STAMP="$PRIV/bootstrap-${H:-unknown}-${VER:-0}-$KEY"
@@ -139,7 +153,7 @@ fi
 if [ -z "${VALID:-}" ] || [ -z "${MD:-}" ]; then
   MD=""
   if [ -x "$V/bin/python" ] && [ -n "$PRIV" ]; then
-    MD=$(PYTHONPATH="$D/lib${PYTHONPATH:+:$PYTHONPATH}" "$V/bin/python" -B -m swarm.fastpath --cache "${H:-unknown}" 2>/dev/null)
+    MD=$(PYTHONPATH="$D/lib${PYTHONPATH:+:$PYTHONPATH}" "$V/bin/python" -m swarm.fastpath --cache "${H:-unknown}" 2>/dev/null)
   fi
 fi
 MD="${MD:-$HOME/.local/state/swarm/active}"
@@ -151,8 +165,8 @@ for MARKER in "$MD"/*.json; do [ -f "$MARKER" ] && { ACTIVE=1; break; }; done
 LOG=/dev/null
 [ -n "$PRIV" ] && LOG="$PRIV/hook-stderr.log"
 if [ -n "$HAVE_PAYLOAD" ]; then
-  printf '%s' "$PAYLOAD" | SWARM_HOOK_FASTPATH=1 SWARM_HOOK_EVENT="$1" PYTHONPATH="$D/lib${PYTHONPATH:+:$PYTHONPATH}" "$V/bin/python" -B -m swarm.cli hook $HOSTARG "$1" 2>>"$LOG" || true
+  printf '%s' "$PAYLOAD" | SWARM_HOOK_FASTPATH=1 SWARM_HOOK_EVENT="$1" PYTHONPATH="$D/lib${PYTHONPATH:+:$PYTHONPATH}" "$V/bin/python" -m swarm.cli hook $HOSTARG "$1" 2>>"$LOG" || true
 else
-  SWARM_HOOK_FASTPATH=1 SWARM_HOOK_EVENT="$1" PYTHONPATH="$D/lib${PYTHONPATH:+:$PYTHONPATH}" "$V/bin/python" -B -m swarm.cli hook $HOSTARG "$1" 2>>"$LOG" || true
+  SWARM_HOOK_FASTPATH=1 SWARM_HOOK_EVENT="$1" PYTHONPATH="$D/lib${PYTHONPATH:+:$PYTHONPATH}" "$V/bin/python" -m swarm.cli hook $HOSTARG "$1" 2>>"$LOG" || true
 fi
 exit 0

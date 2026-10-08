@@ -84,7 +84,7 @@ class LauncherTests(unittest.TestCase):
         first, _ = self.run_hook("--host", "codex", "session-start")
         self.assertEqual(first.stdout, '{"systemMessage": "from python"}\n')
         self.assertEqual((self.home / "python-args").read_text().split(),
-                         ["-B", "-m", "swarm.cli", "notices", "--hook-output", "--host", "codex"])
+                         ["-m", "swarm.cli", "notices", "--hook-output", "--host", "codex"])
         second, _ = self.run_hook("--host", "codex", "session-start")
         self.assertEqual(second.stdout, "")
 
@@ -150,6 +150,95 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(hd.stat().st_mode & 0o777, 0o700)
         self.assertFalse((self.home / ".local/state/swarm/hook-errors.log").exists())
 
+    def _env_recording_venv(self):
+        """A complete venv whose python records the bytecode variables it was started with."""
+        v = self.home / "venv"; (v / "bin").mkdir(parents=True)
+        (v / "bin/python").write_text('#!/bin/sh\necho "prefix=$PYTHONPYCACHEPREFIX nowrite=$PYTHONDONTWRITEBYTECODE" '
+                                      f'> "{self.home}/pyc-seen"\n')
+        (v / "bin/python").chmod(0o755)
+        pkgs = v / "lib/python3.12/site-packages"
+        for pkg in ("psycopg", "zstandard"):
+            (pkgs / pkg).mkdir(parents=True); (pkgs / pkg / "__init__.py").write_text("")
+        req = subprocess.run(["sh", "-c", f"cksum < '{ROOT / 'requirements.txt'}' | cut -d' ' -f1"],
+                             capture_output=True, text=True).stdout.strip()
+        (v / ".swarm-requirements").write_text(req + "\n")
+        self.env["SWARM_VENV"] = str(v)
+        self.env.pop("PYTHONPYCACHEPREFIX", None)
+        self.env.pop("PYTHONDONTWRITEBYTECODE", None)
+
+    def _seen(self) -> str:
+        return (self.home / "pyc-seen").read_text().strip()
+
+    def _cli(self):
+        return subprocess.run([str(ROOT / "bin/swarm"), "status"], capture_output=True, text=True,
+                              env=self.env, timeout=30)
+
+    def _hook(self):
+        md = self.home / ".local/state/swarm/active"; md.mkdir(parents=True, exist_ok=True)
+        (md / "J.json").write_text('{"job": "J", "session_id": "s"}')
+        return subprocess.run([str(ROOT / "bin/swarm-hook"), "--host", "claude", "turn"],
+                              input='{"agent_id": "a", "session_id": "s"}', capture_output=True, text=True,
+                              timeout=30, env=self.env)
+
+    @posix_only("runs a POSIX sh script (the Windows entry points are tested in test_windows_*.py)")
+    def test_launchers_cache_bytecode_in_a_private_dir(self):
+        self._env_recording_venv()
+        pyc = self.home / ".local/share/swarm/pyc"
+        for run in (self._cli, self._hook):
+            with self.subTest(run=run.__name__):
+                shutil.rmtree(pyc, ignore_errors=True)
+                run()
+                self.assertEqual(self._seen(), f"prefix={pyc} nowrite=")      # created 0700 and used
+                self.assertEqual(pyc.stat().st_mode & 0o777, 0o700)
+
+    @posix_only("runs a POSIX sh script (the Windows entry points are tested in test_windows_*.py)")
+    def test_launchers_write_no_bytecode_when_the_cache_dir_is_refused(self):
+        self._env_recording_venv()
+        pyc = self.home / ".local/share/swarm/pyc"
+        pyc.parent.mkdir(parents=True)
+        elsewhere = self.home / "elsewhere"; elsewhere.mkdir()
+        for label, make in (("symlink", lambda: pyc.symlink_to(elsewhere)),
+                            ("group-writable", lambda: (pyc.mkdir(), pyc.chmod(0o770))),
+                            ("world-readable", lambda: (pyc.mkdir(), pyc.chmod(0o755)))):
+            for run in (self._cli, self._hook):
+                with self.subTest(case=label, run=run.__name__):
+                    if pyc.is_symlink() or pyc.exists():
+                        pyc.unlink() if pyc.is_symlink() else shutil.rmtree(pyc)
+                    make()
+                    run()
+                    self.assertEqual(self._seen(), "prefix= nowrite=1")
+                    self.assertEqual(list(elsewhere.iterdir()), [])
+
+    @posix_only("runs a POSIX sh script (the Windows entry points are tested in test_windows_*.py)")
+    def test_launchers_refuse_a_cache_dir_with_an_acl(self):
+        self._env_recording_venv()
+        pyc = self.home / ".local/share/swarm/pyc"; pyc.mkdir(parents=True); pyc.chmod(0o700)
+        fake = self.home / "fakebin"; fake.mkdir()
+        (fake / "ls").write_text('#!/bin/sh\necho "drwx------+ 2 me me 4096 Jan 1 00:00 $2"\n')   # `ls -ld`: ACL mark
+        (fake / "ls").chmod(0o755)
+        self.env["PATH"] = f"{fake}:{self.env['PATH']}"
+        self._cli()
+        self.assertEqual(self._seen(), "prefix= nowrite=1")
+
+    @posix_only("the launchers and their bytecode cache are POSIX (the Windows entry points run without one)")
+    def test_bootstrap_prunes_bytecode_of_sources_that_are_gone(self):
+        from swarm import bootstrap
+        cache = self.home / "pyc"
+        live = self.home / "plugin/0.3.0/lib"; live.mkdir(parents=True)
+        (live / "mod.py").write_text("")
+        gone = self.home / "plugin/0.2.0/lib"            # a plugin version that was removed
+        cached_live = cache / str(live).lstrip("/"); cached_live.mkdir(parents=True)
+        cached_gone = cache / str(gone).lstrip("/"); cached_gone.mkdir(parents=True)
+        (cached_live / "mod.cpython-313.pyc").write_bytes(b"x")
+        (cached_live / "removed.cpython-313.pyc").write_bytes(b"x")   # its module no longer exists
+        (cached_gone / "mod.cpython-313.pyc").write_bytes(b"x")
+        outside = self.home / "outside"; outside.mkdir(); (outside / "keep.pyc").write_bytes(b"x")
+        (cache / "link").symlink_to(outside)
+        self.assertEqual(bootstrap.prune_pycache(cache), 2)
+        self.assertEqual([p.name for p in cached_live.iterdir()], ["mod.cpython-313.pyc"])
+        self.assertFalse(cached_gone.exists())
+        self.assertTrue((outside / "keep.pyc").exists())
+
     @posix_only("runs a POSIX sh script (the Windows entry points are tested in test_windows_*.py)")
     def test_bin_swarm_reinstalls_a_venv_missing_psycopg(self):
         # the venv's python records its args; pip is that python, so nothing touches the network
@@ -165,7 +254,7 @@ class LauncherTests(unittest.TestCase):
         self.env["SWARM_VENV"] = str(v)
         log = self.home / "python-args"
         subprocess.run([str(ROOT / "bin/swarm"), "status"], capture_output=True, text=True, env=self.env, timeout=30)
-        self.assertEqual(log.read_text().splitlines()[-1].split(), ["-B", "-m", "swarm.cli", "status"])
+        self.assertEqual(log.read_text().splitlines()[-1].split(), ["-m", "swarm.cli", "status"])
         self.assertNotIn("pip", log.read_text())                           # complete venv: no pip
         shutil.rmtree(pkgs / "psycopg")
         log.unlink()

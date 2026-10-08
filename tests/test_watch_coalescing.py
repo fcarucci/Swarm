@@ -120,7 +120,8 @@ class CoalescingTests(unittest.TestCase):
         board._conn.execute.assert_called_once()
         query,params=board._conn.execute.call_args.args
         self.assertEqual(query.count('%s'),len(params))
-        self.assertIn('GROUP BY a.agent_key',query)
+        self.assertNotIn('GROUP BY a.agent_key',query)   # the per-agent counts are agents.message_count
+        self.assertNotIn('LEFT JOIN messages',query)
         self.assertNotIn('(SELECT count(*) FROM messages',query)
 
     def test_config_defaults_and_cli_override(self):

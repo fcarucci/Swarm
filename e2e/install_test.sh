@@ -457,13 +457,13 @@ copydir_mode="$(stat -c %a "$(dirname "$copy")" 2>/dev/null || stat -f %A "$(dir
 [ "$copydir_mode" = "755" ] || echo "$user: installer copy dir is not 0755" >> "$BASE/violations"
 case "$copy" in "$BASE"/users/*) echo "$user: installer copy is inside a user home" >> "$BASE/violations" ;; esac
 head -n 2 "$copy" > "$BASE/copy.head"
-find "$home" | sort > "$BASE/snap/$user.handover"
+find "$home" -path "$home/.local/share/swarm/pyc" -prune -o -print | sort > "$BASE/snap/$user.handover"   # (the bytecode cache is not state)
 cmp -s "$BASE/snap/$user.before" "$BASE/snap/$user.handover" \
   || echo "$user: root wrote into $home before handing over to $user" >> "$BASE/violations"
 env FAKE_UID="$(awk -v n="$user" '$1 == n {print $2}' "$BASE/uids")" FAKE_USER="$user" \
     PATH="$BASE/users/$user/bin:$BASE/idbin:$PYBIN:/usr/bin:/bin:/usr/local/bin" "$@"
 rc=$?
-find "$home" | sort > "$BASE/snap/$user.after"
+find "$home" -path "$home/.local/share/swarm/pyc" -prune -o -print | sort > "$BASE/snap/$user.after"
 exit $rc
 STUB
   chmod +x "$base/idbin/id" "$base/rootbin/sudo"
@@ -480,7 +480,7 @@ new_user() {   # $1 = base, $2 = user name; scratch home + that user's own stub 
 
 snapshot_before() {   # $1 = base, then user names
   base="$1"; shift
-  for u in "$@"; do find "$base/users/$u/home" | sort > "$base/snap/$u.before"; done
+  for u in "$@"; do find "$base/users/$u/home" -path "*/.local/share/swarm/pyc" -prune -o -print | sort > "$base/snap/$u.before"; done
 }
 
 run_as_fake_root() {   # $1 = base, $2 = SWARM_INSTALL_TEST_USERS, then install.sh args
@@ -497,7 +497,7 @@ assert_root_wrote_nothing() {   # $1 = base, then the users that got a run
   if [ -f "$base/violations" ]; then fail "root-side violations: $(cat "$base/violations")"; fi
   for u in "$@"; do
     [ -f "$base/snap/$u.after" ] || fail "$u never got a run of its own"
-    find "$base/users/$u/home" | sort > "$base/snap/$u.final"
+    find "$base/users/$u/home" -path "*/.local/share/swarm/pyc" -prune -o -print | sort > "$base/snap/$u.final"
     cmp -s "$base/snap/$u.after" "$base/snap/$u.final" \
       || fail "root wrote into $u's home after $u's own run: $(diff "$base/snap/$u.after" "$base/snap/$u.final")"
   done
@@ -576,7 +576,7 @@ t_root_all_users() {
 
   grep -q "rebuilt by a root run" "$base/copy.head" && fail "run from a file, the per-user copy should be a plain copy of it"
   assert_root_wrote_nothing "$base" alice bob carol
-  [ "$(find "$base/users/dave/home" | sort)" = "$(cat "$base/snap/dave.before")" ] || fail "dave's home was touched"
+  [ "$(find "$base/users/dave/home" -path "*/.local/share/swarm/pyc" -prune -o -print | sort)" = "$(cat "$base/snap/dave.before")" ] || fail "dave's home was touched"
   echo "root-all-users: ok"
 }
 

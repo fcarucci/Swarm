@@ -92,17 +92,18 @@ def _wait_reason(board, j, now, *, bounded_only: bool) -> str | None:
 def annotate(board, job: str, rows, now=None) -> list:
     """`rows` (AgentStatus of `job`) as ShownAgent where the display differs from the stored row
     (status, role orchestrator, and a note saying why); the order is kept. Each agent's last post
-    is one bounded query (board.last_post), only for an idle or dead one. See the module doc."""
+    is read for all the idle and dead ones in one query (board.last_posts). See the module doc."""
     rows = list(rows)
     if not any(a.status in ("idle", "dead") or a.left_reason or a.role is None or a.role == ORCHESTRATOR
                for a in rows):
         return rows
     now = now or board.now()
     j = board.job_status(job)
+    posts = board.last_posts(job, [a.name for a in rows if a.status in ("idle", "dead")])   # one query
     replaced = {a.resume_of for a in rows if a.resume_of}   # a replacement took over: not lost
     out = []
     for a in rows:
-        status, note = ("left", None) if a.agent_key in replaced else _display(board, j, a, now)
+        status, note = ("left", None) if a.agent_key in replaced else _display(board, j, a, now, posts)
         role = ORCHESTRATOR if is_orchestrator(a) else a.role
         out.append(a if note is None and status == a.status and role == a.role else
                    _shown_type()(**{f.name: getattr(a, f.name) for f in dataclasses.fields(a)} | {
@@ -110,7 +111,7 @@ def annotate(board, job: str, rows, now=None) -> list:
     return out
 
 
-def _display(board, j, a, now) -> tuple[str, str | None]:
+def _display(board, j, a, now, posts) -> tuple[str, str | None]:
     from swarm.board import STUCK_PREFIX
     if a.ended_at is not None and (a.left_reason or "").startswith(STUCK_PREFIX):
         return "dead", "closed as stuck"
@@ -118,7 +119,7 @@ def _display(board, j, a, now) -> tuple[str, str | None]:
         return ("standby" if a.status == "idle" else "away"), "orchestrator, not a worker"
     if a.status not in ("idle", "dead"):
         return a.status, None
-    post = board.last_post(a.job, a.name)
+    post = posts.get(a.name)
     mine = post if post is not None and post.created_at >= a.joined_at else None
     if mine is not None and _HANDOFF.match(mine.message):
         return "finished", "posted " + _note(mine.message)

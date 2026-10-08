@@ -339,6 +339,25 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("jobs", "max_hours", "REAL"),      # schema 11: the job's own lifetime cap
     ("jobs", "plugin_data", "TEXT"),    # schema 16: per-job settings kept by CLI plugins (JSON)
     ("agents", "title", "TEXT"),        # schema 20: the optional display title (NULL: none)
+    ("agents", "message_count", "INTEGER NOT NULL DEFAULT 0"),   # schema 22: see COUNT_TRIGGERS
+)
+
+# Schema 22: agents.message_count = the messages the agent posted to its job since it joined (what
+# the status read counted per agent on every call). An insert bumps every agent row of that job and
+# name that joined before it (departed ones too, as the status read counted); a reset, a move or a rename recounts. Backfilled by setup when the column is first added.
+COUNT_BACKFILL = ("UPDATE agents SET message_count = (SELECT count(*) FROM messages m WHERE m.job = agents.job "
+                  "AND m.agent_name = agents.name AND m.created_at >= agents.joined_at)")
+COUNT_TRIGGERS = (
+    "CREATE TRIGGER IF NOT EXISTS messages_count AFTER INSERT ON messages BEGIN "
+    "UPDATE agents SET message_count = message_count + 1 "
+    "WHERE job = NEW.job AND name = NEW.agent_name AND joined_at <= NEW.created_at; END",
+    "CREATE TRIGGER IF NOT EXISTS messages_uncount AFTER DELETE ON messages BEGIN "
+    "UPDATE agents SET message_count = max(message_count - 1, 0) "
+    "WHERE job = OLD.job AND name = OLD.agent_name AND joined_at <= OLD.created_at; END",
+    "CREATE TRIGGER IF NOT EXISTS agents_recount_messages AFTER UPDATE OF job, name, joined_at ON agents "
+    "WHEN NEW.job IS NOT OLD.job OR NEW.name IS NOT OLD.name OR NEW.joined_at IS NOT OLD.joined_at BEGIN "
+    "UPDATE agents SET message_count = (SELECT count(*) FROM messages m WHERE m.job = NEW.job "
+    "AND m.agent_name = NEW.name AND m.created_at >= NEW.joined_at) WHERE agent_key = NEW.agent_key; END",
 )
 
 _MESSAGE_COLS = "id, created_at, job, agent_name, to_agent, message"
@@ -592,6 +611,10 @@ class SqliteBoard(SqlBlockers, SqlEvents, Board):
                     have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
                     if column not in have:
                         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+                        if column == "message_count":
+                            conn.execute(COUNT_BACKFILL)
+                for trigger in COUNT_TRIGGERS:
+                    conn.execute(trigger)
                 for statement in (sql_schema() + events_schema()).split(";"):
                     if statement.strip(): conn.execute(statement)
                 migrate_sql(conn)
@@ -1259,8 +1282,7 @@ class SqliteBoard(SqlBlockers, SqlEvents, Board):
     def _agent_statuses(self, c: sqlite3.Connection, job: str, now: _dt.datetime,
                         include_departed: bool = True, with_messages: bool = True) -> list[AgentStatus]:
         """The job's agents with derived status, in agents() order."""
-        msgs = ("(SELECT count(*) FROM messages m WHERE m.job = a.job AND m.agent_name = a.name "
-                "AND m.created_at >= a.joined_at)") if with_messages else "0"
+        msgs = "a.message_count" if with_messages else "0"
         active = "" if include_departed else " AND left_at IS NULL"
         out = []
         for r in c.execute(f"SELECT {_AGENT_COLS}, {msgs} FROM agents a WHERE job = ?{active} "
@@ -1422,6 +1444,12 @@ class SqliteBoard(SqlBlockers, SqlEvents, Board):
         jf, jp = (" AND job = ?", (job,)) if job else ("", ())
         return [self._msg(r) for r in self._c().execute(
             f"SELECT {_MESSAGE_COLS} FROM messages WHERE id > ?{jf} ORDER BY id", (after_id, *jp))]
+
+    def pipeline_messages(self, job: str) -> list[Message]:
+        return [self._msg(r) for r in self._c().execute(
+            f"SELECT {_MESSAGE_COLS} FROM messages WHERE job = ? AND (substr(message, 1, 5) = 'DONE ' "
+            "OR substr(message, 1, 10) = 'FINALIZED ' OR substr(message, 1, 11) = 'INTEGRATED ') ORDER BY id",
+            (job,))]
 
     def last_message_id(self, job: str | None = None) -> int:
         jf, jp = (" WHERE job = ?", (job,)) if job else ("", ())

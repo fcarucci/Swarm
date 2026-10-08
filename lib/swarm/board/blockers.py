@@ -71,8 +71,11 @@ class BlockerLifecycle:
 
     def expire_blockers(self, now):
         """Existing sweep entry point. Default application and overdue are durable and once-only."""
+        open_by_job: dict = {}
+        for b in self.blockers():   # every open blocker in one query, not one per job
+            open_by_job.setdefault(b.job, []).append(b)
         for js in self.jobs(True):
-            for b in self.blockers(js.job):
+            for b in open_by_job.get(js.job, ()):
                 # Legacy waits pause with the job; decision deadlines continue.
                 if b.kind == "wait" and js.status != "active":
                     continue

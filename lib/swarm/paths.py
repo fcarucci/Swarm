@@ -38,6 +38,11 @@ def share_dir() -> Path:
     return home() / ".local" / "share" / "swarm"
 
 
+def pycache_dir() -> Path:
+    """Where bin/swarm and bin/swarm-hook keep Python bytecode (SWARM_PYCACHE overrides)."""
+    return Path(os.environ["SWARM_PYCACHE"]) if os.environ.get("SWARM_PYCACHE") else share_dir() / "pyc"
+
+
 def host_dir() -> Path:
     """Host-only files (hook logs, stamps, notices, enrolment records): a 0700 directory outside
     every sandbox writable root, reached through safefs.open_base(strict_mode=0o700)."""

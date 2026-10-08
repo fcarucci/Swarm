@@ -29,7 +29,7 @@ class SnapshotBoard:
         self.blocker_rows = rows(Blocker, row[7]) if len(row) > 7 else []
         self.plugin_data = row[8] or {} if len(row) > 8 else {}
         # Each idle or dead agent's newest post, taken in the same statement (agentview.last_post).
-        self.last_posts = {(m.job, m.agent_name): m for m in rows(Message, row[9] if len(row) > 9 else [])}
+        self._last_posts = {(m.job, m.agent_name): m for m in rows(Message, row[9] if len(row) > 9 else [])}
         from swarm.review import pipeline_status
         self.job_rows = [replace(job, **pipeline_status(self.plugin_data.get(job.job)))
                          for job in self.job_rows]
@@ -72,7 +72,10 @@ class SnapshotBoard:
                 and (include_closed or b.state == 'open')]
 
     def last_post(self, job, agent_name):
-        return self.last_posts.get((job, agent_name))
+        return self._last_posts.get((job, agent_name))
+
+    def last_posts(self, job, names):
+        return {n: m for n in dict.fromkeys(names) if (m := self._last_posts.get((job, n))) is not None}
 
     def job_data(self, job):
         return parse_job_data(self.plugin_data.get(job))

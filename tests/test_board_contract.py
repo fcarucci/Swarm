@@ -1087,6 +1087,55 @@ class BoardContract:
         self.assertEqual(self.agent("new").messages, 1)
         self.assertEqual(self.b.job_status("j").messages, 2)
 
+    def test_message_counter_follows_posts_resets_and_moves(self):
+        a = self.b.allocate_name("k", "j")
+        self.b.open_job("other", None, None, None, None)
+        for text in ("one", "two"):
+            self.b.post("j", a, text)
+        self.b.post("other", a, "elsewhere")          # another job: not this row's count
+        self.assertEqual(self.agent("k").messages, 2)
+        self.b.move_agent("k", "other")               # recounted for the new job since it joined
+        self.assertEqual(self.agent("k", "other").messages, 1)
+        self.b.agent_stopped("k")
+        self.assertEqual(self.b.allocate_name("k", "j"), a)   # revived into j, joined_at kept: j's two again
+        self.assertEqual(self.agent("k").messages, 2)
+        self.b.agent_stopped("k")
+
+    def test_last_posts_is_last_post_for_several_agents(self):
+        names = [self.b.allocate_name(k, "j") for k in ("p", "q", "silent")]
+        for text, who in (("p1", names[0]), ("q1", names[1]), ("p2", names[0])):
+            self.b.post("j", who, text)
+        got = self.b.last_posts("j", names + names[:1])
+        self.assertEqual({n: m.message for n, m in got.items()}, {names[0]: "p2", names[1]: "q1"})
+        self.assertEqual(got[names[0]], self.b.last_post("j", names[0]))
+        self.assertEqual(self.b.last_posts("j", []), {})
+
+    def test_pipeline_messages_are_the_handoff_and_finalization_posts_in_order(self):
+        a = self.b.allocate_name("w", "j")
+        for text in ("chatter", "DONE x@" + "a" * 40, "DONEx", "FINALIZED x", "done lower", "INTEGRATED y", "see DONE z"):
+            self.b.post("j", a, text)
+        self.b.post("other", a, "DONE elsewhere")
+        got = self.b.pipeline_messages("j")
+        self.assertEqual([m.message for m in got], ["DONE x@" + "a" * 40, "FINALIZED x", "INTEGRATED y"])
+        self.assertEqual(got, [m for m in self.b.messages_after(0, "j")
+                               if m.message.startswith(("DONE ", "FINALIZED ", "INTEGRATED "))])
+
+    def test_purged_messages_leave_the_agent_counts(self):
+        keys = ("p", "q")
+        names = [self.b.allocate_name(k, "j") for k in keys]
+        for k in keys:
+            self.h.backdate_agent(k, joined_at=10 * DAY)    # joined before the old message was posted
+        ids = [self.b.post("j", names[0], f"p{i}").id for i in range(3)] + [self.b.post("j", names[1], "q").id]
+        self.h.backdate_message(ids[0], 8 * DAY)             # one past retention
+        self.assertEqual([self.agent(k).messages for k in keys], [3, 1])
+        self.b.purge()
+        stored = self.b.messages_after(0, "j")
+        self.assertEqual(len(stored), 3)
+        self.assertEqual([self.agent(k).messages for k in keys], [2, 1])
+        self.assertEqual(sum(self.agent(k).messages for k in keys), self.b.job_status("j").messages)
+        self.b.purge()                                       # idempotent
+        self.assertEqual([self.agent(k).messages for k in keys], [2, 1])
+
     def test_closed_job_rollups_remain_live_and_match_agent_status(self):
         self.b.open_job("j", "closed", None, None, None)
         self.b.open_job("other", None, None, None, None)
@@ -2199,7 +2248,7 @@ class PostgresSpecificTests(unittest.TestCase):
             self.assertEqual(self.b.session_jobs("S1"), [expected])
             self.assertEqual(self.b.watch_snapshot("j", None, None, 20).jobs(), [expected])
 
-    def test_agent_status_job_filter_reaches_message_scan(self):
+    def test_agent_status_reads_no_messages_and_filters_agents_by_job(self):
         from swarm.board.postgres import _AGENT_STATUS_COLS
         self.b.allocate_name("one", "j")
         self.b.allocate_name("two", "other")
@@ -2213,14 +2262,8 @@ class PostgresSpecificTests(unittest.TestCase):
             for child in node.get("Plans", []):
                 yield from nodes(child)
 
-        scans = [node for node in nodes(plan) if node.get("Relation Name") == "messages"]
-        self.assertTrue(scans, plan)
-        for scan in scans:
-            # A bitmap scan may carry the condition on its child index scan instead.
-            conditions = " ".join(str(n.get(field, "")) for n in nodes(scan)
-                                  for field in ("Filter", "Index Cond", "Recheck Cond"))
-            self.assertIn("job", conditions, plan)
-            self.assertTrue("'j'" in conditions or "a.job" in conditions, plan)
+        # the per-agent message count is the agents.message_count column: no scan of messages at all
+        self.assertEqual([n for n in nodes(plan) if n.get("Relation Name") == "messages"], [], plan)
         agent_scans = [node for node in nodes(plan) if node.get("Relation Name") == "agents"]
         self.assertTrue(agent_scans, plan)
         for scan in agent_scans:
@@ -2326,8 +2369,8 @@ class PostgresSpecificTests(unittest.TestCase):
                                "ORDER BY table_name, ordinal_position").fetchall()
         for _ in range(2):  # migration and idempotent re-init
             type(self.b).setup(self.h.cfg, SMALL_POOL)
-            self.assertEqual(SCHEMA_VERSION, 21)
-            self.assertEqual(type(self.b).schema_version(self.h.cfg), 21)
+            self.assertEqual(SCHEMA_VERSION, 22)
+            self.assertEqual(type(self.b).schema_version(self.h.cfg), 22)
             self.assertEqual(self.b.job_data("j"), {"engineering-team.optional": "build_engineer"})
             self.assertEqual([conn.execute(q).fetchall() for q in queries], before)
             self.assertEqual(conn.execute("SELECT table_name, column_name, data_type "

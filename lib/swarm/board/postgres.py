@@ -279,6 +279,59 @@ ALTER TABLE agents ADD COLUMN IF NOT EXISTS left_reason text;
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS resume_of text;
 -- Schema version 20: an optional display title, separate from role (NULL: none).
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS title text;
+-- Schema version 22: agents.message_count, the messages this agent posted to its job since it joined
+-- (what the agent_status view's `messages` used to count with one index scan per agent on every read).
+-- The triggers keep it exact whatever client writes, so a rollout needs no lockstep: an insert bumps every
+-- agent row of that job and name that joined before it (departed ones too, as the view counted);
+-- a reset, a move or a rename recounts. The first setup adds the column and backfills it under SHARE mode (readers carry on, posters wait a moment).
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = current_schema() AND table_name = 'agents'
+                      AND column_name = 'message_count') THEN
+        ALTER TABLE agents ADD COLUMN message_count bigint NOT NULL DEFAULT 0;
+        LOCK TABLE messages IN SHARE MODE;
+        UPDATE agents a SET message_count = (SELECT count(*) FROM messages m
+            WHERE m.job = a.job AND m.agent_name = a.name AND m.created_at >= a.joined_at);
+    END IF;
+END $$;
+CREATE OR REPLACE FUNCTION swarm_count_message() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    UPDATE agents SET message_count = message_count + 1
+     WHERE job = NEW.job AND name = NEW.agent_name AND joined_at <= NEW.created_at;
+    RETURN NULL;
+END $$;
+DROP TRIGGER IF EXISTS messages_count ON messages;
+CREATE TRIGGER messages_count AFTER INSERT ON messages FOR EACH ROW EXECUTE FUNCTION swarm_count_message();
+-- Deleted messages (retention purge) leave the counts, as the old per-read count saw them go.
+CREATE OR REPLACE FUNCTION swarm_uncount_messages() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    UPDATE agents a SET message_count = greatest(0, a.message_count - c.n)
+      FROM (SELECT g.agent_key, count(*) AS n FROM old_rows o
+              JOIN agents g ON g.job = o.job AND g.name = o.agent_name AND g.joined_at <= o.created_at
+             GROUP BY g.agent_key) c
+     WHERE a.agent_key = c.agent_key;
+    RETURN NULL;
+END $$;
+DROP TRIGGER IF EXISTS messages_uncount ON messages;
+CREATE TRIGGER messages_uncount AFTER DELETE ON messages REFERENCING OLD TABLE AS old_rows
+    FOR EACH STATEMENT EXECUTE FUNCTION swarm_uncount_messages();
+CREATE OR REPLACE FUNCTION swarm_recount_messages() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.message_count := (SELECT count(*) FROM messages m WHERE m.job = NEW.job
+                            AND m.agent_name = NEW.name AND m.created_at >= NEW.joined_at);
+    RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS agents_recount_messages ON agents;
+CREATE TRIGGER agents_recount_messages BEFORE UPDATE OF job, name, joined_at ON agents FOR EACH ROW
+    WHEN (NEW.job IS DISTINCT FROM OLD.job OR NEW.name IS DISTINCT FROM OLD.name
+          OR NEW.joined_at IS DISTINCT FROM OLD.joined_at)
+    EXECUTE FUNCTION swarm_recount_messages();
+-- Schema version 22: vacuum and analyze the two hot tables sooner than the 20% default (the insert
+-- scale factor kept messages' visibility map ~30% stale for a day, so index-only scans fetched the heap).
+ALTER TABLE messages SET (autovacuum_vacuum_insert_scale_factor = 0.02, autovacuum_vacuum_scale_factor = 0.05,
+                          autovacuum_analyze_scale_factor = 0.05);
+ALTER TABLE agents SET (autovacuum_vacuum_insert_scale_factor = 0.02, autovacuum_vacuum_scale_factor = 0.05,
+                        autovacuum_analyze_scale_factor = 0.05);
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS supervise boolean NOT NULL DEFAULT true;
 -- Schema version 9: a final capture that kept failing is stored as a marker row without a body,
 -- holding why (transcripts.capture_failed_row).
@@ -336,16 +389,10 @@ CREATE VIEW agent_status AS
 SELECT a.job, a.name, CASE WHEN a.judge THEN 'judge' WHEN a.verifier THEN 'verifier' ELSE a.role END AS role,
        {agent_status} AS status,
        a.current_tool, a.tool_calls,
-       COALESCE(mc.messages, 0::bigint) AS messages,
+       a.message_count AS messages,
        a.joined_at, a.last_seen AS last_contact_at, a.last_post_at, a.left_at AS ended_at,
        a.host, a.agent_key, a.harness, a.model, a.os_user, a.left_reason, a.resume_of, a.title
-  FROM agents a
-  LEFT JOIN LATERAL (
-    -- Count only this job/name/incarnation via messages_job_agent_created_at.
-    -- Names can be reused after departure; keep the joined_at boundary.
-    SELECT count(*) AS messages FROM messages m
-     WHERE m.job = a.job AND m.agent_name = a.name AND m.created_at >= a.joined_at
-  ) mc ON true;
+  FROM agents a;
 
 DROP VIEW IF EXISTS job_status;
 CREATE VIEW job_status AS
@@ -1312,9 +1359,7 @@ class PostgresBoard(SqlBlockers, SqlEvents, Board):
 
     def watch_snapshot(self, job, session, recent_minutes, limit):
         from swarm.watchdata import SnapshotBoard
-        # The view's message-count join is pruned when its messages column is unused.
-        # Aggregate counts only for visible incarnations, never a subquery per agent.
-        agent_cols = _AGENT_STATUS_COLS.replace('tool_calls, messages,', 'tool_calls, 0::bigint AS messages,')
+        agent_cols = _AGENT_STATUS_COLS   # `messages` is agents.message_count: no per-agent count
         query = f"""
           WITH scope AS MATERIALIZED (
             SELECT job FROM jobs WHERE (%s::text IS NOT NULL AND job = %s)
@@ -1330,10 +1375,6 @@ class PostgresBoard(SqlBlockers, SqlEvents, Board):
              WHERE job IN (SELECT job FROM selected)
                AND (%s::float IS NULL OR status NOT IN ('completed','left','dead')
                     OR greatest(ended_at,last_contact_at) >= now() - %s * interval '1 minute')
-          ), counts AS (
-            SELECT a.agent_key, count(m.id) AS messages FROM visible a LEFT JOIN messages m
-              ON m.job = a.job AND m.agent_name = a.name AND m.created_at >= a.joined_at
-             GROUP BY a.agent_key
           ), hidden AS (
             SELECT job, count(*) AS n FROM agent_status
              WHERE job IN (SELECT job FROM selected) AND %s::float IS NOT NULL
@@ -1346,10 +1387,11 @@ class PostgresBoard(SqlBlockers, SqlEvents, Board):
                 FROM messages WHERE job IN (SELECT job FROM selected)
             ) m WHERE rn <= %s
           ), lastposts AS (
-            SELECT DISTINCT ON (m.job, m.agent_name) {_MESSAGE_COLS_M}
-              FROM messages m JOIN (SELECT DISTINCT job, name FROM visible WHERE status IN ('idle','dead')) a
-                ON a.job = m.job AND a.name = m.agent_name
-             ORDER BY m.job, m.agent_name, m.id DESC
+            SELECT {_MESSAGE_COLS_M}
+              FROM (SELECT DISTINCT job, name FROM visible WHERE status IN ('idle','dead')) a
+              CROSS JOIN LATERAL (
+                SELECT * FROM messages WHERE job = a.job AND agent_name = a.name
+                 ORDER BY id DESC LIMIT 1) m
           ), checks AS (
             SELECT m.job, count(*) FILTER (WHERE m.message LIKE 'VERIFIED%%') AS verified,
                    count(*) FILTER (WHERE m.message LIKE 'FAILED%%') AS failed
@@ -1359,8 +1401,7 @@ class PostgresBoard(SqlBlockers, SqlEvents, Board):
           )
           SELECT now(),
             (SELECT jsonb_agg(to_jsonb(j) ORDER BY activated_at,job) FROM selected j),
-            (SELECT jsonb_agg(to_jsonb(a) || jsonb_build_object('messages',c.messages)
-                     ORDER BY (ended_at IS NULL) DESC,joined_at) FROM visible a JOIN counts c USING(agent_key)),
+            (SELECT jsonb_agg(to_jsonb(a) ORDER BY (ended_at IS NULL) DESC,joined_at) FROM visible a),
             (SELECT jsonb_agg(to_jsonb(m) ORDER BY id) FROM recent m),
             (SELECT jsonb_agg(to_jsonb(r) ORDER BY id) FROM restarts r WHERE job IN (SELECT job FROM selected)),
             (SELECT jsonb_object_agg(job,n) FROM hidden),
@@ -1814,10 +1855,28 @@ class PostgresBoard(SqlBlockers, SqlEvents, Board):
                                     "ORDER BY id DESC LIMIT 1", (job, agent_name))
         return rows[0] if rows else None
 
+    def last_posts(self, job: str, names: list[str]) -> dict[str, Message]:
+        if not names:
+            return {}
+        rows = self._fetch(Message, f"""
+            SELECT m.id, m.created_at, m.job, m.agent_name, m.to_agent, m.message
+              FROM unnest(%s::text[]) AS n(name)
+              CROSS JOIN LATERAL (
+                SELECT {_MESSAGE_COLS} FROM messages
+                 WHERE job = %s AND agent_name = n.name
+                 ORDER BY id DESC LIMIT 1) m""",
+                           (list(dict.fromkeys(names)), job))
+        return {m.agent_name: m for m in rows}
+
     def messages_after(self, after_id: int, job: str | None = None) -> list[Message]:
         jf, jp = self._job_filter(job)
         return self._fetch(Message, f"SELECT {_MESSAGE_COLS} FROM messages WHERE id > %s{jf} ORDER BY id",
                            (after_id, *jp))
+
+    def pipeline_messages(self, job: str) -> list[Message]:
+        return self._fetch(Message, f"SELECT {_MESSAGE_COLS} FROM messages WHERE job = %s AND "
+                                    "(left(message, 5) = 'DONE ' OR left(message, 10) = 'FINALIZED ' "
+                                    "OR left(message, 11) = 'INTEGRATED ') ORDER BY id", (job,))
 
     def last_message_id(self, job: str | None = None) -> int:
         jf, jp = self._job_filter(job)

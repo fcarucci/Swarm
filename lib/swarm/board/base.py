@@ -120,7 +120,11 @@ RESTART_OUTCOMES = ("running", "completed", "timeout", "max_turns", "failed", "n
 # old file/memory rows keep working; every host sharing a board still upgrades together.
 # 21 external events (the events table: a generic "something happened" record that wakes the
 # orchestrator; see Board.post_event).
-SCHEMA_VERSION = 21
+# 22 agents.message_count, the messages an agent posted to its job since it joined (the agent_status
+# view and the watch snapshot read it instead of counting per agent on every read), kept by triggers
+# on Postgres and SQLite and by the post on the file/memory stores (a row without it is counted once);
+# per-table autovacuum settings on Postgres' messages and agents.
+SCHEMA_VERSION = 22
 
 TITLE_MAX = 60
 
@@ -2318,6 +2322,24 @@ class Board(abc.ABC):
     @abc.abstractmethod
     def messages_after(self, after_id: int, job: str | None = None) -> list[Message]:
         """All messages with id > after_id (of `job`, or all jobs), ordered by id. Unbounded."""
+
+    PIPELINE_PREFIXES = ("DONE ", "FINALIZED ", "INTEGRATED ")
+
+    def pipeline_messages(self, job: str) -> list[Message]:
+        """The messages of `job` that start with one of PIPELINE_PREFIXES, ordered by id: all the
+        review code (hand-offs, finalization) reads. The SQL backends filter in the store, so a
+        job with thousands of messages is not transferred whole on every call."""
+        return [m for m in self.messages_after(0, job) if m.message.startswith(self.PIPELINE_PREFIXES)]
+
+    def last_posts(self, job: str, names: list[str]) -> dict[str, Message]:
+        """The newest message of each of the named agents on `job` (a name that never posted is
+        absent): last_post for several agents. The Postgres backend does it in one query."""
+        out = {}
+        for name in dict.fromkeys(names):
+            m = self.last_post(job, name)
+            if m is not None:
+                out[name] = m
+        return out
 
     @abc.abstractmethod
     def last_message_id(self, job: str | None = None) -> int:

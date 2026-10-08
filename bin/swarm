@@ -10,6 +10,20 @@ if [ "${OS:-}" = "Windows_NT" ]; then   # Git Bash on Windows: the Python entry 
 fi
 D="$(cd "$(dirname "$0")/.." && pwd)"
 V="${SWARM_VENV:-$HOME/.local/share/swarm/venv}"
+# Bytecode cache: without one every run recompiles ~1 MB of source (~0.2 s of each command, and of
+# each hook that reaches Python). It lives beside the venv, which already holds code this user runs,
+# and is used only when it is this user's own, unshared directory (a sandboxed agent can't plant
+# bytecode there: no symlink, no group/world access, no ACL entries). Otherwise nothing is cached and
+# nothing is written (PYTHONDONTWRITEBYTECODE), so the plugin tree and the venv stay clean.
+PYC="${SWARM_PYCACHE:-$HOME/.local/share/swarm/pyc}"
+if { [ -d "$PYC" ] || mkdir -p -m 700 "$PYC" 2>/dev/null; } && [ -O "$PYC" ] && [ ! -L "$PYC" ]; then
+  case "$(ls -ld "$PYC" 2>/dev/null)" in
+    d???------\ *|d???------.\ *) export PYTHONPYCACHEPREFIX="$PYC";;
+    *) export PYTHONDONTWRITEBYTECODE=1;;
+  esac
+else
+  export PYTHONDONTWRITEBYTECODE=1
+fi
 REQ="$(cksum < "$D/requirements.txt" | cut -d' ' -f1)"
 # Needs (re)install: no interpreter, another requirements stamp, or a required package missing
 # from the venv (a glob, no Python start: an unmatched glob leaves the literal path, which fails -f).
@@ -40,4 +54,4 @@ if stale; then
   fi
   rmdir "$V.building" 2>/dev/null; trap - EXIT INT TERM
 fi
-PYTHONPATH="$D/lib${PYTHONPATH:+:$PYTHONPATH}" exec "$V/bin/python" -B -m swarm.cli "$@"
+PYTHONPATH="$D/lib${PYTHONPATH:+:$PYTHONPATH}" exec "$V/bin/python" -m swarm.cli "$@"

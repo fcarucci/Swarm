@@ -2,15 +2,27 @@
 import unittest
 
 import support  # noqa: F401 (sets sys.path)
-from swarm.board.postgres import STATUS_VIEW
+from swarm.board.postgres import SCHEMA, STATUS_VIEW
 
 
 class StatusViewShapeTests(unittest.TestCase):
-    def test_agent_message_count_is_restricted_to_job_and_incarnation(self):
+    def test_agent_message_count_is_read_from_the_agent_row(self):
         agent_view = STATUS_VIEW.split('CREATE VIEW job_status AS')[0]
-        self.assertIn('LEFT JOIN LATERAL', agent_view)
-        self.assertRegex(agent_view, r'WHERE m\.job = a\.job AND m\.agent_name = a\.name')
-        self.assertIn('m.created_at >= a.joined_at', agent_view)
+        self.assertIn('a.message_count AS messages', agent_view)
+        self.assertNotIn('LATERAL', agent_view)           # no per-agent count of messages on a read
+        self.assertNotIn('FROM messages', agent_view)
+
+    def test_message_count_is_kept_by_triggers_that_match_the_old_count(self):
+        # an insert bumps every row of the job and name that joined before it; a reset, move or rename recounts
+        self.assertRegex(SCHEMA, r'UPDATE agents SET message_count = message_count \+ 1\s+'
+                                 r'WHERE job = NEW\.job AND name = NEW\.agent_name AND joined_at <= NEW\.created_at')
+        self.assertIn('BEFORE UPDATE OF job, name, joined_at ON agents', SCHEMA)
+        self.assertIn('m.created_at >= NEW.joined_at', SCHEMA)
+
+    def test_hot_tables_vacuum_early(self):
+        for table in ('messages', 'agents'):
+            self.assertRegex(SCHEMA, rf'ALTER TABLE {table} SET \(autovacuum_vacuum_insert_scale_factor = 0\.02, '
+                                     r'autovacuum_vacuum_scale_factor = 0\.05,\s+autovacuum_analyze_scale_factor = 0\.05\)')
 
     def test_job_rollup_does_not_compute_per_agent_message_counts(self):
         job_view = STATUS_VIEW.split('CREATE VIEW job_status AS')[1]

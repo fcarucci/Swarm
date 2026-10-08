@@ -37,9 +37,9 @@ class EventContract:
         self.b.open_job("j", "events", None, None, None)
         self.b.open_job("k", "other", None, None, None)
 
-    def test_schema_is_21(self):
-        self.assertEqual(SCHEMA_VERSION, 21)
-        self.assertEqual(type(self.b).schema_version(self.h.cfg), 21)
+    def test_schema_is_22(self):
+        self.assertEqual(SCHEMA_VERSION, 22)
+        self.assertEqual(type(self.b).schema_version(self.h.cfg), 22)
 
     def test_post_is_idempotent_per_job_kind_key(self):
         first, created = self.b.post_event("j", "NEEDS-REVIEW", "7@abc", "PR 7 opened", source="gitea")
