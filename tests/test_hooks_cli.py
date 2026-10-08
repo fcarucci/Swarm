@@ -215,8 +215,8 @@ class CliTests(Env):
         rows = [l.split("\t") for l in out.splitlines()]
         self.assertEqual([r[0] for r in rows], [a, b])
         self.assertEqual(rows[0][1], "")  # harness: not recorded
-        self.assertEqual(rows[0][2:4], ["r", "started"])
-        self.assertRegex(rows[0][4], r"^last contact \d\d:\d\d$")
+        self.assertEqual(rows[0][2:5], ["r", "", "started"])   # role, title (none), status
+        self.assertRegex(rows[0][5], r"^last contact \d\d:\d\d$")
         self.assertEqual(self.cli("leave", "--as", a)[1], "left\n")
         self.assertEqual(self.cli("leave", "--key", "kb")[1], "left\n")
         rc, out, err = self.cli("leave", "--key", "kb")  # already gone: say so, don't claim "left"

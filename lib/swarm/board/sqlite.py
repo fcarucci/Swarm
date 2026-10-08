@@ -338,6 +338,7 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("jobs", "waiting_until", "TEXT"),  # schema 11: when a bounded `wait --for` expires
     ("jobs", "max_hours", "REAL"),      # schema 11: the job's own lifetime cap
     ("jobs", "plugin_data", "TEXT"),    # schema 16: per-job settings kept by CLI plugins (JSON)
+    ("agents", "title", "TEXT"),        # schema 20: the optional display title (NULL: none)
 )
 
 _MESSAGE_COLS = "id, created_at, job, agent_name, to_agent, message"
@@ -345,7 +346,7 @@ _RESTART_COLS = ("id, job, agent_key, attempt, at, reason, old_agent_key, new_ag
                  "os_user, minutes_cap, ended_at, outcome")   # Restart field order
 _AGENT_COLS = ("agent_key, name, job, role, host, joined_at, last_seen, left_at, state, tool_calls, "
                "current_tool, tool_started_at, last_post_at, judge, verifier, harness, model, os_user, "
-               "left_reason, resume_of")
+               "left_reason, resume_of, title")
 # The replies an agent owes (see OwedReply): addressed to it on its job since it joined, already
 # shown (id <= cursor), not yet reminded, and not answered by a later post to the sender.
 _OWED = ("SELECT m.id, m.agent_name, m.created_at FROM messages m WHERE m.to_agent = :name "
@@ -1007,6 +1008,11 @@ class SqliteBoard(SqlBlockers, Board):
         self._c().execute("UPDATE agents SET role = ? WHERE agent_key = ? AND left_at IS NULL",
                           (role, agent_key))
 
+    def set_agent_title(self, agent_key: str, title: str | None) -> bool:
+        from .base import clean_title
+        return self._c().execute("UPDATE agents SET title = ? WHERE agent_key = ? AND left_at IS NULL",
+                                 (clean_title(title), agent_key)).rowcount > 0
+
     def set_agent_runtime(self, agent_key: str, harness: str | None, model: str | None) -> None:
         self._c().execute("UPDATE agents SET harness = COALESCE(?, harness), model = COALESCE(?, model) "
                           "WHERE agent_key = ? AND left_at IS NULL", (harness, model, agent_key))
@@ -1050,21 +1056,21 @@ class SqliteBoard(SqlBlockers, Board):
                             (agent_key,)).fetchone()
             if cur is not None and cur[1] is None and cur[2] == job:
                 return cur[0]
-            old = c.execute("SELECT name, role, job, left_at, last_read_id, judge, verifier FROM agents "
+            old = c.execute("SELECT name, role, job, left_at, last_read_id, judge, verifier, title FROM agents "
                             "WHERE agent_key = ?", (resume_of,)).fetchone()
             if old is None or old[2] != job or old[3] is None or self._name_held(c, old[0]):
                 return None
-            name, role, _, _, cursor, judge, verifier = old
+            name, role, _, _, cursor, judge, verifier, title = old
             judge = bool(judge) and c.execute(
                 "SELECT 1 FROM agents WHERE job = ? AND judge AND left_at IS NULL", (job,)).fetchone() is None
             now = self._now()
             # A full reset, as allocate_name's: every other column (sync state, counters) defaults.
             c.execute("DELETE FROM agents WHERE agent_key = ?", (agent_key,))
             c.execute("INSERT INTO agents (agent_key, name, job, role, host, os_user, joined_at, last_seen, "
-                      "last_read_id, state, judge, verifier, resume_of) "
-                      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'started', ?, ?, ?)",
+                      "last_read_id, state, judge, verifier, resume_of, title) "
+                      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'started', ?, ?, ?, ?)",
                       (agent_key, name, job, role, compat.node(), getpass.getuser(), now, now,
-                       cursor, int(judge), int(bool(verifier)), resume_of))
+                       cursor, int(judge), int(bool(verifier)), resume_of, title))
             return name
 
     def job_state(self, job: str) -> str | None:
@@ -1253,7 +1259,7 @@ class SqliteBoard(SqlBlockers, Board):
         for r in c.execute(f"SELECT {_AGENT_COLS}, {msgs} FROM agents a WHERE job = ?{active} "
                            "ORDER BY left_at IS NOT NULL, joined_at", (job,)):
             (key, name, ajob, role, host, joined, seen, left, state, calls, tool, tool_at, post_at,
-             judge, verifier, harness, model, os_user, left_reason, resume_of, messages) = r
+             judge, verifier, harness, model, os_user, left_reason, resume_of, title, messages) = r
             last_seen = _dt_(seen)
             out.append(AgentStatus(
                 job=ajob, name=name, role="judge" if judge else "verifier" if verifier else role,
@@ -1261,7 +1267,7 @@ class SqliteBoard(SqlBlockers, Board):
                 tool_calls=calls, messages=messages, joined_at=_dt_(joined), last_contact_at=last_seen,
                 last_post_at=_dt_(post_at), ended_at=_dt_(left), host=host, agent_key=key,
                 harness=harness, model=model, os_user=os_user, left_reason=left_reason,
-                resume_of=resume_of))
+                resume_of=resume_of, title=title))
         return out
 
     def agents(self, job: str, include_departed: bool = True) -> list[AgentStatus]:

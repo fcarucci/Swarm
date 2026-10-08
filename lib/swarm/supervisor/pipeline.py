@@ -199,7 +199,9 @@ def prompt_for(action, recipe):
     js, h = action.job, action.handoff
     role = recipe.get("finalizer_role", "finalizer") if action.role == "finalizer" else action.role
     ref_arg = shlex.quote(h.artifact)
-    lines = [f"[swarm job: {js.job}]", f"[swarm role: {role}]",
+    from swarm.board.base import clean_title
+    title = clean_title((recipe.get("titles") or {}).get(role))   # a plugin's seat label (display only)
+    lines = [f"[swarm job: {js.job}]", f"[swarm role: {role}]"] + ([f"[swarm title: {title}]"] if title else []) + [
              f"Goal: {_clean(js.goal, 12000)}", f"Task: {_clean(js.task or js.description, 12000)}",
              f"Hand-off artifact: {_clean(h.artifact, 2000)}",
              f"Hand-off #{h.id} from {_clean(h.agent_name)}: {_clean(h.summary, 8000)}"]
@@ -250,6 +252,8 @@ def launch_action(board, cfg, sup, action, owner, recipe, decision, *, start_run
     harness = settings(cfg)["judge_host"] if role == "judge" else owner.harness
     old = "pipeline-seat-" + str(uuid.uuid4())
     name = board.allocate_name(old, action.job.job, role)
+    if (recipe.get("titles") or {}).get(role):
+        board.set_agent_title(old, recipe["titles"][role])   # the replacement inherits it
     if role == "judge" and not board.take_judge_seat(old, action.job.job):
         board.close_agent(old, "pipeline judge seat busy")
         return None

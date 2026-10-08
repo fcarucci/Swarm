@@ -66,7 +66,7 @@ class ViewContract:
             swarm._board_who(self.b, {}, types.SimpleNamespace(job=job))
         rows = {}
         for line in out.getvalue().splitlines():
-            name, _harness, role, state, _contact, tool = line.split("\t")
+            name, _harness, role, _title, state, _contact, tool = line.split("\t")
             rows[name] = (role, state, tool)
         return rows
 

@@ -396,7 +396,7 @@ class MigrationContract:
                     self.assertEqual(b.job_status("j").description, "description")
                     if version == 16:
                         self.assertEqual(b.job_data("j")["demo.setting"], "kept")
-                self.assertEqual(SCHEMA_VERSION, 19)
+                self.assertEqual(SCHEMA_VERSION, 20)
 
     def test_main_schema_17_auto_upgrades_to_19_with_blockers(self):
         """Main's schema 17 has plugin_data and status views, but no blocker storage."""
@@ -448,8 +448,8 @@ class MigrationContract:
                 if stamp is not None:
                     stamp.unlink(missing_ok=True)
                 self.assertEqual(ensure_initialized(self.h.cfg).action, "initialized")
-        self.assertEqual(SCHEMA_VERSION, 19)
-        self.assertEqual(backend_class(self.h.cfg).schema_version(self.h.cfg), 19)
+        self.assertEqual(SCHEMA_VERSION, 20)
+        self.assertEqual(backend_class(self.h.cfg).schema_version(self.h.cfg), 20)
         with self.h.board() as b:
             self.assertEqual(b.blockers("j"), [])
             self.assertEqual(b.job_data("j"), {"demo.setting": "kept"})
@@ -492,6 +492,8 @@ class MigrationContract:
             self.h.path.parent.mkdir(parents=True, exist_ok=True)
             self.h._db().executescript((fixtures / "schema18_sqlite.sql").read_text())
             self.assertEqual(self.h._db().execute("SELECT count(*) FROM blockers").fetchone()[0], 1)
+            # the one schema 20 column, so the current code can read this snapshot before the upgrade
+            self.h._db().execute("ALTER TABLE agents ADD COLUMN title TEXT")
         else:
             c = self.h.conn
             c.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
@@ -513,8 +515,8 @@ class MigrationContract:
                 if stamp is not None:
                     stamp.unlink(missing_ok=True)
                 self.assertEqual(ensure_initialized(self.h.cfg).action, "initialized")
-        self.assertEqual(SCHEMA_VERSION, 19)
-        self.assertEqual(backend_class(self.h.cfg).schema_version(self.h.cfg), 19)
+        self.assertEqual(SCHEMA_VERSION, 20)
+        self.assertEqual(backend_class(self.h.cfg).schema_version(self.h.cfg), 20)
         from swarm.board import setup_board
         from support import SMALL_POOL
         for _ in range(2):  # automatic migration, then idempotent setup

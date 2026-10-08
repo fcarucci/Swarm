@@ -275,6 +275,7 @@ both at once (see [One job, both hosts](#one-job-both-hosts)). What differs, as 
 | spawn tool | `Agent` | `spawn_agent` (the prompt is its `message`) |
 | which job a subagent joins | the job its `[swarm job: <job>]` tag names; one session can run several jobs | the session's job: Codex encrypts spawn messages, so tags can't be read, and a session runs one job at a time (`activate` refuses a second) |
 | role | `[swarm role: <role>]` in the prompt | `<role>__<task>` task name; legacy `verifier...` / `judge...` prefixes also work |
+| title | `[swarm title: <text>]` in the prompt, or `swarm title` | the spawn message is encrypted: the agent runs `swarm title` itself |
 | an agent's own spawns | need the job's tag and a `[swarm spawn: <why>]` line, within the caps and depth | only the caps and depth are checked; the spawn is announced on the board and the agent is told to say there why |
 | verifier is refused | `Edit`, `Write`, `MultiEdit`, `NotebookEdit`, shell writes (best effort), spawning | `apply_patch`, shell writes (best effort), spawning |
 | a subagent completes | when it stops | at SessionEnd or confirmed runner exit; a turn ending never proves completion |
@@ -1100,6 +1101,7 @@ subagent's spawn prompt:
 | `[swarm job: <job>]` | routes the subagent to that job; printed by `activate`. Put it in every subagent prompt. |
 | `[swarm role: judge]` | makes it the job's judge (jobs with a goal) |
 | `[swarm role: verifier]` | makes it a read-only verifier |
+| `[swarm title: <text>]` | gives it a short display title (see [Agent titles](#agent-titles)); optional, never changes what it may do |
 | `[swarm spawn: <why>]` | required in the prompt of a subagent spawned by a swarm agent |
 
 In Codex the spawn prompt (`spawn_agent`'s `message`) is encrypted, so none of these can be
@@ -1616,6 +1618,33 @@ fixes; neither automatically receives verifier restrictions or judge authority. 
 role's responsibilities, deliverables, ownership and handoffs in the brief; a label does not
 load a persona or supply a workflow. Configure its model under `[models.<host>]` as below.
 
+### Agent titles
+
+An agent can carry an optional **title**: a short free-text label for the board, such as `EL`, `PM`,
+`QA` or `Eng: board view`. It is separate from the role, which drives judge and verifier seats and
+role addressing (`--to @EL`); nothing keys off a title, it is only shown. A title is whitespace-collapsed,
+control characters are dropped, and it is cut at 60 characters. Never put a secret in one: it is shown to
+everyone on the board.
+
+| how | effect |
+|---|---|
+| `[swarm title: <text>]` on a line of its own in a subagent's prompt | the title the hooks set when it enrols (Claude; a Codex spawn message is encrypted, so a Codex agent uses `swarm title`) |
+| `swarm join --job J --key K --title TEXT` | sets it when the agent joins through the CLI |
+| `swarm title --job J (--as NAME \| --key K) [TEXT...]` | sets or replaces it; empty text clears it. Like `move` and `post` it names an active agent of the job with `--as` or `--key`; there is no other permission check, so use your own name |
+
+`swarm who` has a TITLE field after the role (empty without a title). `status --job` and `watch` add a
+TITLE column after AGENT when at least one agent has a title (the compact `watch` shows `Name (title)`,
+cutting the title after the tool and model under width pressure). Agents without a title show nothing, and
+board message lines stay `Name: text`. A supervisor replacement inherits its predecessor's title, as does a
+resumed or paused-and-resumed agent. The engineering-team plugin tags each seat (`EL`, `PM`, `Product`, `QA`,
+`Judge`, `Build`, `Reviewer`, `Verifier`, `Eng`) and `swarm team --job J --show` lists them.
+
+Titles are schema 20 on every backend: a nullable `agents.title` and a last column of the `agent_status`
+view (Postgres, SQLite), a `title` field of the agent row (file and memory). The upgrade is automatic and
+online on first use; a client of the previous release keeps reading the board (it asks for its own columns,
+and a row without the field has no title), but it does not show or keep titles. As always, upgrade every host
+sharing a board together.
+
 ### Addressing a role
 
 `swarm post --to @EL "..."` addresses a seat instead of a display name: the message goes to the
@@ -1754,7 +1783,7 @@ The engineering-team skill ships one (`skills/engineering-team/swarm_plugin.py`)
 
 | command | what it does |
 |---|---|
-| `team --job J [--show]` | print the job's team: the always-present seats, the optional seats on, and who carries the duties of an absent one |
+| `team --job J [--show]` | print the job's team: the always-present seats, the optional seats on, who carries the duties of an absent one, and the board title each seat is spawned with (`[swarm title: EL]`, `PM`, `Product`, `QA`, `Judge`, `Build`, `Reviewer`, `Verifier`, `Eng`) |
 | `team --job J --add ROLE` / `--remove ROLE` | change the optional seats of the job (repeatable). A mandatory seat (`engineering_lead`, `qa`, `engineer`, `judge`) can't be removed: exit status 2 |
 | `activate ... --team ROLES` | the job's optional roles at activation, comma separated (`''` for none); a bad name stops the activation |
 
@@ -1922,7 +1951,7 @@ STORED column (the agent's stored transcript size, `-` for none) to the agents t
 ### `swarm who` and `swarm read`
 
 `swarm who --job J` lists the active agents, tab-separated: exact name (paste it into `--to`),
-host, role, status, last contact, current tool. `swarm read (--as NAME | --key K) [--job J] [--peek]`
+host, role, title (empty without one), status, last contact, current tool. `swarm read (--as NAME | --key K) [--job J] [--peek]`
 prints the messages new to that agent, `read_limit` at a time; `--peek` doesn't move its cursor.
 
 ### Querying the data directly
@@ -2330,7 +2359,8 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `status --job J [--all-agents] [--no-color]` | one job's details and agents table |
 | `watch [--job J] [--session S] [--compact] [--exit-when-idle N] [--interval S] [--no-color]` | full-screen live dashboard |
 | `tail [--job J] [-n N] [--interval S] [--no-agents] [--no-color]` | follow the board live |
-| `join --job J --key K [--role R] [--judge\|--verifier]` | allocate a unique name for agent key K, or return the one it already has. `--judge` takes the job's judge seat (refused if another agent holds it) and `--verifier` makes it a verifier: for agents without the swarm's hooks, such as a one-off `codex exec` judge. They read the board with `read --key K`, and post and record verdicts with the CLI. |
+| `title --job J (--as NAME \| --key K) [TEXT...]` | set, replace or (empty text) clear an agent's display title (at most 60 characters), shown by `who`, `status` and `watch`; see [Agent titles](#agent-titles) |
+| `join --job J --key K [--role R] [--title T] [--judge\|--verifier]` | allocate a unique name for agent key K, or return the one it already has. `--title` sets its display title. `--judge` takes the job's judge seat (refused if another agent holds it) and `--verifier` makes it a verifier: for agents without the swarm's hooks, such as a one-off `codex exec` judge. They read the board with `read --key K`, and post and record verdicts with the CLI. |
 | `config [board.message_max_chars [N]] [--save]` | print or set the board's message cap (200 by default, 50 to 4000; online; existing messages are kept; `--save` also writes `[board] message_max_chars`, which only seeds a new board) |
 | `post --job J (--as NAME \| --key K) [--to NAME\|@ROLE] MESSAGE...` | post a message; whitespace is collapsed and the text capped at the board's message cap; spooled when the board is unreachable. `--to @EL`, `@PM`, `@QA`, `@judge` or `@<role>` goes to whoever holds that seat on the job now (one message each); a name that is not on the job, a seat nobody holds, or an author who is not an agent of `--job` is refused with an error and nothing is stored. `@EL` is `engineering_lead`, `@PM` is `project_manager` (else `orchestrator`), `@product` is `product_manager`; compatibility exception: an author active on another open job is redirected there with a note on stderr before validation |
 | `read (--as NAME \| --key K) [--job J] [--peek]` | messages new since the last read, excluding your own, `read_limit` at a time with a count of what is left; `--peek` doesn't advance the cursor |

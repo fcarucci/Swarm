@@ -2,6 +2,8 @@
 
 Each role invocation has a bounded deliverable, a durable brief path, task IDs, and a return to PM. PM may resume a compatible same-role agent where the host supports it; a return alone does not prove its slot is free. Roles can run in waves. A separate reviewer/QA/product context must never be manufactured by renaming or reusing the author. The shared Swarm board may show author messages to everyone; independent reviewers inspect the requirement and change directly instead of relying on those messages.
 
+Each seat is shown on the board by a short **title** (display only, set by a `[swarm title: ...]` line in its spawn prompt or by `swarm title`): `EL` (`engineering_lead`), `PM` (`project_manager`), `Product` (`product_manager`), `QA`, `Judge`, `Build` (`build_engineer`), `Reviewer`, `Verifier`, `Eng` (`engineer`, optionally with a scope such as `Eng: board view`). EL keeps the engineers' titles current when scopes change. Titles never replace the role tag, which addresses and enforces.
+
 Seats: **mandatory** (always present): PM (the invoking agent), EL, QA, at least one engineer, and an independent judge. **Optional** (user's choice via `team.toml` or `swarm team --job J --add/--remove/--show`; check the effective set before staffing): `product_manager`, `build_engineer`, `reviewer`, `verifier`. Removing a mandatory seat is rejected.
 
 | Role | Seat | Decision and deliverable | Handoff |

@@ -226,6 +226,19 @@ def _role(payload: dict, agent_id: str, prompt: str | None) -> str | None:
     return (roles.from_prompt(prompt or "") if host.reads_prompt_tags else None) or host.role_hint(payload, agent_id)
 
 
+def _tag_title(board, agent_id: str, prompt: str | None) -> None:
+    """The title the spawn prompt's `[swarm title: ...]` line asks for, if any: set on the agent's
+    row (every host whose prompt is readable; Codex's encrypted spawn message is not, so a Codex
+    agent sets its own with `swarm title`). Display only: a failure never blocks the agent."""
+    from swarm import titles
+    title = titles.from_prompt(prompt or "")
+    if title:
+        try:
+            board.set_agent_title(agent_id, title)
+        except Exception as exc:
+            _log_error("title", agent_id, exc)
+
+
 def _pick(tag: str | None, bound: dict, unbound: dict, session_id: str) -> tuple[str | None, str]:
     """(job, why not): the tagged job if it is bound to this session or claimable (in
     `unbound`, which the caller has cut down to what this agent may claim); with no tag the
@@ -340,6 +353,7 @@ def _verify_route(board, agent_id: str, sid: str, member, bound: dict, unbound: 
         role = custom_role(_role(payload, agent_id, prompt))
         if role:
             board.set_agent_role(agent_id, role)
+        _tag_title(board, agent_id, prompt)
         if _role(payload, agent_id, prompt) == "verifier" and board.claim_verifier(agent_id, member.job):
             js = board.job_status(member.job)
             _out("PreToolUse", "[swarm] Your prompt makes you a verifier: this replaces the worker "
@@ -1207,6 +1221,7 @@ def _enrol(board, event: str, agent_id: str, job: str, payload: dict, cfg: dict,
     name = board.allocate_name(agent_id, job, role or payload.get("agent_type"))
     if role:
         board.set_agent_role(agent_id, role)
+    _tag_title(board, agent_id, prompt)
     _record_enrolment(cfg, agent_id, job, sid, payload, prompt)
     board.set_waiting(job, None)   # an agent at work: the job is no longer waiting for anything
     if sid:

@@ -27,6 +27,13 @@ ABSENT = {   # who carries a missing optional seat's duties (shown by `swarm tea
                        "record the product acceptance",
     "build_engineer": "engineering_lead owns the build, CI, integration-gate and build-slot duties",
 }
+# The short board label (`[swarm title: EL]`) each seat is spawned with: what `swarm who`, `status` and
+# `watch` show beside the name. Display only; several engineers may add a short scope (`Eng: board view`).
+SEAT_TITLES = {"project_manager": "PM", "engineering_lead": "EL", "product_manager": "Product", "qa": "QA",
+               "judge": "Judge", "build_engineer": "Build", "reviewer": "Reviewer", "verifier": "Verifier",
+               "engineer": "Eng"}
+# The review pipeline's own seats (a plugin recipe's `titles`, keyed by the seat's role).
+PIPELINE_TITLES = {"judge": "Judge", "worker": "Eng: fix", "integrator": "Eng: integrate"}
 DATA_KEY = "optional_roles"
 FILE_ENV = "SWARM_TEAM_CONFIG"
 
@@ -95,6 +102,8 @@ def describe(optional: list[str], source: str) -> list[str]:
     for role in ("product_manager", "build_engineer"):
         if role not in optional:
             lines.append(f"absent     {role}: {ABSENT[role]}")
+    lines.append("titles     " + ", ".join(f"{r}={SEAT_TITLES[r]}" for r in ("project_manager", *MANDATORY, *optional)) +
+                 "  (tag each spawn `[swarm title: <title>]`)")
     return lines
 
 
@@ -306,7 +315,7 @@ def coding_recipe(ctx, board, job: str, artifact: str | None) -> dict | None:
     )
     return {"evidence_command": evidence, "evidence_check": evidence_check,
             "finalize": finalize, "finalizer_role": "integrator", "enabled": config["integrate"],
-            "artifact_group": branch}
+            "artifact_group": branch, "titles": PIPELINE_TITLES}
 
 
 # Forge adapters: platform commands belong here, never in the generic coding recipe/core.

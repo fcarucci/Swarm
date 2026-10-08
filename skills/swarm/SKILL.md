@@ -271,6 +271,11 @@ user asks for one. Don't run duplicate jobs: merge similar ones (`swarm job merg
      Custom roles have normal worker permissions and remain subject to all spawn limits.
      A QA engineer writing tests or a reviewer implementing fixes needs a custom role;
      `verifier` is the built-in read-only role. Only `judge` can record the final verdict.
+   - **Titles.** An optional short label, separate from the role, for telling agents apart on the
+     board: put `[swarm title: EL]` (at most 60 characters, `Eng: board view`) on a line of its own
+     in the prompt, or run `swarm title --job J --as NAME "text"` (empty text clears it). `who`,
+     `status` and `watch` show it; it changes nothing an agent may do and never goes on messages.
+     Codex spawn messages are encrypted, so a Codex agent sets its own with `swarm title`.
      An engineering lead can spawn children tagged `engineer` or `qa`; those labels survive
      enrolment and resume. Size the team against the host's available concurrency and the
      configured spawn limits. The plugin's default child-spawn budget is not a total team limit.
@@ -476,7 +481,8 @@ way its own host does it. `swarm status --job <job>` shows each agent's HOST and
 | `job J [--description D] [--goal G\|-]` | create a job, or update its description; `--goal` sets or replaces the goal of an open job after activation (a changed goal clears the old verdict; the marker gets the goal flag; prints the judge tag line when no judge is seated) |
 | `job merge FROM --into TO` | merge two open jobs: FROM's active agents move to TO (live, keeping names), FROM's goal is appended to TO's, FROM closes `completed` with outcome `merged into TO`. TO keeps its judge; FROM's judge becomes a normal member (the command says so, so you can stop it). Refused for the same job, or a closed FROM or TO |
 | `move (--as NAME \| --key K) --to J` | move one live agent to another open job, without stopping it. Its next tool call shows a moved notice (job description, task, goal, roster) plus the new job's recent messages, once; posts made with its old `--job` land on its new job. A judge's seat is dropped. Refused for a closed or missing job |
-| `join --job J --key K [--role R] [--judge\|--verifier]` | allocate or return the unique name for agent key K; `--judge`/`--verifier` give that seat to an agent without the swarm's hooks (e.g. a one-off `codex exec` judge), which reads with `read --key K` and posts, and records verdicts, through the CLI |
+| `title --job J (--as NAME \| --key K) [TEXT...]` | set, replace or (empty text) clear an agent's display title (at most 60 characters): a short label such as `EL` or `Eng: board view`, shown by `who`, `status` and `watch`; not the role |
+| `join --job J --key K [--role R] [--title T] [--judge\|--verifier]` | allocate or return the unique name for agent key K; `--title` sets its display title; `--judge`/`--verifier` give that seat to an agent without the swarm's hooks (e.g. a one-off `codex exec` judge), which reads with `read --key K` and posts, and records verdicts, through the CLI |
 | `done --job J --as NAME [--artifact REF] [--summary TEXT]` | worker hand-off for artifact-bound review; `--branch B --sha S` is the coding alias |
 | `post --job J --as NAME [--to NAME\|@ROLE] "message"` | post (whitespace collapsed; capped at the board's message cap); `--to @EL\|@PM\|@QA\|@judge\|@<role>` goes to the current holders of that seat, and an unknown name, an empty seat or an author outside the job is refused |
 | `config board.message_max_chars [N] [--save]` | print the board's message cap, or set it to N (50-4000). When a user says "make board messages 500 characters", run `swarm config board.message_max_chars 500` (add `--save` to keep it in the config file too) |

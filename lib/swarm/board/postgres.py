@@ -277,6 +277,8 @@ ALTER TABLE transcripts ADD COLUMN IF NOT EXISTS harness text;
 -- agent; old_agent_key is UNIQUE: each closed agent is replaced at most once.
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS left_reason text;
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS resume_of text;
+-- Schema version 20: an optional display title, separate from role (NULL: none).
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS title text;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS supervise boolean NOT NULL DEFAULT true;
 -- Schema version 9: a final capture that kept failing is stored as a marker row without a body,
 -- holding why (transcripts.capture_failed_row).
@@ -336,7 +338,7 @@ SELECT a.job, a.name, CASE WHEN a.judge THEN 'judge' WHEN a.verifier THEN 'verif
        a.current_tool, a.tool_calls,
        COALESCE(mc.messages, 0::bigint) AS messages,
        a.joined_at, a.last_seen AS last_contact_at, a.last_post_at, a.left_at AS ended_at,
-       a.host, a.agent_key, a.harness, a.model, a.os_user, a.left_reason, a.resume_of
+       a.host, a.agent_key, a.harness, a.model, a.os_user, a.left_reason, a.resume_of, a.title
   FROM agents a
   LEFT JOIN LATERAL (
     -- Count only this job/name/incarnation via messages_job_agent_created_at.
@@ -418,7 +420,7 @@ CHANNEL_STATE = "swarm_state"
 # Column lists for status queries. JobStatus rows map by column name.
 _AGENT_STATUS_COLS = ("job, name, role, status, current_tool, tool_calls, messages, joined_at, "
                       "last_contact_at, last_post_at, ended_at, host, agent_key, harness, model, os_user, "
-                      "left_reason, resume_of")
+                      "left_reason, resume_of, title")
 _JOB_STATUS_COLS = ("job, status, description, task, outcome, created_by, session_id, created_at, "
                     "activated_at, finished_at, agents, started, running, idle, completed, "
                     "dead_or_left, messages, last_activity_at, project, goal, verdict, verdict_reason, "
@@ -448,11 +450,11 @@ _CLAIM_NAME = ("INSERT INTO agents (agent_key, name, job, role, host, os_user, l
                "memory_seen = '{}', remembered_at = NULL, nudged_at = NULL, "
                "reply_reminded_id = 0, calls_at_post = 0, silence_nudged_at = NULL, judge = false, "
                "verifier = false, harness = NULL, model = NULL, turn_ended_at = NULL, "
-               "os_user = EXCLUDED.os_user, left_reason = NULL, resume_of = NULL")
+               "os_user = EXCLUDED.os_user, left_reason = NULL, resume_of = NULL, title = NULL")
 # A supervisor replacement (claim_resume) takes its predecessor's name, role, read cursor and
 # judge/verifier marks: a new row, or a full reset of the key's row like _CLAIM_NAME's.
 _CLAIM_RESUME = ("INSERT INTO agents (agent_key, name, job, role, host, os_user, last_read_id, judge, "
-                 "verifier, resume_of) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                 "verifier, resume_of, title) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
                  "ON CONFLICT (agent_key) DO UPDATE SET name = EXCLUDED.name, job = EXCLUDED.job, "
                  "role = EXCLUDED.role, host = EXCLUDED.host, left_at = NULL, joined_at = now(), "
                  "last_seen = now(), last_read_id = EXCLUDED.last_read_id, state = 'started', tool_calls = 0, "
@@ -462,7 +464,7 @@ _CLAIM_RESUME = ("INSERT INTO agents (agent_key, name, job, role, host, os_user,
                  "reply_reminded_id = 0, calls_at_post = 0, silence_nudged_at = NULL, "
                  "judge = EXCLUDED.judge, verifier = EXCLUDED.verifier, harness = NULL, model = NULL, "
                  "turn_ended_at = NULL, os_user = EXCLUDED.os_user, spawns = 0, left_reason = NULL, "
-                 "resume_of = EXCLUDED.resume_of")
+                 "resume_of = EXCLUDED.resume_of, title = EXCLUDED.title")
 # Held from before an INSERT INTO messages until its commit, so ids commit (and become visible)
 # in id order: a reader's cursor can then never pass an id that commits later. ('SWRM')
 POST_LOCK = 0x5357524D
@@ -832,7 +834,7 @@ def _install_schema(conn: psycopg.Connection, b: dict) -> None:
         EXECUTE FUNCTION swarm_keep_blocked_jobs();
     """)
     _install_checks(conn)
-    # Schema 19 (18 -> 19): recreate status views with per-job LATERAL totals,
+    # Schema 19 (18 -> 19) and 20 (agent_status gains title, last): recreate the status views with per-job LATERAL totals,
     # retaining schema-18 blocker columns and expiry activity rules. Idempotent on re-init.
     conn.execute(STATUS_VIEW.format(idle=int(b["idle_minutes"]), dead=int(b["dead_minutes"]),
                                     tool_timeout=int(b["tool_timeout_minutes"])))
@@ -1430,6 +1432,11 @@ class PostgresBoard(SqlBlockers, Board):
         self._conn.execute("UPDATE agents SET role = %s WHERE agent_key = %s AND left_at IS NULL",
                            (role, agent_key))
 
+    def set_agent_title(self, agent_key: str, title: str | None) -> bool:
+        from .base import clean_title
+        return self._conn.execute("UPDATE agents SET title = %s WHERE agent_key = %s AND left_at IS NULL "
+                                  "RETURNING 1", (clean_title(title), agent_key)).fetchone() is not None
+
     def set_agent_runtime(self, agent_key: str, harness: str | None, model: str | None) -> None:
         self._conn.execute("UPDATE agents SET harness = COALESCE(%s, harness), model = COALESCE(%s, model) "
                            "WHERE agent_key = %s AND left_at IS NULL", (harness, model, agent_key))
@@ -1474,11 +1481,11 @@ class PostgresBoard(SqlBlockers, Board):
                                    (agent_key,)).fetchone()
                 if cur is not None and cur[1] is None and cur[2] == job:
                     return cur[0]
-                old = conn.execute("SELECT name, role, job, left_at, last_read_id, judge, verifier "
+                old = conn.execute("SELECT name, role, job, left_at, last_read_id, judge, verifier, title "
                                    "FROM agents WHERE agent_key = %s FOR UPDATE", (resume_of,)).fetchone()
                 if old is None or old[2] != job or old[3] is None:
                     return None
-                name, role, _, _, cursor, judge, verifier = old
+                name, role, _, _, cursor, judge, verifier, title = old
                 if conn.execute("SELECT 1 FROM agents WHERE name = %s AND left_at IS NULL",
                                 (name,)).fetchone():
                     return None
@@ -1486,7 +1493,7 @@ class PostgresBoard(SqlBlockers, Board):
                     "SELECT 1 FROM agents WHERE job = %s AND judge AND left_at IS NULL",
                     (job,)).fetchone() is None
                 conn.execute(_CLAIM_RESUME, (agent_key, name, job, role, compat.node(),
-                                             getpass.getuser(), cursor, judge, bool(verifier), resume_of))
+                                             getpass.getuser(), cursor, judge, bool(verifier), resume_of, title))
                 return name
         except psycopg.errors.UniqueViolation:   # the name (or the judge seat) was taken meanwhile
             return None

@@ -270,8 +270,8 @@ class AddressingTests(Env):
         a = self.agent("a").name
         out = self.cli("who", "--job", "J")[1]
         fields = out.splitlines()[0].split("\t")
-        self.assertEqual(fields[:4], [a, "claude", "Explore", "running"])
-        self.assertEqual(fields[5], "in Grep")
+        self.assertEqual(fields[:5], [a, "claude", "Explore", "", "running"])   # title: none
+        self.assertEqual(fields[6], "in Grep")
         ctx = self.context(self.hook("start", agent_id="b"))
         self.assertIn("address them with --to '<exact name>'", ctx)
         self.assertIn(f"- {a} (Explore): running, in Grep", ctx)

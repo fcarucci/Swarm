@@ -152,6 +152,14 @@ class PipelineTests(unittest.TestCase):
         self.tick()
         self.assertEqual(len(self.launched), 2)
 
+    def test_recipe_titles_tag_the_seat_prompt_and_the_replacement_inherits_them(self):
+        self.recipe.return_value = dict(titles={'judge': 'Judge'})
+        self.done()
+        self.tick()
+        self.assertIn('[swarm title: Judge]', self.launched[-1]['stdin'])
+        key, _ = self.enroll_latest()
+        self.assertEqual([a.title for a in self.b.agents('J') if a.agent_key == key], ['Judge'])
+
     def test_not_met_fix_same_worker_host_and_next_brief(self):
         self.done(); self.tick()
         self.conclude('not_met', next_steps='Add outage root cause with evidence')

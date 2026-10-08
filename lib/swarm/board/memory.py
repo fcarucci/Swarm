@@ -499,7 +499,7 @@ class MemoryBoard(MemoryBlockers, Board):
                 "last_read_id": self._history_cursor(job), "left_at": None, "state": "started",
                 "tool_calls": 0, "current_tool": None, "tool_started_at": None,
                 "last_post_at": None, "judge": False, "verifier": False, "left_reason": None,
-                "resume_of": None, **_SYNC_DEFAULTS}
+                "resume_of": None, "title": None, **_SYNC_DEFAULTS}
             s.touch()
             return name
 
@@ -701,6 +701,17 @@ class MemoryBoard(MemoryBlockers, Board):
                 a["role"] = role
                 s.touch()
 
+    def set_agent_title(self, agent_key: str, title: str | None) -> bool:
+        from .base import clean_title
+        s = self._s()
+        with s.lock:
+            a = self._active(agent_key)
+            if not a:
+                return False
+            a["title"] = clean_title(title)
+            s.touch()
+            return True
+
     def set_agent_runtime(self, agent_key: str, harness: str | None, model: str | None) -> None:
         s = self._s()
         with s.lock:
@@ -787,7 +798,7 @@ class MemoryBoard(MemoryBlockers, Board):
                 "left_at": None, "state": "started", "tool_calls": 0, "current_tool": None,
                 "tool_started_at": None, "last_post_at": None, "judge": judge,
                 "verifier": bool(old.get("verifier")), "left_reason": None, "resume_of": resume_of,
-                **_SYNC_DEFAULTS}
+                "title": old.get("title"), **_SYNC_DEFAULTS}
             s.touch()
             return old["name"]
 
@@ -994,7 +1005,8 @@ class MemoryBoard(MemoryBlockers, Board):
                            last_post_at=a["last_post_at"], ended_at=a["left_at"], host=a["host"],
                            agent_key=a["agent_key"], harness=a.get("harness"),
                            model=a.get("model"), os_user=a.get("os_user"),
-                           left_reason=a.get("left_reason"), resume_of=a.get("resume_of"))
+                           left_reason=a.get("left_reason"), resume_of=a.get("resume_of"),
+                           title=a.get("title"))
 
     def agents(self, job: str, include_departed: bool = True) -> list[AgentStatus]:
         s = self._s()

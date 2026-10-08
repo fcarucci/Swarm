@@ -947,6 +947,7 @@ def cmd_tail(cfg: dict, job: str | None, backlog: int, interval: float, show_age
 
 JOB_TAG = "[swarm job:"
 ROLE_TAG = "[swarm role:"
+TITLE_TAG = "[swarm title:"   # an optional display label for the agent (see swarm.titles)
 JUDGE_TAG_LINE = f"{ROLE_TAG} judge]"   # makes a subagent its job's judge (jobs with a goal)
 VERIFIER_TAG_LINE = f"{ROLE_TAG} verifier]"   # a read-only checker of the other agents' claims
 SPAWN_TAG = "[swarm spawn:"   # a swarm agent's justification for spawning a subagent of its own
@@ -1216,14 +1217,18 @@ def agents_table(board, job: str, color: bool, now, recent_minutes: int | None =
         return f"{cell} (restarted ×{attempts[a.agent_key]})" if a.agent_key in attempts else cell
 
     # LAST CONTACT covers posts too: posting updates last_seen.
-    table = [[a.name, a.role or "", a.harness or "", _short_model(a.model), _status_cell(a),
-              str(a.tool_calls), str(a.messages), _ago(a.joined_at, now),
-              _ago(a.last_contact_at, now)]
+    titled = any(a.title for a in rows)   # the TITLE column only when someone has one
+    table = [[a.name] + ([a.title or ""] if titled else [])
+             + [a.role or "", a.harness or "", _short_model(a.model), _status_cell(a),
+                str(a.tool_calls), str(a.messages), _ago(a.joined_at, now),
+                _ago(a.last_contact_at, now)]
              + ([] if stored is None else [_stored_cell(stored.get(a.agent_key))])
              + [a.current_tool or getattr(a, "note", None) or ""]
              for a in rows]
-    headers = ["AGENT", "ROLE", "HOST", "MODEL", "STATUS", "CALLS", "MSGS", "JOINED", "LAST CONTACT"]
-    out = _table(headers + ([] if stored is None else ["STORED"]) + ["TOOL"], table, color, status_col=4)
+    headers = ["AGENT"] + (["TITLE"] if titled else []) + ["ROLE", "HOST", "MODEL", "STATUS", "CALLS", "MSGS",
+                                                          "JOINED", "LAST CONTACT"]
+    out = _table(headers + ([] if stored is None else ["STORED"]) + ["TOOL"], table, color,
+                 status_col=5 if titled else 4)
     if hidden:
         note = f"({hidden} older finished agent{'s' if hidden != 1 else ''} hidden · {hint})"
         out += "\n" + (_sgr(2, note) if color else note)
@@ -2069,19 +2074,23 @@ def _fit(text: str, width: int) -> str:
 
 
 def _compact_agent_line(a, width: int, color: bool) -> str:
-    """One agent, at most `width` columns: name [judge|verifier] status model tool. Under
-    pressure the tool is cut (or dropped) first, then the model, then the name is cut."""
+    """One agent, at most `width` columns: name [judge|verifier] (title) status model tool. Under
+    pressure the tool is cut (or dropped) first, then the model, then the title, then the name is cut."""
     name = term_safe(a.name) + (f" [{a.role}]" if a.role in ("judge", "verifier", agentview.ORCHESTRATOR) else "")
     status = term_safe(a.left_reason if a.ended_at is not None and a.left_reason else a.status)
     model, tool = term_safe(_short_model(a.model)), term_safe(a.current_tool or getattr(a, "note", None) or "")
+    title = f" ({term_safe(a.title)})" if getattr(a, "title", None) else ""
     room = width - 2
     if len(name) + 1 + len(status) > room:      # not even name + status: cut the name
-        name, model, tool = _fit(name, max(1, room - len(status) - 1)), "", ""
-    elif len(name) + 1 + len(status) + 1 + len(model) > room:
+        name, title, model, tool = _fit(name, max(1, room - len(status) - 1)), "", "", ""
+    elif len(name) + len(title) + 1 + len(status) + 1 + len(model) > room:
         model, tool = "", ""
-    left = room - len(name) - 1 - len(status) - (1 + len(model) if model else 0)
+        if len(name) + len(title) + 1 + len(status) > room:
+            title = ""
+    left = room - len(name) - len(title) - 1 - len(status) - (1 + len(model) if model else 0)
     tool = _fit(tool, left - 1) if tool and left >= 6 else ""
-    line = "  " + _paint_head(name, term_safe(a.name), color) + " " + _paint_status(a.status, status, color)
+    line = ("  " + _paint_head(name, term_safe(a.name), color) + title + " "
+            + _paint_status(a.status, status, color))
     return _clip(line + (" " + model if model else "") + (" " + tool if tool else ""), width)
 
 
@@ -2669,11 +2678,18 @@ def _parser() -> argparse.ArgumentParser:
     jn = sub.add_parser("join"); jn.add_argument("--job", required=True)
     jn.add_argument("--key", help="stable unique id of the agent (e.g. hook agent_id); required")
     jn.add_argument("--role")
+    jn.add_argument("--title", help="a short display label for the agent (at most 60 characters), "
+                                    "shown by who, status and watch; not the role")
     seat = jn.add_mutually_exclusive_group()
     seat.add_argument("--judge", action="store_true",
                       help="take the job's judge seat (for agents outside Claude Code, which get no hooks)")
     seat.add_argument("--verifier", action="store_true",
                       help="join as a read-only verifier (for agents outside Claude Code)")
+    tt = sub.add_parser("title", help="set, replace or clear (with an empty text) an agent's display title "
+                                      "(a short seat label such as EL or 'Eng: board view'); not the role")
+    tt.add_argument("--job", required=True)
+    tt.add_argument("--as", dest="name"); tt.add_argument("--key")
+    tt.add_argument("text", nargs="*", help="the title; empty (\"\") clears it")
     po = sub.add_parser("post", help="post a message; --to NAME, or --to @EL|@PM|@QA|@judge|@<role> for "
                                      "whoever holds that seat now (rejected if nobody does)")
     po.add_argument("--job", required=True); po.add_argument("--as", dest="name")
@@ -3994,7 +4010,7 @@ def _board_who(board, cfg: dict, args) -> None:
         tool = f"in {term_safe(a.current_tool)}" if a.current_tool else ""
         note = getattr(a, "note", None)
         state = term_safe(a.status) + (f" ({term_safe(note)})" if note else "")
-        print(f"{term_safe(a.name)}\t{term_safe(a.harness)}\t{term_safe(a.role)}\t{state}\t"
+        print(f"{term_safe(a.name)}\t{term_safe(a.harness)}\t{term_safe(a.role)}\t{term_safe(a.title)}\t{state}\t"
               f"last contact {a.last_contact_at.astimezone().strftime('%H:%M')}\t{tool}")
 
 
@@ -4089,8 +4105,32 @@ def _board_join(board, cfg: dict, args) -> int:
     if args.verifier and not board.claim_verifier(args.key, args.job):
         print(f"refused: could not make {name} a verifier of job {args.job}", file=sys.stderr)
         return 1
+    if getattr(args, "title", None):
+        board.set_agent_title(args.key, args.title)
     _sweep(board, cfg)   # prints nothing on stdout: scripts read the name from it
     print(name)
+    return 0
+
+
+def _board_title(board, cfg: dict, args) -> int:
+    """`swarm title`: set, replace or (empty text) clear the display title of an active agent of
+    the job. Like move/post/leave it names the agent with --as or --key; it changes nothing but
+    the label."""
+    if bool(args.name) == bool(args.key):
+        print("swarm title: give exactly one of --as NAME and --key K", file=sys.stderr)
+        return 2
+    a = next((x for x in board.agents(args.job, include_departed=False)
+              if (args.key and x.agent_key == args.key) or (args.name and not args.key and x.name == args.name)), None)
+    if a is None:
+        print(f"refused: no active agent {term_safe(args.name or args.key)} on job {term_safe(args.job)}",
+              file=sys.stderr)
+        return 1
+    from swarm.board.base import clean_title
+    title = clean_title(" ".join(args.text))
+    if not board.set_agent_title(a.agent_key, title):
+        print(f"refused: {term_safe(a.name)} is no longer active", file=sys.stderr)
+        return 1
+    print(f"title of {term_safe(a.name)}: {term_safe(title)}" if title else f"title of {term_safe(a.name)} cleared")
     return 0
 
 
@@ -4211,6 +4251,7 @@ def _prune_memory_refs(board, cfg: dict) -> None:
 BOARD_COMMANDS = {
     "job": _board_job,
     "join": _board_join,
+    "title": _board_title,
     "move": _board_move,
     "post": _board_post,
     "done": _board_done,

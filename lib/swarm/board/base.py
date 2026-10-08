@@ -114,7 +114,22 @@ RESTART_OUTCOMES = ("running", "completed", "timeout", "max_turns", "failed", "n
 # 17 indexed job-restricted agent message counts and message-free agent rollups in job_status.
 # 18 blockers and their append-only audit events.
 # 19 per-job LATERAL job_status totals for filtered multi-job listings.
-SCHEMA_VERSION = 19
+# 20 agents.title (a nullable display label, at most TITLE_MAX characters, separate from role) and
+# the agent_status view's title column (last, so the previous release's explicit column lists
+# keep reading it). Nullable and read with .get() / explicit column lists, so old clients and
+# old file/memory rows keep working; every host sharing a board still upgrades together.
+SCHEMA_VERSION = 20
+
+TITLE_MAX = 60
+
+
+def clean_title(value: object) -> str | None:
+    """A title as stored: control characters dropped, whitespace collapsed, at most TITLE_MAX
+    characters (cut, then trimmed). None for nothing left (or None): no title."""
+    if value is None:
+        return None
+    text = "".join(c for c in str(value) if c.isprintable() or c.isspace())
+    return " ".join(text.split())[:TITLE_MAX].strip() or None
 
 JOB_DATA_KEY = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}")
 JOB_DATA_VALUE_MAX = 2000
@@ -445,7 +460,8 @@ class AgentStatus:
     status: see derive_agent_status. messages: posts on `job` by `name` created at or after
     joined_at. last_contact_at: last hook contact (last_seen). ended_at: left_at (None = active).
     left_reason: why it left when the supervisor (or a runner) closed it, e.g. "stuck:dead",
-    "limit:timeout"; resume_of: the agent_key this replacement took over from."""
+    "limit:timeout"; resume_of: the agent_key this replacement took over from. title: the optional display
+    label (set_agent_title; None = none)."""
     job: str
     name: str
     role: str | None
@@ -464,6 +480,7 @@ class AgentStatus:
     os_user: str | None = None
     left_reason: str | None = None
     resume_of: str | None = None
+    title: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1128,7 +1145,7 @@ WRITE_METHODS = (
     "purge", "ensure_job", "open_job", "close_job", "auto_close_job", "undo_auto_close",
     "sweep_auto_close", "bind_job_session", "allocate_name", "claim_judge", "take_judge_seat", "claim_verifier",
     "set_waiting", "set_job_max_hours", "set_job_goal", "move_agent", "sweep_expiry", "reserve_spawn", "record_verdict", "tool_started", "record_route",
-    "claim_route", "tool_finished", "agent_stopped", "set_agent_role", "set_agent_runtime",
+    "claim_route", "tool_finished", "agent_stopped", "set_agent_role", "set_agent_title", "set_agent_runtime",
     "agent_turn_ended",
     "turns_resumed", "finish_quiet_agents", "leave", "close_agent", "claim_resume",
     "set_job_supervise", "set_job_data", "set_job_pipeline", "record_restart", "set_restart_agent", "finish_restart",
@@ -1795,6 +1812,14 @@ class Board(abc.ABC):
         No-op for unknown or departed keys. ValueError for an invalid role identifier or
         judge/verifier: those require claim_judge/claim_verifier. Existing judge/verifier
         flags are unchanged and still override this label in the roster."""
+
+    @abc.abstractmethod
+    def set_agent_title(self, agent_key: str, title: str | None) -> bool:
+        """Set an ACTIVE agent's display title (clean_title: whitespace collapsed, at most
+        TITLE_MAX characters); None or text with nothing left clears it. Display only: nothing
+        keys off it, and it is separate from the role. Returns whether an active agent with this
+        key matched (False for an unknown or departed one, which is left unchanged). A
+        replacement taken over by claim_resume keeps its predecessor's title."""
 
     @abc.abstractmethod
     def set_agent_runtime(self, agent_key: str, harness: str | None, model: str | None) -> None:

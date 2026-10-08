@@ -132,11 +132,12 @@ as proof. Shared board history remains visible: a fresh context is not a blind r
 ### Claude Code
 
 PM calls the host's `Agent` tool with `prompt` and a bounded `description`; use a fresh
-agent for each independent role. Put both tags on their own lines in **every** prompt:
+agent for each independent role. Put the job and role tags, and the seat's title tag, on their own lines in **every** prompt:
 
 ```text
 [swarm job: J]
 [swarm role: engineer]
+[swarm title: Eng: board view]
 Task E1. Read docs/team/task-E1.md. PM: <exact board name>.
 Use <absolute swarm command>. First board post: BRIEF: docs/team/task-E1.md tasks: E1
 Own only the files named in that brief. Finish the bounded task, post a handoff,
@@ -147,6 +148,8 @@ Change the role tag per seat: `engineering_lead`, `product_manager`, `build_engi
 the Swarm role; the host's agent type does not substitute for it. A member's exceptional
 synchronous helper also needs `[swarm spawn: <why strictly needed>]` and the job tag;
 meet configured `min_justification_chars` and all child caps.
+
+Title tags: `[swarm title: EL]` for `engineering_lead`, `PM` for `project_manager`, `Product` for `product_manager`, `QA`, `Judge`, `Build` for `build_engineer`, `Reviewer`, `Verifier`, and `Eng` for `engineer` (several engineers may add a short scope, `Eng: board view`). Keep each to a few characters: it is the narrow column `swarm who`, `status` and `watch` show beside the name, never a replacement for the role (`swarm team --job J --show` lists the titles). A Codex child's message is encrypted, so it cannot carry the tag: have it run `swarm title --job J --as "<its name>" "<title>"` as its first board step.
 
 ### Codex
 
