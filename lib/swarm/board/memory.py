@@ -1145,6 +1145,12 @@ class MemoryBoard(MemoryBlockers, Board):
                 rows = [m for m in rows if m["job"] in active]
             return [self._msg(m) for m in rows[-limit:]] if limit > 0 else []
 
+    def last_post(self, job: str, agent_name: str) -> Message | None:
+        s = self._s()
+        with s.lock:
+            return next((self._msg(m) for m in reversed(s.messages)
+                         if m["job"] == job and m["agent_name"] == agent_name), None)
+
     def messages_after(self, after_id: int, job: str | None = None) -> list[Message]:
         s = self._s()
         with s.lock:

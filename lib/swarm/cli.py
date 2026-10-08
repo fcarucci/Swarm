@@ -1202,7 +1202,7 @@ def agents_table(board, job: str, color: bool, now, recent_minutes: int | None =
               str(a.tool_calls), str(a.messages), _ago(a.joined_at, now),
               _ago(a.last_contact_at, now)]
              + ([] if stored is None else [_stored_cell(stored.get(a.agent_key))])
-             + [a.current_tool or ""]
+             + [a.current_tool or getattr(a, "note", None) or ""]
              for a in rows]
     headers = ["AGENT", "ROLE", "HOST", "MODEL", "STATUS", "CALLS", "MSGS", "JOINED", "LAST CONTACT"]
     out = _table(headers + ([] if stored is None else ["STORED"]) + ["TOOL"], table, color, status_col=4)
@@ -2055,7 +2055,7 @@ def _compact_agent_line(a, width: int, color: bool) -> str:
     pressure the tool is cut (or dropped) first, then the model, then the name is cut."""
     name = term_safe(a.name) + (f" [{a.role}]" if a.role in ("judge", "verifier", agentview.ORCHESTRATOR) else "")
     status = term_safe(a.left_reason if a.ended_at is not None and a.left_reason else a.status)
-    model, tool = term_safe(_short_model(a.model)), term_safe(a.current_tool or "")
+    model, tool = term_safe(_short_model(a.model)), term_safe(a.current_tool or getattr(a, "note", None) or "")
     room = width - 2
     if len(name) + 1 + len(status) > room:      # not even name + status: cut the name
         name, model, tool = _fit(name, max(1, room - len(status) - 1)), "", ""
@@ -3969,7 +3969,9 @@ def _board_who(board, cfg: dict, args) -> None:
         # Tab-separated, the name first and exact (so it can be pasted into --to '<name>'),
         # then the harness in its own field so the name field is never altered.
         tool = f"in {term_safe(a.current_tool)}" if a.current_tool else ""
-        print(f"{term_safe(a.name)}\t{term_safe(a.harness)}\t{term_safe(a.role)}\t{term_safe(a.status)}\t"
+        note = getattr(a, "note", None)
+        state = term_safe(a.status) + (f" ({term_safe(note)})" if note else "")
+        print(f"{term_safe(a.name)}\t{term_safe(a.harness)}\t{term_safe(a.role)}\t{state}\t"
               f"last contact {a.last_contact_at.astimezone().strftime('%H:%M')}\t{tool}")
 
 

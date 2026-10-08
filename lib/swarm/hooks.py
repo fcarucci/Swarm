@@ -855,29 +855,100 @@ def _gate_spawn(board, agent_id: str, name: str, job: str, payload: dict, cfg: d
     return False
 
 
-_JOIN_KEY = re.compile(r"""(?P<head>\bswarm\s+join\b[^;&|\n]*?--key(?:=|[ \t]+))(?P<q>['"]?)(?P<key>[^\s'";&|]+)(?P=q)""")
+def _shell_words(command: str):
+    """The unquoted-structure of a shell command line as [(start, end, text, plain)] per word, with
+    None as a separator between commands (; & | newline and parentheses). `text` has its quotes
+    and escapes removed; `plain` is False for a word that had a quote, escape or expansion in it.
+    None for a command line this does not take apart safely: a heredoc, a command substitution
+    ($( or a backtick), or an unbalanced quote."""
+    if "<<" in command or "`" in command or "$(" in command:
+        return None
+    words, i, n = [], 0, len(command)
+    while i < n:
+        c = command[i]
+        if c in " \t":
+            i += 1
+        elif c in ";&|\n()":
+            if words and words[-1] is not None:
+                words.append(None)
+            i += 1
+        else:
+            start, text, plain = i, [], True
+            while i < n and command[i] not in " \t;&|\n()":
+                c = command[i]
+                if c in "'\"":
+                    end = command.find(c, i + 1)
+                    if end < 0:
+                        return None
+                    body = command[i + 1:end]
+                    plain = plain and not (c == '"' and ("$" in body or "`" in body))
+                    text.append(body); i = end + 1
+                elif c == "\\" and i + 1 < n:
+                    text.append(command[i + 1]); i += 2
+                else:
+                    plain = plain and c != "$"
+                    text.append(c); i += 1
+            words.append((start, i, "".join(text), plain))
+    return words
 
 
-def own_key_command(command: str, agent_id: str) -> str | None:
-    """`command` with the --key of every `swarm join` in it replaced by `agent_id`, or None when
-    there is nothing to change (no join, or it already uses agent_id)."""
-    new = _JOIN_KEY.sub(lambda m: m["head"] + agent_id if m["key"] != agent_id else m[0], command)
-    return new if new != command else None
+def own_key_command(command: str, agent_id: str, job: str | None = None) -> str | None:
+    """`command` with the --key of each real `swarm join` invocation in it replaced by
+    `agent_id`, or None when there is nothing to change. A join invocation is a command whose
+    program is `swarm` (any path) and whose first argument is `join`, found by taking the line
+    apart (quotes, echo arguments, heredocs and substitutions are never one). A join that names
+    another --job than `job` is left alone: the rewrite never moves the caller. A key that
+    is not plain text (a variable, say) is left alone too."""
+    words = _shell_words(command)
+    if not words:
+        return None
+    edits, k = [], 0
+    while k < len(words):
+        end = k
+        while end < len(words) and words[end] is not None:
+            end += 1
+        seg = words[k:end]
+        k = end + 1
+        while seg and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", seg[0][2]):   # VAR=value prefixes
+            seg = seg[1:]
+        if len(seg) < 2 or os.path.basename(seg[0][2]) != "swarm" or seg[1][2] != "join":
+            continue
+        key = other_job = None
+        args = seg[2:]
+        for m, (_, _, text, plain) in enumerate(args):
+            nxt = args[m + 1] if m + 1 < len(args) else None
+            for flag in ("--key", "--job"):
+                value = text[len(flag) + 1:] if text.startswith(flag + "=") else \
+                    (nxt[2] if text == flag and nxt else None)
+                tok = args[m] if text.startswith(flag + "=") else nxt
+                if value is None:
+                    continue
+                if flag == "--job" and job is not None and value != job:
+                    other_job = value
+                if flag == "--key" and tok is not None and tok[3] and value != agent_id:
+                    key = (tok, text.startswith("--key="))
+        if key is not None and other_job is None:
+            tok, joined = key
+            edits.append((tok[0] + (len("--key=") if joined else 0), tok[1]))
+    for a, b in reversed(edits):
+        command = command[:a] + agent_id + command[b:]
+    return command if edits else None
 
 
-def _reuse_identity(agent_id: str, payload: dict) -> None:
+def _reuse_identity(agent_id: str, job: str, payload: dict) -> None:
     """A member that runs `swarm join --key X` itself would get a SECOND row (its hook identity,
     keyed by agent_id, plus X): the board would list one agent twice, one of them an idle ghost. The
     hook knows who is calling, so the call runs with --key <agent_id> instead: join then returns
-    the name the agent already has. Only where the host lets a hook rewrite a shell call."""
+    the name the agent already has. Only where the host lets a hook rewrite a shell call, only a
+    real join invocation (own_key_command), and never a join of another job."""
     host = current_host()
     command = host.shell_command(payload) if agent_id and host.supports_shell_rewrite else None
-    new = own_key_command(command, agent_id) if command else None
+    new = own_key_command(command, agent_id, job) if command else None
     if new:
         ti = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
         _set_input_rewrite(host.input_rewrite_output({**ti, "command": new}))
-        _out("PreToolUse", f"[swarm] You already have a swarm identity (your hooks joined you), so "
-                           f"`swarm join` ran with it: no second name. You don't need to run join.")
+        _out("PreToolUse", "[swarm] You already have a swarm identity (your hooks joined you), so "
+                           "`swarm join` ran with it: no second name. You don't need to run join.")
 
 
 def _gate_judge(board, agent_id: str, job: str, payload: dict) -> bool:
@@ -928,7 +999,7 @@ def _gate_new_member(board, agent_id: str, bound: dict, payload: dict, cfg: dict
         return
     verifier = any(a.agent_key == agent_id and a.role == "verifier"
                    for a in board.agents(job, include_departed=False))
-    _reuse_identity(agent_id, payload)
+    _reuse_identity(agent_id, job, payload)
     if _gate_judge(board, agent_id, job, payload) and _gate_verifier(board, agent_id, verifier, payload):
         _gate_spawn(board, agent_id, name, job, payload, cfg)
 
@@ -1519,7 +1590,7 @@ def _on_event(board, event: str, agent_id: str, sid: str | None, bound: dict, un
         model = payload.get("model") or current_host().agent_model(payload, agent_id)
         if model:
             board.set_agent_runtime(agent_id, None, model)
-    _reuse_identity(agent_id, payload)
+    _reuse_identity(agent_id, member.job, payload)
     if _gate_judge(board, agent_id, member.job, payload) and \
             _gate_verifier(board, agent_id, member.verifier, payload) and \
             _gate_spawn(board, agent_id, member.name, member.job, payload, cfg):

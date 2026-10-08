@@ -8,14 +8,16 @@ SWARM_TEST_BACKEND.
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import os
+import types
 import unittest
 
 from support import FileHarness, MemoryHarness, PostgresHarness, SqliteHarness  # noqa: F401  (sets sys.path)
 from test_hooks_cli import Env  # noqa: E402
 
-from swarm import agentview  # noqa: E402
-from swarm import hooks as swarm_hooks  # noqa: E402
+from swarm import cli as swarm  # noqa: E402
 
 MIN = 60
 HOUR = 3600
@@ -56,24 +58,36 @@ class ViewContract:
         for key, seen in self.contact.items():
             self.h.backdate_agent(key, last_seen=seen)
 
-    def shown(self, job="j"):
+    def who(self, job="j"):
+        """`swarm who` as {name: (role, state text, tool text)}: what a person reads."""
         self.age_contact()
-        rows = agentview.annotate(self.b, job, self.b.agents(job))
-        return {a.name: a for a in rows}
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            swarm._board_who(self.b, {}, types.SimpleNamespace(job=job))
+        rows = {}
+        for line in out.getvalue().splitlines():
+            name, _harness, role, state, _contact, tool = line.split("\t")
+            rows[name] = (role, state, tool)
+        return rows
 
-    def rollup(self):
-        self.age_contact()
-        return agentview.rollup(agentview.annotate(self.b, "j", self.b.agents("j")))
+    def shown(self, job="j"):
+        return {n: types.SimpleNamespace(role=r, state=st, tool=t) for n, (r, st, t) in self.who(job).items()}
 
     def status(self, name, job="j"):
-        return self.shown(job)[name].status
+        return self.shown(job)[name].state.split(" (")[0]
+
+    def rollup_line(self, job="j"):
+        """The `agents` line of `swarm status --job`."""
+        self.age_contact()
+        text = swarm.job_detail(self.b, job, False)
+        return next((ln.split(None, 1)[1].strip() for ln in text.splitlines() if ln.startswith("agents ")), None)
 
     # ---- the evidence of 2026-10-08, row by row
     def evidence(self):
         self.job()
         arnie = self.agent("arnie", "engineer", seen=19 * MIN)
         qa = self.agent("qa", "QA", seen=11 * HOUR)
-        akira = self.agent("orchestrator-2", "orchestrator", seen=6 * MIN)
+        akira = self.agent("orchestrator-2", None, seen=6 * MIN)   # `swarm join --key orchestrator-2`: no role
         judge = self.agent("judge", "judge", seen=10 * HOUR)
         dewey = self.agent("dewey", "general-purpose", seen=0)
         self.post(arnie, "DONE fix landed", 11 * HOUR)
@@ -96,24 +110,19 @@ class ViewContract:
         self.assertEqual(self.status(n["arnie"]), "finished")   # posted DONE, then went quiet
         self.assertEqual(self.status(n["qa"]), "finished")      # quiet before the goal was met
         self.assertEqual(self.status(n["judge"]), "finished")   # recorded verdict met
-        self.assertIn("DONE", self.shown()[n["arnie"]].current_tool)
+        self.assertEqual(self.who()[n["arnie"]][1], "finished (posted DONE fix landed)")
 
     def test_orchestrator_is_not_an_idle_worker(self):
         n = self.evidence()
-        a = self.shown()[n["akira"]]
-        self.assertEqual((a.role, a.status), ("orchestrator", "standby"))
+        self.assertEqual(self.who()[n["akira"]][:2], ("orchestrator", "standby (orchestrator, not a worker)"))
 
     def test_running_agent_is_untouched(self):
         n = self.evidence()
-        a = self.shown()[n["dewey"]]
-        self.assertEqual((a.status, a.current_tool), ("running", "Bash"))
+        self.assertEqual(self.who()[n["dewey"]][1:], ("running", "in Bash"))
 
     def test_rollup_of_the_evidence_job(self):
         self.evidence()
-        r = self.rollup()
-        self.assertEqual((r.working, r.waiting, r.idle, r.finished, r.lost, r.orchestrators),
-                         (1, 0, 0, 3, 0, 1))
-        self.assertEqual(r.text(), "1 working, 0 waiting, 3 finished, 0 lost, 1 orchestrator")
+        self.assertEqual(self.rollup_line(), "1 working, 0 waiting, 3 finished, 0 lost, 1 orchestrator")
 
     # ---- finished vs dead edge cases
     def test_silent_while_owing_work_is_dead(self):
@@ -121,7 +130,7 @@ class ViewContract:
         w = self.agent("w", "worker", seen=2 * HOUR)
         self.post(w, "starting on the parser", 2 * HOUR)
         self.assertEqual(self.status(w), "dead")
-        self.assertIn("no DONE or verdict", self.shown()[w].current_tool)
+        self.assertEqual(self.who()[w][1:], ("dead (silent, no DONE or verdict)", ""))
 
     def test_done_then_more_work_is_not_finished(self):
         self.job()
@@ -162,23 +171,38 @@ class ViewContract:
         b = self.agent("b", "worker")
         self.b.agent_stopped("a")
         self.b.close_agent("b", "left")
-        shown = self.shown()
-        self.assertEqual((shown[a].status, shown[b].status), ("completed", "left"))
+        table = swarm.agents_table(self.b, "j", False, self.b.now())
+        self.assertRegex(table, rf"{a}.*completed")
+        self.assertRegex(table, rf"{b}.*left")
+        self.assertEqual(self.rollup_line(), "0 working, 0 waiting, 2 finished, 0 lost")
 
     def test_stuck_closed_agent_is_lost_unless_replaced(self):
         self.job()
         a = self.agent("a", "worker")
         self.b.close_agent("a", "stuck:dead")
-        self.assertEqual(self.status(a), "dead")
-        self.assertIn("lost", self.shown()[a].current_tool)
+        self.assertEqual(self.rollup_line(), "0 working, 0 waiting, 0 finished, 1 lost")
 
     # ---- idle: waiting vs stalled
+    def test_more_than_400_later_messages_do_not_hide_a_done_post(self):
+        """astroloom-m0: two agents posted DONE, then 450 other posts followed."""
+        self.job()
+        a = self.agent("a", "worker", seen=2 * HOUR)
+        b = self.agent("b", "worker", seen=2 * HOUR)
+        chatty = self.agent("c", "worker", seen=0)
+        self.post(a, "DONE alpha", 3 * HOUR)
+        self.post(b, "DONE beta, see PR", 3 * HOUR)
+        for i in range(450):
+            self.b.post("j", chatty, f"progress {i}")
+        shown = self.who()
+        self.assertEqual((shown[a][1].split(" (")[0], shown[b][1].split(" (")[0]), ("finished", "finished"))
+        self.assertEqual(self.rollup_line(), "1 working, 0 waiting, 2 finished, 0 lost")
+
     def test_idle_with_a_declared_wait_is_waiting(self):
         self.job()
         w = self.agent("w", "worker", seen=10 * MIN)
         self.b.set_waiting("j", "GitHub Actions run 42", None)
         self.assertEqual(self.status(w), "waiting")
-        self.assertIn("GitHub Actions run 42", self.shown()[w].current_tool)
+        self.assertEqual(self.who()[w][1], "waiting (on GitHub Actions run 42)")
 
     def test_idle_whose_last_post_says_it_waits_is_waiting(self):
         self.job()
@@ -191,7 +215,7 @@ class ViewContract:
         w = self.agent("w", "worker", seen=10 * MIN)
         self.post(w, "refactoring the parser", 10 * MIN)
         self.assertEqual(self.status(w), "idle")
-        self.assertIn("no wait stated", self.shown()[w].current_tool)
+        self.assertEqual(self.who()[w][1], "idle (silent, no wait stated)")
 
     def test_bounded_wait_covers_a_long_silent_agent_but_unbounded_does_not(self):
         self.job()
@@ -208,17 +232,14 @@ class ViewContract:
         self.agent("o", "orchestrator", seen=10 * MIN)
         self.agent("w", "worker")
         self.b.tool_started("w", "Bash")
-        r = self.rollup()
-        self.assertEqual((r.working, r.idle, r.orchestrators), (1, 0, 1))
-        self.assertNotIn("idle", r.text())
+        self.assertEqual(self.rollup_line(), "1 working, 0 waiting, 0 finished, 0 lost, 1 orchestrator")
 
     def test_rollup_names_what_the_waiting_agents_wait_on(self):
         self.job()
         self.agent("a", "worker", seen=10 * MIN)
         self.agent("b", "worker", seen=10 * MIN)
         self.b.set_waiting("j", "CI", None)
-        r = self.rollup()
-        self.assertEqual(r.text(), "0 working, 2 waiting (on CI), 0 finished, 0 lost")
+        self.assertEqual(self.rollup_line(), "0 working, 2 waiting (on CI), 0 finished, 0 lost")
 
 
 class MemoryView(ViewContract, unittest.TestCase):
@@ -239,21 +260,22 @@ class PostgresView(ViewContract, unittest.TestCase):
     harness_factory = staticmethod(lambda: PostgresHarness(os.environ["SWARM_TEST_CONFIG"]))
 
 
-class JoinRoleTests(unittest.TestCase):
-    def test_default_role(self):
-        for key in ("orchestrator", "orchestrator-2", "Orchestrator_x"):
-            self.assertEqual(agentview.default_role(key, None), "orchestrator", key)
-        for key in ("orchestrators", "worker-1", "my-orchestrator"):
-            self.assertIsNone(agentview.default_role(key, None), key)
-        self.assertEqual(agentview.default_role("orchestrator-2", "helper"), "helper")
-
-
 class ViewCliTests(Env):
     """`join`, `who`, `status` and the hooks, end to end."""
 
     def rows(self, job="J"):
         with self.board() as b:
             return b.agents(job)
+
+    def test_default_role_of_a_cli_join(self):
+        self.assertEqual(self.cli("activate", "--job", "J")[0], 0)
+        for key, role, want in (("orchestrator", None, "orchestrator"), ("orchestrator-2", None, "orchestrator"),
+                                ("orchestrators", None, None), ("worker-1", None, None),
+                                ("orchestrator-3", "helper", "helper")):
+            with self.subTest(key=key):
+                rc, name, err = self.cli("join", "--job", "J", "--key", key, *(["--role", role] if role else []))
+                self.assertEqual(rc, 0, err)
+                self.assertEqual([a.role for a in self.rows() if a.name == name.strip()], [want])
 
     def test_cli_orchestrator_join_gets_the_orchestrator_role(self):
         self.assertEqual(self.cli("activate", "--job", "J")[0], 0)
@@ -295,11 +317,8 @@ class ViewCliTests(Env):
         self.assertEqual(len(self.rows()), 1)
 
     def test_join_with_the_agents_own_key_is_left_alone(self):
-        self.assertEqual(self.cli("activate", "--job", "J")[0], 0)
-        self.hook("start", agent_id="agent-1")
-        out = self.hook("turn", agent_id="agent-1", tool_name="Bash",
-                        tool_input={"command": "swarm join --job J --key agent-1"})
-        self.assertNotIn("updatedInput", (out or {}).get("hookSpecificOutput", {}))
+        self.member()
+        self.assertIsNone(self.rewritten("swarm join --job J --key agent-1"))
 
     def test_other_commands_and_the_orchestrator_are_not_rewritten(self):
         self.assertEqual(self.cli("activate", "--job", "J")[0], 0)
@@ -311,14 +330,50 @@ class ViewCliTests(Env):
                         tool_input={"command": "swarm join --job J --key orchestrator-2"})
         self.assertNotIn("updatedInput", (out or {}).get("hookSpecificOutput", {}))
 
-    def test_own_key_command_forms(self):
-        f = swarm_hooks.own_key_command
-        self.assertEqual(f("swarm join --job J --key=k1", "A"), "swarm join --job J --key=A")
-        self.assertEqual(f("cd x && swarm join --job J --key k1; ls", "A"), "cd x && swarm join --job J --key A; ls")
-        self.assertEqual(f("swarm join --job J --key \"k1\" --judge", "A"), "swarm join --job J --key A --judge")
-        self.assertIsNone(f("swarm join --job J --key A", "A"))
-        self.assertIsNone(f("swarm read --key k1", "A"))
-        self.assertIsNone(f("echo swarm join", "A"))
+    def rewritten(self, command, agent="agent-1"):
+        """The command the hook makes the caller run, or None when it leaves it alone."""
+        out = self.hook("turn", agent_id=agent, tool_name="Bash", tool_input={"command": command})
+        return ((out or {}).get("hookSpecificOutput", {}).get("updatedInput") or {}).get("command")
+
+    def member(self):
+        self.assertEqual(self.cli("activate", "--job", "J")[0], 0)
+        self.hook("start", agent_id="agent-1")
+
+    def test_real_join_invocations_are_rewritten(self):
+        self.member()
+        for before, after in (
+                ("swarm join --job J --key=k1", "swarm join --job J --key=agent-1"),
+                ("cd x && swarm join --job J --key k1; ls", "cd x && swarm join --job J --key agent-1; ls"),
+                ("swarm join --job J --key \"k1\" --judge", "swarm join --job J --key agent-1 --judge"),
+                ("FOO=1 /p/bin/swarm join --key k1 --job J", "FOO=1 /p/bin/swarm join --key agent-1 --job J")):
+            with self.subTest(before):
+                self.assertEqual(self.rewritten(before), after)
+
+    def test_mentions_of_join_are_never_rewritten(self):
+        """A judge prompt for `codex exec`, an echo, a heredoc, a substitution: not a join call."""
+        self.member()
+        for command in (
+                'codex exec "run swarm join --job J --key judge-1 --judge, then vote"',
+                "codex exec 'swarm join --job J --key judge-1 --judge'",
+                "echo swarm join --job J --key k1",
+                "echo 'swarm join --job J --key k1'",
+                "cat > p.md <<EOF\nswarm join --job J --key k1 --judge\nEOF",
+                "cat <<'EOF'\nswarm join --job J --key k1\nEOF",
+                "x=$(swarm join --job J --key k1)",
+                "swarm join --job J --key $KEY",
+                "swarm read --job J --key k1",
+                "swarm join --job J --key agent-1"):
+            with self.subTest(command):
+                self.assertIsNone(self.rewritten(command))
+
+    def test_a_join_of_another_job_is_not_rewritten(self):
+        """Rewriting to the caller's key would MOVE it to the other job: never."""
+        self.member()
+        for command in ("swarm join --job OTHER --key k1", "swarm join --key k1 --job=OTHER"):
+            with self.subTest(command):
+                self.assertIsNone(self.rewritten(command))
+        with self.board() as b:
+            self.assertEqual(b.active_agent_name("k1"), None)
 
     def test_codex_host_is_not_rewritten(self):
         self.assertEqual(self.cli("activate", "--job", "J")[0], 0)

@@ -1790,6 +1790,11 @@ class PostgresBoard(SqlBlockers, Board):
                                    (*jp, limit))
         return newest_first[::-1]
 
+    def last_post(self, job: str, agent_name: str) -> Message | None:
+        rows = self._fetch(Message, f"SELECT {_MESSAGE_COLS} FROM messages WHERE job = %s AND agent_name = %s "
+                                    "ORDER BY id DESC LIMIT 1", (job, agent_name))
+        return rows[0] if rows else None
+
     def messages_after(self, after_id: int, job: str | None = None) -> list[Message]:
         jf, jp = self._job_filter(job)
         return self._fetch(Message, f"SELECT {_MESSAGE_COLS} FROM messages WHERE id > %s{jf} ORDER BY id",

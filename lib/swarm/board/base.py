@@ -2112,6 +2112,12 @@ class Board(abc.ABC):
         """The newest `limit` messages, returned OLDEST first. Scope: `job` if given; else all
         jobs, or only jobs whose status is active when active_jobs_only (`swarm watch`)."""
 
+    def last_post(self, job: str, agent_name: str) -> Message | None:
+        """The newest message `agent_name` posted on `job`, None if it posted none. One bounded
+        lookup per agent (the backends override this scan of every message of the job)."""
+        mine = [m for m in self.messages_after(0, job) if m.agent_name == agent_name]
+        return mine[-1] if mine else None
+
     @abc.abstractmethod
     def messages_after(self, after_id: int, job: str | None = None) -> list[Message]:
         """All messages with id > after_id (of `job`, or all jobs), ordered by id. Unbounded."""

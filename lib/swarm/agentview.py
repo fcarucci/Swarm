@@ -33,8 +33,34 @@ ORCHESTRATOR = "orchestrator"
 ORCHESTRATOR_KEY = re.compile(r"orchestrator(?:[-_.:].*)?", re.IGNORECASE)
 _HANDOFF = re.compile(r"\s*(DONE|VERIFIED|FAILED)\b")
 _WAITS = re.compile(r"\b(waiting|waits?|blocked|parked)\b|\bCI\b", re.IGNORECASE)
-MESSAGE_WINDOW = 400     # newest messages looked at for each agent's last post
 NOTE_MAX = 70
+
+
+_SHOWN = []
+
+
+def _shown_type():
+    """ShownAgent: an AgentStatus as shown (`status` is the display status, `note` says why).
+    Built on first use: this module is imported by the CLI on every hook call, the board package is not."""
+    if not _SHOWN:
+        from swarm.board.base import AgentStatus
+
+        @dataclasses.dataclass(frozen=True)
+        class ShownAgent(AgentStatus):
+            note: str | None = None
+        _SHOWN.append(ShownAgent)
+    return _SHOWN[0]
+
+
+def is_orchestrator(a) -> bool:
+    """A member that only orchestrates, from what the board holds: its role says so, or it has no
+    role and joined through the CLI under a key named orchestrator... (`swarm join --key
+    orchestrator-2` stores no role), or it has no role, no harness and never ran a tool (a CLI
+    join: a hook-registered agent has a harness and its tool calls counted)."""
+    if a.role == ORCHESTRATOR:
+        return True
+    return a.role is None and (ORCHESTRATOR_KEY.fullmatch(a.agent_key or "") is not None
+                               or (a.harness is None and a.tool_calls == 0 and a.current_tool is None))
 
 
 def default_role(key: str, role: str | None) -> str | None:
@@ -46,14 +72,6 @@ def default_role(key: str, role: str | None) -> str | None:
 def _note(text: str) -> str:
     text = " ".join((text or "").split())
     return text if len(text) <= NOTE_MAX else text[:NOTE_MAX - 1] + "…"
-
-
-def _last_posts(board, job: str) -> dict:
-    """name -> that agent's newest post on the job (within MESSAGE_WINDOW messages)."""
-    last = {}
-    for m in board.recent_messages(MESSAGE_WINDOW, job):   # oldest first: the newest wins
-        last[m.agent_name] = m
-    return last
 
 
 def _wait_reason(board, j, now, *, bounded_only: bool) -> str | None:
@@ -72,31 +90,35 @@ def _wait_reason(board, j, now, *, bounded_only: bool) -> str | None:
 
 
 def annotate(board, job: str, rows, now=None) -> list:
-    """`rows` (AgentStatus of `job`) with the display status and a note in current_tool for the
-    rows that are not running a tool; the order is kept. See the module doc for the rules."""
+    """`rows` (AgentStatus of `job`) as ShownAgent where the display differs from the stored row
+    (status, role orchestrator, and a note saying why); the order is kept. Each agent's last post
+    is one bounded query (board.last_post), only for an idle or dead one. See the module doc."""
     rows = list(rows)
-    if not any(a.status in ("idle", "dead") or a.role == ORCHESTRATOR or a.left_reason for a in rows):
+    if not any(a.status in ("idle", "dead") or a.left_reason or a.role is None or a.role == ORCHESTRATOR
+               for a in rows):
         return rows
     now = now or board.now()
     j = board.job_status(job)
-    last = _last_posts(board, job)
     replaced = {a.resume_of for a in rows if a.resume_of}   # a replacement took over: not lost
     out = []
     for a in rows:
-        status, note = ("left", None) if a.agent_key in replaced else _display(board, j, a, last.get(a.name), now)
-        out.append(a if note is None and status == a.status else
-                   dataclasses.replace(a, status=status, current_tool=note if note is not None else a.current_tool))
+        status, note = ("left", None) if a.agent_key in replaced else _display(board, j, a, now)
+        role = ORCHESTRATOR if is_orchestrator(a) else a.role
+        out.append(a if note is None and status == a.status and role == a.role else
+                   _shown_type()(**{f.name: getattr(a, f.name) for f in dataclasses.fields(a)} | {
+                       "status": status, "role": role, "note": note}))
     return out
 
 
-def _display(board, j, a, post, now) -> tuple[str, str | None]:
+def _display(board, j, a, now) -> tuple[str, str | None]:
     from swarm.board import STUCK_PREFIX
     if a.ended_at is not None and (a.left_reason or "").startswith(STUCK_PREFIX):
-        return "dead", "lost: closed as stuck"
-    if a.role == ORCHESTRATOR and a.status in ("idle", "dead"):
-        return ("standby" if a.status == "idle" else "away"), "orchestrator: not a worker"
+        return "dead", "closed as stuck"
+    if is_orchestrator(a) and a.status in ("idle", "dead"):
+        return ("standby" if a.status == "idle" else "away"), "orchestrator, not a worker"
     if a.status not in ("idle", "dead"):
         return a.status, None
+    post = board.last_post(a.job, a.name)
     mine = post if post is not None and post.created_at >= a.joined_at else None
     if mine is not None and _HANDOFF.match(mine.message):
         return "finished", "posted " + _note(mine.message)
@@ -108,14 +130,14 @@ def _display(board, j, a, post, now) -> tuple[str, str | None]:
     if a.status == "idle":
         why = _wait_reason(board, j, now, bounded_only=False)
         if why:
-            return "waiting", "waiting on " + _note(why)
+            return "waiting", "on " + _note(why)
         if mine is not None and _WAITS.search(mine.message):
-            return "waiting", _note(mine.message)
+            return "waiting", "last post: " + _note(mine.message)
         return "idle", "silent, no wait stated"
     why = _wait_reason(board, j, now, bounded_only=True)
     if why:
-        return "waiting", "waiting on " + _note(why)
-    return "dead", "lost: silent, no DONE or verdict"
+        return "waiting", "on " + _note(why)
+    return "dead", "silent, no DONE or verdict"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -152,13 +174,14 @@ def rollup(rows) -> Rollup:
     c = dict(working=0, waiting=0, idle=0, finished=0, lost=0, orchestrators=0)
     waits = []
     for a in rows:
-        if a.role == ORCHESTRATOR:
+        if is_orchestrator(a):
             c["orchestrators"] += 1
         elif a.status in ("running", "started"):
             c["working"] += 1
         elif a.status == "waiting":
             c["waiting"] += 1
-            reason = (a.current_tool or "").removeprefix("waiting on ")
+            note = getattr(a, "note", None) or ""
+            reason = note.removeprefix("on ") if note.startswith("on ") else ""
             if reason and reason not in waits:
                 waits.append(reason)
         elif a.status == "idle":

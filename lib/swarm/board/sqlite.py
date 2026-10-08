@@ -1400,6 +1400,11 @@ class SqliteBoard(SqlBlockers, Board):
                                  (*jp, limit)).fetchall()
         return [self._msg(r) for r in reversed(rows)]
 
+    def last_post(self, job: str, agent_name: str) -> Message | None:
+        row = self._c().execute(f"SELECT {_MESSAGE_COLS} FROM messages WHERE job = ? AND agent_name = ? "
+                                "ORDER BY id DESC LIMIT 1", (job, agent_name)).fetchone()
+        return self._msg(row) if row else None
+
     def messages_after(self, after_id: int, job: str | None = None) -> list[Message]:
         jf, jp = (" AND job = ?", (job,)) if job else ("", ())
         return [self._msg(r) for r in self._c().execute(
