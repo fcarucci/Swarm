@@ -250,7 +250,7 @@ def launch_action(board, cfg, sup, action, owner, recipe, decision, *, start_run
     harness = settings(cfg)["judge_host"] if role == "judge" else owner.harness
     old = "pipeline-seat-" + str(uuid.uuid4())
     name = board.allocate_name(old, action.job.job, role)
-    if role == "judge" and not board.claim_judge(old, action.job.job):
+    if role == "judge" and not board.take_judge_seat(old, action.job.job):
         board.close_agent(old, "pipeline judge seat busy")
         return None
     board.close_agent(old, "pipeline predecessor")

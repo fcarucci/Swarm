@@ -3928,8 +3928,6 @@ def _board_verdict(board, cfg: dict, args) -> int:
     from swarm.fastpath import changed
     changed(args.job)
     print(f"verdict {args.verdict} recorded for {args.job}, and posted on the board")
-    if args.verdict == "met":
-        _learning_instructions(args.job)
     return 0
 
 
@@ -4037,7 +4035,7 @@ def _board_join(board, cfg: dict, args) -> int:
         print(f"refused: {name} ({args.key}) was closed as stuck by the swarm supervisor and "
               f"can't rejoin: its replacement does the work", file=sys.stderr)
         return 1
-    if args.judge and not board.claim_judge(args.key, args.job):
+    if args.judge and not board.take_judge_seat(args.key, args.job):
         js = board.job_status(args.job)
         print(f"refused: {term_safe(js.judge) if js and js.judge else 'another agent'} is already the judge of "
               f"job {args.job} (one per job)", file=sys.stderr)
@@ -4333,8 +4331,6 @@ def _run_command(cfg: dict, args) -> int:
             print(f"queued (board not reachable from here: {_error_name(exc)}); it is delivered "
                   f"automatically within seconds by the swarm hooks, and counts only if you are the "
                   f"judge of {args.job} (if not, you are told on the board).")
-            if args.verdict == "met":
-                _learning_instructions(args.job)
             return 0
         print(f"cannot reach the board database: {exc}"
               + (" (this command writes: it needs the primary)" if not _reads_only(args) else ""),

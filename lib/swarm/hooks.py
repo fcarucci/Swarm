@@ -966,7 +966,7 @@ def _goal_roles(board, agent_id: str, job: str, payload: dict, marker: dict | No
     if prompt is None:
         prompt = _spawn_prompt(payload, agent_id)
     wants = _role(payload, agent_id, prompt) == "judge"
-    is_judge = wants and board.claim_judge(agent_id, job)
+    is_judge = wants and board.take_judge_seat(agent_id, job)
     js = board.job_status(job)
     goal, judge = (js.goal, js.judge) if js else (None, None)
     note = None

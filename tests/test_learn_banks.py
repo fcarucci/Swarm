@@ -160,13 +160,13 @@ class LearnBanksTests(HindsightEnv):
         self.assertIn('general memory bank', err)
         self.assertEqual(self.fake.calls('DELETE'), [])
 
-    def test_close_and_met_verdict_require_learnings(self):
+    def test_met_verdict_does_not_ask_for_learnings_but_close_does(self):
         self.cli('activate', '--job', 'J', '--goal', 'done')
         self.cli('join', '--job', 'J', '--key', 'judge', '--judge')
         name = self.agent('judge').name
         rc, out, err = self.cli('verdict', '--job', 'J', '--as', name, 'met', 'Done')
         self.assertEqual(rc, 0, err)
-        self.assertIn('Required learnings step', out)
+        self.assertNotIn('learn', out)     # learnings belong at close, after integration
         rc, out, err = self.cli('deactivate', '--job', 'J')
         self.assertEqual(rc, 0, err)
         self.assertIn('best-matching EXISTING bank', out)
@@ -183,7 +183,7 @@ class LearnBanksTests(HindsightEnv):
         self.assertIn('hermes', err)
         self.assertEqual({r['body']['query'] for r in self.fake.calls('POST', '/memories/recall')}, {'Job task'})
 
-    def test_queued_met_verdict_still_instructs_learning(self):
+    def test_queued_met_verdict_does_not_ask_for_learnings(self):
         self.cli('activate', '--job', 'J', '--goal', 'done')
         self.cli('join', '--job', 'J', '--key', 'judge', '--judge')
         name = self.agent('judge').name
@@ -191,4 +191,4 @@ class LearnBanksTests(HindsightEnv):
         rc, out, err = self.cli('verdict', '--job', 'J', '--as', name, 'met', 'Done')
         self.assertEqual(rc, 0, err)
         self.assertIn('queued', out)
-        self.assertIn('Required learnings step', out)
+        self.assertNotIn('learn', out)

@@ -11,6 +11,8 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 ### Fixed
 - `swarm deactivate` no longer asks for learnings again after `swarm learn --job J` recorded them. A pipeline job whose accepted artifacts await finalization still refuses until FINALIZED/INTEGRATED is posted; the refusal says so. A stale waiting job with a met verdict but unfinalized accepted work closes `failed`.
+- A new judge takes the judge seat itself when the previous judge has completed or died (a fix round after `not_met`), through the hook, `join --judge` and the pipeline, so it records `swarm verdict` under its own name; a live judge is never displaced and `--as` another agent is still refused.
+- `swarm verdict` no longer asks for `swarm learn`; the learnings reminder comes when the job closes (`deactivate`).
 
 ### Changed
 - The skill text says a judge run outside the board must record `swarm verdict`, and that the job is closed as soon as the goal is met.

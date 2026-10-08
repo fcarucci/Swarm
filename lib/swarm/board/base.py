@@ -77,6 +77,7 @@ VERDICTS = ("met", "not_met")   # a judge's verdict on a job's goal
 AUTO_CLOSED_BY = "auto"
 AUTO_CLOSE_BLOCKING = ("started", "running", "idle")
 AUTO_CLOSE_OUTCOME_MAX = 200
+JUDGE_HANDOVER = "judge seat handed to a new judge"   # left_reason of a finished judge replaced by a new one
 # The supervisor (swarm.supervisor): an agent it closed has left_reason STUCK_PREFIX + one of
 # STUCK_REASONS; only those are restarted. A replacement's row has resume_of = the
 # agent_key it replaced.
@@ -1125,7 +1126,7 @@ def load_name_pool(data_dir: Path = DATA_DIR) -> dict[str, list[str]]:
 # are writes only when they advance the cursor.
 WRITE_METHODS = (
     "purge", "ensure_job", "open_job", "close_job", "auto_close_job", "undo_auto_close",
-    "sweep_auto_close", "bind_job_session", "allocate_name", "claim_judge", "claim_verifier",
+    "sweep_auto_close", "bind_job_session", "allocate_name", "claim_judge", "take_judge_seat", "claim_verifier",
     "set_waiting", "set_job_max_hours", "set_job_goal", "move_agent", "sweep_expiry", "reserve_spawn", "record_verdict", "tool_started", "record_route",
     "claim_route", "tool_finished", "agent_stopped", "set_agent_role", "set_agent_runtime",
     "agent_turn_ended",
@@ -1597,6 +1598,20 @@ class Board(abc.ABC):
         itself). At most one active judge per job, even under concurrent claims (Postgres:
         partial unique index). A judge's derived role (roster, agents()) is "judge"; the seat
         frees when it departs."""
+
+    def take_judge_seat(self, agent_key: str, job: str) -> bool:
+        """claim_judge, plus the handover: a judge that has completed or died (no longer started,
+        running or idle) gives up the seat to a new one, so a fix round's fresh judge records
+        under its own name and never needs `--as` another agent. The old judge leaves (close_agent,
+        reason JUDGE_HANDOVER); a live holder (AUTO_CLOSE_BLOCKING) is never displaced. Returns
+        whether `agent_key` is the judge now."""
+        if self.claim_judge(agent_key, job):
+            return True
+        for a in self.agents(job):
+            if a.role == "judge" and a.ended_at is None and a.agent_key != agent_key \
+                    and a.status in ("completed", "dead"):
+                self.close_agent(a.agent_key, JUDGE_HANDOVER)
+        return self.claim_judge(agent_key, job)
 
     @abc.abstractmethod
     def _move_agent_row(self, agent_key: str, job: str, keep: int) -> str | None:

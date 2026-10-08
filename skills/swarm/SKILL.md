@@ -284,6 +284,9 @@ user asks for one. Don't run duplicate jobs: merge similar ones (`swarm job merg
      `swarm join --job J --key K --judge`). A verdict only in its own output is invisible to the
      job: the goal stays unmet and the job waits for ever. As soon as the verdict is `met`, the
      orchestrator closes the job (`learn`, then `deactivate`); do not leave it waiting.
+     **Judge seat handover:** a new judge (a fix round's, tagged `[swarm role: judge]` or `swarm join --judge`)
+     takes the seat itself when the previous judge completed, left or died (no contact for `dead_minutes`);
+     a live judge keeps it. Always record as yourself: never use `--as` another agent.
      Judges only inspect and record `swarm verdict --job J --as NAME --artifact REF met
      --reason "evidence"` or `not_met --reason "missing" --next "fix brief"`.
      **Always include `--artifact REF` for the exact hand-off inspected.** For compatibility,
@@ -364,7 +367,8 @@ user asks for one. Don't run duplicate jobs: merge similar ones (`swarm job merg
    facts to `swarm learn --job <job> --bank <bank> -`. Without `--bank`, it uses `default_bank`.
    Supply one fact per nonblank stdin line; `learn` waits for extraction (timeout at least
    120 seconds), then records provenance after the entire batch succeeds.
-   Do this after a judge rules `met` too. Create a bank only when strictly necessary, with
+   Do this when the job closes, after the work is integrated, not when the judge rules `met` (`verdict`
+   does not ask for it). Create a bank only when strictly necessary, with
    explicit `--create-bank`.
 
    `swarm deactivate --job <job> [--status completed|cancelled|failed] [--outcome "<summary>"]`.
