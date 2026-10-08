@@ -60,7 +60,7 @@ class GoalCliTests(GoalEnv):
         self.activate("K")
         _, out, _ = self.cli("status", "--no-color")
         lines = out.splitlines()
-        self.assertRegex(lines[0], r"\sVERDICT\s+WAITING ON\s+DESCRIPTION$")
+        self.assertRegex(lines[0], r"\sVERDICT\s+WAITING ON\s+WORKERS\s+DESCRIPTION$")
         self.assertRegex(next(l for l in lines if l.startswith("J ")), r"\snone(\s|$)")
         self.assertRegex(next(l for l in lines if l.startswith("K ")), r"\s-(\s|$)")
         _, out, _ = self.cli("status", "--job", "J", "--no-color")

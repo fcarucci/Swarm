@@ -1889,7 +1889,7 @@ With no arguments, `status` lists the active jobs (`--all` adds closed ones) wit
 STATUS (`active`/`waiting`/`waiting (goal not met)`/`idle` for open jobs, else the closed status), AGENTS, RUNNING
 (started or running), IDLE, DONE (completed), LEFT/DEAD, MSGS, ACTIVATED, LAST ACTIVITY,
 FINISHED, VERDICT (`-` no goal, `none` none yet, `met`, `not_met`; `*` completed with
-`--force`), WAITING ON and DESCRIPTION. Before the table it runs the [auto-close](#auto-close)
+`--force`), WAITING ON, WORKERS (the agents rollup) and DESCRIPTION. Before the table it runs the [auto-close](#auto-close)
 sweep and prints one `<job>: <outcome>` line for each job it closed.
 
 What an agent's status column and the `agents` rollup show is decided from more than hook contact (`lib/swarm/agentview.py`; nothing extra is stored). For an agent the clock calls idle or dead:
