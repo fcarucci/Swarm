@@ -107,18 +107,20 @@ class PipelineRecipeTests(TeamEnv):
             self.assertEqual(adapter.github_repository(str(self.tmp)), 'fcarucci/Swarm')
 
     def test_pending_red_absent_and_wrong_sha_never_pass_launch_gate(self):
-        self.team_toml.write_text('[ci]\nkind = "github"\n')
-        check = self.recipe("feat/result@" + self.sha)["evidence_check"]
-        for runs in ([], [{"headSha": self.sha, "status": "queued", "conclusion": None}],
-                     [{"headSha": self.sha, "status": "completed", "conclusion": "failure"}],
-                     [{"headSha": "b" * 40, "status": "completed", "conclusion": "success"}]):
-            with mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stdout=json.dumps(runs))):
+        self.team_toml.write_text('[ci]\nkind = "github"\nrepository = "owner/repo"\n')
+        recipe = self.recipe("feat/result@" + self.sha)
+        check = recipe["evidence_check"]
+        self.assertEqual(recipe["evidence_command"],
+                         f"swarm ci wait --repo owner/repo --sha {self.sha} --timeout 1s")
+        for code in (1, 124):   # failed, or not green yet (timeout)
+            with mock.patch("subprocess.run", return_value=mock.Mock(returncode=code, stdout="")):
                 self.assertFalse(check(str(self.tmp)))
-        green = [{"headSha": self.sha, "status": "completed", "conclusion": "success"}]
-        with mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stdout=json.dumps(green))) as run:
+        with mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stdout="")) as run:
             self.assertTrue(check(str(self.tmp)))
         self.assertIn(self.sha, run.call_args.args[0])
         self.assertEqual(run.call_args.kwargs["cwd"], str(self.tmp))
+        self.team_toml.write_text('[ci]\nkind = "github"\n')   # no repository to ask about: held
+        self.assertFalse(self.recipe("feat/result@" + self.sha)["evidence_check"](str(self.tmp)))
 
     def test_team_config_and_owner_repository_override(self):
         self.team_toml.write_text('[pipeline]\nintegrate = false\ndelete_branch = false\n'

@@ -336,7 +336,7 @@ def coding_recipe(ctx, board, job: str, artifact: str | None) -> dict | None:
             "artifact_group": branch, "titles": PIPELINE_TITLES}
 
 
-# CI adapters: platform commands belong here, never in the generic coding recipe/core.
+# CI hosts: the ci plugin owns every host call; this recipe only names `swarm ci wait`.
 def github_repository(cwd: str | None) -> str:
     """Find GitHub even when the fetch remote is Gitea and GitHub is a push URL."""
     if not cwd:
@@ -363,10 +363,9 @@ def ci_adapter(ci: dict, workdir: str | None, artifact: str, branch: str, sha: s
     kind = ci["kind"]
     template = ci["evidence_command"]
     instructions = {
-        "github": "\nCI adapter: github. Open/reuse a PR with gh pr create/view; inspect CI with gh run list --commit SHA. "
+        "github": "\nCI adapter: github. Wait for CI only with `swarm ci wait --repo OWNER/REPO --sha SHA`. "
                   "Complete the PR only using a method that preserves the approved rebased SHA and linear history.",
-        "gitea": "\nCI adapter: gitea. Open/reuse an MR/PR with tea pr create or the Gitea API; "
-                 "check the project's CI for the exact SHA with the configured tea/API command. "
+        "gitea": "\nCI adapter: gitea. Wait for CI only with `swarm ci wait --repo OWNER/REPO --sha SHA`. "
                  "Complete the request only using a method that preserves the approved rebased SHA and linear history.",
         "gitlab": "\nCI adapter: gitlab. Open/reuse an MR with glab mr create or the GitLab API; "
                   "check the project's CI for the exact SHA with the configured glab/API command. "
@@ -387,24 +386,18 @@ def ci_adapter(ci: dict, workdir: str | None, artifact: str, branch: str, sha: s
         return ("false # Configure [ci] evidence_command for the project's CI on exact SHA " + sha,
                 lambda cwd: False, instructions)
     repository = ci["repository"] or github_repository(workdir)
-    repo_args = ["--repo", repository] if repository else []
-    argv = ["gh", "run", "list", "--commit", sha, "--limit", "100", *repo_args,
-            "--json", "headSha,status,conclusion"]
-    query = ('if length > 0 and all(.[]; .headSha == "' + sha + '" and '
-             '.status == "completed" and .conclusion == "success") then "green" else "pending/red" end')
-    command = '[ "$(' + shlex.join([*argv, "--jq", query]) + ')" = green ]'
+    if not repository:
+        return ("false # Set [ci] repository (OWNER/REPO) so `swarm ci wait` can check exact SHA " + sha,
+                lambda cwd: False, instructions)
+    # The ci plugin owns every call to the CI host: one wait that returns at once, exit 0 only when green.
+    argv = ["swarm", "ci", "wait", "--repo", repository, "--sha", sha, "--timeout", "1s"]
+    command = shlex.join(argv)
 
     def check(cwd: str) -> bool:
-        import json
-        result = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=30)
-        if result.returncode:
-            return False
-        runs = json.loads(result.stdout)
-        return bool(isinstance(runs, list) and runs and all(
-            isinstance(r, dict) and r.get("headSha") == sha and r.get("status") == "completed"
-            and r.get("conclusion") == "success" for r in runs))
+        return subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=30).returncode == 0
 
     return command, check, instructions
+
 
 def register(api) -> None:
     api.add_command("team", run_team, setup=setup_team,

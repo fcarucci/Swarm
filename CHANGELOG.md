@@ -30,6 +30,7 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 ### Changed
 - Schema 20 (applied automatically on first use, on every backend): a nullable `agents.title` and a last `title` column of the `agent_status` view. Boards stay readable by the previous release, which shows no titles; as always, upgrade every host sharing a board together. `swarm who` gains a TITLE field after the role (empty without one).
 
+- engineering-team is now process only (PM, reviewer and integrator steps per CI event, `[land] strategy`, models per role, seat titles). It waits with `swarm ci wait`, reacts to the `ci` skill's events (including `CI-GREEN`), and makes no CI host call of its own; the integrator's evidence check uses `swarm ci wait`. A test fails if the retired word returns outside the rename line.
 - The old `[forge]` name is gone, with no alias: the `team.toml` section is `[ci]` (`[repositories."p".ci]` for overrides), the `swarm ci --kind` option replaces the old host flag, and event-source state files, modules and docs say CI host. `swarm upgrade` and `swarm init` rewrite an existing `[forge]` section to `[ci]` once, keeping `team.toml.bak` next to it and saying so.
 - CI: tag and release-branch pushes no longer re-run the full test matrix (the Release workflow tests the tag).
 

@@ -7,7 +7,7 @@ is no longer the PR's head is stale: ack it and do nothing.
 
 ## NEEDS-REVIEW N@sha (and BRANCH-READY branch@sha)
 
-1. Check the head is still `sha` (`gh pr view N` or the Gitea API). If not, ack and stop.
+1. Check the head is still `sha` (the event's sha; `swarm ci status --repo OWNER/REPO --sha <sha>` shows its CI). If not, ack and stop.
 2. Dispatch an independent reviewer (never the author) from the review template: PR number, the
    FULL head sha, the base, the requirement or issue link, what to run, and the exact verdict line
    to post on the PR and on the board: `REVIEW #N @ <full-sha>: VERIFIED|CHANGES REQUIRED <why>`.
@@ -21,8 +21,13 @@ NEEDS-REVIEW follows, and the old verdict is stale.
 
 ## CI-FAILED N@sha <contexts>
 
-Read the failing contexts' logs. Diagnose: a real failure, a flake (rerun once), or an
+Read the failing contexts' logs (`swarm ci status --repo OWNER/REPO --sha <sha>` lists them). Diagnose: a real failure, a flake (rerun once), or an
 infrastructure fault. Send the cause and the failing contexts back to the coder; never fix it as PM.
+
+## CI-GREEN sha
+
+The exact head is green. If its verdict is already VERIFIED the ci skill raises READY-TO-LAND next;
+otherwise nothing to do but let review finish. A worker waiting with `swarm ci wait` returns at once.
 
 ## READY-TO-LAND N@sha
 

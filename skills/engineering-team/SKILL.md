@@ -53,16 +53,11 @@ See [review pipeline](../../docs/REFERENCE.md#review-pipeline) and `team.example
 
 ## Waiting for CI
 
-Agents never watch CI with `gh`. Every agent on a box that ran its own `gh run watch` (3 s polling) burned the
-whole 5000/h GitHub API budget in minutes. **wait for CI ONLY with `swarm ci wait --repo OWNER/REPO --sha <exact head> [--timeout 90m]` (exit 0 green, 1 failed with the failing jobs, 124 timeout); `swarm ci status` for a one-off look. Never `gh run watch`, never a `gh run list` loop.**
-`swarm ci` is budget-safe: one shared cache and one poller per box (`~/.cache/swarm/ci/OWNER/REPO/SHA.json`), at most
-one CI host call per repo per 60 s across all agents, backoff 60/120/300 s on queued runs, 10 min when under 500 calls
-remain, and a fall back to the public API on a 403 (it says so). When the event core is installed and a CI event
-(`CI-FAILED`, `READY-TO-LAND`) for that exact SHA arrives, the wait returns from the event without polling.
-The CI host comes from `[ci] kind` (`github` or `gitea`; for Gitea set `api_url` and `token_file`, a path).
-Pass the exact head SHA of the change (never a branch name), and re-run it with the new SHA after every push.
-Put this rule in **every worker, engineer and reviewer brief** and in every spawn prompt that mentions CI:
-`CI: wait for CI ONLY with swarm ci wait --repo OWNER/REPO --sha <exact head> [--timeout 90m] (exit 0 green, 1 failed with the failing jobs, 124 timeout); swarm ci status for a one-off look. Never gh run watch, never a gh run list loop.`
+This skill never talks to a CI host. It depends on the [ci skill](../ci/SKILL.md): wait for CI ONLY with
+`swarm ci wait --repo OWNER/REPO --sha <exact head> [--timeout 90m]` (exit 0 green, 1 failed, 124 timeout),
+`swarm ci status` for a one-off look, never `gh run watch` or a `gh run list` loop. Pass the exact head SHA
+and re-run it after every push. Put this line in every worker, engineer and reviewer brief:
+`CI: wait for CI ONLY with swarm ci wait --repo OWNER/REPO --sha <exact head> [--timeout 90m]; never gh run watch.`
 
 Don't:
 
@@ -79,29 +74,25 @@ Don't:
 Do not call a host validated because these instructions exist or checkout unit tests pass. A host needs the installed custom-role capability and an independent behavioral run. If research tools, an independent reviewer, a safe writer handoff, or a required host capability are unavailable, record the specific blocker and continue independent work that remains possible.
 
 
-## CI adapters
+## CI host
 
-`[ci] kind = "github"|"gitea"|"gitlab"|"none"` selects the adapter explicitly; the default
-is `none`. Set `evidence_command` to the project's CI checker with `{sha}`; zero exit status
-must mean all required checks passed on that exact rebased SHA, never a latest-branch run.
-GitHub has a built-in `gh run list --commit SHA` checker and uses `gh pr create/view` for PRs.
-Gitea uses `tea`/API for MRs/PRs and configured CI checks; GitLab uses `glab`/API for MRs and
-configured CI checks. `none` uses a configured project CI command and direct pushes.
-An absent CI checker holds integration. Request completion must preserve the approved rebased
-SHA and linear history. Commands and authentication belong to the adapter, never generic core.
+`[ci] kind = "github"|"gitea"|"gitlab"|"none"` in `team.toml` names the host (setup, webhooks and tokens
+are in the ci skill). Set `evidence_command` to the project's CI checker with `{sha}` when `swarm ci wait`
+does not apply: zero exit status must mean all required checks passed on that exact rebased SHA. An absent
+checker holds integration. Completing a request must preserve the approved rebased SHA and linear history.
 
 ## PM procedure per event
 
 The PM does not poll. Keep `swarm event wait --job J --to @pm --json` armed as a harness-tracked
 background command; when it returns an event, act, `swarm event ack --job J ID`, then re-arm
-it at once. CI events come from the `ci` plugin's `gitea` or `github` event source (enabled by `[ci.gitea]` /
-`[ci.github]` in the swarm config, never assumed) and from `BRANCH READY ...` board posts; the dedupe key is `kind:N@sha`, so an
+it at once. CI events (raised by the `ci` skill, see its SKILL.md) and `BRANCH READY ...` board posts; the dedupe key is `kind:N@sha`, so an
 event is never raised twice for the same head. Full steps: [PM event procedure](references/pm-events.md).
 
 - `NEEDS-REVIEW N@sha`: dispatch a fresh independent reviewer from the review template and record the dispatch.
 - `BRANCH-READY branch@sha`: start review, as for NEEDS-REVIEW.
 - `REVIEW-CHANGES N@sha`: send the findings back to the coder.
 - `CI-FAILED N@sha <contexts>`: read the failing logs, diagnose, then send it back to the coder with the cause.
+- `CI-GREEN sha`: the exact head is green; if a verdict is pending, nothing to wait for any more; `swarm ci wait` returns at once.
 - `READY-TO-LAND N@sha`: land per `[land] strategy`, verify the landed tree equals the reviewed head's tree, close the PR and its issue.
 
 `[land] strategy` in `team.toml` is per project: `rebase-ff` (default; rebase, then fast-forward, no
