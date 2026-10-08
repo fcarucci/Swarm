@@ -115,8 +115,8 @@ class StaleWaitingTests(Env):
         s = self.job()
         self.assertEqual((s.status, s.closed_by), ("completed", "auto"))
 
-    def test_met_verdict_with_accepted_work_awaiting_finalization_completes(self):
-        """Met verdict on a pipeline artifact nobody finalized (still waiting): completed, not failed."""
+    def test_met_verdict_with_accepted_work_awaiting_finalization_closes_failed(self):
+        """Met verdict on a pipeline artifact nobody finalized (still waiting): failed, not completed."""
         self.activate("J", "--goal", "ship it")
         with self.board() as b:
             b.set_job_data("J", "pipeline.started_at", (b.now() - dt.timedelta(hours=9)).isoformat())
@@ -131,7 +131,28 @@ class StaleWaitingTests(Env):
         self.h.backdate_job("J", verdict_at=CLOSE_AT)
         self.sweep()
         s = self.job()
-        self.assertEqual((s.status, s.closed_by), ("completed", "auto"))
+        self.assertEqual((s.status, s.closed_by), ("failed", "auto"))
+        self.assertEqual(s.outcome, "auto-closed: goal met but accepted work never finalized")
+
+    def test_a_bounded_wait_keeps_the_job_open(self):
+        self.activate("J")
+        self.finished_agent()
+        rc, _, err = self.cli("wait", "--job", "J", "--for", "600m", "--on", "the build")
+        self.assertEqual(rc, 0, err)
+        self.quiet(CLOSE_AT)
+        self.sweep()
+        self.assertEqual(self.job().status, "active")
+        self.assertEqual(self.notices(), [])
+
+    def test_an_open_human_question_keeps_the_job_open(self):
+        self.activate("J")
+        self.finished_agent()
+        with self.board() as b:
+            b.open_blocker("J", "question", "human", "which colour?")
+        self.quiet(CLOSE_AT)
+        self.sweep()
+        self.assertEqual(self.job().status, "active")
+        self.assertEqual(self.notices(), [])
 
     # ---- never a job with a live agent
     def test_a_live_agent_keeps_the_job_untouched(self):

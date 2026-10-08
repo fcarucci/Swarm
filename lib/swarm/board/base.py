@@ -952,7 +952,7 @@ class CloseGuard:
     settled: bool = True
     goal: str | None = None
     max_hours: float | None = None
-    pending_ok: bool = False   # settled close that need not wait for pipeline finalization (stale waiting, met verdict)
+    pending_ok: bool = False   # a close that is not completed work, so it need not wait for pipeline finalization
 
     def allows(self, goal: str | None, verdict: str | None, max_hours: float | None) -> bool:
         if self.settled:
@@ -1468,10 +1468,15 @@ class Board(abc.ABC):
         quiet_since = since or js.last_activity_at or run_start(js)
         total = max(close_minutes or 0, notice_minutes)
         if close_minutes and close_minutes > 0 and now - quiet_since >= _dt.timedelta(minutes=total):
+            from swarm.review import auto_close_pending
             met = js.verdict == "met"
+            unfinalized = bool(js.goal) and auto_close_pending(self, js.job)
+            if met and unfinalized:   # accepted work nobody integrated is not a completed job
+                return ExpiryAction("failed", "auto-closed: goal met but accepted work never finalized", None,
+                                    CloseGuard(pending_ok=True), stale=True)
             outcome = ("auto-closed: waiting with no live agents; verdict met" if met
                        else "auto-closed: waiting with no live agents and no verdict")
-            guard = CloseGuard(pending_ok=True) if met or not goal_unmet(js) else CloseGuard(False, js.goal, js.max_hours)
+            guard = CloseGuard() if met or not goal_unmet(js) else CloseGuard(False, js.goal, js.max_hours)
             return ExpiryAction("completed" if met else "failed", outcome, None, guard, stale=True)
         if notice is None:
             left = f"; auto-closes in {max(1, int(total - (now - quiet_since).total_seconds() / 60))} min" \

@@ -42,9 +42,9 @@ class LearnThenDeactivateTests(HindsightEnv):
         with self.board() as b:
             self.assertEqual(b.job_status("J").status, "completed")
 
-    def test_deactivate_after_learn_on_a_pipeline_job_awaiting_finalization(self):
-        """The real gate: an accepted artifact with no FINALIZED post refuses deactivate; the
-        finalize step says to run swarm learn first, and that learning must satisfy it."""
+    def test_learn_does_not_satisfy_finalization_on_a_pipeline_job(self):
+        """The real gate: an accepted artifact with no FINALIZED post refuses deactivate, and a
+        learning does not stand in for the integration it certifies."""
         self.assertEqual(self.cli("activate", "--job", "J", "--goal", "ship it")[0], 0)
         with self.board() as b:
             started = (b.now() - dt.timedelta(hours=1)).isoformat()
@@ -61,6 +61,11 @@ class LearnThenDeactivateTests(HindsightEnv):
         rc, out, err = self.cli("learn", "--job", "J", "--bank", "coding", "-", stdin="Fact.\n")
         self.assertEqual(rc, 0, err)
         rc, out, err = self.cli("deactivate", "--job", "J")
-        self.assertEqual(rc, 0, err)
+        self.assertEqual(rc, 1)                       # learned: still refused until FINALIZED/INTEGRATED
+        self.assertIn("await finalization", err)
+        self.assertIn("FINALIZED", err)
         with self.board() as b:
-            self.assertEqual(b.job_status("J").status, "completed")
+            self.assertEqual(b.job_status("J").status, "active")
+            b.post("J", "executor", "INTEGRATED ref-1")
+        rc, out, err = self.cli("deactivate", "--job", "J")
+        self.assertEqual(rc, 0, err)

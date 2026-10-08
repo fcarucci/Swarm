@@ -3092,11 +3092,10 @@ def cmd_deactivate(cfg: dict, args) -> int:
             pending = pending_artifacts(board, args.job)
             refusal = (f"not completing {args.job}: artifacts await a met verdict: " + ', '.join(pending)
                        if pending else None)
-            if not refusal and auto_close_pending(board, args.job) \
-                    and not _learned_since(board, js, js.verdict_at):
-                refusal = (f'not completing {args.job}: accepted artifacts await finalization '
-                           f'(next: `swarm learn --job {args.job} --bank BANK -` with the distilled facts, then run '
-                           f'deactivate again; or have the executor post FINALIZED <artifact>)')
+            if not refusal and auto_close_pending(board, args.job):
+                refusal = (f'not completing {args.job}: accepted artifacts await finalization: finish '
+                           f'integration (rebase, PR, CI), then the executor posts FINALIZED <artifact> '
+                           f'(INTEGRATED for coding); a learning does not replace it. Retry deactivate after that')
     if refusal and not args.force:
         board.close()
         print(refusal, file=sys.stderr)

@@ -10,7 +10,7 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 - Stale waiting jobs: a job waiting for any reason (a goal's verdict included) with no live agent and no activity for `[job] stale_waiting_minutes` (120) gets one board notice, and at `[job] stale_waiting_close_minutes` (240) is auto-closed (`completed` with a met verdict, else `failed`).
 
 ### Fixed
-- `swarm deactivate` no longer asks for learnings again after `swarm learn --job J` recorded them, and a pipeline job whose accepted artifacts await finalization accepts that learning.
+- `swarm deactivate` no longer asks for learnings again after `swarm learn --job J` recorded them. A pipeline job whose accepted artifacts await finalization still refuses until FINALIZED/INTEGRATED is posted; the refusal says so. A stale waiting job with a met verdict but unfinalized accepted work closes `failed`.
 
 ### Changed
 - The skill text says a judge run outside the board must record `swarm verdict`, and that the job is closed as soon as the goal is met.

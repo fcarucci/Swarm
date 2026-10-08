@@ -371,7 +371,8 @@ user asks for one. Don't run duplicate jobs: merge similar ones (`swarm job merg
    Add `--delete-bank` only for an explicit project bank whose learnings have already been
    successfully retained elsewhere with `swarm learn`; otherwise deletion is refused.
    A learning recorded with `swarm learn --job <job>` (any bank) is seen by `deactivate`: it
-   says so instead of asking again, and it satisfies a pipeline job's finalization wait.
+   says so instead of asking again. It does not satisfy a pipeline job's finalization wait:
+   that needs the executor's `FINALIZED`/`INTEGRATED` post once integration is done.
    This closes the job, and any agent still active on it is marked `left`. **A job with a goal
    isn't completed until the judge's latest verdict is `met`:** until then `deactivate`
    (status `completed`) refuses and prints the judge's last reason. Keep the swarm working on
