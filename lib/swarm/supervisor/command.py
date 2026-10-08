@@ -975,6 +975,14 @@ def _pass(board, cfg: dict, sup: dict, state: dict, job, now, say, start_runner,
     except Exception as exc:   # never fails a pass
         from swarm.supervisor.settings import log
         log(f"retrying pending final transcripts failed ({type(exc).__name__})")
+    try:   # events: keep the listener up, then the safety-net checks
+        from swarm import events_listener, events_safety
+        if events_listener.settings(cfg)["enabled"]:
+            events_listener.ensure_running(cfg, say)
+            events_safety.run_check(board, cfg, say=lambda m: None)
+    except Exception as exc:   # never fails a pass
+        from swarm.supervisor.settings import log
+        log(f"events supervision failed ({type(exc).__name__})")
     for line in _caps_lines(board, sup, job, _host_running(board)):
         say(line)
 

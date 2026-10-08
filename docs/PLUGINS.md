@@ -60,6 +60,8 @@ A plugin is a module with `register(api)`:
 | `api.add_status_lines(fn)` | `fn(ctx, job) -> list[str]`: lines `swarm status --job J` prints after the job's own details |
 | `api.add_pipeline_recipe(fn)` | `fn(ctx, board, job, artifact) -> dict \| None`: first matching recipe wins; None leaves the artifact generic. Recipes return `evidence_command`, `finalize`, `finalizer_role`, `enabled`, optional `evidence_check(cwd) -> bool`, and optional `artifact_group` (new hand-offs in a group supersede older ones). Recipe errors hold the transition |
 
+| `api.register_event_source(name, *, routes, verify, handle, poll=None, poll_interval_s=None, helpers=None)` | an external event source for `swarm events serve` (see below) |
+
 `ctx` (`PluginContext`) is what a command or hook receives:
 
 | `ctx` | |
@@ -100,6 +102,34 @@ the reference use of this API: `skills/engineering-team/swarm_plugin.py`. It als
 coding pipeline recipe for `branch@sha`: the project's CI on the exact rebased SHA via the configured
 `[forge]` adapter, and an INTEGRATOR executor (rebase locally, MR/PR where supported).
 Configure it under `[pipeline]` and `[forge]` in `team.toml`; see [review pipeline](REFERENCE.md#review-pipeline).
+
+### Event sources
+
+`api.register_event_source(name, *, routes, verify, handle, poll=None, poll_interval_s=None, helpers=None)`:
+
+- `routes`: URL paths the listener hands to the source, e.g. `["/gitea"]` (unique across plugins).
+- `verify(headers, body) -> bool`: checks the signature on the RAW bytes; core calls it before anything
+  parses the body, and a raise is a refusal. It reads its secret itself (a `secret_file` path, never a value).
+- `handle(headers, body, ctx) -> list[EventSpec]`: only after `verify`. `EventSpec = dict(job, kind, key,
+  text, to=None)`; `kind` is 1-48 of `A-Za-z0-9_.:-`, `key` 1-200 characters (the dedupe key, unique per
+  job + kind + key), `text` at most 500 characters and never a secret, `to` a role (`@pm`) or a name, or
+  None for the orchestrator. A malformed spec is dropped.
+- `poll(ctx) -> list[EventSpec] | None`, every `poll_interval_s` seconds (both or neither), for sources
+  that get no webhooks (Gitea CI status).
+  Prefer callbacks to polling: the interval has a floor of `[events] min_poll_interval_s` (600 s) unless
+  the operator sets `poll_interval_s` in `[events.sources.<name>]`. Every poll is logged at debug level
+  (logger `swarm.events`).
+- `helpers(config) -> list[dict(name, argv, env=None)]`: helper processes the listener keeps running for
+  the source, e.g. `gh webhook forward` (an outbound websocket delivering GitHub webhooks to the listener,
+  so no public endpoint). `argv` is a list (no shell), `env` is added to the listener's; never put a token in
+  `argv` or the output (it is discarded). A helper that exits is restarted after 5, 15, 60, then 300 s (reset
+  after 60 s up); a down helper raises a `forwarder-down` SWARM-ALERT.
+- `ctx` (`EventContext`): `ctx.board`, `ctx.config` (the source's `[events.sources.<name>]` table),
+  `ctx.post(job, kind, key, text, to=None)` (for a source that posts itself) and `ctx.log(message)`.
+  Never log a body, a header or a token.
+
+Core never interprets `kind` or the body. Listener, keep-alive and safety nets:
+[REFERENCE.md](REFERENCE.md#external-events-the-listener-and-the-safety-nets).
 
 ### Blocker protection rules
 

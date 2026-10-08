@@ -140,6 +140,10 @@ DEFAULTS = {
     # The supervisor (swarm.supervisor): closes stuck agents and restarts them headless. On by
     # default; every key and its default is in swarm/supervisor/settings.py (DEFAULTS).
     "supervise": {"enabled": True},
+    # External events (swarm.events_listener): `swarm events serve` is an HTTP listener that plugins'
+    # event sources feed; off by default. [events.sources.<name>] holds a source's own settings.
+    "events": {"enabled": False, "bind": "127.0.0.1", "port": 8923, "max_body_bytes": 1048576,
+               "model": "haiku", "stall_minutes": 60, "unacked_minutes": 30, "sources": {}},
     # [board] backend = "sqlite": one database file shared by every agent on this machine.
     # Outside the sandboxes on purpose; sandboxed agents' posts spool (see bin/board/sqlite.py).
     # Not under ~/.local/state/swarm, which Codex sandboxes may write.
@@ -2640,6 +2644,11 @@ def _parser() -> argparse.ArgumentParser:
                                           ".claude/hooks, .mcp.json, .codex, ...) for supervisor launches; "
                                           "interactive only")
     sva.add_argument("dir", help="the work dir whose current project configuration files you approve")
+    ev = sub.add_parser("events", help="external events: `events serve` runs the listener plugins feed "
+                                       "([events] enabled); `events check` runs the safety-net checks once")
+    evs = ev.add_subparsers(dest="scmd")
+    evs.add_parser("serve", help="serve the registered event sources over HTTP until stopped")
+    evs.add_parser("check", help="listener up? waiter armed? job stalled? unacked events? (exit 1 on a problem)")
     nt = sub.add_parser("notices", help="what the last bootstrap left for the user (the SessionStart hook runs it)")
     nt.add_argument("--hook-output", action="store_true", required=True,
                     help="print it as SessionStart hook output (a fixed template), consuming it")
@@ -3300,6 +3309,32 @@ def _cmd_supervise(cfg: dict, args) -> int:
     return cmd_supervise(cfg, args)
 
 
+def _cmd_events(cfg: dict, args) -> int:
+    try:
+        compat.require_posix("swarm events")
+    except compat.Unsupported as exc:
+        print(f"swarm events: {exc}", file=sys.stderr)
+        return 1
+    from swarm import events_listener as el, events_safety
+    try:
+        el.settings(cfg)
+    except el.EventSettingsError as exc:
+        print(f"swarm events: {exc}", file=sys.stderr)
+        return 1
+    from swarm.board import open_board
+    if args.scmd == "serve":
+        from swarm import plugins
+        reg = PLUGINS if PLUGINS is not None else plugins.Registry(cfg, cfg.get("_config_path")).load()
+        from swarm.supervisor.settings import log
+        return el.serve(cfg, reg, lambda: open_board(cfg), log=lambda m: log("events " + m))
+    if args.scmd == "check":
+        with open_board(cfg) as board:
+            problems = events_safety.run_check(board, cfg)
+        return 1 if problems else 0
+    print("swarm events: say serve or check", file=sys.stderr)
+    return 2
+
+
 # Set in a harness session (Claude Code, Codex): approval is refused there. An agent's shell can
 # unset them, but has no terminal on stdin: the TTY check is the real gate.
 HARNESS_SESSION_VARS = ("CLAUDE_CODE_SESSION_ID", "CLAUDECODE", "CODEX_THREAD_ID", "CODEX_SESSION_ID")
@@ -3602,6 +3637,7 @@ COMMANDS = {
     "init": cmd_init,
     "install-hooks": _cmd_install_hooks,
     "supervise": _cmd_supervise,
+    "events": _cmd_events,
     "bootstrap": cmd_bootstrap,
     "migrate": cmd_migrate,
     "doctor": cmd_doctor,

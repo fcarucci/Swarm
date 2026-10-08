@@ -24,6 +24,7 @@ The API handed to register(api) is deliberately small and stable (see docs/PLUGI
     api.extend_command(name, setup=None, before=None, after=None)
     api.add_status_lines(fn)
     api.add_pipeline_recipe(fn)
+    api.register_event_source(name, routes=, verify=, handle=, poll=None, poll_interval_s=None, helpers=None)
 
 run(ctx, args) -> int | None is a new command; setup(parser) adds its arguments. extend_command
 adds arguments to an existing core command and hooks around it: before(ctx, args) -> int | None
@@ -70,6 +71,7 @@ class PluginInfo:
     source: str                    # a file path, or "entry point <ep>"
     commands: list[str] = dataclasses.field(default_factory=list)
     extends: list[str] = dataclasses.field(default_factory=list)
+    sources: list[str] = dataclasses.field(default_factory=list)   # event sources it registered
     error: str | None = None       # why it isn't loaded
     disabled: bool = False         # skipped on purpose ([plugins] disabled): not an error
 
@@ -109,6 +111,19 @@ class PluginContext:
     def set_job_data(self, board, job: str, key: str, value: str | None) -> bool:
         """Keep `key` = `value` (None removes it) with the job, under this plugin's own prefix."""
         return board.set_job_data(job, f"{self.plugin}.{key}", value)
+
+
+@dataclasses.dataclass
+class EventSource:
+    """An external event source a plugin registered (`swarm events serve` serves it)."""
+    plugin: str
+    name: str
+    routes: tuple
+    verify: Callable
+    handle: Callable
+    poll: Callable | None = None
+    poll_interval_s: int | None = None
+    helpers: Callable | None = None   # helpers(config) -> list[dict(name, argv, env=None)]
 
 
 @dataclasses.dataclass
@@ -163,6 +178,45 @@ class PluginAPI:
         if not callable(fn):
             raise TypeError("fn must be callable")
         self._r.pipeline_hooks.append((self.name, fn))
+
+    def register_event_source(self, name: str, *, routes: list, verify: Callable, handle: Callable,
+                              poll: Callable | None = None, poll_interval_s: int | None = None,
+                              helpers: Callable | None = None) -> None:
+        """An external event source for `swarm events serve`.
+
+        routes: URL paths the listener hands to this source (e.g. ["/gitea"]).
+        verify(headers, body) -> bool runs on the raw body BEFORE anything parses it.
+        handle(headers, body, ctx) -> list[EventSpec]; EventSpec = dict(job, kind, key, text, to=None).
+        poll(ctx) -> list[EventSpec] | None runs every poll_interval_s seconds (needs both).
+        ctx (EventContext): .board, .config (this source's [events.sources.<name>]), .post, .log.
+        helpers(config) -> list[dict(name, argv, env=None)]: per-source helper processes the listener
+        keeps running (restart with backoff, health in the safety nets), e.g. `gh webhook forward`, an
+        outbound websocket that delivers webhooks here. argv is a list (no shell); env adds to the
+        listener's environment; never put a token in argv (use a token_file the helper reads).
+        poll_interval_s has a floor ([events] min_poll_interval_s, 600) unless the source's config sets
+        poll_interval_s itself.
+        Core never interprets kind or the body."""
+        if not isinstance(name, str) or not name.replace("-", "").replace("_", "").isalnum() or not name[:1].isalpha():
+            raise ValueError(f"bad event source name {name!r}")
+        if name in self._r.event_sources:
+            raise ValueError(f"event source {name!r} already exists ({self._r.event_sources[name].plugin})")
+        if (not isinstance(routes, (list, tuple)) or not routes
+                or not all(isinstance(r, str) and r.startswith("/") and len(r) > 1 and "?" not in r for r in routes)):
+            raise ValueError("routes must be a non-empty list of paths starting with /")
+        taken = {r for src in self._r.event_sources.values() for r in src.routes}
+        if taken & set(routes):
+            raise ValueError(f"event route already taken: {sorted(taken & set(routes))[0]}")
+        if not callable(verify) or not callable(handle):
+            raise TypeError("verify and handle must be callable")
+        if helpers is not None and not callable(helpers):
+            raise TypeError("helpers must be callable")
+        if poll is not None and not callable(poll):
+            raise TypeError("poll must be callable")
+        if poll is not None and (not isinstance(poll_interval_s, int) or isinstance(poll_interval_s, bool)
+                                 or poll_interval_s < 1):
+            raise ValueError("poll needs poll_interval_s, a positive integer")
+        self._r.event_sources[name] = EventSource(self.name, name, tuple(routes), verify, handle, poll,
+                                                  poll_interval_s, helpers)
 
     def register_blocker_kind(self, kind: str, display: Callable | None = None,
                               expiry: Callable | None = None, protection: str = "addressed") -> None:
@@ -219,6 +273,7 @@ class Registry:
         self.watch_hooks: list[tuple[str, Callable]] = []
         self.orchestrator_hooks: list[tuple[str, Callable]] = []
         self.agent_hooks: list[tuple[str, Callable]] = []
+        self.event_sources: dict[str, EventSource] = {}
 
     # ---- loading
 
@@ -257,6 +312,7 @@ class Registry:
             return
         info.commands = sorted(c for c, v in self.commands.items() if v.plugin == name)
         info.extends = sorted({e.command for e in self.extensions if e.plugin == name})
+        info.sources = sorted(n for n, v in self.event_sources.items() if v.plugin == name)
 
     def _discover(self):
         dirs = [self.config_path.parent / "plugins"]
@@ -410,6 +466,7 @@ class Registry:
         for hooks in (self.blocker_event_hooks, self.watch_hooks, self.orchestrator_hooks, self.agent_hooks):
             hooks[:] = [h for h in hooks if h[0] != plugin]
         self.blocker_kinds = {k:v for k,v in self.blocker_kinds.items() if v[0] != plugin}
+        self.event_sources = {k: v for k, v in self.event_sources.items() if v.plugin != plugin}
 
     def _lines(self, hooks, what, job, board):
         out = []
@@ -469,7 +526,7 @@ class Registry:
             return ["no plugins found (looked in " + ", ".join(str(d) for d in self.search_dirs()) + ")"]
         lines = []
         for p in self.plugins:
-            what = ", ".join([*p.commands, *(f"+{c}" for c in p.extends)]) or "-"
+            what = ", ".join([*p.commands, *(f"+{c}" for c in p.extends), *(f"events:{n}" for n in p.sources)]) or "-"
             state = "loaded" if p.loaded else "disabled" if p.disabled else "ERROR"
             lines.append(f"{p.name}\t{state}\t{what}\t{p.source}")
             if p.error and not p.disabled:

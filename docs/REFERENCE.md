@@ -1465,6 +1465,60 @@ host's, otherwise the harnesses whose hooks have run for this OS user, else whic
 trusted (`/hooks`); one that never joins is killed after `enrol_minutes`. Logs:
 `~/.local/share/swarm/supervisor/supervise.log`, `journalctl --user -u swarm-supervise.service`.
 
+## External events: the listener and the safety nets
+
+A plugin can register an **event source** (the engineering-team forge adapters are the first). Core
+never interprets an event: a source turns a request or a poll into `EventSpec`s
+(`dict(job, kind, key, text, to=None)`) and core posts them with `Board.post_event`, idempotent per
+job + kind + key, for the orchestrator (or `to`) to wake on (`swarm event wait`).
+
+| | |
+|---|---|
+| `swarm events serve` | the HTTP listener: one path per source's routes, `GET /healthz` for liveness. Needs `[events] enabled = true` and a plugin source. One per user (a lock in the supervisor's private directory) |
+| `swarm events check` | the safety-net checks once (exit 1 when something is wrong, one `SWARM-ALERT` per job posted) |
+
+```toml
+[events]
+enabled = false            # the listener, the keep-alive and the checks are all off by default
+bind = "127.0.0.1"         # put a reverse proxy or the LAN address here deliberately
+port = 8923
+max_body_bytes = 1048576   # bigger bodies are refused (413) without being read
+model = "haiku"            # the model for anything a watcher pass must read; never the orchestrator's
+triage = false             # true: one Haiku call summarises an alert into one line
+stall_minutes = 60         # job with live agents and no activity this long
+unacked_minutes = 30       # orchestrator events or messages unread/unacked this long
+waiter_stale_seconds = 120 # `event wait` heartbeat older than this = not armed
+min_poll_interval_s = 600  # floor for a source's poll(); a source's own poll_interval_s in its table lowers it
+alert_repeat_minutes = 60  # the same problem is re-alerted at most this often
+
+[events.sources.<name>]    # the source's own keys: secret_file, token_file, repo, ...
+```
+
+**Listener rules.** The signature is verified on the raw bytes before anything parses the body (a
+`verify` that raises is a refusal, 403); the body is capped before it is read (413; no chunked
+bodies, 411); the request line, headers and body are never logged, nor is an exception's text, only
+the source, the status and a count. Secrets are paths to files (`secret_file`, `token_file`), never
+values in the config.
+
+**Keep-alive.** Every `swarm supervise` pass (the existing timer) starts the listener detached when
+`[events] enabled` and nothing answers on the port; a listener that holds its lock but does not answer
+is left alone and alerted. Sources with a `poll` are polled by the listener on their own
+`poll_interval_s`.
+
+**Helpers.** A source may declare helper processes (`helpers=` in `register_event_source`), for example
+`gh webhook forward` for GitHub: callbacks over an outbound websocket, no public endpoint, no polling.
+The listener starts them, restarts one that exits (5, 15, 60, 300 s backoff) and publishes their health;
+`events check` and the supervisor pass raise a `forwarder-down` alert when one is down or the listener that
+supervises them is not running.
+
+**Safety nets** (the hourly cron check, now a supervision pass). For each active job: the listener is
+up; the orchestrator's `swarm event wait` is armed (its heartbeat, the job data key
+`events.waiter.<role|orchestrator>`, is fresh); the job has not stalled; no event for the orchestrator
+is unacked, and no message to it unread, longer than `unacked_minutes`. Problems go out as one
+`SWARM-ALERT` event per job and window (a board without events gets one plain board notice). The checks are
+deterministic; with `triage = true` a Haiku call (`[events] model`, or the job's `events.model` job data)
+writes the one-line summary. The model is never inherited from the orchestrator or the environment.
+
 ## Review pipeline
 
 The owner supervisor drives review on the same timer as crash recovery. `[pipeline] enabled`
@@ -2378,6 +2432,7 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `leave (--as NAME \| --key K \| --session S)` | release a name (exit 1 if no active agent matched); `--session S` marks every unfinished agent of that session's jobs left ("session restarted"), for a session start after a restart killed them |
 | `purge` | apply retention now, and [auto-close](#auto-close) the jobs that are done and quiet (`status`, `join`, `activate`, `watch` and `tail` do that too) |
 | `supervise [--dry-run] [--job J]` | one supervisor pass (the systemd user timer runs it every `[supervise] timer_minutes`; on unless `[supervise] enabled = false`): recover this machine's crashed agents and orphaned coordinators within budgets, or post once why not; then print the caps. `--dry-run` prints what it would do and changes nothing |
+| `events serve` / `events check` | `serve`: the HTTP listener plugins' event sources feed (`[events] enabled`; the supervisor keeps it running). `check`: the safety-net checks once (listener up, `event wait` armed, job stalled, events unacked), one `SWARM-ALERT` per job; exit 1 on a problem |
 | `transcript list [--job J] [--agent NAME] [--color auto\|always] [--no-color]` | archived transcripts with their host (`claude`/`codex`), raw/stored size, ratio, redactions, final flag and capture time, then a total (see [Transcript archive](#transcript-archive-optional)). Coloured by kind (host, size/ratio, redactions) on a real terminal or `--color=always`; `--no-color`/`NO_COLOR` always wins |
 | `transcript show (--job J --agent NAME \| --agent NAME \| --job J --orchestrator \| [--job J] --key K) [--format text\|jsonl] [--tail N] [--grep RE] [-o FILE] [--color auto\|always] [--no-color]` | print one transcript as readable turns, or its redacted JSONL. Coloured by turn kind (user/assistant/tool call/tool result/memory) on a real terminal or `--color=always` (`--format jsonl` is never coloured); `--no-color`/`NO_COLOR` always wins, and never with `-o`/`--output` |
 | `transcript export --job J [DIR]` | every transcript of the job as `.jsonl` files plus `index.tsv` |

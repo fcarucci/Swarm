@@ -136,6 +136,16 @@ max_total_mb = 2048                 # total stored (compressed); over it, whole 
 snapshot_minutes = 15               # re-capture running agents this often (0 = only at stop/close)
 max_mb = 50                         # per transcript, compressed; a larger one keeps its head and tail
 
+# [events]
+# External events (docs/REFERENCE.md#external-events-the-listener-and-the-safety-nets): the listener plugins' event sources
+# feed (`swarm events serve`, kept running by the supervisor) and the safety-net checks. Off by default.
+# enabled = false
+# bind = "127.0.0.1"
+# port = 8923
+# max_body_bytes = 1048576
+# model = "haiku"          # for anything a watcher pass must read; never the orchestrator's model
+# [events.sources.<name>]  # a source's own keys, e.g. secret_file = "~/.config/x/webhook-secret"
+
 # [supervise]
 # Recover jobs created here after their coordinator and all workers disappear.
 # orphan_minutes = 15

@@ -16,6 +16,9 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 ### Added
 - External events (schema 21): `swarm event post|list|ack|wait` record "something happened outside the board" for the orchestrator, a role or an agent. Posts are idempotent per job, kind and key; `event wait` blocks until one is pending (Postgres `LISTEN`, a one-second poll elsewhere; exit 124 on timeout). Pending events show in the hook context, a compact line each, until acked. Python API: `Board.post_event`, `events`, `pending_events`, `ack_events`, `wait_event`.
+- `swarm events serve`: an HTTP listener for external event sources that plugins register with `api.register_event_source` (routes, `verify` before parse, `handle`, optional `poll`). Signature checked on the raw body, body size capped, nothing of a request logged. Off by default (`[events] enabled`); `swarm supervise` keeps it running.
+- Event sources can declare helper processes (e.g. `gh webhook forward`): the listener keeps them running with backoff and a `forwarder-down` alert; source polls have a 600 s floor (`[events] min_poll_interval_s`) unless the source's config lowers it.
+- Safety-net checks in the supervisor pass and `swarm events check`: listener up, orchestrator `event wait` armed, job stalled, events or messages for the orchestrator unacked too long. One `SWARM-ALERT` per job; an optional Haiku summary uses `[events] model`, never the orchestrator's.
 
 ### Changed
 - Schema 20 (applied automatically on first use, on every backend): a nullable `agents.title` and a last `title` column of the `agent_status` view. Boards stay readable by the previous release, which shows no titles; as always, upgrade every host sharing a board together. `swarm who` gains a TITLE field after the role (empty without one).
