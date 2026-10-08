@@ -182,10 +182,17 @@ def merge_team_models(cfg: dict, config_path: Path) -> None:
     """team.toml's [models.<host>] role -> model tables fill the roles config.toml leaves out
     (config.toml wins). Only those tables are read; a missing or broken file is ignored."""
     team = Path(os.environ.get("SWARM_TEAM_CONFIG") or config_path.parent / "team.toml").expanduser()
+    from swarm import safefs
     try:
-        with open(team, "rb") as fh:
-            tables = tomllib.load(fh).get("models")
-    except (OSError, tomllib.TOMLDecodeError):
+        fd = safefs.open_base(team.parent, create=False)
+        try:
+            data = safefs.read(fd, team.name)
+        finally:
+            os.close(fd)
+        if data is None:
+            return
+        tables = tomllib.loads(data.decode()).get("models")
+    except (OSError, ValueError, tomllib.TOMLDecodeError):
         return
     for host, roles in (tables.items() if isinstance(tables, dict) else ()):
         if isinstance(roles, dict):
