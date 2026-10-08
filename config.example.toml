@@ -95,6 +95,13 @@ orphan_minutes = 30
 #   failed ("goal not met"). 0 = never (default). A job's own `swarm activate --stall-hours N`
 #   takes precedence (0 = never).
 goal_stall_hours = 0
+# stale_waiting_minutes: a job that is waiting (for anything: a wait, a goal without a met verdict,
+#   pipeline artifacts awaiting finalization) with no live agent and no board activity for this long
+#   gets one notice on the board. stale_waiting_close_minutes: after this much quiet in total it is
+#   closed (completed if a met verdict exists, else failed). Judges that run outside the board must
+#   record `swarm verdict`, or the job waits until this closes it. 0 = off.
+stale_waiting_minutes = 120
+stale_waiting_close_minutes = 240
 
 [plugins]
 # CLI plugins (see docs/PLUGINS.md) are found in <config dir>/plugins/, $SWARM_PLUGIN_PATH, the skills'

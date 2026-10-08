@@ -661,8 +661,9 @@ class ExpiryCliTests(Env):
         self.assertIn("J: auto-closed: no live agents for 30 min", out)
         self.assertEqual(self.job().status, "cancelled")
 
-    # ---- a goal job is never closed by a sweep
+    # ---- a goal job is never closed by the orphan or stall sweeps (the stale-waiting rule is off here)
     def test_a_goal_job_survives_every_sweep(self):
+        self.config.write_text(self.config.read_text() + "[job]\nstale_waiting_minutes = 0\n")   # (stale waiting is tested apart)
         self.activate("J", "--goal", "ship it")
         self.age("J", 40 * MIN)
         _, out, _ = self.cli("purge")
@@ -672,6 +673,7 @@ class ExpiryCliTests(Env):
         self.assertEqual(self.job().status, "active")
 
     def test_an_idle_goal_job_can_be_attached_to_by_any_session(self):
+        self.config.write_text(self.config.read_text() + "[job]\nstale_waiting_minutes = 0\n")   # (stale waiting is tested apart)
         self.activate("J", "--goal", "ship it")
         self.age("J", 99 * HOUR)
         self.markers.joinpath("J.json").unlink()      # the orchestrator's session is gone
@@ -698,7 +700,7 @@ class ExpiryCliTests(Env):
 
     def test_goal_stall_hours_in_the_config_closes_a_stalled_goal_job_as_failed(self):
         self.assertEqual(self.cfg["job"]["goal_stall_hours"], 0)   # never, by default
-        self.config.write_text(self.config.read_text() + "[job]\ngoal_stall_hours = 6\n")
+        self.config.write_text(self.config.read_text() + "[job]\ngoal_stall_hours = 6\nstale_waiting_minutes = 0\n")
         self.activate("G", "--goal", "ship it")
         self.activate("O", "--goal", "ship it", "--stall-hours", "0")   # its own: never
         self.age("G", 5 * HOUR)

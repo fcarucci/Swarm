@@ -118,7 +118,12 @@ DEFAULTS = {
     # with no live agent (all done, dead or gone; waiting and paused jobs excluded) and no board activity
     # for that long is closed "cancelled". 0 turns either off. Neither closes a job with a goal
     # and no met verdict; goal_stall_hours is that job's own stall limit (0 = never, the default).
-    "job": {"auto_close_minutes": 30, "stall_hours": 4, "orphan_minutes": 30, "goal_stall_hours": 0},
+    # stale_waiting_minutes: a job that is waiting (for anything, a goal's verdict included) with no
+    # live agent and no board activity for that long gets one board notice; at
+    # stale_waiting_close_minutes of quiet it is closed (completed with a met verdict, else failed).
+    # 0 turns the notice and close off.
+    "job": {"auto_close_minutes": 30, "stall_hours": 4, "orphan_minutes": 30, "goal_stall_hours": 0,
+            "stale_waiting_minutes": 120, "stale_waiting_close_minutes": 240},
     # Codex fires SubagentStop after every turn of a child: it counts as completed once no new
     # turn came for this long
     "codex": {"stop_quiet_minutes": 3},
@@ -292,6 +297,12 @@ def auto_close_minutes(cfg: dict) -> float:
     return float((cfg.get("job") or {}).get("auto_close_minutes") or 0)
 
 
+def stale_limits(cfg: dict) -> tuple[float, float]:
+    """([job] stale_waiting_minutes, [job] stale_waiting_close_minutes); 0 = off."""
+    job = cfg.get("job") or {}
+    return float(job.get("stale_waiting_minutes") or 0), float(job.get("stale_waiting_close_minutes") or 0)
+
+
 def job_limits(cfg: dict) -> tuple[float, float, float]:
     """([job] stall_hours, [job] orphan_minutes, [job] goal_stall_hours); 0 = that rule is off."""
     job = cfg.get("job") or {}
@@ -408,10 +419,14 @@ def sweep_jobs(board, cfg: dict, deadline: float | None = None) -> list:
     if minutes > 0:
         closed = board.sweep_auto_close(minutes, lambda job: OrchestratorWatch(cfg, minutes, job))
     stall_hours, orphan_minutes, goal_stall_hours = job_limits(cfg)
+    stale_minutes, stale_close_minutes = stale_limits(cfg)
     try:   # best effort: never fails the caller (a per-job cap applies even with the defaults off)
         closed += board.sweep_expiry(stall_hours, orphan_minutes,
                                      lambda job: OrchestratorWatch(cfg, orphan_minutes, job),
-                                     goal_stall_hours=goal_stall_hours)
+                                     goal_stall_hours=goal_stall_hours,
+                                     stale_waiting_minutes=stale_minutes,
+                                     stale_waiting_close_minutes=stale_close_minutes,
+                                     stale_watch=lambda job: OrchestratorWatch(cfg, stale_minutes, job))
     except Exception as exc:
         from swarm.board import BoardUnavailable
         if isinstance(exc, BoardUnavailable):
@@ -3077,8 +3092,11 @@ def cmd_deactivate(cfg: dict, args) -> int:
             pending = pending_artifacts(board, args.job)
             refusal = (f"not completing {args.job}: artifacts await a met verdict: " + ', '.join(pending)
                        if pending else None)
-            if not refusal and auto_close_pending(board, args.job):
-                refusal = f'not completing {args.job}: accepted artifacts await finalization'
+            if not refusal and auto_close_pending(board, args.job) \
+                    and not _learned_since(board, js, js.verdict_at):
+                refusal = (f'not completing {args.job}: accepted artifacts await finalization '
+                           f'(next: `swarm learn --job {args.job} --bank BANK -` with the distilled facts, then run '
+                           f'deactivate again; or have the executor post FINALIZED <artifact>)')
     if refusal and not args.force:
         board.close()
         print(refusal, file=sys.stderr)
@@ -3107,6 +3125,7 @@ def cmd_deactivate(cfg: dict, args) -> int:
         _learning_instructions(args.job)
         return 0
     forced = bool(refusal)
+    learned = _learned_since(board, js)
     try:
         with board:
             known = board.close_job(args.job, args.status, args.outcome, forced=forced,
@@ -3121,12 +3140,29 @@ def cmd_deactivate(cfg: dict, args) -> int:
     except Exception as exc:
         print(f"deactivated {args.job}; could not record status ({_error_name(exc)})",
               file=sys.stderr)
-    _learning_instructions(args.job)
+    _learning_instructions(args.job, learned=learned, closed=True)
     return 0
 
 
-def _learning_instructions(job: str) -> None:
-    print(f"Required learnings step for {job}: distill what the job learned into self-contained facts. "
+def _learned_since(board, js, since=None) -> bool:
+    """Whether `swarm learn --job J` retained a learning for this run of the job (any bank), after
+    `since` when given. It reads the durable provenance learn writes (writer swarm-learn)."""
+    if board is None or js is None:
+        return False
+    start = max(t for t in (js.activated_at or js.created_at, since) if t is not None)
+    try:
+        return any(r.writer == "swarm-learn" and r.created_at >= start
+                   for r in board.memory_refs(job=js.job))
+    except Exception:
+        return False
+
+
+def _learning_instructions(job: str, learned: bool = False, closed: bool = False) -> None:
+    if learned:
+        print(f"Learnings for {job} are already recorded (swarm learn); nothing more to do.")
+        return
+    note = " (the job is closed; this is a reminder, not a refusal, and --force is not needed)" if closed else ""
+    print(f"Required learnings step for {job}{note}: distill what the job learned into self-contained facts. "
           "Run `swarm learn --list-banks` and retain them in the best-matching EXISTING bank, "
           f"strongly preferring banks that already cover the topic: `swarm learn --job {job} --bank BANK -`. "
           "Create a bank only when strictly necessary, with explicit --create-bank.")

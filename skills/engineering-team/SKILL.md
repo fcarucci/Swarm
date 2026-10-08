@@ -27,6 +27,10 @@ pushing. The owner supervisor starts independent artifact-bound review and bound
 Judges must record `swarm verdict --job J --as NAME --artifact branch@sha met --reason "evidence"`
 (or `not_met --reason "missing" --next "fix brief"`). **Always pass `--artifact` for the exact
 hand-off inspected.** A leading `branch@sha:` in the reason is accepted for compatibility.
+A judge run outside the board (a one-off `codex exec`, a person) must still record its result with
+`swarm verdict --job J --as NAME --artifact REF met|not_met ...` (`swarm join --job J --key K --judge`
+first); otherwise the goal stays unmet and the job waits until the stale-waiting sweep closes it. Close
+the job as soon as the verdict is `met`.
 Judges only judge; integration, pushes and fixes belong to executors. A newer SHA on the same
 branch supersedes its earlier hand-off; separate branches keep independent verdicts.
 A separate INTEGRATOR rebases the branch onto the latest target locally with `git rebase`,

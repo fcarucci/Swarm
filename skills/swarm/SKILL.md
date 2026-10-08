@@ -202,6 +202,14 @@ On Postgres the same data is queryable directly as the `agent_status` and `job_s
   `waiting (goal not met)` while no agent works on it). Only the judge's `met` or `swarm
   deactivate` ends it, unless the job has its own `--stall-hours` or `[job] goal_stall_hours` is
   set: then no progress for that long closes it `failed`, outcome `...; goal not met`.
+- **Stale waiting** is the other exception, so a job never waits silently for ever. A job that is
+  `waiting` for any reason (including `waiting (goal not met)`), with no agent started, running or
+  idle and no board activity for `[job] stale_waiting_minutes` (default 120), gets one notice on the
+  board from `swarm`. After `[job] stale_waiting_close_minutes` of quiet (default 240) it is closed
+  through the same auto-close path (`closed_by auto`): `completed` if its verdict is `met`, else
+  `failed`, outcome `auto-closed: waiting with no live agents and no verdict`. A bounded wait or an
+  open question to a person still shields it; the orchestrating session at work keeps it open. `0`
+  turns it off.
 
 `swarm wait --on "<what>" --for 90m` (`h`, `m`, `s`; a bare number is minutes) bounds a wait: until
 it expires the wait shields the job from orphan and stall rules, including `goal_stall_hours`; past it
@@ -271,6 +279,11 @@ user asks for one. Don't run duplicate jobs: merge similar ones (`swarm job merg
      References are opaque: a report path, deployment id, URL, or coding `branch@sha`.
      The supervisor starts a judge on each new hand-off, reusing the job's single judge seat
      between artifacts. You may also seat a judge explicitly with `[swarm role: judge]`.
+     **A judge run outside the board** (a one-off `codex exec`, another tool, a person) **MUST
+     record its result with `swarm verdict --job J --as NAME ...`** (seat it first with
+     `swarm join --job J --key K --judge`). A verdict only in its own output is invisible to the
+     job: the goal stays unmet and the job waits for ever. As soon as the verdict is `met`, the
+     orchestrator closes the job (`learn`, then `deactivate`); do not leave it waiting.
      Judges only inspect and record `swarm verdict --job J --as NAME --artifact REF met
      --reason "evidence"` or `not_met --reason "missing" --next "fix brief"`.
      **Always include `--artifact REF` for the exact hand-off inspected.** For compatibility,
@@ -357,6 +370,8 @@ user asks for one. Don't run duplicate jobs: merge similar ones (`swarm job merg
    `swarm deactivate --job <job> [--status completed|cancelled|failed] [--outcome "<summary>"]`.
    Add `--delete-bank` only for an explicit project bank whose learnings have already been
    successfully retained elsewhere with `swarm learn`; otherwise deletion is refused.
+   A learning recorded with `swarm learn --job <job>` (any bank) is seen by `deactivate`: it
+   says so instead of asking again, and it satisfies a pipeline job's finalization wait.
    This closes the job, and any agent still active on it is marked `left`. **A job with a goal
    isn't completed until the judge's latest verdict is `met`:** until then `deactivate`
    (status `completed`) refuses and prints the judge's last reason. Keep the swarm working on
@@ -445,7 +460,7 @@ way its own host does it. `swarm status --job <job>` shows each agent's HOST and
 | `activate --job J --attach [--session S]` | bind this session to a job that is already active (e.g. from the other host) without reopening it; see [One job, both hosts](#one-job-both-hosts) |
 | `activate … --goal G\|-` | give the job a goal: one judge (`[swarm role: judge]` in its prompt) decides when it is met; prints both tag lines |
 | `deactivate --job J [--status S] [--outcome O] [--force] [--delete-bank]` | switch the board off and close the job; `completed` needs the judge's `met` verdict when the job has a goal, unless `--force` (recorded). On a job that is already closed (e.g. auto-closed) it replaces the status and outcome |
-| `verdict --job J --as NAME [--artifact REF] met\|not_met "reason"` | the job's judge only: record the verdict on its goal and post it on the board (queued like `post` when the board is unreachable; a non-judge is refused) |
+| `verdict --job J --as NAME [--artifact REF] met\|not_met "reason"` | the job's judge only (a judge outside the board must run this too, or the job waits): record the verdict on its goal and post it on the board (queued like `post` when the board is unreachable; a non-judge is refused) |
 | `wait --job J --on "<what>" [--for DURATION\|--until TIME]` / `resume --job J` | mark an open job as waiting for something (shown as `waiting` with the reason; `--for 90m` or `--until 17:30` bounds it, and a bounded wait that has not ended protects the job from auto-close) / working again (an agent joining does this too) |
 | `blockers --job J [--open\|--all]` | list open blockers, or include resolved/expired history with `--all` |
 | `blocker resolve ID [--how TEXT]` / `blocker comment ID TEXT...` | resolve a blocker with an audit reason, or append a comment |

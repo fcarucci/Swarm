@@ -354,7 +354,7 @@ class MemoryBoard(MemoryBlockers, Board):
             j = s.jobs.get(job)
             if guard and not (j and guard.allows(j["goal"], j["verdict"], j.get("max_hours")) and not any(protects(b, self.now()) for b in self.blockers(job))):
                 return False
-            if guard and guard.settled and j and j.get("goal") and j.get("max_hours") is None:
+            if guard and guard.settled and not guard.pending_ok and j and j.get("goal") and j.get("max_hours") is None:
                 from swarm.review import auto_close_pending
                 if auto_close_pending(self, job):
                     return False

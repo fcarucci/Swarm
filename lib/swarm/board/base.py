@@ -952,6 +952,7 @@ class CloseGuard:
     settled: bool = True
     goal: str | None = None
     max_hours: float | None = None
+    pending_ok: bool = False   # settled close that need not wait for pipeline finalization (stale waiting, met verdict)
 
     def allows(self, goal: str | None, verdict: str | None, max_hours: float | None) -> bool:
         if self.settled:
@@ -967,6 +968,20 @@ class ExpiryAction:
     outcome: str
     cap: float | None
     guard: CloseGuard
+    stale: bool = False   # the stale-waiting close (no live agents, quiet): re-checked like the orphan close
+
+
+STALE_NOTICE = "stale waiting: no live agents, no activity since "   # the board notice's start
+STALE_SINCE = re.compile(re.escape(STALE_NOTICE) + r"(\S+?)[;.]")
+
+
+def stale_waiting(js: JobStatus, now: _dt.datetime, minutes: float, since: _dt.datetime | None = None) -> bool:
+    """The stale-waiting test on the rollup: no agent started, running or idle, and no board
+    activity (`since`, else last_activity_at, else the run's start) for `minutes`. Whether the job
+    is waiting at all is Board._is_waiting's question."""
+    if not minutes or minutes <= 0 or js.started or js.running or js.idle:
+        return False
+    return now - (since or js.last_activity_at or run_start(js)) >= _dt.timedelta(minutes=minutes)
 
 
 def stall_cap(js: JobStatus, stall_hours: float, goal_stall_hours: float) -> float | None:
@@ -1363,7 +1378,8 @@ class Board(abc.ABC):
         return max(t for t in times if t)
 
     def sweep_expiry(self, stall_hours: float, orphan_minutes: float, watch=None,
-                     goal_stall_hours: float = 0) -> list[AutoClosed]:
+                     goal_stall_hours: float = 0, stale_waiting_minutes: float = 0,
+                     stale_waiting_close_minutes: float = 0, stale_watch=None) -> list[AutoClosed]:
         """Close the open jobs that outlived their welcome (`[job] stall_hours`, `orphan_minutes`;
         0 or less turns a rule off). Returns what it closed. Template method, not overridden.
 
@@ -1390,20 +1406,85 @@ class Board(abc.ABC):
         The job is read again right before the close, so an agent that joined (or progress made)
         meanwhile keeps it open, and close_job re-checks the goal atomically with the close
         (a goal set, or a verdict changed, since the first read). Idempotent; costs one jobs()
-        query when nothing qualifies."""
+        query when nothing qualifies.
+
+        Stale waiting (`[job] stale_waiting_minutes`, `stale_waiting_close_minutes`; 0 = off): a job
+        that is waiting for any reason (a wait, a blocker, a goal without a met verdict, pipeline
+        artifacts awaiting finalization) with no agent started, running or idle and no board
+        activity for stale_waiting_minutes gets one board notice from "swarm" (the same notice
+        carries the quiet start, so it is posted once); once it has been quiet for
+        stale_waiting_close_minutes it is closed through this same path (closed_by AUTO_CLOSED_BY):
+        "completed" if its verdict is met, else "failed", outcome "auto-closed: waiting with no
+        live agents and no verdict". A wait or question that protects the job (wait_protects)
+        and an orchestrator session at work (`stale_watch(job).active()`) keep it open."""
         now = self.now()
         self.expire_blockers(now)
         closed = []
         for js in self.jobs(False):
             seen_activity = js.last_activity_at
             js = self._clear_expired_wait(js, now)
-            action = self._expiry_action(js, now, stall_hours, orphan_minutes, goal_stall_hours, watch)
+            action = self._stale_waiting_action(js, now, stale_waiting_minutes, stale_waiting_close_minutes,
+                                                stale_watch) \
+                or self._expiry_action(js, now, stall_hours, orphan_minutes, goal_stall_hours, watch)
             if action is None or not self._expiry_holds(action, self.job_status(js.job), seen_activity, now, js.waiting_until):
                 continue   # (the job is read again: nothing changed since the rollup?)
             # a goal set, or a verdict changed, since the read is checked again, atomically with the close
             if self.close_job(js.job, action.status, action.outcome, closed_by=AUTO_CLOSED_BY, guard=action.guard):
                 closed.append(AutoClosed(js.job, action.outcome))
         return closed
+
+    def _is_waiting(self, js: JobStatus, now: _dt.datetime) -> bool:
+        """Open and waiting for something: derive_job_status says waiting, or a goal job whose
+        goal is unmet or whose pipeline artifacts still await acceptance or finalization."""
+        if js.status != "active":
+            return False
+        if derive_job_status(js, 0, now) in ("waiting", WAITING_GOAL):
+            return True
+        from swarm.review import auto_close_pending
+        return bool(js.goal) and auto_close_pending(self, js.job)
+
+    def _stale_waiting_action(self, js: JobStatus, now: _dt.datetime, notice_minutes: float,
+                              close_minutes: float, watch) -> ExpiryAction | None:
+        """The stale-waiting close for sweep_expiry, or None. Between the notice and the close
+        threshold it posts the notice (once) and returns None."""
+        if not notice_minutes or notice_minutes <= 0 or wait_protects(js) or not self._is_waiting(js, now):
+            return None
+        last = self.recent_messages(1, job=js.job)
+        notice = last[-1] if last and last[-1].agent_name == "swarm" \
+            and last[-1].message.startswith(STALE_NOTICE) else None
+        since = None
+        if notice is not None and (js.last_activity_at is None or js.last_activity_at <= notice.created_at):
+            m = STALE_SINCE.match(notice.message)   # nothing since the notice: its quiet start still holds
+            try:
+                since = _dt.datetime.fromisoformat(m.group(1)) if m else None
+            except ValueError:
+                since = None
+        else:
+            notice = None
+        if not stale_waiting(js, now, notice_minutes, since):
+            return None
+        if watch is not None and watch(js.job).active():
+            return None
+        quiet_since = since or js.last_activity_at or run_start(js)
+        total = max(close_minutes or 0, notice_minutes)
+        if close_minutes and close_minutes > 0 and now - quiet_since >= _dt.timedelta(minutes=total):
+            met = js.verdict == "met"
+            outcome = ("auto-closed: waiting with no live agents; verdict met" if met
+                       else "auto-closed: waiting with no live agents and no verdict")
+            guard = CloseGuard(pending_ok=True) if met or not goal_unmet(js) else CloseGuard(False, js.goal, js.max_hours)
+            return ExpiryAction("completed" if met else "failed", outcome, None, guard, stale=True)
+        if notice is None:
+            left = f"; auto-closes in {max(1, int(total - (now - quiet_since).total_seconds() / 60))} min" \
+                if close_minutes and close_minutes > 0 else ""
+            self.post(js.job, "swarm", f"{STALE_NOTICE}{quiet_since.isoformat(timespec='seconds')}; "
+                      f"waiting on {self._waiting_reason(js)}{left}. Close it (swarm deactivate) or resume work.")
+        return None
+
+    @staticmethod
+    def _waiting_reason(js: JobStatus) -> str:
+        if js.waiting_on:
+            return js.waiting_on
+        return "a judge's met verdict" if goal_unmet(js) else "its pipeline"
 
     def _clear_expired_wait(self, js: JobStatus, now: _dt.datetime) -> JobStatus:
         # An expired wait's end is grace for the orphan clock, just as before schema 18.
@@ -1442,7 +1523,7 @@ class Board(abc.ABC):
         goal job, no progress (a post, verdict or new agent) since."""
         if now_js is None or now_js.status != "active" or wait_protects(now_js):
             return False
-        if action.status == "cancelled":
+        if action.status == "cancelled" or action.stale:
             return not (now_js.started or now_js.running or now_js.idle or now_js.last_activity_at != seen_activity)
         return not (goal_unmet(now_js) and now - self.progress_at(now_js, grace) < _dt.timedelta(hours=action.cap))
 

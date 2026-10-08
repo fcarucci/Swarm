@@ -1056,7 +1056,7 @@ class PostgresBoard(SqlBlockers, Board):
                                          (job,)).fetchone()
                 if not row or not guard.allows(*row) or any(protects(b, self.now()) for b in self.blockers(job)):
                     return False
-                if guard.settled and row[0] and row[2] is None:
+                if guard.settled and not guard.pending_ok and row[0] and row[2] is None:
                     from swarm.review import auto_close_pending
                     if auto_close_pending(self, job):
                         return False

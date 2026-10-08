@@ -759,6 +759,8 @@ On Postgres, re-run `swarm init` after changing `idle_minutes`, `dead_minutes` o
 | `stall_hours` | `4` | an open job with no progress (no agent post, verdict or new agent; tool calls and heartbeats don't count) for this long closes as `failed`, whatever its agents do; a job that keeps progressing is never closed by it. `activate --stall-hours N` sets one job's own limit, `0` = never; `0` here turns the default off. Not applied to a job with a goal and no `met` verdict (see `goal_stall_hours`) |
 | `orphan_minutes` | `30` | an open job that is not waiting, with no live agent and no board activity for this long closes as `cancelled`; `0` turns it off. Never closes a job with a goal and no `met` verdict |
 | `goal_stall_hours` | `0` | the stall limit of a job with a goal and no `met` verdict, which `stall_hours` and `orphan_minutes` never close: no progress for this long closes it as `failed`, `auto-closed: no progress for N h; goal not met` (plus its last verdict); `0` = never. The job's own `activate --stall-hours N` takes precedence (`0` = never) |
+| `stale_waiting_minutes` | `120` | a job that is waiting for any reason (a wait, a goal without a met verdict, artifacts awaiting finalization) with no agent started, running or idle and no board activity for this long gets one notice on the board (from `swarm`); `0` = off. A bounded wait or an open question to a person still shields it |
+| `stale_waiting_close_minutes` | `240` | total quiet after which that job is closed through the auto-close path (`closed_by auto`): `completed` with a met verdict, else `failed`, `auto-closed: waiting with no live agents and no verdict`; `0` = notice only |
 
 **`[sqlite]`** (with `backend = "sqlite"`)
 
