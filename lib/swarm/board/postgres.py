@@ -425,6 +425,7 @@ _JOB_STATUS_COLS = ("job, status, description, task, outcome, created_by, sessio
                     "verdict_by, verdict_at, completion_forced, judge, waiting_on, waiting_since, closed_by, "
                     "supervise, verdict_next, max_hours, waiting_until, open_blockers, protected_blockers")
 _MESSAGE_COLS = "id, created_at, job, agent_name, to_agent, message"
+_MESSAGE_COLS_M = ", ".join("m." + c.strip() for c in _MESSAGE_COLS.split(","))
 _RESTART_COLS = ("id, job, agent_key, attempt, at, reason, old_agent_key, new_agent_key, harness, host, "
                  "os_user, minutes_cap, ended_at, outcome")   # Restart field order
 
@@ -1337,6 +1338,11 @@ class PostgresBoard(SqlBlockers, Board):
               SELECT {_MESSAGE_COLS}, row_number() OVER (PARTITION BY job ORDER BY id DESC) AS rn
                 FROM messages WHERE job IN (SELECT job FROM selected)
             ) m WHERE rn <= %s
+          ), lastposts AS (
+            SELECT DISTINCT ON (m.job, m.agent_name) {_MESSAGE_COLS_M}
+              FROM messages m JOIN (SELECT DISTINCT job, name FROM visible WHERE status IN ('idle','dead')) a
+                ON a.job = m.job AND a.name = m.agent_name
+             ORDER BY m.job, m.agent_name, m.id DESC
           ), checks AS (
             SELECT m.job, count(*) FILTER (WHERE m.message LIKE 'VERIFIED%%') AS verified,
                    count(*) FILTER (WHERE m.message LIKE 'FAILED%%') AS failed
@@ -1353,7 +1359,8 @@ class PostgresBoard(SqlBlockers, Board):
             (SELECT jsonb_object_agg(job,n) FROM hidden),
             (SELECT jsonb_object_agg(job,jsonb_build_array(verified,failed)) FROM checks),
             (SELECT jsonb_agg(to_jsonb(b) ORDER BY id) FROM blockers b WHERE job IN (SELECT job FROM selected)),
-            (SELECT jsonb_object_agg(job,plugin_data) FROM jobs WHERE job IN (SELECT job FROM selected))
+            (SELECT jsonb_object_agg(job,plugin_data) FROM jobs WHERE job IN (SELECT job FROM selected)),
+            (SELECT jsonb_agg(to_jsonb(p)) FROM lastposts p)
         """.replace('{agent_cols}', agent_cols)
         row = self._conn.execute(query, (job,job,job,session,session,session,session,recent_minutes,recent_minutes,
                                         recent_minutes,recent_minutes,limit)).fetchone()

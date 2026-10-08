@@ -52,6 +52,37 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot.job_status("J1").waiting_since, job.waiting_since)
         self.assertIn("waiting", swarm.jobs_overview(snapshot, False, False))
 
+    def test_snapshot_board_serves_agentview_last_post_in_both_watch_views(self):
+        """The Postgres draw is a SnapshotBoard: agentview.annotate must work on it (0.2.1 crashed
+        with AttributeError 'last_post') with idle agents that have posts, compact and full."""
+        import dataclasses
+        from swarm.watchdata import SnapshotBoard
+        from swarm import agentview
+        now = self.board.now()
+        def js(o):
+            return {k: v.isoformat() if isinstance(v, dt.datetime) else v
+                    for k, v in dataclasses.asdict(o).items()}
+        ghost = dt.timedelta(minutes=30)
+        names = [self.board.allocate_name(f"k{i}", "J1", None) for i in range(2)]
+        for n in names:
+            self.board.post("J1", n, "DONE: checked it" if n == names[0] else "waiting for CI")
+        a = self.board.agents("J1")
+        self.assertEqual(len(a), 2)
+        agents = [dataclasses.replace(x, status="idle", last_contact_at=now - ghost) for x in a]
+        post = self.board.last_post("J1", names[0])
+        self.assertIsNotNone(post)
+        row = [now, [js(self.board.job_status("J1"))], [js(x) for x in agents],
+               [js(m) for m in self.board.recent_messages(60, job="J1")], [], {}, {}, [], {}, [js(post)]]
+        snap = SnapshotBoard(self.board, row)
+        self.assertEqual(snap.last_post("J1", names[0]).message, post.message)
+        self.assertIsNone(snap.last_post("J1", "nobody"))
+        self.assertTrue(agentview.annotate(snap, "J1", snap.agents("J1")))
+        for compact in (True, False):
+            view = self.view(compact)
+            with mock.patch("shutil.get_terminal_size", return_value=(80, 40)):
+                lines = swarm._watch_frame(snap, None, 2.0, False, True, view)
+            self.assertTrue(lines, compact)
+
     def test_every_key_and_a_resize_render_from_the_snapshot(self):
         for compact in (True, False):
             snap = self.snapshot(compact)

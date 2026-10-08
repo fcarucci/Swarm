@@ -6,6 +6,9 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 ## [Unreleased]
 
+### Fixed
+- `swarm watch` no longer crashes with `AttributeError: 'SnapshotBoard' object has no attribute 'last_post'` (0.2.1, PostgreSQL boards): the watch snapshot now carries each idle or dead agent's last post, fetched in the same single statement.
+
 ### Changed
 - CI: tag and release-branch pushes no longer re-run the full test matrix (the Release workflow tests the tag).
 
