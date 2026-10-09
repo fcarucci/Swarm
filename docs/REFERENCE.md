@@ -353,6 +353,13 @@ the base table still has `network_access = true`.
   retained as an ignored compatibility setting.
 - **No readable spawn prompts.** The tag lines and the `[swarm spawn: <why>]` justification
   can't be checked (see the table above).
+- **No background tracking.** Codex background commands are not tracked by `swarm bg`: Codex
+  exposes no background flag to hooks and takes no shell rewrites here (`supports_shell_rewrite`
+  is False). Their long-running commands are not recorded or reaped. A Codex agent can still run
+  `swarm bg ... -- CMD` itself (see [Background commands and orphans](#background-commands-and-orphans)).
+- **No `--key` rewrite.** On Codex, `swarm join --key K` is not rewritten to the agent's own id,
+  because `supports_shell_rewrite` is False. The hooks add `--as NAME` to the calls they can't
+  rewrite instead (see [The judge](#the-judge-goals-and-the-completion-gate)).
 - **Codex's own agent board.** Codex has an `agent_message_board` of its own under development;
   once it ships it may overlap with what the swarm does.
 
@@ -1250,9 +1257,8 @@ It runs by itself at these points:
 `status --job` and `watch` show `background N running, M orphaned`, and `doctor` warns about this
 host's orphans.
 
-Codex is not covered. Codex has no background flag a hook can see: an `exec_command` session is
-only known to be long-running after it yields, and Codex doesn't take shell rewrites here. Its
-long-running commands are not recorded. A Codex agent can still run `swarm bg ... -- CMD` itself.
+Codex is not covered: its long-running commands are not recorded (see
+[Known gaps on Codex](#known-gaps-on-codex)). A Codex agent can still run `swarm bg ... -- CMD` itself.
 
 ## Pausing and resuming a job
 
@@ -1567,6 +1573,11 @@ listener's port for local routes.** It would connect from loopback as a local pr
 the token and the header check would stand between the internet and an unsigned route that can
 post CI-GREEN or READY-TO-LAND. A public repo webhook goes to the signed route (`/github`,
 `/gitea`), which checks the HMAC itself.
+
+**Other local users.** The token and the header check don't keep out another OS user who can reach
+the listener. A TCP forwarder run as the listener's own user (socat, `ssh -L`, an SSH tunnel) would
+relay their requests to `/github-forward/<token>` with the listener's uid, and the socket check
+would pass. So run none of those as the listener's user while the listener is up.
 
 **Keep-alive.** Every `swarm supervise` pass (the existing timer) starts the listener detached when
 `[events] enabled` and nothing answers on the port; a listener that holds its lock but does not answer
@@ -2124,7 +2135,7 @@ FINISHED, VERDICT (`-` no goal, `none` none yet, `met`, `not_met`; `*` completed
 sweep and prints one `<job>: <outcome>` line for each job it closed.
 
 What an agent's status column and the `agents` rollup show is decided from more than hook contact (`lib/swarm/agentview.py`; nothing extra is stored). For an agent the clock calls idle or dead:
-`finished` if its last post starts with DONE, VERIFIED or FAILED, if it is the judge that recorded a `met` verdict, or if the job's goal was met after its last contact; `waiting` if it is idle and the job waits on something (`swarm wait --on`, an open blocker) or its last post says it waits (a bounded, unexpired `swarm wait --for/--until` also covers a long-silent agent); `dead` only when it was silent while it still owed work (no hand-off, no verdict, no wait); otherwise `idle`. Role `orchestrator` (a `swarm join` key named `orchestrator` or `orchestrator-N` gets it unless `--role` says otherwise) shows `standby`/`away` and is not counted as a worker. The rollup is `N working, N waiting (on what), N finished, N lost`, plus `N idle (no reason given)` when there are some. A hook-registered Claude subagent that runs `swarm join --key X` is joined with its own key instead (its hook rewrites the call), so it keeps one row.
+`finished` if its last post starts with DONE, VERIFIED or FAILED, if it is the judge that recorded a `met` verdict, or if the job's goal was met after its last contact; `waiting` if it is idle and the job waits on something (`swarm wait --on`, an open blocker) or its last post says it waits (a bounded, unexpired `swarm wait --for/--until` also covers a long-silent agent); `dead` only when it was silent while it still owed work (no hand-off, no verdict, no wait); otherwise `idle`. Role `orchestrator` (a `swarm join` key named `orchestrator` or `orchestrator-N` gets it unless `--role` says otherwise) shows `standby`/`away` and is not counted as a worker. The rollup is `N working, N waiting (on what), N finished, N lost`, plus `N idle (no reason given)` when there are some. A Claude subagent that runs `swarm join --key X` for a job of its session is joined with its own agent id as the key instead (its hook rewrites the call; Codex has no such rewrite, see [Known gaps on Codex](#known-gaps-on-codex)), so it keeps one row, and a resume (SendMessage) gives it back the same name and role. That holds for a subagent its hooks did not adopt too (it was running before the job was activated). Don't join a running subagent from the orchestrator under a made-up key: its hooks can't tie that key to it, and when it is resumed it gets a new name.
 
 `status --job J` shows the job's header: status, when and by whom it was activated and its
 session, activity, what it waits on, when it finished (and who closed it: `(auto-closed; activate

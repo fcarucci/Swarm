@@ -158,11 +158,12 @@ class UpgradeChannelTests(unittest.TestCase):
         changed = {"changed": False, "old_version": "0.1.2", "new_version": "0.1.2",
                    "old_root": None, "new_root": None, "verb": "update"}
         seen = {}
-        def fake_claude(bin_, ref=update._UNSET, url=None):
-            seen["ref"], seen["url"] = ref, url
+        def fake_claude(bin_, ref=update._UNSET, url=None, force=False):
+            seen["ref"], seen["url"], seen["force"] = ref, url, force
             return changed
         out = io.StringIO()
-        with mock.patch.object(update, "update_claude", fake_claude):
+        with mock.patch.object(update, "update_claude", fake_claude), \
+                mock.patch.object(update.channels, "tip_commit", return_value=None):   # commits: test_upgrade_cmd
             rc = update.run_update("claude", False, False, which=lambda h: f"/bin/{h}", out=out, **kw)
         return rc, seen, out.getvalue()
 

@@ -65,7 +65,7 @@ import time
 from pathlib import Path
 from typing import Iterator, Mapping, Sequence
 
-from .base import (check_verdict_details, details_if_bound, VerdictDetails, check_job_data, merged_job_data, parse_job_data, LEFT_PAUSED, MOVED_PREFIX, PauseRecord, build_manifest, NAME_MAX, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, AUTO_CLOSE_BLOCKING, CloseGuard, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, Restart,
+from .base import (check_verdict_details, details_if_bound, VerdictDetails, check_job_data, merged_job_data, parse_job_data, LEFT_PAUSED, MOVED_PREFIX, PauseRecord, build_manifest, NAME_MAX, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, assignable_name, restart_over_limits, STUCK_PREFIX, AUTO_CLOSE_BLOCKING, CloseGuard, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, Restart,
                    ROUTE_STATES, TOOL_NAME_MAX, AgentEvent, AgentStatus, Board, BoardError, BoardUnavailable, JobStatus, Member, Message, ReadOnlyBoard, refuse_writes,
                    OwedReply, ReadResult, Route, RosterEntry, SCHEMA_VERSION, SetupResult, SpawnGrant, SyncState,
                    TRANSCRIPT_ROLES, TranscriptImage, TranscriptRow, TranscriptSummary, VERDICTS,
@@ -848,7 +848,8 @@ class SqliteBoard(SqlBlockers, SqlEvents, SqlBgCommands, Board):
         for source in NAME_SOURCES:
             free = [r[0] for r in c.execute(
                 "SELECT name FROM name_pool p WHERE source = ? AND NOT EXISTS "
-                "(SELECT 1 FROM agents a WHERE a.name = p.name AND a.left_at IS NULL)", (source,))]
+                "(SELECT 1 FROM agents a WHERE a.name = p.name AND a.left_at IS NULL)", (source,))
+                if assignable_name(r[0])]
             if free:
                 return random.choice(free)
         english = load_name_pool()["english"]

@@ -63,6 +63,7 @@ class ForcePullTests(unittest.TestCase):
         (self.plugins / "known_marketplaces.json").write_text(json.dumps(
             {"swarm": {"source": {"source": "git", "url": "https://example.com/s.git"}}}))
         self.calls = []
+        self.install_sha = TIP
         env = mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.home / ".claude"),
                                            "CODEX_HOME": str(self.home / ".codex"), "HOME": str(self.home)})
         env.start(); self.addCleanup(env.stop)
@@ -78,7 +79,7 @@ class ForcePullTests(unittest.TestCase):
         if args[:2] == ["plugin", "--help"]:
             return subprocess.CompletedProcess([], 0, "  update  x\n", "")
         if args[:2] in (["plugin", "install"], ["plugin", "add"]):
-            self.set_installed(TIP)   # the reinstall refetches the tip
+            self.set_installed(self.install_sha)   # the reinstall refetches the tip
         return subprocess.CompletedProcess([], 0, "", "")
 
     def go(self, force, channel="main", hosts=("claude",), tip=TIP, ref_tag=None, commits=None):
@@ -88,7 +89,7 @@ class ForcePullTests(unittest.TestCase):
                 mock.patch.object(update.channels, "latest_tag", return_value=ref_tag), \
                 mock.patch.object(update, "_child", return_value=(0, "", "")), \
                 mock.patch.object(update, "_codex_plugin_version", return_value="0.2.0"), \
-                mock.patch.object(update, "_codex_plugin_commit", side_effect=commits or [OLD, TIP]), \
+                mock.patch.object(update, "_codex_plugin_commit", side_effect=commits or [OLD, OLD, TIP]), \
                 mock.patch.object(update, "_host_source", return_value=("https://example.com/s.git", True)), \
                 mock.patch.object(update, "newest_installed_plugin_root", return_value=self.tree), \
                 mock.patch("os.access", return_value=True), \
@@ -101,19 +102,39 @@ class ForcePullTests(unittest.TestCase):
     def verbs(self):
         return [a[1] for _, a in self.calls if a[:1] == ["plugin"]]
 
-    def test_same_version_newer_commit_warns_without_force(self):
+    def test_same_version_newer_commit_reinstalls_on_main(self):
+        # c8d7c50 landed with the version string unchanged: a plain upgrade on main must install it
         rc, out, _ = self.go(False)
         self.assertEqual(rc, 0)
-        self.assertIn("behind main", out)
-        self.assertIn("swarm upgrade --force", out)
+        self.assertIn(f"installed commit {OLD[:7]}, tip of main {TIP[:7]}: reinstalling", out)
+        self.assertEqual(self.verbs(), ["marketplace", "--help", "uninstall", "install"])
+        self.assertIn(f"[claude] commit: {OLD[:7]} -> {TIP[:7]} (tip of main {TIP[:7]})", out)
+        self.assertIn("claude plugin", out)
+        self.assertIn("changed", out)
+        self.assertIn("Restart your Claude sessions", out)
         self.assertNotIn("up to date", out)
+        self.assertNotIn("behind main", out)
+
+    def test_unknown_installed_commit_reinstalls_and_records_the_tip(self):
+        self.set_installed(None)
+        self.install_sha = None          # a host that records no commit
+        rc, out, _ = self.go(False)
+        self.assertEqual(rc, 0)
+        self.assertIn("uninstall", self.verbs())
+        self.assertNotIn("up to date", out)
+        self.assertEqual(update.recorded_commit("claude", self.tree), TIP)
+        self.calls.clear()
+        rc, out, _ = self.go(False)      # the recorded commit is the tip now: nothing to do
+        self.assertIn("up to date", out)
         self.assertNotIn("uninstall", self.verbs())
 
-    def test_unknown_installed_commit_is_said(self):
-        self.set_installed(None)
-        rc, out, _ = self.go(False)
-        self.assertIn("can't be determined", out)
-        self.assertNotIn("up to date", out)
+    def test_recorded_commit_is_per_install_root(self):
+        update.record_commit("claude", self.tree, TIP)
+        self.assertEqual(update.recorded_commit("claude", self.tree), TIP)
+        self.assertIsNone(update.recorded_commit("claude", self.home / "other"))
+        self.assertIsNone(update.recorded_commit("codex", self.tree))
+        update.record_commit("claude", self.tree, "not-a-sha")
+        self.assertEqual(update.recorded_commit("claude", self.tree), TIP)
 
     def test_at_the_tip_is_up_to_date(self):
         self.set_installed(TIP)
@@ -141,6 +162,7 @@ class ForcePullTests(unittest.TestCase):
         rc, out, _ = self.go(False, channel="release", ref_tag="v0.2.0")
         self.assertNotIn("behind", out)
         self.assertIn("up to date", out)
+        self.assertNotIn("uninstall", self.verbs())   # release: version semantics, no commit check
 
     def test_force_codex_removes_then_adds(self):
         rc, out, _ = self.go(True, hosts=("codex",))
@@ -164,10 +186,13 @@ class ForcePullTests(unittest.TestCase):
                 mock.patch.object(update, "_codex_plugin_version", return_value="0.2.0"), \
                 mock.patch.object(update, "_host_source", return_value=("https://example.com/s.git", True)), \
                 mock.patch.object(update, "newest_installed_plugin_root", return_value=stale), \
+                mock.patch.object(update, "_child", return_value=(0, "", "")), \
+                mock.patch("os.access", return_value=True), \
                 mock.patch("sys.stderr", err):
             update.run_update("codex", False, False, which=lambda h: f"/bin/{h}", out=out, channel="main")
         self.assertNotIn("up to date", out.getvalue())
-        self.assertIn("can't be determined", out.getvalue())
+        self.assertIn(f"installed commit unknown, tip of main {TIP[:7]}: reinstalling", out.getvalue())
+        self.assertEqual(update.recorded_commit("codex", stale), TIP)
 
     def test_codex_commit_read_from_the_installed_copy(self):
         repo = self.home / "copy"

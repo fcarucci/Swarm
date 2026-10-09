@@ -246,7 +246,9 @@ user asks for one. Don't run duplicate jobs: merge similar ones (`swarm job merg
    jobs can share an explicit project bank. Without `--project`, writes use `default_bank`
    (default `coding`); recall uses the configured general banks. No bank is created implicitly.
    Subagents that were already running at activation stay off the board (they have their own
-   tasks); pass `--adopt-running` to enrol them too.
+   tasks); pass `--adopt-running` to enrol them too, or have such a subagent run `swarm join`
+   itself (its hooks key it by its own agent id). Never join it from here under a made-up
+   `--key`: resumed later (SendMessage), it would come back under a new name.
    Activation writes a marker in `marker_dir`, bound to this session: `activate` reads
    `$CLAUDE_CODE_SESSION_ID`, which Claude Code sets in its Bash tool, or in Codex the session
    id Codex sets in its shell (`--session` overrides it; run outside either, the first session

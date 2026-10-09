@@ -512,6 +512,71 @@ def _host_source(host: str, bin_: str) -> tuple[str | None, bool]:
     return src, True
 
 
+# --------------------------------------------------------------------------- installed commit record
+#
+# On the main channel an install is compared with the tip of main by commit, not by version (a
+# version string is not bumped on every commit to main). Claude records the commit it fetched
+# (installed_plugins.json gitCommitSha); a Codex copy only when it kept its .git. Where the host
+# records none, the upgrade records the tip it installed from here, per host and install root.
+
+COMMIT_RECORD = "installed-commits.json"
+_SHA = re.compile(r"[0-9a-f]{40,64}")
+
+
+def _read_commit_records() -> dict:
+    try:
+        from swarm import safefs
+        with safefs.dir_fd(paths.host_dir(), create=False, strict_mode=0o700) as d:
+            data = json.loads(safefs.read_text(d, COMMIT_RECORD) or "{}")
+    except Exception:   # missing, unreadable or not this user's private dir: nothing recorded
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def recorded_commit(host: str, root: Path | None) -> str | None:
+    """The commit this machine's last main-channel upgrade installed for `host` at `root`, if
+    recorded (and `root` is still the install it was recorded for)."""
+    rec = _read_commit_records().get(host)
+    if not (isinstance(rec, dict) and root is not None and rec.get("root") == str(root)):
+        return None
+    sha = rec.get("sha")
+    return sha if isinstance(sha, str) and _SHA.fullmatch(sha) else None
+
+
+def record_commit(host: str, root: Path | None, sha: str | None) -> None:
+    """Remember that `host`'s plugin at `root` was installed at `sha`. Never raises."""
+    if root is None or not (isinstance(sha, str) and _SHA.fullmatch(sha)):
+        return
+    try:
+        from swarm import safefs
+        data = _read_commit_records()
+        data[host] = {"root": str(root), "sha": sha}
+        with safefs.dir_fd(paths.host_dir(), strict_mode=0o700) as d:
+            safefs.write_atomic(d, COMMIT_RECORD, json.dumps(data, indent=1) + "\n")
+    except Exception:
+        pass
+
+
+def _claude_plugins_dir() -> Path:
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or (paths.home() / ".claude")) / "plugins"
+
+
+def installed_commit(host: str, bin_: str) -> tuple[str | None, Path | None]:
+    """(commit, root) of the installed plugin before an upgrade: the host's own record, else the
+    one record_commit kept for that root, else (None, root)."""
+    if host == "claude":
+        root = _claude_plugin_root(_claude_plugins_dir())
+        sha = _claude_plugin_commit(_claude_plugins_dir())
+    else:
+        root = newest_installed_plugin_root("codex", codex_bin=bin_)
+        sha = _codex_plugin_commit(root)
+    return sha or recorded_commit(host, root), root
+
+
+def _same_commit(a: str | None, b: str | None) -> bool:
+    return bool(a and b and (a.startswith(b) or b.startswith(a)))
+
+
 def _short(sha: str | None) -> str:
     return sha[:7] if sha else "unknown"
 
@@ -583,10 +648,25 @@ def run_update(host_arg: str | None, force: bool, color: bool, config_path: Path
             if warning:
                 print(f"swarm upgrade: [{host}] warning: {warning}", file=sys.stderr)
             print(f"[{host}] channel: {chan} ({ref or 'tip of main'})", file=out)
+            have = None
+            hkw = fkw
             if chan == "main" and url:
-                tips[host] = channels.tip_commit(url)
-            results[host] = (update_claude(bin_, ref, url, **fkw) if host == "claude"
-                             else update_codex(bin_, ref, url, **fkw))
+                tip = tips[host] = channels.tip_commit(url)
+                have, _ = installed_commit(host, bin_)
+                if tip and not force and not _same_commit(have, tip):
+                    # same version string, other commit: a plain update would refetch nothing
+                    print(f"[{host}] installed commit {_short(have)}, tip of main {_short(tip)}: "
+                          f"reinstalling from the tip", file=out)
+                    hkw = {"force": True}
+            r = results[host] = (update_claude(bin_, ref, url, **hkw) if host == "claude"
+                                 else update_codex(bin_, ref, url, **hkw))
+            if chan == "main" and tips.get(host):
+                r["old_commit"] = r.get("old_commit") or have
+                if r.get("new_commit") is None:   # the host records none: ours, or the tip just installed
+                    r["new_commit"] = tips[host] if hkw.get("force") else recorded_commit(host, r.get("new_root"))
+                r["reinstalled"] = bool(hkw.get("force"))
+                record_commit(host, r.get("new_root"), r.get("new_commit"))
+                r["changed"] = bool(r["changed"] or _commit_moved(r) or (hkw.get("force") and not have))
         except UpdateError as exc:
             print(f"swarm update: {exc}", file=sys.stderr)
             return 1
@@ -603,9 +683,9 @@ def run_update(host_arg: str | None, force: bool, color: bool, config_path: Path
         steps.append(bootstrap.Step(f"{host} plugin", status, f"{old} -> {new}"))
     print(bootstrap.format_steps(steps, color), file=out)
 
-    if force:
-        for host in hosts:
-            r = results[host]
+    for host in hosts:
+        r = results[host]
+        if force or r.get("reinstalled"):
             print(f"[{host}] commit: {_short(r.get('old_commit'))} -> {_short(r.get('new_commit'))}"
                   + (f" (tip of main {_short(tips[host])})" if tips.get(host) else ""), file=out)
 
@@ -651,8 +731,7 @@ def run_update(host_arg: str | None, force: bool, color: bool, config_path: Path
         if rc != 0:
             doctor_failed = True
 
-    if results.get("claude", {}).get("changed") or (
-            force and _commit_moved(results.get("claude"))):
+    if results.get("claude", {}).get("changed") or _commit_moved(results.get("claude")):
         print("Restart your Claude sessions to pick up the new plugin.", file=out)
     codex_r = results.get("codex")
     if codex_r and codex_r["changed"] and codex_hooks_changed(codex_r["old_root"], codex_r["new_root"]):

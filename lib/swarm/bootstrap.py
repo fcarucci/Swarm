@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -189,29 +190,70 @@ def _registered_plugin_roots() -> set[Path]:
     return out
 
 
+_PYC_NAME = re.compile(r"^(?P<stem>[^.]+)\.[A-Za-z0-9_-]+-\d+(?:\.opt-\d+)?\.pyc$")   # x.cpython-313[.opt-1].pyc
+
+
+def _prunable_cache(root: Path) -> Path | None:
+    """The cache directory to prune, resolved, or None when it may not be pruned: not absolute,
+    not private (paths.private_dir), or not strictly inside the home directory (or inside the
+    default cache, ~/.local/share/swarm/pyc). The home directory and every ancestor of it are
+    refused by identity (st_dev, st_ino), so no spelling reaches them (`//home/u`,
+    `/proc/self/root/home/u`, a symlinked parent). Any error refuses."""
+    try:
+        root = Path(root)
+        if not root.is_absolute() or not paths.private_dir(root):
+            return None
+        real = Path(os.path.realpath(root))
+        home = Path(os.path.realpath(os.path.expanduser("~")))
+        default = Path(os.path.realpath(paths.share_dir() / "pyc"))
+        if not (home in real.parents or real == default or default in real.parents):
+            return None
+        st = os.stat(real)
+        for anc in (home, *home.parents):
+            a = os.stat(anc)
+            if (a.st_dev, a.st_ino) == (st.st_dev, st.st_ino):
+                return None
+        if not paths.private_dir(real):
+            return None
+        return real
+    except (OSError, ValueError, RuntimeError):
+        return None
+
+
 def prune_pycache(root: Path | None = None) -> int:
     """Delete cached bytecode whose source no longer exists (an old plugin version, a removed
-    module) from the launchers' cache; returns how many files went. Never follows symlinks and
-    never leaves the cache directory; best effort."""
-    root = root or paths.pycache_dir()
-    gone = 0
-    if root.is_symlink() or not root.is_dir():
+    module) from the launchers' cache; returns how many files went. Best effort.
+
+    The cache ($SWARM_PYCACHE, else ~/.local/share/swarm/pyc) is pruned only when it passes the
+    launchers' own check (paths.private_dir: this user's, 0700-style, no symlink, no ACL) and lies
+    strictly inside the home directory, never the home directory or above it (_prunable_cache).
+    Only interpreter cache files (<module>.<tag>-NN[.opt-N].pyc) are deleted, and only a directory that this prune emptied is removed: a directory that was
+    empty before, or holds anything else, stays. Never follows symlinks, never leaves the cache."""
+    root = _prunable_cache(root or paths.pycache_dir())
+    if root is None:
         return 0
+    gone = 0
+    emptied: set[Path] = set()
     for d, dirs, files in os.walk(root, topdown=False, followlinks=False):
         here = Path(d)
         src = Path("/") / here.relative_to(root)
         for name in files:
-            if not name.endswith(".pyc"):
+            m = _PYC_NAME.match(name)
+            if not m or (here / name).is_symlink():
                 continue
-            if not (src / (name.split(".")[0] + ".py")).exists():
+            if not (src / (m.group("stem") + ".py")).exists():
                 try:
                     (here / name).unlink()
                     gone += 1
+                    emptied.add(here)
                 except OSError:
                     pass
+        if here == root or not (here in emptied or any(here / x in emptied for x in dirs)):
+            continue
         try:
-            if here != root and not any(here.iterdir()):
+            if not here.is_symlink() and not any(here.iterdir()):
                 here.rmdir()
+                emptied.add(here)
         except OSError:
             pass
     return gone

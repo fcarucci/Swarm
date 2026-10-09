@@ -244,6 +244,17 @@ def check_name(name, what: str = "name") -> str:
     return name
 
 
+# Pool names an agent is never given: a name that reads like a seat ("Judge Constance Harm") makes
+# a worker look like the job's judge to itself and to everyone else. Kept in the shipped list (a
+# board's name_pool table may hold them already); every backend skips them when it allocates.
+SEAT_NAME_PREFIXES = ("judge ", "verifier ")
+
+
+def assignable_name(name: str) -> bool:
+    """Whether a pool name may be given to an agent (it does not read like a seat)."""
+    return not name.lower().startswith(SEAT_NAME_PREFIXES)
+
+
 def valid_pool(names: Mapping[str, Sequence[str]]) -> dict[str, list[str]]:
     """`names` ({source: [name]}) without the names valid_name refuses (setup skips them)."""
     return {source: [n for n in lst if valid_name(n)] for source, lst in names.items()}

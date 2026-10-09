@@ -493,7 +493,7 @@ class SourceReplacedMidUpdateTests(unittest.TestCase):
         self.addCleanup(sys.modules.update, saved)
         self.addCleanup(lambda: blocker in sys.meta_path and sys.meta_path.remove(blocker))
 
-        def swapped_out(_bin, *_pin):
+        def swapped_out(_bin, *_pin, **_force):
             sys.meta_path.insert(0, blocker)       # the old folder is gone from here on
             return {"changed": True, "old_version": "0.1.7", "new_version": "0.1.8",
                     "old_root": None, "new_root": None, "verb": "update"}
@@ -501,8 +501,10 @@ class SourceReplacedMidUpdateTests(unittest.TestCase):
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.object(update, "update_claude", side_effect=swapped_out), \
                 mock.patch.object(update.channels, "latest_tag", return_value=None), \
+                mock.patch.object(update.channels, "tip_commit", return_value="b" * 40), \
                 mock.patch.object(update, "newest_installed_plugin_root", return_value=None), \
                 mock.patch("sys.stderr", err):
+            # main channel (no tag): the commit check and its record run after the swap too
             rc = update.run_update("claude", False, False, which=lambda h: f"/bin/{h}", out=out)
         self.assertIn("claude plugin changed  0.1.7 -> 0.1.8", out.getvalue())
         self.assertEqual(rc, 1)                     # stops at the missing bin/swarm, not a traceback

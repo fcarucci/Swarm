@@ -700,7 +700,9 @@ def _event_targets_of(name: str, role: str | None) -> tuple[str, ...]:
     """What an agent's events are addressed to: its name, its role ("@engineering_lead") and the
     short aliases of that seat ("@el"; addressing.ALIASES)."""
     from swarm.addressing import ALIASES
-    tokens = {role} if role else set()
+    from swarm.roles import valid_name
+    # a role that is no @role token ("general-purpose", a Claude agent type) is addressed by name only
+    tokens = {role} if valid_name(role) else set()
     tokens |= {alias for alias, seats in ALIASES.items() if role in seats}
     return (name, *sorted("@" + t for t in tokens))
 
@@ -1092,7 +1094,8 @@ def _gate_judge(board, agent_id: str, job: str, payload: dict) -> bool:
         _deny("[swarm] Judges only judge: no editing, fixing, merging, pushing or spawning, and no "
               "writing files (not even a verdict.md). Record not_met with --next for the "
               "supervisor's fix worker, and put your full report in the verdict: "
-              "`swarm verdict ... --details -` with the Markdown on stdin (a heredoc with a quoted delimiter: --details - <<'EOF').")
+              f"`{_bin()} verdict ... --details -` with the Markdown on stdin (a heredoc with a quoted "
+              f"delimiter: --details - <<'EOF').")
         return False
     return True
 
@@ -1168,6 +1171,56 @@ def _gate_verifier(board, agent_id: str, is_verifier: bool, payload: dict) -> bo
     _deny(f"[swarm] Refused: {why}. Check, don't fix: post FAILED with the evidence, --to the agent "
           f"whose work it is.")
     return False
+
+
+def _own_job(agent_id: str, bound: dict, payload: dict) -> str | None:
+    """The job a subagent on no board belongs to: its prompt's [swarm job: ...] tag when that
+    job is bound to this session, else the session's only bound job. None when that is unknown
+    (several jobs and no tag)."""
+    tag = _tag_of(_spawn_prompt(payload, agent_id) or "")
+    if tag is not None:
+        return tag if tag in bound else None
+    return next(iter(bound)) if len(bound) == 1 else None
+
+
+def _orchestrator_join(command: str) -> bool:
+    """True when `command` runs a real `swarm join --key orchestrator`."""
+    for args in _swarm_calls(command, "join"):
+        if any(_flag_value(args, m, "--key")[0] == "orchestrator" for m in range(len(args))):
+            return True
+    return False
+
+
+def _own_key_join(agent_id: str, bound: dict, payload: dict) -> None:
+    """A subagent that is on no board yet (it was running before its job was activated, so its
+    hooks did not adopt it) and runs `swarm join` for its own session job joins under its OWN
+    agent id, whatever --key it wrote. Its identity is then keyed like every hook-enrolled
+    agent's: when it is resumed (SendMessage), its hooks find the row and give back the same name
+    and role. Under a made-up key the resumed agent had no row and was named afresh. Only the
+    join for that job is rewritten: a join for another job of the session is left as it is, and
+    so is every join when the agent's own job is not known. Only where the host lets a hook
+    rewrite a shell call."""
+    host = current_host()
+    command = host.shell_command(payload) if agent_id and host.supports_shell_rewrite else None
+    job = _own_job(agent_id, bound, payload) if command else None
+    if not job:
+        return
+    new = own_key_command(command, agent_id, job)
+    if not new:
+        return
+    ti = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
+    _set_input_rewrite(host.input_rewrite_output({**ti, "command": new}))
+    _out("PreToolUse", "[swarm] `swarm join` runs with your own agent id as its key, so you keep "
+                       "this name and role if you are resumed later.")
+
+
+def _deny_orchestrator_join(agent_id: str, payload: dict) -> bool:
+    """An unadopted subagent may not join as the orchestrator: the call is refused."""
+    command = current_host().shell_command(payload) if agent_id else None
+    if not command or not _orchestrator_join(command):
+        return False
+    _deny("[swarm] a subagent cannot join as the orchestrator; only the main session is the orchestrator")
+    return True
 
 
 def _gate_new_member(board, agent_id: str, bound: dict, payload: dict, cfg: dict) -> None:
@@ -1758,6 +1811,8 @@ def _on_event(board, event: str, agent_id: str, sid: str | None, bound: dict, un
     else:
         member = board.tool_started(agent_id, payload.get("tool_name"))
     if member is None:  # not an active member (yet): route it, maybe enrol it
+        if _deny_orchestrator_join(agent_id, payload):
+            return
         if resume is not None:
             _enrol_resumed(board, agent_id, resume, payload, cfg)
             return
@@ -1767,6 +1822,8 @@ def _on_event(board, event: str, agent_id: str, sid: str | None, bound: dict, un
             return
         _route_new(board, event, agent_id, sid, bound, unbound, payload, cfg)
         _gate_new_member(board, agent_id, bound, payload, cfg)
+        if bound and board.active_agent_name(agent_id) is None:
+            _own_key_join(agent_id, bound, payload)
         return
     if resume is not None and _first_call_of_resumed(board, agent_id, member.job):
         _enrol_resumed(board, agent_id, resume, payload, cfg)   # its seat was claimed by `swarm resume`

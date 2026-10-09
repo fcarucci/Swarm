@@ -32,7 +32,7 @@ from .base import (check_verdict_details, details_if_bound, VerdictDetails, chec
                    AgentStatus, Board, BoardError, BoardUnavailable, IncompatibleStorage, JobStatus,
                    Member, Message, OwedReply, ReadResult, Route, RosterEntry, SCHEMA_VERSION, SetupResult,
                    SpawnGrant, SyncState, TRANSCRIPT_ROLES, TranscriptImage, TranscriptRow, TranscriptSummary,
-                   VERDICTS, load_name_pool)
+                   VERDICTS, assignable_name, load_name_pool)
 from swarm import compat
 
 SCHEMA = """
@@ -1231,7 +1231,8 @@ class PostgresBoard(SqlBlockers, SqlEvents, SqlBgCommands, Board):
         for source in NAME_SOURCES:
             free = [r[0] for r in conn.execute(
                 "SELECT name FROM name_pool p WHERE source = %s AND NOT EXISTS "
-                "(SELECT 1 FROM agents a WHERE a.name = p.name AND a.left_at IS NULL)", (source,))]
+                "(SELECT 1 FROM agents a WHERE a.name = p.name AND a.left_at IS NULL)", (source,))
+                if assignable_name(r[0])]
             random.shuffle(free)
             for name in free:
                 try:

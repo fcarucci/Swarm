@@ -27,7 +27,7 @@ import random
 import threading
 from typing import Mapping, Sequence
 
-from .base import (check_verdict_details, details_if_bound, VerdictDetails, check_job_data, merged_job_data, parse_job_data, LEFT_PAUSED, MOVED_PREFIX, PauseRecord, build_manifest, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, AUTO_CLOSE_BLOCKING, CloseGuard, goal_is_unmet, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, Restart,
+from .base import (check_verdict_details, details_if_bound, VerdictDetails, check_job_data, merged_job_data, parse_job_data, LEFT_PAUSED, MOVED_PREFIX, PauseRecord, build_manifest, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, assignable_name, restart_over_limits, STUCK_PREFIX, AUTO_CLOSE_BLOCKING, CloseGuard, goal_is_unmet, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, Restart,
                    ROUTE_STATES, TOOL_NAME_MAX, AgentEvent, AgentStatus, Board, BoardError, BoardUnavailable, JobStatus, Member, Message,
                    OwedReply, ReadResult, Route, SCHEMA_VERSION, SetupResult, SpawnGrant, SyncState, TRANSCRIPT_ROLES,
                    TranscriptImage, TranscriptRow, TranscriptSummary, VERDICTS,
@@ -473,7 +473,8 @@ class MemoryBoard(MemoryBlockers, MemoryEvents, MemoryBgCommands, Board):
     def _free_name(self) -> str:
         """A random free pool name, sources in NAME_SOURCES order; else "<english name> NNN"."""
         for source in NAME_SOURCES:
-            free = [n for n in self._store.pool.get(source, []) if not self._name_held(n)]
+            free = [n for n in self._store.pool.get(source, [])
+                    if assignable_name(n) and not self._name_held(n)]
             if free:
                 return random.choice(free)
         while True:

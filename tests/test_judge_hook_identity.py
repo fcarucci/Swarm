@@ -177,6 +177,21 @@ class JudgeIdentityTests(GoalEnv):
         self.assertIn("verdict --job 'J' --artifact REF met", text)
         self.assertNotIn("verdict --job 'J' --as", text)
 
+    def test_judge_brief_offers_details_only_with_the_cli_it_names(self):
+        # The brief names this plugin's own bin/swarm (hooks._bin), so it may offer --details
+        # exactly when that same tree's CLI has it. A 0.2.2 hook shows a 0.2.2 brief (no
+        # --details) and a 0.2.2 bin/swarm; a judge told otherwise was told by its spawn prompt.
+        from swarm import paths
+        brief = hooks._judge_instructions("Lisa Simpson", "J", "the goal", self.cfg, 200)
+        self.assertIn(shlex.quote(str(paths.agent_bin())), brief)
+        import contextlib, io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            __import__("swarm.cli").cli.main(["verdict", "--help"])
+        out = out.getvalue()
+        self.assertEqual("--details" in brief, "--details" in out)
+        self.assertIn("--details", brief)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from unittest import mock
 import subprocess
 import shutil
 import tempfile
@@ -234,10 +235,83 @@ class LauncherTests(unittest.TestCase):
         (cached_gone / "mod.cpython-313.pyc").write_bytes(b"x")
         outside = self.home / "outside"; outside.mkdir(); (outside / "keep.pyc").write_bytes(b"x")
         (cache / "link").symlink_to(outside)
-        self.assertEqual(bootstrap.prune_pycache(cache), 2)
+        cache.chmod(0o755)                                 # not private: the launchers don't use it
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+            self.assertEqual(bootstrap.prune_pycache(cache), 0)
+            cache.chmod(0o700)
+            self.assertEqual(bootstrap.prune_pycache(cache), 2)
         self.assertEqual([p.name for p in cached_live.iterdir()], ["mod.cpython-313.pyc"])
         self.assertFalse(cached_gone.exists())
         self.assertTrue((outside / "keep.pyc").exists())
+
+    @posix_only("the launchers and their bytecode cache are POSIX (the Windows entry points run without one)")
+    def test_prune_of_an_overridden_cache_deletes_only_bytecode_it_orphaned(self):
+        # SWARM_PYCACHE pointed at a directory full of other things (the judge's case: $HOME)
+        from swarm import bootstrap
+        root = self.home / "notacache"; root.mkdir(mode=0o700); root.chmod(0o700)
+        (root / "empty-before").mkdir()                    # an empty directory of the user's
+        (root / "notes").mkdir(); (root / "notes/a.pyc").write_bytes(b"x")         # not a cache name
+        (root / "notes/old.cpython-313.pyc").write_bytes(b"x")                     # orphan cache file
+        (root / "docs").mkdir(); (root / "docs/readme.txt").write_text("keep")
+        (root / "docs/x.cpython-313.opt-1.pyc").write_bytes(b"x")
+        with mock.patch.dict(os.environ, {"SWARM_PYCACHE": str(root), "HOME": str(self.home)}):
+            self.assertEqual(bootstrap.prune_pycache(), 2)
+        self.assertTrue((root / "empty-before").is_dir())
+        self.assertTrue((root / "notes/a.pyc").exists())
+        self.assertFalse((root / "notes/old.cpython-313.pyc").exists())
+        self.assertTrue((root / "notes").is_dir())          # it still holds a.pyc
+        self.assertTrue((root / "docs/readme.txt").exists())
+        # a cache dir that is a symlink, or the home directory itself, is never pruned
+        link = self.home / "cachelink"; link.symlink_to(root)
+        (root / "docs/y.cpython-313.pyc").write_bytes(b"x")
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+            self.assertEqual(bootstrap.prune_pycache(link), 0)
+        with mock.patch.dict(os.environ, {"HOME": str(root)}):
+            self.assertEqual(bootstrap.prune_pycache(root), 0)
+        self.assertTrue((root / "docs/y.cpython-313.pyc").exists())
+
+    def _fake_home(self):
+        """A private home holding a live project's bytecode: pruned as a cache, the pyc would go
+        (its 'source' /proj/__pycache__/mod.py does not exist)."""
+        home = self.home / "users" / "me"; home.mkdir(parents=True); home.chmod(0o700)
+        live = home / "proj/__pycache__"; live.mkdir(parents=True)
+        (home / "proj/mod.py").write_text("")
+        pyc = live / "mod.cpython-313.pyc"; pyc.write_bytes(b"x")
+        return home, pyc
+
+    @posix_only("the launchers and their bytecode cache are POSIX (the Windows entry points run without one)")
+    def test_prune_refuses_every_spelling_of_home(self):
+        from swarm import bootstrap
+        home, pyc = self._fake_home()
+        parent_link = self.home / "via"; parent_link.symlink_to(home.parent)
+        spellings = {"home": str(home), "double slash": "/" + str(home),
+                     "trailing dot": str(home) + "/.", "symlinked parent": str(parent_link / "me"),
+                     "home's parent": str(home.parent), "root": "/"}
+        if Path("/proc/self/root").is_dir():
+            spellings["/proc/self/root"] = "/proc/self/root" + str(home)
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            for why, spelled in spellings.items():
+                with self.subTest(why):
+                    self.assertEqual(bootstrap.prune_pycache(Path(spelled)), 0)
+                    with mock.patch.dict(os.environ, {"SWARM_PYCACHE": spelled}):
+                        self.assertEqual(bootstrap.prune_pycache(), 0)
+                    self.assertTrue(pyc.exists(), f"{why}: the live pyc was deleted")
+
+    @posix_only("the launchers and their bytecode cache are POSIX (the Windows entry points run without one)")
+    def test_prune_still_works_strictly_inside_home(self):
+        # the control for the test above: the same tree as a real cache inside home is pruned
+        from swarm import bootstrap
+        home, _ = self._fake_home()
+        cache = home / ".local/share/swarm/pyc"; cache.mkdir(parents=True); cache.chmod(0o700)
+        orphan = cache / str(home / "gone").lstrip("/"); orphan.mkdir(parents=True)
+        (orphan / "x.cpython-313.pyc").write_bytes(b"x")
+        outside = self.home / "elsewhere"; outside.mkdir(mode=0o700); outside.chmod(0o700)
+        (outside / "z.cpython-313.pyc").write_bytes(b"x")
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            self.assertEqual(bootstrap.prune_pycache(outside), 0)    # not inside home
+            self.assertEqual(bootstrap.prune_pycache(Path("/" + str(cache))), 1)
+        self.assertFalse((orphan / "x.cpython-313.pyc").exists())
+        self.assertTrue((outside / "z.cpython-313.pyc").exists())
 
     @posix_only("runs a POSIX sh script (the Windows entry points are tested in test_windows_*.py)")
     def test_bin_swarm_reinstalls_a_venv_missing_psycopg(self):
