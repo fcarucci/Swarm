@@ -466,6 +466,14 @@ def sweep_jobs(board, cfg: dict, deadline: float | None = None) -> list:
         from swarm import transcripts as _t
         _t.log(f"sweep: expiry failed: {type(exc).__name__}")
     _drop_auto_closed_markers(board, cfg)
+    for c in closed:   # their orphaned background commands: a detached reap (it waits its grace)
+        try:
+            from swarm import bg
+            if bg.has_local_running(board, c.job):
+                bg.spawn_reaper(cfg, c.job)
+        except Exception as exc:
+            from swarm import transcripts as _t
+            _t.log(f"sweep: reaping {c.job}'s background commands failed: {type(exc).__name__}")
     if closed and transcripts_enabled(cfg):
         from swarm import transcripts
         transcripts.capture_closed(board, cfg, [c.job for c in closed], deadline)
@@ -2195,6 +2203,9 @@ def _watch_frame(board, job: str | None, interval: float, color: bool, interacti
     blocker_rows = board.blockers(job)
     if blocker_rows:
         out += ['', _bold('BLOCKERS', color)] + [_blocker_line(board, b) for b in blocker_rows]
+    background = bg_line(board, job)
+    if background:
+        out += ['', background]
     if PLUGINS is not None:
         out += [term_safe(line) for line in PLUGINS.watch_panes(job, board)]
     header = len(out)
@@ -2769,6 +2780,20 @@ def _parser() -> argparse.ArgumentParser:
     ac.add_argument("--stall-hours", "--max-hours", dest="max_hours", type=float, metavar="N",
                     help="close the job (failed) after N hours without progress, instead of [job] "
                          "stall_hours; 0 = never (--max-hours is the old name)")
+    bg = sub.add_parser("bg", help="background commands of agents: `bg list`, `bg reap`; `swarm bg --job J "
+                                   "--as NAME -- COMMAND` runs one recorded (the hooks wrap members' background calls)")
+    bgs = bg.add_subparsers(dest="bcmd", required=True)
+    bgl = bgs.add_parser("list", help="background commands still running (--all: ended ones too)")
+    bgl.add_argument("--job")
+    bgl.add_argument("--orphans", action="store_true",
+                     help="only orphans: running while their agent is finished or their job closed")
+    bgl.add_argument("--all", action="store_true", help="include the ones that ended")
+    bgr = bgs.add_parser("reap", help="stop orphaned background commands of this host: SIGTERM, up to 10 s, "
+                                      "then SIGKILL; only processes provably the recorded command's")
+    bgr.add_argument("--job")
+    bgr.add_argument("--agent", metavar="KEY", help="only this agent's (by agent key)")
+    bgr.add_argument("--delay", type=float, default=0.0, help=argparse.SUPPRESS)   # SubagentStop's grace
+    bgr.add_argument("--dry-run", action="store_true", help="print what it would do; change nothing")
     de = sub.add_parser("deactivate", help="turn the board off for the job and close it")
     de.add_argument("--job", required=True)
     de.add_argument("--status", choices=["completed", "cancelled", "failed"], default="completed")
@@ -3234,6 +3259,8 @@ def cmd_deactivate(cfg: dict, args) -> int:
                                     closed_by=os.environ.get("USER") or None)
             if known and transcripts_enabled(cfg):
                 _capture_final_transcripts(board, cfg, args.job)
+            if known:
+                _reap_closed_job(board, args.job)
         how = args.status + (", forced without a met verdict" if forced else "")
         if js is not None and js.status != "active":   # e.g. replacing an auto-close outcome
             how += f"; it was already {js.status}" + (", auto-closed" if js.closed_by == AUTO_CLOSED_BY else "")
@@ -3244,6 +3271,30 @@ def cmd_deactivate(cfg: dict, args) -> int:
               file=sys.stderr)
     _learning_instructions(args.job, learned=learned, closed=True)
     return 0
+
+
+def _reap_closed_job(board, job: str) -> None:
+    """The closed job's orphaned background commands on this host: stopped now (swarm.bg.reap,
+    at most its grace). Never fails the deactivate."""
+    try:
+        from swarm import bg
+        bg.reap_orphans(board, job=job, say=lambda line: print(f"background command {line}"))
+    except Exception as exc:
+        print(f"could not reap {job}'s background commands ({_error_name(exc)}); "
+              f"run `swarm bg reap --job {job}`", file=sys.stderr)
+
+
+def bg_line(board, job: str | None) -> str | None:
+    """`background N running, M orphaned` for status and watch; None when nothing runs (or the
+    board predates schema 24)."""
+    try:
+        running, orphaned = board.bg_counts(job)
+    except Exception:
+        return None
+    if not running:
+        return None
+    return (f"background {running} running, {orphaned} orphaned"
+            + (" (swarm bg list --orphans; swarm bg reap)" if orphaned else ""))
 
 
 def _learned_since(board, js, since=None) -> bool:
@@ -3666,6 +3717,7 @@ COMMANDS = {
     "activate": cmd_activate,
     "plugins": cmd_plugins,
     "deactivate": cmd_deactivate,
+    "bg": lambda cfg, args: cmd_bg(cfg, args),
     "hook": _cmd_hook,
     "notices": cmd_notices,
     "remember": cmd_remember,
@@ -4172,7 +4224,7 @@ def _board_blocker(board, cfg, args):
     blocker = board.blocker(args.id)
     if blocker is None:
         print(f'no such blocker: {args.id}', file=sys.stderr); return 1
-    actor = _blocker_actor(board)
+    actor = _blocker_actor(board, cfg)
     if args.bcmd == 'resolve':
         changed = board.resolve_blocker(args.id, args.how, actor=actor)
         print(f'blocker {args.id} resolved' if changed else f'blocker {args.id} is already {blocker.state}')
@@ -4212,7 +4264,7 @@ def _board_event(board, cfg, args):
                 if not rows:
                     print("(no events)")
         elif args.ecmd == "ack":
-            n = board.ack_events(args.job, args.ids, args.name or _blocker_actor(board))
+            n = board.ack_events(args.job, args.ids, args.name or _blocker_actor(board, cfg))
             print(f"acked {n} event{'' if n == 1 else 's'}")
         else:
             rows = board.wait_event(args.job, to=to, timeout=args.timeout)
@@ -4229,16 +4281,29 @@ def _board_event(board, cfg, args):
     return 0
 
 
-def _blocker_actor(board):
-    # Same identity boundary the ask/answer plugin uses: the host session's member, else human.
+ORCHESTRATOR_ACTOR = "orchestrator"
+
+
+def _blocker_actor(board, cfg: dict | None = None):
+    """Who a blocker change or an event ack without --as is recorded as. The host session id is
+    all the CLI knows, and a session's orchestrator and all its subagents share it: a session that
+    orchestrates a job (a marker is bound to it) is recorded as "orchestrator", never as one of
+    its subagents picked at random (subagents pass --as); a session with exactly one member (a
+    headless replacement, say) as that member; anything else as "human"."""
     from swarm import hosts
     sid = hosts.cli_session_id(os.environ)
-    if sid:
-        for job in board.jobs():
-            for agent in board.agents(job.job, include_departed=False):
-                if board.route(agent.agent_key).session_id == sid:
-                    return agent.name
-    return 'human'
+    if not sid:
+        return 'human'
+    if cfg is not None:
+        try:
+            from swarm.hooks import _markers
+            if any(m.get("session_id") == sid for m in _markers(cfg)):
+                return ORCHESTRATOR_ACTOR
+        except Exception:
+            pass
+    members = [agent.name for job in board.jobs() for agent in board.agents(job.job, include_departed=False)
+               if board.route(agent.agent_key).session_id == sid]
+    return members[0] if len(members) == 1 else ('human' if not members else ORCHESTRATOR_ACTOR)
 
 
 def _board_status(board, cfg: dict, args) -> None:
@@ -4263,6 +4328,9 @@ def _board_status(board, cfg: dict, args) -> None:
     recent = None if args.all_agents else int(cfg["board"]["watch_recent_minutes"])
     rows = board.transcripts(job=args.job) if enabled and board.job_status(args.job) else None
     print(job_detail(board, args.job, color, recent, "--all-agents to show", rows, sup=sup))
+    line = bg_line(board, args.job) if board.job_status(args.job) else None
+    if line:
+        print(line)
     for line in (PLUGINS.status_lines(args.job, board) if PLUGINS is not None else ()):
         print(term_safe(line))
 
@@ -4452,9 +4520,51 @@ BOARD_COMMANDS = {
 }
 
 
+def _bg_wrapper(argv: list[str]) -> tuple[Path, list[str]] | None:
+    """(config path, the words after `bg`) when argv is the wrapper form `[--config P] bg [--job J]
+    [--key K] [--as NAME] -- COMMAND...`, not `bg list|reap`; else None."""
+    path, i = DEFAULT_CONFIG, 0
+    while True:   # argparse semantics: the last --config wins
+        if argv[i:i + 1] == ["--config"] and len(argv) > i + 1:
+            path, i = Path(argv[i + 1]), i + 2
+        elif argv[i:i + 1] and argv[i].startswith("--config="):
+            path, i = Path(argv[i][len("--config="):]), i + 1
+        else:
+            break
+    if argv[i:i + 1] != ["bg"] or (argv[i + 1:i + 2] and argv[i + 1] in ("list", "reap", "-h", "--help")):
+        return None
+    return path, argv[i + 1:]
+
+
+def cmd_bg_wrapper(path: Path, words: list[str]) -> int:
+    """`swarm bg ... -- COMMAND`: the command runs whatever happens to the config or the board."""
+    from swarm import bg
+    k = words.index("--") if "--" in words else len(words)
+    p = argparse.ArgumentParser(prog="swarm bg")
+    p.add_argument("--job"); p.add_argument("--key"); p.add_argument("--as", dest="name")
+    opts, extra = p.parse_known_args(words[:k])
+    try:
+        cfg = load_config(path)
+    except Exception:
+        cfg = {}
+    return bg.run_wrapper(cfg, opts.job, opts.key, opts.name, extra + words[k + 1:])
+
+
+def cmd_bg(cfg: dict, args) -> int:
+    from swarm import bg
+    from swarm.board import open_board
+    with open_board(cfg, readers=args.bcmd == "list") as board:
+        if args.bcmd == "list":
+            return bg.cmd_list(board, args.job, args.orphans, args.all)
+        return bg.cmd_reap(board, args.job, args.agent, args.delay, args.dry_run)
+
+
 def main(argv=None) -> int:
     from swarm.spool import SpoolError
     compat.setup_stdio()
+    wrapper = _bg_wrapper(list(sys.argv[1:] if argv is None else argv))
+    if wrapper is not None:   # before plugins and the board: the command starts at once
+        return cmd_bg_wrapper(*wrapper)
     try:
         return _main(argv)
     except SpoolError as exc:   # a post or memory that had to be queued, with no private spool
@@ -4491,7 +4601,7 @@ def note_orchestrator_read(cfg: dict, args) -> None:
 def _reads_only(args) -> bool:
     """Whether the command only reads the board, so a standby may serve it when no primary is up."""
     return (args.cmd in ("who", "status", "blockers", "recall") or (args.cmd == "read" and args.peek)
-            or (args.cmd == "event" and args.ecmd == "list")
+            or (args.cmd == "event" and args.ecmd == "list") or (args.cmd == "bg" and args.bcmd == "list")
             or (args.cmd == "verdict" and args.verdict == "show")
             or (args.cmd == "config" and args.value is None and not args.save)
             or (args.cmd == "learn" and args.list_banks)

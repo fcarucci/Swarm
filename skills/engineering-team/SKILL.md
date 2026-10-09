@@ -56,8 +56,15 @@ See [review pipeline](../../docs/REFERENCE.md#review-pipeline) and `team.example
 This skill never talks to a CI host. It depends on the [ci skill](../ci/SKILL.md): wait for CI ONLY with
 `swarm ci wait --repo OWNER/REPO --sha <exact head> [--timeout 90m]` (exit 0 green, 1 failed, 124 timeout),
 `swarm ci status` for a one-off look, never `gh run watch` or a `gh run list` loop. Pass the exact head SHA
-and re-run it after every push. Put this line in every worker, engineer and reviewer brief:
-`CI: wait for CI ONLY with swarm ci wait --repo OWNER/REPO --sha <exact head> [--timeout 90m]; never gh run watch.`
+and re-run it after every push. Run it in the foreground, never as a background command: a background wait
+outlives the agent that started it. Put this line in every worker, engineer and reviewer brief:
+`CI: wait for CI ONLY with swarm ci wait --repo OWNER/REPO --sha <exact head> [--timeout 90m] in the foreground; never gh run watch.`
+Never write `gh run watch` into a brief, even as an example. The swarm hooks refuse a member's
+`gh run watch`, `gh pr checks --watch` and gh/curl poll loops, and point the agent at the exact
+`swarm ci wait` instead. A one-shot `gh run view <id> --json conclusion` stays allowed for judges.
+A member's background shell commands run under `swarm bg`, in a fresh `bash -c`, so the shell's
+aliases and functions are not available to them. If one is still running after its agent
+finishes or the job closes, it is reaped (`swarm bg list --orphans`).
 
 Don't:
 

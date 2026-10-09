@@ -8,7 +8,10 @@ import hashlib
 import hmac
 import http.client
 import json
+import os
+import sys
 import threading
+import time
 import unittest
 from types import SimpleNamespace as NS
 from unittest import mock
@@ -81,7 +84,8 @@ def registry(src, **kw):
 def running(src, cfg_events=None, board=None, logs=None, **kw):
     board = board or FakeBoard()
     cfg = {"events": {"enabled": True, "port": 1, **(cfg_events or {})}}
-    lst = el.Listener(cfg, registry(src, **kw), lambda: board, log=(logs.append if logs is not None else None))
+    lst = el.Listener(cfg, registry(src, **kw), lambda: board, log=(logs.append if logs is not None else None),
+                      write_token=lambda token: None)   # never the real private dir
     lst.cfg["port"] = 0
     host, port = lst.bind()
     t = threading.Thread(target=lst.serve_forever, daemon=True)
@@ -105,6 +109,107 @@ def signed(body):
     return {"X-Sig": hmac.new(SECRET, body, hashlib.sha256).hexdigest()}
 
 
+@unittest.skipUnless(sys.platform.startswith("linux"), "the local route reads /proc/net/tcp (Linux)")
+class LocalRouteTests(unittest.TestCase):
+    """A helper's unsigned deliveries (no secret in its argv) are served on a local route only to a
+    loopback peer whose socket is this OS user's; verify() is never called for them."""
+
+    BODY = json.dumps({"job": "J", "key": "1", "text": "x"}).encode()
+
+    def test_own_process_is_served_without_a_signature_at_the_token_path(self):
+        src = Source(verify=lambda h, b: False)
+        with running(src, local_routes=["/gitea-forward"]) as (lst, board, port):
+            self.assertEqual(post(port, f"/gitea-forward/{lst.local_token}", self.BODY), 204)
+            self.assertEqual(post(port, "/gitea", self.BODY), 403)      # the signed route still needs one
+        self.assertEqual(len(src.parsed), 1)
+        self.assertEqual(src.verify_calls, 1)                            # only the signed route's
+
+    def test_a_wrong_or_missing_token_is_refused(self):
+        src = Source(verify=lambda h, b: True)
+        logs = []
+        with running(src, logs=logs, local_routes=["/gitea-forward"]) as (lst, board, port):
+            self.assertEqual(post(port, "/gitea-forward", self.BODY), 403)
+            self.assertEqual(post(port, "/gitea-forward/" + "x" * 32, self.BODY), 403)
+            self.assertEqual(post(port, f"/gitea-forward/{lst.local_token}x", self.BODY), 403)
+        self.assertEqual(src.parsed, [])
+        self.assertTrue(any("route token" in m for m in logs))
+
+    def test_proxy_headers_are_refused_even_with_the_token(self):
+        """A reverse proxy or tunnel running as this user connects from loopback with this uid: it
+        must never make a local route public."""
+        src = Source(verify=lambda h, b: True)
+        with running(src, local_routes=["/gitea-forward"]) as (lst, board, port):
+            for header in ("X-Forwarded-For", "Forwarded", "Via", "X-Real-IP", "X-Forwarded-Host"):
+                self.assertEqual(post(port, f"/gitea-forward/{lst.local_token}", self.BODY, {header: "1.2.3.4"}),
+                                 403, header)
+        self.assertEqual(src.parsed, [])
+
+    def test_another_users_socket_is_refused(self):
+        src = Source(verify=lambda h, b: True)
+        logs = []
+        with mock.patch.object(el, "peer_uid", return_value=os.getuid() + 1):
+            with running(src, logs=logs, local_routes=["/gitea-forward"]) as (lst, board, port):
+                self.assertEqual(post(port, f"/gitea-forward/{lst.local_token}", self.BODY), 403)
+        self.assertEqual(src.parsed, [])
+        self.assertTrue(any("refused a local delivery" in m for m in logs))
+
+    def test_a_client_that_sent_and_closed_is_refused(self):
+        """It leaves a TIME_WAIT/FIN_WAIT row (uid 0, inode 0): never read as root's socket. The
+        check runs before the body is read."""
+        import socket as so
+        src = Source(verify=lambda h, b: True)
+        gate = threading.Event()
+        real = el.own_peer
+
+        def late(peer, local, proc="/proc/net"):
+            gate.wait(5)              # the client has closed by now
+            return real(peer, local, proc)
+        # as if the listener ran as root: the closed client's row says uid 0
+        with mock.patch.object(el, "own_peer", side_effect=late), mock.patch.object(el.os, "getuid", return_value=0):
+            with running(src, local_routes=["/gitea-forward"]) as (lst, board, port):
+                c = so.create_connection(("127.0.0.1", port))
+                c.sendall(f"POST /gitea-forward/{lst.local_token} HTTP/1.1\r\nHost: x\r\n"
+                          f"Content-Length: {len(self.BODY)}\r\n\r\n".encode() + self.BODY)
+                c.close()
+                time.sleep(0.2)
+                gate.set()
+                time.sleep(0.5)
+        self.assertEqual(src.parsed, [])
+
+    def test_peer_uid_only_reads_established_sockets(self):
+        import socket as so
+        srv = so.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(1)
+        cli = so.create_connection(srv.getsockname())
+        conn, peer = srv.accept()
+        try:
+            local = conn.getsockname()
+            self.assertEqual(el.peer_uid(peer, local), os.getuid())
+            cli.close()
+            time.sleep(0.1)
+            self.assertIsNone(el.peer_uid(peer, local))     # FIN_WAIT/TIME_WAIT: not a live owner
+        finally:
+            for x in (conn, cli, srv):
+                x.close()
+
+    def test_peer_uid_reads_the_kernel_socket_table(self):
+        import socket as so
+        srv = so.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(1)
+        cli = so.create_connection(srv.getsockname())
+        conn, peer = srv.accept()
+        try:
+            self.assertEqual(el.peer_uid(peer, conn.getsockname()), os.getuid())
+            self.assertTrue(el.own_peer(peer, conn.getsockname()))
+            self.assertFalse(el.own_peer(("10.0.0.1", peer[1]), conn.getsockname()))   # not loopback
+            self.assertIsNone(el.peer_uid(("127.0.0.1", 1), conn.getsockname()))      # no such socket
+        finally:
+            for x in (conn, cli, srv):
+                x.close()
+
+    def test_proc_addr_format(self):
+        self.assertEqual(el._proc_addr("127.0.0.1", 8923, False), "0100007F:22DB")
+        self.assertEqual(el._proc_addr("127.0.0.1", 80, True), "0000000000000000FFFF00000100007F:0050")
+
+
 class RegisterTests(unittest.TestCase):
     def reg(self):
         r = plugins.Registry({}, "/nonexistent/config.toml", core_commands=())
@@ -124,7 +229,10 @@ class RegisterTests(unittest.TestCase):
         for name, kw in (("g", ok), ("h", {**ok, "routes": ["/g"]}), ("h", {**ok, "routes": []}),
                          ("h", {**ok, "routes": ["nolead"]}), ("h", {**ok, "verify": None}),
                          ("h", {**ok, "routes": ["/h"], "poll": lambda c: None}),   # poll without interval
-                         ("bad name", {**ok, "routes": ["/h"]})):
+                         ("bad name", {**ok, "routes": ["/h"]}),
+                         ("h", {**ok, "routes": ["/h"], "local_routes": ["/g"]}),   # taken
+                         ("h", {**ok, "routes": ["/h"], "local_routes": ["/h"]}),   # its own signed route
+                         ("h", {**ok, "routes": ["/h"], "local_routes": ["x"]})):
             with self.assertRaises((ValueError, TypeError), msg=name):
                 api.register_event_source(name, **kw)
 
@@ -299,6 +407,34 @@ class HelperTests(unittest.TestCase):
         hs.step()
         self.assertEqual(len(self.procs), 7)
 
+    def test_a_fixed_credential_is_picked_up_within_the_capped_backoff(self):
+        """Live report (swarm-orphans): `gh webhook forward` failed until gh was re-logged in. The
+        backoff never exceeds 300 s, each restart re-reads the source's spec, and the health file
+        says when the next try is due, so the alert does not read as stuck for good."""
+        self.assertEqual(max(el.BACKOFF), 300)
+        hs = self.sup()
+        hs.step()
+        for _ in range(6):   # failing for a long while: the wait stays at the cap
+            self.procs[-1][1].rc = self.procs[-1][1].returncode = 1
+            self.t[0] += 1
+            hs.step()
+            h = self.written[-1]["helpers"]["gitea/forward"]
+            self.assertLessEqual(h["retry_at"] - self.t[0], 300)
+            self.t[0] = h["retry_at"]
+            hs.step()
+        hs.l.cfg["sources"] = {"gitea": {"repo": "o/fixed"}}   # the fix: a new config/credential
+        self.procs[-1][1].rc = self.procs[-1][1].returncode = 1
+        self.t[0] += 1
+        hs.step()
+        self.t[0] = self.written[-1]["helpers"]["gitea/forward"]["retry_at"]
+        hs.step()
+        self.assertEqual(self.procs[-1][0], ["gh", "webhook", "forward", "o/fixed"])   # re-read at restart
+        self.assertNotIn("retry_at", self.written[-1]["helpers"]["gitea/forward"])   # up again
+        down = {"beat": NOW.timestamp(), "helpers": {"g/f": {"up": False, "restarts": 18,
+                                                            "retry_at": NOW.timestamp() + 200}}}
+        (prob,) = es.helper_problems(down, NOW)
+        self.assertIn("(restarted 18x); next try in 200 s", prob.text)
+
     def test_health_makes_forwarder_down_problems(self):
         up = {"beat": NOW.timestamp(), "helpers": {"g/f": {"up": True, "restarts": 0}}}
         self.assertEqual(es.helper_problems(up, NOW), [])
@@ -349,6 +485,24 @@ class KeepAliveTests(unittest.TestCase):
         self.assertEqual(cmd[-2:], ["events", "serve"])
         self.assertIn("/c.toml", cmd)
         self.assertTrue(popen.call_args[1]["start_new_session"])
+        self.assertNotIn("-B", cmd)   # it uses the launchers' bytecode cache, like bin/swarm
+        env = popen.call_args[1]["env"]
+        self.assertTrue("PYTHONPYCACHEPREFIX" in env or env.get("PYTHONDONTWRITEBYTECODE") == "1")
+
+    def test_pycache_env_is_bin_swarms(self):
+        import os
+        import tempfile
+        from swarm import paths
+        with tempfile.TemporaryDirectory() as td:
+            mine = os.path.join(td, "pyc")
+            self.assertEqual(paths.pycache_env({"SWARM_PYCACHE": mine}), {"PYTHONPYCACHEPREFIX": mine})
+            self.assertEqual(os.stat(mine).st_mode & 0o777, 0o700)
+            os.chmod(mine, 0o755)    # shared: nothing cached, nothing written
+            self.assertEqual(paths.pycache_env({"SWARM_PYCACHE": mine}), {"PYTHONDONTWRITEBYTECODE": "1"})
+            link = os.path.join(td, "link")
+            os.chmod(mine, 0o700)
+            os.symlink(mine, link)
+            self.assertEqual(paths.pycache_env({"SWARM_PYCACHE": link}), {"PYTHONDONTWRITEBYTECODE": "1"})
 
     def test_probe_sees_a_live_listener_and_a_dead_port(self):
         with running(Source()) as (lst, _, port):

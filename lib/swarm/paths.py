@@ -83,3 +83,26 @@ def agent_bin() -> Path:
 
 def config_path() -> Path:
     return Path(os.environ.get("SWARM_CONFIG") or "~/.config/swarm/config.toml").expanduser()
+
+
+def pycache_env(environ=os.environ) -> dict:
+    """What bin/swarm sets for Python's bytecode, for the processes Python itself starts (the events
+    listener, a supervisor runner): {"PYTHONPYCACHEPREFIX": dir} when the cache dir ($SWARM_PYCACHE,
+    else ~/.local/share/swarm/pyc) is, or can be made, this user's own directory with no group or
+    other access, not a symlink and without an ACL; else {"PYTHONDONTWRITEBYTECODE": "1"} (nothing
+    is cached, nothing written). Never raises."""
+    import stat
+    d = Path(environ.get("SWARM_PYCACHE") or Path(environ.get("HOME") or Path.home()) / ".local/share/swarm/pyc")
+    try:
+        if not os.path.lexists(d):
+            d.mkdir(mode=0o700, parents=True)
+        st = os.lstat(d)
+        ok = (stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid() and not st.st_mode & 0o077)
+        if ok and hasattr(os, "listxattr"):
+            try:
+                ok = not any(a.startswith("system.posix_acl") for a in os.listxattr(d, follow_symlinks=False))
+            except OSError:
+                pass
+    except (OSError, AttributeError):
+        ok = False
+    return {"PYTHONPYCACHEPREFIX": str(d)} if ok else {"PYTHONDONTWRITEBYTECODE": "1"}

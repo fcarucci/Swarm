@@ -139,6 +139,12 @@ class Host:
         """The command line of a shell tool call (for the verifier's write check), else None."""
         return None
 
+    def is_background_shell(self, payload: dict) -> bool:
+        """Whether this shell call runs in the background (it returns at once and the command
+        keeps running after the call, possibly after the agent): its command is then rewritten to
+        run under `swarm bg` where supports_shell_rewrite. False where the host can't tell."""
+        return False
+
     def input_rewrite_output(self, new_input: dict) -> dict:
         """The hookSpecificOutput fields that make this host run the call with `new_input`.
         Claude applies updatedInput without a permissionDecision (hooks.md, PreToolUse decision

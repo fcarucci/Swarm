@@ -254,6 +254,42 @@ class EventTests(Base):
         rc, _, _ = self.wait(self.poller(host), events=lambda: ("CI-FAILED", "CI-FAILED 7@x unit"))
         self.assertEqual((rc, host.calls), (1, 0))
 
+    def status(self, poller, events=None):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cw.run_status(poller, REPO, SHA, True, events)
+        return json.loads(out.getvalue())
+
+    def test_status_agrees_with_a_wait_an_event_ended(self):
+        """Live report (swarm-orphans): `ci wait` ended green on a CI-GREEN event, and `ci status`
+        for the same SHA still said running (the cache had the last poll)."""
+        host = FakeHost("running", "running", "running")
+        p = self.poller(host)
+        self.assertEqual(self.status(p)["state"], "running")       # a poll cached "running"
+        self.clock.t += 120
+        rc, _, _ = self.wait(p, events=lambda: ("CI-GREEN", "CI-GREEN @" + SHA))
+        self.assertEqual(rc, 0)
+        res = self.status(p)                                     # no event lookup at all: the cache says it
+        self.assertEqual((res["state"], res.get("event")), ("green", "CI-GREEN"))
+        self.assertEqual(host.calls, 1)
+
+    def test_status_reads_the_event_itself_when_nothing_waited(self):
+        host = FakeHost("running")
+        res = self.status(self.poller(host), events=lambda: ("CI-FAILED", "CI-FAILED @" + SHA + " unit"))
+        self.assertEqual(res["state"], "failed")
+
+    def test_confirmer_asks_the_host_once_even_inside_the_floor(self):
+        """A completion event is only a trigger: the source confirms the whole commit with one call
+        through the shared poller, whatever the 60 s floor; a final host answer in the cache is reused."""
+        host = FakeHost("running", "green")
+        p = self.poller(host)
+        confirm = cw.confirmer(REPO, p)
+        self.assertEqual(confirm(SHA), "running")
+        self.assertEqual(confirm(SHA), "green")          # the floor has not elapsed: still asked
+        self.assertEqual(host.calls, 2)
+        self.assertEqual(confirm(SHA), "green")          # final and fresh in the cache: no call
+        self.assertEqual(host.calls, 2)
+
     def test_no_event_falls_back_to_polling(self):
         host = FakeHost("green")
         self.assertEqual(self.wait(self.poller(host), events=lambda: None)[0], 0)

@@ -42,7 +42,11 @@ DEFAULTS = {
 TEXT_MAX = 500
 DEBUG = logging.getLogger("swarm.events")
 HELPERS_FILE = "events-helpers.json"
-BACKOFF = (5, 15, 60, 300)   # seconds before a helper restart; reset after HEALTHY_AFTER s up
+LOCAL_TOKEN_FILE = "events-local-token"   # this listener start's local-route token (private dir, 0600)
+PROXY_HEADERS = ("x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-forwarded-port",
+                 "x-forwarded-server", "forwarded", "via", "x-real-ip", "cf-connecting-ip", "true-client-ip")
+BACKOFF = (5, 15, 60, 300)   # seconds before a helper restart; reset after HEALTHY_AFTER s up. The cap
+# (300 s) bounds how long a fixed credential or config waits: each restart re-reads the spec.
 HEALTHY_AFTER = 60
 _KIND = re.compile(r"[A-Za-z0-9_.:-]{1,48}")
 _TO = re.compile(r"@?[A-Za-z0-9_. -]{1,64}")
@@ -171,13 +175,69 @@ def _make_handler(listener: "Listener"):
     return Handler
 
 
+def _proc_addr(ip: str, port: int, v6: bool) -> str:
+    """An address as /proc/net/tcp{,6} prints it: each 32-bit word of the address in host byte
+    order, as hex, then the port in hex (an IPv4 peer in tcp6 is ::ffff:a.b.c.d)."""
+    import ipaddress
+    a = ipaddress.ip_address(ip.split("%", 1)[0])
+    if v6 and a.version == 4:
+        a = ipaddress.IPv6Address(f"::ffff:{a}")
+    if (a.version == 6) != v6:
+        raise ValueError("other family")
+    b = a.packed
+    words = [b[i:i + 4] if sys.byteorder == "big" else b[i:i + 4][::-1] for i in range(0, len(b), 4)]
+    return "".join(w.hex() for w in words).upper() + f":{int(port):04X}"
+
+
+def peer_uid(peer, local, proc="/proc/net") -> int | None:
+    """The OS user owning the client end of a local TCP connection (peer -> local, both
+    (host, port, ...)), from the kernel's socket table; None when not found or unreadable. Another
+    user can't fake this: the uid column is the socket owner's, as the kernel records it."""
+    for name, v6 in (("tcp", False), ("tcp6", True)):
+        try:
+            want_l, want_r = _proc_addr(peer[0], peer[1], v6), _proc_addr(local[0], local[1], v6)
+            with open(os.path.join(proc, name), encoding="ascii") as fh:
+                next(fh, None)
+                for line in fh:
+                    f = line.split()
+                    # ESTABLISHED (01) with a live inode only: a client that sent and closed
+                    # leaves a TIME_WAIT/FIN_WAIT row whose uid is 0 (root's), inode 0
+                    if len(f) > 9 and f[1] == want_l and f[2] == want_r and f[3] == "01" and f[9] != "0":
+                        return int(f[7])
+        except (OSError, ValueError, IndexError):
+            continue
+    return None
+
+
+def own_peer(peer, local, proc="/proc/net") -> bool:
+    """A loopback peer whose socket belongs to this process's OS user (Linux only: elsewhere the
+    owner can't be told, so no)."""
+    import ipaddress
+    try:
+        if not ipaddress.ip_address(str(peer[0]).split("%", 1)[0]).is_loopback:
+            return False
+    except ValueError:
+        return False
+    return hasattr(os, "getuid") and peer_uid(peer, local, proc) == os.getuid()
+
+
 class Listener:
-    def __init__(self, cfg: dict, registry, board_factory: Callable, log: Callable[[str], None] | None = None):
+    def __init__(self, cfg: dict, registry, board_factory: Callable, log: Callable[[str], None] | None = None,
+                 write_token: Callable[[str], None] | None = None):
+        import secrets
         self.cfg = settings(cfg)
+        # Local routes are served at <route>/<token>: a fresh random token per listener start, kept
+        # in the private dir for the helpers' plugin (local_token()). Local users can read it in a
+        # helper's argv, but the uid check stops them; it stops a remote sender behind a proxy.
+        self.local_token = secrets.token_urlsafe(24)
+        self.write_token = write_token or _write_local_token
         self.registry = registry
         self.board_factory = board_factory
         self.log = log or (lambda m: None)
-        self.routes = {r: src for src in registry.event_sources.values() for r in src.routes}
+        self.routes = {r: src for src in registry.event_sources.values()
+                       for r in src.routes + tuple(getattr(src, "local_routes", ()) or ())}
+        self.local_paths = {r for src in registry.event_sources.values()
+                            for r in tuple(getattr(src, "local_routes", ()) or ())}
         self.server: ThreadingHTTPServer | None = None
         self.stop = threading.Event()
         self._next_poll: dict[str, float] = {}
@@ -187,9 +247,15 @@ class Listener:
 
     def handle_post(self, h: BaseHTTPRequestHandler) -> None:
         path = h.path.split("?", 1)[0]
-        src = self.routes.get(path)
+        local = self._local_route(path)
+        src = self.routes.get(local or path)
         if src is None:
             return h._reply(404)
+        if local is not None or path in self.local_paths:   # unsigned by design; checked before the body
+            why = self._local_refusal(h, path, local)
+            if why:
+                self.log(f"{src.name}: refused a local delivery ({why})")
+                return h._reply(403)
         if h.headers.get("Transfer-Encoding"):
             return h._reply(411)
         raw = h.headers.get("Content-Length")
@@ -205,13 +271,14 @@ class Listener:
             return h._reply(400)
         if len(body) != n:
             return h._reply(400)
-        try:
-            ok = bool(src.verify(h.headers, body))   # before anything parses the body
-        except Exception:
-            ok = False
-        if not ok:
-            self.log(f"{src.name}: refused a request (bad signature)")
-            return h._reply(403)
+        if local is None:
+            try:
+                ok = bool(src.verify(h.headers, body))   # before anything parses the body
+            except Exception:
+                ok = False
+            if not ok:
+                self.log(f"{src.name}: refused a request (bad signature)")
+                return h._reply(403)
         try:
             with self.board_factory() as board:
                 ctx = EventContext(src.name, board, self.source_config(src.name), self.log)
@@ -221,6 +288,24 @@ class Listener:
             return h._reply(500)
         self.log(f"{src.name}: ok, {new} new event(s)")
         h._reply(204)
+
+    def _local_route(self, path: str) -> str | None:
+        """The local route `path` is `<route>/<token>` of (whatever the token), else None."""
+        base, sep, _ = path.rpartition("/")
+        return base if sep and base in self.local_paths else None
+
+    def _local_refusal(self, h, path: str, local: str | None) -> str | None:
+        """Why a delivery to a local route is refused (None: served). Only this listener start's
+        token, never through a proxy, only from this OS user's own established loopback socket."""
+        import hmac as _hmac
+        if any(h.headers.get(name) is not None for name in PROXY_HEADERS):
+            return "proxy headers: local routes are never served through a proxy"
+        token = path.rpartition("/")[2] if local is not None else ""
+        if not token or not _hmac.compare_digest(token.encode(), self.local_token.encode()):
+            return "wrong or missing route token"
+        if not own_peer(h.client_address, h.connection.getsockname()):
+            return "not an established loopback socket of this OS user"
+        return None
 
     # ---- polls
 
@@ -265,6 +350,12 @@ class Listener:
         if self.server is None:
             self.bind()
         threading.Thread(target=self._poll_loop, daemon=True).start()
+        if self.local_paths:   # before any helper starts: they build their URL from it
+            try:
+                self.write_token(self.local_token)
+            except Exception as exc:
+                self.log(f"cannot keep the local-route token ({type(exc).__name__}): local routes refuse all")
+                self.local_token = ""
         self.helpers = HelperSupervisor(self, self.log)
         threading.Thread(target=self.helpers.run, daemon=True).start()
         try:
@@ -298,21 +389,37 @@ class HelperSupervisor:
         self.retry_at: dict[str, float] = {}
         self.stop = threading.Event()
 
+    def _specs_of(self, src) -> dict[str, dict] | None:
+        """{key: spec} of one source's helpers, or None when helpers() fails."""
+        try:
+            specs = src.helpers(self.l.source_config(src.name)) or []
+        except Exception as exc:
+            self.log(f"{src.name}: helpers() failed ({type(exc).__name__})")
+            return None
+        out = {}
+        for h in specs:
+            if (isinstance(h, dict) and isinstance(h.get("name"), str) and isinstance(h.get("argv"), list)
+                    and h["argv"] and all(isinstance(a, str) for a in h["argv"])):
+                out[f"{src.name}/{h['name']}"] = h
+            else:
+                self.log(f"{src.name}: ignored a malformed helper spec")
+        return out
+
     def load(self) -> None:
         for src in self.l.registry.event_sources.values():
-            if src.helpers is None:
-                continue
-            try:
-                specs = src.helpers(self.l.source_config(src.name)) or []
-            except Exception as exc:
-                self.log(f"{src.name}: helpers() failed ({type(exc).__name__})")
-                continue
-            for h in specs:
-                if (isinstance(h, dict) and isinstance(h.get("name"), str) and isinstance(h.get("argv"), list)
-                        and h["argv"] and all(isinstance(a, str) for a in h["argv"])):
-                    self.specs[f"{src.name}/{h['name']}"] = h
-                else:
-                    self.log(f"{src.name}: ignored a malformed helper spec")
+            if src.helpers is not None:
+                self.specs.update(self._specs_of(src) or {})
+
+    def _fresh(self, key: str, h: dict) -> dict:
+        """The spec of `key` as its source gives it now (a restart picks up a rotated secret, a new
+        config or credential), else the one loaded before."""
+        src = self.l.registry.event_sources.get(key.split("/", 1)[0])
+        if src is None or src.helpers is None:
+            return h
+        new = (self._specs_of(src) or {}).get(key)
+        if new is not None:
+            self.specs[key] = new
+        return new or h
 
     def step(self) -> None:
         """One supervision tick: start what is due, notice exits, write the health file."""
@@ -328,6 +435,8 @@ class HelperSupervisor:
                 self.log(f"{key}: helper exited (rc {proc.returncode}), restart in "
                          f"{int(self.retry_at[key] - now)} s")
             if key not in self.procs and self.retry_at.get(key, 0) <= now:
+                if key in self.retry_at:   # a restart: the source's spec as it is now
+                    h = self._fresh(key, h)
                 try:
                     p = self.popen(h["argv"], env={**os.environ, **(h.get("env") or {})},
                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -340,7 +449,9 @@ class HelperSupervisor:
                     self.retry_at[key] = now + BACKOFF[min(max(st["fails"], 1), len(BACKOFF)) - 1]
                     self.log(f"{key}: helper failed to start ({type(exc).__name__})")
         try:
-            self.write({"beat": now, "helpers": {k: {f: v[f] for f in ("up", "pid", "restarts", "since")}
+            self.write({"beat": now, "helpers": {k: {**{f: v[f] for f in ("up", "pid", "restarts", "since")},
+                                                     **({} if v["up"] or k not in self.retry_at
+                                                        else {"retry_at": self.retry_at[k]})}
                                                  for k, v in self.state.items()}})
         except Exception:
             pass
@@ -360,6 +471,19 @@ class HelperSupervisor:
                 p.terminate()
             except Exception:
                 pass
+
+
+def _write_local_token(token: str) -> None:
+    from swarm.supervisor import settings as sup
+    sup.write_private(LOCAL_TOKEN_FILE, token)
+
+
+def local_token() -> str | None:
+    """The running listener's local-route token (for a plugin building its helper's URL), or None."""
+    from swarm.supervisor import settings as sup
+    raw = sup.read_private(LOCAL_TOKEN_FILE)
+    token = raw.decode("ascii", "replace").strip() if raw else ""
+    return token if re.fullmatch(r"[A-Za-z0-9_-]{16,128}", token) else None
 
 
 def _write_health(data: dict) -> None:
@@ -417,13 +541,24 @@ def lock_held() -> bool:
     return False
 
 
+def launch_env(environ, lib) -> dict:
+    """The environment bin/swarm gives `python -m swarm.cli`: PYTHONPATH with the plugin's lib, and
+    its bytecode cache (paths.pycache_env: PYTHONPYCACHEPREFIX in the private cache dir, else
+    PYTHONDONTWRITEBYTECODE=1), so processes the supervisor starts compile nothing on every start
+    (no `-B`) and write nothing into the plugin tree."""
+    from swarm import paths
+    env = {**environ, "PYTHONPATH": str(lib)}
+    env.update(paths.pycache_env(environ))
+    return env
+
+
 def start_detached(cfg: dict, popen=None) -> int:
     """Start `swarm events serve` detached (the supervisor pass does this when the listener is down)."""
     import subprocess
     from swarm import paths
     popen = popen or subprocess.Popen
-    env = {**os.environ, "PYTHONPATH": str(paths.LIB_DIR)}
-    cmd = [sys.executable, "-B", "-m", "swarm.cli"]
+    env = launch_env(os.environ, paths.LIB_DIR)
+    cmd = [sys.executable, "-m", "swarm.cli"]
     if cfg.get("_config_path"):
         cmd += ["--config", str(cfg["_config_path"])]
     proc = popen(cmd + ["events", "serve"], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,

@@ -10,6 +10,14 @@ if [ "${OS:-}" = "Windows_NT" ]; then   # Git Bash on Windows: the Python entry 
 fi
 D="$(cd "$(dirname "$0")/.." && pwd)"
 V="${SWARM_VENV:-$HOME/.local/share/swarm/venv}"
+# What this launcher changes in the environment (below), as it was before: `swarm bg` gives the
+# command it wraps exactly the environment it would have had unwrapped (swarm.bg.caller_env).
+# _SWARM_PRE_<VAR> is exported only when VAR was set; _SWARM_LAUNCHER says the record is there.
+for _v in PYTHONPATH PYTHONPYCACHEPREFIX PYTHONDONTWRITEBYTECODE; do unset "_SWARM_PRE_$_v"; done
+[ -n "${PYTHONPATH+x}" ] && export _SWARM_PRE_PYTHONPATH="$PYTHONPATH"
+[ -n "${PYTHONPYCACHEPREFIX+x}" ] && export _SWARM_PRE_PYTHONPYCACHEPREFIX="$PYTHONPYCACHEPREFIX"
+[ -n "${PYTHONDONTWRITEBYTECODE+x}" ] && export _SWARM_PRE_PYTHONDONTWRITEBYTECODE="$PYTHONDONTWRITEBYTECODE"
+export _SWARM_LAUNCHER=1
 # Bytecode cache: without one every run recompiles ~1 MB of source (~0.2 s of each command, and of
 # each hook that reaches Python). It lives beside the venv, which already holds code this user runs,
 # and is used only when it is this user's own, unshared directory (a sandboxed agent can't plant

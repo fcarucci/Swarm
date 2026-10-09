@@ -534,11 +534,13 @@ def _allow_paused(conn: sqlite3.Connection) -> None:
 
 from .blockers import SqlBlockers, sql_schema, migrate_sql, rollup, protects
 from .events import SqlEvents, sql_schema as events_schema
+from .bgcmds import SqlBgCommands, sql_schema as bg_schema
 
 
-class SqliteBoard(SqlBlockers, SqlEvents, Board):
+class SqliteBoard(SqlBlockers, SqlEvents, SqlBgCommands, Board):
     _blocker_pg = False
     _event_pg = False
+    _bg_pg = False
     """A Board over one SQLite connection to the shared database file."""
 
     def __init__(self, cfg: dict, read_only: bool = False):
@@ -619,7 +621,7 @@ class SqliteBoard(SqlBlockers, SqlEvents, Board):
                             conn.execute(COUNT_BACKFILL)
                 for trigger in COUNT_TRIGGERS:
                     conn.execute(trigger)
-                for statement in (sql_schema() + events_schema()).split(";"):
+                for statement in (sql_schema() + events_schema() + bg_schema()).split(";"):
                     if statement.strip(): conn.execute(statement)
                 migrate_sql(conn)
                 for source in NAME_SOURCES:
@@ -727,6 +729,8 @@ class SqliteBoard(SqlBlockers, SqlEvents, Board):
         c.execute("DELETE FROM restarts WHERE at < ?", (keep,))
         c.execute("DELETE FROM events WHERE created_at < ? AND (acked_at IS NOT NULL "
                   "OR job NOT IN (SELECT job FROM jobs))", (keep,))
+        c.execute("DELETE FROM bg_commands WHERE job NOT IN (SELECT job FROM jobs) "
+                  "OR (ended_at IS NOT NULL AND ended_at < ?)", (keep,))
 
     # ---- jobs --------------------------------------------------------------------
 

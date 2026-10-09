@@ -189,6 +189,12 @@ class ClaudeHost(Host):
         cmd = ti.get("command")
         return cmd if payload.get("tool_name") == "Bash" and isinstance(cmd, str) else None
 
+    def is_background_shell(self, payload: dict) -> bool:
+        """Bash with `run_in_background: true` (verified on Claude Code 2.1.295: the PreToolUse
+        payload carries it, and an updatedInput command is what the background task runs)."""
+        ti = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
+        return payload.get("tool_name") == "Bash" and ti.get("run_in_background") is True
+
     # -- pause/resume ----------------------------------------------------------------------
     # Claude Code resumes `--resume <uuid>` from <config>/projects/<cwd with non-alphanumerics as
     # "-">/<uuid>.jsonl, found by the current directory: a transcript stored from another box

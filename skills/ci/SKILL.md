@@ -40,7 +40,8 @@ Config, in the swarm `config.toml` (paths only, never secret values):
     repo = "owner/name"
     secret_file = "~/.config/me/webhook-secret"
     token_file = "~/.config/me/ci-token"
-    forward = true         # github: run `gh webhook forward`
+    forward = true         # github: run `gh webhook forward` (no secret on its command line: it
+                           # delivers to a local route only this OS user's processes may use; Linux)
     api_url = "..."        # gitea; github defaults to api.github.com
     job = "my-job"         # optional: default every active job
 

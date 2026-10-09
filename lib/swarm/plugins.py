@@ -124,6 +124,7 @@ class EventSource:
     poll: Callable | None = None
     poll_interval_s: int | None = None
     helpers: Callable | None = None   # helpers(config) -> list[dict(name, argv, env=None)]
+    local_routes: tuple = ()          # served unsigned, to this OS user's own local processes only
 
 
 @dataclasses.dataclass
@@ -181,7 +182,7 @@ class PluginAPI:
 
     def register_event_source(self, name: str, *, routes: list, verify: Callable, handle: Callable,
                               poll: Callable | None = None, poll_interval_s: int | None = None,
-                              helpers: Callable | None = None) -> None:
+                              helpers: Callable | None = None, local_routes: list | None = None) -> None:
         """An external event source for `swarm events serve`.
 
         routes: URL paths the listener hands to this source (e.g. ["/gitea"]).
@@ -195,6 +196,10 @@ class PluginAPI:
         listener's environment; never put a token in argv (use a token_file the helper reads).
         poll_interval_s has a floor ([events] min_poll_interval_s, 600) unless the source's config sets
         poll_interval_s itself.
+        local_routes: paths for a helper's deliveries that carry no signature (so no secret has to
+        sit in the helper's argv, which every OS user can read in /proc). verify() is not called
+        for them; the listener serves them only to a loopback peer whose socket belongs to the
+        listener's own OS user (/proc/net/tcp, Linux), and refuses them everywhere else.
         Core never interprets kind or the body."""
         if not isinstance(name, str) or not name.replace("-", "").replace("_", "").isalnum() or not name[:1].isalpha():
             raise ValueError(f"bad event source name {name!r}")
@@ -203,9 +208,13 @@ class PluginAPI:
         if (not isinstance(routes, (list, tuple)) or not routes
                 or not all(isinstance(r, str) and r.startswith("/") and len(r) > 1 and "?" not in r for r in routes)):
             raise ValueError("routes must be a non-empty list of paths starting with /")
-        taken = {r for src in self._r.event_sources.values() for r in src.routes}
-        if taken & set(routes):
-            raise ValueError(f"event route already taken: {sorted(taken & set(routes))[0]}")
+        local_routes = list(local_routes or ())
+        if not all(isinstance(r, str) and r.startswith("/") and len(r) > 1 and "?" not in r for r in local_routes):
+            raise ValueError("local_routes must be paths starting with /")
+        taken = {r for src in self._r.event_sources.values() for r in src.routes + src.local_routes}
+        mine = set(routes) | set(local_routes)
+        if taken & mine or set(routes) & set(local_routes):
+            raise ValueError(f"event route already taken: {sorted((taken & mine) or (set(routes) & set(local_routes)))[0]}")
         if not callable(verify) or not callable(handle):
             raise TypeError("verify and handle must be callable")
         if helpers is not None and not callable(helpers):
@@ -216,7 +225,7 @@ class PluginAPI:
                                  or poll_interval_s < 1):
             raise ValueError("poll needs poll_interval_s, a positive integer")
         self._r.event_sources[name] = EventSource(self.name, name, tuple(routes), verify, handle, poll,
-                                                  poll_interval_s, helpers)
+                                                  poll_interval_s, helpers, tuple(local_routes))
 
     def register_blocker_kind(self, kind: str, display: Callable | None = None,
                               expiry: Callable | None = None, protection: str = "addressed") -> None:

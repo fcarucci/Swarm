@@ -1042,24 +1042,39 @@ def own_name_verdict_command(command: str, name: str, job: str | None = None) ->
     return command
 
 
-def _reuse_identity(agent_id: str, job: str, payload: dict, name: str | None = None) -> None:
+def _reuse_identity(agent_id: str, job: str, payload: dict, name: str | None = None,
+                    cfg: dict | None = None) -> None:
     """A member that runs `swarm join --key X` itself would get a SECOND row (its hook identity,
     keyed by agent_id, plus X): the board would list one agent twice, one of them an idle ghost. The
     hook knows who is calling, so the call runs with --key <agent_id> instead: join then returns
     the name the agent already has. Likewise `swarm verdict` runs as the caller's own name, so a
     judge never needs `--as`. Only where the host lets a hook rewrite a shell call, only a real
-    join or verdict invocation, and never one of another job."""
+    join or verdict invocation, and never one of another job.
+    A background shell call (host.is_background_shell) runs under `swarm bg` (swarm.bg), so the
+    board knows it and stops it if it outlives the agent or the job."""
     host = current_host()
     command = host.shell_command(payload) if agent_id and host.supports_shell_rewrite else None
     new = own_key_command(command, agent_id, job) if command else None
     if command and name:
         new = own_name_verdict_command(new or command, name, job) or new
-    if new:
+    wrapped = None
+    if command and name and cfg is not None and host.is_background_shell(payload):
+        from swarm import bg
+        if not bg.is_wrapped(new or command, job, agent_id, name, cfg):
+            wrapped = bg.wrap_command(new or command, job, agent_id, name, cfg)
+    if new or wrapped:
         ti = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
-        _set_input_rewrite(host.input_rewrite_output({**ti, "command": new}))
+        _set_input_rewrite(host.input_rewrite_output({**ti, "command": wrapped or new}))
+    if new:
         _out("PreToolUse", "[swarm] You already have a swarm identity (your hooks joined you): "
                            "`swarm join` runs with it (no second name) and `swarm verdict` records "
                            "as you. You don't need to run join or pass --as.")
+    if wrapped:
+        _out("PreToolUse", "[swarm] This background command runs under `swarm bg`: the board records "
+                           "it, and it is stopped if it is still running after you finish or the job "
+                           "closes. Its output, exit code and environment are its own, but it runs in a "
+                           "fresh `bash -c`: your shell's aliases and functions are not available to it "
+                           "(write the commands out, or source what defines them).")
 
 
 def _gate_judge(board, agent_id: str, job: str, payload: dict) -> bool:
@@ -1080,6 +1095,58 @@ def _gate_judge(board, agent_id: str, job: str, payload: dict) -> bool:
               "`swarm verdict ... --details -` with the Markdown on stdin (a heredoc with a quoted delimiter: --details - <<'EOF').")
         return False
     return True
+
+
+def _ci_plugin_loaded(board, cfg: dict) -> bool:
+    """Whether `swarm ci` exists here: the ci plugin is installed and not disabled."""
+    reg = getattr(board, "plugin_registry", None)
+    if reg is None:
+        try:
+            from swarm import cli, plugins, paths
+            reg = plugins.Registry(cfg, cfg.get("_config_path") or paths.config_path(),
+                                   core_commands=tuple(cli.BOARD_COMMANDS) + tuple(cli.COMMANDS)).load()
+        except Exception:
+            return False
+    return "ci" in getattr(reg, "commands", {})
+
+
+def ci_wait_refusal(command: str, cwd: str, plugin: bool) -> str | None:
+    """The refusal for a shell command that waits on or polls CI (shellguard.ci_wait), with the
+    exact `swarm ci wait` to run instead; None for any other command."""
+    from swarm import gitinfo
+    from swarm.shellguard import ci_repo, ci_wait
+    what = ci_wait(command)
+    if what is None:
+        return None
+    repo = ci_repo(command) or gitinfo.repo_slug(cwd) or "OWNER/REPO"
+    sha = gitinfo.head_sha(cwd) or "<exact head SHA>"
+    head = (f"[swarm] Refused: {what} waits on CI by polling the CI host's API, which exhausts the shared "
+            f"budget, and a background wait can outlive you and keep you running after the job is done.")
+    if not plugin:
+        return (f"{head} The swarm `ci` plugin (`swarm ci wait`, the event-driven replacement) is not "
+                f"installed or is disabled here: ask the orchestrator or the human to enable it "
+                f"(swarm plugins). Meanwhile check once with `gh run view <run-id> --json status,conclusion` "
+                f"and post on the board instead of looping.")
+    return (f"{head} Wait with `{_bin()} ci wait --repo {shlex.quote(repo)} --sha {shlex.quote(sha)}` "
+            f"(foreground: it blocks until CI concludes on that exact commit; exit 0 green, 1 failed with "
+            f"the failing jobs, 124 timeout; --timeout 90m by default). For one look use "
+            f"`{_bin()} ci status --repo {shlex.quote(repo)} --sha {shlex.quote(sha)}`. "
+            f"A one-shot `gh run view <run-id> --json conclusion` is still allowed.")
+
+
+def _gate_ci(board, agent_id: str, payload: dict, cfg: dict) -> bool:
+    """Refuse a member's shell command that waits on or polls CI; point at `swarm ci wait`.
+    True = go ahead."""
+    command = current_host().shell_command(payload)
+    if not command:
+        return True
+    from swarm.shellguard import ci_wait
+    if ci_wait(command) is None:   # the cheap test first: no plugin load, no .git read
+        return True
+    why = ci_wait_refusal(command, _payload_cwd(payload), _ci_plugin_loaded(board, cfg))
+    board.tool_finished(agent_id)   # a denied call gets no PostToolUse
+    _deny(why)
+    return False
 
 
 def _gate_verifier(board, agent_id: str, is_verifier: bool, payload: dict) -> bool:
@@ -1112,8 +1179,9 @@ def _gate_new_member(board, agent_id: str, bound: dict, payload: dict, cfg: dict
         return
     verifier = any(a.agent_key == agent_id and a.role == "verifier"
                    for a in board.agents(job, include_departed=False))
-    _reuse_identity(agent_id, job, payload, name)
-    if _gate_judge(board, agent_id, job, payload) and _gate_verifier(board, agent_id, verifier, payload):
+    _reuse_identity(agent_id, job, payload, name, cfg)
+    if _gate_judge(board, agent_id, job, payload) and _gate_verifier(board, agent_id, verifier, payload) \
+            and _gate_ci(board, agent_id, payload, cfg):
         _gate_spawn(board, agent_id, name, job, payload, cfg)
 
 
@@ -1601,6 +1669,20 @@ def _judge_stop(board, agent_id: str, cfg: dict, payload: dict) -> bool:
         + ' before stopping. Record met with evidence or not_met with --reason and --next.'})
     return False
 
+def _reap_own_bg(board, cfg: dict, agent_id: str) -> None:
+    """The finished agent's background commands still running on this host: a detached
+    `swarm bg reap --agent K` after bg.AGENT_GRACE seconds (it re-checks that the agent is still
+    finished, then SIGTERM/SIGKILL). Never fails the stop."""
+    try:
+        job = board.route(agent_id).member_job
+        if job:
+            from swarm import bg
+            if bg.has_local_running(board, job, agent_id):
+                bg.spawn_reaper(cfg, job, agent_id, bg.AGENT_GRACE)
+    except Exception as exc:
+        _log_error("stop bg reap", agent_id, exc)
+
+
 def _agent_plugin_lines(board, cfg, job, agent_key):
     try:
         from swarm import plugins, paths, cli
@@ -1629,6 +1711,7 @@ def _on_event(board, event: str, agent_id: str, sid: str | None, bound: dict, un
             _log_error("stop model", agent_id, exc)
         if host.completes_on(event):
             board.agent_stopped(agent_id)
+            _reap_own_bg(board, cfg, agent_id)
         else:   # Codex: this turn ended; only session/process exit completes the agent
             board.agent_turn_ended(agent_id)
         deadline = time.monotonic() + TRANSCRIPT_BUDGET_SECONDS
@@ -1707,9 +1790,10 @@ def _on_event(board, event: str, agent_id: str, sid: str | None, bound: dict, un
         model = payload.get("model") or current_host().agent_model(payload, agent_id)
         if model:
             board.set_agent_runtime(agent_id, None, model)
-    _reuse_identity(agent_id, member.job, payload, member.name)
+    _reuse_identity(agent_id, member.job, payload, member.name, cfg)
     if _gate_judge(board, agent_id, member.job, payload) and \
             _gate_verifier(board, agent_id, member.verifier, payload) and \
+            _gate_ci(board, agent_id, payload, cfg) and \
             _gate_spawn(board, agent_id, member.name, member.job, payload, cfg):
         _on_turn(board, agent_id, member.name, member.job, cfg, sid, payload)
 

@@ -121,6 +121,35 @@ class EventHookTests(Env):
         self.cli("event", "ack", "--job", "J", "1", "2")
         self.assertIsNone(self.orch())
 
+    def test_an_ack_whose_generation_lands_elsewhere_still_clears_within_the_check_window(self):
+        """Live report (swarm-orphans): acked events kept showing. An ack run through another
+        plugin install bumps the generation in that install's fast-path dir, not the hook's; the
+        hook's cached result must still expire within EVENT_CHECK_SECONDS."""
+        from unittest import mock
+        from swarm import fastpath, hooks
+        self.post("A", "1", "one")
+        self.assertIn("#1", self.context(self.orch()))
+        with mock.patch.object(fastpath, "changed"):          # the bump went to another dir
+            self.cli("event", "ack", "--job", "J", "1")
+        real = fastpath.now()
+        with mock.patch.object(fastpath, "now", return_value=real + hooks.EVENT_CHECK_SECONDS + 1):
+            self.assertIsNone(self.orch())
+
+    def test_an_ack_from_the_orchestrating_session_is_recorded_as_the_orchestrator(self):
+        """Not as whichever subagent of that session the board lists first (they share its id)."""
+        from unittest import mock
+        from swarm import hosts
+        for key in ("sub-1", "sub-2"):
+            self.hook("start", agent_id=key, session="sess-1")
+        self.post("A", "1", "one")
+        self.post("A", "2", "two")
+        with mock.patch.object(hosts, "cli_session_id", return_value="sess-1"):
+            self.cli("event", "ack", "--job", "J", "1")
+        with mock.patch.object(hosts, "cli_session_id", return_value="another-session"):
+            self.cli("event", "ack", "--job", "J", "2")
+        rows = {r["id"]: r["acked_by"] for r in json.loads(self.cli("event", "list", "--job", "J", "--json")[1])}
+        self.assertEqual(rows, {1: "orchestrator", 2: "human"})
+
     def test_the_cap_keeps_the_output_compact(self):
         for i in range(1, 9):
             self.post("A", str(i), f"event {i}")

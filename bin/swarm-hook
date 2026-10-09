@@ -73,6 +73,20 @@ case "${1:-}" in turn|done)
     # `swarm join` and `swarm verdict` are rewritten to the caller's own identity by the Python hook.
     case "$PAYLOAD" in *spawn_agent*|*followup_task*|*SendMessage*|*\"Agent\"*|*\"Task\"*|*memory*|*remember*) VALID="";; esac
     case "$PAYLOAD" in *swarm*join*|*swarm*verdict*) VALID="";; esac
+    # PreToolUse only, and only its tool_input (never a tool's output): a background shell call is
+    # rewritten to run under `swarm bg`, and a CI wait (gh run watch, gh pr checks --watch, a
+    # gh/curl poll loop) is refused, by the Python hook. A gh word must start a command (after a
+    # quote, a space, ; & | ( / ` or an escaped newline), so a path like ~/repos/proj never matches.
+    if [ "$1" = turn ]; then
+      TI=${PAYLOAD#*\"tool_input\"}
+      [ "$TI" = "$PAYLOAD" ] && TI=""
+      case "$TI" in
+        *\"run_in_background\":\ true*|*\"run_in_background\":true*) VALID="";;
+        *[\"\ \;\&\|\(/\`]gh\ run\ *|*\\ngh\ run\ *|*[\"\ \;\&\|\(/\`]gh\ pr\ checks*|*\\ngh\ pr\ checks*) VALID="";;
+        *[\"\ \;\&\|\(/\`]gh\ api\ *|*\\ngh\ api\ *|*[\"\ \;\&\|\(/\`]gh\ -R*|*[\"\ \;\&\|\(/\`]gh\ --repo*) VALID="";;
+        *://*/api/v1/repos/*|*api.github.com/repos/*|*[\"\ \;\&\|\(/\`]tea\ action*) VALID="";;
+      esac
+    fi
     if [ -n "$VALID" ] && [ -d "$FP" ] && [ ! -L "$FP" ] && [ -O "$FP" ] &&
        [ -f "$FP/agent-$KEY" ] && [ ! -L "$FP/agent-$KEY" ] &&
        [ -f "$FP/live" ] && [ ! -L "$FP/live" ]; then

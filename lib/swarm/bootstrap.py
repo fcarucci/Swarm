@@ -1401,6 +1401,7 @@ def doctor(host: str | None = None, *, config: Path | None = None, claude_plugin
     if cfg_ok:
         checks += _transcripts_users_check(cfg)
         checks += _capture_failed_check(cfg)
+        checks += _bg_orphans_check(cfg)
     checks += supervisor_checks(cfg, host)
     return checks
 
@@ -1571,6 +1572,28 @@ def _transcripts_users_check(cfg: dict) -> list[Check]:
 
 
 PENDING_FINAL_WARN_HOURS = 1.0   # doctor: an ended agent without a final transcript this long is shown
+
+
+def _bg_orphans_check(cfg: dict) -> list[Check]:
+    """Background commands of agents (swarm bg) still running on this host although their agent
+    finished or their job closed. Read-only; an unreachable board is the board check's to report."""
+    from swarm import bg
+    from swarm.board import open_board
+    try:
+        with open_board(cfg, init_timeout=5.0, readers=True) as b:
+            host = bg.this_host()
+            here = [r for r in b.bg_orphans() if r.host == host]
+    except Exception:
+        return []
+    if not here:
+        return [Check("orphaned bg commands", True, "none on this host")]
+    jobs = sorted({r.job for r in here})
+    from swarm.textsafe import term_safe
+    return [Check("orphaned bg commands", None,
+                  term_safe(f"{len(here)} still running after their agent finished or job closed "
+                            f"(jobs: {', '.join(jobs[:5])}{', ...' if len(jobs) > 5 else ''})"),
+                  "~/.local/bin/swarm bg list --orphans, then ~/.local/bin/swarm bg reap "
+                  "(the supervisor pass reaps them too when [supervise] is on)")]
 
 
 def _capture_failed_check(cfg: dict) -> list[Check]:

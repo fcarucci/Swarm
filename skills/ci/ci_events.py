@@ -239,6 +239,7 @@ class PushState:
     def __init__(self, path=None):
         self.path = Path(path) if path else None
         self.heads, self.verdicts, self.ci, self.titles = {}, {}, {}, {}
+        self.unconfirmed: list = []   # shas whose recorded runs all passed, not yet confirmed final
         if self.path and self.path.is_file():
             try:
                 d = json.loads(self.path.read_text())
@@ -246,6 +247,7 @@ class PushState:
                 self.verdicts = {int(k): v for k, v in d.get("verdicts", {}).items()}
                 self.ci = d.get("ci", {})
                 self.titles = {int(k): v for k, v in d.get("titles", {}).items()}
+                self.unconfirmed = [s for s in d.get("unconfirmed", []) if isinstance(s, str)][-50:]
             except (OSError, ValueError):
                 pass
 
@@ -256,27 +258,55 @@ class PushState:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(json.dumps({"heads": self.heads, "verdicts": self.verdicts,
-                                       "ci": self.ci, "titles": self.titles}))
+                                       "ci": self.ci, "titles": self.titles,
+                                       "unconfirmed": self.unconfirmed[-50:]}))
             tmp.replace(self.path)
         except OSError:
             pass
 
     def ci_state(self, sha):
+        """What the pushed completions say: failure as soon as one failed; "success" only means every
+        run RECORDED so far passed (other workflows or check suites may still be running)."""
         runs = self.ci.get(sha) or {}
         bad = [f"{k}:{v}" for k, v in runs.items() if v not in ("success", "skipped", "neutral")]
         if bad:
             return "failure", " ".join(bad)
         return ("success", "") if runs else ("pending", "")
 
+    def confirmed_state(self, sha, confirm, memo=None):
+        """ci_state, with "success" confirmed: a completion is only a trigger. `confirm(sha)` asks
+        the CI host once (through the shared poller) whether the WHOLE commit is final: "green",
+        "failed", or anything else (still running, unknown). Unconfirmed, it is "pending" and the
+        sha is kept for the source's poll to confirm later (confirm_pending)."""
+        state = self.ci_state(sha)
+        if state[0] != "success":
+            return state
+        memo = {} if memo is None else memo
+        if sha not in memo:
+            try:
+                memo[sha] = confirm(sha) if confirm else None
+            except Exception:
+                memo[sha] = None
+        verdict = memo[sha]
+        if verdict in ("green", "failed"):
+            if sha in self.unconfirmed:
+                self.unconfirmed.remove(sha)
+            return ("success", "") if verdict == "green" else ("failure", "CI failed (confirmed with the CI host)")
+        if sha not in self.unconfirmed:
+            self.unconfirmed.append(sha)
+        return "pending", ""
 
-def handle_push(state, job, headers, body: bytes):
-    """GitHub webhook -> events with NO API call, from `state` plus the payload alone."""
+
+def handle_push(state, job, headers, body: bytes, confirm=None):
+    """GitHub webhook -> events from `state` plus the payload. CI-FAILED needs no API call; CI-GREEN
+    and READY-TO-LAND only once `confirm(sha)` (one call through the shared poller) says the whole
+    commit is green: a workflow_run or check_suite completion is one of possibly several."""
     try:
         p = json.loads(body or b"{}")
     except ValueError:
         return []
     ev = {k.lower(): v for k, v in headers.items()}.get("x-github-event", "")
-    touched, new_head, sha_events = [], False, []
+    touched, new_head, sha_events, memo = [], False, [], {}
     if ev == "pull_request" and p.get("action") in NEW_HEAD_ACTIONS:
         pr = p.get("pull_request", {})
         n, sha = pr.get("number"), pr.get("head", {}).get("sha")
@@ -301,28 +331,48 @@ def handle_push(state, job, headers, body: bytes):
             for n in listed:   # the run itself names its PR: its head is known without any API call
                 state.heads.setdefault(n, sha)
             touched = listed + [n for n, h in state.heads.items() if h == sha and n not in listed]
-            sha_events = ci_events(job, sha, state.ci_state(sha), has_pr=bool(touched))
+            sha_events = ci_events(job, sha, state.confirmed_state(sha, confirm, memo), has_pr=bool(touched))
     out = list(sha_events)
     for n in touched:
         sha = state.heads.get(n)
         if sha:
             out += decide(job, n, sha, state.titles.get(n, ""), state.verdicts.get(n, []),
-                          state.ci_state(sha), new_head=new_head)
+                          state.confirmed_state(sha, confirm, memo), new_head=new_head)
     state.save()
     return out
 
 
-def forward_argv(section, port, route="/github"):
+def confirm_pending(state, job, confirm):
+    """The source's poll: confirm the shas whose recorded runs all passed but that were not yet
+    confirmed final (their last completion came before the rest of the commit's CI), and emit
+    what a confirmation unlocks: CI-GREEN, READY-TO-LAND, or CI-FAILED."""
+    out, memo = [], {}
+    for sha in list(state.unconfirmed):
+        prs = [n for n, h in state.heads.items() if h == sha]
+        ci = state.confirmed_state(sha, confirm, memo)
+        if ci[0] == "pending":
+            continue
+        out += ci_events(job, sha, ci, has_pr=bool(prs))
+        for n in prs:
+            out += decide(job, n, sha, state.titles.get(n, ""), state.verdicts.get(n, []), ci, new_head=False)
+    state.save()
+    return out
+
+
+FORWARD_ROUTE = "/github-forward"
+
+
+def forward_argv(section, port, route=FORWARD_ROUTE, token=""):
     """argv of `gh webhook forward` (cli/gh-webhook): GitHub pushes events over an outbound websocket
-    to the local listener, so a box with no public endpoint still gets callbacks. The secret is read
-    from `secret_file` at launch; the config never holds the value. For the supervisor to run when
+    to the local listener, so a box with no public endpoint still gets callbacks. NO secret: gh-webhook
+    v0.2.0 takes it only as `--secret VALUE`, and argv is readable by every OS user in /proc. Its
+    deliveries go to a local route the listener serves only to this OS user's own loopback
+    processes (events_listener.own_peer), at `<route>/<token>`: the listener start's random token
+    (a remote sender behind a proxy can't know it). For the supervisor to run when
     `[ci.github] forward = true`."""
     events = section.get("forward_events") or "workflow_run,check_suite,pull_request,pull_request_review,issue_comment"
-    argv = ["gh", "webhook", "forward", f"--repo={section['repo']}", f"--events={events}",
-            f"--url=http://127.0.0.1:{int(port)}{route}"]
-    if section.get("secret_file"):
-        argv += ["--secret", read_secret(section["secret_file"]).decode()]
-    return argv
+    return ["gh", "webhook", "forward", f"--repo={section['repo']}", f"--events={events}",
+            f"--url=http://127.0.0.1:{int(port)}{route}" + (f"/{token}" if token else "")]
 
 
 def evaluate(ci, job, n, sha=None, title="", new_head=False):

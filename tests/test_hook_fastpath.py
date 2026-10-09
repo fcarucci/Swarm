@@ -46,6 +46,24 @@ class ShellFastPathTests(unittest.TestCase):
             payload=json.dumps({'session_id':'s','tool_name':'Bash','tool_input':{},'agent_id':'unknown'})
             r=subprocess.run([str(ROOT/'bin/swarm-hook'),'--host','claude','turn'],input=payload,text=True,capture_output=True,env=env)
             self.assertNotEqual(r.stderr,'', 'agent identity after arguments borrowed the parent lease')
+            # A background call (wrapped in `swarm bg`) and a CI wait (refused) always reach Python.
+            for ti in ({'command': 'sleep 9', 'run_in_background': True}, {'command': 'gh run watch 1'},
+                       {'command': 'while :; do gh api repos/o/r/actions/runs; done'}):
+                payload=json.dumps({'session_id':'s','agent_id':'a','tool_name':'Bash','tool_input':ti})
+                r=subprocess.run([str(ROOT/'bin/swarm-hook'),'--host','claude','turn'],input=payload,text=True,capture_output=True,env=env)
+                self.assertNotEqual(r.stderr,'', f'the fast path skipped the Python hook for {ti}')
+            # Ordinary calls stay on the fast path: a path with /repos/, a word ending in gh, and any
+            # PostToolUse (its tool output may say anything).
+            for ti in ({'command': 'ls ~/repos/proj && cat /srv/repos/x'}, {'command': 'echo sigh run away'},
+                       {'command': 'sleep 9', 'run_in_background': False}):
+                payload=json.dumps({'session_id':'s','agent_id':'a','tool_name':'Bash','tool_input':ti})
+                r=subprocess.run([str(ROOT/'bin/swarm-hook'),'--host','claude','turn'],input=payload,text=True,capture_output=True,env=env)
+                self.assertEqual((r.stdout, r.stderr), ('', ''), f'{ti} left the fast path')
+            payload=json.dumps({'session_id':'s','agent_id':'a','tool_name':'Bash',
+                                'tool_input':{'command':'cat log'},
+                                'tool_response':{'stdout':'gh run watch 1; run_in_background: true; gh api x'}})
+            r=subprocess.run([str(ROOT/'bin/swarm-hook'),'--host','claude','done'],input=payload,text=True,capture_output=True,env=env)
+            self.assertEqual((r.stdout, r.stderr), ('', ''), 'PostToolUse output left the fast path')
 
 from unittest import mock
 from test_hooks_cli import Env

@@ -126,7 +126,9 @@ RESTART_OUTCOMES = ("running", "completed", "timeout", "max_turns", "failed", "n
 # per-table autovacuum settings on Postgres' messages and agents.
 # 23 jobs.verdict_details and verdict_details_at (the judge's full Markdown report with a verdict and the verdict_at it belongs to, at most
 # VERDICT_DETAILS_MAX bytes; nullable, read with .get() so old rows and clients keep working).
-SCHEMA_VERSION = 23
+# 24 the bg_commands table: an agent's background shell commands as the `swarm bg` wrapper
+# recorded them (pid, pgid, /proc start ticks, tag), so orphans can be listed and reaped safely.
+SCHEMA_VERSION = 24
 
 VERDICT_DETAILS_MAX = 64 * 1024   # bytes of UTF-8: the largest `swarm verdict --details` report
 
@@ -550,6 +552,43 @@ class Event:
     created_at: _dt.datetime
     acked_at: _dt.datetime | None = None
     acked_by: str | None = None
+
+
+# A background command's end (BgCommand.outcome; None while it runs): "exited" (the wrapper saw it
+# end), "reaped" (SIGTERM ended it), "killed" (SIGKILL was needed), "gone" (reap found it no
+# longer running: vanished, the pid reused, the machine rebooted).
+BG_OUTCOMES = ("exited", "reaped", "killed", "gone")
+BG_COMMAND_MAX = 500        # characters of a recorded command line (one line, env dropped, redacted)
+BG_DETAIL_MAX = 300
+
+
+@dataclass(frozen=True)
+class BgCommand:
+    """A background shell command of a swarm member, recorded by the `swarm bg` wrapper (schema
+    24). `pgid` is the wrapper's child's own process group (= its pid); `proc_start` is that
+    child's /proc start time in clock ticks since boot; `boot` is "<boot id>/<pid namespace>";
+    `tag` is the random SWARM_BG_TAG value in the environment of every process of the group.
+    Running while ended_at is None."""
+    id: int
+    job: str
+    agent_key: str | None
+    agent_name: str
+    command: str
+    started_at: _dt.datetime
+    host: str
+    boot: str | None
+    pid: int | None
+    pgid: int | None
+    proc_start: int | None
+    tag: str | None
+    ended_at: _dt.datetime | None = None
+    exit_code: int | None = None
+    outcome: str | None = None
+    detail: str | None = None
+
+    @property
+    def running(self) -> bool:
+        return self.ended_at is None
 
 
 @dataclass(frozen=True)
@@ -1928,6 +1967,82 @@ class Board(abc.ABC):
     def _events_sleep(self, seconds: float) -> None:
         """Sleep at most `seconds` or until a post may have happened (default: a poll tick)."""
         time.sleep(max(0.0, min(seconds, EVENT_POLL_SECONDS)))
+
+    # ---- background commands (schema 24) -------------------------------------------------
+
+    def bg_start(self, job: str, agent_key: str | None, agent_name: str, command: str, *, host: str,
+                 boot: str | None, pid: int | None, pgid: int | None, proc_start: int | None,
+                 tag: str | None) -> int:
+        """Record a member's background command as the `swarm bg` wrapper started it; returns its
+        id. ValueError (nothing stored) for a job that doesn't exist, an invalid agent name, an
+        empty command or host. The command is stored as one line of at most BG_COMMAND_MAX
+        characters (callers drop env assignments and redact first: swarm.bg.clean_command)."""
+        if not valid_name(agent_name):
+            raise ValueError(f"invalid agent name {agent_name!r}")
+        command, _ = normalize_message(command if isinstance(command, str) else "", BG_COMMAND_MAX)
+        if not command:
+            raise ValueError("empty command")
+        if not isinstance(host, str) or not host.strip():
+            raise ValueError("a background command needs a host")
+        ints = []
+        for v in (pid, pgid, proc_start):
+            if v is not None and (isinstance(v, bool) or not isinstance(v, int) or v < 0):
+                raise ValueError("pid, pgid and proc_start are non-negative integers or None")
+            ints.append(v)
+        return self._insert_bg(job, agent_key, agent_name, command, host.strip(), boot, *ints, tag)
+
+    @abc.abstractmethod
+    def _insert_bg(self, job, agent_key, agent_name, command, host, boot, pid, pgid, proc_start, tag) -> int:
+        """bg_start after its checks; ValueError when the job doesn't exist."""
+
+    def bg_end(self, id: int, outcome: str, exit_code: int | None = None, detail: str | None = None,
+               *, signalled_at: _dt.datetime | None = None) -> bool:
+        """Mark a running background command ended (BG_OUTCOMES); False if it already was (the first
+        end stands) or doesn't exist. One exception, the reap's: with `signalled_at` (when the reap
+        began signalling, board clock), an end the wrapper recorded as "exited" with a signal's
+        exit code (>= 128) at or after that time is the reap's doing, and the reap's outcome and
+        detail replace it (the wrapper's exit code is kept)."""
+        if outcome not in BG_OUTCOMES:
+            raise ValueError(f"outcome must be one of {', '.join(BG_OUTCOMES)}")
+        if detail is not None:
+            detail = normalize_message(str(detail), BG_DETAIL_MAX)[0] or None
+        return self._end_bg(int(id), outcome, exit_code, detail, signalled_at)
+
+    @abc.abstractmethod
+    def _end_bg(self, id: int, outcome: str, exit_code: int | None, detail: str | None,
+                signalled_at: _dt.datetime | None = None) -> bool:
+        """bg_end after its checks: set ended_at/outcome/exit_code/detail where ended_at is NULL,
+        or (signalled_at given) where it is a signal exit recorded at or after signalled_at."""
+
+    @abc.abstractmethod
+    def bg_commands(self, job: str | None = None, running: bool = False) -> list[BgCommand]:
+        """Background commands in id order: of `job` (None: every job), only the running ones
+        (ended_at NULL) with running=True."""
+
+    def bg_counts(self, job: str | None = None) -> tuple[int, int]:
+        """(running, orphaned) background commands of `job` (None: every job); see bg_orphans."""
+        rows = self.bg_commands(job, running=True)
+        return len(rows), len(self.bg_orphans(job, rows))
+
+    def bg_orphans(self, job: str | None = None, rows: list[BgCommand] | None = None) -> list[BgCommand]:
+        """The running background commands whose agent is finished (completed, left or dead, or
+        has no row any more) or whose job is closed (not active or paused). rows: the running
+        rows already read (bg_commands(job, running=True))."""
+        rows = self.bg_commands(job, running=True) if rows is None else rows
+        out, jobs, agents = [], {}, {}
+        for r in rows:
+            if r.job not in jobs:
+                js = self.job_status(r.job)
+                jobs[r.job] = js is not None and js.status in ("active", "paused")
+                agents[r.job] = {a.agent_key: a for a in self.agents(r.job)}
+            a = agents[r.job].get(r.agent_key) if r.agent_key else None
+            if a is None:   # no row on this job: moved to another job while it runs, or gone
+                finished = not r.agent_key or self.active_agent_name(r.agent_key) is None
+            else:
+                finished = a.ended_at is not None or a.status in ("completed", "left", "dead")
+            if not jobs[r.job] or finished:
+                out.append(r)
+        return out
 
     @abc.abstractmethod
     def set_waiting(self, job: str, on: str | None, until: _dt.datetime | None = None) -> bool:

@@ -263,6 +263,13 @@ class MemoryHarness:
             next(e for e in self.store.events if e["id"] == event_id)["created_at"] = self._ago(seconds_ago)
             self.store.touch()
 
+    def backdate_bg(self, bg_id: int, **fields_seconds_ago) -> None:
+        with self.store.lock:
+            row = next(r for r in self.store.bg_commands if r["id"] == bg_id)
+            for field, secs in fields_seconds_ago.items():
+                row[field] = self._ago(secs)
+            self.store.touch()
+
     def update_agent(self, agent_key: str, **values) -> None:
         with self.store.lock:
             self.store.agents[agent_key].update(values)
@@ -317,6 +324,7 @@ class FileHarness(MemoryHarness):
             s.blockers, s.next_blocker_id = [], 1
             s.blocker_events, s.next_blocker_event_id = [], 1
             s.events, s.next_event_id = [], 1
+            s.bg_commands, s.next_bg_id = [], 1
             s.message_max_chars = None   # setup seeds it from the config again
         setup_board(self.cfg, pool)
 
@@ -367,7 +375,8 @@ class PostgresHarness:
 
     def reset(self, pool=SMALL_POOL) -> None:
         self.conn.execute("TRUNCATE messages, agents, jobs, name_pool, agent_routes, transcripts, transcript_image_refs, "
-                          "memory_ref_images, memory_refs, transcript_images, restarts, job_pauses, blocker_events, blockers, events")
+                          "memory_ref_images, memory_refs, transcript_images, restarts, job_pauses, blocker_events, blockers, events, "
+                          "bg_commands")
         with self.conn.cursor() as cur:
             cur.executemany("INSERT INTO name_pool (name, source) VALUES (%s, %s)",
                             [(n, s) for s, names in pool.items() for n in names])
@@ -396,6 +405,9 @@ class PostgresHarness:
             self.conn.execute(sql.SQL("UPDATE {} SET {} = now() - make_interval(secs => %s) WHERE {} = %s")
                               .format(sql.Identifier(table), sql.Identifier(field), sql.Identifier(key_col)),
                               (secs, key))
+
+    def backdate_bg(self, bg_id: int, **fields_seconds_ago) -> None:
+        self._backdate("bg_commands", "id", bg_id, fields_seconds_ago)
 
     def plant_transcript_body(self, job: str, agent_key: str, blob: bytes) -> None:
         self.conn.execute("UPDATE transcripts SET body = %s WHERE job = %s AND agent_key = %s", (blob, job, agent_key))
@@ -473,7 +485,7 @@ class SqliteHarness:
             if self.sqlite_board.SqliteBoard.schema_version(self.cfg) != self.sqlite_board.SCHEMA_VERSION:
                 setup_board(self.cfg, pool)   # a store from before the newest tables: add them first
             self._db().executescript("BEGIN IMMEDIATE; DELETE FROM messages; DELETE FROM agents; "
-                                     "DELETE FROM events; DELETE FROM blocker_events; DELETE FROM blockers; DELETE FROM jobs; DELETE FROM name_pool; "
+                                     "DELETE FROM events; DELETE FROM bg_commands; DELETE FROM blocker_events; DELETE FROM blockers; DELETE FROM jobs; DELETE FROM name_pool; "
                                      "DELETE FROM agent_routes; DELETE FROM transcripts; DELETE FROM restarts; DELETE FROM job_pauses; "
                                      "DELETE FROM memory_ref_images; DELETE FROM memory_refs; "
                                      "DELETE FROM transcript_image_refs; DELETE FROM transcript_images; "
@@ -513,6 +525,9 @@ class SqliteHarness:
 
     def backdate_agent(self, agent_key: str, **fields_seconds_ago) -> None:
         self._set("agents", "agent_key", agent_key, {f: self._ago(s) for f, s in fields_seconds_ago.items()})
+
+    def backdate_bg(self, bg_id: int, **fields_seconds_ago) -> None:
+        self._set("bg_commands", "id", bg_id, {f: self._ago(s) for f, s in fields_seconds_ago.items()})
 
     def backdate_message(self, msg_id: int, seconds_ago: float) -> None:
         self._set("messages", "id", msg_id, {"created_at": self._ago(seconds_ago)})

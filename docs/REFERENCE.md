@@ -1203,6 +1203,57 @@ when the job is re-activated, and when it is closed. Only the display changes: t
 status stays `active` (`waiting_on` and `waiting_since` hold the reason), so the markers,
 routing and the completion gate are unaffected.
 
+### Background commands and orphans
+
+A background shell call of a member runs under `swarm bg` (Claude Code: Bash with
+`run_in_background`). It is how an agent's work can outlive the agent: a CI wait left running kept
+an agent "running" for 14 h after its job closed. The PreToolUse hook rewrites the call to
+`swarm bg --job J --key K --as NAME -- '<command>'`, the same way it rewrites `swarm join` and
+`swarm verdict`. Claude Code 2.1.295 was checked with a logging hook: it runs the rewritten
+command as the background task. The wrapper does four things:
+
+- It starts the command (`bash -c`) in a process group of its own, with a random
+  `SWARM_BG_TAG` in its environment. Cwd, environment, output and exit code are unchanged.
+  The new shell does not have the agent shell's functions and aliases (Claude Code's shell
+  snapshot), only its environment. The environment is exactly the caller's: what the `bin/swarm`
+  launcher sets for itself (`PYTHONPATH`, `PYTHONPYCACHEPREFIX`, `PYTHONDONTWRITEBYTECODE`) is
+  restored to its previous value, or removed, before the command starts.
+- It records the command on the board (schema 24, table `bg_commands`): job, agent key and name,
+  the command line (env assignments dropped, credentials redacted, at most 500 characters), start
+  time, host, boot id and pid namespace, pid, process group, /proc start time and tag.
+- It forwards TERM/INT/HUP/QUIT to the group, then records the exit code. When a reap killed
+  the command, the reap's `reaped`/`killed` is what the row keeps, not the wrapper's 143/137.
+- If the board can't be reached, the command runs anyway, unrecorded, with one line on stderr.
+
+A running command is **orphaned** when its agent is completed, left or dead, or its job is no longer
+active or paused. `swarm bg list [--job J] [--orphans] [--all]` shows them. `swarm bg reap [--job J]
+[--agent KEY] [--dry-run]` stops this host's orphans: SIGTERM to the group, up to 10 s, then
+SIGKILL. The outcome is recorded as `reaped`, `killed` or `gone`. Reaping is strict about what it
+signals:
+
+- **Recorded processes only.** It signals only processes whose process group is the recorded
+  one, that started no earlier than the recorded leader, and that carry the row's tag. Each signal
+  goes through a pidfd that is opened and then re-checked. A reused pid has another start time and
+  no tag, so it is never signalled; its row is closed as `gone`.
+- **This host only.** A row of another host, or of another pid namespace of this boot, is left to
+  that host's reap. A row from a previous boot is closed as `gone` without a signal.
+- **Linux only.** Without /proc and pidfd (macOS, Windows), nothing is signalled.
+
+It runs by itself at these points:
+
+- **The supervisor pass:** every job's orphans on this host.
+- **`deactivate`:** that job's.
+- **Auto-close:** a detached reap of the closed job, so no hook waits.
+- **An agent's SubagentStop:** a detached reap of its own commands, 30 s later, which re-checks
+  that the agent is still finished.
+
+`status --job` and `watch` show `background N running, M orphaned`, and `doctor` warns about this
+host's orphans.
+
+Codex is not covered. Codex has no background flag a hook can see: an `exec_command` session is
+only known to be long-running after it yields, and Codex doesn't take shell rewrites here. Its
+long-running commands are not recorded. A Codex agent can still run `swarm bg ... -- CMD` itself.
+
 ## Pausing and resuming a job
 
 `swarm pause --job J [--reason TEXT] [--wait SECONDS]` freezes a job so it can be continued later,
@@ -1480,7 +1531,7 @@ job + kind + key, for the orchestrator (or `to`) to wake on (`swarm event wait`)
 ```toml
 [events]
 enabled = false            # the listener, the keep-alive and the checks are all off by default
-bind = "127.0.0.1"         # put a reverse proxy or the LAN address here deliberately
+bind = "127.0.0.1"         # a LAN address only deliberately; see "Local routes": never proxy them
 port = 8923
 max_body_bytes = 1048576   # bigger bodies are refused (413) without being read
 model = "haiku"            # the model for anything a watcher pass must read; never the orchestrator's
@@ -1499,6 +1550,23 @@ alert_repeat_minutes = 60  # the same problem is re-alerted at most this often
 bodies, 411); the request line, headers and body are never logged, nor is an exception's text, only
 the source, the status and a count. Secrets are paths to files (`secret_file`, `token_file`), never
 values in the config.
+
+**Local routes.** A source's `local_routes` take unsigned deliveries from a helper on this box. The
+ci plugin's `gh webhook forward` uses one because it can only take its secret on the command line.
+Such a route is served at `<route>/<token>`, where the token is random for each listener start, kept
+in the supervisor's private directory (0600) and read by the plugin when it builds the helper's
+URL. A request is refused (403) before its body is read when any of these holds:
+
+- it carries a proxy header (`X-Forwarded-*`, `Forwarded`, `Via`, `X-Real-IP`, ...);
+- the token is wrong or missing;
+- its client is not an ESTABLISHED loopback socket owned by the listener's own OS user, according
+  to the kernel's socket table (/proc/net/tcp; on hosts without /proc it is always refused).
+
+**Never put a reverse proxy or tunnel (caddy, nginx, cloudflared, ngrok...) in front of the
+listener's port for local routes.** It would connect from loopback as a local process, and only
+the token and the header check would stand between the internet and an unsigned route that can
+post CI-GREEN or READY-TO-LAND. A public repo webhook goes to the signed route (`/github`,
+`/gitea`), which checks the HMAC itself.
 
 **Keep-alive.** Every `swarm supervise` pass (the existing timer) starts the listener detached when
 `[events] enabled` and nothing answers on the port; a listener that holds its lock but does not answer
@@ -1653,9 +1721,14 @@ PR head's combined commit status. Config: `[ci.gitea]` / `[ci.github]` in `confi
 remembered state (`ci-github-state.json` next to `config.toml`: PR heads, verdict lines, CI conclusions per sha;
 no secrets), with no API call. With `forward = true` in `[ci.github]` the listener keeps
 `gh webhook forward --repo=<owner/repo> --events=workflow_run,check_suite,pull_request,pull_request_review,issue_comment
---url=http://127.0.0.1:<[events] port>/github --secret <secret_file content>` running (GitHub's cli/gh-webhook
-extension: an outbound websocket, so no public endpoint). `secret_file` is a path; its value is read at launch and is
-the webhook HMAC secret, not a token. Polling the API is a fallback only (also the only CI path for Gitea, which
+--url=http://127.0.0.1:<[events] port>/github-forward/<token>` running (GitHub's cli/gh-webhook
+extension: an outbound websocket, so no public endpoint). It runs **without** `--secret`: gh-webhook v0.2.0 takes
+the secret only as a command-line value, and every OS user on the box can read command lines in /proc.
+`/github-forward` is a local route. It takes unsigned deliveries, but only from a loopback peer whose socket the
+kernel's table (/proc/net/tcp) shows is owned by the listener's own OS user. Same-user processes can read
+`secret_file` anyway, so this is the same trust boundary. Other users, and non-Linux hosts (where the owner
+can't be checked), get 403. `/github` still requires the HMAC from `secret_file` (a path, never a value) for a
+normal repo webhook. Polling the API is a fallback only (also the only CI path for Gitea, which
 sends no CI webhooks): never faster than 600 s (`poll_interval_s` can only raise it). `[land] strategy` in `team.toml` is `rebase-ff` (default) or `squash-ff`.
 
 ## Roles
@@ -1910,6 +1983,22 @@ Budget protection, shared by every agent on the box:
 - events first: with the event core installed (`swarm event` exists), a `CI-FAILED`, `READY-TO-LAND` or
   `CI-*` event whose key or text names `@SHA` ends the wait at once without a CI host call, for `--job J` or
   `$SWARM_JOB`, else every active job. Without the event core it prints a note and polls.
+
+The hooks steer members to it. A member's shell command that waits on or polls CI is refused with
+the exact `swarm ci wait --repo R --sha S` to run instead, and `swarm ci status` for one look. These
+count as CI waits:
+
+- `gh run watch`;
+- `gh pr checks --watch`;
+- a `while`/`until`/`for` loop or the `watch` program around `gh run view`, `gh run list`,
+  `gh api .../runs|check-runs|statuses`, or curl/wget of a GitHub or Gitea runs or status URL.
+
+R comes from the command's `-R`/`--repo`, else the work dir's git remote (a github.com one first).
+S is the work dir's HEAD. Both are read from the `.git` files; git is never run. A one-shot
+`gh run view <id> --json conclusion` stays allowed, so judges can verify. Without the ci plugin
+(not installed, or `[plugins] disabled`), the refusal says so and names no missing command. The
+check is best effort, like the verifier's write check: it reads quoted text as data, except
+`$(...)` and backticks inside double quotes. The orchestrator is not gated.
 
 ### Ask-answer skill (0.2.0)
 
@@ -2461,6 +2550,8 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `event list --job J [--to T]... [--pending] [--json]` | list a job's events (all, or only the unacked) |
 | `event ack --job J [--as NAME] ID...` | mark events handled: they stop showing in the hooks |
 | `event wait --job J [--to T]... [--timeout S] [--json]` | block until an event addressed to `T` is pending, print every pending one and exit 0; exit 124 on timeout. Run it as a background command the orchestrator re-arms |
+| `bg --job J --key K --as NAME -- COMMAND...` | run a command recorded as an agent's background command (the hooks wrap members' background shell calls in it); see [Background commands and orphans](#background-commands-and-orphans) |
+| `bg list [--job J] [--orphans] [--all]` / `bg reap [--job J] [--agent KEY] [--dry-run]` | list agents' background commands (running, only orphans, or all) / stop this host's orphans (SIGTERM, 10 s, SIGKILL; recorded processes only) |
 | `pause --job J [--reason TEXT] [--wait SECONDS]` | pause a job: no joins or posts, every agent recorded in a resume manifest and closed, final transcripts captured (see Pausing and resuming a job) |
 | `resume --job J [--host claude\|codex] [--workdir DIR] [--only NAME...] [--dry-run] [--retry]` | on a paused job: re-create its agents on this machine from the transcripts on the board, same names and cursors. On any other job: the job is no longer waiting (an agent joining does this too) |
 | `status [--all] [--no-color]` | jobs overview |

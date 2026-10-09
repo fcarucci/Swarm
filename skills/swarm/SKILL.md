@@ -379,6 +379,12 @@ user asks for one. Don't run duplicate jobs: merge similar ones (`swarm job merg
    close it (below). The same goes for you or an agent that ends the turn to wait for
    background work (a monitor, a long remote run, an integration lock): your own tool calls keep the
    job open, but waiting between turns does not.
+   Wait for CI with `swarm ci wait --repo OWNER/REPO --sha <exact head>` (the ci plugin) in the
+   foreground, never with `gh run watch` or a polling loop. The hooks refuse those for members
+   and give the exact `swarm ci wait` to run instead. Never put `gh run watch` in a brief. A
+   member's background commands are recorded (`swarm bg list`). They run in a fresh `bash -c`:
+   the shell's aliases and functions are not available to them, so write them out in the command. One still running after its
+   agent finished or the job closed is an orphan: it is reaped, and `status --job` counts it.
 5. **When the job is done:**
    **Required learnings step:** distill durable findings into self-contained facts with enough
    context to understand them without this job. Run `swarm learn --list-banks`, choose the
@@ -492,6 +498,8 @@ way its own host does it. `swarm status --job <job>` shows each agent's HOST and
 | `event list --job J [--to T]... [--pending] [--json]` | list a job's events (all, or only the unacked) |
 | `event ack --job J [--as NAME] ID...` | mark events handled: they stop showing in the hooks |
 | `event wait --job J [--to T]... [--timeout S] [--json]` | block until an event addressed to `T` is pending, print every pending one and exit 0; exit 124 on timeout. Run it as a background command the orchestrator re-arms |
+| `bg list [--job J] [--orphans] [--all]` | background shell commands of agents (a member's background Bash call runs under `swarm bg`, recorded with its process group): running ones, only orphans (still running after their agent finished or their job closed), or `--all` with the ended ones |
+| `bg reap [--job J] [--agent KEY] [--dry-run]` | stop this host's orphaned background commands: SIGTERM to the recorded group, up to 10 s, then SIGKILL; only processes provably the recorded command's (this host, boot and pid namespace, start time, tag), never another host's. The supervisor pass, `deactivate`, auto-close and an agent's stop (after 30 s) run it by themselves |
 | `pause --job J [--reason TEXT]` / `resume --job J [--host H]` | pause a whole job (nobody can join or post; every agent and its final transcript are saved) / resume it on this or another machine: the agents come back under their own names from the transcripts on the board |
 | `status [--all] [--no-color]` / `status --job J [--all-agents]` | jobs overview / one job's details and agent table, with each agent's HOST and MODEL (older finished agents hidden unless `--all-agents`). With `[transcripts] enabled`: a `transcripts:` footer (stored and raw size, ratio, limits, jobs, oldest) / a `transcripts` line and a STORED column per agent |
 | `watch [--job J] [--interval S] [--no-color]` | live full-screen dashboard of jobs, agents and messages |

@@ -286,6 +286,21 @@ class Poller:
     def read(self, repo, sha):
         return _read(self._dir(repo) / f"{self._sha(sha)}.json")
 
+    def record(self, repo, sha, res):
+        """Store a final result learned without a host call (a CI event ended the wait) in the shared
+        cache, so `status` and every other waiter agree with it. A final result already cached for
+        the SHA is kept (a host answer beats an event); a pending one is replaced."""
+        sha = self._sha(sha)
+        cached = self.read(repo, sha)
+        if cached and cached.get("state") in ("green", "failed") and self.fresh(repo, sha, cached):
+            return cached
+        res = {**res, "repo": repo, "sha": sha, "fetched_at": self.now()}
+        try:
+            _write(self._dir(repo) / f"{sha}.json", res)
+        except OSError:
+            pass
+        return res
+
     def want(self, repo, sha):
         _write(self._dir(repo) / f"{self._sha(sha)}.want", {"until": self.now() + WANT_S})
 
@@ -316,9 +331,10 @@ class Poller:
             return age < TTL_FAILED_S
         return False
 
-    def poll(self, repo, sha):
+    def poll(self, repo, sha, force=False):
         """The latest result for repo@sha. Calls the host only when this process wins the repo lock
-        AND the floor has elapsed; otherwise returns the shared cache (None if nothing cached yet)."""
+        AND the floor has elapsed (force: whatever the floor; one call to confirm a CI completion
+        event); otherwise returns the shared cache (None if nothing cached yet)."""
         sha = self._sha(sha)
         cached = self.read(repo, sha)
         if self.fresh(repo, sha, cached):
@@ -328,10 +344,10 @@ class Poller:
             if not lock.held:
                 return self.read(repo, sha)           # another process is the poller
             st = _read(d / "_poll.json", {}) or {}
-            if self.now() < st.get("last_call", 0) + max(self.floor, self.interval(st)):
+            if not force and self.now() < st.get("last_call", 0) + max(self.floor, self.interval(st)):
                 return self.read(repo, sha)           # the floor has not elapsed
-            target = min(self._wanted(repo, sha) or [sha],
-                         key=lambda s: (_read(d / f"{s}.json", {}) or {}).get("fetched_at", 0))
+            target = sha if force else min(self._wanted(repo, sha) or [sha],
+                                           key=lambda s: (_read(d / f"{s}.json", {}) or {}).get("fetched_at", 0))
             res = self._call(repo, target, st)
             _write(d / "_poll.json", st)
             _write(d / f"{target}.json", res)
@@ -444,9 +460,23 @@ def emit(res, as_json, out=None):
         print("\n".join(render(res)), file=out)
 
 
-def run_status(poller, repo, sha, as_json=False) -> int:
-    res = poller.poll(repo, sha) or result("none", repo=repo, sha=sha,
-                                           notes=["no cached result yet; another process is polling or the floor has not elapsed"])
+def _event_result(poller, repo, sha, events):
+    """A final result from a CI event for repo@sha (recorded in the cache), else None."""
+    hit = events() if events else None
+    if not hit:
+        return None
+    kind, text = hit
+    res = result(event_state(kind), repo=repo, sha=poller._sha(sha), event=kind, notes=[text], source="event")
+    poller.record(repo, sha, res)
+    return res
+
+
+def run_status(poller, repo, sha, as_json=False, events=None) -> int:
+    res = poller.poll(repo, sha)
+    if not (res and res["state"] in ("green", "failed")):   # what ended a wait ends a status look too
+        res = _event_result(poller, repo, sha, events) or res
+    res = res or result("none", repo=repo, sha=sha,
+                        notes=["no cached result yet; another process is polling or the floor has not elapsed"])
     res = {**res, "source": "cache" if res.get("source") == "poll" and poller.calls == 0 else res.get("source", "cache")}
     emit(res, as_json)
     return 0
@@ -458,14 +488,10 @@ def run_wait(poller, repo, sha, timeout, as_json=False, events=None, say=None) -
     announced = set()
     sha = poller._sha(sha)
     while True:
-        if events:
-            hit = events()
-            if hit:
-                kind, text = hit
-                res = result(event_state(kind), repo=repo, sha=sha, event=kind, notes=[text],
-                             source="event")
-                emit(res, as_json)
-                return 1 if res["state"] == "failed" else 0
+        res = _event_result(poller, repo, sha, events)
+        if res:   # recorded in the shared cache: `status` now says the same
+            emit(res, as_json)
+            return 1 if res["state"] == "failed" else 0
         poller.want(repo, sha)
         res = poller.poll(repo, sha)
         if res and res["state"] in ("green", "failed"):
@@ -480,6 +506,18 @@ def run_wait(poller, repo, sha, timeout, as_json=False, events=None, say=None) -
             say(f"swarm ci: timed out after {int(timeout)}s waiting for CI on {sha[:12]}")
             return 124
         poller.sleep(min(TICK_S, poller.floor, max(0.0, deadline - poller.now())))
+
+
+def confirmer(repo, poller):
+    """confirm(sha) for the event sources: "green"/"failed" when the whole commit's CI is final
+    (one call through the shared poller, its cache when that is already final), else its state."""
+    def confirm(sha):
+        res = poller.read(repo, sha)
+        if not (res and res.get("state") in ("green", "failed") and poller.fresh(repo, sha, res)
+                and res.get("source") != "event"):
+            res = poller.poll(repo, sha, force=True)
+        return (res or {}).get("state")
+    return confirm
 
 
 def ci_settings(ctx, override=None) -> tuple[str, dict]:
@@ -522,7 +560,8 @@ def run_ci(ctx, args, *, host=None, poller=None) -> int:
                 host = make_host(kind, cfg)
             poller = Poller(host)
         if args.ci_cmd == "status":
-            return run_status(poller, args.repo, args.sha, args.as_json)
+            events = event_lookup(ctx, args.sha, os.environ.get("SWARM_JOB") or None, note=lambda *a, **k: None)
+            return run_status(poller, args.repo, args.sha, args.as_json, events)
         events = event_lookup(ctx, args.sha, args.job or os.environ.get("SWARM_JOB") or None)
         return run_wait(poller, args.repo, args.sha, parse_duration(args.timeout), args.as_json, events)
     except CiError as exc:

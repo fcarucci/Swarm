@@ -874,6 +874,7 @@ def _install_schema(conn: psycopg.Connection, b: dict) -> None:
         conn.execute(sql_schema(True))
         migrate_sql(conn, True)
         conn.execute(events_schema(True))
+        conn.execute(bg_schema(True))   # schema 24
         conn.execute("""
     CREATE OR REPLACE FUNCTION swarm_keep_blocked_jobs() RETURNS trigger LANGUAGE plpgsql AS $$
     BEGIN
@@ -945,11 +946,13 @@ def _agent_match(agent_key: str | None, name: str | None) -> tuple[str, tuple]:
 
 from .blockers import SqlBlockers, sql_schema, migrate_sql, rollup, protects
 from .events import SqlEvents, sql_schema as events_schema
+from .bgcmds import SqlBgCommands, sql_schema as bg_schema
 
 
-class PostgresBoard(SqlBlockers, SqlEvents, Board):
+class PostgresBoard(SqlBlockers, SqlEvents, SqlBgCommands, Board):
     _blocker_pg = True
     _event_pg = True
+    _bg_pg = True
     """A Board over one autocommit psycopg connection. Every statement commits on its own,
     which is what the pre-refactor code relied on (a failed INSERT in allocate_name's race
     loop does not poison the connection)."""
@@ -1081,6 +1084,8 @@ class PostgresBoard(SqlBlockers, SqlEvents, Board):
         conn.execute("DELETE FROM restarts WHERE at < now() - make_interval(days => %s)", (days,))
         conn.execute("DELETE FROM events WHERE created_at < now() - make_interval(days => %s) "
                      "AND (acked_at IS NOT NULL OR job NOT IN (SELECT job FROM jobs))", (days,))
+        conn.execute("DELETE FROM bg_commands WHERE job NOT IN (SELECT job FROM jobs) "
+                     "OR ended_at < now() - make_interval(days => %s)", (days,))
 
     # ---- jobs --------------------------------------------------------------------
 

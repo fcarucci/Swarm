@@ -10,6 +10,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from support import tq  # noqa: E402  (a TOML string of a path, Windows-safe)
+
 ROOT = Path(__file__).resolve().parent.parent / "skills" / "ci"
 
 
@@ -188,9 +190,15 @@ class PushTests(unittest.TestCase):
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)
         self.state = fe.PushState(Path(self.dir.name, "state.json"))
+        self.host = {}          # what the CI host says of a sha when asked to confirm (default green)
+        self.asked = []
+
+    def confirm(self, sha):
+        self.asked.append(sha)
+        return self.host.get(sha, "green")
 
     def push(self, event, payload):
-        return fe.handle_push(self.state, "J", {"X-GitHub-Event": event}, json.dumps(payload).encode())
+        return fe.handle_push(self.state, "J", {"X-GitHub-Event": event}, json.dumps(payload).encode(), self.confirm)
 
     def opened(self, sha=SHA):
         return self.push("pull_request", {"action": "opened", "pull_request": {"number": 3, "head": {"sha": sha}, "title": "T"}})
@@ -219,6 +227,45 @@ class PushTests(unittest.TestCase):
         self.assertEqual(kinds(self.wfrun("failure", sha=OLD, prs=())), [f"CI-FAILED:@{OLD}"])
         self.assertEqual(kinds(self.wfrun_all("success", sha="c" * 40, prs=())), [f"CI-GREEN:@{'c' * 40}"])
 
+    def suite(self, concl, app, sha=SHA, prs=({"number": 3},)):
+        return self.push("check_suite", {"action": "completed", "check_suite": {
+            "head_sha": sha, "conclusion": concl, "name": app, "pull_requests": list(prs)}})
+
+    def test_one_of_two_workflows_green_is_not_ci_green(self):
+        """The first workflow's success must not end anyone's wait while the second still runs: a
+        completion is only a trigger, the CI host confirms the whole commit."""
+        self.opened()
+        self.verdict(f"REVIEW #3 @ {SHA}: VERIFIED fine")
+        self.host[SHA] = "running"
+        self.assertEqual(kinds(self.wfrun_all("success", name="Test")), [])          # Lint still running
+        self.assertEqual(self.asked, [SHA])                                           # one confirmation
+        self.assertIn(SHA, self.state.unconfirmed)
+        self.host[SHA] = "green"
+        self.assertEqual(sorted(kinds(self.wfrun_all("success", name="Lint"))),
+                         sorted([f"CI-GREEN:@{SHA}", f"READY-TO-LAND:3@{SHA}"]))
+        self.assertNotIn(SHA, self.state.unconfirmed)
+
+    def test_several_check_suites_need_the_whole_commit(self):
+        self.host[SHA] = "running"
+        self.assertEqual(kinds(self.suite("success", "actions", prs=())), [])
+        self.assertEqual(kinds(self.suite("success", "codecov", prs=())), [])
+        self.host[SHA] = "failed"   # the host says another suite failed: CI-FAILED, never green
+        self.assertEqual(kinds(self.suite("success", "lint-app", prs=())), [f"CI-FAILED:@{SHA}"])
+
+    def test_poll_confirms_what_a_last_completion_left_pending(self):
+        self.host[SHA] = "running"
+        self.assertEqual(kinds(self.wfrun_all("success", prs=())), [])
+        self.assertEqual(fe.confirm_pending(self.state, "J", self.confirm), [])   # still running
+        self.host[SHA] = "green"
+        self.assertEqual(kinds(fe.confirm_pending(self.state, "J", self.confirm)), [f"CI-GREEN:@{SHA}"])
+        self.assertEqual(self.state.unconfirmed, [])
+
+    def test_without_a_confirmation_nothing_is_green(self):
+        out = fe.handle_push(self.state, "J", {"X-GitHub-Event": "workflow_run"}, json.dumps({
+            "action": "completed", "workflow_run": {"head_sha": SHA, "conclusion": "success", "name": "T",
+                                                    "pull_requests": []}}).encode())
+        self.assertEqual(out, [])
+
     def test_verdict_then_green_run_is_ready_to_land_either_order(self):
         self.opened()
         self.assertEqual(self.verdict(f"REVIEW #3 @ {SHA}: VERIFIED fine"), [])
@@ -228,9 +275,10 @@ class PushTests(unittest.TestCase):
         fe.handle_push(other, "J", {"X-GitHub-Event": "pull_request"}, json.dumps(
             {"action": "opened", "pull_request": {"number": 3, "head": {"sha": SHA}, "title": "T"}}).encode())
         fe.handle_push(other, "J", h, json.dumps({"action": "completed", "workflow_run": {
-            "head_sha": SHA, "conclusion": "success", "name": "Test", "pull_requests": [{"number": 3}]}}).encode())
+            "head_sha": SHA, "conclusion": "success", "name": "Test", "pull_requests": [{"number": 3}]}}).encode(), self.confirm)
         out = fe.handle_push(other, "J", {"X-GitHub-Event": "pull_request_review"}, json.dumps(
-            {"action": "submitted", "pull_request": {"number": 3}, "review": {"body": f"REVIEW #3 @ {SHA}: VERIFIED"}}).encode())
+            {"action": "submitted", "pull_request": {"number": 3}, "review": {"body": f"REVIEW #3 @ {SHA}: VERIFIED"}}).encode(),
+            self.confirm)
         self.assertEqual([k for k in kinds(out) if not k.startswith("CI-GREEN")], [f"READY-TO-LAND:3@{SHA}"])
 
     def test_a_green_run_on_an_old_head_is_not_ready(self):
@@ -250,7 +298,7 @@ class PushTests(unittest.TestCase):
         self.verdict(f"REVIEW #3 @ {SHA}: VERIFIED")
         again = fe.PushState(self.state.path)
         out = fe.handle_push(again, "J", {"X-GitHub-Event": "workflow_run"}, json.dumps({"action": "completed", "workflow_run": {
-            "head_sha": SHA, "conclusion": "success", "name": "Test", "pull_requests": [{"number": 3}]}}).encode())
+            "head_sha": SHA, "conclusion": "success", "name": "Test", "pull_requests": [{"number": 3}]}}).encode(), self.confirm)
         self.assertEqual([k for k in kinds(out) if not k.startswith("CI-GREEN")], [f"READY-TO-LAND:3@{SHA}"])
         self.assertNotIn("secret", self.state.path.read_text())
 
@@ -258,14 +306,17 @@ class PushTests(unittest.TestCase):
         self.assertEqual(fe.handle_push(self.state, "J", {"X-GitHub-Event": "pull_request"}, b"not json"), [])
         self.assertEqual(self.push("ping", {"zen": "x"}), [])
 
-    def test_forward_argv_reads_the_secret_from_its_file_and_poll_has_a_floor(self):
+    def test_forward_argv_never_holds_the_secret_and_poll_has_a_floor(self):
+        """gh-webhook v0.2.0 takes its secret only as `--secret VALUE`, and argv is readable by every
+        OS user in /proc: the forwarder runs without one, to the listener's local route."""
         secret = Path(self.dir.name, "sec")
         secret.write_text("hmac-value\n")
         argv = fe.forward_argv({"repo": "o/r", "secret_file": str(secret)}, 8923)
         self.assertEqual(argv[:3], ["gh", "webhook", "forward"])
         self.assertIn("--repo=o/r", argv)
-        self.assertIn("--url=http://127.0.0.1:8923/github", argv)
-        self.assertEqual(argv[-2:], ["--secret", "hmac-value"])
+        self.assertIn("--url=http://127.0.0.1:8923/github-forward", argv)
+        self.assertFalse(any("hmac-value" in a for a in argv))
+        self.assertNotIn("--secret", argv)
         self.assertTrue(any(a.startswith("--events=workflow_run,check_suite,pull_request,pull_request_review") for a in argv))
         self.assertEqual(fe.poll_interval({}), 600)
         self.assertEqual(fe.poll_interval({"poll_interval_s": 5}), 600)
@@ -280,14 +331,24 @@ class PushTests(unittest.TestCase):
 
             def register_event_source(self, name, **kw):
                 seen[name] = kw
+        secret = Path(self.dir.name, "sec")
+        secret.write_text("the-webhook-secret\n")
         (Path(self.dir.name) / "config.toml").write_text(
-            '[events]\nport = 9000\n[ci.github]\nrepo = "o/r"\nforward = true\n')
+            f'[events]\nport = 9000\n[ci.github]\nrepo = "o/r"\nforward = true\nsecret_file = {tq(secret)}\n')   # tq: a Windows path is not a TOML escape
         sp.register_event_sources(Api())
         self.assertGreaterEqual(seen["github"]["poll_interval_s"], 600)
         self.assertGreaterEqual(seen["gitea"]["poll_interval_s"], 600)
-        helpers = seen["github"]["helpers"]({"forward": True})
+        self.assertEqual(seen["github"]["local_routes"], ["/github-forward"])
+        import unittest.mock
+        with unittest.mock.patch.object(sp, "_local_token", return_value=None):
+            self.assertEqual(seen["github"]["helpers"]({"forward": True}), [])   # no listener token: no forwarder
+        with unittest.mock.patch.object(sp, "_local_token", return_value="tok-" + "x" * 30):
+            helpers = seen["github"]["helpers"]({"forward": True})
+        self.assertIn("--url=http://127.0.0.1:9000/github-forward/tok-" + "x" * 30, helpers[0]["argv"])
         self.assertEqual(helpers[0]["name"], "forward")
-        self.assertIn("--url=http://127.0.0.1:9000/github", helpers[0]["argv"])
+        for h in helpers:   # no spawned helper carries the secret, in argv or env
+            self.assertFalse(any("the-webhook-secret" in a for a in h["argv"]))
+            self.assertFalse(any("the-webhook-secret" in str(v) for v in (h.get("env") or {}).values()))
         (Path(self.dir.name) / "config.toml").write_text('[ci.github]\nrepo = "o/r"\n')   # forward off
         self.assertEqual(seen["github"]["helpers"]({}), [])
 
@@ -346,7 +407,8 @@ class RegistrationTests(unittest.TestCase):
         self.assertTrue(github["verify"](headers, body))
         self.assertFalse(github["verify"](dict(headers, **{"X-Hub-Signature-256": "sha256=00"}), body))
         ctx = type("Ctx", (), {"board": type("B", (), {"jobs": lambda self: [type("J", (), {"job": "J", "status": "active"})()]})()})()
-        with unittest.mock.patch("urllib.request.urlopen", side_effect=AssertionError("API call")):
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=AssertionError("API call")), \
+                unittest.mock.patch.object(sp, "_confirm", return_value=lambda sha: "green"):
             out = github["handle"](headers, body, ctx)
             green = github["handle"](headers, body.replace(b"failure", b"success"), ctx)
         self.assertEqual(kinds(out), [f"CI-FAILED:3@{SHA}"])

@@ -342,14 +342,15 @@ def _group_alive(pgid: int) -> bool:
         return False
 
 
-def _members(pgid, tag: str | None, since) -> list[int]:
+def _members(pgid, tag: str | None, since, env: str = RUN_ENV) -> list[int]:
     """The processes of group `pgid` that belong to this run: their environment carries
-    RUN_ENV=<tag> (set on the session, inherited by what it starts) and they started no earlier
-    than the session's leader (`since`, /proc start ticks). A group id reused by an unrelated
-    group has no such member. No tag or no /proc: none (nothing is ever signalled blind)."""
+    <env>=<tag> (RUN_ENV, set on the session, inherited by what it starts; swarm.bg uses its own
+    variable) and they started no earlier than the session's leader (`since`, /proc start
+    ticks). A group id reused by an unrelated group has no such member. No tag or no /proc:
+    none (nothing is ever signalled blind)."""
     if not tag or not pgid:
         return []
-    want = f"{RUN_ENV}={tag}".encode()
+    want = f"{env}={tag}".encode()
     try:
         since = int(since or 0)
         pgid = int(pgid)
@@ -386,23 +387,26 @@ def _signal_run(pgid: int, sig, proc, tag: str | None, since) -> None:
         _signal_member(pid, pgid, tag, since, sig)
 
 
-def _signal_member(pid: int, pgid, tag, since, sig) -> None:
+def _signal_member(pid: int, pgid, tag, since, sig, env: str = RUN_ENV) -> bool:
     """Signal `pid` through a pidfd opened first, then checked: the pidfd pins the process, so if
     the pid was recycled since _members saw it, the check reads the new process (and refuses it),
-    and the signal can only reach the process that passed the check. No pidfd support: nothing."""
+    and the signal can only reach the process that passed the check. No pidfd support: nothing.
+    Whether the signal was sent."""
     if not (hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal")):
-        return
+        return False
     try:
         fd = os.pidfd_open(pid)
     except OSError:
-        return
+        return False
     try:
-        if pid in _members(pgid, tag, since):
+        if pid in _members(pgid, tag, since, env):
             signal.pidfd_send_signal(fd, sig)
+            return True
     except OSError:
         pass
     finally:
         os.close(fd)
+    return False
 
 
 def _stop_group(pgid: int, proc=None, grace: float | None = None, *, tag: str | None = None,
@@ -551,8 +555,8 @@ def start(cfg: dict, run: dict, popen=subprocess.Popen) -> int:
         raise RuntimeError(f"restart r{run['restart_id']} already has a runner")
     try:
         write_run(run)
-        env = {**os.environ, "PYTHONPATH": str(paths.LIB_DIR)}
-        proc = popen([sys.executable, "-B", "-m", "swarm.supervisor.runner", "--lock-fd", str(fd)],
+        env = {**os.environ, "PYTHONPATH": str(paths.LIB_DIR), **paths.pycache_env(os.environ)}
+        proc = popen([sys.executable, "-m", "swarm.supervisor.runner", "--lock-fd", str(fd)],
                      env=env, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                      stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True, pass_fds=(fd,))
     finally:

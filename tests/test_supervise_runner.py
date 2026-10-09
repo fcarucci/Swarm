@@ -657,6 +657,8 @@ class RunnerTests(RunnerBase):
         self.assertEqual(runner.start(self.cfg, run, popen=popen), 4242)
         fd = seen["pass_fds"][0]
         self.assertEqual(seen["argv"][-4:], ["-m", "swarm.supervisor.runner", "--lock-fd", str(fd)])
+        self.assertNotIn("-B", seen["argv"])   # the launchers' bytecode cache, like bin/swarm
+        self.assertTrue("PYTHONPYCACHEPREFIX" in seen["env"] or seen["env"].get("PYTHONDONTWRITEBYTECODE") == "1")
         self.assertEqual(seen["stdin"], subprocess.PIPE)
         self.assertTrue(seen["start_new_session"])
         self.assertTrue(runner.run_file(self.r.id, self.cfg).exists())

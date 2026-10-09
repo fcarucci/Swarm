@@ -118,7 +118,13 @@ def helper_problems(health, now: _dt.datetime) -> list[Problem]:
         return []
     if now.timestamp() - float(health.get("beat") or 0) > 60:
         return [Problem(None, "forwarder-down", "helper health is stale: the listener's helper supervisor is not running")]
-    return [Problem(None, "forwarder-down", f"helper {k} is down (restarted {v.get('restarts', 0)}x)")
+    def retry(v) -> str:
+        at = v.get("retry_at")
+        if not isinstance(at, (int, float)):
+            return ""
+        return (f"; next try in {max(0, int(at - now.timestamp()))} s (each try re-reads its config and "
+                f"credentials; the wait is capped at 5 min)")
+    return [Problem(None, "forwarder-down", f"helper {k} is down (restarted {v.get('restarts', 0)}x){retry(v)}")
             for k, v in sorted(health["helpers"].items()) if not v.get("up")]
 
 

@@ -112,7 +112,7 @@ Its first board post is `BRIEF: <durable path> tasks: <IDs>` using the hook-assi
 name; make a local tool call so enrollment can resolve. Read the brief and board,
 claim files before edits, and post findings and handoffs. Keep board posts within the
 board's message cap (default 200 characters; `swarm config board.message_max_chars`); put details in artifacts.
-Every brief and spawn prompt that mentions CI carries this line: "CI: wait for CI ONLY with swarm ci wait --repo OWNER/REPO --sha <exact head> [--timeout 90m] (exit 0 green, 1 failed with the failing jobs, 124 timeout); swarm ci status for a one-off look. Never gh run watch, never a gh run list loop." (`swarm ci` shares one poller and cache per box so many agents do not exhaust the GitHub API budget).
+Every brief and spawn prompt that mentions CI carries this line: "CI: wait for CI ONLY with swarm ci wait --repo OWNER/REPO --sha <exact head> [--timeout 90m] in the foreground (exit 0 green, 1 failed with the failing jobs, 124 timeout); swarm ci status for a one-off look. Never gh run watch, never a gh run list loop." (`swarm ci` shares one poller and cache per box so many agents do not exhaust the GitHub API budget).
 
 Every invocation returns directly to PM after its bounded deliverable, including on
 a blocker. Post the request to PM on the board **and** return this structure:

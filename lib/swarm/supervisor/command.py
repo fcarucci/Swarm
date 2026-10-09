@@ -897,6 +897,11 @@ def _dry_run(board, cfg: dict, sup: dict, job, now, say, scope_ok, config_path="
             say(f"not restarting {c.agent.name} on {c.js.job}: {d.why}")
     for js, a in unenrolled:
         say(f"not restarting {a.name} on {js.job}: {NOT_ENROLLED}")
+    try:
+        from swarm import bg
+        bg.reap_orphans(board, job=job, dry_run=True, say=say)
+    except Exception as exc:
+        say(f"cannot tell orphaned background commands ({type(exc).__name__})")
     for line in _caps_lines(board, sup, job, running):
         say(line)
 
@@ -975,6 +980,13 @@ def _pass(board, cfg: dict, sup: dict, state: dict, job, now, say, start_runner,
     except Exception as exc:   # never fails a pass
         from swarm.supervisor.settings import log
         log(f"retrying pending final transcripts failed ({type(exc).__name__})")
+    try:   # this host's orphaned background commands (agents finished, jobs closed): stopped
+        from swarm import bg
+        from swarm.supervisor.settings import log
+        bg.reap_orphans(board, job=job, say=lambda line: log(f"background command {line}"))
+    except Exception as exc:   # never fails a pass
+        from swarm.supervisor.settings import log
+        log(f"reaping orphaned background commands failed ({type(exc).__name__})")
     try:   # events: keep the listener up, then the safety-net checks
         from swarm import events_listener, events_safety
         if events_listener.settings(cfg)["enabled"]:
