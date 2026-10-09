@@ -15,11 +15,13 @@ from __future__ import annotations
 import shlex
 
 from test_goals import GoalEnv  # noqa: E402  (sets sys.path)
+from test_supervise_hooks import SupervisedEnv  # noqa: E402
 
 from swarm.board.base import assignable_name  # noqa: E402
 
 JOIN = "/x/bin/swarm join --job J --key energy-eng --role engineer --title 'Eng: energy'"
 VERDICT = '/x/bin/swarm verdict --job J not_met --reason "x" --next "fix y"'
+ORCH_DENY = "[swarm] a subagent cannot join as the orchestrator; only the main session is the orchestrator"
 
 
 class ResumeIdentityTests(GoalEnv):
@@ -133,3 +135,71 @@ class ResumeIdentityTests(GoalEnv):
         from swarm import hooks
         self.assertEqual(hooks._event_targets_of("Homer Simpson", "general-purpose"), ("Homer Simpson",))
         self.assertIn("@engineer", hooks._event_targets_of("Homer Simpson", "engineer"))
+
+
+class OrchestratorKeyTests(GoalEnv):
+    def setUp(self):
+        super().setUp()
+        self.write_prompt("eng-1", "Configure the HA energy panel and a dashboard.")
+        self.activate_goal()
+
+    def bash_out(self, agent, command) -> dict:
+        out = self.hook("turn", agent_id=agent, session="sess-1", tool_name="Bash",
+                        transcript_path=self.main_transcript(), tool_input={"command": command})
+        return (out or {}).get("hookSpecificOutput", {})
+
+    def test_subagent_cannot_join_under_an_orchestrator_prefixed_key(self):
+        # `orchestrator-2` (a second main session's key) and the like take the orchestrator role
+        # too (agentview.ORCHESTRATOR_KEY): an untagged multi-job subagent must not get them
+        for key in ("orchestrator", "orchestrator-2", "orchestrator_x", "orchestrator.2", "Orchestrator-2"):
+            for command in (f"/x/bin/swarm join --job J --key {key} --role engineer",
+                            f"/x/bin/swarm join --job J --key={key} --role engineer"):
+                o = self.bash_out("eng-1", command)
+                self.assertEqual(o.get("permissionDecision"), "deny", command)
+                self.assertEqual(o.get("permissionDecisionReason"), ORCH_DENY, command)
+                self.assertNotIn("updatedInput", o)
+        self.assertIsNone(self.member("eng-1"))
+        self.assertIsNone(self.agent("orchestrator-2"))
+
+    def test_key_that_only_resembles_orchestrator_is_not_denied(self):
+        o = self.bash_out("eng-1", "/x/bin/swarm join --job J --key orchestra --role engineer")
+        self.assertNotEqual(o.get("permissionDecision"), "deny", o)
+
+
+class ReplacementJoinTests(SupervisedEnv):
+    """A supervisor replacement's own `swarm join`: the restarted coordinator is the orchestrator
+    again (its join as `orchestrator` is legitimate); a restarted worker is not."""
+    SID = "11111111-2222-4333-8444-555555555555"
+    JOIN_ORCH = "/x/bin/swarm join --job J --key orchestrator --role coordinator"
+
+    def setUp(self):
+        super().setUp()
+        self.enable_supervisor()
+        self.cli("activate", "--job", "J", "--session", "sess-1")
+        self.hook("start", agent_id="orig", session="sess-1")
+        self.name = self.agent("orig").name
+        with self.board() as b:
+            b.close_agent("orig", "stuck:dead")
+            self.rid = b.record_restart("J", "orig", "orig", "stuck:dead", "claude", 60).id
+
+    def replacement_join(self):
+        from swarm.supervisor import markers
+        markers.write_resume_marker(self.cfg, "J", self.rid, resume_of="orig", name=self.name,
+                                    harness="claude", session_id=self.SID)
+        out = self.hook("turn", agent_id=None, session=self.SID, tool_name="Bash",
+                        tool_input={"command": self.JOIN_ORCH})
+        return (out or {}).get("hookSpecificOutput", {})
+
+    def test_restarted_coordinator_may_join_as_orchestrator(self):
+        self.h.update_agent("orig", role="coordinator")
+        o = self.replacement_join()
+        self.assertNotEqual(o.get("permissionDecision"), "deny", o)
+        me = self.agent(self.SID)
+        self.assertEqual((me.name, me.resume_of), (self.name, "orig"))
+
+    def test_restarted_worker_still_cannot_join_as_orchestrator(self):
+        o = self.replacement_join()
+        self.assertEqual(o.get("permissionDecision"), "deny", o)
+        self.assertEqual(o.get("permissionDecisionReason"), ORCH_DENY)
+        # the replacement is still enrolled under its predecessor's name, as any replacement is
+        self.assertEqual(self.agent(self.SID).name, self.name)

@@ -1184,11 +1184,24 @@ def _own_job(agent_id: str, bound: dict, payload: dict) -> str | None:
 
 
 def _orchestrator_join(command: str) -> bool:
-    """True when `command` runs a real `swarm join --key orchestrator`."""
+    """True when `command` runs a `swarm join` whose --key starts with "orchestrator" (orchestrator,
+    orchestrator-2, orchestrator_x): the key that seats the orchestrator role, whatever follows
+    it (agentview.ORCHESTRATOR_KEY reads these keys case-insensitively, so this does too)."""
     for args in _swarm_calls(command, "join"):
-        if any(_flag_value(args, m, "--key")[0] == "orchestrator" for m in range(len(args))):
-            return True
+        for m in range(len(args)):
+            key = _flag_value(args, m, "--key")[0]
+            if key and key.casefold().startswith("orchestrator"):
+                return True
     return False
+
+
+def _restarted_coordinator(board, resume: dict) -> bool:
+    """A supervisor replacement that restarts the coordinator (the orphan-coordinator restart, or a
+    restart whose predecessor was a coordinator): the main session again, so it is the orchestrator
+    and may join with the orchestrator key."""
+    row = next((x for x in board.restarts(job=resume["job"]) if x.id == resume["resume"].get("restart_id")), None)
+    return row is not None and ((row.reason or "").startswith("orphan-coordinator:")
+        or any(a.agent_key == row.old_agent_key and a.role == "coordinator" for a in board.agents(resume["job"])))
 
 
 def _own_key_join(agent_id: str, bound: dict, payload: dict) -> None:
@@ -1215,9 +1228,12 @@ def _own_key_join(agent_id: str, bound: dict, payload: dict) -> None:
 
 
 def _deny_orchestrator_join(agent_id: str, payload: dict) -> bool:
-    """An unadopted subagent may not join as the orchestrator: the call is refused."""
+    """A subagent that is not the orchestrator may not join as the orchestrator: the call is
+    refused. A call that is already refused (a replacement's stop message) keeps its reason."""
     command = current_host().shell_command(payload) if agent_id else None
     if not command or not _orchestrator_join(command):
+        return False
+    if _OUTPUT.get("hookSpecificOutput", {}).get("permissionDecision") == "deny":
         return False
     _deny("[swarm] a subagent cannot join as the orchestrator; only the main session is the orchestrator")
     return True
@@ -1477,8 +1493,7 @@ def _enrol_resumed(board, agent_id: str, resume: dict, payload: dict, cfg: dict)
     from swarm.pause import PAUSE_RESUME_REASON
     row = next((x for x in board.restarts(job=job) if x.id == r.get("restart_id")), None)
     from_pause = row is not None and (row.reason or "").startswith(PAUSE_RESUME_REASON)
-    coordinator = row is not None and ((row.reason or "").startswith("orphan-coordinator:")
-        or any(a.agent_key == row.old_agent_key and a.role == "coordinator" for a in board.agents(job)))
+    coordinator = _restarted_coordinator(board, resume)
     off = None if from_pause else _supervise_off(board, cfg, job)   # a resume the user asked for is not the supervisor's
     if off:   # the kill switches hold at the enrolment too
         _deny(f"[swarm] The swarm supervisor is switched off ({off}), so this restart won't go "
@@ -1811,10 +1826,14 @@ def _on_event(board, event: str, agent_id: str, sid: str | None, bound: dict, un
     else:
         member = board.tool_started(agent_id, payload.get("tool_name"))
     if member is None:  # not an active member (yet): route it, maybe enrol it
-        if _deny_orchestrator_join(agent_id, payload):
-            return
         if resume is not None:
             _enrol_resumed(board, agent_id, resume, payload, cfg)
+            # Checked after the replacement's enrolment: a restarted coordinator is the orchestrator
+            # and its `join --key orchestrator` is its own. Any other replacement (a worker) is refused.
+            if not _restarted_coordinator(board, resume):
+                _deny_orchestrator_join(agent_id, payload)
+            return
+        if _deny_orchestrator_join(agent_id, payload):
             return
         stop = _paused_stop(board, agent_id) or _stuck_closed(board, agent_id)
         if stop:
