@@ -41,6 +41,7 @@ CATEGORY = "Developer Tools"
 
 SKILLS = ("swarm", "ask-answer", "complexity-analyzer", "refactoring")   # engineering-team and ci need the full edition
 TOP_FILES = ("LICENSE", "NOTICE", "PRIVACY.md", "SECURITY.md", "THIRD_PARTY_NOTICES.md", "requirements.txt",
+             "requirements-postgres.txt",
              "config.example.toml")
 EXCLUDE_NAMES = {"winhook.py", "hooks.py", "SKILL.cdx.md", ".DS_Store", ".gitignore", ".gitattributes"}
 EXCLUDE_DIRS = {"__pycache__", "node_modules", "tests", "tools", ".git"}

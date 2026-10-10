@@ -92,6 +92,16 @@ class CodexDirectoryTests(unittest.TestCase):
                      ".codex-plugin/plugin.json", "assets/icon.svg", "assets/logo.svg", "skills/swarm/SKILL.md"):
             self.assertIn(must, self.names)
 
+    def test_every_root_file_the_launchers_read_is_shipped(self):
+        # bin/swarm reads "$D/<file>" and winlaunch reads REQUIREMENTS from the plugin root: a ZIP
+        # without one breaks the first run (live test, 82a3bb0: requirements-postgres.txt missing)
+        from swarm import winlaunch
+        sh = (ROOT / "bin/swarm").read_text()
+        wanted = set(re.findall(r'"\$D/([A-Za-z0-9_.-]+\.txt)"', sh)) | set(winlaunch.REQUIREMENTS)
+        self.assertIn("requirements-postgres.txt", wanted)
+        for name in sorted(wanted):
+            self.assertIn(name, self.names)
+
     def test_sizes_and_no_archives(self):
         self.assertLessEqual(len(self.names), 512)
         for info in self.infos:
