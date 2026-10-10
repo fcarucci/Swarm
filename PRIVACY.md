@@ -15,13 +15,17 @@ Swarm has no telemetry and sends nothing to its author.
 Swarm's first-session setup installs its Python dependencies from PyPI. Every other call is to a
 service you configure or a command you run: `swarm upgrade` (GitHub), `swarm ci` (your CI host), the
 events listener (off by default, bound to 127.0.0.1), Hindsight memory (`[hindsight] url`), a
-Postgres board, and the complexity-analyzer tool downloads (sha256-verified). See
+Postgres board, and the complexity-analyzer tool downloads (sha256-verified).
+
+When Hindsight memory is configured, Swarm sends it recall queries built from the job's goal and
+project, and the facts agents save with `swarm remember` or `swarm learn`. See
 [What Swarm changes on your machine](README.md#what-swarm-changes-on-your-machine).
 
 ## Secrets
 
-Secrets (the webhook secret, the Hindsight key, the Postgres password) are read from files you own,
-never logged and never put on command lines. Keep them mode 600. Use `sslmode=require` for a remote
+Secrets (the webhook secret, the Hindsight key, the Postgres password) are read from files you own
+or, for the Postgres password, the `PGPASSWORD` environment variable; they are never logged and
+never put on command lines. Keep them mode 600. Use `sslmode=require` for a remote
 Postgres server.
 
 ## Deleting your data

@@ -52,7 +52,7 @@ curl -fsSL https://raw.githubusercontent.com/fcarucci/Swarm/main/install.sh | ba
 
 To install a specific version, append `-s -- --ref v0.2.0` to `bash` once that tag exists.
 
-Start a new Claude session. In Codex, trust the plugin in `/hooks`, start a new session
+Start a new Claude session. In Codex, after trusting the hooks (above), start a new session
 for setup, then another to load its configuration. Run `swarm doctor` to check setup.
 
 Windows (PowerShell): `irm https://raw.githubusercontent.com/fcarucci/Swarm/main/install.ps1 -OutFile install.ps1; .\install.ps1`.
@@ -66,7 +66,8 @@ systemd user timer); see [Windows setup and limits](docs/REFERENCE.md#windows). 
 repository is a plugin for both hosts: Claude Code reads `.claude-plugin/` and
 `hooks/hooks.json`, Codex reads `.codex-plugin/` and `hooks/codex-hooks.json`; each host
 ignores the other's files. In Codex, Swarm needs the CLI or desktop app with trusted hooks;
-plugin hooks do not run in ChatGPT cloud "Work" threads or under `allow_managed_hooks_only`.
+in ChatGPT cloud "Work" threads it will not work, because the hook scripts are not deployed to
+that execution environment, nor under `allow_managed_hooks_only`.
 The public ChatGPT/Codex plugin directory does not accept plugins with lifecycle hooks, so
 Swarm is installed from its own marketplace (this repository).
 
@@ -87,9 +88,17 @@ Swarm is installed from its own marketplace (this repository).
   directory to `sandbox.filesystem.allowWrite` in `~/.claude/settings.json`, and for Codex adds
   the spool and marker directories to `[sandbox_workspace_write] writable_roots` and sets
   `[agents] max_depth = 2` in `~/.codex/config.toml`; it backs up each file first. On Linux it
-  installs and enables the systemd user timer `swarm-supervise.timer` (every 5 minutes), which
-  restarts stuck agents of active jobs as headless `claude -p` or `codex exec` sessions. Set
-  `[supervise] enabled = false` before the first session to skip it.
+  installs and enables the systemd user timer `swarm-supervise.timer` (every 5 minutes). Each
+  pass of this supervisor, for this OS user's jobs on this machine only:
+  - restarts stuck agents of active jobs as headless `claude -p` or `codex exec` sessions;
+  - runs the review pipeline: after a hand-off it launches headless judge, fix and
+    finalizer/integrator sessions (a finalizer acts, for example by merging, as its brief says);
+  - recovers orphaned jobs whose coordinator and workers are gone;
+  - reaps background commands left running after their agent or job ended.
+
+  Replacements run only in work dirs under `[supervise] allowed_workdirs` (default `~/src`).
+  Switches: `[supervise] enabled = false` (set it before the first session to skip the timer)
+  turns all of this off; `[pipeline] enabled = false` turns off only the review pipeline.
 - **Network.** No telemetry: Swarm sends nothing to its author. The venv setup downloads from
   PyPI. Everything else is opt-in or user-run: `swarm upgrade` (GitHub), `swarm ci` (your
   CI host), the events listener (off by default; binds 127.0.0.1:8923), Hindsight memory (your
@@ -101,7 +110,11 @@ Swarm is installed from its own marketplace (this repository).
 
 ## Uninstall
 
-On Linux, stop and remove the supervisor first:
+First stop running work: deactivate any active job (`swarm deactivate --job J --outcome "uninstall"`)
+and stop leftover background commands (`swarm bg reap`), so no headless replacement or
+background command keeps running.
+
+On Linux, stop and remove the supervisor:
 
 ```sh
 systemctl --user disable --now swarm-supervise.timer
@@ -117,10 +130,15 @@ rm -rf ~/.local/bin/swarm ~/.local/share/swarm
 rm -rf ~/.local/state/swarm ~/.config/swarm
 ```
 
-Remove the spool path from `sandbox.filesystem.allowWrite` in `~/.claude/settings.json`, and
-the Swarm entries under `[sandbox_workspace_write] writable_roots` in `~/.codex/config.toml`.
-Finally uninstall the plugin: `/plugin uninstall swarm@swarm` in Claude Code, or remove it
-with Codex's plugin commands.
+On Windows the launcher is `~/.local/bin/swarm.cmd`.
+
+Undo the settings Swarm added: remove the spool path from `sandbox.filesystem.allowWrite` in
+`~/.claude/settings.json`; in `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`) remove the
+Swarm entries under `[sandbox_workspace_write] writable_roots` and reset `[agents] max_depth`
+(Swarm sets it to 2). Before each edit Swarm saved a copy next to the file
+(`settings.json.pre-swarm-<date>`, `config.toml.pre-swarm-<date>`); you can restore from those
+or delete them. Finally uninstall the plugin: `/plugin uninstall swarm@swarm` in Claude Code, or
+remove it with Codex's plugin commands.
 
 ## Quick start
 

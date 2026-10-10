@@ -1,13 +1,39 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
-  <rect width="128" height="128" rx="24" fill="#1f2937"/>
-  <g fill="#f59e0b">
-    <circle cx="64" cy="40" r="12"/>
-    <circle cx="36" cy="84" r="12"/>
-    <circle cx="92" cy="84" r="12"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="Swarm Team">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#121a38"/>
+      <stop offset="1" stop-color="#0b1020"/>
+    </linearGradient>
+    <radialGradient id="halo" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#6ea8ff" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#6ea8ff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="128" height="128" rx="28" fill="url(#bg)"/>
+  <circle cx="64" cy="66" r="40" fill="url(#halo)"/>
+  <!-- team ring: hexagon of agents -->
+  <path d="M64 24 L99 44 L99 86 L64 106 L29 86 L29 44 Z" fill="none" stroke="#6ea8ff" stroke-opacity="0.28" stroke-width="2.5" stroke-linejoin="round"/>
+  <!-- spokes to the shared board -->
+  <g stroke="#6ea8ff" stroke-opacity="0.7" stroke-width="3" stroke-linecap="round">
+    <line x1="99" y1="44" x2="78" y2="56"/>
+    <line x1="99" y1="86" x2="78" y2="76"/>
+    <line x1="64" y1="106" x2="64" y2="82"/>
+    <line x1="29" y1="86" x2="50" y2="76"/>
+    <line x1="29" y1="44" x2="50" y2="56"/>
   </g>
-  <g stroke="#f59e0b" stroke-width="6" stroke-linecap="round">
-    <line x1="58" y1="51" x2="42" y2="73"/>
-    <line x1="70" y1="51" x2="86" y2="73"/>
-    <line x1="48" y1="84" x2="80" y2="84"/>
+  <line x1="64" y1="24" x2="64" y2="50" stroke="#ffcc66" stroke-width="3.5" stroke-linecap="round"/>
+  <!-- the board -->
+  <rect x="47" y="51" width="34" height="30" rx="8" fill="#161d3a" stroke="#6ea8ff" stroke-width="3"/>
+  <rect x="54" y="59" width="20" height="4" rx="2" fill="#a9c6ff"/>
+  <rect x="54" y="67" width="13" height="4" rx="2" fill="#a9c6ff" fill-opacity="0.6"/>
+  <!-- agents -->
+  <g fill="#6ea8ff">
+    <circle cx="99" cy="44" r="8"/>
+    <circle cx="99" cy="86" r="8"/>
+    <circle cx="64" cy="106" r="8"/>
+    <circle cx="29" cy="86" r="8"/>
+    <circle cx="29" cy="44" r="8"/>
   </g>
+  <!-- the lead -->
+  <circle cx="64" cy="24" r="10" fill="#ffcc66"/>
 </svg>
