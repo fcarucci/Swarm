@@ -42,6 +42,7 @@ class SeatView:
     launches: int
     last_outcome: str | None
     wake_reason: str | None
+    wake_watermark: int | None
     updated_at: datetime | None
 
 
@@ -76,6 +77,8 @@ class VerdictView:
     verdict: str
     scope: str
     artifact: str | None
+    candidate: str | None
+    req: str | None
     generation: int
     open: int | None
     progress: str | None
