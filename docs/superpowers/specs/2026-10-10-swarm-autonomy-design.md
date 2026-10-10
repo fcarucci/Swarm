@@ -3,7 +3,8 @@
 Status: design, revision 5 (EL, job swarm-autonomy, 2026-10-10). Base: github/main 2f194bb.
 Revisions 2, 3 and 4 resolve Codex review rounds 1 (23 findings), 2 (23) and 3 (9); revision 5 applies the design
 judge's fixes F1–F24 (`~/work/swarm-autonomy/JUDGE-design.md`, each marked inline as **[Fn]**) and the PM's
-ruling that drive mode is the default for goal jobs (option A, **[A]**); see §10.
+ruling that drive mode is the default for goal jobs (option A, **[A]**); the delta re-review's RR1–RR8 are marked
+**[RRn]**; see §10.
 
 ## 0. The requirement
 
@@ -231,6 +232,19 @@ rollover) are recognised through the ledger, never through receipts or board row
 `led.terminal_intent`/`led.terminal` and never the job row's verdict. Rollover step (d) writes the ledger first,
 then the board.
 
+**[RR1] Activation order and recovery.** Activation writes, each durably (fsync file and directory) before the
+next: (1) the host-private owner record (requester session, work roots, pinned remotes, pinned requirements);
+(2) the ledger with `state = "activating"`; (3) the board job row with `drive.enabled`; (4) the lead seat request
+and its driver-authored authorization; (5) the ledger `state = "active"`. A pass that finds an `activating` ledger
+with its owner record completes steps 3–5 idempotently. A ledger without an owner record on this host is
+`DRIVER-ORPHAN` (hold, doctor FAIL), never silently skipped.
+
+**[RR2] Terminal intent is pending until committed.** `led.terminal_intent` is a *pending* outcome;
+`led.terminal` is set only after the board close succeeded. If the closing gate rejects a pending MET (target
+moved, requirements changed, audit failure), the driver durably clears `terminal_intent` and `closing`, records
+the rejection in the ledger, and schedules the goal judge again; budgets, the progress counter and
+`enforce_deadlines` keep running. A mechanical UNREACHABLE has no gate and cannot be rejected.
+
 ### 3.2 The job driver
 
 New module `lib/swarm/supervisor/driver.py`, called from `_pass` **first**: `enforce_deadlines` for every drive
@@ -432,6 +446,11 @@ in Claude Code can answer, stop, cancel and staff without a tty; a person in a t
 other session's deactivate is tamper (§3.2), not a cancellation. **[A]** In a drive job, Agent-tool spawns by the
 requester session are refused by the SubagentStart hook with a pointer to `swarm seat request`.
 
+**[RR6] Overlap checks are serialized.** `claim_drive_launch` takes a host-wide lock before reading the live
+`wt:` rows: Postgres `pg_advisory_xact_lock(hashtext('swarm-wt:' || host))`; SQLite `BEGIN IMMEDIATE` (already
+serial); memory/file the store lock. Two supervisors (two OS users on one host) therefore cannot both claim
+nested roots. Tested with concurrent nested-root claims from two processes.
+
 ### 3.5 The lead, headless under the supervisor
 
 - The lead is the seat `lead` (role `engineering_lead`, title `EL`, model Opus, harness from activation),
@@ -583,6 +602,18 @@ the same patch-id as a commit of one. A commit that fails the audit blocks the c
 ruling due with the finding in its prompt. "Trusted" for `swarm land` means "checked by code that does not take
 agent input for its decisions", not "tamper-proof against a same-user agent".
 
+**[RR5] Landing completes before terminalization.** Terminalization (§3.1) gets a step 0: complete every land
+journal of the job from its land receipt (driver-executed fast-forwards, same checks), keeping the destination
+leases until each journal is `verified` or `land_complete_minutes` (30) have passed. On failure the job still
+closes, and the verdict details list the destinations left partially landed with their SHAs (`DRIVER-PARTIAL-LAND`
+is posted). `enforce_deadlines` therefore never interrupts a landing midway without recording it.
+
+**[RR8] The driver executes landings.** `swarm land` run by an integrator seat (Claude or Codex) only records a
+receipted *land request* for the artifact; the driver executes the helper in the supervisor pass, with its
+private mirrors and land receipts, which never lie under a Codex writable root. This makes Codex integrators
+possible without widening the sandbox and makes the landing path the same for both harnesses. The integrator seat
+waits for the `INTEGRATED` post (or the refusal reason) with `swarm event wait`, bounded by its wall clock.
+
 ### 3.9 Stall recovery
 
 - **Lost/silent seats**: the existing stuck sweep (`stuck_reason`: dead, tool, silent) closes the row; in drive
@@ -629,6 +660,10 @@ agent input for its decisions", not "tamper-proof against a same-user agent".
 **[A]** Because every goal job is driven, `--default` becomes mandatory for every question in a goal job (a
 breaking change for goal jobs; release notes and §9).
 
+**[RR3] Drive questions expire only through the driver.** The generic `expire_blockers` sweep skips blockers of
+drive jobs; the driver applies the default when the ledger's effective deadline (`until` + `halted_total`) has
+passed, and never while the job is halted. So a halt cannot let a default be applied behind a person's back.
+
 ### 3.11 Triggering: timer, hook kicks, NOTIFY
 
 - The timer stays the correctness floor, fixed at `[supervise] timer_minutes` (5); no adaptive cadence.
@@ -666,6 +701,13 @@ then requests Claude). In drive jobs the CLI never spools a control command (`do
 `answer`, `land`, `verdict`): it fails loudly instead, so no unbound record exists. Codex hooks (trusted, outside
 the sandbox) write the receipts exactly as Claude's do. The fake Codex harness models the sandbox (no direct
 board access unless drive-ready) and the live acceptance run uses a real Codex engineer (§6.3).
+
+**[RR7] Codex read-only roles.** A Codex judge or reviewer runs `--sandbox read-only` and so cannot write a
+SQLite/file store. Ruling: Codex judges and reviewers are supported only on Postgres with the network profile
+(no local store writes needed); on SQLite/file backends those roles always run on Claude, and a request for
+Codex is overridden with the reason posted. Doctor validates drive-readiness per role sandbox
+(`codex drive-ready: writer yes, read-only no (sqlite)`). R12 is amended accordingly: with [RR8], a Codex
+integrator no longer needs to push at all.
 
 ### 3.13 The coordinator becomes optional
 
@@ -782,6 +824,9 @@ the driver refuses a workdir that is or lies under /tmp or any tmpfs mount (new 
   session's receipted command (**[F17]**). This replaces R15's "stopping needs no proof" and round-2 #2's
   "person path only".
 - A tamper-halt (§3.2 DRIVER-TAMPER) is a halt: the same deadline shift applies.
+
+**[RR4] Halt and cost.** Halt waives attempt and session counts only. Cost is charged as everywhere else
+(§4.1, R17): actual usage when the runner can read it, otherwise the reserved ceiling.
 
 ### 4.4 Permissions
 
@@ -966,7 +1011,8 @@ Transcripts and the board export are attached to the judge's evidence.
 - R9 Questions in drive mode must carry a default; expiry defaults to 4 h; only the blocked seat waits.
 - R10 Halt is a person's brake (person path only), not a terminal state.
 - R11 No automatic cross-host failover; `swarm job move` remains the person's tool.
-- R12 Integrator/pushing seats run on Claude unless Codex network access is configured.
+- R12 Codex seats must be drive-ready ([F18]); Codex judges/reviewers need Postgres ([RR7]); landings are executed by
+  the driver for both harnesses ([RR8]).
 - R13 waiter-stale/unacked alerts are suppressed for drive jobs; a failed invariant raises DRIVER-STALLED.
 - R14 Model policy as Francesco set it (Opus leads/judges, Sonnet coding, Haiku simple), enforced for lead and
   judge, configurable in `[models]`.
@@ -1124,3 +1170,16 @@ risk is carried by the implementation reviews and the tests of §6, which includ
 | F23 staffing changes | plan |
 | F24 close-time target audit; forgery-claim scope | §3.8 [F24], §4.0 [F24] |
 | A drive mode default for goal jobs (PM ruling) | §2.1, §2.3, §3.1, §3.4, §3.10, §3.13, §6, §9, R1, D2 |
+
+### Delta re-review (Codex, 2026-10-10, one focused round on rev 3→5): CHANGES, 8 findings, all accepted
+
+| # | Finding | Resolution |
+|---|---------|------------|
+| RR1 | Owner record ordering; incomplete activation never driven | Five-step durable activation, `activating` ledger completed by the pass (§3.1) |
+| RR2 | Rejected MET leaves a permanent terminal intent | Pending vs committed; rejection clears intent and closing (§3.1) |
+| RR3 | Generic expiry applies defaults during halt | Drive questions expire only through the driver, never while halted (§3.10) |
+| RR4 | Halt vs unknown-usage charging | Halt waives attempts only; cost rule unchanged (§4.3) |
+| RR5 | Deadline terminalization interrupts landings | Terminalization step 0 completes land journals; partial lands recorded (§3.8) |
+| RR6 | Nested-root claims race across supervisors | Host-wide lock around the overlap check (§3.4) |
+| RR7 | Read-only Codex roles cannot write SQLite/file | Codex judges/reviewers only on Postgres; doctor per role (§3.12, R12) |
+| RR8 | Codex cannot run `swarm land` privately | Land requests receipted; the driver executes landings (§3.8, R12) |
