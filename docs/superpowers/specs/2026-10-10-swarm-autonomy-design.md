@@ -1,6 +1,6 @@
 # Swarm autonomy: a goal job runs to MET or UNREACHABLE with zero coordinator turns
 
-Status: design, revision 6 (EL, job swarm-autonomy, 2026-10-10). Base: github/main 2f194bb.
+Status: design, revision 6.1 (EL, job swarm-autonomy, 2026-10-10). Base: github/main 2f194bb.
 Revisions 2, 3 and 4 resolve Codex review rounds 1 (23 findings), 2 (23) and 3 (9); revision 5 applies the design
 judge's fixes F1–F24 (`~/work/swarm-autonomy/JUDGE-design.md`, each marked inline as **[Fn]**) and the PM's
 ruling that drive mode is the default for goal jobs (option A, **[A]**); the delta re-review's RR1–RR8 are marked
@@ -330,8 +330,9 @@ passes gets `DRIVER-ERROR <class>` posted once and a ruling made due; if the rul
    addressed to it, a verdict on its artifact handled outside step 4) → resume it.
 7. **Stall recovery** (§3.9): stuck-closed or exited-without-hand-off seats → relaunch/replace.
 8. **Lead wake** (§3.5): lead seat idle and lead-wake events since its last turn → resume the lead.
-9. **Goal judgment** (§3.7): lead has posted `GOAL-READY` and every hand-off is integrated and nothing is live
-   → launch the goal judge.
+9. **Goal judgment** (§3.7): lead has posted `GOAL-READY`, nothing is live, and every non-withdrawn hand-off group
+   is *integrated* (coding recipe) or *judged `met`* (artifact recipe, **[G3]**: there is no integration step) →
+   launch the goal judge.
 10. **Invariant fallback**: nothing live, nothing pending, nothing above fired → wake the lead with
     "nothing is running: post seat requests, or GOAL-READY, or UNREACHABLE-PROPOSED". Such a wake is a
     **round without progress** in the single round counter of §3.6.
@@ -563,7 +564,9 @@ target must be able to reach MET too. The recipe chooses the gate:
   matching the file in the workdir at close. No target, CI or audit.
 The recipe is fixed at activation (`--recipe coding|artifact`, default `coding` when the workdir is a git checkout
 with a pinned remote, else `artifact`) and stored in the owner record; a lead cannot change it. An E2E test runs a
-non-coding goal to MET.
+non-coding goal to MET. For the artifact recipe, `GOAL-READY` takes the candidate as `report:<path>@<blob>`
+(`swarm goal-ready --job J --candidate report:<path>@<blob> [--add-requirements PATH]...`), and step 9 of §3.3
+requires every non-withdrawn group to be judged `met` rather than integrated.
 
 ### 3.8 Integration and landing gate
 
@@ -647,7 +650,15 @@ explicitly (`-c credential.helper=<pinned>` with `credential.useHttpPath=true`, 
 `GIT_SSH_COMMAND="ssh -i <key> -o IdentitiesOnly=yes -o BatchMode=yes"`, or `SSH_AUTH_SOCK` passed through for
 that call only); nothing else from the user's config is read. Fetches into the mirrors use the same source, so
 private repositories work. `swarm doctor` runs a dry-run `git ls-remote` per pinned destination with the pinned
-source and FAILs on an error. A Task 11 test lands against an authenticated remote fixture.
+source and FAILs on an error. **[G2a] Helper environment.** The mirror git runs with `HOME=<private dir>`, so a
+helper such as `gh auth git-credential` would not find `~/.config/gh`, and the systemd pass has no
+`SSH_AUTH_SOCK`. Activation therefore also pins, per destination, the helper's config location
+(`GH_CONFIG_DIR`, defaulting to the activating user's resolved `~/.config/gh`, or for other allowlisted helpers
+their `HOME`) and, for `ssh-agent`, the agent socket path resolved at activation. These are passed only in the
+environment of that one git invocation (and so to its helper), never to sessions or other commands; doctor's
+`ls-remote` check uses exactly the same environment, so a socket that disappears after reboot is reported. The
+Task 11 test lands against an authenticated remote fixture through a real gh-style config dir (a `hosts.yml`
+with a token read by an allowlisted helper that honours `GH_CONFIG_DIR`), never a fake helper that ignores it.
 
 ### 3.9 Stall recovery
 
