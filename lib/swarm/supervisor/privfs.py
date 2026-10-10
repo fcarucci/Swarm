@@ -36,6 +36,8 @@ MODE = 0o700
 # privfs.lock opens the lock file (checked, never truncated) without taking the flock: the
 # runner and the pass take it themselves (blocking or not).
 lock = safefs.open_lock
+# locked(d, name): an exclusive flock held for a with-block (safefs.locked); the ledger's lock.
+locked = safefs.locked
 
 
 def _error(msg: str):
