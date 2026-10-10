@@ -9,7 +9,9 @@ if _sys.platform == "win32":
 import datetime as dt
 import json
 import os
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from unittest import mock
 
@@ -245,6 +247,31 @@ class DoctorSupervisorTests(Env):
 
 
 class TimerStateEnv(_unittest.TestCase):
+    def test_manager_env_leaves_runtime_dir_unset_when_no_bus_dir(self):
+        with mock.patch.dict(os.environ, {}, clear=False), \
+             mock.patch("pathlib.Path.is_dir", return_value=False):
+            os.environ.pop("XDG_RUNTIME_DIR", None)
+            self.assertNotIn("XDG_RUNTIME_DIR", systemd.manager_env())
+
+    @posix_only("needs POSIX file modes (Windows has ACLs)")
+    def test_install_runs_systemctl_through_manager_env(self):
+        seen = []
+
+        def run(cmd, **kw):
+            seen.append(kw.get("env"))
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        tmp = Path(tempfile.mkdtemp(prefix="swarm-units-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(tmp)}), \
+             mock.patch.dict(os.environ, {}), \
+             mock.patch.object(systemd, "_disabled", return_value=False), \
+             mock.patch("shutil.which", return_value="/usr/bin/systemctl"), \
+             mock.patch.object(systemd, "manager_env", return_value={"SENTINEL": "1"}):
+            self.assertEqual(systemd.install(tmp / "config.toml", 2, run=run).status, "changed")
+        self.assertTrue(seen)
+        self.assertTrue(all(e == {"SENTINEL": "1"} for e in seen))
+
     def test_timer_state_sets_xdg_runtime_dir(self):
         seen = {}
 
