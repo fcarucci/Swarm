@@ -92,7 +92,7 @@ DEFAULTS = {
               "roster_refresh_minutes": 10,
               # `watch` and `status --job` hide finished agents (completed/left/dead) whose end
               # or last contact is older than this; `a` / --all-agents shows them
-              "watch_recent_minutes": 10, "watch_interval_s": 10, "watch_min_redraw_s": 2,
+              "watch_recent_minutes": 10, "watch_interval_s": 10, "watch_check_s": 60, "watch_min_redraw_s": 2,
               # nudge an agent to post a status after this many tool calls or minutes without
               # posting (once per quiet window; 0 disables that trigger)
               "silence_nudge_calls": 15, "silence_nudge_minutes": 10,
@@ -281,7 +281,7 @@ def cmd_init(cfg: dict, args) -> int:
 
 
 # Commands that don't set the board up by themselves first (see auto_init).
-NO_AUTO_INIT = ("plugins", "init", "install-hooks", "hook", "spool", "bootstrap", "migrate", "doctor", "notices",
+NO_AUTO_INIT = ("snapshot", "plugins", "init", "install-hooks", "hook", "spool", "bootstrap", "migrate", "doctor", "notices",
                 "upgrade", "update")
 
 
@@ -901,6 +901,35 @@ def _follow(cfg: dict, run, notice, pause) -> None:
 
 def degraded_notice(host: str) -> str:
     return f"degraded: reading from {host} (no primary)"
+
+
+def cmd_snapshot(cfg: dict, args) -> int:
+    """`swarm snapshot --json [--job J ...] [--session ID ...] [--messages N] [--follow]`: the
+    board's current view as JSON, a pure read (no setup, no spool flush, no sweep, no bookkeeping;
+    a read-only session). --follow: NDJSON stream, see swarm.snapshot. Connects with
+    watcher_config(cfg), like watch and tail (LISTEN needs the primary, not a pooler)."""
+    from swarm import snapshot as snap
+    from swarm.board import BoardUnavailable
+    scope = snap.Scope(jobs=tuple(args.job or ()), sessions=tuple(args.session or ()),
+                       messages=args.messages, recent_minutes=int(cfg["board"]["watch_recent_minutes"]))
+    wcfg = watcher_config(cfg)
+    try:
+        if not args.follow:
+            with snap.open_snapshot_board(wcfg) as board:
+                print(snap.dumps(snap.snapshot_once(board, scope)), flush=True)
+            return 0
+
+        def emit(line: dict) -> None:
+            print(snap.dumps(line), flush=True)
+        snap.follow(lambda: snap.open_snapshot_board(wcfg), scope, emit,
+                    check_s=args.check if args.check is not None else float(cfg["board"].get("watch_check_s", 60)),
+                    keepalive_s=args.keepalive, poll_s=args.poll)
+    except BoardUnavailable as exc:
+        print(f"cannot reach the board database: {exc}", file=sys.stderr)
+        return 1
+    except (KeyboardInterrupt, BrokenPipeError):
+        return 0
+    return 0
 
 
 def cmd_tail(cfg: dict, job: str | None, backlog: int, interval: float, show_agents: bool,
@@ -2320,6 +2349,7 @@ class _Recorder:
         self._board, self.data, self.attrs, self.msgs = board, {}, {}, []
         self.agent_windows = []
         self.taken, self.taken_mono = board.now(), time.monotonic()
+        self._age_cfg = (getattr(board, "cfg", None) or {}).get("board", {})   # idle/dead thresholds, for ageing
 
     def __getattr__(self, name):
         value = getattr(self._board, name)
@@ -2351,6 +2381,9 @@ class SnapshotMiss(Exception):
     """The frame asked a snapshot for something it did not record."""
 
 
+_NOT_RECORDED = object()   # a call the refresh never made (as opposed to one it recorded as None)
+
+
 class _Replay:
     """A board stand-in for the key thread: answers from a _Recorder, never a query. now() moves
     on with the local clock, so idle and dead keep ageing between refreshes. Lists are copied, so
@@ -2369,35 +2402,67 @@ class _Replay:
             return snap.attrs[name]
 
         def call(*args, **kwargs):
-            try:
-                result = snap.data[(name, repr((args, sorted(kwargs.items()))))]
-            except KeyError:
-                result = None
-                if name == "recent_messages" and len(args) == 1:   # a shorter window of a longer one
-                    kw = repr(sorted(kwargs.items()))
-                    for limit, kw2, rows in snap.msgs:
-                        if kw2 == kw and limit >= args[0]:
-                            result = rows[-args[0]:] if args[0] > 0 else []
-                            break
-                if result is None and name == 'watch_agents' and len(args) == 2 and args[1] is None:
-                    for saved_job, saved in snap.agent_windows:
-                        if saved_job == args[0] and saved[1] == 0:
-                            result = saved
-                            break
-                if result is None:
-                    raise SnapshotMiss(name) from None
-            return list(result) if isinstance(result, list) else result
+            result = self._recorded(name, args, kwargs)
+            if result is _NOT_RECORDED:
+                raise SnapshotMiss(name)
+            return self._aged(list(result) if isinstance(result, list) else result)
         return call
 
+    def _recorded(self, name, args, kwargs):
+        """The answer the refresh recorded for this call, or what a recorded wider answer implies
+        (a shorter window of recent_messages, the unfiltered agent window); None: not recorded."""
+        snap = self._snap
+        try:
+            return snap.data[(name, repr((args, sorted(kwargs.items()))))]
+        except KeyError:
+            pass
+        if name == "recent_messages" and len(args) == 1:   # a shorter window of a longer one
+            return self._shorter_window(args[0], repr(sorted(kwargs.items())))
+        if name == 'watch_agents' and len(args) == 2 and args[1] is None:
+            return next((saved for job, saved in snap.agent_windows if job == args[0] and saved[1] == 0),
+                        _NOT_RECORDED)
+        return _NOT_RECORDED
 
-def _take_snapshot(board, frame, view: dict, job: str | None) -> _Recorder:
+    def _shorter_window(self, count, kw):
+        for limit, saved_kw, rows in self._snap.msgs:
+            if saved_kw == kw and limit >= count:
+                return rows[-count:] if count > 0 else []
+        return _NOT_RECORDED
+
+    def _aged(self, result):
+        """Agent rows as of now(): started/running/idle only ever become idle or dead as time
+        passes, so a quiet board needs no query to keep the statuses right."""
+        from swarm.board import AgentStatus
+        from swarm.watchdata import age_agent
+        now, cfg = self.now(), self._snap._age_cfg
+
+        def one(x):
+            return age_agent(x, now, cfg) if isinstance(x, AgentStatus) else x
+        if isinstance(result, list):
+            return [one(x) for x in result]
+        if isinstance(result, tuple) and result and isinstance(result[0], list):
+            return ([one(x) for x in result[0]], *result[1:])
+        return one(result)
+
+
+def _watch_board(board, view: dict, job, source, kind):
+    """What a frame is drawn from: the source's read (Postgres: full, incremental or the fingerprint
+    check, None when nothing differs), a full snapshot of a Postgres board, or the board itself."""
+    recent = None if view.get('all_agents') else view.get('recent_minutes')
+    if source is not None:
+        return source.read(recent, kind)
+    if hasattr(board, 'watch_snapshot'):
+        return board.watch_snapshot(job, view.get('session'), recent, 60 if view.get('compact') else WATCH_HISTORY)
+    return board
+
+
+def _take_snapshot(board, frame, view: dict, job: str | None, source=None, kind: str = "full") -> _Recorder | None:
     """Run frame(recorder): every board answer the frame used is kept. Then also the newest
     WATCH_HISTORY messages (60 in the compact view, which has no history), of which every other
     window (scrolling back, a taller terminal) is a slice, so those keys need no query either."""
-    if hasattr(board, 'watch_snapshot'):
-        recent = None if view.get('all_agents') else view.get('recent_minutes')
-        board = board.watch_snapshot(job, view.get('session'), recent,
-                                     60 if view.get('compact') else WATCH_HISTORY)
+    board = _watch_board(board, view, job, source, kind)
+    if board is None:   # the fingerprint check found nothing different
+        return None
     rec = _Recorder(board)
     session = view.get("session")
     srows = session_jobs(rec, session)[0] if session else None
@@ -2414,16 +2479,109 @@ class _RefreshGate:
         self.last = None
         self.dirty = False
 
+    push_fn = staticmethod(lambda: False)   # a plain gate has no push: refresh on the interval
+
     def due(self, now, changed=False):
         self.dirty |= changed
         return self.last is None or now >= self.last + self.interval or (
             self.dirty and now >= self.last + self.minimum)
 
-    def refreshed(self, now):
+    def next(self, now, changed, miss, push=False):
+        """The refresh to do now ("full") or None: the one decision interface of gate and plan."""
+        return "full" if self.due(now, changed or miss) else None
+
+    def mark_miss(self) -> None:
+        """A frame needed data the snapshot lacks: refresh again."""
+        self.dirty = True
+
+    def refreshed(self, now, kind=None):
         self.last, self.dirty = now, False
 
 
-def _watch_loop(board, out, fd: int | None, interval: float, view: dict, draw, refresh=None) -> None:
+class _RefreshPlan(_RefreshGate):
+    """What the next watch refresh should be, in a push (LISTEN/NOTIFY) board's terms:
+
+      full         the first draw, a view that needs data the snapshot lacks, and push coming back
+                   after polling; with no push at all, every `interval` as ever
+      incremental  a notification arrived: only what changed is read, merged into the snapshot
+      check        nothing arrived for check_s: one cheap fingerprint statement; a full read only if
+                   it differs from what is held (SnapshotSource does that part)
+      None         nothing: a quiet board costs one statement per check_s, and the clock and the
+                   idle/dead ageing are drawn client-side (watchdata.age_agent)."""
+
+    def __init__(self, interval, check_s=60.0, minimum=2, clock=time.monotonic, push_fn=None):
+        super().__init__(interval, minimum)
+        self.check_s, self.clock = max(float(check_s), self.interval), clock
+        self.push_fn = push_fn or (lambda: True)
+        self.last_check, self.was_push, self.miss = None, None, False
+
+    def next(self, now, changed, miss, push):
+        self.dirty |= changed
+        self.miss |= miss
+        was, self.was_push = self.was_push, push
+        if self.last is None or (push and was is False):
+            return "full"
+        throttled = now < self.last + self.minimum
+        if self.miss:
+            return None if throttled else "full"
+        if not push:
+            return "full" if self._poll_due(now, throttled) else None
+        return self._push_kind(now, throttled)
+
+    def _push_kind(self, now, throttled):
+        if self.dirty:   # a notification is pending: never a check (it would clear it); wait out the throttle
+            return None if throttled else "incremental"
+        return "check" if now >= self._check_at() else None
+
+    def _poll_due(self, now, throttled) -> bool:
+        return (self.dirty and not throttled) or now >= self.last + self.interval
+
+    def _check_at(self):
+        return (self.last if self.last_check is None else self.last_check) + self.check_s
+
+    def mark_miss(self) -> None:
+        super().mark_miss()
+        self.miss = True
+
+    def refreshed(self, now, kind=None):
+        super().refreshed(now)
+        self.miss = False
+        if kind != "incremental":
+            self.last_check = now
+
+
+def polling_notice(poll_s) -> str:
+    return f"push unavailable: polling every {poll_s:g}s"
+
+
+class _Refresher:
+    """One refresh decision and its read, the same for the plain and the threaded loop: ask the
+    gate (a plain _RefreshGate or a _RefreshPlan) what is due, run `refresh(kind)` (a zero-argument
+    refresh of a plain caller is adapted), tell the gate. A None result keeps the old snapshot."""
+
+    def __init__(self, gate, refresh, plan):
+        self.gate = gate
+        self.refresh = refresh if plan is not None or refresh is None else (lambda kind: refresh())
+
+    def step(self, now, changed, miss=False, on_start=None):
+        """(due, fresh): fresh is the new snapshot, None if nothing was read or nothing differs."""
+        kind = self.gate.next(now, changed, miss, self.gate.push_fn())
+        if kind is None:
+            return False, None
+        if on_start is not None:
+            on_start()
+        fresh = self.refresh(kind) if self.refresh is not None else None
+        if self.refresh is not None:
+            self.gate.refreshed(time.monotonic(), kind)
+        return True, fresh
+
+
+def _paint(out, lines) -> None:
+    out.write("\033[H" + "\n".join(line + "\033[K" for line in lines) + "\033[J")
+    out.flush()
+
+
+def _watch_loop(board, out, fd: int | None, interval: float, view: dict, draw, refresh=None, plan=None) -> None:
     """Redraw on change, on keys and every `interval` seconds; returns when the user quits, or
     when view["idle_exit"] (an IdleExit, set by --exit-when-idle) has expired.
 
@@ -2438,41 +2596,126 @@ def _watch_loop(board, out, fd: int | None, interval: float, view: dict, draw, r
     redraws never bypass the database refresh deadline."""
     board.subscribe()
     if refresh is not None and fd is not None:
-        return _watch_loop_threaded(board, out, fd, interval, view, draw, refresh)
-    dirty, changed = True, False
-    gate = _RefreshGate(interval, view.get('min_redraw', 2))
-    snap = None
+        return _watch_loop_threaded(board, out, fd, interval, view, draw, refresh, plan)
+    _watch_loop_plain(board, out, fd, interval, view, draw, refresh, plan)
+
+
+def _watch_loop_plain(board, out, fd, interval: float, view: dict, draw, refresh, plan) -> None:
+    gate = plan or _RefreshGate(interval, view.get('min_redraw', 2))
+    refresher = _Refresher(gate, refresh, plan)
+    dirty, changed, snap, drawn_at = True, False, None, 0.0
     while True:
-        due = gate.due(time.monotonic(), changed)
-        if refresh is not None and due:
-            snap = refresh()
-            gate.refreshed(time.monotonic())
-            dirty = True
+        due, fresh = refresher.step(time.monotonic(), changed)
+        snap = snap if fresh is None else fresh
+        # a new snapshot, or the clock and the idle/dead ageing: a redraw, no query
+        dirty |= fresh is not None or _ageing_redraw_due(plan, time.monotonic(), drawn_at, interval)
         if dirty or due:
-            try:
-                lines = draw(_Replay(snap)) if refresh is not None else draw()
-            except SnapshotMiss:
-                gate.dirty = True
-            else:
-                out.write("\033[H" + "\n".join(line + "\033[K" for line in lines) + "\033[J")
-                out.flush()
-            dirty = False
-            if refresh is None:
-                gate.refreshed(time.monotonic())
+            drawn_at, dirty = time.monotonic(), False
+            _draw_plain(out, draw, snap, refresh, gate)
         # Poll keys and board changes in short slices: a keypress redraws at once, and a
         # burst of hook updates lands in one slice, so it costs one redraw, not dozens.
-        keys = _read_keys(fd)
-        if keys is not None:
-            if not _apply_keys(keys, view):
-                return
-            dirty = True
+        quit_, pressed = _poll_keys(fd, view)
+        if quit_:
+            return
+        dirty |= pressed
         changed = board.wait_for_change(0.1)  # coalesce bursts; keys still render immediately
-        idle = view.get("idle_exit")
-        if idle is not None and idle.expired():
+        if _idle_exit_expired(view):
             return
 
 
-def _watch_loop_threaded(board, out, fd, interval: float, view: dict, draw, refresh) -> None:
+def _ageing_redraw_due(plan, now, drawn_at, interval) -> bool:
+    return plan is not None and now >= drawn_at + max(interval, plan.minimum)
+
+
+def _poll_keys(fd, view) -> tuple[bool, bool]:
+    """(quit, a key was applied) for the keys typed within the next 0.2 s."""
+    keys = _read_keys(fd)
+    if keys is None:
+        return False, False
+    return (not _apply_keys(keys, view)), True
+
+
+def _idle_exit_expired(view) -> bool:
+    idle = view.get("idle_exit")
+    return idle is not None and idle.expired()
+
+
+def _draw_plain(out, draw, snap, refresh, gate) -> None:
+    try:
+        lines = draw(_Replay(snap)) if refresh is not None else draw()
+    except SnapshotMiss:
+        gate.mark_miss()
+    else:
+        _paint(out, lines)
+    if refresh is None:   # the draw itself queried the board: that is the refresh
+        gate.refreshed(time.monotonic())
+
+
+class _ThreadedWatch:
+    """The event-driven loop's parts: a selector waits on the sources and calls the callback
+    registered for each (see _watch_loop_threaded)."""
+
+    def __init__(self, board, out, fd, interval, view, draw, refresher):
+        import socket
+        import threading
+        self.board, self.out, self.fd, self.interval, self.view = board, out, fd, interval, view
+        self.draw, self.refresher = draw, refresher
+        self.state = {"snap": None, "error": None, "quit": False}
+        self.stop, self.wake = threading.Event(), threading.Event()
+        self.rd_sock, self.wr_sock = socket.socketpair()
+        self.rd_sock.setblocking(False)
+        self.wr_sock.setblocking(False)
+
+    def poke(self, byte: bytes) -> None:
+        try:
+            self.wr_sock.send(byte)
+        except OSError:   # full (a poke is already pending) or closed
+            pass
+
+    def worker(self) -> None:
+        try:
+            while not self.stop.is_set():
+                changed = self.board.wait_for_change(0.1)   # drains pending notifications; stop checked between
+                due, fresh = self.refresher.step(time.monotonic(), changed, self.wake.is_set(), self.wake.clear)
+                if due and fresh is not None:
+                    self.state["snap"] = fresh
+                    self.poke(b"s")
+        except BaseException as exc:   # the loop re-raises it (BoardUnavailable: _follow reconnects)
+            self.state["error"] = exc
+            self.poke(b"e")
+
+    def render(self) -> None:
+        if self.state["snap"] is None:
+            return
+        try:
+            lines = self.draw(_Replay(self.state["snap"]))
+        except SnapshotMiss:
+            self.wake.set()   # the view needs data the snapshot lacks: refresh, keep the old frame
+            return
+        _paint(self.out, lines)
+
+    def on_keys(self) -> None:
+        data = os.read(self.fd, 64).decode(errors="ignore")
+        if not data or not _apply_keys(data, self.view):   # EOF (the terminal is gone) quits too
+            self.state["quit"] = True
+            return
+        self.render()
+
+    def on_event(self) -> None:
+        try:
+            self.rd_sock.recv(4096)
+        except BlockingIOError:
+            pass
+        if self.state["error"] is not None:
+            raise self.state["error"]
+        self.render()
+
+    def close(self) -> None:
+        self.rd_sock.close()
+        self.wr_sock.close()
+
+
+def _watch_loop_threaded(board, out, fd, interval: float, view: dict, draw, refresh, plan=None) -> None:
     """The event-driven loop: a selector waits on the sources and calls the callback registered
     for each. stdin readable -> on_keys (dispatches through WATCH_KEYS/VIEW_ACTIONS, then renders
     from the cached snapshot: no query on this path). A socket the refresh thread writes to (and
@@ -2483,92 +2726,42 @@ def _watch_loop_threaded(board, out, fd, interval: float, view: dict, draw, refr
     lacks (SnapshotMiss). Quitting does not wait for a refresh stuck in a query (daemon thread)."""
     import selectors
     import signal
-    import socket
     import threading
-    state = {"snap": None, "error": None, "quit": False}
-    stop, wake = threading.Event(), threading.Event()
-    rd_sock, wr_sock = socket.socketpair()
-    rd_sock.setblocking(False)
-    wr_sock.setblocking(False)
-
-    def poke(byte: bytes) -> None:
-        try:
-            wr_sock.send(byte)
-        except OSError:   # full (a poke is already pending) or closed
-            pass
-
-    def worker() -> None:
-        gate = _RefreshGate(interval, view.get('min_redraw', 2))
-        try:
-            while not stop.is_set():
-                changed = board.wait_for_change(0.1)   # drains pending notifications; stop checked between
-                if gate.due(time.monotonic(), wake.is_set() or changed):
-                    wake.clear()
-                    state["snap"] = refresh()
-                    gate.refreshed(time.monotonic())
-                    poke(b"s")
-        except BaseException as exc:   # the loop re-raises it (BoardUnavailable: _follow reconnects)
-            state["error"] = exc
-            poke(b"e")
-
-    def render() -> None:
-        if state["snap"] is None:
-            return
-        try:
-            lines = draw(_Replay(state["snap"]))
-        except SnapshotMiss:
-            wake.set()   # the view needs data the snapshot lacks: refresh, keep the old frame
-            return
-        out.write("\033[H" + "\n".join(line + "\033[K" for line in lines) + "\033[J")
-        out.flush()
-
-    def on_keys() -> None:
-        data = os.read(fd, 64).decode(errors="ignore")
-        if not data or not _apply_keys(data, view):   # EOF (the terminal is gone) quits too
-            state["quit"] = True
-            return
-        render()
-
-    def on_event() -> None:
-        try:
-            rd_sock.recv(4096)
-        except BlockingIOError:
-            pass
-        if state["error"] is not None:
-            raise state["error"]
-        render()
-
+    gate = plan or _RefreshGate(interval, view.get('min_redraw', 2))
+    w = _ThreadedWatch(board, out, fd, interval, view, draw, _Refresher(gate, refresh, plan))
     sel = selectors.DefaultSelector()
-    sel.register(rd_sock, selectors.EVENT_READ, on_event)
+    sel.register(w.rd_sock, selectors.EVENT_READ, w.on_event)
     if fd is not None:   # (cmd_watch passes fd=None on Windows, which cannot select() on stdin)
-        sel.register(fd, selectors.EVENT_READ, on_keys)
+        sel.register(fd, selectors.EVENT_READ, w.on_keys)
     winch_set, old_winch = False, None
     if hasattr(signal, "SIGWINCH") and threading.current_thread() is threading.main_thread():
-        old_winch = signal.signal(signal.SIGWINCH, lambda *_: poke(b"r"))   # a resize re-renders
+        old_winch = signal.signal(signal.SIGWINCH, lambda *_: w.poke(b"r"))   # a resize re-renders
         winch_set = True
     out.write("\033[H" + _bold("loading…", False) + "\033[K")
     out.flush()
-    thread = threading.Thread(target=worker, name="watch-refresh", daemon=True)
+    thread = threading.Thread(target=w.worker, name="watch-refresh", daemon=True)
     thread.start()
     try:
-        next_tick = time.monotonic()
-        while not state["quit"]:
-            for key, _ in sel.select(max(0.0, next_tick - time.monotonic())):
-                key.data()
-            if time.monotonic() >= next_tick:   # the clock and idle/dead ageing: a render, no query
-                render()
-                next_tick = time.monotonic() + max(interval, view.get('min_redraw', 2))
-            idle = view.get("idle_exit")
-            if idle is not None and idle.expired():
-                return
+        _select_loop(sel, w, interval, view)
     finally:
-        stop.set()
+        w.stop.set()
         if winch_set:   # signal() returns None for a handler not set from Python: that is SIG_DFL
             signal.signal(signal.SIGWINCH, signal.SIG_DFL if old_winch is None else old_winch)
         thread.join(timeout=0.3)   # not for a query in flight: it is a daemon, the process is leaving
         sel.close()
-        rd_sock.close()
-        wr_sock.close()
+        w.close()
+
+
+def _select_loop(sel, w: "_ThreadedWatch", interval: float, view: dict) -> None:
+    next_tick = time.monotonic()
+    while not w.state["quit"]:
+        for key, _ in sel.select(max(0.0, next_tick - time.monotonic())):
+            key.data()
+        if time.monotonic() >= next_tick:   # the clock and idle/dead ageing: a render, no query
+            w.render()
+            next_tick = time.monotonic() + max(interval, view.get('min_redraw', 2))
+        if _idle_exit_expired(view):
+            return
 
 
 def cmd_watch(cfg: dict, job: str | None, interval: float, color: bool, session: str | None = None,
@@ -2593,6 +2786,7 @@ def cmd_watch(cfg: dict, job: str | None, interval: float, color: bool, session:
     interval = float(cfg['board'].get('watch_interval_s', 10)) if interval is None else interval
     if interval <= 0:
         raise ValueError('watch interval must be positive')
+    check_s = float(cfg['board'].get('watch_check_s', 60))
     view = {"min_redraw": cfg['board'].get('watch_min_redraw_s', 2),
             "offset": 0, "wrap": False, "max_offset": 0, "all_agents": False,
             "anchor": None, "scroll": 0, "mark": None, "page": 1,
@@ -2607,19 +2801,28 @@ def cmd_watch(cfg: dict, job: str | None, interval: float, color: bool, session:
     sweeper = Sweeper(cfg)
 
     def run(board) -> None:
+        from swarm.watchdata import SnapshotSource
         def frame(b, v) -> list[str]:
             lines = _watch_frame(b, job, interval, color, interactive, v, _sup_or_none(cfg))
-            if b.degraded and len(lines) > 1 and not lines[1]:   # the blank line under the title
-                lines[1] = _bold(degraded_notice(b.degraded), color)
+            if len(lines) > 1 and not lines[1]:   # the blank line under the title
+                if b.degraded:
+                    lines[1] = _bold(degraded_notice(b.degraded), color)
+                elif getattr(b, "change_mode", "push") == "degraded":   # LISTEN refused: polling
+                    lines[1] = _bold(polling_notice(interval), color)
             return lines
 
-        def refresh() -> _Recorder:   # on the refresh thread: every query happens here
+        source = (SnapshotSource(board, job, session, 60 if compact else WATCH_HISTORY, check_s=check_s)
+                  if hasattr(board, "watch_snapshot") else None)
+        plan = _RefreshPlan(interval, check_s, view.get("min_redraw", 2),
+                            push_fn=lambda: source is not None and board.change_mode == "push")
+
+        def refresh(kind="full") -> _Recorder | None:   # on the refresh thread: every query happens here
             sweeper(board)
-            return _take_snapshot(board, lambda b: frame(b, dict(view)), view, job)   # a view copy: the frame writes back clamps
+            return _take_snapshot(board, lambda b: frame(b, dict(view)), view, job, source, kind)   # a view copy: the frame writes back clamps
 
         def draw(snap) -> list[str]:  # on the key thread: no query, only the last snapshot
             return frame(snap, view)
-        _watch_loop(board, out, fd, interval, view, draw, refresh)
+        _watch_loop(board, out, fd, interval, view, draw, refresh, plan)
 
     def notice(text: str) -> None:  # over the frame's top line; the rest of the frame stays
         out.write("\033[H" + _bold(text, color) + "\033[K")
@@ -2858,6 +3061,20 @@ def _parser() -> argparse.ArgumentParser:
     st.add_argument("--all-agents", action="store_true",
                     help="with --job: also list finished agents older than board.watch_recent_minutes")
     st.add_argument("--no-color", action="store_true")
+    sn = sub.add_parser("snapshot", help="the board's current view as JSON (pure read); --follow streams changes as NDJSON")
+    sn.add_argument("--json", action="store_true", help="JSON output (the only format; accepted for clarity)")
+    sn.add_argument("--job", action="append", help="only this job (repeatable)")
+    sn.add_argument("--session", action="append", help="the jobs shown for this host session id (repeatable)")
+    sn.add_argument("--messages", type=int, default=20, metavar="N",
+                    help="newest messages per job (default 20, at most 200)")
+    sn.add_argument("--follow", action="store_true",
+                    help="stream NDJSON: a snapshot, then a delta per change; on Postgres woken by LISTEN/NOTIFY, "
+                         "elsewhere polling; a degraded line while push is unavailable")
+    sn.add_argument("--check", type=float, default=None, metavar="SECONDS",
+                    help="with --follow: how often the fingerprint check runs (config watch_check_s, default 60)")
+    sn.add_argument("--keepalive", type=float, default=15.0, metavar="SECONDS", help="with --follow: ping interval")
+    sn.add_argument("--poll", type=float, default=2.0, metavar="SECONDS",
+                    help="with --follow: poll interval where push is unavailable")
     wa = sub.add_parser("watch", help="live full-screen view of jobs, agents and messages (Ctrl-C to quit)")
     wa.add_argument("--job", help="focus on one job (default: all active jobs)")
     wa.add_argument("--interval", type=float, default=None, help="seconds between quiet refreshes (config watch_interval_s, default 10)")
@@ -3724,6 +3941,7 @@ COMMANDS = {
     "learn": cmd_learn,
     "recall": cmd_recall,
     "spool": lambda cfg, args: cmd_spool_retry(cfg),
+    "snapshot": lambda cfg, args: cmd_snapshot(cfg, args),
     "tail": lambda cfg, args: cmd_tail(cfg, args.job, args.backlog, args.interval, not args.no_agents,
                                        _use_color(args)),
     "watch": lambda cfg, args: cmd_watch(cfg, args.job, args.interval, _use_color(args),
@@ -4605,6 +4823,7 @@ def _reads_only(args) -> bool:
             or (args.cmd == "verdict" and args.verdict == "show")
             or (args.cmd == "config" and args.value is None and not args.save)
             or (args.cmd == "learn" and args.list_banks)
+            or args.cmd == "snapshot"
             or (args.cmd == "transcript" and args.tcmd in TRANSCRIPT_COMMANDS))
 
 

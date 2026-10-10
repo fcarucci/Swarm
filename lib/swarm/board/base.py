@@ -1366,6 +1366,19 @@ class Board(abc.ABC):
     # Set (the server's name) when the primary was unreachable and a read-only command was
     # served by a standby instead (Postgres with several hosts): writes are not available.
     degraded: str | None = None
+    # Whether the backend pushes changes to wait_for_change (Postgres LISTEN/NOTIFY, the memory
+    # store's condition variable) rather than polling for them (SQLite, file: a 0.1 s look at a
+    # change counter). change_mode is what holds right now: "push", "poll" (this backend only
+    # polls) or "degraded" (a push backend that has fallen back to polling: a standby, a pooler
+    # that refuses LISTEN). Consumers that stream (swarm snapshot --follow) poll themselves in
+    # every mode but "push".
+    supports_subscribe = False
+
+    @property
+    def change_mode(self) -> str:
+        if not self.supports_subscribe:
+            return "poll"
+        return "degraded" if self.degraded else "push"
 
     def __init__(self, cfg: dict):
         self.cfg = cfg

@@ -38,7 +38,8 @@ agent_stale_hours = 12              # an agent silent this long gives its name b
 read_limit = 50                     # max messages returned by one read
 join_history = 30                   # a new agent is first shown the job's newest N messages (0 = none)
 roster_refresh_minutes = 10         # full roster re-sent to each agent at least this often (diffs in between)
-watch_interval_s = 10               # periodic watch refresh; --interval overrides
+watch_interval_s = 10               # watch redraw (clock, idle/dead ageing: no query) and, without push, its refresh; --interval overrides
+watch_check_s = 60                  # push boards: how often watch / snapshot --follow compare a cheap fingerprint with their state (a full read only on a mismatch)
 watch_min_redraw_s = 2              # coalesce notifications/snapshot misses, also in compact panes
 watch_recent_minutes = 10           # watch / status --job hide finished agents older than this (`a` / --all-agents shows them)
 silence_nudge_calls = 15            # nudge an agent to post a status after this many tool calls without posting (0 = off)

@@ -119,7 +119,8 @@ class CoalescingTests(unittest.TestCase):
         self.assertIsInstance(snap,SnapshotBoard)
         board._conn.execute.assert_called_once()
         query,params=board._conn.execute.call_args.args
-        self.assertEqual(query.count('%s'),len(params))
+        import re   # named parameters now (jobs, sessions, recent, limit, after)
+        self.assertEqual(set(re.findall(r'%\((\w+)\)s',query)),set(params))
         self.assertNotIn('GROUP BY a.agent_key',query)   # the per-agent counts are agents.message_count
         self.assertNotIn('LEFT JOIN messages',query)
         self.assertNotIn('(SELECT count(*) FROM messages',query)

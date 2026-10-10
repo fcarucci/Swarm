@@ -1539,6 +1539,8 @@ class MemoryBoard(MemoryBlockers, MemoryEvents, MemoryBgCommands, Board):
         s = self._store
         return s.msg_version if self._subscribed else s.state_version
 
+    supports_subscribe = True
+
     def subscribe(self, messages_only: bool = False) -> None:
         s = self._s()
         with s.lock:

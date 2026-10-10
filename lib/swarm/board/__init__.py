@@ -82,6 +82,22 @@ def open_read_only(cfg: dict) -> Board:
     return cls(cfg)
 
 
+def open_snapshot_board(cfg: dict) -> Board:
+    """The board for `swarm snapshot`: reads only, whichever backend. Postgres: a session whose
+    default_transaction_read_only is on (the server refuses any write), and with several hosts a
+    standby answers when no primary is reachable (board.degraded; no LISTEN there). File and
+    SQLite: open read-only (nothing created, written or renamed). Every backend: each write method
+    raises ReadOnlyBoard. Raises BoardUnavailable if the store cannot be reached or is missing."""
+    from .base import refuse_writes
+    cls, name = backend_class(cfg), board_backend(cfg)
+    if name == "postgres":
+        return cls(cfg, readers=True, read_only=True)
+    board = cls(cfg, read_only=True) if name in ("file", "sqlite") else cls(cfg)
+    if not board.read_only:
+        refuse_writes(board, "the snapshot board")
+    return board
+
+
 def setup_board(cfg: dict, names: Mapping[str, Sequence[str]] | None = None) -> SetupResult:
     """Create/upgrade the configured board's storage (`swarm init`); names default to the
     shipped pool (load_name_pool())."""
@@ -98,7 +114,7 @@ def ensure_initialized(cfg: dict, timeout: float = 60.0,
 
 __all__ = [
     "ensure_initialized", "SCHEMA_VERSION",
-    "open_board", "open_read_only", "setup_board", "backend_class", "board_backend", "DEFAULT_BACKEND", "BACKENDS",
+    "open_board", "open_read_only", "open_snapshot_board", "setup_board", "backend_class", "board_backend", "DEFAULT_BACKEND", "BACKENDS",
     "Board", "BoardError", "JobPaused", "PauseRecord", "PAUSE_WRITER", "LEFT_PAUSED", "MANIFEST_VERSION", "build_manifest", "BoardUnavailable", "IncompatibleStorage", "ReadOnlyBoard",
     "Message", "PostResult", "SetupResult", "AgentStatus", "JobStatus", "AgentEvent",
     "ReadResult", "RosterEntry", "OwedReply", "SyncState", "Member", "Route", "MEMORY_SEEN_MAX",
