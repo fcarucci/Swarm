@@ -2,7 +2,8 @@
 
 Every factory takes keyword overrides for every field of the type it builds (tests/test_drive_model.py
 checks this), and every default is a fresh container, so tests never share state. `L` mirrors the field
-names of eng-ledger's `Ledger` (lib/swarm/supervisor/ledger.py @ 60f507d); `spent_usd` is a shorthand that
+names of eng-ledger's `Ledger` (lib/swarm/supervisor/ledger.py @ 534cfce, 26 fields); `receipt` mirrors
+eng-ledger's `Receipt` (lib/swarm/receipts.py @ 534cfce, 14 fields); `spent_usd` is a shorthand that
 seeds one concluded intent, because the Ledger has no spent_usd field (it has charged_usd())."""
 from __future__ import annotations
 
@@ -74,6 +75,34 @@ class Intent:
     charged_usd: float | None = None
 
 
+@dataclass(frozen=True)
+class Receipt:
+    """Stand-in for eng-ledger's Receipt (lib/swarm/receipts.py @ 534cfce), same field names."""
+    board_key: str
+    job: str
+    generation: int
+    incarnation: str
+    action_id: str
+    attempt: int
+    seat: str | None
+    kind: str
+    record_id: str
+    rev: int
+    content_sha: str
+    args_sha: str
+    expires_at: float
+    destinations: dict | None = None
+
+
+def receipt(**kw: Any) -> Receipt:
+    base = dict(
+        board_key="board-key", job="J", generation=1, incarnation="0" * 32,
+        action_id="gen1|launch|a|-|1|-", attempt=1, seat="a", kind="done", record_id="1", rev=1,
+        content_sha="c" * 64, args_sha="a" * 64, expires_at=T0.timestamp() + 3600, destinations=None,
+    )
+    return Receipt(**{**base, **kw})
+
+
 @dataclass
 class L:
     """Lightweight stand-in for eng-ledger's Ledger: the same field names and defaults, and charged_usd()."""
@@ -100,6 +129,8 @@ class L:
     halted_total_seconds: float = 0.0
     requester_session: str | None = None
     pinned_requirements: dict = field(default_factory=dict)
+    incarnation: str = ""
+    ledger_rev: int = 0
     spent_usd: InitVar[float | None] = None
 
     def __post_init__(self, spent_usd: float | None) -> None:

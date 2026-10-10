@@ -7,15 +7,29 @@ import datetime as dt
 import unittest
 
 import support  # noqa: F401  (puts lib/ on sys.path)
-from drive_fixtures import L, T0, ho, intent, iso, minutes, q, seat, snap, v
+from drive_fixtures import L, T0, Intent, Receipt, ho, intent, iso, minutes, q, receipt, seat, snap, v
 from swarm.supervisor import driver_model as dm
 
-# Field names of eng-ledger's Ledger dataclass (lib/swarm/supervisor/ledger.py @ 60f507d).
+# Pinned against eng-ledger at 534cfce. If these change, update drive_fixtures.py to match.
+# Field names of the Ledger dataclass (lib/swarm/supervisor/ledger.py): 26 fields.
 LEDGER_FIELDS = (
     "board_key", "job", "generation", "generation_requested", "activated_at", "budgets", "intents",
     "owners", "integrated", "ruling_due_at", "ruling_attempts", "rounds_without_progress", "errors",
     "closing", "halted", "terminal", "mirror_fetch_pending", "last_pass", "watermarks",
     "terminal_intent", "halted_total_seconds", "requester_session", "pinned_requirements",
+    "incarnation", "ledger_rev",
+)
+
+# The Intent dataclass (lib/swarm/supervisor/ledger.py @ 534cfce): 11 fields.
+INTENT_FIELDS = (
+    "launch_id", "action_id", "attempt", "seat", "reserved_usd", "reserved_minutes", "locks", "state",
+    "outcome", "success", "charged_usd",
+)
+
+# The Receipt dataclass (lib/swarm/receipts.py @ 534cfce): 14 fields.
+RECEIPT_FIELDS = (
+    "board_key", "job", "generation", "incarnation", "action_id", "attempt", "seat", "kind", "record_id",
+    "rev", "content_sha", "args_sha", "expires_at", "destinations",
 )
 
 SNAPSHOT_FIELDS = (
@@ -56,7 +70,7 @@ class FrozenModelTest(unittest.TestCase):
         # Each factory must accept an override for every field of the type it builds, and keep it.
         cases = (
             (dm.Snapshot, snap), (dm.SeatView, seat), (dm.Question, q),
-            (dm.HandoffView, ho), (dm.VerdictView, v), (L, L),
+            (dm.HandoffView, ho), (dm.VerdictView, v), (L, L), (Receipt, receipt), (Intent, intent),
         )
         for cls, factory in cases:
             for f in dataclasses.fields(cls):
@@ -167,6 +181,21 @@ class FrozenModelTest(unittest.TestCase):
 class FixtureTest(unittest.TestCase):
     def test_ledger_stand_in_has_eng_ledger_field_names(self):
         self.assertEqual(tuple(f.name for f in dataclasses.fields(L)), LEDGER_FIELDS)
+
+    def test_intent_and_receipt_stand_ins_have_eng_ledger_field_names(self):
+        self.assertEqual(tuple(f.name for f in dataclasses.fields(Intent)), INTENT_FIELDS)
+        self.assertEqual(tuple(f.name for f in dataclasses.fields(Receipt)), RECEIPT_FIELDS)
+
+    def test_ledger_incarnation_and_rev_defaults(self):
+        led = L()
+        self.assertEqual((led.incarnation, led.ledger_rev), ("", 0))
+        self.assertEqual(L(incarnation="f" * 32, ledger_rev=4).ledger_rev, 4)
+
+    def test_receipt_factory_defaults_are_valid_and_frozen(self):
+        r = receipt()
+        self.assertEqual((r.generation, r.rev, r.destinations), (1, 1, None))
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            r.rev = 2
 
     def test_ledger_spent_usd_seeds_a_concluded_charge(self):
         led = L(spent_usd=35.5)
