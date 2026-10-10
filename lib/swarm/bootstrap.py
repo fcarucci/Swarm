@@ -1280,10 +1280,6 @@ def supervisor_checks(cfg: dict, host: str | None, run=None, which=None) -> list
     no_manager = bool(scope) and scope[0].ok is not True
     if not no_manager:
         state = systemd.timer_state(run)
-        active = state.get("ActiveState") == "active" and state.get("UnitFileState") == "enabled"
-        out.append(Check("supervise timer", active,
-                         f"{systemd.TIMER}: {state.get('ActiveState', '?')}/{state.get('UnitFileState', '?')}",
-                         f"swarm bootstrap, or systemctl --user enable --now {systemd.TIMER}"))
         last = st.load_state().get("last_run_at")
         age = None
         if last:
@@ -1291,6 +1287,16 @@ def supervisor_checks(cfg: dict, host: str | None, run=None, which=None) -> list
                 age = (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(last)).total_seconds() / 60
             except (TypeError, ValueError):
                 pass
+        active = state.get("ActiveState") == "active" and state.get("UnitFileState") == "enabled"
+        if not state and age is not None and 0 <= age <= 2 * sup["timer_minutes"]:
+            # no user bus from this shell (agent shells lack it): the timer can't be read, but the
+            # last pass ran recently, so the timer is evidently running
+            out.append(Check("supervise timer", True,
+                             "unknown (no user bus from this shell); last run recent"))
+        else:
+            out.append(Check("supervise timer", active,
+                             f"{systemd.TIMER}: {state.get('ActiveState', '?')}/{state.get('UnitFileState', '?')}",
+                             f"swarm bootstrap, or systemctl --user enable --now {systemd.TIMER}"))
         fresh = age is not None and 0 <= age <= 3 * sup["timer_minutes"]
         out.append(Check("supervise last run", fresh, "never" if age is None else f"{age:.0f} min ago",
                          "journalctl --user -u swarm-supervise.service -n 50"))

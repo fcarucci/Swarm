@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import re
@@ -55,6 +56,20 @@ class DoctorTests(unittest.TestCase):
         self.assertIn("auto-restart inactive until", checks["replacement scope"].detail)
         self.assertIn("auto-restart inactive until", checks["supervise harness"].detail)
         self.assertFalse(any(c.ok is False for c in checks.values()))
+
+    @posix_only("supervisor uses Linux systemd")
+    def test_timer_unknown_from_shell_without_bus_is_not_fail(self):
+        from swarm.supervisor import settings as st, systemd
+        with open(self.cfg, "a") as fh:
+            fh.write("[supervise]\nenabled = true\n")
+        bootstrap.bootstrap("claude", config=self.cfg)
+        st.save_state({"last_run_at": dt.datetime.now(dt.timezone.utc).isoformat()})
+        with mock.patch("swarm.supervisor.runner.scope_available", return_value=True), \
+             mock.patch.object(systemd, "timer_state", return_value={}), \
+             mock.patch.object(systemd, "linger", return_value=None):
+            checks = self.by_name(bootstrap.doctor("claude", config=self.cfg))
+        self.assertIs(checks["supervise timer"].ok, True)
+        self.assertIn("unknown (no user bus from this shell)", checks["supervise timer"].detail)
 
     @posix_only("pre-0.1 skill hooks never existed on Windows")
     def test_doctor_flags_legacy_hooks_while_plugin_installed(self):

@@ -63,6 +63,7 @@ import threading
 import time
 from pathlib import Path
 from swarm import compat
+from swarm.supervisor.systemd import manager_env as _manager_env
 
 POLL_SECONDS = 5.0
 BOARD_EVERY = 30.0
@@ -453,17 +454,6 @@ def _allowed_env(src, pass_env=()) -> dict:
         elif (k in ENV_ALLOW or k.startswith("LC_")) and not k.startswith("PG") and not _KEY_FULL.fullmatch(k):
             out[k] = v
     return out
-
-
-def _manager_env(env=None) -> dict:
-    """`env` (default: the allowlisted part of ours) with XDG_RUNTIME_DIR set (the user manager's
-    bus lives there) when it is missing."""
-    env = _allowed_env(os.environ) if env is None else dict(env)
-    if not env.get("XDG_RUNTIME_DIR"):
-        d = Path(f"/run/user/{compat.uid()}")
-        if d.is_dir():
-            env["XDG_RUNTIME_DIR"] = str(d)
-    return env
 
 
 def _systemctl(*args: str) -> subprocess.CompletedProcess | None:

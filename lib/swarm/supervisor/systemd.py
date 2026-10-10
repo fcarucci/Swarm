@@ -63,6 +63,19 @@ def timer_text(minutes: int) -> str:
             "[Install]\nWantedBy=timers.target\n")
 
 
+def manager_env(env=None) -> dict:
+    """`env` (default: the runner's allowlisted environment) with XDG_RUNTIME_DIR set when missing:
+    the user manager's bus lives there. Agent shells lack it, and systemctl --user then fails."""
+    from swarm import compat
+    from swarm.supervisor.runner import _allowed_env
+    env = _allowed_env(os.environ) if env is None else dict(env)
+    if not env.get("XDG_RUNTIME_DIR"):
+        d = Path(f"/run/user/{compat.uid()}")
+        if d.is_dir():
+            env["XDG_RUNTIME_DIR"] = str(d)
+    return env
+
+
 def _disabled() -> bool:
     return os.environ.get("SWARM_NO_SYSTEMD") == "1"
 
@@ -89,7 +102,7 @@ def install(config: Path, minutes: int, run=subprocess.run):
         ["systemctl", "--user", "enable", "--now", TIMER]]
     for command in commands:
         try:
-            result = run(command, capture_output=True, text=True, timeout=20)
+            result = run(command, capture_output=True, text=True, timeout=20, env=manager_env())
         except (OSError, subprocess.SubprocessError) as exc:
             return Step("supervisor", "failed", f"`{' '.join(command)}`: {type(exc).__name__}")
         if result.returncode != 0:
@@ -102,7 +115,7 @@ def install(config: Path, minutes: int, run=subprocess.run):
 def timer_state(run=subprocess.run) -> dict:
     try:
         result = run(["systemctl", "--user", "show", TIMER, "-p", "ActiveState", "-p", "UnitFileState"],
-                     capture_output=True, text=True, timeout=10)
+                     capture_output=True, text=True, timeout=10, env=manager_env())
     except (OSError, subprocess.SubprocessError):
         return {}
     if result.returncode != 0:
@@ -114,7 +127,7 @@ def linger(run=subprocess.run) -> bool | None:
     import getpass
     try:
         result = run(["loginctl", "show-user", getpass.getuser(), "-p", "Linger"],
-                     capture_output=True, text=True, timeout=10)
+                     capture_output=True, text=True, timeout=10, env=manager_env())
     except (OSError, subprocess.SubprocessError):
         return None
     if result.returncode != 0:
