@@ -284,4 +284,23 @@ class TimerStateEnv(_unittest.TestCase):
             os.environ.pop("XDG_RUNTIME_DIR", None)
             state = systemd.timer_state(run)
         self.assertEqual(state["ActiveState"], "active")
-        self.assertTrue(seen["XDG_RUNTIME_DIR"].startswith("/run/user/"))
+        self.assertEqual(seen["XDG_RUNTIME_DIR"], f"/run/user/{os.getuid()}")
+
+    def test_manager_env_does_not_mutate_its_argument(self):
+        given = {"PATH": "/usr/bin"}
+        with mock.patch("pathlib.Path.is_dir", return_value=True):
+            out = systemd.manager_env(given)
+        self.assertEqual(given, {"PATH": "/usr/bin"})
+        self.assertEqual(out["PATH"], "/usr/bin")
+        self.assertIn("XDG_RUNTIME_DIR", out)
+
+    def test_linger_runs_loginctl_through_manager_env(self):
+        seen = []
+
+        def run(cmd, **kw):
+            seen.append(kw.get("env"))
+            return subprocess.CompletedProcess(cmd, 0, "Linger=yes\n", "")
+
+        with mock.patch.object(systemd, "manager_env", return_value={"SENTINEL": "1"}):
+            self.assertIs(systemd.linger(run), True)
+        self.assertEqual(seen, [{"SENTINEL": "1"}])
