@@ -164,7 +164,7 @@ stays exactly where it is while (a) or (b) fail.
 ### 3.1 Drive mode and terminal states
 
 - `swarm activate --job J --goal G [--lead-brief PATH] [--workdir DIR] [--requirements PATH]...
-  [--lead-harness claude|codex] [--budget KEY=VALUE ...]` (**[A]** `--drive` is implied by `--goal`; `--no-drive
+  [--lead-harness claude|codex] [--max-cost-usd N] [--ruling-reserve-usd N] [--budget KEY=VALUE ...]` (**[A]** `--drive` is implied by `--goal`; `--no-drive
   --reason TEXT` opts out) from any shell (a person's terminal, a coordinator, a script). It writes the job,
   the owner enrolment record (existing `write_job_owner`, now with `cwd=DIR`), `drive.enabled=1`, the budget
   snapshot, and a **lead seat request** (§3.4). Then it kicks the supervisor (§3.11) and returns. Nothing else
@@ -767,11 +767,19 @@ seats only. `swarm doctor` labels Claude role limits "guardrail only" unless the
 | `max_rounds` | 8 judged rounds per artifact group | ruling |
 | `no_progress_rounds` | 3 (the one progress counter, §3.3) | ruling |
 | `max_attempts` | 3 per logical action | action fails; lead woken |
-| `max_cost_usd` | 40 (Claude `total_cost_usd` + Codex tokens × `[drive] codex_usd_per_mtok`) | ruling |
+| `max_cost_usd` | configurable; shipped default 40 (Claude `total_cost_usd` + Codex tokens × `[drive] codex_usd_per_mtok`) | ruling |
 | `max_session_minutes` | 60 per session (wall clock, runner) | session ends; seat idle |
 | `max_wall_hours` | 24 from activation | ruling |
-| `ruling_reserve` | 2 sessions, 60 min, 5 USD kept back for rulings | — |
+| `ruling_reserve` | configurable; shipped default 2 sessions, 60 min, 5 USD kept back for rulings | — |
 
+- **[D1] The spending cap is configurable** (Francesco, 2026-10-10: "spending cap is configurable"). Every value in
+  this table is a configurable default, not a fixed limit: set in `config.toml` under `[drive]` (e.g.
+  `max_cost_usd`, `ruling_reserve_usd`), overridable per job at activation (`--max-cost-usd N`,
+  `--ruling-reserve-usd N`, or `--budget KEY=VALUE` for any key; a re-activation may change them, recorded in the
+  ledger). The shipped defaults are 40 USD and 5 USD. The effective per-job values live in the ledger
+  (`led.budgets`) and are shown by `swarm status --job J` and by `swarm doctor` (one line per active drive job:
+  `drive budget J: cost 12.40/40.00 USD (reserve 5.00), sessions 9/60, wall 3.1/24 h`). A reserve larger than the
+  cap is refused at activation.
 - Each budget check happens in `next_action` from the ledger; launches that would eat into `ruling_reserve`
   are held, and a ruling becomes due. A ruling never waits on a spent budget: it draws on the reserve. If the
   reserve is gone too, mechanical UNREACHABLE.
@@ -1037,11 +1045,10 @@ Transcripts and the board export are attached to the judge's evidence.
 
 ## 8. Decisions only Francesco can make
 
-- D1 Default per-job spend ceiling `max_cost_usd` (proposed 40 USD; ruling reserve 5 USD) and whether it is
-  enforced on subscription accounts where cost is notional (proposed: yes, as a usage proxy).
-  Interim (PM, 2026-10-10): the proposed 40 USD with 5 USD reserved for the ruling is the configurable default
-  until Francesco answers. With drive mode the default for every goal job (**[A]**), small jobs simply spend
-  less; the ceiling is a cap, not an allocation.
+- D1 **Answered** (Francesco, 2026-10-10, verbatim): "spending cap is configurable". The per-job cap and the ruling
+  reserve are configuration: `[drive] max_cost_usd` / `ruling_reserve_usd` in `config.toml`, overridable per job
+  with `swarm activate --max-cost-usd N --ruling-reserve-usd N`; 40 USD and 5 USD are only the shipped,
+  configurable defaults (§4.1 [D1]). Doctor and status show the effective value per job.
 - D2 (confirmation only) The PM ruled option A (drive mode is the default for goal jobs, **[A]**) to meet "NEVER"
   literally; Francesco may override it to opt-in plus an auto-conversion net (judge's option B).
 
@@ -1183,3 +1190,8 @@ risk is carried by the implementation reviews and the tests of §6, which includ
 | RR6 | Nested-root claims race across supervisors | Host-wide lock around the overlap check (§3.4) |
 | RR7 | Read-only Codex roles cannot write SQLite/file | Codex judges/reviewers only on Postgres; doctor per role (§3.12, R12) |
 | RR8 | Codex cannot run `swarm land` privately | Land requests receipted; the driver executes landings (§3.8, R12) |
+
+### Revision 5.2 (after Francesco's D1 answer)
+
+D1 answered: the spending cap and the ruling reserve are configurable (config defaults, per-job activation
+flags), 40/5 USD only shipped defaults; effective values shown per job by status and doctor (§4.1 [D1], §8).
