@@ -1164,3 +1164,8 @@ Seats: security reviewer (opus; read-only), judge (opus).
 
 - **Task 11 [G2a]:** the owner record pins `GH_CONFIG_DIR` (or the helper's `HOME`) and the ssh-agent socket path per destination; `mirror.Mirror` passes them only in that git invocation's environment. `test_land_against_authenticated_remote` uses a real gh-style config dir: a fixture `hosts.yml` (`github.com: oauth_token: <test token>`) under a temporary `GH_CONFIG_DIR`, read by the allowlisted helper (the real `gh auth git-credential` when `gh` is installed in CI, otherwise a fixture helper that reads the token from `$GH_CONFIG_DIR/hosts.yml` and fails without it); assert the push fails when `GH_CONFIG_DIR` is not pinned and succeeds when it is. Also `test_ssh_agent_socket_pinned_and_passed_only_to_git` and `test_doctor_reports_missing_agent_socket`.
 - **Task 7/10 [G3]:** step 9 for the artifact recipe requires every non-withdrawn group judged `met` (`test_artifact_recipe_goal_judge_after_all_groups_met`); `swarm goal-ready --candidate report:<path>@<blob>` (`test_goal_ready_accepts_report_candidate`).
+
+## Main moved: supervisor opt-in (spec [M1])
+
+- Task 6: `test_drive_activation_refused_when_supervisor_disabled` (message names `swarm supervise enable` and `--no-drive --reason`); `test_supervise_disable_warns_and_halts_drive_jobs`.
+- Task 1: `test_doctor_fails_drive_job_on_host_with_supervisor_disabled`.
