@@ -92,7 +92,7 @@ Swarm is installed from its own marketplace (this repository).
   `[supervise] enabled = false` before the first session to skip it.
 - **Network.** No telemetry: Swarm sends nothing to its author. The venv setup downloads from
   PyPI. Everything else is opt-in or user-run: `swarm upgrade` (GitHub), `swarm ci` (your
-  forge), the events listener (off by default; binds 127.0.0.1:8923), Hindsight memory (your
+  CI host), the events listener (off by default; binds 127.0.0.1:8923), Hindsight memory (your
   configured URL), a Postgres board (your server), and the complexity-analyzer tool downloads
   (sha256-verified).
 - **Data.** Messages and job data stay in the backend you chose. Transcripts are off by

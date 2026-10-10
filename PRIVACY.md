@@ -13,7 +13,7 @@ Swarm has no telemetry and sends nothing to its author.
 ## Network calls
 
 Swarm's first-session setup installs its Python dependencies from PyPI. Every other call is to a
-service you configure or a command you run: `swarm upgrade` (GitHub), `swarm ci` (your forge), the
+service you configure or a command you run: `swarm upgrade` (GitHub), `swarm ci` (your CI host), the
 events listener (off by default, bound to 127.0.0.1), Hindsight memory (`[hindsight] url`), a
 Postgres board, and the complexity-analyzer tool downloads (sha256-verified). See
 [What Swarm changes on your machine](README.md#what-swarm-changes-on-your-machine).
