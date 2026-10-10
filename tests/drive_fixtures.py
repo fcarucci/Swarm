@@ -27,11 +27,11 @@ def minutes(n: float) -> dt.timedelta:
 
 def seat(name: str = "a", state: str = "idle", role: str = "engineer", **kw: Any) -> dm.SeatView:
     base = dict(
-        id=1, job="J", seat=name, role=role, title=None, harness="claude", model="sonnet",
+        id=1, job="J", seat=name, role=role, title=None, harness="claude", model="haiku",
         workdir="/home/claude/src/wt-" + name, brief_path="/home/claude/src/briefs/" + name + ".md",
         task_ref=None, complexity="standard", requested_by="lead", requested_at=T0, state=state,
         agent_key=None, session_id=None, generation=1, revision=1, launches=0, last_outcome=None,
-        wake_reason=None, updated_at=T0,
+        wake_reason=None, wake_watermark=None, updated_at=T0,
     )
     return dm.SeatView(**{**base, **kw})
 
@@ -51,14 +51,15 @@ def ho(artifact: str = "feat/a@" + "a" * 40, by: str = "a", **kw: Any) -> dm.Han
 
 def v(verdict: str = "not_met", scope: str = "artifact", **kw: Any) -> dm.VerdictView:
     base = dict(
-        verdict=verdict, scope=scope, artifact=None, generation=1, open=None, progress=None,
+        verdict=verdict, scope=scope, artifact=None, candidate=None, req=None, generation=1,
+        open=None, progress=None,
         reason="", next="", by="judge", at=T0, receipt_id=1,
     )
     return dm.VerdictView(**{**base, **kw})
 
 
 @dataclass
-class _Intent:
+class Intent:
     """Stand-in for eng-ledger's Intent (same field names)."""
     launch_id: str
     action_id: str
@@ -103,7 +104,7 @@ class L:
 
     def __post_init__(self, spent_usd: float | None) -> None:
         if spent_usd is not None:
-            self.intents.append(_Intent(
+            self.intents.append(Intent(
                 launch_id="L0", action_id="gen1|launch|a|-|1|-", attempt=1, seat="a",
                 reserved_usd=spent_usd, reserved_minutes=0.0, locks=[], state="concluded",
                 outcome="completed", success=True, charged_usd=spent_usd,
@@ -117,6 +118,14 @@ class L:
             else:
                 total += i.reserved_usd
         return total
+
+
+def intent(state: str = "concluded", reserved: float = 0.0, charged: float | None = None,
+           seat: str | None = "a", **kw: Any) -> Intent:
+    base = dict(launch_id="L0", action_id="gen1|launch|" + str(seat) + "|-|1|-", attempt=1, seat=seat,
+                reserved_usd=reserved, reserved_minutes=0.0, locks=[], state=state, outcome=None,
+                success=None, charged_usd=charged)
+    return Intent(**{**base, **kw})
 
 
 def snap(**kw: Any) -> dm.Snapshot:

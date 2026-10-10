@@ -7,7 +7,7 @@ import datetime as dt
 import unittest
 
 import support  # noqa: F401  (puts lib/ on sys.path)
-from drive_fixtures import L, T0, ho, iso, minutes, q, seat, snap, v
+from drive_fixtures import L, T0, ho, intent, iso, minutes, q, seat, snap, v
 from swarm.supervisor import driver_model as dm
 
 # Field names of eng-ledger's Ledger dataclass (lib/swarm/supervisor/ledger.py @ 60f507d).
@@ -31,8 +31,11 @@ ACTION_FIELDS = (
 SEAT_FIELDS = (
     "id", "job", "seat", "role", "title", "harness", "model", "workdir", "brief_path", "task_ref",
     "complexity", "requested_by", "requested_at", "state", "agent_key", "session_id", "generation",
-    "revision", "launches", "last_outcome", "wake_reason", "updated_at",
+    "revision", "launches", "last_outcome", "wake_reason", "wake_watermark", "updated_at",
 )
+
+# verdict fields the review.verdict_data record carries (plan line 198) must be on VerdictView
+VERDICT_DATA_KEYS = ("scope", "generation", "open", "progress", "candidate", "req")
 
 ACTION_KINDS = (
     "launch", "record_unreachable", "close", "hold", "nothing", "rollover", "stop_seat", "complete_land",
@@ -115,6 +118,44 @@ class FrozenModelTest(unittest.TestCase):
         self.assertEqual(v("met", scope="goal").scope, "goal")
         self.assertEqual(dm.VERDICTS, ("met", "not_met", "unreachable"))
 
+    def test_question_handoff_and_verdict_are_frozen(self):
+        question = q(1)
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            question.text = "changed"
+        handoff = ho()
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            handoff.by = "b"
+        verdict = v("met")
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            verdict.verdict = "not_met"
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            verdict.open = 3
+
+    def test_action_is_frozen(self):
+        a = dm.Action("launch", "id", "a", "fix")
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            a.kind = "close"
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            a.ruling = True
+        self.assertEqual(a.kind, "launch")
+
+    def test_verdict_view_carries_verdict_data_keys(self):
+        names = {f.name for f in dataclasses.fields(dm.VerdictView)}
+        self.assertLessEqual(set(VERDICT_DATA_KEYS), names)
+        self.assertEqual(v("met", candidate="feat/a@" + "c" * 40, req="R1").candidate, "feat/a@" + "c" * 40)
+        self.assertEqual(v("met", req="R1").req, "R1")
+
+    def test_seat_defaults_to_haiku_and_no_watermark(self):
+        s = seat()
+        self.assertEqual(s.model, "haiku")
+        self.assertIsNone(s.wake_watermark)
+        self.assertEqual(seat(wake_watermark=42).wake_watermark, 42)
+
+    def test_factory_defaults_generation_and_rounds(self):
+        self.assertEqual(v().generation, 1)
+        self.assertEqual(L().rounds_without_progress, 0)
+        self.assertEqual(L().generation, 1)
+
     def test_snapshot_factory_defaults_are_fresh_containers(self):
         a, b = snap(), snap()
         self.assertIsNot(a.seats, b.seats)
@@ -132,6 +173,19 @@ class FixtureTest(unittest.TestCase):
         self.assertAlmostEqual(led.charged_usd(), 35.5)
         self.assertEqual([i.state for i in led.intents], ["concluded"])
         self.assertEqual(L().charged_usd(), 0.0)
+
+    def test_charged_usd_reserves_open_intents_and_charges_concluded_ones(self):
+        # reserved and charged differ, so flipping the state test changes the total
+        open_reserve = L(intents=[intent("claimed", reserved=5.0, charged=None)])
+        self.assertAlmostEqual(open_reserve.charged_usd(), 5.0)
+        concluded = L(intents=[intent("concluded", reserved=5.0, charged=2.0)])
+        self.assertAlmostEqual(concluded.charged_usd(), 2.0)
+        # a concluded intent with no charge (no usage reported) charges nothing, not its reservation
+        no_usage = L(intents=[intent("concluded", reserved=5.0, charged=None)])
+        self.assertAlmostEqual(no_usage.charged_usd(), 0.0)
+        mixed = L(intents=[intent("concluded", reserved=5.0, charged=2.0),
+                           intent("claimed", reserved=3.0, charged=None, seat="b")])
+        self.assertAlmostEqual(mixed.charged_usd(), 5.0)
 
     def test_ledger_rejects_unknown_fields(self):
         with self.assertRaises(TypeError):
