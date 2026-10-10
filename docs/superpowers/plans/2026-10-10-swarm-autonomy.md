@@ -9,7 +9,7 @@
 
 **Tech Stack:** Python 3.11+ stdlib (as the rest of `lib/swarm`), unittest, SQLite/Postgres/file/memory board backends, systemd user units, Claude Code `claude -p`, Codex `codex exec`.
 
-**Spec:** `docs/superpowers/specs/2026-10-10-swarm-autonomy-design.md` (revision 5, commit 85afef8; design-judge fixes marked **[Fn]**, PM ruling **[A]**). Read §2.2 (guarantee and limits), §3.2–§3.3 (driver), §4.0 (threat model) and §4.5 (claim protocol) before any task.
+**Spec:** `docs/superpowers/specs/2026-10-10-swarm-autonomy-design.md` (revision 5 with the delta re-review fixes **[RRn]**; design-judge fixes marked **[Fn]**, PM ruling **[A]**). Read §2.2 (guarantee and limits), §3.2–§3.3 (driver), §4.0 (threat model) and §4.5 (claim protocol) before any task.
 
 ## Global Constraints
 
@@ -1131,3 +1131,12 @@ Seats: security reviewer (opus; read-only), judge (opus).
 
 - Spec coverage: §3.1 → T2, T6, T8; §3.2–3.3 → T7, T8; §3.4 → T3, T5, T6; §3.5 → T7, T8 (prompts), T14; §3.6–3.7 → T10; §3.8 → T11; §3.9 → T8, T9; §3.10 → T12; §3.11 → T5, T13; §3.12 → T6, T9; §3.13 → T8, T13, T14; §4.0 → T4, T5; §4.1 → T7, T9; §4.2 → T6; §4.3 → T6; §4.4 → T5, T9; §4.5 → T8; §4.6 → T5, T6; §5 → T1; §6 → T15–T17, T19; §9 → T18.
 - Names used across tasks: `claim_drive_launch`, `request_seat`, `set_seat_state`, `seat`, `seats`, `ledger.load/create/unfinished`, `Intent`, `receipts.write/find/args_sha`, `next_actions`, `Snapshot`, `Action`, `driver.enforce_deadlines/reconcile/execute/terminalize/rollover/drive`, `launch.spec_for(..., budget_usd, read_only, resume)`, `runner.unit_presence`, `runner.parse_usage`, `mirror.Mirror`, `land.land`, `hooks.kick`, `person.require`, `drive_authz.seat_request_authorized` — each defined in exactly one task's Interfaces block.
+
+## Delta re-review additions (spec [RR1]–[RR8])
+
+- Task 6: [RR1] five-step durable activation; test `test_activating_ledger_completed_by_next_pass` (crash after each step).
+- Task 8b: [RR2] `test_rejected_met_clears_terminal_intent_and_rejudges`; [RR3] `test_halted_job_question_default_not_applied`; [RR4] `test_halt_with_unknown_usage_charges_reservation`; [RR5] `test_terminalization_completes_land_journal_first` and `test_partial_land_recorded_on_timeout`.
+- Task 3: [RR6] host-wide lock in `claim_drive_launch`; `test_concurrent_nested_root_claims_one_wins` (two processes, sqlite and postgres).
+- Task 5/9: [RR7] doctor per-role Codex readiness; `test_codex_judge_overridden_to_claude_on_sqlite`.
+- Task 11: [RR8] `swarm land` records a receipted land request; the driver executes `land.land` in the pass (`Action.kind == "land"`); tests `test_land_request_executed_by_driver`, `test_codex_integrator_lands_via_request`.
+- Task 12: [RR3] generic `expire_blockers` skips drive jobs; `test_generic_sweep_skips_drive_questions`.
