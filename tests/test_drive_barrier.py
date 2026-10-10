@@ -35,6 +35,14 @@ class BarrierTests(unittest.TestCase):
     def test_unset_exits_zero(self):
         self.assertEqual(run("x", None), 0)
 
+    def test_name_is_not_matched_as_substring_of_env_value(self):
+        # env names a barrier that merely contains this one: must not fire.
+        self.assertEqual(run("x", "xy"), 0)
+        self.assertEqual(run("x", "ax"), 0)
+
+    def test_env_is_not_matched_as_substring_of_name(self):
+        self.assertEqual(run("after_xy", "after_x"), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

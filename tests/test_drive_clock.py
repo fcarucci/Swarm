@@ -1,4 +1,5 @@
 """Injectable clock: real by default, fakeable with use(), nesting restores."""
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 
@@ -27,6 +28,11 @@ class ClockTests(unittest.TestCase):
     def test_real_monotonic_does_not_go_back(self):
         a = clock.monotonic()
         self.assertGreaterEqual(clock.monotonic(), a)
+
+    def test_real_monotonic_is_the_monotonic_source(self):
+        # time.time() is epoch seconds (~1.7e9); time.monotonic() is a small boot-relative value.
+        # Comparing against time.monotonic() directly rejects a wall-clock implementation.
+        self.assertLess(abs(clock.monotonic() - time.monotonic()), 1.0)
 
     def test_use_fake_and_restore(self):
         t = datetime(2030, 1, 1, tzinfo=timezone.utc)
