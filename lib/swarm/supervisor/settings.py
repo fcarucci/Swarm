@@ -23,7 +23,8 @@ from pathlib import Path
 from swarm import paths
 
 DEFAULTS = {
-    "enabled": True,                   # kill switch; explicit false also gates closing
+    "enabled": False,                  # opt in (`swarm supervise enable`); explicit false also gates
+                                       # closing. Unset in an existing config file = on (enabled_implied)
     "orphan_minutes": 15,
     "orphan_max_restarts": 3,
     "silent_minutes": 90,              # no post and no tool call for this long -> stuck:silent
@@ -70,6 +71,17 @@ class SettingsError(ValueError):
     """[supervise] holds a value the supervisor refuses to run with (the message says which)."""
 
 
+def enabled_implied(cfg: dict) -> bool:
+    """An existing install that relied on the old on-by-default supervisor: a config file that
+    never set `[supervise] enabled` (load_config marks that). New configs are written from
+    config.example.toml, which sets `enabled = false` explicitly, so only configs from before the
+    opt-in are unset: they keep the supervisor (timer passes where systemd exists, and stuck-agent
+    closing during sweeps on every host, macOS included) with no action. No config file at all is
+    a new machine: off. `swarm supervise enable|disable` makes the choice explicit."""
+    section = (cfg or {}).get("supervise")
+    return bool((cfg or {}).get("_supervise_unset")) and not (isinstance(section, dict) and "enabled" in section)
+
+
 def settings(cfg: dict) -> dict:
     section = (cfg or {}).get("supervise")
     if section is None:
@@ -77,6 +89,8 @@ def settings(cfg: dict) -> dict:
     if not isinstance(section, dict):   # `supervise = 2` instead of a [supervise] table
         raise SettingsError(f"[supervise] must be a table of settings, not {section!r}")
     s = {**DEFAULTS, **section}
+    if "enabled" not in section and enabled_implied(cfg):
+        s["enabled"] = True
     out = dict(s)
     if not isinstance(s["enabled"], bool):   # "false" (a string) must not switch it on
         raise SettingsError(f"[supervise] enabled must be true or false, not {s['enabled']!r}")

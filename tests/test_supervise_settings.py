@@ -28,7 +28,7 @@ class SettingsTests(unittest.TestCase):
                           s["max_restarts_per_job"], s["backoff_minutes"], s["max_concurrent_replacements"],
                           s["max_turns"], s["max_minutes"], s["max_restart_minutes"],
                           s["daily_restart_minutes"], s["brief_turns"], s["timer_minutes"]),
-                         (True, 90, 3, 6, [2, 10, 30], 2, 60, 60, 180, 480, 40, 5))
+                         (False, 90, 3, 6, [2, 10, 30], 2, 60, 60, 180, 480, 40, 5))   # opt-in (B3)
 
     def test_user_values_override_and_are_typed(self):
         cfg = base_config()
@@ -84,7 +84,7 @@ class SettingsTests(unittest.TestCase):
 
     def test_enabled_needs_flag_and_no_off_file(self):
         cfg = base_config()
-        self.assertTrue(st.enabled(cfg))
+        self.assertFalse(st.enabled(cfg))   # opt-in: off until enabled
         cfg["supervise"] = {"enabled": True}
         self.assertTrue(st.enabled(cfg))
         st.off_file().parent.mkdir(parents=True, exist_ok=True)

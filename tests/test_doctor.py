@@ -39,10 +39,13 @@ class DoctorTests(unittest.TestCase):
         failing = {n: c.detail for n, c in checks.items() if c.ok is False}
         self.assertEqual(failing, {})
         self.assertIsNone(checks["orchestrator model"].ok)
+        # this config predates the opt-in (no [supervise] enabled): the supervisor stays on
         self.assertTrue(checks["supervise" if paths.IS_WINDOWS else "supervise config"].ok)
 
     @posix_only("supervisor uses Linux systemd")
     def test_clean_install_without_manager_or_harness_warns(self):
+        with open(self.cfg, "a") as fh:
+            fh.write("[supervise]\nenabled = true\n")
         bootstrap.bootstrap("claude", config=self.cfg)
         with mock.patch("swarm.supervisor.runner.scope_available", return_value=False), \
              mock.patch("swarm.bootstrap.shutil.which", return_value=None):

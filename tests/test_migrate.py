@@ -171,6 +171,7 @@ class SettingsWriterTests(unittest.TestCase):
         users = sorted(p.relative_to(ROOT / "lib").as_posix() for p in (ROOT / "lib").rglob("*.py")
                        if "claude_settings_path()" in p.read_text() or "settings.json" in p.read_text())
         # bootstrap.py: migrate, and bootstrap --host claude's sandbox.filesystem.allowWrite entry.
+        # uninstall.py: `swarm uninstall` removes that same entry again (backup first, safefile).
         # supervisor/command.py and launch.py name a *project's* .claude/settings.json (hashing for
         # `supervise approve`): allowed, as long as it never touches the user's settings.
         readers = {"swarm/supervisor/command.py", "swarm/supervisor/launch.py"}
@@ -178,7 +179,7 @@ class SettingsWriterTests(unittest.TestCase):
             self.assertNotIn("claude_settings_path", (ROOT / "lib" / r).read_text())
             self.assertNotIn("write_preserving", (ROOT / "lib" / r).read_text())
         self.assertEqual([u for u in users if u not in readers],
-                         ["swarm/bootstrap.py", "swarm/cli.py", "swarm/safefile.py"])
+                         ["swarm/bootstrap.py", "swarm/cli.py", "swarm/safefile.py", "swarm/uninstall.py"])
         cli_text = (ROOT / "lib/swarm/cli.py").read_text()
         self.assertNotIn("_write_settings", cli_text)
         callers = [chunk.split("(", 1)[0] for chunk in cli_text.split("\ndef ")[1:]

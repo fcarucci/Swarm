@@ -105,7 +105,9 @@ Swarm is installed from its own marketplace (this repository).
   directory to `sandbox.filesystem.allowWrite` in `~/.claude/settings.json`, and for Codex adds
   the spool and marker directories to `[sandbox_workspace_write] writable_roots` and sets
   `[agents] max_depth = 2` in `~/.codex/config.toml` (only with your consent: `--apply-settings`, the installer, or an
-  install from before the opt-in); it backs up each file first. On Linux it
+  install from before the opt-in); it backs up each file first.
+- **Supervisor (opt-in).** Off for new installs (`[supervise] enabled = false`); a config from
+  before the opt-in has no key and stays on. `swarm supervise enable` turns it on and, on Linux,
   installs and enables the systemd user timer `swarm-supervise.timer` (every 5 minutes). Each
   pass of this supervisor, for this OS user's jobs on this machine only:
   - restarts stuck agents of active jobs as headless `claude -p` or `codex exec` sessions;
@@ -115,8 +117,8 @@ Swarm is installed from its own marketplace (this repository).
   - reaps background commands left running after their agent or job ended.
 
   Replacements run only in work dirs under `[supervise] allowed_workdirs` (default `~/src`).
-  Switches: `[supervise] enabled = false` (set it before the first session to skip the timer)
-  turns all of this off; `[pipeline] enabled = false` turns off only the review pipeline.
+  Switches: `swarm supervise disable` (`[supervise] enabled = false`) turns all of this off;
+  `[pipeline] enabled = false` turns off only the review pipeline.
 - **Network.** No telemetry: Swarm sends nothing to its author. The venv setup downloads from
   PyPI. Everything else is opt-in or user-run: `swarm upgrade` (GitHub), `swarm ci` (your
   CI host), the events listener (off by default; binds 127.0.0.1:8923), Hindsight memory (your
@@ -127,6 +129,9 @@ Swarm is installed from its own marketplace (this repository).
 - **PATH.** The plugin's `bin/` puts `swarm` on the agent's Bash PATH.
 
 ## Uninstall
+
+`swarm uninstall` does the steps below for you (`--dry-run` lists them first; see
+Configuration essentials for what it removes and keeps). By hand:
 
 First stop running work: deactivate any active job (`swarm deactivate --job J --outcome "uninstall"`)
 and stop leftover background commands (`swarm bg reap`), so no headless replacement or
@@ -204,7 +209,9 @@ Transcripts are off by default. Set `[transcripts] enabled = true` to archive th
 redaction is best effort, and board readers can read them.
 See [transcript settings and provenance](docs/REFERENCE.md#transcript-archive-optional).
 
-On Linux, [automatic recovery](docs/REFERENCE.md#supervisor-stuck-agents-and-automatic-restarts) and the [review pipeline](docs/REFERENCE.md#review-pipeline) are on by default: hand-off → judge → fix or finalizer.
+On Linux, [automatic recovery](docs/REFERENCE.md#supervisor-stuck-agents-and-automatic-restarts) and the [review pipeline](docs/REFERENCE.md#review-pipeline) (hand-off → judge → fix or finalizer) need the supervisor, a systemd user timer. It is off until you run `swarm supervise enable`; `swarm supervise disable` turns it off again. An existing install whose config predates this change (no `[supervise] enabled` key) keeps it on, on every host; new configs say `enabled = false`.
+
+To remove what Swarm set up outside the plugin (timer, launcher, venv, settings entries), run `swarm uninstall` (`--dry-run` to see the list, `--purge` to also delete local boards and the config), then remove the plugin with the host. Removed: the supervisor's units (stopped first), the `~/.local/bin` launcher Swarm wrote, `~/.local/share/swarm` (the venv, bytecode cache, host-only files and logs, the supervisor's private dir, the complexity-analyzer `tools/`, and `legacy-skill-*` backups), and the entries Swarm added to Claude's `sandbox.filesystem.allowWrite` and Codex's `writable_roots` (each file backed up first). `--purge` also deletes `~/.local/state/swarm` (local file boards, markers, spool), the default SQLite board dir `~/.local/share/swarm-board`, and the config file when it is in `~/.config/swarm`. Kept even with `--purge`: a Postgres board (never dropped), a SQLite or file board at a non-default path, the other files in `~/.config/swarm` (`team.toml`, `webhook-secret`, `ci-github-state.json`, `*.bak*`), a config file outside `~/.config/swarm` (`--config`/`SWARM_CONFIG`), the `*.pre-swarm-*` backups uninstall itself makes of the settings files, and any cron entry you added. If stopping the timer fails (for example no user systemd bus in this shell), uninstall removes nothing and prints the commands to run. macOS: Swarm installs no launchd agent and no timer there, so `uninstall` has nothing launchd-related to remove; replacement sessions can't be launched on macOS yet.
 
 The engineering team uses `~/.config/swarm/team.toml` (or `$SWARM_TEAM_CONFIG`), separately
 from core configuration. `swarm team --job J --show` displays the effective team;
