@@ -31,6 +31,7 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 - `swarm watch` on Postgres no longer re-reads the whole view on a timer. A notification reads only the new messages and refreshes the jobs and agents; idle and dead are aged on screen from the snapshot, so a quiet board costs one cheap fingerprint statement a minute (was one ~150 KB snapshot every 10 s) and a full read happens only when the fingerprint differs, on connect, after a reconnect, or when push comes back. A watch that has fallen back to polling says so under the title. Blockers in the watch snapshot are the open ones.
 
 ### Fixed
+- `swarm doctor` no longer reports `FAIL supervise timer ?/?` from agent shells: it reads the timer through the user manager's environment (`XDG_RUNTIME_DIR`), and says "unknown (no user bus from this shell)" instead of failing when the bus is unreachable but the last pass is recent.
 - The Codex directory edition ZIP ships `requirements-postgres.txt`, which its launcher reads on first run.
 - `swarm ci wait` and `swarm ci status` no longer return a cached failure for a commit that was re-run: a failure is re-checked with the CI host (within the 60 s floor) and a newer run attempt, or a run still queued or in progress, reads as running until its result is in. A cached green stays final.
 - CI's Postgres service job pulls `postgres:16` from `public.ecr.aws/docker/library` instead of Docker Hub, which rate-limited anonymous pulls.
