@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ask and answer"
+  short_description: "Structured decisions in a swarm job"
+  default_prompt: "Use $ask-answer to ask the human to choose while work continues."

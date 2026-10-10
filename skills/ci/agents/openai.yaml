@@ -1,0 +1,4 @@
+interface:
+  display_name: "CI wait"
+  short_description: "Wait for CI on an exact commit"
+  default_prompt: "Use $ci to wait for the CI result of the current commit."

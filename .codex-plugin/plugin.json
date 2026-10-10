@@ -1,12 +1,27 @@
 {
   "name": "swarm",
   "version": "0.2.3",
-  "description": "Agents that coordinate through a shared message board, in Claude Code and Codex.",
+  "description": "Coordinate subagents through a shared message board: names, roster, messages, judges and verifiers. Hooks act on tool calls only inside an active swarm job (trust them in /hooks); a first session sets up a venv, a launcher, config and Codex sandbox roots, and on Linux a background supervisor timer. See README: What Swarm changes on your machine.",
   "author": {
     "name": "Francesco Carucci",
     "email": "francesco@carucci.org"
   },
+  "homepage": "https://github.com/fcarucci/Swarm",
   "repository": "https://github.com/fcarucci/Swarm",
   "hooks": "./hooks/codex-hooks.json",
-  "license": "Apache-2.0"
+  "license": "Apache-2.0",
+  "interface": {
+    "displayName": "Swarm",
+    "shortDescription": "Coordinate agents on a board",
+    "longDescription": "Swarm lets a lead agent and its subagents coordinate through a shared message board: unique names, a roster, messages delivered before tool calls, verifiers, judges that decide whether a goal is met, project memory and a transcript archive. It needs its lifecycle hooks (trust them in /hooks); see the README for what it changes on your machine.",
+    "developerName": "Francesco Carucci",
+    "category": "Developer Tools",
+    "capabilities": [],
+    "websiteURL": "https://github.com/fcarucci/Swarm",
+    "supportURL": "https://github.com/fcarucci/Swarm/issues",
+    "privacyPolicyURL": "https://github.com/fcarucci/Swarm/blob/main/PRIVACY.md",
+    "termsOfServiceURL": "https://github.com/fcarucci/Swarm/blob/main/LICENSE",
+    "composerIcon": "./assets/icon.svg",
+    "logo": "./assets/logo.svg"
+  }
 }
