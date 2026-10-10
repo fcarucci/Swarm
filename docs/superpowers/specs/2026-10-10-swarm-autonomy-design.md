@@ -253,6 +253,13 @@ rejection, and from then on `enforce_deadlines` applies normally (a ruling becom
 **[G10]** The generated lead brief under `<workdir>/.swarm/` is added to the checkout's `.git/info/exclude` at
 activation (and `.swarm/` with it), so writer seats never commit it.
 
+**[M1] Supervisor opt-in (main 9cdecba, B3).** New configs have `[supervise] enabled = false` and no timer. A goal
+job cannot be driven on such a host, so activation of a drive job refuses when the owner host's supervisor is
+disabled (or switched off), naming the fix: `swarm supervise enable`, or `--no-drive --reason TEXT`. Doctor FAILs
+for an active drive job whose owner host has the supervisor disabled. Disabling the supervisor while drive jobs
+are active (`swarm supervise disable`) warns and lists them; it is treated as a global halt of those jobs ([F5]
+semantics: deadlines shift), not as tamper. Owned by plan Task 6 (activation) and Task 1 (doctor).
+
 ### 3.2 The job driver
 
 New module `lib/swarm/supervisor/driver.py`, called from `_pass` **first**: `enforce_deadlines` for every drive
