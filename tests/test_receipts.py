@@ -85,6 +85,17 @@ class ReceiptTests(ReceiptCase):
                             receipts.content_sha("done", dict(DONE, artifact="b@" + "c" * 40)))
         self.assertRegex(receipts.content_sha("done", DONE), r"[0-9a-f]{64}")
 
+    def test_content_sha_ignores_key_order_of_nested_dicts(self):
+        # the land destinations are a nested dict: insertion order must not change the digest
+        inner_a = {"state": "pushed", "sha": "a" * 40}
+        inner_b = {"sha": "a" * 40, "state": "pushed"}
+        d1 = {"destinations": {"https://x.test/a": inner_a, "https://x.test/b": inner_a}}
+        d2 = {"destinations": {"https://x.test/b": inner_b, "https://x.test/a": inner_b}}
+        self.assertEqual(receipts.content_sha("land", d1), receipts.content_sha("land", d2))
+        changed = {"destinations": {"https://x.test/a": dict(inner_a, state="verified"),
+                                    "https://x.test/b": inner_a}}
+        self.assertNotEqual(receipts.content_sha("land", d1), receipts.content_sha("land", changed))
+
     def test_content_sha_refuses_unknown_kinds_and_missing_decision_fields(self):
         with self.assertRaises(ValueError):
             receipts.content_sha("bogus", DONE)
@@ -108,6 +119,17 @@ class BindingTests(ReceiptCase):
         self.assertFalse(receipts.matches(r, self.row(artifact="b@" + "e" * 40)))
         self.assertFalse(receipts.matches(r, self.row(sha="e" * 40)))
         self.assertFalse(receipts.matches(r, self.row(group="other")))
+
+    def test_a_verdict_row_with_a_changed_candidate_or_req_does_not_match(self):
+        # the verdict's decision fields include candidate and req (receipts.DECISION)
+        verdict = {"verdict": "met", "scope": "goal", "generation": 1,
+                   "candidate": "b@" + "a" * 40, "req": "R1"}
+        r = self.receipt(kind="verdict", record_id="9", content_sha=receipts.content_sha("verdict", verdict))
+        row = dict(verdict, kind="verdict", id="9", rev=1)
+        self.assertTrue(receipts.matches(r, row))
+        self.assertFalse(receipts.matches(r, dict(row, candidate="b@" + "c" * 40)))
+        self.assertFalse(receipts.matches(r, dict(row, req="R2")))
+        self.assertFalse(receipts.matches(r, dict(row, req=None)))
 
     def test_a_row_with_another_kind_or_id_does_not_match(self):
         r = self.receipt()
@@ -163,6 +185,11 @@ class ScopeTests(ReceiptCase):
         for bad in (math.nan, math.inf, "soon", True):
             with self.subTest(expires_at=bad), self.assertRaises(ValueError):
                 receipts.write(BOARD, self.receipt(expires_at=bad))
+
+    def test_write_refuses_a_board_key_other_than_the_receipts_and_writes_nothing(self):
+        with self.assertRaises(ValueError):
+            receipts.write("other", self.receipt())
+        self.assertFalse(self.enrolled().exists() and any(self.enrolled().glob("receipt-*")))
 
     def test_board_key_with_nul_is_refused(self):
         with self.assertRaises(ValueError):
