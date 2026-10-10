@@ -1,7 +1,7 @@
 # Swarm autonomy: a goal job runs to MET or UNREACHABLE with zero coordinator turns
 
 Status: design, revision 2 (EL, job swarm-autonomy, 2026-10-10). Base: github/main 2f194bb.
-Revision 2 resolves Codex review round 1 (23 findings), revision 3 round 2 (23 findings); see §10.
+Revisions 2, 3 and 4 resolve Codex review rounds 1 (23 findings), 2 (23) and 3 (9); see §10.
 
 ## 0. The requirement
 
@@ -128,6 +128,15 @@ stays exactly where it is while (a) or (b) fail.
   `OnBootSec=2min`; all state is on the board and resumes idempotently). Moving a job to another host is a
   person's action (`swarm job move`, existing); automatic cross-host failover is out of scope (ruling R11).
 - *Board down.* Nothing progresses; the pass notes the outage (existing `outage.py`) and resumes.
+- *systemd user manager down on the owner host.* Session containment cannot be confirmed; launches stop and
+  terminalization waits at its fencing step (it first tries a bus-free check, §3.9). This is treated like the
+  host being down.
+- *Database-level attackers.* A writer with the board's database role can deny service (close or delete rows,
+  flood the tables). The design guarantees integrity against them (no launch, settlement or terminal outcome on
+  their word, §4.0) but not availability; the driver detects and reports such tampering (§3.2).
+- *External target pushes.* A push to the target branch by something outside this job between the goal judge's
+  verdict and the close makes the `met` stale; the goal judge reruns (§3.7). Very busy target branches can
+  therefore exhaust the budget and end in UNREACHABLE.
 - *Budgets.* "Guaranteed to complete" means guaranteed to reach a *ruling*: when budgets run out the outcome
   may be UNREACHABLE ("budget exhausted before the goal was met", with the judge's assessment), not MET.
 - *Judgment quality.* MET and UNREACHABLE are a model judge's rulings; the design guarantees one is recorded with
@@ -196,8 +205,14 @@ too (`runner.reap` stops after 20 s and resumes where it left off next pass). Th
 `pipeline.run` already returns `managed`). It reuses the pipeline's transition logic, the launch/runner/marker
 machinery, `record_restart` as the atomic launch ledger, and the stuck sweep.
 
-For each active job with `drive.enabled` whose owner record is on this host+user (`find_job_owner` or
-`find_job`):
+The driver enumerates **unfinished private ledgers** (§4.0), not the board's active jobs, so a board row
+changed by an untrusted writer cannot make a job silently drop out. For each unfinished ledger whose owner
+record is on this host+user (`find_job_owner` or `find_job`): if the board row disagrees with the ledger
+(closed, goal changed, drive flag cleared, supervise off) without a trusted record (a person-path command on
+this host writes a private receipt for `deactivate`, `activate`, halt and unhalt), the driver posts
+`DRIVER-TAMPER <what>` once, rewrites the board row from the ledger where the backend allows (reopen, restore
+goal and flags), and otherwise treats the job as halted until a person acts (§2.2, database-level attackers).
+Then:
 
 ```
 snap = Snapshot.read(board, job)          # one consistent read: job, seats, restarts, verdicts,
@@ -229,8 +244,14 @@ ledger and the job row (no recipes, plugins, hand-off parsing or git): if `rulin
 it records the mechanical UNREACHABLE and starts terminalization. So a job whose snapshot or recipe keeps
 failing still terminates.
 
-**Failure isolation.** Each job is driven inside its own try/except with a per-job deadline (15 s of the 95 s
-pass budget); jobs are visited in least-recently-driven order (job data `drive.last_pass`), so one slow or
+**No model calls outside the ledger.** `events_safety` model triage (`[events] triage`) is never run for drive
+jobs: every model session of a drive job is a seat attempt with a reservation.
+
+**Failure isolation.** Each job is driven inside its own try/except with a per-job deadline (30 s of the 95 s
+pass budget; every blocking operation — git in the mirrors, systemctl, board queries — gets a timeout of
+`min(its own cap, the time left for the job and the pass)`, and an operation cut short persists its
+continuation in the ledger, e.g. `mirror_fetch_pending`, and resumes next pass; tested with slow git and
+systemctl stubs across several jobs); jobs are visited in least-recently-driven order (job data `drive.last_pass`), so one slow or
 broken job cannot starve the others. A job whose driver step raises on `driver_error_passes` (6) consecutive
 passes gets `DRIVER-ERROR <class>` posted once and a ruling made due; if the ruling cannot be launched either,
 §2.2's deadline produces the mechanical UNREACHABLE naming the error.
@@ -330,9 +351,11 @@ board through its hooks (enrol deadline kills it otherwise): **every agent joins
 **Hand-backs are board events.** A seat's work product is `swarm done --artifact REF` (pipeline),
 `swarm seat release` by the lead, questions, and verdicts. Nothing returns to a parent session.
 
-**Exclusive writer checkouts.** A writer seat (engineer, integrator, fix worker) claims its workdir realpath as
-a `drive_locks` key `wt:<sha256(realpath)>` inside `claim_drive_launch`; two live writer seats never share a
-checkout. The lead's briefs give each writer its own git worktree (under `~/src` or `~/work`, never /tmp).
+**Exclusive writer checkouts.** A writer seat (engineer, integrator, fix worker) claims the **worktree root**
+of its workdir (found by walking up from the realpath to the first directory holding a `.git` file or directory,
+without running git) as a `drive_locks` key `wt:<sha256(root)>` inside `claim_drive_launch`, and the claim is
+refused if any live writer's root is an ancestor or descendant of it; two live writer seats never share a
+checkout or index. Tested with nested workdirs. The lead's briefs give each writer its own git worktree (under `~/src` or `~/work`, never /tmp).
 Read-only seats (judge, reviewer, QA when it only runs tests) may share.
 
 **Ownership transfer.** If a fix round's owner seat is `released`, `failed` or `cancelled`, the driver creates
@@ -352,7 +375,10 @@ worktree of the artifact branch) and transfers `drive.owner` to it, keeping the 
   wake. **Watermarks, not timestamps**: each lead turn is launched with the board's current message id and event
   id as its watermark (in the prompt and on the seat row, `wake_watermark`). Wake events are board rows with ids;
   those with id > the watermark of the last *acknowledged* turn are pending, so events arriving while the lead
-  runs are never lost. A turn acknowledges its watermark by ending normally (runner outcome `completed`); a
+  runs are never lost. **Only trusted wake sources count**: driver-derived events (seat state changes, verdict
+  and integration receipts, attempt outcomes, expiries applied by the driver) and agent records with receipts
+  (§4.0: addressed posts, questions and answers made by enrolled seats of this job, person-path answers). An
+  unreceipted board message is shown to the lead when it runs but never triggers a launch. A turn acknowledges its watermark by ending normally (runner outcome `completed`); a
   crashed turn does not, and its events stay pending. Wakes are coalesced: one resume carries all pending ids.
 - A lost lead (stuck, crashed, exited without a turn summary) is relaunched by §3.9 with the lead brief + board
   history; the lead's turns are bounded by the job budgets and the progress counter.
@@ -402,9 +428,13 @@ ref>@<sha>` (normally the target branch after landing), every current hand-off i
 live, the driver launches the goal judge (Opus) on the target SHA with the goal, the requirements files the
 lead names, and the evidence (CI on that exact SHA, QA reports). The verdict must carry
 `--candidate <target>@<sha> --req <requirements revision>` (the requirements file's git blob id, named by the
-lead in `GOAL-READY`). At close, in the same transaction, the driver checks the candidate equals the latest
-integration receipt's landed SHA for that target and the requirement revision is unchanged; a stale `met` (the
-target moved or requirements changed) is rejected and the goal judge runs again. Outcomes: `met` → completed;
+lead in `GOAL-READY`). Immediately before the close transaction the driver fetches every destination into its
+private mirrors and requires each destination's target **head to equal** the candidate SHA, and the requirement
+revision to be unchanged; inside the transaction it checks the ledger state it verified is unchanged. A stale
+`met` (a target moved or requirements changed) is rejected and the goal judge runs again; a rerun caused by an
+external target move is not a round without progress, but it does consume budget (§2.2, external target
+pushes). There is no cross-system transaction with the git host, so a push landing between the fetch and the
+close is not detected; that window is seconds and is stated as a limit. Outcomes: `met` → completed;
 `not_met --open N --next` → lead wake with the next steps (a **goal round**, counted like §3.6);
 `unreachable` → failed. The lead may also post `UNREACHABLE-PROPOSED <reason file>` to request an early ruling
 (the judge decides; the lead never records a verdict). In drive mode `complete_finalized` no longer closes the
@@ -437,7 +467,7 @@ Unchanged in substance from the coding recipe, now always run by the driver:
   whose remote URLs are pinned in the owner record at activation (`--remote NAME=URL`, defaulting to the
   activation workdir's remotes read once by the person's activation command), with `GIT_CONFIG_NOSYSTEM=1`,
   `GIT_CONFIG_GLOBAL=/dev/null`, `core.hooksPath=/dev/null`, `protocol.allow=never` except `https`/`ssh`/`file`,
-  the minimal environment, and a 60 s timeout per command. A partial push
+  the minimal environment, and a timeout per command of at most 60 s and never more than the time left (§3.2). A partial push
   (some remotes advanced) is journalled per remote by the integrator (`swarm seat note`), and the next
   integrator attempt reconciles the missing remotes first.
 - **Landings are serialized by a lease.** New table `drive_locks(key PRIMARY KEY, holder, generation,
@@ -445,8 +475,9 @@ Unchanged in substance from the coding recipe, now always run by the driver:
   **every** pinned destination (all remotes and push URLs), claimed all-or-nothing in sorted order inside
   `claim_drive_launch`. The runner renews them while the session lives. Expiry alone never transfers ownership:
   a lease is reclaimable only when it has expired **and** its holder's attempt row is ended with the scope
-  confirmed absent (or the holder is another host's, whose expiry plus a 30 min margin has passed). Two
-  supervisors cannot land on overlapping destinations at once.
+  confirmed absent. A lease held by another host cannot be positively fenced from here, so it is never
+  reclaimed: the integrator action holds, and if it stays held the ruling deadline ends the job UNREACHABLE
+  with the cause named. Two supervisors therefore never land on overlapping destinations at once.
 
 ### 3.9 Stall recovery
 
@@ -458,8 +489,10 @@ Unchanged in substance from the coding recipe, now always run by the driver:
   `runner._unit_state` returns `("", "")` when systemctl itself fails and `_unit_exists` reads that as absent;
   the driver uses a new tri-state `unit_presence() -> present | absent | unknown` and relaunches only on
   `absent` (systemctl answered "not loaded"). On `present` it stops the scope (`runner._stop_session`) and waits
-  for a later pass; on `unknown` it holds (posted once) — the job's progress is then bounded by the wall clock
-  and ruling deadline like any other hold.
+  for a later pass; on `unknown` it falls back to a bus-free positive check: the scope's cgroup directory under
+  `/sys/fs/cgroup/user.slice/user-<uid>.slice/user@<uid>.service/` is absent, or its `cgroup.procs` is empty
+  (then it is `absent`). If that is unreadable too it holds (posted once): see §2.2, systemd user manager down.
+  Tested with a prolonged user-bus failure.
 - **Exited without a hand-off**: a seat whose session ended `completed` with no `swarm done`, release, or open
   question since its launch is an unsuccessful attempt of its action (§3.2): retried with "you
   ended without a hand-off: finish, or ask with a default"; after `max_attempts` → seat `failed` + lead wake.
@@ -549,7 +582,11 @@ structured command replacing the `REVIEW ...` post), verdict, `GOAL-READY`, `INT
 count for the driver only with a **receipt**: the unsandboxed PostToolUse hook, seeing the command succeed in a
 session whose enrolment record maps to the seat attempt the driver launched for that action, writes a
 host-private receipt (`receipt-<sha256>.json`: job, generation, action id, attempt, seat, record kind, record
-id, sha256 of the exact submitted arguments). Records without a matching receipt are displayed but ignored.
+id, sha256 of the exact submitted arguments). The same applies to every agent-originated record that can cause
+a launch or a blocking transition: posts addressed to a seat or role, `swarm ask`, `swarm answer`, and blocker
+resolutions. A person-path command on the owner host writes its own receipt. Records without a matching
+receipt are displayed but ignored for decisions; question expiry is applied by the driver from the receipted
+question's `until`, not from a board event.
 Non-drive jobs keep today's behavior.
 
 ### 4.1 Budgets (per job, `[drive]` defaults, overridable at activation within host maxima)
@@ -626,6 +663,9 @@ integration receipt, §3.8) instead of trusting the integrator's post.
 ### 4.5 Idempotence and crash recovery (the one authoritative protocol)
 
 1. **Decide** from the snapshot: an action id (generation-bound, §3.2) and the next attempt number.
+1a. **Write-ahead intent**: append `{launch_id, action_id, attempt, seat, reserved_usd, reserved_minutes,
+   locks, state: "claiming"}` to the private ledger and fsync it. Budgets and attempt history are computed from
+   the ledger's intents (authoritative); the board's reservations exist for cross-host caps and display.
 2. **Claim**: `claim_drive_launch` in one transaction (seat revision CAS, generation check, budget
    reservation, host caps, `drive_locks` for workdir/land destinations, insert of the restart row with
    `UNIQUE(job, action_id, attempt)`, `launch_id` = random UUID, `launch_host`, `launch_user`). Lost race →
@@ -637,7 +677,11 @@ integration receipt, §3.8) instead of trusting the integrator's post.
    `max_attempts`.
 
 **Reconciliation** at the start of every pass, before any new decision, bounded to 20 s and rotated across
-jobs: every open restart row of this host+user is matched to a run file and lock. A row with a held lock is
+jobs. Ledger ↔ board: an intent `claiming` with a board row carrying its `launch_id` becomes `claimed`; an
+intent without a board row after `LAUNCH_GRACE` is concluded `failed` (nothing was launched) and its
+reservation released; a board row whose `launch_id` matches no intent is foreign or forged and is ignored for
+this job's decisions (and reported). Then every open restart row of this host+user with an intent is matched
+to a run file and lock. A row with a held lock is
 live. A row whose run file exists but whose lock is free is reaped by the existing `runner.reap`. **A row with
 no run file** (crash between steps 2 and 3/4) older than `LAUNCH_GRACE` (90 s) is finished `failed`
 (`outcome_detail = "claimed, never started"`), its reservation and locks released, its marker removed if
@@ -771,6 +815,9 @@ Transcripts and the board export are attached to the judge's evidence.
 - R21 Landing only through `swarm land` (trusted checks, fast-forward only), verified in private mirrors with
   pinned remotes; leases cover every destination and never transfer on expiry alone.
 - R22 A ruling quiesces live work first, and a ruling MET passes the same closing gate as a goal MET.
+- R24 The driver iterates its private ledgers, repairs or halts on unauthorized board changes, and never
+  depends on the board's job status to keep driving.
+- R25 Only receipted or driver-derived events wake seats; foreign-host leases are never reclaimed.
 - R23 Judges and reviewers run read-only (Codex read-only sandbox; Claude edit tools disallowed, Bash sandbox
   where available).
 
@@ -852,3 +899,20 @@ Transcripts and the board export are attached to the judge's evidence.
 | 21 | Clocks and crash simulation | One injectable clock; SIGKILL barriers in child passes (§6.2) |
 | 22 | Compat triggers incomplete; unverified SQLite/file claim | Ledger makes old writes noise; triggers on all tables; tested against 0.2.3 (§9) |
 | 23 | `max_seat_launches` overlaps | Removed (§3.4) |
+
+### Round 3 (Codex, 2026-10-10, final round): CHANGES, 9 findings, all accepted
+
+| # | Finding (short) | Resolution |
+|---|-----------------|------------|
+| 1 | Unknown systemd state blocks terminalization forever | Bus-free cgroupfs check; user-manager-down stated as a limit (§2.2, §3.9) |
+| 2 | Board closure by a DB writer drops the job | Driver iterates private ledgers; DRIVER-TAMPER repair/halt; availability limit stated (§2.2, §3.2, R24) |
+| 3 | Unreceipted messages/questions/answers cause wakes | Receipts for every wake-causing record; driver-applied expiry (§3.5, §4.0, R25) |
+| 4 | Ledger vs board claim durability | Write-ahead intent keyed by launch_id; two-sided reconciliation (§4.5) |
+| 5 | Foreign lease reclaimed by timeout | Never reclaimed; hold → ruling deadline (§3.8) |
+| 6 | Nested workdirs share a checkout | Worktree-root locks, overlap refused (§3.4) |
+| 7 | Stale MET after target advance | Fresh head equality via mirrors before close; window stated (§3.7, §2.2) |
+| 8 | events triage launches `claude -p` outside the ledger | Disabled for drive jobs (§3.2) |
+| 9 | Operation timeouts exceed per-job deadline | Timeouts capped by remaining time; persisted continuations (§3.2, §3.8) |
+
+The review cap (3 rounds) is reached. All findings of all rounds are resolved in this revision; the remaining
+risk is carried by the implementation reviews and the tests of §6, which include every case these rounds raised.
