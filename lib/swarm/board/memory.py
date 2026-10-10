@@ -27,7 +27,7 @@ import random
 import threading
 from typing import Mapping, Sequence
 
-from .base import (check_verdict_details, details_if_bound, VerdictDetails, check_job_data, merged_job_data, parse_job_data, LEFT_PAUSED, MOVED_PREFIX, PauseRecord, build_manifest, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, assignable_name, restart_over_limits, STUCK_PREFIX, AUTO_CLOSE_BLOCKING, CloseGuard, goal_is_unmet, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, Restart,
+from .base import (check_verdict_args, check_verdict_details, details_if_bound, VerdictDetails, check_job_data, merged_job_data, parse_job_data, LEFT_PAUSED, MOVED_PREFIX, PauseRecord, build_manifest, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, assignable_name, restart_over_limits, STUCK_PREFIX, AUTO_CLOSE_BLOCKING, CloseGuard, goal_is_unmet, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, Restart,
                    ROUTE_STATES, TOOL_NAME_MAX, AgentEvent, AgentStatus, Board, BoardError, BoardUnavailable, JobStatus, Member, Message,
                    OwedReply, ReadResult, Route, SCHEMA_VERSION, SetupResult, SpawnGrant, SyncState, TRANSCRIPT_ROLES,
                    TranscriptImage, TranscriptRow, TranscriptSummary, VERDICTS,
@@ -155,7 +155,8 @@ def reset_store(name: str = "default") -> MemoryStore:
 
 # Verdict fields of a job, cleared when it is (re-)opened.
 _NO_VERDICT = {"verdict": None, "verdict_reason": None, "verdict_next": None, "verdict_by": None, "verdict_at": None,
-               "verdict_details": None}
+               "verdict_details": None, "verdict_scope": None, "verdict_generation": None,
+               "verdict_candidate": None, "verdict_req": None}
 
 # ---- purge steps (store lock held; each returns whether it changed anything) -----------
 
@@ -608,21 +609,27 @@ class MemoryBoard(MemoryBlockers, MemoryEvents, MemoryBgCommands, Board):
 
     def record_verdict(self, job: str, judge_name: str, verdict: str, reason: str,
                        next_steps: str | None = None, artifact: str | None = None,
-                       details: str | None = None) -> bool:
+                       details: str | None = None, *, scope: str = "artifact", generation: int | None = None,
+                       open_count: int | None = None, progress: bool | None = None,
+                       candidate: str | None = None, req: str | None = None) -> bool:
         check_name(judge_name, "judge name")
         if verdict not in VERDICTS:
             raise BoardError(f"unknown verdict {verdict!r}")
         details = check_verdict_details(details)
+        from swarm.review import drive_job, verdict_data
         s = self._s()
         with s.lock:
             judge, j = self._active_judge(job), s.jobs.get(job)
             if j is None or judge is None or judge["name"] != judge_name:
                 return False
-            from swarm.review import verdict_data
+            check_verdict_args(verdict, scope, details, open_count, drive_job(j.get('plugin_data')))
             at = self.now()
             j.update(verdict=verdict, verdict_reason=reason, verdict_next=next_steps, verdict_by=judge_name, verdict_at=at,
                      verdict_details=details, verdict_details_at=at if details else None,
-                     plugin_data=verdict_data(j.get('plugin_data'), artifact, verdict, reason, next_steps, judge_name, at))
+                     verdict_scope=scope, verdict_generation=generation, verdict_candidate=candidate, verdict_req=req,
+                     plugin_data=verdict_data(j.get('plugin_data'), artifact, verdict, reason, next_steps, judge_name, at,
+                                              scope=scope, generation=generation, open_count=open_count,
+                                              progress=progress, candidate=candidate, req=req))
             s.touch()
             return True
 
@@ -1235,7 +1242,9 @@ class MemoryBoard(MemoryBlockers, MemoryEvents, MemoryBgCommands, Board):
             waiting_on=j.get("waiting_on"), waiting_since=j.get("waiting_since"),
             closed_by=j.get("closed_by"), supervise=j.get("supervise", True),
             verdict_next=j.get("verdict_next"), max_hours=j.get("max_hours"),
-            waiting_until=j.get("waiting_until"), **pipeline_status(j.get("plugin_data")))
+            waiting_until=j.get("waiting_until"), verdict_scope=j.get("verdict_scope"),
+            verdict_generation=j.get("verdict_generation"), verdict_candidate=j.get("verdict_candidate"),
+            verdict_req=j.get("verdict_req"), **pipeline_status(j.get("plugin_data")))
 
         return rollup(js, self.blockers(j["job"]), now)
 

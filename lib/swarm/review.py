@@ -89,18 +89,29 @@ def latest_handoffs(board, job: str, messages=None) -> list[Handoff]:
     return sorted(found.values(), key=lambda item: item.id)
 
 
+def drive_job(raw: str | None) -> bool:
+    """Whether a job's job-data marks it a drive job (`drive.enabled`, copied from the ledger)."""
+    return parse_job_data(raw).get('drive.enabled') == '1'
+
+
 def verdict_data(raw: str | None, artifact: str | None, verdict: str, reason: str,
-                 next_steps: str | None, judge: str, at: dt.datetime) -> str:
+                 next_steps: str | None, judge: str, at: dt.datetime, *, scope: str = 'artifact',
+                 generation: int | None = None, open_count: int | None = None, progress: bool | None = None,
+                 candidate: str | None = None, req: str | None = None) -> str:
     """New job-data JSON, written atomically with the legacy latest-verdict columns.
 
-    Chunking preserves long --next briefs within the ordinary job-data value bound.
+    Chunking preserves long --next briefs within the ordinary job-data value bound. The record of
+    an artifact verdict keeps its scope, drive generation, open count (acceptance criteria still
+    unmet), progress flag, candidate and requirements digest, for the drive pipeline to read.
     """
     data = parse_job_data(raw)
     data['pipeline.verdict_artifact'] = artifact or ''
     if artifact is not None:
         key = 'pipeline.verdict.' + hashlib.sha256(artifact.encode()).hexdigest()[:32]
         record = json.dumps(dict(artifact=artifact, verdict=verdict, reason=reason,
-                            next_steps=next_steps, judge=judge, at=at.isoformat()), ensure_ascii=False)
+                            next_steps=next_steps, judge=judge, at=at.isoformat(), scope=scope,
+                            generation=generation, open=open_count, progress=progress,
+                            candidate=candidate, req=req), ensure_ascii=False)
         chunks = [record[i:i + JOB_DATA_VALUE_MAX] for i in range(0, len(record), JOB_DATA_VALUE_MAX)]
         # Remove obsolete tail chunks when a shorter verdict replaces a longer one.
         data = {k: v for k, v in data.items() if not k.startswith(key + '.')}

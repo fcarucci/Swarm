@@ -25,7 +25,7 @@ import time
 import uuid
 from pathlib import Path
 from swarm import compat, roles
-from swarm.board.base import VERDICT_DETAILS_MAX
+from swarm.board.base import VERDICT_DETAILS_MAX, VERDICTS
 
 STUCK_AFTER = 24 * 3600  # seconds a memory may keep failing before it is parked as .stuck
 RECORD_MAX = 256 * 1024  # a spooled record larger than this is not read (it goes to .bad)
@@ -308,8 +308,10 @@ def _load(d: int, claimed: str, name: str) -> tuple | None:
                 raise ValueError("next is not text")
             if rec[5] is not None and (not isinstance(rec[5], str) or not rec[5].strip()):
                 raise ValueError("artifact is not a nonempty reference")
-            if rec[2] not in ("met", "not_met"):
+            if rec[2] not in VERDICTS:
                 raise ValueError("unknown verdict")
+            if rec[2] == "unreachable" and not rec[6]:   # the board refuses it without its report
+                raise ValueError("an unreachable verdict needs its details")
             return rec
         is_memory = suffix == ".mem"
         rec = m["job"], m["name"], m["text" if is_memory else "message"], m.get("project" if is_memory else "to")
@@ -452,7 +454,9 @@ def retry_stuck(cfg: dict) -> int:
 
 def deliver_verdict(board, job: str, name: str, verdict: str, reason: str,
                     next_steps: str | None = None, artifact: str | None = None,
-                    details: str | None = None) -> bool:
+                    details: str | None = None, *, scope: str = "artifact", generation: int | None = None,
+                    open_count: int | None = None, progress: bool | None = None,
+                    candidate: str | None = None, req: str | None = None) -> bool:
     """Record a judge's verdict and post it on the job's board; False (nothing recorded or
     posted) if `name` is not the job's active judge. Shared by `swarm verdict` and the spool."""
     if artifact is None:
@@ -463,7 +467,9 @@ def deliver_verdict(board, job: str, name: str, verdict: str, reason: str,
         handoffs = latest_handoffs(board, job)
         if artifact is None and handoffs:
             artifact = handoffs[-1].artifact
-    if not board.record_verdict(job, name, verdict, reason, next_steps, artifact, details):
+    if not board.record_verdict(job, name, verdict, reason, next_steps, artifact, details, scope=scope,
+                                generation=generation, open_count=open_count, progress=progress,
+                                candidate=candidate, req=req):
         return False
     board.post(job, name, f"VERDICT {verdict}: {reason}")
     if details and details.strip():   # the report itself is not posted (the board caps a message)
@@ -477,8 +483,12 @@ def _deliver_spooled_verdict(board, rec: tuple) -> bool:
     """A spooled verdict from someone who isn't the judge is refused; the sender is told on the
     board (it can't see the CLI's answer: the CLI only queued it)."""
     job, name, verdict, reason, next_steps, artifact, details = rec
-    if deliver_verdict(board, job, name, verdict, reason, next_steps, artifact, details):
-        return True
+    try:
+        if deliver_verdict(board, job, name, verdict, reason, next_steps, artifact, details):
+            return True
+    except ValueError as exc:   # the board's rules (e.g. a drive job's not_met without its open count)
+        board.post(job, "swarm", f"verdict refused: {exc}", to=name)
+        return False
     board.post(job, "swarm", f"verdict refused: {name} is not the judge of job {job}", to=name)
     return False
 

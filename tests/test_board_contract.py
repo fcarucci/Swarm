@@ -2200,21 +2200,126 @@ class BoardContract:
         self.assertEqual(self.b.memory_refs(), [])
 
 
-class MemoryBoardContract(BoardContract, unittest.TestCase):
+class DriveVerdicts:
+    """Schema 25 typed verdicts: `unreachable`, the scope, generation, candidate and req a verdict
+    carries, and the open count a drive job's not_met must give. A mixin: each backend's contract
+    class runs these on its own store."""
+
+    def judged_goal(self, job="J", goal="G"):
+        self.b.open_job(job, None, None, None, "me", goal=goal)
+        self.b.allocate_name("jk", job)
+        self.assertTrue(self.b.claim_judge("jk", job))
+        return self.b.active_agent_name("jk")
+
+    def test_unreachable_requires_details(self):
+        judge = self.judged_goal()
+        with self.assertRaises(ValueError):
+            self.b.record_verdict("J", judge, "unreachable", "cannot", scope="goal", generation=1)
+        with self.assertRaises(ValueError):
+            self.b.record_verdict("J", judge, "unreachable", "cannot", details=" \n ", scope="goal", generation=1)
+        self.assertIsNone(self.b.job_status("J").verdict)   # refused: nothing stored
+        self.assertTrue(self.b.record_verdict("J", judge, "unreachable", "cannot", details="# why\n...",
+                                              scope="goal", generation=1))
+        js = self.b.job_status("J")
+        self.assertEqual((js.verdict, js.verdict_scope, js.verdict_generation), ("unreachable", "goal", 1))
+        self.assertEqual(self.b.verdict_details("J").details, "# why\n...")
+
+    def test_scope_generation_candidate_and_req_are_stored(self):
+        judge = self.judged_goal()
+        sha = "a" * 40
+        self.assertTrue(self.b.record_verdict("J", judge, "met", "ok", artifact=f"feat/x@{sha}", scope="artifact",
+                                              generation=2, candidate=sha, req="sha256:abc"))
+        js = self.b.job_status("J")
+        self.assertEqual((js.verdict, js.verdict_scope, js.verdict_generation, js.verdict_candidate, js.verdict_req),
+                         ("met", "artifact", 2, sha, "sha256:abc"))
+        self.assertTrue(self.b.record_verdict("J", judge, "not_met", "again", "fix it"))
+        js = self.b.job_status("J")
+        self.assertEqual((js.verdict_scope, js.verdict_generation, js.verdict_candidate, js.verdict_req),
+                         ("artifact", None, None, None))
+
+    def test_unreachable_judges_the_goal_or_a_ruling_not_one_artifact(self):
+        judge = self.judged_goal()
+        with self.assertRaises(ValueError):
+            self.b.record_verdict("J", judge, "unreachable", "cannot", details="report", scope="artifact")
+        self.assertIsNone(self.b.job_status("J").verdict)
+        self.assertTrue(self.b.record_verdict("J", judge, "unreachable", "cannot", details="report", scope="ruling",
+                                              generation=2))
+        self.assertEqual(self.b.job_status("J").verdict_scope, "ruling")
+
+    def test_unknown_scope_is_refused(self):
+        judge = self.judged_goal()
+        with self.assertRaises(ValueError):
+            self.b.record_verdict("J", judge, "met", "ok", scope="whole-job")
+        self.assertIsNone(self.b.job_status("J").verdict)
+
+    def test_unreachable_settles_a_goal_and_not_met_does_not(self):
+        from swarm.board.base import goal_is_unmet
+        self.assertFalse(goal_is_unmet("g", "unreachable"))
+        self.assertFalse(goal_is_unmet("g", "met"))
+        self.assertTrue(goal_is_unmet("g", "not_met"))
+        self.assertTrue(goal_is_unmet("g", None))
+        self.assertFalse(goal_is_unmet(None, None))
+
+    def test_drive_job_not_met_must_say_how_many_criteria_are_open(self):
+        judge = self.judged_goal()
+        self.assertTrue(self.b.set_job_data("J", "drive.enabled", "1"))
+        with self.assertRaises(ValueError):
+            self.b.record_verdict("J", judge, "not_met", "why", "next", scope="goal", generation=1)
+        with self.assertRaises(ValueError):
+            self.b.record_verdict("J", judge, "not_met", "why", "next", scope="goal", generation=1, open_count=-1)
+        self.assertIsNone(self.b.job_status("J").verdict)
+        self.assertTrue(self.b.record_verdict("J", judge, "not_met", "why", "next", scope="goal", generation=1,
+                                              open_count=3))
+        self.assertEqual(self.b.job_status("J").verdict, "not_met")
+        self.assertTrue(self.b.record_verdict("J", judge, "met", "done", scope="goal", generation=1))
+
+    def test_artifact_verdict_record_keeps_scope_generation_and_progress(self):
+        from swarm.review import artifact_verdicts
+        judge = self.judged_goal()
+        self.assertTrue(self.b.set_job_data("J", "drive.enabled", "1"))
+        ref = "feat/x@" + "b" * 40
+        self.assertTrue(self.b.record_verdict("J", judge, "not_met", "why", "next", artifact=ref, scope="artifact",
+                                              generation=3, open_count=2, progress=True, candidate="b" * 40,
+                                              req="sha256:r"))
+        rec = artifact_verdicts(self.b, "J")[ref]
+        self.assertEqual((rec["scope"], rec["generation"], rec["open"], rec["progress"], rec["candidate"], rec["req"]),
+                         ("artifact", 3, 2, True, "b" * 40, "sha256:r"))
+
+    def test_a_new_goal_clears_the_typed_verdict(self):
+        judge = self.judged_goal()
+        self.assertTrue(self.b.record_verdict("J", judge, "met", "ok", scope="goal", generation=1,
+                                              candidate="c" * 40, req="sha256:r"))
+        self.assertTrue(self.b.set_job_goal("J", "a new goal"))
+        js = self.b.job_status("J")
+        self.assertEqual((js.goal, js.verdict, js.verdict_scope, js.verdict_generation, js.verdict_candidate,
+                          js.verdict_req), ("a new goal", None, None, None, None, None))
+
+    def test_reopening_clears_the_typed_verdict(self):
+        judge = self.judged_goal()
+        self.assertTrue(self.b.record_verdict("J", judge, "unreachable", "no", details="report", scope="goal",
+                                              generation=1, candidate="c" * 40, req="sha256:r"))
+        self.assertTrue(self.b.close_job("J", "failed", "unreachable: no"))
+        self.b.open_job("J", None, None, None, "me")
+        js = self.b.job_status("J")
+        self.assertEqual((js.verdict, js.verdict_scope, js.verdict_generation, js.verdict_candidate, js.verdict_req),
+                         (None, None, None, None, None))
+
+
+class MemoryBoardContract(BoardContract, DriveVerdicts, unittest.TestCase):
     harness_factory = MemoryHarness
 
 
-class SqliteBoardContract(BoardContract, unittest.TestCase):
+class SqliteBoardContract(BoardContract, DriveVerdicts, unittest.TestCase):
     harness_factory = SqliteHarness
 
 
-class FileBoardContract(BoardContract, unittest.TestCase):
+class FileBoardContract(BoardContract, DriveVerdicts, unittest.TestCase):
     harness_factory = FileHarness
 
 
 @unittest.skipUnless(os.environ.get("SWARM_TEST_CONFIG"),
                      "set SWARM_TEST_CONFIG to a throwaway Postgres board config to run")
-class PostgresBoardContract(BoardContract, unittest.TestCase):
+class PostgresBoardContract(BoardContract, DriveVerdicts, unittest.TestCase):
     harness_factory = staticmethod(lambda: PostgresHarness(os.environ["SWARM_TEST_CONFIG"]))
 
 
@@ -2356,8 +2461,11 @@ class PostgresSpecificTests(unittest.TestCase):
         conn.execute(old_views.format(idle=5, dead=30, tool_timeout=60))
         conn.execute("UPDATE board_meta SET value = %s WHERE key = 'schema_version'", (str(version),))
         self.b.set_job_data("j", "engineering-team.optional", "build_engineer")
+        # the old views predate the typed verdict columns (schema 25): compare without them too
+        typed = {"verdict_scope", "verdict_generation", "verdict_candidate", "verdict_req"}
         legacy_job_cols = ", ".join(c.strip() for c in _JOB_STATUS_COLS.split(",")
-                                    if version == 18 or c.strip() not in {"open_blockers", "protected_blockers"})
+                                    if c.strip() not in typed
+                                    and (version == 18 or c.strip() not in {"open_blockers", "protected_blockers"}))
         # the old views predate agent_status.title (schema 20): compare without that column
         legacy_agent_cols = ", ".join(c.strip() for c in _AGENT_STATUS_COLS.split(",") if c.strip() != "title")
         queries = (f"SELECT {legacy_agent_cols} FROM agent_status ORDER BY job, agent_key",
@@ -2365,7 +2473,7 @@ class PostgresSpecificTests(unittest.TestCase):
         before = [conn.execute(q).fetchall() for q in queries]
         columns = conn.execute("SELECT table_name, column_name, data_type FROM information_schema.columns "
                                "WHERE table_name IN ('agent_status', 'job_status') "
-                               "AND column_name NOT IN ('blockers', 'open_blockers', 'protected_blockers', 'title') "
+                               "AND column_name NOT IN ('blockers', 'open_blockers', 'protected_blockers', 'title', 'verdict_scope', 'verdict_generation', 'verdict_candidate', 'verdict_req') "
                                "ORDER BY table_name, ordinal_position").fetchall()
         for _ in range(2):  # migration and idempotent re-init
             type(self.b).setup(self.h.cfg, SMALL_POOL)
@@ -2376,7 +2484,7 @@ class PostgresSpecificTests(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT table_name, column_name, data_type "
                                           "FROM information_schema.columns "
                                           "WHERE table_name IN ('agent_status', 'job_status') "
-                                          "AND column_name NOT IN ('blockers', 'open_blockers', 'protected_blockers', 'title') "
+                                          "AND column_name NOT IN ('blockers', 'open_blockers', 'protected_blockers', 'title', 'verdict_scope', 'verdict_generation', 'verdict_candidate', 'verdict_req') "
                                           "ORDER BY table_name, ordinal_position").fetchall(), columns)
 
     def test_ids_become_visible_in_order(self):

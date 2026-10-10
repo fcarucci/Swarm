@@ -65,7 +65,7 @@ import time
 from pathlib import Path
 from typing import Iterator, Mapping, Sequence
 
-from .base import (check_verdict_details, details_if_bound, VerdictDetails, check_job_data, merged_job_data, parse_job_data, LEFT_PAUSED, MOVED_PREFIX, PauseRecord, build_manifest, NAME_MAX, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, assignable_name, restart_over_limits, STUCK_PREFIX, AUTO_CLOSE_BLOCKING, CloseGuard, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, Restart,
+from .base import (check_verdict_args, check_verdict_details, details_if_bound, VerdictDetails, check_job_data, merged_job_data, parse_job_data, LEFT_PAUSED, MOVED_PREFIX, PauseRecord, build_manifest, NAME_MAX, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, assignable_name, restart_over_limits, STUCK_PREFIX, AUTO_CLOSE_BLOCKING, CloseGuard, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, Restart,
                    ROUTE_STATES, TOOL_NAME_MAX, AgentEvent, AgentStatus, Board, BoardError, BoardUnavailable, JobStatus, Member, Message, ReadOnlyBoard, refuse_writes,
                    OwedReply, ReadResult, Route, RosterEntry, SCHEMA_VERSION, SetupResult, SpawnGrant, SyncState,
                    TRANSCRIPT_ROLES, TranscriptImage, TranscriptRow, TranscriptSummary, VERDICTS,
@@ -98,7 +98,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     finished_at       TEXT,
     project           TEXT,
     goal              TEXT,
-    verdict           TEXT CHECK (verdict IN ('met', 'not_met')),
+    verdict           TEXT CHECK (verdict IN ('met', 'not_met', 'unreachable')),
     verdict_reason    TEXT,
     verdict_next      TEXT,
     verdict_details   TEXT,
@@ -344,6 +344,10 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("agents", "message_count", "INTEGER NOT NULL DEFAULT 0"),   # schema 22: see COUNT_TRIGGERS
     ("jobs", "verdict_details_at", "TEXT"),   # schema 23: the verdict_at the report belongs to
     ("jobs", "verdict_details", "TEXT"),   # schema 23: the judge's full Markdown report
+    ("jobs", "verdict_scope", "TEXT"),        # schema 25: the latest verdict's scope (VERDICT_SCOPES)
+    ("jobs", "verdict_generation", "INTEGER"),   # schema 25: the drive generation it was given in
+    ("jobs", "verdict_candidate", "TEXT"),    # schema 25: the candidate it judged
+    ("jobs", "verdict_req", "TEXT"),          # schema 25: the requirements digest it judged
 )
 
 # Schema 22: agents.message_count = the messages the agent posted to its job since it joined (what
@@ -494,6 +498,43 @@ def _drop_message_check(conn: sqlite3.Connection) -> int | None:
     return old
 
 
+def _allow_unreachable(conn: sqlite3.Connection) -> None:
+    """Schema 25: jobs.verdict accepts `unreachable`. SQLite can't alter a CHECK, so an older jobs
+    table is rebuilt the way _allow_paused does it (foreign keys OFF, one transaction: new table with
+    the widened CHECK, copy, drop, rename, triggers again). Only when the stored CREATE statement
+    lacks 'unreachable'. Must run outside a transaction."""
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'jobs'").fetchone()
+    if row is None or "'unreachable'" in row[0]:
+        return
+    old = "CHECK (verdict IN ('met', 'not_met'))"
+    if old not in row[0]:
+        raise BoardUnavailable("board database: the jobs table has an unexpected verdict check; "
+                               "cannot add the 'unreachable' verdict")
+    new_sql = re.sub(r'CREATE TABLE "?jobs"?', "CREATE TABLE jobs_new", row[0], count=1).replace(
+        old, "CHECK (verdict IN ('met', 'not_met', 'unreachable'))", 1)
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute("DROP TABLE IF EXISTS jobs_new")
+            conn.execute(new_sql)
+            cols = ", ".join(r[1] for r in conn.execute("PRAGMA table_info(jobs)"))
+            conn.execute(f"INSERT INTO jobs_new ({cols}) SELECT {cols} FROM jobs")
+            conn.execute("DROP TABLE jobs")
+            conn.execute("ALTER TABLE jobs_new RENAME TO jobs")
+            for name, op in (("inserted", "INSERT"), ("updated", "UPDATE"), ("deleted", "DELETE")):
+                conn.execute(f"CREATE TRIGGER IF NOT EXISTS jobs_{name} AFTER {op} ON jobs BEGIN "
+                             f"UPDATE board_changes SET n = n + 1 WHERE kind = 'state'; END")
+            if conn.execute("PRAGMA foreign_key_check").fetchall():
+                raise BoardUnavailable("board database: foreign key violations after rebuilding jobs")
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+
+
 def _allow_paused(conn: sqlite3.Connection) -> None:
     """Schema 12: jobs.status may be 'paused'. SQLite can't alter a CHECK, so an older jobs table is
     rebuilt by the documented procedure: foreign keys OFF (dropping the table with them on would
@@ -611,6 +652,7 @@ class SqliteBoard(SqlBlockers, SqlEvents, SqlBgCommands, Board):
             conn.execute("INSERT OR IGNORE INTO board_meta (key, value) VALUES ('message_max_chars', ?)",
                          (str(old_cap or seed),))
             _allow_paused(conn)
+            _allow_unreachable(conn)
             conn.execute("BEGIN IMMEDIATE")
             try:
                 for table, column, decl in MIGRATIONS:
@@ -759,6 +801,7 @@ class SqliteBoard(SqlBlockers, SqlEvents, SqlBgCommands, Board):
             "session_id = COALESCE(excluded.session_id, jobs.session_id), "
             "project = COALESCE(excluded.project, jobs.project), goal = COALESCE(excluded.goal, jobs.goal), "
             "verdict = NULL, verdict_reason = NULL, verdict_next = NULL, verdict_by = NULL, verdict_at = NULL, verdict_details = NULL, "
+            "verdict_scope = NULL, verdict_generation = NULL, verdict_candidate = NULL, verdict_req = NULL, "
             "completion_forced = 0, spawns = 0, waiting_on = NULL, waiting_since = NULL, "
             "waiting_until = NULL, max_hours = NULL, closed_by = NULL",
             (job, description, task, session_id, created_by, project, goal, now, now))
@@ -921,7 +964,9 @@ class SqliteBoard(SqlBlockers, SqlEvents, SqlBgCommands, Board):
             if row[0] != goal:
                 from swarm.review import clear_verdict_data
                 c.execute("UPDATE jobs SET goal = ?, verdict = NULL, verdict_reason = NULL, "
-                          "verdict_next = NULL, verdict_by = NULL, verdict_at = NULL, verdict_details = NULL, plugin_data = ? WHERE job = ?",
+                          "verdict_next = NULL, verdict_by = NULL, verdict_at = NULL, verdict_details = NULL, "
+                          "verdict_scope = NULL, verdict_generation = NULL, verdict_candidate = NULL, verdict_req = NULL, "
+                          "plugin_data = ? WHERE job = ?",
                           (goal, clear_verdict_data(row[1]), job))
             return True
 
@@ -955,23 +1000,30 @@ class SqliteBoard(SqlBlockers, SqlEvents, SqlBgCommands, Board):
 
     def record_verdict(self, job: str, judge_name: str, verdict: str, reason: str,
                        next_steps: str | None = None, artifact: str | None = None,
-                       details: str | None = None) -> bool:
+                       details: str | None = None, *, scope: str = "artifact", generation: int | None = None,
+                       open_count: int | None = None, progress: bool | None = None,
+                       candidate: str | None = None, req: str | None = None) -> bool:
         check_name(judge_name, "judge name")
         if verdict not in VERDICTS:
             raise BoardError(f"unknown verdict {verdict!r}")
         details = check_verdict_details(details)
-        from swarm.review import verdict_data
+        from swarm.review import drive_job, verdict_data
         with self._tx() as c:
             row = c.execute("SELECT plugin_data FROM jobs WHERE job = ? AND EXISTS "
                 "(SELECT 1 FROM agents WHERE job = ? AND name = ? AND judge AND left_at IS NULL)",
                 (job, job, judge_name)).fetchone()
             if row is None:
                 return False
+            check_verdict_args(verdict, scope, details, open_count, drive_job(row[0]))
             at = self.now()
             c.execute("UPDATE jobs SET verdict = ?, verdict_reason = ?, verdict_next = ?, verdict_by = ?, "
-                "verdict_at = ?, verdict_details = ?, verdict_details_at = ?, plugin_data = ? WHERE job = ?",
+                "verdict_at = ?, verdict_details = ?, verdict_details_at = ?, verdict_scope = ?, "
+                "verdict_generation = ?, verdict_candidate = ?, verdict_req = ?, plugin_data = ? WHERE job = ?",
                 (verdict, reason, next_steps, judge_name, at.isoformat(), details, at.isoformat() if details else None,
-                 verdict_data(row[0], artifact, verdict, reason, next_steps, judge_name, at), job))
+                 scope, generation, candidate, req,
+                 verdict_data(row[0], artifact, verdict, reason, next_steps, judge_name, at, scope=scope,
+                              generation=generation, open_count=open_count, progress=progress,
+                              candidate=candidate, req=req), job))
             return True
 
     def verdict_details(self, job: str, artifact: str | None = None) -> VerdictDetails | None:
@@ -1481,12 +1533,14 @@ class SqliteBoard(SqlBlockers, SqlEvents, SqlBgCommands, Board):
                  "(SELECT count(*) FROM messages m WHERE m.job = jobs.job), "
                  "(SELECT max(created_at) FROM messages m WHERE m.job = jobs.job AND NOT (m.agent_name = 'swarm' AND m.message LIKE 'Blocker % expired:%')), "
                  "(SELECT a.name FROM agents a WHERE a.job = jobs.job AND a.judge AND a.left_at IS NULL), "
-                 "verdict_next, max_hours, waiting_until, plugin_data")
+                 "verdict_next, max_hours, waiting_until, plugin_data, verdict_scope, verdict_generation, "
+                 "verdict_candidate, verdict_req")
 
     def _job_status(self, c: sqlite3.Connection, r, now: _dt.datetime) -> JobStatus:
         (job, status, desc, task, outcome, by, session, created, activated, finished, project, goal,
          verdict, reason, verdict_by, verdict_at, forced, waiting_on, waiting_since, closed_by,
-         supervise, n_messages, last_message, judge, verdict_next, max_hours, waiting_until, plugin_data) = r
+         supervise, n_messages, last_message, judge, verdict_next, max_hours, waiting_until, plugin_data,
+         verdict_scope, verdict_generation, verdict_candidate, verdict_req) = r
         sts = self._agent_statuses(c, job, now, with_messages=False)
         stamps = [a.last_contact_at for a in sts] + ([_dt_(last_message)] if last_message else [])
         count = lambda *st: sum(1 for a in sts if a.status in st)  # noqa: E731
@@ -1502,6 +1556,8 @@ class SqliteBoard(SqlBlockers, SqlEvents, SqlBgCommands, Board):
             completion_forced=bool(forced), judge=judge, waiting_on=waiting_on,
             waiting_since=_dt_(waiting_since), closed_by=closed_by, supervise=bool(supervise),
             verdict_next=verdict_next, max_hours=max_hours, waiting_until=_dt_(waiting_until),
+            verdict_scope=verdict_scope, verdict_generation=verdict_generation, verdict_candidate=verdict_candidate,
+            verdict_req=verdict_req,
             **pipeline_status(plugin_data))
 
         return rollup(js, self.blockers(job), now)

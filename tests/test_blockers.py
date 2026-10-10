@@ -506,11 +506,23 @@ class MigrationContract:
                        if self.h.name == "sqlite" else nullcontext())
         # The snapshot reads through current queries, which select agents.title (schema 20): give
         # the old fixture just that nullable column, as the migration would, nothing else.
+        # schema 25 adds the typed-verdict columns the same way (the old fixture has none of them)
+        typed = (("verdict_scope", "TEXT"), ("verdict_generation", "INTEGER"),
+                 ("verdict_candidate", "TEXT"), ("verdict_req", "TEXT"))
         if self.h.name == "sqlite":
             self.h._db().execute("ALTER TABLE agents ADD COLUMN title TEXT")
+            for column, decl in typed:
+                self.h._db().execute(f"ALTER TABLE jobs ADD COLUMN {column} {decl}")
             self.h._db().commit()
         elif self.h.name == "postgres":
             self.h.conn.execute("ALTER TABLE agents ADD COLUMN IF NOT EXISTS title text")
+            self.h.conn.execute("ALTER TABLE agents ADD COLUMN IF NOT EXISTS message_count integer NOT NULL DEFAULT 0")
+            for column, decl in typed:
+                self.h.conn.execute(f"ALTER TABLE jobs ADD COLUMN IF NOT EXISTS {column} {decl.lower()}")
+            from swarm.board.postgres import STATUS_VIEW
+            board = self.h.cfg["board"]   # the view is formatted as setup formats it
+            self.h.conn.execute(STATUS_VIEW.format(idle=int(board["idle_minutes"]), dead=int(board["dead_minutes"]),
+                                                   tool_timeout=int(board["tool_timeout_minutes"])))
         with old_version, self.h.board() as b:
             before = (b.blockers("j"), b.blocker_events(1), b.job_status("j"),
                       b.recent_messages(10, "j"))
@@ -538,6 +550,13 @@ class MigrationContract:
             blocker = b.open_blocker("j", "review", "@EL", "new blocker")
             self.assertGreater(blocker.id, 1)
             self.assertEqual([event.event for event in b.blocker_events(blocker.id)], ["opened"])
+            # schema 25: the verdict CHECK now accepts `unreachable`; rows from before keep a NULL scope
+            self.assertIsNone(b.job_status("j").verdict_scope)
+            judge = b.allocate_name("judge25", "j")
+            self.assertTrue(b.claim_judge("judge25", "j"))
+            self.assertTrue(b.record_verdict("j", judge, "unreachable", "cannot", details="# why",
+                                             scope="goal", generation=1))
+            self.assertEqual((b.job_status("j").verdict, b.job_status("j").verdict_scope), ("unreachable", "goal"))
 
     @classmethod
     def setUpClass(cls):

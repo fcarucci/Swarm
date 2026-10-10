@@ -27,7 +27,7 @@ from typing import Mapping, Sequence
 import psycopg
 from psycopg import sql
 
-from .base import (check_verdict_details, details_if_bound, VerdictDetails, check_job_data, merged_job_data, parse_job_data, LEFT_PAUSED, PauseRecord, build_manifest, database_hosts, MOVED_PREFIX, NAME_PATTERN, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, CloseGuard, CapExceeded, configured_message_cap, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, ROUTE_STATES, TOOL_NAME_MAX,
+from .base import (check_verdict_args, check_verdict_details, details_if_bound, VerdictDetails, check_job_data, merged_job_data, parse_job_data, LEFT_PAUSED, PauseRecord, build_manifest, database_hosts, MOVED_PREFIX, NAME_PATTERN, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, CloseGuard, CapExceeded, configured_message_cap, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, ROUTE_STATES, TOOL_NAME_MAX,
                    AgentEvent, Restart,
                    AgentStatus, Board, BoardError, BoardUnavailable, IncompatibleStorage, JobStatus,
                    Member, Message, OwedReply, ReadResult, Route, RosterEntry, SCHEMA_VERSION, SetupResult,
@@ -175,9 +175,14 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS verdict_details_at timestamptz;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS verdict_by text;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS verdict_at timestamptz;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS completion_forced boolean NOT NULL DEFAULT false;
-DO $$ BEGIN
-    ALTER TABLE jobs ADD CONSTRAINT jobs_verdict_check CHECK (verdict IN ('met', 'not_met'));
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+-- Schema version 25: typed verdicts. The CHECK accepts `unreachable`; the latest verdict's scope,
+-- drive generation, candidate and requirements digest (NULL for older and non-drive verdicts).
+ALTER TABLE jobs DROP CONSTRAINT IF EXISTS jobs_verdict_check;
+ALTER TABLE jobs ADD CONSTRAINT jobs_verdict_check CHECK (verdict IN ('met', 'not_met', 'unreachable'));
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS verdict_scope text;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS verdict_generation integer;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS verdict_candidate text;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS verdict_req text;
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS judge boolean NOT NULL DEFAULT false;
 CREATE UNIQUE INDEX IF NOT EXISTS agents_one_judge ON agents (job) WHERE judge AND left_at IS NULL;
 -- Subagents spawned by swarm agents (the hook enforces the [spawn] caps): per agent and per job.
@@ -414,7 +419,7 @@ SELECT j.job, j.status, j.description, j.task, j.outcome, j.created_by, j.sessio
        j.project, j.goal, j.verdict, j.verdict_reason, j.verdict_by, j.verdict_at, j.completion_forced,
        (SELECT a.name FROM agents a WHERE a.job = j.job AND a.judge AND a.left_at IS NULL) AS judge,
        j.waiting_on, j.waiting_since, j.closed_by, j.supervise, j.verdict_next,
-       j.max_hours, j.waiting_until,
+       j.max_hours, j.waiting_until, j.verdict_scope, j.verdict_generation, j.verdict_candidate, j.verdict_req,
        COALESCE((SELECT json_agg(row_to_json(b) ORDER BY b.id) FROM blockers b
                  WHERE b.job=j.job AND b.state='open'), '[]'::json) AS blockers,
        (SELECT count(*) FROM blockers b WHERE b.job=j.job AND b.state='open') AS open_blockers,
@@ -429,7 +434,7 @@ SELECT j.job, j.status, j.description, j.task, j.outcome, j.created_by, j.sessio
             WHEN COALESCE(j.waiting_on, '') <> '' THEN 'waiting'
             WHEN COALESCE(s.started, 0) + COALESCE(s.running, 0) > 0 THEN 'active'
             WHEN COALESCE(j.goal, '') <> '' AND j.verdict IS DISTINCT FROM 'met'
-                 AND COALESCE(s.idle, 0) = 0 THEN 'waiting (goal not met)'
+                 AND j.verdict IS DISTINCT FROM 'unreachable' AND COALESCE(s.idle, 0) = 0 THEN 'waiting (goal not met)'
             WHEN COALESCE(greatest(s.last_contact_at,
                                    m.last_post_at),
                           j.activated_at, j.created_at) > now() - make_interval(mins => {idle}) THEN 'active'
@@ -477,7 +482,8 @@ _JOB_STATUS_COLS = ("job, status, description, task, outcome, created_by, sessio
                     "activated_at, finished_at, agents, started, running, idle, completed, "
                     "dead_or_left, messages, last_activity_at, project, goal, verdict, verdict_reason, "
                     "verdict_by, verdict_at, completion_forced, judge, waiting_on, waiting_since, closed_by, "
-                    "supervise, verdict_next, max_hours, waiting_until, open_blockers, protected_blockers")
+                    "supervise, verdict_next, max_hours, waiting_until, open_blockers, protected_blockers, "
+                    "verdict_scope, verdict_generation, verdict_candidate, verdict_req")
 _MESSAGE_COLS = "id, created_at, job, agent_name, to_agent, message"
 _MESSAGE_COLS_M = ", ".join("m." + c.strip() for c in _MESSAGE_COLS.split(","))
 _RESTART_COLS = ("id, job, agent_key, attempt, at, reason, old_agent_key, new_agent_key, harness, host, "
@@ -1151,6 +1157,7 @@ class PostgresBoard(SqlBlockers, SqlEvents, SqlBgCommands, Board):
             "task = COALESCE(EXCLUDED.task, jobs.task), session_id = COALESCE(EXCLUDED.session_id, jobs.session_id), "
             "project = COALESCE(EXCLUDED.project, jobs.project), goal = COALESCE(EXCLUDED.goal, jobs.goal), "
             "verdict = NULL, verdict_reason = NULL, verdict_next = NULL, verdict_by = NULL, verdict_at = NULL, verdict_details = NULL, "
+            "verdict_scope = NULL, verdict_generation = NULL, verdict_candidate = NULL, verdict_req = NULL, "
             "completion_forced = false, spawns = 0, waiting_on = NULL, waiting_since = NULL, "
             "waiting_until = NULL, max_hours = NULL, closed_by = NULL",
             (job, description, task, session_id, created_by, project, goal))
@@ -1342,7 +1349,9 @@ class PostgresBoard(SqlBlockers, SqlEvents, SqlBgCommands, Board):
                 return False
             if row[0] != goal:
                 self._conn.execute("UPDATE jobs SET goal = %s, verdict = NULL, verdict_reason = NULL, "
-                    "verdict_next = NULL, verdict_by = NULL, verdict_at = NULL, verdict_details = NULL, plugin_data = %s WHERE job = %s",
+                    "verdict_next = NULL, verdict_by = NULL, verdict_at = NULL, verdict_details = NULL, "
+                    "verdict_scope = NULL, verdict_generation = NULL, verdict_candidate = NULL, verdict_req = NULL, "
+                    "plugin_data = %s WHERE job = %s",
                     (goal, clear_verdict_data(row[1]), job))
             return True
 
@@ -1377,23 +1386,30 @@ class PostgresBoard(SqlBlockers, SqlEvents, SqlBgCommands, Board):
 
     def record_verdict(self, job: str, judge_name: str, verdict: str, reason: str,
                        next_steps: str | None = None, artifact: str | None = None,
-                       details: str | None = None) -> bool:
+                       details: str | None = None, *, scope: str = "artifact", generation: int | None = None,
+                       open_count: int | None = None, progress: bool | None = None,
+                       candidate: str | None = None, req: str | None = None) -> bool:
         check_name(judge_name, "judge name")
         if verdict not in VERDICTS:
             raise BoardError(f"unknown verdict {verdict!r}")
         details = check_verdict_details(details)
-        from swarm.review import verdict_data
+        from swarm.review import drive_job, verdict_data
         with self._conn.transaction():
             row = self._conn.execute("SELECT plugin_data FROM jobs WHERE job = %s AND EXISTS "
                 "(SELECT 1 FROM agents WHERE job = %s AND name = %s AND judge AND left_at IS NULL) "
                 "FOR UPDATE", (job, job, judge_name)).fetchone()
             if row is None:
                 return False
+            check_verdict_args(verdict, scope, details, open_count, drive_job(row[0]))
             at = self.now()
             self._conn.execute("UPDATE jobs SET verdict = %s, verdict_reason = %s, verdict_next = %s, "
-                "verdict_by = %s, verdict_at = %s, verdict_details = %s, verdict_details_at = %s, plugin_data = %s WHERE job = %s",
-                (verdict, reason, next_steps, judge_name, at, details, at if details else None,
-                 verdict_data(row[0], artifact, verdict, reason, next_steps, judge_name, at), job))
+                "verdict_by = %s, verdict_at = %s, verdict_details = %s, verdict_details_at = %s, verdict_scope = %s, "
+                "verdict_generation = %s, verdict_candidate = %s, verdict_req = %s, plugin_data = %s WHERE job = %s",
+                (verdict, reason, next_steps, judge_name, at, details, at if details else None, scope, generation,
+                 candidate, req,
+                 verdict_data(row[0], artifact, verdict, reason, next_steps, judge_name, at, scope=scope,
+                              generation=generation, open_count=open_count, progress=progress,
+                              candidate=candidate, req=req), job))
             return True
 
     def verdict_details(self, job: str, artifact: str | None = None) -> VerdictDetails | None:
