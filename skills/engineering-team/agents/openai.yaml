@@ -1,0 +1,4 @@
+interface:
+  display_name: "Engineering team"
+  short_description: "Lead, engineers, QA and a judge"
+  default_prompt: "Use $engineering-team to staff and run this software task."

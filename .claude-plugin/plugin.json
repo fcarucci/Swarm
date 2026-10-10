@@ -1,11 +1,22 @@
 {
   "name": "swarm",
+  "displayName": "Swarm",
   "version": "0.2.3",
-  "description": "Agents that coordinate through a shared message board, in Claude Code and Codex: names, roster, messages before every tool call, verifiers, judges, project memory, transcript archive.",
+  "description": "Agents that coordinate through a shared message board, in Claude Code and Codex: names, roster, messages before every tool call, verifiers, judges, project memory. Tool-call hooks act only inside an active swarm job; the first session sets up a venv, a launcher and config, and on Linux a background supervisor timer. See README: What Swarm changes on your machine.",
   "author": {
     "name": "Francesco Carucci",
     "email": "francesco@carucci.org"
   },
+  "homepage": "https://github.com/fcarucci/Swarm",
   "repository": "https://github.com/fcarucci/Swarm",
-  "license": "Apache-2.0"
+  "license": "Apache-2.0",
+  "keywords": [
+    "multi-agent",
+    "orchestration",
+    "subagents",
+    "message-board",
+    "judge",
+    "verification",
+    "ci"
+  ]
 }

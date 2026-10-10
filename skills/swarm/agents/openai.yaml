@@ -1,0 +1,4 @@
+interface:
+  display_name: "Swarm"
+  short_description: "Coordinate agents on a shared board"
+  default_prompt: "Use $swarm to run this task with a swarm of agents."

@@ -1,6 +1,23 @@
 {
   "name": "swarm",
-  "description": "The swarm plugin (this repository is its own marketplace)",
-  "owner": {"name": "Francesco Carucci"},
-  "plugins": [{"name": "swarm", "source": "./", "description": "Agents that coordinate through a shared message board"}]
+  "description": "Marketplace for the Swarm plugin",
+  "owner": {
+    "name": "Francesco Carucci"
+  },
+  "plugins": [
+    {
+      "name": "swarm",
+      "source": "./",
+      "description": "Agents that coordinate through a shared message board, in Claude Code and Codex: names, roster, messages before every tool call, verifiers, judges, project memory. Tool-call hooks act only inside an active swarm job; the first session sets up a venv, a launcher and config, and on Linux a background supervisor timer. See README: What Swarm changes on your machine.",
+      "author": {
+        "name": "Francesco Carucci"
+      },
+      "homepage": "https://github.com/fcarucci/Swarm",
+      "category": "development",
+      "tags": [
+        "multi-agent",
+        "orchestration"
+      ]
+    }
+  ]
 }
