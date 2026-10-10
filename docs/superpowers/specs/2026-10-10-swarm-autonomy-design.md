@@ -727,7 +727,7 @@ with a token read by an allowlisted helper that honours `GH_CONFIG_DIR`), never 
 breaking change for goal jobs; release notes and §9).
 
 **[RR3] Drive questions expire only through the driver.** The generic `expire_blockers` sweep skips blockers of
-drive jobs; the driver applies the default when the ledger's effective deadline (`until` + `halted_total`) has
+drive jobs; the driver applies the default when the ledger's effective deadline (`until` + `halted_total_seconds`) has
 passed, and never while the job is halted. So a halt cannot let a default be applied behind a person's back.
 
 ### 3.11 Triggering: timer, hook kicks, NOTIFY
@@ -915,7 +915,7 @@ the driver refuses a workdir that is or lies under /tmp or any tmpfs mount (new 
 - Attempts concluded by a halt are `halted`: not counted against `max_attempts`, `ruling_attempts` or budgets
   other than the cost actually used.
 - `enforce_deadlines` skips halted jobs, and every deadline (`max_wall_hours`, `ruling_due_at + deadline`, question
-  `until`) is shifted by the halted duration on unhalt (`led.halted_total`). This replaces the earlier
+  `until`) is shifted by the halted duration on unhalt (`led.halted_total_seconds`). This replaces the earlier
   "ruling on unhalt" rule.
 - Who: `swarm halt` is refused only for enrolled **seat** sessions (no tty needed: a person, a script, or the
   job's requester session may halt); `unhalt` and re-activation are person path (tty) or the requester
