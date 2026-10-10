@@ -33,10 +33,10 @@ else
   export PYTHONDONTWRITEBYTECODE=1
 fi
 # Dependencies: requirements.txt always; requirements-postgres.txt (psycopg) only for a Postgres
-# board: the config names it (backend = "postgres", or a [database] section: installs from before
-# the file-board default), or this venv already has psycopg (an existing install keeps it). Both
-# files pin exact versions with hashes: pip installs them hash-checked, as wheels only.
-CFG="${SWARM_CONFIG:-$HOME/.config/swarm/config.toml}"
+# board: swarm/pgwant.py (run by the system python3, which tomllib needs: 3.11+) reads the config
+# the way cli.load_config does (--config PATH, else $SWARM_CONFIG, else the default), or this venv
+# already has psycopg (an existing install keeps it). Both files pin exact versions with hashes:
+# pip installs them hash-checked, as wheels only.
 has_pkg() {
   for init in "$V"/lib/python3*/site-packages/$1/__init__.py; do [ -f "$init" ] && return 0; done
   return 1
@@ -44,8 +44,18 @@ has_pkg() {
 WANT_PG=""
 if has_pkg psycopg; then
   WANT_PG=1
-elif [ -f "$CFG" ] && grep -Eq '^[[:space:]]*(backend[[:space:]]*=[[:space:]]*"postgres"|\[database\])' "$CFG" 2>/dev/null; then
-  WANT_PG=1
+else
+  CFGARG=""; _prev=""
+  for _a in "$@"; do
+    case "$_prev" in --config) CFGARG="$_a";; esac
+    case "$_a" in --config=*) CFGARG="${_a#--config=}";; esac
+    _prev="$_a"
+  done
+  if [ -n "$CFGARG" ]; then
+    python3 -I "$D/lib/swarm/pgwant.py" --config "$CFGARG" 2>/dev/null && WANT_PG=1
+  else
+    python3 -I "$D/lib/swarm/pgwant.py" 2>/dev/null && WANT_PG=1
+  fi
 fi
 REQ="$(cat "$D/requirements.txt" "$D/requirements-postgres.txt" | cksum | cut -d' ' -f1)"
 # Needs (re)install: no interpreter, another requirements stamp, or a required package missing
@@ -83,7 +93,11 @@ if stale; then
     { [ -x "$V/bin/python" ] || python3 -m venv "$V"; } \
       && pip_install \
       && echo "$REQ" > "$V/.swarm-requirements" \
-      || { echo "swarm: could not set up $V (need python3 >= 3.11 with venv and pip)" >&2; exit 1; }
+      || { echo "swarm: could not set up $V. Needs python3 >= 3.11 with venv and pip. Packages are installed as" >&2
+           echo "swarm: hash-checked wheels only (pip --require-hashes --only-binary=:all:), so a platform or Python" >&2
+           echo "swarm: version with no published wheel, or a hash mismatch, fails here: see pip's error above." >&2
+           echo "swarm: Use Python 3.11-3.14 on a supported platform, or install the requirements files by hand." >&2
+           exit 1; }
   fi
   rmdir "$V.building" 2>/dev/null; trap - EXIT INT TERM
 fi

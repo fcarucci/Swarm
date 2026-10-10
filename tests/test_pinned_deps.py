@@ -7,9 +7,11 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from support import ROOT, home_env, posix_only
 
@@ -99,6 +101,58 @@ class LauncherTests(unittest.TestCase):
         (pip,) = self.pip_lines()
         self.assertIn(str(ROOT / "requirements-postgres.txt"), pip)
 
+    def wants_pg(self, config_text, *, args=("status",), env_config=True, extra=None):
+        """Run the launcher on a stale file-board venv; whether pip was told to install psycopg."""
+        if config_text is not None:
+            self.config.write_text(config_text)
+        self.log.unlink(missing_ok=True)
+        shutil.rmtree(self.v, ignore_errors=True)
+        self.fake_venv(stamp="stale")
+        env = dict(self.env)
+        if not env_config:
+            env.pop("SWARM_CONFIG")
+        subprocess.run([str(ROOT / "bin/swarm"), *args], capture_output=True, text=True, env=env, timeout=30)
+        (pip,) = self.pip_lines()
+        return str(ROOT / "requirements-postgres.txt") in pip
+
+    @posix_only("runs the POSIX sh launcher")
+    def test_the_shipped_example_config_is_a_file_board(self):
+        # config.example.toml has a [database] section and backend = "file": no psycopg
+        self.assertFalse(self.wants_pg((ROOT / "config.example.toml").read_text()))
+
+    @posix_only("runs the POSIX sh launcher")
+    def test_database_section_with_an_explicit_file_backend_needs_no_psycopg(self):
+        self.assertFalse(self.wants_pg('[database]\nhost = "db"\n[board]\nbackend = "file"\n'))
+        self.assertFalse(self.wants_pg('[database]\nhost = "db"\n[board]\nbackend = "sqlite"  # one machine\n'))
+
+    @posix_only("runs the POSIX sh launcher")
+    def test_single_quoted_postgres_backend_installs_psycopg(self):
+        self.assertTrue(self.wants_pg("[board]\nbackend = 'postgres'\n"))
+        self.assertTrue(self.wants_pg('[board]\nbackend="postgres"  # shared\n'))
+        self.assertTrue(self.wants_pg('board = { backend = "postgres" }\n'))
+
+    @posix_only("runs the POSIX sh launcher")
+    def test_a_commented_or_empty_database_section_is_not_postgres(self):
+        self.assertFalse(self.wants_pg('# [database]\n[board]\n'))
+        self.assertFalse(self.wants_pg('[database]\n'))      # empty: cli.load_config keeps the file default
+
+    @posix_only("runs the POSIX sh launcher")
+    def test_config_argument_is_honoured(self):
+        other = self.home / "other.toml"
+        other.write_text("[board]\nbackend = 'postgres'\n")
+        self.config.write_text('[board]\nbackend = "file"\n')          # SWARM_CONFIG says file
+        self.assertTrue(self.wants_pg(None, args=("--config", str(other), "status")))
+        self.assertTrue(self.wants_pg(None, args=(f"--config={other}", "status")))
+
+    @posix_only("runs the POSIX sh launcher")
+    def test_pip_failure_says_what_can_go_wrong(self):
+        self.fake_venv(stamp="stale")
+        (self.v / "bin/python").write_text('#!/bin/sh\necho "pip says no" >&2\nexit 1\n')
+        res = self.run_swarm()
+        self.assertEqual(res.returncode, 1)
+        for words in ("wheel", "hash", "pip", "3.11"):
+            self.assertIn(words, res.stderr)
+
     @posix_only("runs the POSIX sh launcher")
     def test_a_venv_that_has_psycopg_keeps_it_on_rebuild(self):
         self.fake_venv(packages=("zstandard", "psycopg"), stamp="old-requirements")
@@ -125,6 +179,67 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("3.11", res.stderr)
         self.assertFalse(self.v.exists())
         self.assertNotIn("venv", (self.home / "py3-args").read_text())
+
+
+class WantPostgresTests(unittest.TestCase):
+    """swarm.pgwant is the one rule both launchers use; it parses the config like cli.load_config."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="swarm-pgwant-"))
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
+
+    def wanted(self, text):
+        from swarm import pgwant
+        cfg = self.home / "c.toml"
+        cfg.write_text(text)
+        return pgwant.wanted(cfg)
+
+    def test_rules(self):
+        self.assertFalse(self.wanted((ROOT / "config.example.toml").read_text()))
+        self.assertFalse(self.wanted('[database]\nhost = "x"\n[board]\nbackend = "file"\n'))
+        self.assertTrue(self.wanted("[board]\nbackend = 'postgres'\n"))
+        self.assertTrue(self.wanted('[database]\nhost = "x"\n'))                 # legacy: no backend set
+        self.assertFalse(self.wanted(""))
+        self.assertFalse(self.wanted("not = [valid"))                                # unreadable: not wanted
+
+    def test_a_missing_config_is_not_postgres(self):
+        from swarm import pgwant
+        self.assertFalse(pgwant.wanted(self.home / "nope.toml"))
+
+    def test_config_argument_parsing(self):
+        from swarm import pgwant
+        self.assertEqual(pgwant.config_arg(["--config", "a", "status"]), "a")
+        self.assertEqual(pgwant.config_arg(["--config=b", "status"]), "b")
+        self.assertEqual(pgwant.config_arg(["--config", "a", "--config=b"]), "b")    # the last wins
+        self.assertIsNone(pgwant.config_arg(["status"]))
+
+    def test_windows_launcher_uses_the_same_rule(self):
+        from swarm import winlaunch
+        cfg = self.home / "c.toml"
+        v = self.home / "venv"
+        cfg.write_text((ROOT / "config.example.toml").read_text())
+        with mock.patch.dict(os.environ, {"SWARM_CONFIG": str(cfg)}):
+            self.assertFalse(winlaunch.want_postgres(v))
+            cfg.write_text("[board]\nbackend = 'postgres'\n")
+            self.assertTrue(winlaunch.want_postgres(v))
+            self.assertTrue(winlaunch.want_postgres(v, ["--config", str(cfg)]))
+            cfg.write_text('[board]\nbackend = "file"\n[database]\nhost = "x"\n')
+            self.assertFalse(winlaunch.want_postgres(v))
+            other = self.home / "o.toml"
+            other.write_text('[database]\nhost = "x"\n')
+            self.assertTrue(winlaunch.want_postgres(v, ["--config", str(other)]))
+
+
+class MissingPsycopgTests(unittest.TestCase):
+    def test_a_postgres_board_without_psycopg_says_what_to_run(self):
+        from swarm.board import BoardError, backend_class
+        sys.modules.pop("swarm.board.postgres", None)
+        with mock.patch.dict(sys.modules, {"psycopg": None}):
+            with self.assertRaises(BoardError) as ctx:
+                backend_class({"board": {"backend": "postgres"}})
+        msg = str(ctx.exception)
+        for words in ("psycopg", "requirements-postgres.txt", "--require-hashes", "SWARM_CONFIG"):
+            self.assertIn(words, msg)
 
 
 if __name__ == "__main__":

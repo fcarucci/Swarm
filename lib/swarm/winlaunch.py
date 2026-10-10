@@ -54,18 +54,20 @@ def _has(v: Path, pkg: str) -> bool:
     return any((s / pkg / "__init__.py").exists() for s in sites)
 
 
-def want_postgres(v: Path) -> bool:
-    """psycopg is installed only for a Postgres board: the config names it (backend = "postgres",
-    or a [database] section, as installs from before the file-board default have), or the venv
-    already has it (an existing install keeps it). The same rule as bin/swarm."""
+def want_postgres(v: Path, argv=None) -> bool:
+    """psycopg is installed only for a Postgres board: the config says so (swarm.pgwant, the rule
+    bin/swarm uses: cli.load_config's, honouring --config in argv and SWARM_CONFIG), or the venv
+    already has it (an existing install keeps it)."""
     if _has(v, "psycopg"):
         return True
-    cfg = Path(os.environ.get("SWARM_CONFIG") or Path(os.path.expanduser("~")) / ".config" / "swarm" / "config.toml")
     try:
-        text = cfg.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return False
-    return bool(re.search(r'^\s*(backend\s*=\s*"postgres"|\[database\])', text, re.M))
+        from swarm import pgwant
+    except ImportError:          # run as a script: its own folder is on sys.path
+        import pgwant
+    arg = pgwant.config_arg(sys.argv[1:] if argv is None else argv)
+    cfg = Path(arg).expanduser() if arg else Path(os.environ.get("SWARM_CONFIG")
+                                                  or Path(os.path.expanduser("~")) / ".config" / "swarm" / "config.toml")
+    return pgwant.wanted(cfg)
 
 
 def _packages_ok(v: Path, want_pg: bool) -> bool:
@@ -120,7 +122,10 @@ def ensure_venv(v: Path | None = None, root: Path = PLUGIN_ROOT, timeout: int = 
             ok = ok and subprocess.run([str(venv_python(v)), *pip_args(root, want_pg)], env=env,
                                        stdout=sys.stderr).returncode == 0
             if not ok:
-                sys.exit(f"swarm: could not set up {v} (need python >= 3.11 with venv and pip)")
+                sys.exit(f"swarm: could not set up {v}. Needs python >= 3.11 with venv and pip. Packages are installed as "
+                         f"hash-checked wheels only (pip --require-hashes --only-binary=:all:), so a platform or "
+                         f"Python version with no published wheel, or a hash mismatch, fails here: see pip's error above. "
+                         f"Use Python 3.11-3.14 on a supported platform, or install the requirements files by hand.")
             (v / ".swarm-requirements").write_text(want + "\n")
     finally:
         try:

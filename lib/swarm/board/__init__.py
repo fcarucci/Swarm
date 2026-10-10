@@ -12,6 +12,7 @@ backend is actually chosen.
 from __future__ import annotations
 
 import importlib
+import sys
 from typing import Mapping, Sequence
 
 from .base import (AUTO_CLOSED_BY, BG_OUTCOMES, BgCommand, VerdictDetails, VERDICT_DETAILS_MAX, RESTART_OUTCOMES, STUCK_PREFIX, STUCK_REASONS, AutoClosed, Restart, AGENT_STATES, AGENT_STATUSES, CLOSED_JOB_STATUSES, DATA_DIR,  # noqa: F401
@@ -47,7 +48,19 @@ def backend_class(cfg: dict) -> type[Board]:
         module, cls = BACKENDS[name]
     except KeyError:
         raise BoardError(f"unknown board backend {name!r} (known: {', '.join(BACKENDS)})") from None
-    return getattr(importlib.import_module(f".{module}", __name__), cls)
+    try:
+        return getattr(importlib.import_module(f".{module}", __name__), cls)
+    except ImportError as exc:
+        if name == "postgres" and (exc.name or "").split(".")[0] == "psycopg":
+            from swarm import paths
+            root = paths.PLUGIN_ROOT
+            raise BoardError(
+                "the Postgres board needs psycopg, which is not installed in this environment. The launcher "
+                "installs it when the config you run swarm with sets [board] backend = \"postgres\": run swarm "
+                "again with that config (SWARM_CONFIG=PATH, or --config PATH before the command), or install it "
+                f"by hand: {sys.executable} -m pip install --require-hashes --only-binary=:all: "
+                f"-r {root / 'requirements-postgres.txt'}") from exc
+        raise
 
 
 def open_board(cfg: dict, init_timeout: float = 60.0, readers: bool = False) -> Board:
