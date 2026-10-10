@@ -1,13 +1,13 @@
 ---
 name: complexity-analyzer
-description: Analyze cognitive complexity (Rust via Clippy, JS/TS via ESLint + SonarJS), rank complex functions, and suggest refactorings; also computes deterministic metrics and four overall scores (complexity, coupling, over-engineering, maintainability) for Rust, Python and JS/TS repos. Use when asked to analyze complexity, coupling, over-engineering or overall code health, or to find functions to refactor.
+description: Analyze cognitive complexity (Rust via Clippy, JS/TS via ESLint + SonarJS, Python via rust-code-analysis + radon), rank complex functions, and suggest refactorings; also reports Python design signals (class cohesion LCOM4, long parameter lists, data clumps, module fan-out) for architectural refactoring, computes deterministic metrics and four overall scores (complexity, coupling, over-engineering, maintainability) for Rust, Python and JS/TS repos. Use when asked to analyze complexity, coupling, over-engineering, class or module design or overall code health, or to find functions or classes to refactor.
 ---
 
 # Complexity Analyzer
 
 Analyze code complexity, rank ALL complex functions, and provide detailed
-refactoring suggestions. Supports **Rust** (Clippy) and **JavaScript /
-TypeScript** (ESLint + SonarJS).
+refactoring suggestions. Supports **Rust** (Clippy), **JavaScript /
+TypeScript** (ESLint + SonarJS) and **Python** (rust-code-analysis + radon).
 
 Resolve `SKILL_DIR` to the directory containing this SKILL.md in the installed plugin
 (`skills/complexity-analyzer`), for either Claude Code or Codex. All commands below
@@ -38,10 +38,11 @@ Invoke this skill when the user asks to:
 |---|---|---|---|
 | `Cargo.toml` present | Rust | `cargo clippy` | 25 |
 | `.js` / `.mjs` / `.cjs` / `.ts` files | JavaScript | `js/analyze.sh` | 15 cognitive |
+| `.py` files | Python | `py/analyze.py` | 15 cognitive / 10 cyclomatic |
 
-If a repo has both, ask which to analyze, or run both and report separately.
-Never report Rust and JavaScript scores in the same ranking table — the two
-tools' scales are not comparable (see "Comparing Scales" below).
+If a repo has more than one language, ask which to analyze, or run each and report
+separately. Never report scores from different languages in the same ranking table —
+the tools' scales are not comparable (see "Comparing Scales" below).
 
 ### Step 1a: Run Analysis — Rust
 
@@ -95,6 +96,55 @@ What the driver does, and why:
 If the command prints `eslint produced no report`, it will dump ESLint's own
 stderr — read it rather than guessing.
 
+### Step 1c: Run Analysis — Python
+
+```bash
+uv run --no-project --with radon==6.0.1 python "$SKILL_DIR"/py/analyze.py <file-or-dir> [more...]
+```
+
+Output is TSV in the same layout as Step 1b (`cognitive<TAB>cyclomatic<TAB>file<TAB>line<TAB>function`),
+highest cognitive first. Methods are named `Class.method`, nested functions `outer.inner`.
+
+- **Cognitive** comes from `rust-code-analysis-cli`, which `bin/metrics` already pins and uses for Python.
+  It implements the Sonar rules (nesting-weighted), so the numbers match `bin/metrics` for the same file.
+  No pure-Python cognitive tool is pinned, and adding one would be a second implementation of the same metric.
+- **Cyclomatic** comes from `radon cc` (pinned in `tool-manifest.json`); radon counts `and`/`or` as decision points.
+- A function is listed when cognitive is above `--threshold` (default 15) or cyclomatic is above `--cyclomatic`
+  (default 10), the same strict comparison the JS driver makes. `--all` or `--threshold 0` lists every function.
+- The totals (functions, summed cognitive, summed cyclomatic) go to stderr. In a refactoring loop compare these
+  totals before and after, not only the top rows: a split that moves complexity into new small functions
+  shows up as an unchanged total.
+- Needs `rust-code-analysis-cli` (`python3 "$SKILL_DIR"/bin/install_tools.py`) and radon. Nothing else.
+
+### Design signals (Python, architectural refactoring)
+
+Complexity rankings find long functions; design signals find structure that a complexity loop does not
+see. Run them on the same paths (stdlib only, deterministic):
+
+```bash
+python3 "$SKILL_DIR"/py/design.py <file-or-dir> [more...]
+```
+
+Rows, tab-separated: `class` (methods, public_methods, attributes, loc, lcom4), `longparams` (more than 5
+parameters, `self`/`cls` not counted), `clump` (the same 3+ parameter names shared by 2+ functions) and
+`module` (sloc, fanout, hint). Definitions are in the header of `py/design.py`.
+
+How to use them in an architecture refactoring loop:
+
+- **lcom4 above 1**: the class holds more than one responsibility. Split it along the connected method
+  groups, one class per group, and move any method that uses no state out of the class into a function.
+- **Data clump**: the same parameters travel together. Introduce a parameter object (dataclass or named
+  tuple) and pass that; the clump should disappear from the next run.
+- **longparams**: group the parameters into an object, or split the function. Same remedy as a clump.
+- **module hint (large or fan-out)**: look for the seam where the module's functions or classes split into
+  groups that import different things, and move each group into its own module.
+- **Re-measure** after each step with the same command. The class or clump must be gone, and the
+  complexity totals must not just move into a new class.
+
+These are heuristics. LCOM4 leaves `__init__` out, because every constructor touches every field, and it
+counts a method that uses no state as its own component, so static helpers show up as separate components.
+Read the code before splitting. Design rows are never scored and no threshold is tuned for them.
+
 ### Step 2: Generate Response
 
 Provide response in this format:
@@ -102,8 +152,8 @@ Provide response in this format:
 ```
 ## Complexity Analysis Results
 
-**Language**: [Rust | JavaScript]
-**Found**: [N] functions exceeding threshold ([25 Rust | 15 JS])
+**Language**: [Rust | JavaScript | Python]
+**Found**: [N] functions exceeding threshold ([25 Rust | 15 JS | 15 Python])
 **Highest**: [score]
 **Average**: [avg]
 
@@ -121,6 +171,8 @@ Omit the Cyclomatic column for Rust (Clippy reports only the one metric).
 **Severity, Rust** (threshold 25): 🔴 Critical (40+), 🟠 High (31-40), 🟡 Warning (26-30)
 
 **Severity, JavaScript** (threshold 15): 🔴 Critical (40+), 🟠 High (25-39), 🟡 Warning (16-24)
+
+**Severity, Python** (threshold 15): the same bands as JavaScript.
 
 ```
 ---
@@ -234,8 +286,11 @@ ESLint workflow above and the refactoring suggestions. Formulas and thresholds a
 
 Clippy's cognitive complexity and SonarJS's cognitive complexity are
 *different implementations of the same idea*, not the same number. Clippy's
-default threshold is 25; Sonar's is 15. Do not carry a score from one language
-to the other, and do not rank Rust and JavaScript functions in one table.
+default threshold is 25; Sonar's is 15. Python's cognitive score comes from
+rust-code-analysis, which follows the Sonar rules, so it is closest to the JS
+figure, but it is still a different implementation. Do not carry a score from one
+language to another, and do not rank Rust, JavaScript and Python functions in one
+table.
 Clippy's lint (restriction group) adds no nesting increment, skips closure and
 async-block bodies and subtracts `return`s, so on nested code it reads 2-3x lower
 than rust-code-analysis (Sonar rules, used by `bin/metrics`): `validate` in Astro
@@ -352,5 +407,8 @@ the operation. A tokenizer or a 40-case dispatch is not automatically a defect.
 - `lib/cxmetrics/`, `thresholds.json`, `tool-manifest.json`, `tests/` — implementation, versioned thresholds, pinned tools, fixture
 
 - `js/analyze.sh` — JavaScript driver (install, strip, lint, rank)
+- `py/analyze.py` — Python per-function ranking (rust-code-analysis cognitive + radon cyclomatic)
+- `py/design.py` — Python design signals (class LCOM4, long parameter lists, data clumps, module fan-out)
+- `py/pyast.py` — shared stdlib-ast helpers for the two Python drivers
 - `js/eslint.config.mjs` — rules and thresholds
 - `js/strip-directives.py` — blanks `#` preprocessor lines, preserving line numbers
