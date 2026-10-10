@@ -516,7 +516,7 @@ class MigrationContract:
             self.h._db().commit()
         elif self.h.name == "postgres":
             self.h.conn.execute("ALTER TABLE agents ADD COLUMN IF NOT EXISTS title text")
-            self.h.conn.execute("ALTER TABLE agents ADD COLUMN IF NOT EXISTS message_count integer NOT NULL DEFAULT 0")
+            self.h.conn.execute("ALTER TABLE agents ADD COLUMN IF NOT EXISTS message_count bigint NOT NULL DEFAULT 0")
             for column, decl in typed:
                 self.h.conn.execute(f"ALTER TABLE jobs ADD COLUMN IF NOT EXISTS {column} {decl.lower()}")
             from swarm.board.postgres import STATUS_VIEW
