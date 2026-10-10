@@ -467,9 +467,11 @@ def deliver_verdict(board, job: str, name: str, verdict: str, reason: str,
         handoffs = latest_handoffs(board, job)
         if artifact is None and handoffs:
             artifact = handoffs[-1].artifact
-    if not board.record_verdict(job, name, verdict, reason, next_steps, artifact, details, scope=scope,
-                                generation=generation, open_count=open_count, progress=progress,
-                                candidate=candidate, req=req):
+    # the typed fields go only when given, so a verdict without them is recorded as before
+    typed = {k: v for k, v in (("scope", None if scope == "artifact" else scope), ("generation", generation),
+                               ("open_count", open_count), ("progress", progress), ("candidate", candidate),
+                               ("req", req)) if v is not None}
+    if not board.record_verdict(job, name, verdict, reason, next_steps, artifact, details, **typed):
         return False
     board.post(job, name, f"VERDICT {verdict}: {reason}")
     if details and details.strip():   # the report itself is not posted (the board caps a message)
