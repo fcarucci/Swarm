@@ -73,6 +73,7 @@ class CodexDirectoryTests(unittest.TestCase):
             parts = Path(name).parts
             self.assertNotIn("hooks", parts[:-1], name)
             self.assertNotIn(parts[-1], HOOK_FILES, name)
+            self.assertNotIn("hook", name.lower(), name)     # not even lib/swarm/hooks.py
         self.assertNotIn("hooks", self.manifest())
         for rel in (".codex-plugin/plugin.json", "README.md", "PRIVACY.md", "SECURITY.md", "THIRD_PARTY_NOTICES.md",
                     *[n for n in self.names if re.fullmatch(r"skills/[^/]+/SKILL\.md", n)]):
@@ -104,6 +105,7 @@ class CodexDirectoryTests(unittest.TestCase):
         self.assertEqual(m["version"], self.main_manifest["version"])
         self.assertRegex(m["name"], r"^[a-z0-9]+(-[a-z0-9]+)*$")
         self.assertLessEqual(len(m["name"]), 64)
+        self.assertEqual(m["name"], "swarm-team")
         self.assertNotEqual(m["name"], "swarm")           # a single dictionary word is discouraged
         self.assertLessEqual(len(m["description"]), 4000)
         self.assertTrue(m["author"]["name"])
@@ -153,16 +155,18 @@ class CodexDirectoryTests(unittest.TestCase):
             if not (src.parent / "SKILL.cdx.md").exists():
                 self.assertEqual(shipped.read_bytes(), src.read_bytes())
 
-    def cli(self, home: Path, *args: str, check=True) -> str:
+    def cli(self, home: Path, *args: str, check=True, env_extra=None, both=False):
         env = {k: v for k, v in os.environ.items()
                if not k.startswith(("CLAUDE", "CODEX", "SWARM_")) and k not in ("PLUGIN_ROOT",)}
         env.update(HOME=str(home), PYTHONPATH=str(self.extract / "lib"), SWARM_AUTO_INIT="0",
-                   SWARM_NO_SYSTEMD="1", SWARM_NO_MIGRATE="1", PYTHONDONTWRITEBYTECODE="1")
+                   SWARM_NO_SYSTEMD="1", SWARM_NO_MIGRATE="1", PYTHONDONTWRITEBYTECODE="1",
+                   CODEX_HOME=str(home / ".codex"))
+        env.update(env_extra or {})
         res = subprocess.run([sys.executable, "-m", "swarm.cli", *args], capture_output=True, text=True,
-                             env=env, cwd=home, timeout=120)
+                             env=env, cwd=home, timeout=120, stdin=subprocess.DEVNULL)
         if check:
             self.assertEqual(res.returncode, 0, f"swarm {' '.join(args)}: {res.stderr}")
-        return res.stdout
+        return (res.stdout + res.stderr) if both else res.stdout
 
     def test_cdx_skill_commands_exist_in_the_cli(self):
         with tempfile.TemporaryDirectory(prefix="swarm-cdx-home-") as h:
@@ -201,10 +205,121 @@ class CodexDirectoryTests(unittest.TestCase):
             judge = self.cli(home, "join", "--job", "cdx1", "--key", "judge-1", "--judge").strip()
             self.assertTrue(judge)
 
-    def test_release_workflow_builds_and_attaches_the_zip(self):
-        text = (ROOT / ".github" / "workflows" / "release.yml").read_text()
-        self.assertIn("scripts/build-codex-directory", text)
-        self.assertIn("swarm-codex-", text)
+    def test_hook_free_goal_flow_judge_handoff_and_close(self):
+        with tempfile.TemporaryDirectory(prefix="swarm-cdx-home-") as h:
+            home = Path(h)
+            self.cli(home, "init")
+            self.cli(home, "activate", "--job", "cdx2", "--task", "t", "--goal", "g", "--no-supervise")
+            self.cli(home, "join", "--job", "cdx2", "--key", "eng", "--role", "engineer")
+            judge = self.cli(home, "join", "--job", "cdx2", "--key", "jdg", "--role", "judge", "--judge").strip()
+            self.cli(home, "done", "--job", "cdx2", "--key", "eng", "--summary", "did it")
+            seen = self.cli(home, "read", "--job", "cdx2", "--key", "jdg")
+            ref = re.search(r"handoff-[0-9a-f]+", seen)
+            self.assertIsNotNone(ref, seen)                  # the REF the skill tells the judge to use
+            self.cli(home, "verdict", "--job", "cdx2", "--as", judge, "--artifact", ref.group(0), "met", "ok")
+            refused = self.cli(home, "deactivate", "--job", "cdx2", "--outcome", "done", check=False, both=True)
+            self.assertIn("FINALIZED", refused)              # accepted work awaits finalization
+            self.cli(home, "post", "--job", "cdx2", "--key", "eng", f"FINALIZED {ref.group(0)}")
+            self.cli(home, "deactivate", "--job", "cdx2", "--outcome", "done")
+
+    def test_the_edition_marker_is_in_the_zip_only(self):
+        self.assertEqual((self.extract / "lib" / "swarm" / "EDITION").read_text().strip(), "codex-directory")
+        self.assertFalse((ROOT / "lib" / "swarm" / "EDITION").exists())
+
+    def test_activate_gives_no_hook_advice_in_this_edition(self):
+        with tempfile.TemporaryDirectory(prefix="swarm-cdx-home-") as h:
+            home = Path(h)
+            self.cli(home, "init")
+            out = self.cli(home, "activate", "--job", "cdx3", "--task", "t", "--goal", "g", "--no-supervise", both=True)
+            for bad in ("[swarm job:", "[swarm role:", "spawned from now on", "/hooks"):
+                self.assertNotIn(bad, out)
+            self.assertIn("swarm join --job cdx3 --key", out)
+
+    def test_doctor_and_bootstrap_know_a_directory_install(self):
+        with tempfile.TemporaryDirectory(prefix="swarm-cdx-home-") as h:
+            home = Path(h)
+            doctor = self.cli(home, "doctor", "--host", "codex", check=False, both=True)
+            boot = self.cli(home, "bootstrap", "--host", "codex", check=False, both=True)
+            for out in (doctor, boot):
+                for bad in ("/hooks", "swarm@swarm", "hooks trusted", "supervise codex hooks"):
+                    self.assertNotIn(bad, out)
+            self.assertIn("directory edition", doctor)
+
+    def test_hook_command_is_not_available_in_this_edition(self):
+        with tempfile.TemporaryDirectory(prefix="swarm-cdx-home-") as h:
+            out = self.cli(Path(h), "hook", "turn", check=False, both=True)
+            self.assertIn("not available in this edition", out)
+
+    def ask_flow(self, home, env_extra):
+        self.cli(home, "init")
+        self.cli(home, "activate", "--job", "cdx4", "--task", "t", "--no-supervise")
+        eng = self.cli(home, "join", "--job", "cdx4", "--key", "eng", "--role", "engineer").strip()
+        qa = self.cli(home, "join", "--job", "cdx4", "--key", "qa", "--role", "qa").strip()
+        q = self.cli(home, "ask", "--job", "cdx4", "--key", "eng", "--to", "@qa", "Which tests?",
+                     env_extra=env_extra).strip()
+        self.assertRegex(q, r"^Q\d+$")
+        listing = self.cli(home, "questions", "--job", "cdx4", "--open", "--to", "me", "--key", "qa",
+                           env_extra=env_extra)
+        self.assertIn("Which tests?", listing)
+        self.assertNotIn("Which tests?", self.cli(home, "questions", "--job", "cdx4", "--open", "--to", "me",
+                                                  "--key", "eng", env_extra=env_extra))   # not the asker's
+        self.cli(home, "answer", q[1:], "--key", "qa", "unit tests", env_extra=env_extra)
+        shown = self.cli(home, "questions", "--job", "cdx4", "--all", env_extra=env_extra)
+        self.assertIn(f"answer by {qa}", shown)
+        self.assertNotIn("answer by human", shown)
+
+    def test_ask_answer_identifies_a_joined_agent_by_key(self):
+        for extra in ({}, {"CODEX_THREAD_ID": "0198a1b2-0000-7000-8000-000000000001",
+                           "CODEX_SESSION_ID": "0198a1b2-0000-7000-8000-000000000002"},
+                      {"CODEX_THREAD_ID": "0198a1b2-0000-7000-8000-000000000001"}):
+            with self.subTest(env=sorted(extra)), tempfile.TemporaryDirectory(prefix="swarm-cdx-home-") as h:
+                self.ask_flow(Path(h), extra)
+
+    def test_a_key_that_is_not_a_joined_agent_is_never_the_human(self):
+        with tempfile.TemporaryDirectory(prefix="swarm-cdx-home-") as h:
+            home = Path(h)
+            self.cli(home, "init")
+            self.cli(home, "activate", "--job", "cdx5", "--task", "t", "--no-supervise")
+            out = self.cli(home, "ask", "--job", "cdx5", "--key", "ghost", "--to", "human", "q?",
+                           check=False, both=True)
+            self.assertNotRegex(out, r"^Q\d+")
+            self.assertIn("join", out)
+
+    def release_workflow(self) -> str:
+        return (ROOT / ".github" / "workflows" / "release.yml").read_text()
+
+    def test_release_workflow_triggers_only_on_tags_and_attaches_the_zip(self):
+        text = self.release_workflow()
+        on = text.split("\npermissions:")[0]
+        self.assertIn('tags:\n      - "v*"', on)
+        self.assertIn("workflow_dispatch:", on)
+        for other in ("branches:", "pull_request", "schedule:"):
+            self.assertNotIn(other, on)
+        create = text[text.index("gh release create"):]
+        self.assertIn('"dist/swarm-codex-${VERSION}.zip"', create)
+
+    @unittest.skipIf(os.name == "nt", "runs the workflow's bash step")
+    def test_release_workflow_build_step_makes_the_zip_it_attaches(self):
+        text = self.release_workflow()
+        step = text[text.index("- name: Build the Codex directory edition"):]
+        script = step.split("run: |\n", 1)[1].split("\n\n      - name:", 1)[0]
+        script = "\n".join(line[10:] if line.startswith(" " * 10) else line for line in script.splitlines())
+        version = self.main_manifest["version"]
+        with tempfile.TemporaryDirectory(prefix="swarm-cdx-rel-") as d:
+            work = Path(d)
+            (work / "dist").mkdir()
+            (work / "dist" / "SHA256SUMS").write_text("")
+            res = subprocess.run(["bash", "-c", script.replace("scripts/build-codex-directory",
+                                                                f"{ROOT}/scripts/build-codex-directory")],
+                                 cwd=work, env={**os.environ, "VERSION": version}, capture_output=True, text=True)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertTrue((work / "dist" / f"swarm-codex-{version}.zip").is_file())
+            self.assertIn(f"swarm-codex-{version}.zip", (work / "dist" / "SHA256SUMS").read_text())
+
+    def test_shipped_config_example_has_no_personal_or_dangling_references(self):
+        text = (self.extract / "config.example.toml").read_text()
+        self.assertNotIn("hermes", text)
+        self.assertNotRegex(text, r"(?<!main/)docs/REFERENCE\.md")      # only the absolute GitHub URL
 
 
 if __name__ == "__main__":

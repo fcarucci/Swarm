@@ -411,6 +411,10 @@ def host_setup(host: str | None, cfg: dict | None = None) -> Step:
         from swarm import codex_config
         from swarm.cli import load_config
         status, detail = codex_config.apply(_codex_home() / "config.toml", cfg or load_config(paths.config_path()))
+        from swarm import edition
+        if edition.is_directory():   # no hooks to trust
+            return Step("host", "manual" if status in ("changed", "manual") else "ok",
+                        f"{detail}\n{NEW_SESSION_STEP}" if status == "changed" else detail)
         if status == "changed":   # Codex reads config.toml at session start: running sessions keep the old sandbox
             return Step("host", "manual", f"{detail}\n{NEW_SESSION_STEP}\n{TRUST_STEP}")
         if status == "manual" or not _hooks_ran("codex"):
@@ -1244,7 +1248,8 @@ def supervisor_checks(cfg: dict, host: str | None, run=None, which=None) -> list
                          f"{h}: {sup[f'{h}_bin']}: {found[h] or 'not on PATH'}"
                          + ("" if found[h] else "; auto-restart inactive until harness installed"),
                          f"install {h} or set [supervise] {h}_bin"))
-    if "codex" in hs:
+    from swarm import edition
+    if "codex" in hs and not edition.is_directory():
         out.append(Check("supervise codex hooks", None,
                          "can't tell whether the plugin's hooks are trusted; replacements that never join are "
                          "killed after enrol_minutes",
@@ -1767,15 +1772,20 @@ def plugin_table_state(output: str) -> bool | None:
 def _codex_checks(cfg: dict, env=os.environ) -> list[Check]:
     import tomllib
     from swarm import codex_config
-    listed = _codex_plugin_listed()
+    from swarm import edition
+    directory = edition.is_directory()
+    listed = True if directory else _codex_plugin_listed()
     out = [Check("plugin", listed, {True: "codex: swarm installed and enabled", False: "codex: swarm not installed "
                  "and enabled", None: f"codex: can't tell (`{PLUGIN_LIST_CMD}` gave an unknown answer)"}[listed],
                  "codex plugin marketplace add https://github.com/fcarucci/Swarm.git && codex plugin add "
                  f"swarm@swarm (check with `{PLUGIN_LIST_CMD}`; enable it if it is disabled)")]
-    ran = _hooks_ran("codex")
-    out.append(Check("hooks trusted", True if ran else None,
-                     "codex: the swarm's SessionStart hook has run for this version" if ran
-                     else "codex: no swarm hook has run since this version was installed", TRUST_STEP))
+    if directory:
+        out[0] = Check("plugin", True, f"codex: the directory edition is installed at {paths.PLUGIN_ROOT}", "")
+    else:
+        ran = _hooks_ran("codex")
+        out.append(Check("hooks trusted", True if ran else None,
+                         "codex: the swarm's SessionStart hook has run for this version" if ran
+                         else "codex: no swarm hook has run since this version was installed", TRUST_STEP))
     path = _codex_home() / "config.toml"
     try:
         data = tomllib.loads(path.read_text()) if path.exists() else {}

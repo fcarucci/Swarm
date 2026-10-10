@@ -31,7 +31,13 @@ def save_question(ctx, board, blocker, data):
     ctx.set_job_data(board, blocker.job, f'q{blocker.id}.count', str(len(pieces)))
 
 
-def identity(board, cfg=None):
+def identity(board, cfg=None, key=None):
+    if key:   # a joined agent names itself: hooks bind sessions to agents, the directory edition has none
+        name = board.active_agent_name(key)
+        if name is None:
+            raise ValueError(f'no active agent has the key {key!r}: join the job first '
+                             f'(swarm join --job JOB --key KEY --role ROLE)')
+        return name   # never 'human'
     sid = hosts.cli_session_id(os.environ)
     if sid:
         for job in board.jobs(True):
@@ -271,7 +277,7 @@ def doctor(ctx, args):
 
 def run_ask(ctx, args):
     with ctx.open_board() as board:
-        b = open_question(ctx, board, args.job, identity(board, ctx.cfg), args.to, ' '.join(args.text),
+        b = open_question(ctx, board, args.job, identity(board, ctx.cfg, getattr(args, 'key', None)), args.to, ' '.join(args.text),
                           options=args.options.split(',') if args.options else None,
                           default=args.default, expires=args.expires, blocks=args.blocks)
         print(f'Q{b.id}')
@@ -279,7 +285,7 @@ def run_ask(ctx, args):
 
 def run_answer(ctx, args):
     with ctx.open_board() as board:
-        b = answer_question(ctx, board, args.id, identity(board, ctx.cfg),
+        b = answer_question(ctx, board, args.id, identity(board, ctx.cfg, getattr(args, 'key', None)),
                             text=' '.join(args.text) if args.text else None, option=args.option,
                             use_default=args.default, comment=args.comment, reopen=args.reopen)
         print(f'Q{b.id} {b.state}')
@@ -287,7 +293,7 @@ def run_answer(ctx, args):
 
 def run_questions(ctx, args):
     with ctx.open_board() as board:
-        to = identity(board, ctx.cfg) if args.to == 'me' else args.to
+        to = identity(board, ctx.cfg, getattr(args, 'key', None)) if args.to == 'me' else args.to
         for b in question_rows(ctx, board, args.job, args.all, to):
             data = question_data(ctx, board, b)
             print(cli.term_safe(f'Q{b.id} [{b.state}] -> {b.waiting_on}: {data.get("text", b.reason)}'))
@@ -308,6 +314,7 @@ def run_questions(ctx, args):
 
 def setup_ask(p):
     p.add_argument('--job', required=True)
+    p.add_argument('--key', help='your agent key, when you joined with `swarm join --key`')
     p.add_argument('--to', required=True)
     p.add_argument('text', nargs='+')
     for name in ('options','default','expires','blocks'):
@@ -316,6 +323,7 @@ def setup_ask(p):
 
 def setup_answer(p):
     p.add_argument('id', type=int)
+    p.add_argument('--key', help='your agent key, when you joined with `swarm join --key`')
     p.add_argument('text', nargs='*')
     p.add_argument('--option')
     p.add_argument('--default', action='store_true')
@@ -325,6 +333,7 @@ def setup_answer(p):
 
 def setup_questions(p):
     p.add_argument('--job')
+    p.add_argument('--key', help='your agent key, when you joined with `swarm join --key`')
     group = p.add_mutually_exclusive_group()
     group.add_argument('--open', action='store_true')
     group.add_argument('--all', action='store_true')

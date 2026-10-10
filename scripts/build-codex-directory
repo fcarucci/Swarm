@@ -9,7 +9,7 @@ a generated directory manifest and its own README and icons (cdx/).
 
     scripts/build-codex-directory [--out DIR] [--root DIR]
 
-Prints the path of the ZIP. Needs only the Python standard library.
+Prints the path of the ZIP. The ZIP also carries lib/swarm/EDITION, which makes the CLI describe an edition without hooks. Needs only the Python standard library.
 """
 from __future__ import annotations
 
@@ -23,11 +23,11 @@ from pathlib import Path
 
 # The directory listing. The slug is distinctive on purpose (the guidelines discourage a single
 # dictionary word); Francesco approves the name before anything is submitted.
-NAME = "swarm-board"
-DISPLAY_NAME = "Swarm Board for Codex"
+NAME = "swarm-team"
+DISPLAY_NAME = "Swarm Team for Codex"
 SHORT_DESCRIPTION = "Coordinate agents on a board"          # at most 30 characters
 LONG_DESCRIPTION = (
-    "Swarm Board lets a lead agent and its subagents coordinate through a shared message board: "
+    "Swarm Team lets a lead agent and its subagents coordinate through a shared message board: "
     "every agent joins a job under a unique name, reads what the others posted, and posts claims, "
     "status, findings and hand-offs. A judge records whether the job's goal is met, and read-only "
     "verifiers check claims. The board is plain files or SQLite on your machine by default, or your "
@@ -42,7 +42,7 @@ CATEGORY = "Developer Tools"
 SKILLS = ("swarm", "ask-answer", "complexity-analyzer", "refactoring")   # engineering-team and ci need the full edition
 TOP_FILES = ("LICENSE", "NOTICE", "PRIVACY.md", "SECURITY.md", "THIRD_PARTY_NOTICES.md", "requirements.txt",
              "config.example.toml")
-EXCLUDE_NAMES = {"winhook.py", "SKILL.cdx.md", ".DS_Store", ".gitignore", ".gitattributes"}
+EXCLUDE_NAMES = {"winhook.py", "hooks.py", "SKILL.cdx.md", ".DS_Store", ".gitignore", ".gitattributes"}
 EXCLUDE_DIRS = {"__pycache__", "node_modules", "tests", "tools", ".git"}
 ZIP_TIME = (2026, 1, 1, 0, 0, 0)
 
@@ -103,6 +103,20 @@ def manifest(root: Path) -> dict:
     }
 
 
+CONFIG_EDITS = (   # the shipped example: no personal recall bank, no pointer to a file the ZIP lacks
+    ('recall_banks = ["coding", "hermes"] #', 'recall_banks = ["coding"]           #'),
+    ("docs/REFERENCE.md", REPO + "/blob/main/docs/REFERENCE.md"),
+)
+
+
+def patch_config(text: str) -> str:
+    for old, new in CONFIG_EDITS:
+        if old not in text:
+            raise SystemExit(f"build-codex-directory: config.example.toml no longer contains {old!r}")
+        text = text.replace(old, new)
+    return text
+
+
 def collect(root: Path) -> dict[str, bytes]:
     """Archive path -> content, for every file of the edition."""
     files: dict[str, bytes] = {}
@@ -114,6 +128,8 @@ def collect(root: Path) -> dict[str, bytes]:
         cdx = root / "skills" / skill / "SKILL.cdx.md"
         if cdx.is_file():
             files[f"skills/{skill}/SKILL.md"] = cdx.read_bytes()
+    files["lib/swarm/EDITION"] = b"codex-directory\n"      # the CLI stops describing hook behaviour (swarm.edition)
+    files["config.example.toml"] = patch_config(files["config.example.toml"].decode()).encode()
     files["README.md"] = (root / "cdx" / "README.md").read_bytes()
     for icon in ("icon.svg", "logo.svg"):
         files[f"assets/{icon}"] = (root / "cdx" / "assets" / icon).read_bytes()

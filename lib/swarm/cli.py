@@ -54,6 +54,7 @@ import time
 import tomllib
 from pathlib import Path
 
+from swarm import edition  # noqa: E402
 from swarm.paths import PLUGIN_ROOT as SKILL_DIR  # noqa: E402  (the old name, kept for callers)
 # Every board-derived string is shown through term_safe: a control character in a post,
 # a name or a job becomes visible notation instead of terminal input or a forged line.
@@ -3039,7 +3040,7 @@ def valid_session_id(session: str) -> bool:
 def cmd_activate(cfg: dict, args) -> int:
     from swarm.board import open_board
     from swarm import hosts, safefs
-    from swarm.hooks import JOB_NAME
+    from swarm.jobmarkers import JOB_NAME
     if not JOB_NAME.fullmatch(args.job or ""):
         # the name is shown to agents inside shell commands and names marker files
         print(f"swarm activate: --job must be 1-64 letters, digits, '.', '_' or '-', starting with a "
@@ -3090,6 +3091,8 @@ def cmd_activate(cfg: dict, args) -> int:
                                "adopt_running": args.adopt_running, "attached": True,
                                **({"goal": True} if js.goal else {})})   # a new binding starts unseen
         _print_activation_footer(cfg, lambda: print(
+            f"attached this session to {args.job}: each agent runs `swarm join --job {args.job} --key KEY --role ROLE`"
+            if edition.is_directory() else
             f"attached this session to {args.job}: its subagents spawned from now on join the board\n"
             f"put this line in every subagent prompt for this job:\n{tag_line(args.job)}"))
         return 0
@@ -3129,6 +3132,16 @@ def cmd_activate(cfg: dict, args) -> int:
     _say_closed(closed)
 
     def _details():
+        if edition.is_directory():   # no hooks: nothing joins an agent, nothing reads a prompt tag
+            print(f"activated {args.job}: each agent runs `swarm join --job {args.job} --key KEY --role ROLE` "
+                  f"(KEY is its own stable id), reads with `swarm read --job {args.job} --key KEY` and "
+                  f"posts with `swarm post --job {args.job} --key KEY \"...\"`")
+            if goal:
+                print(f"the job has a goal: the judge joins with `swarm join --job {args.job} --key KEY "
+                      f"--role judge --judge`; when a worker finishes, `swarm done --job {args.job} --key KEY "
+                      f"--summary \"...\"` posts DONE with a hand-off id, which the judge uses as "
+                      f"`swarm verdict --artifact ID`")
+            return
         print(f"activated {args.job}: subagents spawned from now on join the board\n"
               f"put this line in every subagent prompt for this job (it picks the job when this "
               f"session runs several):\n{tag_line(args.job)}")
@@ -3562,7 +3575,7 @@ def cmd_remember(cfg: dict, args) -> int:
     except Exception as exc:
         tag = queue(args.project)
         print(term_safe(f"queued (board not reachable from here: {_error_name(exc)}); it is stored "
-                        f"automatically within seconds by the swarm hooks. This is normal inside a "
+                        f"{edition.delivery()}. This is normal inside a "
                         f"sandbox.{tag}"))
         return 0
     with board_cm as board:
@@ -3699,7 +3712,11 @@ def cmd_spool_retry(cfg: dict) -> int:
 def _cmd_hook(cfg: dict, args) -> int:
     if args.event == "session-start":
         return 0   # handled by bin/swarm-hook's shell part
-    from swarm.hooks import run_hook
+    try:
+        from swarm.hooks import run_hook
+    except ImportError:   # the directory edition ships without hooks
+        print("swarm hook: not available in this edition (it has no hooks).", file=sys.stderr)
+        return 0
     return run_hook(args.event, cfg, args.host)
 
 
@@ -4296,7 +4313,7 @@ def _blocker_actor(board, cfg: dict | None = None):
         return 'human'
     if cfg is not None:
         try:
-            from swarm.hooks import _markers
+            from swarm.jobmarkers import _markers
             if any(m.get("session_id") == sid for m in _markers(cfg)):
                 return ORCHESTRATOR_ACTOR
         except Exception:
@@ -4696,7 +4713,7 @@ def _run_command(cfg: dict, args) -> int:
             spool_post(cfg, args.job, args.name, " ".join(args.message), args.to,
                        agent_key=getattr(args, "key", None))
             print(f"queued (board not reachable from here: {_error_name(exc)}); it is delivered "
-                  f"automatically within seconds by the swarm hooks. This is normal inside a sandbox.")
+                  f"{edition.delivery()}. This is normal inside a sandbox.")
             return 0
         if args.cmd == "resume" and (args.host or args.workdir or args.only or args.dry_run or args.retry):
             print(f"cannot reach the board database: {exc} (resuming a paused job needs the board)", file=sys.stderr)
@@ -4715,8 +4732,9 @@ def _run_command(cfg: dict, args) -> int:
                     print(f"swarm wait: {exc}", file=sys.stderr)
                     return 2
             spool_wait(cfg, args.job, on, until)
-            print(f"queued (board not reachable from here: {_error_name(exc)}); the swarm hooks apply "
-                  f"it within seconds. This is normal inside a sandbox.")
+            print(f"queued (board not reachable from here: {_error_name(exc)}); it is applied "
+                  + ("the next time swarm runs outside the sandbox" if edition.is_directory() else "within seconds by the swarm hooks")
+                  + ". This is normal inside a sandbox.")
             return 0
         if args.cmd == "verdict" and args.verdict == "show":
             print(f"cannot reach the board database: {exc}", file=sys.stderr)
@@ -4725,7 +4743,7 @@ def _run_command(cfg: dict, args) -> int:
             spool_verdict(cfg, args.job, args.name, args.verdict, *_verdict_text(args), artifact=args.artifact,
                           details=getattr(args, "details_text", None))
             print(f"queued (board not reachable from here: {_error_name(exc)}); it is delivered "
-                  f"automatically within seconds by the swarm hooks, and counts only if you are the "
+                  f"{edition.delivery()}, and counts only if you are the "
                   f"judge of {args.job} (if not, you are told on the board).")
             return 0
         print(f"cannot reach the board database: {exc}"

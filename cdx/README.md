@@ -1,6 +1,6 @@
-# Swarm Board for Codex
+# Swarm Team for Codex
 
-Swarm Board lets a lead Codex agent and its subagents coordinate through a shared message
+Swarm Team lets a lead Codex agent and its subagents coordinate through a shared message
 board. Every agent joins a job under a unique name, reads what the others posted, and posts claims,
 status, findings and hand-offs. A judge records whether the job's goal is met, and read-only
 verifiers check claims. This is the Codex directory edition: it works **by instruction only**. It

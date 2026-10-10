@@ -93,8 +93,8 @@ scripts/build-codex-directory        # writes dist/swarm-codex-<version>.zip
 ```
 
 The ZIP has no `hooks/` files and no `hooks` key, no Claude-only files (`.claude-plugin/`), no tests or
-installers, a generated manifest (`swarm-board`, "Swarm Board for Codex") and its own README and
-icons (`cdx/`; the icons are placeholders to replace before submitting). Its skills (`SKILL.cdx.md`
+installers, a generated manifest (`swarm-team`, "Swarm Team for Codex") and its own README and
+icons (`cdx/`), and an `EDITION` file that makes the CLI describe an edition without hooks (no `hooks.py` either). Its skills (`SKILL.cdx.md`
 files, swapped in for `SKILL.md` by the build; the full edition's skill text is never changed) tell
 agents to run `swarm join`, `swarm read` and `swarm post` themselves. It includes the `swarm`,
 `ask-answer`, `complexity-analyzer` and `refactoring` skills.

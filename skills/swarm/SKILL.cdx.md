@@ -53,7 +53,9 @@ board's directories for an agent to post: `swarm doctor --host codex` says what 
    ```
 4. Read the board before each decision and each spawn, and before your final answer. Answer
    messages addressed to you.
-5. When the work is done and verified, close the job:
+5. When the work is done and verified, close the job. With a goal, `swarm deactivate` waits for the
+   judge's `met` verdict on each hand-off **and** for a worker (never the judge) to confirm that the accepted
+   work is finished, by posting `FINALIZED <hand-off id>` (or `INTEGRATED <hand-off id>` once it is merged). Then:
 
    ```sh
    swarm deactivate --job fix-api --outcome "API regression fixed"
@@ -102,7 +104,11 @@ swarm verdict --job JOB --as "<your name>" --artifact REF met "evidence"
 swarm verdict --job JOB --as "<your name>" --artifact REF not_met --reason "what is missing" --next "what to change and what you will re-check"
 ```
 
-Inspect the exact hand-off named by `REF` before ruling; a long report goes through
+`REF` is the hand-off id: the `handoff-...` word in the worker's `DONE "handoff-..." | summary` message
+that `swarm read` shows (a worker publishes it with `swarm done`). Use that exact id for each hand-off;
+a guessed value (a branch name, `HEAD`) records a verdict nobody is waiting for, and a job with a goal
+cannot be closed with `swarm deactivate` until every hand-off has a `met` verdict. Inspect the work named
+by that hand-off before ruling; a long report goes through
 `--details -` on standard input (a quoted heredoc), never into a file. `swarm verdict show --job JOB`
 prints it. Read the board before ruling, and record a verdict before you stop: a goal without a `met`
 verdict stays unmet.

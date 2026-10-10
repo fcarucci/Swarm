@@ -267,7 +267,7 @@ def _entries(path: Path | None, limit: int = SCAN_LINES) -> list[dict] | None:
 def _log(message: str) -> None:
     """Into the hooks' error log; never raises."""
     try:
-        from swarm.hooks import _log_line
+        from swarm.jobmarkers import _log_line
         _log_line("codex", "-", message)
     except Exception:
         pass
