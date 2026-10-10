@@ -13,6 +13,8 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 - `swarm status --job` and `swarm watch` show `background N running, M orphaned`; `swarm doctor` warns about this host's orphaned background commands.
 
 ### Fixed
+- `swarm ci wait` and `swarm ci status` no longer return a cached failure for a commit that was re-run: a failure is re-checked with the CI host (within the 60 s floor) and a newer run attempt, or a run still queued or in progress, reads as running until its result is in. A cached green stays final.
+- CI's Postgres service job pulls `postgres:16` from `public.ecr.aws/docker/library` instead of Docker Hub, which rate-limited anonymous pulls.
 - A subagent resumed through SendMessage keeps its name and role. A subagent that was already running when its job was activated (so its hooks did not adopt it) and runs `swarm join --key X` now joins under its own agent id, as hook-enrolled members already did; under a made-up key, a resumed agent found no row of its own and was named afresh.
 - A subagent's `swarm join` in a command that also joins another job of its session rewrites only its own job's join; the other join is left unchanged.
 - A subagent that runs `swarm join --key orchestrator` is refused: only the main session is the orchestrator.

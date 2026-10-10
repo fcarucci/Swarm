@@ -38,7 +38,8 @@ BACKOFF_S = (60, 120, 300)
 LOW_BUDGET = 500
 LOW_BUDGET_S = 600
 PUBLIC_MODE_S = 900          # how long a 403 keeps the poller on the public API
-TTL_GREEN_S, TTL_FAILED_S = 600, 120   # a terminal result is served from cache this long
+TTL_GREEN_S = 600            # a cached green is served this long; a failure is never served from cache
+                             # on its own: a re-run may have started, so it is re-checked (floor-limited)
 WANT_S = 180                 # a waiter's interest lasts this long unless it renews
 TICK_S = 5                   # waiters wake this often to read the cache or an event
 SHA_RE = re.compile(r"[0-9a-fA-F]{7,64}")
@@ -81,6 +82,16 @@ def classify(runs) -> str:
     if any(r.get("status") == "in_progress" for r in runs) or any(r.get("status") == "completed" for r in runs):
         return "running"
     return "queued"
+
+
+def newer_attempt(prior, res) -> bool:
+    """True when the host's runs carry a higher run_attempt than the cached failure's (a re-run).
+    Hosts without run_attempt (Gitea) never report one."""
+    def top(r):
+        vals = [x.get("attempt") for x in (r or {}).get("runs", []) if isinstance(x.get("attempt"), int)]
+        return max(vals) if vals else None
+    a, b = top(prior), top(res)
+    return a is not None and b is not None and b > a
 
 
 # ---------------------------------------------------------------- CI hosts
@@ -139,7 +150,7 @@ class GitHubHost:
             except ValueError:
                 raise CiError("gh api: unreadable response")
         runs = [{"id": r.get("id"), "name": r.get("name"), "status": r.get("status"),
-                 "conclusion": r.get("conclusion"), "url": r.get("html_url")}
+                 "conclusion": r.get("conclusion"), "url": r.get("html_url"), "attempt": r.get("run_attempt")}
                 for r in data.get("workflow_runs", []) if r.get("head_sha", "").lower() == sha.lower()]
         return result(classify(runs), runs=runs, remaining=remaining)
 
@@ -322,19 +333,26 @@ class Poller:
         return st.get("last_call", 0) + max(self.floor, self.interval(st))
 
     def fresh(self, repo, sha, cached) -> bool:
-        if not cached:
+        """Only a green is served from cache on its own. A failure is never final by itself: the
+        commit may have been re-run since, so poll() asks the host again (at most once per floor)."""
+        if not cached or cached.get("state") != "green":
             return False
-        age = self.now() - cached.get("fetched_at", 0)
-        if cached["state"] == "green":
-            return age < TTL_GREEN_S
-        if cached["state"] == "failed":
-            return age < TTL_FAILED_S
-        return False
+        return self.now() - cached.get("fetched_at", 0) < TTL_GREEN_S
+
+    def _unverified(self, repo, sha, cached):
+        """What a look reports when it could not ask the host for this sha: a cached green stays final;
+        a cached failure reads as running, because it may predate a re-run."""
+        if cached and cached.get("state") == "failed":
+            return result("running", repo=repo, sha=sha, notes=[
+                "last CI result for this commit was a failure: re-checking the CI host within the "
+                f"{int(self.floor)} s floor"])
+        return cached
 
     def poll(self, repo, sha, force=False):
         """The latest result for repo@sha. Calls the host only when this process wins the repo lock
         AND the floor has elapsed (force: whatever the floor; one call to confirm a CI completion
-        event); otherwise returns the shared cache (None if nothing cached yet)."""
+        event). A cached failure is re-checked, never trusted: until a host call answers for this sha,
+        it reads as running. Otherwise returns the shared cache (None if nothing cached yet)."""
         sha = self._sha(sha)
         cached = self.read(repo, sha)
         if self.fresh(repo, sha, cached):
@@ -342,18 +360,20 @@ class Poller:
         d = self._dir(repo)
         with _Lock(d / ".lock") as lock:
             if not lock.held:
-                return self.read(repo, sha)           # another process is the poller
+                return self._unverified(repo, sha, cached)   # another process is the poller
             st = _read(d / "_poll.json", {}) or {}
             if not force and self.now() < st.get("last_call", 0) + max(self.floor, self.interval(st)):
-                return self.read(repo, sha)           # the floor has not elapsed
+                return self._unverified(repo, sha, cached)   # the floor has not elapsed
             target = sha if force else min(self._wanted(repo, sha) or [sha],
                                            key=lambda s: (_read(d / f"{s}.json", {}) or {}).get("fetched_at", 0))
-            res = self._call(repo, target, st)
+            res = self._call(repo, target, st, prior=cached if target == sha else None)
             _write(d / "_poll.json", st)
             _write(d / f"{target}.json", res)
-        return self.read(repo, sha)
+            if target == sha:
+                return self.read(repo, sha)
+        return self._unverified(repo, sha, self.read(repo, sha))   # the host was asked about another sha
 
-    def _call(self, repo, sha, st):
+    def _call(self, repo, sha, st, prior=None):
         now = self.now()
         public = st.get("public_until", 0) > now
         notes = []
@@ -378,6 +398,11 @@ class Poller:
             st["streak"] = st.get("streak", 0) + 1
         else:
             st["streak"] = 0
+        if prior and prior.get("state") == "failed" and res["state"] in ("green", "failed") \
+                and newer_attempt(prior, res):
+            # a re-run of the commit is newer than the failure we had: its result is not in yet
+            notes.append("CI was re-run after the cached failure: waiting for the new attempt")
+            res = result("running", runs=res["runs"], remaining=res.get("remaining"))
         if res["state"] == "failed" and not res["failing"]:
             try:
                 res["failing"], res["tail"] = self.host.failure_detail(repo, sha, res, public=public)

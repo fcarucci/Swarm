@@ -242,6 +242,76 @@ class ExitCodeTests(Base):
             ["none", "queued", "running", "running", "green", "failed"])
 
 
+class AttemptHost:
+    """GitHub-shaped: each call returns the commit's one workflow run at the scripted (state, run_attempt);
+    the last item repeats. state: green, failed, running or queued."""
+
+    def __init__(self, *script):
+        self.script, self.calls, self.public_calls, self.rate_calls = list(script), 0, 0, 0
+
+    def fetch(self, repo, sha, public=False):
+        state, attempt = self.script[min(self.calls, len(self.script) - 1)]
+        self.calls += 1
+        status = {"green": "completed", "failed": "completed", "running": "in_progress", "queued": "queued"}[state]
+        runs = [{"id": 37989936260, "name": "test", "status": status, "url": "u", "attempt": attempt,
+                 "conclusion": {"green": "success", "failed": "failure"}.get(state)}]
+        return cw.result(cw.classify(runs), runs=runs, remaining=None)
+
+    def rate_limit(self):
+        self.rate_calls += 1
+        return 4000, 2_000_000
+
+    def failure_detail(self, repo, sha, res, public=False):
+        return [{"name": "test / unit", "url": "u", "id": 7}], "boom"
+
+
+class RerunTests(Base):
+    """A cached failure is not final forever: after `gh run rerun --failed` the same SHA has a newer
+    attempt, and `wait` must follow it (main 0277352, run 37989936260, attempt 2)."""
+
+    def test_wait_after_a_rerun_follows_the_new_attempt_to_green(self):
+        host = AttemptHost(("failed", 1), ("running", 2), ("green", 2))
+        p = self.poller(host)
+        self.assertEqual(p.poll(REPO, SHA)["state"], "failed")      # attempt 1, cached
+        self.clock.t += 61                                           # the floor has passed
+        rc, out, _ = self.wait(p)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(host.calls, 3)
+
+    def test_a_wait_right_after_the_failure_does_not_trust_it(self):
+        host = AttemptHost(("failed", 1), ("running", 2), ("green", 2))
+        p = self.poller(host)
+        p.poll(REPO, SHA)
+        self.clock.t += 5                                            # the re-run was just triggered
+        rc, out, _ = self.wait(p)
+        self.assertEqual((rc, host.calls), (0, 3), out)
+
+    def test_a_newer_attempt_that_already_finished_reads_running_first(self):
+        host = AttemptHost(("failed", 1), ("green", 2))
+        p = self.poller(host)
+        p.poll(REPO, SHA)
+        self.clock.t += 61
+        rc, out, _ = self.wait(p)
+        self.assertEqual((rc, host.calls), (0, 3))
+
+    def test_a_failure_confirmed_by_a_fresh_check_is_final(self):
+        host = AttemptHost(("failed", 1), ("failed", 1))
+        p = self.poller(host)
+        p.poll(REPO, SHA)
+        self.clock.t += 61
+        rc, out, _ = self.wait(p)
+        self.assertEqual((rc, host.calls), (1, 2))
+        self.assertIn("test / unit", out)
+
+    def test_cached_green_stays_final_without_a_call(self):
+        host = AttemptHost(("green", 1))
+        p = self.poller(host)
+        p.poll(REPO, SHA)
+        self.clock.t += 300
+        rc, _, _ = self.wait(p)
+        self.assertEqual((rc, host.calls), (0, 1))
+
+
 class EventTests(Base):
     def test_event_short_circuits_without_polling(self):
         host = FakeHost("running")
@@ -334,6 +404,14 @@ class HostTests(Base):
         res = cw.GitHubHost(run=run).fetch(REPO, SHA)
         self.assertEqual((res["state"], res["remaining"], len(res["runs"])), ("green", 4321, 1))
         self.assertIn(f"head_sha={SHA}", calls[0][-1])
+
+    def test_github_keeps_run_attempt_for_the_rerun_check(self):
+        body = json.dumps({"workflow_runs": [
+            {"id": 37989936260, "name": "test", "status": "completed", "conclusion": "failure", "head_sha": SHA,
+             "html_url": "u", "run_attempt": 2}]})
+        run = lambda argv, **kw: SimpleNamespace(returncode=0, stdout="HTTP/2.0 200 OK\r\n\r\n" + body, stderr="")  # noqa: E731
+        res = cw.GitHubHost(run=run).fetch(REPO, SHA)
+        self.assertEqual([r["attempt"] for r in res["runs"]], [2])
 
     def test_github_403_raises_rate_limited(self):
         run = lambda argv, **kw: SimpleNamespace(returncode=1, stdout="", stderr="gh: API rate limit exceeded (HTTP 403)")  # noqa: E731
