@@ -5,7 +5,7 @@ keeps its own licence.
 
 | Component | Licence | How Swarm gets it |
 |---|---|---|
-| [psycopg](https://www.psycopg.org/) (`psycopg[binary]`, bundles libpq) | LGPL-3.0 (libpq: PostgreSQL Licence) | pip, into Swarm's venv on first run |
+| [psycopg](https://www.psycopg.org/) (`psycopg[binary]`, bundles libpq) | LGPL-3.0 (libpq: PostgreSQL Licence) | pip (pinned, hash-checked), into Swarm's venv, only for a Postgres board |
 | [zstandard](https://github.com/indygreg/python-zstandard) | BSD-3-Clause | pip, into Swarm's venv on first run |
 | [rust-code-analysis](https://github.com/mozilla/rust-code-analysis) | MPL-2.0 | complexity-analyzer: downloaded on demand, sha256-verified |
 | eslint, eslint-plugin-sonarjs, @typescript-eslint/parser, typescript, dependency-cruiser, jscpd, knip | each package's own licence | complexity-analyzer: npm, exact versions in `skills/complexity-analyzer/node-tools/package-lock.json`, on demand |

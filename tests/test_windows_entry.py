@@ -79,9 +79,9 @@ class WinLaunchTests(Base):
         with mock.patch.object(winlaunch.subprocess, "run", side_effect=AssertionError("rebuilt")):
             self.assertEqual(winlaunch.ensure_venv(), self.py)
 
-    def test_missing_psycopg_is_reinstalled_even_with_a_matching_stamp(self):
+    def test_missing_zstandard_is_reinstalled_even_with_a_matching_stamp(self):
         self.full_venv()
-        shutil.rmtree(self.venv / "lib" / "python3.12" / "site-packages" / "psycopg")
+        shutil.rmtree(self.venv / "lib" / "python3.12" / "site-packages" / "zstandard")
         calls = []
         def run(cmd, **kw):
             calls.append(cmd)
@@ -91,6 +91,30 @@ class WinLaunchTests(Base):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][1:4], ["-m", "pip", "install"])          # pip only, no new venv
         self.assertEqual((self.venv / ".swarm-requirements").read_text().strip(), winlaunch.requirements_stamp())
+
+    def test_missing_psycopg_is_reinstalled_for_a_postgres_board(self):
+        self.full_venv()
+        shutil.rmtree(self.venv / "lib" / "python3.12" / "site-packages" / "psycopg")
+        cfg = self.tmp / "pg.toml"
+        cfg.write_text('[board]\nbackend = "postgres"\n')
+        calls = []
+        def run(cmd, **kw):
+            calls.append(cmd)
+            return mock.Mock(returncode=0)
+        with mock.patch.dict(os.environ, {"SWARM_CONFIG": str(cfg)}), \
+                mock.patch.object(winlaunch.subprocess, "run", run):
+            winlaunch.ensure_venv()
+        (cmd,) = calls
+        self.assertIn("--require-hashes", cmd)
+        self.assertIn("--only-binary=:all:", cmd)
+        self.assertEqual(cmd[-1], str(winlaunch.PLUGIN_ROOT / "requirements-postgres.txt"))
+
+    def test_file_board_venv_without_psycopg_is_complete(self):
+        self.full_venv()
+        shutil.rmtree(self.venv / "lib" / "python3.12" / "site-packages" / "psycopg")
+        with mock.patch.dict(os.environ, {"SWARM_CONFIG": str(self.tmp / "none.toml")}), \
+                mock.patch.object(winlaunch.subprocess, "run", side_effect=AssertionError("rebuilt")):
+            self.assertEqual(winlaunch.ensure_venv(), self.py)
 
     def test_failed_setup_exits_with_a_message(self):
         with mock.patch.object(winlaunch.subprocess, "run", return_value=mock.Mock(returncode=1)):

@@ -100,7 +100,7 @@ Swarm is installed from its own marketplace (this repository).
 - **Setup.** On a machine that was never set up, nothing runs until you run `swarm init` (see
   Install). Once set up, the session-start hook runs `swarm bootstrap` in the background the
   first time each plugin version starts, whether or not a job is active. Setup creates a Python venv in `~/.local/share/swarm/venv`
-  (pip installs `psycopg[binary]` and `zstandard` from PyPI), the launcher
+  (pip installs pinned, hash-checked wheels from PyPI: `zstandard`, plus `psycopg` for a Postgres board), the launcher
   `~/.local/bin/swarm`, `~/.config/swarm/config.toml` and the board. It adds the spool
   directory to `sandbox.filesystem.allowWrite` in `~/.claude/settings.json`, and for Codex adds
   the spool and marker directories to `[sandbox_workspace_write] writable_roots` and sets
