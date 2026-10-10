@@ -106,6 +106,22 @@ case "${1:-}" in turn|done)
     fi
   fi
 esac
+# A machine that was never set up (no config, no launcher, no bootstrap stamp of any version) is
+# not set up silently: SessionStart says what to run and writes nothing at all (no host dir, no
+# bytecode cache). An existing install is set up as before.
+if [ "${1:-}" = "session-start" ]; then
+  EXISTING=""
+  [ -e "$CFG" ] || [ -L "$CFG" ] && EXISTING=1
+  [ -e "$HOME/.local/bin/swarm" ] || [ -L "$HOME/.local/bin/swarm" ] && EXISTING=1
+  for S in "$HD"/bootstrap-*; do [ -f "$S" ] && { EXISTING=1; break; }; done
+  if [ -z "$EXISTING" ]; then
+    cat >/dev/null
+    MSG="[swarm] not set up: run \`swarm init\` (the plugin's bin/swarm). It creates ~/.config/swarm/config.toml, the launcher ~/.local/bin/swarm and the board, and edits no Claude or Codex settings file unless you pass --apply-settings; see the README. Until then the swarm hooks do nothing and nothing has been written."
+    printf '{"systemMessage": "%s"}\n' "$MSG"
+    printf '%s\n' "$MSG" >&2
+    exit 0
+  fi
+fi
 D="$(cd "$(dirname "$0")/.." && pwd)"
 V="${SWARM_VENV:-$HOME/.local/share/swarm/venv}"
 # Bytecode cache: without one every run recompiles ~1 MB of source (~0.2 s of each command, and of
@@ -156,18 +172,6 @@ if [ "${1:-}" = "session-start" ]; then
   fi
   STAMP="$PRIV/bootstrap-${H:-unknown}-${VER:-0}-$KEY"
   [ -f "$STAMP" ] && exit 0
-  # A machine that was never set up (no config, no launcher, no stamp of any version) is not set
-  # up silently: say what to run and do nothing else. An existing install is set up as before.
-  EXISTING=""
-  [ -e "$CFG" ] || [ -L "$CFG" ] && EXISTING=1
-  [ -e "$HOME/.local/bin/swarm" ] || [ -L "$HOME/.local/bin/swarm" ] && EXISTING=1
-  for S in "$PRIV"/bootstrap-*; do [ -f "$S" ] && { EXISTING=1; break; }; done
-  if [ -z "$EXISTING" ]; then
-    MSG="[swarm] not set up: run \`swarm init\` (the plugin's bin/swarm; see the README). Until then the swarm hooks do nothing and nothing outside the plugin is changed."
-    printf '{"systemMessage": "%s"}\n' "$MSG"
-    printf '%s\n' "$MSG" >&2
-    exit 0
-  fi
   if command -v setsid >/dev/null 2>&1; then
     setsid "$D/bin/swarm" bootstrap $HOSTARG --quiet --stamp "$STAMP" </dev/null >>"$PRIV/bootstrap.log" 2>&1 &
   else

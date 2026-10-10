@@ -129,6 +129,7 @@ class WinHookTests(Base):
         msg = json.loads(out)["systemMessage"]
         self.assertIn("swarm init", msg)
         self.assertIn("not set up", msg)
+        self.assertFalse((self.tmp / ".local").exists())                     # nothing written, not even the host dir
 
     def test_session_start_keeps_bootstrapping_an_existing_install(self):
         Path(os.environ["SWARM_CONFIG"]).write_text("")
@@ -203,6 +204,7 @@ class WinHookTests(Base):
         if os.name == "nt":
             self.skipTest("needs symlink privilege")
         target = self.tmp / "elsewhere"; target.mkdir()
+        Path(os.environ["SWARM_CONFIG"]).write_text("")        # an existing install (a new one only gets the init notice)
         self.host.parent.mkdir(parents=True)
         self.host.symlink_to(target)
         rc, out = self.run_hook("--host", "claude", "session-start")

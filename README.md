@@ -54,8 +54,10 @@ first session only says `[swarm] not set up: run swarm init`. Run `swarm init` (
 the launcher `~/.local/bin/swarm`, and creates the board. It edits no host settings file: it
 prints the lines to add (Claude `sandbox.filesystem.allowWrite`, Codex `writable_roots` and
 `[agents] max_depth`), and `swarm init --apply-settings` makes those edits (with a backup).
-A machine that is already set up (a config, the launcher or an earlier bootstrap exists)
-keeps working as before, with no action. Then start a new Claude session. In Codex, trust the
+The answer is stored (`~/.local/share/swarm/host/settings-consent`) and followed by the
+automatic setup and `swarm upgrade`. A machine that is already set up (a config, the launcher
+or an earlier bootstrap exists, no answer stored) counts as yes and keeps working as before,
+with no action. Then start a new Claude session. In Codex, trust the
 plugin in `/hooks`, start a new session, then another to load its configuration. Run
 `swarm doctor` to check setup.
 

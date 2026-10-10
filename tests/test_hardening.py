@@ -1506,6 +1506,8 @@ class HostDirProblemAtSessionStartTests(ProbeEnv):
 
     @posix_only("runs the POSIX sh launcher")
     def test_a_symlinked_host_dir_is_reported(self):
+        self.config.parent.mkdir(parents=True, exist_ok=True)
+        self.config.touch()                      # an existing install (a new one only gets the `swarm init` notice)
         share = self.home / ".local/share/swarm"
         share.mkdir(parents=True)
         (self.home / "elsewhere").mkdir()

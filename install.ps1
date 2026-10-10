@@ -286,7 +286,7 @@ function Invoke-Swarm([string]$sw, [string[]]$Arguments, [hashtable]$Env = @{}) 
 function Invoke-Bootstrap([string]$h, [string]$sw) {
   Log "[$h] swarm bootstrap --host $h"
   $chan = if ($ChannelGiven -and -not $Ref -and $Script:PinActive) { $Script:ResolvedChannel } else { '' }
-  $r = Invoke-Swarm $sw @('bootstrap', '--host', $h) @{ SWARM_CHANNEL = $chan; SWARM_NO_MIGRATE = '1' }
+  $r = Invoke-Swarm $sw @('bootstrap', '--host', $h) @{ SWARM_CHANNEL = $chan; SWARM_NO_MIGRATE = '1'; SWARM_APPLY_SETTINGS = '1' }
   Show-Steps $r.Out
   if ($r.Code -ne 0) { Die "[$h] swarm bootstrap failed (see output above)" }
   if ($r.Out -match '(?m)^config .*manual') { $Script:ConfigNeedsAttention = $true; $Script:ConfigDetail = (($r.Out -split "`r?`n") | Where-Object { $_ -match '^config ' } | Select-Object -First 1) }

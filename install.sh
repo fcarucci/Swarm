@@ -716,7 +716,7 @@ run_bootstrap() {
   # SWARM_CHANNEL: remember an explicitly chosen channel for `swarm upgrade` (bootstrap writes it
   # into the config's [upgrade] section).
   chan=""; if [ "$CHANNEL_GIVEN" = "1" ] && [ -z "$REF_GIVEN" ] && [ "$PIN_ACTIVE" = "1" ]; then chan="$CHANNEL"; fi
-  out="$(SWARM_CHANNEL="$chan" SWARM_NO_MIGRATE=1 "$sw" bootstrap --host "$host" 2>&1 </dev/null)"
+  out="$(SWARM_CHANNEL="$chan" SWARM_NO_MIGRATE=1 SWARM_APPLY_SETTINGS=1 "$sw" bootstrap --host "$host" 2>&1 </dev/null)"
   rc=$?
   set -e
   printf '%s\n' "$out" | paint_lines

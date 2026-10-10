@@ -80,13 +80,18 @@ def _detached(cmd: list[str], log: Path) -> None:
                          creationflags=flags if os.name == "nt" else 0, env=winlaunch.run_env(PLUGIN_ROOT))
 
 
-def existing_install(priv: Path) -> bool:
+NOT_SET_UP = ("[swarm] not set up: run `swarm init` (the plugin's bin/swarm). It creates ~/.config/swarm/config.toml, "
+              "the launcher ~/.local/bin/swarm and the board, and edits no Claude or Codex settings file unless you "
+              "pass --apply-settings; see the README. Until then the swarm hooks do nothing and nothing has been written.")
+
+
+def existing_install() -> bool:
     """A machine set up before: its config, the launcher, or a bootstrap stamp of any version
     (bin/swarm-hook and swarm.bootstrap.existing_install test the same three things)."""
     cfg = Path(os.environ.get("SWARM_CONFIG") or (_home() / ".config" / "swarm" / "config.toml"))
     launcher = _home() / ".local" / "bin" / ("swarm.cmd" if os.name == "nt" else "swarm")
     return (os.path.lexists(cfg) or os.path.lexists(launcher)
-            or any(p.is_file() for p in priv.glob("bootstrap-*")))
+            or any(p.is_file() for p in (_home() / ".local" / "share" / "swarm" / "host").glob("bootstrap-*")))
 
 
 def session_start(host: str, priv: Path | None) -> int:
@@ -110,12 +115,6 @@ def session_start(host: str, priv: Path | None) -> int:
     stamp = priv / f"bootstrap-{h}-{ver}-{key}"
     if stamp.is_file():
         return 0
-    if not existing_install(priv):
-        msg = ("[swarm] not set up: run `swarm init` (the plugin's bin/swarm; see the README). Until then the "
-               "swarm hooks do nothing and nothing outside the plugin is changed.")
-        print(json.dumps({"systemMessage": msg}))
-        print(msg, file=sys.stderr)
-        return 0
     args = ["bootstrap", *(["--host", host] if host else []), "--quiet", "--stamp", str(stamp)]
     _detached([sys.executable, str(HERE / "winlaunch.py"), *args], priv / "bootstrap.log")
     return 0
@@ -134,6 +133,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     event = argv[0]
     try:
+        if event == "session-start" and not existing_install():   # a new machine: say so, write nothing
+            sys.stdin.read()
+            print(json.dumps({"systemMessage": NOT_SET_UP}))
+            print(NOT_SET_UP, file=sys.stderr)
+            return 0
         priv = private_dir()
         if event == "session-start":
             return session_start(host, priv)

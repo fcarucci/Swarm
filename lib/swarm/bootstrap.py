@@ -429,6 +429,61 @@ def host_setup(host: str | None, cfg: dict | None = None, *, apply_settings: boo
     return Step("host", "skipped", "no host given")
 
 
+CONSENT_FILE = "settings-consent"      # in the host dir: "yes" or "no"
+
+
+def read_consent() -> str | None:
+    """The stored answer to "may the swarm edit the host settings files": "yes" or "no", or None
+    when none was given. Read from the host-only dir, without following links."""
+    try:
+        d = safefs.open_base(paths.host_dir(), create=False, strict_mode=0o700)
+    except (OSError, ValueError):
+        return None
+    try:
+        text = safefs.read_text(d, CONSENT_FILE, limit=16)
+    except (OSError, ValueError):
+        text = None
+    finally:
+        os.close(d)
+    text = (text or "").strip()
+    return text if text in ("yes", "no") else None
+
+
+def write_consent(value: str) -> bool:
+    """Store "yes" or "no" (0600, in the host-only dir). False when it can't be stored."""
+    assert value in ("yes", "no")
+    try:
+        d = safefs.open_base(paths.host_dir(), strict_mode=0o700)
+    except (OSError, ValueError):
+        return False
+    try:
+        safefs.write_atomic(d, CONSENT_FILE, value + "\n")
+        return True
+    except (OSError, ValueError):
+        return False
+    finally:
+        os.close(d)
+
+
+def settings_consent(config: Path | None = None, *, existing: bool | None = None, grant: bool = False) -> bool:
+    """Whether the host settings files may be edited. The stored answer wins. Without one, an
+    install that existed before this consent was recorded (`existing`, decided before anything
+    of this run was written) is grandfathered as "yes", which is stored once, so it keeps
+    working with no action; a new one is "no" (and stored, so that a config or launcher that
+    `swarm init` itself creates never turns into consent). grant=True is an explicit consent
+    (`swarm init --apply-settings`, the installers): "yes", stored."""
+    if grant:
+        write_consent("yes")
+        return True
+    stored = read_consent()
+    if stored:
+        return stored == "yes"
+    if existing is None:
+        existing = existing_install(config)
+    write_consent("yes" if existing else "no")
+    return existing
+
+
 def existing_install(config: Path | None = None) -> bool:
     """Whether this machine was set up before: its config exists, or the launcher does, or a
     bootstrap stamp of any plugin version is in the host dir (bin/swarm-hook tests the same three

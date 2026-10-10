@@ -58,9 +58,9 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("not set up", msg)
         time.sleep(0.3)
         self.assertFalse((self.home / "bootstrap-entered").exists())      # nothing was launched
-        for rel in (".local/bin", ".config/swarm", ".claude", ".codex", ".local/state/swarm"):
-            self.assertFalse((self.home / rel).exists(), rel)               # nothing else was written
-        self.assertEqual(list((self.home / ".local/share/swarm/host").glob("bootstrap-*")), [])
+        self.assertIn("~/.config/swarm/config.toml", msg)                    # what init creates, named
+        self.assertEqual(sorted(p.name for p in self.home.iterdir() if p.name not in ("plugin", "none.toml")), [])
+        self.assertFalse((self.home / ".local").exists())                    # no host dir, no pyc, no stamp
 
     @posix_only("runs a POSIX sh script (the Windows entry points are tested in test_windows_*.py)")
     def test_session_start_keeps_bootstrapping_an_existing_install(self):

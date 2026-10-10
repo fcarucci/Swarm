@@ -280,12 +280,15 @@ def _init_hosts(args, existing: bool) -> list[str]:
 def cmd_init(cfg: dict, args) -> int:
     """The explicit setup: the config, the launcher, the board and the host settings. Nothing
     outside the plugin is edited without consent: a new install gets the lines to add printed;
-    --apply-settings (or an install that already existed, which kept this behaviour) edits them."""
+    --apply-settings stores the consent ("yes", bootstrap.settings_consent) and edits them. An install
+    that existed before is grandfathered as "yes"; a plain `swarm init` on a new one stores "no",
+    which the detached bootstrap and `swarm upgrade` then follow."""
     from swarm.board import IncompatibleStorage
     from swarm.board.autoinit import initialize
     from swarm import bootstrap, ci_migrate, paths
     config = getattr(args, "config", None) or paths.config_path()
-    existing = bootstrap.existing_install(config)
+    existing = bootstrap.existing_install(config)   # before this run writes the config and launcher
+    apply = bootstrap.settings_consent(config, existing=existing, grant=bool(getattr(args, "apply_settings", False)))
     setup = [bootstrap.ensure_launcher(), bootstrap.ensure_config(config)]
     if setup[1].status == "changed":       # a new config was written: the board is set up from it
         cfg = load_config(config)
@@ -301,7 +304,6 @@ def cmd_init(cfg: dict, args) -> int:
         print(note)
     step = bootstrap.supervisor_step(cfg, config)
     print(f"supervisor: {step.status}: {step.detail}")
-    apply = bool(getattr(args, "apply_settings", False)) or existing
     setup += [bootstrap.host_setup(h, cfg, apply_settings=apply) for h in _init_hosts(args, existing)]
     print(bootstrap.format_steps(setup, _use_color(args)))
     print(f"setup done: launcher, config and board are in place (venv: {paths.venv_dir()})")
@@ -2686,6 +2688,9 @@ def _parser() -> argparse.ArgumentParser:
     bs = sub.add_parser("bootstrap", help="set the swarm up for this host (run automatically by the plugin)")
     bs.add_argument("--host", choices=["claude", "codex"]); bs.add_argument("--quiet", action="store_true")
     bs.add_argument("--stamp", help=argparse.SUPPRESS)
+    bs.add_argument("--apply-settings", action="store_true", help="consent to editing the host settings files "
+                    "(stored; the default follows the stored answer, an install that predates it counts as yes)")
+    bs.add_argument("--no-apply-settings", action="store_true", help="edit no host settings file in this run")
     bs.add_argument("--no-color", action="store_true")
     mg = sub.add_parser("migrate", help="remove the old ~/.claude/skills/swarm install (hooks in settings.json, the directory)")
     mg.add_argument("--force", action="store_true")
@@ -3513,8 +3518,13 @@ def cmd_notices(cfg: dict, args) -> int:
 
 
 def cmd_bootstrap(cfg: dict, args) -> int:
-    from swarm import bootstrap
-    steps = bootstrap.bootstrap(args.host, config=args.config, stamp=Path(args.stamp) if args.stamp else None)
+    from swarm import bootstrap, paths
+    config = args.config or paths.config_path()
+    existing = bootstrap.existing_install(config)   # before this run writes the config and launcher
+    grant = bool(args.apply_settings) or os.environ.get("SWARM_APPLY_SETTINGS") == "1"   # the installers
+    apply = False if args.no_apply_settings else bootstrap.settings_consent(config, existing=existing, grant=grant)
+    steps = bootstrap.bootstrap(args.host, config=args.config, stamp=Path(args.stamp) if args.stamp else None,
+                                apply_settings=apply)
     shown = [s for s in steps if not args.quiet or s.status not in ("ok", "skipped")]
     if shown:
         print(bootstrap.format_steps(shown, _use_color(args)))
