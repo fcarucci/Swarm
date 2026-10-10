@@ -1169,3 +1169,7 @@ Seats: security reviewer (opus; read-only), judge (opus).
 
 - Task 6: `test_drive_activation_refused_when_supervisor_disabled` (message names `swarm supervise enable` and `--no-drive --reason`); `test_supervise_disable_warns_and_halts_drive_jobs`.
 - Task 1: `test_doctor_fails_drive_job_on_host_with_supervisor_disabled`.
+- [M1] additions (judge, board #27577):
+  - Task 1: doctor's drive check requires a **running** timer (unit active+enabled via `systemd.manager_env()`, last pass < 2 × `timer_minutes`), not just `[supervise] enabled`: `test_doctor_fails_drive_job_when_timer_not_running`; on macOS/Windows doctor reports "drive mode unavailable: no supervisor timer".
+  - Task 6: `swarm supervise disable` writes the [F5] halt into each local drive ledger and stops live seats; `enable` unhalts those and shifts deadlines (`test_supervise_disable_halts_drive_ledgers_and_stops_seats`, `test_supervise_enable_unhalts_and_shifts_deadlines`); `disable` refused for enrolled seat sessions (`test_supervise_disable_refused_for_seat_session`); drive activation refused when the timer is not running and on macOS/Windows (`test_drive_activation_refused_without_running_timer`, `test_drive_activation_refused_on_macos_and_windows`).
+  - Task 14: release notes and skill text list the fourth breaking change (`activate --goal` fails until `swarm supervise enable`).

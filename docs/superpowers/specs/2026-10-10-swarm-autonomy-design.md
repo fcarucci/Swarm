@@ -259,6 +259,19 @@ disabled (or switched off), naming the fix: `swarm supervise enable`, or `--no-d
 for an active drive job whose owner host has the supervisor disabled. Disabling the supervisor while drive jobs
 are active (`swarm supervise disable`) warns and lists them; it is treated as a global halt of those jobs ([F5]
 semantics: deadlines shift), not as tamper. Owned by plan Task 6 (activation) and Task 1 (doctor).
+Additions (design judge, board #27577):
+1. `swarm supervise disable` itself writes the [F5] halt (reason `supervisor disabled`, actor recorded) into every
+   drive job ledger owned by this host+user and stops their live seats (scopes confirmed absent); `swarm supervise
+   enable` unhalts exactly those halts and shifts their deadlines by the halted time ([F5]).
+2. Activation and doctor check that a supervisor **timer actually runs** (the user unit `swarm-supervise.timer` is
+   active and enabled, read with the manager environment of §5, and the last pass is younger than
+   `2 × timer_minutes`), not only that the config says enabled. Drive activation is refused on macOS and Windows,
+   where no timer is installed (`--no-drive --reason` remains available there).
+3. `swarm supervise disable` is refused for enrolled seat sessions, like `swarm halt` ([F5]); the requester session
+   and the person path may run it.
+4. A fourth breaking change for the release notes and skill text: with the supervisor off by default and "goal
+   implies drive", `swarm activate --goal` fails out of the box until `swarm supervise enable` has been run (the
+   error names it and `--no-drive --reason`).
 
 ### 3.2 The job driver
 
@@ -1136,9 +1149,10 @@ Transcripts and the board export are attached to the judge's evidence.
 
 - **[A]** Existing active goal jobs are not converted: they keep running as non-drive jobs; `swarm doctor`
   lists them ("goal job not autonomous: activated before drive mode") so a person can re-activate them. The
-  release notes call out the three breaking changes for goal jobs: `--goal` implies drive mode; questions need
+  release notes call out the four breaking changes for goal jobs: `--goal` implies drive mode; questions need
   `--default`; and (**[G5]**) the activating (requester) session's Agent-tool spawns are refused in drive jobs, so
-  the engineering-team and swarm skills staff through `swarm seat request` instead (rewritten in plan Task 14).
+  the engineering-team and swarm skills staff through `swarm seat request` instead (rewritten in plan Task 14); and (**[M1].4**) with the supervisor off by default, `activate --goal` fails until `swarm
+  supervise enable` has been run.
 
 ## 10. Review log
 
