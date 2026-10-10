@@ -679,9 +679,11 @@ def _connect_timeout(db: dict, hosts: int) -> int:
     return min(timeout, MULTI_HOST_CONNECT_TIMEOUT) if hosts > 1 and timeout else timeout
 
 
-def _connect(cfg: dict, admin: bool = False, any_host: bool = False) -> psycopg.Connection:
+def _connect(cfg: dict, admin: bool = False, any_host: bool = False,
+             read_only: bool = False) -> psycopg.Connection:
     """One autocommit connection, as swarm.connect() made it, with the query deadline.
-    Failure -> BoardUnavailable."""
+    read_only: the session's default_transaction_read_only is on, so the server itself refuses
+    any write (`swarm snapshot`). Failure -> BoardUnavailable."""
     db = cfg["database"]
     # No named prepared statements unless [database] prepared_statements = true. psycopg
     # prepares a query after its 5th execution; through a connection pooler, a LISTENing
@@ -692,6 +694,8 @@ def _connect(cfg: dict, admin: bool = False, any_host: bool = False) -> psycopg.
     extra = {} if db.get("prepared_statements") else {"prepare_threshold": None}
     if db.get("application_name"):
         extra["application_name"] = db["application_name"]
+    if read_only:
+        extra["options"] = "-c default_transaction_read_only=on"
     hosts = database_hosts(db)   # a bad host or port list: BoardError, saying which
     try:
         conn = _DeadlineConnection.connect(
@@ -944,6 +948,21 @@ def _agent_match(agent_key: str | None, name: str | None) -> tuple[str, tuple]:
     return ("agent_key = %s", (agent_key,)) if agent_key else ("name = %s", (name,))
 
 
+_SCOPE_SQL = """
+            SELECT job FROM jobs WHERE job = ANY(%(jobs)s::text[])
+            UNION
+            SELECT job FROM jobs WHERE session_id = ANY(%(sessions)s::text[]) AND status IN ('active','paused')
+            UNION
+            SELECT (SELECT x.job FROM jobs x WHERE x.session_id = s
+                      AND NOT EXISTS (SELECT 1 FROM jobs y WHERE y.session_id = s AND y.status IN ('active','paused'))
+                    ORDER BY COALESCE(x.finished_at,x.created_at) DESC, x.job DESC LIMIT 1)
+              FROM unnest(%(sessions)s::text[]) s
+            UNION
+            SELECT job FROM jobs WHERE status IN ('active','paused')
+               AND cardinality(%(jobs)s::text[]) = 0 AND cardinality(%(sessions)s::text[]) = 0
+"""
+
+
 from .blockers import SqlBlockers, sql_schema, migrate_sql, rollup, protects
 from .events import SqlEvents, sql_schema as events_schema
 from .bgcmds import SqlBgCommands, sql_schema as bg_schema
@@ -957,19 +976,31 @@ class PostgresBoard(SqlBlockers, SqlEvents, SqlBgCommands, Board):
     which is what the pre-refactor code relied on (a failed INSERT in allocate_name's race
     loop does not poison the connection)."""
 
-    def __init__(self, cfg: dict, readers: bool = False):
+    supports_subscribe = True   # LISTEN/NOTIFY (change_mode says whether it works right now)
+
+    def __init__(self, cfg: dict, readers: bool = False, read_only: bool = False):
         super().__init__(cfg)
         self._listening: tuple[str, ...] = ()   # the channels subscribe() was asked for
         self._polling = False                   # LISTEN is unavailable: wait_for_change polls
         self._retry_at = 0.0
+        self._session_read_only = read_only     # the server refuses writes on this connection
         try:
-            self._conn = _connect(cfg)
+            self._conn = _connect(cfg, read_only=read_only)
         except BoardUnavailable:
             if not (readers and len(database_hosts(cfg["database"])) > 1):
                 raise
             # no primary: a read-only command is served by whichever standby answers
-            self._conn = _connect(cfg, any_host=True)
+            self._conn = _connect(cfg, any_host=True, read_only=read_only)
             self.degraded = self._conn.info.host
+        if read_only:
+            from .base import refuse_writes
+            refuse_writes(self, "the snapshot board")
+
+    @property
+    def change_mode(self) -> str:
+        """"push" while LISTEN is live; "degraded" while a standby serves us or LISTEN is refused
+        (wait_for_change then polls)."""
+        return "degraded" if (self.degraded or self._polling) else "push"
 
     @contextlib.contextmanager
     def op_timeout(self, seconds: float):
@@ -1377,35 +1408,41 @@ class PostgresBoard(SqlBlockers, SqlEvents, SqlBgCommands, Board):
             ((tool_name or "?")[:TOOL_NAME_MAX], agent_key)).fetchone()
         return Member(*row) if row else None
 
-    def watch_snapshot(self, job, session, recent_minutes, limit):
+    def watch_snapshot(self, job, session, recent_minutes, limit, *, jobs=(), sessions=(), after_id=0):
+        """One statement for a whole watch (or `swarm snapshot`) draw, as a SnapshotBoard.
+
+        Scope: `job` alone if given; else the jobs of host session `session` (the open ones, or
+        the last finished one); else every active or paused job. jobs / sessions are the same for
+        several: the union of the named jobs and the jobs shown for each named session (none
+        named: every active or paused job). The newest `limit` messages per job, only those with
+        id > after_id: the incremental form, which the caller merges into what it has (see
+        SnapshotBoard.merged). Blockers: the open ones (a snapshot never shows closed ones)."""
         from swarm.watchdata import SnapshotBoard
         agent_cols = _AGENT_STATUS_COLS   # `messages` is agents.message_count: no per-agent count
+        if job is not None:
+            jobs, sessions = (job,), ()
+        elif session is not None and not sessions:
+            sessions = (session,)
         query = f"""
-          WITH scope AS MATERIALIZED (
-            SELECT job FROM jobs WHERE (%s::text IS NOT NULL AND job = %s)
-                OR (%s::text IS NULL AND (%s::text IS NULL AND status IN ('active','paused')
-                                         OR (session_id = %s AND (status IN ('active','paused') OR job = (
-                                           SELECT job FROM jobs WHERE session_id = %s
-                                            AND NOT EXISTS (SELECT 1 FROM jobs WHERE session_id = %s AND status IN ('active','paused'))
-                                            ORDER BY COALESCE(finished_at,created_at) DESC, job DESC LIMIT 1)))))
+          WITH scope AS MATERIALIZED ({_SCOPE_SQL}
           ), selected AS MATERIALIZED (
             SELECT {_JOB_STATUS_COLS} FROM job_status WHERE job IN (SELECT job FROM scope)
           ), visible AS MATERIALIZED (
             SELECT {{agent_cols}} FROM agent_status
              WHERE job IN (SELECT job FROM selected)
-               AND (%s::float IS NULL OR status NOT IN ('completed','left','dead')
-                    OR greatest(ended_at,last_contact_at) >= now() - %s * interval '1 minute')
+               AND (%(recent)s::float IS NULL OR status NOT IN ('completed','left','dead')
+                    OR greatest(ended_at,last_contact_at) >= now() - %(recent)s * interval '1 minute')
           ), hidden AS (
             SELECT job, count(*) AS n FROM agent_status
-             WHERE job IN (SELECT job FROM selected) AND %s::float IS NOT NULL
+             WHERE job IN (SELECT job FROM selected) AND %(recent)s::float IS NOT NULL
                AND status IN ('completed','left','dead')
-               AND greatest(ended_at,last_contact_at) < now() - %s * interval '1 minute'
+               AND greatest(ended_at,last_contact_at) < now() - %(recent)s * interval '1 minute'
              GROUP BY job
           ), recent AS (
             SELECT {_MESSAGE_COLS} FROM (
               SELECT {_MESSAGE_COLS}, row_number() OVER (PARTITION BY job ORDER BY id DESC) AS rn
                 FROM messages WHERE job IN (SELECT job FROM selected)
-            ) m WHERE rn <= %s
+            ) m WHERE rn <= %(limit)s AND id > %(after)s
           ), lastposts AS (
             SELECT {_MESSAGE_COLS_M}
               FROM (SELECT DISTINCT job, name FROM visible WHERE status IN ('idle','dead')) a
@@ -1426,13 +1463,49 @@ class PostgresBoard(SqlBlockers, SqlEvents, SqlBgCommands, Board):
             (SELECT jsonb_agg(to_jsonb(r) ORDER BY id) FROM restarts r WHERE job IN (SELECT job FROM selected)),
             (SELECT jsonb_object_agg(job,n) FROM hidden),
             (SELECT jsonb_object_agg(job,jsonb_build_array(verified,failed)) FROM checks),
-            (SELECT jsonb_agg(to_jsonb(b) ORDER BY id) FROM blockers b WHERE job IN (SELECT job FROM selected)),
+            (SELECT jsonb_agg(to_jsonb(b) ORDER BY id) FROM blockers b
+              WHERE state = 'open' AND job IN (SELECT job FROM selected)),
             (SELECT jsonb_object_agg(job,plugin_data) FROM jobs WHERE job IN (SELECT job FROM selected)),
             (SELECT jsonb_agg(to_jsonb(p)) FROM lastposts p)
         """.replace('{agent_cols}', agent_cols)
-        row = self._conn.execute(query, (job,job,job,session,session,session,session,recent_minutes,recent_minutes,
-                                        recent_minutes,recent_minutes,limit)).fetchone()
+        row = self._conn.execute(query, {"jobs": list(jobs), "sessions": list(sessions), "recent": recent_minutes,
+                                         "limit": limit, "after": after_id}).fetchone()
         return SnapshotBoard(self, row)
+
+    def scope_fingerprint(self, jobs=(), sessions=(), recent_minutes=None, with_messages=True, statuses=True):
+        """A cheap digest of what watch_snapshot would show for this scope: (newest message id,
+        job count, job digest, visible agent count, agent digest). The digests are md5 over
+        sorted text rows built from integers and names only, so snapshot.fingerprint_of_rows
+        reproduces them from the rows a consumer holds (timestamps as epoch microseconds).
+        statuses=False: the derived time-based statuses (started/running/idle/dead) all count as
+        one, for a consumer that ages them itself (swarm watch) and must not see ageing as a change."""
+        query = f"""
+          WITH scope AS MATERIALIZED ({_SCOPE_SQL}
+          ), sel AS MATERIALIZED (
+            SELECT job || '|' || status || '|' || agents || '|' || messages || '|'
+                   || coalesce((extract(epoch from last_activity_at) * 1000000)::bigint::text, '') AS s, job
+              FROM job_status WHERE job IN (SELECT job FROM scope)
+          ), vis AS MATERIALIZED (
+            SELECT job || '|' || agent_key || '|'
+                   || CASE WHEN %(statuses)s OR status IN ('completed','left') THEN status ELSE 'live' END
+                   || '|' || (ended_at IS NOT NULL)::int || '|' || tool_calls || '|'
+                   || coalesce((extract(epoch from last_contact_at) * 1000000)::bigint::text, '') AS s
+              FROM agent_status
+             WHERE job IN (SELECT job FROM sel)
+               AND (%(recent)s::float IS NULL OR status NOT IN ('completed','left','dead')
+                    OR greatest(ended_at,last_contact_at) >= now() - %(recent)s * interval '1 minute')
+          )
+          SELECT CASE WHEN %(msgs)s THEN (SELECT coalesce(max(id), 0) FROM messages
+                                           WHERE job IN (SELECT job FROM sel)) ELSE 0 END,
+                 (SELECT count(*) FROM sel),
+                 (SELECT coalesce(md5(string_agg(s, ',' ORDER BY s COLLATE "C")), '') FROM sel),
+                 (SELECT count(*) FROM vis),
+                 (SELECT coalesce(md5(string_agg(s, ',' ORDER BY s COLLATE "C")), '') FROM vis)
+        """
+        row = self._conn.execute(query, {"jobs": list(jobs), "sessions": list(sessions),
+                                         "recent": recent_minutes, "msgs": bool(with_messages),
+                                         "statuses": bool(statuses)}).fetchone()
+        return tuple(row)
 
     def hook_member(self, agent_key: str) -> Member | None:
         row = self._conn.execute(
@@ -2009,7 +2082,7 @@ class PostgresBoard(SqlBlockers, SqlEvents, SqlBgCommands, Board):
         if self.degraded:
             db = {**self.cfg["database"], "connect_timeout": min(2, self.cfg["database"]["connect_timeout"])}
             try:
-                conn = _connect({**self.cfg, "database": db})
+                conn = _connect({**self.cfg, "database": db}, read_only=self._session_read_only)
             except BoardUnavailable:
                 self._retry_at = time.monotonic() + LIVE_RETRY_SECONDS
                 return False
