@@ -16,7 +16,7 @@
 - Terminal states of a drive goal job: MET, UNREACHABLE (judge verdict with reasons, or the labelled mechanical one), CANCELLED (a person). Never idle/stalled/waiting for the coordinator.
 - No new always-on process: only the timer-driven pass, its per-session runners, and the existing opt-in events listener.
 - Every agent joins the board (enrol deadline `enrol_minutes` kills sessions that do not).
-- Models (Francesco's latest policy): Haiku for simple tasks, Sonnet for coding and reviewers, Opus for leads, judges and the security reviewer. Config: `engineering_lead = judge = security_reviewer = "opus"`; `engineer = qa = reviewer = integrator = worker = "sonnet"`; `--complexity simple` → `"haiku"`. Lead and judge clamped to Opus in drive mode.
+- Models: product defaults for drive seats as below. **Build staffing for this job** (Francesco, 2026-10-10: "i want the engineers to be haiku"): every engineer seat in every wave runs on Haiku; reviewers and QA on Sonnet; the security reviewer, the judge and the lead on Opus. Config: `engineering_lead = judge = security_reviewer = "opus"`; `engineer = qa = reviewer = integrator = worker = "sonnet"`; `--complexity simple` → `"haiku"`. Lead and judge clamped to Opus in drive mode.
 - Landing: rebase only (or `[land] strategy = squash-ff` where the project sets it), fast-forward pushes only, never a force push, CI green on the exact rebased SHA, through `swarm land`.
 - Tests: on the box only targeted tests through `/var/tmp/test-slots/test-slot -- <cmd>` run from `tests/` (`cd tests && /var/tmp/test-slots/test-slot -- python3 -B -m unittest test_x`); full suites only in GitHub Actions; wait for CI with `swarm ci wait --repo fcarucci/Swarm --sha <exact sha> --timeout 540` in the foreground; never `gh run watch`.
 - Never put work trees, clones or builds under /tmp (live acceptance uses `~/work/drive-accept/`; seat workdirs under /tmp are refused by the driver). Unit tests keep using the suite sandbox `support.SANDBOX`/`TMPDIR`, short-lived and small, as the existing suite does.
@@ -42,15 +42,22 @@
 
 | Wave | Tasks | Seats (model) | Reviewer |
 |------|-------|---------------|----------|
-| 0 | 1 doctor fix | eng-doctor (haiku, simple) | reviewer (sonnet) |
-| 1 | 2 schema+verdicts, 4 ledger+receipts, 9a clock+barriers | eng-board (sonnet), eng-ledger (sonnet), eng-runner (sonnet) | reviewer (sonnet); security reviewer (opus) on 4 |
-| 2 | 3 seats+claim, 9 runner, 12 questions | eng-board, eng-runner, eng-questions (sonnet) | reviewer (sonnet); security reviewer (opus) on 3 |
-| 3 | 5 hooks+receipts+guardrails, 6 CLI, 7a model freeze | eng-hooks (sonnet), eng-cli (sonnet), eng-driver (sonnet) | security reviewer (opus) on 5; EL on 7a |
-| 4 | 7 next_actions, 8a execute+reconcile, 8b deadlines/terminalize/rollover, 8c tamper/pass/prompts | eng-driver, eng-driver2, eng-driver3, eng-driver4 (all sonnet) | EL + reviewer; security reviewer on 8a, 8b |
-| 5 | 10 pipeline, 11 land+mirrors, 13 triggers | eng-pipeline (sonnet), eng-land (sonnet), eng-trigger (sonnet) | reviewer; security reviewer on 11 |
-| 6 | 14 skill docs, 18 compat | eng-docs (sonnet), eng-board | reviewer |
+| — | reviewer (sonnet): line-by-line + test-quality + mutation gate on every seat; security reviewer (opus): Tasks 3, 4, 5, 8a–8c, 11, 20; QA (sonnet); judge (opus); lead/integrator (opus) | | |
+| 0 | 1 doctor fix | eng-doctor (haiku) | reviewer (sonnet) |
+| 1 | 2 schema+verdicts, 4 ledger+receipts, 9a clock+barriers | eng-board (haiku), eng-ledger (haiku), eng-runner (haiku) | reviewer (sonnet); security reviewer (opus) on 4 |
+| 2 | 3 seats+claim, 9 runner, 12 questions | eng-board, eng-runner, eng-questions (haiku) | reviewer (sonnet); security reviewer (opus) on 3 |
+| 3 | 5 hooks+receipts+guardrails, 6 CLI, 7a model freeze | eng-hooks (haiku), eng-cli (haiku), eng-driver (haiku) | security reviewer (opus) on 5; EL on 7a |
+| 4 | 7 next_actions, 8a execute+reconcile, 8b deadlines/terminalize/rollover, 8c tamper/pass/prompts | eng-driver, eng-driver2, eng-driver3, eng-driver4 (all haiku) | EL + reviewer (sonnet); security reviewer (opus) on 8a, 8b, 8c |
+| 5 | 10 pipeline, 11 land+mirrors, 13 triggers | eng-pipeline (haiku), eng-land (haiku), eng-trigger (haiku) | reviewer (sonnet); security reviewer (opus) on 11 |
+| 6 | 14 skill docs, 18 compat | eng-docs (haiku), eng-board | reviewer |
 | 7 | 15 E2E, 16 chaos, 17 systemd test | qa (sonnet), qa-chaos (sonnet) | EL |
 | 8 | 19 live acceptance, 20 security review, judge | qa + EL; security reviewer (opus); judge (opus) | judge |
+
+**Review gates for Haiku engineers** (every seat's diff, before integration; owned by the Sonnet reviewer, enforced by the lead):
+1. **Line-by-line review** of the whole diff against the task text and spec sections: every changed line accounted for; any behaviour change outside the task's files or Interfaces is a blocking finding (hidden behaviour changes); deleted or weakened existing assertions are blocking.
+2. **Test-quality check:** each new test must fail on the base commit (the reviewer runs it there through test-slot and records the failure) and must assert observable behaviour, not mocks of the code under test or tautologies (vacuous tests are blocking).
+3. **Mutation gate:** the reviewer applies at least 5 targeted mutations to the task's new or changed logic (negate a condition, drop a guard or `return`, off-by-one a bound, swap a CAS/revision check, skip an fsync/lock call), one at a time in a scratch copy of the worktree under `~/work/mutants/<seat>/` (never /tmp), and runs the task's targeted tests through test-slot. Every mutant must be killed; a survivor is a blocking finding with the mutant diff attached. The mutants and results go in the review report.
+4. **Opus security review** additionally gates Tasks 3, 4, 5, 8a/8b/8c, 11 and 20.
 
 Every task: its own branch `feat/drive-<task>` off `feat/swarm-autonomy`, `swarm done --artifact feat/drive-<task>@<sha>`, review, integration by rebase onto `feat/swarm-autonomy`. The final branch lands on `main` through the pipeline after CI green on the exact SHA.
 
@@ -58,7 +65,7 @@ Every task: its own branch `feat/drive-<task>` off `feat/swarm-autonomy`, `swarm
 
 ### Task 1: Doctor reads the timer through the user manager's environment
 
-Seat: eng-doctor (haiku, simple). Spec §5.
+Seat: eng-doctor (haiku). Spec §5.
 
 **Files:**
 - Modify: `lib/swarm/supervisor/systemd.py` (`timer_state`, `linger`, `install`; add `manager_env`)
@@ -139,7 +146,7 @@ Expected: PASS. Then `swarm doctor | grep 'supervise timer'` on the box prints `
 
 ### Task 2: Schema 25 part 1 — typed verdicts, `unreachable`, generation
 
-Seat: eng-board (sonnet). Spec §3.1, §9.
+Seat: eng-board (haiku). Spec §3.1, §9.
 
 **Files:**
 - Modify: `lib/swarm/board/base.py` (`VERDICTS`, `SCHEMA_VERSION = 25`, `record_verdict`, `goal_is_unmet`, `CloseGuard`)
@@ -203,7 +210,7 @@ SQLite: append the four columns to `MIGRATIONS`; the CHECK change uses the exist
 
 ### Task 3: Schema 25 part 2 — seats, drive locks, atomic launch claim
 
-Seat: eng-board (sonnet). Security reviewer reviews. Spec §3.2, §3.4, §3.8, §4.5.
+Seat: eng-board (haiku). Security reviewer reviews. Spec §3.2, §3.4, §3.8, §4.5.
 
 **Files:**
 - Create: `lib/swarm/board/seats.py` (SQL + memory storage, like `board/blockers.py`)
@@ -302,7 +309,7 @@ def test_nested_worktrees_conflict(self):
 
 ### Task 4: Host-private ledger and receipts
 
-Seat: eng-ledger (sonnet). Security reviewer reviews. Spec §4.0, §4.5.
+Seat: eng-ledger (haiku). Security reviewer reviews. Spec §4.0, §4.5.
 
 **Files:**
 - Create: `lib/swarm/supervisor/ledger.py`
@@ -364,7 +371,7 @@ class ReceiptTests(unittest.TestCase):
 
 ### Task 5: Hooks — receipts, seat authorizations, person path, guardrails, kicks
 
-Seat: eng-hooks (sonnet). Security reviewer reviews. Spec §3.4, §3.11, §4.0, §4.4.
+Seat: eng-hooks (haiku). Security reviewer reviews. Spec §3.4, §3.11, §4.0, §4.4.
 
 **Files:**
 - Modify: `lib/swarm/hooks.py` (PostToolUse and PreToolUse handlers for drive jobs)
@@ -443,7 +450,7 @@ class DriveHooks(Env):
 
 ### Task 6: CLI — `activate --drive`, `swarm seat`, `swarm halt|unhalt`, `swarm review`
 
-Seat: eng-cli (sonnet). Spec §3.1, §3.4, §3.6, §4.3.
+Seat: eng-cli (haiku). Spec §3.1, §3.4, §3.6, §4.3.
 
 **Files:**
 - Modify: `lib/swarm/cli.py` (parsers + handlers), `lib/swarm/enrolment.py` (`write_job_owner(..., roots: list[str], remotes: dict[str, str])`)
@@ -511,7 +518,7 @@ class DriveCli(CliEnv):
 
 ### Task 7a: Freeze the driver model (Snapshot, Action, fixtures)
 
-Seat: eng-driver (sonnet). Reviewed by EL. Lands before wave 4 so Tasks 7, 8a, 8b, 8c build on one interface.
+Seat: eng-driver (haiku). Reviewed by EL. Lands before wave 4 so Tasks 7, 8a, 8b, 8c build on one interface.
 
 **Files:**
 - Create: `lib/swarm/supervisor/driver_model.py` (dataclasses only: `Snapshot`, `Action`, `SeatView`, `Question`, `HandoffView`, `VerdictView`; no logic)
@@ -527,7 +534,7 @@ Seat: eng-driver (sonnet). Reviewed by EL. Lands before wave 4 so Tasks 7, 8a, 8
 
 ### Task 7: Driver core — snapshot and pure `next_actions`
 
-Seat: eng-driver (sonnet). Reviewed by EL. Spec §3.2, §3.3, §3.5–§3.7, §3.9, §4.1.
+Seat: eng-driver (haiku). Reviewed by EL. Spec §3.2, §3.3, §3.5–§3.7, §3.9, §4.1.
 
 **Files:**
 - Modify: `lib/swarm/supervisor/driver_model.py` (Task 7a's frozen dataclasses; this task adds the pure `next_actions`)
@@ -622,7 +629,7 @@ class NextActions(unittest.TestCase):
 
 ### Task 8a: Driver execution — claims and reconciliation
 
-Seat: eng-driver2 (sonnet). Reviewed by EL and the security reviewer (opus). Spec §3.2, §3.9, §4.5 incl. [F7].
+Seat: eng-driver2 (haiku). Reviewed by EL and the security reviewer (opus). Spec §3.2, §3.9, §4.5 incl. [F7].
 
 Scope note: this task owns `driver.execute`, `driver.reconcile` and the drive-run reaping; `enforce_deadlines`, `terminalize`, `rollover` move to Task 8b and tamper/`_pass`/prompts to Task 8c. The Interfaces block below is shared; the tests listed are split by owner as marked: 8a owns `test_claim_without_run_file_is_concluded_after_grace`, `test_forged_restart_row_ignored`, `test_prose_done_is_not_a_handoff`; 8b owns `test_deadline_records_mechanical_unreachable_without_snapshot`, `test_rollover_stops_old_generation_first`, `test_terminalize_settles_questions_and_closes`; 8c owns `test_tamper_closed_job_is_reopened`, `test_broken_job_does_not_starve_next`.
 
@@ -715,7 +722,7 @@ class DriverTests(DriveEnv):
 
 ### Task 8b: Driver deadlines, terminalization, rollover
 
-Seat: eng-driver3 (sonnet). Reviewed by EL and the security reviewer (opus). Spec §3.1 [F2][F6], §3.2, §4.3 [F5].
+Seat: eng-driver3 (haiku). Reviewed by EL and the security reviewer (opus). Spec §3.1 [F2][F6], §3.2, §4.3 [F5].
 
 **Files:** Modify `lib/swarm/supervisor/driver.py` (functions below); Test `tests/test_drive_lifecycle.py`.
 
@@ -733,7 +740,7 @@ Seat: eng-driver3 (sonnet). Reviewed by EL and the security reviewer (opus). Spe
 
 ### Task 8c: Driver tamper handling, pass integration, prompts
 
-Seat: eng-driver4 (sonnet). Reviewed by EL. Spec §3.2 (tamper), §3.5, §3.13, [F17].
+Seat: eng-driver4 (haiku). Reviewed by EL. Spec §3.2 (tamper), §3.5, §3.13, [F17].
 
 **Files:** Modify `lib/swarm/supervisor/driver.py` (`drive`, tamper), Create `lib/swarm/supervisor/prompts.py`, Modify `lib/swarm/supervisor/command.py:_pass`, `orphans.py`, `stuck.py`, `pipeline.py` (skip ledger drive jobs); Test `tests/test_drive_pass.py`.
 
@@ -743,7 +750,7 @@ Seat: eng-driver4 (sonnet). Reviewed by EL. Spec §3.2 (tamper), §3.5, §3.13, 
 
 ### Task 9: Runner and launch — one launch contract, budgets, usage, containment, clock, barriers
 
-Seat: eng-runner (sonnet). Spec §3.9, §4.1, §6.2. Task 9a (clock + barriers) lands in wave 1, the rest in wave 2.
+Seat: eng-runner (haiku). Spec §3.9, §4.1, §6.2. Task 9a (clock + barriers) lands in wave 1, the rest in wave 2.
 
 **Files:**
 - Create: `lib/swarm/clock.py`, `lib/swarm/supervisor/barrier.py`
@@ -811,7 +818,7 @@ class Presence(unittest.TestCase):
 
 ### Task 10: Pipeline — review stage, owner seats, progress, ruling and goal judges
 
-Seat: eng-pipeline (sonnet). Spec §3.6, §3.7.
+Seat: eng-pipeline (haiku). Spec §3.6, §3.7.
 
 **Files:**
 - Modify: `lib/swarm/supervisor/pipeline.py` (review stage via recipe `review_role`; drive jobs delegate launch decisions to the driver, keep `transitions` shared)
@@ -858,7 +865,7 @@ class DrivePipeline(DriveEnv):
 
 ### Task 11: `swarm land`, private mirrors, land leases
 
-Seat: eng-land (sonnet). Security reviewer reviews. Spec §3.8, §4.0.
+Seat: eng-land (haiku). Security reviewer reviews. Spec §3.8, §4.0.
 
 **Files:**
 - Create: `lib/swarm/supervisor/mirror.py`, `lib/swarm/land.py`
@@ -902,7 +909,7 @@ class Land(DriveEnv):
 
 ### Task 12: Questions per seat
 
-Seat: eng-questions (sonnet). Spec §3.10.
+Seat: eng-questions (haiku). Spec §3.10.
 
 **Files:**
 - Modify: `skills/ask-answer/swarm_plugin.py` (`open_question` passes `seat`, `generation`; drive defaults), `lib/swarm/board/blockers.py` (`expire_blockers` unchanged semantics; driver applies expiry for drive jobs from receipted `until`)
@@ -935,7 +942,7 @@ class DriveQuestions(DriveEnv):
 
 ### Task 13: Triggers — NOTIFY kick, triage off, alert changes
 
-Seat: eng-trigger (sonnet; re-sized by the design judge: Postgres LISTEN, debounce, ledger-based DRIVER-STALLED). Spec §3.11, §3.13.
+Seat: eng-trigger (haiku; re-sized by the design judge: Postgres LISTEN, debounce, ledger-based DRIVER-STALLED). Spec §3.11, §3.13.
 
 **Files:**
 - Modify: `lib/swarm/events_listener.py` (LISTEN `swarm_board` → `hooks.kick()` for drive jobs, same debounce)
@@ -961,7 +968,7 @@ def test_triage_skipped_for_drive_jobs(self):
 
 ### Task 14: Engineering-team skill and docs
 
-Seat: eng-docs (sonnet). Spec §3.5, §3.13.
+Seat: eng-docs (haiku). Spec §3.5, §3.13.
 
 **Files:**
 - Modify: `skills/engineering-team/SKILL.md`, `references/hosts.md`, `references/pm-events.md`, `references/recovery.md`, `references/team-roles.md`
@@ -1094,7 +1101,7 @@ Seat: qa-chaos (sonnet). Spec §6.2a.
 
 ### Task 18: Compatibility with older clients
 
-Seat: eng-board (sonnet). Spec §9.
+Seat: eng-board (haiku). Spec §9.
 
 **Files:** Modify `lib/swarm/board/postgres.py` (set `swarm.client_schema` on connect; triggers on `jobs, agents, messages, restarts, blockers, seats, drive_locks, events` refusing writes to drive jobs without it), `lib/swarm/board/sqlite.py`/`file.py` (guard older clients honour, decided by the test); Create `tests/test_drive_compat.py`.
 
@@ -1173,3 +1180,7 @@ Seats: security reviewer (opus; read-only), judge (opus).
   - Task 1: doctor's drive check requires a **running** timer (unit active+enabled via `systemd.manager_env()`, last pass < 2 × `timer_minutes`), not just `[supervise] enabled`: `test_doctor_fails_drive_job_when_timer_not_running`; on macOS/Windows doctor reports "drive mode unavailable: no supervisor timer".
   - Task 6: `swarm supervise disable` writes the [F5] halt into each local drive ledger and stops live seats; `enable` unhalts those and shifts deadlines (`test_supervise_disable_halts_drive_ledgers_and_stops_seats`, `test_supervise_enable_unhalts_and_shifts_deadlines`); `disable` refused for enrolled seat sessions (`test_supervise_disable_refused_for_seat_session`); drive activation refused when the timer is not running and on macOS/Windows (`test_drive_activation_refused_without_running_timer`, `test_drive_activation_refused_on_macos_and_windows`).
   - Task 14: release notes and skill text list the fourth breaking change (`activate --goal` fails until `swarm supervise enable`).
+
+## Staffing change (Francesco, 2026-10-10): engineers on Haiku
+
+All engineer seats (every wave) run on Haiku; reviewers and QA on Sonnet; security reviewer, judge and lead on Opus. Because Haiku engineers have a record of vacuous tests and hidden behaviour changes, every seat's diff passes the Review gates (Staffing section: line-by-line review, tests failing on base, mutation gate) before integration, and the Opus security reviewer keeps Tasks 3, 4, 5, 8a–8c, 11 and 20.
