@@ -6,6 +6,8 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-10-10
+
 ### Changed
 - Setup is opt-in on a new machine. Installing the plugin no longer starts a detached `swarm bootstrap` at the first session: SessionStart prints `[swarm] not set up: run swarm init` and does nothing else. `swarm init` is the explicit setup (config, launcher, board; `--host claude|codex`) and prints a summary. By default it no longer edits `~/.claude/settings.json` (`sandbox.filesystem.allowWrite`) or `~/.codex/config.toml` (`writable_roots`, `[agents] max_depth`): it prints the exact lines, and only `swarm init --apply-settings` edits them (backup kept).
 - The choice is stored: `~/.local/share/swarm/host/settings-consent` holds `yes` or `no`. `swarm init --apply-settings` (and the installers, through `SWARM_APPLY_SETTINGS=1`) store `yes`; a plain `swarm init` on a new machine stores `no`. The detached bootstrap, `swarm bootstrap` and `swarm upgrade` follow the stored answer (`swarm bootstrap --apply-settings` / `--no-apply-settings` override it for one run), so the config and launcher that `swarm init` creates never turn into consent.
