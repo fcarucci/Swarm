@@ -1184,8 +1184,8 @@ def supervisor_checks(cfg: dict, host: str | None, run=None, which=None) -> list
         return [Check("supervise", True, "off (opt in: `swarm supervise enable`)")]
     out = [Check("supervise config", True, "valid")]
     if st.enabled_implied(cfg):
-        out.append(Check("supervise choice", None, "on because its timer is installed (the default is "
-                         "now off); make it explicit", "swarm supervise enable"))
+        out.append(Check("supervise choice", None, "on because this config predates the opt-in (it has no "
+                         "[supervise] enabled); make it explicit", "swarm supervise enable"))
     off_file = st.switched_off()
     if off_file is not None:
         out.append(Check("supervise off file", None, f"switched off by {off_file}", f"rm {off_file}"))

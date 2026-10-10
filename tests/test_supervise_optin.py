@@ -17,7 +17,7 @@ import tomllib
 from pathlib import Path
 from unittest import mock
 
-from support import base_config, home_env
+from support import ROOT, base_config, home_env
 from test_hooks_cli import Env
 from swarm import cli as swarm, paths
 from swarm.supervisor import settings as st, systemd
@@ -52,16 +52,31 @@ class DefaultTests(_unittest.TestCase):
     def test_off_with_no_config(self):
         self.assertFalse(st.settings(base_config())["enabled"])
 
-    def test_off_for_a_new_config(self):
-        self.config.write_text('[board]\nbackend = "file"\n')
+    def test_off_for_a_new_config_written_from_the_example(self):
+        shutil.copyfile(ROOT / "config.example.toml", self.config)   # what bootstrap/init write
+        self.install_timer()                                          # even with a timer around
         self.assertFalse(st.settings(swarm.load_config(self.config))["enabled"])
 
-    def test_existing_install_with_timer_keeps_it_on(self):
+    def test_existing_config_without_the_key_stays_on_without_a_timer(self):
+        # Francesco's Mac, a Linux box without systemd: no timer file, a config from before the
+        # opt-in. Stuck-agent closing (gated by enabled) must keep running.
+        self.config.write_text('[board]\nbackend = "file"\n')
+        with mock.patch("sys.platform", "darwin"):
+            cfg = swarm.load_config(self.config)
+            self.assertTrue(st.enabled(cfg))
+            self.assertTrue(st.enabled_implied(cfg))
+
+    def test_existing_config_without_the_key_and_a_timer_stays_on(self):
         self.config.write_text('[board]\nbackend = "file"\n')
         self.install_timer()
         cfg = swarm.load_config(self.config)
         self.assertTrue(st.settings(cfg)["enabled"])
         self.assertTrue(st.enabled_implied(cfg))
+
+    def test_no_config_file_with_a_timer_is_off(self):
+        # no config file at all is a new machine (bootstrap writes the example, enabled = false)
+        self.install_timer()
+        self.assertFalse(st.settings(swarm.load_config(self.home / "missing.toml"))["enabled"])
 
     def test_explicit_false_wins_over_an_installed_timer(self):
         self.config.write_text('[supervise]\nenabled = false\n')
@@ -101,6 +116,27 @@ class SwitchTests(SafeEnv):
         self.assertIn(["systemctl", "--user", "enable", "--now", systemd.TIMER], run.calls)
         self.assertTrue((systemd.unit_dir() / systemd.TIMER).exists())
 
+    def test_enable_without_systemctl_exits_zero_and_says_so(self):
+        os.environ.pop("SWARM_NO_SYSTEMD", None)
+        with mock.patch.object(systemd.shutil, "which", return_value=None), \
+                mock.patch("sys.platform", "linux"):
+            rc, out, err = self.cli("supervise", "enable")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("no systemctl here", out)
+        self.assertIs(tomllib.loads(self.config.read_text())["supervise"]["enabled"], True)
+
+    def test_enable_on_macos_suggests_no_cron(self):
+        os.environ.pop("SWARM_NO_SYSTEMD", None)
+        run = FakeRun()
+        with mock.patch("sys.platform", "darwin"), \
+                mock.patch("swarm.supervisor.systemd.subprocess.run", run):
+            rc, out, err = self.cli("supervise", "enable")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("macOS", out)
+        self.assertNotIn("cron", out)
+        self.assertEqual(run.calls, [])
+        self.assertIs(tomllib.loads(self.config.read_text())["supervise"]["enabled"], True)
+
     def test_disable_writes_false_and_stops_the_timer(self):
         run = FakeRun()
         with mock.patch.object(systemd.shutil, "which", return_value="/usr/bin/systemctl"), \
@@ -129,8 +165,8 @@ class UninstallTests(SafeEnv):
         self.claude_settings.write_text(json.dumps(
             {"model": "x", "sandbox": {"filesystem": {"allowWrite": ["/keep", spool]}}}))
 
-    def uninstall(self, *extra):
-        run = FakeRun()
+    def uninstall(self, *extra, rc=0):
+        run = FakeRun(rc)
         with mock.patch.object(systemd.shutil, "which", return_value="/usr/bin/systemctl"), \
                 mock.patch("swarm.supervisor.systemd.subprocess.run", run):
             rc, out, err = self.cli("uninstall", *extra)
@@ -162,11 +198,62 @@ class UninstallTests(SafeEnv):
         self.assertEqual(data["sandbox_workspace_write"]["writable_roots"], ["/keep"])
         self.assertEqual(data["model"], "m")
 
-    def test_purge_also_removes_state_and_config(self):
+    def test_a_failed_timer_stop_removes_nothing(self):
+        rc, out, err, run = self.uninstall(rc=1)   # e.g. no user systemd bus in this shell
+        self.assertEqual(rc, 1)
+        self.assertTrue((self.units / systemd.TIMER).exists())
+        self.assertTrue((self.units / systemd.SERVICE).exists())
+        self.assertTrue(paths.share_dir().exists())
+        self.assertTrue(self.launcher.exists())
+        self.assertIn("systemctl --user disable --now", err)
+
+    def test_codex_roots_all_swarms_drops_the_key(self):
+        codex = self.home / ".codex" / "config.toml"
+        codex.parent.mkdir(parents=True, exist_ok=True)
+        ours = [str(self.spool_dir), str(self.markers)]
+        codex.write_text('model = "m"\n[sandbox_workspace_write]\nwritable_roots = ' + json.dumps(ours) + '\n')
+        rc, out, err, run = self.uninstall()
+        self.assertEqual(rc, 0, err)
+        data = tomllib.loads(codex.read_text())
+        self.assertNotIn("writable_roots", data.get("sandbox_workspace_write", {}))
+        self.assertEqual(data["model"], "m")
+
+    def test_purge_removes_state_and_a_default_location_config(self):
+        default = self.home / ".config" / "swarm" / "config.toml"
+        default.parent.mkdir(parents=True, exist_ok=True)
+        default.write_text(self.config.read_text())
+        self.config = default
         rc, out, err, run = self.uninstall("--purge")
         self.assertEqual(rc, 0, err)
         self.assertFalse(paths.state_dir().exists())
-        self.assertFalse(self.config.exists())
+        self.assertFalse(default.exists())
+
+    def test_purge_keeps_a_config_outside_the_default_location(self):
+        rc, out, err, run = self.uninstall("--purge")
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(self.config.exists())
+        self.assertIn("not Swarm's default location", out)
+
+    def test_purge_removes_the_default_sqlite_dir_only(self):
+        board_dir = self.home / ".local" / "share" / "swarm-board"
+        board_dir.mkdir(parents=True)
+        (board_dir / "board.sqlite3").write_text("x")
+        rc, out, err, run = self.uninstall("--purge")
+        self.assertEqual(rc, 0, err)
+        self.assertFalse(board_dir.exists())
+
+    def test_purge_keeps_a_custom_sqlite_board(self):
+        board_dir = self.home / ".local" / "share" / "swarm-board"
+        board_dir.mkdir(parents=True)
+        custom = self.tmp / "elsewhere" / "b.sqlite3"
+        custom.parent.mkdir()
+        custom.write_text("x")
+        with open(self.config, "a") as fh:
+            fh.write(f'[sqlite]\npath = {json.dumps(str(custom))}\n')
+        rc, out, err, run = self.uninstall("--purge")
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(custom.exists())
+        self.assertTrue(board_dir.exists())   # not the configured board: not Swarm's to delete
 
     def test_dry_run_changes_nothing(self):
         rc, out, err, run = self.uninstall("--dry-run")

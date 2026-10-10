@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sys
 import tomllib
 from pathlib import Path
 
@@ -47,8 +48,28 @@ def _plan(cfg: dict, config: Path, purge: bool) -> list[tuple[str, str, object]]
         if board.parent == default_board_dir and default_board_dir.exists():
             out.append(("tree", f"remove {default_board_dir}", default_board_dir))
         if config.exists():
-            out.append(("file", f"remove {config}", config))
+            if _under(config, paths.home() / ".config" / "swarm"):
+                out.append(("file", f"remove {config}", config))
+            else:
+                out.append(("keep", f"kept {config} (not Swarm's default location)", None))
     return out
+
+
+def _under(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def _manual_timer_steps() -> str:
+    from swarm.supervisor import systemd
+    d = systemd.unit_dir()
+    return (f"  systemctl --user disable --now {systemd.TIMER}\n"
+            f"  rm -f {d / systemd.SERVICE} {d / systemd.TIMER}\n"
+            "  systemctl --user daemon-reload\n"
+            "then run `swarm uninstall` again")
 
 
 def _allow_write(settings: Path) -> list:
@@ -111,11 +132,20 @@ def cmd_uninstall(cfg: dict, args) -> int:
         print("nothing of Swarm's to remove outside the plugin")
     failed = 0
     for kind, text, target in plan:
+        if kind == "keep":
+            print(text)
+            continue
         if args.dry_run:
             print(f"would {text}")
             continue
         err = _do(kind, target)
         print(f"{text}: {'failed: ' + err if err else 'done'}")
+        if err and kind == "timer":
+            # a timer that may still be loaded must keep its unit files and the venv it runs:
+            # stop here, change nothing else, and say what to run (e.g. from a login shell)
+            print("stopped: nothing else was removed. Stop the timer from a shell with a user "
+                  "systemd session, then:\n" + _manual_timer_steps(), file=sys.stderr)
+            return 1
         failed += bool(err)
     if not args.dry_run:
         print("Now remove the plugin itself: `/plugin uninstall swarm@swarm` in Claude Code, or with "

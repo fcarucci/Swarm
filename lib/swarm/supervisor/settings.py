@@ -24,7 +24,7 @@ from swarm import paths
 
 DEFAULTS = {
     "enabled": False,                  # opt in (`swarm supervise enable`); explicit false also gates
-                                       # closing. Unset + an installed timer = on (enabled_implied)
+                                       # closing. Unset in an existing config file = on (enabled_implied)
     "orphan_minutes": 15,
     "orphan_max_restarts": 3,
     "silent_minutes": 90,              # no post and no tool call for this long -> stuck:silent
@@ -72,17 +72,14 @@ class SettingsError(ValueError):
 
 
 def enabled_implied(cfg: dict) -> bool:
-    """An existing install that relied on the old on-by-default supervisor: its config file never
-    set `[supervise] enabled` (load_config marks that) and its systemd timer is installed. It keeps
-    the supervisor on with no action; `swarm supervise enable|disable` makes the choice explicit."""
+    """An existing install that relied on the old on-by-default supervisor: a config file that
+    never set `[supervise] enabled` (load_config marks that). New configs are written from
+    config.example.toml, which sets `enabled = false` explicitly, so only configs from before the
+    opt-in are unset: they keep the supervisor (timer passes where systemd exists, and stuck-agent
+    closing during sweeps on every host, macOS included) with no action. No config file at all is
+    a new machine: off. `swarm supervise enable|disable` makes the choice explicit."""
     section = (cfg or {}).get("supervise")
-    if not (cfg or {}).get("_supervise_unset") or (isinstance(section, dict) and "enabled" in section):
-        return False
-    from swarm.supervisor import systemd
-    try:
-        return (systemd.unit_dir() / systemd.TIMER).exists()
-    except OSError:
-        return False
+    return bool((cfg or {}).get("_supervise_unset")) and not (isinstance(section, dict) and "enabled" in section)
 
 
 def settings(cfg: dict) -> dict:

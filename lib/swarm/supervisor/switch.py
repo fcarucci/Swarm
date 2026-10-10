@@ -54,6 +54,10 @@ def cmd_switch(cfg: dict, args) -> int:
     if paths.IS_WINDOWS:
         print("the supervisor needs a systemd user timer: not available on Windows")
         return 0
+    if sys.platform == "darwin":   # no launchd agent is installed: nothing runs passes on a timer
+        print("macOS: no timer is installed; the supervisor can't launch replacement sessions on macOS "
+              "yet. Stuck agents are still closed during `swarm status`/`watch` sweeps.")
+        return 0
     minutes = st.DEFAULTS["timer_minutes"]
     try:
         minutes = st.settings(cfg)["timer_minutes"]

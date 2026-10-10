@@ -39,7 +39,8 @@ class DoctorTests(unittest.TestCase):
         failing = {n: c.detail for n, c in checks.items() if c.ok is False}
         self.assertEqual(failing, {})
         self.assertIsNone(checks["orchestrator model"].ok)
-        self.assertTrue(checks["supervise"].ok)   # opt-in: a clean install reports it off
+        # this config predates the opt-in (no [supervise] enabled): the supervisor stays on
+        self.assertTrue(checks["supervise" if paths.IS_WINDOWS else "supervise config"].ok)
 
     @posix_only("supervisor uses Linux systemd")
     def test_clean_install_without_manager_or_harness_warns(self):
