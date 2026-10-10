@@ -44,7 +44,9 @@ class Env(unittest.TestCase):
         self.config.write_text(
             f'[board]\nbackend = "{self.h.name}"\nspool_dir = {tq(self.spool_dir)}\n'
             f'[hook]\nmarker_dir = {tq(self.markers)}\n'
-            f'[plugins]\ndisabled = {json.dumps(list(self.plugins_disabled))}\n' + self.h.toml)
+            f'[plugins]\ndisabled = {json.dumps(list(self.plugins_disabled))}\n'
+            # the supervisor is opt-in (B3); these end-to-end tests cover it switched on
+            '[supervise]\nenabled = true\n' + self.h.toml)
         self.cfg = swarm.load_config(self.config)
         self.h.reset(swarm_names())
         home = self.tmp / "home"
