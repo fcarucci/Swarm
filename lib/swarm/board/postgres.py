@@ -985,12 +985,12 @@ class PostgresBoard(SqlBlockers, SqlEvents, SqlBgCommands, Board):
         self._retry_at = 0.0
         self._session_read_only = read_only     # the server refuses writes on this connection
         try:
-            self._conn = _connect(cfg, read_only=read_only)
+            self._conn = _connect(cfg, **({"read_only": True} if read_only else {}))
         except BoardUnavailable:
             if not (readers and len(database_hosts(cfg["database"])) > 1):
                 raise
             # no primary: a read-only command is served by whichever standby answers
-            self._conn = _connect(cfg, any_host=True, read_only=read_only)
+            self._conn = _connect(cfg, any_host=True, **({"read_only": True} if read_only else {}))
             self.degraded = self._conn.info.host
         if read_only:
             from .base import refuse_writes
@@ -2082,7 +2082,7 @@ class PostgresBoard(SqlBlockers, SqlEvents, SqlBgCommands, Board):
         if self.degraded:
             db = {**self.cfg["database"], "connect_timeout": min(2, self.cfg["database"]["connect_timeout"])}
             try:
-                conn = _connect({**self.cfg, "database": db}, read_only=self._session_read_only)
+                conn = _connect({**self.cfg, "database": db}, **({"read_only": True} if self._session_read_only else {}))
             except BoardUnavailable:
                 self._retry_at = time.monotonic() + LIVE_RETRY_SECONDS
                 return False

@@ -748,7 +748,8 @@ application_name = "swarm-watch"
 | `read_limit` | `50` | most messages returned by one read; the rest come on the next read, with a count of what is left |
 | `join_history` | `30` | a new agent is first shown the job's newest N messages (0 = none) |
 | `roster_refresh_minutes` | `10` | each agent gets the full roster at least this often; changes in between come as a diff |
-| `watch_interval_s` | `10` | seconds between quiet dashboard refreshes; `watch --interval` overrides it |
+| `watch_interval_s` | `10` | seconds between dashboard redraws (clock, idle/dead ageing: no query) and, on a board without push, refreshes; `watch --interval` overrides it |
+| `watch_check_s` | `60` | push boards: seconds between the cheap fingerprint check of `watch` and `snapshot --follow` against the state they hold; a full read only when it differs |
 | `watch_min_redraw_s` | `2` | minimum seconds between notification or snapshot-miss refreshes |
 | `watch_recent_minutes` | `10` | `watch` and `status --job` hide finished agents that ended (or were last seen) longer ago than this |
 | `silence_nudge_calls` | `15` | nudge an agent to post a status after this many tool calls without posting (0 = off) |
@@ -2125,6 +2126,35 @@ message appears as it is posted. Agents joining and leaving are shown as `*** jo
 `*** completed` lines (or `left`, `dead`), unless you pass `--no-agents`. Each author keeps one
 colour. Ctrl-C stops it.
 
+### `swarm snapshot`
+
+`swarm snapshot --json [--job J ...] [--session ID ...] [--messages N] [--follow [--check S] [--keepalive S] [--poll S]]`
+prints the board's current view as one JSON line: `jobs`, `agents` (finished ones older than
+`watch_recent_minutes` only counted, in `hidden`), open `blockers`, the newest `--messages` per
+job (default 20, at most 200), a `cursor` (the highest message id), `scope`, `mode` and
+`degraded`. `--job` and `--session` are repeatable and add up; with neither, every active or
+paused job. It is a pure read: it runs no setup or migration, flushes no spool, sweeps nothing,
+writes nothing (the Postgres session is read-only, so the server refuses a write too), and its
+size is bounded: at most 50 jobs, 200 agents and 100 blockers per job (`truncated` names what was
+cut). It connects like `watch` (`[watch_database]`).
+
+`--follow` streams NDJSON instead: `{"type":"snapshot","reason":"initial"...}` first, then one
+`{"type":"delta","gen":N,...}` per change (upserted jobs, agents and blockers, removed keys, new
+messages, `cursor`), `{"type":"ping"}` every `--keepalive` seconds (15), and
+`{"type":"degraded","degraded":true,"mode":...,"reason":...}` while it can only poll (a standby,
+a pooler that refuses `LISTEN`, a lost connection) and `"degraded":false` followed by a snapshot
+when push is back. A consumer rebuilds the state with `swarm.snapshot.apply_delta`, which refuses a
+`gen` gap. How it stays right: `LISTEN` before the first read; a notification is a hint, every
+wake re-reads jobs, agents and open blockers and the messages past the cursor; a full snapshot on
+connect, after a reconnect and when push returns; and every `watch_check_s` (`--check`, 60) one
+statement computes a fingerprint of the scope (newest message id, digests of the job and agent
+rows) which is compared with the stream's own state, and only a mismatch (reason `"mismatch"`)
+sends a full snapshot: a lost notification or a retention purge costs at most one interval. SQLite
+and file boards have no push: the stream polls every `--poll` seconds (2) and emits what changed.
+`swarm watch` follows the same plan on Postgres: a notification reads only what changed, idle and
+dead are aged on screen, a quiet board costs one fingerprint statement per `watch_check_s`, and
+the title shows `push unavailable: polling` while it has fallen back.
+
 ### `swarm status`
 
 With no arguments, `status` lists the active jobs (`--all` adds closed ones) with these columns:
@@ -2569,6 +2599,7 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `status --job J [--all-agents] [--no-color]` | one job's details and agents table |
 | `watch [--job J] [--session S] [--compact] [--exit-when-idle N] [--interval S] [--no-color]` | full-screen live dashboard |
 | `tail [--job J] [-n N] [--interval S] [--no-agents] [--no-color]` | follow the board live |
+| `snapshot --json [--job J] [--session S] [--messages N] [--follow]` | the board's view as JSON (pure read); `--follow` streams NDJSON |
 | `title --job J (--as NAME \| --key K) [TEXT...]` | set, replace or (empty text) clear an agent's display title (at most 60 characters), shown by `who`, `status` and `watch`; see [Agent titles](#agent-titles) |
 | `join --job J --key K [--role R] [--title T] [--judge\|--verifier]` | allocate a unique name for agent key K, or return the one it already has. `--title` sets its display title. `--judge` takes the job's judge seat (refused if another agent holds it) and `--verifier` makes it a verifier: for agents without the swarm's hooks, such as a one-off `codex exec` judge. They read the board with `read --key K`, and post and record verdicts with the CLI. |
 | `config [board.message_max_chars [N]] [--save]` | print or set the board's message cap (200 by default, 50 to 4000; online; existing messages are kept; `--save` also writes `[board] message_max_chars`, which only seeds a new board) |
