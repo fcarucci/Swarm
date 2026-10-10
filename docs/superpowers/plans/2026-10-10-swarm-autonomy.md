@@ -3,25 +3,27 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 > In this job the tasks are filled as Swarm seats by the EL (`swarm seat request` once Task 6 lands; until then by the PM's spawns). Each task names its seat, model and reviewer.
 
-**Goal:** A goal job activated with `--drive` reaches MET, UNREACHABLE or CANCELLED with zero coordinator turns: the supervisor pass drives staffing, resumes, review/fix/judge rounds, landing, rulings and recovery from board state plus a host-private ledger.
+**Goal:** Every goal job (`--goal` implies drive mode; `--no-drive --reason` opts out) reaches MET, UNREACHABLE or CANCELLED with zero coordinator turns: the supervisor pass drives staffing, resumes, review/fix/judge rounds, landing, rulings and recovery from board state plus a host-private ledger.
 
 **Architecture:** A new `swarm.supervisor.driver` runs first in every supervisor pass. It enforces deadlines from a host-private ledger, reconciles launches, computes the next actions with a pure `next_actions(snapshot)` and executes them through one atomic `claim_drive_launch` plus the existing runner/marker machinery. Seats (schema 25) replace coordinator spawns; hook-written receipts authenticate every agent-written control record; `swarm land` is the only path to the target branch.
 
 **Tech Stack:** Python 3.11+ stdlib (as the rest of `lib/swarm`), unittest, SQLite/Postgres/file/memory board backends, systemd user units, Claude Code `claude -p`, Codex `codex exec`.
 
-**Spec:** `docs/superpowers/specs/2026-10-10-swarm-autonomy-design.md` (revision 4, commit 8d0a2cf). Read §2.2 (guarantee and limits), §3.2–§3.3 (driver), §4.0 (threat model) and §4.5 (claim protocol) before any task.
+**Spec:** `docs/superpowers/specs/2026-10-10-swarm-autonomy-design.md` (revision 5, commit 85afef8; design-judge fixes marked **[Fn]**, PM ruling **[A]**). Read §2.2 (guarantee and limits), §3.2–§3.3 (driver), §4.0 (threat model) and §4.5 (claim protocol) before any task.
 
 ## Global Constraints
 
 - Terminal states of a drive goal job: MET, UNREACHABLE (judge verdict with reasons, or the labelled mechanical one), CANCELLED (a person). Never idle/stalled/waiting for the coordinator.
 - No new always-on process: only the timer-driven pass, its per-session runners, and the existing opt-in events listener.
 - Every agent joins the board (enrol deadline `enrol_minutes` kills sessions that do not).
-- Models: `engineering_lead = judge = "opus"`; `engineer = qa = reviewer = integrator = worker = "sonnet"`; `--complexity simple` → `"haiku"`. Lead and judge clamped to Opus in drive mode.
+- Models (Francesco's latest policy): Haiku for simple tasks, Sonnet for coding and reviewers, Opus for leads, judges and the security reviewer. Config: `engineering_lead = judge = security_reviewer = "opus"`; `engineer = qa = reviewer = integrator = worker = "sonnet"`; `--complexity simple` → `"haiku"`. Lead and judge clamped to Opus in drive mode.
 - Landing: rebase only (or `[land] strategy = squash-ff` where the project sets it), fast-forward pushes only, never a force push, CI green on the exact rebased SHA, through `swarm land`.
 - Tests: on the box only targeted tests through `/var/tmp/test-slots/test-slot -- <cmd>` run from `tests/` (`cd tests && /var/tmp/test-slots/test-slot -- python3 -B -m unittest test_x`); full suites only in GitHub Actions; wait for CI with `swarm ci wait --repo fcarucci/Swarm --sha <exact sha> --timeout 540` in the foreground; never `gh run watch`.
 - Never put work trees, clones or builds under /tmp (live acceptance uses `~/work/drive-accept/`; seat workdirs under /tmp are refused by the driver). Unit tests keep using the suite sandbox `support.SANDBOX`/`TMPDIR`, short-lived and small, as the existing suite does.
 - Judges only judge; reviewers only review; fixes happen on writer seats.
 - Never a bypass flag (`launch.check_safe`), `--setting-sources user`, Codex `workspace-write` (read-only for judges/reviewers).
+- **One record format** (couples Tasks 5 and 6): every CLI command that creates or changes a drive control record prints, as its last stdout line, exactly `swarm-record: kind=<kind> id=<integer> rev=<integer>` (`kind` ∈ `done, review, verdict, seat, ask, answer, post, goal_ready, ack, withdraw, halt, unhalt, deactivate, activate`; `rev` is 1 for records without revisions). Task 6 prints it; Task 5 parses it with `re.fullmatch(r"swarm-record: kind=([a-z_]+) id=(\d+) rev=(\d+)", last_line)`.
+- In drive jobs the CLI never spools a control command (spec [F18]); it fails with a clear error instead.
 - Schema version becomes 25 (`SCHEMA_VERSION = 25`); verdicts `("met", "not_met", "unreachable")`.
 - Budget defaults (`[drive]`): `max_sessions=60`, `max_seats=12`, `max_rounds=8`, `no_progress_rounds=3`, `max_attempts=3`, `max_cost_usd=40`, `session_usd_cap=5`, `min_session_usd=0.5`, `max_session_minutes=60`, `max_wall_hours=24`, `ruling_reserve = {sessions=2, minutes=60, usd=5}`, `ruling_attempts=2`, `ruling_deadline_minutes=120`, `ruling_grace_minutes=15`, `question_expiry="4h"`, `stall_minutes=90`, `driver_error_passes=6`, `max_concurrent_sessions=4`, `codex_usd_per_mtok=10`.
 - Commits end with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`; CHANGELOG.md gets an entry per user-visible task (the changelog check in CI enforces it).
@@ -41,14 +43,14 @@
 | Wave | Tasks | Seats (model) | Reviewer |
 |------|-------|---------------|----------|
 | 0 | 1 doctor fix | eng-doctor (haiku, simple) | reviewer (sonnet) |
-| 1 | 2 schema+verdicts, 4 ledger+receipts, 9a clock+barriers | eng-board (sonnet), eng-ledger (sonnet), eng-runner (sonnet) | reviewer; security reviewer on 4 |
-| 2 | 3 seats+claim, 9 runner, 12 questions | eng-board, eng-runner, eng-questions (sonnet) | reviewer; security on 3 |
-| 3 | 5 hooks+receipts+guardrails, 6 CLI | eng-hooks (sonnet), eng-cli (sonnet) | security reviewer |
-| 4 | 7 next_actions, 8 driver execute | eng-driver (sonnet), eng-driver2 (sonnet) | EL + reviewer |
-| 5 | 10 pipeline, 11 land+mirrors, 13 triggers | eng-pipeline (sonnet), eng-land (sonnet), eng-trigger (haiku, simple) | reviewer; security on 11 |
+| 1 | 2 schema+verdicts, 4 ledger+receipts, 9a clock+barriers | eng-board (sonnet), eng-ledger (sonnet), eng-runner (sonnet) | reviewer (sonnet); security reviewer (opus) on 4 |
+| 2 | 3 seats+claim, 9 runner, 12 questions | eng-board, eng-runner, eng-questions (sonnet) | reviewer (sonnet); security reviewer (opus) on 3 |
+| 3 | 5 hooks+receipts+guardrails, 6 CLI, 7a model freeze | eng-hooks (sonnet), eng-cli (sonnet), eng-driver (sonnet) | security reviewer (opus) on 5; EL on 7a |
+| 4 | 7 next_actions, 8a execute+reconcile, 8b deadlines/terminalize/rollover, 8c tamper/pass/prompts | eng-driver, eng-driver2, eng-driver3, eng-driver4 (all sonnet) | EL + reviewer; security reviewer on 8a, 8b |
+| 5 | 10 pipeline, 11 land+mirrors, 13 triggers | eng-pipeline (sonnet), eng-land (sonnet), eng-trigger (sonnet) | reviewer; security reviewer on 11 |
 | 6 | 14 skill docs, 18 compat | eng-docs (sonnet), eng-board | reviewer |
 | 7 | 15 E2E, 16 chaos, 17 systemd test | qa (sonnet), qa-chaos (sonnet) | EL |
-| 8 | 19 live acceptance, 20 security review, judge | qa + EL; security reviewer; judge (opus) | judge |
+| 8 | 19 live acceptance, 20 security review, judge | qa + EL; security reviewer (opus); judge (opus) | judge |
 
 Every task: its own branch `feat/drive-<task>` off `feat/swarm-autonomy`, `swarm done --artifact feat/drive-<task>@<sha>`, review, integration by rebase onto `feat/swarm-autonomy`. The final branch lands on `main` through the pipeline after CI green on the exact SHA.
 
@@ -285,6 +287,19 @@ ALTER TABLE blockers ADD COLUMN IF NOT EXISTS generation integer;
 
 ---
 
+**Additions from the design judge:**
+- [ ] **[F20]** `drive_locks` gains a `path` column. Create `lib/swarm/supervisor/worktree.py` with `worktree_root(path: str) -> str | None` (walk up from `os.path.realpath(path)` to the first directory containing a `.git` file or directory, without running git). `claim_drive_launch` refuses a `wt:` lock whose `path` equals, is an ancestor of, or is a descendant of any live `wt:` row's `path` (`a == b or a.startswith(b + "/") or b.startswith(a + "/")`), inside the transaction. Test:
+
+```python
+def test_nested_worktrees_conflict(self):
+    b = self.board(); self.goal_job(b, "J")
+    a, c = self.seat(b, "J", "a"), self.seat(b, "J", "c")
+    self.assertIsNotNone(self.claim(b, a, locks=["wt:" + h("/w/repo")], paths={"wt:" + h("/w/repo"): "/w/repo"}))
+    self.assertIsNone(self.claim(b, c, locks=["wt:" + h("/w/repo/sub")], paths={"wt:" + h("/w/repo/sub"): "/w/repo/sub"}))
+```
+
+  `claim_drive_launch` therefore takes `lock_paths: dict[str, str]` in addition to `locks`.
+
 ### Task 4: Host-private ledger and receipts
 
 Seat: eng-ledger (sonnet). Security reviewer reviews. Spec §4.0, §4.5.
@@ -341,6 +356,12 @@ class ReceiptTests(unittest.TestCase):
 
 ---
 
+**Additions from the design judge:**
+- [ ] **[F2]** `ledger.unfinished(board_key)` enumerates ledger **files by name**: a file that fails to parse yields `LedgerBad(job_hint, path, why)` instead of being skipped; `ledger.load` raises `LedgerBadError` rather than returning None for an existing-but-bad file. Test: write garbage to a ledger file → `unfinished()` returns a `LedgerBad`.
+- [ ] **[F6]** fields `terminal_intent: dict | None`, `halted_total_seconds: float`, `requester_session: str | None`, `pinned_requirements: dict[str, str]` (path → blob id).
+- [ ] **[F7]** writes are `write → fsync(file) → rename → fsync(dir)`; test with `mock.patch("os.fsync")` asserting two calls per save (file and directory).
+- [ ] Receipt kinds add `ack, withdraw, land` (land receipts carry `destinations: dict[url, {"state": "intent"|"pushed"|"verified", "sha": str}]`).
+
 ### Task 5: Hooks — receipts, seat authorizations, person path, guardrails, kicks
 
 Seat: eng-hooks (sonnet). Security reviewer reviews. Spec §3.4, §3.11, §4.0, §4.4.
@@ -354,7 +375,7 @@ Seat: eng-hooks (sonnet). Security reviewer reviews. Spec §3.4, §3.11, §4.0, 
 **Interfaces:**
 - Consumes: `receipts.write/find/args_sha` (Task 4); `Board.seat`, `Board.request_seat` (Task 3); `enrolment.find` (existing).
 - Produces:
-  - `hooks.drive_post_tool(board, cfg, payload) -> None`: for a Bash tool call whose parsed argv is `swarm done|review|verdict|seat request|post --to|ask|answer` (parsed with `cli.build_parser()`), exit status 0, session enrolled as a seat of a drive job → write a `Receipt` (kind by subcommand, `record_id` = the id the CLI printed on its last line `id=<n> rev=<r>`), then `kick()`.
+  - `hooks.drive_post_tool(board, cfg, payload) -> None`: for a Bash tool call whose parsed argv is `swarm done|review|verdict|seat request|post --to|ask|answer` (parsed with `cli.build_parser()`), exit status 0, session enrolled as a seat of a drive job → write a `Receipt` (kind by subcommand, `record_id` = the id from the CLI's last line in the one record format of Global Constraints), then `kick()`.
   - `hooks.kick(now=time.time) -> bool`: `systemctl --user start --no-block swarm-supervise.service` with `systemd.manager_env()`, at most once per 20 s (stamp `kick.stamp` in the private dir).
   - `person.require(action: str, job: str | None) -> str` → returns `"person"` or raises `PermissionError`: refused if the calling session id has an enrolment record; otherwise prompts on `/dev/tty` `Type the job name to confirm <action>:` and compares.
   - PreToolUse refusals (drive jobs only): judges/reviewers: `git commit`, `git push`, file-writing tools; everyone: `git push` whose refspec targets the recipe's target branch, any `--force`/`-f`/`+refspec`, `claude -p`, `claude --print`, `codex exec`. Message points to `swarm land` / `swarm seat request`.
@@ -366,7 +387,7 @@ class DriveHooks(Env):
     def test_done_from_seat_session_writes_receipt(self):
         self.drive_job("J"); key = self.launch_seat("J", "eng-a")
         out = self.run_cli_as(key, "done", "--job", "J", "--artifact", "feat/a@" + "a"*40, "--summary", "x")
-        rid = out.split("id=")[1].split()[0]
+        rid = re.fullmatch(r"swarm-record: kind=([a-z_]+) id=(\d+) rev=(\d+)", out.strip().splitlines()[-1]).group(2)
         self.hook("post", agent_id=key, tool_name="Bash",
                   tool_input={"command": f"swarm done --job J --artifact feat/a@{'a'*40} --summary x"},
                   tool_response={"exit_code": 0, "stdout": out})
@@ -376,14 +397,14 @@ class DriveHooks(Env):
         self.drive_job("J"); key = self.launch_seat("J", "eng-a", role="engineer")
         self.hook("post", agent_id=key, tool_name="Bash",
                   tool_input={"command": "swarm seat request --job J --seat eng-b --role engineer --brief B.md"},
-                  tool_response={"exit_code": 0, "stdout": "id=7 rev=1"})
+                  tool_response={"exit_code": 0, "stdout": "swarm-record: kind=seat id=7 rev=1"})
         self.assertIsNone(receipts.find(self.board_key, "J", "seat_request", "7"))
 
     def test_row_swapped_before_hook_is_not_authorized(self):
         self.drive_job("J"); lead = self.launch_seat("J", "lead", role="engineering_lead")
         argv = "swarm seat request --job J --seat eng-b --role engineer --brief B.md --workdir /w/b"
         self.hook("post", agent_id=lead, tool_name="Bash", tool_input={"command": argv},
-                  tool_response={"exit_code": 0, "stdout": "id=7 rev=1"})
+                  tool_response={"exit_code": 0, "stdout": "swarm-record: kind=seat id=7 rev=1"})
         with self.board() as b:
             b.request_seat("J", 1, "eng-b", role="engineer", harness="claude", model="opus",
                            workdir="/w/other", brief_path="B.md", requested_by="lead")   # forged change
@@ -407,11 +428,18 @@ class DriveHooks(Env):
 
 `drive_authz.seat_request_authorized(board_key, board, job, generation, seat) -> bool` lives in `lib/swarm/supervisor/drive_authz.py` (create it here): true iff a `seat_request` receipt exists for the seat's row id whose `args_sha` equals `receipts.args_sha(canonical_seat_args(seat_row))` and whose recorded revision equals the row's revision.
 - [ ] **Step 2: Run** `cd tests && /var/tmp/test-slots/test-slot -- python3 -B -m unittest test_drive_hooks` → FAIL.
-- [ ] **Step 3: Implement.** CLI subcommands touched print `id=<n> rev=<r>` as their last stdout line (Task 6 owns the CLI; coordinate through the board: eng-hooks posts the exact format, eng-cli implements it). `canonical_seat_args(seat) -> list[str]` returns the argv the CLI would have needed to produce those fields (fixed order). Guardrail patterns live in `shellguard.py` next to the existing `gh run watch` refusals.
+- [ ] **Step 3: Implement.** CLI subcommands touched print the one record format of Global Constraints as their last stdout line (Task 6 prints it, this task parses it; no other format). `canonical_seat_args(seat) -> list[str]` returns the argv the CLI would have needed to produce those fields (fixed order). Guardrail patterns live in `shellguard.py` next to the existing `gh run watch` refusals.
 - [ ] **Step 4: Run** step 2 + `test_hooks_cli test_shellguard test_spawn` → PASS.
 - [ ] **Step 5: Commit** — "hooks: drive receipts, seat authorization, person path, guardrails and supervisor kicks".
 
 ---
+
+**Additions from the design judge:**
+- [ ] Parse the one record format from Global Constraints (no other format).
+- [ ] **[F17]** The requester session (owner record `requester_session`) gets receipts for `answer`, `deactivate`, `halt`, `unhalt`, `activate`, `seat request`; any other session's `deactivate` of a drive job gets no receipt (the driver treats the board change as tamper). Test `test_requester_answer_is_receipted` and `test_foreign_deactivate_not_receipted`.
+- [ ] **[A]/[F17]** SubagentStart refuses Agent-tool spawns by the requester session and by the lead seat in a drive job, pointing to `swarm seat request`. Test `test_requester_cannot_spawn_subagents_in_drive_job`.
+- [ ] **[F18]** Codex hooks write receipts exactly like Claude's (`test_codex_done_receipted` via `test_codex_hooks.Env`).
+- [ ] **[F21]** A failed receipt write is logged to the private dir (`receipt-failures.log`); doctor FAILs on an entry younger than 24 h (`test_doctor_fails_on_receipt_write_failure`). Barrier `hook_after_cli_before_receipt` sits between parsing and `receipts.write`.
 
 ### Task 6: CLI — `activate --drive`, `swarm seat`, `swarm halt|unhalt`, `swarm review`
 
@@ -426,7 +454,7 @@ Seat: eng-cli (sonnet). Spec §3.1, §3.4, §3.6, §4.3.
 - Consumes: Tasks 2–5.
 - Produces commands:
   - `swarm activate --job J --goal G --drive --lead-brief PATH --workdir DIR [--allow-workdir DIR]... [--remote NAME=URL]... [--lead-harness claude|codex] [--budget KEY=VALUE]...` → job + owner record (roots, pinned remotes: default = `git -C DIR remote -v` read once, sanitized env) + `ledger.create` + `drive.enabled=1`, `drive.generation_requested` + lead seat request with driver-authored authorization + `hooks.kick()`. Re-activation of an existing drive job writes `generation_requested = generation + 1` only (Task 8 rolls over). Person path (`person.require`) when re-activating.
-  - `swarm seat request|list|show|release|cancel` (flags as spec §3.4); last stdout line `id=<n> rev=<r>`.
+  - `swarm seat request|list|show|release|cancel` (flags as spec §3.4); last stdout line `swarm-record: kind=seat id=<n> rev=<r>` (Global Constraints).
   - `swarm review --job J --artifact REF verified|changes --report PATH` (structured review result; posts `REVIEW <artifact> VERIFIED|CHANGES <path>`).
   - `swarm halt [--job J] [--reason T]` / `swarm unhalt [--job J]` (person path; job-level: ledger `halted`, `runner` stop of the job's scopes; global: private `supervise.off`).
   - `swarm ask` in a drive job: `--default` required; `--expires` default `[drive] question_expiry`; `--blocks` default = asking seat (core `seat` column).
@@ -472,12 +500,37 @@ class DriveCli(CliEnv):
 
 ---
 
+**Additions from the design judge and the PM ruling:**
+- [ ] **[A]** `--goal` implies drive; `--no-drive --reason TEXT` (refused without `--reason`); `--lead-brief` optional (generated at `<workdir>/.swarm/lead-brief-<job>.md`); `--workdir` defaults to cwd when under `allowed_workdirs` and not under /tmp, else error. Tests: `test_goal_implies_drive`, `test_no_drive_requires_reason`, `test_no_drive_shown_not_autonomous`, `test_generated_lead_brief`, `test_workdir_default_refused_under_tmp`.
+- [ ] **[A]** `swarm ask` in any goal job requires `--default`.
+- [ ] **[F10]** `--requirements PATH` (repeatable) pins blob ids in the owner record and ledger; `GOAL-READY` (`swarm goal-ready --job J --target REF@SHA [--add-requirements PATH]...`) cannot drop pinned files. Test `test_goal_ready_cannot_replace_pinned_requirements`.
+- [ ] **[F9]** `swarm seat release --withdraw-artifact GROUP --reason TEXT`. **[F4]** `swarm seat ack --upto ID`.
+- [ ] **[F2]** `swarm drive repair --job J` (person path) rebuilds a bad ledger from the board plus receipts; `swarm job move` refuses drive jobs unless `--with-ledger`.
+- [ ] **[F2]** Activation order: ledger created and fsynced before the board row (test with a crash between them: the next pass sees a ledger without a board row and creates the row; never the reverse).
+- [ ] **[F22]** Status shows `driving: <next action or running seats>` (`test_status_driving_line`); per-seat bounded agent `swarm wait` (`test_agent_wait_is_per_seat_and_bounded`).
+
+### Task 7a: Freeze the driver model (Snapshot, Action, fixtures)
+
+Seat: eng-driver (sonnet). Reviewed by EL. Lands before wave 4 so Tasks 7, 8a, 8b, 8c build on one interface.
+
+**Files:**
+- Create: `lib/swarm/supervisor/driver_model.py` (dataclasses only: `Snapshot`, `Action`, `SeatView`, `Question`, `HandoffView`, `VerdictView`; no logic)
+- Create: `tests/drive_fixtures.py` (factories `seat`, `q`, `ho`, `v`, `L`, `iso`, `minutes`, `snap` used by Tasks 7–8c)
+- Test: `tests/test_drive_model.py`
+
+**Interfaces:**
+- Produces the exact field lists given in Task 7's Interfaces (moved here), frozen dataclasses with `__slots__`, plus `Action.kind ∈ {"launch","record_unreachable","close","hold","nothing","rollover","stop_seat","complete_land"}` and `Action.not_before: datetime | None`, `Action.responsible: str | None`.
+
+- [ ] **Step 1:** test that every factory builds a valid frozen object and that `dataclasses.replace` works (`test_snapshot_is_frozen`, `test_factories_cover_every_field`).
+- [ ] **Step 2–4:** run `cd tests && /var/tmp/test-slots/test-slot -- python3 -B -m unittest test_drive_model` → FAIL, implement, PASS.
+- [ ] **Step 5:** commit "driver: frozen snapshot and action model with test fixtures"; post the interface on the board for eng-driver2..4.
+
 ### Task 7: Driver core — snapshot and pure `next_actions`
 
 Seat: eng-driver (sonnet). Reviewed by EL. Spec §3.2, §3.3, §3.5–§3.7, §3.9, §4.1.
 
 **Files:**
-- Create: `lib/swarm/supervisor/driver_model.py` (pure: dataclasses + `next_actions`)
+- Modify: `lib/swarm/supervisor/driver_model.py` (Task 7a's frozen dataclasses; this task adds the pure `next_actions`)
 - Create: `lib/swarm/supervisor/driver_snapshot.py` (reads board + ledger + receipts into the model)
 - Test: `tests/test_drive_next_actions.py` (table tests, no board), `tests/test_drive_snapshot.py`
 
@@ -557,9 +610,21 @@ class NextActions(unittest.TestCase):
 
 ---
 
-### Task 8: Driver execution — claims, reconciliation, deadlines, rollover, terminalization, tamper
+**Additions from the design judge** (tests in `test_drive_next_actions.py`, each written fully):
+- [ ] **[F1]** `test_gated_lead_holds_until_question_expiry`: only a lead gated by an open question → one `hold` with `not_before == until`; no lead wake; no round counted.
+- [ ] **[F3]** `test_failed_lead_gets_one_successor_then_ruling`.
+- [ ] **[F9]** `test_withdrawn_group_does_not_block_goal_judge`.
+- [ ] **[F11]** `test_finalize_blocked_cycle_counts_no_progress`, `test_max_seats_refusal_wake_counts_no_progress`, `test_nothing_else_to_do_definition`.
+- [ ] **[F12]** `test_outage_attempt_not_counted`.
+- [ ] **[F15]** `test_question_to_role_wakes_that_seat`.
+- [ ] **[F19]** `test_land_lease_hold_over_limit_makes_ruling_due`.
+- [ ] **[F22]** `test_driver_error_passes_make_ruling_due`, `test_stall_minutes_wakes_lead`, `test_max_seats_refused`.
 
-Seat: eng-driver2 (sonnet). Reviewed by EL and the security reviewer. Spec §3.1, §3.2, §3.9, §4.5.
+### Task 8a: Driver execution — claims and reconciliation
+
+Seat: eng-driver2 (sonnet). Reviewed by EL and the security reviewer (opus). Spec §3.2, §3.9, §4.5 incl. [F7].
+
+Scope note: this task owns `driver.execute`, `driver.reconcile` and the drive-run reaping; `enforce_deadlines`, `terminalize`, `rollover` move to Task 8b and tamper/`_pass`/prompts to Task 8c. The Interfaces block below is shared; the tests listed are split by owner as marked: 8a owns `test_claim_without_run_file_is_concluded_after_grace`, `test_forged_restart_row_ignored`, `test_prose_done_is_not_a_handoff`; 8b owns `test_deadline_records_mechanical_unreachable_without_snapshot`, `test_rollover_stops_old_generation_first`, `test_terminalize_settles_questions_and_closes`; 8c owns `test_tamper_closed_job_is_reopened`, `test_broken_job_does_not_starve_next`.
 
 **Files:**
 - Create: `lib/swarm/supervisor/driver.py`
@@ -643,6 +708,39 @@ class DriverTests(DriveEnv):
 
 ---
 
+**Additions from the design judge ([F7]):**
+- [ ] `test_lost_race_intent_concluded_lost_uncounted`.
+- [ ] `test_deleted_board_row_with_live_lock_is_not_restarted` (run file + held flock + present unit → live, whatever the board says).
+- [ ] `test_driver_reaps_drive_runs` (the existing `runner.reap` is called for drive intents by the driver).
+
+### Task 8b: Driver deadlines, terminalization, rollover
+
+Seat: eng-driver3 (sonnet). Reviewed by EL and the security reviewer (opus). Spec §3.1 [F2][F6], §3.2, §4.3 [F5].
+
+**Files:** Modify `lib/swarm/supervisor/driver.py` (functions below); Test `tests/test_drive_lifecycle.py`.
+
+**Interfaces:** Consumes Task 8a's `execute`/`reconcile`; produces `enforce_deadlines`, `terminalize`, `rollover` with the signatures in Task 8a's Interfaces block, plus `driver.halt(board, cfg, led, actor, now)` / `driver.unhalt(...)` implementing [F5].
+
+- [ ] **Step 1: Failing tests** (written fully, using `tests/drive_fixtures.py` and `support.ManualClock`): the three 8b tests named in Task 8a's scope note, plus
+  `test_terminal_intent_fsynced_before_board_verdict` (crash barrier between them: next pass completes the close from the ledger),
+  `test_mechanical_verdict_recognised_from_ledger_not_receipts`,
+  `test_enforce_deadlines_ignores_board_verdict_column` (a forged board `met` does not stop the deadline),
+  `test_bad_ledger_holds_and_posts_driver_ledger_bad`, `test_board_drive_job_without_ledger_posts_driver_orphan`,
+  `test_halt_idles_seats_and_shifts_deadlines`, `test_halt_cancelled_attempts_not_counted`,
+  `test_rollover_writes_ledger_before_board` (barrier `mid_rollover_after_ledger`).
+- [ ] **Step 2–4:** `cd tests && /var/tmp/test-slots/test-slot -- python3 -B -m unittest test_drive_lifecycle` → FAIL, implement, PASS.
+- [ ] **Step 5:** commit "driver: deadlines, ledger-first terminalization, rollover and halt".
+
+### Task 8c: Driver tamper handling, pass integration, prompts
+
+Seat: eng-driver4 (sonnet). Reviewed by EL. Spec §3.2 (tamper), §3.5, §3.13, [F17].
+
+**Files:** Modify `lib/swarm/supervisor/driver.py` (`drive`, tamper), Create `lib/swarm/supervisor/prompts.py`, Modify `lib/swarm/supervisor/command.py:_pass`, `orphans.py`, `stuck.py`, `pipeline.py` (skip ledger drive jobs); Test `tests/test_drive_pass.py`.
+
+- [ ] **Step 1: Failing tests:** the two 8c tests named in Task 8a's scope note, plus `test_requester_deactivate_is_cancel_not_tamper`, `test_foreign_deactivate_is_tamper_and_halts_with_deadline_shift`, `test_other_passes_skip_jobs_with_a_ledger`, `test_pass_order_driver_first_with_bounded_reap`, `test_prompts_fence_untrusted_text` (a post containing `END untrusted` cannot close the fence), `test_lead_prompt_lists_pending_wake_ids_and_watermark`.
+- [ ] **Step 2–4:** `cd tests && /var/tmp/test-slots/test-slot -- python3 -B -m unittest test_drive_pass test_supervise_command test_supervise_orphans test_supervise_pipeline` → FAIL, implement, PASS.
+- [ ] **Step 5:** commit "driver: tamper handling, pass integration and seat prompts".
+
 ### Task 9: Runner and launch — one launch contract, budgets, usage, containment, clock, barriers
 
 Seat: eng-runner (sonnet). Spec §3.9, §4.1, §6.2. Task 9a (clock + barriers) lands in wave 1, the rest in wave 2.
@@ -706,6 +804,11 @@ class Presence(unittest.TestCase):
 
 ---
 
+**Additions from the design judge:**
+- [ ] **[F12]** `runner.classify_failure(harness, tail) -> "outage" | "error" | None` (Claude `is_error` with API/overload/auth subtypes; Codex error events of the same classes; binary launch failure). Test `test_overload_is_outage`.
+- [ ] **[F16]** `unit_presence` fallback only on cgroup v2 with readable `user@<uid>.service` and the slice recorded in the run file at launch (`systemctl show -p Slice`); otherwise `unknown`. Tests `test_cgroup_v1_is_unknown`, `test_wrong_slice_is_unknown`.
+- [ ] **[F22]** `test_slow_systemctl_capped_by_remaining_time`; doctor line for the Claude Bash sandbox ("boundary" or "guardrail only") and the Codex rollout-budget check (`test_doctor_codex_rollout_budget`).
+
 ### Task 10: Pipeline — review stage, owner seats, progress, ruling and goal judges
 
 Seat: eng-pipeline (sonnet). Spec §3.6, §3.7.
@@ -748,6 +851,11 @@ class DrivePipeline(DriveEnv):
 
 ---
 
+**Additions from the design judge:**
+- [ ] **[F10]** goal and ruling verdicts must name the pinned requirements digest in `--req`; `test_goal_met_with_unpinned_req_rejected`.
+- [ ] **[F13]** `test_clean_rebase_same_patch_ids_reuses_met` (only exact-SHA CI required) and `test_rebase_changing_patch_id_needs_new_verdict`.
+- [ ] **[F14]** `report:<path>@<blob>` artifacts: `test_report_artifact_is_a_handoff`.
+
 ### Task 11: `swarm land`, private mirrors, land leases
 
 Seat: eng-land (sonnet). Security reviewer reviews. Spec §3.8, §4.0.
@@ -787,6 +895,11 @@ class Land(DriveEnv):
 
 ---
 
+**Additions from the design judge:**
+- [ ] **[F8]** `land.land` journals each destination in a host-private land receipt (`intent` → `pushed` → `verified`); `driver` action `complete_land` finishes an interrupted landing. Tests `test_interrupted_land_completed_by_driver` (barrier `land_after_first_destination`), `test_quiesce_exempts_inflight_land`.
+- [ ] **[F19]** `test_orphan_lock_row_reported`; foreign-lease test `test_foreign_lease_never_reclaimed_then_ruling`.
+- [ ] **[F24]** `mirror.audit_target(since_sha, candidate, judged: set[str]) -> list[str]` (commits not reachable from a judged-met SHA and with no patch-id match); `test_unjudged_commit_on_target_blocks_close`.
+
 ### Task 12: Questions per seat
 
 Seat: eng-questions (sonnet). Spec §3.10.
@@ -818,9 +931,11 @@ class DriveQuestions(DriveEnv):
 
 ---
 
+**Additions:** [A] `--default` mandatory in every goal job (`test_goal_job_question_without_default_refused`); [F1] chaos case lives in Task 16.
+
 ### Task 13: Triggers — NOTIFY kick, triage off, alert changes
 
-Seat: eng-trigger (haiku, simple). Spec §3.11, §3.13.
+Seat: eng-trigger (sonnet; re-sized by the design judge: Postgres LISTEN, debounce, ledger-based DRIVER-STALLED). Spec §3.11, §3.13.
 
 **Files:**
 - Modify: `lib/swarm/events_listener.py` (LISTEN `swarm_board` → `hooks.kick()` for drive jobs, same debounce)
@@ -917,6 +1032,12 @@ class DriveE2E(DriveE2EEnv):          # one instance per backend: memory, sqlite
 
 ---
 
+**Additions from the design judge and the PM ruling:**
+- [ ] Add `test_drive_e2e` (and Task 16's `test_drive_chaos`) to `tests/run_postgres_suite.py` so they run in the Postgres CI job.
+- [ ] Replace `coordinator_turns() == 0` with `assert_no_coordinator()`: no restart row whose reason starts with `orphan-coordinator:`, no orphan-coordinator launch in the supervise log, and no agent row with a role in `[events] orchestrator_roles` in the job.
+- [ ] **[F18]** The fake Codex harness models the sandbox: with `SWARM_FAKE_SANDBOX=1` it cannot open the board directly unless the test marks the host drive-ready; `test_codex_seat_refused_when_not_drive_ready` and `test_codex_parity` (drive-ready) both run.
+- [ ] **[A]** `test_goal_without_drive_flag_is_driven` and `test_no_drive_with_reason_runs_as_before`.
+
 ### Task 16: Chaos suite
 
 Seat: qa-chaos (sonnet). Spec §6.2 scenario 3.
@@ -929,7 +1050,9 @@ Seat: qa-chaos (sonnet). Spec §6.2 scenario 3.
 
 ```python
 BARRIERS = ["before_claim", "after_claim", "after_run_file", "after_marker", "after_runner_start",
-            "runner_mid_session", "before_finish", "mid_terminalization", "mid_rollover"]
+            "runner_mid_session", "before_finish", "mid_terminalization", "mid_rollover",
+            "hook_after_cli_before_receipt", "land_after_first_destination", "after_intent_before_claim",
+            "mid_rollover_after_ledger"]
 
 class DriveChaos(DriveE2EEnv):
     def test_every_barrier_recovers(self):
@@ -950,10 +1073,12 @@ class DriveChaos(DriveE2EEnv):
     def test_user_bus_down_holds_then_recovers(self): ... # systemctl stub errors for N passes, cgroupfs unreadable
 ```
 
-- [ ] **Step 2:** run `cd tests && SWARM_TEST_BACKEND=sqlite /var/tmp/test-slots/test-slot -- python3 -B -m unittest test_drive_chaos` → PASS once Tasks 1–15 are in.
+- [ ] **Step 2:** run locally per backend `cd tests && SWARM_TEST_BACKEND=<memory|sqlite|file> /var/tmp/test-slots/test-slot -- python3 -B -m unittest test_drive_chaos` → PASS once Tasks 1–15 are in; Postgres runs in the CI job (Task 15 addition).
 - [ ] **Step 3: Commit** — "tests: drive-mode chaos suite with SIGKILL crash barriers".
 
 ---
+
+**Additions from the design judge:** `test_lead_asks_human_all_else_idle` ([F1]: holds until expiry, default applied, lead woken, ends MET); `test_provider_outage_does_not_burn_attempts` ([F12]); `test_bad_ledger_holds_not_silent` ([F2]); all on four backends.
 
 ### Task 17: Real-systemd test (box only)
 
@@ -990,9 +1115,11 @@ Seats: qa (sonnet) runs it, EL checks. Spec §6.3.
 
 ---
 
+**Additions from the design judge:** the MET run includes one **real Codex engineer** seat on a drive-ready host ([F18]), and the script kills the supervisor mid-run once (`systemctl --user kill swarm-supervise.service` during an active pass, then `kill -9` of one runner); the run must still reach MET with no duplicate attempts in the ledger.
+
 ### Task 20: Security review and final judging
 
-Seats: security reviewer (sonnet; read-only), judge (opus).
+Seats: security reviewer (opus; read-only), judge (opus).
 
 - [ ] **Step 1:** security reviewer reviews the whole branch diff against spec §4.0–§4.6 and the round-1–3 findings tables, focusing on: receipt forgery paths, `swarm land` checks, mirror git sanitisation, person path, budget reservation races, path validation (workdir roots, /tmp, symlinks), prompt fencing. Report with `swarm review --job J --artifact feat/swarm-autonomy@<sha> verified|changes --report <path>`.
 - [ ] **Step 2:** fixes go back to the owning seats (drive pipeline once available, otherwise EL dispatch).
