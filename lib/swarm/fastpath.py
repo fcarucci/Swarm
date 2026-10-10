@@ -221,7 +221,7 @@ def notifier():
                     if board.degraded or getattr(board, '_polling', False):
                         return
                     # Close the read-to-LISTEN startup gap before advertising a healthy relay.
-                    from swarm.hooks import _markers
+                    from swarm.jobmarkers import _markers
                     for marker in _markers(cfg):
                         changed(marker['job'])
                     while directory() == original_directory and list(md.glob('*.json')):
@@ -229,7 +229,7 @@ def notifier():
                         if board.wait_for_change(2):
                             # Payload is only an id on Postgres. Invalidating local jobs needs
                             # no board query; spurious reads are safe, lost notifications aren't.
-                            from swarm.hooks import _markers
+                            from swarm.jobmarkers import _markers
                             for marker in _markers(cfg):
                                 changed(marker['job'])
                         # Non-LISTEN backends cheaply report their trigger counter changes.

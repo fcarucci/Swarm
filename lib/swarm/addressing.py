@@ -1,5 +1,5 @@
 """Role addressing for `swarm post --to`: `@EL`, `@QA`, `@PM`, `@judge`, `@<role>` resolve to the
-agents that hold that seat on the job now; a plain name must be an agent of the job. A recipient
+agents that hold that seat on the job now; a plain name must be an agent of the job (or the key an active agent joined with). A recipient
 that doesn't resolve is an error (AddressError), never a message nobody will read.
 
 Seats are the agents' roles (`[swarm role: <role>]` in a subagent's prompt, `swarm join --role`),
@@ -54,6 +54,9 @@ def resolve(board, job: str, to: str) -> list[str]:
     if not to.startswith("@"):
         if any(a.name == to for a in agents):
             return [to]
+        by_key = [a.name for a in live if getattr(a, "agent_key", None) == to]   # the key it joined with
+        if len(by_key) == 1:
+            return by_key
         raise AddressError(f"no agent named {to!r} on job {job} (see `swarm who --job {job}`; address a "
                            f"seat with @role, e.g. @EL); nothing was posted")
     token = to[1:]

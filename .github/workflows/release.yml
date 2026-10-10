@@ -87,6 +87,16 @@ jobs:
           (cd dist && sha256sum "swarm-${VERSION}.tar.gz" "swarm-${VERSION}.zip" "install.sh" > SHA256SUMS)
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
+      - name: Build the Codex directory edition
+        id: codex
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 scripts/build-codex-directory --out dist
+          test -f "dist/swarm-codex-${VERSION}.zip"
+          (cd dist && sha256sum "swarm-codex-${VERSION}.zip" >> SHA256SUMS)
+
       - name: Generate release notes
         env:
           TAG: ${{ steps.tag.outputs.tag }}
@@ -103,5 +113,6 @@ jobs:
             --notes-file dist/RELEASE_NOTES.md \
             "dist/swarm-${VERSION}.tar.gz" \
             "dist/swarm-${VERSION}.zip" \
+            "dist/swarm-codex-${VERSION}.zip" \
             dist/install.sh \
             dist/SHA256SUMS

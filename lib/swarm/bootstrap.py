@@ -416,11 +416,16 @@ def host_setup(host: str | None, cfg: dict | None = None, *, apply_settings: boo
         from swarm import codex_config
         from swarm.cli import load_config
         cfg = cfg or load_config(paths.config_path())
+        from swarm import edition
+        directory = edition.is_directory()   # the Codex directory edition: no hooks to trust
         if not apply_settings:
             return Step("host", "manual", f"codex: not changed; add to {_codex_home() / 'config.toml'}: "
                                           f"{codex_config._manual_keys(cfg)} (or run `swarm init "
-                                          f"--apply-settings`)\n{TRUST_STEP}")
+                                          f"--apply-settings`)" + ("" if directory else f"\n{TRUST_STEP}"))
         status, detail = codex_config.apply(_codex_home() / "config.toml", cfg)
+        if directory:
+            return Step("host", "manual" if status in ("changed", "manual") else "ok",
+                        f"{detail}\n{NEW_SESSION_STEP}" if status == "changed" else detail)
         if status == "changed":   # Codex reads config.toml at session start: running sessions keep the old sandbox
             return Step("host", "manual", f"{detail}\n{NEW_SESSION_STEP}\n{TRUST_STEP}")
         if status == "manual" or not _hooks_ran("codex"):
@@ -1101,6 +1106,9 @@ def write_notices(host: str | None, steps: list[Step]) -> None:
     through hook_output, the next CLI command through take_notices; whichever comes first
     consumes them). The details hold paths and the swarm's own settings only, never secrets.
     Best effort: an unsafe host dir means no notice, never a write through a link."""
+    from swarm import edition
+    if edition.is_directory():   # the steps are printed by the command that ran them; no session shows notices
+        return
     todo = [{"name": s.name, "status": s.status, "detail": s.detail}
             for s in steps if s.status in NOTICE_STATUSES]
     name = notices_path(host).name
@@ -1250,6 +1258,9 @@ def format_checks(checks: list[Check], color: bool = False) -> str:
 
 
 def supervisor_checks(cfg: dict, host: str | None, run=None, which=None) -> list[Check]:
+    from swarm import edition
+    if edition.is_directory():   # the directory edition has no supervisor
+        return []
     if paths.IS_WINDOWS:
         return [Check("supervise", True, "not available on Windows (Linux systemd only)")]
     import datetime as dt
@@ -1327,7 +1338,8 @@ def supervisor_checks(cfg: dict, host: str | None, run=None, which=None) -> list
                          f"{h}: {sup[f'{h}_bin']}: {found[h] or 'not on PATH'}"
                          + ("" if found[h] else "; auto-restart inactive until harness installed"),
                          f"install {h} or set [supervise] {h}_bin"))
-    if "codex" in hs:
+    from swarm import edition
+    if "codex" in hs and not edition.is_directory():
         out.append(Check("supervise codex hooks", None,
                          "can't tell whether the plugin's hooks are trusted; replacements that never join are "
                          "killed after enrol_minutes",
@@ -1608,14 +1620,24 @@ def exposure_checks(cfg: dict) -> list[Check]:
     if bdir is not None:
         under = [(w, r) for w, r in roots if _within(bdir, r)]
         opted = (cfg.get("codex") or {}).get("board_writable") is True
-        out.append(Check("board location", not under,
-                         (f"the {board_backend(cfg)} board {bdir} is under {', '.join(str(r) for _, r in under)}"
-                          f" ({', '.join(w for w, _ in under)}): a sandboxed agent can fake and tamper with board "
-                          f"rows and plant links in it" + (" ([codex] board_writable = true grants it)" if opted else ""))
-                         if under else f"{bdir}: under no sandbox writable root",
-                         ("set [codex] board_writable = false, then " if opted else "")
-                         + f"move the board out of the sandbox's reach (default under ~/.local/share/swarm-board/; "
-                           f"`swarm migrate` moves the old default), or take its dir out of the writable roots"))
+        from swarm import edition
+        if edition.is_directory() and under and opted:
+            # no hooks here: the board is written by the agents themselves, from inside the sandbox.
+            # The user chose it; say what it costs, don't fail.
+            out.append(Check("board location", None,
+                             f"the {board_backend(cfg)} board {bdir} is writable by sandboxed agents "
+                             f"([codex] board_writable = true): this edition needs that, and any agent can fake or "
+                             f"tamper with board rows. Use it for work you trust",
+                             "set [codex] board_writable = false to take it back (agents then cannot join or post)"))
+        else:
+            out.append(Check("board location", not under,
+                             (f"the {board_backend(cfg)} board {bdir} is under {', '.join(str(r) for _, r in under)}"
+                              f" ({', '.join(w for w, _ in under)}): a sandboxed agent can fake and tamper with board "
+                              f"rows and plant links in it" + (" ([codex] board_writable = true grants it)" if opted else ""))
+                             if under else f"{bdir}: under no sandbox writable root",
+                             ("set [codex] board_writable = false, then " if opted else "")
+                             + f"move the board out of the sandbox's reach (default under ~/.local/share/swarm-board/; "
+                               f"`swarm migrate` moves the old default), or take its dir out of the writable roots"))
     problem = spool_problem(cfg)
     out.append(Check("spool dir", problem is None,
                      problem.replace("the old shared default", "the old shared default (/tmp is shared by every "
@@ -1851,15 +1873,20 @@ def plugin_table_state(output: str) -> bool | None:
 def _codex_checks(cfg: dict, env=os.environ) -> list[Check]:
     import tomllib
     from swarm import codex_config
-    listed = _codex_plugin_listed()
+    from swarm import edition
+    directory = edition.is_directory()
+    listed = True if directory else _codex_plugin_listed()
     out = [Check("plugin", listed, {True: "codex: swarm installed and enabled", False: "codex: swarm not installed "
                  "and enabled", None: f"codex: can't tell (`{PLUGIN_LIST_CMD}` gave an unknown answer)"}[listed],
                  "codex plugin marketplace add https://github.com/fcarucci/Swarm.git && codex plugin add "
                  f"swarm@swarm (check with `{PLUGIN_LIST_CMD}`; enable it if it is disabled)")]
-    ran = _hooks_ran("codex")
-    out.append(Check("hooks trusted", True if ran else None,
-                     "codex: the swarm's SessionStart hook has run for this version" if ran
-                     else "codex: no swarm hook has run since this version was installed", TRUST_STEP))
+    if directory:
+        out[0] = Check("plugin", True, f"codex: the directory edition is installed at {paths.PLUGIN_ROOT}", "")
+    else:
+        ran = _hooks_ran("codex")
+        out.append(Check("hooks trusted", True if ran else None,
+                         "codex: the swarm's SessionStart hook has run for this version" if ran
+                         else "codex: no swarm hook has run since this version was installed", TRUST_STEP))
     path = _codex_home() / "config.toml"
     try:
         data = tomllib.loads(path.read_text()) if path.exists() else {}
