@@ -283,6 +283,36 @@ class VerdictDetailsCliTests(GoalEnv):
         _, status, _ = self.cli("status", "--job", "J", "--no-color")
         self.assertNotIn("details    ", status)
 
+    def test_unreachable_needs_its_reason_and_report_and_judges_the_goal(self):
+        rc, _, err = self.verdict("unreachable", "--reason", "no credentials")
+        self.assertEqual(rc, 1)
+        self.assertIn("unreachable verdict must say why", err)
+        with self.board() as b:
+            self.assertIsNone(b.job_status("J").verdict)
+        rc, _, err = self.verdict("unreachable", "--reason", "no credentials", "--details", "-", stdin=REPORT)
+        self.assertEqual(rc, 0, err)
+        with self.board() as b:
+            js = b.job_status("J")
+        self.assertEqual((js.verdict, js.verdict_scope, js.closed_by), ("unreachable", "goal", None))
+        rc, out, _ = self.cli("verdict", "--job", "J", "show")
+        self.assertEqual(rc, 0)
+        self.assertIn("1. The drill was never run.", out)
+
+    def test_a_drive_jobs_not_met_must_give_its_open_count_and_progress_is_kept(self):
+        with self.board() as b:
+            self.assertTrue(b.set_job_data("J", "drive.enabled", "1"))
+        rc, _, err = self.verdict("--artifact", "a1", "not_met", "--reason", "r", "--next", "n")
+        self.assertEqual(rc, 1)
+        self.assertIn("open_count", err)
+        rc, _, err = self.verdict("--artifact", "a1", "--open", "2", "--progress", "yes", "--candidate", "c" * 40,
+                                  "not_met", "--reason", "r", "--next", "n")
+        self.assertEqual(rc, 0, err)
+        from swarm.review import artifact_verdicts
+        with self.board() as b:
+            rec = artifact_verdicts(b, "J")["a1"]
+        self.assertEqual((rec["open"], rec["progress"], rec["candidate"], rec["scope"]),
+                         (2, True, "c" * 40, "artifact"))
+
     def test_an_oversized_report_is_refused_clearly_and_nothing_is_recorded(self):
         rc, _, err = self.verdict("not_met", "--reason", "r", "--next", "n", "--details", "-",
                                   stdin="x" * (VERDICT_DETAILS_MAX + 1))

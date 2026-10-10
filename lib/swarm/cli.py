@@ -3063,14 +3063,26 @@ def _parser() -> argparse.ArgumentParser:
     vd.add_argument("--as", dest="name",
                     help="the judge's name; a hook-registered subagent leaves it out (its hooks add it)")
     vd.add_argument("--artifact", help="opaque reference being judged (defaults to this judge hand-off)")
-    vd.add_argument("verdict", choices=["met", "not_met", "show"],
-                    help="met or not_met records the verdict; `show` prints the latest full report "
+    vd.add_argument("verdict", choices=["met", "not_met", "unreachable", "show"],
+                    help="met or not_met records the verdict; unreachable (a drive goal that cannot be met: "
+                         "needs --reason and --details) records it too; `show` prints the latest full report "
                          "(--details) of the job's verdict, for anyone (--artifact REF: only if it is bound to REF)")
     vd.add_argument("reason", nargs="*", help="why (met: the words after the verdict; not_met: use --reason)")
     vd.add_argument("--details", metavar="-|PATH",
                     help="the full report in Markdown, read from stdin (-, e.g. a quoted heredoc) or from "
-                         "PATH; kept with the verdict (met or not_met) and shown by `swarm verdict show`. "
-                         "At most 64 KiB. Use it instead of writing a report file: judges cannot write files")
+                         "PATH; kept with the verdict (met, not_met or unreachable; required for unreachable) "
+                         "and shown by `swarm verdict show`. At most 64 KiB. Use it instead of writing a report "
+                         "file: judges cannot write files")
+    vd.add_argument("--scope", choices=["artifact", "goal", "ruling"],
+                    help="what the verdict judges: one hand-off (artifact; the default for met and not_met), the "
+                         "job's goal on the integrated target (goal; the default for unreachable) or a ruling on "
+                         "the current candidate (ruling)")
+    vd.add_argument("--open", dest="open_count", type=int, metavar="N",
+                    help="a drive job's not_met: how many acceptance criteria are still unmet (required there)")
+    vd.add_argument("--progress", choices=["yes"],
+                    help="a drive job's not_met: yes when the round made progress, with its reason")
+    vd.add_argument("--candidate", help="the candidate (commit SHA) the verdict judges")
+    vd.add_argument("--req", help="the requirements digest the verdict judges")
     vd.add_argument("--reason", dest="reason_opt", help="why the judge ruled so (required for not_met)")
     vd.add_argument("--next", dest="next_steps",
                     help="not_met: concrete instructions to meet the goal: what to change, where, and "
@@ -4401,6 +4413,13 @@ def _verdict_text(args) -> tuple[str, str | None] | None:
             print("a verdict needs a reason: swarm verdict --job J met \"<why>\"", file=sys.stderr)
             return None
         return reason, None
+    if args.verdict == "unreachable":
+        if not reason or not getattr(args, "details_text", None):
+            print("refused: an unreachable verdict must say why the goal cannot be met (--reason) and give its "
+                  "report (--details -): what was tried, why it cannot be met, and what would change that.",
+                  file=sys.stderr)
+            return None
+        return reason, None
     missing = [flag for flag, v in (("--reason \"<why it is not met>\"", reason),
                                     ("--next \"<what to change, where, and what you will re-check>\"", nxt)) if not v]
     if missing:
@@ -4433,6 +4452,12 @@ def _verdict_show(board, args) -> int:
     return 0
 
 
+def _verdict_scope(args) -> str:
+    """The scope a `swarm verdict` judges: --scope, else goal for unreachable (it ends a goal) and
+    artifact for met and not_met."""
+    return getattr(args, "scope", None) or ("goal" if args.verdict == "unreachable" else "artifact")
+
+
 def _board_verdict(board, cfg: dict, args) -> int:
     from swarm.spool import deliver_verdict
     if args.verdict == "show":
@@ -4442,7 +4467,10 @@ def _board_verdict(board, cfg: dict, args) -> int:
         return 1
     try:
         recorded = deliver_verdict(board, args.job, args.name, args.verdict, text[0], text[1],
-                                   getattr(args, "artifact", None), getattr(args, "details_text", None))
+                                   getattr(args, "artifact", None), getattr(args, "details_text", None),
+                                   scope=_verdict_scope(args), open_count=getattr(args, "open_count", None),
+                                   progress=True if getattr(args, "progress", None) else None,
+                                   candidate=getattr(args, "candidate", None), req=getattr(args, "req", None))
     except ValueError as exc:   # a name the board refuses (board.base.valid_name)
         print(f"verdict not recorded: {term_safe(exc)}", file=sys.stderr)
         return 1
@@ -5001,6 +5029,10 @@ def _run_command(cfg: dict, args) -> int:
             return 0
         if args.cmd == "verdict" and args.verdict == "show":
             print(f"cannot reach the board database: {exc}", file=sys.stderr)
+            return 1
+        if args.cmd == "verdict" and args.verdict == "unreachable":
+            print(f"cannot reach the board database: {exc}. An unreachable verdict is not queued: record it "
+                  "once the board is reachable.", file=sys.stderr)
             return 1
         if args.cmd == "verdict":  # likewise; whether args.name is the judge is checked on delivery
             spool_verdict(cfg, args.job, args.name, args.verdict, *_verdict_text(args), artifact=args.artifact,

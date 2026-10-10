@@ -70,7 +70,11 @@ TOOL_NAME_MAX = 80   # current_tool is stored truncated to this many characters
 # not readable yet (pending), it joined the session's only job before the tag could be read
 # (unverified), or the decision is made (final; job None = on no board).
 ROUTE_STATES = ("pending", "unverified", "final")
-VERDICTS = ("met", "not_met")   # a judge's verdict on a job's goal
+VERDICTS = ("met", "not_met", "unreachable")   # a judge's verdict on a job's goal
+# What a verdict judges (schema 25): one hand-off (artifact), the job's goal on the integrated target
+# (goal) or a ruling on the current candidate (ruling). Only a current-generation goal or ruling verdict
+# can make a drive job terminal (the driver decides; the board only stores it).
+VERDICT_SCOPES = ("artifact", "goal", "ruling")
 # Auto-close (Board.sweep_auto_close): the closed_by of a job the sweep closed, the derived agent
 # statuses that keep a job open (an agent still at work, or silent for less than dead_minutes),
 # and the cap on the outcome it writes.
@@ -128,9 +132,31 @@ RESTART_OUTCOMES = ("running", "completed", "timeout", "max_turns", "failed", "n
 # VERDICT_DETAILS_MAX bytes; nullable, read with .get() so old rows and clients keep working).
 # 24 the bg_commands table: an agent's background shell commands as the `swarm bg` wrapper
 # recorded them (pid, pgid, /proc start ticks, tag), so orphans can be listed and reaped safely.
-SCHEMA_VERSION = 24
+# 25 typed verdicts: the verdict CHECK accepts `unreachable`; jobs.verdict_scope, verdict_generation,
+# verdict_candidate and verdict_req hold the latest verdict's scope, drive generation, candidate and req.
+SCHEMA_VERSION = 25
 
 VERDICT_DETAILS_MAX = 64 * 1024   # bytes of UTF-8: the largest `swarm verdict --details` report
+
+
+def check_verdict_args(verdict: str, scope: str, details: str | None, open_count: int | None,
+                       drive: bool) -> None:
+    """The rules every backend's record_verdict applies before it stores anything (ValueError):
+    a known scope; an `unreachable` verdict carries its report (details, already checked by
+    check_verdict_details: None when blank); on a drive job a not_met judging the goal or an
+    artifact says how many acceptance criteria are still open (open_count, a count of 0 or more)."""
+    if scope not in VERDICT_SCOPES:
+        raise ValueError(f"unknown verdict scope {scope!r}: one of {', '.join(VERDICT_SCOPES)}")
+    if verdict == "unreachable" and scope == "artifact":
+        raise ValueError("an unreachable verdict judges the goal or a ruling (scope goal or ruling), "
+                         "not one artifact")
+    if verdict == "unreachable" and details is None:
+        raise ValueError("an unreachable verdict needs its report (details): what was tried, why the goal "
+                         "cannot be met, and what would change that")
+    if drive and verdict == "not_met" and scope in ("goal", "artifact"):
+        if type(open_count) is not int or open_count < 0:
+            raise ValueError("a not_met verdict on a drive job must give open_count: how many acceptance "
+                             "criteria are still unmet (0 or more)")
 
 
 def check_verdict_details(details: str | None) -> str | None:
@@ -659,6 +685,12 @@ class JobStatus:
     evidence_command: str | None = None
     finalize: str | None = None
     verdict_artifact: str | None = None
+    # Schema 25: the latest verdict's scope (VERDICT_SCOPES), the drive generation it was given in,
+    # and the candidate and requirements digest it judged (None for legacy and non-drive verdicts).
+    verdict_scope: str | None = None
+    verdict_generation: int | None = None
+    verdict_candidate: str | None = None
+    verdict_req: str | None = None
 
 
 def details_if_bound(details: str, verdict: str, by: str | None, at, plugin_data: str | None,
@@ -1062,9 +1094,9 @@ def run_agents(agents: Sequence[AgentStatus], start: _dt.datetime) -> list[Agent
 
 def goal_is_unmet(goal: str | None, verdict: str | None) -> bool:
     """The one definition, on raw columns (backend rows, CloseGuard): a goal whose latest verdict
-    is not `met`. Only the judge's `met` (or a person: deactivate, --force) may end such a job,
-    never a quiet-time sweep."""
-    return bool(goal) and verdict != "met"
+    is neither `met` nor `unreachable` (both settle a goal). Only the judge's `met` or `unreachable`
+    (or a person: deactivate, --force) may end such a job, never a quiet-time sweep."""
+    return bool(goal) and verdict not in ("met", "unreachable")
 
 
 def goal_unmet(js: JobStatus) -> bool:
@@ -2089,9 +2121,15 @@ class Board(abc.ABC):
     @abc.abstractmethod
     def record_verdict(self, job: str, judge_name: str, verdict: str, reason: str,
                        next_steps: str | None = None, artifact: str | None = None,
-                       details: str | None = None) -> bool:
+                       details: str | None = None, *, scope: str = "artifact", generation: int | None = None,
+                       open_count: int | None = None, progress: bool | None = None,
+                       candidate: str | None = None, req: str | None = None) -> bool:
         """The judge's verdict on the job's goal: only if `judge_name` is the job's ACTIVE judge
         (else False, nothing stored). Sets verdict (one of VERDICTS, anything else raises),
+        scope (VERDICT_SCOPES; unknown raises), generation, candidate and req (kept as the latest
+        verdict's, None when absent). check_verdict_args refuses (ValueError, nothing stored) an
+        `unreachable` without details and, on a drive job, a not_met goal/artifact verdict without
+        open_count; open_count and progress are kept in the artifact's verdict record.
         verdict_reason, verdict_next = next_steps (None for met), verdict_by = judge_name, verdict_at = now; a later verdict replaces it.
         `details`: the judge's full report (Markdown), stored with the verdict and replaced (cleared
         when absent) by the next one; over VERDICT_DETAILS_MAX bytes raises BoardError (see
