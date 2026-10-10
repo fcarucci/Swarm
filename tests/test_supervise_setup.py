@@ -242,3 +242,19 @@ class DoctorSupervisorTests(Env):
         self.checks(which=which)
         self.assertEqual(seen["path"], systemd.service_path())
         self.assertIsNotNone(seen["path"])
+
+
+class TimerStateEnv(_unittest.TestCase):
+    def test_timer_state_sets_xdg_runtime_dir(self):
+        seen = {}
+
+        def run(cmd, **kw):
+            seen.update(kw.get("env") or {})
+            return subprocess.CompletedProcess(cmd, 0, "ActiveState=active\nUnitFileState=enabled\n", "")
+
+        with mock.patch.dict(os.environ, {}, clear=False), \
+             mock.patch("pathlib.Path.is_dir", return_value=True):
+            os.environ.pop("XDG_RUNTIME_DIR", None)
+            state = systemd.timer_state(run)
+        self.assertEqual(state["ActiveState"], "active")
+        self.assertTrue(seen["XDG_RUNTIME_DIR"].startswith("/run/user/"))
