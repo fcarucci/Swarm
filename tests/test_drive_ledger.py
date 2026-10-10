@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -149,7 +150,8 @@ class LedgerTests(LedgerCase):
         real_fsync = os.fsync
         with mock.patch("os.fsync", side_effect=real_fsync) as fsync:
             led.save()
-        self.assertEqual(fsync.call_count, 2)
+        # file and directory; Windows cannot flush a directory (compat.fsync_dir is a no-op there)
+        self.assertEqual(fsync.call_count, 1 if sys.platform == "win32" else 2)
 
 
 if __name__ == "__main__":
