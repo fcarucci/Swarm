@@ -52,7 +52,23 @@ curl -fsSL https://raw.githubusercontent.com/fcarucci/Swarm/main/install.sh | ba
 
 To install a specific version, append `-s -- --ref v0.2.0` to `bash` once that tag exists.
 
-Start a new Claude session. In Codex, after trusting the hooks (above), start a new session
+Installing the plugin changes nothing outside it. On a machine that was never set up, the
+first session only says `[swarm] not set up: run swarm init`. Run `swarm init` (the plugin's
+`bin/swarm`): it writes `~/.config/swarm/config.toml` and the launcher `~/.local/bin/swarm`, and
+creates the board. It edits no host settings file: it prints the lines to add (Claude
+`sandbox.filesystem.allowWrite`, Codex `writable_roots` and `[agents] max_depth`), and
+`swarm init --apply-settings` makes those edits (with a backup). The answer is stored
+(`~/.local/share/swarm/host/settings-consent`) and followed by the automatic setup and
+`swarm upgrade`. A machine that is already set up (a config, the launcher or an earlier
+bootstrap exists, no answer stored) counts as yes and keeps working as before, with no action.
+
+The installer script (`install.sh`, `install.ps1`) is an explicit setup: it runs the setup with
+`SWARM_APPLY_SETTINGS=1`, so it also applies those host settings, like
+`swarm init --apply-settings`. To keep Swarm out of your host settings, install with the plugin
+commands and run plain `swarm init` instead; to stop later setup and upgrades from editing them,
+write `no` into `~/.local/share/swarm/host/settings-consent`.
+
+Then start a new Claude session. In Codex, after trusting the hooks (above), start a new session
 for setup, then another to load its configuration. Run `swarm doctor` to check setup.
 
 Windows (PowerShell): `irm https://raw.githubusercontent.com/fcarucci/Swarm/main/install.ps1 -OutFile install.ps1; .\install.ps1`.
@@ -81,13 +97,15 @@ Swarm is installed from its own marketplace (this repository).
   `swarm verdict` calls and members' background Bash commands so they are recorded, refuse
   CI-polling commands such as `gh run watch` for members, and let a judge or finalizer hold a
   stop until a verdict is recorded.
-- **First session.** The session-start hook runs `swarm bootstrap` in the background the
-  first time each plugin version starts, whether or not a job is active. It creates a Python venv in `~/.local/share/swarm/venv`
+- **Setup.** On a machine that was never set up, nothing runs until you run `swarm init` (see
+  Install). Once set up, the session-start hook runs `swarm bootstrap` in the background the
+  first time each plugin version starts, whether or not a job is active. Setup creates a Python venv in `~/.local/share/swarm/venv`
   (pip installs `psycopg[binary]` and `zstandard` from PyPI), the launcher
   `~/.local/bin/swarm`, `~/.config/swarm/config.toml` and the board. It adds the spool
   directory to `sandbox.filesystem.allowWrite` in `~/.claude/settings.json`, and for Codex adds
   the spool and marker directories to `[sandbox_workspace_write] writable_roots` and sets
-  `[agents] max_depth = 2` in `~/.codex/config.toml`; it backs up each file first. On Linux it
+  `[agents] max_depth = 2` in `~/.codex/config.toml` (only with your consent: `--apply-settings`, the installer, or an
+  install from before the opt-in); it backs up each file first. On Linux it
   installs and enables the systemd user timer `swarm-supervise.timer` (every 5 minutes). Each
   pass of this supervisor, for this OS user's jobs on this machine only:
   - restarts stuck agents of active jobs as headless `claude -p` or `codex exec` sessions;

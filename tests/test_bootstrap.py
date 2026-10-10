@@ -387,6 +387,54 @@ class ClaudeSandboxAllowlistTests(unittest.TestCase):
                          ["/work", self.spool])
         self.assertEqual(len(list(self.settings.parent.glob("settings.json.pre-swarm-*"))), 1)
 
+    def test_apply_settings_false_prints_the_line_and_edits_nothing(self):
+        """B2: without consent (a new install) the Claude settings are never written."""
+        self.settings.parent.mkdir(parents=True)
+        text = json.dumps({"model": "opus"})
+        self.settings.write_text(text)
+        step = bootstrap.host_setup("claude", self.cfg, apply_settings=False)
+        self.assertEqual(step.status, "manual")
+        self.assertIn(self.spool, step.detail)
+        self.assertIn("sandbox.filesystem.allowWrite", step.detail)
+        self.assertIn("swarm init --apply-settings", step.detail)
+        self.assertEqual(self.settings.read_text(), text)
+        self.assertEqual(list(self.settings.parent.glob("settings.json.pre-swarm-*")), [])
+        self.assertFalse(Path(self.spool).exists())
+
+    def test_apply_settings_false_leaves_codex_config_alone(self):
+        codex_home = self.home / ".codex"
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+            step = bootstrap.host_setup("codex", self.cfg, apply_settings=False)
+        self.assertEqual(step.status, "manual")
+        self.assertIn("writable_roots", step.detail)
+        self.assertIn("max_depth = 2", step.detail)
+        self.assertIn("swarm init --apply-settings", step.detail)
+        self.assertFalse((codex_home / "config.toml").exists())
+
+    def test_bootstrap_applies_settings_by_default_and_not_when_asked(self):
+        """The detached bootstrap of an existing install keeps today's behaviour (the default)."""
+        with_edit = bootstrap.bootstrap("claude", config=self.home / "a.toml")
+        self.assertTrue(self.settings.exists(), [s.detail for s in with_edit])
+        self.settings.unlink()
+        without = bootstrap.bootstrap("claude", config=self.home / "b.toml", apply_settings=False)
+        self.assertFalse(self.settings.exists(), [s.detail for s in without])
+        host = next(s for s in without if s.name == "host")
+        self.assertEqual(host.status, "manual")
+
+    def test_existing_install_is_the_config_the_launcher_or_a_stamp(self):
+        cfgpath = self.home / ".config/swarm/config.toml"
+        self.assertFalse(bootstrap.existing_install(cfgpath))
+        cfgpath.parent.mkdir(parents=True); cfgpath.write_text("")
+        self.assertTrue(bootstrap.existing_install(cfgpath))
+        cfgpath.unlink()
+        self.assertFalse(bootstrap.existing_install(cfgpath))
+        paths.launcher_path().parent.mkdir(parents=True); paths.launcher_path().write_text("#!/bin/sh\n")
+        self.assertTrue(bootstrap.existing_install(cfgpath))
+        paths.launcher_path().unlink()
+        host = paths.host_dir(); host.mkdir(parents=True, mode=0o700, exist_ok=True)
+        (host / "bootstrap-claude-0.0.1-1").touch()
+        self.assertTrue(bootstrap.existing_install(cfgpath))
+
     def test_missing_settings_created(self):
         bootstrap.host_setup("claude", self.cfg)
         self.assertEqual(json.loads(self.settings.read_text()),

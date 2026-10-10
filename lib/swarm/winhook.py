@@ -1,7 +1,8 @@
 """The Windows hook entry: what bin/swarm-hook.cmd (and bin/swarm-hook under Git Bash) runs. The
 Python port of the sh script bin/swarm-hook: `swarm-hook [--host H] start|turn|done|stop|session-start`
 with the hook JSON on stdin. Never fails the agent and never builds anything: session-start only
-starts a detached `swarm bootstrap` when this plugin version hasn't been set up yet; the others
+starts a detached `swarm bootstrap` when this plugin version hasn't been set up yet on an existing
+install (a new machine gets a "run `swarm init`" notice); the others
 exit before the swarm package is imported unless a swarm job marker exists.
 
 Files: only the host-only directory ~/.local/share/swarm/host is written or read here (stamps,
@@ -79,6 +80,20 @@ def _detached(cmd: list[str], log: Path) -> None:
                          creationflags=flags if os.name == "nt" else 0, env=winlaunch.run_env(PLUGIN_ROOT))
 
 
+NOT_SET_UP = ("[swarm] not set up: run `swarm init` (the plugin's bin/swarm). It creates ~/.config/swarm/config.toml, "
+              "the launcher ~/.local/bin/swarm and the board, and edits no Claude or Codex settings file unless you "
+              "pass --apply-settings; see the README. Until then the swarm hooks do nothing and nothing has been written.")
+
+
+def existing_install() -> bool:
+    """A machine set up before: its config, the launcher, or a bootstrap stamp of any version
+    (bin/swarm-hook and swarm.bootstrap.existing_install test the same three things)."""
+    cfg = Path(os.environ.get("SWARM_CONFIG") or (_home() / ".config" / "swarm" / "config.toml"))
+    launcher = _home() / ".local" / "bin" / ("swarm.cmd" if os.name == "nt" else "swarm")
+    return (os.path.lexists(cfg) or os.path.lexists(launcher)
+            or any(p.is_file() for p in (_home() / ".local" / "share" / "swarm" / "host").glob("bootstrap-*")))
+
+
 def session_start(host: str, priv: Path | None) -> int:
     sys.stdin.read()
     if priv is None:
@@ -118,6 +133,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     event = argv[0]
     try:
+        if event == "session-start" and not existing_install():   # a new machine: say so, write nothing
+            sys.stdin.read()
+            print(json.dumps({"systemMessage": NOT_SET_UP}))
+            print(NOT_SET_UP, file=sys.stderr)
+            return 0
         priv = private_dir()
         if event == "session-start":
             return session_start(host, priv)

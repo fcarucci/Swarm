@@ -118,6 +118,118 @@ class CliTests(Env):
         self.assertRegex(out, r"supervisor: skipped: (SWARM_NO_SYSTEMD set|not available on Windows[^\n]*)\n")
         self.assertFalse((Path(os.environ["HOME"]) / "settings.json").exists())
 
+    def fresh(self):
+        """A machine that was never set up: a config path that doesn't exist yet, and no launcher."""
+        home = Path(os.environ["HOME"])
+        cfg = home / ".config/swarm/config.toml"
+        self.assertFalse(cfg.exists())
+        return home, cfg
+
+    def init_fresh(self, cfg, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = swarm.main(["--config", str(cfg), "init", *argv])
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_init_on_a_new_machine_sets_up_but_only_prints_the_settings_lines(self):
+        """B2: `swarm init` is the explicit setup (launcher, config, board). It edits no host
+        settings file unless --apply-settings: it prints the exact lines instead."""
+        home, cfg = self.fresh()
+        rc, out, err = self.init_fresh(cfg)
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(cfg.exists())
+        self.assertTrue((home / ".local/bin/swarm").exists() or os.name == "nt")
+        self.assertIn("schema ready", out)
+        self.assertIn("sandbox.filesystem.allowWrite", out)
+        self.assertIn("writable_roots", out)
+        self.assertIn("swarm init --apply-settings", out)
+        self.assertFalse(Path(os.environ["CLAUDE_SETTINGS"]).exists())
+        self.assertFalse((home / ".codex/config.toml").exists())
+
+    def test_init_apply_settings_edits_the_host_settings(self):
+        home, cfg = self.fresh()
+        rc, out, err = self.init_fresh(cfg, "--apply-settings", "--host", "claude")
+        self.assertEqual(rc, 0, err)
+        spool = json.loads(Path(os.environ["CLAUDE_SETTINGS"]).read_text())["sandbox"]["filesystem"]["allowWrite"]
+        self.assertEqual(len(spool), 1)
+        self.assertIn(spool[0], out)
+
+    def bootstrap_fresh(self, cfg, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = swarm.main(["--config", str(cfg), "bootstrap", "--quiet", *argv])
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_a_declined_init_stays_declined_through_session_start_reinit_and_upgrade(self):
+        """Judge B2: a plain `swarm init` stores "no". The detached bootstrap (SessionStart), a second
+        init and the bootstrap `swarm upgrade` runs all follow it: no host settings file is written,
+        even though the config and launcher that init created now make the machine look installed."""
+        from swarm import bootstrap
+        home, cfg = self.fresh()
+        claude, codex = Path(os.environ["CLAUDE_SETTINGS"]), home / ".codex/config.toml"
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(home / ".codex")}):
+            self.assertEqual(self.init_fresh(cfg, "--host", "claude")[0], 0)
+            self.assertEqual(bootstrap.read_consent(), "no")
+            self.assertTrue(bootstrap.existing_install(cfg))                 # init made it look installed
+            for argv in (("--host", "claude"), ("--host", "codex")):          # the SessionStart / upgrade bootstrap
+                rc, out, err = self.bootstrap_fresh(cfg, *argv)
+                self.assertEqual(rc, 0, err)
+                self.assertIn("not changed", out + err + " ".join(str(x.detail) for x in
+                              bootstrap.bootstrap(argv[1], config=cfg, apply_settings=False)))
+            self.assertEqual(self.init_fresh(cfg, "--host", "codex")[0], 0)   # re-init, still no flag
+            self.assertEqual(self.init_fresh(cfg)[0], 0)
+            self.assertEqual(bootstrap.read_consent(), "no")
+            self.assertFalse(claude.exists())
+            self.assertFalse(codex.exists())
+
+    def test_apply_settings_is_stored_and_followed_by_bootstrap(self):
+        from swarm import bootstrap
+        home, cfg = self.fresh()
+        claude = Path(os.environ["CLAUDE_SETTINGS"])
+        self.assertEqual(self.init_fresh(cfg, "--apply-settings", "--host", "claude")[0], 0)
+        self.assertEqual(bootstrap.read_consent(), "yes")
+        before = claude.read_text()
+        self.assertEqual(self.init_fresh(cfg, "--host", "claude")[0], 0)      # a later plain init keeps it
+        rc, _, err = self.bootstrap_fresh(cfg, "--host", "claude")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(claude.read_text(), before)                           # edited once, idempotent
+
+
+    def test_a_legacy_install_without_the_marker_is_grandfathered(self):
+        """A config plus an old stamp and no consent marker (every install before this change):
+        bootstrap applies the settings as before, and the answer is stored as yes."""
+        from swarm import bootstrap
+        home, cfg = self.fresh()
+        cfg.parent.mkdir(parents=True)
+        cfg.write_text((ROOT / "config.example.toml").read_text())
+        host = home / ".local/share/swarm/host"; host.mkdir(parents=True, mode=0o700)
+        (host / "bootstrap-claude-0.0.1-1").touch()
+        self.assertIsNone(bootstrap.read_consent())
+        rc, out, err = self.bootstrap_fresh(cfg, "--host", "claude")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(bootstrap.read_consent(), "yes")
+        self.assertTrue(Path(os.environ["CLAUDE_SETTINGS"]).exists())
+
+    def test_bootstrap_flags_and_the_installer_variable(self):
+        from swarm import bootstrap
+        home, cfg = self.fresh()
+        claude = Path(os.environ["CLAUDE_SETTINGS"])
+        self.assertEqual(self.bootstrap_fresh(cfg, "--host", "claude", "--no-apply-settings")[0], 0)
+        self.assertFalse(claude.exists())
+        with mock.patch.dict(os.environ, {"SWARM_APPLY_SETTINGS": "1"}):     # install.sh / install.ps1
+            self.assertEqual(self.bootstrap_fresh(cfg, "--host", "claude")[0], 0)
+        self.assertTrue(claude.exists())
+        self.assertEqual(bootstrap.read_consent(), "yes")
+
+    def test_init_on_an_existing_install_keeps_applying_the_settings(self):
+        """An install with a config keeps today's behaviour with zero action (the settings were
+        accepted at an earlier bootstrap)."""
+        with mock.patch("swarm.bootstrap.spool_problem", return_value=None):   # the test spool isn't under HOME
+            rc, out, err = self.cli("init", "--host", "claude")      # self.config exists: an existing install
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(Path(os.environ["CLAUDE_SETTINGS"]).exists())
+        self.assertNotIn("swarm init --apply-settings", out)
+
     def test_auto_init_never_writes_claude_settings(self):
         rc, _, _ = self.cli("status")
         rc, out, _ = self.cli("install-hooks")
