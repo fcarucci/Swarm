@@ -137,9 +137,11 @@ DEFAULTS = {
     # re-captured every snapshot_minutes; one over max_mb compressed keeps its head and tail.
     "transcripts": {"enabled": False, "retention_days": 30, "max_total_mb": 2048,
                     "snapshot_minutes": 15, "max_mb": 50},
-    # The supervisor (swarm.supervisor): closes stuck agents and restarts them headless. On by
-    # default; every key and its default is in swarm/supervisor/settings.py (DEFAULTS).
-    "supervise": {"enabled": True},
+    # The supervisor (swarm.supervisor): closes stuck agents and restarts them headless. Off by
+    # default (opt in: `swarm supervise enable`); an install whose timer is already there and whose
+    # config never set `enabled` keeps it on. Every key and its default is in
+    # swarm/supervisor/settings.py (DEFAULTS).
+    "supervise": {},
     # External events (swarm.events_listener): `swarm events serve` is an HTTP listener that plugins'
     # event sources feed; off by default. [events.sources.<name>] holds a source's own settings.
     "events": {"enabled": False, "bind": "127.0.0.1", "port": 8923, "max_body_bytes": 1048576,
@@ -209,6 +211,10 @@ def load_config(path: Path = DEFAULT_CONFIG) -> dict:
             user = tomllib.load(fh)
         for section, values in user.items():
             cfg.setdefault(section, {}).update(values)
+        if "enabled" not in (user.get("supervise") if isinstance(user.get("supervise"), dict) else {}):
+            # an install from before the supervisor became opt-in: if its timer is installed it
+            # stays on (swarm.supervisor.settings decides; `swarm doctor` says to set it explicitly)
+            cfg["_supervise_unset"] = True
         for key in implicit_legacy_database_keys(user):
             cfg["database"][key] = LEGACY_DATABASE_DEFAULTS[key]
         db = user.get("database")
@@ -281,7 +287,7 @@ def cmd_init(cfg: dict, args) -> int:
 
 
 # Commands that don't set the board up by themselves first (see auto_init).
-NO_AUTO_INIT = ("plugins", "init", "install-hooks", "hook", "spool", "bootstrap", "migrate", "doctor", "notices",
+NO_AUTO_INIT = ("plugins", "init", "uninstall", "install-hooks", "hook", "spool", "bootstrap", "migrate", "doctor", "notices",
                 "upgrade", "update")
 
 
@@ -2666,6 +2672,15 @@ def _parser() -> argparse.ArgumentParser:
                                           ".claude/hooks, .mcp.json, .codex, ...) for supervisor launches; "
                                           "interactive only")
     sva.add_argument("dir", help="the work dir whose current project configuration files you approve")
+    svs.add_parser("enable", help="turn the supervisor on: [supervise] enabled = true in the config, "
+                                  "and install and start the systemd user timer")
+    svs.add_parser("disable", help="turn the supervisor off: [supervise] enabled = false, and stop the timer")
+    un = sub.add_parser("uninstall", help="remove what Swarm set up outside the plugin: the supervisor "
+                                          "timer, the launcher, the venv and caches, and the settings "
+                                          "entries it added (then remove the plugin with the host)")
+    un.add_argument("--purge", action="store_true",
+                    help="also remove ~/.local/state/swarm (local boards, markers) and this config file")
+    un.add_argument("--dry-run", action="store_true", help="print what it would remove; change nothing")
     ev = sub.add_parser("events", help="external events: `events serve` runs the listener plugins feed "
                                        "([events] enabled); `events check` runs the safety-net checks once")
     evs = ev.add_subparsers(dest="scmd")
@@ -3373,6 +3388,9 @@ def _cmd_supervise(cfg: dict, args) -> int:
         return 1
     if getattr(args, "scmd", None) == "approve":
         return cmd_supervise_approve(cfg, args)
+    if getattr(args, "scmd", None) in ("enable", "disable"):
+        from swarm.supervisor.switch import cmd_switch
+        return cmd_switch(cfg, args)
     from swarm.supervisor.command import cmd_supervise
     return cmd_supervise(cfg, args)
 
@@ -3708,6 +3726,7 @@ COMMANDS = {
     "init": cmd_init,
     "install-hooks": _cmd_install_hooks,
     "supervise": _cmd_supervise,
+    "uninstall": lambda cfg, args: __import__("swarm.uninstall", fromlist=["cmd_uninstall"]).cmd_uninstall(cfg, args),
     "events": _cmd_events,
     "bootstrap": cmd_bootstrap,
     "migrate": cmd_migrate,

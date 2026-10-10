@@ -150,12 +150,12 @@ max_mb = 50                         # per transcript, compressed; a larger one k
 # Recover jobs created here after their coordinator and all workers disappear.
 # orphan_minutes = 15
 # orphan_max_restarts = 3   # per job per rolling 24 hours; backoff 15m, 30m, 60m
-# The supervisor (on by default; every key in docs/REFERENCE.md#supervisor-stuck-agents-and-automatic-restarts). Replacements get a minimal
+# The supervisor (off by default: `swarm supervise enable`; every key in docs/REFERENCE.md#supervisor-stuck-agents-and-automatic-restarts). Replacements get a minimal
 # environment; pass_env names extra variables to pass through: a proxy (HTTPS_PROXY, HTTP_PROXY,
 # NO_PROXY), a CA bundle (SSL_CERT_FILE, NODE_EXTRA_CA_CERTS), or an API key the harness needs
 # when it isn't logged in (ANTHROPIC_API_KEY, OPENAI_API_KEY). The session can read whatever
 # is listed here: only what it must have.
-# enabled = true           # set false to disable automatic recovery
+# enabled = false          # `swarm supervise enable` sets true and installs the timer
 # max_restarts_per_agent = 3 # per agent chain per rolling 24 hours
 # timer_minutes = 5
 # pass_env = []
