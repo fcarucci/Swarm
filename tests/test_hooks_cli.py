@@ -44,9 +44,7 @@ class Env(unittest.TestCase):
         self.config.write_text(
             f'[board]\nbackend = "{self.h.name}"\nspool_dir = {tq(self.spool_dir)}\n'
             f'[hook]\nmarker_dir = {tq(self.markers)}\n'
-            f'[plugins]\ndisabled = {json.dumps(list(self.plugins_disabled))}\n'
-            # the supervisor is opt-in (B3); these end-to-end tests cover it switched on
-            '[supervise]\nenabled = true\n' + self.h.toml)
+            f'[plugins]\ndisabled = {json.dumps(list(self.plugins_disabled))}\n' + self.h.toml)
         self.cfg = swarm.load_config(self.config)
         self.h.reset(swarm_names())
         home = self.tmp / "home"
@@ -117,7 +115,7 @@ class CliTests(Env):
         rc, out, _ = self.cli("init", "--no-hooks")
         self.assertEqual(rc, 0)
         self.assertRegex(out, r"^schema ready; name pool: \{'simpsons': \d+, 'english': \d+\}\n")
-        self.assertRegex(out, r"supervisor: skipped: (SWARM_NO_SYSTEMD set|not available on Windows[^\n]*)\n")
+        self.assertRegex(out, r"supervisor: skipped: (off \(\[supervise\] enabled = false\)|not available on Windows[^\n]*)\n")
         self.assertFalse((Path(os.environ["HOME"]) / "settings.json").exists())
 
     def test_auto_init_never_writes_claude_settings(self):

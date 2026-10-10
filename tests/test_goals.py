@@ -7,12 +7,19 @@ import json
 
 from test_routing import RoutingEnv  # noqa: E402  (sets sys.path)
 
-from swarm import spool  # noqa: E402
+from swarm import spool, cli as swarm  # noqa: E402
 
 GOAL = "The HA cluster survives the loss of any one node with no lost writes."
 
 
 class GoalEnv(RoutingEnv):
+    def setUp(self):
+        super().setUp()
+        # the supervisor is opt-in (B3); goal jobs here cover it switched on (it starts the judge)
+        from swarm import codex_config
+        self.config.write_text(codex_config.set_value(self.config.read_text(), "supervise", "enabled", True))
+        self.cfg = swarm.load_config(self.config)
+
     def activate_goal(self, job: str = "J", goal: str = GOAL, **kw):
         return self.activate(job, "--goal", goal, **kw)
 

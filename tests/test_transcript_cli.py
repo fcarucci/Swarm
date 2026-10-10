@@ -220,6 +220,14 @@ class ExportTests(TranscriptEnv):
 
 
 class StatusTests(TranscriptEnv):
+    def setUp(self):
+        super().setUp()
+        # the supervisor is opt-in (B3); its status footer is covered switched on
+        from swarm import codex_config
+        from swarm.cli import load_config
+        self.config.write_text(codex_config.set_value(self.config.read_text(), "supervise", "enabled", True))
+        self.cfg = load_config(self.config)
+
     def test_status_footer_and_job_detail(self):
         self.cli("activate", "--job", "J")
         name = self.cli("join", "--job", "J", "--key", "k1")[1].strip()
