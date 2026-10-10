@@ -25,7 +25,7 @@
 - **One record format** (couples Tasks 5 and 6): every CLI command that creates or changes a drive control record prints, as its last stdout line, exactly `swarm-record: kind=<kind> id=<integer> rev=<integer>` (`kind` ∈ `done, review, verdict, seat, ask, answer, post, goal_ready, ack, withdraw, halt, unhalt, deactivate, activate`; `rev` is 1 for records without revisions). Task 6 prints it; Task 5 parses it with `re.fullmatch(r"swarm-record: kind=([a-z_]+) id=(\d+) rev=(\d+)", last_line)`.
 - In drive jobs the CLI never spools a control command (spec [F18]); it fails with a clear error instead.
 - Schema version becomes 25 (`SCHEMA_VERSION = 25`); verdicts `("met", "not_met", "unreachable")`.
-- Budget defaults (`[drive]`): `max_sessions=60`, `max_seats=12`, `max_rounds=8`, `no_progress_rounds=3`, `max_attempts=3`, `max_cost_usd=40`, `session_usd_cap=5`, `min_session_usd=0.5`, `max_session_minutes=60`, `max_wall_hours=24`, `ruling_reserve = {sessions=2, minutes=60, usd=5}`, `ruling_attempts=2`, `ruling_deadline_minutes=120`, `ruling_grace_minutes=15`, `question_expiry="4h"`, `stall_minutes=90`, `driver_error_passes=6`, `max_concurrent_sessions=4`, `codex_usd_per_mtok=10`.
+- Budget **configurable defaults** (`[drive]` in config.toml; per job overridable at activation; spec §4.1 [D1]; Francesco: "spending cap is configurable"): `max_sessions=60`, `max_seats=12`, `max_rounds=8`, `no_progress_rounds=3`, `max_attempts=3`, `max_cost_usd=40` (shipped default), `ruling_reserve_usd=5` (shipped default), `session_usd_cap=5`, `min_session_usd=0.5`, `max_session_minutes=60`, `max_wall_hours=24`, `ruling_reserve = {sessions=2, minutes=60, usd=5}`, `ruling_attempts=2`, `ruling_deadline_minutes=120`, `ruling_grace_minutes=15`, `question_expiry="4h"`, `stall_minutes=90`, `driver_error_passes=6`, `max_concurrent_sessions=4`, `codex_usd_per_mtok=10`.
 - Commits end with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`; CHANGELOG.md gets an entry per user-visible task (the changelog check in CI enforces it).
 
 ## Review Focus
@@ -453,7 +453,7 @@ Seat: eng-cli (sonnet). Spec §3.1, §3.4, §3.6, §4.3.
 **Interfaces:**
 - Consumes: Tasks 2–5.
 - Produces commands:
-  - `swarm activate --job J --goal G --drive --lead-brief PATH --workdir DIR [--allow-workdir DIR]... [--remote NAME=URL]... [--lead-harness claude|codex] [--budget KEY=VALUE]...` → job + owner record (roots, pinned remotes: default = `git -C DIR remote -v` read once, sanitized env) + `ledger.create` + `drive.enabled=1`, `drive.generation_requested` + lead seat request with driver-authored authorization + `hooks.kick()`. Re-activation of an existing drive job writes `generation_requested = generation + 1` only (Task 8 rolls over). Person path (`person.require`) when re-activating.
+  - `swarm activate --job J --goal G --drive --lead-brief PATH --workdir DIR [--allow-workdir DIR]... [--remote NAME=URL]... [--lead-harness claude|codex] [--max-cost-usd N] [--ruling-reserve-usd N] [--budget KEY=VALUE]...` → job + owner record (roots, pinned remotes: default = `git -C DIR remote -v` read once, sanitized env) + `ledger.create` + `drive.enabled=1`, `drive.generation_requested` + lead seat request with driver-authored authorization + `hooks.kick()`. Re-activation of an existing drive job writes `generation_requested = generation + 1` only (Task 8 rolls over). Person path (`person.require`) when re-activating.
   - `swarm seat request|list|show|release|cancel` (flags as spec §3.4); last stdout line `swarm-record: kind=seat id=<n> rev=<r>` (Global Constraints).
   - `swarm review --job J --artifact REF verified|changes --report PATH` (structured review result; posts `REVIEW <artifact> VERIFIED|CHANGES <path>`).
   - `swarm halt [--job J] [--reason T]` / `swarm unhalt [--job J]` (person path; job-level: ledger `halted`, `runner` stop of the job's scopes; global: private `supervise.off`).
@@ -1140,3 +1140,9 @@ Seats: security reviewer (opus; read-only), judge (opus).
 - Task 5/9: [RR7] doctor per-role Codex readiness; `test_codex_judge_overridden_to_claude_on_sqlite`.
 - Task 11: [RR8] `swarm land` records a receipted land request; the driver executes `land.land` in the pass (`Action.kind == "land"`); tests `test_land_request_executed_by_driver`, `test_codex_integrator_lands_via_request`.
 - Task 12: [RR3] generic `expire_blockers` skips drive jobs; `test_generic_sweep_skips_drive_questions`.
+
+## D1 answered: configurable spending cap (spec rev 5.2)
+
+- Task 6: `--max-cost-usd N` and `--ruling-reserve-usd N` (plus `--budget KEY=VALUE`), defaults from `[drive]` in config.toml, stored in `led.budgets`; reserve > cap refused. Tests `test_max_cost_flag_overrides_config_default`, `test_config_default_used_without_flag`, `test_reserve_larger_than_cap_refused`.
+- Task 6/8c: `swarm status --job J` shows the effective budget line; Task 1's doctor gains one line per active drive job (`drive budget J: cost x/y USD (reserve r), sessions a/b, wall h/H h`); test `test_doctor_shows_effective_budget_per_job`.
+- Task 14: config.example.toml and REFERENCE.md present 40/5 USD as configurable defaults, not limits.
