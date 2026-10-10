@@ -160,7 +160,7 @@ class LauncherTests(unittest.TestCase):
         pkgs = v / "lib/python3.12/site-packages"
         for pkg in ("psycopg", "zstandard"):
             (pkgs / pkg).mkdir(parents=True); (pkgs / pkg / "__init__.py").write_text("")
-        req = subprocess.run(["sh", "-c", f"cksum < '{ROOT / 'requirements.txt'}' | cut -d' ' -f1"],
+        req = subprocess.run(["sh", "-c", f"cat '{ROOT / 'requirements.txt'}' '{ROOT / 'requirements-postgres.txt'}' | cksum | cut -d' ' -f1"],
                              capture_output=True, text=True).stdout.strip()
         (v / ".swarm-requirements").write_text(req + "\n")
         self.env["SWARM_VENV"] = str(v)
@@ -314,7 +314,7 @@ class LauncherTests(unittest.TestCase):
         self.assertTrue((outside / "z.cpython-313.pyc").exists())
 
     @posix_only("runs a POSIX sh script (the Windows entry points are tested in test_windows_*.py)")
-    def test_bin_swarm_reinstalls_a_venv_missing_psycopg(self):
+    def test_bin_swarm_reinstalls_a_venv_missing_zstandard(self):
         # the venv's python records its args; pip is that python, so nothing touches the network
         v = self.home / "venv"; (v / "bin").mkdir(parents=True)
         (v / "bin/python").write_text(f'#!/bin/sh\necho "$@" >> "{self.home}/python-args"\n')
@@ -322,7 +322,7 @@ class LauncherTests(unittest.TestCase):
         pkgs = v / "lib/python3.12/site-packages"
         for pkg in ("psycopg", "zstandard"):
             (pkgs / pkg).mkdir(parents=True); (pkgs / pkg / "__init__.py").write_text("")
-        req = subprocess.run(["sh", "-c", f"cksum < '{ROOT / 'requirements.txt'}' | cut -d' ' -f1"],
+        req = subprocess.run(["sh", "-c", f"cat '{ROOT / 'requirements.txt'}' '{ROOT / 'requirements-postgres.txt'}' | cksum | cut -d' ' -f1"],
                              capture_output=True, text=True).stdout.strip()
         (v / ".swarm-requirements").write_text(req + "\n")
         self.env["SWARM_VENV"] = str(v)
@@ -330,12 +330,14 @@ class LauncherTests(unittest.TestCase):
         subprocess.run([str(ROOT / "bin/swarm"), "status"], capture_output=True, text=True, env=self.env, timeout=30)
         self.assertEqual(log.read_text().splitlines()[-1].split(), ["-m", "swarm.cli", "status"])
         self.assertNotIn("pip", log.read_text())                           # complete venv: no pip
-        shutil.rmtree(pkgs / "psycopg")
+        shutil.rmtree(pkgs / "zstandard")
         log.unlink()
         subprocess.run([str(ROOT / "bin/swarm"), "status"], capture_output=True, text=True, env=self.env, timeout=30)
         lines = log.read_text().splitlines()
         self.assertEqual(lines[0].split()[:4], ["-m", "pip", "install", "-q"])   # pip restores the package
-        self.assertEqual(lines[0].split()[-1], str(ROOT / "requirements.txt"))
+        # the venv has psycopg, so an existing install keeps it: both files, hash-checked
+        self.assertEqual(lines[0].split()[-1], str(ROOT / "requirements-postgres.txt"))
+        self.assertIn("--require-hashes", lines[0].split())
         self.assertEqual((v / ".swarm-requirements").read_text().strip(), req)
         self.assertFalse(Path(str(v) + ".building").exists())
 

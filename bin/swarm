@@ -32,17 +32,29 @@ if { [ -d "$PYC" ] || mkdir -p -m 700 "$PYC" 2>/dev/null; } && [ -O "$PYC" ] && 
 else
   export PYTHONDONTWRITEBYTECODE=1
 fi
-REQ="$(cksum < "$D/requirements.txt" | cut -d' ' -f1)"
+# Dependencies: requirements.txt always; requirements-postgres.txt (psycopg) only for a Postgres
+# board: the config names it (backend = "postgres", or a [database] section: installs from before
+# the file-board default), or this venv already has psycopg (an existing install keeps it). Both
+# files pin exact versions with hashes: pip installs them hash-checked, as wheels only.
+CFG="${SWARM_CONFIG:-$HOME/.config/swarm/config.toml}"
+has_pkg() {
+  for init in "$V"/lib/python3*/site-packages/$1/__init__.py; do [ -f "$init" ] && return 0; done
+  return 1
+}
+WANT_PG=""
+if has_pkg psycopg; then
+  WANT_PG=1
+elif [ -f "$CFG" ] && grep -Eq '^[[:space:]]*(backend[[:space:]]*=[[:space:]]*"postgres"|\[database\])' "$CFG" 2>/dev/null; then
+  WANT_PG=1
+fi
+REQ="$(cat "$D/requirements.txt" "$D/requirements-postgres.txt" | cksum | cut -d' ' -f1)"
 # Needs (re)install: no interpreter, another requirements stamp, or a required package missing
 # from the venv (a glob, no Python start: an unmatched glob leaves the literal path, which fails -f).
 stale() {
   [ -x "$V/bin/python" ] || return 0
   [ "$(cat "$V/.swarm-requirements" 2>/dev/null)" = "$REQ" ] || return 0
-  for p in psycopg zstandard; do
-    f=0
-    for init in "$V"/lib/python3*/site-packages/$p/__init__.py; do [ -f "$init" ] && f=1; done
-    [ "$f" = 1 ] || return 0
-  done
+  has_pkg zstandard || return 0
+  [ -z "$WANT_PG" ] || has_pkg psycopg || return 0
   return 1
 }
 if stale; then
@@ -54,9 +66,22 @@ if stale; then
   done
   trap 'rmdir "$V.building" 2>/dev/null' EXIT INT TERM
   if stale; then
+    if [ ! -x "$V/bin/python" ] && ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))' 2>/dev/null; then
+      echo "swarm: Python 3.11 or newer is needed to set up $V (python3 on PATH is older or missing)" >&2
+      exit 1
+    fi
     echo "swarm: setting up $V (first run or new requirements)..." >&2
+    pip_install() {
+      if [ -n "$WANT_PG" ]; then
+        PIP_DISABLE_PIP_VERSION_CHECK=1 "$V/bin/python" -m pip install -q --require-hashes --only-binary=:all: \
+          -r "$D/requirements.txt" -r "$D/requirements-postgres.txt" >&2
+      else
+        PIP_DISABLE_PIP_VERSION_CHECK=1 "$V/bin/python" -m pip install -q --require-hashes --only-binary=:all: \
+          -r "$D/requirements.txt" >&2
+      fi
+    }
     { [ -x "$V/bin/python" ] || python3 -m venv "$V"; } \
-      && PIP_DISABLE_PIP_VERSION_CHECK=1 "$V/bin/python" -m pip install -q -r "$D/requirements.txt" >&2 \
+      && pip_install \
       && echo "$REQ" > "$V/.swarm-requirements" \
       || { echo "swarm: could not set up $V (need python3 >= 3.11 with venv and pip)" >&2; exit 1; }
   fi

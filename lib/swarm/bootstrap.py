@@ -1309,11 +1309,12 @@ def _common_checks(config: Path) -> list[Check]:
     from swarm.cli import load_config
     out = []
     v = paths.venv_dir()
-    if paths.IS_WINDOWS:   # bin/swarm.cmd's stamp: a CRC-32 of requirements.txt (winlaunch)
+    if paths.IS_WINDOWS:   # bin/swarm.cmd's stamp: a CRC-32 of the requirements files (winlaunch)
         from swarm import winlaunch
         req = winlaunch.requirements_stamp(paths.PLUGIN_ROOT)
     else:
-        req = subprocess.run(["sh", "-c", f"cksum < '{paths.PLUGIN_ROOT / 'requirements.txt'}' | cut -d' ' -f1"],
+        req = subprocess.run(["sh", "-c", f"cat '{paths.PLUGIN_ROOT / 'requirements.txt'}' "
+                                     f"'{paths.PLUGIN_ROOT / 'requirements-postgres.txt'}' | cksum | cut -d' ' -f1"],
                              capture_output=True, text=True).stdout.strip()
     have = (v / ".swarm-requirements").read_text().strip() if (v / ".swarm-requirements").exists() else ""
     out.append(Check("venv", paths.venv_python(v).exists() and have == req, str(v),

@@ -42,7 +42,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt -r requirements-postgres.txt
 
       - name: Run tests (backend=${{ matrix.backend }})
         env:
@@ -73,7 +73,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt -r requirements-postgres.txt
 
       - name: Run tests (backend=${{ matrix.backend }})
         env:
@@ -104,7 +104,7 @@ jobs:
       - name: Build the checkout's own venv (e2e/install_test.sh expects $ROOT/.venv already built)
         run: |
           python3 -m venv .venv
-          .venv/bin/pip install -q -r requirements.txt
+          .venv/bin/pip install -q -r requirements.txt -r requirements-postgres.txt
 
       - name: install.sh end to end (bash 3.2)
         run: |
@@ -150,7 +150,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt -r requirements-postgres.txt
 
       - name: Write a throwaway SWARM_TEST_CONFIG
         run: |

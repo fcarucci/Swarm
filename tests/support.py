@@ -137,7 +137,7 @@ def temp_venv() -> Path:
             from swarm.winlaunch import requirements_stamp
             req = requirements_stamp(ROOT)
         else:
-            req = subprocess.run(["sh", "-c", f"cksum < '{ROOT / 'requirements.txt'}' | cut -d' ' -f1"],
+            req = subprocess.run(["sh", "-c", f"cat '{ROOT / 'requirements.txt'}' '{ROOT / 'requirements-postgres.txt'}' | cksum | cut -d' ' -f1"],
                                  capture_output=True, text=True).stdout.strip()
         (v / ".swarm-requirements").write_text(req + "\n")
         _VENV = v

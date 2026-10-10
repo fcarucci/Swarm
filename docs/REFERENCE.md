@@ -68,9 +68,12 @@ marker/spool directory under `~/.local` are now covered by both bootstrap's tigh
 ## Requirements
 
 - Python 3.11 or newer (the config is read with `tomllib`), with `venv` and `pip`. The plugin
-  keeps its own venv (`~/.local/share/swarm/venv`) and installs `requirements.txt`
-  (`psycopg[binary]` 3.2 or newer, `zstandard` for compressed Codex rollouts) into it, whichever
-  backend you use.
+  keeps its own venv (`~/.local/share/swarm/venv`) and installs `requirements.txt` (`zstandard`,
+  for compressed Codex rollouts) into it, plus `requirements-postgres.txt` (`psycopg` with its
+  binary wheel) only for a Postgres board: when the config sets `backend = "postgres"` or has a
+  `[database]` section, or the venv already has psycopg. Both files pin exact versions with
+  sha256 hashes, and the launcher installs them with `pip --require-hashes --only-binary=:all:`
+  (wheels only, nothing built). It checks for Python 3.11+ before it creates the venv.
 - Claude Code or Codex, with plugin hooks enabled.
 - Storage for the board, one of:
   - **Plain files** (the default) or **SQLite**, when everything runs on one machine. Nothing to install;
@@ -2753,7 +2756,7 @@ covers the details.
 
 The tests use stdlib `unittest` and run offline. Test fixtures isolate host settings, markers,
 spools, and board state. Set up a checkout venv with `python3 -m venv .venv` and
-`.venv/bin/pip install -r requirements.txt`.
+`.venv/bin/pip install -r requirements.txt -r requirements-postgres.txt`.
 
 Run targeted tests for the files you changed locally; full suites run on GitHub Actions.
 For documentation changes:

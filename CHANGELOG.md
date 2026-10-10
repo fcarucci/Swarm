@@ -6,6 +6,9 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 ## [Unreleased]
 
+### Changed
+- The venv's dependencies are pinned to exact versions with sha256 hashes (`requirements.txt`: zstandard; `requirements-postgres.txt`: psycopg, psycopg-binary and their markers' dependencies) and installed with `pip --require-hashes --only-binary=:all:`. The launchers check for Python 3.11+ before creating the venv. psycopg is installed only for a Postgres board (`backend = "postgres"` or a `[database]` section in the config) or when the venv already has it. **Existing installs need no action**: the first `swarm` command after the upgrade rebuilds the venv once with the pinned versions and keeps psycopg.
+
 ### Added
 - `swarm verdict --details -|PATH`: a judge records its full Markdown report (evidence, numbered defects, fix list; at most 64 KiB) with a met or not_met verdict, bound to the same `--artifact`, instead of writing a `verdict.md` that judges are not allowed to create. `swarm verdict show --job J [--artifact REF]` prints it, `status --job J` shows `details: N lines`, and the fix worker's brief points to it. Needs schema 23 (nullable `jobs.verdict_details`; the board upgrades itself on first use).
 - Background commands of agents are tracked (schema 24, the `bg_commands` table; the board upgrades itself on first use). A swarm member's background Bash call in Claude Code now runs under `swarm bg`, which records it on the board with its process group, start time and host, and records its exit code. The command keeps its output, exit code and environment, but it now runs in a fresh `bash -c`, without Claude Code's shell snapshot: the agent shell's aliases and functions are not available to it. Codex can't be wrapped: its long-running commands are not tracked (documented).
