@@ -261,9 +261,34 @@ def _error_name(exc: BaseException) -> str:
     return type(exc.__cause__ or exc).__name__
 
 
+def _init_hosts(args, existing: bool) -> list[str]:
+    """The hosts `swarm init` reports on (and, when it applies settings, edits): --host, else the
+    host this CLI runs in, else the ones installed here. With none found a new install is told
+    about both (the lines to add are the same wherever it ends up); an existing one that asked
+    for nothing is left alone, as before."""
+    from swarm import bootstrap, hosts
+    one = getattr(args, "host", None) or hosts.detect_cli_host(os.environ)
+    if one:
+        return [one]
+    found = [h for h, d in (("claude", bootstrap._claude_config_dir()), ("codex", bootstrap._codex_home()))
+             if d.is_dir()]
+    if found:
+        return found
+    return ["claude", "codex"] if (getattr(args, "apply_settings", False) or not existing) else []
+
+
 def cmd_init(cfg: dict, args) -> int:
+    """The explicit setup: the config, the launcher, the board and the host settings. Nothing
+    outside the plugin is edited without consent: a new install gets the lines to add printed;
+    --apply-settings (or an install that already existed, which kept this behaviour) edits them."""
     from swarm.board import IncompatibleStorage
     from swarm.board.autoinit import initialize
+    from swarm import bootstrap, ci_migrate, paths
+    config = getattr(args, "config", None) or paths.config_path()
+    existing = bootstrap.existing_install(config)
+    setup = [bootstrap.ensure_launcher(), bootstrap.ensure_config(config)]
+    if setup[1].status == "changed":       # a new config was written: the board is set up from it
+        cfg = load_config(config)
     try:
         result = initialize(cfg)
     except IncompatibleStorage as exc:
@@ -272,12 +297,15 @@ def cmd_init(cfg: dict, args) -> int:
     for note in result.notes:
         print(note)
     print(f"schema ready; name pool: {result.pool}")
-    from swarm import bootstrap, ci_migrate, paths
-    for note in ci_migrate.migrate_team_config(getattr(args, "config", None) or paths.config_path()):
+    for note in ci_migrate.migrate_team_config(config):
         print(note)
-    step = bootstrap.supervisor_step(cfg, getattr(args, "config", None) or paths.config_path())
+    step = bootstrap.supervisor_step(cfg, config)
     print(f"supervisor: {step.status}: {step.detail}")
-    return 0
+    apply = bool(getattr(args, "apply_settings", False)) or existing
+    setup += [bootstrap.host_setup(h, cfg, apply_settings=apply) for h in _init_hosts(args, existing)]
+    print(bootstrap.format_steps(setup, _use_color(args)))
+    print(f"setup done: launcher, config and board are in place (venv: {paths.venv_dir()})")
+    return 1 if any(x.status in ("failed", "refused") for x in setup) else 0
 
 
 # Commands that don't set the board up by themselves first (see auto_init).
@@ -2647,8 +2675,13 @@ def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="swarm", description=__doc__.split("\n\n")[0])
     p.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     sub = p.add_subparsers(dest="cmd", required=True)
-    ini = sub.add_parser("init", help="create db/schema/name pool if missing (hooks come from the plugin)")
+    ini = sub.add_parser("init", help="set up: config, launcher, board; host settings only with --apply-settings")
     ini.add_argument("--no-hooks", action="store_true", help="ignored (hooks come from the plugin)")
+    ini.add_argument("--host", choices=["claude", "codex"], help="the host to set up (default: the one running this, "
+                     "else the installed ones)")
+    ini.add_argument("--apply-settings", action="store_true", help="also edit the host settings files (Claude "
+                     "sandbox.filesystem.allowWrite, Codex writable_roots); a new install otherwise only gets the lines to add")
+    ini.add_argument("--no-color", action="store_true")
     sub.add_parser("install-hooks", help="obsolete: the hooks come from the plugin (prints how)")
     bs = sub.add_parser("bootstrap", help="set the swarm up for this host (run automatically by the plugin)")
     bs.add_argument("--host", choices=["claude", "codex"]); bs.add_argument("--quiet", action="store_true")

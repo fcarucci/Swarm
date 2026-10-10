@@ -1,7 +1,8 @@
 """The Windows hook entry: what bin/swarm-hook.cmd (and bin/swarm-hook under Git Bash) runs. The
 Python port of the sh script bin/swarm-hook: `swarm-hook [--host H] start|turn|done|stop|session-start`
 with the hook JSON on stdin. Never fails the agent and never builds anything: session-start only
-starts a detached `swarm bootstrap` when this plugin version hasn't been set up yet; the others
+starts a detached `swarm bootstrap` when this plugin version hasn't been set up yet on an existing
+install (a new machine gets a "run `swarm init`" notice); the others
 exit before the swarm package is imported unless a swarm job marker exists.
 
 Files: only the host-only directory ~/.local/share/swarm/host is written or read here (stamps,
@@ -79,6 +80,15 @@ def _detached(cmd: list[str], log: Path) -> None:
                          creationflags=flags if os.name == "nt" else 0, env=winlaunch.run_env(PLUGIN_ROOT))
 
 
+def existing_install(priv: Path) -> bool:
+    """A machine set up before: its config, the launcher, or a bootstrap stamp of any version
+    (bin/swarm-hook and swarm.bootstrap.existing_install test the same three things)."""
+    cfg = Path(os.environ.get("SWARM_CONFIG") or (_home() / ".config" / "swarm" / "config.toml"))
+    launcher = _home() / ".local" / "bin" / ("swarm.cmd" if os.name == "nt" else "swarm")
+    return (os.path.lexists(cfg) or os.path.lexists(launcher)
+            or any(p.is_file() for p in priv.glob("bootstrap-*")))
+
+
 def session_start(host: str, priv: Path | None) -> int:
     sys.stdin.read()
     if priv is None:
@@ -99,6 +109,12 @@ def session_start(host: str, priv: Path | None) -> int:
                            stdin=subprocess.DEVNULL, stderr=err, env=winlaunch.run_env(PLUGIN_ROOT))
     stamp = priv / f"bootstrap-{h}-{ver}-{key}"
     if stamp.is_file():
+        return 0
+    if not existing_install(priv):
+        msg = ("[swarm] not set up: run `swarm init` (the plugin's bin/swarm; see the README). Until then the "
+               "swarm hooks do nothing and nothing outside the plugin is changed.")
+        print(json.dumps({"systemMessage": msg}))
+        print(msg, file=sys.stderr)
         return 0
     args = ["bootstrap", *(["--host", host] if host else []), "--quiet", "--stamp", str(stamp)]
     _detached([sys.executable, str(HERE / "winlaunch.py"), *args], priv / "bootstrap.log")

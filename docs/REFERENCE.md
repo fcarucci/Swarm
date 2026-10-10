@@ -898,7 +898,9 @@ A shared LISTEN notifier per configuration relays remote messages into host-only
 See [Upgrading](#upgrading-shared-boards) first: this
 migrates the board automatically, but every host sharing it needs to be on this version too.
 
-`swarm init` is never required. The board records the schema version its setup installed
+`swarm init` is never required for the board (it is also the explicit machine setup: config,
+launcher, and the host settings lines, see the README; `--apply-settings` edits the host
+settings files, which a new install otherwise only gets printed). The board records the schema version its setup installed
 (`SCHEMA_VERSION` in `lib/swarm/board/base.py`; Postgres: the `board_meta` row `schema_version`,
 SQLite: `PRAGMA user_version`, file backend: the `schema_version` file in the board directory),
 and every CLI command and every hook that opens the board first calls `ensure_initialized`:

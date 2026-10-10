@@ -1,6 +1,7 @@
 """bin/swarm-hook's shell part: fast, silent, never builds."""
 from __future__ import annotations
 
+import json
 import os
 from unittest import mock
 import subprocess
@@ -33,8 +34,59 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual((res.returncode, res.stdout), (0, ""))
         self.assertFalse((self.home / ".local/share/swarm/venv").exists())   # nothing built
 
+    def fake_plugin(self, bootstrap_body='touch "$HOME/bootstrap-entered"'):
+        fake = self.home / "plugin"; (fake / "bin").mkdir(parents=True); (fake / ".claude-plugin").mkdir()
+        (fake / ".claude-plugin/plugin.json").write_text('{"name": "swarm", "version": "1.2.3"}')
+        (fake / "bin/swarm-hook").write_text((ROOT / "bin/swarm-hook").read_text())
+        (fake / "bin/swarm").write_text(f'#!/bin/sh\n{bootstrap_body}\n')
+        for f in ("swarm", "swarm-hook"):
+            (fake / "bin" / f).chmod(0o755)
+        return fake
+
+    def session_start(self, fake, host="claude"):
+        return subprocess.run([str(fake / "bin/swarm-hook"), "--host", host, "session-start"], input="{}",
+                              capture_output=True, text=True, timeout=30, env=self.env)
+
+    @posix_only("runs a POSIX sh script (the Windows entry points are tested in test_windows_*.py)")
+    def test_session_start_on_a_new_machine_only_prints_the_init_notice(self):
+        """B2: a fresh machine (no config, launcher or bootstrap stamp) is never set up silently."""
+        fake = self.fake_plugin()
+        res = self.session_start(fake)
+        self.assertEqual(res.returncode, 0)
+        msg = json.loads(res.stdout)["systemMessage"]
+        self.assertIn("swarm init", msg)
+        self.assertIn("not set up", msg)
+        time.sleep(0.3)
+        self.assertFalse((self.home / "bootstrap-entered").exists())      # nothing was launched
+        for rel in (".local/bin", ".config/swarm", ".claude", ".codex", ".local/state/swarm"):
+            self.assertFalse((self.home / rel).exists(), rel)               # nothing else was written
+        self.assertEqual(list((self.home / ".local/share/swarm/host").glob("bootstrap-*")), [])
+
+    @posix_only("runs a POSIX sh script (the Windows entry points are tested in test_windows_*.py)")
+    def test_session_start_keeps_bootstrapping_an_existing_install(self):
+        """An install that already exists (its config, its launcher, or a stamp of any version) keeps today's
+        behaviour: a version change starts the detached bootstrap, with no notice."""
+        def config(home):
+            Path(self.env["SWARM_CONFIG"]).write_text("")
+        def launcher(home):
+            (home / ".local/bin").mkdir(parents=True); (home / ".local/bin/swarm").write_text("#!/bin/sh\n")
+        def old_stamp(home):
+            h = home / ".local/share/swarm/host"; h.mkdir(parents=True, mode=0o700)
+            (h / "bootstrap-claude-0.0.1-12345").touch()
+        for name, mark in (("config", config), ("launcher", launcher), ("stamp", old_stamp)):
+            with self.subTest(name):
+                shutil.rmtree(self.home, ignore_errors=True); self.home.mkdir()
+                self.env["SWARM_CONFIG"] = str(self.home / "none.toml")
+                fake = self.fake_plugin()
+                mark(self.home)
+                res = self.session_start(fake)
+                self.assertEqual(res.returncode, 0)
+                self.assertNotIn("not set up", res.stdout)
+                wait_until(lambda: (self.home / "bootstrap-entered").exists())
+
     @posix_only("runs a POSIX sh script (the Windows entry points are tested in test_windows_*.py)")
     def test_session_start_spawns_bootstrap_detached(self):
+        Path(self.env["SWARM_CONFIG"]).write_text("")        # an existing install (B2)
         fake = self.home / "plugin"; (fake / "bin").mkdir(parents=True); (fake / ".claude-plugin").mkdir()
         (fake / ".claude-plugin/plugin.json").write_text('{"name": "swarm", "version": "1.2.3"}')
         (fake / "bin/swarm-hook").write_text((ROOT / "bin/swarm-hook").read_text())

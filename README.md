@@ -48,8 +48,16 @@ codex plugin marketplace add https://github.com/fcarucci/Swarm.git
 codex plugin add swarm@swarm
 ```
 
-Start a new Claude session. In Codex, trust the plugin in `/hooks`, start a new session
-for setup, then another to load its configuration. Run `swarm doctor` to check setup.
+Installing the plugin changes nothing outside it. On a machine that was never set up, the
+first session only says `[swarm] not set up: run swarm init`. Run `swarm init` (the plugin's
+`bin/swarm`; the installer above does it for you): it writes `~/.config/swarm/config.toml` and
+the launcher `~/.local/bin/swarm`, and creates the board. It edits no host settings file: it
+prints the lines to add (Claude `sandbox.filesystem.allowWrite`, Codex `writable_roots` and
+`[agents] max_depth`), and `swarm init --apply-settings` makes those edits (with a backup).
+A machine that is already set up (a config, the launcher or an earlier bootstrap exists)
+keeps working as before, with no action. Then start a new Claude session. In Codex, trust the
+plugin in `/hooks`, start a new session, then another to load its configuration. Run
+`swarm doctor` to check setup.
 
 Windows (PowerShell): `irm https://raw.githubusercontent.com/fcarucci/Swarm/main/install.ps1 -OutFile install.ps1; .\install.ps1`.
 See [Windows setup and limits](docs/REFERENCE.md#windows).

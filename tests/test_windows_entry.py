@@ -120,7 +120,26 @@ class WinHookTests(Base):
             rc = winhook.main(list(argv))
         return rc, out.getvalue()
 
+    def test_session_start_on_a_new_machine_only_prints_the_init_notice(self):
+        started = []
+        with mock.patch.object(winhook, "_detached", lambda cmd, log: started.append(cmd)):
+            rc, out = self.run_hook("--host", "claude", "session-start")
+        self.assertEqual(rc, 0)
+        self.assertEqual(started, [])
+        msg = json.loads(out)["systemMessage"]
+        self.assertIn("swarm init", msg)
+        self.assertIn("not set up", msg)
+
+    def test_session_start_keeps_bootstrapping_an_existing_install(self):
+        Path(os.environ["SWARM_CONFIG"]).write_text("")
+        started = []
+        with mock.patch.object(winhook, "_detached", lambda cmd, log: started.append(cmd)):
+            rc, out = self.run_hook("--host", "claude", "session-start")
+        self.assertEqual((rc, len(started)), (0, 1))
+        self.assertNotIn("not set up", out)
+
     def test_session_start_stamps_and_starts_a_detached_bootstrap_once(self):
+        Path(os.environ["SWARM_CONFIG"]).write_text("")        # an existing install (B2)
         started = []
         with mock.patch.object(winhook, "_detached", lambda cmd, log: started.append(cmd)):
             self.assertEqual(self.run_hook("--host", "codex", "session-start")[0], 0)

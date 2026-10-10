@@ -363,12 +363,14 @@ def spool_problem(cfg: dict) -> str | None:
     return None
 
 
-def claude_sandbox_step(cfg: dict, settings_path: Path | None = None) -> Step:
+def claude_sandbox_step(cfg: dict, settings_path: Path | None = None, *, apply: bool = True) -> Step:
     """Claude Code's sandbox writes to the per-user spool dir: add it to
     sandbox.filesystem.allowWrite in the Claude user settings (the key of Claude Code 2.1.283),
     through safefile (backup first, mode kept), keeping every other key. The dir is created 0700
     first. A settings file the swarm can't parse, or whose sandbox keys have another shape, is
-    left alone: the step says what to add by hand."""
+    left alone: the step says what to add by hand. apply=False (a new install that hasn't agreed
+    to it: see existing_install) never writes: the step names the line to add and the one command
+    that does it."""
     from swarm import cli, codex_config, safefile
     settings_path = settings_path or cli.claude_settings_path()
     spool = str(codex_config.spool_path(cfg))
@@ -377,6 +379,8 @@ def claude_sandbox_step(cfg: dict, settings_path: Path | None = None) -> Step:
     if problem:
         return Step("host", "manual", f"claude: [board] spool_dir: {problem}; set it to a per-user dir "
                                       f"(default ~/.local/state/swarm/spool), then run `swarm bootstrap`")
+    if not apply:
+        return Step("host", "manual", f"claude: not changed; {by_hand} (or run `swarm init --apply-settings`)")
     settings = {}
     try:
         if settings_path.exists():
@@ -401,22 +405,42 @@ def claude_sandbox_step(cfg: dict, settings_path: Path | None = None) -> Step:
                               + (f" (backup: {saved.name})" if saved else ""))
 
 
-def host_setup(host: str | None, cfg: dict | None = None) -> Step:
+def host_setup(host: str | None, cfg: dict | None = None, *, apply_settings: bool = True) -> Step:
     """cfg: the swarm config bootstrap() loaded (its --config), for the Codex writable roots and
-    the Claude sandbox's spool entry."""
+    the Claude sandbox's spool entry. apply_settings=False edits no host settings file: the step
+    says what to add (a new install is only set up with `swarm init --apply-settings`)."""
     if host == "claude":
         from swarm.cli import load_config
-        return claude_sandbox_step(cfg or load_config(paths.config_path()))
+        return claude_sandbox_step(cfg or load_config(paths.config_path()), apply=apply_settings)
     if host == "codex":
         from swarm import codex_config
         from swarm.cli import load_config
-        status, detail = codex_config.apply(_codex_home() / "config.toml", cfg or load_config(paths.config_path()))
+        cfg = cfg or load_config(paths.config_path())
+        if not apply_settings:
+            return Step("host", "manual", f"codex: not changed; add to {_codex_home() / 'config.toml'}: "
+                                          f"{codex_config._manual_keys(cfg)} (or run `swarm init "
+                                          f"--apply-settings`)\n{TRUST_STEP}")
+        status, detail = codex_config.apply(_codex_home() / "config.toml", cfg)
         if status == "changed":   # Codex reads config.toml at session start: running sessions keep the old sandbox
             return Step("host", "manual", f"{detail}\n{NEW_SESSION_STEP}\n{TRUST_STEP}")
         if status == "manual" or not _hooks_ran("codex"):
             return Step("host", "manual", f"{detail}\n{TRUST_STEP}")
         return Step("host", "ok", detail)
     return Step("host", "skipped", "no host given")
+
+
+def existing_install(config: Path | None = None) -> bool:
+    """Whether this machine was set up before: its config exists, or the launcher does, or a
+    bootstrap stamp of any plugin version is in the host dir (bin/swarm-hook tests the same three
+    things). An existing install keeps its behaviour with no action (the detached bootstrap at a
+    new plugin version, settings upkeep included); a new one is only set up by `swarm init`."""
+    try:
+        if os.path.lexists(config or paths.config_path()) or os.path.lexists(paths.launcher_path()):
+            return True
+        hd = paths.host_dir()
+        return hd.is_dir() and not hd.is_symlink() and any(hd.glob("bootstrap-*"))
+    except OSError:
+        return False
 
 
 TRUST_STEP = ("Codex: open /hooks in a Codex session and trust the swarm plugin's hooks (Codex asks "
@@ -886,7 +910,8 @@ def supervisor_step(cfg: dict, config: Path, run=None) -> Step:
     return systemd.install(config, sup["timer_minutes"], run=run or subprocess.run)
 
 
-def bootstrap(host: str | None, *, config: Path | None = None, stamp: Path | None = None) -> list[Step]:
+def bootstrap(host: str | None, *, config: Path | None = None, stamp: Path | None = None,
+              apply_settings: bool = True) -> list[Step]:
     from swarm.cli import load_config
     config = config or paths.config_path()
     steps = [Step("venv", "ok", os.environ.get("VIRTUAL_ENV") or str(paths.venv_dir()))]
@@ -919,7 +944,7 @@ def bootstrap(host: str | None, *, config: Path | None = None, stamp: Path | Non
     board_step = (ensure_board(cfg) if config_step.status in ("ok", "changed") else
                   Step("board", "skipped", "fix the config first"))
     steps.append(board_step)
-    steps.append(host_setup(host, cfg))
+    steps.append(host_setup(host, cfg, apply_settings=apply_settings))
     if board_step.status in ("ok", "changed"):   # the board is usable: prune old enrolment records too (TZ concern 4)
         _prune_enrolments(cfg)
     steps.append(supervisor_step(cfg, config))
