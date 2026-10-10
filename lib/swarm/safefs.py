@@ -266,11 +266,12 @@ def read_tail(d: int, name: str, limit: int) -> tuple[bytes, bool] | None:
         os.close(fd)
 
 
-def write_atomic(d: int, name: str, data: bytes | str, mode: int = 0o600) -> None:
+def write_atomic(d: int, name: str, data: bytes | str, mode: int = 0o600, *, durable: bool = False) -> None:
     """Replace `name` in `d` by a new file holding `data`, mode `mode`: written to a fresh O_EXCL
     temp file with a random name, fsynced, then renamed over the name relative to `d`. A planted
     symlink, hard link or FIFO at `name` is replaced, never followed or truncated; a directory
-    there makes it raise (OSError)."""
+    there makes it raise (OSError). With `durable`, a failed directory fsync raises too (the
+    rename may then not survive a crash); otherwise that failure is ignored."""
     _entry(name)
     if isinstance(data, str):
         data = data.encode("utf-8")
@@ -289,8 +290,11 @@ def write_atomic(d: int, name: str, data: bytes | str, mode: int = 0o600) -> Non
         with contextlib.suppress(OSError):
             compat.unlink(tmp, dir_fd=d)
         raise
-    with contextlib.suppress(OSError):
+    if durable:
         compat.fsync_dir(d)
+    else:
+        with contextlib.suppress(OSError):
+            compat.fsync_dir(d)
 
 
 def _open_or_create(d: int, name: str, flags: int, mode: int) -> int:
