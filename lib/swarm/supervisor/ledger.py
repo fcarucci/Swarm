@@ -14,10 +14,10 @@ import hashlib
 import json
 import logging
 import math
-import os
 import re
 from dataclasses import asdict, dataclass, field, fields
 
+from swarm import compat
 from swarm.supervisor import privfs
 
 log = logging.getLogger("swarm.supervisor.ledger")
@@ -207,7 +207,7 @@ def unfinished(board_key: str) -> list:
     does not parse (its board is unknowable then, so it is reported for every board)."""
     out: list = []
     with privfs.dir_fd(SUBDIR) as d:
-        for name in sorted(os.listdir(d)):
+        for name in sorted(compat.listdir(d)):
             if not _FILE.fullmatch(name):
                 continue
             try:
