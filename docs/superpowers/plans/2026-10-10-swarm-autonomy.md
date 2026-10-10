@@ -9,7 +9,7 @@
 
 **Tech Stack:** Python 3.11+ stdlib (as the rest of `lib/swarm`), unittest, SQLite/Postgres/file/memory board backends, systemd user units, Claude Code `claude -p`, Codex `codex exec`.
 
-**Spec:** `docs/superpowers/specs/2026-10-10-swarm-autonomy-design.md` (revision 5 with the delta re-review fixes **[RRn]**; design-judge fixes marked **[Fn]**, PM ruling **[A]**). Read §2.2 (guarantee and limits), §3.2–§3.3 (driver), §4.0 (threat model) and §4.5 (claim protocol) before any task.
+**Spec:** `docs/superpowers/specs/2026-10-10-swarm-autonomy-design.md` (revision 6: re-judge fixes **[Gn]**, delta re-review fixes **[RRn]**; design-judge fixes marked **[Fn]**, PM ruling **[A]**). Read §2.2 (guarantee and limits), §3.2–§3.3 (driver), §4.0 (threat model) and §4.5 (claim protocol) before any task.
 
 ## Global Constraints
 
@@ -453,7 +453,7 @@ Seat: eng-cli (sonnet). Spec §3.1, §3.4, §3.6, §4.3.
 **Interfaces:**
 - Consumes: Tasks 2–5.
 - Produces commands:
-  - `swarm activate --job J --goal G --drive --lead-brief PATH --workdir DIR [--allow-workdir DIR]... [--remote NAME=URL]... [--lead-harness claude|codex] [--max-cost-usd N] [--ruling-reserve-usd N] [--budget KEY=VALUE]...` → job + owner record (roots, pinned remotes: default = `git -C DIR remote -v` read once, sanitized env) + `ledger.create` + `drive.enabled=1`, `drive.generation_requested` + lead seat request with driver-authored authorization + `hooks.kick()`. Re-activation of an existing drive job writes `generation_requested = generation + 1` only (Task 8 rolls over). Person path (`person.require`) when re-activating.
+  - `swarm activate --job J --goal G [--drive (accepted no-op)] [--lead-brief PATH] [--workdir DIR] [--recipe coding|artifact] [--allow-workdir DIR]... [--remote NAME=URL]... [--lead-harness claude|codex] [--max-cost-usd N] [--ruling-reserve-usd N] [--budget KEY=VALUE]...` → job + owner record (roots, pinned remotes: default = `git -C DIR remote -v` read once, sanitized env) + `ledger.create` + `drive.enabled=1`, `drive.generation_requested` + lead seat request with driver-authored authorization + `hooks.kick()`. Re-activation of an existing drive job writes `generation_requested = generation + 1` only (Task 8 rolls over). Person path (`person.require`) when re-activating.
   - `swarm seat request|list|show|release|cancel` (flags as spec §3.4); last stdout line `swarm-record: kind=seat id=<n> rev=<r>` (Global Constraints).
   - `swarm review --job J --artifact REF verified|changes --report PATH` (structured review result; posts `REVIEW <artifact> VERIFIED|CHANGES <path>`).
   - `swarm halt [--job J] [--reason T]` / `swarm unhalt [--job J]` (person path; job-level: ledger `halted`, `runner` stop of the job's scopes; global: private `supervise.off`).
@@ -978,7 +978,7 @@ def test_drive_defaults_documented(self):
         self.assertIn(key, example); self.assertIn(f"`{key}`", ref)
 ```
 
-- [ ] **Step 2:** run → FAIL. **Step 3:** rewrite: moderate/complex jobs use `swarm activate --drive`; the invoking session is "requester/observer"; the EL brief template (seat requests, worktrees per writer, GOAL-READY with requirements blob id); PM event procedure scoped to non-drive jobs; the ruling/UNREACHABLE semantics; never /tmp; test-slot and `swarm ci wait --timeout 540`. **Step 4:** run the doc tests → PASS. **Step 5:** commit "docs: drive mode in the engineering-team skill and reference".
+- [ ] **Step 2:** run → FAIL. **Step 3:** rewrite: every goal job is driven (`swarm activate --goal`; `--no-drive --reason` to opt out); the invoking session is "requester/observer"; the EL brief template (seat requests, worktrees per writer, GOAL-READY with requirements blob id); PM event procedure scoped to non-drive jobs; the ruling/UNREACHABLE semantics; never /tmp; test-slot and `swarm ci wait --timeout 540`. **Step 4:** run the doc tests → PASS. **Step 5:** commit "docs: drive mode in the engineering-team skill and reference".
 
 ---
 
@@ -1109,7 +1109,7 @@ Seats: qa (sonnet) runs it, EL checks. Spec §6.3.
 
 **Files:** Create `e2e/drive_live.sh`, `e2e/drive_live/toy-repo-template/` (tiny Python CLI + one test), `e2e/drive_live/LEAD-met.md`, `e2e/drive_live/LEAD-unreachable.md`.
 
-- [ ] **Step 1:** the script: create `~/work/drive-accept/<stamp>/{toy.git,toy}` (bare remote + clone), `swarm activate --job drive-accept-<stamp> --goal "$(cat goal)" --drive --lead-brief .../LEAD-met.md --workdir ~/work/drive-accept/<stamp>/toy --budget max_cost_usd=10`, then only `swarm status --job ...` every 60 s until terminal or 3 h; no Claude Code session is involved; exit 0 iff MET with the landed head equal to the judged candidate and CI (the toy repo's `make test` run by `swarm ci` local adapter) green on it.
+- [ ] **Step 1:** the script: create `~/work/drive-accept/<stamp>/{toy.git,toy}` (bare remote + clone), `swarm activate --job drive-accept-<stamp> --goal "$(cat goal)" --lead-brief .../LEAD-met.md --workdir ~/work/drive-accept/<stamp>/toy --budget max_cost_usd=10`, then only `swarm status --job ...` every 60 s until terminal or 3 h; no Claude Code session is involved; exit 0 iff MET with the landed head equal to the judged candidate and CI (the toy repo's `make test` run by `swarm ci` local adapter) green on it.
 - [ ] **Step 2:** run it once for MET and once with `LEAD-unreachable.md` (expects UNREACHABLE). Attach `swarm transcript export --job ...`, `swarm snapshot --job ...` and the supervise log excerpt to `docs/superpowers/evidence/2026-10-drive-live.md` (redacted).
 - [ ] **Step 3:** commit the script and evidence: "e2e: live drive-mode acceptance on the coder box".
 
@@ -1146,3 +1146,16 @@ Seats: security reviewer (opus; read-only), judge (opus).
 - Task 6: `--max-cost-usd N` and `--ruling-reserve-usd N` (plus `--budget KEY=VALUE`), defaults from `[drive]` in config.toml, stored in `led.budgets`; reserve > cap refused. Tests `test_max_cost_flag_overrides_config_default`, `test_config_default_used_without_flag`, `test_reserve_larger_than_cap_refused`.
 - Task 6/8c: `swarm status --job J` shows the effective budget line; Task 1's doctor gains one line per active drive job (`drive budget J: cost x/y USD (reserve r), sessions a/b, wall h/H h`); test `test_doctor_shows_effective_budget_per_job`.
 - Task 14: config.example.toml and REFERENCE.md present 40/5 USD as configurable defaults, not limits.
+
+## Re-judge fixes G1–G12 (spec revision 6)
+
+- **Task 5/9 [G1]:** in drive mode judge and reviewer seats always launch on Claude; a Codex request is overridden with the reason posted. Tests `test_codex_judge_overridden_to_claude_on_every_backend` (memory, sqlite, file, postgres) and `test_doctor_codex_readonly_line`. Replaces the [RR7] test `test_codex_judge_overridden_to_claude_on_sqlite`.
+- **Task 6/11 [G2]:** activation pins one credential source per destination in the owner record (`--credential DEST=helper:<allowlisted cmd>|ssh-key:<path>|ssh-agent`; default: `helper:gh auth git-credential` for https, `ssh-agent` for ssh). `mirror.Mirror(url, credential)` passes it explicitly (`-c credential.helper=...`, `GIT_SSH_COMMAND=ssh -i <key> -o IdentitiesOnly=yes -o BatchMode=yes`, or `SSH_AUTH_SOCK` for that call only). Doctor: dry-run `git ls-remote` per pinned destination. Tests: `test_land_against_authenticated_remote` (a local `git http-backend` behind a tiny stdlib HTTP server requiring basic auth, credential helper fixture script on the allowlist; without the pinned helper the push fails, with it the landing succeeds), `test_credential_helper_not_on_allowlist_refused`, `test_doctor_ls_remote_per_destination`. The land request is the integrator's hand-off: `test_integrator_exits_after_land_request_driver_posts_integrated`, `test_land_refused_wakes_owner_and_lead`.
+- **Task 10/15 [G3]:** per-recipe closing gate. `--recipe artifact` (default with no pinned git target): MET on `report:<path>@<blob>` with receipted goal `met`, blob unchanged at close, no target/CI/audit. Tests `test_artifact_recipe_met_without_target` (Task 10) and E2E `test_non_coding_goal_reaches_met` (Task 15, all backends): a research goal, one QA/research seat hands off `report:findings.md@<blob>`, goal judge `met` → completed, with `assert_no_coordinator()`.
+- **Task 8b [G4]:** `close_deadline_minutes` (60, configurable). Test `test_unevaluable_pending_met_rejected_after_close_deadline` (mirror fetch stub always times out → after 60 min the intent is rejected "gate not evaluable", a ruling becomes due, and `enforce_deadlines` later records the mechanical UNREACHABLE).
+- **Task 14 [G5]:** release notes list three breaking changes (goal implies drive; `--default` required; requester Agent-tool spawns refused in drive jobs); rewrite `skills/engineering-team/SKILL.md`, `references/hosts.md`, `pm-events.md`, `recovery.md` and `skills/swarm/SKILL.md` so staffing goes through `swarm seat request` and the invoking session is requester/observer. Doc test `test_skills_never_tell_requester_to_spawn_in_drive_jobs` (greps the skill files for Agent-spawn instructions outside the non-drive section).
+- **Task 6 [G6]:** `--drive` accepted as a no-op (`test_drive_flag_is_accepted_noop`); `--lead-brief` and `--workdir` optional (tests already listed under [A]); requester-session person authority tests (`test_requester_can_unhalt_without_tty`, `test_enrolled_seat_refused_person_path`).
+- **Task 6 [G7]:** `swarm drive budget --job J KEY=VALUE...` without rollover (`test_drive_budget_changes_without_rollover`); `test_cap_below_reserve_plus_min_session_refused`.
+- **Task 9 [G9]:** `test_missing_binary_is_error_not_outage`.
+- **Task 6 [G10]:** `test_generated_brief_is_git_excluded` (`.git/info/exclude` contains `.swarm/`).
+- **Task 20 [G11]:** the security review explicitly confirms the requester-session trust choice is documented (§4.0) and limited to that job.

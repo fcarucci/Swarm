@@ -1,10 +1,10 @@
 # Swarm autonomy: a goal job runs to MET or UNREACHABLE with zero coordinator turns
 
-Status: design, revision 5 (EL, job swarm-autonomy, 2026-10-10). Base: github/main 2f194bb.
+Status: design, revision 6 (EL, job swarm-autonomy, 2026-10-10). Base: github/main 2f194bb.
 Revisions 2, 3 and 4 resolve Codex review rounds 1 (23 findings), 2 (23) and 3 (9); revision 5 applies the design
 judge's fixes F1–F24 (`~/work/swarm-autonomy/JUDGE-design.md`, each marked inline as **[Fn]**) and the PM's
 ruling that drive mode is the default for goal jobs (option A, **[A]**); the delta re-review's RR1–RR8 are marked
-**[RRn]**; see §10.
+**[RRn]**; the re-judge's G1–G12 are marked **[Gn]**; see §10.
 
 ## 0. The requirement
 
@@ -243,7 +243,15 @@ with its owner record completes steps 3–5 idempotently. A ledger without an ow
 `led.terminal` is set only after the board close succeeded. If the closing gate rejects a pending MET (target
 moved, requirements changed, audit failure), the driver durably clears `terminal_intent` and `closing`, records
 the rejection in the ledger, and schedules the goal judge again; budgets, the progress counter and
-`enforce_deadlines` keep running. A mechanical UNREACHABLE has no gate and cannot be rejected.
+`enforce_deadlines` keep running. A mechanical UNREACHABLE has no gate and cannot be rejected. **[G4]** A pending
+intent whose gate cannot be evaluated (git host unreachable, mirror fetches timing out) is bounded: once it is older
+than `close_deadline_minutes` (60, configurable) it is rejected as "gate not evaluable", cleared like any other
+rejection, and from then on `enforce_deadlines` applies normally (a ruling becomes due and its deadline runs).
+
+**[G6]** `--drive` remains an accepted no-op flag (old scripts keep working); it is never required.
+
+**[G10]** The generated lead brief under `<workdir>/.swarm/` is added to the checkout's `.git/info/exclude` at
+activation (and `.swarm/` with it), so writer seats never commit it.
 
 ### 3.2 The job driver
 
@@ -353,7 +361,8 @@ an integration is a round without progress, and so is a lead wake caused by a `m
 
 **[F12] Provider outages do not consume attempts.** An attempt that concludes with a classified provider error
 (Claude JSON `is_error` with an API/overload/auth subtype; Codex `--json` error events of the same classes; a
-runner-detected launch failure of the binary) is concluded `outage`: not counted against `max_attempts` or
+runner-detected failure to reach the provider) is concluded `outage`. **[G9]** A missing or non-executable
+harness binary is an `error`, not an `outage` (doctor reports it); an `outage` attempt is not counted against `max_attempts` or
 `ruling_attempts`, retried with the existing backoff (2/10/30 min). The wall clock still runs, so a long outage
 ends at `max_wall_hours` + ruling deadline (§2.2).
 
@@ -395,14 +404,15 @@ States: `requested → running → idle ⇄ running … → released | failed | 
   input** (parsed with the same argparse definition) and binds them to the row id and `revision` the CLI printed;
   the driver launches only if the current row's fields hash to that value at that revision, so a row replaced
   by another database writer between the command and the hook is not authorized; or by
-  `swarm activate --drive` for the initial lead seat; or by a person through the person path below. A changed
+  `swarm activate` (goal implies drive) for the initial lead seat; or by a person or the requester session (below). A changed
   row no longer matches its hash and is not launched.
-- **Person authority** (halt, unhalt, a person's seat request, a person's job-level wait) is not inferred from
-  missing agent environment variables (spoofable, as `ask-answer.identity` shows). The caller must not be an
-  enrolled session of any job (no enrolment record for its session id) and must confirm on `/dev/tty`. This is
-  a guardrail, not a boundary, against a same-user agent (§4.0): such an agent can allocate a PTY. Enrolled
-  agents are refused outright.
-- **Job workdir scope.** `swarm activate --drive --workdir DIR [--allow-workdir DIR ...]` records the job's
+- **Person authority** (unhalt, re-activation, a person's seat request, a person's job-level wait) is not inferred
+  from missing agent environment variables (spoofable, as `ask-answer.identity` shows). It is held by exactly two
+  callers (**[G6]**, reconciling with [F17]): (a) the job's requester session, through its hook receipts; (b) any
+  other caller that is not an enrolled session of any job and confirms on `/dev/tty`. Enrolled seat sessions are
+  refused outright. Halt follows [F5]. The tty path is a guardrail, not a boundary, against a same-user agent
+  (§4.0); the requester session's authority is an accepted trust choice ([G11]).
+- **Job workdir scope.** `swarm activate --goal G [--workdir DIR] [--allow-workdir DIR ...]` records the job's
   authorized roots in the owner record (host-private). A seat's workdir must lie under a job root **and** pass the
   host checks of §4.2; the lead cannot widen the job's write scope to other repositories.
 - **Hand-off contract.** Only structured records count: `swarm done --artifact REF` (pipeline hand-off),
@@ -543,21 +553,36 @@ GROUP --reason TEXT` (receipted). The goal judge requires only non-withdrawn gro
 groups are listed in the goal judge's prompt with their reasons. An abandoned, unwithdrawn group still blocks
 step 9, and the lead is woken about it at each stall wake.
 
+**[G3] The closing gate is per recipe (PM ruling).** Every goal job is driven ([A]), so a goal without a git
+target must be able to reach MET too. The recipe chooses the gate:
+- **coding recipe** (a git target exists): the gate above — candidate `<target>@<sha>`, head equality, exact-SHA
+  CI, the target audit ([F24]) and the pinned requirements.
+- **artifact recipe** (default for jobs with no target: research, a report, a decision): the candidate is a
+  `report:<path>@<blob>` or another pinned artifact ([F14]); the gate is the goal judge's (or ruling judge's)
+  `met` with `--candidate report:<path>@<blob> --req <pinned digest>`, a receipt, and the candidate's blob still
+  matching the file in the workdir at close. No target, CI or audit.
+The recipe is fixed at activation (`--recipe coding|artifact`, default `coding` when the workdir is a git checkout
+with a pinned remote, else `artifact`) and stored in the owner record; a lead cannot change it. An E2E test runs a
+non-coding goal to MET.
+
 ### 3.8 Integration and landing gate
 
 Unchanged in substance from the coding recipe, now always run by the driver:
-- `met` artifact → integrator seat (Sonnet; harness Claude unless the Codex network profile is configured,
-  §3.12): fetch, rebase onto the latest target (rebase only; never merge commits, squash only if the project's
+- `met` artifact → integrator seat (Sonnet; Claude, or Codex when drive-ready, §3.12 [F18]): fetch, rebase onto the latest target (rebase only; never merge commits, squash only if the project's
   `[land] strategy = squash-ff`), push the rebased branch, open/reuse the PR, `swarm ci wait --repo R --sha
   <exact rebased sha> --timeout 540` in the foreground (repeated while pending, within the seat's wall clock).
 - Rebased SHA differs from the judged SHA → new hand-off; the old verdict and CI do not cover it (existing).
-- Green on the exact SHA + `met` on that SHA → **`swarm land --job J --artifact REF`**, a trusted helper run
-  by the integrator seat: it checks (from the ledger and receipts, not from arguments) that the caller is the
-  current generation's integrator seat holding the land leases, that a receipted `met` covers that exact SHA,
-  and that CI is green on it (`swarm ci status`); then fast-forwards the target on every destination with
-  plain fast-forward pushes only (never a force push of any kind), verifies the landed
-  tree, deletes the branch, and writes the integration receipt. `INTEGRATED <artifact>` is posted by the
-  helper, not typed by the agent. Other pushes to a target branch are refused by the hook guardrail.
+- Green on the exact SHA + `met` on that SHA → the integrator runs **`swarm land --job J --artifact REF`**, which
+  records a receipted *land request* and is the integrator's hand-off: the seat exits (**[G8]**, superseding the
+  older "run by the integrator seat" wording). The driver then executes the landing helper in the pass: it checks
+  (from the ledger and receipts, not from arguments) that the request came from the current generation's
+  integrator seat, that a receipted `met` covers that exact SHA (or its patch-id twin, [F13]) and that CI is green
+  on it (`swarm ci status`); claims the land leases; fast-forwards the target on every destination with plain
+  fast-forward pushes only (never a force push of any kind), verifies the landed tree, deletes the branch, writes
+  the integration receipt and posts `INTEGRATED <artifact>` (or `LAND-REFUSED <artifact> <why>`, which is a
+  wake event for the integrator's group owner and the lead). "Checked" here means decided by code that takes no
+  agent input for its decisions (F24), not tamper-proof against a same-user Claude seat. Other pushes to a target
+  branch are refused by the hook guardrail.
 - Red CI or a non-trivial conflict → `FINALIZE_BLOCKED <artifact> <instructions>` → fix round (§3.6).
   CI red repeatedly is a no-progress round like any other and so ends in a ruling.
 - **Integration receipt, not inference.** Today `coding_integrated` treats "source branch gone remotely or its
@@ -582,8 +607,7 @@ Unchanged in substance from the coding recipe, now always run by the driver:
   `claim_drive_launch`. The runner renews them while the session lives. Expiry alone never transfers ownership:
   a lease is reclaimable only when it has expired **and** its holder's attempt row is ended with the scope
   confirmed absent. A lease held by another host cannot be positively fenced from here, so it is never
-  reclaimed: the integrator action holds, and if it stays held the ruling deadline ends the job UNREACHABLE
-  with the cause named. Two supervisors therefore never land on overlapping destinations at once.
+  reclaimed: the landing holds, and a hold longer than `lease_hold_minutes` makes a ruling due ([F19]). Two supervisors therefore never land on overlapping destinations at once.
 
 **[F13] Clean rebases reuse the review.** When the rebased branch has the same `git patch-id --stable` set as
 the judged SHA (computed in the private mirror), the existing review and `met` carry over to the rebased SHA; only
@@ -610,9 +634,20 @@ is posted). `enforce_deadlines` therefore never interrupts a landing midway with
 
 **[RR8] The driver executes landings.** `swarm land` run by an integrator seat (Claude or Codex) only records a
 receipted *land request* for the artifact; the driver executes the helper in the supervisor pass, with its
-private mirrors and land receipts, which never lie under a Codex writable root. This makes Codex integrators
-possible without widening the sandbox and makes the landing path the same for both harnesses. The integrator seat
-waits for the `INTEGRATED` post (or the refusal reason) with `swarm event wait`, bounded by its wall clock.
+private mirrors and land receipts, which never lie under a Codex writable root. The target fast-forward is the same
+for both harnesses. **[G2]** The integrator does not wait: the land request is its hand-off and the seat exits; the
+driver posts `INTEGRATED` or `LAND-REFUSED` (a wake event). The integrator still pushes the rebased branch and waits
+on CI with `swarm ci wait`, so a Codex integrator must be drive-ready with network.
+
+**[G2] Driver credentials are pinned.** The mirrors run with no global git config and a minimal environment, which
+removes the user's credential helper and ssh agent. So activation pins, per destination in the host-private owner
+record, exactly one credential source: an allowlisted credential-helper command (`[drive] credential_helpers`,
+default `["gh auth git-credential"]`), or an ssh key path, or "use `SSH_AUTH_SOCK`". The mirror git receives it
+explicitly (`-c credential.helper=<pinned>` with `credential.useHttpPath=true`, or
+`GIT_SSH_COMMAND="ssh -i <key> -o IdentitiesOnly=yes -o BatchMode=yes"`, or `SSH_AUTH_SOCK` passed through for
+that call only); nothing else from the user's config is read. Fetches into the mirrors use the same source, so
+private repositories work. `swarm doctor` runs a dry-run `git ls-remote` per pinned destination with the pinned
+source and FAILs on an error. A Task 11 test lands against an authenticated remote fixture.
 
 ### 3.9 Stall recovery
 
@@ -702,12 +737,15 @@ then requests Claude). In drive jobs the CLI never spools a control command (`do
 the sandbox) write the receipts exactly as Claude's do. The fake Codex harness models the sandbox (no direct
 board access unless drive-ready) and the live acceptance run uses a real Codex engineer (§6.3).
 
-**[RR7] Codex read-only roles.** A Codex judge or reviewer runs `--sandbox read-only` and so cannot write a
-SQLite/file store. Ruling: Codex judges and reviewers are supported only on Postgres with the network profile
-(no local store writes needed); on SQLite/file backends those roles always run on Claude, and a request for
-Codex is overridden with the reason posted. Doctor validates drive-readiness per role sandbox
-(`codex drive-ready: writer yes, read-only no (sqlite)`). R12 is amended accordingly: with [RR8], a Codex
-integrator no longer needs to push at all.
+**[RR7 → G1] Codex read-only roles run on Claude.** The `[codex] network_access` profile bootstrap writes is
+`[sandbox_workspace_write] network_access = true`; it does not apply to `--sandbox read-only`, so a Codex judge
+or reviewer has no board access on any backend, and spooling `verdict`/`review` is forbidden in drive jobs.
+Ruling: in drive mode judges and reviewers always run on Claude, on every backend; a request for Codex is
+overridden with the reason posted. (A future read-only network profile, if the installed Codex supports one, may
+lift this; doctor would then have to verify it.) Doctor's per-role line reads
+`codex drive-ready: writer yes|no (<why>); judge/reviewer: claude (codex read-only has no board access)`.
+Codex writer seats (engineer, fix worker, integrator) still need network or a writable store ([F18]): the
+integrator pushes the rebased branch and waits on CI itself ([G2]).
 
 ### 3.13 The coordinator becomes optional
 
@@ -758,6 +796,12 @@ user, which could write receipts or the ledger itself; against that, the guardra
 audit (§3.8) catches unjudged commits on the target. §6.2 scenario 5 tests forgery by database writers and Codex
 seats only. `swarm doctor` labels Claude role limits "guardrail only" unless the Bash sandbox is active.
 
+**[G11] Accepted trust choice: the requester session holds person authority.** With [F17], the session that
+activated the job — usually a Claude Code agent session acting for the person — can unhalt, re-activate,
+deactivate (CANCELLED), answer, change budgets and request seats through its receipted commands. It is
+deliberately trusted as the person's delegate; a compromised requester session can therefore cancel or redirect
+its own job. Other sessions cannot (their deactivate is tamper).
+
 ### 4.1 Budgets (per job, `[drive]` defaults, overridable at activation within host maxima)
 
 | Key | Default | On exhaustion |
@@ -775,8 +819,11 @@ seats only. `swarm doctor` labels Claude role limits "guardrail only" unless the
 - **[D1] The spending cap is configurable** (Francesco, 2026-10-10: "spending cap is configurable"). Every value in
   this table is a configurable default, not a fixed limit: set in `config.toml` under `[drive]` (e.g.
   `max_cost_usd`, `ruling_reserve_usd`), overridable per job at activation (`--max-cost-usd N`,
-  `--ruling-reserve-usd N`, or `--budget KEY=VALUE` for any key; a re-activation may change them, recorded in the
-  ledger). The shipped defaults are 40 USD and 5 USD. The effective per-job values live in the ledger
+  `--ruling-reserve-usd N`, or `--budget KEY=VALUE` for any key). **[G7]** A running job's budgets are changed with
+  `swarm drive budget --job J KEY=VALUE...` (requester session or person path; recorded in the ledger; no
+  generation rollover, no session stopped); a re-activation also accepts them but is a rollover that stops every
+  session. Validation: a reserve larger than the cap, or a cap below `ruling_reserve_usd + min_session_usd`, is
+  refused. The shipped defaults are 40 USD and 5 USD. The effective per-job values live in the ledger
   (`led.budgets`) and are shown by `swarm status --job J` and by `swarm doctor` (one line per active drive job:
   `drive budget J: cost 12.40/40.00 USD (reserve 5.00), sessions 9/60, wall 3.1/24 h`). A reserve larger than the
   cap is refused at activation.
@@ -938,7 +985,7 @@ the file backend including close-and-reopen of the store between passes) with fa
 `claude`/`codex` executables on PATH (`tests/fixtures/drive/fake_harness.py`), started by the real runner
 through an injectable `start_runner` that executes them as subprocesses and drives the real hooks (as
 `test_pause_e2e` does). Each fake reads its prompt, identifies its role, and follows a script file. No
-coordinator session exists in any of these tests; `activate --drive` is called once from the test's shell.
+coordinator session exists in any of these tests; `activate --goal` (drive implied) is called once from the test's shell.
 
 1. **MET**: lead requests two engineer seats (one `simple` → asserts Haiku, one Sonnet) and QA; engineers
    hand off; reviewer CHANGES on one → author resumed → VERIFIED; judge not_met once (open 2→0) → fix → met;
@@ -994,7 +1041,7 @@ is refused.
 ### 6.3 Live acceptance on the coder box (manual gate before landing)
 
 `e2e/drive_live.sh`: a toy repository under `~/work/drive-accept/` with a small, real goal (e.g. "add a
-`--version` flag with tests"), `activate --drive` from a plain shell, real Claude (Opus lead/judge, Sonnet
+`--version` flag with tests"), `activate --goal` (drive implied) from a plain shell, real Claude (Opus lead/judge, Sonnet
 engineers, Haiku for a `simple` seat) and one Codex engineer, the real systemd timer, **no coordinator
 session**, budget `max_cost_usd=10`. Pass: MET with an integrated rebase-only commit on the toy repo's main and a
 green (local fake or GitHub) CI on the exact SHA; a second run with an impossible goal reaches UNREACHABLE.
@@ -1019,8 +1066,9 @@ Transcripts and the board export are attached to the judge's evidence.
 - R9 Questions in drive mode must carry a default; expiry defaults to 4 h; only the blocked seat waits.
 - R10 Halt is a person's brake (person path only), not a terminal state.
 - R11 No automatic cross-host failover; `swarm job move` remains the person's tool.
-- R12 Codex seats must be drive-ready ([F18]); Codex judges/reviewers need Postgres ([RR7]); landings are executed by
-  the driver for both harnesses ([RR8]).
+- R12 Codex writer seats must be drive-ready ([F18]); judges and reviewers run on Claude on every backend ([G1]);
+  the target fast-forward is executed by the driver for both harnesses, while the integrator still pushes the
+  rebased branch and waits on CI ([RR8], [G2]).
 - R13 waiter-stale/unacked alerts are suppressed for drive jobs; a failed invariant raises DRIVER-STALLED.
 - R14 Model policy as Francesco set it (Opus leads/judges, Sonnet coding, Haiku simple), enforced for lead and
   judge, configurable in `[models]`.
@@ -1070,8 +1118,9 @@ Transcripts and the board export are attached to the judge's evidence.
 
 - **[A]** Existing active goal jobs are not converted: they keep running as non-drive jobs; `swarm doctor`
   lists them ("goal job not autonomous: activated before drive mode") so a person can re-activate them. The
-  release notes call out the two breaking changes for goal jobs: `--goal` implies drive mode, and questions need
-  `--default`.
+  release notes call out the three breaking changes for goal jobs: `--goal` implies drive mode; questions need
+  `--default`; and (**[G5]**) the activating (requester) session's Agent-tool spawns are refused in drive jobs, so
+  the engineering-team and swarm skills staff through `swarm seat request` instead (rewritten in plan Task 14).
 
 ## 10. Review log
 
@@ -1195,3 +1244,20 @@ risk is carried by the implementation reviews and the tests of §6, which includ
 
 D1 answered: the spending cap and the ruling reserve are configurable (config defaults, per-job activation
 flags), 40/5 USD only shipped defaults; effective values shown per job by status and doctor (§4.1 [D1], §8).
+
+### Re-judge (Dr. Hibbert, 3e1d54e): APPROVE-WITH-FIXES; G1–G12 applied in revision 6
+
+| Fix | Where |
+|-----|-------|
+| G1 Codex judges/reviewers run on Claude in drive mode, every backend; doctor line | §3.12 [RR7 → G1], R12 |
+| G2 pinned driver credentials; doctor ls-remote; land request is the hand-off; R12 corrected | §3.8 [G2], R12 |
+| G3 per-recipe closing gate (PM ruling): artifact recipe reaches MET without target/CI/audit | §3.7 [G3] |
+| G4 pending terminal intent bounded by `close_deadline_minutes` | §3.1 [RR2]/[G4] |
+| G5 requester-spawn refusal is the third breaking change; skill rewrite | §9 [G5] |
+| G6 option A text cleanups; `--drive` accepted no-op; person authority reconciled | §3.1, §3.4, §6.2, §6.3 |
+| G7 cap ≥ reserve + min_session_usd; `swarm drive budget` without rollover | §4.1 [G7] |
+| G8 stale landing text removed; "trusted" reworded | §3.8 |
+| G9 missing harness binary is an error, not an outage | §3.3 [F12]/[G9] |
+| G10 generated brief excluded from git | §3.1 [G10] |
+| G11 requester session's person authority stated as an accepted trust choice | §4.0 [G11] |
+| G12 no further review round; the judge re-checks G1–G4 | — |
