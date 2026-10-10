@@ -211,6 +211,13 @@ class ExclusiveCreateTests(LedgerCase):
             ledger.create("bk", "J", budgets={}, activated_at=ACTIVATED)
         self.assertEqual(self.path_of("bk", "J").read_text(), "garbage that must survive")
 
+    def test_reactivation_merges_budgets_keeping_keys_not_given(self):
+        # Pinned: activation budgets are a merge. Keys given overwrite, keys not given keep their
+        # value (a per-job override changes what it names, not the job's other limits).
+        ledger.create("bk", "J", budgets={"max_cost_usd": 40, "max_sessions": 60}, activated_at=ACTIVATED)
+        ledger.activate("bk", "J", budgets={"max_cost_usd": 20}, activated_at=ACTIVATED)
+        self.assertEqual(ledger.load("bk", "J").budgets, {"max_cost_usd": 20, "max_sessions": 60})
+
     def test_activate_creates_when_absent(self):
         led = ledger.activate("bk", "J", budgets={"max_cost_usd": 40}, activated_at=ACTIVATED)
         self.assertEqual(led.generation_requested, 1)
@@ -227,6 +234,15 @@ class ExclusiveCreateTests(LedgerCase):
         self.assertEqual(stored.charged_usd(), 5.0)
         self.assertEqual(stored.budgets, {"max_cost_usd": 20})
         self.assertEqual(stored.activated_at, "2026-10-11T00:00:00+00:00")   # a rollover starts a new window
+
+    def test_activate_refuses_a_finished_job_and_changes_nothing(self):
+        led = ledger.create("bk", "J", budgets={}, activated_at=ACTIVATED)
+        led.terminal = {"verdict": "met", "at": ACTIVATED}
+        led.save()
+        before = self.path_of("bk", "J").read_bytes()
+        with self.assertRaises(ledger.LedgerFinishedError):
+            ledger.activate("bk", "J", budgets={}, activated_at="2026-10-11T00:00:00+00:00")
+        self.assertEqual(self.path_of("bk", "J").read_bytes(), before)
 
     def test_reactivation_over_a_bad_file_is_refused(self):
         self.drive_dir().parent.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -270,6 +286,19 @@ class ConcurrencyTests(LedgerCase):
         stored = ledger.load("bk", "J")
         self.assertEqual([i.launch_id for i in stored.intents], ["B"])
         self.assertEqual(stored.charged_usd(), 1.0)
+
+    def test_a_stale_copy_of_a_deleted_job_cannot_overwrite_its_successor(self):
+        ledger.create("bk", "J", budgets={}, activated_at=ACTIVATED)
+        old = ledger.load("bk", "J")                       # rev 1, incarnation A
+        os.unlink(self.path_of("bk", "J"))
+        successor = ledger.create("bk", "J", budgets={}, activated_at=ACTIVATED)   # rev 1, incarnation B
+        self.assertEqual(successor.ledger_rev, old.ledger_rev)
+        self.assertNotEqual(successor.incarnation, old.incarnation)
+        old.intents.append(ledger.Intent("OLD", "a", 1, None, 9.0, 1.0, [], "claimed"))
+        with self.assertRaises(ledger.LedgerConflict):
+            old.save()
+        self.assertEqual(ledger.load("bk", "J").incarnation, successor.incarnation)
+        self.assertEqual(ledger.load("bk", "J").intents, [])
 
     def test_load_modify_save_by_many_threads_loses_no_intent(self):
         ledger.create("bk", "J", budgets={}, activated_at=ACTIVATED)
@@ -376,6 +405,25 @@ class ValidationTests(LedgerCase):
             with self.subTest(board_key=bk[:12], job=job[:12]), self.assertRaises(ValueError):
                 ledger.create(bk, job, budgets={}, activated_at=ACTIVATED)
         self.assertFalse(self.drive_dir().exists() and any(self.drive_dir().iterdir()))
+
+    def test_save_refuses_an_invalid_ledger_and_writes_nothing(self):
+        # the guard in save(): a value load would refuse must not reach the disk
+        led = self.good()
+        before = self.path_of("bk", "J").read_bytes()
+        led.intents.append(ledger.Intent("L", "a", 1, None, 5.0, 1.0, [], "concluded",
+                                         outcome="done", success=True, charged_usd=-500.0))
+        with self.assertRaises(ValueError):
+            led.save()
+        self.assertEqual(self.path_of("bk", "J").read_bytes(), before)
+        self.assertEqual(ledger.load("bk", "J").charged_usd(), 0.0)
+
+    def test_save_refuses_a_nul_in_a_key_field_and_writes_nothing(self):
+        led = self.good()
+        before = self.path_of("bk", "J").read_bytes()
+        led.owners = {"group\0x": "seat"}
+        with self.assertRaises(ValueError):
+            led.save()
+        self.assertEqual(self.path_of("bk", "J").read_bytes(), before)
 
     def test_a_planted_nul_key_in_the_body_is_refused(self):
         self.good()

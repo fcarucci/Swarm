@@ -59,6 +59,11 @@ class LedgerExistsError(RuntimeError):
     """create() found an entry (a good or a bad ledger) already at the job's name."""
 
 
+class LedgerFinishedError(RuntimeError):
+    """activate() on a job whose ledger is terminal (MET, UNREACHABLE or CANCELLED): a finished job is
+    not re-opened by activation; a new job is needed."""
+
+
 class LedgerConflict(RuntimeError):
     """save() found the stored ledger changed since this copy was loaded: reload and try again."""
 
@@ -139,6 +144,8 @@ class Ledger:
             else:
                 stored = _read_entry(d, name, self.board_key, self.job)
                 expected = stored.ledger_rev if stored is not None else 0
+                if stored is not None and stored.incarnation != self.incarnation:
+                    raise LedgerConflict(f"job {self.job!r}: the job was deleted and created again")
             if expected != self.ledger_rev:
                 raise LedgerConflict(f"job {self.job!r}: the stored ledger is revision {expected}, "
                                      f"this copy is {self.ledger_rev}")
@@ -376,6 +383,9 @@ def activate(board_key: str, job: str, *, budgets: dict, activated_at: str) -> L
                 return create(board_key, job, budgets=budgets, activated_at=activated_at)
             except LedgerExistsError:
                 continue   # created by someone else since the load: roll it over instead
+        if led.terminal is not None:
+            raise LedgerFinishedError(f"job {job!r} is finished ({led.terminal.get('verdict')}); "
+                                      f"activate a new job instead")
         led.generation_requested += 1
         led.budgets.update(budgets)
         led.activated_at = activated_at
