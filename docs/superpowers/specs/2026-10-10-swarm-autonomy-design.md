@@ -1,6 +1,7 @@
 # Swarm autonomy: a goal job runs to MET or UNREACHABLE with zero coordinator turns
 
-Status: design, revision 1 (EL, job swarm-autonomy, 2026-10-10). Base: github/main 2f194bb.
+Status: design, revision 2 (EL, job swarm-autonomy, 2026-10-10). Base: github/main 2f194bb.
+Revision 2 resolves Codex review round 1 (23 findings; see §10).
 
 ## 0. The requirement
 
@@ -113,10 +114,13 @@ supervisor's systemd-launched sessions start agents.
 **Guarantee.** While (a) the owner host's supervisor timer runs and (b) the board is reachable, every active
 drive-mode goal job is, at every pass, in one of these states: a live seat session or runner is responsible for
 progress; or the pass launches one; or the job is in a bounded backoff with a recorded `not_before`; or the job
-is terminal. Every loop is bounded by a budget whose exhaustion launches a *ruling judge* that may only record
-MET or UNREACHABLE, and if no ruling is obtained after `ruling_attempts` launches the supervisor records
-UNREACHABLE itself, labelled as mechanical. So a job ends MET, UNREACHABLE or CANCELLED within
-`max_wall_hours` + one ruling window, or stays exactly where it is while (a) or (b) fail.
+is terminal. Every loop is bounded by a budget whose exhaustion makes a *ruling* due: a ruling judge that may
+only record MET or UNREACHABLE. Ruling acquisition has an absolute deadline (`ruling_deadline_minutes`, 120,
+from the moment the ruling became due); every concluded ruling attempt without a valid verdict (failed launch,
+pre-launch refusal, non-enrolment, timeout, exit without a verdict) counts against `ruling_attempts` (2), and
+at the deadline or the attempt limit the supervisor records UNREACHABLE itself, labelled mechanical, with the
+cause. So a job ends MET, UNREACHABLE or CANCELLED within `max_wall_hours` + `ruling_deadline_minutes`, or
+stays exactly where it is while (a) or (b) fail.
 
 **Limits, stated plainly.**
 - *Owner host down.* Only the owner host's supervisor drives a job (launch authority is host-private
@@ -152,9 +156,19 @@ UNREACHABLE itself, labelled as mechanical. So a job ends MET, UNREACHABLE or CA
 - **Verdicts.** `VERDICTS = ("met", "not_met", "unreachable")` (schema 25; Postgres CHECK constraint replaced,
   SQLite CHECK via table rebuild in the existing migration framework). `unreachable` requires `--reason` and
   `--details` (the report: what was tried, why it cannot be met, what would change that).
+- **Typed verdicts.** Today `review.verdict_data` writes every artifact judgment into the job's legacy
+  latest-verdict columns too, so an artifact `met` looks like goal completion. In drive mode each verdict has a
+  `scope`: `artifact` (judges one hand-off), `goal` (judges the job's goal on the integrated target, §3.7) or
+  `ruling` (§3.6). Scope and the activation **generation** are stored with the verdict (job data
+  `drive.verdict.<generation>.<scope>...` and a new `verdict_scope` column); only a `goal` or `ruling` verdict
+  of the current generation can make the job terminal. The legacy columns keep being written for display and
+  for non-drive jobs.
+- **Generations.** `drive.generation` starts at 1 and is incremented by every (re)activation and goal change.
+  Seats, action ids, round counters, wake watermarks, `GOAL-READY`, ownership and integration receipts all
+  carry the generation; anything of an older generation is ignored for decisions (kept for history).
 - **Terminal transitions** (driver only, under the existing close guard):
-  - goal verdict `met` (§3.7) → job `completed`, outcome `met: <reason>`;
-  - verdict `unreachable` → job `failed`, outcome `unreachable: <reason>`, `closed_by='driver'`;
+  - current-generation `goal` or `ruling` verdict `met` (§3.7) → job `completed`, outcome `met: <reason>`;
+  - current-generation `unreachable` → job `failed`, outcome `unreachable: <reason>`, `closed_by='driver'`;
   - a person's `swarm deactivate` → `cancelled` (existing).
   `goal_is_unmet` treats `unreachable` as settled for closing; the `jobs_keep_goal_jobs` trigger is unchanged
   (it only refuses the old auto-close outcome).
@@ -180,15 +194,35 @@ execute(action)                            # idempotent; token-guarded; rechecks
 
 `next_action` returns one of `Launch(seat, kind, token, prompt_parts)`, `Record(verdict|close)`,
 `Hold(why, not_before)`, `Nothing(responsible=<running seat or runner>)`. The driver may execute several
-launches per pass for one job (seat requests in parallel) within the host cap; each is decided again from a
-fresh read right before `record_restart` (the pattern `pipeline.run` already uses).
+launches per pass for one job (seat requests in parallel) within the host cap.
+
+**Actions and attempts.** Every logical action has a stable **action id**
+(`gen|kind|seat|artifact-group|round|event-id`); each try of it is an **attempt** (`action id#n`). An action
+has explicit success criteria (e.g. a fix attempt succeeds when its seat publishes a new `swarm done` for the
+group; a judge attempt when a valid verdict of the right scope exists; a lead turn when the turn ends with its
+watermark acknowledged, §3.5). A concluded attempt without success is retried as attempt n+1 with backoff, up to
+`max_attempts` (3) per action; then the action fails, which wakes the lead (or, for rulings, follows §2.2).
+
+**One atomic claim.** A launch is a single board transaction, `Board.claim_drive_launch(job, generation,
+action_id, attempt, seat_id, seat_rev, reserve_usd, reserve_minutes, caps)`: it checks the seat revision
+(compare-and-set), the generation, budget reservations (§4.1) and host caps, and inserts the restart row with
+`UNIQUE(job, action_id, attempt)`. Losing the race returns `None` and the driver re-reads next pass. Only after
+the claim is the marker written and the runner started (the existing order).
+
+**Failure isolation.** Each job is driven inside its own try/except with a per-job deadline (15 s of the 95 s
+pass budget); jobs are visited in least-recently-driven order (job data `drive.last_pass`), so one slow or
+broken job cannot starve the others. A job whose driver step raises on `driver_error_passes` (6) consecutive
+passes gets `DRIVER-ERROR <class>` posted once and a ruling made due; if the ruling cannot be launched either,
+§2.2's deadline produces the mechanical UNREACHABLE naming the error.
 
 ### 3.3 next_action: priority order and the invariant
 
 1. **Halted / kill switch / job not active** → `Nothing`.
 2. **Terminal verdict present** → `Record(close)`.
-3. **Ruling due** (any budget exhausted, §4.1; or `no_progress_rounds` reached, §3.6; or wall time) →
-   launch the ruling judge if none is live; after `ruling_attempts` failed launches → `Record(unreachable,
+3. **Ruling due** (any budget exhausted, §4.1; `no_progress_rounds` reached, §3.6; `max_wall_hours`; an
+   action out of attempts with nothing else to do; repeated driver errors) → launch the ruling judge if none is
+   live (rulings may exceed the host concurrency cap by one and draw on the ruling reserve); on
+   `ruling_attempts` concluded attempts without a ruling, or at `ruling_deadline_minutes` → `Record(unreachable,
    mechanical)`.
 4. **Pipeline transitions** (existing `pipeline.transitions`, extended in §3.6): unreviewed hand-off →
    reviewer; reviewed → judge; `not_met` → fix round on the **author seat** (resume); `met` → integrator;
@@ -201,8 +235,14 @@ fresh read right before `record_restart` (the pattern `pipeline.run` already use
 9. **Goal judgment** (§3.7): lead has posted `GOAL-READY` and every hand-off is integrated and nothing is live
    → launch the goal judge.
 10. **Invariant fallback**: nothing live, nothing pending, nothing above fired → wake the lead with
-    "nothing is running: post seat requests, or GOAL-READY, or UNREACHABLE-PROPOSED". Each fallback wake counts
-    as an **idle round**; `max_idle_rounds` (3) without a new hand-off or seat request makes a ruling due (3).
+    "nothing is running: post seat requests, or GOAL-READY, or UNREACHABLE-PROPOSED". Such a wake is a
+    **round without progress** in the single round counter of §3.6.
+
+**One progress counter.** There is exactly one counter that ends loops: `rounds_without_progress` (per job and
+generation). It advances on every judge verdict (artifact or goal) that shows no progress (§3.6), every
+invariant-fallback wake, and every stall wake (§3.9); it resets on progress (§3.6). At `no_progress_rounds` (3)
+a ruling is due. The other bounds are absolute (attempts per action, budgets, `max_wall_hours`); there are no
+other counters and no adaptive timer.
 
 **Invariant** (asserted in tests over every reachable snapshot of the fake-harness E2E and chaos runs, and
 checked by `swarm doctor --job J`): for an active, unhalted drive job, after each pass, at least one of: a seat
@@ -232,8 +272,28 @@ States: `requested → running → idle ⇄ running … → released | failed | 
   a repeat with the same fields is a no-op; with different fields while `requested` it updates; otherwise it is
   refused (release first).
 - `swarm seat list|show|release|cancel --job J [--seat NAME]`.
-- Who may request: the job's lead seat's agent (bound through enrolment), or a person (actor `human`). Others
-  are refused with a pointer to ask the lead (`--to @EL`).
+- Who may request: the job's lead seat, or a person. Others are refused with a pointer to ask the lead
+  (`--to @EL`).
+- **Authentication is host-private, never a board field.** Board rows are forgeable (shared database role,
+  `enrolment.py`). A seat row alone never launches anything. The driver launches a request only if a
+  **seat authorization record** exists in the host-private enrolment directory
+  (`~/.local/share/swarm/host/enrolled/seat-<sha256>.json`, same safefs rules as enrolment records), binding
+  `(board_key, job, generation, seat, sha256 of the canonical request fields)` to its author. It is written by:
+  the unsandboxed PostToolUse hook when the *enrolled lead seat's own session* (session id → enrolment record
+  → lead seat) ran a successful `swarm seat request` (the hook re-reads the row and hashes it); or by
+  `swarm activate --drive` for the initial lead seat; or by a person through the person path below. A changed
+  row no longer matches its hash and is not launched.
+- **Person authority** (unhalt, a person's seat request, a person's job-level wait) is not inferred from missing
+  agent environment variables (spoofable, as `ask-answer.identity` shows). It requires an interactive
+  confirmation read from `/dev/tty` (the command prints the action and waits for the typed job name); a
+  headless agent session has no controlling terminal. Stopping is always allowed: `swarm halt` needs no person
+  proof (§4.3).
+- **Job workdir scope.** `swarm activate --drive --workdir DIR [--allow-workdir DIR ...]` records the job's
+  authorized roots in the owner record (host-private). A seat's workdir must lie under a job root **and** pass the
+  host checks of §4.2; the lead cannot widen the job's write scope to other repositories.
+- **Hand-off contract.** Only structured records count: `swarm done --artifact REF` (pipeline hand-off),
+  `swarm seat release`, an open question, `BLOCKED` via `swarm ask`. A prose `DONE:` post is a status line,
+  not a hand-off (consistent with `review.latest_handoffs`).
 
 **Filling.** The driver launches a seat exactly as `pipeline.launch_action` launches a judge: a placeholder agent
 key, `allocate_name`, `record_restart(reason="drive:seat:<seat>:<launch#>")` with all caps, resume marker,
@@ -252,13 +312,16 @@ board through its hooks (enrol deadline kills it otherwise): **every agent joins
   `swarm seat request` lines, `swarm seat release` finished seats, answer engineers, post `GOAL-READY <target>`
   when it believes the goal is met, then exit. It never spawns agents itself (no Agent tool use needed; the hook
   refuses spawns of a drive-mode lead with a pointer to `swarm seat request`).
-- **Lead-wake events** (computed by the driver from board state since the lead's last turn ended): a seat
-  became idle/failed/refused; a hand-off was integrated; any verdict; a question answered or expired; a
-  `@EL`-addressed post; `FINALIZE_BLOCKED` that a fix round could not resolve; a goal `not_met`; an idle round.
-  Wakes are coalesced: one resume carries all pending reasons. While the lead is live, new events wait for its
-  next turn (it also reads the board through its hooks).
+- **Lead-wake events**: a seat became idle/failed/refused; a hand-off was integrated; any verdict; a question
+  answered or expired; a `@EL`-addressed post; an action out of attempts; a goal `not_met`; a fallback or stall
+  wake. **Watermarks, not timestamps**: each lead turn is launched with the board's current message id and event
+  id as its watermark (in the prompt and on the seat row, `wake_watermark`). Wake events are board rows with ids;
+  those with id > the watermark of the last *acknowledged* turn are pending, so events arriving while the lead
+  runs are never lost. A turn acknowledges its watermark by ending normally (runner outcome `completed`); a
+  crashed turn does not, and its events stay pending. Wakes are coalesced: one resume carries all pending ids.
 - A lost lead (stuck, crashed, exited without a turn summary) is relaunched by §3.9 with the lead brief + board
-  history; `max_seat_launches` does not apply to the lead (its turns are budgeted by `max_lead_turns`).
+  history; `max_seat_launches` does not apply to the lead (its turns are bounded by the job budgets and the
+  progress counter).
 - The PM duties of `skills/engineering-team` (NEEDS-REVIEW dispatch, CI-FAILED triage, READY-TO-LAND landing,
   staffing waves) move: review dispatch, fix rounds and landing to the driver pipeline (§3.6, §3.8); CI-FAILED
   triage to the fix round's brief (the integrator's FINALIZE_BLOCKED text and the CI logs pointer); staffing to
@@ -273,16 +336,21 @@ Extends `pipeline.transitions` (shared by drive mode and the existing non-drive 
   `REVIEW <artifact> VERIFIED|CHANGES <report path>` (and on the PR where the CI host supports it). `CHANGES`
   → fix round on the author seat → new hand-off → review again. `VERIFIED` → judge. Non-coding recipes may set
   no reviewer (straight to judge, as today).
-- **Fix rounds resume the author seat** (`seats.agent_key` lineage of the hand-off's author), with the judge's
-  or reviewer's report pointer, instead of today's "last joined non-judge agent's workdir".
+- **Fix rounds resume the owning seat.** The first `swarm done` of an artifact group (branch) records
+  `drive.owner.<gen>.<group> = <seat>`; later revisions keep that owner whoever publishes them (the integrator's
+  rebased hand-off included). Fix rounds resume the owner seat with the judge's or reviewer's report pointer,
+  instead of today's "last joined non-judge agent's workdir".
 - **Progress measure.** In drive mode a `not_met` verdict must carry `--open N` (the number of unmet acceptance
   criteria the judge counted) in addition to `--reason` and `--next`. A round makes **progress** when the new
   hand-off's artifact differs from the previous judged one **and** `open` decreased, or the judge passes
-  `--progress yes` with its reason. `no_progress_rounds` (2) consecutive rounds without progress, or
-  `max_rounds` (6) rounds on one artifact group, make the next judge launch a **ruling**.
+  `--progress yes` with its reason; progress also counts when an artifact group is integrated or the goal
+  judge's `open` decreases. Progress resets `rounds_without_progress` (§3.3); everything else that is a round
+  advances it. At `no_progress_rounds` (3) the next judge launch is a **ruling**. `max_rounds` (8 judged rounds
+  per artifact group) is an absolute cap that also makes a ruling due.
 - **Ruling judge.** Same judge seat, prompt says it must rule `met` or `unreachable`; the board sets job data
-  `drive.ruling=<token>` and `swarm verdict` refuses `not_met` while it is set (the CLI and `deliver_verdict`
-  check it). `unreachable` here means "not reachable within this job's budget and approach", with the details
+  `drive.ruling=<action id>` and `swarm verdict` refuses `not_met` while it is set (the CLI and
+  `deliver_verdict` check it); a ruling verdict is stored with scope `ruling`. A ruling attempt that concludes
+  without one counts toward `ruling_attempts` (§2.2). `unreachable` here means "not reachable within this job's budget and approach", with the details
   report. No silent loop is possible: every path through §3.3 either makes progress or advances a counter that
   ends in a ruling.
 - Judges only judge: the judge, reviewer and integrator prompts keep today's separation; fixes are always on a
@@ -311,20 +379,35 @@ Unchanged in substance from the coding recipe, now always run by the driver:
   delete the branch, `swarm learn`, `INTEGRATED <artifact>`.
 - Red CI or a non-trivial conflict → `FINALIZE_BLOCKED <artifact> <instructions>` → fix round (§3.6).
   CI red repeatedly is a no-progress round like any other and so ends in a ruling.
-- Landings are serialized per target branch: at most one integrator per (repo, target) is live (driver check).
+- **Integration receipt, not inference.** Today `coding_integrated` treats "source branch gone remotely or its
+  SHA an ancestor of a local tracking ref" as integrated. In drive mode an artifact group is integrated only with
+  a receipt: the integrator's `INTEGRATED <artifact>` from the integrator seat of the current generation, plus a
+  driver check (`git fetch` + `merge-base --is-ancestor <rebased sha> <remote>/<target>`) on **every**
+  configured remote, recorded as job data `drive.integrated.<gen>.<group>` with the landed SHA. A partial push
+  (some remotes advanced) is journalled per remote by the integrator (`swarm seat note`), and the next
+  integrator attempt reconciles the missing remotes first.
+- **Landings are serialized by a lease.** New table `drive_locks(key PRIMARY KEY, holder, generation,
+  expires_at)` (schema 25); the key is `land:<sha256 of the normalized remote URL>:<target>`. The integrator
+  launch claims it inside `claim_drive_launch`; the runner renews it while the session lives; it expires
+  (session wall clock + 10 min) if the runner dies. Two supervisors (two hosts or users) cannot land on the
+  same target at once.
 
 ### 3.9 Stall recovery
 
 - **Lost/silent seats**: the existing stuck sweep (`stuck_reason`: dead, tool, silent) closes the row; in drive
   mode the driver relaunches the *seat* (not a coordinator) with the seat brief + `brief.build_brief` context
   (posts, transcript tail). The question gate in `stuck_reason` becomes per seat (§3.10).
+- **Writer fencing.** A seat is never relaunched while its previous attempt may still write: the relaunch
+  requires the previous attempt's restart row to be ended **and** its scope unit to be gone
+  (`runner._unit_exists` false). If the row is ended by the sweep but the runner has not yet stopped the scope,
+  the driver stops it (`runner._stop_session`) and relaunches on a later pass.
 - **Exited without a hand-off**: a seat whose session ended `completed` with no `swarm done`, `DONE:` post,
-  release, or open question since its launch → resumed once with "you ended without a hand-off: finish or post
-  BLOCKED with why"; again → `failed` + lead wake.
+  release, or open question since its launch is an unsuccessful attempt of its action (§3.2): retried with "you
+  ended without a hand-off: finish, or ask with a default"; after `max_attempts` → seat `failed` + lead wake.
 - **Lead lost** → relaunched (§3.5). **No progress for T**: `drive.stall_minutes` (90) without a new hand-off,
   verdict, seat-state change or lead turn while seats are live → the lead is woken with "no progress for T";
-  counts as an idle round.
-- **Supervisor killed or restarted**: every launch is a `record_restart` row inserted atomically with its caps;
+  is a round without progress (§3.3).
+- **Supervisor killed or restarted**: every launch is a `claim_drive_launch` row inserted atomically with its caps;
   the runner owns it by flock; `reap` finishes dead runners' runs; seats in `running` whose restart row ended are
   reconciled to `idle`/`failed` at the next pass; tokens make every action idempotent (§4.5).
 
@@ -335,6 +418,10 @@ Unchanged in substance from the coding recipe, now always run by the driver:
 - The driver, `pipeline`, `stuck_reason` and `candidates` stop reading the job-level `waiting_on`/
   `human_question` for drive jobs; they read open question blockers **per seat**: only the blocked seat is not
   relaunched or woken; every other seat and the pipeline continue.
+- **Core binding.** Blockers gain core columns `seat` and `generation` (schema 25), set by core `open_blocker`
+  from the asking agent's seat (not from the plugin payload), so the per-seat gate and the answer wake work even
+  if the ask-answer plugin is absent or its payload is unreadable. Wakes are derived from the durable
+  `blocker_events` rows (`resolved`, `expired`).
 - On answer or expiry (existing `expire_blockers` applies the default, posts `Q<n> default applied`), the
   blocked seat gets a wake (§3.4 step 6) with the answer and whether it was assumed.
 - The job rollup still shows open questions (so `swarm status` and watch display them), but in drive mode
@@ -344,8 +431,7 @@ Unchanged in substance from the coding recipe, now always run by the driver:
 
 ### 3.11 Triggering: timer, hook kicks, NOTIFY
 
-- The timer stays the correctness floor (5 min; `drive.timer_minutes` may lower it to 2 when any drive job is
-  open, written by `swarm bootstrap`).
+- The timer stays the correctness floor, fixed at `[supervise] timer_minutes` (5); no adaptive cadence.
 - **Hook kicks**: the unsandboxed PostToolUse hook, on a successful `swarm done|verdict|seat|ask|answer|post
   --to`, runs `systemctl --user start --no-block swarm-supervise.service` (with `runner._manager_env`), at most
   once per 20 s per user (stamp in the private dir). This is starting the sanctioned supervisor unit, not an
@@ -389,10 +475,9 @@ Unchanged in substance from the coding recipe, now always run by the driver:
 |-----|---------|---------------|
 | `max_sessions` | 60 launches (all seats, all kinds) | ruling |
 | `max_seats` | 12 distinct seats | further requests `refused` (lead woken) |
-| `max_rounds` | 6 per artifact group; 4 goal rounds | ruling |
-| `no_progress_rounds` | 2 | ruling |
-| `max_idle_rounds` | 3 | ruling |
-| `max_lead_turns` | 30 | ruling |
+| `max_rounds` | 8 judged rounds per artifact group | ruling |
+| `no_progress_rounds` | 3 (the one progress counter, §3.3) | ruling |
+| `max_attempts` | 3 per logical action | action fails; lead woken |
 | `max_cost_usd` | 40 (Claude `total_cost_usd` + Codex tokens × `[drive] codex_usd_per_mtok`) | ruling |
 | `max_session_minutes` | 60 per session (wall clock, runner) | session ends; seat idle |
 | `max_wall_hours` | 24 from activation | ruling |
@@ -401,11 +486,17 @@ Unchanged in substance from the coding recipe, now always run by the driver:
 - Each budget check happens in `next_action` from the ledger; launches that would eat into `ruling_reserve`
   are held, and a ruling becomes due. A ruling never waits on a spent budget: it draws on the reserve. If the
   reserve is gone too, mechanical UNREACHABLE.
-- **Cost accounting**: the runner already keeps a redacted stdout tail; it parses Claude's final JSON
-  (`total_cost_usd`, `usage`) and Codex `--json` token-count events, and records `cost_usd`, `tokens_in`,
-  `tokens_out` on the restart row (schema 25 columns). A session whose cost cannot be read is charged
-  `[drive] unknown_session_usd` (2). Per-session ceilings stay `claude --max-budget-usd` (set to the job's
-  remaining budget, capped) and `codex_token_limit`.
+- **Reserve before launch, reconcile after.** `claim_drive_launch` atomically reserves the session's ceiling
+  (`reserved_usd` on the restart row): `min([drive] session_usd_cap (5), budget − charged − open reservations −
+  ruling reserve)`; a launch with less than `min_session_usd` (0.5) available is held and a ruling becomes due.
+  The ceiling is enforced per session: Claude `--max-budget-usd <reserved>`; Codex
+  `features.rollout_budget.limit_tokens = reserved / codex_usd_per_mtok` (drive mode refuses Codex seats when the
+  rollout budget feature is unavailable in the installed Codex, doctor checks it). Concurrent sessions can
+  therefore never exceed the job budget together.
+- **Cost accounting.** The runner parses Claude's final JSON (`total_cost_usd`, `usage`) and Codex `--json`
+  token-count events from the output it already captures, and records `cost_usd`, `tokens_in`, `tokens_out` on
+  the restart row (schema 25). A session whose usage cannot be read (crash, SIGKILL, malformed output) is charged
+  its full reserved ceiling: an upper bound, never an estimate.
 - Host caps remain: `max_concurrent_sessions` (new, default 4, replacing `max_concurrent_replacements` for
   drive launches; counts every open restart row of the host), `daily_restart_minutes` (raised default 960 for
   drive). The crash-recovery caps of `[supervise]` keep governing non-drive jobs.
@@ -418,10 +509,12 @@ the driver refuses a workdir that is or lies under /tmp or any tmpfs mount (new 
 
 ### 4.3 Kill switch: `swarm halt`
 
-- `swarm halt [--job J] [--reason TEXT]` (person only: refused from an agent identity): job-level sets
+- `swarm halt [--job J] [--reason TEXT]` (anyone may stop; recorded with the actor): job-level sets
   `drive.halted` and stops every live seat session of the job (`systemctl --user kill` of its scopes via the
   runner, which finishes rows `cancelled`); global writes the private `supervise.off` (existing kill switch,
-  which a sandboxed agent cannot delete) and stops all runs. `swarm unhalt` reverses. Every launch path rechecks
+  which a sandboxed agent cannot delete) and stops all runs. `swarm unhalt` reverses and needs person proof
+  (§3.4, `/dev/tty` confirmation). Halting advances no counter and no budget clock except `max_wall_hours`
+  (deliberately: a halted job past its wall time gets a ruling on unhalt). Every launch path rechecks
   the switches immediately before starting (existing `_switched_off_now`).
 - Halt is not a terminal state (deviation from "only three states", by design: a person's emergency brake);
   it is shown as `halted by <person>` and ends with `unhalt` or `deactivate` (CANCELLED).
@@ -433,6 +526,14 @@ Unchanged and reaffirmed: never a bypass flag (`check_safe`), Claude `--permissi
 only by the supervisor's systemd unit; agents never start sessions (the classifier's "Create Unsafe Agents"
 denial stays correct, and the hook refuses agent-launched `claude -p`/`codex exec` loops with a pointer to
 `swarm seat request`).
+
+**Role limits are enforced in hooks, not prompts.** Prompts and fencing are not permission boundaries, and a
+brief is agent-written. In drive jobs the PreToolUse hook enforces: judges and reviewers may not edit files,
+commit or push (existing judge rule, extended to reviewers); only the integrator seat of the current
+generation holding the land lease may push to the target branch (`git push` to `<target>` or `HEAD:<target>`
+is refused for every other seat; force pushes are refused for everyone); no seat may run `swarm verdict` except
+the judge seat; no seat may launch `claude`/`codex` sessions. The driver independently verifies landing (the
+integration receipt, §3.8) instead of trusting the integrator's post.
 
 ### 4.5 Idempotence and crash recovery
 
@@ -474,7 +575,15 @@ gating; progress measure; cost parsing; halt; doctor fix; hook kick debounce.
 
 ### 6.2 E2E in CI with scripted harnesses (no coordinator)
 
-`tests/test_drive_e2e.py` runs real `run_pass` loops on SQLite and Postgres (Actions matrix) with fake
+**Determinism.** The E2E harness uses an injected clock (`now=`), a pass limit (a scenario that is not
+terminal after `max_passes` fails the test, printing the snapshot), and named **crash barriers**: hooks in
+`driver.execute` and `claim_drive_launch`/runner start (`before_claim`, `after_claim`, `after_marker`,
+`after_runner_start`, `runner_mid_session`, `before_finish`) where a test raises `SystemExit` or SIGKILLs a
+process. "Every snapshot" means: the invariant is asserted after every pass of every scenario, and the chaos
+suite enumerates every barrier × each of the scenario's actions (bounded by the scenario size).
+
+`tests/test_drive_e2e.py` runs real `run_pass` loops on SQLite, Postgres and the file backend (Actions matrix,
+the file backend including close-and-reopen of the store between passes) with fake
 `claude`/`codex` executables on PATH (`tests/fixtures/drive/fake_harness.py`), started by the real runner
 through an injectable `start_runner` that executes them as subprocesses and drives the real hooks (as
 `test_pause_e2e` does). Each fake reads its prompt, identifies its role, and follows a script file. No
@@ -499,6 +608,16 @@ coordinator session exists in any of these tests; `activate --drive` is called o
    - ruling judge fails twice → mechanical unreachable;
    - `swarm halt` stops everything; `unhalt` resumes to MET.
 4. **Codex parity**: scenario 1 with the lead and one engineer on the fake Codex harness.
+5. **Forgery**: a seat row inserted directly into the database (no authorization record), a modified row after
+   authorization, a `swarm seat request` from a non-lead seat, and an agent-environment-cleared "person" unhalt
+   are all refused; a seat workdir outside the job roots and one under /tmp are refused.
+
+### 6.2a Real systemd (box-only, targeted)
+
+`tests/test_drive_systemd.py` (skipped unless `SWARM_TEST_SYSTEMD=1` and a user manager answers), run on the
+coder box through test-slot: real `systemd-run --scope` units with a fake harness that forks a grandchild;
+asserts SIGKILL of the runner → reap stops the scope and its descendants; `swarm halt` racing a launch leaves
+no live scope and no open row; writer fencing waits for the scope to disappear before a relaunch.
 
 ### 6.3 Live acceptance on the coder box (manual gate before landing)
 
@@ -532,6 +651,11 @@ Transcripts and the board export are attached to the judge's evidence.
 - R13 waiter-stale/unacked alerts are suppressed for drive jobs; a failed invariant raises DRIVER-STALLED.
 - R14 Model policy as Francesco set it (Opus leads/judges, Sonnet coding, Haiku simple), enforced for lead and
   judge, configurable in `[models]`.
+- R15 Seat requests are authenticated by host-private authorization records written by hooks, never by board
+  fields; person authority needs a `/dev/tty` confirmation; stopping (halt) needs no proof.
+- R16 One progress counter plus absolute caps; no idle-round, lead-turn or adaptive-timer counters (cut).
+- R17 Budgets are reserved before launch and charged at the reserved ceiling when usage is unknown.
+- R18 Verdicts are typed (artifact/goal/ruling) and bound to an activation generation.
 
 ## 8. Decisions only Francesco can make
 
@@ -540,8 +664,43 @@ Transcripts and the board export are attached to the judge's evidence.
 
 ## 9. Compatibility and rollout
 
-- Schema 25: `seats` table; `verdict` CHECK adds `unreachable`; restart rows gain `cost_usd`, `tokens_in`,
-  `tokens_out`, `kind`. Older clients: they read `unreachable` as "not met" (display only); they cannot record
-  it. A drive job should not be touched by clients older than 25 (doctor warns).
+- Schema 25: `seats` and `drive_locks` tables; `verdict` CHECK adds `unreachable`; `verdict_scope` column;
+  blockers gain `seat`, `generation`; restart rows gain `action_id`, `cost_usd`, `reserved_usd`, `tokens_in`,
+  `tokens_out` with `UNIQUE(job, action_id, attempt)`.
+- **Older clients are refused, not warned.** On Postgres, schema-25 clients set `swarm.client_schema = 25` on
+  every connection; triggers on `seats`, `drive_locks`, `blockers` and `jobs` refuse writes touching a drive job
+  (job data `drive.enabled`) from a connection without it (an older client gets an error, never a silent
+  half-write). SQLite and file stores are local to one installation, which upgrades as a whole; their
+  migration bumps `user_version`/the state document version, which older clients already refuse to open.
 - Order: doctor fix (independent) → schema + verdict → seats + driver core → pipeline extensions → questions →
   kicks/NOTIFY → halt/budgets/cost → skill rewrite → E2E/chaos → live acceptance → release notes.
+
+## 10. Review log
+
+### Round 1 (Codex, `codex exec`, 2026-10-10): CHANGES, 23 findings, all accepted
+
+| # | Finding (short) | Resolution |
+|---|-----------------|------------|
+| 1 | Artifact verdicts write the job's latest-verdict columns, could close the job | Typed verdicts + generation (§3.1, R18) |
+| 2 | Ruling launches can wait forever (pre-launch holds) | Absolute ruling deadline; pre-launch refusals count (§2.2, §3.3) |
+| 3 | Ruling session exiting without a verdict undefined | Counts as a concluded failed attempt (§2.2, §3.6) |
+| 4 | Board rows forgeable; seat requests unauthenticated | Host-private seat authorization records (§3.4, R15) |
+| 5 | "human" identity spoofable | `/dev/tty` person proof; halt needs none (§3.4, §4.3) |
+| 6 | Lead could widen write scope across repos | Job workdir roots at activation (§3.4) |
+| 7 | Prompt fencing is not enforcement | Hook-enforced role limits; driver verifies landing (§4.4) |
+| 8 | Concurrent sessions overspend | Atomic reservation before launch (§4.1, R17) |
+| 9 | Unknown cost undercharged | Charge reserved ceiling; Codex rollout budget required (§4.1) |
+| 10 | Tokens conflate actions and attempts | Action id + attempt, success criteria, max_attempts (§3.2) |
+| 11 | Launch claim not atomic | `claim_drive_launch` single transaction, unique (job, action, attempt) (§3.2) |
+| 12 | Wake events lost while lead runs | Id watermarks acknowledged per turn (§3.5) |
+| 13 | Replacement writers overlap | Writer fencing on scope gone (§3.9) |
+| 14 | Prose `DONE:` strands a seat | Only structured hand-offs count (§3.4) |
+| 15 | Rebased hand-off loses author | Artifact-group owner seat (§3.6) |
+| 16 | `coding_integrated` too weak | Integration receipt verified on every remote (§3.8) |
+| 17 | Target serialization only a check | `drive_locks` land lease (§3.8) |
+| 18 | Revisions/reactivation not isolated | Activation generation on everything (§3.1) |
+| 19 | Per-job errors can starve the driver | Per-job isolation, deadline, rotation, DRIVER-ERROR → ruling (§3.2) |
+| 20 | Blocker seat binding lives in plugin payload | Core `seat`/`generation` columns (§3.10) |
+| 21 | Tests skip systemd, lack determinism | Clock, pass limit, crash barriers; box-only systemd test (§6) |
+| 22 | File backend/old clients | File backend in E2E; Postgres refuses old clients on drive jobs (§6, §9) |
+| 23 | Too many progress mechanisms | One counter + absolute caps (§3.3, R16) |
