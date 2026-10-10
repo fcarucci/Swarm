@@ -16,7 +16,7 @@
 - Terminal states of a drive goal job: MET, UNREACHABLE (judge verdict with reasons, or the labelled mechanical one), CANCELLED (a person). Never idle/stalled/waiting for the coordinator.
 - No new always-on process: only the timer-driven pass, its per-session runners, and the existing opt-in events listener.
 - Every agent joins the board (enrol deadline `enrol_minutes` kills sessions that do not).
-- Models: product defaults for drive seats as below. **Build staffing for this job** (Francesco, 2026-10-10: "i want the engineers to be haiku"): every engineer seat in every wave runs on Haiku; reviewers and QA on Sonnet; the security reviewer, the judge and the lead on Opus. Config: `engineering_lead = judge = security_reviewer = "opus"`; `engineer = qa = reviewer = integrator = worker = "sonnet"`; `--complexity simple` → `"haiku"`. Lead and judge clamped to Opus in drive mode.
+- Models: product defaults for drive seats as below. **Build staffing for this job** (Francesco, 2026-10-10: "i want the engineers to be haiku"): every engineer seat in every wave runs on Haiku; reviewers and QA on Sonnet; the security reviewer, the judge and the lead on Opus. Product defaults ([P1], `[drive.models]`, configurable, per job `--model ROLE=MODEL`, per seat `--model`): `engineer = worker = integrator = "haiku"`, `reviewer = qa = "sonnet"`, `judge = lead = security = "opus"`.
 - Landing: rebase only (or `[land] strategy = squash-ff` where the project sets it), fast-forward pushes only, never a force push, CI green on the exact rebased SHA, through `swarm land`.
 - Tests: on the box only targeted tests through `/var/tmp/test-slots/test-slot -- <cmd>` run from `tests/` (`cd tests && /var/tmp/test-slots/test-slot -- python3 -B -m unittest test_x`); full suites only in GitHub Actions; wait for CI with `swarm ci wait --repo fcarucci/Swarm --sha <exact sha> --timeout 540` in the foreground; never `gh run watch`.
 - Never put work trees, clones or builds under /tmp (live acceptance uses `~/work/drive-accept/`; seat workdirs under /tmp are refused by the driver). Unit tests keep using the suite sandbox `support.SANDBOX`/`TMPDIR`, short-lived and small, as the existing suite does.
@@ -1184,3 +1184,9 @@ Seats: security reviewer (opus; read-only), judge (opus).
 ## Staffing change (Francesco, 2026-10-10): engineers on Haiku
 
 All engineer seats (every wave) run on Haiku; reviewers and QA on Sonnet; security reviewer, judge and lead on Opus. Because Haiku engineers have a record of vacuous tests and hidden behaviour changes, every seat's diff passes the Review gates (Staffing section: line-by-line review, tests failing on base, mutation gate) before integration, and the Opus security reviewer keeps Tasks 3, 4, 5, 8a–8c, 11 and 20.
+
+## PM ruling [P1]: per-role model table in drive mode
+
+- Task 6: `[drive.models]` table with the shipped defaults above; `swarm activate --model ROLE=MODEL` (per job, in the ledger); `swarm drive models --job J ROLE=MODEL` (requester/person path); seat `--model` within `allowed_models`. Tests `test_drive_models_defaults`, `test_job_model_override`, `test_seat_model_override_within_allowlist`, `test_status_and_doctor_show_effective_models`.
+- Task 10: recipe `review_gates = "haiku-strict"` by default when the effective engineer model is Haiku: the reviewer prompt requires line-by-line review, fails-on-base evidence per new test and a mutation gate (>= 5 mutants under the seat's work root); `test_haiku_engineer_selects_strict_review_gates`, `test_review_changes_on_surviving_mutant_report`.
+- Task 14: config.example.toml `[drive.models]`, REFERENCE.md, skill text.

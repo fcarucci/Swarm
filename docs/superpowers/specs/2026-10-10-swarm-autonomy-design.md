@@ -749,10 +749,22 @@ passed, and never while the job is halted. So a halt cannot let a default be app
 - Codex `workspace-write` has no network unless `[codex] network_access = true` (existing profile). Seats that
   need the network (integrator, anything pushing) run on Claude unless doctor confirms the Codex profile; the
   driver posts the reason when it overrides a request.
-- **Models** (`[models.claude]` defaults written by bootstrap; drive mode enforces lead and judge):
-  `engineering_lead = judge = "opus"`; `engineer = qa = reviewer = integrator = worker = "sonnet"`; a seat with
-  `--complexity simple` gets `"haiku"`. `[drive] allowed_models` limits what a request may name; leads and judges
-  are clamped to Opus. `[models.codex]` likewise for Codex.
+- **Models: a per-role config table** (**[P1]**, PM ruling 2026-10-10, matching Francesco's standing policy
+  "i want the engineers to be haiku"). `[drive.models]` (Claude; `[drive.models.codex]` for Codex) maps roles to
+  models, with shipped configurable defaults:
+  `engineer = "haiku"`, `worker = "haiku"` (fix rounds), `integrator = "haiku"`, `reviewer = "sonnet"`,
+  `qa = "sonnet"`, `judge = "opus"`, `lead = "opus"` (`engineering_lead`), `security = "opus"`.
+  Precedence: seat request `--model` (within `[drive] allowed_models`) > per-job override at activation
+  (`--model ROLE=MODEL`, stored in the ledger; changeable with `swarm drive budget`-style `swarm drive models`) >
+  `[drive.models]` > `[models.<host>]` (legacy) > the shipped defaults. `swarm doctor` and `swarm status --job J`
+  show the effective table per job.
+- **Haiku engineers bring their review gates.** Whenever the effective engineer (or worker/integrator) model is
+  Haiku, the pipeline's review stage (§3.6) is, by default, a Sonnet reviewer that does a line-by-line review of
+  the whole diff, checks that every new test fails on the base commit, and runs a mutation gate (at least 5
+  targeted mutants of the changed logic in a scratch copy under the seat's work root, never /tmp; every mutant
+  must be killed), and reports it with `swarm review ... --report`. A surviving mutant, a test that passes on the
+  base, or an unexplained behaviour change is `CHANGES`. The recipe key `review_gates = "haiku-strict"|"standard"`
+  selects it (default: `haiku-strict` when the engineer model is Haiku).
 - Every seat prompt carries: targeted tests only, through `/var/tmp/test-slots/test-slot -- <cmd>` when it
   exists; full suites only in CI; `swarm ci wait --repo R --sha S --timeout 540` in the foreground, never
   `gh run watch`; never put work trees or builds under /tmp; rebase-only landing; post DONE with evidence.
@@ -1101,8 +1113,10 @@ Transcripts and the board export are attached to the judge's evidence.
   the target fast-forward is executed by the driver for both harnesses, while the integrator still pushes the
   rebased branch and waits on CI ([RR8], [G2]).
 - R13 waiter-stale/unacked alerts are suppressed for drive jobs; a failed invariant raises DRIVER-STALLED.
-- R14 Model policy as Francesco set it (Opus leads/judges, Sonnet coding, Haiku simple), enforced for lead and
-  judge, configurable in `[models]`.
+- R14 **[P1]** Models are a per-role config table `[drive.models]`, overridable per job and per seat request;
+  shipped defaults follow Francesco's policy: engineers (and fix workers, integrators) Haiku, reviewers and QA
+  Sonnet, judge, lead and security reviewer Opus. Haiku engineers get the strict review gates (line-by-line review,
+  fails-on-base tests, mutation gate) by default.
 - R15 Seat requests are authenticated by host-private authorization records written by hooks, never by board
   fields; person authority is the tty path or the receipted requester session (**[F17]**); halt is refused
   only for seat sessions (**[F5]**).
