@@ -5,3 +5,5 @@ __pycache__/
 
 /skills/complexity-analyzer/tools/
 node_modules/
+
+dist/

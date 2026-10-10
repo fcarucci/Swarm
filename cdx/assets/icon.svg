@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+<!-- TODO(Francesco): placeholder mark for the Codex directory listing; replace before submitting. -->
+  <rect width="128" height="128" rx="24" fill="#1f2937"/>
+  <g fill="#f59e0b">
+    <circle cx="64" cy="40" r="12"/>
+    <circle cx="36" cy="84" r="12"/>
+    <circle cx="92" cy="84" r="12"/>
+  </g>
+  <g stroke="#f59e0b" stroke-width="6" stroke-linecap="round">
+    <line x1="58" y1="51" x2="42" y2="73"/>
+    <line x1="70" y1="51" x2="86" y2="73"/>
+    <line x1="48" y1="84" x2="80" y2="84"/>
+  </g>
+</svg>

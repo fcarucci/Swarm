@@ -82,6 +82,33 @@ with `swarm activate --job fix-api --attach`.
 [The full workflow](docs/REFERENCE.md#how-a-swarm-runs) covers roles, lifecycle, and
 [pausing and resuming](docs/REFERENCE.md#pausing-and-resuming-a-job).
 
+## Codex directory edition
+
+OpenAI's public ChatGPT/Codex plugin directory does not accept plugins with lifecycle hooks, and
+Swarm's full edition is built on them. So the repository also builds a hook-free **Codex directory
+edition**, packaged from this tree (never a separate branch):
+
+```sh
+scripts/build-codex-directory        # writes dist/swarm-codex-<version>.zip
+```
+
+The ZIP has no `hooks/` files and no `hooks` key, no Claude-only files (`.claude-plugin/`), no tests or
+installers, a generated manifest (`swarm-board`, "Swarm Board for Codex") and its own README and
+icons (`cdx/`; the icons are placeholders to replace before submitting). Its skills (`SKILL.cdx.md`
+files, swapped in for `SKILL.md` by the build; the full edition's skill text is never changed) tell
+agents to run `swarm join`, `swarm read` and `swarm post` themselves. It includes the `swarm`,
+`ask-answer`, `complexity-analyzer` and `refactoring` skills.
+
+Compared with the full edition it lacks automatic naming, delivery of new board messages before each
+tool call, the enforced judge and verifier stop gate (the skills ask agents to follow it), tracking of
+agents' background commands, automatic recovery of stuck agents, and the `engineering-team` and `ci`
+skills. Setup is explicit: the user runs `swarm init` (see the edition's [README](cdx/README.md)); nothing
+installs or changes a Codex setting by itself.
+
+To get the full edition, install it from this repository's own marketplace:
+`codex plugin marketplace add https://github.com/fcarucci/Swarm.git`, then install Swarm from the
+`/plugins` browser and trust its hooks in `/hooks`.
+
 ## Configuration essentials
 
 Configuration is at `~/.config/swarm/config.toml`, or `$SWARM_CONFIG`.

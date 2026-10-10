@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""Build the Codex directory edition: dist/swarm-codex-<version>.zip.
+
+OpenAI's public plugin directory refuses plugins that carry lifecycle hooks, so the directory
+edition is a packaged variant of this tree, never a branch: it has no hooks (no hooks/ files, no
+`hooks` key, no hook launchers), no Claude-only files, no dev files, skills that work by instruction
+(`skills/*/SKILL.cdx.md` replaces SKILL.md in the ZIP; the repo's SKILL.md files are never touched),
+a generated directory manifest and its own README and icons (cdx/).
+
+    scripts/build-codex-directory [--out DIR] [--root DIR]
+
+Prints the path of the ZIP. Needs only the Python standard library.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import zipfile
+from pathlib import Path
+
+# The directory listing. The slug is distinctive on purpose (the guidelines discourage a single
+# dictionary word); Francesco approves the name before anything is submitted.
+NAME = "swarm-board"
+DISPLAY_NAME = "Swarm Board for Codex"
+SHORT_DESCRIPTION = "Coordinate agents on a board"          # at most 30 characters
+LONG_DESCRIPTION = (
+    "Swarm Board lets a lead agent and its subagents coordinate through a shared message board: "
+    "every agent joins a job under a unique name, reads what the others posted, and posts claims, "
+    "status, findings and hand-offs. A judge records whether the job's goal is met, and read-only "
+    "verifiers check claims. The board is plain files or SQLite on your machine by default, or your "
+    "own Postgres server. Included skills: swarm (the board protocol), ask-answer (structured "
+    "questions to the human or a role), complexity-analyzer and refactoring. This edition works by "
+    "instruction only: it installs nothing and changes no Codex setting until you run the setup "
+    "command from its README, and it sends nothing to its author."
+)
+REPO = "https://github.com/fcarucci/Swarm"
+CATEGORY = "Developer Tools"
+
+SKILLS = ("swarm", "ask-answer", "complexity-analyzer", "refactoring")   # engineering-team and ci need the full edition
+TOP_FILES = ("LICENSE", "NOTICE", "PRIVACY.md", "SECURITY.md", "THIRD_PARTY_NOTICES.md", "requirements.txt",
+             "config.example.toml")
+EXCLUDE_NAMES = {"winhook.py", "SKILL.cdx.md", ".DS_Store", ".gitignore", ".gitattributes"}
+EXCLUDE_DIRS = {"__pycache__", "node_modules", "tests", "tools", ".git"}
+ZIP_TIME = (2026, 1, 1, 0, 0, 0)
+
+
+def tracked(root: Path) -> list[Path]:
+    """The files of the tree: git's tracked files, else everything under root."""
+    try:
+        out = subprocess.run(["git", "-C", str(root), "ls-files", "-z"], capture_output=True, check=True).stdout
+        files = [root / p for p in out.decode().split("\0") if p]
+        if files:
+            return files
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    return [p for p in root.rglob("*") if p.is_file()]
+
+
+def wanted(rel: Path) -> bool:
+    parts = rel.parts
+    if rel.name in EXCLUDE_NAMES or rel.suffix == ".pyc" or EXCLUDE_DIRS & set(parts[:-1]):
+        return False
+    if parts[0] == "bin":
+        return rel.name in ("swarm", "swarm.cmd")
+    if parts[0] in ("lib", "data"):
+        return True
+    if parts[0] == "skills":
+        return len(parts) > 2 and parts[1] in SKILLS
+    return len(parts) == 1 and rel.name in TOP_FILES
+
+
+def manifest(root: Path) -> dict:
+    main = json.loads((root / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    return {
+        "name": NAME,
+        "version": main["version"],
+        "description": ("Coordinate Codex agents through a shared message board: unique names, a roster, "
+                        "messages, a judge and read-only verifiers. Works by instruction only; run its setup "
+                        "command to prepare the board. See the README."),
+        "author": main["author"],
+        "homepage": REPO,
+        "repository": REPO,
+        "license": main.get("license", "Apache-2.0"),
+        "keywords": ["multi-agent", "orchestration", "subagents", "message-board", "judge"],
+        "skills": "./skills/",
+        "interface": {
+            "displayName": DISPLAY_NAME,
+            "shortDescription": SHORT_DESCRIPTION,
+            "longDescription": LONG_DESCRIPTION,
+            "developerName": main["author"]["name"],
+            "category": CATEGORY,
+            "capabilities": ["Message board", "Agent coordination"],
+            "websiteURL": REPO,
+            "supportURL": REPO + "/issues",
+            "privacyPolicyURL": REPO + "/blob/main/PRIVACY.md",
+            "termsOfServiceURL": REPO + "/blob/main/LICENSE",
+            "composerIcon": "./assets/icon.svg",
+            "logo": "./assets/logo.svg",
+        },
+    }
+
+
+def collect(root: Path) -> dict[str, bytes]:
+    """Archive path -> content, for every file of the edition."""
+    files: dict[str, bytes] = {}
+    for path in tracked(root):
+        rel = path.relative_to(root)
+        if wanted(rel) and path.is_file():
+            files[rel.as_posix()] = path.read_bytes()
+    for skill in SKILLS:                       # the instruction-only text replaces SKILL.md in the ZIP
+        cdx = root / "skills" / skill / "SKILL.cdx.md"
+        if cdx.is_file():
+            files[f"skills/{skill}/SKILL.md"] = cdx.read_bytes()
+    files["README.md"] = (root / "cdx" / "README.md").read_bytes()
+    for icon in ("icon.svg", "logo.svg"):
+        files[f"assets/{icon}"] = (root / "cdx" / "assets" / icon).read_bytes()
+    files[".codex-plugin/plugin.json"] = (json.dumps(manifest(root), indent=2) + "\n").encode()
+    return files
+
+
+def build(root: Path, out: Path) -> Path:
+    version = json.loads((root / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))["version"]
+    files = collect(root)
+    out.mkdir(parents=True, exist_ok=True)
+    target = out / f"swarm-codex-{version}.zip"
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as z:
+        for name in sorted(files):
+            info = zipfile.ZipInfo(name, ZIP_TIME)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = (0o755 if name == "bin/swarm" else 0o644) << 16
+            z.writestr(info, files[name])
+    return target
+
+
+def main(argv: list[str] | None = None) -> int:
+    here = Path(__file__).resolve().parent.parent
+    ap = argparse.ArgumentParser(description="build dist/swarm-codex-<version>.zip, the hook-free Codex directory edition")
+    ap.add_argument("--root", type=Path, default=here, help="the tree to package (default: this repository)")
+    ap.add_argument("--out", type=Path, default=None, help="output directory (default: <root>/dist)")
+    args = ap.parse_args(argv)
+    root = args.root.resolve()
+    print(build(root, (args.out or root / "dist").resolve()))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
