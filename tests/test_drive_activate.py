@@ -407,6 +407,26 @@ class PinnedGitTests(HomeCase):
             with self.subTest(url=bad), self.assertRaises(da.DriveError):
                 da.remote_head(bad, None, None, "main")
 
+    def test_check_url_says_which_rule_refused(self):
+        """Each gitpin rule on its own (later rules or git itself would also refuse some of these, so the
+        reason is what pins each rule)."""
+        cases = (("--upload-pack=touch${IFS}x", "start with '-'"), ("-u", "start with '-'"),
+                 ("ext::sh", "transport helper"), ("fd::3", "transport helper"),
+                 ("https://exa mple.com/r.git", "whitespace or control"), ("https://example.com/r\x7f", "whitespace or control"),
+                 ("git://example.com/r.git", "not git transport"), ("ssh://-oProxyCommand=x/r", "not an option"))
+        for url, why in cases:
+            with self.subTest(url=url), self.assertRaisesRegex(da.gitpin.GitPinError, re.escape(why)):
+                da.gitpin.check_url(url)
+
+    def test_sanitize_refuses_controls_that_urlsplit_would_strip(self):
+        for url in ("https://exa\nmple.com/r.git", "https://example.com/r\t.git", "https://example.com/r.git\r"):
+            with self.subTest(url=url), self.assertRaisesRegex(da.DriveError, "control characters"):
+                da.sanitize_remote(url)
+
+    def test_helper_pin_needs_an_absolute_path_with_the_hint(self):
+        with self.assertRaisesRegex(da.DriveError, re.escape("helper:/abs/path/gh")):
+            da.credential_pin("helper:gh auth git-credential")
+
     def test_sanitize_remote_refuses_an_option_or_a_transport_helper(self):
         for bad in ("--upload-pack=touch${IFS}x", "-u", "ext::sh -c id", "git://example.com/r.git",
                     "https://example.com/r.git\n", "relative/repo"):
@@ -602,6 +622,11 @@ class OwnerRecordTests(HomeCase):
         with mock.patch.object(da, "board_key", return_value="bk"), \
                 self.assertRaisesRegex(da.DriveError, "DRIVER-CONFIG.*owner record format/fields invalid"):
             da._owner("bk", "J")
+
+    def test_an_older_format_number_with_every_key_is_refused(self):
+        self.planted({**self.owner(), "format": 1})
+        with self.assertRaisesRegex(enrolment.OwnerRecordInvalid, "format 1 is not 2"):
+            enrolment.find_job_owner("bk", "J", strict=True)
 
     def test_unknown_field_or_planted_url_in_a_current_record_is_a_clear_error(self):
         for owner in ({**self.owner(), "format": 2, "extra": 1},
