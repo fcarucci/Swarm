@@ -360,8 +360,9 @@ def drv_kill_runner(args):
 
 
 def kill_pass_midway(rig, st) -> bool:
-    """Plan Task 19 addition, as far as a non-systemd harness can: SIGKILL a supervisor pass while it is in flight
-    with a live runner, then SIGKILL one runner. Records evidence in st["killed_pass"]; True once both happened.
+    """Plan Task 19 addition, as far as a non-systemd harness can: with a runner alive, SIGKILL the supervisor pass in
+    flight, then SIGKILL that runner. `st["killed_pass"]` is recorded ONLY when a runner was seen and killed; otherwise
+    nothing is recorded and the miss is counted (the scenario then fails: nothing was tested).
     (`systemctl --user kill swarm-supervise.service` is the real-timer variant: never run here, it names the
     shared unit; Task 17 covers it on the box.)"""
     p = subprocess.Popen([str(rig.run.bin / "swarm"), "supervise"], env=rig.run.env(),
@@ -373,18 +374,23 @@ def kill_pass_midway(rig, st) -> bool:
         if runners:
             break
         time.sleep(0.5)
-    if p.poll() is not None:
+    if p.poll() is not None or not runners:     # the pass ended first, or never started a runner
+        if p.poll() is None:
+            p.kill()
+        p.wait()
         st["kill_miss"] = st.get("kill_miss", 0) + 1
         return False
-    q.kill_tree(p.pid)
+    os.kill(p.pid, signal.SIGKILL)               # the pass only: its runner is what we kill next, on purpose
     p.wait()
-    rcs = p.returncode
-    runners = q.run_procs(rig.run, "supervisor.runner")
-    for r in runners[:1]:
-        os.kill(r, signal.SIGKILL)
-    st["killed_pass"] = f"pass SIGKILLed in flight (rc {rcs}) with {len(runners)} runner(s); killed runner {runners[:1]}"
+    victim = runners[0]
+    try:
+        os.kill(victim, signal.SIGKILL)
+    except ProcessLookupError:
+        st["kill_miss"] = st.get("kill_miss", 0) + 1
+        return False
+    st["killed_pass"] = f"pass SIGKILLed in flight (rc {p.returncode}); runner {victim} SIGKILLed ({len(runners)} alive)"
     rig.run.event("chaos", st["killed_pass"])
-    return bool(runners)
+    return True
 
 
 def drv_kill_supervisor_and_runner(args):
@@ -422,6 +428,13 @@ def drv_corrupt_ledger(args):
                   fired=lambda rig, st: f"ledger corrupted at pass {st['at']}" if "bak" in st else None, after=after)
 
 
+# every NOT NULL column of drive_locks (lib/swarm/board/seats.py): key, holder, job, generation, launch_id, host, expires_at
+STALE_LOCK_COLUMNS = ("key", "holder", "job", "generation", "launch_id", "host", "expires_at")
+STALE_LOCK_SQL = ("INSERT INTO drive_locks (key, holder, job, generation, launch_id, host, expires_at) "
+                  "VALUES ('land:' || repeat('0', 64) || ':main', 'dead-attempt', 'qa-dead-job', 1, 'dead-launch', "
+                  "'dead-host', now() - interval '1 hour') ON CONFLICT DO NOTHING")
+
+
 def drv_stale_lock(args):
     """Plant a stale ledger lock file and (postgres) an expired drive_locks row of a dead holder, PROVE both exist,
     then require the job to end MET. Nothing planted = FAIL."""
@@ -439,9 +452,7 @@ def drv_stale_lock(args):
             if lock.exists():
                 planted.append(f"ledger lock {lock.name[:12]}")
         if rig.run.pg:
-            _pg_sql(rig, "INSERT INTO drive_locks (key, holder, generation, expires_at) "
-                         "VALUES ('land:' || repeat('0', 64) || ':main', 'dead-attempt', 1, now() - interval '1 hour') "
-                         "ON CONFLICT DO NOTHING")
+            _pg_sql(rig, STALE_LOCK_SQL)
             rows = _pg_sql(rig, "SELECT holder FROM drive_locks WHERE holder = 'dead-attempt'")
             if rows:
                 planted.append("expired drive_locks row of a dead holder")
@@ -478,20 +489,37 @@ def drv_reactivated_long_idle(args):
 
 # -- questions ---------------------------------------------------------------------------------
 
+def question_default_applied(text: str) -> bool:
+    """`swarm questions --all` shows the asked question WITH a 'default applied' event (spec 3.10)."""
+    return bool(re.search(r"(?i)left or right\?[\s\S]*default applied|default applied[\s\S]*left or right\?", text))
+
+
+def question_companions(log: list[dict], expires_s: float) -> list[str]:
+    """Real events, tied to the expiry: the ask command ran at t0; (a) some seat's `done` succeeded between t0 and
+    t0+expires (progress WHILE the question was open); (b) a lead session STARTED after t0+expires (woken by the default)."""
+    asks = [e for e in log if e.get("ev") == "cmd" and re.search(r"swarm\S* ask ", e.get("cmd", ""))]
+    if not asks:
+        return ["no `swarm ask` command was run by the lead"]
+    t0 = min(e["at"] for e in asks)
+    bad = []
+    if not any(e.get("ev") == "cmd" and re.search(r"swarm\S* done ", e.get("cmd", "")) and e.get("rc") == 0
+               and t0 <= e["at"] < t0 + expires_s for e in log):
+        bad.append("no other seat finished work (`done` rc 0) while the question was open")
+    if not any(e.get("ev") == "start" and e.get("role") == "lead" and e["at"] >= t0 + expires_s for e in log):
+        bad.append("no lead session started after the default expired: the asker was not woken")
+    return bad
+
+
 def drv_question_default_expires(args):
     def patch(s):
         s["lead"]["ask"] = {"text": "left or right?", "options": "left,right", "default": "left", "expires": "2m"}
 
     def after(rig, st):
-        bad = []
         qs = rig.run.swarm("questions", "--job", rig.job, "--all").stdout
-        if not re.search(r"(?i)left or right\?[\s\S]*default applied|default applied[\s\S]*left or right\?", qs):
-            bad.append("the board shows no 'default applied' event for the question (swarm questions --all)")
-        if len(_starts(rig, role="lead")) < 2 and rig.run.harness == "fake":
-            bad.append("the asking lead was not woken after the default applied")
-        if not any(e.get("ev") == "cmd" and "done" in e.get("cmd", "") and e.get("rc") == 0 for e in rig.harness_log()) \
-                and rig.run.harness == "fake":
-            bad.append("no other seat made progress (no successful `done`) while the question was open")
+        bad = [] if question_default_applied(qs) else \
+            ["the board shows no 'default applied' event for the question (swarm questions --all)"]
+        if rig.run.harness == "fake":
+            bad += question_companions(rig.harness_log(), 120.0)
         return bad
     return _drive(args, "question_default_expires", patch=patch, after=after,
                   fired=lambda rig, st: "question asked" if "left or right?" in
