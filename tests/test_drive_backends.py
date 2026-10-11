@@ -192,6 +192,21 @@ class PostgresStepSummary(unittest.TestCase):
                + _log(("test_drive_b.Other.test_y", "ok")))
         self.assertEqual(self.problems(log), [])
 
+    def test_a_module_that_builds_a_board_without_variants_is_a_problem(self):
+        with tempfile.TemporaryDirectory(dir=SANDBOX) as d:
+            tests = Path(d)
+            (tests / "test_drive_ok.py").write_text("x = 1\n")                                    # pure logic
+            (tests / "test_drive_cli.py").write_text("from test_hooks_cli import Env\n")          # CLI: SWARM_TEST_BACKEND
+            (tests / "test_drive_variants.py").write_text("h = MemoryHarness()\nadd_backend_variants(globals(), A)\n")
+            self.assertEqual(self.s.source_problems(tests), [])
+            for word in ("MemoryHarness", "FileHarness", "SqliteHarness", "PostgresHarness", "harness_factory",
+                         "drive_backends", "open_board"):
+                (tests / "test_drive_bad.py").write_text(f"h = {word}()\n")
+                self.assertEqual(self.s.source_problems(tests),
+                                 ["test_drive_bad: builds a board harness but never calls add_backend_variants"], word)
+            (tests / "test_drive_bad.py").write_text("h = MemoryHarness()\n# add_backend_variants( in a comment\n")
+            self.assertEqual(len(self.s.source_problems(tests)), 1)
+
     def test_main_exit_status_follows_the_problems(self):
         with tempfile.TemporaryDirectory(dir=SANDBOX) as d:
             tests = Path(d) / "tests"
