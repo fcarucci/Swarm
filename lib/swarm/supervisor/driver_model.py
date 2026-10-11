@@ -73,7 +73,7 @@ class HandoffView:
 @dataclass(frozen=True, slots=True)
 class VerdictView:
     """A receipted judge verdict (spec 3.6-3.7). `open` is the unmet-criteria count of a `not_met`;
-    `progress` is the judge's explicit `--progress yes|no` when given."""
+    `progress` is the judge's explicit progress flag, stored as a bool (None when not given)."""
     verdict: str
     scope: str
     artifact: str | None
@@ -81,7 +81,7 @@ class VerdictView:
     req: str | None
     generation: int
     open: int | None
-    progress: str | None
+    progress: bool | None
     reason: str
     next: str
     by: str | None
