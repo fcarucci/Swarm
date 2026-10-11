@@ -525,7 +525,7 @@ class SshPinning(MirrorCase):
                 m = Mirror(remote, cred, allowed_helpers=self.allowed)
                 ssh = m._cred_env["GIT_SSH_COMMAND"]
                 self.assertIn("BatchMode=yes", ssh)
-                self.assertIn(f"UserKnownHostsFile={shlex.quote(m._known_hosts)}", ssh)
+                self.assertIn(shlex.quote(f"UserKnownHostsFile={m._known_hosts}"), ssh)
                 self.assertIn(os.path.join("mirrors", "known_hosts"), m._known_hosts)
 
 
