@@ -2640,6 +2640,10 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `job J [--description D] [--goal G\|-]` | create a job record without activating it, or update its description. `--goal` sets or replaces an open job's goal (see [Merging jobs and moving agents](#merging-jobs-and-moving-agents)) |
 | `job merge FROM --into TO` | merge FROM into TO: move its active agents, append its goal, close it `completed` (outcome `merged into TO`) |
 | `move (--as NAME \| --key K) --to J` | move one live agent to another open job |
+| `halt --job J [--reason TEXT]` / `unhalt --job J` | a person stops a drive job on purpose (nothing progresses until it is unhalted or cancelled) / resumes it. A person's action: the job's requester session, or a confirmation on the terminal; an enrolled agent is refused |
+| `seat request --job J --seat NAME --role ROLE --brief PATH [--model M] [--workdir DIR]` / `seat list\|show --job J [--seat NAME]` / `seat release\|cancel --job J --seat NAME` | drive seats. The lead or a person requests a seat (the workdir must lie under the job's work roots and never under /tmp); release by the lead or a person (`--withdraw-artifact GROUP --reason TEXT` withdraws an artifact group); cancel is a person's |
+| `review --job J --artifact REF verified\|changes --report PATH --key K` | an enrolled reviewer of the job posts its structured review: `REVIEW <artifact> VERIFIED\|CHANGES <path>` |
+| `goal-ready --job J --candidate REF@SHA [--add-requirements PATH]...` | the lead or a person declares the goal ready for the judge; the requirement files it names are pinned (added, never replaced) |
 | `hook [--host claude\|codex] start\|turn\|done\|stop\|session-start` | hook entry point, reads hook JSON on stdin (called by `swarm-hook`, not by hand) |
 
 ## Security model and known limits

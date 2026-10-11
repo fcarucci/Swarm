@@ -79,19 +79,29 @@ def _board_verdict(board, cfg: dict, args) -> int:
     text = _verdict_text(args)
     if text is None:
         return 1
+    scope = _verdict_scope(args)
+    # a goal or ruling verdict is stored under its drive generation (review.verdict_data), from the ledger
+    generation = _drive_generation(cfg, args.job) if scope in ("goal", "ruling") else None
     try:
-        recorded = deliver_verdict(board, args.job, args.name, args.verdict, text[0], text[1],
-                                   getattr(args, "artifact", None), getattr(args, "details_text", None),
-                                   scope=_verdict_scope(args), open_count=getattr(args, "open_count", None),
-                                   progress=True if getattr(args, "progress", None) else None,
-                                   candidate=getattr(args, "candidate", None), req=getattr(args, "req", None))
+        message_id = deliver_verdict(board, args.job, args.name, args.verdict, text[0], text[1],
+                                     getattr(args, "artifact", None), getattr(args, "details_text", None),
+                                     scope=scope, generation=generation,
+                                     open_count=getattr(args, "open_count", None),
+                                     progress=True if getattr(args, "progress", None) else None,
+                                     candidate=getattr(args, "candidate", None), req=getattr(args, "req", None))
     except ValueError as exc:   # a name the board refuses (board.base.valid_name)
         print(f"verdict not recorded: {_cli().term_safe(exc)}", file=sys.stderr)
         return 1
-    if not recorded:
+    if not message_id:
         print(f"refused: {_cli().term_safe(args.name)} is not the judge of job {_cli().term_safe(args.job)}", file=sys.stderr)
         return 1
     from swarm.fastpath import changed
     changed(args.job)
     print(f"verdict {args.verdict} recorded for {args.job}, and posted on the board")
+    print(f"swarm-record: kind=verdict id={message_id} rev=1")
     return 0
+
+
+def _drive_generation(cfg: dict, job: str) -> int | None:
+    from swarm.drive_cli import drive_generation
+    return drive_generation(cfg, job)
