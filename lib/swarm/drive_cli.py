@@ -20,6 +20,7 @@ import sys
 
 from swarm import enrolment, person
 from swarm.supervisor import ledger
+from swarm.supervisor.drive_authz import requirements_digest  # noqa: F401  (the one copy: Task 5's)
 
 RECORD = "swarm-record: kind={kind} id={id} rev={rev}"
 REVIEW_OUTCOMES = ("verified", "changes")
@@ -339,8 +340,6 @@ def blob_id(data: bytes) -> str:
     return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
 
 
-def requirements_digest(pins: dict) -> str:
-    return hashlib.sha256("".join(f"{p}@{b}\n" for p, b in sorted(pins.items())).encode()).hexdigest()
 
 
 def cmd_goal_ready(board, cfg, args) -> int:
@@ -527,9 +526,67 @@ def cmd_drive(board, cfg, args) -> int:
     return DRIVE_COMMANDS[args.dcmd](board, cfg, args) or 0
 
 
-def register(sub, handlers: dict) -> None:
+def _with_record(fn):
+    """A post/done handler that ends, in a drive job, with the record line of the one message it posted
+    (`kind=done|post id=<message id>`; post only with --to): the board it runs on remembers what it posted."""
+    if getattr(fn, "_drive_record", False):
+        return fn
+
+    def handler(board, cfg, args):
+        posted = []
+
+        class Recording:
+            def __getattr__(self, name):
+                return getattr(board, name)
+
+            def post(self, *a, **k):
+                row = board.post(*a, **k)
+                posted.append(row)
+                return row
+        rc = fn(Recording(), cfg, args)
+        if not rc and len(posted) == 1 and (args.cmd == "done" or getattr(args, "to", None)):
+            drive_record(cfg, args.job, "done" if args.cmd == "done" else "post", posted[0].id)
+        return rc
+    handler._drive_record = True
+    return handler
+
+
+def _closed(cfg: dict, job: str) -> bool:
+    try:
+        from swarm.board import open_board
+        with open_board(cfg) as board:
+            js = board.job_status(job)
+        return js is not None and js.status != "active"
+    except Exception:
+        return False
+
+
+def _with_person_receipt(fn):
+    """`swarm deactivate` of a drive job: a person's (the requester's grant, or a confirmed tty) writes its
+    person receipt once the job is closed, and every closing deactivation ends with `kind=deactivate`."""
+    if getattr(fn, "_drive_record", False):
+        return fn
+
+    def handler(cfg, args):
+        led, how = deactivate_person(cfg, args)
+        rc = fn(cfg, args)
+        if not rc and _closed(cfg, args.job):
+            deactivate_receipt(cfg, args, led, how)
+            deactivate_record(cfg, args.job)
+        return rc
+    handler._drive_record = True
+    return handler
+
+
+def register(sub, handlers: dict, commands: dict | None = None) -> None:
     """Add the control parsers to the subparsers `sub` and their handlers to `handlers` (cli's
-    BOARD_COMMANDS). Called once from cli.py."""
+    BOARD_COMMANDS); wrap post and done (handlers) and deactivate (`commands`, cli's COMMANDS) so a drive
+    job's record line and person receipt follow them. Called from cli._parser (repeat calls wrap once)."""
+    for name in ("post", "done"):
+        if name in handlers:
+            handlers[name] = _with_record(handlers[name])
+    if commands is not None and "deactivate" in commands:
+        commands["deactivate"] = _with_person_receipt(commands["deactivate"])
     h = sub.add_parser("halt", help="a person stops a drive job on purpose (until unhalt or cancel)")
     h.add_argument("--job", required=True); h.add_argument("--reason")
     u = sub.add_parser("unhalt", help="a person resumes a halted drive job")

@@ -414,15 +414,15 @@ class VerdictLine(ControlCase):
     def test_S2_the_cli_queues_a_goal_verdict_with_its_ledger_generation(self):
         from swarm import spool
         judge = self.judge()
-        seen = {}
         args = cli._parser().parse_args(["verdict", "--job", JOB, "--as", judge, "--scope", "goal", "--candidate",
                                          "feat/x@abc1234", "--req", "d" * 64, "met", "ok"])
-        with mock.patch.object(spool, "spool_verdict", side_effect=lambda *a, **kw: seen.update(kw)), \
-                mock.patch("swarm.board.open_board", side_effect=OSError("board down")), \
+        with mock.patch("swarm.board.open_board", side_effect=OSError("board down")), \
                 contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
             cli._run_command(self.cfg, args)
         self.assertIn("queued", out.getvalue())
-        self.assertEqual(seen.get("generation"), ledger.load(self.bkey, JOB).generation)
+        spool.flush_spool(self.board, self.cfg)
+        gen = ledger.load(self.bkey, JOB).generation
+        self.assertIsNotNone(review.drive_verdict(self.board, JOB, gen, "goal", "feat/x@abc1234", "d" * 64))
 
     def test_S2_an_unreadable_ledger_warns_that_the_verdict_cannot_conclude(self):
         hits = list(self.home.rglob(ledger._name(self.bkey, JOB)))
@@ -870,7 +870,10 @@ class PersonReceipts(ControlCase):
 
     def test_requester_halt_unhalt_and_cancel_write_person_receipts(self):
         self.assertEqual(self.run_cmd("halt", "--job", JOB)[0], 0)
-        self.assertEqual(self.receipt("halt", ledger.load(self.bkey, JOB).ledger_rev).action_id, "requester:halt")
+        rev = ledger.load(self.bkey, JOB).ledger_rev
+        self.assertEqual(drive_cli.person_record_id("halt", rev), f"halt:{rev}")   # the id 8c reads
+        self.assertEqual(drive_cli.person_record_id("seat cancel", 7), "seat_cancel:7")
+        self.assertEqual(self.receipt("halt", rev).action_id, "requester:halt")
         self.assertEqual(self.run_cmd("unhalt", "--job", JOB)[0], 0)
         self.receipt("unhalt", ledger.load(self.bkey, JOB).ledger_rev)
         self.assertEqual(self.request_seat()[0], 0)
@@ -898,7 +901,8 @@ class PersonReceipts(ControlCase):
         with mock.patch("swarm.board.open_board", return_value=self.board), \
                 mock.patch.object(self.board, "close", lambda: None), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(cli.cmd_deactivate(self.cfg, args), 0)
+            cli._parser()   # registration wraps COMMANDS["deactivate"] (drive_cli.register)
+            self.assertEqual(cli.COMMANDS["deactivate"](self.cfg, args), 0)
         led = ledger.load(self.bkey, JOB)
         self.assertEqual(self.receipt("deactivate", led.generation).action_id, "tty:deactivate")
 
@@ -910,7 +914,8 @@ class PersonReceipts(ControlCase):
         with mock.patch("swarm.board.open_board", return_value=self.board), \
                 mock.patch.object(self.board, "close", lambda: None), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            cli.cmd_deactivate(self.cfg, args)
+            cli._parser()
+            cli.COMMANDS["deactivate"](self.cfg, args)
         led = ledger.load(self.bkey, JOB)
         self.assertIsNone(receipts.find(self.bkey, JOB, "person", drive_cli.person_record_id("deactivate", 1),
                                         rev=1, incarnation=led.incarnation, generation=led.generation, now=0))
