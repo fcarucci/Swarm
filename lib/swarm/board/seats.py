@@ -304,27 +304,38 @@ class SqlSeats:
             if self._exec(c, "SELECT 1 FROM jobs WHERE job = ?", (job,)).fetchone() is None:
                 raise ValueError(f"{job} is not a job")
             now = self._seat_time(self.now())
-            row = self._exec(c, f"SELECT {SEAT_COLS} FROM seats WHERE job = ? AND generation = ? AND seat = ?",
-                             (job, generation, seat)).fetchone()
+            where = "WHERE job = ? AND generation = ? AND seat = ?"
+            row = self._exec(c, f"SELECT {SEAT_COLS} FROM seats {where}", (job, generation, seat)).fetchone()
             if row is None:
+                # ON CONFLICT: a racing first request for the same seat inserted it; use that row
                 row = self._exec(
                     c, "INSERT INTO seats (job, generation, seat, role, title, harness, model, workdir, brief_path, "
                     "task_ref, complexity, requested_by, requested_at, state, revision, launches, updated_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'requested', 1, 0, ?) "
-                    f"RETURNING {SEAT_COLS}",
+                    f"ON CONFLICT (job, generation, seat) DO NOTHING RETURNING {SEAT_COLS}",
                     (job, generation, seat, role, title, harness, model, workdir, brief_path, task_ref,
                      complexity, requested_by, now, now)).fetchone()
-                return self._seat_obj(Seat, SEAT_COLS, row)
+                if row is not None:
+                    return self._seat_obj(Seat, SEAT_COLS, row)
+                row = self._exec(c, f"SELECT {SEAT_COLS} FROM seats {where}", (job, generation, seat)).fetchone()
             current = self._seat_obj(Seat, SEAT_COLS, row)
             if all(getattr(current, k) == v for k, v in fields.items()):
                 return current
             if current.state != "requested":
                 raise ValueError(f"seat is {current.state}: release it first")
+            # The row must still be the one we read and still requested: a claim may have committed between
+            # the read and this write (READ COMMITTED). Then nothing is written and the request is refused.
             row = self._exec(
                 c, "UPDATE seats SET role = ?, harness = ?, model = ?, workdir = ?, brief_path = ?, title = ?, "
                 "task_ref = ?, complexity = ?, requested_by = ?, revision = revision + 1, updated_at = ? "
-                f"WHERE id = ? RETURNING {SEAT_COLS}",
-                (*fields.values(), now, current.id)).fetchone()
+                f"WHERE id = ? AND revision = ? AND state = 'requested' RETURNING {SEAT_COLS}",
+                (*fields.values(), now, current.id, current.revision)).fetchone()
+            if row is None:
+                moved = self._seat_obj(Seat, SEAT_COLS, self._exec(
+                    c, f"SELECT {SEAT_COLS} FROM seats WHERE id = ?", (current.id,)).fetchone())
+                if moved.state != "requested":
+                    raise ValueError(f"seat is {moved.state}: release it first")
+                raise ValueError("seat changed while it was being requested: request it again")
             return self._seat_obj(Seat, SEAT_COLS, row)
 
     def seats(self, job, generation=None, include_closed=True):

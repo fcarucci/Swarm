@@ -2331,6 +2331,21 @@ class DriveHelpers:
     def wt(root):
         return "wt:" + hashlib.sha256(root.encode()).hexdigest()
 
+    def interleave_before(self, needle, action):
+        """SQL boards only: run `action` (on this board) just before the first statement containing
+        `needle`, as if another writer had committed in between. Returns the list of the calls made."""
+        if not hasattr(self.b, "_exec"):
+            self.skipTest("the interleaving needs a SQL board")
+        real, fired = self.b._exec, []
+
+        def _exec(c, sql, args=()):
+            if needle in sql and not fired:
+                fired.append(True)
+                action()
+            return real(c, sql, args)
+        self.b._exec = _exec
+        return fired
+
 
 class DriveClaims(DriveHelpers):
     """Schema 25 seats, drive locks and the atomic launch claim (a mixin: each backend's contract
@@ -2384,6 +2399,27 @@ class DriveClaims(DriveHelpers):
         one = self.seat("J", "a")
         two = self.seat("J", "a")
         self.assertEqual((one.id, one.revision), (two.id, two.revision))
+
+    def test_a_request_racing_a_claim_does_not_rewrite_the_running_seat(self):
+        self.goal_job()
+        s = self.seat("J", "a", model="sonnet", workdir="/w/a")
+        fired = self.interleave_before("UPDATE seats SET role", lambda: self.claim(s, launch_id="LR"))
+        with self.assertRaisesRegex(ValueError, "release it first|changed while"):
+            self.seat("J", "a", model="opus", workdir="/w/evil")
+        self.assertEqual(fired, [True])
+        # the racing request raised, so its whole transaction (the claim included) rolled back; what must
+        # not happen is the request's own write landing on the seat the claim had already taken
+        seat = self.b.seat("J", 1, "a")
+        self.assertEqual((seat.model, seat.workdir, seat.revision), ("sonnet", "/w/a", 1))
+
+    def test_identical_first_requests_racing_return_one_row(self):
+        self.goal_job()
+        first = []
+        fired = self.interleave_before("INSERT INTO seats", lambda: first.append(self.seat("J", "a")))
+        second = self.seat("J", "a")
+        self.assertEqual(fired, [True])
+        self.assertEqual((second.id, second.revision), (first[0].id, 1))
+        self.assertEqual(len(self.b.seats("J")), 1)
 
     def test_changed_request_while_requested_bumps_revision_and_otherwise_refuses(self):
         self.goal_job()
