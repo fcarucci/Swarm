@@ -114,7 +114,8 @@ def _validate(rec: Record) -> Record:
     return rec
 
 
-OWNER_KEYS = ("roots", "remotes", "credentials", "requirements", "recipe", "goal", "brief")
+OWNER_KEYS = ("roots", "remotes", "credentials", "requirements", "recipe", "review_role", "review_gates",
+              "goal", "brief")
 
 
 def _validate_owner(o) -> None:
@@ -138,6 +139,8 @@ def _validate_owner(o) -> None:
             _text(k, f"owner {key} key", MAX_CWD)
             _text(v, f"owner {key} value", 4096)
     _text(o["recipe"], "owner recipe", 64)
+    _text(o["review_role"], "owner review_role", 64)     # "none" for a recipe without a review stage
+    _text(o["review_gates"], "owner review_gates", 64)   # "haiku-strict" or "standard"
     _text(o["goal"], "owner goal", GOAL_MAX)
     _text(o["brief"], "owner brief", MAX_CWD)
     if not os.path.isabs(o["brief"]):
@@ -291,16 +294,21 @@ def prune(max_age: float, *, now: float | None = None, keep=None) -> int:
 def write_job_owner(board_key: str, *, job: str, harness: str, session_id: str | None, cwd: str, now=None,
                     roots: list | None = None, remotes: dict | None = None, credentials: dict | None = None,
                     requirements: dict | None = None, recipe: str | None = None, goal: str | None = None,
-                    brief: str | None = None):
+                    brief: str | None = None, review_role: str | None = None, review_gates: str | None = None):
     """Creation proof, independent of attached coordinators; written only for new jobs. A drive job
     also records its work roots, pinned remotes, credential sources, pinned requirements and recipe
     ([RR1] step 1, [G2], [F10]): roots default to [cwd] and the rest to empty, so a plain activation
     writes the same record it always did plus those keys."""
     owner = None
     if any(v is not None for v in (roots, remotes, credentials, requirements, recipe, goal, brief)):
+        kind = recipe or "coding"
         owner = {"roots": [cwd] if roots is None else list(roots), "remotes": dict(remotes or {}),
                  "credentials": dict(credentials or {}), "requirements": dict(requirements or {}),
-                 "recipe": recipe or "coding", "goal": goal or "", "brief": brief or os.path.join(cwd, "LEAD.md")}
+                 "recipe": kind, "goal": goal or "", "brief": brief or os.path.join(cwd, "LEAD.md"),
+                 # the recipe's review stage (spec 3.6, [P1]): the coding recipe reviews with "reviewer";
+                 # a recipe without one says "none"
+                 "review_role": review_role or ("reviewer" if kind == "coding" else "none"),
+                 "review_gates": review_gates or "standard"}
     rec = Record("owner", board_key, job, None, harness, session_id, cwd,
                  time.time() if now is None else float(now), owner=owner)
     return _store(rec, f"owner-{_digest('owner', board_key, job)}.json")
