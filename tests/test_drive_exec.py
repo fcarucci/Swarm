@@ -1394,6 +1394,21 @@ class FixRoundTests(ExecEnv):
             self.assertEqual(driver_exec.sweep_unlaunched_seats(self.b, "J"), 0)
         moved.assert_not_called()
 
+    def test_an_unreadable_ledger_at_the_recheck_cancels_the_launch_and_never_crashes(self):
+        self.seat()
+        real = ledger.load
+        calls = []
+
+        def bad_second(bk, job):
+            calls.append(job)
+            if len(calls) >= 1:
+                raise ledger.LedgerBadError("bad", "x.json")
+            return real(bk, job)
+        with mock.patch.object(ledger, "load", side_effect=bad_second):
+            self.assertIsNone(self.go(self.act()))
+        self.assertEqual(self.launched, [])
+        self.assertEqual(self.b.drive_locks(), [])
+
     # -- lows
     def test_a_kill_switch_cancel_does_not_count_toward_max_attempts(self):
         self.cfg["drive"] = {"max_attempts": 1}

@@ -518,9 +518,13 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
             board.set_restart_agent(row.id, spec.session_id)
         runner.write_run(run)
         # 4. recheck the kill switches, then start
-        fresh = ledger.load(led.board_key, led.job)
-        off = (command._switched_off_now(cfg, board, led.job)
-               or ("the job is halted" if fresh is not None and fresh.halted else None))
+        try:
+            fresh = ledger.load(led.board_key, led.job)
+            held = "the job is halted" if fresh is not None and fresh.halted else None
+        except ledger.LedgerBadError as exc:      # an unreadable ledger holds the job: nothing starts
+            log(f"job {led.job}: ledger unreadable at launch: {exc}")
+            held = "the ledger is unreadable"
+        off = command._switched_off_now(cfg, board, led.job) or held
         if off:
             board.finish_restart(row.id, "cancelled")
             _discard(run, marker=marker)
