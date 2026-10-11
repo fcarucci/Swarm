@@ -68,7 +68,7 @@ marker/spool directory under `~/.local` are now covered by both bootstrap's tigh
 ## Requirements
 
 - Python 3.11 or newer (the config is read with `tomllib`), with `venv` and `pip`. The plugin
-  keeps its own venv (`~/.local/share/swarm/venv`) and installs `requirements.txt` (`zstandard`,
+  keeps its own venv (`~/.local/share/swarm/venv-<stamp>`, one per requirements stamp: see below) and installs `requirements.txt` (`zstandard`,
   for compressed Codex rollouts) into it, plus `requirements-postgres.txt` (`psycopg` with its
   binary wheel) only for a Postgres board: when the config sets `backend = "postgres"` or has a
   `[database]` section, or the venv already has psycopg. Both files pin exact versions with
@@ -217,7 +217,7 @@ The installer runs marketplace/plugin setup, bootstrap, migrate, and doctor. It 
 `%USERPROFILE%\.local\bin` to your user PATH, where `swarm.cmd` lives.
 
 **Layout.** The same as on Linux, under `%USERPROFILE%` (what `~` means): the venv at
-`.local\share\swarm\venv` (interpreter `Scripts\python.exe`; `SWARM_VENV` overrides it), host-only
+`.local\share\swarm\venv-<stamp>` (interpreter `Scripts\python.exe`; `SWARM_VENV` overrides it), host-only
 files in `.local\share\swarm\host`, markers and the spool under `.local\state\swarm`, the
 config at `.config\swarm\config.toml` (`SWARM_CONFIG`), the default file/SQLite board under
 `.local\share\swarm-board`. `%APPDATA%`/`%LOCALAPPDATA%` are not used: one layout on every
@@ -225,7 +225,7 @@ platform keeps the sandbox, doctor and test model the same. Put these on a local
 your own profile, not a network share.
 
 **Launchers.** `bin\swarm.cmd` (found by `py -3`, else `python`) runs `lib\swarm\winlaunch.py`,
-which builds the venv under a lock directory (`<venv>.building`) when `requirements.txt` changed,
+which builds the venv under a lock directory (`<venv>.building`, stale-checked like the Linux one but by age only) when `requirements.txt` changed,
 then runs the swarm package from the plugin. `swarm bootstrap` writes `~\.local\bin\swarm.cmd`
 (on your user PATH after `install.ps1`), which runs the installed plugin and, when that plugin
 folder has been replaced, falls back to the newest installed one. Agents and the orchestrator
@@ -376,8 +376,17 @@ In Codex that hook runs only once you have trusted the plugin's hooks in `/hooks
 setup happens in the first session started after that.
 Bootstrap is idempotent. Its steps:
 
-1. **venv**: `~/.local/share/swarm/venv` (`$SWARM_VENV` overrides it), outside the plugin so it
-   survives updates; `bin/swarm` rebuilds it only when `requirements.txt` changes.
+1. **venv**: `~/.local/share/swarm/venv-<stamp>` (`$SWARM_VENV` names one venv explicitly and is
+   used as is), outside the plugin so it survives updates. `<stamp>` is the `cksum` of
+   `requirements.txt` and `requirements-postgres.txt`, so plugin versions with different
+   requirements each keep their own venv instead of rebuilding one shared venv in turn; an older
+   install's `venv/` whose stamp matches is still used (no rebuild on upgrade). `bin/swarm` builds a
+   venv only when its stamp's directory is missing or incomplete. The build lock is the directory
+   `<venv>.building`, holding its owner's pid and host; a lock whose owner is dead (same host) or
+   that is older than `SWARM_LOCK_STALE_MINUTES` (default 20) is a killed build: it is removed
+   and the build retried. A live, young lock is waited for (up to 300 s). Venvs of stamps no
+   plugin uses any more are not removed automatically: delete `~/.local/share/swarm/venv-*`
+   directories you no longer need.
 2. **launcher**: `~/.local/bin/swarm`, a small script that runs the plugin bootstrap last ran
    from, so one `swarm` command works from a terminal, Claude Code and Codex. It is repointed
    whenever its target is another tree that isn't strictly newer, including one with the same

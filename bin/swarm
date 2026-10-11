@@ -9,7 +9,20 @@ if [ "${OS:-}" = "Windows_NT" ]; then   # Git Bash on Windows: the Python entry 
   echo "swarm: Python 3.11 or newer was not found on PATH" >&2; exit 1
 fi
 D="$(cd "$(dirname "$0")/.." && pwd)"
-V="${SWARM_VENV:-$HOME/.local/share/swarm/venv}"
+REQ="$(cat "$D/requirements.txt" "$D/requirements-postgres.txt" | cksum | cut -d' ' -f1)"
+# One venv per requirements stamp (venv-<stamp> beside the old one), so two plugin versions with
+# different requirements never rebuild one shared venv in turn (each rebuild is minutes of pip, and
+# a killed one left its lock behind). $SWARM_VENV names one venv explicitly and is used as is. An old
+# install's venv/ whose stamp matches is still used, so the upgrade rebuilds nothing.
+if [ -n "${SWARM_VENV:-}" ]; then
+  V="$SWARM_VENV"
+else
+  VB="$HOME/.local/share/swarm/venv"
+  V="$VB-$REQ"
+  if [ ! -x "$V/bin/python" ] && [ -x "$VB/bin/python" ] && [ "$(cat "$VB/.swarm-requirements" 2>/dev/null)" = "$REQ" ]; then
+    V="$VB"
+  fi
+fi
 # What this launcher changes in the environment (below), as it was before: `swarm bg` gives the
 # command it wraps exactly the environment it would have had unwrapped (swarm.bg.caller_env).
 # _SWARM_PRE_<VAR> is exported only when VAR was set; _SWARM_LAUNCHER says the record is there.
@@ -57,7 +70,6 @@ else
     python3 -I "$D/lib/swarm/pgwant.py" 2>/dev/null && WANT_PG=1
   fi
 fi
-REQ="$(cat "$D/requirements.txt" "$D/requirements-postgres.txt" | cksum | cut -d' ' -f1)"
 # Needs (re)install: no interpreter, another requirements stamp, or a required package missing
 # from the venv (a glob, no Python start: an unmatched glob leaves the literal path, which fails -f).
 stale() {
@@ -69,12 +81,44 @@ stale() {
 }
 if stale; then
   mkdir -p "$(dirname "$V")"
+  # The build lock is the directory $V.building, holding "<pid> <host>" of its owner. A lock whose
+  # owner is gone (same host, pid dead) or that is older than SWARM_LOCK_STALE_MINUTES (default 20: a
+  # killed build, or one on another host) is removed and the lock taken again: a killed rebuild used
+  # to hang every swarm command until the 300 s wait ran out.
+  LOCK="$V.building"
+  STALE_MIN="${SWARM_LOCK_STALE_MINUTES:-20}"
+  HOST="$(hostname 2>/dev/null || uname -n)"
+  lock_stale() {
+    [ -d "$LOCK" ] || return 1
+    read -r _pid _host < "$LOCK/owner" 2>/dev/null || { _pid=""; _host=""; }
+    case "$_pid" in
+      ""|*[!0-9]*) ;;      # no owner record yet (just created, or killed before writing it): age decides
+      *) [ "$_host" = "$HOST" ] && ! kill -0 "$_pid" 2>/dev/null && return 0;;
+    esac
+    [ -n "$(find "$LOCK" -prune -mmin "+$STALE_MIN" 2>/dev/null)" ]
+  }
+  lock_release() { [ "$(cat "$LOCK/owner" 2>/dev/null)" = "$$ $HOST" ] && rm -rf "$LOCK"; }
   i=0
-  until mkdir "$V.building" 2>/dev/null; do
-    i=$((i + 1)); [ "$i" -gt 300 ] && { echo "swarm: $V.building is stuck; remove it and retry" >&2; exit 1; }
+  while :; do
+    if mkdir "$LOCK" 2>/dev/null; then
+      echo "$$ $HOST" > "$LOCK/owner" 2>/dev/null
+      break
+    fi
+    if lock_stale; then
+      # rename first: of several waiters seeing the same stale lock only one wins the rename
+      GONE="$LOCK.stale.$$"
+      if mv "$LOCK" "$GONE" 2>/dev/null; then
+        echo "swarm: removed a stale build lock ($LOCK)" >&2
+        rm -rf "$GONE"
+        continue
+      fi
+    fi
+    i=$((i + 1)); [ "$i" -gt 300 ] && { echo "swarm: $LOCK is held (not stale: its owner is running and it is younger than $STALE_MIN minutes); remove it if you are sure no build is running, then retry" >&2; exit 1; }
     sleep 1
   done
-  trap 'rmdir "$V.building" 2>/dev/null' EXIT INT TERM
+  trap lock_release EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   if stale; then
     if [ ! -x "$V/bin/python" ] && ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))' 2>/dev/null; then
       echo "swarm: Python 3.11 or newer is needed to set up $V (python3 on PATH is older or missing)" >&2
@@ -99,6 +143,6 @@ if stale; then
            echo "swarm: Use Python 3.11-3.14 on a supported platform, or install the requirements files by hand." >&2
            exit 1; }
   fi
-  rmdir "$V.building" 2>/dev/null; trap - EXIT INT TERM
+  lock_release; trap - EXIT INT TERM
 fi
 PYTHONPATH="$D/lib${PYTHONPATH:+:$PYTHONPATH}" exec "$V/bin/python" -m swarm.cli "$@"
