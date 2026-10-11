@@ -226,7 +226,7 @@ def _cancel(board, cfg: dict, led, now: dt.datetime, m) -> bool:
     if cancel is None:
         log.warning("job %s: cancelled by its requester, but driver_life.cancel_job is not there yet", led.job)
         return False
-    return bool(cancel(board, cfg, led, now))
+    return bool(cancel(board, cfg, led, "requester session", now, reason="deactivate by the requester session"))
 
 
 def _check_tamper(board, cfg, state, led, js, owner, data, now, m, say) -> str | None:

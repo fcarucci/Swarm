@@ -420,10 +420,10 @@ class TamperTests(PassCase):
         self.requester_deactivate_receipt()
         self.board.close_job("J", "cancelled", "by the requester", forced=True)
         cancelled = []
-        with mock.patch.object(life, "cancel_job", lambda board, cfg, led, now: cancelled.append(led.job) or True,
+        with mock.patch.object(life, "cancel_job", lambda board, cfg, led, actor, now, **kw: cancelled.append((led.job, actor)) or True,
                                create=True):
             self.drive()
-        self.assertEqual(cancelled, ["J"])                                    # 8b's cancel_job does the work
+        self.assertEqual(cancelled, [("J", "requester session")])                                    # 8b's cancel_job does the work
         self.assertEqual(self.board.job_status("J").status, "cancelled")      # not reopened
         self.assertFalse(self.has_post("DRIVER-TAMPER"))
         self.assertIsNone(self.load().halted)
