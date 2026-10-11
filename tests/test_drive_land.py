@@ -65,7 +65,7 @@ class LandCase(unittest.TestCase):
         return path
 
     def commit(self, path, fname, text, msg="change"):
-        with open(os.path.join(path, fname), "w") as fh:
+        with open(os.path.join(path, fname), "w", newline="\n") as fh:      # LF on every platform
             fh.write(text)
         git(path, "add", fname)
         git(path, "commit", "-q", "-m", msg)
@@ -1031,6 +1031,7 @@ class SeatName(unittest.TestCase):
 
 
 class Pins(unittest.TestCase):
+    @support.posix_only("drive mode is refused on Windows: pins are POSIX paths")
     def test_credential_pins(self):
         self.assertEqual(credential_from_pin(None), {"kind": "none"})
         self.assertEqual(credential_from_pin("ssh-key:/k/id", config_dir="/c"), {"kind": "ssh-key", "path": "/k/id"})
@@ -1043,6 +1044,7 @@ class Pins(unittest.TestCase):
         with self.assertRaises(LandRefused):
             credential_from_pin("helper:/h/gh auth git-credential", config_dir="")
 
+    @support.posix_only("drive mode is refused on Windows: pins are POSIX paths")
     def test_config_dir_is_pinned_per_destination_and_wins_over_the_default(self):
         owner = {"remotes": {"a": "https://github.com/o/a", "b": "https://github.com/o/b"},
                  "credentials": {"a": "helper:/h/gh auth git-credential", "b": "helper:/h/gh auth git-credential"},
@@ -1052,12 +1054,14 @@ class Pins(unittest.TestCase):
         with self.assertRaises(LandRefused):
             destinations_from_owner(owner)
 
+    @support.posix_only("drive mode is refused on Windows: pins are POSIX paths")
     def test_bad_pins_refused(self):
         for bad in ("helper:gh auth git-credential", "helper:", "ssh-key:rel", "ssh-agent:", "ssh-agent",
                     "ssh-key:/a b", "other:/x", "helper"):
             with self.subTest(bad=bad), self.assertRaises(LandRefused):
-                credential_from_pin(bad)
+                credential_from_pin(bad, config_dir="/cfg")
 
+    @support.posix_only("drive mode is refused on Windows: pins are POSIX paths")
     def test_destinations_sorted_deduplicated_and_pinned(self):
         owner = {"remotes": {"origin": "https://github.com/o/r.git", "mirror": "https://GITHUB.com/o/r",
                              "z": "git@host.test:o/z.git"},
