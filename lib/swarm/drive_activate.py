@@ -302,15 +302,30 @@ def credential_pin(spec: str) -> str:
     raise DriveError(f"credential {spec!r}: use helper:<absolute path>, ssh-key:<absolute path> or ssh-agent")
 
 
-def default_credential(url: str) -> str | None:
-    """The credential a remote gets when none is named: gh for https, the agent for ssh, none
-    for a local path. A missing gh is an error that names the flag."""
+_SCP_REMOTE = re.compile(r"(?:[^@/\\\s:]+@)?[^@/\\\s:]{2,}:")   # [user@]host:path (not a C:\ path)
+
+
+def remote_kind(url: str) -> str:
+    """local (file://, a plain path, git://), https, or ssh (ssh:// or scp-style [user@]host:path)."""
     if re.match(r"https?://", url):
+        return "https"
+    if re.match(r"ssh://", url):
+        return "ssh"
+    if "://" in url:
+        return "local"
+    return "ssh" if _SCP_REMOTE.match(url) else "local"
+
+
+def default_credential(url: str) -> str | None:
+    """The credential a remote gets when none is named: gh for https, the ssh agent for ssh, none for a
+    local remote (file://, a plain path), which needs neither. A missing gh is an error that names the flag."""
+    kind = remote_kind(url)
+    if kind == "https":
         gh = shutil.which("gh")
         if gh is None or not os.path.isabs(gh):
             raise DriveError("no gh found for https remotes: pass --credential NAME=helper:/abs/path/to/gh")
         return credential_pin(f"helper:{os.path.abspath(gh)} auth git-credential")
-    if "://" in url or re.match(r"[^/@]+@[^/]+:", url):
+    if kind == "ssh":
         return credential_pin("ssh-agent")
     return None
 
