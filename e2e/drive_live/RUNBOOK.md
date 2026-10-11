@@ -23,7 +23,7 @@ Everything lives under ONE run directory `~/work/swarm-autonomy/qa/runs/<stamp>-
 |---|---|---|
 | HOME of every process | `<run>/home` | config, markers, spool, supervisor private dir, ledger and receipts are all under it; `~/.local/share/swarm` is unreachable |
 | board | throwaway Postgres 16 in `<run>/pg` (127.0.0.1, own random port, trust auth, TCP only) or `--backend sqlite\|file` | `SWARM_CONFIG` is the run's own file; the harness refuses to run if it equals the shared config; only the harness's own `pg_ctl -D <run>/pg/data` starts and stops the cluster (also via `atexit`); no other connection is ever touched |
-| git | `<run>/forge/{origin,backup}.git`, file:// URLs only | fast-forward-only `main`, no merge commits (an `update` hook), branch deletion allowed |
+| git | `<run>/hub/{origin,backup}.git`, file:// URLs only | fast-forward-only `main`, no merge commits (an `update` hook), branch deletion allowed |
 | work trees | `<run>/work/...` | `[supervise] allowed_workdirs` is the run dir only |
 | shims | `<run>/bin/{swarm,claude,codex}` | fake mode: `claude`/`codex` are `fake_harness.py`; real mode: the real binaries on the box PATH |
 
@@ -63,7 +63,7 @@ mid-run, plan Task 19 addition), `chaos --today-only` (only the no-driver layers
 ### Fake vs real harness
 
 * `--harness fake` (default): `claude`/`codex` are scripted by `scripts/*.json`; real hooks (`bin/swarm-hook`), real `swarm`
-  CLI, real git against the fake forge; cost is the script's `cost_usd` per session. $0, minutes.
+  CLI, real git against the fake hub; cost is the script's `cost_usd` per session. $0, minutes.
 * `--harness real` (the Task 19 gate): the real `claude` (and a real Codex engineer, plan [F18], on a drive-ready host).
   The run's HOME is isolated, so copy auth in first: `mkdir -p <run>/home/.claude && cp ~/.claude/.credentials.json <run>/home/.claude/`
   (or export `ANTHROPIC_API_KEY`, which the harness passes through), and `claude_plugin_dir` points at the checkout under
@@ -80,7 +80,7 @@ expect to touch, at most:
    `drive_cli.py` and the ask-answer skill).
 2. `rig.py` `check_*` (restart rows vs launches, ledger fields) if the landed ledger or restart schema differs.
 3. Known 6a gap found while building this: `drive_activate.default_credential` treats `file://` as ssh and demands
-   `SSH_AUTH_SOCK`. Until fixed, run with `SWARM_QA_REMOTE_STYLE=path` (pins plain paths; the forge URLs stay file://).
+   `SSH_AUTH_SOCK`. Until fixed, run with `SWARM_QA_REMOTE_STYLE=path` (pins plain paths; the hub URLs stay file://).
 4. `activate` refuses unless a supervisor pass ran in the last 2 minutes; the rig runs one first.
 
 ## Scenarios and what they assert
@@ -88,7 +88,7 @@ expect to touch, at most:
 Live (`met`, `unreachable`), each: status/verdict as expected (completed+met; failed+unreachable with details), never
 `closed_by=auto`, never forced; ledger charged <= budget; no duplicate `(action_id, attempt)`; zero coordinator turns
 (no `orphan-coordinator:` restart row, no orchestrator-role agent); every agent of the job has a supervisor restart row and is
-ended; the harness log shows one session per launch; for MET: forge `main` linear, both destinations equal, something landed.
+ended; the harness log shows one session per launch; for MET: hub `main` linear, both destinations equal, something landed.
 
 Chaos (`e2e/drive_live.sh chaos --list`). Each has a `<name>/today` row (needs no driver; runs now) and a driven row:
 
@@ -131,7 +131,7 @@ Per run, `<run>/logs/evidence/` (written by every live and chaos run):
 * `supervise-tail.log` (last 400 lines of the passes), `timeline.jsonl` (every command, pass, state change, injected fault
   with elapsed seconds), `harness.jsonl` (every session: role, seat, model, harness, budget, cost), `costs.json`
   (sessions, launches, passes, ledger cost vs harness cost, by role, wall seconds)
-* `<run>/logs/supervise.log` (all passes in full), `<run>/pg/pg.log`, the forge audit (`forge.py audit --forge <run>/forge --since <initial>`)
+* `<run>/logs/supervise.log` (all passes in full), `<run>/pg/pg.log`, the hub audit (`hub.py audit --hub <run>/hub --since <initial>`)
 * `~/work/swarm-autonomy/qa/runs/last-report.txt` (the PASS/FAIL/SKIP table of the last invocation)
 
 For the judge's evidence file `docs/superpowers/evidence/2026-10-drive-live.md` (plan Task 19): the head SHA the run used
@@ -147,6 +147,6 @@ stopped. Verify nothing is left: `pgrep -af 'swarm-autonomy/qa/runs'` prints not
 ## Smoke tests that run today
 
 `cd tests && /var/tmp/test-slots/test-slot -- python3 -B -m unittest test_drive_qa_harness` (20 tests, ~5 s; with the QA venv
-python the no-driver chaos layers also run): probes and `Pending` text, run-dir guards, fake forge (exact-SHA CI, fast-forward
+python the no-driver chaos layers also run): probes and `Pending` text, run-dir guards, fake hub (exact-SHA CI, fast-forward
 only, no merge commits, audit), the scripted engineer's change passes `make test` (and the impossible one cannot), and the
-corrupt-ledger / stale-lock / forged-receipt layers. Mutants checked: forge fast-forward refusal, exact-SHA CI, audit linearity.
+corrupt-ledger / stale-lock / forged-receipt layers. Mutants checked: hub fast-forward refusal, exact-SHA CI, audit linearity.

@@ -18,7 +18,7 @@ PENDING_EXIT = 3
 
 def preflight(args) -> list[tuple[str, str, str]]:
     """What runs on any checkout: the throwaway board comes up, the isolated config does not reach the
-    shared board, the forge refuses non-fast-forward, the scratch repo's CI runs on an exact SHA, the
+    shared board, the hub refuses non-fast-forward, the scratch repo's CI runs on an exact SHA, the
     harness shims exist. No driver needed."""
     out = []
     t = time.monotonic()
@@ -36,17 +36,17 @@ def preflight(args) -> list[tuple[str, str, str]]:
             out.append(("preflight/isolation", q.Outcome.FAIL if same else q.Outcome.PASS,
                         f"HOME={r.home} config={r.config}"))
             sha = rig.initial
-            ci = subprocess.run([sys.executable, str(Path(__file__).parent / "forge.py"), "ci-check", "--forge",
-                                 str(rig.forge), "--run", sha], capture_output=True, text=True)
-            out.append(("preflight/forge-ci", q.Outcome.PASS if ci.returncode == 0 else q.Outcome.FAIL,
+            ci = subprocess.run([sys.executable, str(Path(__file__).parent / "hub.py"), "ci-check", "--hub",
+                                 str(rig.hub), "--run", sha], capture_output=True, text=True)
+            out.append(("preflight/hub-ci", q.Outcome.PASS if ci.returncode == 0 else q.Outcome.FAIL,
                         f"toy `make test` on {sha[:8]}: {ci.stdout.strip()}"))
-            subprocess.run([sys.executable, str(Path(__file__).parent / "forge.py"), "advance", "--forge",
-                            str(rig.forge)], capture_output=True, check=True)
+            subprocess.run([sys.executable, str(Path(__file__).parent / "hub.py"), "advance", "--hub",
+                            str(rig.hub)], capture_output=True, check=True)
             subprocess.run(["git", "-C", str(rig.workdir), "-c", "user.email=q@q", "-c", "user.name=q",
                             "commit", "-q", "--allow-empty", "-m", "diverged"], capture_output=True)
             ff = subprocess.run(["git", "-C", str(rig.workdir), "push", "-f", rig.urls["origin"], "HEAD:main"],
                                 capture_output=True, text=True)
-            out.append(("preflight/forge-refuses-rewind", q.Outcome.PASS if ff.returncode else q.Outcome.FAIL,
+            out.append(("preflight/hub-refuses-rewind", q.Outcome.PASS if ff.returncode else q.Outcome.FAIL,
                         "a non-fast-forward push to main is refused"))
             if args.harness == "fake":
                 ok = all((r.bin / n).exists() for n in ("swarm", "claude", "codex"))

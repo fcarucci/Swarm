@@ -1,6 +1,6 @@
 """The drive rig: one isolated run with a goal job on it, driven by supervisor passes and nothing else.
 
-`Rig.prepare()` works on any checkout (throwaway board, fake forge, scratch repo, harness shims, team config).
+`Rig.prepare()` works on any checkout (throwaway board, fake hub, scratch repo, harness shims, team config).
 `Rig.activate()` needs 6a and `Rig.drive()` needs 8a/8b/8c/11b: without them they raise qa_lib.Pending.
 Zero coordinator turns by construction: no Claude Code session is started and nothing but
 `swarm activate` (once) and `swarm supervise` (the timer's command) is ever run against the job.
@@ -20,7 +20,7 @@ import qa_lib as q
 HERE = Path(__file__).resolve().parent
 TEMPLATE = HERE / "toy-repo-template"
 SCRIPTS = HERE / "scripts"
-FORGE_PY = HERE / "forge.py"
+HUB_PY = HERE / "hub.py"
 SHA40 = "0123456789abcdef"
 
 
@@ -32,7 +32,7 @@ class Rig:
         self.script_name = script
         self.job = q.check_job_name(job or f"qa-{name}")
         self.budget_usd = budget_usd
-        self.forge = self.run.forge_dir
+        self.hub = self.run.hub_dir
         self.initial = ""
         self.urls: dict[str, str] = {}
         self.workdir = self.run.work / "toy"
@@ -55,7 +55,7 @@ class Rig:
     # -- setup that works today
     def prepare(self) -> None:
         r = self.run
-        out = subprocess.run([sys.executable, str(FORGE_PY), "init", "--forge", str(self.forge),
+        out = subprocess.run([sys.executable, str(HUB_PY), "init", "--hub", str(self.hub),
                               "--template", str(TEMPLATE), "--dest", "origin", "--dest", "backup"],
                              capture_output=True, text=True, check=True).stdout
         info = json.loads(out)
@@ -68,15 +68,15 @@ class Rig:
             self.script_patch(script)
         script_path = r.write_text("script.json", json.dumps(script))
         r.write_text("harness.json", json.dumps({"repo": str(r.root), "script": str(script_path),
-                                                 "forge": str(self.forge), "job": self.job,
+                                                 "hub": str(self.hub), "job": self.job,
                                                  "initial_head": self.initial}))
-        evidence = f"{sys.executable} {FORGE_PY} ci-check --forge {self.forge} --run {{sha}}"
+        evidence = f"{sys.executable} {HUB_PY} ci-check --hub {self.hub} --run {{sha}}"
         team = ('[pipeline]\nintegrate = true\ntarget_branch = "main"\ndelete_branch = true\n\n'
                 f'[ci]\nkind = "none"\nevidence_command = {json.dumps(evidence)}\n')
         (r.home / ".config" / "swarm" / "team.toml").write_text(team)
         # setup the board now so a broken throwaway cluster fails here, not mid-run
         res = r.swarm("doctor")
-        r.event("prepare", "board and forge ready", pg_port=getattr(r.pg, "port", None),
+        r.event("prepare", "board and hub ready", pg_port=getattr(r.pg, "port", None),
                 initial=self.initial, doctor_rc=res.returncode)
 
     # -- the goal job
@@ -204,7 +204,7 @@ class Rig:
         return bad
 
     def check_landing(self) -> list[str]:
-        out = subprocess.run([sys.executable, str(FORGE_PY), "audit", "--forge", str(self.forge),
+        out = subprocess.run([sys.executable, str(HUB_PY), "audit", "--hub", str(self.hub),
                               "--since", self.initial], capture_output=True, text=True, check=True).stdout
         a = json.loads(out)
         bad = []

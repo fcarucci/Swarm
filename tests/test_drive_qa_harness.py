@@ -1,6 +1,6 @@
 """The drive-mode QA harness itself (e2e/drive_live/): the parts that run today, so a broken harness is
 caught here and not on the day the driver lands. Covers the pending-probe, the run-dir guards, the fake
-forge (file:// bare repos: exact-SHA CI, fast-forward-only main, no merge commits), the scripted engineer's
+hub (file:// bare repos: exact-SHA CI, fast-forward-only main, no merge commits), the scripted engineer's
 toy change, and the no-driver chaos layers (corrupt ledger, stale lock, forged receipt) in a subprocess.
 
 Run: cd tests && /var/tmp/test-slots/test-slot -- python3 -B -m unittest test_drive_qa_harness
@@ -17,6 +17,9 @@ import unittest
 from pathlib import Path
 
 import support  # noqa: F401  (puts lib/ on sys.path)
+
+if sys.platform == "win32":
+    raise unittest.SkipTest("the drive QA harness is POSIX only (sh hooks, O_NOFOLLOW ledger, pgrep)")
 
 HARNESS = Path(__file__).resolve().parent.parent / "e2e" / "drive_live"
 sys.path.insert(0, str(HARNESS))
@@ -88,14 +91,14 @@ class Guards(Tmp):
         self.assertEqual(q.check_job_name("qa-live.met_1"), "qa-live.met_1")
 
 
-@unittest.skipUnless(POSIX and HAVE_MAKE, "the fake forge needs git, make and POSIX sh hooks")
-class Forge(Tmp):
+@unittest.skipUnless(POSIX and HAVE_MAKE, "the fake hub needs git, make and POSIX sh hooks")
+class Hub(Tmp):
     def setUp(self):
         super().setUp()
-        import forge
-        self.forge = forge
-        self.f = self.tmp / "forge"
-        info = forge.init(self.f, HARNESS / "toy-repo-template", ["origin", "backup"])
+        import hub
+        self.hub = hub
+        self.f = self.tmp / "hub"
+        info = hub.init(self.f, HARNESS / "toy-repo-template", ["origin", "backup"])
         self.initial = info["initial"]
         self.urls = {k: v for k, v in info.items() if k != "initial"}
         self.w = self.tmp / "w"
@@ -108,11 +111,11 @@ class Forge(Tmp):
 
     def test_urls_are_file_urls_and_both_destinations_start_equal(self):
         self.assertTrue(all(u.startswith("file:///") for u in self.urls.values()))
-        a = self.forge.audit(self.f, None)
+        a = self.hub.audit(self.f, None)
         self.assertTrue(a["destinations_equal"] and a["linear"])
 
     def test_ci_is_green_only_for_the_exact_sha_that_was_run(self):
-        f = self.forge
+        f = self.hub
         self.assertEqual(f.ci_state(self.f, self.initial), "none")
         self.assertEqual(f.ci_run(self.f, self.initial)["state"], "green")
         self.assertEqual(f.ci_state(self.f, self.initial), "green")
@@ -120,7 +123,7 @@ class Forge(Tmp):
         self.assertEqual(f.ci_state(self.f, "abc"), "none")            # not an exact SHA
 
     def test_a_red_toy_change_makes_ci_red_and_forced_red_sticks(self):
-        f = self.forge
+        f = self.hub
         self.commit("tests/test_bad.py", "import unittest\nclass T(unittest.TestCase):\n"
                     "    def test_x(self):\n        self.assertEqual(1, 2)\n")
         sha = git("rev-parse", "HEAD", cwd=self.w).stdout.strip()
@@ -134,11 +137,11 @@ class Forge(Tmp):
         self.commit()
         ok = git("push", self.urls["origin"], "HEAD:main", cwd=self.w)
         self.assertEqual(ok.returncode, 0, ok.stderr)
-        self.forge.advance(self.f, "origin")                       # the target moves under us
+        self.hub.advance(self.f, "origin")                       # the target moves under us
         self.commit("y.txt", "y\n", "second")
         git("reset", "-q", "--hard", "HEAD", cwd=self.w)
         self.assertNotEqual(git("push", self.urls["origin"], "HEAD:main", cwd=self.w).returncode, 0)   # client side
-        bad = git("push", "-f", self.urls["origin"], "HEAD:main", cwd=self.w)                         # the forge itself
+        bad = git("push", "-f", self.urls["origin"], "HEAD:main", cwd=self.w)                         # the hub itself
         self.assertNotEqual(bad.returncode, 0)
         self.assertRegex(bad.stderr, r"non-fast-forward")
 
@@ -162,7 +165,7 @@ class Forge(Tmp):
         git("push", "-q", self.urls["origin"], "HEAD:refs/heads/staged", cwd=self.w)   # not main: the hook lets it by
         sha = git("rev-parse", "HEAD", cwd=self.w).stdout.strip()
         git("--git-dir", str(self.f / "origin.git"), "update-ref", "refs/heads/main", sha)   # as an admin would
-        self.assertFalse(self.forge.audit(self.f, self.initial)["linear"])
+        self.assertFalse(self.hub.audit(self.f, self.initial)["linear"])
 
     def test_branch_deletion_is_allowed_for_the_integrator(self):
         self.commit()
@@ -171,18 +174,18 @@ class Forge(Tmp):
         self.assertEqual(gone.returncode, 0, gone.stderr)
 
     def test_advance_moves_every_destination_to_one_commit_and_audit_sees_it(self):
-        moved = self.forge.advance(self.f, None)
+        moved = self.hub.advance(self.f, None)
         self.assertEqual(len(set(moved.values())), 1)
-        a = self.forge.audit(self.f, self.initial)
+        a = self.hub.audit(self.f, self.initial)
         self.assertTrue(a["destinations_equal"] and a["linear"])
         self.assertEqual(a["commits"], list(set(moved.values())))
 
     def test_the_cli_ci_check_is_an_evidence_command(self):
-        script = HARNESS / "forge.py"
-        r = subprocess.run([sys.executable, str(script), "ci-check", "--forge", str(self.f), "--run", self.initial],
+        script = HARNESS / "hub.py"
+        r = subprocess.run([sys.executable, str(script), "ci-check", "--hub", str(self.f), "--run", self.initial],
                            capture_output=True, text=True)
         self.assertEqual((r.returncode, r.stdout.strip()), (0, "green"))
-        r = subprocess.run([sys.executable, str(script), "ci-check", "--forge", str(self.f), "f" * 40],
+        r = subprocess.run([sys.executable, str(script), "ci-check", "--hub", str(self.f), "f" * 40],
                            capture_output=True, text=True)
         self.assertEqual((r.returncode, r.stdout.strip()), (1, "none"))
 
@@ -198,7 +201,7 @@ class ScriptedEngineer(Tmp):
         script = run / "s.json"
         script.write_text("{}")
         (run / "harness.json").write_text(json.dumps({"repo": str(HARNESS), "script": str(script),
-                                                      "forge": str(run / "forge")}))
+                                                      "hub": str(run / "hub")}))
         old = os.environ.get("HOME")
         os.environ["HOME"] = str(run / "home")
         self.addCleanup(lambda: os.environ.__setitem__("HOME", old) if old else os.environ.pop("HOME", None))

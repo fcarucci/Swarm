@@ -2,7 +2,7 @@
 # Drive-mode live acceptance and chaos (plan Tasks 15-19, spec 6.2/6.3), on an isolated board.
 # Runbook: ~/work/swarm-autonomy/qa/RUNBOOK.md  (a copy: e2e/drive_live/RUNBOOK.md)
 #
-#   e2e/drive_live.sh preflight                 what can run today: throwaway board, forge, harness (no driver needed)
+#   e2e/drive_live.sh preflight                 what can run today: throwaway board, hub, harness (no driver needed)
 #   e2e/drive_live.sh met [--harness real]      MET run: zero coordinator turns, supervisor launches every seat
 #   e2e/drive_live.sh unreachable               impossible goal -> UNREACHABLE
 #   e2e/drive_live.sh chaos [NAME ...]          the chaos suite (or the named scenarios)
