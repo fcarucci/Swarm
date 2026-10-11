@@ -190,8 +190,8 @@ class MemorySeats:
             if row is None or row["job"] != job or row["revision"] != expected_revision:
                 return None
             check_transition(row["state"], state)
-            if row["state"] == "running" and (row["launch_id"] is None or any(
-                    r["launch_id"] == row["launch_id"] and r["ended_at"] is None for r in s.restarts)):
+            if row["state"] == "running" and row["launch_id"] is not None and any(
+                    r["launch_id"] == row["launch_id"] and r["ended_at"] is None for r in s.restarts):
                 raise ValueError("the seat's launch is still open: end it first")
             row.update(fields, state=state, revision=row["revision"] + 1, updated_at=self.now())
             s.touch()
@@ -280,7 +280,7 @@ class MemorySeats:
 
 def seats_schema(pg: bool = False) -> str:
     """Schema 25 part 2: the seats and drive_locks tables, the restart columns of a claim and the
-    unique (job, action_id, attempt). Runs after the base schema, so restarts exists. Postgres
+    unique (job, action_id, attempt) and unique launch_id (one restart row per launch). Runs after the base schema, so restarts exists. Postgres
     adds the restart columns here; SQLite adds them in MIGRATIONS, before this runs."""
     id_type = "bigserial PRIMARY KEY" if pg else "INTEGER PRIMARY KEY AUTOINCREMENT"
     ts = "timestamptz" if pg else "TEXT"
@@ -295,6 +295,7 @@ def seats_schema(pg: bool = False) -> str:
     return f"""
 {restart_cols}CREATE UNIQUE INDEX IF NOT EXISTS restarts_action_attempt ON restarts (job, action_id, attempt)
  WHERE action_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS restarts_launch_id ON restarts (launch_id) WHERE launch_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS seats (
  id {id_type}, job TEXT NOT NULL REFERENCES jobs(job) ON DELETE CASCADE, generation {big} NOT NULL,
  seat TEXT NOT NULL, role TEXT NOT NULL, title TEXT, harness TEXT NOT NULL CHECK (harness IN ('claude', 'codex')),
@@ -422,7 +423,7 @@ class SqlSeats:
         return self._seat_obj(Seat, SEAT_COLS, row) if row else None
 
     def _launch_open(self, c, launch_id):
-        return launch_id is None or self._exec(
+        return launch_id is not None and self._exec(
             c, "SELECT 1 FROM restarts WHERE launch_id = ? AND ended_at IS NULL", (launch_id,)).fetchone() is not None
 
     def set_seat_state(self, seat_id, expected_revision, state, *, job, **fields):

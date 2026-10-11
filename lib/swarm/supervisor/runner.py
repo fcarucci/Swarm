@@ -64,6 +64,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from swarm import clock, compat
+from swarm.supervisor import barrier
 from swarm.supervisor.systemd import manager_env as _manager_env
 
 POLL_SECONDS = 5.0
@@ -697,6 +698,31 @@ def classify_failure(harness: str, tail: str) -> str | None:
     return None
 
 
+def _price(cfg: dict, tokens: int) -> float:
+    """What `tokens` cost on Codex, which reports tokens and no cost: [drive] codex_usd_per_mtok."""
+    rate = float(((cfg or {}).get("drive") or {}).get("codex_usd_per_mtok", 10))
+    return tokens * rate / 1_000_000
+
+
+def _read_drive_usage(cfg: dict, run: dict) -> None:
+    """Once per drive run: read what the session cost from its kept output tail and keep it in the run
+    (cost_usd, tokens_in, tokens_out; None when unreadable: the ledger then charges the reservation)
+    with whether it ended in a provider outage. A retried finish reuses it."""
+    if "usage_read" in run:
+        return
+    text = ""
+    try:
+        with _runs_fd(run["board"], create=False) as d:
+            text = _read_tail(d, f"r{int(run['restart_id'])}.tail.txt", 2 * TAIL_BYTES + 4096)
+    except Exception:
+        pass
+    u = parse_usage(run["harness"], text)
+    cost = None if u is None else (u.cost_usd if u.cost_usd is not None else _price(cfg, u.tokens_in + u.tokens_out))
+    run.update(usage_read=True, cost_usd=cost, tokens_in=None if u is None else u.tokens_in,
+               tokens_out=None if u is None else u.tokens_out,
+               outage=classify_failure(run["harness"], text) == "outage")
+
+
 def _stop_unit(unit: str, proc=None, grace: float | None = None) -> None:
     """SIGTERM every process of the session's scope, wait up to `grace` (KILL_GRACE) seconds for
     the scope to be empty (and our systemd-run child, if the scope wasn't created yet, to end),
@@ -1102,6 +1128,7 @@ def _execute(cfg: dict, run: dict, *, popen, clock, sleep, poll: float, board_ev
     next_board, enrolled, outcome = t0, False, None
     ignored: set = set()   # marker-bound keys already logged as not ours
     while proc.poll() is None:
+        barrier.hit("runner_mid_session")
         now = clock()
         if now - t0 >= float(run["limit_seconds"]):
             outcome = "timeout"
@@ -1168,11 +1195,14 @@ def finish(cfg: dict, run: dict, outcome: str) -> bool:
     the resume marker, the session output (a redacted tail kept, the raw files deleted), the log
     and the run file. False when the board is unreachable or the marker couldn't be removed: the
     run file stays, recording how far it got, for `reap` to finish."""
+    barrier.hit("before_finish")
     from swarm.board import open_board
     from swarm.supervisor import lost, markers
     from swarm.supervisor.settings import log
     from swarm.supervisor.stuck import SUPERVISOR_NAME, WAITING_PREFIX
     key = run.get("agent_key")
+    if run.get("launch_id"):
+        _read_drive_usage(cfg, run)
     if not run.get("board_done"):
         try:
             with open_board(cfg) as b:
@@ -1206,6 +1236,14 @@ def finish(cfg: dict, run: dict, outcome: str) -> bool:
             return False
         run.update(board_done=True, outcome=run.get("outcome") or outcome)
         _save_progress(run)
+    if run.get("launch_id") and not run.get("ledger_done"):
+        from swarm.supervisor import driver_exec
+        if not driver_exec.conclude_run(cfg, run, outcome, run.get("cost_usd"), bool(run.get("outage"))):
+            log(f"ledger of restart {run['restart_id']} busy; finish retried later")
+            return False
+        _release_drive_locks(cfg, run)
+        run["ledger_done"] = True
+        _save_progress(run)
     bad_marker = _marker_problem(cfg, run)
     if bad_marker:
         log(f"restart {run['restart_id']}: {bad_marker}; not removed")
@@ -1219,6 +1257,22 @@ def finish(cfg: dict, run: dict, outcome: str) -> bool:
     return True
 
 
+def _release_drive_locks(cfg: dict, run: dict) -> None:
+    """Release the drive locks of an ended launch, once its scope unit is confirmed gone (writer
+    fencing, spec 3.9): with the unit present or unknown they stay until they expire and the host
+    sweep takes them."""
+    from swarm.supervisor.settings import log
+    unit = run.get("unit")
+    if unit and unit_presence(unit, run.get("slice")) != "absent":
+        return
+    try:
+        from swarm.board import open_board
+        with open_board(cfg) as b:
+            b.release_drive_locks(run["launch_id"], job=run["job"], holder=run["action_id"])
+    except Exception as exc:
+        log(f"drive locks of restart {run['restart_id']} not released: {type(exc).__name__}")
+
+
 def _finish_row_and_post(b, run: dict, outcome: str, poster: str) -> None:
     """Finish the restart row and post its end, exactly once in the normal case. The message is
     recorded in the run file (post_pending) before the row is finished, so a crash or a failed post
@@ -1226,8 +1280,9 @@ def _finish_row_and_post(b, run: dict, outcome: str, poster: str) -> None:
     finished the row, or by a retry of a recorded one; a stale run file with no record whose row is
     already finished posts nothing. At least once, not exactly once, only if the process dies
     between the post and recording it (the board's post isn't idempotent)."""
+    spent = {k: run[k] for k in ("cost_usd", "tokens_in", "tokens_out") if run.get(k) is not None}
     if run.get("posted"):
-        b.finish_restart(run["restart_id"], outcome)
+        b.finish_restart(run["restart_id"], outcome, **spent)
         return
     recorded = bool(run.get("post_pending"))
     if not recorded:
@@ -1235,7 +1290,7 @@ def _finish_row_and_post(b, run: dict, outcome: str, poster: str) -> None:
         why = f" ({run['refused_reason']})" if run.get("refused_reason") else ""
         run["post_pending"] = f"{run['name']} (restart {attempt}) ended: {outcome}{why}"
         write_run(run)   # an OSError here defers the finish: nothing is lost
-    transitioned = b.finish_restart(run["restart_id"], outcome)
+    transitioned = b.finish_restart(run["restart_id"], outcome, **spent)
     if transitioned or recorded:
         b.post(run["job"], poster, run["post_pending"])
     run.update(posted=True, post_pending=None)
