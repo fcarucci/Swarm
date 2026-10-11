@@ -828,6 +828,10 @@ integrator pushes the rebased branch and waits on CI itself ([G2]).
   a same-user Claude agent that defeats the classifier can do what the user can (including impersonating a
   person locally). This design does not claim more; sandboxing Claude seats is recorded as future work (R19).
 
+**Trust assumption (after the Task 7b review):** a database writer can alter the board state of a genuinely
+launched seat (e.g. mark it idle or failed, or change its row): that is denial only, never settlement — it can make
+the driver relaunch, hold or rule, but it can never make an artifact, a verdict or the job settle.
+
 **Host-private driver ledger.** `~/.local/share/swarm/supervisor/drive/<sha256(board_key|job)>.json` (privfs:
 0700 dir, atomic writes) is authoritative for the driver's own control state: generation, action ids and
 attempts, owners, integration receipts, ruling-due time, error counts, wake watermarks. The board carries copies
