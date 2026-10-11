@@ -367,6 +367,15 @@ def load(board_key: str, job: str) -> Ledger | None:
         return _read_entry(d, name, board_key, job)
 
 
+def exists(board_key: str, job: str) -> bool:
+    """Whether an entry (good or bad) is at the job's name. Read-only: creates neither the directory
+    nor a lock file, so a sweep or a dry run can ask it freely."""
+    import os
+    from swarm.supervisor import settings
+    _check_key(board_key, job)
+    return os.path.lexists(settings.private_dir() / SUBDIR / _name(board_key, job))
+
+
 def create(board_key: str, job: str, *, budgets: dict, activated_at: str, state: str = "active",
            models: dict | None = None, pinned: dict | None = None) -> Ledger:
     """A new ledger with a fresh incarnation, written at once. LedgerExistsError if any entry is

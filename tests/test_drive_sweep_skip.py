@@ -11,7 +11,7 @@ from test_hooks_cli import Env  # noqa: E402  (sets sys.path)
 
 from swarm import cli as swarm
 from swarm.board.autoinit import store_key
-from swarm.supervisor import ledger
+from swarm.supervisor import ledger, settings
 
 MIN = 60
 CLOSE_AT = 241 * MIN
@@ -86,10 +86,19 @@ class StaleWaitingSkip(SkipBase):
         self.assertEqual(self.notices(), [])
 
     def test_a_bad_ledger_still_protects_the_job(self):
-        self.waiting_goal_job()
         cfg = swarm.load_config(self.config)
-        with mock.patch.object(ledger, "load", side_effect=ledger.LedgerBadError("bad")):
-            self.assertTrue(swarm.drive_ledger_present(cfg, "J"))
+        led = self.ledger()
+        path = settings.private_dir() / ledger.SUBDIR / ledger._name(store_key(cfg), "J")
+        path.write_bytes(b"{ not a ledger")
+        self.assertRaises(ledger.LedgerBadError, ledger.load, store_key(cfg), "J")
+        self.assertTrue(swarm.drive_ledger_present(cfg, "J"))
+
+    def test_asking_creates_nothing(self):
+        cfg = swarm.load_config(self.config)
+        before = sorted(p for p in settings.private_dir().rglob("*")) if settings.private_dir().exists() else []
+        self.assertFalse(swarm.drive_ledger_present(cfg, "J"))
+        after = sorted(p for p in settings.private_dir().rglob("*")) if settings.private_dir().exists() else []
+        self.assertEqual(before, after)
 
     def test_drive_ledger_present_follows_the_ledger(self):
         cfg = swarm.load_config(self.config)
