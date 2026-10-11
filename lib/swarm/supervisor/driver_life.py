@@ -31,7 +31,7 @@ import time
 
 from swarm import compat, receipts
 from swarm.board.base import CloseGuard
-from swarm.supervisor import barrier
+from swarm.supervisor import barrier, driver_events as ev
 
 log = logging.getLogger("swarm.supervisor.driver_life")
 
@@ -134,12 +134,12 @@ def default_request_lead(board, cfg: dict, led, generation: int) -> None:
     old = sorted((s for s in board.seats(led.job) if s.seat == "lead" and s.generation < generation),
                  key=lambda x: x.generation, reverse=True)
     if not old:
-        board.post(led.job, SUPERVISOR, f"DRIVER-ROLLOVER generation {generation}: no earlier lead seat to copy")
+        board.post(led.job, SUPERVISOR, f"{ev.DRIVER_ROLLOVER} generation {generation}: no earlier lead seat to copy")
         return
     s = next((x for x in old if seat_receipted(led, x)), None)
     if s is None:
         board.post(led.job, SUPERVISOR,
-                   f"DRIVER-ROLLOVER generation {generation}: no earlier lead seat matches its receipted request")
+                   f"{ev.DRIVER_ROLLOVER} generation {generation}: no earlier lead seat matches its receipted request")
         return
     board.request_seat(led.job, generation, "lead", role=s.role, harness=s.harness, model=s.model,
                        workdir=s.workdir, brief_path=s.brief_path, title=s.title, task_ref=s.task_ref,
@@ -338,12 +338,12 @@ def enforce_deadlines(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks |
     if cause is None:
         return False
     intent = led.terminal_intent
-    if intent is not None and intent["verdict"] != "unreachable" and "terminal_stuck" in led.watermarks:
+    if intent is not None and intent["verdict"] == "met" and "terminal_stuck" in led.watermarks:
         led.terminal_intent = None         # a pending MET that cannot finish closing: the deadline wins
         led.closing = None
     if not begin_terminal(board, led, "unreachable", "ruling", MECHANICAL, cause, now):
         return False
-    _post(board, led.job, f"DRIVER-MECHANICAL-UNREACHABLE (no judge verdict): {cause}")
+    _post(board, led.job, f"{ev.DRIVER_MECHANICAL_UNREACHABLE} (no judge verdict): {cause}")
     _record_mechanical(board, led)
     barrier.hit("terminal_verdict_recorded")
     return True
@@ -361,7 +361,7 @@ def _reject_pending(board, led, reason: str, now: dt.datetime, *, ruling_due: bo
     if ruling_due and led.ruling_due_at is None:
         led.ruling_due_at = _iso(now)
     led.save()
-    _post(board, led.job, f"DRIVER-CLOSE-REJECTED {reason}")
+    _post(board, led.job, f"{ev.DRIVER_CLOSE_REJECTED} {reason}")
 
 
 def _check_met(board, cfg, led, js, now, hooks: Hooks) -> str:
@@ -392,11 +392,13 @@ def terminalize(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks | None 
     if led.terminal is not None:
         repair_claim(board, led)   # a claim the commit could not clear is cleared on a later pass
         return False
-    if intent is None or led.halted is not None:
+    if intent is None or (led.halted is not None and intent["verdict"] != "cancelled"):
         return False
     js = board.job_status(led.job)
     if js is None:
         return False
+    if intent["verdict"] == "cancelled":
+        return _terminalize_cancelled(board, cfg, led, intent, js, now, hooks)
     reasons: list = []
     if js.status != "active":
         # Crashed after the close: only when the LEDGER says this driver was closing (the marker is
@@ -407,7 +409,7 @@ def terminalize(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks | None 
         if js.closed_by == CLOSED_BY and "tamper_closed" not in led.watermarks:
             led.watermarks["tamper_closed"] = 1
             led.save()
-            _post(board, led.job, "DRIVER-TAMPER the job was closed as the driver without the driver's own close")
+            _post(board, led.job, f"{ev.DRIVER_TAMPER} the job was closed as the driver without the driver's own close")
         return False                 # closed by someone else: tamper handling is the pass's
     # step 0: finish a half-done landing first ([RR5])
     land = hooks.complete_land(board, cfg, led, now)
@@ -417,7 +419,7 @@ def terminalize(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks | None 
         land = LandResult("partial", land.detail or "land journal still pending at the close deadline")
     if land.state == "partial":
         reasons.append(f"partial land recorded: {land.detail}"[:1000])
-        _post(board, led.job, f"DRIVER-LAND-PARTIAL {land.detail}")
+        _post(board, led.job, f"{ev.DRIVER_LAND_PARTIAL} {land.detail}")
     # steps 1-2: `closing` is set; stop every session and confirm the scopes are gone
     rows = _open_rows(board, led)
     if rows:
@@ -453,6 +455,46 @@ def terminalize(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks | None 
     return _commit(board, cfg, led, intent, now, reasons, hooks)
 
 
+def cancel_job(board, cfg: dict, led, actor: str, now: dt.datetime, *, reason: str | None = None,
+               hooks: Hooks | None = None) -> bool:
+    """CANCELLED: a person ended the job (`swarm deactivate`, or the pass found it closed by one). The
+    caller has checked that `actor` is a person. Ledger first (the terminal intent, over whatever intent
+    was pending: a person's word ends the job, even a halted one), then the sessions are stopped and
+    confirmed gone, the questions settled, the locks and seats released, the board job closed if it is
+    still open, the claim cleared and `led.terminal` committed. Resumable like terminalize, which it
+    calls: True once done, False while the sessions are still stopping or when it is already terminal."""
+    if led.terminal is not None:
+        repair_claim(board, led)
+        return False
+    cause = (reason or "cancelled by a person").strip()[:200]
+    led.terminal_intent = {"verdict": "cancelled", "scope": "job", "generation": led.generation,
+                           "candidate": None, "req": None, "by": actor, "at": _iso(now)}
+    led.closing = f"cancelled: {cause}"[:64]
+    led.save()
+    barrier.hit("terminal_intent_saved")
+    return terminalize(board, cfg, led, now, hooks=hooks)
+
+
+def _terminalize_cancelled(board, cfg, led, intent: dict, js, now, hooks: Hooks) -> bool:
+    rows = _open_rows(board, led)
+    if rows:
+        hooks.stop_rows(board, cfg, rows)
+        if hooks.rows_live(board, cfg, rows):
+            _note_stuck(board, cfg, led, intent, now)
+            return False
+    _end_sessions(board, led, "cancelled")
+    led.save()
+    _settle_blockers(board, led, "job concluded: cancelled")
+    _release_locks(board, led)
+    _release_seats(board, led, None, "job concluded")
+    if js.status == "active":      # a person's deactivate has usually closed it already
+        cause = (led.closing or "cancelled").partition(": ")[2] or "cancelled"
+        if not board.close_job(led.job, "cancelled", f"cancelled: {cause}"[:500], forced=False, closed_by=CLOSED_BY):
+            return False
+        barrier.hit("terminal_closed_before_ledger")
+    return _commit(board, cfg, led, intent, now, [], hooks)
+
+
 def _closing_key(intent: dict) -> str:
     return f"closing:{intent['at']}"[:256]
 
@@ -469,7 +511,7 @@ def _note_stuck(board, cfg: dict, led, intent: dict, now: dt.datetime) -> None:
         return
     led.watermarks["terminal_stuck"] = 1
     led.save()
-    _post(board, led.job, f"DRIVER-TERMINAL-STUCK {intent['verdict']}: sessions not confirmed gone at the close deadline")
+    _post(board, led.job, f"{ev.DRIVER_TERMINAL_STUCK} {intent['verdict']}: sessions not confirmed gone at the close deadline")
 
 
 def repair_claim(board, led) -> bool:
@@ -610,7 +652,7 @@ def unhalt(board, cfg: dict, led, actor: str, now: dt.datetime) -> bool:
         board.set_job_data(led.job, "drive.halted", None)
     except Exception as exc:
         log.warning("board halt flag for %s not cleared: %s", led.job, type(exc).__name__)
-    _post(board, led.job, f"DRIVER-UNHALT by {actor}: deadlines shifted by {int(lasted)} s")
+    _post(board, led.job, f"{ev.DRIVER_UNHALT} by {actor}: deadlines shifted by {int(lasted)} s")
     return True
 
 
