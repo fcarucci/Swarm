@@ -536,14 +536,26 @@ def _cgroup_presence(unit: str, slice_name: str) -> str:
         return "absent"
     try:
         with open(os.path.join(scope, "cgroup.events"), encoding="ascii", errors="replace") as f:
-            events = f.read().split()
+            populated = _populated(f.read())
     except OSError:
         return "unknown"
-    if events == ["populated", "1"]:
+    if populated == "1":
         return "present"
-    if events == ["populated", "0"]:
+    if populated == "0":
         return "absent"
     return "unknown"
+
+
+def _populated(text: str) -> str | None:
+    """The value of the `populated` key of a cgroup.events file ("0" or "1"), read as key/value
+    lines (the file also has `frozen N`, and newer kernels add more). None unless exactly one
+    `populated` line holds 0 or 1."""
+    vals = []
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0] == "populated":
+            vals.append(parts[1])
+    return vals[0] if len(vals) == 1 and vals[0] in ("0", "1") else None
 
 
 def unit_presence(unit: str, slice_name: str | None = None, deadline: float | None = None) -> str:
