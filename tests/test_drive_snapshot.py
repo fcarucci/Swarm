@@ -17,7 +17,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import support  # noqa: F401  (puts lib/ on sys.path)
-from support import SANDBOX, FileHarness, MemoryHarness, SqliteHarness, home_env
+from support import SANDBOX, add_backend_variants, drive_backends, home_env
 from swarm import receipts
 from swarm.supervisor import driver_snapshot as ds
 from swarm.supervisor.ledger import Intent, Ledger
@@ -41,7 +41,7 @@ class SnapshotCase:
 
     @classmethod
     def setUpClass(cls):
-        cls.h = cls.harness_factory()
+        cls.h = cls.harness_factory(cls.__qualname__)
 
     @classmethod
     def tearDownClass(cls):
@@ -536,12 +536,7 @@ class WakeMapping(unittest.TestCase):
 
 
 class MemorySnapshot(SnapshotCase, unittest.TestCase):
-    harness_factory = staticmethod(lambda: MemoryHarness())
+    harness_factory = staticmethod(drive_backends()["memory"])
 
 
-class FileSnapshot(SnapshotCase, unittest.TestCase):
-    harness_factory = staticmethod(lambda: FileHarness())
-
-
-class SqliteSnapshot(SnapshotCase, unittest.TestCase):
-    harness_factory = staticmethod(lambda: SqliteHarness())
+add_backend_variants(globals(), MemorySnapshot)   # FileSnapshot, SqliteSnapshot, PostgresSnapshot (SWARM_TEST_CONFIG)

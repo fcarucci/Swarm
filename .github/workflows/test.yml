@@ -185,6 +185,19 @@ jobs:
           cd tests
           python -B run_postgres_suite.py 2>&1 | tee ../pg.log || { cd .. && python .github/scripts/annotate.py pg.log; exit 1; }
 
+      # The drive suites (tests/test_drive_*.py) again, on the Postgres board: modules with
+      # backend variants (support.add_backend_variants) run their Postgres classes, the CLI ones
+      # (activate, hooks) run wholly on a Postgres board through SWARM_TEST_BACKEND. The summary
+      # fails the step when a module ran nothing, a Postgres variant never ran, or a test skipped.
+      - name: Drive suites on Postgres
+        env:
+          SWARM_TEST_BACKEND: postgres
+        run: |
+          set -o pipefail
+          cd tests
+          python -B -m unittest -v $(ls test_drive_*.py | sed 's/\.py$//') 2>&1 | tee ../drive-pg.log || { cd .. && python .github/scripts/annotate.py drive-pg.log; exit 1; }
+          cd .. && python .github/scripts/drive_pg_summary.py drive-pg.log
+
       - name: Known-stall recovery tests (swarm tail/watch vs a stalling proxy; allowed to fail)
         continue-on-error: true
         run: cd tests && python -B -m unittest test_stall.PostgresFollowRecoveryTests -v
