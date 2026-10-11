@@ -147,6 +147,21 @@ class ExecuteTests(ExecEnv):
                             workdir=row.workdir, brief_path=row.brief_path, requested_by="lead")
         self.assertIsNone(self.go(self.act()))
 
+    def test_a_role_forged_on_the_row_is_not_launched_and_takes_no_lock_shortcut(self):
+        self.seat()
+        with self.b._s().lock:
+            next(r for r in self.b._s().seats if r["seat"] == "eng-a")["role"] = "reviewer"   # a read-only role: no lock
+        self.assertIsNone(self.go(self.act()))
+        self.assertEqual((self.reload().intents, self.b.drive_locks()), ([], []))
+
+    def test_a_forged_role_on_an_idle_seat_is_not_carried_forward(self):
+        self.seat()
+        self.end_run = self.go(self.act())
+        self.end(self.end_run, "completed")
+        with self.b._s().lock:
+            next(r for r in self.b._s().seats if r["seat"] == "eng-a")["role"] = "judge"
+        self.assertIsNone(self.go(self.act(trigger="2")))
+
     def test_only_launch_actions_in_this_generation_run(self):
         self.seat()
         self.assertIsNone(self.go(dm.Action(kind="hold", action_id="gen1|hold|-|-|0|-", seat=None, prompt_kind=None)))
@@ -197,6 +212,29 @@ class ExecuteTests(ExecEnv):
         self.assertIsNotNone(self.go(self.act()))
         self.assertIsNone(self.go(self.act()))
         self.assertEqual(len(self.reload().intents), 1)
+
+    def test_an_open_attempt_blocks_even_when_the_seat_is_launchable(self):
+        self.seat()
+        self.led.intents.append(ledger.Intent("t1-" + "0" * 32, self.act().action_id, 1, "other", 5.0, 60.0, [],
+                                              "claimed"))
+        self.led.save()
+        self.assertIsNone(self.go(self.act()))
+        self.assertEqual(self.b.restarts(job="J"), [])
+
+    def test_a_row_altered_during_the_claim_loses_its_authorization(self):
+        self.seat()
+        real = self.b.claim_drive_launch
+
+        def claim_then_alter(**kw):
+            row = real(**kw)
+            with self.b._s().lock:
+                next(r for r in self.b._s().seats if r["seat"] == "eng-a")["workdir"] = "/elsewhere"
+            return row
+        with mock.patch.object(self.b, "claim_drive_launch", side_effect=claim_then_alter):
+            run = self.go(self.act())
+        self.end(run, "completed")
+        self.assertEqual(self.b.seat("J", 1, "eng-a").state, "idle")
+        self.assertIsNone(self.go(self.act(trigger="2")))            # not authorized at its new revision
 
     def test_next_attempt_numbers_never_reuse_and_stop_at_max_attempts(self):
         self.seat()
