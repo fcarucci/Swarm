@@ -285,6 +285,7 @@ class Checks(LandCase):
             self.ci = state
             res = self.go()
             self.assertTrue(res.pending, state)
+            self.assertFalse(res.lease_held, state)
             self.assertFalse(res.ok)
         self.assertEqual(self.pushes, [])
 
@@ -338,6 +339,7 @@ class Leases(LandCase):
         self.release_first()
         res = self.go()
         self.assertTrue(res.pending)
+        self.assertTrue(res.lease_held)
         self.assertIn("lease", res.why)
         self.assertEqual(self.pushes, [])
 
@@ -346,7 +348,7 @@ class Leases(LandCase):
         self.board.open_job("K", None, None, None, "me", goal="G")
         self.assertIsNotNone(self.lease("K"))
         res = self.go()
-        self.assertTrue(res.pending)
+        self.assertTrue(res.pending and res.lease_held)
         self.assertIn("job K", res.why)
         self.assertIn("lease", res.why)
         self.assertEqual(self.pushes, [])
