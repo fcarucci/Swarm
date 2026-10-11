@@ -4,7 +4,7 @@ the supervisor pass, claims and releases the per-destination land leases, finish
 
 Wiring (Task 8a/8b/8c): the pass builds a land.LandEnv for the job (ledger, owner record, the judged SHAs
 from its snapshot, target branch) and calls `run(board, cfg, env, job)` once per pass, before any other
-action on the group; terminalization calls `complete_all(...)` and posts DRIVER-PARTIAL-LAND from
+action on the group; terminalization calls `complete_all(...)` and posts DRIVER-LAND-PARTIAL from
 `partial_report(...)` when a journal could not be completed."""
 from __future__ import annotations
 
@@ -180,7 +180,7 @@ def complete_all(board, cfg: dict, env: LandEnv, job: str) -> list:
 
 def partial_report(board, env: LandEnv, job: str) -> list[str]:
     """`<url>@<sha>` for every destination a journal shows pushed or verified whose landing never
-    completed: what DRIVER-PARTIAL-LAND names in the verdict details."""
+    completed: what DRIVER-LAND-PARTIAL names in the verdict details."""
     out, now = [], env.now()
     for request in _unfinished(board, env, job):
         j = land.read_journal(env.led, request.id, now, destinations=64)
