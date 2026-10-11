@@ -194,7 +194,7 @@ class LeaseHolds(DriverCase):
         self.other_job()
         self.submit()
         self.run_pass()
-        later = NOW.replace(hour=13)
+        later = NOW.replace(minute=30)
         self.run_pass(env={"now": lambda: later})
         self.assertEqual(self.led.integrated[GROUP]["lease_held_since"], NOW.isoformat())
         for d in self.board.drive_locks("land:"):
