@@ -561,7 +561,7 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
 def _board_marks(board, led, seat, now) -> tuple[int, int]:
     """The message id and event id a session is launched knowing about: only the ids the snapshot would list
     as this seat's pending wakes (driver_snapshot._wakes): messages to the seat's agent that carry the
-    ledger's own `post` receipt (host-private, so a database writer cannot forge one), and events addressed
+    ledger's own `post` receipt (host-private, so a database writer cannot fake one), and events addressed
     to that agent. Nothing else moves a mark; with no agent yet, or nothing pending, the marks stay."""
     prev_msg = led.watermarks.get(f"msg:{seat.seat}", 0)
     prev_event = led.watermarks.get(f"event:{seat.seat}", 0)
