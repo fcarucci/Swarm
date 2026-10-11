@@ -49,6 +49,17 @@ def no_controls(value: str) -> bool:
     return not any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in value)
 
 
+def _optionlike(part) -> bool:
+    """Whether a URL part starts with "-" once percent-decoded (%2d, %2D, and %252d decoded again)."""
+    text = part or ""
+    for _ in range(3):
+        decoded = urllib.parse.unquote(text)
+        if decoded == text:
+            break
+        text = decoded
+    return text.startswith("-")
+
+
 def check_url(url) -> str:
     """The URL unchanged when a pinned git call may take it, else GitPinError."""
     if not isinstance(url, str) or not url or len(url) > URL_MAX:
@@ -70,16 +81,29 @@ def check_url(url) -> str:
             raise GitPinError(f"a remote URL must use {', '.join(ALLOWED_PROTOCOLS)}, not {scheme or 'no'} transport")
         if parts.password is not None or (parts.username is not None and scheme != "ssh"):
             raise GitPinError("a remote URL must not carry credentials")
+        if "\\" in url:
+            raise GitPinError("a remote URL must not contain a backslash")
+        if any(_optionlike(seg) for seg in parts.path.split("/")):
+            raise GitPinError("a remote URL path must not start a segment with '-' (also percent-encoded)")
         if scheme == "file":
             if parts.netloc or not os.path.isabs(parts.path):
                 raise GitPinError("a file:// remote must name an absolute local path")
-        elif not host or host.startswith("-") or (parts.username or "").startswith("-"):
+            return url
+        if not host or _optionlike(host) or _optionlike(parts.username):
             raise GitPinError("a remote URL must name a host that is not an option")
+        try:
+            port = parts.port
+        except ValueError:
+            port = -1
+        if port is not None and not 1 <= port <= 65535:
+            raise GitPinError("a remote URL port must be 1-65535")
         return url
     m = SCP_URL.match(url)
     if m and not os.path.isabs(url):
-        if m.group("host").startswith("-") or (m.group("user") or "").startswith("-"):
+        if _optionlike(m.group("host")) or _optionlike(m.group("user")):
             raise GitPinError("a remote URL must name a host that is not an option")
+        if any(_optionlike(seg) for seg in url[m.end():].split("/")):
+            raise GitPinError("a remote URL path must not start a segment with '-' (also percent-encoded)")
         return url
     if not os.path.isabs(url):
         raise GitPinError("a local remote must be an absolute path")
