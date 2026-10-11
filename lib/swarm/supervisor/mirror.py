@@ -103,12 +103,19 @@ def _abs_path(value, what: str) -> str:
     return value
 
 
+def _split(url: str):
+    try:
+        return urlsplit(url)
+    except ValueError as exc:
+        raise MirrorError("the remote url is malformed") from exc
+
+
 def _check_url(url, loopback_http: bool) -> str:
     if not isinstance(url, str) or not url or url.startswith("-") or any(
             c in url for c in "\n\r\0 "):
         raise MirrorError("the remote url must be a non-empty string without spaces")
     if "://" in url:
-        parts = urlsplit(url)
+        parts = _split(url)
         if parts.password is not None or (parts.username is not None and parts.scheme != "ssh"):
             raise MirrorError("the remote url must not carry credentials")
     else:
@@ -118,11 +125,25 @@ def _check_url(url, loopback_http: bool) -> str:
     if loopback_http:
         if not os.environ.get(TEST_MARKER):
             raise MirrorError("loopback_http is for the test suite only")
-        parts = urlsplit(url)
+        parts = _split(url)
         if (parts.scheme != "http" or parts.hostname not in _LOOPBACK_HOSTS
                 or "@" in parts.netloc):
             raise MirrorError("loopback_http only applies to http:// on 127.0.0.1 or localhost")
     return url
+
+
+def _runs(spine: list[str], matched: set[str]) -> list[list[str]]:
+    """Maximal runs of consecutive commits on the first-parent spine that are all matched."""
+    runs, current = [], []
+    for c in spine:
+        if c in matched:
+            current.append(c)
+        elif current:
+            runs.append(current)
+            current = []
+    if current:
+        runs.append(current)
+    return runs
 
 
 def _kill_group(proc: subprocess.Popen) -> None:
@@ -265,12 +286,14 @@ class Mirror:
     def _lines(self, args: list, stdin: bytes | None = None) -> list[str]:
         return self._git(args, stdin=stdin).stdout.decode().split()
 
-    def _revs(self, positive: list[str], negative: list[str], reverse: bool = False) -> list[str]:
+    def _revs(self, positive: list[str], negative: list[str], reverse: bool = False,
+              first_parent: bool = False) -> list[str]:
         """Commits reachable from `positive` and not from `negative`; shas go on stdin, not argv."""
         if not positive:
             return []
         lines = [*positive, *(f"^{n}" for n in negative)]
-        args = ["rev-list", "--stdin"] + (["--reverse"] if reverse else [])
+        args = ["rev-list", "--stdin"] + (["--reverse"] if reverse else []) + (
+            ["--first-parent"] if first_parent else [])
         return self._lines(args, stdin=("\n".join(lines) + "\n").encode())
 
     def _require_known(self, shas) -> None:
@@ -366,23 +389,64 @@ class Mirror:
         self._require_known([since_sha, candidate, *judged_list])
         if not self.is_ancestor(since_sha, candidate):
             raise TargetRewoundError(f"{since_sha} is not an ancestor of {candidate}")
-        on_target = self._revs([candidate], [since_sha])
+        on_target = set(self._revs([candidate], [since_sha]))
         unreached = self._revs([candidate], [since_sha, *judged_list], reverse=True)
         if not unreached:
             return []
         judged_new = self._revs(judged_list, [since_sha])
         judged_ids = self._patch_map(judged_new)
-        on_target_set = set(on_target)
         budget = Counter(judged_ids[c] for c in judged_new if c in judged_ids)
         for c in judged_new:
-            if c in on_target_set and c in judged_ids:
+            if c in on_target and c in judged_ids:
                 budget[judged_ids[c]] -= 1
         ids = self._patch_map(unreached)
-        flagged = []
+        matched = set()
         for c in unreached:
             pid = ids.get(c)
             if pid is not None and budget[pid] > 0:
                 budget[pid] -= 1
-            else:
-                flagged.append(c)
-        return flagged
+                matched.add(c)
+        accepted = self._accepted_runs(since_sha, candidate, judged_list, matched, ids)
+        return [c for c in unreached if c not in accepted]
+
+    def _accepted_runs(self, since: str, candidate: str, judged_list: list[str], matched: set[str],
+                       ids: dict[str, str]) -> set[str]:
+        """The matched commits that sit in a run which is a contiguous slice of some judged
+        chain, in order, and whose tree equals that judged slice merged onto the run's parent
+        ([F24] M2, L7). A commit outside every accepted run is flagged, whatever its patch-id."""
+        if not matched:
+            return set()
+        chains = []
+        for j in judged_list:
+            chain = self._revs([j], [since], reverse=True, first_parent=True)
+            chain_ids = self._patch_map(chain)
+            seq = [chain_ids.get(c) for c in chain]
+            if chain and None not in seq:
+                chains.append((chain, seq))
+        accepted: set[str] = set()
+        spine = self._revs([candidate], [since], reverse=True, first_parent=True)
+        for run in _runs(spine, matched):
+            pids = [ids[c] for c in run]
+            ours = self._lines(["rev-parse", f"{run[0]}^1"])[0]
+            if any(self._run_matches(chain, seq, pids, ours, since, run[-1])
+                   for chain, seq in chains):
+                accepted.update(run)
+        return accepted
+
+    def _run_matches(self, chain: list[str], seq: list[str], pids: list[str], ours: str,
+                     base: str, last: str) -> bool:
+        k = len(pids)
+        for i in range(len(seq) - k + 1):
+            if seq[i:i + k] == pids and self._tree_matches(ours, chain[i + k - 1], base, last):
+                return True
+        return False
+
+    def _tree_matches(self, ours: str, theirs: str, base: str, last: str) -> bool:
+        """True when merging `theirs` onto `ours` (merge base `base`) cleanly gives the tree of
+        `last`. Any failure to compute the merge (conflict, unsupported git) is a mismatch."""
+        proc = self._git(["merge-tree", "--write-tree", f"--merge-base={base}", ours, theirs],
+                         check=False)
+        if proc.returncode != 0 or not proc.stdout.strip():
+            return False
+        tree = proc.stdout.decode().split()[0]
+        return tree == self._lines(["rev-parse", f"{last}^{{tree}}"])[0]
