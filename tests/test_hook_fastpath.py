@@ -65,6 +65,31 @@ class ShellFastPathTests(unittest.TestCase):
             r=subprocess.run([str(ROOT/'bin/swarm-hook'),'--host','claude','done'],input=payload,text=True,capture_output=True,env=env)
             self.assertEqual((r.stdout, r.stderr), ('', ''), 'PostToolUse output left the fast path')
 
+    def test_a_drive_record_line_reaches_python_even_without_a_marker(self):
+        """`swarm deactivate` removes the job's marker; the hook that receipts it must still run."""
+        with tempfile.TemporaryDirectory() as td:
+            home=Path(td); hd=home/'.local/share/swarm/host'; hd.mkdir(parents=True,mode=0o700)
+            fp=hd/'fastpath'; fp.mkdir(mode=0o700)
+            cfg=home/'config.toml'; cfg.write_text('[hook]\nhook_min_interval_s=15\n')
+            boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+            cache=hd/'hook-config-claude'; cache.write_text(f'{cfg}\n{ROOT}\n{fp}\n{home}/active\n1\nuptime-v1\n{boot_id}\n')
+            os.utime(cache, ns=(cfg.stat().st_atime_ns,cfg.stat().st_mtime_ns))
+            (home/'active').mkdir()                         # the marker directory: no marker in it
+            py=home/'venv/bin/python'; py.parent.mkdir(parents=True)
+            py.write_text(f'#!/bin/sh\ncat >"{home}/payload"\ntouch "{home}/ran"\n'); py.chmod(0o755)
+            env=dict(os.environ,HOME=td,SWARM_CONFIG=str(cfg),SWARM_VENV=str(home/'venv'))
+            def run(event, response):
+                (home/'ran').unlink(missing_ok=True)
+                payload=json.dumps({'session_id':'s','tool_name':'Bash','tool_input':{'command':'swarm deactivate --job J'},
+                                    'tool_response':{'stdout':response}})
+                r=subprocess.run([str(ROOT/'bin/swarm-hook'),'--host','claude',event],input=payload,text=True,
+                                 capture_output=True,env=env)
+                self.assertEqual(r.returncode,0,r.stderr)
+                return (home/'ran').exists()
+            self.assertTrue(run('done','posted\nswarm-record: kind=deactivate id=3 rev=1\n'))
+            self.assertFalse(run('done','ordinary output\n'), 'a call with no record line ran Python without a marker')
+            self.assertFalse(run('turn','swarm-record: kind=deactivate id=3 rev=1'), 'only PostToolUse is let through')
+
 from unittest import mock
 from test_hooks_cli import Env
 from swarm import fastpath, paths, hooks

@@ -8,6 +8,7 @@ The board contract and the schema migration run on the memory, file and sqlite b
 from __future__ import annotations
 
 import datetime as dt
+import json
 import os
 import types
 import unittest
@@ -377,6 +378,25 @@ class VerdictDetailsCliTests(GoalEnv):
             from swarm.review import artifact_verdicts
             rec = artifact_verdicts(b, "J")["a1"]
         self.assertEqual((rec["open"], rec["progress"], rec["scope"]), (3, True, "goal"))
+
+    def test_a_spooled_goal_verdict_keeps_candidate_and_req(self):
+        """Task 2's surviving spool mutant: both fields are in the queued file and on the delivered job."""
+        with self.board() as b:
+            self.assertTrue(b.set_job_data("J", "drive.enabled", "1"))
+        path = spool.spool_verdict(self.cfg, "J", self.judge, "met", "goal met", scope="goal", generation=1,
+                                   candidate="c" * 40, req="sha256:r")
+        queued = json.loads(path.read_text())
+        self.assertEqual((queued["candidate"], queued["req"], queued["scope"]), ("c" * 40, "sha256:r", "goal"))
+        self.assertEqual(spool.typed_verdict_fields("goal", 1, None, None, "c" * 40, "sha256:r"),
+                         {"scope": "goal", "generation": 1, "candidate": "c" * 40, "req": "sha256:r"})
+        only_req = json.loads(spool.spool_verdict(self.cfg, "J", self.judge, "met", "again", scope="goal",
+                                                  req="sha256:r").read_text())
+        self.assertNotIn("candidate", only_req)
+        with self.board() as b:
+            self.assertEqual(spool.flush_spool(b, self.cfg), 2)
+            js = b.job_status("J")
+        self.assertEqual((js.verdict, js.verdict_scope, js.verdict_req), ("met", "goal", "sha256:r"))
+        self.assertIsNone(js.verdict_candidate)       # the newer queued verdict (req only) is the latest
 
     def test_an_oversized_report_is_refused_clearly_and_nothing_is_recorded(self):
         rc, _, err = self.verdict("not_met", "--reason", "r", "--next", "n", "--details", "-",

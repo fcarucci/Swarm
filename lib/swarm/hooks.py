@@ -2141,6 +2141,9 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
     elif event == "session-stop" and agent_id:
         return 0   # harness subagents use SubagentStop
 
+    if event in ("turn", "done") and _drive_event(event, cfg, payload, resume):
+        return 0   # refused: the denial is written
+
     lease = _CURRENT.get('lease')
     if not agent_id and lease and lease.enabled:
         markers, _ = _session_markers(cfg, sid) if sid else ({}, {})
@@ -2229,6 +2232,60 @@ def _unchecked_verifier_write(payload: dict, agent_id: str) -> bool:
     except Exception:
         return True
 
+
+
+# --- drive jobs (spec 3.4, 3.11, 4.0, 4.5): the logic is in swarm.drivegate --------------------------------
+
+def kick(now=time.time) -> bool:
+    """Start the supervisor pass now, at most once per 20 s (the logic and its stamp are swarm.drivegate.kick; the
+    CLI calls that one, because this module is not in the directory edition). True when started; never raises."""
+    from swarm import drivegate
+    return drivegate.kick(now)
+
+
+def _drive_event(event: str, cfg: dict, payload: dict, resume: dict | None) -> bool:
+    """The drive gate of PreToolUse (every call of every session, before anything else a hook does: a join, a
+    first call and a seat of an unbound job included) and the receipts of PostToolUse. True when the call was
+    refused (the denial is written). The payload's own agent_id is what tells a main session from a subagent.
+    A session of a drive job (a seat, its subagents, the requester) never holds a fast-path lease: the shell
+    entry would serve its next calls without Python, and with them the gate and the receipts."""
+    from swarm import paths
+    if not (paths.share_dir() / "supervisor" / "drive").is_dir():
+        return False   # no drive job was ever activated on this host: nothing below applies (and nothing is imported)
+    ctx = None
+    try:
+        from swarm import drivegate
+        host = current_host()
+        try:
+            ctx = drivegate.classify(cfg, payload, resume, _resume_binding)
+        except Exception as exc:
+            _log_error("drive classify", str(payload.get("agent_id") or payload.get("session_id")), exc)
+        if ctx is not None:
+            _no_lease(payload)
+        if event == "done":
+            drivegate.post_tool(cfg, payload, host, resume=resume, resume_lookup=_resume_binding)
+            return False
+        why = drivegate.pre_tool(cfg, payload, host, resume=resume, resume_lookup=_resume_binding, ctx=ctx)
+    except Exception as exc:   # never break the agent (a known drive seat's errors are refused inside pre_tool)
+        _log_error("drive", str(payload.get("agent_id") or payload.get("session_id")), exc)
+        return False
+    if why is None:
+        return False
+    _deny(f"[swarm] Refused in a drive job: {why}. Land work with `swarm land`; ask the lead for a seat "
+          f"with `swarm seat request`.")
+    return True
+
+
+def _no_lease(payload: dict) -> None:
+    """End this session's fast-path lease and issue no new one (see _drive_event). Never raises."""
+    try:
+        from swarm import fastpath
+        fastpath.invalidate(payload)
+    except Exception as exc:
+        _log_error("drive lease", str(payload.get("agent_id") or payload.get("session_id")), exc)
+    lease = _CURRENT.get("lease")
+    if lease:
+        lease.enabled = False   # finish() writes nothing more: the invalidation above stands
 
 def _person_grants(cfg: dict, payload: dict) -> None:
     """PreToolUse of a shell call that runs a swarm control command (halt, unhalt, seat, goal-ready, drive):
