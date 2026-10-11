@@ -2369,6 +2369,14 @@ class DriveClaims(DriveHelpers):
                                           lock_seconds=1, max_host_running=4)
         self.assertIsNone(again)                     # stale revision and duplicate attempt
 
+    def test_a_reused_launch_id_is_refused(self):
+        self.goal_job()
+        a, c = self.seat("J", "a"), self.seat("J", "c")
+        self.assertIsNotNone(self.claim(a, launch_id="LX", action="1|seat|a"))
+        self.assertIsNone(self.claim(c, launch_id="LX", action="2|seat|c"))   # another action, same launch
+        self.assertEqual(self.b.seat("J", 1, "c").state, "requested")
+        self.assertEqual(len(self.b.restarts("J")), 1)
+
     def test_duplicate_attempt_is_refused_even_with_a_fresh_seat_revision(self):
         self.goal_job()
         a = self.seat("J", "a")
@@ -2479,12 +2487,23 @@ class DriveClaims(DriveHelpers):
     def test_worktree_ancestor_and_sibling_roots(self):
         self.goal_job()
         a, c = self.seat("J", "a"), self.seat("J", "c")
-        self.assertIsNotNone(self.claim(a, locks=[self.wt("/w/repo/sub")],
-                                        paths={self.wt("/w/repo/sub"): "/w/repo/sub"}))
-        # an ancestor of a live root conflicts too
-        self.assertIsNone(self.claim(c, locks=[self.wt("/w/repo")], paths={self.wt("/w/repo"): "/w/repo"}))
-        # a sibling whose name only starts with the same text is not nested
+        self.assertIsNotNone(self.claim(a, locks=[self.wt("/w/repo")], paths={self.wt("/w/repo"): "/w/repo"}))
+        # a descendant of a live root conflicts
+        self.assertIsNone(self.claim(c, locks=[self.wt("/w/repo/sub")],
+                                     paths={self.wt("/w/repo/sub"): "/w/repo/sub"}))
+        # a sibling whose name only starts with the same text is not nested: /w/repo-2 is claimed
         self.assertIsNotNone(self.claim(c, locks=[self.wt("/w/repo-2")], paths={self.wt("/w/repo-2"): "/w/repo-2"}))
+
+    def test_roots_overlap_compares_whole_path_components(self):
+        from swarm.supervisor.worktree import roots_overlap
+        self.assertTrue(roots_overlap("/w/repo", "/w/repo"))
+        self.assertTrue(roots_overlap("/w/repo/sub", "/w/repo"))
+        self.assertTrue(roots_overlap("/w/repo", "/w/repo/sub"))
+        self.assertTrue(roots_overlap("/w/repo/", "/w/repo"))
+        self.assertTrue(roots_overlap("/x", "/"))
+        self.assertFalse(roots_overlap("/w/repo-2", "/w/repo"))
+        self.assertFalse(roots_overlap("/w/repo", "/w/repo-2"))
+        self.assertFalse(roots_overlap("/w/repo", "/w/rep"))
 
     def test_a_worktree_lock_needs_its_root_path(self):
         self.goal_job()
@@ -2513,6 +2532,16 @@ class DriveClaims(DriveHelpers):
         self.assertEqual(self.b.drive_locks("land:"), [])
         self.assertIsNotNone(self.claim(c, locks=["land:x:main"], launch_id="LC2"))
 
+    def test_release_and_renew_touch_only_their_own_launch(self):
+        self.goal_job()
+        a, c = self.seat("J", "a"), self.seat("J", "c")
+        self.assertIsNotNone(self.claim(a, locks=["land:x:main"], launch_id="LA"))
+        self.assertIsNotNone(self.claim(c, locks=["land:y:main"], launch_id="LC"))
+        self.assertEqual(self.b.renew_drive_locks("LC", self.b.now() + dt.timedelta(hours=2)), 1)
+        self.assertEqual(self.b.release_drive_locks("LA"), 1)
+        self.assertEqual([l.key for l in self.b.drive_locks("land:")], ["land:y:main"])
+        self.assertEqual(self.b.drive_locks("land:")[0].launch_id, "LC")
+
     def test_drive_locks_list_by_prefix_with_their_fields(self):
         self.goal_job()
         a = self.seat("J", "a")
@@ -2528,10 +2557,14 @@ class DriveClaims(DriveHelpers):
     def test_the_claim_writes_a_restart_row_with_its_reservation(self):
         self.goal_job()
         a = self.seat("J", "a")
-        r = self.claim(a, launch_id="LA", action="3|seat|a")
+        r = self.claim(a, launch_id="LA", action="3|seat|a", attempt=2)
         self.assertEqual((r.action_id, r.launch_id, r.reserved_usd, r.outcome, r.ended_at),
                          ("3|seat|a", "LA", 5, None, None))
         self.assertEqual(r.minutes_cap, 60)
+        # the convention the later tasks read: the action is the lineage, the launch is the old key
+        self.assertEqual((r.agent_key, r.old_agent_key, r.reason, r.attempt, r.host, r.new_agent_key),
+                         ("3|seat|a", "launch:LA", "drive:3|seat|a", 2, compat.node(), None))
+        self.assertEqual(r.harness, "claude")
         self.assertTrue(self.b.finish_restart(r.id, "completed", cost_usd=1.25, tokens_in=100, tokens_out=50))
         done = self.b.restarts("J")[0]
         self.assertEqual((done.outcome, done.cost_usd, done.tokens_in, done.tokens_out), ("completed", 1.25, 100, 50))
