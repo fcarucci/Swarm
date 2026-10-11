@@ -79,7 +79,6 @@ def _board_verdict(board, cfg: dict, args) -> int:
     text = _verdict_text(args)
     if text is None:
         return 1
-    before = board.last_message_id(args.job)
     try:
         recorded = deliver_verdict(board, args.job, args.name, args.verdict, text[0], text[1],
                                    getattr(args, "artifact", None), getattr(args, "details_text", None),
@@ -95,15 +94,15 @@ def _board_verdict(board, cfg: dict, args) -> int:
     from swarm.fastpath import changed
     changed(args.job)
     print(f"verdict {args.verdict} recorded for {args.job}, and posted on the board")
-    print(f"swarm-record: kind=verdict id={_verdict_message_id(board, args, before)} rev=1")
+    print(f"swarm-record: kind=verdict id={_verdict_message_id(board, args)} rev=1")
     return 0
 
 
-def _verdict_message_id(board, args, before: int) -> int:
-    """The id of the VERDICT message this judge just posted (the first one after `before`), the record id
-    of the verdict (the record format's last line). 0 if it cannot be found."""
+def _verdict_message_id(board, args) -> int:
+    """The id of the newest VERDICT message this judge posted on the job: the verdict's record id (the
+    record format's last line). 0 if it is not among the newest messages."""
     prefix = f"VERDICT {args.verdict}: "
-    for m in board.messages_after(before, args.job):
+    for m in reversed(board.recent_messages(200, args.job)):
         if m.agent_name == args.name and m.message.startswith(prefix):
             return m.id
     return 0

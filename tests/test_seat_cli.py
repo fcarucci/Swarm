@@ -176,7 +176,7 @@ class Seats(ControlCase):
     @posix_only("the /tmp refusal is about POSIX paths")
     def test_seat_request_under_tmp_refused(self):
         self.roots.append("/tmp/x")
-        with mock.patch.object(drive_cli, "TMP_ROOTS", ("/tmp",)):
+        with mock.patch.object(drive_cli, "TMP_ROOTS", ("/tmp", "/private/tmp")):   # macOS: /tmp -> /private/tmp
             rc, _, err = self.request_seat(workdir="/tmp/x")
         self.assertNotEqual(rc, 0)
         self.assertIn("never /tmp", err)
