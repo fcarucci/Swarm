@@ -102,6 +102,13 @@ class RequesterByGrant(PersonCase):
             self.require({"CLAUDE_CODE_SESSION_ID": "REQ"}, lambda a, j: True, UNDER_CLAUDE)
         self.assertIn("not the requester", str(cm.exception))
 
+    def test_a_seat_of_another_job_gets_no_grant_for_this_one(self):
+        other = ledger.create(self.bk, "K", budgets={}, activated_at="2026-10-11T00:00:00+00:00")
+        ctx = drivegate.Ctx(kind="seat", job="K", led=other, seat="lead",
+                            intent=ledger.Intent("L", "A", 1, "lead", 0.0, 0.0, [], "claimed"))
+        self.assertEqual(self.hook("K-LEAD", ctx=ctx), 0)
+        self.assertEqual(self.hook("K-LEAD", argv=["halt", "--job", "K"], ctx=ctx), 1)
+
     def test_M2_a_subagent_of_the_requester_gets_no_grant(self):
         self.assertEqual(self.hook("REQ", agent_id="sub-1"), 0)
         with self.assertRaises(person.PersonRefused):

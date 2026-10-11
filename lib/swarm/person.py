@@ -9,7 +9,7 @@ or the seat the host-private chain names (seat_context: marker, run file, ledger
 args_sha of the submitted argv (drivegate.submitted_argv, computed here from the parsed arguments), to the
 job's incarnation and generation, lives GRANT_SECONDS, and is used up by the first command that takes it
 (receipts.take). A subagent never gets one. A Codex seat cannot write one (its sandbox is the boundary) nor
-use one up (the unlink fails in the sandbox). A same-user unsandboxed Claude seat could forge one: that is the
+use one up (the unlink fails in the sandbox). A same-user unsandboxed Claude seat could write one itself: that is the
 guardrail line of spec 4.0 [F24].
 
 Person authority (halt, unhalt, seat cancel, a person's seat request, drive repair) is held by exactly two

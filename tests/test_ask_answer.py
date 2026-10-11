@@ -249,7 +249,7 @@ class DriveRecordLines(RoutingEnv):
     def test_ask_and_answer(self):
         self.activate('J', session='root-session')
         self.drive()
-        rc, out, err = self.cli('ask', '--job', 'J', '--to', 'human', 'Choose?')
+        rc, out, err = self.cli('ask', '--job', 'J', '--to', 'human', 'Choose?', '--default', 'red')
         self.assertEqual((rc, err), (0, ''))
         qid = int(out.strip().splitlines()[0].removeprefix('Q'))
         self.assertEqual(self.record(out), ('ask', qid, 1))
