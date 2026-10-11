@@ -954,6 +954,8 @@ REVIEWED = {
     ("bootstrap.py", "writable_roots", ".read_text"): "$CODEX_HOME config and profiles (read)",
     ("bootstrap.py", "exposure_checks", ".read_text"): "~/.claude/settings.json (read)",
     ("bootstrap.py", "_codex_checks", ".read_text"): "$CODEX_HOME/config.toml (read)",
+    ("bootstrap.py", "_codex_drive_checks", ".read_text"): "$CODEX_HOME/config.toml (read)",
+    ("bootstrap.py", "_claude_sandbox_check", ".read_text"): "~/.claude/settings.json (read; the Claude user settings)",
     ("codex_config.py", "_ensure_private_root", "os.open"): "O_DIRECTORY|O_NOFOLLOW on the dir it just created, to fchmod 0700",
     ("cli.py", "_save_config_value", ".mkdir"): "config set --save: the operator's own ~/.config/swarm/config.toml or --config (temp then replace)",
     ("cli.py", "_save_config_value", ".read_text"): "config set --save: the operator's own ~/.config/swarm/config.toml or --config (temp then replace)",
