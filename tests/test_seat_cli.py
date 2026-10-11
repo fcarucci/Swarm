@@ -240,6 +240,17 @@ class Seats(ControlCase):
         self.assertIn("role: engineer", out)
 
 
+class VerdictLine(ControlCase):
+    def test_verdict_prints_record_line_with_its_message_id(self):
+        judge = self.board.allocate_name("jk", JOB)
+        self.board.claim_judge("jk", JOB)
+        rc, out, err = self.run_cmd("verdict", "--job", JOB, "--as", judge, "met", "all requirements hold")
+        self.assertEqual(rc, 0, err)
+        verdict_id = next(m.id for m in self.board.messages_after(0, JOB)
+                          if m.message.startswith("VERDICT met: "))
+        self.assertEqual(self.last_line(out), f"swarm-record: kind=verdict id={verdict_id} rev=1")
+
+
 class Review(ControlCase):
     def setUp(self):
         super().setUp()
