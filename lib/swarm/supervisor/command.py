@@ -65,6 +65,8 @@ class Candidate:
 # lost.retry_slow_finals) whatever is left of PASS_BUDGET_SECONDS, last.
 PASS_BUDGET_SECONDS = 95.0
 PASS_SWEEP_SECONDS = 20.0
+PASS_DRIVE_SECONDS = 50.0      # the driver's share of the pass: it runs first (spec 3.2)
+PASS_REAP_SECONDS = 20.0       # runner.reap stops after this and resumes next pass
 BRIEF_CAPTURE_SECONDS = 10.0
 NOT_ENROLLED = "no local enrolment record (not enrolled by this host user's hooks: never replaced)"
 
@@ -885,7 +887,10 @@ def _dry_run(board, cfg: dict, sup: dict, job, now, say, scope_ok, config_path="
     from swarm.supervisor import orphans, pipeline
     from swarm.supervisor.settings import load_state
     state = load_state()
-    managed = pipeline.run(board, cfg, sup, state, job=job, now=now, dry_run=True, say=say, scope_ok=scope_ok, config_path=config_path)
+    from swarm.supervisor import driver
+    drive_jobs = driver.drive_jobs(board, cfg)   # a dry run never drives; it only leaves the drive jobs alone
+    managed = pipeline.run(board, cfg, sup, state, job=job, now=now, dry_run=True, say=say, scope_ok=scope_ok,
+                           config_path=config_path, skip_jobs=drive_jobs) | drive_jobs
     orphans.run(board, cfg, sup, state, job=job, now=now, dry_run=True, say=say, scope_ok=scope_ok, skip_jobs=managed)
     running = _host_running(board)
     unenrolled: list = []
@@ -950,11 +955,15 @@ def _pass(board, cfg: dict, sup: dict, state: dict, job, now, say, start_runner,
     from swarm.supervisor import outage, runner
     began = time.monotonic() if began is None else began
     outage.note_reachable()
-    runner.reap(cfg, board)
+    from swarm.supervisor import driver, orphans, pipeline
+    drive_jobs = driver.run(board, cfg, sup, state, job=job, now=now, say=say, start_runner=start_runner,
+                            which=which, scope_ok=scope_ok, config_path=config_path,
+                            deadline=min(began + PASS_BUDGET_SECONDS, time.monotonic() + PASS_DRIVE_SECONDS))
+    runner.reap(cfg, board, deadline=time.monotonic() + PASS_REAP_SECONDS)
     clean_resume_markers(board, cfg)
-    from swarm.supervisor import orphans, pipeline
-    managed = pipeline.run(board, cfg, sup, state, job=job, now=now, say=say,
-                           start_runner=start_runner, which=which, scope_ok=scope_ok, config_path=config_path)
+    managed = pipeline.run(board, cfg, sup, state, job=job, now=now, say=say, start_runner=start_runner,
+                           which=which, scope_ok=scope_ok, config_path=config_path,
+                           skip_jobs=drive_jobs) | drive_jobs
     orphans.run(board, cfg, sup, state, job=job, now=now, say=say,
                 start_runner=start_runner, which=which, scope_ok=scope_ok, config_path=config_path, skip_jobs=managed)
     cli.sweep_jobs(board, cfg, time.monotonic() + PASS_SWEEP_SECONDS)

@@ -248,7 +248,7 @@ def _terminal_intent(o) -> dict:
 
 def _terminal(o) -> dict:
     _verdict_keys(o, {"verdict", "at"}, {"reasons", "scope"}, "terminal")
-    _need(o["verdict"] in VERDICTS and _safe_text(o["at"], 64), "terminal verdict/at")
+    _need(o["verdict"] in VERDICTS + ("cancelled",) and _safe_text(o["at"], 64), "terminal verdict/at")
     if "reasons" in o:
         _need(isinstance(o["reasons"], list) and all(_safe_text(x, _MAX_TEXT) for x in o["reasons"]),
               "terminal reasons")
