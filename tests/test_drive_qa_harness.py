@@ -474,6 +474,11 @@ class Hub(Tmp):
         git("--git-dir", str(self.f / "origin.git"), "update-ref", "refs/heads/main", sha)   # as an admin would
         self.assertFalse(self.hub.audit(self.f, self.initial)["linear"])
 
+    def test_every_destination_is_configured_to_deny_non_fast_forwards(self):
+        for d in ("origin", "backup"):
+            r = git("config", "receive.denyNonFastForwards", cwd=self.f / f"{d}.git")
+            self.assertEqual(r.stdout.strip(), "true", d)
+
     def test_branch_deletion_is_allowed_for_the_integrator(self):
         self.commit()
         git("push", "-q", self.urls["origin"], "HEAD:refs/heads/feat/a", cwd=self.w)
