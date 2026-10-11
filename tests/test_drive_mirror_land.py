@@ -275,6 +275,11 @@ class NoCredentialAndMergeBase(PushCase):
         m.fetch_branches(["feat"], 30)
         self.assertEqual(m.merge_base(self.tip, self.base), self.base)
         self.assertEqual(m.merge_base(self.base, self.tip), self.base)
+        other = self.repo("unrelated")
+        stranger = self.commit(other, "u.txt", "u\n", "unrelated root")
+        git(other, "push", "-q", self.remote, "main:stranger")
+        m.fetch_branches(["stranger"], 30)
+        self.assertIsNone(m.merge_base(stranger, self.base))
         with self.assertRaises(MissingCommitError):
             m.merge_base("3" * 40, self.base)
         with self.assertRaises(MirrorError):
@@ -369,6 +374,15 @@ class SshHosts(MirrorCase):
         for bad in ("-oProxyCommand=x", "a b", "", "x;y"):
             with self.assertRaises(MirrorError):
                 mirror.scan_host_keys(bad, 22)
+
+
+class RealTimeout(MirrorCase):
+    @support.posix_only("sleep")
+    def test_a_real_git_timeout_is_a_typed_timeout_error(self):
+        remote, _ = self.remote_with_main()
+        m = Mirror(remote, self.agent_cred())
+        with self.assertRaises(MirrorTimeoutError):
+            m._exec(["sleep", "5"], env={"PATH": "/usr/bin:/bin"}, timeout=0.2)
 
 
 class AuditDeadline(MirrorCase):

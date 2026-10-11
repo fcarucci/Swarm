@@ -203,7 +203,7 @@ class Landing(LandCase):
         res = self.go()
         self.assertTrue(res.ok)
         self.assertEqual(self.pushes, [])
-        self.assertEqual(res.land_id, "7")
+        self.assertEqual((res.land_id, res.why), ("7", "already landed"))
 
     def test_blocked_and_lease_marks_cleared_on_landing(self):
         self.led.integrated[GROUP] = {"blocked": "text", "blocked_id": 4, "lease_held_since": "x", "withdrawn_note": "k"}
@@ -306,7 +306,7 @@ class Checks(LandCase):
         self.assertTrue(res.ok, res.why)
 
     def test_malformed_artifact_refused(self):
-        for bad in ("feat/x", "feat/x@abc", "feat/x@" + "G" * 40, "../x@" + "a" * 40, "x y@" + "a" * 40,
+        for bad in ("a/../x@" + "a" * 40, "feat/x.lock@" + "a" * 40, "feat/x/@" + "a" * 40, "feat/x@abc", "feat/x@" + "G" * 40, "../x@" + "a" * 40, "x y@" + "a" * 40,
                     "feat/x@" + "a" * 64, 5, None):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 parse_artifact(bad)
@@ -359,6 +359,10 @@ class Leases(LandCase):
         keys = lease_keys(destinations_from_owner(self.owner), "main")
         self.assertEqual(keys, sorted(keys))
         self.assertEqual(len(keys), 2)
+        many = [Destination(f"d{i}", f"https://h{i}.test/o/r", {"kind": "none"}) for i in range(8)]
+        self.assertEqual(lease_keys(many, "main"), sorted(lease_keys(many, "main")))
+        self.assertEqual(len(set(lease_keys(many + many, "main"))), 8)
+        self.assertEqual(len(lease_keys(many + many, "main")), 8)
         self.assertTrue(all(k.startswith("land:") and k.endswith(":main") for k in keys))
         self.assertNotEqual(lease_key(self.a, "main"), lease_key(self.a, "dev"))
         same = ["https://GitHub.com/o/r.git", "https://github.com/o/r", "https://github.com:443/o/r/",
@@ -448,6 +452,27 @@ class Journal(LandCase):
         res = self.go(request=other)
         self.assertFalse(res.ok)
         self.assertIn("journal", res.why)
+
+    def test_journal_verified_needs_every_destination_at_this_sha(self):
+        self.go()
+        urls = list(land.read_journal(self.led, 7, NOW, destinations=2).destinations)
+        self.assertTrue(land.journal_verified(self.led, 7, NOW, urls, self.sha))
+        self.assertFalse(land.journal_verified(self.led, 7, NOW, urls, "b" * 40))
+        self.assertFalse(land.journal_verified(self.led, 7, NOW, urls[:1], self.sha))
+        self.assertFalse(land.journal_verified(self.led, 7, NOW, urls + ["x"], self.sha))
+        self.assertFalse(land.journal_verified(self.led, 99, NOW, urls, self.sha))
+
+    def test_a_push_that_changed_nothing_is_not_accepted(self):
+        real = self.factory()
+
+        def make(url, cred):
+            m = real(url, cred)
+            m.push = lambda sha, target, **kw: None
+            return m
+        res = self.go(env={"mirror_factory": make})
+        self.assertFalse(res.ok)
+        self.assertIn("does not contain", res.why)
+        self.assertNotIn("landed", self.led.integrated.get(GROUP, {}))
 
     def test_forged_journal_does_not_validate(self):
         self.go()
@@ -660,6 +685,20 @@ class Audit(LandCase):
         git(self.a, "update-ref", "refs/heads/main", self.base)    # the target is reset behind the landed sha
         out = land.audit(self.env(), self.since(**{self.a: self.sha}), self.sha)
         self.assertTrue(any("reset backwards" in f for f in out.findings), out.findings)
+
+    def test_findings_win_over_a_pending_destination(self):
+        self.landed()
+        extra = self.advance(self.b, "sneaky.txt")
+        real = self.factory()
+
+        def make(url, cred):
+            m = real(url, cred)
+            if url == self.a:
+                m.fetch_branches = lambda b, t: ({}, list(b))
+            return m
+        out = land.audit(self.env(mirror_factory=make), self.since(), extra)
+        self.assertEqual(len(out.findings), 1)
+        self.assertFalse(out.pending)
 
     def test_a_destination_without_an_activation_head_is_a_finding(self):
         self.landed()
