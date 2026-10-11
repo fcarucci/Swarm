@@ -289,6 +289,12 @@ class DriveSeatHandleTest(ResumeBase):
         self.assertIn("--resume", r.argv)
         self.assertTrue(r.argv)
 
+    def test_drive_briefing_without_a_budget_is_refused(self):
+        self.store(claude_lines(), harness="codex")
+        with self.assertRaises(ValueError):
+            R.restore(self.b, self.manifest(harness="codex"), "claude", self.root, cfg={},
+                      workdir=str(self.work), host_label="box-b", drive=True)
+
     def test_drive_briefing_goes_through_the_launch_contract(self):
         self.store(claude_lines(), harness="codex")
         r = R.restore(self.b, self.manifest(harness="codex"), "claude", self.root, cfg={},
@@ -296,7 +302,7 @@ class DriveSeatHandleTest(ResumeBase):
                       read_only=True)
         self.assertEqual(r.mode, "briefing")
         self.assertEqual(r.argv[r.argv.index("--max-budget-usd") + 1], "2")
-        self.assertEqual(r.argv[r.argv.index("--disallowedTools") + 1], "Edit,Write,NotebookEdit")
+        self.assertEqual(r.argv[r.argv.index("--disallowedTools") + 1], "Edit,Write,NotebookEdit,MultiEdit")
 
 
 if __name__ == "__main__":

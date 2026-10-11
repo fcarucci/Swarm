@@ -241,7 +241,7 @@ class LaunchContractTests(unittest.TestCase):
 
     def test_claude_read_only_disallows_edits(self):
         spec = launch.spec_for({}, "claude", prompt="p", workdir="/w", model=None, minutes=5, read_only=True)
-        self.assertEqual(spec.argv[spec.argv.index("--disallowedTools") + 1], "Edit,Write,NotebookEdit")
+        self.assertEqual(spec.argv[spec.argv.index("--disallowedTools") + 1], "Edit,Write,NotebookEdit,MultiEdit")
         writable = launch.spec_for({}, "claude", prompt="p", workdir="/w", model=None, minutes=5)
         self.assertNotIn("--disallowedTools", writable.argv)
 
@@ -249,6 +249,20 @@ class LaunchContractTests(unittest.TestCase):
         for bad in (0, -1, float("nan"), float("inf")):
             with self.assertRaises(ValueError):
                 launch.spec_for({}, "claude", prompt="p", workdir="/w", model=None, minutes=5, budget_usd=bad)
+
+    def test_drive_launch_without_a_budget_is_refused(self):
+        for harness in ("claude", "codex"):
+            with self.assertRaises(ValueError):
+                launch.spec_for({"drive": {"codex_usd_per_mtok": 10}}, harness, prompt="p", workdir="/w",
+                                model=None, minutes=5, drive=True)
+            with self.assertRaises(ValueError):
+                launch.spec_for({}, harness, prompt="p", workdir="/w", model=None, minutes=5, drive=True,
+                                resume="sid")
+        # a drive launch with a budget is fine; a non-drive launch with none keeps the config path
+        self.assertIn("--max-budget-usd", launch.spec_for({}, "claude", prompt="p", workdir="/w", model=None,
+                                                         minutes=5, drive=True, budget_usd=1).argv)
+        self.assertNotIn("--max-budget-usd", launch.spec_for({}, "claude", prompt="p", workdir="/w", model=None,
+                                                            minutes=5).argv)
 
     def test_budget_given_replaces_the_configured_claude_budget(self):
         spec = launch.spec_for(cfg(max_budget_usd=9), "claude", prompt="p", workdir="/w", model=None,

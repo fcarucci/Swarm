@@ -461,7 +461,6 @@ def _allowed_env(src, pass_env=()) -> dict:
 
 SYSTEMCTL_TIMEOUT = 15.0   # a systemctl call's own cap (unit_presence never waits past its deadline)
 CGROUP_ROOT = "/sys/fs/cgroup"   # cgroup v2 mount; tests point it at a fake tree
-DEFAULT_SLICE = "app.slice"   # where systemd-run --user --scope puts a session with no --slice
 _SLICE = re.compile(r"^[a-z0-9][a-z0-9@._-]{0,127}\.slice$")
 
 
@@ -514,10 +513,12 @@ def _unit_slice(unit: str) -> str | None:
 
 
 def _cgroup_presence(unit: str, slice_name: str) -> str:
-    """[F16] The bus-free check, used only when systemctl can't answer. Only on cgroup v2, with
-    the user manager's slice tree readable and the slice the run recorded present; then the
-    scope's directory missing, or its cgroup.procs empty, is "absent" and a populated one is
-    "present". Any other layout (cgroup v1, a missing slice, an unreadable file) is "unknown"."""
+    """[F16] The bus-free check, used only when systemctl can't answer, and only with the slice the
+    run recorded at launch (never a guessed default). Only on cgroup v2, with the user manager's
+    slice tree readable and that slice present: the scope's directory missing is "absent"; a
+    present scope is "present" when its cgroup.events says populated 1 (this covers processes in
+    child cgroups too), "absent" when populated 0. Any other layout (cgroup v1, a missing slice,
+    an unreadable or unexpected events file) is "unknown"."""
     if not (_UNIT.fullmatch(unit) and _SLICE.fullmatch(slice_name) and hasattr(os, "getuid")):
         return "unknown"
     root = CGROUP_ROOT
@@ -534,19 +535,24 @@ def _cgroup_presence(unit: str, slice_name: str) -> str:
     if not os.path.isdir(scope):
         return "absent"
     try:
-        with open(os.path.join(scope, "cgroup.procs"), encoding="ascii", errors="replace") as f:
-            procs = f.read().split()
+        with open(os.path.join(scope, "cgroup.events"), encoding="ascii", errors="replace") as f:
+            events = f.read().split()
     except OSError:
         return "unknown"
-    return "present" if procs else "absent"
+    if events == ["populated", "1"]:
+        return "present"
+    if events == ["populated", "0"]:
+        return "absent"
+    return "unknown"
 
 
-def unit_presence(unit: str, slice_name: str = DEFAULT_SLICE, deadline: float | None = None) -> str:
+def unit_presence(unit: str, slice_name: str | None = None, deadline: float | None = None) -> str:
     """"present" | "absent" | "unknown" for a session's scope. systemctl answers first: "not-found"
-    is absent, any loaded unit present. When systemctl can't answer, the cgroup check (_cgroup_presence)
-    decides, with `slice_name` the slice the run recorded at launch. `deadline` (a clock.monotonic
-    value) caps every systemctl wait to the time left; with none left it is "unknown" and the
-    caller holds (asks again next pass)."""
+    is absent, any loaded unit present. When systemctl can't answer, the cgroup check runs, and only
+    with `slice_name`: the slice the run recorded at launch (run["slice"]). None, or a name that is
+    not a slice name, is "unknown": the fallback never guesses a slice. `deadline` (a clock.monotonic
+    value) caps every systemctl wait to the time left; with none left, or none left after a slow
+    systemctl, it is "unknown" and the caller holds (asks again next pass)."""
     timeout = SYSTEMCTL_TIMEOUT
     if deadline is not None:
         left = float(deadline) - clock.monotonic()
@@ -561,6 +567,10 @@ def unit_presence(unit: str, slice_name: str = DEFAULT_SLICE, deadline: float | 
             return "absent"
         if load:
             return "present"
+    if deadline is not None and clock.monotonic() >= float(deadline):
+        return "unknown"   # the systemctl wait used up the time: no cgroup read past the deadline
+    if not isinstance(slice_name, str):
+        return "unknown"
     return _cgroup_presence(unit, slice_name)
 
 
@@ -619,7 +629,8 @@ def _count(v) -> int:
 
 def parse_usage(harness: str, stdout_tail: str) -> Usage | None:
     """What one session cost, from its captured output. Claude: the last result object's
-    `total_cost_usd` and `usage` (input and output tokens); no numeric cost means unreadable.
+    `total_cost_usd` and `usage` (input and output tokens, cache tokens not counted: the cost is
+    authoritative); no numeric cost means unreadable.
     Codex: the summed `usage` of its turn.completed events (tokens, no cost). None when the
     usage can't be read (killed, truncated, malformed): the driver then charges the reservation."""
     if harness == "claude":
@@ -634,6 +645,9 @@ def parse_usage(harness: str, stdout_tail: str) -> Usage | None:
                  and isinstance(o.get("usage"), dict)]
         if not turns:
             return None
+        # PROVISIONAL: summed per turn.completed. Whether codex reports per-turn or thread-cumulative
+        # usage is unverified (no live capture yet); summing can only overcharge, which is the safe
+        # direction for the budget. Verify against a live `codex exec --json` capture.
         tin = sum(_count(t["usage"].get("input_tokens")) for t in turns)
         tout = sum(_count(t["usage"].get("output_tokens")) for t in turns)
         return Usage(None, tin, tout)
