@@ -86,8 +86,12 @@ def _drive_ledger(bk: str, job: str):
 
 
 def _within(path: str, root: str) -> bool:
-    root = root.rstrip("/")
-    return path == root or path.startswith(root + "/")
+    """Whether `path` is `root` or lies under it (both already real paths; case and separators per OS)."""
+    p, r = os.path.normcase(path), os.path.normcase(root)
+    try:
+        return os.path.commonpath([p, r]) == r
+    except ValueError:   # another drive, or one absolute and one not
+        return False
 
 
 TMP_ROOTS = ("/tmp", "/private/tmp")   # a seat's workdir is never under these (tests patch it: the suite sandbox is under /tmp)
