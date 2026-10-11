@@ -750,7 +750,18 @@ def expire_orphan_questions(board, job: str, now: dt.datetime, *, board_key: str
 
 # --- host sweeps -----------------------------------------------------------------------------
 
-def sweep_locks_by_host(board, cfg: dict, now: dt.datetime, *, hooks: Hooks | None = None) -> int:
+def _ledger_says_open(board_key: str, job: str, launch_id: str) -> bool:
+    """Local evidence: this host's ledger has an intent for the launch that is not concluded."""
+    from swarm.supervisor import ledger as _ledger
+    try:
+        led = _ledger.load(board_key, job)
+    except _ledger.LedgerBadError:
+        return True               # unreadable: hold the lock
+    return led is not None and any(i.launch_id == launch_id and i.state != "concluded" for i in led.intents)
+
+
+def sweep_locks_by_host(board, cfg: dict, now: dt.datetime, *, hooks: Hooks | None = None,
+                        board_key: str | None = None) -> int:
     """Spec 4.5 / Task 3 review L5: sweep `drive_locks` by HOST (every lock whose host is this one,
     whatever its job), never by a cascade from a job: a cascade would skip writer fencing. A lock whose
     holder's launch has ended is released. A lock held by a still-open launch is released only once it
@@ -770,6 +781,9 @@ def sweep_locks_by_host(board, cfg: dict, now: dt.datetime, *, hooks: Hooks | No
                     by_launch[r.launch_id] = r       # a duplicate row with the same launch id: an open one wins,
             rows[lock.job] = by_launch               # so a forged ended copy never releases a live launch's locks
         row = rows[lock.job].get(lock.launch_id)
+        if board_key is not None and (row is None or row.ended_at is not None) \
+                and _ledger_says_open(board_key, lock.job, lock.launch_id):
+            continue          # a board row alone (absent or forged ended) never frees a launch the ledger holds open
         if row is not None and row.ended_at is None:
             if lock.expires_at > now:
                 continue                                    # live and valid
