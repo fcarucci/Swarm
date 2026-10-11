@@ -451,14 +451,12 @@ def cli_closed_by() -> str | None:
 
 
 def drive_ledger_present(cfg: dict, job: str) -> bool:
-    """Whether this host holds a drive ledger for `job` (a bad one counts: it is the driver's to
-    report). The core sweeps leave such a job to the driver."""
+    """Whether this host holds a drive ledger entry for `job` (a bad one counts: it is the driver's to
+    report). Read-only: a sweep creates nothing. The core sweeps leave such a job to the driver."""
     from swarm.board.autoinit import store_key
     from swarm.supervisor import ledger
     try:
-        return ledger.load(store_key(cfg), job) is not None
-    except ledger.LedgerBadError:
-        return True
+        return ledger.exists(store_key(cfg), job)
     except Exception as exc:
         from swarm import transcripts as _t
         _t.log(f"sweep: drive ledger check for {job} failed: {type(exc).__name__}")
