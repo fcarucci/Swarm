@@ -345,6 +345,109 @@ class HaltLedgerTests(T.LifeCase):
         self.assertEqual([k for k in self.reload().watermarks if k.startswith("hopen:")], [])
 
 
+class RereviewTests(T.LifeCase):
+    def test_a_forged_open_duplicate_does_not_hide_the_real_session(self):
+        lid = self.launch(locks=["repo:x"])
+        real = self.row(lid)
+        self.b.finish_restart(real.id, "cancelled")
+        with self.h.store.lock:
+            dup = dict(next(r for r in self.h.store.restarts if r["launch_id"] == lid))
+            dup["id"] = max(r["id"] for r in self.h.store.restarts) + 1
+            dup["ended_at"] = None
+            self.h.store.restarts.append(dup)
+        self.run.live.add(lid)                                       # the real session still runs
+        self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.at(200), hooks=self.run.hooks()), 0)
+        self.assertEqual(len(self.b.drive_locks()), 1)
+        self.assertEqual(self.run.calls[0][0], "stop")
+
+    def test_an_ended_row_on_another_host_does_not_free_the_lock(self):
+        lid = self.launch(locks=["repo:x"])
+        self.b.finish_restart(self.row(lid).id, "cancelled")
+        with self.h.store.lock:
+            for r in self.h.store.restarts:
+                r["host"] = "host-a"
+        self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.at(200), hooks=self.run.hooks()), 0)
+        self.assertEqual(len(self.b.drive_locks()), 1)
+
+    def _dup_rows(self, lid):
+        real = self.row(lid)
+        with self.h.store.lock:
+            dup = dict(next(r for r in self.h.store.restarts if r["launch_id"] == lid))
+            dup["id"] = max(r["id"] for r in self.h.store.restarts) + 1
+            self.h.store.restarts.append(dup)
+        return real.id, dup["id"]
+
+    def test_every_row_of_the_launch_is_fenced_and_checked(self):
+        for live_index in (0, 1):
+            with self.subTest(live=live_index):
+                self.setUp()
+                lid = self.launch(locks=["repo:x"])
+                ids = self._dup_rows(lid)
+                stopped = []
+                hooks = life.Hooks(stop_rows=lambda b, c, rows: stopped.append(sorted(r.id for r in rows)),
+                                   rows_live=lambda b, c, rows: [r for r in rows if r.id == ids[live_index]])
+                self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.at(200), hooks=hooks), 0)
+                self.assertEqual(stopped, [sorted(ids)])
+                self.assertEqual(len(self.b.drive_locks()), 1)
+
+    def test_all_rows_are_ended_when_the_lock_is_released(self):
+        lid = self.launch(locks=["repo:x"])
+        ids = self._dup_rows(lid)
+        self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.at(200), hooks=self.run.hooks()), 1)
+        self.assertTrue(all(r.ended_at is not None for r in self.b.restarts("J") if r.id in ids))
+
+    def test_a_lock_and_row_on_another_host_are_left_alone(self):
+        lid = self.launch(locks=["repo:x"])
+        with self.h.store.lock:
+            for r in self.h.store.restarts:
+                r["host"] = "host-b"
+            for l in self.h.store.drive_locks:
+                l["host"] = "host-b"
+        self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.at(200), hooks=self.run.hooks()), 0)
+        self.assertEqual(self.run.calls, [])
+        self.assertIsNone(self.row(lid).ended_at)
+
+    def test_a_finished_ledger_is_not_a_drive_view(self):
+        from swarm.supervisor import orphans
+        with mock.patch("swarm.board.autoinit.store_key", return_value="bk"):
+            self.assertEqual(orphans.drive_view(self.b, self.cfg, "J"), (True, 1))
+            self.pending_met()
+            self.assertTrue(life.terminalize(self.b, self.cfg, self.led, self.at(1), hooks=self.run.hooks()))
+            self.assertEqual(orphans.drive_view(self.b, self.cfg, "J"), (False, None))
+
+    def test_the_ledger_is_asked_by_default_through_the_stores_key(self):
+        lid = self.launch(locks=["repo:x"])
+        self.b.finish_restart(self.row(lid).id, "cancelled")
+        with mock.patch("swarm.board.autoinit.store_key", return_value="bk"):
+            self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.at(1), hooks=self.run.hooks()), 0)
+        self.assertEqual(len(self.b.drive_locks()), 1)
+
+    def test_a_finished_ledger_does_not_claim_the_job(self):
+        self.pending_met()
+        self.assertTrue(life.terminalize(self.b, self.cfg, self.led, self.at(1), hooks=self.run.hooks()))
+        self.assertFalse(ledger.claims("bk", "J"))
+        self.assertTrue(ledger.exists("bk", "J"))
+
+    def test_an_unfinished_ledger_claims_the_job(self):
+        self.assertTrue(ledger.claims("bk", "J"))
+        self.assertFalse(ledger.claims("bk", "nope"))
+
+    def test_crash_recovery_needs_the_board_status_to_match_the_intent(self):
+        self.pending_met()
+        self.led.watermarks[life._closing_key(self.led.terminal_intent)] = 1
+        self.led.save()
+        self.b.close_job("J", "failed", "writer", closed_by="driver")          # not "completed" for a MET
+        self.assertFalse(life.terminalize(self.b, self.cfg, self.led, self.at(1), hooks=self.run.hooks()))
+        self.assertIsNone(self.reload().terminal)
+
+    def test_cancel_does_not_overwrite_a_met_whose_close_began(self):
+        self.pending_met()
+        with self.barrier_crash("terminal_closed_before_ledger"), self.assertRaises(T.Crash):
+            life.terminalize(self.b, self.cfg, self.led, self.at(1), hooks=self.run.hooks())
+        self.assertTrue(life.cancel_job(self.b, self.cfg, self.reload(), "alice", self.at(2), hooks=self.run.hooks()))
+        self.assertEqual(self.reload().terminal["verdict"], "met")
+
+
 class CancelTests(T.LifeCase):
     """CANCELLED: a person ended the job; ledger first, every terminal state clears the claim."""
 

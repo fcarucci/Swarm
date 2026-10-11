@@ -404,7 +404,8 @@ def terminalize(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks | None 
         # Crashed after the close: only when the LEDGER says this driver was closing (the marker is
         # written before close_job). The board's closed_by is text anyone can write.
         if js.status in ("completed", "failed") and js.closed_by == CLOSED_BY \
-                and _closing_key(intent) in led.watermarks:
+                and _closing_key(intent) in led.watermarks \
+                and (js.status == "completed") == (intent["verdict"] == "met"):
             return _commit(board, cfg, led, intent, now, reasons, hooks)
         if js.closed_by == CLOSED_BY and "tamper_closed" not in led.watermarks:
             led.watermarks["tamper_closed"] = 1
@@ -467,6 +468,9 @@ def cancel_job(board, cfg: dict, led, actor: str, now: dt.datetime, *, reason: s
     if led.terminal is not None:
         repair_claim(board, led)
         return False
+    pending = led.terminal_intent
+    if pending is not None and _closing_key(pending) in led.watermarks:
+        return terminalize(board, cfg, led, now, hooks=hooks)     # its close already began: finish that, not a cancel
     cause = (reason or "cancelled by a person").strip()[:200]
     led.terminal_intent = {"verdict": "cancelled", "scope": "job", "generation": led.generation,
                            "candidate": None, "req": None, "by": actor, "at": _iso(now)}
@@ -775,6 +779,12 @@ def sweep_locks_by_host(board, cfg: dict, now: dt.datetime, *, hooks: Hooks | No
     has expired AND its holder is fenced (session stopped and confirmed gone); until then it keeps
     blocking. The number released."""
     hooks = hooks or Hooks()
+    if board_key is None:
+        try:                              # never weaker without the key: the ledger is asked whenever it can be
+            from swarm.board.autoinit import store_key
+            board_key = store_key(cfg)
+        except Exception:
+            board_key = None
     rows: dict = {}
     n = 0
     for lock in board.drive_locks():
@@ -783,29 +793,29 @@ def sweep_locks_by_host(board, cfg: dict, now: dt.datetime, *, hooks: Hooks | No
         if lock.job not in rows:
             by_launch: dict = {}
             for r in board.restarts(job=lock.job):
-                cur = by_launch.get(r.launch_id)
-                if cur is None or (cur.ended_at is not None and r.ended_at is None):
-                    by_launch[r.launch_id] = r       # a duplicate row with the same launch id: an open one wins,
-            rows[lock.job] = by_launch               # so a forged ended copy never releases a live launch's locks
-        row = rows[lock.job].get(lock.launch_id)
-        if row is None or row.ended_at is not None:
-            # A board row alone (missing, or a forged "ended" copy) never frees a lock: positive local
-            # evidence is needed. The ledger says the launch is concluded, or (no ledger intent for it)
-            # the row is ended and its session is confirmed gone here.
+                by_launch.setdefault(r.launch_id, []).append(r)    # every row of a launch id, forged copies too
+            rows[lock.job] = by_launch
+        rs = rows[lock.job].get(lock.launch_id, [])
+        if any(r.host != lock.host for r in rs):
+            log.warning("lock %s of %s: a launch row is on another host; kept", lock.launch_id, lock.job)
+            continue                      # not ours to fence or end: it keeps blocking
+        open_rows = [r for r in rs if r.ended_at is None]
+        if not open_rows:
+            # A board row alone (missing, or an "ended" copy) never frees a lock: positive local evidence is
+            # needed: the ledger says the launch is concluded, or (no ledger intent for it) every row is
+            # ended and no session of any of them is live here.
             seen = _ledger_launch(board_key, lock.job, lock.launch_id) if board_key is not None else "unknown"
             if seen in ("open", "bad"):
                 continue
-            if seen != "concluded" and (row is None or hooks.rows_live(board, cfg, [row])):
+            if seen != "concluded" and (not rs or hooks.rows_live(board, cfg, rs)):
                 continue
-        if row is not None and row.ended_at is None:
+        else:
             if lock.expires_at > now:
                 continue                                    # live and valid
-            if row.host != lock.host:      # (lock.host is this host: checked above)
-                log.warning("lock %s of %s: its open launch row is on another host; kept", lock.launch_id, lock.job)
-                continue                  # not ours to fence or end: it keeps blocking
-            hooks.stop_rows(board, cfg, [row])              # expired: fence the holder first
-            if hooks.rows_live(board, cfg, [row]):
+            hooks.stop_rows(board, cfg, rs)                 # expired: fence the holder (every row) first
+            if hooks.rows_live(board, cfg, rs):
                 continue
-            board.finish_restart(row.id, "timeout")
+            for r in open_rows:
+                board.finish_restart(r.id, "timeout")
         n += board.release_drive_locks(lock.launch_id, job=lock.job, holder=lock.holder)
     return n
