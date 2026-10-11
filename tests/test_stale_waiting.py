@@ -55,6 +55,33 @@ class StaleWaitingTests(Env):
     def sweep(self):
         return self.cli("purge")
 
+    # ---- a reopened job's quiet time starts at the reopening, not at the old silence
+    def test_a_reactivated_job_is_not_closed_by_its_old_silence(self):
+        self.waiting_goal_job(10 * 3600)            # idle for hours, past the close threshold
+        self.activate("J", "--goal", "ship it")     # reopened now
+        self.sweep()
+        self.assertEqual(self.job().status, "active")
+        self.assertEqual(self.notices(), [])
+        self.h.backdate_job("J", created_at=11 * 3600, activated_at=60)
+        self.sweep()                                # swept shortly after the reopening
+        self.assertEqual(self.job().status, "active")
+        self.assertEqual(self.notices(), [])
+
+    def test_a_reactivated_job_still_closes_once_quiet_again(self):
+        self.waiting_goal_job(10 * 3600)
+        self.activate("J", "--goal", "ship it")
+        self.h.backdate_job("J", activated_at=CLOSE_AT)
+        self.sweep()
+        self.assertEqual(self.job().status, "failed")
+
+    def test_the_notice_carries_the_reopening_as_quiet_start(self):
+        self.waiting_goal_job(10 * 3600)
+        self.activate("J", "--goal", "ship it")
+        self.h.backdate_job("J", activated_at=NOTICE_AT)
+        self.sweep()
+        self.assertEqual(self.job().status, "active")
+        self.assertEqual(len(self.notices()), 1)
+
     # ---- the notice
     def test_one_notice_when_quiet_past_stale_waiting_minutes(self):
         self.waiting_goal_job(NOTICE_AT)
@@ -114,6 +141,24 @@ class StaleWaitingTests(Env):
         self.sweep()
         s = self.job()
         self.assertEqual((s.status, s.closed_by), ("completed", "auto"))
+
+    def test_unreachable_verdict_is_named_in_the_outcome_not_no_verdict(self):
+        """A stale job whose judge recorded `unreachable` is closed failed, and the outcome says so."""
+        self.activate("J", "--goal", "ship it")
+        with self.board() as b:
+            judge = b.allocate_name("judge-1", "J", "judge")
+            self.assertTrue(b.claim_judge("judge-1", "J"))
+            self.assertTrue(b.record_verdict("J", judge, "unreachable", "cannot be built", details="tried x", scope="goal"))
+            b.close_agent("judge-1", "done")
+        rc, _, err = self.cli("wait", "--job", "J", "--on", "the human")
+        self.assertEqual(rc, 0, err)
+        self.quiet(CLOSE_AT, agents=("judge-1",))
+        self.h.backdate_job("J", verdict_at=CLOSE_AT)
+        self.sweep()
+        s = self.job()
+        self.assertEqual((s.status, s.closed_by), ("failed", "auto"))
+        self.assertEqual(s.outcome, "auto-closed: waiting with no live agents; verdict unreachable")
+        self.assertNotIn("no verdict", s.outcome)
 
     def test_met_verdict_with_accepted_work_awaiting_finalization_closes_failed(self):
         """Met verdict on a pipeline artifact nobody finalized (still waiting): failed, not completed."""

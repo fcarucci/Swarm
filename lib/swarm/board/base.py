@@ -1153,13 +1153,19 @@ def derive_job_status(js: JobStatus, idle_minutes: float, now: _dt.datetime) -> 
         return "active"
     if goal_unmet(js) and not js.idle:
         return WAITING_GOAL
-    last = js.last_activity_at or js.activated_at or js.created_at
+    last = quiet_start(js)
     return "active" if (now - last).total_seconds() < idle_minutes * 60 else "idle"
 
 
 def run_start(js: JobStatus) -> _dt.datetime:
     """When the job's current run began: its last activation, else its creation."""
     return js.activated_at or js.created_at
+
+
+def quiet_start(js: JobStatus, since: _dt.datetime | None = None) -> _dt.datetime:
+    """When the job's current quiet spell began: the newest of its board activity (`since`, else
+    last_activity_at) and its run's start. A job reopened after a long silence starts quiet anew."""
+    return max(t for t in (since or js.last_activity_at, run_start(js)) if t)
 
 
 def run_agents(agents: Sequence[AgentStatus], start: _dt.datetime) -> list[AgentStatus]:
@@ -1221,7 +1227,7 @@ def stale_waiting(js: JobStatus, now: _dt.datetime, minutes: float, since: _dt.d
     is waiting at all is Board._is_waiting's question."""
     if not minutes or minutes <= 0 or js.started or js.running or js.idle:
         return False
-    return now - (since or js.last_activity_at or run_start(js)) >= _dt.timedelta(minutes=minutes)
+    return now - quiet_start(js, since) >= _dt.timedelta(minutes=minutes)
 
 
 def stall_cap(js: JobStatus, stall_hours: float, goal_stall_hours: float) -> float | None:
@@ -1258,7 +1264,7 @@ def orphaned(js: JobStatus, now: _dt.datetime, orphan_minutes: float) -> bool:
     if derive_job_status(js, 0, now) in ("waiting", "paused") or js.status != "active":
         return False
     quiet = _dt.timedelta(minutes=orphan_minutes)
-    return now - (js.last_activity_at or run_start(js)) >= quiet and now - run_start(js) >= quiet
+    return now - quiet_start(js) >= quiet and now - run_start(js) >= quiet
 
 
 def auto_close_candidate(js: JobStatus, before: _dt.datetime) -> bool:
@@ -1783,7 +1789,7 @@ class Board(abc.ABC):
             return None
         if watch is not None and watch(js.job).active():
             return None
-        quiet_since = since or js.last_activity_at or run_start(js)
+        quiet_since = quiet_start(js, since)
         total = max(close_minutes or 0, notice_minutes)
         if close_minutes and close_minutes > 0 and now - quiet_since >= _dt.timedelta(minutes=total):
             from swarm.review import auto_close_pending
@@ -1793,6 +1799,8 @@ class Board(abc.ABC):
                 return ExpiryAction("failed", "auto-closed: goal met but accepted work never finalized", None,
                                     CloseGuard(pending_ok=True), stale=True)
             outcome = ("auto-closed: waiting with no live agents; verdict met" if met
+                       else "auto-closed: waiting with no live agents; verdict unreachable"
+                       if js.verdict == "unreachable"
                        else "auto-closed: waiting with no live agents and no verdict")
             guard = CloseGuard() if met or not goal_unmet(js) else CloseGuard(False, js.goal, js.max_hours)
             return ExpiryAction("completed" if met else "failed", outcome, None, guard, stale=True)
