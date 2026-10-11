@@ -248,6 +248,19 @@ class Landing(LandCase):
         self.assertFalse(res.ok)
         self.assertIn("does not exist", res.why)
 
+    def test_target_head_missing_after_a_good_fetch_is_refused(self):
+        real = self.factory()
+
+        def make(url, cred):
+            m = real(url, cred)
+            inner = m.head
+            m.head = lambda b: None if b == "main" else inner(b)
+            return m
+        res = self.go(env={"mirror_factory": make})
+        self.assertFalse(res.ok)
+        self.assertIn("does not exist", res.why)
+        self.assertEqual(self.pushes, [])
+
     def test_branch_equal_to_target_refused(self):
         res = self.go(request=self.request(f"main@{self.sha}", seat=land.integrator_seat("main")))
         self.assertFalse(res.ok)
@@ -298,6 +311,13 @@ class Checks(LandCase):
         res = land.land(self.board, env, "J", f"{GROUP}@{self.sha}", caller_session="")
         self.assertFalse(res.ok)
 
+    def test_an_empty_session_never_matches_an_empty_seat_session(self):
+        with mock.patch.object(type(self.board), "seats", lambda s, job, gen=None, include_closed=True: [
+                mock.Mock(seat=SEAT, session_id="")]):
+            res = land.land(self.board, self.env(), "J", f"{GROUP}@{self.sha}", caller_session="")
+        self.assertFalse(res.ok)
+        self.assertEqual(self.pushes, [])
+
     def test_integrator_session_may_land_synchronously(self):
         seat = self.board.seat("J", 1, SEAT)
         with mock.patch.object(type(self.board), "seats", lambda s, job, gen=None, include_closed=True: [
@@ -306,7 +326,7 @@ class Checks(LandCase):
         self.assertTrue(res.ok, res.why)
 
     def test_malformed_artifact_refused(self):
-        for bad in ("a/../x@" + "a" * 40, "feat/x.lock@" + "a" * 40, "feat/x/@" + "a" * 40, "feat/x@abc", "feat/x@" + "G" * 40, "../x@" + "a" * 40, "x y@" + "a" * 40,
+        for bad in ("a/../x@" + "a" * 40, "feat/x.lock@" + "a" * 40, "feat/x/@" + "a" * 40, "feat/x@abc", "feat/x@abcd", "feat/x@" + "a" * 39, "feat/x@" + "G" * 40, "../x@" + "a" * 40, "x y@" + "a" * 40,
                     "feat/x@" + "a" * 64, 5, None):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 parse_artifact(bad)
@@ -371,6 +391,10 @@ class Leases(LandCase):
         self.assertEqual(normalize_url("git@github.com:o/r.git"), normalize_url("ssh://git@github.com/o/r"))
         self.assertNotEqual(normalize_url("https://github.com/o/r"), normalize_url("https://github.com/o/s"))
         self.assertNotEqual(normalize_url("ssh://h:2222/o/r"), normalize_url("ssh://h/o/r"))
+        self.assertNotEqual(normalize_url("http://h/o/r"), normalize_url("https://h/o/r"))
+        self.assertFalse(normalize_url("C:\\repos\\r.git").startswith("ssh://"))
+        self.assertFalse(normalize_url("C:/repos/r.git").startswith("ssh://"))
+        self.assertNotEqual(normalize_url("ssh://h/o/r"), normalize_url("https://h/o/r"))
 
     def test_second_job_cannot_claim_the_same_destinations(self):
         self.board.open_job("K", None, None, None, "me", goal="G")
@@ -424,9 +448,23 @@ class Journal(LandCase):
         self.pushes.clear()
         res = land.complete_land(self.board, self.env(), "J", self.request(), action_id="gen1|land|-|feat/x|1|8")
         self.assertTrue(res.ok, res.why)
+        self.assertEqual(res.land_rev, 5)           # a verified destination is not journaled again
         self.assertEqual(self.head(self.b), self.sha)
         self.assertEqual([p[0] for p in self.pushes], [self.b])
         self.assertEqual(self.led.integrated[GROUP]["landed"], self.sha)
+
+    def test_resume_refuses_when_the_target_moved_meanwhile(self):
+        def hit(name):
+            raise Crash()
+        with mock.patch.object(barrier, "hit", hit), self.assertRaises(Crash):
+            self.go()
+        self.advance(self.b)
+        self.pushes.clear()
+        res = self.go()
+        self.assertFalse(res.ok)
+        self.assertIn("moved", res.why)
+        self.assertIn("rebase", res.why)
+        self.assertEqual(self.pushes, [])
 
     def test_crash_after_push_before_journal_does_not_push_twice(self):
         real_write = receipts.write
@@ -564,6 +602,7 @@ class Twins(LandCase):
         self.judged = {judged}
         res = self.go(request=self.request(f"{GROUP}@{sha}"), env={"judged_branches": lambda: ["judged-old"]})
         self.assertFalse(res.ok)
+        self.assertIn("met verdict", res.why)       # not a twin: the generic refusal, not the typed one
         self.assertEqual(self.pushes, [])
 
 
@@ -854,6 +893,9 @@ class Requests(LandCase):
         self.receipt(wrong_kind, kind="done")
         junk = self.post("LAND-REQUEST not-an-artifact")
         self.receipt(junk, body="LAND-REQUEST not-an-artifact")
+        body = f"NOT-REQUEST!!{GROUP}@{self.sha}"          # same length as the prefix, receipted body
+        shifted = self.post(body)
+        self.receipt(shifted, body=body)
         chatter = self.post("hello")
         self.assertEqual(self.find(), [])
         self.assertNotIn(plain, [r.id for r in self.find()])

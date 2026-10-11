@@ -181,7 +181,8 @@ def _kill_group(proc: subprocess.Popen) -> None:
             pass
 
 
-_SCP_URL = re.compile(r"(?:[^@/:\s]+@)?(?P<host>[A-Za-z0-9][A-Za-z0-9.-]*):(?!//)")
+# scp-style `user@host:path`. A one-letter "host" is a Windows drive (C:\repo), as git itself reads it.
+_SCP_URL = re.compile(r"(?:[^@/:\s]+@)?(?P<host>[A-Za-z0-9][A-Za-z0-9.-]+):(?!//)")
 
 
 def ssh_host_of(url: str) -> tuple[str, int] | None:

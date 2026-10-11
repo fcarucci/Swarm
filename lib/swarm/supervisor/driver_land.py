@@ -91,18 +91,18 @@ def _text(prefix: str, artifact: str, why: str | None = None) -> str:
 
 
 def _set_lease_mark(env: LandEnv, branch: str, held: bool) -> None:
+    """integrated[group].lease_held_since: set when a hold starts, kept while it lasts (the ruling clock), cleared
+    when the hold ends."""
+    if held == ("lease_held_since" in (env.led.integrated.get(branch) or {})):
+        return
+
     def apply(led):
         ig = dict(led.integrated.get(branch) or {})
-        if held and "lease_held_since" not in ig:
+        if held:
             ig["lease_held_since"] = env.now().isoformat()
-        elif not held:
-            ig.pop("lease_held_since", None)
         else:
-            return
+            ig.pop("lease_held_since", None)
         led.integrated[branch] = ig
-    before = dict(env.led.integrated.get(branch) or {})
-    if held == ("lease_held_since" in before):
-        return
     land.update_ledger(env.led, apply)
 
 
