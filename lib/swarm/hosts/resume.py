@@ -176,7 +176,7 @@ def restore(board, manifest: dict, host: str | None = None, dest_root=None,
     from swarm.supervisor import launch
     spec = launch.spec_for(cfg, target, prompt=prompt, workdir=cwd, model=model,
                            minutes=float(manifest.get("minutes") or 30), budget_usd=budget_usd,
-                           read_only=read_only, **({"session_id": sid} if sid else {}))
+                           read_only=read_only, drive=drive, **({"session_id": sid} if sid else {}))
     return Restored(target, "briefing", spec.argv, cwd, prompt, spec.session_id, None, False, tuple(notes))
 
 

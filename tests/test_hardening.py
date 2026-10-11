@@ -980,7 +980,7 @@ REVIEWED = {
     ("supervisor/runner.py", "_members", ".read_bytes"): "/proc",
     ("supervisor/runner.py", "open_workdir", "os.open"): "O_DIRECTORY|O_NOFOLLOW walk with openat",
     ("supervisor/runner.py", "_cgroup_presence", "open"):
-        "/sys/fs/cgroup: the kernel's read-only cgroup tree (cgroup.procs), never a state or spool path; "
+        "/sys/fs/cgroup: the kernel's read-only cgroup tree (cgroup.events), never a state or spool path; "
         "the unit and slice names are validated first",
     ("transcripts.py", "read_slice", "open"): "a host transcript path checked by transcript_ok (read)",
     ("transcripts.py", "_read", ".read_bytes"): "a host transcript path checked by transcript_ok (read)",
