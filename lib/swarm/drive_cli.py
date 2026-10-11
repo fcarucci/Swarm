@@ -229,8 +229,31 @@ def cmd_seat_show(board, cfg, args) -> int:
     return 0
 
 
+def _lead_seat_name(board, job: str, generation: int, key: str) -> str:
+    for s in board.seats(job, generation):
+        if s.agent_key == key and (s.seat == "lead" or s.seat.startswith("lead~")):
+            return s.seat
+    raise Refuse("no lead seat of this job is held by this session")
+
+
+def cmd_seat_ack(board, cfg, args) -> int:
+    """The lead acknowledges the events it was woken for, up to ID (spec [F4]): its own event mark only,
+    which only moves forward. Only the lead's enrolled session may do it."""
+    bk = board_key(cfg)
+    led = _drive_ledger(bk, args.job)
+    key = _caller_agent(bk, os.environ)
+    if key is None or key not in _lead_keys(board, args.job, led.generation):
+        raise Refuse("seat ack comes from the job's lead session (a person cannot acknowledge for the lead)")
+    if args.upto < 0:
+        raise Refuse("--upto must be an event id, 0 or more")
+    mark = f"event:{_lead_seat_name(board, args.job, led.generation, key)}"
+    led.watermarks[mark] = max(led.watermarks.get(mark, 0), args.upto)
+    led.save()
+    return _record("ack", led.ledger_rev, 1)
+
+
 SEAT_COMMANDS = {"request": cmd_seat_request, "release": cmd_seat_release, "cancel": cmd_seat_cancel,
-                 "list": cmd_seat_list, "show": cmd_seat_show}
+                 "list": cmd_seat_list, "show": cmd_seat_show, "ack": cmd_seat_ack}
 
 
 def cmd_seat(board, cfg, args) -> int:
@@ -369,6 +392,8 @@ def register(sub, handlers: dict) -> None:
             p.add_argument("--reason")
         if name == "cancel":
             p.add_argument("--reason")
+    ak = ss.add_parser("ack", help="the lead acknowledges the events it was woken for, up to ID")
+    ak.add_argument("--job", required=True); ak.add_argument("--upto", type=int, required=True)
     rv = sub.add_parser("review", help="post a structured review of an artifact (an enrolled reviewer)")
     rv.add_argument("--job", required=True); rv.add_argument("--artifact", required=True)
     rv.add_argument("outcome", choices=REVIEW_OUTCOMES); rv.add_argument("--report", required=True)
