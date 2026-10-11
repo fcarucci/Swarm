@@ -2656,6 +2656,7 @@ def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="swarm", description=__doc__.split("\n\n")[0])
     p.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     sub = p.add_subparsers(dest="cmd", required=True)
+    from swarm import drive_cli; drive_cli.register(sub, BOARD_COMMANDS)   # seat, review, goal-ready, halt, unhalt
     ini = sub.add_parser("init", help="set up: config, launcher, board; host settings only with --apply-settings")
     ini.add_argument("--no-hooks", action="store_true", help="ignored (hooks come from the plugin)")
     ini.add_argument("--host", choices=["claude", "codex"], help="the host to set up (default: the one running this, "

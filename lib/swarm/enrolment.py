@@ -391,3 +391,20 @@ def find_job_owner(board_key: str, job: str, *, strict: bool = False):
     if rec.kind != "owner" or rec.board_key != board_key or rec.job != job:
         raise OwnerRecordInvalid("owner record format/fields invalid (it is for another key)")
     return rec
+
+
+def agent_sessions(board_key: str) -> dict:
+    """session id -> agent key for the agent records of this board (every job). Read only: a
+    missing directory is an empty map; an unsafe or unreadable entry is skipped, never followed."""
+    out = {}
+    try:
+        with _dir(create=False) as d:
+            for name in sorted(compat.listdir(d)):
+                if not name.startswith("agent-") or not _FILE.fullmatch(name):
+                    continue
+                rec = _parse(safefs.read(d, name, RECORD_MAX))
+                if rec and rec.kind == "agent" and rec.board_key == board_key and rec.session_id:
+                    out[rec.session_id] = rec.agent_key
+    except FileNotFoundError:
+        pass
+    return out
