@@ -366,6 +366,16 @@ class DriveRepair(ControlCase):
         self.assertTrue(fresh.halted["by"].startswith("person"))
         self.assertTrue(any(".bad-" in p.name for p in self.home.rglob("*")), "the bad entry is kept, not deleted")
 
+    def test_repair_is_idempotent_and_keeps_one_archive(self):
+        self.bad_entry()
+        self.assertEqual(self.run_cmd("drive", "repair", "--job", JOB)[0], 0)
+        rc, _, err = self.run_cmd("drive", "repair", "--job", JOB)
+        self.assertEqual(rc, 1)
+        self.assertIn("nothing to repair", err)
+        archives = [p.name for p in self.home.rglob("*") if ".bad-" in p.name]
+        self.assertEqual(len(archives), 1)
+        self.assertRegex(archives[0], r"\.bad-\d{8}T\d{6}Z-[0-9a-f]{12}$")
+
     def test_repair_refuses_a_readable_ledger(self):
         rc, _, err = self.run_cmd("drive", "repair", "--job", JOB)
         self.assertEqual(rc, 1)
