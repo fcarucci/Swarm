@@ -257,3 +257,45 @@ finalize_enabled = true
 # The same values are available as SWARM_EVENT, SWARM_JOB, SWARM_ID, SWARM_TO, SWARM_SUMMARY.
 [notify]
 # on_question = "your-command {event} {job} {id} {to} {summary}"
+
+# Drive mode (`swarm activate --goal`): every goal job is driven by the supervisor timer (needs
+# `swarm supervise enable`). Every value below is a CONFIGURABLE DEFAULT, not a fixed limit: override
+# it here for every job, per job at activation (`--max-cost-usd N`, `--ruling-reserve-usd N`,
+# `--budget KEY=VALUE`, `--model ROLE=MODEL`), or on a running job with `swarm drive budget|models`.
+# The values shown are the shipped defaults. See docs/REFERENCE.md#drive-mode.
+[drive]
+max_sessions = 60                   # launches, all seats and kinds; exhausted: a ruling becomes due
+max_seats = 12                      # distinct seats; further requests are refused (the lead is woken)
+max_rounds = 8                      # judged rounds per artifact group; exhausted: a ruling
+no_progress_rounds = 3              # rounds without progress before a ruling
+max_attempts = 3                    # per logical action; then the action fails and the lead is woken
+max_cost_usd = 40                   # job spending cap; shipped default 40 USD, configurable (Claude cost + Codex tokens)
+ruling_reserve_usd = 5              # kept back so a ruling can always run; shipped default 5 USD, configurable
+session_usd_cap = 5                 # ceiling reserved for one session
+min_session_usd = 0.5               # a launch with less than this available is held (a ruling becomes due)
+max_session_minutes = 60            # wall clock per session; the seat goes idle
+max_wall_hours = 24                 # from activation; exhausted: a ruling
+ruling_attempts = 2                 # judge attempts for a ruling (the ruling reserve also keeps this many sessions back)
+ruling_deadline_minutes = 120       # a ruling must conclude within this; else the labelled mechanical UNREACHABLE
+ruling_grace_minutes = 15           # extra time before the mechanical verdict is recorded
+question_expiry = "4h"              # an unanswered question applies its --default after this
+stall_minutes = 90                  # no progress this long wakes the lead (or relaunches the lost actor)
+driver_error_passes = 6             # consecutive failing driver passes before the job is held and reported
+max_concurrent_sessions = 4         # sessions running at once for one job
+lease_hold_minutes = 60             # how long a seat may hold a writer lease on a work tree
+codex_usd_per_mtok = 10             # Codex has no cost report: tokens x this rate (USD per million) charge the budget
+# Recipe fields (`--recipe coding|artifact`, `review_role`) are fixed at activation in the owner
+# record, never read from this file; recipe = "coding" with review_role = "reviewer" is the default.
+# Models by role: these are the shipped defaults. Build staffing is cheap engineers, strict reviewers.
+allowed_models = ["haiku", "sonnet", "opus"]   # the models a job may pick (activation refuses others)
+# credential_helpers = ["gh auth git-credential"]   # credential helpers a pinned `--credential` may name (absolute path pinned at activation)
+
+[drive.models]
+engineer = "haiku"
+worker = "haiku"
+integrator = "haiku"
+reviewer = "sonnet"
+qa = "sonnet"
+judge = "opus"
+lead = "opus"
+security = "opus"

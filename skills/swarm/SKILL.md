@@ -227,6 +227,19 @@ them, and `swarm event wait --job J --to @pm` (run as a background command; re-a
 returns) blocks until one is pending (exit 124 on timeout). Core never interprets `kind`: what to
 do with an event is the business of the plugin or skill that posts it.
 
+## Drive mode (goal jobs)
+
+A job activated with `--goal` is **driven**: the supervisor timer runs it (the lead, the seats, review, fixes, the judge, landing) and the activating session is only the requester/observer. Full reference: `docs/REFERENCE.md#drive-mode`; the engineering-team skill has the brief template. The rest of "Running a swarm" below, where the orchestrating session starts agents itself, applies to jobs nothing drives: no goal, or `--no-drive --reason TEXT`.
+
+Four breaking changes: a goal implies drive; a question in a drive job needs `--default` (applied when it expires); the requester's Agent-tool spawns are refused in drive jobs (staffing is `swarm seat request`); `swarm activate --goal` fails until `swarm supervise enable` has been run.
+
+- **Activate:** `swarm activate --job J --goal G [--lead-brief PATH] [--workdir DIR] [--requirements PATH]... [--remote NAME=URL] [--credential DEST=SOURCE] [--max-cost-usd N] [--ruling-reserve-usd N] [--budget KEY=VALUE] [--model ROLE=MODEL]`. The spending cap and every `[drive]` value are configurable defaults (shipped: 40 USD cap, 5 USD ruling reserve); `[drive.models]` sets the model per role (haiku engineers, sonnet reviewers and QA, opus judge, lead and security). `--no-drive --reason TEXT` opts out. Change a running job with `swarm drive budget|models`.
+- **Seats:** the lead runs `swarm seat request --job J --seat NAME --role ROLE --brief PATH [--model M] [--workdir DIR]`, `swarm seat release` (`--withdraw-artifact GROUP --reason TEXT` withdraws a group), `swarm seat list|show`; `seat cancel` is a person's. Workdirs lie under the job's work roots, never under `/tmp`.
+- **Review and landing:** `swarm done` hands a change off; an independent reviewer seat records `swarm review --job J --artifact REF verified|changes --report PATH`; the judge records `swarm verdict`; the integrator, after CI is green on the exact rebased SHA (`swarm ci wait --timeout 540`), runs `swarm land --job J --artifact REF`, and the driver executes it (rebase only, fast-forward only, never a force push).
+- **Goal:** the lead runs `swarm goal-ready --job J --candidate branch@sha [--add-requirements PATH]`, which posts `GOAL-READY <candidate> req=<digest>`. The job ends MET, UNREACHABLE (a judge verdict, or the labelled mechanical one when a budget or deadline ran out) or CANCELLED (`swarm deactivate`); it never idles waiting for the requester.
+- **Halt:** a person (the requester session, or a confirmation at the terminal) runs `swarm halt --job J [--reason TEXT]` and `swarm unhalt --job J`; an enrolled agent is refused.
+- **Output:** each command that creates or changes a drive record ends with `swarm-record: kind=<kind> id=<n> rev=<n>`; in a drive job the CLI never spools a control command, it fails with an error.
+
 ## Running a swarm (the orchestrating session does this)
 
 **Be conservative with jobs.** Before spawning an agent: if the work is small, do it yourself.
