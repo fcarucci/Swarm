@@ -252,7 +252,9 @@ class _Ctx:
             return "driver-errors"
         if led.rounds_without_progress >= cfg["no_progress_rounds"]:
             return "no-progress"
-        if any(judged >= cfg["max_rounds"] for judged in self.s.rounds.values()):   # 4.1: per group
+        # 4.1: per group, `>=` (the 8th judged round is the cap). `rounds` already excludes met, landed and
+        # withdrawn groups (driver_snapshot._rounds), so a group still in flight reaches the cap here.
+        if any(judged >= cfg["max_rounds"] for judged in self.s.rounds.values()):
             return "max-rounds"
         cap, reserve, charged = cfg["max_cost_usd"], cfg["ruling_reserve_usd"], led.charged_usd()
         if cap - reserve - charged < cfg["min_session_usd"]:                 # 4.1: seats keep the reserve
@@ -271,6 +273,8 @@ class _Ctx:
         return None
 
     def last_activity(self) -> datetime | None:
+        """The newest activity time that a stall wake reacts to: seat rows, hand-offs and verdicts. A woken lead
+        updates its own seat row, so the clock restarts and wakes recur every stall_minutes (bounded by budgets)."""
         stamps = [x.updated_at for x in self.seats.values() if x.updated_at is not None]
         stamps += [h.at for h in self.s.handoffs if h.at is not None]
         stamps += [vd.at for vd in self.s.verdicts.values() if vd.at is not None]

@@ -1,27 +1,33 @@
 """The driver's snapshot reader (spec 3.2, 4.0; plan Task 7b): one read of a drive job from the board, the
-host-private ledger and the receipts, into the pure model of driver_model (`Snapshot`).
+host-private ledger and receipts, into the pure model of driver_model (`Snapshot`).
 
 Only receipted control records count (spec 4.0). A record is used when receipts.find finds the receipt for its
 kind, record id and revision, at this board, job, incarnation and generation, unexpired, and receipts.matches
 confirms that the board row still carries the receipted decision fields. Anything else is displayed by the board
 but ignored here.
 
-Where each record lives (the carriers the board has today):
+Where each record lives (the carriers written by the board, hook, goal-ready and land code):
 - done (hand-off): a DONE message; record id = message id, rev 1.
-- review: a `REVIEW <artifact> VERIFIED|CHANGES` message; record id = message id, rev 1.
+- review: a `REVIEW <artifact> VERIFIED|CHANGES <report>` message; record id = message id, rev 1.
+- verdict (artifact, goal, ruling): a `VERDICT <verdict>: <reason>` message. The judgment itself (artifact, scope,
+  open, progress, candidate, req) is job data: the artifact's `pipeline.verdict.<hash>` record, and the goal or
+  ruling record at `drive.verdict.<generation>.<scope>`. A stored record pairs with the receipted message whose
+  text and receipt match it; the message id is the record id.
+- goal_ready: a `GOAL-READY <candidate> req=<digest>` message; record id = message id. `req` must equal the digest
+  of the ledger's pinned requirements; `added_requirements` come from the ledger, never from the message.
 - post: a FINALIZE_BLOCKED message (the fix trigger); record id = message id, rev 1.
-- verdict (artifact): the job-data record of the artifact, which must carry its own `id` and `rev`.
-- verdict (goal or ruling) and goal_ready: a JSON object under job data `drive.goal_verdict` / `drive.goal_ready`
-  (count-and-chunks, as verdict_data stores them), which must carry `id` and `rev`.
 - ask (question): an open blocker with a seat and generation; record id = blocker id, rev 1.
-- seat_request: a seat row in state `requested`; record id = seat row id, rev = seat revision.
+- seat_request: a seat row in state `requested`; record id = seat row id, rev = seat revision. Rows in any other
+  state are admitted without a receipt: the driver's own transitions write them (Task 3 owns that write).
 - land: the ledger's integrated[group] entry, which names its land record (`land_id`, `land_rev`).
 
-The recipe keys come from the job's owner record (`drive_cfg`), never from config.toml (plan [G3])."""
+The recipe keys come from the job's owner record (`drive_cfg`), never from config.toml; a missing or unknown
+recipe fails closed (DriveConfigError)."""
 from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import hashlib
 import json
 import re
 from typing import Any
@@ -29,23 +35,37 @@ from typing import Any
 from swarm import enrolment, receipts, review
 from swarm.supervisor import driver_model as dm
 
-GOAL_READY_KEY = "drive.goal_ready"
-GOAL_VERDICT_KEY = "drive.goal_verdict"
+GOAL_READY = re.compile(r"GOAL-READY (\S+) req=(\S+)")
 _REVIEW = re.compile(r"REVIEW (\S+) (VERIFIED|CHANGES)(?=\s|$)")
 _FINALIZE_BLOCKED = "FINALIZE_BLOCKED "
-# The recipe keys a job takes from its owner record (fixed at activation). Used when the record lacks them.
-RECIPE_DEFAULTS = {"recipe": "coding", "review_role": "reviewer", "review_gates": ()}
+RECIPES = ("coding", "artifact")
+_OWNER_RECIPE_KEYS = ("recipe", "review_role", "review_gates")
+
+
+class DriveConfigError(RuntimeError):
+    """A drive job's owner record does not give its recipe keys: the job is not driven (fails closed)."""
 
 
 def drive_cfg(board_key: str, job: str, cfg: dict) -> dict:
-    """`cfg` with the recipe keys (`recipe`, `review_role`, `review_gates`) taken from the job's owner record.
-    config.toml never sets them: a key the owner record does not carry takes its recipe default."""
+    """`cfg` with the recipe keys (`recipe`, `review_role`, `review_gates`) taken from the job's owner record, where
+    Task 6a stores them at activation (`Record.owner`). config.toml never sets them. A missing owner record, a missing
+    key or an unknown recipe raises DriveConfigError: the driver holds the job rather than guess a recipe."""
     owner = enrolment.find_job_owner(board_key, job)
-    recipe = {}
-    for key, default in RECIPE_DEFAULTS.items():
-        value = getattr(owner, key, None) if owner is not None else None
-        recipe[key] = default if value is None else value
-    return {**cfg, **recipe}
+    details = getattr(owner, "owner", None) if owner is not None else None
+    if not isinstance(details, dict):
+        raise DriveConfigError(f"job {job!r}: no owner record with recipe details on this host")
+    missing = [k for k in _OWNER_RECIPE_KEYS if k not in details]
+    if missing:
+        raise DriveConfigError(f"job {job!r}: owner record lacks {missing}")
+    if details["recipe"] not in RECIPES:
+        raise DriveConfigError(f"job {job!r}: owner recipe {details['recipe']!r} is not one of {list(RECIPES)}")
+    return {**cfg, "recipe": details["recipe"], "review_role": details["review_role"],
+            "review_gates": details["review_gates"]}
+
+
+def requirements_digest(pins: dict) -> str:
+    """The digest of pinned requirements (path -> blob id), as the goal-ready command computes it."""
+    return hashlib.sha256("".join(f"{p}@{b}\n" for p, b in sorted(pins.items())).encode()).hexdigest()
 
 
 def _group(artifact: str) -> str:
@@ -111,51 +131,24 @@ def _seats(board: Any, job: str, gen: int, rc: _Receipts) -> dict[str, dm.SeatVi
     return out
 
 
-def _verdict_view(rec: dict, rc: _Receipts) -> dm.VerdictView | None:
-    rid, rev = rec.get("id"), rec.get("rev", 1)
-    row = {"kind": "verdict", "id": str(rid), "rev": rev, "verdict": rec.get("verdict"),
-           "scope": rec.get("scope"), "generation": rec.get("generation"),
-           "candidate": rec.get("candidate"), "req": rec.get("req")}
-    found = rc.get("verdict", rid, rev, row)
-    if found is None:
-        return None
-    artifact = rec.get("artifact")
-    return dm.VerdictView(
-        verdict=rec.get("verdict"), scope=rec.get("scope") or "artifact", artifact=artifact,
-        candidate=rec.get("candidate"), req=rec.get("req"), generation=rec.get("generation"),
-        open=rec.get("open") if type(rec.get("open")) is int else None,
-        progress=rec.get("progress") if type(rec.get("progress")) is bool else None,
-        reason=rec.get("reason") or "", next=rec.get("next_steps") or "", by=found.seat or rec.get("judge"),
-        at=_ts(rec.get("at")), receipt_id=rid)
-
-
-def _verdicts(board: Any, job: str, rc: _Receipts) -> dict[str, dm.VerdictView]:
-    out = {}
-    for artifact, rec in review.artifact_verdicts(board, job).items():
-        view = _verdict_view(rec, rc)
-        if view is not None:
-            out[artifact] = view
-    return out
-
-
-def _handoffs(board: Any, msgs: list, job: str, rc: _Receipts) -> list[dm.HandoffView]:
+def _handoffs(msgs: list, since: dt.datetime | None, rc: _Receipts) -> list[dm.HandoffView]:
     out = []
     for m in msgs:
-        if not m.message.startswith("DONE "):           # review.latest_handoffs drops addressed messages
+        h = review.handoff_of(m, since)           # judged one message at a time: an unreceipted newer DONE
+        if h is None:                             # never hides an older receipted one
             continue
-        for h in review.latest_handoffs(board, job, messages=[m]):
-            row = {"kind": "done", "id": str(m.id), "rev": 1, "artifact": h.artifact,
-                   "sha": _sha(h.artifact), "group": _group(h.artifact)}
-            found = rc.get("done", m.id, 1, row)
-            if found is not None:
-                out.append(dm.HandoffView(artifact=h.artifact, group=_group(h.artifact),
-                                          by=found.seat or h.agent_name, at=h.created_at, receipt_id=m.id))
+        row = {"kind": "done", "id": str(m.id), "rev": 1, "artifact": h.artifact,
+               "sha": _sha(h.artifact), "group": _group(h.artifact)}
+        found = rc.get("done", m.id, 1, row)
+        if found is not None:
+            out.append(dm.HandoffView(artifact=h.artifact, group=_group(h.artifact),
+                                      by=found.seat or h.agent_name, at=h.created_at, receipt_id=m.id))
     return out
 
 
 def _reviews(msgs: list, rc: _Receipts) -> dict[str, str]:
     latest: dict[str, str] = {}
-    for m in msgs:
+    for m in msgs:                                # id order: the newest receipted review wins
         match = _REVIEW.match(m.message)
         if match is None:
             continue
@@ -163,7 +156,7 @@ def _reviews(msgs: list, rc: _Receipts) -> dict[str, str]:
         row = {"kind": "review", "id": str(m.id), "rev": 1, "group": _group(artifact),
                "artifact": artifact, "outcome": outcome}
         if rc.get("review", m.id, 1, row) is not None:
-            latest[artifact] = outcome                    # messages are in id order: the newest wins
+            latest[artifact] = outcome
     return latest
 
 
@@ -212,23 +205,71 @@ def _integrated(led: Any, rc: _Receipts, blocked: dict[str, tuple[int, str]]) ->
     return out
 
 
-def _goal_verdict(data: dict, gen: int, rc: _Receipts) -> dm.VerdictView | None:
-    rec = _json_value(data, GOAL_VERDICT_KEY)
-    if rec is None or rec.get("scope") not in ("goal", "ruling") or rec.get("generation") != gen:
-        return None
-    return _verdict_view(rec, rc)
+def _verdict_row(msg_id: int, rec: dict) -> dict:
+    return {"kind": "verdict", "id": str(msg_id), "rev": 1, "verdict": rec.get("verdict"),
+            "scope": rec.get("scope"), "generation": rec.get("generation"),
+            "candidate": rec.get("candidate"), "req": rec.get("req")}
 
 
-def _goal_ready(data: dict, gen: int, rc: _Receipts) -> dict | None:
-    gr = _json_value(data, GOAL_READY_KEY)
-    if gr is None or gr.get("generation") != gen:
+def _bind_verdicts(records: list[dict], msgs: list, rc: _Receipts) -> list[dm.VerdictView]:
+    """Pair each stored verdict record with the receipted VERDICT message it was posted as. The message text must be
+    `VERDICT <verdict>: <reason>` of the record and its receipt must match the record's decision fields. A message
+    pairs with at most one record."""
+    posted = [m for m in reversed(msgs) if not m.to_agent and m.message.startswith("VERDICT ")]
+    used: set[int] = set()
+    out = []
+    for rec in records:
+        want = f"VERDICT {rec.get('verdict')}: {rec.get('reason') or ''}"
+        for m in posted:
+            if m.id in used or m.message != want:
+                continue
+            found = rc.get("verdict", m.id, 1, _verdict_row(m.id, rec))
+            if found is None:
+                continue
+            used.add(m.id)
+            out.append(dm.VerdictView(
+                verdict=rec.get("verdict"), scope=rec.get("scope") or "artifact", artifact=rec.get("artifact"),
+                candidate=rec.get("candidate"), req=rec.get("req"), generation=rec.get("generation"),
+                open=rec.get("open") if type(rec.get("open")) is int else None,
+                progress=rec.get("progress") if type(rec.get("progress")) is bool else None,
+                reason=rec.get("reason") or "", next=rec.get("next_steps") or "",
+                by=found.seat or rec.get("judge"), at=_ts(rec.get("at")), receipt_id=m.id))
+            break
+    return out
+
+
+def _verdicts(board: Any, data: dict, job: str, gen: int, msgs: list,
+              rc: _Receipts) -> tuple[dict[str, dm.VerdictView], dm.VerdictView | None]:
+    """The receipted artifact verdicts of this generation, by artifact, and the newest receipted goal or ruling
+    verdict of this generation (the record at drive.verdict.<gen>.<scope>, whose scope must be that key's)."""
+    records = list(review.artifact_verdicts(board, job).values())
+    artifacts = {v.artifact: v for v in _bind_verdicts(records, msgs, rc)}
+    goal_records = []
+    for scope in ("goal", "ruling"):
+        rec = _json_value(data, f"drive.verdict.{gen}.{scope}")
+        if rec is not None and rec.get("scope") == scope and rec.get("generation") == gen:
+            goal_records.append(rec)
+    goals = _bind_verdicts(goal_records, msgs, rc)
+    return artifacts, (max(goals, key=lambda v: v.receipt_id) if goals else None)
+
+
+def _goal_ready(msgs: list, led: Any, gen: int, rc: _Receipts) -> dict | None:
+    """The newest receipted GOAL-READY whose req is the digest of the ledger's pinned requirements. From the message
+    only the candidate (receipt-bound) and the message id are taken."""
+    pins = dict(led.pinned_requirements or {})
+    if not pins:
         return None
-    row = {"kind": "goal_ready", "id": str(gr.get("id")), "rev": gr.get("rev", 1), "generation": gen,
-           "candidate": gr.get("candidate")}
-    if rc.get("goal_ready", gr.get("id"), gr.get("rev", 1), row) is None:
-        return None
-    return {"id": gr.get("id"), "req": gr.get("req"), "candidate": gr.get("candidate"), "at": gr.get("at"),
-            "added_requirements": list(gr.get("added_requirements") or [])}
+    req = requirements_digest(pins)
+    for m in reversed(msgs):
+        found = GOAL_READY.fullmatch(m.message)
+        if m.to_agent or found is None or found.group(2) != req:
+            continue
+        candidate = found.group(1)
+        row = {"kind": "goal_ready", "id": str(m.id), "rev": 1, "generation": gen, "candidate": candidate}
+        if rc.get("goal_ready", m.id, 1, row) is not None:
+            return {"id": m.id, "req": req, "candidate": candidate, "at": m.created_at.isoformat(),
+                    "added_requirements": [f"{p}@{b}" for p, b in sorted(pins.items())]}
+    return None
 
 
 def _questions(board: Any, job: str, gen: int, rc: _Receipts) -> dict[str, list[dm.Question]]:
@@ -246,46 +287,72 @@ def _questions(board: Any, job: str, gen: int, rc: _Receipts) -> dict[str, list[
     return out
 
 
-def _wakes(board: Any, job: str, seats: dict[str, dm.SeatView], msgs: list, rc: _Receipts) -> dict[str, list[int]]:
-    """Per seat, the ids above its wake watermark of receipted posts to its agent and of events to it."""
-    events = board.pending_events(job)
+def _wakes(board: Any, job: str, seats: dict[str, dm.SeatView], msgs: list, events: list, led: Any,
+           rc: _Receipts) -> dict[str, list[int]]:
+    """Per seat, the receipted posts and the events to its agent above that seat's own watermarks. Message ids and
+    event ids are separate id spaces, so the ledger keeps two watermarks per seat (`msg:<seat>`, `event:<seat>`).
+    The agent is looked up among departed members too: a resumable seat's agent has usually left."""
+    names = {a.agent_key: a.name for a in board.agents(job, include_departed=True)}
     out: dict[str, list[int]] = {}
-    for name, st in seats.items():
-        agent = board.active_agent_name(st.agent_key) if st.agent_key else None
-        if agent is None:
-            continue
-        mark = st.wake_watermark or 0
-        ids = [m.id for m in msgs if m.to_agent == agent and m.id > mark
+    for seat, st in seats.items():
+        name = names.get(st.agent_key) if st.agent_key else None
+        if name is None:
+            continue                                    # nothing has joined for this seat yet
+        msg_mark = led.watermarks.get(f"msg:{seat}", 0)
+        event_mark = led.watermarks.get(f"event:{seat}", 0)
+        ids = [m.id for m in msgs if m.to_agent == name and m.id > msg_mark
                and rc.get("post", m.id, 1, {"kind": "post", "id": str(m.id), "rev": 1, "to": m.to_agent,
                                             "body": m.message}) is not None]
-        ids += [e.id for e in events if e.to == agent.lower() and e.id > mark]
+        ids += [e.id for e in events if e.to and e.to.lower() == name.lower() and e.id > event_mark]
         if ids:
-            out[name] = sorted(ids)
+            out[seat] = sorted(ids)
+    return out
+
+
+def _rounds(verdicts: dict[str, dm.VerdictView], integrated: dict[str, dict], gen: int) -> dict[str, int]:
+    """Judged rounds per artifact group still in flight: one per receipted artifact verdict of this generation (a
+    re-judge of the same artifact@sha is the same record, so it is not a new round). A group whose newest verdict
+    is met, or which is landed or withdrawn, is not in flight and gets no count."""
+    counts: dict[str, int] = {}
+    newest: dict[str, dm.VerdictView] = {}
+    for artifact, vd in verdicts.items():
+        if vd.generation != gen:
+            continue
+        group = _group(artifact)
+        counts[group] = counts.get(group, 0) + 1
+        if group not in newest or vd.receipt_id > newest[group].receipt_id:
+            newest[group] = vd
+    out = {}
+    for group, judged in counts.items():
+        entry = integrated.get(group) or {}
+        if entry.get("landed") or entry.get("withdrawn") or newest[group].verdict == "met":
+            continue
+        out[group] = judged
     return out
 
 
 def read(board: Any, led: Any, job: str, *, cfg: dict, now: dt.datetime) -> dm.Snapshot:
-    """One consistent read of `job` for next_actions (spec 3.2). `led` is the job's host-private ledger.
-    `cfg` is accepted for the caller's symmetry: the recipe keys come from drive_cfg, never from it."""
+    """One consistent read of `job` for next_actions (spec 3.2). `led` is the job's host-private ledger. `cfg` is
+    accepted for the caller's symmetry: the recipe keys come from drive_cfg, and the caller passes its result."""
     del cfg
     gen = led.generation
     rc = _Receipts(led, job, gen, now)
-    msgs = board.messages_after(0, job)
-    stored = board.job_status(job)
     data = board.job_data(job)
+    since = _ts(data.get("pipeline.started_at"))
+    msgs = board.messages_after(0, job)               # one scan per pass, one read of the events
+    events = board.pending_events(job)
+    stored = board.job_status(job)
     seats = _seats(board, job, gen, rc)
-    handoffs = _handoffs(board, msgs, job, rc)
-    verdicts = _verdicts(board, job, rc)
-    rounds: dict[str, int] = {}
-    for artifact, vd in verdicts.items():
-        if vd.generation == gen:
-            rounds[_group(artifact)] = rounds.get(_group(artifact), 0) + 1
+    handoffs = _handoffs(msgs, since, rc)
+    verdicts, goal_verdict = _verdicts(board, data, job, gen, msgs, rc)
+    integrated = _integrated(led, rc, _blocked(msgs, handoffs, rc))
     return dm.Snapshot(
         job=job, generation=gen, goal=stored.goal if stored else None,
         status=stored.status if stored else "missing", halted=led.halted is not None,
         ledger=led, seats=seats,
         live={i.seat for i in led.intents if i.state in ("claiming", "claimed") and i.seat},
         handoffs=handoffs, reviews=_reviews(msgs, rc), verdicts=verdicts,
-        goal_verdict=_goal_verdict(data, gen, rc), goal_ready=_goal_ready(data, gen, rc),
-        questions=_questions(board, job, gen, rc), wakes=_wakes(board, job, seats, msgs, rc),
-        integrated=_integrated(led, rc, _blocked(msgs, handoffs, rc)), rounds=rounds, now=now)
+        goal_verdict=goal_verdict, goal_ready=_goal_ready(msgs, led, gen, rc),
+        questions=_questions(board, job, gen, rc),
+        wakes=_wakes(board, job, seats, msgs, events, led, rc),
+        integrated=integrated, rounds=_rounds(verdicts, integrated, gen), now=now)

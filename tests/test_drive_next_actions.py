@@ -481,8 +481,6 @@ class Reasons(unittest.TestCase):
                                                  "rollover", "stop_seat", "complete_land"})
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class MaxRounds(unittest.TestCase):
@@ -556,3 +554,7 @@ class StallWakeTrigger(unittest.TestCase):
             "a": seat("a", "running", updated_at=T0 - minutes(300)),
         }, verdicts={B: v("not_met", artifact=B, open=3, at=T0 - minutes(10))})
         self.assertEqual(kinds(next_actions(s, CFG)), ["nothing"])
+
+
+if __name__ == "__main__":
+    unittest.main()
