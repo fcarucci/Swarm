@@ -74,10 +74,10 @@ class OrphansTest(unittest.TestCase):
                 self.run_pass(); setattr(self.b.js, attr, old)
         self.resume.assert_not_called()
     def test_a_drive_job_is_never_restarted_by_the_generic_pass(self):
-        self.b.drive_job_claimed = lambda job: True
+        self.b.job_data = lambda job: {"drive.enabled": "1"}
         self.run_pass()
         self.resume.assert_not_called()
-        self.b.drive_job_claimed = lambda job: False
+        self.b.job_data = lambda job: {}
         self.run_pass()
         self.assertEqual(self.resume.call_count, 1)
 

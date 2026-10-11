@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime as dt
 from swarm.board.base import quiet_start
 from swarm.verdicts import SETTLED_VERDICTS
-from swarm.supervisor.stuck import SUPERVISOR_NAME, WAITING_PREFIX, drive_claimed
+from swarm.supervisor.stuck import SUPERVISOR_NAME, WAITING_PREFIX
 
 REASON = "orphan-coordinator:"
 
@@ -84,7 +84,7 @@ def eligible(board, cfg, js, sup, now):
     from swarm.cli import OrchestratorWatch
     if js.status != "active" or not js.supervise:
         return False
-    if drive_view(board, cfg, js.job)[0] or drive_claimed(board, js.job):
+    if drive_view(board, cfg, js.job)[0]:
         return False          # the driver restarts its own seats; never a generic orphan coordinator
     gate = drive_gate(board, cfg, js.job)
     if gate is None and js.waiting_on and not js.waiting_on.startswith(WAITING_PREFIX):
