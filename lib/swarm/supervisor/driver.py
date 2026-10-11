@@ -415,6 +415,8 @@ def drive(board, cfg: dict, sup: dict, state: dict, *, now: dt.datetime, say=pri
             _step(board, cfg, sup, state, led, owner, now, say, start_runner, config_path, jdeadline, m)
             if led.errors:
                 _mutate(led, lambda l: setattr(l, "errors", 0))
+        except ledger.LedgerBadError as exc:      # the ledger went bad under us (halt, unhalt, a save): hold
+            _bad(board, state, led.job, str(exc)[:200], say)
         except Exception as exc:
             _failed(board, state, led, exc, now, _flat_cfg(cfg, led), m)
         try:
