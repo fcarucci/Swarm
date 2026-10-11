@@ -409,6 +409,10 @@ def terminalize(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks | None 
 
 def _commit(board, cfg, led, intent: dict, now, reasons: list, hooks: Hooks) -> bool:
     """[RR2] `led.terminal` is set only now, after the board close succeeded; then step 6, best effort."""
+    try:
+        board.set_job_data(led.job, "drive.enabled", None)    # every terminal transition clears the claim
+    except Exception as exc:
+        log.warning("drive.enabled of %s not cleared: %s", led.job, type(exc).__name__)
     led.terminal = {"verdict": intent["verdict"], "scope": intent["scope"], "at": _iso(now)}
     if reasons:
         led.terminal["reasons"] = reasons
@@ -570,6 +574,27 @@ def _post_expired(board, b, default: str) -> None:
             registry.blocker_expired(board, b)
     except Exception as exc:
         log.warning("expiry notice for blocker %s failed: %s", b.id, type(exc).__name__)
+
+
+def expire_orphan_questions(board, job: str, now: dt.datetime) -> list[int]:
+    """The orphan `human_question` path: a board job that claims drive mode (`drive.enabled`) but has no
+    ledger on this host (DRIVER-ORPHAN) has nobody to apply its question defaults, and the generic sweep
+    skips drive-claiming jobs. Apply the defaults of its overdue open questions from the board's own rows
+    (there is no ledger to decide from), once each, never while the board says the job is halted. Returns
+    the blocker ids settled."""
+    data = board.job_data(job)
+    if data.get("drive.enabled") != "1" or data.get("drive.halted"):
+        return []
+    js = board.job_status(job)
+    if js is None or js.status not in ("active", "paused"):      # decision deadlines continue while paused
+        return []
+    done = []
+    for b in board.blockers(job):
+        if b.kind == "question" and b.until is not None and b.until <= now and b.default_value is not None \
+                and board.resolve_blocker(b.id, b.default_value, actor="swarm", state="expired"):
+            _post_expired(board, b, b.default_value)
+            done.append(b.id)
+    return done
 
 
 # --- host sweeps -----------------------------------------------------------------------------
