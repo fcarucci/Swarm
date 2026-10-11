@@ -251,8 +251,12 @@ def sanitize_remote(url: str) -> str:
         parts = urllib.parse.urlsplit(url)
     except ValueError:
         raise DriveError("a remote URL is not a valid URL") from None
-    host = parts.netloc.rpartition("@")[2]
-    return urllib.parse.urlunsplit((parts.scheme, host, parts.path, "", ""))
+    userinfo, at, hostport = parts.netloc.rpartition("@")
+    # an ssh username is not a secret and is kept (ssh://git@host); a password or token never is, and
+    # an https userinfo (often a bare token) is dropped whole
+    user = userinfo.split(":", 1)[0] if at and parts.scheme == "ssh" else ""
+    netloc = f"{user}@{hostport}" if user else hostport
+    return urllib.parse.urlunsplit((parts.scheme, netloc, parts.path, "", ""))
 
 
 def git_remotes(workdir: str) -> dict:

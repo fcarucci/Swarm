@@ -225,6 +225,13 @@ class CredentialAndWorkdirTests(HomeCase):
                          "https://example.com/o/r.git")
         self.assertEqual(da.sanitize_remote("git@example.com:o/r.git"), "git@example.com:o/r.git")
 
+    def test_ssh_username_is_kept_and_its_password_is_not(self):
+        self.assertEqual(da.sanitize_remote("ssh://git@example.com/o/r.git"), "ssh://git@example.com/o/r.git")
+        self.assertEqual(da.sanitize_remote("ssh://git:SECRET@example.com/o/r.git?x=1#f"),
+                         "ssh://git@example.com/o/r.git")
+        self.assertEqual(da.sanitize_remote("https://TOKEN@example.com/o/r.git"), "https://example.com/o/r.git")
+        self.assertNotIn("SECRET", da.sanitize_remote("ssh://git:SECRET@example.com:22/o/r.git"))
+
     def test_at_signs_in_a_password_or_query_do_not_leak_a_token(self):
         self.assertEqual(da.sanitize_remote("https://user:p@ss@example.com/o/r.git"),
                          "https://example.com/o/r.git")
