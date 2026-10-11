@@ -323,6 +323,28 @@ def _plan(board, cfg, led, dcfg, now, m):
     return snap, actions
 
 
+def _watch_stalled(board, state, led, actions, now, sup) -> None:
+    """DRIVER-STALLED (spec 3.13): the model names no responsible actor (nothing live, no launch, no record) for
+    more than two timer periods. The first such pass is remembered in the ledger; any other pass forgets it."""
+    idle = (led.halted is None and led.terminal_intent is None
+            and not any(i.state != "concluded" for i in led.intents)
+            and all(a.kind in ("hold", "nothing") and not a.responsible for a in actions))
+    since = led.watermarks.get("stalled.since")
+    if not idle:
+        if since is not None:
+            _mutate(led, lambda l: l.watermarks.pop("stalled.since", None))
+            _forget(state, f"stalled|{led.job}")
+        return
+    if since is None:
+        _mutate(led, lambda l: l.watermarks.setdefault("stalled.since", int(now.timestamp())))
+        return
+    limit = 2 * 60 * float((sup or {}).get("timer_minutes", 5))
+    if now.timestamp() - since > limit:
+        _notice(board, state, f"stalled|{led.job}", led.job,
+                f"DRIVER-STALLED no seat, launch or record is responsible for this job since "
+                f"{dt.datetime.fromtimestamp(since, dt.timezone.utc).isoformat()}")
+
+
 def _step(board, cfg, sup, state, led, owner, now, say, start_runner, config_path, jdeadline, m) -> None:
     life, exe = m.life, m.exec
     flat = _flat_cfg(cfg, led)
@@ -349,6 +371,7 @@ def _step(board, cfg, sup, state, led, owner, now, say, start_runner, config_pat
                 f"DRIVER-CONFIG the owner record of this job lacks what the driver needs ({exc}); the job holds")
         return
     snap, actions = _plan(board, cfg, led, dcfg, now, m)
+    _watch_stalled(board, state, led, actions, now, sup)
     _act(board, cfg, sup, led, snap, actions, now, start_runner, config_path, jdeadline, m)
 
 

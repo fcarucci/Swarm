@@ -76,8 +76,19 @@ def _orchestrators(board, job: str, roles) -> list:
     return [r for r in board.roster(job) if r.active and (r.role or "").lower() in roles]
 
 
+def is_drive(board, job: str) -> bool:
+    """A drive job (its board claim): nobody is expected to wait for it, and every model session of it is a
+    seat attempt with a reservation (spec 3.2, 3.13)."""
+    try:
+        return (board.job_data(job) or {}).get("drive.enabled") == "1"
+    except Exception:
+        return False
+
+
 def check_job(board, s: dict, js, now: _dt.datetime) -> list[Problem]:
     job, out = js.job, []
+    if is_drive(board, job):
+        return []     # the driver raises DRIVER-STALLED itself; waiter-stale, unacked, unread and stalled do not apply
     pending = _pending(board, job)
     old = [e for e in pending if getattr(e, "to", None) in (None, "") or str(e.to).lstrip("@") in
            {str(r).lower() for r in s["orchestrator_roles"]} | {"pm"}]
@@ -197,7 +208,7 @@ def report(board, cfg: dict, problems: list[Problem], now=None, run=subprocess.r
     for job in sorted(jobs):
         mine = [p for p in problems if p.job in (job, None)]
         text = "SWARM-ALERT " + "; ".join(f"{p.code}: {p.text}" for p in mine)
-        line = triage(board, cfg, job, mine, run=run)
+        line = None if is_drive(board, job) else triage(board, cfg, job, mine, run=run)   # no model call outside a seat
         if line:
             text = f"SWARM-ALERT {line} [{', '.join(p.code for p in mine)}]"
         text = text[:events_listener.TEXT_MAX]
