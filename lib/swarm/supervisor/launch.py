@@ -9,6 +9,7 @@ Settings: a Claude replacement loads user settings only
 sources, always."""
 from __future__ import annotations
 
+import math
 import os
 import re
 import uuid
@@ -78,46 +79,94 @@ def replacement_model(cfg: dict, harness: str, role: str | None, recorded: str |
     return models.model_for(cfg, harness, role if roles.valid_name(role) else "worker") or recorded
 
 
+READ_ONLY_CLAUDE_DISALLOWED = "Edit,Write,NotebookEdit"
+
+
+def _budget(budget_usd) -> float:
+    """A per-session budget in USD: finite and positive (never a zero or negative ceiling)."""
+    b = float(budget_usd)
+    if not math.isfinite(b) or b <= 0:
+        raise ValueError(f"a session budget must be a positive number of USD, not {budget_usd!r}")
+    return b
+
+
 def claude_spec(cfg: dict, *, prompt: str, workdir: str, model: str | None, minutes: float,
-                session_id: str | None = None) -> LaunchSpec:
+                session_id: str | None = None, budget_usd: float | None = None, read_only: bool = False,
+                resume: str | None = None) -> LaunchSpec:
     from swarm.supervisor.settings import settings
     s = settings(cfg)
-    sid = session_id or str(uuid.uuid4())
-    argv = [s["claude_bin"], "-p", "--session-id", sid, "--max-turns", str(s["max_turns"]),
-            "--permission-mode", s["claude_permission_mode"], "--output-format", "json",
-            "--setting-sources", "user"]
+    if resume:
+        sid = str(resume)
+        argv = [s["claude_bin"], "-p", "--resume", sid]
+    else:
+        sid = session_id or str(uuid.uuid4())
+        argv = [s["claude_bin"], "-p", "--session-id", sid]
+    argv += ["--max-turns", str(s["max_turns"]),
+             "--permission-mode", s["claude_permission_mode"], "--output-format", "json",
+             "--setting-sources", "user"]
     if model:
         argv += ["--model", model]
-    if s["max_budget_usd"] > 0:
+    if budget_usd is not None:
+        argv += ["--max-budget-usd", f"{_budget(budget_usd):g}"]
+    elif s["max_budget_usd"] > 0:
         argv += ["--max-budget-usd", f"{s['max_budget_usd']:g}"]
+    if read_only:
+        argv += ["--disallowedTools", READ_ONLY_CLAUDE_DISALLOWED]
     if s.get("claude_plugin_dir"):
         argv += ["--plugin-dir", s["claude_plugin_dir"]]
     check_safe(argv)
     return LaunchSpec("claude", tuple(argv), workdir, prompt, sid, minutes)
 
 
-def codex_spec(cfg: dict, *, prompt: str, workdir: str, model: str | None, minutes: float) -> LaunchSpec:
+def _codex_tokens_for(cfg: dict, budget_usd: float) -> int:
+    """floor(budget / codex_usd_per_mtok * 1e6): the rollout token limit a USD budget buys."""
+    rate = float((cfg or {}).get("drive", {}).get("codex_usd_per_mtok", 10))
+    if not math.isfinite(rate) or rate <= 0:
+        raise ValueError("[drive] codex_usd_per_mtok must be a positive number")
+    n = math.floor(_budget(budget_usd) / rate * 1_000_000)
+    if n < 2:
+        raise ValueError(f"a session budget of {budget_usd!r} USD is below the smallest rollout budget")
+    return n
+
+
+def codex_spec(cfg: dict, *, prompt: str, workdir: str, model: str | None, minutes: float,
+               budget_usd: float | None = None, read_only: bool = False,
+               resume: str | None = None) -> LaunchSpec:
     from swarm.supervisor.settings import settings
     s = settings(cfg)
     # no --cd: codex exec takes its process cwd as its working root when --cd is absent
     # (codex-rs/exec/src/lib.rs, `None => AbsolutePathBuf::current_dir()`), and the runner starts it
     # in the verified directory by descriptor (runner.open_workdir): a path would be re-resolved
-    argv = [s["codex_bin"], "exec", "--json", "--sandbox", "workspace-write", "--skip-git-repo-check"]
+    sandbox = "read-only" if read_only else "workspace-write"
+    if resume:
+        # `codex exec resume <thread>`: the sandbox goes in as a config override (as hosts.codex
+        # always passed it on resume)
+        argv = [s["codex_bin"], "exec", "resume", "--json", "--skip-git-repo-check"]
+    else:
+        argv = [s["codex_bin"], "exec", "--json", "--sandbox", sandbox, "--skip-git-repo-check"]
     if model:
         argv += ["-m", model]
-    n = s["codex_token_limit"]
+    if resume:
+        argv += ["-c", f'sandbox_mode="{sandbox}"']
+    n = _codex_tokens_for(cfg, budget_usd) if budget_usd is not None else s["codex_token_limit"]
     if n:
         argv += ["-c", "features.rollout_budget.enabled=true",
                  "-c", f"features.rollout_budget.limit_tokens={n}",
                  "-c", f"features.rollout_budget.reminder_at_remaining_tokens=[{max(1, n // 4)}]"]
-    argv.append("-")
+    argv += [str(resume), "-"] if resume else ["-"]
     check_safe(argv)
     return LaunchSpec("codex", tuple(argv), workdir, prompt, None, minutes)
 
 
-def spec_for(cfg: dict, harness: str, **kw) -> LaunchSpec:
-    """The launch spec for a replacement on `harness` ("codex" or "claude")."""
+def spec_for(cfg: dict, harness: str, *, prompt: str, workdir: str, model: str | None, minutes: float,
+             session_id: str | None = None, budget_usd: float | None = None, read_only: bool = False,
+             resume: str | None = None) -> LaunchSpec:
+    """The launch spec for a fresh replacement, or a resume, on `harness` ("codex" or "claude").
+    The one contract for drive seats: model, sandbox or permission mode, turn and wall-clock
+    limits, and the per-session budget are the same whether the session is new or resumed.
+    `resume` is the harness's session handle (Claude session id; Codex thread id)."""
+    kw = dict(prompt=prompt, workdir=workdir, model=model, minutes=minutes, budget_usd=budget_usd,
+              read_only=read_only, resume=resume)
     if harness == "codex":
-        kw.pop("session_id", None)
         return codex_spec(cfg, **kw)
-    return claude_spec(cfg, **kw)
+    return claude_spec(cfg, session_id=session_id, **kw)
