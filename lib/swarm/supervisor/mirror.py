@@ -30,6 +30,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import time
 from collections import Counter
 from urllib.parse import urlsplit
 
@@ -39,6 +40,10 @@ from swarm.supervisor.settings import private_dir
 # The only credential helper a pinned source may name by default ([drive] credential_helpers).
 ALLOWED_HELPERS = ("gh auth git-credential",)
 MAX_CALL_TIMEOUT = 60.0
+# Overall deadline of one audit_target call, on top of the per-call cap (L8): a large history
+# must not hold the supervisor pass for audit_calls * 60 s.
+AUDIT_DEADLINE = 120.0
+KEYSCAN_TIMEOUT = 15.0
 SYSTEM_DIRS = ("/usr/local/bin", "/usr/bin", "/bin")
 # The suite sets this to its sandbox; loopback_http is refused without it.
 TEST_MARKER = "SWARM_TEST_SANDBOX"
@@ -57,6 +62,23 @@ _LOOPBACK_HOSTS = ("127.0.0.1", "localhost")
 
 class MirrorError(Exception):
     """A mirror refused a request, or git failed, timed out or could not be started."""
+
+
+class MirrorTimeoutError(MirrorError):
+    """A git call ran out of time (its process group was killed)."""
+
+
+class AuditDeadlineError(MirrorTimeoutError):
+    """audit_target ran past its overall deadline; the caller retries in a later pass."""
+
+
+class PushRejectedError(MirrorError):
+    """The destination refused a push (non-fast-forward, protected branch, hook). `.reason` is the
+    remote's own last line, without the url."""
+
+    def __init__(self, message: str, reason: str = ""):
+        super().__init__(message)
+        self.reason = reason
 
 
 class MissingCommitError(MirrorError):
@@ -159,6 +181,140 @@ def _kill_group(proc: subprocess.Popen) -> None:
             pass
 
 
+# scp-style `user@host:path`. A one-letter "host" is a Windows drive (C:\repo), as git itself reads it.
+_SCP_URL = re.compile(r"(?:[^@/:\s]+@)?(?P<host>[A-Za-z0-9][A-Za-z0-9.-]+):(?!//)")
+
+
+def ssh_host_of(url: str) -> tuple[str, int] | None:
+    """(host, port) of an ssh remote (`ssh://[user@]host[:port]/path` or scp-style `user@host:path`)."""
+    if "://" in url:
+        parts = _split(url)
+        if parts.scheme != "ssh" or not parts.hostname:
+            return None
+        try:
+            return parts.hostname, parts.port or 22
+        except ValueError as exc:
+            raise MirrorError("the remote url has a bad port") from exc
+    m = _SCP_URL.match(url)
+    return (m.group("host"), 22) if m else None
+
+
+def _known_name(host: str, port: int) -> str:
+    return host if port == 22 else f"[{host}]:{port}"
+
+
+def known_host_present(path: str, host: str, port: int) -> bool:
+    """Whether the known_hosts file at `path` has an entry for host:port (plain host names only; a
+    hashed or wildcard entry written by hand is not recognised, and doctor then asks for a seed)."""
+    name = _known_name(host, port)
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                fields = line.split()
+                if len(fields) >= 3 and not line.startswith("#") and name in fields[0].split(","):
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def known_hosts_file() -> str:
+    """The private known_hosts file (created empty, 0600, in the private mirrors directory). The
+    only file ssh may trust host keys from; it is only appended to by add_known_host."""
+    with privfs.dir_fd("mirrors"):
+        pass
+    path = os.path.join(str(private_dir()), "mirrors", "known_hosts")
+    if os.path.islink(path):
+        raise MirrorError("refusing a symlinked known_hosts file")
+    if not os.path.exists(path):
+        with open(path, "a"):
+            pass
+        os.chmod(path, 0o600)
+    return path
+
+
+def _tool(cmd: list[str], timeout: float) -> subprocess.CompletedProcess:
+    """Run a system tool (ssh-keyscan, ssh-keygen) with a minimal environment, killed with its
+    process group on timeout."""
+    kwargs = {"start_new_session": True} if os.name == "posix" else {}
+    env = {"PATH": _system_path(), "LC_ALL": "C"}
+    try:
+        proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                stdin=subprocess.DEVNULL, **kwargs)
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        _kill_group(proc)
+        proc.communicate()
+        raise MirrorTimeoutError(f"{os.path.basename(cmd[0])} timed out after {timeout:g}s") from exc
+    except OSError as exc:
+        raise MirrorError(f"cannot run {os.path.basename(cmd[0])}: {exc.__class__.__name__}") from exc
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
+def scan_host_keys(host: str, port: int = 22, timeout: float = KEYSCAN_TIMEOUT) -> list[tuple[str, str]]:
+    """[(known_hosts line, SHA256 fingerprint)] for the keys `host` offers, from ssh-keyscan. The
+    keys are NOT trusted: they are only shown to a person, who confirms them ([G2], never
+    accept-new). MirrorError when the host offers nothing."""
+    if not isinstance(host, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", host):
+        raise MirrorError(f"not a host name: {host!r}")
+    if not isinstance(port, int) or isinstance(port, bool) or not 0 < port < 65536:
+        raise MirrorError(f"not a port: {port!r}")
+    scan = _tool([_resolve("ssh-keyscan"), "-T", str(int(_timeout(timeout))), "-p", str(port),
+                  "-t", "ed25519,ecdsa,rsa", host], _timeout(timeout) + 5)
+    lines = [ln for ln in scan.stdout.decode("utf-8", "replace").splitlines()
+             if ln.strip() and not ln.startswith("#")]
+    out = []
+    for line in lines:
+        fields = line.split()
+        if len(fields) < 3:
+            continue
+        out.append((line, _fingerprint(fields[1], fields[2])))
+    if not out:
+        raise MirrorError(f"{host}:{port} offered no host keys")
+    return out
+
+
+def _fingerprint(keytype: str, b64: str) -> str:
+    import base64
+    try:
+        raw = base64.b64decode(b64.encode("ascii"), validate=True)
+    except (ValueError, UnicodeEncodeError) as exc:
+        raise MirrorError("a host key is not valid base64") from exc
+    digest = base64.b64encode(hashlib.sha256(raw).digest()).decode().rstrip("=")
+    return f"{keytype} SHA256:{digest}"
+
+
+def add_known_host(path: str, host: str, port: int, lines: list[str], *, confirmed: bool) -> int:
+    """Append the host keys a person confirmed to the private known_hosts file. `confirmed` must be
+    exactly True (the caller got it from a person who saw the fingerprints): there is no
+    accept-new. Every line must name this host and port and carry a valid key. Returns the number
+    of lines added."""
+    if confirmed is not True:
+        raise MirrorError("host keys are added only when a person confirmed their fingerprints")
+    if os.path.islink(path):
+        raise MirrorError("refusing a symlinked known_hosts file")
+    name = _known_name(host, port)
+    good = []
+    for line in lines:
+        fields = line.split()
+        if len(fields) < 3 or fields[0] != name or fields[1] not in (
+                "ssh-ed25519", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
+                "ssh-rsa") or any(c in line for c in "\n\r\0"):
+            raise MirrorError(f"not a host key line for {name}")
+        _fingerprint(fields[1], fields[2])
+        good.append(" ".join(fields[:3]))
+    with open(path, "a+", encoding="utf-8") as fh:
+        fh.seek(0, os.SEEK_END)
+        if fh.tell():
+            fh.seek(fh.tell() - 1)
+            if fh.read(1) != "\n":
+                fh.write("\n")
+        for line in good:
+            fh.write(line + "\n")
+    os.chmod(path, 0o600)
+    return len(good)
+
+
 class Mirror:
     """One destination's private bare mirror. `url` is the pinned remote; `credential` is its one
     pinned source. `loopback_http` (keyword-only) allows plain http to 127.0.0.1 or localhost, and
@@ -167,6 +323,7 @@ class Mirror:
     def __init__(self, url: str, credential: dict, *, allowed_helpers=None,
                  loopback_http: bool = False):
         self.url = _check_url(url, loopback_http)
+        self._deadline: float | None = None
         allowed = ALLOWED_HELPERS if allowed_helpers is None else tuple(allowed_helpers)
         self._git_bin = _resolve("git")
         self._ssh_bin = _resolve("ssh")
@@ -188,18 +345,11 @@ class Mirror:
     # --- pinned credential sources ---------------------------------------------------------
 
     def _ensure_known_hosts(self) -> str:
-        path = os.path.join(self.private_home, "mirrors", "known_hosts")
-        if os.path.islink(path):
-            raise MirrorError("refusing a symlinked known_hosts file")
-        if not os.path.exists(path):
-            with open(path, "a"):
-                pass
-            os.chmod(path, 0o600)
-        return path
+        return known_hosts_file()
 
     def _ssh_command(self, options: list[str]) -> str:
         parts = [self._ssh_bin, "-F", os.devnull, "-o", f"UserKnownHostsFile={self._known_hosts}",
-                 "-o", "BatchMode=yes", *options]
+                 "-o", "StrictHostKeyChecking=yes", "-o", "BatchMode=yes", *options]
         return " ".join(shlex.quote(p) for p in parts)
 
     def _pin(self, credential, allowed: tuple[str, ...]):
@@ -209,14 +359,28 @@ class Mirror:
         kind = credential.get("kind")
         if kind == "helper":
             command = credential.get("command")
-            if not isinstance(command, str) or command not in allowed:
+            if not isinstance(command, str) or not command:
                 raise MirrorError(f"credential helper is not on the allowlist: {command!r}")
             config_dir = _abs_path(credential.get("config_dir"), "config_dir")
             first, _, rest = command.partition(" ")
-            absolute = " ".join(p for p in (_resolve(first), rest) if p)
+            if os.path.isabs(first):
+                # A pinned absolute executable ([11b] ruling a): its basename plus the fixed
+                # arguments must be on the allowlist, and it must be a runnable regular file.
+                named = " ".join(p for p in (os.path.basename(first), rest) if p)
+                if named not in allowed:
+                    raise MirrorError(f"credential helper is not on the allowlist: {command!r}")
+                if not os.path.isfile(first) or not os.access(first, os.X_OK):
+                    raise MirrorError(f"credential helper {first} is missing or not executable")
+                absolute = command
+            else:
+                if command not in allowed:
+                    raise MirrorError(f"credential helper is not on the allowlist: {command!r}")
+                absolute = " ".join(p for p in (_resolve(first), rest) if p)
             where = shlex.quote(config_dir)
             # The helper alone sees its config location, as a shell prefix of its own command.
-            helper = f"!GH_CONFIG_DIR={where} HOME={where} {absolute}"
+            exe, _, fixed = absolute.partition(" ")
+            helper = f"!GH_CONFIG_DIR={where} HOME={where} " + " ".join(
+                p for p in (shlex.quote(exe), fixed) if p)
             args = ["-c", "credential.helper=", "-c", "credential.useHttpPath=true",
                     "-c", f"credential.helper={helper}"]
             return args, {"GIT_SSH_COMMAND": self._ssh_command(["-o", "IdentityAgent=none"])}
@@ -229,6 +393,12 @@ class Mirror:
             socket = _abs_path(credential.get("socket"), "ssh-agent socket")
             ssh = self._ssh_command(["-o", f"IdentityAgent={socket}"])
             return ["-c", "credential.helper="], {"GIT_SSH_COMMAND": ssh, "SSH_AUTH_SOCK": socket}
+        if kind == "none":
+            # A local destination (a path or file:// url) needs no credential; a network one does.
+            if "://" in self.url and not self.url.startswith("file://") or (
+                    "://" not in self.url and not os.path.isabs(self.url)):
+                raise MirrorError("a network destination needs a pinned credential source")
+            return ["-c", "credential.helper="], {}
         raise MirrorError(f"unknown credential kind: {kind!r}")
 
     # --- running git -----------------------------------------------------------------------
@@ -260,7 +430,7 @@ class Mirror:
         except subprocess.TimeoutExpired as exc:
             _kill_group(proc)
             proc.communicate()
-            raise MirrorError(f"git timed out after {timeout:g}s") from exc
+            raise MirrorTimeoutError(f"git timed out after {timeout:g}s") from exc
         return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
     def _git(self, args: list, *, timeout: float = MAX_CALL_TIMEOUT, pinned: bool = False,
@@ -272,8 +442,19 @@ class Mirror:
         if pinned:
             cmd += self._cred_args
         cmd += args
-        proc = self._exec(cmd, env=self._env(pinned), timeout=min(float(timeout), MAX_CALL_TIMEOUT),
-                          stdin=stdin, cwd=str(self.path))
+        seconds = min(float(timeout), MAX_CALL_TIMEOUT)
+        if self._deadline is not None:
+            left = self._deadline - time.monotonic()
+            if left <= 0:
+                raise AuditDeadlineError("the audit ran past its overall deadline")
+            seconds = min(seconds, left)
+        try:
+            proc = self._exec(cmd, env=self._env(pinned), timeout=seconds, stdin=stdin,
+                              cwd=str(self.path))
+        except MirrorTimeoutError as exc:
+            if self._deadline is not None and time.monotonic() >= self._deadline:
+                raise AuditDeadlineError("the audit ran past its overall deadline") from exc
+            raise
         if check and proc.returncode != 0:
             raise MirrorError(f"git {args[0]} failed: {self._last_line(proc)}")
         return proc
@@ -337,17 +518,106 @@ class Mirror:
                 refs[name] = sha
         return refs
 
+    def fetch_branches(self, branches: list[str], timeout: float) -> tuple[dict[str, str], list[str]]:
+        """Fetch the named branches one at a time inside one overall `timeout` (each call is also
+        capped at MAX_CALL_TIMEOUT). Returns (refname -> sha of what arrived, branches still
+        pending). A branch whose fetch times out, and every branch after it, stays pending: the
+        caller keeps the list (the ledger's mirror_fetch_pending) and calls again in a later pass,
+        so a big repository is brought in over several passes. Any other git failure (a branch the
+        remote does not have, a refused credential) raises MirrorError."""
+        total = _timeout(timeout)
+        names = [self._branch(b) for b in branches]
+        end = time.monotonic() + total
+        got: dict[str, str] = {}
+        for i, name in enumerate(names):
+            left = end - time.monotonic()
+            if left <= 0:
+                return got, names[i:]
+            try:
+                self._git(["fetch", "--no-tags", "--no-write-fetch-head", "--quiet",
+                           "--no-recurse-submodules", self.url,
+                           f"+refs/heads/{name}:refs/heads/{name}"], timeout=left, pinned=True)
+            except MirrorTimeoutError:
+                return got, names[i:]
+            sha = self.head(name)
+            if sha:
+                got[f"refs/heads/{name}"] = sha
+        return got, []
+
+    def ls_remote(self, timeout: float) -> dict[str, str]:
+        """The remote's branches (refname -> sha), asked with the same pinned credential and
+        environment as fetch and push. Used by doctor, and to verify a landing."""
+        seconds = _timeout(timeout)
+        out = self._git(["ls-remote", "--heads", self.url], timeout=seconds, pinned=True)
+        refs = {}
+        for line in out.stdout.decode("utf-8", "replace").splitlines():
+            sha, _, name = line.partition("\t")
+            if _SHA.fullmatch(sha) and name.startswith("refs/heads/"):
+                refs[name] = sha
+        return refs
+
+    def push(self, sha: str, target: str, *, timeout: float = MAX_CALL_TIMEOUT) -> None:
+        """Fast-forward `target` on the remote to exactly `sha`: `git push <url> <sha>:refs/heads/<target>`
+        with the pinned credential. Never a force (no `+`, no --force); a non-fast-forward or
+        protected branch is PushRejectedError. The commit must already be in the mirror."""
+        _sha(sha)
+        branch = self._branch(target)
+        seconds = _timeout(timeout)
+        self._require_known([sha])
+        proc = self._git(["push", "--porcelain", self.url, f"{sha}:refs/heads/{branch}"],
+                         timeout=seconds, pinned=True, check=False)
+        if proc.returncode != 0:
+            reason = self._last_line(proc)
+            raise PushRejectedError(f"push of {sha[:12]} to {branch} failed: {reason}", reason)
+
+    def delete_branch(self, branch: str, *, timeout: float = MAX_CALL_TIMEOUT) -> None:
+        """Delete a branch on the remote (`git push <url> :refs/heads/<branch>`), pinned credential."""
+        name = self._branch(branch)
+        seconds = _timeout(timeout)
+        proc = self._git(["push", "--porcelain", self.url, f":refs/heads/{name}"], timeout=seconds,
+                         pinned=True, check=False)
+        if proc.returncode != 0:
+            reason = self._last_line(proc)
+            raise PushRejectedError(f"deleting {name} failed: {reason}", reason)
+
+    # --- ssh host keys (person-confirmed only) -----------------------------------------------
+
+    def ssh_host(self) -> tuple[str, int] | None:
+        """(host, port) when the remote is reached over ssh, else None."""
+        return ssh_host_of(self.url)
+
+    def host_key_known(self) -> bool:
+        """Whether the private known_hosts file has a key for this remote's ssh host."""
+        hp = self.ssh_host()
+        return hp is None or known_host_present(self._known_hosts, *hp)
+
+    def _branch(self, branch) -> str:
+        if not isinstance(branch, str) or not _BRANCH.fullmatch(branch) or ".." in branch \
+                or branch.endswith("/") or branch.endswith(".lock"):
+            raise MirrorError(f"not a branch name: {branch!r}")
+        return branch
+
     def head(self, branch: str) -> str | None:
         """The sha of a mirrored branch, or None when the mirror has no such branch."""
-        if not isinstance(branch, str) or not _BRANCH.fullmatch(branch) or ".." in branch \
-                or branch.endswith("/"):
-            raise MirrorError(f"not a branch name: {branch!r}")
+        self._branch(branch)
         proc = self._git(["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}^{{commit}}"],
                          check=False)
         if proc.returncode == 1:
             return None
         if proc.returncode != 0:
             raise MirrorError(f"git rev-parse failed: {self._last_line(proc)}")
+        return proc.stdout.decode().strip()
+
+    def merge_base(self, a: str, b: str) -> str | None:
+        """The best common ancestor of two mirrored commits, or None when they share none."""
+        _sha(a)
+        _sha(b)
+        self._require_known([a, b])
+        proc = self._git(["merge-base", a, b], check=False)
+        if proc.returncode == 1:
+            return None
+        if proc.returncode != 0:
+            raise MirrorError(f"git merge-base failed: {self._last_line(proc)}")
         return proc.stdout.decode().strip()
 
     def is_ancestor(self, a: str, b: str) -> bool:
@@ -375,14 +645,26 @@ class Mirror:
                 f"{len(missing)} commit(s) in {base}..{head} are merges or empty, e.g. {missing[0]}")
         return sorted(mapping[c] for c in commits)
 
-    def audit_target(self, since_sha: str, candidate: str, judged: set[str]) -> list[str]:
+    def audit_target(self, since_sha: str, candidate: str, judged: set[str], *,
+                     deadline: float | None = AUDIT_DEADLINE) -> list[str]:
         """The commits on the target between since_sha and candidate that no judged change
         accounts for ([F24]), in target order. A commit is accounted for when it is reachable from
         a judged SHA, or when its patch-id matches a judged change that is not already on the
         target. Each judged change accounts for at most one such commit, so a revert followed by a
         re-applied cherry-pick is flagged. Merges and empty commits are flagged unless judged.
         Raises MissingCommitError for a judged SHA the mirror lacks, and TargetRewoundError when
-        since_sha is not an ancestor of candidate."""
+        since_sha is not an ancestor of candidate. `deadline` (seconds, default AUDIT_DEADLINE) bounds
+        the whole call on top of the per-call cap: AuditDeadlineError when it runs out ([11b] L8);
+        None means only the per-call cap applies."""
+        if deadline is not None:
+            deadline = _timeout(deadline)
+        self._deadline = None if deadline is None else time.monotonic() + deadline
+        try:
+            return self._audit(since_sha, candidate, judged)
+        finally:
+            self._deadline = None
+
+    def _audit(self, since_sha: str, candidate: str, judged: set[str]) -> list[str]:
         _sha(since_sha)
         _sha(candidate)
         judged_list = sorted({_sha(j) for j in judged})
