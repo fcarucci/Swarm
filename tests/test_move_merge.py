@@ -207,7 +207,7 @@ class MoveTests(MoveEnv):
         self.assertEqual(rc, 1); self.assertIn("not an open job", err)
 
     def test_moving_the_judge_says_so(self):
-        self.activate("A", "--goal", "ship it"); self.activate("B")
+        self.activate("A", "--no-drive", "--reason", "legacy goal test", "--goal", "ship it"); self.activate("B")
         j = self.judge("j1", "A")
         rc, out, _ = self.cli("move", "--as", j, "--to", "B")
         self.assertEqual(rc, 0)
@@ -217,7 +217,7 @@ class MoveTests(MoveEnv):
 
 class MergeTests(MoveEnv):
     def test_merge_moves_agents_appends_goal_and_closes(self):
-        self.activate("A", "--goal", "goal of A"); self.activate("B", "--goal", "goal of B")
+        self.activate("A", "--no-drive", "--reason", "legacy goal test", "--goal", "goal of A"); self.activate("B", "--no-drive", "--reason", "legacy goal test", "--goal", "goal of B")
         ja = self.judge("ja", "A"); jb = self.judge("jb", "B")
         w1 = self.worker("w1", "A"); w2 = self.worker("w2", "B")
         self.post("B", w2, "context on B")
@@ -247,7 +247,7 @@ class MergeTests(MoveEnv):
         self.assertEqual(self.cli("verdict", "--job", "B", "--as", jb, "met", "x")[0], 0)
 
     def test_merge_goal_only_on_the_absorbed_job_needs_a_judge(self):
-        self.activate("A", "--goal", "only A"); self.activate("B")
+        self.activate("A", "--no-drive", "--reason", "legacy goal test", "--goal", "only A"); self.activate("B")
         self.worker("w1", "A")
         rc, out, _ = self.cli("job", "merge", "A", "--into", "B")
         self.assertEqual(rc, 0)

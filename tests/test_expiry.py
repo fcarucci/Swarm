@@ -664,7 +664,7 @@ class ExpiryCliTests(Env):
     # ---- a goal job is never closed by the orphan or stall sweeps (the stale-waiting rule is off here)
     def test_a_goal_job_survives_every_sweep(self):
         self.config.write_text(self.config.read_text() + "[job]\nstale_waiting_minutes = 0\n")   # (stale waiting is tested apart)
-        self.activate("J", "--goal", "ship it")
+        self.activate("J", "--no-drive", "--reason", "legacy goal test", "--goal", "ship it")
         self.age("J", 40 * MIN)
         _, out, _ = self.cli("purge")
         self.assertNotIn("auto-closed", out)
@@ -674,7 +674,7 @@ class ExpiryCliTests(Env):
 
     def test_an_idle_goal_job_can_be_attached_to_by_any_session(self):
         self.config.write_text(self.config.read_text() + "[job]\nstale_waiting_minutes = 0\n")   # (stale waiting is tested apart)
-        self.activate("J", "--goal", "ship it")
+        self.activate("J", "--no-drive", "--reason", "legacy goal test", "--goal", "ship it")
         self.age("J", 99 * HOUR)
         self.markers.joinpath("J.json").unlink()      # the orchestrator's session is gone
         self.cli("purge")
@@ -687,7 +687,7 @@ class ExpiryCliTests(Env):
     def test_a_sweep_from_another_user_or_machine_spares_a_goal_job_and_closes_a_goalless_one_as_before(self):
         # a sweep with no marker of the jobs (another OS user's HOME, another machine's hooks):
         # the orphan rule's evidence is unchanged for a job without a goal, and never applies to a goal job
-        self.activate("G", "--goal", "ship it")
+        self.activate("G", "--no-drive", "--reason", "legacy goal test", "--goal", "ship it")
         self.activate("P")
         for j in ("G", "P"):
             self.age(j, 40 * MIN)
@@ -701,8 +701,8 @@ class ExpiryCliTests(Env):
     def test_goal_stall_hours_in_the_config_closes_a_stalled_goal_job_as_failed(self):
         self.assertEqual(self.cfg["job"]["goal_stall_hours"], 0)   # never, by default
         self.config.write_text(self.config.read_text() + "[job]\ngoal_stall_hours = 6\nstale_waiting_minutes = 0\n")
-        self.activate("G", "--goal", "ship it")
-        self.activate("O", "--goal", "ship it", "--stall-hours", "0")   # its own: never
+        self.activate("G", "--no-drive", "--reason", "legacy goal test", "--goal", "ship it")
+        self.activate("O", "--no-drive", "--reason", "legacy goal test", "--goal", "ship it", "--stall-hours", "0")   # its own: never
         self.age("G", 5 * HOUR)
         self.age("O", 99 * HOUR)
         self.cli("purge")
@@ -724,7 +724,7 @@ class ExpiryCliTests(Env):
             return "\n".join(swarm._watch_frame(b, job, 2.0, False, True, view))
 
     def test_status_and_watch_show_a_goal_job_without_agents_as_waiting_goal_not_met(self):
-        self.activate("G", "--goal", "ship it")
+        self.activate("G", "--no-drive", "--reason", "legacy goal test", "--goal", "ship it")
         self.activate("P")                             # no goal: nothing new
         self.age("G", 2 * HOUR)
         self.age("P", 10 * MIN)                        # idle, but not yet an orphan
@@ -748,7 +748,7 @@ class ExpiryCliTests(Env):
                          r"^G\s+active\s")
 
     def test_compact_watch_shows_the_shared_derived_word_for_every_job(self):
-        self.activate("G", "--goal", "ship it")
+        self.activate("G", "--no-drive", "--reason", "legacy goal test", "--goal", "ship it")
         self.activate("P")                             # no goal, idle since 10 minutes: stored status "active"
         self.age("G", 2 * HOUR)
         self.age("P", 10 * MIN)

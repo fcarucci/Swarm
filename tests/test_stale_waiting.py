@@ -48,7 +48,7 @@ class StaleWaitingTests(Env):
 
     def waiting_goal_job(self, seconds, job="J"):
         """A goal job with no verdict whose only agent has left: `waiting (goal not met)`."""
-        self.activate(job, "--goal", "ship it")
+        self.activate(job, "--no-drive", "--reason", "legacy goal test", "--goal", "ship it")
         self.finished_agent(job)
         self.quiet(seconds, job)
 
@@ -101,7 +101,7 @@ class StaleWaitingTests(Env):
 
     def test_auto_closes_completed_with_a_met_verdict(self):
         """Goal met, but the orchestrator is parked in a wait: completed, not failed."""
-        self.activate("J", "--goal", "ship it")
+        self.activate("J", "--no-drive", "--reason", "legacy goal test", "--goal", "ship it")
         with self.board() as b:
             judge = b.allocate_name("judge-1", "J", "judge")
             self.assertTrue(b.claim_judge("judge-1", "J"))
@@ -117,7 +117,7 @@ class StaleWaitingTests(Env):
 
     def test_met_verdict_with_accepted_work_awaiting_finalization_closes_failed(self):
         """Met verdict on a pipeline artifact nobody finalized (still waiting): failed, not completed."""
-        self.activate("J", "--goal", "ship it")
+        self.activate("J", "--no-drive", "--reason", "legacy goal test", "--goal", "ship it")
         with self.board() as b:
             b.set_job_data("J", "pipeline.started_at", (b.now() - dt.timedelta(hours=9)).isoformat())
             worker = b.allocate_name("agent-1", "J", "worker")
@@ -159,7 +159,7 @@ class StaleWaitingTests(Env):
         for state in ("started", "running", "idle"):
             with self.subTest(state=state):
                 job = f"J-{state}"
-                self.activate(job, "--goal", "ship it")
+                self.activate(job, "--no-drive", "--reason", "legacy goal test", "--goal", "ship it")
                 key = f"a-{state}"
                 self.finished_agent(job, f"done-{state}")
                 with self.board() as b:

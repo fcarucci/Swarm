@@ -2,6 +2,7 @@
 and install or stop the systemd user timer to match."""
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -36,11 +37,23 @@ def stop_timer(run=None) -> str:
     return f"{systemd.TIMER}: disabled and stopped"
 
 
+def _actor() -> str:
+    """Who switched the supervisor off, for the halt record: the requester's session or the user."""
+    from swarm import hosts
+    return hosts.cli_session_id(os.environ) or os.environ.get("USER") or "person"
+
+
 def cmd_switch(cfg: dict, args) -> int:
     from swarm import paths
     from swarm.supervisor import settings as st, systemd
+    from swarm import drive_activate
     config = Path(args.config).expanduser()
     on = args.scmd == "enable"
+    if not on:
+        refusal = drive_activate.refuse_seat_session(cfg)   # [M1] 3: seat sessions may not switch it off
+        if refusal:
+            print(f"swarm supervise disable: {refusal}", file=sys.stderr)
+            return 1
     try:
         set_enabled(config, on)
     except Exception as exc:   # ManualEdit, OSError: say what to set by hand
@@ -49,8 +62,18 @@ def cmd_switch(cfg: dict, args) -> int:
         return 1
     print(f"{config}: [supervise] enabled = {'true' if on else 'false'}")
     if not on:
+        halted, failed = drive_activate.halt_drive_jobs(cfg, actor=_actor())   # [M1] 1: [F5] halt, seats stopped
+        if halted:
+            print(f"warning: drive jobs halted until `swarm supervise enable`: {', '.join(halted)}")
+        for job, why in failed:
+            print(f"warning: could not halt {job}: {why}", file=sys.stderr)
         print(stop_timer())
-        return 0
+        return 1 if failed else 0
+    resumed, failed = drive_activate.unhalt_drive_jobs(cfg)
+    if resumed:
+        print(f"drive jobs unhalted (their deadlines shifted by the halt): {', '.join(resumed)}")
+    for job, why in failed:
+        print(f"warning: could not unhalt {job}: {why}", file=sys.stderr)
     if paths.IS_WINDOWS:
         print("the supervisor needs a systemd user timer: not available on Windows")
         return 0

@@ -29,7 +29,7 @@ class LearnThenDeactivateTests(HindsightEnv):
         self.learn_then_deactivate("hermes", "--project", "job-bank")
 
     def test_deactivate_after_learn_on_a_goal_job_with_met_verdict(self):
-        self.assertEqual(self.cli("activate", "--job", "J", "--goal", "ship it")[0], 0)
+        self.assertEqual(self.cli("activate", "--job", "J", "--no-drive", "--reason", "legacy goal test", "--goal", "ship it")[0], 0)
         self.cli("join", "--job", "J", "--key", "j")
         with self.board() as b:
             name = b.active_agent_name("j")
@@ -45,7 +45,7 @@ class LearnThenDeactivateTests(HindsightEnv):
     def test_learn_does_not_satisfy_finalization_on_a_pipeline_job(self):
         """The real gate: an accepted artifact with no FINALIZED post refuses deactivate, and a
         learning does not stand in for the integration it certifies."""
-        self.assertEqual(self.cli("activate", "--job", "J", "--goal", "ship it")[0], 0)
+        self.assertEqual(self.cli("activate", "--job", "J", "--no-drive", "--reason", "legacy goal test", "--goal", "ship it")[0], 0)
         with self.board() as b:
             started = (b.now() - dt.timedelta(hours=1)).isoformat()
             b.set_job_data("J", "pipeline.started_at", started)   # a pipeline job: DONE posts count
