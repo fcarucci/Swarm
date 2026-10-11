@@ -115,6 +115,24 @@ class StaleWaitingTests(Env):
         s = self.job()
         self.assertEqual((s.status, s.closed_by), ("completed", "auto"))
 
+    def test_unreachable_verdict_is_named_in_the_outcome_not_no_verdict(self):
+        """A stale job whose judge recorded `unreachable` is closed failed, and the outcome says so."""
+        self.activate("J", "--goal", "ship it")
+        with self.board() as b:
+            judge = b.allocate_name("judge-1", "J", "judge")
+            self.assertTrue(b.claim_judge("judge-1", "J"))
+            self.assertTrue(b.record_verdict("J", judge, "unreachable", "cannot be built", details="tried x", scope="goal"))
+            b.close_agent("judge-1", "done")
+        rc, _, err = self.cli("wait", "--job", "J", "--on", "the human")
+        self.assertEqual(rc, 0, err)
+        self.quiet(CLOSE_AT, agents=("judge-1",))
+        self.h.backdate_job("J", verdict_at=CLOSE_AT)
+        self.sweep()
+        s = self.job()
+        self.assertEqual((s.status, s.closed_by), ("failed", "auto"))
+        self.assertEqual(s.outcome, "auto-closed: waiting with no live agents; verdict unreachable")
+        self.assertNotIn("no verdict", s.outcome)
+
     def test_met_verdict_with_accepted_work_awaiting_finalization_closes_failed(self):
         """Met verdict on a pipeline artifact nobody finalized (still waiting): failed, not completed."""
         self.activate("J", "--no-drive", "--reason", "legacy goal test", "--goal", "ship it")
