@@ -1301,3 +1301,5 @@ One doctor line each, with a test each (FAIL/WARN/OK as stated):
 - DRIVER-LEDGER-BAD / DRIVER-ORPHAN jobs → FAIL ([F2]); a receipt-write failure in the last 24 h → FAIL ([F21], if not already added by Task 5);
 - goal jobs activated before drive mode → "not autonomous" list ([A]/§9).
 Credential-helper and `ls-remote` checks per destination stay with Task 11b.
+- From the Task 12 review (low): a bad ledger holds `lead` but not `lead~N` successor seats; 8c holds every seat of the job (lead and successors) when the ledger is bad.
+- Doctor ownership: Task 11b's `land_doctor.checks(cfg) -> list` owns git ≥ 2.40, credential helper path, `ls-remote` per destination, `known_hosts` and agent-socket lines; Task 1b calls it from `bootstrap.py` and does not duplicate them. 11b also adds the authenticated-remote test with a real gh-style `GH_CONFIG_DIR`/`hosts.yml`.
