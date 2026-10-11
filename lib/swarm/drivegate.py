@@ -855,7 +855,8 @@ def post_tool(cfg: dict, payload: dict, host, *, resume=None, resume_lookup=None
     except Exception as exc:
         log_receipt_failure(f"{job_label} {kind} id={rid} rev={rev}: {type(exc).__name__}: {exc}")
         return False
-    _barrier("hook_after_cli_before_receipt")
+    from swarm.supervisor import barrier
+    barrier.hit("hook_after_cli_before_receipt")
     try:
         receipts.write(bk, r)
     except Exception as exc:
@@ -878,12 +879,3 @@ def requester_action(ns) -> str:
     """The action id of a receipt the requester session's command earns: `requester:seat` for every seat
     command (drive_authz checks that one for a seat request), else `requester:<command>`."""
     return "requester:seat" if ns.cmd == "seat" else "requester:" + ns.cmd.replace("-", "_")
-
-
-def _barrier(name: str) -> None:
-    """The test barrier between the CLI's write and the receipt's (a no-op unless a test arms it)."""
-    from swarm.supervisor import barrier
-    try:
-        barrier.hit(name)
-    except Exception:
-        pass

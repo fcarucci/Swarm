@@ -309,6 +309,7 @@ def ci_repo(command: str) -> str | None:
 # `sh -c`, `bash -lc`, `eval`, `script -c`, `$(...)` and backticks is looked at too.
 
 _MAX_NEST = 5
+STDIN_SHELL = "<stdin-shell>"   # a shell that reads its script from a pipe or file: unverifiable
 TOO_DEEP = "<too-deep>"   # the program iter_commands yields for a command nested beyond _MAX_NEST
 _SHELLS = frozenset(("sh", "bash", "zsh", "dash", "ksh", "ash", "fish", "csh", "tcsh", "busybox"))
 _SEPARATORS = ";&|()\n"
@@ -541,6 +542,8 @@ def iter_commands(command: str, _depth: int = 0):
                 yield from iter_commands(inner, _depth + 1)
             elif prog in _SHELLS:
                 reads_stdin = True
+                if not [a for a in args if not a.startswith("-")] and "<<" not in command:
+                    yield STDIN_SHELL, [], set()
         elif prog == "eval":
             yield from iter_commands(" ".join(args), _depth + 1)
         yield prog, args, seen
@@ -600,6 +603,10 @@ def _git_args(args: list[str]):
     while i < len(args) and args[i].startswith("-"):
         opt = args[i]
         name = opt.split("=", 1)[0]
+        if name == "--config-env":
+            val = opt.split("=", 1)[1] if "=" in opt else (args[i + 1] if i + 1 < len(args) else "")
+            if _GIT_CONFIG_RISK.match(val.split("=", 1)[0]):
+                return None, [], f"git --config-env {val.split('=', 1)[0]} (an alias or push setting) is refused", cdir
         if name == "-c" and i + 1 < len(args) and _GIT_CONFIG_RISK.match(args[i + 1].split("=", 1)[0]):
             return None, [], f"git -c {args[i + 1].split('=', 1)[0]} (an alias or push setting) is refused", cdir
         if name == "-C" and i + 1 < len(args):
@@ -622,6 +629,10 @@ def _push_refusal(rest: list[str], targets: set[str], branch_of, cdir=None) -> s
             break
         if a.startswith("--"):
             name = a.split("=", 1)[0]
+            if len(name) >= 4 and name not in _PUSH_FORCE and name not in _PUSH_REFUSED:
+                hit = next((f for f in (*_PUSH_FORCE, *_PUSH_REFUSED) if f.startswith(name)), None)
+                if hit:          # git takes any unique prefix of a long option: --mirr, --force-w, --delet
+                    name = hit
             if name in _PUSH_FORCE:
                 return "a force push is refused"
             if name in _PUSH_REFUSED:
@@ -664,13 +675,20 @@ def _push_refusal(rest: list[str], targets: set[str], branch_of, cdir=None) -> s
             if not branch:
                 return "a push of HEAD with no known branch is refused (name it: git push origin HEAD:<branch>)"
             dst = branch
-        dst = dst.removeprefix("refs/heads/")
+        if any(ch in dst for ch in "{$\\"):
+            return "a push destination with brace, $ or backslash syntax is refused: name the branch"
+        for prefix in ("refs/heads/", "heads/", "refs/"):      # git resolves HEAD:heads/main to refs/heads/main
+            if dst.startswith(prefix):
+                dst = dst[len(prefix):]
+                break
         if dst.lower() in targets:
             return f"a push to the target branch {dst!r} is refused"
     return None
 
 
-_GH_API_RISK = re.compile(r"(?:^|/)(?:git/(?:refs|commits|trees|tags)|merges|merge-upstream)\b")
+_GIT_ENV = re.compile(r"(?:export\s+)?GIT_CONFIG[A-Z_0-9]*=")
+_GH_API_RISK = re.compile(r"(?:^|/)(?:git/(?:refs|commits|trees|tags)|merges|merge-upstream|pulls/\d+/merge)\b")
+_GH_GRAPHQL_RISK = re.compile(r"mergePullRequest|updateRef|createRef|deleteRef|createCommitOnBranch|mergeBranch")
 _CLAUDE_TOKEN = re.compile(r"(?:^|/)(?:claude|claude-code)(?:\.m?c?js)?$|@anthropic-ai/claude-code|"
                            r"claude(?:-code)?/(?:bin/)?(?:cli|index)\.m?c?js$")
 _CODEX_TOKEN = re.compile(r"(?:^|/)codex(?:\.js)?$|@openai/codex")
@@ -748,10 +766,16 @@ def drive_command_refusal(command: str, targets=(), *, branch_of=None) -> str | 
             names = lazy() if callable(lazy) else lazy
             done.append({t.removeprefix("refs/heads/").lower() for t in names if isinstance(t, str) and t})
         return done[0]
+    for text in _nested_scripts(command):
+        for words in split_commands(text):
+            if any(_GIT_ENV.match(w) for w in words):
+                return "git configuration through GIT_CONFIG_* environment variables is refused"
     interp_stdin = False
     for prog, args, wrappers in iter_commands(command):
         if prog == TOO_DEEP:
             return "a command nested too deeply to check (sh -c in sh -c ...) is refused"
+        if prog == STDIN_SHELL:
+            return "a shell that reads its commands from a pipe or file cannot be checked: run the commands directly"
         if _INTERP.fullmatch(prog):
             code = [args[k + 1] for k, a in enumerate(args[:-1]) if a in _INTERP_CODE_FLAGS]
             interp_stdin = interp_stdin or not code
@@ -785,6 +809,12 @@ def drive_command_refusal(command: str, targets=(), *, branch_of=None) -> str | 
                     gargs.append(a)
             if gargs[:2] == ["pr", "merge"]:
                 return "`gh pr merge` is refused: landing goes through `swarm land`"
+            if gargs[:1] == ["api"] and (any(_GH_GRAPHQL_RISK.search(a) for a in args)
+                                         or (any("/contents/" in a for a in gargs[1:])
+                                             and any(a in ("-X", "--method", "-f", "-F", "--field", "--raw-field",
+                                                           "--input") or a.startswith(("-X", "--method=", "-f", "-F"))
+                                                     for a in args))):
+                return "a gh api call that commits or merges is refused: landing goes through `swarm land`"
             if gargs[:1] == ["api"] and any(_GH_API_RISK.search(a.split("?", 1)[0]) for a in gargs[1:]):
                 return "a gh api call that moves a ref or merges is refused: landing goes through `swarm land`"
         why = _launch_refusal(prog, args)
@@ -816,6 +846,8 @@ def readonly_write_reason(command: str) -> str | None:
     for prog, args, _ in iter_commands(command):
         if prog == TOO_DEEP:
             return "a command nested too deeply to check is refused"
+        if prog == STDIN_SHELL:
+            return "a shell that reads its commands from a pipe or file cannot be checked"
         if prog == "git":
             sub, _rest, bad, _cdir = _git_args(args)
             if bad or sub in _GIT_WRITES:
@@ -849,7 +881,7 @@ def swarm_verdict_call(command: str) -> bool:
     return False
 
 
-_READ_VERBS = frozenset(("get", "list", "search", "read", "find", "count", "describe", "query", "fetch", "view",
+_READ_VERBS = frozenset(("get", "list", "search", "read", "find", "count", "describe", "fetch", "view",
                          "show", "lookup", "browse", "snapshot", "history", "status", "info", "stats",
                          "recent", "tool", "index", "health"))
 _WRITE_VERBS = frozenset(("create", "update", "delete", "write", "post", "send", "set", "add", "remove", "push",
@@ -863,7 +895,8 @@ _WRITE_VERBS = frozenset(("create", "update", "delete", "write", "post", "send",
                           "invite", "publish", "cancel", "assign", "transfer", "grant", "deny", "rotate",
                           "archive", "unarchive", "subscribe", "unsubscribe", "force", "sync", "start", "stop",
                           "kill", "launch", "open", "submit", "register", "unregister", "import", "export",
-                          "download", "locate", "wipe", "reset", "rebuild", "refresh", "retry", "resolve"))
+                          "download", "locate", "wipe", "reset", "rebuild", "refresh", "retry", "resolve", "mark", "replace",
+                          "purge", "insert", "upsert", "overwrite", "truncate", "flush", "empty", "query", "sql"))
 
 
 def mcp_read_allowed(tool_name) -> bool:
@@ -873,7 +906,7 @@ def mcp_read_allowed(tool_name) -> bool:
     says neither is not known to be read-only."""
     if not isinstance(tool_name, str) or not tool_name.startswith("mcp__"):
         return True
-    tool = tool_name.rsplit("__", 1)[-1].lower()
+    tool = re.sub(r"(?<=[a-z])(?=[A-Z])", "_", tool_name.rsplit("__", 1)[-1]).lower()
     tokens = [t for t in re.split(r"[_\-\s]+", tool) if t]
     return any(t in _READ_VERBS for t in tokens) and not any(t in _WRITE_VERBS for t in tokens)
 

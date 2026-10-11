@@ -187,6 +187,41 @@ class DriveRefusals(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(refuse(cmd, ["main"], branch_of=on("feat/a")), cmd)
 
+    def test_rr_abbreviated_long_options_and_dwim_destinations(self):
+        for cmd in ("git push --mirr origin", "git push --al origin", "git push --force-w origin HEAD:feat/a",
+                    "git push --delet origin feat/a", "git push --prun origin", "git push --bran origin",
+                    "git push origin HEAD:heads/main", "git push origin HEAD:refs/main",
+                    "git push origin 'HEAD:{main,x}'", "git push origin 'HEAD:$B'", "git push origin 'HEAD:ma\\in'"):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(refuse(cmd, ["main"], branch_of=on("feat/a")), cmd)
+        for cmd in ("git push --tags origin", "git push --no-verify origin feat/a", "git push --set-upstream origin feat/a",
+                    "git push --follow-tags origin feat/a", "git push --porcelain origin feat/a"):
+            self.assertIsNone(refuse(cmd, ["main"], branch_of=on("feat/a")), cmd)
+
+    def test_rr_git_config_by_environment_and_config_env(self):
+        for cmd in ("GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push GIT_CONFIG_VALUE_0=HEAD:main git push origin",
+                    "GIT_CONFIG_PARAMETERS=\"'remote.origin.push=HEAD:main'\" git push origin",
+                    "PV=HEAD:main git --config-env=remote.origin.push=PV push origin",
+                    "git --config-env remote.origin.push=PV push origin", "export GIT_CONFIG_COUNT=1; git push origin feat/a",
+                    "env GIT_CONFIG_COUNT=1 git p", "sh -c 'GIT_CONFIG_COUNT=1 git p'"):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(refuse(cmd, ["main"], branch_of=on("feat/a")), cmd)
+        self.assertIsNone(refuse("git --config-env=user.name=NAME log", ["main"]))
+
+    def test_rr_shells_reading_a_pipe_and_gh_merge_endpoints(self):
+        for cmd in ("echo 'git push origin HEAD:main' | sh", "printf 'claude -p x' | bash", "bash <(echo 'git push')",
+                    "sh -s", "bash < script.sh",
+                    "gh api -X PUT repos/o/r/pulls/1/merge",
+                    "gh api -X PUT repos/o/r/contents/f -f message=m -f branch=main",
+                    "gh api graphql -f query='mutation{mergePullRequest(input:{pullRequestId:\"x\"}){clientMutationId}}'",
+                    "gh api graphql -f query='mutation{updateRef(input:{})}'",
+                    "gh api graphql -f query='mutation{createCommitOnBranch(input:{})}'"):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(refuse(cmd, ["main"], branch_of=on("feat/a")), cmd)
+        for cmd in ("bash script.sh", "bash -lc 'git log'", "gh api repos/o/r/contents/f", "gh api graphql -f query='{viewer{login}}'"):
+            self.assertIsNone(refuse(cmd, ["main"]), cmd)
+        self.assertIn("pipe", shellguard.readonly_write_reason("echo ls | sh") or "pipe")
+
     def test_quoting_and_assignments(self):
         self.assertTrue(refuse("GIT_DIR=x git push origin main", ["main"]))
         self.assertTrue(refuse("git push 'origin' \"main\"", ["main"]))
@@ -276,12 +311,15 @@ class VerdictCalls(unittest.TestCase):
 class McpTools(unittest.TestCase):
     def test_allowlist(self):
         for tool in ("mcp__a__get_x", "mcp__a__list_x", "mcp__a__search_x", "mcp__a__read_x", "mcp__a__find_x",
-                     "mcp__a__count_x", "mcp__a__describe_x", "mcp__a__query_x", "mcp__a__fetch_x", "mcp__a__view_x",
+                     "mcp__a__count_x", "mcp__a__describe_x", "mcp__a__fetch_x", "mcp__a__view_x",
                      "mcp__a__x_get_y", "mcp__a__browser_snapshot", "mcp__a__unifi_tool_index"):
             self.assertTrue(shellguard.mcp_read_allowed(tool), tool)
         for tool in ("mcp__a__create_x", "mcp__a__x", "mcp__a__execute", "mcp__a__get_and_update", "mcp__a__list_and_send",
                      "mcp__a__render_template", "mcp__a__browser_click", "mcp__a__browser_take_screenshot",
-                     "mcp__a__call_service", "mcp__a__restart_ha", "mcp__a__set_x"):
+                     "mcp__a__call_service", "mcp__a__restart_ha", "mcp__a__set_x",
+                     "mcp__github__mark_all_notifications_read", "mcp__gmail__mark_as_read", "mcp__pg__query",
+                     "mcp__fs__search_and_replace", "mcp__x__get_or_insert", "mcp__x__list_and_purge",
+                     "mcp__x__get_fileAndDelete"):
             self.assertFalse(shellguard.mcp_read_allowed(tool), tool)
 
 
