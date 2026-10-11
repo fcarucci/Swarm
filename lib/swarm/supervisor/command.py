@@ -38,7 +38,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from swarm.board.base import SETTLED_VERDICTS
+from swarm.verdicts import SETTLED_VERDICTS
 from swarm.board import AgentStatus, JobStatus, board_backend
 from swarm.supervisor.budget import Decision
 from swarm import compat

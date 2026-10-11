@@ -23,7 +23,7 @@ import getpass
 import os
 import socket
 import time
-from swarm.board.base import SETTLED_VERDICTS
+from swarm.verdicts import SETTLED_VERDICTS
 
 PAUSE_REASON_MAX = 300
 WAIT_DEFAULT = 15.0          # seconds `swarm pause` waits for other boxes' final transcripts

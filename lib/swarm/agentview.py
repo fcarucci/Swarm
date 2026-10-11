@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import dataclasses
 import re
-from swarm.board.base import SETTLED_VERDICTS
+from swarm.verdicts import SETTLED_VERDICTS
 
 ORCHESTRATOR = "orchestrator"
 ORCHESTRATOR_KEY = re.compile(r"orchestrator(?:[-_.:].*)?", re.IGNORECASE)

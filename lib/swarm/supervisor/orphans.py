@@ -1,7 +1,7 @@
 """Recover locally-enrolled jobs whose last coordinator and workers disappeared."""
 from __future__ import annotations
 import datetime as dt
-from swarm.board.base import SETTLED_VERDICTS
+from swarm.verdicts import SETTLED_VERDICTS
 from swarm.supervisor.stuck import SUPERVISOR_NAME, WAITING_PREFIX
 
 REASON = "orphan-coordinator:"
