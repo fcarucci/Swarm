@@ -233,6 +233,39 @@ def known_hosts_file() -> str:
     return path
 
 
+def _under_private(url: str) -> bool:
+    path = urlsplit(url).path if url.startswith("file://") else url
+    root = os.path.realpath(str(private_dir()))
+    real = os.path.realpath(path)
+    return real == root or real.startswith(root + os.sep)
+
+
+def _check_helper_file(path: str, trusted: tuple) -> None:
+    """A pinned absolute credential helper must be a regular executable that a seat cannot replace:
+    in a system directory or named exactly by the person ([drive] credential_helpers paths), owned by root
+    or this user, and neither the file nor any parent directory writable by group or others."""
+    real = os.path.realpath(path)
+    if not os.path.isfile(real) or not os.access(real, os.X_OK):
+        raise MirrorError(f"credential helper {path} is missing or not executable")
+    system = {os.path.realpath(d) for d in SYSTEM_DIRS}
+    named = {os.path.realpath(t) for t in trusted}
+    if os.path.dirname(real) not in system and real not in named:
+        raise MirrorError(f"credential helper {path} is not in a system directory or named in "
+                          f"[drive] credential_helpers paths")
+    if os.name == "nt":
+        return
+    node = real
+    while True:
+        st = os.stat(node)
+        sticky_dir = node != real and st.st_mode & 0o1000          # /tmp-style: others cannot replace our entry
+        if st.st_uid not in (0, os.getuid()) or (st.st_mode & 0o022 and not sticky_dir):
+            raise MirrorError(f"credential helper {path}: {node} is writable by others or owned by another user")
+        parent = os.path.dirname(node)
+        if parent == node:
+            break
+        node = parent
+
+
 def _tool(cmd: list[str], timeout: float) -> subprocess.CompletedProcess:
     """Run a system tool (ssh-keyscan, ssh-keygen) with a minimal environment, killed with its
     process group on timeout."""
@@ -321,9 +354,11 @@ class Mirror:
     only inside the test suite (TEST_MARKER must be set); production never passes it."""
 
     def __init__(self, url: str, credential: dict, *, allowed_helpers=None,
-                 loopback_http: bool = False):
+                 loopback_http: bool = False, trusted_helper_paths=()):
         self.url = _check_url(url, loopback_http)
         self._deadline: float | None = None
+        self._trusted_paths = tuple(trusted_helper_paths)
+        self._local = self.url.startswith("file://") or ("://" not in self.url and ssh_host_of(self.url) is None)
         allowed = ALLOWED_HELPERS if allowed_helpers is None else tuple(allowed_helpers)
         self._git_bin = _resolve("git")
         self._ssh_bin = _resolve("ssh")
@@ -369,8 +404,7 @@ class Mirror:
                 named = " ".join(p for p in (os.path.basename(first), rest) if p)
                 if named not in allowed:
                     raise MirrorError(f"credential helper is not on the allowlist: {command!r}")
-                if not os.path.isfile(first) or not os.access(first, os.X_OK):
-                    raise MirrorError(f"credential helper {first} is missing or not executable")
+                _check_helper_file(first, self._trusted_paths)
                 absolute = command
             else:
                 if command not in allowed:
@@ -398,6 +432,10 @@ class Mirror:
             if "://" in self.url and not self.url.startswith("file://") or (
                     "://" not in self.url and not os.path.isabs(self.url)):
                 raise MirrorError("a network destination needs a pinned credential source")
+            if not os.environ.get(TEST_MARKER) and not _under_private(self.url):
+                # A local repository is written by whoever may write its directory (the integrator
+                # pushes its branch there), so only the supervisor's own directory is trusted.
+                raise MirrorError("a local destination must lie in the supervisor's private directory")
             return ["-c", "credential.helper="], {}
         raise MirrorError(f"unknown credential kind: {kind!r}")
 
@@ -508,7 +546,7 @@ class Mirror:
         """Mirror the remote's branches (pruning deleted ones); returns refname -> sha."""
         seconds = _timeout(timeout)
         self._git(["fetch", "--prune", "--no-tags", "--no-write-fetch-head", "--quiet",
-                   "--no-recurse-submodules", self.url, "+refs/heads/*:refs/heads/*"],
+                   "--no-recurse-submodules", *self._pack("upload"), self.url, "+refs/heads/*:refs/heads/*"],
                   timeout=seconds, pinned=True)
         out = self._git(["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/"])
         refs = {}
@@ -535,7 +573,7 @@ class Mirror:
                 return got, names[i:]
             try:
                 self._git(["fetch", "--no-tags", "--no-write-fetch-head", "--quiet",
-                           "--no-recurse-submodules", self.url,
+                           "--no-recurse-submodules", *self._pack("upload"), self.url,
                            f"+refs/heads/{name}:refs/heads/{name}"], timeout=left, pinned=True)
             except MirrorTimeoutError:
                 return got, names[i:]
@@ -548,7 +586,7 @@ class Mirror:
         """The remote's branches (refname -> sha), asked with the same pinned credential and
         environment as fetch and push. Used by doctor, and to verify a landing."""
         seconds = _timeout(timeout)
-        out = self._git(["ls-remote", "--heads", self.url], timeout=seconds, pinned=True)
+        out = self._git(["ls-remote", "--heads", *self._pack("upload"), self.url], timeout=seconds, pinned=True)
         refs = {}
         for line in out.stdout.decode("utf-8", "replace").splitlines():
             sha, _, name = line.partition("\t")
@@ -564,7 +602,7 @@ class Mirror:
         branch = self._branch(target)
         seconds = _timeout(timeout)
         self._require_known([sha])
-        proc = self._git(["push", "--porcelain", self.url, f"{sha}:refs/heads/{branch}"],
+        proc = self._git(["push", "--porcelain", *self._pack("receive"), self.url, f"{sha}:refs/heads/{branch}"],
                          timeout=seconds, pinned=True, check=False)
         if proc.returncode != 0:
             reason = self._last_line(proc)
@@ -574,7 +612,7 @@ class Mirror:
         """Delete a branch on the remote (`git push <url> :refs/heads/<branch>`), pinned credential."""
         name = self._branch(branch)
         seconds = _timeout(timeout)
-        proc = self._git(["push", "--porcelain", self.url, f":refs/heads/{name}"], timeout=seconds,
+        proc = self._git(["push", "--porcelain", *self._pack("receive"), self.url, f":refs/heads/{name}"], timeout=seconds,
                          pinned=True, check=False)
         if proc.returncode != 0:
             reason = self._last_line(proc)
@@ -590,6 +628,14 @@ class Mirror:
         """Whether the private known_hosts file has a key for this remote's ssh host."""
         hp = self.ssh_host()
         return hp is None or known_host_present(self._known_hosts, *hp)
+
+    def _pack(self, kind: str) -> list[str]:
+        """Local transports run upload-pack / receive-pack in the destination repository and git clears the
+        -c configuration for them, so its own hooks and config would run: pass the safe settings again."""
+        if not self._local:
+            return []
+        cmd = (f"{shlex.quote(self._git_bin)} -c core.hooksPath=/dev/null {kind}-pack")
+        return [f"--{kind}-pack={cmd}"]
 
     def _branch(self, branch) -> str:
         if not isinstance(branch, str) or not _BRANCH.fullmatch(branch) or ".." in branch \

@@ -23,6 +23,11 @@ def _read(path):
         return fh.read()
 
 
+def mirror_receive_pack():
+    git_bin = mirror._resolve("git")
+    return f"--receive-pack={shlex.quote(git_bin)} -c core.hooksPath=/dev/null receive-pack"
+
+
 class PushCase(MirrorCase):
     def setUp(self):
         super().setUp()
@@ -52,7 +57,7 @@ class Push(PushCase):
             m.push(self.tip, "main")
         push = [cmd for cmd, _ in calls if "push" in cmd][0]
         tail = push[push.index("push") + 1:]
-        self.assertEqual(tail, ["--porcelain", self.remote, f"{self.tip}:refs/heads/main"])
+        self.assertEqual(tail, ["--porcelain", mirror_receive_pack(), self.remote, f"{self.tip}:refs/heads/main"])
         for word in push:
             self.assertFalse(word.startswith("+") or word in ("-f", "--force", "--force-with-lease", "--mirror"))
 
@@ -243,7 +248,7 @@ class AbsoluteHelperPin(MirrorCase):
     def test_absolute_helper_path_is_accepted_when_basename_and_args_are_allowlisted(self):
         remote, _ = self.remote_with_main()
         gh = self.gh()
-        m = Mirror(remote, self.cred(f"{gh} auth git-credential"))
+        m = Mirror(remote, self.cred(f"{gh} auth git-credential"), trusted_helper_paths=(gh,))
         helper = [a for a in m._cred_args if a.startswith("credential.helper=!")][0]
         words = shlex.split(helper[len("credential.helper=!"):])
         self.assertEqual(words[2:], [gh, "auth", "git-credential"])
@@ -263,11 +268,11 @@ class AbsoluteHelperPin(MirrorCase):
         }
         for name, command in cases.items():
             with self.subTest(name), self.assertRaises(MirrorError):
-                Mirror(remote, self.cred(command))
+                Mirror(remote, self.cred(command), trusted_helper_paths=(gh, evil))
         os.rename(plain, os.path.join(self.root, "bin", "gh3"))
         os.chmod(gh, 0o600)
         with self.assertRaises(MirrorError) as cm:
-            Mirror(remote, self.cred(f"{gh} auth git-credential"))
+            Mirror(remote, self.cred(f"{gh} auth git-credential"), trusted_helper_paths=(gh,))
         self.assertIn("not executable", str(cm.exception))
 
     @support.posix_only("file modes")
@@ -304,6 +309,118 @@ class NoCredentialAndMergeBase(PushCase):
             m.merge_base("3" * 40, self.base)
         with self.assertRaises(MirrorError):
             m.merge_base("main", self.base)
+
+
+class HelperTrust(AbsoluteHelperPin):
+    """[S3] A pinned absolute helper must be in a system directory or named by the person, and unwritable by others."""
+
+    @support.posix_only("file modes")
+    def test_a_helper_outside_system_dirs_and_not_named_is_refused(self):
+        remote, _ = self.remote_with_main()
+        gh = self.gh()
+        with self.assertRaises(MirrorError) as cm:
+            Mirror(remote, self.cred(f"{gh} auth git-credential"))
+        self.assertIn("credential_helpers", str(cm.exception))
+        with self.assertRaises(MirrorError):
+            Mirror(remote, self.cred(f"{gh} auth git-credential"), trusted_helper_paths=(gh + "x",))
+
+    @support.posix_only("file modes")
+    def test_a_named_helper_must_not_be_writable_by_others(self):
+        remote, _ = self.remote_with_main()
+        gh = self.gh()
+        for mode in (0o722, 0o702, 0o777):
+            os.chmod(gh, mode)
+            with self.subTest(mode=oct(mode)), self.assertRaises(MirrorError) as cm:
+                Mirror(remote, self.cred(f"{gh} auth git-credential"), trusted_helper_paths=(gh,))
+            self.assertIn("writable", str(cm.exception))
+        os.chmod(gh, 0o700)
+        Mirror(remote, self.cred(f"{gh} auth git-credential"), trusted_helper_paths=(gh,))
+
+    @support.posix_only("file modes")
+    def test_a_writable_parent_directory_is_refused_but_a_sticky_one_is_not(self):
+        remote, _ = self.remote_with_main()
+        gh = self.gh()
+        bindir = os.path.dirname(gh)
+        os.chmod(bindir, 0o777)
+        with self.assertRaises(MirrorError):
+            Mirror(remote, self.cred(f"{gh} auth git-credential"), trusted_helper_paths=(gh,))
+        os.chmod(bindir, 0o755)
+        Mirror(remote, self.cred(f"{gh} auth git-credential"), trusted_helper_paths=(gh,))
+
+    @support.posix_only("file modes")
+    def test_a_symlink_to_a_planted_file_is_judged_by_its_target(self):
+        remote, _ = self.remote_with_main()
+        gh = self.gh()
+        link = os.path.join(self.root, "bin", "gh-link")
+        os.symlink(gh, link)
+        os.chmod(gh, 0o777)
+        with self.assertRaises(MirrorError):
+            Mirror(remote, self.cred(f"{link} auth git-credential"), trusted_helper_paths=(link,))
+
+    def test_system_directory_helper_needs_no_naming(self):
+        remote, _ = self.remote_with_main()
+        sh = mirror._resolve("env")                      # a root-owned executable in a system directory
+        self.assertEqual(os.path.dirname(os.path.realpath(sh)) in {os.path.realpath(d) for d in mirror.SYSTEM_DIRS}, True)
+        mirror._check_helper_file(sh, ())
+
+
+class LocalHooks(PushCase):
+    """[S1] A local destination's own hooks and config must never run in the supervisor's pass."""
+
+    def plant(self, names=("pre-receive", "update", "post-receive", "reference-transaction")):
+        marker = os.path.join(self.root, "HOOK-RAN")
+        for name in names:
+            hook = os.path.join(self.remote, "hooks", name)
+            with open(hook, "w") as fh:
+                fh.write(f"#!/bin/sh\necho {name} >> {marker}\ncat >/dev/null\n")
+            os.chmod(hook, 0o755)
+        return marker
+
+    @support.posix_only("shell hooks")
+    def test_planted_hooks_do_not_run_on_push_or_delete(self):
+        marker = self.plant()
+        m = self.mirror()
+        m.push(self.tip, "main")
+        m.delete_branch("feat")
+        self.assertFalse(os.path.exists(marker), "a destination hook ran")
+        self.assertEqual(git(self.remote, "rev-parse", "main"), self.tip)
+
+    @support.posix_only("shell hooks")
+    def test_planted_hooks_would_run_without_the_guard(self):
+        marker = self.plant(("post-receive",))
+        m = self.mirror()
+        with mock.patch.object(Mirror, "_pack", lambda self, kind: []):
+            m.push(self.tip, "main")
+        self.assertTrue(os.path.exists(marker))
+
+    def test_local_calls_carry_the_safe_pack_commands_and_remote_ones_do_not(self):
+        m = self.mirror()
+        calls = []
+        with spy(calls):
+            m.fetch(30)
+            m.fetch_branches(["main"], 30)
+            m.ls_remote(30)
+        for cmd, _ in calls:
+            if any(w in cmd for w in ("fetch", "ls-remote")):
+                self.assertIn(f"--upload-pack={shlex.quote(mirror._resolve('git'))} -c core.hooksPath=/dev/null upload-pack", cmd)
+        self.assertEqual(Mirror("https://example.test/o/r.git", {"kind": "ssh-agent", "socket": SOCK})._pack("upload"), [])
+        self.assertEqual(Mirror("git@example.test:o/r.git", {"kind": "ssh-agent", "socket": SOCK})._pack("receive"), [])
+        self.assertTrue(Mirror("file://" + self.remote, {"kind": "none"})._pack("receive"))
+
+    def test_none_credential_only_for_the_suite_or_the_private_directory(self):
+        with mock.patch.dict(os.environ):
+            os.environ.pop(mirror.TEST_MARKER, None)
+            with self.assertRaises(MirrorError) as cm:
+                Mirror(self.remote, {"kind": "none"})
+            self.assertIn("private directory", str(cm.exception))
+            with self.assertRaises(MirrorError):
+                Mirror("file://" + self.remote, {"kind": "none"})
+            inside = os.path.join(mirror.private_dir(), "local-dest.git")
+            os.makedirs(inside)
+            Mirror(inside, {"kind": "none"})
+            Mirror("file://" + inside, {"kind": "none"})
+            with self.assertRaises(MirrorError):          # a dotdot escape is judged by its real path
+                Mirror(os.path.join(inside, "..", "..", "x"), {"kind": "none"})
 
 
 class SshHosts(MirrorCase):
