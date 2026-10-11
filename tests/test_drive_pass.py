@@ -419,8 +419,11 @@ class TamperTests(PassCase):
         self.job()
         self.requester_deactivate_receipt()
         self.board.close_job("J", "cancelled", "by the requester", forced=True)
-        self.drive()
-        self.assertEqual(self.load().terminal["verdict"], "cancelled")
+        cancelled = []
+        with mock.patch.object(life, "cancel_job", lambda board, cfg, led, now: cancelled.append(led.job) or True,
+                               create=True):
+            self.drive()
+        self.assertEqual(cancelled, ["J"])                                    # 8b's cancel_job does the work
         self.assertEqual(self.board.job_status("J").status, "cancelled")      # not reopened
         self.assertFalse(self.has_post("DRIVER-TAMPER"))
         self.assertIsNone(self.load().halted)
@@ -482,7 +485,8 @@ class TamperTests(PassCase):
         self.job()
         self.requester_deactivate_receipt()
         self.board.open_job("J", None, None, None, None, goal="something else")
-        self.drive()
+        with mock.patch.object(life, "cancel_job", side_effect=AssertionError("not a cancel"), create=True):
+            self.drive()
         self.assertTrue(self.has_post("DRIVER-TAMPER"))
         self.assertIsNone(self.load().terminal)
 
@@ -500,7 +504,8 @@ class TamperTests(PassCase):
                     continue
                 self.requester_deactivate_receipt(name, **over)
                 self.board.close_job(name, "cancelled", "forged", forced=True)
-                self.drive()
+                with mock.patch.object(life, "cancel_job", side_effect=AssertionError("not a cancel"), create=True):
+                    self.drive()
                 self.assertTrue(self.has_post("DRIVER-TAMPER", name), over)
                 self.assertIsNone(self.load(name).terminal)
 
