@@ -1287,3 +1287,17 @@ Seat: eng-hooks2 (**sonnet**: security-critical glue). Security reviewer (opus) 
 - **Deferred to a post-landing follow-up (not on the critical path):** Task 18 (older-client write triggers; the ledger and receipts already make old writes noise, and Task 8b adds the auto-close trigger); Task 13's NOTIFY kick (hook kicks + the timer suffice; correctness never depends on kicks). Task 13's other items (no `waiter-stale`/`unacked`/triage for drive jobs, `DRIVER-STALLED`) fold into Task 8c.
 - **Folded into the QA-prep seat:** Task 17 (box-only real-systemd test) and the Task 19 pre-step (live `codex exec --json` usage capture).
 - **Started early in parallel:** Task 14 (docs/skills, spec is stable) and the Task 1 doctor follow-up lines.
+
+### Task 1b: Doctor drive lines (follow-up of Task 1)
+
+Seat: eng-doctor2 (sonnet). Files: `lib/swarm/bootstrap.py` (doctor checks only), `tests/test_doctor.py`. Base: `preview/drive-wave3` (needs ledger, owner record, activation, mirrors).
+
+One doctor line each, with a test each (FAIL/WARN/OK as stated):
+- drive jobs on a host whose supervisor timer is not **running** (unit active+enabled via `systemd.manager_env()`, last pass < 2 × `timer_minutes`) → FAIL; macOS/Windows → "drive mode unavailable: no supervisor timer" ([M1]);
+- per active drive job: effective budget (`cost x/y USD (reserve r), sessions a/b, wall h/H h`) and effective model table ([D1]/[P1]);
+- Claude Bash sandbox for read-only seats: "boundary" or "guardrail only" ([F22]/[F24]);
+- Codex: rollout-budget feature available; `codex drive-ready: writer yes|no (<why>); judge/reviewer: claude` ([F18]/[G1]) — coordinate with eng-hooks2, which may already print the Codex line; one owner per line;
+- git version ≥ 2.40 for hosts with drive jobs (FAIL below) (11a/11b);
+- DRIVER-LEDGER-BAD / DRIVER-ORPHAN jobs → FAIL ([F2]); a receipt-write failure in the last 24 h → FAIL ([F21], if not already added by Task 5);
+- goal jobs activated before drive mode → "not autonomous" list ([A]/§9).
+Credential-helper and `ls-remote` checks per destination stay with Task 11b.
