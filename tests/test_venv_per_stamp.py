@@ -34,6 +34,8 @@ echo "$0 $*" >> "$SWARM_TEST_LOG"
 exit 0
 PY
   chmod +x "$d/bin/python"
+  # FAKE_STEAL_LOCK: while "building", another launcher takes over the lock (a stale-lock steal)
+  [ -n "$FAKE_STEAL_LOCK" ] && echo "999999 someone-else" > "$d.building/owner"
   echo "venv $d" >> "$SWARM_TEST_LOG"
   exit 0
 fi
@@ -227,6 +229,11 @@ class LauncherVenvTests(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertTrue(self.lock_of(self.v23).is_dir())
 
+    def test_a_lock_taken_over_meanwhile_is_not_released_by_the_old_owner(self):
+        res = self.launch(self.v22, timeout=30, FAKE_STEAL_LOCK="1")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual((self.lock_of(self.v22) / "owner").read_text().strip(), "999999 someone-else")
+
     def test_a_failed_build_releases_its_lock(self):
         (self.home / "fakebin/python3").write_text('#!/bin/sh\ncase "$1" in -c) exit 0;; -I) exit 1;; esac\nexit 1\n')
         res = self.launch(self.v22, timeout=30)
@@ -305,9 +312,10 @@ class WinLaunchVenvTests(unittest.TestCase):
     def test_fresh_lock_is_waited_on_then_reported(self):
         lock = self.tmp / "venv.building"
         lock.mkdir()
-        with mock.patch.object(winlaunch.time, "sleep"):
+        with mock.patch.object(winlaunch.time, "sleep") as sleep:
             with self.assertRaises(SystemExit) as cm:
                 winlaunch.take_lock(lock, timeout=2)
+        self.assertEqual(sleep.call_count, 2, "waits once per second up to the timeout")
         self.assertIn("is held", str(cm.exception))
         self.assertTrue(lock.is_dir())
 
