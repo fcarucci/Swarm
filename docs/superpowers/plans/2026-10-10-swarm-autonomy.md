@@ -1323,3 +1323,12 @@ Seat: eng-ci (sonnet). Base: `feat/swarm-autonomy` after the first batch (or `pr
 - Trust assumption (7b review): a DB writer can alter the state of a genuinely launched seat — denial only, never settlement (spec §4.0).
 - Task 19 pre-step addition (from the Task 1b review): re-pin the Codex `features list` fixture used by the doctor's rollout-budget check against real `codex features list` output from CT118.
 - 8a approved at 74f4849; integrate 0c87ece (adds only the retired-word docstring reword) in the batch with 7b, 8b, 8c. 8c follow-up (low, probe rr7): acknowledge the event ids actually shown to a seat instead of a high-water mark, so a DB writer cannot freeze a seat's event watermark.
+
+## Integration checklist for batch 1 and the driver batch (lead)
+
+1. Task 5's final head first (fix round 2), then **re-apply 6b's drivegate edit** on top (6b merged 57f6322 and switched the verdict receipt to `review.verdict_text`; take Task 5's file, re-apply that one change, run both seats' drivegate/receipt tests).
+2. 7b (c4263cd, rebased onto Task 5's final head if Task 5 moved).
+3. 6a (c006a7e; adds the shared `lib/swarm/gitpin.py`): at integration the lead moves 6a's `drive budget` / `drive models` registration onto 6b's `drive_cli.drive_subparsers` / `add_drive_command(board=False)` and deletes 6a's own `drive` parser (one `drive` parser, owned by 6b's module).
+4. 6b (155309e), 1b (7f698fb), 15a (d5ff09c + the `lock_steal` restore-window comment in `bin/swarm`), docs (78d372f on `feat/drive-docs-rebased`) — re-run `test_drive_docs` and `test_driver_events`.
+5. Driver batch: 8a (0c87ece; rr7 ack-shown-ids follow-up), 8b (542fe7b), 8c (655182a), then 11b (4b2bee5; imports from `gitpin.py` per its re-review).
+6. After each batch: the cross-seat `drive_cfg` + real owner-record test; one full-matrix CI run on the exact SHA; preview rebuilt from `feat/swarm-autonomy` + still-open heads.
