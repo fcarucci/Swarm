@@ -11,6 +11,7 @@ import datetime as dt
 import json
 import os
 import re
+import sys
 import tempfile
 import types
 import unittest
@@ -38,6 +39,27 @@ def absolute(*parts: str) -> str:
 
 def real_tmp() -> str:
     return os.path.realpath(tempfile.gettempdir())
+
+
+class FakePerson:
+    """Task 6b's swarm.person, as the activation code calls it until that module is in this build: a
+    person at a terminal, the requester session that owns the job, or a refusal (seat sessions first)."""
+    PersonRefused = type("PersonRefused", (Exception,), {})
+    tty = True
+    seat_sessions = ()
+
+    @classmethod
+    def require(cls, action, job, *, board_key, env=None, confirm=None):
+        from swarm import enrolment as en, hosts as ho
+        sid = ho.cli_session_id(os.environ)
+        if sid and sid in cls.seat_sessions:
+            raise cls.PersonRefused(f"refused: {action} is a person's action; this is an enrolled agent session")
+        owner = en.find_job_owner(board_key, job)
+        if sid and owner is not None and owner.session_id == sid:
+            return "requester"
+        if cls.tty:
+            return "tty"
+        raise cls.PersonRefused(f"refused: {action} needs a person: run it from the session that activated {job}")
 
 
 def ns(**kw) -> argparse.Namespace:
@@ -196,9 +218,12 @@ class CredentialAndWorkdirTests(HomeCase):
         with mock.patch.dict(os.environ, {"SSH_AUTH_SOCK": ""}), self.assertRaises(da.DriveError):
             da.credential_pin("ssh-agent")
 
-    def test_remote_urls_never_store_userinfo(self):
-        self.assertEqual(da._strip_userinfo("https://user:TOKEN@example.com/o/r.git"),
+    def test_remote_urls_never_store_userinfo_query_or_fragment(self):
+        self.assertEqual(da.sanitize_remote("https://user:TOKEN@example.com/o/r.git"),
                          "https://example.com/o/r.git")
+        self.assertEqual(da.sanitize_remote("https://example.com/o/r.git?token=abc#frag"),
+                         "https://example.com/o/r.git")
+        self.assertEqual(da.sanitize_remote("git@example.com:o/r.git"), "git@example.com:o/r.git")
 
     def test_workdir_default_refused_under_tmp(self):
         tmp = real_tmp()
@@ -274,6 +299,10 @@ class DriveCli(Env):
         tmp = mock.patch.object(da, "TMP_ROOTS", ())   # the suite's temp dir is the temp dir; see HomeCase
         tmp.start()
         self.addCleanup(tmp.stop)
+        FakePerson.tty, FakePerson.seat_sessions = True, ()
+        person = mock.patch.dict(sys.modules, {"swarm.person": FakePerson})
+        person.start()
+        self.addCleanup(person.stop)
         self.platform = mock.patch.object(da, "PLATFORM", "linux")   # the timer check is for Linux here
         self.platform.start()
         self.addCleanup(self.platform.stop)
@@ -334,6 +363,12 @@ class DriveCli(Env):
         self.assertEqual((owner["recipe"], owner["review_role"], owner["review_gates"]),
                          ("coding", "reviewer", "haiku-strict"))   # the engineer defaults to haiku
 
+    def test_plan_decides_the_review_keys_from_the_recipe(self):
+        plan = self.plan()
+        self.assertEqual((plan.review_role, plan.review_gates), ("reviewer", "haiku-strict"))
+        artifact = self.plan(recipe="artifact")
+        self.assertEqual((artifact.review_role, artifact.review_gates), (None, None))
+
     def test_review_gates_standard_when_the_engineer_is_not_haiku(self):
         rc, _, err = self.activate("--workdir", str(self.work), "--model", "engineer=sonnet")
         self.assertEqual(rc, 0, err)
@@ -343,7 +378,8 @@ class DriveCli(Env):
         rc, _, err = self.activate("--workdir", str(self.work), "--recipe", "artifact")
         self.assertEqual(rc, 0, err)
         owner = enrolment.find_job_owner(da.board_key(self.cfg), "J").owner
-        self.assertEqual((owner["recipe"], owner["review_role"]), ("artifact", "none"))
+        self.assertEqual((owner["recipe"], owner["review_role"], owner["review_gates"]), ("artifact", None, None))
+        self.assertFalse(owner["review_role"])   # the driver's reviewer check: falsy means no reviewer launches
 
     def test_activation_sets_drive_enabled_on_the_board(self):
         rc, _, err = self.activate("--workdir", str(self.work))
@@ -433,30 +469,83 @@ class DriveCli(Env):
         """A crash after each durable step: the next pass (finish_activation) completes the job, and
         nothing is duplicated. A crash before the ledger exists leaves nothing to complete; the activation
         is then run again and finishes. Each case has its own job name."""
-        for i, point in enumerate(("brief", "owner", "ledger", "board", "lead")):
+        points = ("brief", "owner", "claim", "ledger", "data", "lead")
+        for i, point in enumerate(points):
             job = f"J{i}"
             with self.subTest(crash=point):
                 plan = self.plan(job=job)
                 with self.board() as b:
                     with self.assertRaises(RuntimeError):
-                        if point in ("brief", "owner", "ledger"):
+                        if point in ("brief", "owner", "claim", "ledger"):
                             da.activate_drive(self.cfg, b, plan, crash_after=point)
                         else:
                             da.activate_drive(self.cfg, b, plan)
                             da.finish_activation(self.cfg, b, job, crash_after=point)
-                    if point in ("brief", "owner"):
-                        self.assertIsNone(self.ledger_of(job))
+                    # the window rule: a ledger never exists without its board claim
+                    if self.ledger_of(job) is not None:
+                        self.assertEqual(b.job_data(job).get("drive.enabled"), "1")
+                    else:
                         da.activate_drive(self.cfg, b, plan)          # the person runs it again
                     da.finish_activation(self.cfg, b, job)           # the next pass
                     da.finish_activation(self.cfg, b, job)           # and again: a no-op
                     self.assertEqual(self.ledger_of(job).state, "active")
                     self.assertEqual(len(b.seats(job, 1)), 1)
                     self.assertEqual(b.job_status(job).status, "active")
+                    self.assertEqual(b.job_data(job).get("drive.enabled"), "1")
+
+    def test_finish_restores_a_claim_that_went_missing(self):
+        plan = self.plan(job="JC")
+        with self.board() as b:
+            with self.assertRaises(RuntimeError):
+                da.activate_drive(self.cfg, b, plan, crash_after="ledger")
+            b.set_job_data("JC", "drive.enabled", None)          # the claim is lost
+            da.finish_activation(self.cfg, b, "JC")
+            self.assertEqual(b.job_data("JC").get("drive.enabled"), "1")
+            self.assertEqual(self.ledger_of("JC").state, "active")
+
+    def test_deactivate_clears_the_drive_claim(self):
+        rc, _, err = self.activate("--workdir", str(self.work))
+        self.assertEqual(rc, 0, err)
+        rc, _, err = self.cli("deactivate", "--job", "J", "--status", "cancelled")
+        self.assertEqual(rc, 0, err)
+        with self.board() as b:
+            self.assertIsNone(b.job_data("J").get("drive.enabled"))
+
+    def test_reactivation_by_the_requester_bumps_the_generation(self):
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "sess-1"}):
+            self.assertEqual(self.activate("--workdir", str(self.work))[0], 0)
+            rc, _, err = self.activate("--workdir", str(self.work))
+        self.assertEqual(rc, 0, err)
+        led = self.ledger_of()
+        self.assertEqual((led.generation, led.generation_requested), (1, 2))
+
+    def test_reactivation_refused_for_a_seat_session(self):
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "sess-1"}):
+            self.assertEqual(self.activate("--workdir", str(self.work))[0], 0)
+        FakePerson.seat_sessions = ("seat-x",)
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "seat-x"}):
+            rc, _, err = self.activate("--workdir", str(self.work))
+        self.assertEqual(rc, 1)
+        self.assertIn("enrolled agent session", err)
+        self.assertEqual(self.ledger_of().generation_requested, 1)
+
+    def test_supervise_disable_stops_the_live_seats(self):
+        self.activate("--workdir", str(self.work))
+        run = {"job": "J", "unit": "unit-1.scope"}
+        stop = mock.Mock()
+        from swarm.supervisor import runner
+        with mock.patch.object(runner, "_run_paths", return_value=[(1, Path("run-1.json")), (2, Path("run-2.json"))]), \
+                mock.patch.object(runner, "_read_run", side_effect=lambda name, board: dict(run, job="J") if name == "run-1.json" else {"job": "other", "unit": "x"}), \
+                mock.patch.object(runner, "_session_alive", return_value=True), \
+                mock.patch.object(runner, "_stop_session", stop):
+            rc, _, err = self.cli("supervise", "disable")
+        self.assertEqual(rc, 0, err)
+        stop.assert_called_once_with(run)
 
     def test_drive_budget_changes_without_rollover(self):
         self.activate("--workdir", str(self.work))
         before = self.ledger_of()
-        with mock.patch.object(da, "_tty", return_value=True):
+        with mock.patch.object(FakePerson, "tty", True):
             rc, _, err = self.cli("drive", "budget", "--job", "J", "max_cost_usd=30")
         self.assertEqual(rc, 0, err)
         after = self.ledger_of()
@@ -465,25 +554,25 @@ class DriveCli(Env):
 
     def test_cap_below_reserve_plus_min_session_refused(self):
         self.activate("--workdir", str(self.work))
-        with mock.patch.object(da, "_tty", return_value=True):
+        with mock.patch.object(FakePerson, "tty", True):
             rc, _, err = self.cli("drive", "budget", "--job", "J", "max_cost_usd=5.2")
         self.assertEqual(rc, 2)
         self.assertIn("below", err)
 
     def test_drive_models_changes_one_role(self):
         self.activate("--workdir", str(self.work))
-        with mock.patch.object(da, "_tty", return_value=True):
+        with mock.patch.object(FakePerson, "tty", True):
             rc, out, err = self.cli("drive", "models", "--job", "J", "engineer=sonnet")
         self.assertEqual(rc, 0, err)
         self.assertEqual(self.ledger_of().models, {"engineer": "sonnet"})
 
     def test_person_path_needed_for_drive_budget(self):
         self.activate("--workdir", str(self.work))
-        with mock.patch.object(da, "_tty", return_value=False), \
+        with mock.patch.object(FakePerson, "tty", False), \
                 mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "someone-else"}):
             rc, _, err = self.cli("drive", "budget", "--job", "J", "max_cost_usd=30")
         self.assertEqual(rc, 1)
-        self.assertIn("requester session", err)
+        self.assertIn("needs a person", err)
 
     @posix_only("supervise is POSIX-only (its systemd timer)")
     def test_supervise_disable_halts_drive_ledgers_and_enable_unhalts(self):
@@ -508,7 +597,8 @@ class DriveCli(Env):
     @posix_only("supervise is POSIX-only (its systemd timer)")
     def test_supervise_disable_refused_for_seat_session(self):
         self.activate("--workdir", str(self.work))
-        with mock.patch.object(da, "_tty", return_value=False), \
+        FakePerson.seat_sessions = ("seat-session",)
+        with mock.patch.object(FakePerson, "tty", False), \
                 mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "seat-session"}):
             rc, _, err = self.cli("supervise", "disable")
         self.assertEqual(rc, 1)
@@ -517,15 +607,37 @@ class DriveCli(Env):
 
 
 class HaltShiftTests(HomeCase):
+    def setUp(self):
+        super().setUp()
+        self.no_sessions = mock.patch.object(da, "stop_job_sessions", return_value=[])   # no runs here
+        self.no_sessions.start()
+        self.addCleanup(self.no_sessions.stop)
+
+    def test_one_failing_ledger_does_not_stop_the_others(self):
+        cfg = {"supervise": {"enabled": True}}
+        with mock.patch.object(da, "board_key", return_value="bk"):
+            for job in ("J1", "J2"):
+                ledger.create("bk", job, budgets=da.budget_defaults({}), activated_at=NOW.isoformat())
+            real_save = da._save
+
+            def flaky(bk, job, mutate):
+                if job == "J1":
+                    raise da.DriveError("ledger is busy")
+                return real_save(bk, job, mutate)
+            with mock.patch.object(da, "_save", side_effect=flaky):
+                halted, failed = da.halt_drive_jobs(cfg, actor="person", now=NOW)
+        self.assertEqual(halted, ["J2"])
+        self.assertEqual(failed, [("J1", "ledger is busy")])
+
     def test_supervise_enable_unhalts_and_shifts_deadlines(self):
         cfg = base_config()
         cfg["supervise"] = {"enabled": True}
         with mock.patch.object(da, "board_key", return_value="bk"):
             ledger.create("bk", "J", budgets=da.budget_defaults({}), activated_at=NOW.isoformat())
             t0 = NOW
-            self.assertEqual(da.halt_drive_jobs(cfg, actor="person", now=t0), ["J"])
-            self.assertEqual(da.halt_drive_jobs(cfg, actor="person", now=t0), [])
-            self.assertEqual(da.unhalt_drive_jobs(cfg, now=t0 + dt.timedelta(seconds=120)), ["J"])
+            self.assertEqual(da.halt_drive_jobs(cfg, actor="person", now=t0), (["J"], []))
+            self.assertEqual(da.halt_drive_jobs(cfg, actor="person", now=t0), ([], []))
+            self.assertEqual(da.unhalt_drive_jobs(cfg, now=t0 + dt.timedelta(seconds=120)), (["J"], []))
             led = ledger.load("bk", "J")
             self.assertIsNone(led.halted)
             self.assertAlmostEqual(led.halted_total_seconds, 120.0)
@@ -537,7 +649,7 @@ class HaltShiftTests(HomeCase):
             led = ledger.load("bk", "J")
             led.halted = {"by": "person", "at": NOW.isoformat(), "reason": "stopped by hand"}
             led.save()
-            self.assertEqual(da.unhalt_drive_jobs(cfg, now=NOW), [])
+            self.assertEqual(da.unhalt_drive_jobs(cfg, now=NOW), ([], []))
             self.assertEqual(ledger.load("bk", "J").halted["reason"], "stopped by hand")
 
 

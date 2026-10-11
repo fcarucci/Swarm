@@ -139,8 +139,9 @@ def _validate_owner(o) -> None:
             _text(k, f"owner {key} key", MAX_CWD)
             _text(v, f"owner {key} value", 4096)
     _text(o["recipe"], "owner recipe", 64)
-    _text(o["review_role"], "owner review_role", 64)     # "none" for a recipe without a review stage
-    _text(o["review_gates"], "owner review_gates", 64)   # "haiku-strict" or "standard"
+    for key in ("review_role", "review_gates"):   # null for a recipe without a review stage
+        if o[key] is not None:
+            _text(o[key], f"owner {key}", 64)
     _text(o["goal"], "owner goal", GOAL_MAX)
     _text(o["brief"], "owner brief", MAX_CWD)
     if not os.path.isabs(o["brief"]):
@@ -306,9 +307,9 @@ def write_job_owner(board_key: str, *, job: str, harness: str, session_id: str |
                  "credentials": dict(credentials or {}), "requirements": dict(requirements or {}),
                  "recipe": kind, "goal": goal or "", "brief": brief or os.path.join(cwd, "LEAD.md"),
                  # the recipe's review stage (spec 3.6, [P1]): the coding recipe reviews with "reviewer";
-                 # a recipe without one says "none"
-                 "review_role": review_role or ("reviewer" if kind == "coding" else "none"),
-                 "review_gates": review_gates or "standard"}
+                 # a recipe without a review stage says null
+                 "review_role": review_role if review_role is not None else ("reviewer" if kind == "coding" else None),
+                 "review_gates": review_gates if review_gates is not None else ("standard" if kind == "coding" else None)}
     rec = Record("owner", board_key, job, None, harness, session_id, cwd,
                  time.time() if now is None else float(now), owner=owner)
     return _store(rec, f"owner-{_digest('owner', board_key, job)}.json")

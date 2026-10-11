@@ -241,9 +241,11 @@ def blob_id(data: bytes) -> str:
     return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
 
 
-def _strip_userinfo(url: str) -> str:
-    """A remote's URL without any user:password part: a secret is never stored or printed."""
-    return re.sub(r"(://)[^/@]*@", r"\1", url)
+def sanitize_remote(url: str) -> str:
+    """A remote's URL without a user:password part, a query string or a fragment: a token is never
+    stored or printed."""
+    url = re.sub(r"(://)[^/@]*@", r"\1", url)
+    return re.split(r"[?#]", url, maxsplit=1)[0]
 
 
 def git_remotes(workdir: str) -> dict:
@@ -261,7 +263,7 @@ def git_remotes(workdir: str) -> dict:
     for line in res.stdout.splitlines():
         parts = line.split()
         if len(parts) == 3 and parts[2] == "(fetch)":
-            out.setdefault(parts[0], _strip_userinfo(parts[1]))
+            out.setdefault(parts[0], sanitize_remote(parts[1]))
     return out
 
 
@@ -362,8 +364,8 @@ class Plan:
     recipe: str
     budgets: dict
     overrides: dict          # the job's --model overrides (the ledger keeps these, not the table)
-    review_role: str = "reviewer"
-    review_gates: str = "standard"
+    review_role: str | None = "reviewer"    # None: the recipe has no review stage (stored as JSON null)
+    review_gates: str | None = "standard"
     description: str | None = None
 
 
@@ -391,11 +393,21 @@ def _save(bk: str, job: str, mutate) -> ledger.Ledger:
     raise DriveError(f"job {job!r}: the ledger kept changing; try again")
 
 
+def claim(board, plan: "Plan") -> None:
+    """The board's job row and its drive claim `drive.enabled=1` ([RR1a]): written before the ledger, so
+    no state has a ledger and no claim."""
+    status = board.job_status(plan.job)
+    if status is None or status.status != "active":
+        board.open_job(plan.job, plan.description, None, plan.session, os.environ.get("USER") or "person",
+                       project="", goal=plan.goal)
+    board.set_job_data(plan.job, "drive.enabled", "1")
+
+
 def activate_drive(cfg: dict, board, plan: Plan, *, crash_after: str | None = None) -> ledger.Ledger:
-    """Steps 1 and 2 of [RR1] for a new drive job, each durable before the next: the generated lead
-    brief (if any), the host-private owner record, then the ledger in state "activating". The board
-    row, the lead seat and the final "active" are finish_activation's (steps 3 to 5), which the next
-    pass also runs after a crash. `crash_after` is for tests ("brief", "owner", "ledger")."""
+    """Steps 1 to 4 of [RR1] for a new drive job, each durable before the next: the generated lead brief
+    (if any), the host-private owner record, the board claim `drive.enabled=1` (with the job row), then
+    the ledger in state "activating". The rest (the board data, the lead seat, the final "active") is
+    finish_activation's, which the next pass also runs. `crash_after` is for tests."""
     bk = board_key(cfg)
     if plan.brief_path.startswith(plan.workdir + os.sep) and not os.path.exists(plan.brief_path):
         write_lead_brief(plan.workdir, plan.job, lead_brief_text(plan.job, plan.goal, sorted(plan.requirements)))
@@ -409,6 +421,9 @@ def activate_drive(cfg: dict, board, plan: Plan, *, crash_after: str | None = No
                                   review_role=plan.review_role, review_gates=plan.review_gates)
     if crash_after == "owner":
         raise RuntimeError("crash after owner")
+    claim(board, plan)
+    if crash_after == "claim":
+        raise RuntimeError("crash after claim")
     led = ledger.load(bk, plan.job)
     if led is None:
         led = ledger.create(bk, plan.job, budgets=plan.budgets, activated_at=_now(), state="activating",
@@ -419,9 +434,10 @@ def activate_drive(cfg: dict, board, plan: Plan, *, crash_after: str | None = No
 
 
 def finish_activation(cfg: dict, board, job: str, *, crash_after: str | None = None) -> ledger.Ledger | None:
-    """Steps 3 to 5 of [RR1] for a job whose ledger is "activating" and whose owner record exists:
-    the board row with drive.enabled, the lead seat request, then the ledger "active". Idempotent,
-    so the next pass runs it after any crash. `crash_after` is for tests ("board", "lead")."""
+    """Steps 5 to 7 of [RR1] for a job whose ledger is "activating" and whose owner record exists: the
+    claim re-asserted, the board's generation data, the lead seat request, then the ledger "active".
+    Idempotent: the activate command and the pass (Task 8a's reconcile) both run it, after any crash.
+    `crash_after` is for tests ("data", "lead")."""
     bk = board_key(cfg)
     led = ledger.load(bk, job)
     if led is None or led.state != "activating":
@@ -434,13 +450,11 @@ def finish_activation(cfg: dict, board, job: str, *, crash_after: str | None = N
     models = {**model_defaults(cfg), **led.models}
     session = owner.session_id
     user = os.environ.get("USER") or "person"
-    if board.job_status(job) is None or board.job_status(job).status != "active":
-        board.open_job(job, None, None, session, user, project="", goal=o["goal"])
     board.set_job_data(job, "drive.enabled", "1")
     board.set_job_data(job, "drive.generation", str(led.generation))
     board.set_job_data(job, "drive.generation_requested", str(led.generation_requested))
-    if crash_after == "board":
-        raise RuntimeError("crash after board")
+    if crash_after == "data":
+        raise RuntimeError("crash after data")
     if board.seat(job, led.generation, "lead") is None:
         board.request_seat(job, led.generation, "lead", role="engineering_lead", harness=owner.harness,
                            model=models["lead"], workdir=o["roots"][0], brief_path=o["brief"],
@@ -486,7 +500,7 @@ def build_plan(cfg: dict, args, goal: str) -> Plan:
     remotes = git_remotes(workdir)
     for spec in args.remote or ():
         name, url = _split_pair(spec, "--remote")
-        remotes[name] = _strip_userinfo(url)
+        remotes[name] = sanitize_remote(url)
     named = {}
     for spec in args.credential or ():
         dest, source = _split_pair(spec, "--credential")
@@ -506,8 +520,8 @@ def build_plan(cfg: dict, args, goal: str) -> Plan:
                 brief_path=brief, roots=roots, remotes=remotes, credentials=credentials,
                 requirements=_requirements(args, goal, workdir), recipe=recipe,
                 budgets=budgets, overrides=overrides, description=args.description,
-                review_role="reviewer" if recipe == "coding" else "none",
-                review_gates="haiku-strict" if engineer == "haiku" else "standard")
+                review_role="reviewer" if recipe == "coding" else None,
+                review_gates=("haiku-strict" if engineer == "haiku" else "standard") if recipe == "coding" else None)
 
 
 def add_activate_args(parser) -> None:
@@ -578,7 +592,7 @@ def cmd_activate_drive(cfg: dict, args) -> int:
     try:
         existing = ledger.load(bk, args.job)
         if existing is not None and existing.state == "active":
-            refusal = authority_refusal(cfg, args.job)   # re-activation is the person path ([F17])
+            refusal = _person("activate", cfg, args.job)   # re-activation is the person path ([F17])
             if refusal:
                 print(f"swarm activate: {refusal}", file=sys.stderr)
                 return 1
@@ -630,29 +644,25 @@ def drive_lines(cfg: dict, job: str) -> list:
 
 # --- person path and the requester session ([F17]) --------------------------------------------
 
-def _tty() -> bool:
+def _person(action: str, cfg: dict, job: str) -> str | None:
+    """The person path, through Task 6b's swarm.person.require: None when the action is allowed, else
+    the refusal text. Until person.py is in the build the import fails and the action is refused."""
     try:
-        return bool(sys.stdin and sys.stdin.isatty())
-    except (OSError, ValueError):
-        return False
+        from swarm import person
+    except ImportError:
+        return f"{action} needs the person path, which this build does not have (swarm/person.py, Task 6b)"
+    try:
+        person.require(action, job, board_key=board_key(cfg))
+    except person.PersonRefused as exc:
+        return str(exc)
+    return None
 
 
-def authority_refusal(cfg: dict, job: str | None) -> str | None:
-    """Who may change a drive job: a person at a terminal, or the requester session that activated
-    it. A seat session, or any other harness session, is refused. None when allowed."""
-    if _tty():
-        return None
-    session = hosts.cli_session_id(os.environ)
-    bk = board_key(cfg)
-    if job is not None:
-        jobs = [job]
-    else:
-        jobs = [led.job for led in ledger.unfinished(bk) if isinstance(led, ledger.Ledger)]
-    for j in jobs:
-        owner = enrolment.find_job_owner(bk, j)
-        if session and owner is not None and owner.session_id == session:
-            return None
-    return "run it from a terminal (the person path), or from the job's requester session"
+def clear_claim(cfg: dict, job: str) -> None:
+    """A terminal drive job drops its claim, so core rules stop treating it as driven ([RR1a])."""
+    from swarm.board import open_board
+    with open_board(cfg) as board:
+        board.set_job_data(job, "drive.enabled", None)
 
 
 def cmd_drive(cfg: dict, args) -> int:
@@ -665,7 +675,7 @@ def cmd_drive(cfg: dict, args) -> int:
     if led is None or led.terminal is not None:
         print(f"swarm drive: {args.job} is not an active drive job on this host", file=sys.stderr)
         return 1
-    refusal = authority_refusal(cfg, args.job)
+    refusal = _person(f"drive {args.dcmd}", cfg, args.job)
     if refusal:
         print(f"swarm drive: {refusal}", file=sys.stderr)
         return 1
@@ -687,33 +697,58 @@ def cmd_drive(cfg: dict, args) -> int:
     return 0
 
 
-# --- swarm supervise disable|enable ([M1] 1 and 3, [F5]) ---------------------------------------
+# --- swarm supervise disable|enable ([M1] 1 and 3, [F5]) -------------------------------------------
 
 def refuse_seat_session(cfg: dict) -> str | None:
-    """`supervise disable` is refused for enrolled seat sessions ([M1] 3): inside a harness session
-    only a job's requester session may run it, and a person at a terminal may. A script with no harness
-    session (cron, a shell) is the user's own and is not refused."""
-    if hosts.cli_session_id(os.environ) is None:
-        return None
-    return authority_refusal(cfg, None)
+    """`supervise disable` is refused unless the person path allows it for every drive job of this board
+    ([M1] 3): an enrolled seat session never does. With no drive job there is nothing to protect."""
+    for led in ledger.unfinished(board_key(cfg)):
+        if isinstance(led, ledger.Ledger):
+            refusal = _person("supervise disable", cfg, led.job)
+            if refusal:
+                return refusal
+    return None
 
 
 def _halt(x, actor: str, when: str) -> None:
     x.halted = {"by": actor, "at": when, "reason": HALT_REASON}
 
 
-def halt_drive_jobs(cfg: dict, *, actor: str, now: dt.datetime | None = None) -> list:
-    """`supervise disable`: the [F5] halt goes into every unfinished drive ledger of this board, with
-    the reason "supervisor disabled". Returns the jobs halted (a job already halted is left alone)."""
+def stop_job_sessions(cfg: dict, job: str) -> list:
+    """Stop the live sessions of a job's seats (their scopes), as the runner does for a stop ([F5]).
+    Returns what was stopped. The runner's run files are keyed by the config. Best effort per run: a
+    run that cannot be read is skipped."""
+    from swarm.supervisor import runner
+    stopped = []
+    for _restart, path in runner._run_paths(cfg):
+        run = runner._read_run(path.name, cfg)
+        if run and run.get("job") == job and runner._session_alive(run):
+            runner._stop_session(run)
+            stopped.append(run.get("unit") or path.name)
+    return stopped
+
+
+def halt_drive_jobs(cfg: dict, *, actor: str, now: dt.datetime | None = None) -> tuple:
+    """`supervise disable`: the [F5] halt goes into every unfinished drive ledger of this board, then the
+    live sessions of the halted jobs are stopped. A job whose ledger fails is reported and the others
+    still get their halt. Returns (halted jobs, [(job, why)] failures)."""
     when = (now or dt.datetime.now(dt.timezone.utc)).isoformat()
     bk = board_key(cfg)
-    halted = []
+    halted, failed = [], []
     for led in ledger.unfinished(bk):
         if not isinstance(led, ledger.Ledger) or led.halted is not None:
             continue
-        _save(bk, led.job, lambda x: _halt(x, actor, when))
-        halted.append(led.job)
-    return halted
+        try:
+            _save(bk, led.job, lambda x: _halt(x, actor, when))
+            halted.append(led.job)
+        except (DriveError, ledger.LedgerBadError, OSError) as exc:
+            failed.append((led.job, str(exc)))
+    for job in halted:
+        try:
+            stop_job_sessions(cfg, job)
+        except Exception as exc:   # the halt stands; the pass stops what is left
+            failed.append((job, f"sessions not stopped: {type(exc).__name__}: {exc}"))
+    return halted, failed
 
 
 def _clear_halt(x, seconds: float) -> None:
@@ -721,19 +756,22 @@ def _clear_halt(x, seconds: float) -> None:
     x.halted = None
 
 
-def unhalt_drive_jobs(cfg: dict, *, now: dt.datetime | None = None) -> list:
+def unhalt_drive_jobs(cfg: dict, *, now: dt.datetime | None = None) -> tuple:
     """`supervise enable`: unhalt exactly the supervisor's halts; each deadline shifts by the time the
-    job was halted ([F5]: halted_total_seconds)."""
+    job was halted ([F5]: halted_total_seconds). Returns (resumed jobs, [(job, why)] failures)."""
     when = now or dt.datetime.now(dt.timezone.utc)
     bk = board_key(cfg)
-    done = []
+    done, failed = [], []
     for led in ledger.unfinished(bk):
         if not isinstance(led, ledger.Ledger) or not led.halted or led.halted.get("reason") != HALT_REASON:
             continue
-        began = dt.datetime.fromisoformat(led.halted["at"])
-        if began.tzinfo is None:
-            began = began.replace(tzinfo=dt.timezone.utc)
-        seconds = max(0.0, (when - began).total_seconds())
-        _save(bk, led.job, lambda x, seconds=seconds: _clear_halt(x, seconds))
-        done.append(led.job)
-    return done
+        try:
+            began = dt.datetime.fromisoformat(led.halted["at"])
+            if began.tzinfo is None:
+                began = began.replace(tzinfo=dt.timezone.utc)
+            seconds = max(0.0, (when - began).total_seconds())
+            _save(bk, led.job, lambda x, seconds=seconds: _clear_halt(x, seconds))
+            done.append(led.job)
+        except (DriveError, ledger.LedgerBadError, OSError, ValueError) as exc:
+            failed.append((led.job, str(exc)))
+    return done, failed
