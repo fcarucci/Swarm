@@ -41,6 +41,8 @@ on it; see its docstring for why Postgres nevertheless reads it from its view.
 """
 from __future__ import annotations
 
+from swarm.verdicts import SETTLED_VERDICTS   # re-exported: the verdicts that settle a goal
+
 import abc
 import contextlib
 import datetime as _dt
@@ -71,8 +73,6 @@ TOOL_NAME_MAX = 80   # current_tool is stored truncated to this many characters
 # (unverified), or the decision is made (final; job None = on no board).
 ROUTE_STATES = ("pending", "unverified", "final")
 VERDICTS = ("met", "not_met", "unreachable")   # a judge's verdict on a job's goal
-# The verdicts that settle a goal: no more work is wanted for it (met), or it cannot be met (unreachable).
-SETTLED_VERDICTS = ("met", "unreachable")
 # What a verdict judges (schema 25): one hand-off (artifact), the job's goal on the integrated target
 # (goal) or a ruling on the current candidate (ruling). Only a current-generation goal or ruling verdict
 # can make a drive job terminal (the driver decides; the board only stores it).

@@ -6,7 +6,7 @@ import datetime as _dt
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from swarm.board.base import SETTLED_VERDICTS
+from swarm.verdicts import SETTLED_VERDICTS
 
 SUPERVISOR_NAME = "swarm supervisor"          # the name the supervisor's board posts carry
 WAITING_PREFIX = "supervisor: restarting "    # the job's waiting_on while a restart is due
