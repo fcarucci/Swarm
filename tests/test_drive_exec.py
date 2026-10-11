@@ -14,7 +14,7 @@ from unittest import mock
 
 from support import MemoryHarness, SqliteHarness
 from test_hooks_cli import Env
-from drive_fixtures import ho, snap, v
+from drive_fixtures import ho, seat as sv, snap, v
 
 from swarm import cli as swarm
 from swarm import enrolment, receipts
@@ -27,6 +27,10 @@ from swarm.supervisor import settings as st
 def driver_exec_pkg():
     import swarm.supervisor as pkg
     return pkg
+
+
+SESS9 = "11111111-2222-3333-4444-555555555555"
+SESS1 = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
 
 def iso(t):
@@ -54,6 +58,9 @@ class ExecEnv(Env):
         self.led = ledger.create(self.bk, "J", budgets={}, activated_at=iso(self.b.now()))
         enrolment.write_job_owner(self.bk, job="J", harness="claude", session_id="s", cwd=str(self.work))
         self.launched = []
+        p = mock.patch.object(driver_exec, "TMP_ROOTS", ())     # the suite sandbox lives under /tmp
+        p.start()
+        self.addCleanup(p.stop)
 
     def tamper_seat(self, name, **cols):
         """Write columns straight into a seat row, as a database writer would (any backend)."""
@@ -282,8 +289,7 @@ class ExecuteTests(ExecEnv):
         self.seat()
         self.spent(36.0)                      # 40 - 5 reserve - 36 < min_session_usd
         self.assertIsNone(self.go(self.act()))
-        self.seat("ruling-judge", role="judge", workdir=str(self.work))
-        run = self.go(self.act(seat="ruling-judge", kind="ruling", group="ruling", ruling=True))
+        run = self.go(self.act(seat=None, kind="ruling", group="ruling", ruling=True))
         self.assertIsNotNone(run)
         self.assertEqual(self.reload().intents[-1].reserved_usd, 4.0)   # what is left of the cap
 
@@ -307,8 +313,7 @@ class ExecuteTests(ExecEnv):
         self.spent(0.1)
         self.seat()
         self.assertIsNone(self.go(self.act()))
-        self.seat("ruling-judge", role="judge", workdir=str(self.work))
-        self.assertIsNotNone(self.go(self.act(seat="ruling-judge", kind="ruling", group="ruling", ruling=True)))
+        self.assertIsNotNone(self.go(self.act(seat=None, kind="ruling", group="ruling", ruling=True)))
 
     def test_lost_intents_do_not_count_as_sessions(self):
         self.led.budgets = {"max_sessions": 1}
@@ -400,9 +405,9 @@ class ExecuteTests(ExecEnv):
     def test_a_seat_that_ran_before_resumes_its_session_and_a_new_one_does_not(self):
         self.seat()
         self.assertNotIn("--resume", self.go(self.act())["argv"])
-        self.end(self.launched[-1], "completed", agent_key="sess-9", session_id="sess-9")
+        self.end(self.launched[-1], "completed", agent_key=SESS9, session_id=SESS9)
         again = self.go(self.act(trigger="2"))
-        self.assertEqual(again["argv"][again["argv"].index("--resume") + 1], "sess-9")
+        self.assertEqual(again["argv"][again["argv"].index("--resume") + 1], SESS9)
 
     def test_each_launch_gets_a_placeholder_agent_and_a_marker(self):
         self.seat()
@@ -460,7 +465,7 @@ class DriverSeatTests(ExecEnv):
 
     def test_driver_seats_never_resume_an_old_session(self):
         run = self.go(self.act(seat=None, kind="judge", group="a"))
-        self.end(run, "completed", agent_key="old", session_id="old")
+        self.end(run, "completed", agent_key=SESS9, session_id=SESS9)
         again = self.go(self.act(seat=None, kind="judge", group="b"))
         self.assertNotIn("--resume", again["argv"])
 
@@ -491,7 +496,8 @@ class DriverSeatTests(ExecEnv):
         self.go(self.act("lead", kind="lead"))
         self.end(self.launched[-1], "failed", idle=False)
         cur = self.b.seat("J", 1, "lead")
-        self.b.set_seat_state(cur.id, cur.revision, "failed", job="J")
+        failed = self.b.set_seat_state(cur.id, cur.revision, "failed", job="J")
+        driver_exec.carry_authorization(self.led, cur, failed, self.now())      # as _settle_seats does
         run = self.go(self.act("lead~1", kind="lead", trigger="2"))
         self.assertIsNotNone(run)
         succ = self.b.seat("J", 1, "lead~1")
@@ -504,7 +510,8 @@ class DriverSeatTests(ExecEnv):
         self.go(self.act("eng-a"))
         self.end(self.launched[-1], "failed", idle=False)
         cur = self.b.seat("J", 1, "eng-a")
-        self.b.set_seat_state(cur.id, cur.revision, "failed", job="J")
+        failed = self.b.set_seat_state(cur.id, cur.revision, "failed", job="J")
+        driver_exec.carry_authorization(self.led, cur, failed, self.now())      # as _settle_seats does
         self.assertIsNotNone(self.go(self.act("eng-a~1", trigger="2")))
         self.assertEqual(self.b.seat("J", 1, "eng-a~1").workdir, owner.workdir)
 
@@ -629,13 +636,13 @@ class ReconcileTests(ExecEnv):
         led = self.rec(1000)
         self.assertEqual(led.intents[0].state, "concluded")
 
-    def test_a_row_ended_elsewhere_concludes_its_intent_with_the_cost_it_recorded(self):
+    def test_a_row_ended_elsewhere_concludes_its_intent_with_the_reservation_not_the_board_cost(self):
         self.seat()
         run = self.go(self.act())
         self.b.finish_restart(run["restart_id"], "completed", cost_usd=0.75)
         os.unlink(runner.run_file(run["restart_id"], self.bk))
         (i,) = self.rec(1).intents
-        self.assertEqual((i.state, i.outcome, i.success, i.charged_usd), ("concluded", "completed", True, 0.75))
+        self.assertEqual((i.state, i.outcome, i.success, i.charged_usd), ("concluded", "completed", True, 5.0))
 
     def test_an_ended_row_whose_run_file_is_still_there_is_left_to_its_finish(self):
         self.seat()
@@ -653,13 +660,13 @@ class ReconcileTests(ExecEnv):
         (i,) = self.rec(1).intents
         self.assertEqual((i.outcome, i.success, i.charged_usd), ("timeout", False, 5.0))
 
-    def test_a_refused_row_charges_nothing(self):
+    def test_a_refused_label_on_the_board_is_not_trusted_and_charges_the_reservation(self):
         self.seat()
         run = self.go(self.act())
         self.b.finish_restart(run["restart_id"], "refused")
         os.unlink(runner.run_file(run["restart_id"], self.bk))
         (i,) = self.rec(1).intents
-        self.assertEqual((i.outcome, i.charged_usd), ("refused", 0.0))
+        self.assertEqual((i.outcome, i.charged_usd), ("failed", 5.0))
 
     def test_a_late_claim_for_a_concluded_intent_is_cancelled_and_its_locks_released(self):
         self.seat()
@@ -704,7 +711,7 @@ class ReconcileTests(ExecEnv):
             self.rec(1)
         self.assertEqual(calls, [])
 
-    def test_a_failed_activation_recovery_does_not_stop_reconcile(self):
+    def test_a_failed_activation_recovery_is_not_swallowed(self):
         self.led.state = "activating"
         self.claim_only()
 
@@ -712,20 +719,28 @@ class ReconcileTests(ExecEnv):
             raise RuntimeError("DRIVER-ORPHAN")
         stub = NS(finish_activation=boom)
         with mock.patch.dict(sys.modules, {"swarm.drive_activate": stub}), mock.patch.object(swarm, "drive_activate", stub, create=True):
-            led = self.rec(91)
-        self.assertEqual(led.intents[0].state, "concluded")
+            with self.assertRaises(RuntimeError):
+                self.rec(91)
 
-    def test_reconcile_runs_the_host_lock_sweep_and_survives_its_failure(self):
+    def test_reconcile_runs_the_host_lock_sweep_and_a_broken_sweep_raises(self):
         calls = []
         life = NS(sweep_locks_by_host=lambda board, cfg, now: calls.append((board, cfg, now)))
         with mock.patch.dict(sys.modules, {"swarm.supervisor.driver_life": life}), \
                 mock.patch.object(driver_exec_pkg(), "driver_life", life, create=True):
             self.rec(1)
             life.sweep_locks_by_host = mock.Mock(side_effect=RuntimeError("boom"))
-            self.claim_only()
-            led = self.rec(91)
+            with self.assertRaises(RuntimeError):                    # present but broken: not swallowed
+                self.rec(91)
         self.assertEqual([c[0] for c in calls], [self.b])
-        self.assertEqual(led.intents[0].state, "concluded")          # a failing sweep does not stop reconcile
+
+    def test_a_module_that_is_not_in_this_build_is_skipped_and_logged_once(self):
+        driver_exec._ABSENT_LOGGED.clear()
+        with mock.patch.dict(sys.modules, {}), mock.patch("importlib.util.find_spec", return_value=None), \
+                mock.patch.object(driver_exec, "log") as log:
+            sys.modules.pop("swarm.supervisor.driver_life", None)
+            self.rec(1)
+            self.rec(2)
+        self.assertEqual([c for c in log.call_args_list if "driver_life" in str(c)].__len__(), 1)
 
     def test_nothing_is_reaped_when_there_is_no_open_intent(self):
         with mock.patch.object(runner, "reap") as reap:
@@ -747,13 +762,13 @@ class ReconcileTests(ExecEnv):
     def test_a_seat_whose_launch_ended_goes_idle_and_keeps_its_session(self):
         self.seat()
         run = self.go(self.act())
-        self.b.set_restart_agent(run["restart_id"], "sess-1")
+        self.b.set_restart_agent(run["restart_id"], SESS1)
         self.b.finish_restart(run["restart_id"], "completed", cost_usd=0.1)
         os.unlink(runner.run_file(run["restart_id"], self.bk))
         self.rec(1)
         seat = self.b.seat("J", 1, "eng-a")
         self.assertEqual((seat.state, seat.last_outcome, seat.agent_key, seat.session_id),
-                         ("idle", "completed", "sess-1", "sess-1"))
+                         ("idle", "completed", SESS1, SESS1))
 
     def test_max_attempts_comes_from_the_drive_config(self):
         self.cfg["drive"] = {"max_attempts": 1}
@@ -1080,6 +1095,282 @@ class ProgressTests(ExecEnv):
         self.settle(verdicts={art: v("not_met", artifact=art, open=3, receipt_id=5)})
         led = self.reload()
         self.assertEqual((led.errors, led.rounds_without_progress), (2, 1))
+
+
+class FixRoundTests(ExecEnv):
+    """The review fix round: every security probe of Task 8a, turned round into the safe outcome."""
+
+    def rec(self, seconds=0):
+        driver_exec.reconcile(self.b, self.cfg, self.led, self.now(seconds), time.monotonic() + 20)
+        return self.reload()
+
+    def memory_only(self):
+        if not hasattr(self.b, "_s"):
+            self.skipTest("raw row forging is done on the memory backend (sqlite refuses it by index)")
+
+    # -- H1: a forged duplicate restart row never unbooks, cancels or releases a live session
+    def test_H1_a_forged_duplicate_row_does_not_unbook_or_cancel_a_live_session(self):
+        self.memory_only()
+        for p in (mock.patch.object(runner, "reap", lambda *a, **k: None),
+                  mock.patch.object(runner, "_held", lambda rid, bk: True)):
+            p.start()
+            self.addCleanup(p.stop)
+        self.seat()
+        run = self.go(self.act())
+        real = next(r for r in self.b._s().restarts if r["id"] == run["restart_id"])
+        forged = dict(real, id=999, ended_at=self.now(), outcome="lost", cost_usd=0.0, attempt=77)
+        with self.b._s().lock:
+            self.b._s().restarts.append(forged)
+        (i,) = self.rec().intents
+        self.assertEqual((i.state, i.outcome), ("claimed", None))        # not concluded, not "lost"
+        with self.b._s().lock:
+            self.b._s().restarts.remove(forged)
+        self.rec()
+        self.assertIsNone(self.row_of(run).ended_at)                     # the live row is not cancelled
+        # (the lock itself is 8b's host sweep: it must match rows the same way, see sweep_locks_by_host)
+        self.assertIsNone(self.go(self.act(trigger="2")))                # no second session in the worktree
+
+    def test_H1_the_claimed_restart_id_is_recorded_in_the_ledger(self):
+        self.seat()
+        run = self.go(self.act())
+        self.assertEqual(self.reload().watermarks[f"rid:{run['launch_id']}"], run["restart_id"])
+
+    def test_H1_an_ended_row_of_another_id_is_ignored_even_with_no_run_file(self):
+        self.memory_only()
+        self.seat()
+        run = self.go(self.act())
+        os.unlink(runner.run_file(run["restart_id"], self.bk))
+        real = next(r for r in self.b._s().restarts if r["id"] == run["restart_id"])
+        with self.b._s().lock:
+            self.b._s().restarts.append(dict(real, id=999, ended_at=self.now(), outcome="lost", cost_usd=0.0, attempt=77))
+        (i,) = self.rec(1).intents
+        self.assertEqual(i.state, "claimed")                              # inside the grace period: left alone
+
+    def test_H1_a_forged_label_and_cost_on_a_crashed_launch_are_not_taken(self):
+        self.memory_only()
+        self.seat()
+        run = self.go(self.act())
+        driver_exec._unlink_run(run)                                      # the driver crashed before its run file
+        with self.b._s().lock:
+            next(r for r in self.b._s().restarts if r["id"] == run["restart_id"]).update(
+                ended_at=self.now(), outcome="lost", cost_usd=0.0)
+        (i,) = self.rec().intents
+        self.assertEqual((i.outcome, i.charged_usd), ("failed", 5.0))     # counted, charged its reservation
+        self.assertEqual(sum(1 for x in self.led.intents if x.outcome != "lost"), 1)
+
+    def test_H1_an_ended_row_with_a_live_session_is_not_concluded(self):
+        self.seat()
+        run = self.go(self.act())
+        self.b.finish_restart(run["restart_id"], "failed")
+        os.unlink(runner.run_file(run["restart_id"], self.bk))
+        fd = runner.own(run["restart_id"], self.bk)                       # its runner lock is held: alive
+        self.addCleanup(os.close, fd)
+        self.assertEqual(self.rec(1).intents[0].state, "claimed")
+
+    def test_H1_a_late_claim_with_a_live_run_is_not_cancelled(self):
+        self.seat()
+        run = self.go(self.act())
+        self.reload()
+        self.led.intents[0].state, self.led.intents[0].outcome = "concluded", "lost"
+        self.led.intents[0].success, self.led.intents[0].charged_usd = False, 0.0
+        self.led.save()
+        self.rec(1)
+        self.assertIsNone(self.row_of(run).ended_at)                      # the run file is there: it is not ours to cancel
+
+    def test_H1_the_restart_launch_id_is_unique_on_sqlite(self):
+        h = SqliteHarness()
+        self.addCleanup(h.close)
+        h.reset()
+        b = h.board()
+        self.addCleanup(b.close)
+        b.open_job("J", None, None, None, "me", goal="G")
+        s = b.request_seat("J", 1, "a", role="engineer", harness="claude", model="haiku", workdir="/w/a",
+                           brief_path="/w/a/B.md", requested_by="lead")
+        args = dict(job="J", generation=1, launch_id="L1", seat_id=s.id, seat_revision=s.revision,
+                    harness="claude", reserve_usd=1, reserve_minutes=1, locks=[], lock_seconds=60, max_host_running=9)
+        b.allocate_name("launch:L1", "J", "engineer")
+        self.assertIsNotNone(b.claim_drive_launch(action_id="a1", attempt=1, **args))
+        row = b.seat("J", 1, "a")
+        with self.assertRaises(Exception):
+            h._db().execute("INSERT INTO restarts (job, agent_key, attempt, at, reason, old_agent_key, harness, host, "
+                            "os_user, minutes_cap, action_id, launch_id) SELECT job, agent_key, 9, at, reason, "
+                            "'other-old', harness, host, os_user, minutes_cap, 'a2', launch_id FROM restarts")
+        self.assertIsNotNone(row)
+
+    # -- H2: a successor is built only from a receipted predecessor, never as a judge or lead
+    def test_H2_an_unauthorized_base_has_no_successor(self):
+        self.seat("evil", role="judge", authorize=False)
+        self.assertIsNone(self.go(self.act(seat="evil~1")))
+        self.assertIsNone(self.b.seat("J", 1, "evil~1"))
+
+    def test_H2_a_tampered_predecessor_row_passes_nothing_to_its_successor(self):
+        self.seat()
+        run = self.go(self.act())
+        self.end(run, "failed")
+        evil = str(self.work / "elsewhere")
+        os.makedirs(evil, exist_ok=True)
+        self.tamper_seat("eng-a", role="judge", brief_path="/home/claude/evil-brief.md", workdir=evil,
+                         model="opus", state="failed")
+        self.assertIsNone(self.go(self.act(seat="eng-a~1", trigger="9")))
+        self.assertIsNone(self.b.seat("J", 1, "eng-a~1"))
+
+    def test_H2_a_judge_never_gets_a_successor_even_when_authorized(self):
+        self.seat("jj", role="judge")
+        self.assertIsNone(self.go(self.act(seat="jj~1")))
+
+    def test_H2_only_the_lead_seat_has_a_lead_successor(self):
+        self.seat("boss", role="engineering_lead")
+        self.assertIsNone(self.go(self.act(seat="boss~1", kind="lead")))
+        self.seat("lead", role="engineering_lead")
+        self.assertIsNotNone(self.go(self.act(seat="lead~1", kind="lead")))
+        self.assertEqual(self.b.seat("J", 1, "lead~1").role, "engineering_lead")
+
+    # -- M1: driver-owned names belong to the driver
+    def test_M1_a_requester_cannot_squat_a_driver_seat_name(self):
+        self.seat("judge", role="engineer", workdir=str(self.work / "lead-pick"))
+        self.assertIsNone(self.go(self.act(seat=None, kind="judge", group="feat/a")))
+        self.assertEqual(self.b.drive_locks(), [])
+        self.assertEqual(self.launched, [])
+
+    def test_M1_a_seat_action_may_not_name_a_driver_seat(self):
+        self.seat("judge", role="judge")
+        self.assertIsNone(self.go(self.act(seat="judge", kind="judge")))
+        for name in ("goal-judge", "ruling-judge", "reviewer-x-12345678", "integrator-x-12345678"):
+            self.assertTrue(driver_exec.reserved_seat(name), name)
+        self.assertFalse(driver_exec.reserved_seat("eng-a"))
+
+    # -- review: the crash between request_seat and authorize_seat is healed, on equality only
+    def test_a_driver_row_left_unauthorized_by_a_crash_is_healed(self):
+        real = driver_exec.authorize_seat
+        with mock.patch.object(driver_exec, "authorize_seat", side_effect=RuntimeError("crash")):
+            with self.assertRaises(RuntimeError):
+                self.go(self.act(seat=None, kind="judge", group="feat/a"))
+        self.assertEqual(self.b.seat("J", 1, "judge").state, "requested")
+        self.assertIsNotNone(self.go(self.act(seat=None, kind="judge", group="feat/a", trigger="2")))
+        self.assertTrue(real is driver_exec.authorize_seat)
+
+    def test_a_driver_row_that_differs_from_what_the_driver_makes_is_not_healed(self):
+        with mock.patch.object(driver_exec, "authorize_seat", side_effect=RuntimeError("crash")):
+            with self.assertRaises(RuntimeError):
+                self.go(self.act(seat=None, kind="judge", group="feat/a"))
+        self.tamper_seat("judge", workdir="/home/claude/elsewhere")
+        self.assertIsNone(self.go(self.act(seat=None, kind="judge", group="feat/a", trigger="2")))
+
+    def test_requested_by_driver_alone_authorizes_nothing(self):
+        self.seat("eng-a", authorize=False)
+        self.tamper_seat("eng-a", requested_by="driver")
+        self.assertIsNone(self.go(self.act()))
+
+    # -- H3: the resume handle is validated, never an option
+    def test_H3_a_handle_that_is_not_a_session_id_is_never_resumed(self):
+        for bad in ('--mcp-config={"mcpServers":{"x":{"command":"sh"}}}', "--add-dir=/", "-c", "a=b", "x y",
+                    "../../etc", "", "short", "abcdefgh=ijkl", "abc\ndefgh12345"):
+            self.assertFalse(driver_exec.valid_resume_handle(bad), bad)
+        for good in (SESS9, SESS1, "019a1b2c3d4e5f60"):
+            self.assertTrue(driver_exec.valid_resume_handle(good), good)
+
+    def test_H3_a_forged_session_id_starts_a_fresh_session(self):
+        self.seat()
+        run = self.go(self.act())
+        self.end(run, "completed")
+        self.tamper_seat("eng-a", session_id='--mcp-config={"mcpServers":{"x":{"command":"sh"}}}')
+        run2 = self.go(self.act(trigger="2"))
+        self.assertNotIn("--resume", run2["argv"])
+        self.assertFalse(any(a.startswith("--mcp-config") for a in run2["argv"]))
+
+    def test_H3_a_forged_new_agent_key_never_reaches_the_seat(self):
+        self.memory_only()
+        self.seat()
+        run = self.go(self.act())
+        with self.b._s().lock:
+            next(r for r in self.b._s().restarts if r["id"] == run["restart_id"]).update(new_agent_key="--add-dir=/")
+        self.b.finish_restart(run["restart_id"], "completed")
+        with mock.patch.object(runner, "has_run", return_value=False):
+            self.rec()
+        self.assertIsNone(self.b.seat("J", 1, "eng-a").session_id)
+
+    # -- M2: wake marks cannot be poisoned by a forged id
+    def test_M2_a_forged_message_id_does_not_poison_the_wake_mark(self):
+        self.memory_only()
+        self.seat()
+        with self.b._s().lock:
+            self.b._s().messages.append({"id": 10 ** 12, "job": "J", "agent_name": "x", "created_at": self.now(),
+                                         "message": "hi", "to_agent": None, "agent_key": None, "host": "h"})
+        run = self.go(self.act())
+        driver_exec.conclude_run(self.cfg, run, "completed", 0.1)
+        self.assertLess(self.reload().watermarks.get("msg:eng-a", 0), 10 ** 6)
+
+    def test_M2_a_far_jump_in_ids_is_not_followed(self):
+        self.assertEqual(driver_exec._chain_mark([5, 6, 7], 0), 7)
+        self.assertEqual(driver_exec._chain_mark([5, 6, 7, 10 ** 12], 0), 7)
+        self.assertEqual(driver_exec._chain_mark([3, 4], 9), 9)           # never back
+
+    # -- M3: last_progress_at is the time of the progress event, never later than now
+    def test_M3_a_future_seat_time_does_not_move_last_progress(self):
+        t = dt.datetime(2026, 10, 10, 12, 0, tzinfo=dt.timezone.utc)
+        s = snap(ledger=self.led, handoffs=[ho(receipt_id=5, at=t - dt.timedelta(hours=1))],
+                 seats={"a": sv("a", updated_at=dt.datetime(2099, 1, 1, tzinfo=dt.timezone.utc))})
+        driver_exec.settle_progress(self.led, s, t)
+        self.assertEqual(self.reload().last_progress_at, (t - dt.timedelta(hours=1)).isoformat())
+
+    def test_M3_a_future_handoff_time_is_clamped_to_now(self):
+        t = dt.datetime(2026, 10, 10, 12, 0, tzinfo=dt.timezone.utc)
+        s = snap(ledger=self.led, handoffs=[ho(receipt_id=5, at=dt.datetime(2099, 1, 1, tzinfo=dt.timezone.utc))])
+        driver_exec.settle_progress(self.led, s, t)
+        self.assertEqual(self.reload().last_progress_at, t.isoformat())
+
+    # -- review: optional modules, activation, locks
+    def test_a_crashed_activation_is_held_until_recovered(self):
+        self.led.state = "activating"
+        self.led.save()
+        self.seat()
+        self.assertIsNone(self.go(self.act()))
+        self.assertEqual(self.reload().intents, [])
+
+    def test_crashed_activation_recovery_reads_the_real_ledger_state(self):
+        led = ledger.create(self.bk, "K", budgets={}, activated_at=iso(self.b.now()), state="activating")
+        self.assertEqual(ledger.load(self.bk, "K").state, "activating")
+        calls = []
+        stub = NS(finish_activation=lambda cfg, board, job: calls.append(job) or ledger.load(self.bk, job))
+        with mock.patch.dict(sys.modules, {"swarm.drive_activate": stub}):
+            driver_exec._finish_activation(self.b, self.cfg, led)
+        self.assertEqual(calls, ["K"])
+
+    def test_never_started_claim_releases_its_drive_locks(self):
+        self.seat()
+        run = self.go(self.act())
+        self.assertEqual(len(self.b.drive_locks()), 1)
+        os.unlink(runner.run_file(run["restart_id"], self.bk))             # crashed before the run file
+        self.rec(91)
+        self.assertEqual(self.b.drive_locks(), [])
+
+    # -- lows
+    def test_a_kill_switch_cancel_does_not_count_toward_max_attempts(self):
+        self.cfg["drive"] = {"max_attempts": 1}
+        self.seat()
+        with mock.patch.object(driver_exec.command if hasattr(driver_exec, "command") else __import__("swarm.supervisor.command", fromlist=["x"]),
+                               "_switched_off_now", return_value="off"):
+            self.assertIsNone(self.go(self.act()))
+        self.assertEqual(self.reload().intents[0].outcome, "cancelled")
+        self.assertIsNotNone(self.go(self.act()))                          # the attempt did not count
+
+    def test_a_workdir_under_tmp_is_refused(self):
+        self.seat()
+        with mock.patch.object(driver_exec, "TMP_ROOTS", (str(self.work),)):
+            self.assertIsNone(self.go(self.act()))
+        self.assertEqual(self.reload().intents, [])
+        self.assertTrue(driver_exec._in_tmp("/tmp/x/../y") if driver_exec.TMP_ROOTS else True)
+
+    def test_the_default_driver_brief_is_not_inside_the_project_tree(self):
+        fields = driver_exec._driver_fields(self.cfg, self.led, "judge")
+        self.assertFalse(fields["brief_path"].startswith(str(self.work)))
+        self.assertNotIn(".swarm", fields["brief_path"].split(os.sep)[-2:-1])
+
+    def test_claude_seats_always_pass_setting_sources_user(self):
+        self.seat()
+        run = self.go(self.act())
+        pairs = list(zip(run["argv"], run["argv"][1:]))
+        self.assertIn(("--setting-sources", "user"), pairs)
 
 
 if __name__ == "__main__":

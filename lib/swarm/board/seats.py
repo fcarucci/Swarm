@@ -261,7 +261,7 @@ class MemorySeats:
 
 def seats_schema(pg: bool = False) -> str:
     """Schema 25 part 2: the seats and drive_locks tables, the restart columns of a claim and the
-    unique (job, action_id, attempt). Runs after the base schema, so restarts exists. Postgres
+    unique (job, action_id, attempt) and unique launch_id (one restart row per launch). Runs after the base schema, so restarts exists. Postgres
     adds the restart columns here; SQLite adds them in MIGRATIONS, before this runs."""
     id_type = "bigserial PRIMARY KEY" if pg else "INTEGER PRIMARY KEY AUTOINCREMENT"
     ts = "timestamptz" if pg else "TEXT"
@@ -276,6 +276,7 @@ def seats_schema(pg: bool = False) -> str:
     return f"""
 {restart_cols}CREATE UNIQUE INDEX IF NOT EXISTS restarts_action_attempt ON restarts (job, action_id, attempt)
  WHERE action_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS restarts_launch_id ON restarts (launch_id) WHERE launch_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS seats (
  id {id_type}, job TEXT NOT NULL REFERENCES jobs(job) ON DELETE CASCADE, generation {big} NOT NULL,
  seat TEXT NOT NULL, role TEXT NOT NULL, title TEXT, harness TEXT NOT NULL CHECK (harness IN ('claude', 'codex')),
