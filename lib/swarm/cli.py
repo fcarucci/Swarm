@@ -3311,6 +3311,8 @@ def cmd_deactivate(cfg: dict, args) -> int:
                 board.close()
             print(f"bank not deleted; job remains unchanged: {term_safe(exc)}", file=sys.stderr)
             return 1
+    from swarm import drive_cli as _dc
+    person_led, person_how = _dc.deactivate_person(cfg, args)   # a drive job: is this a person's cancel?
     # first, so the board goes quiet even if the db write fails; never unlinked without its lock
     markers = [marker] + [m for m in marker.parent.glob(f"{safe_job(args.job)}--*.json")
                           if _read_marker(m).get("job") == args.job]
@@ -3336,6 +3338,7 @@ def cmd_deactivate(cfg: dict, args) -> int:
                 _capture_final_transcripts(board, cfg, args.job)
             if known:
                 _reap_closed_job(board, args.job)
+                _dc.deactivate_receipt(cfg, args, person_led, person_how)   # the driver's proof of a cancel
                 from swarm import drive_activate as _da
                 _da.clear_claim(board, args.job)   # [RR1a] a closed job is not driven
         how = args.status + (", forced without a met verdict" if forced else "")
@@ -3346,7 +3349,10 @@ def cmd_deactivate(cfg: dict, args) -> int:
     except Exception as exc:
         print(f"deactivated {args.job}; could not record status ({_error_name(exc)})",
               file=sys.stderr)
+        known = False
     _learning_instructions(args.job, learned=learned, closed=True)
+    if known:
+        _dc.deactivate_record(cfg, args.job)   # last line: a drive job's record (drivegate receipts)
     return 0
 
 
@@ -4077,6 +4083,9 @@ def _board_post(board, cfg: dict, args) -> int | None:
     to = f" to {args.to} ({', '.join(term_safe(t) for t in targets)})" if args.to and args.to.startswith("@") else ""
     print(f"posted {ids}{to}" + (f" (truncated to {board.message_cap()} chars)"
                                   if any(r.truncated for r in results) else ""))
+    if len(results) == 1 and (args.cmd == "done" or args.to):   # a drive job's record line (drivegate receipts)
+        from swarm.drive_cli import drive_record
+        drive_record(cfg, args.job, "done" if args.cmd == "done" else "post", results[0].id)
 
 
 # Settings `swarm config` can read and change: "section.key" -> (what it is, how to check a value).
@@ -4762,7 +4771,7 @@ def _run_command(cfg: dict, args) -> int:
             scope = _verdict_scope(args)   # a goal/ruling verdict keeps its ledger generation (S2)
             spool_verdict(cfg, args.job, args.name, args.verdict, *_verdict_text(args), artifact=args.artifact,
                           details=getattr(args, "details_text", None), scope=scope,
-                          generation=_drive_generation(cfg, args.job) if scope in ("goal", "ruling") else None,
+                          generation=_drive_generation(cfg, args.job),
                           open_count=getattr(args, "open_count", None),
                           progress=True if getattr(args, "progress", None) else None,
                           candidate=getattr(args, "candidate", None), req=getattr(args, "req", None))

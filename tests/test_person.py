@@ -1,9 +1,11 @@
-"""Person authority and caller identity (spec 3.4 [G6], [F17], 4.0): the hook's single-use grant names the
-caller (never an environment variable), the requester's MAIN session holds person authority, a person outside
-any agent host confirms on /dev/tty, and everything else is refused. Each case runs under a temporary HOME
-inside the suite sandbox. Probes P2, P3a, P3b and P4 of the Task 6b security review are regression tests here."""
+"""Person authority and caller identity (spec 3.4 [G6], [F17], 4.0): the PreToolUse hook's single-use grant
+(a receipts.Receipt of kind "grant", drivegate.write_grants) names the caller, never an environment variable;
+the requester's MAIN session holds person authority; a person outside any agent host confirms on /dev/tty;
+everything else is refused. Each case runs under a temporary HOME inside the suite sandbox. Probes P2, P3a, P3b
+and P4 of the Task 6b security review are regression tests here."""
 from __future__ import annotations
 
+import argparse
 import os
 import shlex
 import tempfile
@@ -12,11 +14,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import SANDBOX, home_env, posix_only  # noqa: F401
+from support import SANDBOX, MemoryHarness, home_env, posix_only  # noqa: F401
 
-from swarm import enrolment, person  # noqa: E402
+from swarm import cli, drivegate, enrolment, hosts, person, receipts  # noqa: E402
+from swarm.board.autoinit import store_key  # noqa: E402
+from swarm.supervisor import ledger  # noqa: E402
 
-BOARD = "memory-contract"
 JOB = "J"
 HALT = ["halt", "--job", JOB]
 NO_HOST = lambda: None   # noqa: E731  (the process-tree walk finds no agent host)
@@ -31,63 +34,83 @@ class PersonCase(unittest.TestCase):
         self.addCleanup(p.stop)
         person.forget()
         self.addCleanup(person.forget)
-        enrolment.write_job_owner(BOARD, job=JOB, harness="claude", session_id="REQ", cwd=str(self.home))
+        self.h = MemoryHarness()
+        self.cfg = self.h.cfg
+        self.bk = store_key(self.cfg)
+        led = ledger.create(self.bk, JOB, budgets={}, activated_at="2026-10-11T00:00:00+00:00")
+        led.requester_session = "REQ"
+        led.save()
+        enrolment.write_job_owner(self.bk, job=JOB, harness="claude", session_id="REQ", cwd=str(self.home))
+
+    def led(self):
+        return ledger.load(self.bk, JOB)
 
     def enrol_seat(self, session="SEAT", key="k-eng"):
-        enrolment.write(BOARD, job=JOB, agent_key=key, harness="claude", session_id=session, cwd=str(self.home))
+        enrolment.write(self.bk, job=JOB, agent_key=key, harness="claude", session_id=session, cwd=str(self.home))
 
-    def hook(self, session, argv=HALT, agent_id=None, command=None):
-        """What the PreToolUse hook does for a shell call `swarm <argv>` of this session."""
-        payload = {"session_id": session}
+    def hook(self, session, argv=HALT, agent_id=None, command=None, ctx=None, now=None):
+        """What the PreToolUse hook does for this session's shell call `swarm <argv>`."""
+        payload = {"session_id": session, "tool_name": "Bash",
+                   "tool_input": {"command": command or shlex.join(["swarm", *argv])}}
         if agent_id:
             payload["agent_id"] = agent_id
-        return person.write_grants(BOARD, payload, command or shlex.join(["swarm", *argv]))
+        return drivegate.write_grants(self.cfg, payload, hosts.get("claude"), ctx, now=now)
+
+    @staticmethod
+    def ns(argv=HALT):
+        return cli._parser().parse_args(list(argv))
+
+    def caller(self, argv=HALT, led=False):
+        person.forget()
+        return person.caller(self.bk, JOB, self.led() if led is False else led, self.ns(argv))
 
     def require(self, env=None, confirm=lambda a, j: False, ancestor=NO_HOST, argv=HALT):
-        person.forget()
-        return person.require("halt", JOB, board_key=BOARD, env={} if env is None else env, confirm=confirm,
-                              argv=argv, ancestor=ancestor)
+        return person.require("halt", JOB, board_key=self.bk, env={} if env is None else env, confirm=confirm,
+                              who=self.caller(argv), ancestor=ancestor)
 
 
 class RequesterByGrant(PersonCase):
     def test_requester_main_session_allowed_without_tty(self):
         def no_tty(a, j):
             raise AssertionError("the requester session must not be asked on a tty")
-        self.hook("REQ")
+        self.assertEqual(self.hook("REQ"), 1)
         self.assertEqual(self.require({"CLAUDE_CODE_SESSION_ID": "REQ"}, no_tty, UNDER_CLAUDE), "requester")
 
-    def test_the_environment_alone_gives_no_authority(self):
-        """P1: a seat exports the requester's session id; without the requester's grant it is refused."""
+    def test_the_grant_is_a_task5_receipt(self):
+        self.hook("REQ")
+        led = self.led()
+        rid = drivegate.grant_id(self.ns())
+        r = receipts.find(self.bk, JOB, "grant", rid, rev=1, incarnation=led.incarnation,
+                          generation=led.generation, now=time.time())
+        self.assertEqual((r.seat, r.action_id, r.args_sha), (None, "requester:halt", rid))
+
+    def test_P1_the_environment_alone_gives_no_authority(self):
         with self.assertRaises(person.PersonRefused):
             self.require({"CLAUDE_CODE_SESSION_ID": "REQ"}, lambda a, j: True, UNDER_CLAUDE)
 
-    def test_a_grant_of_another_session_is_refused_whatever_the_environment_says(self):
+    def test_another_session_gets_no_grant(self):
         self.enrol_seat("SEAT")
-        self.hook("SEAT")
+        self.assertEqual(self.hook("SEAT"), 0)
+        with self.assertRaises(person.PersonRefused):
+            self.require({"CLAUDE_CODE_SESSION_ID": "REQ"}, lambda a, j: True, UNDER_CLAUDE)
+
+    def test_a_seat_grant_is_not_the_requester(self):
+        ctx = drivegate.Ctx(kind="seat", job=JOB, led=self.led(), seat="eng",
+                            intent=ledger.Intent("L", "A", 1, "eng", 0.0, 0.0, [], "claimed"))
+        self.assertEqual(self.hook("SEAT", ctx=ctx), 1)
         with self.assertRaises(person.PersonRefused) as cm:
             self.require({"CLAUDE_CODE_SESSION_ID": "REQ"}, lambda a, j: True, UNDER_CLAUDE)
         self.assertIn("not the requester", str(cm.exception))
 
-    def test_a_subagent_of_the_requester_is_not_the_requester(self):
-        """M2: a subagent's payload carries the parent's session id and its own agent_id."""
-        self.hook("REQ", agent_id="sub-1")
-        with self.assertRaises(person.PersonRefused) as cm:
+    def test_M2_a_subagent_of_the_requester_gets_no_grant(self):
+        self.assertEqual(self.hook("REQ", agent_id="sub-1"), 0)
+        with self.assertRaises(person.PersonRefused):
             self.require({"CLAUDE_CODE_SESSION_ID": "REQ"}, lambda a, j: True, UNDER_CLAUDE)
-        self.assertIn("subagent", str(cm.exception))
 
     def test_P4_requester_still_allowed_after_one_of_its_subagents_enrolled(self):
-        """P4 (fixed): the subagent's enrolment record carries the requester's session id; the requester's own
-        main-session grant still holds."""
         self.enrol_seat("REQ", key="k-sub-of-requester")
         self.hook("REQ")
         self.assertEqual(self.require({"CLAUDE_CODE_SESSION_ID": "REQ"}, ancestor=UNDER_CLAUDE), "requester")
-
-    def test_owner_without_session_gives_no_requester_authority(self):
-        enrolment.write_job_owner(BOARD, job="K", harness="codex", session_id=None, cwd=str(self.home))
-        person.write_grants(BOARD, {"session_id": "X"}, "swarm halt --job K")
-        with self.assertRaises(person.PersonRefused):
-            person.require("halt", "K", board_key=BOARD, env={}, confirm=lambda a, j: True,
-                           argv=["halt", "--job", "K"], ancestor=NO_HOST)
 
     def test_a_grant_is_used_once(self):
         self.hook("REQ")
@@ -95,59 +118,48 @@ class RequesterByGrant(PersonCase):
         with self.assertRaises(person.PersonRefused):
             self.require(ancestor=UNDER_CLAUDE)
 
-    def test_a_grant_is_for_its_exact_argv(self):
-        self.hook("REQ", argv=["halt", "--job", "OTHER"])
+    def test_a_grant_is_for_its_exact_arguments(self):
+        self.hook("REQ", argv=["halt", "--job", JOB, "--reason", "x"])
         with self.assertRaises(person.PersonRefused):
             self.require(ancestor=UNDER_CLAUDE)
 
     def test_an_expired_grant_is_refused(self):
-        person.write_grants(BOARD, {"session_id": "REQ"}, "swarm halt --job J",
-                            now=time.time() - person.GRANT_SECONDS - 1)
+        self.hook("REQ", now=time.time() - drivegate.GRANT_SECONDS - 1)
         with self.assertRaises(person.PersonRefused):
             self.require(ancestor=UNDER_CLAUDE)
 
-    def test_a_grant_of_another_board_is_refused(self):
-        person.write_grants(BOARD + "-other", {"session_id": "REQ"}, "swarm halt --job J")
-        with self.assertRaises(person.PersonRefused):
-            self.require(ancestor=UNDER_CLAUDE)
+    def test_a_grant_of_another_incarnation_is_refused(self):
+        self.hook("REQ")
+        led = self.led()
+        led.incarnation = "f" * 32
+        person.forget()
+        self.assertIsNone(person.caller(self.bk, JOB, led, self.ns()))
 
     def test_a_grant_that_cannot_be_used_up_is_refused(self):
         """A Codex seat's sandbox can read the enrolled directory but not unlink in it: no grant."""
         self.hook("REQ")
-        with mock.patch.object(person.compat, "unlink", side_effect=PermissionError("read-only")):
+        with mock.patch("swarm.compat.unlink", side_effect=PermissionError("read-only")):
             with self.assertRaises(person.PersonRefused):
                 self.require(ancestor=UNDER_CLAUDE)
 
+    def test_drive_repair_of_an_unreadable_ledger_is_granted_by_the_owner_record(self):
+        hits = list(self.home.rglob(ledger._name(self.bk, JOB)))
+        hits[0].write_bytes(b"bad")
+        argv = ["drive", "repair", "--job", JOB]
+        self.assertEqual(self.hook("OTHER", argv=argv), 0)
+        self.assertEqual(self.hook("REQ", argv=argv), 1)
+        self.assertTrue(self.caller(argv, led=None).requester)
+
 
 class Grants(PersonCase):
-    def test_swarm_calls_reads_direct_invocations(self):
-        cmd = ("cd ~/w && FOO=1 swarm halt --job 'J x' 2>&1 | tail -3\n"
-               "~/.local/bin/swarm seat ack --job J --upto 5; echo swarm halt --job J")
-        self.assertEqual(person.swarm_calls(cmd), [["halt", "--job", "J x", "2"], ["halt", "--job", "J x"],
-                                                    ["seat", "ack", "--job", "J", "--upto", "5"]])
-
-    def test_substitutions_and_nested_shells_get_no_grant(self):
-        for cmd in ("swarm halt --job $JOB", "swarm halt --job `cat j`", "bash -c 'swarm halt --job J'",
-                    "env -u CLAUDE_CODE_SESSION_ID swarm halt --job J", "swarm halt --job 'unterminated"):
+    def test_only_control_commands_and_direct_calls_get_a_grant(self):
+        for cmd in ("swarm read --job J", "echo swarm halt --job J", "swarm halt --job $J"):
             self.assertEqual(self.hook("REQ", command=cmd), 0, cmd)
+        self.assertEqual(self.hook("REQ", command="cd /x && swarm --config c.toml halt --job J 2>&1 | tail -2"), 1)
+        self.assertIsNotNone(self.caller())
 
-    def test_only_control_commands_get_a_grant(self):
-        self.assertEqual(self.hook("REQ", command="swarm read --job J"), 0)
-        self.assertEqual(self.hook("REQ", command="swarm --config c.toml seat ack --job J --upto 1"), 1)
-
-    def test_a_grant_file_is_private(self):
-        self.hook("REQ")
-        names = [p for p in (self.home / ".local/share/swarm/host/enrolled").iterdir() if p.name.startswith("grant-")]
-        self.assertEqual(len(names), 1)
-        if os.name == "posix":
-            self.assertEqual(names[0].stat().st_mode & 0o777, 0o600)
-
-    def test_expired_grants_are_pruned_by_the_next_write(self):
-        person.write_grants(BOARD, {"session_id": "REQ"}, "swarm halt --job J", now=1.0)
-        self.hook("REQ", argv=["unhalt", "--job", JOB])
-        names = [p.name for p in (self.home / ".local/share/swarm/host/enrolled").iterdir()
-                 if p.name.startswith("grant-")]
-        self.assertEqual(names, [person.grant_name(BOARD, ["unhalt", "--job", JOB])])
+    def test_two_calls_in_one_command_get_two_grants(self):
+        self.assertEqual(self.hook("REQ", command="swarm halt --job J; swarm unhalt --job J"), 2)
 
 
 class TtyPath(PersonCase):
@@ -183,7 +195,7 @@ class TtyPath(PersonCase):
     def test_tty_unavailable_is_a_refusal(self):
         with mock.patch.object(person, "_open_tty", side_effect=OSError("no tty")):
             with self.assertRaises(person.PersonRefused):
-                person.require("halt", JOB, board_key=BOARD, env={}, argv=HALT, ancestor=NO_HOST)
+                person.require("halt", JOB, board_key=self.bk, env={}, who=None, ancestor=NO_HOST)
 
     def test_tty_answer_must_be_yes(self):
         for answer, ok in ((b"y\n", True), (b"yes\n", True), (b"\n", False), (b"n\n", False), (b"yesno\n", False)):
@@ -228,7 +240,7 @@ class TtyPath(PersonCase):
         def gate(ancestor):
             person.forget()
             try:
-                return person.require("halt", JOB, board_key=BOARD, env={}, argv=HALT, ancestor=ancestor) == "tty"
+                return person.require("halt", JOB, board_key=self.bk, env={}, who=None, ancestor=ancestor) == "tty"
             except person.PersonRefused:
                 return False
         self.assertEqual(self._pty_answer(lambda: gate(UNDER_CLAUDE)), 1)

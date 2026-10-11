@@ -81,7 +81,9 @@ def _board_verdict(board, cfg: dict, args) -> int:
         return 1
     scope = _verdict_scope(args)
     # a goal or ruling verdict is stored under its drive generation (review.verdict_data), from the ledger
-    generation = _drive_generation(cfg, args.job) if scope in ("goal", "ruling") else None
+    # every verdict of a drive job carries its ledger generation (so it is bound to its VERDICT message,
+    # spool.deliver_verdict); a goal or ruling verdict is stored under it (review.verdict_data)
+    generation = _drive_generation(cfg, args.job)
     from swarm.spool import VerdictUnbound
     try:
         message_id = deliver_verdict(board, args.job, args.name, args.verdict, text[0], text[1],

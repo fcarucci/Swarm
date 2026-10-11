@@ -88,6 +88,18 @@ def _now_iso(board) -> str:
     return board.now().isoformat()
 
 
+def drive_record(cfg: dict, job: str, kind: str, rec_id: int, rev: int = 1) -> None:
+    """Print the record line of a board command (done, post --to, ask, answer) when `job` is a drive job (a
+    readable drive ledger on this host): the PostToolUse hook receipts the record by it (drivegate). Other jobs
+    print none (their output is unchanged). Never raises."""
+    try:
+        if ledger.load(board_key(cfg), job) is None:
+            return
+    except Exception:
+        return
+    _record(kind, rec_id, rev)
+
+
 def _record(kind: str, rec_id: int, rev: int) -> int:
     print(RECORD.format(kind=kind, id=int(rec_id), rev=int(rev)))
     return 0
@@ -138,32 +150,29 @@ def _is_lead_seat(name: str) -> bool:
     return name == "lead" or name.startswith("lead~")
 
 
-def _lead_keys(board, job: str, generation: int) -> set:
-    """The agent keys of the job's LIVE lead seat and successors (lead~N) in this generation: a released,
-    failed, cancelled or refused lead holds no authority any more."""
+def _caller(bk: str, job: str, led, args):
+    """The caller the PreToolUse hook attested for this command (person.caller; None: none)."""
+    return person.caller(bk, job, led, args)
+
+
+def _live_lead(board, job: str, led, who) -> str | None:
+    """The attested caller's seat name when it is a LIVE lead seat (lead, lead~N) of this generation."""
     from swarm.board.base import SEAT_CLOSED
-    return {s.agent_key for s in board.seats(job, generation) if s.agent_key
-            and _is_lead_seat(s.seat) and s.state not in SEAT_CLOSED}
+    if who is None or who.seat is None or not _is_lead_seat(who.seat):
+        return None
+    row = board.seat(job, led.generation, who.seat)
+    return who.seat if row is not None and row.state not in SEAT_CLOSED else None
 
 
-def _caller_lead(board, bk: str, job: str, led) -> tuple:
-    """(caller, the lead key the attested caller holds or None, whether it is another enrolled session). The
-    caller comes from the hook's grant (person.caller); a subagent (agent_id) is never the lead."""
-    who = person.caller(bk)
-    if who is None or who.agent_id is not None:
-        return who, None, False
-    keys = enrolment.agent_keys(bk, who.session_id)
-    lead = keys & _lead_keys(board, job, led.generation)
-    return who, (sorted(lead)[0] if lead else None), bool(keys)
-
-
-def _lead_or_person(board, bk: str, job: str, led, env, action: str) -> str:
-    """Authority for a seat-staffing command: the lead's own session (attested by its hook), else a person
-    (person.require). Other enrolled sessions are refused (they ask the lead on the board)."""
-    who, lead, enrolled = _caller_lead(board, bk, job, led)
+def _lead_or_person(board, bk: str, job: str, led, env, action: str, args) -> str:
+    """Authority for a seat-staffing command: the live lead seat (attested by its hook), else a person
+    (person.require). Other seats are refused (they ask the lead on the board)."""
+    who = _caller(bk, job, led, args)
+    lead = _live_lead(board, job, led, who)
     if lead is not None:
-        return f"lead {lead}"
-    if enrolled and not person.requester_of(bk, job, who):
+        row = board.seat(job, led.generation, lead)
+        return f"lead {row.agent_key or lead}"
+    if who is not None and not who.requester:
         raise Refuse(f"{action} comes from the job's lead: ask it on the board (post --to @EL)")
     person.require(action, job, board_key=bk, env=env, who=who)
     return "person"
@@ -203,7 +212,7 @@ def _set_state(board, row, state: str, job: str, **fields):
 def cmd_seat_request(board, cfg, args) -> int:
     bk = board_key(cfg)
     led = _drive_ledger(bk, args.job)
-    who = _lead_or_person(board, bk, args.job, led, os.environ, "seat request")
+    who = _lead_or_person(board, bk, args.job, led, os.environ, "seat request", args)
     workdir = _check_workdir(bk, args.job, args.workdir or os.getcwd())
     model = _model_for(cfg, args.role, args.model)
     seat = board.request_seat(args.job, led.generation, args.seat, role=args.role, harness=args.harness,
@@ -215,7 +224,7 @@ def cmd_seat_request(board, cfg, args) -> int:
 def cmd_seat_release(board, cfg, args) -> int:
     bk = board_key(cfg)
     led = _drive_ledger(bk, args.job)
-    _lead_or_person(board, bk, args.job, led, os.environ, "seat release")
+    _lead_or_person(board, bk, args.job, led, os.environ, "seat release", args)
     if args.withdraw_artifact and not (args.reason or "").strip():
         raise Refuse("--withdraw-artifact needs --reason: say why the artifact is withdrawn")
     row = _seat_row(board, args.job, led.generation, args.seat)
@@ -232,15 +241,18 @@ def cmd_seat_release(board, cfg, args) -> int:
         led.integrated[group] = {**(led.integrated.get(group) or {}), "withdrawn": reason}
         led.save()
     new = _set_state(board, row, "released", args.job)
-    return _record("seat", new.id, new.revision)
+    # a withdrawal is its own record (drivegate receipts kind=withdraw, id = the seat row)
+    return _record("withdraw" if args.withdraw_artifact else "seat", new.id, new.revision)
 
 
 def cmd_seat_cancel(board, cfg, args) -> int:
     bk = board_key(cfg)
     led = _drive_ledger(bk, args.job)
-    person.require("seat cancel", args.job, board_key=bk, env=os.environ)   # Claude and Codex seats alike
+    who = person.require("seat cancel", args.job, board_key=bk, env=os.environ,   # Claude and Codex seats alike
+                         who=_caller(bk, args.job, led, args))
     row = _seat_row(board, args.job, led.generation, args.seat)
     new = _set_state(board, row, "cancelled", args.job)
+    person_receipt(bk, led, "seat cancel", who, args, new.id)
     return _record("seat", new.id, new.revision)
 
 
@@ -261,32 +273,24 @@ def cmd_seat_show(board, cfg, args) -> int:
     return 0
 
 
-def _lead_seat_name(board, job: str, generation: int, key: str) -> str:
-    from swarm.board.base import SEAT_CLOSED
-    for s in board.seats(job, generation):
-        if s.agent_key == key and _is_lead_seat(s.seat) and s.state not in SEAT_CLOSED:
-            return s.seat
-    raise Refuse("no live lead seat of this job is held by this session")
-
-
 def cmd_seat_ack(board, cfg, args) -> int:
     """The lead acknowledges the events it was woken for, up to ID (spec [F4]): its own event mark only,
     which only moves forward, and never past the board's newest message of the job (a mark beyond it would
     silence every later wake). Only the live lead's own session (attested by its hook) may do it."""
     bk = board_key(cfg)
     led = _drive_ledger(bk, args.job)
-    _, key, _ = _caller_lead(board, bk, args.job, led)
-    if key is None:
+    lead = _live_lead(board, args.job, led, _caller(bk, args.job, led, args))
+    if lead is None:
         raise Refuse("seat ack comes from the job's live lead session (a person cannot acknowledge for the lead)")
     if args.upto < 0:
         raise Refuse("--upto must be an event id, 0 or more")
     newest = board.last_message_id(args.job)
     if args.upto > newest:
         raise Refuse(f"--upto {args.upto} is past the newest event of {args.job} ({newest})")
-    mark = f"event:{_lead_seat_name(board, args.job, led.generation, key)}"
+    mark = f"event:{lead}"
     led.watermarks[mark] = max(led.watermarks.get(mark, 0), args.upto)
     led.save()
-    return _record("ack", led.ledger_rev, 1)
+    return _record("ack", args.upto, 1)   # drivegate receipts kind=ack id=<the acknowledged event id>
 
 
 SEAT_COMMANDS = {"request": cmd_seat_request, "release": cmd_seat_release, "cancel": cmd_seat_cancel,
@@ -342,7 +346,7 @@ def requirements_digest(pins: dict) -> str:
 def cmd_goal_ready(board, cfg, args) -> int:
     bk = board_key(cfg)
     led = _drive_ledger(bk, args.job)
-    who = _lead_or_person(board, bk, args.job, led, os.environ, "goal-ready")
+    who = _lead_or_person(board, bk, args.job, led, os.environ, "goal-ready", args)
     if not CANDIDATE.fullmatch(args.candidate or ""):
         raise Refuse("--candidate must be REF@SHA or report:<path>@<blob id>")
     pins = dict(led.pinned_requirements)
@@ -368,32 +372,41 @@ def cmd_goal_ready(board, cfg, args) -> int:
 
 # --- halt and unhalt ---------------------------------------------------------------------------
 
-RECEIPT_HOURS = 24
+PERSON_RECEIPT_DAYS = 30   # long enough for any pass of the driver to see it (a cancel is read at its close)
 
 
-def _person_receipt(bk: str, led, action: str, how: str) -> None:
-    """A person-path command on the owner host writes its own receipt (spec 4.0; the requester session's
-    receipt is its PostToolUse hook's): kind `person`, action id `tty:<action>`, bound to the ledger revision
-    the command printed as its record id. A failure is reported, not fatal (the ledger change is made)."""
-    if how != "tty":
-        return
+def person_record_id(action: str, ref) -> str:
+    """The record id of a person receipt: `<action>:<ref>`, the action with `_` for spaces (halt, unhalt,
+    drive_repair, seat_cancel, deactivate) and `ref` what the command printed as its record id (the ledger
+    revision for halt, unhalt and drive repair; the seat row id for a cancel; the generation for deactivate)."""
+    return f"{action.replace(' ', '_')}:{ref}"
+
+
+def person_receipt(bk: str, led, action: str, how: str, args, ref) -> None:
+    """Every successful person action writes a host-private receipt (8c ruling; spec 4.0 "a person-path
+    command on the owner host writes its own receipt"), on either path, so the driver can tell it from tamper:
+    kind `person`, record_id person_record_id(action, ref), rev 1, decision {action, target: job}, action_id
+    `<how>:<action>` (`requester:halt`, `tty:deactivate`, ...), the ledger's generation and incarnation,
+    args_sha of the submitted argv. receipts.find(bk, job, "person", record_id, rev=1, ...) then
+    receipts.matches(r, {"kind": "person", "id": record_id, "rev": 1, "action": action, "target": job}). A
+    failure is reported, not fatal (the action is done)."""
     import time
-    from swarm import receipts
+    from swarm import drivegate, receipts
     try:
         receipts.write(bk, receipts.Receipt(
             board_key=bk, job=led.job, generation=led.generation, incarnation=led.incarnation,
-            action_id=f"tty:{action.replace(' ', '_')}", attempt=0, seat=None, kind="person",
-            record_id=str(led.ledger_rev), rev=1,
+            action_id=f"{how}:{action.replace(' ', '_')}", attempt=0, seat=None, kind="person",
+            record_id=person_record_id(action, ref), rev=1,
             content_sha=receipts.content_sha("person", {"action": action, "target": led.job}),
-            args_sha=receipts.args_sha(person.cli_argv()), expires_at=time.time() + RECEIPT_HOURS * 3600))
+            args_sha=drivegate.grant_id(args), expires_at=time.time() + PERSON_RECEIPT_DAYS * 86400))
     except (OSError, ValueError) as exc:
         print(f"warning: the person receipt of this {action} was not written: {exc}", file=sys.stderr)
 
 
 def cmd_halt(board, cfg, args) -> int:
     bk = board_key(cfg)
-    _drive_ledger(bk, args.job)
-    who = person.require("halt", args.job, board_key=bk, env=os.environ)
+    led = _drive_ledger(bk, args.job)
+    who = person.require("halt", args.job, board_key=bk, env=os.environ, who=_caller(bk, args.job, led, args))
     led = _drive_ledger(bk, args.job)
     if led.terminal is not None:
         raise Refuse(f"{args.job} is finished; nothing to halt")
@@ -404,14 +417,14 @@ def cmd_halt(board, cfg, args) -> int:
         halt["reason"] = args.reason.strip()
     led.halted = halt
     led.save()
-    _person_receipt(bk, led, "halt", who)
+    person_receipt(bk, led, "halt", who, args, led.ledger_rev)
     return _record("halt", led.ledger_rev, 1)
 
 
 def cmd_unhalt(board, cfg, args) -> int:
     bk = board_key(cfg)
-    _drive_ledger(bk, args.job)
-    who = person.require("unhalt", args.job, board_key=bk, env=os.environ)
+    led = _drive_ledger(bk, args.job)
+    who = person.require("unhalt", args.job, board_key=bk, env=os.environ, who=_caller(bk, args.job, led, args))
     led = _drive_ledger(bk, args.job)
     if led.halted is None:
         raise Refuse(f"{args.job} is not halted")
@@ -426,7 +439,7 @@ def cmd_unhalt(board, cfg, args) -> int:
     led.halted_total_seconds += max(0.0, (now - since).total_seconds())
     led.halted = None
     led.save()
-    _person_receipt(bk, led, "unhalt", who)
+    person_receipt(bk, led, "unhalt", who, args, led.ledger_rev)
     return _record("unhalt", led.ledger_rev, 1)
 
 
@@ -450,7 +463,12 @@ def cmd_drive_repair(board, cfg, args) -> int:
     person's --generation, never from the board. A finished job stays finished; otherwise the fresh ledger is
     halted and unhalt wants budgets set first. Everything not recovered is listed on stderr."""
     bk = board_key(cfg)
-    who = person.require("drive repair", args.job, board_key=bk, env=os.environ)
+    try:
+        current = ledger.load(bk, args.job)
+    except ledger.LedgerBadError:
+        current = None   # the hook's grant then names the owner record's requester (drivegate._grant_owner)
+    who = person.require("drive repair", args.job, board_key=bk, env=os.environ,
+                         who=_caller(bk, args.job, current, args))
     data = board.job_data(args.job) or {}
     try:
         rep = ledger.repair(bk, args.job, at=_now_iso(board), by=f"person ({who})", generation=args.generation,
@@ -478,7 +496,7 @@ def cmd_drive_repair(board, cfg, args) -> int:
     else:
         print(f"{args.job} is halted: set the budgets (net of the spend above), check the pinned requirements, "
               f"then `swarm unhalt --job {args.job}`", file=sys.stderr)
-    _person_receipt(bk, rep.ledger, "drive repair", who)
+    person_receipt(bk, rep.ledger, "drive repair", who, args, rep.ledger.ledger_rev)
     return _record("halt", rep.ledger.ledger_rev, 1)
 
 
@@ -552,3 +570,42 @@ def register(sub, handlers: dict) -> None:
     handlers.update({"halt": _run(cmd_halt), "unhalt": _run(cmd_unhalt), "seat": _run(cmd_seat),
                      "review": _run(cmd_review), "goal-ready": _run(cmd_goal_ready),
                      "drive": _run(cmd_drive)})
+
+
+# --- deactivate (cli.cmd_deactivate calls these for a drive job) -------------------------------------------
+
+def deactivate_person(cfg: dict, args) -> tuple:
+    """Before a drive job is deactivated: (ledger, how) when the caller is a person (the requester's grant,
+    or a confirmed tty outside any agent host), else (ledger or None, None): the deactivation goes ahead as
+    before, but without a person receipt the driver treats it as tamper (spec 3.2). Never raises."""
+    try:
+        bk = board_key(cfg)
+        led = ledger.load(bk, args.job)
+        if led is None:
+            return None, None
+        person.forget()
+        how = person.require("deactivate", args.job, board_key=bk, env=os.environ,
+                             who=person.caller(bk, args.job, led, args))
+        return led, how
+    except Exception as exc:
+        print(f"note: {exc}" if isinstance(exc, person.PersonRefused) else f"note: no person receipt: {exc}",
+              file=sys.stderr)
+        return None, None
+
+
+def deactivate_receipt(cfg: dict, args, led, how) -> None:
+    """After a successful deactivation of a drive job by a person: its person receipt (record id
+    `deactivate:<generation>`), which tells the driver this close is a cancel."""
+    if led is not None and how:
+        person_receipt(board_key(cfg), led, "deactivate", how, args, led.generation)
+
+
+def deactivate_record(cfg: dict, job: str) -> None:
+    """The last line of a deactivation of a drive job: `swarm-record: kind=deactivate id=<generation> rev=1`
+    (drivegate receipts it for the requester session). Nothing for other jobs. Never raises."""
+    try:
+        led = ledger.load(board_key(cfg), job)
+    except Exception:
+        return
+    if led is not None:
+        _record("deactivate", led.generation, 1)

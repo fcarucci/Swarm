@@ -294,6 +294,8 @@ def run_ask(ctx, args):
                           options=args.options.split(',') if args.options else None,
                           default=args.default, expires=args.expires, blocks=args.blocks)
         print(f'Q{b.id}')
+        from swarm.drive_cli import drive_record
+        drive_record(ctx.cfg, args.job, 'ask', b.id)   # a drive job's record line (drivegate receipts)
 
 
 def run_answer(ctx, args):
@@ -302,6 +304,9 @@ def run_answer(ctx, args):
                             text=' '.join(args.text) if args.text else None, option=args.option,
                             use_default=args.default, comment=args.comment, reopen=args.reopen)
         print(f'Q{b.id} {b.state}')
+        if b.state != 'open':   # an answer, not a comment: a drive job's record line (drivegate receipts)
+            from swarm.drive_cli import drive_record
+            drive_record(ctx.cfg, b.job, 'answer', b.id)
 
 
 def run_questions(ctx, args):

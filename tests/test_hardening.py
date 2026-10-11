@@ -424,20 +424,49 @@ class SpoolFlushBoundsTests(Env):
                 clock.advance(0.05)
                 return []
 
+            def record_verdict(self, *a):
+                clock.advance(0.3)
+                return True
+
+            def post(self, *a, **k):
+                pass
+
+        with mock.patch("time.monotonic", clock):
+            self.assertEqual(spool.flush_spool(Recording(), self.cfg, deadline=clock() + 1.0,
+                                               op_timeout=1.0), 1)
+        self.assertEqual(len(limits), 6)  # data, agents, data, hand-offs, record, post
+        for actual, expected in zip(limits, (1.0, 0.95, 0.90, 0.85, 0.80, 0.50)):
+            self.assertAlmostEqual(actual, expected)
+
+    def test_a_bound_drive_verdict_delivery_shares_the_budget_too(self):
+        """A typed (drive) verdict is recorded, posted and bound: all three calls under the one budget."""
+        spool.spool_verdict(self.cfg, "J", "A", "met", "done", None, scope="goal", generation=2,
+                            candidate="feat/x@abc1234", req="d" * 64)
+        limits, calls = [], []
+        clock = ManualClock()
+
+        class Recording:
+            @contextlib.contextmanager
+            def op_timeout(self, seconds):
+                limits.append(seconds)
+                yield
+
             def record_verdict(self, *a, **k):
+                calls.append(k.get("message_id"))
                 clock.advance(0.3)
                 return True
 
             def post(self, *a, **k):
                 import types
-                return types.SimpleNamespace(id=7)   # the VERDICT message the verdict is bound to
+                clock.advance(0.1)
+                return types.SimpleNamespace(id=7)
 
         with mock.patch("time.monotonic", clock):
             self.assertEqual(spool.flush_spool(Recording(), self.cfg, deadline=clock() + 1.0,
                                                op_timeout=1.0), 1)
-        # data, agents, data, hand-offs, record, post, record again (bound to the posted message's id)
-        self.assertEqual(len(limits), 7)
-        for actual, expected in zip(limits, (1.0, 0.95, 0.90, 0.85, 0.80, 0.50, 0.50)):
+        self.assertEqual(calls, [0, 7])   # pending, then bound to the VERDICT message
+        self.assertEqual(len(limits), 3)  # record, post, record again
+        for actual, expected in zip(limits, (1.0, 0.70, 0.60)):
             self.assertAlmostEqual(actual, expected)
 
     def test_board_op_timeout_bounds_a_wait_on_the_store(self):
