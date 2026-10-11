@@ -105,6 +105,13 @@ class ViewContract:
         self.assertEqual((raw[n["arnie"]], raw[n["qa"]], raw[n["judge"]], raw[n["akira"]], raw[n["dewey"]]),
                          ("idle", "dead", "dead", "idle", "running"))
 
+    def test_an_unreachable_verdict_settles_the_judge_and_the_quiet_workers(self):
+        n = self.evidence()
+        self.b.record_verdict("j", n["judge"], "unreachable", "cannot", details="report", scope="goal", generation=1)
+        self.h.backdate_job("j", verdict_at=10 * HOUR)
+        self.assertEqual(self.status(n["judge"]), "finished")   # recorded verdict unreachable
+        self.assertEqual(self.status(n["qa"]), "finished")      # went quiet before the goal was settled
+
     def test_finished_agents_are_finished_not_idle_or_dead(self):
         n = self.evidence()
         self.assertEqual(self.status(n["arnie"]), "finished")   # posted DONE, then went quiet

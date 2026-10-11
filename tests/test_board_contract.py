@@ -2273,6 +2273,17 @@ class DriveVerdicts:
         self.assertEqual(self.b.job_status("J").verdict, "not_met")
         self.assertTrue(self.b.record_verdict("J", judge, "met", "done", scope="goal", generation=1))
 
+    def test_a_drive_not_met_with_no_open_criteria_is_accepted(self):
+        from swarm.review import artifact_verdicts
+        judge = self.judged_goal()
+        self.assertTrue(self.b.set_job_data("J", "drive.enabled", "1"))
+        self.assertTrue(self.b.record_verdict("J", judge, "not_met", "why", "next", scope="goal", generation=1,
+                                              open_count=0))
+        ref = "feat/x@" + "d" * 40
+        self.assertTrue(self.b.record_verdict("J", judge, "not_met", "why", "next", artifact=ref, scope="artifact",
+                                              generation=1, open_count=0))
+        self.assertEqual(artifact_verdicts(self.b, "J")[ref]["open"], 0)
+
     def test_artifact_verdict_record_keeps_scope_generation_and_progress(self):
         from swarm.review import artifact_verdicts
         judge = self.judged_goal()
@@ -2753,3 +2764,9 @@ class PostgresSchemaUpgrade(SchemaUpgradeTests, unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SchemaVersionPin(unittest.TestCase):
+    def test_schema_version_is_25(self):
+        from swarm.board import SCHEMA_VERSION
+        self.assertEqual(SCHEMA_VERSION, 25)

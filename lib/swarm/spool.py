@@ -25,7 +25,7 @@ import time
 import uuid
 from pathlib import Path
 from swarm import compat, roles
-from swarm.board.base import VERDICT_DETAILS_MAX, VERDICTS
+from swarm.board.base import VERDICT_DETAILS_MAX, VERDICT_SCOPES, VERDICTS
 
 STUCK_AFTER = 24 * 3600  # seconds a memory may keep failing before it is parked as .stuck
 RECORD_MAX = 256 * 1024  # a spooled record larger than this is not read (it goes to .bad)
@@ -189,13 +189,27 @@ def _valid_metadata(m) -> bool:
     return valid_metadata(m)
 
 
+def typed_verdict_fields(scope: str | None = None, generation: int | None = None, open_count: int | None = None,
+                         progress: bool | None = None, candidate: str | None = None,
+                         req: str | None = None) -> dict:
+    """The typed verdict fields that were given (the artifact scope is the default and is left out),
+    as the board's record_verdict takes them as keywords."""
+    fields = {"scope": scope if scope not in (None, "artifact") else None, "generation": generation,
+              "open_count": open_count, "progress": progress, "candidate": candidate, "req": req}
+    return {k: v for k, v in fields.items() if v is not None}
+
+
 def spool_verdict(cfg: dict, job: str, name: str, verdict: str, reason: str,
                   next_steps: str | None = None, artifact: str | None = None,
-                  details: str | None = None) -> Path:
-    """Queue a `swarm verdict`; whether `name` is the job's judge is checked on delivery."""
+                  details: str | None = None, *, scope: str | None = None, generation: int | None = None,
+                  open_count: int | None = None, progress: bool | None = None, candidate: str | None = None,
+                  req: str | None = None) -> Path:
+    """Queue a `swarm verdict`; whether `name` is the job's judge is checked on delivery. The typed
+    fields (schema 25) are queued with it, and replayed on delivery."""
+    typed = typed_verdict_fields(scope, generation, open_count, progress, candidate, req)
     return _spool(cfg, {"job": job, "name": name, "verdict": verdict, "reason": reason,
                         "next": next_steps, "artifact": artifact,
-                        **({"details": details} if details else {})}, ".vrd")
+                        **({"details": details} if details else {}), **typed}, ".vrd")
 
 
 def spool_wait(cfg: dict, job: str, on: str | None, until: float | None = None) -> Path:
@@ -300,7 +314,8 @@ def _load(d: int, claimed: str, name: str) -> tuple | None:
             raise ValueError("not a plain job or agent name")
         if suffix == ".vrd":
             rec = (m["job"], m["name"], m["verdict"], m["reason"], m.get("next"), m.get("artifact"),
-                   m.get("details"))   # artifact and details are optional (older files lack them)
+                   m.get("details"),   # artifact and details are optional (older files lack them)
+                   *_typed_from_record(m))
             if rec[6] is not None and (not isinstance(rec[6], str)
                                        or len(rec[6].encode("utf-8", "replace")) > VERDICT_DETAILS_MAX):
                 raise ValueError("details is not text, or is over the cap")
@@ -481,12 +496,32 @@ def deliver_verdict(board, job: str, name: str, verdict: str, reason: str,
     return True
 
 
+def _typed_from_record(m: dict) -> tuple:
+    """(scope, generation, open_count, progress, candidate, req) of a queued verdict; a ValueError when
+    one is malformed (the record then goes to .bad)."""
+    scope, generation, open_count, progress, candidate, req = (
+        m.get(k) for k in ("scope", "generation", "open_count", "progress", "candidate", "req"))
+    if scope is not None and scope not in VERDICT_SCOPES:
+        raise ValueError("unknown verdict scope")
+    if generation is not None and (type(generation) is not int or generation < 1):
+        raise ValueError("generation is not a count")
+    if open_count is not None and (type(open_count) is not int or open_count < 0):
+        raise ValueError("open_count is not a count")
+    if progress is not None and type(progress) is not bool:
+        raise ValueError("progress is not a flag")
+    for text in (candidate, req):
+        if text is not None and (not isinstance(text, str) or not text.strip()):
+            raise ValueError("candidate or req is not a nonempty string")
+    return scope, generation, open_count, progress, candidate, req
+
+
 def _deliver_spooled_verdict(board, rec: tuple) -> bool:
     """A spooled verdict from someone who isn't the judge is refused; the sender is told on the
     board (it can't see the CLI's answer: the CLI only queued it)."""
-    job, name, verdict, reason, next_steps, artifact, details = rec
+    job, name, verdict, reason, next_steps, artifact, details, *typed = rec
+    typed_fields = typed_verdict_fields(*typed)
     try:
-        if deliver_verdict(board, job, name, verdict, reason, next_steps, artifact, details):
+        if deliver_verdict(board, job, name, verdict, reason, next_steps, artifact, details, **typed_fields):
             return True
     except ValueError as exc:   # the board's rules (e.g. a drive job's not_met without its open count)
         board.post(job, "swarm", f"verdict refused: {exc}", to=name)

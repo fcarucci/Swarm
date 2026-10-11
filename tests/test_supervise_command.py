@@ -322,6 +322,12 @@ class SuperviseTests(SuperviseEnv):
         self.assertFalse(any(self.markers.glob("*--resume-r*.json")))
         self.assertTrue(any(p.startswith(f"restart of {self.name} failed to start") for p in self.posts()))
 
+    def test_job_with_unreachable_verdict_is_not_restarted(self):
+        self.h.update_job("J", verdict="unreachable")
+        self.supervise()
+        self.assertEqual(self.started, [])
+        self.assertIsNone(self.agent("orig").left_reason)
+
     def test_job_with_met_verdict_is_not_restarted(self):
         self.h.update_job("J", verdict="met")
         self.supervise()
@@ -728,6 +734,7 @@ class SuperviseTests(SuperviseEnv):
         from swarm.supervisor import brief
         real = brief.build_brief
         for change, why in ((lambda b: self.h.update_job("J", verdict="met"), "the job has a verdict"),
+                            (lambda b: self.h.update_job("J", verdict="unreachable"), "the job has a verdict"),
                             (lambda b: b.set_job_supervise("J", False), "supervise is off for the job")):
             with self.subTest(why=why):
                 def meddle(b, *a, **k):

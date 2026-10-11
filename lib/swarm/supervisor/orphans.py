@@ -1,6 +1,7 @@
 """Recover locally-enrolled jobs whose last coordinator and workers disappeared."""
 from __future__ import annotations
 import datetime as dt
+from swarm.board.base import SETTLED_VERDICTS
 from swarm.supervisor.stuck import SUPERVISOR_NAME, WAITING_PREFIX
 
 REASON = "orphan-coordinator:"
@@ -88,12 +89,12 @@ def run(board, cfg, sup, state, *, job=None, now=None, dry_run=False, say=print,
         rec = local_record(cfg, js)
         if rec is None or not eligible(board, cfg, js, sup, now):
             continue
-        if js.verdict == "met":
+        if js.verdict in SETTLED_VERDICTS:
             if dry_run:
-                say(f"would remind {js.job}: goal met; close the job")
+                say(f"would remind {js.job}: goal {js.verdict}; close the job")
             else:
                 command._post_once(board, state, f"orphan-met|{js.job}|{js.activated_at}", js.job,
-                                   "Goal is met and no agents remain: close this job; no restart needed.")
+                                   f"Goal is {js.verdict} and no agents remain: close this job; no restart needed.")
             continue
         history = [t for t in histories.get(js.job, []) if now.timestamp() - t < 86400]
         if len(history) >= sup["orphan_max_restarts"]:
@@ -126,7 +127,7 @@ def run(board, cfg, sup, state, *, job=None, now=None, dry_run=False, say=print,
         if dry_run:
             continue
         fresh = board.job_status(js.job)
-        if not fresh or fresh.verdict == "met" or not eligible(board, cfg, fresh, sup, now):
+        if not fresh or fresh.verdict in SETTLED_VERDICTS or not eligible(board, cfg, fresh, sup, now):
             continue
         if command._switched_off_now(cfg, board, js.job):
             continue

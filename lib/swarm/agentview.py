@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import dataclasses
 import re
+from swarm.board.base import SETTLED_VERDICTS
 
 ORCHESTRATOR = "orchestrator"
 ORCHESTRATOR_KEY = re.compile(r"orchestrator(?:[-_.:].*)?", re.IGNORECASE)
@@ -123,11 +124,11 @@ def _display(board, j, a, now, posts) -> tuple[str, str | None]:
     mine = post if post is not None and post.created_at >= a.joined_at else None
     if mine is not None and _HANDOFF.match(mine.message):
         return "finished", "posted " + _note(mine.message)
-    if (j is not None and j.verdict == "met" and (a.role == "judge" or j.verdict_by == a.name)
+    if (j is not None and j.verdict in SETTLED_VERDICTS and (a.role == "judge" or j.verdict_by == a.name)
             and j.verdict_at is not None and j.verdict_at >= a.joined_at):
-        return "finished", "recorded verdict met"
-    if j is not None and j.verdict == "met" and j.verdict_at is not None and j.verdict_at >= a.last_contact_at:
-        return "finished", "went quiet before the goal was met"
+        return "finished", f"recorded verdict {j.verdict}"
+    if j is not None and j.verdict in SETTLED_VERDICTS and j.verdict_at is not None and j.verdict_at >= a.last_contact_at:
+        return "finished", f"went quiet before the goal was {j.verdict}"
     if a.status == "idle":
         why = _wait_reason(board, j, now, bounded_only=False)
         if why:
