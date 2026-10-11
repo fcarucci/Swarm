@@ -436,6 +436,32 @@ class EveryTerminalClearsTheClaim(T.LifeCase):
         self.assertIsNone(self.b.job_data("J").get("drive.enabled"))
 
 
+class MidBarrierTests(T.LifeCase):
+    def test_a_crash_mid_terminalization_resumes_to_the_same_end(self):
+        self.pending_met()
+        with self.barrier_crash("mid_terminalization"), self.assertRaises(T.Crash):
+            life.terminalize(self.b, self.cfg, self.led, self.at(1), hooks=self.run.hooks())
+        self.assertIsNone(self.reload().terminal)
+        self.assertTrue(life.terminalize(self.b, self.cfg, self.reload(), self.at(2), hooks=self.run.hooks()))
+        self.assertEqual(self.reload().terminal["verdict"], "met")
+
+    def test_a_crash_mid_cancel_resumes(self):
+        with self.barrier_crash("mid_terminalization"), self.assertRaises(T.Crash):
+            life.cancel_job(self.b, self.cfg, self.led, "alice", self.at(1), hooks=self.run.hooks())
+        self.assertTrue(life.terminalize(self.b, self.cfg, self.reload(), self.at(2), hooks=self.run.hooks()))
+        self.assertEqual(self.reload().terminal["verdict"], "cancelled")
+
+    def test_a_crash_mid_rollover_resumes(self):
+        self.launch("lead")
+        self.led.generation_requested = 2
+        self.led.save()
+        with self.barrier_crash("mid_rollover"), self.assertRaises(T.Crash):
+            life.rollover(self.b, self.cfg, self.led, self.at(1), hooks=self.run.hooks())
+        self.assertEqual(self.reload().generation, 1)
+        self.assertTrue(life.rollover(self.b, self.cfg, self.reload(), self.at(2), hooks=self.run.hooks()))
+        self.assertEqual(self.reload().generation, 2)
+
+
 class ClaimRepairTests(T.LifeCase):
     def test_a_failed_claim_clear_is_retried_on_later_passes(self):
         self.pending_met()
