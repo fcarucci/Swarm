@@ -36,11 +36,8 @@ RECEIPT_FIELDS = (
 )
 assert len(RECEIPT_FIELDS) == 14
 
-# Receipt kinds (spec 3.4 control records); a default receipt must be one of these.
-RECEIPT_KINDS = (
-    "done", "review", "verdict", "seat", "ask", "answer", "post", "goal_ready", "ack", "withdraw",
-    "halt", "unhalt", "deactivate", "activate",
-)
+# Receipt kinds: the real list, never a hand-written copy (it drifted once).
+from swarm.receipts import KINDS as RECEIPT_KINDS  # noqa: E402
 
 SNAPSHOT_FIELDS = (
     "job", "generation", "goal", "status", "halted", "ledger", "seats", "live", "handoffs", "reviews",

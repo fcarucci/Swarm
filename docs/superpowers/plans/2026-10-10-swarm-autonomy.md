@@ -1217,3 +1217,4 @@ All engineer seats (every wave) run on Haiku; reviewers and QA on Sonnet; securi
   - **Task 8b:** `enforce_deadlines`, the 8b terminal records, rollover.
   - **Task 11b:** `complete_land`.
 - Commit trailers (PM ruling, all seats): `Co-Authored-By` names the model that actually wrote the commit (e.g. `Claude Haiku 5.5 <noreply@anthropic.com>`), not the brief's example.
+- Record kind ↔ receipt kind (Tasks 5/6): the CLI record format's kinds map to `receipts.KINDS` as `seat`→`seat_request`; `halt`, `unhalt`, `deactivate`, `activate` (person-path or requester-session commands)→`person` with the command in the decision fields; all other kinds are identical. Task 5 owns the mapping table and a test that every record-format kind maps to a member of `receipts.KINDS`.
