@@ -21,7 +21,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from swarm import enrolment, hosts, paths
+from swarm import enrolment, gitpin, hosts, paths
 from swarm.supervisor import ledger
 from swarm.supervisor import settings as sup_settings
 from swarm.supervisor import driver_events
@@ -34,10 +34,9 @@ BUDGET_KEYS = ("max_sessions", "max_seats", "max_rounds", "no_progress_rounds", 
                "max_cost_usd", "ruling_reserve_usd", "session_usd_cap", "min_session_usd",
                "max_session_minutes", "max_wall_hours", "ruling_attempts", "ruling_deadline_minutes",
                "ruling_grace_minutes", "stall_minutes", "driver_error_passes", "max_concurrent_sessions")
-# [G2] the helper commands a pinned credential may name: the absolute executable's basename and
-# the fixed arguments it takes. Anything else is refused at activation.
-CREDENTIAL_HELPERS = {"gh": ("auth", "git-credential"), "git-credential-manager": (),
-                      "git-credential-store": (), "git-credential-cache": ()}
+# [G2] the helper commands a pinned credential may name (gitpin owns the allowlist; it re-checks a
+# pin read back from the owner record too). Anything else is refused at activation.
+CREDENTIAL_HELPERS = gitpin.CREDENTIAL_HELPERS
 NO_DRIVE_HINT = "pass --no-drive --reason TEXT to run it as a goal job that nothing drives"
 HALT_REASON = "supervisor disabled"          # [F5]: the halt `supervise disable` writes
 _SESSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
@@ -255,11 +254,22 @@ def blob_id(data: bytes) -> str:
     return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
 
 
+def _pinned_url(url: str) -> str:
+    try:
+        return gitpin.check_url(url)
+    except gitpin.GitPinError as exc:
+        raise DriveError(str(exc)) from None
+
+
 def sanitize_remote(url: str) -> str:
     """A remote's URL without its userinfo (user:password@), query string or fragment: a token is
-    never stored or printed. An scp-style ssh remote (no scheme) has none of these and is returned as is."""
+    never stored or printed. An scp-style ssh remote (no scheme) has none of these and is returned as is.
+    The result must be a URL a pinned git call takes (gitpin.check_url): never an option ("-..."), a
+    transport helper (ext::) or another transport, and a local remote is an absolute path."""
+    if not isinstance(url, str) or not url or not gitpin.no_controls(url) or url.startswith("-"):
+        raise DriveError("a remote URL must not start with '-' or contain whitespace or control characters")
     if "://" not in url:
-        return url
+        return _pinned_url(url)
     try:
         parts = urllib.parse.urlsplit(url)
     except ValueError:
@@ -269,28 +279,35 @@ def sanitize_remote(url: str) -> str:
     # an https userinfo (often a bare token) is dropped whole
     user = userinfo.split(":", 1)[0] if at and parts.scheme == "ssh" else ""
     netloc = f"{user}@{hostport}" if user else hostport
-    return urllib.parse.urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+    return _pinned_url(urllib.parse.urlunsplit((parts.scheme, netloc, parts.path, "", "")))
 
 
 def git_remotes(workdir: str) -> dict:
-    """The fetch URLs of the work dir's git remotes, read once with a sanitized environment."""
-    env = {"PATH": os.environ.get("PATH", ""), "HOME": str(paths.home()), "LC_ALL": "C",
-           "GIT_TERMINAL_PROMPT": "0"}
+    """The fetch URLs of the work dir's git remotes, read once with the pinned git environment (no system
+    or global config, hooks and fsmonitor off). The work dir's own config is seat-writable, so each URL
+    is then checked like a --remote one: a relative local path is made absolute against the work dir, and
+    a URL a pinned call refuses (an option, ext::, another transport) is left out, with a warning."""
+    env = gitpin.git_env(home=str(paths.home()))
     try:
-        res = subprocess.run(["git", "-C", workdir, "remote", "-v"], capture_output=True, text=True,
-                             timeout=30, env=env)
+        res = subprocess.run(gitpin.git_argv("git", "-C", workdir, "remote", "-v"), capture_output=True,
+                             text=True, timeout=30, env=env, cwd=gitpin.NEUTRAL_CWD)
     except (OSError, subprocess.SubprocessError):
         return {}
     if res.returncode != 0:
         return {}
     out: dict = {}
     for line in res.stdout.splitlines():
-        parts = line.split()
-        if len(parts) == 3 and parts[2] == "(fetch)":
-            try:
-                out.setdefault(parts[0], sanitize_remote(parts[1]))
-            except DriveError:
-                continue
+        parts = line.split("\t", 1)
+        if len(parts) != 2 or not parts[1].endswith(" (fetch)"):
+            continue
+        name, url = parts[0], parts[1][:-len(" (fetch)")]
+        if url and "://" not in url and not url.startswith("-") and not os.path.isabs(url) \
+                and not gitpin.SCP_URL.match(url):
+            url = os.path.normpath(os.path.join(workdir, url))
+        try:
+            out.setdefault(name, sanitize_remote(url))
+        except DriveError as exc:
+            print(f"swarm activate: remote {name[:80]!r} of the work dir is not pinned: {exc}", file=sys.stderr)
     return out
 
 
@@ -301,22 +318,38 @@ def credential_pin(spec: str) -> str:
         sock = os.environ.get("SSH_AUTH_SOCK", "")
         if not os.path.isabs(sock):
             raise DriveError("ssh-agent: SSH_AUTH_SOCK is not set to an absolute socket path here")
-        return f"ssh-agent:{sock}"
+        return check_pin(f"ssh-agent:{sock}")
     kind, _, value = spec.partition(":")
     if kind == "helper":
-        exe, *args = value.split(" ")
+        exe = value.split(" ")[0]
         if not os.path.isabs(exe):
             raise DriveError(f"credential helper {spec!r}: pin an absolute path (helper:/abs/path/gh)")
-        base = os.path.basename(exe)
-        if base not in CREDENTIAL_HELPERS or tuple(args) != CREDENTIAL_HELPERS[base]:
-            raise DriveError(f"credential helper {base!r} is not on the allowlist "
-                             f"({', '.join(CREDENTIAL_HELPERS)}) with its fixed arguments")
-        return f"helper:{value}"
+        return check_pin(f"helper:{value}")
     if kind == "ssh-key":
         if not os.path.isabs(value):
             raise DriveError("ssh-key: pin an absolute key path")
-        return f"ssh-key:{value}"
+        return check_pin(f"ssh-key:{value}")
     raise DriveError(f"credential {spec!r}: use helper:<absolute path>, ssh-key:<absolute path> or ssh-agent")
+
+
+def check_pin(pin: str) -> str:
+    """A stored credential pin, re-checked against the helper allowlist (gitpin.check_pin)."""
+    try:
+        return gitpin.check_pin(pin)
+    except gitpin.GitPinError as exc:
+        raise DriveError(str(exc)) from None
+
+
+def check_config_dir(path: str, cfg: dict, roots=()) -> str:
+    """[G2a] a gh helper's GH_CONFIG_DIR must be private to this user: refused under any [supervise]
+    allowed_workdirs root or job root (a seat could plant hosts.yml there), when it is not this user's,
+    when group or others can write it, or when a parent directory another user, or group or others, can
+    change (gitpin.dir_problem)."""
+    forbidden = [*sup_settings.settings(cfg)["allowed_workdirs"], *roots]
+    problem = gitpin.dir_problem(path, forbidden)
+    if problem:
+        raise DriveError(f"the gh config dir {path} {problem}: point GH_CONFIG_DIR at a private directory")
+    return path
 
 
 _SCP_REMOTE = re.compile(r"(?:[^@/\\\s:]+@)?[^@/\\\s:]{2,}:")   # [user@]host:path (not a C:\ path)
@@ -413,35 +446,46 @@ def pipeline_target(cfg: dict) -> str:
     """The landing target branch from [pipeline] (`target_branch`, else the `merge_target` alias)."""
     pipe = (cfg or {}).get("pipeline") or {}
     value = pipe.get("target_branch") or pipe.get("merge_target") or "main"
-    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9._/-]{1,200}", value) or ".." in value:
-        raise DriveError(f"[pipeline] target_branch {value!r} is not a branch name")
-    return value
+    try:
+        return gitpin.check_branch(value)
+    except gitpin.GitPinError:
+        raise DriveError(f"[pipeline] target_branch {value!r} is not a branch name") from None
 
 
 def remote_head(url: str, pin: str | None, config_dir: str | None, branch: str, *, timeout: int = 60) -> str | None:
     """The head SHA of `branch` on `url`, read with the destination's pinned credential (the same shape the
     mirror uses: the allowlisted helper with its GH_CONFIG_DIR, the ssh key, or the agent socket). None when
-    the branch is absent. A failed read is a DriveError that names no URL and prints no stderr."""
-    env = {"PATH": os.environ.get("PATH", ""), "HOME": str(paths.home()), "LC_ALL": "C",
-           "GIT_TERMINAL_PROMPT": "0"}
-    args = ["git"]
+    the branch is absent. A failed read is a DriveError that names no URL and prints no stderr.
+    The URL, the pin and the branch are checked again here (they may come back from the owner record), and
+    git runs with the gitpin hygiene: `--` before the URL, the transports pinned, no system or global
+    config, and a neutral working directory (never the seat-writable work dir)."""
+    url = _pinned_url(url)
+    if pin is not None:
+        pin = check_pin(pin)
+    try:
+        branch = gitpin.check_branch(branch)
+    except gitpin.GitPinError as exc:
+        raise DriveError(str(exc)) from None
+    extra: dict = {}
+    args = ["-c", "credential.helper="]
     if pin is None:
         pass
     elif pin.startswith("helper:"):
         exe, *hargs = pin[len("helper:"):].split(" ")
-        args += ["-c", "credential.helper=", "-c",
-                 "credential.helper=!" + " ".join(shlex.quote(x) for x in [exe, *hargs])]
+        args += ["-c", "credential.helper=!" + " ".join(shlex.quote(x) for x in [exe, *hargs])]
         if config_dir:
-            env["GH_CONFIG_DIR"] = config_dir
+            extra["GH_CONFIG_DIR"] = config_dir
     elif pin.startswith("ssh-key:"):
-        env["GIT_SSH_COMMAND"] = (f"ssh -i {shlex.quote(pin[len('ssh-key:'):])} -o IdentitiesOnly=yes "
-                                  "-o BatchMode=yes -o StrictHostKeyChecking=yes")
+        extra["GIT_SSH_COMMAND"] = (f"ssh -i {shlex.quote(pin[len('ssh-key:'):])} -o IdentitiesOnly=yes "
+                                    "-o BatchMode=yes -o StrictHostKeyChecking=yes")
     elif pin.startswith("ssh-agent:"):
-        env["SSH_AUTH_SOCK"] = pin[len("ssh-agent:"):]
-        env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes -o StrictHostKeyChecking=yes"
-    args += ["ls-remote", "--heads", url, f"refs/heads/{branch}"]
+        extra["SSH_AUTH_SOCK"] = pin[len("ssh-agent:"):]
+        extra["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes -o StrictHostKeyChecking=yes"
+    argv = gitpin.git_argv("git", *args, "ls-remote", "--heads", *gitpin.url_args(url, f"refs/heads/{branch}"))
+    env = gitpin.git_env(home=str(paths.home()), extra=extra)
     try:
-        res = subprocess.run(args, capture_output=True, text=True, timeout=timeout, env=env)
+        res = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env,
+                             cwd=gitpin.NEUTRAL_CWD)
     except (OSError, subprocess.SubprocessError):
         raise DriveError(f"could not reach a remote to read {branch} (see the remote's pin)") from None
     if res.returncode != 0:
@@ -522,7 +566,7 @@ def activate_drive(cfg: dict, board, plan: Plan, *, crash_after: str | None = No
         write_lead_brief(plan.workdir, plan.job, lead_brief_text(plan.job, plan.goal, sorted(plan.requirements)))
     if crash_after == "brief":
         raise RuntimeError("crash after brief")
-    if enrolment.find_job_owner(bk, plan.job) is None:
+    if _owner(bk, plan.job) is None:
         enrolment.write_job_owner(bk, job=plan.job, harness=plan.harness, session_id=plan.session,
                                   cwd=plan.workdir, roots=plan.roots, remotes=plan.remotes,
                                   credentials=plan.credentials, requirements=plan.requirements,
@@ -543,7 +587,17 @@ def activate_drive(cfg: dict, board, plan: Plan, *, crash_after: str | None = No
     return led
 
 
-def _record_activation_heads(bk: str, job: str, o: dict) -> None:
+def _owner(bk: str, job: str):
+    """The job's owner record, None when there is none. One that exists but is of another format or has
+    bad fields is a DRIVER-CONFIG hold that says so, never a silent "no record" (and never overwritten)."""
+    try:
+        return enrolment.find_job_owner(bk, job, strict=True)
+    except enrolment.OwnerRecordInvalid as exc:
+        raise DriveError(f"{driver_events.DRIVER_CONFIG}: job {job!r}: {exc}; it is held until `swarm doctor` "
+                         f"and a person repair it") from None
+
+
+def _record_activation_heads(cfg: dict, bk: str, job: str, o: dict) -> None:
     """[11b] the target's head on every pinned remote, recorded once per URL: the landing audit's `since`.
     A URL already recorded keeps its head (a rollover never overwrites it). A branch missing on a remote
     refuses the activation (the ledger stays "activating"; a retry runs this step again)."""
@@ -555,7 +609,12 @@ def _record_activation_heads(bk: str, job: str, o: dict) -> None:
     for name, url in sorted(o["remotes"].items()):
         if url in led.activation_heads or url in pending:
             continue
-        head = remote_head(url, o["credentials"].get(name), o.get("config_dirs", {}).get(name), target)
+        pin, cdir = o["credentials"].get(name), o["config_dirs"].get(name)
+        if pin is not None:
+            check_pin(pin)                         # the allowlist again: the record is read back here
+        if cdir is not None:
+            check_config_dir(cdir, cfg, o["roots"])
+        head = remote_head(url, pin, cdir, target)
         if head is None:
             raise DriveError(f"the target branch {target!r} is not on the remote {name!r}: push it there, "
                              f"then run `swarm activate` again")
@@ -573,10 +632,13 @@ def finish_activation(cfg: dict, board, job: str, *, crash_after: str | None = N
     led = ledger.load(bk, job)
     if led is None or led.state != "activating":
         return led
-    owner = enrolment.find_job_owner(bk, job)
-    if owner is None or owner.owner is None:
+    owner = _owner(bk, job)
+    if owner is None:
         raise DriveError(f"{driver_events.DRIVER_ORPHAN}: job {job!r} has a drive ledger but no owner record on this host; "
                          f"it is held until `swarm doctor` and a person repair it")
+    if owner.owner is None:
+        raise DriveError(f"{driver_events.DRIVER_CONFIG}: job {job!r}: owner record format/fields invalid (it has no "
+                         f"drive details); it is held until `swarm doctor` and a person repair it")
     if board.job_data(job).get("drive.enabled") != "1":
         # the claim is written before the ledger ([RR1a]); a ledger without it is not written here
         raise DriveError(f"{driver_events.DRIVER_ORPHAN}: job {job!r} has a drive ledger but no drive claim on the board; "
@@ -589,7 +651,7 @@ def finish_activation(cfg: dict, board, job: str, *, crash_after: str | None = N
     board.set_job_data(job, "drive.generation_requested", str(led.generation_requested))
     if crash_after == "data":
         raise RuntimeError("crash after data")
-    _record_activation_heads(bk, job, o)
+    _record_activation_heads(cfg, bk, job, o)
     if crash_after == "heads":
         raise RuntimeError("crash after heads")
     if board.seat(job, led.generation, "lead") is None:
@@ -649,7 +711,8 @@ def build_plan(cfg: dict, args, goal: str) -> Plan:
         if pin is not None:
             credentials[name] = pin
             if pin.startswith("helper:") and os.path.basename(pin[len("helper:"):].split(" ")[0]) == "gh":
-                config_dirs[name] = gh_config_dir()    # refused here when it cannot be determined
+                # refused here when it cannot be determined, or when a seat could write it
+                config_dirs[name] = check_config_dir(gh_config_dir(), cfg, roots)
     budgets = effective_budgets(cfg, parse_budget_args(args.budget, args.max_cost_usd, args.ruling_reserve_usd))
     overrides = parse_model_args(args.model)
     engineer = effective_models(cfg, overrides)["engineer"]   # validates the overrides too
@@ -716,14 +779,32 @@ def legacy_goal_check(args) -> int | None:
     return None
 
 
-def kick() -> None:
+def kick() -> bool:
     """Wake the supervisor once a drive job is active, so its first pass does not wait for the timer. The
-    kick lives in swarm.drivegate; a build without it has no kick and the timer's next pass picks the job up."""
+    kick lives in swarm.drivegate; a build without it has no kick and the timer's next pass picks the job up.
+    The activation is already durable here, so a failing kick never undoes or fails it: it is reported
+    loudly on stderr (with its type) and the timer's next pass picks the job up. Returns whether it ran."""
     try:
         from swarm import drivegate
-    except ImportError:
-        return
-    drivegate.kick()
+    except ModuleNotFoundError as exc:
+        if exc.name in ("swarm.drivegate", "swarm"):
+            return False                       # a build without the kick
+        _kick_failed(exc)
+        return False
+    except Exception as exc:                   # a broken drivegate: say so, never hide it
+        _kick_failed(exc)
+        return False
+    try:
+        drivegate.kick()
+    except Exception as exc:
+        _kick_failed(exc)
+        return False
+    return True
+
+
+def _kick_failed(exc: BaseException) -> None:
+    print(f"swarm activate: WARNING: the supervisor kick failed ({type(exc).__name__}: {str(exc)[:200]}); the job "
+          f"is active and the timer's next pass picks it up; run `swarm doctor` if this repeats", file=sys.stderr)
 
 
 def cmd_activate_drive(cfg: dict, args) -> int:

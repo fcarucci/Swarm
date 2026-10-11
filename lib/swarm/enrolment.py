@@ -33,7 +33,7 @@ import re
 import time
 from dataclasses import asdict, dataclass
 
-from swarm import paths, safefs, textsafe
+from swarm import gitpin, paths, safefs, textsafe
 
 SUBDIR = "enrolled"
 FORMAT = 1
@@ -114,16 +114,27 @@ def _validate(rec: Record) -> Record:
     return rec
 
 
-OWNER_KEYS = ("roots", "remotes", "credentials", "requirements", "recipe", "review_role", "review_gates",
-              "goal", "brief", "target_branch", "config_dirs")
+OWNER_FORMAT = 2   # the drive owner details' own format: 2 adds target_branch, config_dirs and the pinned-git checks
+OWNER_KEYS = ("format", "roots", "remotes", "credentials", "requirements", "recipe", "review_role",
+              "review_gates", "goal", "brief", "target_branch", "config_dirs")
+
+
+class OwnerRecordInvalid(ValueError):
+    """An owner record that exists but is not one this build reads (an older format, a missing or
+    unknown field, a refused value): the job is held, never treated as having no record."""
 
 
 def _validate_owner(o) -> None:
     """The owner details: work roots (absolute, normalised), pinned remotes and credential sources
     (destination -> text), pinned requirements (path -> blob id) and the recipe. Anything else is
     refused, so a planted key can never decide a launch."""
-    if not isinstance(o, dict) or set(o) != set(OWNER_KEYS):
-        raise ValueError(f"enrolment: owner details must have exactly the keys {OWNER_KEYS}")
+    if not isinstance(o, dict):
+        raise ValueError("enrolment: owner details must be a map")
+    if o.get("format") != OWNER_FORMAT:
+        raise ValueError(f"enrolment: owner details format {o.get('format')!r:.20} is not {OWNER_FORMAT}")
+    if set(o) != set(OWNER_KEYS):
+        raise ValueError(f"enrolment: owner details must have exactly the keys {OWNER_KEYS}, "
+                         f"not {sorted(set(o) ^ set(OWNER_KEYS))[:5]}")
     roots = o["roots"]
     if not isinstance(roots, list) or len(roots) > 64:
         raise ValueError("enrolment: owner roots must be a list of at most 64 paths")
@@ -138,38 +149,57 @@ def _validate_owner(o) -> None:
         for k, v in m.items():
             _text(k, f"owner {key} key", MAX_CWD)
             _text(v, f"owner {key} value", 4096)
+    try:   # a pinned URL is never an option, a transport helper or another transport; a pin is on the allowlist
+        for url in o["remotes"].values():
+            gitpin.check_url(url)
+        for pin in o["credentials"].values():
+            gitpin.check_pin(pin)
+        gitpin.check_branch(o["target_branch"])
+    except gitpin.GitPinError as exc:
+        raise ValueError(f"enrolment: owner {exc}") from None
     _text(o["recipe"], "owner recipe", 64)
     for key in ("review_role", "review_gates"):   # null for a recipe without a review stage
         if o[key] is not None:
             _text(o[key], f"owner {key}", 64)
-    _text(o["target_branch"], "owner target_branch", 255)   # pinned at activation, never read from config
+    _text(o["target_branch"], "owner target_branch", 255)   # pinned at activation, never read from config;
+    # checked as a branch name above
     cdirs = o["config_dirs"]   # destination -> the GH_CONFIG_DIR of a gh credential helper (absolute)
     if not isinstance(cdirs, dict) or len(cdirs) > 256:
         raise ValueError("enrolment: owner config_dirs must be a map of at most 256 entries")
     for k, v in cdirs.items():
         _text(k, "owner config_dirs key", MAX_CWD)
         _text(v, "owner config_dirs value", MAX_CWD)
-        if not os.path.isabs(v):
-            raise ValueError("enrolment: an owner config dir must be an absolute path")
+        if not os.path.isabs(v) or os.path.normpath(v) != v or v.startswith("-"):
+            raise ValueError("enrolment: an owner config dir must be an absolute, normalised path")
     _text(o["goal"], "owner goal", GOAL_MAX)
     _text(o["brief"], "owner brief", MAX_CWD)
     if not os.path.isabs(o["brief"]):
         raise ValueError("enrolment: the owner brief must be an absolute path")
 
 
-def _parse(data: bytes | None) -> Record | None:
-    if data is None:
-        return None
+def _parse_checked(data: bytes) -> Record:
+    """The record, or ValueError saying why it is not one this build reads."""
     try:
         obj = json.loads(data)
         if not isinstance(obj, dict) or obj.get("v") != FORMAT:
-            return None
+            raise ValueError(f"record format {obj.get('v') if isinstance(obj, dict) else None!r:.20} is not {FORMAT}")
         return _validate(Record(kind=obj["kind"], board_key=obj["board_key"], job=obj["job"],
                                 agent_key=obj["agent_key"], harness=obj["harness"],
                                 session_id=obj["session_id"], cwd=obj["cwd"],
                                 created_at=obj["created_at"], prompt=obj.get("prompt"),
                                 owner=obj.get("owner")))
-    except (ValueError, KeyError, TypeError, ArithmeticError):   # ArithmeticError: 10**400
+    except KeyError as exc:
+        raise ValueError(f"missing field {exc}") from None
+    except (TypeError, ArithmeticError) as exc:   # ArithmeticError: 10**400
+        raise ValueError(f"bad value ({type(exc).__name__})") from None
+
+
+def _parse(data: bytes | None) -> Record | None:
+    if data is None:
+        return None
+    try:
+        return _parse_checked(data)
+    except ValueError:
         return None
 
 
@@ -293,6 +323,8 @@ def prune(max_age: float, *, now: float | None = None, keep=None) -> int:
                 if not _FILE.fullmatch(name):
                     continue
                 rec = _parse(safefs.read(d, name, RECORD_MAX))
+                if rec is None and name.startswith("owner-"):
+                    continue   # an owner record this build cannot read holds its job ([RR1]); never dropped here
                 if rec is None or (now - rec.created_at > max_age and not (keep and keep(rec))):
                     safefs.unlink(d, name)
                     removed += 1
@@ -322,12 +354,40 @@ def write_job_owner(board_key: str, *, job: str, harness: str, session_id: str |
                  "review_role": review_role if review_role is not None else ("reviewer" if kind == "coding" else None),
                  "review_gates": review_gates if review_gates is not None else ("standard" if kind == "coding" else None),
                  "target_branch": target_branch or "main",   # [G3] the landing target, pinned at activation
-                 "config_dirs": dict(config_dirs or {})}     # [G2a] GH_CONFIG_DIR per gh-helper destination
+                 "config_dirs": dict(config_dirs or {}),     # [G2a] GH_CONFIG_DIR per gh-helper destination
+                 "format": OWNER_FORMAT}
     rec = Record("owner", board_key, job, None, harness, session_id, cwd,
                  time.time() if now is None else float(now), owner=owner)
     return _store(rec, f"owner-{_digest('owner', board_key, job)}.json")
 
 
-def find_job_owner(board_key: str, job: str):
-    rec = _load(f"owner-{_digest('owner', board_key, job)}.json")
-    return rec if rec and rec.kind == "owner" and rec.board_key == board_key and rec.job == job else None
+def find_job_owner(board_key: str, job: str, *, strict: bool = False):
+    """The owner record for (board_key, job), or None. Not `strict`: anything invalid is None (as for
+    find). `strict` (drive activation and its recovery): None only when there is no record; a record that
+    exists but is unsafe, of another format, or has missing, unknown or refused fields raises
+    OwnerRecordInvalid ("owner record format/fields invalid ..."), so the job is held, not orphaned."""
+    name = f"owner-{_digest('owner', board_key, job)}.json"
+    if not strict:
+        rec = _load(name)
+        return rec if rec and rec.kind == "owner" and rec.board_key == board_key and rec.job == job else None
+    try:
+        with _dir(create=False) as d:
+            if os.stat in os.supports_dir_fd:
+                os.stat(name, dir_fd=d, follow_symlinks=False)   # FileNotFoundError: no record
+            data = safefs.read(d, name, RECORD_MAX)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise OwnerRecordInvalid(f"owner record format/fields invalid (unreadable or unsafe: "
+                                 f"{type(exc).__name__})") from None
+    if data is None:
+        if os.stat not in os.supports_dir_fd:
+            return None
+        raise OwnerRecordInvalid("owner record format/fields invalid (not a regular private file, or too large)")
+    try:
+        rec = _parse_checked(data)
+    except ValueError as exc:
+        raise OwnerRecordInvalid(f"owner record format/fields invalid ({exc})") from None
+    if rec.kind != "owner" or rec.board_key != board_key or rec.job != job:
+        raise OwnerRecordInvalid("owner record format/fields invalid (it is for another key)")
+    return rec
