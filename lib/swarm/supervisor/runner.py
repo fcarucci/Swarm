@@ -61,8 +61,9 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from swarm import compat
+from swarm import clock, compat
 from swarm.supervisor.systemd import manager_env as _manager_env
 
 POLL_SECONDS = 5.0
@@ -235,6 +236,8 @@ def run_problem(cfg: dict, run, restart_id: int | None = None) -> str | None:
         m = _UNIT.match(unit) if isinstance(unit, str) else None
         if not m or int(m.group(1)) != rid:
             return f"unit {unit!r} is not this restart's scope (swarm-r{rid}-<hex>.scope)"
+    if run.get("slice") is not None and not (isinstance(run["slice"], str) and _SLICE.fullmatch(run["slice"])):
+        return "slice is not a systemd slice name"
     tag = run.get("run_tag")
     if tag is not None:
         m = _TAG.match(tag) if isinstance(tag, str) else None
@@ -456,10 +459,16 @@ def _allowed_env(src, pass_env=()) -> dict:
     return out
 
 
-def _systemctl(*args: str) -> subprocess.CompletedProcess | None:
+SYSTEMCTL_TIMEOUT = 15.0   # a systemctl call's own cap (unit_presence never waits past its deadline)
+CGROUP_ROOT = "/sys/fs/cgroup"   # cgroup v2 mount; tests point it at a fake tree
+DEFAULT_SLICE = "app.slice"   # where systemd-run --user --scope puts a session with no --slice
+_SLICE = re.compile(r"^[a-z0-9][a-z0-9@._-]{0,127}\.slice$")
+
+
+def _systemctl(*args: str, timeout: float = SYSTEMCTL_TIMEOUT) -> subprocess.CompletedProcess | None:
     try:
         return subprocess.run([SYSTEMCTL, "--user", *args], env=_manager_env(), capture_output=True,
-                              text=True, timeout=15)
+                              text=True, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired):
         return None
 
@@ -490,6 +499,176 @@ def _unit_exists(state: tuple[str, str]) -> bool:
 
 def _unit_active(unit: str) -> bool:
     return _unit_state(unit)[1] in ("active", "activating", "deactivating", "reloading")
+
+
+def _unit_slice(unit: str) -> str | None:
+    """The slice systemd put the unit in (`systemctl show -p Slice`), None when it can't say."""
+    r = _systemctl("show", "-p", "Slice", unit)
+    if r is None or r.returncode != 0:
+        return None
+    for line in r.stdout.splitlines():
+        if line.startswith("Slice="):
+            value = line.split("=", 1)[1].strip()
+            return value if _SLICE.fullmatch(value) else None
+    return None
+
+
+def _cgroup_presence(unit: str, slice_name: str) -> str:
+    """[F16] The bus-free check, used only when systemctl can't answer. Only on cgroup v2, with
+    the user manager's slice tree readable and the slice the run recorded present; then the
+    scope's directory missing, or its cgroup.procs empty, is "absent" and a populated one is
+    "present". Any other layout (cgroup v1, a missing slice, an unreadable file) is "unknown"."""
+    if not (_UNIT.fullmatch(unit) and _SLICE.fullmatch(slice_name) and hasattr(os, "getuid")):
+        return "unknown"
+    root = CGROUP_ROOT
+    if not os.access(os.path.join(root, "cgroup.controllers"), os.R_OK):   # the cgroup v2 root
+        return "unknown"
+    uid = os.getuid()
+    parent = os.path.join(root, "user.slice", f"user-{uid}.slice", f"user@{uid}.service")
+    if not os.access(parent, os.R_OK):
+        return "unknown"
+    slice_dir = os.path.join(parent, slice_name)
+    if not os.access(slice_dir, os.R_OK):
+        return "unknown"
+    scope = os.path.join(slice_dir, unit)
+    if not os.path.isdir(scope):
+        return "absent"
+    try:
+        with open(os.path.join(scope, "cgroup.procs"), encoding="ascii", errors="replace") as f:
+            procs = f.read().split()
+    except OSError:
+        return "unknown"
+    return "present" if procs else "absent"
+
+
+def unit_presence(unit: str, slice_name: str = DEFAULT_SLICE, deadline: float | None = None) -> str:
+    """"present" | "absent" | "unknown" for a session's scope. systemctl answers first: "not-found"
+    is absent, any loaded unit present. When systemctl can't answer, the cgroup check (_cgroup_presence)
+    decides, with `slice_name` the slice the run recorded at launch. `deadline` (a clock.monotonic
+    value) caps every systemctl wait to the time left; with none left it is "unknown" and the
+    caller holds (asks again next pass)."""
+    timeout = SYSTEMCTL_TIMEOUT
+    if deadline is not None:
+        left = float(deadline) - clock.monotonic()
+        if left <= 0:
+            return "unknown"
+        timeout = min(SYSTEMCTL_TIMEOUT, left)
+    r = _systemctl("show", "-p", "LoadState,ActiveState", unit, timeout=timeout)
+    if r is not None and r.returncode == 0:
+        kv = dict(line.split("=", 1) for line in r.stdout.splitlines() if "=" in line)
+        load = kv.get("LoadState", "")
+        if load == "not-found":
+            return "absent"
+        if load:
+            return "present"
+    return _cgroup_presence(unit, slice_name)
+
+
+# -- usage and failure classes (the output the runner already captured) ----------------------
+
+@dataclass(frozen=True)
+class Usage:
+    cost_usd: float | None   # Claude's total_cost_usd; None for Codex (the driver prices its tokens)
+    tokens_in: int
+    tokens_out: int
+
+
+BINARY_FAILURE = "could not start the session:"   # the runner's own line when the binary can't run
+_BINARY_LINE = re.compile(r"^\s*(FileNotFoundError|PermissionError)\b", re.MULTILINE)
+_PROVIDER = re.compile(r"overload|rate[ _-]?limit|authentication|permission_error|api_error|unauthori"
+                       r"|credit balance|quota", re.IGNORECASE)
+_PROVIDER_STATUS = {401, 403, 408, 429}
+
+
+def _json_objects(tail: str):
+    """Every JSON object in `tail`, in order: whole lines first (the tail may start mid-line, and
+    a broken line is skipped), else the whole text (a pretty-printed object)."""
+    found = []
+    for line in tail.splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(obj, dict):
+                found.append(obj)
+    if not found:
+        try:
+            obj = json.loads(tail)
+        except ValueError:
+            return found
+        if isinstance(obj, dict):
+            found.append(obj)
+    return found
+
+
+def _claude_result(tail: str) -> dict | None:
+    """The last `type: result` object of Claude's `--output-format json` output, else None."""
+    res = [o for o in _json_objects(tail) if o.get("type") == "result"]
+    return res[-1] if res else None
+
+
+def _number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def _count(v) -> int:
+    return int(v) if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else 0
+
+
+def parse_usage(harness: str, stdout_tail: str) -> Usage | None:
+    """What one session cost, from its captured output. Claude: the last result object's
+    `total_cost_usd` and `usage` (input and output tokens); no numeric cost means unreadable.
+    Codex: the summed `usage` of its turn.completed events (tokens, no cost). None when the
+    usage can't be read (killed, truncated, malformed): the driver then charges the reservation."""
+    if harness == "claude":
+        res = _claude_result(stdout_tail or "")
+        if res is None or not _number(res.get("total_cost_usd")) or res["total_cost_usd"] < 0:
+            return None
+        usage = res.get("usage") if isinstance(res.get("usage"), dict) else {}
+        return Usage(float(res["total_cost_usd"]), _count(usage.get("input_tokens")),
+                     _count(usage.get("output_tokens")))
+    if harness == "codex":
+        turns = [o for o in _json_objects(stdout_tail or "") if o.get("type") == "turn.completed"
+                 and isinstance(o.get("usage"), dict)]
+        if not turns:
+            return None
+        tin = sum(_count(t["usage"].get("input_tokens")) for t in turns)
+        tout = sum(_count(t["usage"].get("output_tokens")) for t in turns)
+        return Usage(None, tin, tout)
+    return None
+
+
+def _provider_class(status, text: str) -> bool:
+    if _number(status) and (int(status) in _PROVIDER_STATUS or 500 <= int(status) < 600):
+        return True
+    return bool(_PROVIDER.search(text or ""))
+
+
+def classify_failure(harness: str, tail: str) -> str | None:
+    """"outage" when the provider failed (overload, rate limit, auth, API error: Claude's JSON
+    result with is_error, Codex's error events of the same classes): not the attempt's fault, so
+    it is not counted against the attempt limits. "error" when the harness binary could not run
+    (the runner's own line; G9: doctor reports it, it is not an outage). None otherwise."""
+    tail = tail or ""
+    if BINARY_FAILURE in tail or _BINARY_LINE.search(tail):
+        return "error"
+    if harness == "claude":
+        res = _claude_result(tail)
+        if res is not None and res.get("is_error") is True:
+            text = " ".join(str(res.get(k) or "") for k in ("subtype", "result", "error", "message"))
+            return "outage" if _provider_class(res.get("api_error_status"), text) else None
+        return None
+    if harness == "codex":
+        for o in _json_objects(tail):
+            if o.get("type") not in ("error", "turn.failed"):
+                continue
+            err = o.get("error") if isinstance(o.get("error"), dict) else {}
+            text = " ".join(str(x) for x in (o.get("message"), err.get("message"), err.get("type")) if x)
+            if _provider_class(err.get("status") or o.get("status"), text):
+                return "outage"
+    return None
 
 
 def _stop_unit(unit: str, proc=None, grace: float | None = None) -> None:
@@ -903,6 +1082,7 @@ def _execute(cfg: dict, run: dict, *, popen, clock, sleep, poll: float, board_ev
             break
         if not run.get("unit_seen_active") and _unit_state(run["unit"])[1] == "active":
             run["unit_seen_active"] = True
+            run["slice"] = _unit_slice(run["unit"]) or run.get("slice")   # for unit_presence [F16]
             write_run(run)
         if now >= next_board:
             next_board = now + board_every

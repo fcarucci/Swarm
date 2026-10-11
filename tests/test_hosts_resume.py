@@ -266,5 +266,38 @@ class StartTest(ResumeBase):
             R.start(bad, popen=mock.MagicMock())
 
 
+class DriveSeatHandleTest(ResumeBase):
+    """Drive seats: restore returns a resume handle only; the argv comes from launch.spec_for."""
+
+    def test_drive_resume_returns_a_handle_and_builds_no_argv(self):
+        self.store(claude_lines())
+        with mock.patch.object(hosts.get("claude").__class__, "resume_argv",
+                               side_effect=AssertionError("drive seats must not build a resume argv")):
+            r = R.restore(self.b, self.manifest(), "claude", self.root, cfg={}, workdir=str(self.work),
+                          host_label="box-b", drive=True)
+        self.assertEqual((r.mode, r.harness, r.argv), ("resume", "claude", ()))
+        uuid.UUID(r.session_id)
+        from swarm.supervisor import launch
+        spec = launch.spec_for({}, "claude", prompt=r.stdin, workdir=r.cwd, model="sonnet", minutes=30,
+                               budget_usd=1.0, resume=r.session_id)
+        self.assertEqual(spec.argv[spec.argv.index("--resume") + 1], r.session_id)
+        self.assertIn("--max-budget-usd", spec.argv)
+
+    def test_non_drive_resume_still_builds_its_argv(self):
+        self.store(claude_lines())
+        r = self.restore()
+        self.assertIn("--resume", r.argv)
+        self.assertTrue(r.argv)
+
+    def test_drive_briefing_goes_through_the_launch_contract(self):
+        self.store(claude_lines(), harness="codex")
+        r = R.restore(self.b, self.manifest(harness="codex"), "claude", self.root, cfg={},
+                      workdir=str(self.work), host_label="box-b", drive=True, budget_usd=2.0,
+                      read_only=True)
+        self.assertEqual(r.mode, "briefing")
+        self.assertEqual(r.argv[r.argv.index("--max-budget-usd") + 1], "2")
+        self.assertEqual(r.argv[r.argv.index("--disallowedTools") + 1], "Edit,Write,NotebookEdit")
+
+
 if __name__ == "__main__":
     unittest.main()

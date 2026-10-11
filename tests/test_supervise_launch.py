@@ -158,3 +158,100 @@ class ModelTests(unittest.TestCase):
                        "codex": {"worker": "worker-model", "product_manager": "product-model"}}
         self.assertEqual(launch.replacement_model(c, "claude", "product_manager", "opus"), "opus")
         self.assertEqual(launch.replacement_model(c, "codex", "product_manager", "product-model"), "product-model")
+
+
+def _without(argv, flag):
+    """argv with `flag` and the value after it removed (the session-id pair differs per launch)."""
+    out, skip = [], False
+    for a in argv:
+        if skip:
+            skip = False
+            continue
+        if a == flag:
+            skip = True
+            continue
+        out.append(a)
+    return out
+
+
+class LaunchContractTests(unittest.TestCase):
+    def test_codex_budget_tokens(self):
+        c = {"drive": {"codex_usd_per_mtok": 10}}
+        spec = launch.spec_for(c, "codex", prompt="p", workdir="/w", model="m", minutes=5, budget_usd=2.5)
+        self.assertIn("features.rollout_budget.limit_tokens=250000", " ".join(spec.argv))
+
+    def test_codex_budget_overrides_the_fixed_token_limit(self):
+        c = {"drive": {"codex_usd_per_mtok": 10}}
+        spec = launch.spec_for(cfg(codex_token_limit=200000), "codex", prompt="p", workdir="/w", model=None,
+                               minutes=5, budget_usd=0.3)
+        self.assertIn("features.rollout_budget.limit_tokens=30000", spec.argv)
+        self.assertNotIn("features.rollout_budget.limit_tokens=200000", spec.argv)
+
+    def test_codex_budget_below_the_smallest_rollout_budget_is_refused(self):
+        with self.assertRaises(ValueError):
+            launch.spec_for({"drive": {"codex_usd_per_mtok": 10}}, "codex", prompt="p", workdir="/w",
+                            model=None, minutes=5, budget_usd=1e-5)   # floor(1e-5 / 10 * 1e6) == 1
+        spec = launch.spec_for({"drive": {"codex_usd_per_mtok": 10}}, "codex", prompt="p", workdir="/w",
+                               model=None, minutes=5, budget_usd=2e-5)
+        self.assertIn("features.rollout_budget.limit_tokens=2", spec.argv)
+
+    def test_codex_budget_must_be_positive(self):
+        with self.assertRaises(ValueError):
+            launch.spec_for({"drive": {"codex_usd_per_mtok": 10}}, "codex", prompt="p", workdir="/w",
+                            model=None, minutes=5, budget_usd=0)
+
+    def test_resume_uses_same_contract(self):
+        a = launch.spec_for({}, "claude", prompt="p", workdir="/w", model="opus", minutes=5, budget_usd=1)
+        b = launch.spec_for({}, "claude", prompt="p", workdir="/w", model="opus", minutes=5, budget_usd=1,
+                            resume="sid")
+        self.assertEqual(b.session_id, "sid")
+        self.assertEqual(b.argv[b.argv.index("--resume") + 1], "sid")
+        self.assertNotIn("--session-id", b.argv)
+        self.assertEqual(_without(b.argv, "--resume"), _without(_without(a.argv, "--session-id"), "--resume"))
+        self.assertEqual(_without(b.argv, "--resume")[0:1], ["claude"])
+        self.assertIn(("--max-budget-usd", "1"), list(zip(b.argv, b.argv[1:])))
+        self.assertIn(("--model", "opus"), list(zip(b.argv, b.argv[1:])))
+
+    def test_resume_still_passes_check_safe(self):
+        with self.assertRaises(launch.UnsafeLaunch):
+            launch.spec_for({}, "claude", prompt="p", workdir="/w", model=None, minutes=5,
+                            resume="bypass" + "Permissions")
+        with self.assertRaises(launch.UnsafeLaunch):
+            launch.spec_for({}, "codex", prompt="p", workdir="/w", model=None, minutes=5,
+                            resume="--dangerously-bypass-approvals-and-sandbox")
+
+    def test_codex_resume_is_exec_resume(self):
+        spec = launch.spec_for({}, "codex", prompt="p", workdir="/w", model="m", minutes=5, resume="thr-1")
+        self.assertEqual(spec.argv[:3], ("codex", "exec", "resume"))
+        self.assertEqual(spec.argv[-2:], ("thr-1", "-"))
+        self.assertNotIn("--sandbox", spec.argv)
+        self.assertIn('sandbox_mode="workspace-write"', spec.argv)
+        self.assertIsNone(spec.session_id)
+
+    def test_codex_resume_read_only_is_read_only(self):
+        spec = launch.spec_for({}, "codex", prompt="p", workdir="/w", model=None, minutes=5, resume="thr-1",
+                               read_only=True)
+        self.assertIn('sandbox_mode="read-only"', spec.argv)
+        self.assertNotIn('sandbox_mode="workspace-write"', spec.argv)
+
+    def test_judge_read_only(self):
+        spec = launch.spec_for({}, "codex", prompt="p", workdir="/w", model="m", minutes=5, read_only=True)
+        self.assertIn("read-only", spec.argv)
+        self.assertEqual(spec.argv[spec.argv.index("--sandbox") + 1], "read-only")
+
+    def test_claude_read_only_disallows_edits(self):
+        spec = launch.spec_for({}, "claude", prompt="p", workdir="/w", model=None, minutes=5, read_only=True)
+        self.assertEqual(spec.argv[spec.argv.index("--disallowedTools") + 1], "Edit,Write,NotebookEdit")
+        writable = launch.spec_for({}, "claude", prompt="p", workdir="/w", model=None, minutes=5)
+        self.assertNotIn("--disallowedTools", writable.argv)
+
+    def test_claude_budget_must_be_positive(self):
+        for bad in (0, -1, float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                launch.spec_for({}, "claude", prompt="p", workdir="/w", model=None, minutes=5, budget_usd=bad)
+
+    def test_budget_given_replaces_the_configured_claude_budget(self):
+        spec = launch.spec_for(cfg(max_budget_usd=9), "claude", prompt="p", workdir="/w", model=None,
+                               minutes=5, budget_usd=1.25)
+        self.assertEqual(spec.argv[spec.argv.index("--max-budget-usd") + 1], "1.25")
+        self.assertNotIn("9", spec.argv)

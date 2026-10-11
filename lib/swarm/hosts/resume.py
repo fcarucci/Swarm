@@ -116,11 +116,17 @@ def fetch_text(board, job: str, agent_key: str) -> str:
 
 def restore(board, manifest: dict, host: str | None = None, dest_root=None,
             host_label: str | None = None, *, cfg: dict | None = None, native: str | None = None,
-            workdir: str | None = None, now: _dt.datetime | None = None, write: bool = True) -> Restored:
+            workdir: str | None = None, now: _dt.datetime | None = None, write: bool = True,
+            drive: bool = False, budget_usd: float | None = None, read_only: bool = False) -> Restored:
     """Prepare one agent (a flat manifest entry) to run on this box. `host`: the adapter to run
     it on (default: the entry's harness). `dest_root`: the host's store root to write the session
     under (default: the host's own, CLAUDE_CONFIG_DIR / CODEX_HOME). `native="codex"` lets Codex
-    use its experimental rollout write. `write=False`: build the command without writing."""
+    use its experimental rollout write. `write=False`: build the command without writing.
+
+    `drive=True` (a drive seat): a resume returns only the handle, `session_id`, with an empty
+    argv; the caller starts it with launch.spec_for(..., resume=session_id), the one launch
+    contract, so no resume argv is built here. A briefing is a fresh launch and goes through
+    launch.spec_for too, with `budget_usd` and `read_only` (the seat's reservation and sandbox)."""
     cfg = cfg or {}
     harness = host
     job, key = manifest.get("job"), manifest.get("agent_key")
@@ -159,6 +165,8 @@ def restore(board, manifest: dict, host: str | None = None, dest_root=None,
             notes.append("stored copy was cut to head and tail: the middle of the conversation is missing")
             note += "\nPart of your earlier conversation was too large to keep and is missing."
         path = host.write_session(session, session_id=sid, cwd=cwd, root=dest_root) if write else None
+        if drive:
+            return Restored(target, "resume", (), cwd, note, sid, path, truncated, tuple(notes))
         argv = host.resume_argv(cfg, session_id=sid, model=model)
         return Restored(target, "resume", tuple(argv), cwd, note, sid, path, truncated, tuple(notes))
     notes.append(why or "briefing mode")
@@ -167,7 +175,8 @@ def restore(board, manifest: dict, host: str | None = None, dest_root=None,
     sid = str(uuid.uuid4()) if target == "claude" else None
     from swarm.supervisor import launch
     spec = launch.spec_for(cfg, target, prompt=prompt, workdir=cwd, model=model,
-                           minutes=float(manifest.get("minutes") or 30), **({"session_id": sid} if sid else {}))
+                           minutes=float(manifest.get("minutes") or 30), budget_usd=budget_usd,
+                           read_only=read_only, **({"session_id": sid} if sid else {}))
     return Restored(target, "briefing", spec.argv, cwd, prompt, spec.session_id, None, False, tuple(notes))
 
 
