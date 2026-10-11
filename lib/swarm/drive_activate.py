@@ -181,7 +181,7 @@ def supervisor_problem(cfg: dict, *, platform: str | None = None, timer: dict | 
     Windows; the supervisor disabled or switched off; the systemd user timer not active and
     enabled; no pass recorded within twice the timer period. The arguments exist for tests."""
     from swarm.supervisor import systemd
-    plat = sys.platform if platform is None else platform
+    plat = (PLATFORM or sys.platform) if platform is None else platform
     if plat == "darwin" or plat.startswith("win"):
         return f"drive jobs need the supervisor's systemd user timer, which this platform ({plat}) does not install; {NO_DRIVE_HINT}"
     if not sup_settings.enabled(cfg):
@@ -211,6 +211,7 @@ def _real(path: str) -> str:
 
 
 TMP_ROOTS = ("/tmp", "/private/tmp")   # never a work dir (spec 4.2); tests of positive activations narrow it
+PLATFORM = None                        # the platform the supervisor check reads (None: sys.platform); tests set it
 
 
 def is_tmp(path: str) -> bool:
