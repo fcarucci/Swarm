@@ -746,6 +746,8 @@ class Restart:
     tokens_out: int | None = None
 
 
+MAX_LOCK_SECONDS = 24 * 3600   # a drive lock lasts at most a day, and a renewal reaches at most that far
+
 RESTART_COLS = ("id, job, agent_key, attempt, at, reason, old_agent_key, new_agent_key, harness, host, "
                 "os_user, minutes_cap, ended_at, outcome, action_id, launch_id, reserved_usd, cost_usd, "
                 "tokens_in, tokens_out")   # the Restart field order, for every backend's SELECT
@@ -755,6 +757,13 @@ RESTART_COLS = ("id, job, agent_key, attempt, at, reason, old_agent_key, new_age
 # successor instead of reviving them.
 SEAT_STATES = ("requested", "running", "idle", "released", "failed", "cancelled", "refused")
 SEAT_CLOSED = ("released", "failed", "cancelled", "refused")
+# Where set_seat_state may move a seat. A seat starts running only through a launch claim, and leaves
+# running only once that launch has ended (its restart row is finished).
+SEAT_TRANSITIONS = {
+    "requested": ("released", "cancelled", "refused"),
+    "running": ("idle", "failed", "released", "cancelled", "refused"),
+    "idle": ("released", "cancelled"),
+}
 SEAT_HARNESSES = ("claude", "codex")
 SEAT_COMPLEXITY = ("simple", "standard", "complex")
 
@@ -786,6 +795,7 @@ class Seat:
     wake_reason: str | None
     wake_watermark: int | None
     updated_at: _dt.datetime
+    launch_id: str | None = None   # the launch that started the seat running (its restart row's launch_id)
 
 
 @dataclass(frozen=True)
@@ -2450,10 +2460,13 @@ class Board(abc.ABC):
         """The seat (job, generation, seat), or None."""
 
     @abc.abstractmethod
-    def set_seat_state(self, seat_id: int, expected_revision: int, state: str, **fields) -> Seat | None:
-        """Compare-and-swap: when the seat is at expected_revision, set state (SEAT_STATES) and the
-        given fields (agent_key, session_id, last_outcome, wake_reason, wake_watermark), revision + 1,
-        and return the new row. None when the revision differs or the seat doesn't exist."""
+    def set_seat_state(self, seat_id: int, expected_revision: int, state: str, *, job: str,
+                       **fields) -> Seat | None:
+        """Compare-and-swap on a seat of `job`: when it is at expected_revision, move it to state (along
+        SEAT_TRANSITIONS; ValueError otherwise, and ValueError while a seat's launch is still open) and
+        set the given fields (agent_key, session_id, last_outcome, wake_reason, wake_watermark), revision
+        + 1. Returns the new row; None when the seat is not of this job, the revision differs or it
+        doesn't exist."""
 
     @abc.abstractmethod
     def claim_drive_launch(self, *, job: str, generation: int, action_id: str, attempt: int, launch_id: str,
@@ -2471,12 +2484,14 @@ class Board(abc.ABC):
         changed)."""
 
     @abc.abstractmethod
-    def renew_drive_locks(self, launch_id: str, expires_at: _dt.datetime) -> int:
-        """Set expires_at of the launch's locks. The number of rows renewed."""
+    def renew_drive_locks(self, launch_id: str, expires_at: _dt.datetime, *, job: str, holder: str) -> int:
+        """Set expires_at of the launch's locks of this job and holder that have not expired yet. A lapsed
+        lock is never revived. expires_at must lie in the future, at most MAX_LOCK_SECONDS ahead (ValueError
+        otherwise). The number of rows renewed."""
 
     @abc.abstractmethod
-    def release_drive_locks(self, launch_id: str) -> int:
-        """Delete the launch's locks. The number of rows deleted."""
+    def release_drive_locks(self, launch_id: str, *, job: str, holder: str) -> int:
+        """Delete the launch's locks of this job and holder. The number of rows deleted."""
 
     @abc.abstractmethod
     def drive_locks(self, prefix: str = "") -> list[DriveLock]:

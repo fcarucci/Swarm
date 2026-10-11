@@ -2336,21 +2336,21 @@ class DriveHelpers:
         return self.b.request_seat(job, generation, name, **fields)
 
     def claim(self, s, *, locks=(), paths=None, launch_id=None, action=None, attempt=1, ruling=False,
-              max_host_running=4, generation=None):
+              max_host_running=4, generation=None, lock_seconds=4200):
         return self.b.claim_drive_launch(
             job=s.job, generation=s.generation if generation is None else generation,
             action_id=action or f"1|seat|{s.seat}", attempt=attempt, launch_id=launch_id or f"L-{s.seat}-{attempt}",
             seat_id=s.id, seat_revision=s.revision, harness="claude", reserve_usd=5, reserve_minutes=60,
-            locks=list(locks), lock_paths=dict(paths or {}), lock_seconds=4200,
+            locks=list(locks), lock_paths=dict(paths or {}), lock_seconds=lock_seconds,
             max_host_running=max_host_running, ruling=ruling)
 
     @staticmethod
     def wt(root):
         return "wt:" + hashlib.sha256(root.encode()).hexdigest()
 
-    def interleave_before(self, needle, action):
-        """SQL boards only: run `action` (on this board) just before the first statement containing
-        `needle`, as if another writer had committed in between. Returns the list of the calls made."""
+    def interleave(self, needle, action, when="before"):
+        """SQL boards only: run `action` (on this board) just before, or just after, the first statement
+        containing `needle`, as if another writer had committed in between. Returns the list of calls."""
         if not hasattr(self.b, "_exec"):
             self.skipTest("the interleaving needs a SQL board")
         real, fired = self.b._exec, []
@@ -2358,7 +2358,12 @@ class DriveHelpers:
         def _exec(c, sql, args=()):
             if needle in sql and not fired:
                 fired.append(True)
+                if when == "before":
+                    action()
+                    return real(c, sql, args)
+                out = real(c, sql, args)
                 action()
+                return out
             return real(c, sql, args)
         self.b._exec = _exec
         return fired
@@ -2374,7 +2379,7 @@ class DriveClaims(DriveHelpers):
                                 workdir="/w/a", brief_path="/w/a/BRIEF.md", requested_by="lead")
         r = self.b.claim_drive_launch(job="J", generation=1, action_id="1|seat|eng-a", attempt=1,
                                       launch_id="L1", seat_id=s.id, seat_revision=s.revision, harness="claude",
-                                      reserve_usd=5, reserve_minutes=60, locks=["wt:aaa"], lock_paths={"wt:aaa": "/w/a"},
+                                      reserve_usd=5, reserve_minutes=60, locks=[self.wt("/w/a")], lock_paths={self.wt("/w/a"): "/w/a"},
                                       lock_seconds=4200, max_host_running=4)
         self.assertIsNotNone(r)
         self.assertEqual(self.b.seat("J", 1, "eng-a").state, "running")
@@ -2397,7 +2402,7 @@ class DriveClaims(DriveHelpers):
         a = self.seat("J", "a")
         self.assertIsNotNone(self.claim(a, launch_id="L1"))
         self.assertTrue(self.b.finish_restart(self.b.restarts("J")[0].id, "completed"))
-        idle = self.b.set_seat_state(a.id, self.b.seat("J", 1, "a").revision, "idle")
+        idle = self.b.set_seat_state(a.id, self.b.seat("J", 1, "a").revision, "idle", job="J")
         self.assertIsNone(self.claim(idle, launch_id="L2"))   # same action and attempt: UNIQUE refuses
         self.assertEqual(self.b.seat("J", 1, "a").state, "idle")   # the refused claim changed nothing
         self.assertIsNotNone(self.claim(idle, launch_id="L3", attempt=2))
@@ -2420,7 +2425,7 @@ class DriveClaims(DriveHelpers):
     def test_a_request_racing_a_claim_does_not_rewrite_the_running_seat(self):
         self.goal_job()
         s = self.seat("J", "a", model="sonnet", workdir="/w/a")
-        fired = self.interleave_before("UPDATE seats SET role", lambda: self.claim(s, launch_id="LR"))
+        fired = self.interleave("UPDATE seats SET role", lambda: self.claim(s, launch_id="LR"))
         with self.assertRaisesRegex(ValueError, "release it first|changed while"):
             self.seat("J", "a", model="opus", workdir="/w/evil")
         self.assertEqual(fired, [True])
@@ -2432,7 +2437,7 @@ class DriveClaims(DriveHelpers):
     def test_identical_first_requests_racing_return_one_row(self):
         self.goal_job()
         first = []
-        fired = self.interleave_before("INSERT INTO seats", lambda: first.append(self.seat("J", "a")))
+        fired = self.interleave("INSERT INTO seats", lambda: first.append(self.seat("J", "a")))
         second = self.seat("J", "a")
         self.assertEqual(fired, [True])
         self.assertEqual((second.id, second.revision), (first[0].id, 1))
@@ -2462,7 +2467,7 @@ class DriveClaims(DriveHelpers):
         self.seat("J", "b", generation=2)
         self.assertEqual([s.seat for s in self.b.seats("J", 1)], ["a"])
         self.assertIsNone(self.b.seat("J", 2, "a"))
-        released = self.b.set_seat_state(self.b.seat("J", 1, "a").id, 1, "released")
+        released = self.b.set_seat_state(self.b.seat("J", 1, "a").id, 1, "released", job="J")
         self.assertEqual(released.state, "released")
         self.assertEqual(self.b.seats("J", 1, include_closed=False), [])
         self.assertEqual([s.seat for s in self.b.seats("J", 1)], ["a"])
@@ -2470,18 +2475,47 @@ class DriveClaims(DriveHelpers):
     def test_set_seat_state_is_compare_and_swap(self):
         self.goal_job()
         s = self.seat("J", "a")
-        self.assertIsNone(self.b.set_seat_state(s.id, s.revision + 5, "idle"))
-        moved = self.b.set_seat_state(s.id, s.revision, "failed", last_outcome="attempts ran out")
-        self.assertEqual((moved.state, moved.revision, moved.last_outcome), ("failed", s.revision + 1,
-                                                                             "attempts ran out"))
-        self.assertIsNone(self.b.set_seat_state(s.id, s.revision, "idle"))   # the old revision is stale
+        self.assertIsNone(self.b.set_seat_state(s.id, s.revision + 5, "refused", job="J"))
+        moved = self.b.set_seat_state(s.id, s.revision, "refused", job="J", last_outcome="no such tool")
+        self.assertEqual((moved.state, moved.revision, moved.last_outcome), ("refused", s.revision + 1,
+                                                                             "no such tool"))
+        self.assertIsNone(self.b.set_seat_state(s.id, s.revision, "released", job="J"))   # the old revision
 
-    def test_a_failed_or_released_seat_cannot_be_claimed(self):
+    def test_a_refused_or_released_seat_cannot_be_claimed(self):
         self.goal_job()
         s = self.seat("J", "a")
-        failed = self.b.set_seat_state(s.id, s.revision, "failed")
-        self.assertIsNone(self.claim(failed))
-        self.assertEqual(self.b.seat("J", 1, "a").state, "failed")
+        refused = self.b.set_seat_state(s.id, s.revision, "refused", job="J")
+        self.assertIsNone(self.claim(refused))
+        self.assertEqual(self.b.seat("J", 1, "a").state, "refused")
+
+    def test_a_seat_moves_only_along_the_allowed_transitions(self):
+        self.goal_job()
+        s = self.seat("J", "a")
+        with self.assertRaisesRegex(ValueError, "only a launch claim"):
+            self.b.set_seat_state(s.id, s.revision, "running", job="J")
+        refused = self.b.set_seat_state(s.id, s.revision, "refused", job="J")
+        with self.assertRaisesRegex(ValueError, "cannot go from refused to idle"):
+            self.b.set_seat_state(s.id, refused.revision, "idle", job="J")
+        # a seat leaves running only once its launch has ended: the session may still be writing
+        t = self.seat("J", "t")
+        launch = self.claim(t, launch_id="LT")
+        cur = self.b.seat("J", 1, "t")
+        with self.assertRaisesRegex(ValueError, "still open"):
+            self.b.set_seat_state(t.id, cur.revision, "idle", job="J")
+        self.assertTrue(self.b.finish_restart(launch.id, "completed"))
+        idle = self.b.set_seat_state(t.id, cur.revision, "idle", job="J")
+        self.assertEqual(idle.state, "idle")
+        with self.assertRaisesRegex(ValueError, "cannot go from idle to failed"):
+            self.b.set_seat_state(t.id, idle.revision, "failed", job="J")
+        self.assertEqual(self.b.set_seat_state(t.id, idle.revision, "released", job="J").state, "released")
+
+    def test_set_seat_state_only_moves_a_seat_of_the_given_job(self):
+        self.goal_job("J")
+        self.goal_job("K")
+        s = self.seat("J", "a")
+        self.assertIsNone(self.b.set_seat_state(s.id, s.revision, "released", job="K"))
+        self.assertEqual(self.b.seat("J", 1, "a").state, "requested")
+        self.assertEqual(self.b.set_seat_state(s.id, s.revision, "released", job="J").state, "released")
 
     def test_claim_refuses_a_generation_the_seat_is_not_in(self):
         self.goal_job()
@@ -2504,18 +2538,24 @@ class DriveClaims(DriveHelpers):
         self.assertIsNone(self.claim(c, locks=[self.wt("/w/repo")], paths={self.wt("/w/repo"): "/w/repo"}))
         self.assertEqual(self.b.seat("J", 1, "c").state, "requested")
 
-    def test_the_root_path_decides_an_overlap_not_the_key(self):
+    def test_a_worktree_root_is_absolute_normalised_and_named_by_its_key(self):
         self.goal_job()
         a, c = self.seat("J", "a"), self.seat("J", "c")
-        self.assertIsNotNone(self.claim(a, locks=["wt:one"], paths={"wt:one": "/w/repo"}))
-        self.assertIsNone(self.claim(c, locks=["wt:two"], paths={"wt:two": "/w/repo"}))
+        with self.assertRaises(ValueError):          # relative: its realpath is unknown
+            self.claim(a, locks=[self.wt("repo")], paths={self.wt("repo"): "repo"})
+        with self.assertRaises(ValueError):          # the key names another root
+            self.claim(a, locks=[self.wt("/w/x")], paths={self.wt("/w/x"): "/w/repo"})
+        # spellings of one root are one root: the key names the normalised path
+        self.assertIsNotNone(self.claim(a, locks=[self.wt("/w/repo")], paths={self.wt("/w/repo"): "/w//repo/"}))
+        self.assertEqual(self.b.drive_locks("wt:")[0].path, "/w/repo")
+        self.assertIsNone(self.claim(c, locks=[self.wt("/w/repo/sub")], paths={self.wt("/w/repo/sub"): "/w/repo/sub"}))
 
     def test_a_stale_seat_revision_is_refused_even_when_the_seat_could_launch(self):
         self.goal_job()
         s = self.seat("J", "a")
         self.assertIsNotNone(self.claim(s, attempt=1))           # the claim moves s past its revision
         self.assertTrue(self.b.finish_restart(self.b.restarts("J")[0].id, "completed"))
-        idle = self.b.set_seat_state(s.id, self.b.seat("J", 1, "a").revision, "idle")
+        idle = self.b.set_seat_state(s.id, self.b.seat("J", 1, "a").revision, "idle", job="J")
         self.assertEqual(idle.state, "idle")
         self.assertIsNone(self.claim(s, attempt=2))              # s holds the revision before the claim
         self.assertIsNotNone(self.claim(idle, attempt=2))
@@ -2548,6 +2588,31 @@ class DriveClaims(DriveHelpers):
             self.claim(s, locks=[self.wt("/w/repo")])
         self.assertEqual(self.b.seat("J", 1, "a").state, "requested")
 
+    def test_a_legacy_restart_cannot_overshoot_the_host_cap_during_a_claim(self):
+        self.goal_job()
+        s = self.seat("J", "a")
+        other = self.h.board()          # a second connection, as a second supervisor would have
+        self.addCleanup(other.close)
+        legacy_results, legacy = [], []
+
+        def legacy_restart():
+            legacy_results.append(other.record_restart("J", "legacy-agent", "legacy-old", "stuck:dead",
+                                                       "claude", 10, max_host_running=1))
+
+        def during_claim():   # the claim has counted the open restarts; a legacy restart runs now
+            t = threading.Thread(target=legacy_restart)
+            legacy.append(t)
+            t.start()
+            t.join(1.0)        # serialised behind the claim: still waiting, or finished before the count was used
+
+        fired = self.interleave("FROM restarts WHERE host", during_claim, when="after")
+        won = self.claim(s, max_host_running=1)
+        for t in legacy:
+            t.join(60)
+        self.assertEqual(fired, [True])
+        self.assertEqual(sum(r is not None for r in [won] + legacy_results), 1)
+        self.assertEqual(len([r for r in self.b.restarts("J") if r.ended_at is None]), 1)
+
     def test_host_running_cap_and_ruling_headroom(self):
         self.goal_job()
         a, c, d = self.seat("J", "a"), self.seat("J", "c"), self.seat("J", "d")
@@ -2561,10 +2626,11 @@ class DriveClaims(DriveHelpers):
         a, c = self.seat("J", "a"), self.seat("J", "c")
         self.assertIsNotNone(self.claim(a, locks=["land:x:main"], launch_id="LA"))
         self.assertIsNone(self.claim(c, locks=["land:x:main"], launch_id="LC"))
-        self.assertEqual(self.b.renew_drive_locks("LA", self.b.now() + dt.timedelta(hours=2)), 1)
-        self.assertEqual(self.b.renew_drive_locks("nope", self.b.now()), 0)
-        self.assertEqual(self.b.release_drive_locks("LA"), 1)
-        self.assertEqual(self.b.release_drive_locks("LA"), 0)
+        later = self.b.now() + dt.timedelta(hours=2)
+        self.assertEqual(self.b.renew_drive_locks("LA", later, job="J", holder="1|seat|a"), 1)
+        self.assertEqual(self.b.renew_drive_locks("nope", later, job="J", holder="1|seat|a"), 0)
+        self.assertEqual(self.b.release_drive_locks("LA", job="J", holder="1|seat|a"), 1)
+        self.assertEqual(self.b.release_drive_locks("LA", job="J", holder="1|seat|a"), 0)
         self.assertEqual(self.b.drive_locks("land:"), [])
         self.assertIsNotNone(self.claim(c, locks=["land:x:main"], launch_id="LC2"))
 
@@ -2572,23 +2638,65 @@ class DriveClaims(DriveHelpers):
         self.goal_job()
         a, c = self.seat("J", "a"), self.seat("J", "c")
         self.assertIsNotNone(self.claim(a, locks=["land:x:main"], launch_id="LA"))
-        self.assertIsNotNone(self.claim(c, locks=["land:y:main"], launch_id="LC"))
-        self.assertEqual(self.b.renew_drive_locks("LC", self.b.now() + dt.timedelta(hours=2)), 1)
-        self.assertEqual(self.b.release_drive_locks("LA"), 1)
+        # a second launch of the same action (a retry, attempt 2): same job and holder, another lock
+        self.assertIsNotNone(self.claim(c, locks=["land:y:main"], launch_id="LC", action="1|seat|a", attempt=2))
+        self.assertEqual(self.b.renew_drive_locks("LC", self.b.now() + dt.timedelta(hours=2), job="J",
+                                                  holder="1|seat|a"), 1)
+        self.assertEqual(self.b.release_drive_locks("LA", job="J", holder="1|seat|a"), 1)
         self.assertEqual([l.key for l in self.b.drive_locks("land:")], ["land:y:main"])
         self.assertEqual(self.b.drive_locks("land:")[0].launch_id, "LC")
 
     def test_drive_locks_list_by_prefix_with_their_fields(self):
         self.goal_job()
         a = self.seat("J", "a")
-        self.assertIsNotNone(self.claim(a, locks=["wt:b", "land:x:main"], paths={"wt:b": "/w/b"}, launch_id="LA",
-                                        action="7|seat|a"))
+        self.assertIsNotNone(self.claim(a, locks=[self.wt("/w/b"), "land:x:main"],
+                                        paths={self.wt("/w/b"): "/w/b"}, launch_id="LA", action="7|seat|a"))
         locks = self.b.drive_locks()
-        self.assertEqual([l.key for l in locks], ["land:x:main", "wt:b"])
+        self.assertEqual([l.key for l in locks], ["land:x:main", self.wt("/w/b")])
         wt = self.b.drive_locks("wt:")[0]
         self.assertEqual((wt.key, wt.holder, wt.job, wt.generation, wt.launch_id, wt.path),
-                         ("wt:b", "7|seat|a", "J", 1, "LA", "/w/b"))
+                         (self.wt("/w/b"), "7|seat|a", "J", 1, "LA", "/w/b"))
         self.assertEqual(self.b.drive_locks("land:")[0].path, None)
+
+    def test_lock_lifetimes_are_bounded(self):
+        self.goal_job()
+        s = self.seat("J", "a")
+        for bad in (-1, 0, float("nan"), float("inf"), 10 ** 9):
+            with self.subTest(lock_seconds=bad), self.assertRaises(ValueError):
+                self.claim(s, locks=["land:x:main"], launch_id=f"LB{bad}".replace(".", "_"), lock_seconds=bad)
+        self.assertEqual(self.b.seat("J", 1, "a").state, "requested")
+        self.assertIsNotNone(self.claim(s, locks=["land:x:main"], launch_id="LOK"))
+
+    def test_an_expired_lock_is_not_renewed_and_renewals_are_bounded(self):
+        from unittest import mock
+        self.goal_job()
+        s = self.seat("J", "a")
+        self.assertIsNotNone(self.claim(s, locks=["land:x:main"], launch_id="LE", lock_seconds=60))
+        lapsed = self.b.drive_locks("land:")[0].expires_at
+        later = self.b.now() + dt.timedelta(minutes=10)
+        with mock.patch.object(self.b, "now", return_value=later):
+            self.assertEqual(self.b.renew_drive_locks("LE", later + dt.timedelta(hours=1), job="J",
+                                                      holder="1|seat|a"), 0)   # lapsed: never revived
+            self.assertEqual(self.b.drive_locks("land:")[0].expires_at, lapsed)
+        now = self.b.now()
+        with self.assertRaises(ValueError):   # a renewal must lie in the future
+            self.b.renew_drive_locks("LE", now - dt.timedelta(minutes=1), job="J", holder="1|seat|a")
+        with self.assertRaises(ValueError):   # and within the cap
+            self.b.renew_drive_locks("LE", now + dt.timedelta(days=30), job="J", holder="1|seat|a")
+        self.assertEqual(self.b.drive_locks("land:")[0].expires_at, lapsed)
+
+    def test_renew_and_release_check_the_job_and_the_holder(self):
+        self.goal_job("J")
+        self.goal_job("K")
+        s = self.seat("J", "a")
+        self.assertIsNotNone(self.claim(s, locks=["land:x:main"], launch_id="LH", action="1|seat|a"))
+        later = self.b.now() + dt.timedelta(hours=2)
+        self.assertEqual(self.b.renew_drive_locks("LH", later, job="K", holder="1|seat|a"), 0)
+        self.assertEqual(self.b.renew_drive_locks("LH", later, job="J", holder="1|seat|zz"), 0)
+        self.assertEqual(self.b.release_drive_locks("LH", job="K", holder="1|seat|a"), 0)
+        self.assertEqual(self.b.release_drive_locks("LH", job="J", holder="1|seat|zz"), 0)
+        self.assertEqual([l.key for l in self.b.drive_locks("land:")], ["land:x:main"])
+        self.assertEqual(self.b.release_drive_locks("LH", job="J", holder="1|seat|a"), 1)
 
     def test_the_claim_writes_a_restart_row_with_its_reservation(self):
         self.goal_job()
@@ -2625,9 +2733,9 @@ class DriveClaims(DriveHelpers):
 
 
 _CLAIM_CHILD = """
-import hashlib, json, sys, time
+import hashlib, json, os, sys, time
 from swarm.board import open_board
-cfg, seat, root, start = json.loads(sys.argv[1]), sys.argv[2], sys.argv[3], float(sys.argv[4])
+cfg, seat, root, start = json.loads(os.environ["SWARM_RACE_CFG"]), sys.argv[1], sys.argv[2], float(sys.argv[3])
 b = open_board(cfg)
 s = b.seat("J", 1, seat)
 key = "wt:" + hashlib.sha256(root.encode()).hexdigest()
@@ -2655,8 +2763,9 @@ class DriveClaimRace(DriveHelpers):
         cfg = json.dumps(self.h.cfg, default=str)
         start = str(time.time() + 4)
         lib = os.path.dirname(os.path.dirname(os.path.abspath(sys.modules["swarm"].__file__)))
-        env = dict(os.environ, PYTHONPATH=lib + os.pathsep + os.environ.get("PYTHONPATH", ""))
-        procs = [subprocess.Popen([sys.executable, "-B", "-c", _CLAIM_CHILD, cfg, seat, path, start],
+        # the config (a Postgres password may be in it) goes in the child's environment, never on its argv
+        env = dict(os.environ, PYTHONPATH=lib + os.pathsep + os.environ.get("PYTHONPATH", ""), SWARM_RACE_CFG=cfg)
+        procs = [subprocess.Popen([sys.executable, "-B", "-c", _CLAIM_CHILD, seat, path, start],
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
                  for seat, path in (("a", root), ("c", root + "/sub"))]
         results = []
