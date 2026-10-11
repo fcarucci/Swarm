@@ -11,8 +11,14 @@ DRIVER_LAND_PARTIAL = "DRIVER-LAND-PARTIAL"  # a landing left destinations parti
 DRIVER_LEDGER_BAD = "DRIVER-LEDGER-BAD"    # unreadable ledger: job held ([F2])
 DRIVER_LOCK_ORPHAN = "DRIVER-LOCK-ORPHAN"  # a drive lock matching no restart or intent ([F19])
 DRIVER_ORPHAN = "DRIVER-ORPHAN"            # board drive claim without a ledger past the grace ([F2])
+DRIVER_CLOSE_REJECTED = "DRIVER-CLOSE-REJECTED"  # the closing gate refused a pending MET (the goal judge runs again)
+DRIVER_MECHANICAL_UNREACHABLE = "DRIVER-MECHANICAL-UNREACHABLE"  # a deadline passed: UNREACHABLE recorded by the supervisor itself
+DRIVER_ROLLOVER = "DRIVER-ROLLOVER"        # a generation rollover could not build the new lead
+DRIVER_TERMINAL_STUCK = "DRIVER-TERMINAL-STUCK"  # sessions not confirmed gone at the close deadline
+DRIVER_UNHALT = "DRIVER-UNHALT"            # a halt ended: deadlines shifted by the halted time
 DRIVER_STALLED = "DRIVER-STALLED"          # events check: no responsible actor for >2 timer periods
 DRIVER_TAMPER = "DRIVER-TAMPER"            # board row changed without a trusted record (spec 3.2)
 
-ALL = (DRIVER_AUDIT, DRIVER_CONFIG, DRIVER_ERROR, DRIVER_INVARIANT, DRIVER_LAND_PARTIAL,
+ALL = (DRIVER_AUDIT, DRIVER_CLOSE_REJECTED, DRIVER_MECHANICAL_UNREACHABLE, DRIVER_ROLLOVER, DRIVER_TERMINAL_STUCK,
+       DRIVER_UNHALT, DRIVER_CONFIG, DRIVER_ERROR, DRIVER_INVARIANT, DRIVER_LAND_PARTIAL,
        DRIVER_LEDGER_BAD, DRIVER_LOCK_ORPHAN, DRIVER_ORPHAN, DRIVER_STALLED, DRIVER_TAMPER)
