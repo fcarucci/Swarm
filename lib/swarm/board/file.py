@@ -583,6 +583,9 @@ class FileStore(MemoryStore):
         self.blocker_events = state.get("blocker_events") or []
         self.next_blocker_id = int(state.get("next_blocker_id") or 1)
         self.next_blocker_event_id = int(state.get("next_blocker_event_id") or 1)
+        self.seats = state.get("seats") or []   # schema 25
+        self.next_seat_id = int(state.get("next_seat_id") or 1)
+        self.drive_locks = state.get("drive_locks") or []
         self.events = state.get("events") or []
         self.next_event_id = int(state.get("next_event_id") or 1)
         self.bg_commands = state.get("bg_commands") or []   # schema 24
@@ -631,6 +634,7 @@ class FileStore(MemoryStore):
                "pauses": self.pauses, "next_pause_id": self.next_pause_id,
                "blockers": self.blockers, "blocker_events": self.blocker_events,
                "next_blocker_id": self.next_blocker_id, "next_blocker_event_id": self.next_blocker_event_id,
+               "seats": self.seats, "next_seat_id": self.next_seat_id, "drive_locks": self.drive_locks,
                "events": self.events, "next_event_id": self.next_event_id,
                "bg_commands": self.bg_commands, "next_bg_id": self.next_bg_id}
         if self.message_max_chars is not None:   # schema 15: the board's message cap

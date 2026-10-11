@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import hashlib
 import os
 import re
 import threading
@@ -2322,21 +2323,321 @@ class DriveVerdicts:
                          (None, None, None, None, None))
 
 
-class MemoryBoardContract(BoardContract, DriveVerdicts, unittest.TestCase):
+class DriveHelpers:
+    """Seat and claim helpers shared by the drive claim tests (no tests here)."""
+
+    def goal_job(self, job="J"):
+        self.b.open_job(job, None, None, None, "me", goal="G")
+
+    def seat(self, job, name, generation=1, **over):
+        fields = dict(role="engineer", harness="claude", model="sonnet", workdir=f"/w/{name}",
+                      brief_path=f"/w/{name}/BRIEF.md", requested_by="lead")
+        fields.update(over)
+        return self.b.request_seat(job, generation, name, **fields)
+
+    def claim(self, s, *, locks=(), paths=None, launch_id=None, action=None, attempt=1, ruling=False,
+              max_host_running=4, generation=None):
+        return self.b.claim_drive_launch(
+            job=s.job, generation=s.generation if generation is None else generation,
+            action_id=action or f"1|seat|{s.seat}", attempt=attempt, launch_id=launch_id or f"L-{s.seat}-{attempt}",
+            seat_id=s.id, seat_revision=s.revision, harness="claude", reserve_usd=5, reserve_minutes=60,
+            locks=list(locks), lock_paths=dict(paths or {}), lock_seconds=4200,
+            max_host_running=max_host_running, ruling=ruling)
+
+    @staticmethod
+    def wt(root):
+        return "wt:" + hashlib.sha256(root.encode()).hexdigest()
+
+
+class DriveClaims(DriveHelpers):
+    """Schema 25 seats, drive locks and the atomic launch claim (a mixin: each backend's contract
+    class runs these on its own store)."""
+
+    def test_claim_is_atomic_and_unique(self):
+        self.goal_job()
+        s = self.b.request_seat("J", 1, "eng-a", role="engineer", harness="claude", model="sonnet",
+                                workdir="/w/a", brief_path="/w/a/BRIEF.md", requested_by="lead")
+        r = self.b.claim_drive_launch(job="J", generation=1, action_id="1|seat|eng-a", attempt=1,
+                                      launch_id="L1", seat_id=s.id, seat_revision=s.revision, harness="claude",
+                                      reserve_usd=5, reserve_minutes=60, locks=["wt:aaa"], lock_paths={"wt:aaa": "/w/a"},
+                                      lock_seconds=4200, max_host_running=4)
+        self.assertIsNotNone(r)
+        self.assertEqual(self.b.seat("J", 1, "eng-a").state, "running")
+        again = self.b.claim_drive_launch(job="J", generation=1, action_id="1|seat|eng-a", attempt=1,
+                                          launch_id="L2", seat_id=s.id, seat_revision=s.revision, harness="claude",
+                                          reserve_usd=5, reserve_minutes=60, locks=[], lock_paths={},
+                                          lock_seconds=1, max_host_running=4)
+        self.assertIsNone(again)                     # stale revision and duplicate attempt
+
+    def test_duplicate_attempt_is_refused_even_with_a_fresh_seat_revision(self):
+        self.goal_job()
+        a = self.seat("J", "a")
+        self.assertIsNotNone(self.claim(a, launch_id="L1"))
+        self.assertTrue(self.b.finish_restart(self.b.restarts("J")[0].id, "completed"))
+        idle = self.b.set_seat_state(a.id, self.b.seat("J", 1, "a").revision, "idle")
+        self.assertIsNone(self.claim(idle, launch_id="L2"))   # same action and attempt: UNIQUE refuses
+        self.assertEqual(self.b.seat("J", 1, "a").state, "idle")   # the refused claim changed nothing
+        self.assertIsNotNone(self.claim(idle, launch_id="L3", attempt=2))
+
+    def test_locks_all_or_nothing(self):
+        self.goal_job()
+        a = self.seat("J", "a")
+        c = self.seat("J", "c")
+        self.assertIsNotNone(self.claim(a, locks=["land:x:main", "land:y:main"]))
+        self.assertIsNone(self.claim(c, locks=["land:y:main", "land:z:main"]))
+        self.assertEqual({l.key for l in self.b.drive_locks("land:")}, {"land:x:main", "land:y:main"})
+        self.assertEqual(self.b.seat("J", 1, "c").state, "requested")   # refused: the seat is untouched
+
+    def test_request_seat_idempotent(self):
+        self.goal_job()
+        one = self.seat("J", "a")
+        two = self.seat("J", "a")
+        self.assertEqual((one.id, one.revision), (two.id, two.revision))
+
+    def test_changed_request_while_requested_bumps_revision_and_otherwise_refuses(self):
+        self.goal_job()
+        one = self.seat("J", "a")
+        two = self.seat("J", "a", model="opus")
+        self.assertEqual((two.id, two.revision, two.model), (one.id, one.revision + 1, "opus"))
+        self.assertIsNotNone(self.claim(two))
+        with self.assertRaisesRegex(ValueError, "seat is running: release it first"):
+            self.seat("J", "a", model="haiku")
+        self.assertEqual(self.b.seat("J", 1, "a").model, "opus")
+
+    def test_request_refuses_an_unknown_harness_and_complexity(self):
+        self.goal_job()
+        with self.assertRaises(ValueError):
+            self.seat("J", "a", harness="gemini")
+        with self.assertRaises(ValueError):
+            self.seat("J", "a", complexity="huge")
+        self.assertIsNone(self.b.seat("J", 1, "a"))
+
+    def test_seats_are_per_generation_and_closed_ones_can_be_hidden(self):
+        self.goal_job()
+        self.seat("J", "a")
+        self.seat("J", "b", generation=2)
+        self.assertEqual([s.seat for s in self.b.seats("J", 1)], ["a"])
+        self.assertIsNone(self.b.seat("J", 2, "a"))
+        released = self.b.set_seat_state(self.b.seat("J", 1, "a").id, 1, "released")
+        self.assertEqual(released.state, "released")
+        self.assertEqual(self.b.seats("J", 1, include_closed=False), [])
+        self.assertEqual([s.seat for s in self.b.seats("J", 1)], ["a"])
+
+    def test_set_seat_state_is_compare_and_swap(self):
+        self.goal_job()
+        s = self.seat("J", "a")
+        self.assertIsNone(self.b.set_seat_state(s.id, s.revision + 5, "idle"))
+        moved = self.b.set_seat_state(s.id, s.revision, "failed", last_outcome="attempts ran out")
+        self.assertEqual((moved.state, moved.revision, moved.last_outcome), ("failed", s.revision + 1,
+                                                                             "attempts ran out"))
+        self.assertIsNone(self.b.set_seat_state(s.id, s.revision, "idle"))   # the old revision is stale
+
+    def test_a_failed_or_released_seat_cannot_be_claimed(self):
+        self.goal_job()
+        s = self.seat("J", "a")
+        failed = self.b.set_seat_state(s.id, s.revision, "failed")
+        self.assertIsNone(self.claim(failed))
+        self.assertEqual(self.b.seat("J", 1, "a").state, "failed")
+
+    def test_claim_refuses_a_generation_the_seat_is_not_in(self):
+        self.goal_job()
+        s = self.seat("J", "a")
+        self.assertIsNone(self.claim(s, generation=2))
+        self.assertEqual(self.b.seat("J", 1, "a").state, "requested")
+
+    def test_nested_worktrees_conflict(self):
+        self.goal_job()
+        a, c = self.seat("J", "a"), self.seat("J", "c")
+        self.assertIsNotNone(self.claim(a, locks=[self.wt("/w/repo")], paths={self.wt("/w/repo"): "/w/repo"}))
+        self.assertIsNone(self.claim(c, locks=[self.wt("/w/repo/sub")],
+                                     paths={self.wt("/w/repo/sub"): "/w/repo/sub"}))
+        self.assertEqual(self.b.seat("J", 1, "c").state, "requested")
+
+    def test_the_same_checkout_is_claimed_once(self):
+        self.goal_job()
+        a, c = self.seat("J", "a"), self.seat("J", "c")
+        self.assertIsNotNone(self.claim(a, locks=[self.wt("/w/repo")], paths={self.wt("/w/repo"): "/w/repo"}))
+        self.assertIsNone(self.claim(c, locks=[self.wt("/w/repo")], paths={self.wt("/w/repo"): "/w/repo"}))
+        self.assertEqual(self.b.seat("J", 1, "c").state, "requested")
+
+    def test_the_root_path_decides_an_overlap_not_the_key(self):
+        self.goal_job()
+        a, c = self.seat("J", "a"), self.seat("J", "c")
+        self.assertIsNotNone(self.claim(a, locks=["wt:one"], paths={"wt:one": "/w/repo"}))
+        self.assertIsNone(self.claim(c, locks=["wt:two"], paths={"wt:two": "/w/repo"}))
+
+    def test_a_stale_seat_revision_is_refused_even_when_the_seat_could_launch(self):
+        self.goal_job()
+        s = self.seat("J", "a")
+        self.assertIsNotNone(self.claim(s, attempt=1))           # the claim moves s past its revision
+        self.assertTrue(self.b.finish_restart(self.b.restarts("J")[0].id, "completed"))
+        idle = self.b.set_seat_state(s.id, self.b.seat("J", 1, "a").revision, "idle")
+        self.assertEqual(idle.state, "idle")
+        self.assertIsNone(self.claim(s, attempt=2))              # s holds the revision before the claim
+        self.assertIsNotNone(self.claim(idle, attempt=2))
+
+    def test_worktree_ancestor_and_sibling_roots(self):
+        self.goal_job()
+        a, c = self.seat("J", "a"), self.seat("J", "c")
+        self.assertIsNotNone(self.claim(a, locks=[self.wt("/w/repo/sub")],
+                                        paths={self.wt("/w/repo/sub"): "/w/repo/sub"}))
+        # an ancestor of a live root conflicts too
+        self.assertIsNone(self.claim(c, locks=[self.wt("/w/repo")], paths={self.wt("/w/repo"): "/w/repo"}))
+        # a sibling whose name only starts with the same text is not nested
+        self.assertIsNotNone(self.claim(c, locks=[self.wt("/w/repo-2")], paths={self.wt("/w/repo-2"): "/w/repo-2"}))
+
+    def test_a_worktree_lock_needs_its_root_path(self):
+        self.goal_job()
+        s = self.seat("J", "a")
+        with self.assertRaises(ValueError):
+            self.claim(s, locks=[self.wt("/w/repo")])
+        self.assertEqual(self.b.seat("J", 1, "a").state, "requested")
+
+    def test_host_running_cap_and_ruling_headroom(self):
+        self.goal_job()
+        a, c, d = self.seat("J", "a"), self.seat("J", "c"), self.seat("J", "d")
+        self.assertIsNotNone(self.claim(a, max_host_running=1))
+        self.assertIsNone(self.claim(c, max_host_running=1))
+        self.assertIsNotNone(self.claim(c, max_host_running=1, ruling=True))   # cap + 1 for a ruling
+        self.assertIsNone(self.claim(d, max_host_running=1, ruling=True))      # the headroom is one
+
+    def test_release_frees_the_locks_and_renew_extends_them(self):
+        self.goal_job()
+        a, c = self.seat("J", "a"), self.seat("J", "c")
+        self.assertIsNotNone(self.claim(a, locks=["land:x:main"], launch_id="LA"))
+        self.assertIsNone(self.claim(c, locks=["land:x:main"], launch_id="LC"))
+        self.assertEqual(self.b.renew_drive_locks("LA", self.b.now() + dt.timedelta(hours=2)), 1)
+        self.assertEqual(self.b.renew_drive_locks("nope", self.b.now()), 0)
+        self.assertEqual(self.b.release_drive_locks("LA"), 1)
+        self.assertEqual(self.b.release_drive_locks("LA"), 0)
+        self.assertEqual(self.b.drive_locks("land:"), [])
+        self.assertIsNotNone(self.claim(c, locks=["land:x:main"], launch_id="LC2"))
+
+    def test_drive_locks_list_by_prefix_with_their_fields(self):
+        self.goal_job()
+        a = self.seat("J", "a")
+        self.assertIsNotNone(self.claim(a, locks=["wt:b", "land:x:main"], paths={"wt:b": "/w/b"}, launch_id="LA",
+                                        action="7|seat|a"))
+        locks = self.b.drive_locks()
+        self.assertEqual([l.key for l in locks], ["land:x:main", "wt:b"])
+        wt = self.b.drive_locks("wt:")[0]
+        self.assertEqual((wt.key, wt.holder, wt.job, wt.generation, wt.launch_id, wt.path),
+                         ("wt:b", "7|seat|a", "J", 1, "LA", "/w/b"))
+        self.assertEqual(self.b.drive_locks("land:")[0].path, None)
+
+    def test_the_claim_writes_a_restart_row_with_its_reservation(self):
+        self.goal_job()
+        a = self.seat("J", "a")
+        r = self.claim(a, launch_id="LA", action="3|seat|a")
+        self.assertEqual((r.action_id, r.launch_id, r.reserved_usd, r.outcome, r.ended_at),
+                         ("3|seat|a", "LA", 5, None, None))
+        self.assertEqual(r.minutes_cap, 60)
+        self.assertTrue(self.b.finish_restart(r.id, "completed", cost_usd=1.25, tokens_in=100, tokens_out=50))
+        done = self.b.restarts("J")[0]
+        self.assertEqual((done.outcome, done.cost_usd, done.tokens_in, done.tokens_out), ("completed", 1.25, 100, 50))
+        self.assertFalse(self.b.finish_restart(r.id, "failed"))   # only an open row finishes
+
+    def test_worktree_root_is_the_first_ancestor_with_a_git_entry(self):
+        import tempfile
+        from swarm.supervisor.worktree import worktree_root
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = os.path.join(tmp, "repo")
+            os.makedirs(os.path.join(repo, "sub", "deep"))
+            with open(os.path.join(repo, ".git"), "w") as f:     # a worktree: a .git file
+                f.write("gitdir: /elsewhere\n")
+            self.assertEqual(worktree_root(os.path.join(repo, "sub", "deep")), os.path.realpath(repo))
+            self.assertEqual(worktree_root(repo), os.path.realpath(repo))
+            os.makedirs(os.path.join(repo, "sub", ".git"))       # a nested repo: its own root
+            self.assertEqual(worktree_root(os.path.join(repo, "sub", "deep")), os.path.realpath(os.path.join(repo, "sub")))
+            bare = os.path.join(tmp, "nogit")
+            os.makedirs(bare)
+            root = worktree_root(bare)   # no git entry under tmp: never the tmp tree itself
+            self.assertTrue(root is None or not root.startswith(os.path.realpath(tmp)))
+
+
+_CLAIM_CHILD = """
+import hashlib, json, sys, time
+from swarm.board import open_board
+cfg, seat, root, start = json.loads(sys.argv[1]), sys.argv[2], sys.argv[3], float(sys.argv[4])
+b = open_board(cfg)
+s = b.seat("J", 1, seat)
+key = "wt:" + hashlib.sha256(root.encode()).hexdigest()
+time.sleep(max(0.0, start - time.time()))
+won = b.claim_drive_launch(job="J", generation=1, action_id="1|seat|" + seat, attempt=1,
+                           launch_id="L-" + seat, seat_id=s.id, seat_revision=s.revision, harness="claude",
+                           reserve_usd=5, reserve_minutes=60, locks=[key], lock_paths={key: root},
+                           lock_seconds=4200, max_host_running=4) is not None
+print("won" if won else "lost")
+"""
+
+
+class DriveClaimRace(DriveHelpers):
+    """Two processes claim nested worktree roots of one host at the same moment: one wins (RR6)."""
+
+    def race(self):
+        import json
+        import subprocess
+        import sys
+        import time
+        self.goal_job()
+        self.seat("J", "a")
+        self.seat("J", "c")
+        root = "/w/race"
+        cfg = json.dumps(self.h.cfg, default=str)
+        start = str(time.time() + 4)
+        lib = os.path.dirname(os.path.dirname(os.path.abspath(sys.modules["swarm"].__file__)))
+        env = dict(os.environ, PYTHONPATH=lib + os.pathsep + os.environ.get("PYTHONPATH", ""))
+        procs = [subprocess.Popen([sys.executable, "-B", "-c", _CLAIM_CHILD, cfg, seat, path, start],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+                 for seat, path in (("a", root), ("c", root + "/sub"))]
+        results = []
+        for proc in procs:
+            out, err = proc.communicate(timeout=120)
+            self.assertEqual(proc.returncode, 0, err)
+            results.append(out.strip())
+        return results
+
+    def test_concurrent_nested_root_claims_one_wins(self):
+        results = self.race()
+        self.assertEqual(sorted(results), ["lost", "won"])
+        self.assertEqual(len(self.b.drive_locks("wt:")), 1)
+
+
+class SqliteDriveClaimRace(DriveClaimRace, unittest.TestCase):
+    def setUp(self):
+        self.h = SqliteHarness()
+        self.h.reset()
+        self.addCleanup(self.h.close)
+        self.b = self.h.board()
+        self.addCleanup(self.b.close)
+
+
+@unittest.skipUnless(os.environ.get("SWARM_TEST_CONFIG"),
+                     "set SWARM_TEST_CONFIG to a throwaway Postgres board config to run")
+class PostgresDriveClaimRace(DriveClaimRace, unittest.TestCase):
+    def setUp(self):
+        self.h = PostgresHarness(os.environ["SWARM_TEST_CONFIG"])
+        self.h.reset()
+        self.addCleanup(self.h.close)
+        self.b = self.h.board()
+        self.addCleanup(self.b.close)
+
+
+class MemoryBoardContract(BoardContract, DriveVerdicts, DriveClaims, unittest.TestCase):
     harness_factory = MemoryHarness
 
 
-class SqliteBoardContract(BoardContract, DriveVerdicts, unittest.TestCase):
+class SqliteBoardContract(BoardContract, DriveVerdicts, DriveClaims, unittest.TestCase):
     harness_factory = SqliteHarness
 
 
-class FileBoardContract(BoardContract, DriveVerdicts, unittest.TestCase):
+class FileBoardContract(BoardContract, DriveVerdicts, DriveClaims, unittest.TestCase):
     harness_factory = FileHarness
 
 
 @unittest.skipUnless(os.environ.get("SWARM_TEST_CONFIG"),
                      "set SWARM_TEST_CONFIG to a throwaway Postgres board config to run")
-class PostgresBoardContract(BoardContract, DriveVerdicts, unittest.TestCase):
+class PostgresBoardContract(BoardContract, DriveVerdicts, DriveClaims, unittest.TestCase):
     harness_factory = staticmethod(lambda: PostgresHarness(os.environ["SWARM_TEST_CONFIG"]))
 
 
