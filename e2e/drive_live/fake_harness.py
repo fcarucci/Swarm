@@ -4,12 +4,12 @@
 It behaves like an agent session as far as the board can tell: it reads its prompt on stdin, finds its
 `[swarm job: J]` / `[swarm role: R]` / seat tags, goes through the REAL hooks (`bin/swarm-hook turn|done|stop`,
 with a synthetic session id, as tests/test_pause_e2e.py does) around every `swarm` command it runs, does
-the role's work with real git against the fake forge, and prints a Claude-style result JSON with
+the role's work with real git against the fake hub, and prints a Claude-style result JSON with
 `total_cost_usd` (or Codex-style JSONL). Behaviour per role comes from the scenario script (scripts/*.json):
 the n-th session of a role (or of a seat) takes the n-th entry of a list.
 
 Stdlib only; it finds its run directory from $HOME (<run>/home) and reads <run>/harness.json
-({"repo": <checkout under test>, "script": <script path>, "forge": <forge dir>, "job": <job>}).
+({"repo": <checkout under test>, "script": <script path>, "hub": <hub dir>, "job": <job>}).
 Role commands are in the ROLE_* functions: if the integrated drive prompts or CLI differ from the plan
 (plan Tasks 6b, 10, 11), this is the one place to adapt.
 """
@@ -29,12 +29,12 @@ HOME = Path(os.environ["HOME"])
 RUN = HOME.parent
 CONF = json.loads((RUN / "harness.json").read_text())
 REPO = Path(CONF["repo"])
-FORGE = Path(CONF["forge"])
+HUB = Path(CONF["hub"])
 SCRIPT = json.loads(Path(CONF["script"]).read_text())
 LOGS = RUN / "logs"
 SWARM = str(RUN / "bin" / "swarm")
 HOOK = str(REPO / "bin" / "swarm-hook")
-FORGE_PY = str(Path(__file__).resolve().parent / "forge.py")
+HUB_PY = str(Path(__file__).resolve().parent / "hub.py")
 
 
 def tag(prompt: str, name: str) -> str | None:
@@ -172,7 +172,7 @@ def role_lead(s: Session, n: int) -> None:
                 args += ["--workdir", str(RUN / "work" / seat["seat"])]
             s.swarm(*args)
         return
-    head = subprocess.run(["git", "--git-dir", str(FORGE / "origin.git"), "rev-parse", "main"],
+    head = subprocess.run(["git", "--git-dir", str(HUB / "origin.git"), "rev-parse", "main"],
                           capture_output=True, text=True).stdout.strip()
     landed = (RUN / "landed.json").exists() or head != CONF.get("initial_head")
     if landed:
@@ -185,7 +185,7 @@ def role_engineer(s: Session, n: int) -> None:
     w = RUN / "work" / (s.seat or "engineer")
     if not (w / ".git").exists():
         w.parent.mkdir(parents=True, exist_ok=True)
-        s.git(w.parent, "clone", "-q", "file://" + str(FORGE / "origin.git"), str(w))
+        s.git(w.parent, "clone", "-q", "file://" + str(HUB / "origin.git"), str(w))
         s.git(w, "checkout", "-q", "-b", f"feat/{s.seat}")
     edit_toy(w, spec.get("change", "version"), n)
     s.git(w, "add", "-A")
@@ -235,13 +235,13 @@ def role_integrator(s: Session, n: int, prompt: str) -> None:
     branch = art.split("@")[0]
     w = RUN / "work" / "integrator"
     if not (w / ".git").exists():
-        s.git(w.parent, "clone", "-q", "file://" + str(FORGE / "origin.git"), str(w))
+        s.git(w.parent, "clone", "-q", "file://" + str(HUB / "origin.git"), str(w))
     s.git(w, "fetch", "-q", "--all")
     s.git(w, "checkout", "-q", "-B", branch, f"origin/{branch}")
     s.git(w, "rebase", "origin/main")
     sha = s.git(w, "rev-parse", "HEAD").stdout.strip()
     s.git(w, "push", "-q", "-f", "origin", f"{branch}:refs/heads/{branch}")
-    r = s.sh([sys.executable, FORGE_PY, "ci-check", "--forge", str(FORGE), "--run", sha])
+    r = s.sh([sys.executable, HUB_PY, "ci-check", "--hub", str(HUB), "--run", sha])
     if r.returncode == 0:
         s.swarm("land", "--job", s.job, "--artifact", f"{branch}@{sha}")
         (RUN / "landed.json").write_text(json.dumps({"sha": sha}))

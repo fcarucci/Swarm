@@ -7,7 +7,7 @@ Everything a run touches lives under ONE run directory below QA_ROOT (default
                        private dir and ledger, mirrors): the shared ~/.local/share/swarm is not reachable
     <run>/pg/          a throwaway Postgres cluster (127.0.0.1, its own random port, trust auth); the
                        sqlite and file backends need none
-    <run>/forge/       the fake forge: bare repositories reached by file:// URLs only
+    <run>/hub/       the fake hub: bare repositories reached by file:// URLs only
     <run>/work/        the job's work tree(s) and the seats' work trees
     <run>/bin/         `swarm`, `claude`, `codex` shims (the fake harness in fake mode)
     <run>/logs/        supervisor passes, harness logs, the timeline and the cost report
@@ -200,7 +200,7 @@ def toml_str(v) -> str:
 
 
 class Run:
-    """One isolated run: home, board, forge, shims, logs, timeline. `with Run(...) as run:` stops the
+    """One isolated run: home, board, hub, shims, logs, timeline. `with Run(...) as run:` stops the
     throwaway Postgres on the way out, whatever happens."""
 
     def __init__(self, name: str, *, backend: str = "postgres", harness: str = "fake",
@@ -209,7 +209,7 @@ class Run:
         stamp = stamp or dt.datetime.now().strftime("%Y%m%dT%H%M%S")
         self.dir = check_run_dir(QA_ROOT / "runs" / f"{stamp}-{name}")
         self.home = self.dir / "home"
-        self.forge_dir = self.dir / "forge"
+        self.hub_dir = self.dir / "hub"
         self.work = self.dir / "work"
         self.bin = self.dir / "bin"
         self.logs = self.dir / "logs"
@@ -229,7 +229,7 @@ class Run:
     def setup(self) -> None:
         if not (VENV / "bin" / "python").exists():
             raise Refused(f"{VENV}: no venv; run e2e/drive_live/setup_venv.sh once")
-        for d in (self.home, self.forge_dir, self.work, self.bin, self.logs):
+        for d in (self.home, self.hub_dir, self.work, self.bin, self.logs):
             d.mkdir(parents=True, exist_ok=True)
         os.chmod(self.home, 0o700)
         if self.pg:
@@ -411,7 +411,7 @@ def wait_until(pred, *, timeout: float, interval: float = 2.0, what: str = "cond
         time.sleep(interval)
 
 
-def kill_tree(pid: int, sig=signal.SIGKILL) -> None:
+def kill_tree(pid: int, sig=getattr(signal, "SIGKILL", signal.SIGTERM)) -> None:
     """SIGKILL a process and its descendants (a fake session and what it forked), not its group: the
     runner that started it may share the group and must be killed only on purpose."""
     kids = subprocess.run(["pgrep", "-P", str(pid)], capture_output=True, text=True).stdout.split()
