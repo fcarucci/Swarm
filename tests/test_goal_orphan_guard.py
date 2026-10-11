@@ -43,6 +43,24 @@ class OrphanGuardTests(unittest.TestCase):
         self.assertTrue(self.board.close_job("e", "cancelled", "by a person"))
         self.assertEqual(self.status("e"), "cancelled")
 
+    def test_any_auto_close_of_a_drive_job_is_refused(self):
+        self.board.open_job("d", None, "t", None, "u")
+        self.board.set_job_data("d", "drive.enabled", "1")
+        for outcome in ("auto-closed: waiting with no live agents and no verdict",
+                        "auto-closed: no progress for 24 h", "auto-closed: 3/3 agents completed"):
+            self.h.conn.execute("UPDATE jobs SET status = 'failed', outcome = %s, closed_by = 'auto' WHERE job = 'd'",
+                                (outcome,))
+            self.assertEqual(self.status("d"), "active", outcome)
+        self.board.set_job_data("d", "drive.enabled", None)           # no longer claimed: closes as before
+        self.h.conn.execute("UPDATE jobs SET status = 'failed', outcome = 'x', closed_by = 'auto' WHERE job = 'd'")
+        self.assertEqual(self.status("d"), "failed")
+
+    def test_the_driver_and_a_person_still_close_a_drive_job(self):
+        self.board.open_job("e", None, "t", None, "u")
+        self.board.set_job_data("e", "drive.enabled", "1")
+        self.assertTrue(self.board.close_job("e", "failed", "unreachable: x", closed_by="driver"))
+        self.assertEqual(self.status("e"), "failed")
+
 
 if __name__ == "__main__":
     unittest.main()

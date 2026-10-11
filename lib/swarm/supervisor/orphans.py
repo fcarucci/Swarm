@@ -1,8 +1,9 @@
 """Recover locally-enrolled jobs whose last coordinator and workers disappeared."""
 from __future__ import annotations
 import datetime as dt
+from swarm.board.base import quiet_start
 from swarm.verdicts import SETTLED_VERDICTS
-from swarm.supervisor.stuck import SUPERVISOR_NAME, WAITING_PREFIX
+from swarm.supervisor.stuck import SUPERVISOR_NAME, WAITING_PREFIX, drive_claimed
 
 REASON = "orphan-coordinator:"
 
@@ -83,6 +84,8 @@ def eligible(board, cfg, js, sup, now):
     from swarm.cli import OrchestratorWatch
     if js.status != "active" or not js.supervise:
         return False
+    if drive_view(board, cfg, js.job)[0] or drive_claimed(board, js.job):
+        return False          # the driver restarts its own seats; never a generic orphan coordinator
     gate = drive_gate(board, cfg, js.job)
     if gate is None and js.waiting_on and not js.waiting_on.startswith(WAITING_PREFIX):
         return False  # all explicit external/human waits stay under owner control
@@ -91,7 +94,7 @@ def eligible(board, cfg, js, sup, now):
     if gate and any(coordinator_seat(seat) for seat in gate):
         return False  # the coordinator itself waits on a question: it is not restarted
     cutoff = now - dt.timedelta(minutes=sup["orphan_minutes"])
-    activity = js.last_activity_at or js.activated_at or js.created_at
+    activity = quiet_start(js, now=now)
     if activity > cutoff or js.started or js.running or js.idle:
         return False
     rows = board.agents(js.job)
