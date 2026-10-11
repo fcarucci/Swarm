@@ -175,34 +175,50 @@ class PresenceTests(unittest.TestCase):
             self.assertEqual(runner.unit_presence(UNIT), "present")
 
     def test_cgroup_v1_is_unknown(self):
-        with _Tree(v2=False, scope=(SLICE, UNIT), events="populated 0\n"):
+        with _Tree(v2=False, scope=(SLICE, UNIT), events="populated 0\nfrozen 0\n"):
             with mock.patch.object(runner, "_systemctl", return_value=None):
                 self.assertEqual(runner.unit_presence(UNIT, slice_name=SLICE), "unknown")
 
     def test_wrong_slice_is_unknown(self):
         # the run recorded session.slice, but the user manager's tree only has app.slice
-        with _Tree(scope=(SLICE, UNIT), events="populated 0\n"):
+        with _Tree(scope=(SLICE, UNIT), events="populated 0\nfrozen 0\n"):
             with mock.patch.object(runner, "_systemctl", return_value=None):
                 self.assertEqual(runner.unit_presence(UNIT, slice_name="session.slice"), "unknown")
                 self.assertEqual(runner.unit_presence(UNIT, slice_name=SLICE), "absent")
 
     def test_slice_name_that_is_a_path_is_refused(self):
         # a populated scope sits where "../x" resolves to: an unvalidated join would read it
-        with _Tree(scope=(SLICE, UNIT), events="populated 0\n") as t:
+        with _Tree(scope=(SLICE, UNIT), events="populated 0\nfrozen 0\n") as t:
             escaped = t.parent / "x" / UNIT
             escaped.mkdir(parents=True)
-            (escaped / "cgroup.events").write_text("populated 0\n")
+            (escaped / "cgroup.events").write_text("populated 0\nfrozen 0\n")
             with mock.patch.object(runner, "_systemctl", return_value=None):
                 for bad in ("../x", "x/" + SLICE, "/abs.slice", "app.slice/..", "", "app.scope"):
                     self.assertEqual(runner.unit_presence(UNIT, slice_name=bad), "unknown", bad)
 
     def test_populated_events_decide_presence(self):
-        with _Tree(scope=(SLICE, UNIT), events="populated 1\n") as t:
+        with _Tree(scope=(SLICE, UNIT), events="populated 1\nfrozen 0\n") as t:
             with mock.patch.object(runner, "_systemctl", return_value=None):
                 self.assertEqual(runner.unit_presence(UNIT, slice_name=SLICE), "present")
-        with _Tree(scope=(SLICE, UNIT), events="populated 0\n") as t:
+        with _Tree(scope=(SLICE, UNIT), events="populated 0\nfrozen 0\n") as t:
             with mock.patch.object(runner, "_systemctl", return_value=None):
                 self.assertEqual(runner.unit_presence(UNIT, slice_name=SLICE), "absent")
+
+    def test_real_events_file_with_extra_keys_reads_populated(self):
+        # the kernel's file is two lines (populated, frozen); newer kernels add keys: only `populated` counts
+        for text, want in (("populated 1\nfrozen 0\n", "present"),
+                           ("populated 0\nfrozen 1\n", "absent"),
+                           ("frozen 0\npopulated 1\nnew_key 7\n", "present"),
+                           ("populated 0\nfrozen 0\nnew_key 7\n", "absent")):
+            with _Tree(scope=(SLICE, UNIT), events=text):
+                with mock.patch.object(runner, "_systemctl", return_value=None):
+                    self.assertEqual(runner.unit_presence(UNIT, slice_name=SLICE), want, text)
+
+    def test_populated_key_must_appear_once_with_0_or_1(self):
+        for text in ("populated 1\npopulated 0\n", "populated 2\nfrozen 0\n", "frozen 0\n", "populated 1 2\n"):
+            with _Tree(scope=(SLICE, UNIT), events=text):
+                with mock.patch.object(runner, "_systemctl", return_value=None):
+                    self.assertEqual(runner.unit_presence(UNIT, slice_name=SLICE), "unknown", text)
 
     def test_missing_or_unexpected_events_is_unknown(self):
         for events in (None, "populated maybe\n", "frozen 1\n", ""):
@@ -217,7 +233,7 @@ class PresenceTests(unittest.TestCase):
         def access(path, mode):
             return not str(path).endswith("user@%d.service" % os.getuid()) and real_access(path, mode)
 
-        with _Tree(scope=(SLICE, UNIT), events="populated 0\n"):
+        with _Tree(scope=(SLICE, UNIT), events="populated 0\nfrozen 0\n"):
             with mock.patch.object(runner, "_systemctl", return_value=None), \
                  mock.patch.object(runner.os, "access", side_effect=access):
                 self.assertEqual(runner.unit_presence(UNIT, slice_name=SLICE), "unknown")
@@ -230,11 +246,11 @@ class PresenceTests(unittest.TestCase):
             raise subprocess.TimeoutExpired(argv, kw.get("timeout"))
 
         with clock.use(FakeClock(100.0)), mock.patch.object(runner.subprocess, "run", side_effect=fake_run):
-            with _Tree(scope=(SLICE, UNIT), events="populated 0\n"):
+            with _Tree(scope=(SLICE, UNIT), events="populated 0\nfrozen 0\n"):
                 self.assertEqual(runner.unit_presence(UNIT, slice_name=SLICE, deadline=103.0), "absent")
         self.assertEqual(seen["timeout"], 3.0)
         with clock.use(FakeClock(100.0)), mock.patch.object(runner.subprocess, "run", side_effect=fake_run):
-            with _Tree(scope=(SLICE, UNIT), events="populated 0\n"):
+            with _Tree(scope=(SLICE, UNIT), events="populated 0\nfrozen 0\n"):
                 runner.unit_presence(UNIT, slice_name=SLICE)
         self.assertEqual(seen["timeout"], runner.SYSTEMCTL_TIMEOUT)
 
