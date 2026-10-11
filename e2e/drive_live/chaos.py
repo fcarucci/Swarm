@@ -146,7 +146,8 @@ def today_forged_receipt(args):
         _env(run)
         from swarm import receipts
         key = run.board_key()
-        dec = {"verdict": "met", "scope": "goal", "generation": 1, "candidate": "main@" + "a" * 40, "req": None}
+        dec = {"verdict": "met", "scope": "goal", "generation": 1, "candidate": "main@" + "a" * 40, "req": None,
+               "artifact": None}   # Task 5's verdict decision fields (a goal verdict's artifact is None)
         r = receipts.Receipt(board_key=key, job="J", generation=1, incarnation="f" * 32, action_id="a1", attempt=1,
                              seat="judge", kind="verdict", record_id="7", rev=1,
                              content_sha=receipts.content_sha("verdict", dec), args_sha=receipts.args_sha(["swarm", "verdict"]),
