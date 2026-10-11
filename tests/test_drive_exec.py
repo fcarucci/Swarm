@@ -1314,8 +1314,10 @@ class FixRoundTests(ExecEnv):
             real = next(r for r in self.b._s().restarts if r["id"] == run["restart_id"])
             self.b._s().restarts.append(dict(real, id=999, ended_at=self.now(), outcome="failed", attempt=77,
                                              new_agent_key=SESS1))
-        with mock.patch.object(runner, "reap", lambda *a, **k: None):
+        with mock.patch.object(runner, "reap", lambda *a, **k: None), \
+                mock.patch.object(self.b, "set_seat_state") as moved:      # the board's own guard must not be the only defence
             self.rec(1)
+        moved.assert_not_called()
         seat = self.b.seat("J", 1, "eng-a")
         self.assertEqual((seat.state, seat.session_id), ("running", None))
 
