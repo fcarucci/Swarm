@@ -1,14 +1,14 @@
 # Team roles and decisions
 
-Each role invocation has a bounded deliverable, a durable brief path, task IDs, and a return to PM. PM may resume a compatible same-role agent where the host supports it; a return alone does not prove its slot is free. Roles can run in waves. A separate reviewer/QA/product context must never be manufactured by renaming or reusing the author. The shared Swarm board may show author messages to everyone; independent reviewers inspect the requirement and change directly instead of relying on those messages.
+Each role invocation has a bounded deliverable, a durable brief path, task IDs, and a return to PM (in a drive job the return goes to the lead and the driver; see below). PM may resume a compatible same-role agent where the host supports it; a return alone does not prove its slot is free. Roles can run in waves. A separate reviewer/QA/product context must never be manufactured by renaming or reusing the author. The shared Swarm board may show author messages to everyone; independent reviewers inspect the requirement and change directly instead of relying on those messages.
 
-Each seat is shown on the board by a short **title** (display only, set by a `[swarm title: ...]` line in its spawn prompt or by `swarm title`): `EL` (`engineering_lead`), `PM` (`project_manager`), `Product` (`product_manager`), `QA`, `Judge`, `Build` (`build_engineer`), `Reviewer`, `Verifier`, `Eng` (`engineer`, optionally with a scope such as `Eng: board view`). EL keeps the engineers' titles current when scopes change. Titles never replace the role tag, which addresses and enforces.
+Each seat is shown on the board by a short **title** (display only, set by a `[swarm title: ...]` line in its launch prompt or by `swarm title`): `EL` (`engineering_lead`), `PM` (`project_manager`), `Product` (`product_manager`), `QA`, `Judge`, `Build` (`build_engineer`), `Reviewer`, `Verifier`, `Eng` (`engineer`, optionally with a scope such as `Eng: board view`). EL keeps the engineers' titles current when scopes change. Titles never replace the role tag, which addresses and enforces.
 
 Seats: **mandatory** (always present): PM (the invoking agent), EL, QA, at least one engineer, and an independent judge. **Optional** (user's choice via `team.toml` or `swarm team --job J --add/--remove/--show`; check the effective set before staffing): `product_manager`, `build_engineer`, `reviewer`, `verifier`. Removing a mandatory seat is rejected.
 
 | Role | Seat | Decision and deliverable | Handoff |
 |---|---|---|---|
-| PM, the invoking agent | mandatory | Own job activation, board join/read, schedule, root spawns, dependency/status record, original-request comparison, user questions and reports | Give product manager the request and scope; give EL the checked product baseline; route returned requests and findings |
+| PM, the invoking agent | mandatory | Own job activation, board join/read, schedule, dependency/status record, original-request comparison, user questions and reports; dispatches roles on the host in non-drive jobs only (in a drive job the requester/observer: activates, answers, reports) | Give product manager the request and scope; give EL the checked product baseline; route returned requests and findings |
 | Product manager (`product_manager`) | optional | Own product brief, competitor research disposition, PR criteria, and product acceptance by criterion | Mark every inference; require PM to route a blocking ambiguity; hand revisioned baseline to EL; examine final candidate directly |
 | Build engineer (`build_engineer`) | optional | Own build/CI and gating: gate on the rebased result, scoped fix rounds with CI as the parallel full gate, build-slot use, head-bound integration checks | Report gate results with the head sha; Rebase and refresh review/CI if main moved and the SHA changed. Without this role EL owns these duties |
 | EL (`engineering_lead`) | mandatory | Own architecture, ER-to-PR map, final complexity tier, engineer count, assignments, integration order, and technical acceptance | Return a staffing request with task IDs, owners, dependencies, and risk; ask PM to launch roles; integrate reviewed tasks and freeze candidate |
@@ -20,7 +20,7 @@ Seats: **mandatory** (always present): PM (the invoking agent), EL, QA, at least
 
 **Absent optional roles.** No `product_manager`: EL writes the PR criteria compactly (same `PR-n` IDs, observable criteria, exclusions), PM compares them with the request, and product acceptance is done by EL and QA together and recorded as such per criterion. No `build_engineer`: EL owns build/CI gating, rebased-result checks, and scoped fix rounds. Never silently drop a duty because its role is absent.
 
-Custom-role signoffs are workflow evidence checked by PM. Only Swarm's built-in judge/verifier restrictions and spawn controls are enforced by code. A custom `reviewer` is an ordinary worker, not a read-only verifier. PM assigns reviewers, never the author.
+Custom-role signoffs are workflow evidence checked by PM. Only Swarm's built-in judge/verifier restrictions and child-launch caps are enforced by code. A custom `reviewer` is an ordinary worker, not a read-only verifier. PM assigns reviewers, never the author.
 
 ## Size the team
 
@@ -32,7 +32,7 @@ Custom-role signoffs are workflow evidence checked by PM. Only Swarm's built-in 
 
 PM's intake size is provisional. EL confirms or upgrades it after product and architecture discovery, recording why the staffing and review depth fit. A four-slot session is a scheduling constraint, not a four-person team. PM root-spawns team roles by default. Member nested spawns are only for synchronously needed short helpers within nonrefundable Swarm caps; never use them to probe host capacity. No host slot is assumed free merely because a role returned.
 
-For moderate and complex jobs, a Swarm goal and one root-spawned judge are recommended. If PM omits them, it records why and still checks all product, EL, QA, and review evidence itself.
+For moderate and complex jobs, a Swarm goal (it drives the job and seats its one judge) is recommended. If PM omits it, it records why and still checks all product, EL, QA, and review evidence itself.
 
 ## Authority and rejection
 
@@ -50,3 +50,7 @@ For any PM action, a subagent posts a concise board update **and** returns a req
 - **Default and file.** Without a file, `product_manager` is on and `build_engineer` is off. The user sets the default in `team.toml` next to the swarm config (`~/.config/swarm/team.toml`, or the path in `$SWARM_TEAM_CONFIG`); `team.example.toml` ships as a template. There is no team section in the swarm `config.toml`.
 - **Per job.** `swarm activate --job J --team product_manager,build_engineer` sets the composition at activation; `swarm team --job J --show|--add ROLE|--remove ROLE` changes it later. PM runs `--show` before every staffing wave and staffs the effective set. Removing a mandatory role is an error.
 - **Plugin.** These commands are provided by the team plugin that ships inside this skill, not by swarm core; the plugin also loads `team.toml` and handles `activate --team`. Core swarm works without it. `swarm plugins` lists loaded plugins and load errors; if `swarm team` is unknown or the plugin failed to load, run `swarm plugins`, report the error to the user, and assume the default composition only after recording that assumption. The plugin API is documented with the swarm plugin documentation, not here.
+
+## Roles in a drive job
+
+A goal job is driven (see [host procedures](hosts.md#drive-jobs)); the seats below are requested, launched, bounded and recovered by the supervisor, not by the invoking agent. The invoking agent is the **requester/observer**: it activates, answers questions, can halt or cancel, and reports. EL (the `lead` seat, opus) requests every other seat with `swarm seat request` and writes each seat's brief file. Engineers, workers and the integrator run on haiku by default, reviewers and QA on sonnet, the judge, lead and security reviewer on opus (`[drive.models]`, per job `--model ROLE=MODEL`). Reviewers are driver-launched, independent of the author, and run strict gates over haiku-written changes. The judge judges the goal (and rulings), never fixes; fixes happen on writer seats. The driver, not a PM, starts reviews, fix rounds and landings.

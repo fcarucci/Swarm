@@ -5,11 +5,71 @@ description: Use when a software project needs a coordinated engineering lead, e
 
 # Engineering team
 
-Use `swarm:swarm` for the job and board. You, the invoking agent, are the project manager (PM): keep the original request and authorization visible, own scheduling and reports, and make host-level spawns. Custom Swarm roles identify responsibilities; they do not grant product, technical, review, or QA authority in code. The built-in `judge` and `verifier` have separate Swarm controls.
+Use `swarm:swarm` for the job and board. **Every goal job is driven**: `swarm activate --job J --goal G` hands the job to the supervisor, which runs an engineering lead (EL) seat, the engineers, reviewers, QA, the judge and the landing. You, the invoking agent, are the **requester/observer**: you state the request, activate, answer questions and report. You do not schedule, spawn or integrate. Custom Swarm roles identify responsibilities; they do not grant product, technical, review, or QA authority in code. The built-in `judge` and `verifier` have separate Swarm controls.
 
-Read [host procedures](references/hosts.md) before activating a job or spawning a role. They cover Claude and Codex syntax, the installed custom-role preflight, board reads, slot budgeting, and recovery. Read [role authority](references/team-roles.md) before assigning work, [artifact contracts](references/artifacts.md) before creating baselines or freezing a candidate, [integration gates and hand-offs](references/gates.md) before the first change is opened for review, and [authorization and recovery](references/recovery.md) before writing briefs and when an agent is lost. Use the project's existing document layout; a small change can use compact records that preserve the same decisions.
+Read [host procedures](references/hosts.md) before activating a job. They cover the drive activation checklist, the EL brief template, Claude and Codex syntax for non-drive jobs, and recovery. Read [role authority](references/team-roles.md) before writing the lead brief, [artifact contracts](references/artifacts.md) before creating baselines or freezing a candidate, [integration gates and hand-offs](references/gates.md) before the first change is opened for review, and [authorization and recovery](references/recovery.md) before writing briefs and when a seat is lost. Use the project's existing document layout; a small change can use compact records that preserve the same decisions.
 
-## Run the team
+## Breaking changes in drive mode
+
+1. A goal implies drive: `swarm activate --goal` starts a driven job. `--no-drive --reason TEXT` opts out and gives the old, coordinator-run job (see [Non-drive jobs](#non-drive-jobs)).
+2. `swarm ask` in a drive job needs `--default`: the driver applies it when the question expires (`question_expiry`, 4h by default), so no question blocks the job.
+3. The requester's Agent-tool spawns are refused in drive jobs. Staffing goes through `swarm seat request`, made by the lead (or a person); the supervisor launches the seat.
+4. `swarm activate --goal` fails until `swarm supervise enable` has been run on the host (and the timer runs). Fix that first or pass `--no-drive --reason TEXT`.
+
+## Run a driven team
+
+1. Small work: skip the team and do it yourself. Otherwise capture the user's request verbatim or by stable link, constraints, approvals already given, and a provisional size.
+2. Check the host once: `swarm doctor` (supervisor timer, git 2.40 or newer, pinned credentials and a dry-run `git ls-remote` per landing destination), `swarm supervise enable` if it is not enabled. Choose the optional seats only with the user's say-so (`product_manager` and `build_engineer`; `team.toml` or `--team`).
+3. Write the requirements as files (PR criteria, observable, with exclusions) and the **lead brief** from the [EL brief template](references/hosts.md#el-brief-template). Pin the requirements at activation: `--requirements PATH` (a requirement is pinned by blob id and cannot be replaced).
+4. Activate and leave: `swarm activate --job J --goal "<what done means>" --lead-brief PATH --workdir DIR [--requirements PATH]... [--max-cost-usd N] [--ruling-reserve-usd N] [--model ROLE=MODEL]`. The spending cap (shipped default 40 USD, ruling reserve 5 USD) and every other `[drive]` value are configurable defaults; ask the user whether the default cap suits the job. The command writes the job, the lead seat request and the budgets, kicks the supervisor and returns.
+5. Observe with `swarm watch --job J` or `swarm snapshot --job J --follow` (no polling loop). As the requester session you may `swarm ask`/answer questions, `swarm halt --job J` / `unhalt`, `swarm deactivate` (that is CANCELLED), and `swarm drive budget --job J KEY=VALUE` or `swarm drive models --job J ROLE=MODEL` on a running job. Everything else is the lead's and the driver's.
+6. The lead requests seats with `swarm seat request` and posts `GOAL-READY <candidate> req=<digest>` (via `swarm goal-ready`) when it believes the goal is met. The goal judge then judges the integrated target. A job ends in **MET**, **UNREACHABLE** (the judge's verdict with reasons, or the labelled mechanical one when budget, deadline or reserve ran out: it says what was tried and what would change it) or **CANCELLED** (a person). It is never idle, stalled or waiting for you. A ruling is the judge's decision at an exhausted budget or no progress: relay UNREACHABLE reports to the user as a result, not as a failure of the process.
+7. Report delivered scope, checks, limits, accepted risks, the final verdict, cost against the cap, and any separate authorization needed for deployment or publication. Never merge, push to the target or close the job yourself.
+
+### What the driver does instead of the PM
+
+- Review: a hand-off (`swarm done`) starts an independent reviewer seat; in drive jobs the engineers run on haiku, so reviewers (sonnet) run strict gates and never the author.
+- Fixes: a verdict or review finding, or `FINALIZE_BLOCKED`, becomes a fix round on the writer's seat, bounded by `max_rounds` and `no_progress_rounds`.
+- Landing: `swarm land --job J --artifact REF` by the integrator seat; the driver lands it (rebase only, or `[land] strategy = squash-ff`; fast-forward pushes only; never a force push; CI green on the exact rebased SHA).
+- CI-FAILED triage goes into the fix round's brief; the PM-per-event procedure is [for non-drive jobs only](references/pm-events.md).
+- Models: `[drive.models]` and `--model ROLE=MODEL`: `engineer`, `worker`, `integrator` haiku; `reviewer`, `qa` sonnet; `judge`, `lead`, `security` opus.
+
+### Rules for every drive seat and brief
+
+- Never put work trees, clones, builds or scratch repos under `/tmp` (the driver refuses such workdirs); one worktree per writer under the job's work roots.
+- On the box run targeted tests only, through `/var/tmp/test-slots/test-slot -- <cmd>`; full suites run in CI.
+- Wait for CI with `swarm ci wait --repo OWNER/REPO --sha <exact head> --timeout 540` in the foreground, repeated while pending; never `gh run watch`.
+- Judges only judge; reviewers only review; fixes happen on writer seats.
+- Briefs state what is authorized and what is not; secrets are referenced by path only ([recovery](references/recovery.md)).
+- Every CLI command that changes a drive record prints `swarm-record: kind=... id=... rev=...` last; in a drive job the CLI never spools a command, it fails with an error.
+
+## Waiting for CI
+
+This skill never talks to a CI host. It depends on the [ci skill](../ci/SKILL.md): wait for CI ONLY with
+`swarm ci wait --repo OWNER/REPO --sha <exact head> [--timeout 90m]` (exit 0 green, 1 failed, 124 timeout),
+`swarm ci status` for a one-off look, never `gh run watch` or a `gh run list` loop. Pass the exact head SHA
+and re-run it after every push. Run it in the foreground, never as a background command: a background wait
+outlives the agent that started it. Put this line in every worker, engineer and reviewer brief:
+`CI: wait for CI ONLY with swarm ci wait --repo OWNER/REPO --sha <exact head> [--timeout 90m] in the foreground; never gh run watch.`
+Never write `gh run watch` into a brief, even as an example. The swarm hooks refuse a member's
+`gh run watch`, `gh pr checks --watch` and gh/curl poll loops, and point the agent at the exact
+`swarm ci wait` instead. A one-shot `gh run view <id> --json conclusion` stays allowed for judges.
+A member's background shell commands run under `swarm bg`, in a fresh `bash -c`, so the shell's
+aliases and functions are not available to them. If one is still running after its agent
+finishes or the job closes, it is reaped (`swarm bg list --orphans`).
+
+## CI host
+
+`[ci] kind = "github"|"gitea"|"gitlab"|"none"` in `team.toml` names the host (setup, webhooks and tokens
+are in the ci skill). Set `evidence_command` to the project's CI checker with `{sha}` when `swarm ci wait`
+does not apply: zero exit status must mean all required checks passed on that exact rebased SHA. An absent
+checker holds integration. Completing a request must preserve the approved rebased SHA and linear history.
+
+## Non-drive jobs
+
+Everything below applies only to a goal job activated with `--no-drive --reason TEXT`, or to a job without a goal: nothing drives it, so the invoking agent is the project manager (PM) and schedules, dispatches and integrates as before. In a driven job none of it applies.
+
+### Run the team (non-drive)
 
 1. Team composition: always present are EL, QA, one or more engineers, and an independent judge. `product_manager` and `build_engineer` are optional and chosen by the user (`team.toml`, or per job). Before staffing run `swarm team --job J --show` and staff exactly the effective set; change it only on the user's say-so with `swarm team --job J --add|--remove ROLE` (a mandatory role cannot be removed). If a role is absent, its duties move as in [role authority](references/team-roles.md): without `product_manager`, EL writes compact PR criteria and EL+QA record product acceptance; without `build_engineer`, EL owns its duties.
 2. Small work: skip the team and do it yourself. Otherwise capture the user's request verbatim or by stable link, constraints, approvals already given, and a provisional size. For moderate and complex jobs, activate with a goal and schedule one root judge as recommended; record the reason if omitted. Join the board as PM and read it at each turn start and before each staffing wave. Do not wait for a subagent's board post alone: a role needing PM action must also return a structured request.
@@ -19,7 +79,7 @@ Read [host procedures](references/hosts.md) before activating a job or spawning 
 6. QA may write tests before integration; another engineer reviews any test code. EL integrates reviewed tasks and freezes the candidate using the [source manifest](references/artifacts.md) **before final checks**. QA then runs applicable acceptance, integration, end-to-end, and performance checks on that candidate. Product manager (or, if absent, EL and QA together, recorded) directly checks delivered behavior against each criterion; EL checks architecture and ERs; QA records test evidence and omissions with EL concurrence. Each final result names the candidate ID and requirement revision. A rejection returns to the owner for repair, independent review, a new freeze, affected retest, and refreshed acceptance.
 7. Recompute the current candidate and compare its ID and requirement revision with each final product, EL, and QA result. If the goal job has a judge, require `candidate=<id> req=<revision>` in its `met` verdict reason and compare those values before closing the job: Swarm's gate checks the latest verdict, not its freshness. Report delivered scope, checks, limits, accepted risks, and any separate authorization needed for deployment or publication.
 
-## Rules of the road
+### Rules of the road
 
 The engineering-team plugin supplies the coding adapter for Swarm's generic review pipeline.
 Publish `swarm done --job J --as NAME --branch B --sha S --summary "change and checks"` after
@@ -51,22 +111,7 @@ See [review pipeline](../../docs/REFERENCE.md#review-pipeline) and `team.example
 - Briefs state what is authorized and what is not; secrets are referenced by path only ([recovery](references/recovery.md)).
 - Final reports and `DONE:` lines follow the hand-off contract in [gates](references/gates.md).
 
-## Waiting for CI
-
-This skill never talks to a CI host. It depends on the [ci skill](../ci/SKILL.md): wait for CI ONLY with
-`swarm ci wait --repo OWNER/REPO --sha <exact head> [--timeout 90m]` (exit 0 green, 1 failed, 124 timeout),
-`swarm ci status` for a one-off look, never `gh run watch` or a `gh run list` loop. Pass the exact head SHA
-and re-run it after every push. Run it in the foreground, never as a background command: a background wait
-outlives the agent that started it. Put this line in every worker, engineer and reviewer brief:
-`CI: wait for CI ONLY with swarm ci wait --repo OWNER/REPO --sha <exact head> [--timeout 90m] in the foreground; never gh run watch.`
-Never write `gh run watch` into a brief, even as an example. The swarm hooks refuse a member's
-`gh run watch`, `gh pr checks --watch` and gh/curl poll loops, and point the agent at the exact
-`swarm ci wait` instead. A one-shot `gh run view <id> --json conclusion` stays allowed for judges.
-A member's background shell commands run under `swarm bg`, in a fresh `bash -c`, so the shell's
-aliases and functions are not available to them. If one is still running after its agent
-finishes or the job closes, it is reaped (`swarm bg list --orphans`).
-
-Don't:
+### Don't (non-drive)
 
 - watch CI with `gh run watch`, a `gh run list` loop or any direct `gh`/API polling: use `swarm ci wait`;
 - use PM polling as the primary trigger for review or integration; react to change events and keep polling only as a safety net;
@@ -80,15 +125,7 @@ Don't:
 
 Do not call a host validated because these instructions exist or checkout unit tests pass. A host needs the installed custom-role capability and an independent behavioral run. If research tools, an independent reviewer, a safe writer handoff, or a required host capability are unavailable, record the specific blocker and continue independent work that remains possible.
 
-
-## CI host
-
-`[ci] kind = "github"|"gitea"|"gitlab"|"none"` in `team.toml` names the host (setup, webhooks and tokens
-are in the ci skill). Set `evidence_command` to the project's CI checker with `{sha}` when `swarm ci wait`
-does not apply: zero exit status must mean all required checks passed on that exact rebased SHA. An absent
-checker holds integration. Completing a request must preserve the approved rebased SHA and linear history.
-
-## PM procedure per event
+### PM procedure per event
 
 The PM does not poll. Keep `swarm event wait --job J --to @pm --json` armed as a harness-tracked
 background command; when it returns an event, act, `swarm event ack --job J ID`, then re-arm
