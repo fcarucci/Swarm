@@ -305,6 +305,7 @@ class Checks(LandCase):
         self.assertEqual(self.pushes, [])
 
     def test_wrong_caller_refused(self):
+        self.receipted_request()          # a real request exists: only the caller is wrong
         env = self.env()
         res = land.land(self.board, env, "J", f"{GROUP}@{self.sha}", caller_session="intruder")
         self.assertFalse(res.ok)
@@ -313,6 +314,7 @@ class Checks(LandCase):
         self.assertFalse(res.ok)
 
     def test_an_empty_session_never_matches_an_empty_seat_session(self):
+        self.receipted_request()
         with mock.patch.object(type(self.board), "seats", lambda s, job, gen=None, include_closed=True: [
                 mock.Mock(seat=SEAT, session_id="")]):
             res = land.land(self.board, self.env(), "J", f"{GROUP}@{self.sha}", caller_session="")
