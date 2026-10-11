@@ -66,6 +66,12 @@ class RecordFormat(DriveCase):
         self.assertIsNone(drivegate.record_of({"tool_response": None}))
         self.assertIsNone(drivegate.record_of({}))
 
+    def test_intermixed_positionals_parse_on_every_python(self):
+        ns = drivegate.parse_swarm(["answer", "3", "--key", "k", "sqlite", "now"])
+        self.assertEqual((ns.cmd, ns.id, ns.key, ns.text), ("answer", "3", "k", ["sqlite", "now"]))
+        ns = drivegate.parse_swarm(["ask", "--job", "J", "--to", "human", "Which", "DB?", "--default", "x"])
+        self.assertEqual((ns.text, ns.default), (["Which", "DB?"], "x"))
+
     def test_submitted_argv_includes_defaults_in_a_fixed_order(self):
         ns = drivegate.parse_swarm(["seat", "request", "--seat", "s", "--job", "J", "--role", "engineer",
                                       "--brief", "B.md"])
@@ -502,7 +508,7 @@ class SeatRequestReceipts(DriveCase):
 
     def setUp(self):
         super().setUp()
-        self.cmd = self.CMD.format(w=self.work)
+        self.cmd = self.CMD.format(w=self.work.as_posix())      # a shell command: forward slashes on Windows too
         p = mock.patch.object(drivegate, "default_model", lambda cfg, role: "haiku")
         p.start()
         self.addCleanup(p.stop)
@@ -557,13 +563,13 @@ class SeatRequestReceipts(DriveCase):
 
     def test_a_default_model_the_writer_changed_is_not_receipted(self):
         """The command named no model: the row must carry the seat command's own default for the role."""
-        cmd = f"swarm seat request --job J --seat eng-b --role engineer --brief B.md --workdir {self.work}"
+        cmd = f"swarm seat request --job J --seat eng-b --role engineer --brief B.md --workdir {self.work.as_posix()}"
         row = self.request(model="opus")
         self.assertFalse(self.post(REQ, cmd, rec("seat", row.id, row.revision)))
         self.assertIn("model", self.failures())
 
     def test_defaults_of_the_cli_count_as_submitted(self):
-        cmd = f"swarm seat request --job J --seat eng-b --role engineer --brief B.md --workdir {self.work}"
+        cmd = f"swarm seat request --job J --seat eng-b --role engineer --brief B.md --workdir {self.work.as_posix()}"
         row = self.request()                    # harness claude, complexity standard, model the default
         self.assertTrue(self.post(REQ, cmd, rec("seat", row.id, row.revision)))
         r = self.receipt("seat_request", row.id, row.revision)
@@ -585,7 +591,7 @@ class SeatRequestReceipts(DriveCase):
                                  workdir=str(self.work), brief_path="B.md", requested_by="lead")
         self.assertEqual(row.harness, "claude")
         cmd = (f"swarm seat request --job J --seat judge-2 --role judge --harness codex --model opus --brief B.md "
-               f"--workdir {self.work}")
+               f"--workdir {self.work.as_posix()}")
         self.assertTrue(self.post(REQ, cmd, rec("seat", row.id, row.revision)))
 
     def test_row_replaced_after_the_command_gets_no_receipt(self):
