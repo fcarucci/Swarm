@@ -47,6 +47,7 @@ MAX_BYTES = 4 * 1024 * 1024
 STATES = ("claiming", "claimed", "concluded")
 LIFECYCLE = ("activating", "active")     # [RR1]: a ledger is "activating" until its activation is complete
 VERDICTS = ("met", "not_met", "unreachable")
+TERMINAL_VERDICTS = VERDICTS + ("cancelled",)   # what a job can end as (cancelled: a person ended it)
 ACTIVATE_TRIES = 5
 _FILE = re.compile(r"[0-9a-f]{64}\.json")
 _HEX32 = re.compile(r"[0-9a-f]{32}")
@@ -256,7 +257,7 @@ def _verdict_keys(o: dict, required: set, optional: set, what: str) -> None:
 
 def _terminal_intent(o) -> dict:
     _verdict_keys(o, {"verdict", "scope", "generation", "candidate", "req", "by", "at"}, set(), "terminal_intent")
-    _need(o["verdict"] in VERDICTS, "terminal_intent verdict")
+    _need(o["verdict"] in TERMINAL_VERDICTS, "terminal_intent verdict")
     _need(_safe_text(o["scope"], 64), "terminal_intent scope")
     _need(_nat(o["generation"], 1), "terminal_intent generation")
     _need(_opt_text(o["candidate"], 256) and _opt_text(o["req"], 256), "terminal_intent candidate/req")
@@ -266,7 +267,7 @@ def _terminal_intent(o) -> dict:
 
 def _terminal(o) -> dict:
     _verdict_keys(o, {"verdict", "at"}, {"reasons", "scope"}, "terminal")
-    _need(o["verdict"] in VERDICTS and _safe_text(o["at"], 64), "terminal verdict/at")
+    _need(o["verdict"] in TERMINAL_VERDICTS and _safe_text(o["at"], 64), "terminal verdict/at")
     if "reasons" in o:
         _need(isinstance(o["reasons"], list) and all(_safe_text(x, _MAX_TEXT) for x in o["reasons"]),
               "terminal reasons")

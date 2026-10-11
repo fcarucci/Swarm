@@ -317,6 +317,89 @@ class HaltLedgerTests(T.LifeCase):
         self.assertEqual([k for k in self.reload().watermarks if k.startswith("hopen:")], [])
 
 
+class CancelTests(T.LifeCase):
+    """CANCELLED: a person ended the job; ledger first, every terminal state clears the claim."""
+
+    def cancel(self, at=1, reason="stop it", **kw):
+        return life.cancel_job(self.b, self.cfg, self.led, "alice", self.at(at), reason=reason,
+                               hooks=self.run.hooks(), **kw)
+
+    def test_an_open_job_is_closed_cancelled_and_the_ledger_commits(self):
+        lid = self.launch(locks=["repo:x"])
+        self.assertTrue(self.cancel())
+        led = self.reload()
+        self.assertEqual((led.terminal["verdict"], led.terminal["scope"]), ("cancelled", "job"))
+        js = self.job()
+        self.assertEqual((js.status, js.closed_by), ("cancelled", "driver"))
+        self.assertIn("stop it", js.outcome)
+        self.assertEqual(self.b.drive_locks(), [])
+        self.assertIsNone(self.b.job_data("J").get("drive.enabled"))
+        self.assertEqual(led.intents[0].outcome, "cancelled")
+        self.assertIn(("stop", [lid]), self.run.calls)
+
+    def test_a_job_a_person_already_closed_is_cleaned_up_and_committed(self):
+        self.launch(locks=["repo:x"])
+        self.b.close_job("J", "cancelled", "by hand", closed_by="alice")
+        self.assertTrue(self.cancel())
+        self.assertEqual(self.reload().terminal["verdict"], "cancelled")
+        self.assertEqual(self.job().closed_by, "alice")                # not re-closed or re-labelled
+        self.assertEqual(self.b.drive_locks(), [])
+        self.assertIsNone(self.b.job_data("J").get("drive.enabled"))
+
+    def test_it_waits_for_live_sessions_then_finishes(self):
+        lid = self.launch()
+        self.run.live.add(lid)
+        self.assertFalse(self.cancel())
+        self.assertEqual(self.job().status, "active")
+        self.assertIsNone(self.reload().terminal)
+        self.assertEqual(self.reload().terminal_intent["verdict"], "cancelled")     # written first
+        self.run.live.clear()
+        self.assertTrue(life.terminalize(self.b, self.cfg, self.reload(), self.at(2), hooks=self.run.hooks()))
+        self.assertEqual(self.reload().terminal["verdict"], "cancelled")
+
+    def test_a_person_overrides_a_pending_met_and_a_halt(self):
+        self.pending_met()
+        life.halt(self.b, self.cfg, self.led, "person", self.at(1), hooks=self.run.hooks())
+        self.assertTrue(self.cancel(at=2))
+        self.assertEqual(self.reload().terminal["verdict"], "cancelled")
+        self.assertNotIn(("gate",), self.run.calls)                     # no gate, no land for a cancel
+        self.assertNotIn(("land",), self.run.calls)
+
+    def test_a_stuck_cancel_is_not_superseded_by_the_deadline(self):
+        lid = self.launch()
+        self.run.live.add(lid)
+        self.assertFalse(self.cancel())
+        self.assertFalse(life.terminalize(self.b, self.cfg, self.led, self.at(61), hooks=self.run.hooks()))
+        self.assertEqual(len(self.posts("DRIVER-TERMINAL-STUCK")), 1)
+        self.assertFalse(life.enforce_deadlines(self.b, self.cfg, self.led, self.at(60 * 40), hooks=self.run.hooks()))
+        self.assertEqual(self.reload().terminal_intent["verdict"], "cancelled")
+
+    def test_a_crash_after_the_close_resumes(self):
+        with self.barrier_crash("terminal_closed_before_ledger"), self.assertRaises(T.Crash):
+            self.cancel()
+        self.assertIsNone(self.reload().terminal)
+        self.assertTrue(life.terminalize(self.b, self.cfg, self.reload(), self.at(2), hooks=self.run.hooks()))
+        self.assertEqual(self.reload().terminal["verdict"], "cancelled")
+
+    def test_cancelling_a_terminal_job_does_nothing_but_repair_the_claim(self):
+        self.assertTrue(self.cancel())
+        self.b.set_job_data("J", "drive.enabled", "1")
+        self.assertFalse(self.cancel(at=3))
+        self.assertIsNone(self.b.job_data("J").get("drive.enabled"))
+
+
+class EveryTerminalClearsTheClaim(T.LifeCase):
+    def test_met_unreachable_and_cancelled(self):
+        self.pending_met()
+        self.assertTrue(life.terminalize(self.b, self.cfg, self.led, self.at(1), hooks=self.run.hooks()))
+        self.assertIsNone(self.b.job_data("J").get("drive.enabled"))
+
+    def test_the_mechanical_unreachable(self):
+        life.enforce_deadlines(self.b, self.cfg, self.led, self.at(60 * 27), hooks=self.run.hooks())
+        self.assertTrue(life.terminalize(self.b, self.cfg, self.led, self.at(60 * 27 + 1), hooks=self.run.hooks()))
+        self.assertIsNone(self.b.job_data("J").get("drive.enabled"))
+
+
 class ClaimRepairTests(T.LifeCase):
     def test_a_failed_claim_clear_is_retried_on_later_passes(self):
         self.pending_met()
