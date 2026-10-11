@@ -26,12 +26,12 @@ def drive_view(board, cfg, job):
         return claimed, None
     import os
     from swarm.board.autoinit import store_key
-    from swarm.supervisor import ledger, privfs, settings
+    from swarm.supervisor import ledger, settings
     if not os.path.lexists(settings.private_dir() / ledger.SUBDIR):
         return claimed, None   # no ledger directory here; a read must not create one (dry runs change nothing)
     try:
         led = ledger.load(store_key(cfg), job)
-    except (ledger.LedgerBadError, privfs.PrivateDirError):
+    except (ledger.LedgerBadError, settings.PrivateDirError):
         return True, None
     if led is not None:
         return True, led.generation

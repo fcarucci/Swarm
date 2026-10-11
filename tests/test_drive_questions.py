@@ -256,11 +256,26 @@ class GateDriveQuestions(QuestionEnv):
         self.assertIsNone(why)
         self.assertEqual(a.name, "eng-b")
 
+    def test_bad_ledger_gates_the_job_as_a_drive_job(self):
+        # A planted or unreadable ledger fails closed: the job is held as a drive job, so the plain
+        # job-level heuristic never applies to it.
+        import hashlib
+        from swarm import paths  # noqa: F401  (the private dir comes from the temporary HOME)
+        from swarm.supervisor import settings as sup_cfg
+        self.b.post("K", self.kasker, "ok?", "human")
+        name = hashlib.sha256(f"{store_key(self.h.cfg)}\0K".encode("utf-8")).hexdigest() + ".json"
+        drive_dir = sup_cfg.private_dir() / "drive"
+        os.makedirs(drive_dir, mode=0o700, exist_ok=True)
+        (drive_dir / name).write_text("{ not a ledger")
+        self.assertFalse(orphans.human_question(self.b, self.b.job_status("K"), self.h.cfg))
+
     def test_drive_lead_question_holds_the_orphan_coordinator(self):
         sup = sup_settings.settings({})
         rows = []
         with mock.patch("swarm.cli.OrchestratorWatch.active", return_value=False):
             js = drive_js(waiting_on=None)
+            successor = FakeBoard(js, rows, [question("lead~1")], {"drive.enabled": "1"})
+            self.assertFalse(orphans.eligible(successor, self.h.cfg, js, sup, NOW))
             held = FakeBoard(js, rows, [question("lead")], {"drive.enabled": "1"})
             self.assertFalse(orphans.eligible(held, self.h.cfg, js, sup, NOW))
             free = FakeBoard(js, rows, [question("eng-a")], {"drive.enabled": "1"})
