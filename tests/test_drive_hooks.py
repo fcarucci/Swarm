@@ -650,6 +650,13 @@ class Kick(Env):
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[0][0][:4], ["systemctl", "--user", "start", "--no-block"])
 
+    def test_hooks_kick_is_the_same_kick(self):
+        """6a's `swarm activate` and the plan call hooks.kick(); the CLI itself calls drivegate.kick()."""
+        with mock.patch("subprocess.run") as run:
+            self.assertTrue(hooks.kick(now=lambda: 100.0))
+            self.assertFalse(drivegate.kick(now=lambda: 105.0))      # one stamp for both
+        self.assertEqual(run.call_count, 1)
+
     def test_kick_never_raises(self):
         with mock.patch("subprocess.run", side_effect=OSError("no systemctl")):
             self.assertFalse(drivegate.kick(now=lambda: 500.0))

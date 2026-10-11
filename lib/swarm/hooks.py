@@ -2234,6 +2234,13 @@ def _unchecked_verifier_write(payload: dict, agent_id: str) -> bool:
 
 # --- drive jobs (spec 3.4, 3.11, 4.0, 4.5): the logic is in swarm.drivegate --------------------------------
 
+def kick(now=time.time) -> bool:
+    """Start the supervisor pass now, at most once per 20 s (the logic and its stamp are swarm.drivegate.kick; the
+    CLI calls that one, because this module is not in the directory edition). True when started; never raises."""
+    from swarm import drivegate
+    return drivegate.kick(now)
+
+
 def _drive_event(event: str, cfg: dict, payload: dict, resume: dict | None) -> bool:
     """The drive gate of PreToolUse (every call of every session, before anything else a hook does: a join, a
     first call and a seat of an unbound job included) and the receipts of PostToolUse. True when the call was
