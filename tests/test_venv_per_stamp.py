@@ -34,6 +34,7 @@ echo "$0 $*" >> "$SWARM_TEST_LOG"
 exit 0
 PY
   chmod +x "$d/bin/python"
+  [ -n "$FAKE_LOG_OWNER" ] && cp "$d.building/owner" "$FAKE_LOG_OWNER"
   # FAKE_STEAL_LOCK: while "building", another launcher takes over the lock (a stale-lock steal)
   [ -n "$FAKE_STEAL_LOCK" ] && echo "999999 someone-else" > "$d.building/owner"
   echo "venv $d" >> "$SWARM_TEST_LOG"
@@ -297,6 +298,47 @@ lock_steal; echo "rc=$?"
         self.assertIn("lock gone", res.stdout)
         self.assertIn("removed a stale", res.stderr)
 
+    def real_owner(self, pid=None) -> tuple[str, str]:
+        """(boot id, start time) of a running process, as bin/swarm records them."""
+        pid = pid or os.getpid()
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        start = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+        return boot, start
+
+    def test_a_lock_from_before_a_reboot_is_stale_even_if_its_pid_is_alive_now(self):
+        boot, start = self.real_owner()
+        lock = self.hold_lock(self.v22, f"{os.getpid()} {socket.gethostname()} not-this-boot {start}")
+        self.assert_builds_through_a_stale_lock(lock)
+
+    def test_a_reused_pid_is_stale(self):
+        boot, start = self.real_owner()
+        lock = self.hold_lock(self.v22, f"{os.getpid()} {socket.gethostname()} {boot} {int(start) + 1}")
+        self.assert_builds_through_a_stale_lock(lock)
+
+    def test_the_real_owner_is_respected(self):
+        boot, start = self.real_owner()
+        self.assert_waits_on_a_live_lock(
+            self.hold_lock(self.v22, f"{os.getpid()} {socket.gethostname()} {boot} {start}", age_minutes=45))
+
+    def test_a_running_owner_is_stale_past_the_backstop_cap(self):
+        boot, start = self.real_owner()
+        lock = self.hold_lock(self.v22, f"{os.getpid()} {socket.gethostname()} {boot} {start}", age_minutes=361)
+        self.assert_builds_through_a_stale_lock(lock)
+        lock = self.hold_lock(self.v22, f"{os.getpid()} {socket.gethostname()}", age_minutes=361)   # old format
+        shutil.rmtree(self.venv_of(self.v22))
+        self.assert_builds_through_a_stale_lock(lock)
+
+    def test_the_launcher_records_boot_id_and_start_time_in_its_lock(self):
+        out = self.home / "owner-copy"
+        res = self.launch(self.v22, timeout=30, FAKE_LOG_OWNER=str(out))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        pid, host, boot, start = out.read_text().split()
+        self.assertEqual(host, socket.gethostname())
+        self.assertEqual(boot, Path("/proc/sys/kernel/random/boot_id").read_text().strip())
+        self.assertRegex(start, r"^\d+$")
+        self.assertEqual(start, Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+                         if Path(f"/proc/{pid}/stat").exists() else start, "(the launcher has exited: the shape is what counts)")
+
     def test_a_lock_taken_over_meanwhile_is_not_released_by_the_old_owner(self):
         res = self.launch(self.v22, timeout=30, FAKE_STEAL_LOCK="1")
         self.assertEqual(res.returncode, 0, res.stderr)
@@ -398,8 +440,8 @@ class WinLaunchVenvTests(unittest.TestCase):
         return lock
 
     @posix_only("the pid probe is POSIX (Windows decides by age alone)")
-    def test_a_live_owner_on_this_host_is_never_stale_however_old(self):
-        lock = self.make_lock(f"{os.getpid()} {socket.gethostname()} tok", age_minutes=600)
+    def test_a_running_owner_on_this_host_is_not_stale_by_age_within_the_cap(self):
+        lock = self.make_lock(f"{os.getpid()} {socket.gethostname()} tok", age_minutes=300)
         self.assertFalse(winlaunch.lock_is_stale(lock))
 
     @posix_only("the pid probe is POSIX (Windows decides by age alone)")
@@ -410,7 +452,7 @@ class WinLaunchVenvTests(unittest.TestCase):
 
     @posix_only("the pid probe is POSIX (Windows decides by age alone)")
     def test_a_permission_error_from_the_pid_probe_means_alive(self):
-        lock = self.make_lock(f"4242 {socket.gethostname()} tok", age_minutes=600)
+        lock = self.make_lock(f"4242 {socket.gethostname()} tok", age_minutes=300)
         with mock.patch.object(winlaunch.os, "kill", side_effect=PermissionError):
             self.assertFalse(winlaunch.lock_is_stale(lock))
 
@@ -450,6 +492,40 @@ class WinLaunchVenvTests(unittest.TestCase):
         (lock / "owner").write_text(f"{os.getpid()} {socket.gethostname()} {token}\n")
         winlaunch.release_lock(lock, token)
         self.assertFalse(lock.exists())
+
+    @posix_only("needs /proc")
+    def test_boot_id_and_start_time_come_from_proc(self):
+        self.assertEqual(winlaunch._boot_id(), Path("/proc/sys/kernel/random/boot_id").read_text().strip())
+        self.assertEqual(winlaunch._start_time(os.getpid()),
+                         Path("/proc/self/stat").read_text().rsplit(")", 1)[1].split()[19])
+        self.assertEqual(winlaunch._start_time(2 ** 22 + 12345), "-")
+
+    @posix_only("needs /proc")
+    def test_a_lock_from_another_boot_or_a_reused_pid_is_stale_a_real_owner_is_not(self):
+        boot, start = winlaunch._boot_id(), winlaunch._start_time(os.getpid())
+        host, me = socket.gethostname(), os.getpid()
+        for owner, stale in ((f"{me} {host} tok {boot} {start}", False),
+                             (f"{me} {host} tok other-boot {start}", True),
+                             (f"{me} {host} tok {boot} {int(start) + 1}", True),
+                             (f"{me} {host} tok - -", False)):      # no identity recorded: the pid decides
+            lock = self.make_lock(owner)
+            self.assertEqual(winlaunch.lock_is_stale(lock), stale, owner)
+            shutil.rmtree(lock)
+
+    @posix_only("needs /proc")
+    def test_a_running_owner_is_stale_only_past_the_cap(self):
+        host, me = socket.gethostname(), os.getpid()
+        self.assertFalse(winlaunch.lock_is_stale(self.make_lock(f"{me} {host} tok", age_minutes=359)))
+        shutil.rmtree(self.tmp / "venv.building")
+        self.assertTrue(winlaunch.lock_is_stale(self.make_lock(f"{me} {host} tok", age_minutes=361)))
+
+    @posix_only("needs /proc")
+    def test_take_lock_records_boot_id_and_start_time(self):
+        lock = self.tmp / "venv.building"
+        winlaunch.take_lock(lock, timeout=1)
+        pid, host, token, boot, start = (lock / "owner").read_text().split()
+        self.assertEqual((int(pid), host, boot, start), (os.getpid(), socket.gethostname(), winlaunch._boot_id(),
+                                                         winlaunch._start_time(os.getpid())))
 
     def test_stale_limit_is_configurable(self):
         lock = self.tmp / "venv.building"
