@@ -43,6 +43,7 @@ SUBDIR = "drive"
 FORMAT = 1
 MAX_BYTES = 4 * 1024 * 1024
 STATES = ("claiming", "claimed", "concluded")
+LIFECYCLE = ("activating", "active")     # [RR1]: a ledger is "activating" until its activation is complete
 VERDICTS = ("met", "not_met", "unreachable")
 ACTIVATE_TRIES = 5
 _FILE = re.compile(r"[0-9a-f]{64}\.json")
@@ -117,6 +118,8 @@ class Ledger:
     pinned_requirements: dict = field(default_factory=dict)
     incarnation: str = ""
     ledger_rev: int = 0
+    state: str = "active"            # [RR1] "activating" until the five activation steps are done
+    models: dict = field(default_factory=dict)   # [P1] the job's role -> model overrides
 
     def charged_usd(self) -> float:
         """Concluded intents' charged cost plus the reservation of every open one."""
@@ -266,7 +269,7 @@ def _text_map(m, value_check, key_limit: int = 256) -> dict:
     return m
 
 
-_DICT_FIELDS = ("budgets", "owners", "integrated", "watermarks", "pinned_requirements")
+_DICT_FIELDS = ("budgets", "owners", "integrated", "watermarks", "pinned_requirements", "models")
 _OPT_DICT = ("halted", "terminal", "terminal_intent")
 _OPT_STR = ("ruling_due_at", "closing", "last_pass", "requester_session")
 _NATS = ("ruling_attempts", "rounds_without_progress", "errors")
@@ -296,6 +299,8 @@ def _check_fields(obj: dict, board_key: str | None, job: str | None) -> None:
     _text_map(obj["owners"], lambda v: _safe_text(v, 256))
     _text_map(obj["watermarks"], lambda v: _nat(v))
     _text_map(obj["pinned_requirements"], lambda v: _safe_text(v, _MAX_ID))
+    _text_map(obj["models"], lambda v: _safe_text(v, 64))
+    _need(obj["state"] in LIFECYCLE, "state")
     _text_map(obj["integrated"], lambda v: isinstance(v, dict) and all(
         _safe_text(k, 256) and _scalar(x) for k, x in v.items()))
     for k in _OPT_DICT:
@@ -361,12 +366,17 @@ def load(board_key: str, job: str) -> Ledger | None:
         return _read_entry(d, name, board_key, job)
 
 
-def create(board_key: str, job: str, *, budgets: dict, activated_at: str) -> Ledger:
+def create(board_key: str, job: str, *, budgets: dict, activated_at: str, state: str = "active",
+           models: dict | None = None, pinned: dict | None = None) -> Ledger:
     """A new ledger with a fresh incarnation, written at once. LedgerExistsError if any entry is
-    already at the job's name (a good one or a bad one: nothing is overwritten)."""
+    already at the job's name (a good one or a bad one: nothing is overwritten). Activation creates
+    it as "activating" and completes it to "active" once its steps are done ([RR1])."""
     _check_key(board_key, job)
+    if state not in LIFECYCLE:
+        raise ValueError(f"ledger state must be one of {LIFECYCLE}")
     led = Ledger(board_key=board_key, job=job, budgets=dict(budgets), activated_at=activated_at,
-                 incarnation=uuid.uuid4().hex)
+                 incarnation=uuid.uuid4().hex, state=state, models=dict(models or {}),
+                 pinned_requirements=dict(pinned or {}))
     led._commit(creating=True)
     return led
 

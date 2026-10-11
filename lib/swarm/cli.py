@@ -2806,6 +2806,9 @@ def _parser() -> argparse.ArgumentParser:
     ac.add_argument("--stall-hours", "--max-hours", dest="max_hours", type=float, metavar="N",
                     help="close the job (failed) after N hours without progress, instead of [job] "
                          "stall_hours; 0 = never (--max-hours is the old name)")
+    from swarm import drive_activate as _da
+    _da.add_activate_args(ac)   # drive mode ([A]): --no-drive, budgets, models, workdir, credentials
+    _da.add_drive_parser(sub)   # swarm drive budget|models
     bg = sub.add_parser("bg", help="background commands of agents: `bg list`, `bg reap`; `swarm bg --job J "
                                    "--as NAME -- COMMAND` runs one recorded (the hooks wrap members' background calls)")
     bgs = bg.add_subparsers(dest="bcmd", required=True)
@@ -3155,6 +3158,13 @@ def cmd_activate(cfg: dict, args) -> int:
         return 2
     task = sys.stdin.read() if args.task == "-" else args.task
     goal = (sys.stdin.read() if args.goal == "-" else args.goal or "").strip() or None
+    from swarm import drive_activate as _da
+    args.goal = goal
+    if _da.wants_drive(args):   # [A] a goal implies drive
+        return _da.cmd_activate_drive(cfg, args)
+    rc = _da.legacy_goal_check(args)
+    if rc is not None:
+        return rc
     # Run from Claude Code (the orchestrator's Bash tool), the job is bound to the calling
     # session at once: no other session can claim it, and it can share the session with others.
     with open_board(cfg) as board:
@@ -3794,6 +3804,7 @@ COMMANDS = {
     "upgrade": cmd_update,
     "update": cmd_update,      # the old name, a hidden alias
     "activate": cmd_activate,
+    "drive": lambda cfg, args: __import__("swarm.drive_activate", fromlist=["cmd_drive"]).cmd_drive(cfg, args),
     "plugins": cmd_plugins,
     "deactivate": cmd_deactivate,
     "bg": lambda cfg, args: cmd_bg(cfg, args),
@@ -4341,6 +4352,9 @@ def _board_status(board, cfg: dict, args) -> None:
     recent = None if args.all_agents else int(cfg["board"]["watch_recent_minutes"])
     rows = board.transcripts(job=args.job) if enabled and board.job_status(args.job) else None
     print(job_detail(board, args.job, color, recent, "--all-agents to show", rows, sup=sup))
+    from swarm import drive_activate as _da
+    for line in _da.drive_lines(cfg, args.job):   # effective budget and models of a drive job ([D1], [P1])
+        print(line)
     line = bg_line(board, args.job) if board.job_status(args.job) else None
     if line:
         print(line)
