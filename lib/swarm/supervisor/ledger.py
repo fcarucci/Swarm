@@ -105,6 +105,7 @@ class Ledger:
     ruling_due_at: str | None = None
     ruling_attempts: int = 0
     rounds_without_progress: int = 0
+    last_progress_at: str | None = None   # ISO time the driver's progress rule last fired (stall-wake trigger)
     errors: int = 0
     closing: str | None = None
     halted: dict | None = None
@@ -271,7 +272,7 @@ def _text_map(m, value_check, key_limit: int = 256) -> dict:
 
 _DICT_FIELDS = ("budgets", "owners", "integrated", "watermarks", "pinned_requirements", "models")
 _OPT_DICT = ("halted", "terminal", "terminal_intent")
-_OPT_STR = ("ruling_due_at", "closing", "last_pass", "requester_session")
+_OPT_STR = ("ruling_due_at", "closing", "last_pass", "requester_session", "last_progress_at")
 _NATS = ("ruling_attempts", "rounds_without_progress", "errors")
 
 
