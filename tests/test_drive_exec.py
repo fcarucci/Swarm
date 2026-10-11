@@ -99,6 +99,26 @@ class ExecEnv(Env):
             driver_exec.authorize_seat(self.led, row, self.now())
         return row
 
+    def agent_of(self, seat="eng-a"):
+        """Give the seat an agent (as a first session would) and return its name."""
+        key = f"k-{seat}"
+        name = self.b.allocate_name(key, "J", "engineer")
+        self.tamper_seat(seat, agent_key=key)
+        return name
+
+    def wake_msg(self, name, text="hello", receipted=True):
+        """A message to `name`, with the ledger's own post receipt when `receipted`; returns its id."""
+        sender = self.b.allocate_name(f"snd{len(self.b.agents('J'))}", "J", "engineer")
+        res = self.b.post("J", sender, text, to=name)
+        if receipted:
+            row = {"kind": "post", "id": str(res.id), "rev": 1, "to": name, "body": text}
+            receipts.write(self.bk, receipts.Receipt(
+                board_key=self.bk, job="J", generation=1, incarnation=self.led.incarnation,
+                action_id="gen1|fix|x|-|1|-", attempt=1, seat="eng-a", kind="post", record_id=str(res.id), rev=1,
+                content_sha=receipts.content_sha("post", row), args_sha=receipts.args_sha(["swarm"]),
+                expires_at=self.now().timestamp() + 3600))
+        return res.id
+
     def act(self, seat="eng-a", kind="seat", group=None, trigger="1", **kw):
         aid = f"gen{self.led.generation}|{kind}|{seat or '-'}|{group or '-'}|0|{trigger}"
         return dm.Action(kind="launch", action_id=aid, seat=seat, prompt_kind=kind, **kw)
@@ -353,7 +373,7 @@ class ExecuteTests(ExecEnv):
         (row,) = self.b.restarts(job="J")
         self.assertEqual(row.outcome, "cancelled")
         (i,) = self.reload().intents
-        self.assertEqual((i.outcome, i.state, i.charged_usd), ("cancelled", "concluded", 0.0))
+        self.assertEqual((i.outcome, i.state, i.charged_usd), ("cancelled-before-start", "concluded", 0.0))
         self.assertFalse(runner.has_run(self.cfg, row.id))
         self.assertEqual(list(self.markers.glob("*--resume-r*.json")), [])
         self.assertEqual(self.b.drive_locks(), [])
@@ -419,12 +439,13 @@ class ExecuteTests(ExecEnv):
         self.assertEqual(self.b.restarts(job="J")[0].old_agent_key, run["resume_of"])
 
     def test_the_launch_remembers_the_board_position_it_started_from(self):
-        self.b.post("J", self.b.allocate_name("p", "J", "engineer"), "hello")
         self.seat()
+        name = self.agent_of()
+        mid = self.wake_msg(name)
+        eid, _ = self.b.post_event("J", "ci", "k1", "real event", to=name)
         run = self.go(self.act())
-        newest = self.b.recent_messages(1, job="J")[0].id
-        self.assertEqual(self.reload().watermarks[f"launch-msg:{run['launch_id']}"], newest)
-        self.assertIn(f"launch-event:{run['launch_id']}", self.led.watermarks)
+        wm = self.reload().watermarks
+        self.assertEqual((wm[f"launch-msg:{run['launch_id']}"], wm[f"launch-event:{run['launch_id']}"]), (mid, eid))
 
 
 class DriverSeatTests(ExecEnv):
@@ -970,8 +991,8 @@ class FinishTests(ExecEnv):
         self.assertEqual(self.reload().intents[0].state, "claimed")
 
     def test_finish_acknowledges_the_wake_watermarks_of_a_completed_turn(self):
-        self.b.post("J", self.b.allocate_name("p", "J", "engineer"), "hello")
-        newest = self.b.recent_messages(1, job="J")[0].id
+        self.seat()
+        newest = self.wake_msg(self.agent_of())
         self.finished(self.claude_tail())
         led = self.reload()
         self.assertEqual(led.watermarks["msg:eng-a"], newest)
@@ -979,7 +1000,8 @@ class FinishTests(ExecEnv):
         self.assertFalse([k for k in led.watermarks if k.startswith("launch-")])
 
     def test_a_crashed_turn_leaves_its_events_pending(self):
-        self.b.post("J", self.b.allocate_name("p", "J", "engineer"), "hello")
+        self.seat()
+        self.wake_msg(self.agent_of())
         self.finished(self.claude_tail(), outcome="not_enrolled")
         led = self.reload()
         self.assertNotIn("msg:eng-a", led.watermarks)
@@ -1261,6 +1283,50 @@ class FixRoundTests(ExecEnv):
         self.tamper_seat("judge", workdir="/home/claude/elsewhere")
         self.assertIsNone(self.go(self.act(seat=None, kind="judge", group="feat/a", trigger="2")))
 
+    def test_R2_a_lead_successor_row_made_by_someone_else_is_not_used(self):
+        self.seat("lead", role="engineering_lead")
+        self.seat("lead~1", role="engineer", workdir=str(self.work / "lead-pick"))
+        self.assertIsNone(self.go(self.act(seat="lead~1")))
+
+    def test_n25_a_reserved_base_gets_no_successor(self):
+        name = driver_exec.seat_name("reviewer", "feat/a")
+        self.seat(name, role="reviewer")
+        self.assertIsNone(self.go(self.act(seat=f"{name}~1")))
+
+    def test_n19_ambiguous_rows_are_held_not_adopted(self):
+        self.memory_only()
+        self.seat()
+        run = self.go(self.act())
+        os.unlink(runner.run_file(run["restart_id"], self.bk))
+        with self.b._s().lock:
+            real = next(r for r in self.b._s().restarts if r["id"] == run["restart_id"])
+            self.b._s().restarts.append(dict(real, id=999, ended_at=self.now(), outcome="failed", attempt=77))
+        self.led.watermarks.pop(f"rid:{run['launch_id']}", None)
+        self.led.save()
+        (i,) = self.rec(500).intents
+        self.assertEqual(i.state, "claimed")
+
+    def test_n20_a_forged_later_duplicate_does_not_idle_a_running_seat(self):
+        self.memory_only()
+        self.seat()
+        run = self.go(self.act())
+        with self.b._s().lock:
+            real = next(r for r in self.b._s().restarts if r["id"] == run["restart_id"])
+            self.b._s().restarts.append(dict(real, id=999, ended_at=self.now(), outcome="failed", attempt=77,
+                                             new_agent_key=SESS1))
+        with mock.patch.object(runner, "reap", lambda *a, **k: None):
+            self.rec(1)
+        seat = self.b.seat("J", 1, "eng-a")
+        self.assertEqual((seat.state, seat.session_id), ("running", None))
+
+    def test_R4_last_progress_never_moves_backwards(self):
+        t = dt.datetime(2026, 10, 10, 12, 0, tzinfo=dt.timezone.utc)
+        newer = snap(ledger=self.led, handoffs=[ho(receipt_id=6, at=t)])
+        driver_exec.settle_progress(self.led, newer, t)
+        older = snap(ledger=self.led, handoffs=[ho(receipt_id=7, at=t - dt.timedelta(hours=2))])
+        driver_exec.settle_progress(self.led, older, t)
+        self.assertEqual(self.reload().last_progress_at, t.isoformat())
+
     def test_requested_by_driver_alone_authorizes_nothing(self):
         self.seat("eng-a", authorize=False)
         self.tamper_seat("eng-a", requested_by="driver")
@@ -1305,10 +1371,37 @@ class FixRoundTests(ExecEnv):
         driver_exec.conclude_run(self.cfg, run, "completed", 0.1)
         self.assertLess(self.reload().watermarks.get("msg:eng-a", 0), 10 ** 6)
 
-    def test_M2_a_far_jump_in_ids_is_not_followed(self):
-        self.assertEqual(driver_exec._chain_mark([5, 6, 7], 0), 7)
-        self.assertEqual(driver_exec._chain_mark([5, 6, 7, 10 ** 12], 0), 7)
-        self.assertEqual(driver_exec._chain_mark([3, 4], 9), 9)           # never back
+    def test_M2_a_forged_event_id_not_addressed_to_the_seat_moves_nothing(self):
+        self.memory_only()
+        self.seat()
+        self.agent_of()
+        eid, _ = self.b.post_event("J", "ci", "k1", "real event", to="someone")
+        with self.b._s().lock:
+            next(e for e in self.b._s().events if e["id"] == eid)["id"] = 10 ** 12
+        run = self.go(self.act())
+        driver_exec.conclude_run(self.cfg, run, "completed", 0.1)
+        self.assertEqual(self.reload().watermarks.get("event:eng-a", 0), 0)
+
+    def test_M2_a_forged_message_by_a_member_without_a_receipt_moves_nothing(self):
+        self.seat()
+        name = self.agent_of()
+        self.wake_msg(name, receipted=False)
+        run = self.go(self.act())
+        driver_exec.conclude_run(self.cfg, run, "completed", 0.1)
+        self.assertEqual(self.reload().watermarks.get("msg:eng-a", 0), 0)
+
+    def test_M2_a_receipted_message_to_another_agent_moves_nothing(self):
+        self.seat()
+        self.agent_of()
+        other = self.b.allocate_name("other", "J", "engineer")
+        self.wake_msg(other)
+        run = self.go(self.act())
+        driver_exec.conclude_run(self.cfg, run, "completed", 0.1)
+        self.assertEqual(self.reload().watermarks.get("msg:eng-a", 0), 0)
+
+    def test_M2_a_seat_with_no_agent_yet_keeps_its_marks(self):
+        self.seat()
+        self.assertEqual(driver_exec._board_marks(self.b, self.led, self.b.seat("J", 1, "eng-a"), self.now()), (0, 0))
 
     # -- M3: last_progress_at is the time of the progress event, never later than now
     def test_M3_a_future_seat_time_does_not_move_last_progress(self):
@@ -1410,13 +1503,24 @@ class FixRoundTests(ExecEnv):
         self.assertEqual(self.b.drive_locks(), [])
 
     # -- lows
+    def test_N1_a_cancel_after_a_session_started_counts_toward_max_attempts(self):
+        self.seat()
+        n = 0
+        for _ in range(8):
+            run = self.go(self.act())
+            if run is None:
+                break
+            n += 1
+            self.end(run, "cancelled")
+        self.assertEqual(n, driver_exec._dcfg(self.cfg, self.led)["max_attempts"])
+
     def test_a_kill_switch_cancel_does_not_count_toward_max_attempts(self):
         self.cfg["drive"] = {"max_attempts": 1}
         self.seat()
         with mock.patch.object(driver_exec.command if hasattr(driver_exec, "command") else __import__("swarm.supervisor.command", fromlist=["x"]),
                                "_switched_off_now", return_value="off"):
             self.assertIsNone(self.go(self.act()))
-        self.assertEqual(self.reload().intents[0].outcome, "cancelled")
+        self.assertEqual(self.reload().intents[0].outcome, "cancelled-before-start")
         self.assertIsNotNone(self.go(self.act()))                          # the attempt did not count
 
     def test_a_workdir_under_tmp_is_refused(self):

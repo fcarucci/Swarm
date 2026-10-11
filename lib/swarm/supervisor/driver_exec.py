@@ -272,6 +272,9 @@ def materialize_seat(board, led, action, cfg: dict, now):
         prev = _successor_of(board, led, action.seat, now) if "~" in action.seat else None
         expected = None if prev is None else {k: getattr(prev, k) for k in _SAME_FIELDS}
         if row is not None:
+            if "~" in action.seat and row.requested_by != "driver":
+                log(f"job {job}: successor seat {action.seat!r} was not made by the driver; refused")
+                return None
             return _heal(led, row, expected, now)
         if prev is None:
             return None
@@ -328,7 +331,7 @@ def _locks(seat) -> tuple[list[str], dict]:
 
 # --- execute -------------------------------------------------------------------------------------
 
-UNCOUNTED = ("outage", "lost", "cancelled")           # attempts that do not count toward max_attempts
+UNCOUNTED = ("outage", "lost", "cancelled-before-start")        # attempts that do not count toward max_attempts
 ACK_OUTCOMES = ("completed", "max_turns", "timeout")   # [F4]: the session completed at least one turn
 
 
@@ -460,8 +463,7 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
                            minutes=reserve_minutes, budget_usd=reserve_usd, read_only=seat.role in READ_ONLY_ROLES,
                            resume=resume, drive=True)
     lock_keys, lock_paths = _locks(seat)
-    marks = _board_marks(board, led.job, led.watermarks.get(f"msg:{seat.seat}", 0),
-                         led.watermarks.get(f"event:{seat.seat}", 0))
+    marks = _board_marks(board, led, seat, now)
     launch_id, attempt = new_launch_id(now), max((i.attempt for i in mine), default=0) + 1
     # 1a. write-ahead intent, fsynced (ledger.save), before anything reaches the board
     mutate(led, lambda l: l.intents.append(ledger.Intent(
@@ -530,7 +532,7 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
             _discard(run, marker=marker)
             board.release_drive_locks(launch_id, job=led.job, holder=action.action_id)
             _idle_seat(board, led, seat.seat, "cancelled", now)
-            _conclude(led, launch_id, "cancelled", False, 0.0)
+            _conclude(led, launch_id, "cancelled-before-start", False, 0.0)
             return None
         (start_runner or runner.start)(cfg, run)
         return run
@@ -543,28 +545,25 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
         raise
 
 
-MARK_GAP = 10000     # the largest jump between two consecutive ids a mark may follow
-
-
-def _chain_mark(ids, prev: int) -> int:
-    """The newest id of `ids` reached from `prev` through ids that follow each other (gaps of at most
-    MARK_GAP): a forged id far above the rest of the board is never reached, so a wake mark cannot be
-    poisoned by one row. Never below `prev`."""
-    mark, first = prev, True
-    for i in sorted(x for x in ids if x > prev):
-        if not first and i - mark > MARK_GAP:
-            break
-        mark, first = i, False
-    return mark
-
-
-def _board_marks(board, job: str, prev_msg: int = 0, prev_event: int = 0) -> tuple[int, int]:
-    """The message id and event id a session is launched knowing about: the ids it can actually be shown
-    (the newest 200 of the job), followed from the seat's last acknowledged mark."""
-    members = {a.name for a in board.agents(job)}       # a row by no member of the job is not a message it was shown
-    msgs = [m.id for m in board.recent_messages(200, job=job) if m.agent_name in members]
-    events = [e.id for e in board.pending_events(job)]
-    return _chain_mark(msgs, prev_msg), _chain_mark(events, prev_event)
+def _board_marks(board, led, seat, now) -> tuple[int, int]:
+    """The message id and event id a session is launched knowing about: only the ids the snapshot would list
+    as this seat's pending wakes (driver_snapshot._wakes): messages to the seat's agent that carry the
+    ledger's own `post` receipt (host-private, so a database writer cannot forge one), and events addressed
+    to that agent. Nothing else moves a mark; with no agent yet, or nothing pending, the marks stay."""
+    prev_msg = led.watermarks.get(f"msg:{seat.seat}", 0)
+    prev_event = led.watermarks.get(f"event:{seat.seat}", 0)
+    from swarm.supervisor import driver_snapshot
+    names = {a.agent_key: a.name for a in board.agents(led.job, include_departed=True)}
+    name = names.get(seat.agent_key) if seat.agent_key else None
+    if name is None:
+        return prev_msg, prev_event
+    rc = driver_snapshot._Receipts(led, led.job, led.generation, now)
+    msgs = [m.id for m in board.messages_after(prev_msg, led.job) if m.to_agent == name and m.id > prev_msg
+            and rc.get("post", m.id, 1, {"kind": "post", "id": str(m.id), "rev": 1, "to": m.to_agent,
+                                         "body": m.message}) is not None]
+    events = [e.id for e in board.pending_events(led.job) if e.to and e.to.lower() == name.lower()
+              and e.id > prev_event]
+    return max(msgs, default=prev_msg), max(events, default=prev_event)
 
 
 def _render_prompt(board, cfg, led, action, seat) -> str:
@@ -874,7 +873,7 @@ def settle_progress(led, snap, now) -> bool:
         if plan["reset"]:
             l.rounds_without_progress = 0
         l.rounds_without_progress += plan["rounds"]
-        if plan["moved"]:
-            l.last_progress_at = stamp
+        if plan["moved"] and (l.last_progress_at is None or stamp > l.last_progress_at):
+            l.last_progress_at = stamp          # never backwards: a late-receipted older event moves nothing
     mutate(led, apply)
     return True
