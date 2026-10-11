@@ -151,8 +151,9 @@ def _lead_body(board, led, seat, action) -> list[str]:
            "workdir, request seats with `swarm seat request`, release finished ones, answer engineers, and post "
            "`swarm goal-ready --candidate SHA` when you believe the goal is met, then exit. You never spawn agents "
            "yourself.",
-           f"Your watermark for this turn: messages up to #{msg_mark}, events up to #{ev_mark}. Ending the turn "
-           f"normally acknowledges it; `swarm seat ack --upto <id>` does too."]
+           f"Your watermark for this turn: messages up to #{msg_mark}. Wake events are acknowledged one by one: "
+           "exactly the event ids listed below are the ones shown to you, and no others are acknowledged "
+           "(an event id above them, however high, is never skipped over)."]
     if pending:
         out.append("Pending wake event ids: " + ", ".join(f"#{e.id}" for e in pending))
         out.append(fence("PENDING EVENTS", "\n".join(f"#{e.id} {e.kind}: {str(e.text)[:500]}" for e in pending)))
