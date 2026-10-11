@@ -575,3 +575,57 @@ def land(board, env: LandEnv, job: str, artifact: str, *, caller_session: str, a
     request = Request(0, seat.seat, artifact, env.led.generation)
     return execute(board, env, job, request, action_id=action_id or f"gen{env.led.generation}|land|-|{branch}|1|0",
                    need_leases=need_leases)
+
+
+# --- the close-time target audit ([F24]) ---------------------------------------------------------
+
+@dataclass(frozen=True)
+class AuditResult:
+    """findings: lines for DRIVER-AUDIT (empty = the target holds only judged work); pending: the audit ran
+    out of time or could not fetch, so the close is retried in a later pass (nothing is decided)."""
+    findings: tuple
+    pending: bool = False
+
+
+def audit(env: LandEnv, since: dict, candidate: str) -> AuditResult:
+    """Audit every destination's target from its activation-time head (`since`: url -> sha) to `candidate`,
+    in the private mirrors, against the judged SHAs. A flagged commit, a judged SHA the mirror lacks, a
+    target reset behind its activation head and a merge/empty commit all become findings; a timeout or
+    an overall-deadline overrun is `pending`."""
+    dests = destinations_from_owner(env.owner, config_dir=env.config_dir)
+    judged = set(env.judged())
+    findings, pending = [], False
+    for d in dests:
+        base = since.get(d.url)
+        if base is None:
+            findings.append(f"{d.name}: no activation-time head is recorded for this destination")
+            continue
+        try:
+            m = env.mirror_factory(d.url, d.credential)
+            _, left = m.fetch_branches([env.target], FETCH_SECONDS)
+            if left:
+                pending = True
+                continue
+            for extra in env.judged_branches():      # best effort: a landed branch is already deleted
+                try:
+                    m.fetch_branches([extra], FETCH_SECONDS)
+                except MirrorError:
+                    pass
+            head = m.head(env.target)
+            if head is None:
+                findings.append(f"{d.name}: {env.target} does not exist")
+                continue
+            flagged = m.audit_target(base, head, judged)
+        except MissingCommitError as exc:
+            findings.append(f"{d.name}: a judged or activation commit is missing from the mirror ({exc})")
+        except TargetRewoundError as exc:
+            findings.append(f"{d.name}: {env.target} was reset backwards ({exc})")
+        except UnpatchableCommitError as exc:
+            findings.append(f"{d.name}: a merge or empty commit cannot be matched ({exc})")
+        except MirrorTimeoutError:                     # includes AuditDeadlineError
+            pending = True
+        except MirrorError as exc:
+            findings.append(f"{d.name}: the audit could not run ({exc})")
+        else:
+            findings += [f"{d.name}: {c[:12]} on {env.target} is not covered by any judged change" for c in flagged]
+    return AuditResult(tuple(findings), pending and not findings)
