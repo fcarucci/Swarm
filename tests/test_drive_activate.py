@@ -350,7 +350,7 @@ class DriveCli(Env):
         self.platform = mock.patch.object(da, "PLATFORM", "linux")   # the timer check is for Linux here
         self.platform.start()
         self.addCleanup(self.platform.stop)
-        self.timer = mock.patch.object(systemd, "timer_state", return_value=dict(ACTIVE_TIMER))
+        self.timer = mock.patch.object(da, "timer_state", return_value=dict(ACTIVE_TIMER))
         self.timer.start()
         self.addCleanup(self.timer.stop)
         self.fresh_pass()
@@ -362,7 +362,7 @@ class DriveCli(Env):
 
     def fresh_pass(self):
         now = dt.datetime.now(dt.timezone.utc).isoformat()
-        p = mock.patch.object(sup_settings, "load_state", return_value={"last_run_at": now})
+        p = mock.patch.object(da, "last_pass_state", return_value={"last_run_at": now})
         p.start()
         self.addCleanup(p.stop)
 
@@ -445,7 +445,7 @@ class DriveCli(Env):
 
     def test_drive_activation_refused_without_running_timer(self):
         self.timer.stop()
-        with mock.patch.object(systemd, "timer_state", return_value={"ActiveState": "inactive"}):
+        with mock.patch.object(da, "timer_state", return_value={"ActiveState": "inactive"}):
             rc, _, err = self.activate("--workdir", str(self.work))
         self.assertEqual(rc, 1)
         self.assertIn("not running", err)

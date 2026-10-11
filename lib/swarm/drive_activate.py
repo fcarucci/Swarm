@@ -176,6 +176,17 @@ def _age_minutes(stamp, now: dt.datetime) -> float | None:
     return (now - when).total_seconds() / 60.0
 
 
+def timer_state() -> dict:
+    """The systemd user timer's state (the seam the activation check reads; tests replace it)."""
+    from swarm.supervisor import systemd
+    return systemd.timer_state()
+
+
+def last_pass_state() -> dict:
+    """The supervisor's state file (its last pass; the seam the activation check reads; tests replace it)."""
+    return sup_settings.load_state()
+
+
 def supervisor_problem(cfg: dict, *, platform: str | None = None, timer: dict | None = None,
                        state: dict | None = None, now: dt.datetime | None = None) -> str | None:
     """Why a drive job cannot be activated on this host (None when it can): no timer on macOS and
@@ -187,13 +198,13 @@ def supervisor_problem(cfg: dict, *, platform: str | None = None, timer: dict | 
         return f"drive jobs need the supervisor's systemd user timer, which this platform ({plat}) does not install; {NO_DRIVE_HINT}"
     if not sup_settings.enabled(cfg):
         return f"the supervisor is disabled on this host: run `swarm supervise enable` first, or {NO_DRIVE_HINT}"
-    info = systemd.timer_state() if timer is None else timer
+    info = timer_state() if timer is None else timer
     if info.get("ActiveState") != "active" or info.get("UnitFileState") != "enabled":
         return (f"the supervisor timer {systemd.TIMER} is not running: run `swarm supervise enable`, "
                 f"or {NO_DRIVE_HINT}")
     limit = 2 * sup_settings.settings(cfg)["timer_minutes"]
     when = now or dt.datetime.now(dt.timezone.utc)
-    last = (sup_settings.load_state() if state is None else state).get("last_run_at")
+    last = (last_pass_state() if state is None else state).get("last_run_at")
     age = _age_minutes(last, when)
     if age is None or age > limit:
         return (f"no supervisor pass in the last {limit} minutes (last: {last or 'never'}); wait for the "
