@@ -139,6 +139,15 @@ class Doctor(MirrorCase):
         self.assertIs(line.ok, False)
         self.assertIn("not executable", line.detail)
 
+    def test_the_remote_url_is_never_echoed(self):
+        url = "https://token-in-path.example.test/o/r.git"
+
+        def factory(u, cred):
+            raise MirrorError(f"fatal: unable to access '{url}': 403")
+        line = self.by_name(check_destination("a", url, {"kind": "none"}, mirror_factory=factory))["land a ls-remote"]
+        self.assertNotIn(url, line.detail)
+        self.assertIn("<remote>", line.detail)
+
     def test_audit_help_explains_causes_and_resolution(self):
         text = land_doctor.AUDIT_HELP
         for word in ("DRIVER-AUDIT", "ruling", "patch-id", "revert", "swarm land", "merge", "judge"):

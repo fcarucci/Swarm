@@ -10,6 +10,7 @@ from unittest import mock
 import support  # noqa: F401
 from swarm import compat, land, receipts
 from swarm.supervisor import barrier, driver_land
+from swarm.land import LeaseHeld
 from test_drive_land import BK, GROUP, NOW, SEAT, Crash, LandCase, Request
 
 
@@ -310,11 +311,84 @@ class Recovery(DriverCase):
         self.assertEqual(self.head(self.b), self.base)
 
 
+class Claims(DriverCase):
+    class Late:
+        def __init__(self, b):
+            self.b = b
+
+        def __getattr__(self, n):
+            return getattr(self.b, n)
+
+        def now(self):
+            import datetime as dt
+            return self.b.now() + dt.timedelta(days=2)
+
+    def parts(self):
+        mid = self.submit()
+        req = Request(mid, SEAT, f"{GROUP}@{self.sha}", 1)
+        dests = land.destinations_from_owner(self.owner)
+        action = driver_land.action_id(self.led, req, GROUP)
+        return req, dests, action
+
+    def hold_with(self, keys, action):
+        seat = self.board.seat("J", 1, SEAT)
+        return self.board.claim_drive_launch(
+            job="J", generation=1, action_id=action, attempt=1, launch_id="own", seat_id=seat.id,
+            seat_revision=seat.revision, harness="claude", reserve_usd=0, reserve_minutes=1, locks=keys,
+            lock_seconds=600, max_host_running=8)
+
+    def test_own_unexpired_leases_are_adopted(self):
+        req, dests, action = self.parts()
+        keys = land.lease_keys(dests, "main")
+        self.hold_with(keys, action)
+        held = driver_land.claim_leases(self.board, {}, self.env(), "J", req, dests, action)
+        self.assertTrue(held.adopted)
+        self.assertEqual(held.launch_id, "own")
+
+    def test_own_expired_leases_are_not_adopted(self):
+        req, dests, action = self.parts()
+        self.hold_with(land.lease_keys(dests, "main"), action)
+        with self.assertRaises(LeaseHeld):
+            driver_land.claim_leases(self.Late(self.board), {}, self.env(), "J", req, dests, action)
+
+    def test_a_partial_set_of_own_leases_is_not_adopted(self):
+        req, dests, action = self.parts()
+        self.hold_with(land.lease_keys(dests, "main")[:1], action)
+        with self.assertRaises(LeaseHeld):
+            driver_land.claim_leases(self.board, {}, self.env(), "J", req, dests, action)
+
+    def test_another_actions_leases_are_not_adopted(self):
+        req, dests, action = self.parts()
+        self.hold_with(land.lease_keys(dests, "main"), action + "x")
+        with self.assertRaises(LeaseHeld):
+            driver_land.claim_leases(self.board, {}, self.env(), "J", req, dests, action)
+
+    def test_refusal_clears_a_lease_hold_mark(self):
+        self.led.integrated[GROUP] = {"lease_held_since": NOW.isoformat()}
+        self.led.save()
+        self.advance(self.b)
+        self.submit()
+        done = self.run_pass()
+        self.assertFalse(done[0][1].ok)
+        self.assertNotIn("lease_held_since", self.led.integrated[GROUP])
+
+
+class Text(unittest.TestCase):
+    def test_reason_is_one_line_and_cut(self):
+        text = driver_land._text("LAND-REFUSED ", "a@b", "x\ny\t" * 400)
+        self.assertNotIn("\n", text)
+        self.assertNotIn("\t", text)
+        self.assertEqual(len(text), len("LAND-REFUSED a@b ") + driver_land.WHY_MAX)
+        self.assertEqual(driver_land._text("INTEGRATED ", "a@b"), "INTEGRATED a@b")
+        self.assertEqual(driver_land._text("LAND-REFUSED ", "a@b", "  too   many   spaces "),
+                         "LAND-REFUSED a@b too many spaces")
+
+
 class Ci(unittest.TestCase):
     def test_repo_slug(self):
         cases = {"https://github.com/fcarucci/Swarm.git": "fcarucci/Swarm", "https://github.com/o/r": "o/r",
                  "git@github.com:o/r.git": "o/r", "ssh://git@github.com/o/r.git": "o/r",
-                 "https://gitea.test/o/r/": "o/r", "/srv/repo.git": None, "": None, None: None}
+                 "https://gitea.test/o/r/": "o/r", "/srv/repo.git": None, "o/r": None, "relative/repo.git": None, "": None, None: None}
         for url, want in cases.items():
             with self.subTest(url=url):
                 self.assertEqual(driver_land.repo_slug(url), want)
@@ -335,6 +409,10 @@ class Ci(unittest.TestCase):
         self.assertTrue(cmd[0].endswith("bin/swarm") or cmd[0].endswith("bin\\swarm"))
         self.assertEqual(kw["timeout"], driver_land.CI_TIMEOUT)
 
+    def test_a_failing_cli_raises_even_with_a_state_on_stdout(self):
+        with self.assertRaises(OSError):
+            driver_land.ci_status_cli("o/r", run=self.fake('{"state": "green"}', code=1))("a" * 40)
+
     def test_failures_raise_so_the_landing_holds(self):
         for run in (self.fake("", code=2), self.fake("not json"), self.fake("{}"), self.fake("")):
             with self.assertRaises(OSError):
@@ -343,7 +421,7 @@ class Ci(unittest.TestCase):
             driver_land.ci_status_cli(None)("a" * 40)
 
     def test_non_string_state_is_not_green(self):
-        self.assertNotEqual(driver_land.ci_status_cli("o/r", run=self.fake('{"state": 1}'))("a" * 40), "green")
+        self.assertEqual(driver_land.ci_status_cli("o/r", run=self.fake('{"state": 1}'))("a" * 40), "unknown")
 
 
 def ledger_load(led):

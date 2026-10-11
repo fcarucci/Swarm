@@ -125,7 +125,7 @@ def normalize_url(url: str) -> str:
     userinfo dropped, one trailing slash and a `.git` suffix dropped; scp-style becomes ssh://."""
     text = url.strip()
     if "://" not in text:
-        m = re.fullmatch(r"(?:[^@/:]+@)?([^/:]+):(?!//)(.*)", text)
+        m = re.fullmatch(r"(?:[^@/:]+@)?([^/:\\]{2,}):(?!//)(.*)", text)
         if m is None:
             return os.path.normpath(text)
         text = f"ssh://{m.group(1)}/{m.group(2).lstrip('/')}"

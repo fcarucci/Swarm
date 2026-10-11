@@ -112,17 +112,17 @@ class HostsAdd(unittest.TestCase):
         self.addCleanup(p.stop)
         self.url = "git@example.test:o/r.git"
 
-    def add(self, answer=None, tty=True, keys=None):
+    def add(self, answer=None, tty=True, keys=None, stdout_tty=None):
         fake_keys = [(EXAMPLE_LINE, "ssh-ed25519 SHA256:abc")] if keys is None else keys
         stdin = mock.Mock(isatty=lambda: tty)
-        stdout = mock.Mock(isatty=lambda: tty, write=lambda s: len(s), flush=lambda: None)
+        out_tty = tty if stdout_tty is None else stdout_tty
         with mock.patch.object(land_cli.sys, "stdin", stdin), mock.patch.object(
                 mirror, "scan_host_keys", lambda h, p, *a: fake_keys), mock.patch(
                 "builtins.input", lambda prompt="": answer):
             out, err = io.StringIO(), io.StringIO()
             with contextlib.redirect_stderr(err):
                 with mock.patch.object(land_cli.sys, "stdout", out):
-                    stdout_isatty = mock.patch.object(out, "isatty", lambda: tty, create=True)
+                    stdout_isatty = mock.patch.object(out, "isatty", lambda: out_tty, create=True)
                     with stdout_isatty:
                         code = land_cli._hosts_add(argparse.Namespace(url=self.url))
         return code, out.getvalue(), err.getvalue()
@@ -146,6 +146,11 @@ class HostsAdd(unittest.TestCase):
         code, out, err = self.add(answer="example.test", tty=False)
         self.assertEqual(code, 1)
         self.assertIn("person at a terminal", err)
+        self.assertFalse(self.trusted())
+
+    def test_a_redirected_stdout_is_not_a_terminal_either(self):
+        code, out, err = self.add(answer="example.test", tty=True, stdout_tty=False)
+        self.assertEqual(code, 1)
         self.assertFalse(self.trusted())
 
     def test_scan_never_runs_without_a_terminal(self):
