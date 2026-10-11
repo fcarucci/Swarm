@@ -339,6 +339,7 @@ def _locks(seat) -> tuple[list[str], dict]:
 # --- execute -------------------------------------------------------------------------------------
 
 UNCOUNTED = ("outage", "lost", "cancelled-before-start")        # attempts that do not count toward max_attempts
+EVACK = "evack:"                                      # evack:<seat>:<event id> = 1: that event was shown and answered
 ACK_OUTCOMES = ("completed", "max_turns", "timeout")   # [F4]: the session completed at least one turn
 
 
@@ -351,11 +352,17 @@ def _conclude(led, launch_id: str, outcome: str, success: bool, charged: float) 
             if i.launch_id != launch_id or i.state == "concluded":
                 continue
             i.state, i.outcome, i.success, i.charged_usd = "concluded", outcome, success, charged
-            for kind in ("msg", "event"):
-                pending = l.watermarks.pop(f"launch-{kind}:{launch_id}", None)
-                if pending is not None and outcome in ACK_OUTCOMES and i.seat:
-                    key = f"{kind}:{i.seat}"
-                    l.watermarks[key] = max(l.watermarks.get(key, 0), pending)
+            pending = l.watermarks.pop(f"launch-msg:{launch_id}", None)
+            if pending is not None and outcome in ACK_OUTCOMES and i.seat:
+                key = f"msg:{i.seat}"
+                l.watermarks[key] = max(l.watermarks.get(key, 0), pending)
+            # events are acknowledged one by one (`evack:<seat>:<id>`), never as a high-water mark: one event
+            # with a far id would otherwise hide every later one
+            shown = [k for k in l.watermarks if k.startswith(f"launch-ev:{launch_id}:")]
+            for k in shown:
+                eid = l.watermarks.pop(k)
+                if outcome in ACK_OUTCOMES and i.seat:
+                    l.watermarks[f"{EVACK}{i.seat}:{eid}"] = 1
     mutate(led, apply)
 
 
@@ -512,7 +519,8 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
                     l.rounds_without_progress += 1
                 l.watermarks[f"rid:{launch_id}"] = row.id      # the one restart row this launch owns
                 l.watermarks[f"launch-msg:{launch_id}"] = marks[0]
-                l.watermarks[f"launch-event:{launch_id}"] = marks[1]
+                for eid in marks[1]:
+                    l.watermarks[f"launch-ev:{launch_id}:{eid}"] = eid
     mutate(led, claimed)
     run = {"restart_id": row.id, "job": led.job, "name": name, "harness": seat.harness, "resume_of": old,
            "marker": "", "argv": list(spec.argv), "cwd": spec.cwd, "stdin": spec.stdin,
@@ -558,25 +566,26 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
         raise
 
 
-def _board_marks(board, led, seat, now) -> tuple[int, int]:
+def _board_marks(board, led, seat, now) -> tuple[int, list]:
     """The message id and event id a session is launched knowing about: only the ids the snapshot would list
     as this seat's pending wakes (driver_snapshot._wakes): messages to the seat's agent that carry the
     ledger's own `post` receipt (host-private, so a database writer cannot fake one), and events addressed
-    to that agent. Nothing else moves a mark; with no agent yet, or nothing pending, the marks stay."""
+    to that agent, returned as the list of ids shown (each acknowledged on its own). Nothing else moves a mark."""
     prev_msg = led.watermarks.get(f"msg:{seat.seat}", 0)
     prev_event = led.watermarks.get(f"event:{seat.seat}", 0)
+    seen = f"{EVACK}{seat.seat}:"
     from swarm.supervisor import driver_snapshot
     names = {a.agent_key: a.name for a in board.agents(led.job, include_departed=True)}
     name = names.get(seat.agent_key) if seat.agent_key else None
     if name is None:
-        return prev_msg, prev_event
+        return prev_msg, []
     rc = driver_snapshot._Receipts(led, led.job, led.generation, now)
     msgs = [m.id for m in board.messages_after(prev_msg, led.job) if m.to_agent == name and m.id > prev_msg
             and rc.get("post", m.id, 1, {"kind": "post", "id": str(m.id), "rev": 1, "to": m.to_agent,
                                          "body": m.message}) is not None]
     events = [e.id for e in board.pending_events(led.job) if e.to and e.to.lower() == name.lower()
-              and e.id > prev_event]
-    return max(msgs, default=prev_msg), max(events, default=prev_event)
+              and e.id > prev_event and f"{seen}{e.id}" not in led.watermarks]
+    return max(msgs, default=prev_msg), sorted(events)
 
 
 def _render_prompt(board, cfg, led, action, seat) -> str:
