@@ -302,6 +302,13 @@ class HaltLedgerTests(T.LifeCase):
         life.settle_halt(self.b, self.cfg, self.led, self.at(6), hooks=self.run.hooks())
         self.assertEqual({i.launch_id: i.outcome for i in self.reload().intents}[old_ended], "cancelled")
 
+    def test_sessions_ended_by_a_halt_without_open_marks_are_still_halted(self):
+        lid = self.launch("a")
+        self.led.halted = {"by": "person", "at": fx.iso(self.at(1))}      # a ledger halted before the marks existed
+        self.led.save()
+        self.assertTrue(life.settle_halt(self.b, self.cfg, self.led, self.at(2), hooks=self.run.hooks()))
+        self.assertEqual({i.launch_id: i.outcome for i in self.reload().intents}[lid], "halted")
+
     def test_unhalt_forgets_the_open_marks(self):
         self.launch("a")
         life.halt(self.b, self.cfg, self.led, "person", self.at(1), hooks=self.run.hooks())

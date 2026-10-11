@@ -89,12 +89,6 @@ def _spent(deadline: float | None) -> bool:
     return deadline is not None and time.monotonic() > deadline
 
 
-def drive_claimed(board, job: str) -> bool:
-    """Whether `job` is the driver's (Board.drive_job_claimed): the generic supervisor passes skip it."""
-    check = getattr(board, "drive_job_claimed", None)
-    return bool(check and check(job))
-
-
 def find_stuck_owned(board, cfg: dict, now=None, deadline: float | None = None) -> list[tuple]:
     """(job status, agent, reason) for each of this machine+user's stuck agents on open,
     supervised jobs; [] when the supervisor is off. Read-only. Orphaned: the job's
@@ -112,7 +106,7 @@ def find_stuck_owned(board, cfg: dict, now=None, deadline: float | None = None) 
     for js in board.jobs(False):
         if _spent(deadline):
             break
-        if not js.supervise or js.status != "active" or drive_claimed(board, js.job):
+        if not js.supervise or js.status != "active":
             continue
         from swarm.supervisor.orphans import drive_gate, drive_view, human_question
         if drive_view(board, cfg, js.job)[0]:
