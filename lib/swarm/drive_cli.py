@@ -61,6 +61,16 @@ def board_key(cfg: dict) -> str:
     return store_key(cfg)
 
 
+def drive_generation(cfg: dict, job: str) -> int | None:
+    """The job's drive generation from its ledger; None when it is not a drive job or its ledger is unreadable
+    (the verdict is then recorded without a drive record: it cannot make the job terminal)."""
+    try:
+        led = ledger.load(board_key(cfg), job)
+    except ledger.LedgerBadError:
+        return None
+    return led.generation if led is not None else None
+
+
 def _now_iso(board) -> str:
     return board.now().isoformat()
 

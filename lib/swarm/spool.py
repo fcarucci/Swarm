@@ -471,10 +471,12 @@ def deliver_verdict(board, job: str, name: str, verdict: str, reason: str,
                     next_steps: str | None = None, artifact: str | None = None,
                     details: str | None = None, *, scope: str = "artifact", generation: int | None = None,
                     open_count: int | None = None, progress: bool | None = None,
-                    candidate: str | None = None, req: str | None = None) -> bool:
-    """Record a judge's verdict and post it on the job's board; False (nothing recorded or
-    posted) if `name` is not the job's active judge. Shared by `swarm verdict` and the spool."""
-    if artifact is None:
+                    candidate: str | None = None, req: str | None = None) -> int:
+    """Record a judge's verdict and post it on the job's board. Returns the id of the posted VERDICT
+    message (the verdict's record id, bound into the stored verdict), or 0 when nothing was recorded or
+    posted because `name` is not the job's active judge. Shared by `swarm verdict` and the spool.
+    A goal or ruling verdict is bound to its candidate, never to a hand-off artifact."""
+    if artifact is None and scope == "artifact":
         from swarm.review import latest_handoffs, judge_artifact, branch_revision
         leading, separator, _ = reason.partition(':')
         artifact = leading if separator and branch_revision(leading) else None
@@ -486,14 +488,20 @@ def deliver_verdict(board, job: str, name: str, verdict: str, reason: str,
     typed = {k: v for k, v in (("scope", None if scope == "artifact" else scope), ("generation", generation),
                                ("open_count", open_count), ("progress", progress), ("candidate", candidate),
                                ("req", req)) if v is not None}
+    # Only the active judge may record (the board checks that under its lock), so the verdict is recorded
+    # first and posted second; its stored record is then bound to the posted message's id, recorded again
+    # under the same checks (the second write is the same verdict with its message id).
     if not board.record_verdict(job, name, verdict, reason, next_steps, artifact, details, **typed):
-        return False
-    board.post(job, name, f"VERDICT {verdict}: {reason}")
+        return 0
+    posted = board.post(job, name, f"VERDICT {verdict}: {reason}")
+    if not board.record_verdict(job, name, verdict, reason, next_steps, artifact, details,
+                                message_id=posted.id, **typed):
+        return 0
     if details and details.strip():   # the report itself is not posted (the board caps a message)
         board.post(job, name, f"DETAILS ({len(details.strip().splitlines())} lines): swarm verdict show --job {job}")
     if next_steps:   # the board caps a message; the full text is what `swarm status --job J` shows
         board.post(job, name, f"NEXT (to meet the goal; full text in swarm status): {next_steps}")
-    return True
+    return posted.id
 
 
 def _typed_from_record(m: dict) -> tuple:

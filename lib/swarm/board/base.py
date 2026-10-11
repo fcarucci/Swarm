@@ -2203,7 +2203,8 @@ class Board(abc.ABC):
                        next_steps: str | None = None, artifact: str | None = None,
                        details: str | None = None, *, scope: str = "artifact", generation: int | None = None,
                        open_count: int | None = None, progress: bool | None = None,
-                       candidate: str | None = None, req: str | None = None) -> bool:
+                       candidate: str | None = None, req: str | None = None,
+                       message_id: int | None = None) -> bool:
         """The judge's verdict on the job's goal: only if `judge_name` is the job's ACTIVE judge
         (else False, nothing stored). Sets verdict (one of VERDICTS, anything else raises),
         scope (VERDICT_SCOPES; unknown raises), generation, candidate and req (kept as the latest

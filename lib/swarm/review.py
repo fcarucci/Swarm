@@ -105,26 +105,35 @@ def drive_job(raw: str | None) -> bool:
 def verdict_data(raw: str | None, artifact: str | None, verdict: str, reason: str,
                  next_steps: str | None, judge: str, at: dt.datetime, *, scope: str = 'artifact',
                  generation: int | None = None, open_count: int | None = None, progress: bool | None = None,
-                 candidate: str | None = None, req: str | None = None) -> str:
+                 candidate: str | None = None, req: str | None = None,
+                 message_id: int | None = None) -> str:
     """New job-data JSON, written atomically with the legacy latest-verdict columns.
 
-    Chunking preserves long --next briefs within the ordinary job-data value bound. The record of
-    an artifact verdict keeps its scope, drive generation, open count (acceptance criteria still
-    unmet), progress flag, candidate and requirements digest, for the drive pipeline to read.
+    Chunking preserves long --next briefs within the ordinary job-data value bound. Every stored record
+    carries `message_id`, the id of the VERDICT message the verdict was posted as (None when not posted).
+    An artifact verdict is stored under `pipeline.verdict.<hash of the artifact>`, bound to its artifact.
+    A goal or ruling verdict of a drive generation is stored under `drive.verdict.<generation>.<scope>`,
+    bound to its candidate (its artifact is None); without a generation it has no record.
+    The record keeps its scope, drive generation, open count (acceptance criteria still unmet), progress
+    flag, candidate and requirements digest, for the drive pipeline to read.
     """
     data = parse_job_data(raw)
     data['pipeline.verdict_artifact'] = artifact or ''
     if artifact is not None:
         key = 'pipeline.verdict.' + hashlib.sha256(artifact.encode()).hexdigest()[:32]
-        record = json.dumps(dict(artifact=artifact, verdict=verdict, reason=reason,
-                            next_steps=next_steps, judge=judge, at=at.isoformat(), scope=scope,
-                            generation=generation, open=open_count, progress=progress,
-                            candidate=candidate, req=req), ensure_ascii=False)
-        chunks = [record[i:i + JOB_DATA_VALUE_MAX] for i in range(0, len(record), JOB_DATA_VALUE_MAX)]
-        # Remove obsolete tail chunks when a shorter verdict replaces a longer one.
-        data = {k: v for k, v in data.items() if not k.startswith(key + '.')}
-        data[key] = str(len(chunks))
-        data.update({f'{key}.{i}': chunk for i, chunk in enumerate(chunks)})
+    elif scope in ('goal', 'ruling') and generation is not None:
+        key = f'drive.verdict.{generation}.{scope}'
+    else:
+        return json.dumps(data, ensure_ascii=False)
+    record = json.dumps(dict(artifact=artifact, verdict=verdict, reason=reason,
+                        next_steps=next_steps, judge=judge, at=at.isoformat(), scope=scope,
+                        generation=generation, open=open_count, progress=progress,
+                        candidate=candidate, req=req, message_id=message_id), ensure_ascii=False)
+    chunks = [record[i:i + JOB_DATA_VALUE_MAX] for i in range(0, len(record), JOB_DATA_VALUE_MAX)]
+    # Remove obsolete tail chunks when a shorter verdict replaces a longer one.
+    data = {k: v for k, v in data.items() if not k.startswith(key + '.')}
+    data[key] = str(len(chunks))
+    data.update({f'{key}.{i}': chunk for i, chunk in enumerate(chunks)})
     return json.dumps(data, ensure_ascii=False)
 
 
