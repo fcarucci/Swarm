@@ -80,6 +80,7 @@ def replacement_model(cfg: dict, harness: str, role: str | None, recorded: str |
 
 
 READ_ONLY_CLAUDE_DISALLOWED = "Edit,Write,NotebookEdit,MultiEdit"
+DRIVE_READ_ONLY_CLAUDE_DISALLOWED = READ_ONLY_CLAUDE_DISALLOWED + ",mcp__*"   # a drive seat without write rights has no MCP tools
 
 
 def _budget(budget_usd) -> float:
@@ -118,7 +119,7 @@ def claude_spec(cfg: dict, *, prompt: str, workdir: str, model: str | None, minu
     elif s["max_budget_usd"] > 0:
         argv += ["--max-budget-usd", f"{s['max_budget_usd']:g}"]
     if read_only:
-        argv += ["--disallowedTools", READ_ONLY_CLAUDE_DISALLOWED]
+        argv += ["--disallowedTools", DRIVE_READ_ONLY_CLAUDE_DISALLOWED if drive else READ_ONLY_CLAUDE_DISALLOWED]
     if s.get("claude_plugin_dir"):
         argv += ["--plugin-dir", s["claude_plugin_dir"]]
     check_safe(argv)

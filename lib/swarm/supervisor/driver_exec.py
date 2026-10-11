@@ -28,7 +28,7 @@ import sys
 import time
 import uuid
 
-from swarm import compat, receipts
+from swarm import compat, driveroles, receipts
 from swarm.board import JobPaused
 from swarm.supervisor import barrier
 from swarm.supervisor import driver_model as dm
@@ -40,7 +40,6 @@ LEDGER_TRIES = 5
 AUTH_HOURS = 24 * 7          # a driver-authored seat authorization receipt is valid this long
 LOCK_SLACK_MINUTES = 15      # a launch's drive locks outlive its wall clock by this
 RULING_RESERVE_SESSIONS = 2  # sessions past max_sessions that only a ruling may use (spec 4.1)
-READ_ONLY_ROLES = ("judge", "reviewer", "qa", "engineering_lead")
 DRIVER_SEATS = ("judge", "goal-judge", "ruling-judge")
 # `[drive.models]` shipped defaults (plan Global Constraints, [P1]); 6a's model table overrides them.
 DEFAULT_MODELS = {"engineer": "haiku", "worker": "haiku", "integrator": "haiku", "reviewer": "sonnet",
@@ -138,6 +137,12 @@ def reserved_seat(name: str) -> bool:
 
 def valid_resume_handle(handle) -> bool:
     return isinstance(handle, str) and _RESUME_HANDLE.fullmatch(handle) is not None
+
+
+def read_only_role(role) -> bool:
+    """Whether a seat of this role has no write rights: Task 5's one definition (judges, reviewers, security)
+    plus the lead and QA, which also never write."""
+    return driveroles.is_read_only_role(role) or role in (driveroles.LEAD_ROLE, "qa")
 
 
 def _in_tmp(path: str) -> bool:
@@ -322,7 +327,7 @@ def _reservation(d: dict, led, ruling: bool) -> tuple[float, float] | None:
 
 def _locks(seat) -> tuple[list[str], dict]:
     """The drive locks of a launch: a writer seat claims the worktree root of its work dir."""
-    if seat.role in READ_ONLY_ROLES:
+    if read_only_role(seat.role):
         return [], {}
     from swarm.supervisor import worktree
     root = worktree.worktree_root(seat.workdir) or os.path.realpath(seat.workdir).replace(os.sep, "/")
@@ -461,7 +466,7 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
     model = seat.model or _models(cfg, led).get(seat.role) or launch.replacement_model(cfg, seat.harness, seat.role, None)
     text = prompt if prompt is not None else _render_prompt(board, cfg, led, action, seat)
     spec = launch.spec_for(cfg, seat.harness, prompt=text, workdir=seat.workdir, model=model,
-                           minutes=reserve_minutes, budget_usd=reserve_usd, read_only=seat.role in READ_ONLY_ROLES,
+                           minutes=reserve_minutes, budget_usd=reserve_usd, read_only=read_only_role(seat.role),
                            resume=resume, drive=True)
     lock_keys, lock_paths = _locks(seat)
     marks = _board_marks(board, led, seat, now)

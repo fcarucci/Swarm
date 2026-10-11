@@ -1510,6 +1510,29 @@ class FixRoundTests(ExecEnv):
         self.assertEqual(self.launched, [])
         self.assertEqual(self.b.drive_locks(), [])
 
+    def test_every_seat_without_write_rights_launches_read_only_with_no_mcp_and_no_lock(self):
+        self.cfg["drive"] = {"max_cost_usd": 1000, "max_concurrent_sessions": 50, "max_sessions": 100}
+        for n, role in enumerate(("judge", "reviewer", "security", "security_reviewer", "qa", "engineering_lead",
+                                  "goal_judge", "ruling_reviewer")):
+            name = f"ro{n}"
+            self.seat(name, role=role)
+            run = self.go(self.act(name))
+            self.assertIsNotNone(run, role)
+            deny = run["argv"][run["argv"].index("--disallowedTools") + 1]
+            self.assertTrue(deny.startswith("Edit,Write,NotebookEdit,MultiEdit") and deny.endswith(",mcp__*"), role)
+        self.assertEqual(self.b.drive_locks(), [])
+
+    def test_a_writer_launches_with_no_deny_list(self):
+        self.seat("w", role="engineer")
+        run = self.go(self.act("w"))
+        self.assertNotIn("--disallowedTools", run["argv"])
+        self.assertTrue(driver_exec.read_only_role("security") and not driver_exec.read_only_role("integrator"))
+
+    def test_the_read_only_roles_are_the_hooks_definition(self):
+        from swarm import driveroles
+        for role in driveroles.READ_ONLY_ROLES:
+            self.assertTrue(driver_exec.read_only_role(role), role)
+
     # -- lows
     def test_N1_a_cancel_after_a_session_started_counts_toward_max_attempts(self):
         self.seat()
