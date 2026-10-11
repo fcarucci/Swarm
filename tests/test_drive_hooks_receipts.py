@@ -424,7 +424,17 @@ class PostAskAnswerReceipts(DriveCase):
         self.assertTrue(self.post(sid, cmd, rec("ask", b.id)))
         r = self.receipt("ask", b.id)
         self.assertTrue(receipts.matches(r, {"kind": "ask", "id": str(b.id), "rev": 1, "question": "Which DB?",
-                                             "until": b.until.isoformat(), "default": "sqlite"}))
+                                             "until": drive_authz.canonical_until(b.until), "default": "sqlite"}))
+
+    def test_the_until_of_an_ask_is_utc_whatever_zone_the_board_answers_in(self):
+        import datetime as dt
+        utc = dt.datetime(2026, 10, 11, 12, 0, tzinfo=dt.timezone.utc)
+        west = utc.astimezone(dt.timezone(dt.timedelta(hours=-7)))
+        self.assertNotEqual(west.isoformat(), utc.isoformat())
+        self.assertEqual(drive_authz.canonical_until(west), "2026-10-11T12:00:00+00:00")
+        self.assertEqual(drive_authz.canonical_until(utc), drive_authz.canonical_until(west))
+        self.assertEqual(drive_authz.canonical_until(dt.datetime(2026, 10, 11, 12, 0)), "2026-10-11T12:00:00+00:00")
+        self.assertIsNone(drive_authz.canonical_until(None))
 
     def test_ask_whose_default_or_text_differs_gets_no_receipt(self):
         sid, _ = self.launch_seat("eng-a")

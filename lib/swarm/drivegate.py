@@ -721,7 +721,8 @@ def _build(cfg, bk, board, ctx, who: Policy | None, ns, rid: int, rev: int, payl
                 or (ns.expires is not None and b.until is None)
                 or (author is not None and b.created_by != author)):
             raise Refused(f"question {rid} differs from what was submitted")
-        return "ask", {"question": b.reason, "until": b.until.isoformat() if b.until else None,
+        from swarm.supervisor import drive_authz
+        return "ask", {"question": b.reason, "until": drive_authz.canonical_until(b.until),
                        "default": b.default_value}, argv
     if sub == "answer":
         need((seat and who is not None) or requester, "swarm answer")

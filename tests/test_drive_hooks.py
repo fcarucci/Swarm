@@ -553,6 +553,23 @@ class FailClosed(DriveCase):
             self.assertIn("could not be verified", self.pre(sid, command="echo x > f"))
             self.assertIsNone(self.pre(sid, command="git status"))
 
+    def test_a_classify_error_does_not_stop_the_receipts_or_the_gate(self):
+        with mock.patch.object(drivegate, "classify", side_effect=RuntimeError("boom")), \
+                mock.patch.object(drivegate, "post_tool") as post, mock.patch.object(drivegate, "pre_tool",
+                                                                                      return_value=None) as pre:
+            self.hook("done", agent_id=None, session="x", tool_name="Bash", tool_input={"command": "ls"})
+            self.hook("turn", agent_id=None, session="x", tool_name="Bash", tool_input={"command": "ls"})
+        post.assert_called_once()
+        pre.assert_called_once()
+        self.assertIn("boom", self.error_log.read_text())
+
+    def test_the_session_is_classified_once_per_call(self):
+        sid, _ = self.launch_seat("eng-a")
+        with mock.patch.object(drivegate, "classify", wraps=drivegate.classify) as classify:
+            self.hook("turn", agent_id=None, session=sid, cwd=str(self.work), tool_name="Bash",
+                      tool_input={"command": "ls"})
+        self.assertEqual(classify.call_count, 1)
+
     def test_the_hook_survives_a_gate_error_on_a_non_drive_session(self):
         with mock.patch.object(drivegate, "pre_tool", side_effect=RuntimeError("boom")):
             self.assertIsNone(self.hook("turn", agent_id=None, session="stranger", tool_name="Bash",

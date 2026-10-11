@@ -7,6 +7,7 @@ comparison is always against the row as it is now, never against what the board 
 """
 from __future__ import annotations
 
+import datetime
 import hashlib
 import time
 
@@ -60,6 +61,17 @@ def seat_decision(seat) -> dict:
     """The row as receipts.matches() reads it: kind, id, rev and the seat_request decision fields."""
     return {"kind": "seat_request", "id": str(seat.id), "rev": seat.revision, "role": seat.role,
             "model": seat.model, "brief": seat.brief_path, "workdir": seat.workdir}
+
+
+def canonical_until(until) -> str | None:
+    """The `until` of an `ask` receipt's decision fields: the question's expiry as UTC ISO text (the board may
+    hand back the same instant in the session's own time zone; a naive time is UTC). None for no expiry. The
+    snapshot reader must compare with this form."""
+    if until is None:
+        return None
+    if until.tzinfo is None:
+        until = until.replace(tzinfo=datetime.timezone.utc)
+    return until.astimezone(datetime.timezone.utc).isoformat()
 
 
 def requirements_digest(pins: dict) -> str:
