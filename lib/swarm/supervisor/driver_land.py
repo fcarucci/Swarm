@@ -8,6 +8,8 @@ action on the group; terminalization calls `complete_all(...)` and posts DRIVER-
 `partial_report(...)` when a journal could not be completed."""
 from __future__ import annotations
 
+import dataclasses
+import datetime as dt
 import json
 import os
 import re
@@ -52,7 +54,8 @@ def claim_leases(board, cfg: dict, env: LandEnv, job: str, request: Request, des
                                                                   ["an earlier landing still to be fenced"]))
         first = next(iter(held.values()))
         row = next((r for r in board.restarts(job) if r.launch_id == first.launch_id and r.ended_at is None), None)
-        return Held(first.launch_id, action, row.id if row else None, None, True)
+        seat = board.seat(job, led.generation, land.integrator_seat(branch))   # a dead pass left it `running`
+        return Held(first.launch_id, action, row.id if row else None, seat.id if seat else None, True)
     seat = board.seat(job, led.generation, land.integrator_seat(branch))
     if seat is None or seat.state not in ("requested", "idle"):
         raise LandPending("the integrator seat is not idle")
@@ -90,20 +93,30 @@ def _text(prefix: str, artifact: str, why: str | None = None) -> str:
     return f"{prefix}{artifact} {one_line}"
 
 
-def _set_lease_mark(env: LandEnv, branch: str, held: bool) -> None:
-    """integrated[group].lease_held_since: set when a hold starts, kept while it lasts (the ruling clock), cleared
-    when the hold ends."""
-    if held == ("lease_held_since" in (env.led.integrated.get(branch) or {})):
+LEASE_MARK = "lease_held_since"
+PENDING_MARK = "land_pending_since"
+
+
+def _set_mark(env: LandEnv, branch: str, key: str, on: bool) -> None:
+    """integrated[group][key]: set when a hold starts, kept while it lasts (the ruling clock), cleared when it ends."""
+    if on == (key in (env.led.integrated.get(branch) or {})):
         return
 
     def apply(led):
         ig = dict(led.integrated.get(branch) or {})
-        if held:
-            ig["lease_held_since"] = env.now().isoformat()
+        if on:
+            ig[key] = env.now().isoformat()
         else:
-            ig.pop("lease_held_since", None)
+            ig.pop(key, None)
         led.integrated[branch] = ig
     land.update_ledger(env.led, apply)
+
+
+def _marks(env: LandEnv, branch: str, res: LandResult) -> None:
+    """A lease hold feeds `lease_held_since` ([F19]); any other pending state (CI not final, fetch not done, the
+    integrator seat busy) feeds `land_pending_since`, so no hold is unbounded; a landed or refused request clears both."""
+    _set_mark(env, branch, LEASE_MARK, res.pending and res.lease_held)
+    _set_mark(env, branch, PENDING_MARK, res.pending and not res.lease_held)
 
 
 def execute_request(board, cfg: dict, env: LandEnv, job: str, request: Request) -> LandResult:
@@ -120,17 +133,27 @@ def execute_request(board, cfg: dict, env: LandEnv, job: str, request: Request) 
     try:
         held = claim_leases(board, cfg, env, job, request, dests, action)
     except LeaseHeld as exc:
-        _set_lease_mark(env, branch, True)
-        return LandResult(False, None, str(exc), pending=True, lease_held=True)
+        res = LandResult(False, None, str(exc), pending=True, lease_held=True)
+        _marks(env, branch, res)
+        return res
     except LandPending as exc:
-        return LandResult(False, None, str(exc), pending=True)
+        res = LandResult(False, None, str(exc), pending=True)
+        _marks(env, branch, res)
+        return res
+
+    def renew():
+        try:
+            board.renew_drive_locks(held.launch_id, board.now() + dt.timedelta(seconds=land.LEASE_SECONDS),
+                                    job=job, holder=held.holder)
+        except ValueError:
+            pass
     outcome = "failed"
     try:
-        res = land.execute(board, env, job, request, action_id=action)
+        res = land.execute(board, dataclasses.replace(env, renew=renew), job, request, action_id=action)
         outcome = "landed" if res.ok else "failed"
     finally:
         release_leases(board, env, job, held, outcome)
-    _set_lease_mark(env, branch, res.lease_held)
+    _marks(env, branch, res)
     if res.ok:
         board.post(job, SUPERVISOR_NAME, _text(land.INTEGRATED_PREFIX, request.artifact))
     elif not res.pending:
@@ -138,23 +161,38 @@ def execute_request(board, cfg: dict, env: LandEnv, job: str, request: Request) 
     return res
 
 
-def _advance(env: LandEnv, request_id: int) -> None:
-    land.update_ledger(env.led, lambda led: led.watermarks.__setitem__(
-        WATERMARK, max(request_id, led.watermarks.get(WATERMARK, 0))))
+def _group_mark(branch: str) -> str:
+    return f"{WATERMARK}:{branch}"
 
 
 def run(board, cfg: dict, env: LandEnv, job: str) -> list:
-    """Execute the job's pending land requests, oldest first, once. Returns [(Request, LandResult)].
-    A pending request (lease held, fetch or CI not done) stops the loop and is retried next pass;
-    a landed or refused one moves the watermark past it."""
-    done = []
-    after = env.led.watermarks.get(WATERMARK, 0)
-    for request in land.find_requests(board, env, job, after=after):
+    """Execute the job's pending land requests, once. Returns [(Request, LandResult)].
+
+    Groups are independent: a pending request (lease held, CI or fetch not done, the seat busy) holds only the later
+    requests of its own group, which keeps their order; other groups go on. Each group has its own watermark
+    (`land.request:<group>`), and `land.request` is the lowest id below which every request is settled."""
+    done, held_groups, open_ids = [], set(), []
+    low = env.led.watermarks.get(WATERMARK, 0)
+    requests = land.find_requests(board, env, job, after=low)
+    for request in requests:
+        branch = land.parse_artifact(request.artifact)[0]
+        if request.id <= env.led.watermarks.get(_group_mark(branch), 0):
+            continue
+        if branch in held_groups:
+            open_ids.append(request.id)
+            continue
         res = execute_request(board, cfg, env, job, request)
         done.append((request, res))
         if res.pending:
-            break
-        _advance(env, request.id)
+            held_groups.add(branch)
+            open_ids.append(request.id)
+        else:
+            land.update_ledger(env.led, lambda led, b=branch, i=request.id: led.watermarks.__setitem__(
+                _group_mark(b), max(i, led.watermarks.get(_group_mark(b), 0))))
+    if requests:
+        new_low = (min(open_ids) - 1) if open_ids else max(r.id for r in requests)
+        if new_low > low:
+            land.update_ledger(env.led, lambda led: led.watermarks.__setitem__(WATERMARK, new_low))
     return done
 
 
@@ -204,13 +242,13 @@ def repo_slug(url: str) -> str | None:
 def ci_status_cli(repo: str | None, *, run=subprocess.run):
     """ci_status(sha) -> "green"|"failed"|"running"|"queued"|"none" through `swarm ci status --json` (the
     ci plugin's shared poller), asked as this host user. A CLI that fails raises (the landing holds)."""
-    def status(sha: str) -> str:
+    def status(sha: str, timeout: float | None = None) -> str:
         if not repo:
             raise ValueError("no CI repository is known: set [land] ci_repo")
         swarm = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
             os.path.abspath(__file__))))), "bin", "swarm")
         proc = run([swarm, "ci", "status", "--repo", repo, "--sha", sha, "--json"], capture_output=True,
-                   text=True, timeout=CI_TIMEOUT, stdin=subprocess.DEVNULL)
+                   text=True, timeout=min(CI_TIMEOUT, timeout or CI_TIMEOUT), stdin=subprocess.DEVNULL)
         if proc.returncode != 0:
             raise OSError(f"swarm ci status exited {proc.returncode}")
         try:
@@ -218,4 +256,5 @@ def ci_status_cli(repo: str | None, *, run=subprocess.run):
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             raise OSError("swarm ci status printed no state") from exc
         return state if isinstance(state, str) else "unknown"
+    status.takes_timeout = True
     return status

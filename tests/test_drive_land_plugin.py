@@ -55,10 +55,25 @@ class PluginCase(unittest.TestCase):
 
 
 class DriveJob(PluginCase):
-    def test_drive_job_follows_the_board_claim(self):
-        self.assertTrue(self.sp.drive_job(FakeBoard({"drive.enabled": "1"}), "J"))
-        for data in ({}, {"drive.enabled": "0"}, {"drive.enabled": "true"}, OSError("down")):
-            self.assertFalse(self.sp.drive_job(FakeBoard(data), "J"), data)
+    def test_drive_job_follows_the_host_private_ledger_not_the_board_claim(self):
+        self.assertFalse(self.sp.drive_job(self.ctx, "J"))
+        self.ledger()
+        self.assertTrue(self.sp.drive_job(self.ctx, "J"))
+        self.assertFalse(self.sp.drive_job(self.ctx, "K"))
+
+    def test_a_bad_ledger_is_still_a_drive_job(self):
+        self.ledger()
+        path = ledger_path("J")
+        with open(path, "w") as fh:
+            fh.write("{not a ledger")
+        self.assertTrue(self.sp.drive_job(self.ctx, "J"))
+
+    def test_a_cleared_board_claim_cannot_turn_a_drive_job_into_git_inference(self):
+        self.ledger()
+        board = FakeBoard({})                         # the claim is gone: agents can write it
+        with mock.patch.object(self.sp, "coding_integrated", side_effect=AssertionError("git facts used")):
+            recipe = self.sp.coding_recipe(self.ctx, board, "J", ART)
+        self.assertIn("swarm land --job J", recipe["finalize"])
 
     def test_landed_only_from_the_ledger_and_the_exact_sha(self):
         self.assertFalse(self.sp.drive_landed(self.ctx, "J", "feat/x", SHA))        # no ledger
@@ -70,7 +85,8 @@ class DriveJob(PluginCase):
         self.assertFalse(self.sp.drive_landed(self.ctx, "K", "feat/x", SHA))
 
     def test_drive_recipe_ends_with_swarm_land_and_never_pushes_the_target(self):
-        board = FakeBoard({"drive.enabled": "1"})
+        self.ledger()
+        board = FakeBoard({})
         with mock.patch.object(self.sp, "coding_integrated", side_effect=AssertionError("git facts used")):
             recipe = self.sp.coding_recipe(self.ctx, board, "J", ART)
         text = recipe["finalize"]
@@ -84,10 +100,13 @@ class DriveJob(PluginCase):
         self.assertEqual(recipe["artifact_group"], "feat/x")
 
     def test_drive_recipe_is_integrated_only_when_the_ledger_says_landed(self):
-        board = FakeBoard({"drive.enabled": "1"})
+        self.ledger()
+        board = FakeBoard({})
         with mock.patch.object(self.sp, "coding_integrated", return_value=True):
             self.assertNotIn("integrated", self.sp.coding_recipe(self.ctx, board, "J", ART))
-        self.ledger(**{"feat/x": {"landed": SHA}})
+        led = ledger.load(BK, "J")
+        led.integrated["feat/x"] = {"landed": SHA}
+        led.save()
         self.assertEqual(self.sp.coding_recipe(self.ctx, board, "J", ART), {"artifact_group": "feat/x", "integrated": True})
 
     def test_non_drive_recipe_is_unchanged(self):
@@ -100,10 +119,16 @@ class DriveJob(PluginCase):
         ci.assert_called_once()
 
     def test_squash_strategy_text_in_drive_mode(self):
+        self.ledger()
         (Path(self.root) / "team.toml").write_text('[land]\nstrategy = "squash-ff"\n')
-        recipe = self.sp.coding_recipe(self.ctx, FakeBoard({"drive.enabled": "1"}), "J", ART)
+        recipe = self.sp.coding_recipe(self.ctx, FakeBoard({}), "J", ART)
         self.assertIn("squash-ff", recipe["finalize"])
         self.assertIn("swarm land --job J", recipe["finalize"])
+
+
+def ledger_path(job):
+    from swarm.supervisor import settings
+    return settings.private_dir() / "drive" / ledger._name(BK, job)
 
 
 if __name__ == "__main__":

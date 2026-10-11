@@ -319,12 +319,35 @@ class Checks(LandCase):
         self.assertFalse(res.ok)
         self.assertEqual(self.pushes, [])
 
-    def test_integrator_session_may_land_synchronously(self):
-        seat = self.board.seat("J", 1, SEAT)
+    def receipted_request(self, artifact=None, seat=SEAT):
+        artifact = artifact or f"{GROUP}@{self.sha}"
+        body = land.request_text(artifact)
+        mid = self.board.post("J", "integrator-bot", body).id
+        receipts.write(BK, receipts.Receipt(
+            board_key=BK, job="J", generation=1, incarnation=self.led.incarnation, action_id="a", attempt=1,
+            seat=seat, kind="post", record_id=str(mid), rev=1,
+            content_sha=receipts.content_sha("post", {"to": None, "body": body}), args_sha="0" * 64,
+            expires_at=NOW.timestamp() + 3600))
+        return mid
+
+    def land_as(self, session="sess-int"):
         with mock.patch.object(type(self.board), "seats", lambda s, job, gen=None, include_closed=True: [
                 mock.Mock(seat=SEAT, session_id="sess-int")]):
-            res = land.land(self.board, self.env(), "J", f"{GROUP}@{self.sha}", caller_session="sess-int")
+            return land.land(self.board, self.env(), "J", f"{GROUP}@{self.sha}", caller_session=session)
+
+    def test_integrator_session_may_land_synchronously_with_its_real_request_id(self):
+        mid = self.receipted_request()
+        res = self.land_as()
         self.assertTrue(res.ok, res.why)
+        self.assertEqual(res.land_id, str(mid))
+
+    def test_synchronous_land_needs_a_receipted_request_for_that_artifact_and_seat(self):
+        self.receipted_request(f"{GROUP}@{'b' * 40}")
+        self.receipted_request(seat="reviewer-x")
+        res = self.land_as()
+        self.assertFalse(res.ok)
+        self.assertIn("no receipted land request", res.why)
+        self.assertEqual(self.pushes, [])
 
     def test_malformed_artifact_refused(self):
         for bad in ("a/../x@" + "a" * 40, "feat/x.lock@" + "a" * 40, "feat/x/@" + "a" * 40, "feat/x@abc", "feat/x@abcd", "feat/x@" + "a" * 39, "feat/x@" + "G" * 40, "../x@" + "a" * 40, "x y@" + "a" * 40,
@@ -390,13 +413,16 @@ class Leases(LandCase):
         same = ["https://GitHub.com/o/r.git", "https://github.com/o/r", "https://github.com:443/o/r/",
                 "https://user@github.com/o/r.git"]
         self.assertEqual(len({lease_key(u, "main") for u in same}), 1)
-        self.assertEqual(normalize_url("git@github.com:o/r.git"), normalize_url("ssh://git@github.com/o/r"))
+        self.assertEqual(normalize_url("git@github.com:o/r.git"), "github.com/o/r")
         self.assertNotEqual(normalize_url("https://github.com/o/r"), normalize_url("https://github.com/o/s"))
         self.assertNotEqual(normalize_url("ssh://h:2222/o/r"), normalize_url("ssh://h/o/r"))
-        self.assertNotEqual(normalize_url("http://h/o/r"), normalize_url("https://h/o/r"))
+        self.assertEqual(normalize_url("http://h/o/r"), normalize_url("https://h/o/r"))
+        self.assertEqual(normalize_url("git@h:o/r.git"), normalize_url("https://H/o/r/"))
+        self.assertEqual(lease_key("git@github.com:o/r.git", "main"), lease_key("https://github.com/o/r", "main"))
+        self.assertEqual(normalize_url("file:///srv/r.git"), "/srv/r.git")
         self.assertFalse(normalize_url("C:\\repos\\r.git").startswith("ssh://"))
         self.assertFalse(normalize_url("C:/repos/r.git").startswith("ssh://"))
-        self.assertNotEqual(normalize_url("ssh://h/o/r"), normalize_url("https://h/o/r"))
+        self.assertEqual(normalize_url("ssh://git@h/o/r.git"), normalize_url("https://h/o/r"))
 
     def test_second_job_cannot_claim_the_same_destinations(self):
         self.board.open_job("K", None, None, None, "me", goal="G")
@@ -553,8 +579,8 @@ class Twins(LandCase):
     def rebased(self, change_content=False):
         """The judged commit rebased onto a moved target (a clean rebase, or one with a changed hunk)."""
         moved = self.advance(self.a, "m.txt")
-        self.advance(self.b, "m.txt")
         git(self.work, "fetch", "-q", self.a, "main")
+        git(self.work, "push", "-q", self.b, "FETCH_HEAD:refs/heads/main")      # the very same commit on b (no clock race)
         git(self.work, "checkout", "-q", "-B", GROUP, "FETCH_HEAD")
         sha = self.commit(self.work, "x.txt", "x2\n" if change_content else "x\n", "feature")
         for r in (self.a, self.b):
@@ -797,6 +823,196 @@ class Audit(LandCase):
         self.assertEqual(fetched[:4], [["main"], ["judged-old"], ["main"], ["judged-old"]])
 
 
+class ContainedSha(LandCase):
+    """[S4] An unjudged SHA already on the target is never recorded as landed."""
+
+    def test_an_unjudged_ancestor_of_the_target_is_not_landed(self):
+        first = self.go()
+        self.assertTrue(first.ok, first.why)
+        for r in (self.a, self.b):
+            git(self.work, "push", "-q", "-f", r, f"{self.base}:refs/heads/{GROUP}")
+        self.pushes.clear()
+        res = self.go(request=self.request(artifact=f"{GROUP}@{self.base}", rid=8))
+        self.assertFalse(res.ok)
+        self.assertIn("met verdict", res.why)
+        self.assertEqual(self.led.integrated[GROUP]["landed"], self.sha)
+        self.assertEqual(self.led.integrated[GROUP]["land_id"], "7")
+        self.assertEqual(self.pushes, [])
+
+    def test_a_judged_sha_already_on_the_target_is_a_recorded_no_op(self):
+        self.go()
+        for r in (self.a, self.b):
+            git(self.work, "push", "-q", "-f", r, f"{self.base}:refs/heads/{GROUP}")
+        self.judged = {self.base}
+        self.pushes.clear()
+        res = self.go(request=self.request(artifact=f"{GROUP}@{self.base}", rid=8))
+        self.assertTrue(res.ok, res.why)
+        self.assertEqual(self.pushes, [])
+        self.assertEqual(self.led.integrated[GROUP]["landed"], self.base)
+
+    def test_an_empty_range_is_never_a_twin(self):
+        self.go()
+        for r in (self.a, self.b):
+            git(self.work, "push", "-q", "-f", r, f"{self.base}:refs/heads/{GROUP}")
+        mirrors = {d.url: Mirror(d.url, d.credential) for d in destinations_from_owner(self.owner)}
+        for m in mirrors.values():
+            m.fetch_branches(["main", GROUP], 30)
+        self.assertFalse(land._twin(mirrors, destinations_from_owner(self.owner), "main", self.base, {self.sha}))
+
+
+class Budget(LandCase):
+    """[F1] Every network step gets min(its cap, the job's slot left); a spent slot is a hold."""
+
+    def test_a_spent_slot_is_a_hold_before_any_git_call(self):
+        calls = []
+        real = self.factory()
+
+        def make(url, cred):
+            m = real(url, cred)
+            for name in ("fetch_branches", "push", "delete_branch"):
+                inner = getattr(m, name)
+                setattr(m, name, lambda *a, _i=inner, _n=name, **k: (calls.append(_n), _i(*a, **k))[1])
+            return m
+        res = self.go(env={"left": lambda: 0, "mirror_factory": make})
+        self.assertTrue(res.pending and not res.ok)
+        self.assertIn("continues next pass", res.why)
+        self.assertEqual(calls, [])
+        self.assertEqual(self.pushes, [])
+
+    def test_every_call_is_capped_by_the_time_left(self):
+        seen = []
+        real = self.factory()
+
+        def make(url, cred):
+            m = real(url, cred)
+            fb, push, dele = m.fetch_branches, m.push, m.delete_branch
+            m.fetch_branches = lambda b, t: (seen.append(("fetch", t)), fb(b, t))[1]
+            m.push = lambda sha, target, timeout=None: (seen.append(("push", timeout)), push(sha, target, timeout=timeout))[1]
+            m.delete_branch = lambda b, timeout=None: (seen.append(("delete", timeout)), dele(b, timeout=timeout))[1]
+            return m
+        res = self.go(env={"left": lambda: 7.0, "mirror_factory": make})
+        self.assertTrue(res.ok, res.why)
+        kinds = {k for k, _ in seen}
+        self.assertEqual(kinds, {"fetch", "push", "delete"})
+        self.assertTrue(all(t == 7.0 for _, t in seen), seen)
+        seen.clear()
+
+    def test_the_fixed_caps_still_apply_when_much_time_is_left(self):
+        seen = []
+        real = self.factory()
+
+        def make(url, cred):
+            m = real(url, cred)
+            fb = m.fetch_branches
+            m.fetch_branches = lambda b, t: (seen.append(t), fb(b, t))[1]
+            return m
+        self.go(env={"left": lambda: 1000.0, "mirror_factory": make})
+        self.assertEqual(max(seen), land.FETCH_SECONDS)
+
+    def test_a_slot_that_runs_out_mid_landing_resumes_from_the_journal(self):
+        budget = {"n": 0}
+
+        def left():
+            budget["n"] += 1
+            return 10.0 if budget["n"] <= 8 else 0.0
+        res = self.go(env={"left": left})
+        self.assertTrue(res.pending, res.why)
+        j = land.read_journal(self.led, 7, NOW, destinations=2)
+        self.assertIsNotNone(j)
+        res = self.go()
+        self.assertTrue(res.ok, res.why)
+        self.assertEqual(self.head(self.a), self.sha)
+        self.assertEqual(self.head(self.b), self.sha)
+
+    def test_leases_are_renewed_before_each_network_step(self):
+        n = []
+        res = self.go(env={"renew": lambda: n.append(1)})
+        self.assertTrue(res.ok)
+        self.assertGreaterEqual(len(n), 8)
+
+    def test_ci_gets_the_time_left_when_it_takes_a_timeout(self):
+        got = []
+
+        def status(sha, timeout=None):
+            got.append(timeout)
+            return "green"
+        status.takes_timeout = True
+        self.go(env={"ci_status": status, "left": lambda: 9.0})
+        self.assertEqual(got, [9.0])
+
+
+class TimeoutsAreHolds(LandCase):
+    """[F2] A slow fetch of a judged branch is a hold, never "no verdict covers it"."""
+
+    def slow(self, extra):
+        real = self.factory()
+
+        def make(url, cred):
+            m = real(url, cred)
+            inner = m.fetch_branches
+            m.fetch_branches = lambda b, t: ({}, list(b)) if b == [extra] else inner(b, t)
+            return m
+        return make
+
+    def test_slow_judged_branch_fetch_is_pending_not_refused(self):
+        self.judged = {"9" * 40}
+        res = self.go(env={"judged_branches": lambda: ["judged-old"], "mirror_factory": self.slow("judged-old")})
+        self.assertTrue(res.pending and not res.ok, res.why)
+        self.assertIn("judged-old", res.why)
+        self.assertEqual(self.pushes, [])
+
+    def test_a_missing_judged_branch_is_still_skipped(self):
+        res = self.go(env={"judged_branches": lambda: ["nope"]})
+        self.assertTrue(res.ok)           # sha itself is judged: the extra branches are not even fetched
+        self.judged = {"9" * 40}
+        res = self.go(request=self.request(rid=9), env={"judged_branches": lambda: ["nope"]})
+        self.assertFalse(res.pending)
+
+    def test_slow_judged_branch_fetch_in_the_audit_is_pending_with_no_findings(self):
+        self.go()
+        out = land.audit(self.env(judged_branches=lambda: ["judged-old"], mirror_factory=self.slow("judged-old")),
+                         {self.a: self.base, self.b: self.base}, self.sha)
+        self.assertEqual(out, land.AuditResult((), True))
+
+    def test_a_spent_slot_makes_the_audit_pending(self):
+        self.go()
+        out = land.audit(self.env(left=lambda: 0), {self.a: self.base, self.b: self.base}, self.sha)
+        self.assertEqual(out, land.AuditResult((), True))
+
+    def test_the_audit_deadline_is_capped_by_the_time_left(self):
+        self.go()
+        seen = []
+        real = self.factory()
+
+        def make(url, cred):
+            m = real(url, cred)
+            inner = m.audit_target
+            m.audit_target = lambda *a, **k: (seen.append(k.get("deadline")), inner(*a, **k))[1]
+            return m
+        land.audit(self.env(left=lambda: 11.0, mirror_factory=make), {self.a: self.base, self.b: self.base}, self.sha)
+        self.assertEqual(seen, [11.0, 11.0])
+
+
+class OwnerPins(LandCase):
+    def test_target_branch_comes_from_the_owner_record(self):
+        env = self.env()
+        self.assertEqual(env.target, "main")
+        self.owner = {**self.owner, "target_branch": "trunk"}
+        self.assertEqual(self.env().target, "trunk")
+        self.owner = {**self.owner, "target_branch": ""}
+        self.assertEqual(self.env(target="dev").target, "dev")
+
+    def test_the_audit_reads_activation_heads_from_the_ledger_by_url(self):
+        self.go()
+        self.led.activation_heads = {self.a: self.base, self.b: self.base}
+        self.assertEqual(land.audit(self.env(), None, self.sha), land.AuditResult((), False))
+        self.led.activation_heads = {self.a: self.base}
+        out = land.audit(self.env(), None, self.sha)
+        self.assertIn("no activation-time head", out.findings[0])
+        del self.led.activation_heads
+        self.assertEqual(len(land.audit(self.env(), None, self.sha).findings), 2)
+
+
 class SeatName(unittest.TestCase):
     def test_integrator_seat_name_shape(self):
         n = land.integrator_seat("feat/x")
@@ -821,9 +1037,20 @@ class Pins(unittest.TestCase):
         self.assertEqual(credential_from_pin("ssh-agent:/run/a.sock"), {"kind": "ssh-agent", "socket": "/run/a.sock"})
         self.assertEqual(credential_from_pin("helper:/h/gh auth git-credential", config_dir="/cfg"),
                          {"kind": "helper", "command": "/h/gh auth git-credential", "config_dir": "/cfg"})
-        d = credential_from_pin("helper:/h/gh auth git-credential")
-        self.assertTrue(os.path.isabs(d["config_dir"]))
-        self.assertTrue(d["config_dir"].endswith(os.path.join(".config", "gh")))
+        with self.assertRaises(LandRefused) as cm:          # no fallback to the driver's own $HOME
+            credential_from_pin("helper:/h/gh auth git-credential")
+        self.assertIn("GH_CONFIG_DIR", str(cm.exception))
+        with self.assertRaises(LandRefused):
+            credential_from_pin("helper:/h/gh auth git-credential", config_dir="")
+
+    def test_config_dir_is_pinned_per_destination_and_wins_over_the_default(self):
+        owner = {"remotes": {"a": "https://github.com/o/a", "b": "https://github.com/o/b"},
+                 "credentials": {"a": "helper:/h/gh auth git-credential", "b": "helper:/h/gh auth git-credential"},
+                 "config_dirs": {"a": "/cfg/a"}}
+        out = {d.name: d.credential["config_dir"] for d in destinations_from_owner(owner, config_dir="/cfg/default")}
+        self.assertEqual(out, {"a": "/cfg/a", "b": "/cfg/default"})
+        with self.assertRaises(LandRefused):
+            destinations_from_owner(owner)
 
     def test_bad_pins_refused(self):
         for bad in ("helper:gh auth git-credential", "helper:", "ssh-key:rel", "ssh-agent:", "ssh-agent",
