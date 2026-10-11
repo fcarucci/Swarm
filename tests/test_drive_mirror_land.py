@@ -137,6 +137,13 @@ class LsRemote(PushCase):
         self.assertIn("core.hooksPath=/dev/null", cmd)
         self.assertEqual(kw["env"]["HOME"], m.private_home)
 
+    def test_ls_remote_keeps_only_branches_with_a_real_sha(self):
+        m = Mirror(self.remote, self.agent_cred())
+        out = (f"{'1' * 40}\trefs/heads/main\n{'2' * 40}\trefs/tags/v1\nnot-a-sha\trefs/heads/x\n"
+               f"{'3' * 40}\tHEAD\n{'4' * 40}\trefs/heads/feat/y\n").encode()
+        with spy([], lambda cmd, kw: subprocess.CompletedProcess(cmd, 0, stdout=out, stderr=b"")):
+            self.assertEqual(m.ls_remote(timeout=5), {"refs/heads/main": "1" * 40, "refs/heads/feat/y": "4" * 40})
+
     def test_ls_remote_timeout_is_validated_and_capped(self):
         m = Mirror(self.remote, self.agent_cred())
         with self.assertRaises(ValueError):
@@ -179,10 +186,21 @@ class FetchBranches(PushCase):
     def test_overall_timeout_runs_out_between_branches(self):
         m = Mirror(self.remote, self.agent_cred())
         clock = iter([0.0, 0.0, 100.0, 100.0, 100.0])
-        with mock.patch.object(mirror.time, "monotonic", lambda: next(clock)):
+        calls = []
+        with mock.patch.object(mirror.time, "monotonic", lambda: next(clock)), spy(calls):
             got, pending = m.fetch_branches(["main", "feat"], timeout=5)
         self.assertEqual(pending, ["feat"])
         self.assertIn("refs/heads/main", got)
+        self.assertEqual(len([1 for cmd, _ in calls if "fetch" in cmd]), 1)   # none for the branch past the budget
+
+    def test_the_second_branch_gets_only_the_time_left(self):
+        m = Mirror(self.remote, self.agent_cred())
+        clock = iter([0.0, 0.0, 10.0, 10.0, 10.0, 10.0])
+        calls = []
+        with mock.patch.object(mirror.time, "monotonic", lambda: next(clock)), spy(calls, ok):
+            m.fetch_branches(["main", "feat"], timeout=30)
+        times = [kw["timeout"] for cmd, kw in calls if "fetch" in cmd]
+        self.assertEqual(times, [30.0, 20.0])
 
     def test_each_branch_call_gets_the_time_left_capped_at_60(self):
         m = Mirror(self.remote, self.agent_cred())
@@ -200,8 +218,10 @@ class FetchBranches(PushCase):
 
     def test_bad_branch_and_timeout_refused(self):
         m = Mirror(self.remote, self.agent_cred())
-        with self.assertRaises(MirrorError):
-            m.fetch_branches(["a..b"], timeout=5)
+        calls = []
+        with spy(calls), self.assertRaises(MirrorError):
+            m.fetch_branches(["main", "a..b"], timeout=5)
+        self.assertEqual(calls, [])
         with self.assertRaises(ValueError):
             m.fetch_branches(["main"], timeout=0)
 
@@ -295,6 +315,9 @@ class SshHosts(MirrorCase):
             "https://example.test/x.git": None,
             "/srv/repo.git": None,
             "file:///srv/repo.git": None,
+            "C:\\repos\\r.git": None,
+            "C:/repos/r.git": None,
+            "ab:o/r.git": ("ab", 22),
         }
         for url, want in cases.items():
             with self.subTest(url=url):
@@ -371,9 +394,14 @@ class SshHosts(MirrorCase):
         with mock.patch.object(mirror, "_tool", lambda c, t: subprocess.CompletedProcess(c, 0, b"", b"")):
             with self.assertRaises(MirrorError):
                 mirror.scan_host_keys("example.test", 22)
-        for bad in ("-oProxyCommand=x", "a b", "", "x;y"):
-            with self.assertRaises(MirrorError):
+        ran = []
+        for bad in ("-oProxyCommand=x", "a b", "", "x;y", "a/b", 5):
+            with mock.patch.object(mirror, "_tool", lambda c, t: ran.append(c)), self.assertRaises(MirrorError):
                 mirror.scan_host_keys(bad, 22)
+        for port in (0, 70000, True, "22", -1):
+            with mock.patch.object(mirror, "_tool", lambda c, t: ran.append(c)), self.assertRaises(MirrorError):
+                mirror.scan_host_keys("example.test", port)
+        self.assertEqual(ran, [])
 
 
 class RealTimeout(MirrorCase):
@@ -383,6 +411,18 @@ class RealTimeout(MirrorCase):
         m = Mirror(remote, self.agent_cred())
         with self.assertRaises(MirrorTimeoutError):
             m._exec(["sleep", "5"], env={"PATH": "/usr/bin:/bin"}, timeout=0.2)
+
+
+class ToolTimeout(unittest.TestCase):
+    @support.posix_only("sleep")
+    def test_a_slow_tool_is_a_typed_timeout_and_is_killed(self):
+        with self.assertRaises(MirrorTimeoutError):
+            mirror._tool(["/bin/sleep", "5"], 0.2)
+
+    @support.posix_only("true")
+    def test_a_tool_runs_with_a_minimal_environment(self):
+        out = mirror._tool(["/usr/bin/env"], 5).stdout.decode().split()
+        self.assertEqual(sorted(x.split("=")[0] for x in out if "=" in x), ["LC_ALL", "PATH"])
 
 
 class AuditDeadline(MirrorCase):
@@ -413,6 +453,14 @@ class AuditDeadline(MirrorCase):
             with self.assertRaises(AuditDeadlineError):
                 self.m.audit_target(self.base, self.base, set(), deadline=60)
         self.assertLessEqual(len(calls), 3)
+
+    def test_no_git_call_is_made_once_the_deadline_has_passed(self):
+        times = iter([0.0] + [1000.0] * 50)
+        calls = []
+        with mock.patch.object(mirror.time, "monotonic", lambda: next(times)), spy(calls):
+            with self.assertRaises(AuditDeadlineError):
+                self.m.audit_target(self.base, self.base, set(), deadline=5)
+        self.assertEqual(calls, [])
 
     def test_a_git_timeout_at_the_deadline_is_an_audit_deadline_error(self):
         t = [0.0]
@@ -498,6 +546,15 @@ class AuthenticatedPush(MirrorCase):
         self.assertEqual(git(self.remote, "rev-parse", "main"), self.base)
         good.push(self.tip, "main")
         self.assertEqual(git(self.remote, "rev-parse", "main"), self.tip)
+
+    @support.posix_only("the fixture helper is a POSIX shell script")
+    def test_delete_needs_the_pinned_config_dir(self):
+        good, bad = self.mirror(self.gh_dir), self.mirror(self.empty)
+        with self.assertRaises(PushRejectedError):
+            bad.delete_branch("feat")
+        self.assertTrue(git(self.remote, "branch", "--list", "feat"))
+        good.delete_branch("feat")
+        self.assertEqual(git(self.remote, "branch", "--list", "feat"), "")
 
 
 if __name__ == "__main__":
