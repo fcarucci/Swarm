@@ -553,15 +553,34 @@ class FailClosed(DriveCase):
             self.assertIn("could not be verified", self.pre(sid, command="echo x > f"))
             self.assertIsNone(self.pre(sid, command="git status"))
 
-    def test_a_classify_error_does_not_stop_the_receipts_or_the_gate(self):
+    def test_a_classify_error_does_not_stop_the_receipts(self):
         with mock.patch.object(drivegate, "classify", side_effect=RuntimeError("boom")), \
-                mock.patch.object(drivegate, "post_tool") as post, mock.patch.object(drivegate, "pre_tool",
-                                                                                      return_value=None) as pre:
+                mock.patch.object(drivegate, "post_tool") as post:
             self.hook("done", agent_id=None, session="x", tool_name="Bash", tool_input={"command": "ls"})
-            self.hook("turn", agent_id=None, session="x", tool_name="Bash", tool_input={"command": "ls"})
         post.assert_called_once()
-        pre.assert_called_once()
         self.assertIn("boom", self.error_log.read_text())
+
+    def test_a_classify_error_on_a_turn_is_denied(self):
+        sid, _ = self.launch_seat("judge", role="judge", kind="judge")
+        with mock.patch.object(drivegate, "classify", side_effect=RuntimeError("boom")):
+            out = self.hook("turn", agent_id=None, session=sid, cwd=str(self.work), tool_name="Bash",
+                            tool_input={"command": "git commit -am x"})
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_a_codex_seat_with_a_replacement_token_and_no_marker_is_still_gated(self):
+        sid, _ = self.launch_seat("judge", role="judge", kind="judge", harness="codex")
+        enrolment.write(self.key, job="J", agent_key=sid, harness="codex", session_id=sid, cwd=str(self.work))
+        for p in Path(self.cfg["hook"]["marker_dir"]).expanduser().glob("*resume*"):
+            p.unlink()
+        with mock.patch.dict(os.environ, {markers.TOKEN_ENV: "tok"}):
+            out = self.hook("turn", agent_id=None, session=sid, host="codex", cwd=str(self.work),
+                            tool_name="Bash", tool_input={"command": "git commit -am x && git push origin HEAD:main"})
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_the_barrier_is_a_literal_barrier_hit(self):
+        src = (Path(drivegate.__file__)).read_text()
+        self.assertIn('barrier.hit("hook_after_cli_before_receipt")', src)
+        self.assertNotIn("def _barrier", src)
 
     def test_the_session_is_classified_once_per_call(self):
         sid, _ = self.launch_seat("eng-a")

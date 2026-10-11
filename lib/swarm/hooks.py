@@ -2130,6 +2130,8 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
     if resume is not None:   # a supervisor replacement's root session: it is the member
         agent_id = resume["resume"].get("agent_key") or sid
     elif not agent_id and _replacement_token():
+        if event in ("turn", "done"):   # a drive seat whose marker is gone is still gated, and its receipts written
+            _drive_event(event, cfg, payload, None)
         return 0   # a session started by (or inside) a replacement that isn't it: never an orchestrator
     if event == "session-end" and current_host().completes_on(event):
         _codex_session_end(cfg, sid, agent_id if resume is None and agent_id != sid else None, payload)
@@ -2258,6 +2260,10 @@ def _drive_event(event: str, cfg: dict, payload: dict, resume: dict | None) -> b
             ctx = drivegate.classify(cfg, payload, resume, _resume_binding)
         except Exception as exc:
             _log_error("drive classify", str(payload.get("agent_id") or payload.get("session_id")), exc)
+            _no_lease(payload)
+            if event == "turn":     # fail closed: a session that cannot be classified on a drive host retries
+                _deny("[swarm] The drive gate could not classify this session; retry the call.")
+                return True
         if ctx is not None:
             _no_lease(payload)
         if event == "done":

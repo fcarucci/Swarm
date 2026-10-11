@@ -76,7 +76,7 @@ class ShellFastPathTests(unittest.TestCase):
             os.utime(cache, ns=(cfg.stat().st_atime_ns,cfg.stat().st_mtime_ns))
             (home/'active').mkdir()                         # the marker directory: no marker in it
             py=home/'venv/bin/python'; py.parent.mkdir(parents=True)
-            py.write_text(f'#!/bin/sh\ncat >"{home}/payload"\ntouch "{home}/ran"\n'); py.chmod(0o755)
+            py.write_text(f'#!/bin/sh\nif [ "$1" = -m ] && [ "$2" = swarm.fastpath ]; then echo "{home}/active"; exit 0; fi\ncat >"{home}/payload"\ntouch "{home}/ran"\n'); py.chmod(0o755)
             env=dict(os.environ,HOME=td,SWARM_CONFIG=str(cfg),SWARM_VENV=str(home/'venv'))
             def run(event, response):
                 (home/'ran').unlink(missing_ok=True)
@@ -89,6 +89,15 @@ class ShellFastPathTests(unittest.TestCase):
             self.assertTrue(run('done','posted\nswarm-record: kind=deactivate id=3 rev=1\n'))
             self.assertFalse(run('done','ordinary output\n'), 'a call with no record line ran Python without a marker')
             self.assertFalse(run('turn','swarm-record: kind=deactivate id=3 rev=1'), 'only PostToolUse is let through')
+            # a host-private drive ledger counts like a marker (the agent-writable markers can be removed)
+            led=home/'.local/share/swarm/supervisor/drive'; led.mkdir(parents=True)
+            (led/'x.json').write_text('{}')
+            self.assertTrue(run('turn','ordinary'), 'a drive ledger did not keep the hook on')
+            (led/'x.json').unlink()
+            self.assertFalse(run('turn','ordinary'))
+            # a live lease does not hide a record line from Python
+            (fp/'live').write_text('9999999999\n'); (fp/'board-J').write_text('g\n'); (fp/'agent-session-s').write_text('9999999999\nJ\ng\n')
+            self.assertTrue(run('done','swarm-record: kind=halt id=1 rev=1\n'))
 
 from unittest import mock
 from test_hooks_cli import Env
