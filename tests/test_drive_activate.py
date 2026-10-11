@@ -232,6 +232,36 @@ class CredentialAndWorkdirTests(HomeCase):
         self.assertEqual(da.sanitize_remote("https://example.com?token=a@b"), "https://example.com")
         self.assertEqual(da.sanitize_remote("https://example.com/o/r.git#x@y"), "https://example.com/o/r.git")
 
+    def test_default_credential_by_remote_kind(self):
+        """[G2] the default source follows the remote's kind: a local remote (file:// or a plain path) needs
+        no credential and no agent; https gets the allowlisted gh helper; ssh (ssh:// or scp-style) gets the
+        ssh agent, which must be set."""
+        gh = absolute("home", "u", ".local", "bin", "gh")
+        sock = absolute("run", "user", "1000", "agent.sock")
+        with mock.patch.dict(os.environ, {"SSH_AUTH_SOCK": ""}), \
+                mock.patch.object(da.shutil, "which", return_value=gh):
+            for local in ("file://" + absolute("srv", "repo.git"), absolute("srv", "repo.git")):
+                with self.subTest(local=local):
+                    self.assertIsNone(da.default_credential(local))
+            self.assertEqual(da.default_credential("https://example.com/o/r.git"),
+                             "helper:" + gh + " auth git-credential")
+            for remote in ("ssh://git@example.com/o/r.git", "git@example.com:o/r.git", "example.com:o/r.git"):
+                with self.subTest(ssh=remote), self.assertRaisesRegex(da.DriveError, "SSH_AUTH_SOCK"):
+                    da.default_credential(remote)
+        with mock.patch.dict(os.environ, {"SSH_AUTH_SOCK": sock}):
+            for remote in ("ssh://git@example.com/o/r.git", "git@example.com:o/r.git", "example.com:o/r.git"):
+                with self.subTest(ssh=remote):
+                    self.assertEqual(da.default_credential(remote), "ssh-agent:" + sock)
+
+    def test_local_remote_activates_without_an_ssh_agent(self):
+        work = self.home / "repo"
+        work.mkdir()
+        with mock.patch.dict(os.environ, {"SSH_AUTH_SOCK": ""}):
+            plan = da.build_plan({"supervise": {"allowed_workdirs": [str(self.home)]}},
+                                 ns(job="J", workdir=str(work), remote=["origin=file:///srv/repo.git"]), GOAL)
+        self.assertEqual(plan.remotes, {"origin": "file:///srv/repo.git"})
+        self.assertNotIn("origin", plan.credentials)
+
     def test_workdir_default_refused_under_tmp(self):
         tmp = real_tmp()
         cfg = {"supervise": {"allowed_workdirs": [tmp]}}
