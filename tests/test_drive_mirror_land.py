@@ -357,6 +357,19 @@ class HelperTrust(AbsoluteHelperPin):
         with self.assertRaises(MirrorError):
             Mirror(remote, self.cred(f"{link} auth git-credential"), trusted_helper_paths=(link,))
 
+    @support.posix_only("file modes")
+    def test_a_symlink_from_a_safe_directory_into_a_writable_one_is_refused(self):
+        remote, _ = self.remote_with_main()
+        gh = self.gh()
+        os.chmod(os.path.dirname(gh), 0o777)             # where the real file lives
+        safe = os.path.join(self.root, "safe")
+        os.makedirs(safe)
+        link = os.path.join(safe, "gh")
+        os.symlink(gh, link)
+        with self.assertRaises(MirrorError) as cm:
+            Mirror(remote, self.cred(f"{link} auth git-credential"), trusted_helper_paths=(link,))
+        self.assertIn("writable", str(cm.exception))
+
     def test_system_directory_helper_needs_no_naming(self):
         remote, _ = self.remote_with_main()
         sh = mirror._resolve("env")                      # a root-owned executable in a system directory
