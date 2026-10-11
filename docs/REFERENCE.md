@@ -3159,6 +3159,45 @@ runs detached, has a five-second timeout and discards command output. Launch/tim
 are isolated from ask/answer, logged in `question-notify-errors.log` next to the config, and shown
 by `swarm doctor`. No notification command means no worker is launched.
 
+## Landing in drive jobs
+
+In a drive job the integrator seat never pushes the target branch. It rebases the artifact branch, pushes the
+branch to every pinned remote, waits for CI on the exact SHA, then runs `swarm land --job J --artifact BRANCH@SHA`
+and exits: that request is its hand-off. The supervisor's driver does the rest, with code that reads nothing
+from the agent for its decisions:
+
+- It checks that the request came from the integrator seat of the current generation, that a receipted `met`
+  verdict covers that exact SHA (or a rebase that changed no patch-id: the whole range must have the same sorted
+  multiset of patch-ids), and that `swarm ci status` is green on it. A merge or empty commit never counts as a twin.
+- It claims one land lease per pinned destination (`land:<sha256 of the normalised push URL>:<target>`), all or
+  none. A lease held by another job or another host is never taken over: the landing holds, and a hold longer than
+  `lease_hold_minutes` makes a ruling due.
+- It fast-forwards the target to exactly the judged SHA on every destination, in sorted order, journaling each step
+  (`intent`, `pushed`, `verified`) in a host-private land receipt. A crash between steps is completed from the journal
+  by the next pass (and before terminalization). It never force-pushes. It verifies in its private mirror, deletes
+  the branch, writes `integrated[group].landed`, `land_id` and `land_rev` from the receipt, and posts
+  `INTEGRATED <artifact>`, or `LAND-REFUSED <artifact> <why>` (a wake for the group's owner and the lead).
+- A fetch that does not finish in time continues on the next pass; a CI host outage is a hold, not a pass.
+
+`swarm land hosts add URL` lets a person trust an ssh destination's host key: it prints the fingerprints and needs
+the host name typed at a terminal. Host keys are never accepted automatically, and the private `known_hosts` is
+the only file ssh may trust. `swarm doctor` reports, per pinned destination, the ssh agent socket or key, the host
+key, and a dry-run `git ls-remote` with exactly the credential environment landing uses.
+
+### A flagged close audit (`DRIVER-AUDIT`)
+
+Before a MET close the driver audits the target since activation in its private mirror: every commit must be
+reachable from a judged SHA or have the patch-id of a judged change. A commit that fails blocks the close and makes
+a ruling due, with the commits in the ruling prompt. `swarm land` pushes exactly the judged SHA, so landings of
+the job itself never cause it. Typical causes: a person or another job pushed to the target during the run; a
+judged branch forked before activation; a merge or empty commit inside a judged chain (it has no patch-id); two
+judged artifacts whose commits twin each other; a partially landed or reordered chain. To resolve: read
+`git log <activation head>..<target>`; if the commits are wanted, put them on a branch, hand it off and have the judge
+record a met verdict for its exact SHA, which the audit then accepts; if not, revert them on a branch, judge and
+`swarm land` it. A finding that a judged SHA is missing from the mirror means its branch was deleted: push it again.
+A rewound target (reset behind its activation head) must be restored before the job can close. The audit has an
+overall deadline of 120 seconds; when it runs out the close is retried in a later pass.
+
 ## License
 
 Apache-2.0, © Francesco Carucci. Modify and redistribute freely; keep the `NOTICE` file and credit the author. See `LICENSE` and `NOTICE`.
