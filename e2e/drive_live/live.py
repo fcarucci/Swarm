@@ -122,7 +122,7 @@ def main(argv=None) -> int:
     ap.add_argument("--list", action="store_true", help="chaos: list scenario names")
     ap.add_argument("--today-only", action="store_true",
                     help="chaos: only the no-driver `<name>/today` layers (fast; what the unit tests run)")
-    a = ap.parse_args(argv)
+    a = ap.parse_intermixed_args(argv)
     if a.budget_usd is None:
         a.budget_usd = 10.0 if a.harness == "real" else 2.0
     if a.timeout_min is None:
