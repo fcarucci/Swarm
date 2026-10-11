@@ -133,6 +133,7 @@ class L:
     ledger_rev: int = 0
     state: str = "active"            # Task 6a: "activating" until the activation's steps are done
     models: dict = field(default_factory=dict)
+    activation_heads: dict = field(default_factory=dict)   # Task 6a: the target's head per remote URL
     spent_usd: InitVar[float | None] = None
 
     def __post_init__(self, spent_usd: float | None) -> None:

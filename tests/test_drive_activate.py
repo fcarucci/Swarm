@@ -344,9 +344,15 @@ class DriveCli(Env):
         tmp.start()
         self.addCleanup(tmp.stop)
         FakePerson.tty, FakePerson.seat_sessions = True, ()
+        # `from swarm import person` reads the package attribute first, so an earlier import of the real
+        # module would shadow a sys.modules stub: replace both, whatever was imported before this test
         person = mock.patch.dict(sys.modules, {"swarm.person": FakePerson})
         person.start()
         self.addCleanup(person.stop)
+        import swarm as swarm_package   # the package: its `person` attribute is what `from swarm import person` reads
+        attr = mock.patch.object(swarm_package, "person", FakePerson, create=True)
+        attr.start()
+        self.addCleanup(attr.stop)
         self.platform = mock.patch.object(da, "PLATFORM", "linux")   # the timer check is for Linux here
         self.platform.start()
         self.addCleanup(self.platform.stop)
@@ -509,11 +515,117 @@ class DriveCli(Env):
         self.assertIn("allowlist", err)
         self.assertIsNone(self.ledger_of())
 
+    def make_repo(self, branch="main", name="upstream"):
+        """A real git repository with one commit on `branch`: the pinned-remote tests read it with git."""
+        import subprocess
+        repo = self.tmp / name
+        repo.mkdir()
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"}
+        subprocess.run(["git", "init", "-q", "-b", branch, str(repo)], check=True, env=env)
+        subprocess.run(["git", "-C", str(repo), "commit", "-q", "--allow-empty", "-m", "one"], check=True, env=env)
+        head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True,
+                              text=True, env=env).stdout.strip()
+        return repo, head, env
+
+    def test_activation_records_the_target_head_per_remote(self):
+        """[11b] the target's head on each pinned remote is recorded at activation: the audit's `since`."""
+        repo, head, _ = self.make_repo()
+        url = "file://" + str(repo)
+        rc, _, err = self.activate("--workdir", str(self.work), "--remote", "origin=" + url)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.ledger_of().activation_heads, {url: head})
+
+    def test_activation_head_survives_a_rollover_unchanged(self):
+        import subprocess
+        repo, head, env = self.make_repo()
+        url = "file://" + str(repo)
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "sess-1"}):
+            self.assertEqual(self.activate("--workdir", str(self.work), "--remote", "origin=" + url)[0], 0)
+            subprocess.run(["git", "-C", str(repo), "commit", "-q", "--allow-empty", "-m", "two"], check=True, env=env)
+            rc, _, err = self.activate("--workdir", str(self.work), "--remote", "origin=" + url)
+        self.assertEqual(rc, 0, err)
+        led = self.ledger_of()
+        self.assertEqual((led.generation_requested, led.activation_heads), (2, {url: head}))
+
+    def test_missing_target_branch_refuses_activation_and_holds_it_activating(self):
+        repo, _, _ = self.make_repo(branch="dev")
+        rc, _, err = self.activate("--workdir", str(self.work), "--remote", "origin=file://" + str(repo))
+        self.assertEqual(rc, 1)
+        self.assertIn("not on the remote", err)
+        self.assertEqual(self.ledger_of().state, "activating")
+
+    def test_target_branch_is_pinned_from_the_pipeline_config(self):
+        self.config.write_text(self.config.read_text() + '\n[pipeline]\ntarget_branch = "release"\n')
+        self.cfg = swarm.load_config(self.config)
+        rc, _, err = self.activate("--workdir", str(self.work))
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(enrolment.find_job_owner(da.board_key(self.cfg), "J").owner["target_branch"], "release")
+
+    def test_target_branch_defaults_to_main_and_accepts_the_merge_target_alias(self):
+        self.assertEqual(da.pipeline_target({}), "main")
+        self.assertEqual(da.pipeline_target({"pipeline": {"merge_target": "dev"}}), "dev")
+        self.assertEqual(da.pipeline_target({"pipeline": {"target_branch": "rel", "merge_target": "dev"}}), "rel")
+        with self.assertRaises(da.DriveError):
+            da.pipeline_target({"pipeline": {"target_branch": "a..b"}})
+
+    def test_gh_helper_pins_its_config_dir_per_destination(self):
+        gh = absolute("home", "u", ".local", "bin", "gh")
+        cfgdir = absolute("home", "u", "gh-config")
+        with mock.patch.dict(os.environ, {"GH_CONFIG_DIR": cfgdir}), \
+                mock.patch.object(da, "remote_head", return_value="a" * 40):
+            rc, _, err = self.activate("--workdir", str(self.work), "--remote",
+                                       "origin=https://example.com/o/r.git",
+                                       "--credential", "origin=helper:" + gh + " auth git-credential")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(enrolment.find_job_owner(da.board_key(self.cfg), "J").owner["config_dirs"],
+                         {"origin": cfgdir})
+
+    def test_non_gh_helper_pins_no_config_dir(self):
+        helper = absolute("usr", "lib", "git-credential-store")
+        with mock.patch.object(da, "remote_head", return_value="a" * 40):
+            rc, _, err = self.activate("--workdir", str(self.work), "--remote",
+                                       "origin=https://example.com/o/r.git",
+                                       "--credential", "origin=helper:" + helper)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(enrolment.find_job_owner(da.board_key(self.cfg), "J").owner["config_dirs"], {})
+
+    def test_undeterminable_gh_config_dir_is_refused_not_guessed(self):
+        gh = absolute("home", "u", ".local", "bin", "gh")
+        orig = os.path.expanduser
+        with mock.patch.dict(os.environ, {"GH_CONFIG_DIR": "", "XDG_CONFIG_HOME": ""}), \
+                mock.patch.object(da.os.path, "expanduser", side_effect=lambda p: "~" if p == "~" else orig(p)), \
+                mock.patch.object(da, "remote_head", return_value="a" * 40):
+            rc, _, err = self.activate("--workdir", str(self.work), "--remote",
+                                       "origin=https://example.com/o/r.git",
+                                       "--credential", "origin=helper:" + gh + " auth git-credential")
+        self.assertEqual(rc, 2)
+        self.assertIn("cannot be determined", err)
+        self.assertIsNone(self.ledger_of())
+
+    def test_gh_config_dir_resolution_order(self):
+        self.assertEqual(da.gh_config_dir({"GH_CONFIG_DIR": "/x/one", "XDG_CONFIG_HOME": "/x/two"}), "/x/one")
+        self.assertEqual(da.gh_config_dir({"XDG_CONFIG_HOME": "/x/two"}), os.path.join("/x/two", "gh"))
+        with self.assertRaises(da.DriveError):
+            da.gh_config_dir({"GH_CONFIG_DIR": "relative/gh"})
+
+    def test_the_helper_is_given_the_pinned_config_dir(self):
+        gh = absolute("home", "u", ".local", "bin", "gh")
+        cfgdir = absolute("home", "u", "gh-config")
+        done = types.SimpleNamespace(returncode=0, stdout="a" * 40 + "\trefs/heads/main\n", stderr="")
+        with mock.patch.object(da.subprocess, "run", return_value=done) as run:
+            sha = da.remote_head("https://example.com/o/r.git", "helper:" + gh + " auth git-credential",
+                                 cfgdir, "main")
+        self.assertEqual(sha, "a" * 40)
+        env, argv = run.call_args.kwargs["env"], run.call_args.args[0]
+        self.assertEqual(env["GH_CONFIG_DIR"], cfgdir)
+        self.assertIn("credential.helper=!" + gh + " auth git-credential", argv)
+
     def test_activating_ledger_completed_by_next_pass(self):
         """A crash after each durable step: the next pass (finish_activation) completes the job, and
         nothing is duplicated. A crash before the ledger exists leaves nothing to complete; the activation
         is then run again and finishes. Each case has its own job name."""
-        points = ("brief", "owner", "claim", "ledger", "data", "lead")
+        points = ("brief", "owner", "claim", "ledger", "data", "heads", "lead")
         for i, point in enumerate(points):
             job = f"J{i}"
             with self.subTest(crash=point):
@@ -572,9 +684,10 @@ class DriveCli(Env):
 
     def test_remote_token_never_reaches_the_owner_record(self):
         key = absolute("home", "u", ".ssh", "id")
-        rc, _, err = self.activate("--workdir", str(self.work), "--remote",
-                                   "origin=https://u:TOKEN1@example.com/r.git?t=TOKEN2#TOKEN3",
-                                   "--credential", "origin=ssh-key:" + key)
+        with mock.patch.object(da, "remote_head", return_value="a" * 40):   # no network in the suite
+            rc, _, err = self.activate("--workdir", str(self.work), "--remote",
+                                       "origin=https://u:TOKEN1@example.com/r.git?t=TOKEN2#TOKEN3",
+                                       "--credential", "origin=ssh-key:" + key)
         self.assertEqual(rc, 0, err)
         owner = enrolment.find_job_owner(da.board_key(self.cfg), "J").owner
         self.assertEqual(owner["remotes"], {"origin": "https://example.com/r.git"})
@@ -678,8 +791,14 @@ class DriveCli(Env):
     def test_person_path_refused_while_the_person_module_is_absent(self):
         """Until Task 6b's swarm.person is in the build, the person path is refused, never allowed."""
         self.activate("--workdir", str(self.work))
-        with mock.patch.dict(sys.modules, {"swarm.person": None}):
-            rc, _, err = self.cli("drive", "budget", "--job", "J", "max_cost_usd=30")
+        import swarm as swarm_package
+        saved = swarm_package.__dict__.pop("person", None)   # no package attribute either: a real ImportError
+        try:
+            with mock.patch.dict(sys.modules, {"swarm.person": None}):
+                rc, _, err = self.cli("drive", "budget", "--job", "J", "max_cost_usd=30")
+        finally:
+            if saved is not None:
+                swarm_package.person = saved
         self.assertEqual(rc, 1)
         self.assertIn("person path", err)
         self.assertEqual(self.ledger_of().budgets["max_cost_usd"], 40)

@@ -120,6 +120,7 @@ class Ledger:
     ledger_rev: int = 0
     state: str = "active"            # [RR1] "activating" until the five activation steps are done
     models: dict = field(default_factory=dict)   # [P1] the job's role -> model overrides
+    activation_heads: dict = field(default_factory=dict)   # the target's head per remote URL at activation
 
     def charged_usd(self) -> float:
         """Concluded intents' charged cost plus the reservation of every open one."""
@@ -269,7 +270,8 @@ def _text_map(m, value_check, key_limit: int = 256) -> dict:
     return m
 
 
-_DICT_FIELDS = ("budgets", "owners", "integrated", "watermarks", "pinned_requirements", "models")
+_DICT_FIELDS = ("budgets", "owners", "integrated", "watermarks", "pinned_requirements", "models",
+                "activation_heads")
 _OPT_DICT = ("halted", "terminal", "terminal_intent")
 _OPT_STR = ("ruling_due_at", "closing", "last_pass", "requester_session")
 _NATS = ("ruling_attempts", "rounds_without_progress", "errors")
@@ -300,6 +302,8 @@ def _check_fields(obj: dict, board_key: str | None, job: str | None) -> None:
     _text_map(obj["watermarks"], lambda v: _nat(v))
     _text_map(obj["pinned_requirements"], lambda v: _safe_text(v, _MAX_ID))
     _text_map(obj["models"], lambda v: _safe_text(v, 64))
+    _text_map(obj["activation_heads"], lambda v: isinstance(v, str) and re.fullmatch(r"[0-9a-f]{40,64}", v) is not None,
+              key_limit=2048)
     _need(obj["state"] in LIFECYCLE, "state")
     _text_map(obj["integrated"], lambda v: isinstance(v, dict) and all(
         _safe_text(k, 256) and _scalar(x) for k, x in v.items()))
