@@ -55,6 +55,33 @@ class StaleWaitingTests(Env):
     def sweep(self):
         return self.cli("purge")
 
+    # ---- a reopened job's quiet time starts at the reopening, not at the old silence
+    def test_a_reactivated_job_is_not_closed_by_its_old_silence(self):
+        self.waiting_goal_job(10 * 3600)            # idle for hours, past the close threshold
+        self.activate("J", "--goal", "ship it")     # reopened now
+        self.sweep()
+        self.assertEqual(self.job().status, "active")
+        self.assertEqual(self.notices(), [])
+        self.h.backdate_job("J", created_at=11 * 3600, activated_at=60)
+        self.sweep()                                # swept shortly after the reopening
+        self.assertEqual(self.job().status, "active")
+        self.assertEqual(self.notices(), [])
+
+    def test_a_reactivated_job_still_closes_once_quiet_again(self):
+        self.waiting_goal_job(10 * 3600)
+        self.activate("J", "--goal", "ship it")
+        self.h.backdate_job("J", activated_at=CLOSE_AT)
+        self.sweep()
+        self.assertEqual(self.job().status, "failed")
+
+    def test_the_notice_carries_the_reopening_as_quiet_start(self):
+        self.waiting_goal_job(10 * 3600)
+        self.activate("J", "--goal", "ship it")
+        self.h.backdate_job("J", activated_at=NOTICE_AT)
+        self.sweep()
+        self.assertEqual(self.job().status, "active")
+        self.assertEqual(len(self.notices()), 1)
+
     # ---- the notice
     def test_one_notice_when_quiet_past_stale_waiting_minutes(self):
         self.waiting_goal_job(NOTICE_AT)
