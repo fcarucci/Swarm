@@ -197,6 +197,7 @@ jobs:
       # (activate, hooks) run wholly on a Postgres board through SWARM_TEST_BACKEND. The summary
       # fails the step when a module ran nothing, a Postgres variant never ran, or a test skipped.
       - name: Drive suites on Postgres
+        if: ${{ !cancelled() }}   # its own signal, whatever the whole-suite step said
         env:
           SWARM_TEST_BACKEND: postgres
         run: |
