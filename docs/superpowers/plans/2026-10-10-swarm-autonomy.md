@@ -1198,3 +1198,22 @@ All engineer seats (every wave) run on Haiku; reviewers and QA on Sonnet; securi
 - Task 7 (pure `next_actions`) depends only on Task 7a and starts in wave 2.
 - PM rulings after the Task 2 / 7a reviews: (a) `progress` is a bool on the board and `bool | None` in `VerdictView`; `progress()` tests `is True`. (b) Task 2 also makes the offline spool keep `scope`, `open`, `progress`, `candidate`, `req`, and makes the pause, stuck, command and agentview readers treat `unreachable` as settled. (c) Task 2's fix commits are additive; eng-seats (Task 3) rebases onto Task 2's new head when the lead says so.
 - [B1] Task 5: `test_seat_enrols_from_marker_with_several_active_jobs` (two active jobs on the host, a supervisor-launched seat of the second one enrols in the second via its marker; a session with neither marker nor job tag joins nothing).
+
+## Snapshot and action-id conventions (lead ruling after Task 7, binding for 7b/8a–8c/11b)
+
+- `integrated[group]` is the per-group pipeline status dict: `landed` (sha, only from a verified land receipt), `blocked` (FINALIZE_BLOCKED text), `withdrawn` (reason), `lease_held_since` (ISO). Confirmed.
+- `goal_ready`: `candidate`, `at`, **and** `req` (pinned requirements digest) and `added_requirements` (list of path@blob). The goal judge launch passes `req` through.
+- `cfg["recipe"]` comes from the owner record/ledger (fixed at activation, [G3]), never from config.toml; the snapshot reader fills it. `cfg["review_role"]` and `cfg["review_gates"]` come from the recipe. Confirmed with that source rule.
+- **Action ids (correction):** `gen<N>|<prompt kind>|<seat or ->|<group or ->|<round>|<trigger>`. The kind slot carries the prompt kind (`seat`, `wake`, `lead`, `relaunch`, `review`, `judge`, `fix`, `integrate`, `goal`, `ruling`, `close`, ...); the last slot is the **id of the record that triggered the action**, never a constant, so a new trigger is a new logical action and repeated successful actions never exhaust `max_attempts`:
+  - review/judge/integrate: the hand-off receipt id; fix: the verdict, review or FINALIZE_BLOCKED record id;
+  - seat request: the seat row revision; relaunch after a lost attempt: the lost intent's `launch_id`;
+  - lead wake: the smallest pending event id; stall wake: the ISO time of the last progress it reacts to; invariant fallback: `rounds_without_progress` at decision time;
+  - goal: the GOAL-READY record id; ruling: `ruling_due_at`.
+- `ruling` and `goal` group slots: confirmed.
+- seat=None for judge, reviewer, integrator, goal and ruling actions: confirmed for `next_actions`; Task 8a's executor materializes driver-owned seat rows with deterministic names (`judge`, `reviewer:<group>`, `integrator:<group>`, `goal-judge`, `ruling-judge`) and driver-authored authorizations before claiming.
+- Deferred items, now owned:
+  - **Task 7b (new, after Task 3):** the snapshot reader `driver_snapshot.read` + a per-group judged-round count (`rounds: dict[str, int]` added to `Snapshot`, a model change approved by the lead) + the `max_rounds` rule in `next_actions`.
+  - **Task 8a:** executor-side state: `ruling_due_at` set when a ruling becomes due, `rounds_without_progress` advanced/reset by the progress rule, successor seat rows (`<owner>~n`, `lead~1`) created with driver authorizations.
+  - **Task 8b:** `enforce_deadlines`, the 8b terminal records, rollover.
+  - **Task 11b:** `complete_land`.
+- Commit trailers (PM ruling, all seats): `Co-Authored-By` names the model that actually wrote the commit (e.g. `Claude Haiku 5.5 <noreply@anthropic.com>`), not the brief's example.
