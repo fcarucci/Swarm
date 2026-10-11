@@ -715,8 +715,8 @@ class TamperTests(PassCase):
         self.job()
         self.requester_deactivate_receipt()
         self.board.close_job("J", "cancelled", "by the requester", forced=True)
-        self.assertFalse(hasattr(life, "cancel_job"))
-        self.drive()
+        with mock.patch.object(life, "cancel_job", None, create=True):          # 8b's is not there yet
+            self.drive()
         self.assertTrue(self.has_post("could not be completed"))
         self.assertFalse(any("cancelled by its requester" in l for l in self.said))
         self.assertIsNone(self.load().halted)
