@@ -1,14 +1,22 @@
 """`swarm transcript list|show|export`. Kept out of cli.py, which must stay under the Codex directory
-edition's 256 KiB per-file limit. The functions use cli.py's helpers: cli binds them in with _bind()
-when it finishes loading (its own names win only where this module defines none)."""
+edition's 256 KiB per-file limit. The functions are written against cli.py's namespace: cli calls
+bound(globals()) when it finishes loading and gets copies whose globals ARE cli's module dict, so every
+name (and every test patch of a cli name) resolves exactly as if the code still lived in cli.py."""
 from __future__ import annotations
 
+import types
 
-def _bind(names: dict) -> None:
-    g = globals()
-    for k, v in names.items():
-        if not k.startswith("__") and k not in g:
-            g[k] = v
+_NAMES = ("_transcript_list", "_transcript_show", "_transcript_export")
+
+
+def bound(cli_globals: dict) -> dict:
+    out = {}
+    for name in _NAMES:
+        f = globals()[name]
+        g = types.FunctionType(f.__code__, cli_globals, f.__name__, f.__defaults__, f.__closure__)
+        g.__kwdefaults__, g.__doc__, g.__qualname__ = f.__kwdefaults__, f.__doc__, f.__qualname__
+        out[name] = g
+    return out
 
 
 def _transcript_list(board, cfg: dict, args) -> int:

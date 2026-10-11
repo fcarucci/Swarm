@@ -4770,12 +4770,9 @@ def _run_command(cfg: dict, args) -> int:
 
 
 # `swarm transcript list|show|export` live in transcript_cli.py (cli.py stays under the Codex directory
-# edition's 256 KiB per-file limit). Bound last, so every name they use from this module exists.
+# edition's 256 KiB per-file limit). Bound last: they run with this module's globals.
 from swarm import transcript_cli as _transcript_cli  # noqa: E402
-_transcript_cli._bind(globals())
-_transcript_list = _transcript_cli._transcript_list
-_transcript_show = _transcript_cli._transcript_show
-_transcript_export = _transcript_cli._transcript_export
+globals().update(_transcript_cli.bound(globals()))
 TRANSCRIPT_COMMANDS = {"list": _transcript_list, "show": _transcript_show, "export": _transcript_export}
 
 
