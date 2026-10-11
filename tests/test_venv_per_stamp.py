@@ -193,8 +193,16 @@ class LauncherVenvTests(unittest.TestCase):
         lock = self.hold_lock(self.v22, f"{self.dead_pid()} {socket.gethostname()}")
         self.assert_builds_through_a_stale_lock(lock)
 
-    def test_old_lock_of_a_live_owner_is_removed(self):
-        lock = self.hold_lock(self.v22, f"{os.getpid()} {socket.gethostname()}", age_minutes=45)
+    def test_old_lock_of_a_live_owner_on_this_host_is_never_stolen(self):
+        self.assert_waits_on_a_live_lock(
+            self.hold_lock(self.v22, f"{os.getpid()} {socket.gethostname()}", age_minutes=45))
+
+    def test_a_process_of_another_user_counts_as_alive(self):
+        # pid 1 belongs to root: kill -0 says EPERM to anyone else, which is "alive", not "dead"
+        self.assert_waits_on_a_live_lock(self.hold_lock(self.v22, f"1 {socket.gethostname()}", age_minutes=45))
+
+    def test_old_lock_of_another_host_is_removed_by_age(self):
+        lock = self.hold_lock(self.v22, f"{self.dead_pid()} some-other-host", age_minutes=45)
         self.assert_builds_through_a_stale_lock(lock)
 
     def test_lock_with_no_owner_record_goes_stale_by_age(self):
@@ -202,11 +210,26 @@ class LauncherVenvTests(unittest.TestCase):
         self.assert_builds_through_a_stale_lock(lock)
 
     def test_age_limit_is_configurable(self):
-        lock = self.hold_lock(self.v22, f"{os.getpid()} {socket.gethostname()}", age_minutes=5)
+        lock = self.hold_lock(self.v22, None, age_minutes=5)
         res = self.launch(self.v22, timeout=30, SWARM_LOCK_STALE_MINUTES="3")
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertIn("removed a stale build lock", res.stderr)
         self.assertFalse(lock.exists())
+
+    def test_a_limit_of_zero_means_any_age_where_the_pid_cannot_be_checked(self):
+        lock = self.hold_lock(self.v22, None)               # fresh, no owner record
+        res = self.launch(self.v22, timeout=30, SWARM_LOCK_STALE_MINUTES="0")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("removed a stale build lock", res.stderr)
+        self.assertFalse(lock.exists())
+
+    def test_an_invalid_limit_falls_back_to_twenty_minutes(self):
+        for bad in ("abc", "1.5", "-3"):
+            lock = self.hold_lock(self.v22, None, age_minutes=10)    # younger than 20
+            with self.assertRaises(subprocess.TimeoutExpired):
+                self.launch(self.v22, timeout=3, SWARM_LOCK_STALE_MINUTES=bad)
+            self.assertTrue(lock.is_dir(), bad)
+            shutil.rmtree(lock)
 
     def assert_waits_on_a_live_lock(self, lock: Path):
         with self.assertRaises(subprocess.TimeoutExpired):
@@ -228,6 +251,44 @@ class LauncherVenvTests(unittest.TestCase):
         res = self.launch(self.v22, timeout=30)
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertTrue(self.lock_of(self.v23).is_dir())
+
+    def steal_script(self, body: str) -> subprocess.CompletedProcess:
+        """bin/swarm's lock functions, run on their own (LOCK, HOST, STALE_MIN set here)."""
+        text = (ROOT / "bin/swarm").read_text()
+        start = text.index("  # lock-functions begin")
+        end = text.index("  # lock-functions end")
+        script = f'cd "{self.home}"\nLOCK="$PWD/v.building"; HOST=h; STALE_MIN=20\n{text[start:end]}\n{body}\n'
+        return subprocess.run(["sh", "-c", script], capture_output=True, text=True, env=self.env)
+
+    def test_takeover_does_not_remove_a_fresh_lock_taken_after_the_verdict(self):
+        """The review's race: waiter B judged the lock stale, waiter A removed it and took a fresh one,
+        B then runs its steal on A's fresh lock: it must put it back and report 'not stolen'."""
+        for owner in ('"$$ $HOST"', ""):          # A's live owner, or A before it wrote its owner file
+            write = f'echo {owner} > "$LOCK/owner"' if owner else ":"
+            res = self.steal_script(f'''
+rm -rf "$LOCK" "$LOCK".stale.*; mkdir "$LOCK"
+{write}
+lock_steal; echo "rc=$?"
+[ -d "$LOCK" ] && echo "lock kept"
+[ -f "$LOCK/owner" ] && echo "owner=$(cat "$LOCK/owner")"
+ls -d "$LOCK".stale.* 2>/dev/null || echo "no leftovers"
+''')
+            self.assertIn("rc=1", res.stdout, res.stderr)
+            self.assertIn("lock kept", res.stdout)
+            self.assertIn("no leftovers", res.stdout)
+            self.assertNotIn("removed a stale", res.stderr)
+            if owner:
+                self.assertRegex(res.stdout, r"owner=\d+ h")
+
+    def test_takeover_removes_a_really_stale_lock(self):
+        res = self.steal_script(f'''
+rm -rf "$LOCK"; mkdir "$LOCK"; echo "{self.dead_pid()} $HOST" > "$LOCK/owner"
+lock_steal; echo "rc=$?"
+[ -e "$LOCK" ] && echo "lock still there" || echo "lock gone"
+''')
+        self.assertIn("rc=0", res.stdout)
+        self.assertIn("lock gone", res.stdout)
+        self.assertIn("removed a stale", res.stderr)
 
     def test_a_lock_taken_over_meanwhile_is_not_released_by_the_old_owner(self):
         res = self.launch(self.v22, timeout=30, FAKE_STEAL_LOCK="1")
@@ -306,7 +367,7 @@ class WinLaunchVenvTests(unittest.TestCase):
         os.utime(lock, (old, old))
         winlaunch.take_lock(lock, timeout=2)
         self.assertTrue(lock.is_dir())
-        self.assertEqual((lock / "owner").read_text().strip(), str(os.getpid()))
+        self.assertEqual((lock / "owner").read_text().split()[0], str(os.getpid()))
         self.assertEqual([p.name for p in self.tmp.glob("venv.building.stale.*")], [])
 
     def test_fresh_lock_is_waited_on_then_reported(self):
@@ -318,6 +379,70 @@ class WinLaunchVenvTests(unittest.TestCase):
         self.assertEqual(sleep.call_count, 2, "waits once per second up to the timeout")
         self.assertIn("is held", str(cm.exception))
         self.assertTrue(lock.is_dir())
+
+    def make_lock(self, owner: str | None, age_minutes: float = 0) -> Path:
+        lock = self.tmp / "venv.building"
+        lock.mkdir()
+        if owner is not None:
+            (lock / "owner").write_text(owner + "\n")
+        if age_minutes:
+            past = time.time() - age_minutes * 60
+            os.utime(lock, (past, past))
+        return lock
+
+    @posix_only("the pid probe is POSIX (Windows decides by age alone)")
+    def test_a_live_owner_on_this_host_is_never_stale_however_old(self):
+        lock = self.make_lock(f"{os.getpid()} {socket.gethostname()} tok", age_minutes=600)
+        self.assertFalse(winlaunch.lock_is_stale(lock))
+
+    @posix_only("the pid probe is POSIX (Windows decides by age alone)")
+    def test_a_dead_owner_on_this_host_is_stale_at_once(self):
+        p = subprocess.Popen(["true"])
+        p.wait()
+        self.assertTrue(winlaunch.lock_is_stale(self.make_lock(f"{p.pid} {socket.gethostname()} tok")))
+
+    @posix_only("the pid probe is POSIX (Windows decides by age alone)")
+    def test_a_permission_error_from_the_pid_probe_means_alive(self):
+        lock = self.make_lock(f"4242 {socket.gethostname()} tok", age_minutes=600)
+        with mock.patch.object(winlaunch.os, "kill", side_effect=PermissionError):
+            self.assertFalse(winlaunch.lock_is_stale(lock))
+
+    def test_another_host_or_no_owner_goes_by_age(self):
+        self.assertTrue(winlaunch.lock_is_stale(self.make_lock(f"{os.getpid()} elsewhere tok", age_minutes=60)))
+        shutil.rmtree(self.tmp / "venv.building")
+        self.assertFalse(winlaunch.lock_is_stale(self.make_lock(f"{os.getpid()} elsewhere tok", age_minutes=1)))
+        shutil.rmtree(self.tmp / "venv.building")
+        self.assertTrue(winlaunch.lock_is_stale(self.make_lock(None, age_minutes=60)))
+
+    def test_limit_zero_is_any_age_and_junk_is_twenty_minutes_like_the_shell(self):
+        lock = self.make_lock(None)
+        with mock.patch.dict(os.environ, {"SWARM_LOCK_STALE_MINUTES": "0"}):
+            self.assertTrue(winlaunch.lock_is_stale(lock))
+        for bad in ("abc", "1.5", "-3"):
+            with mock.patch.dict(os.environ, {"SWARM_LOCK_STALE_MINUTES": bad}):
+                self.assertEqual(winlaunch._stale_minutes(), 20.0, bad)
+                self.assertFalse(winlaunch.lock_is_stale(lock), bad)
+
+    def test_steal_puts_back_a_fresh_lock_it_did_not_judge(self):
+        lock = self.make_lock(f"{os.getpid()} {socket.gethostname()} tok")     # A's live, fresh lock
+        self.assertFalse(winlaunch._steal(lock))
+        self.assertEqual((lock / "owner").read_text().split()[2], "tok")
+        self.assertEqual(list(self.tmp.glob("venv.building.stale.*")), [])
+
+    def test_steal_removes_a_stale_lock(self):
+        lock = self.make_lock(None, age_minutes=60)
+        self.assertTrue(winlaunch._steal(lock))
+        self.assertFalse(lock.exists())
+
+    def test_release_only_removes_a_lock_that_is_still_ours(self):
+        lock = self.tmp / "venv.building"
+        token = winlaunch.take_lock(lock, timeout=1)
+        (lock / "owner").write_text("999999 elsewhere other-token\n")       # taken over meanwhile
+        winlaunch.release_lock(lock, token)
+        self.assertTrue(lock.is_dir())
+        (lock / "owner").write_text(f"{os.getpid()} {socket.gethostname()} {token}\n")
+        winlaunch.release_lock(lock, token)
+        self.assertFalse(lock.exists())
 
     def test_stale_limit_is_configurable(self):
         lock = self.tmp / "venv.building"

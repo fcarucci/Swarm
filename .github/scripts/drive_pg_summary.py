@@ -7,7 +7,11 @@ Per test_drive_* module: tests run, and how many of them ran in a Postgres varia
 whose name ends in "Postgres", made by tests/support.add_backend_variants). Fails when
   - a test_drive_*.py module ran no test at all;
   - a module that builds Postgres variants (it calls add_backend_variants) ran none of them;
-  - any test was skipped for a reason other than Windows-only or systemd-only.
+  - any test was skipped for a reason other than Windows-only or systemd-only;
+  - a module builds a board harness itself (it names harness_factory, MemoryHarness, FileHarness,
+    SqliteHarness, PostgresHarness, drive_backends or open_board) without calling
+    add_backend_variants: its tests would never reach Postgres. (The CLI modules that use
+    test_hooks_cli.Env run on Postgres through SWARM_TEST_BACKEND and name none of these.)
 Modules that build no board (the pure logic ones) have no Postgres variants; the modules that
 drive the CLI on a board (activate, hooks) run entirely on Postgres through SWARM_TEST_BACKEND.
 """
@@ -44,12 +48,28 @@ def summarise(log: str, modules: dict[str, bool]) -> tuple[list[str], list[str]]
     return lines, problems
 
 
+BUILDS_A_BOARD = re.compile(r"\b(harness_factory|MemoryHarness|FileHarness|SqliteHarness|PostgresHarness|"
+                            r"drive_backends|open_board)\b")
+CALLS_VARIANTS = re.compile(r"^add_backend_variants\(", re.M)
+
+
+def source_problems(tests: Path) -> list[str]:
+    """Modules that build a board without adding backend variants (see the module docstring)."""
+    out = []
+    for path in sorted(tests.glob("test_drive_*.py")):
+        text = path.read_text()
+        if BUILDS_A_BOARD.search(text) and not CALLS_VARIANTS.search(text):
+            out.append(f"{path.stem}: builds a board harness but never calls add_backend_variants")
+    return out
+
+
 def main(argv: list[str]) -> int:
     log = Path(argv[1]).read_text(errors="replace")
     tests = Path(argv[2]) if len(argv) > 2 else Path("tests")
-    modules = {p.stem: re.search(r"^add_backend_variants\(", p.read_text(), re.M) is not None
+    modules = {p.stem: CALLS_VARIANTS.search(p.read_text()) is not None
                for p in sorted(tests.glob("test_drive_*.py"))}
     lines, problems = summarise(log, modules)
+    problems += source_problems(tests)
     print("\n".join(lines))
     for p in problems:
         print(f"::error::{p}")

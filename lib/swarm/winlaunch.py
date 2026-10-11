@@ -10,17 +10,20 @@ run the swarm package from this plugin in it.
           normalised); the venv also needs zstandard (and psycopg for a Postgres board), else it is
           refreshed. Installs are hash-checked and wheels only (--require-hashes --only-binary=:all:)
   lock:   the directory <venv>.building, taken with mkdir (atomic), waited for up to 300 s; it holds
-          the owner's pid and host, and one older than LOCK_STALE_MINUTES (SWARM_LOCK_STALE_MINUTES,
-          default 20) is stale (a killed build): removed, then taken again
+          its owner's pid, host and a token: a dead owner (same host) or, where the pid cannot be
+          checked, a lock older than SWARM_LOCK_STALE_MINUTES (default 20) is stale (a killed build):
+          removed, then taken again; a live owner never is. Release checks the token
 """
 from __future__ import annotations
 
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import time
+import uuid
 import zlib
 from pathlib import Path
 
@@ -110,41 +113,102 @@ def pip_args(root: Path, want_pg: bool) -> list[str]:
 LOCK_STALE_MINUTES = 20
 
 
-def lock_is_stale(lock: Path, now: float | None = None) -> bool:
-    """A build lock left by a killed build: older than SWARM_LOCK_STALE_MINUTES. (Windows has no
-    safe pid probe from the stdlib: os.kill would terminate the process, so age alone decides.)"""
+def _stale_minutes() -> float:
     try:
-        minutes = float(os.environ.get("SWARM_LOCK_STALE_MINUTES") or LOCK_STALE_MINUTES)
-        return (time.time() if now is None else now) - lock.stat().st_mtime > minutes * 60
+        v = os.environ.get("SWARM_LOCK_STALE_MINUTES", "")
+        return float(int(v)) if v.isdigit() else float(LOCK_STALE_MINUTES)
+    except ValueError:
+        return float(LOCK_STALE_MINUTES)
+
+
+def _read_owner(lock: Path) -> tuple[int, str, str] | None:
+    """(pid, host, token) from the lock's owner file, None when there is none or it is unreadable."""
+    try:
+        pid, host, token = (lock / "owner").read_text().split()[:3]
+        return int(pid), host, token
     except (OSError, ValueError):
+        return None
+
+
+def _pid_alive(pid: int) -> bool | None:
+    """Whether a process of this host exists; None when the stdlib cannot tell (Windows: os.kill
+    would terminate it). A process of another user (PermissionError) is alive."""
+    if os.name == "nt":
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return None
+    return True
+
+
+def lock_is_stale(lock: Path, now: float | None = None) -> bool:
+    """A build lock left by a killed build. A live owner on this host is never stale, a dead one
+    always is. Where the pid cannot be checked (another host, no owner record, Windows) the lock's
+    age decides: at least SWARM_LOCK_STALE_MINUTES (default 20; 0 = always)."""
+    owner = _read_owner(lock)
+    if owner is not None and owner[1] == socket.gethostname():
+        alive = _pid_alive(owner[0])
+        if alive is not None:
+            return not alive
+    try:
+        return (time.time() if now is None else now) - lock.stat().st_mtime >= _stale_minutes() * 60
+    except OSError:
         return False
 
 
-def take_lock(lock: Path, timeout: int = 300) -> None:
-    """Create the lock directory (atomic), removing a stale one first; SystemExit when it stays held."""
+def _steal(lock: Path) -> bool:
+    """Remove the stale lock; False when it was not ours to remove (left or put back)."""
+    gone = lock.with_name(f"{lock.name}.stale.{os.getpid()}")
+    try:
+        lock.rename(gone)         # of several waiters only one wins the rename
+    except OSError:
+        return False
+    if lock_is_stale(gone):       # judge what we hold: it may be a fresh lock another waiter just took
+        print(f"swarm: removed a stale build lock ({lock})", file=sys.stderr)
+        shutil.rmtree(gone, ignore_errors=True)
+        return True
+    try:                          # not stale: put it back
+        lock.mkdir()
+        shutil.copy2(gone / "owner", lock / "owner")
+        st = gone.stat()
+        os.utime(lock, (st.st_atime, st.st_mtime))
+    except OSError:
+        pass
+    shutil.rmtree(gone, ignore_errors=True)
+    return False
+
+
+def take_lock(lock: Path, timeout: int = 300) -> str:
+    """Create the lock directory (atomic), removing a stale one first; SystemExit when it stays held.
+    Returns the owner token release_lock needs."""
+    token = uuid.uuid4().hex
     waited = 0
     while True:
         try:
             lock.mkdir()
-            (lock / "owner").write_text(f"{os.getpid()}\n")
-            return
+            (lock / "owner").write_text(f"{os.getpid()} {socket.gethostname()} {token}\n")
+            return token
         except FileExistsError:
             pass
-        if lock_is_stale(lock):
-            gone = lock.with_name(f"{lock.name}.stale.{os.getpid()}")
-            try:
-                lock.rename(gone)         # of several waiters only one wins the rename
-            except OSError:
-                pass
-            else:
-                print(f"swarm: removed a stale build lock ({lock})", file=sys.stderr)
-                shutil.rmtree(gone, ignore_errors=True)
-                continue
+        if lock_is_stale(lock) and _steal(lock):
+            continue
         waited += 1
         if waited > timeout:
-            sys.exit(f"swarm: {lock} is held (younger than the stale limit); remove it if you are sure no "
-                     f"build is running, then retry")
+            sys.exit(f"swarm: {lock} is held (its owner is running, or it is younger than the stale limit); "
+                     f"remove it if you are sure no build is running, then retry")
         time.sleep(1)
+
+
+def release_lock(lock: Path, token: str) -> None:
+    """Remove the lock only while it is still ours (it may have been taken over by age meanwhile)."""
+    owner = _read_owner(lock)
+    if owner is not None and owner[2] == token:
+        shutil.rmtree(lock, ignore_errors=True)
 
 
 def ensure_venv(v: Path | None = None, root: Path = PLUGIN_ROOT, timeout: int = 300) -> Path:
@@ -160,7 +224,7 @@ def ensure_venv(v: Path | None = None, root: Path = PLUGIN_ROOT, timeout: int = 
                  f"{sys.version_info[0]}.{sys.version_info[1]} ({sys.executable})")
     v.parent.mkdir(parents=True, exist_ok=True)
     lock = Path(str(v) + ".building")
-    take_lock(lock, timeout)
+    token = take_lock(lock, timeout)
     try:
         if not _stamp_ok(v, want, want_pg):
             print(f"swarm: setting up {v} (first run or new requirements)...", file=sys.stderr)
@@ -175,7 +239,7 @@ def ensure_venv(v: Path | None = None, root: Path = PLUGIN_ROOT, timeout: int = 
                          f"Use Python 3.11-3.14 on a supported platform, or install the requirements files by hand.")
             (v / ".swarm-requirements").write_text(want + "\n")
     finally:
-        shutil.rmtree(lock, ignore_errors=True)
+        release_lock(lock, token)
     return venv_python(v)
 
 
