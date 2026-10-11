@@ -1547,6 +1547,7 @@ def doctor(host: str | None = None, *, config: Path | None = None, claude_plugin
         checks += _capture_failed_check(cfg)
         checks += _bg_orphans_check(cfg)
     checks += supervisor_checks(cfg, host)
+    checks += _receipt_failures_check()
     return checks
 
 
@@ -1723,6 +1724,35 @@ def _transcripts_users_check(cfg: dict) -> list[Check]:
     if excerpts_on:
         detail += "; memory excerpts are readable by every OS user sharing the board role"
     return [Check("transcripts users", None, detail, fix)]
+
+
+RECEIPT_FAILURE_HOURS = 24.0
+
+
+def _receipt_failures_check() -> list[Check]:
+    """A drive hook could not write a receipt in the last 24 h (receipt-failures.log in the host
+    dir): the driver then ignores that control record, so a seat request or a hand-off stalls."""
+    import time
+    from swarm import paths, safefs
+    try:
+        with safefs.dir_fd(paths.host_dir(), create=False) as d:
+            text = safefs.read_text(d, "receipt-failures.log", 64 * 1024) or ""
+    except (OSError, FileNotFoundError):
+        return []
+    now = time.time()
+    recent = []
+    for line in text.splitlines():
+        head = line.split(" ", 1)[0]
+        if head.isdigit() and now - float(head) < RECEIPT_FAILURE_HOURS * 3600:
+            recent.append(line)
+    if not recent:
+        return []
+    return [Check("drive receipts", False,
+                  f"{len(recent)} control record receipt(s) could not be written in the last "
+                  f"{RECEIPT_FAILURE_HOURS:.0f} h; the driver ignores those records (last: "
+                  f"{recent[-1][:160]})",
+                  "fix the host directory (~/.local/share/swarm/host) so receipts can be written, then "
+                  "re-send the failed command")]
 
 
 PENDING_FINAL_WARN_HOURS = 1.0   # doctor: an ended agent without a final transcript this long is shown
