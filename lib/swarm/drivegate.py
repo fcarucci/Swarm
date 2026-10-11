@@ -108,11 +108,12 @@ def load_ledger(board_key: str, job: str):
     """The job's ledger or None (not a drive job). A ledger that exists but cannot be read raises
     (ledger.LedgerBadError): the callers treat the job as a drive job they cannot vouch for. Cached per
     process by the file's identity, size and modification time, so a changed ledger is read again."""
+    from swarm import compat
     from swarm.supervisor import ledger, privfs
     name = ledger._name(board_key, job)
     try:
         with privfs.dir_fd(ledger.SUBDIR, create=False) as d:
-            st = os.stat(name, dir_fd=d, follow_symlinks=False)
+            st = compat.stat(name, dir_fd=d, follow_symlinks=False)
     except FileNotFoundError:
         _LEDGER_CACHE.pop((board_key, job), None)
         return None
@@ -566,7 +567,14 @@ def parse_swarm(argv: list[str]):
     for build in (_cli_parser, _fallback_parser):
         try:
             with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
-                return build().parse_args(list(argv))
+                parser = build()
+                if build is _fallback_parser and argv and argv[0] in ("ask", "answer", "review"):
+                    # positionals after options (`answer 3 --key K text`): Python 3.11's argparse needs the
+                    # intermixed parser for a `*` positional
+                    ns = parser._subparsers._group_actions[0].choices[argv[0]].parse_intermixed_args(list(argv[1:]))
+                    ns.cmd = argv[0]
+                    return ns
+                return parser.parse_args(list(argv))
         except (SystemExit, Exception):
             continue
     return None

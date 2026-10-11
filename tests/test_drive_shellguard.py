@@ -220,7 +220,7 @@ class DriveRefusals(unittest.TestCase):
                 self.assertTrue(refuse(cmd, ["main"], branch_of=on("feat/a")), cmd)
         for cmd in ("bash script.sh", "bash -lc 'git log'", "gh api repos/o/r/contents/f", "gh api graphql -f query='{viewer{login}}'"):
             self.assertIsNone(refuse(cmd, ["main"]), cmd)
-        self.assertIn("pipe", shellguard.readonly_write_reason("echo ls | sh") or "pipe")
+        self.assertIn("cannot be checked", shellguard.readonly_write_reason("echo ls | sh"))
 
     def test_quoting_and_assignments(self):
         self.assertTrue(refuse("GIT_DIR=x git push origin main", ["main"]))

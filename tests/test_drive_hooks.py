@@ -507,7 +507,7 @@ class PushGuard(DriveCase):
         other = self.work / "other"
         (other / ".git").mkdir(parents=True)
         (other / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
-        self.assertIn("main", self.pre(sid, command=f"git -C {other} push origin"))
+        self.assertIn("main", self.pre(sid, command=f"git -C {other.as_posix()} push origin"))
         self.assertIn("main", self.pre(sid, command="git -C other push"))
 
     def test_head_branch_follows_worktree_gitdir_files(self):
