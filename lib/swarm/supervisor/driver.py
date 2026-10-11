@@ -31,7 +31,12 @@ CLOSE_WINDOW_KEY = "closing.window"
 def _modules():
     """The collaborating modules, imported when a pass runs (tests replace this with fakes)."""
     from swarm.supervisor import driver_exec, driver_life, driver_model, driver_snapshot
-    return SimpleNamespace(exec=driver_exec, life=driver_life, model=driver_model, snapshot=driver_snapshot)
+    try:
+        from swarm.supervisor import driver_land      # Task 11b: absent on builds without landing
+    except ImportError:
+        driver_land = None
+    return SimpleNamespace(exec=driver_exec, life=driver_life, model=driver_model, snapshot=driver_snapshot,
+                           land=driver_land)
 
 
 def _iso(now: dt.datetime) -> str:
@@ -395,6 +400,62 @@ def _watch_stalled(board, state, led, actions, now, sup) -> None:
                 f"{dt.datetime.fromtimestamp(since, dt.timezone.utc).isoformat()}")
 
 
+LAND_PENDING_KEY = "land.pending"
+LAND_PENDING_PASSES = 6        # consecutive passes with a pending landing before a ruling is made due
+
+
+def _land_env(cfg, led, owner, snap, say, jdeadline, m):
+    """A `land.LandEnv` from the owner record (`target_branch`, `config_dirs`, remotes, credentials), the
+    ledger (`activation_heads`) and the snapshot's judged SHAs; `left` is what is left of the job's slot.
+    Fields this build's LandEnv does not have (11b's API is still moving) are left out."""
+    import dataclasses
+    from swarm import land
+    d = dict(getattr(owner, "owner", None) or {})
+    judged = {v.artifact.partition("@")[2] for v in snap.verdicts.values()
+              if getattr(v, "verdict", None) == "met" and getattr(v, "artifact", None)}
+    urls = sorted((d.get("remotes") or {}).values())
+    ci = m.land.ci_status_cli(m.land.repo_slug(urls[0]) if urls else None)
+    want = {"led": led, "owner": d, "judged": lambda: set(judged), "ci_status": ci,
+            "target": d.get("target_branch") or "main", "say": say,
+            "left": max(0.0, jdeadline - time.monotonic()),
+            "activation_heads": dict(getattr(led, "activation_heads", None) or {}),
+            "config_dirs": dict(d.get("config_dirs") or {})}
+    have = {f.name for f in dataclasses.fields(land.LandEnv)}
+    return land.LandEnv(**{k: v for k, v in want.items() if k in have})
+
+
+def _idle_integrator(board, led, branch: str, m) -> None:
+    """The integrator seat of a group goes idle once its hand-off is landed or refused."""
+    name = m.exec.seat_name("integrator", branch)
+    for seat in board.seats(led.job, led.generation):
+        if seat.seat == name and seat.state == "running":
+            try:
+                board.set_seat_state(seat.id, seat.revision, "idle", job=led.job, last_outcome="landed")
+            except ValueError as exc:
+                log.warning("integrator %s of %s not idled: %s", name, led.job, exc)
+
+
+def _land(board, cfg, led, owner, snap, flat, now, say, jdeadline, m) -> None:
+    """Task 11b's `driver_land.run`, once per pass before any other action: executes the receipted land
+    requests. A finished request leaves its integrator seat idle. After `land_pending_passes` consecutive
+    passes with a landing still pending a ruling is made due (the lease or the CI never comes)."""
+    if getattr(m, "land", None) is None:
+        return
+    env = _land_env(cfg, led, owner, snap, say, jdeadline, m)
+    results = m.land.run(board, cfg, env, led.job)
+    pending = any(r.pending for _req, r in results)
+    for request, res in results:
+        if not res.pending:
+            _idle_integrator(board, led, request.artifact.partition("@")[0], m)
+    count = led.watermarks.get(LAND_PENDING_KEY, 0)
+    if pending:
+        _mutate(led, lambda l: l.watermarks.__setitem__(LAND_PENDING_KEY, count + 1))
+        if count + 1 >= int(flat.get("land_pending_passes", LAND_PENDING_PASSES)):
+            m.exec.note_ruling_due(led, now)
+    elif count:
+        _mutate(led, lambda l: l.watermarks.pop(LAND_PENDING_KEY, None))
+
+
 def _step(board, cfg, sup, state, led, owner, now, say, start_runner, config_path, jdeadline, m) -> None:
     life, exe = m.life, m.exec
     flat = _flat_cfg(cfg, led)
@@ -421,6 +482,7 @@ def _step(board, cfg, sup, state, led, owner, now, say, start_runner, config_pat
         return
     snap, actions = _plan(board, cfg, led, dcfg, now, m)
     _watch_stalled(board, state, led, actions, now, sup)
+    _land(board, cfg, led, owner, snap, flat, now, say, jdeadline, m)
     _act(board, cfg, sup, led, snap, actions, now, start_runner, config_path, jdeadline, m)
 
 
