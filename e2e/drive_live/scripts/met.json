@@ -1,0 +1,10 @@
+{
+  "_doc": "fake harness script, goal met: one engineer seat, one reviewer, goal judge says not_met once then met",
+  "lead": {"seats": [{"seat": "eng-a", "role": "engineer", "complexity": "simple"},
+                     {"seat": "rev-a", "role": "reviewer"}]},
+  "engineer": {"change": "version"},
+  "reviewer": [{"outcome": "changes"}, {"outcome": "verified"}],
+  "judge": [{"verdict": "not_met", "open": 1}, {"verdict": "met"}],
+  "integrator": {"action": "land"},
+  "cost_usd": 0.05
+}
