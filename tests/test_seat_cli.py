@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import SANDBOX, MemoryHarness, home_env  # noqa: F401
+from support import SANDBOX, MemoryHarness, home_env, posix_only  # noqa: F401
 
 from swarm import cli, drive_cli, enrolment  # noqa: E402
 from swarm.board.autoinit import store_key  # noqa: E402
@@ -173,6 +173,7 @@ class Seats(ControlCase):
         self.assertNotEqual(rc, 0)
         self.assertIn("outside the job's work roots", err)
 
+    @posix_only("the /tmp refusal is about POSIX paths")
     def test_seat_request_under_tmp_refused(self):
         self.roots.append("/tmp/x")
         with mock.patch.object(drive_cli, "TMP_ROOTS", ("/tmp",)):
@@ -180,6 +181,7 @@ class Seats(ControlCase):
         self.assertNotEqual(rc, 0)
         self.assertIn("never /tmp", err)
 
+    @posix_only("the /tmp refusal is about POSIX paths")
     def test_tmp_refusal_is_a_path_prefix_not_a_substring(self):
         with mock.patch.object(drive_cli, "TMP_ROOTS", ("/tmp", "/private/tmp")):
             self.assertTrue(drive_cli._under_tmp("/tmp/x"))
