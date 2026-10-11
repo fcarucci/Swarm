@@ -71,6 +71,8 @@ TOOL_NAME_MAX = 80   # current_tool is stored truncated to this many characters
 # (unverified), or the decision is made (final; job None = on no board).
 ROUTE_STATES = ("pending", "unverified", "final")
 VERDICTS = ("met", "not_met", "unreachable")   # a judge's verdict on a job's goal
+# The verdicts that settle a goal: no more work is wanted for it (met), or it cannot be met (unreachable).
+SETTLED_VERDICTS = ("met", "unreachable")
 # What a verdict judges (schema 25): one hand-off (artifact), the job's goal on the integrated target
 # (goal) or a ruling on the current candidate (ruling). Only a current-generation goal or ruling verdict
 # can make a drive job terminal (the driver decides; the board only stores it).
@@ -1096,7 +1098,7 @@ def goal_is_unmet(goal: str | None, verdict: str | None) -> bool:
     """The one definition, on raw columns (backend rows, CloseGuard): a goal whose latest verdict
     is neither `met` nor `unreachable` (both settle a goal). Only the judge's `met` or `unreachable`
     (or a person: deactivate, --force) may end such a job, never a quiet-time sweep."""
-    return bool(goal) and verdict not in ("met", "unreachable")
+    return bool(goal) and verdict not in SETTLED_VERDICTS
 
 
 def goal_unmet(js: JobStatus) -> bool:

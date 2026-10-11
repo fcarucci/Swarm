@@ -5056,7 +5056,10 @@ def _run_command(cfg: dict, args) -> int:
             return 1
         if args.cmd == "verdict":  # likewise; whether args.name is the judge is checked on delivery
             spool_verdict(cfg, args.job, args.name, args.verdict, *_verdict_text(args), artifact=args.artifact,
-                          details=getattr(args, "details_text", None))
+                          details=getattr(args, "details_text", None), scope=_verdict_scope(args),
+                          open_count=getattr(args, "open_count", None),
+                          progress=True if getattr(args, "progress", None) else None,
+                          candidate=getattr(args, "candidate", None), req=getattr(args, "req", None))
             print(f"queued (board not reachable from here: {_error_name(exc)}); it is delivered "
                   f"{edition.delivery()}, and counts only if you are the "
                   f"judge of {args.job} (if not, you are told on the board).")

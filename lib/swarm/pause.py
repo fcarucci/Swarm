@@ -23,6 +23,7 @@ import getpass
 import os
 import socket
 import time
+from swarm.board.base import SETTLED_VERDICTS
 
 PAUSE_REASON_MAX = 300
 WAIT_DEFAULT = 15.0          # seconds `swarm pause` waits for other boxes' final transcripts
@@ -386,7 +387,7 @@ def _resume_orphan(board, cfg, job, record, note, *, start_runner=None, config_p
     def allowed():
         js = board.job_status(job)
         return (js is not None and js.status == "active" and js.supervise
-                and js.verdict != "met" and not (js.waiting_on and not js.waiting_on.startswith(WAITING_PREFIX))
+                and js.verdict not in SETTLED_VERDICTS and not (js.waiting_on and not js.waiting_on.startswith(WAITING_PREFIX))
                 and not human_question(board, js)
                 and not any(a.status in ("started", "running", "idle") for a in board.agents(job))
                 and not command._switched_off_now(cfg, board, job))

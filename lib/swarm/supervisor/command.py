@@ -38,6 +38,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from swarm.board.base import SETTLED_VERDICTS
 from swarm.board import AgentStatus, JobStatus, board_backend
 from swarm.supervisor.budget import Decision
 from swarm import compat
@@ -157,7 +158,7 @@ def candidates(board, cfg: dict, sup: dict, *, job: str | None = None, now=None,
     found = []
     for js in board.jobs(False):
         # The job still needs work and supervise is enabled.
-        if (job and js.job != job) or not js.supervise or js.status != "active" or js.verdict == "met" or \
+        if (job and js.job != job) or not js.supervise or js.status != "active" or js.verdict in SETTLED_VERDICTS or \
                 (js.waiting_on and not js.waiting_on.startswith("supervisor: restarting ")):
             continue
         from swarm.supervisor.orphans import human_question
@@ -190,8 +191,8 @@ def _invalid(board, job: str, agent_key: str, cfg: dict | None = None):
     js = board.job_status(job)
     if js is None or js.status != "active":
         return "the job is closed", js, None
-    if js.verdict == "met":
-        return "the job has a met verdict", js, None
+    if js.verdict in SETTLED_VERDICTS:
+        return f"the job has a {js.verdict} verdict", js, None
     if js.waiting_on and not js.waiting_on.startswith("supervisor: restarting "):
         return "the job is waiting on a human or external event", js, None
     if not js.supervise:
@@ -547,7 +548,7 @@ def clear_stale_waits(board) -> int:
             continue
         name = w[len(WAITING_PREFIX):]
         taken = any(a.name == name and a.ended_at is None for a in board.agents(js.job))
-        why = ("the job has a verdict" if js.verdict == "met" else
+        why = ("the job has a verdict" if js.verdict in SETTLED_VERDICTS else
                "supervise is off for the job" if not js.supervise else
                f"{name} is active again" if taken else None)
         if why and board.set_waiting(js.job, None):

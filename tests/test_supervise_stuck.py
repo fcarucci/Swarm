@@ -71,6 +71,10 @@ class StuckReasonTests(unittest.TestCase):
     def test_dead_agent_waiting_on_human_is_excluded(self):
         self.assertIsNone(self.reason(agent(100, status="dead"), job(waiting="owner answer")))
 
+    def test_unreachable_job_is_settled_and_not_stuck(self):
+        import dataclasses
+        self.assertIsNone(self.reason(agent(100, status="dead"), dataclasses.replace(job(), verdict="unreachable")))
+
     def test_paused_and_met_jobs_are_excluded(self):
         import dataclasses
         for js in (dataclasses.replace(job(), status="paused"), dataclasses.replace(job(), verdict="met")):

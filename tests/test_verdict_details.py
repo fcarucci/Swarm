@@ -313,6 +313,60 @@ class VerdictDetailsCliTests(GoalEnv):
         self.assertEqual((rec["open"], rec["progress"], rec["candidate"], rec["scope"]),
                          (2, True, "c" * 40, "artifact"))
 
+    def test_an_unreachable_verdict_is_refused_not_queued_when_the_board_is_down(self):
+        self.h.set_available(False)
+        self.addCleanup(self.h.set_available, True)
+        rc, _, err = self.verdict("unreachable", "--reason", "no credentials", "--details", "-", stdin=REPORT)
+        self.assertEqual(rc, 1)
+        self.assertIn("not queued", err)
+        self.assertEqual(list(self.spool_dir.glob("*.vrd")), [])
+
+    def test_a_queued_drive_not_met_without_open_count_is_refused_on_delivery(self):
+        with self.board() as b:
+            self.assertTrue(b.set_job_data("J", "drive.enabled", "1"))
+        spool.spool_verdict(self.cfg, "J", self.judge, "not_met", "why", "fix", "a1")
+        with self.board() as b:
+            self.assertEqual(spool.flush_spool(b, self.cfg), 0)
+            self.assertIsNone(b.job_status("J").verdict)
+            posted = [m.message for m in b.recent_messages(20, job="J")]
+        self.assertTrue(any(m.startswith("verdict refused: ") and "open_count" in m for m in posted), posted)
+        self.assertEqual(len(list(self.spool_dir.glob("*.bad"))), 1)
+
+    def test_a_queued_unreachable_carries_its_details_and_scope(self):
+        spool.spool_verdict(self.cfg, "J", self.judge, "unreachable", "cannot", None, None, REPORT, scope="goal",
+                            generation=1)
+        with self.board() as b:
+            self.assertEqual(spool.flush_spool(b, self.cfg), 1)
+            js = b.job_status("J")
+            self.assertEqual((js.verdict, js.verdict_scope, js.verdict_generation), ("unreachable", "goal", 1))
+            self.assertEqual(b.verdict_details("J").details, REPORT)
+
+    def test_a_queued_unreachable_without_details_goes_to_bad(self):
+        spool.spool_verdict(self.cfg, "J", self.judge, "unreachable", "cannot", scope="goal")
+        with self.board() as b:
+            self.assertEqual(spool.flush_spool(b, self.cfg), 0)
+            self.assertIsNone(b.job_status("J").verdict)
+        self.assertEqual(len(list(self.spool_dir.glob("*.bad"))), 1)
+
+    def test_typed_verdict_fields_survive_the_offline_spool(self):
+        with self.board() as b:
+            self.assertTrue(b.set_job_data("J", "drive.enabled", "1"))
+        self.h.set_available(False)
+        self.addCleanup(self.h.set_available, True)
+        rc, _, err = self.verdict("--artifact", "a1", "--scope", "goal", "--open", "3", "--progress", "yes",
+                                  "--candidate", "c" * 40, "--req", "sha256:r",
+                                  "not_met", "--reason", "r", "--next", "n")
+        self.assertEqual(rc, 0, err)
+        self.h.set_available(True)
+        with self.board() as b:
+            self.assertEqual(spool.flush_spool(b, self.cfg), 1)
+            js = b.job_status("J")
+            self.assertEqual((js.verdict, js.verdict_scope, js.verdict_candidate, js.verdict_req),
+                             ("not_met", "goal", "c" * 40, "sha256:r"))
+            from swarm.review import artifact_verdicts
+            rec = artifact_verdicts(b, "J")["a1"]
+        self.assertEqual((rec["open"], rec["progress"], rec["scope"]), (3, True, "goal"))
+
     def test_an_oversized_report_is_refused_clearly_and_nothing_is_recorded(self):
         rc, _, err = self.verdict("not_met", "--reason", "r", "--next", "n", "--details", "-",
                                   stdin="x" * (VERDICT_DETAILS_MAX + 1))

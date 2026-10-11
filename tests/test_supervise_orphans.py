@@ -85,6 +85,12 @@ class OrphansTest(unittest.TestCase):
     def test_unmet_verdict_can_restart(self):
         self.b.js.verdict = "not_met"
         self.run_pass(); self.resume.assert_called_once()
+    def test_unreachable_verdict_is_settled_without_restart(self):
+        self.b.js.verdict = "unreachable"
+        self.run_pass(); self.run_pass()
+        self.resume.assert_not_called()
+        self.assertEqual(len(self.b.posts), 1)
+        self.assertIn("Goal is unreachable", self.b.posts[0][1])
     def test_met_reminder_once_without_restart(self):
         self.b.js.verdict = "met"
         self.run_pass(); self.run_pass()
@@ -94,6 +100,26 @@ class OrphansTest(unittest.TestCase):
     def test_foreign_owner_excluded(self):
         with mock.patch.object(orphans, "local_record", return_value=None): self.run_pass()
         self.resume.assert_not_called()
+    def test_orphan_resume_refuses_a_job_with_an_unreachable_verdict(self):
+        from swarm import pause
+        from swarm.hosts.resume import Restored
+        h = MemoryHarness("orphan-unreachable-test"); h.reset()
+        b = h.board(); self.addCleanup(b.close)
+        b.open_job("J", "desc", "build parser", None, "tester", goal="done")
+        judge = b.allocate_name("jk", "J")
+        self.assertTrue(b.claim_judge("jk", "J"))
+        self.assertTrue(b.record_verdict("J", judge, "unreachable", "cannot", details="report", scope="goal",
+                                         generation=1))
+        restored = Restored("codex", "briefing", ("codex", "exec", "-"), "/work", "continue", None, None)
+        started = []
+        with mock.patch("swarm.hosts.resume.restore", return_value=restored), \
+             mock.patch("swarm.supervisor.markers.write_resume_marker", return_value="/marker"), \
+             mock.patch("swarm.board.autoinit.store_key", return_value="board"):
+            run = pause._resume_orphan(b, self.cfg, "J", self.rec, "context",
+                                       start_runner=lambda cfg, run: started.append(run))
+        self.assertIsNone(run)
+        self.assertEqual((started, b.restarts(job="J")), ([], []))
+
     def test_recent_activity_or_coordinator_excluded(self):
         self.b.js.last_activity_at = NOW-dt.timedelta(minutes=10)
         self.run_pass()

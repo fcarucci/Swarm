@@ -6,6 +6,7 @@ import datetime as _dt
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from swarm.board.base import SETTLED_VERDICTS
 
 SUPERVISOR_NAME = "swarm supervisor"          # the name the supervisor's board posts carry
 WAITING_PREFIX = "supervisor: restarting "    # the job's waiting_on while a restart is due
@@ -22,7 +23,7 @@ def effective_contact(last_contact: _dt.datetime, out, dead: _dt.timedelta) -> _
 def stuck_reason(a, js, now: _dt.datetime, board_cfg: dict, sup: dict, out=None) -> str | None:
     if a.ended_at is not None:
         return None
-    if js.status != "active" or js.verdict == "met" or (js.waiting_on and not str(js.waiting_on).startswith(WAITING_PREFIX)):
+    if js.status != "active" or js.verdict in SETTLED_VERDICTS or (js.waiting_on and not str(js.waiting_on).startswith(WAITING_PREFIX)):
         return None
     dead = _dt.timedelta(minutes=float(board_cfg["dead_minutes"]))
     silent = _dt.timedelta(minutes=float(sup["silent_minutes"]))
