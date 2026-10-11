@@ -217,6 +217,21 @@ def known_host_present(path: str, host: str, port: int) -> bool:
     return False
 
 
+def known_hosts_file() -> str:
+    """The private known_hosts file (created empty, 0600, in the private mirrors directory). The
+    only file ssh may trust host keys from; it is only appended to by add_known_host."""
+    with privfs.dir_fd("mirrors"):
+        pass
+    path = os.path.join(str(private_dir()), "mirrors", "known_hosts")
+    if os.path.islink(path):
+        raise MirrorError("refusing a symlinked known_hosts file")
+    if not os.path.exists(path):
+        with open(path, "a"):
+            pass
+        os.chmod(path, 0o600)
+    return path
+
+
 def _tool(cmd: list[str], timeout: float) -> subprocess.CompletedProcess:
     """Run a system tool (ssh-keyscan, ssh-keygen) with a minimal environment, killed with its
     process group on timeout."""
@@ -329,14 +344,7 @@ class Mirror:
     # --- pinned credential sources ---------------------------------------------------------
 
     def _ensure_known_hosts(self) -> str:
-        path = os.path.join(self.private_home, "mirrors", "known_hosts")
-        if os.path.islink(path):
-            raise MirrorError("refusing a symlinked known_hosts file")
-        if not os.path.exists(path):
-            with open(path, "a"):
-                pass
-            os.chmod(path, 0o600)
-        return path
+        return known_hosts_file()
 
     def _ssh_command(self, options: list[str]) -> str:
         parts = [self._ssh_bin, "-F", os.devnull, "-o", f"UserKnownHostsFile={self._known_hosts}",

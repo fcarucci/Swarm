@@ -283,6 +283,54 @@ def coding_integrated(workdir: str | None, branch: str, sha: str, target: str) -
         return False
 
 
+def drive_job(board, job: str) -> bool:
+    """Whether the job is a drive job (the board claim `drive.enabled`, written at activation)."""
+    try:
+        return board.job_data(job).get("drive.enabled") == "1"
+    except Exception:
+        return False
+
+
+def drive_landed(ctx, job: str, branch: str, sha: str) -> bool:
+    """A drive job's artifact is integrated only when the host-private ledger says the driver landed it (from a
+    verified land receipt): never from git facts an agent could shape, never from an INTEGRATED post."""
+    try:
+        from swarm.board.autoinit import store_key
+        from swarm.supervisor import ledger
+        led = ledger.load(store_key(ctx.cfg), job)
+    except Exception:
+        return False
+    return led is not None and (led.integrated.get(branch) or {}).get("landed") == sha.lower()
+
+
+def drive_finalize(artifact: str, branch: str, sha: str, job: str, config: dict, ci_instructions: str) -> str:
+    """The integrator's brief in a drive job: rebase, push the BRANCH, wait for exact-SHA CI, then hand off to the
+    driver with `swarm land`. The seat never pushes the target and never posts INTEGRATED."""
+    strategy = ("Rebase with git rebase only; never create a merge commit, squash or force-push. "
+                if config["land_strategy"] == "rebase-ff" else
+                "This project lands with [land] strategy squash-ff: squash the approved branch into ONE commit on the "
+                "latest target locally; never create a merge commit or force-push. The reviewed head's tree must equal "
+                "the landed tree. ")
+    return (
+        f"You are the INTEGRATOR for {artifact}, an executing role separate from the judge. Recheck evidence on exact "
+        f"SHA {sha}. Fetch every configured remote. Verify branch {branch} still names {sha} on every remote; a moved "
+        "branch needs a new DONE and judge verdict, so stop and post the updated handoff. "
+        f"In an isolated worktree on disk, rebase {branch} onto the latest {config['target_branch']} from every remote. "
+        + strategy +
+        "If rebasing changes the SHA, push the rebased branch to EVERY configured remote as a fresh branch without "
+        "rewriting published history, then post a new DONE and judge verdict request for that exact rebased SHA and stop: "
+        "the old verdict and CI do not cover it. If the rebase leaves the SHA unchanged, push nothing new. "
+        f"Branch {branch} must name the judged SHA on every remote. Open/reuse a PR where the CI host supports it, then "
+        "wait for CI on the exact SHA in the foreground with `swarm ci wait --repo OWNER/REPO --sha SHA --timeout 540` "
+        "(repeat while pending). "
+        f"When CI is green on {sha} run exactly `swarm land --job {job} --artifact {artifact}` and stop: that request is "
+        "your hand-off. The supervisor's driver then checks the verdict, CI and leases, fast-forwards the target to that "
+        "exact SHA on every destination, deletes the branch and posts INTEGRATED or LAND-REFUSED <why>. Never push to the "
+        f"target branch {config['target_branch']} yourself and never post INTEGRATED. "
+        "If conflicts require design or code changes, abort the rebase and post FINALIZE_BLOCKED <artifact> <next steps> "
+        "for the supervisor to hand back to a worker. Retain distilled learnings with swarm learn." + ci_instructions)
+
+
 def coding_recipe(ctx, board, job: str, artifact: str | None) -> dict | None:
     from swarm.review import branch_revision
     parsed = branch_revision(artifact) if isinstance(artifact, str) else None
@@ -295,14 +343,16 @@ def coding_recipe(ctx, board, job: str, artifact: str | None) -> dict | None:
     record = local_record(ctx.cfg, js) if js else None
     workdir = getattr(record, "workdir", None) or getattr(record, "cwd", None)
     config = coding_settings(ctx, workdir)
-    if coding_integrated(workdir, branch, sha, config["target_branch"]):
+    drive = drive_job(board, job)
+    if (drive_landed(ctx, job, branch, sha) if drive else
+            coding_integrated(workdir, branch, sha, config["target_branch"])):
         return {"artifact_group": branch, "integrated": True}
     if coding_artifact(artifact) is None:
         return None  # exact-SHA evidence requires the full SHA
     sha = sha.lower()
     evidence, evidence_check, ci_instructions = ci_adapter(config["ci"], workdir, artifact, branch, sha)
 
-    finalize = (
+    finalize = drive_finalize(artifact, branch, sha, job, config, ci_instructions) if drive else (
         f"You are the INTEGRATOR for {artifact}, an executing role separate from the judge. "
         f"Recheck evidence on exact SHA {sha} before changing refs. Fetch every configured remote. "
         f"Verify branch {branch} still names {sha} on every remote that has it; a moved branch needs a new "
