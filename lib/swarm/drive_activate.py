@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -242,10 +243,16 @@ def blob_id(data: bytes) -> str:
 
 
 def sanitize_remote(url: str) -> str:
-    """A remote's URL without a user:password part, a query string or a fragment: a token is never
-    stored or printed."""
-    url = re.sub(r"(://)[^/@]*@", r"\1", url)
-    return re.split(r"[?#]", url, maxsplit=1)[0]
+    """A remote's URL without its userinfo (user:password@), query string or fragment: a token is
+    never stored or printed. An scp-style ssh remote (no scheme) has none of these and is returned as is."""
+    if "://" not in url:
+        return url
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        raise DriveError("a remote URL is not a valid URL") from None
+    host = parts.netloc.rpartition("@")[2]
+    return urllib.parse.urlunsplit((parts.scheme, host, parts.path, "", ""))
 
 
 def git_remotes(workdir: str) -> dict:
@@ -263,7 +270,10 @@ def git_remotes(workdir: str) -> dict:
     for line in res.stdout.splitlines():
         parts = line.split()
         if len(parts) == 3 and parts[2] == "(fetch)":
-            out.setdefault(parts[0], sanitize_remote(parts[1]))
+            try:
+                out.setdefault(parts[0], sanitize_remote(parts[1]))
+            except DriveError:
+                continue
     return out
 
 
@@ -394,8 +404,8 @@ def _save(bk: str, job: str, mutate) -> ledger.Ledger:
 
 
 def claim(board, plan: "Plan") -> None:
-    """The board's job row and its drive claim `drive.enabled=1` ([RR1a]): written before the ledger, so
-    no state has a ledger and no claim."""
+    """The board's job row and its drive claim `drive.enabled=1` ([RR1a]). Written before the ledger, and
+    nothing writes it after the ledger: no state has a ledger without its claim."""
     status = board.job_status(plan.job)
     if status is None or status.status != "active":
         board.open_job(plan.job, plan.description, None, plan.session, os.environ.get("USER") or "person",
@@ -434,8 +444,8 @@ def activate_drive(cfg: dict, board, plan: Plan, *, crash_after: str | None = No
 
 
 def finish_activation(cfg: dict, board, job: str, *, crash_after: str | None = None) -> ledger.Ledger | None:
-    """Steps 5 to 7 of [RR1] for a job whose ledger is "activating" and whose owner record exists: the
-    claim re-asserted, the board's generation data, the lead seat request, then the ledger "active".
+    """Steps 5 to 7 of [RR1] for a job whose ledger is "activating" and whose owner record and board claim
+    exist: the board's generation data, the lead seat request, then the ledger "active".
     Idempotent: the activate command and the pass (Task 8a's reconcile) both run it, after any crash.
     `crash_after` is for tests ("data", "lead")."""
     bk = board_key(cfg)
@@ -446,11 +456,14 @@ def finish_activation(cfg: dict, board, job: str, *, crash_after: str | None = N
     if owner is None or owner.owner is None:
         raise DriveError(f"DRIVER-ORPHAN: job {job!r} has a drive ledger but no owner record on this host; "
                          f"it is held until `swarm doctor` and a person repair it")
+    if board.job_data(job).get("drive.enabled") != "1":
+        # the claim is written before the ledger ([RR1a]); a ledger without it is not written here
+        raise DriveError(f"DRIVER-ORPHAN: job {job!r} has a drive ledger but no drive claim on the board; "
+                         f"it is held until `swarm doctor` and a person repair it")
     o = owner.owner
     models = {**model_defaults(cfg), **led.models}
     session = owner.session_id
     user = os.environ.get("USER") or "person"
-    board.set_job_data(job, "drive.enabled", "1")
     board.set_job_data(job, "drive.generation", str(led.generation))
     board.set_job_data(job, "drive.generation_requested", str(led.generation_requested))
     if crash_after == "data":
@@ -645,24 +658,24 @@ def drive_lines(cfg: dict, job: str) -> list:
 # --- person path and the requester session ([F17]) --------------------------------------------
 
 def _person(action: str, cfg: dict, job: str) -> str | None:
-    """The person path, through Task 6b's swarm.person.require: None when the action is allowed, else
-    the refusal text. Until person.py is in the build the import fails and the action is refused."""
+    """The person path, through Task 6b's `swarm.person.require(action, job, *, board_key, env, confirm)`
+    (returns the authority, or raises PermissionError): None when the action is allowed, else the refusal
+    text. Until person.py is in the build the import fails and the action is refused."""
     try:
         from swarm import person
     except ImportError:
         return f"{action} needs the person path, which this build does not have (swarm/person.py, Task 6b)"
     try:
         person.require(action, job, board_key=board_key(cfg))
-    except person.PersonRefused as exc:
-        return str(exc)
+    except PermissionError as exc:
+        return str(exc) or f"{action} needs a person"
     return None
 
 
-def clear_claim(cfg: dict, job: str) -> None:
-    """A terminal drive job drops its claim, so core rules stop treating it as driven ([RR1a])."""
-    from swarm.board import open_board
-    with open_board(cfg) as board:
-        board.set_job_data(job, "drive.enabled", None)
+def clear_claim(board, job: str) -> None:
+    """A terminal drive job drops its claim, so core rules stop treating it as driven ([RR1a]). Deactivate
+    calls it; every other terminal state (the verdicts, Task 8b) must too."""
+    board.set_job_data(job, "drive.enabled", None)
 
 
 def cmd_drive(cfg: dict, args) -> int:
