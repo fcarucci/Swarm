@@ -11,7 +11,7 @@ from unittest import mock
 
 from test_hooks_cli import Env
 
-from swarm import drive_hooks, enrolment, hosts, receipts
+from swarm import drivegate, enrolment, hosts, receipts
 from swarm.board.autoinit import store_key
 from swarm.supervisor import drive_authz, ledger, markers, runner
 
@@ -36,8 +36,8 @@ class DriveCase(Env):
         self.edit(lambda l: setattr(l, "requester_session", REQ))
         enrolment.write_job_owner(self.key, job="J", harness="claude", session_id=REQ, cwd=str(self.work))
         self.host = hosts.get("claude")
-        drive_hooks._LEDGER_CACHE.clear()
-        kick = mock.patch.object(drive_hooks, "kick", return_value=True)
+        drivegate._LEDGER_CACHE.clear()
+        kick = mock.patch.object(drivegate, "kick", return_value=True)
         self.kick = kick.start()
         self.addCleanup(kick.stop)
 
@@ -101,6 +101,10 @@ class DriveCase(Env):
         with self.board() as b:
             return b.post("J", b.active_agent_name(sid), text, to).id
 
+    def post_as_name(self, name: str, text: str, to: str | None = None) -> int:
+        with self.board() as b:
+            return b.post("J", name, text, to).id
+
     # ---- payloads
     def payload(self, sid, tool="Bash", command=None, *, agent_id=None, stdout=None, **extra) -> dict:
         p = {"session_id": sid, "cwd": str(self.work), "tool_name": tool,
@@ -114,12 +118,12 @@ class DriveCase(Env):
         return p
 
     def pre(self, sid, tool="Bash", command=None, **kw) -> str | None:
-        return drive_hooks.pre_tool(self.cfg, self.payload(sid, tool, command, **kw), self.host)
+        return drivegate.pre_tool(self.cfg, self.payload(sid, tool, command, **kw), self.host)
 
     def post(self, sid, command, record=None, *, agent_id=None, host=None, **kw) -> bool:
         """The PostToolUse of `command` that printed `record` (the swarm-record line) last."""
         out = "posted #1\n" + (record + "\n" if record else "")
-        return drive_hooks.post_tool(self.cfg, self.payload(sid, "Bash", command, agent_id=agent_id, stdout=out, **kw),
+        return drivegate.post_tool(self.cfg, self.payload(sid, "Bash", command, agent_id=agent_id, stdout=out, **kw),
                                      host or self.host)
 
     def receipt(self, kind, rid, rev=1, generation=1):
@@ -128,5 +132,5 @@ class DriveCase(Env):
 
     def failures(self) -> str:
         from swarm import paths
-        p = paths.host_dir() / drive_hooks.RECEIPT_FAILURES
+        p = paths.host_dir() / drivegate.RECEIPT_FAILURES
         return p.read_text() if p.exists() else ""

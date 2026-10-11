@@ -38,7 +38,8 @@ class DriveRefusals(unittest.TestCase):
         for cmd in ("git push origin HEAD:feat/a", "git push origin feat/mainline", "git push -u origin feat/a",
                     "git push origin feat/a:feat/a", "git push origin HEAD:refs/heads/feat/a",
                     "git push --tags origin", "git push --follow-tags origin feat/a", "git push --no-verify origin x",
-                    "git push -o ci.skip origin feat/a", "git push --repo=origin feat/a"):
+                    "git push -o ci.skip origin feat/a", "git push --repo=origin feat/a",
+                    "git push --repo=origin -o main feat/a", "git push -o main origin feat/a"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(refuse(cmd, ["main"], branch_of=on("feat/a")), cmd)
 
@@ -134,6 +135,23 @@ class DriveRefusals(unittest.TestCase):
         self.assertIn("force", refuse("git push -f origin main", ()))
         self.assertIn("claude -p", refuse("claude -p x", ()))
 
+    def test_targets_may_be_a_function_called_only_when_needed(self):
+        calls = []
+
+        def targets():
+            calls.append(1)
+            return ["main"]
+        self.assertIsNone(refuse("git status; ls", targets))
+        self.assertEqual(calls, [])
+        self.assertTrue(refuse("git push origin main", targets))
+        self.assertEqual(calls, [1])
+        self.assertTrue(refuse("git push origin feat/a; git push origin feat/b; git push origin main", targets))
+        self.assertEqual(calls, [1, 1])      # once per command, however many pushes it has
+
+    def test_targets_given_in_mixed_case_match_a_lower_case_push(self):
+        self.assertTrue(refuse("git push origin HEAD:develop", ["Develop"]))
+        self.assertTrue(refuse("git push origin HEAD:DEVELOP", ["develop"]))
+
     def test_targets_are_compared_without_case_and_with_or_without_refs_heads(self):
         self.assertTrue(refuse("git push origin HEAD:MAIN", ["main"]))
         self.assertTrue(refuse("git push origin HEAD:main", ["refs/heads/main"]))
@@ -150,6 +168,22 @@ class DriveRefusals(unittest.TestCase):
         self.assertTrue(refuse("sh <<EOF\nclaude -p hi\nEOF", ["main"]))
         self.assertIsNone(refuse("cat <<'EOF'\ngit push origin main\nEOF", ["main"]))
         self.assertIsNone(refuse("python3 - <<'EOF'\nprint(1)\nEOF", ["main"]))
+
+    def test_inline_scripts_that_push_to_a_target_or_launch_a_session_are_refused(self):
+        for cmd in ("python3 -c \"import subprocess;subprocess.run(['git','push','origin','HEAD:main'])\"",
+                    "python3 -c \"import subprocess;subprocess.run(['claude','-p','x'])\"",
+                    "node -e \"require('child_process').exec('git push -f origin x')\"",
+                    "nodejs -e \"require('child_process').exec('git push origin refs/heads/main')\"",
+                    "perl -e 'system(\"codex exec x\")'", "python3.12 -c \"import os; os.system('git push --mirror')\"",
+                    "python3 - <<'EOF'\nimport os; os.system('git push origin main')\nEOF",
+                    "ruby -e 'system(\"claude --print hi\")'"):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(refuse(cmd, ["main"], branch_of=on("feat/a")), cmd)
+        for cmd in ("python3 -c \"import subprocess;subprocess.run(['git','push','origin','feat/a'])\"",
+                    "python3 -c 'print(1)'", "python3 -c \"print('mainline')\"", "python3 -m unittest x", "node app.js",
+                    "python3 - <<'EOF'\nprint('git push origin feat/a')\nEOF", "perl -e 'print 1'"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(refuse(cmd, ["main"], branch_of=on("feat/a")), cmd)
 
     def test_quoting_and_assignments(self):
         self.assertTrue(refuse("GIT_DIR=x git push origin main", ["main"]))
@@ -180,11 +214,16 @@ class Splitting(unittest.TestCase):
         got = [(p, w) for p, _, w in shellguard.iter_commands("xargs -n1 git push")]
         self.assertEqual(got, [("git", {"xargs"})])
 
-    def test_nesting_depth_is_bounded(self):
-        cmd = "git push origin main"
+    def test_nesting_depth_is_bounded_and_too_deep_is_refused(self):
+        cmd = "git push origin feat/a"
         for _ in range(12):
             cmd = "sh -c " + shlex.quote(cmd)
-        shellguard.drive_command_refusal(cmd, ["main"])      # terminates, never raises
+        self.assertIn("too deeply", shellguard.drive_command_refusal(cmd, ["main"]))
+        self.assertIn("too deeply", shellguard.readonly_write_reason(cmd))
+        deep = "eval " * 3000 + "git push origin feat/a"
+        self.assertIn("too deeply", shellguard.drive_command_refusal(deep, ["main"]))     # no RecursionError
+        shallow = "sh -c " + shlex.quote("sh -c " + shlex.quote("git push origin feat/a"))
+        self.assertIsNone(shellguard.drive_command_refusal(shallow, ["main"]))
 
 
 class ReadOnlyWrites(unittest.TestCase):
@@ -198,6 +237,10 @@ class ReadOnlyWrites(unittest.TestCase):
                     "echo $(touch f)", "watch 'rm f'"):
             with self.subTest(cmd=cmd):
                 self.assertTrue(shellguard.readonly_write_reason(cmd), cmd)
+
+    def test_sqlite_readonly_is_allowed_whatever_the_statement(self):
+        self.assertIsNone(shellguard.readonly_write_reason("sqlite3 -readonly b.db 'update t set a=1'"))
+        self.assertTrue(shellguard.readonly_write_reason("sqlite3 b.db 'update t set a=1'"))
 
     def test_reads_are_not_writes(self):
         for cmd in ("git log --oneline -3", "git diff HEAD~1", "git show HEAD:f", "git -C /w status", "git -c a=b log",

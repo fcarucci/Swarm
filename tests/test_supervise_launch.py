@@ -241,7 +241,7 @@ class LaunchContractTests(unittest.TestCase):
 
     def test_claude_read_only_disallows_edits(self):
         spec = launch.spec_for({}, "claude", prompt="p", workdir="/w", model=None, minutes=5, read_only=True)
-        self.assertEqual(spec.argv[spec.argv.index("--disallowedTools") + 1], "Edit,Write,NotebookEdit,MultiEdit")
+        self.assertEqual(spec.argv[spec.argv.index("--disallowedTools") + 1], "Edit,Write,NotebookEdit,MultiEdit,mcp__*")
         writable = launch.spec_for({}, "claude", prompt="p", workdir="/w", model=None, minutes=5)
         self.assertNotIn("--disallowedTools", writable.argv)
 

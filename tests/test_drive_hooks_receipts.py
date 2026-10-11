@@ -12,8 +12,9 @@ from pathlib import Path
 from unittest import mock
 
 from drive_hooks_support import DriveCase, ISO, REQ
+from support import posix_only
 
-from swarm import drive_hooks, enrolment, hosts, paths, receipts
+from swarm import drivegate, enrolment, hosts, paths, receipts
 from swarm.supervisor import drive_authz, ledger
 
 ART = "feat/a@" + "a" * 40
@@ -40,13 +41,13 @@ class RecordFormat(DriveCase):
         fixture = json.loads((Path(__file__).parent / "fixtures/claude/2.1.284/hooks/PostToolUse-Bash-record.json")
                              .read_text())
         self.assertNotIn("exit_code", fixture["tool_response"])
-        self.assertEqual(drive_hooks.record_of(fixture), ("done", 42, 1))
+        self.assertEqual(drivegate.record_of(fixture), ("done", 42, 1))
 
     def test_codex_payload_is_a_plain_string(self):
         fixture = json.loads((Path(__file__).parent / "fixtures/codex/0.157.1/hooks/PostToolUse-Bash-record.json")
                              .read_text())
         self.assertIsInstance(fixture["tool_response"], str)
-        self.assertEqual(drive_hooks.record_of(fixture), ("done", 42, 1))
+        self.assertEqual(drivegate.record_of(fixture), ("done", 42, 1))
 
     def test_record_line_must_be_the_last_exact_line(self):
         ok = rec("done", 7)
@@ -54,25 +55,25 @@ class RecordFormat(DriveCase):
                            (ok + " ", ("done", 7, 1)), ("x " + ok, None), ("swarm-record: kind=Done id=7 rev=1", None),
                            ("swarm-record: kind=done id=7", None), ("", None)):
             with self.subTest(text=text):
-                self.assertEqual(drive_hooks.record_of({"tool_response": {"stdout": text}}), want)
-                self.assertEqual(drive_hooks.record_of({"tool_response": text}), want)
+                self.assertEqual(drivegate.record_of({"tool_response": {"stdout": text}}), want)
+                self.assertEqual(drivegate.record_of({"tool_response": text}), want)
 
     def test_an_interrupted_or_failed_call_has_no_record(self):
         out = rec("done", 7)
-        self.assertIsNone(drive_hooks.record_of({"tool_response": {"stdout": out, "interrupted": True}}))
-        self.assertIsNone(drive_hooks.record_of({"tool_response": {"stdout": out, "exit_code": 1}}))
-        self.assertEqual(drive_hooks.record_of({"tool_response": {"stdout": out, "exit_code": 0}}), ("done", 7, 1))
-        self.assertIsNone(drive_hooks.record_of({"tool_response": None}))
-        self.assertIsNone(drive_hooks.record_of({}))
+        self.assertIsNone(drivegate.record_of({"tool_response": {"stdout": out, "interrupted": True}}))
+        self.assertIsNone(drivegate.record_of({"tool_response": {"stdout": out, "exit_code": 1}}))
+        self.assertEqual(drivegate.record_of({"tool_response": {"stdout": out, "exit_code": 0}}), ("done", 7, 1))
+        self.assertIsNone(drivegate.record_of({"tool_response": None}))
+        self.assertIsNone(drivegate.record_of({}))
 
     def test_submitted_argv_includes_defaults_in_a_fixed_order(self):
-        ns = drive_hooks.parse_swarm(["seat", "request", "--seat", "s", "--job", "J", "--role", "engineer",
+        ns = drivegate.parse_swarm(["seat", "request", "--seat", "s", "--job", "J", "--role", "engineer",
                                       "--brief", "B.md"])
-        self.assertEqual(drive_hooks.submitted_argv(ns), ["seat", "request", "--brief", "B.md", "--harness", "claude",
+        self.assertEqual(drivegate.submitted_argv(ns), ["seat", "request", "--brief", "B.md", "--harness", "claude",
                                                           "--job", "J", "--role", "engineer", "--seat", "s"])
-        other = drive_hooks.parse_swarm(["seat", "request", "--seat", "s", "--job", "J", "--role", "engineer",
+        other = drivegate.parse_swarm(["seat", "request", "--seat", "s", "--job", "J", "--role", "engineer",
                                          "--brief", "B.md", "--harness", "codex"])
-        self.assertNotEqual(drive_hooks.submitted_argv(ns), drive_hooks.submitted_argv(other))
+        self.assertNotEqual(drivegate.submitted_argv(ns), drivegate.submitted_argv(other))
 
 
 class DoneReceipts(DriveCase):
@@ -86,8 +87,8 @@ class DoneReceipts(DriveCase):
         self.assertEqual((r.seat, r.action_id, r.attempt, r.generation), ("eng-a", self.action, 1, 1))
         self.assertTrue(receipts.matches(r, {"kind": "done", "id": str(rid), "rev": 1, "artifact": ART,
                                              "sha": "a" * 40, "group": "feat/a"}))
-        ns = drive_hooks.parse_swarm(self.CMD.split()[1:])
-        self.assertEqual(r.args_sha, receipts.args_sha(drive_hooks.submitted_argv(ns)))
+        ns = drivegate.parse_swarm(self.CMD.split()[1:])
+        self.assertEqual(r.args_sha, receipts.args_sha(drivegate.submitted_argv(ns)))
         self.kick.assert_called_once()
 
     def test_done_by_the_real_cli_through_a_seat_key(self):
@@ -133,6 +134,11 @@ class DoneReceipts(DriveCase):
         self.assertFalse(self.post(sid, self.CMD, rec("done", rid), agent_id="sub-1"))
         self.assertIsNone(self.receipt("done", rid))
 
+    def test_done_by_a_seat_that_has_not_joined_the_board_gets_no_receipt(self):
+        sid, _ = self.launch_seat("eng-a", bind=False)
+        rid = self.post_as_name("someone", f'DONE "{ART}" | x')
+        self.assertFalse(self.post(sid, self.CMD, rec("done", rid)))
+
     def test_done_with_two_record_commands_gets_no_receipt(self):
         sid, _ = self.launch_seat("eng-a")
         rid = self.post_as(sid, f'DONE "{ART}" | x')
@@ -153,6 +159,7 @@ class DoneReceipts(DriveCase):
         sid, _ = self.launch_seat("eng-a")
         rid = self.post_as(sid, 'DONE "handoff-1" | x')
         self.assertFalse(self.post(sid, "swarm done --job J --summary x", rec("done", rid)))
+        self.assertIn("names its artifact", self.failures())
 
     def test_branch_and_sha_spell_the_artifact(self):
         sid, _ = self.launch_seat("eng-a")
@@ -267,6 +274,22 @@ class VerdictReceipts(DriveCase):
         self.assertFalse(ok)
         self.assertIn("names its artifact", self.failures())
 
+    def test_a_goal_verdict_without_its_candidate_gets_no_receipt(self):
+        sid = self.judge()
+        rid, ok = self.verdict(sid, "met", "goal met", "--scope goal --req R1 met 'goal met'")
+        self.assertFalse(ok)
+        self.assertIn("names its candidate", self.failures())
+
+    def test_the_verdict_receipt_carries_the_ledgers_generation(self):
+        sid = self.judge()
+        self.edit(lambda l: setattr(l, "generation", 2))
+        rid = self.post_as(sid, "VERDICT met: fine")
+        self.assertTrue(self.post(sid, f"swarm verdict --job J --artifact {ART} met fine", rec("verdict", rid)))
+        r = self.receipt("verdict", rid, generation=2)
+        self.assertIsNotNone(r)
+        self.assertTrue(receipts.matches(r, self.decision(rid, generation=2)))
+        self.assertFalse(receipts.matches(r, self.decision(rid, generation=1)))
+
     def test_verdict_message_that_says_another_verdict_gets_no_receipt(self):
         sid = self.judge()
         rid = self.post_as(sid, "VERDICT not_met: nope")
@@ -310,6 +333,13 @@ class GoalReadyReceipts(DriveCase):
         with self.board() as b:
             rid = b.post("J", "person", f"GOAL-READY {CAND} req={self.digest}").id
         self.assertTrue(self.post(REQ, f"swarm goal-ready --job J --candidate {CAND}", rec("goal_ready", rid)))
+
+    def test_a_goal_ready_over_no_pinned_requirements_is_invalid(self):
+        self.edit(lambda l: l.pinned_requirements.clear())
+        sid, _ = self.launch_seat("lead", role="engineering_lead", kind="lead")
+        rid = self.post_as(sid, f"GOAL-READY {CAND} req={drive_authz.requirements_digest({})}")
+        self.assertFalse(self.post(sid, f"swarm goal-ready --job J --candidate {CAND}", rec("goal_ready", rid)))
+        self.assertIn("pins no requirements", self.failures())
 
     def test_a_req_that_is_not_the_ledgers_digest_gets_no_receipt(self):
         sid, _ = self.launch_seat("lead", role="engineering_lead", kind="lead")
@@ -366,6 +396,12 @@ class PostAskAnswerReceipts(DriveCase):
         self.assertFalse(self.post(sid, f"swarm post --job J --key {sid} --to '{to}' please look", rec("post", rid)))
         rid = self.post_as(sid, "please look", to="someone else")
         self.assertFalse(self.post(sid, f"swarm post --job J --key {sid} --to '{to}' please look", rec("post", rid)))
+
+    def test_the_requester_does_not_ask(self):
+        sid, _ = self.launch_seat("eng-a")
+        b = self.open_question(sid)
+        self.assertFalse(self.post(REQ, "swarm ask --job J --to human --default sqlite Which DB?", rec("ask", b.id)))
+        self.assertEqual(self.failures(), "")
 
     def test_requester_post_is_receipted(self):
         lead, _ = self.launch_seat("lead", role="engineering_lead", kind="lead")
@@ -430,7 +466,15 @@ class PostAskAnswerReceipts(DriveCase):
         with self.board() as bd:
             bd.resolve_blocker(b.id, "postgres", actor="human")
         self.assertFalse(self.post(REQ, f"swarm answer {b.id} sqlite", rec("answer", b.id)))
+        self.assertIn("not answered as submitted", self.failures())
+
+    def test_a_comment_is_not_an_answer_and_is_no_failure(self):
+        sid, _ = self.launch_seat("eng-a")
+        b = self.open_question(sid)
+        with self.board() as bd:
+            bd.resolve_blocker(b.id, "postgres", actor="human")
         self.assertFalse(self.post(REQ, f"swarm answer {b.id} --comment hello", rec("answer", b.id)))
+        self.assertEqual(self.failures(), "")
 
     def test_default_option_and_reopen_answers(self):
         sid, _ = self.launch_seat("eng-a")
@@ -449,7 +493,7 @@ class SeatRequestReceipts(DriveCase):
     def setUp(self):
         super().setUp()
         self.cmd = self.CMD.format(w=self.work)
-        p = mock.patch.object(drive_hooks, "default_model", lambda cfg, role: "haiku")
+        p = mock.patch.object(drivegate, "default_model", lambda cfg, role: "haiku")
         p.start()
         self.addCleanup(p.stop)
 
@@ -513,13 +557,17 @@ class SeatRequestReceipts(DriveCase):
         row = self.request()                    # harness claude, complexity standard, model the default
         self.assertTrue(self.post(REQ, cmd, rec("seat", row.id, row.revision)))
         r = self.receipt("seat_request", row.id, row.revision)
-        ns = drive_hooks.parse_swarm(cmd.split()[1:])
+        ns = drivegate.parse_swarm(cmd.split()[1:])
         self.assertEqual(ns.harness, "claude")
 
     def test_workdir_defaults_to_the_calls_cwd(self):
         row = self.request()
         cmd = "swarm seat request --job J --seat eng-b --role engineer --brief B.md --model haiku"
         self.assertTrue(self.post(REQ, cmd, rec("seat", row.id, row.revision)))   # the payload cwd is self.work
+        other = self.work / "elsewhere"
+        other.mkdir()
+        self.assertFalse(self.post(REQ, cmd, rec("seat", row.id, row.revision), cwd=str(other)))
+        self.assertIn("workdir", self.failures())
 
     def test_a_codex_judge_request_is_compared_after_the_claude_override(self):
         with self.board() as b:
@@ -552,7 +600,7 @@ class SeatRequestReceipts(DriveCase):
         """P2/M1: the lead check never reads a board row's role."""
         sid, row_a = self.launch_seat("eng-a")
         row = self.request()
-        real = drive_hooks._open_board
+        real = drivegate._open_board
 
         class Flip:
             def __init__(self, b):
@@ -565,7 +613,7 @@ class SeatRequestReceipts(DriveCase):
                 import dataclasses
                 s = self.b.seat(job, gen, seat)
                 return dataclasses.replace(s, role="engineering_lead") if s and seat == "eng-a" else s
-        with mock.patch.object(drive_hooks, "_open_board", lambda cfg: Flip(real(cfg))):
+        with mock.patch.object(drivegate, "_open_board", lambda cfg: Flip(real(cfg))):
             self.assertFalse(self.post(sid, self.cmd, rec("seat", row.id, row.revision)))
 
     def test_a_seat_named_lead_that_is_not_a_lead_role_gets_no_receipt(self):
@@ -640,6 +688,33 @@ class SeatAuthorization(DriveCase):
         row = self.request("eng-d")
         self.authorize(row, action=self.action, attempt=1, seat="lead")
         self.assertTrue(self.authorized("eng-d"))
+
+    def test_a_receipt_of_an_earlier_revision_does_not_authorize_the_row_as_it_is_now(self):
+        row = self.request()
+        self.authorize(row, action="requester:seat", seat=None)
+        self.assertTrue(self.authorized())
+        with self.board() as b:
+            b.set_seat_state(row.id, row.revision, "released", job="J")
+        self.assertFalse(self.authorized())
+
+    def test_a_driver_authorization_must_carry_the_seat_it_names(self):
+        row = self.request()
+        self.authorize(row, action="driver|authorize|eng-b", seat="lead")
+        self.assertFalse(self.authorized())
+        self.authorize(row, action="driver|authorize|eng-b", seat="eng-b", attempt=2)
+        self.assertFalse(self.authorized())
+
+    def test_a_lead_authorization_needs_the_lead_name_and_the_lead_role(self):
+        for name, role in (("boss", "engineering_lead"), ("lead", "engineer")):
+            sid, _ = self.launch_seat(name, role=role, kind="lead")
+            row = self.request("eng-" + name)
+            self.authorize(row, action=self.action, attempt=1, seat=name)
+            with self.subTest(seat=name):
+                self.assertFalse(self.authorized("eng-" + name))
+        self.launch_seat("lead~1", role="engineering_lead", kind="lead")
+        row = self.request("eng-ok")
+        self.authorize(row, action=self.action, attempt=1, seat="lead~1")
+        self.assertTrue(self.authorized("eng-ok"))
 
     def test_a_receipt_from_an_engineers_action_is_not_a_seat_authorization(self):
         sid, _ = self.launch_seat("eng-a")
@@ -772,26 +847,32 @@ class PersonReceipts(DriveCase):
 
 
 class FailureLog(DriveCase):
-    def test_log_is_private_and_one_printable_line(self):
-        drive_hooks.log_receipt_failure("J person id=9 rev=1: OSError: x\nINJECTED line")
-        p = paths.host_dir() / drive_hooks.RECEIPT_FAILURES
-        self.assertEqual(oct(p.stat().st_mode & 0o777), "0o600")
+    def test_log_is_one_printable_line(self):
+        drivegate.log_receipt_failure("J person id=9 rev=1: OSError: x\nINJECTED line")
+        p = paths.host_dir() / drivegate.RECEIPT_FAILURES
         self.assertEqual(len(p.read_text().splitlines()), 1)
         self.assertIn("\\x0aINJECTED", p.read_text())
+
+    @posix_only("Windows has no file modes")
+    def test_P10_log_is_private(self):
+        drivegate.log_receipt_failure("J person id=9 rev=1: OSError: x")
+        p = paths.host_dir() / drivegate.RECEIPT_FAILURES
+        self.assertEqual(oct(p.stat().st_mode & 0o777), "0o600")
+        self.assertEqual(oct(p.parent.stat().st_mode & 0o777), "0o700")
 
     def test_log_is_cut_back_to_its_tail_when_it_grows(self):
         d = paths.host_dir()
         d.mkdir(parents=True, exist_ok=True)
-        (d / drive_hooks.RECEIPT_FAILURES).write_text("1000 old line\n" * 30000)
-        drive_hooks.log_receipt_failure("J fresh failure")
-        text = (d / drive_hooks.RECEIPT_FAILURES).read_text()
-        self.assertLess(len(text), drive_hooks.RECEIPT_LOG_KEEP + 1024)
+        (d / drivegate.RECEIPT_FAILURES).write_text("1000 old line\n" * 30000)
+        drivegate.log_receipt_failure("J fresh failure")
+        text = (d / drivegate.RECEIPT_FAILURES).read_text()
+        self.assertLess(len(text), drivegate.RECEIPT_LOG_KEEP + 1024)
         self.assertTrue(text.rstrip().endswith("J fresh failure"))
         self.assertTrue(text.startswith("1000 old line\n"))      # cut on a line boundary
 
     def test_logging_never_raises(self):
         with mock.patch("swarm.safefs.dir_fd", side_effect=OSError("no dir")):
-            drive_hooks.log_receipt_failure("x")
+            drivegate.log_receipt_failure("x")
 
 
 class CodexReceipts(DriveCase):
@@ -805,7 +886,7 @@ class CodexReceipts(DriveCase):
                    "hook_event_name": "PostToolUse", "tool_name": "Bash",
                    "tool_input": {"command": f"swarm done --job J --artifact {ART} --summary x"},
                    "tool_response": f"posted #{rid}\n{rec('done', rid)}\n"}
-        self.assertTrue(drive_hooks.post_tool(self.cfg, payload, hosts.get("codex")))
+        self.assertTrue(drivegate.post_tool(self.cfg, payload, hosts.get("codex")))
         self.assertEqual(self.receipt("done", rid).seat, "eng-a")
 
     def test_codex_done_through_the_hook_entry_point(self):
@@ -838,12 +919,14 @@ class CodexReceipts(DriveCase):
 class PerCallCost(DriveCase):
     def test_a_command_that_is_not_swarm_never_opens_the_board(self):
         sid, _ = self.launch_seat("eng-a")
-        with mock.patch.object(drive_hooks, "_open_board", side_effect=AssertionError("opened the board")):
+        with mock.patch.object(drivegate, "_open_board", side_effect=AssertionError("opened the board")):
             self.assertFalse(self.post(sid, "ls -la", rec("done", 3)))
             self.assertFalse(self.post(sid, "swarm status --job J", None))     # no record line
-            self.assertFalse(drive_hooks.post_tool(self.cfg, self.payload(sid, "Read", None), self.host))
+            self.assertFalse(drivegate.post_tool(self.cfg, self.payload(sid, "Read", None), self.host))
+        with mock.patch.object(drivegate, "record_calls", side_effect=AssertionError("tokenized")):
+            self.assertFalse(self.post(sid, "ls -la", rec("done", 3)))      # no `swarm` in it: not even parsed
 
     def test_a_host_without_a_drive_ledger_does_nothing(self):
-        with mock.patch.object(drive_hooks, "has_ledgers", return_value=False), \
-                mock.patch.object(drive_hooks, "_open_board", side_effect=AssertionError("opened the board")):
+        with mock.patch.object(drivegate, "has_ledgers", return_value=False), \
+                mock.patch.object(drivegate, "_open_board", side_effect=AssertionError("opened the board")):
             self.assertFalse(self.post("any", "swarm done --job J --artifact x@1234567", rec("done", 3)))

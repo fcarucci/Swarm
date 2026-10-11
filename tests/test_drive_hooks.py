@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import sys
 import time
+import unittest
 import types
 from pathlib import Path
 from unittest import mock
@@ -13,7 +15,7 @@ from unittest import mock
 from drive_hooks_support import DriveCase, REQ
 from test_hooks_cli import Env
 
-from swarm import bootstrap, drive_hooks, driveroles, enrolment, hooks, paths, shellguard
+from swarm import bootstrap, drivegate, driveroles, enrolment, fastpath, hooks, paths, shellguard
 from swarm.board.autoinit import store_key
 from swarm.supervisor import ledger, markers
 
@@ -55,6 +57,13 @@ class ReadOnlyGate(DriveCase):
         self.assertIsNone(self.pre(sid, "mcp__jira__get_issue"))
         self.assertIsNone(self.pre(sid, "Read", tool_input={"file_path": "x"}))
 
+    def test_a_judge_may_record_its_report_through_the_verdict_heredoc(self):
+        sid = self.judge()
+        cmd = ("swarm verdict --job J --artifact a@1234567 not_met --reason r --next n --details - <<'EOF'\n"
+               "# Report\nrun `git commit` and `echo x > f` and rm -rf x\nEOF")
+        self.assertIsNone(self.pre(sid, command=cmd))
+        self.assertIn("read-only", self.pre(sid, command=cmd + "\necho x > f"))
+
     def test_a_reviewer_by_receipted_role_is_read_only_and_an_engineer_is_not(self):
         rev, _ = self.launch_seat("qa-1", role="reviewer")
         eng, _ = self.launch_seat("eng-a", role="engineer")
@@ -67,14 +76,44 @@ class ReadOnlyGate(DriveCase):
         for name, kind in (("judge", "judge"), ("goal-judge", "goal"), ("ruling-judge", "ruling"),
                            ("reviewer-feat-a-1234abcd", "review")):
             sid, _ = self.launch_seat(name, role="engineer", kind=kind)     # even a mislabelled row
-            with mock.patch.object(drive_hooks, "_open_board", side_effect=AssertionError("board opened")):
+            with mock.patch.object(drivegate, "_open_board", side_effect=AssertionError("board opened")):
                 with self.subTest(seat=name):
                     self.assertIn("read-only", self.pre(sid, command="git commit -m x"))
+
+    def test_the_action_alone_makes_a_seat_read_only_and_a_judge(self):
+        """A judge, goal, ruling or review action is read-only whatever the seat is called; only the first three
+        may run `swarm verdict`."""
+        for name, kind, judge in (("x-1", "judge", True), ("x-2", "goal", True), ("x-3", "ruling", True),
+                                  ("x-4", "review", False)):
+            sid, _ = self.launch_seat(name, role="engineer", kind=kind)
+            with self.subTest(kind=kind), mock.patch.object(drivegate, "_open_board", side_effect=AssertionError("board")):
+                self.assertIn("read-only", self.pre(sid, command="git commit -m x"))
+                verdict = self.pre(sid, command="swarm verdict --job J --artifact a@1234567 met ok")
+                self.assertEqual(verdict is None, judge)
+
+    def test_a_driver_name_alone_makes_a_seat_read_only_and_a_judge(self):
+        """The driver's own seat names say what they are, whatever action the session runs."""
+        for name, judge in (("judge", True), ("goal-judge", True), ("ruling-judge", True),
+                            ("reviewer-feat-a-1234abcd", False)):
+            sid, _ = self.launch_seat(name, role="engineer", kind="wake")
+            with self.subTest(seat=name), mock.patch.object(drivegate, "_open_board", side_effect=AssertionError("board")):
+                self.assertIn("read-only", self.pre(sid, command="git commit -m x"))
+                verdict = self.pre(sid, command="swarm verdict --job J --artifact a@1234567 met ok")
+                self.assertEqual(verdict is None, judge)
+
+    def test_a_seat_named_like_a_lead_but_not_a_lead_role_may_spawn_and_one_that_is_a_lead_role_but_not_named_so_too(self):
+        """A lead needs the lead role (receipted) AND the driver's lead name."""
+        for name, role in (("boss", "engineering_lead"), ("lead", "engineer")):
+            sid, _ = self.launch_seat(name, role=role, kind="seat")
+            with self.subTest(seat=name):
+                self.assertIsNone(self.pre(sid, "Agent", tool_input={"prompt": "x", "description": "x"}))
+        sid, _ = self.launch_seat("lead~1", role="engineering_lead", kind="lead")
+        self.assertIn("lead seat", self.pre(sid, "Agent", tool_input={"prompt": "x", "description": "x"}))
 
     def test_P5_a_judge_row_rewritten_to_engineer_stays_read_only(self):
         """The role comes from the seat's receipt, never from the row a writer can change."""
         sid, _ = self.launch_seat("qa-1", role="judge", kind="seat")
-        real = drive_hooks._open_board
+        real = drivegate._open_board
 
         class Flip:
             def __init__(self, b):
@@ -86,7 +125,7 @@ class ReadOnlyGate(DriveCase):
             def seat(self, job, gen, seat):
                 s = self.b.seat(job, gen, seat)
                 return dataclasses.replace(s, role="engineer") if s else s
-        with mock.patch.object(drive_hooks, "_open_board", lambda cfg: Flip(real(cfg))):
+        with mock.patch.object(drivegate, "_open_board", lambda cfg: Flip(real(cfg))):
             self.assertIn("could not be verified", self.pre(sid, command="git commit -m x"))
             self.assertIsNone(self.pre(sid, command="git log"))
 
@@ -99,6 +138,60 @@ class ReadOnlyGate(DriveCase):
         sid, _ = self.launch_seat("eng-a")
         self.edit(lambda l: setattr(l, "intents", []))
         self.assertIn("could not be verified", self.pre(sid, command="echo x > f"))
+
+    def run_file(self):
+        from swarm.supervisor import runner
+        return runner._read_run(f"r{self.restart_id}.json", self.key)
+
+    def rewrite_run(self, **over):
+        from swarm.supervisor import runner
+        run = self.run_file()
+        run.update(over)
+        runner.write_run(run)
+
+    def test_a_run_file_that_is_not_this_sessions_does_not_name_its_seat(self):
+        """The seat comes from the supervisor's run file, checked against the marker, the job and the session."""
+        for what, over in (("another session", {"session_id": "someone-else"}), ("another job", {"job": "OTHER"}),
+                           ("a malformed run", {"limit_seconds": "soon"}), ("no launch", {"launch_id": None})):
+            sid, _ = self.launch_seat("eng-" + what.split()[-1][:3] + str(len(what)))
+            with self.subTest(what=what):
+                self.assertIsNone(self.pre(sid, command="echo x > f"))            # the run is fine: a writer
+                self.rewrite_run(**over)
+                self.assertIn("could not be verified", self.pre(sid, command="echo x > f"))
+
+    def test_a_run_of_another_job_with_a_matching_marker_name_still_names_no_seat(self):
+        sid, _ = self.launch_seat("eng-a")
+        marker = markers.resume_binding(self.cfg, sid)
+        self.assertEqual(drivegate.seat_context(self.cfg, self.key, self.payload(sid), resume=marker).seat, "eng-a")
+        self.rewrite_run(job="OTHER", marker=str(Path(self.run_file()["marker"]).with_name(
+            f"OTHER--resume-r{self.restart_id}.json")))
+        self.assertIsNone(drivegate.seat_context(self.cfg, self.key, self.payload(sid), resume=marker).seat)
+
+    def test_a_seat_session_is_not_the_run_of_another_session(self):
+        sid, _ = self.launch_seat("eng-a")
+        ctx = drivegate.seat_context(self.cfg, self.key, self.payload(sid))
+        self.assertEqual((ctx.seat, ctx.intent.launch_id), ("eng-a", "L-eng-a"))
+        self.rewrite_run(session_id="x", agent_key="y")
+        self.assertIsNone(drivegate.seat_context(self.cfg, self.key, self.payload(sid)).seat)
+
+    def test_requester_context_is_the_main_session_only(self):
+        self.assertEqual(drivegate.requester_context(self.key, self.payload(REQ), "J").kind, "requester")
+        self.assertIsNone(drivegate.requester_context(self.key, self.payload(REQ, agent_id="sub-1"), "J"))
+        self.assertIsNone(drivegate.requester_context(self.key, self.payload("other"), "J"))
+        self.assertIsNone(drivegate.requester_context(self.key, self.payload(REQ), "NOPE"))
+
+    def test_classify(self):
+        sid, _ = self.launch_seat("eng-a")
+        self.assertEqual(drivegate.classify(self.cfg, self.payload(sid)).kind, "seat")
+        self.assertEqual(drivegate.classify(self.cfg, self.payload(sid, agent_id="sub-1")).seat, "eng-a")
+        self.assertEqual(drivegate.classify(self.cfg, self.payload(REQ)).kind, "requester")
+        self.assertIsNone(drivegate.classify(self.cfg, self.payload(REQ, agent_id="sub-1")))
+        self.assertIsNone(drivegate.classify(self.cfg, self.payload("stranger")))
+        self.assertIsNone(drivegate.classify(self.cfg, {"tool_name": "Bash"}))
+        enrolment.write(self.key, job="J", agent_key="sub-9", harness="claude", session_id="w", cwd=str(self.work))
+        self.assertEqual(drivegate.classify(self.cfg, self.payload("w", agent_id="sub-9")).kind, "enrolled")
+        with mock.patch.object(drivegate, "has_ledgers", return_value=False):
+            self.assertIsNone(drivegate.classify(self.cfg, self.payload(sid)))
 
     def test_a_removed_marker_leaves_the_session_strict_through_its_enrolment(self):
         sid, _ = self.launch_seat("judge", role="judge", kind="judge")
@@ -135,6 +228,17 @@ class EveryCall(DriveCase):
                         tool_input={"command": "echo x > f"})
         self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
 
+    def test_a_denied_call_leaves_no_tool_running(self):
+        """A denied call gets no PostToolUse: it must not have been marked as running a tool either."""
+        sid, _ = self.launch_seat("judge", role="judge", kind="judge")
+        out = self.hook("turn", agent_id=None, session=sid, cwd=str(self.work), tool_name="Bash",
+                        tool_input={"command": "git commit -am x"})
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertIsNone(self.agent(sid).current_tool)
+        self.hook("turn", agent_id=None, session=sid, cwd=str(self.work), tool_name="Bash",
+                  tool_input={"command": "git log"})
+        self.assertEqual(self.agent(sid).current_tool, "Bash")      # an allowed call is marked as usual
+
     def test_subagent_of_a_judge_inherits_its_restrictions(self):
         sid, _ = self.launch_seat("judge", role="judge", kind="judge")
         for cmd in ("echo x > f", "git commit -am x"):
@@ -163,6 +267,68 @@ class EveryCall(DriveCase):
         self.assertIn("target branch", self.pre("whoever", command="git push origin HEAD:main", agent_id="sub-9"))
         self.assertIn("could not be verified", self.pre("whoever", command="echo x > f", agent_id="sub-9"))
         self.assertIsNone(self.pre("whoever", command="git status", agent_id="sub-9"))
+
+
+@unittest.skipUnless(sys.platform.startswith("linux"), "the shell fast path uses Linux /proc/uptime")
+class NoFastPathLease(DriveCase):
+    """bin/swarm-hook serves a leased session's next calls without Python: no gate, no receipts. A session of a
+    drive job (a seat, its subagents, the requester) must never hold such a lease."""
+
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.dict(os.environ, SWARM_CONFIG=str(self.config), SWARM_HOOK_FASTPATH="1",
+                            SWARM_HOOK_EVENT="turn")
+        p.start()
+        self.addCleanup(p.stop)
+        n = mock.patch.object(fastpath, "ensure_notifier")
+        n.start()
+        self.addCleanup(n.stop)
+
+    def turn(self, sid, agent_id=None, n=3):
+        for _ in range(n):
+            self.hook("turn", agent_id=agent_id, session=sid, cwd=str(self.work), tool_name="Bash",
+                      tool_input={"command": "ls"})
+
+    def test_a_seat_never_holds_a_lease(self):
+        sid, _ = self.launch_seat("eng-a")
+        self.turn(sid)
+        self.assertEqual(fastpath.read("agent-session-" + sid)[:1], ["0"])
+        self.hook("done", agent_id=None, session=sid, cwd=str(self.work), tool_name="Bash",
+                  tool_input={"command": "ls"})
+        self.assertEqual(fastpath.read("agent-session-" + sid)[:1], ["0"])
+
+    def test_without_the_drive_gate_the_same_seat_would_get_one(self):
+        """The control: the lease the gate prevents is real."""
+        sid, _ = self.launch_seat("eng-a")
+        with mock.patch.object(drivegate, "classify", return_value=None):
+            self.turn(sid)
+        self.assertGreater(int(fastpath.read("agent-session-" + sid)[0]), 0)
+
+    def test_a_subagent_of_a_seat_never_holds_a_lease(self):
+        sid, _ = self.launch_seat("eng-a")
+        self.turn(sid, agent_id="sub-1")
+        self.assertEqual(fastpath.read("agent-sub-1")[:1], ["0"])
+
+    def test_the_requester_session_never_holds_a_lease(self):
+        rc, _, err = self.cli("activate", "--job", "JX", "--session", REQ)
+        self.assertEqual(rc, 0, err)
+        self.turn(REQ)
+        self.assertEqual(fastpath.read("agent-session-" + REQ)[:1], ["0"])
+        with mock.patch.object(drivegate, "classify", return_value=None):
+            self.turn(REQ)
+        self.assertGreater(int(fastpath.read("agent-session-" + REQ)[0]), 0)       # the control
+
+    def test_a_stale_lease_is_ended_when_the_session_turns_out_to_be_a_seat(self):
+        sid, _ = self.launch_seat("eng-a")
+        fastpath.write("agent-session-" + sid, [10 ** 9, "J", "x"])
+        self.turn(sid, n=1)
+        self.assertEqual(fastpath.read("agent-session-" + sid)[:1], ["0"])
+
+    def test_other_sessions_keep_their_leases(self):
+        rc, _, err = self.cli("activate", "--job", "JX", "--session", "other-sess")
+        self.assertEqual(rc, 0, err)
+        self.turn("other-sess")
+        self.assertGreater(int(fastpath.read("agent-session-other-sess")[0]), 0)
 
 
 class SpawnRefusals(DriveCase):
@@ -304,6 +470,12 @@ class PushGuard(DriveCase):
             self.assertIn("release/1", self.pre(sid, command="git push origin HEAD:release/1"))
             self.assertIn("next", self.pre(sid, command="git push origin next"))
 
+    def test_the_owner_record_is_read_only_when_a_push_needs_the_targets(self):
+        sid, _ = self.launch_seat("eng-a")
+        with mock.patch.object(drivegate, "drive_targets", side_effect=AssertionError("targets read")):
+            self.assertIsNone(self.pre(sid, command="ls -la && git status && echo hi"))
+            self.assertIn("could not decide", self.pre(sid, command="git push origin feat/a"))
+
     def test_branches_the_ledger_integrated_into_are_targets(self):
         sid, _ = self.launch_seat("eng-a")
         self.edit(lambda l: l.integrated.update({"feat/a": {"into": "feat/swarm-autonomy"}}))
@@ -345,9 +517,9 @@ class PushGuard(DriveCase):
         wt = self.work / "wt"
         wt.mkdir()
         (wt / ".git").write_text(f"gitdir: {gitdir}\n")
-        self.assertEqual(drive_hooks.head_branch(str(wt)), "feat/w")
-        self.assertEqual(drive_hooks.head_branch(str(wt / "sub")), "feat/w")
-        self.assertIsNone(drive_hooks.head_branch("/nonexistent/x"))
+        self.assertEqual(drivegate.head_branch(str(wt)), "feat/w")
+        self.assertEqual(drivegate.head_branch(str(wt / "sub")), "feat/w")
+        self.assertIsNone(drivegate.head_branch("/nonexistent/x"))
 
     def test_refusals_hold_for_every_role_and_every_seat_kind(self):
         for name, role, kind in (("eng-a", "engineer", "seat"), ("lead", "engineering_lead", "lead"),
@@ -372,17 +544,17 @@ class FailClosed(DriveCase):
             self.assertIn("could not decide", self.pre(sid, command="ls"))
 
     def test_an_error_before_the_session_is_known_lets_the_call_through(self):
-        with mock.patch.object(drive_hooks, "seat_context", side_effect=RuntimeError("boom")):
+        with mock.patch.object(drivegate, "seat_context", side_effect=RuntimeError("boom")):
             self.assertIsNone(self.pre("stranger", command="ls"))
 
     def test_an_unreadable_ledger_makes_the_seat_strict(self):
         sid, _ = self.launch_seat("eng-a")
-        with mock.patch.object(drive_hooks, "load_ledger", side_effect=ledger.LedgerBadError("bad")):
+        with mock.patch.object(drivegate, "load_ledger", side_effect=ledger.LedgerBadError("bad")):
             self.assertIn("could not be verified", self.pre(sid, command="echo x > f"))
             self.assertIsNone(self.pre(sid, command="git status"))
 
     def test_the_hook_survives_a_gate_error_on_a_non_drive_session(self):
-        with mock.patch.object(drive_hooks, "pre_tool", side_effect=RuntimeError("boom")):
+        with mock.patch.object(drivegate, "pre_tool", side_effect=RuntimeError("boom")):
             self.assertIsNone(self.hook("turn", agent_id=None, session="stranger", tool_name="Bash",
                                         tool_input={"command": "ls"}))
 
@@ -391,42 +563,55 @@ class Caching(DriveCase):
     def test_a_changed_ledger_invalidates_the_cached_one(self):
         sid, _ = self.launch_seat("eng-a")
         real = ledger.load
-        drive_hooks._LEDGER_CACHE.clear()
+        drivegate._LEDGER_CACHE.clear()
         with mock.patch.object(ledger, "load", wraps=real) as load:
             self.pre(sid, command="ls")
             self.pre(sid, command="ls")
             self.assertEqual(load.call_count, 1)
             self.edit(lambda l: setattr(l, "errors", 3))
             n = load.call_count
-            led = drive_hooks.load_ledger(self.key, "J")
+            led = drivegate.load_ledger(self.key, "J")
             self.assertEqual(led.errors, 3)
             self.assertEqual(load.call_count, n + 1)
-            drive_hooks.load_ledger(self.key, "J")
+            drivegate.load_ledger(self.key, "J")
             self.assertEqual(load.call_count, n + 1)
 
     def test_a_ledger_that_is_gone_is_forgotten(self):
-        drive_hooks.load_ledger(self.key, "J")
-        self.assertIn((self.key, "J"), drive_hooks._LEDGER_CACHE)
-        self.assertIsNone(drive_hooks.load_ledger(self.key, "NOPE"))
-        self.assertNotIn((self.key, "NOPE"), drive_hooks._LEDGER_CACHE)
+        drivegate.load_ledger(self.key, "J")
+        self.assertIn((self.key, "J"), drivegate._LEDGER_CACHE)
+        for f in (Path(os.environ["HOME"]) / ".local/share/swarm/supervisor/drive").glob("*.json"):
+            f.unlink()
+        self.assertIsNone(drivegate.load_ledger(self.key, "J"))
+        self.assertNotIn((self.key, "J"), drivegate._LEDGER_CACHE)
 
     def test_a_host_with_no_ledger_does_no_work(self):
-        with mock.patch.object(drive_hooks, "has_ledgers", return_value=False), \
-                mock.patch.object(drive_hooks, "seat_context", side_effect=AssertionError("looked")):
+        with mock.patch.object(drivegate, "has_ledgers", return_value=False), \
+                mock.patch.object(drivegate, "seat_context", side_effect=AssertionError("looked")):
             self.assertIsNone(self.pre("anyone", command="git push --force origin main"))
+
+    def test_a_host_that_never_activated_a_drive_job_never_reaches_the_gate(self):
+        import shutil
+        shutil.rmtree(Path(os.environ["HOME"]) / ".local/share/swarm/supervisor/drive")
+        with mock.patch.object(drivegate, "pre_tool", side_effect=AssertionError("gate ran")), \
+                mock.patch.object(drivegate, "post_tool", side_effect=AssertionError("gate ran")):
+            self.assertIsNone(self.hook("turn", agent_id=None, session="x", tool_name="Bash",
+                                        tool_input={"command": "git push --force origin main"}))
+            self.assertIsNone(self.hook("done", agent_id=None, session="x", tool_name="Bash",
+                                        tool_input={"command": "swarm done --job J"}))
+        self.assertFalse(self.error_log.exists() and "gate ran" in self.error_log.read_text())
 
     def test_has_ledgers_is_false_without_the_drive_directory(self):
         d = Path(os.environ["HOME"]) / ".local/share/swarm/supervisor/drive"
-        self.assertTrue(drive_hooks.has_ledgers())
+        self.assertTrue(drivegate.has_ledgers())
         for f in d.glob("*"):
             f.unlink()
-        self.assertFalse(drive_hooks.has_ledgers())
+        self.assertFalse(drivegate.has_ledgers())
         d.rmdir()
-        self.assertFalse(drive_hooks.has_ledgers())
+        self.assertFalse(drivegate.has_ledgers())
 
     def test_reads_by_a_writer_seat_need_neither_the_board_nor_the_ledger_intents(self):
         sid, _ = self.launch_seat("eng-a")
-        with mock.patch.object(drive_hooks, "_open_board", side_effect=AssertionError("board opened")):
+        with mock.patch.object(drivegate, "_open_board", side_effect=AssertionError("board opened")):
             self.assertIsNone(self.pre(sid, command="git log"))
             self.assertIsNone(self.pre(sid, "Read", tool_input={"file_path": "x"}))
 
@@ -442,30 +627,30 @@ class Kick(Env):
     def test_kick_debounced(self):
         calls = []
         with mock.patch("subprocess.run", side_effect=lambda *a, **k: calls.append(a) or mock.Mock(returncode=0)):
-            self.assertTrue(drive_hooks.kick(now=lambda: 100.0))
-            self.assertFalse(drive_hooks.kick(now=lambda: 110.0))
-            self.assertTrue(drive_hooks.kick(now=lambda: 121.0))
+            self.assertTrue(drivegate.kick(now=lambda: 100.0))
+            self.assertFalse(drivegate.kick(now=lambda: 110.0))
+            self.assertTrue(drivegate.kick(now=lambda: 121.0))
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[0][0][:4], ["systemctl", "--user", "start", "--no-block"])
 
     def test_kick_never_raises(self):
         with mock.patch("subprocess.run", side_effect=OSError("no systemctl")):
-            self.assertFalse(drive_hooks.kick(now=lambda: 500.0))
+            self.assertFalse(drivegate.kick(now=lambda: 500.0))
 
     def test_P8_a_garbage_stamp_heals_itself(self):
         d = private_host_dir()
         for junk in ("not-a-number", "nan", "inf", "", "1e999999"):
             (d / "kick.stamp").write_text(junk)
             with self.subTest(stamp=junk), mock.patch("subprocess.run") as run:
-                self.assertTrue(drive_hooks.kick(now=lambda: 10_000.0))
-                self.assertFalse(drive_hooks.kick(now=lambda: 10_001.0))     # rewritten: debounced again
+                self.assertTrue(drivegate.kick(now=lambda: 10_000.0))
+                self.assertFalse(drivegate.kick(now=lambda: 10_001.0))     # rewritten: debounced again
                 self.assertEqual(run.call_count, 1)
 
     def test_a_stamp_from_the_future_does_not_suppress_kicks(self):
         d = private_host_dir()
         (d / "kick.stamp").write_text("99999999")
         with mock.patch("subprocess.run"):
-            self.assertTrue(drive_hooks.kick(now=lambda: 100.0))
+            self.assertTrue(drivegate.kick(now=lambda: 100.0))
 
 
 class DoctorReceipts(Env):
@@ -496,6 +681,10 @@ class DoctorReceipts(Env):
             out = bootstrap.doctor(config=self.config)
         chk.assert_called()
         self.assertIn("marker", out)
+
+    def test_the_partial_first_line_of_a_cut_tail_is_not_a_failure(self):
+        self.write("1000 " + "9" * 70000 + "\n")          # the tail starts inside a run of digits (a huge "time")
+        self.assertEqual(bootstrap._receipt_failures_check(), [])
 
     def test_the_log_may_not_end_in_a_newline_or_hold_garbage(self):
         self.write("garbage\n\n" + f"{time.time():.0f} J person id=1 rev=1: OSError: x")
@@ -547,8 +736,14 @@ class RoleRules(DriveCase):
         self.assertFalse(driveroles.seat_name_is_read_only("my-judge"))
         self.assertFalse(driveroles.seat_name_is_read_only("integrator-a-1"))
         self.assertEqual(driveroles.action_kind("gen2|review|rev|feat/a|1|7"), "review")
+        self.assertIsNone(driveroles.action_kind("2|review|rev|feat/a|1|7"))
+        self.assertIsNone(driveroles.action_kind("driver|authorize|lead"))
         self.assertIsNone(driveroles.action_kind("requester:seat"))
         self.assertIsNone(driveroles.action_kind(None))
+
+    def test_read_only_claude_launches_disallow_mcp_tools(self):
+        from swarm.supervisor import launch
+        self.assertEqual(launch.READ_ONLY_CLAUDE_DISALLOWED, "Edit,Write,NotebookEdit,MultiEdit,mcp__*")
 
     def test_codex_judges_and_reviewers_run_on_claude(self):
         self.assertEqual(driveroles.effective_harness("judge", "codex")[0], "claude")

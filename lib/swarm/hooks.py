@@ -2232,18 +2232,31 @@ def _unchecked_verifier_write(payload: dict, agent_id: str) -> bool:
 
 
 
-# --- drive jobs (spec 3.4, 3.11, 4.0, 4.5): the logic is in swarm.drive_hooks --------------------------------
+# --- drive jobs (spec 3.4, 3.11, 4.0, 4.5): the logic is in swarm.drivegate --------------------------------
 
 def _drive_event(event: str, cfg: dict, payload: dict, resume: dict | None) -> bool:
     """The drive gate of PreToolUse (every call of every session, before anything else a hook does: a join, a
     first call and a seat of an unbound job included) and the receipts of PostToolUse. True when the call was
-    refused (the denial is written). The payload's own agent_id is what tells a main session from a subagent."""
+    refused (the denial is written). The payload's own agent_id is what tells a main session from a subagent.
+    A session of a drive job (a seat, its subagents, the requester) never holds a fast-path lease: the shell
+    entry would serve its next calls without Python, and with them the gate and the receipts."""
+    from swarm import paths
+    if not (paths.share_dir() / "supervisor" / "drive").is_dir():
+        return False   # no drive job was ever activated on this host: nothing below applies (and nothing is imported)
+    ctx = None
     try:
-        from swarm import drive_hooks
+        from swarm import drivegate
+        host = current_host()
+        try:
+            ctx = drivegate.classify(cfg, payload, resume, _resume_binding)
+        except Exception as exc:
+            _log_error("drive classify", str(payload.get("agent_id") or payload.get("session_id")), exc)
+        if ctx is not None:
+            _no_lease(payload)
         if event == "done":
-            drive_hooks.post_tool(cfg, payload, current_host(), resume=resume, resume_lookup=_resume_binding)
+            drivegate.post_tool(cfg, payload, host, resume=resume, resume_lookup=_resume_binding)
             return False
-        why = drive_hooks.pre_tool(cfg, payload, current_host(), resume=resume, resume_lookup=_resume_binding)
+        why = drivegate.pre_tool(cfg, payload, host, resume=resume, resume_lookup=_resume_binding, ctx=ctx)
     except Exception as exc:   # never break the agent (a known drive seat's errors are refused inside pre_tool)
         _log_error("drive", str(payload.get("agent_id") or payload.get("session_id")), exc)
         return False
@@ -2252,3 +2265,15 @@ def _drive_event(event: str, cfg: dict, payload: dict, resume: dict | None) -> b
     _deny(f"[swarm] Refused in a drive job: {why}. Land work with `swarm land`; ask the lead for a seat "
           f"with `swarm seat request`.")
     return True
+
+
+def _no_lease(payload: dict) -> None:
+    """End this session's fast-path lease and issue no new one (see _drive_event). Never raises."""
+    try:
+        from swarm import fastpath
+        fastpath.invalidate(payload)
+    except Exception as exc:
+        _log_error("drive lease", str(payload.get("agent_id") or payload.get("session_id")), exc)
+    lease = _CURRENT.get("lease")
+    if lease:
+        lease.enabled = False   # finish() writes nothing more: the invalidation above stands
