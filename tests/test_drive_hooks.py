@@ -18,6 +18,7 @@ from swarm.board.autoinit import store_key
 from swarm.supervisor import drive_authz, ledger
 
 ISO = "2026-10-10T00:00:00+00:00"
+ABS_CWD = os.path.abspath(os.path.join(os.sep, "w"))   # absolute and normalised on every platform
 LEAD_KEY = "lead-key"
 SEAT_KEY = "eng-key"
 
@@ -64,7 +65,7 @@ class DriveCase(Env):
 
     def bind(self, agent_key: str, session: str, job: str = "J"):
         enrolment.write(self.key, job=job, agent_key=agent_key, harness="claude", session_id=session,
-                        cwd="/w")
+                        cwd=ABS_CWD)
 
     def run_post(self, command: str, record: str | None, *, exit_code: int = 0, sid="s-lead",
                  agent: str | None = None, bind: dict | None = None):
