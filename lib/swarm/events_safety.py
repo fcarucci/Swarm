@@ -76,19 +76,42 @@ def _orchestrators(board, job: str, roles) -> list:
     return [r for r in board.roster(job) if r.active and (r.role or "").lower() in roles]
 
 
-def is_drive(board, job: str) -> bool:
-    """A drive job (its board claim): nobody is expected to wait for it, and every model session of it is a
-    seat attempt with a reservation (spec 3.2, 3.13)."""
+def drive_ledgers(cfg: dict) -> dict:
+    """job -> the unfinished host-private ledger of every drive job owned by this host. The board's
+    `drive.enabled` flag is board-writable and decides nothing here (spec 4.0): a job is a drive job for the
+    watchdog only when this host holds its ledger. {} when there is no ledger directory or it cannot be read."""
+    import os
+    from swarm.board.autoinit import store_key
+    from swarm.supervisor import ledger, settings
     try:
-        return (board.job_data(job) or {}).get("drive.enabled") == "1"
+        if not os.path.lexists(settings.private_dir() / ledger.SUBDIR):
+            return {}
+        return {e.job: e for e in ledger.unfinished(store_key(cfg)) if isinstance(e, ledger.Ledger)}
     except Exception:
-        return False
+        return {}
 
 
-def check_job(board, s: dict, js, now: _dt.datetime) -> list[Problem]:
+def driver_stale(led, cfg: dict, now: _dt.datetime) -> bool:
+    """The driver has not completed a pass over this ledger for more than two timer periods."""
+    from swarm.supervisor import settings
+    try:
+        last = led.last_pass or led.activated_at
+        t = _aware(_dt.datetime.fromisoformat(last))
+        return (now - t).total_seconds() > 2 * 60 * float(settings.settings(cfg)["timer_minutes"])
+    except Exception:
+        return True
+
+
+def check_job(board, s: dict, js, now: _dt.datetime, drive=None, cfg=None) -> list[Problem]:
+    """`drive`: the drive ledgers of this host (drive_ledgers). A drive job gets no waiter-stale, unacked, unread or
+    stalled alerts (nobody waits for it; the driver raises DRIVER-STALLED), but one outside check: its driver
+    has not passed for more than two timer periods."""
     job, out = js.job, []
-    if is_drive(board, job):
-        return []     # the driver raises DRIVER-STALLED itself; waiter-stale, unacked, unread and stalled do not apply
+    if drive and job in drive:
+        if cfg is not None and driver_stale(drive[job], cfg, now):
+            out.append(Problem(job, "driver-stalled", "the driver has not passed over this drive job for more "
+                               "than two timer periods (is the supervisor timer running?)"))
+        return out
     pending = _pending(board, job)
     old = [e for e in pending if getattr(e, "to", None) in (None, "") or str(e.to).lstrip("@") in
            {str(r).lower() for r in s["orchestrator_roles"]} | {"pm"}]
@@ -152,9 +175,16 @@ def check(board, cfg: dict, now=None, *, listener_up=None, health=None) -> list[
             problems.append(Problem(None, "listener-down", "the events listener is not answering"))
     if s["enabled"]:
         problems += helper_problems(health, n)
+    drive = drive_ledgers(cfg)
+    seen = set()
     for js in board.jobs(False):
+        seen.add(js.job)
         if js.status == "active":
-            problems += check_job(board, s, js, n)
+            problems += check_job(board, s, js, n, drive, cfg)
+    for job in sorted(set(drive) - seen):    # a paused drive job is not in the active list: still watched
+        js = board.job_status(job)
+        if js is not None and js.status == "paused":
+            problems += check_job(board, s, js, n, drive, cfg)
     return problems
 
 
@@ -208,7 +238,7 @@ def report(board, cfg: dict, problems: list[Problem], now=None, run=subprocess.r
     for job in sorted(jobs):
         mine = [p for p in problems if p.job in (job, None)]
         text = "SWARM-ALERT " + "; ".join(f"{p.code}: {p.text}" for p in mine)
-        line = None if is_drive(board, job) else triage(board, cfg, job, mine, run=run)   # no model call outside a seat
+        line = None if job in drive_ledgers(cfg) else triage(board, cfg, job, mine, run=run)   # no model call outside a seat
         if line:
             text = f"SWARM-ALERT {line} [{', '.join(p.code for p in mine)}]"
         text = text[:events_listener.TEXT_MAX]
