@@ -206,8 +206,9 @@ class ShellDeliveryTests(Env):
         (venv/'bin/python').symlink_to(__import__('sys').executable)
         self.env=dict(os.environ,SWARM_VENV=str(venv))
 
-    def shell(self,event='turn',quiet=False):
-        payload=json.dumps({'agent_id':'agent-1','session_id':'sess-1','tool_name':'Bash','tool_input':{}})
+    def shell(self,event='turn',quiet=False,command=None):
+        tool_input={'command':command} if command else {}
+        payload=json.dumps({'agent_id':'agent-1','session_id':'sess-1','tool_name':'Bash','tool_input':tool_input})
         env={**self.env,'PATH':'/nonexistent'} if quiet else self.env
         result=subprocess.run([str(ROOT/'bin/swarm-hook'),'--host','claude',event],
             input=payload,text=True,capture_output=True,env=env,timeout=15)
@@ -230,6 +231,18 @@ class ShellDeliveryTests(Env):
         self.shell('stop')
         self.assertEqual(self.agent('agent-1').status,'completed')
         self.assertEqual(fastpath.read('agent-agent-1')[0],'0')
+
+    def test_a_drive_control_command_always_reaches_the_python_hook(self):
+        """A fresh lease never serves `swarm halt|seat|goal-ready|drive`: the Python hook writes the caller's
+        grant (swarm.person), which the CLI needs."""
+        from swarm import person
+        from swarm.board.autoinit import store_key
+        self.shell()
+        self.assertEqual(self.shell(quiet=True).stdout, '')   # the lease serves an ordinary call
+        self.shell(command='swarm halt --job J')
+        person.forget()
+        self.assertEqual(person.caller(store_key(self.cfg), ['halt', '--job', 'J']),
+                         person.Caller('sess-1', 'agent-1'))
 
     def test_stale_notifier_forces_python_even_with_a_fresh_lease(self):
         self.shell()
