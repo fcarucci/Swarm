@@ -264,11 +264,14 @@ class GateDriveQuestions(QuestionEnv):
         (drive_dir / name).write_text("{ not a ledger")
 
     def test_bad_ledger_gates_the_job_as_a_drive_job(self):
-        # A planted or unreadable ledger fails closed: the job is held as a drive job, so the plain
-        # job-level heuristic never applies to it.
+        # A planted or unreadable ledger fails closed: the job is a drive job, so the plain job-level
+        # heuristic never applies to it, and the coordinator is HELD (never released) by the bad ledger.
         self.b.post("K", self.kasker, "ok?", "human")
         self.write_bad_ledger("K")
         self.assertFalse(orphans.human_question(self.b, self.b.job_status("K"), self.h.cfg))
+        gate = orphans.drive_gate(self.b, self.h.cfg, "K")
+        self.assertIsNotNone(gate, "a bad ledger must classify the job as a drive job")
+        self.assertIn("lead", gate)
 
     def test_bad_ledger_holds_the_asking_seat_and_the_coordinator(self):
         # Real questions carry the ledger's generation (1+). An unreadable ledger must still hold them.
