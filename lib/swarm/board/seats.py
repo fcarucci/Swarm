@@ -65,6 +65,8 @@ def normalise_lock_paths(locks, lock_paths) -> dict:
             if not isinstance(given, str) or not os.path.isabs(given):
                 raise ValueError(f"worktree lock {key} needs an absolute root path")
             root = os.path.normpath(given).replace(os.sep, "/")
+            if root.startswith("//"):   # POSIX keeps a leading // distinct from /: no second spelling of a root
+                raise ValueError(f"worktree lock {key}: a root must not start with //")
             if key != "wt:" + hashlib.sha256(root.encode()).hexdigest():
                 raise ValueError(f"worktree lock {key} does not name the root {root}")
             roots[key] = root

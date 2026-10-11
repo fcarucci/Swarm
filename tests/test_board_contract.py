@@ -2536,6 +2536,15 @@ class DriveClaims(DriveHelpers):
                                      paths={self.wt("/w/repo/sub"): self.root("/w/repo/sub")}))
         self.assertEqual(self.b.seat("J", 1, "c").state, "requested")
 
+    def test_a_worktree_root_with_a_leading_double_slash_is_refused(self):
+        # POSIX normpath keeps //w/repo distinct from /w/repo: the key is spelled out, not derived
+        self.goal_job()
+        a = self.seat("J", "a")
+        key = "wt:" + hashlib.sha256(b"//w/repo").hexdigest()
+        with self.assertRaises(ValueError):
+            self.claim(a, locks=[key], paths={key: "//w/repo"})
+        self.assertEqual(self.b.seat("J", 1, "a").state, "requested")
+
     def test_the_same_checkout_is_claimed_once(self):
         self.goal_job()
         a, c = self.seat("J", "a"), self.seat("J", "c")
