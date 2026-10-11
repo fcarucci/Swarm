@@ -35,6 +35,10 @@ class FakeExec:
         self.launched = []
         self.ruling_noted = 0
 
+    @staticmethod
+    def seat_name(kind, group=None):
+        return f"{kind}-" + (group or "").replace("/", "-")
+
     def reconcile(self, board, cfg, led, now, deadline):
         self.calls.append(("reconcile", led.job))
 
@@ -67,7 +71,7 @@ class FakeSnapshot:
         self.reads.append(job)
         if job in self.fail_for:
             raise RuntimeError("snapshot broke")
-        return SimpleNamespace(job=job, goal_verdict=None, ledger=led)
+        return SimpleNamespace(job=job, goal_verdict=None, ledger=led, verdicts={})
 
     def drive_cfg(self, board_key, job, cfg):
         if self.config_error:
@@ -387,6 +391,122 @@ class IsolationTests(PassCase):
         self.assertIsNotNone(self.load().ruling_due_at)
 
 
+class FakeLand:
+    """Task 11b's driver_land as the pass calls it."""
+
+    def __init__(self):
+        self.envs, self.pending, self.requests = [], False, []
+        self.slug_of = []
+
+    def repo_slug(self, url):
+        self.slug_of.append(url)
+        return "o/r"
+
+    def ci_status_cli(self, repo):
+        self.repo = repo
+        return lambda sha: "green"
+
+    def run(self, board, cfg, env, job):
+        self.envs.append(env)
+        return [(r, SimpleNamespace(pending=self.pending)) for r in self.requests]
+
+
+class LandTests(PassCase):
+    def setUp(self):
+        super().setUp()
+        self.land = FakeLand()
+        self.mods.land = self.land
+        self.order = []
+
+    def request(self, branch="feat/a"):
+        return SimpleNamespace(id=5, artifact=f"{branch}@" + "a" * 40)
+
+    def test_env_comes_from_the_owner_record_the_ledger_and_the_snapshot(self):
+        led = self.job()
+        led.activation_heads = {"https://x/r.git": "b" * 40}
+        owner = SimpleNamespace(owner={"remotes": {"origin": "https://github.com/o/r.git"}, "target_branch": "dev",
+                                       "config_dirs": {"https://github.com/o/r.git": "/gh"}})
+        verdicts = {"a": SimpleNamespace(verdict="met", artifact="feat/a@" + "c" * 40),
+                    "b": SimpleNamespace(verdict="not_met", artifact="feat/b@" + "d" * 40)}
+        env = driver._land_env(self.cfg, led, owner, SimpleNamespace(verdicts=verdicts), print,
+                               time.monotonic() + 30, self.mods)
+        self.assertEqual((env.target, env.owner["remotes"], env.judged()), ("dev", owner.owner["remotes"],
+                                                                              {"c" * 40}))
+        self.assertIs(env.led, led)
+        self.assertEqual(self.land.slug_of, ["https://github.com/o/r.git"])
+        self.assertEqual(self.land.repo, "o/r")
+        self.assertEqual(env.ci_status("x"), "green")
+
+    def test_left_is_the_remaining_job_slot(self):
+        import dataclasses
+        from swarm import land as real
+        led = self.job()
+        if "left" not in {f.name for f in dataclasses.fields(real.LandEnv)}:
+            self.skipTest("this build's LandEnv has no `left` yet; the keyword is passed when it does")
+        owner = SimpleNamespace(owner={"remotes": {}})
+        env = driver._land_env(self.cfg, led, owner, SimpleNamespace(verdicts={}), print,
+                               time.monotonic() + 12, self.mods)
+        self.assertTrue(0 < env.left <= 12)
+
+    def test_unknown_env_fields_are_left_out_not_fatal(self):
+        led = self.job()
+        owner = SimpleNamespace(owner={"remotes": {}})
+        env = driver._land_env(self.cfg, led, owner, SimpleNamespace(verdicts={}), print, time.monotonic() + 5,
+                               self.mods)
+        self.assertEqual(env.target, "main")
+
+    def test_land_runs_once_per_pass_before_the_actions(self):
+        self.job()
+        self.actions = [self.launch_action()]
+        self.land.run = lambda *a: self.order.append("land") or []
+        self.exec.execute = lambda *a, **k: self.order.append("execute")
+        self.drive()
+        self.assertEqual(self.order, ["land", "execute"])
+
+    def test_a_finished_request_leaves_the_integrator_idle(self):
+        led = self.job()
+        name = self.mods.exec.seat_name("integrator", "feat/a")
+        s = self.board.request_seat("J", 1, name, role="integrator", harness="claude", model="haiku",
+                                    workdir="/w", brief_path="/w/B.md", requested_by="lead")
+        row = self.board.claim_drive_launch(job="J", generation=1, action_id="gen1|integrate|-|feat/a|1|5", attempt=1,
+                                      launch_id="L1", seat_id=s.id, seat_revision=s.revision, harness="claude",
+                                      reserve_usd=1.0, reserve_minutes=5, locks=[], lock_seconds=600,
+                                      max_host_running=4)
+        self.assertEqual(self.board.seat("J", 1, name).state, "running")
+        self.land.requests = [self.request()]
+        self.drive()
+        self.assertEqual(self.board.seat("J", 1, name).state, "running")      # its session is still open
+        self.board.finish_restart(row.id, "completed")                         # the session ended
+        self.drive()
+        self.assertEqual(self.board.seat("J", 1, name).state, "idle")
+
+    def test_a_pending_request_keeps_the_integrator_and_counts(self):
+        self.job()
+        self.land.requests, self.land.pending = [self.request()], True
+        self.drive()
+        self.assertEqual(self.load().watermarks[driver.LAND_PENDING_KEY], 1)
+
+    def test_n_pending_passes_make_a_ruling_due_and_one_clean_pass_resets(self):
+        self.job()
+        self.land.requests, self.land.pending = [self.request()], True
+        n = driver.LAND_PENDING_PASSES
+        for _ in range(n - 1):
+            self.drive()
+        self.assertIsNone(self.load().ruling_due_at)
+        self.drive()
+        self.assertIsNotNone(self.load().ruling_due_at)
+        self.land.pending = False
+        self.drive()
+        self.assertNotIn(driver.LAND_PENDING_KEY, self.load().watermarks)
+
+    def test_without_the_land_module_the_pass_goes_on(self):
+        self.job()
+        self.mods.land = None
+        self.actions = [self.launch_action()]
+        self.drive()
+        self.assertEqual(len(self.exec.launched), 1)
+
+
 class StallTests(PassCase):
     NOBODY = dm.Action(kind="nothing", action_id="gen1|nothing|-|-|0|-", seat=None, prompt_kind=None, reason="x")
 
@@ -572,6 +692,27 @@ class TamperTests(PassCase):
         self.board.set_job_data("J", "drive.enabled", None)
         self.assert_tamper_halts("drive flag cleared")
         self.assertEqual(self.board.job_data("J").get("drive.enabled"), "1")
+
+    def test_a_valid_requester_receipt_does_not_cancel_a_tampered_open_job(self):
+        self.job()
+        self.requester_deactivate_receipt()                                    # a fully valid receipt
+        self.board.set_job_supervise("J", False)                               # tampered, but not closed
+        with mock.patch.object(life, "cancel_job", side_effect=AssertionError("not closed"), create=True):
+            self.drive()
+        self.assertTrue(self.has_post("DRIVER-TAMPER"))
+        self.assertIsNone(self.load().terminal)
+
+    def test_a_close_of_the_wrong_status_in_the_window_is_tamper_for_every_verdict(self):
+        for verdict, wrong in (("met", "failed"), ("unreachable", "completed")):
+            with self.subTest(verdict=verdict):
+                name = "W" + verdict
+                led = self.job(name)
+                life.begin_terminal(self.board, led, verdict, "goal", "judge", "x", self.t0, candidate="c", req="r")
+                led.watermarks[driver.CLOSE_WINDOW_KEY] = 1
+                led.save()
+                self.board.close_job(name, wrong, "x", forced=True, closed_by=life.CLOSED_BY)
+                self.drive()
+                self.assertTrue(self.has_post("DRIVER-TAMPER", name))
 
     def test_a_receipt_does_not_excuse_tamper_on_an_open_job(self):
         self.job()
@@ -784,7 +925,7 @@ class StepOrderTests(PassCase):
     def test_close_action_carries_the_goal_verdict_into_the_intent(self):
         self.job()
         gv = SimpleNamespace(verdict="met", scope="goal", by="judge", candidate="c" * 40, req="r" * 16)
-        self.snap.read = lambda board, led, job, *, cfg, now: SimpleNamespace(job=job, goal_verdict=gv, ledger=led)
+        self.snap.read = lambda board, led, job, *, cfg, now: SimpleNamespace(job=job, goal_verdict=gv, ledger=led, verdicts={})
         self.actions = [dm.Action(kind="close", action_id="gen1|close|-|-|0|3", seat=None, prompt_kind="close",
                                   reason="met")]
         with mock.patch.object(life, "terminalize", return_value=False):
