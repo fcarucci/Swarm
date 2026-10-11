@@ -1,0 +1,547 @@
+"""The driver's snapshot reader (spec 3.2, 4.0; plan Task 7b) on the memory, file and sqlite boards.
+
+Each control record counts only with a receipt (spec 4.0): receipted vs unreceipted records, receipts of another
+generation, expired receipts, and rows whose decision fields no longer match the receipt. Verdicts and goal-ready
+are bound to their board messages; the requirements digest is checked against the ledger's pins. The ledger is a
+real Ledger value (not saved); receipts are real files under a temporary HOME of the suite sandbox."""
+from __future__ import annotations
+
+import datetime as dt
+import hashlib
+import json
+import os
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+
+import support  # noqa: F401  (puts lib/ on sys.path)
+from support import SANDBOX, FileHarness, MemoryHarness, SqliteHarness, home_env
+from swarm import receipts
+from swarm.supervisor import driver_snapshot as ds
+from swarm.supervisor.ledger import Intent, Ledger
+
+BK = "board-key"
+INC = "f" * 32
+NOW = dt.datetime(2026, 10, 10, 12, 0, tzinfo=dt.timezone.utc)
+SHA1 = "1" * 40
+SHA2 = "2" * 40
+SHA3 = "3" * 40
+PINS = {"/w/req.md": "b" * 40}
+
+
+def verdict_key(artifact: str) -> str:
+    return "pipeline.verdict." + hashlib.sha256(artifact.encode()).hexdigest()[:32]
+
+
+class SnapshotCase:
+    """Shared body; each backend's subclass sets harness_factory."""
+    harness_factory = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.h = cls.harness_factory()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.h.close()
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(dir=SANDBOX, prefix="snap-home-"))
+        env = mock.patch.dict(os.environ, home_env(self.home))
+        env.start()
+        self.addCleanup(env.stop)
+        self.h.reset()
+        self.b = self.h.board()
+        self.addCleanup(self.b.close)
+        self.b.open_job("J", None, None, None, "me", goal="G")
+        self.led = Ledger(board_key=BK, job="J", generation=1, incarnation=INC)
+
+    # ---- helpers
+    def read(self, led=None, now=NOW):
+        return ds.read(self.b, led or self.led, "J", cfg={}, now=now)
+
+    def receipt(self, kind, record_id, rev, row, *, generation=1, seat="a", expires=None):
+        """Write the receipt the hook would write for this record and row (decision fields of `row`)."""
+        r = receipts.Receipt(
+            board_key=BK, job="J", generation=generation, incarnation=INC, action_id="gen1|fix|a|-|1|-",
+            attempt=1, seat=seat, kind=kind, record_id=str(record_id), rev=rev,
+            content_sha=receipts.content_sha(kind, row), args_sha=receipts.args_sha(["swarm"]),
+            expires_at=(NOW + dt.timedelta(hours=1)).timestamp() if expires is None else expires,
+            destinations=row.get("destinations"))
+        receipts.write(BK, r)
+        return r
+
+    def done(self, artifact, *, receipted=True, generation=1):
+        msg = self.b.post("J", "lead", f"DONE {artifact}")
+        if receipted:
+            self.receipt("done", msg.id, 1, self.done_row(msg.id, artifact), generation=generation)
+        return msg.id
+
+    @staticmethod
+    def done_row(msg_id, artifact):
+        return {"kind": "done", "id": str(msg_id), "rev": 1, "artifact": artifact,
+                "sha": artifact.partition("@")[2], "group": artifact.partition("@")[0]}
+
+    def store_json(self, key, value):
+        body = json.dumps(value, sort_keys=True)
+        chunks = [body[i:i + 900] for i in range(0, len(body), 900)] or [""]
+        self.b.set_job_data("J", key, str(len(chunks)))
+        for i, chunk in enumerate(chunks):
+            self.b.set_job_data("J", f"{key}.{i}", chunk)
+
+    def verdict(self, rec, *, receipted=True, generation=1, seat="j", text=None):
+        """Post the VERDICT message of `rec` (or `text`) and, if asked, its receipt. Returns the message id."""
+        msg = self.b.post("J", "judge", text or f"VERDICT {rec['verdict']}: {rec['reason']}")
+        if receipted:
+            row = {"kind": "verdict", "id": str(msg.id), "rev": 1, "verdict": rec["verdict"],
+                   "scope": rec["scope"], "generation": rec["generation"], "candidate": rec["candidate"],
+                   "req": rec["req"]}
+            self.receipt("verdict", msg.id, 1, row, generation=generation, seat=seat)
+        return msg.id
+
+    @staticmethod
+    def record(artifact=None, *, verdict="not_met", scope="artifact", generation=1, open_count=2,
+               reason="reason", candidate=None, req=None, progress=None):
+        return dict(artifact=artifact, verdict=verdict, scope=scope, generation=generation, open=open_count,
+                    reason=reason, next_steps="next", judge="judge", at=NOW.isoformat(), progress=progress,
+                    candidate=candidate, req=req)
+
+    def artifact_verdict(self, artifact, *, receipted=True, **kw):
+        """A stored artifact verdict record (job data, no id) and its VERDICT message and receipt."""
+        rec = self.record(artifact, **kw)
+        self.store_json(verdict_key(artifact), rec)
+        return rec, self.verdict(rec, receipted=receipted, generation=rec["generation"])
+
+    @staticmethod
+    def requirements_digest(pins):
+        return hashlib.sha256("".join(f"{p}@{b}\n" for p, b in sorted(pins.items())).encode()).hexdigest()
+
+    # ---- hand-offs
+    def test_receipted_done_is_a_hand_off_attributed_to_its_seat(self):
+        mid = self.done(f"feat/a@{SHA1}")
+        handoffs = self.read().handoffs
+        self.assertEqual([(h.artifact, h.group, h.by, h.receipt_id) for h in handoffs],
+                         [(f"feat/a@{SHA1}", "feat/a", "a", mid)])
+
+    def test_unreceipted_done_is_displayed_not_used(self):
+        self.done(f"feat/a@{SHA1}", receipted=False)
+        self.assertEqual(self.read().handoffs, [])
+
+    def test_a_done_addressed_to_someone_is_not_a_hand_off(self):
+        msg = self.b.post("J", "lead", f"DONE feat/a@{SHA1}", to="other")
+        self.receipt("done", msg.id, 1, self.done_row(msg.id, f"feat/a@{SHA1}"))
+        self.assertEqual(self.read().handoffs, [])
+
+    def test_unreceipted_newer_done_does_not_hide_a_receipted_older_one(self):
+        old = self.done(f"feat/a@{SHA1}")
+        self.done(f"feat/a@{SHA2}", receipted=False)
+        self.assertEqual([(h.artifact, h.receipt_id) for h in self.read().handoffs],
+                         [(f"feat/a@{SHA1}", old)])
+
+    def test_done_receipt_of_another_generation_does_not_count(self):
+        self.done(f"feat/a@{SHA1}", generation=2)
+        self.assertEqual(self.read().handoffs, [])
+
+    def test_expired_receipt_does_not_count(self):
+        msg = self.b.post("J", "lead", f"DONE feat/a@{SHA1}")
+        self.receipt("done", msg.id, 1, self.done_row(msg.id, f"feat/a@{SHA1}"),
+                     expires=(NOW - dt.timedelta(seconds=1)).timestamp())
+        self.assertEqual(self.read().handoffs, [])
+
+    def test_receipt_whose_decision_fields_changed_does_not_count(self):
+        msg = self.b.post("J", "lead", f"DONE feat/a@{SHA1}")
+        self.receipt("done", msg.id, 1, self.done_row(msg.id, f"feat/a@{SHA2}"))   # receipted another sha
+        self.assertEqual(self.read().handoffs, [])
+
+    # ---- seats
+    def request(self, name, generation=1, **over):
+        fields = dict(role="engineer", harness="claude", model="haiku", workdir=f"/w/{name}",
+                      brief_path=f"/w/{name}/B.md", requested_by="lead")
+        fields.update(over)
+        return self.b.request_seat("J", generation, name, **fields)
+
+    def test_unreceipted_seat_request_is_not_admitted(self):
+        self.request("a")
+        self.assertEqual(self.read().seats, {})
+
+    def test_receipted_seat_request_is_admitted_as_a_seat_view(self):
+        st = self.request("a")
+        row = {"kind": "seat_request", "id": str(st.id), "rev": st.revision, "role": st.role, "model": st.model,
+               "brief": st.brief_path, "workdir": st.workdir}
+        self.receipt("seat_request", st.id, st.revision, row)
+        seats = self.read().seats
+        self.assertEqual(list(seats), ["a"])
+        self.assertEqual((seats["a"].state, seats["a"].role, seats["a"].generation), ("requested", "engineer", 1))
+
+    def test_seats_of_another_generation_are_not_read(self):
+        st = self.request("b", generation=2)
+        row = {"kind": "seat_request", "id": str(st.id), "rev": st.revision, "role": st.role, "model": st.model,
+               "brief": st.brief_path, "workdir": st.workdir}
+        self.receipt("seat_request", st.id, st.revision, row)
+        self.assertEqual(self.read().seats, {})
+
+    # ---- review
+    def review(self, artifact, outcome, *, receipted=True):
+        msg = self.b.post("J", "rev", f"REVIEW {artifact} {outcome} rep.md")
+        if receipted:
+            self.receipt("review", msg.id, 1, {"kind": "review", "id": str(msg.id), "rev": 1,
+                                               "group": artifact.partition("@")[0], "artifact": artifact,
+                                               "outcome": outcome.lower()})
+
+    def test_review_outcome_is_the_newest_receipted_one(self):
+        art = f"feat/a@{SHA1}"
+        self.review(art, "CHANGES")
+        self.review(art, "VERIFIED", receipted=False)
+        self.assertEqual(self.read().reviews, {art: "changes"})
+
+    def test_review_ordering_newer_verified_wins(self):
+        art = f"feat/a@{SHA1}"
+        self.review(art, "CHANGES")
+        self.review(art, "VERIFIED")
+        self.assertEqual(self.read().reviews, {art: "verified"})
+
+    def test_review_ordering_newer_changes_wins(self):
+        art = f"feat/a@{SHA1}"
+        self.review(art, "VERIFIED")
+        self.review(art, "CHANGES")
+        self.assertEqual(self.read().reviews, {art: "changes"})
+
+    # ---- verdicts (artifact, goal, ruling) and rounds
+    def test_artifact_verdict_counts_only_when_its_message_is_receipted(self):
+        art = f"feat/a@{SHA1}"
+        rec = self.record(art)
+        self.store_json(verdict_key(art), rec)
+        self.assertEqual(self.read().verdicts, {})                        # the record alone is not enough
+        mid = self.verdict(rec)
+        vd = self.read().verdicts[art]
+        self.assertEqual((vd.verdict, vd.scope, vd.open, vd.receipt_id), ("not_met", "artifact", 2, mid))
+
+    def test_verdict_message_without_receipt_does_not_count(self):
+        self.artifact_verdict(f"feat/a@{SHA1}", receipted=False)
+        self.assertEqual(self.read().verdicts, {})
+
+    def test_verdict_receipt_for_another_verdict_does_not_bind_the_record(self):
+        art = f"feat/a@{SHA1}"
+        rec = self.record(art, verdict="not_met")
+        self.store_json(verdict_key(art), rec)
+        # The text says not_met, but the receipt was written for a met verdict: it binds nothing.
+        self.verdict(dict(rec, verdict="met"), text=f"VERDICT not_met: {rec['reason']}")
+        self.assertEqual(self.read().verdicts, {})
+
+    def test_rounds_count_judged_artifacts_per_group_for_this_generation(self):
+        for art in (f"feat/a@{SHA1}", f"feat/a@{SHA2}", f"feat/b@{SHA3}"):
+            self.artifact_verdict(art)
+        self.artifact_verdict(f"feat/a@{SHA3}", generation=2)
+        self.assertEqual(self.read().rounds, {"feat/a": 2, "feat/b": 1})
+
+    def test_rounds_ignore_a_receipted_verdict_whose_record_names_another_generation(self):
+        rec = self.record(f"feat/a@{SHA1}", generation=2)
+        self.store_json(verdict_key(f"feat/a@{SHA1}"), rec)
+        self.verdict(rec, generation=1)
+        self.assertEqual(self.read().rounds, {})
+
+    def test_met_landed_and_withdrawn_groups_are_not_in_flight(self):
+        self.artifact_verdict(f"feat/a@{SHA1}", verdict="met", open_count=None)
+        self.artifact_verdict(f"feat/b@{SHA2}")
+        self.artifact_verdict(f"feat/c@{SHA3}")
+        led = Ledger(board_key=BK, job="J", generation=1, incarnation=INC,
+                     integrated={"feat/c": {"withdrawn": "dropped"}})
+        self.assertEqual(self.read(led).rounds, {"feat/b": 1})
+
+    def test_goal_verdict_is_bound_to_its_message_and_its_key(self):
+        rec = self.record(None, verdict="met", scope="goal", open_count=None)
+        self.store_json("drive.verdict.1.goal", rec)
+        self.assertIsNone(self.read().goal_verdict)                       # no receipt yet
+        mid = self.verdict(rec)
+        gv = self.read().goal_verdict
+        self.assertEqual((gv.verdict, gv.scope, gv.receipt_id), ("met", "goal", mid))
+
+    def test_goal_key_refuses_a_record_of_another_scope(self):
+        rec = self.record(None, verdict="met", scope="artifact", open_count=None)
+        self.store_json("drive.verdict.1.goal", rec)
+        self.verdict(rec)
+        self.assertIsNone(self.read().goal_verdict)
+
+    def test_goal_verdict_of_another_generation_is_not_read(self):
+        rec = self.record(None, verdict="met", scope="goal", generation=2, open_count=None)
+        self.store_json("drive.verdict.1.goal", rec)
+        self.verdict(rec, generation=2)
+        self.assertIsNone(self.read().goal_verdict)
+
+    # ---- integration and blocking
+    def test_finalize_blocked_after_the_newest_hand_off_is_the_blocked_id(self):
+        art = f"feat/a@{SHA1}"
+        self.done(art)
+        msg = self.b.post("J", "int", f"FINALIZE_BLOCKED {art} fix the lint")
+        self.receipt("post", msg.id, 1, {"kind": "post", "id": str(msg.id), "rev": 1, "to": None,
+                                         "body": f"FINALIZE_BLOCKED {art} fix the lint"})
+        block = self.read().integrated["feat/a"]
+        self.assertEqual((block["blocked_id"], block["blocked"]),
+                         (msg.id, f"FINALIZE_BLOCKED {art} fix the lint"))
+
+    def test_finalize_blocked_before_a_newer_hand_off_is_stale(self):
+        art = f"feat/a@{SHA1}"
+        msg = self.b.post("J", "int", f"FINALIZE_BLOCKED {art} fix the lint")
+        self.receipt("post", msg.id, 1, {"kind": "post", "id": str(msg.id), "rev": 1, "to": None,
+                                         "body": f"FINALIZE_BLOCKED {art} fix the lint"})
+        self.done(f"feat/a@{SHA2}")
+        self.assertIsNone(self.read().integrated.get("feat/a", {}).get("blocked"))
+
+    def test_unreceipted_finalize_blocked_is_ignored(self):
+        self.b.post("J", "int", f"FINALIZE_BLOCKED feat/a@{SHA1} fix")
+        self.assertEqual(self.read().integrated, {})
+
+    def test_landed_only_from_a_verified_land_receipt(self):
+        dest = {"https://example.test/r.git": {"state": "verified", "sha": SHA1}}
+        led = Ledger(board_key=BK, job="J", generation=1, incarnation=INC, integrated={
+            "feat/a": {"landed": SHA1, "land_id": 7, "land_rev": 1, "destinations": dest}})
+        self.receipt("land", 7, 1, {"destinations": dest}, seat=None)
+        self.assertEqual(self.read(led).integrated["feat/a"]["landed"], SHA1)
+        pushed = {"https://example.test/r.git": {"state": "pushed", "sha": SHA1}}
+        led2 = Ledger(board_key=BK, job="J", generation=1, incarnation=INC, integrated={
+            "feat/a": {"landed": SHA1, "land_id": 8, "land_rev": 1, "destinations": pushed}})
+        self.receipt("land", 8, 1, {"destinations": pushed}, seat=None)
+        self.assertIsNone(self.read(led2).integrated["feat/a"]["landed"])
+
+    def test_landed_needs_every_destination_verified_not_just_one(self):
+        dest = {"https://example.test/a.git": {"state": "verified", "sha": SHA1},
+                "https://example.test/b.git": {"state": "pushed", "sha": SHA1}}
+        led = Ledger(board_key=BK, job="J", generation=1, incarnation=INC, integrated={
+            "feat/a": {"landed": SHA1, "land_id": 9, "land_rev": 1, "destinations": dest}})
+        self.receipt("land", 9, 1, {"destinations": dest}, seat=None)
+        self.assertIsNone(self.read(led).integrated["feat/a"]["landed"])
+
+    def test_landed_needs_the_destination_sha_to_be_the_landed_sha(self):
+        dest = {"https://example.test/a.git": {"state": "verified", "sha": SHA2}}
+        led = Ledger(board_key=BK, job="J", generation=1, incarnation=INC, integrated={
+            "feat/a": {"landed": SHA1, "land_id": 10, "land_rev": 1, "destinations": dest}})
+        self.receipt("land", 10, 1, {"destinations": dest}, seat=None)
+        self.assertIsNone(self.read(led).integrated["feat/a"]["landed"])
+
+    # ---- questions and goal-ready
+    def test_question_counts_only_when_receipted(self):
+        until = NOW + dt.timedelta(hours=4)
+        bl = self.b.open_blocker("J", "ask", "lead", "which way?", until=until, default_value="left",
+                                 seat="a", generation=1)
+        self.assertEqual(self.read().questions, {})
+        self.receipt("ask", bl.id, 1, {"kind": "ask", "id": str(bl.id), "rev": 1, "question": "which way?",
+                                       "until": until.isoformat(), "default": "left"})
+        (q,) = self.read().questions["a"]
+        self.assertEqual((q.text, q.default, q.receipt_id, q.generation), ("which way?", "left", bl.id, 1))
+
+    def test_question_whose_blocker_names_another_generation_is_not_read(self):
+        bl = self.b.open_blocker("J", "ask", "lead", "which way?", seat="a", generation=2)
+        self.receipt("ask", bl.id, 1, {"kind": "ask", "id": str(bl.id), "rev": 1, "question": "which way?",
+                                       "until": None, "default": None}, generation=1)
+        self.assertEqual(self.read().questions, {})
+
+    def test_question_of_another_generation_is_not_read(self):
+        bl = self.b.open_blocker("J", "ask", "lead", "which way?", seat="a", generation=2)
+        self.receipt("ask", bl.id, 1, {"kind": "ask", "id": str(bl.id), "rev": 1, "question": "which way?",
+                                       "until": None, "default": None}, generation=2)
+        self.assertEqual(self.read().questions, {})
+
+    def goal_ready(self, candidate=SHA1, *, pins=PINS, req=None, receipted=True, generation=1):
+        """A GOAL-READY message as drive_cli posts it, its receipt, and the ledger's pins."""
+        self.led.pinned_requirements = dict(pins)
+        digest = req or self.requirements_digest(pins)
+        msg = self.b.post("J", "lead", f"GOAL-READY {candidate} req={digest}")
+        if receipted:
+            self.receipt("goal_ready", msg.id, 1, {"kind": "goal_ready", "id": str(msg.id), "rev": 1,
+                                                   "generation": generation, "candidate": candidate},
+                         generation=generation)
+        return msg.id
+
+    def test_goal_ready_carries_id_req_candidate_at_and_added_requirements_from_the_ledger(self):
+        mid = self.goal_ready()
+        gr = self.read().goal_ready
+        self.assertEqual(gr["id"], mid)
+        self.assertEqual(gr["req"], self.requirements_digest(PINS))
+        self.assertEqual((gr["candidate"], gr["added_requirements"]), (SHA1, ["/w/req.md@" + "b" * 40]))
+        self.assertIsInstance(gr["at"], str)
+
+    def test_goal_ready_without_its_receipt_is_ignored(self):
+        self.goal_ready(receipted=False)
+        self.assertIsNone(self.read().goal_ready)
+
+    def test_goal_ready_whose_req_is_not_the_ledger_digest_is_ignored(self):
+        self.goal_ready(req="0" * 64)
+        self.assertIsNone(self.read().goal_ready)
+
+    def test_goal_ready_without_pinned_requirements_is_ignored(self):
+        self.goal_ready(pins={})
+        self.assertIsNone(self.read().goal_ready)
+
+    def test_an_addressed_goal_ready_is_not_a_goal_ready(self):
+        self.led.pinned_requirements = dict(PINS)
+        msg = self.b.post("J", "lead", f"GOAL-READY {SHA1} req={self.requirements_digest(PINS)}", to="other")
+        self.receipt("goal_ready", msg.id, 1, {"kind": "goal_ready", "id": str(msg.id), "rev": 1,
+                                               "generation": 1, "candidate": SHA1})
+        self.assertIsNone(self.read().goal_ready)
+
+    def test_goal_ready_of_another_generation_is_ignored(self):
+        self.goal_ready(generation=2)
+        self.assertIsNone(self.read().goal_ready)
+
+    def test_goal_ready_is_read_for_the_ledgers_generation(self):
+        led2 = Ledger(board_key=BK, job="J", generation=2, incarnation=INC, pinned_requirements=dict(PINS))
+        msg = self.b.post("J", "lead", f"GOAL-READY {SHA1} req={self.requirements_digest(PINS)}")
+        self.receipt("goal_ready", msg.id, 1, {"kind": "goal_ready", "id": str(msg.id), "rev": 1,
+                                               "generation": 2, "candidate": SHA1}, generation=2)
+        self.assertEqual(self.read(led2).goal_ready["id"], msg.id)
+        self.assertIsNone(self.read(self.led).goal_ready)          # generation 1 does not see it
+
+    def test_goal_ready_takes_the_newest_bound_one(self):
+        self.goal_ready(SHA1)
+        newer = self.goal_ready(SHA2)
+        gr = self.read().goal_ready
+        self.assertEqual((gr["id"], gr["candidate"]), (newer, SHA2))
+
+    # ---- the ledger's own state
+    def test_live_seats_are_those_with_a_claiming_or_claimed_intent(self):
+        self.led.intents = [
+            Intent("L1", "gen1|seat|a|-|1|-", 1, "a", 1.0, 1.0, [], "claimed"),
+            Intent("L2", "gen1|seat|b|-|1|-", 1, "b", 1.0, 1.0, [], "claiming"),
+            Intent("L3", "gen1|seat|c|-|1|-", 1, "c", 1.0, 1.0, [], "concluded", "completed", True, 0.5),
+        ]
+        self.assertEqual(self.read().live, {"a", "b"})
+
+    def test_halted_follows_the_ledger_and_status_the_board(self):
+        self.assertFalse(self.read().halted)
+        self.assertEqual(self.read().status, "active")
+        self.led.halted = {"at": NOW.isoformat(), "by": "person"}
+        self.assertTrue(self.read().halted)
+
+    # ---- drive_cfg: the recipe comes from the owner record, and fails closed
+    @staticmethod
+    def owner(details):
+        return mock.patch("swarm.enrolment.find_job_owner", return_value=SimpleNamespace(owner=details))
+
+    @staticmethod
+    def full_owner(recipe, review_role, review_gates=None):
+        return {"recipe": recipe, "review_role": review_role, "review_gates": review_gates}
+
+    def test_drive_cfg_reads_the_recipe_from_the_owner_record(self):
+        with self.owner(self.full_owner("artifact", None, None)):
+            cfg = ds.drive_cfg(BK, "J", {"recipe": "coding", "max_rounds": 5})
+        self.assertEqual((cfg["recipe"], cfg["review_role"], cfg["review_gates"]), ("artifact", None, None))
+        self.assertEqual(cfg["max_rounds"], 5)
+
+    def test_drive_cfg_coding_recipe_keeps_its_reviewer_and_gates(self):
+        with self.owner(self.full_owner("coding", "reviewer", "haiku-strict")):
+            cfg = ds.drive_cfg(BK, "J", {})
+        self.assertEqual((cfg["recipe"], cfg["review_role"], cfg["review_gates"]),
+                         ("coding", "reviewer", "haiku-strict"))
+
+    def test_drive_cfg_never_takes_the_recipe_from_config(self):
+        with self.owner(self.full_owner("artifact", None, None)):
+            self.assertEqual(ds.drive_cfg(BK, "J", {"recipe": "coding"})["recipe"], "artifact")
+
+    def test_drive_cfg_fails_closed_without_an_owner_record(self):
+        with mock.patch("swarm.enrolment.find_job_owner", return_value=None):
+            with self.assertRaises(ds.DriveConfigError):
+                ds.drive_cfg(BK, "J", {"recipe": "coding"})
+
+    def test_drive_cfg_fails_closed_when_any_recipe_key_is_missing(self):
+        for dropped in ("recipe", "review_role", "review_gates"):
+            details = self.full_owner("coding", "reviewer", "standard")
+            del details[dropped]
+            with self.subTest(dropped=dropped), self.owner(details):
+                with self.assertRaises(ds.DriveConfigError):
+                    ds.drive_cfg(BK, "J", {})
+
+    def test_drive_cfg_fails_closed_on_an_unknown_recipe(self):
+        with self.owner(self.full_owner("haiku-only", "reviewer", "standard")):
+            with self.assertRaises(ds.DriveConfigError):
+                ds.drive_cfg(BK, "J", {})
+
+
+class WakeMapping(unittest.TestCase):
+    """_wakes on a stand-in board: the seat-to-agent mapping (departed members too), the two watermarks, the
+    receipt gate on posts, and events matched by name case-insensitively."""
+
+    class Board:
+        """`agents` maps agent key to name; `departed` is the set of keys whose agent has left."""
+        def __init__(self, agents, departed=()):
+            self._agents, self._departed = agents, set(departed)
+
+        def agents(self, job, include_departed=True):
+            return [SimpleNamespace(agent_key=k, name=n, ended_at=("gone" if k in self._departed else None))
+                    for k, n in self._agents.items() if include_departed or k not in self._departed]
+
+    class Rc:
+        def __init__(self, ok_ids):
+            self.ok_ids = set(ok_ids)
+
+        def get(self, kind, record_id, rev, row):
+            return object() if record_id in self.ok_ids else None
+
+    @staticmethod
+    def seats(**by_seat):
+        return {s: SimpleNamespace(agent_key=k) for s, k in by_seat.items()}
+
+    @staticmethod
+    def msg(id, to, text="x"):
+        return SimpleNamespace(id=id, to_agent=to, message=text)
+
+    @staticmethod
+    def ev(id, to):
+        return SimpleNamespace(id=id, to=to)
+
+    def wakes(self, *, agents, seats, msgs=(), events=(), watermarks=None, ok=None, departed=()):
+        led = SimpleNamespace(watermarks=watermarks or {})
+        ok = [m.id for m in msgs] if ok is None else ok
+        return ds._wakes(self.Board(agents, departed), "J", seats, list(msgs), list(events), led, self.Rc(ok))
+
+    def test_a_departed_members_post_wakes_its_resumable_seat(self):
+        got = self.wakes(agents={"k1": "Gone Agent"}, seats=self.seats(a="k1"),
+                         msgs=[self.msg(5, "Gone Agent")], departed=["k1"])
+        self.assertEqual(got, {"a": [5]})
+
+    def test_an_unreceipted_post_does_not_wake(self):
+        got = self.wakes(agents={"k1": "A"}, seats=self.seats(a="k1"), msgs=[self.msg(5, "A")], ok=[])
+        self.assertEqual(got, {})
+
+    def test_a_post_at_the_message_watermark_is_not_a_wake(self):
+        got = self.wakes(agents={"k1": "A"}, seats=self.seats(a="k1"),
+                         msgs=[self.msg(5, "A"), self.msg(6, "A")], watermarks={"msg:a": 5})
+        self.assertEqual(got, {"a": [6]})
+
+    def test_the_message_watermark_does_not_hide_events(self):
+        got = self.wakes(agents={"k1": "A"}, seats=self.seats(a="k1"), msgs=[self.msg(900, "A")],
+                         events=[self.ev(3, "a")], watermarks={"msg:a": 900})
+        self.assertEqual(got, {"a": [3]})
+
+    def test_the_event_watermark_does_not_hide_posts(self):
+        got = self.wakes(agents={"k1": "A"}, seats=self.seats(a="k1"), msgs=[self.msg(4, "A")],
+                         events=[self.ev(50, "a")], watermarks={"event:a": 50})
+        self.assertEqual(got, {"a": [4]})
+
+    def test_events_at_the_event_watermark_are_not_wakes(self):
+        got = self.wakes(agents={"k1": "A"}, seats=self.seats(a="k1"),
+                         events=[self.ev(50, "a"), self.ev(51, "a")], watermarks={"event:a": 50})
+        self.assertEqual(got, {"a": [51]})
+
+    def test_event_names_match_case_insensitively(self):
+        got = self.wakes(agents={"k1": "Mixed Case"}, seats=self.seats(a="k1"),
+                         events=[self.ev(7, "mixed case")])
+        self.assertEqual(got, {"a": [7]})
+
+    def test_a_seat_without_an_agent_key_gets_no_wakes(self):
+        got = self.wakes(agents={"k1": "A"}, seats={"a": SimpleNamespace(agent_key=None)},
+                         msgs=[self.msg(5, "A"), self.msg(6, None)])     # a broadcast is no one's wake
+        self.assertEqual(got, {})
+
+
+class MemorySnapshot(SnapshotCase, unittest.TestCase):
+    harness_factory = staticmethod(lambda: MemoryHarness())
+
+
+class FileSnapshot(SnapshotCase, unittest.TestCase):
+    harness_factory = staticmethod(lambda: FileHarness())
+
+
+class SqliteSnapshot(SnapshotCase, unittest.TestCase):
+    harness_factory = staticmethod(lambda: SqliteHarness())

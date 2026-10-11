@@ -46,6 +46,39 @@ def integrated(board, job: str, artifact: str) -> bool:
     return bool(board.job_data(job).get(key))
 
 
+def handoff_of(message, since: dt.datetime | None = None) -> Handoff | None:
+    """The hand-off one board message makes (a DONE post), or None. `since`: messages before it do not count.
+    Shared by latest_handoffs and the driver's snapshot reader, which must judge each message on its own."""
+    if since and message.created_at < since:
+        return None
+    text = message.message
+    if message.to_agent or not text.startswith('DONE '):
+        return None
+    first, _, summary = text.partition('\n')
+    artifact = first[5:].strip()
+    if artifact.startswith('"'):
+        try:
+            artifact, end = json.JSONDecoder().raw_decode(first[5:].strip())
+            if not isinstance(artifact, str):
+                return None
+            suffix = first[5:].strip()[end:].strip()
+            if suffix and not suffix.startswith('|'):
+                return None
+            summary = suffix[1:].strip() if suffix else summary
+        except ValueError:
+            return None
+    # Compatibility with the original DONE branch sha convention.
+    if not first[5:].strip().startswith('"'):
+        parts = artifact.split()
+        if len(parts) == 2 and branch_revision('@'.join(parts)):
+            artifact = '@'.join(parts)
+        elif len(parts) != 1:
+            return None  # multi-word refs must be JSON-quoted; prose isn't an artifact
+    if not artifact:
+        return None
+    return Handoff(artifact, summary.strip(), message.id, message.created_at, message.agent_name)
+
+
 def latest_handoffs(board, job: str, messages=None) -> list[Handoff]:
     """Newest worker hand-off for each artifact or coding branch, in board order. DONE: claims aren't hand-offs.
     `messages`: the job's Board.pipeline_messages, when the caller has them already."""
@@ -56,38 +89,13 @@ def latest_handoffs(board, job: str, messages=None) -> list[Handoff]:
     except ValueError:
         since = None
     for message in (board.pipeline_messages(job) if messages is None else messages):
-        if since and message.created_at < since:
+        handoff = handoff_of(message, since)
+        if handoff is None:
             continue
-        text = message.message
-        if message.to_agent or not text.startswith('DONE '):
-            continue
-        first, _, summary = text.partition('\n')
-        artifact = first[5:].strip()
-        if artifact.startswith('"'):
-            try:
-                artifact, end = json.JSONDecoder().raw_decode(first[5:].strip())
-                if not isinstance(artifact, str):
-                    continue
-                suffix = first[5:].strip()[end:].strip()
-                if suffix and not suffix.startswith('|'):
-                    continue
-                summary = suffix[1:].strip() if suffix else summary
-            except ValueError:
-                continue
-        # Compatibility with the original DONE branch sha convention.
-        if not first[5:].strip().startswith('"'):
-            parts = artifact.split()
-            if len(parts) == 2 and branch_revision('@'.join(parts)):
-                artifact = '@'.join(parts)
-            elif len(parts) != 1:
-                continue  # multi-word refs must be JSON-quoted; prose isn't an artifact
-        revision = branch_revision(artifact)
-        key = ('branch', revision[0]) if revision else ('artifact', artifact)
-        if artifact:
-            found[key] = Handoff(artifact, summary.strip(), message.id,
-                                     message.created_at, message.agent_name)
+        revision = branch_revision(handoff.artifact)
+        key = ('branch', revision[0]) if revision else ('artifact', handoff.artifact)
+        found[key] = handoff
     return sorted(found.values(), key=lambda item: item.id)
-
 
 def drive_job(raw: str | None) -> bool:
     """Whether a job's job-data marks it a drive job (`drive.enabled`, copied from the ledger)."""

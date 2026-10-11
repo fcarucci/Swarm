@@ -165,6 +165,6 @@ def snap(**kw: Any) -> dm.Snapshot:
     base = dict(
         job="J", generation=1, goal="g", status="active", halted=False, ledger=L(), seats={},
         live=set(), handoffs=[], reviews={}, verdicts={}, goal_verdict=None, goal_ready=None,
-        questions={}, wakes={}, integrated={}, now=T0,
+        questions={}, wakes={}, integrated={}, rounds={}, now=T0,
     )
     return dm.Snapshot(**{**base, **kw})
