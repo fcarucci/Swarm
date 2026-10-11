@@ -626,6 +626,97 @@ class FetchContinuation(LandCase):
         self.assertIn("fetch from", res.why)
 
 
+class Audit(LandCase):
+    def landed(self):
+        res = self.go()
+        self.assertTrue(res.ok, res.why)
+
+    def since(self, **kw):
+        return {self.a: self.base, self.b: self.base, **kw}
+
+    def test_clean_landing_passes_the_audit(self):
+        self.landed()
+        out = land.audit(self.env(), self.since(), self.sha)
+        self.assertEqual(out, land.AuditResult((), False))
+
+    def test_unjudged_commit_on_target_blocks_close(self):
+        self.landed()
+        extra = self.advance(self.b, "sneaky.txt")
+        out = land.audit(self.env(), self.since(), extra)
+        self.assertEqual(len(out.findings), 1)
+        self.assertIn(extra[:12], out.findings[0])
+        self.assertIn("b:", out.findings[0])
+        self.assertIn("not covered", out.findings[0])
+        self.assertFalse(out.pending)
+
+    def test_missing_judged_commit_and_rewound_target_are_findings(self):
+        self.landed()
+        self.judged = {"9" * 40}
+        out = land.audit(self.env(), self.since(), self.sha)
+        self.assertTrue(out.findings and all("missing" in f for f in out.findings), out.findings)
+        self.judged = {self.sha}
+        out = land.audit(self.env(), self.since(**{self.a: self.sha, self.b: self.sha}), self.base)
+        self.assertEqual(out.findings, ())      # since == candidate-range empty is fine
+        git(self.a, "update-ref", "refs/heads/main", self.base)    # the target is reset behind the landed sha
+        out = land.audit(self.env(), self.since(**{self.a: self.sha}), self.sha)
+        self.assertTrue(any("reset backwards" in f for f in out.findings), out.findings)
+
+    def test_a_destination_without_an_activation_head_is_a_finding(self):
+        self.landed()
+        out = land.audit(self.env(), {self.a: self.base}, self.sha)
+        self.assertEqual(len(out.findings), 1)
+        self.assertIn("no activation-time head", out.findings[0])
+
+    def test_timeouts_and_deadline_overruns_are_pending_not_findings(self):
+        self.landed()
+        real = self.factory()
+        for exc in (mirror.AuditDeadlineError("late"), mirror.MirrorTimeoutError("slow")):
+            def make(url, cred, exc=exc):
+                m = real(url, cred)
+                m.audit_target = lambda *a, **k: (_ for _ in ()).throw(exc)
+                return m
+            out = land.audit(self.env(mirror_factory=make), self.since(), self.sha)
+            self.assertEqual(out, land.AuditResult((), True), type(exc).__name__)
+
+    def test_fetch_not_finished_is_pending(self):
+        self.landed()
+        real = self.factory()
+
+        def make(url, cred):
+            m = real(url, cred)
+            m.fetch_branches = lambda b, t: ({}, list(b))
+            return m
+        out = land.audit(self.env(mirror_factory=make), self.since(), self.sha)
+        self.assertEqual(out, land.AuditResult((), True))
+
+    def test_other_mirror_errors_are_findings(self):
+        self.landed()
+        real = self.factory()
+
+        def make(url, cred):
+            m = real(url, cred)
+            m.audit_target = lambda *a, **k: (_ for _ in ()).throw(MirrorError("boom"))
+            return m
+        out = land.audit(self.env(mirror_factory=make), self.since(), self.sha)
+        self.assertEqual(len(out.findings), 2)
+        self.assertIn("could not run", out.findings[0])
+
+    def test_a_judged_branch_is_fetched_so_its_commits_are_known(self):
+        self.landed()
+        fetched = []
+        real = self.factory()
+
+        def make(url, cred):
+            m = real(url, cred)
+            inner = m.fetch_branches
+            m.fetch_branches = lambda b, t: (fetched.append(list(b)), inner(b, t))[1]
+            return m
+        out = land.audit(self.env(mirror_factory=make, judged_branches=lambda: ["judged-old"]), self.since(),
+                         self.sha)
+        self.assertEqual(out, land.AuditResult((), False))      # a deleted judged branch is not a finding
+        self.assertEqual(fetched[:4], [["main"], ["judged-old"], ["main"], ["judged-old"]])
+
+
 class SeatName(unittest.TestCase):
     def test_integrator_seat_name_shape(self):
         n = land.integrator_seat("feat/x")
