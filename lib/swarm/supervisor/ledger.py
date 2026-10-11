@@ -25,6 +25,7 @@ or junction at the name is followed there; the directory's NTFS ACLs are the pri
 safefs user. The symlink tests are POSIX-only for this reason."""
 from __future__ import annotations
 
+import datetime
 import hashlib
 import json
 import logging
@@ -388,7 +389,7 @@ def create(board_key: str, job: str, *, budgets: dict, activated_at: str, state:
 
 def archive_bad(board_key: str, job: str) -> str:
     """Move the job's bad ledger entry aside (never deleted, so `create` may start a fresh one): renamed under
-    the lock to `<name>.bad-<random>`, a name the scan does not read as a ledger, then the directory is synced.
+    the lock to `<name>.bad-<UTC stamp>-<random>`, a name the scan does not read as a ledger, then the directory is synced.
     Returns the new name. ValueError when there is no entry or it is readable; LedgerBadError where a rename
     relative to the directory is not available."""
     _check_key(board_key, job)
@@ -404,7 +405,8 @@ def archive_bad(board_key: str, job: str) -> str:
             raise ValueError(f"no ledger entry for job {job!r}")
         if os.rename not in os.supports_dir_fd:
             raise LedgerBadError("this platform cannot move a bad ledger aside; a person must do it")
-        target = f"{name[:-len('.json')]}.bad-{uuid.uuid4().hex}"
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        target = f"{name[:-len('.json')]}.bad-{stamp}-{uuid.uuid4().hex[:12]}"
         os.rename(name, target, src_dir_fd=d, dst_dir_fd=d)
         try:
             os.fsync(d)
