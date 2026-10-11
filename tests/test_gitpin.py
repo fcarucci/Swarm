@@ -84,7 +84,7 @@ REFUSED = (
     ("https://TOKEN@example.com/r.git", "credentials"),
     ("ssh://git:pw@example.com/r.git", "credentials"),
     ("ssh://h\\@evil/r", "backslash"),
-    ("https://example.com\\@evil/r", "backslash"),
+    ("https://example.com\\@evil/r", "credentials"),   # urlsplit sees userinfo first; refused either way
     ("ssh://host:99999/r", "port must be 1-65535"),
     ("ssh://host:65536/r", "port must be 1-65535"),
     ("ssh://host:0/r", "port must be 1-65535"),
