@@ -362,6 +362,8 @@ class Plan:
     recipe: str
     budgets: dict
     overrides: dict          # the job's --model overrides (the ledger keeps these, not the table)
+    review_role: str = "reviewer"
+    review_gates: str = "standard"
     description: str | None = None
 
 
@@ -403,7 +405,8 @@ def activate_drive(cfg: dict, board, plan: Plan, *, crash_after: str | None = No
         enrolment.write_job_owner(bk, job=plan.job, harness=plan.harness, session_id=plan.session,
                                   cwd=plan.workdir, roots=plan.roots, remotes=plan.remotes,
                                   credentials=plan.credentials, requirements=plan.requirements,
-                                  recipe=plan.recipe, goal=plan.goal, brief=plan.brief_path)
+                                  recipe=plan.recipe, goal=plan.goal, brief=plan.brief_path,
+                                  review_role=plan.review_role, review_gates=plan.review_gates)
     if crash_after == "owner":
         raise RuntimeError("crash after owner")
     led = ledger.load(bk, plan.job)
@@ -495,13 +498,16 @@ def build_plan(cfg: dict, args, goal: str) -> Plan:
             credentials[name] = pin
     budgets = effective_budgets(cfg, parse_budget_args(args.budget, args.max_cost_usd, args.ruling_reserve_usd))
     overrides = parse_model_args(args.model)
-    effective_models(cfg, overrides)   # validates the overrides against the allowed models
+    engineer = effective_models(cfg, overrides)["engineer"]   # validates the overrides too
+    recipe = args.recipe or "coding"
     brief = _real(args.lead_brief) if args.lead_brief else str(Path(workdir) / ".swarm" / f"lead-brief-{args.job}.md")
     harness = args.lead_harness or hosts.detect_cli_host(os.environ) or "claude"
     return Plan(job=args.job, goal=goal, session=_session(args), harness=harness, workdir=workdir,
                 brief_path=brief, roots=roots, remotes=remotes, credentials=credentials,
-                requirements=_requirements(args, goal, workdir), recipe=args.recipe or "coding",
-                budgets=budgets, overrides=overrides, description=args.description)
+                requirements=_requirements(args, goal, workdir), recipe=recipe,
+                budgets=budgets, overrides=overrides, description=args.description,
+                review_role="reviewer" if recipe == "coding" else "none",
+                review_gates="haiku-strict" if engineer == "haiku" else "standard")
 
 
 def add_activate_args(parser) -> None:

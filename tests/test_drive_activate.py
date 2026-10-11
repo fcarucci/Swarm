@@ -327,6 +327,30 @@ class DriveCli(Env):
         self.assertEqual(owner.owner["goal"], GOAL)
         self.assertEqual(owner.owner["requirements"]["goal"], da.blob_id(GOAL.encode()))
 
+    def test_owner_record_carries_the_recipe_review_keys(self):
+        rc, _, err = self.activate("--workdir", str(self.work))
+        self.assertEqual(rc, 0, err)
+        owner = enrolment.find_job_owner(da.board_key(self.cfg), "J").owner
+        self.assertEqual((owner["recipe"], owner["review_role"], owner["review_gates"]),
+                         ("coding", "reviewer", "haiku-strict"))   # the engineer defaults to haiku
+
+    def test_review_gates_standard_when_the_engineer_is_not_haiku(self):
+        rc, _, err = self.activate("--workdir", str(self.work), "--model", "engineer=sonnet")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(enrolment.find_job_owner(da.board_key(self.cfg), "J").owner["review_gates"], "standard")
+
+    def test_artifact_recipe_has_no_review_stage(self):
+        rc, _, err = self.activate("--workdir", str(self.work), "--recipe", "artifact")
+        self.assertEqual(rc, 0, err)
+        owner = enrolment.find_job_owner(da.board_key(self.cfg), "J").owner
+        self.assertEqual((owner["recipe"], owner["review_role"]), ("artifact", "none"))
+
+    def test_activation_sets_drive_enabled_on_the_board(self):
+        rc, _, err = self.activate("--workdir", str(self.work))
+        self.assertEqual(rc, 0, err)
+        with self.board() as b:
+            self.assertEqual(b.job_data("J").get("drive.enabled"), "1")
+
     def test_drive_flag_is_accepted_noop(self):
         rc, _, err = self.activate("--drive", "--workdir", str(self.work))
         self.assertEqual(rc, 0, err)
