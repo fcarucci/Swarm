@@ -573,9 +573,22 @@ def _with_person_receipt(fn):
         if not rc and _closed(cfg, args.job):
             deactivate_receipt(cfg, args, led, how)
             deactivate_record(cfg, args.job)
+            _clear_drive_claim(cfg, args.job)   # [RR1a]/6a: a closed job is not driven
         return rc
     handler._drive_record = True
     return handler
+
+
+def _clear_drive_claim(cfg: dict, job: str) -> None:
+    """Clear the board's drive claim of a job `swarm deactivate` closed (drive_activate.clear_claim). Never raises:
+    the driver's ledger-first terminalization clears it too."""
+    try:
+        from swarm import drive_activate
+        from swarm.board import open_board
+        with open_board(cfg) as board:
+            drive_activate.clear_claim(board, job)
+    except Exception:
+        pass
 
 
 def register(sub, handlers: dict, commands: dict | None = None) -> None:
