@@ -20,11 +20,18 @@ def effective_contact(last_contact: _dt.datetime, out, dead: _dt.timedelta) -> _
     return last_contact
 
 
-def stuck_reason(a, js, now: _dt.datetime, board_cfg: dict, sup: dict, out=None) -> str | None:
+def stuck_reason(a, js, now: _dt.datetime, board_cfg: dict, sup: dict, out=None, gate=None) -> str | None:
+    """`gate`: None for a plain job (its job-level wait holds every agent); for a drive job, the seats
+    with an open question, which hold only themselves (spec 3.10)."""
     if a.ended_at is not None:
         return None
-    if js.status != "active" or js.verdict in SETTLED_VERDICTS or (js.waiting_on and not str(js.waiting_on).startswith(WAITING_PREFIX)):
+    if js.status != "active" or js.verdict in SETTLED_VERDICTS:
         return None
+    if gate is None:
+        if js.waiting_on and not str(js.waiting_on).startswith(WAITING_PREFIX):
+            return None
+    elif a.name in gate:
+        return None   # a seat blocked on its own question is waiting, not stuck
     dead = _dt.timedelta(minutes=float(board_cfg["dead_minutes"]))
     silent = _dt.timedelta(minutes=float(sup["silent_minutes"]))
     contact = effective_contact(a.last_contact_at, out, dead)
@@ -36,7 +43,7 @@ def stuck_reason(a, js, now: _dt.datetime, board_cfg: dict, sup: dict, out=None)
     if a.current_tool is None and quiet > dead:
         return "dead"
     posted_recently = a.last_post_at is not None and now - a.last_post_at <= silent
-    waiting = bool(js.waiting_on) and not str(js.waiting_on).startswith(WAITING_PREFIX)
+    waiting = gate is None and bool(js.waiting_on) and not str(js.waiting_on).startswith(WAITING_PREFIX)
     if not waiting and quiet > silent and not posted_recently:
         return "silent"
     return None
@@ -101,9 +108,10 @@ def find_stuck_owned(board, cfg: dict, now=None, deadline: float | None = None) 
             break
         if not js.supervise or js.status != "active":
             continue
-        from swarm.supervisor.orphans import human_question
-        if human_question(board, js):
+        from swarm.supervisor.orphans import drive_gate, human_question
+        if human_question(board, js, cfg):
             continue
+        gate = drive_gate(board, cfg, js.job)
         now_j = now or board.now()
         active = board.agents(js.job, include_departed=False)
         posts = board.recent_messages(100, job=js.job)
@@ -114,7 +122,7 @@ def find_stuck_owned(board, cfg: dict, now=None, deadline: float | None = None) 
                     and latest[a.name].created_at >= a.joined_at
                     and (latest[a.name].message.strip().upper() == "DONE"
                          or latest[a.name].message.strip().upper().startswith("DONE "))}
-        reasons = {a.agent_key: (None if a.name in finished else stuck_reason(a, js, now_j, bcfg, sup, out))
+        reasons = {a.agent_key: (None if a.name in finished else stuck_reason(a, js, now_j, bcfg, sup, out, gate=gate))
                    for a in active}
         # orphaned: every agent dead at once plus no .seen heartbeat. An agent in
         # a timed-out tool call is a live process, so the job isn't orphaned: it stays "tool"
