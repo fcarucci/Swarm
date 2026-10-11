@@ -117,7 +117,8 @@ class Run(DriverCase):
         done = self.run_pass()
         self.assertTrue(done[0][1].pending)
         self.assertEqual(self.texts(), [])
-        self.assertEqual(self.led.watermarks.get(driver_land.WATERMARK, 0), 0)
+        self.assertLess(self.led.watermarks.get(driver_land.WATERMARK, 0), mid)
+        self.assertEqual(self.led.watermarks.get(driver_land._group_mark(GROUP), 0), 0)
         self.assertEqual(self.locks(), [])
         self.assertEqual(self.pushes, [])
         self.ci = "green"
@@ -269,6 +270,7 @@ class Recovery(DriverCase):
         self.assertEqual(self.texts(), [f"INTEGRATED {GROUP}@{self.sha}"])
         open_rows = [r for r in self.board.restarts("J") if r.ended_at is None]
         self.assertEqual(open_rows, [])
+        self.assertEqual(self.board.seat("J", 1, SEAT).state, "idle")      # the dead pass left it running
 
     def test_quiesce_exempts_inflight_land(self):
         # the journal of an interrupted landing is found by complete_all whatever else the group does
@@ -309,6 +311,93 @@ class Recovery(DriverCase):
         out = driver_land.run(Late(self.board), {}, self.env(), "J")
         self.assertTrue(out[0][1].pending and out[0][1].lease_held)
         self.assertEqual(self.head(self.b), self.base)
+
+
+class Groups(DriverCase):
+    """[S5] One group's pending request never blocks another group; each pending state has its own clock."""
+
+    def requests(self, *pairs):
+        return [land.Request(i, land.integrator_seat(g), f"{g}@{c * 40}", 1) for i, g, c in pairs]
+
+    def run_with(self, reqs, results):
+        seen = []
+
+        def fake(board, cfg, env, job, request):
+            seen.append(request.id)
+            return results.get(request.id, land.LandResult(True, "a" * 40, "landed"))
+        with mock.patch.object(land, "find_requests", lambda b, e, j, after=0: [r for r in reqs if r.id > after]), \
+                mock.patch.object(driver_land, "execute_request", fake):
+            driver_land.run(self.board, {}, self.env(), "J")
+        return seen
+
+    def test_a_pending_group_does_not_block_the_others(self):
+        reqs = self.requests((5, "a", "1"), (6, "b", "2"), (7, "a", "3"))
+        pending = {5: land.LandResult(False, None, "CI not green", pending=True)}
+        seen = self.run_with(reqs, pending)
+        self.assertEqual(seen, [5, 6])               # b went on; a's later request waits behind a's pending one
+        marks = self.led.watermarks
+        self.assertEqual(marks[driver_land._group_mark("b")], 6)
+        self.assertNotIn(driver_land._group_mark("a"), marks)
+        self.assertEqual(marks[driver_land.WATERMARK], 4)       # everything below the oldest open request is settled
+
+    def test_head_of_line(self):
+        reqs = self.requests((5, "a", "1"), (6, "b", "2"))
+        pending = {5: land.LandResult(False, None, "the integrator seat is not idle", pending=True)}
+        for _ in range(3):
+            seen = self.run_with(reqs, pending)
+            self.assertEqual(seen, [5, 6] if _ == 0 else [5])    # b settled in the first pass, a is retried
+        self.assertEqual(self.led.watermarks[driver_land._group_mark("b")], 6)
+
+    def test_the_global_mark_advances_over_settled_requests(self):
+        reqs = self.requests((5, "a", "1"), (6, "b", "2"))
+        self.run_with(reqs, {})
+        self.assertEqual(self.led.watermarks[driver_land.WATERMARK], 6)
+        self.assertEqual(self.run_with(reqs, {}), [])
+
+    def test_a_refused_request_settles_its_group_too(self):
+        reqs = self.requests((5, "a", "1"), (6, "a", "2"))
+        self.run_with(reqs, {5: land.LandResult(False, None, "no")})
+        self.assertEqual(self.led.watermarks[driver_land._group_mark("a")], 6)
+
+    def test_pending_clock_for_non_lease_holds_and_its_clearing(self):
+        self.submit()
+        self.ci = "running"
+        self.run_pass()
+        ig = self.led.integrated[GROUP]
+        self.assertEqual(ig[driver_land.PENDING_MARK], NOW.isoformat())
+        self.assertNotIn(driver_land.LEASE_MARK, ig)
+        self.run_pass(env={"now": lambda: NOW.replace(minute=30)})
+        self.assertEqual(self.led.integrated[GROUP][driver_land.PENDING_MARK], NOW.isoformat())   # kept, not restarted
+        self.ci = "green"
+        self.run_pass()
+        self.assertNotIn(driver_land.PENDING_MARK, self.led.integrated[GROUP])
+
+    def test_a_lease_hold_does_not_set_the_pending_mark_and_switching_clears_the_other(self):
+        self.led.integrated[GROUP] = {driver_land.PENDING_MARK: NOW.isoformat()}
+        self.led.save()
+        self.board.open_job("K", None, None, None, "me", goal="G")
+        self.assertIsNotNone(self.lease("K"))
+        self.submit()
+        self.run_pass()
+        ig = self.led.integrated[GROUP]
+        self.assertIn(driver_land.LEASE_MARK, ig)
+        self.assertNotIn(driver_land.PENDING_MARK, ig)
+
+
+class Renewal(DriverCase):
+    def test_leases_are_renewed_while_landing(self):
+        calls = []
+        real = type(self.board).renew_drive_locks
+
+        def spy(board, launch_id, expires_at, *, job, holder):
+            calls.append(launch_id)
+            return real(board, launch_id, expires_at, job=job, holder=holder)
+        self.submit()
+        with mock.patch.object(type(self.board), "renew_drive_locks", spy):
+            done = self.run_pass()
+        self.assertTrue(done[0][1].ok, done[0][1].why)
+        self.assertGreaterEqual(len(calls), 8)
+        self.assertEqual(len(set(calls)), 1)
 
 
 class Claims(DriverCase):

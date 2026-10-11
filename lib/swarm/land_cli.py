@@ -2,6 +2,7 @@
 host key). Kept out of cli.py (256 KiB cap). See swarm.land for what the driver then does."""
 from __future__ import annotations
 
+import os
 import sys
 
 from swarm import land
@@ -40,6 +41,14 @@ def _hosts_add(args) -> int:
         if mirror.known_host_present(path, host, port):
             print(f"{host}:{port} is already trusted")
             return 0
+        from swarm.cli import HARNESS_SESSION_VARS
+        in_session = [v for v in HARNESS_SESSION_VARS if os.environ.get(v)]
+        if in_session:
+            # An agent can open a pty and type the host name back; only a person's own shell, outside any
+            # harness session, may trust a host key. (Replace with swarm.person.require once Task 6b's gate lands.)
+            print(f"refused: this runs inside an agent session ({in_session[0]} is set); a person confirms host "
+                  f"keys from their own terminal", file=sys.stderr)
+            return 1
         if not (sys.stdin.isatty() and sys.stdout.isatty()):
             print("refused: host keys are confirmed by a person at a terminal, never by a script or an agent",
                   file=sys.stderr)

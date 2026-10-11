@@ -102,10 +102,19 @@ class LandEnv:
     judged: Callable[[], set]
     ci_status: Callable[[str], str]
     target: str = "main"
-    mirror_factory: Callable = Mirror
+    mirror_factory: Callable | None = None      # (url, credential) -> Mirror; None: Mirror with trusted_helpers
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.timezone.utc)
-    config_dir: str | None = None
+    config_dir: str | None = None               # the helper config location when the owner record pins none per destination
     delete_branch: bool = True
+    left: Callable[[], float] = lambda: 1e9     # seconds left of the job's slot in the pass; every call is capped by it
+    renew: Callable[[], None] = lambda: None    # renews the land leases (called before each network step)
+    trusted_helpers: tuple = ()                 # absolute credential-helper paths the person named ([drive] credential_helpers)
+
+    def __post_init__(self):
+        # The target branch is pinned in the owner record at activation (6a): a mid-job config edit cannot redirect a landing.
+        pinned = (self.owner or {}).get("target_branch")
+        if isinstance(pinned, str) and pinned:
+            self.target = pinned
     judged_branches: Callable[[], list] = lambda: []    # branches that carry judged SHAs (for a [F13] twin)
     say: Callable[[str], None] = lambda text: None
 
@@ -121,8 +130,9 @@ def parse_artifact(artifact) -> tuple[str, str]:
 
 
 def normalize_url(url: str) -> str:
-    """The normalised push URL a lease is keyed by: scheme and host lowercased, default port dropped,
-    userinfo dropped, one trailing slash and a `.git` suffix dropped; scp-style becomes ssh://."""
+    """The normalised push URL a lease is keyed by: `host[:port]/path`, host lowercased, the scheme (https, ssh,
+    scp-style) and the default port dropped, userinfo dropped, one trailing slash and a `.git` suffix dropped,
+    so every spelling of one repository shares one lease; a file:// URL is its path."""
     text = url.strip()
     if "://" not in text:
         m = re.fullmatch(r"(?:[^@/:]+@)?([^/:\\]{2,}):(?!//)(.*)", text)
@@ -136,7 +146,9 @@ def normalize_url(url: str) -> str:
     path = parts.path.rstrip("/")
     if path.endswith(".git"):
         path = path[:-4]
-    return f"{parts.scheme.lower()}://{host}{port}{path}"
+    if parts.scheme.lower() == "file":
+        return os.path.normpath(parts.path)
+    return f"{host}{port}{path}"            # https, http and ssh spellings of one repository share a key
 
 
 def lease_key(url: str, target: str) -> str:
@@ -150,16 +162,17 @@ def lease_keys(dests: list, target: str) -> list[str]:
 
 def credential_from_pin(pin: str | None, *, config_dir: str | None = None) -> dict:
     """The mirror's credential mapping for one owner-record pin: `helper:/abs/gh auth git-credential`,
-    `ssh-key:/abs/key`, `ssh-agent:/abs/socket`, or None for a local destination. The helper's
-    config location (GH_CONFIG_DIR) is the pinned one, else the activating user's ~/.config/gh."""
+    `ssh-key:/abs/key`, `ssh-agent:/abs/socket`, or None for a local destination. A helper needs its
+    pinned config location (GH_CONFIG_DIR): there is no fallback to the driver's own $HOME."""
     if pin is None:
         return {"kind": "none"}
     kind, _, value = pin.partition(":")
     if kind == "helper":
         if not value or not os.path.isabs(value.split(" ", 1)[0]):
             raise LandRefused("the pinned credential helper is not an absolute path")
-        return {"kind": "helper", "command": value,
-                "config_dir": config_dir or os.path.join(os.path.expanduser("~"), ".config", "gh")}
+        if not config_dir:
+            raise LandRefused("no helper config location (GH_CONFIG_DIR) is pinned for this destination")
+        return {"kind": "helper", "command": value, "config_dir": config_dir}
     if kind == "ssh-key" and _ABS_PIN.fullmatch(value):
         return {"kind": "ssh-key", "path": value}
     if kind == "ssh-agent" and _ABS_PIN.fullmatch(value):
@@ -179,7 +192,8 @@ def destinations_from_owner(owner: dict, *, config_dir: str | None = None) -> li
         if norm in seen:
             continue
         seen.add(norm)
-        out.append(Destination(name, url, credential_from_pin(creds.get(name), config_dir=config_dir)))
+        where = ((owner or {}).get("config_dirs") or {}).get(name) or config_dir
+        out.append(Destination(name, url, credential_from_pin(creds.get(name), config_dir=where)))
     if not out:
         raise LandRefused("the owner record pins no destination to land on")
     return sorted(out, key=lambda d: normalize_url(d.url))
@@ -308,7 +322,8 @@ def _twin(mirrors: dict, dests: list, target: str, sha: str, judged: set) -> boo
                 if head is None or base_j is None:
                     ok = False
                     break
-                if m.patch_ids(head, sha) != m.patch_ids(base_j, j):
+                ids = m.patch_ids(head, sha)
+                if not ids or ids != m.patch_ids(base_j, j):      # an empty range (sha already on the target) is no twin
                     ok = False
                     break
             except (MissingCommitError, UnpatchableCommitError):
@@ -330,8 +345,9 @@ def _covered(env: LandEnv, mirrors: dict, dests: list, target: str, sha: str) ->
 
 
 def _ci(env: LandEnv, sha: str) -> None:
+    budget = _budget(env, 1e9)
     try:
-        state = env.ci_status(sha)
+        state = env.ci_status(sha, budget) if getattr(env.ci_status, "takes_timeout", False) else env.ci_status(sha)
     except Exception as exc:                        # a CI host outage is a hold, never a pass
         raise LandPending(f"CI status unavailable ({type(exc).__name__})") from exc
     if state == "green":
@@ -343,11 +359,27 @@ def _ci(env: LandEnv, sha: str) -> None:
 
 # --- the landing -------------------------------------------------------------------------------
 
+def _budget(env: LandEnv, cap: float) -> float:
+    """Seconds the next network step may take: min(cap, the job's slot left). LandPending when the slot is spent
+    (the landing continues in the next pass). Renews the land leases first, so a long fetch cannot outlive them."""
+    left = env.left()
+    if left <= 0.5:
+        raise LandPending("the job's time in this pass is spent; the landing continues next pass")
+    env.renew()
+    return min(cap, left)
+
+
+def _make_mirror(env: LandEnv, d: Destination):
+    if env.mirror_factory is not None:
+        return env.mirror_factory(d.url, d.credential)
+    return Mirror(d.url, d.credential, trusted_helper_paths=env.trusted_helpers)
+
+
 def _mirrors(env: LandEnv, dests: list) -> dict:
     out = {}
     for d in dests:
         try:
-            out[d.url] = env.mirror_factory(d.url, d.credential)
+            out[d.url] = _make_mirror(env, d)
         except MirrorError as exc:
             raise LandRefused(f"destination {d.name}: {exc}") from exc
     return out
@@ -374,7 +406,7 @@ def _fetch(env: LandEnv, dests: list, mirrors: dict, branches: list) -> None:
     for d in dests:
         key = lambda b: _pending_key(d.url, b)
         try:
-            _, left = mirrors[d.url].fetch_branches(branches, FETCH_SECONDS)
+            _, left = mirrors[d.url].fetch_branches(branches, _budget(env, FETCH_SECONDS))
         except (MissingCommitError, TargetRewoundError, UnpatchableCommitError, MirrorTimeoutError):
             raise                                   # typed: execute() maps each to its own result
         except MirrorError as exc:
@@ -468,9 +500,11 @@ def _execute(board, env: LandEnv, job: str, request: Request, action_id: str, ne
             for extra in env.judged_branches():      # a twin needs the judged commits themselves
                 for d in dests:
                     try:
-                        mirrors[d.url].fetch_branches([extra], FETCH_SECONDS)
+                        _, left = mirrors[d.url].fetch_branches([extra], _budget(env, FETCH_SECONDS))
                     except MirrorError:
-                        pass
+                        continue                 # a deleted judged branch is not an error
+                    if left:                     # a slow fetch is a hold, never "no verdict covers it"
+                        raise LandPending(f"fetch of judged branch {extra} did not finish; it continues next pass")
         _covered(env, mirrors, dests, target, sha)
         _ci(env, sha)
         for d in dests:
@@ -504,13 +538,13 @@ def _execute(board, env: LandEnv, job: str, request: Request, action_id: str, ne
             if head is None or not m.is_ancestor(head, sha):
                 raise LandRefused(f"{target} on {d.name} moved: rebase {branch} onto {target}, push it and "
                                   f"hand off the new SHA (a fast-forward is impossible)")
-            m.push(sha, target, timeout=PUSH_SECONDS)
+            m.push(sha, target, timeout=_budget(env, PUSH_SECONDS))
         if entry["state"] == "intent":
             entry["state"] = "pushed"
             rev += 1
             receipts.write(led.board_key, _journal_receipt(led, request=request, action_id=action_id, rev=rev,
                                                            dests=state, now=env.now()))
-        _, left = m.fetch_branches([target], FETCH_SECONDS)
+        _, left = m.fetch_branches([target], _budget(env, FETCH_SECONDS))
         head = m.head(target)
         if left or head is None or not m.is_ancestor(sha, head):
             raise LandRefused(f"{d.name}: {target} does not contain {sha[:12]} after the push")
@@ -545,7 +579,7 @@ def _finish(board, env: LandEnv, job: str, request: Request, branch: str, sha: s
     if env.delete_branch:
         for d in dests:
             try:
-                mirrors[d.url].delete_branch(branch)
+                mirrors[d.url].delete_branch(branch, timeout=_budget(env, PUSH_SECONDS))
             except MirrorError as exc:
                 notes.append(f"{d.name}: branch {branch} not deleted ({exc})")
     for note in notes:
@@ -572,8 +606,11 @@ def land(board, env: LandEnv, job: str, artifact: str, *, caller_session: str, a
                  if s.seat == integrator_seat(branch)), None)
     if seat is None or not caller_session or seat.session_id != caller_session:
         return LandResult(False, None, f"the caller is not the integrator seat of {branch}")
-    request = Request(0, seat.seat, artifact, env.led.generation)
-    return execute(board, env, job, request, action_id=action_id or f"gen{env.led.generation}|land|-|{branch}|1|0",
+    mine = [r for r in find_requests(board, env, job) if r.artifact == artifact and r.seat == seat.seat]
+    if not mine:
+        return LandResult(False, None, "no receipted land request for this artifact from this seat: run swarm land")
+    request = mine[-1]
+    return execute(board, env, job, request, action_id=action_id or f"gen{env.led.generation}|land|-|{branch}|1|{request.id}",
                    need_leases=need_leases)
 
 
@@ -587,12 +624,14 @@ class AuditResult:
     pending: bool = False
 
 
-def audit(env: LandEnv, since: dict, candidate: str) -> AuditResult:
+def audit(env: LandEnv, since: dict | None, candidate: str) -> AuditResult:
     """Audit every destination's target from its activation-time head (`since`: url -> sha) to `candidate`,
     in the private mirrors, against the judged SHAs. A flagged commit, a judged SHA the mirror lacks, a
     target reset behind its activation head and a merge/empty commit all become findings; a timeout or
     an overall-deadline overrun is `pending`."""
     dests = destinations_from_owner(env.owner, config_dir=env.config_dir)
+    if since is None:                                   # the ledger's activation_heads: {remote url: sha}, written once
+        since = dict(getattr(env.led, "activation_heads", None) or {})
     judged = set(env.judged())
     findings, pending = [], False
     for d in dests:
@@ -601,28 +640,33 @@ def audit(env: LandEnv, since: dict, candidate: str) -> AuditResult:
             findings.append(f"{d.name}: no activation-time head is recorded for this destination")
             continue
         try:
-            m = env.mirror_factory(d.url, d.credential)
-            _, left = m.fetch_branches([env.target], FETCH_SECONDS)
+            m = _make_mirror(env, d)
+            _, left = m.fetch_branches([env.target], _budget(env, FETCH_SECONDS))
             if left:
                 pending = True
                 continue
+            slow = False
             for extra in env.judged_branches():      # best effort: a landed branch is already deleted
                 try:
-                    m.fetch_branches([extra], FETCH_SECONDS)
+                    _, more = m.fetch_branches([extra], _budget(env, FETCH_SECONDS))
                 except MirrorError:
-                    pass
+                    continue
+                slow = slow or bool(more)
+            if slow:                                  # without a judged branch the audit would call its commits unjudged
+                pending = True
+                continue
             head = m.head(env.target)
             if head is None:
                 findings.append(f"{d.name}: {env.target} does not exist")
                 continue
-            flagged = m.audit_target(base, head, judged)
+            flagged = m.audit_target(base, head, judged, deadline=_budget(env, mirror_mod.AUDIT_DEADLINE))
         except MissingCommitError as exc:
             findings.append(f"{d.name}: a judged or activation commit is missing from the mirror ({exc})")
         except TargetRewoundError as exc:
             findings.append(f"{d.name}: {env.target} was reset backwards ({exc})")
         except UnpatchableCommitError as exc:
             findings.append(f"{d.name}: a merge or empty commit cannot be matched ({exc})")
-        except MirrorTimeoutError:                     # includes AuditDeadlineError
+        except (LandPending, MirrorTimeoutError):      # the slot is spent, or a timeout (AuditDeadlineError too)
             pending = True
         except MirrorError as exc:
             findings.append(f"{d.name}: the audit could not run ({exc})")

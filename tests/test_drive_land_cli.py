@@ -153,6 +153,24 @@ class HostsAdd(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertFalse(self.trusted())
 
+    def test_an_agent_session_cannot_trust_a_host_key_even_on_a_terminal(self):
+        scanned = []
+        for var in ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID"):
+            with self.subTest(var=var), mock.patch.dict(os.environ, {var: "1"}):
+                with mock.patch.object(mirror, "scan_host_keys", lambda *a: scanned.append(a) or []):
+                    code, out, err = self.add(answer="example.test", tty=True)
+                self.assertEqual(code, 1)
+                self.assertIn("agent session", err)
+                self.assertFalse(self.trusted())
+        self.assertEqual(scanned, [])
+
+    def test_a_person_outside_any_session_still_can(self):
+        env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID",
+                                                                 "CODEX_THREAD_ID", "CODEX_SESSION_ID")}
+        with mock.patch.dict(os.environ, env, clear=True):
+            code, out, err = self.add(answer="example.test")
+        self.assertEqual(code, 0, err)
+
     def test_scan_never_runs_without_a_terminal(self):
         called = []
         with mock.patch.object(mirror, "scan_host_keys", lambda *a: called.append(a) or []):

@@ -283,10 +283,16 @@ def coding_integrated(workdir: str | None, branch: str, sha: str, target: str) -
         return False
 
 
-def drive_job(board, job: str) -> bool:
-    """Whether the job is a drive job (the board claim `drive.enabled`, written at activation)."""
+def drive_job(ctx, job: str) -> bool:
+    """Whether the job is a drive job: the host-private ledger exists (never the agent-writable board claim, which
+    a board writer could clear to make integration fall back to git facts)."""
     try:
-        return board.job_data(job).get("drive.enabled") == "1"
+        from swarm.board.autoinit import store_key
+        from swarm.supervisor import ledger
+        try:
+            return ledger.load(store_key(ctx.cfg), job) is not None
+        except ledger.LedgerBadError:
+            return True            # an unreadable ledger is still a drive job: fail closed, never git facts
     except Exception:
         return False
 
@@ -343,7 +349,7 @@ def coding_recipe(ctx, board, job: str, artifact: str | None) -> dict | None:
     record = local_record(ctx.cfg, js) if js else None
     workdir = getattr(record, "workdir", None) or getattr(record, "cwd", None)
     config = coding_settings(ctx, workdir)
-    drive = drive_job(board, job)
+    drive = drive_job(ctx, job)
     if (drive_landed(ctx, job, branch, sha) if drive else
             coding_integrated(workdir, branch, sha, config["target_branch"])):
         return {"artifact_group": branch, "integrated": True}
