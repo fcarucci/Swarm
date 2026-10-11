@@ -1129,11 +1129,39 @@ class DriveCli(Env):
         self.assertIn("below", err)
 
     def test_activation_kicks_the_supervisor_once(self):
+        """The kick follows a completed activation. Its precondition is pinned here, not read from the host:
+        the timer seam says the user manager runs the timer (CI has no user systemd manager), the platform
+        is Linux and a pass is recent; drivegate is stubbed at both lookup points (the real module may
+        already be imported by an earlier test, and would shadow a sys.modules stub)."""
         kicker = types.SimpleNamespace(kick=mock.Mock())
-        with drivegate_stub(kicker):
+        with drivegate_stub(kicker), mock.patch.object(da, "timer_state", return_value=dict(ACTIVE_TIMER)), \
+                mock.patch.object(da, "PLATFORM", "linux"):
             rc, _, err = self.activate("--workdir", str(self.work))
         self.assertEqual(rc, 0, err)
         kicker.kick.assert_called_once_with()
+
+    def test_no_user_manager_refuses_and_never_kicks(self):
+        """No user systemd manager (CI, a container): `systemctl --user show` fails and the timer seam reads
+        {}. Activation is refused before anything is written, so nothing is kicked."""
+        kicker = types.SimpleNamespace(kick=mock.Mock())
+        with drivegate_stub(kicker), mock.patch.object(da, "timer_state", return_value={}):
+            rc, _, err = self.activate("--workdir", str(self.work))
+        self.assertEqual(rc, 1)
+        self.assertIn("not running", err)
+        self.assertIsNone(self.ledger_of())
+        kicker.kick.assert_not_called()
+
+    def test_real_drivegate_already_imported_does_not_shadow_the_stub(self):
+        """The CI failure: an earlier test imported the real swarm.drivegate, so a sys.modules-only stub was
+        shadowed by the package attribute and the mock saw 0 calls."""
+        import swarm as swarm_package
+        real = types.SimpleNamespace(kick=mock.Mock(side_effect=AssertionError("the real kick ran")))
+        kicker = types.SimpleNamespace(kick=mock.Mock())
+        with mock.patch.object(swarm_package, "drivegate", real, create=True), drivegate_stub(kicker):
+            rc, _, err = self.activate("--workdir", str(self.work))
+        self.assertEqual(rc, 0, err)
+        kicker.kick.assert_called_once_with()
+        real.kick.assert_not_called()
 
     def test_refused_activation_does_not_kick(self):
         kicker = types.SimpleNamespace(kick=mock.Mock())
