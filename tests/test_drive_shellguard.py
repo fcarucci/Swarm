@@ -39,7 +39,9 @@ class DriveRefusals(unittest.TestCase):
                     "git push origin feat/a:feat/a", "git push origin HEAD:refs/heads/feat/a",
                     "git push --tags origin", "git push --follow-tags origin feat/a", "git push --no-verify origin x",
                     "git push -o ci.skip origin feat/a", "git push --repo=origin feat/a",
-                    "git push --repo=origin -o main feat/a", "git push -o main origin feat/a"):
+                    "git push --repo=origin -o main feat/a", "git push -o main origin feat/a",
+                    "git push --repo=origin --push-option main feat/a", "git push --repo=origin --receive-pack main feat/a",
+                    "git push --repo=origin --exec main feat/a", "git push --repo=origin --push-option=main feat/a"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(refuse(cmd, ["main"], branch_of=on("feat/a")), cmd)
 
