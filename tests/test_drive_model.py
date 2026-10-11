@@ -15,12 +15,12 @@ from swarm.supervisor import driver_model as dm
 # Field names of the Ledger dataclass (lib/swarm/supervisor/ledger.py @ 534cfce): 25 fields.
 LEDGER_FIELDS = (
     "board_key", "job", "generation", "generation_requested", "activated_at", "budgets", "intents",
-    "owners", "integrated", "ruling_due_at", "ruling_attempts", "rounds_without_progress", "errors",
+    "owners", "integrated", "ruling_due_at", "ruling_attempts", "rounds_without_progress", "last_progress_at", "errors",
     "closing", "halted", "terminal", "mirror_fetch_pending", "last_pass", "watermarks",
     "terminal_intent", "halted_total_seconds", "requester_session", "pinned_requirements",
     "incarnation", "ledger_rev",
 )
-assert len(LEDGER_FIELDS) == 25
+assert len(LEDGER_FIELDS) == 26
 
 # The Intent dataclass (lib/swarm/supervisor/ledger.py @ 534cfce): 11 fields.
 INTENT_FIELDS = (

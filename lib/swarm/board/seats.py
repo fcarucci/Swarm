@@ -171,8 +171,8 @@ class MemorySeats:
             if row is None or row["job"] != job or row["revision"] != expected_revision:
                 return None
             check_transition(row["state"], state)
-            if row["state"] == "running" and (row["launch_id"] is None or any(
-                    r["launch_id"] == row["launch_id"] and r["ended_at"] is None for r in s.restarts)):
+            if row["state"] == "running" and row["launch_id"] is not None and any(
+                    r["launch_id"] == row["launch_id"] and r["ended_at"] is None for r in s.restarts):
                 raise ValueError("the seat's launch is still open: end it first")
             row.update(fields, state=state, revision=row["revision"] + 1, updated_at=self.now())
             s.touch()
@@ -402,7 +402,7 @@ class SqlSeats:
         return self._seat_obj(Seat, SEAT_COLS, row) if row else None
 
     def _launch_open(self, c, launch_id):
-        return launch_id is None or self._exec(
+        return launch_id is not None and self._exec(
             c, "SELECT 1 FROM restarts WHERE launch_id = ? AND ended_at IS NULL", (launch_id,)).fetchone() is not None
 
     def set_seat_state(self, seat_id, expected_revision, state, *, job, **fields):
