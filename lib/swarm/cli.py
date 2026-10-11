@@ -4758,8 +4758,11 @@ def _run_command(cfg: dict, args) -> int:
                   "once the board is reachable.", file=sys.stderr)
             return 1
         if args.cmd == "verdict":  # likewise; whether args.name is the judge is checked on delivery
+            from swarm.verdict_cli import _drive_generation
+            scope = _verdict_scope(args)   # a goal/ruling verdict keeps its ledger generation (S2)
             spool_verdict(cfg, args.job, args.name, args.verdict, *_verdict_text(args), artifact=args.artifact,
-                          details=getattr(args, "details_text", None), scope=_verdict_scope(args),
+                          details=getattr(args, "details_text", None), scope=scope,
+                          generation=_drive_generation(cfg, args.job) if scope in ("goal", "ruling") else None,
                           open_count=getattr(args, "open_count", None),
                           progress=True if getattr(args, "progress", None) else None,
                           candidate=getattr(args, "candidate", None), req=getattr(args, "req", None))

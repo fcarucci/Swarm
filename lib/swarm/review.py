@@ -109,11 +109,15 @@ def verdict_data(raw: str | None, artifact: str | None, verdict: str, reason: st
                  message_id: int | None = None) -> str:
     """New job-data JSON, written atomically with the legacy latest-verdict columns.
 
-    Chunking preserves long --next briefs within the ordinary job-data value bound. Every stored record
-    carries `message_id`, the id of the VERDICT message the verdict was posted as (None when not posted).
+    Chunking preserves long --next briefs within the ordinary job-data value bound. A record written by
+    deliver_verdict carries `message_id`: 0 from its first write (recorded, not yet bound), then the id of the
+    VERDICT message it was posted as. bound_verdict() refuses 0, so a verdict whose binding write failed counts
+    for no reader. A record written without a message id (a direct board call) has no such field: a legacy
+    artifact verdict, never a drive goal or ruling verdict.
     An artifact verdict is stored under `pipeline.verdict.<hash of the artifact>`, bound to its artifact.
-    A goal or ruling verdict of a drive generation is stored under `drive.verdict.<generation>.<scope>`,
-    bound to its candidate (its artifact is None); without a generation it has no record.
+    A goal or ruling verdict of a drive generation is stored under drive_verdict_key(): one record per
+    (generation, scope, candidate, req), so a verdict on another candidate never replaces or stands in for
+    it (its artifact is None); without a generation it has no record.
     The record keeps its scope, drive generation, open count (acceptance criteria still unmet), progress
     flag, candidate and requirements digest, for the drive pipeline to read.
     """
@@ -122,19 +126,74 @@ def verdict_data(raw: str | None, artifact: str | None, verdict: str, reason: st
     if artifact is not None:
         key = 'pipeline.verdict.' + hashlib.sha256(artifact.encode()).hexdigest()[:32]
     elif scope in ('goal', 'ruling') and generation is not None:
-        key = f'drive.verdict.{generation}.{scope}'
+        key = drive_verdict_key(generation, scope, candidate, req)
     else:
         return json.dumps(data, ensure_ascii=False)
-    record = json.dumps(dict(artifact=artifact, verdict=verdict, reason=reason,
-                        next_steps=next_steps, judge=judge, at=at.isoformat(), scope=scope,
-                        generation=generation, open=open_count, progress=progress,
-                        candidate=candidate, req=req, message_id=message_id), ensure_ascii=False)
+    fields = dict(artifact=artifact, verdict=verdict, reason=reason, next_steps=next_steps, judge=judge,
+                  at=at.isoformat(), scope=scope, generation=generation, open=open_count, progress=progress,
+                  candidate=candidate, req=req)
+    if message_id is not None:   # 0: recorded, binding pending (deliver_verdict's first write)
+        fields['message_id'] = message_id
+    record = json.dumps(fields, ensure_ascii=False)
     chunks = [record[i:i + JOB_DATA_VALUE_MAX] for i in range(0, len(record), JOB_DATA_VALUE_MAX)]
     # Remove obsolete tail chunks when a shorter verdict replaces a longer one.
     data = {k: v for k, v in data.items() if not k.startswith(key + '.')}
     data[key] = str(len(chunks))
     data.update({f'{key}.{i}': chunk for i, chunk in enumerate(chunks)})
     return json.dumps(data, ensure_ascii=False)
+
+
+def drive_verdict_key(generation: int, scope: str, candidate: str | None, req: str | None) -> str:
+    """The job-data key of a goal or ruling verdict: per generation, scope and (candidate, req) digest."""
+    digest = hashlib.sha256(f"{candidate or ''}\0{req or ''}".encode()).hexdigest()[:32]
+    return f'drive.verdict.{generation}.{scope}.{digest}'
+
+
+def bound_verdict(record, *, legacy_ok: bool = False) -> dict | None:
+    """The verdict record if it is bound to its posted VERDICT message (a positive int `message_id`), else
+    None. A record written before the binding (message_id 0: the second write of deliver_verdict failed or
+    has not happened yet) is never accepted. `legacy_ok` accepts a record with no message_id field at all
+    (written before verdict binding existed; non-drive artifact verdicts only). Every reader of verdict
+    records goes through this (Tasks 7/8 included)."""
+    if not isinstance(record, dict):
+        return None
+    if 'message_id' not in record:
+        return record if legacy_ok else None
+    mid = record['message_id']
+    return record if type(mid) is int and mid > 0 else None
+
+
+def _chunked(data: dict, key: str):
+    count = int(data[key])
+    if not 0 < count <= 10000:
+        raise ValueError('chunk count')
+    return json.loads(''.join(data[f'{key}.{i}'] for i in range(count)))
+
+
+def drive_verdict(board, job: str, generation: int, scope: str, candidate: str | None,
+                  req: str | None) -> dict | None:
+    """The bound goal or ruling verdict on exactly this (generation, scope, candidate, req), or None. The
+    consumer still checks the message id against the board and the verdict's receipt (spec 4.0)."""
+    data = board.job_data(job)
+    try:
+        rec = _chunked(data, drive_verdict_key(generation, scope, candidate, req))
+    except (KeyError, ValueError, TypeError):
+        return None
+    rec = bound_verdict(rec)
+    if rec is None or (rec.get('generation'), rec.get('scope'), rec.get('candidate'), rec.get('req')) != (
+            generation, scope, candidate, req):
+        return None
+    return rec
+
+
+def verdict_text(verdict: str, reason: str, *, scope: str = 'artifact', generation: int | None = None,
+                 candidate: str | None = None, req: str | None = None) -> str:
+    """The VERDICT message: a goal or ruling verdict of a drive generation names what it judges, so a reader
+    holding the message can tell (before the reason: the board caps a message's length)."""
+    if scope in ('goal', 'ruling') and generation is not None:
+        return (f"VERDICT {verdict} [{scope} gen={generation} candidate={candidate or '-'} req={req or '-'}]: "
+                f"{reason}")
+    return f"VERDICT {verdict}: {reason}"
 
 
 def artifact_verdicts(board, job: str) -> dict[str, dict]:
@@ -147,8 +206,8 @@ def artifact_verdicts(board, job: str) -> dict[str, dict]:
             count = int(count)
             if not 0 < count <= 10000:
                 continue
-            record = json.loads(''.join(data[f'{key}.{i}'] for i in range(count)))
-            if record['verdict'] in ('met', 'not_met'):
+            record = bound_verdict(json.loads(''.join(data[f'{key}.{i}'] for i in range(count))), legacy_ok=True)
+            if record is not None and record['verdict'] in ('met', 'not_met'):
                 result[record['artifact']] = record
         except (KeyError, ValueError, TypeError):
             continue
