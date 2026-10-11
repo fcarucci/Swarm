@@ -445,7 +445,7 @@ class ExecuteTests(ExecEnv):
         eid, _ = self.b.post_event("J", "ci", "k1", "real event", to=name)
         run = self.go(self.act())
         wm = self.reload().watermarks
-        self.assertEqual((wm[f"launch-msg:{run['launch_id']}"], wm[f"launch-event:{run['launch_id']}"]), (mid, eid))
+        self.assertEqual((wm[f"launch-msg:{run['launch_id']}"], wm[f"launch-ev:{run['launch_id']}:{eid}"]), (mid, eid))
 
 
 class DriverSeatTests(ExecEnv):
@@ -1003,7 +1003,7 @@ class FinishTests(ExecEnv):
         self.finished(self.claude_tail())
         led = self.reload()
         self.assertEqual(led.watermarks["msg:eng-a"], newest)
-        self.assertIn("event:eng-a", led.watermarks)
+        self.assertEqual([k for k in led.watermarks if k.startswith("evack:")], [])    # no event was pending
         self.assertFalse([k for k in led.watermarks if k.startswith("launch-")])
 
     def test_a_crashed_turn_leaves_its_events_pending(self):
@@ -1397,6 +1397,34 @@ class FixRoundTests(ExecEnv):
         driver_exec.conclude_run(self.cfg, run, "completed", 0.1)
         self.assertEqual(self.reload().watermarks.get("event:eng-a", 0), 0)
 
+    def test_rr7_a_far_event_id_acks_only_itself_and_hides_no_later_event(self):
+        self.memory_only()
+        self.seat()
+        name = self.agent_of()
+        eid, _ = self.b.post_event("J", "ci", "k1", "far event", to=name)
+        with self.b._s().lock:
+            next(e for e in self.b._s().events if e["id"] == eid)["id"] = 10 ** 9
+        run = self.go(self.act())
+        driver_exec.conclude_run(self.cfg, run, "completed", 0.1)
+        wm = self.reload().watermarks
+        self.assertEqual(wm.get("event:eng-a", 0), 0)                       # no high-water mark moved
+        self.assertEqual(wm.get(f"evack:eng-a:{10 ** 9}"), 1)               # only that event is acknowledged
+        later, _ = self.b.post_event("J", "ci", "k2", "later real event", to=name)
+        self.assertLess(later, 10 ** 9)
+        self.assertNotIn(f"evack:eng-a:{later}", wm)
+        self.end(run, "completed")
+        run2 = self.go(self.act(trigger="2"))
+        shown = [k for k in self.reload().watermarks if k.startswith(f"launch-ev:{run2['launch_id']}:")]
+        self.assertEqual(shown, [f"launch-ev:{run2['launch_id']}:{later}"])   # the answered one is not shown again
+
+    def test_an_unacknowledged_turn_leaves_its_events_unacknowledged(self):
+        self.seat()
+        name = self.agent_of()
+        eid, _ = self.b.post_event("J", "ci", "k1", "e", to=name)
+        run = self.go(self.act())
+        driver_exec.conclude_run(self.cfg, run, "failed", 0.1)
+        self.assertFalse([k for k in self.reload().watermarks if k.startswith(("evack:", "launch-ev:"))])
+
     def test_M2_a_forged_message_by_a_member_without_a_receipt_moves_nothing(self):
         self.seat()
         name = self.agent_of()
@@ -1416,7 +1444,7 @@ class FixRoundTests(ExecEnv):
 
     def test_M2_a_seat_with_no_agent_yet_keeps_its_marks(self):
         self.seat()
-        self.assertEqual(driver_exec._board_marks(self.b, self.led, self.b.seat("J", 1, "eng-a"), self.now()), (0, 0))
+        self.assertEqual(driver_exec._board_marks(self.b, self.led, self.b.seat("J", 1, "eng-a"), self.now()), (0, []))
 
     # -- M3: last_progress_at is the time of the progress event, never later than now
     def test_M3_a_future_seat_time_does_not_move_last_progress(self):
