@@ -1387,6 +1387,13 @@ class FixRoundTests(ExecEnv):
                 self.go(self.act(seat="eng-a~1", trigger="9"))
         self.assertIsNotNone(self.go(self.act(seat="eng-a~1", trigger="9")))
 
+    def test_the_no_launch_sweep_does_not_even_try_a_seat_with_a_launch(self):
+        self.seat()
+        self.go(self.act())
+        with mock.patch.object(self.b, "set_seat_state") as moved:
+            self.assertEqual(driver_exec.sweep_unlaunched_seats(self.b, "J"), 0)
+        moved.assert_not_called()
+
     # -- lows
     def test_a_kill_switch_cancel_does_not_count_toward_max_attempts(self):
         self.cfg["drive"] = {"max_attempts": 1}
