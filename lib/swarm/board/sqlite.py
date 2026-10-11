@@ -65,7 +65,7 @@ import time
 from pathlib import Path
 from typing import Iterator, Mapping, Sequence
 
-from .base import (check_verdict_args, check_verdict_details, details_if_bound, VerdictDetails, check_job_data, merged_job_data, parse_job_data, LEFT_PAUSED, MOVED_PREFIX, PauseRecord, build_manifest, NAME_MAX, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, assignable_name, restart_over_limits, STUCK_PREFIX, AUTO_CLOSE_BLOCKING, CloseGuard, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, Restart,
+from .base import (check_verdict_args, check_verdict_details, details_if_bound, VerdictDetails, check_job_data, merged_job_data, parse_job_data, LEFT_PAUSED, MOVED_PREFIX, PauseRecord, build_manifest, NAME_MAX, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, assignable_name, restart_over_limits, STUCK_PREFIX, AUTO_CLOSE_BLOCKING, CloseGuard, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, Restart, RESTART_COLS,
                    ROUTE_STATES, TOOL_NAME_MAX, AgentEvent, AgentStatus, Board, BoardError, BoardUnavailable, JobStatus, Member, Message, ReadOnlyBoard, refuse_writes,
                    OwedReply, ReadResult, Route, RosterEntry, SCHEMA_VERSION, SetupResult, SpawnGrant, SyncState,
                    TRANSCRIPT_ROLES, TranscriptImage, TranscriptRow, TranscriptSummary, VERDICTS,
@@ -348,6 +348,12 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("jobs", "verdict_generation", "INTEGER"),   # schema 25: the drive generation it was given in
     ("jobs", "verdict_candidate", "TEXT"),    # schema 25: the candidate it judged
     ("jobs", "verdict_req", "TEXT"),          # schema 25: the requirements digest it judged
+    ("restarts", "action_id", "TEXT"),        # schema 25: the drive action a launch claim is for
+    ("restarts", "launch_id", "TEXT"),        # schema 25: the launch's random id (its drive locks' launch_id)
+    ("restarts", "reserved_usd", "REAL"),     # schema 25: what the claim reserved of the job's budget
+    ("restarts", "cost_usd", "REAL"),         # schema 25: what the launch spent (finish_restart)
+    ("restarts", "tokens_in", "INTEGER"),
+    ("restarts", "tokens_out", "INTEGER"),
 )
 
 # Schema 22: agents.message_count = the messages the agent posted to its job since it joined (what
@@ -369,8 +375,7 @@ COUNT_TRIGGERS = (
 )
 
 _MESSAGE_COLS = "id, created_at, job, agent_name, to_agent, message"
-_RESTART_COLS = ("id, job, agent_key, attempt, at, reason, old_agent_key, new_agent_key, harness, host, "
-                 "os_user, minutes_cap, ended_at, outcome")   # Restart field order
+_RESTART_COLS = RESTART_COLS   # Restart field order (base.py)
 _AGENT_COLS = ("agent_key, name, job, role, host, joined_at, last_seen, left_at, state, tool_calls, "
                "current_tool, tool_started_at, last_post_at, judge, verifier, harness, model, os_user, "
                "left_reason, resume_of, title")
@@ -574,12 +579,14 @@ def _allow_paused(conn: sqlite3.Connection) -> None:
 
 
 from .blockers import SqlBlockers, sql_schema, migrate_sql, rollup, protects
+from .seats import SqlSeats, seats_schema
 from .events import SqlEvents, sql_schema as events_schema
 from .bgcmds import SqlBgCommands, sql_schema as bg_schema
 
 
-class SqliteBoard(SqlBlockers, SqlEvents, SqlBgCommands, Board):
+class SqliteBoard(SqlBlockers, SqlSeats, SqlEvents, SqlBgCommands, Board):
     _blocker_pg = False
+    _seat_pg = False
     _event_pg = False
     _bg_pg = False
     """A Board over one SQLite connection to the shared database file."""
@@ -663,7 +670,7 @@ class SqliteBoard(SqlBlockers, SqlEvents, SqlBgCommands, Board):
                             conn.execute(COUNT_BACKFILL)
                 for trigger in COUNT_TRIGGERS:
                     conn.execute(trigger)
-                for statement in (sql_schema() + events_schema() + bg_schema()).split(";"):
+                for statement in (sql_schema() + events_schema() + bg_schema() + seats_schema()).split(";"):
                     if statement.strip(): conn.execute(statement)
                 migrate_sql(conn)
                 for source in NAME_SOURCES:
@@ -1278,10 +1285,13 @@ class SqliteBoard(SqlBlockers, SqlEvents, SqlBgCommands, Board):
 
     @staticmethod
     def _restart(r) -> Restart:
-        (rid, job, key, attempt, at, reason, old, new, harness, host, os_user, cap, ended, outcome) = r
+        (rid, job, key, attempt, at, reason, old, new, harness, host, os_user, cap, ended, outcome,
+         action_id, launch_id, reserved, cost, tokens_in, tokens_out) = r
         return Restart(id=rid, job=job, agent_key=key, attempt=attempt, at=_dt_(at), reason=reason,
                        old_agent_key=old, new_agent_key=new, harness=harness, host=host, os_user=os_user,
-                       minutes_cap=float(cap), ended_at=_dt_(ended), outcome=outcome)
+                       minutes_cap=float(cap), ended_at=_dt_(ended), outcome=outcome, action_id=action_id,
+                       launch_id=launch_id, reserved_usd=reserved, cost_usd=cost, tokens_in=tokens_in,
+                       tokens_out=tokens_out)
 
     def record_restart(self, job: str, agent_key: str, old_agent_key: str, reason: str, harness: str,
                        minutes_cap: float, outcome: str | None = None,
@@ -1316,11 +1326,15 @@ class SqliteBoard(SqlBlockers, SqlEvents, SqlBgCommands, Board):
         return self._c().execute("UPDATE restarts SET new_agent_key = ? WHERE id = ?",
                                  (new_agent_key, restart_id)).rowcount > 0
 
-    def finish_restart(self, restart_id: int, outcome: str) -> bool:
+    def finish_restart(self, restart_id: int, outcome: str, *, cost_usd=None, tokens_in=None,
+                       tokens_out=None) -> bool:
         if outcome not in RESTART_OUTCOMES:
             raise ValueError(outcome)
-        return self._c().execute("UPDATE restarts SET ended_at = ?, outcome = ? WHERE id = ? AND ended_at IS NULL",
-                                 (self._now(), outcome, restart_id)).rowcount > 0
+        return self._c().execute(
+            "UPDATE restarts SET ended_at = ?, outcome = ?, cost_usd = COALESCE(?, cost_usd), "
+            "tokens_in = COALESCE(?, tokens_in), tokens_out = COALESCE(?, tokens_out) "
+            "WHERE id = ? AND ended_at IS NULL",
+            (self._now(), outcome, cost_usd, tokens_in, tokens_out, restart_id)).rowcount > 0
 
     def was_replaced(self, agent_key: str) -> bool:
         return self._c().execute("SELECT 1 FROM restarts WHERE old_agent_key = ?",

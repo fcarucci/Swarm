@@ -28,7 +28,7 @@ import psycopg
 from psycopg import sql
 
 from .base import (check_verdict_args, check_verdict_details, details_if_bound, VerdictDetails, check_job_data, merged_job_data, parse_job_data, LEFT_PAUSED, PauseRecord, build_manifest, database_hosts, MOVED_PREFIX, NAME_PATTERN, check_images, check_name, decompress_capped, decompress_transcript, MemoryRef, valid_pool, restart_over_limits, STUCK_PREFIX, CloseGuard, CapExceeded, configured_message_cap, AUTO_CLOSED_BY, MEMORY_SEEN_MAX, NAME_SOURCES, RESTART_OUTCOMES, ROUTE_STATES, TOOL_NAME_MAX,
-                   AgentEvent, Restart,
+                   AgentEvent, Restart, RESTART_COLS,
                    AgentStatus, Board, BoardError, BoardUnavailable, IncompatibleStorage, JobStatus,
                    Member, Message, OwedReply, ReadResult, Route, RosterEntry, SCHEMA_VERSION, SetupResult,
                    SpawnGrant, SyncState, TRANSCRIPT_ROLES, TranscriptImage, TranscriptRow, TranscriptSummary,
@@ -486,8 +486,7 @@ _JOB_STATUS_COLS = ("job, status, description, task, outcome, created_by, sessio
                     "verdict_scope, verdict_generation, verdict_candidate, verdict_req")
 _MESSAGE_COLS = "id, created_at, job, agent_name, to_agent, message"
 _MESSAGE_COLS_M = ", ".join("m." + c.strip() for c in _MESSAGE_COLS.split(","))
-_RESTART_COLS = ("id, job, agent_key, attempt, at, reason, old_agent_key, new_agent_key, harness, host, "
-                 "os_user, minutes_cap, ended_at, outcome")   # Restart field order
+_RESTART_COLS = RESTART_COLS   # Restart field order (base.py)
 
 # The debounce drain after a wake-up: collects what is already on the wire (as watch did).
 _DRAIN_TIMEOUT = 0.01
@@ -898,6 +897,7 @@ def _install_schema(conn: psycopg.Connection, b: dict) -> None:
         migrate_sql(conn, True)
         conn.execute(events_schema(True))
         conn.execute(bg_schema(True))   # schema 24
+        conn.execute(seats_schema(True))   # schema 25: seats, drive locks, the claim's restart columns
         conn.execute("""
     CREATE OR REPLACE FUNCTION swarm_keep_blocked_jobs() RETURNS trigger LANGUAGE plpgsql AS $$
     BEGIN
@@ -983,11 +983,13 @@ _SCOPE_SQL = """
 
 
 from .blockers import SqlBlockers, sql_schema, migrate_sql, rollup, protects
+from .seats import SqlSeats, seats_schema
 from .events import SqlEvents, sql_schema as events_schema
 from .bgcmds import SqlBgCommands, sql_schema as bg_schema
 
 
-class PostgresBoard(SqlBlockers, SqlEvents, SqlBgCommands, Board):
+class PostgresBoard(SqlBlockers, SqlSeats, SqlEvents, SqlBgCommands, Board):
+    _seat_pg = True
     _blocker_pg = True
     _event_pg = True
     _bg_pg = True
@@ -1818,12 +1820,15 @@ class PostgresBoard(SqlBlockers, SqlEvents, SqlBgCommands, Board):
         return self._conn.execute("UPDATE restarts SET new_agent_key = %s WHERE id = %s RETURNING id",
                                   (new_agent_key, restart_id)).fetchone() is not None
 
-    def finish_restart(self, restart_id: int, outcome: str) -> bool:
+    def finish_restart(self, restart_id: int, outcome: str, *, cost_usd=None, tokens_in=None,
+                       tokens_out=None) -> bool:
         if outcome not in RESTART_OUTCOMES:
             raise ValueError(outcome)
-        return self._conn.execute("UPDATE restarts SET ended_at = now(), outcome = %s "
-                                  "WHERE id = %s AND ended_at IS NULL RETURNING id",
-                                  (outcome, restart_id)).fetchone() is not None
+        return self._conn.execute(
+            "UPDATE restarts SET ended_at = now(), outcome = %s, cost_usd = COALESCE(%s, cost_usd), "
+            "tokens_in = COALESCE(%s, tokens_in), tokens_out = COALESCE(%s, tokens_out) "
+            "WHERE id = %s AND ended_at IS NULL RETURNING id",
+            (outcome, cost_usd, tokens_in, tokens_out, restart_id)).fetchone() is not None
 
     def was_replaced(self, agent_key: str) -> bool:
         return self._conn.execute("SELECT 1 FROM restarts WHERE old_agent_key = %s",

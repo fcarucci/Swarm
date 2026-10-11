@@ -560,6 +560,8 @@ class Blocker:
     resolved_how: str | None = None
     resolved_at: _dt.datetime | None = None
     protection_rule: str = "addressed"
+    seat: str | None = None          # schema 25: the drive seat it concerns (None: the job)
+    generation: int | None = None    # schema 25: the drive generation it was opened in
 
 
 @dataclass(frozen=True)
@@ -733,6 +735,69 @@ class Restart:
     minutes_cap: float
     ended_at: _dt.datetime | None
     outcome: str | None       # RESTART_OUTCOMES; None while running
+    # Schema 25: a drive launch (Board.claim_drive_launch) and what it reserved and spent.
+    action_id: str | None = None
+    launch_id: str | None = None
+    reserved_usd: float | None = None
+    cost_usd: float | None = None
+    tokens_in: int | None = None
+    tokens_out: int | None = None
+
+
+RESTART_COLS = ("id, job, agent_key, attempt, at, reason, old_agent_key, new_agent_key, harness, host, "
+                "os_user, minutes_cap, ended_at, outcome, action_id, launch_id, reserved_usd, cost_usd, "
+                "tokens_in, tokens_out")   # the Restart field order, for every backend's SELECT
+
+
+# Drive seats (schema 25, spec §3.4). `closed` seats are finished: a fix round or the lead asks for a
+# successor instead of reviving them.
+SEAT_STATES = ("requested", "running", "idle", "released", "failed", "cancelled", "refused")
+SEAT_CLOSED = ("released", "failed", "cancelled", "refused")
+SEAT_HARNESSES = ("claude", "codex")
+SEAT_COMPLEXITY = ("simple", "standard", "complex")
+
+
+@dataclass(frozen=True)
+class Seat:
+    """A named drive seat (schema 25): one agent's role in one drive generation of a job. `revision`
+    counts every change (compare-and-swap); `launches` counts claimed launches."""
+    id: int
+    job: str
+    generation: int
+    seat: str
+    role: str
+    title: str | None
+    harness: str
+    model: str | None
+    workdir: str
+    brief_path: str
+    task_ref: str | None
+    complexity: str
+    requested_by: str
+    requested_at: _dt.datetime
+    state: str
+    agent_key: str | None
+    session_id: str | None
+    revision: int
+    launches: int
+    last_outcome: str | None
+    wake_reason: str | None
+    wake_watermark: int | None
+    updated_at: _dt.datetime
+
+
+@dataclass(frozen=True)
+class DriveLock:
+    """A drive lock (schema 25): `key` is held by `holder` (the action) for launch `launch_id` on
+    `host` until `expires_at`. `path` is the worktree root of a `wt:` lock (None otherwise)."""
+    key: str
+    holder: str
+    job: str
+    generation: int
+    launch_id: str
+    host: str
+    expires_at: _dt.datetime
+    path: str | None = None
 
 
 def restart_reserved_minutes(r: Restart) -> float:
@@ -1362,6 +1427,7 @@ WRITE_METHODS = (
     "save_transcript", "refresh_transcript", "mark_capture_failed", "rotate_transcripts",
     "save_memory_ref", "mark_memory_refs_checked", "delete_memory_refs",
     "open_blocker", "resolve_blocker", "reopen_blocker", "comment_blocker", "expire_blockers", "_overdue_blocker",
+    "request_seat", "set_seat_state", "claim_drive_launch", "renew_drive_locks", "release_drive_locks",
     "post_event", "ack_events",
     "pause_job", "begin_resume", "record_resume_outcome", "set_message_cap",
 )
@@ -1901,8 +1967,10 @@ class Board(abc.ABC):
     @abc.abstractmethod
     def open_blocker(self, job: str, kind: str, waiting_on: str, reason: str,
                      until: _dt.datetime | None = None, default_value: str | None = None,
-                     created_by: str | None = None) -> Blocker:
-        """Open a blocker on an active job, append opened, and return its immutable record."""
+                     created_by: str | None = None, seat: str | None = None,
+                     generation: int | None = None) -> Blocker:
+        """Open a blocker on an active job, append opened, and return its immutable record.
+        seat and generation (schema 25) name the drive seat and generation it concerns."""
 
     @abc.abstractmethod
     def blockers(self, job: str | None = None, include_closed: bool = False) -> list[Blocker]:
@@ -2353,9 +2421,64 @@ class Board(abc.ABC):
         """The replacement's agent key, once known (Codex: its thread id). False if no such row."""
 
     @abc.abstractmethod
-    def finish_restart(self, restart_id: int, outcome: str) -> bool:
+    def finish_restart(self, restart_id: int, outcome: str, *, cost_usd: float | None = None,
+                       tokens_in: int | None = None, tokens_out: int | None = None) -> bool:
         """ended_at = now, outcome = outcome (RESTART_OUTCOMES, anything else raises ValueError),
-        only if the row hasn't ended yet. Returns whether this call finished it."""
+        only if the row hasn't ended yet. Returns whether this call finished it. The spend given
+        (schema 25) is stored; a None leaves the stored value as it is."""
+
+    # ---- drive seats, drive locks and the atomic launch claim (schema 25, spec §3.4, §4.5) ----
+
+    @abc.abstractmethod
+    def request_seat(self, job: str, generation: int, seat: str, *, role: str, harness: str,
+                     model: str | None, workdir: str, brief_path: str, title: str | None = None,
+                     task_ref: str | None = None, complexity: str = "standard",
+                     requested_by: str) -> Seat:
+        """Create or update the seat (job, generation, seat). Idempotent: the same fields give the
+        same row and revision. Changed fields while `requested` give revision + 1. Otherwise
+        ValueError("seat is <state>: release it first")."""
+
+    @abc.abstractmethod
+    def seats(self, job: str, generation: int | None = None, include_closed: bool = True) -> list[Seat]:
+        """The job's seats (of one generation when given) in id order; include_closed=False drops
+        the SEAT_CLOSED ones."""
+
+    @abc.abstractmethod
+    def seat(self, job: str, generation: int, seat: str) -> Seat | None:
+        """The seat (job, generation, seat), or None."""
+
+    @abc.abstractmethod
+    def set_seat_state(self, seat_id: int, expected_revision: int, state: str, **fields) -> Seat | None:
+        """Compare-and-swap: when the seat is at expected_revision, set state (SEAT_STATES) and the
+        given fields (agent_key, session_id, last_outcome, wake_reason, wake_watermark), revision + 1,
+        and return the new row. None when the revision differs or the seat doesn't exist."""
+
+    @abc.abstractmethod
+    def claim_drive_launch(self, *, job: str, generation: int, action_id: str, attempt: int, launch_id: str,
+                           seat_id: int, seat_revision: int, harness: str, reserve_usd: float,
+                           reserve_minutes: float, locks: list[str], lock_seconds: float,
+                           max_host_running: int, ruling: bool = False,
+                           lock_paths: dict[str, str] | None = None) -> Restart | None:
+        """One transaction, under a host-wide lock: the seat (of this job and generation, in
+        requested or idle) at seat_revision moves to running (revision + 1, launches + 1); every
+        lock in `locks` is inserted for lock_seconds, all or none (sorted; a `wt:` key needs its
+        root in lock_paths and must not be equal to, an ancestor of, or a descendant of a live
+        `wt:` root of this host); the host's open restarts stay below max_host_running (ruling: one
+        more); the restart row (action_id, attempt, launch_id, reserved_usd) is inserted, unique on
+        (job, action_id, attempt). Returns the restart row, or None on any conflict (nothing
+        changed)."""
+
+    @abc.abstractmethod
+    def renew_drive_locks(self, launch_id: str, expires_at: _dt.datetime) -> int:
+        """Set expires_at of the launch's locks. The number of rows renewed."""
+
+    @abc.abstractmethod
+    def release_drive_locks(self, launch_id: str) -> int:
+        """Delete the launch's locks. The number of rows deleted."""
+
+    @abc.abstractmethod
+    def drive_locks(self, prefix: str = "") -> list[DriveLock]:
+        """The drive locks whose key starts with prefix, by key."""
 
     @abc.abstractmethod
     def was_replaced(self, agent_key: str) -> bool:

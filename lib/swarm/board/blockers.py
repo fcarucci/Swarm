@@ -10,7 +10,8 @@ import datetime as dt
 import re
 from .base import Blocker, BlockerEvent, CapExceeded, normalize_message
 
-FIELDS = "id, job, kind, waiting_on, reason, until, default_value, state, created_by, created_at, resolved_by, resolved_how, resolved_at, protection_rule"
+FIELDS = ("id, job, kind, waiting_on, reason, until, default_value, state, created_by, created_at, resolved_by, "
+          "resolved_how, resolved_at, protection_rule, seat, generation")
 EVENT_FIELDS = "id, blocker, at, actor, event, detail"
 
 
@@ -162,7 +163,8 @@ class MemoryBlockers(BlockerLifecycle):
             return [BlockerEvent(**e) for e in self._store.blocker_events if e["blocker"] == id]
 
     def open_blocker(
-        self, job, kind, waiting_on, reason, until=None, default_value=None, created_by=None
+        self, job, kind, waiting_on, reason, until=None, default_value=None, created_by=None,
+        seat=None, generation=None,
     ):
         check_blocker(kind, waiting_on, reason)
         with self._s().lock:
@@ -185,6 +187,8 @@ class MemoryBlockers(BlockerLifecycle):
                 resolved_how=None,
                 resolved_at=None,
                 protection_rule=self._blocker_protection_rule(kind),
+                seat=seat,
+                generation=generation,
             )
             s.next_blocker_id += 1
             s.blockers.append(row)
@@ -341,7 +345,8 @@ class SqlBlockers(BlockerLifecycle):
         ]
 
     def open_blocker(
-        self, job, kind, waiting_on, reason, until=None, default_value=None, created_by=None
+        self, job, kind, waiting_on, reason, until=None, default_value=None, created_by=None,
+        seat=None, generation=None,
     ):
         check_blocker(kind, waiting_on, reason)
         with self._blocker_lock(job) as c:
@@ -350,7 +355,7 @@ class SqlBlockers(BlockerLifecycle):
                 raise ValueError(f"{job} is not an open job")
             row = self._blocker_execute(
                 c,
-                "INSERT INTO blockers (job,kind,waiting_on,reason,until,default_value,state,created_by,created_at,protection_rule) VALUES (?,?,?,?,?,?,'open',?,?,?) RETURNING "
+                "INSERT INTO blockers (job,kind,waiting_on,reason,until,default_value,state,created_by,created_at,protection_rule,seat,generation) VALUES (?,?,?,?,?,?,'open',?,?,?,?,?) RETURNING "
                 + FIELDS,
                 (
                     job,
@@ -362,6 +367,8 @@ class SqlBlockers(BlockerLifecycle):
                     created_by,
                     self._blocker_time(self.now()),
                     self._blocker_protection_rule(kind),
+                    seat,
+                    generation,
                 ),
             ).fetchone()
             result = self._blocker_row(row)
@@ -435,7 +442,8 @@ CREATE TABLE IF NOT EXISTS blockers (
  reason TEXT NOT NULL, until {timestamp}, default_value TEXT,
  state TEXT NOT NULL CHECK(state IN ('open','resolved','expired')), created_by TEXT,
  created_at {timestamp} NOT NULL, resolved_by TEXT, resolved_how TEXT, resolved_at {timestamp},
- protection_rule TEXT NOT NULL DEFAULT 'addressed' CHECK(protection_rule IN ('addressed','always','deadline')));
+ protection_rule TEXT NOT NULL DEFAULT 'addressed' CHECK(protection_rule IN ('addressed','always','deadline')),
+ seat TEXT, generation INTEGER);
 CREATE INDEX IF NOT EXISTS blockers_job_state ON blockers(job,state,id);
 CREATE TABLE IF NOT EXISTS blocker_events (
  id {id_type}, blocker BIGINT NOT NULL REFERENCES blockers(id), at {timestamp} NOT NULL,
@@ -451,6 +459,16 @@ def migrate_sql(c, pg=False):
         c.execute("ALTER TABLE blockers ADD COLUMN IF NOT EXISTS protection_rule TEXT NOT NULL DEFAULT 'addressed' CHECK(protection_rule IN ('addressed','always','deadline'))")
     elif "protection_rule" not in {r[1] for r in c.execute("PRAGMA table_info(blockers)")}:
         c.execute("ALTER TABLE blockers ADD COLUMN protection_rule TEXT NOT NULL DEFAULT 'addressed' CHECK(protection_rule IN ('addressed','always','deadline'))")
+    # schema 25: the drive seat and generation a blocker concerns (NULL: the job's own)
+    if pg:
+        c.execute("ALTER TABLE blockers ADD COLUMN IF NOT EXISTS seat TEXT")
+        c.execute("ALTER TABLE blockers ADD COLUMN IF NOT EXISTS generation integer")
+    else:
+        have = {r[1] for r in c.execute("PRAGMA table_info(blockers)")}
+        if "seat" not in have:
+            c.execute("ALTER TABLE blockers ADD COLUMN seat TEXT")
+        if "generation" not in have:
+            c.execute("ALTER TABLE blockers ADD COLUMN generation INTEGER")
     c.execute("UPDATE blockers SET protection_rule='deadline' WHERE kind='wait'")
     if pg:
         c.execute("SELECT job FROM jobs WHERE waiting_on IS NOT NULL FOR UPDATE")

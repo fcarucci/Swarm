@@ -76,6 +76,9 @@ class MemoryStore:
         self.blocker_events: list[dict] = []
         self.next_blocker_id = 1
         self.next_blocker_event_id = 1
+        self.seats: list[dict] = []            # drive seats (schema 25), by id
+        self.next_seat_id = 1
+        self.drive_locks: list[dict] = []      # drive locks (schema 25), by key
         self.events: list[dict] = []           # external events (Board.post_event), by id
         self.next_event_id = 1
         self.bg_commands: list[dict] = []      # background commands (Board.bg_start), by id
@@ -147,7 +150,8 @@ def reset_store(name: str = "default") -> MemoryStore:
                      "transcript_bodies", "image_bodies", "next_id", "schema_version",
                      "restarts", "next_restart_id", "memory_refs", "pauses", "next_pause_id",
                      "message_max_chars", "blockers", "blocker_events", "next_blocker_id", "next_blocker_event_id",
-                     "events", "next_event_id", "bg_commands", "next_bg_id"):
+                     "events", "next_event_id", "bg_commands", "next_bg_id", "seats", "next_seat_id",
+                     "drive_locks"):
             setattr(store, attr, getattr(fresh, attr))
         store.touch(messages=True)
     return store
@@ -218,15 +222,17 @@ def _drop_quiet_jobs(s: MemoryStore, keep: _dt.datetime) -> bool:
     for job in doomed:
         del s.jobs[job]
     _drop_agents(s, lambda a: a["job"] in doomed)
+    s.seats[:] = [r for r in s.seats if r["job"] not in doomed]   # seats cascade with their job (schema 25)
     return bool(doomed)
 
 
 from .blockers import MemoryBlockers, rollup, protects
+from .seats import MemorySeats
 from .events import MemoryEvents, drop_old_events
 from .bgcmds import MemoryBgCommands, drop_old_bg
 
 
-class MemoryBoard(MemoryBlockers, MemoryEvents, MemoryBgCommands, Board):
+class MemoryBoard(MemorySeats, MemoryBlockers, MemoryEvents, MemoryBgCommands, Board):
     """In-process Board over a shared MemoryStore. Reference/test backend only."""
 
     def __init__(self, cfg: dict):
@@ -980,7 +986,8 @@ class MemoryBoard(MemoryBlockers, MemoryEvents, MemoryBgCommands, Board):
                    "at": now, "reason": reason, "old_agent_key": old_agent_key, "new_agent_key": None,
                    "harness": harness, "host": compat.node(), "os_user": getpass.getuser(),
                    "minutes_cap": float(minutes_cap), "ended_at": now if outcome else None,
-                   "outcome": outcome}
+                   "outcome": outcome, "action_id": None, "launch_id": None, "reserved_usd": None,
+                   "cost_usd": None, "tokens_in": None, "tokens_out": None}
             s.next_restart_id += 1
             s.restarts.append(row)
             s.touch()
@@ -996,7 +1003,8 @@ class MemoryBoard(MemoryBlockers, MemoryEvents, MemoryBgCommands, Board):
                     return True
             return False
 
-    def finish_restart(self, restart_id: int, outcome: str) -> bool:
+    def finish_restart(self, restart_id: int, outcome: str, *, cost_usd=None, tokens_in=None,
+                       tokens_out=None) -> bool:
         if outcome not in RESTART_OUTCOMES:
             raise ValueError(outcome)
         s = self._s()
@@ -1004,6 +1012,10 @@ class MemoryBoard(MemoryBlockers, MemoryEvents, MemoryBgCommands, Board):
             for r in s.restarts:
                 if r["id"] == restart_id and r["ended_at"] is None:
                     r.update(ended_at=self.now(), outcome=outcome)
+                    for key, value in (("cost_usd", cost_usd), ("tokens_in", tokens_in),
+                                       ("tokens_out", tokens_out)):
+                        if value is not None:
+                            r[key] = value
                     s.touch()
                     return True
             return False

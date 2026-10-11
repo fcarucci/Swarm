@@ -206,6 +206,15 @@ class BlockerContract:
             self.assertEqual(b.blocker(a.id), a)
             self.assertEqual(b.blocker_events(a.id)[0].event, "opened")
 
+    def test_seat_and_generation_round_trip(self):
+        a = self.b.open_blocker("j", "question", "@EL", "which seat", seat="eng-a", generation=1)
+        self.assertEqual((a.seat, a.generation), ("eng-a", 1))
+        self.assertEqual(self.b.blocker(a.id).seat, "eng-a")
+        self.assertEqual(self.b.blockers("j")[0].generation, 1)
+        plain = self.b.open_blocker("j", "question", "human", "anything")
+        self.assertEqual((plain.seat, plain.generation), (None, None))
+        self.assertEqual(self.b.blocker(plain.id).seat, None)
+
 
 class MemoryBlockers(BlockerContract, unittest.TestCase):
     harness_factory = MemoryHarness
@@ -509,16 +518,21 @@ class MigrationContract:
         # schema 25 adds the typed-verdict columns the same way (the old fixture has none of them)
         typed = (("verdict_scope", "TEXT"), ("verdict_generation", "INTEGER"),
                  ("verdict_candidate", "TEXT"), ("verdict_req", "TEXT"))
+        # schema 25 also adds blockers.seat and blockers.generation (the drive seat a blocker concerns)
         if self.h.name == "sqlite":
             self.h._db().execute("ALTER TABLE agents ADD COLUMN title TEXT")
             for column, decl in typed:
                 self.h._db().execute(f"ALTER TABLE jobs ADD COLUMN {column} {decl}")
+            self.h._db().execute("ALTER TABLE blockers ADD COLUMN seat TEXT")
+            self.h._db().execute("ALTER TABLE blockers ADD COLUMN generation INTEGER")
             self.h._db().commit()
         elif self.h.name == "postgres":
             self.h.conn.execute("ALTER TABLE agents ADD COLUMN IF NOT EXISTS title text")
             self.h.conn.execute("ALTER TABLE agents ADD COLUMN IF NOT EXISTS message_count bigint NOT NULL DEFAULT 0")
             for column, decl in typed:
                 self.h.conn.execute(f"ALTER TABLE jobs ADD COLUMN IF NOT EXISTS {column} {decl.lower()}")
+            self.h.conn.execute("ALTER TABLE blockers ADD COLUMN IF NOT EXISTS seat text")
+            self.h.conn.execute("ALTER TABLE blockers ADD COLUMN IF NOT EXISTS generation integer")
             from swarm.board.postgres import STATUS_VIEW
             board = self.h.cfg["board"]   # the view is formatted as setup formats it
             self.h.conn.execute(STATUS_VIEW.format(idle=int(board["idle_minutes"]), dead=int(board["dead_minutes"]),
