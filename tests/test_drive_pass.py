@@ -271,6 +271,22 @@ class IsolationTests(PassCase):
         self.assertEqual(sum("DRIVER-ERROR RuntimeError" in p for p in self.posts()), 1)
         self.assertIsNotNone(self.load().ruling_due_at)
 
+    def test_ledger_turning_bad_mid_step_holds_and_posts_not_counts_an_error(self):
+        self.job()
+        self.job("K")
+        self.actions = [self.launch_action()]
+        real = self.exec.reconcile
+
+        def reconcile(board, cfg, led, now, deadline):
+            if led.job == "J":
+                raise ledger.LedgerBadError("went bad")
+            real(board, cfg, led, now, deadline)
+        self.exec.reconcile = reconcile
+        self.drive()
+        self.assertTrue(self.has_post("DRIVER-LEDGER-BAD"))
+        self.assertEqual(self.load("J").errors, 0)
+        self.assertEqual({j for j, _ in self.exec.launched}, {"K"})
+
     def test_success_resets_the_error_count(self):
         self.job()
         self.snap.fail_for = {"J"}
