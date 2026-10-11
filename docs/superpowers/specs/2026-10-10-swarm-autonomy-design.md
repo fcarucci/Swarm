@@ -482,6 +482,15 @@ requester session are refused by the SubagentStart hook with a pointer to `swarm
 serial); memory/file the store lock. Two supervisors (two OS users on one host) therefore cannot both claim
 nested roots. Tested with concurrent nested-root claims from two processes.
 
+**[B1] Seat enrolment never depends on the session's job binding** (finding, 2026-10-10: in this job, four
+coordinator-spawned seats never joined the board because the parent session had several active jobs and the start
+hook did not bind them to swarm-autonomy). A drive seat enrols only through its launch: the resume marker written
+for its restart row names the job, seat, generation and action, and the hook binds the session from that marker,
+whatever other jobs the host or parent session has active. A session that matches no marker and carries no
+`[swarm job: J]` tag is never guessed into a job. The enrol deadline (`enrol_minutes`) still kills a seat that does
+not join, so this failure becomes a failed attempt, never a silent unboarded worker. Test (plan Task 5):
+`test_seat_enrols_from_marker_with_several_active_jobs`.
+
 ### 3.5 The lead, headless under the supervisor
 
 - The lead is the seat `lead` (role `engineering_lead`, title `EL`, model Opus, harness from activation),
