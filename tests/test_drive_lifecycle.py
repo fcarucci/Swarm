@@ -438,7 +438,7 @@ class TerminalizeTests(LifeCase):
 
     def test_job_closed_by_someone_else_is_not_ours_to_finish(self):
         self.pending_met()
-        self.b.close_job("J", "cancelled", "forged", forced=True, closed_by="mallory")
+        self.b.close_job("J", "completed", "forged", forced=True, closed_by="mallory")
         self.assertFalse(life.terminalize(self.b, self.cfg, self.led, self.at(1), hooks=self.run.hooks()))
         self.assertIsNone(self.reload().terminal)
         self.assertEqual(self.job().outcome, "forged")
@@ -452,6 +452,17 @@ class TerminalizeTests(LifeCase):
         life.enforce_deadlines(self.b, self.cfg, self.led, self.t0)
         self.assertTrue(life.terminalize(self.b, self.cfg, self.led, self.at(1), hooks=self.run.hooks()))
         self.assertEqual(self.job().verdict, "unreachable")
+
+    def test_a_row_not_in_the_ledger_is_never_touched(self):
+        lid = self.launch()
+        s = self.seat("forged")
+        self.b.claim_drive_launch(job="J", generation=1, action_id="gen1|seat|forged|-|1|1", attempt=1,
+                                  launch_id="FORGED", seat_id=s.id, seat_revision=s.revision, harness="claude",
+                                  reserve_usd=1, reserve_minutes=1, locks=[], lock_seconds=60, max_host_running=4)
+        self.pending_met()
+        self.assertTrue(life.terminalize(self.b, self.cfg, self.led, self.at(1), hooks=self.run.hooks()))
+        self.assertEqual(self.run.calls[1], ("stop", [lid]))                 # [land, stop(...)]: only ours
+        self.assertIsNone(next(r for r in self.b.restarts("J") if r.launch_id == "FORGED").ended_at)
 
     def test_a_met_is_never_authored_by_the_driver(self):
         life.begin_terminal(self.b, self.led, "met", "goal", "judge", "x", self.t0, candidate=CAND, req=REQ)
@@ -528,6 +539,18 @@ class RolloverTests(LifeCase):
         self.assertFalse(life.rollover(self.b, self.cfg, self.led, self.at(1), hooks=self.run.hooks()))
         self.assertEqual(self.led.generation, 1)
 
+    def test_rollover_touches_only_the_old_generation(self):
+        old, new = self.launch("lead", gen=1), self.launch("lead2", gen=2)
+        self.request(3)
+        self.run.live = set()
+        life.rollover(self.b, self.cfg, self.led, self.at(1), hooks=self.run.hooks())
+        self.assertEqual(self.run.calls, [("stop", [old])])
+        self.assertIsNotNone(self.row(old).ended_at)
+        self.assertIsNone(self.row(new).ended_at)
+        by = {i.launch_id: i.state for i in self.reload().intents}
+        self.assertEqual(by, {old: "concluded", new: "claimed"})
+        self.assertEqual(self.b.seat("J", 2, "lead2").state, "running")
+
     def test_rollover_keeps_charges_and_budgets(self):
         self.launch("lead")
         self.led.budgets = {"max_cost_usd": 12}
@@ -540,17 +563,17 @@ class RolloverTests(LifeCase):
 class HaltTests(LifeCase):
     def test_halt_idles_seats_and_shifts_deadlines(self):
         lid = self.launch()
-        life.halt(self.b, self.cfg, self.led, "francesco", self.at(0), reason="stop", hooks=self.run.hooks())
+        life.halt(self.b, self.cfg, self.led, "francesco", self.at(60), reason="stop", hooks=self.run.hooks())
         self.assertIn(("stop", [lid]), self.run.calls)
         seat = self.b.seat("J", 1, "eng-a")
         self.assertEqual((seat.state, seat.last_outcome, seat.wake_reason), ("idle", "halted", "halted"))
         led = self.reload()
-        self.assertEqual(led.halted, {"by": "francesco", "at": fx.iso(self.at(0)), "reason": "stop"})
+        self.assertEqual(led.halted, {"by": "francesco", "at": fx.iso(self.at(60)), "reason": "stop"})
         self.assertEqual(self.b.job_data("J")["drive.halted"], "francesco")
         intent = led.intents[0]
         self.assertEqual((intent.state, intent.outcome, intent.success), ("concluded", "halted", False))
         self.assertEqual(self.row(lid).outcome, "cancelled")
-        self.assertTrue(life.unhalt(self.b, self.cfg, led, "francesco", self.at(10)))
+        self.assertTrue(life.unhalt(self.b, self.cfg, led, "francesco", self.at(70)))
         led = self.reload()
         self.assertEqual((led.halted, led.halted_total_seconds), (None, 600.0))
         self.assertNotIn("drive.halted", self.b.job_data("J"))
@@ -651,6 +674,13 @@ class QuestionTests(LifeCase):
         self.assertEqual(life.apply_question_expiry(self.b, self.cfg, self.led, self.at(500), [q]), [])
         self.assertEqual(self.b.blocker(b.id).state, "open")
 
+    def test_applied_question_is_not_applied_again_even_if_reopened(self):
+        b, q = self.ask(until=30)
+        life.apply_question_expiry(self.b, self.cfg, self.led, self.at(31), [q])
+        self.assertTrue(self.b.reopen_blocker(b.id, "again", actor="me"))
+        self.assertEqual(life.apply_question_expiry(self.b, self.cfg, self.led, self.at(40), [q]), [])
+        self.assertEqual(self.b.blocker(b.id).state, "open")
+
     def test_halted_time_shifts_the_question_deadline(self):
         b, q = self.ask(until=30)
         self.led.halted_total_seconds = 3600
@@ -673,6 +703,11 @@ class QuestionTests(LifeCase):
         self.assertTrue(self.b.resolve_blocker(b.id, "right", actor="human"))
         self.assertEqual(life.apply_question_expiry(self.b, self.cfg, self.led, self.at(500), [q]), [])
         self.assertEqual(self.b.blocker(b.id).resolved_how, "right")
+        self.assertNotIn(f"qdone:{b.id}", self.led.watermarks)
+
+    def test_question_whose_blocker_is_gone_is_skipped(self):
+        q = fx.q(999, seat="a", default="left", until=self.t0 + 30 * MIN, receipt_id=1)
+        self.assertEqual(life.apply_question_expiry(self.b, self.cfg, self.led, self.at(500), [q]), [])
 
     def test_question_without_default_is_not_applied(self):
         b, q = self.ask(until=30, default=None)
