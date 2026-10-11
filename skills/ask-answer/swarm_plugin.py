@@ -84,6 +84,18 @@ def open_question(ctx, board, job, actor, to, text, options=None, default=None, 
         raise ValueError('options must be distinct nonempty values')
     if options and default is not None and default not in options:
         raise ValueError('default must be one of the options')
+    from swarm.supervisor.orphans import drive_view
+    drive, generation = drive_view(board, ctx.cfg, job)
+    if drive:
+        # A drive job is driven: nobody answers in time, so the driver applies the default on expiry (spec 3.10).
+        if default is None:
+            raise ValueError('a question in a drive (goal) job needs --default: it is applied when the question expires')
+        if not expires:
+            from swarm.supervisor.driver_model import DEFAULT_CFG
+            expires = ((ctx.cfg or {}).get('drive') or {}).get('question_expiry', DEFAULT_CFG['question_expiry'])
+        if blocks is None and actor != 'human':
+            blocks = actor
+    seat = actor if drive and actor != 'human' else None
     until = None
     if expires:
         epoch = cli.wait_deadline(None, expires, board.now().timestamp())
@@ -91,7 +103,8 @@ def open_question(ctx, board, job, actor, to, text, options=None, default=None, 
     # Serialize payload and blocker mutations with the same lock as core resolution/close guards.
     with board._blocker_lock(job):
         b = board.open_blocker(job, 'question', to, text, until=until,
-                               default_value=default, created_by=actor)
+                               default_value=default, created_by=actor,
+                               seat=seat, generation=generation if drive else None)
         save_question(ctx, board, b, {'text': text, 'options': options, 'default': default,
                                      'blocks': blocks, 'asked_by': actor})
     pointer = f' (answer: swarm answer {b.id} ...)'
