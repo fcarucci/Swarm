@@ -154,6 +154,15 @@ class BoardLevelSkip(SkipBase):
             b.expire_blockers(later)
             self.assertEqual(b.blocker(q.id).state, "expired")
 
+    def test_the_ledger_hook_alone_keeps_generic_expiry_off_a_question(self):
+        self.activate("K")
+        with self.board() as b:
+            q = b.open_blocker("K", "question", "human", "which way?", until=b.now() + dt.timedelta(minutes=1),
+                               default_value="left", created_by="a", seat="a", generation=1)
+            b.drive_ledger = lambda job: job == "K"
+            b.expire_blockers(dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1))
+            self.assertEqual(b.blocker(q.id).state, "open")
+
 
 class StuckSkip(SkipBase):
     def setUp(self):
