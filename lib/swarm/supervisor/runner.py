@@ -1425,7 +1425,7 @@ def _adopt_legacy(here: str) -> int:
     return n
 
 
-def reap(cfg: dict, board) -> int:
+def reap(cfg: dict, board, deadline: float | None = None) -> int:
     """Finish the runs whose runner is gone (it died, or finish was deferred: board down, marker
     busy), each while holding its run lock (a held lock means a live runner: skipped). The outcome
     is the one recorded, else "failed". A session that outlived its runner is stopped, its whole
@@ -1439,6 +1439,8 @@ def reap(cfg: dict, board) -> int:
     _adopt_legacy(here)
     n = 0
     for rid, p in _run_paths(here):
+        if deadline is not None and time.monotonic() >= deadline:
+            break      # `deadline` (time.monotonic()): the rest is finished by the next pass
         fd = own(rid, here)
         if fd is None:
             continue   # its runner (or another reap) owns it

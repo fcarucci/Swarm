@@ -388,7 +388,7 @@ def _resume_orphan(board, cfg, job, record, note, *, start_runner=None, config_p
         js = board.job_status(job)
         return (js is not None and js.status == "active" and js.supervise
                 and js.verdict not in SETTLED_VERDICTS and not (js.waiting_on and not js.waiting_on.startswith(WAITING_PREFIX))
-                and not human_question(board, js)
+                and not human_question(board, js, cfg)
                 and not any(a.status in ("started", "running", "idle") for a in board.agents(job))
                 and not command._switched_off_now(cfg, board, job))
     if not allowed():
