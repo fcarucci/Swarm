@@ -843,10 +843,31 @@ class LockSweepTests(LifeCase):
         self.assertEqual(self.b.drive_locks(), [])
         self.assertEqual(self.row(lid).outcome, "timeout")
 
-    def test_lock_of_a_deleted_row_is_released(self):
+    def test_lock_of_a_deleted_row_is_held_without_local_evidence(self):
         self.launch(locks=("land:a:main",))
         with self.b._store.lock:
             self.b._store.restarts.clear()
+        self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.t0, hooks=self.run.hooks()), 0)
+        self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.t0, hooks=self.run.hooks(),
+                                                  board_key="bk"), 0)             # the ledger holds the launch open
+        self.assertEqual(len(self.b.drive_locks()), 1)
+
+    def test_lock_of_a_deleted_row_is_released_once_the_ledger_concluded_the_launch(self):
+        self.launch(locks=("land:a:main",))
+        with self.b._store.lock:
+            self.b._store.restarts.clear()
+        for i in self.led.intents:
+            i.state, i.outcome, i.success, i.charged_usd = "concluded", "cancelled", False, 1.0
+        self.led.save()
+        self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.t0, hooks=self.run.hooks(),
+                                                  board_key="bk"), 1)
+
+    def test_an_ended_row_with_a_live_session_does_not_free_the_lock(self):
+        lid = self.launch(locks=("land:a:main",))
+        self.b.finish_restart(self.row(lid).id, "cancelled")
+        self.run.live.add(lid)
+        self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.t0, hooks=self.run.hooks()), 0)
+        self.run.live.clear()
         self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.t0, hooks=self.run.hooks()), 1)
 
 

@@ -196,6 +196,15 @@ class LockHostTests(T.LifeCase):
             self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.at(1), hooks=self.run.hooks(),
                                                       board_key="bk"), 0)
 
+    def test_another_hosts_lock_is_never_released_here_even_when_its_row_ended(self):
+        lid = self.launch(locks=["repo:x"])
+        self.b.finish_restart(self.row(lid).id, "cancelled")
+        with self.h.store.lock:
+            for l in self.h.store.drive_locks:
+                l["host"] = "host-b"
+        self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.at(1), hooks=self.run.hooks()), 0)
+        self.assertEqual(len(self.b.drive_locks()), 1)
+
     def test_a_row_on_this_host_is_still_fenced_and_released(self):
         lid = self.launch(locks=["repo:x"])
         self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.at(200), hooks=self.run.hooks()), 1)
