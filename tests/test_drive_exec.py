@@ -1214,6 +1214,11 @@ class FixRoundTests(ExecEnv):
         self.assertIsNone(self.go(self.act(seat="eng-a~1", trigger="9")))
         self.assertIsNone(self.b.seat("J", 1, "eng-a~1"))
 
+    def test_H2_an_unauthorized_engineer_base_has_no_successor(self):
+        self.seat("plain", authorize=False)
+        self.assertIsNone(self.go(self.act(seat="plain~1")))
+        self.assertIsNone(self.b.seat("J", 1, "plain~1"))
+
     def test_H2_a_judge_never_gets_a_successor_even_when_authorized(self):
         self.seat("jj", role="judge")
         self.assertIsNone(self.go(self.act(seat="jj~1")))
@@ -1341,7 +1346,8 @@ class FixRoundTests(ExecEnv):
         run = self.go(self.act())
         self.assertEqual(len(self.b.drive_locks()), 1)
         os.unlink(runner.run_file(run["restart_id"], self.bk))             # crashed before the run file
-        self.rec(91)
+        with mock.patch.object(driver_exec, "_sweep_locks"):               # the host sweep would mask a missed release
+            self.rec(91)
         self.assertEqual(self.b.drive_locks(), [])
 
     def test_a_launch_mark_below_the_acknowledged_mark_does_not_move_it_back(self):
