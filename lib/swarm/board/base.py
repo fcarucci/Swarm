@@ -1153,7 +1153,7 @@ def derive_job_status(js: JobStatus, idle_minutes: float, now: _dt.datetime) -> 
         return "active"
     if goal_unmet(js) and not js.idle:
         return WAITING_GOAL
-    last = quiet_start(js)
+    last = quiet_start(js, now=now)
     return "active" if (now - last).total_seconds() < idle_minutes * 60 else "idle"
 
 
@@ -1162,10 +1162,14 @@ def run_start(js: JobStatus) -> _dt.datetime:
     return js.activated_at or js.created_at
 
 
-def quiet_start(js: JobStatus, since: _dt.datetime | None = None) -> _dt.datetime:
+def quiet_start(js: JobStatus, since: _dt.datetime | None = None, now: _dt.datetime | None = None) -> _dt.datetime:
     """When the job's current quiet spell began: the newest of its board activity (`since`, else
-    last_activity_at) and its run's start. A job reopened after a long silence starts quiet anew."""
-    return max(t for t in (since or js.last_activity_at, run_start(js)) if t)
+    last_activity_at), its run's start and, as the floor, its creation. A job reopened after a long
+    silence starts quiet anew. With `now`, a time in the future (clock skew, a bad row) is ignored,
+    so it cannot hold a dead job open for ever."""
+    times = [t for t in (since or js.last_activity_at, run_start(js), js.created_at) if t]
+    valid = [t for t in times if now is None or t <= now]
+    return max(valid) if valid else min(times)
 
 
 def run_agents(agents: Sequence[AgentStatus], start: _dt.datetime) -> list[AgentStatus]:
@@ -1227,7 +1231,7 @@ def stale_waiting(js: JobStatus, now: _dt.datetime, minutes: float, since: _dt.d
     is waiting at all is Board._is_waiting's question."""
     if not minutes or minutes <= 0 or js.started or js.running or js.idle:
         return False
-    return now - quiet_start(js, since) >= _dt.timedelta(minutes=minutes)
+    return now - quiet_start(js, since, now) >= _dt.timedelta(minutes=minutes)
 
 
 def stall_cap(js: JobStatus, stall_hours: float, goal_stall_hours: float) -> float | None:
@@ -1264,7 +1268,7 @@ def orphaned(js: JobStatus, now: _dt.datetime, orphan_minutes: float) -> bool:
     if derive_job_status(js, 0, now) in ("waiting", "paused") or js.status != "active":
         return False
     quiet = _dt.timedelta(minutes=orphan_minutes)
-    return now - quiet_start(js) >= quiet and now - run_start(js) >= quiet
+    return now - quiet_start(js, now=now) >= quiet
 
 
 def auto_close_candidate(js: JobStatus, before: _dt.datetime) -> bool:
@@ -1642,6 +1646,16 @@ class Board(abc.ABC):
         (activated_at), the agents and the verdict are kept, so the job auto-closes again, as
         the same run, once it is quiet. Returns whether it reverted."""
 
+    def drive_job_claimed(self, job: str) -> bool:
+        """Whether `job` belongs to the driver, so no core sweep may close, restart or answer for it:
+        its board row claims drive mode (`drive.enabled`), or a ledger exists for it on this host
+        (`self.drive_ledger(job)`, set by cli.sweep_jobs: the ledger is host-private, the claim is
+        only a board row a writer could clear)."""
+        if self.job_data(job).get("drive.enabled") == "1":
+            return True
+        check = getattr(self, "drive_ledger", None)
+        return bool(check and check(job))
+
     def sweep_auto_close(self, minutes: float, watch=None) -> list[AutoClosed]:
         """Close every open job whose agents are all done and that has been quiet for `minutes`
         (`[job] auto_close_minutes`; 0 or less: nothing). Returns what it closed.
@@ -1664,7 +1678,7 @@ class Board(abc.ABC):
         before = self.now() - _dt.timedelta(minutes=minutes)
         closed = []
         for js in self.jobs(False):
-            if not auto_close_candidate(js, before):
+            if not auto_close_candidate(js, before) or self.drive_job_claimed(js.job):
                 continue
             run = run_agents(self.agents(js.job), run_start(js))
             if not any(a.status in ("completed", "left") for a in run) or \
@@ -1745,6 +1759,8 @@ class Board(abc.ABC):
         self.expire_blockers(now)
         closed = []
         for js in self.jobs(False):
+            if self.drive_job_claimed(js.job):
+                continue   # the driver ends its own jobs: no stale-waiting, stall or orphan close
             seen_activity = js.last_activity_at
             js = self._clear_expired_wait(js, now)
             action = self._stale_waiting_action(js, now, stale_waiting_minutes, stale_waiting_close_minutes,
@@ -1789,7 +1805,7 @@ class Board(abc.ABC):
             return None
         if watch is not None and watch(js.job).active():
             return None
-        quiet_since = quiet_start(js, since)
+        quiet_since = quiet_start(js, since, now)
         total = max(close_minutes or 0, notice_minutes)
         if close_minutes and close_minutes > 0 and now - quiet_since >= _dt.timedelta(minutes=total):
             from swarm.review import auto_close_pending

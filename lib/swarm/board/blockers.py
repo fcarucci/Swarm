@@ -85,7 +85,8 @@ class BlockerLifecycle:
         for js in self.jobs(True):
             rows = open_by_job.get(js.job, ())
             # Drive jobs expire their questions only through the driver, from the ledger's deadline (spec 3.10 [RR3]).
-            drive = bool(rows) and (self.job_data(js.job) or {}).get("drive.enabled") == "1"
+            # (the board's claim, or a ledger on this host: Board.drive_job_claimed)
+            drive = bool(rows) and self.drive_job_claimed(js.job)
             for b in rows:
                 if drive:
                     continue

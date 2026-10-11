@@ -442,6 +442,29 @@ def codex_quiet_seconds(cfg: dict) -> float:
     return float((cfg.get("codex") or {}).get("stop_quiet_minutes", 3)) * 60
 
 
+def cli_closed_by() -> str | None:
+    """The closed_by a person's CLI close records: the user name, except the two names that mean a
+    machine closed the job (the driver's, the auto-close sweep's), which the environment must not forge."""
+    from swarm.board import AUTO_CLOSED_BY
+    user = os.environ.get("USER") or None
+    return None if user in ("driver", AUTO_CLOSED_BY) else user
+
+
+def drive_ledger_present(cfg: dict, job: str) -> bool:
+    """Whether this host holds a drive ledger for `job` (a bad one counts: it is the driver's to
+    report). The core sweeps leave such a job to the driver."""
+    from swarm.board.autoinit import store_key
+    from swarm.supervisor import ledger
+    try:
+        return ledger.load(store_key(cfg), job) is not None
+    except ledger.LedgerBadError:
+        return True
+    except Exception as exc:
+        from swarm import transcripts as _t
+        _t.log(f"sweep: drive ledger check for {job} failed: {type(exc).__name__}")
+        return False
+
+
 def sweep_jobs(board, cfg: dict, deadline: float | None = None) -> list:
     """Close the jobs that are done and quiet (Board.sweep_auto_close over [job]
     auto_close_minutes) and remove this machine's markers of auto-closed jobs, so the hooks stop
@@ -463,6 +486,7 @@ def sweep_jobs(board, cfg: dict, deadline: float | None = None) -> list:
     if deadline is None:
         from swarm import transcripts as _tr
         deadline = time.monotonic() + _tr.SWEEP_SECONDS
+    board.drive_ledger = lambda job: drive_ledger_present(cfg, job)   # drive jobs are the driver's, not the sweeps'
     # A Codex turn ending (or staying quiet) does not prove that its process exited.
     # Completion comes from SessionEnd or the supervisor runner's exit bookkeeping.
     try:
@@ -3331,7 +3355,7 @@ def cmd_deactivate(cfg: dict, args) -> int:
     try:
         with board:
             known = board.close_job(args.job, args.status, args.outcome, forced=forced,
-                                    closed_by=os.environ.get("USER") or None)
+                                    closed_by=cli_closed_by())
             if known and transcripts_enabled(cfg):
                 _capture_final_transcripts(board, cfg, args.job)
             if known:
@@ -3960,7 +3984,7 @@ def _job_merge(board, cfg: dict, args) -> int:
     board.post(dst, SYSTEM_NAME, f"merged job {src} into this job: {names} moved here"
                + (", its goal appended" if sj.goal and sj.goal != dj.goal else ""))
     stuck = [m for m in src_markers if not remove_marker(m)]
-    board.close_job(src, "completed", f"merged into {dst}", closed_by=os.environ.get("USER") or None)
+    board.close_job(src, "completed", f"merged into {dst}", closed_by=cli_closed_by())
     if transcripts_enabled(cfg):
         _capture_final_transcripts(board, cfg, src)
     print(f"merged {src} into {dst}: {len(moved)} agent(s) moved ({names}); {src} is closed (completed, "

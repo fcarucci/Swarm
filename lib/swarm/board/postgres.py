@@ -120,6 +120,11 @@ BEGIN
        AND NEW.outcome LIKE 'auto-closed: no live agents%' THEN
         RETURN NULL;
     END IF;
+    -- a drive job is ended by its driver only: no auto-close outcome (orphan, stale-waiting, stall, quiet)
+    IF NEW.status <> 'active' AND OLD.status = 'active' AND NEW.closed_by = 'auto'
+       AND OLD.plugin_data ~ '"drive\\.enabled"\\s*:\\s*"1"' THEN
+        RETURN NULL;
+    END IF;
     RETURN NEW;
 END $$;
 DROP TRIGGER IF EXISTS jobs_keep_goal_jobs ON jobs;
