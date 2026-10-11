@@ -444,19 +444,18 @@ def codex_quiet_seconds(cfg: dict) -> float:
 
 def cli_closed_by() -> str | None:
     """The closed_by a person's CLI close records: the user name, except the two names that mean a
-    machine closed the job (the driver's, the auto-close sweep's), which the environment must not forge."""
+    machine closed the job (the driver's, the auto-close sweep's), which the environment must not fake."""
     from swarm.board import AUTO_CLOSED_BY
     user = os.environ.get("USER") or None
     return None if user in ("driver", AUTO_CLOSED_BY) else user
 
 
 def drive_ledger_present(cfg: dict, job: str) -> bool:
-    """Whether this host holds a drive ledger entry for `job` (a bad one counts: it is the driver's to
-    report). Read-only: a sweep creates nothing. The core sweeps leave such a job to the driver."""
+    """Whether this host holds an unfinished (or unreadable) drive ledger for `job`. Read-only: a sweep creates nothing. The core sweeps leave such a job to the driver."""
     from swarm.board.autoinit import store_key
     from swarm.supervisor import ledger
     try:
-        return ledger.exists(store_key(cfg), job)
+        return ledger.claims(store_key(cfg), job)
     except Exception as exc:
         from swarm import transcripts as _t
         _t.log(f"sweep: drive ledger check for {job} failed: {type(exc).__name__}")

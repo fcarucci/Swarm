@@ -34,9 +34,9 @@ def _ledger_state(board, cfg, job):
         led = ledger.load(store_key(cfg), job)
     except (ledger.LedgerBadError, settings.PrivateDirError):
         return True, None, True
-    if led is not None:
+    if led is not None and led.terminal is None:
         return True, led.generation, False
-    return claimed, None, False
+    return claimed, None, False       # none, or a finished ledger: a reopened plain job is not driven
 
 
 def drive_view(board, cfg, job):

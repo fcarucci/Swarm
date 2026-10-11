@@ -376,6 +376,19 @@ def exists(board_key: str, job: str) -> bool:
     return os.path.lexists(settings.private_dir() / SUBDIR / _name(board_key, job))
 
 
+def claims(board_key: str, job: str) -> bool:
+    """Whether this host's ledger makes `job` a drive job for the core sweeps: an unfinished ledger, or
+    one that cannot be read (the driver's to report). A finished ledger does not: a job a person
+    reopened as a plain job belongs to the sweeps again. Creates nothing when there is no entry."""
+    if not exists(board_key, job):
+        return False
+    try:
+        led = load(board_key, job)
+    except LedgerBadError:
+        return True
+    return led is not None and led.terminal is None
+
+
 def create(board_key: str, job: str, *, budgets: dict, activated_at: str, state: str = "active",
            models: dict | None = None, pinned: dict | None = None) -> Ledger:
     """A new ledger with a fresh incarnation, written at once. LedgerExistsError if any entry is
