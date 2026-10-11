@@ -289,6 +289,78 @@ class IsolationTests(PassCase):
         self.assertIsNotNone(self.load().ruling_due_at)
 
 
+class StallTests(PassCase):
+    NOBODY = dm.Action(kind="nothing", action_id="gen1|nothing|-|-|0|-", seat=None, prompt_kind=None, reason="x")
+
+    def drive_at(self, minutes):
+        return self.drive(now=self.t0 + dt.timedelta(minutes=minutes))
+
+    def test_driver_stalled_after_two_timer_periods_without_a_responsible_actor(self):
+        self.job()
+        self.actions = [self.NOBODY]
+        self.drive_at(0)
+        self.drive_at(9)
+        self.assertFalse(self.has_post("DRIVER-STALLED"))                     # 2 x timer_minutes (5) = 10
+        self.drive_at(11)
+        self.drive_at(12)
+        self.assertEqual(sum("DRIVER-STALLED" in p for p in self.posts()), 1)  # once
+
+    def test_a_responsible_actor_resets_the_stall_clock(self):
+        self.job()
+        self.actions = [self.NOBODY]
+        self.drive_at(0)
+        self.actions = [dm.Action(kind="nothing", action_id="gen1|nothing|-|-|0|-", seat=None, prompt_kind=None,
+                                  responsible="eng", reason="responsible")]
+        self.drive_at(8)
+        self.assertNotIn("stalled.since", self.load().watermarks)
+        self.actions = [self.NOBODY]
+        self.drive_at(12)
+        self.drive_at(15)
+        self.assertFalse(self.has_post("DRIVER-STALLED"))
+
+    def test_a_launch_is_never_a_stall(self):
+        self.job()
+        self.actions = [self.launch_action()]
+        for minute in (0, 11, 22):
+            self.drive_at(minute)
+        self.assertFalse(self.has_post("DRIVER-STALLED"))
+
+    def test_an_open_attempt_is_a_responsible_runner(self):
+        led = self.job()
+        led.intents.append(ledger.Intent(launch_id="L1", action_id="gen1|seat|eng|-|1|1", attempt=1, seat="eng",
+                                         reserved_usd=1.0, reserved_minutes=5.0, locks=[], state="claimed"))
+        led.save()
+        self.actions = [self.NOBODY]
+        for minute in (0, 11, 22):
+            self.drive_at(minute)
+        self.assertFalse(self.has_post("DRIVER-STALLED"))
+
+
+class EventsSafetyTests(PassCase):
+    def test_no_waiter_stale_or_unacked_alerts_for_drive_jobs_but_for_plain_ones(self):
+        from swarm import events_listener, events_safety
+        self.job()
+        self.board.open_job("P", None, None, None, "me", goal=GOAL)
+        for name in ("J", "P"):
+            self.board.post_event(name, "ci", "k", "CI failed")
+        later = self.board.now() + dt.timedelta(hours=3)
+        s = events_listener.settings(self.cfg)
+        drive = events_safety.check_job(self.board, s, self.board.job_status("J"), later)
+        plain = events_safety.check_job(self.board, s, self.board.job_status("P"), later)
+        self.assertEqual(drive, [])
+        self.assertIn("unacked", {p.code for p in plain})
+
+    def test_no_model_triage_for_a_drive_job(self):
+        from swarm import events_listener, events_safety
+        self.job()
+        cfg = {**self.cfg, "events": {**self.cfg.get("events", {}), "triage": True}}
+        calls = []
+        problems = [events_safety.Problem("J", "listener-down", "x")]
+        events_safety.report(self.board, cfg, problems, run=lambda *a, **k: calls.append(a) or
+                             SimpleNamespace(returncode=0, stdout="a line"))
+        self.assertEqual(calls, [])
+
+
 class TamperTests(PassCase):
     def test_tamper_closed_job_is_reopened(self):
         self.job()
