@@ -437,6 +437,23 @@ class LandTests(PassCase):
         self.assertEqual(self.land.repo, "o/r")
         self.assertEqual(env.ci_status("x"), "green")
 
+    def test_fields_the_land_env_has_are_filled(self):
+        import dataclasses
+        from swarm import land as real
+        @dataclasses.dataclass
+        class Env(real.LandEnv):
+            left: float = 0.0
+            activation_heads: dict = dataclasses.field(default_factory=dict)
+            config_dirs: dict = dataclasses.field(default_factory=dict)
+        led = self.job()
+        led.activation_heads = {"u": "b" * 40}
+        owner = SimpleNamespace(owner={"remotes": {}, "config_dirs": {"u": "/gh"}})
+        with mock.patch.object(real, "LandEnv", Env):
+            env = driver._land_env(self.cfg, led, owner, SimpleNamespace(verdicts={}), print,
+                                   time.monotonic() + 12, self.mods)
+        self.assertTrue(0 < env.left <= 12)
+        self.assertEqual((env.activation_heads, env.config_dirs), ({"u": "b" * 40}, {"u": "/gh"}))
+
     def test_left_is_the_remaining_job_slot(self):
         import dataclasses
         from swarm import land as real
@@ -482,9 +499,18 @@ class LandTests(PassCase):
 
     def test_a_pending_request_keeps_the_integrator_and_counts(self):
         self.job()
+        name = self.mods.exec.seat_name("integrator", "feat/a")
+        seat = self.board.request_seat("J", 1, name, role="integrator", harness="claude", model="haiku",
+                                       workdir="/w", brief_path="/w/B.md", requested_by="lead")
+        row = self.board.claim_drive_launch(job="J", generation=1, action_id="gen1|integrate|-|feat/a|1|5",
+                                            attempt=1, launch_id="L2", seat_id=seat.id, seat_revision=seat.revision,
+                                            harness="claude", reserve_usd=1.0, reserve_minutes=5, locks=[],
+                                            lock_seconds=600, max_host_running=4)
+        self.board.finish_restart(row.id, "completed")                         # session over, landing pending
         self.land.requests, self.land.pending = [self.request()], True
         self.drive()
         self.assertEqual(self.load().watermarks[driver.LAND_PENDING_KEY], 1)
+        self.assertEqual(self.board.seat("J", 1, name).state, "running")       # not idled until it lands
 
     def test_n_pending_passes_make_a_ruling_due_and_one_clean_pass_resets(self):
         self.job()
@@ -713,6 +739,8 @@ class TamperTests(PassCase):
                 self.board.close_job(name, wrong, "x", forced=True, closed_by=life.CLOSED_BY)
                 self.drive()
                 self.assertTrue(self.has_post("DRIVER-TAMPER", name))
+                self.assertEqual(self.board.job_status(name).status, "active")
+                self.assertIsNone(self.load(name).terminal)
 
     def test_a_receipt_does_not_excuse_tamper_on_an_open_job(self):
         self.job()
@@ -788,6 +816,8 @@ class TamperTests(PassCase):
         self.board.close_job("J", "cancelled", "x", forced=True, closed_by=life.CLOSED_BY)
         self.drive()
         self.assertTrue(self.has_post("DRIVER-TAMPER"))
+        self.assertEqual(self.board.job_status("J").status, "active")          # reopened
+        self.assertIsNone(self.load().terminal)
 
     def test_forged_closed_by_driver_without_the_window_is_tamper_not_a_commit(self):
         led = self.job()
@@ -1157,10 +1187,20 @@ class PromptTests(PassCase):
         text = prompts.render(self.board, self.cfg, led, self.action("lead"), self.seat("engineering_lead", "lead",
                                                                                           wake=events[0].id))
         mid = self.board.recent_messages(1, job="J")[0].id
-        self.assertIn(f"events up to #{events[-1].id}", text)
+        self.assertNotIn("events up to", text)                                 # no high-water mark for events
         self.assertIn(f"messages up to #{mid}", text)
         self.assertIn(f"#{events[-1].id}", text.split("Pending wake event ids:")[1].splitlines()[0])
         self.assertNotIn(f"#{events[0].id},", text.split("Pending wake event ids:")[1].splitlines()[0])   # acked
+
+    def test_a_far_event_id_cannot_freeze_the_leads_event_mark(self):
+        led = self.job()
+        ev = lambda i: SimpleNamespace(id=i, kind="ci", text=f"event {i}")
+        board = SimpleNamespace(recent_messages=lambda n, job=None: [], pending_events=lambda job: [ev(3), ev(10 ** 9)])
+        text = prompts.render(board, self.cfg, led, self.action("lead"), self.seat("engineering_lead", "lead"))
+        listed = text.split("Pending wake event ids:")[1].splitlines()[0]
+        self.assertEqual(listed.strip(), "#3, #1000000000")                     # exactly the shown ids
+        self.assertNotIn("up to #1000000000", text)
+        self.assertIn("never skipped over", text)
 
     def test_lead_prompt_without_events_says_none(self):
         led = self.job()
