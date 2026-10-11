@@ -131,7 +131,7 @@ class NextActions(unittest.TestCase):
     def test_goal_ready_and_all_integrated_launches_goal_judge(self):
         s = snap(seats={}, ledger=L(owners={"feat/a": "a"}), handoffs=[ho(A, by="a")],
                  verdicts={A: v("met")}, integrated={"feat/a": {"landed": "abc"}},
-                 goal_ready={"candidate": "main@abc", "at": T0})
+                 goal_ready={"candidate": "main@abc", "req": "r1", "at": T0})
         (a,) = next_actions(s, CFG)
         self.assertEqual((a.kind, a.prompt_kind), ("launch", "goal"))
 
@@ -157,7 +157,7 @@ class NextActions(unittest.TestCase):
         s = snap(seats={"a": seat("a", "idle")}, ledger=L(owners={"feat/a": "a", "feat/b": "a"}),
                  handoffs=[ho(A, by="a"), ho(B, by="a")], verdicts={A: v("met")},
                  integrated={"feat/a": {"landed": "abc"}, "feat/b": {"withdrawn": "abandoned"}},
-                 goal_ready={"candidate": "main@abc", "at": T0})
+                 goal_ready={"candidate": "main@abc", "req": "r1", "at": T0})
         (a,) = next_actions(s, CFG)
         self.assertEqual((a.kind, a.prompt_kind), ("launch", "goal"))
 
@@ -225,7 +225,7 @@ class NextActions(unittest.TestCase):
 
     def test_artifact_recipe_goal_judge_after_all_groups_met(self):
         base = dict(seats={"a": seat("a", "idle")}, ledger=L(owners={"report:x": "a"}),
-                    handoffs=[ho(R, by="a")], goal_ready={"candidate": "report:x@" + "c" * 40, "at": T0})
+                    handoffs=[ho(R, by="a")], goal_ready={"candidate": "report:x@" + "c" * 40, "req": "r1", "at": T0})
         met = next_actions(snap(verdicts={R: v("met")}, **base), ARTIFEXT_CFG)
         self.assertEqual(named(met), [("launch", None, "goal")])
         not_met = next_actions(snap(verdicts={R: v("not_met", open=1)}, **base), ARTIFEXT_CFG)
@@ -307,7 +307,8 @@ class TriggerIds(unittest.TestCase):
 
     def test_judge_id_follows_the_hand_off_receipt(self):
         def judge(receipt):
-            s = snap(seats={"lead": seat("lead", "idle", **LEAD)}, handoffs=[ho(A, by="a", receipt_id=receipt)])
+            s = snap(seats={"lead": seat("lead", "idle", **LEAD)}, handoffs=[ho(A, by="a", receipt_id=receipt)],
+                     reviews={A: "verified"})
             return next_actions(s, CFG)[0].action_id
         self.assertEqual(judge(1), "gen1|judge|-|feat/a|1|1")
         self.assertNotEqual(judge(1), judge(2))

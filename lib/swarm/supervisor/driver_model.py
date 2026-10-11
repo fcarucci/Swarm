@@ -131,7 +131,7 @@ class Action:
 
 # --- decisions ---------------------------------------------------------------------------------
 # Action reasons that count against the single progress counter `rounds_without_progress` (spec 3.3, "One
-# progress counter"). A judged round (review/judge/integration verdicts) counts unless `progress()` says it moved.
+# progress counter"). A judged round counts unless `progress()` says it moved.
 NO_PROGRESS_REASONS = frozenset({"invariant-fallback", "stall", "max-seats-refused", "finalize-blocked"})
 
 # Shipped `[drive]` defaults (spec 4.1 and 3.x); a job's `ledger.budgets` overrides them, and the caller's cfg
@@ -194,15 +194,20 @@ class _Ctx:
         self.open = [i for i in s.ledger.intents if i.state != "concluded"]
         self.exhausted = False
         self.expiry = dt.timedelta(minutes=_minutes(self.cfg["question_expiry"]))
+        # The ruling's trigger: its due time. The caller records ledger.ruling_due_at at the first pass that
+        # finds a due reason (Task 8); until it does, the quiesce holds from now.
+        self.rtrig = s.ledger.ruling_due_at or "unrecorded"
 
-    def aid(self, kind: str, seat: str | None, group: str | None, rnd: int, event: str) -> str:
-        return f"gen{self.s.generation}|{kind}|{seat or '-'}|{group or '-'}|{rnd}|{event or '-'}"
+    def aid(self, prompt: str, seat: str | None, group: str | None, rnd: int, trigger: str) -> str:
+        """`gen<N>|<prompt kind>|<seat>|<group>|<round>|<trigger>`: retries of one trigger share the id."""
+        return f"gen{self.s.generation}|{prompt}|{seat or '-'}|{group or '-'}|{rnd}|{trigger}"
 
     def act(self, kind: str, seat: str | None, group: str | None, rnd: int, *, prompt: str | None = None,
-            event: str | None = None, artifact: str | None = None, ruling: bool = False, reason: str = "",
+            trigger: object = None, artifact: str | None = None, ruling: bool = False, reason: str = "",
             not_before: datetime | None = None, responsible: str | None = None) -> Action:
-        ev = event if event is not None else (prompt or "-")
-        return Action(kind=kind, action_id=self.aid(kind, seat, group, rnd, ev), seat=seat, prompt_kind=prompt,
+        slot = prompt or kind
+        trig = "-" if trigger is None else str(trigger)
+        return Action(kind=kind, action_id=self.aid(slot, seat, group, rnd, trig), seat=seat, prompt_kind=prompt,
                       artifact=artifact, ruling=ruling, reason=reason, not_before=not_before,
                       responsible=responsible)
 
@@ -217,6 +222,10 @@ class _Ctx:
 
     def seat_has_open_intent(self, name: str) -> bool:
         return any(i.seat == name for i in self.open)
+
+    def last_launch(self, name: str) -> str:
+        ids = [i.launch_id for i in self.s.ledger.intents if i.seat == name]
+        return ids[-1] if ids else "none"
 
     def gated(self, name: str) -> datetime | None:
         """The time a seat's open question holds it until (spec 3.10, [F1]): capped at question_expiry."""
@@ -236,7 +245,7 @@ class _Ctx:
         return sum(1 for i in self.s.ledger.intents if i.outcome != "lost")
 
     def due_reason(self) -> str | None:
-        """Why a ruling is due now (spec 3.3 step 3, 4.1, 3.6, 3.8 [F19], 3.2 [F22], 3.7 and 3.5 [F3])."""
+        """Why a ruling is due now (spec 3.3 step 3, 4.1, 3.6, 3.8 [F19], 3.2 [F22], 3.5 [F3])."""
         led, cfg = self.s.ledger, self.cfg
         if led.errors >= cfg["driver_error_passes"]:
             return "driver-errors"
@@ -265,14 +274,15 @@ class _Ctx:
         return max(stamps) if stamps else None
 
     def ruling_action(self, reason: str) -> Action:
-        return self.act("launch", None, "ruling", 0, prompt="ruling", ruling=True, reason=reason)
+        return self.act("launch", None, "ruling", 0, prompt="ruling", trigger=self.rtrig, ruling=True,
+                        reason=reason)
 
 
 def _terminal(c: _Ctx) -> list[Action] | None:
     """Step 2 (spec 3.3): a receipted terminal goal or ruling verdict closes the job (spec 3.7)."""
     gv = c.s.goal_verdict
     if _valid(gv, c.s.generation) and gv.verdict in ("met", "unreachable") and gv.scope in ("goal", "ruling"):
-        return [c.act("close", None, None, 0, prompt="close", reason=gv.verdict)]
+        return [c.act("close", None, None, 0, prompt="close", trigger=gv.receipt_id, reason=gv.verdict)]
     return None
 
 
@@ -289,20 +299,22 @@ def _ruling(c: _Ctx) -> list[Action] | None:
     if c.live:                                                                # quiesce (spec 3.6)
         grace = dt.timedelta(minutes=c.cfg["ruling_grace_minutes"])
         if elapsed < grace:
-            return [c.act("hold", None, "ruling", 0, prompt="quiesce", ruling=True, reason=reason,
-                          not_before=since + grace)]
-        return [c.act("stop_seat", name, "ruling", 0, prompt="quiesce", ruling=True, reason=reason)
+            return [c.act("hold", None, "ruling", 0, prompt="quiesce", trigger=c.rtrig, ruling=True,
+                          reason=reason, not_before=since + grace)]
+        return [c.act("stop_seat", name, "ruling", 0, prompt="quiesce", trigger=c.seats[name].revision,
+                      ruling=True, reason=reason)
                 for name in sorted(c.live)]
     deadline = dt.timedelta(minutes=c.cfg["ruling_deadline_minutes"])
     if led.ruling_attempts >= c.cfg["ruling_attempts"] or elapsed >= deadline:  # 2.2: mechanical
         cause = "ruling attempts exhausted" if led.ruling_attempts >= c.cfg["ruling_attempts"] \
             else "ruling deadline passed"
-        return [c.act("record_unreachable", None, "ruling", 0, prompt="mechanical", ruling=True, reason=cause)]
+        return [c.act("record_unreachable", None, "ruling", 0, prompt="mechanical", trigger=c.rtrig,
+                      ruling=True, reason=cause)]
     if c.inflight("ruling"):
         return [c.act("nothing", None, None, 0, responsible="ruling", reason="ruling-in-flight")]
     if led.charged_usd() >= c.cfg["max_cost_usd"]:                            # reserve gone too (4.1)
-        return [c.act("record_unreachable", None, "ruling", 0, prompt="mechanical", ruling=True,
-                      reason="budget reserve spent")]
+        return [c.act("record_unreachable", None, "ruling", 0, prompt="mechanical", trigger=c.rtrig,
+                      ruling=True, reason="budget reserve spent")]
     return [c.ruling_action(reason)]
 
 
@@ -333,7 +345,8 @@ def _owner_seat(c: _Ctx, owner: str) -> str | None:
 
 def _pipeline(c: _Ctx) -> list[Action] | None:
     """Step 4 (spec 3.3, 3.6, 3.8): review, judge, fix on the owner, integrate, FINALIZE_BLOCKED. Withdrawn
-    groups (F9) and groups with a launch in flight are skipped. Out-of-attempts actions set `exhausted`."""
+    groups (F9) and groups with a launch in flight are skipped. Out-of-attempts actions set `exhausted`.
+    The trigger of each action is the record that caused it (plan 88854be)."""
     s, cfg = c.s, c.cfg
     latest: dict[str, HandoffView] = {}
     count: dict[str, int] = {}
@@ -345,72 +358,76 @@ def _pipeline(c: _Ctx) -> list[Action] | None:
         ig = s.integrated.get(group) or {}
         if ig.get("withdrawn") or c.inflight(group):
             continue
-        art, rnd = h.artifact, count[group]
+        art, rnd, rec = h.artifact, count[group], h.receipt_id
         owner = s.ledger.owners.get(group) or h.by
         vd = _verdict(c, art)
         review = s.reviews.get(art)
         act = None
         if vd is None:
             if cfg["review_role"] and review is None:                         # unreviewed → reviewer (3.6)
-                act = c.act("launch", None, group, rnd, prompt="review", artifact=art)
+                act = c.act("launch", None, group, rnd, prompt="review", trigger=rec, artifact=art)
             elif review == "changes":                                          # CHANGES → fix round (3.6)
-                act = _fix(c, group, art, rnd, owner, "changes")
+                act = _fix(c, group, art, rnd, owner, "changes", rec)
             else:
-                act = c.act("launch", None, group, rnd, prompt="judge", artifact=art)
+                act = c.act("launch", None, group, rnd, prompt="judge", trigger=rec, artifact=art)
         elif vd.verdict == "not_met":                                          # not_met → fix (3.6)
-            act = _fix(c, group, art, rnd, owner, "not-met")
+            act = _fix(c, group, art, rnd, owner, "not-met", vd.receipt_id)
         elif vd.verdict == "met":
             if cfg["recipe"] == "artifact":                                    # 3.7 [G3]: no integration
                 continue
             if ig.get("blocked"):                                              # FINALIZE_BLOCKED (3.8)
-                act = _fix(c, group, art, rnd, owner, "finalize-blocked")
+                act = _fix(c, group, art, rnd, owner, "finalize-blocked", ig.get("blocked_id", rec))
             elif not ig.get("landed"):                                         # met → integrator (3.8)
-                act = c.act("launch", None, group, rnd, prompt="integrate", artifact=art)
+                act = c.act("launch", None, group, rnd, prompt="integrate", trigger=rec, artifact=art)
         if act is None:
             continue
-        if act.action_id and c.attempts(act.action_id) >= cfg["max_attempts"]:  # out of attempts (3.2)
+        if c.attempts(act.action_id) >= cfg["max_attempts"]:                  # out of attempts (3.2)
             c.exhausted = True
             continue
         out.append(act)
     return out or None
 
 
-def _fix(c: _Ctx, group: str, art: str, rnd: int, owner: str, reason: str) -> Action | None:
+def _fix(c: _Ctx, group: str, art: str, rnd: int, owner: str, reason: str, trigger: object) -> Action | None:
     seat = _owner_seat(c, owner)
     if seat is None or c.gated(seat) is not None:
         return None
-    return c.act("launch", seat, group, rnd, prompt="fix", artifact=art, reason=reason)
+    return c.act("launch", seat, group, rnd, prompt="fix", trigger=trigger, artifact=art, reason=reason)
 
 
 def _seat_requests(c: _Ctx) -> list[Action]:
-    """Step 5 (spec 3.4): fill requested seats within the host cap. A request beyond `max_seats` is refused and
-    wakes the lead once (counted, spec 3.3 [F11]). Launch attempts are counted per action."""
+    """Step 5 (spec 3.4): fill requested seats within the host cap. `max_seats` counts distinct seats of the
+    generation, dead ones included (spec 4.1): a request beyond the cap is refused, and wakes the lead once
+    (counted, spec 3.3 [F11]). Launch attempts are counted per trigger (the seat revision)."""
     out: list[Action] = []
-    refused = False
-    room = c.cfg["max_concurrent_sessions"] - len(c.live)
-    for name in sorted(c.seats):
+    refused: list[int] = []
+    room = c.cfg["max_concurrent_sessions"] - len(c.live)     # per job; the host-wide cap is Task 8
+    admitted = sum(1 for st in c.seats.values() if st.state != "requested")
+    for name in sorted(c.seats, key=lambda n: c.seats[n].id):
         st = c.seats[name]
         if st.state != "requested" or c.gated(name) is not None:
             continue
-        if len(c.seats) > c.cfg["max_seats"]:
-            refused = True
+        if admitted >= c.cfg["max_seats"]:
+            refused.append(st.revision)
             continue
+        admitted += 1
         if room <= 0:
             continue
-        act = c.act("launch", name, None, 0, prompt="seat", reason="request")
+        act = c.act("launch", name, None, 0, prompt="seat", trigger=st.revision, reason="request")
         if c.attempts(act.action_id) >= c.cfg["max_attempts"]:
             c.exhausted = True
             continue
         out.append(act)
         room -= 1
     if refused and c.is_lead_wakeable():
-        out.append(c.act("launch", c.lead, None, 0, prompt="wake", event="max-seats",
+        out.append(c.act("launch", c.lead, None, 0, prompt="wake", trigger=min(refused),
                          reason="max-seats-refused"))
     return out
 
 
 def _seat_wakes(c: _Ctx) -> list[Action]:
-    """Step 6 (spec 3.4, 3.10): an idle non-lead seat with pending wake events resumes, unless gated."""
+    """Step 6 (spec 3.4, 3.10): an idle non-lead seat with pending wake events resumes, unless gated. The
+    trigger is the smallest pending event id (coalesced wakes)."""
     out: list[Action] = []
     for name in sorted(c.s.wakes):
         ids = c.s.wakes[name] or []
@@ -419,58 +436,63 @@ def _seat_wakes(c: _Ctx) -> list[Action]:
             continue
         if c.gated(name) is not None:
             continue
-        out.append(c.act("launch", name, None, 0, prompt="wake", event=str(min(ids)), reason="wake"))
+        out.append(c.act("launch", name, None, 0, prompt="wake", trigger=min(ids), reason="wake"))
     return out
 
 
 def _stalls(c: _Ctx) -> list[Action] | None:
     """Step 7 (spec 3.9): a running seat that is not live is relaunched (stall, counted); with seats live and no
-    progress for `stall_minutes`, the lead is woken (counted)."""
+    progress for `stall_minutes`, the lead is woken (counted). The relaunch trigger is the lost launch."""
     out = []
     for name in sorted(c.seats):
         st = c.seats[name]
         if st.state == "running" and name not in c.live and not c.seat_has_open_intent(name) \
                 and c.gated(name) is None:
-            out.append(c.act("launch", name, None, 0, prompt="relaunch", event="stall", reason="stall"))
+            out.append(c.act("launch", name, None, 0, prompt="relaunch", trigger=c.last_launch(name),
+                             reason="stall"))
     if out:
         return out
     last = c.last_activity()
     if c.live and c.is_lead_wakeable() and last is not None \
             and c.now - last >= dt.timedelta(minutes=c.cfg["stall_minutes"]):
-        return [c.act("launch", c.lead, None, 0, prompt="wake", event="stall", reason="stall")]
+        return [c.act("launch", c.lead, None, 0, prompt="stall", trigger=last.isoformat(), reason="stall")]
     return None
 
 
 def _lead_wake(c: _Ctx) -> list[Action] | None:
     """Step 8 (spec 3.5, [F3]): the active lead resumes on lead-wake events while idle. A failed first lead gets
-    one successor `lead~1`; its failure is a ruling (see `_ruling`)."""
+    one successor `lead~1`; its failure is a ruling (see `_due_reason`)."""
     name = c.lead
     if name is None:
         return None
     st = c.seats[name]
     if st.state == "failed" and name == "lead":
-        return [c.act("launch", "lead~1", None, 0, prompt="lead", reason="lead-successor")]
+        return [c.act("launch", "lead~1", None, 0, prompt="lead", trigger=st.revision, reason="lead-successor")]
     if c.gated(name) is not None:
         return None
     if st.state == "idle" and c.s.wakes.get(name):
-        ids = c.s.wakes[name]
-        return [c.act("launch", name, None, 0, prompt="wake", event=str(min(ids)), reason="wake")]
+        return [c.act("launch", name, None, 0, prompt="wake", trigger=min(c.s.wakes[name]), reason="wake")]
     return None
 
 
-def _newer(a: datetime | None, b: datetime | None) -> bool:
-    return a is not None and (b is None or a > b)
+def _ts_of(gr: dict) -> datetime | None:
+    at = gr.get("at")
+    if isinstance(at, str):
+        return _ts(at)
+    return at if isinstance(at, datetime) else None
 
 
 def _goal(c: _Ctx) -> list[Action] | None:
     """Step 9 (spec 3.7, 3.7 [G3], [F9]): GOAL-READY with nothing live and every non-withdrawn group integrated
-    (coding) or judged met (artifact) launches the goal judge."""
+    (coding) or judged met (artifact) launches the goal judge. The verdict must bind the pinned requirements
+    (`req`), so a GOAL-READY without one is not judged."""
     s = c.s
     gr = s.goal_ready
-    if gr is None or c.live or c.inflight("goal"):
+    if gr is None or not gr.get("req") or c.live or c.inflight("goal"):
         return None
     gv = s.goal_verdict
-    if _valid(gv, s.generation) and (gv.verdict != "not_met" or not _newer(_ts_of(gr), gv.at)):
+    at = _ts_of(gr)
+    if _valid(gv, s.generation) and (gv.verdict != "not_met" or at is None or gv.at is None or at <= gv.at):
         return None
     for group, h in {x.group: x for x in s.handoffs}.items():
         ig = s.integrated.get(group) or {}
@@ -482,23 +504,27 @@ def _goal(c: _Ctx) -> list[Action] | None:
                 return None
         elif not ig.get("landed") or ig.get("blocked"):
             return None
-    return [c.act("launch", None, "goal", 0, prompt="goal", artifact=gr.get("candidate"), reason="goal-ready")]
-
-
-def _ts_of(gr: dict) -> datetime | None:
-    at = gr.get("at")
-    return at if isinstance(at, datetime) else None
+    return [c.act("launch", None, "goal", 0, prompt="goal", trigger=gr.get("id"), artifact=gr.get("candidate"),
+                  reason="goal-ready")]
 
 
 def _fallback(c: _Ctx) -> list[Action]:
-    """Step 10 (spec 3.3 invariant): nothing live, nothing pending: wake the lead (counted), or hold on a gated
-    lead (F1), or rule when the lead cannot run."""
+    """Step 10 (spec 3.3 invariant): nothing live, nothing pending. A gated seat holds the job until its question
+    expires (F1; the lead is not woken, the gated seat is responsible). Otherwise wake the lead (counted), or
+    rule when the lead cannot run."""
+    gates = []
+    for name in sorted(c.seats):
+        until = c.gated(name)
+        if until is not None:
+            gates.append((until, name))
+    if gates:
+        until, _ = min(gates)
+        return [c.act("hold", None, None, 0, prompt="question", trigger=until.isoformat(),
+                      reason="question-gated", not_before=until)]
     lead = c.lead
-    until = c.gated(lead) if lead else None
-    if until is not None:
-        return [c.act("hold", None, None, 0, prompt="question", reason="question-gated", not_before=until)]
     if lead is not None and c.seats[lead].state in ("idle", "requested"):
-        return [c.act("launch", lead, None, 0, prompt="lead", event="fallback", reason="invariant-fallback")]
+        return [c.act("launch", lead, None, 0, prompt="fallback", trigger=c.s.ledger.rounds_without_progress,
+                      reason="invariant-fallback")]
     return [c.ruling_action("lead-unavailable")]          # the lead cannot run: a ruling (spec 3.3 step 10)
 
 
@@ -535,16 +561,16 @@ def counts_as_no_progress(action: Action) -> bool:
     return action.reason in NO_PROGRESS_REASONS
 
 
-def progress(prev: dict | None, new: dict) -> bool:
-    """Spec 3.6: a judged round is progress when its artifact is new and `open` decreased, or the judge passed
-    `progress: "yes"`, or an artifact group was integrated. A goal verdict's decreased `open` also counts."""
-    if new.get("integrated") or new.get("progress") == "yes":
+def progress(prev: VerdictView | None, new: VerdictView, integrated: bool = False) -> bool:
+    """Spec 3.6 (plan eceb35e): a judged round is progress when the judge passed `--progress yes` (its
+    `progress` is True), or an artifact group was integrated, or its artifact is new and `open` decreased.
+    A goal verdict's decreased `open` also counts."""
+    if integrated or new.progress is True:
         return True
     if prev is None:
         return False
-    before, after = prev.get("open"), new.get("open")
-    if before is None or after is None or after >= before:
+    if prev.open is None or new.open is None or new.open >= prev.open:
         return False
-    if new.get("scope") == "goal":
+    if new.scope == "goal":
         return True
-    return new.get("artifact") != prev.get("artifact")
+    return new.artifact != prev.artifact
