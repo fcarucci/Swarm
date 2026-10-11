@@ -17,8 +17,45 @@ def local_record(cfg, js):
     return enrolment.find_job(key, js.job)
 
 
-def human_question(board, js):
-    """An unanswered question addressed to the owner/user is an external wait."""
+def drive_view(board, cfg, job):
+    """(drive, generation) of `job`. A drive job is one the host's ledger holds (a bad ledger counts, so
+    the gate fails closed) or whose board row claims drive (`drive.enabled`). The generation is the
+    ledger's, None without one. Without `cfg` only the board's claim is read."""
+    claimed = (board.job_data(job) or {}).get("drive.enabled") == "1"
+    if cfg is None:
+        return claimed, None
+    import os
+    from swarm.board.autoinit import store_key
+    from swarm.supervisor import ledger, privfs, settings
+    if not os.path.lexists(settings.private_dir() / ledger.SUBDIR):
+        return claimed, None   # no ledger directory here; a read must not create one (dry runs change nothing)
+    try:
+        led = ledger.load(store_key(cfg), job)
+    except (ledger.LedgerBadError, privfs.PrivateDirError):
+        return True, None
+    if led is not None:
+        return True, led.generation
+    return claimed, None
+
+
+def drive_gate(board, cfg, job):
+    """None for a job that is not a drive job; otherwise the seats whose question is open in the job's
+    current generation (spec 3.10). A drive job's own waits and questions gate only those seats."""
+    from swarm.board.blockers import open_question_seats
+    drive, generation = drive_view(board, cfg, job)
+    return frozenset(open_question_seats(board, job, generation)) if drive else None
+
+
+def coordinator_seat(name):
+    """The seat that coordinates a drive job (the lead, or a successor lead)."""
+    return name == "lead" or name.startswith("lead~")
+
+
+def human_question(board, js, cfg=None):
+    """An unanswered question addressed to the owner/user is an external wait. Never for a drive job:
+    its questions gate their own seats (drive_gate), not the job."""
+    if drive_gate(board, cfg, js.job) is not None:
+        return False
     owner = (getattr(js, "created_by", None) or "").casefold()
     humans = {"user", "human", "owner", "francesco", owner} - {""}
     answered = set()
@@ -34,10 +71,13 @@ def eligible(board, cfg, js, sup, now):
     from swarm.cli import OrchestratorWatch
     if js.status != "active" or not js.supervise:
         return False
-    if js.waiting_on and not js.waiting_on.startswith(WAITING_PREFIX):
+    gate = drive_gate(board, cfg, js.job)
+    if gate is None and js.waiting_on and not js.waiting_on.startswith(WAITING_PREFIX):
         return False  # all explicit external/human waits stay under owner control
-    if human_question(board, js):
+    if human_question(board, js, cfg):
         return False
+    if gate and any(coordinator_seat(seat) for seat in gate):
+        return False  # the coordinator itself waits on a question: it is not restarted
     cutoff = now - dt.timedelta(minutes=sup["orphan_minutes"])
     activity = js.last_activity_at or js.activated_at or js.created_at
     if activity > cutoff or js.started or js.running or js.idle:
