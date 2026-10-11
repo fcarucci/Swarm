@@ -3,9 +3,11 @@
 
 Every command that creates or changes a control record prints, as its last stdout line,
 `swarm-record: kind=<kind> id=<n> rev=<n>`; a refusal says why on stderr and exits 1. Drive commands never
-spool (spec F18): an unreachable board is an error, not a queued post. Who may act:
-- seat request, seat release, goal-ready: the job's lead seat (its enrolled session) or a person;
-- seat cancel, halt, unhalt: a person (person.require: the requester session or a confirmed tty);
+spool (spec F18): an unreachable board is an error, not a queued post. Who may act (the caller is the one the
+PreToolUse hook attested for this exact command, swarm.person; never an environment variable):
+- seat request, seat release, goal-ready: the job's live lead seat (its own main session) or a person;
+- seat ack: the job's live lead seat only;
+- seat cancel, halt, unhalt, drive repair: a person (person.require: the requester session or a confirmed tty);
 - review: an enrolled agent of the job, by its key.
 Kept out of cli.py (a 256 KiB file cap): cli.py only calls register()."""
 from __future__ import annotations
@@ -26,6 +28,8 @@ DEFAULT_MODELS = {"lead": "opus", "judge": "opus", "security": "opus", "engineer
 REPORT_MAX = 64 * 1024
 REQUIREMENT_MAX = 1024 * 1024
 CANDIDATE = re.compile(r"(?:report:)?[^\s@]+@[0-9a-f]{7,64}")
+WITHDRAW_REASON_MAX = 1024     # characters of a --withdraw-artifact reason (the ledger keeps it)
+INTEGRATED_MAX = 512           # groups a ledger may record as integrated or withdrawn
 
 
 class Refuse(Exception):
@@ -40,6 +44,7 @@ def _cli():
 def _run(fn):
     """Handler wrapper: a Refuse or a person refusal prints and exits 1; a record line is printed by fn."""
     def handler(board, cfg, args):
+        person.forget()   # a new command: its caller is taken from its own grant
         try:
             return fn(board, cfg, args) or 0
         except (Refuse, person.PersonRefused) as exc:
@@ -53,6 +58,9 @@ def _run(fn):
             print("refused: the drive ledger of this job is unreadable; the job holds until a person "
                   "repairs it", file=sys.stderr)
             return 1
+        except ledger.LedgerTooLargeError as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return 1
     return handler
 
 
@@ -61,12 +69,17 @@ def board_key(cfg: dict) -> str:
     return store_key(cfg)
 
 
-def drive_generation(cfg: dict, job: str) -> int | None:
+def drive_generation(cfg: dict, job: str, warn: bool = False) -> int | None:
     """The job's drive generation from its ledger; None when it is not a drive job or its ledger is unreadable
-    (the verdict is then recorded without a drive record: it cannot make the job terminal)."""
+    (the verdict is then recorded without a drive record: it cannot make the job terminal). `warn` says so on
+    stderr for an unreadable ledger."""
     try:
         led = ledger.load(board_key(cfg), job)
     except ledger.LedgerBadError:
+        if warn:
+            print(f"warning: the drive ledger of {job} is unreadable: this verdict gets no drive record and "
+                  "cannot conclude the job until a person repairs the ledger (swarm drive repair)",
+                  file=sys.stderr)
         return None
     return led.generation if led is not None else None
 
@@ -121,27 +134,38 @@ def _check_workdir(bk: str, job: str, workdir: str) -> str:
     return real
 
 
-def _caller_agent(bk: str, env) -> str | None:
-    """The agent key of an enrolled caller session on this board (any job), or None."""
-    sid = person.session_of(env)
-    return enrolment.agent_sessions(bk).get(sid) if sid else None
+def _is_lead_seat(name: str) -> bool:
+    return name == "lead" or name.startswith("lead~")
 
 
 def _lead_keys(board, job: str, generation: int) -> set:
-    """The agent keys of the job's lead seat and its successors (lead~N) in this generation."""
+    """The agent keys of the job's LIVE lead seat and successors (lead~N) in this generation: a released,
+    failed, cancelled or refused lead holds no authority any more."""
+    from swarm.board.base import SEAT_CLOSED
     return {s.agent_key for s in board.seats(job, generation) if s.agent_key
-            and (s.seat == "lead" or s.seat.startswith("lead~"))}
+            and _is_lead_seat(s.seat) and s.state not in SEAT_CLOSED}
+
+
+def _caller_lead(board, bk: str, job: str, led) -> tuple:
+    """(caller, the lead key the attested caller holds or None, whether it is another enrolled session). The
+    caller comes from the hook's grant (person.caller); a subagent (agent_id) is never the lead."""
+    who = person.caller(bk)
+    if who is None or who.agent_id is not None:
+        return who, None, False
+    keys = enrolment.agent_keys(bk, who.session_id)
+    lead = keys & _lead_keys(board, job, led.generation)
+    return who, (sorted(lead)[0] if lead else None), bool(keys)
 
 
 def _lead_or_person(board, bk: str, job: str, led, env, action: str) -> str:
-    """Authority for a seat-staffing command: the lead's enrolled session, else a person. Other enrolled
-    sessions are refused (they ask the lead on the board)."""
-    key = _caller_agent(bk, env)
-    if key is not None:
-        if key not in _lead_keys(board, job, led.generation):
-            raise Refuse(f"{action} comes from the job's lead: ask it on the board (post --to @EL)")
-        return f"lead {key}"
-    person.require(action, job, board_key=bk, env=env)
+    """Authority for a seat-staffing command: the lead's own session (attested by its hook), else a person
+    (person.require). Other enrolled sessions are refused (they ask the lead on the board)."""
+    who, lead, enrolled = _caller_lead(board, bk, job, led)
+    if lead is not None:
+        return f"lead {lead}"
+    if enrolled and not person.requester_of(bk, job, who):
+        raise Refuse(f"{action} comes from the job's lead: ask it on the board (post --to @EL)")
+    person.require(action, job, board_key=bk, env=env, who=who)
     return "person"
 
 
@@ -195,9 +219,17 @@ def cmd_seat_release(board, cfg, args) -> int:
     if args.withdraw_artifact and not (args.reason or "").strip():
         raise Refuse("--withdraw-artifact needs --reason: say why the artifact is withdrawn")
     row = _seat_row(board, args.job, led.generation, args.seat)
+    from swarm.board.base import SEAT_CLOSED
+    if row.state in SEAT_CLOSED:   # before any ledger write: a refused release changes nothing
+        raise Refuse(f"seat {row.seat} is {row.state} already")
     if args.withdraw_artifact:
-        group = args.withdraw_artifact
-        led.integrated[group] = {**(led.integrated.get(group) or {}), "withdrawn": args.reason.strip()}
+        group, reason = args.withdraw_artifact.strip(), args.reason.strip()
+        if not group or len(group) > 256 or len(reason) > WITHDRAW_REASON_MAX:
+            raise Refuse(f"--withdraw-artifact takes a group of 1-256 characters and a --reason of at most "
+                         f"{WITHDRAW_REASON_MAX} characters")
+        if group not in led.integrated and len(led.integrated) >= INTEGRATED_MAX:
+            raise Refuse(f"the ledger already records {INTEGRATED_MAX} groups: a person must look at this job")
+        led.integrated[group] = {**(led.integrated.get(group) or {}), "withdrawn": reason}
         led.save()
     new = _set_state(board, row, "released", args.job)
     return _record("seat", new.id, new.revision)
@@ -206,7 +238,7 @@ def cmd_seat_release(board, cfg, args) -> int:
 def cmd_seat_cancel(board, cfg, args) -> int:
     bk = board_key(cfg)
     led = _drive_ledger(bk, args.job)
-    person.require("seat cancel", args.job, board_key=bk, env=os.environ)
+    person.require("seat cancel", args.job, board_key=bk, env=os.environ)   # Claude and Codex seats alike
     row = _seat_row(board, args.job, led.generation, args.seat)
     new = _set_state(board, row, "cancelled", args.job)
     return _record("seat", new.id, new.revision)
@@ -230,22 +262,27 @@ def cmd_seat_show(board, cfg, args) -> int:
 
 
 def _lead_seat_name(board, job: str, generation: int, key: str) -> str:
+    from swarm.board.base import SEAT_CLOSED
     for s in board.seats(job, generation):
-        if s.agent_key == key and (s.seat == "lead" or s.seat.startswith("lead~")):
+        if s.agent_key == key and _is_lead_seat(s.seat) and s.state not in SEAT_CLOSED:
             return s.seat
-    raise Refuse("no lead seat of this job is held by this session")
+    raise Refuse("no live lead seat of this job is held by this session")
 
 
 def cmd_seat_ack(board, cfg, args) -> int:
     """The lead acknowledges the events it was woken for, up to ID (spec [F4]): its own event mark only,
-    which only moves forward. Only the lead's enrolled session may do it."""
+    which only moves forward, and never past the board's newest message of the job (a mark beyond it would
+    silence every later wake). Only the live lead's own session (attested by its hook) may do it."""
     bk = board_key(cfg)
     led = _drive_ledger(bk, args.job)
-    key = _caller_agent(bk, os.environ)
-    if key is None or key not in _lead_keys(board, args.job, led.generation):
-        raise Refuse("seat ack comes from the job's lead session (a person cannot acknowledge for the lead)")
+    _, key, _ = _caller_lead(board, bk, args.job, led)
+    if key is None:
+        raise Refuse("seat ack comes from the job's live lead session (a person cannot acknowledge for the lead)")
     if args.upto < 0:
         raise Refuse("--upto must be an event id, 0 or more")
+    newest = board.last_message_id(args.job)
+    if args.upto > newest:
+        raise Refuse(f"--upto {args.upto} is past the newest event of {args.job} ({newest})")
     mark = f"event:{_lead_seat_name(board, args.job, led.generation, key)}"
     led.watermarks[mark] = max(led.watermarks.get(mark, 0), args.upto)
     led.save()
@@ -331,6 +368,28 @@ def cmd_goal_ready(board, cfg, args) -> int:
 
 # --- halt and unhalt ---------------------------------------------------------------------------
 
+RECEIPT_HOURS = 24
+
+
+def _person_receipt(bk: str, led, action: str, how: str) -> None:
+    """A person-path command on the owner host writes its own receipt (spec 4.0; the requester session's
+    receipt is its PostToolUse hook's): kind `person`, action id `tty:<action>`, bound to the ledger revision
+    the command printed as its record id. A failure is reported, not fatal (the ledger change is made)."""
+    if how != "tty":
+        return
+    import time
+    from swarm import receipts
+    try:
+        receipts.write(bk, receipts.Receipt(
+            board_key=bk, job=led.job, generation=led.generation, incarnation=led.incarnation,
+            action_id=f"tty:{action.replace(' ', '_')}", attempt=0, seat=None, kind="person",
+            record_id=str(led.ledger_rev), rev=1,
+            content_sha=receipts.content_sha("person", {"action": action, "target": led.job}),
+            args_sha=receipts.args_sha(person.cli_argv()), expires_at=time.time() + RECEIPT_HOURS * 3600))
+    except (OSError, ValueError) as exc:
+        print(f"warning: the person receipt of this {action} was not written: {exc}", file=sys.stderr)
+
+
 def cmd_halt(board, cfg, args) -> int:
     bk = board_key(cfg)
     _drive_ledger(bk, args.job)
@@ -345,16 +404,21 @@ def cmd_halt(board, cfg, args) -> int:
         halt["reason"] = args.reason.strip()
     led.halted = halt
     led.save()
+    _person_receipt(bk, led, "halt", who)
     return _record("halt", led.ledger_rev, 1)
 
 
 def cmd_unhalt(board, cfg, args) -> int:
     bk = board_key(cfg)
     _drive_ledger(bk, args.job)
-    person.require("unhalt", args.job, board_key=bk, env=os.environ)
+    who = person.require("unhalt", args.job, board_key=bk, env=os.environ)
     led = _drive_ledger(bk, args.job)
     if led.halted is None:
         raise Refuse(f"{args.job} is not halted")
+    if str(led.halted.get("reason", "")).startswith(ledger.REPAIR_REASON) and not led.budgets:
+        raise Refuse(f"{args.job}'s ledger was rebuilt by a drive repair and has no budgets: set them first, net "
+                     f"of the spend the repair reported (swarm drive budget --job {args.job} KEY=VALUE ..., or "
+                     "re-activate with --budget), then unhalt")
     now = board.now()
     since = _dt.datetime.fromisoformat(led.halted["at"])
     if since.tzinfo is None:
@@ -362,40 +426,88 @@ def cmd_unhalt(board, cfg, args) -> int:
     led.halted_total_seconds += max(0.0, (now - since).total_seconds())
     led.halted = None
     led.save()
+    _person_receipt(bk, led, "unhalt", who)
     return _record("unhalt", led.ledger_rev, 1)
 
 
 # --- drive repair ------------------------------------------------------------------------------
 
+CLOSED_VERDICTS = {"completed": "met", "failed": "unreachable"}
+
+
+def _board_finished(board, job: str) -> str | None:
+    """The verdict a closed board job implies (None: open or unknown). The board is untrusted: this only ever
+    keeps a job finished, it never makes one run."""
+    js = board.job_status(job)
+    if js is None or js.status == "active":
+        return None
+    return CLOSED_VERDICTS.get(js.status, "unreachable")
+
+
 def cmd_drive_repair(board, cfg, args) -> int:
     """Person path (spec F2): a drive ledger that does not read is moved aside (never deleted) and a fresh one
-    takes its place at the job's board generation. The fresh ledger is halted, so nothing launches until a
-    person sets the budgets and unhalts. Pinned requirements and integrated groups of the bad ledger are not
-    recovered: the goal judge then needs them pinned again (GOAL-READY --add-requirements)."""
+    takes its place, under one lock (ledger.repair). The generation comes from the archived ledger, else from a
+    person's --generation, never from the board. A finished job stays finished; otherwise the fresh ledger is
+    halted and unhalt wants budgets set first. Everything not recovered is listed on stderr."""
     bk = board_key(cfg)
     who = person.require("drive repair", args.job, board_key=bk, env=os.environ)
+    data = board.job_data(args.job) or {}
     try:
-        led = ledger.load(bk, args.job)
-    except ledger.LedgerBadError:
-        led = None
-    if led is not None:
-        raise Refuse(f"{args.job}'s drive ledger reads fine: nothing to repair")
-    try:
-        moved = ledger.archive_bad(bk, args.job)
+        rep = ledger.repair(bk, args.job, at=_now_iso(board), by=f"person ({who})", generation=args.generation,
+                            claimed=data.get("drive.enabled") == "1",
+                            board_finished=_board_finished(board, args.job))
+    except ledger.LedgerExistsError as exc:
+        raise Refuse(f"{exc}: run the repair again")
     except ValueError as exc:
         raise Refuse(str(exc))
-    print(f"bad drive ledger moved aside as {moved}")
-    raw = (board.job_data(args.job) or {}).get("drive.generation", "")
-    generation = int(raw) if raw.isdigit() and int(raw) >= 1 else 1
-    fresh = ledger.create(bk, args.job, budgets={}, activated_at=_now_iso(board))
-    fresh.generation = fresh.generation_requested = generation
-    fresh.halted = {"by": f"person ({who})", "at": _now_iso(board),
-                    "reason": "drive repair: set the budgets, then unhalt"}
-    fresh.save()
-    return _record("halt", fresh.ledger_rev, 1)
+    if rep.archived:
+        print(f"bad drive ledger moved aside as {rep.archived}")
+    elif rep.source:
+        print(f"finishing an interrupted repair from {rep.source}")
+    raw = data.get("drive.generation", "")
+    if raw != str(rep.ledger.generation):
+        print(f"warning: the board says generation {raw or '(none)'}, the repaired ledger is generation "
+              f"{rep.ledger.generation} (the ledger wins; the driver rewrites the board copy)", file=sys.stderr)
+    print(f"WARNING: drive repair of {args.job}: recovered {', '.join(rep.kept) or 'nothing'}. NOT recovered:",
+          file=sys.stderr)
+    for line in rep.lost:
+        print(f"  - {line}", file=sys.stderr)
+    if rep.finished:
+        print(f"{args.job} had finished: the repaired ledger stays terminal "
+              f"({rep.ledger.terminal.get('verdict')}); nothing will run", file=sys.stderr)
+    else:
+        print(f"{args.job} is halted: set the budgets (net of the spend above), check the pinned requirements, "
+              f"then `swarm unhalt --job {args.job}`", file=sys.stderr)
+    _person_receipt(bk, rep.ledger, "drive repair", who)
+    return _record("halt", rep.ledger.ledger_rev, 1)
 
 
 # --- registration ------------------------------------------------------------------------------
+
+# One `drive` parser tree for every task that adds a `swarm drive <cmd>` (6b: repair; 6a: budget, models).
+# A task adds its sub-command with drive_subparsers(sub).add_parser(...) and add_drive_command(name, handler):
+# argparse refuses a second `drive` parser, so nobody calls sub.add_parser("drive") directly.
+DRIVE_COMMANDS: dict = {}
+
+
+def drive_subparsers(sub):
+    """The `drive` sub-command's subparsers of the CLI's subparsers `sub`, made on first use (kept on `sub`)."""
+    tree = getattr(sub, "_swarm_drive_tree", None)
+    if tree is None:
+        dr = sub.add_parser("drive", help="drive ledger repair and running-job changes")
+        tree = dr.add_subparsers(dest="dcmd", required=True)
+        sub._swarm_drive_tree = tree
+    return tree
+
+
+def add_drive_command(name: str, handler, *, board: bool = True) -> None:
+    """Register `swarm drive <name>`: handler(board, cfg, args), or handler(cfg, args) when `board` is False."""
+    DRIVE_COMMANDS[name] = handler if board else (lambda _board, cfg, args: handler(cfg, args))
+
+
+def cmd_drive(board, cfg, args) -> int:
+    return DRIVE_COMMANDS[args.dcmd](board, cfg, args) or 0
+
 
 def register(sub, handlers: dict) -> None:
     """Add the control parsers to the subparsers `sub` and their handlers to `handlers` (cli's
@@ -424,10 +536,12 @@ def register(sub, handlers: dict) -> None:
             p.add_argument("--reason")
     ak = ss.add_parser("ack", help="the lead acknowledges the events it was woken for, up to ID")
     ak.add_argument("--job", required=True); ak.add_argument("--upto", type=int, required=True)
-    dr = sub.add_parser("drive", help="drive ledger repair (a person)")
-    ds = dr.add_subparsers(dest="dcmd", required=True)
-    rp = ds.add_parser("repair", help="move a bad drive ledger aside; a fresh one starts halted")
+    rp = drive_subparsers(sub).add_parser(
+        "repair", help="move a bad drive ledger aside; a fresh one starts halted (a person)")
     rp.add_argument("--job", required=True)
+    rp.add_argument("--generation", type=int, metavar="N",
+                    help="the job's generation, when the bad ledger no longer tells it (never read from the board)")
+    add_drive_command("repair", cmd_drive_repair)
     rv = sub.add_parser("review", help="post a structured review of an artifact (an enrolled reviewer)")
     rv.add_argument("--job", required=True); rv.add_argument("--artifact", required=True)
     rv.add_argument("outcome", choices=REVIEW_OUTCOMES); rv.add_argument("--report", required=True)
@@ -438,10 +552,3 @@ def register(sub, handlers: dict) -> None:
     handlers.update({"halt": _run(cmd_halt), "unhalt": _run(cmd_unhalt), "seat": _run(cmd_seat),
                      "review": _run(cmd_review), "goal-ready": _run(cmd_goal_ready),
                      "drive": _run(cmd_drive)})
-
-
-def cmd_drive(board, cfg, args) -> int:
-    return DRIVE_COMMANDS[args.dcmd](board, cfg, args) or 0
-
-
-DRIVE_COMMANDS = {"repair": cmd_drive_repair}
