@@ -55,6 +55,29 @@ class ExecEnv(Env):
         enrolment.write_job_owner(self.bk, job="J", harness="claude", session_id="s", cwd=str(self.work))
         self.launched = []
 
+    def tamper_seat(self, name, **cols):
+        """Write columns straight into a seat row, as a database writer would (any backend)."""
+        if hasattr(self.b, "_s"):
+            with self.b._s().lock:
+                next(r for r in self.b._s().seats if r["seat"] == name).update(cols)
+        elif hasattr(self.b, "_tx"):
+            keys = list(cols)
+            with self.b._tx() as c:
+                c.execute("UPDATE seats SET " + ", ".join(f"{k} = ?" for k in keys) + " WHERE job = ? AND seat = ?",
+                          [cols[k] for k in keys] + ["J", name])
+        else:
+            self.skipTest("no raw row access on this backend")
+
+    def delete_restarts(self):
+        if hasattr(self.b, "_s"):
+            with self.b._s().lock:
+                self.b._s().restarts.clear()
+        elif hasattr(self.b, "_tx"):
+            with self.b._tx() as c:
+                c.execute("DELETE FROM restarts")
+        else:
+            self.skipTest("no raw row access on this backend")
+
     # -- helpers
     def now(self, seconds=0):
         return self.b.now() + dt.timedelta(seconds=seconds)
@@ -149,8 +172,7 @@ class ExecuteTests(ExecEnv):
 
     def test_a_role_forged_on_the_row_is_not_launched_and_takes_no_lock_shortcut(self):
         self.seat()
-        with self.b._s().lock:
-            next(r for r in self.b._s().seats if r["seat"] == "eng-a")["role"] = "reviewer"   # a read-only role: no lock
+        self.tamper_seat("eng-a", role="reviewer")   # a read-only role: no lock
         self.assertIsNone(self.go(self.act()))
         self.assertEqual((self.reload().intents, self.b.drive_locks()), ([], []))
 
@@ -158,8 +180,7 @@ class ExecuteTests(ExecEnv):
         self.seat()
         self.end_run = self.go(self.act())
         self.end(self.end_run, "completed")
-        with self.b._s().lock:
-            next(r for r in self.b._s().seats if r["seat"] == "eng-a")["role"] = "judge"
+        self.tamper_seat("eng-a", role="judge")
         self.assertIsNone(self.go(self.act(trigger="2")))
 
     def test_only_launch_actions_in_this_generation_run(self):
@@ -227,8 +248,7 @@ class ExecuteTests(ExecEnv):
 
         def claim_then_alter(**kw):
             row = real(**kw)
-            with self.b._s().lock:
-                next(r for r in self.b._s().seats if r["seat"] == "eng-a")["workdir"] = "/elsewhere"
+            self.tamper_seat("eng-a", workdir="/elsewhere")
             return row
         with mock.patch.object(self.b, "claim_drive_launch", side_effect=claim_then_alter):
             run = self.go(self.act())
@@ -586,8 +606,7 @@ class ReconcileTests(ExecEnv):
         run = self.go(self.act())
         fd = runner.own(run["restart_id"], self.bk)                       # a live runner holds the run lock
         self.addCleanup(os.close, fd)
-        with self.b._s().lock:
-            self.b._s().restarts.clear()                                   # a database writer deleted the row
+        self.delete_restarts()
         led = self.rec(1000)
         self.assertEqual(led.intents[0].state, "claimed")
         self.assertEqual(self.launched, [run])
@@ -597,8 +616,7 @@ class ReconcileTests(ExecEnv):
         run = self.go(self.act())
         run["unit"] = f"swarm-r{run['restart_id']}-ab.scope"
         runner.write_run(run)
-        with self.b._s().lock:
-            self.b._s().restarts.clear()
+        self.delete_restarts()
         with mock.patch.object(runner, "unit_presence", return_value="present"):
             led = self.rec(1000)
         self.assertEqual(led.intents[0].state, "claimed")
@@ -606,8 +624,7 @@ class ReconcileTests(ExecEnv):
     def test_deleted_board_row_with_nothing_alive_is_concluded_after_grace(self):
         self.seat()
         run = self.go(self.act())
-        with self.b._s().lock:
-            self.b._s().restarts.clear()
+        self.delete_restarts()
         runner.run_file(run["restart_id"], self.bk)       # the run file stays but no lock is held, no unit
         led = self.rec(1000)
         self.assertEqual(led.intents[0].state, "concluded")
@@ -767,9 +784,7 @@ class ReconcileTests(ExecEnv):
 
     def test_reconcile_ends_running_seats_with_no_launch(self):
         self.seat()
-        with self.b._s().lock:
-            row = next(r for r in self.b._s().seats if r["seat"] == "eng-a")
-            row.update(state="running", launch_id=None)
+        self.tamper_seat("eng-a", state="running", launch_id=None)
         self.rec(1)
         seat = self.b.seat("J", 1, "eng-a")
         self.assertEqual((seat.state, seat.last_outcome), ("idle", "no launch"))
