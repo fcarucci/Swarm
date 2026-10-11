@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import http.server
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -387,7 +388,7 @@ class SshPinning(MirrorCase):
         fetch_env = [e for a, e in seen if "fetch" in a][0]
         head_env = [e for a, e in seen if "rev-parse" in a][0]
         self.assertEqual(fetch_env["GIT_SSH_COMMAND"],
-                         f"ssh -i {key} -o IdentitiesOnly=yes -o BatchMode=yes")
+                         f"ssh -i {shlex.quote(key)} -o IdentitiesOnly=yes -o BatchMode=yes")
         self.assertNotIn("GIT_SSH_COMMAND", head_env)
 
 
