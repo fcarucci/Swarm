@@ -237,7 +237,10 @@ next: (1) the host-private owner record (requester session, work roots, pinned r
 (2) the ledger with `state = "activating"`; (3) the board job row with `drive.enabled`; (4) the lead seat request
 and its driver-authored authorization; (5) the ledger `state = "active"`. A pass that finds an `activating` ledger
 with its owner record completes steps 3–5 idempotently. A ledger without an owner record on this host is
-`DRIVER-ORPHAN` (hold, doctor FAIL), never silently skipped.
+`DRIVER-ORPHAN` (hold, doctor FAIL), never silently skipped. **[RR1a]** (PM ruling after the Task 12 review) The board's `drive.enabled`
+claim is written right after the owner record and before the ledger, so a ledger never exists without the claim
+(core expiry relies on the claim when it cannot read a ledger); a claim without a ledger is `DRIVER-ORPHAN` only
+after `activation_grace_seconds` (120).
 
 **[RR2] Terminal intent is pending until committed.** `led.terminal_intent` is a *pending* outcome;
 `led.terminal` is set only after the board close succeeded. If the closing gate rejects a pending MET (target
