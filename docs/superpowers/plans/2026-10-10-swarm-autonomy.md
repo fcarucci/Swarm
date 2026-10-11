@@ -1333,3 +1333,4 @@ Seat: eng-ci (sonnet). Base: `feat/swarm-autonomy` after the first batch (or `pr
 5. Driver batch: 8a (0c87ece; rr7 ack-shown-ids follow-up), 8b (542fe7b), 8c (655182a), then 11b (4b2bee5; imports from `gitpin.py` per its re-review).
 6. After each batch: the cross-seat `drive_cfg` + real owner-record test; one full-matrix CI run on the exact SHA; preview rebuilt from `feat/swarm-autonomy` + still-open heads.
 - rr7 has two parts: 8c (655182a) lists the exact event ids in the lead prompt (done); 8a's `_board_marks` stores the set of acked ids instead of the max event id (in progress).
+- 6a approved at c006a7e (use its gitpin follow-up head — rejects `%2d` and bad ports, adds `tests/test_gitpin.py` — when it lands). **Ruling:** 11b uses `swarm.gitpin`'s `url_args`, `git_argv`, `git_env` and `NEUTRAL_CWD` on every git call that takes a pinned URL (mirror fetch/push/ls-remote, land, doctor), no private copies.
