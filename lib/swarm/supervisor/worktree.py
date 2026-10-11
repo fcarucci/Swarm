@@ -12,12 +12,12 @@ import os
 
 
 def worktree_root(path: str) -> str | None:
-    """The realpath of the first directory at or above `path` that holds a `.git` entry; None when
-    no ancestor does."""
+    """The realpath of the first directory at or above `path` that holds a `.git` entry, with `/` as
+    the separator (the form a drive lock's key is computed from); None when no ancestor does."""
     d = os.path.realpath(path)
     while True:
         if os.path.exists(os.path.join(d, ".git")):
-            return d
+            return d.replace(os.sep, "/")
         parent = os.path.dirname(d)
         if parent == d:
             return None
