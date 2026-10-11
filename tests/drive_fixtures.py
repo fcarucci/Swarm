@@ -118,6 +118,7 @@ class L:
     ruling_due_at: str | None = None
     ruling_attempts: int = 0
     rounds_without_progress: int = 0
+    last_progress_at: str | None = None
     errors: int = 0
     closing: str | None = None
     halted: dict | None = None

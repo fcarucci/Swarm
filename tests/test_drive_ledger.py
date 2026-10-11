@@ -69,6 +69,17 @@ class LedgerTests(LedgerCase):
         self.assertEqual(again.budgets, {"max_cost_usd": 40})
         self.assertEqual([x.job for x in ledger.unfinished("bk")], ["J"])
 
+    def test_last_progress_at_roundtrips_and_is_validated(self):
+        led = self.good(last_progress_at="2026-10-10T01:00:00+00:00")
+        self.assertEqual(ledger.load("bk", "J").last_progress_at, "2026-10-10T01:00:00+00:00")
+        self.assertIsNone(ledger.create("bk", "K", budgets={}, activated_at=ACTIVATED).last_progress_at)
+        for bad in (5, "x\x00y", "t" * 65, ""):
+            obj = self.raw("bk", "J")
+            obj["last_progress_at"] = bad
+            self.put("bk", "J", obj)
+            with self.assertRaises(ledger.LedgerBadError, msg=repr(bad)):
+                ledger.load("bk", "J")
+
     def test_concluded_intent_charges_actual_cost_open_ones_charge_reservation(self):
         led = ledger.create("bk", "J", budgets={}, activated_at=ACTIVATED)
         led.intents.append(ledger.Intent("L1", "a", 1, "a", 5.0, 60.0, [], "concluded",
