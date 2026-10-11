@@ -6,8 +6,8 @@ from __future__ import annotations
 
 import datetime as dt
 
-from swarm.board.base import STALE_NOTICE
 from test_hooks_cli import Env  # noqa: E402  (sets sys.path)
+from swarm.board.base import STALE_NOTICE  # noqa: E402
 
 
 MIN = 60

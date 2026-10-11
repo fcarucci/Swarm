@@ -22,7 +22,7 @@ class StatusViewShapeTests(unittest.TestCase):
     def test_shown_status_idleness_counts_from_the_newest_of_contact_post_and_run_start(self):
         # a reopened job (activated_at newer than its last post) is not "idle" for its old silence
         view = STATUS_VIEW.split('CREATE VIEW job_status AS')[1]
-        self.assertRegex(view, r'greatest\(s\.last_contact_at, m\.last_post_at,\s+j\.activated_at, j\.created_at\)'
+        self.assertRegex(view, r'greatest\(s\.last_contact_at, m\.last_post_at,\s+least\(j\.activated_at, now\(\)\), least\(j\.created_at, now\(\)\)\)'
                                r' > now\(\) - make_interval\(mins => \{idle\}\)')
         self.assertNotIn('COALESCE(greatest(s.last_contact_at', view)
 
