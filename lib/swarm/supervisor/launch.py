@@ -79,7 +79,9 @@ def replacement_model(cfg: dict, harness: str, role: str | None, recorded: str |
     return models.model_for(cfg, harness, role if roles.valid_name(role) else "worker") or recorded
 
 
-READ_ONLY_CLAUDE_DISALLOWED = "Edit,Write,NotebookEdit,MultiEdit"
+# Read-only seats (judges, reviewers) get no edit tool and no MCP tool: an MCP tool is outside the Bash
+# sandbox, so the PreToolUse allowlist of read verbs (shellguard.mcp_read_allowed) is only the second line.
+READ_ONLY_CLAUDE_DISALLOWED = "Edit,Write,NotebookEdit,MultiEdit,mcp__*"
 
 
 def _budget(budget_usd) -> float:

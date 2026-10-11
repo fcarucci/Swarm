@@ -302,7 +302,7 @@ class DriveSeatHandleTest(ResumeBase):
                       read_only=True)
         self.assertEqual(r.mode, "briefing")
         self.assertEqual(r.argv[r.argv.index("--max-budget-usd") + 1], "2")
-        self.assertEqual(r.argv[r.argv.index("--disallowedTools") + 1], "Edit,Write,NotebookEdit,MultiEdit")
+        self.assertEqual(r.argv[r.argv.index("--disallowedTools") + 1], "Edit,Write,NotebookEdit,MultiEdit,mcp__*")
 
 
 if __name__ == "__main__":

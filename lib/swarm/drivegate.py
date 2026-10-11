@@ -20,7 +20,6 @@ import contextlib
 import dataclasses
 import io
 import json
-import math
 import os
 import re
 import time
@@ -60,7 +59,7 @@ def kick(now=time.time) -> bool:
                 last = float(safefs.read_text(d, KICK_STAMP, 64))
             except Exception:       # missing, unparsable, or an entry the safe reader refuses: stale
                 last = None
-            if last is not None and math.isfinite(last) and 0 <= t - last < KICK_SECONDS:
+            if last is not None and 0 <= t - last < KICK_SECONDS:
                 return False
             safefs.write_atomic(d, KICK_STAMP, repr(t))
         subprocess.run(["systemctl", "--user", "start", "--no-block", KICK_UNIT], env=manager_env(),
@@ -142,7 +141,6 @@ class Ctx:
     kind: str
     job: str
     led: object
-    subagent: bool = False
     seat: str | None = None
     intent: object = None
     agent_key: str | None = None
@@ -185,7 +183,7 @@ def seat_context(cfg: dict, board_key: str, payload: dict, resume=None, resume_l
         led = False          # a drive job whose ledger cannot be read
     if led is None:
         return None
-    ctx = Ctx(kind="seat", job=job, led=led or None, subagent=bool(payload.get("agent_id")), agent_key=agent_key)
+    ctx = Ctx(kind="seat", job=job, led=led or None, agent_key=agent_key)
     if not led or not marker:
         return ctx
     rid = m["resume"].get("restart_id")
@@ -213,16 +211,22 @@ def requester_context(board_key: str, payload: dict, job: str):
     return Ctx(kind="requester", job=job, led=led)
 
 
-def requester_of_unfinished(board_key: str, sid) -> bool:
-    """Whether `sid` is the requester session of an unfinished drive job of this board (never raises)."""
+def requester_job(board_key: str, sid) -> str | None:
+    """The first unfinished drive job of this board whose requester is the session `sid` (a main session:
+    the caller checks that the payload has no agent_id), or None. Never raises."""
     if not sid:
-        return False
+        return None
     try:
         from swarm.supervisor import ledger
-        return any(getattr(l, "requester_session", None) == sid and l.terminal is None
-                   for l in ledger.unfinished(board_key) if hasattr(l, "requester_session"))
+        return next((l.job for l in ledger.unfinished(board_key)      # unfinished(): no terminal ledger
+                     if hasattr(l, "requester_session") and l.requester_session == sid), None)
     except Exception:
-        return False
+        return None
+
+
+def requester_of_unfinished(board_key: str, sid) -> bool:
+    """Whether `sid` is the requester session of an unfinished drive job of this board (never raises)."""
+    return requester_job(board_key, sid) is not None
 
 
 def enrolled_context(board_key: str, payload: dict):
@@ -238,8 +242,8 @@ def enrolled_context(board_key: str, payload: dict):
     try:
         led = load_ledger(board_key, rec.job)
     except Exception:
-        return Ctx(kind="enrolled", job=rec.job, led=None, subagent=True, agent_key=agent)
-    return Ctx(kind="enrolled", job=rec.job, led=led, subagent=True, agent_key=agent) if led is not None else None
+        return Ctx(kind="enrolled", job=rec.job, led=None, agent_key=agent)
+    return Ctx(kind="enrolled", job=rec.job, led=led, agent_key=agent) if led is not None else None
 
 
 def drive_targets(board_key: str, ctx: Ctx) -> set[str]:
@@ -359,33 +363,52 @@ def _write_call(host, payload: dict, command: str) -> str | None:
     return None
 
 
-def pre_tool(cfg: dict, payload: dict, host, *, resume=None, resume_lookup=None) -> str | None:
+_UNSET = object()
+
+
+def classify(cfg: dict, payload: dict, resume=None, resume_lookup=None):
+    """The Ctx of a session that belongs to a drive job: a seat (or a subagent of one), a subagent enrolled in
+    the job by its tag, or the job's requester main session. None for every other session, and for any host
+    with no drive ledger (one directory check). Raises only on a bug: callers treat that as "unknown"."""
+    sid = payload.get("session_id")
+    if not isinstance(sid, str) or not sid or not has_ledgers():
+        return None
+    from swarm.board.autoinit import store_key
+    bk = store_key(cfg)
+    ctx = seat_context(cfg, bk, payload, resume, resume_lookup)
+    if ctx is not None:
+        return ctx
+    if payload.get("agent_id"):
+        return enrolled_context(bk, payload)
+    job = requester_job(bk, sid)
+    return Ctx(kind="requester", job=job, led=None) if job else None
+
+
+def pre_tool(cfg: dict, payload: dict, host, *, resume=None, resume_lookup=None, ctx=_UNSET) -> str | None:
     """Why this tool call of a drive session is refused (the reason shown to the agent), None when it may
     go ahead. Runs before everything else a hook does, on every call: the join, the first call of a resumed
     session and a seat whose job is not one of the session's bound markers are gated like any other. An
     error in the decision of a known drive seat refuses the call (retry); in anything else it lets it
-    through. Cheap first: no ledger on the host, no work."""
+    through. Cheap first: no ledger on the host, no work. `ctx` is classify()'s answer when the caller has it."""
     tool, sid = payload.get("tool_name"), payload.get("session_id")
-    if not isinstance(tool, str) or not isinstance(sid, str) or not sid or not has_ledgers():
+    if not isinstance(tool, str) or not isinstance(sid, str) or not sid:
         return None
     known = False
     try:
+        if ctx is _UNSET:
+            ctx = classify(cfg, payload, resume, resume_lookup)
+        if ctx is None:
+            return None
         from swarm.board.autoinit import store_key
         bk = store_key(cfg)
         spawn = host.is_spawn(payload)
-        ctx = seat_context(cfg, bk, payload, resume, resume_lookup)
-        if ctx is None and not payload.get("agent_id"):
-            if spawn and requester_of_unfinished(bk, sid):
-                return SPAWN_REFUSAL.format(who="the requester session")
-            return None
-        if ctx is None:
-            ctx = enrolled_context(bk, payload)
-        if ctx is None:
-            return None
+        if ctx.kind == "requester":
+            return SPAWN_REFUSAL.format(who="the requester session") if spawn else None
         known = True
         command = _command_of(host, payload)
         if command:
-            why = shellguard.drive_command_refusal(command, drive_targets(bk, ctx), branch_of=_branch_of(payload, command))
+            why = shellguard.drive_command_refusal(command, lambda: drive_targets(bk, ctx),
+                                                   branch_of=_branch_of(payload, command))
             if why:
                 return why
         wants_verdict = bool(command) and shellguard.swarm_verdict_call(command)
@@ -416,11 +439,10 @@ def pre_tool(cfg: dict, payload: dict, host, *, resume=None, resume_lookup=None)
 def _branch_of(payload: dict, command: str):
     """`branch_of(directory)` for a push that names no branch: the branch checked out in `directory` (git -C)
     or in the payload's cwd. A command that moves (cd, pushd) leaves it unknown: such a push is refused."""
-    moved = any(prog in ("cd", "pushd") for prog, _a, _w in shellguard.iter_commands(command))
     cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
 
     def branch_of(directory=None):
-        if moved:
+        if any(prog in ("cd", "pushd") for prog, _a, _w in shellguard.iter_commands(command)):
             return None
         base = directory if directory and os.path.isabs(directory) else (
             os.path.join(cwd or os.getcwd(), directory) if directory else cwd)
@@ -761,7 +783,8 @@ def _verdict_decision(board, ctx, ns, rid: int, author) -> dict:
 
 def _activation_ok(board, ctx, payload: dict) -> None:
     """[RR1a] activation order: the owner record (host-private, written first) names this session, the board
-    carries the drive claim, and the ledger (written last) names this session as the requester."""
+    carries the drive claim, and the ledger (written last) names this session as the requester (the caller's
+    requester_context has checked that last one)."""
     from swarm import enrolment
     bk = ctx.led.board_key
     owner = enrolment.find_job_owner(bk, ctx.job)
@@ -769,8 +792,6 @@ def _activation_ok(board, ctx, payload: dict) -> None:
         raise Refused("the owner record does not name this session", log=False)
     if (board.job_data(ctx.job) or {}).get("drive.enabled") != "1":
         raise Refused("the board carries no drive claim for the job", log=False)
-    if ctx.led.requester_session != payload.get("session_id"):
-        raise Refused("the ledger names another requester", log=False)
 
 
 def post_tool(cfg: dict, payload: dict, host, *, resume=None, resume_lookup=None) -> bool:

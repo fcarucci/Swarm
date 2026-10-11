@@ -309,6 +309,7 @@ def ci_repo(command: str) -> str | None:
 # `sh -c`, `bash -lc`, `eval`, `script -c`, `$(...)` and backticks is looked at too.
 
 _MAX_NEST = 5
+TOO_DEEP = "<too-deep>"   # the program iter_commands yields for a command nested beyond _MAX_NEST
 _SHELLS = frozenset(("sh", "bash", "zsh", "dash", "ksh", "ash", "fish", "csh", "tcsh", "busybox"))
 _SEPARATORS = ";&|()\n"
 _KEYWORDS = frozenset(("{", "}", "!", "if", "then", "do", "else", "elif", "while", "until", "time", "command",
@@ -520,7 +521,10 @@ def _script_arg(prog: str, args: list[str]) -> str | None:
 def iter_commands(command: str, _depth: int = 0):
     """Yield (prog, args, wrappers) for every command a shell text runs, looking inside the wrappers that
     run a string (sh -c, bash -lc, eval, script -c, su -c, watch 'cmd'), `$(...)` and backticks."""
-    if _depth > _MAX_NEST or not command:
+    if not command:
+        return
+    if _depth > _MAX_NEST:      # too deep to look at: callers refuse what they cannot check
+        yield TOO_DEEP, [], set()
         return
     reads_stdin = False
     for words in split_commands(command):
@@ -710,15 +714,51 @@ def _launch_refusal(prog: str, args: list[str]) -> str | None:
     return None
 
 
+_INTERP = re.compile(r"(?:python[0-9.]*|node(?:js)?|ruby|perl|php|deno|bun)")
+_INTERP_CODE_FLAGS = ("-c", "-e", "--eval", "-pe", "-ne", "-E")
+
+
+def _inline_refusal(text: str, targets: set[str]) -> str | None:
+    """Why an inline script (python -c, node -e, a script on stdin) is refused: it runs a git push that names a
+    target branch or forces, or starts a headless claude or codex. A best-effort scan of the text, not a parse
+    (the close-time audit is the backstop for what an agent hides in code, spec 4.0)."""
+    if re.search(r"\bgit\b", text) and re.search(r"\bpush\b", text):
+        if re.search(r"--force|--mirror|--all\b|(?<![\w-])-f\b|['\"]\+", text) or any(
+                re.search(r"(?<![\w/.-])(?:refs/heads/)?" + re.escape(t) + r"(?![\w/.-])", text, re.I) for t in targets):
+            return "an inline script that pushes to a target branch or forces a push is refused"
+    if re.search(r"\bclaude\b", text) and re.search(r"(?<![\w-])(?:-p|--print)(?![\w-])", text):
+        return "a headless claude session (claude -p) is refused"
+    if re.search(r"\bcodex\b", text) and re.search(r"(?<![\w-])exec(?![\w-])", text):
+        return "a headless codex session (codex exec) is refused"
+    return None
+
+
 def drive_command_refusal(command: str, targets=(), *, branch_of=None) -> str | None:
     """Why a drive seat may not run `command` (its reason, for the agent), or None. `targets` are the
-    branch names a push may not update (the recipe's target, e.g. "main"; compared without case).
+    branch names a push may not update (the recipe's target, e.g. "main"; compared without case), or a
+    function giving them (called only when a push or an inline script needs them).
     `branch_of(directory)` names the branch checked out in `directory` (the -C value, None for where the
     command runs), for a push that names none (None when it cannot be told: such a push is refused)."""
     if not command:
         return None
-    targets = {t.removeprefix("refs/heads/").lower() for t in targets if isinstance(t, str) and t}
+    lazy, done = targets, []
+
+    def get_targets():       # computed at the first push or inline script (`targets` may be a callable)
+        if not done:
+            names = lazy() if callable(lazy) else lazy
+            done.append({t.removeprefix("refs/heads/").lower() for t in names if isinstance(t, str) and t})
+        return done[0]
+    interp_stdin = False
     for prog, args, wrappers in iter_commands(command):
+        if prog == TOO_DEEP:
+            return "a command nested too deeply to check (sh -c in sh -c ...) is refused"
+        if _INTERP.fullmatch(prog):
+            code = [args[k + 1] for k, a in enumerate(args[:-1]) if a in _INTERP_CODE_FLAGS]
+            interp_stdin = interp_stdin or not code
+            for text in code:
+                why = _inline_refusal(text, get_targets())
+                if why:
+                    return why
         if prog in ("git", "git-push", "git-send-pack"):
             sub, rest, why, cdir = _git_args(args) if prog == "git" else (prog[4:], args, None, None)
             if why:
@@ -726,7 +766,7 @@ def drive_command_refusal(command: str, targets=(), *, branch_of=None) -> str | 
             if sub in ("push", "send-pack"):
                 if "xargs" in wrappers:
                     return "a push through xargs is refused: name the branch on the command line"
-                why = _push_refusal(rest, targets, branch_of, cdir)
+                why = _push_refusal(rest, get_targets(), branch_of, cdir)
                 if why:
                     return why
             elif sub == "config" and any(_GIT_CONFIG_RISK.match(a) for a in rest if not a.startswith("-")):
@@ -750,6 +790,11 @@ def drive_command_refusal(command: str, targets=(), *, branch_of=None) -> str | 
         why = _launch_refusal(prog, args)
         if why:
             return why
+    if interp_stdin and "<<" in command:      # `python3 - <<'EOF' ... EOF`
+        for body in heredoc_bodies(command):
+            why = _inline_refusal(body, get_targets())
+            if why:
+                return why
     return None
 
 
@@ -769,6 +814,8 @@ def readonly_write_reason(command: str) -> str | None:
         if why:
             return why
     for prog, args, _ in iter_commands(command):
+        if prog == TOO_DEEP:
+            return "a command nested too deeply to check is refused"
         if prog == "git":
             sub, _rest, bad, _cdir = _git_args(args)
             if bad or sub in _GIT_WRITES:
