@@ -15,7 +15,7 @@ import uuid
 from pathlib import Path
 from unittest import mock
 
-from support import SANDBOX, MemoryHarness, home_env  # noqa: F401  (puts lib/ on sys.path)
+from support import SANDBOX, add_backend_variants, drive_backends, home_env  # noqa: F401  (puts lib/ on sys.path)
 import drive_fixtures as fx
 
 from swarm import compat, receipts  # noqa: E402
@@ -62,6 +62,7 @@ class FakeRunner:
 
 
 class LifeCase(unittest.TestCase):
+    harness_factory = staticmethod(drive_backends()["memory"])    # variants below swap it per backend
     CFG = {"max_wall_hours": 24, "ruling_deadline_minutes": 120, "close_deadline_minutes": 60,
            "question_expiry": "4h"}
 
@@ -70,7 +71,8 @@ class LifeCase(unittest.TestCase):
         env = mock.patch.dict(os.environ, home_env(self.home))
         env.start()
         self.addCleanup(env.stop)
-        self.h = MemoryHarness("life-" + uuid.uuid4().hex[:8])
+        self.h = self.harness_factory(self.id().rsplit(".", 1)[0])
+        self.addCleanup(self.h.close)
         self.h.reset()
         self.b = self.h.board()
         self.addCleanup(self.b.close)
@@ -803,10 +805,8 @@ class OrphanQuestionTests(LifeCase):
 
 class LockSweepTests(LifeCase):
     def other_host_lock(self, key="land:z:main"):
-        store = self.b._store
-        with store.lock:
-            store.drive_locks.append(dict(key=key, holder="gen1|x", job="J", generation=1, launch_id="L-far",
-                                          host="another-host", expires_at=self.t0 - 10 * MIN, path=None))
+        self.h.plant_drive_lock(key=key, holder="gen1|x", job="J", generation=1, launch_id="L-far",
+                                host="another-host", expires_at=self.t0 - 10 * MIN)
 
     def test_released_by_host_whatever_the_job(self):
         self.b.open_job("K", None, None, None, "me", goal="G")
@@ -845,8 +845,7 @@ class LockSweepTests(LifeCase):
 
     def test_lock_of_a_deleted_row_is_held_without_local_evidence(self):
         self.launch(locks=("land:a:main",))
-        with self.b._store.lock:
-            self.b._store.restarts.clear()
+        self.h.delete_restarts()
         self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.t0, hooks=self.run.hooks()), 0)
         self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.t0, hooks=self.run.hooks(),
                                                   board_key="bk"), 0)             # the ledger holds the launch open
@@ -854,8 +853,7 @@ class LockSweepTests(LifeCase):
 
     def test_lock_of_a_deleted_row_is_released_once_the_ledger_concluded_the_launch(self):
         self.launch(locks=("land:a:main",))
-        with self.b._store.lock:
-            self.b._store.restarts.clear()
+        self.h.delete_restarts()
         for i in self.led.intents:
             i.state, i.outcome, i.success, i.charged_usd = "concluded", "cancelled", False, 1.0
         self.led.save()
@@ -869,6 +867,11 @@ class LockSweepTests(LifeCase):
         self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.t0, hooks=self.run.hooks()), 0)
         self.run.live.clear()
         self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.t0, hooks=self.run.hooks()), 1)
+
+
+# one subclass per backend of support.drive_backends() beyond memory (Postgres only with SWARM_TEST_CONFIG)
+add_backend_variants(globals(), DeadlineTests, TerminalizeTests, RolloverTests, HaltTests, QuestionTests,
+                     OrphanQuestionTests, LockSweepTests)
 
 
 if __name__ == "__main__":

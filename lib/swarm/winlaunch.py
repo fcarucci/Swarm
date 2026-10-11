@@ -3,16 +3,21 @@ it runs with any Python 3.11+ before the venv exists. It does what the sh launch
 keep the venv (outside the plugin, so it survives plugin updates) matching requirements.txt, then
 run the swarm package from this plugin in it.
 
-  venv:   %SWARM_VENV%, else %USERPROFILE%\\.local\\share\\swarm\\venv  (interpreter: Scripts\\python.exe)
+  venv:   %SWARM_VENV%, else %USERPROFILE%\\.local\\share\\swarm\\venv-<stamp> (one venv per requirements
+          stamp, so plugin versions with other requirements do not rebuild it in turn; an old
+          install's venv\\ with a matching stamp is adopted)  (interpreter: Scripts\\python.exe)
   stamp:  <venv>\\.swarm-requirements holds a CRC-32 of the requirements files (line endings
           normalised); the venv also needs zstandard (and psycopg for a Postgres board), else it is
           refreshed. Installs are hash-checked and wheels only (--require-hashes --only-binary=:all:)
-  lock:   the directory <venv>.building, taken with mkdir (atomic), waited for up to 300 s
+  lock:   the directory <venv>.building, taken with mkdir (atomic), waited for up to 300 s; it holds
+          the owner's pid and host, and one older than LOCK_STALE_MINUTES (SWARM_LOCK_STALE_MINUTES,
+          default 20) is stale (a killed build): removed, then taken again
 """
 from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -25,7 +30,18 @@ MIN_PY = (3, 11)
 
 def venv_dir() -> Path:
     env = os.environ.get("SWARM_VENV")
-    return Path(env) if env else Path(os.path.expanduser("~")) / ".local" / "share" / "swarm" / "venv"
+    if env:
+        return Path(env)
+    share = Path(os.path.expanduser("~")) / ".local" / "share" / "swarm"
+    stamp = requirements_stamp()
+    per_stamp, legacy = share / f"venv-{stamp}", share / "venv"
+    if not venv_python(per_stamp).exists() and venv_python(legacy).exists():
+        try:
+            if (legacy / ".swarm-requirements").read_text().strip() == stamp:
+                return legacy
+        except OSError:
+            pass
+    return per_stamp
 
 
 def venv_python(v: Path) -> Path:
@@ -91,6 +107,46 @@ def pip_args(root: Path, want_pg: bool) -> list[str]:
     return args
 
 
+LOCK_STALE_MINUTES = 20
+
+
+def lock_is_stale(lock: Path, now: float | None = None) -> bool:
+    """A build lock left by a killed build: older than SWARM_LOCK_STALE_MINUTES. (Windows has no
+    safe pid probe from the stdlib: os.kill would terminate the process, so age alone decides.)"""
+    try:
+        minutes = float(os.environ.get("SWARM_LOCK_STALE_MINUTES") or LOCK_STALE_MINUTES)
+        return (time.time() if now is None else now) - lock.stat().st_mtime > minutes * 60
+    except (OSError, ValueError):
+        return False
+
+
+def take_lock(lock: Path, timeout: int = 300) -> None:
+    """Create the lock directory (atomic), removing a stale one first; SystemExit when it stays held."""
+    waited = 0
+    while True:
+        try:
+            lock.mkdir()
+            (lock / "owner").write_text(f"{os.getpid()}\n")
+            return
+        except FileExistsError:
+            pass
+        if lock_is_stale(lock):
+            gone = lock.with_name(f"{lock.name}.stale.{os.getpid()}")
+            try:
+                lock.rename(gone)         # of several waiters only one wins the rename
+            except OSError:
+                pass
+            else:
+                print(f"swarm: removed a stale build lock ({lock})", file=sys.stderr)
+                shutil.rmtree(gone, ignore_errors=True)
+                continue
+        waited += 1
+        if waited > timeout:
+            sys.exit(f"swarm: {lock} is held (younger than the stale limit); remove it if you are sure no "
+                     f"build is running, then retry")
+        time.sleep(1)
+
+
 def ensure_venv(v: Path | None = None, root: Path = PLUGIN_ROOT, timeout: int = 300) -> Path:
     """The venv's interpreter, creating or refreshing the venv first when needed. SystemExit(1)
     with a message on stderr when it can't be set up."""
@@ -104,16 +160,7 @@ def ensure_venv(v: Path | None = None, root: Path = PLUGIN_ROOT, timeout: int = 
                  f"{sys.version_info[0]}.{sys.version_info[1]} ({sys.executable})")
     v.parent.mkdir(parents=True, exist_ok=True)
     lock = Path(str(v) + ".building")
-    waited = 0
-    while True:
-        try:
-            lock.mkdir()
-            break
-        except FileExistsError:
-            waited += 1
-            if waited > timeout:
-                sys.exit(f"swarm: {lock} is stuck; remove it and retry")
-            time.sleep(1)
+    take_lock(lock, timeout)
     try:
         if not _stamp_ok(v, want, want_pg):
             print(f"swarm: setting up {v} (first run or new requirements)...", file=sys.stderr)
@@ -128,10 +175,7 @@ def ensure_venv(v: Path | None = None, root: Path = PLUGIN_ROOT, timeout: int = 
                          f"Use Python 3.11-3.14 on a supported platform, or install the requirements files by hand.")
             (v / ".swarm-requirements").write_text(want + "\n")
     finally:
-        try:
-            lock.rmdir()
-        except OSError:
-            pass
+        shutil.rmtree(lock, ignore_errors=True)
     return venv_python(v)
 
 

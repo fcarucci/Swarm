@@ -8,12 +8,11 @@ import importlib.util
 import os
 import tempfile
 import unittest
-import uuid
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest import mock
 
-from support import SANDBOX, ROOT, MemoryHarness, home_env  # noqa: F401  (puts lib/ on sys.path)
+from support import SANDBOX, ROOT, add_backend_variants, drive_backends, home_env  # noqa: F401  (puts lib/ on sys.path)
 
 from swarm import plugins
 from swarm.board import STUCK_PREFIX
@@ -31,6 +30,7 @@ HOUR = dt.timedelta(hours=1)
 class QuestionEnv(unittest.TestCase):
     """Two jobs on a real memory board: J is a drive job (board claim, no ledger), K is a goal job
     that is not driven. The host's private dir is a temporary HOME, so ledgers never touch the real one."""
+    harness_factory = staticmethod(drive_backends()["memory"])    # variants below swap it per backend
 
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(dir=SANDBOX, prefix="q-home-"))
@@ -40,7 +40,7 @@ class QuestionEnv(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("drive_questions_plugin", PLUGIN)
         self.p = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.p)
-        self.h = MemoryHarness(store=f"drive-questions-{uuid.uuid4().hex}")
+        self.h = self.harness_factory(self.id().rsplit(".", 1)[0])
         self.h.reset()
         self.addCleanup(self.h.close)
         self.b = self.h.board()
@@ -323,6 +323,10 @@ class GateDriveQuestions(QuestionEnv):
             plain = FakeBoard(js, rows, [question("lead")], {})
             self.assertTrue(orphans.eligible(plain, self.h.cfg, js, sup, NOW),
                             "a plain job's gate is the job-level wait, not a seat's question")
+
+
+# one subclass per backend of support.drive_backends() beyond memory (Postgres only with SWARM_TEST_CONFIG)
+add_backend_variants(globals(), PluginDriveQuestions, GateDriveQuestions)
 
 
 if __name__ == "__main__":

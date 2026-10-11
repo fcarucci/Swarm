@@ -281,6 +281,17 @@ class MemoryHarness:
     def set_available(self, flag: bool) -> None:
         self.store.available = flag
 
+    # ---- planting drive rows as another host or a corrupt store could leave them
+    def plant_drive_lock(self, **row) -> None:
+        """A drive lock row (key, holder, job, generation, launch_id, host, expires_at, path), as is."""
+        with self.store.lock:
+            self.store.drive_locks.append(dict(path=None, **row))
+
+    def delete_restarts(self) -> None:
+        """Every restart row, gone (a lock whose launch row was deleted)."""
+        with self.store.lock:
+            self.store.restarts.clear()
+
     def close(self) -> None:
         pass
 
@@ -343,9 +354,11 @@ class PostgresHarness:
     swarm config, so it cannot wipe a production board by accident."""
     name = "postgres"
 
-    def __init__(self, config_path: str):
+    def __init__(self, config_path: str, dbname: str | None = None):
         self.cfg = swarm.load_config(Path(config_path).expanduser())
         self.cfg["board"]["backend"] = "postgres"
+        if dbname:      # a database of its own (for_env): setup_board creates it through admin_dbname
+            self.cfg["database"]["dbname"] = dbname
         db = self.cfg["database"]
         live = swarm.load_config(Path(os.environ.get("SWARM_CONFIG", "~/.config/swarm/config.toml")).expanduser())
         if Path(config_path).expanduser().resolve() == Path(os.environ.get(
@@ -357,11 +370,52 @@ class PostgresHarness:
                      ("retention_days", 7), ("agent_stale_hours", 12)):
             self.cfg["board"][k] = v
         setup_board(self.cfg, SMALL_POOL)
+        self.toml = "[database]\n" + "".join(
+            f"{k} = {tq(v) if isinstance(v, str) else str(v).lower()}\n" for k, v in db.items()
+            if isinstance(v, (str, int, bool)))
         import psycopg
         self.conn = psycopg.connect(host=db["host"], port=db["port"], user=db["user"],
                                     password=self._password(db), dbname=db["dbname"],
                                     connect_timeout=db["connect_timeout"], sslmode=db["sslmode"],
                                     autocommit=True)
+
+    # one throwaway database per test class (module-level: every harness of the class shares it,
+    # reset() truncates between tests); dropped when the process exits
+    _class_databases: dict = {}
+
+    @classmethod
+    def for_env(cls, tmp: Path, name: str) -> "PostgresHarness":
+        """A harness on a database of its own, fresh per test class (`name` is a test id,
+        module.Class.method). Needs SWARM_TEST_CONFIG."""
+        import atexit
+        import uuid
+        config = os.environ.get("SWARM_TEST_CONFIG")
+        if not config:
+            raise RuntimeError("SWARM_TEST_BACKEND=postgres needs SWARM_TEST_CONFIG (a throwaway Postgres config)")
+        key = name.rsplit(".", 1)[0]
+        dbname = cls._class_databases.get(key)
+        if dbname is None:
+            base = swarm.load_config(Path(config).expanduser())["database"]["dbname"]
+            dbname = f"{base}_{uuid.uuid4().hex[:10]}"
+            cls._class_databases[key] = dbname
+            atexit.register(cls._drop_database, config, dbname)
+        return cls(config, dbname)
+
+    @staticmethod
+    def _drop_database(config: str, dbname: str) -> None:
+        """Drop one of our own throwaway databases (never another: the name is ours alone); FORCE
+        ends only the sessions of the tests that made it."""
+        import psycopg
+        from psycopg import sql
+        db = swarm.load_config(Path(config).expanduser())["database"]
+        try:
+            with psycopg.connect(host=db["host"], port=db["port"], user=db["user"],
+                                 password=PostgresHarness._password(db), dbname=db["admin_dbname"],
+                                 connect_timeout=db["connect_timeout"], sslmode=db["sslmode"],
+                                 autocommit=True) as c:
+                c.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(dbname)))
+        except Exception as e:      # best effort: the CI database dies with the job anyway
+            print(f"could not drop throwaway database {dbname}: {e}", file=sys.stderr)
 
     @staticmethod
     def _password(db: dict) -> str | None:
@@ -447,6 +501,15 @@ class PostgresHarness:
     def backdate_event(self, event_id: int, seconds_ago: float) -> None:
         self._backdate("events", "id", event_id, {"created_at": seconds_ago})
 
+    def plant_drive_lock(self, **row) -> None:
+        row = dict(path=None, **row)
+        self.conn.execute("INSERT INTO drive_locks (key, holder, job, generation, launch_id, host, expires_at, path) "
+                          "VALUES (%(key)s, %(holder)s, %(job)s, %(generation)s, %(launch_id)s, %(host)s, "
+                          "%(expires_at)s, %(path)s)", row)
+
+    def delete_restarts(self) -> None:
+        self.conn.execute("DELETE FROM restarts")
+
     def close(self) -> None:
         self.conn.close()
 
@@ -509,6 +572,15 @@ class SqliteHarness:
 
     def _ago(self, seconds: float) -> dt.datetime:
         return dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=seconds)
+
+    def plant_drive_lock(self, **row) -> None:
+        row = dict(path=None, **row)
+        row["expires_at"] = self.sqlite_board._ts(row["expires_at"])
+        self._db().execute("INSERT INTO drive_locks (key, holder, job, generation, launch_id, host, expires_at, path) "
+                           "VALUES (:key, :holder, :job, :generation, :launch_id, :host, :expires_at, :path)", row)
+
+    def delete_restarts(self) -> None:
+        self._db().execute("DELETE FROM restarts")
 
     def plant_transcript_body(self, job: str, agent_key: str, blob: bytes) -> None:
         import sqlite3
@@ -578,7 +650,39 @@ class SqliteHarness:
 
 
 # backend name -> harness class, for the end-to-end tests (SWARM_TEST_BACKEND)
-HARNESSES = {"memory": MemoryHarness, "file": FileHarness, "sqlite": SqliteHarness}
+HARNESSES = {"memory": MemoryHarness, "file": FileHarness, "sqlite": SqliteHarness,
+             "postgres": PostgresHarness}
+
+
+def drive_backends() -> dict:
+    """The backends the drive test modules run on: name -> factory(key=None) of a fresh harness.
+    memory, file and sqlite always; postgres too when SWARM_TEST_CONFIG names a throwaway Postgres
+    test config (CI's postgres job). Postgres factories with the same `key` (a test class name)
+    share one throwaway database, a fresh one per key. Every test_drive_* module builds one
+    subclass per entry (`add_backend_variants`), so a backend added here covers them all."""
+    import uuid
+    backends = {
+        "memory": lambda key=None: MemoryHarness("drive-" + uuid.uuid4().hex[:10]),
+        "file": lambda key=None: FileHarness(),
+        "sqlite": lambda key=None: SqliteHarness(),
+    }
+    if os.environ.get("SWARM_TEST_CONFIG"):
+        backends["postgres"] = lambda key=None: PostgresHarness.for_env(
+            Path("."), (key or uuid.uuid4().hex) + ".x")
+    return backends
+
+
+def add_backend_variants(namespace: dict, *cases: type, skip: tuple = ("memory",)) -> None:
+    """For every case class (a TestCase whose harness comes from `self.harness_factory(key)`) add to
+    `namespace` (the module's globals()) one subclass per backend of drive_backends() not in `skip`
+    (the backend the case itself runs on), named <Case><Backend>."""
+    for case in cases:
+        for backend, factory in drive_backends().items():
+            if backend in skip:
+                continue
+            name = case.__name__ + backend.capitalize()
+            namespace[name] = type(name, (case,), {"harness_factory": staticmethod(factory),
+                                                   "__module__": namespace["__name__"]})
 
 
 def e2e_harness(tmp: Path, name: str):

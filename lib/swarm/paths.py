@@ -49,8 +49,53 @@ def host_dir() -> Path:
     return share_dir() / "host"
 
 
+def _cksum_table() -> list[int]:
+    table = []
+    for i in range(256):
+        c = i << 24
+        for _ in range(8):
+            c = ((c << 1) ^ 0x04C11DB7) if c & 0x80000000 else c << 1
+        table.append(c & 0xFFFFFFFF)
+    return table
+
+
+def posix_cksum(data: bytes) -> int:
+    """What POSIX `cksum` prints for `data` (bin/swarm's requirements stamp), without a subprocess."""
+    table, crc = _cksum_table(), 0
+    for b in data + len(data).to_bytes((len(data).bit_length() + 7) // 8, "little"):
+        crc = ((crc << 8) & 0xFFFFFFFF) ^ table[((crc >> 24) ^ b) & 0xFF]
+    return ~crc & 0xFFFFFFFF
+
+
+def requirements_stamp(root: Path = PLUGIN_ROOT) -> str:
+    """The stamp bin/swarm (`cat requirements.txt requirements-postgres.txt | cksum`) or, on Windows,
+    winlaunch writes into a venv, and the suffix of the venv it uses (venv-<stamp>)."""
+    if IS_WINDOWS:
+        from swarm import winlaunch
+        return winlaunch.requirements_stamp(root)
+    data = b"".join((root / name).read_bytes() for name in ("requirements.txt", "requirements-postgres.txt"))
+    return str(posix_cksum(data))
+
+
 def venv_dir() -> Path:
-    return Path(os.environ["SWARM_VENV"]) if os.environ.get("SWARM_VENV") else share_dir() / "venv"
+    """The venv this plugin's launcher uses: $SWARM_VENV, else share/venv-<requirements stamp> (one
+    venv per stamp, so plugin versions with different requirements do not rebuild one in turn),
+    else an old install's share/venv whose stamp matches (the launcher adopts it)."""
+    if os.environ.get("SWARM_VENV"):
+        return Path(os.environ["SWARM_VENV"])
+    legacy = share_dir() / "venv"
+    try:
+        stamp = requirements_stamp()
+    except OSError:
+        return legacy
+    per_stamp = share_dir() / f"venv-{stamp}"
+    if not venv_python(per_stamp).exists() and venv_python(legacy).exists():
+        try:
+            if (legacy / ".swarm-requirements").read_text().strip() == stamp:
+                return legacy
+        except OSError:
+            pass
+    return per_stamp
 
 
 def venv_python(venv: Path | None = None) -> Path:

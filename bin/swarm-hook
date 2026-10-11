@@ -129,7 +129,18 @@ if [ "${1:-}" = "session-start" ]; then
   fi
 fi
 D="$(cd "$(dirname "$0")/.." && pwd)"
-V="${SWARM_VENV:-$HOME/.local/share/swarm/venv}"
+# The venv bin/swarm built for this plugin's requirements (venv-<stamp>; see bin/swarm), else an old
+# install's venv/ whose stamp matches; $SWARM_VENV as is.
+if [ -n "${SWARM_VENV:-}" ]; then
+  V="$SWARM_VENV"
+else
+  VB="$HOME/.local/share/swarm/venv"
+  REQ="$(cat "$D/requirements.txt" "$D/requirements-postgres.txt" 2>/dev/null | cksum | cut -d' ' -f1)"
+  V="$VB-$REQ"
+  if [ ! -x "$V/bin/python" ] && [ -x "$VB/bin/python" ] && [ "$(cat "$VB/.swarm-requirements" 2>/dev/null)" = "$REQ" ]; then
+    V="$VB"
+  fi
+fi
 # Bytecode cache: without one every run recompiles ~1 MB of source (~0.2 s of each command, and of
 # each hook that reaches Python). It lives beside the venv, which already holds code this user runs,
 # and is used only when it is this user's own, unshared directory (a sandboxed agent can't plant
