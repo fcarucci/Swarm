@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -250,6 +251,45 @@ class VerdictLine(ControlCase):
                           if m.message.startswith("VERDICT met: "))
         self.assertEqual(self.last_line(out), f"swarm-record: kind=verdict id={verdict_id} rev=1")
 
+    def test_goal_verdict_binds_candidate_and_its_message_id(self):
+        judge = self.board.allocate_name("jk", JOB)
+        self.board.claim_judge("jk", JOB)
+        rc, out, err = self.run_cmd("verdict", "--job", JOB, "--as", judge, "--scope", "goal",
+                                    "--candidate", "feat/x@abc1234", "--req", "d" * 64, "met", "all held")
+        self.assertEqual(rc, 0, err)
+        verdict_id = next(m.id for m in self.board.messages_after(0, JOB)
+                          if m.message.startswith("VERDICT met: "))
+        self.assertEqual(self.last_line(out), f"swarm-record: kind=verdict id={verdict_id} rev=1")
+        gen = ledger.load(self.bkey, JOB).generation
+        data = self.board.job_data(JOB)
+        count = int(data[f"drive.verdict.{gen}.goal"])
+        rec = json.loads("".join(data[f"drive.verdict.{gen}.goal.{i}"] for i in range(count)))
+        self.assertEqual((rec["candidate"], rec["req"], rec["message_id"]), ("feat/x@abc1234", "d" * 64, verdict_id))
+        self.assertIsNone(rec["artifact"])
+
+    def test_a_verdict_from_a_non_judge_is_refused_and_posts_nothing(self):
+        self.board.allocate_name("jk", JOB)
+        self.board.claim_judge("jk", JOB)
+        outsider = self.board.allocate_name("outsider", JOB)
+        rc, _, err = self.run_cmd("verdict", "--job", JOB, "--as", outsider, "met", "all held")
+        self.assertEqual(rc, 1)
+        self.assertIn("is not the judge", err)
+        self.assertEqual([m for m in self.board.messages_after(0, JOB) if m.message.startswith("VERDICT ")], [])
+
+    def test_goal_verdict_is_not_bound_to_an_artifact_named_in_its_reason(self):
+        judge = self.board.allocate_name("jk", JOB)
+        self.board.claim_judge("jk", JOB)
+        rc, _, err = self.run_cmd("verdict", "--job", JOB, "--as", judge, "--scope", "goal",
+                                  "--candidate", "feat/x@abc1234", "--req", "d" * 64, "met",
+                                  "feat/x@abc1234: all held")
+        self.assertEqual(rc, 0, err)
+        gen = ledger.load(self.bkey, JOB).generation
+        data = self.board.job_data(JOB)
+        count = int(data[f"drive.verdict.{gen}.goal"])
+        rec = json.loads("".join(data[f"drive.verdict.{gen}.goal.{i}"] for i in range(count)))
+        self.assertIsNone(rec["artifact"])
+        self.assertEqual(rec["candidate"], "feat/x@abc1234")
+
 
 class Review(ControlCase):
     def setUp(self):
@@ -298,6 +338,15 @@ class GoalReady(ControlCase):
         led = ledger.load(self.bkey, JOB)
         self.assertIn(os.path.realpath(self.req_a), led.pinned_requirements)
         self.assertRegex(self.last_line(out), r"^swarm-record: kind=goal_ready id=\d+ rev=1$")
+
+    def test_goal_ready_is_a_board_message_whose_id_is_the_record(self):
+        self.board.post(JOB, "Reviewer", "hello", None)   # so the GOAL-READY id is not simply 1
+        rc, out, err = self.candidate("--add-requirements", str(self.req_a))
+        self.assertEqual(rc, 0, err)
+        req = drive_cli.requirements_digest(ledger.load(self.bkey, JOB).pinned_requirements)
+        posted = [m for m in self.board.messages_after(0, JOB) if m.message.startswith("GOAL-READY ")]
+        self.assertEqual([m.message for m in posted], [f"GOAL-READY feat/x@abc1234 req={req}"])
+        self.assertEqual(self.last_line(out), f"swarm-record: kind=goal_ready id={posted[0].id} rev=1")
 
     def test_goal_ready_needs_a_requirement(self):
         rc, _, err = self.candidate()

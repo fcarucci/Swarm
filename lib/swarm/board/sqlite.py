@@ -1009,7 +1009,8 @@ class SqliteBoard(SqlBlockers, SqlSeats, SqlEvents, SqlBgCommands, Board):
                        next_steps: str | None = None, artifact: str | None = None,
                        details: str | None = None, *, scope: str = "artifact", generation: int | None = None,
                        open_count: int | None = None, progress: bool | None = None,
-                       candidate: str | None = None, req: str | None = None) -> bool:
+                       candidate: str | None = None, req: str | None = None,
+                       message_id: int | None = None) -> bool:
         check_name(judge_name, "judge name")
         if verdict not in VERDICTS:
             raise BoardError(f"unknown verdict {verdict!r}")
@@ -1030,7 +1031,7 @@ class SqliteBoard(SqlBlockers, SqlSeats, SqlEvents, SqlBgCommands, Board):
                  scope, generation, candidate, req,
                  verdict_data(row[0], artifact, verdict, reason, next_steps, judge_name, at, scope=scope,
                               generation=generation, open_count=open_count, progress=progress,
-                              candidate=candidate, req=req), job))
+                              candidate=candidate, req=req, message_id=message_id), job))
             return True
 
     def verdict_details(self, job: str, artifact: str | None = None) -> VerdictDetails | None:
