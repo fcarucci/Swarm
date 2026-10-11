@@ -43,6 +43,7 @@ RECORD_MAX = 96 * 1024
 MAX_BOARD_KEY = 1024
 MAX_NAME = 256            # job, agent_key, session_id
 MAX_CWD = 4096
+GOAL_MAX = 12000          # a drive job's goal text (the owner record keeps it for a recovering pass)
 _FILE = re.compile(r"(agent|job|owner)-[0-9a-f]{64}\.json")   # always fullmatch
 
 
@@ -57,6 +58,7 @@ class Record:
     cwd: str
     created_at: float
     prompt: str | None = None
+    owner: dict | None = None     # owner records only: roots, remotes, credentials, requirements, recipe
 
 
 # --- names and validation ----------------------------------------------------------------------
@@ -105,7 +107,41 @@ def _validate(rec: Record) -> Record:
         raise ValueError("enrolment: created_at must be a number")
     if rec.prompt is not None and (not isinstance(rec.prompt, str) or len(rec.prompt) > 12000):
         raise ValueError("enrolment: prompt must be at most 12000 characters")
+    if rec.owner is not None:
+        if rec.kind != "owner":
+            raise ValueError("enrolment: only an owner record carries owner details")
+        _validate_owner(rec.owner)
     return rec
+
+
+OWNER_KEYS = ("roots", "remotes", "credentials", "requirements", "recipe", "goal", "brief")
+
+
+def _validate_owner(o) -> None:
+    """The owner details: work roots (absolute, normalised), pinned remotes and credential sources
+    (destination -> text), pinned requirements (path -> blob id) and the recipe. Anything else is
+    refused, so a planted key can never decide a launch."""
+    if not isinstance(o, dict) or set(o) != set(OWNER_KEYS):
+        raise ValueError(f"enrolment: owner details must have exactly the keys {OWNER_KEYS}")
+    roots = o["roots"]
+    if not isinstance(roots, list) or len(roots) > 64:
+        raise ValueError("enrolment: owner roots must be a list of at most 64 paths")
+    for r in roots:
+        _text(r, "owner root", MAX_CWD)
+        if not os.path.isabs(r) or os.path.normpath(r) != r or ".." in r.replace(os.sep, "/").split("/"):
+            raise ValueError(f"enrolment: owner root must be an absolute, normalised path, not {r!r:.80}")
+    for key in ("remotes", "credentials", "requirements"):
+        m = o[key]
+        if not isinstance(m, dict) or len(m) > 256:
+            raise ValueError(f"enrolment: owner {key} must be a map of at most 256 entries")
+        for k, v in m.items():
+            _text(k, f"owner {key} key", MAX_CWD)
+            _text(v, f"owner {key} value", 4096)
+    _text(o["recipe"], "owner recipe", 64)
+    _text(o["goal"], "owner goal", GOAL_MAX)
+    _text(o["brief"], "owner brief", MAX_CWD)
+    if not os.path.isabs(o["brief"]):
+        raise ValueError("enrolment: the owner brief must be an absolute path")
 
 
 def _parse(data: bytes | None) -> Record | None:
@@ -118,7 +154,8 @@ def _parse(data: bytes | None) -> Record | None:
         return _validate(Record(kind=obj["kind"], board_key=obj["board_key"], job=obj["job"],
                                 agent_key=obj["agent_key"], harness=obj["harness"],
                                 session_id=obj["session_id"], cwd=obj["cwd"],
-                                created_at=obj["created_at"], prompt=obj.get("prompt")))
+                                created_at=obj["created_at"], prompt=obj.get("prompt"),
+                                owner=obj.get("owner")))
     except (ValueError, KeyError, TypeError, ArithmeticError):   # ArithmeticError: 10**400
         return None
 
@@ -251,10 +288,21 @@ def prune(max_age: float, *, now: float | None = None, keep=None) -> int:
     return removed
 
 
-def write_job_owner(board_key: str, *, job: str, harness: str, session_id: str | None, cwd: str, now=None):
-    """Creation proof, independent of attached coordinators; written only for new jobs."""
+def write_job_owner(board_key: str, *, job: str, harness: str, session_id: str | None, cwd: str, now=None,
+                    roots: list | None = None, remotes: dict | None = None, credentials: dict | None = None,
+                    requirements: dict | None = None, recipe: str | None = None, goal: str | None = None,
+                    brief: str | None = None):
+    """Creation proof, independent of attached coordinators; written only for new jobs. A drive job
+    also records its work roots, pinned remotes, credential sources, pinned requirements and recipe
+    ([RR1] step 1, [G2], [F10]): roots default to [cwd] and the rest to empty, so a plain activation
+    writes the same record it always did plus those keys."""
+    owner = None
+    if any(v is not None for v in (roots, remotes, credentials, requirements, recipe, goal, brief)):
+        owner = {"roots": [cwd] if roots is None else list(roots), "remotes": dict(remotes or {}),
+                 "credentials": dict(credentials or {}), "requirements": dict(requirements or {}),
+                 "recipe": recipe or "coding", "goal": goal or "", "brief": brief or os.path.join(cwd, "LEAD.md")}
     rec = Record("owner", board_key, job, None, harness, session_id, cwd,
-                 time.time() if now is None else float(now))
+                 time.time() if now is None else float(now), owner=owner)
     return _store(rec, f"owner-{_digest('owner', board_key, job)}.json")
 
 
