@@ -322,6 +322,13 @@ class SuperviseTests(SuperviseEnv):
         self.assertFalse(any(self.markers.glob("*--resume-r*.json")))
         self.assertTrue(any(p.startswith(f"restart of {self.name} failed to start") for p in self.posts()))
 
+    def test_a_job_with_an_unreachable_verdict_is_not_considered_at_all(self):
+        self._flagged()   # a stuck agent the supervisor would otherwise decide on
+        self.h.update_job("J", verdict="unreachable")
+        with mock.patch.object(command, "_decide_for", wraps=command._decide_for) as decide:
+            self.supervise()
+        self.assertEqual([c.args[3].job for c in decide.call_args_list if c.args[3].job == "J"], [])
+
     def test_job_with_unreachable_verdict_is_not_restarted(self):
         self.h.update_job("J", verdict="unreachable")
         self.supervise()
@@ -734,9 +741,10 @@ class SuperviseTests(SuperviseEnv):
         from swarm.supervisor import brief
         real = brief.build_brief
         for change, why in ((lambda b: self.h.update_job("J", verdict="met"), "the job has a verdict"),
-                            (lambda b: self.h.update_job("J", verdict="unreachable"), "the job has a verdict"),
+                            (lambda b: self.h.update_job("J", verdict="unreachable"), "the job has a unreachable verdict"),
                             (lambda b: b.set_job_supervise("J", False), "supervise is off for the job")):
             with self.subTest(why=why):
+                st.log_path().unlink(missing_ok=True)   # this subtest's log only
                 def meddle(b, *a, **k):
                     with self.board() as other:
                         change(other)
@@ -744,7 +752,8 @@ class SuperviseTests(SuperviseEnv):
                 with mock.patch.object(brief, "build_brief", side_effect=meddle):
                     self.supervise()
                 self.assertEqual((self.started, self.restarts()), ([], []))
-                self.assertIn(why, st.log_path().read_text())
+                logged = st.log_path().read_text() if st.log_path().exists() else ""
+                self.assertIn(why, logged)
                 self.h.update_job("J", verdict=None)
                 with self.board() as b:
                     b.set_job_supervise("J", True)
@@ -916,6 +925,13 @@ class SuperviseTests(SuperviseEnv):
     def test_wait_flag_cleared_when_the_job_gets_a_verdict(self):
         self._flagged()
         self.h.update_job("J", verdict="met")
+        self.supervise()
+        self.assertEqual(self.started, [])
+        self.assertIsNone(self.waiting())
+
+    def test_wait_flag_cleared_when_the_job_gets_an_unreachable_verdict(self):
+        self._flagged()
+        self.h.update_job("J", verdict="unreachable")
         self.supervise()
         self.assertEqual(self.started, [])
         self.assertIsNone(self.waiting())
