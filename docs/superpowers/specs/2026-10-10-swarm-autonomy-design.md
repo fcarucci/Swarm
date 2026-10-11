@@ -661,7 +661,7 @@ agent input for its decisions", not "tamper-proof against a same-user agent".
 **[RR5] Landing completes before terminalization.** Terminalization (§3.1) gets a step 0: complete every land
 journal of the job from its land receipt (driver-executed fast-forwards, same checks), keeping the destination
 leases until each journal is `verified` or `land_complete_minutes` (30) have passed. On failure the job still
-closes, and the verdict details list the destinations left partially landed with their SHAs (`DRIVER-PARTIAL-LAND`
+closes, and the verdict details list the destinations left partially landed with their SHAs (`DRIVER-LAND-PARTIAL`
 is posted). `enforce_deadlines` therefore never interrupts a landing midway without recording it.
 
 **[RR8] The driver executes landings.** `swarm land` run by an integrator seat (Claude or Codex) only records a
@@ -866,7 +866,7 @@ its own job. Other sessions cannot (their deactivate is tamper).
 | `max_cost_usd` | configurable; shipped default 40 (Claude `total_cost_usd` + Codex tokens × `[drive] codex_usd_per_mtok`) | ruling |
 | `max_session_minutes` | 60 per session (wall clock, runner) | session ends; seat idle |
 | `max_wall_hours` | 24 from activation | ruling |
-| `ruling_reserve` | configurable; shipped default 2 sessions, 60 min, 5 USD kept back for rulings | — |
+| `ruling_reserve_usd` | configurable; shipped default 5 USD kept back for rulings (the number of ruling launches and their time are bounded by `ruling_attempts` (2) and `ruling_deadline_minutes` (120), not by a separate reserve) | — |
 
 - **[D1] The spending cap is configurable** (Francesco, 2026-10-10: "spending cap is configurable"). Every value in
   this table is a configurable default, not a fixed limit: set in `config.toml` under `[drive]` (e.g.
@@ -879,7 +879,7 @@ its own job. Other sessions cannot (their deactivate is tamper).
   (`led.budgets`) and are shown by `swarm status --job J` and by `swarm doctor` (one line per active drive job:
   `drive budget J: cost 12.40/40.00 USD (reserve 5.00), sessions 9/60, wall 3.1/24 h`). A reserve larger than the
   cap is refused at activation.
-- Each budget check happens in `next_action` from the ledger; launches that would eat into `ruling_reserve`
+- Each budget check happens in `next_action` from the ledger; launches that would eat into `ruling_reserve_usd`
   are held, and a ruling becomes due. A ruling never waits on a spent budget: it draws on the reserve. If the
   reserve is gone too, mechanical UNREACHABLE.
 - **Reserve before launch, reconcile after.** `claim_drive_launch` atomically reserves the session's ceiling
