@@ -91,21 +91,47 @@ if stale; then
   case "$STALE_MIN" in *[!0-9]*) STALE_MIN=20;; esac
   HOST="$(hostname 2>/dev/null || uname -n)"
   # lock-functions begin (tests/test_venv_per_stamp.py runs these on their own)
+  LOCK_CAP_MIN=360     # a running owner's lock older than this is stale anyway
   lock_pid_alive() {   # kill -0 fails for a process of another user too (EPERM): ps still sees that one
     kill -0 "$1" 2>/dev/null || ps -p "$1" >/dev/null 2>&1
   }
-  lock_older_than_limit() {
+  lock_older_than_secs() {
     _m="$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null)"
     case "$_m" in ""|*[!0-9]*) return 1;; esac
-    [ $(( $(date +%s) - _m )) -ge $(( STALE_MIN * 60 )) ]
+    [ $(( $(date +%s) - _m )) -ge "$2" ]
+  }
+  lock_older_than_limit() { lock_older_than_secs "$1" $(( STALE_MIN * 60 )); }
+  # Who owns a lock is "<pid> <host> <boot id> <process start time>" (the last two from /proc where
+  # there is one, else "-"): after a reboot with HOME kept, or when the pid was reused, a live pid
+  # that is not the owner must not hold the lock for ever.
+  lock_boot_id() { cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo -; }
+  lock_start_time() {   # field 22 of /proc/<pid>/stat; comm (field 2) may hold spaces: cut after its ")"
+    _t="$(sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f20)"
+    echo "${_t:--}"
+  }
+  lock_owner_gone() {   # pid boot start: the owning process is not running (dead, other boot, pid reused)
+    _cur="$(lock_boot_id)"
+    [ "$2" != - ] && [ "$_cur" != - ] && [ "$_cur" != "$2" ] && return 0
+    lock_pid_alive "$1" || return 0
+    if [ "$3" != - ]; then
+      _now="$(lock_start_time "$1")"
+      [ "$_now" != - ] && [ "$_now" != "$3" ] && return 0
+    fi
+    return 1
   }
   lock_stale() {       # is the lock directory $1 a killed build's?
     [ -d "$1" ] || return 1
-    _pid=""; _host=""
-    [ -f "$1/owner" ] && { read -r _pid _host < "$1/owner"; } 2>/dev/null
+    _pid=""; _host=""; _boot=-; _start=-
+    [ -f "$1/owner" ] && { read -r _pid _host _boot _start < "$1/owner"; } 2>/dev/null
+    _boot="${_boot:--}"; _start="${_start:--}"
     case "$_pid" in
       *[!0-9]*) ;;
-      ?*) if [ "$_host" = "$HOST" ]; then lock_pid_alive "$_pid" && return 1; return 0; fi;;
+      ?*) if [ "$_host" = "$HOST" ]; then
+            lock_owner_gone "$_pid" "$_boot" "$_start" && return 0
+            # a running owner: stale only past the backstop cap (a build never takes hours)
+            lock_older_than_secs "$1" $(( LOCK_CAP_MIN * 60 )) && return 0
+            return 1
+          fi;;
     esac
     lock_older_than_limit "$1"
   }
@@ -127,12 +153,13 @@ if stale; then
     rm -rf "$GONE"
     return 1
   }
-  lock_release() { [ "$(cat "$LOCK/owner" 2>/dev/null)" = "$$ $HOST" ] && rm -rf "$LOCK"; }
+  lock_release() { [ "$(cat "$LOCK/owner" 2>/dev/null)" = "$OWNER" ] && rm -rf "$LOCK"; }
   # lock-functions end
   i=0
   while :; do
     if mkdir "$LOCK" 2>/dev/null; then
-      echo "$$ $HOST" > "$LOCK/owner" 2>/dev/null
+      OWNER="$$ $HOST $(lock_boot_id) $(lock_start_time $$)"
+      echo "$OWNER" > "$LOCK/owner" 2>/dev/null
       break
     fi
     if lock_stale "$LOCK" && lock_steal; then

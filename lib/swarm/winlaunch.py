@@ -121,12 +121,31 @@ def _stale_minutes() -> float:
         return float(LOCK_STALE_MINUTES)
 
 
-def _read_owner(lock: Path) -> tuple[int, str, str] | None:
-    """(pid, host, token) from the lock's owner file, None when there is none or it is unreadable."""
+LOCK_CAP_MINUTES = 360       # a running owner's lock older than this is stale anyway (a build never takes hours)
+
+
+def _boot_id() -> str:
     try:
-        pid, host, token = (lock / "owner").read_text().split()[:3]
-        return int(pid), host, token
-    except (OSError, ValueError):
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip() or "-"
+    except OSError:
+        return "-"
+
+
+def _start_time(pid: int) -> str:
+    """Field 22 of /proc/<pid>/stat (the process start, in clock ticks since boot), "-" without /proc."""
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError):
+        return "-"
+
+
+def _read_owner(lock: Path) -> tuple[int, str, str, str, str] | None:
+    """(pid, host, token, boot id, start time) from the lock's owner file; the last two "-" when it
+    does not carry them; None when there is none or it is unreadable."""
+    try:
+        f = (lock / "owner").read_text().split()
+        return int(f[0]), f[1], f[2], (f[3] if len(f) > 3 else "-"), (f[4] if len(f) > 4 else "-")
+    except (OSError, ValueError, IndexError):
         return None
 
 
@@ -146,19 +165,35 @@ def _pid_alive(pid: int) -> bool | None:
     return True
 
 
+def _owner_gone(owner: tuple[int, str, str, str, str]) -> bool | None:
+    """Whether the owning process is not running: dead, from another boot, or its pid reused by a
+    process that started later. None when that cannot be told."""
+    pid, _, _, boot, start = owner
+    if boot != "-" and _boot_id() not in ("-", boot):
+        return True
+    alive = _pid_alive(pid)
+    if alive is None:
+        return None
+    if not alive:
+        return True
+    return start != "-" and _start_time(pid) not in ("-", start)
+
+
 def lock_is_stale(lock: Path, now: float | None = None) -> bool:
-    """A build lock left by a killed build. A live owner on this host is never stale, a dead one
-    always is. Where the pid cannot be checked (another host, no owner record, Windows) the lock's
-    age decides: at least SWARM_LOCK_STALE_MINUTES (default 20; 0 = always)."""
+    """A build lock left by a killed build. A dead owner on this host (or one from before a reboot, or
+    whose pid was reused) always is stale; a running one is stale only past LOCK_CAP_MINUTES. Where the
+    owner cannot be checked (another host, no owner record, Windows) the lock's age decides: at least
+    SWARM_LOCK_STALE_MINUTES (default 20; 0 = always)."""
     owner = _read_owner(lock)
-    if owner is not None and owner[1] == socket.gethostname():
-        alive = _pid_alive(owner[0])
-        if alive is not None:
-            return not alive
     try:
-        return (time.time() if now is None else now) - lock.stat().st_mtime >= _stale_minutes() * 60
+        age = (time.time() if now is None else now) - lock.stat().st_mtime
     except OSError:
         return False
+    if owner is not None and owner[1] == socket.gethostname():
+        gone = _owner_gone(owner)
+        if gone is not None:
+            return gone or age >= LOCK_CAP_MINUTES * 60
+    return age >= _stale_minutes() * 60
 
 
 def _steal(lock: Path) -> bool:
@@ -191,7 +226,8 @@ def take_lock(lock: Path, timeout: int = 300) -> str:
     while True:
         try:
             lock.mkdir()
-            (lock / "owner").write_text(f"{os.getpid()} {socket.gethostname()} {token}\n")
+            (lock / "owner").write_text(f"{os.getpid()} {socket.gethostname()} {token} {_boot_id()} "
+                                        f"{_start_time(os.getpid())}\n")
             return token
         except FileExistsError:
             pass
