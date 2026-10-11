@@ -138,6 +138,247 @@ class NoVacuousPass(Tmp):
         self.assertTrue(str(q.Pending([], "needs postgres")).startswith("not run"))
 
 
+class Mutants(Tmp):
+    """Regression tests for the QA harness's own guards (re-review of feat/drive-qa @ ba945c7): each of these
+    fails if the guard it names is removed."""
+
+    def test_stale_lock_plants_every_not_null_column_of_drive_locks(self):
+        import re
+        import chaos
+        ddl = (Path(__file__).resolve().parent.parent / "lib/swarm/board/seats.py").read_text()
+        body = re.search(r"CREATE TABLE IF NOT EXISTS drive_locks \((.*?)\);", ddl, re.S).group(1)
+        required = {m.group(1) for m in re.finditer(r"(\w+) [^,]*NOT NULL", body.replace("{big}", "BIG").replace("{ts}", "TS"))}
+        required.add("key")                                   # the PRIMARY KEY
+        self.assertTrue({"key", "holder", "job", "generation", "launch_id", "host", "expires_at"} <= required, required)
+        cols = re.search(r"INSERT INTO drive_locks \(([^)]*)\)", chaos.STALE_LOCK_SQL).group(1)
+        self.assertLessEqual(required, {c.strip() for c in cols.split(",")}, "the planted row omits a NOT NULL column")
+        self.assertEqual(set(chaos.STALE_LOCK_COLUMNS), {c.strip() for c in cols.split(",")})
+
+    def fake_rig(self, **kw):
+        from types import SimpleNamespace as NS
+        calls = self.calls = []
+        run = NS(harness="fake", pg=None, ledger_dir=lambda: self.tmp / "ledgers", dir=self.tmp,
+                 swarm=lambda *a, **k: calls.append(a) or NS(returncode=0, stdout="", stderr=""),
+                 event=lambda *a, **k: None, bin=self.tmp, env=lambda: {})
+        rig = NS(run=run, job="J", calls=calls, budget_usd=1.0, **kw)
+        return rig
+
+    def test_cost_cap_halts_the_job_and_raises(self):
+        from unittest import mock
+        import qa_lib as q
+        import rig as rigmod
+        r = rigmod.Rig.__new__(rigmod.Rig)
+        r.run = self.fake_rig().run
+        r.job, r.budget_usd, r.passes, r.invariant_violations = "J", 1.0, 0, []
+        r.stall_passes, r._last_change, r._last_sig, r.pass_env, r.rcs = 10, 0, None, {}, []
+        r.snapshot_line = lambda: {"status": "active", "agents": [], "messages": 0, "restarts": 1, "verdict": None,
+                                   "closed_by": None}
+        r.spent_usd = lambda: 1.5
+        r.one_pass = lambda: self.fail("a pass ran after the cost cap was exceeded")
+        with mock.patch.object(q, "require"), self.assertRaises(rigmod.CostCap):
+            r.drive(timeout_s=60, interval_s=0)
+        self.assertTrue(any(c[0] == "halt" for c in self.calls), "the job was not halted")
+
+    def test_under_budget_keeps_driving(self):
+        from unittest import mock
+        import qa_lib as q
+        import rig as rigmod
+        r = rigmod.Rig.__new__(rigmod.Rig)
+        r.run = self.fake_rig().run
+        r.job, r.budget_usd, r.passes, r.invariant_violations = "J", 1.0, 0, []
+        r.stall_passes, r._last_change, r._last_sig, r.pass_env, r.rcs = 10, 0, None, {}, []
+        seq = iter([{"status": "active", "agents": [], "messages": 0, "restarts": 0, "verdict": None, "closed_by": None},
+                    {"status": "completed", "agents": [], "messages": 1, "restarts": 1, "verdict": "met", "closed_by": "x"}])
+        r.snapshot_line = lambda: next(seq)
+        r.spent_usd = lambda: 0.5
+        r.one_pass = lambda: None
+        with mock.patch.object(q, "require"):
+            self.assertEqual(r.drive(timeout_s=60, interval_s=0)["status"], "completed")
+
+    def test_real_mode_resolves_claude_from_the_users_path_inside_the_isolated_home(self):
+        from unittest import mock
+        import qa_lib as q
+        bindir = self.tmp / "userbin"
+        bindir.mkdir()
+        (bindir / "claude").write_text("#!/bin/sh\n")
+        (bindir / "claude").chmod(0o755)
+        (self.tmp / "realhome" / ".claude").mkdir(parents=True)
+        (self.tmp / "realhome" / ".claude" / ".credentials.json").write_text("{}")
+        with mock.patch.object(q, "QA_ROOT", self.tmp), mock.patch.object(q, "REAL_PATH", f"{bindir}:/usr/bin"), \
+                mock.patch.object(q, "REAL_HOME", str(self.tmp / "realhome")), \
+                mock.patch.dict(os.environ, {"SWARM_QA_CLAUDE": ""}):
+            run = q.Run("realmode", backend="sqlite", harness="real", stamp="t")
+            run.home.mkdir(parents=True)
+            run.bin.mkdir(parents=True)
+            run._write_config()
+            self.assertIn(str(bindir), run.env()["PATH"])
+            self.assertIn(f'claude_bin = "{bindir / "claude"}"', run.config.read_text())
+            self.assertTrue((run.home / ".claude" / ".credentials.json").exists())
+            fake = q.Run("fakemode", backend="sqlite", harness="fake", stamp="t")
+            self.assertNotIn(str(bindir), fake.env()["PATH"])
+
+    def run_harness(self, scope, seat, prompt_extra=""):
+        """One fake judge session as a subprocess; returns the `swarm` arguments it ran."""
+        run = self.tmp / "hrun"
+        (run / "home").mkdir(parents=True, exist_ok=True)
+        (run / "bin").mkdir(exist_ok=True)
+        (run / "repo" / "bin").mkdir(parents=True, exist_ok=True)
+        (run / "repo" / "bin" / "swarm-hook").write_text("#!/bin/sh\ncat >/dev/null\n")
+        (run / "repo" / "bin" / "swarm-hook").chmod(0o755)
+        (run / "bin" / "swarm").write_text(f'#!/bin/sh\necho "$@" >> {run}/swarm-calls\n')
+        (run / "bin" / "swarm").chmod(0o755)
+        (run / "script.json").write_text(json.dumps({"judge": {
+            "artifact": [{"verdict": "not_met", "open": 1}, {"verdict": "met"}],
+            "goal": [{"verdict": "met"}], "ruling": [{"verdict": "unreachable", "reason": "r"}]}}))
+        (run / "harness.json").write_text(json.dumps({"repo": str(run / "repo"), "script": str(run / "script.json"),
+                                                      "hub": str(run / "hub"), "job": "J"}))
+        before = (run / "swarm-calls").read_text().splitlines() if (run / "swarm-calls").exists() else []
+        prompt = f"[swarm job: J]\n[swarm role: judge]\n[swarm seat: {seat}]\n[swarm scope: {scope}]\n{prompt_extra}"
+        r = subprocess.run([sys.executable, "-B", str(HARNESS / "fake_harness.py"), "--harness", "claude", "-p"],
+                           input=prompt, capture_output=True, text=True,
+                           env={"HOME": str(run / "home"), "PATH": os.environ["PATH"]})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return (run / "swarm-calls").read_text().splitlines()[len(before):]
+
+    def test_judge_sessions_follow_the_script_by_scope_not_by_seat(self):
+        first = self.run_harness("goal", "judge-1")
+        self.assertTrue(first and first[0].startswith("verdict met "), first)             # goal: first entry is met
+        art1 = self.run_harness("artifact", "judge-2")
+        self.assertTrue(art1 and art1[0].startswith("verdict not_met"), art1)             # artifact: first entry
+        art2 = self.run_harness("artifact", "judge-OTHER-SEAT")                           # a different seat, same scope
+        self.assertTrue(art2 and art2[0].startswith("verdict met "), art2)                # ...gets the SECOND entry
+        ruling = self.run_harness("ruling", "judge-1")
+        self.assertTrue(ruling and ruling[0].startswith("verdict unreachable"), ruling)
+
+    def test_drive_fails_when_the_fault_never_fired_and_passes_when_it_did(self):
+        import argparse
+        from types import SimpleNamespace as NS
+        from unittest import mock
+        import chaos
+        import qa_lib as q
+
+        class FakeRig:
+            def __init__(self, *a, **k):
+                self.run = NS(harness="fake", event=lambda *a, **k: None)
+            def __enter__(self): return self
+            def __exit__(self, *e): pass
+            def activate(self): pass
+            def drive(self, **k): return {}
+            def check_terminal(self, expect): return []
+            def check_no_coordinator(self): return []
+            def check_every_seat_supervisor_launched(self): return []
+            def check_landing(self): return []
+            def write_costs(self): return {"launches": 1, "passes": 1, "spent_usd": 0}
+            def export_evidence(self): pass
+        args = argparse.Namespace(backend="sqlite", harness="fake", budget_usd=1, timeout_min=1, interval_s=0)
+        with mock.patch.object(chaos, "Rig", FakeRig), mock.patch.object(q, "require"):
+            never = chaos._drive(args, "x", fired=lambda rig, st: None)
+            did = chaos._drive(args, "x", fired=lambda rig, st: "it happened")
+            nofn = chaos._drive(args, "x")
+        self.assertEqual(never[1], "FAIL")
+        self.assertIn("never fired", never[2])
+        self.assertEqual(did[1], "PASS")
+        self.assertEqual(nofn[1], "PASS")
+
+    def test_stale_lock_inject_plants_only_once_a_ledger_exists_and_fired_needs_the_proof(self):
+        from unittest import mock
+        import chaos
+        rig = self.fake_rig()
+        captured = {}
+        with mock.patch.object(chaos, "_drive", lambda args, name, **kw: captured.update(kw) or ("x", "PASS", "")):
+            chaos.drv_stale_lock(None)
+        st: dict = {}
+        captured["inject"](rig, 0, {}, st)                                  # no ledger directory yet: nothing planted
+        self.assertFalse(st.get("planted"))
+        self.assertIsNone(captured["fired"](rig, st))
+        (self.tmp / "ledgers").mkdir()
+        (self.tmp / "ledgers" / ("a" * 64 + ".json")).write_text("{}")
+        captured["inject"](rig, 1, {}, st)
+        self.assertTrue((self.tmp / "ledgers" / ("a" * 64 + ".lock")).exists())
+        self.assertIn("ledger lock", captured["fired"](rig, st))
+        self.assertIsNone(captured["fired"](rig, {"planted": []}))          # an empty plant is not proof
+
+    def test_the_question_check_wants_the_event_and_real_companions(self):
+        import chaos
+        asked = "Q1 left or right?"
+        self.assertTrue(chaos.question_default_applied(f"{asked}\n  default applied: left"))
+        self.assertFalse(chaos.question_default_applied(f"{asked}\n  default: left (--default left)"))   # only the word default
+        self.assertFalse(chaos.question_default_applied("Q1 other question\n default applied"))
+        cmd = lambda t, c, rc=0: {"ev": "cmd", "at": t, "cmd": f"/r/bin/swarm {c}", "rc": rc}   # noqa: E731
+        start = lambda t, role: {"ev": "start", "at": t, "role": role}                         # noqa: E731
+        ok = [cmd(100, "ask --job J"), cmd(150, "done --job J"), start(260, "lead")]
+        self.assertEqual(chaos.question_companions(ok, 120), [])
+        no_progress = [cmd(100, "ask --job J"), cmd(300, "done --job J"), start(260, "lead")]   # done only AFTER expiry
+        self.assertTrue(any("while the question was open" in b for b in chaos.question_companions(no_progress, 120)))
+        no_wake = [cmd(100, "ask --job J"), cmd(150, "done --job J"), start(110, "lead")]       # lead started before expiry
+        self.assertTrue(any("not woken" in b for b in chaos.question_companions(no_wake, 120)))
+        self.assertTrue(chaos.question_companions([start(1, "lead")], 120))                     # no ask at all
+
+    def test_a_nonzero_exit_that_is_not_sigkill_is_not_a_barrier(self):
+        import rig as rigmod
+        r = rigmod.Rig.__new__(rigmod.Rig)
+        r.harness_log = lambda: []
+        for rcs in ([1], [0, 2], [-15], [255]):
+            r.rcs = rcs
+            self.assertIsNone(r.barrier_fired("after_claim"), rcs)
+
+    def test_kill_pass_midway_needs_a_live_runner_and_kills_it(self):
+        from types import SimpleNamespace as NS
+        from unittest import mock
+        import chaos
+        import qa_lib as q
+        sh = self.tmp / "swarm"
+        sh.write_text("#!/bin/sh\nsleep 30\n")
+        sh.chmod(0o755)
+        run = NS(bin=self.tmp, env=lambda: dict(os.environ), event=lambda *a, **k: None)
+        rig = NS(run=run)
+        st: dict = {}
+        with mock.patch.object(q, "run_procs", lambda *a, **k: []), mock.patch.object(chaos.time, "sleep", lambda s: None), \
+                mock.patch.object(chaos.time, "monotonic", iter([0, 1, 100, 100, 100]).__next__):
+            self.assertFalse(chaos.kill_pass_midway(rig, st))                # the pass never had a runner
+        self.assertNotIn("killed_pass", st)
+        self.assertEqual(st["kill_miss"], 1)
+        runner = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(runner.kill)
+        st = {}
+        with mock.patch.object(q, "run_procs", lambda *a, **k: [runner.pid]), mock.patch.object(chaos.time, "sleep", lambda s: None):
+            self.assertTrue(chaos.kill_pass_midway(rig, st))
+        self.assertEqual(runner.wait(timeout=10), -9)                        # the runner really was SIGKILLed
+        self.assertIn("killed_pass", st)
+
+
+@unittest.skipUnless(POSIX, "POSIX only")
+class PgSignals(Tmp):
+    def test_sigterm_stops_the_throwaway_cluster(self):
+        import qa_lib as q
+        if not (q.PG_BIN / "postgres").exists() or subprocess.run([str(q.PG_BIN / "postgres"), "-V"],
+                                                                   capture_output=True).returncode:
+            self.skipTest("no runnable Postgres for the QA harness here")
+        import signal
+        import time
+        code = ("import sys, time; sys.path.insert(0, %r); import qa_lib as q; from pathlib import Path\n"
+                "pg = q.Pg(q.QA_ROOT / 'runs' / 'sigterm-test' / 'pg'); pg.start(); print('up', flush=True); time.sleep(120)\n"
+                % str(HARNESS))
+        env = {**os.environ, "SWARM_QA_ROOT": str(self.tmp / "qa"), "SWARM_QA_PG_BIN": str(q.PG_BIN)}
+        p = subprocess.Popen([sys.executable, "-B", "-c", code], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             text=True, env=env)
+        self.addCleanup(p.stdout.close)
+        data = self.tmp / "qa" / "runs" / "sigterm-test" / "pg" / "data"
+        self.addCleanup(lambda: subprocess.run([str(q.PG_BIN / "pg_ctl"), "-D", str(data), "-m", "immediate", "stop"],
+                                               capture_output=True))
+        line = p.stdout.readline().strip()
+        self.assertEqual(line, "up", line)
+        self.assertTrue((data / "postmaster.pid").exists())
+        p.send_signal(signal.SIGTERM)
+        p.wait(timeout=60)
+        for _ in range(50):
+            if not (data / "postmaster.pid").exists():
+                break
+            time.sleep(0.2)
+        self.assertFalse((data / "postmaster.pid").exists(), "the cluster was left running after SIGTERM")
+        self.assertEqual(p.returncode, 128 + signal.SIGTERM)
+
+
 class Guards(Tmp):
     def test_run_dir_must_be_under_the_qa_root_and_never_tmp(self):
         import qa_lib as q
