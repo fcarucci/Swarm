@@ -1,0 +1,22 @@
+{
+ "cwd": "/home/alice/work",
+ "duration_ms": 22,
+ "hook_event_name": "PostToolUse",
+ "permission_mode": "default",
+ "prompt_id": "00000000-0000-4000-9000-000000000002",
+ "session_id": "00000000-0000-4000-9000-000000000001",
+ "tool_input": {
+  "command": "swarm done --job J --artifact feat/a@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --summary x",
+  "description": "hand off"
+ },
+ "tool_name": "Bash",
+ "tool_response": {
+  "interrupted": false,
+  "isImage": false,
+  "noOutputExpected": false,
+  "stderr": "",
+  "stdout": "posted #42\nswarm-record: kind=done id=42 rev=1\n"
+ },
+ "tool_use_id": "toolu_01SyntheticSwarmDone",
+ "transcript_path": "/home/alice/.claude/projects/-home-alice-work/00000000-0000-4000-9000-000000000001.jsonl"
+}

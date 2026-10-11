@@ -2427,6 +2427,22 @@ class DriveClaims(DriveHelpers):
         two = self.seat("J", "a")
         self.assertEqual((one.id, one.revision), (two.id, two.revision))
 
+    def test_codex_judge_overridden_to_claude_on_every_backend(self):
+        """[G1] a judge or reviewer requested on Codex is stored on Claude, the reason is posted once, and
+        every other role keeps what it asked for. Each backend's contract class runs this on its own store."""
+        self.goal_job()
+        for name, role in (("judge", "judge"), ("rev", "reviewer"), ("goal-judge", "goal_judge")):
+            s = self.seat("J", name, role=role, harness="codex")
+            self.assertEqual((s.harness, s.role), ("claude", role), name)
+        self.assertEqual(self.seat("J", "eng", role="engineer", harness="codex").harness, "codex")
+        self.assertEqual(self.seat("J", "eng2", role="engineer", harness="claude").harness, "claude")
+        posts = [m.message for m in self.b.recent_messages(50, "J") if "runs on Claude" in m.message]
+        self.assertEqual(len(posts), 3)
+        self.assertTrue(all(m.startswith("seat ") for m in posts))
+        again = self.seat("J", "judge", role="judge", harness="codex")      # the same request again
+        self.assertEqual((again.harness, again.revision), ("claude", 1))
+        self.assertEqual(len([m for m in self.b.recent_messages(50, "J") if "runs on Claude" in m.message]), 3)
+
     def test_a_request_racing_a_claim_does_not_rewrite_the_running_seat(self):
         self.goal_job()
         s = self.seat("J", "a", model="sonnet", workdir="/w/a")

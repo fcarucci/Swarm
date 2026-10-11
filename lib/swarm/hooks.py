@@ -1721,7 +1721,6 @@ def _on_event(board, event: str, agent_id: str, sid: str | None, bound: dict, un
         _sweep(board, cfg, event, agent_id, payload, deadline)
         return
     if event == "done":  # PostToolUse: the tool call finished; bookkeeping, and memory provenance
-        _drive_post(board, cfg, agent_id, sid, payload)
         lease = _CURRENT.get('lease')
         if lease and lease.enabled:
             member = board.tool_contact(agent_id, None) if lease.due else board.hook_member(agent_id)
@@ -1802,7 +1801,7 @@ def _on_event(board, event: str, agent_id: str, sid: str | None, bound: dict, un
         if model:
             board.set_agent_runtime(agent_id, None, model)
     _reuse_identity(agent_id, member.job, payload, member.name, cfg)
-    if _gate_drive(board, agent_id, payload, cfg) and _gate_judge(board, agent_id, member.job, payload) and \
+    if _gate_judge(board, agent_id, member.job, payload) and \
             _gate_verifier(board, agent_id, member.verifier, payload) and \
             _gate_ci(board, agent_id, payload, cfg) and \
             _gate_spawn(board, agent_id, member.name, member.job, payload, cfg):
@@ -2140,6 +2139,9 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
     elif event == "session-stop" and agent_id:
         return 0   # harness subagents use SubagentStop
 
+    if event in ("turn", "done") and _drive_event(event, cfg, payload, resume):
+        return 0   # refused: the denial is written
+
     lease = _CURRENT.get('lease')
     if not agent_id and lease and lease.enabled:
         markers, _ = _session_markers(cfg, sid) if sid else ({}, {})
@@ -2154,12 +2156,6 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
         _orchestrator_plugin_lines(event, cfg, sid)
         _orchestrator_event_lines(event, cfg, sid)
         _orchestrator_respawn(event, cfg, sid, payload)
-        if event == "done" and sid:
-            _drive_post_main(cfg, sid, payload)
-        if event == "turn" and current_host().is_spawn(payload) and _drive_requester_of(cfg, sid):
-            _deny("[swarm] Spawn refused in a drive job: the requester session does not staff seats. "
-                  "Ask the lead with `swarm seat request` (or a person) to request the seat.")
-            return 0
         if event == "turn" and current_host().is_spawn(payload):
             try:
                 _orchestrator_spawn(cfg, sid, payload)
@@ -2236,236 +2232,23 @@ def _unchecked_verifier_write(payload: dict, agent_id: str) -> bool:
 
 
 
-# --- drive jobs (spec 3.4, 3.11, 4.0, 4.5) -------------------------------------------------------
-# Unsandboxed hooks of a drive job: receipts for the control records the driver acts on, the
-# refusals that keep read-only seats read-only and seats off the target branch, and the kick that
-# starts the supervisor pass sooner. Nothing here decides an outcome: the driver checks receipts.
+# --- drive jobs (spec 3.4, 3.11, 4.0, 4.5): the logic is in swarm.drive_hooks --------------------------------
 
-KICK_SECONDS = 20.0
-KICK_UNIT = "swarm-supervise.service"
-KICK_STAMP = "kick.stamp"
-RECEIPT_FAILURES = "receipt-failures.log"
-DRIVE_TARGETS = ("main", "master")   # branches no seat may push to
-READ_ONLY_ROLES = ("judge", "reviewer", "goal_judge", "ruling_judge")
-_MCP_WRITE = re.compile(r"^mcp__.*_(?:create|update|delete|write|post|send|set|add|remove|push|merge|commit|"
-                        r"edit|put|patch|reply|comment|move|rename|upload|modify|revoke|approve|trigger|close)",
-                        re.I)
-_PERSON_SUBS = ("halt", "unhalt", "deactivate", "activate")
-_RECORD_LINE = re.compile(r"swarm-record: kind=([a-z_]+) id=(\d+) rev=(\d+)")
-
-
-def kick(now=time.time) -> bool:
-    """Start the supervisor pass now (`systemctl --user start --no-block swarm-supervise.service`),
-    at most once per KICK_SECONDS (the stamp is in the host dir). True when started; never raises."""
-    import subprocess
-    from swarm import paths, safefs
-    from swarm.supervisor.systemd import manager_env
+def _drive_event(event: str, cfg: dict, payload: dict, resume: dict | None) -> bool:
+    """The drive gate of PreToolUse (every call of every session, before anything else a hook does: a join, a
+    first call and a seat of an unbound job included) and the receipts of PostToolUse. True when the call was
+    refused (the denial is written). The payload's own agent_id is what tells a main session from a subagent."""
     try:
-        with safefs.dir_fd(paths.host_dir(), create=True, strict_mode=0o700) as d:
-            t = float(now())
-            last = safefs.read_text(d, KICK_STAMP, 64)
-            if last is not None and 0 <= t - float(last) < KICK_SECONDS:
-                return False
-            safefs.write_atomic(d, KICK_STAMP, repr(t))
-        subprocess.run(["systemctl", "--user", "start", "--no-block", KICK_UNIT], env=manager_env(),
-                       capture_output=True, text=True, timeout=20, check=False)
-        return True
-    except Exception:
-        return False
-
-
-def _log_receipt_failure(text: str) -> None:
-    """A line in the host dir's receipt-failures.log (doctor FAILs on a recent one); never raises."""
-    from swarm import paths, safefs
-    try:
-        with safefs.dir_fd(paths.host_dir(), create=True, strict_mode=0o700) as d:
-            safefs.append(d, RECEIPT_FAILURES, f"{time.time():.0f} {text}\n")
-    except Exception:
-        pass
-
-
-def _parse_swarm_words(words: list[str]):
-    """The namespace of a `swarm` argv (the words after `swarm`) by the CLI's own parser, None when
-    it does not parse (errors silenced: the call is then simply not receipted)."""
-    import contextlib
-    import io
-    from swarm.cli import _parser
-    try:
-        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
-            return _parser().parse_args(words)
-    except (SystemExit, Exception):
-        return None
-
-
-def _record_of(payload: dict):
-    """(kind, id, rev) from the one record format on the output's last line, for a call that exited 0."""
-    resp = payload.get("tool_response")
-    if not isinstance(resp, dict) or resp.get("exit_code") != 0:
-        return None
-    lines = str(resp.get("stdout") or "").rstrip("\n").splitlines()
-    m = _RECORD_LINE.fullmatch(lines[-1]) if lines else None
-    return (m.group(1), int(m.group(2)), int(m.group(3))) if m else None
-
-
-def _open_intent(led, seat: str):
-    """The driver's open (not concluded) intent for `seat`: the action and attempt its session runs."""
-    return next((i for i in led.intents if i.seat == seat and i.state != "concluded"), None)
-
-
-def _agrees(ns, **expect) -> bool:
-    """Every field the command gave (not None on the namespace) equals the row's value."""
-    return all(getattr(ns, k, None) in (None, v) for k, v in expect.items())
-
-
-def drive_post_tool(board, cfg: dict, payload: dict, agent_id: str | None, sid: str | None) -> bool:
-    """PostToolUse of a successful `swarm seat request` (by the job's lead seat or its requester
-    session) or of a person-path command (halt, unhalt, deactivate, activate) by the requester
-    session: writes the receipt the driver checks (receipts.write), then kicks the supervisor.
-    True when a receipt was written. A failed write is logged. Anything else gets no receipt."""
-    from swarm import enrolment, receipts
-    from swarm.board.autoinit import store_key
-    from swarm.supervisor import drive_authz, ledger
-    host = current_host()
-    command = host.shell_command(payload) or ""
-    rec = _record_of(payload)
-    if rec is None or not re.search(r"\bswarm\b", command):
-        return False
-    kind, record_id, rev = rec
-    board_key = store_key(cfg)
-    calls = [(sub, args) for sub in ("seat", *_PERSON_SUBS) for args in _swarm_calls(command, sub)]
-    if len(calls) != 1:
-        return False
-    sub, args = calls[0]
-    words = [w[2] for w in args]
-    if sub == "seat" and words[:1] != ["request"]:
-        return False
-    if sub != "seat" and kind != sub:
-        return False
-    job = None
-    if agent_id:   # a seat session: its own enrolment names the job (never the command's --job)
-        enr = enrolment.find(board_key, agent_id)
-        if enr is None:
+        from swarm import drive_hooks
+        if event == "done":
+            drive_hooks.post_tool(cfg, payload, current_host(), resume=resume, resume_lookup=_resume_binding)
             return False
-        job = enr.job
-    ns = _parse_swarm_words([sub] + words)
-    if ns is None:
+        why = drive_hooks.pre_tool(cfg, payload, current_host(), resume=resume, resume_lookup=_resume_binding)
+    except Exception as exc:   # never break the agent (a known drive seat's errors are refused inside pre_tool)
+        _log_error("drive", str(payload.get("agent_id") or payload.get("session_id")), exc)
         return False
-    job = job or getattr(ns, "job", None)
-    led = ledger.load(board_key, job) if job else None
-    if led is None or not _agrees(ns, job=job):
-        return False
-    requester = bool(sid) and led.requester_session == sid
-    seat_row = next((s for s in board.seats(job, led.generation, include_closed=False)
-                     if agent_id and s.agent_key == agent_id), None)
-    if sub != "seat":
-        if not requester:
-            return False
-        action, attempt, seat_name = f"requester:{sub}", 0, None
-        rkind, rid, decision = "person", str(record_id), {"action": sub, "target": job}
-        args_sha = receipts.args_sha([sub, job])
-    else:
-        lead = seat_row is not None and seat_row.role == "engineering_lead"
-        if not (requester or lead):
-            return False
-        row = board.seat(job, led.generation, getattr(ns, "seat", None) or "")
-        if row is None or row.id != record_id or row.revision != rev or row.job != job:
-            return False      # not the row the command printed (replaced since)
-        if not _agrees(ns, seat=row.seat, role=row.role, brief=row.brief_path, workdir=row.workdir,
-                       model=row.model):
-            return False      # the row was changed between the command and this hook
-        if requester:
-            action, attempt = "requester:seat", 0
-        else:
-            intent = _open_intent(led, seat_row.seat)
-            if intent is None:
-                return False
-            action, attempt = intent.action_id, intent.attempt
-        seat_name = row.seat
-        rkind, rid, decision = "seat_request", str(row.id), drive_authz.seat_decision(row)
-        args_sha = receipts.args_sha(drive_authz.canonical_seat_args(row))
-    try:
-        r = receipts.Receipt(board_key=board_key, job=job, generation=led.generation,
-                             incarnation=led.incarnation, action_id=action, attempt=attempt, seat=seat_name,
-                             kind=rkind, record_id=rid, rev=rev,
-                             content_sha=receipts.content_sha(rkind, decision), args_sha=args_sha,
-                             expires_at=time.time() + 24 * 3600)
-        receipts.write(board_key, r)
-    except Exception as exc:
-        _log_receipt_failure(f"{job} {rkind} id={rid} rev={rev}: {type(exc).__name__}: {exc}")
-        return False
-    kick()
-    return True
-
-
-def _drive_post(board, cfg: dict, agent_id: str, sid: str | None, payload: dict) -> None:
-    try:
-        drive_post_tool(board, cfg, payload, agent_id, sid)
-    except Exception as exc:   # never break the agent
-        _log_error("drive receipt", agent_id, exc)
-
-
-def _drive_refusal(board, agent_id: str, payload: dict, cfg: dict) -> str | None:
-    """Why this drive seat's tool call is refused (the reason), None when it may go ahead. Only an
-    enrolled session of a drive job (one with a ledger) is looked at."""
-    from swarm import enrolment
-    from swarm.board.autoinit import store_key
-    from swarm.shellguard import drive_command_refusal, powershell_writes, writes_files
-    from swarm.supervisor import ledger
-    key = store_key(cfg)
-    rec = enrolment.find(key, agent_id)
-    if rec is None or ledger.load(key, rec.job) is None:
-        return None
-    host = current_host()
-    tool = payload.get("tool_name")
-    seat = next((s for s in board.seats(rec.job, None, include_closed=False) if s.agent_key == agent_id), None)
-    read_only = seat is not None and (seat.role in READ_ONLY_ROLES or seat.role.endswith(("judge", "reviewer")))
-    if read_only and (tool == "Monitor" or (isinstance(tool, str) and _MCP_WRITE.search(tool))
-                      or host.tool_matches(tool, host.write_tools)):
-        return "a read-only seat (judge or reviewer) may not write"
-    command = host.shell_command(payload) or ""
-    if tool == "PowerShell":   # the same rules as Bash, whatever the host's shell adapter reads
-        command = str((payload.get("tool_input") or {}).get("command") or "")
-    if not command:
-        return None
-    if read_only and (writes_files(command) or (tool == "PowerShell" and powershell_writes(command))):
-        return "a read-only seat (judge or reviewer) may not write (no redirects, edits, commits or pushes)"
-    return drive_command_refusal(command, DRIVE_TARGETS)
-
-
-def _gate_drive(board, agent_id: str, payload: dict, cfg: dict) -> bool:
-    """PreToolUse of a drive seat: True when the call may go ahead; otherwise it is refused with a
-    pointer to `swarm land` (targets) and `swarm seat request` (more seats). Errors let it through."""
-    try:
-        why = _drive_refusal(board, agent_id, payload, cfg)
-    except Exception as exc:
-        _log_error("drive gate", agent_id, exc)
-        return True
     if why is None:
-        return True
-    board.tool_finished(agent_id)   # a denied call gets no PostToolUse
+        return False
     _deny(f"[swarm] Refused in a drive job: {why}. Land work with `swarm land`; ask the lead for a seat "
           f"with `swarm seat request`.")
-    return False
-
-
-def _drive_post_main(cfg: dict, sid: str, payload: dict) -> None:
-    """PostToolUse of the requester session (no agent of its own): its person-path receipts."""
-    try:
-        from swarm.board import open_board
-        with open_board(cfg, init_timeout=HOOK_INIT_TIMEOUT) as board:
-            drive_post_tool(board, cfg, payload, None, sid)
-    except Exception as exc:
-        _log_error("drive receipt", sid, exc)
-
-
-def _drive_requester_of(cfg: dict, sid: str | None) -> bool:
-    """Whether `sid` is the requester session of an unfinished drive job of this board (never raises)."""
-    if not sid:
-        return False
-    try:
-        from swarm.board.autoinit import store_key
-        from swarm.supervisor import ledger
-        return any(getattr(led, "requester_session", None) == sid and getattr(led, "terminal", None) is None
-                   for led in ledger.unfinished(store_key(cfg)) if hasattr(led, "requester_session"))
-    except Exception:
-        return False
+    return True
