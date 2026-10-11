@@ -278,20 +278,3 @@ def agent_sessions(board_key: str) -> dict:
     except FileNotFoundError:
         pass
     return out
-
-
-def agent_keys(board_key: str, session_id: str) -> set:
-    """The agent keys of every agent record of this board whose session is `session_id` (a main session and
-    the subagents that share its id). Read only; unsafe or unreadable entries are skipped."""
-    out = set()
-    try:
-        with _dir(create=False) as d:
-            for name in sorted(compat.listdir(d)):
-                if not name.startswith("agent-") or not _FILE.fullmatch(name):
-                    continue
-                rec = _parse(safefs.read(d, name, RECORD_MAX))
-                if rec and rec.kind == "agent" and rec.board_key == board_key and rec.session_id == session_id:
-                    out.add(rec.agent_key)
-    except FileNotFoundError:
-        pass
-    return out

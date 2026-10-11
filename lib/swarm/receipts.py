@@ -32,7 +32,7 @@ from swarm import enrolment, paths, safefs
 FORMAT = 1
 RECORD_MAX = 64 * 1024
 KINDS = ("done", "review", "verdict", "goal_ready", "integrated", "seat_request", "post", "ask",
-         "answer", "blocker_resolution", "person", "ack", "withdraw", "land")
+         "answer", "blocker_resolution", "person", "ack", "withdraw", "land", "grant")
 # The decision fields of each kind: the values whose digest is content_sha. A kind's row must
 # carry every one of them. Task 5 and Task 6 write and read records with these names. A verdict binds
 # the artifact it judges (an artifact verdict) or the candidate (a goal or ruling verdict): the other of
@@ -52,6 +52,9 @@ DECISION = {
     "ack": ("request_id",),
     "withdraw": ("request_id",),
     "land": ("destinations",),
+    # A grant is the hook's attestation, BEFORE a control command runs, of who submitted it (drivegate.
+    # write_grants): record_id is args_sha(submitted argv), seat/action_id say who. Single use (take()).
+    "grant": ("argv_sha",),
 }
 LAND_STATES = ("intent", "pushed", "verified")
 _SHA = re.compile(r"[0-9a-f]{64}")
@@ -218,5 +221,25 @@ def find_latest(board_key: str, job: str, kind: str, record_id: str, *, incarnat
             board_key, job, kind, record_id, incarnation, generation):
         return None
     if not r.expires_at > now:
+        return None
+    return r
+
+
+GRANT_INCARNATION_NO_LEDGER = "0" * 32   # a grant for `drive repair` of a job whose ledger does not read
+
+
+def take(board_key: str, job: str, kind: str, record_id: str, *, rev: int, incarnation: str,
+         generation: int, now: float) -> Receipt | None:
+    """find(), then remove the receipt: a single-use receipt (a grant) serves one command. Whoever loses the
+    removal race, or cannot remove it (a sandbox that may read the enrolled directory but not write it),
+    gets None."""
+    r = find(board_key, job, kind, record_id, rev=rev, incarnation=incarnation, generation=generation, now=now)
+    if r is None:
+        return None
+    from swarm import compat
+    try:
+        with enrolment._dir(create=False) as d:
+            compat.unlink(safefs._entry(receipt_name(board_key, job, kind, record_id)), dir_fd=d)
+    except OSError:
         return None
     return r

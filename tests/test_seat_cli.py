@@ -1,8 +1,9 @@
 """Drive control commands (Task 6b): halt/unhalt, seat request/list/show/release/cancel, review,
 goal-ready, drive repair. Handlers run through the real CLI parser against the memory board, under a temporary
-HOME inside the suite sandbox. The caller is attested the way the PreToolUse hook does it (person.write_grants
-for the session's own shell call); the job's lead is a real `lead` seat row holding the lead's agent key (set
-on the memory store: a seat gets its key from the launch, which these tests do not run)."""
+HOME inside the suite sandbox. The caller is attested the way the PreToolUse hook does it
+(drivegate.write_grants for the session's own shell call: the requester by the ledger's requester_session, a
+seat by the context the host-private chain gives it, built here directly); the job's lead is a real `lead`
+seat row (its state set on the memory store: a seat starts running only through a launch claim)."""
 from __future__ import annotations
 
 import contextlib
@@ -18,7 +19,7 @@ from unittest import mock
 
 from support import SANDBOX, MemoryHarness, home_env, posix_only  # noqa: F401
 
-from swarm import cli, drive_cli, enrolment, person, review  # noqa: E402
+from swarm import cli, drive_cli, drivegate, enrolment, person, review  # noqa: E402
 from swarm.board.autoinit import store_key  # noqa: E402
 from swarm.supervisor import ledger  # noqa: E402
 
@@ -43,7 +44,10 @@ class ControlCase(unittest.TestCase):
         self.cfg = self.h.cfg
         self.bkey = store_key(self.cfg)
         self.board.open_job(JOB, "d", None, REQ_SESSION, "Francesco", goal="g")
-        ledger.create(self.bkey, JOB, budgets={}, activated_at=self.board.now().isoformat())
+        led = ledger.create(self.bkey, JOB, budgets={}, activated_at=self.board.now().isoformat())
+        led.requester_session = REQ_SESSION   # what activation records (the hook's requester_context reads it)
+        led.save()
+        self.seat_of = {}   # session -> (job, seat) the host-private chain resolves (drivegate.seat_context)
         enrolment.write_job_owner(self.bkey, job=JOB, harness="claude", session_id=REQ_SESSION,
                                   cwd=str(self.work))
         self.roots = [str(self.work)]
@@ -77,16 +81,37 @@ class ControlCase(unittest.TestCase):
             for var in person.HOST_ENV:
                 os.environ.pop(var, None)
 
-    def enrol(self, session, key):
-        enrolment.write(self.bkey, job=JOB, agent_key=key, harness="claude", session_id=session,
+    SEATS = {LEAD_KEY: "lead", ENG_KEY: "eng"}
+
+    def enrol(self, session, key, job=JOB, seat=None):
+        enrolment.write(self.bkey, job=job, agent_key=key, harness="claude", session_id=session,
                         cwd=str(self.work))
+        seat = seat or self.SEATS.get(key)
+        if seat:
+            self.seat_of[session] = (job, seat)
+
+    def seat_ctx(self, session):
+        """The drivegate.Ctx seat_context gives a seat session (marker, run file and intent, here direct)."""
+        if session not in self.seat_of:
+            return None
+        job, seat = self.seat_of[session]
+        try:
+            led = ledger.load(self.bkey, job)
+        except ledger.LedgerBadError:
+            led = None
+        intent = ledger.Intent(f"L-{seat}", f"A-{seat}", 1, seat, 0.0, 0.0, [], "claimed")
+        return drivegate.Ctx(kind="seat", job=job, led=led, seat=seat if led else None,
+                             intent=intent if led else None)
 
     def run_cmd(self, *argv):
         """Run `swarm <argv>` as the current session's shell call: its PreToolUse hook writes the grant, then
         the real CLI parser and handler run. (rc, stdout, stderr)."""
         if self.session:
-            payload = {"session_id": self.session, **({"agent_id": self.agent_id} if self.agent_id else {})}
-            person.write_grants(self.bkey, payload, shlex.join(["swarm", *argv]))
+            command = shlex.join(["swarm", *argv])
+            payload = {"session_id": self.session, "tool_name": "Bash", "tool_input": {"command": command},
+                       **({"agent_id": self.agent_id} if self.agent_id else {})}
+            from swarm import hosts
+            drivegate.write_grants(self.cfg, payload, hosts.get("claude"), self.seat_ctx(self.session))
         args = cli._parser().parse_args(list(argv))
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
@@ -245,7 +270,8 @@ class Seats(ControlCase):
         self.assertEqual(rc, 0, err)
         self.assertEqual(self.board.seat(JOB, 1, "eng").state, "released")
         self.assertEqual(ledger.load(self.bkey, JOB).integrated["feat/x"]["withdrawn"], "superseded")
-        self.assertRegex(self.last_line(out), r"^swarm-record: kind=seat id=\d+ rev=2$")
+        row = self.board.seat(JOB, 1, "eng")
+        self.assertEqual(drivegate.record_of({"tool_response": {"stdout": out}}), ("withdraw", row.id, row.revision))
 
     def test_seat_release_withdraw_needs_reason(self):
         self.request_seat()
@@ -368,7 +394,7 @@ class VerdictLine(ControlCase):
         with mock.patch.object(self.board, "post", side_effect=RuntimeError("board gone")):
             with self.assertRaises(RuntimeError):
                 from swarm import spool
-                spool.deliver_verdict(self.board, JOB, judge, "met", "ok", artifact="feat/x@abc1234")
+                spool.deliver_verdict(self.board, JOB, judge, "met", "ok", artifact="feat/x@abc1234", generation=1)
         self.assertEqual(review.artifact_verdicts(self.board, JOB), {})
 
     def test_S2_a_spooled_goal_verdict_keeps_its_generation_and_gets_its_record(self):
@@ -416,29 +442,19 @@ class SeatAck(ControlCase):
             self.board.post(JOB, "Someone", f"event {i}", None)
         self.newest = self.board.last_message_id(JOB)
 
-    def test_lead_seat_is_found_by_the_agent_key_of_a_live_lead_seat(self):
-        class Row:
-            def __init__(self, seat, agent_key, state="running"):
-                self.seat, self.agent_key, self.state = seat, agent_key, state
-
-        class FakeBoard:
-            rows = [Row("eng", "k-x"), Row("lead~1", LEAD_KEY), Row("lead", "k-other"),
-                    Row("lead", "k-old", "released")]
-
-            def seats(self, job, generation):
-                return self.rows
-
-        self.assertEqual(drive_cli._lead_seat_name(FakeBoard(), JOB, 1, LEAD_KEY), "lead~1")
-        for key in ("k-x", "k-old"):
-            with self.assertRaises(drive_cli.Refuse):
-                drive_cli._lead_seat_name(FakeBoard(), JOB, 1, key)
+    def test_a_lead_successor_acks_its_own_mark(self):
+        self.make_lead("k-lead2", seat="lead~1")
+        self.enrol("LEAD2-SESSION", "k-lead2", seat="lead~1")
+        self.set_session("LEAD2-SESSION")
+        self.assertEqual(self.run_cmd("seat", "ack", "--job", JOB, "--upto", "4")[0], 0)
+        self.assertEqual(ledger.load(self.bkey, JOB).watermarks, {"event:lead~1": 4})
 
     def test_lead_ack_moves_its_event_mark_and_prints_record(self):
         self.set_session("LEAD-SESSION")
         rc, out, err = self.run_cmd("seat", "ack", "--job", JOB, "--upto", "12")
         self.assertEqual(rc, 0, err)
         self.assertEqual(ledger.load(self.bkey, JOB).watermarks["event:lead"], 12)
-        self.assertRegex(self.last_line(out), r"^swarm-record: kind=ack id=\d+ rev=1$")
+        self.assertEqual(drivegate.record_of({"tool_response": {"stdout": out}}), ("ack", 12, 1))   # id = --upto
 
     def test_ack_never_moves_the_mark_back(self):
         self.set_session("LEAD-SESSION")
@@ -570,7 +586,7 @@ class LeadAuthority(ControlCase):
                                          workdir=str(self.work), brief_path="L.md", requested_by="activation")
         store = next(r for r in self.board._s().seats if r["id"] == k_lead.id)
         store.update(agent_key="k-lead-of-K", state="running")
-        self.enrol("K-LEAD-SESSION", "k-lead-of-K")
+        self.enrol("K-LEAD-SESSION", "k-lead-of-K", job="K", seat="lead")
         self.set_session("K-LEAD-SESSION")
         for what, argv in self.commands(JOB).items():
             self.assertEqual(self.run_cmd(*argv)[0], 1, what)
@@ -734,7 +750,7 @@ class DriveRepair(ControlCase):
         self.set_session("ENG-SESSION")
         rc, _, err = self.repair()
         self.assertEqual(rc, 1)
-        self.assertIn("not the requester", err)
+        self.assertRegex(err, "not the requester|enrolled")
         with self.assertRaises(ledger.LedgerBadError):
             ledger.load(self.bkey, JOB)
 
@@ -820,20 +836,6 @@ class DriveRepair(ControlCase):
 
 
 class TtyReceipt(ControlCase):
-    def test_a_person_at_a_terminal_halts_and_a_person_receipt_is_written(self):
-        from swarm import receipts
-        self.set_session(None)
-        with mock.patch.object(person, "_ancestor_host", return_value=None), \
-                mock.patch.object(person, "_tty_confirm", return_value=True):
-            rc, out, err = self.run_cmd("halt", "--job", JOB)
-        self.assertEqual(rc, 0, err)
-        led = ledger.load(self.bkey, JOB)
-        self.assertEqual(led.halted["by"], "person (tty)")
-        r = receipts.find(self.bkey, JOB, "person", str(led.ledger_rev), rev=1, incarnation=led.incarnation,
-                          generation=led.generation, now=0)
-        self.assertIsNotNone(r)
-        self.assertEqual(r.action_id, "tty:halt")
-
     def test_codex_seat_cancel_goes_through_the_same_gate(self):
         self.assertEqual(self.request_seat()[0], 0)
         self.enrol("CODEX-SEAT", ENG_KEY)
@@ -843,6 +845,75 @@ class TtyReceipt(ControlCase):
             rc, _, err = self.run_cmd("seat", "cancel", "--job", JOB, "--seat", "eng")
         self.assertEqual(rc, 1)
         self.assertEqual(self.board.seat(JOB, 1, "eng").state, "requested")
+
+
+class PersonReceipts(ControlCase):
+    """8c ruling: every successful person action writes a `person` receipt that receipts.find/matches locate,
+    on the requester path and on the tty path."""
+    def receipt(self, action, ref, led=None):
+        from swarm import receipts
+        led = led or ledger.load(self.bkey, JOB)
+        rid = drive_cli.person_record_id(action, ref)
+        r = receipts.find(self.bkey, JOB, "person", rid, rev=1, incarnation=led.incarnation,
+                          generation=led.generation, now=0)
+        self.assertIsNotNone(r, rid)
+        self.assertTrue(receipts.matches(r, {"kind": "person", "id": rid, "rev": 1, "action": action,
+                                             "target": JOB}))
+        return r
+
+    def as_person_at_a_terminal(self):
+        self.set_session(None)
+        for target, value in (("_ancestor_host", None), ("_tty_confirm", True)):
+            p = mock.patch.object(person, target, return_value=value)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_requester_halt_unhalt_and_cancel_write_person_receipts(self):
+        self.assertEqual(self.run_cmd("halt", "--job", JOB)[0], 0)
+        self.assertEqual(self.receipt("halt", ledger.load(self.bkey, JOB).ledger_rev).action_id, "requester:halt")
+        self.assertEqual(self.run_cmd("unhalt", "--job", JOB)[0], 0)
+        self.receipt("unhalt", ledger.load(self.bkey, JOB).ledger_rev)
+        self.assertEqual(self.request_seat()[0], 0)
+        rc, out, err = self.run_cmd("seat", "cancel", "--job", JOB, "--seat", "eng")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.receipt("seat cancel", self.board.seat(JOB, 1, "eng").id).action_id,
+                         "requester:seat_cancel")
+
+    def test_tty_halt_and_repair_write_person_receipts(self):
+        self.as_person_at_a_terminal()
+        rc, _, err = self.run_cmd("halt", "--job", JOB)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.receipt("halt", ledger.load(self.bkey, JOB).ledger_rev).action_id, "tty:halt")
+        body = json.loads(next(self.home.rglob(ledger._name(self.bkey, JOB))).read_text())
+        body["x"] = 1
+        next(self.home.rglob(ledger._name(self.bkey, JOB))).write_text(json.dumps(body))
+        rc, _, err = self.run_cmd("drive", "repair", "--job", JOB)
+        self.assertEqual(rc, 0, err)
+        fresh = ledger.load(self.bkey, JOB)
+        self.assertEqual(self.receipt("drive repair", fresh.ledger_rev, fresh).action_id, "tty:drive_repair")
+
+    def test_a_person_deactivate_writes_a_receipt_the_driver_reads_as_a_cancel(self):
+        self.as_person_at_a_terminal()
+        args = cli._parser().parse_args(["deactivate", "--job", JOB, "--status", "cancelled"])
+        with mock.patch("swarm.board.open_board", return_value=self.board), \
+                mock.patch.object(self.board, "close", lambda: None), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.cmd_deactivate(self.cfg, args), 0)
+        led = ledger.load(self.bkey, JOB)
+        self.assertEqual(self.receipt("deactivate", led.generation).action_id, "tty:deactivate")
+
+    def test_an_agent_deactivate_writes_no_person_receipt(self):
+        from swarm import receipts
+        self.enrol("ENG-SESSION", ENG_KEY)
+        self.set_session("ENG-SESSION")
+        args = cli._parser().parse_args(["deactivate", "--job", JOB, "--status", "cancelled"])
+        with mock.patch("swarm.board.open_board", return_value=self.board), \
+                mock.patch.object(self.board, "close", lambda: None), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            cli.cmd_deactivate(self.cfg, args)
+        led = ledger.load(self.bkey, JOB)
+        self.assertIsNone(receipts.find(self.bkey, JOB, "person", drive_cli.person_record_id("deactivate", 1),
+                                        rev=1, incarnation=led.incarnation, generation=led.generation, now=0))
 
 
 class Probes(ControlCase):

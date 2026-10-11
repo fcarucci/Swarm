@@ -902,31 +902,40 @@ if __name__ == "__main__":
 
 
 class PersonGrantHook(Env):
-    """The PreToolUse hook attests who submitted a drive control command (swarm.person): the payload's session
-    and, for a subagent, its agent id. Never the environment."""
-    def grant(self, argv):
-        from swarm import person
+    """The PreToolUse hook (hooks._drive_event -> drivegate.write_grants) attests who submits a drive control
+    command: the job's requester MAIN session by the ledger's requester_session. Never a subagent, never the
+    environment."""
+    def setUp(self):
+        super().setUp()
         from swarm.board.autoinit import store_key
-        person.forget()
-        return person.caller(store_key(self.cfg), argv)
+        from swarm.supervisor import ledger
+        self.bk = store_key(self.cfg)
+        led = ledger.create(self.bk, "J", budgets={}, activated_at="2026-10-11T00:00:00+00:00")
+        led.requester_session = "REQ"
+        led.save()
 
-    def test_main_session_shell_call_gets_a_grant(self):
+    def caller(self, argv):
         from swarm import person
+        from swarm.supervisor import ledger
+        person.forget()
+        return person.caller(self.bk, "J", ledger.load(self.bk, "J"), swarm._parser().parse_args(argv))
+
+    def test_requester_main_session_shell_call_gets_a_grant(self):
         self.hook("turn", agent_id=None, session="REQ", host="claude", tool_name="Bash",
                   tool_input={"command": "swarm halt --job J 2>&1 | tail -2"})
-        self.assertEqual(self.grant(["halt", "--job", "J"]), person.Caller("REQ", None))
+        who = self.caller(["halt", "--job", "J"])
+        self.assertTrue(who is not None and who.requester)
 
-    def test_subagent_shell_call_is_attested_as_the_subagent(self):
-        from swarm import person
-        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "SOMEONE-ELSE"}):
+    def test_a_subagent_of_the_requester_gets_none(self):
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "REQ"}):
             self.hook("turn", agent_id="sub-1", session="REQ", host="claude", tool_name="Bash",
-                      tool_input={"command": "swarm seat ack --job J --upto 3"})
-        self.assertEqual(self.grant(["seat", "ack", "--job", "J", "--upto", "3"]), person.Caller("REQ", "sub-1"))
+                      tool_input={"command": "swarm halt --job J"})
+        self.assertIsNone(self.caller(["halt", "--job", "J"]))
 
-    def test_other_tools_and_commands_get_none(self):
+    def test_another_session_and_other_commands_get_none(self):
+        self.hook("turn", agent_id=None, session="OTHER", host="claude", tool_name="Bash",
+                  tool_input={"command": "swarm halt --job J"})
         self.hook("turn", agent_id=None, session="REQ", host="claude", tool_name="Read",
-                  tool_input={"file_path": "swarm halt --job J"})
-        self.hook("turn", agent_id=None, session="REQ", host="claude", tool_name="Bash",
-                  tool_input={"command": "swarm read --job J"})
-        self.assertIsNone(self.grant(["halt", "--job", "J"]))
-        self.assertIsNone(self.grant(["read", "--job", "J"]))
+                  tool_input={"file_path": "swarm unhalt --job J"})
+        self.assertIsNone(self.caller(["halt", "--job", "J"]))
+        self.assertIsNone(self.caller(["unhalt", "--job", "J"]))

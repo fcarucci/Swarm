@@ -90,6 +90,34 @@ class ShellFastPathTests(unittest.TestCase):
             self.assertFalse(run('done','ordinary output\n'), 'a call with no record line ran Python without a marker')
             self.assertFalse(run('turn','swarm-record: kind=deactivate id=3 rev=1'), 'only PostToolUse is let through')
 
+    def test_a_drive_control_command_is_never_served_by_a_lease(self):
+        """PreToolUse of `swarm halt|seat|goal-ready|drive|deactivate` always reaches Python, which writes the
+        caller's grant (drivegate.write_grants); an ordinary call of the same session is served by its lease."""
+        with tempfile.TemporaryDirectory() as td:
+            home=Path(td); hd=home/'.local/share/swarm/host'; hd.mkdir(parents=True,mode=0o700)
+            fp=hd/'fastpath'; fp.mkdir(mode=0o700)
+            cfg=home/'config.toml'; cfg.write_text('[hook]\nhook_min_interval_s=15\n')
+            boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+            cache=hd/'hook-config-claude'; cache.write_text(f'{cfg}\n{ROOT}\n{fp}\n{home}/active\n1\nuptime-v1\n{boot_id}\n')
+            os.utime(cache, ns=(cfg.stat().st_atime_ns,cfg.stat().st_mtime_ns))
+            (home/'active').mkdir(); (home/'active'/'J.json').write_text('{"job": "J"}')
+            (fp/'agent-session-s').write_text('99999999\nJ\n5\n'); (fp/'live').write_text('99999999\n')
+            (fp/'board-J').write_text('5\n')
+            py=home/'venv/bin/python'; py.parent.mkdir(parents=True)
+            py.write_text(f'#!/bin/sh\ncat >/dev/null\ntouch "{home}/ran"\n'); py.chmod(0o755)
+            env=dict(os.environ,HOME=td,SWARM_CONFIG=str(cfg),SWARM_VENV=str(home/'venv'))
+            def ran(command):
+                (home/'ran').unlink(missing_ok=True)
+                payload=json.dumps({'session_id':'s','tool_name':'Bash','tool_input':{'command':command}})
+                r=subprocess.run([str(ROOT/'bin/swarm-hook'),'--host','claude','turn'],input=payload,text=True,
+                                 capture_output=True,env=env)
+                self.assertEqual(r.returncode,0,r.stderr)
+                return (home/'ran').exists()
+            self.assertFalse(ran('ls -la'), 'the lease serves an ordinary call')
+            for command in ('swarm halt --job J', 'swarm seat ack --job J --upto 3', 'swarm deactivate --job J',
+                            'swarm drive repair --job J', 'swarm goal-ready --job J --candidate a@1234567'):
+                self.assertTrue(ran(command), command)
+
 from unittest import mock
 from test_hooks_cli import Env
 from swarm import fastpath, paths, hooks
@@ -256,18 +284,6 @@ class ShellDeliveryTests(Env):
         self.shell('stop')
         self.assertEqual(self.agent('agent-1').status,'completed')
         self.assertEqual(fastpath.read('agent-agent-1')[0],'0')
-
-    def test_a_drive_control_command_always_reaches_the_python_hook(self):
-        """A fresh lease never serves `swarm halt|seat|goal-ready|drive`: the Python hook writes the caller's
-        grant (swarm.person), which the CLI needs."""
-        from swarm import person
-        from swarm.board.autoinit import store_key
-        self.shell()
-        self.assertEqual(self.shell(quiet=True).stdout, '')   # the lease serves an ordinary call
-        self.shell(command='swarm halt --job J')
-        person.forget()
-        self.assertEqual(person.caller(store_key(self.cfg), ['halt', '--job', 'J']),
-                         person.Caller('sess-1', 'agent-1'))
 
     def test_stale_notifier_forces_python_even_with_a_fresh_lease(self):
         self.shell()

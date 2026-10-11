@@ -73,8 +73,10 @@ case "${1:-}" in turn|done)
     # `swarm join` and `swarm verdict` are rewritten to the caller's own identity by the Python hook.
     case "$PAYLOAD" in *spawn_agent*|*followup_task*|*SendMessage*|*\"Agent\"*|*\"Task\"*|*memory*|*remember*) VALID="";; esac
     case "$PAYLOAD" in *swarm*join*|*swarm*verdict*) VALID="";; esac
-    # Drive control commands get their caller grant from the Python hook (swarm.person).
-    case "$PAYLOAD" in *swarm*halt*|*swarm*seat*|*swarm*goal-ready*|*swarm*drive*) VALID="";; esac
+    # Drive control commands get their caller's grant from the Python hook (drivegate.write_grants).
+    # (NOLEASE, not VALID: the cached marker directory stays valid, only the lease is not used.)
+    NOLEASE=""
+    case "$PAYLOAD" in *swarm*halt*|*swarm*seat*|*swarm*goal-ready*|*swarm*drive*|*swarm*deactivate*) NOLEASE=1;; esac
     # PreToolUse only, and only its tool_input (never a tool's output): a background shell call is
     # rewritten to run under `swarm bg`, and a CI wait (gh run watch, gh pr checks --watch, a
     # gh/curl poll loop) is refused, by the Python hook. A gh word must start a command (after a
@@ -89,7 +91,7 @@ case "${1:-}" in turn|done)
         *://*/api/v1/repos/*|*api.github.com/repos/*|*[\"\ \;\&\|\(/\`]tea\ action*) VALID="";;
       esac
     fi
-    if [ -n "$VALID" ] && [ -d "$FP" ] && [ ! -L "$FP" ] && [ -O "$FP" ] &&
+    if [ -n "$VALID" ] && [ -z "$NOLEASE" ] && [ -d "$FP" ] && [ ! -L "$FP" ] && [ -O "$FP" ] &&
        [ -f "$FP/agent-$KEY" ] && [ ! -L "$FP/agent-$KEY" ] &&
        [ -f "$FP/live" ] && [ ! -L "$FP/live" ]; then
       { IFS= read -r UNTIL; IFS= read -r JOB; IFS= read -r SEEN; } < "$FP/agent-$KEY"

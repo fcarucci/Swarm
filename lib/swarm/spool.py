@@ -502,23 +502,30 @@ def deliver_verdict(board, job: str, name: str, verdict: str, reason: str,
                                ("open_count", open_count), ("progress", progress), ("candidate", candidate),
                                ("req", req)) if v is not None}
     # Only the active judge may record (the board checks that under its lock), so the verdict is recorded
-    # first and posted second; its stored record is then bound to the posted message's id, recorded again
-    # under the same checks (the second write is the same verdict with its message id).
-    if not board.record_verdict(job, name, verdict, reason, next_steps, artifact, details, message_id=0, **typed):
-        return 0   # message_id 0: recorded, binding pending (review.bound_verdict refuses it)
+    # first and posted second. A typed verdict (a drive job's: it carries its generation, scope, counts) is
+    # bound to the posted message: its first write marks it pending (message_id 0, which no reader accepts:
+    # review.bound_verdict), the second, under the same checks, stores the message id. An untyped verdict (a
+    # job that is not driven) is one write, as before binding existed (a legacy artifact verdict). Every call
+    # goes through the board the caller gave, so a spool delivery's calls all share its one budget.
+    bind = bool(typed)
+    recorded = (board.record_verdict(job, name, verdict, reason, next_steps, artifact, details, message_id=0, **typed)
+                if bind else board.record_verdict(job, name, verdict, reason, next_steps, artifact, details))
+    if not recorded:
+        return 0
     from swarm.review import verdict_text
     posted = board.post(job, name, verdict_text(verdict, reason, scope=scope, generation=generation,
                                                 candidate=candidate, req=req))
-    if not board.record_verdict(job, name, verdict, reason, next_steps, artifact, details,
-                                message_id=posted.id, **typed):
-        board.post(job, "swarm", f"VERDICT-VOID {posted.id}: posted but unbound ({name} is no longer the judge); "
+    posted_id = getattr(posted, "id", None)
+    if bind and not board.record_verdict(job, name, verdict, reason, next_steps, artifact, details,
+                                         message_id=posted_id, **typed):
+        board.post(job, "swarm", f"VERDICT-VOID {posted_id}: posted but unbound ({name} is no longer the judge); "
                                  "it does not count", to=name)
-        raise VerdictUnbound(posted.id)
+        raise VerdictUnbound(posted_id)
     if details and details.strip():   # the report itself is not posted (the board caps a message)
         board.post(job, name, f"DETAILS ({len(details.strip().splitlines())} lines): swarm verdict show --job {job}")
     if next_steps:   # the board caps a message; the full text is what `swarm status --job J` shows
         board.post(job, name, f"NEXT (to meet the goal; full text in swarm status): {next_steps}")
-    return posted.id
+    return posted_id or 1   # a board whose post returns no row (a test double) still says "recorded"
 
 
 def _typed_from_record(m: dict) -> tuple:

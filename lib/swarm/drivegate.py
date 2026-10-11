@@ -887,3 +887,95 @@ def _barrier(name: str) -> None:
         barrier.hit(name)
     except Exception:
         pass
+
+
+# --- PreToolUse: grants (who runs a control command, attested before it runs) -------------------------------
+#
+# A receipt (post_tool) proves to the driver that a session's command made a record. It is written after the
+# command, so it cannot tell the CLI who is calling while the command runs: the CLI's own ledger writes
+# (halt, unhalt, an ack's mark, a withdrawal, pins, a repair) need that before. A grant is the same kind of
+# host-private receipt, written by this PreToolUse hook from the same contexts (requester_context: the
+# requester's MAIN session; seat_context: the seat the host-private chain names), bound to args_sha of the
+# submitted argv (submitted_argv: the CLI computes the same from its parsed arguments), single use
+# (receipts.take) and short-lived. A subagent (a payload with an agent_id) gets none, like receipts.
+
+GRANT_SECONDS = 120.0
+GRANT_SUBS = ("halt", "unhalt", "seat", "goal-ready", "drive", "deactivate")
+
+
+def grant_id(ns) -> str:
+    """The record id of the grant for the parsed command `ns`: args_sha of its submitted argv."""
+    return receipts.args_sha(submitted_argv(ns))
+
+
+def _grant_calls(command: str) -> list:
+    out = []
+    for prog, args, _wrappers in shellguard.iter_commands(command):
+        if prog != "swarm":
+            continue
+        sub, argv = _sub_of(args)
+        if sub in GRANT_SUBS:
+            out.append(argv)
+    return out
+
+
+def _grant_owner(board_key: str, payload: dict, ns):
+    """(led or None, action_id, attempt, seat) of the caller this grant attests for `ns`, or None."""
+    from swarm import enrolment
+    job = getattr(ns, "job", None)
+    if not isinstance(job, str):
+        return None
+    ctx = requester_context(board_key, payload, job)
+    if ctx is not None:
+        return ctx.led, requester_action(ns), 0, None
+    if ns.cmd == "drive" and getattr(ns, "dcmd", None) == "repair":
+        # the ledger does not read (that is why it is repaired): the owner record names the requester
+        try:
+            led = load_ledger(board_key, job)
+        except Exception:
+            led = None
+        owner = enrolment.find_job_owner(board_key, job)
+        if led is None and owner is not None and owner.session_id and owner.session_id == payload.get("session_id"):
+            return None, "requester:drive_repair", 0, None
+    return None
+
+
+def write_grants(cfg: dict, payload: dict, host, ctx=None, now=None) -> int:
+    """Write a grant for each direct `swarm` control command (GRANT_SUBS) of this shell call whose caller is
+    the requester's main session of its job, or a seat the host-private chain resolves (`ctx`, classify()'s
+    answer). Returns how many were written. Never for a subagent. Raises on an unsafe enrolled directory
+    (the caller logs it; the CLI then finds no grant and refuses)."""
+    if payload.get("agent_id") or not isinstance(payload.get("session_id"), str):
+        return 0
+    command = host.shell_command(payload) or ""
+    if "swarm" not in command:
+        return 0
+    calls = _grant_calls(command)
+    if not calls:
+        return 0
+    from swarm.board.autoinit import store_key
+    bk = store_key(cfg)
+    now = time.time() if now is None else now
+    n = 0
+    for argv in calls:
+        ns = parse_swarm(argv)
+        if ns is None:
+            continue
+        owner = None
+        if ctx is not None and ctx.kind == "seat" and ctx.job == getattr(ns, "job", None) and ctx.led \
+                and ctx.seat and ctx.intent is not None:
+            owner = ctx.led, ctx.intent.action_id, ctx.intent.attempt, ctx.seat
+        else:
+            owner = _grant_owner(bk, payload, ns)
+        if owner is None:
+            continue
+        led, action, attempt, seat = owner
+        rid = grant_id(ns)
+        receipts.write(bk, receipts.Receipt(
+            board_key=bk, job=ns.job, generation=led.generation if led else 1,
+            incarnation=led.incarnation if led else receipts.GRANT_INCARNATION_NO_LEDGER,
+            action_id=action, attempt=attempt, seat=seat, kind="grant", record_id=rid, rev=1,
+            content_sha=receipts.content_sha("grant", {"argv_sha": rid}), args_sha=rid,
+            expires_at=now + GRANT_SECONDS))
+        n += 1
+    return n
