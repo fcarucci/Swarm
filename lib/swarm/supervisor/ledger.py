@@ -67,6 +67,11 @@ class LedgerFinishedError(RuntimeError):
     not re-opened by activation; a new job is needed."""
 
 
+class LedgerTooLargeError(RuntimeError):
+    """save() or create() of a ledger whose serialized form is over MAX_BYTES: nothing is written (a ledger
+    load would refuse it, and the job would hold)."""
+
+
 class LedgerConflict(RuntimeError):
     """save() found the stored ledger changed since this copy was loaded: reload and try again."""
 
@@ -157,7 +162,11 @@ class Ledger:
                                      f"this copy is {self.ledger_rev}")
             body = json.dumps({"v": FORMAT, **asdict(self), "ledger_rev": self.ledger_rev + 1},
                               sort_keys=True, allow_nan=False)
-            _parse(body.encode("utf-8"), self.board_key, self.job)   # never write what load refuses
+            data = body.encode("utf-8")
+            if len(data) > MAX_BYTES:
+                raise LedgerTooLargeError(f"job {self.job!r}: the ledger would be {len(data)} bytes, over "
+                                          f"{MAX_BYTES}: nothing written")
+            _parse(data, self.board_key, self.job)   # never write what load refuses
             privfs.write_atomic(d, name, body, durable=True)
             self.ledger_rev += 1
 
@@ -387,11 +396,25 @@ def create(board_key: str, job: str, *, budgets: dict, activated_at: str, state:
     return led
 
 
+def _move_aside(d: int, name: str) -> str:
+    """Rename the entry `name` to `<name>.bad-<UTC stamp>-<random>` (a name the scan does not read as a
+    ledger; stamps sort by time) and sync the directory. The caller holds the ledger's lock."""
+    if os.rename not in os.supports_dir_fd:
+        raise LedgerBadError("this platform cannot move a bad ledger aside; a person must do it")
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    target = f"{name[:-len('.json')]}.bad-{stamp}-{uuid.uuid4().hex[:12]}"
+    os.rename(name, target, src_dir_fd=d, dst_dir_fd=d)
+    try:
+        os.fsync(d)
+    except OSError:   # directories cannot be synced everywhere; the rename itself is done
+        pass
+    return target
+
+
 def archive_bad(board_key: str, job: str) -> str:
     """Move the job's bad ledger entry aside (never deleted, so `create` may start a fresh one): renamed under
-    the lock to `<name>.bad-<UTC stamp>-<random>`, a name the scan does not read as a ledger, then the directory is synced.
-    Returns the new name. ValueError when there is no entry or it is readable; LedgerBadError where a rename
-    relative to the directory is not available."""
+    the lock (_move_aside). Returns the new name. ValueError when it is readable; NoLedgerError when there is
+    no entry; LedgerBadError where a rename relative to the directory is not available."""
     _check_key(board_key, job)
     name = _name(board_key, job)
     with privfs.dir_fd(SUBDIR) as d, privfs.locked(d, _lock_name(name)):
@@ -400,19 +423,210 @@ def archive_bad(board_key: str, job: str) -> str:
         except LedgerBadError:
             pass
         else:
+            if not privfs.exists(d, name):
+                raise NoLedgerError(f"no ledger entry for job {job!r}")
             raise ValueError(f"the ledger of job {job!r} is readable: nothing to archive")
-        if not privfs.exists(d, name):
-            raise ValueError(f"no ledger entry for job {job!r}")
-        if os.rename not in os.supports_dir_fd:
-            raise LedgerBadError("this platform cannot move a bad ledger aside; a person must do it")
-        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        target = f"{name[:-len('.json')]}.bad-{stamp}-{uuid.uuid4().hex[:12]}"
-        os.rename(name, target, src_dir_fd=d, dst_dir_fd=d)
+        return _move_aside(d, name)
+
+
+class NoLedgerError(ValueError):
+    """archive_bad() found no entry at all at the job's name (not a readable one)."""
+
+
+# --- repair (spec [F2]: a person rebuilds a bad ledger; never silently) ----------------------------------
+
+REPAIR_REASON = "drive repair"     # the halt reason prefix of a repaired ledger: unhalt wants budgets first
+SALVAGE_MAX = 64 * 1024 * 1024     # a bad ledger may be over MAX_BYTES (that can be why it is bad)
+
+
+@dataclass
+class Repaired:
+    """What repair() did: the fresh ledger, the archive it salvaged from, and what it kept and lost."""
+    ledger: Ledger
+    archived: str | None      # the bad entry's new name, when this repair moved it (None: moved earlier)
+    source: str | None        # the archive the fields were salvaged from (None: there was none)
+    kept: list               # field names recovered from the archive
+    lost: list               # one human line per thing not recovered
+    finished: bool           # the fresh ledger is terminal (the job stays finished)
+    archived_generation: int | None
+
+
+def archives(d: int, name: str) -> list:
+    """The archived (moved-aside) entries of the ledger `name`, oldest first."""
+    prefix = name[:-len(".json")] + ".bad-"
+    return sorted(n for n in compat.listdir(d) if n.startswith(prefix))
+
+
+def _salvage(raw: bytes | None) -> dict | None:
+    """The archived ledger as a plain JSON object, read leniently (no field checks), or None."""
+    if raw is None:
+        return None
+    try:
+        obj = json.loads(raw)
+    except (ValueError, RecursionError):
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _checked(old: dict, key: str, check) -> tuple:
+    """(True, value) when old[key] passes `check` (a predicate, or a validator that raises ValueError)."""
+    if key not in old:
+        return False, None
+    v = old[key]
+    try:
+        ok = check(v)
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return False, None
+    return (ok is not False), v
+
+
+def _spend_lines(old: dict) -> list:
+    """What the archived intents say about spend and open launches (lenient: what can be read)."""
+    intents = old.get("intents")
+    if not isinstance(intents, list):
+        return ["spend and launches: the archived intents do not read; the spend so far is unknown"]
+    spent, open_ = 0.0, []
+    for i in intents:
+        if not isinstance(i, dict):
+            continue
+        charge = i.get("charged_usd") if i.get("state") == "concluded" else i.get("reserved_usd")
+        if _amount(charge):
+            spent += charge
+        if i.get("state") in ("claiming", "claimed"):
+            open_.append(f"{str(i.get('launch_id'))[:80]} (seat {str(i.get('seat'))[:64]})")
+    lines = [f"spend: ${spent:.2f} charged or reserved over {len(intents)} launches; the fresh ledger counts "
+             "from $0, so set the budgets net of it"]
+    if open_:
+        lines.append("open launches (their sessions may still run, their locks are forgotten; stop them): "
+                     + ", ".join(open_))
+    return lines
+
+
+def repair(board_key: str, job: str, *, at: str, by: str, generation: int | None = None,
+           claimed: bool = False, board_finished: str | None = None) -> Repaired:
+    """Replace a bad ledger by a fresh one, under the ledger's lock from the check to the write (an activation
+    cannot slip in between). The bad entry is moved aside (never deleted). A retry after a crash between the
+    move and the write finds no entry and the newest archive, and finishes the repair from it.
+
+    Salvaged from the archive when they validate: generation (never from the board), generation_requested,
+    incarnation, activated_at, requester_session, pinned_requirements, watermarks, halted_total_seconds and
+    the round counters, terminal and terminal_intent. Never salvaged: budgets (a person sets them again, net
+    of the spend so far), intents, owners, integrated groups, pending mirror fetches. `generation` (a person's
+    --generation) is needed when the archive gives none, and must agree with it when it does.
+
+    The fresh ledger is halted (reason REPAIR_REASON) unless the job had finished: then it stays terminal
+    (archived terminal, else a terminal built from the archived terminal_intent, the archived terminal's
+    verdict or `board_finished`, the board job's closed verdict). ValueError when there is nothing to repair
+    (a readable ledger; no entry, no archive and not `claimed`) or the generation is unknown or disagrees."""
+    _check_key(board_key, job)
+    name = _name(board_key, job)
+    with privfs.dir_fd(SUBDIR) as d, privfs.locked(d, _lock_name(name)):
         try:
-            os.fsync(d)
-        except OSError:   # directories cannot be synced everywhere; the rename itself is done
-            pass
-        return target
+            stored = _read_entry(d, name, board_key, job)
+        except LedgerBadError:
+            stored, bad = None, True
+        else:
+            bad = False
+            if stored is not None:
+                raise ValueError(f"{job}'s drive ledger reads fine: nothing to repair")
+        archived = None
+        if bad:
+            try:
+                raw = privfs.read(d, name, SALVAGE_MAX)
+            except OSError:
+                raw = None
+            archived = source = _move_aside(d, name)
+        else:
+            found = archives(d, name)
+            source = found[-1] if found else None
+            if source is None and not claimed:
+                raise ValueError(f"{job} has no drive ledger and no archived one, and the board does not "
+                                 "claim it as a drive job: nothing to repair")
+            try:
+                raw = privfs.read(d, source, SALVAGE_MAX) if source else None
+            except OSError:
+                raw = None
+        old = _salvage(raw) or {}
+        kept, lost = [], []
+        if raw is not None and not old:
+            lost.append("everything: the archived ledger is not a JSON object")
+        elif source is None:
+            lost.append("everything: there is no archived ledger to recover from")
+
+        ok, gen = _checked(old, "generation", lambda v: _nat(v, 1))
+        if not ok:
+            if generation is None:
+                raise ValueError("the archived ledger gives no generation: a person names it with "
+                                 "--generation N (the board's copy is not trusted)")
+            gen = generation
+            lost.append(f"generation: taken from --generation {generation}")
+        elif generation is not None and generation != gen:
+            raise ValueError(f"the archived ledger says generation {gen}; --generation {generation} disagrees")
+        else:
+            kept.append("generation")
+        fresh = Ledger(board_key=board_key, job=job, generation=gen, generation_requested=gen,
+                       activated_at=at, incarnation=uuid.uuid4().hex)
+
+        def take(key, check, what=None, attr=None):
+            ok, v = _checked(old, key, check)
+            if ok:
+                setattr(fresh, attr or key, v)
+                kept.append(key)
+            elif what:
+                lost.append(what)
+            return ok
+
+        take("generation_requested", lambda v: _nat(v, gen))
+        take("incarnation", lambda v: isinstance(v, str) and _HEX32.fullmatch(v) is not None,
+             "incarnation: a new one (receipts of the old ledger no longer validate)")
+        take("activated_at", lambda v: _safe_text(v, 64),
+             "activated_at: the wall clock (max_wall_hours) restarts now")
+        take("requester_session", lambda v: v is None or _safe_text(v, 64),
+             "requester_session: the requester session is unknown to the hooks")
+        if not take("pinned_requirements", lambda v: _text_map(v, lambda x: _safe_text(x, _MAX_ID))):
+            lost.append("pinned requirements: none recovered, so the pin set is open (a GOAL-READY may pin "
+                        "any set): check the goal's requirements before you unhalt")
+        take("watermarks", lambda v: _text_map(v, lambda x: _nat(x)), "watermarks: wake marks restart at 0")
+        take("halted_total_seconds", _amount, "halted_total_seconds: the halted time is forgotten")
+        take("rounds_without_progress", _nat, "rounds_without_progress: restarts at 0")
+        take("ruling_attempts", _nat, "ruling_attempts: restarts at 0")
+        take("terminal_intent", lambda v: v is None or _terminal_intent(v))
+        has_terminal = take("terminal", lambda v: v is None or _terminal(v))
+
+        budgets = old.get("budgets")
+        lost.append("budgets: not carried over" + (f" (they were {json.dumps(budgets, sort_keys=True)[:400]})"
+                                                   if isinstance(budgets, dict) and budgets else "")
+                    + "; set them before unhalt")
+        lost.extend(_spend_lines(old) if old else [])
+        groups = old.get("integrated")
+        if isinstance(groups, dict) and groups:
+            lost.append("integrated groups (rebuild from the integration receipts): "
+                        + ", ".join(str(g)[:80] for g in list(groups)[:50]))
+        owners = old.get("owners")
+        if isinstance(owners, dict) and owners:
+            lost.append("action owners: " + ", ".join(str(a)[:80] for a in list(owners)[:50]))
+
+        finished = fresh.terminal is not None
+        if not finished and (old.get("terminal") is not None or fresh.terminal_intent is not None
+                             or board_finished is not None):
+            pending = fresh.terminal_intent or {}
+            prior = old.get("terminal") if isinstance(old.get("terminal"), dict) else {}
+            verdict = next((v for v in (pending.get("verdict"), prior.get("verdict"), board_finished)
+                            if v in VERDICTS), "unreachable")
+            fresh.terminal = {"verdict": verdict, "at": at, "scope": "repair",
+                              "reasons": [f"{REPAIR_REASON}: the job had finished (archived terminal "
+                                          f"{'unreadable' if not has_terminal else 'pending'}; board "
+                                          f"{board_finished or 'open'}); it stays finished"]}
+            finished = True
+        if not finished:
+            fresh.halted = {"by": by, "at": at, "reason": f"{REPAIR_REASON}: set the budgets, then unhalt"}
+        body = json.dumps({"v": FORMAT, **asdict(fresh), "ledger_rev": 1}, sort_keys=True, allow_nan=False)
+        _parse(body.encode("utf-8"), board_key, job)   # never write what load refuses
+        if privfs.exists(d, name):
+            raise LedgerExistsError(f"a ledger for job {job!r} appeared during the repair")
+        privfs.write_atomic(d, name, body, durable=True)
+        fresh.ledger_rev = 1
+        return Repaired(fresh, archived, source, kept, lost, finished, gen if ok else None)
 
 
 def activate(board_key: str, job: str, *, budgets: dict, activated_at: str) -> Ledger:

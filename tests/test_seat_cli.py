@@ -1,13 +1,16 @@
 """Drive control commands (Task 6b): halt/unhalt, seat request/list/show/release/cancel, review,
-goal-ready. Handlers run through the real CLI parser against the memory board, under a temporary HOME
-inside the suite sandbox. The lead's agent key is patched in (a seat gets its key only from a launch
-claim, which these tests do not run)."""
+goal-ready, drive repair. Handlers run through the real CLI parser against the memory board, under a temporary
+HOME inside the suite sandbox. The caller is attested the way the PreToolUse hook does it (person.write_grants
+for the session's own shell call); the job's lead is a real `lead` seat row holding the lead's agent key (set
+on the memory store: a seat gets its key from the launch, which these tests do not run)."""
 from __future__ import annotations
 
 import contextlib
 import io
 import json
 import os
+import shlex
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,7 +18,7 @@ from unittest import mock
 
 from support import SANDBOX, MemoryHarness, home_env, posix_only  # noqa: F401
 
-from swarm import cli, drive_cli, enrolment  # noqa: E402
+from swarm import cli, drive_cli, enrolment, person, review  # noqa: E402
 from swarm.board.autoinit import store_key  # noqa: E402
 from swarm.supervisor import ledger  # noqa: E402
 
@@ -47,27 +50,47 @@ class ControlCase(unittest.TestCase):
         tmp = mock.patch.object(drive_cli, "TMP_ROOTS", ("/tmp-not-used-by-tests",))
         tmp.start()
         self.addCleanup(tmp.stop)
-        for target, fn in (("_owner_roots", lambda bk, job: list(self.roots)),
-                           ("_lead_keys", lambda board, job, gen: {LEAD_KEY})):
-            patch = mock.patch.object(drive_cli, target, side_effect=fn)
-            patch.start()
-            self.addCleanup(patch.stop)
+        patch = mock.patch.object(drive_cli, "_owner_roots", side_effect=lambda bk, job: list(self.roots))
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.lead_row = self.make_lead(LEAD_KEY)
+        self.agent_id = None
         self.set_session(REQ_SESSION)
 
-    def set_session(self, sid):
-        p = mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": sid})
+    def make_lead(self, key, seat="lead", state="running"):
+        """A real lead seat row of generation 1 holding `key` (what a launch and the seat's enrolment make)."""
+        row = self.board.request_seat(JOB, 1, seat, role="engineering_lead", harness="claude", model="opus",
+                                      workdir=str(self.work), brief_path="L.md", requested_by="activation")
+        store = next(r for r in self.board._s().seats if r["id"] == row.id)
+        store.update(agent_key=key, state=state)
+        return row
+
+    def set_session(self, sid, env=None):
+        """The session whose shell runs the next commands: its hook attests it (None: no hook, a terminal).
+        `env` is what the process environment claims (default: the same session)."""
+        self.session = sid
+        claimed = sid if env is None else env
+        p = mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": claimed} if claimed else {})
         p.start()
         self.addCleanup(p.stop)
+        if not claimed:   # a terminal outside any agent host: none of the host's variables
+            for var in person.HOST_ENV:
+                os.environ.pop(var, None)
 
     def enrol(self, session, key):
         enrolment.write(self.bkey, job=JOB, agent_key=key, harness="claude", session_id=session,
                         cwd=str(self.work))
 
     def run_cmd(self, *argv):
-        """Parse `argv` with the real CLI parser and run its handler: (rc, stdout, stderr)."""
+        """Run `swarm <argv>` as the current session's shell call: its PreToolUse hook writes the grant, then
+        the real CLI parser and handler run. (rc, stdout, stderr)."""
+        if self.session:
+            payload = {"session_id": self.session, **({"agent_id": self.agent_id} if self.agent_id else {})}
+            person.write_grants(self.bkey, payload, shlex.join(["swarm", *argv]))
         args = cli._parser().parse_args(list(argv))
         out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                mock.patch.object(sys, "argv", ["swarm", *argv]):
             rc = cli.BOARD_COMMANDS[args.cmd](self.board, self.cfg, args) or 0
         return rc, out.getvalue(), err.getvalue()
 
@@ -94,7 +117,7 @@ class Halt(ControlCase):
         self.set_session("ENG-SESSION")
         rc, _, err = self.run_cmd("halt", "--job", JOB)
         self.assertNotEqual(rc, 0)
-        self.assertIn("enrolled", err)
+        self.assertIn("not the requester", err)
         self.assertIsNone(ledger.load(self.bkey, JOB).halted)
 
     def test_halt_twice_refused(self):
@@ -241,10 +264,23 @@ class Seats(ControlCase):
         self.assertIn("role: engineer", out)
 
 
+def goal_record(board, job, gen, candidate, req):
+    """The raw stored goal record of (gen, candidate, req), bound or not (None when absent)."""
+    data = board.job_data(job)
+    key = review.drive_verdict_key(gen, "goal", candidate, req)
+    if key not in data:
+        return None
+    return json.loads("".join(data[f"{key}.{i}"] for i in range(int(data[key]))))
+
+
 class VerdictLine(ControlCase):
-    def test_verdict_prints_record_line_with_its_message_id(self):
-        judge = self.board.allocate_name("jk", JOB)
+    def judge(self):
+        name = self.board.allocate_name("jk", JOB)
         self.board.claim_judge("jk", JOB)
+        return name
+
+    def test_verdict_prints_record_line_with_its_message_id(self):
+        judge = self.judge()
         rc, out, err = self.run_cmd("verdict", "--job", JOB, "--as", judge, "met", "all requirements hold")
         self.assertEqual(rc, 0, err)
         verdict_id = next(m.id for m in self.board.messages_after(0, JOB)
@@ -252,24 +288,22 @@ class VerdictLine(ControlCase):
         self.assertEqual(self.last_line(out), f"swarm-record: kind=verdict id={verdict_id} rev=1")
 
     def test_goal_verdict_binds_candidate_and_its_message_id(self):
-        judge = self.board.allocate_name("jk", JOB)
-        self.board.claim_judge("jk", JOB)
+        judge = self.judge()
         rc, out, err = self.run_cmd("verdict", "--job", JOB, "--as", judge, "--scope", "goal",
                                     "--candidate", "feat/x@abc1234", "--req", "d" * 64, "met", "all held")
         self.assertEqual(rc, 0, err)
-        verdict_id = next(m.id for m in self.board.messages_after(0, JOB)
-                          if m.message.startswith("VERDICT met: "))
-        self.assertEqual(self.last_line(out), f"swarm-record: kind=verdict id={verdict_id} rev=1")
         gen = ledger.load(self.bkey, JOB).generation
-        data = self.board.job_data(JOB)
-        count = int(data[f"drive.verdict.{gen}.goal"])
-        rec = json.loads("".join(data[f"drive.verdict.{gen}.goal.{i}"] for i in range(count)))
-        self.assertEqual((rec["candidate"], rec["req"], rec["message_id"]), ("feat/x@abc1234", "d" * 64, verdict_id))
+        posted = [m for m in self.board.messages_after(0, JOB) if m.message.startswith("VERDICT met ")]
+        self.assertEqual(posted[-1].message,
+                         f"VERDICT met [goal gen={gen} candidate=feat/x@abc1234 req={'d' * 64}]: all held")
+        self.assertEqual(self.last_line(out), f"swarm-record: kind=verdict id={posted[-1].id} rev=1")
+        rec = review.drive_verdict(self.board, JOB, gen, "goal", "feat/x@abc1234", "d" * 64)
+        self.assertEqual((rec["candidate"], rec["req"], rec["message_id"]),
+                         ("feat/x@abc1234", "d" * 64, posted[-1].id))
         self.assertIsNone(rec["artifact"])
 
     def test_a_verdict_from_a_non_judge_is_refused_and_posts_nothing(self):
-        self.board.allocate_name("jk", JOB)
-        self.board.claim_judge("jk", JOB)
+        self.judge()
         outsider = self.board.allocate_name("outsider", JOB)
         rc, _, err = self.run_cmd("verdict", "--job", JOB, "--as", outsider, "met", "all held")
         self.assertEqual(rc, 1)
@@ -277,44 +311,127 @@ class VerdictLine(ControlCase):
         self.assertEqual([m for m in self.board.messages_after(0, JOB) if m.message.startswith("VERDICT ")], [])
 
     def test_goal_verdict_is_not_bound_to_an_artifact_named_in_its_reason(self):
-        judge = self.board.allocate_name("jk", JOB)
-        self.board.claim_judge("jk", JOB)
+        judge = self.judge()
         rc, _, err = self.run_cmd("verdict", "--job", JOB, "--as", judge, "--scope", "goal",
                                   "--candidate", "feat/x@abc1234", "--req", "d" * 64, "met",
                                   "feat/x@abc1234: all held")
         self.assertEqual(rc, 0, err)
         gen = ledger.load(self.bkey, JOB).generation
-        data = self.board.job_data(JOB)
-        count = int(data[f"drive.verdict.{gen}.goal"])
-        rec = json.loads("".join(data[f"drive.verdict.{gen}.goal.{i}"] for i in range(count)))
+        rec = review.drive_verdict(self.board, JOB, gen, "goal", "feat/x@abc1234", "d" * 64)
         self.assertIsNone(rec["artifact"])
         self.assertEqual(rec["candidate"], "feat/x@abc1234")
+
+    def test_P9_a_verdict_on_another_candidate_neither_replaces_nor_satisfies_it(self):
+        """P9 / M5 (fixed): records are keyed by (generation, scope, candidate, req); the post names them."""
+        judge = self.judge()
+        self.run_cmd("verdict", "--job", JOB, "--as", judge, "--scope", "goal", "--candidate", "feat/x@abc1234",
+                     "--req", "d" * 64, "not_met", "--reason", "missing B", "--next", "do B", "--open", "1")
+        rc, _, err = self.run_cmd("verdict", "--job", JOB, "--as", judge, "--scope", "goal",
+                                  "--candidate", "feat/evil@deadbee", "--req", "e" * 64, "met", "ok")
+        self.assertEqual(rc, 0, err)
+        gen = ledger.load(self.bkey, JOB).generation
+        mine = review.drive_verdict(self.board, JOB, gen, "goal", "feat/x@abc1234", "d" * 64)
+        self.assertEqual(mine["verdict"], "not_met")
+        self.assertIsNone(review.drive_verdict(self.board, JOB, gen, "goal", "feat/x@abc1234", "e" * 64))
+        last = [m.message for m in self.board.messages_after(0, JOB) if m.message.startswith("VERDICT")][-1]
+        self.assertIn("candidate=feat/evil@deadbee", last)
+
+    def test_P10_second_write_failure_leaves_no_accepted_verdict_and_says_so(self):
+        """M2 / L1 (fixed): the judge changes between the two writes; the record stays unbound, no reader
+        accepts it, a VERDICT-VOID is posted, and the CLI says the verdict was posted but rejected."""
+        judge = self.judge()
+        real = self.board.record_verdict
+        calls = []
+
+        def flaky(*a, **kw):
+            calls.append(kw.get("message_id"))
+            return real(*a, **kw) if len(calls) == 1 else False
+        gen = ledger.load(self.bkey, JOB).generation
+        with mock.patch.object(self.board, "record_verdict", side_effect=flaky):
+            rc, _, err = self.run_cmd("verdict", "--job", JOB, "--as", judge, "--scope", "goal",
+                                      "--candidate", "feat/x@abc1234", "--req", "d" * 64, "met", "ok")
+        self.assertEqual(rc, 1)
+        self.assertIn("posted but unbound", err)
+        self.assertIn("rejected", err)
+        self.assertNotIn("is not the judge", err)
+        raw = goal_record(self.board, JOB, gen, "feat/x@abc1234", "d" * 64)
+        self.assertEqual(raw["message_id"], 0)                    # stored, unbound ...
+        self.assertIsNone(review.bound_verdict(raw))              # ... and no reader accepts it
+        self.assertIsNone(review.drive_verdict(self.board, JOB, gen, "goal", "feat/x@abc1234", "d" * 64))
+        posted = [m.message for m in self.board.messages_after(0, JOB)]
+        void = [t for t in posted if t.startswith("VERDICT-VOID ")]
+        self.assertEqual(len(void), 1)
+
+    def test_an_unbound_artifact_verdict_is_not_an_artifact_verdict(self):
+        """The window between the two writes: an artifact record with message_id None counts for no reader."""
+        judge = self.judge()
+        with mock.patch.object(self.board, "post", side_effect=RuntimeError("board gone")):
+            with self.assertRaises(RuntimeError):
+                from swarm import spool
+                spool.deliver_verdict(self.board, JOB, judge, "met", "ok", artifact="feat/x@abc1234")
+        self.assertEqual(review.artifact_verdicts(self.board, JOB), {})
+
+    def test_S2_a_spooled_goal_verdict_keeps_its_generation_and_gets_its_record(self):
+        from swarm import spool
+        judge = self.judge()
+        gen = ledger.load(self.bkey, JOB).generation
+        with mock.patch.object(cli, "open_board", side_effect=OSError("down"), create=True):
+            pass
+        spool.spool_verdict(self.cfg, JOB, judge, "met", "ok", None, scope="goal",
+                            generation=drive_cli.drive_generation(self.cfg, JOB),
+                            candidate="feat/x@abc1234", req="d" * 64)
+        spool.flush_spool(self.board, self.cfg)
+        rec = review.drive_verdict(self.board, JOB, gen, "goal", "feat/x@abc1234", "d" * 64)
+        self.assertIsNotNone(rec)
+        self.assertEqual(rec["verdict"], "met")
+
+    def test_S2_the_cli_queues_a_goal_verdict_with_its_ledger_generation(self):
+        from swarm import spool
+        judge = self.judge()
+        seen = {}
+        args = cli._parser().parse_args(["verdict", "--job", JOB, "--as", judge, "--scope", "goal", "--candidate",
+                                         "feat/x@abc1234", "--req", "d" * 64, "met", "ok"])
+        with mock.patch.object(spool, "spool_verdict", side_effect=lambda *a, **kw: seen.update(kw)), \
+                mock.patch("swarm.board.open_board", side_effect=OSError("board down")), \
+                contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
+            cli._run_command(self.cfg, args)
+        self.assertIn("queued", out.getvalue())
+        self.assertEqual(seen.get("generation"), ledger.load(self.bkey, JOB).generation)
+
+    def test_S2_an_unreadable_ledger_warns_that_the_verdict_cannot_conclude(self):
+        hits = list(self.home.rglob(ledger._name(self.bkey, JOB)))
+        hits[0].write_bytes(b"bad")
+        err = io.StringIO()
+        from swarm import verdict_cli
+        with contextlib.redirect_stderr(err):
+            self.assertIsNone(verdict_cli._drive_generation(self.cfg, JOB))
+        self.assertIn("cannot conclude", err.getvalue())
 
 
 class SeatAck(ControlCase):
     def setUp(self):
         super().setUp()
         self.enrol("LEAD-SESSION", LEAD_KEY)
-        self.real_lead_seat_name = drive_cli._lead_seat_name
-        # the lead's seat only gets its agent key through a launch claim; the lookup is tested on its own below
-        patch = mock.patch.object(drive_cli, "_lead_seat_name", return_value="lead")
-        patch.start()
-        self.addCleanup(patch.stop)
+        for i in range(20):   # board events the lead can acknowledge
+            self.board.post(JOB, "Someone", f"event {i}", None)
+        self.newest = self.board.last_message_id(JOB)
 
-    def test_lead_seat_is_found_by_the_agent_key_of_a_lead_seat(self):
+    def test_lead_seat_is_found_by_the_agent_key_of_a_live_lead_seat(self):
         class Row:
-            def __init__(self, seat, agent_key):
-                self.seat, self.agent_key = seat, agent_key
+            def __init__(self, seat, agent_key, state="running"):
+                self.seat, self.agent_key, self.state = seat, agent_key, state
 
         class FakeBoard:
-            rows = [Row("eng", "k-x"), Row("lead~1", LEAD_KEY), Row("lead", "k-other")]
+            rows = [Row("eng", "k-x"), Row("lead~1", LEAD_KEY), Row("lead", "k-other"),
+                    Row("lead", "k-old", "released")]
 
             def seats(self, job, generation):
                 return self.rows
 
-        self.assertEqual(self.real_lead_seat_name(FakeBoard(), JOB, 1, LEAD_KEY), "lead~1")
-        with self.assertRaises(drive_cli.Refuse):
-            self.real_lead_seat_name(FakeBoard(), JOB, 1, "k-x")
+        self.assertEqual(drive_cli._lead_seat_name(FakeBoard(), JOB, 1, LEAD_KEY), "lead~1")
+        for key in ("k-x", "k-old"):
+            with self.assertRaises(drive_cli.Refuse):
+                drive_cli._lead_seat_name(FakeBoard(), JOB, 1, key)
 
     def test_lead_ack_moves_its_event_mark_and_prints_record(self):
         self.set_session("LEAD-SESSION")
@@ -329,6 +446,25 @@ class SeatAck(ControlCase):
         self.assertEqual(self.run_cmd("seat", "ack", "--job", JOB, "--upto", "5")[0], 0)
         self.assertEqual(ledger.load(self.bkey, JOB).watermarks["event:lead"], 12)
 
+    def test_P5_ack_past_the_newest_event_is_refused(self):
+        """H2 / S1 (fixed): the mark never goes past the board's newest message of the job."""
+        self.set_session("LEAD-SESSION")
+        rc, _, err = self.run_cmd("seat", "ack", "--job", JOB, "--upto", str(10 ** 18))
+        self.assertEqual(rc, 1)
+        self.assertIn("past the newest event", err)
+        self.assertEqual(self.run_cmd("seat", "ack", "--job", JOB, "--upto", str(self.newest))[0], 0)
+        self.assertNotEqual(self.run_cmd("seat", "ack", "--job", JOB, "--upto", str(self.newest + 1))[0], 0)
+        self.assertEqual(ledger.load(self.bkey, JOB).watermarks["event:lead"], self.newest)
+
+    def test_P6_a_seat_exporting_the_lead_session_id_cannot_ack(self):
+        """H1 exploit 2 (fixed): the hook attests the seat's own session, whatever its environment claims."""
+        self.enrol("ENG-SESSION", ENG_KEY)
+        self.set_session("ENG-SESSION", env="LEAD-SESSION")
+        rc, _, err = self.run_cmd("seat", "ack", "--job", JOB, "--upto", "3")
+        self.assertEqual(rc, 1)
+        self.assertIn("lead session", err)
+        self.assertNotIn("event:lead", ledger.load(self.bkey, JOB).watermarks)
+
     def test_ack_from_a_person_or_another_enrolled_agent_refused(self):
         rc, _, err = self.run_cmd("seat", "ack", "--job", JOB, "--upto", "3")   # the requester session
         self.assertEqual(rc, 1)
@@ -340,6 +476,19 @@ class SeatAck(ControlCase):
         self.assertIn("lead session", err)
         self.assertNotIn("event:lead", ledger.load(self.bkey, JOB).watermarks)
 
+    def test_a_subagent_of_the_lead_cannot_ack(self):
+        self.set_session("LEAD-SESSION")
+        self.agent_id = "sub-of-lead"
+        self.assertEqual(self.run_cmd("seat", "ack", "--job", JOB, "--upto", "3")[0], 1)
+
+    def test_L3_a_released_lead_no_longer_counts_as_lead(self):
+        store = next(r for r in self.board._s().seats if r["id"] == self.lead_row.id)
+        store["state"] = "released"
+        self.set_session("LEAD-SESSION")
+        rc, _, err = self.run_cmd("seat", "ack", "--job", JOB, "--upto", "3")
+        self.assertEqual(rc, 1)
+        self.assertIn("live lead", err)
+
     def test_ack_needs_a_non_negative_event_id(self):
         self.set_session("LEAD-SESSION")
         rc, _, err = self.run_cmd("seat", "ack", "--job", JOB, "--upto", "-1")
@@ -347,50 +496,368 @@ class SeatAck(ControlCase):
         self.assertIn("--upto must be an event id", err)
 
 
+class LeadAuthority(ControlCase):
+    """S5: the real _lead_keys / _lead_seat_name gate (no mocks), per command, and across jobs."""
+    def setUp(self):
+        super().setUp()
+        self.enrol("LEAD-SESSION", LEAD_KEY)
+        req = self.work / "a.md"
+        req.write_text("A\n", encoding="utf-8")
+        self.req = req
+        self.board.post(JOB, "Someone", "event", None)
+
+    def commands(self, job=JOB):
+        return {
+            "seat request": ("seat", "request", "--job", job, "--seat", "eng", "--role", "engineer",
+                             "--brief", "B.md", "--workdir", str(self.work)),
+            "goal-ready": ("goal-ready", "--job", job, "--candidate", "feat/x@abc1234",
+                           "--add-requirements", str(self.req)),
+            "seat ack": ("seat", "ack", "--job", job, "--upto", "1"),
+        }
+
+    def test_the_live_lead_may_run_every_lead_command(self):
+        self.set_session("LEAD-SESSION")
+        for what, argv in self.commands().items():
+            rc, _, err = self.run_cmd(*argv)
+            self.assertEqual(rc, 0, f"{what}: {err}")
+        rc, _, err = self.run_cmd("seat", "release", "--job", JOB, "--seat", "eng",
+                                  "--withdraw-artifact", "feat/x", "--reason", "superseded")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.board.seat(JOB, 1, "eng").state, "released")
+
+    def test_L3_a_released_or_failed_lead_is_refused_every_lead_command(self):
+        store = next(r for r in self.board._s().seats if r["id"] == self.lead_row.id)
+        for state in ("released", "failed"):
+            store["state"] = state
+            self.set_session("LEAD-SESSION")
+            for what, argv in self.commands().items():
+                rc, _, err = self.run_cmd(*argv)
+                self.assertEqual(rc, 1, f"{state} {what}: {err}")
+        self.assertIsNone(self.board.seat(JOB, 1, "eng"))
+        self.assertEqual(ledger.load(self.bkey, JOB).pinned_requirements, {})
+
+    def test_another_enrolled_seat_is_refused_every_lead_command(self):
+        self.enrol("ENG-SESSION", ENG_KEY)
+        self.set_session("ENG-SESSION")
+        for what, argv in self.commands().items():
+            rc, _, err = self.run_cmd(*argv)
+            self.assertEqual(rc, 1, what)
+        self.assertIsNone(self.board.seat(JOB, 1, "eng"))
+        self.assertEqual(ledger.load(self.bkey, JOB).pinned_requirements, {})
+
+    def test_P6_lead_session_id_exported_by_a_seat_gets_no_lead_authority(self):
+        self.enrol("ENG-SESSION", ENG_KEY)
+        self.set_session("ENG-SESSION", env="LEAD-SESSION")
+        for what, argv in self.commands().items():
+            self.assertEqual(self.run_cmd(*argv)[0], 1, what)
+        self.request_seat_as_requester()
+        rc, _, _ = self.run_cmd("seat", "release", "--job", JOB, "--seat", "eng",
+                                "--withdraw-artifact", "g", "--reason", "r")
+        self.assertEqual(rc, 1)
+        self.assertNotIn("g", ledger.load(self.bkey, JOB).integrated)
+
+    def request_seat_as_requester(self):
+        sid = self.session
+        self.set_session(REQ_SESSION)
+        self.assertEqual(self.request_seat()[0], 0)
+        self.set_session(sid, env="LEAD-SESSION")
+
+    def test_the_lead_of_another_job_is_refused_here(self):
+        self.board.open_job("K", "d", None, REQ_SESSION, "Francesco", goal="g")
+        ledger.create(self.bkey, "K", budgets={}, activated_at=self.board.now().isoformat())
+        enrolment.write_job_owner(self.bkey, job="K", harness="claude", session_id=REQ_SESSION, cwd=str(self.work))
+        k_lead = self.board.request_seat("K", 1, "lead", role="engineering_lead", harness="claude", model="opus",
+                                         workdir=str(self.work), brief_path="L.md", requested_by="activation")
+        store = next(r for r in self.board._s().seats if r["id"] == k_lead.id)
+        store.update(agent_key="k-lead-of-K", state="running")
+        self.enrol("K-LEAD-SESSION", "k-lead-of-K")
+        self.set_session("K-LEAD-SESSION")
+        for what, argv in self.commands(JOB).items():
+            self.assertEqual(self.run_cmd(*argv)[0], 1, what)
+        self.assertEqual(self.run_cmd(*self.commands("K")["seat ack"])[0], 1)   # K has no events: past newest
+        self.assertEqual(self.run_cmd(*self.commands("K")["seat request"])[0], 0)
+
+
+class Withdraw(ControlCase):
+    def setUp(self):
+        super().setUp()
+        self.enrol("LEAD-SESSION", LEAD_KEY)
+        self.assertEqual(self.request_seat()[0], 0)
+        self.set_session("LEAD-SESSION")
+
+    def release(self, group, reason):
+        return self.run_cmd("seat", "release", "--job", JOB, "--seat", "eng",
+                            "--withdraw-artifact", group, "--reason", reason)
+
+    def test_P7_an_overlong_reason_is_refused_and_nothing_is_saved(self):
+        """M3 (fixed): the reason is capped; a refused release never writes the ledger."""
+        rev = ledger.load(self.bkey, JOB).ledger_rev
+        rc, _, err = self.release("g0", "x" * (drive_cli.WITHDRAW_REASON_MAX + 1))
+        self.assertEqual(rc, 1)
+        self.assertIn("--reason", err)
+        self.assertEqual(ledger.load(self.bkey, JOB).ledger_rev, rev)
+
+    def test_P7_repeating_a_release_of_a_released_seat_writes_nothing(self):
+        self.assertEqual(self.release("g0", "r")[0], 0)
+        rev = ledger.load(self.bkey, JOB).ledger_rev
+        for i in range(5):
+            rc, _, err = self.release(f"g{i + 1}", "r")
+            self.assertEqual(rc, 1)
+            self.assertIn("released already", err)
+        led = ledger.load(self.bkey, JOB)
+        self.assertEqual(led.ledger_rev, rev)
+        self.assertEqual(list(led.integrated), ["g0"])
+
+    def test_the_number_of_groups_is_capped(self):
+        led = ledger.load(self.bkey, JOB)
+        led.integrated = {f"g{i}": {"withdrawn": "r"} for i in range(drive_cli.INTEGRATED_MAX)}
+        led.save()
+        rc, _, err = self.release("one-more", "r")
+        self.assertEqual(rc, 1)
+        self.assertIn("groups", err)
+
+    def test_a_ledger_over_max_bytes_is_never_written(self):
+        led = ledger.load(self.bkey, JOB)
+        led.integrated = {f"g{i}": {"withdrawn": "x" * 4000} for i in range(1200)}
+        with self.assertRaises(ledger.LedgerTooLargeError):
+            led.save()
+        self.assertIsNotNone(ledger.load(self.bkey, JOB))   # the stored ledger still reads
+
+
 class DriveRepair(ControlCase):
-    def bad_entry(self):
+    def entry(self):
         hits = list(self.home.rglob(ledger._name(self.bkey, JOB)))
         self.assertEqual(len(hits), 1)
-        hits[0].write_bytes(b"not a ledger")
+        return hits[0]
+
+    def bad_entry(self, body=b"not a ledger"):
+        self.entry().write_bytes(body)
+
+    def corrupt(self, **changes):
+        """Make the ledger unreadable while keeping its fields readable to a lenient parse."""
+        body = json.loads(self.entry().read_text())
+        body.update(changes)
+        body["unknown_field"] = 1
+        self.entry().write_text(json.dumps(body))
+
+    def archives(self):
+        return [p for p in self.home.rglob("*") if ".bad-" in p.name]
+
+    def repair(self, *extra):
+        return self.run_cmd("drive", "repair", "--job", JOB, *extra)
 
     def test_repair_moves_the_bad_ledger_aside_and_starts_a_halted_fresh_one(self):
-        self.board.set_job_data(JOB, "drive.generation", "3")
-        self.bad_entry()
+        led = ledger.load(self.bkey, JOB)
+        led.generation = led.generation_requested = 3
+        led.save()
+        self.corrupt()
         with self.assertRaises(ledger.LedgerBadError):
             ledger.load(self.bkey, JOB)
-        rc, out, err = self.run_cmd("drive", "repair", "--job", JOB)
+        rc, out, err = self.repair()
         self.assertEqual(rc, 0, err)
         self.assertRegex(self.last_line(out), r"^swarm-record: kind=halt id=\d+ rev=1$")
         fresh = ledger.load(self.bkey, JOB)
         self.assertEqual(fresh.generation, 3)
         self.assertTrue(fresh.halted["by"].startswith("person"))
-        self.assertTrue(any(".bad-" in p.name for p in self.home.rglob("*")), "the bad entry is kept, not deleted")
+        self.assertEqual(len(self.archives()), 1, "the bad entry is kept, not deleted")
+
+    def test_P7_M4_the_generation_comes_from_the_archive_never_from_the_board(self):
+        led = ledger.load(self.bkey, JOB)
+        led.generation = led.generation_requested = 2
+        led.save()
+        self.corrupt()
+        self.board.set_job_data(JOB, "drive.generation", "999")   # a database writer
+        rc, _, err = self.repair()
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(ledger.load(self.bkey, JOB).generation, 2)
+        self.assertIn("the board says generation 999", err)
+
+    def test_M4_an_unparseable_archive_needs_a_person_supplied_generation(self):
+        self.board.set_job_data(JOB, "drive.generation", "3")
+        self.bad_entry()
+        rc, _, err = self.repair()
+        self.assertEqual(rc, 1)
+        self.assertIn("--generation", err)
+        rc, _, err = self.repair("--generation", "3")   # the crash-window path: archived, no ledger yet
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(ledger.load(self.bkey, JOB).generation, 3)
+
+    def test_M4_a_person_generation_must_agree_with_the_archive(self):
+        self.corrupt()
+        rc, _, err = self.repair("--generation", "7")
+        self.assertEqual(rc, 1)
+        self.assertIn("disagrees", err)
+
+    def test_M1_a_crash_between_the_archive_and_the_create_is_repaired_by_a_retry(self):
+        led = ledger.load(self.bkey, JOB)
+        led.generation = led.generation_requested = 4
+        led.save()
+        self.corrupt()
+        real_write = ledger.privfs.write_atomic
+        with mock.patch.object(ledger.privfs, "write_atomic", side_effect=OSError("crash")):
+            with self.assertRaises(OSError):
+                self.repair()
+        self.assertIsNone(ledger.load(self.bkey, JOB))   # archived, no ledger: DRIVER-ORPHAN until repaired
+        self.assertEqual(len(self.archives()), 1)
+        self.assertIs(ledger.privfs.write_atomic, real_write)
+        rc, out, err = self.repair()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("finishing an interrupted repair", out)
+        self.assertEqual(ledger.load(self.bkey, JOB).generation, 4)
+        self.assertEqual(len(self.archives()), 1)
 
     def test_repair_is_idempotent_and_keeps_one_archive(self):
-        self.bad_entry()
-        self.assertEqual(self.run_cmd("drive", "repair", "--job", JOB)[0], 0)
-        rc, _, err = self.run_cmd("drive", "repair", "--job", JOB)
+        self.corrupt()
+        self.assertEqual(self.repair()[0], 0)
+        rc, _, err = self.repair()
         self.assertEqual(rc, 1)
         self.assertIn("nothing to repair", err)
-        archives = [p.name for p in self.home.rglob("*") if ".bad-" in p.name]
+        archives = self.archives()
         self.assertEqual(len(archives), 1)
-        self.assertRegex(archives[0], r"\.bad-\d{8}T\d{6}Z-[0-9a-f]{12}$")
+        self.assertRegex(archives[0].name, r"\.bad-\d{8}T\d{6}Z-[0-9a-f]{12}$")
 
     def test_repair_refuses_a_readable_ledger(self):
-        rc, _, err = self.run_cmd("drive", "repair", "--job", JOB)
+        rc, _, err = self.repair()
         self.assertEqual(rc, 1)
         self.assertIn("nothing to repair", err)
         self.assertIsNotNone(ledger.load(self.bkey, JOB))
 
+    def test_repair_without_ledger_archive_or_drive_claim_refused(self):
+        self.entry().unlink()
+        rc, _, err = self.repair("--generation", "1")
+        self.assertEqual(rc, 1)
+        self.assertIn("nothing to repair", err)
+
     def test_repair_is_person_only(self):
-        self.bad_entry()
+        self.corrupt()
         self.enrol("ENG-SESSION", ENG_KEY)
         self.set_session("ENG-SESSION")
-        rc, _, err = self.run_cmd("drive", "repair", "--job", JOB)
+        rc, _, err = self.repair()
         self.assertEqual(rc, 1)
-        self.assertIn("enrolled", err)
+        self.assertIn("not the requester", err)
         with self.assertRaises(ledger.LedgerBadError):
             ledger.load(self.bkey, JOB)
+
+    def test_P8_S3_a_finished_job_stays_finished(self):
+        self.corrupt(terminal={"bogus": True})
+        rc, _, err = self.repair()
+        self.assertEqual(rc, 0, err)
+        fresh = ledger.load(self.bkey, JOB)
+        self.assertIsNotNone(fresh.terminal)
+        self.assertIsNone(fresh.halted)
+        self.assertIn("stays terminal", err)
+        self.assertNotIn(fresh, ledger.unfinished(self.bkey))
+
+    def test_S3_a_valid_archived_terminal_is_kept(self):
+        self.corrupt(terminal={"verdict": "met", "at": "2026-10-10T00:00:00+00:00"})
+        self.assertEqual(self.repair()[0], 0)
+        self.assertEqual(ledger.load(self.bkey, JOB).terminal["verdict"], "met")
+
+    def test_S3_a_closed_board_job_with_an_unreadable_archive_stays_finished(self):
+        self.assertTrue(self.board.close_job(JOB, "completed", "met: done", forced=True))
+        self.assertEqual(self.board.job_status(JOB).status, "completed")
+        self.bad_entry()
+        rc, _, err = self.repair("--generation", "1")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(ledger.load(self.bkey, JOB).terminal["verdict"], "met")
+
+    def test_P7_S4_repair_salvages_pins_and_counters_and_lists_what_was_lost(self):
+        self.assertEqual(self.request_seat()[0], 0)
+        led = ledger.load(self.bkey, JOB)
+        led.rounds_without_progress, led.ruling_attempts = 2, 1
+        led.pinned_requirements = {str(self.work / "a.md"): "a" * 40}
+        led.budgets = {"max_sessions": 5.0, "max_cost_usd": 10.0}
+        led.integrated = {"feat/x": {"sha": "abc"}}
+        led.intents = [ledger.Intent("L1", "A1", 1, "eng", 2.5, 30.0, ["wt:x"], "claimed"),
+                       ledger.Intent("L0", "A0", 1, "eng", 1.0, 30.0, [], "concluded", "ok", True, 0.75)]
+        led.save()
+        self.corrupt()
+        rc, _, err = self.repair()
+        self.assertEqual(rc, 0, err)
+        fresh = ledger.load(self.bkey, JOB)
+        self.assertEqual(fresh.pinned_requirements, {str(self.work / "a.md"): "a" * 40})
+        self.assertEqual((fresh.rounds_without_progress, fresh.ruling_attempts), (2, 1))
+        self.assertEqual((fresh.budgets, fresh.intents, fresh.integrated), ({}, [], {}))
+        for text in ("WARNING", "spend: $3.25", "open launches", "L1", "budgets", "max_cost_usd",
+                     "integrated groups", "feat/x", "set the budgets"):
+            self.assertIn(text, err)
+
+    def test_S4_unhalt_after_repair_wants_budgets_first(self):
+        self.corrupt()
+        self.assertEqual(self.repair()[0], 0)
+        rc, _, err = self.run_cmd("unhalt", "--job", JOB)
+        self.assertEqual(rc, 1)
+        self.assertIn("set them first", err)
+        led = ledger.load(self.bkey, JOB)
+        led.budgets = {"max_sessions": 3.0}
+        led.save()
+        self.assertEqual(self.run_cmd("unhalt", "--job", JOB)[0], 0)
+
+    def test_L2_repair_and_activation_take_the_same_lock(self):
+        """An activation between the move and the create is impossible: both run under the ledger's lock."""
+        self.corrupt()
+        seen = []
+        real = ledger._move_aside
+
+        def move_then_activate(d, name):
+            out = real(d, name)
+            import threading
+            t = threading.Thread(target=lambda: seen.append(
+                ledger.activate(self.bkey, JOB, budgets={"max_sessions": 9.0}, activated_at="x")))
+            t.start()
+            t.join(0.3)
+            seen.append(("alive", t.is_alive()))
+            self.thread = t
+            return out
+        with mock.patch.object(ledger, "_move_aside", side_effect=move_then_activate):
+            rc, _, err = self.repair()
+        self.thread.join(10)
+        self.assertEqual(rc, 0, err)
+        self.assertIn(("alive", True), seen)   # the activation waited for the repair's lock
+        led = ledger.load(self.bkey, JOB)
+        self.assertEqual(led.generation_requested, led.generation + 1)   # it rolled the repaired ledger over
+        self.assertIsNotNone(led.halted)                                  # which stays halted
+
+
+class TtyReceipt(ControlCase):
+    def test_a_person_at_a_terminal_halts_and_a_person_receipt_is_written(self):
+        from swarm import receipts
+        self.set_session(None)
+        with mock.patch.object(person, "_ancestor_host", return_value=None), \
+                mock.patch.object(person, "_tty_confirm", return_value=True):
+            rc, out, err = self.run_cmd("halt", "--job", JOB)
+        self.assertEqual(rc, 0, err)
+        led = ledger.load(self.bkey, JOB)
+        self.assertEqual(led.halted["by"], "person (tty)")
+        r = receipts.find(self.bkey, JOB, "person", str(led.ledger_rev), rev=1, incarnation=led.incarnation,
+                          generation=led.generation, now=0)
+        self.assertIsNotNone(r)
+        self.assertEqual(r.action_id, "tty:halt")
+
+    def test_codex_seat_cancel_goes_through_the_same_gate(self):
+        self.assertEqual(self.request_seat()[0], 0)
+        self.enrol("CODEX-SEAT", ENG_KEY)
+        self.set_session(None)
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "CODEX-SEAT"}), \
+                mock.patch.object(person, "_tty_confirm", return_value=True):
+            rc, _, err = self.run_cmd("seat", "cancel", "--job", JOB, "--seat", "eng")
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.board.seat(JOB, 1, "eng").state, "requested")
+
+
+class Probes(ControlCase):
+    """The Task 6b security probes P1 and P6 against the real CLI (P2-P5, P7-P10 live above and in test_person)."""
+    def test_P1_enrolled_seat_exporting_the_requester_session_id_is_refused(self):
+        self.enrol("ENG-SESSION", ENG_KEY)
+        self.set_session("ENG-SESSION")
+        self.assertNotEqual(self.run_cmd("halt", "--job", JOB)[0], 0)
+        owner_sid = enrolment.find_job_owner(self.bkey, JOB).session_id
+        self.set_session("ENG-SESSION", env=owner_sid)
+        for argv in (("halt", "--job", JOB), ("unhalt", "--job", JOB), ("drive", "repair", "--job", JOB)):
+            rc, _, err = self.run_cmd(*argv)
+            self.assertEqual(rc, 1, argv)
+        self.assertIsNone(ledger.load(self.bkey, JOB).halted)
+
 
 class Review(ControlCase):
     def setUp(self):
