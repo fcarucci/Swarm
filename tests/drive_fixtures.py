@@ -2,7 +2,7 @@
 
 Every factory takes keyword overrides for every field of the type it builds (tests/test_drive_model.py
 checks this), and every default is a fresh container, so tests never share state. `L` mirrors the field
-names of eng-ledger's `Ledger` (lib/swarm/supervisor/ledger.py @ 534cfce, 26 fields); `receipt` mirrors
+names of eng-ledger's `Ledger` (lib/swarm/supervisor/ledger.py @ 534cfce, 25 fields); `receipt` mirrors
 eng-ledger's `Receipt` (lib/swarm/receipts.py @ 534cfce, 14 fields); `spent_usd` is a shorthand that
 seeds one concluded intent, because the Ledger has no spent_usd field (it has charged_usd())."""
 from __future__ import annotations

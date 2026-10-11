@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import typing
 import unittest
 
 import support  # noqa: F401  (puts lib/ on sys.path)
@@ -11,7 +12,7 @@ from drive_fixtures import L, T0, Intent, Receipt, ho, intent, iso, minutes, q, 
 from swarm.supervisor import driver_model as dm
 
 # Pinned against eng-ledger at 534cfce. If these change, update drive_fixtures.py to match.
-# Field names of the Ledger dataclass (lib/swarm/supervisor/ledger.py): 26 fields.
+# Field names of the Ledger dataclass (lib/swarm/supervisor/ledger.py @ 534cfce): 25 fields.
 LEDGER_FIELDS = (
     "board_key", "job", "generation", "generation_requested", "activated_at", "budgets", "intents",
     "owners", "integrated", "ruling_due_at", "ruling_attempts", "rounds_without_progress", "errors",
@@ -19,17 +20,26 @@ LEDGER_FIELDS = (
     "terminal_intent", "halted_total_seconds", "requester_session", "pinned_requirements",
     "incarnation", "ledger_rev",
 )
+assert len(LEDGER_FIELDS) == 25
 
 # The Intent dataclass (lib/swarm/supervisor/ledger.py @ 534cfce): 11 fields.
 INTENT_FIELDS = (
     "launch_id", "action_id", "attempt", "seat", "reserved_usd", "reserved_minutes", "locks", "state",
     "outcome", "success", "charged_usd",
 )
+assert len(INTENT_FIELDS) == 11
 
 # The Receipt dataclass (lib/swarm/receipts.py @ 534cfce): 14 fields.
 RECEIPT_FIELDS = (
     "board_key", "job", "generation", "incarnation", "action_id", "attempt", "seat", "kind", "record_id",
     "rev", "content_sha", "args_sha", "expires_at", "destinations",
+)
+assert len(RECEIPT_FIELDS) == 14
+
+# Receipt kinds (spec 3.4 control records); a default receipt must be one of these.
+RECEIPT_KINDS = (
+    "done", "review", "verdict", "seat", "ask", "answer", "post", "goal_ready", "ack", "withdraw",
+    "halt", "unhalt", "deactivate", "activate",
 )
 
 SNAPSHOT_FIELDS = (
@@ -159,6 +169,18 @@ class FrozenModelTest(unittest.TestCase):
         self.assertEqual(v("met", candidate="feat/a@" + "c" * 40, req="R1").candidate, "feat/a@" + "c" * 40)
         self.assertEqual(v("met", req="R1").req, "R1")
 
+    def test_seat_defaults_to_engineer_role_and_idle_state(self):
+        s = seat()
+        self.assertEqual((s.role, s.state), ("engineer", "idle"))
+
+    def test_question_factory_defaults_are_a_real_question(self):
+        question = q()
+        self.assertTrue(question.text)
+        self.assertEqual((question.job, question.generation, question.default), ("J", 1, "left"))
+
+    def test_intent_factory_defaults_to_a_concluded_intent(self):
+        self.assertEqual(intent().state, "concluded")
+
     def test_seat_defaults_to_haiku_and_no_watermark(self):
         s = seat()
         self.assertEqual(s.model, "haiku")
@@ -199,11 +221,31 @@ class FixtureTest(unittest.TestCase):
         self.assertEqual((led.incarnation, led.ledger_rev), ("", 0))
         self.assertEqual(L(incarnation="f" * 32, ledger_rev=4).ledger_rev, 4)
 
-    def test_receipt_factory_defaults_are_valid_and_frozen(self):
+    def test_receipt_factory_defaults_are_well_formed_and_frozen(self):
         r = receipt()
         self.assertEqual((r.generation, r.rev, r.destinations), (1, 1, None))
+        self.assertEqual(r.kind, "done")
+        self.assertIn(r.kind, RECEIPT_KINDS)
+        self.assertGreater(r.expires_at, T0.timestamp())
+        self.assertEqual(len(r.incarnation), 32)
+        self.assertEqual((len(r.content_sha), len(r.args_sha)), (64, 64))
+        self.assertTrue(r.action_id)
+        self.assertTrue(r.board_key)
+        self.assertTrue(r.job)
         with self.assertRaises(dataclasses.FrozenInstanceError):
             r.rev = 2
+
+    def test_intent_stand_in_is_mutable_like_the_ledger_intent(self):
+        i = intent()
+        i.state = "concluded"
+        i.charged_usd = 1.5
+        self.assertEqual((i.state, i.charged_usd), ("concluded", 1.5))
+
+    def test_verdict_progress_is_a_bool_or_none(self):
+        self.assertIsNone(v("not_met").progress)
+        self.assertIs(v("not_met", progress=True).progress, True)
+        self.assertIs(v("not_met", progress=False).progress, False)
+        self.assertEqual(typing.get_type_hints(dm.VerdictView)["progress"], bool | None)
 
     def test_ledger_spent_usd_seeds_a_concluded_charge(self):
         led = L(spent_usd=35.5)
