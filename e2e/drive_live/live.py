@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import subprocess
 import sys
 import time
@@ -11,7 +13,9 @@ import traceback
 from pathlib import Path
 
 import qa_lib as q
-from rig import Rig
+from rig import CostCap, Rig
+import chaos
+HERE = Path(__file__).resolve().parent
 
 PENDING_EXIT = 3
 
@@ -33,8 +37,12 @@ def preflight(args) -> list[tuple[str, str, str]]:
                         + ("" if up else f" ({(act.stderr + st.stderr).strip()[:200]})")))
             real = Path.home() / ".config" / "swarm" / "config.toml"
             same = real.exists() and real.resolve() == r.config.resolve()
-            out.append(("preflight/isolation", q.Outcome.FAIL if same else q.Outcome.PASS,
-                        f"HOME={r.home} config={r.config}"))
+            seen = r.swarm("status").stdout
+            leaked = [j for j in ("swarm-autonomy",) if j in seen]
+            port_ok = (r.pg is None) or str(r.pg.port) in r.config.read_text()
+            out.append(("preflight/isolation", q.Outcome.FAIL if same or leaked or not port_ok else q.Outcome.PASS,
+                        f"HOME={r.home}; status lists only the run's jobs (shared job names seen: {leaked or 'none'}); "
+                        f"own database port {getattr(r.pg, 'port', '-')}"))
             sha = rig.initial
             ci = subprocess.run([sys.executable, str(Path(__file__).parent / "hub.py"), "ci-check", "--hub",
                                  str(rig.hub), "--run", sha], capture_output=True, text=True)
@@ -46,8 +54,9 @@ def preflight(args) -> list[tuple[str, str, str]]:
                             "commit", "-q", "--allow-empty", "-m", "diverged"], capture_output=True)
             ff = subprocess.run(["git", "-C", str(rig.workdir), "push", "-f", rig.urls["origin"], "HEAD:main"],
                                 capture_output=True, text=True)
-            out.append(("preflight/hub-refuses-rewind", q.Outcome.PASS if ff.returncode else q.Outcome.FAIL,
-                        "a non-fast-forward push to main is refused"))
+            out.append(("preflight/hub-refuses-rewind",
+                        q.Outcome.PASS if ff.returncode and "non-fast-forward" in ff.stderr else q.Outcome.FAIL,
+                        "the hub itself refuses a non-fast-forward push to main" if ff.returncode else "push was accepted"))
             if args.harness == "fake":
                 ok = all((r.bin / n).exists() for n in ("swarm", "claude", "codex"))
                 out.append(("preflight/shims", q.Outcome.PASS if ok else q.Outcome.FAIL, f"{r.bin}"))
@@ -62,51 +71,85 @@ def preflight(args) -> list[tuple[str, str, str]]:
     return out
 
 
-def run_goal(args, expect: str) -> tuple[str, str, str]:
+def user_manager_up() -> bool:
+    r = subprocess.run(["systemctl", "--user", "is-system-running"], capture_output=True, text=True)
+    return r.stdout.strip() in ("running", "degraded")
+
+
+def run_goal(args, expect: str) -> list[tuple[str, str, str]]:
+    """The live run. Returns one row for the run itself plus one per spec-6.3 / Task 19 assertion, so a missing
+    capability (no codex binary, no user manager) is a visible SKIP and never a silent omission."""
     name = f"live-{expect}"
     try:
         q.require(*q.LIVE_NEEDS, what="supervisor-driven goal run")
     except q.Pending as exc:
-        return (name, q.Outcome.SKIP, str(exc))
+        return [(name, q.Outcome.SKIP, str(exc))]
+    if args.harness == "real" and not (os.environ.get("SWARM_QA_CLAUDE") or shutil.which("claude")):
+        return [(name, q.Outcome.SKIP, "not run (--harness real: no `claude` on PATH; set SWARM_QA_CLAUDE)")]
+    if args.systemd and not user_manager_up():
+        return [(name, q.Outcome.SKIP, "not run (--systemd: no systemd user manager answers)")]
+    have_codex = bool(os.environ.get("SWARM_QA_CODEX") or shutil.which("codex"))
     script = "met" if expect == "met" else "unreachable"
-    if args.harness == "real":
-        script = script   # the real harness ignores the script; kept for the rig's bookkeeping
     try:
-        with Rig(name, script=script, backend=args.backend, harness=args.harness, budget_usd=args.budget_usd) as rig:
-            killed = []
+        with Rig(name, script=script, backend=args.backend, harness=args.harness, budget_usd=args.budget_usd,
+                 systemd=args.systemd) as rig:
+            if args.harness == "real" and expect == "met" and have_codex:
+                rig.lead_brief = HERE / "LEAD-met-codex.md"      # asks for one engineer seat on the codex harness
+            st: dict = {}
 
             def on_pass(k, snap):
-                if args.kill_supervisor_once and not killed and snap["agents"]:
-                    killed.append(k)
-                    p = subprocess.Popen([str(rig.run.bin / "swarm"), "supervise"], env=rig.run.env(),
-                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    time.sleep(1.0)
-                    q.kill_tree(p.pid)
-                    p.wait()
-                    rig.run.event("chaos", "supervisor pass SIGKILLed mid-pass", pass_no=k)
+                if args.kill_supervisor_once and not st.get("killed_pass") and snap["agents"] and st.get("kill_miss", 0) < 8:
+                    chaos.kill_pass_midway(rig, st)
 
             rig.activate()
             interval = args.interval_s or (20 if args.harness == "fake" else 60)
             try:
                 rig.drive(timeout_s=args.timeout_min * 60, interval_s=interval, on_pass=on_pass)
+            except CostCap as exc:
+                rig.write_costs(); rig.export_evidence()
+                return [(name, q.Outcome.FAIL, f"COST CAP: {exc}")]
             except TimeoutError as exc:
                 rig.write_costs(); rig.export_evidence()
-                return (name, q.Outcome.FAIL, f"STUCK: {exc}")
+                return [(name, q.Outcome.FAIL, f"STUCK: {exc}")]
             problems = rig.check_terminal(expect) + rig.check_no_coordinator() + rig.check_every_seat_supervisor_launched()
-            if expect == "met":
-                problems += rig.check_landing()
+            if args.kill_supervisor_once and not st.get("killed_pass"):
+                problems.append("--kill-supervisor-once: the pass was never killed in flight: nothing was tested")
             costs = rig.write_costs()
             ev = rig.export_evidence()
             detail = (f"{costs['launches']} launches in {costs['passes']} passes, {costs['wall_s']}s, "
-                      f"${costs['ledger_cost_usd']} (harness ${costs['harness_cost_usd']}); evidence {ev}")
-            if problems:
-                return (name, q.Outcome.FAIL, "; ".join(problems) + " | " + detail)
-            return (name, q.Outcome.PASS, detail)
+                      f"spent ${costs['spent_usd']} of ${costs['budget_usd']:g}; "
+                      f"{st.get('killed_pass') or 'no fault injected'}; evidence {ev}")
+            rows = [(name, q.Outcome.FAIL if problems else q.Outcome.PASS,
+                     ("; ".join(problems) + " | " if problems else "") + detail)]
+            def row(n, probs, ok):
+                rows.append((f"{name}/{n}", q.Outcome.FAIL if probs else q.Outcome.PASS, "; ".join(probs) or ok))
+            row("models", rig.check_models(), "lead/judge opus, engineer haiku, reviewer sonnet (agent rows)")
+            row("invariant", [f"invariant: {v}" for v in rig.invariant_violations],
+                f"no stall window in {rig.passes} passes (observable approximation; see rig._watch)")
+            if expect == "met":
+                row("landed-head", rig.check_landing(),
+                    "landed head == judged candidate on both destinations; linear; green CI on that SHA, consulted")
+                if args.harness == "real":
+                    if have_codex:
+                        row("codex-engineer", rig.check_codex_engineer(), "a codex engineer seat ran")
+                    else:
+                        rows.append((f"{name}/codex-engineer", q.Outcome.SKIP,
+                                     "not run (no codex binary on this box; [F18] is unchecked)"))
+                else:
+                    rows.append((f"{name}/codex-engineer", q.Outcome.SKIP,
+                                 "not run in fake mode (chaos codex_parity covers the fake codex harness)"))
+            else:
+                row("unreachable-details", rig.check_unreachable_details(), "verdict ruling/mechanical with details")
+            rows.append((f"{name}/real-systemd", q.Outcome.PASS if args.systemd and not problems else q.Outcome.SKIP,
+                         "passes ran with real scopes" if args.systemd else
+                         "not run (add --systemd; the harness never touches the shared swarm-supervise unit; "
+                         "Task 17 tests/test_drive_systemd.py covers containment)"))
+            return rows
     except q.Pending as exc:
-        return (name, q.Outcome.SKIP, str(exc))
+        return [(name, q.Outcome.SKIP, str(exc))]
     except Exception as exc:
         traceback.print_exc()
-        return (name, q.Outcome.FAIL, f"{type(exc).__name__}: {exc}")
+        return [(name, q.Outcome.FAIL, f"{type(exc).__name__}: {exc}")]
 
 
 def main(argv=None) -> int:
@@ -119,6 +162,7 @@ def main(argv=None) -> int:
     ap.add_argument("--timeout-min", type=float, default=None)
     ap.add_argument("--interval-s", type=float, default=None)
     ap.add_argument("--kill-supervisor-once", action="store_true")
+    ap.add_argument("--systemd", action="store_true", help="run passes with real systemd scopes (needs a user manager)")
     ap.add_argument("--list", action="store_true", help="chaos: list scenario names")
     ap.add_argument("--today-only", action="store_true",
                     help="chaos: only the no-driver `<name>/today` layers (fast; what the unit tests run)")
@@ -136,9 +180,9 @@ def main(argv=None) -> int:
     if a.cmd in ("preflight", "all"):
         results += preflight(a)
     if a.cmd in ("met", "all"):
-        results.append(run_goal(a, "met"))
+        results += run_goal(a, "met")
     if a.cmd in ("unreachable", "all"):
-        results.append(run_goal(a, "unreachable"))
+        results += run_goal(a, "unreachable")
     if a.cmd in ("chaos", "all"):
         import chaos
         if a.list:

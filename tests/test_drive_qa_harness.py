@@ -58,10 +58,10 @@ class Probes(Tmp):
         import qa_lib as q
         d = self.tmp / "lib/swarm/supervisor"
         d.mkdir(parents=True)
-        (d / "driver.py").write_text("def claim_drive_launch(): pass\n")
+        (d / "driver_exec.py").write_text("def execute(): claim_drive_launch()\n")
         caps = q.capabilities(self.tmp)
         self.assertTrue(caps["8a"].present)
-        self.assertFalse(caps["8b"].present)      # needs terminalization and the core-sweep skip too
+        self.assertFalse(caps["8b"].present)      # needs terminalize, enforce_deadlines and the core-sweep skip too
         q.require("8a", root=self.tmp)
         with self.assertRaisesRegex(q.Pending, "pending 8b"):
             q.require("8a", "8b", root=self.tmp)
@@ -70,6 +70,72 @@ class Probes(Tmp):
         import qa_lib as q
         caps = q.capabilities(Path(__file__).resolve().parent.parent)
         self.assertTrue(caps["ledger"].present and caps["receipts"].present)
+
+
+class NoVacuousPass(Tmp):
+    """A fault that did not happen must never read as a pass (review of feat/drive-qa @ 7c652e4)."""
+
+    def test_8a_probe_wants_driver_exec_and_8b_wants_real_symbols(self):
+        import qa_lib as q
+        d = self.tmp / "lib/swarm/supervisor"
+        d.mkdir(parents=True)
+        (d / "driver.py").write_text("def claim_drive_launch(): terminal\n")        # the old, wrong evidence
+        self.assertFalse(q.capabilities(self.tmp)["8a"].present)
+        self.assertFalse(q.capabilities(self.tmp)["8b"].present)
+        (d / "driver_exec.py").write_text("def execute(): claim_drive_launch()\n")
+        self.assertTrue(q.capabilities(self.tmp)["8a"].present)
+        (d / "driver_life.py").write_text("def terminalize(): pass\ndef enforce_deadlines(): pass\n")
+        self.assertFalse(q.capabilities(self.tmp)["8b"].present)                    # still needs the core-sweep skip
+        (self.tmp / "lib/swarm/board").mkdir(parents=True)
+        (self.tmp / "lib/swarm/board/base.py").write_text("def drive_job_claimed(): pass\n")
+        self.assertTrue(q.capabilities(self.tmp)["8b"].present)
+
+    def test_barrier_presence_is_a_hit_call_in_lib(self):
+        import qa_lib as q
+        d = self.tmp / "lib/swarm"
+        d.mkdir(parents=True)
+        (d / "x.py").write_text('barrier.hit("after_claim")\n# hit("only_a_comment_name") is still a hit call\n')
+        self.assertTrue(q.barrier_present("after_claim", self.tmp))
+        self.assertFalse(q.barrier_present("after_run_file", self.tmp))
+        self.assertFalse(q.barrier_present("after_cla", self.tmp))
+
+    def test_a_barrier_that_is_absent_is_a_skip_naming_it(self):
+        import argparse
+        import chaos
+        row = chaos.SCENARIOS["barrier_after_run_file"][1](argparse.Namespace(backend="sqlite", harness="fake"))
+        self.assertEqual(row[1], "SKIP")
+        self.assertIn("after_run_file", row[2])
+
+    def test_barrier_fired_needs_evidence(self):
+        import rig as rigmod
+        r = rigmod.Rig.__new__(rigmod.Rig)
+        r.rcs, r.harness_log = [0, 0], lambda: []
+        self.assertIsNone(r.barrier_fired("after_claim"))                  # two clean passes: nothing was killed
+        r.rcs = [0, rigmod.KILLED]
+        self.assertIn("SIGKILL", r.barrier_fired("after_claim"))
+        r.rcs, r.harness_log = [0], lambda: [{"ev": "hook_killed", "role": "engineer", "event": "done"}]
+        self.assertIn("hook", r.barrier_fired("hook_after_cli_before_receipt"))
+        r.harness_log = lambda: [{"ev": "start", "sid": "a"}]
+        self.assertIsNotNone(r.barrier_fired("runner_mid_session"))        # started, never ended
+        self.assertIsNone(r.barrier_fired("after_claim"))
+
+    def test_every_planned_barrier_and_required_scenario_has_a_row(self):
+        import chaos
+        plan = ["before_claim", "after_claim", "after_run_file", "after_marker", "after_runner_start", "runner_mid_session",
+                "before_finish", "mid_terminalization", "hook_after_cli_before_receipt", "land_after_first_destination",
+                "after_intent_before_claim", "mid_rollover", "mid_rollover_after_ledger"]
+        for b in plan:
+            self.assertIn(f"barrier_{b}", chaos.SCENARIOS)
+        for n in ("kill_seat_mid_task", "kill_lead_mid_turn", "ci_red_twice", "budget_ruling_max_sessions_8",
+                  "ruling_judge_fails_twice", "provider_outage", "bus_down", "stale_met", "rollover", "codex_parity",
+                  "forged_closed_by_driver", "forged_receipt", "forged_person_commands", "forged_seat_row",
+                  "forged_unhalt_by_seat", "question_default_expires", "stale_lock", "corrupt_ledger",
+                  "reactivated_long_idle", "kill_supervisor_and_runner_once"):
+            self.assertIn(n, chaos.SCENARIOS)
+
+    def test_pending_without_pieces_says_not_run(self):
+        import qa_lib as q
+        self.assertTrue(str(q.Pending([], "needs postgres")).startswith("not run"))
 
 
 class Guards(Tmp):
@@ -240,6 +306,17 @@ class ScriptedEngineer(Tmp):
         fh.edit_toy(w, "impossible", 0)
         self.assertNotEqual(self.make_test(w).returncode, 0)
 
+    def test_judge_scope_and_script_are_keyed_by_scope_not_seat(self):
+        fh = self.load_harness()
+        self.assertEqual(fh.judge_scope("You are the goal judge"), "goal")
+        self.assertEqual(fh.judge_scope("[swarm scope: ruling]\nx"), "ruling")
+        self.assertEqual(fh.judge_scope("judge the artifact feat/x@" + "a" * 40), "artifact")
+        met = json.loads((HARNESS / "scripts" / "met.json").read_text())["judge"]
+        unr = json.loads((HARNESS / "scripts" / "unreachable.json").read_text())["judge"]
+        self.assertEqual(fh.nth(met["goal"], 0)["verdict"], "met")                   # the goal judge's FIRST run is met
+        self.assertEqual(fh.nth(unr["ruling"], 0)["verdict"], "unreachable")         # the ruling judge's first is unreachable
+        self.assertEqual([e["verdict"] for e in met["artifact"]], ["not_met", "met"])
+
     def test_the_nth_script_entry_sticks_at_the_last(self):
         fh = self.load_harness()
         self.assertEqual(fh.nth([{"a": 1}, {"a": 2}], 0), {"a": 1})
@@ -254,15 +331,19 @@ class NoDriverChaosLayers(Tmp):
     of their process) on a throwaway SQLite board under a temp QA root. No Postgres, no driver
     (`--today-only` leaves the driven rows to e2e/drive_live.sh)."""
 
+    def venv(self):
+        import qa_lib as q
+        return str(q.VENV if (q.VENV / "bin" / "python").exists() else sys.prefix)
+
     def run_chaos(self, *names):
         env = {k: v for k, v in os.environ.items() if k in ("PATH", "LANG", "LC_ALL")}
-        env.update(SWARM_QA_ROOT=str(self.tmp / "qa"), SWARM_QA_VENV=sys.prefix,
+        env.update(SWARM_QA_ROOT=str(self.tmp / "qa"), SWARM_QA_VENV=self.venv(),
                    SWARM_QA_REPO=str(Path(__file__).resolve().parent.parent))
         return subprocess.run([sys.executable, "-B", str(HARNESS / "live.py"), "chaos", "--today-only", "--backend", "sqlite", *names],
                               capture_output=True, text=True, env=env, cwd=HARNESS, timeout=240)
 
     def test_corrupt_ledger_stale_lock_and_forged_receipt_layers_pass(self):
-        if not (Path(sys.prefix) / "bin" / "python").exists():
+        if not (Path(self.venv()) / "bin" / "python").exists():
             self.skipTest("no venv python under sys.prefix for the run shims")
         r = self.run_chaos("corrupt_ledger", "stale_lock", "forged_receipt")
         out = r.stdout

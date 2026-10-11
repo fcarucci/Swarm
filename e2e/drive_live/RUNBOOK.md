@@ -53,20 +53,20 @@ e2e/drive_live.sh all                                                           
 SWARM_QA_REPO=/path/to/other/checkout e2e/drive_live.sh pending                  # probe another checkout read-only
 ```
 
+SIGTERM/SIGINT stop the throwaway Postgres too (trust auth on 127.0.0.1 is open to local users while a run lasts; a SIGKILLed harness leaves its cluster: stop it with `pg_ctl -D <run>/pg/data stop`).
+
 Exit codes: `0` everything passed, `1` any failure, `3` only skips (a drive piece is pending: the message reads
 `pending 6a/6b/8a/8b/8c/11b`, naming exactly the missing pieces), `2` setup missing.
 
 Options: `--backend postgres|sqlite|file` (default postgres), `--harness fake|real` (default fake), `--budget-usd N`,
-`--timeout-min N`, `--interval-s N` (seconds between supervisor passes), `--kill-supervisor-once` (kills one supervise pass
-mid-run, plan Task 19 addition), `chaos --today-only` (only the no-driver layers).
+`--timeout-min N`, `--interval-s N` (seconds between supervisor passes), `--kill-supervisor-once` (SIGKILLs a supervise pass in flight and one runner; FAILs if it never managed to), `--systemd` (real scopes; needs a user manager), `chaos --today-only` (only the no-driver layers).
 
 ### Fake vs real harness
 
 * `--harness fake` (default): `claude`/`codex` are scripted by `scripts/*.json`; real hooks (`bin/swarm-hook`), real `swarm`
   CLI, real git against the fake hub; cost is the script's `cost_usd` per session. $0, minutes.
 * `--harness real` (the Task 19 gate): the real `claude` (and a real Codex engineer, plan [F18], on a drive-ready host).
-  The run's HOME is isolated, so copy auth in first: `mkdir -p <run>/home/.claude && cp ~/.claude/.credentials.json <run>/home/.claude/`
-  (or export `ANTHROPIC_API_KEY`, which the harness passes through), and `claude_plugin_dir` points at the checkout under
+  The run's HOME is isolated: `~/.claude/.credentials.json` is copied (mode 600) into it automatically (or export `ANTHROPIC_API_KEY`), and `claude_plugin_dir` points at the checkout under
   test so the seats load THIS plugin. Budget cap defaults to `max_cost_usd=10`.
 
 ### What it needs from the integrated head (adapt points)
@@ -90,19 +90,45 @@ Live (`met`, `unreachable`), each: status/verdict as expected (completed+met; fa
 (no `orphan-coordinator:` restart row, no orchestrator-role agent); every agent of the job has a supervisor restart row and is
 ended; the harness log shows one session per launch; for MET: hub `main` linear, both destinations equal, something landed.
 
-Chaos (`e2e/drive_live.sh chaos --list`). Each has a `<name>/today` row (needs no driver; runs now) and a driven row:
+Chaos (`e2e/drive_live.sh chaos --list`, 37 rows). Each has a `<name>/today` row where something can be checked without the
+driver, and a driven row. **No row can pass vacuously**: every driven scenario names the evidence that its fault fired
+(a pass died by SIGKILL, a pid file was killed, a row was planted and read back, a CI red was recorded...) and FAILs with
+"the injected fault never fired: nothing was tested" otherwise; a crash barrier that has no `hit("name")` in `lib/` of the
+checkout is a SKIP naming it (`pending barrier: ...`), never a pass.
 
 | scenario | injected fault | passes when |
 |---|---|---|
-| `kill_seat_mid_task` | SIGKILL the engineer session after it wrote its pid file | seat relaunched (2+ starts), job MET |
-| `kill_runner_mid_session` | SIGKILL the runner of a live session | next pass reaps, relaunches, job MET |
-| `kill_supervisor_after_claim` / `_after_run_file` / `_after_runner_start` | `SWARM_CRASH_AT=<barrier>` SIGKILLs the pass mid-launch | no duplicate attempt, job MET |
-| `corrupt_ledger` | garbage over the job's ledger, restored 3 passes later | job held (not closed) and `DRIVER-LEDGER-BAD` posted; MET after restore. Today: every corruption (truncated, garbage, wrong shape, other job, oversize) raises `LedgerBadError` / is reported by `unfinished()`, never "no ledger" |
-| `stale_lock` | left-over `.lock` file, expired `drive_locks` row of a dead holder (postgres) | nothing blocks, MET. Today: stale lock file blocks no save; a planted lock symlink is refused and never followed |
-| `reactivated_long_idle` | a drive job halted, silent 5 h (backdated), swept, unhalted | not auto-closed, MET. Today (postgres): reproduces TODAY's bug: a goal job silent 10 h and re-activated is closed by the next sweep. Reports `SKIP known bug, pending 8b` until the quiet-clock fix (924b58c) is present, `FAIL` if it is present and the job is still closed (verified: passes on `feat/drive-eng-life`) |
-| `question_default_expires` | lead asks a human with `--default left --expires 2m`, nobody answers | default applied (a post says so), other seats progressed, MET |
-| `forged_closed_by_driver` | agent calls `close_job(completed, closed_by="driver")` directly | the forged close does not stay: no `completed` without a ledger terminal; job ends MET via the real flow |
-| `forged_receipt` | `DONE feat/forged@fff...` and `INTEGRATED ...` rows posted with no hook receipt | no session is ever launched for the forged artifact; MET. Today: forged row, other incarnation/generation, expired, missing receipt all refused by `receipts.find/matches` |
+| `kill_seat_mid_task`, `kill_lead_mid_turn` | SIGKILL the engineer / lead session at its hang point | seat relaunched (2+ starts), MET |
+| `kill_runner_mid_session` | SIGKILL the runner of a live session | next pass reaps and relaunches, MET |
+| `kill_supervisor_and_runner_once` (also `--kill-supervisor-once` on live runs) | SIGKILL a supervisor pass in flight while a runner is live, then SIGKILL a runner | both kills recorded, no duplicate attempt, MET. The real-timer variant (`systemctl --user kill swarm-supervise.service`) is never run here: it names the shared unit (Task 17) |
+| `barrier_<name>` x16 | `SWARM_CRASH_AT=<name>` armed on every pass until a pass dies by SIGKILL (or a seat hook / runner session is killed: barriers `runner_mid_session`, `before_finish`, `hook_after_cli_before_receipt` live in seat processes and are passed through `[supervise] pass_env`) | fired (evidence recorded), no duplicate attempt, ends MET/UNREACHABLE. The 13 plan barriers plus `terminal_intent_saved`, `terminal_verdict_recorded`, `terminal_closed_before_ledger`. **In the tree today: `terminal_*`, `mid_rollover_after_ledger`, `land_after_first_destination`; the other 10 are SKIP until their owners add the `hit()` (posted on the board)**; `mid_terminalization` is covered by the three `terminal_*` names |
+| `corrupt_ledger` | garbage over the ledger, restored 3 passes later | held, `DRIVER-LEDGER-BAD` posted, not closed while corrupt, MET after restore. Today: five corruption kinds raise `LedgerBadError` / are reported, never "no ledger" |
+| `stale_lock` | stale `.lock` file (after the ledger exists) and an expired `drive_locks` row (postgres), both read back | planted proof, MET. Today: stale lock file blocks no save; planted lock symlink refused, target untouched |
+| `reactivated_long_idle` | job halted, silent 10 h (postgres backdating), swept (`purge`, `status`, a pass), unhalted | still open after the sweeps, MET. Today (postgres): reproduces the bug; SKIP "known bug, pending 8b" until `quiet_start` is present (verified passing on `feat/drive-eng-life`) |
+| `question_default_expires` | lead asks a human, `--default left --expires 2m` | `swarm questions --all` shows the **default applied** event for that question, the lead was woken (2+ starts), another seat made progress, MET |
+| `forged_closed_by_driver` | `close_job(completed, closed_by="driver")` straight into the board, then one pass | not left `completed` without a ledger terminal; ends MET via the real flow |
+| `forged_receipt` | `DONE`, `INTEGRATED`, `GOAL-READY` rows posted without receipts | no session launched for the forged SHA, forged SHA never on the target, MET. Today: forged row, other incarnation/generation, expiry, missing receipt all refused |
+| `forged_person_commands` | `verdict`, `done`, `review` from a plain shell; `seat request` with a /tmp work dir | all refused (exit codes recorded), no seat launched |
+| `forged_seat_row` (postgres) | seat row inserted into the database with no authorization | never launched (SKIP if the row cannot be inserted) |
+| `forged_unhalt_by_seat` | an enrolled seat's `unhalt` | **not automated** (SKIP with reason; covered by `tests/test_drive_hooks`) |
+| `ci_red_twice` | CI red on the rebased SHA twice (`hub.py ci-fail`) | two reds recorded, FINALIZE_BLOCKED/fix rounds/ruling, ends MET or UNREACHABLE |
+| `budget_ruling_max_sessions_8` | `--budget max_sessions=8` with a reviewer that keeps asking for changes | 8 launches reached, ruling from the reserve, ends terminal within the cap + reserve |
+| `ruling_judge_fails_twice` | the ruling judge exits without a verdict twice | mechanical UNREACHABLE (scope labelled mechanical) |
+| `provider_outage` | the first 2 sessions fail like a provider outage (529) | outages recorded, attempts not burned, MET |
+| `bus_down` | `systemctl` stub errors for 4 passes | held, then recovers, MET. Needs `SWARM_QA_SYSTEMD=1` and a user manager (else SKIP) |
+| `stale_met` | the target moves after landing, before the close | goal judge reruns (2+ goal-judge sessions), terminal |
+| `rollover` | re-activation with a changed goal mid-run | ledger generation >= 2, terminal |
+| `codex_parity` | lead and engineer on the (fake) codex harness | codex sessions ran, MET |
+
+Live runs add one row each (`live-met/...`): `models` (agent rows match the `[drive.models]` table: lead and judge opus, engineer
+haiku, reviewer sonnet), `invariant` (no stall window over the run; an observable approximation of spec 3.3, replace with the
+driver's own `invariant(snapshot)` once it exists), `landed-head` (landed head == the judged candidate on BOTH destinations,
+linear, green CI recorded for that exact SHA and consulted by `ci-check`; FAIL when the candidate cannot be found),
+`codex-engineer` (real mode with a `codex` binary; SKIP otherwise, this box has none, so [F18] stays unchecked),
+`real-systemd` (`--systemd`: passes run with real transient scopes; SKIP by default), and for unreachable `unreachable-details`.
+
+Cost guard: inside the drive loop, spending (ledger charge or restart-row cost, whichever is larger) above the budget halts the job and
+fails the run ("COST CAP"), not only a check after the run.
 
 Not covered here (own tasks): real systemd containment (Task 17, `SWARM_TEST_SYSTEMD=1`, box only), older-client compat (18),
 the full barrier matrix on four backends (Task 16 in `tests/test_drive_chaos.py`, CI).
@@ -146,7 +172,7 @@ stopped. Verify nothing is left: `pgrep -af 'swarm-autonomy/qa/runs'` prints not
 
 ## Smoke tests that run today
 
-`cd tests && /var/tmp/test-slots/test-slot -- python3 -B -m unittest test_drive_qa_harness` (20 tests, ~5 s; with the QA venv
+`cd tests && /var/tmp/test-slots/test-slot -- python3 -B -m unittest test_drive_qa_harness` (27 tests, ~5 s; with the QA venv
 python the no-driver chaos layers also run): probes and `Pending` text, run-dir guards, fake hub (exact-SHA CI, fast-forward
 only, no merge commits, audit), the scripted engineer's change passes `make test` (and the impossible one cannot), and the
 corrupt-ledger / stale-lock / forged-receipt layers. Mutants checked: hub fast-forward refusal, exact-SHA CI, audit linearity.

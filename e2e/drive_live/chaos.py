@@ -12,6 +12,7 @@ A `today` row that reproduces a known bug the plan fixes (the reactivation auto-
 from __future__ import annotations
 
 import json
+import re
 import os
 import signal
 import subprocess
@@ -21,7 +22,7 @@ import traceback
 from pathlib import Path
 
 import qa_lib as q
-from rig import Rig
+from rig import Rig, CostCap
 
 P, F, S = q.Outcome.PASS, q.Outcome.FAIL, q.Outcome.SKIP
 
@@ -46,41 +47,6 @@ def _pg_sql(rig_or_run, sql: str, params=()):
                          autocommit=True, connect_timeout=5) as c:
         cur = c.execute(sql, params)
         return cur.fetchall() if cur.description else None
-
-
-def _drive(args, name, *, expect="met", script="met", patch=None, inject=None, after=None,
-           budget=None, timeout_min=None, job_setup=None) -> tuple[str, str, str]:
-    """One driven scenario: activate, drive with `inject(rig, k, snap)` before each pass, assert the
-    terminal state, no coordinator, every seat supervisor-launched, then `after(rig)` extra checks."""
-    try:
-        q.require(*q.LIVE_NEEDS, what="driven chaos")
-    except q.Pending as exc:
-        return (name, S, str(exc))
-    try:
-        with Rig(f"chaos-{name}", script=script, backend=args.backend, harness=args.harness,
-                 budget_usd=budget or args.budget_usd, script_patch=patch) as rig:
-            rig.activate()
-            state: dict = {}
-            hook = (lambda k, snap: inject(rig, k, snap, state)) if inject else None
-            try:
-                rig.drive(timeout_s=(timeout_min or args.timeout_min) * 60,
-                          interval_s=args.interval_s or (15 if args.harness == "fake" else 60), on_pass=hook)
-            except TimeoutError as exc:
-                rig.write_costs(); rig.export_evidence()
-                return (name, F, f"STUCK: {exc}")
-            bad = rig.check_terminal(expect) + rig.check_no_coordinator()
-            if expect == "met":
-                bad += rig.check_landing()
-            if after:
-                bad += after(rig, state) or []
-            c = rig.write_costs(); rig.export_evidence()
-            note = f"{c['launches']} launches/{c['passes']} passes ${c['ledger_cost_usd']}; injected: {state.get('note', '-')}"
-            return (name, F if bad else P, ("; ".join(bad) + " | " if bad else "") + note)
-    except q.Pending as exc:
-        return (name, S, str(exc))
-    except Exception as exc:
-        traceback.print_exc()
-        return (name, F, f"{type(exc).__name__}: {exc}")
 
 
 def _today(name: str, fn) -> tuple[str, str, str]:
@@ -145,6 +111,8 @@ def today_stale_lock(args):
         if lock is None:
             lock = d / (next(d.glob("*.json")).stem + ".lock")
             lock.write_text("")
+        if not lock.exists():
+            return F, "could not plant the stale lock file: nothing was tested"
         led2 = ledger.load(key, job)
         led2.errors += 1
         led2.save()
@@ -154,6 +122,8 @@ def today_stale_lock(args):
         victim = run.dir / "victim.txt"
         victim.write_text("keep")
         lock.symlink_to(victim)
+        if not lock.is_symlink():
+            return F, "could not plant the lock symlink: nothing was tested"
         refused = False
         try:
             ledger.unfinished(key)
@@ -248,27 +218,131 @@ TODAY = {
 
 # ---------------------------------------------------------------------------------------------
 # driven scenarios
+#
+# A fault that did not happen is a FAILED scenario, never a pass: every `_drive` call names the evidence that
+# its fault fired (`fired(rig, st)` returns a string, or None = it never happened). A crash barrier that
+# does not exist in the checkout under test is a SKIP naming it, never a pass.
 
-def drv_kill_seat_mid_task(args):
+def _drive(args, name, *, expect="met", script="met", patch=None, inject=None, fired=None, after=None,
+           budget=None, timeout_min=None, activate_extra=None, pass_env=None, systemd=False,
+           check_landing=None, harness=None) -> tuple[str, str, str]:
+    """One driven scenario: activate, drive with `inject(rig, k, snap, st)` before each pass, then assert: the
+    fault fired, the terminal state, no coordinator, every seat supervisor-launched, landing (for MET),
+    `after(rig, st)` extras. Skipped as pending until the driver is integrated."""
+    try:
+        q.require(*q.LIVE_NEEDS, what="driven chaos")
+    except q.Pending as exc:
+        return (name, S, str(exc))
+    try:
+        with Rig(f"chaos-{name}", script=script, backend=args.backend, harness=harness or args.harness,
+                 budget_usd=budget or args.budget_usd, script_patch=patch, activate_extra=activate_extra,
+                 pass_env=pass_env, systemd=systemd) as rig:
+            rig.activate()
+            st: dict = {}
+            hook = (lambda k, snap: inject(rig, k, snap, st)) if inject else None
+            bad: list[str] = []
+            try:
+                rig.drive(timeout_s=(timeout_min or args.timeout_min) * 60,
+                          interval_s=args.interval_s or (15 if args.harness == "fake" else 60), on_pass=hook)
+            except CostCap as exc:
+                rig.write_costs(); rig.export_evidence()
+                return (name, F, f"COST CAP: {exc}")
+            except TimeoutError as exc:
+                rig.write_costs(); rig.export_evidence()
+                return (name, F, f"STUCK: {exc}")
+            if fired:
+                ev = fired(rig, st)
+                if ev:
+                    st["note"] = ev
+                else:
+                    bad.append("the injected fault never fired: nothing was tested")
+            bad += rig.check_terminal(expect) + rig.check_no_coordinator() + rig.check_every_seat_supervisor_launched()
+            if (check_landing if check_landing is not None else expect == "met"):
+                bad += rig.check_landing()
+            if after:
+                bad += after(rig, st) or []
+            c = rig.write_costs(); rig.export_evidence()
+            note = f"{c['launches']} launches/{c['passes']} passes ${c['spent_usd']}; injected: {st.get('note', '-')}"
+            return (name, F if bad else P, ("; ".join(bad) + " | " if bad else "") + note)
+    except q.Pending as exc:
+        return (name, S, str(exc))
+    except Exception as exc:
+        traceback.print_exc()
+        return (name, F, f"{type(exc).__name__}: {exc}")
+
+
+def _starts(rig, **match):
+    return [e for e in rig.harness_log() if e.get("ev") == "start" and all(e.get(k) == v for k, v in match.items())]
+
+
+# -- crash barriers ----------------------------------------------------------------------------
+
+# the plan's 13 (Task 16) plus the terminalization barriers that exist in the tree today; where a barrier is
+# not in the checkout the row is a SKIP that names it. where = which process the barrier lives in.
+BARRIERS = {
+    "before_claim": "pass", "after_claim": "pass", "after_run_file": "pass", "after_marker": "pass",
+    "after_runner_start": "pass", "runner_mid_session": "seat", "before_finish": "seat",
+    "mid_terminalization": "pass", "mid_rollover": "pass", "hook_after_cli_before_receipt": "seat",
+    "land_after_first_destination": "pass", "after_intent_before_claim": "pass", "mid_rollover_after_ledger": "pass",
+    "terminal_intent_saved": "pass", "terminal_verdict_recorded": "pass", "terminal_closed_before_ledger": "pass",
+}
+
+
+def _barrier(barrier: str):
+    where = BARRIERS[barrier]
+
+    def run(args):
+        name = f"barrier_{barrier}"
+        if not q.barrier_present(barrier):
+            return (name, S, f"pending barrier: no hit(\"{barrier}\") in lib/ of this checkout (owner of that code "
+                             f"path must add it; plan Task 16 names it)")
+
+        def inject(rig, k, snap, st):
+            if not st.get("fired"):
+                ev = rig.barrier_fired(barrier)
+                if ev:
+                    st["fired"] = ev
+                    rig.disarm()
+                elif k < 40:
+                    rig.arm_barrier(barrier)
+
+        def fired(rig, st):
+            ev = st.get("fired") or rig.barrier_fired(barrier)
+            rig.disarm()
+            return f"barrier {barrier}: {ev}" if ev else None
+        return _drive(args, name, inject=inject, fired=fired, pass_env=["SWARM_CRASH_AT"] if where == "seat" else None)
+    return run
+
+
+# -- kills -------------------------------------------------------------------------------------
+
+def _kill_seat(args, name, key, role, script_key):
     def patch(s):
-        s["engineer"] = {**s["engineer"], "hang_once": True}
+        if script_key == "lead":
+            s["lead"] = {**s["lead"], "hang_once": True}
+        else:
+            s[script_key] = {**s[script_key], "hang_once": True}
 
     def inject(rig, k, snap, st):
-        pidf = rig.run.dir / "hang" / "eng-a.pid"
+        pidf = rig.run.dir / "hang" / f"{key}.pid"
         if pidf.exists() and not st.get("killed"):
             pid = int(pidf.read_text())
             q.kill_tree(pid)
-            st["killed"] = True
-            st["note"] = f"SIGKILL engineer session pid {pid} mid-task (pass {k})"
-            rig.run.event("chaos", st["note"])
+            st["killed"] = f"SIGKILL {role} session pid {pid} mid-task (pass {k})"
+            rig.run.event("chaos", st["killed"])
 
     def after(rig, st):
-        bad = [] if st.get("killed") else ["the engineer never reached the hang point: nothing was killed"]
-        starts = [e for e in rig.harness_log() if e.get("ev") == "start" and e.get("seat") == "eng-a"]
-        if st.get("killed") and len(starts) < 2:
-            bad.append("the killed engineer seat was not relaunched")
-        return bad
-    return _drive(args, "kill_seat_mid_task", patch=patch, inject=inject, after=after)
+        starts = [e for e in rig.harness_log() if e.get("ev") == "start" and (e.get("seat") == key or e.get("role") == role)]
+        return [f"the killed {role} was not relaunched"] if len(starts) < 2 else []
+    return _drive(args, name, patch=patch, inject=inject, fired=lambda rig, st: st.get("killed"), after=after)
+
+
+def drv_kill_seat_mid_task(args):
+    return _kill_seat(args, "kill_seat_mid_task", "eng-a", "engineer", "engineer")
+
+
+def drv_kill_lead_mid_turn(args):
+    return _kill_seat(args, "kill_lead_mid_turn", "lead", "lead", "lead")
 
 
 def drv_kill_runner(args):
@@ -280,98 +354,151 @@ def drv_kill_runner(args):
             pids = q.run_procs(rig.run, "supervisor.runner")
             for p in pids:
                 os.kill(p, signal.SIGKILL)
-            st["killed"] = bool(pids)
-            st["note"] = f"SIGKILL runner pid(s) {pids}; the session is orphaned for the next reap"
-    return _drive(args, "kill_runner_mid_session", patch=patch, inject=inject,
-                  after=lambda rig, st: [] if st.get("killed") else ["no runner process found to kill"])
+            if pids:
+                st["killed"] = f"SIGKILL runner pid(s) {pids}; the session is orphaned for the next reap"
+    return _drive(args, "kill_runner_mid_session", patch=patch, inject=inject, fired=lambda rig, st: st.get("killed"))
 
 
-def _barrier(barrier: str):
-    def run(args):
-        def inject(rig, k, snap, st):
-            if not st.get("killed") and not snap["agents"]:
-                r = rig.run.supervise_pass(env={"SWARM_CRASH_AT": barrier})
-                st["killed"] = True
-                st["note"] = f"pass SIGKILLed at barrier {barrier} (rc {r.returncode})"
-                rig.run.event("chaos", st["note"])
-        return _drive(args, f"kill_supervisor_{barrier}", inject=inject,
-                      after=lambda rig, st: [] if st.get("killed") else ["the barrier pass never ran"])
-    return run
+def kill_pass_midway(rig, st) -> bool:
+    """Plan Task 19 addition, as far as a non-systemd harness can: SIGKILL a supervisor pass while it is in flight
+    with a live runner, then SIGKILL one runner. Records evidence in st["killed_pass"]; True once both happened.
+    (`systemctl --user kill swarm-supervise.service` is the real-timer variant: never run here, it names the
+    shared unit; Task 17 covers it on the box.)"""
+    p = subprocess.Popen([str(rig.run.bin / "swarm"), "supervise"], env=rig.run.env(),
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    t0 = time.monotonic()
+    runners: list[int] = []
+    while time.monotonic() - t0 < 45 and p.poll() is None:
+        runners = q.run_procs(rig.run, "supervisor.runner")
+        if runners:
+            break
+        time.sleep(0.5)
+    if p.poll() is not None:
+        st["kill_miss"] = st.get("kill_miss", 0) + 1
+        return False
+    q.kill_tree(p.pid)
+    p.wait()
+    rcs = p.returncode
+    runners = q.run_procs(rig.run, "supervisor.runner")
+    for r in runners[:1]:
+        os.kill(r, signal.SIGKILL)
+    st["killed_pass"] = f"pass SIGKILLed in flight (rc {rcs}) with {len(runners)} runner(s); killed runner {runners[:1]}"
+    rig.run.event("chaos", st["killed_pass"])
+    return bool(runners)
 
+
+def drv_kill_supervisor_and_runner(args):
+    def inject(rig, k, snap, st):
+        if snap["agents"] and not st.get("killed_pass") and st.get("kill_miss", 0) < 8:
+            kill_pass_midway(rig, st)
+    return _drive(args, "kill_supervisor_and_runner_once", inject=inject,
+                  fired=lambda rig, st: st.get("killed_pass"))
+
+
+# -- ledger, lock, reactivation -----------------------------------------------------------------
 
 def drv_corrupt_ledger(args):
     def inject(rig, k, snap, st):
-        files = list(rig.run.ledger_dir().glob("*.json")) if rig.run.ledger_dir().exists() else []
+        d = rig.run.ledger_dir()
+        files = list(d.glob("*.json")) if d.exists() else []
         if files and snap["agents"] and "bak" not in st:
             p = files[0]
-            st["bak"], st["path"] = p.read_bytes(), p
+            st["bak"], st["path"], st["at"] = p.read_bytes(), p, k
             p.write_bytes(b'{"v": 1, "garbage')
             st["note"] = f"ledger corrupted at pass {k}; restored 3 passes later"
-            st["at"] = k
         elif "bak" in st and k >= st["at"] + 3 and not st.get("restored"):
             st["path"].write_bytes(st["bak"])
             st["restored"] = True
-        elif "bak" in st and not st.get("restored"):
-            if snap["status"] in q.TERMINAL:
-                st["terminal_while_corrupt"] = snap["status"]
 
     def after(rig, st):
-        bad = [] if "bak" in st else ["the ledger was never corrupted"]
-        if st.get("terminal_while_corrupt"):
-            bad.append(f"the job went {st['terminal_while_corrupt']} while its ledger was corrupt")
         _, _, _, msgs = rig.state()
-        if "bak" in st and not any("LEDGER-BAD" in m.message.upper().replace(" ", "-") for m in msgs):
+        bad = []
+        if not any("LEDGER-BAD" in m.message.upper().replace(" ", "-") for m in msgs):
             bad.append("no DRIVER-LEDGER-BAD post: a bad ledger must hold the job loudly, not silently")
+        if not st.get("restored"):
+            bad.append("the job ended before the ledger was restored: it was closed while corrupt")
         return bad
-    return _drive(args, "corrupt_ledger", inject=inject, after=after)
+    return _drive(args, "corrupt_ledger", inject=inject,
+                  fired=lambda rig, st: f"ledger corrupted at pass {st['at']}" if "bak" in st else None, after=after)
 
 
 def drv_stale_lock(args):
+    """Plant a stale ledger lock file and (postgres) an expired drive_locks row of a dead holder, PROVE both exist,
+    then require the job to end MET. Nothing planted = FAIL."""
     def inject(rig, k, snap, st):
-        if st.get("done"):
+        if st.get("planted"):
             return
-        st["done"] = True
         d = rig.run.ledger_dir()
-        note = []
-        if d.exists():
-            for f in d.glob("*.json"):
-                (d / (f.stem + ".lock")).write_text("")        # left by a dead holder: must block nothing
-                note.append("stale .lock file")
+        ledgers = list(d.glob("*.json")) if d.exists() else []
+        if not ledgers:
+            return                    # wait until the ledger exists: planting a lock for nothing proves nothing
+        planted = []
+        for f in ledgers:
+            lock = d / (f.stem + ".lock")
+            lock.write_text("")
+            if lock.exists():
+                planted.append(f"ledger lock {lock.name[:12]}")
         if rig.run.pg:
             _pg_sql(rig, "INSERT INTO drive_locks (key, holder, generation, expires_at) "
                          "VALUES ('land:' || repeat('0', 64) || ':main', 'dead-attempt', 1, now() - interval '1 hour') "
                          "ON CONFLICT DO NOTHING")
-            note.append("expired drive_locks row of a dead holder")
-        st["note"] = ", ".join(note) or "nothing plantable on this backend"
-    return _drive(args, "stale_lock", inject=inject)
+            rows = _pg_sql(rig, "SELECT holder FROM drive_locks WHERE holder = 'dead-attempt'")
+            if rows:
+                planted.append("expired drive_locks row of a dead holder")
+        st["planted"] = planted
+
+    return _drive(args, "stale_lock", inject=inject,
+                  fired=lambda rig, st: ", ".join(st["planted"]) if st.get("planted") else None)
 
 
 def drv_reactivated_long_idle(args):
-    """A drive job halted for a long time then unhalted (and reactivated with the same goal) must not be
-    auto-closed by any core sweep: the 8b live bug."""
+    """A drive job halted, silent for hours (backdated), swept, then unhalted must not be auto-closed by any core
+    sweep: the 8b live bug. Needs postgres (backdating)."""
+    if args.backend != "postgres":
+        return ("reactivated_long_idle", S, "not run (needs --backend postgres for backdating)")
+
     def inject(rig, k, snap, st):
         if snap["agents"] and not st.get("halted"):
-            rig.run.swarm("halt", "--job", rig.job, "--reason", "chaos: long idle")
-            st["halted"] = True
-            if rig.run.pg:
-                _pg_sql(rig, "UPDATE messages SET created_at = created_at - interval '5 hours' WHERE job = %s", (rig.job,))
-                _pg_sql(rig, "UPDATE agents SET last_seen = last_seen - interval '5 hours' WHERE job = %s", (rig.job,))
-            for _ in range(2):
-                rig.run.swarm("status")
-                rig.run.supervise_pass()
-            r = rig.run.swarm("unhalt", "--job", rig.job)
-            st["note"] = f"halted, backdated 5h, swept, unhalted (rc {r.returncode})"
-    return _drive(args, "reactivated_long_idle", inject=inject,
-                  after=lambda rig, st: [] if st.get("halted") else ["never halted"])
+            h = rig.run.swarm("halt", "--job", rig.job, "--reason", "chaos: long idle")
+            st["halted"] = h.returncode == 0
+            _pg_sql(rig, "UPDATE messages SET created_at = created_at - interval '10 hours' WHERE job = %s", (rig.job,))
+            _pg_sql(rig, "UPDATE agents SET last_seen = last_seen - interval '10 hours' WHERE job = %s", (rig.job,))
+            sweeps = [rig.run.swarm("purge").returncode, rig.run.swarm("status").returncode]
+            sweeps.append(rig.run.supervise_pass().returncode)
+            js = rig.state()[0]
+            st["still_open"] = js is not None and js.status not in q.TERMINAL
+            u = rig.run.swarm("unhalt", "--job", rig.job)
+            st["note"] = f"halted rc{h.returncode}, backdated 10h, swept {sweeps}, still open={st['still_open']}, unhalt rc{u.returncode}"
 
+    def after(rig, st):
+        return [] if st.get("still_open") else ["the halted, long-silent job was closed by a sweep"]
+    return _drive(args, "reactivated_long_idle", inject=inject,
+                  fired=lambda rig, st: st.get("note") if st.get("halted") else None, after=after)
+
+
+# -- questions ---------------------------------------------------------------------------------
 
 def drv_question_default_expires(args):
     def patch(s):
         s["lead"]["ask"] = {"text": "left or right?", "options": "left,right", "default": "left", "expires": "2m"}
-    return _drive(args, "question_default_expires", patch=patch,
-                  after=lambda rig, st: [] if any("default" in m.message.lower()
-                                                  for m in rig.state()[3]) else ["no post shows the default being applied"])
 
+    def after(rig, st):
+        bad = []
+        qs = rig.run.swarm("questions", "--job", rig.job, "--all").stdout
+        if not re.search(r"(?i)left or right\?[\s\S]*default applied|default applied[\s\S]*left or right\?", qs):
+            bad.append("the board shows no 'default applied' event for the question (swarm questions --all)")
+        if len(_starts(rig, role="lead")) < 2 and rig.run.harness == "fake":
+            bad.append("the asking lead was not woken after the default applied")
+        if not any(e.get("ev") == "cmd" and "done" in e.get("cmd", "") and e.get("rc") == 0 for e in rig.harness_log()) \
+                and rig.run.harness == "fake":
+            bad.append("no other seat made progress (no successful `done`) while the question was open")
+        return bad
+    return _drive(args, "question_default_expires", patch=patch, after=after,
+                  fired=lambda rig, st: "question asked" if "left or right?" in
+                  rig.run.swarm("questions", "--job", rig.job, "--all").stdout else None)
+
+
+# -- forgeries ---------------------------------------------------------------------------------
 
 def drv_forged_closed_by_driver(args):
     def inject(rig, k, snap, st):
@@ -380,23 +507,19 @@ def drv_forged_closed_by_driver(args):
             with rig.run.board() as b:
                 try:
                     ok = b.close_job(rig.job, "completed", "forged by an agent", closed_by="driver")
-                    st["note"] = f"forged close_job(closed_by=driver) accepted={ok}"
+                    st["forged"] = f"forged close_job(closed_by=driver) accepted={ok}"
                 except Exception as exc:
-                    st["note"] = f"forged close refused: {type(exc).__name__}"
-            st["forged"] = True
-            st["forged_at"] = k
-        elif st.get("forged") and not st.get("checked"):
-            st["checked"] = True
+                    st["forged"] = f"forged close refused: {type(exc).__name__}"
+            rig.one_pass()            # the driver must notice (reopen or refuse) in the very next pass
+            js = rig.state()[0]
             led = rig.run.ledger(rig.job)
-            if snap["status"] == "completed" and not (led and led.terminal):
+            if js is not None and js.status == "completed" and not (led and led.terminal):
                 st["accepted"] = True
 
     def after(rig, st):
-        bad = [] if st.get("forged") else ["never forged"]
-        if st.get("accepted"):
-            bad.append("a closed_by=driver close with no ledger terminal stayed completed: the forged MET was accepted")
-        return bad
-    return _drive(args, "forged_closed_by_driver", inject=inject, after=after)
+        return ["a closed_by=driver close with no ledger terminal stayed completed: the forged MET was accepted"] \
+            if st.get("accepted") else []
+    return _drive(args, "forged_closed_by_driver", inject=inject, fired=lambda rig, st: st.get("forged"), after=after)
 
 
 def drv_forged_receipt(args):
@@ -409,31 +532,220 @@ def drv_forged_receipt(args):
                 name = next((a.name for a in b.agents(rig.job) if a.role in ("engineer", "worker")), snap["agents"][0][0])
                 b.post(rig.job, name, f"DONE feat/forged@{forged} forged hand-off, no receipt")
                 b.post(rig.job, name, f"INTEGRATED feat/forged@{forged}")
-            st["forged"] = True
-            st["note"] = "posted DONE and INTEGRATED rows with no hook receipt"
+                b.post(rig.job, name, f"GOAL-READY main@{forged}")
+            st["forged"] = "posted DONE, INTEGRATED and GOAL-READY rows with no hook receipt"
 
     def after(rig, st):
-        bad = [] if st.get("forged") else ["never forged"]
-        for e in rig.harness_log():
-            if forged in json.dumps(e):
-                bad.append(f"a {e.get('role')} session was launched for the forged artifact")
+        bad = []
+        if rig.run.harness == "fake":
+            for e in rig.harness_log():
+                if forged in json.dumps(e):
+                    bad.append(f"a {e.get('role')} session was launched for the forged artifact")
+        if forged in json.dumps(rig.landed()):
+            bad.append("the forged SHA reached the target")
         return bad
-    return _drive(args, "forged_receipt", inject=inject, after=after)
+    return _drive(args, "forged_receipt", inject=inject, fired=lambda rig, st: st.get("forged"), after=after)
+
+
+def drv_forged_person_commands(args):
+    """Agent-only commands from a plain shell (no enrolment, no receipt) and a /tmp work dir are refused."""
+    def inject(rig, k, snap, st):
+        if snap["agents"] and not st.get("tried"):
+            sha = "e" * 40
+            cmds = {
+                "verdict": ["verdict", "met", "forged", "--job", rig.job, "--artifact", f"main@{sha}"],
+                "done": ["done", "--job", rig.job, "--artifact", f"feat/x@{sha}", "--summary", "forged"],
+                "review": ["review", "--job", rig.job, "--artifact", f"feat/x@{sha}", "verified", "--report", "/dev/null"],
+                "seat_in_tmp": ["seat", "request", "--job", rig.job, "--seat", "forged-seat", "--role", "engineer",
+                                "--brief", "/dev/null", "--workdir", "/tmp/forged-seat"],
+            }
+            st["tried"] = {n: rig.run.swarm(*a).returncode for n, a in cmds.items()}
+            st["accepted"] = [n for n, rc in st["tried"].items() if rc == 0]
+            st["note"] = f"exit codes {st['tried']}"
+
+    return _drive(args, "forged_person_commands", inject=inject,
+                  fired=lambda rig, st: st.get("note") if st.get("tried") else None,
+                  after=lambda rig, st: [f"forged `{n}` was accepted" for n in st.get("accepted", [])]
+                  + ([] if not any(e.get("seat") == "forged-seat" for e in rig.harness_log()) else
+                     ["a seat was launched for the forged /tmp request"]))
+
+
+def drv_forged_seat_row(args):
+    """A seat row written straight into the database, with no authorization record: it must never launch."""
+    if args.backend != "postgres":
+        return ("forged_seat_row", S, "not run (needs --backend postgres to insert the row)")
+
+    def inject(rig, k, snap, st):
+        if snap["agents"] and not st.get("planted"):
+            cols = _pg_sql(rig, "SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns "
+                                "WHERE table_name = 'seats' ORDER BY ordinal_position") or []
+            known = {"job": rig.job, "seat": "forged-seat", "role": "engineer", "harness": "claude", "model": "haiku",
+                     "workdir": str(rig.run.work / "forged-seat"), "brief_path": "/dev/null", "state": "requested",
+                     "generation": 1, "revision": 1, "requested_by": "lead", "complexity": "standard"}
+            use, vals = [], []
+            for c, typ, nullable, default in cols:
+                if c in known:
+                    use.append(c); vals.append(known[c])
+                elif nullable == "NO" and default is None:
+                    use.append(c); vals.append(0 if "int" in typ else ("x" if typ in ("text", "character varying") else None))
+            from psycopg import sql as _sql  # noqa: F401
+            try:
+                _pg_sql(rig, f"INSERT INTO seats ({', '.join(use)}) VALUES ({', '.join(['%s'] * len(use))})", tuple(vals))
+                rows = _pg_sql(rig, "SELECT count(*) FROM seats WHERE seat = 'forged-seat'")
+                st["planted"] = bool(rows and rows[0][0])
+            except Exception as exc:
+                st["plant_error"] = f"{type(exc).__name__}: {exc}"[:200]
+                st["planted"] = False
+            st["note"] = "forged seat row inserted" if st["planted"] else f"could not insert: {st.get('plant_error')}"
+
+    return _drive(args, "forged_seat_row", inject=inject,
+                  fired=lambda rig, st: st.get("note") if st.get("planted") else None,
+                  after=lambda rig, st: ["a seat was launched for the forged row"]
+                  if any(e.get("seat") == "forged-seat" for e in rig.harness_log()) else [])
+
+
+def drv_forged_unhalt_by_seat(args):
+    return ("forged_unhalt_by_seat", S, "not automated: needs an enrolled seat shell running while the job is "
+            "halted (the fake harness cannot be started by hand during a halt); covered by tests/test_drive_hooks")
+
+
+# -- pipeline faults ----------------------------------------------------------------------------
+
+def drv_ci_red_twice(args):
+    def patch(s):
+        s["integrator"] = {"action": "land", "ci_red": 2}
+
+    def fired(rig, st):
+        reds = [p for p in (rig.hub / "ci").glob("*.json") if json.loads(p.read_text()).get("state") == "failed"]
+        return f"CI recorded red on {len(reds)} rebased SHA(s)" if len(reds) >= 2 else None
+    return _drive(args, "ci_red_twice", expect="terminal", patch=patch, fired=fired, check_landing=False)
+
+
+def drv_budget_ruling_max_sessions(args):
+    def patch(s):
+        s["reviewer"] = [{"outcome": "changes"}] * 7 + [{"outcome": "verified"}]
+    return _drive(args, "budget_ruling_max_sessions_8", expect="terminal", patch=patch, check_landing=False,
+                  activate_extra=["--budget", "max_sessions=8"],
+                  fired=lambda rig, st: f"{len(rig.state()[2])} launches (cap 8)" if len(rig.state()[2]) >= 8 else None,
+                  after=lambda rig, st: [f"{len(rig.state()[2])} launches exceed max_sessions=8 by more than the "
+                                         f"ruling reserve allows"] if len(rig.state()[2]) > 8 + 3 else [])
+
+
+def drv_ruling_judge_fails_twice(args):
+    def patch(s):
+        s["judge"]["ruling"] = [{"fail": True}, {"fail": True}]
+
+    def after(rig, st):
+        js = rig.state()[0]
+        scope = getattr(js, "verdict_scope", None)
+        return [] if scope in (None, "mechanical") else [f"verdict scope {scope!r}, want the labelled mechanical one"]
+    return _drive(args, "ruling_judge_fails_twice", expect="unreachable", script="unreachable", patch=patch, after=after,
+                  fired=lambda rig, st: f"{len([e for e in rig.harness_log() if e.get('ev') == 'judge_fail'])} ruling-judge failures"
+                  if len([e for e in rig.harness_log() if e.get("ev") == "judge_fail"]) >= 2 else None)
+
+
+def drv_provider_outage(args):
+    def patch(s):
+        s["outage_sessions"] = 2
+
+    def fired(rig, st):
+        n = len([e for e in rig.harness_log() if e.get("ev") == "outage"])
+        return f"{n} sessions failed like a provider outage" if n >= 2 else None
+    return _drive(args, "provider_outage", patch=patch, fired=fired, harness="fake")
+
+
+def drv_bus_down(args):
+    """The user bus is down for a few passes (a `systemctl` stub errors); the driver must hold, then recover. Needs the
+    real scope mode, so it only runs with SWARM_QA_SYSTEMD=1 (Task 17 covers the box-only containment checks)."""
+    if os.environ.get("SWARM_QA_SYSTEMD") != "1":
+        return ("bus_down", S, "not run (needs real scope mode: SWARM_QA_SYSTEMD=1 and a user manager; Task 17)")
+
+    def inject(rig, k, snap, st):
+        flag = rig.run.dir / "bus-down"
+        if k == 0:
+            stub = rig.run.bin / "systemctl"
+            stub.write_text('#!/bin/sh\n[ -e "%s" ] && { echo "Failed to connect to bus: No medium found" >&2; exit 1; }\n'
+                            'exec /usr/bin/systemctl "$@"\n' % flag)
+            stub.chmod(0o755)
+            flag.write_text("1")
+            st["down_from"] = k
+        elif k == st.get("down_from", 0) + 4 and flag.exists():
+            flag.unlink()
+            st["note"] = "bus down for 4 passes, then back"
+    return _drive(args, "bus_down", inject=inject, systemd=True,
+                  fired=lambda rig, st: st.get("note"))
+
+
+def drv_stale_met(args):
+    """The target moves after the work landed but before the close: the stale `met` must be rejected and the goal judge
+    rerun (spec 6.2 scenario 7)."""
+    def inject(rig, k, snap, st):
+        if not st.get("advanced") and rig.landed()["commits"] and snap["status"] not in q.TERMINAL:
+            subprocess.run([sys.executable, str(Path(__file__).parent / "hub.py"), "advance", "--hub", str(rig.hub)],
+                           check=True, capture_output=True)
+            st["advanced"] = f"target advanced after landing (pass {k})"
+
+    def after(rig, st):
+        goal_judges = [e for e in rig.harness_log() if e.get("ev") == "start" and e.get("scope") == "goal"]
+        return [] if len(goal_judges) >= 2 or rig.run.harness != "fake" else \
+            [f"the goal judge ran {len(goal_judges)}x: the stale met was not re-judged"]
+    return _drive(args, "stale_met", expect="terminal", inject=inject, check_landing=False,
+                  fired=lambda rig, st: st.get("advanced"), after=after)
+
+
+def drv_rollover(args):
+    """Re-activation with a changed goal mid-run: generation-1 sessions stop before generation 2 launches; a
+    generation-1 verdict cannot close the job (spec 6.2 scenario 6)."""
+    def inject(rig, k, snap, st):
+        if snap["agents"] and not st.get("rolled"):
+            r = rig.run.swarm(*rig.activate_args(goal=rig.goal_text() + " (revised: also document it in the README)"))
+            st["rolled"] = f"re-activated with a changed goal at pass {k} (rc {r.returncode})" if r.returncode == 0 else None
+            st["rc"] = r.returncode
+
+    def after(rig, st):
+        led = rig.run.ledger(rig.job)
+        gen = max(getattr(led, "generation", 1), getattr(led, "generation_requested", 1)) if led else 0
+        return [] if gen >= 2 else [f"ledger generation is {gen}: no rollover happened"]
+    return _drive(args, "rollover", expect="terminal", inject=inject, check_landing=False,
+                  fired=lambda rig, st: st.get("rolled"), after=after)
+
+
+def drv_codex_parity(args):
+    def patch(s):
+        s["lead"]["seats"][0]["harness"] = "codex"
+
+    def after(rig, st):
+        codex = [e for e in rig.harness_log() if e.get("ev") == "start" and e.get("harness") == "codex"]
+        return [] if codex else ["no session ran on the codex harness"]
+    return _drive(args, "codex_parity", patch=patch, activate_extra=["--lead-harness", "codex"], after=after,
+                  fired=lambda rig, st: "lead and eng-a on the codex harness", harness="fake")
 
 
 SCENARIOS = {
     "kill_seat_mid_task": (None, drv_kill_seat_mid_task),
+    "kill_lead_mid_turn": (None, drv_kill_lead_mid_turn),
     "kill_runner_mid_session": (None, drv_kill_runner),
-    "kill_supervisor_after_claim": (None, _barrier("after_claim")),
-    "kill_supervisor_after_run_file": (None, _barrier("after_run_file")),
-    "kill_supervisor_after_runner_start": (None, _barrier("after_runner_start")),
+    "kill_supervisor_and_runner_once": (None, drv_kill_supervisor_and_runner),
     "corrupt_ledger": ("corrupt_ledger", drv_corrupt_ledger),
     "stale_lock": ("stale_lock", drv_stale_lock),
     "reactivated_long_idle": ("reactivated_long_idle", drv_reactivated_long_idle),
     "question_default_expires": (None, drv_question_default_expires),
     "forged_closed_by_driver": (None, drv_forged_closed_by_driver),
     "forged_receipt": ("forged_receipt", drv_forged_receipt),
+    "forged_person_commands": (None, drv_forged_person_commands),
+    "forged_seat_row": (None, drv_forged_seat_row),
+    "forged_unhalt_by_seat": (None, drv_forged_unhalt_by_seat),
+    "ci_red_twice": (None, drv_ci_red_twice),
+    "budget_ruling_max_sessions_8": (None, drv_budget_ruling_max_sessions),
+    "ruling_judge_fails_twice": (None, drv_ruling_judge_fails_twice),
+    "provider_outage": (None, drv_provider_outage),
+    "bus_down": (None, drv_bus_down),
+    "stale_met": (None, drv_stale_met),
+    "rollover": (None, drv_rollover),
+    "codex_parity": (None, drv_codex_parity),
 }
+for _b in BARRIERS:
+    SCENARIOS[f"barrier_{_b}"] = (None, _barrier(_b))
 
 
 def run(args, names: list[str]) -> list[tuple[str, str, str]]:

@@ -196,6 +196,8 @@ def main(argv=None) -> int:
         (results_dir(hub) / f"{a.sha}.json").write_text(json.dumps({"sha": a.sha, "state": "failed",
                                                                         "at": time.time(), "detail": "forced red"}))
     elif a.cmd == "ci-check":
+        with open(results_dir(hub) / f"{a.sha}.checks", "a") as fh:   # who consulted CI on this exact SHA
+            fh.write(f"{time.time()}\n")
         if ci_state(hub, a.sha) == "none" and a.run:
             ci_run(hub, a.sha)
         st = ci_state(hub, a.sha)
