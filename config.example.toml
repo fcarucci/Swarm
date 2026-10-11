@@ -275,7 +275,8 @@ session_usd_cap = 5                 # ceiling reserved for one session
 min_session_usd = 0.5               # a launch with less than this available is held (a ruling becomes due)
 max_session_minutes = 60            # wall clock per session; the seat goes idle
 max_wall_hours = 24                 # from activation; exhausted: a ruling
-ruling_attempts = 2                 # judge attempts for a ruling (the ruling reserve also keeps this many sessions back)
+ruling_attempts = 2                 # judge attempts for a ruling (the ruling reserve is USD only: ruling_reserve_usd)
+close_deadline_minutes = 60         # a MET close that cannot complete within this ends with the labelled mechanical outcome
 ruling_deadline_minutes = 120       # a ruling must conclude within this; else the labelled mechanical UNREACHABLE
 ruling_grace_minutes = 15           # extra time before the mechanical verdict is recorded
 question_expiry = "4h"              # an unanswered question applies its --default after this
@@ -288,7 +289,7 @@ codex_usd_per_mtok = 10             # Codex has no cost report: tokens x this ra
 # record, never read from this file; recipe = "coding" with review_role = "reviewer" is the default.
 # Models by role: these are the shipped defaults. Build staffing is cheap engineers, strict reviewers.
 allowed_models = ["haiku", "sonnet", "opus"]   # the models a job may pick (activation refuses others)
-# credential_helpers = ["gh auth git-credential"]   # credential helpers a pinned `--credential` may name (absolute path pinned at activation)
+# credential_helpers = ["gh auth git-credential"]   # planned, wired by `swarm land`: credential helpers a pinned `--credential` may name (absolute path pinned at activation)
 
 [drive.models]
 engineer = "haiku"

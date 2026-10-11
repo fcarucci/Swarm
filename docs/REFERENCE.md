@@ -1814,19 +1814,22 @@ on a running job with `swarm drive budget --job J KEY=VALUE ...` (no rollover). 
 | `max_session_minutes` | 60 | the session ends, the seat goes idle |
 | `max_wall_hours` | 24 | ruling |
 | `ruling_attempts` | 2 | the mechanical UNREACHABLE |
+| `close_deadline_minutes` | 60 | the close is abandoned and the job ends with the labelled mechanical outcome |
 | `ruling_deadline_minutes` | 120 | the mechanical UNREACHABLE |
 | `ruling_grace_minutes` | 15 | the mechanical UNREACHABLE |
 | `question_expiry` | `"4h"` | the question's `--default` is applied |
 | `stall_minutes` | 90 | the lead is woken or the lost actor relaunched |
-| `driver_error_passes` | 6 | the job is held and `DRIVER-STALLED`/`DRIVER-CONFIG` reported |
+| `driver_error_passes` | 6 | `DRIVER-ERROR` is posted once and a ruling becomes due |
 | `max_concurrent_sessions` | 4 | further launches wait |
 | `lease_hold_minutes` | 60 | a ruling becomes due |
 | `codex_usd_per_mtok` | 10 | Codex tokens times this rate charge the budget |
 | `allowed_models` | `["haiku", "sonnet", "opus"]` | activation refuses other models |
-| `credential_helpers` | `["gh auth git-credential"]` | the credential helpers a pinned `--credential` may name |
+| `credential_helpers` | `["gh auth git-credential"]` | planned: the credential helpers a pinned `--credential` may name; wired by `swarm land` (until then only the built-in default list applies) |
 | `recipe`, `review_role` | `coding`, `reviewer` | fixed at activation in the owner record (`--recipe`), never read from `config.toml` |
 
 ### Landing destinations, credentials and worktrees
+
+`swarm land`, the git 2.40 and per-destination `ls-remote` doctor checks and the UNC refusal arrive with this release (Tasks 11b, 1 and 3); this section describes them as designed.
 
 - **Pinned credentials.** Verification and landing run in supervisor-private bare mirrors with a minimal environment. Activation pins, per destination, one credential source with `--credential DEST=SOURCE`: an allowlisted helper, an ssh key or an agent socket. A helper is pinned as an **absolute** path in the owner record (the mirror resolves helpers only from system directories, and `gh` often lives in `~/.local/bin`), together with its config location. For ssh destinations activation or doctor seeds `known_hosts` in the private mirrors directory (BatchMode fails closed). `swarm doctor` runs a dry-run `git ls-remote` per destination and fails on an unresolvable helper; it also needs git 2.40 or newer on hosts with drive jobs.
 - **Windows UNC roots.** A worktree root that is a Windows UNC path (or has a leading `//`) is refused, fail safe; drive mode is refused on Windows anyway.
