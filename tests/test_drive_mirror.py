@@ -791,6 +791,18 @@ class FixRound2(MirrorCase):
         self.push("feat", "tail")
         self.assertEqual(self.mirror.audit_target(self.base, head, {c}), [])
 
+    def test_reordered_twins_are_flagged(self):
+        # The judged chain is A then B (commuting, different files). The target re-applies them as
+        # B then A: same final tree, but the run is not the judged sequence in order.
+        git(self.work, "checkout", "-q", "-b", "feat")
+        a = self.commit(self.work, "a.txt", "a\n", "A")
+        b = self.commit(self.work, "b.txt", "b\n", "B")
+        git(self.work, "checkout", "-q", "-B", "reordered", "main")
+        git(self.work, "cherry-pick", b, a)
+        b2, a2 = git(self.work, "rev-parse", "HEAD~1"), git(self.work, "rev-parse", "HEAD")
+        self.push("feat", "reordered")
+        self.assertEqual(sorted(self.mirror.audit_target(self.base, a2, {b})), sorted([b2, a2]))
+
     def test_malformed_url_raises_mirror_error(self):
         with self.assertRaises(MirrorError):
             Mirror("http://[evil/x.git", self.agent_cred())
