@@ -481,5 +481,78 @@ class Reasons(unittest.TestCase):
                                                  "rollover", "stop_seat", "complete_land"})
 
 
+class MaxRounds(unittest.TestCase):
+    """spec 4.1 and 3.6: max_rounds (8 judged rounds per artifact group) is an absolute cap that makes a
+    ruling due. It is per group, not a total over the job."""
+
+    def lead_idle(self):
+        return {"lead": seat("lead", "idle", **LEAD)}
+
+    def test_group_at_max_rounds_makes_ruling_due(self):
+        acts = next_actions(snap(rounds={"feat/a": 8}, seats=self.lead_idle()), CFG)
+        self.assertEqual(kinds(acts), ["launch"])
+        self.assertTrue(acts[0].ruling)
+        self.assertEqual(acts[0].prompt_kind, "ruling")
+
+    def test_group_above_max_rounds_makes_ruling_due(self):
+        acts = next_actions(snap(rounds={"feat/a": 9}, seats=self.lead_idle()), CFG)
+        self.assertTrue(acts[0].ruling)
+
+    def test_one_round_below_max_is_not_a_ruling(self):
+        acts = next_actions(snap(rounds={"feat/a": 7}, seats=self.lead_idle()), CFG)
+        self.assertFalse(any(x.ruling for x in acts))
+        self.assertEqual(named(acts), [("launch", "lead", "fallback")])
+
+    def test_rounds_are_counted_per_group_not_summed(self):
+        acts = next_actions(snap(rounds={"feat/a": 4, "feat/b": 4}, seats=self.lead_idle()), CFG)
+        self.assertFalse(any(x.ruling for x in acts))
+
+    def test_any_one_group_at_max_rounds_makes_ruling_due(self):
+        acts = next_actions(snap(rounds={"feat/a": 1, "feat/b": 8}, seats=self.lead_idle()), CFG)
+        self.assertTrue(acts[0].ruling)
+
+    def test_max_rounds_is_configurable(self):
+        acts = next_actions(snap(rounds={"feat/a": 3}, seats=self.lead_idle()), {**CFG, "max_rounds": 3})
+        self.assertTrue(acts[0].ruling)
+
+    def test_ruling_for_max_rounds_names_its_cause(self):
+        acts = next_actions(snap(rounds={"feat/a": 8}, seats=self.lead_idle()), CFG)
+        self.assertEqual(acts[0].reason, "max-rounds")
+
+
+class StallWakeTrigger(unittest.TestCase):
+    """spec 3.9 and the action-id rule: a stall wake's trigger is the ISO time of the last progress it reacts
+    to (the newest seat, hand-off or verdict activity; the ledger keeps no separate progress stamp)."""
+
+    def stalled(self, last, now=T0):
+        return snap(now=now, live={"a"}, seats={
+            "lead": seat("lead", "idle", updated_at=last, **LEAD),
+            "a": seat("a", "running", updated_at=last),
+        })
+
+    def test_stall_wake_trigger_is_the_time_of_last_progress(self):
+        last = T0 - minutes(100)
+        acts = next_actions(self.stalled(last), CFG)
+        self.assertEqual(named(acts), [("launch", "lead", "stall")])
+        self.assertEqual(acts[0].action_id, f"gen1|stall|lead|-|0|{iso(last)}")
+
+    def test_stall_wake_waits_for_stall_minutes(self):
+        last = T0 - minutes(89)
+        acts = next_actions(self.stalled(last), CFG)
+        self.assertEqual(kinds(acts), ["nothing"])
+        self.assertEqual(acts[0].responsible, "a")
+
+    def test_stall_wake_fires_at_exactly_stall_minutes(self):
+        last = T0 - minutes(90)
+        self.assertEqual(named(next_actions(self.stalled(last), CFG)), [("launch", "lead", "stall")])
+
+    def test_newest_activity_resets_the_stall_clock(self):
+        s = snap(now=T0, live={"a"}, seats={
+            "lead": seat("lead", "idle", updated_at=T0 - minutes(300), **LEAD),
+            "a": seat("a", "running", updated_at=T0 - minutes(300)),
+        }, verdicts={B: v("not_met", artifact=B, open=3, at=T0 - minutes(10))})
+        self.assertEqual(kinds(next_actions(s, CFG)), ["nothing"])
+
+
 if __name__ == "__main__":
     unittest.main()

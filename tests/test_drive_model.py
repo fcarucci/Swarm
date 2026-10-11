@@ -41,7 +41,7 @@ from swarm.receipts import KINDS as RECEIPT_KINDS  # noqa: E402
 
 SNAPSHOT_FIELDS = (
     "job", "generation", "goal", "status", "halted", "ledger", "seats", "live", "handoffs", "reviews",
-    "verdicts", "goal_verdict", "goal_ready", "questions", "wakes", "integrated", "now",
+    "verdicts", "goal_verdict", "goal_ready", "questions", "wakes", "integrated", "rounds", "now",
 )
 
 ACTION_FIELDS = (
