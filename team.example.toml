@@ -15,6 +15,13 @@
 # `swarm team --job J --add build_engineer` / `--remove product_manager` / `--show`.
 optional_roles = ["product_manager"]
 
+# DRIVE JOBS (`swarm activate --goal`, driven by the supervisor timer): the lead (EL) staffs the job with
+# `swarm seat request`, so the invoking session is only the requester/observer and no PM spawns or PM event
+# loop is needed. The driver reads [land] and [ci] below for its integrator seats and for `swarm land`
+# (fast-forward only, CI green on the exact rebased SHA); per-role models are `[drive.models]` in
+# config.toml (docs/REFERENCE.md#drive-mode). The "PM procedure per event" in the engineering-team skill
+# applies to non-drive jobs only (`--no-drive --reason TEXT`).
+
 # The coding recipe matches DONE branch@<full SHA>. Other artifacts use the generic pipeline.
 [pipeline]
 integrate = true

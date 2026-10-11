@@ -1,11 +1,27 @@
 # PM event procedure
 
+**Non-drive jobs only.** In a drive job (every goal job unless `--no-drive --reason TEXT`) nobody
+polls and no PM acts per event: the driver turns the same events into actions and the requester
+is an observer.
+
+| Event | In a drive job |
+|---|---|
+| `NEEDS-REVIEW` / `BRANCH-READY` | the driver starts an independent reviewer seat for the hand-off |
+| `REVIEW-CHANGES` | the findings become the fix round's brief on the writer seat |
+| `CI-FAILED` | the integrator's `FINALIZE_BLOCKED` text and the CI logs pointer go into the fix round |
+| `CI-GREEN` | `swarm ci wait` returns; the integrator runs `swarm land` |
+| `READY-TO-LAND` | the driver executes the receipted land request (rebase only, fast-forward only) |
+
+The rest of this file is the procedure for non-drive jobs.
+
+## Non-drive jobs: per-event procedure
+
 Events reach the PM through `swarm event wait --job J --to @pm`; they are never read from the
 board by a model. An event carries `kind`, `key` (`kind:N@sha`) and a one-line text. Always
 `swarm event ack --job J ID` once it is handled, then re-arm the wait. An event naming a sha that
 is no longer the PR's head is stale: ack it and do nothing.
 
-## NEEDS-REVIEW N@sha (and BRANCH-READY branch@sha)
+### NEEDS-REVIEW N@sha (and BRANCH-READY branch@sha)
 
 1. Check the head is still `sha` (the event's sha; `swarm ci status --repo OWNER/REPO --sha <sha>` shows its CI). If not, ack and stop.
 2. Dispatch an independent reviewer (never the author) from the review template: PR number, the
@@ -14,22 +30,22 @@ is no longer the PR's head is stale: ack it and do nothing.
 3. Record the dispatch with a board post `REVIEW-DISPATCHED N@sha <reviewer>`; the key is the dedupe,
    there is no separate file to keep. For BRANCH-READY with no PR yet, open the PR first.
 
-## REVIEW-CHANGES N@sha
+### REVIEW-CHANGES N@sha
 
 Send the findings (the verdict text on the PR) to the coder. The fix is a new head: a new
 NEEDS-REVIEW follows, and the old verdict is stale.
 
-## CI-FAILED N@sha <contexts>
+### CI-FAILED N@sha <contexts>
 
 Read the failing contexts' logs (`swarm ci status --repo OWNER/REPO --sha <sha>` lists them). Diagnose: a real failure, a flake (rerun once), or an
 infrastructure fault. Send the cause and the failing contexts back to the coder; never fix it as PM.
 
-## CI-GREEN sha
+### CI-GREEN sha
 
 The exact head is green. If its verdict is already VERIFIED the ci skill raises READY-TO-LAND next;
 otherwise nothing to do but let review finish. A worker waiting with `swarm ci wait` returns at once.
 
-## READY-TO-LAND N@sha
+### READY-TO-LAND N@sha
 
 The event means a VERIFIED verdict and green CI agree on this exact head. Re-check both, then land
 per the project's `[land] strategy` (team.toml):
