@@ -474,6 +474,14 @@ class Hub(Tmp):
         git("--git-dir", str(self.f / "origin.git"), "update-ref", "refs/heads/main", sha)   # as an admin would
         self.assertFalse(self.hub.audit(self.f, self.initial)["linear"])
 
+    def test_the_update_hook_alone_refuses_a_rewind_of_main(self):
+        git("config", "receive.denyNonFastForwards", "false", cwd=self.f / "origin.git")   # leave only the hook
+        self.hub.advance(self.f, "origin")                      # main moves on; our commit now diverges from it
+        self.commit()
+        bad = git("push", "-f", self.urls["origin"], "HEAD:main", cwd=self.w)
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertIn("hub: non-fast-forward refused", bad.stderr)
+
     def test_every_destination_is_configured_to_deny_non_fast_forwards(self):
         for d in ("origin", "backup"):
             r = git("config", "receive.denyNonFastForwards", cwd=self.f / f"{d}.git")
