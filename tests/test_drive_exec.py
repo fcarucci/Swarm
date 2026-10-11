@@ -754,6 +754,13 @@ class ReconcileTests(ExecEnv):
                 self.rec(91)
         self.assertEqual([c[0] for c in calls], [self.b])
 
+    def test_the_lock_sweep_gets_this_boards_key_when_it_takes_one(self):
+        seen = {}
+        life = NS(sweep_locks_by_host=lambda board, cfg, now, *, board_key=None: seen.update(key=board_key))
+        with mock.patch.dict(sys.modules, {"swarm.supervisor.driver_life": life}):
+            self.rec(1)
+        self.assertEqual(seen["key"], self.bk)
+
     def test_a_module_that_is_not_in_this_build_is_skipped_and_logged_once(self):
         driver_exec._ABSENT_LOGGED.clear()
         with mock.patch.dict(sys.modules, {}), mock.patch("importlib.util.find_spec", return_value=None), \
