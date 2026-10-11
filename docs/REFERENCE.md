@@ -920,6 +920,11 @@ and every CLI command and every hook that opens the board first calls `ensure_in
    hooks: `hook-errors.log`). Update the plugin on this machine.
 4. It writes the stamp.
 
+Schema 25 adds a unique index on `restarts.launch_id` (one restart row per drive launch). A development
+board that already holds two rows with the same `launch_id` (only the autonomy branches write one) fails
+setup loudly on it, with the transaction rolled back: clear the duplicates (`UPDATE restarts SET launch_id = NULL`
+on the extra rows) or recreate the board, then run any command again.
+
 The hooks only do the schema, give a concurrent setup at most a few seconds, and log any failure
 to `hook-errors.log` without failing the agent. The no-job fast path is untouched: without an
 active job marker the hook exits in `sh` before Python starts. Nothing registers hooks at run
