@@ -34,8 +34,8 @@ def named(acts):
     return [(x.kind, x.seat, x.prompt_kind) for x in acts]
 
 
-def stuck_intents(action_id, outcome="error", n=3):
-    return [intent(state="concluded", charged=0.0, outcome=outcome, success=False, seat="a",
+def stuck_intents(action_id, outcome="error", n=3, success=False):
+    return [intent(state="concluded", charged=0.0, outcome=outcome, success=success, seat="a",
                    action_id=action_id) for _ in range(n)]
 
 
@@ -62,11 +62,11 @@ class NextActions(unittest.TestCase):
 
     def test_two_failed_attempts_still_retry_the_fix(self):
         s = snap(seats={"a": seat("a", "idle")}, ledger=L(owners={"feat/a": "a"}, intents=stuck_intents(
-            "gen1|launch|a|feat/a|1|fix", n=2)), handoffs=[ho(A, by="a")], verdicts={A: v("not_met", open=2)})
+            "gen1|fix|a|feat/a|1|1", n=2)), handoffs=[ho(A, by="a")], verdicts={A: v("not_met", open=2)})
         self.assertEqual(named(next_actions(s, CFG)), [("launch", "a", "fix")])
 
     def test_seat_request_out_of_attempts_is_not_launched(self):
-        s = snap(seats={"a": seat("a", "requested")}, ledger=L(intents=stuck_intents("gen1|launch|a|-|0|seat")))
+        s = snap(seats={"a": seat("a", "requested")}, ledger=L(intents=stuck_intents("gen1|seat|a|-|0|1")))
         acts = next_actions(s, CFG)
         self.assertEqual(kinds(acts), ["launch"])
         self.assertTrue(acts[0].ruling)
@@ -81,7 +81,7 @@ class NextActions(unittest.TestCase):
     def test_requested_lead_is_launched(self):
         a = next_actions(snap(seats={"lead": seat("lead", "requested", **LEAD)}), CFG)
         self.assertEqual([(x.kind, x.seat) for x in a], [("launch", "lead")])
-        self.assertEqual(a[0].action_id, "gen1|launch|lead|-|0|seat")
+        self.assertEqual(a[0].action_id, "gen1|seat|lead|-|0|1")
 
     def test_question_blocks_only_its_seat(self):
         s = snap(seats={"a": seat("a", "idle"), "b": seat("b", "requested")},
@@ -118,7 +118,7 @@ class NextActions(unittest.TestCase):
                  verdicts={A: v("not_met", open=2)})
         (a,) = next_actions(s, CFG)
         self.assertEqual((a.kind, a.seat, a.prompt_kind), ("launch", "a", "fix"))
-        self.assertEqual(a.action_id, "gen1|launch|a|feat/a|1|fix")
+        self.assertEqual(a.action_id, "gen1|fix|a|feat/a|1|1")
 
     def test_released_owner_gets_successor(self):
         s = snap(seats={"a": seat("a", "released")}, ledger=L(owners={"feat/a": "a"}),
@@ -187,7 +187,7 @@ class NextActions(unittest.TestCase):
     def test_nothing_else_to_do_definition(self):
         # every pending action is out of attempts, no seat is live or wakeable: a ruling, nothing else
         s = snap(seats={"a": seat("a", "idle")}, ledger=L(owners={"feat/a": "a"}, intents=stuck_intents(
-            "gen1|launch|a|feat/a|1|fix")), handoffs=[ho(A, by="a")], verdicts={A: v("not_met", open=2)})
+            "gen1|fix|a|feat/a|1|1")), handoffs=[ho(A, by="a")], verdicts={A: v("not_met", open=2)})
         acts = next_actions(s, CFG)
         self.assertEqual(kinds(acts), ["launch"])
         self.assertTrue(acts[0].ruling)
@@ -195,7 +195,7 @@ class NextActions(unittest.TestCase):
 
     def test_outage_attempt_not_counted(self):
         s = snap(seats={"a": seat("a", "idle")}, ledger=L(owners={"feat/a": "a"}, intents=stuck_intents(
-            "gen1|launch|a|feat/a|1|fix", outcome="outage")), handoffs=[ho(A, by="a")],
+            "gen1|fix|a|feat/a|1|1", outcome="outage")), handoffs=[ho(A, by="a")],
             verdicts={A: v("not_met", open=2)})
         self.assertEqual(named(next_actions(s, CFG)), [("launch", "a", "fix")])
 
@@ -247,7 +247,7 @@ class NextActions(unittest.TestCase):
 
     def test_ruling_in_flight_is_responsible(self):
         s = snap(ledger=L(rounds_without_progress=3,
-                          intents=[intent(state="claimed", seat=None, action_id="gen1|launch|-|ruling|0|ruling")]),
+                          intents=[intent(state="claimed", seat=None, action_id="gen1|ruling|-|ruling|0|unrecorded")]),
                  seats={"lead": seat("lead", "idle", **LEAD)})
         (a,) = next_actions(s, CFG)
         self.assertEqual((a.kind, a.responsible), ("nothing", "ruling"))
@@ -273,7 +273,7 @@ class NextActions(unittest.TestCase):
     def test_open_judge_is_responsible_not_fallback(self):
         s = snap(handoffs=[ho(A, by="a")], reviews={A: "verified"},
                  ledger=L(intents=[intent(state="claimed", seat=None,
-                                          action_id="gen1|launch|-|feat/a|1|judge")]))
+                                          action_id="gen1|judge|-|feat/a|1|1")]))
         (a,) = next_actions(s, CFG)
         self.assertEqual((a.kind, a.responsible), ("nothing", "runner"))
 
@@ -295,28 +295,183 @@ class NextActions(unittest.TestCase):
         self.assertEqual(len(ids), len(set(ids)))
 
 
+class TriggerIds(unittest.TestCase):
+    """Action ids are `gen<N>|<prompt kind>|<seat>|<group>|<round>|<trigger>` (plan 88854be): two distinct
+    triggers of one action get distinct ids; a retry of the same trigger reuses its id."""
+
+    def test_seat_request_id_follows_the_seat_revision(self):
+        r1 = next_actions(snap(seats={"a": seat("a", "requested", revision=1)}), CFG)[0]
+        r2 = next_actions(snap(seats={"a": seat("a", "requested", revision=2)}), CFG)[0]
+        self.assertEqual(r1.action_id, "gen1|seat|a|-|0|1")
+        self.assertNotEqual(r1.action_id, r2.action_id)
+
+    def test_judge_id_follows_the_hand_off_receipt(self):
+        def judge(receipt):
+            s = snap(seats={"lead": seat("lead", "idle", **LEAD)}, handoffs=[ho(A, by="a", receipt_id=receipt)])
+            return next_actions(s, CFG)[0].action_id
+        self.assertEqual(judge(1), "gen1|judge|-|feat/a|1|1")
+        self.assertNotEqual(judge(1), judge(2))
+
+    def test_fallback_id_follows_rounds_without_progress(self):
+        def fallback(rounds):
+            s = snap(seats={"lead": seat("lead", "idle", **LEAD)}, ledger=L(rounds_without_progress=rounds))
+            return next_actions(s, CFG)[0].action_id
+        self.assertEqual(fallback(0), "gen1|fallback|lead|-|0|0")
+        self.assertNotEqual(fallback(0), fallback(1))
+
+    def test_ruling_id_follows_ruling_due_at(self):
+        def ruling(due):
+            s = snap(seats={"lead": seat("lead", "idle", **LEAD)}, ledger=L(ruling_due_at=due))
+            return next_actions(s, CFG)[0].action_id
+        self.assertNotEqual(ruling(iso(T0)), ruling(iso(T0 + minutes(1))))
+
+    def test_relaunch_id_follows_the_lost_launch(self):
+        def relaunch(launch_id):
+            s = snap(seats={"a": seat("a", "running")},
+                     ledger=L(intents=[intent(state="concluded", charged=0.0, outcome="error", success=False,
+                                              seat="a", launch_id=launch_id)]))
+            return next_actions(s, CFG)[0].action_id
+        self.assertNotEqual(relaunch("L1"), relaunch("L2"))
+
+    def test_retry_of_the_same_trigger_reuses_its_id(self):
+        s = snap(seats={"a": seat("a", "requested", revision=1)})
+        self.assertEqual(next_actions(s, CFG)[0].action_id, next_actions(s, CFG)[0].action_id)
+        retried = snap(seats={"a": seat("a", "requested", revision=1)},
+                       ledger=L(intents=stuck_intents("gen1|seat|a|-|0|1", n=2)))
+        (a,) = next_actions(retried, CFG)
+        self.assertEqual((a.kind, a.action_id), ("launch", "gen1|seat|a|-|0|1"))
+
+    def test_successful_repeats_do_not_cap_a_new_trigger(self):
+        s = snap(seats={"a": seat("a", "idle")}, ledger=L(owners={"feat/a": "a"}, intents=stuck_intents(
+            "gen1|fix|a|feat/a|1|1", outcome="completed", n=3, success=True)),
+            handoffs=[ho(A, by="a")], verdicts={A: v("not_met", open=2, receipt_id=2)})
+        (a,) = next_actions(s, CFG)
+        self.assertEqual((a.kind, a.action_id), ("launch", "gen1|fix|a|feat/a|1|2"))
+
+    def test_lead_wake_uses_the_smallest_pending_event(self):
+        (a,) = next_actions(snap(seats={"lead": seat("lead", "idle", **LEAD)}, wakes={"lead": [8, 4]}), CFG)
+        self.assertEqual(a.action_id, "gen1|wake|lead|-|0|4")
+
+    def test_seat_wake_uses_the_smallest_pending_event(self):
+        (a,) = next_actions(snap(seats={"a": seat("a", "idle")}, wakes={"a": [9, 3]}), CFG)
+        self.assertEqual(a.action_id, "gen1|wake|a|-|0|3")
+
+    def test_goal_id_follows_the_goal_ready_record(self):
+        s = snap(seats={}, ledger=L(owners={"feat/a": "a"}), handoffs=[ho(A, by="a")], verdicts={A: v("met")},
+                 integrated={"feat/a": {"landed": "abc"}},
+                 goal_ready={"id": 77, "candidate": "main@abc", "req": "r1", "at": T0})
+        (a,) = next_actions(s, CFG)
+        self.assertEqual((a.prompt_kind, a.action_id), ("goal", "gen1|goal|-|goal|0|77"))
+
+
+class SurvivorKills(unittest.TestCase):
+    """One test per mutant the review (task7-next.md) found surviving the first gate."""
+
+    def test_ruling_grace_boundary_stops_at_exactly_grace(self):          # M1
+        s = snap(ledger=L(ruling_due_at=iso(T0 - minutes(15))), live={"a"}, seats={"a": seat("a", "running")})
+        self.assertEqual(kinds(next_actions(s, CFG)), ["stop_seat"])
+
+    def test_question_until_is_capped_at_question_expiry(self):          # M2
+        s = snap(seats={"lead": seat("lead", "idle", **LEAD)},
+                 questions={"lead": [q(1, seat="lead", until=T0 + minutes(600))]})
+        (a,) = next_actions(s, CFG)
+        self.assertEqual((a.kind, a.not_before), ("hold", T0 + minutes(240)))
+
+    def test_concurrency_cap_limits_seat_launches(self):                 # M12
+        cfg = {**CFG, "max_concurrent_sessions": 2}
+        s = snap(seats={"x": seat("x", "running"), "a": seat("a", "requested"), "b": seat("b", "requested")},
+                 live={"x"})
+        self.assertEqual([x.seat for x in next_actions(s, cfg) if x.kind == "launch"], ["a"])
+
+    def test_max_seats_boundary_admits_the_twelfth_seat(self):           # M13
+        seats = {f"s{i}": seat(f"s{i}", "idle") for i in range(11)}
+        seats["x"] = seat("x", "requested")                                # 11 others + x = 12 seats
+        self.assertEqual([x.seat for x in next_actions(snap(seats=seats), CFG) if x.kind == "launch"], ["x"])
+
+    def test_max_seats_counts_dead_seats(self):
+        seats = {f"d{i}": seat(f"d{i}", "released") for i in range(12)}
+        seats["x"] = seat("x", "requested")
+        acts = next_actions(snap(seats=seats), CFG)
+        self.assertNotIn("x", [x.seat for x in acts if x.kind == "launch"])
+
+    def test_wall_clock_ruling_at_max_wall_hours(self):                  # M16
+        s = snap(ledger=L(activated_at=iso(T0 - minutes(25 * 60))), seats={"lead": seat("lead", "idle", **LEAD)})
+        a = next_actions(s, CFG)
+        self.assertTrue(any(x.ruling for x in a))
+        self.assertEqual(a[0].reason, "wall-clock")
+
+    def test_artifact_recipe_unreachable_artifact_does_not_gate_goal(self):  # M17
+        s = snap(seats={"a": seat("a", "idle")}, handoffs=[ho(R, by="a")], verdicts={R: v("unreachable")},
+                 goal_ready={"id": 5, "candidate": "report:x@" + "c" * 40, "req": "r", "at": T0})
+        self.assertNotIn("goal", [x.prompt_kind for x in next_actions(s, ARTIFEXT_CFG)])
+
+    def test_stop_seat_is_a_ruling_action(self):                         # M18
+        s = snap(ledger=L(ruling_due_at=iso(T0 - minutes(16))), live={"a"}, seats={"a": seat("a", "running")})
+        (a,) = next_actions(s, CFG)
+        self.assertEqual((a.kind, a.ruling), ("stop_seat", True))
+
+    def test_stale_generation_terminal_verdict_does_not_close(self):     # M20
+        acts = next_actions(snap(goal_verdict=v("met", scope="goal", generation=0)), CFG)
+        self.assertNotIn("close", kinds(acts))
+
+    def test_gated_owner_holds_the_job_not_the_lead(self):              # F1
+        s = snap(seats={"a": seat("a", "idle"), "lead": seat("lead", "idle", **LEAD)},
+                 ledger=L(owners={"feat/a": "a"}), handoffs=[ho(A, by="a")], reviews={A: "verified"},
+                 verdicts={A: v("not_met", open=2)}, questions={"a": [q(1)]})
+        (a,) = next_actions(s, CFG)
+        self.assertEqual((a.kind, a.not_before), ("hold", T0 + minutes(240)))
+
+    def test_gated_requested_seat_does_not_wake_the_lead(self):          # F1
+        s = snap(seats={"b": seat("b", "requested"), "lead": seat("lead", "idle", **LEAD)},
+                 questions={"b": [q(1, seat="b")]})
+        self.assertEqual(kinds(next_actions(s, CFG)), ["hold"])
+
+    def test_goal_rejudged_after_newer_string_goal_ready(self):          # finding 7
+        s = snap(goal_verdict=v("not_met", scope="goal", at=T0),
+                 goal_ready={"id": 9, "candidate": "m@1", "req": "r", "at": iso(T0 + minutes(5))})
+        self.assertEqual(named(next_actions(s, CFG)), [("launch", None, "goal")])
+
+    def test_goal_needs_the_pinned_requirements(self):                   # finding 5
+        s = snap(seats={}, ledger=L(owners={"feat/a": "a"}), handoffs=[ho(A, by="a")], verdicts={A: v("met")},
+                 integrated={"feat/a": {"landed": "abc"}}, goal_ready={"id": 1, "candidate": "main@abc"})
+        self.assertNotIn("goal", [x.prompt_kind for x in next_actions(s, CFG)])
+
+    def test_ruling_without_stamp_holds_from_now(self):                  # finding 6 (caller contract)
+        s = snap(ledger=L(rounds_without_progress=3), live={"a"}, seats={"a": seat("a", "running")})
+        (a,) = next_actions(s, CFG)
+        self.assertEqual((a.kind, a.not_before), ("hold", T0 + minutes(15)))
+
+
 class Progress(unittest.TestCase):
+    """progress(prev, new) takes judge VerdictViews and the board's bool flag (plan eceb35e)."""
+
     def test_first_judged_round_is_no_progress(self):
-        self.assertFalse(progress(None, {"artifact": "x", "open": 1}))
+        self.assertFalse(progress(None, v("not_met", artifact="x", open=1)))
 
     def test_new_artifact_and_open_decreased_is_progress(self):
-        self.assertTrue(progress({"artifact": "a", "open": 3}, {"artifact": "b", "open": 2}))
+        self.assertTrue(progress(v("not_met", artifact="a", open=3), v("not_met", artifact="b", open=2)))
 
     def test_same_artifact_is_not_progress(self):
-        self.assertFalse(progress({"artifact": "a", "open": 3}, {"artifact": "a", "open": 2}))
+        self.assertFalse(progress(v("not_met", artifact="a", open=3), v("not_met", artifact="a", open=2)))
 
     def test_open_not_decreased_is_not_progress(self):
-        self.assertFalse(progress({"artifact": "a", "open": 3}, {"artifact": "b", "open": 3}))
+        self.assertFalse(progress(v("not_met", artifact="a", open=3), v("not_met", artifact="b", open=3)))
 
-    def test_judge_progress_yes_is_progress(self):
-        self.assertTrue(progress({"artifact": "a", "open": 3}, {"artifact": "a", "open": 3, "progress": "yes"}))
+    def test_judge_progress_flag_is_progress(self):
+        self.assertTrue(progress(v("not_met", artifact="a", open=3),
+                                 v("not_met", artifact="a", open=3, progress=True)))
+
+    def test_judge_progress_flag_false_is_not_progress_by_itself(self):
+        self.assertFalse(progress(v("not_met", artifact="a", open=3),
+                                  v("not_met", artifact="a", open=3, progress=False)))
 
     def test_integration_is_progress(self):
-        self.assertTrue(progress({"artifact": "a", "open": 3}, {"integrated": True}))
+        self.assertTrue(progress(v("not_met", artifact="a", open=3), v("not_met", artifact="a", open=3),
+                                 integrated=True))
 
     def test_goal_open_decrease_is_progress_on_the_same_target(self):
-        self.assertTrue(progress({"artifact": "t", "open": 3, "scope": "goal"},
-                                 {"artifact": "t", "open": 2, "scope": "goal"}))
+        self.assertTrue(progress(v("not_met", scope="goal", artifact="t", open=3),
+                                 v("not_met", scope="goal", artifact="t", open=2)))
 
 
 class Reasons(unittest.TestCase):
