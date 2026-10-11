@@ -268,3 +268,63 @@ def ci_repo(command: str) -> str | None:
                 if w.startswith("--repo="):
                     return w[len("--repo="):]
     return None
+
+
+# ---- drive jobs (spec 3.4, 4.0): what no seat may run, and what a read-only seat may not write -----
+# A target push (to the recipe's branch), any force push, a headless Claude or Codex session (it runs
+# outside the seat's supervision and receipts) are refused for every drive seat. Writes by judges and
+# reviewers are refused with writes_files() above.
+
+_FORCE_FLAGS = ("--force", "--force-with-lease", "--force-if-includes")
+
+
+def drive_command_refusal(command: str, targets=()) -> str | None:
+    """Why a drive seat may not run `command` (its reason, for the agent), or None. `targets` are
+    the branch names a push may not update (the recipe's target, e.g. "main")."""
+    if not command:
+        return None
+    targets = {t.removeprefix("refs/heads/") for t in targets}
+    for words in _simple_commands(command):
+        words, _ = _strip_prefix(words)
+        if not words:
+            continue
+        prog, args = _prog(words[0]), words[1:]
+        if prog == "git":
+            i = 0
+            while i < len(args) and args[i].startswith("-"):
+                i += 2 if args[i] == "-C" else 1
+            if i >= len(args) or args[i] != "push":
+                continue
+            positional = []
+            for a in args[i + 1:]:
+                if a.startswith("-"):
+                    if a in _FORCE_FLAGS or (not a.startswith("--") and "f" in a[1:]):
+                        return "a force push is refused"
+                    continue
+                positional.append(a)
+            for spec in positional[1:]:
+                if spec.startswith("+"):
+                    return "a force push (+refspec) is refused"
+                dst = spec.rsplit(":", 1)[-1].removeprefix("refs/heads/")
+                if dst in targets:
+                    return f"a push to the target branch {dst!r} is refused"
+        elif prog == "claude" and ("-p" in args or "--print" in args):
+            return "a headless claude session (claude -p) is refused"
+        elif prog == "codex" and "exec" in args:
+            return "a headless codex session (codex exec) is refused"
+    return None
+
+
+_PS_WRITE = re.compile(r"(?i)\b(?:Set|Add|Clear|Out|New|Remove|Copy|Move|Rename|Export|Install|Uninstall)-"
+                       r"(?:Content|Item|Items|File|ItemProperty|Acl|Package|Module|Service|Process|Variable)\b"
+                       r"|\bOut-File\b|\bSet-Location\b.*\bgit\b|\bgit\s+(?:commit|push|add|apply|stash|reset)\b"
+                       r"|\[(?:System\.)?IO\.File\]::(?:Write|Create|Delete|Move|Copy|Append)|(?<![<>\w])>>?(?!=)")
+
+
+def powershell_writes(command: str) -> str | None:
+    """Whether a PowerShell command writes (redirection, Set-Content, Out-File, Remove-Item, git
+    commit or push, .NET file writes), a best-effort match like writes_files; None when it reads."""
+    if not command:
+        return None
+    m = _PS_WRITE.search(command)
+    return f"a PowerShell write ({m.group(0).strip()!r})" if m else None
