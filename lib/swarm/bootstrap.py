@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -1549,6 +1550,8 @@ def doctor(host: str | None = None, *, config: Path | None = None, claude_plugin
     checks += supervisor_checks(cfg, host)
     checks += _receipt_failures_check()
     checks += _codex_drive_check()
+    if cfg_ok:
+        checks += drive_checks(cfg)
     return checks
 
 
@@ -1785,6 +1788,301 @@ def _codex_drive_check() -> list[Check]:
     return [Check("codex drive-ready", None,
                   f"writer no (the installed codex has no rollout budget feature); {tail}",
                   "update Codex to a version with `features.rollout_budget`, or run writer seats on Claude")]
+
+# ------------------------------------------------------------- doctor: drive mode
+
+DRIVE_GIT_MIN = (2, 40)          # `git merge-tree --merge-base` (11a/11b) fails closed below this
+
+
+def _drive_exec(run, argv, timeout=10):
+    """argv's stdout, or None when it can't run or fails (doctor never raises over a probe)."""
+    import subprocess
+    try:
+        res = run(argv, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return (res.stdout or "") if res.returncode == 0 else None
+
+
+def _drive_timer_check(cfg: dict, run, now) -> Check:
+    """A drive job needs the supervisor timer RUNNING (unit active and enabled, read through the
+    user manager's environment) and a pass within 2 x timer_minutes; with no readable user bus the
+    last pass alone decides (never the false `?/?`)."""
+    import datetime as dt
+    from swarm.supervisor import settings as st, systemd
+    fix = f"swarm supervise enable, or systemctl --user enable --now {systemd.TIMER}"
+    try:
+        sup = st.settings(cfg)
+    except st.SettingsError as exc:
+        return Check("drive timer", False, f"drive jobs need the supervisor: {exc}", "fix [supervise] in the swarm config")
+    if not st.enabled(cfg):
+        return Check("drive timer", False, "drive jobs here, but the supervisor is disabled or switched off", fix)
+    limit = 2 * sup["timer_minutes"]
+    age = None
+    try:
+        age = (now - dt.datetime.fromisoformat(st.load_state().get("last_run_at"))).total_seconds() / 60
+    except (TypeError, ValueError):
+        pass
+    state = systemd.timer_state(run)
+    if state and not (state.get("ActiveState") == "active" and state.get("UnitFileState") == "enabled"):
+        return Check("drive timer", False, f"{systemd.TIMER}: {state.get('ActiveState', '?')}/"
+                     f"{state.get('UnitFileState', '?')}; drive jobs are not being driven", fix)
+    when = "never" if age is None else f"{age:.0f} min ago"
+    if age is None or not 0 <= age <= limit:
+        return Check("drive timer", False, f"last pass {when} (a drive job needs one within {limit} min)",
+                     "journalctl --user -u swarm-supervise.service -n 50; " + fix)
+    seen = f"{systemd.TIMER}: active/enabled" if state else "no user bus from this shell"
+    return Check("drive timer", True, f"{seen}; last pass {when}")
+
+
+def _drive_git_check(run, has_jobs: bool) -> Check:
+    out = _drive_exec(run, ["git", "--version"])
+    m = re.search(r"(\d+)\.(\d+)", out or "")
+    if not m:
+        return Check("drive git", None, "can't read the git version (drive needs git >= 2.40)",
+                     "install git >= 2.40")
+    version = out.strip().removeprefix("git version ")
+    if (int(m.group(1)), int(m.group(2))) >= DRIVE_GIT_MIN:
+        return Check("drive git", True, f"git {version} (drive needs >= 2.40)")
+    return Check("drive git", False if has_jobs else None,
+                 f"git {version}: drive needs >= 2.40 (merge-tree --merge-base)", "upgrade git to 2.40 or newer")
+
+
+def _claude_sandbox_check() -> Check:
+    from swarm import cli
+    path = cli.claude_settings_path()
+    try:
+        data = json.loads(path.read_text())
+        enabled = isinstance(data, dict) and isinstance(data.get("sandbox"), dict) \
+            and data["sandbox"].get("enabled") is True
+    except (OSError, ValueError):
+        enabled = False
+    if enabled:
+        return Check("claude sandbox", True, "claude read-only seats: the Bash sandbox is on (boundary)")
+    return Check("claude sandbox", None,
+                 f"claude read-only seats: guardrail only (the Bash sandbox is not enabled in {path}; "
+                 "the hook refuses commits and pushes, nothing stops other writes)",
+                 f'set "sandbox": {{"enabled": true}} in {path}')
+
+
+def _codex_drive_checks(cfg: dict, which) -> list[Check]:
+    """Whether a Codex writer seat can reach the board ([F18]): on a server board the swarm
+    config's [codex] network_access and the Codex profile that carries it; on a local board the
+    store dir as a Codex writable root. (The rollout budget and the per-role line are
+    _codex_drive_check's.) Nothing without Codex installed."""
+    import tomllib
+    from swarm import codex_config
+    if not which("codex"):
+        return []
+    try:
+        data = tomllib.loads((_codex_home() / "config.toml").read_text())
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        data = {}
+    sw = data.get("sandbox_workspace_write") if isinstance(data.get("sandbox_workspace_write"), dict) else {}
+    store = codex_config.board_dir(cfg)
+    if store is None:
+        ready = sw.get("network_access") is True and codex_config._opt(cfg, "network_access")
+        why = "[codex] network_access = true is not installed (set it in the swarm config, then `swarm bootstrap --host codex`)"
+    else:
+        roots = sw.get("writable_roots") if isinstance(sw.get("writable_roots"), list) else []
+        ready = str(store) in [str(Path(str(r)).expanduser()) for r in roots]
+        why = f"the board store {store} is not a codex writable root"
+    return [Check("codex board access", True if ready else None,
+                  "codex writer seats reach the board" if ready else f"codex writer seats cannot reach the board: {why}",
+                  "swarm bootstrap --host codex")]
+
+
+def _drive_job_checks(cfg: dict, led, now) -> list[Check]:
+    import datetime as dt
+    from swarm import drive_activate as da
+    out = []
+    try:
+        budgets = {**da.budget_defaults(cfg), **{k: v for k, v in led.budgets.items() if k in da.BUDGET_KEYS}}
+        cap, reserve = float(budgets["max_cost_usd"]), float(budgets["ruling_reserve_usd"])
+        cost, sessions, max_sessions = led.charged_usd(), len(led.intents), float(budgets["max_sessions"])
+        wall_max = float(budgets["max_wall_hours"])
+        try:
+            started = dt.datetime.fromisoformat(led.activated_at)
+            started = started if started.tzinfo else started.replace(tzinfo=dt.timezone.utc)
+            wall = max(0.0, (now - started).total_seconds() - led.halted_total_seconds) / 3600
+        except ValueError:
+            wall = 0.0
+        spent = cost >= cap or sessions >= max_sessions or wall >= wall_max
+        out.append(Check(f"drive budget {led.job}", None if spent else True,
+                         f"cost {cost:.2f}/{cap:.2f} USD (reserve {reserve:.2f}), sessions {sessions}/{max_sessions:g}, "
+                         f"wall {wall:.1f}/{wall_max:g} h",
+                         f"raise it with `swarm drive budget {led.job} KEY=VALUE`" if spent else ""))
+    except da.DriveError as exc:
+        out.append(Check(f"drive budget {led.job}", None, f"can't compute the budget: {exc}", "fix [drive] in the swarm config"))
+    try:
+        table = da.effective_models(cfg, led.models)
+        out.append(Check(f"drive models {led.job}", True, ", ".join(f"{r}={m}" for r, m in table.items())))
+    except da.DriveError as exc:
+        out.append(Check(f"drive models {led.job}", None, f"can't compute the model table: {exc}",
+                         "fix [drive] models and allowed_models in the swarm config"))
+    return out
+
+
+def _drive_credential_checks(bk: str, led) -> list[Check]:
+    from swarm import enrolment
+    owner = enrolment.find_job_owner(bk, led.job)
+    creds = (owner.owner or {}).get("credentials") if owner is not None else None
+    out = []
+    for dest, pin in sorted((creds or {}).items()):
+        if not isinstance(pin, str) or not pin.startswith("helper:"):
+            continue
+        exe = pin[len("helper:"):].split(" ")[0]
+        ok = os.path.isfile(exe) and os.access(exe, os.X_OK)
+        out.append(Check(f"drive credential {dest}", ok,
+                         f"{dest}: credential helper {exe}" + ("" if ok else " is not an executable file"),
+                         f"install it, or re-activate with --credential {dest}=helper:/abs/path/to/gh"))
+    return out
+
+
+DRIVE_ACTIVATION_GRACE = 120      # seconds a board drive claim may exist before its ledger does ([RR1])
+
+
+def _board_store_exists(cfg: dict) -> bool:
+    """Whether a board is there to read without creating it: a server board always, a local one
+    when its database file or directory exists."""
+    from swarm import codex_config
+    backend = board_backend(cfg)
+    if backend not in ("sqlite", "file"):
+        return True
+    return codex_config._absolute(cfg[backend]["path"]).exists()
+
+
+def _aware(when, default=None):
+    import datetime as dt
+    if when is None:
+        return default
+    return when if when.tzinfo else when.replace(tzinfo=dt.timezone.utc)
+
+
+def _drive_board_checks(cfg: dict, bk, led_jobs: set, now) -> list[Check]:
+    """DRIVER-ORPHAN for a board drive claim with no ledger past the activation grace, and the
+    list of goal jobs activated before drive mode (nothing drives them)."""
+    import datetime as dt
+    from swarm.board import open_board
+    from swarm.supervisor import driver_events, ledger
+    grace = dt.timedelta(seconds=(cfg.get("drive") or {}).get("activation_grace_seconds", DRIVE_ACTIVATION_GRACE))
+    out, legacy = [], []
+    try:
+        with open_board(cfg, readers=True) as board:
+            for js in board.jobs():
+                claimed = (board.job_data(js.job) or {}).get("drive.enabled") == "1"
+                if js.job in led_jobs:
+                    continue
+                if not claimed:
+                    if js.goal:
+                        legacy.append(js.job)
+                    continue
+                since = _aware(js.activated_at, _aware(js.created_at))
+                if since is not None and now - since <= grace:
+                    continue
+                try:
+                    if ledger.load(bk, js.job) is not None:
+                        continue                 # a finished job's ledger: nothing is orphaned
+                except ledger.LedgerBadError:
+                    continue                     # reported as a bad ledger
+                out.append(Check(f"drive orphan {js.job}", False,
+                                 f"{driver_events.DRIVER_ORPHAN}: job {js.job!r} claims drive mode on the board "
+                                 f"but has no ledger on this host (past the {grace.total_seconds():.0f} s activation grace)",
+                                 "re-run `swarm activate` for it on the host that owns it, or `swarm deactivate` it"))
+    except Exception as exc:     # an unreachable board is the board checks' finding
+        return [Check("drive board", None, f"drive claims not checked: can't read the board ({type(exc).__name__})")]
+    if legacy:
+        shown = ", ".join(sorted(legacy)[:10]) + (f" and {len(legacy) - 10} more" if len(legacy) > 10 else "")
+        out.append(Check("drive not autonomous", None,
+                         f"{len(legacy)} goal job(s) not autonomous: activated before drive mode: {shown}",
+                         "re-activate each with `swarm activate --goal` to have the supervisor drive it, "
+                         "or leave it with its coordinator"))
+    return out
+
+
+def drive_checks(cfg: dict, *, run=None, which=None, now=None, platform: str | None = None) -> list[Check]:
+    """The drive-mode doctor lines (spec 3.2-3.3, 4.0, 4.5). Read-only: nothing here creates a
+    directory or a file. The host lines (timer, git, sandbox, Codex) only on a host with unfinished
+    drive jobs (or a [drive] section); the board lines whenever a board is there to read. Platform:
+    no supervisor timer off Linux, so no drive mode ([M1])."""
+    import datetime as dt
+    import subprocess
+    from swarm import drive_activate as da, edition
+    from swarm.supervisor import driver_events, ledger, settings as st
+    if edition.is_directory():
+        return []
+    run, which = run or subprocess.run, which or shutil.which
+    now = now or dt.datetime.now(dt.timezone.utc)
+    linux = (platform or sys.platform).startswith("linux")
+    try:
+        bk = da.board_key(cfg)
+    except Exception:          # an unreachable board: the board checks report it
+        bk = None
+    found, unreadable = [], None
+    if linux and bk is not None and os.path.lexists(st.private_dir() / ledger.SUBDIR):
+        try:
+            found = ledger.unfinished(bk)
+        except (OSError, ValueError, st.PrivateDirError) as exc:   # fail closed: a held job must show
+            unreadable = exc
+    relevant = bool(found) or unreadable is not None or bool(cfg.get("drive"))
+    if not relevant and not (linux and bk is not None and _board_store_exists(cfg)):
+        return []
+    if not linux:
+        return [Check("drive mode", True, "drive mode unavailable: no supervisor timer")]
+    jobs = [x for x in found if isinstance(x, ledger.Ledger)]
+    has_jobs = bool(found) or unreadable is not None
+    out: list[Check] = []
+    if relevant:
+        out = [_drive_timer_check(cfg, run, now)] if has_jobs else []
+        out += [_drive_git_check(run, has_jobs), _claude_sandbox_check()]
+        out += _codex_drive_checks(cfg, which)
+    if unreadable is not None:
+        out.append(Check("drive ledgers", False,
+                         f"{driver_events.DRIVER_LEDGER_BAD}: the drive ledgers can't be read "
+                         f"({type(unreadable).__name__}: {unreadable}); drive jobs are held",
+                         "fix or remove what is named (a planted link or a bad file in the supervisor's drive dir), "
+                         "then rerun doctor"))
+    for bad in (x for x in found if isinstance(x, ledger.LedgerBad)):
+        out.append(Check(f"drive ledger {bad.job_hint or bad.path[:12]}", False,
+                         f"{driver_events.DRIVER_LEDGER_BAD}: {bad.why}",
+                         "restore or repair the ledger (`swarm drive repair`), then rerun doctor"))
+    for led in jobs:
+        out += _drive_orphan_checks(bk, led)
+        if relevant:
+            out += _drive_job_checks(cfg, led, now) + _drive_credential_checks(bk, led)
+    if bk is not None and _board_store_exists(cfg):
+        out += _drive_board_checks(cfg, bk, {x.job for x in jobs} | {x.job_hint for x in found
+                                                                   if isinstance(x, ledger.LedgerBad) and x.job_hint}, now)
+    return out + (_land_checks(cfg, bk, jobs) if relevant else [])
+
+
+def _drive_orphan_checks(bk, led) -> list[Check]:
+    from swarm import enrolment
+    from swarm.supervisor import driver_events
+    if enrolment.find_job_owner(bk, led.job) is not None:
+        return []
+    return [Check(f"drive orphan {led.job}", False,
+                  f"{driver_events.DRIVER_ORPHAN}: job {led.job!r} has a drive ledger but no owner record on this host",
+                  "the job was activated on another host or user, or its owner record was lost: deactivate it "
+                  "and activate it again here")]
+
+
+def _land_checks(cfg: dict, bk, jobs) -> list[Check]:
+    """Task 11b's per-destination lines (ls-remote, known_hosts, agent socket, flagged-audit text),
+    for the pinned destinations of the active jobs; nothing where the landing module is absent."""
+    from swarm import enrolment
+    try:
+        from swarm import land_doctor
+    except ImportError:
+        return []
+    if not jobs:
+        return []
+    owners = []
+    for led in jobs:
+        rec = enrolment.find_job_owner(bk, led.job)
+        if rec is not None and rec.owner:
+            owners.append(rec.owner)
+    return [Check(line.name, line.ok, line.detail, line.fix or "") for line in land_doctor.checks(cfg, owners)]
 
 
 PENDING_FINAL_WARN_HOURS = 1.0   # doctor: an ended agent without a final transcript this long is shown

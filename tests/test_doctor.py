@@ -616,3 +616,503 @@ class ExposureDoctorTests(unittest.TestCase):
         self.assertIn(str(self.home / ".local/state"), c.detail)
         self.assertNotIn(str(self.home / ".local/share"), c.detail)
         self.assertTrue(c.fix.startswith("chmod go-w"))
+
+
+class FakeRun:
+    """A stand-in for subprocess.run: answers systemctl, git and codex from a table, records calls."""
+
+    def __init__(self, *, systemctl="ActiveState=active\nUnitFileState=enabled\n", git="git version 2.43.0",
+                 features="rollout_budget  experimental  true\n", systemctl_rc=0):
+        self.systemctl, self.git, self.features, self.systemctl_rc = systemctl, git, features, systemctl_rc
+        self.calls = []
+
+    def __call__(self, argv, **kw):
+        self.calls.append((list(argv), kw))
+        out, rc = "", 0
+        if argv[0] == "systemctl":
+            out, rc = self.systemctl, self.systemctl_rc
+        elif argv[0] == "git":
+            out = self.git
+        elif argv[0] == "codex":
+            out = self.features
+        return mock.Mock(returncode=rc, stdout=out, stderr="")
+
+
+class DriveDoctorTests(unittest.TestCase):
+    NOW = dt.datetime(2026, 10, 11, 12, 0, tzinfo=dt.timezone.utc)
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp(prefix="swarm-ddoc-"))
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
+        p = mock.patch.dict(os.environ, {**home_env(self.home),
+                                         "CLAUDE_SETTINGS": str(self.home / "claude-settings.json"),
+                                         "SWARM_AUTO_INIT": "1"})
+        p.start(); self.addCleanup(p.stop)
+        self.cfg_path = self.home / ".config/swarm/config.toml"
+        self.cfg_path.parent.mkdir(parents=True)
+        self.write_cfg("")
+        self.state = {"last_run_at": (self.NOW - dt.timedelta(minutes=3)).isoformat()}
+        q = mock.patch("swarm.supervisor.settings.load_state", side_effect=lambda: self.state)
+        q.start(); self.addCleanup(q.stop)
+
+    def write_cfg(self, extra):
+        self.cfg_path.write_text(f'[board]\nbackend = "sqlite"\nspool_dir = "~/.local/state/swarm/spool"\n'
+                                 f'[sqlite]\npath = {tq(f"{self.home}/b.sqlite3")}\n{extra}')
+
+    def cfg(self):
+        from swarm.cli import load_config
+        return load_config(self.cfg_path)
+
+    def key(self):
+        from swarm import drive_activate
+        return drive_activate.board_key(self.cfg())
+
+    def ledger(self, job="J", **kw):
+        from swarm.supervisor import ledger
+        kw.setdefault("budgets", {})
+        kw.setdefault("activated_at", (self.NOW - dt.timedelta(hours=1)).isoformat())
+        return ledger.create(self.key(), job, **kw)
+
+    def run_checks(self, run=None, which=None, platform="linux", now=None, **kw):
+        run = run or FakeRun()
+        which = which or (lambda name, path=None: None)
+        checks = bootstrap.drive_checks(self.cfg(), run=run, which=which, now=now or self.NOW, platform=platform, **kw)
+        return {c.name: c for c in checks}
+
+    # ---- relevance
+    def test_nothing_without_drive_jobs_or_config(self):
+        self.assertEqual(bootstrap.drive_checks(self.cfg(), run=FakeRun(), which=lambda n, path=None: None,
+                                                now=self.NOW, platform="linux"), [])
+
+    # ---- running timer
+    @posix_only("systemd")
+    def test_timer_running_and_recent_pass_is_ok(self):
+        self.ledger()
+        c = self.run_checks()["drive timer"]
+        self.assertTrue(c.ok)
+        self.assertIn("3 min ago", c.detail)
+        self.assertIn("active/enabled", c.detail)
+        self.assertNotIn("no user bus", c.detail)
+
+    @posix_only("systemd")
+    def test_timer_not_active_fails(self):
+        self.ledger()
+        run = FakeRun(systemctl="ActiveState=inactive\nUnitFileState=enabled\n")
+        c = self.run_checks(run)["drive timer"]
+        self.assertIs(c.ok, False)
+        self.assertIn("inactive/enabled", c.detail)
+
+    @posix_only("systemd")
+    def test_timer_not_enabled_fails(self):
+        self.ledger()
+        run = FakeRun(systemctl="ActiveState=active\nUnitFileState=disabled\n")
+        self.assertIs(self.run_checks(run)["drive timer"].ok, False)
+
+    @posix_only("systemd")
+    def test_stale_last_pass_fails_beyond_two_periods(self):
+        self.ledger()
+        self.state["last_run_at"] = (self.NOW - dt.timedelta(minutes=10.5)).isoformat()   # timer_minutes 5
+        c = self.run_checks()["drive timer"]
+        self.assertIs(c.ok, False)
+        self.assertIn("last pass", c.detail)
+        self.state["last_run_at"] = (self.NOW - dt.timedelta(minutes=9.5)).isoformat()
+        self.assertTrue(self.run_checks()["drive timer"].ok)
+
+    @posix_only("systemd")
+    def test_never_run_or_future_dated_pass_fails(self):
+        self.ledger()
+        self.state.clear()
+        self.assertIs(self.run_checks()["drive timer"].ok, False)
+        self.state["last_run_at"] = (self.NOW + dt.timedelta(minutes=30)).isoformat()
+        self.assertIs(self.run_checks()["drive timer"].ok, False)
+
+    @posix_only("systemd")
+    def test_unreadable_bus_with_recent_pass_is_not_a_false_fail(self):
+        self.ledger()
+        c = self.run_checks(FakeRun(systemctl="", systemctl_rc=1))["drive timer"]
+        self.assertTrue(c.ok)
+        self.assertNotIn("?/?", c.detail)
+        self.assertIn("no user bus", c.detail)
+        self.state["last_run_at"] = (self.NOW - dt.timedelta(hours=2)).isoformat()
+        self.assertIs(self.run_checks(FakeRun(systemctl="", systemctl_rc=1))["drive timer"].ok, False)
+
+    @posix_only("systemd")
+    def test_timer_is_read_with_the_user_managers_environment(self):
+        self.ledger()
+        run = FakeRun()
+        with mock.patch("swarm.supervisor.systemd.manager_env", return_value={"XDG_RUNTIME_DIR": "/run/user/4242"}):
+            self.run_checks(run)
+        shown = [kw for argv, kw in run.calls if argv[0] == "systemctl"]
+        self.assertTrue(shown)
+        self.assertEqual(shown[0]["env"], {"XDG_RUNTIME_DIR": "/run/user/4242"})
+
+    @posix_only("systemd")
+    def test_disabled_supervisor_fails_drive_timer(self):
+        self.write_cfg("[supervise]\nenabled = false\n")
+        self.ledger()
+        c = self.run_checks()["drive timer"]
+        self.assertIs(c.ok, False)
+        self.assertIn("disabled", c.detail)
+
+    @posix_only("systemd")
+    def test_drive_config_alone_adds_no_timer_line(self):
+        self.write_cfg("[drive]\nmax_cost_usd = 10\n")
+        checks = self.run_checks()
+        self.assertNotIn("drive timer", checks)
+        self.assertIn("drive git", checks)
+
+    def test_other_platforms_say_drive_is_unavailable(self):
+        self.write_cfg("[drive]\nmax_cost_usd = 10\n")
+        for plat in ("darwin", "win32"):
+            checks = self.run_checks(platform=plat)
+            self.assertEqual(list(checks), ["drive mode"])
+            self.assertTrue(checks["drive mode"].ok)
+            self.assertEqual(checks["drive mode"].detail, "drive mode unavailable: no supervisor timer")
+
+    # ---- git
+    def test_git_below_2_40_fails_with_drive_jobs(self):
+        self.ledger()
+        for version in ("2.39.5", "2.9.1", "1.8.3"):
+            c = self.run_checks(FakeRun(git=f"git version {version}"))["drive git"]
+            self.assertIs(c.ok, False, version)
+            self.assertIn(version, c.detail)
+            self.assertIn("2.40", c.fix)
+
+    def test_git_2_40_and_newer_pass(self):
+        self.ledger()
+        for version in ("2.40.0", "2.43.0", "2.100.1", "3.0.0", "2.50.1.windows.1"):
+            self.assertTrue(self.run_checks(FakeRun(git=f"git version {version}"))["drive git"].ok, version)
+
+    def test_old_git_only_warns_without_drive_jobs(self):
+        self.write_cfg("[drive]\nmax_cost_usd = 10\n")
+        self.assertIsNone(self.run_checks(FakeRun(git="git version 2.30.2"))["drive git"].ok)
+
+    def test_git_missing_or_unreadable_version_is_a_warning(self):
+        self.ledger()
+        self.assertIsNone(self.run_checks(FakeRun(git="what"))["drive git"].ok)
+        run = mock.Mock(side_effect=lambda argv, **kw: (_ for _ in ()).throw(OSError("no git")) if argv[0] == "git"
+                        else FakeRun()(argv, **kw))
+        self.assertIsNone(self.run_checks(run)["drive git"].ok)
+
+    # ---- Claude Bash sandbox
+    def settings(self, data):
+        Path(os.environ["CLAUDE_SETTINGS"]).write_text(data if isinstance(data, str) else json.dumps(data))
+
+    def test_bash_sandbox_enabled_is_a_boundary(self):
+        self.ledger()
+        self.settings({"sandbox": {"enabled": True}})
+        c = self.run_checks()["claude sandbox"]
+        self.assertTrue(c.ok)
+        self.assertIn("boundary", c.detail)
+        self.assertNotIn("guardrail only", c.detail)
+
+    def test_bash_sandbox_off_missing_or_unreadable_is_guardrail_only(self):
+        self.ledger()
+        for data in ({"sandbox": {"enabled": False}}, {"sandbox": {"enabled": "true"}}, {}, {"sandbox": []},
+                     "{not json", None):
+            if data is not None:
+                self.settings(data)
+            c = self.run_checks()["claude sandbox"]
+            self.assertIsNone(c.ok, data)
+            self.assertIn("guardrail only", c.detail)
+            self.assertNotIn("boundary", c.detail)
+
+    # ---- Codex
+    def codex_home(self, text):
+        d = self.home / ".codex"
+        d.mkdir(exist_ok=True)
+        (d / "config.toml").write_text(text)
+        p = mock.patch.dict(os.environ, {"CODEX_HOME": str(d)}); p.start(); self.addCleanup(p.stop)
+
+    def test_no_codex_lines_without_codex(self):
+        self.ledger()
+        names = self.run_checks()
+        self.assertNotIn("codex board access", names)
+        self.assertNotIn("codex rollout budget", names)
+
+    def test_codex_writer_ready_when_the_store_dir_is_a_writable_root(self):
+        self.ledger()
+        which = lambda name, path=None: "/usr/bin/codex" if name == "codex" else None   # noqa: E731
+        self.codex_home(f'[sandbox_workspace_write]\nwritable_roots = [{tq(self.home)}]\n')
+        c = self.run_checks(which=which)["codex board access"]
+        self.assertTrue(c.ok)
+        self.assertEqual(c.detail, "codex writer seats reach the board")
+        self.codex_home('[sandbox_workspace_write]\nwritable_roots = ["/elsewhere"]\n')
+        c = self.run_checks(which=which)["codex board access"]
+        self.assertIsNone(c.ok)
+        self.assertIn("cannot reach the board", c.detail)
+
+    def test_codex_writer_on_postgres_needs_network_access(self):
+        self.ledger()
+        which = lambda name, path=None: "/usr/bin/codex" if name == "codex" else None   # noqa: E731
+        cfg = self.cfg()
+        with mock.patch("swarm.codex_config.board_dir", return_value=None):
+            self.codex_home("[sandbox_workspace_write]\nnetwork_access = true\n")
+            cfg["codex"] = {"network_access": True}
+            yes = {c.name: c for c in bootstrap.drive_checks(cfg, run=FakeRun(), which=which, now=self.NOW,
+                                                             platform="linux")}["codex board access"]
+            self.assertEqual(yes.detail, "codex writer seats reach the board")
+            cfg["codex"] = {}
+            no = {c.name: c for c in bootstrap.drive_checks(cfg, run=FakeRun(), which=which, now=self.NOW,
+                                                            platform="linux")}["codex board access"]
+            self.assertIn("cannot reach the board", no.detail)
+            self.assertIn("network_access", no.detail)
+            cfg["codex"] = {"network_access": True}
+            self.codex_home("[sandbox_workspace_write]\n")
+            half = {c.name: c for c in bootstrap.drive_checks(cfg, run=FakeRun(), which=which, now=self.NOW,
+                                                              platform="linux")}["codex board access"]
+            self.assertIn("cannot reach the board", half.detail)
+
+    # ---- budget and models
+    def test_budget_line_per_active_job(self):
+        from swarm.supervisor import ledger
+        led = self.ledger(budgets={"max_cost_usd": 10, "ruling_reserve_usd": 2, "max_sessions": 5,
+                                   "max_wall_hours": 3})
+        led.intents.append(ledger.Intent("L1", "a1", 1, "a", 2.0, 60.0, [], "concluded", "ok", True, 1.5))
+        led.intents.append(ledger.Intent("L2", "a2", 1, "b", 0.5, 60.0, [], "claimed"))
+        led.save()
+        c = self.run_checks()["drive budget J"]
+        self.assertTrue(c.ok)
+        self.assertEqual(c.detail, "cost 2.00/10.00 USD (reserve 2.00), sessions 2/5, wall 1.0/3 h")
+
+    def test_budget_line_defaults_and_config_overlay(self):
+        self.write_cfg("[drive]\nmax_cost_usd = 25\n")
+        self.ledger()
+        self.assertEqual(self.run_checks()["drive budget J"].detail,
+                         "cost 0.00/25.00 USD (reserve 5.00), sessions 0/60, wall 1.0/24 h")
+
+    def test_budget_wall_clock_excludes_halted_time(self):
+        led = self.ledger(budgets={"max_wall_hours": 3})
+        led.halted_total_seconds = 1800.0
+        led.save()
+        self.assertIn("wall 0.5/3 h", self.run_checks()["drive budget J"].detail)
+
+    def test_exhausted_budget_warns(self):
+        from swarm.supervisor import ledger
+        led = self.ledger(budgets={"max_cost_usd": 3, "ruling_reserve_usd": 1, "max_sessions": 9})
+        led.intents.append(ledger.Intent("L1", "a1", 1, "a", 3.0, 60.0, [], "concluded", "ok", True, 3.0))
+        led.save()
+        self.assertIsNone(self.run_checks()["drive budget J"].ok)
+        led = self.ledger("K", budgets={"max_sessions": 1})
+        led.intents.append(ledger.Intent("L1", "a1", 1, "a", 1.0, 60.0, [], "concluded", "ok", True, 0.1))
+        led.save()
+        self.assertIsNone(self.run_checks()["drive budget K"].ok)
+        self.ledger("W", budgets={"max_wall_hours": 0.5})
+        self.assertIsNone(self.run_checks()["drive budget W"].ok)
+
+    def test_model_table_line_uses_job_overrides_then_config_then_defaults(self):
+        self.write_cfg('[drive.models]\nreviewer = "opus"\n')
+        self.ledger(models={"engineer": "sonnet"})
+        c = self.run_checks()["drive models J"]
+        self.assertTrue(c.ok)
+        for want in ("engineer=sonnet", "reviewer=opus", "judge=opus", "worker=haiku", "lead=opus", "qa=sonnet"):
+            self.assertIn(want, c.detail)
+
+    def test_bad_model_config_is_a_warning_not_a_crash(self):
+        self.write_cfg('[drive.models]\nreviewer = "gpt-9"\n')
+        self.ledger()
+        checks = self.run_checks()
+        self.assertIsNone(checks["drive models J"].ok)
+        self.assertIn("allowed_models", checks["drive models J"].detail)
+
+    def test_finished_jobs_get_no_lines(self):
+        done = self.ledger("DONE")
+        done.terminal = {"verdict": "met", "at": self.NOW.isoformat()}
+        done.save()
+        self.ledger("LIVE")
+        names = list(self.run_checks())
+        self.assertIn("drive budget LIVE", names)
+        self.assertNotIn("drive budget DONE", names)
+        self.assertNotIn("drive models DONE", names)
+
+    # ---- credential helpers
+    def owner(self, credentials, job="J"):
+        from swarm import enrolment
+        enrolment.write_job_owner(self.key(), job=job, harness="claude", session_id=None, cwd=str(self.home),
+                                  roots=[str(self.home)], remotes={}, credentials=credentials, requirements={},
+                                  recipe="coding", goal="G")
+
+    @posix_only("executable bits")
+    def test_credential_helper_resolvable_or_not_per_destination(self):
+        self.ledger()
+        good = self.home / "bin/gh"
+        good.parent.mkdir()
+        good.write_text("#!/bin/sh\n"); good.chmod(0o755)
+        noexec = self.home / "bin/git-credential-store"
+        noexec.write_text("#!/bin/sh\n"); noexec.chmod(0o644)
+        self.owner({"origin": f"helper:{good} auth git-credential",
+                    "mirror": f"helper:{self.home}/gone/gh auth git-credential",
+                    "other": f"helper:{noexec}"})
+        checks = self.run_checks()
+        self.assertTrue(checks["drive credential origin"].ok)
+        self.assertIn(str(good), checks["drive credential origin"].detail)
+        gone = checks["drive credential mirror"]
+        self.assertIs(gone.ok, False)
+        self.assertIn(f"{self.home}/gone/gh", gone.detail)
+        self.assertIn("--credential", gone.fix)
+        self.assertIs(checks["drive credential other"].ok, False)
+        (self.home / "bin/adir").mkdir(mode=0o755)
+        self.owner({"d": f"helper:{self.home}/bin/adir"})
+        self.assertIs(self.run_checks()["drive credential d"].ok, False)
+
+    def test_non_helper_credentials_and_missing_owner_add_no_helper_line(self):
+        self.ledger()
+        self.owner({"ssh": "ssh-agent:/run/user/1/agent.sock", "key": f"ssh-key:{self.home}/k"})
+        self.assertFalse([n for n in self.run_checks() if n.startswith("drive credential")])
+        self.ledger("NOOWNER")
+        self.assertFalse([n for n in self.run_checks() if n.startswith("drive credential")])
+
+    def test_land_lines_are_added_for_each_jobs_pinned_destinations(self):
+        import sys
+        import types
+        from collections import namedtuple
+        Line = namedtuple("Line", "name ok detail fix")
+        seen = []
+        fake = types.ModuleType("swarm.land_doctor")
+        fake.checks = lambda cfg, owners=None: seen.append(owners) or [Line("land x ls-remote", False, "boom", None)]
+        self.ledger()
+        self.owner({"origin": "ssh-agent:/run/user/1/a.sock"})
+        import swarm
+        with mock.patch.dict(sys.modules, {"swarm.land_doctor": fake}), \
+                mock.patch.object(swarm, "land_doctor", fake, create=True):
+            c = self.run_checks()["land x ls-remote"]
+        self.assertIs(c.ok, False)
+        self.assertEqual((c.detail, c.fix), ("boom", ""))
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0][0]["credentials"], {"origin": "ssh-agent:/run/user/1/a.sock"})
+
+    def test_no_land_lines_without_drive_jobs(self):
+        import sys
+        import types
+        fake = types.ModuleType("swarm.land_doctor")
+        fake.checks = lambda cfg, owners=None: self.fail("called without drive jobs")
+        self.write_cfg("[drive]\nmax_cost_usd = 10\n")
+        import swarm
+        with mock.patch.dict(sys.modules, {"swarm.land_doctor": fake}), \
+                mock.patch.object(swarm, "land_doctor", fake, create=True):
+            self.run_checks()
+
+    # ---- bad ledgers
+    def test_unreadable_ledger_fails_as_driver_ledger_bad(self):
+        from swarm.supervisor import privfs
+        self.ledger()
+        with privfs.dir_fd("drive") as d:
+            privfs.write_atomic(d, "ab" * 32 + ".json", "{not json")
+        checks = self.run_checks()
+        bad = [c for n, c in checks.items() if n.startswith("drive ledger")]
+        self.assertEqual([c.ok for c in bad], [False])
+        self.assertIn("DRIVER-LEDGER-BAD", bad[0].detail)
+        self.assertIn("drive timer", checks)       # an unreadable ledger still means drive jobs here
+
+    # ---- orphans, claims, goal jobs ([A], DRIVER-ORPHAN)
+    def board_job(self, job, *, claim=False, goal="G"):
+        from swarm.board import open_board
+        with open_board(self.cfg()) as b:
+            b.open_job(job, "d", None, None, "me", goal=goal)
+            if claim:
+                b.set_job_data(job, "drive.enabled", "1")
+
+    def later(self, seconds):
+        return dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=seconds)
+
+    def test_ledger_without_owner_record_is_a_driver_orphan(self):
+        from swarm.supervisor import driver_events
+        self.ledger("J")
+        c = self.run_checks()["drive orphan J"]
+        self.assertIs(c.ok, False)
+        self.assertIn(driver_events.DRIVER_ORPHAN, c.detail)
+        self.assertIn("owner record", c.detail)
+        self.owner({})
+        self.assertNotIn("drive orphan J", self.run_checks())
+
+    def test_board_claim_without_ledger_fails_only_past_the_grace(self):
+        from swarm.supervisor import driver_events
+        self.board_job("C", claim=True)
+        self.write_cfg("[drive]\nmax_cost_usd = 10\n")
+        within = bootstrap.drive_checks(self.cfg(), run=FakeRun(), which=lambda n, path=None: None,
+                                        now=self.later(100), platform="linux")
+        self.assertNotIn("drive orphan C", {c.name for c in within})
+        past = {c.name: c for c in bootstrap.drive_checks(self.cfg(), run=FakeRun(), which=lambda n, path=None: None,
+                                                          now=self.later(125), platform="linux")}
+        self.assertIs(past["drive orphan C"].ok, False)
+        self.assertIn(driver_events.DRIVER_ORPHAN, past["drive orphan C"].detail)
+        self.assertIn("claim", past["drive orphan C"].detail)
+
+    def test_claim_with_a_ledger_or_a_terminal_ledger_is_not_an_orphan(self):
+        self.board_job("L", claim=True)
+        self.ledger("L")
+        self.owner({}, job="L")
+        done = self.ledger("T")
+        done.terminal = {"verdict": "met", "at": self.NOW.isoformat()}
+        done.save()
+        self.board_job("T", claim=True)
+        names = {c.name for c in bootstrap.drive_checks(self.cfg(), run=FakeRun(), which=lambda n, path=None: None,
+                                                        now=self.later(3600), platform="linux")}
+        self.assertNotIn("drive orphan L", names)
+        self.assertNotIn("drive orphan T", names)
+
+    def test_goal_jobs_activated_before_drive_mode_are_listed(self):
+        self.board_job("OLD", claim=False, goal="G")
+        self.board_job("NOGOAL", claim=False, goal=None)
+        self.board_job("DRIVEN", claim=True, goal="G")
+        self.ledger("DRIVEN")
+        self.owner({}, job="DRIVEN")
+        self.board_job("NOCLAIM", claim=False, goal="G")   # a ledger, but the claim was lost: not "old"
+        self.ledger("NOCLAIM")
+        self.owner({}, job="NOCLAIM")
+        c = self.run_checks(now=self.later(0))["drive not autonomous"]
+        self.assertNotIn("NOCLAIM", c.detail)
+        self.assertIsNone(c.ok)
+        self.assertIn("activated before drive mode", c.detail)
+        self.assertIn("OLD", c.detail)
+        self.assertNotIn("NOGOAL", c.detail)
+        self.assertNotIn("DRIVEN", c.detail)
+
+    def test_no_list_when_every_goal_job_is_driven_or_there_is_no_board(self):
+        self.ledger("J")
+        self.assertNotIn("drive not autonomous", self.run_checks())   # no board store: nothing read
+
+    def test_board_unreadable_is_a_warning_line(self):
+        from swarm.board import BoardUnavailable
+        self.board_job("X")
+        with mock.patch("swarm.board.open_board", side_effect=BoardUnavailable("down")):
+            c = self.run_checks()["drive board"]
+        self.assertIsNone(c.ok)
+
+    # ---- read-only, and loud when a ledger can't be read
+    def tree(self):
+        return sorted(str(p.relative_to(self.home)) for p in self.home.rglob("*"))
+
+    def test_doctor_creates_nothing_on_a_fresh_home(self):
+        self.write_cfg("[drive]\nmax_cost_usd = 10\n")
+        before = self.tree()
+        checks = self.run_checks()
+        self.assertIn("drive git", checks)
+        self.assertEqual(self.tree(), before)
+        self.assertFalse((self.home / ".local/share/swarm/supervisor").exists())
+
+    @posix_only("symlinks")
+    def test_unreadable_ledger_dir_is_a_fail_line_not_silence(self):
+        from swarm.supervisor import driver_events, ledger, settings
+        self.ledger("J")
+        d = settings.private_dir() / ledger.SUBDIR
+        lock = d / ledger._lock_name(ledger._name(self.key(), "J"))
+        lock.unlink(missing_ok=True)
+        lock.symlink_to(self.home / "nowhere")
+        checks = self.run_checks()
+        c = checks["drive ledgers"]
+        self.assertIs(c.ok, False)
+        self.assertIn(driver_events.DRIVER_LEDGER_BAD, c.detail)
+        self.assertIn("held", c.detail)
+        self.assertIn("drive timer", checks)
+
+    # ---- wiring
+    @posix_only("systemd")
+    def test_doctor_includes_the_drive_lines(self):
+        self.ledger()
+        import support
+        with mock.patch.dict(os.environ, {"SWARM_VENV": str(support.temp_venv()), "SWARM_AUTO_INIT": "1"}), \
+             mock.patch("swarm.bootstrap.drive_checks", return_value=[bootstrap.Check("drive probe", True, "x")]) as m:
+            names = [c.name for c in bootstrap.doctor("claude", config=self.cfg_path)]
+        self.assertIn("drive probe", names)
+        self.assertEqual(m.call_count, 1)
