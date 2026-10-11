@@ -62,6 +62,23 @@ class FakePerson:
         raise PermissionError(f"refused: {action} needs a person: run it from the session that activated {job}")
 
 
+def drivegate_stub(module):
+    """Stand `module` in for swarm.drivegate (None: absent). `from swarm import drivegate` reads the package
+    attribute first, so once any test imported the real module (the hooks do), a sys.modules stub alone is
+    shadowed and the real kick runs: replace both, whatever was imported before."""
+    import contextlib
+    import swarm as swarm_package
+    stack = contextlib.ExitStack()
+    stack.enter_context(mock.patch.dict(sys.modules, {"swarm.drivegate": module}))
+    if module is None:
+        if hasattr(swarm_package, "drivegate"):
+            stack.enter_context(mock.patch.object(swarm_package, "drivegate", None))
+            delattr(swarm_package, "drivegate")
+    else:
+        stack.enter_context(mock.patch.object(swarm_package, "drivegate", module, create=True))
+    return stack
+
+
 def ns(**kw) -> argparse.Namespace:
     base = dict(goal=None, no_drive=False, reason=None, job="J", workdir=None, allow_workdir=None,
                 lead_brief=None, recipe=None, requirements=None, remote=None, credential=None,
@@ -307,6 +324,339 @@ class CredentialAndWorkdirTests(HomeCase):
         self.assertEqual(da.blob_id(b"hello\n"), "ce013625030ba8dba906f756967f9e9ca394464a")
 
 
+class PinnedGitTests(HomeCase):
+    """[G2] every git call that takes a pinned URL: the URL is never an option (`--` before it, and a URL
+    starting with "-" is refused everywhere it enters), the transports are pinned (https, ssh, file), and
+    git runs in a neutral directory with no system or global config, so config a seat wrote (a work dir's
+    .git/config, ~/.gitconfig) cannot rewrite the URL or enable a protocol."""
+
+    def git(self, *args, cwd=None):
+        import subprocess
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"}
+        return subprocess.run(["git", *args], check=True, capture_output=True, text=True, env=env, cwd=cwd)
+
+    def upstream(self, branch="main"):
+        repo = self.home / "upstream"
+        self.git("init", "-q", "-b", branch, str(repo))
+        self.git("-C", str(repo), "commit", "-q", "--allow-empty", "-m", "one")
+        return repo, self.git("-C", str(repo), "rev-parse", "HEAD").stdout.strip()
+
+    def test_upload_pack_url_does_not_execute(self):
+        """The reviewer's PoC: `git ls-remote --heads --upload-pack=CMD ...` runs CMD. It is refused before
+        git runs, and even if it reached git the `--` makes it a repository name."""
+        marker = self.home / "pwned-upload-pack"
+        url = "--upload-pack=touch${IFS}" + str(marker)
+        with self.assertRaises(da.DriveError):
+            da.remote_head(url, None, None, "main")
+        self.assertFalse(marker.exists())
+
+    def test_upload_pack_url_is_inert_even_past_the_validation(self):
+        marker = self.home / "pwned-upload-pack-2"
+        url = "--upload-pack=touch${IFS}" + str(marker)
+        with mock.patch.object(da.gitpin, "check_url", side_effect=lambda u: u):
+            with self.assertRaises(da.DriveError):
+                da.remote_head(url, None, None, "main")
+        self.assertFalse(marker.exists())
+
+    def test_argv_has_double_dash_before_the_url_and_env_pins(self):
+        done = types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        url = "https://example.com/o/r.git"
+        with mock.patch.object(da.subprocess, "run", return_value=done) as run:
+            da.remote_head(url, None, None, "main")
+        argv, kw = run.call_args.args[0], run.call_args.kwargs
+        self.assertEqual(argv[argv.index(url) - 1], "--")
+        self.assertLess(argv.index("ls-remote"), argv.index("--"))
+        env = kw["env"]
+        self.assertEqual(env["GIT_ALLOW_PROTOCOL"], "https:ssh:file")
+        self.assertEqual(env["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertEqual(env["GIT_CONFIG_GLOBAL"], os.devnull)
+        self.assertIn("protocol.allow=never", argv)
+        self.assertEqual(kw["cwd"], os.path.abspath(os.sep))
+        self.assertNotEqual(kw["cwd"], os.getcwd())
+
+    def test_planted_insteadof_in_the_workdir_config_does_not_run(self):
+        """The reviewer's second PoC: the work dir's .git/config (seat-writable) rewrites the URL to ext::
+        and allows ext. With the process inside that work dir, the read still goes to the pinned URL."""
+        repo, head = self.upstream()
+        work = self.home / "work"
+        self.git("init", "-q", str(work))
+        marker = self.home / "pwned-insteadof"
+        url = "file://" + str(repo)
+        self.git("-C", str(work), "config", "protocol.ext.allow", "always")
+        self.git("-C", str(work), "config", f"url.ext::sh -c touch% {marker}% >&2.insteadOf", url)
+        cwd = os.getcwd()
+        self.addCleanup(os.chdir, cwd)
+        os.chdir(work)
+        self.assertEqual(da.remote_head(url, None, None, "main"), head)
+        self.assertFalse(marker.exists())
+
+    def test_planted_global_config_does_not_redirect_the_url(self):
+        repo, head = self.upstream()
+        decoy = self.home / "decoy"
+        self.git("init", "-q", "-b", "main", str(decoy))
+        self.git("-C", str(decoy), "commit", "-q", "--allow-empty", "-m", "decoy")
+        url = "file://" + str(repo)
+        (self.home / ".gitconfig").write_text(f'[url "file://{decoy}"]\n\tinsteadOf = {url}\n')
+        self.assertEqual(da.remote_head(url, None, None, "main"), head)
+
+    def test_ext_and_unpinned_transports_refused(self):
+        for bad in ("ext::sh -c touch% x", "ext::sh", "fd::3", "git://example.com/r.git", "http://example.com/r.git",
+                    "ftp://example.com/r.git", "-oProxyCommand=x", "ssh://-oProxyCommand=x/r", "relative/path",
+                    "https://example.com/r\n.git", "https://exa mple.com/r.git"):
+            with self.subTest(url=bad), self.assertRaises(da.DriveError):
+                da.remote_head(bad, None, None, "main")
+
+    def test_sanitize_remote_refuses_an_option_or_a_transport_helper(self):
+        for bad in ("--upload-pack=touch${IFS}x", "-u", "ext::sh -c id", "git://example.com/r.git",
+                    "https://example.com/r.git\n", "relative/repo"):
+            with self.subTest(url=bad), self.assertRaises(da.DriveError):
+                da.sanitize_remote(bad)
+
+    def test_remote_flag_with_an_option_url_is_refused_at_plan_time(self):
+        work = self.home / "repo"
+        work.mkdir()
+        with self.assertRaises(da.DriveError):
+            da.build_plan({"supervise": {"allowed_workdirs": [str(self.home)]}},
+                          ns(job="J", workdir=str(work), remote=["origin=--upload-pack=touch${IFS}x"]), GOAL)
+
+    def test_workdir_remote_with_an_option_url_is_never_pinned(self):
+        work = self.home / "w2"
+        self.git("init", "-q", str(work))
+        self.git("-C", str(work), "config", "remote.evil.url", "--upload-pack=touch${IFS}x")
+        self.git("-C", str(work), "config", "remote.rel.url", "../up.git")
+        remotes = da.git_remotes(str(work))
+        self.assertNotIn("evil", remotes)
+        self.assertEqual(remotes.get("rel"), str(self.home / "up.git"))
+
+    def test_pin_read_back_is_rechecked_against_the_allowlist(self):
+        done = types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        for pin in ("helper:/usr/bin/curl", "helper:/usr/bin/gh auth login", "helper:gh auth git-credential",
+                    "ssh-key:relative", "ssh-agent:relative", "nonsense"):
+            with self.subTest(pin=pin), mock.patch.object(da.subprocess, "run", return_value=done) as run:
+                with self.assertRaises(da.DriveError):
+                    da.remote_head("https://example.com/r.git", pin, None, "main")
+                run.assert_not_called()
+
+
+class ConfigDirTests(HomeCase):
+    """[G2a] a gh helper's GH_CONFIG_DIR must be private: a seat that can write it can plant hosts.yml, and
+    the pushes then use the seat's token."""
+
+    def setUp(self):
+        super().setUp()
+        self.root = self.home / "src"
+        self.root.mkdir(mode=0o700)
+        self.cfg = {"supervise": {"allowed_workdirs": [str(self.root)]}}
+
+    def private(self, name="gh"):
+        d = self.home / name
+        d.mkdir(mode=0o700)
+        os.chmod(d, 0o700)
+        return str(d)
+
+    def test_private_dir_accepted(self):
+        d = self.private()
+        self.assertEqual(da.check_config_dir(d, self.cfg), d)
+
+    def test_dir_under_an_allowed_workdirs_root_refused(self):
+        d = self.root / "repo" / ".gh"
+        d.mkdir(parents=True, mode=0o700)
+        with self.assertRaisesRegex(da.DriveError, "work root"):
+            da.check_config_dir(str(d), self.cfg)
+
+    def test_dir_under_a_job_root_refused(self):
+        d = self.private("extra")
+        with self.assertRaisesRegex(da.DriveError, "work root"):
+            da.check_config_dir(d, self.cfg, [d])
+
+    def test_missing_dir_refused(self):
+        with self.assertRaisesRegex(da.DriveError, "does not exist"):
+            da.check_config_dir(str(self.home / "nope"), self.cfg)
+
+    @posix_only("needs POSIX file modes and uids")
+    def test_group_or_world_writable_dir_refused(self):
+        for mode in (0o770, 0o707):
+            with self.subTest(mode=oct(mode)):
+                d = self.private(f"gh-{mode:o}")
+                os.chmod(d, mode)
+                with self.assertRaisesRegex(da.DriveError, "group or others"):
+                    da.check_config_dir(d, self.cfg)
+
+    @posix_only("needs POSIX file modes and uids")
+    def test_writable_parent_refused(self):
+        parent = self.home / "shared"
+        parent.mkdir()
+        os.chmod(parent, 0o777)
+        (parent / "gh").mkdir(mode=0o700)
+        with self.assertRaisesRegex(da.DriveError, "parent"):
+            da.check_config_dir(str(parent / "gh"), self.cfg)
+
+    @posix_only("needs POSIX file modes and uids")
+    def test_sticky_parent_allowed(self):
+        parent = self.home / "sticky"
+        parent.mkdir()
+        os.chmod(parent, 0o1777)
+        (parent / "gh").mkdir(mode=0o700)
+        self.assertEqual(da.check_config_dir(str(parent / "gh"), self.cfg), str(parent / "gh"))
+
+    @posix_only("needs POSIX file modes and uids")
+    def test_dir_of_another_user_refused(self):
+        d = self.private()
+        real = os.stat(d)
+        fake = os.stat_result((real.st_mode, real.st_ino, real.st_dev, real.st_nlink, os.getuid() + 1,
+                               real.st_gid, real.st_size, int(real.st_atime), int(real.st_mtime), int(real.st_ctime)))
+        orig = os.stat
+        with mock.patch.object(da.gitpin.os, "stat", side_effect=lambda p, *a, **k: fake if p == os.path.realpath(d) else orig(p, *a, **k)):
+            with self.assertRaisesRegex(da.DriveError, "not owned"):
+                da.check_config_dir(d, self.cfg)
+
+    def test_plan_refuses_a_gh_config_dir_under_the_workdir(self):
+        work = self.root / "repo"
+        work.mkdir()
+        planted = work / ".config" / "gh"
+        planted.mkdir(parents=True, mode=0o700)
+        gh = absolute("home", "u", ".local", "bin", "gh")
+        with mock.patch.dict(os.environ, {"GH_CONFIG_DIR": str(planted)}), \
+                self.assertRaisesRegex(da.DriveError, "work root"):
+            da.build_plan(self.cfg, ns(job="J", workdir=str(work), remote=["origin=https://example.com/o/r.git"],
+                                       credential=["origin=helper:" + gh + " auth git-credential"]), GOAL)
+
+    def test_config_dir_rechecked_when_read_back_from_the_record(self):
+        """A record whose config dir became unsafe (or was planted) refuses before git runs."""
+        work = self.root / "repo"
+        work.mkdir()
+        bad = work / "gh"
+        bad.mkdir(mode=0o700)
+        o = {"target_branch": "main", "remotes": {"origin": "https://example.com/r.git"},
+             "credentials": {"origin": "helper:/usr/bin/gh auth git-credential"},
+             "config_dirs": {"origin": str(bad)}, "roots": [str(work)]}
+        led = types.SimpleNamespace(activation_heads={})
+        with mock.patch.object(ledger, "load", return_value=led), \
+                mock.patch.object(da, "remote_head") as head, self.assertRaisesRegex(da.DriveError, "work root"):
+            da._record_activation_heads(self.cfg, "bk", "J", o)
+        head.assert_not_called()
+
+    def test_pin_rechecked_when_read_back_from_the_record(self):
+        o = {"target_branch": "main", "remotes": {"origin": "https://example.com/r.git"},
+             "credentials": {"origin": "helper:/usr/bin/curl"}, "config_dirs": {}, "roots": [str(self.root)]}
+        led = types.SimpleNamespace(activation_heads={})
+        with mock.patch.object(ledger, "load", return_value=led), \
+                mock.patch.object(da, "remote_head") as head, self.assertRaisesRegex(da.DriveError, "allowlist"):
+            da._record_activation_heads(self.cfg, "bk", "J", o)
+        head.assert_not_called()
+
+
+class OwnerRecordTests(HomeCase):
+    """The owner record validator refuses what a pinned git call refuses, and an owner record this build
+    cannot read is a clear DRIVER-CONFIG hold, not a silent "no record" (a misleading DRIVER-ORPHAN)."""
+
+    def owner(self, **kw):
+        base = dict(roots=[absolute("w")], remotes={"origin": "https://example.com/r.git"},
+                    credentials={"origin": "helper:/usr/bin/gh auth git-credential"}, requirements={},
+                    recipe="coding", goal=GOAL, brief=absolute("w", "b.md"), target_branch="main",
+                    config_dirs={"origin": absolute("home", "u", ".config", "gh")})
+        base.update(kw)
+        return base
+
+    def write(self, **kw):
+        return enrolment.write_job_owner("bk", job="J", harness="claude", session_id=None, cwd=absolute("w"),
+                                         **self.owner(**kw))
+
+    def test_valid_owner_record_round_trips_with_its_format(self):
+        self.write()
+        rec = enrolment.find_job_owner("bk", "J", strict=True)
+        self.assertEqual(rec.owner["format"], enrolment.OWNER_FORMAT)
+
+    def test_option_or_helper_urls_refused_in_the_owner_record(self):
+        for url in ("--upload-pack=touch${IFS}x", "-x", "ext::sh -c id", "git://example.com/r.git", "rel/path"):
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                self.write(remotes={"origin": url})
+
+    def test_pins_off_the_allowlist_refused_in_the_owner_record(self):
+        for pin in ("helper:/usr/bin/curl", "helper:gh auth git-credential", "ssh-key:rel", "x"):
+            with self.subTest(pin=pin), self.assertRaises(ValueError):
+                self.write(credentials={"origin": pin})
+
+    def test_target_branch_regex_applied_in_the_owner_record(self):
+        for branch in ("-x", "a..b", "a b", "a\nb", "/x", "x.lock", "x/"):
+            with self.subTest(branch=branch), self.assertRaises(ValueError):
+                self.write(target_branch=branch)
+
+    def planted(self, owner):
+        """Write an owner record file directly (as an older build, or a planter, would)."""
+        import json as _json
+        rec = {"v": enrolment.FORMAT, "kind": "owner", "board_key": "bk", "job": "J", "agent_key": None,
+               "harness": "claude", "session_id": None, "cwd": absolute("w"), "created_at": 1.0, "prompt": None,
+               "owner": owner}
+        with enrolment._dir(create=True) as d:
+            enrolment.safefs.write_atomic(d, f"owner-{enrolment._digest('owner', 'bk', 'J')}.json", _json.dumps(rec))
+
+    def test_old_format_owner_record_is_a_clear_error_not_a_missing_record(self):
+        old = self.owner()
+        old.pop("target_branch"), old.pop("config_dirs")          # a format-1 drive record
+        self.planted(old)
+        self.assertIsNone(enrolment.find_job_owner("bk", "J"))
+        with self.assertRaisesRegex(enrolment.OwnerRecordInvalid, "owner record format/fields invalid"):
+            enrolment.find_job_owner("bk", "J", strict=True)
+        with mock.patch.object(da, "board_key", return_value="bk"), \
+                self.assertRaisesRegex(da.DriveError, "DRIVER-CONFIG.*owner record format/fields invalid"):
+            da._owner("bk", "J")
+
+    def test_unknown_field_or_planted_url_in_a_current_record_is_a_clear_error(self):
+        for owner in ({**self.owner(), "format": 2, "extra": 1},
+                      {**self.owner(), "format": 2, "remotes": {"o": "--upload-pack=x"}}):
+            self.planted(owner)
+            with self.subTest(owner=sorted(owner)), self.assertRaisesRegex(enrolment.OwnerRecordInvalid,
+                                                                           "format/fields invalid"):
+                enrolment.find_job_owner("bk", "J", strict=True)
+
+    def test_no_record_is_none_when_strict(self):
+        self.assertIsNone(enrolment.find_job_owner("bk", "J", strict=True))
+
+    def test_prune_keeps_an_owner_record_it_cannot_read(self):
+        old = self.owner()
+        old.pop("target_branch")
+        self.planted(old)
+        enrolment.prune(0.0, now=10.0 ** 9)
+        with self.assertRaises(enrolment.OwnerRecordInvalid):
+            enrolment.find_job_owner("bk", "J", strict=True)
+
+
+class KickTests(unittest.TestCase):
+    def test_absent_drivegate_is_silent(self):
+        import io
+        from contextlib import redirect_stderr
+        err = io.StringIO()
+        with drivegate_stub(None), redirect_stderr(err):
+            self.assertFalse(da.kick())
+        self.assertEqual(err.getvalue(), "")
+
+    def test_failing_kick_is_reported_loudly_and_not_raised(self):
+        import io
+        from contextlib import redirect_stderr
+        kicker = types.SimpleNamespace(kick=mock.Mock(side_effect=RuntimeError("socket gone")))
+        err = io.StringIO()
+        with drivegate_stub(kicker), redirect_stderr(err):
+            self.assertFalse(da.kick())
+        self.assertIn("WARNING: the supervisor kick failed (RuntimeError: socket gone)", err.getvalue())
+
+    def test_broken_drivegate_import_is_reported(self):
+        import io
+        import builtins
+        from contextlib import redirect_stderr
+        real = builtins.__import__
+
+        def fake(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "swarm" and fromlist and "drivegate" in fromlist:
+                raise ModuleNotFoundError("No module named 'yaml'", name="yaml")
+            return real(name, globals, locals, fromlist, level)
+        err = io.StringIO()
+        with mock.patch.object(builtins, "__import__", side_effect=fake), redirect_stderr(err):
+            self.assertFalse(da.kick())
+        self.assertIn("kick failed (ModuleNotFoundError", err.getvalue())
+
+
 class FlagTests(HomeCase):
     def parser(self):
         p = argparse.ArgumentParser()
@@ -353,6 +703,10 @@ class DriveCli(Env):
         attr = mock.patch.object(swarm_package, "person", FakePerson, create=True)
         attr.start()
         self.addCleanup(attr.stop)
+        # the real kick (Task 5's drivegate) would start the user's supervisor unit: a stub kicks here
+        stub = drivegate_stub(types.SimpleNamespace(kick=mock.Mock(return_value=True)))
+        stub.__enter__()
+        self.addCleanup(stub.__exit__, None, None, None)
         self.platform = mock.patch.object(da, "PLATFORM", "linux")   # the timer check is for Linux here
         self.platform.start()
         self.addCleanup(self.platform.stop)
@@ -571,7 +925,8 @@ class DriveCli(Env):
 
     def test_gh_helper_pins_its_config_dir_per_destination(self):
         gh = absolute("home", "u", ".local", "bin", "gh")
-        cfgdir = absolute("home", "u", "gh-config")
+        cfgdir = tempfile.mkdtemp(dir=SANDBOX, prefix="gh-config-")   # private, outside every work root
+        self.addCleanup(os.rmdir, cfgdir)
         with mock.patch.dict(os.environ, {"GH_CONFIG_DIR": cfgdir}), \
                 mock.patch.object(da, "remote_head", return_value="a" * 40):
             rc, _, err = self.activate("--workdir", str(self.work), "--remote",
@@ -775,7 +1130,7 @@ class DriveCli(Env):
 
     def test_activation_kicks_the_supervisor_once(self):
         kicker = types.SimpleNamespace(kick=mock.Mock())
-        with mock.patch.dict(sys.modules, {"swarm.drivegate": kicker}):
+        with drivegate_stub(kicker):
             rc, _, err = self.activate("--workdir", str(self.work))
         self.assertEqual(rc, 0, err)
         kicker.kick.assert_called_once_with()
@@ -783,7 +1138,7 @@ class DriveCli(Env):
     def test_refused_activation_does_not_kick(self):
         kicker = types.SimpleNamespace(kick=mock.Mock())
         self.enable_supervisor(False)
-        with mock.patch.dict(sys.modules, {"swarm.drivegate": kicker}):
+        with drivegate_stub(kicker):
             rc, _, _ = self.activate("--workdir", str(self.work))
         self.assertEqual(rc, 1)
         kicker.kick.assert_not_called()
