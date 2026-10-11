@@ -12,15 +12,18 @@ from __future__ import annotations
 import contextlib
 import datetime as _dt
 import getpass
+import hashlib
+import os
 import re
 
 from swarm import compat
-from .base import SEAT_CLOSED, SEAT_COMPLEXITY, SEAT_HARNESSES, SEAT_STATES, DriveLock, RESTART_COLS, Restart, Seat
+from .base import (MAX_LOCK_SECONDS, SEAT_CLOSED, SEAT_COMPLEXITY, SEAT_HARNESSES, SEAT_STATES, SEAT_TRANSITIONS,
+                   DriveLock, RESTART_COLS, Restart, Seat)
 from ..supervisor.worktree import roots_overlap
 
 SEAT_COLS = ("id, job, generation, seat, role, title, harness, model, workdir, brief_path, task_ref, complexity, "
              "requested_by, requested_at, state, agent_key, session_id, revision, launches, last_outcome, "
-             "wake_reason, wake_watermark, updated_at")
+             "wake_reason, wake_watermark, updated_at, launch_id")
 LOCK_COLS = "key, holder, job, generation, launch_id, host, expires_at, path"
 # The fields a request sets (and compares with its row): a repeat with the same ones is a no-op.
 REQUEST_FIELDS = ("role", "harness", "model", "workdir", "brief_path", "title", "task_ref", "complexity",
@@ -47,15 +50,25 @@ def check_seat(seat, generation, role, harness, workdir, brief_path, complexity,
         raise ValueError(f"seat complexity must be one of {', '.join(SEAT_COMPLEXITY)}")
 
 
-def check_lock_keys(locks, lock_paths):
-    """Every key once, and a `wt:` key with the worktree root it stands for."""
+def normalise_lock_paths(locks, lock_paths) -> dict:
+    """The worktree root of each `wt:` lock, normalised (`//` and `.` collapsed), as a dict key -> root.
+    A root must be absolute, and its key must be `wt:` + sha256(root): the key names the checkout, so two
+    spellings of one checkout can't both be granted. Each key is named once."""
     if len(set(locks)) != len(locks):
         raise ValueError("a claim names each drive lock once")
+    roots = {}
     for key in locks:
         if not isinstance(key, str) or not key:
             raise ValueError("a drive lock key must be a nonempty string")
-        if key.startswith("wt:") and not lock_paths.get(key):
-            raise ValueError(f"worktree lock {key} needs its root path")
+        if key.startswith("wt:"):
+            given = lock_paths.get(key)
+            if not isinstance(given, str) or not os.path.isabs(given):
+                raise ValueError(f"worktree lock {key} needs an absolute root path")
+            root = os.path.normpath(given)
+            if key != "wt:" + hashlib.sha256(root.encode()).hexdigest():
+                raise ValueError(f"worktree lock {key} does not name the root {root}")
+            roots[key] = root
+    return roots
 
 
 def wt_paths_overlap(new_paths, live_paths) -> bool:
@@ -68,6 +81,24 @@ def wt_paths_overlap(new_paths, live_paths) -> bool:
 
 def request_fields(**kw) -> dict:
     return {k: kw.get(k) for k in REQUEST_FIELDS}
+
+
+def check_lock_seconds(lock_seconds):
+    if (isinstance(lock_seconds, bool) or not isinstance(lock_seconds, (int, float))
+            or not 0 < lock_seconds <= MAX_LOCK_SECONDS):   # also refuses NaN
+        raise ValueError(f"a drive lock lasts more than 0 and at most {MAX_LOCK_SECONDS} seconds")
+
+
+def check_renewal(now, expires_at):
+    if not isinstance(expires_at, _dt.datetime) or not now < expires_at <= now + _dt.timedelta(seconds=MAX_LOCK_SECONDS):
+        raise ValueError("a renewal must lie in the future, at most a lock's maximum lifetime ahead")
+
+
+def check_transition(current, state):
+    if state == "running":
+        raise ValueError("only a launch claim starts a seat (running)")
+    if state not in SEAT_TRANSITIONS.get(current, ()):
+        raise ValueError(f"seat cannot go from {current} to {state}")
 
 
 def _check_state(state, fields):
@@ -100,7 +131,8 @@ class MemorySeats:
             if row is None:
                 row = dict(id=s.next_seat_id, job=job, generation=generation, seat=seat, **fields,
                            requested_at=now, state="requested", agent_key=None, session_id=None, revision=1,
-                           launches=0, last_outcome=None, wake_reason=None, wake_watermark=None, updated_at=now)
+                           launches=0, last_outcome=None, wake_reason=None, wake_watermark=None, updated_at=now,
+                           launch_id=None)
                 s.next_seat_id += 1
                 s.seats.append(row)
                 s.touch()
@@ -127,13 +159,17 @@ class MemorySeats:
                         and r["seat"] == seat), None)
             return Seat(**row) if row else None
 
-    def set_seat_state(self, seat_id, expected_revision, state, **fields):
+    def set_seat_state(self, seat_id, expected_revision, state, *, job, **fields):
         _check_state(state, fields)
         s = self._s()
         with s.lock:
             row = next((r for r in s.seats if r["id"] == seat_id), None)
-            if row is None or row["revision"] != expected_revision:
+            if row is None or row["job"] != job or row["revision"] != expected_revision:
                 return None
+            check_transition(row["state"], state)
+            if row["state"] == "running" and (row["launch_id"] is None or any(
+                    r["launch_id"] == row["launch_id"] and r["ended_at"] is None for r in s.restarts)):
+                raise ValueError("the seat's launch is still open: end it first")
             row.update(fields, state=state, revision=row["revision"] + 1, updated_at=self.now())
             s.touch()
             return Seat(**row)
@@ -141,8 +177,8 @@ class MemorySeats:
     def claim_drive_launch(self, *, job, generation, action_id, attempt, launch_id, seat_id, seat_revision,
                            harness, reserve_usd, reserve_minutes, locks, lock_seconds, max_host_running,
                            ruling=False, lock_paths=None):
-        lock_paths = dict(lock_paths or {})
-        check_lock_keys(locks, lock_paths)
+        lock_paths = normalise_lock_paths(locks, lock_paths or {})
+        check_lock_seconds(lock_seconds)
         if harness not in SEAT_HARNESSES:
             raise ValueError(f"seat harness must be one of {', '.join(SEAT_HARNESSES)}")
         s = self._s()
@@ -182,27 +218,32 @@ class MemorySeats:
                            reserved_usd=float(reserve_usd), cost_usd=None, tokens_in=None, tokens_out=None)
             s.next_restart_id += 1
             s.restarts.append(restart)
-            row.update(state="running", revision=row["revision"] + 1, launches=row["launches"] + 1, updated_at=now)
+            row.update(state="running", revision=row["revision"] + 1, launches=row["launches"] + 1, updated_at=now,
+                       launch_id=launch_id)
             s.touch()
             return Restart(**restart)
 
-    def renew_drive_locks(self, launch_id, expires_at):
+    def renew_drive_locks(self, launch_id, expires_at, *, job, holder):
+        now = self.now()
+        check_renewal(now, expires_at)
         s = self._s()
         with s.lock:
             n = 0
             for d in s.drive_locks:
-                if d["launch_id"] == launch_id:
+                if (d["launch_id"] == launch_id and d["job"] == job and d["holder"] == holder
+                        and d["expires_at"] > now):
                     d["expires_at"] = expires_at
                     n += 1
             if n:
                 s.touch()
             return n
 
-    def release_drive_locks(self, launch_id):
+    def release_drive_locks(self, launch_id, *, job, holder):
         s = self._s()
         with s.lock:
             before = len(s.drive_locks)
-            s.drive_locks[:] = [d for d in s.drive_locks if d["launch_id"] != launch_id]
+            s.drive_locks[:] = [d for d in s.drive_locks
+                                if not (d["launch_id"] == launch_id and d["job"] == job and d["holder"] == holder)]
             if len(s.drive_locks) != before:
                 s.touch()
             return before - len(s.drive_locks)
@@ -223,6 +264,8 @@ def seats_schema(pg: bool = False) -> str:
     big = "bigint" if pg else "INTEGER"
     real = "double precision" if pg else "REAL"
     alter = "ALTER TABLE restarts ADD COLUMN IF NOT EXISTS {} {};\n" if pg else ""
+    # a seats table created before the launch column existed gets it here (Postgres: CREATE TABLE skips it)
+    seat_launch = "ALTER TABLE seats ADD COLUMN IF NOT EXISTS launch_id text;\n" if pg else ""
     restart_cols = "".join(alter.format(c, t) for c, t in (
         ("action_id", "text"), ("launch_id", "text"), ("reserved_usd", real), ("cost_usd", real),
         ("tokens_in", big), ("tokens_out", big)))
@@ -237,13 +280,13 @@ CREATE TABLE IF NOT EXISTS seats (
  requested_by TEXT NOT NULL, requested_at {ts} NOT NULL,
  state TEXT NOT NULL CHECK (state IN ('requested', 'running', 'idle', 'released', 'failed', 'cancelled', 'refused')),
  agent_key TEXT, session_id TEXT, revision {big} NOT NULL DEFAULT 1, launches {big} NOT NULL DEFAULT 0,
- last_outcome TEXT, wake_reason TEXT, wake_watermark {big}, updated_at {ts} NOT NULL,
+ last_outcome TEXT, wake_reason TEXT, wake_watermark {big}, updated_at {ts} NOT NULL, launch_id TEXT,
  UNIQUE (job, generation, seat));
 CREATE TABLE IF NOT EXISTS drive_locks (
  key TEXT PRIMARY KEY, holder TEXT NOT NULL, job TEXT NOT NULL, generation {big} NOT NULL,
  launch_id TEXT NOT NULL, host TEXT NOT NULL, expires_at {ts} NOT NULL, path TEXT);
 CREATE INDEX IF NOT EXISTS drive_locks_launch ON drive_locks (launch_id);
-"""
+{seat_launch}"""
 
 
 class SqlSeats:
@@ -354,34 +397,52 @@ class SqlSeats:
                          (job, generation, seat)).fetchone()
         return self._seat_obj(Seat, SEAT_COLS, row) if row else None
 
-    def set_seat_state(self, seat_id, expected_revision, state, **fields):
+    def _launch_open(self, c, launch_id):
+        return launch_id is None or self._exec(
+            c, "SELECT 1 FROM restarts WHERE launch_id = ? AND ended_at IS NULL", (launch_id,)).fetchone() is not None
+
+    def set_seat_state(self, seat_id, expected_revision, state, *, job, **fields):
         _check_state(state, fields)
         assignments = "".join(f", {k} = ?" for k in fields)
         with self._seat_tx() as c:
+            row = self._exec(c, f"SELECT {SEAT_COLS} FROM seats WHERE id = ? AND job = ?", (seat_id, job)).fetchone()
+            if row is None:
+                return None
+            current = self._seat_obj(Seat, SEAT_COLS, row)
+            if current.revision != expected_revision:
+                return None
+            check_transition(current.state, state)
+            if current.state == "running" and self._launch_open(c, current.launch_id):
+                raise ValueError("the seat's launch is still open: end it first")
             row = self._exec(
                 c, f"UPDATE seats SET state = ?, revision = revision + 1, updated_at = ?{assignments} "
-                f"WHERE id = ? AND revision = ? RETURNING {SEAT_COLS}",
-                (state, self._seat_time(self.now()), *fields.values(), seat_id, expected_revision)).fetchone()
+                f"WHERE id = ? AND job = ? AND revision = ? AND state = ? RETURNING {SEAT_COLS}",
+                (state, self._seat_time(self.now()), *fields.values(), seat_id, job, expected_revision,
+                 current.state)).fetchone()
         return self._seat_obj(Seat, SEAT_COLS, row) if row else None
 
     def claim_drive_launch(self, *, job, generation, action_id, attempt, launch_id, seat_id, seat_revision,
                            harness, reserve_usd, reserve_minutes, locks, lock_seconds, max_host_running,
                            ruling=False, lock_paths=None):
-        lock_paths = dict(lock_paths or {})
-        check_lock_keys(locks, lock_paths)
+        lock_paths = normalise_lock_paths(locks, lock_paths or {})
+        check_lock_seconds(lock_seconds)
         if harness not in SEAT_HARNESSES:
             raise ValueError(f"seat harness must be one of {', '.join(SEAT_HARNESSES)}")
         host = compat.node()
         try:
             with self._seat_tx() as c:
-                if self._seat_pg:   # the host-wide overlap lock: one claim at a time per host
-                    c.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("swarm-wt:" + host,))
+                if self._seat_pg:
+                    # The host-wide overlap lock, then the locks record_restart takes for its caps, in the
+                    # same order record_restart uses (job, then host). record_restart never takes swarm-wt,
+                    # so the order is acyclic, and a legacy restart can't count the host's rows meanwhile.
+                    for key in ("swarm-wt:" + host, "restarts:" + job, "restarts-host:" + host):
+                        c.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (key,))
                 now = self._seat_time(self.now())
                 moved = self._exec(
                     c, "UPDATE seats SET state = 'running', revision = revision + 1, launches = launches + 1, "
-                    "updated_at = ? WHERE id = ? AND job = ? AND generation = ? AND revision = ? "
+                    "updated_at = ?, launch_id = ? WHERE id = ? AND job = ? AND generation = ? AND revision = ? "
                     "AND state IN ('requested', 'idle') RETURNING id",
-                    (now, seat_id, job, generation, seat_revision)).fetchone()
+                    (now, launch_id, seat_id, job, generation, seat_revision)).fetchone()
                 if moved is None:
                     raise _Refused("seat moved")
                 open_here = self._exec(c, "SELECT count(*) FROM restarts WHERE host = ? AND ended_at IS NULL",
@@ -424,14 +485,18 @@ class SqlSeats:
                 r[i] = self._seat_time_out(r[i])
         return Restart(*r)
 
-    def renew_drive_locks(self, launch_id, expires_at):
+    def renew_drive_locks(self, launch_id, expires_at, *, job, holder):
+        now = self.now()
+        check_renewal(now, expires_at)
         with self._seat_tx() as c:
-            return self._exec(c, "UPDATE drive_locks SET expires_at = ? WHERE launch_id = ?",
-                              (self._seat_time(expires_at), launch_id)).rowcount
+            return self._exec(c, "UPDATE drive_locks SET expires_at = ? WHERE launch_id = ? AND job = ? "
+                              "AND holder = ? AND expires_at > ?",
+                              (self._seat_time(expires_at), launch_id, job, holder, self._seat_time(now))).rowcount
 
-    def release_drive_locks(self, launch_id):
+    def release_drive_locks(self, launch_id, *, job, holder):
         with self._seat_tx() as c:
-            return self._exec(c, "DELETE FROM drive_locks WHERE launch_id = ?", (launch_id,)).rowcount
+            return self._exec(c, "DELETE FROM drive_locks WHERE launch_id = ? AND job = ? AND holder = ?",
+                              (launch_id, job, holder)).rowcount
 
     def drive_locks(self, prefix=""):
         rows = self._exec(self._conn, "SELECT " + LOCK_COLS + " FROM drive_locks ORDER BY key").fetchall()
