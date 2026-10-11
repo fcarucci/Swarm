@@ -2328,8 +2328,13 @@ class DriveHelpers:
             max_host_running=max_host_running, ruling=ruling)
 
     @staticmethod
-    def wt(root):
-        return "wt:" + hashlib.sha256(root.encode()).hexdigest()
+    def root(p):
+        """The absolute, normalised, /-separated spelling of a test root (POSIX paths get the drive on Windows)."""
+        return os.path.normpath(os.path.abspath(p)).replace(os.sep, "/")
+
+    @classmethod
+    def wt(cls, root):
+        return "wt:" + hashlib.sha256(cls.root(root).encode()).hexdigest()
 
     def interleave(self, needle, action, when="before"):
         """SQL boards only: run `action` (on this board) just before, or just after, the first statement
@@ -2362,7 +2367,7 @@ class DriveClaims(DriveHelpers):
                                 workdir="/w/a", brief_path="/w/a/BRIEF.md", requested_by="lead")
         r = self.b.claim_drive_launch(job="J", generation=1, action_id="1|seat|eng-a", attempt=1,
                                       launch_id="L1", seat_id=s.id, seat_revision=s.revision, harness="claude",
-                                      reserve_usd=5, reserve_minutes=60, locks=[self.wt("/w/a")], lock_paths={self.wt("/w/a"): "/w/a"},
+                                      reserve_usd=5, reserve_minutes=60, locks=[self.wt("/w/a")], lock_paths={self.wt("/w/a"): self.root("/w/a")},
                                       lock_seconds=4200, max_host_running=4)
         self.assertIsNotNone(r)
         self.assertEqual(self.b.seat("J", 1, "eng-a").state, "running")
@@ -2509,16 +2514,16 @@ class DriveClaims(DriveHelpers):
     def test_nested_worktrees_conflict(self):
         self.goal_job()
         a, c = self.seat("J", "a"), self.seat("J", "c")
-        self.assertIsNotNone(self.claim(a, locks=[self.wt("/w/repo")], paths={self.wt("/w/repo"): "/w/repo"}))
+        self.assertIsNotNone(self.claim(a, locks=[self.wt("/w/repo")], paths={self.wt("/w/repo"): self.root("/w/repo")}))
         self.assertIsNone(self.claim(c, locks=[self.wt("/w/repo/sub")],
-                                     paths={self.wt("/w/repo/sub"): "/w/repo/sub"}))
+                                     paths={self.wt("/w/repo/sub"): self.root("/w/repo/sub")}))
         self.assertEqual(self.b.seat("J", 1, "c").state, "requested")
 
     def test_the_same_checkout_is_claimed_once(self):
         self.goal_job()
         a, c = self.seat("J", "a"), self.seat("J", "c")
-        self.assertIsNotNone(self.claim(a, locks=[self.wt("/w/repo")], paths={self.wt("/w/repo"): "/w/repo"}))
-        self.assertIsNone(self.claim(c, locks=[self.wt("/w/repo")], paths={self.wt("/w/repo"): "/w/repo"}))
+        self.assertIsNotNone(self.claim(a, locks=[self.wt("/w/repo")], paths={self.wt("/w/repo"): self.root("/w/repo")}))
+        self.assertIsNone(self.claim(c, locks=[self.wt("/w/repo")], paths={self.wt("/w/repo"): self.root("/w/repo")}))
         self.assertEqual(self.b.seat("J", 1, "c").state, "requested")
 
     def test_a_worktree_root_is_absolute_normalised_and_named_by_its_key(self):
@@ -2527,11 +2532,11 @@ class DriveClaims(DriveHelpers):
         with self.assertRaises(ValueError):          # relative: its realpath is unknown
             self.claim(a, locks=[self.wt("repo")], paths={self.wt("repo"): "repo"})
         with self.assertRaises(ValueError):          # the key names another root
-            self.claim(a, locks=[self.wt("/w/x")], paths={self.wt("/w/x"): "/w/repo"})
+            self.claim(a, locks=[self.wt("/w/x")], paths={self.wt("/w/x"): self.root("/w/repo")})
         # spellings of one root are one root: the key names the normalised path
-        self.assertIsNotNone(self.claim(a, locks=[self.wt("/w/repo")], paths={self.wt("/w/repo"): "/w//repo/"}))
-        self.assertEqual(self.b.drive_locks("wt:")[0].path, "/w/repo")
-        self.assertIsNone(self.claim(c, locks=[self.wt("/w/repo/sub")], paths={self.wt("/w/repo/sub"): "/w/repo/sub"}))
+        self.assertIsNotNone(self.claim(a, locks=[self.wt("/w/repo")], paths={self.wt("/w/repo"): self.root("/w//repo/")}))
+        self.assertEqual(self.b.drive_locks("wt:")[0].path, self.root("/w/repo"))
+        self.assertIsNone(self.claim(c, locks=[self.wt("/w/repo/sub")], paths={self.wt("/w/repo/sub"): self.root("/w/repo/sub")}))
 
     def test_a_stale_seat_revision_is_refused_even_when_the_seat_could_launch(self):
         self.goal_job()
@@ -2546,12 +2551,12 @@ class DriveClaims(DriveHelpers):
     def test_worktree_ancestor_and_sibling_roots(self):
         self.goal_job()
         a, c = self.seat("J", "a"), self.seat("J", "c")
-        self.assertIsNotNone(self.claim(a, locks=[self.wt("/w/repo")], paths={self.wt("/w/repo"): "/w/repo"}))
+        self.assertIsNotNone(self.claim(a, locks=[self.wt("/w/repo")], paths={self.wt("/w/repo"): self.root("/w/repo")}))
         # a descendant of a live root conflicts
         self.assertIsNone(self.claim(c, locks=[self.wt("/w/repo/sub")],
-                                     paths={self.wt("/w/repo/sub"): "/w/repo/sub"}))
+                                     paths={self.wt("/w/repo/sub"): self.root("/w/repo/sub")}))
         # a sibling whose name only starts with the same text is not nested: /w/repo-2 is claimed
-        self.assertIsNotNone(self.claim(c, locks=[self.wt("/w/repo-2")], paths={self.wt("/w/repo-2"): "/w/repo-2"}))
+        self.assertIsNotNone(self.claim(c, locks=[self.wt("/w/repo-2")], paths={self.wt("/w/repo-2"): self.root("/w/repo-2")}))
 
     def test_roots_overlap_compares_whole_path_components(self):
         from swarm.supervisor.worktree import roots_overlap
@@ -2633,12 +2638,12 @@ class DriveClaims(DriveHelpers):
         self.goal_job()
         a = self.seat("J", "a")
         self.assertIsNotNone(self.claim(a, locks=[self.wt("/w/b"), "land:x:main"],
-                                        paths={self.wt("/w/b"): "/w/b"}, launch_id="LA", action="7|seat|a"))
+                                        paths={self.wt("/w/b"): self.root("/w/b")}, launch_id="LA", action="7|seat|a"))
         locks = self.b.drive_locks()
         self.assertEqual([l.key for l in locks], ["land:x:main", self.wt("/w/b")])
         wt = self.b.drive_locks("wt:")[0]
         self.assertEqual((wt.key, wt.holder, wt.job, wt.generation, wt.launch_id, wt.path),
-                         (self.wt("/w/b"), "7|seat|a", "J", 1, "LA", "/w/b"))
+                         (self.wt("/w/b"), "7|seat|a", "J", 1, "LA", self.root("/w/b")))
         self.assertEqual(self.b.drive_locks("land:")[0].path, None)
 
     def test_lock_lifetimes_are_bounded(self):
@@ -2705,20 +2710,22 @@ class DriveClaims(DriveHelpers):
             os.makedirs(os.path.join(repo, "sub", "deep"))
             with open(os.path.join(repo, ".git"), "w") as f:     # a worktree: a .git file
                 f.write("gitdir: /elsewhere\n")
-            self.assertEqual(worktree_root(os.path.join(repo, "sub", "deep")), os.path.realpath(repo))
-            self.assertEqual(worktree_root(repo), os.path.realpath(repo))
+            rp = lambda p: os.path.realpath(p).replace(os.sep, "/")
+            self.assertEqual(worktree_root(os.path.join(repo, "sub", "deep")), rp(repo))
+            self.assertEqual(worktree_root(repo), rp(repo))
             os.makedirs(os.path.join(repo, "sub", ".git"))       # a nested repo: its own root
-            self.assertEqual(worktree_root(os.path.join(repo, "sub", "deep")), os.path.realpath(os.path.join(repo, "sub")))
+            self.assertEqual(worktree_root(os.path.join(repo, "sub", "deep")), rp(os.path.join(repo, "sub")))
             bare = os.path.join(tmp, "nogit")
             os.makedirs(bare)
             root = worktree_root(bare)   # no git entry under tmp: never the tmp tree itself
-            self.assertTrue(root is None or not root.startswith(os.path.realpath(tmp)))
+            self.assertTrue(root is None or not root.startswith(os.path.realpath(tmp).replace(os.sep, "/")))
 
 
 _CLAIM_CHILD = """
 import hashlib, json, os, sys, time
 from swarm.board import open_board
 cfg, seat, root, start = json.loads(os.environ["SWARM_RACE_CFG"]), sys.argv[1], sys.argv[2], float(sys.argv[3])
+root = os.path.normpath(os.path.abspath(root)).replace(os.sep, "/")
 b = open_board(cfg)
 s = b.seat("J", 1, seat)
 key = "wt:" + hashlib.sha256(root.encode()).hexdigest()
@@ -2742,7 +2749,7 @@ class DriveClaimRace(DriveHelpers):
         self.goal_job()
         self.seat("J", "a")
         self.seat("J", "c")
-        root = "/w/race"
+        root = self.root("/w/race")
         cfg = json.dumps(self.h.cfg, default=str)
         start = str(time.time() + 4)
         lib = os.path.dirname(os.path.dirname(os.path.abspath(sys.modules["swarm"].__file__)))
