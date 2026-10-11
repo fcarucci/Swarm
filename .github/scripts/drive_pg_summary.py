@@ -47,7 +47,7 @@ def summarise(log: str, modules: dict[str, bool]) -> tuple[list[str], list[str]]
 def main(argv: list[str]) -> int:
     log = Path(argv[1]).read_text(errors="replace")
     tests = Path(argv[2]) if len(argv) > 2 else Path("tests")
-    modules = {p.stem: "add_backend_variants(" in p.read_text() and "def add_backend_variants" not in p.read_text()
+    modules = {p.stem: re.search(r"^add_backend_variants\(", p.read_text(), re.M) is not None
                for p in sorted(tests.glob("test_drive_*.py"))}
     lines, problems = summarise(log, modules)
     print("\n".join(lines))
