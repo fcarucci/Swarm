@@ -433,6 +433,7 @@ def terminalize(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks | None 
         verdict = _check_met(board, cfg, led, js, now, hooks)
         if verdict != "ok":
             return False
+    barrier.hit("mid_terminalization")       # sessions gone, nothing settled yet
     # steps 3-4: settle the questions, release the locks and seats
     _settle_blockers(board, led, f"job concluded: {intent['verdict']}")
     _release_locks(board, led)
@@ -484,6 +485,7 @@ def _terminalize_cancelled(board, cfg, led, intent: dict, js, now, hooks: Hooks)
             return False
     _end_sessions(board, led, "cancelled")
     led.save()
+    barrier.hit("mid_terminalization")
     _settle_blockers(board, led, "job concluded: cancelled")
     _release_locks(board, led)
     _release_seats(board, led, None, "job concluded")
@@ -574,6 +576,7 @@ def rollover(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks | None = N
         if hooks.rows_live(board, cfg, rows):
             return False
     _end_sessions(board, led, "cancelled", old)
+    barrier.hit("mid_rollover")              # the old generation's sessions ended, nothing released or advanced
     _release_locks(board, led, old)
     _release_seats(board, led, old, "generation rolled over")
     _settle_blockers(board, led, "generation rolled over", old)
