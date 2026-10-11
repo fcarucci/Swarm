@@ -278,6 +278,18 @@ class TerminalizeTests(LifeCase):
         self.assertEqual(led.terminal["scope"], "goal")
         self.assertIn(("after_close",), self.run.calls)
 
+    def test_terminalization_clears_the_board_drive_claim(self):
+        self.pending_met()
+        self.assertEqual(self.b.job_data("J")["drive.enabled"], "1")
+        self.assertTrue(life.terminalize(self.b, self.cfg, self.led, self.at(1), hooks=self.run.hooks()))
+        self.assertNotIn("drive.enabled", self.b.job_data("J"))
+
+    def test_claim_is_kept_while_the_close_is_pending(self):
+        self.pending_met()
+        self.run.gate = life.Gate("unknown")
+        life.terminalize(self.b, self.cfg, self.led, self.at(1), hooks=self.run.hooks())
+        self.assertEqual(self.b.job_data("J")["drive.enabled"], "1")
+
     def test_terminalize_without_intent_or_when_halted_does_nothing(self):
         self.assertFalse(life.terminalize(self.b, self.cfg, self.led, self.t0, hooks=self.run.hooks()))
         self.pending_met()
@@ -726,6 +738,47 @@ class QuestionTests(LifeCase):
         self.assertEqual(launches(), ["b"])                               # a waits for its answer, b runs
         self.assertEqual(life.apply_question_expiry(self.b, self.cfg, self.led, self.at(10), [q]), [])
         self.assertEqual(self.b.blocker(b.id).state, "open")              # and nothing was applied behind its back
+
+
+class OrphanQuestionTests(LifeCase):
+    """A board job claiming drive mode with no ledger: the driver applies its overdue defaults itself."""
+
+    def ask(self, minutes=30, default="left", kind="question"):
+        return self.b.open_blocker("J", kind, "human", "which way?", until=self.t0 + minutes * MIN,
+                                   default_value=default, created_by="a", seat="a", generation=1)
+
+    def test_overdue_default_applied_once(self):
+        b = self.ask()
+        self.assertEqual(life.expire_orphan_questions(self.b, "J", self.t0 + 29 * MIN), [])
+        self.assertEqual(life.expire_orphan_questions(self.b, "J", self.t0 + 30 * MIN), [b.id])
+        self.assertEqual(self.b.blocker(b.id).resolved_how, "left")
+        self.assertEqual(life.expire_orphan_questions(self.b, "J", self.t0 + 31 * MIN), [])
+        self.assertEqual(len(self.posts(f"Blocker {b.id} expired: left")), 1)
+
+    def test_halted_board_claim_applies_nothing(self):
+        b = self.ask()
+        self.b.set_job_data("J", "drive.halted", "me")
+        self.assertEqual(life.expire_orphan_questions(self.b, "J", self.at(500)), [])
+        self.assertEqual(self.b.blocker(b.id).state, "open")
+
+    def test_job_without_the_claim_is_left_to_the_generic_sweep(self):
+        b = self.ask()
+        self.b.set_job_data("J", "drive.enabled", None)
+        self.assertEqual(life.expire_orphan_questions(self.b, "J", self.at(500)), [])
+        self.assertEqual(self.b.blocker(b.id).state, "open")
+
+    def test_closed_job_is_left_alone_and_a_paused_one_is_not(self):
+        b, c = self.ask(minutes=30), self.ask(minutes=60)
+        self.b.pause_job("J", "me", "hold")
+        self.assertEqual(life.expire_orphan_questions(self.b, "J", self.at(45)), [b.id])
+        self.b.close_job("J", "cancelled", "x", forced=True)
+        self.assertEqual(life.expire_orphan_questions(self.b, "J", self.at(500)), [])
+        self.assertEqual(self.b.blocker(c.id).state, "open")
+
+    def test_waits_and_defaultless_questions_are_not_touched(self):
+        w, d = self.ask(kind="wait"), self.ask(default=None)
+        self.assertEqual(life.expire_orphan_questions(self.b, "J", self.at(500)), [])
+        self.assertEqual({self.b.blocker(w.id).state, self.b.blocker(d.id).state}, {"open"})
 
 
 class LockSweepTests(LifeCase):
