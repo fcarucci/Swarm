@@ -607,6 +607,16 @@ def legacy_goal_check(args) -> int | None:
     return None
 
 
+def kick() -> None:
+    """Wake the supervisor once a drive job is active, so its first pass does not wait for the timer. The
+    kick lives in swarm.drivegate; a build without it has no kick and the timer's next pass picks the job up."""
+    try:
+        from swarm import drivegate
+    except ImportError:
+        return
+    drivegate.kick()
+
+
 def cmd_activate_drive(cfg: dict, args) -> int:
     """`swarm activate --goal` (drive mode): refuse what this host cannot drive, else the durable
     activation, then the one record line. A re-activation of a drive job is a rollover request only."""
@@ -643,6 +653,7 @@ def cmd_activate_drive(cfg: dict, args) -> int:
         print(f"swarm activate: {exc}", file=sys.stderr)
         return 1
     models = {**model_defaults(cfg), **led.models}
+    kick()
     print(f"activated {args.job} (drive): the supervisor drives it from here; the lead is seat 1 "
           f"(generation {led.generation}); models {_models_text(models)}")
     print(f"swarm-record: kind=activate id={led.generation} rev={led.ledger_rev}")

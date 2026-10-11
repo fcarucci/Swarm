@@ -660,6 +660,21 @@ class DriveCli(Env):
         self.assertEqual(rc, 2)
         self.assertIn("below", err)
 
+    def test_activation_kicks_the_supervisor_once(self):
+        kicker = types.SimpleNamespace(kick=mock.Mock())
+        with mock.patch.dict(sys.modules, {"swarm.drivegate": kicker}):
+            rc, _, err = self.activate("--workdir", str(self.work))
+        self.assertEqual(rc, 0, err)
+        kicker.kick.assert_called_once_with()
+
+    def test_refused_activation_does_not_kick(self):
+        kicker = types.SimpleNamespace(kick=mock.Mock())
+        self.enable_supervisor(False)
+        with mock.patch.dict(sys.modules, {"swarm.drivegate": kicker}):
+            rc, _, _ = self.activate("--workdir", str(self.work))
+        self.assertEqual(rc, 1)
+        kicker.kick.assert_not_called()
+
     def test_person_path_refused_while_the_person_module_is_absent(self):
         """Until Task 6b's swarm.person is in the build, the person path is refused, never allowed."""
         self.activate("--workdir", str(self.work))
