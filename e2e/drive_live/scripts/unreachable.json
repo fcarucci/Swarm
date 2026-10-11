@@ -1,9 +1,10 @@
 {
-  "_doc": "fake harness script, impossible goal: the judge finds no progress twice, the ruling judge says unreachable",
+  "_doc": "impossible goal: the artifact judge finds no progress twice (open stays 2); the ruling judge records unreachable with a reason",
   "lead": {"seats": [{"seat": "eng-a", "role": "engineer", "complexity": "simple"}]},
   "engineer": {"change": "impossible"},
   "reviewer": [{"outcome": "verified"}],
-  "judge": [{"verdict": "not_met", "open": 2}, {"verdict": "not_met", "open": 2},
-            {"verdict": "unreachable", "reason": "the goal asks for a test that must both pass and fail"}],
+  "judge": {"artifact": [{"verdict": "not_met", "open": 2}],
+            "goal": [{"verdict": "not_met", "open": 2}],
+            "ruling": [{"verdict": "unreachable", "reason": "the goal asks for a test that must both pass and fail"}]},
   "cost_usd": 0.05
 }

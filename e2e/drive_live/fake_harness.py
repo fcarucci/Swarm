@@ -78,6 +78,8 @@ class Session:
         payload = {"session_id": self.sid, "agent_id": None, "cwd": str(RUN / "work"), **extra}
         r = subprocess.run([HOOK, event], input=json.dumps(payload), capture_output=True, text=True,
                            env=os.environ, timeout=60)
+        if r.returncode < 0:   # a crash barrier killed the hook (SWARM_CRASH_AT reached the seat's environment)
+            log(ev="hook_killed", sid=self.sid, role=self.role, event=event, signal=-r.returncode)
         try:
             return json.loads(r.stdout) if r.stdout.strip() else None
         except ValueError:
@@ -152,9 +154,31 @@ def hang_if_asked(s: Session, spec: dict, key: str) -> None:
         time.sleep(float(spec.get("hang_seconds", 600)))
 
 
+def judge_scope(prompt: str) -> str:
+    """artifact | goal | ruling: `[swarm scope: X]` if the drive prompt carries it, else its wording."""
+    t = tag(prompt, "scope")
+    low = prompt.lower()
+    if t in ("artifact", "goal", "ruling"):
+        return t
+    if "ruling" in low:
+        return "ruling"
+    if "goal judge" in low or "scope goal" in low or "--scope goal" in low or "judge the goal" in low:
+        return "goal"
+    return "artifact"
+
+
+def outage_now() -> bool:
+    """Chaos: the first `outage_sessions` sessions of the whole run fail like a provider outage."""
+    n = int(SCRIPT.get("outage_sessions", 0))
+    return bool(n) and counter("outage") < n
+
+
 def role_lead(s: Session, n: int) -> None:
-    lead = nth(SCRIPT.get("lead"), n, {}) or {}
-    if n == 0:
+    lead = nth(SCRIPT.get("lead"), 0, {}) or {}
+    hang_if_asked(s, lead, "lead")
+    flag = RUN / "lead-requested"
+    if not flag.exists():
+        flag.write_text("1")   # idempotent across a killed first session: seats are requested once
         ask = lead.get("ask")
         if ask:   # a human question with a default that expires (spec 3.10); the lead keeps working
             s.swarm("ask", "--job", s.job, "--to", "human", ask["text"], "--options", ask.get("options", "left,right"),
@@ -170,6 +194,8 @@ def role_lead(s: Session, n: int) -> None:
                 args += ["--complexity", seat["complexity"]]
             if seat["role"] == "engineer":
                 args += ["--workdir", str(RUN / "work" / seat["seat"])]
+            if seat.get("harness"):
+                args += ["--harness", seat["harness"]]
             s.swarm(*args)
         return
     head = subprocess.run(["git", "--git-dir", str(HUB / "origin.git"), "rev-parse", "main"],
@@ -216,7 +242,12 @@ def role_reviewer(s: Session, n: int, prompt: str) -> None:
 
 
 def role_judge(s: Session, n: int, prompt: str) -> None:
-    ent = nth(SCRIPT.get("judge"), n, {"verdict": "met"}) or {}
+    table = SCRIPT.get("judge")
+    seq = table.get(s.scope) if isinstance(table, dict) else table
+    ent = nth(seq, n, {"verdict": "met"}) or {}
+    if ent.get("fail"):   # a judge session that ends without recording anything (chaos: ruling judge fails)
+        log(ev="judge_fail", sid=s.sid, scope=s.scope, nth=n)
+        return
     art = current_artifact(prompt)
     v = ent.get("verdict", "met")
     extra = ["--artifact", art] if art else []
@@ -241,6 +272,10 @@ def role_integrator(s: Session, n: int, prompt: str) -> None:
     s.git(w, "rebase", "origin/main")
     sha = s.git(w, "rev-parse", "HEAD").stdout.strip()
     s.git(w, "push", "-q", "-f", "origin", f"{branch}:refs/heads/{branch}")
+    spec = SCRIPT.get("integrator") or {}
+    if isinstance(spec, dict) and counter("ci_red") < int(spec.get("ci_red", 0)):
+        # chaos: CI is red on this rebased SHA (the driver must turn it into FINALIZE_BLOCKED and a fix round)
+        s.sh([sys.executable, HUB_PY, "ci-fail", "--hub", str(HUB), sha])
     r = s.sh([sys.executable, HUB_PY, "ci-check", "--hub", str(HUB), "--run", sha])
     if r.returncode == 0:
         s.swarm("land", "--job", s.job, "--artifact", f"{branch}@{sha}")
@@ -259,11 +294,20 @@ def main() -> int:
     seat = tag(prompt, "seat") or tag(prompt, "title")
     if "engineer" in role and not seat:
         seat = "eng-a"
-    key = f"{role}:{seat or ''}"
+    scope = judge_scope(prompt) if "judge" in role else None
+    # judges and reviewers are keyed by ROLE (and the judge's scope), never by seat: the scripted verdict
+    # sequence is the same however the driver names or orders its seats
+    key = f"judge:{scope}" if scope else (f"{role}:" if "review" in role else f"{role}:{seat or ''}")
     n = counter(key)
+    if outage_now():
+        print(json.dumps({"type": "result", "subtype": "error_during_execution", "is_error": True,
+                          "result": "API Error: 529 overloaded_error", "session_id": sid}))
+        log(ev="outage", sid=sid, role=role)
+        return 1
     cost = float(SCRIPT.get("cost_usd", 0.05))
     s = Session(sid, job, role, seat, model)
-    log(ev="start", sid=sid, role=role, seat=seat, job=job, model=model, harness=a.harness, nth=n,
+    s.scope = scope
+    log(ev="start", scope=scope, sid=sid, role=role, seat=seat, job=job, model=model, harness=a.harness, nth=n,
         budget=opt("--max-budget-usd"), artifact=current_artifact(prompt) if role not in ("lead", "engineer") else None)
     s.hook("start")
     try:

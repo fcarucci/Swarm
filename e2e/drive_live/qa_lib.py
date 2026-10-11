@@ -34,6 +34,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = Path(os.environ.get("SWARM_QA_REPO", str(HERE.parent.parent)))   # the checkout under test
+REAL_HOME = os.path.expanduser("~")
+REAL_PATH = os.environ.get("PATH", "")
 QA_ROOT = Path(os.environ.get("SWARM_QA_ROOT", "~/work/swarm-autonomy/qa")).expanduser()
 VENV = Path(os.environ.get("SWARM_QA_VENV", str(QA_ROOT / "venv"))).expanduser()
 
@@ -111,15 +113,17 @@ def capabilities(root: Path = REPO) -> dict[str, Cap]:
         "7": Cap("7 pure next_actions", _has(root, "lib/swarm/supervisor/driver_model.py", "next_actions")
                  or _has(root, "lib/swarm/supervisor/next_actions.py"), "driver_model / next_actions"),
         "8a": Cap("8a driver execution (claims, reconciliation)",
-                  _has(root, "lib/swarm/supervisor/driver.py", "claim_drive_launch"), "supervisor/driver.py"),
-        "8b": Cap("8b deadlines, terminalization, rollover",
-                  _has(root, "lib/swarm/supervisor/driver.py", "terminal")
+                  _has(root, "lib/swarm/supervisor/driver_exec.py", "def execute", "claim_drive_launch"),
+                  "supervisor/driver_exec.py def execute + claim_drive_launch"),
+        "8b": Cap("8b deadlines, terminalization, rollover, core-sweep skip",
+                  _has(root, "lib/swarm/supervisor/driver_life.py", "def terminalize", "def enforce_deadlines")
                   and _has(root, "lib/swarm/board/base.py", "drive_job_claimed"),
-                  "driver.py terminalization + drive skip in core sweeps (base.drive_job_claimed)"),
+                  "driver_life.py terminalize/enforce_deadlines + base.drive_job_claimed"),
         "8b-reactivation": Cap("8b reactivation quiet clock (today's auto-close bug)",
                                _has(root, "lib/swarm/board/base.py", "quiet_start"), "board/base.py quiet_start"),
         "8c": Cap("8c pass integration, tamper handling",
-                  _has(root, "lib/swarm/supervisor/command.py", "driver"), "supervisor/command.py runs the driver"),
+                  _has(root, "lib/swarm/supervisor/driver.py") and _has(root, "lib/swarm/supervisor/command.py", "driver"),
+                  "supervisor/driver.py + command.py runs the driver"),
         "11b": Cap("11b swarm land (driver-executed landing)",
                    _has(root, "lib/swarm/land.py") and _has(root, "lib/swarm/cli.py", '"land"')
                    or _has(root, "lib/swarm/drive_cli.py", '"land"'), "lib/swarm/land.py + swarm land"),
@@ -127,6 +131,20 @@ def capabilities(root: Path = REPO) -> dict[str, Cap]:
         "receipts": Cap("4 receipts", _has(root, "lib/swarm/receipts.py"), "receipts.py"),
     }
     return c
+
+
+def barrier_present(name: str, root: Path = REPO) -> bool:
+    """Whether the checkout has a crash barrier of this name: a `hit("name")` call under lib/. A scenario that
+    arms an absent barrier would kill nothing and pass vacuously, so it is skipped instead."""
+    import re as _re
+    pat = _re.compile(r"""hit\(\s*["']%s["']\s*\)""" % _re.escape(name))
+    for f in (root / "lib").rglob("*.py"):
+        try:
+            if pat.search(f.read_text(errors="replace")):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 LIVE_NEEDS = ("6a", "6b", "8a", "8b", "8c", "11b")
@@ -137,7 +155,7 @@ class Pending(Exception):
 
     def __init__(self, missing: list[str], what: str = ""):
         self.missing = missing
-        super().__init__(f"pending {'/'.join(missing)}" + (f" ({what})" if what else ""))
+        super().__init__((f"pending {'/'.join(missing)}" if missing else "not run") + (f" ({what})" if what else ""))
 
 
 def require(*names: str, root: Path = REPO, what: str = "") -> None:
@@ -182,6 +200,15 @@ class Pg:
         subprocess.run([self._pg("pg_ctl"), "-D", str(self.data), "-l", str(self.base / "pg.log"), "-o", opts,
                         "-w", "-t", "60", "start"], check=True, capture_output=True, text=True)
         atexit.register(self.stop)
+        for sig in (signal.SIGTERM, signal.SIGINT, getattr(signal, "SIGHUP", signal.SIGTERM)):
+            try:
+                signal.signal(sig, self._on_signal)
+            except ValueError:   # not the main thread
+                pass
+
+    def _on_signal(self, signum, frame):
+        self.stop()
+        raise SystemExit(128 + signum)
 
     def stop(self) -> None:
         if (self.data / "postmaster.pid").exists():
@@ -204,7 +231,9 @@ class Run:
     throwaway Postgres on the way out, whatever happens."""
 
     def __init__(self, name: str, *, backend: str = "postgres", harness: str = "fake",
-                 root: Path = REPO, stamp: str | None = None, keep: bool = True):
+                 root: Path = REPO, stamp: str | None = None, keep: bool = True, systemd: bool = False,
+                 pass_env: list | None = None):
+        self.systemd, self.pass_env = systemd, list(pass_env or [])
         self.name, self.backend, self.harness, self.root, self.keep = name, backend, harness, root, keep
         stamp = stamp or dt.datetime.now().strftime("%Y%m%dT%H%M%S")
         self.dir = check_run_dir(QA_ROOT / "runs" / f"{stamp}-{name}")
@@ -281,10 +310,23 @@ class Run:
             L += ["[file]", f"path = {toml_str(self.dir / 'board')}", ""]
         sup = ["[supervise]", "enabled = true", f"allowed_workdirs = [{toml_str(self.dir)}]",
                "timer_minutes = 1", "orphan_minutes = 1", "enrol_minutes = 2", "max_minutes = 20"]
+        if self.pass_env:
+            sup.append(f"pass_env = {json.dumps(self.pass_env)}")
         if self.harness == "fake":
             sup += [f"claude_bin = {toml_str(self.bin / 'claude')}", f"codex_bin = {toml_str(self.bin / 'codex')}"]
         else:
+            # the user's own binaries (the isolated HOME has no ~/.local/bin); SWARM_QA_CLAUDE/_CODEX override
+            for h in ("claude", "codex"):
+                found = os.environ.get(f"SWARM_QA_{h.upper()}") or shutil.which(h, path=REAL_PATH)
+                if found:
+                    sup.append(f"{h}_bin = {toml_str(found)}")
             sup += [f"claude_plugin_dir = {toml_str(self.root)}"]
+            creds = Path(REAL_HOME) / ".claude" / ".credentials.json"
+            if creds.exists():   # a private copy: the run's HOME is isolated
+                dst = self.home / ".claude"
+                dst.mkdir(mode=0o700, exist_ok=True)
+                shutil.copy(creds, dst / ".credentials.json")
+                os.chmod(dst / ".credentials.json", 0o600)
         L += sup + [""]
         L += ["[hook]", f"marker_dir = {toml_str(self.home / '.local/state/swarm/active')}", ""]
         self.config.write_text("\n".join(L))
@@ -301,13 +343,20 @@ class Run:
         keep = {k: os.environ[k] for k in ("LANG", "LC_ALL", "TERM", "USER", "LOGNAME", "ANTHROPIC_API_KEY",
                                            "OPENAI_API_KEY") if k in os.environ}
         e = {**keep, "HOME": str(self.home), "SWARM_CONFIG": str(self.config), "SWARM_VENV": str(VENV),
-             "SWARM_NO_SYSTEMD": "1", "SWARM_PYCACHE": str(self.home / ".cache" / "pyc"),
-             "PATH": f"{self.bin}:/usr/local/bin:/usr/bin:/bin", "SWARM_QA_RUN": str(self.dir),
+             "SWARM_PYCACHE": str(self.home / ".cache" / "pyc"),
+             "PATH": f"{self.bin}:" + (REAL_PATH if self.harness == "real" else "/usr/local/bin:/usr/bin:/bin"),
+             "SWARM_QA_RUN": str(self.dir),
              "SWARM_QA_ROOT": str(QA_ROOT), "SWARM_QA_REPO": str(self.root), "SWARM_QA_HARNESS": self.harness,
              "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
              "GIT_AUTHOR_NAME": "QA", "GIT_AUTHOR_EMAIL": "qa@example.invalid",
              "GIT_COMMITTER_NAME": "QA", "GIT_COMMITTER_EMAIL": "qa@example.invalid",
              "GIT_CONFIG_GLOBAL": os.devnull}
+        if not self.systemd:
+            e["SWARM_NO_SYSTEMD"] = "1"
+        elif "XDG_RUNTIME_DIR" in os.environ:   # real scopes: the user manager's bus, units named by the runner
+            e["XDG_RUNTIME_DIR"] = os.environ["XDG_RUNTIME_DIR"]
+            if "DBUS_SESSION_BUS_ADDRESS" in os.environ:
+                e["DBUS_SESSION_BUS_ADDRESS"] = os.environ["DBUS_SESSION_BUS_ADDRESS"]
         e.update({k: str(v) for k, v in extra.items()})
         return e
 
