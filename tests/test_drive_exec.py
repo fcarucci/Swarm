@@ -1344,6 +1344,43 @@ class FixRoundTests(ExecEnv):
         self.rec(91)
         self.assertEqual(self.b.drive_locks(), [])
 
+    def test_a_launch_mark_below_the_acknowledged_mark_does_not_move_it_back(self):
+        self.seat()
+        run = self.go(self.act())
+        self.reload()
+        self.led.watermarks[f"launch-msg:{run['launch_id']}"] = 5
+        self.led.watermarks["msg:eng-a"] = 100
+        self.led.save()
+        driver_exec.conclude_run(self.cfg, run, "completed", 0.1)
+        self.assertEqual(self.reload().watermarks["msg:eng-a"], 100)
+
+    def test_an_ended_row_with_its_run_file_but_no_held_lock_is_left_to_the_reaper(self):
+        self.seat()
+        run = self.go(self.act())
+        self.b.finish_restart(run["restart_id"], "failed")
+        with mock.patch.object(runner, "reap", lambda *a, **k: None):
+            self.assertEqual(self.rec(1).intents[0].state, "claimed")        # the run file is there: its finish concludes
+
+    def test_a_successor_row_requested_by_someone_else_is_not_healed(self):
+        self.seat()
+        run = self.go(self.act())
+        self.end(run, "failed")
+        cur = self.b.seat("J", 1, "eng-a")
+        self.b.request_seat("J", 1, "eng-a~1", role=cur.role, harness=cur.harness, model=cur.model,
+                            workdir=cur.workdir, brief_path=cur.brief_path, title=cur.title, task_ref=cur.task_ref,
+                            complexity=cur.complexity, requested_by="lead")
+        self.assertIsNone(self.go(self.act(seat="eng-a~1", trigger="9")))
+        self.assertFalse(driver_exec.seat_authorized(self.led, self.b.seat("J", 1, "eng-a~1"), self.now()))
+
+    def test_a_successor_row_the_driver_made_and_lost_to_a_crash_is_healed(self):
+        self.seat()
+        run = self.go(self.act())
+        self.end(run, "failed")
+        with mock.patch.object(driver_exec, "authorize_seat", side_effect=RuntimeError("crash")):
+            with self.assertRaises(RuntimeError):
+                self.go(self.act(seat="eng-a~1", trigger="9"))
+        self.assertIsNotNone(self.go(self.act(seat="eng-a~1", trigger="9")))
+
     # -- lows
     def test_a_kill_switch_cancel_does_not_count_toward_max_attempts(self):
         self.cfg["drive"] = {"max_attempts": 1}
