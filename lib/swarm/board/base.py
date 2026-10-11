@@ -1793,6 +1793,8 @@ class Board(abc.ABC):
                 return ExpiryAction("failed", "auto-closed: goal met but accepted work never finalized", None,
                                     CloseGuard(pending_ok=True), stale=True)
             outcome = ("auto-closed: waiting with no live agents; verdict met" if met
+                       else "auto-closed: waiting with no live agents; verdict unreachable"
+                       if js.verdict == "unreachable"
                        else "auto-closed: waiting with no live agents and no verdict")
             guard = CloseGuard() if met or not goal_unmet(js) else CloseGuard(False, js.goal, js.max_hours)
             return ExpiryAction("completed" if met else "failed", outcome, None, guard, stale=True)
