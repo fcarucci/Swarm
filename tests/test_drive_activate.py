@@ -17,7 +17,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from support import SANDBOX, base_config, home_env  # noqa: F401
+from support import SANDBOX, base_config, home_env, posix_only  # noqa: F401
 
 from test_hooks_cli import Env  # noqa: E402  (sets sys.path)
 
@@ -29,6 +29,15 @@ NOW = dt.datetime(2026, 10, 10, 12, 0, tzinfo=dt.timezone.utc)
 FRESH = {"last_run_at": (NOW - dt.timedelta(minutes=1)).isoformat()}
 ACTIVE_TIMER = {"ActiveState": "active", "UnitFileState": "enabled"}
 RECORD = re.compile(r"swarm-record: kind=([a-z_]+) id=(\d+) rev=(\d+)")
+
+
+def absolute(*parts: str) -> str:
+    """An absolute path on this platform (POSIX /x or Windows C:\\x), built from parts."""
+    return os.path.join(os.path.abspath(os.sep), *parts)
+
+
+def real_tmp() -> str:
+    return os.path.realpath(tempfile.gettempdir())
 
 
 def ns(**kw) -> argparse.Namespace:
@@ -170,17 +179,20 @@ class CredentialAndWorkdirTests(HomeCase):
                 da.credential_pin(bad)
 
     def test_credential_helper_on_allowlist_pinned_with_absolute_path(self):
-        self.assertEqual(da.credential_pin("helper:/home/u/.local/bin/gh auth git-credential"),
-                         "helper:/home/u/.local/bin/gh auth git-credential")
+        gh = absolute("home", "u", ".local", "bin", "gh")
+        self.assertEqual(da.credential_pin("helper:" + gh + " auth git-credential"),
+                         "helper:" + gh + " auth git-credential")
 
     def test_ssh_key_must_be_absolute(self):
-        self.assertEqual(da.credential_pin("ssh-key:/home/u/.ssh/id"), "ssh-key:/home/u/.ssh/id")
+        key = absolute("home", "u", ".ssh", "id")
+        self.assertEqual(da.credential_pin("ssh-key:" + key), "ssh-key:" + key)
         with self.assertRaises(da.DriveError):
             da.credential_pin("ssh-key:id")
 
     def test_ssh_agent_pins_the_socket(self):
-        with mock.patch.dict(os.environ, {"SSH_AUTH_SOCK": "/run/user/1000/agent.sock"}):
-            self.assertEqual(da.credential_pin("ssh-agent"), "ssh-agent:/run/user/1000/agent.sock")
+        sock = absolute("run", "user", "1000", "agent.sock")
+        with mock.patch.dict(os.environ, {"SSH_AUTH_SOCK": sock}):
+            self.assertEqual(da.credential_pin("ssh-agent"), "ssh-agent:" + sock)
         with mock.patch.dict(os.environ, {"SSH_AUTH_SOCK": ""}), self.assertRaises(da.DriveError):
             da.credential_pin("ssh-agent")
 
@@ -189,10 +201,11 @@ class CredentialAndWorkdirTests(HomeCase):
                          "https://example.com/o/r.git")
 
     def test_workdir_default_refused_under_tmp(self):
-        cfg = {"supervise": {"allowed_workdirs": ["/tmp"]}}
-        with mock.patch.object(da, "TMP_ROOTS", ("/tmp", "/private/tmp")), \
+        tmp = real_tmp()
+        cfg = {"supervise": {"allowed_workdirs": [tmp]}}
+        with mock.patch.object(da, "TMP_ROOTS", (tmp,)), \
                 self.assertRaisesRegex(da.DriveError, "never /tmp"):
-            da.resolve_workdir(cfg, None, "/tmp/some-job")
+            da.resolve_workdir(cfg, None, os.path.join(tmp, "some-job"))
 
     def test_workdir_outside_allowed_workdirs_refused(self):
         cfg = {"supervise": {"allowed_workdirs": [str(self.home / "src")]}}
@@ -258,9 +271,12 @@ class DriveCli(Env):
         self.work.mkdir(parents=True)
         self.base_toml = self.config.read_text()
         self.enable_supervisor(True)
-        tmp = mock.patch.object(da, "TMP_ROOTS", ())   # the suite's temp dir is /tmp; see HomeCase
+        tmp = mock.patch.object(da, "TMP_ROOTS", ())   # the suite's temp dir is the temp dir; see HomeCase
         tmp.start()
         self.addCleanup(tmp.stop)
+        self.platform = mock.patch.object(da, "PLATFORM", "linux")   # the timer check is for Linux here
+        self.platform.start()
+        self.addCleanup(self.platform.stop)
         self.timer = mock.patch.object(systemd, "timer_state", return_value=dict(ACTIVE_TIMER))
         self.timer.start()
         self.addCleanup(self.timer.stop)
@@ -345,7 +361,7 @@ class DriveCli(Env):
     def test_workdir_default_refused_under_tmp(self):
         cwd = os.getcwd()
         self.addCleanup(os.chdir, cwd)
-        with mock.patch.object(da, "TMP_ROOTS", ("/tmp", "/private/tmp")):
+        with mock.patch.object(da, "TMP_ROOTS", (real_tmp(),)):
             os.chdir(self.tmp)
             rc, _, err = self.activate()
         self.assertEqual(rc, 2)
@@ -382,8 +398,9 @@ class DriveCli(Env):
         self.assertEqual(self.ledger_of().models, {"engineer": "sonnet"})
 
     def test_credential_helper_not_on_allowlist_refused(self):
+        curl = absolute("usr", "bin", "curl")
         rc, _, err = self.activate("--workdir", str(self.work), "--remote", "origin=https://example.com/r.git",
-                                   "--credential", "origin=helper:/usr/bin/curl")
+                                   "--credential", "origin=helper:" + curl)
         self.assertEqual(rc, 2)
         self.assertIn("allowlist", err)
         self.assertIsNone(self.ledger_of())
@@ -444,6 +461,7 @@ class DriveCli(Env):
         self.assertEqual(rc, 1)
         self.assertIn("requester session", err)
 
+    @posix_only("supervise is POSIX-only (its systemd timer)")
     def test_supervise_disable_halts_drive_ledgers_and_enable_unhalts(self):
         self.activate("--workdir", str(self.work))
         rc, out, err = self.cli("supervise", "disable")
@@ -463,6 +481,7 @@ class DriveCli(Env):
         self.assertIn("engineer=sonnet", out)
         self.assertIn("lead=opus", out)
 
+    @posix_only("supervise is POSIX-only (its systemd timer)")
     def test_supervise_disable_refused_for_seat_session(self):
         self.activate("--workdir", str(self.work))
         with mock.patch.object(da, "_tty", return_value=False), \
