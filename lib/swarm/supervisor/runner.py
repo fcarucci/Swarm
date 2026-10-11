@@ -64,6 +64,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from swarm import clock, compat
+from swarm.supervisor import barrier
 from swarm.supervisor.systemd import manager_env as _manager_env
 
 POLL_SECONDS = 5.0
@@ -1127,6 +1128,7 @@ def _execute(cfg: dict, run: dict, *, popen, clock, sleep, poll: float, board_ev
     next_board, enrolled, outcome = t0, False, None
     ignored: set = set()   # marker-bound keys already logged as not ours
     while proc.poll() is None:
+        barrier.hit("runner_mid_session")
         now = clock()
         if now - t0 >= float(run["limit_seconds"]):
             outcome = "timeout"
@@ -1193,6 +1195,7 @@ def finish(cfg: dict, run: dict, outcome: str) -> bool:
     the resume marker, the session output (a redacted tail kept, the raw files deleted), the log
     and the run file. False when the board is unreachable or the marker couldn't be removed: the
     run file stays, recording how far it got, for `reap` to finish."""
+    barrier.hit("before_finish")
     from swarm.board import open_board
     from swarm.supervisor import lost, markers
     from swarm.supervisor.settings import log

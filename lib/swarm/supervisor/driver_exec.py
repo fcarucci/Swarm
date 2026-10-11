@@ -30,6 +30,7 @@ import uuid
 
 from swarm import compat, receipts
 from swarm.board import JobPaused
+from swarm.supervisor import barrier
 from swarm.supervisor import driver_model as dm
 from swarm.supervisor import ledger
 from swarm.supervisor.settings import log
@@ -465,10 +466,12 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
     lock_keys, lock_paths = _locks(seat)
     marks = _board_marks(board, led, seat, now)
     launch_id, attempt = new_launch_id(now), max((i.attempt for i in mine), default=0) + 1
+    barrier.hit("before_claim")
     # 1a. write-ahead intent, fsynced (ledger.save), before anything reaches the board
     mutate(led, lambda l: l.intents.append(ledger.Intent(
         launch_id=launch_id, action_id=action.action_id, attempt=attempt, seat=seat.seat,
         reserved_usd=reserve_usd, reserved_minutes=reserve_minutes, locks=list(lock_keys), state="claiming")))
+    barrier.hit("after_intent_before_claim")
     old = f"launch:{launch_id}"
     try:
         try:
@@ -489,6 +492,7 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
     if row is None:                      # lost the race: not an attempt, nothing counted (F7)
         _conclude(led, launch_id, "lost", False, 0.0)
         return None
+    barrier.hit("after_claim")
     carry_authorization(led, seat, board.seat(led.job, led.generation, seat.seat), now)
     # the claim is recorded; a launch of a no-progress kind advances the progress counter, and the
     # board position the session starts from is kept until its turn is acknowledged
@@ -516,9 +520,11 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
         marker = markers.write_resume_marker(cfg, led.job, row.id, resume_of=old, name=name,
                                              harness=seat.harness, session_id=spec.session_id)
         run["marker"] = str(marker)
+        barrier.hit("after_marker")
         if spec.session_id:
             board.set_restart_agent(row.id, spec.session_id)
         runner.write_run(run)
+        barrier.hit("after_run_file")
         # 4. recheck the kill switches, then start
         try:
             fresh = ledger.load(led.board_key, led.job)
@@ -535,6 +541,7 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
             _conclude(led, launch_id, "cancelled-before-start", False, 0.0)
             return None
         (start_runner or runner.start)(cfg, run)
+        barrier.hit("after_runner_start")
         return run
     except Exception:
         board.finish_restart(row.id, "failed")

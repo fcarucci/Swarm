@@ -1550,5 +1550,71 @@ class FixRoundTests(ExecEnv):
         self.assertIn(("--setting-sources", "user"), pairs)
 
 
+class BarrierTests(ExecEnv):
+    """Crash barriers (SWARM_CRASH_AT): each named point is hit, in order, and nothing later has happened."""
+
+    class Crash(BaseException):
+        pass
+
+    def crash_at(self, name):
+        def kill(pid, sig):
+            raise self.Crash(name)
+        with mock.patch.dict(os.environ, {"SWARM_CRASH_AT": name}), mock.patch("os.kill", kill):
+            with self.assertRaises(self.Crash):
+                self.go(self.act())
+
+    def test_before_claim_nothing_is_written(self):
+        self.seat()
+        self.crash_at("before_claim")
+        self.assertEqual((self.reload().intents, self.b.restarts(job="J")), ([], []))
+
+    def test_after_intent_before_claim_only_the_intent_exists(self):
+        self.seat()
+        self.crash_at("after_intent_before_claim")
+        self.assertEqual([i.state for i in self.reload().intents], ["claiming"])
+        self.assertEqual(self.b.restarts(job="J"), [])
+
+    def test_after_claim_the_row_exists_without_a_run_file(self):
+        self.seat()
+        self.crash_at("after_claim")
+        (row,) = self.b.restarts(job="J")
+        self.assertEqual([i.state for i in self.reload().intents], ["claiming"])
+        self.assertFalse(runner.has_run(self.cfg, row.id))
+
+    def test_after_marker_there_is_no_run_file_yet(self):
+        self.seat()
+        self.crash_at("after_marker")
+        (row,) = self.b.restarts(job="J")
+        self.assertFalse(runner.has_run(self.cfg, row.id))
+        self.assertTrue(markers.resume_marker_path(self.cfg, "J", row.id).exists())
+
+    def test_after_run_file_the_run_exists_and_nothing_started(self):
+        self.seat()
+        self.crash_at("after_run_file")
+        (row,) = self.b.restarts(job="J")
+        self.assertTrue(runner.has_run(self.cfg, row.id))
+        self.assertEqual(self.launched, [])
+
+    def test_after_runner_start_the_runner_was_started(self):
+        self.seat()
+        self.crash_at("after_runner_start")
+        self.assertEqual(len(self.launched), 1)
+
+    def test_before_finish_the_run_is_not_finished(self):
+        self.seat()
+        run = self.go(self.act())
+        with mock.patch.dict(os.environ, {"SWARM_CRASH_AT": "before_finish"}), \
+                mock.patch("os.kill", side_effect=self.Crash("x")):
+            with self.assertRaises(self.Crash):
+                runner.finish(self.cfg, run, "completed")
+        self.assertTrue(runner.has_run(self.cfg, run["restart_id"]))
+        self.assertIsNone(self.row_of(run).ended_at)
+
+    def test_runner_mid_session_is_a_literal_barrier_call_in_the_poll_loop(self):
+        src = open(runner.__file__).read()
+        loop = src.index("while proc.poll() is None:")
+        self.assertIn('barrier.hit("runner_mid_session")', src[loop:loop + 200])
+
+
 if __name__ == "__main__":
     unittest.main()
