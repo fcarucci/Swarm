@@ -19,6 +19,16 @@ class StatusViewShapeTests(unittest.TestCase):
         self.assertIn('BEFORE UPDATE OF job, name, joined_at ON agents', SCHEMA)
         self.assertIn('m.created_at >= NEW.joined_at', SCHEMA)
 
+    def test_shown_status_idleness_counts_from_the_newest_of_contact_post_and_run_start(self):
+        # a reopened job (activated_at newer than its last post) is not "idle" for its old silence
+        view = STATUS_VIEW.split('CREATE VIEW job_status AS')[1]
+        self.assertRegex(view, r'greatest\(s\.last_contact_at, m\.last_post_at,\s+j\.activated_at, j\.created_at\)'
+                               r' > now\(\) - make_interval\(mins => \{idle\}\)')
+        self.assertNotIn('COALESCE(greatest(s.last_contact_at', view)
+
+    def test_a_drive_job_is_never_auto_closed_by_the_board_itself(self):
+        self.assertRegex(SCHEMA, r"closed_by = 'auto'\s+AND OLD\.plugin_data ~ '\"drive\\\.enabled\"")
+
     def test_hot_tables_vacuum_early(self):
         for table in ('messages', 'agents'):
             self.assertRegex(SCHEMA, rf'ALTER TABLE {table} SET \(autovacuum_vacuum_insert_scale_factor = 0\.02, '
