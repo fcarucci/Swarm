@@ -1762,6 +1762,91 @@ can't be checked), get 403. `/github` still requires the HMAC from `secret_file`
 normal repo webhook. Polling the API is a fallback only (also the only CI path for Gitea, which
 sends no CI webhooks): never faster than 600 s (`poll_interval_s` can only raise it). `[land] strategy` in `team.toml` is `rebase-ff` (default) or `squash-ff`.
 
+## Drive mode
+
+A goal job is **driven**: the supervisor timer runs the job, not a coordinator session. `swarm activate
+--job J --goal G` implies drive (`--drive` is accepted and does nothing); `--no-drive --reason TEXT` runs the
+goal job the old way, with nothing driving it. Nothing else needs to stay alive after activation: the session that
+activated the job is the **requester/observer**. It may watch (`swarm watch`, `swarm snapshot --follow`) and, as the
+requester session, answer questions, `swarm halt`/`unhalt`, `deactivate` and request seats through receipted
+commands. Its turns, its absence or its blocking change nothing. There is no new always-on process: only the
+timer-driven pass, its per-session runners and the existing opt-in events listener.
+
+### Breaking changes
+
+Drive mode changes four things for anyone who scripted the old flow:
+
+1. **A goal implies drive.** `swarm activate --goal` starts a driven job; use `--no-drive --reason TEXT` for the old behaviour.
+2. **`--default` is required** on every `swarm ask` in a drive job: the driver applies it when the question expires (`question_expiry`, 4h).
+3. **Requester Agent-tool spawns are refused in drive jobs.** The requester no longer staffs the job with the host's spawn tool; the lead requests seats with `swarm seat request` and the supervisor launches them.
+4. **`activate --goal` fails until `swarm supervise enable`** has been run on the host and the timer is running (and drive mode is refused on Windows and macOS, which have no timer host). The error names the fix.
+
+### Terminal states
+
+A drive job ends in exactly one of: **MET** (a current-generation goal or ruling verdict `met`, then the close-time
+checks), **UNREACHABLE** (the judge's verdict with reasons and details, or the labelled mechanical one when the
+budget, deadline or reserve is gone) or **CANCELLED** (a person ran `swarm deactivate`). A drive job is never
+left idle, stalled or waiting for a coordinator. When a budget is exhausted, or `no_progress_rounds` pass without
+progress, a **ruling** becomes due: the ruling judge decides MET, UNREACHABLE or one more bounded stretch of work, drawing on the reserve
+(`ruling_reserve_usd`, `ruling_attempts`). `ruling_deadline_minutes` and `ruling_grace_minutes` bound it; past them
+the driver records the mechanical UNREACHABLE and says so in the outcome.
+
+### Seats, rounds and landing
+
+- **Seats.** The lead (`lead`, title EL) is a headless session started at activation from the lead brief. It writes task briefs as files in the work dir and runs `swarm seat request --job J --seat NAME --role ROLE --brief PATH [--model M] [--workdir DIR]`, `swarm seat release`, answers questions and, when it believes the goal is met, `swarm goal-ready` (a `GOAL-READY <candidate> req=<digest>` post). One writer works in one work tree: a worktree per writer, under the job's work roots and never under `/tmp` (the driver refuses such workdirs).
+- **Rounds.** A hand-off (`swarm done`) starts an independent review (`swarm review`), then a fix round or a judge verdict, bounded by `max_rounds` and by progress.
+- **Landing.** `swarm land --job J --artifact REF` records a receipted land request and ends the integrator's turn; the driver executes it: rebase only (or `[land] strategy = squash-ff`), fast-forward pushes only, never a force push, CI green on the exact rebased SHA (`swarm ci wait --repo OWNER/REPO --sha <sha> --timeout 540`, in the foreground), the landed tree verified.
+- **Records.** Every CLI command that creates or changes a drive record prints, as its last stdout line, `swarm-record: kind=<kind> id=<n> rev=<n>`. In a drive job the CLI never spools a control command: it fails with a clear error.
+- **Halt.** `swarm halt --job J [--reason TEXT]` (a person, or the requester session) stops progress; `swarm unhalt` resumes it. `swarm supervise disable` halts every drive job on the host and `enable` resumes exactly those halts, shifting each deadline by the time it was halted.
+
+### Models, review gates and staffing
+
+`[drive.models]` sets the model per role; per job `--model ROLE=MODEL` at activation, per seat `--model` on `seat request`, and
+`swarm drive models --job J ROLE=MODEL ...` on a running job. The shipped defaults: `engineer`, `worker` and `integrator` run on
+**haiku**; `reviewer` and `qa` on **sonnet**; `judge`, `lead` and `security` on **opus**. `allowed_models` lists what a job may pick;
+anything else is refused at activation. Because haiku writes the code, the haiku-written change gets strict review gates: an independent
+sonnet reviewer for every hand-off (`review_gates` of the recipe), never the author.
+
+### Budgets: configurable defaults, not limits
+
+Every key under `[drive]` in `config.toml` is a configurable default; `config.example.toml` lists them with their shipped values.
+The per-job values live in the ledger, are shown by `swarm status --job J` and `swarm doctor`, and are changed
+on a running job with `swarm drive budget --job J KEY=VALUE ...` (no rollover). A reserve larger than the cap, or a cap below
+`ruling_reserve_usd` plus `min_session_usd`, is refused. At activation: `--max-cost-usd N`, `--ruling-reserve-usd N`, `--budget KEY=VALUE`.
+
+| Key | Shipped default | On exhaustion |
+|-----|-----------------|---------------|
+| `max_sessions` | 60 | ruling |
+| `max_seats` | 12 | further requests refused, lead woken |
+| `max_rounds` | 8 | ruling |
+| `no_progress_rounds` | 3 | ruling |
+| `max_attempts` | 3 | the action fails, lead woken |
+| `max_cost_usd` | 40 (USD), configurable | ruling |
+| `ruling_reserve_usd` | 5 (USD), configurable | the reserve is what a ruling draws on |
+| `session_usd_cap` | 5 | a session's reserved ceiling |
+| `min_session_usd` | 0.5 | the launch is held and a ruling becomes due |
+| `max_session_minutes` | 60 | the session ends, the seat goes idle |
+| `max_wall_hours` | 24 | ruling |
+| `ruling_attempts` | 2 | the mechanical UNREACHABLE |
+| `ruling_deadline_minutes` | 120 | the mechanical UNREACHABLE |
+| `ruling_grace_minutes` | 15 | the mechanical UNREACHABLE |
+| `question_expiry` | `"4h"` | the question's `--default` is applied |
+| `stall_minutes` | 90 | the lead is woken or the lost actor relaunched |
+| `driver_error_passes` | 6 | the job is held and `DRIVER-STALLED`/`DRIVER-CONFIG` reported |
+| `max_concurrent_sessions` | 4 | further launches wait |
+| `lease_hold_minutes` | 60 | a ruling becomes due |
+| `codex_usd_per_mtok` | 10 | Codex tokens times this rate charge the budget |
+| `allowed_models` | `["haiku", "sonnet", "opus"]` | activation refuses other models |
+| `credential_helpers` | `["gh auth git-credential"]` | the credential helpers a pinned `--credential` may name |
+| `recipe`, `review_role` | `coding`, `reviewer` | fixed at activation in the owner record (`--recipe`), never read from `config.toml` |
+
+### Landing destinations, credentials and worktrees
+
+- **Pinned credentials.** Verification and landing run in supervisor-private bare mirrors with a minimal environment. Activation pins, per destination, one credential source with `--credential DEST=SOURCE`: an allowlisted helper, an ssh key or an agent socket. A helper is pinned as an **absolute** path in the owner record (the mirror resolves helpers only from system directories, and `gh` often lives in `~/.local/bin`), together with its config location. For ssh destinations activation or doctor seeds `known_hosts` in the private mirrors directory (BatchMode fails closed). `swarm doctor` runs a dry-run `git ls-remote` per destination and fails on an unresolvable helper; it also needs git 2.40 or newer on hosts with drive jobs.
+- **Windows UNC roots.** A worktree root that is a Windows UNC path (or has a leading `//`) is refused, fail safe; drive mode is refused on Windows anyway.
+- **Flagged audit.** Before a MET close the driver audits the target's history since activation: every commit must be reachable from a judged-met SHA of the job or have the same patch-id as one. A **flagged** audit (`DRIVER-AUDIT`) blocks the close and makes a ruling due with the finding in its prompt. It can flag legitimate cases: twin runs spanning two judged artifacts, a judged chain with a merge or empty commit, a judged branch forked before activation. Drive landings avoid these because `swarm land` pushes the exact judged SHA. To resolve a flag, re-judge the flagged commits (a new hand-off of the exact SHA), or let the ruling decide with the finding in front of it.
+- **Never /tmp.** Work trees, clones and build output never go under `/tmp` (seat workdirs there are refused). Targeted tests run through `/var/tmp/test-slots/test-slot`; the full suite runs only in CI.
+
 ## Roles
 
 ### Workers
@@ -1986,6 +2071,10 @@ Claude/Codex routing, board polling, and recovery. Custom roles and this skill r
 0.1.1 or later; check the loaded plugin and role enrollment if an older cache hides the skill.
 Documentation checks do not validate host behavior; independent evaluation on each host is
 still required before treating that host's behavior as validated.
+
+In a driven goal job (see [Drive mode](#drive-mode)) the skill changes shape: the invoking session is the
+requester/observer, the lead staffs through `swarm seat request`, and the PM-per-event procedure and root spawns
+apply to non-drive jobs only.
 
 ### Waiting for CI: `swarm ci`
 

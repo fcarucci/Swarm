@@ -1,12 +1,60 @@
 # Host orchestration and recovery
 
 Use with the [role contract](team-roles.md), [artifact contract](artifacts.md), and
-[Swarm CLI/host reference](../../swarm/SKILL.md). The invoking agent is PM. EL decides
-technical staffing and assignments; PM owns activation, board polling, root dispatch,
-and user reports. A `project_manager` delegate does bounded planning/reporting and
-returns to PM; its label grants no host-only powers.
+[Swarm CLI/host reference](../../swarm/SKILL.md). **A goal job is driven**: the supervisor runs
+it, EL requests its seats with `swarm seat request`, and the invoking agent is the
+requester/observer. Staffing, dispatch and landing by the invoking agent (PM) exist only in
+[non-drive jobs](#non-drive-jobs) (`--no-drive --reason TEXT`).
 
-## 1. Check the installed host before dispatch
+## Drive jobs
+
+### Activation checklist (requester/observer)
+
+- Check the host first: `swarm doctor --host claude` or `--host codex` (hooks, supervisor timer,
+  git 2.40 or newer, the pinned credential and a dry-run `git ls-remote` per landing destination,
+  Claude Bash sandbox "boundary" or "guardrail only", Codex drive-readiness per role, the per-job
+  budget and model lines). Run `swarm supervise enable` if the supervisor is off: without it
+  `swarm activate --goal` fails (use `--no-drive --reason TEXT` only for a job nothing drives).
+  Drive mode is refused on Windows and macOS (no timer host); a Windows UNC worktree root is refused.
+- Pin the landing destinations and credentials at activation: `--remote NAME=URL` and
+  `--credential DEST=SOURCE` (an absolute helper path, an ssh key or the agent socket; the driver's
+  mirrors read no global git config). Pin the requirements with `--requirements PATH`.
+- Set the model per role if the defaults do not fit (`--model ROLE=MODEL`; the defaults are
+  haiku for `engineer`, `worker` and `integrator`, sonnet for `reviewer` and `qa`, opus for
+  `judge`, `lead` and `security`) and the budget (`--max-cost-usd N`, `--ruling-reserve-usd N`,
+  `--budget KEY=VALUE`). Those are configurable defaults from `[drive]`, not limits.
+- Activate, then observe. After activation the invoking session may exit; nothing waits on it.
+  A question to the requester carries `--default`; if the requester session never answers, the
+  default applies at `question_expiry`.
+- Workdirs lie under the job's work roots (`--workdir`, `--allow-workdir`) and never under `/tmp`.
+  Tests: targeted, through `/var/tmp/test-slots/test-slot -- <cmd>` from the tests directory.
+
+### EL brief template
+
+The lead brief (`--lead-brief PATH`; a default is generated) is a file. It states, in this order:
+
+1. The original request (verbatim or a stable link), constraints, approvals given and exclusions.
+2. The requirement files (pinned at activation; `swarm goal-ready --add-requirements PATH` may pin more) with their blob ids.
+3. Authorization: what may be changed, pushed, published, spent; secrets by path only.
+4. Staffing rules: request each seat with `swarm seat request --job J --seat NAME --role ROLE --brief PATH [--model M] [--harness claude|codex] [--workdir DIR]`, one **worktree per writer** under the job's work roots (never `/tmp`), exclusive file ownership, a task brief file per seat, `swarm seat release` when a seat is done; the seat count is capped by `max_seats`.
+5. Gates: every hand-off is `swarm done`, reviewed by an independent reviewer seat; landing is `swarm land` by an integrator seat; the lead never lands or pushes the target.
+6. Every brief carries this CI line: "CI: wait for CI ONLY with swarm ci wait --repo OWNER/REPO --sha <exact head> --timeout 540 in the foreground; never gh run watch."
+7. Finish: when the integrated target meets the requirements run `swarm goal-ready --job J --candidate branch@sha`, which posts `GOAL-READY <candidate> req=<requirements blob id digest>`; the goal judge decides MET or UNREACHABLE. If the goal cannot be met, say so with evidence: UNREACHABLE needs a report of what was tried and what would change it.
+
+### Seats and the requester
+
+- Seats are `requested`, `idle`, `running`, `released`, `failed` or `cancelled`; `swarm seat list|show --job J` prints them. The lead, a person and (for release) the requester session may change them; an enrolled engineer cannot.
+- Every agent joins the board: a seat that does not enrol within `enrol_minutes` is killed. A seat prompt carries the `[swarm job: J]` line and its role tags; the supervisor writes them, not you.
+- The requester session answers with `swarm answer`, halts with `swarm halt`, resumes with `swarm unhalt`, cancels with `swarm deactivate`. A requester Agent-tool spawn is refused in a drive job; ask the lead through the board (`swarm post --to @EL`) when more staffing is needed.
+
+## Non-drive jobs
+
+Everything below is for a job nothing drives (`--no-drive --reason TEXT`, or no goal). The PM
+owns activation, board polling, root dispatch and user reports; EL decides technical staffing
+and assignments. A `project_manager` delegate does bounded planning/reporting and returns to PM;
+its label grants no host-only powers.
+
+### 1. Check the installed host before dispatch
 
 Record these in the job's evidence record, separately for Claude and Codex:
 
@@ -48,7 +96,7 @@ dry run used `fork_turns: "none"`. Static frontmatter/link/diff checks and check
 tests prove neither installed enrollment nor host workflow behavior. Keep each host's
 independent behavioral evaluation `pending` until it is actually observed and graded.
 
-## 2. Activate and keep PM on the board
+### 2. Activate and keep PM on the board
 
 Below, replace `swarm` with the absolute `swarm command:` printed by activation and
 replace example job `J`, paths, IDs, names, and goal text with the real values.
@@ -104,7 +152,7 @@ without reopening it. That session uses its own durable PM key, built from the s
 and its own host/session identity; never transfer or reuse the first session's key. Agree
 one PM scheduler; do not create competing ownership or dispatch loops.
 
-## 3. Give every invocation a bounded, durable brief
+### 3. Give every invocation a bounded, durable brief
 
 Include job, PM name, absolute CLI path, repository/workspace, role, task IDs, durable
 brief path, requirement revision, inputs, exclusive files, checks, and return condition.
@@ -130,7 +178,7 @@ board message. Review briefs supply requirements, immutable diff/base, and repro
 checks. Reviewers inspect those sources independently before treating author narrative
 as proof. Shared board history remains visible: a fresh context is not a blind review.
 
-### Claude Code
+#### Claude Code
 
 PM calls the host's `Agent` tool with `prompt` and a bounded `description`; use a fresh
 agent for each independent role. Put the job and role tags, and the seat's title tag, on their own lines in **every** prompt:
@@ -152,7 +200,7 @@ meet configured `min_justification_chars` and all child caps.
 
 Title tags: `[swarm title: EL]` for `engineering_lead`, `PM` for `project_manager`, `Product` for `product_manager`, `QA`, `Judge`, `Build` for `build_engineer`, `Reviewer`, `Verifier`, and `Eng` for `engineer` (several engineers may add a short scope, `Eng: board view`). Keep each to a few characters: it is the narrow column `swarm who`, `status` and `watch` show beside the name, never a replacement for the role (`swarm team --job J --show` lists the titles). A Codex child's message is encrypted, so it cannot carry the tag: have it run `swarm title --job J --as "<its name>" "<title>"` as its first board step.
 
-### Codex
+#### Codex
 
 PM calls `spawn_agent` with a role-prefixed task name and a fresh context, for example:
 
@@ -193,7 +241,7 @@ reviewer's recheck, not turn an author into its independent reviewer, QA, or pro
 acceptor. A same-role product manager or EL may return for acceptance if independence
 is preserved; a newly launched replacement reads the artifacts in a fresh context.
 
-## 4. Schedule against actual capacity
+### 4. Schedule against actual capacity
 
 PM records a small queue with owner, dependency, state, next check, and host invocation
 ID. EL requests engineers and review coverage; PM root-spawns bounded work in waves
@@ -244,7 +292,7 @@ swarm resume --job J
 
 Run `resume` when returning to work after the dependency clears, then poll the board.
 
-## 5. Fence stopped writers and recover
+### 5. Fence stopped writers and recover
 
 Before manual reassignment, confirm the old writer has stopped through supported host
 status/stop tools or observed completion. An interrupt request alone, silence, a dead
@@ -263,7 +311,7 @@ shared claims, board-gated spawns, and acceptance; queued/spooled posts are not 
 coordination. After recovery, drain messages and reconcile claims and candidate state
 before dispatch. Report an unrecoverable blocker with evidence and the decision needed.
 
-## 6. Complete only on matching evidence
+### 6. Complete only on matching evidence
 
 Use one built-in judge only for a job activated with `--goal`; PM schedules it at root.
 The judge posts its verdict through the CLI under its assigned name. In Claude Code its hooks add the name (no `join`, no `--as`); on a host without hooks add `--as "Judge name"`. For example:
