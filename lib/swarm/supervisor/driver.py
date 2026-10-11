@@ -25,6 +25,7 @@ RECONCILE_SECONDS = 20.0
 ACTIVATION_GRACE_SECONDS = 120.0
 CLOSED = ("completed", "cancelled", "failed")
 PERSON_RECEIPT_ACTION = "requester:deactivate"
+CLOSE_WINDOW_KEY = "closing.window"
 
 
 def _modules():
@@ -71,8 +72,12 @@ def _notice(board, state: dict, key: str, job: str, text: str) -> bool:
     posted = state.setdefault("posted", {})
     if key in posted:
         return False
+    from swarm.board import JobPaused, PAUSE_WRITER
     try:
-        board.post(job, SUPERVISOR, text[:1900])
+        try:
+            board.post(job, SUPERVISOR, text[:1900])
+        except JobPaused:          # a DRIVER-* notice is never suppressible: the pause writer may post
+            board.post(job, PAUSE_WRITER, text[:1900])
     except Exception as exc:       # a notice is never worth failing a pass for
         log.warning("post to %s failed: %s", job, type(exc).__name__)
         return False
@@ -89,10 +94,39 @@ def _forget(state: dict, prefix: str) -> None:
 
 # --- enumeration ---------------------------------------------------------------------------------
 
+def _scan_files(key: str):
+    """(ledgers, bad): every ledger file of this board read on its own, so one unreadable entry (a planted
+    lock, a bad body) holds only itself. Never sourced from the board."""
+    from swarm import compat
+    from swarm.supervisor import privfs
+    leds, bad = [], []
+    with privfs.dir_fd(ledger.SUBDIR) as d:
+        for name in sorted(compat.listdir(d)):
+            if not ledger._FILE.fullmatch(name):
+                continue
+            data = None
+            try:
+                data = privfs.read(d, name, ledger.MAX_BYTES)
+                with privfs.locked(d, ledger._lock_name(name)):
+                    data = privfs.read(d, name, ledger.MAX_BYTES)
+                led = ledger._parse(data, None, None) if data is not None else None
+                if led is None:
+                    raise ValueError("not a regular private file")
+                if ledger._name(led.board_key, led.job) != name:
+                    raise ValueError("file name does not match its key")
+            except Exception as exc:
+                bad.append((ledger._hint(data), name, f"{type(exc).__name__}: {exc}"[:200]))
+                continue
+            if led.board_key == key and led.terminal is None:
+                leds.append(led)
+    return leds, bad
+
+
 def _enumerate(board, cfg: dict, state: dict, key: str, say):
     """(ledgers, held): every unfinished ledger of this board, and the job names held for a bad ledger.
-    A planted lock (or anything else that makes `ledger.unfinished` raise) holds the jobs it cannot read
-    and does not stop the pass for the others."""
+    When `ledger.unfinished` raises (a planted lock) the ledger directory is listed by file name instead:
+    each file stands alone, and the board is never asked which jobs exist (a board writer must not be able
+    to make a job drop out, [F2])."""
     held: set = set()
     from swarm.supervisor import settings
     if not os.path.lexists(settings.private_dir() / ledger.SUBDIR):
@@ -101,16 +135,8 @@ def _enumerate(board, cfg: dict, state: dict, key: str, say):
         entries = ledger.unfinished(key)
     except Exception as exc:
         log.warning("ledger enumeration failed: %s", type(exc).__name__)
-        entries = []
-        for js in _claimed_jobs(board):
-            try:
-                led = ledger.load(key, js.job)
-            except Exception as exc2:
-                _bad(board, state, js.job, f"{type(exc2).__name__}", say)
-                held.add(js.job)
-                continue
-            if led is not None and led.terminal is None:
-                entries.append(led)
+        leds, bad = _scan_files(key)
+        entries = list(leds) + [ledger.LedgerBad(h, n, w) for h, n, w in bad]
     leds = []
     for e in entries:
         if isinstance(e, ledger.Ledger):
@@ -151,7 +177,8 @@ def _orphans(board, cfg: dict, state: dict, key: str, known: set, now, say) -> s
     for js in _claimed_jobs(board):
         if js.job in known or js.status != "active":
             continue
-        if enrolment.find_job_owner(key, js.job) is None and enrolment.find_job(key, js.job) is None:
+        rec = enrolment.find_job_owner(key, js.job)
+        if rec is None or not getattr(rec, "owner", None):
             continue                  # another host's job: its owner host reports it
         since = js.activated_at or js.created_at
         out.add(js.job)               # claimed: no other pass touches it, orphan or still activating
@@ -166,23 +193,33 @@ def _orphans(board, cfg: dict, state: dict, key: str, known: set, now, say) -> s
 
 # --- tamper ([F17], [G6]) ------------------------------------------------------------------------
 
-def _requester_deactivated(led, key: str, now: dt.datetime) -> bool:
-    """A receipted `swarm deactivate` by the job's requester session (hook receipt kind person) of this
-    incarnation and generation, unexpired."""
+RECEIPT_TTL = 24 * 3600        # hooks.drive_post_tool writes receipts that expire after a day
+CLOSE_WINDOW = (-60.0, 600.0)  # a receipt is issued this many seconds after the close it excuses
+
+
+def _requester_deactivated(led, key: str, now: dt.datetime, js=None) -> bool:
+    """A receipted `swarm deactivate` by the job's requester session (receipt kind person) of this incarnation
+    and generation, unexpired, and issued at the close it excuses (an old receipt cannot excuse a later
+    close). NOTE: Task 6b's receipts.find/matches by the close record id replaces the directory scan when its
+    API is on the base; until then the receipt's issue time (expiry minus its TTL) is bound to `finished_at`."""
     from swarm import enrolment, receipts, safefs
+    closed = getattr(js, "finished_at", None)
+    if closed is None:
+        return False
     try:
         with enrolment._dir(create=False) as d:
             found = safefs.scan(d, ".json", limit=receipts.RECORD_MAX,
                                 match=lambda n: n.startswith("receipt-"))
     except OSError:
-        return False
+        return False                       # fail safe: not a cancel (the row is repaired and the job halted)
     want = receipts.content_sha("person", {"action": "deactivate", "target": led.job})
     for _name, data in found:
         r = receipts._parse(data)
         if (r is not None and r.board_key == led.board_key and r.job == led.job and r.kind == "person"
                 and r.incarnation == led.incarnation and r.generation == led.generation
                 and r.action_id == PERSON_RECEIPT_ACTION and r.content_sha == want
-                and r.expires_at > now.timestamp()):
+                and r.expires_at > now.timestamp()
+                and CLOSE_WINDOW[0] <= (r.expires_at - RECEIPT_TTL) - closed.timestamp() <= CLOSE_WINDOW[1]):
             return True
     return False
 
@@ -193,6 +230,8 @@ def tamper(led, js, owner, data: dict) -> str | None:
         return "job row missing"
     if js.status in CLOSED:
         return f"job closed ({js.status}) by {js.closed_by or 'someone'}"
+    if js.status == "paused":
+        return "job paused"
     goal = (getattr(owner, "owner", None) or {}).get("goal")
     if goal and (js.goal or "") != goal:
         return "goal changed"
@@ -229,23 +268,45 @@ def _cancel(board, cfg: dict, led, now: dt.datetime, m) -> bool:
     return bool(cancel(board, cfg, led, "requester session", now, reason="deactivate by the requester session"))
 
 
+def _own_close(led, js) -> bool:
+    """The closed row is the driver's own close only when the ledger says it was closing: the window marker the
+    pass writes (and fsyncs) right before it terminalizes, and a status that matches the pending outcome. The
+    board's `closed_by` is board-writable and never trusted ([H1])."""
+    intent = led.terminal_intent
+    if intent is None or not led.watermarks.get(CLOSE_WINDOW_KEY):
+        return False
+    return js.status == ("completed" if intent["verdict"] == "met" else "failed")
+
+
+def _terminalize(board, cfg, led, now, m) -> bool:
+    """`life.terminalize` inside the ledger's close window: the marker is saved before the board is written and
+    dropped again unless the job is terminal, so a close made between passes is never taken for ours."""
+    _mutate(led, lambda l: l.watermarks.__setitem__(CLOSE_WINDOW_KEY, int(now.timestamp())))
+    try:
+        return m.life.terminalize(board, cfg, led, now)
+    finally:
+        if led.terminal is None:
+            _mutate(led, lambda l: l.watermarks.pop(CLOSE_WINDOW_KEY, None))
+
+
 def _check_tamper(board, cfg, state, led, js, owner, data, now, m, say) -> str | None:
-    """None when the row agrees; else "cancelled" (the requester's deactivate, job finished) or "held"."""
+    """None when the row agrees; else "cancelled" (the requester's deactivate, done) or "held"."""
     if getattr(led, "state", "active") == "activating":
         return None                                    # the activation is still being completed
-    intent = led.terminal_intent
-    if js is not None and js.status in CLOSED and intent is not None and js.closed_by == m.life.CLOSED_BY:
+    if js is not None and js.status in CLOSED and _own_close(led, js):
         return None                                    # the driver's own close; terminalize commits it
-    if js is not None and js.status == "paused":
-        return None
     what = tamper(led, js, owner, data)
     if what is None:
         _forget(state, f"tamper|{led.job}|")
         return None
-    if js is not None and js.status in CLOSED and _requester_deactivated(led, led.board_key, now):
-        _cancel(board, cfg, led, now, m)
-        say(f"drive: {led.job} cancelled by its requester")
-        return "cancelled"
+    if js is not None and js.status in CLOSED and _requester_deactivated(led, led.board_key, now, js):
+        if _cancel(board, cfg, led, now, m):
+            say(f"drive: {led.job} cancelled by its requester")
+            return "cancelled"
+        _notice(board, state, f"cancel|{led.job}", led.job,
+                f"{ev.DRIVER_TAMPER} the requester session deactivated this job but the cancellation could not "
+                "be completed; the job holds and the cancel is retried each pass")
+        return "held"
     repaired = _repair(board, led, owner, js)
     if not led.halted:
         m.life.halt(board, cfg, led, "driver (tamper)", now, reason=f"tamper: {what}"[:200])
@@ -293,7 +354,7 @@ def _act(board, cfg, sup, led, snap, actions, now, start_runner, config_path, jd
             m.exec.execute(board, cfg, sup, led, a, start_runner=start_runner, now=now, config_path=config_path)
         elif a.kind in ("record_unreachable", "close"):
             if _terminal_from(snap, led, board, now, m, a):
-                m.life.terminalize(board, cfg, led, now)
+                _terminalize(board, cfg, led, now, m)
         elif a.kind == "rollover":
             m.life.rollover(board, cfg, led, now)
         elif a.kind == "stop_seat" and a.seat:
@@ -337,7 +398,6 @@ def _watch_stalled(board, state, led, actions, now, sup) -> None:
 def _step(board, cfg, sup, state, led, owner, now, say, start_runner, config_path, jdeadline, m) -> None:
     life, exe = m.life, m.exec
     flat = _flat_cfg(cfg, led)
-    life.enforce_deadlines(board, flat, led, now)                  # cheap; ledger and job row only
     exe.reconcile(board, cfg, led, now, min(jdeadline, time.monotonic() + RECONCILE_SECONDS))
     if led.terminal is not None:
         return
@@ -349,7 +409,7 @@ def _step(board, cfg, sup, state, led, owner, now, say, start_runner, config_pat
         life.settle_halt(board, flat, led, now)
         return
     if led.terminal_intent is not None:
-        life.terminalize(board, flat, led, now)
+        _terminalize(board, flat, led, now, m)
         return
     if life.rollover(board, flat, led, now):
         return
@@ -365,14 +425,17 @@ def _step(board, cfg, sup, state, led, owner, now, say, start_runner, config_pat
 
 
 def _failed(board, state, led, exc, now, flat: dict, m) -> None:
-    """A driver step raised: count it; after `driver_error_passes` in a row post DRIVER-ERROR once and make a
-    ruling due (spec 3.2), so the deadline can still end the job."""
+    """A driver step raised: count it. At `driver_error_passes` in a row the ruling is made due first (whether or
+    not the notice can be posted), then DRIVER-ERROR is posted once per streak (spec 3.2)."""
     log.warning("driver step for %s failed: %s", led.job, type(exc).__name__, exc_info=True)
     try:
         _mutate(led, lambda l: setattr(l, "errors", l.errors + 1))
         if led.errors >= int(flat["driver_error_passes"]):
-            if _notice(board, state, f"error|{led.job}", led.job, f"{ev.DRIVER_ERROR} {type(exc).__name__}"):
+            try:
                 m.exec.note_ruling_due(led, now)
+            finally:
+                _notice(board, state, f"error|{led.job}|{led.generation}", led.job,
+                        f"{ev.DRIVER_ERROR} {type(exc).__name__}")
     except Exception as exc2:
         log.warning("error count for %s not saved: %s", led.job, type(exc2).__name__)
 
@@ -388,7 +451,22 @@ def drive(board, cfg: dict, sup: dict, state: dict, *, now: dt.datetime, say=pri
     leds, held = _enumerate(board, cfg, state, key, say)
     managed = set(held) | {led.job for led in leds}
     managed |= _orphans(board, cfg, state, key, managed, now, say)
-    m = _modules() if leds else None
+    m = None
+    if leds:
+        try:
+            m = _modules()
+        except ImportError as exc:                # a half-installed build: loud, and every job holds
+            for led in leds:
+                _notice(board, state, f"modules|{led.job}", led.job,
+                        f"{ev.DRIVER_ERROR} the driver's modules are missing ({exc}); the job holds")
+            return managed
+        for led in leds:                         # spec 3.2: deadlines of EVERY job first (ledger only, cheap)
+            if time.monotonic() >= deadline:
+                break
+            try:
+                m.life.enforce_deadlines(board, _flat_cfg(cfg, led), led, now)
+            except Exception as exc:
+                log.warning("deadlines of %s failed: %s", led.job, type(exc).__name__)
     for led in sorted(leds, key=lambda l: l.last_pass or ""):      # least recently driven first
         if time.monotonic() >= deadline:
             break
@@ -404,6 +482,7 @@ def drive(board, cfg: dict, sup: dict, state: dict, *, now: dt.datetime, say=pri
             _step(board, cfg, sup, state, led, owner, now, say, start_runner, config_path, jdeadline, m)
             if led.errors:
                 _mutate(led, lambda l: setattr(l, "errors", 0))
+                _forget(state, f"error|{led.job}|")
         except ledger.LedgerBadError as exc:      # the ledger went bad under us (halt, unhalt, a save): hold
             _bad(board, state, led.job, str(exc)[:200], say)
         except Exception as exc:
