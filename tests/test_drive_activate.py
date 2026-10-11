@@ -42,9 +42,9 @@ def real_tmp() -> str:
 
 
 class FakePerson:
-    """Task 6b's swarm.person, as the activation code calls it until that module is in this build: a
-    person at a terminal, the requester session that owns the job, or a refusal (seat sessions first)."""
-    PersonRefused = type("PersonRefused", (Exception,), {})
+    """Task 6b's swarm.person as the activation code calls it until that module is in this build: a person at
+    a terminal, the requester session that owns the job, or a refusal (seat sessions first). Like the real
+    require, it returns the authority or raises PermissionError."""
     tty = True
     seat_sessions = ()
 
@@ -53,13 +53,13 @@ class FakePerson:
         from swarm import enrolment as en, hosts as ho
         sid = ho.cli_session_id(os.environ)
         if sid and sid in cls.seat_sessions:
-            raise cls.PersonRefused(f"refused: {action} is a person's action; this is an enrolled agent session")
+            raise PermissionError(f"refused: {action} is a person's action; this is an enrolled agent session")
         owner = en.find_job_owner(board_key, job)
         if sid and owner is not None and owner.session_id == sid:
             return "requester"
         if cls.tty:
             return "tty"
-        raise cls.PersonRefused(f"refused: {action} needs a person: run it from the session that activated {job}")
+        raise PermissionError(f"refused: {action} needs a person: run it from the session that activated {job}")
 
 
 def ns(**kw) -> argparse.Namespace:
@@ -224,6 +224,13 @@ class CredentialAndWorkdirTests(HomeCase):
         self.assertEqual(da.sanitize_remote("https://example.com/o/r.git?token=abc#frag"),
                          "https://example.com/o/r.git")
         self.assertEqual(da.sanitize_remote("git@example.com:o/r.git"), "git@example.com:o/r.git")
+
+    def test_at_signs_in_a_password_or_query_do_not_leak_a_token(self):
+        self.assertEqual(da.sanitize_remote("https://user:p@ss@example.com/o/r.git"),
+                         "https://example.com/o/r.git")
+        self.assertEqual(da.sanitize_remote("https://example.com/o/r.git?x=a@b"), "https://example.com/o/r.git")
+        self.assertEqual(da.sanitize_remote("https://example.com?token=a@b"), "https://example.com")
+        self.assertEqual(da.sanitize_remote("https://example.com/o/r.git#x@y"), "https://example.com/o/r.git")
 
     def test_workdir_default_refused_under_tmp(self):
         tmp = real_tmp()
@@ -493,15 +500,72 @@ class DriveCli(Env):
                     self.assertEqual(b.job_status(job).status, "active")
                     self.assertEqual(b.job_data(job).get("drive.enabled"), "1")
 
-    def test_finish_restores_a_claim_that_went_missing(self):
+    def test_finish_never_writes_the_claim_after_the_ledger(self):
+        """[RR1a]: a ledger whose claim is missing is held, not completed with a claim written after it."""
         plan = self.plan(job="JC")
         with self.board() as b:
             with self.assertRaises(RuntimeError):
                 da.activate_drive(self.cfg, b, plan, crash_after="ledger")
             b.set_job_data("JC", "drive.enabled", None)          # the claim is lost
-            da.finish_activation(self.cfg, b, "JC")
-            self.assertEqual(b.job_data("JC").get("drive.enabled"), "1")
-            self.assertEqual(self.ledger_of("JC").state, "active")
+            with self.assertRaisesRegex(da.DriveError, "DRIVER-ORPHAN"):
+                da.finish_activation(self.cfg, b, "JC")
+            self.assertIsNone(b.job_data("JC").get("drive.enabled"))
+            self.assertEqual(self.ledger_of("JC").state, "activating")
+
+    def test_claim_is_written_before_the_ledger_and_never_after(self):
+        """[RR1a]: the activation's first claim write comes before the ledger, and no later step writes it."""
+        events = []
+        real_create = ledger.create
+
+        def create(*a, **kw):
+            events.append("ledger")
+            return real_create(*a, **kw)
+        with self.board() as b:
+            real_set = b.set_job_data
+
+            def set_job_data(job, key, *a, **kw):
+                if key == "drive.enabled":
+                    events.append("claim")
+                return real_set(job, key, *a, **kw)
+            b.set_job_data = set_job_data
+            with mock.patch.object(ledger, "create", side_effect=create):
+                da.activate_drive(self.cfg, b, self.plan(job="JO"))
+                da.finish_activation(self.cfg, b, "JO")
+        self.assertEqual(events, ["claim", "ledger"])
+
+    def test_remote_token_never_reaches_the_owner_record(self):
+        key = absolute("home", "u", ".ssh", "id")
+        rc, _, err = self.activate("--workdir", str(self.work), "--remote",
+                                   "origin=https://u:TOKEN1@example.com/r.git?t=TOKEN2#TOKEN3",
+                                   "--credential", "origin=ssh-key:" + key)
+        self.assertEqual(rc, 0, err)
+        owner = enrolment.find_job_owner(da.board_key(self.cfg), "J").owner
+        self.assertEqual(owner["remotes"], {"origin": "https://example.com/r.git"})
+        self.assertNotIn("TOKEN", json.dumps(owner))
+
+    def test_artifact_owner_record_reads_back_with_no_review_stage(self):
+        """The owner record's review keys read back through the driver's cfg semantics (the record's recipe
+        and review keys overlay DEFAULT_CFG; a review launches only when review_role is truthy, as in
+        driver_model.next_actions). The artifact recipe stores JSON null, never the string "none"."""
+        from swarm.supervisor.driver_model import DEFAULT_CFG
+        rc, _, err = self.activate("--workdir", str(self.work), "--recipe", "artifact")
+        self.assertEqual(rc, 0, err)
+        owner = enrolment.find_job_owner(da.board_key(self.cfg), "J")
+        self.assertIn('"review_role": null', json.dumps(owner.owner))
+        cfg = {**DEFAULT_CFG, "recipe": owner.owner["recipe"], "review_role": owner.owner["review_role"],
+               "review_gates": owner.owner["review_gates"]}
+        self.assertEqual((cfg["recipe"], cfg["review_role"], cfg["review_gates"]), ("artifact", None, None))
+        self.assertFalse(cfg["review_role"])
+
+    def test_coding_owner_record_reads_back_with_a_reviewer(self):
+        from swarm.supervisor.driver_model import DEFAULT_CFG
+        rc, _, err = self.activate("--workdir", str(self.work))
+        self.assertEqual(rc, 0, err)
+        owner = enrolment.find_job_owner(da.board_key(self.cfg), "J").owner
+        cfg = {**DEFAULT_CFG, "recipe": owner["recipe"], "review_role": owner["review_role"],
+               "review_gates": owner["review_gates"]}
+        self.assertEqual((cfg["recipe"], cfg["review_role"]), ("coding", "reviewer"))
+        self.assertTrue(cfg["review_role"])
 
     def test_deactivate_clears_the_drive_claim(self):
         rc, _, err = self.activate("--workdir", str(self.work))
@@ -558,6 +622,15 @@ class DriveCli(Env):
             rc, _, err = self.cli("drive", "budget", "--job", "J", "max_cost_usd=5.2")
         self.assertEqual(rc, 2)
         self.assertIn("below", err)
+
+    def test_person_path_refused_while_the_person_module_is_absent(self):
+        """Until Task 6b's swarm.person is in the build, the person path is refused, never allowed."""
+        self.activate("--workdir", str(self.work))
+        with mock.patch.dict(sys.modules, {"swarm.person": None}):
+            rc, _, err = self.cli("drive", "budget", "--job", "J", "max_cost_usd=30")
+        self.assertEqual(rc, 1)
+        self.assertIn("person path", err)
+        self.assertEqual(self.ledger_of().budgets["max_cost_usd"], 40)
 
     def test_drive_models_changes_one_role(self):
         self.activate("--workdir", str(self.work))
