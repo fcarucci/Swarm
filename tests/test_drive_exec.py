@@ -1327,6 +1327,12 @@ class FixRoundTests(ExecEnv):
         driver_exec.settle_progress(self.led, older, t)
         self.assertEqual(self.reload().last_progress_at, t.isoformat())
 
+    def test_heal_never_authorizes_a_row_someone_else_requested(self):
+        row = self.seat("eng-a~1", authorize=False)                         # requested_by lead
+        expected = {k: getattr(row, k) for k in driver_exec._SAME_FIELDS}
+        driver_exec._heal(self.led, row, expected, self.now())
+        self.assertFalse(driver_exec.seat_authorized(self.led, row, self.now()))
+
     def test_requested_by_driver_alone_authorizes_nothing(self):
         self.seat("eng-a", authorize=False)
         self.tamper_seat("eng-a", requested_by="driver")
