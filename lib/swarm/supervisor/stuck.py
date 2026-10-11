@@ -114,7 +114,9 @@ def find_stuck_owned(board, cfg: dict, now=None, deadline: float | None = None) 
             break
         if not js.supervise or js.status != "active" or drive_claimed(board, js.job):
             continue
-        from swarm.supervisor.orphans import drive_gate, human_question
+        from swarm.supervisor.orphans import drive_gate, drive_view, human_question
+        if drive_view(board, cfg, js.job)[0]:
+            continue          # a drive job's seats are the driver's: never closed as stuck by this pass
         if human_question(board, js, cfg):
             continue
         gate = drive_gate(board, cfg, js.job)

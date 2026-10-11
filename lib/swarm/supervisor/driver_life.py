@@ -721,7 +721,12 @@ def sweep_locks_by_host(board, cfg: dict, now: dt.datetime, *, hooks: Hooks | No
         if lock.host != compat.node():
             continue
         if lock.job not in rows:
-            rows[lock.job] = {r.launch_id: r for r in board.restarts(job=lock.job)}
+            by_launch: dict = {}
+            for r in board.restarts(job=lock.job):
+                cur = by_launch.get(r.launch_id)
+                if cur is None or (cur.ended_at is not None and r.ended_at is None):
+                    by_launch[r.launch_id] = r       # a duplicate row with the same launch id: an open one wins,
+            rows[lock.job] = by_launch               # so a forged ended copy never releases a live launch's locks
         row = rows[lock.job].get(lock.launch_id)
         if row is not None and row.ended_at is None:
             if lock.expires_at > now:

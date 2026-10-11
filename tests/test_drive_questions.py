@@ -307,7 +307,7 @@ class GateDriveQuestions(QuestionEnv):
         self.assertEqual(open_question_seats(self.b, "J", None), set())
         self.assertEqual(orphans.drive_gate(self.b, self.h.cfg, "J"), frozenset())
 
-    def test_drive_lead_question_holds_the_orphan_coordinator(self):
+    def test_drive_job_is_not_a_generic_orphan_and_plain_job_is_gated_by_its_wait(self):
         sup = sup_settings.settings({})
         rows = []
         with mock.patch("swarm.cli.OrchestratorWatch.active", return_value=False):
@@ -317,7 +317,9 @@ class GateDriveQuestions(QuestionEnv):
             held = FakeBoard(js, rows, [question("lead")], {"drive.enabled": "1"})
             self.assertFalse(orphans.eligible(held, self.h.cfg, js, sup, NOW))
             free = FakeBoard(js, rows, [question("eng-a")], {"drive.enabled": "1"})
-            self.assertTrue(orphans.eligible(free, self.h.cfg, js, sup, NOW))
+            # (8b ruling: the generic orphan pass never restarts a drive job's coordinator, whatever its
+            # seats' questions say; the driver restarts its own seats)
+            self.assertFalse(orphans.eligible(free, self.h.cfg, js, sup, NOW))
             plain = FakeBoard(js, rows, [question("lead")], {})
             self.assertTrue(orphans.eligible(plain, self.h.cfg, js, sup, NOW),
                             "a plain job's gate is the job-level wait, not a seat's question")

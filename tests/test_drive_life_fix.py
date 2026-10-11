@@ -165,6 +165,18 @@ class LockHostTests(T.LifeCase):
         self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.at(200), hooks=self.run.hooks()), 0)
         self.assertIsNone(self.row(lid).ended_at)
 
+    def test_a_forged_ended_duplicate_row_does_not_release_a_live_launchs_locks(self):
+        lid = self.launch(locks=["repo:x"])
+        live = self.row(lid)
+        with self.h.store.lock:                       # a later row with the same launch id, already ended
+            dup = dict(next(r for r in self.h.store.restarts if r["launch_id"] == lid))
+            dup["id"] = max(r["id"] for r in self.h.store.restarts) + 1
+            dup["ended_at"] = self.t0
+            self.h.store.restarts.append(dup)
+        self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.at(1), hooks=self.run.hooks()), 0)
+        self.assertEqual(len(self.b.drive_locks()), 1)
+        self.assertIsNone(next(r for r in self.b.restarts("J") if r.id == live.id).ended_at)
+
     def test_a_row_on_this_host_is_still_fenced_and_released(self):
         lid = self.launch(locks=["repo:x"])
         self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.at(200), hooks=self.run.hooks()), 1)
