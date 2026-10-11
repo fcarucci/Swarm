@@ -110,6 +110,7 @@ class Snapshot:
     questions: dict[str, list[Question]]
     wakes: dict[str, list[int]]
     integrated: dict[str, dict]
+    rounds: dict[str, int]
     now: datetime
 
 
@@ -251,6 +252,8 @@ class _Ctx:
             return "driver-errors"
         if led.rounds_without_progress >= cfg["no_progress_rounds"]:
             return "no-progress"
+        if any(judged >= cfg["max_rounds"] for judged in self.s.rounds.values()):   # 4.1: per group
+            return "max-rounds"
         cap, reserve, charged = cfg["max_cost_usd"], cfg["ruling_reserve_usd"], led.charged_usd()
         if cap - reserve - charged < cfg["min_session_usd"]:                 # 4.1: seats keep the reserve
             return "budget-cost"
