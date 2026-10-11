@@ -89,9 +89,32 @@ class DriveDefaultsDocumented(unittest.TestCase):
 
     def test_drive_defaults_documented(self):
         from swarm.supervisor.driver_model import DEFAULT_CFG
-        for key in DEFAULT_CFG:
+        from swarm.supervisor.driver_life import DEFAULTS as LIFE
+        for key in {**DEFAULT_CFG, **LIFE}:
             self.assertIn(key, self.example, key)
             self.assertIn(f"`{key}`", self.ref, key)
+
+    def test_reference_table_values_match_defaults(self):
+        from swarm.supervisor.driver_life import DEFAULTS as LIFE
+        from swarm.supervisor.driver_model import DEFAULT_CFG
+        rows = {}
+        for line in heading_body(self.ref, "Drive mode").splitlines():
+            m = re.match(r"^\| `(\w+)` \| (.*?) \| (.*?) \|$", line)
+            if m:
+                rows[m.group(1)] = (m.group(2).strip(), m.group(3).strip())
+        for key, want in {**DEFAULT_CFG, **LIFE}.items():
+            if key in NOT_CONFIG:
+                continue
+            self.assertIn(key, rows, key)
+            cell = rows[key][0].replace("`", "")
+            got = tomllib.loads(f"v = {cell.split(' (')[0].split(',')[0].strip()}")["v"]
+            self.assertEqual(got, want, key)
+        self.assertIn("DRIVER-ERROR", rows["driver_error_passes"][1])
+        self.assertIn("ruling", rows["driver_error_passes"][1])
+        self.assertIn("ruling", rows["max_sessions"][1])
+        self.assertIn("applied", rows["question_expiry"][1])
+        for key, (_, exhaustion) in rows.items():
+            self.assertTrue(exhaustion, key)
 
     def test_extra_drive_keys_documented(self):
         for key in ("codex_usd_per_mtok", "allowed_models", "credential_helpers", "ruling_reserve_usd"):
@@ -103,7 +126,8 @@ class DriveDefaultsDocumented(unittest.TestCase):
         from swarm.supervisor.driver_model import DEFAULT_CFG
         drive = tomllib.loads(self.example).get("drive")
         self.assertIsInstance(drive, dict, "config.example.toml needs a [drive] table")
-        for key, want in DEFAULT_CFG.items():
+        from swarm.supervisor.driver_life import DEFAULTS as LIFE
+        for key, want in {**DEFAULT_CFG, **LIFE}.items():
             if key not in NOT_CONFIG:
                 self.assertEqual(drive.get(key), want, key)
         self.assertEqual(drive.get("codex_usd_per_mtok"), 10)
