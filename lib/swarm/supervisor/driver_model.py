@@ -58,6 +58,7 @@ class Question:
     default: str | None
     until: datetime | None
     receipt_id: int | None
+    opened_at: datetime | None = None   # the receipted time it was opened; None: the driver's first sight of it
 
 
 @dataclass(frozen=True, slots=True)
