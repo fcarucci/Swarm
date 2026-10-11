@@ -9,6 +9,7 @@ import contextlib
 import datetime as dt
 import os
 import tempfile
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -17,7 +18,7 @@ from unittest import mock
 from support import SANDBOX, MemoryHarness, home_env  # noqa: F401  (puts lib/ on sys.path)
 import drive_fixtures as fx
 
-from swarm import compat  # noqa: E402
+from swarm import compat, receipts  # noqa: E402
 from swarm.supervisor import driver_life as life, driver_model as dm, ledger  # noqa: E402
 
 MIN = dt.timedelta(minutes=1)
@@ -109,8 +110,18 @@ class LifeCase(unittest.TestCase):
                                             now or self.t0, candidate=CAND, req=REQ))
 
     def seat(self, name="eng-a", gen=1):
-        return self.b.request_seat("J", gen, name, role="engineer", harness="claude", model="haiku",
-                                   workdir=f"/w/{name}", brief_path=f"/w/{name}/B.md", requested_by="lead")
+        s = self.b.request_seat("J", gen, name, role="engineer", harness="claude", model="haiku",
+                                workdir=f"/w/{name}", brief_path=f"/w/{name}/B.md", requested_by="lead")
+        self.receipt_seat(s)
+        return s
+
+    def receipt_seat(self, seat):
+        """The host's seat_request receipt for the row as it is (what a lead's own request leaves)."""
+        receipts.write(self.led.board_key, receipts.Receipt(
+            board_key=self.led.board_key, job="J", generation=seat.generation, incarnation=self.led.incarnation,
+            action_id="t|seat", attempt=0, seat=seat.seat, kind="seat_request", record_id=str(seat.id),
+            rev=seat.revision, content_sha=receipts.content_sha("seat_request", life._seat_decision(seat)),
+            args_sha="0" * 64, expires_at=time.time() + 3600))
 
     def launch(self, name="eng-a", gen=1, usd=5.0, locks=()):
         s = self.seat(name, gen)
@@ -706,7 +717,8 @@ class QuestionTests(LifeCase):
 
     def test_far_future_until_is_capped_at_question_expiry(self):
         b, q = self.ask(until=24 * 60)
-        opened = b.created_at
+        opened = self.t0
+        q = fx.q(b.id, default="left", until=self.t0 + 24 * 60 * MIN, receipt_id=1, opened_at=opened)
         self.assertEqual(life.apply_question_expiry(self.b, self.cfg, self.led, opened + 239 * MIN, [q]), [])
         self.assertEqual(life.apply_question_expiry(self.b, self.cfg, self.led, opened + 240 * MIN, [q]), [b.id])
 
@@ -736,8 +748,16 @@ class QuestionTests(LifeCase):
                     wakes={"a": [5]})
         launches = lambda: [x.seat for x in dm.next_actions(s, dm.DEFAULT_CFG) if x.kind == "launch"]
         self.assertEqual(launches(), ["b"])                               # a waits for its answer, b runs
-        self.assertEqual(life.apply_question_expiry(self.b, self.cfg, self.led, self.at(10), [q]), [])
-        self.assertEqual(self.b.blocker(b.id).state, "open")              # and nothing was applied behind its back
+        other, qo = self.ask(seat="b", until=30)
+        for minute in (10, 29):                                           # before the deadline: nothing, for either seat
+            self.assertEqual(life.apply_question_expiry(self.b, self.cfg, self.led, self.at(minute), [q, qo]), [])
+            self.assertEqual(self.b.blocker(b.id).state, "open")          # and nothing was applied behind its back
+        self.assertEqual(life.apply_question_expiry(self.b, self.cfg, self.led, self.at(31), [q]), [b.id])
+        self.assertEqual(self.b.blocker(b.id).state, "expired")           # at expiry only that seat's question settles
+        self.assertEqual(self.b.blocker(other.id).state, "open")
+        s2 = fx.snap(seats={"a": fx.seat("a", "idle"), "b": fx.seat("b", "requested")}, questions={},
+                     wakes={"a": [5]})
+        self.assertEqual(sorted(x.seat for x in dm.next_actions(s2, dm.DEFAULT_CFG) if x.kind == "launch"), ["a", "b"])
 
 
 class OrphanQuestionTests(LifeCase):
