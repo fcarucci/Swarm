@@ -115,7 +115,7 @@ def _validate(rec: Record) -> Record:
 
 
 OWNER_KEYS = ("roots", "remotes", "credentials", "requirements", "recipe", "review_role", "review_gates",
-              "goal", "brief")
+              "goal", "brief", "target_branch", "config_dirs")
 
 
 def _validate_owner(o) -> None:
@@ -142,6 +142,15 @@ def _validate_owner(o) -> None:
     for key in ("review_role", "review_gates"):   # null for a recipe without a review stage
         if o[key] is not None:
             _text(o[key], f"owner {key}", 64)
+    _text(o["target_branch"], "owner target_branch", 255)   # pinned at activation, never read from config
+    cdirs = o["config_dirs"]   # destination -> the GH_CONFIG_DIR of a gh credential helper (absolute)
+    if not isinstance(cdirs, dict) or len(cdirs) > 256:
+        raise ValueError("enrolment: owner config_dirs must be a map of at most 256 entries")
+    for k, v in cdirs.items():
+        _text(k, "owner config_dirs key", MAX_CWD)
+        _text(v, "owner config_dirs value", MAX_CWD)
+        if not os.path.isabs(v):
+            raise ValueError("enrolment: an owner config dir must be an absolute path")
     _text(o["goal"], "owner goal", GOAL_MAX)
     _text(o["brief"], "owner brief", MAX_CWD)
     if not os.path.isabs(o["brief"]):
@@ -295,13 +304,15 @@ def prune(max_age: float, *, now: float | None = None, keep=None) -> int:
 def write_job_owner(board_key: str, *, job: str, harness: str, session_id: str | None, cwd: str, now=None,
                     roots: list | None = None, remotes: dict | None = None, credentials: dict | None = None,
                     requirements: dict | None = None, recipe: str | None = None, goal: str | None = None,
-                    brief: str | None = None, review_role: str | None = None, review_gates: str | None = None):
+                    brief: str | None = None, review_role: str | None = None, review_gates: str | None = None,
+                    target_branch: str | None = None, config_dirs: dict | None = None):
     """Creation proof, independent of attached coordinators; written only for new jobs. A drive job
     also records its work roots, pinned remotes, credential sources, pinned requirements and recipe
     ([RR1] step 1, [G2], [F10]): roots default to [cwd] and the rest to empty, so a plain activation
     writes the same record it always did plus those keys."""
     owner = None
-    if any(v is not None for v in (roots, remotes, credentials, requirements, recipe, goal, brief)):
+    if any(v is not None for v in (roots, remotes, credentials, requirements, recipe, goal, brief,
+                                   target_branch, config_dirs)):
         kind = recipe or "coding"
         owner = {"roots": [cwd] if roots is None else list(roots), "remotes": dict(remotes or {}),
                  "credentials": dict(credentials or {}), "requirements": dict(requirements or {}),
@@ -309,7 +320,9 @@ def write_job_owner(board_key: str, *, job: str, harness: str, session_id: str |
                  # the recipe's review stage (spec 3.6, [P1]): the coding recipe reviews with "reviewer";
                  # a recipe without a review stage says null
                  "review_role": review_role if review_role is not None else ("reviewer" if kind == "coding" else None),
-                 "review_gates": review_gates if review_gates is not None else ("standard" if kind == "coding" else None)}
+                 "review_gates": review_gates if review_gates is not None else ("standard" if kind == "coding" else None),
+                 "target_branch": target_branch or "main",   # [G3] the landing target, pinned at activation
+                 "config_dirs": dict(config_dirs or {})}     # [G2a] GH_CONFIG_DIR per gh-helper destination
     rec = Record("owner", board_key, job, None, harness, session_id, cwd,
                  time.time() if now is None else float(now), owner=owner)
     return _store(rec, f"owner-{_digest('owner', board_key, job)}.json")

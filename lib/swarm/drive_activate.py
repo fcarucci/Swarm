@@ -13,11 +13,12 @@ import hashlib
 import math
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import urllib.parse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from swarm import enrolment, hosts, paths
@@ -387,6 +388,71 @@ def lead_brief_text(job: str, goal: str, requirements: list) -> str:
             "full suites only in CI; never put work trees or builds under /tmp; rebase-only landing.\n")
 
 
+def gh_config_dir(env=None) -> str:
+    """The GH_CONFIG_DIR a gh credential helper reads, resolved at activation and pinned per destination
+    ([G2a]): $GH_CONFIG_DIR, else $XDG_CONFIG_HOME/gh, else ~/.config/gh. Refused when none of them can
+    be determined, never guessed (a gh helper without its own config dir would read whatever is at $HOME)."""
+    env = os.environ if env is None else env
+    explicit = (env.get("GH_CONFIG_DIR") or "").strip()
+    if explicit:
+        if not os.path.isabs(explicit):
+            raise DriveError("GH_CONFIG_DIR must be an absolute path for a gh credential helper")
+        return os.path.normpath(explicit)
+    xdg = (env.get("XDG_CONFIG_HOME") or "").strip()
+    if xdg:
+        if not os.path.isabs(xdg):
+            raise DriveError("XDG_CONFIG_HOME must be an absolute path for a gh credential helper")
+        return os.path.normpath(os.path.join(xdg, "gh"))
+    home = os.path.expanduser("~")
+    if not os.path.isabs(home):
+        raise DriveError("the gh config dir cannot be determined (no home directory): set GH_CONFIG_DIR")
+    return os.path.normpath(os.path.join(home, ".config", "gh"))
+
+
+def pipeline_target(cfg: dict) -> str:
+    """The landing target branch from [pipeline] (`target_branch`, else the `merge_target` alias)."""
+    pipe = (cfg or {}).get("pipeline") or {}
+    value = pipe.get("target_branch") or pipe.get("merge_target") or "main"
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9._/-]{1,200}", value) or ".." in value:
+        raise DriveError(f"[pipeline] target_branch {value!r} is not a branch name")
+    return value
+
+
+def remote_head(url: str, pin: str | None, config_dir: str | None, branch: str, *, timeout: int = 60) -> str | None:
+    """The head SHA of `branch` on `url`, read with the destination's pinned credential (the same shape the
+    mirror uses: the allowlisted helper with its GH_CONFIG_DIR, the ssh key, or the agent socket). None when
+    the branch is absent. A failed read is a DriveError that names no URL and prints no stderr."""
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": str(paths.home()), "LC_ALL": "C",
+           "GIT_TERMINAL_PROMPT": "0"}
+    args = ["git"]
+    if pin is None:
+        pass
+    elif pin.startswith("helper:"):
+        exe, *hargs = pin[len("helper:"):].split(" ")
+        args += ["-c", "credential.helper=", "-c",
+                 "credential.helper=!" + " ".join(shlex.quote(x) for x in [exe, *hargs])]
+        if config_dir:
+            env["GH_CONFIG_DIR"] = config_dir
+    elif pin.startswith("ssh-key:"):
+        env["GIT_SSH_COMMAND"] = (f"ssh -i {shlex.quote(pin[len('ssh-key:'):])} -o IdentitiesOnly=yes "
+                                  "-o BatchMode=yes -o StrictHostKeyChecking=yes")
+    elif pin.startswith("ssh-agent:"):
+        env["SSH_AUTH_SOCK"] = pin[len("ssh-agent:"):]
+        env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes -o StrictHostKeyChecking=yes"
+    args += ["ls-remote", "--heads", url, f"refs/heads/{branch}"]
+    try:
+        res = subprocess.run(args, capture_output=True, text=True, timeout=timeout, env=env)
+    except (OSError, subprocess.SubprocessError):
+        raise DriveError(f"could not reach a remote to read {branch} (see the remote's pin)") from None
+    if res.returncode != 0:
+        raise DriveError(f"could not read {branch} on a pinned remote (git exits {res.returncode})")
+    for line in res.stdout.splitlines():
+        sha, _, ref = line.partition("\t")
+        if ref == f"refs/heads/{branch}" and re.fullmatch(r"[0-9a-f]{40,64}", sha):
+            return sha
+    return None
+
+
 # --- the activation ([RR1]) --------------------------------------------------------------------
 
 @dataclass
@@ -408,6 +474,8 @@ class Plan:
     review_role: str | None = "reviewer"    # None: the recipe has no review stage (stored as JSON null)
     review_gates: str | None = "standard"
     description: str | None = None
+    target_branch: str = "main"           # [G3] pinned here, never read from config after activation
+    config_dirs: dict = field(default_factory=dict)   # [G2a] destination -> GH_CONFIG_DIR of a gh helper
 
 
 def board_key(cfg: dict) -> str:
@@ -459,7 +527,8 @@ def activate_drive(cfg: dict, board, plan: Plan, *, crash_after: str | None = No
                                   cwd=plan.workdir, roots=plan.roots, remotes=plan.remotes,
                                   credentials=plan.credentials, requirements=plan.requirements,
                                   recipe=plan.recipe, goal=plan.goal, brief=plan.brief_path,
-                                  review_role=plan.review_role, review_gates=plan.review_gates)
+                                  review_role=plan.review_role, review_gates=plan.review_gates,
+                                  target_branch=plan.target_branch, config_dirs=plan.config_dirs)
     if crash_after == "owner":
         raise RuntimeError("crash after owner")
     claim(board, plan)
@@ -472,6 +541,27 @@ def activate_drive(cfg: dict, board, plan: Plan, *, crash_after: str | None = No
     if crash_after == "ledger":
         raise RuntimeError("crash after ledger")
     return led
+
+
+def _record_activation_heads(bk: str, job: str, o: dict) -> None:
+    """[11b] the target's head on every pinned remote, recorded once per URL: the landing audit's `since`.
+    A URL already recorded keeps its head (a rollover never overwrites it). A branch missing on a remote
+    refuses the activation (the ledger stays "activating"; a retry runs this step again)."""
+    target = o.get("target_branch") or "main"
+    led = ledger.load(bk, job)
+    if led is None:
+        return
+    pending = {}
+    for name, url in sorted(o["remotes"].items()):
+        if url in led.activation_heads or url in pending:
+            continue
+        head = remote_head(url, o["credentials"].get(name), o.get("config_dirs", {}).get(name), target)
+        if head is None:
+            raise DriveError(f"the target branch {target!r} is not on the remote {name!r}: push it there, "
+                             f"then run `swarm activate` again")
+        pending[url] = head
+    if pending:
+        _save(bk, job, lambda x: [x.activation_heads.setdefault(u, h) for u, h in pending.items()])
 
 
 def finish_activation(cfg: dict, board, job: str, *, crash_after: str | None = None) -> ledger.Ledger | None:
@@ -499,6 +589,9 @@ def finish_activation(cfg: dict, board, job: str, *, crash_after: str | None = N
     board.set_job_data(job, "drive.generation_requested", str(led.generation_requested))
     if crash_after == "data":
         raise RuntimeError("crash after data")
+    _record_activation_heads(bk, job, o)
+    if crash_after == "heads":
+        raise RuntimeError("crash after heads")
     if board.seat(job, led.generation, "lead") is None:
         board.request_seat(job, led.generation, "lead", role="engineering_lead", harness=owner.harness,
                            model=models["lead"], workdir=o["roots"][0], brief_path=o["brief"],
@@ -550,10 +643,13 @@ def build_plan(cfg: dict, args, goal: str) -> Plan:
         dest, source = _split_pair(spec, "--credential")
         named[dest] = credential_pin(source)
     credentials = {}
+    config_dirs = {}
     for name, url in remotes.items():
         pin = named.get(name) or default_credential(url)
         if pin is not None:
             credentials[name] = pin
+            if pin.startswith("helper:") and os.path.basename(pin[len("helper:"):].split(" ")[0]) == "gh":
+                config_dirs[name] = gh_config_dir()    # refused here when it cannot be determined
     budgets = effective_budgets(cfg, parse_budget_args(args.budget, args.max_cost_usd, args.ruling_reserve_usd))
     overrides = parse_model_args(args.model)
     engineer = effective_models(cfg, overrides)["engineer"]   # validates the overrides too
@@ -565,7 +661,8 @@ def build_plan(cfg: dict, args, goal: str) -> Plan:
                 requirements=_requirements(args, goal, workdir), recipe=recipe,
                 budgets=budgets, overrides=overrides, description=args.description,
                 review_role="reviewer" if recipe == "coding" else None,
-                review_gates=("haiku-strict" if engineer == "haiku" else "standard") if recipe == "coding" else None)
+                review_gates=("haiku-strict" if engineer == "haiku" else "standard") if recipe == "coding" else None,
+                target_branch=pipeline_target(cfg), config_dirs=config_dirs)
 
 
 def add_activate_args(parser) -> None:
