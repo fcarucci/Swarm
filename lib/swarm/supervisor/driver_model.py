@@ -134,6 +134,10 @@ class Action:
 # progress counter"). A judged round counts unless `progress()` says it moved.
 NO_PROGRESS_REASONS = frozenset({"invariant-fallback", "stall", "max-seats-refused", "finalize-blocked"})
 
+# Concluded attempts that never count against `max_attempts` (spec 3.3 [F12], 4.3 [F5]): an outage, a lost
+# claim race, an attempt a halt ended.
+UNCOUNTED_OUTCOMES = ("outage", "lost", "halted")
+
 # Shipped `[drive]` defaults (spec 4.1 and 3.x); a job's `ledger.budgets` overrides them, and the caller's cfg
 # overrides these. `recipe` and `review_role` are the recipe keys of spec 3.6 and 3.7 (coding: a reviewer).
 DEFAULT_CFG: dict = {
@@ -214,7 +218,7 @@ class _Ctx:
     def attempts(self, action_id: str) -> int:
         """Attempts of one logical action so far. Outage attempts do not count (spec 3.3 [F12])."""
         return sum(1 for i in self.s.ledger.intents
-                   if i.action_id == action_id and i.outcome not in ("outage", "lost"))
+                   if i.action_id == action_id and i.outcome not in UNCOUNTED_OUTCOMES)
 
     def inflight(self, group: str) -> bool:
         """An unconcluded launch for this artifact group (or the goal/ruling slot) is still running."""
@@ -242,7 +246,7 @@ class _Ctx:
         return self.lead is not None and self.seats[self.lead].state == "idle" and self.gated(self.lead) is None
 
     def sessions(self) -> int:
-        return sum(1 for i in self.s.ledger.intents if i.outcome != "lost")
+        return sum(1 for i in self.s.ledger.intents if i.outcome not in ("lost", "halted"))
 
     def due_reason(self) -> str | None:
         """Why a ruling is due now (spec 3.3 step 3, 4.1, 3.6, 3.8 [F19], 3.2 [F22], 3.5 [F3])."""
