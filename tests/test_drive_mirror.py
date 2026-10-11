@@ -37,6 +37,10 @@ printf 'username=%s\\npassword=%s\\n' "{user}" "$tok"
 """
 BASE_ENV_KEYS = {"GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "HOME", "PATH", "GIT_TERMINAL_PROMPT"}
 FAKE_SHA = "1" * 40
+# Written out literally: a mutant that drops an entry from mirror._SAFE_CONFIG must still fail.
+EXPECTED_SAFE_CONFIG = ("core.hooksPath=/dev/null", "protocol.allow=never",
+                        "protocol.https.allow=always", "protocol.ssh.allow=always",
+                        "protocol.file.allow=always")
 
 
 def _git_env() -> dict:
@@ -279,6 +283,19 @@ class MirrorBasics(MirrorCase):
         with self.assertRaises(MirrorError):
             Mirror(remote, self.agent_cred())
 
+    def test_url_starting_with_a_dash_refused(self):
+        with self.assertRaises(MirrorError):
+            Mirror("--upload-pack=sh", self.agent_cred())
+
+    @support.posix_only("symlinks")
+    def test_symlinked_known_hosts_refused(self):
+        remote, _ = self.remote_with_main()
+        m = Mirror(remote, self.agent_cred())
+        os.remove(m._known_hosts)
+        os.symlink(os.path.join(self.root, "elsewhere"), m._known_hosts)
+        with self.assertRaises(MirrorError):
+            Mirror(remote, self.agent_cred())
+
     def test_branch_with_dotdot_refused_before_any_git_call(self):
         remote, _ = self.remote_with_main()
         m = Mirror(remote, self.agent_cred())
@@ -306,9 +323,12 @@ class MirrorBasics(MirrorCase):
         remote, _ = self.remote_with_main()
         m = Mirror(remote, self.agent_cred())
         pidfile = os.path.join(self.root, "grandchild.pid")
+        started = time.time()
         with self.assertRaises(MirrorError):
-            m._exec(["/bin/sh", "-c", f"sleep 30 & echo $! > {pidfile}; sleep 30"],
+            m._exec(["/bin/sh", "-c", f"sleep 60 & echo $! > {pidfile}; sleep 60"],
                     env=m._env(pinned=False), timeout=1)
+        # A grandchild that kept the pipe open would make the call wait out its sleep.
+        self.assertLess(time.time() - started, 20)
         pid = int(open(pidfile).read().strip())
         deadline = time.time() + 5
         while time.time() < deadline and _alive(pid):
@@ -354,7 +374,7 @@ class MirrorIsolation(MirrorCase):
             self.assertEqual(env["HOME"], m.private_home)
             self.assertEqual(env["GIT_TERMINAL_PROMPT"], "0")
             self.assertEqual(env["PATH"], mirror._system_path())
-            for item in mirror._SAFE_CONFIG:
+            for item in EXPECTED_SAFE_CONFIG:
                 self.assertTrue(any(cmd[i] == "-c" and cmd[i + 1] == item
                                     for i in range(len(cmd) - 1)), item)
             self.assertIn("timeout", kw)
@@ -670,6 +690,8 @@ class PatchIdsAndAudit(MirrorCase):
         shas = {self.base, j, u}
         self.assertTrue(calls)
         for cmd, _ in calls:
+            if "merge-base" in cmd:  # is_ancestor takes exactly two shas, on argv by design
+                continue
             self.assertFalse(shas & set(cmd), cmd)
 
 

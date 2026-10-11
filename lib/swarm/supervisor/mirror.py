@@ -6,15 +6,18 @@ can run code, so nothing the driver decides is read from a repository an agent c
 destination gets one bare mirror under the supervisor's private directory
 (`mirrors/<sha256(url)>.git`, reached through supervisor.privfs). Every git call runs with:
 
+- the absolute git binary, from system directories only (never ~/.local/bin), and a PATH made of
+  those directories;
 - no system or global config (GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_GLOBAL=/dev/null), HOME pointed at
-  the private directory, the service PATH, and no prompts (GIT_TERMINAL_PROMPT=0);
+  the private directory, and no prompts (GIT_TERMINAL_PROMPT=0);
 - hooks off (core.hooksPath=/dev/null) and protocols allowed by name only (https, ssh, file);
-- a timeout per call of at most MAX_CALL_TIMEOUT seconds.
+- a timeout per call of at most MAX_CALL_TIMEOUT seconds, enforced on the call's whole process
+  group, so helpers and ssh children die with git.
 
-Network calls (fetch) also carry the destination's pinned credential source, and nothing else from
-the user's environment: a pinned helper with its config location, a pinned ssh key, or a pinned
-ssh-agent socket. Those reach only that one git invocation, never sessions or other commands.
-Local calls (rev-list, log, patch-id, merge-base) never see a credential.
+Network calls (fetch) also carry the destination's one pinned credential source, and nothing else
+from the user's environment: an allowlisted helper with its config location, an ssh key, or an
+ssh-agent socket. Those reach only that one git invocation. Local calls never see a credential.
+ssh runs with `-F /dev/null`, a pinned known_hosts file, and BatchMode=yes, so it never prompts.
 
 Trust: these checks decide from git data and pinned settings, not from agent input. They do not
 defeat a same-user agent that writes the private directory (spec §4.0)."""
@@ -24,15 +27,21 @@ import hashlib
 import os
 import re
 import shlex
+import shutil
+import signal
 import subprocess
+from collections import Counter
+from urllib.parse import urlsplit
 
 from swarm.supervisor import privfs
 from swarm.supervisor.settings import private_dir
-from swarm.supervisor.systemd import service_path
 
 # The only credential helper a pinned source may name by default ([drive] credential_helpers).
 ALLOWED_HELPERS = ("gh auth git-credential",)
 MAX_CALL_TIMEOUT = 60.0
+SYSTEM_DIRS = ("/usr/local/bin", "/usr/bin", "/bin")
+# The suite sets this to its sandbox; loopback_http is refused without it.
+TEST_MARKER = "SWARM_TEST_SANDBOX"
 
 _SAFE_CONFIG = (
     "core.hooksPath=/dev/null",
@@ -43,23 +52,49 @@ _SAFE_CONFIG = (
 )
 _SHA = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 _BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}")
-_LOOPBACK_HTTP = ("http://127.0.0.1:", "http://127.0.0.1/", "http://localhost:", "http://localhost/")
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost")
 
 
 class MirrorError(Exception):
     """A mirror refused a request, or git failed, timed out or could not be started."""
 
 
-def _sha(value: str) -> str:
+class MissingCommitError(MirrorError):
+    """A SHA the caller names is not in the mirror. Callers treat this as a blocking DRIVER-AUDIT."""
+
+
+class TargetRewoundError(MirrorError):
+    """The target no longer descends from the activation-time head (it was reset backwards)."""
+
+
+class UnpatchableCommitError(MirrorError):
+    """A commit in the range is a merge or empty, so it has no patch-id to compare."""
+
+
+def _system_path() -> str:
+    if os.name == "nt":
+        return os.environ.get("PATH", "")
+    return os.pathsep.join(SYSTEM_DIRS)
+
+
+def _resolve(tool: str) -> str:
+    """The absolute path of a tool in the system directories (never ~/.local/bin)."""
+    found = shutil.which(tool, path=_system_path())
+    if not found or not os.path.isabs(found):
+        raise MirrorError(f"{tool} is not installed in a system directory")
+    return found
+
+
+def _sha(value) -> str:
     if not isinstance(value, str) or not _SHA.fullmatch(value):
         raise MirrorError(f"not a commit sha: {value!r}")
     return value
 
 
-def _timeout(value: float) -> float:
+def _timeout(value) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not value > 0:
         raise ValueError("timeout must be a positive number of seconds")
-    return min(float(value), MAX_CALL_TIMEOUT)
+    return float(value)
 
 
 def _abs_path(value, what: str) -> str:
@@ -68,68 +103,121 @@ def _abs_path(value, what: str) -> str:
     return value
 
 
-def _pin_credential(credential, allowed: tuple[str, ...]):
-    """The git arguments and the call environment for one pinned credential source."""
-    if not isinstance(credential, dict):
-        raise MirrorError("a credential source must be a mapping with a 'kind'")
-    kind = credential.get("kind")
-    if kind == "helper":
-        command = credential.get("command")
-        if not isinstance(command, str) or command not in allowed:
-            raise MirrorError(f"credential helper is not on the allowlist: {command!r}")
-        config_dir = _abs_path(credential.get("config_dir"), "config_dir")
-        where = shlex.quote(config_dir)
-        # The helper alone sees its config location, as a shell prefix of its own command line.
-        helper = f"!GH_CONFIG_DIR={where} HOME={where} {command}"
-        args = ["-c", "credential.helper=", "-c", "credential.useHttpPath=true",
-                "-c", f"credential.helper={helper}"]
-        return args, {}
-    if kind == "ssh-key":
-        path = _abs_path(credential.get("path"), "ssh key path")
-        ssh = f"ssh -i {shlex.quote(path)} -o IdentitiesOnly=yes -o BatchMode=yes"
-        return ["-c", "credential.helper="], {"GIT_SSH_COMMAND": ssh}
-    if kind == "ssh-agent":
-        socket = _abs_path(credential.get("socket"), "ssh-agent socket")
-        return ["-c", "credential.helper="], {"SSH_AUTH_SOCK": socket}
-    raise MirrorError(f"unknown credential kind: {kind!r}")
+def _check_url(url, loopback_http: bool) -> str:
+    if not isinstance(url, str) or not url or url.startswith("-") or any(
+            c in url for c in "\n\r\0 "):
+        raise MirrorError("the remote url must be a non-empty string without spaces")
+    if "://" in url:
+        parts = urlsplit(url)
+        if parts.password is not None or (parts.username is not None and parts.scheme != "ssh"):
+            raise MirrorError("the remote url must not carry credentials")
+    else:
+        head = url.split("/", 1)[0]
+        if "@" in head and ":" in head.split("@", 1)[0]:
+            raise MirrorError("the remote url must not carry credentials")
+    if loopback_http:
+        if not os.environ.get(TEST_MARKER):
+            raise MirrorError("loopback_http is for the test suite only")
+        parts = urlsplit(url)
+        if (parts.scheme != "http" or parts.hostname not in _LOOPBACK_HOSTS
+                or "@" in parts.netloc):
+            raise MirrorError("loopback_http only applies to http:// on 127.0.0.1 or localhost")
+    return url
+
+
+def _kill_group(proc: subprocess.Popen) -> None:
+    try:
+        if os.name == "posix":
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            proc.kill()
+    except OSError:
+        try:
+            proc.kill()
+        except OSError:
+            pass
 
 
 class Mirror:
     """One destination's private bare mirror. `url` is the pinned remote; `credential` is its one
-    pinned source (see _pin_credential). `loopback_http` is for tests only: it allows plain http
-    to 127.0.0.1 or localhost, and nothing else."""
+    pinned source. `loopback_http` (keyword-only) allows plain http to 127.0.0.1 or localhost, and
+    only inside the test suite (TEST_MARKER must be set); production never passes it."""
 
     def __init__(self, url: str, credential: dict, *, allowed_helpers=None,
                  loopback_http: bool = False):
-        if not isinstance(url, str) or not url or url.startswith("-") or any(
-                c in url for c in "\n\r\0 "):
-            raise MirrorError("the remote url must be a non-empty string without spaces")
-        if loopback_http and not url.startswith(_LOOPBACK_HTTP):
-            raise MirrorError("loopback_http only applies to http:// on 127.0.0.1 or localhost")
+        self.url = _check_url(url, loopback_http)
         allowed = ALLOWED_HELPERS if allowed_helpers is None else tuple(allowed_helpers)
-        self.url = url
-        self._cred_args, self._cred_env = _pin_credential(credential, allowed)
-        self._proto_args = ["-c", "protocol.http.allow=always"] if loopback_http else []
+        self._git_bin = _resolve("git")
+        self._ssh_bin = _resolve("ssh")
         self.private_home = str(private_dir())
         with privfs.dir_fd("mirrors"):
             pass
+        self._known_hosts = self._ensure_known_hosts()
+        self._cred_args, self._cred_env = self._pin(credential, allowed)
+        self._proto_args = ["-c", "protocol.http.allow=always"] if loopback_http else []
         digest = hashlib.sha256(url.encode()).hexdigest()
         self.path = private_dir() / "mirrors" / f"{digest}.git"
         if os.path.islink(self.path):
             raise MirrorError(f"refusing a symlinked mirror: {self.path}")
         if not (self.path / "HEAD").exists():
             os.makedirs(self.path, mode=0o700, exist_ok=True)
-            self._exec(["git", "init", "--bare", "--quiet", "--template=", str(self.path)],
+            self._exec([self._git_bin, "init", "--bare", "--quiet", "--template=", str(self.path)],
                        env=self._env(pinned=False), timeout=MAX_CALL_TIMEOUT)
 
-    # --- running git -------------------------------------------------------------------------
+    # --- pinned credential sources ---------------------------------------------------------
+
+    def _ensure_known_hosts(self) -> str:
+        path = os.path.join(self.private_home, "mirrors", "known_hosts")
+        if os.path.islink(path):
+            raise MirrorError("refusing a symlinked known_hosts file")
+        if not os.path.exists(path):
+            with open(path, "a"):
+                pass
+            os.chmod(path, 0o600)
+        return path
+
+    def _ssh_command(self, options: list[str]) -> str:
+        parts = [self._ssh_bin, "-F", os.devnull, "-o", f"UserKnownHostsFile={self._known_hosts}",
+                 "-o", "BatchMode=yes", *options]
+        return " ".join(shlex.quote(p) for p in parts)
+
+    def _pin(self, credential, allowed: tuple[str, ...]):
+        """The git arguments and the fetch-only environment for one pinned credential source."""
+        if not isinstance(credential, dict):
+            raise MirrorError("a credential source must be a mapping with a 'kind'")
+        kind = credential.get("kind")
+        if kind == "helper":
+            command = credential.get("command")
+            if not isinstance(command, str) or command not in allowed:
+                raise MirrorError(f"credential helper is not on the allowlist: {command!r}")
+            config_dir = _abs_path(credential.get("config_dir"), "config_dir")
+            first, _, rest = command.partition(" ")
+            absolute = " ".join(p for p in (_resolve(first), rest) if p)
+            where = shlex.quote(config_dir)
+            # The helper alone sees its config location, as a shell prefix of its own command.
+            helper = f"!GH_CONFIG_DIR={where} HOME={where} {absolute}"
+            args = ["-c", "credential.helper=", "-c", "credential.useHttpPath=true",
+                    "-c", f"credential.helper={helper}"]
+            return args, {"GIT_SSH_COMMAND": self._ssh_command(["-o", "IdentityAgent=none"])}
+        if kind == "ssh-key":
+            path = _abs_path(credential.get("path"), "ssh key path")
+            ssh = self._ssh_command(["-i", path, "-o", "IdentitiesOnly=yes",
+                                     "-o", "IdentityAgent=none"])
+            return ["-c", "credential.helper="], {"GIT_SSH_COMMAND": ssh}
+        if kind == "ssh-agent":
+            socket = _abs_path(credential.get("socket"), "ssh-agent socket")
+            ssh = self._ssh_command(["-o", f"IdentityAgent={socket}"])
+            return ["-c", "credential.helper="], {"GIT_SSH_COMMAND": ssh, "SSH_AUTH_SOCK": socket}
+        raise MirrorError(f"unknown credential kind: {kind!r}")
+
+    # --- running git -----------------------------------------------------------------------
 
     def _env(self, pinned: bool) -> dict:
         env = {
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_GLOBAL": os.devnull,
             "HOME": self.private_home,
-            "PATH": service_path(),
+            "PATH": _system_path(),
             "GIT_TERMINAL_PROMPT": "0",
         }
         if pinned:
@@ -137,25 +225,33 @@ class Mirror:
         return env
 
     def _exec(self, cmd: list, *, env: dict, timeout: float, stdin: bytes | None = None,
-              cwd: str | None = None):
+              cwd: str | None = None) -> subprocess.CompletedProcess:
+        kwargs = {"start_new_session": True} if os.name == "posix" else {}
         try:
-            return subprocess.run(cmd, env=env, input=stdin, capture_output=True,
-                                  timeout=timeout, cwd=cwd)
-        except subprocess.TimeoutExpired as exc:
-            raise MirrorError(f"git timed out after {timeout:g}s") from exc
+            proc = subprocess.Popen(cmd, env=env, cwd=cwd, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE,
+                                    stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+                                    **kwargs)
         except OSError as exc:
             raise MirrorError(f"cannot run git: {exc.__class__.__name__}") from exc
+        try:
+            out, err = proc.communicate(stdin, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            _kill_group(proc)
+            proc.communicate()
+            raise MirrorError(f"git timed out after {timeout:g}s") from exc
+        return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
     def _git(self, args: list, *, timeout: float = MAX_CALL_TIMEOUT, pinned: bool = False,
-             stdin: bytes | None = None, check: bool = True):
-        cmd = ["git", "--git-dir", str(self.path)]
+             stdin: bytes | None = None, check: bool = True) -> subprocess.CompletedProcess:
+        cmd = [self._git_bin, "--git-dir", str(self.path)]
         for item in _SAFE_CONFIG:
             cmd += ["-c", item]
         cmd += self._proto_args
         if pinned:
             cmd += self._cred_args
         cmd += args
-        proc = self._exec(cmd, env=self._env(pinned), timeout=min(timeout, MAX_CALL_TIMEOUT),
+        proc = self._exec(cmd, env=self._env(pinned), timeout=min(float(timeout), MAX_CALL_TIMEOUT),
                           stdin=stdin, cwd=str(self.path))
         if check and proc.returncode != 0:
             raise MirrorError(f"git {args[0]} failed: {self._last_line(proc)}")
@@ -166,17 +262,35 @@ class Mirror:
         text = lines[-1] if lines else f"exit status {proc.returncode}"
         return text.replace(self.url, "<remote>")
 
-    def _revs(self, *args: str) -> list[str]:
-        out = self._git(["rev-list", *args]).stdout.decode().split()
-        return out
+    def _lines(self, args: list, stdin: bytes | None = None) -> list[str]:
+        return self._git(args, stdin=stdin).stdout.decode().split()
+
+    def _revs(self, positive: list[str], negative: list[str], reverse: bool = False) -> list[str]:
+        """Commits reachable from `positive` and not from `negative`; shas go on stdin, not argv."""
+        if not positive:
+            return []
+        lines = [*positive, *(f"^{n}" for n in negative)]
+        args = ["rev-list", "--stdin"] + (["--reverse"] if reverse else [])
+        return self._lines(args, stdin=("\n".join(lines) + "\n").encode())
+
+    def _require_known(self, shas) -> None:
+        wanted = sorted(set(shas))
+        if not wanted:
+            return
+        out = self._git(["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+                        stdin=("\n".join(wanted) + "\n").encode())
+        for line in out.stdout.decode().splitlines():
+            parts = line.split()
+            if len(parts) != 2 or parts[1] != "commit":
+                raise MissingCommitError(f"commit {parts[0] if parts else '?'} is not in the mirror")
 
     def _patch_map(self, commits: list[str]) -> dict[str, str]:
-        """commit sha -> `git patch-id --stable` id, for the non-merge commits among `commits`."""
+        """commit sha -> `git patch-id --verbatim` id. Merges and empty commits have no entry."""
         if not commits:
             return {}
-        log = self._git(["log", "-p", "--no-walk=unsorted", "--no-merges", "--no-color",
-                         "--no-ext-diff", "--no-textconv", *commits])
-        ids = self._git(["patch-id", "--stable"], stdin=log.stdout).stdout.decode()
+        log = self._git(["log", "-p", "--no-walk=unsorted", "--no-color", "--no-ext-diff",
+                         "--no-textconv", "--stdin"], stdin=("\n".join(commits) + "\n").encode())
+        ids = self._git(["patch-id", "--verbatim"], stdin=log.stdout).stdout.decode()
         mapping = {}
         for line in ids.splitlines():
             parts = line.split()
@@ -184,7 +298,7 @@ class Mirror:
                 mapping[parts[1]] = parts[0]
         return mapping
 
-    # --- public API --------------------------------------------------------------------------
+    # --- public API ------------------------------------------------------------------------
 
     def fetch(self, timeout: float) -> dict[str, str]:
         """Mirror the remote's branches (pruning deleted ones); returns refname -> sha."""
@@ -223,26 +337,52 @@ class Mirror:
             return False
         raise MirrorError(f"git merge-base failed: {self._last_line(proc)}")
 
-    def patch_ids(self, base: str, head: str) -> set[str]:
-        """The `git patch-id --stable` ids of the non-merge commits in base..head ([F13])."""
+    def patch_ids(self, base: str, head: str) -> list[str]:
+        """The sorted `patch-id --verbatim` ids of the commits in base..head (a multiset: a commit
+        applied twice counts twice). A merge or empty commit in the range raises
+        UnpatchableCommitError: it has no id, so it can never be proven to be a judged change."""
         _sha(base)
         _sha(head)
-        commits = self._revs("--no-merges", f"{base}..{head}")
-        return set(self._patch_map(commits).values())
+        self._require_known([base, head])
+        commits = self._revs([head], [base])
+        mapping = self._patch_map(commits)
+        missing = [c for c in commits if c not in mapping]
+        if missing:
+            raise UnpatchableCommitError(
+                f"{len(missing)} commit(s) in {base}..{head} are merges or empty, e.g. {missing[0]}")
+        return sorted(mapping[c] for c in commits)
 
     def audit_target(self, since_sha: str, candidate: str, judged: set[str]) -> list[str]:
-        """Commits on the target between since_sha and candidate that are not reachable from a
-        judged SHA and have no patch-id match among the judged commits ([F24]). Merges count as
-        unmatched. An empty list means the target is clean. The caller passes the list through."""
+        """The commits on the target between since_sha and candidate that no judged change
+        accounts for ([F24]), in target order. A commit is accounted for when it is reachable from
+        a judged SHA, or when its patch-id matches a judged change that is not already on the
+        target. Each judged change accounts for at most one such commit, so a revert followed by a
+        re-applied cherry-pick is flagged. Merges and empty commits are flagged unless judged.
+        Raises MissingCommitError for a judged SHA the mirror lacks, and TargetRewoundError when
+        since_sha is not an ancestor of candidate."""
         _sha(since_sha)
         _sha(candidate)
-        judged_list = sorted(_sha(j) for j in judged)
-        unreached = self._revs("--reverse", f"{since_sha}..{candidate}", "--not", *judged_list)
+        judged_list = sorted({_sha(j) for j in judged})
+        self._require_known([since_sha, candidate, *judged_list])
+        if not self.is_ancestor(since_sha, candidate):
+            raise TargetRewoundError(f"{since_sha} is not an ancestor of {candidate}")
+        on_target = self._revs([candidate], [since_sha])
+        unreached = self._revs([candidate], [since_sha, *judged_list], reverse=True)
         if not unreached:
             return []
-        judged_pids: set[str] = set()
-        if judged_list:
-            judged_commits = self._revs("--no-merges", *judged_list, "--not", since_sha)
-            judged_pids = set(self._patch_map(judged_commits).values())
-        pids = self._patch_map(unreached)
-        return [c for c in unreached if pids.get(c) not in judged_pids]
+        judged_new = self._revs(judged_list, [since_sha])
+        judged_ids = self._patch_map(judged_new)
+        on_target_set = set(on_target)
+        budget = Counter(judged_ids[c] for c in judged_new if c in judged_ids)
+        for c in judged_new:
+            if c in on_target_set and c in judged_ids:
+                budget[judged_ids[c]] -= 1
+        ids = self._patch_map(unreached)
+        flagged = []
+        for c in unreached:
+            pid = ids.get(c)
+            if pid is not None and budget[pid] > 0:
+                budget[pid] -= 1
+            else:
+                flagged.append(c)
+        return flagged
