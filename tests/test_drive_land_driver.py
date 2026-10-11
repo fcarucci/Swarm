@@ -498,6 +498,15 @@ class Ci(unittest.TestCase):
         self.assertTrue(cmd[0].endswith("bin/swarm") or cmd[0].endswith("bin\\swarm"))
         self.assertEqual(kw["timeout"], driver_land.CI_TIMEOUT)
 
+    def test_the_status_callable_takes_a_timeout_and_is_capped_by_it(self):
+        calls = []
+        status = driver_land.ci_status_cli("o/r", run=self.fake('{"state": "green"}', calls=calls))
+        self.assertTrue(status.takes_timeout)
+        status("a" * 40, 3.0)
+        status("a" * 40, 999.0)
+        status("a" * 40)
+        self.assertEqual([kw["timeout"] for _, kw in calls], [3.0, driver_land.CI_TIMEOUT, driver_land.CI_TIMEOUT])
+
     def test_a_failing_cli_raises_even_with_a_state_on_stdout(self):
         with self.assertRaises(OSError):
             driver_land.ci_status_cli("o/r", run=self.fake('{"state": "green"}', code=1))("a" * 40)
