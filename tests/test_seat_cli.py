@@ -347,6 +347,41 @@ class SeatAck(ControlCase):
         self.assertIn("--upto must be an event id", err)
 
 
+class DriveRepair(ControlCase):
+    def bad_entry(self):
+        hits = list(self.home.rglob(ledger._name(self.bkey, JOB)))
+        self.assertEqual(len(hits), 1)
+        hits[0].write_bytes(b"not a ledger")
+
+    def test_repair_moves_the_bad_ledger_aside_and_starts_a_halted_fresh_one(self):
+        self.board.set_job_data(JOB, "drive.generation", "3")
+        self.bad_entry()
+        with self.assertRaises(ledger.LedgerBadError):
+            ledger.load(self.bkey, JOB)
+        rc, out, err = self.run_cmd("drive", "repair", "--job", JOB)
+        self.assertEqual(rc, 0, err)
+        self.assertRegex(self.last_line(out), r"^swarm-record: kind=halt id=\d+ rev=1$")
+        fresh = ledger.load(self.bkey, JOB)
+        self.assertEqual(fresh.generation, 3)
+        self.assertTrue(fresh.halted["by"].startswith("person"))
+        self.assertTrue(any(".bad-" in p.name for p in self.home.rglob("*")), "the bad entry is kept, not deleted")
+
+    def test_repair_refuses_a_readable_ledger(self):
+        rc, _, err = self.run_cmd("drive", "repair", "--job", JOB)
+        self.assertEqual(rc, 1)
+        self.assertIn("nothing to repair", err)
+        self.assertIsNotNone(ledger.load(self.bkey, JOB))
+
+    def test_repair_is_person_only(self):
+        self.bad_entry()
+        self.enrol("ENG-SESSION", ENG_KEY)
+        self.set_session("ENG-SESSION")
+        rc, _, err = self.run_cmd("drive", "repair", "--job", JOB)
+        self.assertEqual(rc, 1)
+        self.assertIn("enrolled", err)
+        with self.assertRaises(ledger.LedgerBadError):
+            ledger.load(self.bkey, JOB)
+
 class Review(ControlCase):
     def setUp(self):
         super().setUp()

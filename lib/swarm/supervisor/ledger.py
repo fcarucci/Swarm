@@ -29,6 +29,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import re
 import unicodedata
 import uuid
@@ -383,6 +384,33 @@ def create(board_key: str, job: str, *, budgets: dict, activated_at: str, state:
                  pinned_requirements=dict(pinned or {}))
     led._commit(creating=True)
     return led
+
+
+def archive_bad(board_key: str, job: str) -> str:
+    """Move the job's bad ledger entry aside (never deleted, so `create` may start a fresh one): renamed under
+    the lock to `<name>.bad-<random>`, a name the scan does not read as a ledger, then the directory is synced.
+    Returns the new name. ValueError when there is no entry or it is readable; LedgerBadError where a rename
+    relative to the directory is not available."""
+    _check_key(board_key, job)
+    name = _name(board_key, job)
+    with privfs.dir_fd(SUBDIR) as d, privfs.locked(d, _lock_name(name)):
+        try:
+            _read_entry(d, name, board_key, job)
+        except LedgerBadError:
+            pass
+        else:
+            raise ValueError(f"the ledger of job {job!r} is readable: nothing to archive")
+        if not privfs.exists(d, name):
+            raise ValueError(f"no ledger entry for job {job!r}")
+        if os.rename not in os.supports_dir_fd:
+            raise LedgerBadError("this platform cannot move a bad ledger aside; a person must do it")
+        target = f"{name[:-len('.json')]}.bad-{uuid.uuid4().hex}"
+        os.rename(name, target, src_dir_fd=d, dst_dir_fd=d)
+        try:
+            os.fsync(d)
+        except OSError:   # directories cannot be synced everywhere; the rename itself is done
+            pass
+        return target
 
 
 def activate(board_key: str, job: str, *, budgets: dict, activated_at: str) -> Ledger:

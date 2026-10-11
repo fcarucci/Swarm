@@ -365,6 +365,36 @@ def cmd_unhalt(board, cfg, args) -> int:
     return _record("unhalt", led.ledger_rev, 1)
 
 
+# --- drive repair ------------------------------------------------------------------------------
+
+def cmd_drive_repair(board, cfg, args) -> int:
+    """Person path (spec F2): a drive ledger that does not read is moved aside (never deleted) and a fresh one
+    takes its place at the job's board generation. The fresh ledger is halted, so nothing launches until a
+    person sets the budgets and unhalts. Pinned requirements and integrated groups of the bad ledger are not
+    recovered: the goal judge then needs them pinned again (GOAL-READY --add-requirements)."""
+    bk = board_key(cfg)
+    who = person.require("drive repair", args.job, board_key=bk, env=os.environ)
+    try:
+        led = ledger.load(bk, args.job)
+    except ledger.LedgerBadError:
+        led = None
+    if led is not None:
+        raise Refuse(f"{args.job}'s drive ledger reads fine: nothing to repair")
+    try:
+        moved = ledger.archive_bad(bk, args.job)
+    except ValueError as exc:
+        raise Refuse(str(exc))
+    print(f"bad drive ledger moved aside as {moved}")
+    raw = (board.job_data(args.job) or {}).get("drive.generation", "")
+    generation = int(raw) if raw.isdigit() and int(raw) >= 1 else 1
+    fresh = ledger.create(bk, args.job, budgets={}, activated_at=_now_iso(board))
+    fresh.generation = fresh.generation_requested = generation
+    fresh.halted = {"by": f"person ({who})", "at": _now_iso(board),
+                    "reason": "drive repair: set the budgets, then unhalt"}
+    fresh.save()
+    return _record("halt", fresh.ledger_rev, 1)
+
+
 # --- registration ------------------------------------------------------------------------------
 
 def register(sub, handlers: dict) -> None:
@@ -394,6 +424,10 @@ def register(sub, handlers: dict) -> None:
             p.add_argument("--reason")
     ak = ss.add_parser("ack", help="the lead acknowledges the events it was woken for, up to ID")
     ak.add_argument("--job", required=True); ak.add_argument("--upto", type=int, required=True)
+    dr = sub.add_parser("drive", help="drive ledger repair (a person)")
+    ds = dr.add_subparsers(dest="dcmd", required=True)
+    rp = ds.add_parser("repair", help="move a bad drive ledger aside; a fresh one starts halted")
+    rp.add_argument("--job", required=True)
     rv = sub.add_parser("review", help="post a structured review of an artifact (an enrolled reviewer)")
     rv.add_argument("--job", required=True); rv.add_argument("--artifact", required=True)
     rv.add_argument("outcome", choices=REVIEW_OUTCOMES); rv.add_argument("--report", required=True)
@@ -402,4 +436,12 @@ def register(sub, handlers: dict) -> None:
     gr.add_argument("--job", required=True); gr.add_argument("--candidate", required=True)
     gr.add_argument("--add-requirements", action="append", metavar="PATH")
     handlers.update({"halt": _run(cmd_halt), "unhalt": _run(cmd_unhalt), "seat": _run(cmd_seat),
-                     "review": _run(cmd_review), "goal-ready": _run(cmd_goal_ready)})
+                     "review": _run(cmd_review), "goal-ready": _run(cmd_goal_ready),
+                     "drive": _run(cmd_drive)})
+
+
+def cmd_drive(board, cfg, args) -> int:
+    return DRIVE_COMMANDS[args.dcmd](board, cfg, args) or 0
+
+
+DRIVE_COMMANDS = {"repair": cmd_drive_repair}
