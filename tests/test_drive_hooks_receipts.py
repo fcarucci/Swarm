@@ -237,8 +237,9 @@ class VerdictReceipts(DriveCase):
         sid, _ = self.launch_seat("judge", role="judge", kind="judge")
         return sid
 
-    def verdict(self, sid, verdict, reason, cmd_tail, **kw):
-        rid = self.post_as(sid, f"VERDICT {verdict}: {reason}")
+    def verdict(self, sid, verdict, reason, cmd_tail, scope="artifact", candidate=None, req=None, **kw):
+        from swarm.review import verdict_text   # the CLI's one VERDICT format (6b: a goal verdict names what it judges)
+        rid = self.post_as(sid, verdict_text(verdict, reason, scope=scope, generation=1, candidate=candidate, req=req))
         return rid, self.post(sid, f"swarm verdict --job J {cmd_tail}", rec("verdict", rid), **kw)
 
     def decision(self, rid, **over):
@@ -259,7 +260,8 @@ class VerdictReceipts(DriveCase):
     def test_goal_verdict_receipt_binds_the_candidate_and_req(self):
         sid = self.judge()
         rid, ok = self.verdict(sid, "met", "goal met",
-                               f"--scope goal --candidate {CAND} --req R1 met 'goal met'")
+                               f"--scope goal --candidate {CAND} --req R1 met 'goal met'",
+                               scope="goal", candidate=CAND, req="R1")
         self.assertTrue(ok)
         r = self.receipt("verdict", rid)
         self.assertTrue(receipts.matches(r, self.decision(rid, scope="goal", candidate=CAND, req="R1",
@@ -270,7 +272,8 @@ class VerdictReceipts(DriveCase):
     def test_unreachable_defaults_to_the_goal_scope(self):
         sid = self.judge()
         rid, ok = self.verdict(sid, "unreachable", "no way",
-                               f"--candidate {CAND} --reason 'no way' --details - unreachable")
+                               f"--candidate {CAND} --reason 'no way' --details - unreachable",
+                               scope="goal", candidate=CAND)
         self.assertTrue(ok)
         self.assertEqual(self.receipt("verdict", rid).kind, "verdict")
 

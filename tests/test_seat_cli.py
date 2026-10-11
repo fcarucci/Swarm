@@ -328,6 +328,20 @@ class VerdictLine(ControlCase):
                          ("feat/x@abc1234", "d" * 64, posted[-1].id))
         self.assertIsNone(rec["artifact"])
 
+    def test_the_hook_receipts_the_real_verdict_posts(self):
+        """drivegate checks the VERDICT message against the submitted command (review.verdict_text both sides)."""
+        judge = self.judge()
+        led = ledger.load(self.bkey, JOB)
+        ctx = drivegate.Ctx(kind="seat", job=JOB, led=led, seat="judge")
+        for argv in (("verdict", "--job", JOB, "--as", judge, "--scope", "goal", "--candidate", "feat/x@abc1234",
+                      "--req", "d" * 64, "met", "all held"),
+                     ("verdict", "--job", JOB, "--as", judge, "--artifact", "feat/y@abc1234", "met", "fine")):
+            rc, out, err = self.run_cmd(*argv)
+            self.assertEqual(rc, 0, err)
+            kind, rid, rev = drivegate.record_of({"tool_response": {"stdout": out}})
+            decision = drivegate._verdict_decision(self.board, ctx, drivegate.parse_swarm(list(argv)), rid, judge)
+            self.assertEqual((kind, decision["verdict"]), ("verdict", "met"))
+
     def test_a_verdict_from_a_non_judge_is_refused_and_posts_nothing(self):
         self.judge()
         outsider = self.board.allocate_name("outsider", JOB)

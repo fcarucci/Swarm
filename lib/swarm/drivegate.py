@@ -785,7 +785,9 @@ def _verdict_decision(board, ctx, ns, rid: int, author) -> dict:
         raise Refused("an artifact verdict in a drive job names its artifact (--artifact REF)")
     if scope != "artifact" and not ns.candidate:
         raise Refused("a goal or ruling verdict names its candidate (--candidate)")
-    _expect_message(board, ctx.job, rid, f"VERDICT {verdict}: {reason}", author)
+    from swarm.review import verdict_text   # the one VERDICT format (a goal/ruling verdict names what it judges)
+    _expect_message(board, ctx.job, rid, verdict_text(verdict, reason, scope=scope, generation=ctx.led.generation,
+                                                      candidate=ns.candidate, req=ns.req), author)
     return {"verdict": verdict, "scope": scope, "generation": ctx.led.generation, "candidate": ns.candidate,
             "req": ns.req, "artifact": artifact}
 
