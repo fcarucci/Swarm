@@ -30,6 +30,7 @@ class FakeBoard:
         return [NS(id=42, agent_name="Homer", message="Already pushed parser branch")][-n:]
     def post(self, job, author, message): self.posts.append((author, message))
     def verdict_details(self, job, artifact=None): return None
+    def job_data(self, job): return {}
 
 
 
