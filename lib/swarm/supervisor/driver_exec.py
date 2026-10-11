@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import importlib.util
+import inspect
 import os
 import re
 import sys
@@ -751,7 +752,9 @@ def _sweep_locks(board, cfg: dict, now) -> None:
     Called unguarded when the module is part of the build: a failure is the pass's to report."""
     life = _module("swarm.supervisor.driver_life")
     if life is not None:
-        life.sweep_locks_by_host(board, cfg, now)
+        from swarm.board.autoinit import store_key
+        extra = {"board_key": store_key(cfg)} if "board_key" in inspect.signature(life.sweep_locks_by_host).parameters else {}
+        life.sweep_locks_by_host(board, cfg, now, **extra)      # 8b's sweep matches runs by local evidence in this board's key
 
 
 def sweep_unlaunched_seats(board, job: str) -> int:
