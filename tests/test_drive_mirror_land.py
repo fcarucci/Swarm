@@ -257,6 +257,30 @@ class AbsoluteHelperPin(MirrorCase):
             Mirror(remote, self.cred("./gh auth git-credential"))
 
 
+class NoCredentialAndMergeBase(PushCase):
+    def test_none_credential_only_for_local_destinations(self):
+        m = Mirror(self.remote, {"kind": "none"})
+        self.assertEqual(m._cred_env, {})
+        m.fetch(timeout=30)
+        m.push(self.tip, "main")
+        self.assertEqual(git(self.remote, "rev-parse", "main"), self.tip)
+        Mirror("file://" + self.remote, {"kind": "none"})
+        for url in ("https://example.test/x.git", "ssh://git@example.test/x", "git@example.test:x.git",
+                    "relative/path.git"):
+            with self.subTest(url=url), self.assertRaises(MirrorError):
+                Mirror(url, {"kind": "none"})
+
+    def test_merge_base(self):
+        m = self.mirror()
+        m.fetch_branches(["feat"], 30)
+        self.assertEqual(m.merge_base(self.tip, self.base), self.base)
+        self.assertEqual(m.merge_base(self.base, self.tip), self.base)
+        with self.assertRaises(MissingCommitError):
+            m.merge_base("3" * 40, self.base)
+        with self.assertRaises(MirrorError):
+            m.merge_base("main", self.base)
+
+
 class SshHosts(MirrorCase):
     def test_ssh_host_parsing(self):
         cases = {

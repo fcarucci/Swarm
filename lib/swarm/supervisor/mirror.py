@@ -384,6 +384,12 @@ class Mirror:
             socket = _abs_path(credential.get("socket"), "ssh-agent socket")
             ssh = self._ssh_command(["-o", f"IdentityAgent={socket}"])
             return ["-c", "credential.helper="], {"GIT_SSH_COMMAND": ssh, "SSH_AUTH_SOCK": socket}
+        if kind == "none":
+            # A local destination (a path or file:// url) needs no credential; a network one does.
+            if "://" in self.url and not self.url.startswith("file://") or (
+                    "://" not in self.url and not os.path.isabs(self.url)):
+                raise MirrorError("a network destination needs a pinned credential source")
+            return ["-c", "credential.helper="], {}
         raise MirrorError(f"unknown credential kind: {kind!r}")
 
     # --- running git -----------------------------------------------------------------------
@@ -591,6 +597,18 @@ class Mirror:
             return None
         if proc.returncode != 0:
             raise MirrorError(f"git rev-parse failed: {self._last_line(proc)}")
+        return proc.stdout.decode().strip()
+
+    def merge_base(self, a: str, b: str) -> str | None:
+        """The best common ancestor of two mirrored commits, or None when they share none."""
+        _sha(a)
+        _sha(b)
+        self._require_known([a, b])
+        proc = self._git(["merge-base", a, b], check=False)
+        if proc.returncode == 1:
+            return None
+        if proc.returncode != 0:
+            raise MirrorError(f"git merge-base failed: {self._last_line(proc)}")
         return proc.stdout.decode().strip()
 
     def is_ancestor(self, a: str, b: str) -> bool:
