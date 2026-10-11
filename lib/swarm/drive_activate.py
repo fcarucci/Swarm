@@ -23,6 +23,7 @@ from pathlib import Path
 from swarm import enrolment, hosts, paths
 from swarm.supervisor import ledger
 from swarm.supervisor import settings as sup_settings
+from swarm.supervisor import driver_events
 from swarm.supervisor.driver_model import DEFAULT_CFG
 
 ROLE_MODELS = {"engineer": "haiku", "worker": "haiku", "integrator": "haiku", "reviewer": "sonnet",
@@ -484,11 +485,11 @@ def finish_activation(cfg: dict, board, job: str, *, crash_after: str | None = N
         return led
     owner = enrolment.find_job_owner(bk, job)
     if owner is None or owner.owner is None:
-        raise DriveError(f"DRIVER-ORPHAN: job {job!r} has a drive ledger but no owner record on this host; "
+        raise DriveError(f"{driver_events.DRIVER_ORPHAN}: job {job!r} has a drive ledger but no owner record on this host; "
                          f"it is held until `swarm doctor` and a person repair it")
     if board.job_data(job).get("drive.enabled") != "1":
         # the claim is written before the ledger ([RR1a]); a ledger without it is not written here
-        raise DriveError(f"DRIVER-ORPHAN: job {job!r} has a drive ledger but no drive claim on the board; "
+        raise DriveError(f"{driver_events.DRIVER_ORPHAN}: job {job!r} has a drive ledger but no drive claim on the board; "
                          f"it is held until `swarm doctor` and a person repair it")
     o = owner.owner
     models = {**model_defaults(cfg), **led.models}
