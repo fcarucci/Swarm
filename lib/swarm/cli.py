@@ -3566,6 +3566,7 @@ def cmd_deactivate(cfg: dict, args) -> int:
                 _capture_final_transcripts(board, cfg, args.job)
             if known:
                 _reap_closed_job(board, args.job)
+                board.set_job_data(args.job, "drive.enabled", None)   # [RR1a] a closed job is not driven
         how = args.status + (", forced without a met verdict" if forced else "")
         if js is not None and js.status != "active":   # e.g. replacing an auto-close outcome
             how += f"; it was already {js.status}" + (", auto-closed" if js.closed_by == AUTO_CLOSED_BY else "")

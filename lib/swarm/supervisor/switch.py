@@ -62,14 +62,18 @@ def cmd_switch(cfg: dict, args) -> int:
         return 1
     print(f"{config}: [supervise] enabled = {'true' if on else 'false'}")
     if not on:
-        halted = drive_activate.halt_drive_jobs(cfg, actor=_actor())   # [M1] 1: the [F5] halt, deadlines shift
+        halted, failed = drive_activate.halt_drive_jobs(cfg, actor=_actor())   # [M1] 1: [F5] halt, seats stopped
         if halted:
             print(f"warning: drive jobs halted until `swarm supervise enable`: {', '.join(halted)}")
+        for job, why in failed:
+            print(f"warning: could not halt {job}: {why}", file=sys.stderr)
         print(stop_timer())
-        return 0
-    resumed = drive_activate.unhalt_drive_jobs(cfg)
+        return 1 if failed else 0
+    resumed, failed = drive_activate.unhalt_drive_jobs(cfg)
     if resumed:
         print(f"drive jobs unhalted (their deadlines shifted by the halt): {', '.join(resumed)}")
+    for job, why in failed:
+        print(f"warning: could not unhalt {job}: {why}", file=sys.stderr)
     if paths.IS_WINDOWS:
         print("the supervisor needs a systemd user timer: not available on Windows")
         return 0
