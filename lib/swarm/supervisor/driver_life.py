@@ -750,14 +750,18 @@ def expire_orphan_questions(board, job: str, now: dt.datetime, *, board_key: str
 
 # --- host sweeps -----------------------------------------------------------------------------
 
-def _ledger_says_open(board_key: str, job: str, launch_id: str) -> bool:
-    """Local evidence: this host's ledger has an intent for the launch that is not concluded."""
+def _ledger_launch(board_key: str, job: str, launch_id: str) -> str:
+    """This host's ledger on a launch: "open", "concluded", "unknown" (no ledger or no such intent) or
+    "bad" (unreadable ledger)."""
     from swarm.supervisor import ledger as _ledger
     try:
         led = _ledger.load(board_key, job)
     except _ledger.LedgerBadError:
-        return True               # unreadable: hold the lock
-    return led is not None and any(i.launch_id == launch_id and i.state != "concluded" for i in led.intents)
+        return "bad"
+    for i in (led.intents if led is not None else ()):
+        if i.launch_id == launch_id:
+            return "concluded" if i.state == "concluded" else "open"
+    return "unknown"
 
 
 def sweep_locks_by_host(board, cfg: dict, now: dt.datetime, *, hooks: Hooks | None = None,
@@ -781,9 +785,15 @@ def sweep_locks_by_host(board, cfg: dict, now: dt.datetime, *, hooks: Hooks | No
                     by_launch[r.launch_id] = r       # a duplicate row with the same launch id: an open one wins,
             rows[lock.job] = by_launch               # so a forged ended copy never releases a live launch's locks
         row = rows[lock.job].get(lock.launch_id)
-        if board_key is not None and (row is None or row.ended_at is not None) \
-                and _ledger_says_open(board_key, lock.job, lock.launch_id):
-            continue          # a board row alone (absent or forged ended) never frees a launch the ledger holds open
+        if row is None or row.ended_at is not None:
+            # A board row alone (missing, or a forged "ended" copy) never frees a lock: positive local
+            # evidence is needed. The ledger says the launch is concluded, or (no ledger intent for it)
+            # the row is ended and its session is confirmed gone here.
+            seen = _ledger_launch(board_key, lock.job, lock.launch_id) if board_key is not None else "unknown"
+            if seen in ("open", "bad"):
+                continue
+            if seen != "concluded" and (row is None or hooks.rows_live(board, cfg, [row])):
+                continue
         if row is not None and row.ended_at is None:
             if lock.expires_at > now:
                 continue                                    # live and valid
