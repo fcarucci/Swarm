@@ -21,7 +21,7 @@ class GoalEnv(RoutingEnv):
         self.cfg = swarm.load_config(self.config)
 
     def activate_goal(self, job: str = "J", goal: str = GOAL, **kw):
-        return self.activate(job, "--goal", goal, **kw)
+        return self.activate(job, "--no-drive", "--reason", "legacy goal test", "--goal", goal, **kw)
 
     def judge_prompt(self, job: str = "J") -> str:
         return f"[swarm job: {job}]\n[swarm role: judge]\nDecide whether the goal is met."
@@ -47,8 +47,8 @@ class GoalCliTests(GoalEnv):
         self.assertTrue(json.loads((self.markers / "J.json").read_text())["goal"])
 
     def test_goal_from_stdin(self):
-        rc, _, _ = self.cli("activate", "--job", "J", "--session", "sess-1", "--goal", "-",
-                            stdin="  line one\nline two\n")
+        rc, _, _ = self.cli("activate", "--job", "J", "--session", "sess-1", "--no-drive",
+                            "--reason", "legacy goal test", "--goal", "-", stdin="  line one\nline two\n")
         self.assertEqual(rc, 0)
         self.assertEqual(self.job().goal, "line one\nline two")
 

@@ -38,7 +38,7 @@ class DeriveJobStatusTests(unittest.TestCase):
 
 class WaitCliTests(RoutingEnv):
     def test_who_shows_waiting_goal_not_met_without_agents(self):
-        rc, _, err = self.cli('activate', '--job', 'J', '--goal', 'deliver report')
+        rc, _, err = self.cli('activate', '--job', 'J', '--no-drive', '--reason', 'legacy goal test', '--goal', 'deliver report')
         self.assertEqual(rc, 0, err)
         rc, out, err = self.cli('who', '--job', 'J')
         self.assertEqual(rc, 0, err)

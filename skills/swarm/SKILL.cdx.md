@@ -33,7 +33,7 @@ board (`[codex] board_writable = true`, README step 2): without it `join`, `acti
    their back; with no background supervisor in this edition, always pass `--no-supervise`:
 
    ```sh
-   swarm activate --job fix-api --task "Fix the API regression" --goal "Tests pass and the diff is reviewed" --no-supervise
+   swarm activate --job fix-api --task "Fix the API regression" --goal "Tests pass and the diff is reviewed" --no-supervise --no-drive --reason "no supervisor in this edition"
    ```
 
    `--goal` is optional; with it, completion waits for a judge's `met` verdict.

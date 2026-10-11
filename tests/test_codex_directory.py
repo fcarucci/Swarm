@@ -219,7 +219,7 @@ class CodexDirectoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="swarm-cdx-home-") as h:
             home = Path(h)
             self.cli(home, "init")
-            self.cli(home, "activate", "--job", "cdx2", "--task", "t", "--goal", "g", "--no-supervise")
+            self.cli(home, "activate", "--job", "cdx2", "--task", "t", "--no-drive", "--reason", "legacy goal test", "--goal", "g", "--no-supervise")
             self.cli(home, "join", "--job", "cdx2", "--key", "eng", "--role", "engineer")
             judge = self.cli(home, "join", "--job", "cdx2", "--key", "jdg", "--role", "judge", "--judge").strip()
             self.cli(home, "done", "--job", "cdx2", "--key", "eng", "--summary", "did it")
@@ -240,7 +240,7 @@ class CodexDirectoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="swarm-cdx-home-") as h:
             home = Path(h)
             self.cli(home, "init")
-            out = self.cli(home, "activate", "--job", "cdx3", "--task", "t", "--goal", "g", "--no-supervise", both=True)
+            out = self.cli(home, "activate", "--job", "cdx3", "--task", "t", "--no-drive", "--reason", "legacy goal test", "--goal", "g", "--no-supervise", both=True)
             for bad in ("[swarm job:", "[swarm role:", "spawned from now on", "/hooks"):
                 self.assertNotIn(bad, out)
             self.assertIn("swarm join --job cdx3 --key", out)

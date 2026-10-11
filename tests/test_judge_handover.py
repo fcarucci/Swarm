@@ -8,7 +8,7 @@ from test_hooks_cli import Env  # noqa: E402  (sets sys.path)
 class JudgeHandoverTests(Env):
     def setUp(self):
         super().setUp()
-        self.assertEqual(self.cli("activate", "--job", "J", "--goal", "ship it")[0], 0)
+        self.assertEqual(self.cli("activate", "--job", "J", "--no-drive", "--reason", "legacy goal test", "--goal", "ship it")[0], 0)
 
     def go_dead(self, key):
         """The judge's session ended without a stop: no contact for longer than dead_minutes, its

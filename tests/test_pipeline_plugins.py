@@ -11,7 +11,7 @@ from test_team_plugin import TeamEnv
 class PipelineRecipeTests(TeamEnv):
     def setUp(self):
         super().setUp()
-        self.cli("activate", "--job", "J", "--goal", "deliver")
+        self.cli("activate", "--job", "J", "--no-drive", "--reason", "legacy goal test", "--goal", "deliver")
         self.sha = "a" * 40
 
     def recipe(self, artifact):

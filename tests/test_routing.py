@@ -89,7 +89,7 @@ class ActivateTagTests(RoutingEnv):
         self.assertIn("product_manager", out)
 
     def test_custom_role_on_goal_job_cannot_verdict_but_can_write(self):
-        self.activate("J", "--goal", "Ship the requested product")
+        self.activate("J", "--no-drive", "--reason", "legacy goal test", "--goal", "Ship the requested product")
         self.spawn("qa", "[swarm job: J]\n[swarm role: qa]\nWrite acceptance tests.")
         self.assertEqual(self.member("qa").role, "qa")
         out = self.turn("qa", tool="Write")
