@@ -2545,6 +2545,15 @@ class DriveClaims(DriveHelpers):
             self.claim(a, locks=[key], paths={key: "//w/repo"})
         self.assertEqual(self.b.seat("J", 1, "a").state, "requested")
 
+    def test_a_renewal_time_without_a_timezone_is_refused(self):
+        self.goal_job()
+        s = self.seat("J", "a")
+        self.assertIsNotNone(self.claim(s, locks=["land:x:main"], launch_id="LZ"))
+        naive = dt.datetime(2030, 1, 1)
+        with self.assertRaises(ValueError):
+            self.b.renew_drive_locks("LZ", naive, job="J", holder="1|seat|a")
+        self.assertEqual(self.b.drive_locks("land:")[0].launch_id, "LZ")
+
     def test_the_same_checkout_is_claimed_once(self):
         self.goal_job()
         a, c = self.seat("J", "a"), self.seat("J", "c")

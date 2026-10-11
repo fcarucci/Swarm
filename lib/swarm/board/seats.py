@@ -92,7 +92,9 @@ def check_lock_seconds(lock_seconds):
 
 
 def check_renewal(now, expires_at):
-    if not isinstance(expires_at, _dt.datetime) or not now < expires_at <= now + _dt.timedelta(seconds=MAX_LOCK_SECONDS):
+    if not isinstance(expires_at, _dt.datetime) or expires_at.tzinfo is None:
+        raise ValueError("a renewal needs a timezone-aware time")   # a naive one can't be compared with now
+    if not now < expires_at <= now + _dt.timedelta(seconds=MAX_LOCK_SECONDS):
         raise ValueError("a renewal must lie in the future, at most a lock's maximum lifetime ahead")
 
 
