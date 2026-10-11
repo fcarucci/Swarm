@@ -75,6 +75,8 @@ case "${1:-}" in turn|done)
     case "$PAYLOAD" in *swarm*join*|*swarm*verdict*) VALID="";; esac
     # A drive control command's record line always reaches Python (its receipt), lease or not.
     case "$PAYLOAD" in *"swarm-record: kind="*) VALID="";; esac
+    # Drive control commands get their caller grant from the Python hook (swarm.person).
+    case "$PAYLOAD" in *swarm*halt*|*swarm*seat*|*swarm*goal-ready*|*swarm*drive*) VALID="";; esac
     # PreToolUse only, and only its tool_input (never a tool's output): a background shell call is
     # rewritten to run under `swarm bg`, and a CI wait (gh run watch, gh pr checks --watch, a
     # gh/curl poll loop) is refused, by the Python hook. A gh word must start a command (after a

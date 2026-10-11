@@ -2124,6 +2124,8 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
         _CURRENT['lease'] = Lease(cfg, current_host().name, payload)
     agent_id = payload.get("agent_id")
     sid = payload.get("session_id")
+    if event == "turn":
+        _person_grants(cfg, payload)   # before anything can return: the CLI's caller identity (swarm.person)
     if event == "turn" and sid and current_host().is_followup(payload):
         _resume_turns(cfg, sid, agent_id)
     resume = _resume_binding(cfg, sid) if not agent_id else None
@@ -2290,3 +2292,18 @@ def _no_lease(payload: dict) -> None:
     lease = _CURRENT.get("lease")
     if lease:
         lease.enabled = False   # finish() writes nothing more: the invalidation above stands
+
+
+def _person_grants(cfg: dict, payload: dict) -> None:
+    """PreToolUse of a shell call that runs a swarm control command (halt, unhalt, seat, goal-ready, drive):
+    attest the caller (the payload's session and subagent id) for the exact argv, so the CLI never takes its
+    identity from the environment (swarm.person, spec [G6]/[F17]). Never raises."""
+    try:
+        command = current_host().shell_command(payload)
+        if not command or "swarm" not in command:
+            return
+        from swarm import person
+        from swarm.board.autoinit import store_key
+        person.write_grants(store_key(cfg), payload, command)
+    except Exception as exc:
+        _log_error("grant", str(payload.get("agent_id") or payload.get("session_id")), exc)

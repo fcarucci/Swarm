@@ -899,3 +899,34 @@ class EnrolmentTests(Env):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PersonGrantHook(Env):
+    """The PreToolUse hook attests who submitted a drive control command (swarm.person): the payload's session
+    and, for a subagent, its agent id. Never the environment."""
+    def grant(self, argv):
+        from swarm import person
+        from swarm.board.autoinit import store_key
+        person.forget()
+        return person.caller(store_key(self.cfg), argv)
+
+    def test_main_session_shell_call_gets_a_grant(self):
+        from swarm import person
+        self.hook("turn", agent_id=None, session="REQ", host="claude", tool_name="Bash",
+                  tool_input={"command": "swarm halt --job J 2>&1 | tail -2"})
+        self.assertEqual(self.grant(["halt", "--job", "J"]), person.Caller("REQ", None))
+
+    def test_subagent_shell_call_is_attested_as_the_subagent(self):
+        from swarm import person
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "SOMEONE-ELSE"}):
+            self.hook("turn", agent_id="sub-1", session="REQ", host="claude", tool_name="Bash",
+                      tool_input={"command": "swarm seat ack --job J --upto 3"})
+        self.assertEqual(self.grant(["seat", "ack", "--job", "J", "--upto", "3"]), person.Caller("REQ", "sub-1"))
+
+    def test_other_tools_and_commands_get_none(self):
+        self.hook("turn", agent_id=None, session="REQ", host="claude", tool_name="Read",
+                  tool_input={"file_path": "swarm halt --job J"})
+        self.hook("turn", agent_id=None, session="REQ", host="claude", tool_name="Bash",
+                  tool_input={"command": "swarm read --job J"})
+        self.assertIsNone(self.grant(["halt", "--job", "J"]))
+        self.assertIsNone(self.grant(["read", "--job", "J"]))
