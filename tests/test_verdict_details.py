@@ -346,7 +346,18 @@ class VerdictDetailsCliTests(GoalEnv):
         with self.board() as b:
             self.assertEqual(spool.flush_spool(b, self.cfg), 0)
             self.assertIsNone(b.job_status("J").verdict)
+            posted = [m.message for m in b.recent_messages(20, job="J")]
         self.assertEqual(len(list(self.spool_dir.glob("*.bad"))), 1)
+        self.assertFalse(any("verdict refused" in m for m in posted), posted)   # rejected on load, not on the board
+
+    def test_a_queued_verdict_with_a_malformed_typed_field_goes_to_bad(self):
+        for field, value in (("open_count", -1), ("generation", 0), ("progress", "yes"), ("scope", "whole-job")):
+            with self.subTest(field=field):
+                spool.spool_verdict(self.cfg, "J", self.judge, "met", "ok", **{field: value})
+        with self.board() as b:
+            self.assertEqual(spool.flush_spool(b, self.cfg), 0)
+            self.assertIsNone(b.job_status("J").verdict)
+        self.assertEqual(len(list(self.spool_dir.glob("*.bad"))), 4)
 
     def test_typed_verdict_fields_survive_the_offline_spool(self):
         with self.board() as b:

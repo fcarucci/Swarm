@@ -2273,6 +2273,12 @@ class DriveVerdicts:
         self.assertEqual(self.b.job_status("J").verdict, "not_met")
         self.assertTrue(self.b.record_verdict("J", judge, "met", "done", scope="goal", generation=1))
 
+    def test_a_drive_ruling_not_met_needs_no_open_count(self):
+        judge = self.judged_goal()
+        self.assertTrue(self.b.set_job_data("J", "drive.enabled", "1"))
+        self.assertTrue(self.b.record_verdict("J", judge, "not_met", "why", "next", scope="ruling", generation=2))
+        self.assertEqual(self.b.job_status("J").verdict_scope, "ruling")
+
     def test_a_drive_not_met_with_no_open_criteria_is_accepted(self):
         from swarm.review import artifact_verdicts
         judge = self.judged_goal()

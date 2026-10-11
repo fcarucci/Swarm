@@ -32,6 +32,8 @@ class FakeBoard:
     def verdict_details(self, job, artifact=None): return None
 
 
+
+
 class OrphansTest(unittest.TestCase):
     def setUp(self):
         self.b = FakeBoard()
@@ -100,6 +102,14 @@ class OrphansTest(unittest.TestCase):
     def test_foreign_owner_excluded(self):
         with mock.patch.object(orphans, "local_record", return_value=None): self.run_pass()
         self.resume.assert_not_called()
+    def test_a_verdict_recorded_after_selection_stops_the_restart(self):
+        import copy
+        selected = copy.copy(self.b.js)                    # the selection read: taken before the verdict
+        self.b.jobs = lambda all: [selected]
+        self.b.js.verdict = "unreachable"                  # the re-read just before the restart sees it
+        self.run_pass()
+        self.resume.assert_not_called()
+
     def test_orphan_resume_refuses_a_job_with_an_unreachable_verdict(self):
         from swarm import pause
         from swarm.hosts.resume import Restored
@@ -110,6 +120,7 @@ class OrphansTest(unittest.TestCase):
         self.assertTrue(b.claim_judge("jk", "J"))
         self.assertTrue(b.record_verdict("J", judge, "unreachable", "cannot", details="report", scope="goal",
                                          generation=1))
+        b.agent_stopped("jk")   # no agent left at work: only the settled verdict can refuse the resume
         restored = Restored("codex", "briefing", ("codex", "exec", "-"), "/work", "continue", None, None)
         started = []
         with mock.patch("swarm.hosts.resume.restore", return_value=restored), \
