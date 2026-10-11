@@ -16,7 +16,9 @@ import hashlib
 import os
 import re
 
-from swarm import compat
+import functools
+
+from swarm import compat, driveroles
 from .base import (MAX_LOCK_SECONDS, SEAT_CLOSED, SEAT_COMPLEXITY, SEAT_HARNESSES, SEAT_STATES, SEAT_TRANSITIONS,
                    DriveLock, RESTART_COLS, Restart, Seat)
 from ..supervisor.worktree import roots_overlap
@@ -113,6 +115,22 @@ def _check_state(state, fields):
         raise ValueError(f"not a seat field: {', '.join(sorted(unknown))}")
 
 
+def drive_harness_override(request_seat):
+    """Wrap a backend's request_seat: a judge or reviewer requested on Codex is stored on Claude (spec 3.12
+    [G1]: Codex's read-only sandbox has no board access), and the reason is posted on the job once, when the
+    request created or changed the row. Every request path goes through here (the seat command, the driver's
+    own seats), on every backend."""
+    @functools.wraps(request_seat)
+    def wrapper(self, job, generation, seat, *, role, harness, **kw):
+        new, why = driveroles.effective_harness(role, harness)
+        before = self.seat(job, generation, seat) if why else None
+        row = request_seat(self, job, generation, seat, role=role, harness=new, **kw)
+        if why and (before is None or before.revision != row.revision):
+            self.post(job, "swarm", f"seat {seat}: {why}")
+        return row
+    return wrapper
+
+
 class _Refused(Exception):
     """A claim conflict found inside its transaction: the transaction rolls back, nothing is kept."""
 
@@ -120,6 +138,7 @@ class _Refused(Exception):
 class MemorySeats:
     """Seats, drive locks and the launch claim over the shared MemoryStore."""
 
+    @drive_harness_override
     def request_seat(self, job, generation, seat, *, role, harness, model, workdir, brief_path, title=None,
                      task_ref=None, complexity="standard", requested_by):
         check_seat(seat, generation, role, harness, workdir, brief_path, complexity, requested_by)
@@ -342,6 +361,7 @@ class SqlSeats:
     def _exec(self, c, sql, args=()):
         return c.execute(self._sx(sql), args)
 
+    @drive_harness_override
     def request_seat(self, job, generation, seat, *, role, harness, model, workdir, brief_path, title=None,
                      task_ref=None, complexity="standard", requested_by):
         check_seat(seat, generation, role, harness, workdir, brief_path, complexity, requested_by)
