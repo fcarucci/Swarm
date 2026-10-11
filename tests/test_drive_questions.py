@@ -256,18 +256,53 @@ class GateDriveQuestions(QuestionEnv):
         self.assertIsNone(why)
         self.assertEqual(a.name, "eng-b")
 
+    def write_bad_ledger(self, job):
+        import hashlib
+        name = hashlib.sha256(f"{store_key(self.h.cfg)}\0{job}".encode("utf-8")).hexdigest() + ".json"
+        drive_dir = sup_settings.private_dir() / "drive"
+        os.makedirs(drive_dir, mode=0o700, exist_ok=True)
+        (drive_dir / name).write_text("{ not a ledger")
+
     def test_bad_ledger_gates_the_job_as_a_drive_job(self):
         # A planted or unreadable ledger fails closed: the job is held as a drive job, so the plain
         # job-level heuristic never applies to it.
-        import hashlib
-        from swarm import paths  # noqa: F401  (the private dir comes from the temporary HOME)
-        from swarm.supervisor import settings as sup_cfg
         self.b.post("K", self.kasker, "ok?", "human")
-        name = hashlib.sha256(f"{store_key(self.h.cfg)}\0K".encode("utf-8")).hexdigest() + ".json"
-        drive_dir = sup_cfg.private_dir() / "drive"
-        os.makedirs(drive_dir, mode=0o700, exist_ok=True)
-        (drive_dir / name).write_text("{ not a ledger")
+        self.write_bad_ledger("K")
         self.assertFalse(orphans.human_question(self.b, self.b.job_status("K"), self.h.cfg))
+
+    def test_bad_ledger_holds_the_asking_seat_and_the_coordinator(self):
+        # Real questions carry the ledger's generation (1+). An unreadable ledger must still hold them.
+        self.create_ledger("J")
+        q = self.ask(default="postgres")
+        self.assertEqual(self.b.blocker(q.id).generation, 1)
+        self.write_bad_ledger("J")
+        gate = orphans.drive_gate(self.b, self.h.cfg, "J")
+        self.assertIn(self.a, gate)
+        self.assertIn("lead", gate)
+        self.assertNotIn(self.bn, gate, "a seat with no open question is not held")
+        rows = [agent("eng-a", "ka", ended=NOW - HOUR, left=STUCK_PREFIX + "dead"),
+                agent("eng-b", "kb", ended=NOW - HOUR, left=STUCK_PREFIX + "dead")]
+        held = FakeBoard(drive_js(), rows, [question("eng-a", generation=1)], {"drive.enabled": "1"})
+        with mock.patch.object(command, "_host_restarts", return_value=[]), \
+                mock.patch.object(command, "enrolment_of", return_value=object()), \
+                mock.patch.object(command, "_decide_for",
+                                  side_effect=lambda board, cfg, sup, js, a, *r, **k: NS(
+                                      decision=NS(go=True), agent=a, js=js)):
+            got = command.candidates(held, self.h.cfg, sup_settings.settings({}), now=NOW)
+        self.assertEqual([c.agent.name for c in got], ["eng-b"])
+
+    def test_drive_view_never_creates_the_ledger_directory(self):
+        self.assertFalse(os.path.lexists(sup_settings.private_dir()))
+        self.assertEqual(orphans.drive_view(self.b, self.h.cfg, "J"), (True, None))
+        self.assertEqual(orphans.drive_view(self.b, self.h.cfg, "K"), (False, None))
+        self.assertFalse(orphans.human_question(self.b, self.b.job_status("K"), self.h.cfg))
+        self.assertFalse(os.path.lexists(sup_settings.private_dir()),
+                         "a read must not create the private drive directory")
+
+    def test_wait_blocker_with_a_seat_is_not_a_question(self):
+        self.b.open_blocker("J", "wait", "external", "waiting on the lab", seat=self.a)
+        self.assertEqual(open_question_seats(self.b, "J", None), set())
+        self.assertEqual(orphans.drive_gate(self.b, self.h.cfg, "J"), frozenset())
 
     def test_drive_lead_question_holds_the_orphan_coordinator(self):
         sup = sup_settings.settings({})
