@@ -225,11 +225,18 @@ class LauncherVenvTests(unittest.TestCase):
 
     def test_an_invalid_limit_falls_back_to_twenty_minutes(self):
         for bad in ("abc", "1.5", "-3"):
-            lock = self.hold_lock(self.v22, None, age_minutes=10)    # younger than 20
-            with self.assertRaises(subprocess.TimeoutExpired):
-                self.launch(self.v22, timeout=3, SWARM_LOCK_STALE_MINUTES=bad)
-            self.assertTrue(lock.is_dir(), bad)
-            shutil.rmtree(lock)
+            lock = self.hold_lock(self.v22, None, age_minutes=30)    # older than 20, younger than any big default
+            res = self.launch(self.v22, timeout=30, SWARM_LOCK_STALE_MINUTES=bad)
+            self.assertEqual(res.returncode, 0, (bad, res.stderr))
+            self.assertIn("removed a stale build lock", res.stderr, bad)
+            shutil.rmtree(self.venv_of(self.v22), ignore_errors=True)
+
+    def test_the_age_limit_is_inclusive_to_the_second(self):
+        """lock_older_than_limit with stubbed clock and mtime: exactly the limit is stale."""
+        for age, rc in ((60, 0), (59, 1), (61, 0)):
+            res = self.steal_script(f'date() {{ echo 1000; }}; stat() {{ echo {1000 - age}; }}; STALE_MIN=1\n'
+                                    'lock_older_than_limit x; echo rc=$?')
+            self.assertIn(f"rc={rc}", res.stdout, (age, res.stderr))
 
     def assert_waits_on_a_live_lock(self, lock: Path):
         with self.assertRaises(subprocess.TimeoutExpired):
