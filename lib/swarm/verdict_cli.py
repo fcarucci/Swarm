@@ -82,6 +82,7 @@ def _board_verdict(board, cfg: dict, args) -> int:
     scope = _verdict_scope(args)
     # a goal or ruling verdict is stored under its drive generation (review.verdict_data), from the ledger
     generation = _drive_generation(cfg, args.job) if scope in ("goal", "ruling") else None
+    from swarm.spool import VerdictUnbound
     try:
         message_id = deliver_verdict(board, args.job, args.name, args.verdict, text[0], text[1],
                                      getattr(args, "artifact", None), getattr(args, "details_text", None),
@@ -89,6 +90,11 @@ def _board_verdict(board, cfg: dict, args) -> int:
                                      open_count=getattr(args, "open_count", None),
                                      progress=True if getattr(args, "progress", None) else None,
                                      candidate=getattr(args, "candidate", None), req=getattr(args, "req", None))
+    except VerdictUnbound as exc:
+        print(f"refused: verdict posted but unbound — rejected: {_cli().term_safe(args.name)} stopped being the "
+              f"judge of {_cli().term_safe(args.job)} while it was recorded (message {exc.message_id} is void and "
+              "counts for nothing); if you are the judge, run it again", file=sys.stderr)
+        return 1
     except ValueError as exc:   # a name the board refuses (board.base.valid_name)
         print(f"verdict not recorded: {_cli().term_safe(exc)}", file=sys.stderr)
         return 1
@@ -104,4 +110,4 @@ def _board_verdict(board, cfg: dict, args) -> int:
 
 def _drive_generation(cfg: dict, job: str) -> int | None:
     from swarm.drive_cli import drive_generation
-    return drive_generation(cfg, job)
+    return drive_generation(cfg, job, warn=True)

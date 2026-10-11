@@ -467,6 +467,16 @@ def retry_stuck(cfg: dict) -> int:
         cm.__exit__(None, None, None)
 
 
+class VerdictUnbound(Exception):
+    """deliver_verdict recorded and posted the verdict, but could not bind the record to the posted message
+    (the judge changed between the two writes). The unbound record counts for no reader (review.bound_verdict);
+    `message_id` is the VERDICT message that was posted and is void."""
+
+    def __init__(self, message_id: int):
+        super().__init__(f"verdict message {message_id} posted but not bound")
+        self.message_id = message_id
+
+
 def deliver_verdict(board, job: str, name: str, verdict: str, reason: str,
                     next_steps: str | None = None, artifact: str | None = None,
                     details: str | None = None, *, scope: str = "artifact", generation: int | None = None,
@@ -474,8 +484,11 @@ def deliver_verdict(board, job: str, name: str, verdict: str, reason: str,
                     candidate: str | None = None, req: str | None = None) -> int:
     """Record a judge's verdict and post it on the job's board. Returns the id of the posted VERDICT
     message (the verdict's record id, bound into the stored verdict), or 0 when nothing was recorded or
-    posted because `name` is not the job's active judge. Shared by `swarm verdict` and the spool.
-    A goal or ruling verdict is bound to its candidate, never to a hand-off artifact."""
+    posted because `name` is not the job's active judge. VerdictUnbound when the verdict was posted but its
+    binding write was refused (the judge changed in between): the record keeps message_id 0, which no
+    reader accepts (review.bound_verdict), and a VERDICT-VOID post says so on the board. Shared by `swarm
+    verdict` and the spool. A goal or ruling verdict is bound to its candidate, never to a hand-off artifact;
+    its VERDICT message names the generation, scope, candidate and req it judges (review.verdict_text)."""
     if artifact is None and scope == "artifact":
         from swarm.review import latest_handoffs, judge_artifact, branch_revision
         leading, separator, _ = reason.partition(':')
@@ -491,12 +504,16 @@ def deliver_verdict(board, job: str, name: str, verdict: str, reason: str,
     # Only the active judge may record (the board checks that under its lock), so the verdict is recorded
     # first and posted second; its stored record is then bound to the posted message's id, recorded again
     # under the same checks (the second write is the same verdict with its message id).
-    if not board.record_verdict(job, name, verdict, reason, next_steps, artifact, details, **typed):
-        return 0
-    posted = board.post(job, name, f"VERDICT {verdict}: {reason}")
+    if not board.record_verdict(job, name, verdict, reason, next_steps, artifact, details, message_id=0, **typed):
+        return 0   # message_id 0: recorded, binding pending (review.bound_verdict refuses it)
+    from swarm.review import verdict_text
+    posted = board.post(job, name, verdict_text(verdict, reason, scope=scope, generation=generation,
+                                                candidate=candidate, req=req))
     if not board.record_verdict(job, name, verdict, reason, next_steps, artifact, details,
                                 message_id=posted.id, **typed):
-        return 0
+        board.post(job, "swarm", f"VERDICT-VOID {posted.id}: posted but unbound ({name} is no longer the judge); "
+                                 "it does not count", to=name)
+        raise VerdictUnbound(posted.id)
     if details and details.strip():   # the report itself is not posted (the board caps a message)
         board.post(job, name, f"DETAILS ({len(details.strip().splitlines())} lines): swarm verdict show --job {job}")
     if next_steps:   # the board caps a message; the full text is what `swarm status --job J` shows
@@ -531,6 +548,8 @@ def _deliver_spooled_verdict(board, rec: tuple) -> bool:
     try:
         if deliver_verdict(board, job, name, verdict, reason, next_steps, artifact, details, **typed_fields):
             return True
+    except VerdictUnbound:   # posted, then refused: the VERDICT-VOID post told the sender
+        return False
     except ValueError as exc:   # the board's rules (e.g. a drive job's not_met without its open count)
         board.post(job, "swarm", f"verdict refused: {exc}", to=name)
         return False
