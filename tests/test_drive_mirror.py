@@ -694,6 +694,99 @@ class PatchIdsAndAudit(MirrorCase):
                 continue
             self.assertFalse(shas & set(cmd), cmd)
 
+class FixRound2(MirrorCase):
+    def setUp(self):
+        super().setUp()
+        self.remote = self.repo("remote.git", bare=True)
+        self.work = self.repo("work")
+        self.base = self.commit(self.work, "base.txt", "base\n", "base")
+        git(self.work, "push", "-q", self.remote, "main")
+        self.mirror = Mirror(self.remote, self.agent_cred())
+
+    def push(self, *refspecs):
+        git(self.work, "push", "-q", "-f", self.remote, *refspecs)
+        self.mirror.fetch(timeout=30)
+
+    def test_partial_judged_artifact_without_middle_commit_is_flagged(self):
+        # M2: judged A -> B -> C lands as A' -> C' with B left out; each commit has a twin, but
+        # the run is not a contiguous slice of the judged chain, and its tree is not the judged one.
+        git(self.work, "checkout", "-q", "-b", "feat")
+        a = self.commit(self.work, "admin.txt", "delete_all()\n", "A adds admin")
+        b = self.commit(self.work, "admin.txt", "require_auth()\ndelete_all()\n", "B adds auth")
+        c = self.commit(self.work, "c.txt", "unrelated\n", "C unrelated")
+        git(self.work, "checkout", "-q", "-B", "landed", "main")
+        git(self.work, "cherry-pick", a)
+        git(self.work, "cherry-pick", c)
+        landed = git(self.work, "rev-parse", "HEAD")
+        self.push("feat", "landed")
+        self.assertIn(landed, self.mirror.audit_target(self.base, landed, {c}))
+
+    def test_moved_hunk_with_identical_context_is_flagged(self):
+        # L7: the judged commit removes DANGER from the first of two identical blocks; the twin
+        # removes it from the second. The patch-ids match, the trees do not.
+        block = "p\nq\nr\nDANGER\ns\nt\nu\n"
+        sep = "sep1\nsep2\nsep3\nsep4\n"
+        self.commit(self.work, "f.cfg", block + sep + block, "two blocks")
+        base = git(self.work, "rev-parse", "HEAD")
+        self.push("main")
+        git(self.work, "checkout", "-q", "-b", "feat")
+        judged = self.commit(self.work, "f.cfg", block.replace("DANGER\n", "") + sep + block,
+                             "remove first")
+        git(self.work, "checkout", "-q", "-B", "twin", "main")
+        twin = self.commit(self.work, "f.cfg", block + sep + block.replace("DANGER\n", ""),
+                           "remove second")
+        self.push("feat", "twin")
+        self.assertEqual(self.mirror.patch_ids(base, judged), self.mirror.patch_ids(base, twin))
+        self.assertEqual(self.mirror.audit_target(base, twin, {judged}), [twin])
+
+    def test_one_judged_change_does_not_justify_two_identical_commits(self):
+        # R1: T1 and T2 carry the same patch-id; the judged change justifies only one of them.
+        git(self.work, "checkout", "-q", "-b", "feat")
+        judged = self.commit(self.work, "f.txt", "x\na\n", "judged: add a")
+        git(self.work, "checkout", "-q", "-B", "twins", "main")
+        t1 = self.commit(self.work, "f.txt", "x\na\n", "twin one")
+        t2 = self.commit(self.work, "f.txt", "x\na\na\n", "twin two")
+        self.push("feat", "twins")
+        self.assertEqual(self.mirror.patch_ids(self.base, t1), self.mirror.patch_ids(self.base, judged))
+        self.assertEqual(self.mirror.audit_target(self.base, t2, {judged}), [t2])
+        self.assertEqual(self.mirror.audit_target(self.base, t1, {judged}), [])
+
+    def test_duplicate_patch_ids_are_kept_as_a_multiset(self):
+        # R2: two commits with the same patch-id must both be counted.
+        self.commit(self.work, "f.txt", "x\na\n", "add a")
+        self.commit(self.work, "f.txt", "x\na\na\n", "add a again")
+        self.push("main")
+        ids = self.mirror.patch_ids(self.base, git(self.work, "rev-parse", "HEAD"))
+        self.assertEqual(len(ids), 2)
+        self.assertEqual(ids[0], ids[1])
+
+    def test_full_judged_chain_rebased_onto_target_is_accepted(self):
+        # The legitimate case: the whole judged chain, re-applied in order, passes.
+        git(self.work, "checkout", "-q", "-b", "feat")
+        a = self.commit(self.work, "a.txt", "a\n", "A")
+        b = self.commit(self.work, "b.txt", "b\n", "B")
+        c = self.commit(self.work, "c.txt", "c\n", "C")
+        git(self.work, "checkout", "-q", "-B", "rebased", "main")
+        git(self.work, "cherry-pick", a, b, c)
+        head = git(self.work, "rev-parse", "HEAD")
+        self.push("feat", "rebased")
+        self.assertEqual(self.mirror.audit_target(self.base, head, {c}), [])
+
+    def test_tail_rebased_after_a_landed_head_is_accepted(self):
+        git(self.work, "checkout", "-q", "-b", "feat")
+        a = self.commit(self.work, "a.txt", "a\n", "A")
+        b = self.commit(self.work, "b.txt", "b\n", "B")
+        c = self.commit(self.work, "c.txt", "c\n", "C")
+        git(self.work, "checkout", "-q", "-B", "tail", a)
+        git(self.work, "cherry-pick", b, c)
+        head = git(self.work, "rev-parse", "HEAD")
+        self.push("feat", "tail")
+        self.assertEqual(self.mirror.audit_target(self.base, head, {c}), [])
+
+    def test_malformed_url_raises_mirror_error(self):
+        with self.assertRaises(MirrorError):
+            Mirror("http://[evil/x.git", self.agent_cred())
+
 
 if __name__ == "__main__":
     unittest.main()
