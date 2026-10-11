@@ -302,8 +302,8 @@ def enforce_deadlines(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks |
     """The minimal recovery path (spec 3.2): reads the ledger only (never the job row's verdict, a recipe
     or a snapshot). Past a deadline with no terminal outcome pending, records the mechanical UNREACHABLE
     ledger-first (then on the board, if it can be now) and starts terminalization. Skips halted jobs.
-    True when it did."""
-    if led.terminal is not None or led.terminal_intent is not None or led.halted is not None:
+    True when it did (begin_terminal refuses while an outcome is already pending)."""
+    if led.terminal is not None or led.halted is not None:
         return False
     cause = _deadline_cause(cfg, led, now)
     if cause is None:
@@ -549,14 +549,14 @@ def apply_question_expiry(board, cfg: dict, led, now: dt.datetime, questions) ->
         if q.receipt_id is None or key in led.watermarks or q.until is None or q.default is None:
             continue
         b = board.blocker(q.id)
-        if b is None or b.state != "open":
+        if b is None:
             continue
         if now < min(q.until, b.created_at + expiry) + shift:
             continue
-        if board.resolve_blocker(q.id, q.default, actor="swarm", state="expired"):
+        if board.resolve_blocker(q.id, q.default, actor="swarm", state="expired"):   # once: False if closed
             _post_expired(board, b, q.default)
             done.append(q.id)
-        led.watermarks[key] = 1
+            led.watermarks[key] = 1
     if done:
         led.save()
     return done
