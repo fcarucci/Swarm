@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import datetime as dt
 
+from swarm.board.base import STALE_NOTICE
 from test_hooks_cli import Env  # noqa: E402  (sets sys.path)
 
 
@@ -81,6 +82,16 @@ class StaleWaitingTests(Env):
         self.sweep()
         self.assertEqual(self.job().status, "active")
         self.assertEqual(len(self.notices()), 1)
+
+    def test_the_notices_quiet_start_decides_the_close(self):
+        self.waiting_goal_job(250 * MIN)
+        since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=250)).isoformat(timespec="seconds")
+        with self.board() as b:
+            b.post("J", "swarm", f"{STALE_NOTICE}{since}; auto-closes in 5 min")
+            mid = b.messages_after(0, "J")[-1].id
+        self.h.backdate_message(mid, 119 * MIN)      # the notice is the newest activity, 119 min old
+        self.sweep()
+        self.assertEqual(self.job().status, "failed")     # quiet since the notice's start: 250 min
 
     # ---- the notice
     def test_one_notice_when_quiet_past_stale_waiting_minutes(self):

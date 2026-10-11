@@ -73,6 +73,22 @@ class OrphansTest(unittest.TestCase):
                 old = getattr(self.b.js, attr); setattr(self.b.js, attr, value)
                 self.run_pass(); setattr(self.b.js, attr, old)
         self.resume.assert_not_called()
+    def test_a_drive_job_is_never_restarted_by_the_generic_pass(self):
+        self.b.drive_job_claimed = lambda job: True
+        self.run_pass()
+        self.resume.assert_not_called()
+        self.b.drive_job_claimed = lambda job: False
+        self.run_pass()
+        self.assertEqual(self.resume.call_count, 1)
+
+    def test_a_reopened_job_is_not_an_orphan_for_its_old_silence(self):
+        self.b.js.activated_at = NOW - dt.timedelta(minutes=5)         # reopened; the last activity was 2 h ago
+        self.run_pass()
+        self.resume.assert_not_called()
+        self.b.js.activated_at = NOW - dt.timedelta(hours=3)
+        self.run_pass()
+        self.assertEqual(self.resume.call_count, 1)
+
     def test_unanswered_owner_question_is_external_wait(self):
         question = NS(agent_name="Homer", to_agent="Francesco", message="Approve this deployment?", id=50)
         with mock.patch.object(self.b,"recent_messages",return_value=[question]):
