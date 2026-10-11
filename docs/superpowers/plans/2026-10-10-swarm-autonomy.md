@@ -1303,3 +1303,11 @@ One doctor line each, with a test each (FAIL/WARN/OK as stated):
 Credential-helper and `ls-remote` checks per destination stay with Task 11b.
 - From the Task 12 review (low): a bad ledger holds `lead` but not `lead~N` successor seats; 8c holds every seat of the job (lead and successors) when the ledger is bad.
 - Doctor ownership: Task 11b's `land_doctor.checks(cfg) -> list` owns git ≥ 2.40, credential helper path, `ls-remote` per destination, `known_hosts` and agent-socket lines; Task 1b calls it from `bootstrap.py` and does not duplicate them. 11b also adds the authenticated-remote test with a real gh-style `GH_CONFIG_DIR`/`hosts.yml`.
+
+### Task 15a: Drive tests on a real Postgres in CI
+
+Seat: eng-ci (sonnet). Base: `feat/swarm-autonomy` after the first batch (or `preview/drive-wave3` until then). Found by the Task 8a review: the drive test modules hard-code the memory/file/sqlite harnesses, `support.HARNESSES` has no Postgres entry, so no drive test ever runs against Postgres although production is pg-ha.
+
+**Files:** `tests/support.py` (a `drive_backends()` helper: memory, file, sqlite, plus `PostgresHarness` when `SWARM_TEST_CONFIG` names a Postgres test config; `HARNESSES["postgres"]` with a `for_env` that uses a fresh throwaway schema/database name per test class), every `tests/test_drive_*.py` that builds a harness (switch to `drive_backends()`; one subclass per backend, as the existing contract tests do), `.github/workflows/test.yml` (postgres job: also run `python -B -m unittest $(cd tests; ls test_drive_*.py | sed 's/.py$//')` with `SWARM_TEST_BACKEND=postgres`), `tests/run_postgres_suite.py` unchanged unless needed.
+
+**Acceptance:** the Actions postgres job log shows every `test_drive_*` module running its Postgres variants (count > 0 for each module, no skips except Windows-only/systemd-only); a deliberately Postgres-only failure (the reviewer's probe: e.g. drop the `UNIQUE(job, action_id, attempt)` index in the Postgres DDL only) makes that job red. Coordinate on the board with seats editing the same test modules: land after the first batch; rebase their branches onto it.
