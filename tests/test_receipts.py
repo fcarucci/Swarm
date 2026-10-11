@@ -121,15 +121,40 @@ class BindingTests(ReceiptCase):
         self.assertFalse(receipts.matches(r, self.row(group="other")))
 
     def test_a_verdict_row_with_a_changed_candidate_or_req_does_not_match(self):
-        # the verdict's decision fields include candidate and req (receipts.DECISION)
+        # the verdict's decision fields include candidate, req and artifact (receipts.DECISION)
         verdict = {"verdict": "met", "scope": "goal", "generation": 1,
-                   "candidate": "b@" + "a" * 40, "req": "R1"}
+                   "candidate": "b@" + "a" * 40, "req": "R1", "artifact": None}
         r = self.receipt(kind="verdict", record_id="9", content_sha=receipts.content_sha("verdict", verdict))
         row = dict(verdict, kind="verdict", id="9", rev=1)
         self.assertTrue(receipts.matches(r, row))
         self.assertFalse(receipts.matches(r, dict(row, candidate="b@" + "c" * 40)))
         self.assertFalse(receipts.matches(r, dict(row, req="R2")))
         self.assertFalse(receipts.matches(r, dict(row, req=None)))
+
+    def test_an_artifact_verdict_receipt_binds_its_artifact(self):
+        """A receipt for a verdict on one artifact does not match a verdict row for another (or none)."""
+        verdict = {"verdict": "met", "scope": "artifact", "generation": 1, "candidate": None, "req": None,
+                   "artifact": "feat/a@" + "a" * 40}
+        r = self.receipt(kind="verdict", record_id="9", content_sha=receipts.content_sha("verdict", verdict))
+        row = dict(verdict, kind="verdict", id="9", rev=1)
+        self.assertTrue(receipts.matches(r, row))
+        self.assertFalse(receipts.matches(r, dict(row, artifact="feat/b@" + "b" * 40)))
+        self.assertFalse(receipts.matches(r, dict(row, artifact=None)))
+        with self.assertRaises(ValueError):
+            receipts.content_sha("verdict", {k: v for k, v in verdict.items() if k != "artifact"})
+
+    def test_find_latest_ignores_the_revision_find_requires_it(self):
+        r = self.receipt(rev=3)
+        receipts.write(BOARD, r)
+        args = dict(incarnation=INC, generation=1, now=NOW)
+        self.assertEqual(receipts.find_latest(BOARD, "J", "done", "42", **args), r)
+        self.assertEqual(receipts.find(BOARD, "J", "done", "42", rev=3, **args), r)
+        self.assertIsNone(receipts.find(BOARD, "J", "done", "42", rev=2, **args))
+        self.assertIsNone(receipts.find_latest(BOARD, "J", "done", "42", incarnation="f" * 32, generation=1,
+                                               now=NOW))
+        self.assertIsNone(receipts.find_latest(BOARD, "J", "done", "42", incarnation=INC, generation=2, now=NOW))
+        self.assertIsNone(receipts.find_latest(BOARD, "J", "done", "42", incarnation=INC, generation=1,
+                                               now=NOW + 7200))
 
     def test_a_row_with_another_kind_or_id_does_not_match(self):
         r = self.receipt()

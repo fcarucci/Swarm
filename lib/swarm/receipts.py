@@ -34,11 +34,13 @@ RECORD_MAX = 64 * 1024
 KINDS = ("done", "review", "verdict", "goal_ready", "integrated", "seat_request", "post", "ask",
          "answer", "blocker_resolution", "person", "ack", "withdraw", "land")
 # The decision fields of each kind: the values whose digest is content_sha. A kind's row must
-# carry every one of them. Task 5 and Task 6 write and read records with these names.
+# carry every one of them. Task 5 and Task 6 write and read records with these names. A verdict binds
+# the artifact it judges (an artifact verdict) or the candidate (a goal or ruling verdict): the other of
+# the two is None, so a receipt for one artifact never authorizes a verdict for another.
 DECISION = {
     "done": ("artifact", "sha", "group"),
     "review": ("group", "artifact", "outcome"),
-    "verdict": ("verdict", "scope", "generation", "candidate", "req"),
+    "verdict": ("verdict", "scope", "generation", "candidate", "req", "artifact"),
     "goal_ready": ("generation", "candidate"),
     "integrated": ("group", "sha", "into"),
     "seat_request": ("role", "model", "brief", "workdir"),
@@ -197,6 +199,14 @@ def find(board_key: str, job: str, kind: str, record_id: str, *, rev: int, incar
     for this board and not expired at `now`; otherwise None (missing, unreadable, unsafe, invalid,
     or for another key, board, revision, incarnation or generation). The caller still checks
     the board row with matches()."""
+    r = find_latest(board_key, job, kind, record_id, incarnation=incarnation, generation=generation, now=now)
+    return r if r is not None and r.rev == rev else None
+
+
+def find_latest(board_key: str, job: str, kind: str, record_id: str, *, incarnation: str,
+                generation: int, now: float) -> Receipt | None:
+    """find() for whatever revision the stored receipt carries (one file per record: a new revision's
+    receipt replaces the old one). For a caller that checks the revision itself."""
     try:
         with enrolment._dir(create=False) as d:
             r = _parse(safefs.read(d, receipt_name(board_key, job, kind, record_id), RECORD_MAX))
@@ -204,8 +214,8 @@ def find(board_key: str, job: str, kind: str, record_id: str, *, rev: int, incar
         return None
     if r is None:
         return None
-    if (r.board_key, r.job, r.kind, r.record_id, r.rev, r.incarnation, r.generation) != (
-            board_key, job, kind, record_id, rev, incarnation, generation):
+    if (r.board_key, r.job, r.kind, r.record_id, r.incarnation, r.generation) != (
+            board_key, job, kind, record_id, incarnation, generation):
         return None
     if not r.expires_at > now:
         return None
