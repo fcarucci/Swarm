@@ -177,6 +177,25 @@ class LockHostTests(T.LifeCase):
         self.assertEqual(len(self.b.drive_locks()), 1)
         self.assertIsNone(next(r for r in self.b.restarts("J") if r.id == live.id).ended_at)
 
+    def test_a_forged_ended_row_cannot_free_a_launch_the_ledger_holds_open(self):
+        lid = self.launch(locks=["repo:x"])
+        self.b.finish_restart(self.row(lid).id, "cancelled")            # the board row says it ended
+        self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.at(1), hooks=self.run.hooks(),
+                                                  board_key="bk"), 0)
+        self.assertEqual(len(self.b.drive_locks()), 1)
+        for i in self.led.intents:                                       # once the ledger concludes it
+            i.state, i.outcome, i.success, i.charged_usd = "concluded", "cancelled", False, 1.0
+        self.led.save()
+        self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.at(1), hooks=self.run.hooks(),
+                                                  board_key="bk"), 1)
+
+    def test_an_unreadable_ledger_holds_the_lock(self):
+        lid = self.launch(locks=["repo:x"])
+        self.b.finish_restart(self.row(lid).id, "cancelled")
+        with mock.patch.object(ledger, "load", side_effect=ledger.LedgerBadError("bad")):
+            self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.at(1), hooks=self.run.hooks(),
+                                                      board_key="bk"), 0)
+
     def test_a_row_on_this_host_is_still_fenced_and_released(self):
         lid = self.launch(locks=["repo:x"])
         self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.at(200), hooks=self.run.hooks()), 1)
@@ -336,6 +355,14 @@ class CancelTests(T.LifeCase):
         self.assertIsNone(self.b.job_data("J").get("drive.enabled"))
         self.assertEqual(led.intents[0].outcome, "cancelled")
         self.assertIn(("stop", [lid]), self.run.calls)
+
+    def test_questions_are_settled_and_seats_released(self):
+        seat = self.seat("idle-b")
+        q = self.b.open_blocker("J", "question", "human", "which way?", until=self.t0 + 600 * MIN,
+                                default_value="left", created_by="a", seat="idle-b", generation=1)
+        self.assertTrue(self.cancel())
+        self.assertEqual(self.b.blocker(q.id).state, "expired")
+        self.assertEqual(self.b.seats("J", include_closed=True)[0].state, "released")
 
     def test_a_job_a_person_already_closed_is_cleaned_up_and_committed(self):
         self.launch(locks=["repo:x"])
