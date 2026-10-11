@@ -740,25 +740,33 @@ class FixRound2(MirrorCase):
         self.assertEqual(self.mirror.audit_target(base, twin, {judged}), [twin])
 
     def test_one_judged_change_does_not_justify_two_identical_commits(self):
-        # R1: T1 and T2 carry the same patch-id; the judged change justifies only one of them.
+        # R1: t1 and t3 are the same patch (+a after x); the one judged change justifies only one.
+        seed = self.commit(self.work, "f.txt", "x\n", "seed f")
+        self.push("main")
         git(self.work, "checkout", "-q", "-b", "feat")
         judged = self.commit(self.work, "f.txt", "x\na\n", "judged: add a")
         git(self.work, "checkout", "-q", "-B", "twins", "main")
         t1 = self.commit(self.work, "f.txt", "x\na\n", "twin one")
-        t2 = self.commit(self.work, "f.txt", "x\na\na\n", "twin two")
+        t2 = self.commit(self.work, "f.txt", "x\n", "remove a")
+        t3 = self.commit(self.work, "f.txt", "x\na\n", "add a back")
         self.push("feat", "twins")
-        self.assertEqual(self.mirror.patch_ids(self.base, t1), self.mirror.patch_ids(self.base, judged))
-        self.assertEqual(self.mirror.audit_target(self.base, t2, {judged}), [t2])
-        self.assertEqual(self.mirror.audit_target(self.base, t1, {judged}), [])
+        self.assertEqual(self.mirror.patch_ids(seed, t1), self.mirror.patch_ids(seed, judged))
+        self.assertEqual(self.mirror.patch_ids(t2, t3), self.mirror.patch_ids(seed, t1))
+        self.assertEqual(sorted(self.mirror.audit_target(seed, t3, {judged})), sorted([t2, t3]))
+        self.assertEqual(self.mirror.audit_target(seed, t1, {judged}), [])
 
     def test_duplicate_patch_ids_are_kept_as_a_multiset(self):
-        # R2: two commits with the same patch-id must both be counted.
-        self.commit(self.work, "f.txt", "x\na\n", "add a")
-        self.commit(self.work, "f.txt", "x\na\na\n", "add a again")
+        # R2: the add, remove, add-back sequence has a repeated patch-id; a set would collapse it.
+        from collections import Counter
+        seed = self.commit(self.work, "f.txt", "x\n", "seed f")
         self.push("main")
-        ids = self.mirror.patch_ids(self.base, git(self.work, "rev-parse", "HEAD"))
-        self.assertEqual(len(ids), 2)
-        self.assertEqual(ids[0], ids[1])
+        self.commit(self.work, "f.txt", "x\na\n", "add a")
+        self.commit(self.work, "f.txt", "x\n", "remove a")
+        self.commit(self.work, "f.txt", "x\na\n", "add a back")
+        self.push("main")
+        ids = self.mirror.patch_ids(seed, git(self.work, "rev-parse", "HEAD"))
+        self.assertEqual(len(ids), 3)
+        self.assertEqual(sorted(Counter(ids).values()), [1, 2])
 
     def test_full_judged_chain_rebased_onto_target_is_accepted(self):
         # The legitimate case: the whole judged chain, re-applied in order, passes.
