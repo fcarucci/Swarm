@@ -2768,11 +2768,11 @@ class PostgresSchemaUpgrade(SchemaUpgradeTests, unittest.TestCase):
                 c.execute(sql, args)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class SchemaVersionPin(unittest.TestCase):
     def test_schema_version_is_25(self):
         from swarm.board import SCHEMA_VERSION
         self.assertEqual(SCHEMA_VERSION, 25)
+
+
+if __name__ == "__main__":
+    unittest.main()
