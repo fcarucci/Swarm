@@ -15,7 +15,7 @@ import os
 import time
 from types import SimpleNamespace
 
-from swarm.supervisor import ledger
+from swarm.supervisor import driver_events as ev, ledger
 
 log = logging.getLogger("swarm.supervisor.driver")
 
@@ -138,7 +138,7 @@ def _claimed_jobs(board):
 
 def _bad(board, state, job, why, say) -> None:
     if _notice(board, state, f"ledger-bad|{job}", job,
-               f"DRIVER-LEDGER-BAD the drive ledger of this job is unreadable ({why}); the job holds until a "
+               f"{ev.DRIVER_LEDGER_BAD} the drive ledger of this job is unreadable ({why}); the job holds until a "
                f"person runs `swarm drive repair --job {job}`"):
         say(f"drive: ledger of {job} is bad; held")
 
@@ -158,7 +158,7 @@ def _orphans(board, cfg: dict, state: dict, key: str, known: set, now, say) -> s
         if since is not None and (now - since).total_seconds() < ACTIVATION_GRACE_SECONDS:
             continue
         if _notice(board, state, f"orphan|{js.job}", js.job,
-                   "DRIVER-ORPHAN this job claims drive mode but has no ledger on its owner host; it holds "
+                   f"{ev.DRIVER_ORPHAN} this job claims drive mode but has no ledger on its owner host; it holds "
                    "until a person repairs or deactivates it"):
             say(f"drive: {js.job} claims drive without a ledger; held")
     return out
@@ -219,25 +219,14 @@ def _repair(board, led, owner, js) -> bool:
 
 
 def _cancel(board, cfg: dict, led, now: dt.datetime, m) -> bool:
-    """CANCELLED: a person's (the requester's receipted) deactivate. Stop the sessions, release locks and seats,
-    settle the questions, then commit `terminal`. False while a session is still stopping."""
-    life = m.life
-    rows = life._open_rows(board, led)
-    if rows:
-        hooks = life.Hooks()
-        hooks.stop_rows(board, cfg, rows)
-        if hooks.rows_live(board, cfg, rows):
-            return False
-    life._end_sessions(board, led, "cancelled")
-    life._release_locks(board, led)
-    life._release_seats(board, led, None, "job cancelled")
-    life._settle_blockers(board, led, "job cancelled")
-    try:
-        board.set_job_data(led.job, "drive.enabled", None)
-    except Exception as exc:
-        log.warning("drive.enabled of %s not cleared: %s", led.job, type(exc).__name__)
-    _mutate(led, lambda l: setattr(l, "terminal", {"verdict": "cancelled", "scope": "job", "at": _iso(now)}))
-    return True
+    """CANCELLED: a person's (the requester's receipted) deactivate. Task 8b's `driver_life.cancel_job` does it
+    (ledger first: stops the sessions, closes, commits `terminal`, clears the claim); until it lands the job
+    simply holds. False when the cancel is not (yet) complete: it is retried next pass."""
+    cancel = getattr(m.life, "cancel_job", None)
+    if cancel is None:
+        log.warning("job %s: cancelled by its requester, but driver_life.cancel_job is not there yet", led.job)
+        return False
+    return bool(cancel(board, cfg, led, now))
 
 
 def _check_tamper(board, cfg, state, led, js, owner, data, now, m, say) -> str | None:
@@ -261,7 +250,7 @@ def _check_tamper(board, cfg, state, led, js, owner, data, now, m, say) -> str |
     if not led.halted:
         m.life.halt(board, cfg, led, "driver (tamper)", now, reason=f"tamper: {what}"[:200])
     if _notice(board, state, f"tamper|{led.job}|{what}", led.job,
-               f"DRIVER-TAMPER {what}: " + ("the row was restored from the ledger; " if repaired
+               f"{ev.DRIVER_TAMPER} {what}: " + ("the row was restored from the ledger; " if repaired
                                            else "the row could not be restored; ")
                + "the job is halted until a person unhalts it"):
         say(f"drive: tamper on {led.job}: {what}")
@@ -341,7 +330,7 @@ def _watch_stalled(board, state, led, actions, now, sup) -> None:
     limit = 2 * 60 * float((sup or {}).get("timer_minutes", 5))
     if now.timestamp() - since > limit:
         _notice(board, state, f"stalled|{led.job}", led.job,
-                f"DRIVER-STALLED no seat, launch or record is responsible for this job since "
+                f"{ev.DRIVER_STALLED} no seat, launch or record is responsible for this job since "
                 f"{dt.datetime.fromtimestamp(since, dt.timezone.utc).isoformat()}")
 
 
@@ -368,7 +357,7 @@ def _step(board, cfg, sup, state, led, owner, now, say, start_runner, config_pat
         dcfg = m.snapshot.drive_cfg(led.board_key, led.job, flat)
     except m.snapshot.DriveConfigError as exc:
         _notice(board, state, f"config|{led.job}", led.job,
-                f"DRIVER-CONFIG the owner record of this job lacks what the driver needs ({exc}); the job holds")
+                f"{ev.DRIVER_CONFIG} the owner record of this job lacks what the driver needs ({exc}); the job holds")
         return
     snap, actions = _plan(board, cfg, led, dcfg, now, m)
     _watch_stalled(board, state, led, actions, now, sup)
@@ -382,7 +371,7 @@ def _failed(board, state, led, exc, now, flat: dict, m) -> None:
     try:
         _mutate(led, lambda l: setattr(l, "errors", l.errors + 1))
         if led.errors >= int(flat["driver_error_passes"]):
-            if _notice(board, state, f"error|{led.job}", led.job, f"DRIVER-ERROR {type(exc).__name__}"):
+            if _notice(board, state, f"error|{led.job}", led.job, f"{ev.DRIVER_ERROR} {type(exc).__name__}"):
                 m.exec.note_ruling_due(led, now)
     except Exception as exc2:
         log.warning("error count for %s not saved: %s", led.job, type(exc2).__name__)
@@ -408,7 +397,7 @@ def drive(board, cfg: dict, sup: dict, state: dict, *, now: dt.datetime, say=pri
         owner = enrolment.find_job_owner(key, led.job)
         if owner is None:
             _notice(board, state, f"orphan|{led.job}", led.job,
-                    "DRIVER-ORPHAN this job has a ledger but no owner record on this host; it holds")
+                    f"{ev.DRIVER_ORPHAN} this job has a ledger but no owner record on this host; it holds")
             continue
         jdeadline = min(deadline, time.monotonic() + JOB_SECONDS)
         try:
