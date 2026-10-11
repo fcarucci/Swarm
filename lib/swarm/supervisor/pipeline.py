@@ -357,8 +357,9 @@ def complete_finalized(board, cfg, js, handoffs, *, dry_run=False, say=print):
 
 
 def run(board, cfg, sup, state, *, job=None, now=None, dry_run=False, say=print,
-        start_runner=None, which=None, scope_ok=lambda: True, config_path=""):
-    """Return owned pipeline jobs, so orphan/replacement passes do not duplicate their work."""
+        start_runner=None, which=None, scope_ok=lambda: True, config_path="", skip_jobs=()):
+    """Return owned pipeline jobs, so orphan/replacement passes do not duplicate their work.
+    `skip_jobs`: the drive jobs (a ledger owns them: the driver runs their pipeline)."""
     from swarm.supervisor import command, orphans
     from swarm.supervisor.settings import save_state
     p = settings(cfg)
@@ -367,7 +368,8 @@ def run(board, cfg, sup, state, *, job=None, now=None, dry_run=False, say=print,
     managed = set()
     now = now or board.now()
     for js in board.jobs(False):
-        if (job and job != js.job) or not js.goal or not js.supervise or js.status != "active":
+        if (job and job != js.job) or js.job in skip_jobs or not js.goal or not js.supervise \
+                or js.status != "active":
             continue
         owner = orphans.local_record(cfg, js)
         if owner is None:
@@ -380,7 +382,7 @@ def run(board, cfg, sup, state, *, job=None, now=None, dry_run=False, say=print,
         if not review.latest_handoffs(board, js.job):
             continue
         managed.add(js.job)
-        if (js.waiting_on and not js.waiting_on.startswith("supervisor:")) or orphans.human_question(board, js):
+        if (js.waiting_on and not js.waiting_on.startswith("supervisor:")) or orphans.human_question(board, js, cfg):
             continue
         try:
             actions = transitions(board, js, cfg, config_path=config_path)
