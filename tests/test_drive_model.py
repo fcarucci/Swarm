@@ -182,6 +182,14 @@ class FixtureTest(unittest.TestCase):
     def test_ledger_stand_in_has_eng_ledger_field_names(self):
         self.assertEqual(tuple(f.name for f in dataclasses.fields(L)), LEDGER_FIELDS)
 
+    def test_stand_ins_match_the_real_ledger_and_receipt(self):
+        # Now that the ledger is integrated, pin the stand-ins to the real dataclasses, not to copies.
+        from swarm import receipts
+        from swarm.supervisor import ledger
+        self.assertEqual(LEDGER_FIELDS, tuple(f.name for f in dataclasses.fields(ledger.Ledger)))
+        self.assertEqual(INTENT_FIELDS, tuple(f.name for f in dataclasses.fields(ledger.Intent)))
+        self.assertEqual(RECEIPT_FIELDS, tuple(f.name for f in dataclasses.fields(receipts.Receipt)))
+
     def test_intent_and_receipt_stand_ins_have_eng_ledger_field_names(self):
         self.assertEqual(tuple(f.name for f in dataclasses.fields(Intent)), INTENT_FIELDS)
         self.assertEqual(tuple(f.name for f in dataclasses.fields(Receipt)), RECEIPT_FIELDS)
