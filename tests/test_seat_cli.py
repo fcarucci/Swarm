@@ -291,6 +291,62 @@ class VerdictLine(ControlCase):
         self.assertEqual(rec["candidate"], "feat/x@abc1234")
 
 
+class SeatAck(ControlCase):
+    def setUp(self):
+        super().setUp()
+        self.enrol("LEAD-SESSION", LEAD_KEY)
+        self.real_lead_seat_name = drive_cli._lead_seat_name
+        # the lead's seat only gets its agent key through a launch claim; the lookup is tested on its own below
+        patch = mock.patch.object(drive_cli, "_lead_seat_name", return_value="lead")
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_lead_seat_is_found_by_the_agent_key_of_a_lead_seat(self):
+        class Row:
+            def __init__(self, seat, agent_key):
+                self.seat, self.agent_key = seat, agent_key
+
+        class FakeBoard:
+            rows = [Row("eng", "k-x"), Row("lead~1", LEAD_KEY), Row("lead", "k-other")]
+
+            def seats(self, job, generation):
+                return self.rows
+
+        self.assertEqual(self.real_lead_seat_name(FakeBoard(), JOB, 1, LEAD_KEY), "lead~1")
+        with self.assertRaises(drive_cli.Refuse):
+            self.real_lead_seat_name(FakeBoard(), JOB, 1, "k-x")
+
+    def test_lead_ack_moves_its_event_mark_and_prints_record(self):
+        self.set_session("LEAD-SESSION")
+        rc, out, err = self.run_cmd("seat", "ack", "--job", JOB, "--upto", "12")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(ledger.load(self.bkey, JOB).watermarks["event:lead"], 12)
+        self.assertRegex(self.last_line(out), r"^swarm-record: kind=ack id=\d+ rev=1$")
+
+    def test_ack_never_moves_the_mark_back(self):
+        self.set_session("LEAD-SESSION")
+        self.assertEqual(self.run_cmd("seat", "ack", "--job", JOB, "--upto", "12")[0], 0)
+        self.assertEqual(self.run_cmd("seat", "ack", "--job", JOB, "--upto", "5")[0], 0)
+        self.assertEqual(ledger.load(self.bkey, JOB).watermarks["event:lead"], 12)
+
+    def test_ack_from_a_person_or_another_enrolled_agent_refused(self):
+        rc, _, err = self.run_cmd("seat", "ack", "--job", JOB, "--upto", "3")   # the requester session
+        self.assertEqual(rc, 1)
+        self.assertIn("lead session", err)
+        self.enrol("ENG-SESSION", ENG_KEY)
+        self.set_session("ENG-SESSION")
+        rc, _, err = self.run_cmd("seat", "ack", "--job", JOB, "--upto", "3")
+        self.assertEqual(rc, 1)
+        self.assertIn("lead session", err)
+        self.assertNotIn("event:lead", ledger.load(self.bkey, JOB).watermarks)
+
+    def test_ack_needs_a_non_negative_event_id(self):
+        self.set_session("LEAD-SESSION")
+        rc, _, err = self.run_cmd("seat", "ack", "--job", JOB, "--upto", "-1")
+        self.assertEqual(rc, 1)
+        self.assertIn("--upto must be an event id", err)
+
+
 class Review(ControlCase):
     def setUp(self):
         super().setUp()

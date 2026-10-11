@@ -424,18 +424,20 @@ class SpoolFlushBoundsTests(Env):
                 clock.advance(0.05)
                 return []
 
-            def record_verdict(self, *a):
+            def record_verdict(self, *a, **k):
                 clock.advance(0.3)
                 return True
 
             def post(self, *a, **k):
-                pass
+                import types
+                return types.SimpleNamespace(id=7)   # the VERDICT message the verdict is bound to
 
         with mock.patch("time.monotonic", clock):
             self.assertEqual(spool.flush_spool(Recording(), self.cfg, deadline=clock() + 1.0,
                                                op_timeout=1.0), 1)
-        self.assertEqual(len(limits), 6)  # data, agents, data, hand-offs, record, post
-        for actual, expected in zip(limits, (1.0, 0.95, 0.90, 0.85, 0.80, 0.50)):
+        # data, agents, data, hand-offs, record, post, record again (bound to the posted message's id)
+        self.assertEqual(len(limits), 7)
+        for actual, expected in zip(limits, (1.0, 0.95, 0.90, 0.85, 0.80, 0.50, 0.50)):
             self.assertAlmostEqual(actual, expected)
 
     def test_board_op_timeout_bounds_a_wait_on_the_store(self):
