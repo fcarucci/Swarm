@@ -6,7 +6,7 @@
  "prompt_id": "00000000-0000-4000-9000-000000000002",
  "session_id": "00000000-0000-4000-9000-000000000001",
  "tool_input": {
-  "command": "swarm done --job J --artifact feat/a@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --summary x",
+  "command": "swarm done --job J --artifact feat/a@abc1234 --summary x",
   "description": "hand off"
  },
  "tool_name": "Bash",
