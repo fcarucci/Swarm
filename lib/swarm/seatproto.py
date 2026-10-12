@@ -58,8 +58,9 @@ SCHEMA: dict = {
                                      "sha": ("str", "--sha")}, "required": ("job",)},
     "review": {"id": "key", "fields": {"job": ("str", "--job"), "artifact": ("str", "--artifact"),
                                        "outcome": (("choice", ("verified", "changes")), None),
-                                       "report": ("report", "--report")},
-               "required": ("job", "outcome", "report")},
+                                       "report": ("report", "--report"),
+                                       "report_text": ("text", "--report-text")},
+               "required": ("job", "outcome"), "one_of": ("report", "report_text")},
     "goal-ready": {"id": None, "fields": {"job": ("str", "--job"), "candidate": ("str", "--candidate"),
                                           "add_requirements": ("paths", "--add-requirements")},
                    "required": ("job",)},
@@ -118,7 +119,7 @@ def _command_parser(command: str) -> _Parser:
         elif typ in ("paths", "repeat"):
             kw = {"action": "append"}
         elif isinstance(typ, tuple):
-            kw = {"choices": typ[1]}
+            kw = {"choices": typ[1], "type": str.lower}   # `CHANGES` is `changes`
         if opt:
             p.add_argument(opt, dest=name, **kw)
         else:
@@ -244,6 +245,9 @@ def validate(req, own_job=None) -> tuple[str, dict]:
                 fields["job"] = own_job
         elif own_job is not OWN_JOB and fields["job"] != own_job:
             raise ProtocolError(f"--job {fields['job']} is not this seat's job: a seat runs its own job's commands")
+    one_of = spec.get("one_of")
+    if one_of and sum(1 for f in one_of if f in fields) != 1:
+        raise ProtocolError(f"give exactly one of {', '.join('--' + f.replace('_', '-') for f in one_of)}")
     missing = [r for r in spec.get("required", ()) if r not in fields and not (r == "job" and own_job is OWN_JOB)]
     if missing:
         raise ProtocolError(f"missing {', '.join(missing)}")

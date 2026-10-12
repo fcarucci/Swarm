@@ -529,8 +529,10 @@ def _fallback_parser() -> argparse.ArgumentParser:
     rv = sub.add_parser("review", add_help=False, allow_abbrev=False)
     rv.add_argument("--job", required=True)
     rv.add_argument("--artifact", required=True)
-    rv.add_argument("outcome", choices=("verified", "changes"))
-    rv.add_argument("--report", required=True)
+    rv.add_argument("outcome", choices=("verified", "changes"), type=str.lower)
+    rg = rv.add_mutually_exclusive_group(required=True)
+    rg.add_argument("--report")
+    rg.add_argument("--report-text")
     rv.add_argument("--key")
     gr = sub.add_parser("goal-ready", add_help=False, allow_abbrev=False)
     gr.add_argument("--job", required=True)
@@ -696,7 +698,9 @@ def _build(cfg, bk, board, ctx, who: Policy | None, ns, rid: int, rev: int, payl
         need(seat and who is not None and who.known and who.read_only and not who.judge, "swarm review")
         artifact = ns.artifact.strip()
         outcome = ns.outcome.lower()
-        _expect_message(board, job, rid, f"REVIEW {artifact} {outcome.upper()} {ns.report}", author)
+        from swarm.drive_cli import review_ref
+        _expect_message(board, job, rid, f"REVIEW {artifact} {outcome.upper()} {review_ref(getattr(ns, 'report', None))}",
+                        author)
         return "review", {"group": artifact.partition("@")[0], "artifact": artifact, "outcome": outcome}, argv
     if sub == "verdict":
         need(seat and who is not None and who.known and who.judge, "swarm verdict")

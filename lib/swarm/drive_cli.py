@@ -402,20 +402,34 @@ def cmd_review(board, cfg, args) -> int:
     if not name:
         raise Refuse("the reviewing agent is not active on this job")
     content = getattr(args, "report_content", None)
-    data = _read_regular(content or args.report, REPORT_MAX, "review report")
+    inline = getattr(args, "report_text", None)
+    if (inline is None) == (args.report is None):
+        raise Refuse("give the review report as --report-text TEXT (or --report FILE), exactly one")
+    if inline is not None:
+        data = inline.encode("utf-8")
+        if len(data) > REPORT_MAX:
+            raise Refuse(f"the review report is over {REPORT_MAX} bytes")
+    else:
+        data = _read_regular(content or args.report, REPORT_MAX, "review report")
     if not data.strip():
         raise Refuse("the review report is empty")
     artifact = args.artifact.strip()
     if not artifact or any(c.isspace() for c in artifact):
         raise Refuse("--artifact must be one reference without spaces")
     verdict = args.outcome.upper()
-    res = board.post(args.job, name, f"REVIEW {artifact} {verdict} {args.report}", None, agent_key=key)
-    if content:
+    res = board.post(args.job, name, f"REVIEW {artifact} {verdict} {review_ref(args.report)}", None, agent_key=key)
+    if content or inline is not None:
         _keep_review_report(args.job, res.id, data)
     return _record("review", res.id, 1)
 
 
 REVIEW_REPORTS = "review-reports"
+INLINE_REPORT = "(report inline)"   # the REVIEW post's report reference of a --report-text review
+
+
+def review_ref(report: str | None) -> str:
+    """What a REVIEW post names as its report: the path as typed, or INLINE_REPORT (the text is kept privately)."""
+    return report if report is not None else INLINE_REPORT
 
 
 def review_report_path(job: str, message_id: int):
@@ -873,7 +887,10 @@ def register(sub, handlers: dict, commands: dict | None = None) -> None:
     add_drive_command("run", cmd_drive_run, board=False)
     rv = sub.add_parser("review", help="post a structured review of an artifact (an enrolled reviewer)")
     rv.add_argument("--job", required=True); rv.add_argument("--artifact", required=True)
-    rv.add_argument("outcome", choices=REVIEW_OUTCOMES); rv.add_argument("--report", required=True)
+    rv.add_argument("outcome", choices=REVIEW_OUTCOMES, type=str.lower)
+    rg = rv.add_mutually_exclusive_group(required=True)
+    rg.add_argument("--report-text", metavar="TEXT", help="the review report itself (one literal argument)")
+    rg.add_argument("--report", metavar="FILE", help="a file holding the review report")
     rv.add_argument("--key", help="the reviewing agent's key")
     # A jailed seat's broker (Task 20): the report's content, in a file only the supervisor writes; --report is
     # then the path as the seat typed it (posted, not read here)

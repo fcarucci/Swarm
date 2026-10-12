@@ -272,6 +272,15 @@ class ReviewReceipts(DriveCase):
         self.assertFalse(receipts.matches(r, {"kind": "review", "id": str(rid), "rev": 1, "group": "feat/a",
                                               "artifact": ART, "outcome": "changes"}))
 
+    def test_review_with_an_inline_report_and_capital_outcome_is_receipted(self):
+        from swarm.drive_cli import INLINE_REPORT
+        sid, _ = self.launch_seat("reviewer-a-1", role="reviewer", kind="review")
+        rid = self.post_as(sid, f"REVIEW {ART} CHANGES {INLINE_REPORT}")
+        cmd = f'swarm review --job J --artifact {ART} CHANGES --report-text "the test passes on the base"'
+        self.assertTrue(self.post(sid, cmd, rec("review", rid)))
+        self.assertTrue(receipts.matches(self.receipt("review", rid), {
+            "kind": "review", "id": str(rid), "rev": 1, "group": "feat/a", "artifact": ART, "outcome": "changes"}))
+
     def test_review_whose_message_says_changes_gets_no_receipt(self):
         sid, _ = self.launch_seat("reviewer-a-1", role="reviewer", kind="review")
         rid = self.post_as(sid, f"REVIEW {ART} CHANGES r.md")

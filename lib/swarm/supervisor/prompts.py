@@ -43,7 +43,7 @@ def standing_rules(job: str) -> list[str]:
 GATES = ("Review gates (haiku-strict): read the whole diff line by line; check that every new test fails on the "
          "base commit; run a mutation gate (at least 5 targeted mutants of the changed logic, in a scratch copy "
          "under your work root, never /tmp; every mutant must be killed). A surviving mutant, a test that passes "
-         "on the base, or an unexplained behaviour change is CHANGES. Report it with `swarm review ... --report`.")
+         "on the base, or an unexplained behaviour change is CHANGES. Report it with `swarm review ... changes --report-text \"...\"`.")
 _BREAKS = re.compile("[\r\v\f\x85\u2028\u2029]")
 _MARKER = re.compile(r"\b(begin|end)\b.*\b(untrusted|id)\b", re.I)
 _SAFE_REF = re.compile(r"[A-Za-z0-9._/@:+~=,#-]{1,300}")
@@ -176,7 +176,11 @@ def _lead_body(board, led, seat, action) -> list[str]:
     return out
 
 
-def _judge_body(board, cfg, led, seat, action) -> list[str]:
+def _judge_body(*a) -> list[str]:
+    return [*_judge_lines(*a), JUDGE_RECORD]
+
+
+def _judge_lines(board, cfg, led, seat, action) -> list[str]:
     kind = action.prompt_kind
     digest = requirements_digest(led.pinned_requirements)
     if kind == "goal":
@@ -197,10 +201,18 @@ def _judge_body(board, cfg, led, seat, action) -> list[str]:
             "made progress). You only judge: never edit files."]
 
 
+JUDGE_RECORD = ("Write the verdict in lowercase (met, not_met, unreachable) and give the details on stdin, never as "
+                "a file: end the one literal `swarm verdict ...` call with `--details - <<'EOF'`, then your report, "
+                "then `EOF`.")
+
+
 def _review_body(cfg, led, seat, action) -> list[str]:
     ref = _ref(action.artifact or _group(action) or "the hand-off", what="artifact")
-    out = [f"You are the reviewer of {ref}. Review it and post `swarm review --job {led.job} --artifact {ref} "
-           "VERIFIED|CHANGES --report <text>`. You only review: never edit files."]
+    out = [f"You are the reviewer of {ref}. Review it, then record your review with exactly one of "
+           f"`swarm review --job {led.job} --artifact {ref} verified --report-text \"<your report>\"` or "
+           f"`swarm review --job {led.job} --artifact {ref} changes --report-text \"<what must change and why>\"` "
+           "(lowercase verified or changes; the report is the --report-text argument itself, no file), as its own "
+           "command. You only review: never edit files."]
     if _gates(cfg, led.job) == "haiku-strict":
         out.append(GATES)
     return out
