@@ -130,6 +130,10 @@ def check_url(url) -> str:
         if port is not None and not 1 <= port <= 65535:
             raise GitPinError("a remote URL port must be 1-65535")
         return url
+    if not os.path.isabs(url):
+        head = url.split("/", 1)[0]               # scp-style `user:secret@host:path` carries a credential
+        if "@" in head and ":" in head.split("@", 1)[0]:
+            raise GitPinError("a remote URL must not carry credentials")
     m = SCP_URL.match(url)
     if m and not os.path.isabs(url):
         if _optionlike(m.group("host")) or _optionlike(m.group("user")):
