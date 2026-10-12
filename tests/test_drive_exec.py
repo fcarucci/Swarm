@@ -1418,6 +1418,51 @@ class FixRoundTests(ExecEnv):
         shown = [k for k in self.reload().watermarks if k.startswith(f"launch-ev:{run2['launch_id']}:")]
         self.assertEqual(shown, [f"launch-ev:{run2['launch_id']}:{later}"])   # the answered one is not shown again
 
+    def test_rr8_a_launch_shows_at_most_fifty_events_oldest_first(self):
+        self.seat()
+        name = self.agent_of()
+        ids = [self.b.post_event("J", "ci", f"k{n}", "e", to=name)[0] for n in range(60)]
+        run = self.go(self.act())
+        shown = sorted(int(k.rsplit(":", 1)[1]) for k in self.reload().watermarks if k.startswith("launch-ev:"))
+        self.assertEqual(shown, sorted(ids)[:driver_exec.MAX_EVENTS_SHOWN])
+        self.assertEqual(driver_exec.MAX_EVENTS_SHOWN, 50)
+
+    def test_rr8_answered_events_are_acknowledged_on_the_board_and_their_keys_pruned(self):
+        self.seat()
+        name = self.agent_of()
+        ids = [self.b.post_event("J", "ci", f"k{n}", "e", to=name)[0] for n in range(3)]
+        run = self.go(self.act())
+        driver_exec.conclude_run(self.cfg, run, "completed", 0.1)
+        self.assertEqual(len([k for k in self.reload().watermarks if k.startswith("evack:")]), 3)
+        self.rec(1)
+        self.assertEqual([k for k in self.led.watermarks if k.startswith("evack:")], [])
+        self.assertEqual([e.id for e in self.b.pending_events("J") if e.id in ids], [])
+
+    def test_rr8_sixty_thousand_events_never_grow_the_ledger(self):
+        self.memory_only()
+        self.seat()
+        name = self.agent_of()
+        s = self.b._s()
+        with s.lock:
+            for k in range(60000):
+                s.events.append(dict(id=s.next_event_id, job="J", kind="ci", key=f"k{k}", to=name, text="x",
+                                     source=None, created_at=self.now(), acked_at=None, acked_by=None))
+                s.next_event_id += 1
+        run = self.go(self.act())
+        driver_exec.conclude_run(self.cfg, run, "completed", 0.1)
+        self.rec(1)
+        size = os.path.getsize(ledger.ledger_path(self.bk, "J")) if hasattr(ledger, "ledger_path") else None
+        self.assertLess(len(json.dumps(self.reload().watermarks)), 20000)
+        if size is not None:
+            self.assertLess(size, 100000)
+
+    def test_rr9_a_legacy_event_mark_hides_nothing(self):
+        self.seat()
+        name = self.agent_of()
+        eid, _ = self.b.post_event("J", "ci", "k9", "old", to=name)
+        driver_exec.mutate(self.led, lambda l: l.watermarks.__setitem__("event:eng-a", eid + 5))
+        self.assertEqual(driver_exec._board_marks(self.b, self.led, self.b.seat("J", 1, "eng-a"), self.now())[1], [eid])
+
     def test_an_unacknowledged_turn_leaves_its_events_unacknowledged(self):
         self.seat()
         name = self.agent_of()
