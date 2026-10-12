@@ -45,7 +45,13 @@ POSIX = sys.platform != "win32"
 def watchdog(test, seconds: float) -> None:
     """A hang fails fast: past `seconds` the process prints every thread's stack and exits (no 6-hour CI job)."""
     import faulthandler
-    faulthandler.dump_traceback_later(seconds, exit=True)
+    import io
+    try:
+        f = sys.__stderr__
+        f.fileno()           # CI captures sys.stderr (no fileno): the real stream, or no watchdog at all
+    except (AttributeError, ValueError, OSError, io.UnsupportedOperation):
+        return
+    faulthandler.dump_traceback_later(seconds, exit=True, file=f)
     test.addCleanup(faulthandler.cancel_dump_traceback_later)
 
 
