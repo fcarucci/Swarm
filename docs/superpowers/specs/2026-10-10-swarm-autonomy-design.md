@@ -953,6 +953,23 @@ outcome-deciding check is `swarm land` plus the driver's mirror verification); n
 the judge seat; no seat may launch `claude`/`codex` sessions. The driver independently verifies landing (the
 integration receipt, §3.8) instead of trusting the integrator's post.
 
+**One rule for code in drive seats (the hook guardrail, round-4 ruling).** Code that can run commands must be a
+literal argument, and it is scanned: `<shell> -c '<literal>'` (every shell, `--` handled) is parsed and walked like
+the command line itself; interpreter code (`python3 -c`, `perl -e`, `node -e`, `ruby -e`, `php -r`, `lua -e`,
+`expect -c`, an awk or sed program, `vim -c`), the commands git, ssh and less take from settings and variables
+(`git -c core.pager=…`, `GIT_SSH_COMMAND`, `GIT_EDITOR`, `PAGER`, `ssh -o ProxyCommand=…`) and what wrappers run
+(`chroot`, `unshare`, `nsenter`, `screen`, `tmux`, `setsid`, `nohup`, `parallel … :::`, `git bisect run`,
+`git subtree push`, `swarm bg`) are scanned too. Code that arrives any other way cannot be checked and is refused:
+stdin, a pipe, a here-string, a heredoc, `<(…)`, a variable or `$(…)` (as the program, as `-c` code or under
+`eval`), a glob or brace expansion as the program, a shell or interpreter under xargs or parallel, and a script
+file the seat could write. **Script files:** a script runs (directly as `./script.sh`, through a shell or an
+interpreter as `bash script.sh` or `python3 x.py`, or sourced) only when it is tracked unmodified at HEAD in its
+repository (`git diff --quiet HEAD -- <path>`, compared by blob hash) or the seat cannot write it (`/usr/bin/...`);
+both spellings behave the same. A compiled program runs by path, but a shell or interpreter only under its own name
+(a symlink or copy named otherwise is refused); a bare name is resolved through PATH and its real name decides
+(`rbash` is bash). `at`, `batch` and `crontab` (except `-l`) are refused, and so are `codex app-server|proto|exec`.
+Seats run a new script by committing it first, or by giving the code as a literal `-c` argument.
+
 ### 4.5 Idempotence and crash recovery (the one authoritative protocol)
 
 1. **Decide** from the snapshot: an action id (generation-bound, §3.2) and the next attempt number.

@@ -4,8 +4,13 @@ script -c, $(...) and backticks. A guardrail, not a boundary: what decides an ou
 driver's mirror audit."""
 from __future__ import annotations
 
+import os
 import shlex
+import shutil
+import subprocess
+import tempfile
 import unittest
+from unittest import mock
 
 from support import SANDBOX  # noqa: F401  (puts lib/ on sys.path)
 
@@ -169,7 +174,7 @@ class DriveRefusals(unittest.TestCase):
         self.assertTrue(refuse("bash <<'EOF'\ngit push origin main\nEOF", ["main"]))
         self.assertTrue(refuse("sh <<EOF\nclaude -p hi\nEOF", ["main"]))
         self.assertIsNone(refuse("cat <<'EOF'\ngit push origin main\nEOF", ["main"]))
-        self.assertIsNone(refuse("python3 - <<'EOF'\nprint(1)\nEOF", ["main"]))
+        self.assertTrue(refuse("python3 - <<'EOF'\nprint(1)\nEOF", ["main"]))    # code from a heredoc (round 4)
 
     def test_inline_scripts_that_push_to_a_target_or_launch_a_session_are_refused(self):
         for cmd in ("python3 -c \"import subprocess;subprocess.run(['git','push','origin','HEAD:main'])\"",
@@ -182,8 +187,8 @@ class DriveRefusals(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertTrue(refuse(cmd, ["main"], branch_of=on("feat/a")), cmd)
         for cmd in ("python3 -c \"import subprocess;subprocess.run(['git','push','origin','feat/a'])\"",
-                    "python3 -c 'print(1)'", "python3 -c \"print('mainline')\"", "python3 -m unittest x", "node app.js",
-                    "python3 - <<'EOF'\nprint('git push origin feat/a')\nEOF", "perl -e 'print 1'"):
+                    "python3 -c 'print(1)'", "python3 -c \"print('mainline')\"", "python3 -m unittest x",
+                    "perl -e 'print 1'"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(refuse(cmd, ["main"], branch_of=on("feat/a")), cmd)
 
@@ -239,7 +244,7 @@ class DriveRefusals(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertTrue(refuse(cmd, ["main"], branch_of=on("feat/a")), cmd)
         for cmd in ("bash -c 'git log'", "sh -lc 'ls'", "bash -o pipefail -c 'ls | wc -l'", "busybox sh -c 'ls'",
-                    "env bash -c 'ls'", "source venv/bin/activate", ". ./env.sh", "busybox ls"):
+                    "env bash -c 'ls'", "busybox ls"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(refuse(cmd, ["main"], branch_of=on("feat/a")), cmd)
         self.assertTrue(shellguard.readonly_write_reason("bash <<< 'touch f'"))
@@ -275,7 +280,7 @@ class DriveRefusals(unittest.TestCase):
         for cmd in ("git branch", "git branch --list", "git branch -a", "git branch -v", "git branch --contains abc",
                     "git config --get user.name", "git config --list", "git symbolic-ref HEAD", "git remote -v", "git remote show origin",
                     "git reflog", "git hash-object f", "tar tf a.tar", "sort a", "awk '{print $1}' a", "sed -n 1p f",
-                    "python3 - <<'EOF'\nprint(1)\nEOF", "git log", "git tag -l" if False else "git show HEAD"):
+                    "git log", "git tag -l" if False else "git show HEAD"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(shellguard.readonly_write_reason(cmd), cmd)
 
@@ -285,6 +290,210 @@ class DriveRefusals(unittest.TestCase):
         self.assertTrue(refuse("git\tpush\torigin\tmain", ["main"]))
         self.assertTrue(refuse("git push origin ma\\in", ["main"]))
         self.assertTrue(refuse("git push \\\norigin main", ["main"]))
+
+
+P = "git push origin HEAD:main"
+
+
+class Round4OneRule(unittest.TestCase):
+    """Round 4: code that can run commands is a literal argument that is scanned; code that arrives any other way
+    (stdin, a pipe, a here-string, a heredoc, <(...), a variable or $(...), eval of a non-literal, a script the seat
+    could write) is refused. Each command below is a bypass the round-3 guard let through."""
+
+    def bad(self, *cmds, branch="feat/a"):
+        for cmd in cmds:
+            with self.subTest(cmd=cmd):
+                self.assertTrue(refuse(cmd, ["main"], branch_of=on(branch)), cmd)
+
+    def good(self, *cmds):
+        for cmd in cmds:
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(refuse(cmd, ["main"], branch_of=on("feat/a")), cmd)
+
+    def test_g1_dash_dash_and_options_after_c(self):
+        self.bad(f"bash -c -- '{P}'", f"sh -c -x '{P}'", f"bash -xc -- '{P}'", "bash -c --", f"bash -- -c '{P}'")
+        self.good("bash -c -- 'ls'", "bash -c 'ls' -- a b")
+
+    def test_g2_the_program_or_the_code_is_an_expansion(self):
+        self.bad(f"X='{P}'; $X", f"X='{P}'; bash -c \"$X\"", f"X='{P}'; eval \"$X\"", f"bash -c '$(echo {P})'",
+                 f"bash -c 'eval \"$X\"'", "${X} push origin HEAD:main", "$'\\x67it' push origin HEAD:main",
+                 "/bin/?h -c 'git push origin HEAD:main'", "{git,push,origin,HEAD:main}", "`echo git` push origin x",
+                 f"python3 -c \"$CODE\"", "awk \"$PROG\" f", "bash \"$SCRIPT\"", "source \"$F\"",
+                 f"read -r X <<< '{P}'; $X", "set -- git push; \"$@\" origin HEAD:main")
+        self.good("echo $HOME", "bash -c 'echo $HOME'", "ls *.py", "[ -f x ] && echo y", "git commit -m \"$(cat msg)\"",
+                  "echo {a,b}", "eval 'git log'", "find . -name '*.py' -exec grep -l x {} +")
+
+    def test_every_shell_is_a_shell(self):
+        for sh in ("rbash", "mksh", "lksh", "posh", "yash", "oksh", "loksh", "hush", "elvish", "nu", "xonsh", "pwsh",
+                   "powershell", "ksh93", "tcsh", "csh"):
+            self.bad(f"echo '{P}' | {sh}", f"{sh} -c '{P}'", f"{sh} <<< '{P}'")
+        self.bad("pwsh -EncodedCommand ZQB4AA==", "pwsh -e ZQ==", "powershell -EncodedCommand ZQ==", "bash -ic 'ls'", f"pwsh -Command '{P}'", "pwsh -Command -",
+                 f"powershell -c \"{P}\"")
+        self.good("pwsh -c 'Get-ChildItem'", "pwsh -Version", "rbash -c 'ls'", "nu -c 'ls'")
+
+    def test_interpreters_take_code_only_as_a_literal_argument(self):
+        self.bad(f"awk 'BEGIN{{system(\"{P}\")}}'", f"gawk 'BEGIN{{system(\"{P}\")}}'", f"mawk -e 'BEGIN{{system(\"{P}\")}}'",
+                 f"echo \"import os; os.system('{P}')\" | python3", f"python3 <<< \"import os; os.system('{P}')\"",
+                 "python3 - <<'EOF'\nprint(1)\nEOF", "python3", "python3 -", "python3 /dev/stdin", "echo x | perl",
+                 "node", "node -", "ruby < x.rb", f"lua -e 'os.execute(\"{P}\")'", f"php -r 'system(\"{P}\");'",
+                 f"tclsh <<< 'exec {P}'", f"expect -c 'spawn {P}'", f"sed -n '1e {P}' f", f"vim -c ':!{P}' -c ':q'",
+                 f"vim '+!{P}'", f"make -f <(printf 'a:\\n\\t{P}\\n')", "make -f -", f"osascript -e 'do shell script \"{P}\"'",
+                 "echo 'print 1' | lua", "perl -ple 'x' -", "python3 -i", "awk -f /dev/stdin", "sed -f - f",
+                 f"ed f <<< '!{P}'", f"bun -e 'Bun.spawn([\"git\",\"push\",\"origin\",\"HEAD:main\"])'",
+                 f"deno eval 'new Deno.Command(\"git\", {{args: [\"push\",\"origin\",\"HEAD:main\"]}}).spawn()'",
+                 f"perl -le 'system(\"{P}\")'", f"python3 -Bc \"import os; os.system('{P}')\"",
+                 f"node --eval='require(\"child_process\").execSync(\"{P}\")'")
+        self.good("python3 -c 'print(1)'", "python3 -m unittest x", "python3 -B -m unittest x", "python3 --version",
+                  "python3 -V", "node --version", "perl -ne 'print' f", "perl -v", "ruby -e 'puts 1'", "sed -n 1p f",
+                  "sed -i 's/a/b/' f", "sed -i.bak -e 's/a/b/' f", "awk -F: '{print $1}' f", "awk -v x=1 '{print x}' f",
+                  "vim -c ':wq' f", "make", "make test", "make -C sub", "lua -v", "php -v",
+                  "python3 -c 'import sys' -m x", "python3 -c 'import sys; print(sys.argv)' -i",
+                  "cat <<EOF > f\nx\nEOF")
+
+    def test_scheduling_is_refused(self):
+        self.bad(f"at now <<< '{P}'", "at now + 1 minute -f job.sh", "batch", f"crontab <<< '* * * * * {P}'",
+                 "crontab f", "crontab -r")
+        self.good("crontab -l", "atq" if False else "ls")
+
+    def test_git_settings_and_variables_that_run_commands(self):
+        self.bad(f"GIT_SSH_COMMAND='{P}' git fetch", f"export GIT_SSH_COMMAND='{P}'; git fetch",
+                 f"GIT_EXTERNAL_DIFF='sh -c \"{P}\"' git diff", f"GIT_PAGER='{P}' git log", f"PAGER='{P}' git log",
+                 f"GIT_EDITOR='{P}' git commit", f"GIT_SEQUENCE_EDITOR='{P}' git rebase -i HEAD~2",
+                 f"EDITOR='claude -p x' git commit", f"git -c core.pager='sh -c \"{P}\"' log",
+                 f"git -c core.editor='{P}' commit", f"git -c diff.x.textconv='{P}' diff", f"git -c credential.helper='!{P}' fetch",
+                 f"git -c sequence.editor='{P}' rebase -i HEAD~1", f"git -c pager.log='{P}' log",
+                 "git -c core.sshCommand=x fetch", "git --config-env core.pager=X log", "git config core.pager x",
+                 "git config --global core.editor x", "git config diff.external x", "GIT_SSH=./evil git fetch",
+                 "GIT_EDITOR=\"$E\" git commit", "BASH_ENV=x.sh bash -c true", "ENV=x.sh sh -c true",
+                 "LD_PRELOAD=./x.so ls", "env 'BASH_FUNC_ls%%=() { git push origin HEAD:main; }' bash -c ls",
+                 "NODE_OPTIONS='--require ./x.js' node --version", "PERL5OPT=-Mx perl -e 1", f"PS4='$({P})' bash -xc true",
+                 "GIT_EXEC_PATH=. git status", "git -c protocol.ext.allow=always fetch", "git fetch 'ext::sh -c x'",
+                 f"git fetch --upload-pack='{P}' .", f"git difftool -x 'sh -c \"{P}\"'",
+                 f"git filter-branch --tree-filter '{P}' HEAD", f"git bisect run sh -c '{P}'", f"git bisect run {P}",
+                 "git subtree push --prefix=d origin main", "git subtree push -P d origin HEAD:refs/heads/main",
+                 f"rsync -e 'sh -c \"{P}\"' a h:b", f"ssh -o ProxyCommand='{P}' host", f"ssh -oProxyCommand='{P}' host",
+                 f"ssh -o 'LocalCommand {P}' -o PermitLocalCommand=yes host", f"scp -o ProxyCommand='{P}' a h:b",
+                 f"echo '{P}' | ssh localhost", f"ssh localhost \"$X\"")
+        self.good("GIT_EDITOR=true git rebase --continue", "GIT_SSH_COMMAND='ssh -i ~/.ssh/k' git fetch",
+                  "git -c core.editor=true commit --amend --no-edit", "git -c core.pager=less log", "PAGER=cat git log",
+                  "git config --get core.pager", "git -c user.name=x log", "git bisect run make test",
+                  "git subtree push --prefix=d origin feat/a", "rsync -e 'ssh -p 2222' a h:b", "ssh host ls",
+                  "ssh -N -L 1:x:2 host", "NODE_OPTIONS=--max-old-space-size=4096 node --version", "PYTHONPATH=lib python3 -m x")
+
+    def test_wrappers_are_unwrapped(self):
+        self.bad(f"chroot / sh -c '{P}'", f"chroot --userspec=x / sh -c '{P}'", f"unshare -r sh -c '{P}'",
+                 f"nsenter -t 1 -m sh -c '{P}'", f"dbus-run-session -- sh -c '{P}'", f"echo '{P}' | busybox -- sh",
+                 f"busybox awk 'BEGIN{{system(\"{P}\")}}'", f"setsid -w sh -c '{P}'", f"nohup {P}", f"screen -dm {P}",
+                 f"screen -S x -dm bash -c '{P}'", "screen -X stuff 'git push origin HEAD:main\\n'", f"tmux new -d {P}",
+                 f"tmux new-session -d -s x '{P}'", "tmux send-keys -t x 'git push origin HEAD:main' Enter",
+                 f"tmux run-shell '{P}'", f"tmux if-shell true '{P}'", f"tmux -c '{P}'", f"echo '{P}' | sudo -s",
+                 f"echo '{P}' | sudo -i", f"echo '{P}' | su", f"echo '{P}' | su -l x", f"echo '{P}' | script -q /dev/null",
+                 "chroot /", "unshare -r", f"strace -f -o /dev/null sh -c '{P}'", f"coproc sh -c '{P}'",
+                 f"env -S'{P}'", f"env --split-string='{P}'", f"sg grp '{P}'", "newgrp grp", f"runuser -u x -- {P}",
+                 f"pkexec --user x sh -c '{P}'", f"trap '{P}' EXIT", f"alias x='{P}'",
+                 f"swarm bg --job J -- '{P}'")
+        self.good("tmux ls", "tmux new -d", "screen -ls", "sudo -u x ls", "nohup make &", "setsid make", "busybox ls",
+                  "swarm bg --job J -- 'make test'", "trap - EXIT")
+
+    def test_xargs_and_parallel_do_not_run_code_from_their_input(self):
+        self.bad(f"parallel git push origin ::: HEAD:main", f"parallel ::: '{P}'", f"echo '{P}' | parallel",
+                 f"parallel bash -c ::: '{P}'", f"parallel 'git push origin {{}}' ::: main",
+                 f"echo '{P}' | xargs -I{{}} sh -c '{{}}'", f"echo '{P}' | xargs sh -c", "echo x | xargs python3 -c",
+                 "echo 's/a/b/' | xargs -I{} sed -i {} f", "find . -exec {} ;", "find . -name x -exec sh {} ;")
+        self.good("parallel echo ::: a b", "xargs grep x", "xargs sed -i s/a/b/", "find . -exec grep -l x {} +")
+
+    def test_headless_launches(self):
+        self.bad("codex app-server", "codex proto", "codex mcp-server", "codex e hi", "npx @openai/codex app-server",
+                 "codex --model x app-server", "claude mcp serve")
+        self.good("codex --help", "codex", "claude mcp list")
+
+
+@unittest.skipUnless(shutil.which("git"), "needs git")
+class Round4ScriptFiles(unittest.TestCase):
+    """A script file runs (directly, through a shell or an interpreter, or sourced) only when it is tracked
+    unmodified at HEAD in its repository, or when the seat cannot write it."""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.addCleanup(self.td.cleanup)
+        self.repo = os.path.realpath(self.td.name)
+        git = ["git", "-C", self.repo, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
+        subprocess.run(["git", "init", "-q", self.repo], check=True)
+        os.makedirs(os.path.join(self.repo, "scripts"))
+        for rel, text in (("scripts/check.sh", "echo ok\n"), ("tool.py", "print(1)\n"), ("env.sh", "X=1\n"),
+                          ("mod.sh", "echo ok\n"), ("staged.sh", "echo ok\n"), ("Makefile", "a:\n\techo a\n")):
+            with open(os.path.join(self.repo, rel), "w", newline="\n") as f:
+                f.write(text)
+        subprocess.run(git + ["add", "-A"], check=True)
+        subprocess.run(git + ["commit", "-qm", "init"], check=True)
+        with open(os.path.join(self.repo, "mod.sh"), "a") as f:
+            f.write("git push origin HEAD:main\n")
+        with open(os.path.join(self.repo, "staged.sh"), "a") as f:
+            f.write("git push origin HEAD:main\n")
+        subprocess.run(git + ["add", "staged.sh"], check=True)
+        with open(os.path.join(self.repo, "new.sh"), "w") as f:
+            f.write("git push origin HEAD:main\n")
+
+    def at(self, cmd, cwd="__repo__"):
+        return refuse(cmd, ["main"], branch_of=on("feat/a"), cwd=self.repo if cwd == "__repo__" else cwd)
+
+    def test_tracked_unmodified_scripts_run_in_every_form(self):
+        for cmd in ("./scripts/check.sh", "scripts/check.sh", "bash scripts/check.sh", "sh ./scripts/check.sh",
+                    "python3 tool.py", "source env.sh", ". ./env.sh", "make -f Makefile", "bash -- scripts/check.sh",
+                    f"bash {self.repo}/scripts/check.sh", "cd scripts && ./check.sh", "cd scripts; bash check.sh",
+                    "timeout 60 ./scripts/check.sh", "env A=1 ./scripts/check.sh"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.at(cmd), cmd)
+
+    def test_untracked_modified_or_staged_scripts_are_refused_in_every_form(self):
+        for name in ("new.sh", "mod.sh", "staged.sh", "missing.sh"):
+            for form in ("./{}", "bash {}", "sh {}", "source {}", ". ./{}", "python3 {}", "zsh ./{}", "{}"[0:0] + "./{}"):
+                cmd = form.format(name)
+                with self.subTest(cmd=cmd):
+                    self.assertTrue(self.at(cmd), cmd)
+        self.assertTrue(self.at("bash --rcfile new.sh -i -c 'ls'"))
+        self.assertTrue(self.at("bash --rcfile new.sh -c 'ls'"))
+        self.assertIn("tracked unmodified at HEAD", self.at("bash new.sh"))
+        self.assertIn("tracked unmodified at HEAD", self.at("./new.sh"))
+
+    def test_a_relative_script_needs_a_known_directory(self):
+        self.assertTrue(self.at("./scripts/check.sh", cwd=None))
+        self.assertTrue(self.at("env -C scripts ./scripts/check.sh"))   # the command runs elsewhere
+        self.assertTrue(self.at("cd \"$D\"/.. && ./scripts/check.sh"))
+        self.assertTrue(self.at("(cd scripts) ; ./check.sh"))          # a subshell's cd does not last
+        self.assertIsNone(self.at(f"{self.repo}/scripts/check.sh", cwd=None))
+
+    @unittest.skipIf(os.name == "nt", "symlinks")
+    def test_a_link_out_of_the_repository_and_a_renamed_shell_are_refused(self):
+        os.symlink(os.path.join(self.repo, "new.sh"), os.path.join(self.repo, "scripts", "link.sh"))
+        self.assertTrue(self.at("./scripts/link.sh"))
+        sh = os.path.realpath(shutil.which("sh") or "/bin/sh")
+        os.symlink(sh, os.path.join(self.repo, "x"))
+        for cmd in (f"./x -c '{P}'", f"echo '{P}' | ./x", f"{self.repo}/x -c '{P}'", f"echo '{P}' | {self.repo}/x"):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(self.at(cmd), cmd)
+        bindir = os.path.join(self.repo, "bin")
+        os.makedirs(bindir)
+        os.symlink(sh, os.path.join(bindir, "mysh"))
+        with mock.patch.dict(os.environ, {"PATH": bindir + os.pathsep + os.environ.get("PATH", "")}):
+            self.assertTrue(self.at(f"echo '{P}' | mysh"))
+            self.assertTrue(self.at(f"mysh -c '{P}'"))
+            self.assertIsNone(self.at("mysh -c 'ls'"))
+
+    def test_files_the_seat_cannot_write_run(self):
+        with mock.patch.object(shellguard.os, "access", return_value=False):
+            self.assertIsNone(self.at("./new.sh"))
+        self.assertFalse(shellguard.tracked_unmodified(os.path.join(self.repo, "new.sh")))
+        self.assertTrue(shellguard.tracked_unmodified(os.path.join(self.repo, "scripts", "check.sh")))
+        self.assertFalse(shellguard.tracked_unmodified(os.path.join(self.repo, "mod.sh")))
+        self.assertFalse(shellguard.tracked_unmodified(os.path.join(self.repo, "staged.sh")))
+
+    def test_the_swarm_launcher_runs(self):
+        from swarm import paths
+        launcher = os.path.join(self.repo, "new.sh")
+        with mock.patch.object(paths, "agent_bin", return_value=shellguard.os.path.realpath(launcher)):
+            self.assertIsNone(self.at(f"{launcher} post --job J hi"))
+        self.assertTrue(self.at(f"{launcher} post --job J hi"))
 
 
 class Splitting(unittest.TestCase):
