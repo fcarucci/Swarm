@@ -125,10 +125,14 @@ def _win_creation(pid: int) -> str | None:
     k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
     k32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
     k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    k32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
     h = k32.OpenProcess(0x1000, False, int(pid))      # PROCESS_QUERY_LIMITED_INFORMATION
     if not h:
         return None
     try:
+        code = wintypes.DWORD(0)
+        if not k32.GetExitCodeProcess(h, ctypes.byref(code)) or code.value != 259:   # STILL_ACTIVE
+            return None                       # exited (a handle somewhere keeps its record): not a live process
         t = [wintypes.FILETIME() for _ in range(4)]
         if not k32.GetProcessTimes(h, *(ctypes.byref(x) for x in t)):
             return None
