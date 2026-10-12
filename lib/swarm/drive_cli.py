@@ -702,13 +702,12 @@ def cmd_drive_run(cfg, args) -> int:
     Installs nothing and never calls a model. One per board (and job filter) at a time."""
     from swarm.supervisor import session_driver
     bk = board_key(cfg)
-    why = session_driver.seat_caller()
+    why = session_driver.seat_caller(os.getpid())       # its env, its own environment and every ancestor
     if why:
         print(f"swarm drive run: refused: {why}", file=sys.stderr)
         return 1
-    try:   # a person's command (review rr1): never under an agent host; confirmed on the tty, or by --yes
-        person.require("drive run", args.job or "every drive job", board_key=bk, who=None, env=os.environ,
-                       confirm=(lambda _a, _j: True) if getattr(args, "yes", False) else None)
+    try:   # a person's command (review rr1): never under an agent host, and confirmed on the tty
+        person.require("drive run", args.job or "every drive job", board_key=bk, who=None, env=os.environ)
     except person.PersonRefused as exc:
         print(f"swarm drive run: {exc}", file=sys.stderr)
         return 1
@@ -871,8 +870,6 @@ def register(sub, handlers: dict, commands: dict | None = None) -> None:
         "run", help="drive this board's drive jobs in the foreground until none is left (no session needed; "
                     "installs nothing)")
     rn.add_argument("--job", help="only this job")
-    rn.add_argument("--yes", action="store_true",
-                    help="no tty confirmation (still refused inside an agent host, as every person command is)")
     add_drive_command("run", cmd_drive_run, board=False)
     rv = sub.add_parser("review", help="post a structured review of an artifact (an enrolled reviewer)")
     rv.add_argument("--job", required=True); rv.add_argument("--artifact", required=True)

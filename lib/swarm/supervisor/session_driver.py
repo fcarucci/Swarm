@@ -501,7 +501,29 @@ def record_launch_env(session: str, config_path: str | None) -> None:
     from swarm.supervisor.settings import write_private
     cfgp = os.path.abspath(os.path.expanduser(str(config_path or os.environ.get("SWARM_CONFIG")
                                                    or paths.config_path())))
-    write_private(record_name(session), json.dumps({"path": os.environ.get("PATH", os.defpath), "config": cfgp}))
+    env = {k: v for k, v in os.environ.items() if k in RECORD_ENV or k.upper() in RECORD_ENV}
+    write_private(record_name(session), json.dumps({"path": os.environ.get("PATH", os.defpath), "config": cfgp,
+                                                    "env": env}))
+
+
+# What a driver's environment is rebuilt from (review rr1b): the requester's own, recorded at its activation.
+RECORD_ENV = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "LANGUAGE", "TZ", "TMPDIR", "CLAUDE_CONFIG_DIR",
+              "CODEX_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME",
+              "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "SWARM_VENV", "SWARM_NO_SYSTEMD", "USERPROFILE",
+              "USERNAME", "APPDATA", "LOCALAPPDATA", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT",
+              "TEMP", "TMP", "PROGRAMDATA", "HOMEDRIVE", "HOMEPATH")
+
+
+def driver_environ(rec: dict) -> dict:
+    """The driver process's whole environment, rebuilt from the requester's record: its variables (RECORD_ENV),
+    its PATH and config, the library path. Nothing of the starter's environment is inherited (review rr1b)."""
+    from swarm import paths
+    env = {k: v for k, v in (rec.get("env") or {}).items()
+           if isinstance(k, str) and isinstance(v, str) and (k in RECORD_ENV or k.upper() in RECORD_ENV)}
+    env["PATH"] = rec["path"]
+    env["SWARM_CONFIG"] = rec["config"]
+    env["PYTHONPATH"] = str(paths.LIB_DIR)
+    return env
 
 
 def launch_env(session: str) -> dict | None:
@@ -571,7 +593,7 @@ def start(cfg: dict, session: str, host_pid: int, *, config_path: str | None = N
         return None
     payload = json.dumps({"session": session, "pid": int(host_pid), "token": token})
     proc = popen([sys.executable, "-m", "swarm.supervisor.session_driver"],
-                 env=_child_env(cfg, rec["config"], rec["path"]),
+                 env={**_child_env(cfg, rec["config"], rec["path"]), **driver_environ(rec)},
                  stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True,
                  cwd=os.path.expanduser("~"), **_detach())
     try:
@@ -662,14 +684,16 @@ def main(argv=None) -> int:
         session, pid, token = str(params["session"]), int(params["pid"]), params.get("token")
     except Exception:
         return 2
-    rec = launch_env(session)          # however it was started: the requester's recorded PATH and config only
-    why = "no launch environment recorded by its activation" if rec is None else seat_caller(pid)
+    rec = launch_env(session)          # however it was started: the requester's recorded environment only
+    why = ("no launch environment recorded by its activation" if rec is None
+           else seat_caller(os.getpid()) or seat_caller(pid))   # the caller itself, then the watched host
     if why:
         _log(f"driver for {session} not run: {why}")
         return 1
     config_path = rec["config"]
-    os.environ["PATH"] = rec["path"]   # what the runners (and the harness binaries they resolve) see
-    os.environ["SWARM_CONFIG"] = config_path
+    environ = driver_environ(rec)      # rebuilt whole: what the runners and the harness binaries see
+    os.environ.clear()
+    os.environ.update(environ)
     try:
         cfg = load_config(Path(config_path).expanduser())
     except Exception as exc:
