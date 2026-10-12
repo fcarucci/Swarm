@@ -47,7 +47,8 @@ def check_author(board, job: str, name: str, key: str | None = None) -> None:
 
 def resolve(board, job: str, to: str) -> list[str]:
     """The agent names `to` addresses on `job`: [to] for a plain name of an agent of the job; for
-    `@role` the active holders of the seat, in roster order. AddressError if the name is unknown,
+    `@role` the active holders of the seat, in roster order; [to] for a name of the person behind the job
+    (owners.person_names: owner, user, human, the job's creator, [board] owner_names). AddressError if the name is unknown,
     or the seat has no holder (the error lists who is on the job)."""
     agents = board.agents(job)
     live = [a for a in agents if a.ended_at is None]
@@ -57,6 +58,9 @@ def resolve(board, job: str, to: str) -> list[str]:
         by_key = [a.name for a in live if getattr(a, "agent_key", None) == to]   # the key it joined with
         if len(by_key) == 1:
             return by_key
+        from swarm.owners import is_person
+        if is_person(board, job, to):   # the person behind the job (owner, user, human, its creator,
+            return [to]                 # [board] owner_names): what human_question reads as a wait on a person
         raise AddressError(f"no agent named {to!r} on job {job} (see `swarm who --job {job}`; address a "
                            f"seat with @role, e.g. @EL); nothing was posted")
     token = to[1:]

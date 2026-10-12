@@ -325,8 +325,74 @@ class GateDriveQuestions(QuestionEnv):
                             "a plain job's gate is the job-level wait, not a seat's question")
 
 
+class PersonAddressee(QuestionEnv):
+    """A drive seat escalates to the person behind the job (QA live-unreachable, 12:31:18): `--to owner`, a
+    `[board] owner_names` name or the job's creator is an addressee, by the rule human_question reads."""
+
+    def test_seat_question_to_owner_is_opened_with_the_drive_default_and_expiry(self):
+        q = self.ask(to="owner", default="unreachable")
+        self.assertEqual(q.waiting_on, "owner")
+        self.assertEqual(self.b.blocker(q.id).seat, self.a)
+        self.assertAlmostEqual(self.remaining(q), 4 * 3600, delta=60)
+
+    def test_seat_question_to_owner_still_needs_a_default_in_a_goal_job(self):
+        with self.assertRaisesRegex(ValueError, "default"):
+            self.ask(to="owner", default=None)
+        self.assertEqual(self.b.blockers("J"), [])
+
+    def test_owner_names_and_the_creator_are_addressees_and_others_are_not(self):
+        from swarm import addressing
+        self.b.open_job("C", None, None, None, "Marge", goal="ship")
+        self.assertTrue(self.b.set_job_data("J", "owner.names", "Ned Flanders,Rod"))
+        self.assertEqual(addressing.resolve(self.b, "J", "owner"), ["owner"])
+        self.assertEqual(addressing.resolve(self.b, "J", "ned flanders"), ["ned flanders"])
+        self.assertEqual(addressing.resolve(self.b, "C", "Marge"), ["Marge"])
+        q = self.ask(to="Ned Flanders", default="x")
+        self.assertEqual(q.waiting_on, "Ned Flanders")
+        with self.assertRaises(addressing.AddressError):
+            addressing.resolve(self.b, "J", "Marge")         # the creator of another job
+        with self.assertRaises(addressing.AddressError):
+            self.ask(to="nobody-here", default="x")
+
+    def test_only_the_person_answers_an_owner_question_and_it_is_listed_for_them(self):
+        q = self.ask(to="owner", default="unreachable")
+        with self.assertRaisesRegex(ValueError, "only comment"):
+            self.p.answer_question(self.ctx, self.b, q.id, self.bn, text="go")
+        self.assertIn(q.id, [b.id for b in self.p.question_rows(self.ctx, self.b, "J", to="human")])
+        self.assertTrue(self.p.orchestrator_lines(self.ctx, "J"))
+        self.assertEqual(self.p.answer_question(self.ctx, self.b, q.id, "human", text="rule it").state, "resolved")
+
+    def test_seat_asks_by_its_own_key(self):
+        args = NS(job="J", key="eng-a", to="owner", text=["Rule", "it?"], options=None,
+                  default="unreachable", expires=None, blocks=None)
+        with mock.patch.object(self.ctx, "open_board", return_value=_NoClose(self.b)), \
+                mock.patch("swarm.drive_cli.drive_record"):
+            self.p.run_ask(self.ctx, args)
+        (q,) = [b for b in self.b.blockers("J") if b.kind == "question"]
+        self.assertEqual((q.created_by, q.waiting_on, q.seat), (self.a, "owner", self.a))
+
+    def test_human_question_reads_the_same_person_names(self):
+        self.b.allocate_name("k-other", "K", role="engineer")
+        self.assertTrue(self.b.set_job_data("K", "owner.names", "Rod"))
+        js = self.b.job_status("K")
+        self.assertFalse(orphans.human_question(self.b, js, self.h.cfg))
+        self.b.post("K", self.kasker, "Which store?", "rod")
+        self.assertTrue(orphans.human_question(self.b, self.b.job_status("K"), self.h.cfg))
+
+
+class _NoClose:
+    def __init__(self, board):
+        self.board = board
+
+    def __enter__(self):
+        return self.board
+
+    def __exit__(self, *exc):
+        return False
+
+
 # one subclass per backend of support.drive_backends() beyond memory (Postgres only with SWARM_TEST_CONFIG)
-add_backend_variants(globals(), PluginDriveQuestions, GateDriveQuestions)
+add_backend_variants(globals(), PluginDriveQuestions, GateDriveQuestions, PersonAddressee)
 
 
 if __name__ == "__main__":

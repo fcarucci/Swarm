@@ -1032,6 +1032,42 @@ def own_name_verdict_command(command: str, name: str, job: str | None = None) ->
     return command
 
 
+def own_key_question_command(command: str, agent_id: str, job: str | None = None) -> str | None:
+    """`command` with every real `swarm ask` and `swarm answer` invocation made to run as the caller's
+    own agent: a call with no --key gets `--key AGENT_ID` (the hook knows who is calling, as for
+    `swarm verdict`; a drive seat's session alone does not name it), and a plain --key naming another
+    agent is replaced: a question is only ever asked or answered as the caller itself. None when there
+    is nothing to change. An ask for another --job than `job` is left alone."""
+    from swarm.shellguard import mask_heredocs
+    inserts, edits = [], []
+    masked = mask_heredocs(command)
+    for sub in ("ask", "answer"):
+        for args in _swarm_calls(masked, sub):
+            has_key, other_job, bad = False, False, None
+            for m, (_, _, text, _) in enumerate(args):
+                value, tok = _flag_value(args, m, "--job")
+                other_job = other_job or (value is not None and job is not None and value != job)
+                value, tok = _flag_value(args, m, "--key")
+                if value is not None:
+                    has_key = True
+                    if tok[3] and value != agent_id:
+                        bad = (tok, text.startswith("--key="))
+            if other_job:
+                continue
+            if bad is not None:
+                tok, joined = bad
+                edits.append((tok[0] + (len("--key=") if joined else 0), tok[1]))
+            elif not has_key and args:   # (no arguments at all: the CLI refuses it anyway)
+                inserts.append(args[0][0])
+    if not (inserts or edits):
+        return None
+    q = shlex.quote(agent_id)
+    changes = [(a, b, q) for a, b in edits] + [(at, at, f"--key {q} ") for at in inserts]
+    for a, b, text in sorted(changes, reverse=True):
+        command = command[:a] + text + command[b:]
+    return command
+
+
 def _reuse_identity(agent_id: str, job: str, payload: dict, name: str | None = None,
                     cfg: dict | None = None) -> None:
     """A member that runs `swarm join --key X` itself would get a SECOND row (its hook identity,
@@ -1047,6 +1083,7 @@ def _reuse_identity(agent_id: str, job: str, payload: dict, name: str | None = N
     new = own_key_command(command, agent_id, job) if command else None
     if command and name:
         new = own_name_verdict_command(new or command, name, job) or new
+        new = own_key_question_command(new or command, agent_id, job) or new
     if command:
         new = own_key_review_command(new or command, agent_id, job) or new
     wrapped = None
@@ -1059,9 +1096,9 @@ def _reuse_identity(agent_id: str, job: str, payload: dict, name: str | None = N
         _set_input_rewrite(host.input_rewrite_output({**ti, "command": wrapped or new}))
     if new:
         _out("PreToolUse", "[swarm] You already have a swarm identity (your hooks joined you): "
-                           "`swarm join` runs with it (no second name), `swarm verdict` records "
-                           "as you and `swarm review` runs with your key. You don't need to run join "
-                           "or pass --as or --key.")
+                           "`swarm join` runs with it (no second name); `swarm verdict`, `swarm ask` "
+                           "and `swarm answer` record as you and `swarm review` runs with your key. You don't "
+                           "need to run join or pass --as or --key.")
     if wrapped:
         _out("PreToolUse", "[swarm] This background command runs under `swarm bg`: the board records "
                            "it, and it is stopped if it is still running after you finish or the job "

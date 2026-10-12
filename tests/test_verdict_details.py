@@ -474,6 +474,38 @@ class JudgeTeachingTests(GoalEnv):
         self.assertIn("<<'EOF'", text)
 
 
+class SeatQuestionIdentityTests(GoalEnv):
+    """`swarm ask` and `swarm answer` run as the caller's own agent, as `swarm verdict` does: the hook adds
+    the caller's --key (QA live-unreachable: a driver-launched lead got "no board identity")."""
+
+    def setUp(self):
+        super().setUp()
+        self.activate_goal()
+        self.spawn_worker("lead-agent")
+
+    def rewritten(self, command):
+        out = self.hook("turn", agent_id="lead-agent", tool_name="Bash", tool_input={"command": command},
+                        transcript_path=self.main_transcript()) or {}
+        return ((out.get("hookSpecificOutput") or {}).get("updatedInput") or {}).get("command")
+
+    def test_ask_without_key_runs_with_the_callers_own_key(self):
+        cmd = self.rewritten("swarm ask --job J --to owner --default unreachable 'Rule it?'")
+        self.assertEqual(cmd, "swarm ask --key lead-agent --job J --to owner --default unreachable 'Rule it?'")
+
+    def test_another_key_is_replaced_by_the_callers_own(self):
+        cmd = self.rewritten("swarm ask --job J --key lead-gen1 --to owner --default x 'q?'")
+        self.assertEqual(cmd, "swarm ask --job J --key lead-agent --to owner --default x 'q?'")
+        cmd = self.rewritten("swarm answer 3 --key=other go")
+        self.assertEqual(cmd, "swarm answer 3 --key=lead-agent go")
+
+    def test_answer_gets_the_key_and_an_ask_for_another_job_is_left_alone(self):
+        self.assertEqual(self.rewritten("swarm answer Q3 --option a"), "swarm answer --key lead-agent Q3 --option a")
+        self.assertIsNone(hooks.own_key_question_command("swarm ask --job K --to owner q", "lead-agent", "J"))
+        self.assertIsNone(hooks.own_key_question_command("swarm ask --job J --key lead-agent --to owner q",
+                                                         "lead-agent", "J"))
+        self.assertIsNone(hooks.own_key_question_command("echo swarm ask --job J q", "lead-agent", "J"))
+
+
 class FixWorkerBriefTests(unittest.TestCase):
     def action(self, verdict):
         job = types.SimpleNamespace(job="J", goal="g", task="t", description="d")

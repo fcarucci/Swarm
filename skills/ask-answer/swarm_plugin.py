@@ -9,6 +9,7 @@ import shlex
 import subprocess
 import sys
 from swarm import addressing, cli, hosts
+from swarm.owners import is_person
 from swarm.board.base import JOB_DATA_VALUE_MAX, normalize_message
 
 
@@ -64,12 +65,17 @@ def identity(board, cfg=None, key=None):
 def authorized(board, blocker, actor):
     if actor == 'human':
         return True
-    if blocker.waiting_on == 'human':
+    if to_person(board, blocker):
         return False
     try:
         return actor in addressing.resolve(board, blocker.job, blocker.waiting_on)
     except ValueError:
         return False
+
+
+def to_person(board, blocker):
+    # 'human', or another name of the person behind the job (owner, user, its creator, [board] owner_names)
+    return blocker.waiting_on == 'human' or is_person(board, blocker.job, blocker.waiting_on)
 
 
 def open_question(ctx, board, job, actor, to, text, options=None, default=None, expires=None, blocks=None):
@@ -205,7 +211,7 @@ def agent_lines(ctx, job, agent_key):
 
 def question_rows(ctx, board, job=None, all_=False, to=None):
     rows = [b for b in board.blockers(job, include_closed=all_) if b.kind == 'question']
-    return [b for b in rows if to is None or (b.waiting_on == 'human' if to == 'human' else authorized(board, b, to))]
+    return [b for b in rows if to is None or (to_person(board, b) if to == 'human' else authorized(board, b, to))]
 
 
 def age(now, at):
@@ -214,7 +220,7 @@ def age(now, at):
 
 def orchestrator_lines(ctx, job):
     with ctx.open_board() as board:
-        rows = [b for b in question_rows(ctx, board, job) if b.waiting_on == 'human']
+        rows = [b for b in question_rows(ctx, board, job) if to_person(board, b)]
         if not rows:
             return []
         return [f'{len(rows)} open question{"s" if len(rows)!=1 else ""} for you '

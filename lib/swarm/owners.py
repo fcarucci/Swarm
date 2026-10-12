@@ -30,3 +30,27 @@ def stored(data: dict | None) -> list[str]:
     """The names recorded on a job (its job data)."""
     raw = (data or {}).get(JOB_DATA_KEY) or ""
     return [n.strip() for n in raw.split(",") if n.strip()]
+
+
+ALIASES = ("user", "human", "owner")
+
+
+def person_names(board, job: str, js=None) -> set[str]:
+    """The casefolded names that address the person behind `job`: the aliases, the job's creator and the
+    owner names recorded on the job. One rule for the stale sweeps (human_question) and for addressing."""
+    if js is None:
+        try:
+            js = board.job_status(job)
+        except Exception:
+            js = None
+    try:
+        configured = stored(board.job_data(job))
+    except Exception:
+        configured = []
+    creator = (getattr(js, "created_by", None) or "").casefold()
+    return {*ALIASES, creator, *(n.casefold() for n in configured)} - {""}
+
+
+def is_person(board, job: str, name: str | None) -> bool:
+    """Whether `name` addresses the person behind `job` (person_names), ignoring case."""
+    return bool(name) and name.casefold() in person_names(board, job)
