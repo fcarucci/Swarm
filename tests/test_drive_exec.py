@@ -1396,6 +1396,7 @@ class FixRoundTests(ExecEnv):
         run = self.go(self.act())
         driver_exec.conclude_run(self.cfg, run, "completed", 0.1)
         self.assertEqual(self.reload().watermarks.get("event:eng-a", 0), 0)
+        self.assertFalse([k for k in self.led.watermarks if k.startswith("evack:")])     # not shown, so not acknowledged
 
     def test_rr7_a_far_event_id_acks_only_itself_and_hides_no_later_event(self):
         self.memory_only()
