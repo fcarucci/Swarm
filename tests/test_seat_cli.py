@@ -1137,6 +1137,54 @@ class CodexControlRequests(ControlCase):
         self.assertIn("no matching receipt", why)
         self.assertIsNotNone(ledger.load(self.bkey, JOB).halted)
 
+    def test_stored_arguments_without_a_receipt_are_no_request(self):
+        """Even with the host-private arguments in place, no receipt means no request."""
+        from swarm import drive_control
+        self.assertEqual(self.run_cmd("halt", "--job", JOB)[0], 0)
+        ns = cli._parser().parse_args(["unhalt", "--job", JOB])
+        mid = self.board.post(JOB, "codex session", drive_control.request_text(ns), None).id
+        drive_control.store_body(self.bkey, JOB, mid, drive_control.fields_of(ns))
+        self.assertEqual(self.driver(), [])
+        kind, sha = drive_control.parse_text(drive_control.request_text(ns))
+        req = drive_control.ControlRequest(mid, JOB, kind, sha, drive_control.fields_of(ns), None,
+                                           "requester:unhalt", 1)
+        applied, why = drive_cli.apply_control_request(self.board, self.cfg, ledger.load(self.bkey, JOB), req,
+                                                       self.board.now())
+        self.assertFalse(applied)
+        self.assertIn("no matching receipt", why)
+
+    def test_a_closed_lead_seats_request_is_refused(self):
+        newest = self.board.last_message_id(JOB)
+        rc, _, err, receipted = self.codex("LEAD-SESSION", "seat", "ack", "--job", JOB, "--upto", str(newest))
+        self.assertEqual((rc, receipted), (0, True), err)
+        store = next(r for r in self.board._s().seats if r["id"] == self.lead_row.id)
+        store["state"] = "released"                                            # released before the pass
+        [(_, (applied, why))] = self.driver()
+        self.assertFalse(applied)
+        self.assertIn("live lead", why)
+
+    def test_the_hook_receipts_only_the_message_the_command_posts(self):
+        """A record line that points at another message (here a request for another command) gets no receipt."""
+        from swarm import drive_control, hosts
+        other = drive_control.request_text(cli._parser().parse_args(["unhalt", "--job", JOB]))
+        mid = self.board.post(JOB, "codex session", other, None).id
+        payload = {"session_id": REQ_SESSION, "tool_name": "Bash", "tool_input": {"command": f"swarm halt --job {JOB}"},
+                   "tool_response": f"swarm-record: kind=control_request id={mid} rev=1"}
+        with mock.patch.object(drivegate, "_open_board", return_value=_NoClose(self.board)), \
+                mock.patch.object(drivegate, "kick", return_value=False):
+            self.assertFalse(drivegate.post_tool(self.cfg, payload, hosts.get("codex")))
+        self.assertEqual(self.driver(), [])
+
+    def test_a_seat_of_another_job_gets_no_receipt_here(self):
+        self.board.open_job("K", "d", None, REQ_SESSION, "Francesco", goal="g")
+        ledger.create(self.bkey, "K", budgets={}, activated_at=self.board.now().isoformat())
+        self.enrol("K-LEAD", "k-lead-of-K", job="K", seat="lead")
+        newest = self.board.last_message_id(JOB)
+        rc, _, err, receipted = self.codex("K-LEAD", "seat", "ack", "--job", JOB, "--upto", str(newest))
+        self.assertEqual(rc, 0, err)
+        self.assertFalse(receipted)
+        self.assertEqual(self.driver(), [])
+
     def test_a_replayed_request_is_refused(self):
         self.assertEqual(self.run_cmd("halt", "--job", JOB)[0], 0)
         self.codex(REQ_SESSION, "unhalt", "--job", JOB)

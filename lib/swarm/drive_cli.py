@@ -238,6 +238,15 @@ def cmd_seat_request(board, cfg, args) -> int:
     return _record("seat", seat.id, seat.revision)
 
 
+def _open_seat_row(board, job: str, led, seat: str):
+    """The seat row, if it is not closed (released, failed, cancelled, refused); Refuse otherwise."""
+    from swarm.board.base import SEAT_CLOSED
+    row = _seat_row(board, job, led.generation, seat)
+    if row.state in SEAT_CLOSED:
+        raise Refuse(f"seat {row.seat} is {row.state} already")
+    return row
+
+
 def check_withdraw_args(group, reason) -> tuple:
     """(group, reason) of a --withdraw-artifact, stripped; Refuse for a missing, overlong or empty one."""
     group, reason = (group or "").strip(), (reason or "").strip()
@@ -252,10 +261,7 @@ def check_withdraw_args(group, reason) -> tuple:
 def core_withdraw(board, job: str, led, seat: str, group: str, reason: str):
     """The ledger side of a withdrawal (no save): the seat row must still be open; the group is recorded
     withdrawn. Returns the seat row, to release once the ledger is saved (ledger first)."""
-    row = _seat_row(board, job, led.generation, seat)
-    from swarm.board.base import SEAT_CLOSED
-    if row.state in SEAT_CLOSED:   # before any ledger write: a refused release changes nothing
-        raise Refuse(f"seat {row.seat} is {row.state} already")
+    row = _open_seat_row(board, job, led, seat)   # before any ledger write: a refused release changes nothing
     if group not in led.integrated and len(led.integrated) >= INTEGRATED_MAX:
         raise Refuse(f"the ledger already records {INTEGRATED_MAX} groups: a person must look at this job")
     led.integrated[group] = {**(led.integrated.get(group) or {}), "withdrawn": reason}
@@ -271,13 +277,11 @@ def cmd_seat_release(board, cfg, args) -> int:
     if person.codex_session(os.environ):
         return control_request(board, cfg, args)
     _lead_or_person(board, bk, args.job, led, os.environ, "seat release", args)
-    row = _seat_row(board, args.job, led.generation, args.seat)
-    from swarm.board.base import SEAT_CLOSED
-    if row.state in SEAT_CLOSED:   # before any ledger write: a refused release changes nothing
-        raise Refuse(f"seat {row.seat} is {row.state} already")
     if args.withdraw_artifact:
-        row = core_withdraw(board, args.job, led, args.seat, group, reason)
+        row = core_withdraw(board, args.job, led, args.seat, group, reason)   # refuses a closed seat first
         led.save()
+    else:
+        row = _open_seat_row(board, args.job, led, args.seat)
     new = _set_state(board, row, "released", args.job)
     # a withdrawal is its own record (drivegate receipts kind=withdraw, id = the seat row)
     return _record("withdraw" if args.withdraw_artifact else "seat", new.id, new.revision)
@@ -324,8 +328,6 @@ def cmd_seat_ack(board, cfg, args) -> int:
     hide later ones. Only the live lead's own session (attested by its hook) may do it."""
     bk = board_key(cfg)
     led = _drive_ledger(bk, args.job)
-    if args.upto < 0:
-        raise Refuse("--upto must be a message id, 0 or more")
     if person.codex_session(os.environ):
         return control_request(board, cfg, args)
     lead = _live_lead(board, args.job, led, _caller(bk, args.job, led, args))

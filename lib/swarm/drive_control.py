@@ -266,7 +266,7 @@ def apply(board, cfg: dict, led, req: ControlRequest, now) -> tuple:
             group, reason = drive_cli.check_withdraw_args(f.withdraw_artifact, getattr(f, "reason", None))
             row = drive_cli.core_withdraw(board, job, led, f.seat, group, reason)
         elif req.kind in ("release", "cancel"):
-            row = drive_cli._seat_row(board, job, led.generation, f.seat)
+            row = drive_cli._open_seat_row(board, job, led, f.seat)
     except (_Refused, drive_cli.Refuse) as exc:
         why = str(exc).removeprefix("refused: ")
         if led is not None:
