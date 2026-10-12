@@ -478,30 +478,30 @@ class SeatAck(ControlCase):
         self.enrol("LEAD2-SESSION", "k-lead2", seat="lead~1")
         self.set_session("LEAD2-SESSION")
         self.assertEqual(self.run_cmd("seat", "ack", "--job", JOB, "--upto", "4")[0], 0)
-        self.assertEqual(ledger.load(self.bkey, JOB).watermarks, {"event:lead~1": 4})
+        self.assertEqual(ledger.load(self.bkey, JOB).watermarks, {"msg:lead~1": 4})
 
     def test_lead_ack_moves_its_event_mark_and_prints_record(self):
         self.set_session("LEAD-SESSION")
         rc, out, err = self.run_cmd("seat", "ack", "--job", JOB, "--upto", "12")
         self.assertEqual(rc, 0, err)
-        self.assertEqual(ledger.load(self.bkey, JOB).watermarks["event:lead"], 12)
+        self.assertEqual(ledger.load(self.bkey, JOB).watermarks["msg:lead"], 12)
         self.assertEqual(drivegate.record_of({"tool_response": {"stdout": out}}), ("ack", 12, 1))   # id = --upto
 
     def test_ack_never_moves_the_mark_back(self):
         self.set_session("LEAD-SESSION")
         self.assertEqual(self.run_cmd("seat", "ack", "--job", JOB, "--upto", "12")[0], 0)
         self.assertEqual(self.run_cmd("seat", "ack", "--job", JOB, "--upto", "5")[0], 0)
-        self.assertEqual(ledger.load(self.bkey, JOB).watermarks["event:lead"], 12)
+        self.assertEqual(ledger.load(self.bkey, JOB).watermarks["msg:lead"], 12)
 
     def test_P5_ack_past_the_newest_event_is_refused(self):
         """H2 / S1 (fixed): the mark never goes past the board's newest message of the job."""
         self.set_session("LEAD-SESSION")
         rc, _, err = self.run_cmd("seat", "ack", "--job", JOB, "--upto", str(10 ** 18))
         self.assertEqual(rc, 1)
-        self.assertIn("past the newest event", err)
+        self.assertIn("past the newest message", err)
         self.assertEqual(self.run_cmd("seat", "ack", "--job", JOB, "--upto", str(self.newest))[0], 0)
         self.assertNotEqual(self.run_cmd("seat", "ack", "--job", JOB, "--upto", str(self.newest + 1))[0], 0)
-        self.assertEqual(ledger.load(self.bkey, JOB).watermarks["event:lead"], self.newest)
+        self.assertEqual(ledger.load(self.bkey, JOB).watermarks["msg:lead"], self.newest)
 
     def test_P6_a_seat_exporting_the_lead_session_id_cannot_ack(self):
         """H1 exploit 2 (fixed): the hook attests the seat's own session, whatever its environment claims."""
@@ -510,7 +510,7 @@ class SeatAck(ControlCase):
         rc, _, err = self.run_cmd("seat", "ack", "--job", JOB, "--upto", "3")
         self.assertEqual(rc, 1)
         self.assertIn("lead session", err)
-        self.assertNotIn("event:lead", ledger.load(self.bkey, JOB).watermarks)
+        self.assertNotIn("msg:lead", ledger.load(self.bkey, JOB).watermarks)
 
     def test_ack_from_a_person_or_another_enrolled_agent_refused(self):
         rc, _, err = self.run_cmd("seat", "ack", "--job", JOB, "--upto", "3")   # the requester session
@@ -521,7 +521,7 @@ class SeatAck(ControlCase):
         rc, _, err = self.run_cmd("seat", "ack", "--job", JOB, "--upto", "3")
         self.assertEqual(rc, 1)
         self.assertIn("lead session", err)
-        self.assertNotIn("event:lead", ledger.load(self.bkey, JOB).watermarks)
+        self.assertNotIn("msg:lead", ledger.load(self.bkey, JOB).watermarks)
 
     def test_a_subagent_of_the_lead_cannot_ack(self):
         self.set_session("LEAD-SESSION")
@@ -536,11 +536,33 @@ class SeatAck(ControlCase):
         self.assertEqual(rc, 1)
         self.assertIn("live lead", err)
 
+    def test_N4_events_are_acknowledged_one_by_one_as_8a_reads_them(self):
+        """R4: --upto is the MESSAGE mark (msg:<lead>); events are acknowledged per id (evack:<lead>:<id>),
+        and no `event:` high-water mark is ever written, so no far id can hide a later event."""
+        e1 = self.board.post_event(JOB, "ci", "k1", "CI failed", "Lead", None)
+        e2 = self.board.post_event(JOB, "ci", "k2", "CI failed again", "Lead", None)
+        ids = sorted(e.id for e in self.board.events(JOB))
+        self.set_session("LEAD-SESSION")
+        rc, out, err = self.run_cmd("seat", "ack", "--job", JOB, "--upto", str(self.newest), "--event", str(ids[0]))
+        self.assertEqual(rc, 0, err)
+        wm = ledger.load(self.bkey, JOB).watermarks
+        self.assertEqual(wm, {"msg:lead": self.newest, f"evack:lead:{ids[0]}": 1})
+        self.assertFalse([k for k in wm if k.startswith("event:")])
+        self.assertEqual(drivegate.record_of({"tool_response": {"stdout": out}}), ("ack", self.newest, 1))
+        del e1, e2
+
+    def test_N4_an_event_of_no_job_or_another_job_is_refused(self):
+        self.set_session("LEAD-SESSION")
+        rc, _, err = self.run_cmd("seat", "ack", "--job", JOB, "--upto", "1", "--event", "999")
+        self.assertEqual(rc, 1)
+        self.assertIn("not an event of", err)
+        self.assertEqual(ledger.load(self.bkey, JOB).watermarks, {})
+
     def test_ack_needs_a_non_negative_event_id(self):
         self.set_session("LEAD-SESSION")
         rc, _, err = self.run_cmd("seat", "ack", "--job", JOB, "--upto", "-1")
         self.assertEqual(rc, 1)
-        self.assertIn("--upto must be an event id", err)
+        self.assertIn("--upto must be a message id", err)
 
 
 class LeadAuthority(ControlCase):
