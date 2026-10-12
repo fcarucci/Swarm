@@ -312,14 +312,15 @@ class Round4OneRule(unittest.TestCase):
 
     def test_g1_dash_dash_and_options_after_c(self):
         self.bad(f"bash -c -- '{P}'", f"sh -c -x '{P}'", f"bash -xc -- '{P}'", "bash -c --", f"bash -- -c '{P}'")
-        self.good("bash -c -- 'ls'", "bash -c 'ls' -- a b")
+        self.good("bash -c -- 'ls'", "bash -c 'ls' -- a b", "sh -c -- '--help'")     # after --, `--help` is the command
 
     def test_g2_the_program_or_the_code_is_an_expansion(self):
         self.bad(f"X='{P}'; $X", f"X='{P}'; bash -c \"$X\"", f"X='{P}'; eval \"$X\"", f"bash -c '$(echo {P})'",
                  f"bash -c 'eval \"$X\"'", "${X} push origin HEAD:main", "$'\\x67it' push origin HEAD:main",
                  "/bin/?h -c 'git push origin HEAD:main'", "{git,push,origin,HEAD:main}", "`echo git` push origin x",
                  f"python3 -c \"$CODE\"", "awk \"$PROG\" f", "bash \"$SCRIPT\"", "source \"$F\"",
-                 f"read -r X <<< '{P}'; $X", "set -- git push; \"$@\" origin HEAD:main")
+                 f"read -r X <<< '{P}'; $X", "set -- git push; \"$@\" origin HEAD:main", "gi[t] push origin HEAD:main",
+                 "eval \"echo $X\"", "bash -c \"echo $X\"", "find . -exec '{}' ';'")
         self.good("echo $HOME", "bash -c 'echo $HOME'", "ls *.py", "[ -f x ] && echo y", "git commit -m \"$(cat msg)\"",
                   "echo {a,b}", "eval 'git log'", "find . -name '*.py' -exec grep -l x {} +")
 
@@ -399,7 +400,8 @@ class Round4OneRule(unittest.TestCase):
         self.bad(f"parallel git push origin ::: HEAD:main", f"parallel ::: '{P}'", f"echo '{P}' | parallel",
                  f"parallel bash -c ::: '{P}'", f"parallel 'git push origin {{}}' ::: main",
                  f"echo '{P}' | xargs -I{{}} sh -c '{{}}'", f"echo '{P}' | xargs sh -c", "echo x | xargs python3 -c",
-                 "echo 's/a/b/' | xargs -I{} sed -i {} f", "find . -exec {} ;", "find . -name x -exec sh {} ;")
+                 "echo 's/a/b/' | xargs -I{} sed -i '{}' f", "echo f | xargs sed -i '{}'", "find . -exec {} ;",
+                 "find . -name x -exec sh {} ;")
         self.good("parallel echo ::: a b", "xargs grep x", "xargs sed -i s/a/b/", "find . -exec grep -l x {} +")
 
     def test_headless_launches(self):
@@ -422,7 +424,8 @@ class Round4ScriptFiles(unittest.TestCase):
         subprocess.run(["git", "init", "-q", self.repo], check=True)
         os.makedirs(os.path.join(self.repo, "scripts"))
         for rel, text in (("scripts/check.sh", "echo ok\n"), ("tool.py", "print(1)\n"), ("env.sh", "X=1\n"),
-                          ("mod.sh", "echo ok\n"), ("staged.sh", "echo ok\n"), ("Makefile", "a:\n\techo a\n")):
+                          ("mod.sh", "echo ok\n"), ("staged.sh", "echo ok\n"), ("Makefile", "a:\n\techo a\n"),
+                          ("$X.sh", "echo ok\n")):
             with open(os.path.join(self.repo, rel), "w", newline="\n") as f:
                 f.write(text)
         subprocess.run(git + ["add", "-A"], check=True)
@@ -452,6 +455,8 @@ class Round4ScriptFiles(unittest.TestCase):
                 cmd = form.format(name)
                 with self.subTest(cmd=cmd):
                     self.assertTrue(self.at(cmd), cmd)
+        self.assertIsNone(self.at("bash '$X.sh'"))                    # a tracked file named $X.sh, quoted
+        self.assertTrue(self.at("bash \"$X\".sh"))                     # the same text, expanded: cannot be checked
         self.assertTrue(self.at("bash --rcfile new.sh -i -c 'ls'"))
         self.assertTrue(self.at("bash --rcfile new.sh -c 'ls'"))
         self.assertIn("tracked unmodified at HEAD", self.at("bash new.sh"))
@@ -538,7 +543,8 @@ class ReadOnlyWrites(unittest.TestCase):
                     "git update-ref refs/heads/x HEAD",
                     "sqlite3 board.db 'update seats set role=1'", "sqlite3 b.db \"insert into t values (1)\"",
                     "sqlite3 b.db < dump.sql", "sqlite3 b.db '.import f t'", "sqlite3 b.db 'PRAGMA user_version = 2'",
-                    "echo $(touch f)", "watch 'rm f'"):
+                    "echo $(touch f)", "watch 'rm f'", "python3 -c \"import subprocess; subprocess.run(['touch', 'f'])\"",
+                    "awk 'BEGIN{system(\"touch f\")}'", "perl -e 'system(\"touch f\")'"):
             with self.subTest(cmd=cmd):
                 self.assertTrue(shellguard.readonly_write_reason(cmd), cmd)
 

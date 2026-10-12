@@ -558,6 +558,30 @@ class PushGuard(DriveCase):
         self.assertIn("swarm land", out["hookSpecificOutput"]["permissionDecisionReason"])
 
 
+class ScriptFileRule(DriveCase):
+    """Round 4: a script runs in a drive seat only when it is tracked unmodified at HEAD; the gate resolves a
+    relative script against the call's cwd (the payload's), the same for `./x.sh` and `bash x.sh`."""
+
+    @unittest.skipUnless(__import__("shutil").which("git"), "needs git")
+    def test_a_script_in_the_seat_cwd_is_checked_against_head(self):
+        import subprocess
+        git = ["git", "-C", str(self.work), "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
+        subprocess.run(["git", "init", "-q", str(self.work)], check=True)
+        (self.work / "check.sh").write_text("echo ok\n")
+        subprocess.run(git + ["add", "check.sh"], check=True)
+        subprocess.run(git + ["commit", "-qm", "init"], check=True)
+        (self.work / "new.sh").write_text("git push origin HEAD:main\n")
+        sid, _ = self.launch_seat("eng-a")
+        judge, _ = self.launch_seat("judge", role="judge", kind="judge")
+        for who in (sid, judge):
+            for cmd in ("./check.sh", "bash check.sh", "sh ./check.sh"):
+                with self.subTest(who=who, cmd=cmd):
+                    self.assertIsNone(self.pre(who, command=cmd))
+            for cmd in ("./new.sh", "bash new.sh", "source new.sh"):
+                with self.subTest(who=who, cmd=cmd):
+                    self.assertIn("tracked unmodified at HEAD", self.pre(who, command=cmd))
+
+
 class FailClosed(DriveCase):
     def test_an_error_in_a_known_seats_decision_refuses_the_call(self):
         sid, _ = self.launch_seat("eng-a")
