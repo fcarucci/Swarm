@@ -190,6 +190,10 @@ class LocalityTests(unittest.TestCase):
         self.assertEqual(gitpin.locality(str(inside), str(self.private)), (True, True))
         self.assertEqual(gitpin.locality("file://" + str(inside), str(self.private)), (True, True))
         self.assertEqual(gitpin.locality(str(inside)), (True, False))
+        root_link = self.base / "private-link"
+        root_link.symlink_to(self.private)
+        self.assertEqual(gitpin.locality(str(inside), str(root_link)), (True, True))
+        self.assertEqual(gitpin.locality(str(self.outside), str(root_link)), (True, False))
         self.assertEqual(gitpin.locality(str(self.private) + "-sibling/r.git", str(self.private)), (True, False))
         for url in ("https://example.com/r.git", "ssh://git@example.com/r.git", "git@example.com:o/r.git"):
             with self.subTest(url=url):
