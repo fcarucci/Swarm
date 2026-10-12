@@ -1046,7 +1046,7 @@ def _job_active(rid: int) -> int | None:
     buf = (ctypes.c_uint32 * 12)()                    # JOBOBJECT_BASIC_ACCOUNTING_INFORMATION (48 bytes)
     if not _k32().QueryInformationJobObject(job, 1, buf, ctypes.sizeof(buf), None):
         return None
-    return int(buf[9])                                # ActiveProcesses
+    return int(buf[10])                               # ActiveProcesses (after 4 times, page faults, total)
 
 
 def _job_stop(rid: int, proc=None, grace: float | None = None) -> None:
