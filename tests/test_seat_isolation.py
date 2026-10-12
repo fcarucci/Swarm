@@ -131,6 +131,47 @@ class PrepareTest(SeatHomeCase):
             seathome.prepare(self.cfg, "J", "eng-1")
 
 
+class SeatAllowTest(SeatHomeCase):
+    """QA live-met 4fda7fc: the auto-mode classifier denied the seat's own `swarm done` ("[Auto-Mode Bypass]")
+    because the seat's settings had no allow rules."""
+    HOOKS = {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "swarm hook turn"}]}]}
+
+    def test_the_seat_settings_keep_hooks_and_add_exactly_the_seat_allow_rules(self):
+        (self.home / ".claude" / "settings.json").write_text(json.dumps(
+            {"hooks": self.HOOKS, "enabledPlugins": {"swarm@x": True}, "permissions": {"allow": ["Read"],
+                                                                                    "deny": ["Bash(rm:*)"]}}))
+        h = seathome.prepare(self.cfg, "J", "eng-1")
+        path = h / seathome.SEAT_SETTINGS
+        got = json.loads(path.read_text())
+        self.assertEqual(got["hooks"], self.HOOKS)
+        self.assertEqual(got["enabledPlugins"], {"swarm@x": True})
+        self.assertEqual(got["permissions"]["deny"], ["Bash(rm:*)"])
+        allow = got["permissions"]["allow"]
+        self.assertEqual(allow[0], "Read")
+        for c in ("post", "read", "done", "review", "verdict", "goal-ready", "land", "ask", "answer", "seat",
+                  "who", "status"):
+            self.assertIn(f"Bash(swarm {c}:*)", allow)
+        self.assertIn("Bash(make test:*)", allow)
+        self.assertEqual(len(allow), 1 + 13)                         # nothing broader
+        self.assertFalse(any(r in ("Bash", "Bash(*)", "Bash(swarm:*)") for r in allow))
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o400)
+        seathome.prepare(self.cfg, "J", "eng-1")                     # refreshed, not duplicated
+        self.assertEqual(json.loads(path.read_text())["permissions"]["allow"], allow)
+
+    def test_the_jail_binds_the_seat_settings_read_only_in_place_of_the_persons(self):
+        h = seathome.prepare(self.cfg, "J", "s")
+        spec = seathome.jail_spec(self.cfg, h, None, self.home)
+        target = f"{self.home}/.claude/settings.json"
+        binds = [b for b in spec["binds"] if b[1] == target]
+        self.assertEqual(binds, [[f"{h}/{seathome.SEAT_SETTINGS}", target, "ro"]])
+
+    def test_a_best_effort_claude_seat_gets_the_settings_flag(self):
+        h = seathome.prepare(self.cfg, "J", "s")
+        argv = seathome.with_seat_settings(["claude", "-p", "--session-id", "x"], h)
+        self.assertEqual(argv[:3], ["claude", "--settings", str(h / seathome.SEAT_SETTINGS)])
+        self.assertEqual(seathome.with_seat_settings(["codex", "exec"], h), ["codex", "exec"])
+
+
 class SpecTest(SeatHomeCase):
     def spec(self, workdir=None):
         h = seathome.prepare(self.cfg, "J", "s")
@@ -225,7 +266,8 @@ class FailClosedTest(SeatHomeCase):
             fallback = {**run, "launch_id": "L1"}
             argv, why = runner._seat_argv(self.cfg, fallback)       # no jail here: best-effort, never refused
             self.assertIsNone(why)
-            self.assertEqual((argv, fallback["seat_mode"]), (["claude", "-p"], "best-effort"))
+            self.assertEqual(([argv[0], argv[1], argv[-1]], fallback["seat_mode"]),
+                             (["claude", "--settings", "-p"], "best-effort"))
             self.cfg["drive"]["seat_isolation"] = "strict"
             _, why = runner._seat_argv(self.cfg, {**run, "launch_id": "L1"})
         self.assertIn("no userns", why)                               # strict: refused
@@ -962,7 +1004,7 @@ class BestEffortTest(SeatHomeCase):
     def test_launch_on_macos(self):
         argv, env, m = seathome.launch(self.cfg, ["claude", "-p"], job="J", seat="s", platform="darwin")
         h = seathome.home_dir("J", "s")
-        self.assertEqual((argv, m), (["claude", "-p"], "best-effort"))
+        self.assertEqual((argv, m), (["claude", "--settings", str(h / seathome.SEAT_SETTINGS), "-p"], "best-effort"))
         self.assertEqual(env["HOME"], str(h / "home"))
         self.assertEqual(env["GIT_CONFIG_NOSYSTEM"], "1")
         self.assertEqual(env["GIT_CONFIG_GLOBAL"], str(h / "gitconfig"))
@@ -1014,7 +1056,7 @@ class BestEffortTest(SeatHomeCase):
             r2 = dict(run)
             b, _ = runner._seat_argv(self.cfg, r2)
         self.assertIsNone(why)
-        self.assertEqual(a, ["claude", "-p"])
+        self.assertEqual([a[0], a[1], a[-1]], ["claude", "--settings", "-p"])   # + the seat's allow rules
         self.assertEqual(r2["seat_mode"], "best-effort")
         self.assertIn("SWARM_SEAT_BROKER", r2["seat_env"])
         self.assertTrue(r2["seat_home"])
@@ -1035,7 +1077,7 @@ class BestEffortTest(SeatHomeCase):
         with mock.patch.object(seathome, "jail_platform", lambda platform=None: True):
             argv, env, m = seathome.launch(self.cfg, ["claude"], job="J", seat="s", probe=lambda: (False, "no userns"),
                                            no_userns=lambda: "unprivileged user namespaces are disabled (x=0)")
-        self.assertEqual((argv, m), (["claude"], "best-effort"))
+        self.assertEqual((argv, m), (["claude", "--settings", *[str(seathome.home_dir("J", "s") / seathome.SEAT_SETTINGS)]], "best-effort"))
         self.assertEqual(env["GIT_CONFIG_NOSYSTEM"], "1")
         with mock.patch.object(seathome, "jail_platform", lambda platform=None: True), \
                 mock.patch("swarm.seatjail.available", lambda: (False, "no userns")):

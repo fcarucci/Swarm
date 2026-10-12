@@ -254,6 +254,29 @@ def _read_person(path: Path) -> bytes | None:
         os.close(fd)
 
 
+SEAT_SWARM_COMMANDS = ("post", "read", "done", "review", "verdict", "goal-ready", "land", "ask", "answer", "seat",
+                       "who", "status")
+SEAT_ALLOW = tuple(f"Bash(swarm {c}:*)" for c in SEAT_SWARM_COMMANDS) + ("Bash(make test:*)",)
+SEAT_SETTINGS = "claude-settings.json"     # in the seat's directory: ~/.claude/settings.json for the seat
+
+
+def seat_settings(person: bytes | None) -> str:
+    """The seat's Claude user settings: the person's ~/.claude/settings.json (hooks, plugins, everything kept) with
+    `permissions.allow` rules for exactly the documented seat commands added (SEAT_ALLOW), so the harness's
+    auto-mode classifier does not deny a seat's own `swarm done`. Nothing broader: the broker, the hook guard and
+    the jail still decide what runs. Unreadable or non-object settings: just the rules."""
+    try:
+        data = json.loads(person) if person else {}
+    except ValueError:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    perms = data.get("permissions") if isinstance(data.get("permissions"), dict) else {}
+    allow = [r for r in (perms.get("allow") or []) if isinstance(r, str)] if isinstance(perms.get("allow"), list) else []
+    perms = {**perms, "allow": allow + [r for r in SEAT_ALLOW if r not in allow]}
+    return json.dumps({**data, "permissions": perms}, indent=2)
+
+
 def prepare(cfg: dict, job: str, seat: str) -> Path:
     """Create or refresh the seat's directory (privfs: no link followed, this user's, 0700); its path."""
     from swarm import safefs
@@ -262,6 +285,7 @@ def prepare(cfg: dict, job: str, seat: str) -> Path:
     home = paths.home()
     known = _read_person(home / ".ssh" / "known_hosts") or b""
     claude_json = _read_person(home / ".claude.json")
+    person_settings = _read_person(home / ".claude" / "settings.json")
     client = (Path(__file__).resolve().parent.parent / "seatbroker_client.py").read_bytes()
     proto = (Path(__file__).resolve().parent.parent / "seatproto.py").read_bytes()
     fds = []
@@ -273,6 +297,7 @@ def prepare(cfg: dict, job: str, seat: str) -> Path:
         for sub in ("home", "tmp", "claude", "codex", ".ssh", "broker", "bin", "gh"):
             os.close(safefs.open_sub(h, sub, strict_mode=0o700))
         privfs.write_atomic(h, "gitconfig", gitconfig_text(cfg))
+        privfs.write_atomic(h, SEAT_SETTINGS, seat_settings(person_settings), 0o400)   # read-only for the seat
 
         def into(sub, name, data, mode=0o600):
             d = safefs.open_sub(h, sub, strict_mode=0o700)
@@ -417,7 +442,8 @@ def jail_spec(cfg: dict, seat_home: Path, workdir: str | None, home: Path | None
     h, sh = home_s, str(seat_home)
     binds: list = [[f"{sh}/claude", f"{h}/.claude", "rw"]]
     binds += [[f"{h}/.claude/{n}", f"{h}/.claude/{n}", "ro", "follow"] for n in CLAUDE_RO
-              if os.path.lexists(f"{h}/.claude/{n}")]
+              if n != "settings.json" and os.path.lexists(f"{h}/.claude/{n}")]
+    binds.append([f"{sh}/{SEAT_SETTINGS}", f"{h}/.claude/settings.json", "ro"])   # the person's + seat allow rules
     binds += [[f"{h}/.claude/{n}", f"{h}/.claude/{n}", "rw"] for n in CLAUDE_RW if os.path.exists(f"{h}/.claude/{n}")]
     binds.append([f"{sh}/codex", f"{h}/.codex", "rw"])
     binds += [[f"{h}/.codex/{n}", f"{h}/.codex/{n}", "ro", "follow"] for n in CODEX_RO
@@ -530,7 +556,16 @@ def launch(cfg: dict, argv: list, *, job: str, seat: str, workdir: str | None = 
         raise SeatIsolationError(f"no filesystem jail on {platform or sys.platform} and [drive] seat_isolation = "
                                  "\"strict\": not started")
     h = prepare(cfg, job, seat)
-    return list(argv), best_effort_env(cfg, h, platform), m
+    return with_seat_settings(argv, h), best_effort_env(cfg, h, platform), m
+
+
+def with_seat_settings(argv: list, seat_home: Path) -> list:
+    """A best-effort Claude seat keeps the person's config dir (CLAUDE_CONFIG_DIR), which is not the seat's to
+    write: its allow rules come as `--settings <the seat's settings file>` (merged with the user settings)."""
+    argv = list(argv)
+    if argv and os.path.basename(str(argv[0])).lower().startswith("claude") and "--settings" not in argv:
+        argv[1:1] = ["--settings", os.path.join(str(seat_home), SEAT_SETTINGS)]
+    return argv
 
 
 def _jail_git_overrides(h: str) -> dict:
