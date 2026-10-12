@@ -79,7 +79,7 @@ class FakeSnapshot:
         return {**cfg, "recipe": "coding", "review_role": "reviewer", "review_gates": "standard"}
 
 
-support_posix = support.posix_only("symlinks and /proc fds")
+support_posix = support.posix_only("planted symlinks (drive mode is Linux-only)")
 
 
 class PassCase(unittest.TestCase):
@@ -184,12 +184,11 @@ class EnumerationTests(PassCase):
         self.assertEqual([j for j, _ in self.exec.launched], ["K"])          # K was driven, J held
 
     def plant_lock(self, name="J"):
-        from swarm.supervisor import privfs
-        with privfs.dir_fd(ledger.SUBDIR) as d:
-            path = os.path.join(f"/proc/self/fd/{d}", ledger._lock_name(ledger._name(self.key, name)))
-            if os.path.lexists(path):
-                os.unlink(path)
-            os.symlink("/nonexistent-target", path)
+        from swarm.supervisor import settings
+        path = settings.private_dir() / ledger.SUBDIR / ledger._lock_name(ledger._name(self.key, name))
+        if os.path.lexists(path):
+            os.unlink(path)
+        os.symlink("/nonexistent-target", path)
 
     @support_posix
     def test_planted_lock_symlink_holds_job_not_pass(self):
