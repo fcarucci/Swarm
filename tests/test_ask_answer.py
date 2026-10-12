@@ -226,6 +226,30 @@ class QuestionCli(RoutingEnv):
         self.assertEqual(self.cli('answer',str(id),'--reopen','red')[0],0)
         self.assertIn('red',self.turn('asker')['hookSpecificOutput']['additionalContext'])
 
+class IntermixedArguments(RoutingEnv):
+    """`swarm answer 12 --key K text` and `swarm ask --job J Which --to human DB?`: options before or between
+    the words of the text, on every Python the swarm supports (3.11's argparse needs the intermixed parse)."""
+    plugins_disabled = ('engineering-team',)
+
+    def test_answer_text_after_an_option(self):
+        self.activate('J', session='root-session')
+        rc, out, err = self.cli('ask', '--job', 'J', '--to', 'human', 'Choose?')
+        self.assertEqual((rc, err), (0, ''))
+        qid = int(out.strip().splitlines()[0].removeprefix('Q'))
+        rc, out, err = self.cli('answer', str(qid), '--comment', 'my pick', 'blue')
+        self.assertEqual(rc, 0, err)
+        with self.board() as board:
+            self.assertEqual(board.blocker(qid).resolved_how, 'blue')
+
+    def test_ask_text_around_an_option(self):
+        self.activate('J', session='root-session')
+        rc, out, err = self.cli('ask', '--job', 'J', 'Which', '--to', 'human', 'colour?')
+        self.assertEqual((rc, err), (0, ''))
+        qid = int(out.strip().splitlines()[0].removeprefix('Q'))
+        with self.board() as board:
+            self.assertEqual(board.blocker(qid).reason, 'Which colour?')
+
+
 class DriveRecordLines(RoutingEnv):
     """In a drive job (a drive ledger on this host) ask, answer, `post --to`, done and deactivate end with the
     record line the PostToolUse hook receipts; each real CLI output is read by drivegate's own parser
