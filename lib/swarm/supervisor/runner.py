@@ -351,14 +351,58 @@ def _group_alive(pgid: int) -> bool:
         return False
 
 
+def _ps_members(pgid: int, want: str) -> list[int] | None:
+    """Without /proc (macOS, BSD): the group's live members from `ps -A -o pid=,pgid=,stat=`, each kept only
+    when `ps -E` (its environment, readable for this user's own processes) carries `want`. None when ps
+    cannot be run or read (the caller then knows nothing)."""
+    try:
+        out = subprocess.run(["ps", "-A", "-o", "pid=,pgid=,stat="], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    found = []
+    for line in out.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 3 or not parts[0].isdigit() or not parts[1].isdigit():
+            continue
+        if int(parts[1]) != pgid or parts[2].startswith("Z"):
+            continue
+        try:
+            env = subprocess.run(["ps", "-E", "-ww", "-p", parts[0], "-o", "command="], capture_output=True,
+                                 text=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if want in env.stdout.split():
+            found.append(int(parts[0]))
+    return found
+
+
+def _list_members(pgid, tag: str | None, since, env: str = RUN_ENV) -> list[int] | None:
+    """_members, or None when the members cannot be listed here (no /proc and no usable ps)."""
+    if not tag or not pgid:
+        return []
+    if not os.path.isdir("/proc/self"):
+        try:
+            return _ps_members(int(pgid), f"{env}={tag}")
+        except (TypeError, ValueError):
+            return []
+    return _members(pgid, tag, since, env)
+
+
 def _members(pgid, tag: str | None, since, env: str = RUN_ENV) -> list[int]:
     """The processes of group `pgid` that belong to this run: their environment carries
     <env>=<tag> (RUN_ENV, set on the session, inherited by what it starts; swarm.bg uses its own
     variable) and they started no earlier than the session's leader (`since`, /proc start
-    ticks). A group id reused by an unrelated group has no such member. No tag or no /proc:
-    none (nothing is ever signalled blind)."""
+    ticks). A group id reused by an unrelated group has no such member. No tag: none (nothing is
+    ever signalled blind). Without /proc, `ps` lists them (_ps_members; no start-time check there)."""
     if not tag or not pgid:
         return []
+    if not os.path.isdir("/proc/self"):
+        try:
+            return _ps_members(int(pgid), f"{env}={tag}") or []
+        except (TypeError, ValueError):
+            return []
     want = f"{env}={tag}".encode()
     try:
         since = int(since or 0)
@@ -392,7 +436,15 @@ def _signal_run(pgid: int, sig, proc, tag: str | None, since) -> None:
         except (ProcessLookupError, PermissionError, OSError):
             pass
         return
-    for pid in _members(pgid, tag, since):   # only this run's own processes, one by one
+    members = _members(pgid, tag, since)
+    if members and not os.path.isdir("/proc/self") and not hasattr(os, "pidfd_open"):
+        # no /proc and no pidfds (macOS): the group whose members were just seen carrying this run's tag
+        try:
+            os.killpg(int(pgid), sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        return
+    for pid in members:   # only this run's own processes, one by one
         _signal_member(pid, pgid, tag, since, sig)
 
 
@@ -765,14 +817,15 @@ def _stop_session(run: dict, proc=None, grace: float | None = None) -> None:
 def group_presence(run: dict) -> str:
     """"present" | "absent" | "unknown" for a run contained in its process group (no scope unit, spec 3.11
     [T21]): a tagged member is evidence of presence; no member is "absent" only where the members can be
-    listed (/proc); elsewhere "unknown" (never "absent" without positive evidence). A run that never
-    started a session is "absent"."""
+    listed (/proc, or `ps` where there is none); otherwise "unknown" (never "absent" without positive
+    evidence). A run that never started a session is "absent"."""
     pgid = run.get("child_pgid") or run.get("child_pid")
     if not pgid:
         return "absent"
-    if _members(pgid, run.get("run_tag"), run.get("child_start")):
+    found = _list_members(pgid, run.get("run_tag"), run.get("child_start"))
+    if found:
         return "present"
-    return "absent" if os.path.isdir("/proc/self") else "unknown"
+    return "unknown" if found is None else "absent"
 
 
 def session_presence(run: dict, deadline: float | None = None) -> str:
@@ -1164,8 +1217,10 @@ def _execute(cfg: dict, run: dict, *, popen, clock, sleep, poll: float, board_ev
     try:
         # the child changes into the opened directory itself (/proc/self/fd/<n> is the open
         # directory, not a path lookup), before systemd-run execs; nothing re-resolves the path
-        proc = popen(argv, cwd=f"/proc/self/fd/{wfd}", pass_fds=(wfd,), env=env, stdin=subprocess.PIPE,
-                     stdout=subprocess.PIPE, stderr=fd_err, start_new_session=True)
+        where = ({"cwd": f"/proc/self/fd/{wfd}"} if os.path.isdir("/proc/self/fd")
+                 else {"preexec_fn": lambda: os.fchdir(wfd)})   # no /proc (macOS): the child enters it itself
+        proc = popen(argv, pass_fds=(wfd,), env=env, stdin=subprocess.PIPE,
+                     stdout=subprocess.PIPE, stderr=fd_err, start_new_session=True, **where)
     except OSError as exc:   # no such binary, bad cwd: the session never started
         os.close(wfd)
         os.write(fd_err, f"could not start the session: {type(exc).__name__}\n".encode())

@@ -28,7 +28,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import support  # noqa: F401  (puts lib/ on sys.path)
-from support import SANDBOX, drive_backends, home_env, posix_only, tq, wait_until
+from support import SANDBOX, add_backend_variants, drive_backends, home_env, posix_only, tq, wait_until
 
 import swarm.cli as swarm
 from swarm import enrolment
@@ -55,13 +55,15 @@ def stop(p) -> None:
 
 
 class Home(unittest.TestCase):
-    """A temporary HOME with a config for `backend` (a support harness), the private directory in place."""
-    backend = "sqlite"
+    """A temporary HOME with a config for the board of `harness_factory` (a support harness: sqlite unless a
+    backend variant says otherwise), the private directory in place."""
+    harness_factory = staticmethod(drive_backends()["sqlite"])
 
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(dir=SANDBOX, prefix="sdrv-home-"))
         self.addCleanup(shutil.rmtree, self.home, True)
-        self.h = drive_backends()[self.backend](self.id())
+        self.h = self.harness_factory(self.id())
+        self.backend = self.h.name
         self.addCleanup(self.h.close)
         self.h.reset()
         self.config = self.home / ".config" / "swarm" / "config.toml"
@@ -539,22 +541,13 @@ class IdleCase(Home):
         self.assertLess(worst, 1.0, f"{self.backend}: a board change woke the driver after {worst:.2f} s")
 
 
-class SqliteIdle(IdleCase):
-    backend = "sqlite"
-
-
-class FileIdle(IdleCase):
-    backend = "file"
-
-
-@unittest.skipUnless("postgres" in drive_backends(), "needs SWARM_TEST_CONFIG (a throwaway Postgres)")
-class PostgresIdle(IdleCase):
-    backend = "postgres"
+# IdleCase runs on sqlite; IdleCaseFile, and IdleCasePostgres with SWARM_TEST_CONFIG (CI's postgres job)
+add_backend_variants(globals(), IdleCase, skip=("memory", "sqlite"))
 
 
 class MemoryIdle(Home):
     """The memory board is in-process only: its driver runs in a thread (the board pushes changes)."""
-    backend = "memory"
+    harness_factory = staticmethod(drive_backends()["memory"])
 
     def setUp(self):
         super().setUp()
@@ -770,10 +763,32 @@ class GroupPresenceTests(unittest.TestCase):
         from swarm.supervisor import runner
         run = {"child_pgid": 12345, "run_tag": "r1-x", "child_start": 1, "unit": None}
         real = os.path.isdir
-        with mock.patch.object(runner, "_members", return_value=[]), \
-                mock.patch("os.path.isdir", side_effect=lambda p: False if p == "/proc/self" else real(p)):
-            self.assertEqual(runner.group_presence(run), "unknown")
-            self.assertTrue(runner._session_alive(run))
+        with mock.patch("os.path.isdir", side_effect=lambda p: False if p == "/proc/self" else real(p)):
+            with mock.patch.object(runner, "_ps_members", return_value=None):      # ps cannot tell
+                self.assertEqual(runner.group_presence(run), "unknown")
+                self.assertTrue(runner._session_alive(run))
+            with mock.patch.object(runner, "_ps_members", return_value=[]):        # ps lists no member
+                self.assertEqual(runner.group_presence(run), "absent")
+            with mock.patch.object(runner, "_ps_members", return_value=[4242]):
+                self.assertEqual(runner.group_presence(run), "present")
+
+    def test_ps_lists_the_tagged_members_of_the_group(self):
+        from swarm.supervisor import runner
+        tag = "r9-00000000000000fe"
+        p = subprocess.Popen(["sh", "-c", "sleep 30 & wait"], start_new_session=True,
+                             env={**os.environ, runner.RUN_ENV: tag})
+        self.addCleanup(stop, p)
+        listing = f"{p.pid} {p.pid} S\n999999 {p.pid} Z\n7 7 S\n"
+
+        def ps(argv, **kw):
+            if argv[:2] == ["ps", "-A"]:
+                return SimpleNamespace(returncode=0, stdout=listing)
+            pid = argv[argv.index("-p") + 1]
+            env = f"{runner.RUN_ENV}={tag}" if pid == str(p.pid) else "OTHER=1"
+            return SimpleNamespace(returncode=0, stdout=f"sh -c x {env}\n")
+        with mock.patch.object(runner.subprocess, "run", side_effect=ps):
+            self.assertEqual(runner._ps_members(p.pid, f"{runner.RUN_ENV}={tag}"), [p.pid])
+            self.assertEqual(runner._ps_members(p.pid, f"{runner.RUN_ENV}=other"), [])
 
 
 class RunnerExitWakesTests(NoSystemdContainmentTests):
