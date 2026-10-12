@@ -290,10 +290,33 @@ class _Ctx:
                         reason=reason)
 
 
+def candidate_landed(integrated: dict, candidate: str | None) -> bool:
+    """Whether the judged `candidate` (a sha, or `ref@sha`) is the landed head of a group: `landed` is set only
+    from a land receipt verified at that sha on every pinned destination (driver_snapshot._landed), so this is
+    "INTEGRATED, on all destinations, at exactly the candidate"."""
+    sha = (candidate or "").rpartition("@")[2].strip().lower()
+    if len(sha) < 7:
+        return False
+    for entry in (integrated or {}).values():
+        landed = str((entry or {}).get("landed") or "").lower()
+        if len(landed) >= 7 and (landed.startswith(sha) or sha.startswith(landed)):
+            return True
+    return False
+
+
 def _terminal(c: _Ctx) -> list[Action] | None:
-    """Step 2 (spec 3.3): a receipted terminal goal or ruling verdict closes the job (spec 3.7)."""
+    """Step 2 (spec 3.3): a receipted terminal goal or ruling verdict closes the job (spec 3.7). In a coding job a
+    MET closes only when the judged candidate has landed (candidate_landed): a MET on unlanded work is not the
+    goal met. An unlanded ruling MET is recorded UNREACHABLE (the ruling is the job's last word: the work exists
+    but did not land within the budget); an unlanded goal MET does not close and the job keeps driving."""
     gv = c.s.goal_verdict
     if _valid(gv, c.s.generation) and gv.verdict in ("met", "unreachable") and gv.scope in ("goal", "ruling"):
+        if gv.verdict == "met" and c.cfg["recipe"] != "artifact" and not candidate_landed(c.s.integrated,
+                                                                                         gv.candidate):
+            if gv.scope == "ruling":
+                return [c.act("record_unreachable", None, "ruling", 0, prompt="mechanical", trigger=gv.receipt_id,
+                              ruling=True, reason="ruling met, but the candidate is not landed")]
+            return None
         return [c.act("close", None, None, 0, prompt="close", trigger=gv.receipt_id, reason=gv.verdict)]
     return None
 
