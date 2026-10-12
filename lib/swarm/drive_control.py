@@ -14,9 +14,10 @@ it and must not write the ledger. Instead (drive_cli.control_request):
    seat cannot write them);
 3. the driver, in its pass, is the only writer: find() lists the receipted requests, apply() checks them
    again (the receipt, its decision fields, the message, the args digest, the generation and incarnation,
-   expiry, one-time use through the ledger's `ctlreq:<id>` mark, and the caller's authority under the same
-   rules as the Claude path) and applies the change ledger first, then the board side, and posts
-   CONTROL-APPLIED <id> <kind> or CONTROL-REFUSED <id> <why>.
+   expiry, the caller's authority under the same rules as the Claude path) and applies the change ledger
+   first, then the board side, and posts CONTROL-APPLIED <id> <kind> or CONTROL-REFUSED <id> <why>. A
+   decided request is used up like a grant: its receipt and stored arguments are removed (_consume), and the
+   ledger's `ctlreq:<id>` mark is the second check.
 
 Kinds: halt, unhalt, repair, cancel (the requester); ack (the live lead); pins, withdraw, release (the live
 lead or the requester). A Claude session keeps the direct path (a grant)."""
@@ -231,8 +232,11 @@ def apply(board, cfg: dict, led, req: ControlRequest, now) -> tuple:
     from swarm.supervisor import ledger as ledger_mod
     bk = drive_cli.board_key(cfg)
     job = req.job
-    if led is not None and (led.job != job or f"{MARK}{req.id}" in led.watermarks):
-        return False, "already decided (a request is used once)" if led.job == job else "another job's request"
+    if led is not None and led.job != job:
+        return False, "another job's request"
+    if led is not None and f"{MARK}{req.id}" in led.watermarks:
+        _consume(bk, job, req.id)                    # decided before: what is left of it goes
+        return False, "already decided (a request is used once)"
     msg = next((m for m in board.messages_after(req.id - 1, job) if m.id == req.id), None)
     parsed = parse_text(msg.message) if msg is not None else None
     if parsed is None or parsed != (req.kind, req.args_sha):
@@ -250,6 +254,7 @@ def apply(board, cfg: dict, led, req: ControlRequest, now) -> tuple:
         by = f"{who} (control request {req.id})"
         if req.kind == "repair":
             rep = drive_cli.core_repair(board, bk, job, f"person ({by})", getattr(f, "generation", None))
+            _consume(bk, job, req.id)                # one repair per request, however often the ledger goes bad
             _mark(bk, job, req.id)
             _post(board, job, f"{APPLIED}{req.id} repair: {', '.join(rep.lost)[:300] or 'nothing lost'}")
             return True, "repaired"
@@ -271,6 +276,7 @@ def apply(board, cfg: dict, led, req: ControlRequest, now) -> tuple:
         why = str(exc).removeprefix("refused: ")
         if led is not None:
             _decide(ledger_mod.load(bk, job) or led, req)   # a fresh copy: the core may have changed `led`
+        _consume(bk, job, req.id)                    # decided: refused for good
         _post(board, job, f"{REFUSED}{req.id} {why}")
         return False, why
     led.watermarks[f"{MARK}{req.id}"] = 1          # used once: saved with the change itself
@@ -278,6 +284,7 @@ def apply(board, cfg: dict, led, req: ControlRequest, now) -> tuple:
         led.save()                                   # ledger first
     except ledger_mod.LedgerConflict:
         return False, "the ledger changed meanwhile: the next pass tries again"
+    _consume(bk, job, req.id)                        # decided: the receipt and its arguments are used up
     if row is not None:
         try:
             drive_cli._set_state(board, row, "cancelled" if req.kind == "cancel" else "released", job)
@@ -289,6 +296,19 @@ def apply(board, cfg: dict, led, req: ControlRequest, now) -> tuple:
                                  SimpleNamespace(**req.fields), led.ledger_rev if row is None else row.id)
     _post(board, job, f"{APPLIED}{req.id} {req.kind}")
     return True, req.kind
+
+
+def _consume(bk: str, job: str, msg_id: int) -> None:
+    """Use up a decided request, as a grant is used up: its receipt and its stored arguments are removed, so
+    nothing can apply it again even if the ledger that marks it decided is lost (a repair that does not keep
+    the watermarks, a ledger that goes bad again). Never raises."""
+    from swarm import enrolment, receipts, safefs
+    receipts.drop(bk, job, KIND, str(msg_id))
+    try:
+        with enrolment._dir(create=False) as d:
+            safefs.unlink(d, _body_name(bk, job, msg_id))
+    except OSError:
+        pass
 
 
 def _decide(led, req: ControlRequest) -> None:

@@ -1260,6 +1260,61 @@ class CodexControlRequests(ControlCase):
         self.assertTrue(applied, why)
         self.assertIsNotNone(ledger.load(self.bkey, JOB).halted)
 
+    def _make_bad(self, keep_watermarks=True):
+        entry = next(self.home.rglob(ledger._name(self.bkey, JOB)))
+        body = json.loads(entry.read_text())
+        body["x"] = 1
+        if not keep_watermarks:
+            body["watermarks"] = "lost"                  # the salvage drops the marks, keeps the incarnation
+        entry.write_text(json.dumps(body))
+
+    def _gone(self, req, led):
+        from swarm import drive_control, receipts
+        inc, gen = (led.incarnation, led.generation) if led is not None else (receipts.GRANT_INCARNATION_NO_LEDGER, 1)
+        self.assertIsNone(receipts.find(self.bkey, JOB, "control_request", str(req.id), rev=1, incarnation=inc,
+                                        generation=gen, now=0))
+        self.assertIsNone(drive_control.load_body(self.bkey, JOB, req.id, req.kind, req.args_sha))
+
+    @posix_only("drive repair moves the bad ledger with a dir_fd rename (POSIX); drive mode is refused on Windows")
+    def test_X1_a_repair_request_repairs_once(self):
+        """CX1 X1: the request is used up when decided, so a ledger that goes bad again is not re-repaired."""
+        self._make_bad()
+        rc, _, err, receipted = self.codex(REQ_SESSION, "drive", "repair", "--job", JOB)
+        self.assertEqual((rc, receipted), (0, True), err)
+        [(req, (applied, why))] = self.driver(led=None)
+        self.assertTrue(applied, why)
+        self._gone(req, None)
+        self._make_bad()
+        self.assertEqual(self.driver(led=None), [])
+        with self.assertRaises(ledger.LedgerBadError):
+            ledger.load(self.bkey, JOB)
+
+    @posix_only("drive repair moves the bad ledger with a dir_fd rename (POSIX); drive mode is refused on Windows")
+    def test_X2_a_repair_that_loses_the_marks_replays_no_old_request(self):
+        """CX1 X2: decided requests are used up, so a repair that keeps the incarnation but not the marks does
+        not bring them back (a stale unhalt cannot lift the repair's halt)."""
+        self.assertEqual(self.run_cmd("halt", "--job", JOB)[0], 0)
+        self.codex(REQ_SESSION, "unhalt", "--job", JOB)
+        [(req, (applied, why))] = self.driver()
+        self.assertTrue(applied, why)
+        self._gone(req, ledger.load(self.bkey, JOB))
+        inc = ledger.load(self.bkey, JOB).incarnation
+        self._make_bad(keep_watermarks=False)
+        self.set_session(REQ_SESSION)
+        self.assertEqual(self.run_cmd("drive", "repair", "--job", JOB)[0], 0)
+        led = ledger.load(self.bkey, JOB)
+        self.assertEqual((led.incarnation, led.watermarks), (inc, {}))
+        led.budgets = {"max_sessions": 5.0}
+        led.save()
+        self.assertEqual(self.driver(), [])
+        self.assertIsNotNone(ledger.load(self.bkey, JOB).halted)
+
+    def test_a_refused_request_is_used_up_too(self):
+        self.codex("ENG-SESSION", "halt", "--job", JOB)
+        [(req, (applied, _))] = self.driver()
+        self.assertFalse(applied)
+        self._gone(req, ledger.load(self.bkey, JOB))
+
     def test_a_claude_session_keeps_the_direct_path(self):
         self.assertEqual(self.run_cmd("halt", "--job", JOB)[0], 0)
         rc, out, err = self.run_cmd("unhalt", "--job", JOB)
