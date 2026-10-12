@@ -815,7 +815,7 @@ def _stop_unit(unit: str, proc=None, grace: float | None = None) -> None:
 def _stop_session(run: dict, proc=None, grace: float | None = None) -> None:
     """Stop everything of the run's session: its scope, its Job Object (Windows), else its process group."""
     if run.get("contained") == "job":
-        _job_stop(int(run["restart_id"]), proc, grace)
+        _job_stop(run, proc, grace)
         return
     if run.get("unit"):
         _stop_unit(run["unit"], proc, grace)
@@ -830,12 +830,12 @@ def group_presence(run: dict) -> str:
     listed (/proc, or `ps` where there is none); otherwise "unknown" (never "absent" without positive
     evidence). A run that never started a session is "absent"."""
     if run.get("contained") == "job":   # Windows: the job of a live runner; a dead runner's job died with it
-        active = _job_active(int(run.get("restart_id") or 0))
+        active = _job_active(run)   # the named job (rr2): every process of the seat, not only its leader
         if active is not None:
             return "present" if active else "absent"
         from swarm.supervisor import procwatch
         pid = run.get("child_pid")
-        return "present" if pid and procwatch.ProcWatch(int(pid), run.get("child_token")).alive() else "absent"
+        return "present" if pid and procwatch.ProcWatch(int(pid), run.get("child_token")).alive() else "unknown"
     pgid = run.get("child_pgid") or run.get("child_pid")
     if not pgid:
         return "absent"
@@ -916,6 +916,19 @@ def _start_windows(run: dict, popen) -> int:
 
 _JOBS: dict = {}   # restart id -> the Job Object handle this runner holds (closing it kills the seat)
 
+JOB_QUERY_TERMINATE = 0x0004 | 0x0008   # JOB_OBJECT_QUERY | JOB_OBJECT_TERMINATE
+ERROR_FILE_NOT_FOUND = 2
+
+
+def job_name(run: dict) -> str | None:
+    """The seat's named Job Object (rr2): `Local\\swarm-<run_tag>`, so any process of this user in this logon
+    session can open it by name to stop the seat or count its processes, not only the runner that made it.
+    The name lives as long as some handle to the job is open: the runner holds one, and KILL_ON_JOB_CLOSE ends
+    every process of the job when the runner's last handle closes, so a name that no longer opens means no
+    seat process is left."""
+    tag = run.get("run_tag")
+    return f"Local\\swarm-{tag}" if isinstance(tag, str) and _TAG.match(tag) else None
+
 
 def _k32():
     import ctypes
@@ -923,24 +936,84 @@ def _k32():
     k32 = ctypes.WinDLL("kernel32", use_last_error=True)
     k32.CreateJobObjectW.restype = wintypes.HANDLE
     k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+    k32.OpenJobObjectW.restype = wintypes.HANDLE
+    k32.OpenJobObjectW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
     k32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
     k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
     k32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
     k32.QueryInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
                                               ctypes.c_void_p]
     k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    k32.GetCurrentProcess.restype = wintypes.HANDLE
+    k32.LocalFree.argtypes = [ctypes.c_void_p]
     return k32
 
 
-def _job_contain(rid: int, proc) -> None:
+def _user_only_sa():
+    """SECURITY_ATTRIBUTES whose DACL grants the current user (by SID) all access and nobody else any
+    (`D:P(A;;GA;;;<sid>)`); with the buffers that must outlive the call that uses it."""
+    import ctypes
+    from ctypes import wintypes
+    k32 = _k32()
+    adv = ctypes.WinDLL("advapi32", use_last_error=True)
+    adv.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    adv.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+                                        ctypes.POINTER(wintypes.DWORD)]
+    adv.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
+    adv.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.DWORD)]
+    tok = wintypes.HANDLE()
+    if not adv.OpenProcessToken(k32.GetCurrentProcess(), 0x0008, ctypes.byref(tok)):   # TOKEN_QUERY
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        need = wintypes.DWORD()
+        adv.GetTokenInformation(tok, 1, None, 0, ctypes.byref(need))                    # TokenUser
+        buf = ctypes.create_string_buffer(need.value)
+        if not adv.GetTokenInformation(tok, 1, buf, need, ctypes.byref(need)):
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        k32.CloseHandle(tok)
+    psid = ctypes.cast(buf, ctypes.POINTER(ctypes.c_void_p))[0]                         # TOKEN_USER.User.Sid
+    ssid = wintypes.LPWSTR()
+    if not adv.ConvertSidToStringSidW(psid, ctypes.byref(ssid)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        sddl = f"D:P(A;;GA;;;{ssid.value})"
+    finally:
+        k32.LocalFree(ssid)
+    sd = ctypes.c_void_p()
+    if not adv.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, ctypes.byref(sd), None):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    class SA(ctypes.Structure):
+        _fields_ = [("nLength", wintypes.DWORD), ("lpSecurityDescriptor", ctypes.c_void_p),
+                    ("bInheritHandle", wintypes.BOOL)]
+
+    return SA(ctypes.sizeof(SA), sd, False), sd
+
+
+def _job_contain(rid: int, proc, name: str | None = None) -> None:
     """Put the (suspended) session in a new Job Object that kills every process in it when its last handle
     closes (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: if this runner dies, the seat dies with it), then resume it.
-    Anything it starts is in the job too. Raises when the job cannot be made: the caller stops the session."""
+    Anything it starts is in the job too. The job is named (job_name) with a DACL for this user only, so a
+    driver, `supervise disable` or a reap in another process can stop the seat and see whether it is there.
+    Raises when the job cannot be made: the caller stops the session."""
     import ctypes
     k32 = _k32()
-    job = k32.CreateJobObjectW(None, None)
+    sa = sd = None
+    if name:
+        sa, sd = _user_only_sa()
+    try:
+        job = k32.CreateJobObjectW(ctypes.byref(sa) if sa is not None else None, name)
+        err = ctypes.get_last_error()
+    finally:
+        if sd is not None:
+            k32.LocalFree(sd)
     if not job:
-        raise ctypes.WinError(ctypes.get_last_error())
+        raise ctypes.WinError(err)
+    if name and err == 183:   # ERROR_ALREADY_EXISTS: someone else made a job of this name first; never share it
+        k32.CloseHandle(job)
+        raise OSError(f"job object {name} already exists")
 
     class BASIC(ctypes.Structure):
         _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
@@ -973,26 +1046,65 @@ def _job_contain(rid: int, proc) -> None:
     ntdll.NtResumeProcess(int(proc._handle))
 
 
-def _job_active(rid: int) -> int | None:
-    """How many processes the seat's Job Object holds (None: this process holds no job for the run)."""
+def _job_open(run: dict):
+    """(handle, owned) for the seat's job: this runner's own handle, else one opened by name (owned: the
+    caller closes it). (None, "gone") when the name no longer exists (the job and every process in it ended);
+    (None, "unknown") when it cannot be opened for another reason or the run has no named job."""
     import ctypes
+    rid = int(run.get("restart_id") or 0)
     job = _JOBS.get(rid)
-    if job is None:
-        return None
+    if job is not None:
+        return job, False
+    name = job_name(run)
+    if name is None:
+        return None, "unknown"
+    h = _k32().OpenJobObjectW(JOB_QUERY_TERMINATE, False, name)
+    if not h:
+        return None, ("gone" if ctypes.get_last_error() == ERROR_FILE_NOT_FOUND else "unknown")
+    return h, True
+
+
+def _job_count(job) -> int | None:
+    import ctypes
     buf = (ctypes.c_uint32 * 12)()                    # JOBOBJECT_BASIC_ACCOUNTING_INFORMATION (48 bytes)
     if not _k32().QueryInformationJobObject(job, 1, buf, ctypes.sizeof(buf), None):
         return None
     return int(buf[9])                                # ActiveProcesses
 
 
-def _job_stop(rid: int, proc=None, grace: float | None = None) -> None:
+def _job_active(run: dict) -> int | None:
+    """How many processes the seat's Job Object holds: 0 when its name is gone (the job ended with every
+    process in it), None when it cannot be told."""
+    job, how = _job_open(run)
+    if job is None:
+        return 0 if how == "gone" else None
+    try:
+        return _job_count(job)
+    finally:
+        if how is True:
+            _k32().CloseHandle(job)
+
+
+def _job_stop(run: dict, proc=None, grace: float | None = None) -> None:
     """End every process of the seat's job: TerminateJobObject (Windows has no SIGTERM for a console-less
-    process tree), then close the job."""
+    process tree), from the runner or from any other process of this user (the job is named), then wait a
+    little for the job to empty."""
+    rid = int(run.get("restart_id") or 0)
+    k32 = _k32()
     job = _JOBS.pop(rid, None)
+    owned = job is not None
+    if job is None:
+        job, how = _job_open(run)
+        owned = how is True
     if job is not None:
-        k32 = _k32()
-        k32.TerminateJobObject(job, 1)
-        k32.CloseHandle(job)
+        try:
+            k32.TerminateJobObject(job, 1)
+            end = time.monotonic() + 5
+            while time.monotonic() < end and _job_count(job):
+                time.sleep(0.05)
+        finally:
+            if owned:
+                k32.CloseHandle(job)
     elif proc is not None and proc.poll() is None:
         proc.kill()
     if proc is not None:
@@ -1306,7 +1418,7 @@ def _execute(cfg: dict, run: dict, *, popen, clock, sleep, poll: float, board_ev
                          stderr=fd_err, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | 0x4
                          | getattr(subprocess, "CREATE_NO_WINDOW", 0))   # 0x4: CREATE_SUSPENDED
             try:
-                _job_contain(rid, proc)
+                _job_contain(rid, proc, job_name(run))
             except BaseException:
                 proc.kill()
                 raise
