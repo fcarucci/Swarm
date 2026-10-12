@@ -1,6 +1,6 @@
 # Swarm autonomy: a goal job runs to MET or UNREACHABLE with zero coordinator turns
 
-Status: design, revision 6.1 (EL, job swarm-autonomy, 2026-10-10). Base: github/main 2f194bb.
+Status: design, revision 7 (EL, job swarm-autonomy, 2026-10-10). Base: github/main 2f194bb.
 Revisions 2, 3 and 4 resolve Codex review rounds 1 (23 findings), 2 (23) and 3 (9); revision 5 applies the design
 judge's fixes F1–F24 (`~/work/swarm-autonomy/JUDGE-design.md`, each marked inline as **[Fn]**) and the PM's
 ruling that drive mode is the default for goal jobs (option A, **[A]**); the delta re-review's RR1–RR8 are marked
@@ -116,7 +116,7 @@ supervisor's systemd-launched sessions start agents.
 
 ### 2.2 The guarantee, and its honest limits
 
-**Guarantee.** While (a) the owner host's supervisor timer runs and (b) the board is reachable, every active
+**Guarantee.** While (a) the job's orchestrating session is open on the owner host, so its session driver runs ([T21]), and (b) the board is reachable, every active
 drive-mode goal job is, at every pass, in one of these states: a live seat session or runner is responsible for
 progress; or the pass launches one; or the job is in a bounded backoff with a recorded `not_before`; or the job
 is terminal. Every loop is bounded by a budget whose exhaustion makes a *ruling* due: a ruling judge that may
@@ -752,6 +752,56 @@ passed, and never while the job is halted. So a halt cannot let a default be app
 - **NOTIFY**: when `[events] enabled`, the existing listener also LISTENs on `swarm_board` and kicks the pass
   (same debounce) for drive jobs. No new process.
 - Correctness never depends on kicks: tests run with kicks disabled.
+
+**[T21] The session driver replaces every timer (Francesco, 2026-10-12, binding; supersedes the timer parts of
+§3.11, [M1] items 2 and 4, and the macOS/Windows refusal).** "The swarm 'just works' without installing timers."
+Drive mode depends on no systemd/launchd/Task Scheduler timer, installs none, and works on Linux, macOS and
+Windows with zero setup.
+- **Who drives.** One **session driver** process per orchestrating session that owns at least one active drive
+  job (`requester_session` in the owner record). It is started by `swarm activate` (drive) and by that session's
+  SessionStart or first hook when no driver for the session is running; exactly one per session (a host-private
+  lock `driver-<sha256(session)>.lock`, flock / LockFileEx). It is a detached child (POSIX: own session/process
+  group; Windows: DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP, no console) started with the runner's sanitized
+  environment, never inside a sandbox. It exits when the session's host process (the nearest claude/codex
+  ancestor of the hook that started it) is gone, when no unfinished drive ledger of that session remains, or on
+  the kill switch; it leaves no orphan.
+- **Event-driven, not polling, not hook-dependent.** The driver sleeps until one of: (a) a board change — Postgres
+  `LISTEN`/`NOTIFY` (the channels `tail`/`watch` already use); for sqlite and file boards an OS file-change
+  notification (inotify on Linux, kqueue on macOS, ReadDirectoryChangesW on Windows; stdlib or ctypes, no new
+  dependency) on a per-board **wake file** `~/.local/share/swarm/supervisor/wake/<sha256(board_key)>` that every
+  swarm CLI board write, every hook board write and every runner exit touches; (b) the exit of the session's host
+  process (pidfd/poll on Linux, kqueue `NOTE_EXIT` on macOS, `WaitForSingleObject` on Windows); (c) the **next
+  ledger deadline**: one sleep until the exact earliest of hold `not_before`, question `until`, ruling-due +
+  deadline, close deadline, wall clock, lease expiry and attempt backoff, computed from the ledger (no periodic
+  tick). Only when no notification mechanism is available does it fall back to a backed-off poll (2 s doubling to
+  60 s while nothing changes, back to 2 s on activity); doctor names that degraded mode.
+- **On each wake** it runs one pass (the driver and the drive housekeeping of `run_pass`) under the existing host
+  pass lock, scoped to its session's jobs. Hook kicks and CLI kicks (`drivegate.kick`) only touch the wake file;
+  nothing depends on them.
+- **No LLM calls.** The session driver is deterministic code; it never calls a model (seats are the only model
+  sessions, and they are launched, not called).
+- **Idle cost.** Idle CPU is near zero on every backend: under 0.5 % of one core over 60 s measured from the
+  process's own CPU times, with a bounded number of wakeups; wake latency after a board change is under 1 s with
+  notifications.
+- **Seat containment without systemd.** Where no user systemd manager answers (macOS, Windows, minimal Linux), the
+  runner contains a seat in its own process group (POSIX, killed by group) or a Job Object (Windows, kill on
+  close); `unit_presence` answers from the group/job, never "absent" without positive evidence.
+- **`swarm drive run [--job J]`**: the same loop in the foreground, for unattended progress with no session open;
+  it installs nothing.
+- **Removed:** the running-timer precondition of activation, the macOS/Windows refusal, and the timer doctor
+  FAILs. `swarm supervise` (timer) stays an optional legacy, never required; `swarm supervise disable` still
+  halts drive jobs ([M1] 1, 3). Doctor reports "session driver running for S (mode: listen|notify|poll)" or
+  "no live session driver (the job advances while its session is open, or with `swarm drive run`)".
+- **Guarantee, restated (Francesco: "it's ok to require sessions open for jobs running"):** while the
+  orchestrating session is open — idle or busy, with no coordinator turns — the job advances to MET, UNREACHABLE
+  or CANCELLED. When that session closes, the job pauses (not terminal: seats already running finish, nothing
+  new launches) and resumes when a session that owns it opens (its SessionStart starts the driver) or under
+  `swarm drive run`. This replaces §2.2's "owner host's supervisor timer runs" condition.
+- **Proof:** an end-to-end test where the orchestrating session process is open and idle and the job goes launch →
+  hand-off → judge → MET with zero coordinator turns, driven only by the session driver; a test that the driver
+  exits and leaves no orphan when the session process dies; per-backend idle-CPU, wakeup and latency tests
+  (memory, sqlite, file, postgres; macOS and Windows in CI); and the fake-harness `e2e/drive_live.sh met` passing
+  on the macOS and Windows CI runners.
 
 ### 3.12 Claude and Codex parity; models; rules every seat gets
 
