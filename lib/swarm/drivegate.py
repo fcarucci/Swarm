@@ -1064,6 +1064,30 @@ def write_grants(cfg: dict, payload: dict, host, ctx=None, now=None) -> int:
     return n
 
 
+def write_grant_argv(cfg: dict, argv: list[str], ctx, pid: int | None, now=None) -> str | None:
+    """A seat broker's grant (Task 20): the broker, outside the jail, attests that the seat `ctx` (resolved from
+    its own launch record, as the hook would) submits exactly the brokered `argv` (leading `--config` included),
+    run under the seat's session process `pid`. The grant id, or None when `argv` is no grant command or `ctx`
+    is no resolved seat of its job."""
+    if not argv or not ctx or getattr(ctx, "kind", None) != "seat" or not ctx.led or not ctx.seat \
+            or ctx.intent is None:
+        return None
+    ns = parse_swarm(list(argv))
+    if ns is None or getattr(ns, "cmd", None) not in GRANT_SUBS or ctx.job != getattr(ns, "job", None):
+        return None
+    from swarm.board.autoinit import store_key
+    bk = store_key(cfg)
+    now = time.time() if now is None else now
+    rid = grant_id(ns, pid)
+    led = ctx.led
+    receipts.write(bk, receipts.Receipt(
+        board_key=bk, job=ns.job, generation=led.generation, incarnation=led.incarnation,
+        action_id=ctx.intent.action_id, attempt=ctx.intent.attempt, seat=ctx.seat, kind="grant", record_id=rid,
+        rev=1, content_sha=receipts.content_sha("grant", {"argv_sha": rid}), args_sha=rid,
+        expires_at=now + GRANT_SECONDS))
+    return rid
+
+
 def drop_grants(cfg: dict, payload: dict, host) -> int:
     """PostToolUse (or a refused PreToolUse): remove every grant this shell call could have been given, used
     or not, so none outlives its call. Returns how many were removed. Never raises."""

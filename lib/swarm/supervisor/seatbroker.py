@@ -76,57 +76,110 @@ def _under(path: str, root: str) -> bool:
     return path == root or path.startswith(root.rstrip("/") + "/")
 
 
-def seat_transcript(seat_dir: str, harness: str, key: str | None) -> str | None:
-    """The seat's own transcript in its seat directory (Claude: claude/projects/<p>/<session>.jsonl; Codex:
-    codex/sessions/Y/M/D/rollout-*-<thread>.jsonl), found without following a link, or None."""
-    if not key or not re.fullmatch(r"[A-Za-z0-9-]{8,80}", key):
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def _read_fd(fd: int, limit: int) -> bytes | None:
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_size > limit:
         return None
-    if harness == "codex":
-        base, depth, want = os.path.join(seat_dir, "codex", "sessions"), 3, lambda n: n.endswith(f"-{key}.jsonl")
-    else:
-        base, depth, want = os.path.join(seat_dir, "claude", "projects"), 1, lambda n: n == f"{key}.jsonl"
-    level = [base]
-    for _ in range(depth):
-        nxt = []
-        for d in level:
-            try:
-                with os.scandir(d) as it:
-                    nxt += [e.path for e in it if e.is_dir(follow_symlinks=False)]
-            except OSError:
-                pass
-        level = nxt
-    for d in level:
-        try:
-            with os.scandir(d) as it:
-                found = [e.path for e in it if want(e.name) and e.is_file(follow_symlinks=False)]
-        except OSError:
-            found = []
-        if found:
-            return sorted(found)[0]
-    return None
+    chunks, left = [], limit
+    while left > 0:
+        c = os.read(fd, min(left, 1 << 20))
+        if not c:
+            break
+        chunks.append(c)
+        left -= len(c)
+    return b"".join(chunks)
 
 
-def read_seat_file(path: str, limit: int) -> bytes | None:
-    """A file of the seat's directory (written by the seat): read without following a link, a regular file of
-    at most `limit` bytes, else None."""
+def read_under(root: str, rel: str, limit: int) -> bytes | None:
+    """The file `rel` below the directory `root`, reached one component at a time with O_NOFOLLOW (a link
+    anywhere on the way, a non-directory component, "..", or a non-regular or oversize file: None)."""
+    parts = [p for p in rel.split("/") if p not in ("", ".")]
+    if not parts or ".." in parts:
+        return None
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        fd = os.open(root, _DIR_FLAGS)
     except OSError:
         return None
     try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode) or st.st_size > limit:
-            return None
-        chunks, left = [], limit
-        while left > 0:
-            c = os.read(fd, min(left, 1 << 20))
-            if not c:
-                break
-            chunks.append(c)
-            left -= len(c)
-        return b"".join(chunks)
+        for part in parts[:-1]:
+            nfd = os.open(part, _DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+        leaf = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=fd)
+    except OSError:
+        os.close(fd)
+        return None
+    os.close(fd)
+    try:
+        return _read_fd(leaf, limit)
+    finally:
+        os.close(leaf)
+
+
+def _transcript_shape(harness: str, key: str):
+    if harness == "codex":
+        return ("codex", "sessions"), 3, (lambda n: n.startswith("rollout-") and n.endswith(f"-{key}.jsonl"))
+    return ("claude", "projects"), 1, (lambda n: n == f"{key}.jsonl")
+
+
+def _find_transcript(seat_dir: str, harness: str, key: str | None) -> str | None:
+    """The seat's own transcript as a path relative to its seat directory, found through directory descriptors
+    without following a link (Claude: claude/projects/<p>/<session>.jsonl; Codex: codex/sessions/Y/M/D/
+    rollout-*-<thread>.jsonl), or None."""
+    if not key or not re.fullmatch(r"[A-Za-z0-9-]{8,80}", key):
+        return None
+    base, depth, want = _transcript_shape(harness, key)
+    found: list = []
+
+    def walk(fd: int, rel: list, left: int) -> None:
+        try:
+            with os.scandir(fd) as it:
+                entries = [(e.name, e.is_dir(follow_symlinks=False), e.is_file(follow_symlinks=False)) for e in it]
+        except OSError:
+            return
+        for name, is_dir, is_file in entries:
+            if left == 0:
+                if is_file and want(name):
+                    found.append("/".join([*rel, name]))
+            elif is_dir:
+                try:
+                    sub = os.open(name, _DIR_FLAGS, dir_fd=fd)
+                except OSError:
+                    continue
+                try:
+                    walk(sub, [*rel, name], left - 1)
+                finally:
+                    os.close(sub)
+    try:
+        fd = os.open(seat_dir, _DIR_FLAGS)
+    except OSError:
+        return None
+    try:
+        for part in base:
+            nfd = os.open(part, _DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+        walk(fd, list(base), depth)
+    except OSError:
+        return None
     finally:
         os.close(fd)
+    return sorted(found)[0] if found else None
+
+
+def seat_transcript(seat_dir: str, harness: str, key: str | None) -> str | None:
+    """The path of the seat's own transcript in its seat directory (see _find_transcript), or None."""
+    rel = _find_transcript(seat_dir, harness, key)
+    return os.path.join(seat_dir, rel) if rel else None
+
+
+def read_seat_transcript(seat_dir: str, harness: str, key: str | None, limit: int) -> bytes | None:
+    """The seat's own transcript, found and read through descriptors, no link followed anywhere (rr18)."""
+    rel = _find_transcript(seat_dir, harness, key)
+    return read_under(seat_dir, rel, limit) if rel else None
 
 
 class SeatBroker:
@@ -135,8 +188,10 @@ class SeatBroker:
 
     def __init__(self, run: dict, directory: str, *, workdir: str, forbid: list[str], seat_dir: str,
                  config: str, host_pid: int | None, token: str | None = None, base_env: dict | None = None,
-                 python: str | None = None, runner=subprocess.run, file_dir: str | None = None):
+                 python: str | None = None, runner=subprocess.run, file_dir: str | None = None,
+                 cfg: dict | None = None):
         self.run, self.dir, self.workdir = run, directory, workdir
+        self.cfg = cfg
         self.forbid = [os.path.realpath(p) for p in forbid if p]
         self.seat_dir, self.config = seat_dir.rstrip("/"), config
         self.host_pid, self.token = host_pid, token
@@ -192,10 +247,10 @@ class SeatBroker:
 
     # --- running ----------------------------------------------------------------------------------
 
-    def _store(self, content: str, made: list) -> str:
+    def _store(self, content, made: list) -> str:
         fd, path = tempfile.mkstemp(prefix="seat-file-", dir=self.file_dir)
         with os.fdopen(fd, "wb") as fh:
-            fh.write(content.encode("utf-8"))
+            fh.write(content if isinstance(content, bytes) else content.encode("utf-8"))
         made.append(path)
         return path
 
@@ -206,20 +261,57 @@ class SeatBroker:
         res = self._run(cmd, input=stdin, capture_output=True, cwd="/", env=env, timeout=timeout)
         return res.returncode, res.stdout or b"", res.stderr or b""
 
-    def do_cli(self, req) -> tuple[int, bytes, bytes]:
+    def _requirement(self, path: str, made: list) -> list[str]:
+        """A requirement the seat names in its work tree: read here through descriptors (no link followed),
+        pinned by the CLI at that content (--add-requirements-pinned PATH\\nFILE)."""
         from swarm import seatproto
+        rel = os.path.relpath(path, self.workdir)
+        if not _under(path, self.workdir) or rel.startswith(".."):
+            raise Refused(f"requirement {path} is not in the seat's work tree")
+        data = read_under(self.workdir, rel, seatproto.REQUIREMENT_MAX)
+        if data is None:
+            raise Refused(f"requirement {path} is not a regular file of the work tree (a link, or too large)")
+        return [f"--add-requirements-pinned={path}\n{self._store(data, made)}"]
+
+    def _grant(self, argv: list[str]) -> tuple:
+        """For a control command that needs its caller attested (drivegate.GRANT_SUBS): the broker writes the
+        grant itself, for the seat its launch record names. (board key, job, grant id) or Nones."""
+        from swarm import drivegate
+        if not argv or argv[0] not in drivegate.GRANT_SUBS or self.cfg is None:
+            return None, None, None
+        from swarm.board.autoinit import store_key
+        bk = store_key(self.cfg)
+        ctx = drivegate.seat_context(self.cfg, bk, {"session_id": self.session()})
+        full = ["--config", self.config, *argv]
+        rid = drivegate.write_grant_argv(self.cfg, full, ctx, self.host_pid)
+        ns = drivegate.parse_swarm(full) if rid else None
+        return bk, getattr(ns, "job", None), rid
+
+    def do_cli(self, req) -> tuple[int, bytes, bytes]:
+        from swarm import receipts, seatproto
         command, fields = seatproto.validate(req)
         if self.session() is None:
             raise Refused("the seat's session is not known yet (a Codex seat before its thread started)")
         made: list = []
+        grant = (None, None, None)
         try:
-            argv = seatproto.build_argv(command, fields, key=self.session(), name=self.run.get("name"),
-                                        file_path=lambda c: self._store(c, made))
+            argv = seatproto.build_argv(
+                command, fields, key=self.session(), name=self.run.get("name"),
+                file_path=lambda c: self._store(c, made),
+                report=lambda path, content: [f"--report={path}", f"--report-content={self._store(content, made)}"],
+                requirement=lambda path: self._requirement(path, made))
             if command == "seat request" and "workdir" not in fields:
-                argv[2:2] = ["--workdir", self.workdir]
+                argv[2:2] = [f"--workdir={self.workdir}"]
             limit = CLI_WAIT_TIMEOUT if command == "wait" else CLI_TIMEOUT
+            grant = self._grant(argv)
             return self._exec(argv, None, limit)
         finally:
+            bk, job, rid = grant
+            if rid:
+                try:
+                    receipts.drop(bk, job, "grant", rid)   # used up by the command, or never: none outlives it
+                except Exception:
+                    pass
             for p in made:
                 try:
                     os.unlink(p)
@@ -398,4 +490,4 @@ def for_run(cfg: dict, run: dict, *, host_pid: int | None, token: str | None) ->
     files = private_dir() / "broker-files"
     files.mkdir(mode=0o700, exist_ok=True)
     return SeatBroker(run, os.path.join(sh, "broker"), workdir=workdir, forbid=forbid, seat_dir=sh,
-                      config=config_path(cfg, run), host_pid=host_pid, token=token, file_dir=str(files))
+                      config=config_path(cfg, run), host_pid=host_pid, token=token, file_dir=str(files), cfg=cfg)
