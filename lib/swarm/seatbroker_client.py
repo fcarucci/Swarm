@@ -1,13 +1,20 @@
-"""The swarm command and hooks of a jailed drive seat (Task 20, rr4): the seat has no board password and no
-host-private file, so every `swarm ...` and every swarm hook it runs is handed, as a request file, to its
-runner's broker (swarm.supervisor.seatbroker) through the seat's broker directory ($SWARM_SEAT_BROKER, bound
-into this seat's jail only). The broker runs it outside the jail as this seat (who the seat is comes from
-the seat's launch record, never from the request) and returns its output and exit status.
+"""The swarm command and hooks of a jailed drive seat (Task 20). The seat has no board password and no
+host-private file, so it hands each call to its runner's broker (swarm.supervisor.seatbroker) through its broker
+directory ($SWARM_SEAT_BROKER, bound into this seat's jail only), as a TYPED request (swarm.seatproto):
 
-Standard library only: run as `python3 -I seatbroker_client.py cli|hook ARG...`."""
+- `swarm ...`: parsed here against seatproto.SCHEMA (only seat commands and their fields; --as/--key are dropped,
+  the broker injects who the seat is); a file named on the command line is read here, in the jail, and sent as
+  its content;
+- a hook: its event name and payload; the broker keeps only the payload fields it knows.
+
+A guard hook (PreToolUse) that gets no answer fails CLOSED: the tool call is denied.
+
+Standard library only: run as `python3 -I seatbroker_client.py cli|hook ARG...`; seatproto is loaded from this
+file's own directory by path."""
 from __future__ import annotations
 
 import base64
+import importlib.util
 import json
 import os
 import secrets
@@ -15,33 +22,31 @@ import sys
 import time
 
 STDIN_MAX = 2 * 1024 * 1024
-TIMEOUT = {"cli": 960.0, "hook": 60.0}
+TIMEOUT = {"cli": 960.0, "hook": 30.0}
 POLL = 0.05
 
 
-def _stdin(kind: str, argv: list[str]) -> bytes | None:
-    if kind == "hook" or "-" in argv:
-        data = sys.stdin.buffer.read(STDIN_MAX + 1)
-        if len(data) > STDIN_MAX:
-            raise SystemExit("swarm: input too large for the seat broker")
-        return data
-    return None
+def _proto():
+    here = os.path.dirname(os.path.abspath(__file__))
+    spec = importlib.util.spec_from_file_location("_swarm_seatproto", os.path.join(here, "seatproto.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
-def request(kind: str, argv: list[str], directory: str, stdin: bytes | None = None,
-            timeout: float | None = None, clock=time.monotonic, sleep=time.sleep) -> tuple[int, bytes, bytes]:
+def request(body: dict, directory: str, timeout: float, clock=time.monotonic,
+            sleep=time.sleep) -> tuple[int, bytes, bytes] | None:
+    """Send one request; (rc, stdout, stderr), or None when no answer came in time."""
     rid = secrets.token_hex(16)
-    body = json.dumps({"v": 1, "kind": kind, "argv": argv, "cwd": os.getcwd(),
-                       "stdin": None if stdin is None else base64.b64encode(stdin).decode()}).encode()
     tmp = os.path.join(directory, f"{rid}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
-        os.write(fd, body)
+        os.write(fd, json.dumps(body).encode())
     finally:
         os.close(fd)
     os.rename(tmp, os.path.join(directory, f"{rid}.req"))
     resp = os.path.join(directory, f"{rid}.resp")
-    deadline = clock() + (TIMEOUT[kind] if timeout is None else timeout)
+    deadline = clock() + timeout
     while clock() < deadline:
         try:
             fd = os.open(resp, os.O_RDONLY | os.O_NOFOLLOW)
@@ -60,7 +65,54 @@ def request(kind: str, argv: list[str], directory: str, stdin: bytes | None = No
         os.unlink(resp)
         r = json.loads(raw)
         return int(r["rc"]), base64.b64decode(r.get("out") or ""), base64.b64decode(r.get("err") or "")
-    return 124, b"", b"swarm: the seat broker did not answer in time (is the seat's runner alive?)\n"
+    try:
+        os.unlink(os.path.join(directory, f"{rid}.req"))   # never answered: withdraw it if still queued
+    except OSError:
+        pass
+    return None
+
+
+def deny_output(event: str, why: str) -> bytes:
+    """What a guard hook prints when it cannot run: the tool call is denied (fail closed)."""
+    if event != "turn":
+        return b""
+    return json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                              "permissionDecisionReason": f"[swarm] {why}: this tool call is "
+                                                                          "refused; try again"}}).encode() + b"\n"
+
+
+def run_hook(argv: list[str], directory: str, stdin_bytes: bytes, **kw) -> tuple[int, bytes, bytes]:
+    event = argv[-1] if argv else ""
+    try:
+        payload = json.loads(stdin_bytes or b"{}")
+    except ValueError:
+        payload = {}
+    body = {"v": 2, "kind": "hook", "event": event, "payload": payload if isinstance(payload, dict) else {}}
+    if not os.path.isdir(directory):
+        return 0, deny_output(event, "the seat broker is missing"), b""
+    try:
+        r = request(body, directory, kw.pop("timeout", TIMEOUT["hook"]), **kw)
+    except OSError:
+        r = None
+    if r is None:
+        return 0, deny_output(event, "the seat broker did not answer"), b""
+    if r[0] != 0 and event == "turn" and not r[1].strip():
+        return 0, deny_output(event, "the seat's guard hook failed"), r[2]
+    return r
+
+
+def run_cli(argv: list[str], directory: str, **kw) -> tuple[int, bytes, bytes]:
+    proto = _proto()
+    try:
+        body = proto.parse_cli(argv, os.getcwd(), sys.stdin if "-" in argv else None)
+    except proto.ProtocolError as exc:
+        return 2, b"", f"swarm: refused in a drive seat: {exc}\n".encode()
+    if not os.path.isdir(directory):
+        return 1, b"", b"swarm: no seat broker here ($SWARM_SEAT_BROKER)\n"
+    r = request(body, directory, kw.pop("timeout", TIMEOUT["cli"]), **kw)
+    if r is None:
+        return 124, b"", b"swarm: the seat broker did not answer in time (is the seat's runner alive?)\n"
+    return r
 
 
 def main(args: list[str]) -> int:
@@ -69,10 +121,11 @@ def main(args: list[str]) -> int:
         return 2
     kind, argv = args[0], args[1:]
     directory = os.environ.get("SWARM_SEAT_BROKER", "")
-    if not os.path.isdir(directory):
-        print("swarm: no seat broker here ($SWARM_SEAT_BROKER)", file=sys.stderr)
-        return 0 if kind == "hook" else 1
-    rc, out, err = request(kind, argv, directory, _stdin(kind, argv))
+    if kind == "hook":
+        data = sys.stdin.buffer.read(STDIN_MAX)
+        rc, out, err = run_hook(argv, directory, data)
+    else:
+        rc, out, err = run_cli(argv, directory)
     sys.stdout.buffer.write(out)
     sys.stdout.flush()
     sys.stderr.buffer.write(err)

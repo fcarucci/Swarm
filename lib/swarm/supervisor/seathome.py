@@ -233,6 +233,7 @@ def prepare(cfg: dict, job: str, seat: str) -> Path:
     known = _read_person(home / ".ssh" / "known_hosts") or b""
     claude_json = _read_person(home / ".claude.json")
     client = (Path(__file__).resolve().parent.parent / "seatbroker_client.py").read_bytes()
+    proto = (Path(__file__).resolve().parent.parent / "seatproto.py").read_bytes()
     fds = []
     try:
         fds.append(privfs.open_dir(SEAT_HOME))
@@ -253,6 +254,7 @@ def prepare(cfg: dict, job: str, seat: str) -> Path:
         into(".ssh", "config", ssh_config_text(cfg))
         into("bin", "swarm", CLIENT_SH, 0o700)
         into("bin", "seatbroker_client.py", client, 0o600)
+        into("bin", "seatproto.py", proto, 0o600)
         if claude_json is not None:
             into("home", ".claude.json", claude_json)
     except (safefs.UnsafePathError, PrivateDirError, OSError) as exc:
