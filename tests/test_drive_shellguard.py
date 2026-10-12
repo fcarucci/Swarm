@@ -685,10 +685,11 @@ class Round6(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertTrue(self.at(cmd), cmd)
         for cmd in ("read -r x <<< y", "printf -v x %s y", "for i in 1 2; do echo $i; done", "echo ${X:=1}",
-                    "echo ${HOME:-x}", "declare -a arr", "unset x", "let n=1", "export PATH=/usr/bin:$PATH",
-                    "read -p HOME x"):
+                    "echo ${HOME:-x}", "declare -a arr", "unset x", "let n=1", "read -p HOME x"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(self.at(cmd), cmd)
+        if os.name != "nt":           # an assignment with a value is the PATH rule's (an absolute system directory)
+            self.assertIsNone(self.at("export PATH=/usr/bin:$PATH"))
 
     def test_rr39_a_venv_that_shadows_a_guarded_program_is_not_a_venv(self):
         venv = os.path.join(self.repo, "v")
