@@ -411,6 +411,23 @@ class VerdictLine(ControlCase):
                 spool.deliver_verdict(self.board, JOB, judge, "met", "ok", artifact="feat/x@abc1234", generation=1)
         self.assertEqual(review.artifact_verdicts(self.board, JOB), {})
 
+    def test_N3_an_unbound_artifact_record_does_not_count_in_a_drive_job(self):
+        """R3: a record with no message id (a direct board write, a verdict while the ledger did not read) is
+        no artifact verdict in a drive job, whether or not the board row claims drive."""
+        judge = self.judge()
+        self.board.record_verdict(JOB, judge, "met", "ok", None, "feat/x@abc1234", None)
+        self.assertEqual(review.artifact_verdicts(self.board, JOB), {})                  # the ledger says drive
+        self.board.set_job_data(JOB, "drive.enabled", "1")
+        self.assertEqual(review.artifact_verdicts(self.board, JOB), {})                  # and so does the board
+        self.assertIn("feat/x@abc1234", review.artifact_verdicts(self.board, JOB, drive=False))   # a legacy job
+
+    def test_N3_a_job_that_is_not_driven_keeps_its_legacy_verdicts(self):
+        self.board.open_job("K", "d", None, REQ_SESSION, "Francesco", goal="g")
+        name = self.board.allocate_name("jk2", "K")
+        self.board.claim_judge("jk2", "K")
+        self.board.record_verdict("K", name, "met", "ok", None, "feat/k@abc1234", None)
+        self.assertIn("feat/k@abc1234", review.artifact_verdicts(self.board, "K"))
+
     def test_S2_a_spooled_goal_verdict_keeps_its_generation_and_gets_its_record(self):
         from swarm import spool
         judge = self.judge()

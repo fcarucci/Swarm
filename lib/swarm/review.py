@@ -196,8 +196,33 @@ def verdict_text(verdict: str, reason: str, *, scope: str = 'artifact', generati
     return f"VERDICT {verdict}: {reason}"
 
 
-def artifact_verdicts(board, job: str) -> dict[str, dict]:
+def is_drive_job(board, job: str, data: dict | None = None) -> bool:
+    """Whether `job` is driven: its board row claims it (drive.enabled), or this host holds a drive ledger
+    for it (a bad one included). Either is enough: a writer that clears the board claim does not turn a drive
+    job's verdict rules back into the legacy ones."""
+    data = board.job_data(job) if data is None else data
+    if data.get('drive.enabled') == '1':
+        return True
+    try:
+        from swarm.board.autoinit import store_key
+        from swarm.supervisor import ledger
+        cfg = getattr(board, 'cfg', None)
+        if cfg is None:
+            return False
+        try:
+            return ledger.load(store_key(cfg), job) is not None
+        except ledger.LedgerBadError:
+            return True
+    except Exception:
+        return False
+
+
+def artifact_verdicts(board, job: str, *, drive: bool | None = None) -> dict[str, dict]:
+    """The artifact verdicts of `job` by artifact. Every record goes through bound_verdict(); a record with
+    no message id at all (written before verdict binding, or by a direct board call) counts only in a job
+    that is not driven (`drive`: is_drive_job() when not given)."""
     data = board.job_data(job)
+    legacy_ok = not (is_drive_job(board, job, data) if drive is None else drive)
     result = {}
     for key, count in data.items():
         if not re.fullmatch(r'pipeline\.verdict\.[0-9a-f]{32}', key):
@@ -206,7 +231,7 @@ def artifact_verdicts(board, job: str) -> dict[str, dict]:
             count = int(count)
             if not 0 < count <= 10000:
                 continue
-            record = bound_verdict(json.loads(''.join(data[f'{key}.{i}'] for i in range(count))), legacy_ok=True)
+            record = bound_verdict(json.loads(''.join(data[f'{key}.{i}'] for i in range(count))), legacy_ok=legacy_ok)
             if record is not None and record['verdict'] in ('met', 'not_met'):
                 result[record['artifact']] = record
         except (KeyError, ValueError, TypeError):
