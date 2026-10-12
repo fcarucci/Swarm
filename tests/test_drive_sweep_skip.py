@@ -60,8 +60,11 @@ class SkipBase(Env):
 
 class StaleWaitingSkip(SkipBase):
     def waiting_goal_job(self):
-        self.activate("J", "--goal", "ship it")
+        """A goal-less job waiting on a wait with its agent gone: the stale rule closes it unless it is the driver's."""
+        self.activate("J")
         self.finished_agent()
+        rc, _, err = self.cli("wait", "--job", "J", "--on", "the human")
+        self.assertEqual(rc, 0, err)
         self.quiet(CLOSE_AT + 3600)
 
     def test_control_an_ordinary_waiting_job_is_closed(self):

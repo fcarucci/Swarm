@@ -116,9 +116,13 @@ CREATE TRIGGER jobs_state_notify AFTER INSERT OR UPDATE OR DELETE ON jobs
 CREATE OR REPLACE FUNCTION swarm_keep_goal_jobs() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     IF NEW.status <> 'active' AND OLD.status = 'active' AND NEW.goal IS NOT NULL AND length(NEW.goal) > 0
-       AND NEW.verdict IS DISTINCT FROM 'met' AND NEW.closed_by = 'auto'
-       AND NEW.outcome LIKE 'auto-closed: no live agents%' THEN
-        RETURN NULL;
+       AND NEW.verdict IS DISTINCT FROM 'met' AND NEW.verdict IS DISTINCT FROM 'unreachable'
+       AND NEW.closed_by = 'auto' AND NEW.outcome LIKE 'auto-closed: %no live agents%' THEN
+        RETURN NULL;     -- a goal job is ended by a met or unreachable verdict or a person, never by these sweeps
+    END IF;
+    IF NEW.status <> 'active' AND OLD.status = 'active' AND NEW.closed_by = 'auto' AND NEW.max_hours = 0
+       AND NEW.outcome LIKE 'auto-closed: %no live agents%' THEN
+        RETURN NULL;     -- --stall-hours 0: never closed by quiet time
     END IF;
     -- a drive job is ended by its driver only: no auto-close outcome (orphan, stale-waiting, stall, quiet)
     IF NEW.status <> 'active' AND OLD.status = 'active' AND NEW.closed_by = 'auto'
