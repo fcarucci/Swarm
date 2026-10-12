@@ -461,7 +461,7 @@ def jail_spec(cfg: dict, seat_home: Path, workdir: str | None, home: Path | None
             "runtime_dir": f"/run/user/{os.getuid()}", "cwd": workdir or h,
             "path_prepend": [f"{h}/.swarm-seat/bin"],
             "env": {"GIT_CONFIG_GLOBAL": f"{h}/.gitconfig", "GIT_SSH_COMMAND": f"ssh -F {h}/.ssh/config",
-                    "SWARM_SEAT_BROKER": f"{h}/.swarm-seat/broker"}}
+                    "SWARM_SEAT_BROKER": f"{h}/.swarm-seat/broker", **_jail_git_overrides(h)}}
 
 
 def best_effort_env(cfg: dict, seat_home: Path, platform: str | None = None) -> dict:
@@ -473,10 +473,11 @@ def best_effort_env(cfg: dict, seat_home: Path, platform: str | None = None) -> 
     real = str(paths.home())
     scratch = os.path.join(h, "home")
     ssh_cfg = os.path.join(h, ".ssh", "config")
+    from swarm import seatjail
+    ssh = f'ssh -F "{ssh_cfg}" -o IdentityAgent=none -o IdentitiesOnly=yes -o IdentityFile=none -o BatchMode=yes'
     env = {"HOME": scratch, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.path.join(h, "gitconfig"),
-           "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never",
-           "GIT_SSH_COMMAND": f'ssh -F "{ssh_cfg}" -o IdentityAgent=none -o IdentitiesOnly=yes '
-                              f'-o IdentityFile=none -o BatchMode=yes',
+           "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never", "GIT_SSH_COMMAND": ssh,
+           **seatjail.git_overrides(ssh),
            "GH_CONFIG_DIR": os.path.join(h, "gh"), "SWARM_SEAT_BROKER": os.path.join(h, "broker"),
            "CLAUDE_CONFIG_DIR": os.path.join(real, ".claude"), "CODEX_HOME": os.path.join(real, ".codex"),
            "SWARM_SEAT_ISOLATION": "best-effort"}
@@ -486,11 +487,11 @@ def best_effort_env(cfg: dict, seat_home: Path, platform: str | None = None) -> 
     return env
 
 
-def best_effort_child_env(base: dict, overrides: dict, seat_home: str) -> dict:
+def best_effort_child_env(base: dict, overrides: dict, seat_home: str, platform: str | None = None) -> dict:
     """A best-effort seat's whole environment: the allowlist of `base`, the overrides, the seat's `swarm` first
     on PATH."""
     from swarm import seatjail
-    out = seatjail.scrub_env(dict(base))
+    out = seatjail.scrub_env(dict(base), platform)
     out.update(overrides)
     out["PATH"] = os.pathsep.join([os.path.join(seat_home, "bin"), out.get("PATH", "")]).rstrip(os.pathsep)
     return out
@@ -499,8 +500,11 @@ def best_effort_child_env(base: dict, overrides: dict, seat_home: str) -> dict:
 BEST_EFFORT_NOTE = "best-effort on {platform} (no filesystem jail)"
 
 
+last_fallback_reason: list = [None]   # why the last Linux launch fell back (the runner logs it)
+
+
 def launch(cfg: dict, argv: list, *, job: str, seat: str, workdir: str | None = None,
-           platform: str | None = None, probe=None) -> tuple[list, dict | None, str]:
+           platform: str | None = None, probe=None, no_userns=None) -> tuple[list, dict | None, str]:
     """How a drive seat starts: (argv, env overrides or None, mode). Linux: the jail (wrap; fail closed).
     macOS/Windows: best-effort (argv unchanged, best_effort_env). "off" (a person's act): unchanged, nothing."""
     m = mode(cfg, platform)
@@ -514,12 +518,24 @@ def launch(cfg: dict, argv: list, *, job: str, seat: str, workdir: str | None = 
         if strict(cfg):
             raise SeatIsolationError(f"this host cannot jail a drive seat ({why}) and [drive] seat_isolation = "
                                      "\"strict\": not started")
-        m = "best-effort"          # no jail here (no unprivileged user namespaces): fall back, never refuse
+        # Fall back ONLY when this host deterministically has no unprivileged user namespaces. Any other failure
+        # (a timeout, ENOSPC, EAGAIN, ENOMEM: things a seat can cause) refuses: never a downgrade.
+        reason = (no_userns or seatjail.no_userns_reason)()
+        if not reason:
+            raise SeatIsolationError(f"the seat's jail could not be built ({why}) on a host that supports it: not "
+                                     "started (fail closed; retried by the driver)")
+        m = "best-effort"
+        last_fallback_reason[0] = reason
     elif strict(cfg):
         raise SeatIsolationError(f"no filesystem jail on {platform or sys.platform} and [drive] seat_isolation = "
                                  "\"strict\": not started")
     h = prepare(cfg, job, seat)
     return list(argv), best_effort_env(cfg, h, platform), m
+
+
+def _jail_git_overrides(h: str) -> dict:
+    from swarm import seatjail
+    return seatjail.git_overrides(f"ssh -F {h}/.ssh/config")
 
 
 def jail_script() -> str:
@@ -572,7 +588,7 @@ PROBE_PATHS = (".config", ".config/gh", ".secrets", ".git-credentials", ".netrc"
                ".local/share/swarm/supervisor", ".pg0", ".local/share/pki", ".config/swarm")
 
 
-def probe(cfg: dict, *, network: bool = False, run=None, available=None) -> tuple[bool | None, str]:
+def probe(cfg: dict, *, network: bool = False, run=None, available=None, no_userns=None) -> tuple[bool | None, str]:
     """Run PROBE in a seat's jail. (True, detail) when no credential is reachable; (False, what is
     reachable); (None, why) when a person turned isolation off or this host cannot jail a seat."""
     import subprocess
@@ -586,9 +602,10 @@ def probe(cfg: dict, *, network: bool = False, run=None, available=None) -> tupl
     from swarm import seatjail
     ok, why = (available or seatjail.available)()
     if not ok:
-        if strict(cfg):
+        reason = None if strict(cfg) else (no_userns or seatjail.no_userns_reason)()
+        if not reason:
             return None, f"unavailable: {why}"
-        return None, BEST_EFFORT_NOTE.format(platform=sys.platform)
+        return None, BEST_EFFORT_NOTE.format(platform=sys.platform) + f": {reason}"
     home = str(paths.home())
     targets = [f"{home}/{p}" for p in PROBE_PATHS] + pinned_paths(cfg)
     argv = wrap(cfg, ["sh", "-c", PROBE, "probe", *targets], job="_doctor", seat="probe",

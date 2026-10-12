@@ -1895,8 +1895,11 @@ def _seat_isolation_check(cfg: dict, probe=None) -> Check:
     if ok is None:
         if detail.startswith("best-effort"):
             return Check("seat isolation", None, detail,
-                         "drive seats here get no filesystem jail (Linux only): the seat env has no credential, "
-                         "helper or agent, but files of yours stay readable to them")
+                         "drive seats here get no filesystem jail: their environment carries no credential, credential "
+                         "helper or agent, but your files (and keychain or Credential Manager) stay reachable to them. "
+                         "Best-effort guards against accidental credential use, not a hostile seat. On Linux, enable "
+                         "unprivileged user namespaces for the full jail; [drive] seat_isolation = \"strict\" refuses "
+                         "seats instead")
         if detail.startswith("off"):
             return Check("seat isolation", None, f"drive seats: {detail}",
                          "a person runs `swarm supervise seat-isolation on` to jail every drive seat again")

@@ -913,14 +913,19 @@ _BEST_EFFORT_LOGGED = False
 
 
 def _note_best_effort() -> None:
-    """Log once per process that seats here are best-effort (no filesystem jail)."""
+    """Log that a seat starts best-effort (no filesystem jail): once per process on macOS/Windows (that is how
+    those hosts are), every time on Linux with its reason (a fallback there is a security event)."""
     global _BEST_EFFORT_LOGGED
+    from swarm.supervisor import seathome
+    from swarm.supervisor.settings import log
+    note = "seat isolation: " + seathome.BEST_EFFORT_NOTE.format(platform=sys.platform)
+    if seathome.jail_platform():
+        log(f"{note}: {seathome.last_fallback_reason[0] or 'no user namespaces'}")
+        return
     if _BEST_EFFORT_LOGGED:
         return
     _BEST_EFFORT_LOGGED = True
-    from swarm.supervisor import seathome
-    from swarm.supervisor.settings import log
-    log("seat isolation: " + seathome.BEST_EFFORT_NOTE.format(platform=sys.platform))
+    log(note)
 
 
 SEAT_TRANSCRIPT_MAX = 64 * 1024 * 1024

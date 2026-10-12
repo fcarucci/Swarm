@@ -220,7 +220,8 @@ class FailClosedTest(SeatHomeCase):
         self.assertIsNone(why)
         self.assertEqual(argv[-3:], ["--", "claude", "-p"])
         self.assertTrue(drive["seat_home"].startswith(str(self.priv)))
-        with mock.patch("swarm.seatjail.available", lambda: (False, "no userns")):
+        with mock.patch("swarm.seatjail.available", lambda: (False, "no userns")), \
+                mock.patch("swarm.seatjail.no_userns_reason", lambda: "unprivileged user namespaces are disabled"):
             fallback = {**run, "launch_id": "L1"}
             argv, why = runner._seat_argv(self.cfg, fallback)       # no jail here: best-effort, never refused
             self.assertIsNone(why)
@@ -976,7 +977,9 @@ class BestEffortTest(SeatHomeCase):
         base = {"PATH": "/usr/bin", "HOME": str(self.home), "LANG": "C", "SSH_AUTH_SOCK": "/tmp/agent",
                 "GH_TOKEN": "x", "PGPASSWORD": "y", "GIT_ASKPASS": "/a", "GIT_CONFIG_GLOBAL": "/evil",
                 "SYSTEMROOT": "C:\\\\Windows", "SWARM_RUN_ID": "r1"}
-        env = seathome.best_effort_child_env(base, over, str(seathome.home_dir("J", "s")))
+        env = seathome.best_effort_child_env(base, over, str(seathome.home_dir("J", "s")), platform="win32")
+        self.assertNotIn("SYSTEMROOT", seathome.best_effort_child_env(base, over, str(seathome.home_dir("J", "s")),
+                                                                      platform="darwin"))
         for k in ("SSH_AUTH_SOCK", "GH_TOKEN", "PGPASSWORD", "GIT_ASKPASS"):
             self.assertNotIn(k, env)
         self.assertEqual(env["GIT_CONFIG_GLOBAL"], over["GIT_CONFIG_GLOBAL"])
@@ -1015,14 +1018,16 @@ class BestEffortTest(SeatHomeCase):
 
     def test_linux_without_user_namespaces_falls_back_to_best_effort(self):
         with mock.patch.object(seathome, "jail_platform", lambda platform=None: True):
-            argv, env, m = seathome.launch(self.cfg, ["claude"], job="J", seat="s", probe=lambda: (False, "no userns"))
+            argv, env, m = seathome.launch(self.cfg, ["claude"], job="J", seat="s", probe=lambda: (False, "no userns"),
+                                           no_userns=lambda: "unprivileged user namespaces are disabled (x=0)")
         self.assertEqual((argv, m), (["claude"], "best-effort"))
         self.assertEqual(env["GIT_CONFIG_NOSYSTEM"], "1")
         with mock.patch.object(seathome, "jail_platform", lambda platform=None: True), \
                 mock.patch("swarm.seatjail.available", lambda: (False, "no userns")):
-            ok, detail = seathome.probe(self.cfg)
+            ok, detail = seathome.probe(self.cfg, no_userns=lambda: "unprivileged user namespaces are disabled (x=0)")
         self.assertIsNone(ok)
-        self.assertEqual(detail, f"best-effort on {sys.platform} (no filesystem jail)")
+        self.assertEqual(detail, f"best-effort on {sys.platform} (no filesystem jail): "
+                                 "unprivileged user namespaces are disabled (x=0)")
         check = bootstrap._seat_isolation_check(self.cfg, probe=lambda c: (ok, detail))
         self.assertIsNone(check.ok)      # WARN
 
@@ -1085,6 +1090,89 @@ class BrokerPathModeTest(BrokerCase):
         (self.wd / "l").symlink_to(self.wd / "d")
         self.assertEqual(seatbroker.read_under(str(self.wd), "d/f", 10), b"x")
         self.assertIsNone(seatbroker.read_under(str(self.wd), "l/f", 10))
+
+
+class FallbackHardeningTest(SeatHomeCase):
+    """Review creds-fallback: blocker 1 (downgrade) and blocker 2 (repo-local credential helper)."""
+
+    def test_poc1_a_transient_probe_failure_refuses(self):
+        with mock.patch.object(seathome, "jail_platform", lambda platform=None: True):
+            for why in ("TimeoutExpired: probe took 10 s", "seatjail: cannot isolate the seat ([Errno 28] ENOSPC)",
+                        "OSError: [Errno 11] EAGAIN", "OSError: [Errno 12] ENOMEM"):
+                with self.assertRaises(seathome.SeatIsolationError, msg=why) as cm:
+                    seathome.launch(self.cfg, ["claude"], job="J", seat="s", probe=lambda w=why: (False, w),
+                                    no_userns=lambda: None)
+                self.assertIn("fail closed", str(cm.exception))
+            ok, detail = seathome.probe(self.cfg, available=lambda: (False, "TimeoutExpired"), no_userns=lambda: None)
+            self.assertEqual((ok, detail), (None, "unavailable: TimeoutExpired"))
+            self.assertFalse(bootstrap._seat_isolation_check(self.cfg, probe=lambda c: (ok, detail)).ok)
+
+    def test_only_a_deterministic_no_userns_result_falls_back(self):
+        files = {"/proc/sys/kernel/unprivileged_userns_clone": "0"}
+
+        def read(path):
+            if path in files:
+                return files[path]
+            raise FileNotFoundError(path)
+        self.assertIn("unprivileged_userns_clone=0", seatjail.no_userns_reason(read=read, run=None))
+        files = {"/proc/sys/kernel/apparmor_restrict_unprivileged_userns": "1"}
+        self.assertIn("apparmor", seatjail.no_userns_reason(read=read))
+        files = {"/proc/sys/user/max_user_namespaces": "0"}
+        self.assertIn("max_user_namespaces=0", seatjail.no_userns_reason(read=read))
+        files = {}
+        rc = lambda code: (lambda argv, **kw: subprocess.CompletedProcess(argv, code, b"", b""))  # noqa: E731
+        self.assertIn("EPERM", seatjail.no_userns_reason(read=read, run=rc(3)))
+        self.assertIsNone(seatjail.no_userns_reason(read=read, run=rc(4)))     # ENOSPC, EINVAL, ...: not a fixed fact
+        self.assertIsNone(seatjail.no_userns_reason(read=read, run=rc(0)))     # it works
+
+        def timeout(argv, **kw):
+            raise subprocess.TimeoutExpired(argv, 10)
+        self.assertIsNone(seatjail.no_userns_reason(read=read, run=timeout))
+        if CAN_JAIL:
+            self.assertIsNone(seatjail.no_userns_reason())                   # this host has them
+
+    def test_poc2_a_repo_local_credential_helper_never_runs(self):
+        _argv, over, _m = seathome.launch(self.cfg, ["claude"], job="J", seat="s", platform="darwin")
+        env = seathome.best_effort_child_env({"PATH": os.environ["PATH"], "HOME": str(self.home)}, over,
+                                             str(seathome.home_dir("J", "s")))
+        repo = self.work / "r"
+        self.git("init", "-q", str(repo))
+        marker = self.tmp / "helper-ran"
+        subprocess.run(["git", "-C", str(repo), "config", "credential.helper",
+                        f"!f() {{ echo ran > {marker}; echo password=leaked; }}; f"], check=True)
+        r = subprocess.run(["git", "-C", str(repo), "credential", "fill"], input="protocol=https\nhost=example.test\n\n",
+                           capture_output=True, text=True, env=env, timeout=30)
+        self.assertFalse(marker.exists(), r.stdout)
+        self.assertNotIn("leaked", r.stdout)
+        helpers = subprocess.run(["git", "-C", str(repo), "config", "--get-all", "credential.helper"],
+                                 capture_output=True, text=True, env=env).stdout.splitlines()
+        self.assertEqual(helpers[-1], "")       # the command-scope empty value comes last and resets the list
+        self.assertEqual(env["GIT_CONFIG_KEY_0"], "credential.helper")
+        self.assertEqual(env["GIT_CONFIG_VALUE_0"], "")
+        self.assertIn("IdentityAgent=none", env["GIT_CONFIG_VALUE_2"])
+
+    def test_the_jail_pins_the_same_overrides(self):
+        h = seathome.prepare(self.cfg, "J", "s")
+        env = seathome.jail_spec(self.cfg, h, None, self.home)["env"]
+        self.assertEqual((env["GIT_CONFIG_KEY_0"], env["GIT_CONFIG_VALUE_0"]), ("credential.helper", ""))
+
+    def test_windows_names_only_on_windows(self):
+        env = {"TEMP": "x", "COMSPEC": "y", "PATH": "/bin"}
+        self.assertEqual(seatjail.scrub_env(env, "linux"), {"PATH": "/bin"})
+        self.assertEqual(seatjail.scrub_env(env, "darwin"), {"PATH": "/bin"})
+        self.assertEqual(seatjail.scrub_env(env, "win32"), env)
+
+    def test_every_linux_fallback_is_logged_with_its_reason(self):
+        logged = []
+        run = {"argv": ["claude"], "job": "J", "name": "L", "seat": "eng", "cwd": str(self.work), "launch_id": "L1"}
+        with mock.patch("swarm.seatjail.available", lambda: (False, "no userns")), \
+                mock.patch("swarm.seatjail.no_userns_reason", lambda: "unprivileged user namespaces are disabled (k=0)"), \
+                mock.patch.object(seathome, "jail_platform", lambda platform=None: True), \
+                mock.patch("swarm.supervisor.settings.log", logged.append):
+            runner._seat_argv(self.cfg, dict(run))
+            runner._seat_argv(self.cfg, dict(run))
+        self.assertEqual(len(logged), 2)
+        self.assertIn("(k=0)", logged[0])
 
 
 if __name__ == "__main__":
