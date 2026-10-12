@@ -54,6 +54,30 @@ class Caller:
 _TAKEN: dict = {}
 
 
+def host_pid(parent_of=None, pid: int | None = None, max_hops: int = 40) -> int | None:
+    """The pid of the OUTERMOST claude/codex process above this one (the agent session's own process: Codex
+    runs a command under a `codex-*` sandbox helper, below the codex process its hooks run under), or None.
+    The hook and the CLI of one tool call find the same pid, so a grant bound to it is no use to a process of
+    another session or to one outside every agent host."""
+    parent_of = parent_of or hosts._proc_parent
+    pid = os.getppid() if pid is None else pid
+    found = None
+    for _ in range(max_hops):
+        if pid <= 1:
+            break
+        try:
+            info = parent_of(pid)
+        except Exception:
+            break
+        if not info:
+            break
+        ppid, argv = info
+        if hosts._classify(argv):
+            found = pid
+        pid = ppid
+    return found
+
+
 def forget() -> None:
     """Start a new command: the next caller() takes a grant again (drive_cli calls it per handler)."""
     _TAKEN.clear()
@@ -64,7 +88,7 @@ def caller(board_key: str, job: str, led, args, now: float | None = None) -> Cal
     ledger, None when it does not read), or None. The grant is used up on the first call; later calls in the
     same command return the same answer."""
     from swarm import drivegate, receipts
-    rid = drivegate.grant_id(args)
+    rid = drivegate.grant_id(args, host_pid())
     key = (board_key, job, rid)
     if key in _TAKEN:
         return _TAKEN[key]

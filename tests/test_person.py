@@ -79,7 +79,7 @@ class RequesterByGrant(PersonCase):
     def test_the_grant_is_a_task5_receipt(self):
         self.hook("REQ")
         led = self.led()
-        rid = drivegate.grant_id(self.ns())
+        rid = drivegate.grant_id(self.ns(), person.host_pid())
         r = receipts.find(self.bk, JOB, "grant", rid, rev=1, incarnation=led.incarnation,
                           generation=led.generation, now=time.time())
         self.assertEqual((r.seat, r.action_id, r.args_sha), (None, "requester:halt", rid))
@@ -165,8 +165,51 @@ class Grants(PersonCase):
         self.assertEqual(self.hook("REQ", command="cd /x && swarm --config c.toml halt --job J 2>&1 | tail -2"), 1)
         self.assertIsNotNone(self.caller())
 
-    def test_two_calls_in_one_command_get_two_grants(self):
-        self.assertEqual(self.hook("REQ", command="swarm halt --job J; swarm unhalt --job J"), 2)
+    def test_N1_a_call_that_may_not_run_gets_no_grant(self):
+        """R1: a grant is never planted for a command that does not (or may not) run."""
+        for cmd in ("false && swarm halt --job J", "true || swarm halt --job J",
+                    "if false; then swarm halt --job J; fi", "f(){ swarm halt --job J; }",
+                    "swarm unhalt --job J; swarm halt --job J", "swarm halt --job J &",
+                    "echo x\nswarm halt --job J", "(swarm halt --job J)", "bash -c 'swarm halt --job J'"):
+            self.assertEqual(self.hook("REQ", command=cmd), 0, cmd)
+        self.assertIsNone(self.caller())
+
+    def test_N1_one_running_call_with_cd_pipes_and_redirections_gets_one(self):
+        for cmd in ("cd /w && cd sub && swarm halt --job J 2>&1 | tail -2", "swarm halt --job J > out.txt",
+                    "swarm halt --job J && echo done"):
+            person.forget()
+            self.assertEqual(self.hook("REQ", command=cmd), 1, cmd)
+            self.assertIsNotNone(self.caller(), cmd)
+
+    def test_N1_a_grant_is_bound_to_the_agent_host_process_of_its_call(self):
+        """A same-user process under another agent session (or none) cannot use a stray grant."""
+        with mock.patch.object(person, "host_pid", return_value=4242):
+            self.hook("REQ")
+        for other in (4243, None):
+            with mock.patch.object(person, "host_pid", return_value=other):
+                self.assertIsNone(self.caller(), other)
+        with mock.patch.object(person, "host_pid", return_value=4242):
+            self.assertIsNotNone(self.caller())
+
+    def test_N1_the_post_tool_use_of_the_call_removes_its_grant(self):
+        self.hook("REQ")
+        payload = {"session_id": "REQ", "tool_name": "Bash", "tool_input": {"command": "swarm halt --job J"}}
+        self.assertEqual(drivegate.drop_grants(self.cfg, payload, hosts.get("claude")), 1)
+        self.assertIsNone(self.caller())
+
+    def test_N1_grants_live_a_minute_at_most(self):
+        self.assertLessEqual(drivegate.GRANT_SECONDS, 60)
+
+    def test_N2_the_config_is_part_of_the_grant(self):
+        a = cli._parser().parse_args(["halt", "--job", JOB])
+        b = cli._parser().parse_args(["--config", "/elsewhere/config.toml", "halt", "--job", JOB])
+        self.assertNotEqual(drivegate.grant_id(a, 1), drivegate.grant_id(b, 1))
+
+    def test_host_pid_is_the_outermost_agent_process(self):
+        tree = {10: (9, ["bash"]), 9: (8, ["/usr/bin/codex-linux-sandbox"]), 8: (7, ["codex", "exec"]),
+                7: (1, ["systemd"])}
+        self.assertEqual(person.host_pid(lambda p: tree.get(p), 10), 8)
+        self.assertIsNone(person.host_pid(lambda p: {10: (1, ["bash"])}.get(p), 10))
 
 
 class TtyPath(PersonCase):

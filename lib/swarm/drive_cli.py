@@ -397,7 +397,7 @@ def person_receipt(bk: str, led, action: str, how: str, args, ref) -> None:
             action_id=f"{how}:{action.replace(' ', '_')}", attempt=0, seat=None, kind="person",
             record_id=person_record_id(action, ref), rev=1,
             content_sha=receipts.content_sha("person", {"action": action, "target": led.job}),
-            args_sha=drivegate.grant_id(args), expires_at=time.time() + PERSON_RECEIPT_DAYS * 86400))
+            args_sha=drivegate.grant_id(args, person.host_pid()), expires_at=time.time() + PERSON_RECEIPT_DAYS * 86400))
     except (OSError, ValueError) as exc:
         print(f"warning: the person receipt of this {action} was not written: {exc}", file=sys.stderr)
 

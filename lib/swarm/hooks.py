@@ -2267,13 +2267,15 @@ def _drive_event(event: str, cfg: dict, payload: dict, resume: dict | None) -> b
         if ctx is not None:
             _no_lease(payload)
         if event == "done":
+            drivegate.drop_grants(cfg, payload, host)   # a grant never outlives its call
             drivegate.post_tool(cfg, payload, host, resume=resume, resume_lookup=_resume_binding)
             return False
-        try:   # who runs a control command, for the CLI (swarm.person): before it runs
-            drivegate.write_grants(cfg, payload, host, ctx)
-        except Exception as exc:
-            _log_error("drive grant", str(payload.get("agent_id") or payload.get("session_id")), exc)
         why = drivegate.pre_tool(cfg, payload, host, resume=resume, resume_lookup=_resume_binding, ctx=ctx)
+        if why is None:
+            try:   # who runs a control command, for the CLI (swarm.person): before it runs, if it may run
+                drivegate.write_grants(cfg, payload, host, ctx)
+            except Exception as exc:
+                _log_error("drive grant", str(payload.get("agent_id") or payload.get("session_id")), exc)
     except Exception as exc:   # never break the agent (a known drive seat's errors are refused inside pre_tool)
         _log_error("drive", str(payload.get("agent_id") or payload.get("session_id")), exc)
         return False

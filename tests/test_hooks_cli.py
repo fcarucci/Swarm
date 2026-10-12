@@ -939,3 +939,16 @@ class PersonGrantHook(Env):
                   tool_input={"file_path": "swarm unhalt --job J"})
         self.assertIsNone(self.caller(["halt", "--job", "J"]))
         self.assertIsNone(self.caller(["unhalt", "--job", "J"]))
+
+    def test_N1_a_call_pre_tool_refuses_gets_no_grant(self):
+        from swarm import drivegate
+        with mock.patch.object(drivegate, "pre_tool", return_value="refused for the test"):
+            self.hook("turn", agent_id=None, session="REQ", host="claude", tool_name="Bash",
+                      tool_input={"command": "swarm halt --job J"})
+        self.assertIsNone(self.caller(["halt", "--job", "J"]))
+
+    def test_N1_the_calls_post_tool_use_removes_its_unused_grant(self):
+        call = {"tool_name": "Bash", "tool_input": {"command": "swarm halt --job J"}}
+        self.hook("turn", agent_id=None, session="REQ", host="claude", **call)
+        self.hook("done", agent_id=None, session="REQ", host="claude", tool_response={"stdout": "refused"}, **call)
+        self.assertIsNone(self.caller(["halt", "--job", "J"]))

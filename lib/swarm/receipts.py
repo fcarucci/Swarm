@@ -19,8 +19,10 @@ File "receipt-<sha256(board_key NUL job NUL kind NUL record_id)>.json": {"v": 1,
 Writes are durable (a failed directory fsync raises)."""
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
+import os
 import math
 import re
 import unicodedata
@@ -78,6 +80,44 @@ class Receipt:
     args_sha: str
     expires_at: float          # epoch seconds; not valid at or after this time
     destinations: dict | None = None   # land receipts: url -> {"state": ..., "sha": ...}
+
+
+GRANTS_SUBDIR = "grants"   # ~/.local/share/swarm/host/grants: grants only (a Codex writable root, N6)
+
+
+def grants_dir() -> Path:
+    """Where grants live: their own 0700 directory next to `enrolled`, so a Codex seat's sandbox can be given
+    it (to use a grant up) without the enrolled directory, where every other receipt is."""
+    return paths.host_dir() / GRANTS_SUBDIR
+
+
+@contextlib.contextmanager
+def _dir(kind: str, create: bool):
+    """A verified descriptor of the directory a receipt of `kind` lives in (safefs, 0700, this user's)."""
+    if kind != "grant":
+        with enrolment._dir(create=create) as d:
+            yield d
+        return
+    base = safefs.open_base(paths.host_dir(), create=create, strict_mode=0o700)
+    try:
+        fd = safefs.open_sub(base, GRANTS_SUBDIR, create=create, strict_mode=0o700)
+    finally:
+        os.close(base)
+    try:
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def drop(board_key: str, job: str, kind: str, record_id: str) -> bool:
+    """Remove the receipt of this record (no checks: the caller decided it is void). True when one was removed."""
+    from swarm import compat
+    try:
+        with _dir(kind, create=False) as d:
+            compat.unlink(safefs._entry(receipt_name(board_key, job, kind, record_id)), dir_fd=d)
+        return True
+    except OSError:
+        return False
 
 
 def args_sha(argv: list) -> str:
@@ -191,9 +231,9 @@ def write(board_key: str, r: Receipt) -> Path:
         raise ValueError("receipt: board_key differs from the board the receipt is written for")
     name = receipt_name(board_key, r.job, r.kind, r.record_id)
     body = json.dumps({"v": FORMAT, **asdict(r)}, sort_keys=True, allow_nan=False)
-    with enrolment._dir(create=True) as d:
+    with _dir(r.kind, create=True) as d:
         safefs.write_atomic(d, name, body, durable=True)
-    return enrolment.enrolled_dir() / name
+    return (grants_dir() if r.kind == "grant" else enrolment.enrolled_dir()) / name
 
 
 def find(board_key: str, job: str, kind: str, record_id: str, *, rev: int, incarnation: str,
@@ -211,7 +251,7 @@ def find_latest(board_key: str, job: str, kind: str, record_id: str, *, incarnat
     """find() for whatever revision the stored receipt carries (one file per record: a new revision's
     receipt replaces the old one). For a caller that checks the revision itself."""
     try:
-        with enrolment._dir(create=False) as d:
+        with _dir(kind, create=False) as d:
             r = _parse(safefs.read(d, receipt_name(board_key, job, kind, record_id), RECORD_MAX))
     except (OSError, TypeError):
         return None
@@ -238,7 +278,7 @@ def take(board_key: str, job: str, kind: str, record_id: str, *, rev: int, incar
         return None
     from swarm import compat
     try:
-        with enrolment._dir(create=False) as d:
+        with _dir(kind, create=False) as d:
             compat.unlink(safefs._entry(receipt_name(board_key, job, kind, record_id)), dir_fd=d)
     except OSError:
         return None
