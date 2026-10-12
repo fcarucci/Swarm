@@ -107,7 +107,9 @@ def host_pid(parent_of=None, pid: int | None = None, max_hops: int = 40) -> int 
             # a jailed seat's hook or command, run outside the jail by its runner's broker (seatbroker): no
             # claude/codex process is above it here, so the broker's record names the seat's own session process
             return brokered
-    parent_of = parent_of or hosts._proc_parent
+    if parent_of is None:
+        from swarm.supervisor import procwatch
+        parent_of = procwatch.parent_of        # /proc, `ps` (macOS), a Toolhelp32 snapshot (Windows)
     pid = os.getppid() if pid is None else pid
     found = None
     for _ in range(max_hops):
@@ -172,10 +174,14 @@ def codex_session(env, ancestor=None) -> bool:
 
 
 def _ancestor_host() -> str | None:
+    """The nearest claude/codex process above this one, or None when the ancestry was read up to the top and
+    has none. Linux /proc, macOS `ps`, Windows a Toolhelp32 snapshot (procwatch.parent_of). "unknown" when it
+    cannot be read: treated as inside an agent host (fails closed), on every platform."""
+    from swarm.supervisor import procwatch
     try:
-        return hosts.nearest_ancestor_host(hosts._proc_parent, os.getppid())
+        return procwatch.ancestor_host(os.getppid())
     except Exception:
-        return "unknown"   # cannot tell: treat as inside an agent host (fails closed)
+        return "unknown"
 
 
 def agent_host(env, ancestor=None) -> str | None:

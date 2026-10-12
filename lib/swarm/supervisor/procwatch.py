@@ -91,6 +91,31 @@ def nearest_host(pid: int | None = None, parent=None, max_hops: int = 40) -> int
     return None
 
 
+def ancestor_host(pid: int, parent=None, max_hops: int = 64) -> str | None:
+    """"claude" or "codex" for the nearest agent host at or above `pid`, None when the walk reached the top
+    (pid 1, or a parent that is gone: Windows keeps the pid of an exited parent) without one. Raises
+    LookupError when `pid` itself cannot be read or the walk does not end: the caller fails closed."""
+    from swarm import hosts
+    parent = parent or parent_of
+    pid = int(pid)
+    for hop in range(max_hops):
+        if pid <= (0 if compat.IS_WINDOWS else 1):
+            return None
+        info = parent(pid)
+        if not info:
+            if hop == 0:
+                raise LookupError(f"the ancestry of process {pid} cannot be read")
+            return None
+        ppid, argv = info
+        found = hosts._classify(list(argv))
+        if found:
+            return found
+        if ppid == pid:
+            return None
+        pid = ppid
+    raise LookupError("the ancestry is deeper than it can be walked")
+
+
 # --- identity ----------------------------------------------------------------------------------------
 
 def _win_creation(pid: int) -> str | None:

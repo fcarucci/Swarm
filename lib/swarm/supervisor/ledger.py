@@ -428,14 +428,22 @@ def create(board_key: str, job: str, *, budgets: dict, activated_at: str, state:
 
 def _move_aside(d: int, name: str) -> str:
     """Rename the entry `name` to `<name>.bad-<UTC stamp>-<random>` (a name the scan does not read as a
-    ledger; stamps sort by time) and sync the directory. The caller holds the ledger's lock."""
-    if os.rename not in os.supports_dir_fd:
-        raise LedgerBadError("this platform cannot move a bad ledger aside; a person must do it")
+    ledger; stamps sort by time) and sync the directory. The caller holds the ledger's lock. Relative to the
+    directory's descriptor where the platform renames that way; elsewhere (Windows, spec 3.11 [T21]) by the
+    path of the verified private directory (compat.rename: the target is a fresh random name, so nothing is
+    replaced), and an entry that is a link or junction is refused, never moved through."""
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     target = f"{name[:-len('.json')]}.bad-{stamp}-{uuid.uuid4().hex[:12]}"
-    os.rename(name, target, src_dir_fd=d, dst_dir_fd=d)
+    if os.rename in os.supports_dir_fd:
+        os.rename(name, target, src_dir_fd=d, dst_dir_fd=d)
+    else:
+        import stat as _stat
+        st = compat.lstat(name, dir_fd=d)
+        if _stat.S_ISLNK(st.st_mode) or getattr(st, "st_file_attributes", 0) & 0x400:   # REPARSE_POINT
+            raise LedgerBadError(f"{name} is a link: a person must move it aside")
+        compat.rename(name, target, src_dir_fd=d, dst_dir_fd=d)
     try:
-        os.fsync(d)
+        compat.fsync_dir(d)
     except OSError:   # directories cannot be synced everywhere; the rename itself is done
         pass
     return target

@@ -891,15 +891,30 @@ class DriveRepair(ControlCase):
 
 
 class RepairWithoutDirFdRename(ControlCase):
-    def test_a_platform_without_dir_fd_rename_gets_a_clear_refusal(self):
-        """Windows (no drive mode): repair says it cannot run here, instead of "the ledger is unreadable"."""
+    def test_a_platform_without_dir_fd_rename_still_moves_the_bad_ledger_aside(self):
+        """Windows has no rename relative to a directory descriptor: repair moves the bad ledger aside by the
+        private directory's path instead (spec 3.11 [T21]: drive mode runs there)."""
         entry = next(self.home.rglob(ledger._name(self.bkey, JOB)))
         entry.write_bytes(b"bad")
         with mock.patch.object(ledger.os, "supports_dir_fd", set()):
             rc, _, err = self.run_cmd("drive", "repair", "--job", JOB, "--generation", "1")
+        self.assertEqual(rc, 0, err)
+        aside = [p for p in entry.parent.iterdir() if p.name.startswith(entry.name[:-len(".json")] + ".bad-")]
+        self.assertEqual([p.read_bytes() for p in aside], [b"bad"])            # kept, never deleted
+        self.assertIsNotNone(ledger.load(self.bkey, JOB))                       # a fresh ledger in its place
+
+    @posix_only("symlinks")
+    def test_without_dir_fd_rename_a_link_is_refused_not_moved_through(self):
+        entry = next(self.home.rglob(ledger._name(self.bkey, JOB)))
+        target = self.home / "elsewhere.json"
+        target.write_bytes(b"bad")
+        entry.unlink()
+        entry.symlink_to(target)
+        with mock.patch.object(ledger.os, "supports_dir_fd", set()):
+            rc, _, err = self.run_cmd("drive", "repair", "--job", JOB, "--generation", "1")
         self.assertEqual(rc, 1)
-        self.assertIn("drive repair cannot run here", err)
-        self.assertEqual(entry.read_bytes(), b"bad")   # nothing moved
+        self.assertTrue(entry.is_symlink())
+        self.assertEqual(target.read_bytes(), b"bad")
 
 
 class TtyReceipt(ControlCase):
