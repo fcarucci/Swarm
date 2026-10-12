@@ -448,6 +448,35 @@ class RereviewTests(T.LifeCase):
         self.assertEqual(self.reload().terminal["verdict"], "met")
 
 
+class CancelBehindACloseTests(T.LifeCase):
+    def test_a_cancel_behind_a_rejected_met_applies_after_the_rejection(self):
+        self.pending_met()
+        self.led.watermarks[life._closing_key(self.led.terminal_intent)] = 1       # the close had begun
+        self.led.save()
+        self.run.gate = life.Gate("reject", "target moved")
+        self.assertTrue(life.cancel_job(self.b, self.cfg, self.led, "alice", self.at(2), hooks=self.run.hooks()))
+        self.assertEqual(self.reload().terminal["verdict"], "cancelled")
+        self.assertEqual(self.job().status, "cancelled")
+        self.assertEqual(len(self.posts("DRIVER-CLOSE-REJECTED")), 1)
+
+    def test_a_cancel_behind_a_gate_that_is_still_unknown_stays_pending(self):
+        self.pending_met()
+        self.led.watermarks[life._closing_key(self.led.terminal_intent)] = 1
+        self.led.save()
+        self.run.gate = life.Gate("unknown")
+        self.assertFalse(life.cancel_job(self.b, self.cfg, self.led, "alice", self.at(2), hooks=self.run.hooks()))
+        self.assertIsNone(self.reload().terminal)
+        self.assertEqual(self.reload().terminal_intent["verdict"], "met")
+        self.assertEqual(self.job().status, "active")
+
+    def test_a_cancel_behind_a_met_that_closes_is_moot(self):
+        self.pending_met()
+        with self.barrier_crash("terminal_closed_before_ledger"), self.assertRaises(T.Crash):
+            life.terminalize(self.b, self.cfg, self.led, self.at(1), hooks=self.run.hooks())
+        life.cancel_job(self.b, self.cfg, self.reload(), "alice", self.at(2), hooks=self.run.hooks())
+        self.assertEqual(self.reload().terminal["verdict"], "met")
+
+
 class CancelTests(T.LifeCase):
     """CANCELLED: a person ended the job; ledger first, every terminal state clears the claim."""
 

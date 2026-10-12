@@ -441,7 +441,8 @@ SELECT j.job, j.status, j.description, j.task, j.outcome, j.created_by, j.sessio
             WHEN COALESCE(j.goal, '') <> '' AND j.verdict IS DISTINCT FROM 'met'
                  AND j.verdict IS DISTINCT FROM 'unreachable' AND COALESCE(s.idle, 0) = 0 THEN 'waiting (goal not met)'
             WHEN greatest(s.last_contact_at, m.last_post_at,
-                          least(j.activated_at, now()), least(j.created_at, now())) > now() - make_interval(mins => {idle}) THEN 'active'
+                          CASE WHEN j.activated_at <= now() THEN j.activated_at END,
+                          CASE WHEN j.created_at <= now() THEN j.created_at END) > now() - make_interval(mins => {idle}) THEN 'active'
             ELSE 'idle'
        END AS shown_status
   FROM jobs j
