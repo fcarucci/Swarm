@@ -52,9 +52,11 @@ def _classify(argv: list[str]) -> str | None:
 def _proc_parent(pid: int) -> tuple[int, list[str]] | None:
     """(ppid, argv) of pid from /proc, or from `ps` where there is no /proc (macOS)."""
     try:
-        stat = open(f"/proc/{pid}/stat").read()
+        with open(f"/proc/{pid}/stat") as fh:
+            stat = fh.read()
         ppid = int(stat[stat.rindex(")") + 2:].split()[1])
-        argv = open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            argv = fh.read().split(b"\0")
         return ppid, [a.decode(errors="replace") for a in argv if a]
     except FileNotFoundError:
         pass
