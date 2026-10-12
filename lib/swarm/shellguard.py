@@ -3,7 +3,10 @@ effort; the hard guarantee is OpenShell). Conservative: a few false positives on
 unusual read-only commands are acceptable, completeness is not claimed."""
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import subprocess
 
 _QUOTED = re.compile(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"")
 _AT_CMD = r"(?:^|[;&|(\n`]|\$\(|\b(?:then|do|else|xargs|sudo|env|exec|nohup|time|command)\s|-exec(?:dir)?\s)\s*"
@@ -305,24 +308,58 @@ def ci_repo(command: str) -> str | None:
 
 
 # ---- drive jobs (spec 3.4, 4.0): what no seat may run, and what a read-only seat may not write -----
-# A guardrail, not a boundary (spec 4.0, [F24]): it stops recognisable misuse by an agent that is not
-# trying to hide it, and the driver's own checks (`swarm land`, the mirror audit) decide outcomes. The
-# refusals are a push to the job's target branch (any spelling that names it, or that names none and so
-# pushes whatever is checked out), any force or mirror push, a headless Claude or Codex session, a merge
-# through gh. Read-only seats (judges, reviewers) also refuse writes and SQL writes, and only judges run
-# `swarm verdict`. Words are split like a shell does (quotes resolved, not blanked), and what runs inside
-# `sh -c`, `bash -lc`, `eval`, `script -c`, `$(...)` and backticks is looked at too.
+# A guardrail, not a boundary (spec 4.0, [F24]): the boundary is the Bash sandbox and the seats' lack of landing
+# credentials. It stops recognisable misuse, and the driver's own checks (`swarm land`, the mirror audit) decide
+# outcomes. The refusals are a push to the job's target branch (any spelling that names it, or that names none and
+# so pushes whatever is checked out), any force or mirror push, a headless Claude or Codex session, a merge through
+# gh, and scheduling (at, batch, crontab). Read-only seats (judges, reviewers) also refuse writes and SQL writes,
+# and only judges run `swarm verdict`. Words are split like a shell does (quotes resolved, not blanked).
+#
+# ONE RULE for code (the coordinator's ruling, round 4): code that can run commands must be a LITERAL ARGUMENT,
+# and it is scanned: `sh -c '<literal>'` (and every other shell's -c) is parsed and walked recursively like the
+# command line itself; interpreter code (`python3 -c`, `perl -e`, `node -e`, `ruby -e`, `php -r`, `lua -e`,
+# `expect -c`, `osascript -e`, an awk or sed program, `vim -c`, `git -c core.pager=...`, GIT_SSH_COMMAND=...) is
+# scanned as text (_inline_refusal). Code that arrives any other way cannot be checked and is refused: stdin, a
+# pipe, a here-string, a heredoc, `<(...)`, a variable or `$(...)` (as the program, as -c code or under eval), a
+# glob or brace expansion as the program, and a script FILE, unless that file is tracked unmodified at HEAD in its
+# repository (or is a file the seat cannot write, such as /usr/bin/...). The same file rule covers `./script.sh`,
+# `bash script.sh`, `python3 x.py`, `source f`, `awk -f f`, `make -f f`. A program reached through a path that
+# resolves to a shell or interpreter under another name (`ln -s /bin/sh x; ./x`) is refused; a bare name is
+# resolved through PATH and its real name decides (rbash, a symlink to bash, is bash).
 
 _MAX_NEST = 5
-STDIN_SHELL = "<stdin-shell>"   # a shell that reads its script from a pipe or file: unverifiable
+STDIN_SHELL = "<stdin-shell>"   # code that cannot be checked; args, when given, is [why]
 TOO_DEEP = "<too-deep>"   # the program iter_commands yields for a command nested beyond _MAX_NEST
-_SHELLS = frozenset(("sh", "bash", "zsh", "dash", "ksh", "ash", "fish", "csh", "tcsh", "busybox"))
+CODE = "<code>"           # interpreter code given as a literal argument: args == [the code]
+SCRIPT = "<script-file>"  # a script file a shell or interpreter runs: args == [the path as written]
+_POSIX_SHELLS = frozenset(("sh", "bash", "rbash", "zsh", "dash", "ksh", "ksh93", "mksh", "lksh", "oksh", "loksh",
+                           "pdksh", "posh", "yash", "ash", "hush", "fish", "csh", "tcsh", "osh", "ysh"))
+_OTHER_SHELLS = frozenset(("elvish", "nu", "xonsh", "pwsh", "powershell", "rc", "es", "ion", "murex"))
+_SHELLS = _POSIX_SHELLS | _OTHER_SHELLS
 _SEPARATORS = ";&|()\n"
 _KEYWORDS = frozenset(("{", "}", "!", "if", "then", "do", "else", "elif", "while", "until", "time", "command",
                        "builtin", "exec", "nohup", "setsid", "nice", "ionice", "chrt", "stdbuf", "xargs", "env",
-                       "sudo", "doas", "timeout", "watch", "unbuffer", "caffeinate", "taskset"))
+                       "sudo", "doas", "timeout", "watch", "unbuffer", "caffeinate", "taskset", "coproc", "busybox",
+                       "toybox", "chroot", "unshare", "nsenter", "dbus-run-session", "strace", "pkexec", "cgexec"))
+_SHELL_IF_EMPTY = frozenset(("chroot", "unshare", "nsenter"))   # with no command they start an interactive shell
 _REDIRECT = re.compile(r"\d*(?:<<<|<<-?|>>|>&|<&|&>|>|<)")
 _ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+
+
+class _Word(str):
+    """A shell word, quotes resolved. `dyn`: the shell expands something in it (a $ parameter, `$(...)` or
+    backticks, `$'...'`, a glob or a brace outside quotes), so what it really is cannot be read from the text."""
+    dyn = False
+
+
+def _w(text: str, dyn: bool) -> str:
+    word = _Word(text)
+    word.dyn = dyn
+    return word
+
+
+def _dyn(word) -> bool:
+    return bool(getattr(word, "dyn", False))
 
 
 def _read_substitution(text: str, i: int) -> tuple[str, int]:
@@ -360,10 +397,14 @@ def _read_backticks(text: str, i: int) -> tuple[str, int]:
     return text[i + 1:j], min(j + 1, n)
 
 
+_PARAM_START = re.compile(r"[A-Za-z_{0-9@*#?!$-]")
+
+
 def split_commands(text: str, _depth: int = 0) -> list[list[str]]:
     """The words of each simple command of a shell text, quotes resolved. Command separators are ; & | ( )
     and newlines outside quotes; the commands inside `$(...)` and backticks are listed as commands of their
-    own (and leave a placeholder word where they stood). Redirections are dropped. Never raises."""
+    own (and leave a placeholder word where they stood). Redirections are dropped. Each word is a _Word whose
+    `dyn` says whether the shell expands it. Never raises."""
     if _depth > _MAX_NEST or not isinstance(text, str):
         return []
     text = drop_heredoc_bodies(text)
@@ -371,13 +412,15 @@ def split_commands(text: str, _depth: int = 0) -> list[list[str]]:
     words: list[str] = []
     cur: list[str] = []
     has = False            # a word is being built (an empty "" still counts)
+    dyn = glob = brace = False
     i, n = 0, len(text)
 
     def end_word():
-        nonlocal cur, has
+        nonlocal cur, has, dyn, glob, brace
         if has:
-            words.append("".join(cur))
-        cur, has = [], False
+            word = "".join(cur)
+            words.append(_w(word, dyn or (glob and word not in ("[", "[[")) or (brace and word != "{")))
+        cur, has, dyn, glob, brace = [], False, False, False, False
 
     def end_command():
         nonlocal words
@@ -410,11 +453,15 @@ def split_commands(text: str, _depth: int = 0) -> list[list[str]]:
                     inner, i = _read_substitution(text, i)
                     out.extend(split_commands(inner, _depth + 1))
                     cur.append("$SUB")
+                    dyn = True
                 elif text[i] == "`":
                     inner, i = _read_backticks(text, i)
                     out.extend(split_commands(inner, _depth + 1))
                     cur.append("$SUB")
+                    dyn = True
                 else:
+                    if text[i] == "$" and i + 1 < n and _PARAM_START.match(text[i + 1]):
+                        dyn = True
                     cur.append(text[i])
                     i += 1
             i += 1
@@ -422,12 +469,12 @@ def split_commands(text: str, _depth: int = 0) -> list[list[str]]:
             inner, i = _read_substitution(text, i)
             out.extend(split_commands(inner, _depth + 1))
             cur.append("$SUB")
-            has = True
+            has = dyn = True
         elif c == "`":
             inner, i = _read_backticks(text, i)
             out.extend(split_commands(inner, _depth + 1))
             cur.append("$SUB")
-            has = True
+            has = dyn = True
         elif c == "#" and not has:
             while i < n and text[i] != "\n":
                 i += 1
@@ -441,6 +488,12 @@ def split_commands(text: str, _depth: int = 0) -> list[list[str]]:
             end_word()
             i += 1
         else:
+            if c == "$" and i + 1 < n and (_PARAM_START.match(text[i + 1]) or text[i + 1] in "'\""):
+                dyn = True     # $NAME, ${...}, $1, $@, $'...' (ANSI-C: escapes decoded), $"..." (locale)
+            elif c in "*?[":
+                glob = True
+            elif c == "{":
+                brace = True
             cur.append(c)
             has = True
             i += 1
@@ -464,7 +517,8 @@ def _drop_redirections(words: list[str]) -> list[str]:
 
 _VALUE_FLAGS = {
     "env": {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"},
-    "sudo": {"-u", "-g", "-h", "-p", "-C", "-r", "-t", "-D", "-R", "-U"},
+    "sudo": {"-u", "-g", "-h", "-p", "-C", "-r", "-t", "-D", "-R", "-U", "--user", "--group", "--chdir", "--host",
+             "--prompt", "--role", "--type", "--other-user", "--close-from"},
     "doas": {"-u", "-C"},
     "timeout": {"-s", "--signal", "-k", "--kill-after"},
     "nice": {"-n", "--adjustment"},
@@ -476,28 +530,54 @@ _VALUE_FLAGS = {
     "watch": {"-n", "--interval", "-d"},
     "taskset": {"-c"},
     "exec": {"-a"},
+    "chroot": {"--userspec", "--groups"},
+    "unshare": {"-S", "--setuid", "-G", "--setgid", "-R", "--root", "-w", "--wd", "--map-user", "--map-group",
+                "--propagation", "--setgroups"},
+    "nsenter": {"-t", "--target", "-S", "--setuid", "-G", "--setgid", "--user-parent"},
+    "dbus-run-session": {"--config-file", "--dbus-daemon"},
+    "strace": {"-o", "-e", "-p", "-s", "-u", "-E", "-a", "-b", "-I", "-O", "-P", "-S", "-X"},
+    "pkexec": {"--user"},
+    "cgexec": {"-g"},
 }
 
 
-def _unwrap(words: list[str]) -> tuple[list[str], set[str]]:
-    """(the command after assignments and wrappers like env, sudo, timeout, nohup, xargs, time; the wrappers
-    seen). A wrapper's own options are skipped, and the ones that take a value skip it."""
+def _unwrap(words: list[str]) -> tuple[list[str], set[str], list[tuple[str, str]]]:
+    """(the command after assignments and wrappers like env, sudo, timeout, nohup, xargs, chroot, busybox; the
+    wrappers seen; the NAME=value assignments made for it). A wrapper's own options are skipped, and the ones that
+    take a value skip it. Tags in the wrappers: `split:TEXT` (env -S), `shell-if-empty` (a wrapper that runs an
+    interactive shell when given no command), `chdir` (the command runs in another directory), `xargs-I`."""
     seen: set[str] = set()
+    assigns: list[tuple[str, str]] = []
     words = list(words)
     while words:
         w = words[0]
-        if _ASSIGN.match(w) and not w.startswith("="):
+        if (_ASSIGN.match(w) or ("env" in seen and "=" in w and not w.startswith(("=", "-")))) and not w.startswith("="):
+            name, _eq, value = w.partition("=")
+            assigns.append((name, _w(value, _dyn(w))))
             words = words[1:]
             continue
         base = _prog(w)
         if base not in _KEYWORDS:
             break
         seen.add(base)
+        if base in _SHELL_IF_EMPTY:
+            seen.add("shell-if-empty")
         words = words[1:]
         values = _VALUE_FLAGS.get(base, set())
         while words and words[0].startswith("-") and words[0] != "-":
             flag = words[0]
             words = words[1:]
+            name = flag.split("=", 1)[0]
+            if base == "env" and (flag.startswith("-S") and len(flag) > 2 or flag.startswith("--split-string=")):
+                seen.add("split:" + (flag[2:] if flag.startswith("-S") else flag.split("=", 1)[1]))
+            if (base == "env" and name in ("-C", "--chdir") or base == "sudo" and name in ("-D", "--chdir")
+                    or base == "env" and flag.startswith("-C") and len(flag) > 2):
+                seen.add("chdir")
+            if base in ("sudo", "doas") and (flag in ("--shell", "--login") or not flag.startswith("--") and
+                                             set(flag[1:]) & set("si")):
+                seen.add("shell-if-empty")
+            if base == "xargs" and (name in ("-I", "-i", "--replace") or flag.startswith(("-I", "-i"))):
+                seen.add("xargs-I")
             if flag in values and words:
                 if base == "env" and flag in ("-S", "--split-string"):
                     seen.add("split:" + words[0])
@@ -508,21 +588,348 @@ def _unwrap(words: list[str]) -> tuple[list[str], set[str]]:
             words = words[1:]
         if base == "taskset" and words and re.fullmatch(r"(?:0x)?[0-9a-fA-F,-]+", words[0]):
             words = words[1:]
+        if base == "chroot" and words:      # NEWROOT
+            words = words[1:]
         if base == "env":
             continue
-    return words, seen
+    return words, seen, assigns
+
+
+# ---- what a program is: its name, or the real name a path or a PATH lookup resolves to -----------------------
+
+def _norm(word: str) -> str:
+    """The program name of a word: its last path component, without a Windows .exe."""
+    name = re.split(r"[/\\]", str(word))[-1]
+    return name[:-4] if name.lower().endswith(".exe") else name
+
+
+_FAMILY = re.compile(r"(?P<python>(?:python|pypy)[0-9.]*)|(?P<perl>perl[0-9.]*)|(?P<ruby>j?ruby[0-9.]*)|"
+                     r"(?P<php>php[0-9.]*(?:-cli)?)|(?P<lua>lua(?:jit)?[0-9.]*)|(?P<tcl>(?:tclsh|wish)[0-9.]*|jimsh)|"
+                     r"(?P<node>node(?:js)?)|(?P<expect>expect)|(?P<osascript>osascript)|(?P<awk>[gmn]?awk)|"
+                     r"(?P<sed>g?sed)|(?P<vim>g?vim?|nvim|ex|view|rvim)|(?P<make>g?make)|(?P<deno>deno)|(?P<bun>bun)")
+
+
+def _family(name: str) -> str | None:
+    """`sh` for a POSIX-like shell, `shx` for another shell, the interpreter's family, or None."""
+    if name in _POSIX_SHELLS:
+        return "sh"
+    if name in _OTHER_SHELLS:
+        return "shx"
+    m = _FAMILY.fullmatch(name)
+    return m.lastgroup if m else None
+
+
+_NATIVE_MAGIC = (b"\x7fELF", b"MZ", b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe",
+                 b"\xca\xfe\xba\xbe")
+
+
+def _is_native(path: str) -> bool:
+    """Whether `path` is a compiled program (ELF, Mach-O, PE), not a script a shell or interpreter reads."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4)
+    except OSError:
+        return False
+    return any(head.startswith(m) for m in _NATIVE_MAGIC)
+
+
+def _effective_prog(word: str) -> str:
+    """The program name `word` runs as: its own name when that names a shell or interpreter; else, for a bare name
+    found on PATH or an absolute path, the real name of the compiled program it resolves to when THAT is a shell
+    or interpreter (rbash -> bash, a symlink `mysh` -> dash). A relative path is resolved by the caller, which
+    knows the directory (drive_command_refusal)."""
+    base = _norm(word)
+    if _family(base) is not None:
+        return base
+    try:
+        path = os.path.expanduser(str(word))
+        if "/" not in path and "\\" not in path:
+            path = shutil.which(path) or ""
+        elif not os.path.isabs(path):
+            return base
+        real = os.path.realpath(path) if path else ""
+        if real and _family(_norm(real)) is not None and _is_native(real):
+            return _norm(real)
+    except Exception:
+        pass
+    return base
+
+
+def _is_path(word: str) -> bool:
+    return "/" in word or (os.sep == "\\" and "\\" in word)
+
+
+# ---- the code a command runs through its arguments ---------------------------------------------------------
+
+def _bad(why: str):
+    return ("bad", why)
+
+
+def _code(word, what="code"):
+    if word is None:
+        return _bad(f"{what} is missing")
+    return ("code", str(word)) if not _dyn(word) else _bad(f"{what} given by a variable or $(...) cannot be checked")
+
+
+def _text(word, what="the -c command"):
+    if word is None:
+        return _bad(f"{what} is missing")
+    return ("t", str(word)) if not _dyn(word) else _bad(f"{what} given by a variable or $(...) cannot be checked")
+
+
+def _file(word, what="a script"):
+    if word is None:
+        return _bad(f"{what} is missing")
+    if _dyn(word):
+        return _bad(f"{what} named by a variable or $(...) cannot be checked")
+    if word in ("-", "/dev/stdin") or str(word).startswith(("/dev/fd/", "/proc/self/fd/", "/dev/stdin")):
+        return _bad(f"{what} read from stdin cannot be checked")
+    return ("file", word)
+
+
+_READS = "reads its code from stdin (a pipe, here-string or heredoc)"
+_STDIN = f"it {_READS}, which cannot be checked"
+
+
+def _shell_items(family: str, args: list[str]):
+    """What a shell runs: the -c literal (parsed and walked as shell text; scanned as code for a non-POSIX shell), a
+    script file (the file rule), --rcfile/--init-file files; anything else reads stdin and cannot be checked."""
+    out, has_c, stdin, i, n = [], False, False, 0, len(args)
+    as_text = _text if family == "sh" else _code
+    while i < n:
+        a = args[i]
+        if a in ("--", "-"):
+            i += 1
+            break
+        if a.startswith("--"):
+            name, eq, val = a.partition("=")
+            value = _w(val, _dyn(a)) if eq else (args[i + 1] if i + 1 < n else None)
+            step = 1 if eq or name not in ("--rcfile", "--init-file", "--command", "--init-command") else 2
+            if name in ("--rcfile", "--init-file"):
+                out.append(_file(value, "a shell rc file"))
+            elif name == "--command":           # fish
+                return out + [as_text(value)]
+            elif name == "--init-command":      # fish
+                out.append(as_text(value))
+            i += step
+            continue
+        if a[:1] in ("-", "+") and len(a) > 1:
+            takes = 0
+            for ch in a[1:]:
+                if ch == "c":
+                    has_c = True
+                elif ch in "oO":
+                    takes += 1
+                elif ch == "s":
+                    stdin = True
+                elif ch == "i":
+                    return out + [_bad("an interactive shell reads its rc files and stdin, which cannot be checked")]
+            i += 1 + takes
+            continue
+        break
+    rest = args[i:]
+    if stdin:
+        return out + [_bad("a shell with -s " + _STDIN)]
+    if has_c:
+        return out + [as_text(rest[0] if rest else None)]
+    if rest:
+        return out + [_file(rest[0])]
+    return out + [_bad("a shell with no -c " + _STDIN)]
+
+
+def _pwsh_items(prog: str, args: list[str]):
+    """PowerShell: -Command (all the rest) is scanned, -EncodedCommand cannot be, -File is the file rule."""
+    i, n = 0, len(args)
+    while i < n:
+        a = args[i]
+        low = a.lower()
+        if not low.startswith(("-", "/")):
+            if prog == "pwsh":
+                return [_file(a)]
+            rest = args[i:]
+            return [_bad("a command given by a variable cannot be checked")] if any(map(_dyn, rest)) else \
+                [("code", " ".join(rest))]
+        name = low.lstrip("-/").split(":", 1)[0]
+        if name in ("e", "ec") or (len(name) >= 3 and "encodedcommand".startswith(name)):
+            return [_bad("an encoded PowerShell command cannot be checked")]
+        if name == "c" or (len(name) >= 2 and "command".startswith(name)):
+            rest = args[i + 1:]
+            if not rest or rest[0] == "-":
+                return [_bad("PowerShell " + _STDIN)]
+            return [_bad("a command given by a variable cannot be checked")] if any(map(_dyn, rest)) else \
+                [("code", " ".join(rest))]
+        if name == "f" or (len(name) >= 2 and "file".startswith(name)):
+            return [_file(args[i + 1] if i + 1 < n else None)]
+        if name in ("v", "version", "h", "help", "?"):
+            return []
+        takes = name in ("ex", "ep", "executionpolicy", "wd", "workingdirectory", "o", "of", "outputformat", "if",
+                         "inputformat", "w", "windowstyle", "configurationname", "settingsfile", "custompipename")
+        i += 2 if takes else 1
+    return [_bad("PowerShell with no -Command: " + _STDIN)]
+
+
+# family: code letters, code long options, file letters, file long options, value letters (take an argument),
+# value long options, stop letters/long options (a module or a mode that runs no code from the command line),
+# attach letters (consume the rest of their bundle), bad letters (interactive), info arguments (print and exit),
+# positional ("file": a script path, "code": the program text, "none": not looked at), code_ends (options end
+# after the code).
+_INTERPRETERS = {
+    "python": dict(code="c", vals="WX", stop="m", bad="i", info={"-V", "-VV", "--version", "-h", "--help", "-?"},
+                   pos="file", code_ends=True),
+    "perl": dict(code="eE", attach="IMmxiCdD", digits="l0", info={"-v", "-V", "--version", "-h", "--help"},
+                 pos="file"),
+    "ruby": dict(code="e", vals="IrCE", attach="xFTWK", digits="0", info={"-v", "--version", "-h", "--help"},
+                 vlong={"--encoding", "--external-encoding", "--internal-encoding", "--enable", "--disable", "--dump"},
+                 pos="file"),
+    "node": dict(code="ep", clong={"--eval", "--print"}, vals="rC",
+                 vlong={"--require", "--import", "--loader", "--experimental-loader", "--input-type", "--conditions",
+                        "--env-file", "--title"},
+                 slong={"--test"}, info={"-v", "--version", "-h", "--help", "--v8-options"}, pos="file",
+                 code_ends=True),
+    "php": dict(code="rBRE", files="fF", vals="dczt", stop="lsS", bad="a",
+                info={"-v", "--version", "-h", "--help", "-i", "-m", "--ini"}, pos="file"),
+    "lua": dict(code="e", vals="l", bad="i", info={"-v"}, pos="file"),
+    "tcl": dict(vlong={"-encoding"}, pos="file"),
+    "expect": dict(code="c", files="f", vals="D", bad="i", info={"-v"}, pos="file"),
+    "osascript": dict(code="e", vals="ls", pos="file"),
+    "awk": dict(code="e", clong={"--source"}, files="fi", flong={"--file", "--include"}, vals="Fvl",
+                vlong={"--field-separator", "--assign", "--load"}, info={"--version", "-V", "--help"}, pos="code"),
+    "sed": dict(code="e", clong={"--expression"}, files="f", flong={"--file"}, vals="l", vlong={"--line-length"},
+                attach="i", info={"--version", "--help"}, pos="code"),
+    "bun": dict(code="e", clong={"--eval", "--print"}, pos="none"),
+}
+
+
+def _interp_items(family: str, args: list[str]):
+    """What an interpreter runs from its command line: its literal code (scanned), its script file (the file
+    rule), or nothing it can be checked by (stdin)."""
+    spec = _INTERPRETERS[family]
+    code, files, vals = spec.get("code", ""), spec.get("files", ""), spec.get("vals", "")
+    out, given, info, i, n = [], False, False, 0, len(args)
+    while i < n:
+        a = args[i]
+        if a in spec.get("info", ()):
+            info = True
+            i += 1
+            continue
+        if a == "--":
+            i += 1
+            break
+        if a.startswith("--") or (a.startswith("-") and a.split("=", 1)[0] in spec.get("vlong", ())):
+            name, eq, val = a.partition("=")
+            value = _w(val, _dyn(a)) if eq else (args[i + 1] if i + 1 < n else None)
+            if name in spec.get("clong", ()):
+                out.append(_code(value))
+                given = True
+                if spec.get("code_ends"):
+                    return out
+            elif name in spec.get("flong", ()):
+                out.append(_file(value))
+                given = True
+            elif name in spec.get("slong", ()):
+                return out
+            elif name not in spec.get("vlong", ()):
+                i += 1
+                continue
+            i += 1 if eq else 2
+            continue
+        if a.startswith("-") and len(a) > 1:
+            letters, j, step, ended = a[1:], 0, 1, False
+            while j < len(letters):
+                ch, rest = letters[j], letters[j + 1:]
+                if ch in code or ch in files or ch in vals:
+                    value = _w(rest, _dyn(a)) if rest else (args[i + 1] if i + 1 < n else None)
+                    step = 1 if rest else 2
+                    if ch in code:
+                        out.append(_code(value))
+                        given = True
+                        ended = bool(spec.get("code_ends"))
+                    elif ch in files:
+                        out.append(_file(value))
+                        given = True
+                    break
+                if ch in spec.get("stop", ""):
+                    return out
+                if ch in spec.get("bad", ""):
+                    return out + [_bad(f"an interactive {family} reads stdin, which cannot be checked")]
+                if ch in spec.get("attach", ""):
+                    break
+                j += 1
+                if ch in spec.get("digits", ""):
+                    while j < len(letters) and letters[j] in "0123456789abcdefABCDEFx":
+                        j += 1
+            i += step
+            if ended:
+                return out
+            continue
+        break
+    rest = args[i:]
+    if given or spec["pos"] == "none":
+        return out
+    if rest:
+        return out + [_code(rest[0], f"the {family} program") if spec["pos"] == "code" else _file(rest[0])]
+    if info:
+        return out
+    return out + [_bad(f"{family} with no code argument: {_STDIN}")]
+
+
+def _vim_items(prog: str, args: list[str]):
+    out, ex, cmds, i, n = [], prog == "ex", False, 0, len(args)
+    while i < n:
+        a = args[i]
+        nxt = args[i + 1] if i + 1 < n else None
+        if a in ("-c", "--cmd"):
+            out.append(_code(nxt))
+            cmds = True
+            i += 2
+            continue
+        if a.startswith("+") and len(a) > 1:
+            out.append(_code(_w(a[1:], _dyn(a))))
+            cmds = True
+        elif a in ("-e", "-E", "-es", "-Es"):
+            ex = True
+        elif a in ("-u", "-U") and nxt is not None:
+            if nxt not in ("NONE", "NORC", "DEFAULTS"):
+                out.append(_file(nxt, "a vim rc file"))
+            i += 2
+            continue
+        elif a == "-S" or (a == "-s" and not ex and nxt is not None and not nxt.startswith("-")):
+            out.append(_file(nxt or "Session.vim", "a vim script"))
+            i += 2
+            continue
+        i += 1
+    if ex and not cmds:
+        out.append(_bad("vim in ex mode with no -c " + _STDIN))
+    return out
+
+
+def _make_items(args: list[str]):
+    out, i, n = [], 0, len(args)
+    while i < n:
+        a = args[i]
+        name, eq, val = a.partition("=")
+        if name in ("--file", "--makefile") or a == "-f" or (a.startswith("-f") and len(a) > 2):
+            value = _w(val, _dyn(a)) if eq else (_w(a[2:], _dyn(a)) if a.startswith("-f") and len(a) > 2
+                                                  else (args[i + 1] if i + 1 < n else None))
+            out.append(_file(value, "a makefile"))
+            i += 1 if eq or (a.startswith("-f") and len(a) > 2) else 2
+            continue
+        if name == "--eval" or a == "-E":
+            out.append(_code(_w(val, _dyn(a)) if eq else (args[i + 1] if i + 1 < n else None)))
+            i += 1 if eq else 2
+            continue
+        i += 1
+    return out
 
 
 def _script_arg(prog: str, args: list[str]) -> str | None:
-    """The command string a shell-like program is told to run (`sh -c STR`, `bash -lc STR`, `script -qc STR`,
-    `su -c STR`, `script --command=STR`), or None."""
+    """The command string `script -c STR`, `script --command=STR`, `su -c STR` or `runuser -c STR` runs, or None."""
     for k, a in enumerate(args):
         if a.startswith("--command="):
-            return a[len("--command="):]
+            return _w(a[len("--command="):], _dyn(a))
         if a in ("--command", "-c") and k + 1 < len(args):
             return args[k + 1]
-        if (re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", a) and not a.startswith("--") and k + 1 < len(args)
-                and prog in _SHELLS | {"script", "su"}):
+        if re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", a) and k + 1 < len(args):
             return args[k + 1]
     return None
 
@@ -530,53 +937,281 @@ def _script_arg(prog: str, args: list[str]) -> str | None:
 _FIND_EXEC = ("-exec", "-execdir", "-ok", "-okdir")
 _SYSTEMD_VALUE = {"-p", "-u", "-E", "-t", "--unit", "--property", "--setenv", "--description", "--slice", "--uid", "--gid",
                   "--working-directory", "-d", "--service-type", "--on-active", "--on-calendar"}
-_SSH_VALUE = {"-p", "-i", "-l", "-o", "-F", "-J", "-L", "-R", "-D", "-b", "-c", "-e", "-m", "-S", "-w", "-E", "-B"}
-_TMUX_RUN = ("new", "new-session", "new-window", "neww", "split-window", "splitw", "run-shell", "run", "send-keys")
+_SSH_VALUE = {"-p", "-i", "-l", "-o", "-F", "-J", "-L", "-R", "-D", "-b", "-c", "-e", "-m", "-S", "-w", "-E", "-B",
+              "-O", "-Q", "-W", "-I", "-P"}
+_SSH_CODE_OPTIONS = ("proxycommand", "localcommand", "knownhostscommand", "remotecommand")
+_TMUX_RUN = ("new", "new-session", "new-window", "neww", "split-window", "splitw", "run-shell", "run", "respawn-pane",
+             "respawnp", "respawn-window", "respawnw", "pipe-pane", "pipep", "display-popup", "popup", "if-shell", "if")
+_TMUX_SEND = ("send-keys", "send", "paste-buffer", "pasteb", "load-buffer", "loadb", "set-buffer", "setb",
+              "command-prompt", "confirm-before", "confirm")
+_TMUX_VALUES = {"display-popup": "bcdehsStTwxy", "popup": "bcdehsStTwxy", "run-shell": "cdt", "run": "cdt"}
+_GIT_RUNNER_OPTS = {"--upload-pack", "-u", "--receive-pack", "--exec"}
+_GIT_FILTERS = ("--tree-filter", "--index-filter", "--msg-filter", "--env-filter", "--commit-filter",
+                "--parent-filter", "--tag-name-filter")
 
 
-def _shell_literal(prog: str, args: list[str]):
-    """For a shell interpreter: ("t", the literal after -c) when it is run as `<shell> -c '<literal>'` and nothing
-    else, else ("bad", None): a shell reading stdin, a script file (/dev/stdin, /dev/fd/N, a path), a here-string,
-    a heredoc or `-c "$(...)"` cannot be checked, so none is allowed. None: not a shell."""
-    if prog == "busybox":
-        if not args or _prog(args[0]) not in _SHELLS - {"busybox"}:
-            return None
-        args = args[1:]
-    elif prog not in _SHELLS:
-        return None
-    i = 0
-    while i < len(args):
+def _ssh_option(opt: str):
+    parts = re.split(r"[=\s]+", str(opt).strip(), maxsplit=1)
+    key, value = parts[0].lower(), (parts[1] if len(parts) > 1 else "")
+    if key in _SSH_CODE_OPTIONS and value.strip().lower() not in ("", "none"):
+        return [_text(_w(value.strip(), _dyn(opt)), f"ssh {key}")]
+    return []
+
+
+def _ssh_items(prog: str, args: list[str]):
+    out, k, n, quiet = [], 0, len(args), False
+    while k < n and args[k].startswith("-"):
+        a = args[k]
+        if a.startswith("-o"):
+            opt = a[2:] if len(a) > 2 else (args[k + 1] if k + 1 < n else "")
+            out.extend(_ssh_option(_w(opt, _dyn(a) if len(a) > 2 else _dyn(opt))))
+            k += 1 if len(a) > 2 else 2
+            continue
+        if prog in ("scp", "sftp") and a == "-S" and k + 1 < n:
+            out.append(("w", [args[k + 1]]))
+            k += 2
+            continue
+        if prog == "sftp" and a == "-b" and k + 1 < n:
+            out.append(_file(args[k + 1], "an sftp batch file"))
+            k += 2
+            continue
+        quiet = quiet or (not a.startswith("--") and bool(set(a[1:]) & set("NWOGQV")))
+        k += 2 if a in _SSH_VALUE else 1
+    if prog != "ssh":
+        return out
+    rest = args[k + 1:]
+    if rest:
+        if any(map(_dyn, rest)):
+            return out + [_bad("a remote command given by a variable cannot be checked")]
+        return out + [("t", " ".join(rest))]
+    if k < n and not quiet:
+        return out + [_bad(f"ssh with no remote command runs a shell that {_READS}")]
+    return out
+
+
+def _tmux_items(args: list[str]):
+    out, i, n = [], 0, len(args)
+    while i < n and args[i].startswith("-"):
         a = args[i]
-        if a in ("-o", "+o"):
-            i += 2
+        if a == "-f" and i + 1 < n:
+            out.append(_file(args[i + 1], "a tmux config file"))
+        elif a == "-c" and i + 1 < n:
+            out.append(_text(args[i + 1]))
+        i += 2 if a in ("-L", "-S", "-f", "-c", "-T") else 1
+    segments, seg = [], []
+    for a in args[i:]:
+        if a == ";":
+            segments.append(seg)
+            seg = []
+        else:
+            seg.append(a)
+    segments.append(seg)
+    for seg in segments:
+        if not seg:
             continue
-        if a.startswith("-") and not a.startswith("--") and "c" in a[1:]:
-            script = args[i + 1] if i + 1 < len(args) else None
-            return ("bad", None) if script is None or "$SUB" in script else ("t", script)
-        if a.startswith(("-", "+")):
-            i += 1
+        sub, rest = seg[0], seg[1:]
+        if sub in _TMUX_SEND:
+            return out + [_bad(f"tmux {sub} types or pastes text into a pane: it cannot be checked")]
+        if sub in ("source-file", "source"):
+            out.extend(_file(a, "a tmux config file") for a in rest if not a.startswith("-"))
             continue
-        return ("bad", None)          # a script file before any -c
-    return ("bad", None)              # no -c: it reads stdin
+        if sub not in _TMUX_RUN:
+            continue
+        values, k = _TMUX_VALUES.get(sub, "cefFlnstxy"), 0
+        while k < len(rest) and rest[k].startswith("-") and rest[k] != "-":
+            k += 2 if rest[k][-1] in values and len(rest[k]) == 2 else 1
+        pos = rest[k:]
+        if sub in ("if-shell", "if"):
+            out.extend(_text(p) for p in pos)
+        elif pos:
+            out.append(_bad("a tmux command given by a variable cannot be checked") if any(map(_dyn, pos))
+                       else ("t", " ".join(pos)))
+    return out
+
+
+def _screen_items(args: list[str]):
+    out, k, n = [], 0, len(args)
+    while k < n and args[k].startswith("-"):
+        a = args[k]
+        if a in ("-ls", "-list", "-v", "-version", "-wipe", "-help", "--version", "--help"):
+            return []
+        if a == "-X":
+            return [_bad("screen -X sends commands into a session: they cannot be checked")]
+        if a == "-s":
+            return [_bad("screen -s sets the shell of its windows: it cannot be checked")]
+        last = a[-1]
+        if a == "-c" or (len(a) > 2 and last == "c"):
+            out.append(_file(args[k + 1] if k + 1 < n else None, "a screen config file"))
+            k += 2
+            continue
+        k += 2 if (last in "SptTeh" or a in ("-Logfile",)) else 1
+    if k >= n:
+        return out + [_bad("screen with no command runs an interactive shell")]
+    return out + [("w", args[k:])]
+
+
+_ENV_SHELL = frozenset(("GIT_EDITOR", "GIT_SEQUENCE_EDITOR", "GIT_PAGER", "PAGER", "MANPAGER", "EDITOR", "VISUAL",
+                        "GIT_EXTERNAL_DIFF", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_PROXY_COMMAND", "PROMPT_COMMAND", "PS4",
+                        "LESSOPEN", "LESSCLOSE", "BROWSER"))
+_ENV_SSH = frozenset(("GIT_SSH_COMMAND", "RSYNC_RSH"))
+_ENV_PROGRAM = frozenset(("GIT_SSH",))
+_ENV_REFUSED = re.compile(r"BASH_ENV|ENV|ZDOTDIR|LD_PRELOAD|LD_AUDIT|DYLD_INSERT_LIBRARIES|GIT_EXEC_PATH|"
+                          r"GIT_TEMPLATE_DIR|PERL5OPT|RUBYOPT|PYTHONSTARTUP|SHELLOPTS|BASHOPTS|BASH_FUNC_.*")
+_NODE_CODE = re.compile(r"(?:^|\s)(?:-r|--require|--import|--loader|--experimental-loader|-e|--eval|-p|--print)\b")
+_SSH_TAIL = " swarm-host true"     # git and rsync append the host and command to an ssh command
+
+
+def _assignment_items(name: str, value):
+    """What an assignment of `name` hands a program as code: the commands of GIT_EDITOR, GIT_PAGER, PAGER, EDITOR,
+    GIT_SSH_COMMAND, GIT_EXTERNAL_DIFF, ... (git, ssh and less run them through a shell); the program of GIT_SSH;
+    and a refusal for what loads code no command line shows (BASH_ENV, LD_PRELOAD, BASH_FUNC_*, ...)."""
+    if _ENV_REFUSED.fullmatch(name) or (name == "NODE_OPTIONS" and _NODE_CODE.search(str(value))):
+        return [_bad(f"setting {name} loads code that cannot be checked")]
+    if name in _ENV_SHELL or name in _ENV_SSH:
+        if not str(value).strip():
+            return []
+        if _dyn(value):
+            return [_bad(f"{name} given by a variable or $(...) cannot be checked")]
+        return [("t", str(value).lstrip("!") + (_SSH_TAIL if name in _ENV_SSH else ""))]
+    if name in _ENV_PROGRAM and str(value).strip():
+        return [("w", [value])]
+    return []
+
+
+_GIT_CMD_KEY = re.compile(r"(?i)(?:pager|editor|command|cmd|textconv|driver|helper|program|askpass|proxy|hook|"
+                          r"hookspath|templatedir)$|(?:^|\.)(?:external|clean|smudge|process|smtpserver|uploadpack|"
+                          r"receivepack|browser|fsmonitor)$|^pager\.")
+
+
+def _git_globals(args: list[str]):
+    """The (key, value, how) of git's global `-c key=value` (how "c") and `--config-env key=VAR` (how "env")."""
+    out, i = [], 0
+    while i < len(args) and args[i].startswith("-"):
+        opt = args[i]
+        name = opt.split("=", 1)[0]
+        if name == "-c" and i + 1 < len(args):
+            key, _eq, value = args[i + 1].partition("=")
+            out.append((key, _w(value, _dyn(args[i + 1])), "c"))
+        elif name == "--config-env":
+            val = opt.split("=", 1)[1] if "=" in opt else (args[i + 1] if i + 1 < len(args) else "")
+            out.append((val.split("=", 1)[0], "", "env"))
+        i += 2 if (name in _GIT_VALUE_OPTS and "=" not in opt) else 1
+    return out
+
+
+def _git_items(args: list[str]):
+    out = []
+    for key, value, how in _git_globals(args):
+        if _GIT_CMD_KEY.search(key):
+            if how == "env":
+                out.append(_bad(f"git --config-env {key} (a command from the environment) cannot be checked"))
+            elif str(value).strip():
+                out.append(_text(_w(str(value).lstrip("!") + (_SSH_TAIL if key.lower().endswith("sshcommand") else ""),
+                                    _dyn(value)), f"git -c {key}"))
+    sub, rest, _bad_why, _cdir = _git_args(args)
+    if sub == "rebase":
+        for k, a in enumerate(rest):
+            if a in ("-x", "--exec") and k + 1 < len(rest):
+                out.append(_text(rest[k + 1], "git rebase --exec"))
+            elif a.startswith("--exec="):
+                out.append(_text(_w(a[len("--exec="):], _dyn(a)), "git rebase --exec"))
+            elif a.startswith("-x") and len(a) > 2 and not a.startswith("--"):
+                out.append(_text(_w(a[2:], _dyn(a)), "git rebase --exec"))
+    elif sub == "submodule" and "foreach" in rest:
+        tail = rest[rest.index("foreach") + 1:]
+        tail = [a for a in tail if not a.startswith("--")]
+        out.append(_bad("git submodule foreach given a variable cannot be checked") if any(map(_dyn, tail))
+                   else ("t", " ".join(tail)))
+    elif sub == "bisect" and rest[:1] == ["run"]:
+        out.append(("w", rest[1:]))
+    elif sub == "difftool":
+        for k, a in enumerate(rest):
+            if a in ("-x", "--extcmd") and k + 1 < len(rest):
+                out.append(_text(rest[k + 1], "git difftool --extcmd"))
+            elif a.startswith("--extcmd="):
+                out.append(_text(_w(a[len("--extcmd="):], _dyn(a)), "git difftool --extcmd"))
+    elif sub == "filter-branch":
+        for k, a in enumerate(rest):
+            name, eq, val = a.partition("=")
+            if name in _GIT_FILTERS:
+                out.append(_text(_w(val, _dyn(a)) if eq else (rest[k + 1] if k + 1 < len(rest) else None), name))
+    if sub in ("fetch", "clone", "pull", "ls-remote", "archive", "push", "send-pack", "remote"):
+        for k, a in enumerate(rest):
+            name, eq, val = a.partition("=")
+            if name in _GIT_RUNNER_OPTS and not (name == "-u" and sub not in ("clone", "fetch", "pull", "ls-remote")):
+                out.append(_text(_w(val, _dyn(a)) if eq else (rest[k + 1] if k + 1 < len(rest) else None), name))
+            if str(a).startswith("ext::"):
+                out.append(_bad("a git ext:: remote runs a command"))
+    return out
+
+
+def _parallel_items(args: list[str]):
+    k = 0
+    while k < len(args) and args[k].startswith("-"):
+        k += 2 if (k + 1 < len(args) and re.fullmatch(r"\d+%?|\S*\{\}\S*", args[k + 1]) and "=" not in args[k]) else 1
+    cmd, extra, sep = [], [], False
+    for w in args[k:]:
+        if w.startswith(":::"):
+            sep = True
+            continue
+        (extra if sep else cmd).append(w)
+    if not cmd:
+        return [_bad("parallel with no command runs its input as commands")]
+    return [("xt", " ".join(cmd + extra))]
 
 
 def _nested(prog: str, args: list[str]):
-    """The commands a command runs through its arguments: [("t", text)] to run as shell text, [("w", words)] as a
-    command, [("bad", None)] for what cannot be checked. Covers shells (-c literal only), eval, script/su -c, find
-    -exec, git rebase -x and submodule foreach, parallel, flock, systemd-run, tmux, ssh, source and `.`."""
-    out = []
-    shell = _shell_literal(prog, args)
-    if shell is not None:
-        return [shell]
-    if prog in ("script", "su"):
+    """The commands a command runs through its arguments: ("t", text) shell text to walk; ("w", words) a command;
+    ("xt", text) shell text whose commands get appended arguments (parallel); ("code", text) interpreter code to
+    scan; ("file", path) a script file; ("assign", (name, value)); ("bad", why) what cannot be checked."""
+    family = _family(prog)
+    if family == "sh":
+        return _shell_items(family, args)
+    if family == "shx":
+        return _pwsh_items(prog, args) if prog in ("pwsh", "powershell") else _shell_items(family, args)
+    if family in _INTERPRETERS:
+        return _interp_items(family, args)
+    if family == "vim":
+        return _vim_items(prog, args)
+    if family == "make":
+        return _make_items(args)
+    if family == "deno":
+        return [_code(args[1] if len(args) > 1 else None)] if args[:1] == ["eval"] else []
+    if prog in ("script", "su", "runuser"):
         inner = _script_arg(prog, args)
-        return [("t", inner)] if inner is not None else []
+        if inner is not None:
+            return [_text(inner)]
+        if prog == "runuser" and "--" in args:
+            return [("w", args[args.index("--") + 1:])]
+        if prog == "script" and any(a in ("-V", "--version", "-h", "--help") for a in args):
+            return []
+        return [_bad(f"{prog} with no -c runs a shell that {_READS}")]
+    if prog == "sg":
+        pos = [a for a in args if a not in ("-", "-c")]
+        return [_text(pos[1])] if len(pos) > 1 else [_bad("sg with no command runs an interactive shell")]
+    if prog in ("ed", "red"):
+        return [] if any(a in ("--version", "--help", "-V", "-h") for a in args) else \
+            [_bad(f"{prog} {_READS}: its commands cannot be checked")]
+    if prog == "newgrp":
+        return [_bad("newgrp runs an interactive shell")]
     if prog == "eval":
+        if any(map(_dyn, args)):
+            return [_bad("eval of a variable or $(...) cannot be checked")]
         return [("t", " ".join(args))]
+    if prog == "trap":
+        rest = args[1:] if args[:1] == ["--"] else args
+        if rest and not rest[0].startswith("-"):
+            return [_text(rest[0], "a trap command")]
+        return []
+    if prog == "alias":
+        return [_text(_w(a.split("=", 1)[1], _dyn(a)), "an alias") for a in args if "=" in a]
+    if prog in ("export", "declare", "typeset", "local", "readonly"):
+        return [("assign", (a.split("=", 1)[0], _w(a.split("=", 1)[1], _dyn(a)))) for a in args
+                if not a.startswith("-") and _ASSIGN.match(a)]
     if prog in ("source", "."):
-        return [("bad", None)] if not args or args[0].startswith(("/dev/", "-")) or "$SUB" in args[0] else []
+        return [_file(args[0] if args else None, "a sourced file")]
     if prog == "find":
-        k = 0
+        out, k = [], 0
         while k < len(args):
             if args[k] in _FIND_EXEC:
                 j = k + 1
@@ -585,50 +1220,55 @@ def _nested(prog: str, args: list[str]):
                 out.append(("w", args[k + 1:j]))
                 k = j
             k += 1
-    elif prog == "git":
-        sub, rest, _bad, _cdir = _git_args(args)
-        if sub == "rebase":
-            for k, a in enumerate(rest):
-                if a in ("-x", "--exec") and k + 1 < len(rest):
-                    out.append(("t", rest[k + 1]))
-                elif a.startswith("--exec="):
-                    out.append(("t", a[len("--exec="):]))
-                elif a.startswith("-x") and len(a) > 2 and not a.startswith("--"):
-                    out.append(("t", a[2:]))
-        elif sub == "submodule" and "foreach" in rest:
-            tail = rest[rest.index("foreach") + 1:]
-            tail = [a for a in tail if not a.startswith("--")]
-            out.append(("t", " ".join(tail)))
-    elif prog == "parallel":
-        words = [a for a in args]
-        k = 0
-        while k < len(words) and words[k].startswith("-"):
-            k += 2 if (k + 1 < len(words) and re.fullmatch(r"\d+%?|\S*\{\}\S*", words[k + 1]) and "=" not in words[k]) else 1
-        cmd = []
-        for w in words[k:]:
-            if w.startswith(":::"):
-                break
-            cmd.append(w)
-        out.append(("w", cmd))
-    elif prog == "flock":
+        return out
+    if prog == "git":
+        return _git_items(args)
+    if prog == "parallel":
+        return _parallel_items(args)
+    if prog == "flock":
         words = [a for a in args if not a.startswith("-")]
-        out.append(("w", words[1:]))
-    elif prog == "systemd-run":
+        return [("w", words[1:])]
+    if prog == "systemd-run":
         k = 0
         while k < len(args) and args[k].startswith("-"):
             k += 2 if args[k] in _SYSTEMD_VALUE else 1
-        out.append(("w", args[k:]))
-    elif prog == "tmux":
-        sub = next((a for a in args if a in _TMUX_RUN), None)
-        if sub and args:
-            out.append(("t", args[-1]))
-    elif prog == "ssh":
+        return [("w", args[k:])]
+    if prog == "tmux":
+        return _tmux_items(args)
+    if prog == "screen":
+        return _screen_items(args)
+    if prog in ("ssh", "scp", "sftp"):
+        return _ssh_items(prog, args)
+    if prog == "rsync":
+        out = []
+        for k, a in enumerate(args):
+            name, eq, val = a.partition("=")
+            if name in ("-e", "--rsh"):
+                value = _w(val, _dyn(a)) if eq else (args[k + 1] if k + 1 < len(args) else None)
+                out.append(_text(_w(str(value) + _SSH_TAIL, _dyn(value)) if value is not None else None, "rsync -e"))
+        return out
+    if prog == "swarm":
         k = 0
         while k < len(args) and args[k].startswith("-"):
-            k += 2 if args[k] in _SSH_VALUE else 1
-        if k + 1 < len(args):
-            out.append(("t", " ".join(args[k + 1:])))
-    return out
+            k += 1 if "=" in args[k] else 2
+        if args[k:k + 1] == ["bg"] and "--" in args:
+            tail = args[args.index("--") + 1:]
+            return [_bad("swarm bg given a variable cannot be checked")] if any(map(_dyn, tail)) else \
+                [("t", " ".join(tail))] if tail else []
+    return []
+
+
+def _runs_code(prog: str, args: list[str], seen: set[str]) -> bool:
+    """Whether a program under xargs or parallel would run code from their input: any shell, interpreter, eval or
+    source; sed and awk only when the input can land in their program (a replacement string)."""
+    family = _family(prog)
+    if prog in ("eval", "source", ".", "trap", "alias"):
+        return True
+    if family is None or family in ("make",):
+        return False
+    if family in ("sed", "awk"):
+        return "xargs-I" in seen or any("{}" in a for a in args)
+    return True
 
 
 def _walk(lists, depth: int):
@@ -636,53 +1276,81 @@ def _walk(lists, depth: int):
         yield TOO_DEEP, [], set()
         return
     for words in lists:
-        words, seen = _unwrap(words)
+        words, seen, assigns = _unwrap(words)
+        for name, value in assigns:
+            yield from _items(_assignment_items(name, value), depth)
         for tag in sorted(seen):
             if tag.startswith("split:"):
                 yield from iter_commands(tag[6:], depth + 1)
         if not words:
+            if "shell-if-empty" in seen:
+                yield STDIN_SHELL, ["a wrapper with no command runs an interactive shell"], seen
             continue
         if "watch" in seen:       # watch runs its words as one command line
             yield from iter_commands(" ".join(words), depth + 1)
             continue
-        prog, args = _prog(words[0]), words[1:]
-        for kind, payload in _nested(prog, args):
-            if kind == "bad":
-                yield STDIN_SHELL, [], set()
-            elif kind == "t":
-                yield from iter_commands(payload, depth + 1)
-            elif payload:
-                yield from _walk([payload], depth + 1)
-        yield prog, args, seen
+        w0 = words[0]
+        if _dyn(w0) or "{}" in w0:
+            yield STDIN_SHELL, [f"the program {str(w0)!r} is a variable, $(...), glob or brace expansion"], seen
+            continue
+        prog, args = _effective_prog(w0), words[1:]
+        if "xargs" in seen and _runs_code(prog, args, seen):
+            yield STDIN_SHELL, [f"{prog} under xargs or parallel runs code from their input"], seen
+            continue
+        yield from _items(_nested(prog, args), depth)
+        if prog in ("cd", "pushd", "popd") and depth == 0:
+            seen = seen | {"depth0"}
+        yield prog, args, (seen | {"argv0:" + w0}) if _is_path(w0) else seen
+
+
+def _items(items, depth: int):
+    for kind, payload in items:
+        if kind == "bad":
+            yield STDIN_SHELL, [payload] if payload else [], set()
+        elif kind == "t":
+            yield from iter_commands(payload, depth + 1)
+        elif kind == "xt":
+            if depth + 1 > _MAX_NEST:
+                yield TOO_DEEP, [], set()
+            else:
+                yield from _walk([["xargs", "-I", "{}", *w] for w in split_commands(payload)], depth + 1)
+        elif kind == "code":
+            yield CODE, [payload], set()
+        elif kind == "file":
+            yield SCRIPT, [payload], set()
+        elif kind == "assign":
+            yield from _items(_assignment_items(*payload), depth)
+        elif payload:
+            yield from _walk([payload], depth + 1)
 
 
 def iter_commands(command: str, _depth: int = 0):
     """Yield (prog, args, wrappers) for every command a shell text runs, looking inside everything that runs
-    another command (_nested), `$(...)` and backticks. A shell is only ever `<shell> -c '<literal>'`."""
+    another command (_nested), `$(...)` and backticks. Code that cannot be checked is yielded as STDIN_SHELL
+    (args: [why]), interpreter code as CODE (args: [code]) and a script file as SCRIPT (args: [path]). A path
+    program carries `argv0:<word>` in its wrappers."""
     if command:
         yield from _walk(split_commands(command), _depth)
 
 
 def _nested_texts(command: str, _depth: int = 0) -> list[str]:
-    """`command` and every text a command in it runs, for a caller that scans text."""
+    """`command` and every shell text a command in it runs, for a caller that scans text."""
     out = [command]
     if _depth > _MAX_NEST or not command:
         return out
     for words in split_commands(command):
-        words, seen = _unwrap(words)
+        words, seen, assigns = _unwrap(words)
         texts = [t[6:] for t in sorted(seen) if t.startswith("split:")]
-        if not words:
-            for t in texts:
-                out.extend(_nested_texts(t, _depth + 1))
-            continue
-        if "watch" in seen:
+        items = [i for name, value in assigns for i in _assignment_items(name, value)]
+        if words and "watch" in seen:
             texts.append(" ".join(words))
-        else:
-            for kind, payload in _nested(_prog(words[0]), words[1:]):
-                if kind == "t":
-                    texts.append(payload)
-                elif kind == "w" and payload:
-                    texts.append(" ".join(payload))
+        elif words:
+            items += _nested(_prog(words[0]), words[1:])
+        for kind, payload in items:
+            if kind in ("t", "xt"):
+                texts.append(payload)
+            elif kind == "w" and payload:
+                texts.append(" ".join(payload))
         for t in texts:
             out.extend(_nested_texts(t, _depth + 1))
     return out
@@ -703,7 +1371,7 @@ _GIT_WRITES = frozenset(("commit", "push", "reset", "checkout", "switch", "merge
                          "add", "update-ref", "worktree", "gc", "prune", "filter-branch", "send-pack",
                          "fast-import", "replace", "notes", "submodule"))
 _GIT_CONFIG_RISK = re.compile(r"(?i)^(?:alias\.|remote\.[^.]+\.push(?:url)?$|url\..*\.pushinsteadof$|push\.|"
-                              r"core\.(?:sshcommand|hookspath|fsmonitor)$)")
+                              r"core\.(?:sshcommand|hookspath|fsmonitor)$|protocol\.)")
 
 
 def _git_args(args: list[str]):
@@ -797,6 +1465,22 @@ def _push_refusal(rest: list[str], targets: set[str], branch_of, cdir=None) -> s
     return None
 
 
+def _subtree_push_refusal(rest: list[str], targets: set[str], branch_of, cdir=None) -> str | None:
+    """`git subtree push -P <prefix> <repository> <refspec>`: the refspec is checked like a push's."""
+    pos, k = [], 1
+    while k < len(rest):
+        a = rest[k]
+        if a in ("-P", "--prefix", "-m", "--message", "--annotate", "-b", "--branch", "--onto"):
+            k += 2
+            continue
+        if not a.startswith("-"):
+            pos.append(a)
+        k += 1
+    if len(pos) < 2:
+        return "a git subtree push that names no branch is refused"
+    return _push_refusal([pos[0], pos[1]], targets, branch_of, cdir)
+
+
 _GIT_ENV = re.compile(r"(?:export\s+)?GIT_CONFIG[A-Z_0-9]*=")
 _GH_API_RISK = re.compile(r"(?:^|/)(?:git/(?:refs|commits|trees|tags)|merges|merge-upstream|pulls/\d+/merge)\b")
 _GH_GRAPHQL_RISK = re.compile(r"mergePullRequest|updateRef|createRef|deleteRef|createCommitOnBranch|mergeBranch")
@@ -806,14 +1490,17 @@ _CODEX_TOKEN = re.compile(r"(?:^|/)codex(?:\.js)?$|@openai/codex")
 _CODEX_VALUE_OPTS = {"-c", "--config", "-m", "--model", "-C", "--cd", "-s", "--sandbox", "-a", "--ask-for-approval",
                      "-p", "--profile", "-i", "--image", "--add-dir", "--local-provider", "--color",
                      "--output-last-message", "-o", "--output-schema", "--enable", "--disable"}
+_CODEX_HEADLESS = ("exec", "e", "app-server", "proto", "p", "mcp-server", "cloud")
 _LAUNCHERS = frozenset(("node", "nodejs", "npx", "bunx", "bun", "deno", "pnpm", "yarn", "npm", "pnpx", "tsx", "ts-node"))
 
 
 def _claude_headless(args: list[str]) -> bool:
-    for a in args:
+    for k, a in enumerate(args):
         if a == "--print" or a.startswith("--print="):
             return True
         if a.startswith("-") and not a.startswith("--") and len(a) > 1 and "p" in a[1:] and not a.startswith("-c="):
+            return True
+        if a == "mcp" and args[k + 1:k + 2] == ["serve"]:
             return True
     return False
 
@@ -825,30 +1512,27 @@ def _codex_headless(args: list[str]) -> bool:
         if a.startswith("-"):
             i += 2 if (a in _CODEX_VALUE_OPTS and "=" not in a) else 1
             continue
-        return a in ("exec", "e")
+        return a in _CODEX_HEADLESS
     return False
 
 
 def _launch_refusal(prog: str, args: list[str]) -> str | None:
     if _CLAUDE_TOKEN.search(prog) and _claude_headless(args):
-        return "a headless claude session (claude -p) is refused"
+        return "a headless claude session (claude -p, claude mcp serve) is refused"
     if _CODEX_TOKEN.search(prog) and _codex_headless(args):
-        return "a headless codex session (codex exec) is refused"
+        return "a headless codex session (codex exec, app-server, proto) is refused"
     if prog in _LAUNCHERS:
         for k, a in enumerate(args):
             if _CLAUDE_TOKEN.search(a):
-                return "a headless claude session (claude -p) is refused" if _claude_headless(args[k + 1:]) else None
+                return "a headless claude session (claude -p, claude mcp serve) is refused" if _claude_headless(args[k + 1:]) else None
             if _CODEX_TOKEN.search(a):
-                return "a headless codex session (codex exec) is refused" if _codex_headless(args[k + 1:]) else None
+                return ("a headless codex session (codex exec, app-server, proto) is refused"
+                        if _codex_headless(args[k + 1:]) else None)
     return None
 
 
-_INTERP = re.compile(r"(?:python[0-9.]*|node(?:js)?|ruby|perl|php|deno|bun)")
-_INTERP_CODE_FLAGS = ("-c", "-e", "--eval", "-pe", "-ne", "-E")
-
-
 def _inline_refusal(text: str, targets: set[str]) -> str | None:
-    """Why an inline script (python -c, node -e, a script on stdin) is refused: it runs a git push that names a
+    """Why an inline script (python -c, node -e, awk, a script on stdin) is refused: it runs a git push that names a
     target branch or forces, or starts a headless claude or codex. A best-effort scan of the text, not a parse
     (the close-time audit is the backstop for what an agent hides in code, spec 4.0)."""
     if re.search(r"\bgit\b", text) and re.search(r"\bpush\b", text):
@@ -856,18 +1540,164 @@ def _inline_refusal(text: str, targets: set[str]) -> str | None:
                 re.search(r"(?<![\w/.-])(?:refs/heads/)?" + re.escape(t) + r"(?![\w/.-])", text, re.I) for t in targets):
             return "an inline script that pushes to a target branch or forces a push is refused"
     if re.search(r"\bclaude\b", text) and re.search(r"(?<![\w-])(?:-p|--print)(?![\w-])", text):
-        return "a headless claude session (claude -p) is refused"
-    if re.search(r"\bcodex\b", text) and re.search(r"(?<![\w-])exec(?![\w-])", text):
+        return "a headless claude session (claude -p, claude mcp serve) is refused"
+    if re.search(r"\bcodex\b", text) and re.search(r"(?<![\w-])(?:exec|app-server|proto)(?![\w-])", text):
         return "a headless codex session (codex exec) is refused"
     return None
 
 
-def drive_command_refusal(command: str, targets=(), *, branch_of=None) -> str | None:
+# ---- the file rule: a script runs only from the repository at HEAD ---------------------------------------------
+
+def _git_out(cwd: str, *args: str) -> str | None:
+    """git's stdout in `cwd`, or None. No hook, filter, fsmonitor or pager runs (plumbing only, no index read)."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0")
+    try:
+        r = subprocess.run(["git", "-c", "core.fsmonitor=false", "-C", cwd, *args], capture_output=True,
+                           stdin=subprocess.DEVNULL, env=env, timeout=10, check=False)
+    except Exception:
+        return None
+    return r.stdout.decode("utf-8", "replace") if r.returncode == 0 else None
+
+
+def tracked_unmodified(path: str) -> bool:
+    """Whether `path` (resolved) is a regular file tracked at HEAD in its repository with exactly the content at
+    HEAD (`git diff --quiet HEAD -- <path>`, by blob hash, with no clean filter)."""
+    try:
+        real = os.path.realpath(path)
+        if not os.path.isfile(real):
+            return False
+        top = _git_out(os.path.dirname(real) or ".", "rev-parse", "--show-toplevel")
+        if not top or not top.strip():
+            return False
+        top = os.path.realpath(top.strip())
+        rel = os.path.relpath(real, top).replace(os.sep, "/")
+        if rel.startswith("../") or rel == "..":
+            return False
+        tree = _git_out(top, "ls-tree", "-z", "HEAD", "--", rel)
+        if not tree:
+            return False
+        meta, _tab, name = tree.rstrip("\0").partition("\t")
+        mode, kind, sha = (meta.split() + ["", "", ""])[:3]
+        if name != rel or kind != "blob" or mode not in ("100644", "100755"):
+            return False
+        cur = _git_out(top, "hash-object", "--no-filters", "--", real)
+        return bool(cur) and cur.strip() == sha
+    except Exception:
+        return False
+
+
+def _swarm_launchers() -> set[str]:
+    """The swarm command given to agents (the plugin's bin/swarm) and the user launcher: trusted as programs."""
+    try:
+        from swarm import paths
+        return {os.path.realpath(str(p)) for p in (paths.agent_bin(), paths.launcher_path())}
+    except Exception:
+        return set()
+
+
+def _trusted_script(path: str) -> bool:
+    """A script may run when the seat cannot write it (nor its directory), or it is tracked unmodified at HEAD."""
+    try:
+        real = os.path.realpath(path)
+        if not os.path.isfile(real):
+            return False
+        if not (os.access(real, os.W_OK) or os.access(os.path.dirname(real) or ".", os.W_OK)):
+            return True
+        return tracked_unmodified(real)
+    except Exception:
+        return False
+
+
+_SCRIPT_RULE = ("in a drive seat a script runs only when it is tracked unmodified at HEAD in its repository "
+                "(commit it, or give the code as a literal `-c` argument)")
+
+
+def _locations(word, cands, wrappers) -> list[str] | None:
+    """The paths a (literal) file word may name: itself when absolute, else under each directory the command may be
+    in. None when that cannot be known."""
+    path = os.path.expanduser(str(word))
+    if os.path.isabs(path):
+        return [path]
+    if cands is None or "chdir" in wrappers:
+        return None
+    return [os.path.normpath(os.path.join(c, path)) for c in sorted(cands)]
+
+
+def _script_refusal(word, cands, wrappers=frozenset()) -> str | None:
+    paths = _locations(word, cands, wrappers)
+    if paths is None:
+        return f"the script {str(word)!r} cannot be located (the directory is not known): {_SCRIPT_RULE}"
+    for p in paths:
+        if not _trusted_script(p):
+            return f"the script {str(word)!r} is not tracked unmodified at HEAD: {_SCRIPT_RULE}"
+    return None
+
+
+def _program_path_refusal(word, cands, wrappers=frozenset()) -> str | None:
+    """A program named by a path: a compiled program runs (but a shell or interpreter only under its own name); a
+    script (anything else: a shell runs a text file it cannot exec) follows the file rule; the swarm launchers run."""
+    paths = _locations(word, cands, wrappers)
+    if paths is None:
+        return f"the program {str(word)!r} cannot be located (the directory is not known): run it by its full path"
+    launchers = None
+    for p in paths:
+        real = os.path.realpath(p)
+        launchers = _swarm_launchers() if launchers is None else launchers
+        if real in launchers:
+            continue
+        if not os.path.isfile(real):
+            return f"{str(word)!r} is not an existing file: {_SCRIPT_RULE}"
+        if _is_native(real):
+            if _family(_norm(real)) is not None and _family(_norm(real)) != _family(_norm(word)):
+                return f"{str(word)!r} is the {_norm(real)} interpreter under another name: call it by its own name"
+            continue
+        if not _trusted_script(p):
+            return f"the script {str(word)!r} is not tracked unmodified at HEAD: {_SCRIPT_RULE}"
+    return None
+
+
+def _sequential(command: str) -> bool:
+    """Whether every command of `command` runs in the one shell, in order: no subshell, pipeline, background job,
+    `$(...)` or backticks (then a `cd` lasts for what follows it)."""
+    view = _code_view(drop_heredoc_bodies(command))
+    return not re.search(r"[()`]|(?<![|&])[|&](?![|&])", view.replace(">&", "  ").replace("<&", "  "))
+
+
+def _cd(cands, prog: str, args: list[str], command: str, wrappers=frozenset()):
+    """The directories a command may be in after `cd`/`pushd`/`popd`, None when unknown. A top-level cd in a
+    sequential command moves it; any other keeps the earlier directories as candidates too (a subshell's cd does
+    not last)."""
+    if cands is None or prog == "popd" or "CDPATH" in command:
+        return None
+    pos = [a for a in args if not (a.startswith("-") and a != "-")]
+    if not pos:
+        if prog == "pushd":
+            return None
+        target = os.path.expanduser("~")
+    else:
+        if _dyn(pos[0]) or pos[0] == "-" or pos[0].startswith("+"):
+            return None
+        target = os.path.expanduser(str(pos[0]))
+    new = {os.path.normpath(os.path.join(c, target)) for c in cands}
+    if not ("depth0" in wrappers and _sequential(command)):
+        new |= set(cands)
+    return new if len(new) <= 16 else None
+
+
+_UNCHECKED = ("A shell is allowed only as `sh -c '<literal>'` in a drive job: code that runs commands must be a "
+              "literal argument (`sh -c '...'`, `python3 -c '...'`) or a script tracked unmodified at HEAD; stdin, a "
+              "pipe, a here-string, a heredoc, <(...), a variable and $(...) cannot be checked")
+
+
+def drive_command_refusal(command: str, targets=(), *, branch_of=None, cwd=None) -> str | None:
     """Why a drive seat may not run `command` (its reason, for the agent), or None. `targets` are the
     branch names a push may not update (the recipe's target, e.g. "main"; compared without case), or a
     function giving them (called only when a push or an inline script needs them).
     `branch_of(directory)` names the branch checked out in `directory` (the -C value, None for where the
-    command runs), for a push that names none (None when it cannot be told: such a push is refused)."""
+    command runs), for a push that names none (None when it cannot be told: such a push is refused).
+    `cwd` is the directory the command runs in (for a script named by a relative path; None: such a script is
+    refused)."""
     if not command:
         return None
     lazy, done = targets, []
@@ -881,20 +1711,29 @@ def drive_command_refusal(command: str, targets=(), *, branch_of=None) -> str | 
         for words in split_commands(text):
             if any(_GIT_ENV.match(w) for w in words):
                 return "git configuration through GIT_CONFIG_* environment variables is refused"
-    interp_stdin = False
+    cands = {os.path.normpath(os.path.abspath(cwd))} if isinstance(cwd, str) and cwd else None
+    script_why = None        # a script refusal is given when nothing more specific (a push, a launch) is found
     for prog, args, wrappers in iter_commands(command):
         if prog == TOO_DEEP:
             return "a command nested too deeply to check (sh -c in sh -c ...) is refused"
         if prog == STDIN_SHELL:
-            return ("a shell is allowed only as `sh -c '<literal>'` in a drive job (no stdin, script file, here-string, "
-                    "heredoc or $(...) script: they cannot be checked)")
-        if _INTERP.fullmatch(prog):
-            code = [args[k + 1] for k, a in enumerate(args[:-1]) if a in _INTERP_CODE_FLAGS]
-            interp_stdin = interp_stdin or not code
-            for text in code:
-                why = _inline_refusal(text, get_targets())
-                if why:
-                    return why
+            return f"{args[0]}: refused. {_UNCHECKED}" if args else f"refused. {_UNCHECKED}"
+        if prog == CODE:
+            why = _inline_refusal(args[0], get_targets())
+            if why:
+                return why
+            continue
+        if prog == SCRIPT:
+            script_why = script_why or _script_refusal(args[0], cands, wrappers)
+            continue
+        argv0 = next((w[6:] for w in wrappers if w.startswith("argv0:")), None)
+        if argv0 is not None:
+            script_why = script_why or _program_path_refusal(argv0, cands, wrappers)
+        if prog in ("cd", "pushd", "popd"):
+            cands = _cd(cands, prog, args, command, wrappers)
+            continue
+        if prog in ("at", "batch") or (prog == "crontab" and "-l" not in args):
+            return f"scheduling a command ({prog}) is refused in a drive seat"
         if prog in ("git", "git-push", "git-send-pack"):
             sub, rest, why, cdir = _git_args(args) if prog == "git" else (prog[4:], args, None, None)
             if why:
@@ -905,8 +1744,13 @@ def drive_command_refusal(command: str, targets=(), *, branch_of=None) -> str | 
                 why = _push_refusal(rest, get_targets(), branch_of, cdir)
                 if why:
                     return why
-            elif sub == "config" and any(_GIT_CONFIG_RISK.match(a) for a in rest if not a.startswith("-")):
-                return "changing a git alias or push setting is refused"
+            elif sub == "subtree" and rest[:1] == ["push"]:
+                why = _subtree_push_refusal(rest, get_targets(), branch_of, cdir)
+                if why:
+                    return why
+            elif sub == "config" and any(_GIT_CONFIG_RISK.match(a) or _GIT_CMD_KEY.search(a.split("=", 1)[0])
+                                         for a in rest if not a.startswith("-")) and not _git_config_read(rest):
+                return "changing a git alias, push setting or command setting is refused"
             elif sub == "remote" and any(a == "--push" or a.startswith("--push=") for a in rest):
                 return "changing a remote's push url is refused"
         elif prog == "gh":
@@ -932,12 +1776,13 @@ def drive_command_refusal(command: str, targets=(), *, branch_of=None) -> str | 
         why = _launch_refusal(prog, args)
         if why:
             return why
-    if interp_stdin and "<<" in command:      # `python3 - <<'EOF' ... EOF`
-        for body in heredoc_bodies(command):
-            why = _inline_refusal(body, get_targets())
-            if why:
-                return why
-    return None
+    return script_why
+
+
+def _git_config_read(rest: list[str]) -> bool:
+    longs = {a.split("=", 1)[0] for a in rest if a.startswith("--")}
+    return bool(longs & {"--get", "--get-all", "--get-regexp", "--list", "--get-urlmatch", "--show-origin",
+                         "--show-scope", "--name-only", "--unset", "--unset-all"}) or "-l" in rest
 
 
 _SQL_WRITE = re.compile(r"(?i)\b(?:insert|update|delete|replace|create|drop|alter|vacuum|attach|detach|reindex|"
@@ -978,27 +1823,29 @@ def _git_writes(sub, rest) -> bool:
 
 
 _INLINE_WRITE = re.compile(r"open\([^)]*,\s*['\"][wax]|write_text|write_bytes|writeFile|appendFile|os\.(?:remove|unlink|rename|system)|"
-                           r"shutil\.|subprocess|\.rename\(|child_process")
+                           r"shutil\.|subprocess|\.rename\(|child_process|\bsystem\s*\(|\bpopen\b|\bspawn")
 
 
 def readonly_write_reason(command: str) -> str | None:
     """Why `command` writes (for a read-only seat), or None: the writer patterns of writes_files over the
     command and over every string a wrapper in it runs (sh -c, eval, ...), git's own writing subcommands
-    whatever options come before them (`git -c k=v commit`), and sqlite3 with a writing statement."""
+    whatever options come before them (`git -c k=v commit`), interpreter code that writes or runs commands, code
+    that cannot be checked, and sqlite3 with a writing statement."""
     if not command:
         return None
     for text in _nested_scripts(command):
         why = writes_files(text)
         if why:
             return why
-    interp_stdin = False
     for prog, args, _ in iter_commands(command):
-        if _INTERP.fullmatch(prog) and not any(a in _INTERP_CODE_FLAGS for a in args):
-            interp_stdin = True
         if prog == TOO_DEEP:
             return "a command nested too deeply to check is refused"
         if prog == STDIN_SHELL:
             return "a shell is allowed only as `sh -c '<literal>'`: anything else cannot be checked"
+        if prog == CODE:
+            if _INLINE_WRITE.search(args[0]):
+                return "an inline script that writes or runs commands"
+            continue
         if prog == "git":
             sub, _rest, bad, _cdir = _git_args(args)
             if bad or _git_writes(sub, _rest):
@@ -1006,10 +1853,6 @@ def readonly_write_reason(command: str) -> str | None:
         elif prog in ("sqlite3", "sqlite", "litecli") and "-readonly" not in args:
             if _SQL_WRITE.search(" ".join(args)) or "<" in command:
                 return "a sqlite3 command that may write (use -readonly, or only SELECT)"
-    if interp_stdin and "<<" in command:      # `python3 - <<'EOF' ... EOF`
-        for body in heredoc_bodies(command):
-            if _INLINE_WRITE.search(body):
-                return "an inline script that writes or runs commands"
     return None
 
 

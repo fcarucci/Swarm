@@ -412,7 +412,8 @@ def pre_tool(cfg: dict, payload: dict, host, *, resume=None, resume_lookup=None,
         command = _command_of(host, payload)
         if command:
             why = shellguard.drive_command_refusal(command, lambda: drive_targets(bk, ctx),
-                                                   branch_of=_branch_of(payload, command))
+                                                   branch_of=_branch_of(payload, command),
+                                                   cwd=payload.get("cwd") if isinstance(payload.get("cwd"), str) else None)
             if why:
                 return why
         wants_verdict = bool(command) and shellguard.swarm_verdict_call(command)
