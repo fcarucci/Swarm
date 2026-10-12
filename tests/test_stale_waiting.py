@@ -159,7 +159,7 @@ class StaleWaitingTests(Env):
                 with self.board() as b:
                     b.allocate_name("agent-1", "J", "worker")      # a dead agent: no heartbeat, never left
                     if ask:
-                        b.post("J", "agent-1", "Francesco, which one?", to="Francesco")
+                        b.post("J", "agent-1", "tester, which one?", to="tester")
                     ids = [m.id for m in b.messages_after(0, "J")]
                 self.h.backdate_job("J", created_at=3 * 3600, activated_at=3 * 3600)
                 self.h.backdate_agent("agent-1", joined_at=2 * 3600 + 60, last_seen=2 * 3600)
@@ -175,7 +175,7 @@ class StaleWaitingTests(Env):
                 self.waiting_job(CLOSE_AT + 3600)
                 if ask:
                     with self.board() as b:
-                        b.post("J", "agent-1", "Francesco, shall I merge it?", to="Francesco")
+                        b.post("J", "agent-1", "tester, shall I merge it?", to="tester")
                         mid = b.messages_after(0, "J")[-1].id
                     self.h.backdate_message(mid, CLOSE_AT + 3000)
                 self.sweep()
@@ -184,9 +184,9 @@ class StaleWaitingTests(Env):
     def test_an_answered_question_no_longer_protects(self):
         self.waiting_job(CLOSE_AT + 3600)
         with self.board() as b:
-            b.post("J", "agent-1", "Francesco, shall I merge it?", to="Francesco")
+            b.post("J", "agent-1", "tester, shall I merge it?", to="tester")
             q = b.messages_after(0, "J")[-1].id
-            b.post("J", "Francesco", "yes")
+            b.post("J", "tester", "yes")
             a = b.messages_after(0, "J")[-1].id
         self.h.backdate_message(q, CLOSE_AT + 3200)
         self.h.backdate_message(a, CLOSE_AT + 3100)
@@ -225,7 +225,7 @@ class StaleWaitingTests(Env):
         rc, _, err = self.cli("wait", "--job", "J", "--on", "the human")
         self.assertEqual(rc, 0, err)
         with self.board() as b:
-            b.post("J", "agent-1", "Francesco, shall I merge it?", to="Francesco")
+            b.post("J", "agent-1", "tester, shall I merge it?", to="tester")
         self.quiet(CLOSE_AT + 3600)
         self.sweep()
         self.assertEqual(self.job().status, "active")

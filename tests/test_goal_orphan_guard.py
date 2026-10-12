@@ -73,12 +73,12 @@ class OrphanGuardTests(unittest.TestCase):
 
     def test_a_quiet_time_close_of_a_job_waiting_on_a_person_is_refused(self):
         self.board.open_job("w", None, "t", None, "u")
-        self.board.post("w", "agent-1", "Francesco, which one?", to="Francesco")
+        self.board.post("w", "agent-1", "u, which one?", to="u")
         for outcome in ("auto-closed: no live agents for 30 min", "auto-closed: no progress for 4 h",
                         "auto-closed: waiting with no live agents and no verdict"):
             self.h.conn.execute("UPDATE jobs SET status='failed', outcome=%s, closed_by='auto' WHERE job='w'", (outcome,))
             self.assertEqual(self.status("w"), "active", outcome)
-        self.board.post("w", "Francesco", "the first")                 # answered: the sweep may close it again
+        self.board.post("w", "u", "the first")                 # answered: the sweep may close it again
         self.h.conn.execute("UPDATE jobs SET status='failed', outcome='auto-closed: no progress for 4 h', "
                             "closed_by='auto' WHERE job='w'")
         self.assertEqual(self.status("w"), "failed")

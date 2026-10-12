@@ -89,11 +89,21 @@ class OrphansTest(unittest.TestCase):
         self.run_pass()
         self.assertEqual(self.resume.call_count, 1)
 
+    def test_the_owner_is_whoever_created_the_job_not_a_fixed_name(self):
+        self.b.js.created_by = "Marigold"
+        question = NS(agent_name="Homer", to_agent="Marigold", message="Approve?", id=50)
+        with mock.patch.object(self.b, "recent_messages", return_value=[question]):
+            self.run_pass(); self.resume.assert_not_called()
+        stranger = NS(agent_name="Homer", to_agent="Somebody", message="Approve?", id=51)
+        with mock.patch.object(self.b, "recent_messages", return_value=[stranger]):
+            self.run_pass(); self.assertEqual(self.resume.call_count, 1)
+
     def test_unanswered_owner_question_is_external_wait(self):
-        question = NS(agent_name="Homer", to_agent="Francesco", message="Approve this deployment?", id=50)
+        self.b.js.created_by = "Marigold"
+        question = NS(agent_name="Homer", to_agent="Marigold", message="Approve this deployment?", id=50)
         with mock.patch.object(self.b,"recent_messages",return_value=[question]):
             self.run_pass(); self.resume.assert_not_called()
-        answer = NS(agent_name="Francesco", to_agent="Homer", message="Yes, continue", id=51)
+        answer = NS(agent_name="Marigold", to_agent="Homer", message="Yes, continue", id=51)
         with mock.patch.object(self.b,"recent_messages",return_value=[question,answer]):
             self.run_pass(); self.resume.assert_called_once()
 
