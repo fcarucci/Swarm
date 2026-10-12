@@ -1,4 +1,8 @@
 #!/bin/sh
+# A jailed drive seat (Task 20) has no board access of its own: its broker runs this outside the jail.
+if [ -n "${SWARM_SEAT_BROKER:-}" ]; then
+  exec python3 -I "$(cd "$(dirname "$0")/.." && pwd)/lib/swarm/seatbroker_client.py" cli "$@"
+fi
 # swarm CLI launcher. The venv lives outside the plugin, so it survives plugin updates; it is
 # (re)built only when requirements.txt changes. Then it runs the swarm package from this plugin.
 if [ "${OS:-}" = "Windows_NT" ]; then   # Git Bash on Windows: the Python entry does the work

@@ -2708,6 +2708,9 @@ def _parser() -> argparse.ArgumentParser:
     svs.add_parser("enable", help="turn the supervisor on: [supervise] enabled = true in the config, "
                                   "and install and start the systemd user timer")
     svs.add_parser("disable", help="turn the supervisor off: [supervise] enabled = false, and stop the timer")
+    svi = svs.add_parser("seat-isolation", help="drive seats' jail on this host: show it, or (a person at a "
+                                                "terminal) turn it off or back on")
+    svi.add_argument("state", nargs="?", choices=["on", "off"])
     un = sub.add_parser("uninstall", help="remove what Swarm set up outside the plugin: the supervisor "
                                           "timer, the launcher, the venv and caches, and the settings "
                                           "entries it added (then remove the plugin with the host)")
@@ -3475,6 +3478,9 @@ def _cmd_supervise(cfg: dict, args) -> int:
         return 1
     if getattr(args, "scmd", None) == "approve":
         return cmd_supervise_approve(cfg, args)
+    if getattr(args, "scmd", None) == "seat-isolation":
+        from swarm.supervisor import seathome
+        return seathome.cmd_seat_isolation(cfg, args)
     if getattr(args, "scmd", None) in ("enable", "disable"):
         from swarm.supervisor.switch import cmd_switch
         return cmd_switch(cfg, args)

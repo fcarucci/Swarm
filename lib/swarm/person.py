@@ -52,6 +52,7 @@ class Caller:
 
 
 _TAKEN: dict = {}
+BROKER_PID_ENV = "SWARM_BROKER_HOST_PID"   # set only by the seat broker on the commands it runs for a seat
 
 
 def host_pid(parent_of=None, pid: int | None = None, max_hops: int = 40) -> int | None:
@@ -59,6 +60,11 @@ def host_pid(parent_of=None, pid: int | None = None, max_hops: int = 40) -> int 
     runs a command under a `codex-*` sandbox helper, below the codex process its hooks run under), or None.
     The hook and the CLI of one tool call find the same pid, so a grant bound to it is no use to a process of
     another session or to one outside every agent host."""
+    brokered = os.environ.get(BROKER_PID_ENV, "")
+    if pid is None and parent_of is None and brokered.isdigit():
+        # a jailed seat's hook or command, run outside the jail by its runner's broker (seatbroker): no
+        # claude/codex process is above it here, so the broker names the seat's own session process
+        return int(brokered)
     parent_of = parent_of or hosts._proc_parent
     pid = os.getppid() if pid is None else pid
     found = None

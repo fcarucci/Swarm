@@ -1,30 +1,30 @@
-"""The seat credential boundary (Task 20, spec 4.0): a drive seat runs in its own user, mount and pid
-namespaces, where the person's push credentials are not there to read.
+"""The seat boundary (Task 20, spec 4.0): a drive seat runs in its own user, mount and pid namespaces and
+sees an ALLOWLIST of the person's files, nothing else.
 
-A drive seat (Claude or Codex, every role) runs as the person's unix user, so a changed $HOME alone
-is no boundary: ssh finds the key through the password database, and any process can open an absolute
-path. Inside the jail:
+A drive seat (Claude or Codex, every role) runs as the person's unix user, so a changed $HOME alone is no
+boundary (ssh finds the key through the password database; any process opens an absolute path) and a
+denylist of credential paths misses the next secret. Inside the jail:
 
-- every credential path named in the spec (the person's ~/.ssh, gh config, git credential stores,
-  ~/.netrc, the pinned credentials of the host's drive jobs, ...) is covered: a directory by an empty
-  read-only tmpfs, a file or socket by /dev/null. ~/.ssh is replaced by the seat's own .ssh (a
-  known_hosts and a config that names no identity and no agent);
-- the user's runtime directory (/run/user/<uid>: the systemd user manager, dbus, agent sockets) is an
-  empty tmpfs, so `systemd-run --user` cannot start a process outside the jail;
-- a fresh /proc of the jail's own pid namespace: /proc/<pid>/root of a process outside cannot be used
-  to look at the person's file system;
-- the covering mounts are made in a first user namespace and the seat runs in a second one nested in it,
-  so they are locked: the seat cannot unmount them (the kernel refuses, MNT_LOCKED), and it runs with no
-  capability (a non-root uid after execve) and no_new_privs;
-- the environment is scrubbed of credential variables (scrub_env) and points git and gh at the seat's
-  own config (GIT_CONFIG_GLOBAL, GH_CONFIG_DIR, no system config, no prompts).
+- $HOME is the seat's own directory (on disk, in the supervisor's private dir), and /tmp is the seat's own
+  too: nothing of the person's home, and no socket of the person's /tmp (tmux, herdr, ssh agents, IDE
+  servers), is there unless the spec binds it back;
+- the spec binds back exactly what the seat needs: its work tree and git dir (writable; the git hooks and
+  config read-only), the harness's login and settings (read-only, except the login file a token refresh
+  writes), the swarm code and the tools on PATH (read-only), the seat's .ssh (known_hosts only), and the
+  seat's broker directory (the only way to the board: swarm.supervisor.seatbroker);
+- /run/user/<uid> (the systemd user manager, dbus, agent sockets) and /dev/shm are empty tmpfs, and every
+  `cover` path (pinned credentials outside the home) is covered;
+- a fresh /proc of the jail's own pid namespace: no /proc/<pid>/root or environ of a process outside;
+- the mounts are made in a first user namespace and the seat runs in a second one nested in it, so they are
+  locked (the kernel refuses to unmount them) and read-only binds cannot be remounted writable; the seat runs
+  with no capability (a non-root uid after execve) and no_new_privs;
+- the environment is an allowlist (seat_env): the locale and terminal, PATH, the seat's swarm run variables
+  and the harness's model API variables; nothing else.
 
-A host that cannot make the namespaces (not Linux; unprivileged user namespaces disabled, as on an
-AppArmor-restricted Ubuntu) never runs a seat unjailed: the jail exits EXIT_UNAVAILABLE before it
-execs anything. `available()` says beforehand.
+A host that cannot make the namespaces (not Linux; unprivileged user namespaces disabled) never runs a seat
+unjailed: the jail exits EXIT_UNAVAILABLE before it execs anything. `available()` says beforehand.
 
-This file imports the standard library only: it is run as `python -I <this file> SPEC -- argv...`
-(isolated mode: nothing from the work dir or the environment is imported)."""
+This file imports the standard library only: it is run as `python -I <this file> SPEC -- argv...`."""
 from __future__ import annotations
 
 import ctypes
@@ -32,6 +32,7 @@ import json
 import os
 import re
 import signal
+import stat
 import sys
 
 EXIT_UNAVAILABLE = 125
@@ -41,48 +42,44 @@ CLONE_NEWNS = 0x00020000
 CLONE_NEWUSER = 0x10000000
 CLONE_NEWPID = 0x20000000
 MS_RDONLY, MS_NOSUID, MS_NODEV, MS_NOEXEC = 1, 2, 4, 8
-MS_REMOUNT, MS_BIND, MS_REC, MS_PRIVATE = 32, 4096, 16384, 1 << 18
+MS_REMOUNT, MS_BIND, MS_NOATIME, MS_NODIRATIME = 32, 4096, 1024, 2048
+MS_REC, MS_PRIVATE, MS_RELATIME = 16384, 1 << 18, 1 << 21
 PR_SET_NO_NEW_PRIVS = 38
+# statvfs f_flag bits -> the mount flags a read-only remount must keep (locked flags in a user namespace)
+_KEEP_FLAGS = ((2, MS_NOSUID), (4, MS_NODEV), (8, MS_NOEXEC), (1024, MS_NOATIME), (2048, MS_NODIRATIME),
+               (4096, MS_RELATIME))
 
-# Variables never passed to a seat, whatever [supervise] pass_env says.
-SCRUB_NAMES = frozenset((
-    "SSH_AUTH_SOCK", "SSH_AGENT_PID", "SSH_ASKPASS", "SSH_ASKPASS_REQUIRE", "GIT_ASKPASS", "GIT_SSH",
-    "GIT_SSH_COMMAND", "GIT_SSH_VARIANT", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CONFIG",
-    "GIT_CONFIG_SYSTEM", "GIT_CREDENTIAL_HELPER", "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN",
-    "GITHUB_ENTERPRISE_TOKEN", "GH_HOST", "GITEA_TOKEN", "GITLAB_TOKEN", "DBUS_SESSION_BUS_ADDRESS",
-    "XDG_RUNTIME_DIR", "NETRC", "GNUPGHOME"))
-_SCRUB_PATTERN = re.compile(r"^(GIT_CONFIG_(KEY|VALUE)_\d+|.*_(TOKEN|PAT|PASSWORD|PASSPHRASE|CREDENTIALS?))$")
-# The harness's own auth (Claude, Codex) and swarm's run bookkeeping are not push credentials.
-_SCRUB_KEEP = re.compile(r"^(SWARM_|CLAUDE_|ANTHROPIC_|CODEX_|OPENAI_)")
+# The environment a seat keeps (rr5: an allowlist). Exact names, plus LC_*.
+KEEP_ENV = frozenset((
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "TERM", "TZ", "COLORTERM", "NO_COLOR",
+    # the seat's swarm run variables the runner sets
+    "SWARM_RUN_ID", "SWARM_RESUME_TOKEN",
+    # the harness's model API (its own login, not a repository credential)
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL",
+    "ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+    "DISABLE_AUTOUPDATER", "DISABLE_TELEMETRY", "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_ORG_ID"))
 
 
 def scrub_env(env: dict) -> dict:
-    """`env` without push-credential variables (SCRUB_NAMES, *_TOKEN and the like, git config
-    injection), keeping the harness's auth and swarm's own run variables."""
-    out = {}
-    for k, v in env.items():
-        if k in SCRUB_NAMES:
-            continue
-        if _SCRUB_PATTERN.match(k) and not _SCRUB_KEEP.match(k):
-            continue
-        out[k] = v
-    return out
+    """The allowlisted part of `env` (KEEP_ENV and LC_*): every other name is dropped, whatever
+    [supervise] pass_env says (PGPASSWORD, AWS_*, DATABASE_URL, TMUX, HERDR_SOCKET_PATH, *_TOKEN, ...)."""
+    return {k: v for k, v in env.items() if k in KEEP_ENV or re.fullmatch(r"LC_[A-Z_]+", k)}
 
 
 def seat_env(env: dict, spec: dict) -> dict:
-    """The environment a jailed seat execs with: scrub_env, git and gh pointed at the seat's config."""
+    """The environment a jailed seat execs with: scrub_env, then the spec's own variables (git and ssh
+    pointed at the seat's config, the broker directory, the seat's PATH)."""
     out = scrub_env(env)
     out.update({JAIL_ENV: "1", "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
-                "GCM_INTERACTIVE": "never"})
-    if spec.get("gitconfig"):
-        out["GIT_CONFIG_GLOBAL"] = spec["gitconfig"]
-    if spec.get("gh_config_dir"):
-        out["GH_CONFIG_DIR"] = spec["gh_config_dir"]
-    if spec.get("ssh_config"):
-        # root's files show as nobody's in the jail, and ssh refuses a system config it does not trust:
-        # the seat's ssh reads only its own config (no identity but [drive] seat_ssh_key, no agent)
-        import shlex
-        out["GIT_SSH_COMMAND"] = f"ssh -F {shlex.quote(spec['ssh_config'])}"
+                "GCM_INTERACTIVE": "never", "TMPDIR": "/tmp"})
+    for k, v in (spec.get("env") or {}).items():
+        if isinstance(k, str) and isinstance(v, str):
+            out[k] = v
+    if spec.get("path_prepend"):
+        out["PATH"] = ":".join([*spec["path_prepend"], out.get("PATH", "/usr/bin:/bin")])
+    if spec.get("home"):
+        out["HOME"] = spec["home"]
     return out
 
 
@@ -134,31 +131,49 @@ def _map_ids(inside_uid: int, outside_uid: int, inside_gid: int, outside_gid: in
 
 
 def _cover(path: str, dev_null: str = "/dev/null") -> bool:
-    """Cover one credential path (no symlink followed at the last component: a link is covered where it
-    points only when that target is also listed). True when something was covered."""
+    """Cover one path: a directory by an empty read-only tmpfs, anything else by /dev/null."""
     try:
-        st = os.lstat(path)
+        st = os.stat(path)
     except OSError:
         return False
-    import stat as s
-    if s.S_ISLNK(st.st_mode):
-        try:
-            st = os.stat(path)
-            path = os.path.realpath(path)
-        except OSError:
-            return False
-    if s.S_ISDIR(st.st_mode):
+    if stat.S_ISDIR(st.st_mode):
         _mount("tmpfs", path, "tmpfs", MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC, "mode=0500,size=16k")
     else:
         _mount(dev_null, path, None, MS_BIND)
     return True
 
 
-def _bind(src: str, dst: str) -> bool:
-    if not (os.path.isdir(src) and os.path.isdir(dst)):
-        return False
-    _mount(src, dst, None, MS_BIND | MS_REC)
-    return True
+def _readonly(path: str) -> None:
+    """Remount the bind at `path` read-only, keeping the flags a user namespace locks."""
+    flags = MS_REMOUNT | MS_BIND | MS_RDONLY
+    have = os.statvfs(path).f_flag
+    for bit, mflag in _KEEP_FLAGS:
+        if have & bit:
+            flags |= mflag
+    _mount(None, path, None, flags)
+
+
+def _mountpoint(dst: str, is_dir: bool, writable_roots: tuple) -> None:
+    """Make `dst` a mount point of the right kind. Below a seat-writable root (its own home or /tmp) a
+    symbolic link on the way is removed first: a link the seat planted never redirects a bind."""
+    parts = dst.strip("/").split("/")
+    cur = ""
+    for i, part in enumerate(parts):
+        cur += "/" + part
+        last = i == len(parts) - 1
+        seat_owned = any(cur.startswith(r + "/") for r in writable_roots)
+        try:
+            st = os.lstat(cur)
+        except FileNotFoundError:
+            st = None
+        if st is not None and stat.S_ISLNK(st.st_mode) and seat_owned:
+            os.unlink(cur)
+            st = None
+        if st is None:
+            if last and not is_dir:
+                os.close(os.open(cur, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600))
+            else:
+                os.mkdir(cur, 0o700)
 
 
 def _forward_and_wait(child: int) -> int:
@@ -188,22 +203,67 @@ def _kill(pid: int, sig: int) -> None:
         pass
 
 
+def _open_source(src: str, follow: bool) -> int | None:
+    flags = os.O_PATH | os.O_CLOEXEC | (0 if follow else os.O_NOFOLLOW)
+    try:
+        return os.open(src, flags)
+    except OSError:
+        return None
+
+
 def setup_mounts(spec: dict, uid: int) -> list[str]:
-    """In the first namespace (root there): private propagation, a fresh /proc, the seat's .ssh over the
-    person's, the runtime dir emptied, then every covered path. The paths covered, in order."""
+    """In the first namespace (root there): private propagation, a fresh /proc, the seat's home over the
+    person's and its /tmp over /tmp, the runtime dir and /dev/shm emptied, then the allowlisted binds
+    (sources opened before anything is covered), the covers, and last the read-only remounts. The paths
+    mounted, in order."""
     _mount(None, "/", None, MS_REC | MS_PRIVATE)
     _mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC)
+    binds = []
+    for b in spec.get("binds", ()):
+        src, dst, mode = b[0], b[1], b[2]
+        follow = len(b) > 3 and b[3] == "follow"
+        fd = _open_source(src, follow)
+        if fd is not None:
+            binds.append((fd, dst, mode))
+    base_fds = {}
+    for key in ("home_base", "tmp"):
+        if spec.get(key):
+            fd = _open_source(spec[key], False)
+            if fd is None:
+                raise OSError(2, f"the seat's {key} {spec[key]} is missing")
+            base_fds[key] = fd
     done = []
-    for src, dst in spec.get("binds", ()):
-        if _bind(src, dst):
-            done.append(dst)
+    home = spec.get("home")
+    roots = []
+    if "tmp" in base_fds:
+        _mount(f"/proc/self/fd/{base_fds['tmp']}", "/tmp", None, MS_BIND)
+        done.append("/tmp")
+        roots.append("/tmp")
+    if home and "home_base" in base_fds:
+        _mountpoint(home, True, tuple(roots))
+        _mount(f"/proc/self/fd/{base_fds['home_base']}", home, None, MS_BIND)
+        done.append(home)
+        roots.append(home)
     runtime = spec.get("runtime_dir") or f"/run/user/{uid}"
-    if os.path.isdir(runtime):
-        _mount("tmpfs", runtime, "tmpfs", MS_NOSUID | MS_NODEV, "mode=0700,size=1m")
-        done.append(runtime)
+    for d, opts in ((runtime, "mode=0700,size=1m"), ("/dev/shm", "mode=1777,size=64m")):
+        if os.path.isdir(d):
+            _mount("tmpfs", d, "tmpfs", MS_NOSUID | MS_NODEV, opts)
+            done.append(d)
+    readonly = []
+    for fd, dst, mode in binds:
+        is_dir = stat.S_ISDIR(os.fstat(fd).st_mode)
+        _mountpoint(dst, is_dir, tuple(roots))
+        _mount(f"/proc/self/fd/{fd}", dst, None, MS_BIND | MS_REC)
+        done.append(dst)
+        if mode == "ro":
+            readonly.append(dst)
     for path in spec.get("cover", ()):
         if path not in done and _cover(path):
             done.append(path)
+    for dst in readonly:
+        _readonly(dst)
+    for fd in [b[0] for b in binds] + list(base_fds.values()):
+        os.close(fd)
     return done
 
 
@@ -219,17 +279,13 @@ def run(spec: dict, argv: list[str]) -> int:
     except OSError as exc:
         print(f"seatjail: cannot isolate the seat ({exc}); not started", file=sys.stderr)
         return EXIT_UNAVAILABLE
-    r, w = os.pipe()
     init = os.fork()
     if init:                                   # outside the pid namespace: wait for the jail's init
-        os.close(w)
-        os.close(r)
         return _forward_and_wait(init)
-    os.close(r)
     try:                                       # pid 1 of the jail, root of the first user namespace
         setup_mounts(spec, uid)
     except OSError as exc:
-        os.write(2, f"seatjail: cannot cover the credential paths ({exc}); not started\n".encode())
+        os.write(2, f"seatjail: cannot build the seat's file view ({exc}); not started\n".encode())
         os._exit(EXIT_UNAVAILABLE)
     seat = os.fork()
     if seat:
@@ -239,10 +295,14 @@ def run(spec: dict, argv: list[str]) -> int:
         _map_ids(uid, 0, gid, 0)
         _check(_lib().prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), "no_new_privs")
         env = seat_env(dict(os.environ), spec)
+        # the inherited cwd and any inherited descriptor (the runner's work-dir descriptor) still point into
+        # the person's file system below the covers: the seat starts from its own view, with only 0-2 open
+        os.chdir(spec.get("cwd") or spec.get("home") or "/")
+        os.closerange(3, 65536)
         os.execvpe(argv[0], argv, env)
     except OSError as exc:
         os.write(2, f"seatjail: cannot start {argv[0]} in the jail ({exc})\n".encode())
-        os._exit(EXIT_UNAVAILABLE if "unshare" in str(exc) or "map" in str(exc) else 127)
+        os._exit(EXIT_UNAVAILABLE)
 
 
 def available(python: str | None = None, timeout: float = 10.0) -> tuple[bool, str]:

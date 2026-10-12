@@ -1,53 +1,61 @@
-"""A drive seat's credential-free environment (Task 20; spec 4.0: the shell guard is a guardrail, this
-is the boundary). Every drive seat launch (Claude and Codex, every role) goes through `wrap`:
+"""A drive seat's file view (Task 20; spec 4.0: the shell guard is a guardrail, this is the boundary). Every
+drive seat launch (Claude and Codex, every role) goes through `wrap`, which runs it in swarm.seatjail with an
+ALLOWLIST of the person's files:
 
-- the seat's home dir, <supervisor private dir>/seat-home/<job>/<seat> (0700; privfs), holds what the seat needs
-  and nothing that pushes: .ssh/known_hosts (a copy of the person's) and .ssh/config (no identity, no
-  agent, batch mode), gitconfig (an identity, no credential helper, GitHub ssh URLs fetched over
-  anonymous HTTPS) and an empty gh config dir;
-- the seat runs in swarm.seatjail: that .ssh is mounted over the person's ~/.ssh, and every path of
-  `cover_paths` (the person's gh config, git credential stores, ~/.netrc, other secret dirs, and the
-  pinned credentials of this host's drive jobs) is covered, so a seat cannot read them by any path;
-- the harness keeps what it runs with: ~/.claude, ~/.claude.json and ~/.codex are not covered (Claude
-  Code's and Codex's own login; neither holds a push credential).
+- the seat's own directory, <supervisor private dir>/seat-home/<job>/<seat> (0700, privfs), holds:
+  home/ (the seat's $HOME, writable scratch, with a copy of ~/.claude.json), tmp/ (its /tmp), claude/ and
+  codex/ (its ~/.claude and ~/.codex: its own transcripts, todos and sessions, never another session's),
+  .ssh/ (known_hosts and a config with no identity), gitconfig (an identity, no credential helper),
+  broker/ (its only way to the board: swarm.supervisor.seatbroker) and bin/ (the `swarm` it runs: the
+  broker client);
+- bound back read-only: the harness's settings, plugins, skills, hooks and instructions (~/.claude/...), the
+  Codex config and hooks, the swarm venv, the tools on PATH below the home, [drive] seat_ro_paths;
+- bound back writable: the seat's work tree and its git dir (hooks and config read-only), the harness's
+  login file (a token refresh writes it: the residual of spec 4.0, not a repository credential),
+  [drive] seat_rw_paths;
+- everything else under the person's home is not there (~/.config, ~/.local/share/pki, ~/.pg0, the
+  supervisor's private dir, shell rc files, systemd units, ~/.ssh keys, gh, tokens, sockets), and paths a
+  job pins outside the home are covered.
 
-HOME is not changed: ssh resolves ~ from the password database, not $HOME, and any process can open
-an absolute path, so a different $HOME alone hides nothing; the mounts do. The supervisor's land path
-(driver_land, mirror) never runs in a jail and keeps its pinned credentials.
+Fetch for seats: GitHub remotes are read over anonymous HTTPS. A private repository needs a READ-ONLY deploy
+key per destination outside the home's hidden parts, named in [drive] seat_ssh_key (bound read-only).
 
-Fetch for seats: GitHub remotes are read over anonymous HTTPS (a public repository). A private one
-needs a READ-ONLY deploy key per destination, placed outside every covered path (e.g.
-~/.local/state/swarm/seat-keys/<name>, 0600) and named in [drive] seat_ssh_key; it is the only identity
-the seat's ssh config names."""
+Turning isolation off is a person's act: `swarm supervise seat-isolation off` (a person at a terminal,
+person.require) writes a flag in the supervisor's private dir, which no seat sees; [drive] seat_isolation
+in config.toml cannot turn it off."""
 from __future__ import annotations
 
+import glob
 import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 from swarm import paths
 
-# Paths below the person's home that hold a push credential (or other secrets) and that a seat never
-# reads. ~/.ssh is not here: the seat's own .ssh is mounted over it.
-HOME_COVER = (".config/gh", ".config/hub", ".git-credentials", ".config/git/credentials", ".netrc",
-              ".gitconfig", ".config/git/config", ".gnupg", ".secrets", ".docker/config.json",
-              ".config/glab-cli", ".config/tea", ".pgpass", ".aws", ".config/gcloud", ".kube")
-# The same credentials where macOS and Windows keep them (Task 21 ports the jail itself; these lists are
-# what a platform jail must cover). The macOS Keychain (gh's token by default) and the Windows Credential
-# Manager / ssh-agent service are not files: a platform jail must deny those services, not paths.
-MACOS_COVER = ("Library/Application Support/gh", "Library/Application Support/GitHub CLI",
-               "Library/Keychains")
+SEAT_HOME = "seat-home"
+OFF_FLAG = "seat-isolation.off"
+_SLUG = re.compile(r"[^A-Za-z0-9._-]+")
+# ~/.claude entries a seat reads (read-only) and writes (the login file); everything else is the seat's own.
+CLAUDE_RO = ("settings.json", "settings.local.json", "CLAUDE.md", "RTK.md", "plugins", "skills", "agents",
+             "commands", "hooks", "output-styles", "keybindings.json", "policy-limits.json",
+             "remote-settings.json")
+CLAUDE_RW = (".credentials.json", ".credentials.lock")
+CODEX_RO = ("config.toml", "hooks.json", "AGENTS.md", "rules", "prompts")
+CODEX_RW = ("auth.json",)
+DEFAULT_RO = (".rustup", ".cargo")
+# The credential locations of the other platforms (Task 21 ports the jail itself; the allowlist above
+# already excludes them on Linux). The macOS Keychain (gh's token by default) and the Windows Credential
+# Manager / ssh-agent service are services, not files: a platform jail must deny those, not paths.
+MACOS_COVER = ("Library/Application Support/gh", "Library/Application Support/GitHub CLI", "Library/Keychains")
 WINDOWS_COVER = (".ssh", "AppData/Roaming/GitHub CLI", ".git-credentials", ".gitconfig",
                  "AppData/Local/GitCredentialManager", "AppData/Roaming/GitCredentialManager", "_netrc")
-SEAT_HOME = "seat-home"
-_SLUG = re.compile(r"[^A-Za-z0-9._-]+")
-ISOLATION_MODES = ("required", "off")
 
 
 class SeatIsolationError(RuntimeError):
-    """A drive seat that cannot be launched without the person's credentials: never started."""
+    """A drive seat that cannot be launched in its jail: never started."""
 
 
 def _drive(cfg: dict) -> dict:
@@ -55,15 +63,84 @@ def _drive(cfg: dict) -> dict:
     return d if isinstance(d, dict) else {}
 
 
-def mode(cfg: dict) -> str:
-    """[drive] seat_isolation: "required" (the default: a seat that cannot be jailed is not started) or
-    "off" (the person's explicit opt-out: seats run with the person's credentials, doctor says so)."""
-    value = str(_drive(cfg).get("seat_isolation", "required")).strip().lower()
-    if value not in ISOLATION_MODES:
-        raise SeatIsolationError(f"[drive] seat_isolation must be one of {', '.join(ISOLATION_MODES)}, "
-                                 f"not {value!r}")
-    return value
+def _list(cfg: dict, key: str) -> list[str]:
+    v = _drive(cfg).get(key) or []
+    if isinstance(v, str):
+        v = [v]
+    if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+        raise SeatIsolationError(f"[drive] {key} must be a list of paths")
+    return [os.path.normpath(os.path.expanduser(x)) for x in v]
 
+
+# --- isolation on/off: a person's act ---------------------------------------------------------------
+
+def off_granted() -> dict | None:
+    """The person's off flag (who, when) in the supervisor's private dir, or None."""
+    from swarm.supervisor import privfs
+    try:
+        with privfs.dir_fd(create=False) as d:
+            raw = privfs.read(d, OFF_FLAG)
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return None          # unreadable: isolation stays on (fail closed)
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else None
+    except ValueError:
+        return None
+
+
+def mode(cfg: dict) -> str:
+    """"required" unless a person turned isolation off on this host (`swarm supervise seat-isolation off`).
+    [drive] seat_isolation in config.toml is only checked: it cannot turn isolation off."""
+    value = str(_drive(cfg).get("seat_isolation", "required")).strip().lower()
+    if value not in ("required", "off"):
+        raise SeatIsolationError(f"[drive] seat_isolation must be \"required\", not {value!r}")
+    return "off" if off_granted() is not None else "required"
+
+
+def set_off(off: bool, *, env=None, confirm=None, ancestor=None) -> str:
+    """Turn seat isolation off (or back on) for this host: a person's act (person.require: a person at a
+    terminal outside any agent host, who types y). Returns who confirmed."""
+    from swarm import person
+    from swarm.board.autoinit import store_key
+    from swarm.supervisor import privfs
+    action = "turn drive seat isolation OFF (seats can read your credentials) on" if off else \
+        "turn drive seat isolation back on for"
+    who = person.require(action, "this host", board_key=store_key({}), who=None,
+                         env=os.environ if env is None else env, confirm=confirm, ancestor=ancestor)
+    with privfs.dir_fd() as d:
+        if off:
+            privfs.write_atomic(d, OFF_FLAG, json.dumps({"by": who, "at": time.time()}), durable=True)
+        else:
+            try:
+                privfs.unlink(d, OFF_FLAG)
+            except FileNotFoundError:
+                pass
+    return who
+
+
+def cmd_seat_isolation(cfg: dict, args) -> int:
+    from swarm import person
+    want = getattr(args, "state", None)
+    if want not in ("on", "off"):
+        flag = off_granted()
+        print("seat isolation: " + ("OFF (by a person, at " + time.strftime("%Y-%m-%d %H:%M", time.localtime(
+            flag.get("at", 0))) + ")" if flag else "on"))
+        return 0
+    try:
+        set_off(want == "off")
+    except person.PersonRefused as exc:
+        print(f"swarm supervise seat-isolation: {exc}", file=sys.stderr)
+        return 1
+    print(f"seat isolation {want}")
+    return 0
+
+
+# --- the seat's directory ---------------------------------------------------------------------------
 
 def _slug(name: str) -> str:
     import hashlib
@@ -108,7 +185,6 @@ def gitconfig_text(cfg: dict) -> str:
         if email:
             lines.append(f'\temail = "{_clean(email)}"')
     lines += ["[credential]", "\thelper =", "[core]", "\taskPass =",
-              # GitHub ssh remotes are fetched anonymously over HTTPS; a push there has no credential
               '[url "https://github.com/"]', "\tinsteadOf = git@github.com:",
               "\tinsteadOf = ssh://git@github.com/"]
     return "\n".join(lines) + "\n"
@@ -128,38 +204,66 @@ def ssh_config_text(cfg: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+CLIENT_SH = """#!/bin/sh
+# the swarm command of a jailed drive seat: everything goes to the supervisor through the seat's broker
+exec python3 -I "$(dirname "$0")/seatbroker_client.py" cli "$@"
+"""
+
+
+def _read_person(path: Path) -> bytes | None:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        import stat
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        return os.read(fd, 16 * 1024 * 1024)
+    finally:
+        os.close(fd)
+
+
 def prepare(cfg: dict, job: str, seat: str) -> Path:
-    """Create or refresh the seat's home dir in the supervisor's private directory (privfs: every
-    component opened without following a link, this user's, 0700; files replaced, never followed); its path."""
+    """Create or refresh the seat's directory (privfs: no link followed, this user's, 0700); its path."""
     from swarm import safefs
     from swarm.supervisor import privfs
     from swarm.supervisor.settings import PrivateDirError
-    try:
-        text = (paths.home() / ".ssh" / "known_hosts").read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        text = ""
+    home = paths.home()
+    known = _read_person(home / ".ssh" / "known_hosts") or b""
+    claude_json = _read_person(home / ".claude.json")
+    client = (Path(__file__).resolve().parent.parent / "seatbroker_client.py").read_bytes()
     fds = []
     try:
         fds.append(privfs.open_dir(SEAT_HOME))
         for name in (_slug(job), _slug(seat)):
             fds.append(safefs.open_sub(fds[-1], name, strict_mode=0o700))
         h = fds[-1]
-        privfs.write_atomic(h, "gitconfig", gitconfig_text(cfg))
-        for sub in (".ssh", "gh"):
+        for sub in ("home", "tmp", "claude", "codex", ".ssh", "broker", "bin"):
             os.close(safefs.open_sub(h, sub, strict_mode=0o700))
-        ssh = safefs.open_sub(h, ".ssh", strict_mode=0o700)
-        try:
-            privfs.write_atomic(ssh, "known_hosts", text)
-            privfs.write_atomic(ssh, "config", ssh_config_text(cfg))
-        finally:
-            os.close(ssh)
+        privfs.write_atomic(h, "gitconfig", gitconfig_text(cfg))
+
+        def into(sub, name, data, mode=0o600):
+            d = safefs.open_sub(h, sub, strict_mode=0o700)
+            try:
+                privfs.write_atomic(d, name, data, mode)
+            finally:
+                os.close(d)
+        into(".ssh", "known_hosts", known)
+        into(".ssh", "config", ssh_config_text(cfg))
+        into("bin", "swarm", CLIENT_SH, 0o700)
+        into("bin", "seatbroker_client.py", client, 0o600)
+        if claude_json is not None:
+            into("home", ".claude.json", claude_json)
     except (safefs.UnsafePathError, PrivateDirError, OSError) as exc:
-        raise SeatIsolationError(f"the seat's home dir cannot be prepared safely: {exc}") from exc
+        raise SeatIsolationError(f"the seat's directory cannot be prepared safely: {exc}") from exc
     finally:
         for fd in fds:
             os.close(fd)
     return home_dir(job, seat)
 
+
+# --- what the seat sees -----------------------------------------------------------------------------
 
 def _pin_paths(owner: dict) -> list[str]:
     """The paths a drive job's pinned credentials name: ssh keys (and their .pub), agent sockets, gh dirs."""
@@ -175,93 +279,177 @@ def _pin_paths(owner: dict) -> list[str]:
 
 
 def pinned_paths(cfg: dict) -> list[str]:
-    """The credential paths pinned by every drive job with an owner record on this host."""
+    """The credential paths pinned by every drive job with an owner record on this host.
+    SeatIsolationError when they cannot be read (rr6: a seat is never started with a pin unknown)."""
     from swarm import enrolment
     from swarm.board.autoinit import store_key
     from swarm.supervisor import ledger
     out: list[str] = []
     try:
         bk = store_key(cfg)
-        jobs = [x for x in ledger.unfinished(bk) if isinstance(x, ledger.Ledger)]
-    except Exception:
-        return out
-    for led in jobs:
-        try:
-            rec = enrolment.find_job_owner(bk, led.job)
-        except Exception:
-            continue
-        if rec is not None and rec.owner:
-            out += _pin_paths(rec.owner)
+        found = ledger.unfinished(bk)
+        jobs = [x for x in found if isinstance(x, ledger.Ledger)]
+        if any(not isinstance(x, ledger.Ledger) for x in found):
+            raise SeatIsolationError("a drive ledger on this host cannot be read, so its pinned credentials "
+                                     "are unknown")
+        for led in jobs:
+            rec = enrolment.find_job_owner(bk, led.job, strict=True)
+            if rec is not None and rec.owner:
+                out += _pin_paths(rec.owner)
+    except SeatIsolationError:
+        raise
+    except Exception as exc:
+        raise SeatIsolationError(f"the pinned credentials of this host's drive jobs cannot be read "
+                                 f"({type(exc).__name__}: {exc}); not started") from exc
     return out
 
 
-def cover_paths(cfg: dict, home: Path | None = None) -> list[str]:
-    """Every path covered in a seat's jail: HOME_COVER, [drive] seat_cover_paths, the jobs' pins, any
-    ssh-agent socket directories in the temp dir, and the person's gh config dir if moved elsewhere."""
-    home = Path(home or paths.home())
-    out = [str(home / p) for p in platform_cover()]
-    extra = _drive(cfg).get("seat_cover_paths") or []
-    if isinstance(extra, str):
-        extra = [extra]
-    out += [os.path.expanduser(str(p)) for p in extra]
-    out += pinned_paths(cfg)
-    for var in ("GH_CONFIG_DIR", "SSH_AUTH_SOCK"):
-        v = os.environ.get(var)
-        if v and os.path.isabs(v):
-            out.append(v)
-    tmp = "/tmp"
-    try:
-        out += [os.path.join(tmp, n) for n in os.listdir(tmp) if n.startswith("ssh-")]
-    except OSError:
-        pass
-    seen, uniq = set(), []
-    for p in out:
-        p = os.path.normpath(p)
-        if p not in seen and os.path.isabs(p):
-            seen.add(p)
-            uniq.append(p)
-    return uniq
-
-
 def platform_cover(platform: str | None = None) -> tuple:
-    """The home-relative paths covered on `platform` (sys.platform)."""
+    """Home-relative credential paths of `platform` (sys.platform) a platform jail must hide."""
     platform = platform or sys.platform
     if platform == "darwin":
-        return HOME_COVER + MACOS_COVER
+        return MACOS_COVER
     if platform.startswith("win"):
-        return HOME_COVER + WINDOWS_COVER
-    return HOME_COVER
+        return WINDOWS_COVER
+    return ()
 
 
-def jail_spec(cfg: dict, seat_home: Path, home: Path | None = None) -> dict:
-    home = Path(home or paths.home())
-    return {"binds": [[str(seat_home / ".ssh"), str(home / ".ssh")]],
-            "cover": cover_paths(cfg, home),
-            "gitconfig": str(seat_home / "gitconfig"),
-            "gh_config_dir": str(seat_home / "gh"),
-            "ssh_config": str(home / ".ssh" / "config"),   # the seat's own, mounted over ~/.ssh
-            "runtime_dir": f"/run/user/{os.getuid()}" if hasattr(os, "getuid") else None}
+def _under(path: str, root: str) -> bool:
+    return path == root or path.startswith(root.rstrip("/") + "/")
+
+
+def git_dirs(cfg: dict, workdir: str) -> tuple[str | None, str | None]:
+    """(git dir, common dir) of the work tree, both checked: real directories under an allowed work root
+    ([supervise] allowed_workdirs) that look like git dirs. The .git file is the seat's to write, so a
+    gitdir line pointing anywhere else (~/.ssh, ~) is refused, never bound. (None, None): not a repository."""
+    from swarm.supervisor.settings import settings
+    roots = [os.path.realpath(os.path.expanduser(r)) for r in settings(cfg)["allowed_workdirs"]]
+    dotgit = os.path.join(workdir, ".git")
+    if os.path.isdir(dotgit) and not os.path.islink(dotgit):
+        gitdir = os.path.realpath(dotgit)
+    elif os.path.isfile(dotgit) and not os.path.islink(dotgit):
+        text = (_read_person(Path(dotgit)) or b"").decode("utf-8", "replace").strip()
+        if not text.startswith("gitdir:"):
+            raise SeatIsolationError(f"{dotgit} is not a gitdir file")
+        gitdir = os.path.realpath(os.path.join(workdir, text[len("gitdir:"):].strip()))
+    else:
+        return None, None
+    common = gitdir
+    cd = _read_person(Path(gitdir) / "commondir")
+    if cd is not None:
+        common = os.path.realpath(os.path.join(gitdir, cd.decode("utf-8", "replace").strip()))
+    for d in (gitdir, common):
+        if not any(_under(d, r) for r in roots):
+            raise SeatIsolationError(f"the work tree's git dir {d} is not under [supervise] allowed_workdirs; "
+                                     "not bound into the seat")
+        if not (os.path.isdir(os.path.join(d, "objects")) or os.path.isfile(os.path.join(d, "commondir"))) \
+                or not os.path.exists(os.path.join(d, "HEAD")):
+            raise SeatIsolationError(f"{d} is not a git dir")
+    if gitdir != common and not _under(gitdir, os.path.join(common, "worktrees")):
+        raise SeatIsolationError(f"the work tree's git dir {gitdir} is not a worktree of {common}")
+    return gitdir, common
+
+
+def _path_dirs(home: str) -> list[str]:
+    out = []
+    for p in (os.environ.get("PATH") or "").split(":"):
+        p = os.path.normpath(p) if p else ""
+        if p and _under(p, home) and p != home and os.path.isdir(p) and p not in out:
+            out.append(p)
+    return out
+
+
+HARNESS_EXES = ("claude", "codex", "node")
+
+
+def _exe_dirs(home: str, names) -> list[str]:
+    """The install dirs (below the home) of the harness executables found on PATH: a ~/.local/bin/claude
+    link points into ~/.local/share/claude/versions, which the seat must read to run it."""
+    import shutil
+    out = []
+    for name in names:
+        found = shutil.which(name) if name and "/" not in name else name
+        if not found:
+            continue
+        real = os.path.realpath(found)
+        d = os.path.dirname(real)
+        if _under(real, home) and os.path.isfile(real) and d not in out:
+            out.append(d)
+    return out
+
+
+def jail_spec(cfg: dict, seat_home: Path, workdir: str | None, home: Path | None = None,
+              exes=()) -> dict:
+    home_s = str(home or paths.home())
+    h, sh = home_s, str(seat_home)
+    binds: list = [[f"{sh}/claude", f"{h}/.claude", "rw"]]
+    binds += [[f"{h}/.claude/{n}", f"{h}/.claude/{n}", "ro", "follow"] for n in CLAUDE_RO
+              if os.path.lexists(f"{h}/.claude/{n}")]
+    binds += [[f"{h}/.claude/{n}", f"{h}/.claude/{n}", "rw"] for n in CLAUDE_RW if os.path.exists(f"{h}/.claude/{n}")]
+    binds.append([f"{sh}/codex", f"{h}/.codex", "rw"])
+    binds += [[f"{h}/.codex/{n}", f"{h}/.codex/{n}", "ro", "follow"] for n in CODEX_RO
+              if os.path.lexists(f"{h}/.codex/{n}")]
+    binds += [[f"{h}/.codex/{n}", f"{h}/.codex/{n}", "rw"] for n in CODEX_RW if os.path.exists(f"{h}/.codex/{n}")]
+    binds += [[f"{sh}/.ssh", f"{h}/.ssh", "ro"], [f"{sh}/gitconfig", f"{h}/.gitconfig", "ro"],
+              [f"{sh}/broker", f"{h}/.swarm-seat/broker", "rw"], [f"{sh}/bin", f"{h}/.swarm-seat/bin", "ro"]]
+    ro = [p for p in glob.glob(f"{h}/.local/share/swarm/venv*") if os.path.isdir(p)]
+    ro += _path_dirs(h) + _exe_dirs(h, (*exes, *HARNESS_EXES)) + [f"{h}/{p}" for p in DEFAULT_RO]
+    ro += _list(cfg, "seat_ro_paths")
+    from swarm.supervisor.settings import settings
+    plugin_dir = settings(cfg).get("claude_plugin_dir")
+    if plugin_dir:
+        ro.append(os.path.normpath(os.path.expanduser(str(plugin_dir))))
+    key = _drive(cfg).get("seat_ssh_key")
+    if key:
+        ro.append(os.path.normpath(str(key)))
+    seen = {b[1] for b in binds}
+    for p in ro:
+        if os.path.exists(p) and p not in seen:
+            binds.append([p, p, "ro", "follow"])
+            seen.add(p)
+    rw = list(_list(cfg, "seat_rw_paths"))
+    overlays = []
+    if workdir:
+        rw.insert(0, workdir)
+        gitdir, common = git_dirs(cfg, workdir)
+        if common and not _under(common, workdir):
+            rw.insert(1, common)
+        for d in {x for x in (gitdir, common) if x}:
+            overlays += [os.path.join(d, n) for n in ("hooks", "config", "config.worktree")]
+    for p in rw:
+        if os.path.exists(p) and p not in seen:
+            binds.append([p, p, "rw"])
+            seen.add(p)
+    for p in overlays:     # after the work tree and git dir: their hooks and config read-only
+        if os.path.exists(p):
+            binds.append([p, p, "ro"])
+    cover = [p for p in pinned_paths(cfg) + _list(cfg, "seat_cover_paths") if not _under(p, h)]
+    return {"home": h, "home_base": f"{sh}/home", "tmp": f"{sh}/tmp", "binds": binds, "cover": cover,
+            "runtime_dir": f"/run/user/{os.getuid()}", "cwd": workdir or h,
+            "path_prepend": [f"{h}/.swarm-seat/bin"],
+            "env": {"GIT_CONFIG_GLOBAL": f"{h}/.gitconfig", "GIT_SSH_COMMAND": f"ssh -F {h}/.ssh/config",
+                    "SWARM_SEAT_BROKER": f"{h}/.swarm-seat/broker"}}
 
 
 def jail_script() -> str:
-    return str(paths.LIB_DIR / "swarm" / "seatjail.py")
+    return str(Path(__file__).resolve().parent.parent / "seatjail.py")
 
 
-def wrap(cfg: dict, argv: list, *, job: str, seat: str, python: str | None = None,
+def wrap(cfg: dict, argv: list, *, job: str, seat: str, workdir: str | None = None, python: str | None = None,
          probe=None) -> list:
-    """The drive seat's argv, jailed: [python, -I, seatjail.py, SPEC, --, *argv]. Unchanged when
-    [drive] seat_isolation = "off". SeatIsolationError when this host cannot jail a seat (`probe()`,
-    default seatjail.available, says why): the seat is never started with the person's credentials."""
+    """The drive seat's argv, jailed: [python, -I, seatjail.py, SPEC, --, *argv]. Unchanged only when a person
+    turned isolation off. SeatIsolationError when this host cannot jail a seat (`probe()`, default
+    seatjail.available, says why) or its view cannot be built: the seat is never started unjailed."""
     if mode(cfg) == "off":
         return list(argv)
     from swarm import seatjail
     ok, why = (probe or seatjail.available)()
     if not ok:
-        raise SeatIsolationError(f"this host cannot isolate a drive seat from the person's credentials ({why}); "
-                                 "not started. Enable unprivileged user namespaces, or set [drive] "
-                                 "seat_isolation = \"off\" to accept seats that can read them")
+        raise SeatIsolationError(f"this host cannot isolate a drive seat from the person's files ({why}); "
+                                 "not started. Enable unprivileged user namespaces, or have a person run "
+                                 "`swarm supervise seat-isolation off` to accept seats that can read them")
     h = prepare(cfg, job, seat)
-    spec = jail_spec(cfg, h)
+    spec = jail_spec(cfg, h, workdir, exes=(str(argv[0]),) if argv else ())
     return [python or sys.executable, "-I", jail_script(), json.dumps(spec, separators=(",", ":")), "--",
             *[str(a) for a in argv]]
 
@@ -275,10 +463,11 @@ for p in "$@"; do
   if [ -d "$p" ] && [ -n "$(ls -A "$p" 2>/dev/null)" ]; then echo "LISTABLE $p"; fail=1; fi
 done
 for k in "$HOME"/.ssh/id_* ; do [ -e "$k" ] && { echo "KEY $k"; fail=1; }; done
-[ -n "$SSH_AUTH_SOCK$GH_TOKEN$GITHUB_TOKEN" ] && { echo "ENV credential variable set"; fail=1; }
+[ -n "$SSH_AUTH_SOCK$GH_TOKEN$GITHUB_TOKEN$PGPASSWORD" ] && { echo "ENV credential variable set"; fail=1; }
 h=$(git config --get-all credential.helper 2>/dev/null | tr -d '[:space:]')
 [ -n "$h" ] && { echo "HELPER git credential helper configured"; fail=1; }
 if command -v gh >/dev/null 2>&1; then gh auth status >/dev/null 2>&1 && { echo "GH gh is logged in"; fail=1; }; fi
+for s in /tmp/tmux-* /tmp/ssh-* ; do [ -e "$s" ] && { echo "SOCKET $s"; fail=1; }; done
 if [ "${SWARM_PROBE_NETWORK:-0}" = 1 ] && command -v ssh >/dev/null 2>&1; then
   out=$(timeout 20 ssh -F "$HOME/.ssh/config" -T -o ConnectTimeout=10 git@github.com 2>&1)
   case "$out" in *"successfully authenticated"*) echo "SSH github accepts a key"; fail=1;; esac
@@ -287,27 +476,33 @@ fi
 exit $fail
 """
 
+# Probed by path from inside the jail (existence and size only, never contents).
+PROBE_PATHS = (".config", ".config/gh", ".secrets", ".git-credentials", ".netrc", ".bash_history",
+               ".local/share/swarm/supervisor", ".pg0", ".local/share/pki", ".config/swarm")
+
 
 def probe(cfg: dict, *, network: bool = False, run=None, available=None) -> tuple[bool | None, str]:
     """Run PROBE in a seat's jail. (True, detail) when no credential is reachable; (False, what is
-    reachable); (None, why) when isolation is off or this host cannot jail a seat."""
+    reachable); (None, why) when a person turned isolation off or this host cannot jail a seat."""
     import subprocess
     if mode(cfg) == "off":
-        return None, "off ([drive] seat_isolation = \"off\"): drive seats can read the person's credentials"
+        return None, "off (a person ran `swarm supervise seat-isolation off`): drive seats can read the person's files"
     from swarm import seatjail
     ok, why = (available or seatjail.available)()
     if not ok:
         return None, f"unavailable: {why}"
-    argv = wrap(cfg, ["sh", "-c", PROBE, "probe", *cover_paths(cfg)], job="_doctor", seat="probe",
+    home = str(paths.home())
+    targets = [f"{home}/{p}" for p in PROBE_PATHS] + pinned_paths(cfg)
+    argv = wrap(cfg, ["sh", "-c", PROBE, "probe", *targets], job="_doctor", seat="probe",
                 probe=lambda: (True, ""))
-    env = seatjail.scrub_env(dict(os.environ))
+    env = dict(os.environ)
     env["SWARM_PROBE_NETWORK"] = "1" if network else "0"
     try:
         res = (run or subprocess.run)(argv, capture_output=True, text=True, timeout=60, env=env,
-                                      cwd=paths.state_dir())
+                                      cwd=paths.state_dir() if paths.state_dir().is_dir() else "/")
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"probe failed to run ({type(exc).__name__})"
     lines = [x for x in (res.stdout or "").splitlines() if x.strip()]
     if res.returncode == 0 and "SEAT-CLEAN" in lines:
-        return True, "active: no key, token, agent or credential helper reachable from a seat"
+        return True, "active: no key, token, agent, socket or credential helper reachable from a seat"
     return False, "; ".join(lines[:6]) or f"probe exit {res.returncode}"
