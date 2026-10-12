@@ -49,7 +49,8 @@ class NextActions(unittest.TestCase):
         self.assertEqual(kinds(next_actions(s, CFG)), ["nothing"])
 
     def test_terminal_verdict_closes(self):
-        acts = next_actions(snap(goal_verdict=v("met", scope="goal")), CFG)
+        acts = next_actions(snap(goal_verdict=v("met", scope="goal", candidate="main@" + "a" * 40),
+                                 integrated={"feat/a": {"landed": "a" * 40}}), CFG)
         self.assertEqual(kinds(acts), ["close"])
 
     def test_unreachable_goal_verdict_closes(self):
@@ -397,6 +398,39 @@ class GoalNeedsLandedWork(unittest.TestCase):
         s = snap(seats={"lead": seat("lead", "idle", **LEAD)},
                  goal_ready={"id": 3, "candidate": R, "req": "r1", "at": T0})
         self.assertEqual(named(next_actions(s, ARTIFEXT_CFG)), [("launch", None, "goal")])
+
+
+class MetNeedsTheCandidateLanded(unittest.TestCase):
+    """Final judge on int/rc-next (QA live-met 20261012T132049): a ruling MET closed a coding job with nothing
+    landed (origin and backup main still at the initial commit; no reviewer, integrator or INTEGRATED)."""
+    CAND = "c" * 40
+
+    def test_ruling_met_on_an_unlanded_candidate_is_recorded_unreachable_not_closed(self):
+        s = snap(goal_verdict=v("met", scope="ruling", candidate=self.CAND))
+        (a,) = next_actions(s, CFG)
+        self.assertEqual((a.kind, a.ruling), ("record_unreachable", True))
+        self.assertIn("not landed", a.reason)
+
+    def test_goal_met_on_an_unlanded_candidate_does_not_close(self):
+        s = snap(seats={"lead": seat("lead", "idle", **LEAD)}, goal_verdict=v("met", scope="goal", candidate=self.CAND),
+                 integrated={"feat/a": {"landed": "d" * 40}})           # another sha landed: not the candidate
+        self.assertNotIn("close", kinds(next_actions(s, CFG)))
+
+    def test_met_closes_once_the_candidate_is_the_landed_head(self):
+        for scope in ("goal", "ruling"):
+            s = snap(goal_verdict=v("met", scope=scope, candidate="main@" + self.CAND),
+                     integrated={"feat/a": {"landed": self.CAND}})
+            self.assertEqual(kinds(next_actions(s, CFG)), ["close"], scope)
+
+    def test_artifact_job_and_unreachable_are_unaffected(self):
+        self.assertEqual(kinds(next_actions(snap(goal_verdict=v("met", scope="ruling", candidate=R)), ARTIFEXT_CFG)),
+                         ["close"])
+        self.assertEqual(kinds(next_actions(snap(goal_verdict=v("unreachable", scope="ruling")), CFG)), ["close"])
+
+    def test_candidate_landed_needs_a_real_sha(self):
+        self.assertFalse(dm.candidate_landed({"g": {"landed": None}}, self.CAND))
+        self.assertFalse(dm.candidate_landed({"g": {"landed": self.CAND}}, None))
+        self.assertTrue(dm.candidate_landed({"g": {"landed": self.CAND}}, "main@" + self.CAND[:12]))
 
 
 class SurvivorKills(unittest.TestCase):

@@ -500,6 +500,59 @@ class TerminalizeTests(LifeCase):
         self.assertEqual(self.reload().terminal_intent["verdict"], "met")
 
 
+class LandedGateTests(LifeCase):
+    """The close-time check (driver_life.landed_gate, the default Hooks.gate): a MET of a coding job closes only
+    when the judged candidate is landed, verified on every destination (QA live-met 20261012T132049 closed MET
+    with nothing landed)."""
+
+    def owner(self, recipe):
+        from swarm import enrolment
+        enrolment.write_job_owner("bk", job="J", harness="claude", session_id=None, cwd=str(self.home),
+                                  roots=[str(self.home)], recipe=recipe, goal="G", review_role="reviewer",
+                                  review_gates="standard")
+
+    def land(self, sha=CAND, state="verified"):
+        dest = {"https://example.test/r.git": {"state": state, "sha": sha},
+                "https://example.test/backup.git": {"state": state, "sha": sha}}
+        self.led.integrated = {"feat/a": {"landed": sha, "land_id": 7, "land_rev": 1}}
+        self.led.save()
+        receipts.write("bk", receipts.Receipt(
+            board_key="bk", job="J", generation=1, incarnation=self.led.incarnation, action_id="t|land", attempt=0,
+            seat=None, kind="land", record_id="7", rev=1,
+            content_sha=receipts.content_sha("land", {"destinations": dest}), args_sha="0" * 64,
+            expires_at=time.time() + 3600, destinations=dest))
+
+    def test_unlanded_coding_met_is_refused_at_close(self):
+        self.owner("coding")
+        self.pending_met()
+        self.assertFalse(life.terminalize(self.b, self.cfg, self.led, self.at(1)))
+        led = self.reload()
+        self.assertIsNone(led.terminal)
+        self.assertIsNone(led.terminal_intent)
+        self.assertEqual(self.job().status, "active")
+        self.assertEqual(len(self.posts("not landed")), 1)
+
+    def test_a_land_not_verified_on_every_destination_is_refused(self):
+        self.owner("coding")
+        self.land(state="pushed")
+        self.pending_met()
+        self.assertEqual(life.landed_gate(self.b, self.cfg, self.led, self.led.terminal_intent, self.at(1)).verdict,
+                         "reject")
+
+    def test_landed_candidate_passes_the_gate(self):
+        self.owner("coding")
+        self.land()
+        self.pending_met()
+        self.assertEqual(life.landed_gate(self.b, self.cfg, self.led, self.led.terminal_intent, self.at(1)).verdict,
+                         "pass")
+
+    def test_artifact_job_met_is_not_checked(self):
+        self.owner("artifact")
+        self.pending_met()
+        self.assertEqual(life.landed_gate(self.b, self.cfg, self.led, self.led.terminal_intent, self.at(1)).verdict,
+                         "pass")
+
+
 class RolloverTests(LifeCase):
     def request(self, n=2):
         self.led.generation_requested = n
@@ -871,7 +924,7 @@ class LockSweepTests(LifeCase):
 
 # one subclass per backend of support.drive_backends() beyond memory (Postgres only with SWARM_TEST_CONFIG)
 add_backend_variants(globals(), DeadlineTests, TerminalizeTests, RolloverTests, HaltTests, QuestionTests,
-                     OrphanQuestionTests, LockSweepTests)
+                     OrphanQuestionTests, LockSweepTests, LandedGateTests)
 
 
 if __name__ == "__main__":

@@ -72,6 +72,27 @@ def _stub_gate(board, cfg, led, intent, now) -> Gate:
     return Gate()                # until Tasks 10/11b wire the closing gate
 
 
+def landed_gate(board, cfg, led, intent, now) -> Gate:
+    """The close-time check of a pending MET of a coding job: the judged candidate must be landed, i.e. the
+    head of a group whose land receipt is verified at that sha on every pinned destination (the snapshot's own
+    rule, driver_model.candidate_landed). A MET on unlanded work is refused. An artifact job, and a job whose
+    owner record names no recipe here (it is not driven on this host), are not checked."""
+    if intent.get("verdict") != "met":
+        return Gate()
+    from swarm.supervisor import driver_model as dm, driver_snapshot as ds
+    try:
+        recipe = ds.drive_cfg(led.board_key, led.job, cfg or {})["recipe"]
+    except ds.DriveConfigError:
+        return Gate()
+    if recipe == "artifact":
+        return Gate()
+    rc = ds._Receipts(led, led.job, intent.get("generation") or led.generation, now)
+    if dm.candidate_landed(ds._integrated(led, rc, {}), intent.get("candidate")):
+        return Gate()
+    return Gate("reject", f"the judged candidate {str(intent.get('candidate'))[:48]} is not landed on every "
+                          "pinned destination (no verified INTEGRATED at that sha)")
+
+
 def _run_for(cfg: dict, row):
     from swarm.board.autoinit import store_key
     from swarm.supervisor import runner
@@ -156,7 +177,7 @@ class Hooks:
     stop_rows: Callable[[Any, dict, list], None] = default_stop_rows
     rows_live: Callable[[Any, dict, list], list] = default_rows_live
     complete_land: Callable[[Any, dict, Any, dt.datetime], LandResult] = _stub_land
-    gate: Callable[[Any, dict, Any, dict, dt.datetime], Gate] = _stub_gate
+    gate: Callable[[Any, dict, Any, dict, dt.datetime], Gate] = landed_gate
     request_lead: Callable[[Any, dict, Any, int], None] = default_request_lead
     after_close: Callable[[Any, dict, Any], None] = _no_capture
 
