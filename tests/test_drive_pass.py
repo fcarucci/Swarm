@@ -1484,7 +1484,7 @@ class PromptTests(PassCase):
         standard = prompts.render(self.board, {**self.cfg, "review_gates": "standard"}, led,
                                   self.action("review", artifact="feat/a@" + "a" * 40),
                                   self.seat("reviewer", "rev"))
-        for needle in ("line by line", "fails on the base commit", "at least 5 targeted mutants", "never /tmp"):
+        for needle in ("line by line", "fails on the base commit", "at least 5 targeted mutants", "$SWARM_SCRATCH"):
             self.assertIn(needle, strict)
             self.assertNotIn(needle, standard)
         self.assertIn("swarm review", standard)

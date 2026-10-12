@@ -421,6 +421,8 @@ def pre_tool(cfg: dict, payload: dict, host, *, resume=None, resume_lookup=None,
         if wants_verdict and not policy.judge:
             return ("only the judge seat records a verdict: `swarm verdict` is refused for every other seat "
                     "(say what you found on the board, `swarm post --to @judge`)")
+        if write and policy.read_only and scratch_only(command, cwd, payload):
+            write = None   # every write of this call lands in the seat's own scratch dir (review gates)
         if write and policy.read_only:
             if not policy.known:
                 return (f"{write}: this seat's role could not be verified, so it may not write (retry in a "
@@ -431,6 +433,93 @@ def pre_tool(cfg: dict, payload: dict, host, *, resume=None, resume_lookup=None,
         from swarm.jobmarkers import _log_line
         _log_line("drive gate", str(payload.get("agent_id") or sid), f"{type(exc).__name__}: {exc}")
         return ("the drive gate could not decide this call; retry it (a seat fails closed)") if known else None
+
+
+# A read-only seat (judge, reviewer) may write in its own scratch dir and nowhere else (review gates copy the tree
+# there and run tests and mutants on the copy). The commands the exemption understands, with where they write:
+_SCRATCH_DEST_LAST = {"cp", "rsync", "mv", "install", "ln"}       # the last operand is the destination
+_SCRATCH_ALL_ARGS = {"mkdir", "touch", "tee", "rm", "rmdir"}      # every operand is written
+_SCRATCH_READONLY = {"cd", "ls", "cat", "echo", "true", "test", "[", "pwd", "head", "tail", "wc", "diff", "grep"}
+_REDIRECT = re.compile(r"(?<![<0-9&])(?:[0-9]?>>?|&>>?)\s*([^\s;&|<>]+)")
+
+
+def _scratch() -> tuple[str, str] | None:
+    """(scratch as the seat names it, scratch on this host) when the seat broker set them, else None."""
+    seat, host = os.environ.get("SWARM_SCRATCH"), os.environ.get("SWARM_SCRATCH_HOST")
+    if seat and host and os.path.isabs(seat) and os.path.isabs(host):
+        return os.path.normpath(seat), os.path.normpath(host)
+    return None
+
+
+def _in_scratch(path: str, cwd: str | None, scratch: tuple[str, str]) -> bool:
+    """Whether `path` (as the seat wrote it, relative to `cwd`) lies in the scratch dir, also once resolved on the
+    host (a symlink in the scratch dir pointing out of it is an escape)."""
+    seat, host = scratch
+    if path == "/dev/null":
+        return True
+    full = os.path.normpath(os.path.join(cwd or seat, path))
+    if not (full == seat or full.startswith(seat + "/")):
+        return False
+    real = os.path.realpath(host + full[len(seat):])
+    root = os.path.realpath(host)
+    return real == root or real.startswith(root + "/")
+
+
+def scratch_only(command: str | None, cwd: str | None, payload: dict | None = None, scratch=None) -> bool:
+    """Whether every write of the shell `command` lands in the seat's scratch dir: redirections to it, cp/rsync/mv
+    INTO it, mkdir/touch/tee/rm in it, `git worktree add`/`git clone` into it, and any other program only when it
+    runs with its working directory in the scratch dir (after `cd`). Pushes and commits never. False when unsure."""
+    scratch = scratch or _scratch()
+    if not scratch:
+        return False
+    if not command:   # a file tool (Write, Edit): its one target
+        ti = (payload or {}).get("tool_input")
+        target = ti.get("file_path") or ti.get("notebook_path") if isinstance(ti, dict) else None
+        return isinstance(target, str) and os.path.isabs(target) and _in_scratch(target, None, scratch)
+    seat = scratch[0]
+    text = command.replace("${SWARM_SCRATCH}", seat).replace("$SWARM_SCRATCH", seat) \
+        .replace("${TMPDIR}", seat).replace("$TMPDIR", seat)
+    if "$" in text or "`" in text:
+        return False                                  # anything else that expands cannot be checked
+    for m in _REDIRECT.finditer(text):
+        if not _in_scratch(m.group(1).strip("'\""), cwd, scratch):
+            return False
+    cur = cwd
+    for prog, args, _wrappers in shellguard.iter_commands(text):
+        if not isinstance(prog, str) or prog in (shellguard.TOO_DEEP, shellguard.STDIN_SHELL):
+            return False
+        name = os.path.basename(prog)
+        operands = [a for a in args if not a.startswith("-")]
+        if name == "cd":
+            if not operands:
+                return False
+            cur = os.path.normpath(os.path.join(cur or seat, operands[0]))
+            continue
+        if name in _SCRATCH_DEST_LAST:
+            if len(operands) < 2 or not _in_scratch(operands[-1], cur, scratch):
+                return False
+            continue
+        if name in _SCRATCH_ALL_ARGS:
+            if not operands or not all(_in_scratch(a, cur, scratch) for a in operands):
+                return False
+            continue
+        if name == "git":
+            sub = operands[0] if operands else ""
+            if sub in ("push", "commit", "tag", "update-ref", "config", "remote"):
+                return False
+            if sub == "worktree" and operands[1:2] == ["add"]:
+                if len(operands) < 3 or not _in_scratch(operands[2], cur, scratch):
+                    return False
+                continue
+            if sub == "clone":
+                if len(operands) < 3 or not _in_scratch(operands[-1], cur, scratch):
+                    return False
+                continue
+        if name in _SCRATCH_READONLY:
+            continue
+        if not (cur and _in_scratch(cur, None, scratch)):
+            return False                              # a program that may write runs only inside the scratch dir
+    return True
 
 
 def _branch_of(payload: dict, command: str):

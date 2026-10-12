@@ -42,7 +42,8 @@ def standing_rules(job: str) -> list[str]:
 
 GATES = ("Review gates (haiku-strict): read the whole diff line by line; check that every new test fails on the "
          "base commit; run a mutation gate (at least 5 targeted mutants of the changed logic, in a scratch copy "
-         "under your work root, never /tmp; every mutant must be killed). A surviving mutant, a test that passes "
+         "under $SWARM_SCRATCH: `git worktree add $SWARM_SCRATCH/base <base sha>` or `cp -r . $SWARM_SCRATCH/copy`, "
+         "then `cd` there; you may write only there; every mutant must be killed). A surviving mutant, a test that passes "
          "on the base, or an unexplained behaviour change is CHANGES. Report it with `swarm review ... --report`.")
 _BREAKS = re.compile("[\r\v\f\x85\u2028\u2029]")
 _MARKER = re.compile(r"\b(begin|end)\b.*\b(untrusted|id)\b", re.I)

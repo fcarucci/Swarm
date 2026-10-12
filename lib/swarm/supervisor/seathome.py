@@ -36,6 +36,7 @@ from pathlib import Path
 from swarm import paths
 
 SEAT_HOME = "seat-home"
+SCRATCH = "swarm-scratch"   # <seat dir>/tmp/swarm-scratch: the seat's private writable scratch ($SWARM_SCRATCH)
 OFF_FLAG = "seat-isolation.off"
 _SLUG = re.compile(r"[^A-Za-z0-9._-]+")
 # ~/.claude entries a seat reads (read-only) and writes (the login file); everything else is the seat's own.
@@ -163,6 +164,11 @@ def _slug(name: str) -> str:
     import hashlib
     s = _SLUG.sub("_", str(name)).strip("._") or "x"
     return f"{s[:60]}-{hashlib.sha256(str(name).encode()).hexdigest()[:8]}"
+
+
+def scratch_host(seat_dir: str) -> str:
+    """The host path of a seat's scratch dir."""
+    return os.path.join(str(seat_dir), "tmp", SCRATCH)
 
 
 def home_dir(job: str, seat: str) -> Path:
@@ -296,6 +302,11 @@ def prepare(cfg: dict, job: str, seat: str) -> Path:
         h = fds[-1]
         for sub in ("home", "tmp", "claude", "codex", ".ssh", "broker", "bin", "gh"):
             os.close(safefs.open_sub(h, sub, strict_mode=0o700))
+        t = safefs.open_sub(h, "tmp", strict_mode=0o700)
+        try:
+            os.close(safefs.open_sub(t, SCRATCH, strict_mode=0o700))
+        finally:
+            os.close(t)
         privfs.write_atomic(h, "gitconfig", gitconfig_text(cfg))
         privfs.write_atomic(h, SEAT_SETTINGS, seat_settings(person_settings), 0o400)   # read-only for the seat
 
@@ -505,6 +516,7 @@ def best_effort_env(cfg: dict, seat_home: Path, platform: str | None = None) -> 
            "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never", "GIT_SSH_COMMAND": ssh,
            **seatjail.git_overrides(ssh),
            "GH_CONFIG_DIR": os.path.join(h, "gh"), "SWARM_SEAT_BROKER": os.path.join(h, "broker"),
+           "SWARM_SCRATCH": os.path.join(h, "tmp", SCRATCH), "TMPDIR": os.path.join(h, "tmp", SCRATCH),
            "CLAUDE_CONFIG_DIR": os.path.join(real, ".claude"), "CODEX_HOME": os.path.join(real, ".codex"),
            "SWARM_SEAT_ISOLATION": "best-effort"}
     if (platform or sys.platform).startswith("win"):

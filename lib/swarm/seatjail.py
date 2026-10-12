@@ -36,7 +36,8 @@ import stat
 import sys
 
 EXIT_UNAVAILABLE = 125
-JAIL_ENV = "SWARM_SEAT_JAIL"      # set to "1" inside the jail (probes and doctor read it)
+JAIL_ENV = "SWARM_SEAT_JAIL"
+JAIL_SCRATCH = "/tmp/swarm-scratch"   # in the jail's private /tmp (the seat dir's tmp/swarm-scratch on the host)      # set to "1" inside the jail (probes and doctor read it)
 
 CLONE_NEWNS = 0x00020000
 CLONE_NEWUSER = 0x10000000
@@ -136,6 +137,8 @@ def seat_env(env: dict, spec: dict) -> dict:
     out = scrub_env(env)
     out.update({JAIL_ENV: "1", "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
                 "GCM_INTERACTIVE": "never", "TMPDIR": "/tmp"})
+    # the seat's private writable scratch (read-only seats too: review gates copy the tree there)
+    out["SWARM_SCRATCH"] = out["TMPDIR"] = JAIL_SCRATCH
     for k, v in (spec.get("env") or {}).items():
         if isinstance(k, str) and isinstance(v, str):
             out[k] = v

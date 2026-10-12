@@ -285,6 +285,13 @@ class SeatBroker:
         env = {k: v for k, v in self.base_env.items() if k not in SESSION_VARS}
         harness, sid = self.run.get("harness"), self.session()
         env["SWARM_HOST"] = harness
+        # the seat's scratch, as the seat names it and where it is here: the guard lets a read-only seat write
+        # there and nowhere else (drivegate.scratch_only)
+        from swarm import seatjail
+        from swarm.supervisor import seathome
+        host_scratch = seathome.scratch_host(self.seat_dir)
+        env["SWARM_SCRATCH_HOST"] = host_scratch
+        env["SWARM_SCRATCH"] = host_scratch if self.run.get("seat_mode") == "best-effort" else seatjail.JAIL_SCRATCH
         env["SWARM_CONFIG"] = self.config
         if harness == "codex":
             env["CODEX_SESSION_ID"] = env["CODEX_THREAD_ID"] = sid or ""

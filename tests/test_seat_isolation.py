@@ -56,7 +56,8 @@ class ScrubEnvTest(unittest.TestCase):
         self.assertNotIn("GH_TOKEN", env)
         self.assertEqual(env["PATH"], "/h/.swarm-seat/bin:/bin")
         self.assertEqual(env["GIT_CONFIG_GLOBAL"], "/h/.gitconfig")
-        self.assertEqual(env["TMPDIR"], "/tmp")
+        self.assertEqual(env["TMPDIR"], seatjail.JAIL_SCRATCH)
+        self.assertEqual(env["SWARM_SCRATCH"], seatjail.JAIL_SCRATCH)
         self.assertEqual(env[seatjail.JAIL_ENV], "1")
 
     def test_runner_scrubs_a_drive_seat_even_through_pass_env(self):
@@ -1230,6 +1231,91 @@ class FallbackHardeningTest(SeatHomeCase):
             runner._seat_argv(self.cfg, dict(run))
         self.assertEqual(len(logged), 2)
         self.assertIn("(k=0)", logged[0])
+
+
+class ScratchGuardTest(unittest.TestCase):
+    """A read-only seat writes only in its own scratch dir (drivegate.scratch_only)."""
+
+    def setUp(self):
+        self.tmp = tmpdir(self)
+        self.host = self.tmp / "seat" / "tmp" / "swarm-scratch"
+        self.host.mkdir(parents=True)
+        self.scratch = ("/tmp/swarm-scratch", str(self.host))
+        self.wt = "/home/u/work/wt"
+
+    def ok(self, command, cwd=None):
+        from swarm import drivegate
+        return drivegate.scratch_only(command, cwd or self.wt, {}, scratch=self.scratch)
+
+    def test_allowed_in_scratch(self):
+        for c in ("cp -r . $SWARM_SCRATCH/copy", "rsync -a ./ /tmp/swarm-scratch/copy/",
+                  "git worktree add $SWARM_SCRATCH/base abc123", "git clone . ${SWARM_SCRATCH}/c",
+                  "mkdir -p $SWARM_SCRATCH/m && cd $SWARM_SCRATCH/m && python -m pytest -q > $TMPDIR/out.txt",
+                  "cd /tmp/swarm-scratch/copy && sed -i s/a/b/ lib/x.py && python -m unittest tests.test_x",
+                  "echo hi > $SWARM_SCRATCH/note.txt"):
+            self.assertTrue(self.ok(c), c)
+
+    def test_refused_outside(self):
+        for c in ("cp -r $SWARM_SCRATCH/copy/x.py ./x.py", "echo hi > notes.txt", "touch /home/u/work/wt/a",
+                  "sed -i s/a/b/ lib/x.py", "python -m pytest", "cd $SWARM_SCRATCH/../.. && touch x",
+                  "cd $SWARM_SCRATCH/copy && git push origin HEAD", "cd $SWARM_SCRATCH/copy && git commit -am x",
+                  "cp a $HOME/x", "echo x > $(echo /home/u/x)", "rm -rf /home/u/work/wt",
+                  "mv $SWARM_SCRATCH/a ../a"):
+            self.assertFalse(self.ok(c), c)
+
+    def test_a_symlink_escape_is_refused(self):
+        outside = self.tmp / "outside"
+        outside.mkdir()
+        (self.host / "esc").symlink_to(outside)
+        self.assertFalse(self.ok("echo x > $SWARM_SCRATCH/esc/f"))
+        self.assertFalse(self.ok("cp a $SWARM_SCRATCH/esc/"))
+        self.assertFalse(self.ok("cd $SWARM_SCRATCH/esc && python -m pytest"))
+
+    def test_file_tools(self):
+        from swarm import drivegate
+        self.assertTrue(drivegate.scratch_only(None, None, {"tool_input": {"file_path": "/tmp/swarm-scratch/a.py"}},
+                                               scratch=self.scratch))
+        self.assertFalse(drivegate.scratch_only(None, None, {"tool_input": {"file_path": "/home/u/work/wt/a.py"}},
+                                                scratch=self.scratch))
+
+    def test_no_scratch_no_exemption(self):
+        from swarm import drivegate
+        with mock.patch.dict(os.environ, {"SWARM_SCRATCH": "/tmp/swarm-scratch"}, clear=False):
+            os.environ.pop("SWARM_SCRATCH_HOST", None)
+            self.assertFalse(drivegate.scratch_only("echo x > $SWARM_SCRATCH/a", "/", {}))
+
+
+REVIEWER = textwrap.dedent("""\
+    import json, os, subprocess
+    s = os.environ["SWARM_SCRATCH"]
+    r = subprocess.run(f"cp -r . {s}/copy && cd {s}/copy && python3 -m unittest -q tests.test_toy",
+                       shell=True, capture_output=True, text=True)
+    print(json.dumps({"scratch": s, "tmpdir": os.environ.get("TMPDIR"), "rc": r.returncode,
+                      "err": r.stderr[-300:], "copied": os.path.exists(os.path.join(s, "copy", "toy.py"))}))
+    """)
+
+
+@unittest.skipUnless(CAN_JAIL, "needs unprivileged user namespaces (Linux)")
+class ScratchJailTest(SeatHomeCase):
+    def test_a_reviewer_copies_the_tree_to_scratch_and_runs_tests_there(self):
+        wt = Path(self.worktree())
+        (wt / "toy.py").write_text("def f():\n    return 1\n")
+        (wt / "tests").mkdir()
+        (wt / "tests" / "__init__.py").write_text("")
+        (wt / "tests" / "test_toy.py").write_text("import unittest, toy\nclass T(unittest.TestCase):\n"
+                                                  "    def test(self):\n        self.assertEqual(toy.f(), 1)\n")
+        (wt / "rev.py").write_text(REVIEWER)
+        with mock.patch("swarm.seatjail.available", lambda: (True, "")):
+            argv = seathome.wrap(self.cfg, [sys.executable, "-I", "rev.py"], job="J", seat="reviewer", workdir=str(wt))
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout.strip().splitlines()[-1])
+        self.assertEqual(out["scratch"], seatjail.JAIL_SCRATCH)
+        self.assertEqual(out["tmpdir"], seatjail.JAIL_SCRATCH)
+        self.assertTrue(out["copied"])
+        self.assertEqual(out["rc"], 0, out["err"])
+        host = Path(seathome.scratch_host(str(seathome.home_dir("J", "reviewer"))))
+        self.assertTrue((host / "copy" / "toy.py").exists())     # on the host, in the seat's own dir
 
 
 if __name__ == "__main__":
