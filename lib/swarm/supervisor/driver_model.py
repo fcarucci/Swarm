@@ -496,7 +496,7 @@ def _ts_of(gr: dict) -> datetime | None:
 
 def _goal(c: _Ctx) -> list[Action] | None:
     """Step 9 (spec 3.7, 3.7 [G3], [F9]): GOAL-READY with nothing live and every non-withdrawn group integrated
-    (coding) or judged met (artifact) launches the goal judge. The verdict must bind the pinned requirements
+    (coding: at least one such group; none is not ready) or judged met (artifact) launches the goal judge. The verdict must bind the pinned requirements
     (`req`), so a GOAL-READY without one is not judged."""
     s = c.s
     gr = s.goal_ready
@@ -506,16 +506,24 @@ def _goal(c: _Ctx) -> list[Action] | None:
     at = _ts_of(gr)
     if _valid(gv, s.generation) and (gv.verdict != "not_met" or at is None or gv.at is None or at <= gv.at):
         return None
+    artifact = c.cfg["recipe"] == "artifact"
+    landed = 0
     for group, h in {x.group: x for x in s.handoffs}.items():
         ig = s.integrated.get(group) or {}
         if ig.get("withdrawn"):
             continue
-        if c.cfg["recipe"] == "artifact":
+        if artifact:
             vd = _verdict(c, h.artifact)
             if vd is None or vd.verdict != "met":
                 return None
         elif not ig.get("landed") or ig.get("blocked"):
             return None
+        landed += 1
+    if not artifact and not landed:
+        # a coding job with no (non-withdrawn) hand-off group has landed nothing: "no groups" is not "all
+        # integrated" (an engineer's DONE that was never receipted leaves none). Not ready: the fallback
+        # wakes the lead for work, never the goal judge on an unlanded branch.
+        return None
     return [c.act("launch", None, "goal", 0, prompt="goal", trigger=gr.get("id"), artifact=gr.get("candidate"),
                   reason="goal-ready")]
 

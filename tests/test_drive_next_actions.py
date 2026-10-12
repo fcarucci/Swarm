@@ -365,6 +365,40 @@ class TriggerIds(unittest.TestCase):
         self.assertEqual((a.prompt_kind, a.action_id), ("goal", "gen1|goal|-|goal|0|77"))
 
 
+class GoalNeedsLandedWork(unittest.TestCase):
+    """E-land on int/rc 32d21ea6 (QA's MET run): an engineer's DONE never receipted left no hand-off group, and
+    "no groups" read as "all integrated" launched the goal judge on an unlanded branch."""
+    GR = {"id": 3, "candidate": "main@abc", "req": "r1", "at": T0}
+
+    def test_coding_job_with_no_groups_wakes_the_lead_not_the_goal_judge(self):
+        s = snap(seats={"lead": seat("lead", "idle", **LEAD)}, goal_ready=self.GR)
+        acts = next_actions(s, CFG)
+        self.assertNotIn("goal", [x.prompt_kind for x in acts])
+        self.assertEqual(named(acts), [("launch", "lead", "fallback")])
+
+    def test_coding_job_whose_only_group_is_withdrawn_is_not_ready(self):
+        s = snap(seats={"lead": seat("lead", "idle", **LEAD)}, ledger=L(owners={"feat/a": "a"}),
+                 handoffs=[ho(A, by="a")], integrated={"feat/a": {"withdrawn": "abandoned"}}, goal_ready=self.GR)
+        self.assertNotIn("goal", [x.prompt_kind for x in next_actions(s, CFG)])
+
+    def test_coding_job_with_an_unlanded_group_is_not_judged(self):
+        s = snap(seats={"lead": seat("lead", "idle", **LEAD)}, ledger=L(owners={"feat/a": "a", "feat/b": "a"}),
+                 handoffs=[ho(A, by="a"), ho(B, by="a")], verdicts={A: v("met"), B: v("met")},
+                 integrated={"feat/a": {"landed": "abc"}}, goal_ready=self.GR)
+        self.assertNotIn("goal", [x.prompt_kind for x in next_actions(s, CFG)])
+
+    def test_coding_job_launches_the_goal_judge_once_every_group_is_integrated(self):
+        s = snap(seats={"lead": seat("lead", "idle", **LEAD)}, ledger=L(owners={"feat/a": "a", "feat/b": "a"}),
+                 handoffs=[ho(A, by="a"), ho(B, by="a")], verdicts={A: v("met"), B: v("met")},
+                 integrated={"feat/a": {"landed": "abc"}, "feat/b": {"landed": "def"}}, goal_ready=self.GR)
+        self.assertEqual(named(next_actions(s, CFG)), [("launch", None, "goal")])
+
+    def test_artifact_job_with_no_groups_is_unaffected(self):
+        s = snap(seats={"lead": seat("lead", "idle", **LEAD)},
+                 goal_ready={"id": 3, "candidate": R, "req": "r1", "at": T0})
+        self.assertEqual(named(next_actions(s, ARTIFEXT_CFG)), [("launch", None, "goal")])
+
+
 class SurvivorKills(unittest.TestCase):
     """One test per mutant the review (task7-next.md) found surviving the first gate."""
 
@@ -428,7 +462,8 @@ class SurvivorKills(unittest.TestCase):
         self.assertEqual(kinds(next_actions(s, CFG)), ["hold"])
 
     def test_goal_rejudged_after_newer_string_goal_ready(self):          # finding 7
-        s = snap(goal_verdict=v("not_met", scope="goal", at=T0),
+        s = snap(goal_verdict=v("not_met", scope="goal", at=T0), ledger=L(owners={"feat/a": "a"}),
+                 handoffs=[ho(A, by="a")], verdicts={A: v("met")}, integrated={"feat/a": {"landed": "abc"}},
                  goal_ready={"id": 9, "candidate": "m@1", "req": "r", "at": iso(T0 + minutes(5))})
         self.assertEqual(named(next_actions(s, CFG)), [("launch", None, "goal")])
 
