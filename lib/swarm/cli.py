@@ -4391,8 +4391,8 @@ def _board_status(board, cfg: dict, args) -> None:
 def _drive_join_judge_refused(board, cfg: dict, args) -> bool:
     """In a drive job, `join --judge` grants nothing unless the joining session is the driver's judge seat
     (drivegate.is_drive_judge: its launch record and receipted role). Plain jobs: never refused here."""
-    from swarm import drivegate, hooks
-    if not hooks._drive_job(cfg, args.job):
+    from swarm import drivegate   # (hooks.py is not in the Codex directory edition)
+    if not drivegate.drive_job(cfg, args.job):
         return False
     return not drivegate.is_drive_judge(cfg, board, args.job, {"session_id": args.key})
 

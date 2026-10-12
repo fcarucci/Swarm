@@ -1485,13 +1485,9 @@ def _drive_judge_flag(board, cfg: dict, agent_id: str, job: str, payload: dict, 
 
 
 def _drive_job(cfg: dict, job: str) -> bool:
-    """Whether `job` is a drive job on this host (it has a ledger, readable or not)."""
-    try:
-        from swarm.board.autoinit import store_key
-        from swarm.supervisor import ledger
-        return ledger.exists(store_key(cfg), job)
-    except Exception:
-        return True   # cannot tell: treat as drive (the stricter case)
+    """Whether `job` is a drive job on this host (drivegate.drive_job: a ledger, readable or not)."""
+    from swarm import drivegate
+    return drivegate.drive_job(cfg, job)
 
 
 def _first_call_of_resumed(board, agent_id: str, job: str) -> bool:

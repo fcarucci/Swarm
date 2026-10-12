@@ -1144,3 +1144,14 @@ def is_drive_judge(cfg: dict, board, job: str, payload: dict, resume=None) -> bo
         return row is not None and drive_authz.receipted_role(bk, ctx.led, row) == "judge"
     except Exception:
         return False
+
+
+def drive_job(cfg: dict, job: str) -> bool:
+    """Whether `job` is a drive job on this host (it has a ledger, readable or not). Cannot tell: True (the
+    stricter case)."""
+    try:
+        from swarm.board.autoinit import store_key
+        from swarm.supervisor import ledger
+        return ledger.exists(store_key(cfg), job)
+    except Exception:
+        return True

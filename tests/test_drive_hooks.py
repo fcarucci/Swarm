@@ -959,6 +959,7 @@ class DriveJobDetection(unittest.TestCase):
         cfg = {}
         with mock.patch("swarm.board.autoinit.store_key", return_value="bk"), \
                 mock.patch.object(ledger, "exists", side_effect=lambda bk, job: job == "D"):
+            self.assertTrue(drivegate.drive_job(cfg, "D"))
             self.assertTrue(hooks._drive_job(cfg, "D"))
             self.assertFalse(hooks._drive_job(cfg, "N"))
         with mock.patch("swarm.board.autoinit.store_key", return_value="bk"), \
@@ -989,20 +990,20 @@ class DriveJoinJudge(Env):
         return rc, js.judge
 
     def test_plain_job_join_judge_still_takes_the_seat(self):
-        with mock.patch.object(hooks, "_drive_job", return_value=False):
+        with mock.patch.object(drivegate, "drive_job", return_value=False):
             rc, judge = self.join()
         self.assertEqual(rc, 0)
         self.assertIsNotNone(judge)
 
     def test_drive_job_join_judge_is_refused_for_a_non_judge_session(self):
-        with mock.patch.object(hooks, "_drive_job", return_value=True), \
+        with mock.patch.object(drivegate, "drive_job", return_value=True), \
                 mock.patch.object(drivegate, "is_drive_judge", return_value=False):
             rc, judge = self.join()
         self.assertEqual(rc, 1)
         self.assertIsNone(judge)
 
     def test_drive_job_join_judge_works_for_the_drivers_judge_seat(self):
-        with mock.patch.object(hooks, "_drive_job", return_value=True), \
+        with mock.patch.object(drivegate, "drive_job", return_value=True), \
                 mock.patch.object(drivegate, "is_drive_judge", return_value=True):
             rc, judge = self.join()
         self.assertEqual(rc, 0)
