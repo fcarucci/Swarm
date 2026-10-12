@@ -433,6 +433,21 @@ class BrokerCase(unittest.TestCase):
 
 
 class TypedProtocolTest(BrokerCase):
+    def test_a_done_without_job_runs_as_the_seats_own_job(self):
+        # QA live-met fdd441e: "refused in a drive seat: missing job" on the seat's first `swarm done`
+        self.run["job"] = "J"
+        rc, out, err = self.cli(["done", "--artifact", "feat/a@" + "a" * 40, "--summary", "x"])
+        self.assertEqual((rc, out), (0, b"ran\n"), err)
+        self.assertIn("--job=J", cli_argv(self.calls[-1]))
+
+    def test_a_done_naming_another_job_is_refused(self):
+        self.run["job"] = "J"
+        n = len(self.calls)
+        rc, _, err = self.cli(["done", "--job", "K", "--artifact", "feat/a@" + "a" * 40])
+        self.assertEqual(rc, 2)
+        self.assertIn(b"not this seat's job", err)
+        self.assertEqual(len(self.calls), n)
+
     def test_a_post_is_built_by_the_broker(self):
         rc, out, _ = self.cli(["post", "--job", "J", "--as", "Bart", "hello", "world"])
         self.assertEqual((rc, out), (0, b"ran\n"))

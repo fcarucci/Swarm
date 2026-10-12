@@ -129,6 +129,29 @@ class DoneReceipts(DriveCase):
         self.assertEqual(r.args_sha, receipts.args_sha(drivegate.submitted_argv(ns)))
         self.kick.assert_called_once()
 
+    def test_done_without_job_gets_the_seats_job_inserted_and_is_receipted(self):
+        # QA live-met fdd441e: `swarm done --artifact ...` with no --job was refused and the seat could not hand off
+        from swarm import hooks
+        sid, _ = self.launch_seat("eng-a")
+        rid = self.post_as(sid, f'DONE "{ART}" | x')
+        bare = f"swarm done --artifact {ART} --summary x"
+        self.assertFalse(self.post(sid, bare, rec("done", rid)), "a done that names no job is not receipted")
+        rewritten = hooks.own_job_command(bare, "J")
+        self.assertEqual(rewritten, self.CMD)
+        self.assertTrue(self.post(sid, rewritten, rec("done", rid)))
+        self.assertIsNotNone(self.receipt("done", rid))
+
+    def test_done_naming_another_job_is_left_alone_and_a_trailing_echo_is_not_receipted(self):
+        from swarm import hooks
+        self.assertIsNone(hooks.own_job_command(f"swarm done --job K --artifact {ART}", "J"))
+        self.assertEqual(hooks.own_job_command("swarm seat list", "J"), "swarm seat list --job J")
+        sid, _ = self.launch_seat("eng-a")
+        rid = self.post_as(sid, f'DONE "{ART}" | x')
+        # the record line must be the output's last line: a trailing `; echo` loses it (the prompt forbids it)
+        out = f"posted #1\n{rec('done', rid)}\nok\n"
+        p = self.payload(sid, "Bash", self.CMD + "; echo ok", stdout=out)
+        self.assertFalse(drivegate.post_tool(self.cfg, p, self.host))
+
     def test_done_by_the_real_cli_through_a_seat_key(self):
         sid, _ = self.launch_seat("eng-a")
         rc, out, err = self.cli("done", "--job", "J", "--key", sid, "--artifact", ART, "--summary", "x")

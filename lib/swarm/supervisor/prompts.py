@@ -21,14 +21,25 @@ STANDING_RULES = (
     "Standing rules:",
     "- Run targeted tests only, through `/var/tmp/test-slots/test-slot -- <cmd>` when it exists; full suites "
     "run only in CI.",
-    "- Wait for CI with `swarm ci wait --repo R --sha S --timeout 540` in the foreground; never `gh run watch`.",
     "- Never put work trees, clones or builds under /tmp.",
     "- Never push: commit on your branch in your workdir. Only the supervisor pushes and lands (rebase-only, "
     "fast-forward, never a force push).",
-    "- Run swarm commands literally as `swarm ...` (never through a shell variable or function): only a literal "
-    "call is recorded.",
-    "- Post `DONE` with evidence when you finish; hand work off with `swarm done --artifact BRANCH@<full sha>`.",
+    "- What you may run: the swarm seat commands (post, read, who, status, wait, done, review, verdict, "
+    "goal-ready, ask, answer, seat ...) and the build and test commands of your worktree. Not `swarm ci wait`, "
+    "not `swarm --help`, never `gh run watch`, never a push: the supervisor waits for CI and lands.",
+    "- Run swarm commands literally as `swarm ...` (never through a shell variable or function), each as its own "
+    "command: no `;`, `&&`, `|` or `echo` before or after it. Only a single literal call is recorded.",
 )
+
+
+def standing_rules(job: str) -> list[str]:
+    """The standing rules, with the exact hand-off command for `job` (a seat's first attempt must just work)."""
+    return [*STANDING_RULES,
+            f"- Hand work off with exactly `swarm done --job {job} --artifact <BRANCH>@<FULL SHA> --summary "
+            "\"<what you did and how to check it>\"` (the full 40-character sha of your commit), as its own "
+            "command, after posting `DONE` with your evidence."]
+
+
 GATES = ("Review gates (haiku-strict): read the whole diff line by line; check that every new test fails on the "
          "base commit; run a mutation gate (at least 5 targeted mutants of the changed logic, in a scratch copy "
          "under your work root, never /tmp; every mutant must be killed). A surviving mutant, a test that passes "
@@ -142,7 +153,7 @@ def _seat_body(board, led, seat, action) -> list[str]:
     elif kind == "fix":
         out.append(f"This is a fix round for {_ref(action.artifact or _group(action) or 'your artifact', what='artifact')}: address "
                    "the review, verdict or FINALIZE_BLOCKED text on the board, then hand off again with "
-                   "`swarm done --artifact REF`.")
+                   f"`swarm done --job {_ref(led.job, what='job')} --artifact <BRANCH>@<FULL SHA> --summary \"...\"`.")
     return out
 
 
@@ -220,7 +231,7 @@ def render(board, cfg, led, action, seat) -> str:
         parts += _integrate_body(led, seat, action)
     else:
         parts += _seat_body(board, led, seat, action)
-    parts += list(STANDING_RULES)
+    parts += standing_rules(_ref(led.job, what="job"))
     parts += _EXTRA
     parts.append(fence("JOB BOARD", _posts(board, led.job)))
     return "\n".join(parts)

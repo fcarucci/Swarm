@@ -389,7 +389,7 @@ class SeatBroker:
 
     def do_cli(self, req) -> tuple[int, bytes, bytes]:
         from swarm import receipts, seatproto
-        command, fields = seatproto.validate(req)
+        command, fields = seatproto.validate(req, self.run.get("job") or None)   # fills/checks --job (own job)
         if self.session() is None:
             raise Refused("the seat's session is not known yet (a Codex seat before its thread started)")
         made: list = []
