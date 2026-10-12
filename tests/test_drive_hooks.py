@@ -950,3 +950,22 @@ class DriveJudgeFlag(Env):
         self.assertIn("--as Homer", out)
         self.assertNotIn("Marge", out)
         self.assertIsNone(hooks.own_name_verdict_command("swarm done --job OTHER --artifact x", "Homer", "J"))
+
+
+class DriveJobDetection(unittest.TestCase):
+    """hooks._drive_job, unmocked: a real ledger makes a drive job; an error is the stricter case."""
+
+    def test_ledger_presence_and_errors(self):
+        cfg = {}
+        with mock.patch("swarm.board.autoinit.store_key", return_value="bk"), \
+                mock.patch.object(ledger, "exists", side_effect=lambda bk, job: job == "D"):
+            self.assertTrue(hooks._drive_job(cfg, "D"))
+            self.assertFalse(hooks._drive_job(cfg, "N"))
+        with mock.patch("swarm.board.autoinit.store_key", return_value="bk"), \
+                mock.patch.object(ledger, "exists", side_effect=OSError("unreadable")):
+            self.assertTrue(hooks._drive_job(cfg, "D"))   # cannot tell: fail closed
+
+    def test_enrolment_wires_the_judge_flag_and_the_cfg(self):
+        import inspect
+        self.assertIn("_drive_judge_flag(board, cfg, agent_id, job, payload, resume)", inspect.getsource(hooks._enrol_resumed))
+        self.assertIn("_goal_roles(board, agent_id, job, payload, marker, prompt, cfg)", inspect.getsource(hooks))
