@@ -330,7 +330,28 @@ def run_questions(ctx, args):
                     print(cli.term_safe(f'  comment by {event.actor}: {event.detail}'))
 
 
+class _Intermixed(__import__('argparse').ArgumentParser):
+    """A subparser that reads its options and positionals intermixed (`answer 3 --key K text`): before Python
+    3.12, argparse stops filling a `*`/`+` positional at the first option and rejects the rest."""
+    _inner = False
+
+    def parse_known_args(self, args=None, namespace=None):
+        if self._inner:
+            return super().parse_known_args(args, namespace)
+        self._inner = True
+        try:
+            return self.parse_known_intermixed_args(args, namespace)
+        finally:
+            self._inner = False
+
+
+def _intermixed(p):
+    if type(p).__name__ == 'ArgumentParser':
+        p.__class__ = _Intermixed
+
+
 def setup_ask(p):
+    _intermixed(p)
     p.add_argument('--job', required=True)
     p.add_argument('--key', help='your agent key, when you joined with `swarm join --key`')
     p.add_argument('--to', required=True)
@@ -345,6 +366,7 @@ def question_id(text):
 
 
 def setup_answer(p):
+    _intermixed(p)
     p.add_argument('id', type=question_id, metavar='ID')
     p.add_argument('--key', help='your agent key, when you joined with `swarm join --key`')
     p.add_argument('text', nargs='*')

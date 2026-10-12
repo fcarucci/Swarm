@@ -566,7 +566,14 @@ def parse_swarm(argv: list[str]):
     for build in (_cli_parser, _fallback_parser):
         try:
             with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
-                return build().parse_args(list(argv))
+                parser = build()
+                if build is _fallback_parser and argv and argv[0] in ("ask", "answer", "review"):
+                    # positionals after options (`answer 3 --key K text`): Python 3.11's argparse needs the
+                    # intermixed parser for a `*` positional (as Task 5 round 2 does)
+                    ns = parser._subparsers._group_actions[0].choices[argv[0]].parse_intermixed_args(list(argv[1:]))
+                    ns.cmd = argv[0]
+                    return ns
+                return parser.parse_args(list(argv))
         except (SystemExit, Exception):
             continue
     return None
