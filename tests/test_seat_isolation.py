@@ -918,8 +918,10 @@ class BrokerEndToEndTest(SeatHomeCase):
 
 class ClientTest(unittest.TestCase):
     def test_no_broker_dir(self):
-        with mock.patch.dict(os.environ, {"SWARM_SEAT_BROKER": "/nonexistent"}):
+        with mock.patch.dict(os.environ, {"SWARM_SEAT_BROKER": "/nonexistent"}), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
             self.assertEqual(seatbroker_client.main(["cli", "who", "--job", "J"]), 1)
+        self.assertIn("no seat broker", err.getvalue())
 
     def test_a_dead_broker_times_out(self):
         d = tmpdir(self)

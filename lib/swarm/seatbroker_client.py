@@ -126,10 +126,13 @@ def main(args: list[str]) -> int:
         rc, out, err = run_hook(argv, directory, data)
     else:
         rc, out, err = run_cli(argv, directory)
-    sys.stdout.buffer.write(out)
-    sys.stdout.flush()
-    sys.stderr.buffer.write(err)
-    sys.stderr.flush()
+    for stream, data in ((sys.stdout, out), (sys.stderr, err)):
+        buf = getattr(stream, "buffer", None)
+        if buf is not None:
+            buf.write(data)
+        else:
+            stream.write(data.decode("utf-8", "replace"))
+        stream.flush()
     return rc
 
 
