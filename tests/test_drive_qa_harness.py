@@ -197,6 +197,30 @@ class Mutants(Tmp):
         with mock.patch.object(q, "require"):
             self.assertEqual(r.drive(timeout_s=60, interval_s=0)["status"], "completed")
 
+    def test_session_mode_watches_swarm_drive_run_and_runs_no_pass(self):
+        """[T21]: in the default mode `swarm drive run` drives the job; the rig only watches, then stops it."""
+        from unittest import mock
+        from types import SimpleNamespace as NS
+        import qa_lib as q
+        import rig as rigmod
+        r = rigmod.Rig.__new__(rigmod.Rig)
+        r.run = self.fake_rig().run
+        proc = mock.Mock()
+        proc.poll.return_value = None
+        r.run.drive_run = lambda: proc
+        r.driver = "session"
+        r.job, r.budget_usd, r.passes, r.invariant_violations = "J", 1.0, 0, []
+        r.stall_passes, r._last_change, r._last_sig, r.pass_env, r.rcs = 10, 0, None, {}, []
+        seq = iter([{"status": "active", "agents": [], "messages": 0, "restarts": 0, "verdict": None, "closed_by": None},
+                    {"status": "completed", "agents": [], "messages": 1, "restarts": 1, "verdict": "met", "closed_by": "x"}])
+        r.snapshot_line = lambda: next(seq)
+        r.spent_usd = lambda: 0.5
+        r.one_pass = lambda: self.fail("a supervisor pass ran in session-driver mode")
+        with mock.patch.object(q, "require"):
+            self.assertEqual(r.drive(timeout_s=60, interval_s=0)["status"], "completed")
+        proc.terminate.assert_called_once()
+        self.assertEqual(NS(calls=self.calls).calls, [])     # no `swarm supervise` either
+
     def test_real_mode_resolves_claude_from_the_users_path_inside_the_isolated_home(self):
         from unittest import mock
         import qa_lib as q

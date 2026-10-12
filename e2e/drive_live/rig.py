@@ -3,7 +3,8 @@
 `Rig.prepare()` works on any checkout (throwaway board, fake hub, scratch repo, harness shims, team config).
 `Rig.activate()` needs 6a/6b and `Rig.drive()` needs 8a/8b/8c/11b: without them they raise qa_lib.Pending.
 Zero coordinator turns by construction: no Claude Code session is started and nothing but
-`swarm activate` (once, plus scripted re-activations) and `swarm supervise` (the timer's command) is run against the job.
+`swarm activate` (once, plus scripted re-activations) and the session driver's `swarm drive run` (spec 3.11
+[T21]; `driver="passes"`: `swarm supervise`, the timer's command) is run against the job.
 
 Nothing here may pass vacuously: every injected fault reports whether it fired (`rig.fired`), and the
 scenario fails when the fault it names never happened.
@@ -41,7 +42,7 @@ class Rig:
     def __init__(self, name: str, *, script: str = "met", backend: str = "postgres", harness: str = "fake",
                  job: str | None = None, budget_usd: float = 10.0, stamp: str | None = None,
                  script_patch=None, systemd: bool = False, pass_env: list | None = None,
-                 activate_extra: list | None = None, stall_passes: int = 10):
+                 activate_extra: list | None = None, stall_passes: int = 10, driver: str = "session"):
         self.run = q.Run(name, backend=backend, harness=harness, stamp=stamp, systemd=systemd, pass_env=pass_env)
         self.script_name = script
         self.job = q.check_job_name(job or f"qa-{name}")
@@ -58,6 +59,7 @@ class Rig:
         self.fired: dict = {}             # fault name -> evidence that it really happened
         self.invariant_violations: list[str] = []
         self.stall_passes = stall_passes
+        self.driver = driver              # "session": `swarm drive run` ([T21]); "passes": `swarm supervise` passes
         self.lead_brief: Path | None = None
         self._last_change = 0
         self._last_sig = None
@@ -122,7 +124,8 @@ class Rig:
 
     def activate(self, extra: list[str] | None = None, goal: str | None = None) -> None:
         q.require("6a", "6b", what="swarm activate --drive and seats")
-        self.run.supervise_pass()    # activation refuses unless the supervisor has run in the last 2 minutes
+        if getattr(self, "driver", "passes") == "passes":
+            self.run.supervise_pass()    # the timer-era precondition: an older checkout refuses without a pass
         res = self.run.swarm(*self.activate_args(goal, extra))
         self.run.event("activate", "goal job activated", rc=res.returncode, out=(res.stdout + res.stderr)[-300:])
         if res.returncode:
@@ -188,6 +191,17 @@ class Rig:
         q.require(*q.LIVE_NEEDS, what="the supervisor driver")
         end = time.monotonic() + timeout_s
         last = None
+        if getattr(self, "driver", "passes") == "session":   # spec 3.11 [T21]: `swarm drive run` drives; this only watches
+            proc = self.run.drive_run()
+            try:
+                return self._watch_driven(proc, end, interval_s, on_pass, max_passes)
+            finally:
+                if proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(30)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
         while True:
             snap = self.snapshot_line()
             if snap != last:
@@ -206,6 +220,33 @@ class Rig:
             if on_pass:
                 on_pass(self.passes, snap)
             self.one_pass()
+            time.sleep(interval_s)
+
+    def _watch_driven(self, proc, end: float, interval_s: float, on_pass, max_passes) -> dict:
+        """The session-driver mode of drive(): the same checks, each `interval_s`, while `swarm drive run` (and
+        nothing else) moves the job; `passes` counts the looks. The driver ending before the job is terminal is
+        a failure (it exits only when no unfinished drive job is left)."""
+        last = None
+        while True:
+            snap = self.snapshot_line()
+            if snap != last:
+                self.run.event("job", "state", **snap)
+                last = snap
+            if snap["status"] in q.TERMINAL:
+                return snap
+            self._watch(snap)
+            spent = self.spent_usd()
+            if spent > self.budget_usd + 1e-6:
+                self.run.swarm("halt", "--job", self.job, "--reason", f"QA cost cap: ${spent:.2f} > ${self.budget_usd:g}")
+                self.run.event("cost", "cap exceeded; job halted", spent=spent)
+                raise CostCap(f"spent ${spent:.2f} over the ${self.budget_usd:g} cap; job halted")
+            if proc.poll() is not None and self.snapshot_line()["status"] not in q.TERMINAL:
+                raise TimeoutError(f"swarm drive run exited ({proc.returncode}) with {self.job} not terminal: {snap}")
+            if time.monotonic() > end or (max_passes is not None and self.passes >= max_passes):
+                raise TimeoutError(f"job {self.job} not terminal after {self.passes} looks: {snap}")
+            if on_pass:
+                on_pass(self.passes, snap)
+            self.passes += 1
             time.sleep(interval_s)
 
     # -- fault helpers
