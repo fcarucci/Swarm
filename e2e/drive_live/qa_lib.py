@@ -383,12 +383,21 @@ class Run:
         return r
 
     def drive_run(self) -> subprocess.Popen:
-        """`swarm drive run --job ...`: the session driver's loop in the foreground (spec 3.11 [T21]), as a
-        background process of this harness; its output goes to logs/driver.log. The caller stops it."""
+        """The requester's session driver (spec 3.11 [T21]) for the activation's session `qa-operator`, watching
+        this harness process (the requester path: `swarm drive run` is a person command, confirmed on a tty).
+        Its log goes to logs/driver.log; the caller stops it (it also ends with this process)."""
+        import json as _json
+        sys.path.insert(0, str(self.root / "lib"))
+        from swarm.supervisor import procwatch
         log = open(self.logs / "driver.log", "a")
         try:
-            return subprocess.Popen([str(self.bin / "swarm"), "drive", "run", "--yes"], stdout=log, stderr=subprocess.STDOUT,
-                                    stdin=subprocess.DEVNULL, env=self.env())
+            env = {**self.env(), "PYTHONPATH": str(self.root / "lib")}
+            proc = subprocess.Popen([str(VENV / "bin" / "python"), "-m", "swarm.supervisor.session_driver"],
+                                    stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT, env=env)
+            proc.stdin.write(_json.dumps({"session": "qa-operator", "pid": os.getpid(),
+                                          "token": procwatch.start_token(os.getpid())}).encode())
+            proc.stdin.close()
+            return proc
         finally:
             log.close()
 

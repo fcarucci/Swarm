@@ -477,6 +477,46 @@ class LifecycleTests(Home):
         self.assertEqual((env["PATH"], env["SWARM_CONFIG"]), (recorded["path"], recorded["config"]))
         self.assertNotIn("/planted", json.dumps(popen.return_value.stdin.write.call_args.args[0].decode()))
 
+    def run_main(self, payload: dict):
+        import io
+        seen = {}
+
+        def serve(cfg, **kw):
+            seen.update(environ=dict(os.environ), kw=kw)
+            return "ok"
+        with mock.patch.object(sd, "serve", side_effect=serve), \
+                mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))):
+            rc = sd.main()
+        return rc, seen
+
+    def test_the_module_entry_refuses_a_caller_under_a_runner(self):
+        """rr1b: run by hand with the requester's own pid, the module still checks its CALLER's ancestry."""
+        self.held_job(session="sess-1")
+        session = idle_process()
+        self.addCleanup(stop, session)
+        payload = {"session": "sess-1", "pid": session.pid, "token": procwatch.start_token(session.pid)}
+        with mock.patch.dict(os.environ), \
+                mock.patch.object(procwatch, "under_runner", side_effect=lambda pid, **k: pid == os.getpid()):
+            rc, seen = self.run_main(payload)
+        self.assertEqual((rc, seen), (1, {}))
+
+    def test_the_module_entry_rebuilds_its_environment_from_the_record(self):
+        self.held_job(session="sess-1")
+        rec = sd.launch_env("sess-1")
+        session = idle_process()
+        self.addCleanup(stop, session)
+        payload = {"session": "sess-1", "pid": session.pid, "token": procwatch.start_token(session.pid)}
+        planted = {"PATH": "/planted/bin", "SWARM_CONFIG": "/planted/c.toml", "CLAUDE_CONFIG_DIR": "/planted/cl",
+                   "XDG_CONFIG_HOME": "/planted/x", "EVIL": "1"}
+        with mock.patch.dict(os.environ, planted):
+            rc, seen = self.run_main(payload)
+        self.assertEqual(rc, 0)
+        env = seen["environ"]
+        self.assertEqual((env["PATH"], env["SWARM_CONFIG"]), (rec["path"], rec["config"]))
+        self.assertNotIn("EVIL", env)
+        self.assertFalse([v for v in env.values() if "/planted" in v], env)
+        self.assertEqual(env.get("HOME"), rec["env"].get("HOME"))
+
     def test_no_recorded_activation_starts_nothing(self):
         self.held_job(session="sess-1")
         from swarm.supervisor import privfs
@@ -949,6 +989,9 @@ class DriveRunTests(Home):
         p = mock.patch.object(person, "_ancestor_host", lambda: None)
         p.start()
         self.addCleanup(p.stop)
+        t = mock.patch.object(person, "_tty_confirm", return_value=True)   # a person typed y on the tty
+        t.start()
+        self.addCleanup(t.stop)
         e = mock.patch.dict(os.environ)
         e.start()
         self.addCleanup(e.stop)
@@ -965,7 +1008,19 @@ class DriveRunTests(Home):
             self.assertEqual(drive_cli.cmd_drive_run(self.cfg, self.args()), 1)
         with mock.patch.object(person, "_tty_confirm", return_value=False):
             self.assertEqual(drive_cli.cmd_drive_run(self.cfg, self.args(yes=False)), 1)   # no person said yes
+        # rr1a: a seat that cleared its variables and detached is still under its runner: refused
+        with mock.patch.object(procwatch, "under_runner", side_effect=lambda pid, **k: pid == os.getpid()):
+            self.assertEqual(drive_cli.cmd_drive_run(self.cfg, self.args()), 1)
         self.assertFalse(sd.held(sd.run_lock_name(self.key, "J")))
+
+    def test_there_is_no_yes_flag(self):
+        import argparse
+        from swarm import drive_cli
+        sub = argparse.ArgumentParser().add_subparsers(dest="cmd")
+        drive_cli.register(sub, {}, {})
+        tree = sub._swarm_drive_tree
+        with self.assertRaises(SystemExit):
+            tree.choices["run"].parse_args(["--yes"])
 
     def test_nothing_to_drive_returns_at_once(self):
         from swarm import drive_cli
