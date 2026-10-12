@@ -469,6 +469,22 @@ class CancelBehindACloseTests(T.LifeCase):
         self.assertEqual(self.reload().terminal_intent["verdict"], "met")
         self.assertEqual(self.job().status, "active")
 
+    def test_a_pending_cancel_wins_over_the_deadline_that_supersedes_a_stuck_met(self):
+        lid = self.launch()
+        self.run.live.add(lid)
+        self.pending_met(now=self.at(1))
+        self.led.watermarks[life._closing_key(self.led.terminal_intent)] = 1
+        self.led.save()
+        life.cancel_job(self.b, self.cfg, self.led, "alice", self.at(2), hooks=self.run.hooks())
+        self.assertFalse(life.terminalize(self.b, self.cfg, self.reload(), self.at(100), hooks=self.run.hooks()))
+        self.assertEqual(len(self.posts("DRIVER-TERMINAL-STUCK")), 1)
+        self.run.live.clear()
+        self.assertTrue(life.enforce_deadlines(self.b, self.cfg, self.reload(), self.at(60 * 30), hooks=self.run.hooks()))
+        led = self.reload()
+        self.assertEqual(led.terminal["verdict"], "cancelled")
+        self.assertEqual(self.job().status, "cancelled")
+        self.assertEqual(self.posts("DRIVER-MECHANICAL-UNREACHABLE"), [])
+
     def test_a_cancel_behind_a_met_that_closes_is_moot(self):
         self.pending_met()
         with self.barrier_crash("terminal_closed_before_ledger"), self.assertRaises(T.Crash):
