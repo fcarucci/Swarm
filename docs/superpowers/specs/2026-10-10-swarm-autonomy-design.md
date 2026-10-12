@@ -1046,7 +1046,12 @@ git dir), `.gitmodules`, a `.gitconfig`, `~/.config/git`, `~/.config/gh`, `~/.ss
 a virtualenv's bin or absolute directories the seat cannot write, and a bare program name that PATH resolves to a
 seat-writable script (not a virtualenv entry point, the swarm launcher, or a file tracked unmodified at HEAD) is
 refused. `gh api graphql` takes its query only literally (`-f query=...`, scanned): `--input`, `-F query=@file` and
-stdin are refused. `ssh -F <file>` and `-o Include=` follow the file rule.
+stdin are refused. `ssh -F <file>` and `-o Include=` follow the file rule. Round 6: a git dir's legacy `remotes/` and
+`branches/` files are protected too, and a refspec-less push to a remote defined there is refused. HOME,
+XDG_CONFIG_HOME, GH_CONFIG_DIR, PATH, every GIT_* and the code-loading variables are read-only names: no builtin
+may set them (`printf -v`, `read`, `mapfile`, `declare`/`typeset`/`local`/`export`/`unset` of the bare name or a
+`-n` reference, `let`, `for`/`select`, `getopts`, `wait -p`, `${NAME:=...}`). A virtualenv counts only when its
+bin holds no program named like one the guard checks (git, gh, ssh, a shell, claude, codex, ...).
 
 ### 4.5 Idempotence and crash recovery (the one authoritative protocol)
 

@@ -639,6 +639,81 @@ class Round5Configuration(unittest.TestCase):
                 self.assertTrue(self.at(cmd), cmd)
         self.assertIsNone(self.at("ssh -F /dev/null host true"))
 
+@unittest.skipUnless(shutil.which("git"), "needs git")
+class Round6(unittest.TestCase):
+    """Round 6: legacy remote files (rr37), protected variables set by builtins (rr38), a venv that shadows a guarded
+    program (rr39)."""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.addCleanup(self.td.cleanup)
+        self.repo = os.path.realpath(self.td.name)
+        self.rs = self.repo.replace(os.sep, "/")
+        subprocess.run(["git", "init", "-q", self.repo], check=True)
+        subprocess.run(["git", "-C", self.repo, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false",
+                        "commit", "-q", "--allow-empty", "-m", "x"], check=True)
+
+    def at(self, cmd):
+        return refuse(cmd, ["main"], branch_of=on("feat/a"), cwd=self.repo)
+
+    def test_rr37_legacy_remote_files(self):
+        for path in (".git/remotes/r2", ".git/branches/b2"):
+            with self.subTest(path=path):
+                self.assertTrue(shellguard.protected_write_refusal({"file_path": path}, self.repo))
+        self.assertTrue(self.at("printf 'URL: x\\nPush: HEAD:main\\n' > .git/remotes/r3"))
+        self.assertIsNone(self.at("git push r2"))
+        os.makedirs(os.path.join(self.repo, ".git", "remotes"), exist_ok=True)
+        with open(os.path.join(self.repo, ".git", "remotes", "r2"), "w") as f:
+            f.write("URL: ../remote.git\nPush: HEAD:refs/heads/main\n")
+        self.assertIn(".git/remotes/", self.at("git push r2"))
+        self.assertIn(".git/remotes/", self.at("git push"))
+        self.assertIsNone(self.at("git push origin"))                 # another remote: no legacy file
+        self.assertIsNone(self.at("git push r2 feat/a"))              # an explicit refspec wins
+        os.makedirs(os.path.join(self.repo, ".git", "branches"), exist_ok=True)
+        with open(os.path.join(self.repo, ".git", "branches", "b2"), "w") as f:
+            f.write("../remote.git#main\n")
+        self.assertIn(".git/branches/", self.at("git push b2"))
+
+    def test_rr38_protected_names_cannot_be_set_by_a_builtin(self):
+        for cmd in ("printf -v HOME %s \"$PWD\" && git push origin", "read -r HOME <<< \"$PWD\"; git push origin",
+                    "printf -vHOME x", "read -a PATH <<< x", "mapfile -t PATH < f", "readarray GIT_DIR < f",
+                    "declare -n R=HOME; R=.", "typeset XDG_CONFIG_HOME", "local GIT_DIR", "export HOME",
+                    "unset PATH", "let PATH=1", "for HOME in .; do git push origin; done", "select GIT_DIR in a; do :; done",
+                    ": ${HOME:=.}", "echo ${HOME=.}", "getopts ab HOME", "wait -p GH_CONFIG_DIR",
+                    "sh -c 'printf -v HOME x'", "read -d x HOME", "read -aPATH <<< x",
+                    "read -r GIT_CONFIG_GLOBAL <<< x", "printf -v 'HOME[0]' %s ."):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(self.at(cmd), cmd)
+        for cmd in ("read -r x <<< y", "printf -v x %s y", "for i in 1 2; do echo $i; done", "echo ${X:=1}",
+                    "echo ${HOME:-x}", "declare -a arr", "unset x", "let n=1", "export PATH=/usr/bin:$PATH",
+                    "read -p HOME x"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.at(cmd), cmd)
+
+    def test_rr39_a_venv_that_shadows_a_guarded_program_is_not_a_venv(self):
+        venv = os.path.join(self.repo, "v")
+        os.makedirs(os.path.join(venv, "bin"))
+        with open(os.path.join(venv, "pyvenv.cfg"), "w") as f:
+            f.write("home = /usr/bin\n")
+        tool = os.path.join(venv, "bin", "pytest")
+        with open(tool, "w") as f:
+            f.write("#!/bin/sh\necho\n")
+        self.assertIsNone(self.at("v/bin/pytest"))
+        self.assertIsNone(self.at("source v/bin/pytest"))
+        if os.name != "nt":
+            self.assertIsNone(self.at(f"PATH={self.rs}/v/bin:$PATH ls"))
+        with open(os.path.join(venv, "bin", "git"), "w") as f:
+            f.write("#!/bin/sh\ngit push origin HEAD:main\n")
+        for cmd in ("v/bin/git status", "v/bin/pytest", "source v/bin/pytest"):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(self.at(cmd), cmd)
+        if os.name != "nt":
+            self.assertTrue(self.at(f"PATH={self.rs}/v/bin:$PATH git status"))
+        os.remove(os.path.join(venv, "bin", "git"))
+        with open(os.path.join(venv, "bin", "bash"), "w") as f:
+            f.write("x\n")
+        self.assertTrue(self.at("v/bin/pytest"))                       # a shell shadowed: not a venv either
+
 
 class Splitting(unittest.TestCase):
     def test_split_commands_resolves_quotes_and_lists_substitutions(self):
