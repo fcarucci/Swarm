@@ -69,13 +69,13 @@ def _optionlike(part) -> bool:
 
 
 def _local_path(url: str) -> str | None:
-    """The filesystem path of a local URL as git reads it (a file:// path percent-decoded), or None for a
-    network URL. A local URL with any '%' is refused by _check_local, so both readings agree."""
+    """The filesystem path of a local URL, or None for a network URL. git percent-decodes a file:// path;
+    a local URL with any '%' is refused by _check_local, so the undecoded path is the one git opens."""
     if url.lower().startswith("file://"):
-        return _decoded(urllib.parse.urlsplit(url).path)
+        return urllib.parse.urlsplit(url).path
     if "://" in url or (SCP_URL.match(url) and not os.path.isabs(url)):
         return None
-    return _decoded(url)
+    return url
 
 
 def _check_local(url: str) -> None:
@@ -87,10 +87,8 @@ def _check_local(url: str) -> None:
         # git decodes a file:// path (%2e%2e is ".."), and opens a plain path literally: a local remote
         # with any '%' would mean two different directories, so it is refused outright
         raise GitPinError("a local remote must not contain '%' (git percent-decodes file:// paths)")
-    if not no_controls(path):
-        raise GitPinError("a local remote must not contain (encoded) whitespace or control characters")
     if ".." in path.replace(os.sep, "/").split("/"):
-        raise GitPinError("a local remote must not contain a '..' segment (also percent-encoded)")
+        raise GitPinError("a local remote must not contain a '..' segment")
 
 
 def check_url(url) -> str:
