@@ -133,7 +133,7 @@ class CodexConfigEditTests(unittest.TestCase):
         inside = base_config(spool_dir="~/.local/state/swarm/../swarm/spool")   # normalized, and granted itself
         self.assertEqual(cc.required(inside)[("sandbox_workspace_write", "writable_roots")],
                          [str(self.home / ".local/state/swarm/spool"), str(self.home / ".local/state/swarm/active"),
-                      str(self.home / ".local/share/swarm/host/grants")])
+                      str(self.home / ".local/state/swarm/grants")])
         cc.apply(self.path, cfg)
         written = tomllib.loads(self.path.read_text())["sandbox_workspace_write"]["writable_roots"]
         self.assertTrue(all(os.path.isabs(r) for r in written))
@@ -295,7 +295,7 @@ class GrantTests(unittest.TestCase):
         req = cc.required(self.cfg)
         self.assertNotIn(("sandbox_workspace_write", "network_access"), req)
         self.assertEqual(self.roots(), [os.path.join(self.state, "spool"), os.path.join(self.state, "active"),
-                                        str(self.home / ".local/share/swarm/host/grants")])   # grants only (N6)
+                                        str(self.home / ".local/state/swarm/grants")])   # grants only (N6)
         for root in self.roots():
             self.assertNotEqual(root, self.state)
             self.assertFalse(str(self.home / ".local/share/swarm").startswith(root))

@@ -2288,7 +2288,7 @@ class DriveVerdicts:
                                               open_count=0))
         ref = "feat/x@" + "d" * 40
         self.assertTrue(self.b.record_verdict("J", judge, "not_met", "why", "next", artifact=ref, scope="artifact",
-                                              generation=1, open_count=0))
+                                              generation=1, open_count=0, message_id=11))   # bound, as delivered
         self.assertEqual(artifact_verdicts(self.b, "J")[ref]["open"], 0)
 
     def test_artifact_verdict_record_keeps_scope_generation_and_progress(self):
@@ -2298,7 +2298,7 @@ class DriveVerdicts:
         ref = "feat/x@" + "b" * 40
         self.assertTrue(self.b.record_verdict("J", judge, "not_met", "why", "next", artifact=ref, scope="artifact",
                                               generation=3, open_count=2, progress=True, candidate="b" * 40,
-                                              req="sha256:r"))
+                                              req="sha256:r", message_id=12))   # bound, as delivered
         rec = artifact_verdicts(self.b, "J")[ref]
         self.assertEqual((rec["scope"], rec["generation"], rec["open"], rec["progress"], rec["candidate"], rec["req"]),
                          ("artifact", 3, 2, True, "b" * 40, "sha256:r"))
