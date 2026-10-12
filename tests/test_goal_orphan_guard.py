@@ -55,6 +55,16 @@ class OrphanGuardTests(unittest.TestCase):
         self.h.conn.execute("UPDATE jobs SET status = 'failed', outcome = 'x', closed_by = 'auto' WHERE job = 'd'")
         self.assertEqual(self.status("d"), "failed")
 
+    def test_the_view_and_python_agree_on_a_future_run_start(self):
+        import datetime as dt
+        from swarm.board import base
+        self.board.open_job("f", None, "t", None, "u")
+        self.h.conn.execute("UPDATE jobs SET created_at = now() - interval '10 hours', "
+                            "activated_at = now() + interval '10 hours' WHERE job = 'f'")
+        js = self.board.job_status("f")
+        self.assertEqual(base.derive_job_status(js, 30, self.board.now()), "idle")
+        self.assertEqual(self.h.shown_status("f"), "idle")
+
     def test_the_driver_and_a_person_still_close_a_drive_job(self):
         self.board.open_job("e", None, "t", None, "u")
         self.board.set_job_data("e", "drive.enabled", "1")
