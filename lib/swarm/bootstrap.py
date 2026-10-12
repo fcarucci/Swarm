@@ -1804,35 +1804,47 @@ def _drive_exec(run, argv, timeout=10):
     return (res.stdout or "") if res.returncode == 0 else None
 
 
-def _drive_timer_check(cfg: dict, run, now) -> Check:
-    """A drive job needs the supervisor timer RUNNING (unit active and enabled, read through the
-    user manager's environment) and a pass within 2 x timer_minutes; with no readable user bus the
-    last pass alone decides (never the false `?/?`)."""
-    import datetime as dt
-    from swarm.supervisor import settings as st, systemd
-    fix = f"swarm supervise enable, or systemctl --user enable --now {systemd.TIMER}"
-    try:
-        sup = st.settings(cfg)
-    except st.SettingsError as exc:
-        return Check("drive timer", False, f"drive jobs need the supervisor: {exc}", "fix [supervise] in the swarm config")
-    if not st.enabled(cfg):
-        return Check("drive timer", False, "drive jobs here, but the supervisor is disabled or switched off", fix)
-    limit = 2 * sup["timer_minutes"]
-    age = None
-    try:
-        age = (now - dt.datetime.fromisoformat(st.load_state().get("last_run_at"))).total_seconds() / 60
-    except (TypeError, ValueError):
-        pass
-    state = systemd.timer_state(run)
-    if state and not (state.get("ActiveState") == "active" and state.get("UnitFileState") == "enabled"):
-        return Check("drive timer", False, f"{systemd.TIMER}: {state.get('ActiveState', '?')}/"
-                     f"{state.get('UnitFileState', '?')}; drive jobs are not being driven", fix)
-    when = "never" if age is None else f"{age:.0f} min ago"
-    if age is None or not 0 <= age <= limit:
-        return Check("drive timer", False, f"last pass {when} (a drive job needs one within {limit} min)",
-                     "journalctl --user -u swarm-supervise.service -n 50; " + fix)
-    seen = f"{systemd.TIMER}: active/enabled" if state else "no user bus from this shell"
-    return Check("drive timer", True, f"{seen}; last pass {when}")
+def _drive_driver_checks(jobs, unreadable: bool = False) -> list[Check]:
+    """Spec 3.11 [T21]: per requester session of the unfinished drive jobs, whether its session driver runs
+    (and in which mode). No timer is needed or checked; a missing driver is a warning, never a failure: the job
+    advances while its session is open, or under `swarm drive run`."""
+    from swarm.supervisor import session_driver
+    sessions: dict = {}
+    for led in jobs:
+        sessions.setdefault(led.requester_session, []).append(led.job)
+    out = []
+    if unreadable and not sessions:
+        out.append(Check("drive driver", None, "which sessions drive the drive jobs here is unknown (their ledgers "
+                         "can't be read)", "see the drive ledger lines"))
+    for session, names in sorted(sessions.items(), key=lambda kv: str(kv[0])):
+        label = ", ".join(sorted(names))
+        info = session_driver.running(session) if session else None
+        if info is not None:
+            out.append(Check("drive driver", True,
+                             f"session driver running for {session} (mode: {info.get('mode') or '?'}): {label}"))
+            if info.get("mode") == "poll":
+                out.append(Check("drive driver mode", None,
+                                 f"the session driver of {session} polls (no OS change notification here)",
+                                 "nothing to do; wakes are up to 60 s late in this mode"))
+        else:
+            out.append(Check("drive driver", None,
+                             f"no live session driver for {session or 'an unknown session'} ({label}): the job "
+                             "advances while its session is open, or with `swarm drive run`",
+                             "open the session that activated it, or run `swarm drive run`"))
+    return out
+
+
+def _drive_containment_check() -> Check:
+    """Spec 3.11 [T21]: how drive seats are contained here. A missing systemd user manager never refuses a
+    launch: the seat gets its own process group (POSIX) or Job Object (Windows) instead of a scope."""
+    from swarm import compat
+    from swarm.supervisor.runner import scope_available
+    if compat.IS_WINDOWS:
+        return Check("drive containment", True, "drive seats: a Job Object each (killed with it)")
+    if scope_available():
+        return Check("drive containment", True, "drive seats: systemd user scopes (systemd-run --user --scope)")
+    return Check("drive containment", True, "drive seats: their own process group each (no systemd user "
+                 "manager here; stopped by group)")
 
 
 def _drive_git_check(run, has_jobs: bool) -> Check:
@@ -2026,9 +2038,9 @@ def _drive_board_checks(cfg: dict, bk, led_jobs: set, now) -> list[Check]:
 
 def drive_checks(cfg: dict, *, run=None, which=None, now=None, platform: str | None = None) -> list[Check]:
     """The drive-mode doctor lines (spec 3.2-3.3, 4.0, 4.5). Read-only: nothing here creates a
-    directory or a file. The host lines (timer, git, sandbox, Codex) only on a host with unfinished
-    drive jobs (or a [drive] section); the board lines whenever a board is there to read. Platform:
-    no supervisor timer off Linux, so no drive mode ([M1])."""
+    directory or a file. The host lines (session drivers, git, sandbox, Codex) only on a host with
+    unfinished drive jobs (or a [drive] section); the board lines whenever a board is there to read.
+    Every platform: no timer is needed ([T21]). `platform` is kept for callers and ignored."""
     import datetime as dt
     import subprocess
     from swarm import drive_activate as da, edition
@@ -2037,27 +2049,24 @@ def drive_checks(cfg: dict, *, run=None, which=None, now=None, platform: str | N
         return []
     run, which = run or subprocess.run, which or shutil.which
     now = now or dt.datetime.now(dt.timezone.utc)
-    linux = (platform or sys.platform).startswith("linux")
     try:
         bk = da.board_key(cfg)
     except Exception:          # an unreachable board: the board checks report it
         bk = None
     found, unreadable = [], None
-    if linux and bk is not None and os.path.lexists(st.private_dir() / ledger.SUBDIR):
+    if bk is not None and os.path.lexists(st.private_dir() / ledger.SUBDIR):
         try:
             found = ledger.unfinished(bk)
         except (OSError, ValueError, st.PrivateDirError) as exc:   # fail closed: a held job must show
             unreadable = exc
     relevant = bool(found) or unreadable is not None or bool(cfg.get("drive"))
-    if not relevant and not (linux and bk is not None and _board_store_exists(cfg)):
+    if not relevant and not (bk is not None and _board_store_exists(cfg)):
         return []
-    if not linux:
-        return [Check("drive mode", True, "drive mode unavailable: no supervisor timer")]
     jobs = [x for x in found if isinstance(x, ledger.Ledger)]
     has_jobs = bool(found) or unreadable is not None
     out: list[Check] = []
     if relevant:
-        out = [_drive_timer_check(cfg, run, now)] if has_jobs else []
+        out = (_drive_driver_checks(jobs, unreadable=not jobs) + [_drive_containment_check()]) if has_jobs else []
         out += [_drive_git_check(run, has_jobs), _claude_sandbox_check()]
         if os.environ.get("SWARM_NO_SYSTEMD") != "1":   # no scopes, no drive seat starts here (the test suite)
             out.append(_seat_isolation_check(cfg))

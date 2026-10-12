@@ -163,7 +163,7 @@ def effective_models(cfg: dict, overrides: dict | None = None) -> dict:
     return models
 
 
-# --- the supervisor checks ([M1]) --------------------------------------------------------------
+# --- the driver precondition ([T21]) --------------------------------------------------------------
 
 def _age_minutes(stamp, now: dt.datetime) -> float | None:
     if not isinstance(stamp, str) or not stamp:
@@ -177,39 +177,13 @@ def _age_minutes(stamp, now: dt.datetime) -> float | None:
     return (now - when).total_seconds() / 60.0
 
 
-def timer_state() -> dict:
-    """The systemd user timer's state (the seam the activation check reads; tests replace it)."""
-    from swarm.supervisor import systemd
-    return systemd.timer_state()
-
-
-def last_pass_state() -> dict:
-    """The supervisor's state file (its last pass; the seam the activation check reads; tests replace it)."""
-    return sup_settings.load_state()
-
-
-def supervisor_problem(cfg: dict, *, platform: str | None = None, timer: dict | None = None,
-                       state: dict | None = None, now: dt.datetime | None = None) -> str | None:
-    """Why a drive job cannot be activated on this host (None when it can): no timer on macOS and
-    Windows; the supervisor disabled or switched off; the systemd user timer not active and
-    enabled; no pass recorded within twice the timer period. The arguments exist for tests."""
-    from swarm.supervisor import systemd
-    plat = (PLATFORM or sys.platform) if platform is None else platform
-    if plat == "darwin" or plat.startswith("win"):
-        return f"drive jobs need the supervisor's systemd user timer, which this platform ({plat}) does not install; {NO_DRIVE_HINT}"
-    if not sup_settings.enabled(cfg):
-        return f"the supervisor is disabled on this host: run `swarm supervise enable` first, or {NO_DRIVE_HINT}"
-    info = timer_state() if timer is None else timer
-    if info.get("ActiveState") != "active" or info.get("UnitFileState") != "enabled":
-        return (f"the supervisor timer {systemd.TIMER} is not running: run `swarm supervise enable`, "
-                f"or {NO_DRIVE_HINT}")
-    limit = 2 * sup_settings.settings(cfg)["timer_minutes"]
-    when = now or dt.datetime.now(dt.timezone.utc)
-    last = (last_pass_state() if state is None else state).get("last_run_at")
-    age = _age_minutes(last, when)
-    if age is None or age > limit:
-        return (f"no supervisor pass in the last {limit} minutes (last: {last or 'never'}); wait for the "
-                f"timer's next pass, or {NO_DRIVE_HINT}")
+def driver_problem(cfg: dict) -> str | None:
+    """Why a drive job cannot be activated on this host, or None. Spec 3.11 [T21]: no timer is needed or
+    installed, on any platform; the session driver drives the job. Only the kill switch (`supervise.off`)
+    refuses: every driver exits while it exists, so the job would never move."""
+    off = sup_settings.switched_off()
+    if off is not None:
+        return f"the supervisor is switched off ({off} exists): remove it first, or {NO_DRIVE_HINT}"
     return None
 
 
@@ -224,7 +198,6 @@ def _real(path: str) -> str:
 
 
 TMP_ROOTS = ("/tmp", "/private/tmp")   # never a work dir (spec 4.2); tests of positive activations narrow it
-PLATFORM = None                        # the platform the supervisor check reads (None: sys.platform); tests set it
 
 
 def is_tmp(path: str) -> bool:
@@ -625,6 +598,21 @@ def _record_activation_heads(cfg: dict, bk: str, job: str, o: dict) -> None:
         _save(bk, job, lambda x: [x.activation_heads.setdefault(u, h) for u, h in pending.items()])
 
 
+def _authorize_lead(led, row, owner: dict, harness: str, model: str) -> None:
+    """The lead seat this activation requested is authorized like a seat the driver creates (spec 3.4: a
+    seat runs only on a receipted request): a seat_request receipt for its row's id and revision, written here
+    because the activation is the requester's own command. Only the row this activation would have written,
+    still requested and not yet authorized; a row a board writer changed stays unauthorized (fails closed)."""
+    from swarm.supervisor import driver_exec
+    now = dt.datetime.now(dt.timezone.utc)
+    want = {"role": "engineering_lead", "harness": harness, "model": model, "workdir": owner["roots"][0],
+            "brief_path": owner["brief"]}
+    if row is None or row.state != "requested" or any(getattr(row, k) != v for k, v in want.items()):
+        return
+    if not driver_exec.seat_authorized(led, row, now):
+        driver_exec.authorize_seat(led, row, now)
+
+
 def finish_activation(cfg: dict, board, job: str, *, crash_after: str | None = None) -> ledger.Ledger | None:
     """Steps 5 to 7 of [RR1] for a job whose ledger is "activating" and whose owner record and board claim
     exist: the board's generation data, the lead seat request, then the ledger "active".
@@ -656,19 +644,20 @@ def finish_activation(cfg: dict, board, job: str, *, crash_after: str | None = N
     _record_activation_heads(cfg, bk, job, o)
     if crash_after == "heads":
         raise RuntimeError("crash after heads")
-    if board.seat(job, led.generation, "lead") is None:
-        board.request_seat(job, led.generation, "lead", role="engineering_lead", harness=owner.harness,
-                           model=models["lead"], workdir=o["roots"][0], brief_path=o["brief"],
-                           requested_by=session or user)
-    # The activation's lead request is driver-authored (spec 3.4 [F2]/[RR1]): no hook sees a plain-shell
-    # activation, so its seat_request receipt is written here, or the driver never admits the lead.
-    from swarm.supervisor import driver_exec
     lead = board.seat(job, led.generation, "lead")
-    if lead is not None and lead.state == "requested" and not driver_exec.seat_authorized(led, lead, board.now()):
-        driver_exec.authorize_seat(led, lead, board.now())
+    if lead is None:
+        lead = board.request_seat(job, led.generation, "lead", role="engineering_lead", harness=owner.harness,
+                                  model=models["lead"], workdir=o["roots"][0], brief_path=o["brief"],
+                                  requested_by=session or user)
+    _authorize_lead(led, lead, o, owner.harness, models["lead"])
     if crash_after == "lead":
         raise RuntimeError("crash after lead")
-    return _save(bk, job, lambda x: setattr(x, "state", "active"))
+
+    def complete(x):
+        x.state = "active"
+        if x.requester_session is None and session:   # the requester session: the hooks and its driver ([T21])
+            x.requester_session = session
+    return _save(bk, job, complete)
 
 
 def _session(args) -> str | None:
@@ -791,10 +780,9 @@ def legacy_goal_check(args) -> int | None:
 
 
 def kick() -> bool:
-    """Wake the supervisor once a drive job is active, so its first pass does not wait for the timer. The
-    kick lives in swarm.drivegate; a build without it has no kick and the timer's next pass picks the job up.
-    The activation is already durable here, so a failing kick never undoes or fails it: it is reported
-    loudly on stderr (with its type) and the timer's next pass picks the job up. Returns whether it ran."""
+    """Wake the session drivers once a drive job is active (their wake file): the activation is already durable
+    here, so a failing kick never undoes or fails it; it is reported on stderr (with its type). Returns whether
+    it ran."""
     try:
         from swarm import drivegate
     except ModuleNotFoundError as exc:
@@ -814,15 +802,31 @@ def kick() -> bool:
 
 
 def _kick_failed(exc: BaseException) -> None:
-    print(f"swarm activate: WARNING: the supervisor kick failed ({type(exc).__name__}: {str(exc)[:200]}); the job "
-          f"is active and the timer's next pass picks it up; run `swarm doctor` if this repeats", file=sys.stderr)
+    print(f"swarm activate: WARNING: the driver kick failed ({type(exc).__name__}: {str(exc)[:200]}); the job "
+          f"is active and its session driver picks it up; run `swarm doctor` if this repeats", file=sys.stderr)
+
+
+def start_driver(cfg: dict, session: str | None, config_path) -> str:
+    """Spec 3.11 [T21]: start the requester session's driver (one per session; it watches the nearest
+    claude/codex process above this command). Says what happened in one line; never fails the activation."""
+    try:
+        from swarm.supervisor import session_driver
+    except ImportError:
+        return "no session driver in this build: run `swarm drive run`"
+    what = session_driver.ensure(cfg, session, config_path=str(config_path) if config_path else None)
+    if what in ("started", "running"):
+        return f"session driver {what} for session {session}"
+    if what == "no host process":
+        return ("no agent session process found above this command: the job advances while a session that "
+                "owns it is open, or under `swarm drive run`")
+    return f"session driver not started ({what}): the job advances under `swarm drive run`"
 
 
 def cmd_activate_drive(cfg: dict, args) -> int:
     """`swarm activate --goal` (drive mode): refuse what this host cannot drive, else the durable
     activation, then the one record line. A re-activation of a drive job is a rollover request only."""
     from swarm.board import open_board
-    problem = supervisor_problem(cfg)
+    problem = driver_problem(cfg)
     if problem:
         print(f"swarm activate: {problem}", file=sys.stderr)
         return 1
@@ -844,6 +848,8 @@ def cmd_activate_drive(cfg: dict, args) -> int:
                 board.set_job_data(args.job, "drive.generation_requested", str(led.generation_requested))
             print(f"re-activated {args.job}: generation {led.generation} -> {led.generation_requested} "
                   f"at the next pass")
+            kick()
+            print(start_driver(cfg, led.requester_session, getattr(args, "config", None)))
             print(f"swarm-record: kind=activate id={led.generation_requested} rev={led.ledger_rev}")
             return 0
         with open_board(cfg) as board:
@@ -855,8 +861,10 @@ def cmd_activate_drive(cfg: dict, args) -> int:
         return 1
     models = {**model_defaults(cfg), **led.models}
     kick()
-    print(f"activated {args.job} (drive): the supervisor drives it from here; the lead is seat 1 "
+    driven = start_driver(cfg, led.requester_session, getattr(args, "config", None))
+    print(f"activated {args.job} (drive): the session driver drives it from here; the lead is seat 1 "
           f"(generation {led.generation}); models {_models_text(models)}")
+    print(driven)
     print(f"swarm-record: kind=activate id={led.generation} rev={led.ledger_rev}")
     return 0
 

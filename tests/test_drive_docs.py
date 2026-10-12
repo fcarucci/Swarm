@@ -24,7 +24,7 @@ BREAKING = (
     ("goal implies drive", r"goal implies drive"),
     ("--default required", r"--default"),
     ("requester spawns refused", r"requester.{0,80}(refus|no longer)|(refus|no longer).{0,80}requester"),
-    ("activate --goal needs supervise enable", r"supervise enable"),
+    ("no timer: the session driver", r"session driver"),
 )
 
 

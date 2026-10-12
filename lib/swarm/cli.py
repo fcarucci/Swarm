@@ -3818,8 +3818,9 @@ def cmd_spool_retry(cfg: dict) -> int:
 
 
 def _cmd_hook(cfg: dict, args) -> int:
-    if args.event == "session-start":
-        return 0   # handled by bin/swarm-hook's shell part
+    if args.event == "session-start":   # bin/swarm-hook's shell part does the rest; here: the drive session driver
+        from swarm.supervisor import session_driver
+        return session_driver.hook_session_start(cfg, sys.stdin)
     try:
         from swarm.hooks import run_hook
     except ImportError:   # the directory edition ships without hooks
@@ -4732,8 +4733,18 @@ def _dispatch(args) -> int:
         rc = _run_command(cfg, args)
         if not rc:
             PLUGINS.run_after(args.cmd, args)
+        _wake(cfg, args)
         return rc
-    return _run_command(cfg, args)
+    rc = _run_command(cfg, args)
+    _wake(cfg, args)
+    return rc
+
+
+def _wake(cfg: dict, args) -> None:
+    """A board write wakes the session drivers (spec 3.11 [T21]: the board's wake file). Never raises."""
+    if not _reads_only(args) and args.cmd not in ("doctor", "hook", "tail", "watch", "notices"):
+        from swarm.supervisor import wake
+        wake.touch_cfg(cfg)
 
 
 def _run_command(cfg: dict, args) -> int:

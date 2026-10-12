@@ -14,12 +14,12 @@ Read [host procedures](references/hosts.md) before activating a job. They cover 
 1. A goal implies drive: `swarm activate --goal` starts a driven job. `--no-drive --reason TEXT` opts out and gives the old, coordinator-run job (see [Non-drive jobs](#non-drive-jobs)).
 2. `swarm ask` in a drive job needs `--default`: the driver applies it when the question expires (`question_expiry`, 4h by default), so no question blocks the job.
 3. The requester's Agent-tool spawns are refused in drive jobs. Staffing goes through `swarm seat request`, made by the lead (or a person); the supervisor launches the seat.
-4. `swarm activate --goal` fails until `swarm supervise enable` has been run on the host (and the timer runs). Fix that first or pass `--no-drive --reason TEXT`.
+4. No timer: `swarm activate --goal` starts this session's session driver, which drives the job while the session is open (idle is fine); `swarm supervise enable` is not needed. With no session open, `swarm drive run` drives it.
 
 ## Run a driven team
 
 1. Small work: skip the team and do it yourself. Otherwise capture the user's request verbatim or by stable link, constraints, approvals already given, and a provisional size.
-2. Check the host once: `swarm doctor` (supervisor timer, git 2.40 or newer, pinned credentials and a dry-run `git ls-remote` per landing destination), `swarm supervise enable` if it is not enabled. Choose the optional seats only with the user's say-so (`product_manager` and `build_engineer`; `team.toml` or `--team`).
+2. Check the host once: `swarm doctor` (session driver, git 2.40 or newer, pinned credentials and a dry-run `git ls-remote` per landing destination). Choose the optional seats only with the user's say-so (`product_manager` and `build_engineer`; `team.toml` or `--team`).
 3. Write the requirements as files (PR criteria, observable, with exclusions) and the **lead brief** from the [EL brief template](references/hosts.md#el-brief-template). Pin the requirements at activation: `--requirements PATH` (a requirement is pinned by blob id and cannot be replaced).
 4. Activate and leave: `swarm activate --job J --goal "<what done means>" --lead-brief PATH --workdir DIR [--requirements PATH]... [--max-cost-usd N] [--ruling-reserve-usd N] [--model ROLE=MODEL]`. The spending cap (shipped default 40 USD, ruling reserve 5 USD) and every other `[drive]` value are configurable defaults; ask the user whether the default cap suits the job. The command writes the job, the lead seat request and the budgets, kicks the supervisor and returns.
 5. Observe with `swarm watch --job J` or `swarm snapshot --job J --follow` (no polling loop). As the requester session you may `swarm ask`/answer questions, `swarm halt --job J` / `unhalt`, `swarm deactivate` (that is CANCELLED), and `swarm drive budget --job J KEY=VALUE` or `swarm drive models --job J ROLE=MODEL` on a running job. Everything else is the lead's and the driver's.

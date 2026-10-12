@@ -169,7 +169,15 @@ if [ -d "$HD" ] && [ ! -L "$HD" ] && [ -O "$HD" ]; then
   case "$(ls -ld "$HD" 2>/dev/null)" in drwx------*) PRIV="$HD";; esac
 fi
 if [ "${1:-}" = "session-start" ]; then
-  cat >/dev/null
+  # A host with a drive ledger: Python starts this session's driver if it owns a drive job (spec 3.11 [T21]).
+  DRIVE=""
+  for MARKER in "$HOME/.local/share/swarm/supervisor/drive"/*.json; do [ -f "$MARKER" ] && { DRIVE=1; break; }; done
+  if [ -n "$DRIVE" ] && [ -n "$PRIV" ] && [ -x "$V/bin/python" ]; then
+    PYTHONPATH="$D/lib${PYTHONPATH:+:$PYTHONPATH}" "$V/bin/python" -m swarm.cli hook $HOSTARG session-start \
+      >/dev/null 2>>"$PRIV/hook-stderr.log" || true
+  else
+    cat >/dev/null
+  fi
   if [ -z "$PRIV" ]; then   # no safe place for the stamps: nothing runs; say so (a fixed text only)
     MSG="[swarm] setup problem: ~/.local/share/swarm/host is not a private (0700, not a symlink) directory of yours, so the swarm hooks do nothing. See \`swarm doctor\`."
     printf '{"systemMessage": "%s"}\n' "$MSG"

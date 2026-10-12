@@ -694,6 +694,34 @@ def apply_control_request(board, cfg: dict, led, req, now) -> tuple:
     return drive_control.apply(board, cfg, led, req, now)
 
 
+# --- swarm drive run ([T21]) ---------------------------------------------------------------------
+
+def cmd_drive_run(cfg, args) -> int:
+    """`swarm drive run [--job J]` (spec 3.11 [T21]): the session driver's loop in the foreground, for progress
+    with no session open: every unfinished drive job of this board (or J), until none is left or the kill switch.
+    Installs nothing and never calls a model. One per board (and job filter) at a time."""
+    from swarm.supervisor import session_driver
+    bk = board_key(cfg)
+    if not session_driver.session_jobs(bk, None, args.job):
+        print(f"swarm drive run: no unfinished drive job{' ' + args.job if args.job else ''} on this board")
+        return 0
+    lock = session_driver.run_lock_name(bk, args.job)
+    print(f"swarm drive run: driving {args.job or 'every drive job of this board'} (Ctrl-C stops; nothing is "
+          "installed)", flush=True)
+    try:
+        why = session_driver.serve(cfg, session=None, job=args.job, watch=None,
+                                   config_path=str(getattr(args, "config", "") or ""), lock=lock,
+                                   say=lambda line: print(line, flush=True))
+    except KeyboardInterrupt:
+        print("swarm drive run: stopped")
+        return 130
+    if why == "already running":
+        print("swarm drive run: another `swarm drive run` drives these jobs already", file=sys.stderr)
+        return 1
+    print(f"swarm drive run: done ({why})")
+    return 0
+
+
 # --- registration ------------------------------------------------------------------------------
 
 # One `drive` parser tree for every task that adds a `swarm drive <cmd>` (6b: repair; 6a: budget, models).
@@ -829,6 +857,11 @@ def register(sub, handlers: dict, commands: dict | None = None) -> None:
     rp.add_argument("--generation", type=int, metavar="N",
                     help="the job's generation, when the bad ledger no longer tells it (never read from the board)")
     add_drive_command("repair", cmd_drive_repair)
+    rn = drive_subparsers(sub).add_parser(
+        "run", help="drive this board's drive jobs in the foreground until none is left (no session needed; "
+                    "installs nothing)")
+    rn.add_argument("--job", help="only this job")
+    add_drive_command("run", cmd_drive_run, board=False)
     rv = sub.add_parser("review", help="post a structured review of an artifact (an enrolled reviewer)")
     rv.add_argument("--job", required=True); rv.add_argument("--artifact", required=True)
     rv.add_argument("outcome", choices=REVIEW_OUTCOMES); rv.add_argument("--report", required=True)

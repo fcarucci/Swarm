@@ -259,6 +259,27 @@ def _bind_verdicts(records: list[dict], msgs: list, rc: _Receipts) -> list[dm.Ve
     return out
 
 
+def _drive_verdict_records(data: dict, gen: int, scope: str) -> list:
+    """The goal or ruling verdict records of generation `gen`: the record at `drive.verdict.<gen>.<scope>`, and
+    those review.verdict_data stores, one per (candidate, req), at `drive.verdict.<gen>.<scope>.<digest>`
+    (chunked; review.drive_verdict_key). A stored record that does not parse or is not bound to its VERDICT
+    message (review.bound_verdict) is skipped; every one is still bound by its receipt (_bind_verdicts)."""
+    import re as _re
+    want = _re.compile(rf"drive\.verdict\.{int(gen)}\.{_re.escape(scope)}\.[0-9a-f]{{32}}")
+    out = []
+    plain = _json_value(data, f"drive.verdict.{gen}.{scope}")    # the carrier contract's single-record key
+    if isinstance(plain, dict):
+        out.append(plain)
+    for key in sorted(k for k in data if want.fullmatch(k)):
+        try:
+            rec = review.bound_verdict(review._chunked(data, key))
+        except (KeyError, ValueError, TypeError):
+            continue
+        if isinstance(rec, dict) and key == review.drive_verdict_key(gen, scope, rec.get("candidate"), rec.get("req")):
+            out.append(rec)
+    return out
+
+
 def _verdicts(board: Any, data: dict, job: str, gen: int, msgs: list,
               rc: _Receipts) -> tuple[dict[str, dm.VerdictView], dm.VerdictView | None]:
     """The receipted artifact verdicts, by artifact, and the newest receipted goal or ruling verdict of this
@@ -266,13 +287,8 @@ def _verdicts(board: Any, data: dict, job: str, gen: int, msgs: list,
     artifacts = {v.artifact: v for v in _bind_verdicts(list(review.artifact_verdicts(board, job).values()), msgs, rc)}
     goal_records = []
     for scope in ("goal", "ruling"):
-        # review.verdict_data stores one record per (generation, scope, candidate, req) under
-        # review.drive_verdict_key(): `drive.verdict.<gen>.<scope>.<32 hex>`; a record must sit under its own key
-        prefix = f"drive.verdict.{gen}.{scope}."
-        for key in sorted(k for k in data if k.startswith(prefix) and re.fullmatch(r"[0-9a-f]{32}", k[len(prefix):])):
-            rec = _json_value(data, key)
-            if (rec is not None and rec.get("scope") == scope and rec.get("generation") == gen
-                    and key == review.drive_verdict_key(gen, scope, rec.get("candidate"), rec.get("req"))):
+        for rec in _drive_verdict_records(data, gen, scope):
+            if rec.get("scope") == scope and rec.get("generation") == gen:
                 goal_records.append(rec)
     goals = _bind_verdicts(goal_records, msgs, rc)
     return artifacts, (max(goals, key=lambda v: v.receipt_id) if goals else None)

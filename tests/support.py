@@ -30,6 +30,10 @@ for _var in HOST_ENV:
 os.environ.setdefault("SWARM_NO_MIGRATE", "1")
 # Never install or query systemd units from a test (bootstrap's supervisor-timer step).
 os.environ.setdefault("SWARM_NO_SYSTEMD", "1")
+# Spec 3.11 [T21]: an activation or a hook starts the session driver of the nearest claude/codex process above
+# it, which under a developer's agent session is that session: tests start no driver unless they ask for one
+# (the session driver tests set it to "1" for their own subprocesses).
+os.environ.setdefault("SWARM_SESSION_DRIVER", "0")
 # Codex setup (bootstrap --host codex) edits $CODEX_HOME/config.toml, default ~/.codex: never the
 # real one from a test, even when the suite runs inside a Codex session. Tests that need a Codex
 # home set CODEX_HOME to a temp dir; the rest fall back to ~/.codex under their temp $HOME.

@@ -32,14 +32,17 @@ runs/b-<sha256 of the board's store_key>/ (0700, reached through the verified ru
 and reap only looks in its own board's. Run files left in runs/ itself by an earlier version are
 adopted (moved into the board's subdirectory under both locks) by the reap of the board they name.
 
-Containment. Each session runs in its own transient scope unit,
+Containment. Each session runs in its own transient scope unit when a systemd user manager answers,
 `systemd-run --user --scope --unit=swarm-r<id>-<rand>.scope`: a cgroup holds the session and
 everything it starts, however it forks, daemonises or clears its environment. The full unit name
 (with .scope: systemctl would read a bare name as a .service) is in the run file before the
 launch. Stopping it (wall clock, enrol deadline, stuck, leftovers, reap of a dead runner's
 session) is `systemctl --user kill` SIGTERM, a grace, SIGKILL, then `stop`; no pid or process
-group is signalled. With no systemd user manager the runner doesn't launch at all: the restart
-ends "refused" (no user systemd manager), and `swarm doctor` fails the scope check. Run files
+group is signalled. With no systemd user manager (macOS, Windows, minimal Linux; spec 3.11 [T21]) a
+drive seat (a run with a launch_id) runs in its own process group (start_new_session), every member
+tagged with RUN_ENV: it is stopped by group as below, and its presence (group_presence) is "absent"
+only where the members can be listed; any other replacement doesn't launch at all: the restart ends
+"refused" (no user systemd manager), and `swarm doctor` fails the scope check. Run files
 from before scopes (no unit) are still reaped through their tagged process group, each member
 signalled through a pidfd (legacy only).
 
@@ -759,12 +762,32 @@ def _stop_session(run: dict, proc=None, grace: float | None = None) -> None:
                     tag=run.get("run_tag"), since=run.get("child_start"))
 
 
+def group_presence(run: dict) -> str:
+    """"present" | "absent" | "unknown" for a run contained in its process group (no scope unit, spec 3.11
+    [T21]): a tagged member is evidence of presence; no member is "absent" only where the members can be
+    listed (/proc); elsewhere "unknown" (never "absent" without positive evidence). A run that never
+    started a session is "absent"."""
+    pgid = run.get("child_pgid") or run.get("child_pid")
+    if not pgid:
+        return "absent"
+    if _members(pgid, run.get("run_tag"), run.get("child_start")):
+        return "present"
+    return "absent" if os.path.isdir("/proc/self") else "unknown"
+
+
+def session_presence(run: dict, deadline: float | None = None) -> str:
+    """The session of a run: its scope (unit_presence) or, without one, its process group (group_presence)."""
+    if run.get("unit"):
+        return unit_presence(run["unit"], run.get("slice"), deadline)
+    return group_presence(run)
+
+
 def _session_alive(run: dict) -> bool:
-    """Anything of the run's session still running (its scope active; fallback: a tagged member)."""
+    """Anything of the run's session still running (its scope active; else its process group, where an
+    unknown answer counts as alive)."""
     if run.get("unit"):
         return _unit_active(run["unit"])
-    pgid = run.get("child_pgid") or run.get("child_pid")
-    return bool(pgid) and bool(_members(pgid, run.get("run_tag"), run.get("child_start")))
+    return group_presence(run) != "absent"
 
 
 def start(cfg: dict, run: dict, popen=subprocess.Popen) -> int:
@@ -936,6 +959,8 @@ def execute(cfg: dict, run: dict, *, popen=subprocess.Popen, clock=time.monotoni
         return _execute(cfg, run, popen=popen, clock=clock, sleep=sleep, poll=poll, board_every=board_every)
     finally:
         os.close(lock_fd)
+        from swarm.supervisor import wake
+        wake.touch_cfg(cfg)   # spec 3.11 [T21]: a runner's exit wakes the session drivers (after its lock is free)
 
 
 def open_workdir(cfg: dict, path: str, check=None) -> tuple[int | None, str | None]:
@@ -1085,7 +1110,10 @@ def _execute(cfg: dict, run: dict, *, popen, clock, sleep, poll: float, board_ev
         _keep_output_tail(rid, run["board"])
         finish(cfg, run, "cancelled")
         return "cancelled"
-    token, refused = (None, "refused") if not scope_available() else _token_for(run)
+    # spec 3.11 [T21]: a drive seat with no user manager runs in its own process group; any other replacement
+    # is refused there, as before (the legacy supervisor's restarts need a scope)
+    scoped = scope_available()
+    token, refused = (None, "refused") if not (scoped or run.get("launch_id")) else _token_for(run)
     if refused == "refused":
         run["refused_reason"] = NO_MANAGER
     if refused:
@@ -1120,12 +1148,17 @@ def _execute(cfg: dict, run: dict, *, popen, clock, sleep, poll: float, board_ev
         return "refused"
     import secrets
     run["run_tag"] = f"r{rid}-{secrets.token_hex(8)}"
-    run.update(unit=f"swarm-r{rid}-{secrets.token_hex(4)}.scope", unit_seen_active=False,
-               launch_epoch=time.time())
-    argv = [SYSTEMD_RUN, "--user", "--scope", f"--unit={run['unit']}", "--collect", "--quiet", "--",
-            *seat_argv]
     from swarm.supervisor.settings import settings
-    env = _manager_env(_child_env(token, run["run_tag"], settings(cfg)["pass_env"], drive=bool(run.get("launch_id"))))
+    env = _child_env(token, run["run_tag"], settings(cfg)["pass_env"], drive=bool(run.get("launch_id")))
+    if scoped:
+        run.update(unit=f"swarm-r{rid}-{secrets.token_hex(4)}.scope", unit_seen_active=False,
+                   launch_epoch=time.time())
+        argv = [SYSTEMD_RUN, "--user", "--scope", f"--unit={run['unit']}", "--collect", "--quiet", "--",
+                *seat_argv]
+        env = _manager_env(env)
+    else:   # contained in its own process group (start_new_session), every member tagged with RUN_ENV
+        run.update(unit=None, contained="group", launch_epoch=time.time())
+        argv = list(seat_argv)
     write_run(run)   # the unit name is known before anything runs in it
     fd_err = _fresh_output(f"r{rid}.err", run["board"])
     try:
@@ -1192,7 +1225,7 @@ def _execute(cfg: dict, run: dict, *, popen, clock, sleep, poll: float, board_ev
         if now - t0 >= float(run["limit_seconds"]):
             outcome = "timeout"
             break
-        if not run.get("unit_seen_active") and _unit_state(run["unit"])[1] == "active":
+        if run.get("unit") and not run.get("unit_seen_active") and _unit_state(run["unit"])[1] == "active":
             run["unit_seen_active"] = True
             run["slice"] = _unit_slice(run["unit"]) or run.get("slice")   # for unit_presence [F16]
             write_run(run)
