@@ -911,6 +911,18 @@ class TamperTests(PassCase):
         self.assertEqual(cancelled, ["J"])
         self.assertFalse(self.has_post("DRIVER-TAMPER"))
 
+    def test_the_receipt_record_id_carries_the_ledgers_generation(self):
+        led = self.job()
+        led.generation = led.generation_requested = 2
+        led.save()
+        self.requester_deactivate_receipt()                                     # deactivate:2, generation 2
+        self.board.close_job("J", "cancelled", "by a person", forced=True)
+        cancelled = []
+        with mock.patch.object(life, "cancel_job", lambda *a, **k: cancelled.append(a[2].job) or True, create=True), \
+                mock.patch.object(life, "rollover", return_value=False):
+            self.drive()
+        self.assertEqual(cancelled, ["J"])
+
     def test_a_tty_halt_receipt_is_not_a_cancel(self):
         self.job()
         self.requester_deactivate_receipt(action="halt", how="tty")
