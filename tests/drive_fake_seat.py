@@ -56,7 +56,14 @@ class Seat:
             log(ev="denied", cmd=cmd, why=spec.get("permissionDecisionReason"))
             return subprocess.CompletedProcess(argv, 126, "", "denied")
         cmd = ((spec.get("updatedInput") or {}).get("command")) or cmd
-        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=120)
+        line = cmd
+        if os.name == "nt":
+            # Claude Code runs its Bash tool in Git Bash on Windows, and the hook's rewrites (`--as 'Name'`)
+            # are POSIX shell words: split them as bash would, then hand cmd.exe the same words in its own
+            # quoting (cmd.exe resolves `swarm` to swarm.cmd on PATH)
+            import shlex
+            line = subprocess.list2cmdline(shlex.split(cmd))
+        r = subprocess.run(line, shell=True, capture_output=True, text=True, timeout=120)
         self.hook("done", tool_name="Bash", tool_input={"command": cmd},
                   tool_response={"stdout": r.stdout, "stderr": r.stderr, "interrupted": False})
         log(ev="cmd", cmd=cmd, rc=r.returncode, out=r.stdout[-400:], err=r.stderr[-400:])

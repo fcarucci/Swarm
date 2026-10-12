@@ -1069,7 +1069,7 @@ def _job_count(job) -> int | None:
     buf = (ctypes.c_uint32 * 12)()                    # JOBOBJECT_BASIC_ACCOUNTING_INFORMATION (48 bytes)
     if not _k32().QueryInformationJobObject(job, 1, buf, ctypes.sizeof(buf), None):
         return None
-    return int(buf[9])                                # ActiveProcesses
+    return int(buf[10])   # ActiveProcesses (after 4 LARGE_INTEGER times, TotalPageFaultCount, TotalProcesses)
 
 
 def _job_active(run: dict) -> int | None:

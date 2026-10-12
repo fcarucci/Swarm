@@ -57,6 +57,7 @@ class NamedJobObjectTests(unittest.TestCase):
         run = {"restart_id": rid, "run_tag": f"r{rid}-{secrets.token_hex(8)}", "contained": "job"}
         proc = subprocess.Popen([sys.executable, "-c", LEADER, *args], stdout=subprocess.PIPE,
                                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | 0x4)   # CREATE_SUSPENDED
+        self.addCleanup(proc.stdout.close)
         self.addCleanup(lambda: proc.poll() is None and proc.kill())
         runner._job_contain(rid, proc, runner.job_name(run))
         self.addCleanup(self.let_go, rid)
