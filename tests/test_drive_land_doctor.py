@@ -53,7 +53,7 @@ class Doctor(MirrorCase):
             check_destination("a", remote, self.agent_cred())
         cmd, kw = [c for c in calls if "ls-remote" in c[0]][0]
         self.assertEqual(kw["env"]["SSH_AUTH_SOCK"], support.abs_("/run/agent.sock"))
-        self.assertIn("core.hooksPath=/dev/null", cmd)
+        self.assertIn("core.hooksPath=" + os.devnull, cmd)
 
     def test_the_timeout_is_passed_to_ls_remote(self):
         made = []

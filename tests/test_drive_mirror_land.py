@@ -27,7 +27,7 @@ def _read(path):
 def pack_cmd(kind):
     """Written out literally (not via gitpin): the exact command a local destination's pack program runs as."""
     parts = [mirror._resolve("git")]
-    for item in ("core.hooksPath=/dev/null", "core.fsmonitor=false", "core.alternateRefsCommand=",
+    for item in ("core.hooksPath=" + os.devnull, "core.fsmonitor=false", "core.alternateRefsCommand=",
                  "receive.denyCurrentBranch=refuse", "receive.denyDeleteCurrent=refuse"):
         parts += ["-c", item]
     parts.append(f"{kind}-pack")
@@ -152,7 +152,7 @@ class LsRemote(PushCase):
         cmd, kw = calls[-1]
         self.assertIn("ls-remote", cmd)
         self.assertEqual(kw["env"]["SSH_AUTH_SOCK"], SOCK)
-        self.assertIn("core.hooksPath=/dev/null", cmd)
+        self.assertIn("core.hooksPath=" + os.devnull, cmd)
         self.assertEqual(kw["env"]["HOME"], m.private_home)
 
     def test_ls_remote_keeps_only_branches_with_a_real_sha(self):
@@ -296,6 +296,7 @@ class AbsoluteHelperPin(MirrorCase):
 
 
 class NoCredentialAndMergeBase(PushCase):
+    @support.posix_only("drive mode is refused on Windows: local destinations and POSIX paths")
     def test_none_credential_only_for_local_destinations(self):
         m = Mirror(self.remote, {"kind": "none"})
         self.assertEqual(m._cred_env, {})
@@ -383,6 +384,7 @@ class HelperTrust(AbsoluteHelperPin):
             Mirror(remote, self.cred(f"{link} auth git-credential"), trusted_helper_paths=(link,))
         self.assertIn("writable", str(cm.exception))
 
+    @support.posix_only("drive mode is refused on Windows: local destinations and POSIX paths")
     def test_system_directory_helper_needs_no_naming(self):
         remote, _ = self.remote_with_main()
         sh = mirror._resolve("env")                      # a root-owned executable in a system directory
@@ -390,6 +392,7 @@ class HelperTrust(AbsoluteHelperPin):
         mirror._check_helper_file(sh, ())
 
 
+@support.posix_only("drive mode is refused on Windows: local destinations and POSIX paths")
 class LocalHooks(PushCase):
     """[S1] A local destination's own hooks and config must never run in the supervisor's pass."""
 
@@ -451,6 +454,7 @@ class LocalHooks(PushCase):
                 Mirror(os.path.join(inside, "..", "..", "x"), {"kind": "none"})
 
 
+@support.posix_only("drive mode is refused on Windows: local destinations and POSIX paths")
 class LocalDestinations(PushCase):
     """[R1] [R2] [R3] A local destination is supervisor-private whatever its credential, resolved the way git
     resolves it, bare, and its config never runs."""
@@ -567,6 +571,7 @@ class LocalDestinations(PushCase):
         self.assertEqual(m._pack("ls-remote"), [pack_cmd("upload")])
 
 
+@support.posix_only("drive mode is refused on Windows: local destinations and POSIX paths")
 class SymlinkSwap(PushCase):
     """[Q1] git is given the path that was checked, so a link swapped after construction changes nothing."""
 
