@@ -813,9 +813,12 @@ def start_driver(cfg: dict, session: str | None, config_path) -> str:
         from swarm.supervisor import session_driver
     except ImportError:
         return "no session driver in this build: run `swarm drive run`"
-    what = session_driver.ensure(cfg, session, config_path=str(config_path) if config_path else None)
+    what = session_driver.ensure(cfg, session, config_path=str(config_path) if config_path else None,
+                                 activation=True)
     if what in ("started", "running"):
         return f"session driver {what} for session {session}"
+    if what.startswith("refused"):
+        return f"session driver not started ({what})"
     if what == "no host process":
         return ("no agent session process found above this command: the job advances while a session that "
                 "owns it is open, or under `swarm drive run`")
