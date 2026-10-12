@@ -2100,8 +2100,10 @@ def run_hook(event: str, cfg: dict, host: str | None = None) -> int:
     _OUTPUT.clear()
     _CURRENT["host"] = None
     _CURRENT["lease"] = None
+    _CURRENT["payload"] = None
     try:
         _handle(event, cfg, host)
+        _wake_drivers(event, cfg, _CURRENT.get("payload") or {})
     finally:
         lease = _CURRENT.get('lease')
         if lease:
@@ -2116,6 +2118,7 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
         payload = json.loads(sys.stdin.read() or "{}")
     except Exception:
         return 0
+    _CURRENT["payload"] = payload if isinstance(payload, dict) else {}
     try:
         _CURRENT["host"] = hosts.get(hosts.detect_hook_host(host_flag, payload, os.environ))
     except KeyError:   # a host this version has no adapter for: do nothing
@@ -2241,10 +2244,37 @@ def _unchecked_verifier_write(payload: dict, agent_id: str) -> bool:
 # --- drive jobs (spec 3.4, 3.11, 4.0, 4.5): the logic is in swarm.drivegate --------------------------------
 
 def kick(now=time.time) -> bool:
-    """Start the supervisor pass now, at most once per 20 s (the logic and its stamp are swarm.drivegate.kick; the
-    CLI calls that one, because this module is not in the directory edition). True when started; never raises."""
+    """Wake the session drivers (swarm.drivegate.kick touches the wake files; the CLI calls that one, because this
+    module is not in the directory edition). True when a wake file was touched; never raises."""
     from swarm import drivegate
     return drivegate.kick(now)
+
+
+def _wake_drivers(event: str, cfg: dict, payload: dict) -> None:
+    """Spec 3.11 [T21]: a hook's board write wakes the session drivers of the board (its wake file). Not for
+    PreToolUse, and after a tool call only when it ran a swarm command (the CLI touches too, unless a sandbox
+    keeps it out of the private directory). Nothing on a host that never activated a drive job. Never raises."""
+    try:
+        if event == "turn":
+            return
+        if event == "done":
+            host = _CURRENT.get("host")
+            if host is None or "swarm" not in (host.shell_command(payload) or ""):
+                return
+        from swarm.supervisor import wake
+        wake.touch_cfg(cfg)
+    except Exception as exc:
+        _log_error("drive wake", str(payload.get("agent_id") or payload.get("session_id")), exc)
+
+
+def _ensure_driver(cfg: dict, payload: dict) -> None:
+    """Spec 3.11 [T21]: the requester main session's first hook starts its session driver when none runs (the
+    SessionStart hook does too). Cheap when one runs: a lock probe. Never raises."""
+    try:
+        from swarm.supervisor import session_driver
+        session_driver.ensure(cfg, payload.get("session_id"))
+    except Exception as exc:
+        _log_error("drive driver", str(payload.get("session_id")), exc)
 
 
 def _drive_event(event: str, cfg: dict, payload: dict, resume: dict | None) -> bool:
@@ -2270,6 +2300,8 @@ def _drive_event(event: str, cfg: dict, payload: dict, resume: dict | None) -> b
                 return True
         if ctx is not None:
             _no_lease(payload)
+            if ctx.kind == "requester" and not payload.get("agent_id"):
+                _ensure_driver(cfg, payload)
         if event == "done":
             drivegate.drop_grants(cfg, payload, host)   # a grant never outlives its call
             drivegate.post_tool(cfg, payload, host, resume=resume, resume_lookup=_resume_binding)

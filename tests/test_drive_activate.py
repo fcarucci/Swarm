@@ -179,42 +179,28 @@ class ModelTests(HomeCase):
             da.model_defaults(cfg)   # the shipped engineer model (haiku) is then not allowed
 
 
-class SupervisorCheckTests(HomeCase):
-    def cfg(self, enabled=True):
-        return {"supervise": {"enabled": enabled}}
+class DriverPreconditionTests(HomeCase):
+    """Spec 3.11 [T21]: activation needs no timer on any platform; only the kill switch refuses."""
 
-    def test_drive_activation_refused_when_supervisor_disabled(self):
-        msg = da.supervisor_problem(self.cfg(False), platform="linux", timer=ACTIVE_TIMER, state=FRESH, now=NOW)
-        self.assertIn("swarm supervise enable", msg)
+    def test_activation_needs_no_timer_or_enabled_supervisor(self):
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled):
+                self.assertIsNone(da.driver_problem({"supervise": {"enabled": enabled}}))
+
+    def test_activation_has_no_platform_refusal(self):
+        import inspect
+        src = inspect.getsource(da)
+        self.assertNotIn("does not install", src)
+        self.assertFalse(hasattr(da, "supervisor_problem"))
+
+    def test_the_kill_switch_refuses(self):
+        from swarm.supervisor import settings as st
+        off = st.off_file()
+        off.parent.mkdir(parents=True, exist_ok=True)
+        off.write_text("")
+        msg = da.driver_problem({"supervise": {"enabled": True}})
+        self.assertIn(str(off), msg)
         self.assertIn("--no-drive --reason", msg)
-
-    def test_drive_activation_refused_without_running_timer(self):
-        msg = da.supervisor_problem(self.cfg(), platform="linux", timer={"ActiveState": "inactive"},
-                                    state=FRESH, now=NOW)
-        self.assertIn("not running", msg)
-
-    def test_timer_must_be_enabled_as_well_as_active(self):
-        msg = da.supervisor_problem(self.cfg(), platform="linux",
-                                    timer={"ActiveState": "active", "UnitFileState": "disabled"},
-                                    state=FRESH, now=NOW)
-        self.assertIn("not running", msg)
-
-    def test_drive_activation_refused_on_macos_and_windows(self):
-        for plat in ("darwin", "win32"):
-            with self.subTest(plat=plat):
-                msg = da.supervisor_problem(self.cfg(), platform=plat, timer=ACTIVE_TIMER, state=FRESH, now=NOW)
-                self.assertIn("--no-drive --reason", msg)
-
-    def test_drive_activation_refused_without_a_recent_pass(self):
-        old = {"last_run_at": (NOW - dt.timedelta(minutes=11)).isoformat()}   # 2 x 5 minutes
-        self.assertIn("no supervisor pass", da.supervisor_problem(self.cfg(), platform="linux",
-                                                                  timer=ACTIVE_TIMER, state=old, now=NOW))
-        self.assertIn("no supervisor pass", da.supervisor_problem(self.cfg(), platform="linux",
-                                                                  timer=ACTIVE_TIMER, state={}, now=NOW))
-
-    def test_drive_activation_allowed_with_timer_and_recent_pass(self):
-        self.assertIsNone(da.supervisor_problem(self.cfg(), platform="linux", timer=ACTIVE_TIMER,
-                                                state=FRESH, now=NOW))
 
 
 class CredentialAndWorkdirTests(HomeCase):
@@ -688,7 +674,7 @@ class KickTests(unittest.TestCase):
         err = io.StringIO()
         with drivegate_stub(kicker), redirect_stderr(err):
             self.assertFalse(da.kick())
-        self.assertIn("WARNING: the supervisor kick failed (RuntimeError: socket gone)", err.getvalue())
+        self.assertIn("WARNING: the driver kick failed (RuntimeError: socket gone)", err.getvalue())
 
     def test_broken_drivegate_import_is_reported(self):
         import io
@@ -756,24 +742,16 @@ class DriveCli(Env):
         stub = drivegate_stub(types.SimpleNamespace(kick=mock.Mock(return_value=True)))
         stub.__enter__()
         self.addCleanup(stub.__exit__, None, None, None)
-        self.platform = mock.patch.object(da, "PLATFORM", "linux")   # the timer check is for Linux here
-        self.platform.start()
-        self.addCleanup(self.platform.stop)
-        self.timer = mock.patch.object(da, "timer_state", return_value=dict(ACTIVE_TIMER))
-        self.timer.start()
-        self.addCleanup(self.timer.stop)
-        self.fresh_pass()
+        # the session driver ([T21]) is started through session_driver.ensure: recorded here, never started
+        from swarm.supervisor import session_driver
+        self.ensure = mock.patch.object(session_driver, "ensure", return_value="started")
+        self.ensured = self.ensure.start()
+        self.addCleanup(self.ensure.stop)
         step = types.SimpleNamespace(name="supervisor", status="ok", detail="swarm-supervise.timer: every 5 min")
         for target in (mock.patch.object(systemd, "install", return_value=step),
                        mock.patch("swarm.supervisor.switch.stop_timer", return_value="stopped")):
             target.start()
             self.addCleanup(target.stop)
-
-    def fresh_pass(self):
-        now = dt.datetime.now(dt.timezone.utc).isoformat()
-        p = mock.patch.object(da, "last_pass_state", return_value={"last_run_at": now})
-        p.start()
-        self.addCleanup(p.stop)
 
     def enable_supervisor(self, enabled: bool):
         self.config.write_text(self.base_toml + f"\n[supervise]\nenabled = {str(enabled).lower()}\n"
@@ -844,20 +822,41 @@ class DriveCli(Env):
         rc, _, err = self.activate("--drive", "--workdir", str(self.work))
         self.assertEqual(rc, 0, err)
 
-    def test_drive_activation_refused_when_supervisor_disabled(self):
+    def test_drive_activation_needs_no_enabled_supervisor_or_timer(self):
+        """[T21]: the supervisor off (the default config) and no timer anywhere: the activation goes ahead and
+        starts the requester session's driver."""
         self.enable_supervisor(False)
+        import subprocess
+        real, ran = subprocess.run, []
+
+        def run(argv, *a, **kw):   # git is fine; a unit manager never runs ([T21]: nothing is installed)
+            ran.append(os.path.basename(str(argv[0])))
+            return real(argv, *a, **kw)
+        with mock.patch("subprocess.run", side_effect=run):
+            rc, out, err = self.activate("--workdir", str(self.work), "--session", "sess-9")
+        self.assertFalse({"systemctl", "systemd-run", "launchctl", "schtasks", "crontab"} & set(ran), ran)
+        self.assertEqual(rc, 0, err)
+        self.assertIsNotNone(self.ledger_of())
+        self.ensured.assert_called_once()
+        self.assertEqual(self.ensured.call_args.args[1], "sess-9")
+        self.assertIn("session driver started for session sess-9", out)
+        from swarm.supervisor import driver_exec
+        led = self.ledger_of()
+        self.assertEqual(led.requester_session, "sess-9")
+        with self.board() as b:
+            lead = b.seat("J", led.generation, "lead")
+        self.assertTrue(driver_exec.seat_authorized(led, lead, dt.datetime.now(dt.timezone.utc)))
+        self.assertTrue(out.strip().splitlines()[-1].startswith("swarm-record: kind=activate "))
+
+    def test_drive_activation_refused_while_switched_off(self):
+        from swarm.supervisor import settings as st
+        st.off_file().parent.mkdir(parents=True, exist_ok=True)
+        st.off_file().write_text("")
         rc, _, err = self.activate("--workdir", str(self.work))
         self.assertEqual(rc, 1)
-        self.assertIn("swarm supervise enable", err)
-        self.assertIn("--no-drive --reason", err)
+        self.assertIn("switched off", err)
         self.assertIsNone(self.ledger_of())
-
-    def test_drive_activation_refused_without_running_timer(self):
-        self.timer.stop()
-        with mock.patch.object(da, "timer_state", return_value={"ActiveState": "inactive"}):
-            rc, _, err = self.activate("--workdir", str(self.work))
-        self.assertEqual(rc, 1)
-        self.assertIn("not running", err)
+        self.ensured.assert_not_called()
 
     def test_no_drive_requires_reason(self):
         rc, _, err = self.activate("--no-drive", "--workdir", str(self.work))
@@ -1183,28 +1182,29 @@ class DriveCli(Env):
         self.assertEqual(rc, 2)
         self.assertIn("below", err)
 
-    def test_activation_kicks_the_supervisor_once(self):
-        """The kick follows a completed activation. Its precondition is pinned here, not read from the host:
-        the timer seam says the user manager runs the timer (CI has no user systemd manager), the platform
-        is Linux and a pass is recent; drivegate is stubbed at both lookup points (the real module may
-        already be imported by an earlier test, and would shadow a sys.modules stub)."""
+    def test_activation_kicks_the_drivers_once(self):
+        """The kick (the wake file) follows a completed activation; drivegate is stubbed at both lookup points
+        (the real module may already be imported by an earlier test, and would shadow a sys.modules stub)."""
         kicker = types.SimpleNamespace(kick=mock.Mock())
-        with drivegate_stub(kicker), mock.patch.object(da, "timer_state", return_value=dict(ACTIVE_TIMER)), \
-                mock.patch.object(da, "PLATFORM", "linux"):
+        with drivegate_stub(kicker):
             rc, _, err = self.activate("--workdir", str(self.work))
         self.assertEqual(rc, 0, err)
         kicker.kick.assert_called_once_with()
 
-    def test_no_user_manager_refuses_and_never_kicks(self):
-        """No user systemd manager (CI, a container): `systemctl --user show` fails and the timer seam reads
-        {}. Activation is refused before anything is written, so nothing is kicked."""
+    def test_no_user_manager_still_activates(self):
+        """No user systemd manager (CI, a container, macOS, Windows): the activation does not care ([T21])."""
         kicker = types.SimpleNamespace(kick=mock.Mock())
-        with drivegate_stub(kicker), mock.patch.object(da, "timer_state", return_value={}):
+        with drivegate_stub(kicker), mock.patch.dict(os.environ, {"SWARM_NO_SYSTEMD": "1"}):
             rc, _, err = self.activate("--workdir", str(self.work))
-        self.assertEqual(rc, 1)
-        self.assertIn("not running", err)
-        self.assertIsNone(self.ledger_of())
-        kicker.kick.assert_not_called()
+        self.assertEqual(rc, 0, err)
+        self.assertIsNotNone(self.ledger_of())
+        kicker.kick.assert_called_once_with()
+
+    def test_no_session_process_says_how_the_job_advances(self):
+        self.ensured.return_value = "no host process"
+        rc, out, err = self.activate("--workdir", str(self.work))
+        self.assertEqual(rc, 0, err)
+        self.assertIn("`swarm drive run`", out)
 
     def test_real_drivegate_already_imported_does_not_shadow_the_stub(self):
         """The CI failure: an earlier test imported the real swarm.drivegate, so a sys.modules-only stub was
@@ -1220,7 +1220,9 @@ class DriveCli(Env):
 
     def test_refused_activation_does_not_kick(self):
         kicker = types.SimpleNamespace(kick=mock.Mock())
-        self.enable_supervisor(False)
+        from swarm.supervisor import settings as st
+        st.off_file().parent.mkdir(parents=True, exist_ok=True)
+        st.off_file().write_text("")
         with drivegate_stub(kicker):
             rc, _, _ = self.activate("--workdir", str(self.work))
         self.assertEqual(rc, 1)

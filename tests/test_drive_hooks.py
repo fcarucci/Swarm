@@ -721,40 +721,54 @@ def private_host_dir() -> Path:
 
 
 class Kick(Env):
-    def test_kick_debounced(self):
-        calls = []
-        with mock.patch("subprocess.run", side_effect=lambda *a, **k: calls.append(a) or mock.Mock(returncode=0)):
-            self.assertTrue(drivegate.kick(now=lambda: 100.0))
-            self.assertFalse(drivegate.kick(now=lambda: 110.0))
-            self.assertTrue(drivegate.kick(now=lambda: 121.0))
-        self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[0][0][:4], ["systemctl", "--user", "start", "--no-block"])
+    """Spec 3.11 [T21]: a kick only touches the wake file(s) of the session drivers: no systemctl, no unit."""
+
+    def drive_host(self):
+        from swarm.supervisor import ledger, privfs
+        with privfs.dir_fd(ledger.SUBDIR):
+            pass
+
+    def wake_mtime(self, key):
+        from swarm.supervisor import wake
+        return wake.mtime(key)
+
+    def test_kick_touches_the_wake_file_and_runs_nothing(self):
+        from swarm.board.autoinit import store_key
+        self.drive_host()
+        key = store_key(self.cfg)
+        with mock.patch("subprocess.run", side_effect=AssertionError("kick ran a program")):
+            self.assertTrue(drivegate.kick(cfg=self.cfg))
+            first = self.wake_mtime(key)
+            os.utime(wake_path(key), (1, 1))
+            self.assertTrue(drivegate.kick(cfg=self.cfg))      # no debounce: a swallowed kick is a missed wake
+        self.assertIsNotNone(first)
+        self.assertGreater(self.wake_mtime(key), 1)
 
     def test_hooks_kick_is_the_same_kick(self):
-        """6a's `swarm activate` and the plan call hooks.kick(); the CLI itself calls drivegate.kick()."""
-        with mock.patch("subprocess.run") as run:
-            self.assertTrue(hooks.kick(now=lambda: 100.0))
-            self.assertFalse(drivegate.kick(now=lambda: 105.0))      # one stamp for both
-        self.assertEqual(run.call_count, 1)
+        """Without a config, every wake file of the host is touched."""
+        from swarm.board.autoinit import store_key
+        self.drive_host()
+        key = store_key(self.cfg)
+        self.assertTrue(drivegate.kick(cfg=self.cfg))
+        os.utime(wake_path(key), (1, 1))
+        self.assertTrue(hooks.kick())
+        self.assertGreater(self.wake_mtime(key), 1)
+
+    def test_no_drive_host_touches_nothing(self):
+        from swarm.supervisor import wake
+        self.assertFalse(drivegate.kick(cfg=self.cfg))
+        self.assertFalse(hooks.kick())
+        self.assertFalse(os.path.lexists(wake.wake_dir()))
 
     def test_kick_never_raises(self):
-        with mock.patch("subprocess.run", side_effect=OSError("no systemctl")):
-            self.assertFalse(drivegate.kick(now=lambda: 500.0))
+        self.drive_host()
+        with mock.patch("swarm.supervisor.wake.touch_cfg", side_effect=OSError("gone")):
+            self.assertFalse(drivegate.kick(cfg=self.cfg))
 
-    def test_P8_a_garbage_stamp_heals_itself(self):
-        d = private_host_dir()
-        for junk in ("not-a-number", "nan", "inf", "", "1e999999"):
-            (d / "kick.stamp").write_text(junk)
-            with self.subTest(stamp=junk), mock.patch("subprocess.run") as run:
-                self.assertTrue(drivegate.kick(now=lambda: 10_000.0))
-                self.assertFalse(drivegate.kick(now=lambda: 10_001.0))     # rewritten: debounced again
-                self.assertEqual(run.call_count, 1)
 
-    def test_a_stamp_from_the_future_does_not_suppress_kicks(self):
-        d = private_host_dir()
-        (d / "kick.stamp").write_text("99999999")
-        with mock.patch("subprocess.run"):
-            self.assertTrue(drivegate.kick(now=lambda: 100.0))
+def wake_path(key):
+    from swarm.supervisor import wake
+    return wake.wake_dir() / wake.wake_name(key)
 
 
 class DoctorReceipts(Env):

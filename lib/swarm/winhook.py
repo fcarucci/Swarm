@@ -95,7 +95,15 @@ def existing_install() -> bool:
 
 
 def session_start(host: str, priv: Path | None) -> int:
-    sys.stdin.read()
+    payload = sys.stdin.read()
+    drive = _home() / ".local" / "share" / "swarm" / "supervisor" / "drive"
+    vpy = winlaunch.venv_python(winlaunch.venv_dir())
+    if priv is not None and vpy.exists() and drive.is_dir() and any(drive.glob("*.json")):
+        # a drive host: start this session's driver if it owns a drive job (spec 3.11 [T21])
+        with open(priv / "hook-stderr.log", "ab") as err:
+            subprocess.run([str(vpy), "-B", "-m", "swarm.cli", "hook", *(["--host", host] if host else []),
+                            "session-start"], input=payload.encode("utf-8", "replace"), stdout=subprocess.DEVNULL,
+                           stderr=err, env=winlaunch.run_env(PLUGIN_ROOT))
     if priv is None:
         msg = ("[swarm] setup problem: ~/.local/share/swarm/host is not a usable (non-symlink) directory "
                "of yours, so the swarm hooks do nothing. See `swarm doctor`.")
@@ -107,7 +115,6 @@ def session_start(host: str, priv: Path | None) -> int:
     h = host or "unknown"
     (priv / f"hooks-ran-{h}-{ver}-{key}").touch()
     notices = priv / f"notices-{h}.json"
-    vpy = winlaunch.venv_python(winlaunch.venv_dir())
     if host and notices.is_file() and not _is_link(notices) and vpy.exists():
         with open(priv / "hook-stderr.log", "ab") as err:
             subprocess.run([str(vpy), "-B", "-m", "swarm.cli", "notices", "--hook-output", "--host", host],

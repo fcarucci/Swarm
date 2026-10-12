@@ -684,90 +684,71 @@ class DriveDoctorTests(unittest.TestCase):
         self.assertEqual(bootstrap.drive_checks(self.cfg(), run=FakeRun(), which=lambda n, path=None: None,
                                                 now=self.NOW, platform="linux"), [])
 
-    # ---- running timer
-    @posix_only("systemd")
-    def test_timer_running_and_recent_pass_is_ok(self):
-        self.ledger()
-        c = self.run_checks()["drive timer"]
-        self.assertTrue(c.ok)
-        self.assertIn("3 min ago", c.detail)
-        self.assertIn("active/enabled", c.detail)
-        self.assertNotIn("no user bus", c.detail)
+    # ---- session drivers ([T21]: no timer anywhere)
+    def hold_driver(self, session, mode):
+        """A live driver of `session`: its lock held by this test, its state file written."""
+        import json as _json
+        from swarm.supervisor import privfs, session_driver
+        with privfs.dir_fd():
+            pass
+        fd = session_driver.take_lock(session_driver.lock_name(session))
+        self.addCleanup(os.close, fd)
+        from swarm.supervisor.settings import write_private
+        write_private(session_driver.state_name(session_driver.lock_name(session)), _json.dumps({"mode": mode}))
 
-    @posix_only("systemd")
-    def test_timer_not_active_fails(self):
-        self.ledger()
-        run = FakeRun(systemctl="ActiveState=inactive\nUnitFileState=enabled\n")
-        c = self.run_checks(run)["drive timer"]
-        self.assertIs(c.ok, False)
-        self.assertIn("inactive/enabled", c.detail)
+    def requester(self, session="S1", job="J"):
+        led = self.ledger(job)
+        led.requester_session = session
+        led.save()
+        return led
 
-    @posix_only("systemd")
-    def test_timer_not_enabled_fails(self):
-        self.ledger()
-        run = FakeRun(systemctl="ActiveState=active\nUnitFileState=disabled\n")
-        self.assertIs(self.run_checks(run)["drive timer"].ok, False)
+    @posix_only("flock on the private lock")
+    def test_live_driver_is_ok_and_names_its_mode(self):
+        self.requester()
+        self.hold_driver("S1", "notify")
+        c = self.run_checks()["drive driver"]
+        self.assertIs(c.ok, True)
+        self.assertIn("session driver running for S1 (mode: notify)", c.detail)
+        self.assertNotIn("drive driver mode", self.run_checks())
 
-    @posix_only("systemd")
-    def test_stale_last_pass_fails_beyond_two_periods(self):
-        self.ledger()
-        self.state["last_run_at"] = (self.NOW - dt.timedelta(minutes=10.5)).isoformat()   # timer_minutes 5
-        c = self.run_checks()["drive timer"]
-        self.assertIs(c.ok, False)
-        self.assertIn("last pass", c.detail)
-        self.state["last_run_at"] = (self.NOW - dt.timedelta(minutes=9.5)).isoformat()
-        self.assertTrue(self.run_checks()["drive timer"].ok)
+    @posix_only("flock on the private lock")
+    def test_poll_mode_is_named_as_degraded(self):
+        self.requester()
+        self.hold_driver("S1", "poll")
+        checks = self.run_checks()
+        self.assertIn("(mode: poll)", checks["drive driver"].detail)
+        self.assertIsNone(checks["drive driver mode"].ok)
 
-    @posix_only("systemd")
-    def test_never_run_or_future_dated_pass_fails(self):
-        self.ledger()
-        self.state.clear()
-        self.assertIs(self.run_checks()["drive timer"].ok, False)
-        self.state["last_run_at"] = (self.NOW + dt.timedelta(minutes=30)).isoformat()
-        self.assertIs(self.run_checks()["drive timer"].ok, False)
+    def test_no_live_driver_is_a_warning_naming_drive_run(self):
+        self.requester()
+        c = self.run_checks()["drive driver"]
+        self.assertIsNone(c.ok)
+        self.assertIn("no live session driver for S1", c.detail)
+        self.assertIn("`swarm drive run`", c.detail)
 
-    @posix_only("systemd")
-    def test_unreadable_bus_with_recent_pass_is_not_a_false_fail(self):
-        self.ledger()
-        c = self.run_checks(FakeRun(systemctl="", systemctl_rc=1))["drive timer"]
-        self.assertTrue(c.ok)
-        self.assertNotIn("?/?", c.detail)
-        self.assertIn("no user bus", c.detail)
-        self.state["last_run_at"] = (self.NOW - dt.timedelta(hours=2)).isoformat()
-        self.assertIs(self.run_checks(FakeRun(systemctl="", systemctl_rc=1))["drive timer"].ok, False)
-
-    @posix_only("systemd")
-    def test_timer_is_read_with_the_user_managers_environment(self):
-        self.ledger()
-        run = FakeRun()
-        with mock.patch("swarm.supervisor.systemd.manager_env", return_value={"XDG_RUNTIME_DIR": "/run/user/4242"}):
-            self.run_checks(run)
-        shown = [kw for argv, kw in run.calls if argv[0] == "systemctl"]
-        self.assertTrue(shown)
-        self.assertEqual(shown[0]["env"], {"XDG_RUNTIME_DIR": "/run/user/4242"})
-
-    @posix_only("systemd")
-    def test_disabled_supervisor_fails_drive_timer(self):
+    def test_no_timer_line_and_no_systemctl_with_the_supervisor_disabled(self):
         self.write_cfg("[supervise]\nenabled = false\n")
-        self.ledger()
-        c = self.run_checks()["drive timer"]
-        self.assertIs(c.ok, False)
-        self.assertIn("disabled", c.detail)
+        self.requester()
+        run = FakeRun()
+        checks = self.run_checks(run)
+        self.assertNotIn("drive timer", checks)
+        self.assertFalse([c for c in checks.values() if c.ok is False and "timer" in c.detail])
+        self.assertFalse([argv for argv, _kw in run.calls if argv[0] == "systemctl"])
 
-    @posix_only("systemd")
-    def test_drive_config_alone_adds_no_timer_line(self):
+    def test_drive_config_alone_adds_no_driver_line(self):
         self.write_cfg("[drive]\nmax_cost_usd = 10\n")
         checks = self.run_checks()
-        self.assertNotIn("drive timer", checks)
+        self.assertNotIn("drive driver", checks)
         self.assertIn("drive git", checks)
 
-    def test_other_platforms_say_drive_is_unavailable(self):
-        self.write_cfg("[drive]\nmax_cost_usd = 10\n")
+    def test_other_platforms_get_the_same_drive_checks(self):
+        self.requester()
+        linux = self.run_checks(platform="linux")
         for plat in ("darwin", "win32"):
-            checks = self.run_checks(platform=plat)
-            self.assertEqual(list(checks), ["drive mode"])
-            self.assertTrue(checks["drive mode"].ok)
-            self.assertEqual(checks["drive mode"].detail, "drive mode unavailable: no supervisor timer")
+            with self.subTest(plat=plat):
+                checks = self.run_checks(platform=plat)
+                self.assertEqual(list(checks), list(linux))
+                self.assertNotIn("drive mode", checks)
 
     # ---- git
     def test_git_below_2_40_fails_with_drive_jobs(self):
@@ -1004,7 +985,7 @@ class DriveDoctorTests(unittest.TestCase):
         bad = [c for n, c in checks.items() if n.startswith("drive ledger")]
         self.assertEqual([c.ok for c in bad], [False])
         self.assertIn("DRIVER-LEDGER-BAD", bad[0].detail)
-        self.assertIn("drive timer", checks)       # an unreadable ledger still means drive jobs here
+        self.assertIn("drive driver", checks)      # an unreadable ledger still means drive jobs here
 
     # ---- orphans, claims, goal jobs ([A], DRIVER-ORPHAN)
     def board_job(self, job, *, claim=False, goal="G"):
@@ -1106,7 +1087,7 @@ class DriveDoctorTests(unittest.TestCase):
         self.assertIs(c.ok, False)
         self.assertIn(driver_events.DRIVER_LEDGER_BAD, c.detail)
         self.assertIn("held", c.detail)
-        self.assertIn("drive timer", checks)
+        self.assertIn("drive driver", checks)
 
     # ---- wiring
     @posix_only("systemd")

@@ -77,8 +77,9 @@ See [Windows setup and limits](docs/REFERENCE.md#windows).
 [Installation details](docs/REFERENCE.md#install) cover all-users mode, channels,
 flags, and migration from the old skill install.
 
-Platforms: Linux has every feature. macOS and Windows have no supervisor (it needs a
-systemd user timer); see [Windows setup and limits](docs/REFERENCE.md#windows). The same
+Platforms: Linux has every feature. Drive mode (goal jobs) needs no timer and runs on Linux, macOS
+and Windows: the requester session's driver drives them. The legacy stuck-agent supervisor still
+needs a systemd user timer; see [Windows setup and limits](docs/REFERENCE.md#windows). The same
 repository is a plugin for both hosts: Claude Code reads `.claude-plugin/` and
 `hooks/hooks.json`, Codex reads `.codex-plugin/` and `hooks/codex-hooks.json`; each host
 ignores the other's files. In Codex, Swarm needs the CLI or desktop app with trusted hooks;

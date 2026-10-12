@@ -493,6 +493,10 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
         except JobPaused:                # nobody joins a paused job: nothing was claimed
             _conclude(led, launch_id, "lost", False, 0.0)
             return None
+        if seat.role == "judge":
+            # the session takes over this row (claim_resume copies its judge flag), so the job's judge seat goes
+            # to it as for a pipeline judge (pipeline.py): its verdict is recorded under its own name
+            board.take_judge_seat(old, led.job)
         board.close_agent(old, "drive predecessor")
         row = board.claim_drive_launch(
             job=led.job, generation=led.generation, action_id=action.action_id, attempt=attempt,
@@ -679,12 +683,16 @@ def _matched_rows(led, rows: dict, cfg, here: str) -> dict:
 
 def _live_evidence(board_key: str, row_id: int | None, run: dict | None) -> bool:
     """Local evidence that a launch is alive, whatever the board says (F7): its run lock is held, or
-    its scope unit is present or cannot be told to be gone."""
+    its scope unit (else its process group) is present or cannot be told to be gone."""
     from swarm.supervisor import runner
     if row_id is not None and runner._held(row_id, board_key):
         return True
-    unit = (run or {}).get("unit")
-    return bool(unit) and runner.unit_presence(unit, (run or {}).get("slice")) != "absent"
+    if not isinstance(run, dict):
+        return False
+    if run.get("unit"):
+        return runner.unit_presence(run["unit"], run.get("slice")) != "absent"
+    # no scope ([T21], no user manager): its process group, while the run has not recorded its end
+    return not run.get("exited") and runner.group_presence(run) != "absent"
 
 
 def _local_run(cfg, board_key: str, launch_id: str):

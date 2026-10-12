@@ -7,7 +7,7 @@
 - BREAKING: a goal implies drive. `swarm activate --goal` now hands the job to the supervisor (lead, seats, review, judge, landing); `--no-drive --reason TEXT` keeps the old coordinator-run job, and the activating session becomes the requester/observer.
 - BREAKING: `--default` is required on `swarm ask` in a drive job; the driver applies it when the question expires (`question_expiry`, 4h), so no question blocks the job.
 - BREAKING: a requester's Agent-tool spawns are refused in drive jobs; staffing goes through `swarm seat request` (the lead or a person), and the engineering-team and swarm skills no longer tell the requester to spawn agents.
-- BREAKING: `swarm activate --goal` fails until `swarm supervise enable` has been run on the host (drive mode is refused on Windows and macOS).
+- BREAKING (reversed by [T21]): drive jobs need no timer and no `swarm supervise enable`, on Linux, macOS and Windows: the requester session's session driver drives them while the session is open, `swarm drive run` when none is; nothing is installed.
 
 ### Added
 - Drive mode: a goal job ends MET, UNREACHABLE (a judge verdict with reasons, or the labelled mechanical one when a budget, deadline or reserve runs out) or CANCELLED, and is never left idle waiting for a coordinator; no new always-on process, only the timer pass, its runners and the opt-in events listener.

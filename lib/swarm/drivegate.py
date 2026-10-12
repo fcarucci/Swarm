@@ -1,6 +1,6 @@
 """Hooks of drive jobs (spec 3.4, 3.11, 4.0, 4.5): the unsandboxed PreToolUse and PostToolUse side of
 autonomy. Receipts for the control records the driver acts on, the refusals that keep read-only seats
-read-only and every seat off the target branch, and the kick that starts the supervisor pass sooner.
+read-only and every seat off the target branch, and the kick that wakes the session drivers sooner.
 Nothing here decides an outcome: the driver checks receipts and verifies what it relies on.
 
 Who is calling comes from host-private state only, never from a board row (an untrusted writer owns those):
@@ -27,9 +27,6 @@ from types import SimpleNamespace
 
 from swarm import driveroles, person, receipts, shellguard
 
-KICK_SECONDS = 20.0
-KICK_UNIT = "swarm-supervise.service"
-KICK_STAMP = "kick.stamp"
 RECEIPT_FAILURES = "receipt-failures.log"
 RECEIPT_LOG_MAX = 256 * 1024     # the failure log is cut back to its newest RECEIPT_LOG_KEEP bytes past this
 RECEIPT_LOG_KEEP = 64 * 1024
@@ -45,26 +42,16 @@ SPAWN_REFUSAL = ("a spawn by {who} is refused: seats are staffed by the lead's `
 
 # --- kick and the failure log ---------------------------------------------------------------------
 
-def kick(now=time.time) -> bool:
-    """Start the supervisor pass now (`systemctl --user start --no-block swarm-supervise.service`), at
-    most once per KICK_SECONDS (the stamp is in the host dir; an unreadable stamp counts as stale, so a
-    damaged one heals itself at the next kick). True when started; never raises."""
-    import subprocess
-    from swarm import paths, safefs
-    from swarm.supervisor.systemd import manager_env
+def kick(now=time.time, cfg: dict | None = None) -> bool:
+    """Wake the session drivers (spec 3.11 [T21]): touch the wake file of `cfg`'s board, or every wake file of
+    this host when no config is given. No systemctl, no unit, no debounce (a touch is cheap and a swallowed
+    kick would be a missed wake); nothing depends on it: the drivers also wake on board changes and deadlines.
+    True when a wake file was touched; never raises. (`now` is kept for callers of the timer-era kick.)"""
+    from swarm.supervisor import wake
     try:
-        with safefs.dir_fd(paths.host_dir(), create=True, strict_mode=0o700) as d:
-            t = float(now())
-            try:
-                last = float(safefs.read_text(d, KICK_STAMP, 64))
-            except Exception:       # missing, unparsable, or an entry the safe reader refuses: stale
-                last = None
-            if last is not None and 0 <= t - last < KICK_SECONDS:
-                return False
-            safefs.write_atomic(d, KICK_STAMP, repr(t))
-        subprocess.run(["systemctl", "--user", "start", "--no-block", KICK_UNIT], env=manager_env(),
-                       capture_output=True, text=True, timeout=20, check=False)
-        return True
+        if cfg is not None:
+            return wake.touch_cfg(cfg)
+        return wake.touch_all()
     except Exception:
         return False
 
@@ -817,7 +804,7 @@ def _activation_ok(board, ctx, payload: dict) -> None:
 
 def post_tool(cfg: dict, payload: dict, host, *, resume=None, resume_lookup=None) -> bool:
     """PostToolUse of a Bash call that ran one control command in a drive job: writes the receipt the
-    driver checks (receipts.write), then kicks the supervisor. True when a receipt was written. Cheap
+    driver checks (receipts.write), then kicks the session drivers (their wake file). True when a receipt was written. Cheap
     prechecks first (the command mentions swarm and printed a record line), the board only after them.
     Only a seat's own session or the requester's main session (never a subagent: a payload with an
     `agent_id`) gets a receipt, and only for the commands its authority covers. A record that disagrees
@@ -888,7 +875,7 @@ def post_tool(cfg: dict, payload: dict, host, *, resume=None, resume_lookup=None
     except Exception as exc:
         log_receipt_failure(f"{r.job} {r.kind} id={rid} rev={rev}: {type(exc).__name__}: {exc}")
         return False
-    kick()
+    kick(cfg=cfg)
     return True
 
 
@@ -1125,5 +1112,5 @@ def control_request_receipt(cfg: dict, payload: dict, ns, rid: int, rev: int, *,
     except Exception as exc:
         log_receipt_failure(f"{job} control_request id={rid}: {type(exc).__name__}: {exc}")
         return False
-    kick()
+    kick(cfg=cfg)
     return True

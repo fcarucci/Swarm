@@ -1764,13 +1764,32 @@ sends no CI webhooks): never faster than 600 s (`poll_interval_s` can only raise
 
 ## Drive mode
 
-A goal job is **driven**: the supervisor timer runs the job, not a coordinator session. `swarm activate
+A goal job is **driven**: the requester session's **session driver** runs the job, not a coordinator session and
+not a timer. `swarm activate
 --job J --goal G` implies drive (`--drive` is accepted and does nothing); `--no-drive --reason TEXT` runs the
 goal job the old way, with nothing driving it. Nothing else needs to stay alive after activation: the session that
 activated the job is the **requester/observer**. It may watch (`swarm watch`, `swarm snapshot --follow`) and, as the
 requester session, answer questions, `swarm halt`/`unhalt`, `deactivate` and request seats through receipted
-commands. Its turns, its absence or its blocking change nothing. There is no new always-on process: only the
-timer-driven pass, its per-session runners and the existing opt-in events listener.
+commands. Its turns and its blocking change nothing: the job advances while that session is open, idle or busy.
+
+### The session driver (no timers)
+
+Drive mode installs nothing (no systemd, launchd, Task Scheduler or cron unit) and works the same on Linux, macOS
+and Windows. `swarm activate` starts one **session driver** per requester session (the session's SessionStart or
+first hook starts it again when none runs): a detached process, one per session (a host-private lock), that
+never calls a model. It sleeps until something happens: a board change (Postgres LISTEN/NOTIFY; for SQLite and
+file boards an OS notification on the board's wake file, which every CLI board write, hook and runner exit
+touches), the exit of the session's process, or the next deadline of a job (a hold, a question's expiry, a
+ruling or close deadline, the wall clock, a stall wake). Without any OS notification it polls, 2 s doubling to
+60 s, and `swarm doctor` says so. Idle, it costs nothing measurable. It exits when its session ends, when its
+jobs are finished, or on the kill switch (`supervise.off`).
+
+When the requester session closes, its jobs pause (seats already running finish, nothing new launches) and
+resume when a session that owns them opens, or under **`swarm drive run [--job J]`**: the same loop in the
+foreground, for progress with no session open. `swarm doctor` reports "session driver running for S (mode:
+listen|notify|poll)" or "no live session driver", and how seats are contained: a systemd user scope where a
+user manager answers, else the seat's own process group (POSIX) or Job Object (Windows). A missing systemd never
+refuses a launch.
 
 ### Breaking changes
 
@@ -1779,7 +1798,7 @@ Drive mode changes four things for anyone who scripted the old flow:
 1. **A goal implies drive.** `swarm activate --goal` starts a driven job; use `--no-drive --reason TEXT` for the old behaviour.
 2. **`--default` is required** on every `swarm ask` in a drive job: the driver applies it when the question expires (`question_expiry`, 4h).
 3. **Requester Agent-tool spawns are refused in drive jobs.** The requester no longer staffs the job with the host's spawn tool; the lead requests seats with `swarm seat request` and the supervisor launches them.
-4. **`activate --goal` fails until `swarm supervise enable`** has been run on the host and the timer is running (and drive mode is refused on Windows and macOS, which have no timer host). The error names the fix.
+4. **No timer: the session driver.** Drive jobs need no `swarm supervise enable` and no timer, on any platform (an earlier draft refused `activate --goal` without them, and refused macOS and Windows); the requester session's driver runs them while it is open, `swarm drive run` when none is. `swarm supervise` stays an optional legacy pass; `swarm supervise disable` still halts drive jobs.
 
 ### Terminal states
 
@@ -2699,7 +2718,7 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `doctor [--host claude\|codex] [--no-color]` | check this machine's setup and print the fix for each problem; exit 1 if a check fails. Default host: the one it runs in (a plain terminal: Claude Code) |
 | `activate --job J [--description D] [--task T\|-] [--project P] [--session S] [--adopt-running]` | open or re-open the job and switch the board on for subagents spawned from now on; bind it to `--session`, default the calling Claude Code or Codex session; print `swarm command: <path>` and the tag lines. In Codex, refused while another job is active in the session |
 | `activate --job J --attach [--session S] [--adopt-running]` | bind this session to a job that is already active, without reopening it (see [One job, both hosts](#one-job-both-hosts)) |
-| `activate … --goal G\|-` | give the job a goal, judged by one judge agent; the tag lines include `[swarm role: judge]`. A goal implies drive: the supervisor drives it (needs `supervise enable`, a running timer and a Linux or other timer host); `--no-drive --reason TEXT` opts out |
+| `activate … --goal G\|-` | give the job a goal, judged by one judge agent; the tag lines include `[swarm role: judge]`. A goal implies drive: the requester session's driver drives it (no timer, any platform; `swarm drive run` without a session); `--no-drive --reason TEXT` opts out |
 | `deactivate --job J [--status completed\|cancelled\|failed] [--outcome O] [--force] [--delete-bank]` | switch the board off and close the job (default `completed`). A job with a goal completes only with the judge's `met` verdict, or with `--force` (recorded). On an already closed (e.g. auto-closed) job it replaces the status and outcome |
 | `verdict --job J [--as NAME] [--artifact REF] met\|not_met REASON...` | the job's judge records an artifact-bound verdict and posts it; anyone else is refused; spooled when the board is unreachable |
 | `land --job J --artifact BRANCH@SHA [--as NAME]` | drive jobs, the integrator seat only: ask the driver to land the exact judged, rebased, CI-green SHA on the target of every pinned remote; it is the integrator's hand-off (the driver posts `INTEGRATED` or `LAND-REFUSED <why>`). `land hosts add URL`: a person at a terminal confirms an ssh destination's host key fingerprints |
