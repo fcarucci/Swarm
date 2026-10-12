@@ -71,11 +71,6 @@ def preflight(args) -> list[tuple[str, str, str]]:
     return out
 
 
-def user_manager_up() -> bool:
-    r = subprocess.run(["systemctl", "--user", "is-system-running"], capture_output=True, text=True)
-    return r.stdout.strip() in ("running", "degraded")
-
-
 def run_goal(args, expect: str) -> list[tuple[str, str, str]]:
     """The live run. Returns one row for the run itself plus one per spec-6.3 / Task 19 assertion, so a missing
     capability (no codex binary, no user manager) is a visible SKIP and never a silent omission."""
@@ -86,7 +81,9 @@ def run_goal(args, expect: str) -> list[tuple[str, str, str]]:
         return [(name, q.Outcome.SKIP, str(exc))]
     if args.harness == "real" and not (os.environ.get("SWARM_QA_CLAUDE") or shutil.which("claude")):
         return [(name, q.Outcome.SKIP, "not run (--harness real: no `claude` on PATH; set SWARM_QA_CLAUDE)")]
-    if args.systemd and not user_manager_up():
+    if args.systemd is None:
+        args.systemd = q.user_manager_up()
+    if args.systemd and not q.user_manager_up():
         return [(name, q.Outcome.SKIP, "not run (--systemd: no systemd user manager answers)")]
     have_codex = bool(os.environ.get("SWARM_QA_CODEX") or shutil.which("codex"))
     script = "met" if expect == "met" else "unreachable"
@@ -162,13 +159,14 @@ def main(argv=None) -> int:
     ap.add_argument("--timeout-min", type=float, default=None)
     ap.add_argument("--interval-s", type=float, default=None)
     ap.add_argument("--kill-supervisor-once", action="store_true")
-    ap.add_argument("--systemd", action="store_true", help="run passes with real systemd scopes (needs a user manager)")
+    ap.add_argument("--systemd", action="store_true", default=None, help="require real systemd scopes (default: on when a user manager answers; drive seats need them)")
+    ap.add_argument("--no-systemd", dest="systemd", action="store_false", help="SWARM_NO_SYSTEMD=1: the driver will refuse launches")
     ap.add_argument("--list", action="store_true", help="chaos: list scenario names")
     ap.add_argument("--today-only", action="store_true",
                     help="chaos: only the no-driver `<name>/today` layers (fast; what the unit tests run)")
     a = ap.parse_intermixed_args(argv)
     if a.budget_usd is None:
-        a.budget_usd = 10.0 if a.harness == "real" else 2.0
+        a.budget_usd = 50.0   # cap - ruling_reserve (5) must stay above the open reservations (5 per live session); a fake run spends cents
     if a.timeout_min is None:
         a.timeout_min = 180.0 if a.harness == "real" else 25.0
     if a.cmd == "pending":

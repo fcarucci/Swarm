@@ -32,7 +32,7 @@ REPO = Path(CONF["repo"])
 HUB = Path(CONF["hub"])
 SCRIPT = json.loads(Path(CONF["script"]).read_text())
 LOGS = RUN / "logs"
-SWARM = str(RUN / "bin" / "swarm")
+SWARM = str(REPO / "bin" / "swarm")   # the plugin's own launcher: a drive seat may only run scripts tracked at HEAD
 HOOK = str(REPO / "bin" / "swarm-hook")
 HUB_PY = str(Path(__file__).resolve().parent / "hub.py")
 
@@ -90,6 +90,10 @@ class Session:
         cmd = " ".join(argv)
         out = self.hook("turn", tool_name="Bash", tool_input={"command": cmd})
         spec = (out or {}).get("hookSpecificOutput") or {}
+        rewritten = (spec.get("updatedInput") or {}).get("command")   # the hook adds `--as NAME` for an enrolled judge
+        if rewritten and rewritten != cmd:
+            argv, cmd = ["sh", "-c", rewritten], rewritten
+        log(ev="hook_out", sid=self.sid, role=self.role, out=json.dumps(out)[:400] if out else None)
         if spec.get("permissionDecision") == "deny":
             self.denied = spec.get("permissionDecisionReason", "denied")
             log(ev="denied", sid=self.sid, role=self.role, cmd=cmd[:160], why=self.denied[:200])
@@ -98,7 +102,8 @@ class Session:
                            timeout=timeout)
         self.hook("done", tool_name="Bash", tool_input={"command": cmd},
                   tool_response={"stdout": r.stdout[-2000:], "stderr": r.stderr[-500:], "exit_code": r.returncode})
-        log(ev="cmd", sid=self.sid, role=self.role, seat=self.seat, cmd=cmd[:200], rc=r.returncode)
+        log(ev="cmd", sid=self.sid, role=self.role, seat=self.seat, cmd=cmd[:200], rc=r.returncode,
+            err=(r.stderr or "")[-300:] if r.returncode else "")
         return r
 
     def swarm(self, *a, **kw):
@@ -193,7 +198,11 @@ def role_lead(s: Session, n: int) -> None:
             if seat.get("complexity"):
                 args += ["--complexity", seat["complexity"]]
             if seat["role"] == "engineer":
-                args += ["--workdir", str(RUN / "work" / seat["seat"])]
+                w = RUN / "work" / seat["seat"]
+                if not (w / ".git").exists():   # the seat's work tree must exist before the request (the driver checks it)
+                    subprocess.run(["git", "clone", "-q", "file://" + str(HUB / "origin.git"), str(w)], capture_output=True)
+                    subprocess.run(["git", "-C", str(w), "checkout", "-q", "-b", f"feat/{seat['seat']}"], capture_output=True)
+                args += ["--workdir", str(w)]
             if seat.get("harness"):
                 args += ["--harness", seat["harness"]]
             s.swarm(*args)
@@ -287,11 +296,19 @@ def main() -> int:
     ap.add_argument("--harness", default="claude")
     a, rest = ap.parse_known_args()
     opt = lambda f: rest[rest.index(f) + 1] if f in rest and rest.index(f) + 1 < len(rest) else None  # noqa: E731
+    if "--version" in rest or "-v" in rest:   # a probe (swarm doctor), not a session
+        print("fake-harness 0")
+        return 0
     prompt = sys.stdin.read()
     sid = opt("--session-id") or opt("--resume") or str(uuid.uuid4())
     model = opt("--model") or opt("-m")
-    job, role = tag(prompt, "job") or CONF.get("job"), (tag(prompt, "role") or "worker").split(":")[0]
-    seat = tag(prompt, "seat") or tag(prompt, "title")
+    import re as _re
+    drv = _re.search(r"You are the drive seat `([^`]+)` \(role ([a-z_]+)\)", prompt)   # the driver's prompt line
+    job = tag(prompt, "job") or CONF.get("job")
+    role = (tag(prompt, "role") or (drv.group(2) if drv else "worker")).split(":")[0]
+    seat = tag(prompt, "seat") or (drv.group(1) if drv else None) or tag(prompt, "title")
+    if role == "engineering_lead":
+        role = "lead"
     if "engineer" in role and not seat:
         seat = "eng-a"
     scope = judge_scope(prompt) if "judge" in role else None
@@ -307,7 +324,7 @@ def main() -> int:
     cost = float(SCRIPT.get("cost_usd", 0.05))
     s = Session(sid, job, role, seat, model)
     s.scope = scope
-    log(ev="start", scope=scope, sid=sid, role=role, seat=seat, job=job, model=model, harness=a.harness, nth=n,
+    log(ev="start", env={k: v for k, v in os.environ.items() if k in ("HOME", "SWARM_CONFIG", "SWARM_VENV", "PATH", "USER")}, cwd=os.getcwd(), prompt_head=prompt[:700], scope=scope, sid=sid, role=role, seat=seat, job=job, model=model, harness=a.harness, nth=n,
         budget=opt("--max-budget-usd"), artifact=current_artifact(prompt) if role not in ("lead", "engineer") else None)
     s.hook("start")
     try:

@@ -40,6 +40,24 @@ QA_ROOT = Path(os.environ.get("SWARM_QA_ROOT", "~/work/swarm-autonomy/qa")).expa
 VENV = Path(os.environ.get("SWARM_QA_VENV", str(QA_ROOT / "venv"))).expanduser()
 
 
+def runtime_dir() -> str | None:
+    xdg = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    return xdg if os.path.isdir(xdg) else None
+
+
+def user_manager_up() -> bool:
+    """A systemd user manager answers (drive seats REQUIRE a real scope: the driver refuses to launch without one)."""
+    xd = runtime_dir()
+    if not xd:
+        return False
+    env = {**os.environ, "XDG_RUNTIME_DIR": xd, "DBUS_SESSION_BUS_ADDRESS": f"unix:path={xd}/bus"}
+    try:
+        r = subprocess.run(["systemctl", "--user", "is-system-running"], capture_output=True, text=True, env=env, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.stdout.strip() in ("running", "degraded")
+
+
 def _pick_pg_bin() -> Path:
     """A Postgres bin dir whose `postgres` actually runs (the pg0 install needs libicuuc.so.70, which this
     box no longer has; QA_ROOT/pgdist is a copy of the pgserver wheel (install + its libs))."""
@@ -231,11 +249,13 @@ class Run:
     throwaway Postgres on the way out, whatever happens."""
 
     def __init__(self, name: str, *, backend: str = "postgres", harness: str = "fake",
-                 root: Path = REPO, stamp: str | None = None, keep: bool = True, systemd: bool = False,
+                 root: Path = REPO, stamp: str | None = None, keep: bool = True, systemd: bool | None = None,
                  pass_env: list | None = None):
-        self.systemd, self.pass_env = systemd, list(pass_env or [])
+        # drive seats need real scopes: default to them whenever a user manager answers
+        self.systemd = user_manager_up() if systemd is None else systemd
+        self.pass_env = list(pass_env or [])
         self.name, self.backend, self.harness, self.root, self.keep = name, backend, harness, root, keep
-        stamp = stamp or dt.datetime.now().strftime("%Y%m%dT%H%M%S")
+        stamp = stamp or dt.datetime.now().strftime("%Y%m%dT%H%M%S") + f"-{os.getpid() % 10000}"
         self.dir = check_run_dir(QA_ROOT / "runs" / f"{stamp}-{name}")
         self.home = self.dir / "home"
         self.hub_dir = self.dir / "hub"
@@ -263,6 +283,7 @@ class Run:
         os.chmod(self.home, 0o700)
         if self.pg:
             self.pg.start()
+        self._stamp_venv()
         self._write_shims()
         self._write_config()
         self._timeline = open(self.logs / "timeline.jsonl", "a", buffering=1)
@@ -284,10 +305,19 @@ class Run:
         return r.stdout.strip() or "?"
 
     # -- files
+    def _stamp_venv(self) -> None:
+        """bin/swarm rebuilds a venv whose requirements stamp differs from the checkout's. The QA venv was built from
+        the same pinned requirement files, so record the checkout's stamp instead of letting a seat trigger a rebuild."""
+        files = [self.root / "requirements.txt", self.root / "requirements-postgres.txt"]
+        if all(f.exists() for f in files):
+            r = subprocess.run(["cksum"], input=b"".join(f.read_bytes() for f in files), capture_output=True)
+            if r.returncode == 0:
+                (VENV / ".swarm-requirements").write_text(r.stdout.split()[0].decode() + "\n")
+
     def _write_shims(self) -> None:
         py = VENV / "bin" / "python"
         swarm = self.bin / "swarm"
-        swarm.write_text(f'#!/bin/sh\nPYTHONPATH="{self.root}/lib" exec "{py}" -m swarm.cli "$@"\n')
+        swarm.write_text(f'#!/bin/sh\nPYTHONPATH="{self.root}/lib" exec "{py}" "{HERE}/qa_swarm.py" "$@"\n')
         swarm.chmod(0o755)
         for harness in ("claude", "codex"):
             shim = self.bin / harness
@@ -353,10 +383,9 @@ class Run:
              "GIT_CONFIG_GLOBAL": os.devnull}
         if not self.systemd:
             e["SWARM_NO_SYSTEMD"] = "1"
-        elif "XDG_RUNTIME_DIR" in os.environ:   # real scopes: the user manager's bus, units named by the runner
-            e["XDG_RUNTIME_DIR"] = os.environ["XDG_RUNTIME_DIR"]
-            if "DBUS_SESSION_BUS_ADDRESS" in os.environ:
-                e["DBUS_SESSION_BUS_ADDRESS"] = os.environ["DBUS_SESSION_BUS_ADDRESS"]
+        elif runtime_dir():   # real scopes: the user manager's bus; units are transient and named by the runner
+            e["XDG_RUNTIME_DIR"] = runtime_dir()
+            e["DBUS_SESSION_BUS_ADDRESS"] = os.environ.get("DBUS_SESSION_BUS_ADDRESS") or f"unix:path={runtime_dir()}/bus"
         e.update({k: str(v) for k, v in extra.items()})
         return e
 

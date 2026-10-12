@@ -40,7 +40,7 @@ class CostCap(RuntimeError):
 class Rig:
     def __init__(self, name: str, *, script: str = "met", backend: str = "postgres", harness: str = "fake",
                  job: str | None = None, budget_usd: float = 10.0, stamp: str | None = None,
-                 script_patch=None, systemd: bool = False, pass_env: list | None = None,
+                 script_patch=None, systemd: bool | None = None, pass_env: list | None = None,
                  activate_extra: list | None = None, stall_passes: int = 10):
         self.run = q.Run(name, backend=backend, harness=harness, stamp=stamp, systemd=systemd, pass_env=pass_env)
         self.script_name = script
@@ -116,7 +116,7 @@ class Rig:
     def activate_args(self, goal: str | None = None, extra: list[str] | None = None) -> list[str]:
         lead = self.lead_brief or HERE / ("LEAD-unreachable.md" if self.script_name.startswith("unreachable") else "LEAD-met.md")
         return ["activate", "--job", self.job, "--goal", goal or self.goal_text(), "--lead-brief", str(lead),
-                "--workdir", str(self.workdir), "--session", "qa-operator",
+                "--workdir", str(self.workdir), "--allow-workdir", str(self.run.work), "--session", "qa-operator",
                 "--remote", f"origin={self._remote('origin')}", "--remote", f"backup={self._remote('backup')}",
                 "--budget", f"max_cost_usd={self.budget_usd:g}", *self.activate_extra, *(extra or [])]
 
@@ -127,6 +127,28 @@ class Rig:
         self.run.event("activate", "goal job activated", rc=res.returncode, out=(res.stdout + res.stderr)[-300:])
         if res.returncode:
             raise RuntimeError(f"activate failed: {res.stderr.strip()[:500]}")
+        if os.environ.get("SWARM_QA_WORKAROUND") == "lead-receipt":
+            self.run.event("workaround", self.workaround_lead_receipt())
+
+    def run_now(self):
+        import datetime as _dt
+        return _dt.datetime.now(_dt.timezone.utc)
+
+    def workaround_lead_receipt(self) -> str:
+        """QA WORKAROUND for driver bug 2 (activate from a plain shell leaves the lead seat without a seat_request
+        receipt, so the snapshot refuses it). Enabled only by SWARM_QA_WORKAROUND=lead-receipt; it writes the receipt
+        the person-path hook would have written. Remove when the driver receipts the lead itself."""
+        import time as _t
+        self.run.apply_env()
+        sys.path.insert(0, str(self.run.root / "lib"))
+        from swarm import receipts
+        key = self.run.board_key()
+        led = self.run.ledger(self.job)
+        with self.run.board() as b:
+            lead = next(x for x in b.seats(self.job, led.generation, include_closed=True) if x.seat == "lead")
+        from swarm.supervisor import driver_exec
+        driver_exec.authorize_seat(led, lead, self.run_now())
+        return f"wrote seat_request receipt for lead (id {lead.id} rev {lead.revision})"
 
     # -- driving
     def state(self):

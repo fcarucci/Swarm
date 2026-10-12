@@ -225,8 +225,8 @@ class Mutants(Tmp):
         (run / "repo" / "bin").mkdir(parents=True, exist_ok=True)
         (run / "repo" / "bin" / "swarm-hook").write_text("#!/bin/sh\ncat >/dev/null\n")
         (run / "repo" / "bin" / "swarm-hook").chmod(0o755)
-        (run / "bin" / "swarm").write_text(f'#!/bin/sh\necho "$@" >> {run}/swarm-calls\n')
-        (run / "bin" / "swarm").chmod(0o755)
+        (run / "repo" / "bin" / "swarm").write_text(f'#!/bin/sh\necho "$@" >> {run}/swarm-calls\n')   # the plugin's launcher
+        (run / "repo" / "bin" / "swarm").chmod(0o755)
         (run / "script.json").write_text(json.dumps({"judge": {
             "artifact": [{"verdict": "not_met", "open": 1}, {"verdict": "met"}],
             "goal": [{"verdict": "met"}], "ruling": [{"verdict": "unreachable", "reason": "r"}]}}))
