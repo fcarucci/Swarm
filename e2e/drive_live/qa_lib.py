@@ -254,6 +254,7 @@ class Run:
         # drive seats need real scopes: default to them whenever a user manager answers
         self.systemd = user_manager_up() if systemd is None else systemd
         self.pass_env = list(pass_env or [])
+        self.session_driver_env = False
         self.name, self.backend, self.harness, self.root, self.keep = name, backend, harness, root, keep
         stamp = stamp or dt.datetime.now().strftime("%Y%m%dT%H%M%S") + f"-{os.getpid() % 10000}"
         self.dir = check_run_dir(QA_ROOT / "runs" / f"{stamp}-{name}")
@@ -329,7 +330,7 @@ class Run:
                 # the target checkout's own scripted seat (tests/drive_fake_seat.py, Task 21): real hooks, no tags
                 seat = self.root / "tests" / "drive_fake_seat.py"
                 shim.write_text(f'#!/bin/sh\nexport FAKE_SWARM="{self.root}/bin/swarm" FAKE_SEAT_LOG="{self.logs}/fakeseat.jsonl"\n'
-                                f'exec "{py}" "{seat}" "$@"\n')
+                                f'PYTHONPATH="{self.root}/lib" exec "{py}" "{seat}" "$@"\n')
                 shim.chmod(0o755)
             elif self.harness == "fakeseat":
                 if shim.exists() or shim.is_symlink():
@@ -394,6 +395,8 @@ class Run:
              "GIT_AUTHOR_NAME": "QA", "GIT_AUTHOR_EMAIL": "qa@example.invalid",
              "GIT_COMMITTER_NAME": "QA", "GIT_COMMITTER_EMAIL": "qa@example.invalid",
              "GIT_CONFIG_GLOBAL": os.devnull}
+        if self.session_driver_env:
+            e["SWARM_SESSION_DRIVER"] = "0"   # started explicitly by the rig, as tests/test_drive_session_driver.py does
         if not self.systemd:
             e["SWARM_NO_SYSTEMD"] = "1"
         elif runtime_dir():   # real scopes: the user manager's bus; units are transient and named by the runner

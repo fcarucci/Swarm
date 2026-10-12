@@ -26,6 +26,7 @@ HERE = Path(__file__).resolve().parent
 TEMPLATE = HERE / "toy-repo-template"
 SCRIPTS = HERE / "scripts"
 HUB_PY = HERE / "hub.py"
+ARTIFACT_GOAL = "write a report"
 SHA40 = re.compile(r"[0-9a-f]{40}")
 # [drive.models] defaults (plan Task 6 / PM ruling [P1]); a role's model must contain this word
 MODELS = {"lead": "opus", "judge": "opus", "engineer": "haiku", "reviewer": "sonnet", "qa": "sonnet",
@@ -79,6 +80,8 @@ class Rig:
         return self
 
     def __exit__(self, *exc) -> None:
+        if self._idle is not None:
+            self._idle.kill()
         self.run.__exit__(*exc)
 
     # -- setup that works today
@@ -120,6 +123,11 @@ class Rig:
         return url[len("file://"):] if os.environ.get("SWARM_QA_REMOTE_STYLE") == "path" else url
 
     def activate_args(self, goal: str | None = None, extra: list[str] | None = None) -> list[str]:
+        if self.recipe == "artifact":
+            lead = self.run.dir / "LEAD.md"
+            lead.write_text("# lead\nWrite REPORT.md and post goal-ready.\n")
+            return ["activate", "--job", self.job, "--goal", goal or ARTIFACT_GOAL, "--recipe", "artifact",
+                    "--workdir", str(self.workdir), "--session", "qa-operator", "--lead-brief", str(lead)]
         lead = self.lead_brief or HERE / ("LEAD-unreachable.md" if self.script_name.startswith("unreachable") else "LEAD-met.md")
         return ["activate", "--job", self.job, "--goal", goal or self.goal_text(), "--lead-brief", str(lead),
                 "--workdir", str(self.workdir), "--allow-workdir", str(self.run.work), "--session", "qa-operator",
@@ -127,6 +135,22 @@ class Rig:
                 "--budget", f"max_cost_usd={self.budget_usd:g}", *self.activate_extra, *(extra or [])]
 
     session_driver = False   # True: no supervise pass is ever run (the session driver drives; Task 21)
+    recipe = None            # "artifact": the target's drive_fake_seat.py recipe (REPORT.md goal, no remotes)
+    _idle = None
+
+    def start_session_driver(self) -> str:
+        """Task 21: what a session's hooks do after `swarm activate`: start the detached session driver, watching an idle
+        orchestrator process that never makes a hook call. No pass, no timer."""
+        self._idle = subprocess.Popen(["sleep", "10800"], start_new_session=True)
+        code = ("import sys, swarm.cli as c; from swarm.supervisor import session_driver as sd; import pathlib\n"
+                "cfg = c.load_config(pathlib.Path(sys.argv[1])); pid = sd.start(cfg, sys.argv[2], int(sys.argv[3]), "
+                "config_path=sys.argv[1]); print('driver pid', pid)\n")
+        r = subprocess.run([str(q.VENV / "bin" / "python"), "-c", code, str(self.run.config), "qa-operator", str(self._idle.pid)],
+                           capture_output=True, text=True, env={**self.run.env(), "PYTHONPATH": str(self.run.root / "lib")})
+        self.run.event("session-driver", (r.stdout + r.stderr).strip()[-200:])
+        if "driver pid None" in r.stdout or r.returncode:
+            raise RuntimeError(f"session driver not started: {(r.stdout + r.stderr)[-300:]}")
+        return r.stdout.strip()
 
     def activate(self, extra: list[str] | None = None, goal: str | None = None) -> None:
         q.require("6a", "6b", what="swarm activate --drive and seats")
@@ -136,6 +160,8 @@ class Rig:
         self.run.event("activate", "goal job activated", rc=res.returncode, out=(res.stdout + res.stderr)[-300:])
         if res.returncode:
             raise RuntimeError(f"activate failed: {res.stderr.strip()[:500]}")
+        if self.session_driver:
+            self.start_session_driver()
         if os.environ.get("SWARM_QA_WORKAROUND") == "lead-receipt":
             self.run.event("workaround", self.workaround_lead_receipt())
 
@@ -383,22 +409,25 @@ class Rig:
         return bad
 
     def check_models(self) -> list[str]:
-        """Spec 6.3: the per-role model table is what the seats actually ran on (agent rows)."""
-        _, agents, _, _ = self.state()
+        """Spec 6.3: the per-role model table is what the seats were launched on. The product records a seat's model on
+        its SEAT row (board.seats(): model, set at the seat request / by the driver from [drive.models]) and passes
+        it as `--model` at launch; the agent row's `model` stays empty for a headless `claude -p` session because the
+        hook payload carries none. So the check reads the seat rows."""
+        self.run.apply_env()
+        with self.run.board() as b:
+            seats = b.seats(self.job, None, include_closed=True)
         bad, seen = [], set()
-        for a in agents:
-            if is_predecessor(a):
-                continue
-            role = (a.role or "").split(":")[0]
+        for st in seats:
+            role = (st.role or "").lower()
             key = next((k for k in MODELS if k in role), None)
             if not key:
                 continue
             seen.add(key)
-            if not a.model:
-                bad.append(f"{a.name} ({role}) has no recorded model")
-            elif MODELS[key] not in a.model.lower():
-                bad.append(f"{a.name} ({role}) ran on {a.model!r}, want a {MODELS[key]} model")
-        for need in ("lead", "judge", "engineer"):
+            if not st.model:
+                bad.append(f"seat {st.seat} ({role}) has no model")
+            elif MODELS[key] not in st.model.lower():
+                bad.append(f"seat {st.seat} ({role}) is on {st.model!r}, want a {MODELS[key]} model")
+        for need in ("lead", "judge") + (("engineer",) if self.script_name.startswith("met") else ()):
             if need not in seen:
                 bad.append(f"no {need} seat found to check its model")
         return bad
@@ -409,7 +438,7 @@ class Rig:
         scope = getattr(js, "verdict_scope", None)
         if scope is not None and scope not in ("ruling", "mechanical"):
             bad.append(f"unreachable verdict scope {scope!r}, want ruling (or labelled mechanical)")
-        shown = self.run.swarm("verdict", "show", "--job", self.job, "--details")
+        shown = self.run.swarm("verdict", "show", "--job", self.job)   # prints the latest full report ("--details" there takes a path)
         if shown.returncode or len(shown.stdout.strip()) < 20:
             bad.append("no verdict details are recorded for the unreachable verdict")
         return bad

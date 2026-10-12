@@ -91,6 +91,9 @@ def run_goal(args, expect: str) -> list[tuple[str, str, str]]:
         with Rig(name, script=script, backend=args.backend, harness=args.harness, budget_usd=args.budget_usd,
                  systemd=args.systemd) as rig:
             rig.session_driver = args.driver == "session"
+            rig.run.session_driver_env = rig.session_driver
+            if args.harness == "fakeseat":
+                rig.recipe = "artifact"
             if args.harness == "real" and expect == "met" and have_codex:
                 rig.lead_brief = HERE / "LEAD-met-codex.md"      # asks for one engineer seat on the codex harness
             st: dict = {}
@@ -114,6 +117,9 @@ def run_goal(args, expect: str) -> list[tuple[str, str, str]]:
                 problems.append("--kill-supervisor-once: the pass was never killed in flight: nothing was tested")
             costs = rig.write_costs()
             ev = rig.export_evidence()
+            if args.harness == "fakeseat":
+                return [(name, q.Outcome.FAIL if problems else q.Outcome.PASS,
+                         ("; ".join(problems) + " | " if problems else "") + f"{costs['launches']} launches, {costs['wall_s']}s; evidence {ev}")]
             detail = (f"{costs['launches']} launches in {costs['passes']} passes, {costs['wall_s']}s, "
                       f"spent ${costs['spent_usd']} of ${costs['budget_usd']:g}; "
                       f"{st.get('killed_pass') or 'no fault injected'}; evidence {ev}")
