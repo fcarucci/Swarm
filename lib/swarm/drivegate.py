@@ -409,11 +409,16 @@ def pre_tool(cfg: dict, payload: dict, host, *, resume=None, resume_lookup=None,
         if ctx.kind == "requester":
             return SPAWN_REFUSAL.format(who="the requester session") if spawn else None
         known = True
+        cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
+        if host.tool_matches(tool, host.write_tools):
+            why = shellguard.protected_write_refusal(payload.get("tool_input"), cwd)
+            if why:
+                return why
         command = _command_of(host, payload)
         if command:
             why = shellguard.drive_command_refusal(command, lambda: drive_targets(bk, ctx),
                                                    branch_of=_branch_of(payload, command),
-                                                   cwd=payload.get("cwd") if isinstance(payload.get("cwd"), str) else None)
+                                                   cwd=cwd)
             if why:
                 return why
         wants_verdict = bool(command) and shellguard.swarm_verdict_call(command)

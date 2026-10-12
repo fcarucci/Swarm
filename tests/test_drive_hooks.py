@@ -582,6 +582,22 @@ class ScriptFileRule(DriveCase):
                     self.assertIn("tracked unmodified at HEAD", self.pre(who, command=cmd))
 
 
+class ProtectedWrites(DriveCase):
+    """Round 5 (rr31): no seat writes git, gh or ssh configuration with a file tool; other files are untouched."""
+
+    def test_write_tools_may_not_write_git_configuration(self):
+        (self.work / ".git" / "hooks").mkdir(parents=True)
+        sid, _ = self.launch_seat("eng-a")
+        for tool, key in (("Write", "file_path"), ("Edit", "file_path"), ("MultiEdit", "file_path"),
+                          ("NotebookEdit", "notebook_path")):
+            for rel in (".git/config", ".git/hooks/pre-commit", ".gitmodules"):
+                with self.subTest(tool=tool, rel=rel):
+                    out = self.pre(sid, tool, tool_input={key: str(self.work / rel), "content": "x"})
+                    self.assertIn("may not write", out)
+            self.assertIn("may not write", self.pre(sid, tool, tool_input={key: ".git/config", "content": "x"}))
+        self.assertIsNone(self.pre(sid, "Write", tool_input={"file_path": str(self.work / "src.py"), "content": "x"}))
+
+
 class FailClosed(DriveCase):
     def test_an_error_in_a_known_seats_decision_refuses_the_call(self):
         sid, _ = self.launch_seat("eng-a")
