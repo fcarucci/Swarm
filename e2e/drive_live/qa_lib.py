@@ -258,7 +258,9 @@ class Run:
         stamp = stamp or dt.datetime.now().strftime("%Y%m%dT%H%M%S") + f"-{os.getpid() % 10000}"
         self.dir = check_run_dir(QA_ROOT / "runs" / f"{stamp}-{name}")
         self.home = self.dir / "home"
-        self.hub_dir = self.dir / "hub"
+        # The fake hub's bare repositories are local destinations: the driver trusts a local destination only
+        # inside the supervisor's private directory (supervisor/mirror.py _check_local), so the hub lives there.
+        self.hub_dir = self.home / ".local" / "share" / "swarm" / "supervisor" / "qa-hub"
         self.work = self.dir / "work"
         self.bin = self.dir / "bin"
         self.logs = self.dir / "logs"
@@ -281,6 +283,8 @@ class Run:
         for d in (self.home, self.hub_dir, self.work, self.bin, self.logs):
             d.mkdir(parents=True, exist_ok=True)
         os.chmod(self.home, 0o700)
+        for d in (self.hub_dir.parent.parent, self.hub_dir.parent):   # share/swarm and its supervisor dir: private
+            os.chmod(d, 0o700)
         if self.pg:
             self.pg.start()
         self._stamp_venv()

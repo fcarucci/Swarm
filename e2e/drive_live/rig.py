@@ -33,6 +33,12 @@ MODELS = {"lead": "opus", "judge": "opus", "engineer": "haiku", "reviewer": "son
 KILLED = -signal.SIGKILL if hasattr(signal, "SIGKILL") else -9
 
 
+
+def is_predecessor(a) -> bool:
+    """The placeholder row the driver allocates for each launch (key `launch:<id>`, closed at once): the name the
+    launched session takes over via claim_resume. It is never a session, so it has no model and no launch."""
+    return (a.agent_key or "").startswith("launch:") and a.ended_at is not None
+
 class CostCap(RuntimeError):
     pass
 
@@ -303,6 +309,8 @@ class Rig:
         bad = []
         launched = {r.new_agent_key for r in restarts if r.new_agent_key}
         for a in agents:
+            if is_predecessor(a):
+                continue
             if a.agent_key not in launched and not (a.resume_of and a.resume_of in launched):
                 bad.append(f"agent {a.name} ({a.role}) was not launched by a supervisor restart row")
             if a.ended_at is None:
@@ -373,6 +381,8 @@ class Rig:
         _, agents, _, _ = self.state()
         bad, seen = [], set()
         for a in agents:
+            if is_predecessor(a):
+                continue
             role = (a.role or "").split(":")[0]
             key = next((k for k in MODELS if k in role), None)
             if not key:

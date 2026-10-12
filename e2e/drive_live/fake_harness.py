@@ -2,7 +2,7 @@
 """A scripted stand-in for `claude -p` and `codex exec`, started by the real supervisor runner.
 
 It behaves like an agent session as far as the board can tell: it reads its prompt on stdin, finds its
-`[swarm job: J]` / `[swarm role: R]` / seat tags, goes through the REAL hooks (`bin/swarm-hook turn|done|stop`,
+`[swarm job: J]` / `[swarm role: R]` / seat tags, goes through the REAL hooks (`bin/swarm-hook --host H session-start|turn|done|session-stop`,
 with a synthetic session id, as tests/test_pause_e2e.py does) around every `swarm` command it runs, does
 the role's work with real git against the fake hub, and prints a Claude-style result JSON with
 `total_cost_usd` (or Codex-style JSONL). Behaviour per role comes from the scenario script (scripts/*.json):
@@ -69,15 +69,41 @@ def nth(entries, n: int, default=None):
 
 
 class Session:
-    def __init__(self, sid: str, job: str, role: str, seat: str | None, model: str | None):
+    def __init__(self, sid: str, job: str, role: str, seat: str | None, model: str | None,
+                 harness: str = "claude"):
         self.sid, self.job, self.role, self.seat, self.model = sid, job, role, seat, model
+        self.harness = harness
         self.denied: str | None = None
+        self.transcript = self._transcript() if harness == "claude" else None
+
+    def _transcript(self) -> str:
+        """A Claude transcript as the real CLI writes it (<projects>/<project>/<session>.jsonl, an assistant entry
+        naming the model): the hooks read the session's model from it, as they do for a real seat."""
+        root = Path(os.environ.get("CLAUDE_CONFIG_DIR") or HOME / ".claude") / "projects" / "-qa-fake"
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / f"{self.sid}.jsonl"
+        if not path.exists():
+            path.write_text(json.dumps({"type": "assistant", "sessionId": self.sid,
+                                        "message": {"role": "assistant", "model": self.model or "claude-haiku-4-5",
+                                                    "content": [{"type": "text", "text": "ok"}]}}) + "\n")
+        return str(path)
+
+    # The hook events of a headless MAIN session, as hooks/hooks.json and hooks/codex-hooks.json wire them:
+    # SessionStart -> session-start, Stop -> session-stop (never SubagentStart/SubagentStop's start/stop,
+    # which would enrol the session down the subagent path and skip the resumed-seat enrolment).
+    EVENTS = {"start": ("SessionStart", "session-start"), "turn": ("PreToolUse", "turn"),
+              "done": ("PostToolUse", "done"), "stop": ("Stop", "session-stop"),
+              "end": ("SessionEnd", "session-end")}
 
     # -- a tool call, the way Claude does it: PreToolUse hook, the command, PostToolUse hook
     def hook(self, event: str, **extra) -> dict | None:
-        payload = {"session_id": self.sid, "agent_id": None, "cwd": str(RUN / "work"), **extra}
-        r = subprocess.run([HOOK, event], input=json.dumps(payload), capture_output=True, text=True,
-                           env=os.environ, timeout=60)
+        name, arg = self.EVENTS[event]
+        # a main session's payload has no agent_id key at all (only a subagent's has one)
+        payload = {"session_id": self.sid, "hook_event_name": name, "cwd": str(RUN / "work"), **extra}
+        if self.transcript:
+            payload["transcript_path"] = self.transcript
+        r = subprocess.run([HOOK, "--host", self.harness, arg], input=json.dumps(payload), capture_output=True,
+                           text=True, env=os.environ, timeout=60)
         if r.returncode < 0:   # a crash barrier killed the hook (SWARM_CRASH_AT reached the seat's environment)
             log(ev="hook_killed", sid=self.sid, role=self.role, event=event, signal=-r.returncode)
         try:
@@ -111,7 +137,14 @@ class Session:
         return self.sh([SWARM, *map(str, a)], **kw)
 
     def git(self, cwd: Path, *a):
-        return subprocess.run(["git", *a], cwd=cwd, capture_output=True, text=True, env=os.environ)
+        # The seat's environment is the runner's launch environment (no GIT_AUTHOR_*), and the run's HOME
+        # has no git identity: give the fake's own commits one, as a real seat's ~/.gitconfig would.
+        ident = ["-c", "user.name=QA seat", "-c", "user.email=qa-seat@example.invalid"]
+        r = subprocess.run(["git", *ident, *a], cwd=cwd, capture_output=True, text=True, env=os.environ)
+        if r.returncode:
+            log(ev="git_failed", sid=self.sid, role=self.role, args=list(a)[:4], rc=r.returncode,
+                err=(r.stderr or "")[-300:])
+        return r
 
 
 # --- the work an engineer does to the toy repo -----------------------------------------------
@@ -261,10 +294,22 @@ def role_judge(s: Session, n: int, prompt: str) -> None:
     art = current_artifact(prompt)
     v = ent.get("verdict", "met")
     extra = ["--artifact", art] if art else []
+    if s.scope in ("goal", "ruling"):
+        # a goal or ruling verdict names its candidate and the pinned requirements' digest, as the drive prompt says
+        import re as _re
+        m = _re.search(r"--candidate ([A-Za-z0-9._/-]+@[0-9a-f]{40})", prompt)
+        cand = m.group(1) if m else art
+        r = _re.search(r"--req ([0-9a-f]{8,64})", prompt) or _re.search(r"digest ([0-9a-f]{8,64})", prompt)
+        extra = ["--scope", s.scope] + (["--candidate", cand] if cand else []) + (["--req", r.group(1)] if r else [])
+        if s.scope == "ruling" and v == "met":
+            s.swarm("verdict", "met", "--job", s.job, "--reason", ent.get("reason", "criteria met"),
+                    "--details", "-", *extra, input=f"# ruling\n{ent.get('reason', 'criteria met')}\n")
+            return
     if v == "met":
         s.swarm("verdict", "met", ent.get("reason", "criteria met"), "--job", s.job, *extra)
     elif v == "not_met":
         s.swarm("verdict", "not_met", "--job", s.job, "--reason", ent.get("reason", "criteria open"),
+                "--next", ent.get("next", "add the missing test in tests/test_toy.py; I re-check it passes"),
                 "--open", ent.get("open", 1), *extra)
     else:
         s.swarm("verdict", "unreachable", "--job", s.job, "--reason", ent.get("reason", "cannot be met"),
@@ -282,6 +327,8 @@ def role_integrator(s: Session, n: int, prompt: str) -> None:
     s.git(w, "rebase", "origin/main")
     sha = s.git(w, "rev-parse", "HEAD").stdout.strip()
     s.git(w, "push", "-q", "-f", "origin", f"{branch}:refs/heads/{branch}")
+    # the rebased branch goes to every pinned remote (the driver refuses a landing whose branch is missing on one)
+    s.git(w, "push", "-q", "-f", "file://" + str(HUB / "backup.git"), f"{branch}:refs/heads/{branch}")
     spec = SCRIPT.get("integrator") or {}
     if isinstance(spec, dict) and counter("ci_red") < int(spec.get("ci_red", 0)):
         # chaos: CI is red on this rebased SHA (the driver must turn it into FINALIZE_BLOCKED and a fix round)
@@ -323,7 +370,7 @@ def main() -> int:
         log(ev="outage", sid=sid, role=role)
         return 1
     cost = float(SCRIPT.get("cost_usd", 0.05))
-    s = Session(sid, job, role, seat, model)
+    s = Session(sid, job, role, seat, model, a.harness)
     s.scope = scope
     log(ev="start", env={k: v for k, v in os.environ.items() if k in ("HOME", "SWARM_CONFIG", "SWARM_VENV", "PATH", "USER")}, cwd=os.getcwd(), prompt_head=prompt[:700], scope=scope, sid=sid, role=role, seat=seat, job=job, model=model, harness=a.harness, nth=n,
         budget=opt("--max-budget-usd"), artifact=current_artifact(prompt) if role not in ("lead", "engineer") else None)
@@ -341,6 +388,8 @@ def main() -> int:
             role_integrator(s, n, prompt)
     finally:
         s.hook("stop")
+        if a.harness == "codex":
+            s.hook("end")   # Codex: SessionEnd at process exit
         log(ev="end", sid=sid, role=role, seat=seat, cost=cost, denied=s.denied)
     if a.harness == "codex":
         print(json.dumps({"type": "thread.started", "thread_id": sid}))
