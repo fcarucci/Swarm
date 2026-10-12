@@ -376,13 +376,16 @@ def classify(cfg: dict, payload: dict, resume=None, resume_lookup=None):
         return None
     from swarm.board.autoinit import store_key
     bk = store_key(cfg)
+    if not payload.get("agent_id"):    # the requester is known from its host-private ledger, before any marker
+        job = requester_job(bk, sid)
+        if job:
+            return Ctx(kind="requester", job=job, led=None)
     ctx = seat_context(cfg, bk, payload, resume, resume_lookup)
     if ctx is not None:
         return ctx
     if payload.get("agent_id"):
         return enrolled_context(bk, payload)
-    job = requester_job(bk, sid)
-    return Ctx(kind="requester", job=job, led=None) if job else None
+    return None
 
 
 def pre_tool(cfg: dict, payload: dict, host, *, resume=None, resume_lookup=None, ctx=_UNSET) -> str | None:
@@ -827,7 +830,11 @@ def post_tool(cfg: dict, payload: dict, host, *, resume=None, resume_lookup=None
     bk = store_key(cfg)
     job_label = getattr(ns, "job", None) or "?"
     try:
-        ctx = seat_context(cfg, bk, payload, resume, resume_lookup)
+        ctx = None
+        if not payload.get("agent_id") and getattr(ns, "job", None) and requester_context(bk, payload, ns.job):
+            ctx = None          # the job's requester: a planted marker must not make it a seat
+        else:
+            ctx = seat_context(cfg, bk, payload, resume, resume_lookup)
         board = _open_board(cfg)
         with contextlib.closing(board):
             if ctx is None:

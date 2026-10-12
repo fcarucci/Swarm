@@ -331,6 +331,27 @@ class NoFastPathLease(DriveCase):
         self.assertGreater(int(fastpath.read("agent-session-other-sess")[0]), 0)
 
 
+class RequesterIdentity(DriveCase):
+    def test_rr9_a_planted_resume_marker_does_not_stop_the_requesters_receipts(self):
+        """The requester is known from its host-private ledger before any marker is looked at."""
+        self.launch_seat("eng-a")
+        markers.write_resume_marker(self.cfg, "J", 999, resume_of="x", name="seat", harness="claude", session_id=REQ)
+        drivegate._LEDGER_CACHE.clear()
+        self.assertTrue(self.post(REQ, "swarm halt --job J --reason r", "swarm-record: kind=halt id=8 rev=1"))
+        self.assertEqual(drivegate.classify(self.cfg, self.payload(REQ)).kind, "requester")
+        self.assertIsNone(self.pre(REQ, command="echo x > notes.txt"))
+
+    def test_rr14_to_16_probes(self):
+        sid, _ = self.launch_seat("eng-a")
+        judge, _ = self.launch_seat("judge", role="judge", kind="judge")
+        self.assertIn("mirror", self.pre(sid, command="git push --m origin"))
+        for cmd in ("echo 'git push origin HEAD:main' | sh /dev/stdin", "bash <<< 'git push origin HEAD:main'",
+                    "echo x | sh; cat <<EOF\nx\nEOF", "source <(echo x)", "echo x | bash -c \"$(cat)\"",
+                    "echo x | busybox sh"):
+            self.assertIn("shell is allowed only", self.pre(sid, command=cmd))
+        self.assertIn("shell is allowed only", self.pre(judge, command="bash <<< 'touch f'"))
+
+
 class SpawnRefusals(DriveCase):
     SPAWN = {"prompt": "[swarm job: J]\nhelp me", "description": "helper"}
 

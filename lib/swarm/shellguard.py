@@ -19,9 +19,14 @@ _ON_STRIPPED = (
     ("dd of=", re.compile(r"\bdd\b[^|;&\n]*\bof=")),
     ("a git command that writes", re.compile(r"\bgit\s+(?:-C\s+\S+\s+)?(?:commit|push|reset|checkout|switch|merge|rebase|"
                                             r"apply|am|stash|restore|clean|rm|mv|tag|cherry-pick|revert|pull|init|clone)\b")),
+    ("tar extraction", re.compile(r"\btar\b[^|;&\n]*\s-?[a-zA-Z]*x[a-zA-Z]*\b")),
+    ("sort -o", re.compile(r"\bsort\b[^|;&\n]*\s(?:-[a-zA-Z]*o\b|--output)")),
+    ("pip install", re.compile(r"\bpip3?\s+install\b|-m\s+pip\s+install\b")),
     ("a download to a file", re.compile(r"\bcurl\b[^|;&\n]*\s-[a-zA-Z]*[oO]\b|\bwget\b")),
 )
 _ON_RAW = (
+    ("awk output to a file", re.compile(r"\bawk\b[^|;&\n]*['\"][^'\"]*>[^'\"]*['\"]")),
+    ("sed w (write to a file)", re.compile(r"\bsed\b[^|;&\n]*['\"][^'\"]*(?:^|[\s;{}0-9$/])w\s*[\w./-]+")),
     ("an inline script that writes", re.compile(
         r"\b(?:python3?|node|ruby|perl)\b[^|;&\n]*\s-[ce]\b.*(?:open\([^)]*,\s*['\"][wax]|write_text|write_bytes|"
         r"writeFile|appendFile|os\.remove|os\.unlink|shutil\.|\.rename\()", re.S)),
@@ -470,6 +475,7 @@ _VALUE_FLAGS = {
               "--delimiter", "--arg-file", "--max-lines", "--max-chars"},
     "watch": {"-n", "--interval", "-d"},
     "taskset": {"-c"},
+    "exec": {"-a"},
 }
 
 
@@ -493,6 +499,8 @@ def _unwrap(words: list[str]) -> tuple[list[str], set[str]]:
             flag = words[0]
             words = words[1:]
             if flag in values and words:
+                if base == "env" and flag in ("-S", "--split-string"):
+                    seen.add("split:" + words[0])
                 words = words[1:]
         if base == "timeout" and words and re.fullmatch(r"\d+(?:\.\d+)?[smhd]?", words[0]):
             words = words[1:]
@@ -519,65 +527,168 @@ def _script_arg(prog: str, args: list[str]) -> str | None:
     return None
 
 
-def iter_commands(command: str, _depth: int = 0):
-    """Yield (prog, args, wrappers) for every command a shell text runs, looking inside the wrappers that
-    run a string (sh -c, bash -lc, eval, script -c, su -c, watch 'cmd'), `$(...)` and backticks."""
-    if not command:
-        return
-    if _depth > _MAX_NEST:      # too deep to look at: callers refuse what they cannot check
+_FIND_EXEC = ("-exec", "-execdir", "-ok", "-okdir")
+_SYSTEMD_VALUE = {"-p", "-u", "-E", "-t", "--unit", "--property", "--setenv", "--description", "--slice", "--uid", "--gid",
+                  "--working-directory", "-d", "--service-type", "--on-active", "--on-calendar"}
+_SSH_VALUE = {"-p", "-i", "-l", "-o", "-F", "-J", "-L", "-R", "-D", "-b", "-c", "-e", "-m", "-S", "-w", "-E", "-B"}
+_TMUX_RUN = ("new", "new-session", "new-window", "neww", "split-window", "splitw", "run-shell", "run", "send-keys")
+
+
+def _shell_literal(prog: str, args: list[str]):
+    """For a shell interpreter: ("t", the literal after -c) when it is run as `<shell> -c '<literal>'` and nothing
+    else, else ("bad", None): a shell reading stdin, a script file (/dev/stdin, /dev/fd/N, a path), a here-string,
+    a heredoc or `-c "$(...)"` cannot be checked, so none is allowed. None: not a shell."""
+    if prog == "busybox":
+        if not args or _prog(args[0]) not in _SHELLS - {"busybox"}:
+            return None
+        args = args[1:]
+    elif prog not in _SHELLS:
+        return None
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in ("-o", "+o"):
+            i += 2
+            continue
+        if a.startswith("-") and not a.startswith("--") and "c" in a[1:]:
+            script = args[i + 1] if i + 1 < len(args) else None
+            return ("bad", None) if script is None or "$SUB" in script else ("t", script)
+        if a.startswith(("-", "+")):
+            i += 1
+            continue
+        return ("bad", None)          # a script file before any -c
+    return ("bad", None)              # no -c: it reads stdin
+
+
+def _nested(prog: str, args: list[str]):
+    """The commands a command runs through its arguments: [("t", text)] to run as shell text, [("w", words)] as a
+    command, [("bad", None)] for what cannot be checked. Covers shells (-c literal only), eval, script/su -c, find
+    -exec, git rebase -x and submodule foreach, parallel, flock, systemd-run, tmux, ssh, source and `.`."""
+    out = []
+    shell = _shell_literal(prog, args)
+    if shell is not None:
+        return [shell]
+    if prog in ("script", "su"):
+        inner = _script_arg(prog, args)
+        return [("t", inner)] if inner is not None else []
+    if prog == "eval":
+        return [("t", " ".join(args))]
+    if prog in ("source", "."):
+        return [("bad", None)] if not args or args[0].startswith(("/dev/", "-")) or "$SUB" in args[0] else []
+    if prog == "find":
+        k = 0
+        while k < len(args):
+            if args[k] in _FIND_EXEC:
+                j = k + 1
+                while j < len(args) and args[j] not in (";", "+"):
+                    j += 1
+                out.append(("w", args[k + 1:j]))
+                k = j
+            k += 1
+    elif prog == "git":
+        sub, rest, _bad, _cdir = _git_args(args)
+        if sub == "rebase":
+            for k, a in enumerate(rest):
+                if a in ("-x", "--exec") and k + 1 < len(rest):
+                    out.append(("t", rest[k + 1]))
+                elif a.startswith("--exec="):
+                    out.append(("t", a[len("--exec="):]))
+                elif a.startswith("-x") and len(a) > 2 and not a.startswith("--"):
+                    out.append(("t", a[2:]))
+        elif sub == "submodule" and "foreach" in rest:
+            tail = rest[rest.index("foreach") + 1:]
+            tail = [a for a in tail if not a.startswith("--")]
+            out.append(("t", " ".join(tail)))
+    elif prog == "parallel":
+        words = [a for a in args]
+        k = 0
+        while k < len(words) and words[k].startswith("-"):
+            k += 2 if (k + 1 < len(words) and re.fullmatch(r"\d+%?|\S*\{\}\S*", words[k + 1]) and "=" not in words[k]) else 1
+        cmd = []
+        for w in words[k:]:
+            if w.startswith(":::"):
+                break
+            cmd.append(w)
+        out.append(("w", cmd))
+    elif prog == "flock":
+        words = [a for a in args if not a.startswith("-")]
+        out.append(("w", words[1:]))
+    elif prog == "systemd-run":
+        k = 0
+        while k < len(args) and args[k].startswith("-"):
+            k += 2 if args[k] in _SYSTEMD_VALUE else 1
+        out.append(("w", args[k:]))
+    elif prog == "tmux":
+        sub = next((a for a in args if a in _TMUX_RUN), None)
+        if sub and args:
+            out.append(("t", args[-1]))
+    elif prog == "ssh":
+        k = 0
+        while k < len(args) and args[k].startswith("-"):
+            k += 2 if args[k] in _SSH_VALUE else 1
+        if k + 1 < len(args):
+            out.append(("t", " ".join(args[k + 1:])))
+    return out
+
+
+def _walk(lists, depth: int):
+    if depth > _MAX_NEST:      # too deep to look at: callers refuse what they cannot check
         yield TOO_DEEP, [], set()
         return
-    reads_stdin = False
-    for words in split_commands(command):
+    for words in lists:
         words, seen = _unwrap(words)
+        for tag in sorted(seen):
+            if tag.startswith("split:"):
+                yield from iter_commands(tag[6:], depth + 1)
         if not words:
             continue
         if "watch" in seen:       # watch runs its words as one command line
-            yield from iter_commands(" ".join(words), _depth + 1)
+            yield from iter_commands(" ".join(words), depth + 1)
             continue
         prog, args = _prog(words[0]), words[1:]
-        if prog in _SHELLS or prog in ("script", "su"):
-            inner = _script_arg(prog, args)
-            if inner is not None:
-                yield from iter_commands(inner, _depth + 1)
-            elif prog in _SHELLS:
-                reads_stdin = True
-                if not [a for a in args if not a.startswith("-")] and "<<" not in command:
-                    yield STDIN_SHELL, [], set()
-        elif prog == "eval":
-            yield from iter_commands(" ".join(args), _depth + 1)
+        for kind, payload in _nested(prog, args):
+            if kind == "bad":
+                yield STDIN_SHELL, [], set()
+            elif kind == "t":
+                yield from iter_commands(payload, depth + 1)
+            elif payload:
+                yield from _walk([payload], depth + 1)
         yield prog, args, seen
-    if reads_stdin and "<<" in command:      # `bash <<'EOF' ... EOF`: the body is the script it runs
-        for body in heredoc_bodies(command):
-            yield from iter_commands(body, _depth + 1)
 
 
-def _nested_scripts(command: str, _depth: int = 0) -> list[str]:
-    """`command` and every string a wrapper in it runs, for a caller that scans text."""
+def iter_commands(command: str, _depth: int = 0):
+    """Yield (prog, args, wrappers) for every command a shell text runs, looking inside everything that runs
+    another command (_nested), `$(...)` and backticks. A shell is only ever `<shell> -c '<literal>'`."""
+    if command:
+        yield from _walk(split_commands(command), _depth)
+
+
+def _nested_texts(command: str, _depth: int = 0) -> list[str]:
+    """`command` and every text a command in it runs, for a caller that scans text."""
     out = [command]
     if _depth > _MAX_NEST or not command:
         return out
-    reads_stdin = False
     for words in split_commands(command):
         words, seen = _unwrap(words)
+        texts = [t[6:] for t in sorted(seen) if t.startswith("split:")]
         if not words:
+            for t in texts:
+                out.extend(_nested_texts(t, _depth + 1))
             continue
-        inner = None
         if "watch" in seen:
-            inner = " ".join(words)
+            texts.append(" ".join(words))
         else:
-            prog, args = _prog(words[0]), words[1:]
-            if prog in _SHELLS or prog in ("script", "su"):
-                inner = _script_arg(prog, args)
-                reads_stdin = reads_stdin or (inner is None and prog in _SHELLS)
-            elif prog == "eval":
-                inner = " ".join(args)
-        if inner:
-            out.extend(_nested_scripts(inner, _depth + 1))
-    if reads_stdin and "<<" in command:
-        for body in heredoc_bodies(command):
-            out.extend(_nested_scripts(body, _depth + 1))
+            for kind, payload in _nested(_prog(words[0]), words[1:]):
+                if kind == "t":
+                    texts.append(payload)
+                elif kind == "w" and payload:
+                    texts.append(" ".join(payload))
+        for t in texts:
+            out.extend(_nested_texts(t, _depth + 1))
     return out
+
+
+_nested_scripts = _nested_texts
 
 
 _GIT_VALUE_OPTS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env",
@@ -629,7 +740,7 @@ def _push_refusal(rest: list[str], targets: set[str], branch_of, cdir=None) -> s
             break
         if a.startswith("--"):
             name = a.split("=", 1)[0]
-            if len(name) >= 4 and name not in _PUSH_FORCE and name not in _PUSH_REFUSED:
+            if len(name) >= 3 and name not in _PUSH_FORCE and name not in _PUSH_REFUSED:
                 hit = next((f for f in (*_PUSH_FORCE, *_PUSH_REFUSED) if f.startswith(name)), None)
                 if hit:          # git takes any unique prefix of a long option: --mirr, --force-w, --delet
                     name = hit
@@ -775,7 +886,8 @@ def drive_command_refusal(command: str, targets=(), *, branch_of=None) -> str | 
         if prog == TOO_DEEP:
             return "a command nested too deeply to check (sh -c in sh -c ...) is refused"
         if prog == STDIN_SHELL:
-            return "a shell that reads its commands from a pipe or file cannot be checked: run the commands directly"
+            return ("a shell is allowed only as `sh -c '<literal>'` in a drive job (no stdin, script file, here-string, "
+                    "heredoc or $(...) script: they cannot be checked)")
         if _INTERP.fullmatch(prog):
             code = [args[k + 1] for k, a in enumerate(args[:-1]) if a in _INTERP_CODE_FLAGS]
             interp_stdin = interp_stdin or not code
@@ -833,6 +945,42 @@ _SQL_WRITE = re.compile(r"(?i)\b(?:insert|update|delete|replace|create|drop|alte
                         r"dump|shell|system|read)\b")
 
 
+_BRANCH_WRITE = set("fdDmMcCu")
+
+
+def _git_writes(sub, rest) -> bool:
+    """Whether this git subcommand changes the repository: the always-writing subcommands, and the ones that read
+    or write by their arguments (branch, config, symbolic-ref, remote, reflog, hash-object)."""
+    if sub in _GIT_WRITES:
+        return True
+    flags = [a for a in rest if a.startswith("-")]
+    pos = [a for a in rest if not a.startswith("-")]
+    letters = {c for a in flags if not a.startswith("--") for c in a[1:]}
+    longs = {a.split("=", 1)[0] for a in flags if a.startswith("--")}
+    if sub == "branch":
+        listing = bool(longs & {"--list", "--contains", "--merged", "--no-merged", "--points-at", "--show-current"}) \
+            or "l" in letters
+        return bool(letters & _BRANCH_WRITE) or bool(longs & {"--force", "--delete", "--move", "--copy",
+                                                              "--set-upstream-to", "--unset-upstream", "--edit-description"}) \
+            or (bool(pos) and not listing)
+    if sub == "config":
+        return not (longs & {"--get", "--get-all", "--get-regexp", "--list", "--get-urlmatch", "--show-origin",
+                             "--show-scope", "--name-only"} or "l" in letters)
+    if sub == "symbolic-ref":
+        return len(pos) >= 2 or "d" in letters or "--delete" in longs
+    if sub == "remote":
+        return bool(pos) and pos[0] in ("add", "set-url", "remove", "rm", "rename", "prune", "set-head", "set-branches", "update")
+    if sub == "reflog":
+        return bool(pos) and pos[0] in ("expire", "delete")
+    if sub == "hash-object":
+        return "w" in letters
+    return False
+
+
+_INLINE_WRITE = re.compile(r"open\([^)]*,\s*['\"][wax]|write_text|write_bytes|writeFile|appendFile|os\.(?:remove|unlink|rename|system)|"
+                           r"shutil\.|subprocess|\.rename\(|child_process")
+
+
 def readonly_write_reason(command: str) -> str | None:
     """Why `command` writes (for a read-only seat), or None: the writer patterns of writes_files over the
     command and over every string a wrapper in it runs (sh -c, eval, ...), git's own writing subcommands
@@ -843,18 +991,25 @@ def readonly_write_reason(command: str) -> str | None:
         why = writes_files(text)
         if why:
             return why
+    interp_stdin = False
     for prog, args, _ in iter_commands(command):
+        if _INTERP.fullmatch(prog) and not any(a in _INTERP_CODE_FLAGS for a in args):
+            interp_stdin = True
         if prog == TOO_DEEP:
             return "a command nested too deeply to check is refused"
         if prog == STDIN_SHELL:
-            return "a shell that reads its commands from a pipe or file cannot be checked"
+            return "a shell is allowed only as `sh -c '<literal>'`: anything else cannot be checked"
         if prog == "git":
             sub, _rest, bad, _cdir = _git_args(args)
-            if bad or sub in _GIT_WRITES:
+            if bad or _git_writes(sub, _rest):
                 return "a git command that writes" if not bad else bad
         elif prog in ("sqlite3", "sqlite", "litecli") and "-readonly" not in args:
             if _SQL_WRITE.search(" ".join(args)) or "<" in command:
                 return "a sqlite3 command that may write (use -readonly, or only SELECT)"
+    if interp_stdin and "<<" in command:      # `python3 - <<'EOF' ... EOF`
+        for body in heredoc_bodies(command):
+            if _INLINE_WRITE.search(body):
+                return "an inline script that writes or runs commands"
     return None
 
 
