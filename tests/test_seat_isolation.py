@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import base64
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -419,7 +421,7 @@ class TypedProtocolTest(BrokerCase):
         self.assertEqual(argv[1:3], ["-I", "-c"])
         self.assertEqual(argv[argv.index("--config") + 1], "/sup/config.toml")
         self.assertEqual(cli_argv(self.calls[-1]),
-                         ["post", "--job", "J", "--key", self.run["session_id"], "--", "hello", "world"])
+                         ["post", "--job=J", f"--key={self.run['session_id']}", "--", "hello", "world"])
         self.assertEqual(kw["cwd"], "/")
         self.assertEqual(kw["env"]["CLAUDE_CODE_SESSION_ID"], self.run["session_id"])
         self.assertEqual(kw["env"]["SWARM_CONFIG"], "/sup/config.toml")
@@ -460,19 +462,19 @@ class TypedProtocolTest(BrokerCase):
         self.assertEqual(self.calls, [])
         rc, _, _ = self.cli(["done", "--job", "J", "--key", "OTHER"])   # accepted and DROPPED
         self.assertEqual(rc, 0)
-        self.assertEqual(cli_argv(self.calls[-1]), ["done", "--job", "J", "--key", self.run["session_id"]])
+        self.assertEqual(cli_argv(self.calls[-1]), ["done", "--job=J", f"--key={self.run['session_id']}"])
         for field in ("as", "key", "session", "name", "_as", "agent_key"):
             rc, _, err = self.raw({"v": 2, "kind": "cli", "command": "done", "fields": {"job": "J", field: "x"}})
             self.assertEqual(rc, 2, field)
         rc, _, _ = self.cli(["verdict", "--job", "J", "--as", "Bart", "met", "ok"])
-        self.assertEqual(cli_argv(self.calls[-1]), ["verdict", "--job", "J", "--as", "Lisa", "--", "met", "ok"])
+        self.assertEqual(cli_argv(self.calls[-1]), ["verdict", "--job=J", "--as=Lisa", "--", "met", "ok"])
 
     def test_rr11_a_file_field_is_content_never_a_seat_path(self):
         (self.wd / "r.md").write_text("the report")
         seen = []
 
         def runner(argv, **kw):
-            p = cli_argv((argv,))[cli_argv((argv,)).index("--details") + 1]
+            p = next(a for a in cli_argv((argv,)) if a.startswith("--details="))[len("--details="):]
             seen.append((p, Path(p).read_text()))
             return subprocess.CompletedProcess(argv, 0, b"", b"")
         b = self.broker(runner)
@@ -486,7 +488,7 @@ class TypedProtocolTest(BrokerCase):
                              "fields": {"job": "J", "verdict": "met", "details": "/home/u/.secrets/x"}})
         argv = cli_argv(self.calls[-1]) if self.calls else []
         # the content "/home/u/.secrets/x" is what lands in the file: the broker never opens that path
-        self.assertTrue(all(not a.startswith("/home/u") for a in argv))
+        self.assertTrue(all("/home/u" not in a for a in argv))
 
     def test_rr12_a_codex_seat_waits_for_its_thread(self):
         self.run.clear()
@@ -596,6 +598,101 @@ class TypedProtocolTest(BrokerCase):
         self.assertEqual(Path(run["transcript_copy"]).read_text(), '{"type":"user"}\n')
 
 
+class Round3Test(BrokerCase):
+    def test_rr15_a_requirement_is_read_by_the_broker_and_pinned_at_that_content(self):
+        (self.wd / "reqs").mkdir()
+        (self.wd / "reqs" / "R.md").write_text("the requirement")
+        seen = []
+
+        def runner(argv, **kw):
+            for a in cli_argv((argv,)):
+                if a.startswith("--add-requirements-pinned="):
+                    path, _, f = a[len("--add-requirements-pinned="):].partition("\n")
+                    seen.append((path, Path(f).read_text(), f))
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+        b = self.broker(runner)
+        rc, _, err = self.cli(["goal-ready", "--job", "J", "--candidate", "b@" + "a" * 40,
+                               "--add-requirements", "reqs/R.md"], broker=b)
+        self.assertEqual(rc, 0, err)
+        path, content, f = seen[0]
+        self.assertEqual((path, content), (str(self.wd / "reqs" / "R.md"), "the requirement"))
+        self.assertTrue(f.startswith(str(self.files)))
+        # a link anywhere on the way, or a path outside the work tree, is refused (never read)
+        (self.wd / "linked").symlink_to(self.wd / "reqs")
+        (self.tmp / "outside.md").write_text("x")
+        for p in ("linked/R.md", str(self.tmp / "outside.md")):
+            rc, _, err = self.cli(["goal-ready", "--job", "J", "--candidate", "b@" + "a" * 40,
+                                   "--add-requirements", p], broker=b)
+            self.assertEqual(rc, 2, (p, err))
+        self.assertEqual(len(seen), 1)
+
+    def test_rr15_the_cli_pins_a_brokered_requirement(self):
+        from swarm import drive_cli
+        root = self.wd
+        (root / "R.md").write_text("pinned text")
+        content = self.files / "c"
+        content.write_text("pinned text")
+        led = mock.Mock(pinned_requirements={})
+        with mock.patch.object(drive_cli, "_owner_roots", lambda bk, job: [str(root)]):
+            pins = drive_cli.pins_for("bk", "J", led, [], [f"{root}/R.md\n{content}"])
+            self.assertEqual(pins, {f"{root}/R.md": drive_cli.blob_id(b"pinned text")})
+            with self.assertRaises(drive_cli.Refuse):
+                drive_cli.pins_for("bk", "J", led, [], [f"{self.tmp}/elsewhere.md\n{content}"])
+            with self.assertRaises(drive_cli.Refuse):
+                drive_cli.pins_for("bk", "J", led, [], [f"{root}/../wt/R.md\n{content}"])
+
+    def test_rr16_a_brokered_review_posts_the_typed_path_and_keeps_the_report(self):
+        from swarm import drive_cli
+        priv = self.tmp / "priv"
+        priv.mkdir(mode=0o700)
+        content = self.files / "c"
+        content.write_text("the review report")
+        board = mock.Mock()
+        board.active_agent_name.return_value = "Lisa"
+        board.post.return_value = mock.Mock(id=42)
+        args = mock.Mock(job="J", key="k", artifact="b@" + "a" * 40, outcome="verified", report="r.md",
+                         report_content=str(content))
+        with mock.patch("swarm.enrolment.owns", lambda bk, key, job: True), \
+                mock.patch.object(drive_cli, "board_key", lambda cfg: "bk"), \
+                mock.patch("swarm.supervisor.settings.private_dir", lambda: priv), \
+                contextlib.redirect_stdout(io.StringIO()):
+            drive_cli.cmd_review(board, {}, args)
+            kept = drive_cli.review_report_path("J", 42)
+        self.assertEqual(board.post.call_args[0][2], f"REVIEW b@{'a' * 40} VERIFIED r.md")
+        self.assertEqual(kept.read_text(), "the review report")
+        self.assertTrue(str(kept).startswith(str(priv)))
+        rc, _, _ = self.cli(["review", "--job", "J", "verified", "--report", "missing.md"])
+        self.assertEqual(rc, 2)    # read in the jail: a missing report never reaches the broker
+
+    def test_rr17_free_text_may_start_with_a_dash(self):
+        from swarm import seatproto
+        for argv, want in ((["done", "--job", "J", "--summary", "- fixed the parser"], "--summary=- fixed the parser"),
+                           (["done", "--job", "J", "--summary=-3 tests flaky"], "--summary=-3 tests flaky"),
+                           (["answer", "3", "--comment", "--verbose was wrong"], "--comment=--verbose was wrong"),
+                           (["ask", "--job", "J", "--to", "EL", "--options=-a|-b", "pick"], "--options=-a|-b")):
+            req = seatproto.parse_cli(argv, str(self.wd))
+            built = seatproto.build_argv(req["command"], req["fields"], key="k", name="n", file_path=str)
+            self.assertIn(want, built, argv)
+        for argv in (["done", "--job=-J"], ["done", "--job", "J", "--artifact=-x"],
+                     ["post", "--job", "J\nX", "hi"], ["seat", "request", "--job", "J", "--role", "-r", "--brief", "b"]):
+            with self.assertRaises(seatproto.ProtocolError, msg=argv):
+                seatproto.parse_cli(argv, str(self.wd))
+
+    def test_rr18_a_linked_directory_is_never_followed(self):
+        sid = self.run["session_id"]
+        real = self.tmp / "realproj"
+        real.mkdir()
+        (real / f"{sid}.jsonl").write_text("not the seat's")
+        (self.seat / "claude" / "projects").mkdir(parents=True)
+        (self.seat / "claude" / "projects" / "p").symlink_to(real)
+        self.assertIsNone(seatbroker.read_seat_transcript(str(self.seat), "claude", sid, 1 << 20))
+        (self.seat / "claude" / "projects" / "p").unlink()
+        (self.seat / "claude" / "projects" / "p").mkdir()
+        (self.seat / "claude" / "projects" / "p" / f"{sid}.jsonl").write_text("mine")
+        self.assertEqual(seatbroker.read_seat_transcript(str(self.seat), "claude", sid, 1 << 20), b"mine")
+        self.assertIsNone(seatbroker.read_under(str(self.seat), "claude/../claude/projects/p/x", 10))
+
+
 class FuzzTest(BrokerCase):
     """Every seat command with extra, abbreviated or identity flags, and every unknown field: refused."""
 
@@ -682,6 +779,10 @@ FAKE_SEAT = textwrap.dedent("""\
         "config": sw("post", "--job", job, "--config", "x.toml", "forged-config"),
         "read": sw("read", "--job", job),
         "verdict": sw("verdict", "--job", job, "met", "all requirements hold", "--details", "report.md"),
+        "review": sw("review", "--job", job, "--artifact", "b@" + "a" * 40, "verified", "--report", "report.md"),
+        "goal_ready": sw("goal-ready", "--job", job, "--candidate", "b@" + "a" * 40, "--add-requirements",
+                         "report.md"),
+        "dash": sw("post", "--job", job, "- a line that starts with a dash"),
         "bg": sw("bg", "--", "id"),
     }))
     """)
@@ -712,6 +813,10 @@ class BrokerEndToEndTest(SeatHomeCase):
         sid = str(uuid.uuid4())
         name = sw("join", "--job", "T20", "--key", sid, "--role", "judge", "--judge")
         wt = self.worktree()
+        from swarm import cli as swarm_cli, enrolment
+        from swarm.board.autoinit import store_key
+        enrolment.write(store_key(swarm_cli.load_config(config)), job="T20", agent_key=sid, harness="claude",
+                        session_id=sid, cwd=wt)   # what the seat's (brokered) hooks record when it starts
         (Path(wt) / "seat.py").write_text(FAKE_SEAT)
         with mock.patch("swarm.seatjail.available", lambda: (True, "")):
             argv = seathome.wrap(self.cfg, [sys.executable, "-I", "seat.py", "T20", other], job="T20", seat="judge",
@@ -737,6 +842,20 @@ class BrokerEndToEndTest(SeatHomeCase):
         self.assertEqual(out["verdict"]["rc"], 0, out)
         self.assertIn("recorded", out["verdict"]["out"])
         self.assertEqual(out["bg"]["rc"], 2, out)
+        self.assertEqual(out["dash"]["rc"], 0, out)
+        # review and goal-ready reach the CLI with the files' content (no "cannot read", no "outside the job's
+        # work roots"): this plain board job has no drive ledger, so the drive commands stop there
+        self.assertEqual(out["review"]["rc"], 0, out)          # the report read in the jail, kept privately
+        self.assertIn("swarm-record: kind=review", out["review"]["out"])
+        kept = list((self.priv / "review-reports").iterdir())
+        self.assertEqual([p.read_text() for p in kept], ["all requirements hold"])
+        self.assertTrue(any(name in row and f"REVIEW b@{'a' * 40} VERIFIED report.md" in row for row in
+                            __import__("sqlite3").connect(board_dir / "board.sqlite3").execute(
+                                "select * from messages").fetchall()))
+        for k in ("review", "goal_ready"):
+            self.assertNotIn("cannot read", out[k]["err"], out)
+            self.assertNotIn("outside the job's work roots", out[k]["err"], out)
+            self.assertNotIn("refused in a drive seat", out[k]["err"], out)
         import sqlite3
         with sqlite3.connect(board_dir / "board.sqlite3") as c:
             rows = c.execute("select * from messages").fetchall()

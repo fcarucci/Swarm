@@ -12,6 +12,7 @@ PreToolUse hook attested for this exact command, swarm.person; never an environm
 Kept out of cli.py (a 256 KiB file cap): cli.py only calls register()."""
 from __future__ import annotations
 
+import argparse
 import datetime as _dt
 import hashlib
 import os
@@ -400,7 +401,8 @@ def cmd_review(board, cfg, args) -> int:
     name = board.active_agent_name(key)
     if not name:
         raise Refuse("the reviewing agent is not active on this job")
-    data = _read_regular(args.report, REPORT_MAX, "review report")
+    content = getattr(args, "report_content", None)
+    data = _read_regular(content or args.report, REPORT_MAX, "review report")
     if not data.strip():
         raise Refuse("the review report is empty")
     artifact = args.artifact.strip()
@@ -408,7 +410,31 @@ def cmd_review(board, cfg, args) -> int:
         raise Refuse("--artifact must be one reference without spaces")
     verdict = args.outcome.upper()
     res = board.post(args.job, name, f"REVIEW {artifact} {verdict} {args.report}", None, agent_key=key)
+    if content:
+        _keep_review_report(args.job, res.id, data)
     return _record("review", res.id, 1)
+
+
+REVIEW_REPORTS = "review-reports"
+
+
+def review_report_path(job: str, message_id: int):
+    """Where a brokered review's report is kept (the supervisor's private dir): readable later by the driver and a
+    person, whatever happens to the seat's work tree."""
+    from swarm.supervisor.settings import private_dir
+    return private_dir() / REVIEW_REPORTS / f"{hashlib.sha256(job.encode()).hexdigest()[:16]}-{int(message_id)}.md"
+
+
+def _keep_review_report(job: str, message_id: int, data: bytes) -> None:
+    from swarm import safefs
+    from swarm.supervisor import privfs
+    p = review_report_path(job, message_id)
+    with privfs.dir_fd() as d:
+        sub = safefs.open_sub(d, REVIEW_REPORTS, strict_mode=0o700)
+        try:
+            privfs.write_atomic(sub, p.name, data, durable=True)
+        finally:
+            os.close(sub)
 
 
 def blob_id(data: bytes) -> str:
@@ -418,19 +444,25 @@ def blob_id(data: bytes) -> str:
 
 
 
-def pins_for(bk: str, job: str, led, paths) -> dict:
+def pins_for(bk: str, job: str, led, paths, pinned=()) -> dict:
     """The pin map `led` would hold with `paths` added (nothing changed): each path must lie under the job's
     roots, be a regular file of at most REQUIREMENT_MAX bytes and keep the blob it is pinned at, and the job
-    pins at most PINS_MAX files."""
+    pins at most PINS_MAX files. `pinned`: a seat broker's "PATH\nFILE" pairs (the content it read from PATH)."""
     pins = dict(led.pinned_requirements)
     roots = [os.path.realpath(r) for r in _owner_roots(bk, job)]
-    for path in paths:
-        real = os.path.realpath(os.path.expanduser(path))
+    items = [(p, None) for p in paths]
+    for pair in pinned:
+        path, sep, content = str(pair).partition("\n")
+        if not sep or not os.path.isabs(path) or os.path.normpath(path) != path:
+            raise Refuse("a brokered requirement must be an absolute, normalised path")
+        items.append((path, content))
+    for path, content in items:
+        real = os.path.realpath(os.path.expanduser(path)) if content is None else path
         if len(real) > PIN_PATH_MAX:
             raise Refuse(f"requirement path {real[:80]}... is over {PIN_PATH_MAX} characters: pin a shorter path")
         if not any(_within(real, r) for r in roots):
             raise Refuse(f"requirement {path} is outside the job's work roots")
-        blob = blob_id(_read_regular(path, REQUIREMENT_MAX, "requirement"))
+        blob = blob_id(_read_regular(content or path, REQUIREMENT_MAX, "requirement"))
         if real in pins and pins[real] != blob:
             raise Refuse(f"requirement {path} is pinned at another blob: a pinned requirement cannot be replaced")
         pins[real] = blob
@@ -439,9 +471,9 @@ def pins_for(bk: str, job: str, led, paths) -> dict:
     return pins
 
 
-def core_pins(bk: str, job: str, led, paths) -> bool:
+def core_pins(bk: str, job: str, led, paths, pinned=()) -> bool:
     """The ledger side of pinning (no save): set the pins pins_for() gives. True when the ledger changed."""
-    pins = pins_for(bk, job, led, paths)
+    pins = pins_for(bk, job, led, paths, pinned)
     if pins == led.pinned_requirements:
         return False
     led.pinned_requirements = pins
@@ -454,14 +486,15 @@ def cmd_goal_ready(board, cfg, args) -> int:
     led = _drive_ledger(bk, args.job)
     if not CANDIDATE.fullmatch(args.candidate or ""):
         raise Refuse("--candidate must be REF@SHA or report:<path>@<blob id>")
-    if person.codex_session(os.environ) and pins_for(bk, args.job, led, args.add_requirements or []) != \
+    pinned = getattr(args, "add_requirements_pinned", None) or []
+    if person.codex_session(os.environ) and pins_for(bk, args.job, led, args.add_requirements or [], pinned) != \
             led.pinned_requirements:
         # new pins write the ledger: the driver applies them; the lead posts GOAL-READY once they are applied
         return control_request(board, cfg, args)
     # Codex, no new pins: a board-only record, which counts once the hook's goal_ready receipt names the caller
     who = ("codex" if person.codex_session(os.environ)
            else _lead_or_person(board, bk, args.job, led, os.environ, "goal-ready", args))
-    changed = core_pins(bk, args.job, led, args.add_requirements or [])
+    changed = core_pins(bk, args.job, led, args.add_requirements or [], pinned)
     pins = led.pinned_requirements
     if not pins:
         raise Refuse("a goal-ready needs at least one pinned requirement (--add-requirements PATH)")
@@ -800,9 +833,15 @@ def register(sub, handlers: dict, commands: dict | None = None) -> None:
     rv.add_argument("--job", required=True); rv.add_argument("--artifact", required=True)
     rv.add_argument("outcome", choices=REVIEW_OUTCOMES); rv.add_argument("--report", required=True)
     rv.add_argument("--key", help="the reviewing agent's key")
+    # A jailed seat's broker (Task 20): the report's content, in a file only the supervisor writes; --report is
+    # then the path as the seat typed it (posted, not read here)
+    rv.add_argument("--report-content", help=argparse.SUPPRESS)
     gr = sub.add_parser("goal-ready", help="declare the goal ready for the judge (the lead or a person)")
     gr.add_argument("--job", required=True); gr.add_argument("--candidate", required=True)
     gr.add_argument("--add-requirements", action="append", metavar="PATH")
+    # A jailed seat's broker (Task 20): "PATH\nFILE": the requirement PATH in the seat's work tree (the broker
+    # reached it without following a link), pinned at the content the broker read into FILE
+    gr.add_argument("--add-requirements-pinned", action="append", help=argparse.SUPPRESS)
     handlers.update({"halt": _run(cmd_halt), "unhalt": _run(cmd_unhalt), "seat": _run(cmd_seat),
                      "review": _run(cmd_review), "goal-ready": _run(cmd_goal_ready),
                      "drive": _run(cmd_drive)})

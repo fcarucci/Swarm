@@ -20,13 +20,22 @@ import os
 
 VERSION = 2
 FILE_MAX = 256 * 1024
+REQUIREMENT_MAX = 1024 * 1024   # drive_cli.REQUIREMENT_MAX
 TEXT_MAX = 64 * 1024
 LIST_MAX = 64
 IDENTITY = ("as", "key", "session", "name", "agent", "agent_key", "session_id", "config", "env", "argv")
 
-# command -> {field: (type, option)}. type: "str" | "bool" | "list" (nargs) | "repeat" (a repeatable option) |
-# "file" | "files" (repeatable
-# file option) | ("choice", (...)). option: the CLI option ("--job"), or None for a positional.
+# command -> {field: (type, option)}. type:
+#   "str"     an identifier (job, artifact, sha, model, ...): no leading "-", no control character;
+#   "text"    free text (a summary, a reason, a comment): anything but NUL;
+#   "bool"    a flag; "list" free-text words (a positional, or one option value joined by spaces);
+#   "repeat"  a repeatable identifier option; ("choice", (...)) one of the values;
+#   "file"    a file read in the jail and sent as its content (verdict --details);
+#   "report"  a file sent as {"path": as typed, "content": its content}: the post names the path the seat typed,
+#             the broker keeps the content (review --report);
+#   "paths"   files the BROKER reads from the seat's work tree, without following a link, and pins at the
+#             content it read (goal-ready --add-requirements: the pin is the path in the work tree).
+# option: the CLI option ("--job"), or None for a positional.
 # "id" says which identity the broker injects: "key" (--key <session>), "as" (--as <name>), or None.
 SCHEMA: dict = {
     "post": {"id": "key", "fields": {"job": ("str", "--job"), "to": ("str", "--to"), "message": ("list", None)},
@@ -42,37 +51,38 @@ SCHEMA: dict = {
         "reason": ("list", None), "artifact": ("str", "--artifact"), "details": ("file", "--details"),
         "scope": (("choice", ("artifact", "goal", "ruling")), "--scope"), "open": ("str", "--open"),
         "progress": (("choice", ("yes",)), "--progress"), "candidate": ("str", "--candidate"),
-        "req": ("str", "--req"), "reason_opt": ("str", "--reason"), "next": ("str", "--next")},
+        "req": ("str", "--req"), "reason_opt": ("text", "--reason"), "next": ("text", "--next")},
         "required": ("job", "verdict")},
     "done": {"id": "key", "fields": {"job": ("str", "--job"), "artifact": ("str", "--artifact"),
-                                     "summary": ("str", "--summary"), "branch": ("str", "--branch"),
+                                     "summary": ("text", "--summary"), "branch": ("str", "--branch"),
                                      "sha": ("str", "--sha")}, "required": ("job",)},
     "review": {"id": "key", "fields": {"job": ("str", "--job"), "artifact": ("str", "--artifact"),
                                        "outcome": (("choice", ("verified", "changes")), None),
-                                       "report": ("file", "--report")}, "required": ("job", "outcome")},
+                                       "report": ("report", "--report")},
+               "required": ("job", "outcome", "report")},
     "goal-ready": {"id": None, "fields": {"job": ("str", "--job"), "candidate": ("str", "--candidate"),
-                                          "add_requirements": ("files", "--add-requirements")},
+                                          "add_requirements": ("paths", "--add-requirements")},
                    "required": ("job",)},
     "land": {"id": "key", "fields": {"job": ("str", "--job"), "artifact": ("str", "--artifact")},
              "required": ("job",)},
     "ask": {"id": "key", "fields": {"job": ("str", "--job"), "to": ("str", "--to"), "text": ("list", None),
-                                    "options": ("str", "--options"), "default": ("str", "--default"),
+                                    "options": ("text", "--options"), "default": ("text", "--default"),
                                     "expires": ("str", "--expires"), "blocks": ("str", "--blocks")},
             "required": ("job", "to", "text")},
-    "answer": {"id": "key", "fields": {"id": ("str", None), "text": ("list", None), "option": ("str", "--option"),
-                                       "default": ("bool", "--default"), "comment": ("str", "--comment"),
-                                       "reopen": ("str", "--reopen")}, "required": ("id",)},
+    "answer": {"id": "key", "fields": {"id": ("str", None), "text": ("list", None), "option": ("text", "--option"),
+                                       "default": ("bool", "--default"), "comment": ("text", "--comment"),
+                                       "reopen": ("text", "--reopen")}, "required": ("id",)},
     "seat request": {"id": None, "fields": {
         "job": ("str", "--job"), "seat": ("str", "--seat"), "role": ("str", "--role"), "brief": ("str", "--brief"),
         "model": ("str", "--model"), "harness": (("choice", ("claude", "codex")), "--harness"),
-        "workdir": ("str", "--workdir"), "title": ("str", "--title"), "task": ("str", "--task"),
+        "workdir": ("str", "--workdir"), "title": ("text", "--title"), "task": ("text", "--task"),
         "complexity": (("choice", ("simple", "standard", "complex")), "--complexity")},
         "required": ("job", "role", "brief")},
     "seat list": {"id": None, "fields": {"job": ("str", "--job")}},
     "seat show": {"id": None, "fields": {"job": ("str", "--job"), "seat": ("str", "--seat")}},
     "seat release": {"id": None, "fields": {"job": ("str", "--job"), "seat": ("str", "--seat"),
                                             "withdraw_artifact": ("str", "--withdraw-artifact"),
-                                            "reason": ("str", "--reason")}},
+                                            "reason": ("text", "--reason")}},
     "seat ack": {"id": None, "fields": {"job": ("str", "--job"), "upto": ("str", "--upto"),
                                         "event": ("repeat", "--event")}},
 }
@@ -105,7 +115,7 @@ def _command_parser(command: str) -> _Parser:
             kw = {"action": "store_true"}
         elif typ == "list":
             kw = {"nargs": "+" if name in spec.get("required", ()) or opt else "*"}
-        elif typ in ("files", "repeat"):
+        elif typ in ("paths", "repeat"):
             kw = {"action": "append"}
         elif isinstance(typ, tuple):
             kw = {"choices": typ[1]}
@@ -154,8 +164,10 @@ def parse_cli(argv: list[str], cwd: str, stdin=None) -> dict:
             continue
         if typ == "file":
             v = (stdin.read(FILE_MAX + 1) if stdin is not None else "") if v == "-" else _read_file(v, cwd)
-        elif typ == "files":
-            v = [_read_file(x, cwd) for x in v]
+        elif typ == "report":
+            v = {"path": v, "content": _read_file(v, cwd)}
+        elif typ == "paths":
+            v = [os.path.normpath(os.path.join(cwd, os.path.expanduser(x))) for x in v]
         fields[name] = v
     req = {"v": VERSION, "kind": "cli", "command": command, "fields": fields}
     validate(req)
@@ -167,6 +179,13 @@ def parse_cli(argv: list[str], cwd: str, stdin=None) -> dict:
 def _check_text(name: str, v, limit: int = TEXT_MAX) -> None:
     if not isinstance(v, str) or len(v) > limit or "\x00" in v:
         raise ProtocolError(f"field {name} is not text")
+
+
+def _check_ident(name: str, v) -> None:
+    """An identifier value: text with no control character that does not start with "-"."""
+    _check_text(name, v)
+    if v.startswith("-") or any(ord(c) < 32 or ord(c) == 127 for c in v):
+        raise ProtocolError(f"field {name}: an identifier may not start with '-' or hold control characters")
 
 
 def validate(req) -> tuple[str, dict]:
@@ -189,29 +208,42 @@ def validate(req) -> tuple[str, dict]:
         if typ == "bool":
             if v is not True:
                 raise ProtocolError(f"field {name} is not a flag")
-        elif typ in ("list", "files", "repeat"):
+        elif typ in ("list", "paths", "repeat"):
             if not isinstance(v, list) or not v or len(v) > LIST_MAX:
                 raise ProtocolError(f"field {name} is not a list")
             for x in v:
-                _check_text(name, x, FILE_MAX if typ == "files" else TEXT_MAX)
+                if typ == "list":
+                    _check_text(name, x)
+                else:
+                    _check_ident(name, x)
+                if typ == "paths" and not os.path.isabs(x):
+                    raise ProtocolError(f"field {name}: {x!r} is not an absolute path")
         elif typ == "file":
             _check_text(name, v, FILE_MAX)
+        elif typ == "report":
+            if not isinstance(v, dict) or set(v) != {"path", "content"}:
+                raise ProtocolError(f"field {name} is not a report")
+            _check_ident(name, v["path"])
+            _check_text(name, v["content"], FILE_MAX)
         elif isinstance(typ, tuple):
             if v not in typ[1]:
                 raise ProtocolError(f"field {name} is not one of {typ[1]}")
-        else:
+        elif typ == "text":
             _check_text(name, v)
+        else:
+            _check_ident(name, v)
     missing = [r for r in spec.get("required", ()) if r not in fields]
     if missing:
         raise ProtocolError(f"missing {', '.join(missing)}")
     return command, fields
 
 
-def build_argv(command: str, fields: dict, *, key: str | None, name: str | None, file_path) -> list[str]:
-    """The CLI argv the broker runs for a validated request: options first (each value a separate argument
-    that is never read as an option: a value starting with "-" is refused), then the seat's identity, then
-    positionals after "--". `file_path(content)` stores a file field's content where only the supervisor
-    can write and returns that path."""
+def build_argv(command: str, fields: dict, *, key: str | None, name: str | None, file_path,
+               report=None, requirement=None) -> list[str]:
+    """The CLI argv the broker runs for a validated request: every option as ONE `--opt=value` argument (argparse
+    never reads a value as an option), then the seat's identity, then positionals after "--". `file_path(content)`
+    stores a file field's content where only the supervisor can write and returns that path; `report(path,
+    content)` and `requirement(path)` give the arguments of a report and of each requirement (the broker's)."""
     spec = SCHEMA[command]
     argv = command.split(" ")
     positional: list[str] = []
@@ -221,31 +253,33 @@ def build_argv(command: str, fields: dict, *, key: str | None, name: str | None,
         v = fields[fname]
         if opt is None:
             positional += v if isinstance(v, list) else [v]
-            continue
-        if typ == "bool":
+        elif typ == "bool":
             argv.append(opt)
         elif typ == "file":
-            argv += [opt, file_path(v)]
-        elif typ == "files":
-            for content in v:
-                argv += [opt, file_path(content)]
-        elif typ in ("list", "repeat"):
-            for x in v:
-                if x.startswith("-"):
-                    raise ProtocolError(f"field {fname}: a value may not start with '-'")
-            argv += [opt, *v] if typ == "list" else [a for x in v for a in (opt, x)]
+            argv.append(f"{opt}={file_path(v)}")
+        elif typ == "report":
+            if report is None:
+                raise ProtocolError(f"{command}: no report handler")
+            argv += report(v["path"], v["content"])
+        elif typ == "paths":
+            if requirement is None:
+                raise ProtocolError(f"{command}: no requirement handler")
+            for path in v:
+                argv += requirement(path)
+        elif typ == "list":
+            argv.append(f"{opt}={' '.join(v)}")
+        elif typ == "repeat":
+            argv += [f"{opt}={x}" for x in v]
         else:
-            if v.startswith("-"):
-                raise ProtocolError(f"field {fname}: a value may not start with '-'")
-            argv += [opt, v]
+            argv.append(f"{opt}={v}")
     if spec["id"] == "key":
         if not key:
             raise ProtocolError("the seat's session is not known yet")
-        argv += ["--key", key]
+        argv.append(f"--key={key}")
     elif spec["id"] == "as":
         if not name:
             raise ProtocolError("the seat's name is not known")
-        argv += ["--as", name]
+        argv.append(f"--as={name}")
     if positional:
         argv += ["--", *positional]
     return argv

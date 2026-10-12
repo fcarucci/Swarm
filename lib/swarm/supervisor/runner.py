@@ -818,12 +818,9 @@ def _keep_seat_transcript(run: dict) -> None:
     and let finish capture it from there."""
     from swarm.supervisor import privfs, seatbroker
     from swarm.supervisor.settings import log
-    src = seatbroker.seat_transcript(run["seat_home"], run.get("harness") or "claude",
-                                     run.get("agent_key") or run.get("session_id"))
-    if not src:
-        return
     try:
-        data = seatbroker.read_seat_file(src, SEAT_TRANSCRIPT_MAX)
+        data = seatbroker.read_seat_transcript(run["seat_home"], run.get("harness") or "claude",
+                                               run.get("agent_key") or run.get("session_id"), SEAT_TRANSCRIPT_MAX)
         if data is None:
             return
         name = f"r{run['restart_id']}.transcript.jsonl"
