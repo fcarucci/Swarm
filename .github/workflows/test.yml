@@ -4,6 +4,8 @@ on:
   push:
     branches-ignore:
       - "release/**"
+    tags:
+      - "v*"
   pull_request:
   workflow_dispatch:
     inputs:
@@ -19,13 +21,14 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Never cancel main, int/rc or tag runs; superseded runs on every other ref free their runners.
+  cancel-in-progress: ${{ !(github.ref == 'refs/heads/main' || github.ref == 'refs/heads/int/rc' || startsWith(github.ref, 'refs/tags/v')) }}
 
-# CI is the bottleneck while many feat/drive-* seat branches push at once: those branches run a
-# REDUCED matrix (ubuntu, Python 3.13, memory + sqlite, and the real-Postgres job). The full matrix
-# (every backend and Python, Windows, macOS, the complexity-analyzer skill, the install checks)
-# runs on everything else: feat/swarm-autonomy, preview/*, main, pull requests and dispatches.
-# A newer push to the same ref cancels the older run (concurrency above).
+# macOS and Windows (the `windows` and `macos` jobs and the complexity-analyzer windows/macos cells)
+# run only when releasing: pushes to main and int/rc, v* tags, workflow_dispatch / workflow_call
+# (the release workflow), and pull requests targeting main (the main ruleset requires those checks).
+# Every other ref (feat/*, fix/*, ci/*, other int/*) runs Linux only. Job and check names are
+# unchanged so the required status contexts still match when the jobs run.
 jobs:
   # Backend contract + hook/CLI suite, on every offline backend and both the minimum and the
   # latest supported Python (README "Requirements": 3.11 or newer).
@@ -34,13 +37,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        backend: ${{ fromJSON(startsWith(github.ref, 'refs/heads/feat/drive-') && '["memory","sqlite"]' || '["memory","sqlite","file"]') }}
-        python-version: ${{ fromJSON(startsWith(github.ref, 'refs/heads/feat/drive-') && '["3.13"]' || '["3.11","3.13"]') }}
-        # The oldest supported Python on the memory backend always runs (on the full matrix this entry is
-        # already one of its cells): 3.11-only breakages (argparse, f-string quoting) must fail seat CI too.
-        include:
-          - backend: memory
-            python-version: "3.11"
+        backend: [memory, sqlite, file]
+        python-version: ["3.11", "3.13"]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -64,7 +62,7 @@ jobs:
   # Native Windows: the unit suite on the offline backends. POSIX-only tests carry skip markers
   # with a reason; nothing is skipped on Linux.
   windows:
-    if: ${{ !startsWith(github.ref, 'refs/heads/feat/drive-') }}
+    if: ${{ (github.event_name == 'workflow_call' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/int/rc' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'pull_request' && github.base_ref == 'main')) }}
     runs-on: windows-latest
     defaults:
       run:
@@ -98,7 +96,7 @@ jobs:
   # exercises it end to end. Also runs the unit suite on sqlite, the backend the e2e script uses
   # nowhere but that is otherwise only covered on Linux above.
   macos:
-    if: ${{ !startsWith(github.ref, 'refs/heads/feat/drive-') }}
+    if: ${{ (github.event_name == 'workflow_call' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/int/rc' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'pull_request' && github.base_ref == 'main')) }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -216,7 +214,6 @@ jobs:
         run: cd tests && python -B -m unittest test_stall.PostgresFollowRecoveryTests -v
 
   complexity-analyzer:
-    if: ${{ !startsWith(github.ref, 'refs/heads/feat/drive-') }}
     defaults:
       run:
         shell: bash
@@ -224,7 +221,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: ${{ fromJSON((github.event_name == 'workflow_call' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/int/rc' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'pull_request' && github.base_ref == 'main')) && '["ubuntu-latest","windows-latest","macos-latest"]' || '["ubuntu-latest"]') }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -240,7 +237,6 @@ jobs:
           python -B -m pytest -q -p no:cacheprovider skills/complexity-analyzer/tests --ignore=skills/complexity-analyzer/tests/fixtures 2>&1 | tee skill-test.log || { python .github/scripts/annotate.py skill-test.log; exit 1; }
 
   install-checks:
-    if: ${{ !startsWith(github.ref, 'refs/heads/feat/drive-') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
