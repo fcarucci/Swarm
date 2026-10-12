@@ -1388,6 +1388,21 @@ class CodexControlRequests(ControlCase):
                          (before.brief_path, before.revision, before.requested_by))
         self.assertEqual(drivegate.record_of({"tool_response": out}), ("seat", after.id, after.revision))
 
+    def test_a_request_below_the_floor_is_refused_as_expired_once(self):
+        """A request that falls below ctlreq-floor before it is decided is refused out loud and used up."""
+        from swarm import drive_control
+        self.assertEqual(self.run_cmd("halt", "--job", JOB)[0], 0)
+        self.codex(REQ_SESSION, "unhalt", "--job", JOB)
+        mid = max(m.id for m in self.board.messages_after(0, JOB) if m.message.startswith("CONTROL-REQUEST "))
+        led = ledger.load(self.bkey, JOB)
+        led.watermarks[drive_control.FLOOR] = mid                   # later decisions pushed the floor past it
+        led.save()
+        self.assertEqual(self.driver(), [])
+        self.assertEqual(self.posts("CONTROL-REFUSED"), [f"CONTROL-REFUSED {mid} expired-below-floor"])
+        self.assertEqual(self.driver(), [])                          # said once: the receipt is used up
+        self.assertEqual(len(self.posts("CONTROL-REFUSED")), 1)
+        self.assertIsNotNone(ledger.load(self.bkey, JOB).halted)
+
     def test_a_claude_session_keeps_the_direct_path(self):
         self.assertEqual(self.run_cmd("halt", "--job", JOB)[0], 0)
         rc, out, err = self.run_cmd("unhalt", "--job", JOB)
