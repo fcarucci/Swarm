@@ -12,6 +12,7 @@ import unittest
 from unittest import mock
 
 import support  # noqa: F401
+from support import add_backend_variants, subclasses_of
 from swarm import land, land_cli
 from swarm.supervisor import mirror
 
@@ -34,13 +35,15 @@ def run(fn, *a):
 
 
 class LandCli(unittest.TestCase):
+    harness_factory = staticmethod(support.drive_backends()["memory"])
     def setUp(self):
         self.root = os.path.realpath(tempfile.mkdtemp(prefix="landcli-", dir=support.SANDBOX))
         self.addCleanup(shutil.rmtree, self.root, True)
         p = mock.patch.dict(os.environ, support.home_env(self.root))
         p.start()
         self.addCleanup(p.stop)
-        self.h = support.MemoryHarness()
+        self.h = self.harness_factory(self.id().rsplit(".", 1)[0])
+        self.addCleanup(self.h.close)
         self.h.reset()
         self.board = self.h.board()
         self.addCleanup(self.board.close)
@@ -226,6 +229,9 @@ class HostsAdd(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("no host keys", err.getvalue())
         self.assertFalse(self.trusted())
+
+
+add_backend_variants(globals(), LandCli)
 
 
 if __name__ == "__main__":

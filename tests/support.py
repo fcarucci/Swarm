@@ -672,6 +672,29 @@ def drive_backends() -> dict:
     return backends
 
 
+def subclasses_of(namespace: dict, base: type) -> list:
+    """The classes of the module `namespace` (its globals()) that derive from `base`, `base` itself excluded."""
+    return [c for c in list(namespace.values())
+            if isinstance(c, type) and issubclass(c, base) and c is not base
+            and c.__module__ == namespace["__name__"]]
+
+
+MEMORY_ONLY = "memory-only: raw row forgery"     # the skip reason drive_pg_summary accepts (prefix "memory-only:")
+
+
+def memory_store_only(test):
+    """A test that forges rows through the memory store's internals (`self.h.store`): it runs on the
+    memory and file backends, and skips elsewhere with the reason the CI summary allow-lists."""
+    import functools
+
+    @functools.wraps(test)
+    def wrapper(self, *a, **kw):
+        if not hasattr(self.h, "store"):
+            self.skipTest(MEMORY_ONLY)
+        return test(self, *a, **kw)
+    return wrapper
+
+
 def add_backend_variants(namespace: dict, *cases: type, skip: tuple = ("memory",)) -> None:
     """For every case class (a TestCase whose harness comes from `self.harness_factory(key)`) add to
     `namespace` (the module's globals()) one subclass per backend of drive_backends() not in `skip`

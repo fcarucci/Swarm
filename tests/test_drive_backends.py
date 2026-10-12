@@ -180,7 +180,9 @@ class PostgresStepSummary(unittest.TestCase):
 
     def test_a_skip_is_a_problem_unless_it_is_windows_or_systemd_only(self):
         for reason, bad in (("skipped 'needs a database'", True), ("skipped 'Windows has no fcntl'", False),
-                            ("skipped 'needs systemd --user'", False)):
+                            ("skipped 'needs systemd --user'", False),
+                            ("skipped 'memory-only: raw row forgery'", False),
+                            ("skipped 'not memory-only: raw row forgery'", True)):
             log = self.good() + _log(("test_drive_b.Other.test_z", reason))
             got = self.problems(log)
             self.assertEqual(bool(got), bad, reason)
