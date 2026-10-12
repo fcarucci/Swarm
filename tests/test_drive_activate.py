@@ -48,6 +48,13 @@ class FakePerson:
     tty = True
     seat_sessions = ()
 
+    class PersonRefused(PermissionError):
+        """6b's swarm.person.PersonRefused, which drive_cli's dispatcher catches."""
+
+    @staticmethod
+    def forget():
+        """6b's swarm.person.forget (drop a cached caller): nothing is cached here."""
+
     @classmethod
     def require(cls, action, job, *, board_key, env=None, confirm=None):
         from swarm import enrolment as en, hosts as ho
