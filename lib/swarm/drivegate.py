@@ -962,8 +962,7 @@ def simple_call(command: str):
             k += 2
             continue
         if t in ("|", "&&"):
-            tail = rest[k + 1:]
-            return argv if tail and not any(x in (";", "&", "||", "\n", "(", ")") for x in tail) else None
+            return argv                        # what follows a pipe or && cannot keep the swarm call from running
         return None
     return argv
 
