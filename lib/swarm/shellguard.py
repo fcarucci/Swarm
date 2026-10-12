@@ -1626,13 +1626,30 @@ def _swarm_launchers() -> set[str]:
         return set()
 
 
-def _venv_entry(path: str) -> bool:
-    """Whether `path` is a virtualenv entry point: a file in <venv>/bin (Scripts on Windows) whose <venv>/pyvenv.cfg
-    exists (`source .venv/bin/activate`, `.venv/bin/pytest`). Running the venv's code is what `python -m` does too."""
+# programs a virtualenv's bin may not hold (or shadow on PATH): what the guard checks by name
+_GUARDED_NAMES = _SHELLS | {"git", "gh", "ssh", "scp", "sftp", "rsync", "claude", "codex", "sudo", "doas", "env",
+                            "xargs", "parallel", "at", "batch", "crontab", "swarm", "npx", "busybox", "toybox"}
+
+
+def _venv_bin_ok(d: str) -> bool:
+    """Whether directory `d` is a virtualenv's bin (Scripts on Windows): <venv>/pyvenv.cfg exists, and no file in it
+    is named like a program the guard checks (git, gh, ssh, a shell, claude, codex, ...): a venv that shadows one is a
+    seat-made trap, not a virtualenv."""
     try:
-        d = os.path.dirname(os.path.abspath(path))
-        return os.path.basename(d) in ("bin", "Scripts") and os.path.isfile(os.path.join(os.path.dirname(d),
-                                                                                        "pyvenv.cfg"))
+        d = os.path.abspath(d)
+        if os.path.basename(d) not in ("bin", "Scripts") or not os.path.isfile(
+                os.path.join(os.path.dirname(d), "pyvenv.cfg")):
+            return False
+        return not any(_norm(n) in _GUARDED_NAMES for n in os.listdir(d))
+    except Exception:
+        return False
+
+
+def _venv_entry(path: str) -> bool:
+    """Whether `path` is a virtualenv entry point: a file in a virtualenv's bin (_venv_bin_ok), such as
+    `source .venv/bin/activate` or `.venv/bin/pytest`. Running the venv's code is what `python -m` does too."""
+    try:
+        return _venv_bin_ok(os.path.dirname(os.path.abspath(path)))
     except Exception:
         return False
 
@@ -1648,7 +1665,7 @@ def _path_value_refusal(value) -> str | None:
         d = os.path.normpath(os.path.expanduser(entry))
         if not os.path.isabs(d):
             return f"the PATH entry {entry!r} is relative: a program there could be one the seat wrote"
-        if _venv_entry(os.path.join(d, "python")):
+        if _venv_bin_ok(d):
             continue
         if not os.path.isdir(d) or os.access(d, os.W_OK):
             return f"the PATH entry {entry!r} is a directory the seat can write: a program there could be one it wrote"
@@ -1765,7 +1782,7 @@ def _cd(cands, prog: str, args: list[str], command: str, wrappers=frozenset()):
 # ~/.ssh/config: each changes what a later, innocent-looking command does. Write, Edit, MultiEdit, NotebookEdit,
 # apply_patch and the shell's writers (a redirection, tee, cp, mv, ...) may not touch them in a drive seat.
 
-_GIT_DIR_PROTECTED = re.compile(r"(?:config|config\.worktree|hooks|info|commondir|gitdir)(?:/.*)?")
+_GIT_DIR_PROTECTED = re.compile(r"(?:config|config\.worktree|hooks|info|commondir|gitdir|remotes|branches)(?:/.*)?")
 _PROTECTED_TEXT = re.compile(r"(?:^|[/\s'\"=])(?:\.git/(?:config|hooks|info|commondir)|\.gitmodules|\.gitconfig|"
                              r"\.ssh/|\.config/(?:git|gh)/)")
 _FILE_WRITERS = frozenset(("tee", "cp", "mv", "install", "ln", "touch", "truncate", "dd", "rsync", "patch", "sed",
@@ -1843,6 +1860,61 @@ def protected_path_reason(path, cwd=None) -> str | None:
     return None
 
 
+def _protected_name(name) -> bool:
+    """A variable a drive seat may not set by any means: where git and gh read configuration, PATH, every GIT_*, and
+    the variables that load or name code (BASH_ENV, LD_PRELOAD, GIT_EDITOR, PAGER, ...)."""
+    n = re.sub(r"\[.*$", "", str(name))
+    return bool(n) and (n == "PATH" or n.startswith("GIT_") or bool(_ENV_CONFIG.fullmatch(n)) or
+                        bool(_ENV_REFUSED.fullmatch(n)) or n in _ENV_SHELL or n in _ENV_SSH or n in _ENV_PROGRAM)
+
+
+_SETS_VALUE_OPTS = {"read": set("dinNptu"), "mapfile": set("dnOsuCc"), "readarray": set("dnOsuCc")}
+_PARAM_ASSIGN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*):?[=]")
+
+
+def _builtin_sets(prog: str, args: list[str]) -> str | None:
+    """The protected variable a builtin sets without a NAME= word (printf -v, read, mapfile, declare -n, let, for,
+    select, getopts, wait -p, unset), or None."""
+    targets: list[str] = []
+    if prog == "printf":
+        for k, a in enumerate(args):
+            if a == "-v" and k + 1 < len(args):
+                targets.append(args[k + 1])
+            elif a.startswith("-v") and len(a) > 2:
+                targets.append(a[2:])
+    elif prog in _SETS_VALUE_OPTS:
+        values, k = _SETS_VALUE_OPTS[prog], 0
+        while k < len(args):
+            a = args[k]
+            if a.startswith("-") and len(a) > 1 and a != "--":
+                if a[1] == "a" and prog == "read":
+                    targets.append(a[2:] or (args[k + 1] if k + 1 < len(args) else ""))
+                    k += 1 if len(a) > 2 else 2
+                    continue
+                k += 2 if (len(a) == 2 and a[1] in values) else 1
+                continue
+            targets.append(a)
+            k += 1
+    elif prog in ("declare", "typeset", "local", "export", "readonly", "unset"):
+        nameref = any(a.startswith("-") and "n" in a[1:] for a in args)
+        for a in args:
+            if not a.startswith("-"):
+                name, eq, value = a.partition("=")
+                if not eq:
+                    targets.append(name)         # NAME=value is an assignment, checked like any other
+                if nameref and eq:
+                    targets.append(value)        # declare -n R=HOME: R is HOME
+    elif prog == "let":
+        targets += [m.group(1) for a in args for m in [re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*[-+*/%^|&<>]*=", a)] if m]
+    elif prog in ("for", "select") and args:
+        targets.append(args[0])
+    elif prog == "getopts" and len(args) >= 2:
+        targets.append(args[1])
+    elif prog == "wait":
+        targets += [args[k + 1] for k, a in enumerate(args[:-1]) if a == "-p"]
+    return next((t for t in targets if _protected_name(t)), None)
+
+
 def _configured_push_refusal(rest: list[str], cdir, cwd) -> str | None:
     """A push that names no refspec pushes what the configuration says: refused when that is a configured push
     refspec (remote.<name>.push) or a push.default other than simple/current/nothing (upstream, matching)."""
@@ -1859,8 +1931,17 @@ def _configured_push_refusal(rest: list[str], cdir, cwd) -> str | None:
         k += 1
     if len(pos) > 1 or not isinstance(cwd, str) or not cwd:
         return None
-    where = cdir if cdir and os.path.isabs(os.path.expanduser(cdir)) else os.path.join(cwd, cdir or "")
-    out = _git_out(os.path.expanduser(where), "config", "--get-regexp", r"^(remote\..*\.push|push\.default)$")
+    where = os.path.expanduser(cdir if cdir and os.path.isabs(os.path.expanduser(cdir)) else os.path.join(cwd, cdir or ""))
+    common = (_git_out(where, "rev-parse", "--git-common-dir") or "").strip()
+    if common:
+        common = common if os.path.isabs(common) else os.path.join(where, common)
+        for legacy in ("remotes", "branches"):        # git still reads .git/remotes/<name> and .git/branches/<name>
+            d = os.path.join(common, legacy)
+            names = [n for n in (os.listdir(d) if os.path.isdir(d) else []) if not n.startswith(".")]
+            if names and (not pos or pos[0] in names):
+                return (f"a push that names no refspec to a remote defined in .git/{legacy}/ is refused: name the "
+                        "remote and the branch (git push origin <branch>)")
+    out = _git_out(where, "config", "--get-regexp", r"^(remote\..*\.push|push\.default)$")
     for line in (out or "").splitlines():
         key, _sep, value = line.partition(" ")
         if key.endswith(".push") and key.startswith("remote."):
@@ -1923,6 +2004,9 @@ def drive_command_refusal(command: str, targets=(), *, branch_of=None, cwd=None)
             names = lazy() if callable(lazy) else lazy
             done.append({t.removeprefix("refs/heads/").lower() for t in names if isinstance(t, str) and t})
         return done[0]
+    m = next((m for m in _PARAM_ASSIGN.finditer(command) if _protected_name(m.group(1))), None)
+    if m:
+        return f"setting {m.group(1)} through ${{{m.group(1)}:=...}} is refused in a drive seat"
     for text in _nested_scripts(command):
         for words in split_commands(text):
             if any(_GIT_ENV.match(w) for w in words):
@@ -1959,6 +2043,10 @@ def drive_command_refusal(command: str, targets=(), *, branch_of=None, cwd=None)
                 why = protected_path_reason(a, cwd)
                 if why:
                     return why
+        name = _builtin_sets(prog, args)
+        if name:
+            return (f"setting {name} is refused in a drive seat (it changes where git, gh or the shell find their "
+                    "configuration or programs)")
         if prog in ("cd", "pushd", "popd"):
             cands = _cd(cands, prog, args, command, wrappers)
             continue
