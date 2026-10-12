@@ -508,6 +508,8 @@ def cmd_drive_repair(board, cfg, args) -> int:
                             board_finished=_board_finished(board, args.job))
     except ledger.LedgerExistsError as exc:
         raise Refuse(f"{exc}: run the repair again")
+    except ledger.LedgerBadError as exc:   # e.g. no rename relative to a directory (Windows: no drive mode)
+        raise Refuse(f"drive repair cannot run here: {exc}")
     except ValueError as exc:
         raise Refuse(str(exc))
     if rep.archived:
