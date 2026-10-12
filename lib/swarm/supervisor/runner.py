@@ -897,12 +897,30 @@ def _seat_argv(cfg: dict, run: dict) -> tuple[list, str | None]:
     from swarm.supervisor import seathome
     seat = str(run.get("seat") or run["name"])
     try:
-        wrapped = seathome.wrap(cfg, argv, job=run["job"], seat=seat, workdir=run["cwd"])
+        launched, env, mode = seathome.launch(cfg, argv, job=run["job"], seat=seat, workdir=run["cwd"])
     except (seathome.SeatIsolationError, OSError) as exc:
         return argv, str(exc)
-    if wrapped != argv:   # jailed: its broker serves the seat's directory
+    run["seat_mode"] = mode
+    if mode != "off":   # jailed or best-effort: its broker serves the seat's directory
         run["seat_home"] = str(seathome.home_dir(run["job"], seat))
-    return wrapped, None
+    if env is not None:
+        run["seat_env"] = env
+        _note_best_effort()
+    return launched, None
+
+
+_BEST_EFFORT_LOGGED = False
+
+
+def _note_best_effort() -> None:
+    """Log once per process that seats here are best-effort (no filesystem jail)."""
+    global _BEST_EFFORT_LOGGED
+    if _BEST_EFFORT_LOGGED:
+        return
+    _BEST_EFFORT_LOGGED = True
+    from swarm.supervisor import seathome
+    from swarm.supervisor.settings import log
+    log("seat isolation: " + seathome.BEST_EFFORT_NOTE.format(platform=sys.platform))
 
 
 SEAT_TRANSCRIPT_MAX = 64 * 1024 * 1024
@@ -1349,6 +1367,9 @@ def _execute(cfg: dict, run: dict, *, popen, clock, sleep, poll: float, board_ev
     else:   # its own process group (start_new_session), every member tagged with RUN_ENV; Windows: a Job Object
         run.update(unit=None, contained="job" if compat.IS_WINDOWS else "group", launch_epoch=time.time())
         argv = list(seat_argv)
+    if run.get("seat_env"):   # a best-effort seat (no jail): the allowlist, no credential helper, its broker
+        from swarm.supervisor import seathome
+        env = seathome.best_effort_child_env(env, run["seat_env"], run["seat_home"])
     write_run(run)   # the unit name is known before anything runs in it
     fd_err = _fresh_output(f"r{rid}.err", run["board"])
     try:
@@ -1469,7 +1490,7 @@ def _execute(cfg: dict, run: dict, *, popen, clock, sleep, poll: float, board_ev
         t.join(5)
         if proc.returncode == 0:
             outcome = "completed"
-        elif run.get("seat_home") and proc.returncode == JAIL_UNAVAILABLE:
+        elif run.get("seat_home") and run.get("seat_mode") == "required" and proc.returncode == JAIL_UNAVAILABLE:
             outcome = "refused"   # the jail could not be built: nothing ran (not an attempt to retry blindly)
             run["refused_reason"] = "the seat's jail could not be built (seatjail exit 125)"
         else:
