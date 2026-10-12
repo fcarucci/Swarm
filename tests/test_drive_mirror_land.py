@@ -25,9 +25,13 @@ def _read(path):
 
 
 def pack_cmd(kind):
-    git_bin = mirror._resolve("git")
-    return (f"--{kind}-pack={shlex.quote(git_bin)} -c core.hooksPath=/dev/null -c core.fsmonitor=false "
-            f"-c core.alternateRefsCommand=true -c receive.denyCurrentBranch=refuse {kind}-pack")
+    """Written out literally (not via gitpin): the exact command a local destination's pack program runs as."""
+    parts = [mirror._resolve("git")]
+    for item in ("core.hooksPath=/dev/null", "core.fsmonitor=false", "core.alternateRefsCommand=",
+                 "receive.denyCurrentBranch=refuse", "receive.denyDeleteCurrent=refuse"):
+        parts += ["-c", item]
+    parts.append(f"{kind}-pack")
+    return f"--{kind}-pack=" + " ".join(shlex.quote(p) for p in parts)
 
 
 def mirror_receive_pack():
@@ -426,9 +430,9 @@ class LocalHooks(PushCase):
             if any(w in cmd for w in ("fetch", "ls-remote")):
                 self.assertIn(pack_cmd("upload"), cmd)
                 self.assertEqual(cmd[cmd.index("--") + 1], m.url)
-        self.assertEqual(Mirror("https://example.test/o/r.git", {"kind": "ssh-agent", "socket": SOCK})._pack("upload"), [])
-        self.assertEqual(Mirror("git@example.test:o/r.git", {"kind": "ssh-agent", "socket": SOCK})._pack("receive"), [])
-        self.assertTrue(Mirror("file://" + self.remote, {"kind": "none"})._pack("receive"))
+        self.assertEqual(Mirror("https://example.test/o/r.git", {"kind": "ssh-agent", "socket": SOCK})._pack("fetch"), [])
+        self.assertEqual(Mirror("git@example.test:o/r.git", {"kind": "ssh-agent", "socket": SOCK})._pack("push"), [])
+        self.assertTrue(Mirror("file://" + self.remote, {"kind": "none"})._pack("push"))
 
     def test_none_credential_only_for_the_suite_or_the_private_directory(self):
         Mirror(self.remote, {"kind": "none"})                  # creates the private directory (mode 0700)
@@ -462,15 +466,24 @@ class LocalDestinations(PushCase):
         return inside
 
     def test_percent_encoded_traversal_out_of_the_private_directory_is_refused(self):
+        plain = self.bare_inside("plain.git")
         with self.outside():
             root = os.path.join(str(mirror.private_dir()), "mirrors")
             rel = os.path.relpath(self.remote, root)
             encoded = "/".join("%2e%2e" if part == ".." else part for part in rel.split(os.sep))
-            for url in ("file://" + root + "/" + encoded, "file://" + root + "/" + rel.replace("..", "%2E%2E"),
-                        "file://" + root + "/" + rel):
+            for url in ("file://" + root + "/" + encoded, "file://" + root + "/" + rel.replace("..", "%2E%2E")):
                 with self.subTest(url=url), self.assertRaises(MirrorError) as cm:
                     Mirror(url, {"kind": "none"})
-                self.assertIn("private directory", str(cm.exception))
+                self.assertIn("%", str(cm.exception))                # gitpin: git percent-decodes file:// paths
+            for url in ("file://" + root + "/" + rel, os.path.join(root, rel)):   # plain traversal
+                with self.subTest(url=url), self.assertRaises(MirrorError):
+                    Mirror(url, {"kind": "none"})
+            outside_rel = os.path.relpath(self.remote, os.path.dirname(plain))
+            with self.assertRaises(MirrorError):
+                Mirror(os.path.join(os.path.dirname(plain), outside_rel), {"kind": "none"})   # resolves outside
+            with self.assertRaises(MirrorError) as cm:
+                Mirror(self.remote, {"kind": "none"})
+            self.assertIn("private directory", str(cm.exception))
 
     def test_every_credential_kind_obeys_the_private_directory_rule_for_a_local_path(self):
         creds = [{"kind": "none"}, {"kind": "ssh-agent", "socket": SOCK},
@@ -510,6 +523,16 @@ class LocalDestinations(PushCase):
         with self.outside(), self.assertRaises(MirrorError):
             Mirror(inside, {"kind": "none"})
 
+    def test_a_bare_looking_directory_whose_config_says_otherwise_is_refused(self):
+        for key, value in (("core.bare", "false"), ("core.worktree", self.root)):
+            dest = self.bare_inside(f"cfg-{key.split('.')[1]}.git")
+            git(dest, "config", key, value)
+            with self.subTest(key=key), self.assertRaises(MirrorError) as cm:
+                Mirror(dest, {"kind": "none"})
+            self.assertIn(key, str(cm.exception))
+        ok_dest = self.bare_inside("ok.git")
+        Mirror(ok_dest, {"kind": "none"})
+
     @support.posix_only("shell hooks")
     def test_alternate_refs_command_in_the_destination_config_does_not_run(self):
         marker = os.path.join(self.root, "ALT-RAN")
@@ -539,11 +562,9 @@ class LocalDestinations(PushCase):
     def test_the_pack_commands_pin_every_destination_setting(self):
         m = self.mirror()
         for kind in ("upload", "receive"):
-            (arg,) = m._pack(kind)
-            for item in ("core.hooksPath=/dev/null", "core.fsmonitor=false", "core.alternateRefsCommand=true",
-                         "receive.denyCurrentBranch=refuse"):
-                self.assertIn(f"-c {item}", arg)
-            self.assertTrue(arg.endswith(f"{kind}-pack"))
+            (arg,) = m._pack("push" if kind == "receive" else "fetch")
+            self.assertEqual(arg, pack_cmd(kind))
+        self.assertEqual(m._pack("ls-remote"), [pack_cmd("upload")])
 
 
 class GitpinUse(MirrorCase):
@@ -564,6 +585,22 @@ class GitpinUse(MirrorCase):
                 i = cmd.index(remote)
                 self.assertEqual(cmd[i - 1], "--", cmd)
                 self.assertNotIn("--", cmd[:i - 1][cmd.index("--git-dir"):] if False else [])
+
+    def test_the_url_is_checked_again_at_every_call(self):
+        remote, _ = self.remote_with_main()
+        m = Mirror(remote, {"kind": "none"})
+        m.url = "--upload-pack=x"
+        calls = []
+        with spy(calls), self.assertRaises(MirrorError) as cm:
+            m.ls_remote(30)
+        self.assertIn("'-'", str(cm.exception))
+        self.assertEqual(calls, [])
+
+    def test_decoded_control_characters_in_a_local_path_are_refused(self):
+        for tail in ("%0A", "%0d", "%00", "%1b"):
+            with self.subTest(tail=tail), self.assertRaises(MirrorError) as cm:
+                Mirror("file://" + os.path.join(self.root, "a" + tail + "b.git"), {"kind": "none"})
+            self.assertIn("%", str(cm.exception))
 
     def test_gitpin_decides_which_urls_are_acceptable(self):
         for url in ("--upload-pack=sh", "ext::sh -c x", "https://u:p@example.test/r", "http://example.test/r",

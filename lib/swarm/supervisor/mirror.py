@@ -32,7 +32,7 @@ import signal
 import subprocess
 import time
 from collections import Counter
-from urllib.parse import unquote, urlsplit
+from urllib.parse import urlsplit
 
 from swarm import gitpin
 from swarm.supervisor import privfs
@@ -151,31 +151,28 @@ def _check_url(url, loopback_http: bool) -> str:
     return url
 
 
-def _local_repo(url: str) -> str | None:
-    """The real path of a local destination (a path or file:// URL, percent-decoded the way git decodes it
-    before the path is resolved), or None for a network URL."""
-    if url.startswith("file://"):
-        path = unquote(urlsplit(url).path)
-    elif "://" not in url and ssh_host_of(url) is None:
-        path = url
-    else:
-        return None
-    if not gitpin.no_controls(path):
-        raise MirrorError("a local destination path must not contain control characters")
-    return os.path.realpath(path)
-
-
-def _check_local(real: str) -> None:
+def _check_local(url: str) -> None:
     """A local destination is written by whoever can write its directory (the integrator pushes its branch there),
-    so outside the test suite only the supervisor's private directory is trusted, whatever the credential kind; and
-    it must be a bare repository (a work tree would run config and filters on update)."""
-    if not os.environ.get(TEST_MARKER):
-        root = os.path.realpath(str(private_dir()))
-        if not (real == root or real.startswith(root + os.sep)):
-            raise MirrorError("a local destination must lie in the supervisor's private directory")
+    so outside the test suite only the supervisor's private directory is trusted, whatever the credential kind (gitpin.locality
+    decides from the URL alone, decoded the way git decodes it); and it must be a bare repository (a work tree would
+    run config and filters on update)."""
+    try:
+        _, under = gitpin.locality(url, str(private_dir()))
+        real = gitpin.resolve_local(url)
+    except gitpin.GitPinError as exc:
+        raise MirrorError(str(exc)) from exc
+    if not under and not os.environ.get(TEST_MARKER):
+        raise MirrorError("a local destination must lie in the supervisor's private directory")
     if os.path.exists(os.path.join(real, ".git")) or not (
             os.path.isfile(os.path.join(real, "HEAD")) and os.path.isdir(os.path.join(real, "objects"))):
         raise MirrorError("a local destination must be a bare repository")
+    # The directory layout is not proof: its own config decides whether git treats it as bare.
+    for key, want in (("core.bare", "true"), ("core.worktree", None)):
+        proc = _tool(gitpin.git_argv(_resolve("git"), "--git-dir", real, "config", "--get", key), 10,
+                     gitpin.git_env(home=str(private_dir()), path=_system_path()))
+        value = proc.stdout.decode("utf-8", "replace").strip()
+        if (want is None and value) or (want is not None and value not in ("", want)):
+            raise MirrorError(f"a local destination must be a bare repository ({key} = {value})")
 
 
 def _runs(spine: list[str], matched: set[str]) -> list[list[str]]:
@@ -283,11 +280,11 @@ def _check_helper_file(path: str, trusted: tuple) -> None:
         node = parent
 
 
-def _tool(cmd: list[str], timeout: float) -> subprocess.CompletedProcess:
+def _tool(cmd: list[str], timeout: float, env: dict | None = None) -> subprocess.CompletedProcess:
     """Run a system tool (ssh-keyscan, ssh-keygen) with a minimal environment, killed with its
     process group on timeout."""
     kwargs = {"start_new_session": True} if os.name == "posix" else {}
-    env = {"PATH": _system_path(), "LC_ALL": "C"}
+    env = env if env is not None else {"PATH": _system_path(), "LC_ALL": "C"}
     try:
         proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 stdin=subprocess.DEVNULL, **kwargs)
@@ -376,10 +373,9 @@ class Mirror:
         self._loopback = loopback_http
         self._deadline: float | None = None
         self._trusted_paths = tuple(trusted_helper_paths)
-        real = _local_repo(self.url)
-        if real is not None:
-            _check_local(real)
-        self._local = real is not None
+        self._local = False if loopback_http else gitpin.is_local(self.url)
+        if self._local:
+            _check_local(self.url)
         allowed = ALLOWED_HELPERS if allowed_helpers is None else tuple(allowed_helpers)
         self._git_bin = _resolve("git")
         self._ssh_bin = _resolve("ssh")
@@ -552,7 +548,7 @@ class Mirror:
         """Mirror the remote's branches (pruning deleted ones); returns refname -> sha."""
         seconds = _timeout(timeout)
         self._git(["fetch", "--prune", "--no-tags", "--no-write-fetch-head", "--quiet",
-                   "--no-recurse-submodules", *self._pack("upload"),
+                   "--no-recurse-submodules", *self._pack("fetch"),
                    *self._u("+refs/heads/*:refs/heads/*")],
                   timeout=seconds, pinned=True)
         out = self._git(["for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/"])
@@ -580,7 +576,7 @@ class Mirror:
                 return got, names[i:]
             try:
                 self._git(["fetch", "--no-tags", "--no-write-fetch-head", "--quiet",
-                           "--no-recurse-submodules", *self._pack("upload"),
+                           "--no-recurse-submodules", *self._pack("fetch"),
                            *self._u(f"+refs/heads/{name}:refs/heads/{name}")],
                           timeout=left, pinned=True)
             except MirrorTimeoutError:
@@ -594,7 +590,7 @@ class Mirror:
         """The remote's branches (refname -> sha), asked with the same pinned credential and
         environment as fetch and push. Used by doctor, and to verify a landing."""
         seconds = _timeout(timeout)
-        out = self._git(["ls-remote", "--heads", *self._pack("upload"), *self._u()], timeout=seconds, pinned=True)
+        out = self._git(["ls-remote", "--heads", *self._pack("ls-remote"), *self._u()], timeout=seconds, pinned=True)
         refs = {}
         for line in out.stdout.decode("utf-8", "replace").splitlines():
             sha, _, name = line.partition("\t")
@@ -610,7 +606,7 @@ class Mirror:
         branch = self._branch(target)
         seconds = _timeout(timeout)
         self._require_known([sha])
-        proc = self._git(["push", "--porcelain", *self._pack("receive"), *self._u(f"{sha}:refs/heads/{branch}")],
+        proc = self._git(["push", "--porcelain", *self._pack("push"), *self._u(f"{sha}:refs/heads/{branch}")],
                          timeout=seconds, pinned=True, check=False)
         if proc.returncode != 0:
             reason = self._last_line(proc)
@@ -620,7 +616,7 @@ class Mirror:
         """Delete a branch on the remote (`git push <url> :refs/heads/<branch>`), pinned credential."""
         name = self._branch(branch)
         seconds = _timeout(timeout)
-        proc = self._git(["push", "--porcelain", *self._pack("receive"), *self._u(f":refs/heads/{name}")], timeout=seconds,
+        proc = self._git(["push", "--porcelain", *self._pack("push"), *self._u(f":refs/heads/{name}")], timeout=seconds,
                          pinned=True, check=False)
         if proc.returncode != 0:
             reason = self._last_line(proc)
@@ -640,17 +636,18 @@ class Mirror:
     def _u(self, *rest: str) -> list[str]:
         """`--`, the pinned URL, then `rest`: the URL is never readable as an option. (Loopback http, test suite
         only, was checked in __init__ and is not a gitpin transport.)"""
-        return ["--", self.url, *rest] if self._loopback else gitpin.url_args(self.url, *rest)
+        if self._loopback:
+            return ["--", self.url, *rest]
+        try:
+            return gitpin.url_args(self.url, *rest)
+        except gitpin.GitPinError as exc:
+            raise MirrorError(str(exc)) from exc
 
-    def _pack(self, kind: str) -> list[str]:
-        """Local transports run upload-pack / receive-pack in the destination repository and git clears the
-        -c configuration for them, so its own hooks and config would run: pass the safe settings again."""
-        if not self._local:
-            return []
-        settings = ("core.hooksPath=/dev/null", "core.fsmonitor=false", "core.alternateRefsCommand=true",
-                    "receive.denyCurrentBranch=refuse")
-        cmd = shlex.join([self._git_bin, *(w for item in settings for w in ("-c", item)), f"{kind}-pack"])
-        return [f"--{kind}-pack={cmd}"]
+    def _pack(self, op: str) -> list[str]:
+        """Local transports run upload-pack / receive-pack in the destination repository and git clears the -c
+        configuration for them: gitpin.local_pack_args passes the safe settings again (hooks, fsmonitor and
+        alternateRefsCommand off, no push into a checked-out branch)."""
+        return gitpin.local_pack_args(op, self._git_bin) if self._local else []
 
     def _branch(self, branch) -> str:
         if not isinstance(branch, str) or not _BRANCH.fullmatch(branch) or ".." in branch \
