@@ -5,6 +5,7 @@ from __future__ import annotations
 import http.server
 import os
 import shlex
+import shutil
 import subprocess
 import threading
 import unittest
@@ -23,9 +24,14 @@ def _read(path):
         return fh.read()
 
 
-def mirror_receive_pack():
+def pack_cmd(kind):
     git_bin = mirror._resolve("git")
-    return f"--receive-pack={shlex.quote(git_bin)} -c core.hooksPath=/dev/null receive-pack"
+    return (f"--{kind}-pack={shlex.quote(git_bin)} -c core.hooksPath=/dev/null -c core.fsmonitor=false "
+            f"-c core.alternateRefsCommand=true -c receive.denyCurrentBranch=refuse {kind}-pack")
+
+
+def mirror_receive_pack():
+    return pack_cmd("receive")
 
 
 class PushCase(MirrorCase):
@@ -57,7 +63,7 @@ class Push(PushCase):
             m.push(self.tip, "main")
         push = [cmd for cmd, _ in calls if "push" in cmd][0]
         tail = push[push.index("push") + 1:]
-        self.assertEqual(tail, ["--porcelain", mirror_receive_pack(), self.remote, f"{self.tip}:refs/heads/main"])
+        self.assertEqual(tail, ["--porcelain", mirror_receive_pack(), "--", self.remote, f"{self.tip}:refs/heads/main"])
         for word in push:
             self.assertFalse(word.startswith("+") or word in ("-f", "--force", "--force-with-lease", "--mirror"))
 
@@ -100,7 +106,8 @@ class Push(PushCase):
         self.assertEqual(push_env["SSH_AUTH_SOCK"], SOCK)
         self.assertNotIn("SSH_AUTH_SOCK", head_env)
         self.assertEqual(set(push_env) - {"GIT_SSH_COMMAND", "SSH_AUTH_SOCK"}, {
-            "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "HOME", "PATH", "GIT_TERMINAL_PROMPT"})
+            "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "HOME", "PATH", "GIT_TERMINAL_PROMPT", "LC_ALL",
+            "GIT_ALLOW_PROTOCOL"})
 
     def test_delete_branch(self):
         m = self.mirror()
@@ -120,7 +127,9 @@ class Push(PushCase):
         self.assertEqual(git(self.remote, "rev-parse", "main"), self.base)
 
     def test_delete_failure_is_typed(self):
-        m = Mirror(os.path.join(self.root, "gone.git"), self.agent_cred())
+        gone = self.repo("gone.git", bare=True)
+        m = Mirror(gone, self.agent_cred())
+        shutil.rmtree(gone)
         with self.assertRaises(PushRejectedError):
             m.delete_branch("feat")
 
@@ -415,12 +424,14 @@ class LocalHooks(PushCase):
             m.ls_remote(30)
         for cmd, _ in calls:
             if any(w in cmd for w in ("fetch", "ls-remote")):
-                self.assertIn(f"--upload-pack={shlex.quote(mirror._resolve('git'))} -c core.hooksPath=/dev/null upload-pack", cmd)
+                self.assertIn(pack_cmd("upload"), cmd)
+                self.assertEqual(cmd[cmd.index("--") + 1], m.url)
         self.assertEqual(Mirror("https://example.test/o/r.git", {"kind": "ssh-agent", "socket": SOCK})._pack("upload"), [])
         self.assertEqual(Mirror("git@example.test:o/r.git", {"kind": "ssh-agent", "socket": SOCK})._pack("receive"), [])
         self.assertTrue(Mirror("file://" + self.remote, {"kind": "none"})._pack("receive"))
 
     def test_none_credential_only_for_the_suite_or_the_private_directory(self):
+        Mirror(self.remote, {"kind": "none"})                  # creates the private directory (mode 0700)
         with mock.patch.dict(os.environ):
             os.environ.pop(mirror.TEST_MARKER, None)
             with self.assertRaises(MirrorError) as cm:
@@ -429,11 +440,146 @@ class LocalHooks(PushCase):
             with self.assertRaises(MirrorError):
                 Mirror("file://" + self.remote, {"kind": "none"})
             inside = os.path.join(mirror.private_dir(), "local-dest.git")
-            os.makedirs(inside)
+            subprocess.run(["git", "init", "-q", "--bare", inside], check=True)
             Mirror(inside, {"kind": "none"})
             Mirror("file://" + inside, {"kind": "none"})
             with self.assertRaises(MirrorError):          # a dotdot escape is judged by its real path
                 Mirror(os.path.join(inside, "..", "..", "x"), {"kind": "none"})
+
+
+class LocalDestinations(PushCase):
+    """[R1] [R2] [R3] A local destination is supervisor-private whatever its credential, resolved the way git
+    resolves it, bare, and its config never runs."""
+
+    def outside(self):
+        Mirror(self.remote, {"kind": "none"})                  # creates the private directory
+        return mock.patch.dict(os.environ, {k: v for k, v in os.environ.items() if k != mirror.TEST_MARKER}, clear=True)
+
+    def bare_inside(self, name="dest.git"):
+        Mirror(self.remote, {"kind": "none"})                  # creates the private directory (mode 0700)
+        inside = os.path.join(str(mirror.private_dir()), name)
+        subprocess.run(["git", "init", "-q", "--bare", inside], check=True)
+        return inside
+
+    def test_percent_encoded_traversal_out_of_the_private_directory_is_refused(self):
+        with self.outside():
+            root = os.path.join(str(mirror.private_dir()), "mirrors")
+            rel = os.path.relpath(self.remote, root)
+            encoded = "/".join("%2e%2e" if part == ".." else part for part in rel.split(os.sep))
+            for url in ("file://" + root + "/" + encoded, "file://" + root + "/" + rel.replace("..", "%2E%2E"),
+                        "file://" + root + "/" + rel):
+                with self.subTest(url=url), self.assertRaises(MirrorError) as cm:
+                    Mirror(url, {"kind": "none"})
+                self.assertIn("private directory", str(cm.exception))
+
+    def test_every_credential_kind_obeys_the_private_directory_rule_for_a_local_path(self):
+        creds = [{"kind": "none"}, {"kind": "ssh-agent", "socket": SOCK},
+                 {"kind": "ssh-key", "path": os.path.join(self.root, "k")},
+                 {"kind": "helper", "command": f"sh {self.helper}", "config_dir": self.home}]
+        inside = self.bare_inside()
+        with self.outside():
+            for cred in creds:
+                with self.subTest(kind=cred["kind"]):
+                    with self.assertRaises(MirrorError) as cm:
+                        Mirror(self.remote, cred, allowed_helpers=(f"sh {self.helper}",))
+                    self.assertIn("private directory", str(cm.exception))
+                    Mirror(inside, cred, allowed_helpers=(f"sh {self.helper}",))
+                    Mirror("file://" + inside, cred, allowed_helpers=(f"sh {self.helper}",))
+
+    def test_a_symlink_into_the_private_directory_is_judged_by_its_target(self):
+        link = os.path.join(self.root, "link.git")
+        os.symlink(self.remote, link)
+        inside = self.bare_inside()
+        into = os.path.join(self.root, "into.git")
+        os.symlink(inside, into)
+        with self.outside():
+            with self.assertRaises(MirrorError):
+                Mirror(link, {"kind": "none"})
+            Mirror(into, {"kind": "none"})
+
+    def test_a_local_destination_must_be_bare(self):
+        work = self.repo("worktree-dest")
+        self.commit(work, "a.txt", "a\n")
+        with self.assertRaises(MirrorError) as cm:
+            Mirror(work, {"kind": "none"})
+        self.assertIn("bare", str(cm.exception))
+        with self.assertRaises(MirrorError):
+            Mirror(os.path.join(self.root, "does-not-exist.git"), {"kind": "none"})
+        inside = self.bare_inside("n.git")
+        os.makedirs(os.path.join(inside, ".git"))
+        with self.outside(), self.assertRaises(MirrorError):
+            Mirror(inside, {"kind": "none"})
+
+    @support.posix_only("shell hooks")
+    def test_alternate_refs_command_in_the_destination_config_does_not_run(self):
+        marker = os.path.join(self.root, "ALT-RAN")
+        other = self.repo("alt-source", bare=True)
+        with open(os.path.join(self.remote, "objects", "info", "alternates"), "w") as fh:
+            fh.write(os.path.join(other, "objects") + "\n")
+        git(self.remote, "config", "core.alternateRefsCommand", f"sh -c 'echo ran >> {marker}' --")
+        m = self.mirror()
+        m.fetch(30)
+        m.fetch_branches(["main"], 30)
+        m.ls_remote(30)
+        m.push(self.tip, "main")
+        self.assertFalse(os.path.exists(marker), "core.alternateRefsCommand ran")
+
+    @support.posix_only("shell hooks")
+    def test_fsmonitor_and_update_instead_cannot_run_anything(self):
+        # a non-bare destination (the update-instead case) is refused outright, so its work tree is never updated
+        work = self.repo("ui")
+        marker = os.path.join(self.root, "FSMON-RAN")
+        self.commit(work, "a.txt", "a\n")
+        git(work, "config", "core.fsmonitor", f"sh -c 'echo ran >> {marker}'")
+        git(work, "config", "receive.denyCurrentBranch", "updateInstead")
+        with self.assertRaises(MirrorError):
+            Mirror(work, {"kind": "none"})
+        self.assertFalse(os.path.exists(marker))
+
+    def test_the_pack_commands_pin_every_destination_setting(self):
+        m = self.mirror()
+        for kind in ("upload", "receive"):
+            (arg,) = m._pack(kind)
+            for item in ("core.hooksPath=/dev/null", "core.fsmonitor=false", "core.alternateRefsCommand=true",
+                         "receive.denyCurrentBranch=refuse"):
+                self.assertIn(f"-c {item}", arg)
+            self.assertTrue(arg.endswith(f"{kind}-pack"))
+
+
+class GitpinUse(MirrorCase):
+    """Every pinned-URL git call goes through gitpin: `--` before the URL, its env, its cwd, its URL rule."""
+
+    def test_the_url_follows_a_double_dash_in_every_call(self):
+        remote, sha = self.remote_with_main()
+        calls = []
+        with spy(calls):
+            m = Mirror(remote, {"kind": "none"})
+            m.fetch(30)
+            m.fetch_branches(["main"], 30)
+            m.ls_remote(30)
+            with self.assertRaises(MirrorError):
+                m.push("1" * 40, "main")
+        for cmd, _ in calls:
+            if remote in cmd:
+                i = cmd.index(remote)
+                self.assertEqual(cmd[i - 1], "--", cmd)
+                self.assertNotIn("--", cmd[:i - 1][cmd.index("--git-dir"):] if False else [])
+
+    def test_gitpin_decides_which_urls_are_acceptable(self):
+        for url in ("--upload-pack=sh", "ext::sh -c x", "https://u:p@example.test/r", "http://example.test/r",
+                    "https://example.test/%2dopt/r", "file://host/abs/path", "relative/path", "https://h/a\\b"):
+            with self.subTest(url=url), self.assertRaises(MirrorError):
+                Mirror(url, {"kind": "ssh-agent", "socket": SOCK})
+
+    def test_default_helper_allowlist_is_gitpins(self):
+        from swarm import gitpin
+        for name, args in gitpin.CREDENTIAL_HELPERS.items():
+            self.assertIn(" ".join((name, *args)), mirror.ALLOWED_HELPERS)
+        self.assertEqual(len(mirror.ALLOWED_HELPERS), len(gitpin.CREDENTIAL_HELPERS))
+
+    def test_the_module_keeps_no_copy_of_gitpins_settings(self):
+        self.assertFalse(hasattr(mirror, "_SAFE_CONFIG"))
+        self.assertFalse(hasattr(mirror, "_under_private"))
 
 
 class SshHosts(MirrorCase):

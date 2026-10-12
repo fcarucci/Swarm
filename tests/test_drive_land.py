@@ -963,6 +963,49 @@ class TimeoutsAreHolds(LandCase):
         self.assertIn("judged-old", res.why)
         self.assertEqual(self.pushes, [])
 
+    def failing(self, extra, message):
+        real = self.factory()
+
+        def make(url, cred):
+            m = real(url, cred)
+            inner = m.fetch_branches
+
+            def fb(b, t):
+                if b == [extra]:
+                    raise MirrorError(message)
+                return inner(b, t)
+            m.fetch_branches = fb
+            return m
+        return make
+
+    def test_a_transient_error_on_a_judged_branch_is_pending_never_refused(self):
+        self.judged = {"9" * 40}
+        for text in ("git fetch failed: fatal: unable to access: Connection reset by peer",
+                     "git fetch failed: fatal: Could not resolve host"):
+            res = self.go(env={"judged_branches": lambda: ["judged-old"],
+                               "mirror_factory": self.failing("judged-old", text)})
+            self.assertTrue(res.pending and not res.ok, res.why)
+            self.assertIn("retrying next pass", res.why)
+        self.assertEqual(self.pushes, [])
+
+    def test_a_branch_the_remote_no_longer_has_is_not_an_error(self):
+        self.judged = {"9" * 40}
+        res = self.go(env={"judged_branches": lambda: ["judged-old"], "mirror_factory": self.failing(
+            "judged-old", "git fetch failed: fatal: couldn't find remote ref refs/heads/judged-old")})
+        self.assertFalse(res.pending)
+        self.assertIn("met verdict", res.why)
+
+    def test_the_audit_holds_on_a_transient_judged_branch_error_and_skips_a_gone_one(self):
+        self.go()
+        since = {self.a: self.base, self.b: self.base}
+        out = land.audit(self.env(judged_branches=lambda: ["judged-old"],
+                                  mirror_factory=self.failing("judged-old", "git fetch failed: Connection reset")),
+                         since, self.sha)
+        self.assertEqual(out, land.AuditResult((), True))
+        out = land.audit(self.env(judged_branches=lambda: ["judged-old"], mirror_factory=self.failing(
+            "judged-old", "git fetch failed: fatal: couldn't find remote ref refs/heads/judged-old")), since, self.sha)
+        self.assertEqual(out, land.AuditResult((), False))
+
     def test_a_missing_judged_branch_is_still_skipped(self):
         res = self.go(env={"judged_branches": lambda: ["nope"]})
         self.assertTrue(res.ok)           # sha itself is judged: the extra branches are not even fetched

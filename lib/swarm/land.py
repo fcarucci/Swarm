@@ -389,6 +389,9 @@ def _pending_key(url: str, branch: str) -> str:
     return f"{hashlib.sha256(url.encode()).hexdigest()[:16]}:{branch}"
 
 
+_GONE = "couldn't find remote ref"      # git's words for a branch the remote no longer has
+
+
 def _fetch_why(env: LandEnv, d: Destination, exc: MirrorError) -> str:
     m = re.search(r"couldn't find remote ref refs/heads/(\S+)", str(exc))
     if m and m.group(1) == env.target:
@@ -501,8 +504,11 @@ def _execute(board, env: LandEnv, job: str, request: Request, action_id: str, ne
                 for d in dests:
                     try:
                         _, left = mirrors[d.url].fetch_branches([extra], _budget(env, FETCH_SECONDS))
-                    except MirrorError:
-                        continue                 # a deleted judged branch is not an error
+                    except MirrorError as exc:
+                        if _GONE in str(exc):
+                            continue             # a deleted judged branch is not an error
+                        raise LandPending(f"fetch of judged branch {extra} failed ({type(exc).__name__}); "
+                                          f"retrying next pass") from exc
                     if left:                     # a slow fetch is a hold, never "no verdict covers it"
                         raise LandPending(f"fetch of judged branch {extra} did not finish; it continues next pass")
         _covered(env, mirrors, dests, target, sha)
@@ -649,7 +655,10 @@ def audit(env: LandEnv, since: dict | None, candidate: str) -> AuditResult:
             for extra in env.judged_branches():      # best effort: a landed branch is already deleted
                 try:
                     _, more = m.fetch_branches([extra], _budget(env, FETCH_SECONDS))
-                except MirrorError:
+                except MirrorError as exc:
+                    if _GONE in str(exc):
+                        continue
+                    slow = True                  # a transient error: hold, do not judge on a partial mirror
                     continue
                 slow = slow or bool(more)
             if slow:                                  # without a judged branch the audit would call its commits unjudged
