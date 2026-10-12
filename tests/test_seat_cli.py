@@ -1341,6 +1341,33 @@ class CodexControlRequests(ControlCase):
         self.assertFalse(applied)
         self._gone(req, ledger.load(self.bkey, JOB))
 
+    def test_X3_ten_thousand_refused_requests_keep_the_marks_bounded(self):
+        """CX1 X3: decisions are remembered as a floor plus at most MARKS_KEEP recent ids."""
+        from swarm import drive_control
+        led = ledger.load(self.bkey, JOB)
+        size = ledger.serialized_size(led)
+        for mid in range(1, 10_001):
+            drive_control.remember(led, mid)
+        marks = [k for k in led.watermarks if k.startswith(drive_control.MARK)]
+        self.assertEqual(len(marks), drive_control.MARKS_KEEP)
+        self.assertEqual(led.watermarks[drive_control.FLOOR], 10_000 - drive_control.MARKS_KEEP)
+        self.assertTrue(all(drive_control.decided(led, mid) for mid in (1, 5_000, 9_936, 10_000)))
+        self.assertFalse(drive_control.decided(led, 10_001))
+        self.assertLess(ledger.serialized_size(led) - size, 2_000)
+        led.save()
+
+    def test_X3_refused_requests_through_the_driver_stay_bounded(self):
+        from swarm import drive_control
+        with mock.patch.object(drive_control, "MARKS_KEEP", 4):
+            for _ in range(12):
+                self.codex("ENG-SESSION", "halt", "--job", JOB)              # a seat may not halt: refused
+                [(_, (applied, _))] = self.driver()
+                self.assertFalse(applied)
+        wm = ledger.load(self.bkey, JOB).watermarks
+        self.assertEqual(len([k for k in wm if k.startswith(drive_control.MARK)]), 4)
+        self.assertIn(drive_control.FLOOR, wm)
+        self.assertEqual(self.driver(), [])
+
     def test_a_claude_session_keeps_the_direct_path(self):
         self.assertEqual(self.run_cmd("halt", "--job", JOB)[0], 0)
         rc, out, err = self.run_cmd("unhalt", "--job", JOB)

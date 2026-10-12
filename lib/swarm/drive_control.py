@@ -33,6 +33,8 @@ REFUSED = "CONTROL-REFUSED "
 REQUESTER_NAME = "codex session"        # the author of a request post (a label: the receipt names the caller)
 SUPERVISOR_NAME = "swarm supervisor"    # the author of the driver's answers (as land.py's)
 MARK = "ctlreq:"                        # ledger watermark ctlreq:<message id> = 1: that request was decided
+FLOOR = "ctlreq-floor"                  # every request id at or below it counts as decided
+MARKS_KEEP = 64                         # decided ids kept above the floor (the rest raise the floor)
 KIND = "control_request"                # the receipt kind
 REQUESTER_KINDS = ("halt", "unhalt", "repair", "cancel")
 LEAD_KINDS = ("ack",)
@@ -172,10 +174,9 @@ def find(board, bk: str, job: str, led, now, after: int = 0) -> list:
     incarnation and generation (for `led` None: a repair, the no-ledger identity), oldest first. A message
     without one is not a request: the board is writable by agents. Requests already decided are left out."""
     out = []
-    marks = led.watermarks if led is not None else {}
     for msg in board.messages_after(after, job):
         parsed = parse_text(msg.message)
-        if parsed is None or f"{MARK}{msg.id}" in marks:
+        if parsed is None or (led is not None and decided(led, msg.id)):
             continue
         kind, sha = parsed
         if (led is None) != (kind == "repair"):
@@ -234,7 +235,7 @@ def apply(board, cfg: dict, led, req: ControlRequest, now) -> tuple:
     job = req.job
     if led is not None and led.job != job:
         return False, "another job's request"
-    if led is not None and f"{MARK}{req.id}" in led.watermarks:
+    if led is not None and decided(led, req.id):
         _consume(bk, job, req.id)                    # decided before: what is left of it goes
         return False, "already decided (a request is used once)"
     msg = next((m for m in board.messages_after(req.id - 1, job) if m.id == req.id), None)
@@ -279,7 +280,7 @@ def apply(board, cfg: dict, led, req: ControlRequest, now) -> tuple:
         _consume(bk, job, req.id)                    # decided: refused for good
         _post(board, job, f"{REFUSED}{req.id} {why}")
         return False, why
-    led.watermarks[f"{MARK}{req.id}"] = 1          # used once: saved with the change itself
+    remember(led, req.id)                            # used once: saved with the change itself
     try:
         led.save()                                   # ledger first
     except ledger_mod.LedgerConflict:
@@ -298,6 +299,26 @@ def apply(board, cfg: dict, led, req: ControlRequest, now) -> tuple:
     return True, req.kind
 
 
+def decided(led, msg_id: int) -> bool:
+    """Whether request `msg_id` was decided: at or below the floor, or one of the recent marks."""
+    return msg_id <= led.watermarks.get(FLOOR, 0) or f"{MARK}{msg_id}" in led.watermarks
+
+
+def remember(led, msg_id: int) -> None:
+    """Mark request `msg_id` decided in `led` (not saved), keeping the marks bounded (CX1 X3): at most
+    MARKS_KEEP ids above the floor; older ones raise the floor. Message ids only grow, so a request at or
+    below the floor that was never decided can only be one older than MARKS_KEEP later decisions (its
+    receipt was late): it is not applied and has to be asked again."""
+    wm = led.watermarks
+    wm[f"{MARK}{msg_id}"] = 1
+    ids = sorted(int(k[len(MARK):]) for k in wm if k.startswith(MARK))
+    if len(ids) > MARKS_KEEP:
+        drop = ids[:len(ids) - MARKS_KEEP]
+        for i in drop:
+            del wm[f"{MARK}{i}"]
+        wm[FLOOR] = max(wm.get(FLOOR, 0), drop[-1])
+
+
 def _consume(bk: str, job: str, msg_id: int) -> None:
     """Use up a decided request, as a grant is used up: its receipt and its stored arguments are removed, so
     nothing can apply it again even if the ledger that marks it decided is lost (a repair that does not keep
@@ -314,7 +335,7 @@ def _consume(bk: str, job: str, msg_id: int) -> None:
 def _decide(led, req: ControlRequest) -> None:
     """Save a refused request's mark, so it is never tried again (best effort: the next pass retries)."""
     from swarm.supervisor import ledger as ledger_mod
-    led.watermarks[f"{MARK}{req.id}"] = 1
+    remember(led, req.id)
     try:
         led.save()
     except (ledger_mod.LedgerConflict, ledger_mod.LedgerTooLargeError, OSError):
@@ -326,7 +347,7 @@ def _mark(bk: str, job: str, msg_id: int) -> None:
     try:
         led = ledger_mod.load(bk, job)
         if led is not None:
-            led.watermarks[f"{MARK}{msg_id}"] = 1
+            remember(led, msg_id)
             led.save()
     except (ledger_mod.LedgerBadError, ledger_mod.LedgerConflict, OSError):
         pass
