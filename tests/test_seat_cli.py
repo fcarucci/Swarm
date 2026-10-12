@@ -13,6 +13,7 @@ import os
 import shlex
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -902,14 +903,17 @@ class RepairWithoutDirFdRename(ControlCase):
 
 
 class TtyReceipt(ControlCase):
-    def test_codex_seat_cancel_goes_through_the_same_gate(self):
+    def test_a_codex_seat_cancel_is_only_a_request(self):
+        """A Codex seat's cancel changes nothing itself: it posts a CONTROL-REQUEST, which the driver applies
+        only for the requester (test CodexControlRequests)."""
         self.assertEqual(self.request_seat()[0], 0)
         self.enrol("CODEX-SEAT", ENG_KEY)
         self.set_session(None)
         with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "CODEX-SEAT"}), \
                 mock.patch.object(person, "_tty_confirm", return_value=True):
-            rc, _, err = self.run_cmd("seat", "cancel", "--job", JOB, "--seat", "eng")
-        self.assertEqual(rc, 1)
+            rc, out, err = self.run_cmd("seat", "cancel", "--job", JOB, "--seat", "eng")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(drivegate.record_of({"tool_response": out})[0], "control_request")
         self.assertEqual(self.board.seat(JOB, 1, "eng").state, "requested")
 
 
@@ -988,55 +992,237 @@ class PersonReceipts(ControlCase):
                                         rev=1, incarnation=led.incarnation, generation=led.generation, now=0))
 
 
-class CodexParity(ControlCase):
-    """N6 (coordinator ruling, spec 6.2 scenario 4): a Codex session's `swarm` command uses up the grant its
-    PreToolUse hook wrote, in the grants directory (a Codex writable root), which holds grants only."""
-    def codex_hook(self, session, *argv):
+class _NoClose:
+    """The test's board for the hook (which closes what it opens)."""
+    def __init__(self, board):
+        self._b = board
+
+    def __getattr__(self, name):
+        return getattr(self._b, name)
+
+    def close(self):
+        pass
+
+
+class CodexControlRequests(ControlCase):
+    """Ruling (Task 6b round 3): a Codex session's ledger-writing control command never writes the ledger. The
+    CLI posts a CONTROL-REQUEST, the real PostToolUse hook (drivegate.post_tool) receipts it from outside the
+    sandbox, and the driver (drive_cli.find_control_requests / apply_control_request) is the only writer."""
+    def setUp(self):
+        super().setUp()
+        self.enrol("LEAD-SESSION", LEAD_KEY)
+        self.enrol("ENG-SESSION", ENG_KEY)
+        for i in range(5):
+            self.board.post(JOB, "Someone", f"event {i}", None)
+        self.req = self.work / "a.md"
+        self.req.write_text("A\n", encoding="utf-8")
+
+    def codex(self, session, *argv, agent_id=None):
+        """Run `swarm <argv>` in a Codex session, then its PostToolUse hook: (rc, out, err, receipted)."""
         from swarm import hosts
-        payload = {"session_id": session, "tool_name": "Bash", "tool_input": {"command": shlex.join(["swarm", *argv])}}
-        return drivegate.write_grants(self.cfg, payload, hosts.get("codex"), None)
+        self.set_session(None)   # no grant: a Codex sandbox cannot use one
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": session}):
+            rc, out, err = self.run_cmd(*argv)
+        payload = {"session_id": session, "tool_name": "Bash", "tool_response": out,
+                   "tool_input": {"command": shlex.join(["swarm", *argv])}}
+        if agent_id:
+            payload["agent_id"] = agent_id
+        with mock.patch.object(drivegate, "seat_context", return_value=self.seat_ctx(session)), \
+                mock.patch.object(drivegate, "_open_board", return_value=_NoClose(self.board)), \
+                mock.patch.object(drivegate, "kick", return_value=False):
+            receipted = drivegate.post_tool(self.cfg, payload, hosts.get("codex"))
+        return rc, out, err, receipted
 
-    def test_a_codex_requester_unhalts_with_its_grant(self):
-        self.assertEqual(self.run_cmd("halt", "--job", JOB)[0], 0)
-        self.set_session(None)
-        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": REQ_SESSION, "CODEX_SANDBOX": "seatbelt"}):
-            self.assertEqual(self.codex_hook(REQ_SESSION, "unhalt", "--job", JOB), 1)
-            rc, out, err = self.run_cmd("unhalt", "--job", JOB)
+    def driver(self, led=False):
+        """One driver pass over the job's control requests: [(request, (applied, why))]."""
+        led = ledger.load(self.bkey, JOB) if led is False else led
+        out = []
+        for req in drive_cli.find_control_requests(self.board, self.bkey, JOB, led, self.board.now()):
+            cur = ledger.load(self.bkey, JOB) if led is not None else None
+            out.append((req, drive_cli.apply_control_request(self.board, self.cfg, cur, req, self.board.now())))
+        return out
+
+    def posts(self, prefix):
+        return [m.message for m in self.board.messages_after(0, JOB) if m.message.startswith(prefix)]
+
+    def test_codex_unhalt_goes_through_the_driver(self):
+        self.assertEqual(self.run_cmd("halt", "--job", JOB)[0], 0)          # a Claude requester halts directly
+        rev = ledger.load(self.bkey, JOB).ledger_rev
+        rc, out, err, receipted = self.codex(REQ_SESSION, "unhalt", "--job", JOB)
         self.assertEqual(rc, 0, err)
+        self.assertEqual(drivegate.record_of({"tool_response": out})[0], "control_request")
+        self.assertTrue(receipted)
+        self.assertEqual(ledger.load(self.bkey, JOB).ledger_rev, rev)       # the CLI wrote no ledger
+        self.assertIsNotNone(ledger.load(self.bkey, JOB).halted)
+        [(req, (applied, why))] = self.driver()
+        self.assertTrue(applied, why)
         self.assertIsNone(ledger.load(self.bkey, JOB).halted)
-        self.assertEqual(drivegate.record_of({"tool_response": out})[0], "unhalt")   # Codex: plain string output
+        self.assertEqual(self.posts("CONTROL-APPLIED"), [f"CONTROL-APPLIED {req.id} unhalt"])
+        self.assertEqual(self.driver(), [])                                    # decided: never again
 
-    def test_without_its_grant_a_codex_session_is_refused(self):
-        self.assertEqual(self.run_cmd("halt", "--job", JOB)[0], 0)
-        self.set_session(None)
-        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": REQ_SESSION}):
-            rc, _, err = self.run_cmd("unhalt", "--job", JOB)
-        self.assertEqual(rc, 1)
-        self.assertIn("agent host", err)
+    def test_codex_lead_ack_goes_through_the_driver(self):
+        eid, _ = self.board.post_event(JOB, "ci", "k1", "CI failed", "Lead", None)
+        newest = self.board.last_message_id(JOB)
+        rc, out, err, receipted = self.codex("LEAD-SESSION", "seat", "ack", "--job", JOB, "--upto", str(newest),
+                                             "--event", str(eid))
+        self.assertEqual((rc, receipted), (0, True), err)
+        self.assertNotIn("msg:lead", ledger.load(self.bkey, JOB).watermarks)
+        [(_, (applied, why))] = self.driver()
+        self.assertTrue(applied, why)
+        wm = ledger.load(self.bkey, JOB).watermarks
+        self.assertEqual((wm["msg:lead"], wm[f"evack:lead:{eid}"]), (newest, 1))
 
-    def test_the_grants_directory_holds_only_grants(self):
+    def test_codex_lead_pins_go_through_the_driver_then_its_goal_ready_posts(self):
+        rc, out, err, receipted = self.codex("LEAD-SESSION", "goal-ready", "--job", JOB, "--candidate",
+                                             "feat/x@abc1234", "--add-requirements", str(self.req))
+        self.assertEqual((rc, receipted), (0, True), err)
+        self.assertEqual(ledger.load(self.bkey, JOB).pinned_requirements, {})
+        [(_, (applied, why))] = self.driver()
+        self.assertTrue(applied, why)
+        pins = ledger.load(self.bkey, JOB).pinned_requirements
+        self.assertEqual(pins, {os.path.realpath(self.req): drive_cli.blob_id(b"A\n")})
+        rc, out, err, _ = self.codex("LEAD-SESSION", "goal-ready", "--job", JOB, "--candidate", "feat/x@abc1234",
+                                     "--add-requirements", str(self.req))    # pinned already: a board-only post
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(drivegate.record_of({"tool_response": out})[0], "goal_ready")
+        self.assertEqual(len(self.posts("GOAL-READY ")), 1)
+
+    def test_codex_lead_withdraws_and_releases_through_the_driver(self):
+        self.set_session(REQ_SESSION)
+        self.assertEqual(self.request_seat()[0], 0)
+        rc, _, err, receipted = self.codex("LEAD-SESSION", "seat", "release", "--job", JOB, "--seat", "eng",
+                                           "--withdraw-artifact", "feat/x", "--reason", "superseded")
+        self.assertEqual((rc, receipted), (0, True), err)
+        self.assertEqual(self.board.seat(JOB, 1, "eng").state, "requested")
+        [(_, (applied, why))] = self.driver()
+        self.assertTrue(applied, why)
+        self.assertEqual(ledger.load(self.bkey, JOB).integrated["feat/x"]["withdrawn"], "superseded")
+        self.assertEqual(self.board.seat(JOB, 1, "eng").state, "released")
+
+    def test_codex_requester_cancel_goes_through_the_driver_with_its_person_receipt(self):
         from swarm import receipts
-        self.assertEqual(self.run_cmd("halt", "--job", JOB)[0], 0)      # a person receipt (enrolled)
-        self.codex_hook(REQ_SESSION, "unhalt", "--job", JOB)              # a grant (grants)
-        grants = receipts.grants_dir()
-        self.assertEqual(grants, self.home / ".local/state/swarm/grants")
-        self.assertEqual(grants.stat().st_mode & 0o777, 0o700)
-        names = [p.name for p in grants.iterdir()]
-        self.assertEqual(len(names), 1)
-        body = json.loads((grants / names[0]).read_text())
-        self.assertEqual(body["kind"], "grant")
-        enrolled = self.home / ".local/share/swarm/host/enrolled"
-        kinds = [json.loads(p.read_text()).get("kind") for p in enrolled.glob("receipt-*.json")]
-        self.assertIn("person", kinds)
-        self.assertNotIn("grant", kinds)
+        self.set_session(REQ_SESSION)
+        self.assertEqual(self.request_seat()[0], 0)
+        rc, _, err, receipted = self.codex(REQ_SESSION, "seat", "cancel", "--job", JOB, "--seat", "eng")
+        self.assertEqual((rc, receipted), (0, True), err)
+        [(_, (applied, why))] = self.driver()
+        self.assertTrue(applied, why)
+        row = self.board.seat(JOB, 1, "eng")
+        self.assertEqual(row.state, "cancelled")
+        led = ledger.load(self.bkey, JOB)
+        r = receipts.find(self.bkey, JOB, "person", drive_cli.person_record_id("seat cancel", row.id), rev=1,
+                          incarnation=led.incarnation, generation=led.generation, now=0)
+        self.assertEqual(r.action_id, "requester:seat_cancel")
 
-    def test_codex_writable_roots_name_the_grants_directory_not_the_enrolled_one(self):
-        from swarm import codex_config, receipts
+    def test_codex_lead_seat_request_is_a_board_record_its_receipt_authorizes(self):
+        rc, out, err, receipted = self.codex("LEAD-SESSION", "seat", "request", "--job", JOB, "--seat", "eng2",
+                                             "--role", "engineer", "--brief", "B.md", "--workdir", str(self.work))
+        self.assertEqual(rc, 0, err)
+        row = self.board.seat(JOB, 1, "eng2")
+        self.assertEqual((row.state, row.requested_by), ("requested", "codex session"))
+        self.assertEqual(drivegate.record_of({"tool_response": out}), ("seat", row.id, row.revision))
+
+    def test_a_forged_request_without_a_receipt_is_refused(self):
+        from swarm import drive_control
+        self.assertEqual(self.run_cmd("halt", "--job", JOB)[0], 0)
+        ns = cli._parser().parse_args(["unhalt", "--job", JOB])
+        mid = self.board.post(JOB, "codex session", drive_control.request_text(ns), None).id   # a DB writer's post
+        self.assertEqual(self.driver(), [])                                    # no receipt: not a request
+        kind, sha = drive_control.parse_text(drive_control.request_text(ns))
+        fields = drive_control.fields_of(ns)
+        forged = drive_control.ControlRequest(mid, JOB, kind, sha, fields, None, "requester:unhalt", 1)
+        applied, why = drive_cli.apply_control_request(self.board, self.cfg, ledger.load(self.bkey, JOB), forged,
+                                                       self.board.now())
+        self.assertFalse(applied)
+        self.assertIn("no matching receipt", why)
+        self.assertIsNotNone(ledger.load(self.bkey, JOB).halted)
+
+    def test_a_replayed_request_is_refused(self):
+        self.assertEqual(self.run_cmd("halt", "--job", JOB)[0], 0)
+        self.codex(REQ_SESSION, "unhalt", "--job", JOB)
+        [(req, (applied, _))] = self.driver()
+        self.assertTrue(applied)
+        self.set_session(REQ_SESSION)
+        self.assertEqual(self.run_cmd("halt", "--job", JOB)[0], 0)          # halted again by a person
+        applied, why = drive_cli.apply_control_request(self.board, self.cfg, ledger.load(self.bkey, JOB), req,
+                                                       self.board.now())
+        self.assertFalse(applied)
+        self.assertIn("used once", why)
+        self.assertIsNotNone(ledger.load(self.bkey, JOB).halted)
+
+    def test_a_request_with_the_wrong_authority_is_refused(self):
+        self.assertEqual(self.run_cmd("halt", "--job", JOB)[0], 0)
+        for session, argv, want in (
+                ("ENG-SESSION", ("unhalt", "--job", JOB), "person's action"),            # a seat: not the requester
+                ("ENG-SESSION", ("seat", "ack", "--job", JOB, "--upto", "1"), "live lead"),   # not the lead
+                (REQ_SESSION, ("seat", "ack", "--job", JOB, "--upto", "1"), "live lead"),     # the requester: not the lead
+                ("LEAD-SESSION", ("unhalt", "--job", JOB), "person's action")):          # the lead: not a person
+            rc, _, err, receipted = self.codex(session, *argv)
+            self.assertEqual((rc, receipted), (0, True), (session, argv, err))
+            [(_, (applied, why))] = self.driver()
+            self.assertFalse(applied, (session, argv))
+            self.assertIn(want, why)
+        led = ledger.load(self.bkey, JOB)
+        self.assertIsNotNone(led.halted)
+        self.assertNotIn("msg:lead", led.watermarks)
+        self.assertEqual(len(self.posts("CONTROL-REFUSED")), 4)
+        self.assertEqual(self.driver(), [])                                    # each decided once
+
+    def test_a_planted_body_or_an_expired_receipt_is_no_request(self):
+        from swarm import drive_control, receipts
+        self.assertEqual(self.run_cmd("halt", "--job", JOB)[0], 0)
+        self.codex(REQ_SESSION, "unhalt", "--job", JOB)
+        [req] = drive_cli.find_control_requests(self.board, self.bkey, JOB, ledger.load(self.bkey, JOB),
+                                                self.board.now())
+        drive_control.store_body(self.bkey, JOB, req.id, {**req.fields, "job": JOB, "reason": "x"})
+        self.assertEqual(self.driver(), [])                                    # the body is not the receipted one
+        applied, why = drive_cli.apply_control_request(self.board, self.cfg, ledger.load(self.bkey, JOB), req,
+                                                       self.board.now())
+        self.assertFalse(applied)
+        drive_control.store_body(self.bkey, JOB, req.id, req.fields)
+        later = time.time() + receipts.RECEIPT_MAX_AGE if hasattr(receipts, "RECEIPT_MAX_AGE") else time.time() + 25 * 3600
+        self.assertEqual(drive_cli.find_control_requests(self.board, self.bkey, JOB, ledger.load(self.bkey, JOB),
+                                                         later), [])          # expired
+        self.assertIsNotNone(ledger.load(self.bkey, JOB).halted)
+
+    def test_a_session_that_is_neither_seat_nor_requester_gets_no_receipt(self):
+        self.assertEqual(self.run_cmd("halt", "--job", JOB)[0], 0)
+        rc, _, err, receipted = self.codex("SOMEONE-ELSE", "unhalt", "--job", JOB)
+        self.assertEqual(rc, 0, err)
+        self.assertFalse(receipted)
+        self.assertEqual(self.driver(), [])
+
+    def test_a_subagent_gets_no_receipt_for_its_request(self):
+        self.assertEqual(self.run_cmd("halt", "--job", JOB)[0], 0)
+        _, _, _, receipted = self.codex(REQ_SESSION, "unhalt", "--job", JOB, agent_id="sub-1")
+        self.assertFalse(receipted)
+        self.assertEqual(self.driver(), [])
+
+    @posix_only("drive repair moves the bad ledger with a dir_fd rename (POSIX); drive mode is refused on Windows")
+    def test_codex_repair_goes_through_the_driver(self):
+        entry = next(self.home.rglob(ledger._name(self.bkey, JOB)))
+        body = json.loads(entry.read_text())
+        body["x"] = 1
+        entry.write_text(json.dumps(body))
+        rc, _, err, receipted = self.codex(REQ_SESSION, "drive", "repair", "--job", JOB)
+        self.assertEqual((rc, receipted), (0, True), err)
+        with self.assertRaises(ledger.LedgerBadError):
+            ledger.load(self.bkey, JOB)                                        # the CLI repaired nothing
+        [(_, (applied, why))] = self.driver(led=None)
+        self.assertTrue(applied, why)
+        self.assertIsNotNone(ledger.load(self.bkey, JOB).halted)
+
+    def test_a_claude_session_keeps_the_direct_path(self):
+        self.assertEqual(self.run_cmd("halt", "--job", JOB)[0], 0)
+        rc, out, err = self.run_cmd("unhalt", "--job", JOB)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(drivegate.record_of({"tool_response": {"stdout": out}})[0], "unhalt")
+        self.assertEqual(self.posts("CONTROL-REQUEST"), [])
+
+    def test_grants_are_not_codex_writable(self):
+        from swarm import codex_config
         roots = codex_config.required(self.cfg)[("sandbox_workspace_write", "writable_roots")]
-        self.assertIn(str(receipts.grants_dir()), roots)
-        for root in roots:
-            self.assertFalse(str(self.home / ".local/share/swarm/host/enrolled").startswith(root), root)
-            self.assertNotEqual(root, str(self.home / ".local/share/swarm/host"))
+        self.assertFalse([r for r in roots if "grants" in r or r.startswith(str(self.home / ".local/share"))])
 
 
 class Probes(ControlCase):

@@ -132,8 +132,7 @@ class CodexConfigEditTests(unittest.TestCase):
         self.assertIn(os.path.join(cwd, "markers"), roots)
         inside = base_config(spool_dir="~/.local/state/swarm/../swarm/spool")   # normalized, and granted itself
         self.assertEqual(cc.required(inside)[("sandbox_workspace_write", "writable_roots")],
-                         [str(self.home / ".local/state/swarm/spool"), str(self.home / ".local/state/swarm/active"),
-                      str(self.home / ".local/state/swarm/grants")])
+                         [str(self.home / ".local/state/swarm/spool"), str(self.home / ".local/state/swarm/active")])
         cc.apply(self.path, cfg)
         written = tomllib.loads(self.path.read_text())["sandbox_workspace_write"]["writable_roots"]
         self.assertTrue(all(os.path.isabs(r) for r in written))
@@ -294,8 +293,7 @@ class GrantTests(unittest.TestCase):
     def test_required_has_no_state_dir_and_no_network(self):
         req = cc.required(self.cfg)
         self.assertNotIn(("sandbox_workspace_write", "network_access"), req)
-        self.assertEqual(self.roots(), [os.path.join(self.state, "spool"), os.path.join(self.state, "active"),
-                                        str(self.home / ".local/state/swarm/grants")])   # grants only (N6)
+        self.assertEqual(self.roots(), [os.path.join(self.state, "spool"), os.path.join(self.state, "active")])
         for root in self.roots():
             self.assertNotEqual(root, self.state)
             self.assertFalse(str(self.home / ".local/share/swarm").startswith(root))
@@ -311,7 +309,7 @@ class GrantTests(unittest.TestCase):
         cfg["file"]["path"] = "~/b/board"
         self.assertIn(str(self.home / "b/board"), self.roots(cfg))
         cfg["board"]["backend"] = "postgres"
-        self.assertEqual(len(self.roots(cfg)), 3)   # spool, markers, grants
+        self.assertEqual(len(self.roots(cfg)), 2)
 
     def test_fresh_apply_sets_no_network(self):
         self.assertEqual(cc.apply(self.path, self.cfg)[0], "changed")

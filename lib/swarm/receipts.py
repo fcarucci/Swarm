@@ -33,7 +33,7 @@ from swarm import enrolment, paths, safefs
 FORMAT = 1
 RECORD_MAX = 64 * 1024
 KINDS = ("done", "review", "verdict", "goal_ready", "integrated", "seat_request", "post", "ask",
-         "answer", "blocker_resolution", "person", "ack", "withdraw", "land", "grant")
+         "answer", "blocker_resolution", "person", "ack", "withdraw", "land", "grant", "control_request")
 # The decision fields of each kind: the values whose digest is content_sha. A kind's row must
 # carry every one of them. Task 5 and Task 6 write and read records with these names. A verdict binds
 # the artifact it judges (an artifact verdict) or the candidate (a goal or ruling verdict): the other of
@@ -56,6 +56,9 @@ DECISION = {
     # A grant is the hook's attestation, BEFORE a control command runs, of who submitted it (drivegate.
     # write_grants): record_id is args_sha(submitted argv), seat/action_id say who. Single use (take()).
     "grant": ("argv_sha",),
+    # A Codex session's ledger-writing control command, posted as CONTROL-REQUEST <request> <args_sha> ...
+    # (drive_control): record_id is the message id; the driver applies it after checking this receipt.
+    "control_request": ("request", "args_sha"),
 }
 LAND_STATES = ("intent", "pushed", "verified")
 _SHA = re.compile(r"[0-9a-f]{64}")
@@ -81,26 +84,13 @@ class Receipt:
     destinations: dict | None = None   # land receipts: url -> {"state": ..., "sha": ...}
 
 
-GRANTS_SUBDIR = "grants"   # ~/.local/state/swarm/grants: grants only (a Codex writable root, N6)
-
-
-def grants_dir() -> Path:
-    """Where grants live: their own 0700 directory in the state dir, next to the spool and marker dirs (the
-    other Codex writable roots), so a Codex seat's sandbox can be given it to use a grant up, and never the
-    enrolled directory where every other receipt is, nor anything under ~/.local/share/swarm (the supervisor
-    refuses a writable root there: settings.ensure_private_dir)."""
-    return paths.state_dir() / GRANTS_SUBDIR
-
-
 @contextlib.contextmanager
 def _dir(kind: str, create: bool):
-    """A verified descriptor of the directory a receipt of `kind` lives in (safefs, 0700, this user's)."""
-    if kind != "grant":
-        with enrolment._dir(create=create) as d:
-            yield d
-        return
-    with safefs.dir_fd(grants_dir(), create=create, strict_mode=0o700) as fd:
-        yield fd
+    """A verified descriptor of the directory receipts live in: the host-private enrolled directory (safefs,
+    0700), for every kind, grants included. It is never a Codex writable root: a sandboxed seat can neither
+    write nor use up a receipt there (a Codex session's control command goes through a CONTROL-REQUEST)."""
+    with enrolment._dir(create=create) as d:
+        yield d
 
 
 def drop(board_key: str, job: str, kind: str, record_id: str) -> bool:
@@ -227,7 +217,7 @@ def write(board_key: str, r: Receipt) -> Path:
     body = json.dumps({"v": FORMAT, **asdict(r)}, sort_keys=True, allow_nan=False)
     with _dir(r.kind, create=True) as d:
         safefs.write_atomic(d, name, body, durable=True)
-    return (grants_dir() if r.kind == "grant" else enrolment.enrolled_dir()) / name
+    return enrolment.enrolled_dir() / name
 
 
 def find(board_key: str, job: str, kind: str, record_id: str, *, rev: int, incarnation: str,

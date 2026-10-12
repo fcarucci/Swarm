@@ -258,12 +258,9 @@ def required(cfg: dict) -> dict:
     """What the swarm needs in the base Codex config: the spool and marker dirs as writable
     roots, each named explicitly, and never the state dir itself (the host-trusted files next to
     them) nor network access. The board dir only when the user opts in ([codex] board_writable,
-    which doctor reports as a FAIL: sandboxed agents can then fake and tamper with board rows).
-    Also the grants directory (receipts.grants_dir: grants only, 0700, never the enrolled directory): a Codex
-    seat's `swarm` command uses up the grant its PreToolUse hook wrote (Codex parity, spec 6.2 scenario 4)."""
-    from swarm import receipts
+    which doctor reports as a FAIL: sandboxed agents can then fake and tamper with board rows)."""
     roots = []
-    wanted = [spool_path(cfg), _absolute(cfg["hook"]["marker_dir"]), _absolute(receipts.grants_dir())]
+    wanted = [spool_path(cfg), _absolute(cfg["hook"]["marker_dir"])]
     if _opt(cfg, "board_writable") and board_dir(cfg) is not None:
         wanted.append(board_dir(cfg))
     for p in wanted:
