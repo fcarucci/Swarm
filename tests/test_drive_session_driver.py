@@ -592,7 +592,7 @@ class MemoryIdle(Home):
 
 # --- the end-to-end proof --------------------------------------------------------------------------------
 
-@unittest.skipUnless(POSIX and os.path.isdir("/proc"), "the fake seat and the runner's group checks need /proc")
+@unittest.skipUnless(POSIX, "the fake seat's launchers are sh scripts (Windows: tracked in the hand-back)")
 class IdleOrchestratorEndToEnd(unittest.TestCase):
     """A real drive job (artifact recipe) on a sqlite board: `swarm activate`, then nothing but the session
     driver. The orchestrating session is an idle child process that never makes a hook call; seats are launched

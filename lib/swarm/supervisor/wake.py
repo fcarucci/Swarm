@@ -316,40 +316,78 @@ class KqueueSource:
 
 # --- Windows: ReadDirectoryChangesW ------------------------------------------------------------------
 
+def _win_k32():
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateFileW.restype = wintypes.HANDLE
+    k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                                wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    k32.CreateEventW.restype = wintypes.HANDLE
+    k32.CreateEventW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR]
+    k32.SetEvent.argtypes = [wintypes.HANDLE]
+    k32.ResetEvent.argtypes = [wintypes.HANDLE]
+    k32.ReadDirectoryChangesW.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD, wintypes.BOOL,
+                                          wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p,
+                                          ctypes.c_void_p]
+    k32.WaitForMultipleObjects.argtypes = [wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE), wintypes.BOOL,
+                                           wintypes.DWORD]
+    k32.WaitForMultipleObjects.restype = wintypes.DWORD
+    k32.GetOverlappedResult.argtypes = [wintypes.HANDLE, ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD),
+                                        wintypes.BOOL]
+    k32.CancelIoEx.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    return k32
+
+
 class WinDirSource:
-    """ReadDirectoryChangesW on the wake directory (synchronous, in its own thread), filtered to this board's
-    wake file: a touch changes its last-write time."""
+    """ReadDirectoryChangesW on the wake directory, overlapped, filtered to this board's wake file (a touch
+    changes its last-write time). The wait is on the I/O's event and a stop event, so close() never blocks
+    (closing a handle with synchronous I/O pending in another thread would wait for that I/O)."""
     kind = "notify"
 
     def __init__(self, board_key: str) -> None:
+        import ctypes
         from ctypes import wintypes
-        self.wt = wintypes
+        self.ct, self.wt = ctypes, wintypes
         self.name = wake_name(board_key)
         ensure(board_key)
-        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        k32.CreateFileW.restype = wintypes.HANDLE
-        k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
-                                    wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
-        k32.ReadDirectoryChangesW.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD, wintypes.BOOL,
-                                              wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p,
-                                              ctypes.c_void_p]
-        k32.CloseHandle.argtypes = [wintypes.HANDLE]
-        self.k32 = k32
+        k32 = self.k32 = _win_k32()
+
+        class OVERLAPPED(ctypes.Structure):
+            _fields_ = [("Internal", ctypes.c_size_t), ("InternalHigh", ctypes.c_size_t),
+                        ("Offset", wintypes.DWORD), ("OffsetHigh", wintypes.DWORD), ("hEvent", wintypes.HANDLE)]
+        self.OVERLAPPED = OVERLAPPED
         # FILE_LIST_DIRECTORY; share read/write/delete; OPEN_EXISTING; FILE_FLAG_BACKUP_SEMANTICS (a directory)
-        # | FILE_FLAG_OPEN_REPARSE_POINT (a junction planted for the directory is not followed)
-        h = k32.CreateFileW(str(wake_dir()), 0x1, 0x7, None, 3, 0x02000000 | 0x00200000, None)
+        # | FILE_FLAG_OPEN_REPARSE_POINT (a junction planted for the directory is not followed) | OVERLAPPED
+        h = k32.CreateFileW(str(wake_dir()), 0x1, 0x7, None, 3, 0x02000000 | 0x00200000 | 0x40000000, None)
         if h in (None, wintypes.HANDLE(-1).value):
             raise ctypes.WinError(ctypes.get_last_error())
         self.h = h
+        self.io = k32.CreateEventW(None, True, False, None)
+        self.stop = k32.CreateEventW(None, True, False, None)
         self.buf = ctypes.create_string_buffer(64 * 1024)
         self.closed = False
 
     def block(self) -> bool:
-        n = self.wt.DWORD(0)
+        ct, wt, k32 = self.ct, self.wt, self.k32
+        ov = self.OVERLAPPED()
+        ov.hEvent = self.io
+        k32.ResetEvent(self.io)
+        n = wt.DWORD(0)
         # FILE_NOTIFY_CHANGE_FILE_NAME | ATTRIBUTES | LAST_WRITE
-        if not self.k32.ReadDirectoryChangesW(self.h, self.buf, len(self.buf), False, 0x1 | 0x4 | 0x10,
-                                              ctypes.byref(n), None, None):
-            raise ctypes.WinError(ctypes.get_last_error())
+        if not k32.ReadDirectoryChangesW(self.h, self.buf, len(self.buf), False, 0x1 | 0x4 | 0x10, None,
+                                         ct.byref(ov), None):
+            raise ct.WinError(ct.get_last_error())
+        handles = (wt.HANDLE * 2)(self.io, self.stop)
+        which = k32.WaitForMultipleObjects(2, handles, False, 0xFFFFFFFF)
+        if which != 0:                               # the stop event (or a failed wait): cancel and end
+            k32.CancelIoEx(self.h, ct.byref(ov))
+            k32.GetOverlappedResult(self.h, ct.byref(ov), ct.byref(n), True)
+            self._release()
+            return False
+        if not k32.GetOverlappedResult(self.h, ct.byref(ov), ct.byref(n), False):
+            raise ct.WinError(ct.get_last_error())
         if n.value == 0:
             return True            # the buffer overflowed: something changed, look anyway
         raw, i, hit = self.buf.raw[:n.value], 0, False
@@ -362,10 +400,17 @@ class WinDirSource:
                 return hit
             i += nxt
 
+    def _release(self) -> None:
+        for h in (self.h, self.io, self.stop):
+            try:
+                self.k32.CloseHandle(h)
+            except Exception:
+                pass
+
     def close(self) -> None:
         self.closed = True
         try:
-            self.k32.CloseHandle(self.h)
+            self.k32.SetEvent(self.stop)     # the blocked thread cancels its read, closes the handles and ends
         except Exception:
             pass
 

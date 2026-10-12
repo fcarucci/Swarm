@@ -195,6 +195,16 @@ class ProcWatch:
             h = k32.OpenProcess(0x00100000 | 0x1000, False, self.pid)   # SYNCHRONIZE | QUERY_LIMITED_INFORMATION
             if not h:
                 raise OSError("OpenProcess failed")
+            k32.CreateEventW.restype = wintypes.HANDLE
+            k32.CreateEventW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR]
+            k32.WaitForMultipleObjects.argtypes = [wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE), wintypes.BOOL,
+                                                   wintypes.DWORD]
+            k32.WaitForMultipleObjects.restype = wintypes.DWORD
+            k32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+            k32.WaitForSingleObject.restype = wintypes.DWORD
+            k32.SetEvent.argtypes = [wintypes.HANDLE]
+            k32.CloseHandle.argtypes = [wintypes.HANDLE]
+            self._stop = k32.CreateEventW(None, True, False, None)   # close() ends a block() at once
             self._handle, self._k32, self.kind = h, k32, "wait"
             return
         if hasattr(os, "pidfd_open"):
@@ -250,8 +260,10 @@ class ProcWatch:
         return True
 
     def block(self) -> bool:
-        """Return True once the process has exited (blocking until then, without polling where possible)."""
+        """Return True once the process has exited (blocking until then, without polling where possible). A
+        one-shot source: once it has reported the exit it is closed (run_source does not call it again)."""
         if self._dead:
+            self.closed = True
             return True
         if self._pidfd is not None:
             import select
@@ -260,14 +272,18 @@ class ProcWatch:
             while not p.poll(None):
                 pass
         elif self._handle is not None:
-            self._k32.WaitForSingleObject(self._handle, 0xFFFFFFFF)
+            from ctypes import wintypes
+            handles = (wintypes.HANDLE * 2)(self._handle, self._stop)
+            if self._k32.WaitForMultipleObjects(2, handles, False, 0xFFFFFFFF) != 0:
+                return False                         # stopped by close(), not an exit
         elif self._kq is not None:
             while not self._kq.control(None, 1, None):
                 pass
         else:
-            while self.alive():
+            while self.alive() and not self.closed:
                 time.sleep(POLL_SECONDS)
         self._dead = True
+        self.closed = True
         return True
 
     def close(self) -> None:
@@ -282,9 +298,9 @@ class ProcWatch:
                 self._kq.close()
             except OSError:
                 pass
-        if self._handle is not None:
+        if self._handle is not None:   # wake a blocked block() first; the handles go with the process
             try:
-                self._k32.CloseHandle(self._handle)
+                self._k32.SetEvent(self._stop)
             except Exception:
                 pass
 
