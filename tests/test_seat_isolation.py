@@ -342,9 +342,11 @@ class JailTest(SeatHomeCase):
         self.assertEqual((self.home / ".ssh" / "id_ed25519").read_text(), "not a real key\n")
 
 
-def recording_runner(calls, rc=0, out=b"ran\n", gate=None):
+def recording_runner(calls, rc=0, out=b"ran\n", gate=None, attested=None):
     def run(argv, **kw):
         calls.append((argv, kw))
+        if attested is not None:
+            attested.append(person.broker_attested(kw["env"], attest_dir=attested_dir(kw)))
         if gate is not None:
             gate.wait(10)
         return subprocess.CompletedProcess(argv, rc, out, b"")
@@ -358,6 +360,13 @@ def cli_argv(call) -> list[str]:
     return argv[i + 2:]
 
 
+_ATTEST_DIRS: dict = {}
+
+
+def attested_dir(kw):
+    return _ATTEST_DIRS.get("dir")
+
+
 class BrokerCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tmpdir(self)
@@ -368,15 +377,19 @@ class BrokerCase(unittest.TestCase):
         self.files = self.tmp / "private-files"
         self.files.mkdir()
         self.calls = []
+        self.attested = []
         self.run = {"harness": "claude", "session_id": "11111111-2222-3333-4444-555555555555", "name": "Lisa"}
+        _ATTEST_DIRS["dir"] = str(self.tmp / "attest")
         self.b = self.broker()
 
     def broker(self, runner=None, **kw):
+        kw.setdefault("attest_dir", str(self.tmp / "attest"))
         return seatbroker.SeatBroker(self.run, str(self.seat / "broker"), workdir=str(self.wd), forbid=[],
                                      seat_dir=str(self.seat), config="/sup/config.toml", host_pid=4242,
                                      base_env={"PATH": "/bin", "CLAUDE_CODE_SESSION_ID": "other",
                                                "PYTHONPATH": str(self.wd)},
-                                     runner=runner or recording_runner(self.calls), file_dir=str(self.files), **kw)
+                                     runner=runner or recording_runner(self.calls, attested=self.attested),
+                                     file_dir=str(self.files), **kw)
 
     def cli(self, argv, broker=None):
         """The seat side (seatbroker_client.run_cli, cwd the work tree) against this broker, inline."""
@@ -426,7 +439,10 @@ class TypedProtocolTest(BrokerCase):
         self.assertEqual(kw["env"]["CLAUDE_CODE_SESSION_ID"], self.run["session_id"])
         self.assertEqual(kw["env"]["SWARM_CONFIG"], "/sup/config.toml")
         self.assertNotIn("PYTHONPATH", kw["env"])
-        self.assertEqual(kw["env"][person.BROKER_PID_ENV], "4242")
+        self.assertIn(person.BROKER_TOKEN_ENV, kw["env"])
+        self.assertNotIn("SWARM_BROKER_HOST_PID", kw["env"])
+        self.assertEqual(self.attested, [4242])                    # the record the broker wrote for the call
+        self.assertEqual(os.listdir(self.tmp / "attest"), [])     # and removed after it
 
     def test_rr9_no_config_or_plugin_reaches_the_cli(self):
         (self.wd / "evil").mkdir()
@@ -691,6 +707,41 @@ class Round3Test(BrokerCase):
         (self.seat / "claude" / "projects" / "p" / f"{sid}.jsonl").write_text("mine")
         self.assertEqual(seatbroker.read_seat_transcript(str(self.seat), "claude", sid, 1 << 20), b"mine")
         self.assertIsNone(seatbroker.read_under(str(self.seat), "claude/../claude/projects/p/x", 10))
+
+
+
+class Rr19Test(BrokerCase):
+    """The broker's attestation cannot be set by an agent: only a live record the broker wrote counts."""
+
+    def test_a_bare_variable_attests_nothing(self):
+        import secrets
+        d = str(self.tmp / "attest")
+        for env in ({"SWARM_BROKER_HOST_PID": "4242"}, {person.BROKER_TOKEN_ENV: secrets.token_hex(32)},
+                    {person.BROKER_TOKEN_ENV: "not-hex"}):
+            self.assertIsNone(person.broker_attested(env, attest_dir=d), env)
+        codex = {"CODEX_THREAD_ID": "t", "SWARM_BROKER_HOST_PID": "4242",
+                 person.BROKER_TOKEN_ENV: secrets.token_hex(32)}
+        with mock.patch.object(person, "broker_attested", lambda env=None, attest_dir=None: None):
+            self.assertTrue(person.codex_session(codex))      # still a sandboxed Codex session: CONTROL-REQUEST
+        with mock.patch.dict(os.environ, codex):
+            self.assertNotEqual(person.host_pid(parent_of=lambda pid: None), 4242)
+
+    def test_only_the_brokers_live_record_counts(self):
+        import time as _t
+        token, name = self.b._attest()
+        d = str(self.tmp / "attest")
+        self.assertEqual(person.broker_attested({person.BROKER_TOKEN_ENV: token}, attest_dir=d), 4242)
+        self.b._unattest(name)
+        person._ATTESTED.clear()
+        self.assertIsNone(person.broker_attested({person.BROKER_TOKEN_ENV: token}, attest_dir=d))
+        token, name = self.b._attest()
+        p = Path(d) / name
+        p.write_text(json.dumps({"pid": 4242, "expires_at": _t.time() - 1}))
+        person._ATTESTED.clear()
+        self.assertIsNone(person.broker_attested({person.BROKER_TOKEN_ENV: token}, attest_dir=d))   # expired
+        os.chmod(d, 0o755)
+        person._ATTESTED.clear()
+        self.assertIsNone(person.broker_attested({person.BROKER_TOKEN_ENV: token}, attest_dir=d))   # not private
 
 
 class FuzzTest(BrokerCase):

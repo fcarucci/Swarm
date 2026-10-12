@@ -52,7 +52,48 @@ class Caller:
 
 
 _TAKEN: dict = {}
-BROKER_PID_ENV = "SWARM_BROKER_HOST_PID"   # set only by the seat broker on the commands it runs for a seat
+# A jailed seat's broker (Task 20) attests the commands it runs for the seat with a per-call SECRET (env), whose
+# record (the seat's session pid, an expiry) only the broker writes, in the supervisor's private dir, under the
+# secret's hash. A bare variable an agent sets attests nothing: without the record it names, it is ignored (rr19).
+BROKER_TOKEN_ENV = "SWARM_BROKER_TOKEN"
+BROKER_ATTEST_DIR = "broker-attest"
+_ATTESTED: dict = {}
+
+
+def broker_attest_name(token: str) -> str:
+    import hashlib
+    return "attest-" + hashlib.sha256(token.encode()).hexdigest() + ".json"
+
+
+def broker_attested(env=None, attest_dir=None) -> int | None:
+    """The seat session pid the broker attested for this process (BROKER_TOKEN_ENV names a live record the broker
+    wrote), else None. Never raises."""
+    import json
+    import re
+    env = os.environ if env is None else env
+    token = env.get(BROKER_TOKEN_ENV) or ""
+    if not re.fullmatch(r"[0-9a-f]{64}", token):
+        return None
+    if token in _ATTESTED:
+        return _ATTESTED[token]
+    pid = None
+    try:
+        from swarm import safefs
+        from swarm.supervisor.settings import private_dir
+        base = attest_dir or str(private_dir() / BROKER_ATTEST_DIR)
+        fd = safefs.open_base(base, create=False, strict_mode=0o700)
+        try:
+            raw = safefs.read(fd, broker_attest_name(token))
+        finally:
+            os.close(fd)
+        rec = json.loads(raw) if raw else None
+        if isinstance(rec, dict) and isinstance(rec.get("pid"), int) and rec["pid"] > 1 \
+                and float(rec.get("expires_at", 0)) > time.time():
+            pid = rec["pid"]
+    except Exception:
+        pid = None
+    _ATTESTED[token] = pid
+    return pid
 
 
 def host_pid(parent_of=None, pid: int | None = None, max_hops: int = 40) -> int | None:
@@ -60,11 +101,12 @@ def host_pid(parent_of=None, pid: int | None = None, max_hops: int = 40) -> int 
     runs a command under a `codex-*` sandbox helper, below the codex process its hooks run under), or None.
     The hook and the CLI of one tool call find the same pid, so a grant bound to it is no use to a process of
     another session or to one outside every agent host."""
-    brokered = os.environ.get(BROKER_PID_ENV, "")
-    if pid is None and parent_of is None and brokered.isdigit():
-        # a jailed seat's hook or command, run outside the jail by its runner's broker (seatbroker): no
-        # claude/codex process is above it here, so the broker names the seat's own session process
-        return int(brokered)
+    if pid is None and parent_of is None:
+        brokered = broker_attested()
+        if brokered is not None:
+            # a jailed seat's hook or command, run outside the jail by its runner's broker (seatbroker): no
+            # claude/codex process is above it here, so the broker's record names the seat's own session process
+            return brokered
     parent_of = parent_of or hosts._proc_parent
     pid = os.getppid() if pid is None else pid
     found = None
@@ -116,7 +158,7 @@ def codex_session(env, ancestor=None) -> bool:
     """Whether this command runs in a Codex session: a Codex variable is set, or the nearest agent host above
     the process is codex. Such a command cannot use a grant (its sandbox cannot touch the enrolled
     directory), so its ledger-writing control commands go to the driver as CONTROL-REQUESTs."""
-    if (env.get(BROKER_PID_ENV) or "").isdigit():
+    if broker_attested(env) is not None:
         return False   # run by a jailed seat's broker outside the jail: the broker attests the caller (its grant)
     if any(env.get(k) for k in CODEX_ENV):
         return True
