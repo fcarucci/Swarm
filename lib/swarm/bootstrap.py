@@ -1865,6 +1865,30 @@ def _claude_sandbox_check() -> Check:
                  f'set "sandbox": {{"enabled": true}} in {path}')
 
 
+def _seat_isolation_check(cfg: dict, probe=None) -> Check:
+    """Task 20: whether drive seats on this host run in their credential jail, and whether any push
+    credential is reachable from inside it (ssh -T to GitHub, gh auth status, git credential helpers,
+    agent and token variables, the covered paths). `probe` replaces seathome.probe (tests)."""
+    from swarm.supervisor import seathome
+    fix = ("enable unprivileged user namespaces for this user (sysctl kernel.unprivileged_userns_clone=1; on "
+           "Ubuntu kernel.apparmor_restrict_unprivileged_userns=0), or move the credential named out of reach")
+    try:
+        ok, detail = (probe or (lambda c: seathome.probe(c, network=True)))(cfg)
+    except seathome.SeatIsolationError as exc:
+        return Check("seat isolation", False, str(exc), "fix [drive] seat_isolation")
+    except Exception as exc:   # never let the probe break doctor
+        return Check("seat isolation", False, f"probe error: {type(exc).__name__}: {exc}", fix)
+    if ok:
+        return Check("seat isolation", True, f"drive seats: {detail}")
+    if ok is None:
+        if detail.startswith("off"):
+            return Check("seat isolation", None, f"drive seats: {detail}",
+                         'remove [drive] seat_isolation = "off" (the default jails every seat)')
+        return Check("seat isolation", False, f"drive seats are NOT started on this host: {detail}", fix)
+    return Check("seat isolation", False, f"drive seats can reach a credential: {detail}",
+                 "cover the path named ([drive] seat_cover_paths) or remove the credential from the seat env")
+
+
 def _codex_drive_checks(cfg: dict, which) -> list[Check]:
     """Whether a Codex writer seat can reach the board ([F18]): on a server board the swarm
     config's [codex] network_access and the Codex profile that carries it; on a local board the
@@ -2035,6 +2059,8 @@ def drive_checks(cfg: dict, *, run=None, which=None, now=None, platform: str | N
     if relevant:
         out = [_drive_timer_check(cfg, run, now)] if has_jobs else []
         out += [_drive_git_check(run, has_jobs), _claude_sandbox_check()]
+        if os.environ.get("SWARM_NO_SYSTEMD") != "1":   # no scopes, no drive seat starts here (the test suite)
+            out.append(_seat_isolation_check(cfg))
         out += _codex_drive_checks(cfg, which)
     if unreadable is not None:
         out.append(Check("drive ledgers", False,
