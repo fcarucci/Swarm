@@ -126,9 +126,12 @@ class Rig:
                 "--remote", f"origin={self._remote('origin')}", "--remote", f"backup={self._remote('backup')}",
                 "--budget", f"max_cost_usd={self.budget_usd:g}", *self.activate_extra, *(extra or [])]
 
+    session_driver = False   # True: no supervise pass is ever run (the session driver drives; Task 21)
+
     def activate(self, extra: list[str] | None = None, goal: str | None = None) -> None:
         q.require("6a", "6b", what="swarm activate --drive and seats")
-        self.run.supervise_pass()    # activation refuses unless the supervisor has run in the last 2 minutes
+        if not self.session_driver:
+            self.run.supervise_pass()    # activation refuses unless the supervisor has run in the last 2 minutes
         res = self.run.swarm(*self.activate_args(goal, extra))
         self.run.event("activate", "goal job activated", rc=res.returncode, out=(res.stdout + res.stderr)[-300:])
         if res.returncode:
@@ -233,8 +236,11 @@ class Rig:
                 raise TimeoutError(f"job {self.job} not terminal after {self.passes} passes: {snap}")
             if on_pass:
                 on_pass(self.passes, snap)
-            self.one_pass()
-            time.sleep(interval_s)
+            if self.session_driver:
+                time.sleep(interval_s)   # nothing but the session driver moves the job
+            else:
+                self.one_pass()
+                time.sleep(interval_s)
 
     # -- fault helpers
     def arm_barrier(self, name: str) -> None:

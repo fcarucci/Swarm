@@ -325,7 +325,16 @@ class Run:
         swarm.chmod(0o755)
         for harness in ("claude", "codex"):
             shim = self.bin / harness
-            if self.harness == "fake":
+            if self.harness == "fakeseat" and harness == "claude":
+                # the target checkout's own scripted seat (tests/drive_fake_seat.py, Task 21): real hooks, no tags
+                seat = self.root / "tests" / "drive_fake_seat.py"
+                shim.write_text(f'#!/bin/sh\nexport FAKE_SWARM="{self.root}/bin/swarm" FAKE_SEAT_LOG="{self.logs}/fakeseat.jsonl"\n'
+                                f'exec "{py}" "{seat}" "$@"\n')
+                shim.chmod(0o755)
+            elif self.harness == "fakeseat":
+                if shim.exists() or shim.is_symlink():
+                    shim.unlink()
+            elif self.harness == "fake":
                 shim.write_text(f'#!/bin/sh\nexec "{py}" "{HERE}/fake_harness.py" --harness {harness} "$@"\n')
                 shim.chmod(0o755)
             elif shim.exists() or shim.is_symlink():
@@ -346,7 +355,7 @@ class Run:
                "timer_minutes = 1", "orphan_minutes = 1", "enrol_minutes = 2", "max_minutes = 20"]
         if self.pass_env:
             sup.append(f"pass_env = {json.dumps(self.pass_env)}")
-        if self.harness == "fake":
+        if self.harness in ("fake", "fakeseat"):
             sup += [f"claude_bin = {toml_str(self.bin / 'claude')}", f"codex_bin = {toml_str(self.bin / 'codex')}"]
         else:
             # the user's own binaries (the isolated HOME has no ~/.local/bin); SWARM_QA_CLAUDE/_CODEX override

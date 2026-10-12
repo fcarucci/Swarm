@@ -90,6 +90,7 @@ def run_goal(args, expect: str) -> list[tuple[str, str, str]]:
     try:
         with Rig(name, script=script, backend=args.backend, harness=args.harness, budget_usd=args.budget_usd,
                  systemd=args.systemd) as rig:
+            rig.session_driver = args.driver == "session"
             if args.harness == "real" and expect == "met" and have_codex:
                 rig.lead_brief = HERE / "LEAD-met-codex.md"      # asks for one engineer seat on the codex harness
             st: dict = {}
@@ -154,10 +155,13 @@ def main(argv=None) -> int:
     ap.add_argument("cmd", choices=["preflight", "met", "unreachable", "chaos", "all", "pending"])
     ap.add_argument("names", nargs="*", help="chaos scenario names")
     ap.add_argument("--backend", default="postgres", choices=["postgres", "sqlite", "file"])
-    ap.add_argument("--harness", default="fake", choices=["fake", "real"])
+    ap.add_argument("--harness", default="fake", choices=["fake", "fakeseat", "real"])
     ap.add_argument("--budget-usd", type=float, default=None)
     ap.add_argument("--timeout-min", type=float, default=None)
     ap.add_argument("--interval-s", type=float, default=None)
+    ap.add_argument("--driver", choices=["pass", "session"], default="pass",
+                    help="pass: the rig runs `swarm supervise` (4318921); session: activate in an idle session and run NO "
+                         "pass and no timer (int/rc, Task 21 session driver)")
     ap.add_argument("--kill-supervisor-once", action="store_true")
     ap.add_argument("--systemd", action="store_true", default=None, help="require real systemd scopes (default: on when a user manager answers; drive seats need them)")
     ap.add_argument("--no-systemd", dest="systemd", action="store_false", help="SWARM_NO_SYSTEMD=1: the driver will refuse launches")
