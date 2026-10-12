@@ -117,6 +117,7 @@ REFUSED = (
 
 
 class CheckUrlTests(unittest.TestCase):
+    @posix_only("drive mode is refused on Windows: POSIX paths in the fixtures")
     def test_accepted(self):
         for url in ACCEPTED:
             with self.subTest(url=url):
@@ -151,6 +152,7 @@ def git(*args, cwd=None, env=None):
                           timeout=60)
 
 
+@posix_only("drive mode is refused on Windows: POSIX paths in the fixtures")
 class LocalityTests(unittest.TestCase):
     """The 11b re-review's local-transport probes, adapted: R1 (percent-encoded escape), R2 (locality decided
     from the URL for every credential kind), R3 (the destination's config runs in a local pack)."""
@@ -310,6 +312,7 @@ class CheckBranchTests(unittest.TestCase):
 
 
 class CheckPinTests(unittest.TestCase):
+    @posix_only("drive mode is refused on Windows: POSIX paths in the fixtures")
     def test_allowlisted_pins(self):
         for pin in ("helper:/usr/bin/gh auth git-credential", "helper:/opt/git-credential-manager",
                     "helper:/usr/lib/git-core/git-credential-store", "helper:/usr/lib/git-core/git-credential-cache",

@@ -39,7 +39,7 @@ BASE_ENV_KEYS = {"GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "HOME", "PATH", "GI
                  "GIT_ALLOW_PROTOCOL"}
 FAKE_SHA = "1" * 40
 # Written out literally: a mutant that drops an entry from mirror._SAFE_CONFIG must still fail.
-EXPECTED_SAFE_CONFIG = ("core.hooksPath=/dev/null", "core.fsmonitor=false", "protocol.allow=never",
+EXPECTED_SAFE_CONFIG = ("core.hooksPath=" + os.devnull, "core.fsmonitor=false", "protocol.allow=never",
                         "protocol.https.allow=always", "protocol.ssh.allow=always",
                         "protocol.file.allow=always")
 
@@ -265,6 +265,7 @@ class MirrorBasics(MirrorCase):
         self.assertTrue(all(kw["timeout"] <= 60 for _, kw in calls))
         self.assertTrue(any(kw["timeout"] == 60 for _, kw in calls))
 
+    @support.posix_only("drive mode is refused on Windows: local destinations and POSIX paths")
     def test_git_error_message_does_not_echo_the_remote_url(self):
         nowhere = self.repo("nowhere", bare=True)
         m = Mirror("file://" + nowhere, self.agent_cred())

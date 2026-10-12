@@ -421,7 +421,7 @@ class Leases(LandCase):
         self.assertEqual(normalize_url("http://h/o/r"), normalize_url("https://h/o/r"))
         self.assertEqual(normalize_url("git@h:o/r.git"), normalize_url("https://H/o/r/"))
         self.assertEqual(lease_key("git@github.com:o/r.git", "main"), lease_key("https://github.com/o/r", "main"))
-        self.assertEqual(normalize_url("file:///srv/r.git"), "/srv/r.git")
+        self.assertEqual(normalize_url("file:///srv/r.git"), os.path.normpath("/srv/r.git"))
         self.assertFalse(normalize_url("C:\\repos\\r.git").startswith("ssh://"))
         self.assertFalse(normalize_url("C:/repos/r.git").startswith("ssh://"))
         self.assertEqual(normalize_url("ssh://git@h/o/r.git"), normalize_url("https://h/o/r"))
