@@ -114,7 +114,9 @@ def _owner_roots(bk: str, job: str) -> list:
     """The job's authorized work roots, from the host-private owner record. None of them recorded (or
     an owner record without them) means no seat workdir and no requirement is accepted: fails closed."""
     owner = enrolment.find_job_owner(bk, job)
-    roots = getattr(owner, "roots", None) if owner is not None else None
+    # the roots are in the owner record's `owner` mapping (6a's format), not an attribute of the Record
+    data = getattr(owner, "owner", None) if owner is not None else None
+    roots = data.get("roots") if isinstance(data, dict) else None
     return list(roots) if isinstance(roots, (list, tuple)) else []
 
 

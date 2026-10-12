@@ -660,6 +660,12 @@ def finish_activation(cfg: dict, board, job: str, *, crash_after: str | None = N
         board.request_seat(job, led.generation, "lead", role="engineering_lead", harness=owner.harness,
                            model=models["lead"], workdir=o["roots"][0], brief_path=o["brief"],
                            requested_by=session or user)
+    # The activation's lead request is driver-authored (spec 3.4 [F2]/[RR1]): no hook sees a plain-shell
+    # activation, so its seat_request receipt is written here, or the driver never admits the lead.
+    from swarm.supervisor import driver_exec
+    lead = board.seat(job, led.generation, "lead")
+    if lead is not None and lead.state == "requested" and not driver_exec.seat_authorized(led, lead, board.now()):
+        driver_exec.authorize_seat(led, lead, board.now())
     if crash_after == "lead":
         raise RuntimeError("crash after lead")
     return _save(bk, job, lambda x: setattr(x, "state", "active"))

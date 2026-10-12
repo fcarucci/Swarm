@@ -1248,6 +1248,14 @@ class PassIntegrationTests(PassCase):
         with mock.patch.object(driver, "drive", side_effect=RuntimeError("boom")):
             self.assertEqual(driver.run(self.board, self.cfg, {}, {}, now=self.t0), {"J"})
 
+    def test_run_without_a_now_uses_the_board_clock(self):
+        """QA bug 1: `swarm supervise` passes now=None; the driver takes the board's clock."""
+        self.job()
+        seen = []
+        with mock.patch.object(driver, "drive", side_effect=lambda *a, **k: seen.append(k["now"]) or set()):
+            driver.run(self.board, self.cfg, {}, {}, now=None)
+        self.assertIsNotNone(seen[0])
+
     def test_dry_run_leaves_drive_jobs_alone_and_drives_nothing(self):
         from swarm.supervisor import command
         self.job()

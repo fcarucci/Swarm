@@ -613,6 +613,8 @@ def run(board, cfg: dict, sup: dict, state: dict, *, now, say=print, start_runne
         config_path: str = "", deadline: float | None = None, job: str | None = None) -> set[str]:
     """`drive`, guarded for the pass: a failure of the driver itself (an import, the enumeration) is logged and
     the job names that can be named without it are still returned, so the other passes leave them alone."""
+    if now is None:   # the CLI's `swarm supervise` passes none: the board's clock
+        now = board.now()
     try:
         return drive(board, cfg, sup, state, now=now, say=say, start_runner=start_runner, which=which,
                      scope_ok=scope_ok, config_path=config_path, deadline=deadline, job=job)

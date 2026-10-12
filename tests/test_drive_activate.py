@@ -801,6 +801,23 @@ class DriveCli(Env):
         self.assertRegex(last, RECORD)
         self.assertEqual(RECORD.fullmatch(last).group(1), "activate")
 
+    def test_a_plain_shell_activation_authorizes_its_lead_seat(self):
+        """QA bug 2: no hook sees a plain-shell activation, so the activation itself writes the lead seat's
+        driver-authored seat_request receipt; otherwise the snapshot never admits the lead."""
+        from swarm.supervisor import driver_exec
+        rc, out, err = self.activate("--drive", "--workdir", str(self.work))
+        self.assertEqual(rc, 0, err)
+        with self.board() as b:
+            lead = b.seat("J", 1, "lead")
+            self.assertTrue(driver_exec.seat_authorized(self.ledger_of(), lead, b.now()))
+
+    def test_owner_roots_are_read_from_the_owner_record(self):
+        """QA bug 3: the roots live in the owner record's `owner` mapping."""
+        from swarm import drive_cli
+        rc, _, err = self.activate("--workdir", str(self.work))
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(drive_cli._owner_roots(da.board_key(self.cfg), "J"), [os.path.realpath(self.work)])
+
     def test_goal_implies_drive_and_pins_the_owner_details(self):
         rc, _, err = self.activate("--workdir", str(self.work))
         self.assertEqual(rc, 0, err)
