@@ -35,10 +35,11 @@ tok=$(sed -n 's/^ *oauth_token: *//p' "$GH_CONFIG_DIR/hosts.yml" 2>/dev/null)
 [ -n "$tok" ] || exit 1
 printf 'username=%s\\npassword=%s\\n' "{user}" "$tok"
 """
-BASE_ENV_KEYS = {"GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "HOME", "PATH", "GIT_TERMINAL_PROMPT"}
+BASE_ENV_KEYS = {"GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "HOME", "PATH", "GIT_TERMINAL_PROMPT", "LC_ALL",
+                 "GIT_ALLOW_PROTOCOL"}
 FAKE_SHA = "1" * 40
 # Written out literally: a mutant that drops an entry from mirror._SAFE_CONFIG must still fail.
-EXPECTED_SAFE_CONFIG = ("core.hooksPath=/dev/null", "protocol.allow=never",
+EXPECTED_SAFE_CONFIG = ("core.hooksPath=/dev/null", "core.fsmonitor=false", "protocol.allow=never",
                         "protocol.https.allow=always", "protocol.ssh.allow=always",
                         "protocol.file.allow=always")
 
@@ -221,9 +222,8 @@ class MirrorBasics(MirrorCase):
         self.assertIsNone(m.head("topic"))
 
     def test_plain_http_refused_without_loopback_opt_in(self):
-        m = Mirror("http://127.0.0.1:9/none.git", self.agent_cred())
         with self.assertRaises(MirrorError):
-            m.fetch(timeout=10)
+            Mirror("http://127.0.0.1:9/none.git", self.agent_cred())
 
     def test_loopback_http_refused_outside_the_suite(self):
         env = {k: v for k, v in os.environ.items() if k != mirror.TEST_MARKER}
@@ -266,7 +266,8 @@ class MirrorBasics(MirrorCase):
         self.assertTrue(any(kw["timeout"] == 60 for _, kw in calls))
 
     def test_git_error_message_does_not_echo_the_remote_url(self):
-        url = "file://" + os.path.join(self.root, "nowhere") + "?token=SECRET-ISH"
+        nowhere = self.repo("nowhere", bare=True)
+        url = "file://" + nowhere + "?token=SECRET-ISH"
         m = Mirror(url, self.agent_cred())
         with self.assertRaises(MirrorError) as cm:
             m.fetch(timeout=30)
@@ -373,6 +374,8 @@ class MirrorIsolation(MirrorCase):
             self.assertEqual(env["GIT_CONFIG_GLOBAL"], os.devnull)
             self.assertEqual(env["HOME"], m.private_home)
             self.assertEqual(env["GIT_TERMINAL_PROMPT"], "0")
+            self.assertEqual(env["GIT_ALLOW_PROTOCOL"], "https:ssh:file")
+            self.assertEqual(kw["cwd"], os.path.abspath(os.sep))        # never a repository that holds config
             self.assertEqual(env["PATH"], mirror._system_path())
             for item in EXPECTED_SAFE_CONFIG:
                 self.assertTrue(any(cmd[i] == "-c" and cmd[i + 1] == item
