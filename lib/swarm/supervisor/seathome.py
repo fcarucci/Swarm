@@ -98,14 +98,22 @@ def jail_platform(platform: str | None = None) -> bool:
     return (platform or sys.platform).startswith("linux")
 
 
-def mode(cfg: dict, platform: str | None = None) -> str:
-    """"required" (Linux: the jail, fail closed) or "best-effort" (macOS, Windows: no filesystem jail; the seat
-    gets the allowlisted environment, no credential helper, no agent, a scratch HOME and the broker), unless a
-    person turned isolation off on this host (`swarm supervise seat-isolation off`): "off". [drive]
-    seat_isolation in config.toml is only checked: it cannot turn isolation off."""
+def strict(cfg: dict) -> bool:
+    """[drive] seat_isolation = "strict": the person's opt-in to fail closed. A seat is never started without the
+    full jail (macOS, Windows and a Linux host without unprivileged user namespaces refuse drive seats)."""
     value = str(_drive(cfg).get("seat_isolation", "required")).strip().lower()
-    if value not in ("required", "off"):
-        raise SeatIsolationError(f"[drive] seat_isolation must be \"required\", not {value!r}")
+    if value not in ("required", "strict", "off"):
+        raise SeatIsolationError(f"[drive] seat_isolation must be \"required\" or \"strict\", not {value!r}")
+    return value == "strict"
+
+
+def mode(cfg: dict, platform: str | None = None) -> str:
+    """"required" (Linux: the jail where it can be built) or "best-effort" (macOS, Windows: no filesystem jail;
+    the seat gets the allowlisted environment, no credential helper, no agent, a scratch HOME and the broker),
+    unless a person turned isolation off on this host (`swarm supervise seat-isolation off`): "off". [drive]
+    seat_isolation in config.toml cannot turn isolation off ("off" there is ignored); "strict" makes a host that
+    cannot jail refuse seats instead of falling back to best-effort (launch)."""
+    strict(cfg)   # validates the value
     if off_granted() is not None:
         return "off"
     return "required" if jail_platform(platform) else "best-effort"
@@ -499,7 +507,17 @@ def launch(cfg: dict, argv: list, *, job: str, seat: str, workdir: str | None = 
     if m == "off":
         return list(argv), None, m
     if m == "required":
-        return wrap(cfg, argv, job=job, seat=seat, workdir=workdir, probe=probe), None, m
+        from swarm import seatjail
+        ok, why = (probe or seatjail.available)()
+        if ok:
+            return wrap(cfg, argv, job=job, seat=seat, workdir=workdir, probe=lambda: (True, "")), None, m
+        if strict(cfg):
+            raise SeatIsolationError(f"this host cannot jail a drive seat ({why}) and [drive] seat_isolation = "
+                                     "\"strict\": not started")
+        m = "best-effort"          # no jail here (no unprivileged user namespaces): fall back, never refuse
+    elif strict(cfg):
+        raise SeatIsolationError(f"no filesystem jail on {platform or sys.platform} and [drive] seat_isolation = "
+                                 "\"strict\": not started")
     h = prepare(cfg, job, seat)
     return list(argv), best_effort_env(cfg, h, platform), m
 
@@ -562,11 +580,15 @@ def probe(cfg: dict, *, network: bool = False, run=None, available=None) -> tupl
     if m == "off":
         return None, "off (a person ran `swarm supervise seat-isolation off`): drive seats can read the person's files"
     if m == "best-effort":
+        if strict(cfg):
+            return None, f"unavailable: no filesystem jail on {sys.platform} ([drive] seat_isolation = \"strict\")"
         return None, BEST_EFFORT_NOTE.format(platform=sys.platform)
     from swarm import seatjail
     ok, why = (available or seatjail.available)()
     if not ok:
-        return None, f"unavailable: {why}"
+        if strict(cfg):
+            return None, f"unavailable: {why}"
+        return None, BEST_EFFORT_NOTE.format(platform=sys.platform)
     home = str(paths.home())
     targets = [f"{home}/{p}" for p in PROBE_PATHS] + pinned_paths(cfg)
     argv = wrap(cfg, ["sh", "-c", PROBE, "probe", *targets], job="_doctor", seat="probe",

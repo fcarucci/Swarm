@@ -294,9 +294,10 @@ allowed_models = ["haiku", "sonnet", "opus"]   # the models a job may pick (acti
 # Seat isolation (Linux): every drive seat runs in a jail that sees an ALLOWLIST of your files (its work tree,
 # the harness login and settings read-only, the swarm venv, the tools on PATH), its own $HOME, /tmp and
 # transcripts, no board password: it reaches the board only through its runner's broker. Only the supervisor
-# lands. A host that cannot jail a seat does not start it. Turning it off is a person's act at a terminal:
+# lands. A host that cannot jail a seat (macOS, Windows, no user namespaces) runs it best-effort (doctor warns)
+# unless seat_isolation = "strict". Turning it off is a person's act at a terminal:
 # `swarm supervise seat-isolation off` (this file cannot turn it off).
-seat_isolation = "required"
+seat_isolation = "required"         # the jail where it can be built, else best-effort (doctor warns); "strict": refuse instead
 # seat_git_name = "..."              # the seats' git identity (default: the person's global one)
 # seat_git_email = "..."
 # seat_ro_paths = ["~/.npm"]         # more paths a seat may read
