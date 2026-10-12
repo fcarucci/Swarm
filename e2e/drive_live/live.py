@@ -58,7 +58,7 @@ def preflight(args) -> list[tuple[str, str, str]]:
                         q.Outcome.PASS if ff.returncode and "non-fast-forward" in ff.stderr else q.Outcome.FAIL,
                         "the hub itself refuses a non-fast-forward push to main" if ff.returncode else "push was accepted"))
             if args.harness == "fake":
-                ok = all((r.bin / n).exists() for n in ("swarm", "claude", "codex"))
+                ok = all((r.swarm_bin.exists(), (r.bin / "claude").exists(), (r.bin / "codex").exists()))
                 out.append(("preflight/shims", q.Outcome.PASS if ok else q.Outcome.FAIL, f"{r.bin}"))
             caps = q.capabilities()
             miss = [k for k in q.LIVE_NEEDS if not caps[k].present]

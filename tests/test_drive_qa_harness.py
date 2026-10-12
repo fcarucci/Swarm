@@ -330,7 +330,7 @@ class Mutants(Tmp):
         sh = self.tmp / "swarm"
         sh.write_text("#!/bin/sh\nsleep 30\n")
         sh.chmod(0o755)
-        run = NS(bin=self.tmp, env=lambda: dict(os.environ), event=lambda *a, **k: None)
+        run = NS(swarm_bin=sh, bin=self.tmp, env=lambda: dict(os.environ), event=lambda *a, **k: None)
         rig = NS(run=run)
         st: dict = {}
         with mock.patch.object(q, "run_procs", lambda *a, **k: []), mock.patch.object(chaos.time, "sleep", lambda s: None), \

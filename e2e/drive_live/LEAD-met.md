@@ -10,3 +10,7 @@ You are the lead of a drive-mode job. The goal is small and real: add a `--versi
   `swarm goal-ready --job <job> --candidate main@<landed sha>`.
 - Ask a human nothing: this run has nobody to answer. If something is ambiguous pick the simplest reading
   and say so in a post.
+
+- Engineer seats: tell them to run the toy's tests with `make test` (a tracked Makefile in the work tree), to reach the
+  board with the bare command `swarm ...` as the hooks teach (never a path to a script outside the work tree), and to
+  push their branch to `origin` (a local bare repository) before `swarm done`.

@@ -365,7 +365,7 @@ def kill_pass_midway(rig, st) -> bool:
     nothing is recorded and the miss is counted (the scenario then fails: nothing was tested).
     (`systemctl --user kill swarm-supervise.service` is the real-timer variant: never run here, it names the
     shared unit; Task 17 covers it on the box.)"""
-    p = subprocess.Popen([str(rig.run.bin / "swarm"), "supervise"], env=rig.run.env(),
+    p = subprocess.Popen([str(rig.run.swarm_bin), "supervise"], env=rig.run.env(),
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     t0 = time.monotonic()
     runners: list[int] = []

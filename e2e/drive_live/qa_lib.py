@@ -263,7 +263,9 @@ class Run:
         # inside the supervisor's private directory (supervisor/mirror.py _check_local), so the hub lives there.
         self.hub_dir = self.home / ".local" / "share" / "swarm" / "supervisor" / "qa-hub"
         self.work = self.dir / "work"
-        self.bin = self.dir / "bin"
+        self.bin = self.dir / "bin"            # claude/codex shims (fake modes only)
+        self.opbin = self.dir / "opbin"        # the OPERATOR's `swarm` (timer-seam stub): never on a seat's PATH
+        self.swarm_bin = self.opbin / "swarm"
         self.logs = self.dir / "logs"
         self.pg = Pg(self.dir / "pg") if backend == "postgres" else None
         self.config = self.home / ".config" / "swarm" / "config.toml"
@@ -281,7 +283,7 @@ class Run:
     def setup(self) -> None:
         if not (VENV / "bin" / "python").exists():
             raise Refused(f"{VENV}: no venv; run e2e/drive_live/setup_venv.sh once")
-        for d in (self.home, self.hub_dir, self.work, self.bin, self.logs):
+        for d in (self.home, self.hub_dir, self.work, self.bin, self.opbin, self.logs):
             d.mkdir(parents=True, exist_ok=True)
         os.chmod(self.home, 0o700)
         for d in (self.hub_dir.parent.parent, self.hub_dir.parent):   # share/swarm and its supervisor dir: private
@@ -321,7 +323,7 @@ class Run:
 
     def _write_shims(self) -> None:
         py = VENV / "bin" / "python"
-        swarm = self.bin / "swarm"
+        swarm = self.swarm_bin
         swarm.write_text(f'#!/bin/sh\nPYTHONPATH="{self.root}/lib" exec "{py}" "{HERE}/qa_swarm.py" "$@"\n')
         swarm.chmod(0o755)
         for harness in ("claude", "codex"):
@@ -388,7 +390,9 @@ class Run:
                                            "OPENAI_API_KEY") if k in os.environ}
         e = {**keep, "HOME": str(self.home), "SWARM_CONFIG": str(self.config), "SWARM_VENV": str(VENV),
              "SWARM_PYCACHE": str(self.home / ".cache" / "pyc"),
-             "PATH": f"{self.bin}:" + (REAL_PATH if self.harness == "real" else "/usr/local/bin:/usr/bin:/bin"),
+             # a seat reaches `swarm` through the plugin's own tracked bin (as documented); a script the seat could write
+             # (a shim in the run dir) is refused by the drive guard
+             "PATH": f"{self.root}/bin:{self.bin}:" + (REAL_PATH if self.harness == "real" else "/usr/local/bin:/usr/bin:/bin"),
              "SWARM_QA_RUN": str(self.dir),
              "SWARM_QA_ROOT": str(QA_ROOT), "SWARM_QA_REPO": str(self.root), "SWARM_QA_HARNESS": self.harness,
              "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
@@ -412,7 +416,7 @@ class Run:
 
     def swarm(self, *args, check: bool = False, timeout: float = 120, input: str | None = None,
               env: dict | None = None) -> subprocess.CompletedProcess:
-        r = subprocess.run([str(self.bin / "swarm"), *map(str, args)], capture_output=True, text=True,
+        r = subprocess.run([str(self.swarm_bin), *map(str, args)], capture_output=True, text=True,
                            timeout=timeout, input=input, env={**self.env(), **(env or {})})
         self.event("cmd", " ".join(["swarm", *map(str, args)])[:200], rc=r.returncode)
         if check and r.returncode:

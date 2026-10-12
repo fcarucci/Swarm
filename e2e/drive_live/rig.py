@@ -106,6 +106,11 @@ class Rig:
         team = ('[pipeline]\nintegrate = true\ntarget_branch = "main"\ndelete_branch = true\n\n'
                 f'[ci]\nkind = "none"\nevidence_command = {json.dumps(evidence)}\n')
         (r.home / ".config" / "swarm" / "team.toml").write_text(team)
+        for name in ("origin", "backup"):
+            ls = subprocess.run(["git", "-C", str(self.workdir), "ls-remote", self.urls[name]], capture_output=True,
+                                text=True, env=r.env())
+            if ls.returncode or "refs/heads/main" not in ls.stdout:
+                raise RuntimeError(f"destination {name} ({self.urls[name]}) does not answer ls-remote from the work tree: {ls.stderr[-200:]}")
         res = r.swarm("doctor")
         r.event("prepare", "board and hub ready", pg_port=getattr(r.pg, "port", None),
                 initial=self.initial, doctor_rc=res.returncode)
@@ -480,6 +485,12 @@ class Rig:
                            ("questions.txt", ["questions", "--job", self.job, "--all"])):
             r = self.run.swarm(*args)
             (ev / name).write_text(r.stdout + (("\n[stderr]\n" + r.stderr) if r.returncode else ""))
+        # the seats' own session transcripts (claude -p keeps them under the isolated HOME) and the runners' kept tails
+        proj = self.run.home / ".claude" / "projects"
+        if proj.exists():
+            shutil.copytree(proj, ev / "claude-projects", dirs_exist_ok=True)
+        for t in (self.run.home / ".local/share/swarm/supervisor").rglob("*.tail.txt"):
+            shutil.copy(t, ev / f"runner-{t.parent.name}-{t.name}")
         sup = self.run.logs / "supervise.log"
         if sup.exists():
             (ev / "supervise-tail.log").write_text("\n".join(sup.read_text().splitlines()[-400:]))
