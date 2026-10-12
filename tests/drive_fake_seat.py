@@ -44,9 +44,12 @@ class Seat:
             return None
 
     def run(self, *args: str) -> subprocess.CompletedProcess:
-        import shlex
         argv = ["swarm", *args]            # the CLI on PATH, as an agent types it (FAKE_SWARM's directory)
-        cmd = shlex.join(argv)
+        if os.name == "nt":                # cmd.exe runs it: double quotes
+            cmd = subprocess.list2cmdline(argv)
+        else:
+            import shlex
+            cmd = shlex.join(argv)
         out = self.hook("turn", tool_name="Bash", tool_input={"command": cmd})
         spec = (out or {}).get("hookSpecificOutput") or {}
         if spec.get("permissionDecision") == "deny":

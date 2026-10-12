@@ -592,11 +592,36 @@ class MemoryIdle(Home):
 
 # --- the end-to-end proof --------------------------------------------------------------------------------
 
-@unittest.skipUnless(POSIX, "the fake seat's launchers are sh scripts (Windows: tracked in the hand-back)")
 class IdleOrchestratorEndToEnd(unittest.TestCase):
     """A real drive job (artifact recipe) on a sqlite board: `swarm activate`, then nothing but the session
     driver. The orchestrating session is an idle child process that never makes a hook call; seats are launched
-    by the real runner (no systemd: their own process groups) as a scripted `claude`; the job reaches MET."""
+    by the real runner (no systemd: their own process group, a Job Object on Windows) as a scripted `claude`;
+    the job reaches MET. Linux, macOS and Windows."""
+
+    WINDOWS_KEEP = ("SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "PROGRAMDATA",
+                    "PROGRAMFILES", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "OS", "USERNAME")
+
+    def venv(self, venv: Path) -> None:
+        """The launcher's venv: this interpreter, stamped as up to date (a stub zstandard where the launcher
+        looks; the interpreter itself does not read that venv: it has no pyvenv.cfg)."""
+        if POSIX:
+            (venv / "bin").mkdir(parents=True)
+            os.symlink(sys.executable, venv / "bin" / "python")
+            stamp = subprocess.run(f'cat "{REPO}/requirements.txt" "{REPO}/requirements-postgres.txt" | cksum',
+                                   shell=True, capture_output=True, text=True).stdout.split()[0]
+            site = venv / "lib" / "python3.x" / "site-packages"
+        else:
+            from swarm import winlaunch
+            (venv / "Scripts").mkdir(parents=True)
+            try:
+                os.symlink(sys.executable, venv / "Scripts" / "python.exe")
+            except OSError as exc:
+                self.skipTest(f"no symlink here for the launcher's venv: {exc}")
+            stamp = winlaunch.requirements_stamp(REPO)
+            site = venv / "Lib" / "site-packages"
+        (venv / ".swarm-requirements").write_text(stamp)
+        (site / "zstandard").mkdir(parents=True)
+        (site / "zstandard" / "__init__.py").write_text("")
 
     def setUp(self):
         # never under /tmp: activation and the driver refuse work dirs there (spec 4.2)
@@ -610,36 +635,41 @@ class IdleOrchestratorEndToEnd(unittest.TestCase):
         self.work.mkdir()
         bindir = self.x / "bin"
         bindir.mkdir()
-        venv = self.x / "venv"          # the launcher's venv: this interpreter, stamped as up to date
-        (venv / "bin").mkdir(parents=True)
-        os.symlink(sys.executable, venv / "bin" / "python")
-        stamp = subprocess.run(f'cat "{REPO}/requirements.txt" "{REPO}/requirements-postgres.txt" | cksum',
-                               shell=True, capture_output=True, text=True).stdout.split()[0]
-        (venv / ".swarm-requirements").write_text(stamp)
-        pkg = venv / "lib" / "python3.x" / "site-packages" / "zstandard"
-        pkg.mkdir(parents=True)
-        (pkg / "__init__.py").write_text("")
+        venv = self.x / "venv"
+        self.venv(venv)
         self.seat_log = self.x / "seats.jsonl"
-        claude = bindir / "claude"
-        claude.write_text(f'#!/bin/sh\nexport FAKE_SWARM="{REPO}/bin/swarm" FAKE_SEAT_LOG="{self.seat_log}"\n'
-                          f'PYTHONPATH="{REPO}/lib" exec "{sys.executable}" "{REPO}/tests/drive_fake_seat.py" "$@"\n')
-        claude.chmod(0o755)
+        seat = REPO / "tests" / "drive_fake_seat.py"
+        if POSIX:
+            self.launcher = REPO / "bin" / "swarm"
+            claude = bindir / "claude"
+            claude.write_text(f'#!/bin/sh\nexport FAKE_SWARM="{self.launcher}" FAKE_SEAT_LOG="{self.seat_log}"\n'
+                              f'PYTHONPATH="{REPO / "lib"}" exec "{sys.executable}" "{seat}" "$@"\n')
+            claude.chmod(0o755)
+            path = f"{bindir}{os.pathsep}/usr/local/bin:/usr/bin:/bin"
+        else:
+            self.launcher = REPO / "bin" / "swarm.cmd"
+            claude = bindir / "claude.cmd"
+            claude.write_text(f'@echo off\r\nset "FAKE_SWARM={self.launcher}"\r\nset "FAKE_SEAT_LOG={self.seat_log}"\r\n'
+                              f'set "PYTHONPATH={REPO / "lib"}"\r\n"{sys.executable}" "{seat}" %*\r\n')
+            path = os.pathsep.join([str(bindir), os.path.dirname(sys.executable), os.environ.get("PATH", "")])
         self.config = self.home / ".config" / "swarm" / "config.toml"
         self.config.parent.mkdir(parents=True)
         self.config.write_text(f'[board]\nbackend = "sqlite"\n[sqlite]\npath = {tq(self.x / "board.sqlite3")}\n'
                                f'[supervise]\nallowed_workdirs = [{tq(self.x)}]\nclaude_bin = {tq(claude)}\n'
                                f'enrol_minutes = 2\n[hook]\nmarker_dir = {tq(self.home / ".local/state/swarm/active")}\n')
         (self.x / "LEAD.md").write_text("# lead\nWrite REPORT.md and post goal-ready.\n")
-        self.env = {"HOME": str(self.home), "PATH": f"{bindir}:/usr/local/bin:/usr/bin:/bin",
+        self.env = {"HOME": str(self.home), "USERPROFILE": str(self.home), "PATH": path,
                     "SWARM_CONFIG": str(self.config), "SWARM_VENV": str(venv), "SWARM_NO_SYSTEMD": "1",
                     "LANG": "C.UTF-8", "SWARM_SESSION_DRIVER": "0", "PYTHONPATH": str(REPO / "lib")}
+        if not POSIX:
+            self.env.update({k: os.environ[k] for k in self.WINDOWS_KEEP if k in os.environ})
         patch = mock.patch.dict(os.environ, self.env, clear=True)
         patch.start()
         self.addCleanup(patch.stop)
 
     def swarm_cli(self, *args):
-        r = subprocess.run([str(REPO / "bin" / "swarm"), *args], env=self.env, capture_output=True, text=True,
-                           cwd=self.work, timeout=120)
+        r = subprocess.run([str(self.launcher), *args], env=self.env, capture_output=True, text=True,
+                           cwd=self.work, timeout=300)
         self.assertEqual(r.returncode, 0, f"swarm {' '.join(args)}: {r.stdout[-800:]} {r.stderr[-800:]}")
         return r
 
@@ -966,3 +996,61 @@ class GitpinWindowsPathTests(unittest.TestCase):
         from swarm import gitpin
         self.assertEqual(gitpin.native_path("/C:/x", nt=False), "/C:/x")
         self.assertEqual(gitpin.native_path("//srv/x", nt=False), "//srv/x")
+
+
+class LeadAuthorizationTests(unittest.TestCase):
+    """The activation authorizes only the lead row it would have written, still requested and not yet authorized."""
+    OWNER = {"roots": ["/w"], "brief": "/w/LEAD.md"}
+
+    def row(self, **kw):
+        base = dict(role="engineering_lead", harness="claude", model="opus", workdir="/w", brief_path="/w/LEAD.md",
+                    state="requested")
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    def authorize(self, row, authorized=False):
+        from swarm import drive_activate as da
+        from swarm.supervisor import driver_exec
+        with mock.patch.object(driver_exec, "authorize_seat") as auth, \
+                mock.patch.object(driver_exec, "seat_authorized", return_value=authorized):
+            da._authorize_lead(SimpleNamespace(), row, self.OWNER, "claude", "opus")
+        return auth.called
+
+    def test_the_row_it_wrote_is_authorized(self):
+        self.assertTrue(self.authorize(self.row()))
+
+    def test_a_changed_or_running_or_authorized_row_is_not(self):
+        for change in ({"model": "haiku"}, {"role": "engineer"}, {"workdir": "/elsewhere"},
+                       {"brief_path": "/x.md"}, {"harness": "codex"}, {"state": "running"}):
+            with self.subTest(change=change):
+                self.assertFalse(self.authorize(self.row(**change)))
+        self.assertFalse(self.authorize(self.row(), authorized=True))
+        self.assertFalse(self.authorize(None))
+
+
+class StopReasonTests(Home):
+    """Before any pass: a gone session or the kill switch ends the loop at once (no pass runs for it)."""
+
+    def run_driver(self, watch):
+        passes = []
+        self.held_job()
+        drv = sd.Driver(self.cfg, session="sess-1", watch=watch, pass_fn=lambda jobs: passes.append(jobs) or
+                        sd.PassResult("ok"))
+        with mock.patch.object(wake, "run_source"):
+            return drv.run(), passes
+
+    def test_a_session_already_gone_runs_no_pass(self):
+        why, passes = self.run_driver(SimpleNamespace(kind="none", alive=lambda: False, close=lambda: None))
+        self.assertEqual((why, passes), ("session gone", []))
+
+    def test_the_kill_switch_runs_no_pass(self):
+        settings.off_file().parent.mkdir(parents=True, exist_ok=True)
+        settings.off_file().write_text("")
+        why, passes = self.run_driver(procwatch.NoWatch())
+        self.assertEqual((why, passes), ("kill switch", []))
+
+    def test_an_unreadable_start_is_a_gone_process(self):
+        p = idle_process()
+        self.addCleanup(stop, p)
+        with mock.patch.object(procwatch, "start_token", return_value=None):
+            self.assertFalse(procwatch.ProcWatch(p.pid, None).alive())
