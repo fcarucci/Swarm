@@ -96,7 +96,7 @@ class SuperviseTests(SuperviseEnv):
 
     def test_open_owner_question_prevents_worker_recovery(self):
         with self.board() as b:
-            b.post("J", self.name, "May I deploy this?", "Francesco")
+            b.post("J", self.name, "May I deploy this?", "owner")
         self.h.backdate_agent("orig", last_seen=31 * 60)
         self.supervise()
         self.assertEqual(self.started, [])

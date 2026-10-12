@@ -83,6 +83,19 @@ class OrphanGuardTests(unittest.TestCase):
                             "closed_by='auto' WHERE job='w'")
         self.assertEqual(self.status("w"), "failed")
 
+    def test_a_configured_owner_name_and_a_finished_agents_question_protect_on_postgres(self):
+        self.board.open_job("o", None, "t", None, "u")
+        self.board.set_job_data("o", "owner.names", "Marigold,Basil")
+        self.board.post("o", "agent-1", "Basil, ok?", to="Basil")
+        for outcome in ("auto-closed: 1/1 agents completed; last post agent-1: Basil, ok?",
+                        "auto-closed: no live agents for 30 min"):
+            self.h.conn.execute("UPDATE jobs SET status='completed', outcome=%s, closed_by='auto' WHERE job='o'", (outcome,))
+            self.assertEqual(self.status("o"), "active", outcome)
+        self.board.set_job_data("o", "owner.names", None)
+        self.h.conn.execute("UPDATE jobs SET status='completed', outcome='auto-closed: no live agents for 30 min', "
+                            "closed_by='auto' WHERE job='o'")
+        self.assertEqual(self.status("o"), "completed")          # an unconfigured name protects nothing
+
     def test_the_view_and_python_agree_on_a_future_run_start(self):
         import datetime as dt
         from swarm.board import base
