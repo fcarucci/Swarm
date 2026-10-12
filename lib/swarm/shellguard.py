@@ -1175,10 +1175,37 @@ def _parallel_items(args: list[str]):
     return [("xt", " ".join(cmd + extra))]
 
 
+def _cmd_items(args: list[str]):
+    """cmd.exe (spec 3.11 [T21], the scanned-literal rule on Windows): what follows /C, /K or /R (all the rest,
+    also glued as `/cdir`) is the command. Cmd's outer quotes are dropped as cmd does, then it is walked as
+    shell text (cmd's & && || | separate commands as in sh) AND scanned as code. A %VAR% or !VAR! (expanded by
+    cmd before it runs) or a variable cannot be checked; with no /C it reads stdin, which cannot be checked."""
+    for i, a in enumerate(args):
+        low = str(a).lower()
+        if low[:2] in ("/c", "/k", "/r"):
+            rest = ([a[2:]] if len(a) > 2 else []) + list(args[i + 1:])
+            if not rest:
+                return [_bad("cmd " + _STDIN)]
+            if any(map(_dyn, rest)):
+                return [_bad("a command given by a variable cannot be checked")]
+            text = " ".join(str(w) for w in rest).strip()
+            if len(text) >= 2 and text[0] == text[-1] == '"':
+                text = text[1:-1]
+            if re.search(r"%[^%\s]+%|![^!\s]+!", text):
+                return [_bad("a cmd variable (%VAR% or !VAR!) is expanded before it runs and cannot be checked")]
+            return [("t", text), ("code", text)]
+        if low.startswith("/"):
+            continue                             # /d /q /s /a /u /e:on /f:off /v:on /t:fg
+        return [_bad("cmd with no /C " + _STDIN)]
+    return [_bad("cmd with no /C: " + _STDIN)]
+
+
 def _nested(prog: str, args: list[str]):
     """The commands a command runs through its arguments: ("t", text) shell text to walk; ("w", words) a command;
     ("xt", text) shell text whose commands get appended arguments (parallel); ("code", text) interpreter code to
     scan; ("file", path) a script file; ("assign", (name, value)); ("bad", why) what cannot be checked."""
+    if prog.lower() == "cmd":
+        return _cmd_items(args)
     family = _family(prog)
     if family == "sh":
         return _shell_items(family, args)

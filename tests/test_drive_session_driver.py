@@ -895,3 +895,74 @@ class HookWakeTests(Home):
                 hooks._wake_drivers(event, self.cfg, {"session_id": "s", "tool_name": "Bash",
                                                       "tool_input": {"command": cmd}})
                 self.assertEqual(path.stat().st_mtime > 1, woke)
+
+
+# --- Windows ports: cmd /c under the scanned-literal rule, ancestry --------------------------------------
+
+class CmdScannedLiteralTests(unittest.TestCase):
+    """`cmd /c` (and /k, /r) is a shell: its command is walked and scanned like `sh -c`'s (spec 3.11 [T21])."""
+    P = "git push origin HEAD:main"
+
+    def refused(self, cmd):
+        from swarm.shellguard import drive_command_refusal
+        return drive_command_refusal(cmd, ["main"], branch_of=lambda *a, **k: "feat/a")
+
+    def test_cmd_c_runs_what_it_is_given_and_that_is_checked(self):
+        for cmd in (f'cmd /c "{self.P}"', f"cmd /c {self.P}", f"cmd.exe /d /s /c \"{self.P}\"",
+                    f"CMD.EXE /C {self.P}", f"cmd /k {self.P}", f"cmd /cgit push origin HEAD:main",
+                    f"cmd /c dir & {self.P}", "cmd /c %X%", "cmd /v:on /c !X!", "cmd", "cmd /q"):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(self.refused(cmd), cmd)
+
+    def test_harmless_cmd_c_is_allowed(self):
+        for cmd in ("cmd /c dir", 'cmd /d /c "echo hello"', "cmd /c git status"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.refused(cmd), cmd)
+
+    def test_powershell_command_is_still_scanned(self):
+        self.assertTrue(self.refused(f"powershell -Command \"{self.P}\""))
+        self.assertIsNone(self.refused("powershell -Command Get-ChildItem"))
+
+
+class AncestryTests(unittest.TestCase):
+    def test_unreadable_ancestry_fails_closed_for_the_person_gate(self):
+        from swarm import person
+        with mock.patch.object(procwatch, "parent_of", return_value=None):
+            self.assertEqual(person._ancestor_host(), "unknown")
+            self.assertIsNotNone(person.agent_host({}))           # refused as inside an agent host
+
+    def test_a_walk_that_reaches_the_top_without_a_host_is_none(self):
+        tree = {10: (9, ["bash"]), 9: (1, ["login"])}
+        self.assertIsNone(procwatch.ancestor_host(10, parent=tree.get))
+        tree = {10: (9, ["bash"]), 9: (8, ["/usr/local/bin/codex"])}
+        self.assertEqual(procwatch.ancestor_host(10, parent=tree.get), "codex")
+        with self.assertRaises(LookupError):
+            procwatch.ancestor_host(10, parent=lambda pid: None)
+
+    def test_windows_ancestry_comes_from_a_toolhelp_snapshot(self):
+        snap = {10: (9, "cmd.exe"), 9: (8, "Claude.exe"), 8: (4, "explorer.exe")}
+        with mock.patch.object(procwatch.compat, "IS_WINDOWS", True), \
+                mock.patch.object(procwatch, "_win_parents", return_value=snap):
+            self.assertEqual(procwatch.parent_of(10), (9, ["cmd.exe"]))
+            self.assertEqual(procwatch.ancestor_host(10), "claude")
+            self.assertEqual(procwatch.nearest_host(10), 9)
+            self.assertIsNone(procwatch.parent_of(77))
+
+
+class GitpinWindowsPathTests(unittest.TestCase):
+    B = "\\"
+
+    def test_windows_local_remotes_are_native_paths(self):
+        from swarm import gitpin
+        b = self.B
+        self.assertEqual(gitpin.native_path("/C:/work/hub.git", nt=True), "C:/work/hub.git")     # file:///C:/...
+        self.assertEqual(gitpin.native_path(f"C:{b}work{b}hub.git", nt=True), f"C:{b}work{b}hub.git")
+        self.assertEqual(gitpin.native_path(f"{b}{b}?{b}C:{b}work", nt=True), f"C:{b}work")
+        for unc in (f"{b}{b}server{b}share{b}hub.git", f"{b}{b}?{b}UNC{b}server{b}share", "//server/share/x"):
+            with self.subTest(unc=unc), self.assertRaises(gitpin.GitPinError):
+                gitpin.native_path(unc, nt=True)
+
+    def test_posix_paths_are_unchanged(self):
+        from swarm import gitpin
+        self.assertEqual(gitpin.native_path("/C:/x", nt=False), "/C:/x")
+        self.assertEqual(gitpin.native_path("//srv/x", nt=False), "//srv/x")

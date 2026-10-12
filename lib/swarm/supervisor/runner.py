@@ -215,7 +215,7 @@ def run_problem(cfg: dict, run, restart_id: int | None = None) -> str | None:
     if run.get("harness") not in ("claude", "codex"):
         return "harness is not claude or codex"
     for k in ("agent_key", "session_id", "post_pending", "refused_reason", "config", "child_start",
-              "runner_start", "cwd", "stdin"):
+              "runner_start", "cwd", "stdin", "child_token"):
         if run.get(k) is not None and not isinstance(run[k], str):
             return f"{k} is not a string"
     if run.get("outcome") is not None and run["outcome"] not in RESTART_OUTCOMES:
@@ -240,6 +240,8 @@ def run_problem(cfg: dict, run, restart_id: int | None = None) -> str | None:
         m = _UNIT.match(unit) if isinstance(unit, str) else None
         if not m or int(m.group(1)) != rid:
             return f"unit {unit!r} is not this restart's scope (swarm-r{rid}-<hex>.scope)"
+    if run.get("contained") not in (None, "group", "job"):
+        return "contained is not group or job"
     if run.get("slice") is not None and not (isinstance(run["slice"], str) and _SLICE.fullmatch(run["slice"])):
         return "slice is not a systemd slice name"
     tag = run.get("run_tag")
@@ -500,6 +502,11 @@ def _stop_group(pgid: int, proc=None, grace: float | None = None, *, tag: str | 
 ENV_ALLOW = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "TERM", "TZ", "TMPDIR",
              "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME",
              "DBUS_SESSION_BUS_ADDRESS", "SWARM_CONFIG", "SWARM_VENV", "CLAUDE_CONFIG_DIR", "CODEX_HOME")
+# Windows: what any process needs to start at all there (no secrets: system paths and the user's folders)
+ENV_ALLOW_WINDOWS = ("SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "USERPROFILE", "USERNAME",
+                     "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "PROGRAMFILES", "PROGRAMFILES(X86)",
+                     "COMMONPROGRAMFILES", "TEMP", "TMP", "HOMEDRIVE", "HOMEPATH", "NUMBER_OF_PROCESSORS",
+                     "PROCESSOR_ARCHITECTURE", "OS")
 
 
 def _allowed_env(src, pass_env=()) -> dict:
@@ -510,7 +517,8 @@ def _allowed_env(src, pass_env=()) -> dict:
     for k, v in src.items():
         if k in pass_env:
             out[k] = v
-        elif (k in ENV_ALLOW or k.startswith("LC_")) and not k.startswith("PG") and not _KEY_FULL.fullmatch(k):
+        elif (k in ENV_ALLOW or k.startswith("LC_") or (compat.IS_WINDOWS and k.upper() in ENV_ALLOW_WINDOWS)) \
+                and not k.startswith("PG") and not _KEY_FULL.fullmatch(k):
             out[k] = v
     return out
 
@@ -805,7 +813,10 @@ def _stop_unit(unit: str, proc=None, grace: float | None = None) -> None:
 
 
 def _stop_session(run: dict, proc=None, grace: float | None = None) -> None:
-    """Stop everything of the run's session: its scope, else (fallback) its process group."""
+    """Stop everything of the run's session: its scope, its Job Object (Windows), else its process group."""
+    if run.get("contained") == "job":
+        _job_stop(int(run["restart_id"]), proc, grace)
+        return
     if run.get("unit"):
         _stop_unit(run["unit"], proc, grace)
     else:
@@ -818,6 +829,13 @@ def group_presence(run: dict) -> str:
     [T21]): a tagged member is evidence of presence; no member is "absent" only where the members can be
     listed (/proc, or `ps` where there is none); otherwise "unknown" (never "absent" without positive
     evidence). A run that never started a session is "absent"."""
+    if run.get("contained") == "job":   # Windows: the job of a live runner; a dead runner's job died with it
+        active = _job_active(int(run.get("restart_id") or 0))
+        if active is not None:
+            return "present" if active else "absent"
+        from swarm.supervisor import procwatch
+        pid = run.get("child_pid")
+        return "present" if pid and procwatch.ProcWatch(int(pid), run.get("child_token")).alive() else "absent"
     pgid = run.get("child_pgid") or run.get("child_pid")
     if not pgid:
         return "absent"
@@ -847,6 +865,8 @@ def start(cfg: dict, run: dict, popen=subprocess.Popen) -> int:
     the locked descriptor (it owns the run from then on); the run itself, brief included, goes to
     it over its stdin, never through a file. Its pid."""
     from swarm import paths
+    if compat.IS_WINDOWS:
+        return _start_windows(run, popen)
     fd = own(run["restart_id"], run["board"])
     if fd is None:
         raise RuntimeError(f"restart r{run['restart_id']} already has a runner")
@@ -865,6 +885,121 @@ def start(cfg: dict, run: dict, popen=subprocess.Popen) -> int:
         finally:
             pipe.close()
     return proc.pid
+
+
+def _start_windows(run: dict, popen) -> int:
+    """Windows passes no descriptors to a child: the run lock is checked free here, then the runner takes it
+    itself (`--own`) BEFORE it writes the run file, and says `owned` on its stdout; this returns only then, so
+    a run file never exists unowned (as with the POSIX hand-off). The runner is detached, with no console."""
+    from swarm import paths
+    fd = own(run["restart_id"], run["board"])
+    if fd is None:
+        raise RuntimeError(f"restart r{run['restart_id']} already has a runner")
+    os.close(fd)
+    env = {**os.environ, "PYTHONPATH": str(paths.LIB_DIR), **paths.pycache_env(os.environ)}
+    flags = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+             | getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    proc = popen([sys.executable, "-m", "swarm.supervisor.runner", "--own"], env=env, stdin=subprocess.PIPE,
+                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, close_fds=True, creationflags=flags)
+    try:
+        proc.stdin.write(json.dumps(run).encode())
+    finally:
+        proc.stdin.close()
+    line = proc.stdout.readline().strip()
+    proc.stdout.close()
+    if line != b"owned":
+        raise RuntimeError(f"restart r{run['restart_id']}: the runner did not take its run lock ({line[:40]!r})")
+    return proc.pid
+
+
+# -- Windows: a seat in a Job Object (spec 3.11 [T21]) -----------------------------------------------
+
+_JOBS: dict = {}   # restart id -> the Job Object handle this runner holds (closing it kills the seat)
+
+
+def _k32():
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateJobObjectW.restype = wintypes.HANDLE
+    k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+    k32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    k32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    k32.QueryInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+                                              ctypes.c_void_p]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    return k32
+
+
+def _job_contain(rid: int, proc) -> None:
+    """Put the (suspended) session in a new Job Object that kills every process in it when its last handle
+    closes (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: if this runner dies, the seat dies with it), then resume it.
+    Anything it starts is in the job too. Raises when the job cannot be made: the caller stops the session."""
+    import ctypes
+    k32 = _k32()
+    job = k32.CreateJobObjectW(None, None)
+    if not job:
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    class BASIC(ctypes.Structure):
+        _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
+                    ("LimitFlags", ctypes.c_uint32), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                    ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", ctypes.c_uint32),
+                    ("Affinity", ctypes.c_size_t), ("PriorityClass", ctypes.c_uint32),
+                    ("SchedulingClass", ctypes.c_uint32)]
+
+    class IO(ctypes.Structure):
+        _fields_ = [(n, ctypes.c_uint64) for n in ("r", "w", "o", "rb", "wb", "ob")]
+
+    class EXTENDED(ctypes.Structure):
+        _fields_ = [("BasicLimitInformation", BASIC), ("IoInfo", IO), ("ProcessMemoryLimit", ctypes.c_size_t),
+                    ("JobMemoryLimit", ctypes.c_size_t), ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                    ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+    info = EXTENDED()
+    info.BasicLimitInformation.LimitFlags = 0x2000          # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    try:
+        if not k32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):   # Extended limits
+            raise ctypes.WinError(ctypes.get_last_error())
+        if not k32.AssignProcessToJobObject(job, int(proc._handle)):
+            raise ctypes.WinError(ctypes.get_last_error())
+    except BaseException:
+        k32.CloseHandle(job)
+        raise
+    _JOBS[rid] = job
+    ntdll = ctypes.WinDLL("ntdll")
+    ntdll.NtResumeProcess.argtypes = [ctypes.c_void_p]
+    ntdll.NtResumeProcess(int(proc._handle))
+
+
+def _job_active(rid: int) -> int | None:
+    """How many processes the seat's Job Object holds (None: this process holds no job for the run)."""
+    import ctypes
+    job = _JOBS.get(rid)
+    if job is None:
+        return None
+    buf = (ctypes.c_uint32 * 12)()                    # JOBOBJECT_BASIC_ACCOUNTING_INFORMATION (48 bytes)
+    if not _k32().QueryInformationJobObject(job, 1, buf, ctypes.sizeof(buf), None):
+        return None
+    return int(buf[9])                                # ActiveProcesses
+
+
+def _job_stop(rid: int, proc=None, grace: float | None = None) -> None:
+    """End every process of the seat's job: TerminateJobObject (Windows has no SIGTERM for a console-less
+    process tree), then close the job."""
+    job = _JOBS.pop(rid, None)
+    if job is not None:
+        k32 = _k32()
+        k32.TerminateJobObject(job, 1)
+        k32.CloseHandle(job)
+    elif proc is not None and proc.poll() is None:
+        proc.kill()
+    if proc is not None:
+        try:
+            proc.wait(5)
+        except subprocess.TimeoutExpired:
+            pass
 
 
 def _child_env(token: str | None = None, tag: str | None = None, pass_env=()) -> dict:
@@ -1006,7 +1141,9 @@ def open_workdir(cfg: dict, path: str, check=None) -> tuple[int | None, str | No
 
         def check(fd, where):
             return command.workdir_config_problem(fd, where, approvals)
-    fd = compat.open("/", os.O_RDONLY | compat.O_DIRECTORY | compat.O_CLOEXEC)
+    # from the root ("/"; on Windows the drive or share root, opened by compat's checked path emulation)
+    fd = (compat.open_root(p.anchor) if compat.IS_WINDOWS
+          else compat.open("/", os.O_RDONLY | compat.O_DIRECTORY | compat.O_CLOEXEC))
     try:
         for i, part in enumerate(p.parts[1:], start=2):
             try:
@@ -1156,18 +1293,28 @@ def _execute(cfg: dict, run: dict, *, popen, clock, sleep, poll: float, board_ev
         argv = [SYSTEMD_RUN, "--user", "--scope", f"--unit={run['unit']}", "--collect", "--quiet", "--",
                 *run["argv"]]
         env = _manager_env(env)
-    else:   # contained in its own process group (start_new_session), every member tagged with RUN_ENV
-        run.update(unit=None, contained="group", launch_epoch=time.time())
+    else:   # its own process group (start_new_session), every member tagged with RUN_ENV; Windows: a Job Object
+        run.update(unit=None, contained="job" if compat.IS_WINDOWS else "group", launch_epoch=time.time())
         argv = list(run["argv"])
     write_run(run)   # the unit name is known before anything runs in it
     fd_err = _fresh_output(f"r{rid}.err", run["board"])
     try:
         # the child changes into the opened directory itself (/proc/self/fd/<n> is the open
         # directory, not a path lookup), before systemd-run execs; nothing re-resolves the path
-        where = ({"cwd": f"/proc/self/fd/{wfd}"} if os.path.isdir("/proc/self/fd")
-                 else {"preexec_fn": lambda: os.fchdir(wfd)})   # no /proc (macOS): the child enters it itself
-        proc = popen(argv, pass_fds=(wfd,), env=env, stdin=subprocess.PIPE,
-                     stdout=subprocess.PIPE, stderr=fd_err, start_new_session=True, **where)
+        if compat.IS_WINDOWS:   # no descriptor cwd: the checked directory by path; suspended until it is in its job
+            proc = popen(argv, cwd=compat._dirs.get(wfd), env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=fd_err, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | 0x4
+                         | getattr(subprocess, "CREATE_NO_WINDOW", 0))   # 0x4: CREATE_SUSPENDED
+            try:
+                _job_contain(rid, proc)
+            except BaseException:
+                proc.kill()
+                raise
+        else:
+            where = ({"cwd": f"/proc/self/fd/{wfd}"} if os.path.isdir("/proc/self/fd")
+                     else {"preexec_fn": lambda: os.fchdir(wfd)})   # no /proc (macOS): the child enters it itself
+            proc = popen(argv, pass_fds=(wfd,), env=env, stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE, stderr=fd_err, start_new_session=True, **where)
     except OSError as exc:   # no such binary, bad cwd: the session never started
         os.close(wfd)
         os.write(fd_err, f"could not start the session: {type(exc).__name__}\n".encode())
@@ -1179,8 +1326,10 @@ def _execute(cfg: dict, run: dict, *, popen, clock, sleep, poll: float, board_ev
         return "failed"
     os.close(fd_err)
     os.close(wfd)
+    from swarm.supervisor import procwatch
     run.update(child_pid=proc.pid, child_pgid=proc.pid,   # start_new_session: its own group
-               child_start=_proc_start(proc.pid), agent_key=run.get("session_id"), started_epoch=time.time())
+               child_start=_proc_start(proc.pid), agent_key=run.get("session_id"), started_epoch=time.time(),
+               child_token=procwatch.start_token(proc.pid))
     write_run(run)
     feeder = threading.Thread(target=_feed, args=(proc, str(run["stdin"]).encode()), daemon=True)
     feeder.start()
@@ -1589,6 +1738,9 @@ def main(argv: list[str] | None = None) -> int:
     from swarm.supervisor.settings import log
     args = list(argv if argv is not None else sys.argv[1:])
     lock_fd = None
+    take = "--own" in args          # Windows (_start_windows): take the run lock here, then say so
+    if take:
+        args.remove("--own")
     if "--lock-fd" in args:
         i = args.index("--lock-fd")
         lock_fd = int(args[i + 1])
@@ -1607,6 +1759,13 @@ def main(argv: list[str] | None = None) -> int:
     if why or not (isinstance(run.get("argv"), list) and run["argv"] and isinstance(run.get("cwd"), str)):
         log(f"runner: refusing its run: {why or 'no command'}; nothing done")
         return 1
+    if take:
+        lock_fd = own(run["restart_id"], run["board"])
+        print("owned" if lock_fd is not None else "busy", flush=True)
+        sys.stdout.close()
+        sys.stdout = open(os.devnull, "w")
+        if lock_fd is None:
+            return 1
     execute(cfg, run, lock_fd=lock_fd)
     return 0
 

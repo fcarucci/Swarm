@@ -68,14 +68,37 @@ def _optionlike(part) -> bool:
     return _decoded(part or "").startswith("-")
 
 
+_DRIVE_URL_PATH = re.compile(r"/[A-Za-z]:[/\\]")
+
+
+def native_path(path: str, nt: bool | None = None) -> str:
+    """A local remote's path as Windows opens it (spec 3.11 [T21]): file:///C:/x gives /C:/x, which is C:/x;
+    an extended-length path (backslash-backslash-?-backslash C:...) is the plain one. A UNC path (a network
+    share: two leading slashes or backslashes, or the extended UNC form) is never a local remote:
+    GitPinError. Elsewhere (`nt` false: not Windows) the path is unchanged."""
+    if not (os.name == "nt" if nt is None else nt):
+        return path
+    if _DRIVE_URL_PATH.match(path):
+        path = path[1:]
+    if path.startswith(("\\\\?\\", "//?/")):
+        rest = path[4:]
+        if rest[:4].upper() in ("UNC\\", "UNC/"):
+            raise GitPinError("a UNC (network share) path is not a local remote")
+        path = rest
+    if path.startswith(("\\\\", "//", "\\/", "/\\")):
+        raise GitPinError("a UNC (network share) path is not a local remote")
+    return path
+
+
 def _local_path(url: str) -> str | None:
     """The filesystem path of a local URL, or None for a network URL. git percent-decodes a file:// path;
-    a local URL with any '%' is refused by _check_local, so the undecoded path is the one git opens."""
+    a local URL with any '%' is refused by _check_local, so the undecoded path is the one git opens. On
+    Windows the path is the native one (native_path)."""
     if url.lower().startswith("file://"):
-        return urllib.parse.urlsplit(url).path
+        return native_path(urllib.parse.urlsplit(url).path)
     if "://" in url or (SCP_URL.match(url) and not os.path.isabs(url)):
         return None
-    return url
+    return native_path(url)
 
 
 def _check_local(url: str) -> None:
