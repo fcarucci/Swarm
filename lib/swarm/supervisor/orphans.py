@@ -69,13 +69,8 @@ def human_question(board, js, cfg=None):
     its questions gate their own seats (drive_gate), not the job."""
     if drive_gate(board, cfg, js.job) is not None:
         return False
-    owner = (getattr(js, "created_by", None) or "").casefold()
-    from swarm.owners import stored
-    try:
-        configured = stored(board.job_data(js.job))
-    except Exception:
-        configured = []
-    humans = {"user", "human", "owner", owner, *(n.casefold() for n in configured)} - {""}
+    from swarm.owners import person_names
+    humans = person_names(board, js.job, js)
     answered = set()
     for m in reversed(board.recent_messages(100, job=js.job)):
         target = (getattr(m, "to_agent", None) or "").casefold()
