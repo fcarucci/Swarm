@@ -221,8 +221,13 @@ class FailClosedTest(SeatHomeCase):
         self.assertEqual(argv[-3:], ["--", "claude", "-p"])
         self.assertTrue(drive["seat_home"].startswith(str(self.priv)))
         with mock.patch("swarm.seatjail.available", lambda: (False, "no userns")):
+            fallback = {**run, "launch_id": "L1"}
+            argv, why = runner._seat_argv(self.cfg, fallback)       # no jail here: best-effort, never refused
+            self.assertIsNone(why)
+            self.assertEqual((argv, fallback["seat_mode"]), (["claude", "-p"], "best-effort"))
+            self.cfg["drive"]["seat_isolation"] = "strict"
             _, why = runner._seat_argv(self.cfg, {**run, "launch_id": "L1"})
-        self.assertIn("no userns", why)
+        self.assertIn("no userns", why)                               # strict: refused
 
     def test_no_namespaces_means_nothing_runs(self):
         with mock.patch.object(seatjail, "_unshare", side_effect=OSError(1, "unshare: EPERM")), \
@@ -1008,10 +1013,40 @@ class BestEffortTest(SeatHomeCase):
         self.assertEqual(check.name, "seat isolation")
         self.assertEqual(check.detail, "best-effort on darwin (no filesystem jail)")
 
-    def test_linux_stays_fail_closed(self):
+    def test_linux_without_user_namespaces_falls_back_to_best_effort(self):
+        with mock.patch.object(seathome, "jail_platform", lambda platform=None: True):
+            argv, env, m = seathome.launch(self.cfg, ["claude"], job="J", seat="s", probe=lambda: (False, "no userns"))
+        self.assertEqual((argv, m), (["claude"], "best-effort"))
+        self.assertEqual(env["GIT_CONFIG_NOSYSTEM"], "1")
+        with mock.patch.object(seathome, "jail_platform", lambda platform=None: True), \
+                mock.patch("swarm.seatjail.available", lambda: (False, "no userns")):
+            ok, detail = seathome.probe(self.cfg)
+        self.assertIsNone(ok)
+        self.assertEqual(detail, f"best-effort on {sys.platform} (no filesystem jail)")
+        check = bootstrap._seat_isolation_check(self.cfg, probe=lambda c: (ok, detail))
+        self.assertIsNone(check.ok)      # WARN
+
+    def test_strict_refuses_wherever_there_is_no_jail(self):
+        self.cfg["drive"]["seat_isolation"] = "strict"
         with mock.patch.object(seathome, "jail_platform", lambda platform=None: True):
             with self.assertRaises(seathome.SeatIsolationError):
                 seathome.launch(self.cfg, ["claude"], job="J", seat="s", probe=lambda: (False, "no userns"))
+            argv, env, m = seathome.launch(self.cfg, ["claude"], job="J", seat="s", probe=lambda: (True, ""))
+            self.assertEqual((env, m), (None, "required"))
+            self.assertIn("seatjail.py", argv[2])
+        for plat in ("darwin", "win32"):
+            with self.assertRaises(seathome.SeatIsolationError):
+                seathome.launch(self.cfg, ["claude"], job="J", seat="s", platform=plat)
+        with mock.patch.object(seathome, "jail_platform", lambda platform=None: True), \
+                mock.patch("swarm.seatjail.available", lambda: (False, "no userns")):
+            ok, detail = seathome.probe(self.cfg)
+        self.assertEqual((ok, detail), (None, "unavailable: no userns"))
+        self.assertFalse(bootstrap._seat_isolation_check(self.cfg, probe=lambda c: (ok, detail)).ok)
+
+    def test_an_unknown_value_is_refused(self):
+        self.cfg["drive"]["seat_isolation"] = "maybe"
+        with self.assertRaises(seathome.SeatIsolationError):
+            seathome.launch(self.cfg, ["claude"], job="J", seat="s", platform="darwin")
 
 
 class BrokerPathModeTest(BrokerCase):
