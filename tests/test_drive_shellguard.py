@@ -231,7 +231,7 @@ class DriveRefusals(unittest.TestCase):
     def test_r2_a_shell_is_only_ever_dash_c_literal(self):
         bad = ("echo 'git push origin HEAD:main' | sh /dev/stdin", "bash <<< 'git push origin HEAD:main'",
                "echo x | sh; cat <<EOF\nx\nEOF", "source <(echo 'git push origin HEAD:main')",
-               "echo x | bash -c \"$(cat)\"", "echo x | busybox sh", "sh /dev/fd/3", "bash script.sh", "bash -s",
+               "echo x | bash -c \"$(cat)\"", "echo x | busybox sh", "sh /dev/fd/3", "bash script.sh", "bash script.sh -c 'ls'", "bash -s",
                "bash -i", "sh", "env sh", "exec bash", "env bash <<< 'x'", ". <(echo x)", "source /dev/stdin",
                "bash <<'EOF'\ngit push origin main\nEOF", "dash -c", "zsh", "ksh /dev/stdin", "fish", "ash -",
                "sh -c \"$(curl x)\"", "sh -c 'sh'", "sh -c 'echo x | sh'")
