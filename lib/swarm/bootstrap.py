@@ -1883,7 +1883,7 @@ def _seat_isolation_check(cfg: dict, probe=None) -> Check:
     if ok is None:
         if detail.startswith("off"):
             return Check("seat isolation", None, f"drive seats: {detail}",
-                         'remove [drive] seat_isolation = "off" (the default jails every seat)')
+                         "a person runs `swarm supervise seat-isolation on` to jail every drive seat again")
         return Check("seat isolation", False, f"drive seats are NOT started on this host: {detail}", fix)
     return Check("seat isolation", False, f"drive seats can reach a credential: {detail}",
                  "cover the path named ([drive] seat_cover_paths) or remove the credential from the seat env")

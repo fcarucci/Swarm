@@ -76,6 +76,7 @@ LAUNCH_GRACE = 90.0   # seconds an unseen scope of a dead runner may still appea
 NO_MANAGER = "no user systemd manager"
 SYSTEMD_RUN = "systemd-run"
 SYSTEMCTL = "systemctl"
+JAIL_UNAVAILABLE = 125   # seatjail.EXIT_UNAVAILABLE
 RUN_ENV = "SWARM_RUN_ID"   # set on every session: marks the processes that belong to one run
 TAIL_BYTES = 32 * 1024    # of each of stdout and stderr, kept redacted after a run (r<id>.tail.txt)
 TAIL_REDACT_SECONDS = 10.0   # its redaction at most (past it: no tail file)
@@ -798,10 +799,14 @@ def _seat_argv(cfg: dict, run: dict) -> tuple[list, str | None]:
     if not run.get("launch_id"):
         return argv, None
     from swarm.supervisor import seathome
+    seat = str(run.get("seat") or run["name"])
     try:
-        return seathome.wrap(cfg, argv, job=run["job"], seat=str(run.get("seat") or run["name"])), None
+        wrapped = seathome.wrap(cfg, argv, job=run["job"], seat=seat, workdir=run["cwd"])
     except (seathome.SeatIsolationError, OSError) as exc:
         return argv, str(exc)
+    if wrapped != argv:   # jailed: its broker serves the seat's directory
+        run["seat_home"] = str(seathome.home_dir(run["job"], seat))
+    return wrapped, None
 
 
 def _child_env(token: str | None = None, tag: str | None = None, pass_env=(), drive: bool = False) -> dict:
@@ -1119,6 +1124,12 @@ def _execute(cfg: dict, run: dict, *, popen, clock, sleep, poll: float, board_ev
     run.update(child_pid=proc.pid, child_pgid=proc.pid,   # start_new_session: its own group
                child_start=_proc_start(proc.pid), agent_key=run.get("session_id"), started_epoch=time.time())
     write_run(run)
+    broker = None
+    if run.get("seat_home"):   # a jailed seat reaches the board only through its broker (Task 20)
+        from swarm.supervisor import seatbroker
+        broker = seatbroker.for_run(cfg, run, host_pid=proc.pid, token=token)
+        if broker is not None:
+            broker.start()
     feeder = threading.Thread(target=_feed, args=(proc, str(run["stdin"]).encode()), daemon=True)
     feeder.start()
     last_line = {"text": ""}
@@ -1198,12 +1209,17 @@ def _execute(cfg: dict, run: dict, *, popen, clock, sleep, poll: float, board_ev
         t.join(5)
         if proc.returncode == 0:
             outcome = "completed"
+        elif run.get("seat_home") and proc.returncode == JAIL_UNAVAILABLE:
+            outcome = "refused"   # the jail could not be built: nothing ran (not an attempt to retry blindly)
+            run["refused_reason"] = "the seat's jail could not be built (seatjail exit 125)"
         else:
             try:
                 sub = json.loads(last_line["text"]).get("subtype")
             except (ValueError, AttributeError):
                 sub = None
             outcome = "max_turns" if sub == "error_max_turns" else "failed"
+    if broker is not None:
+        broker.stop()
     t.join(5)
     feeder.join(1)
     run.update(exited=True, outcome=outcome)
