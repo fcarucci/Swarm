@@ -274,24 +274,37 @@ def cmd_seat_show(board, cfg, args) -> int:
     return 0
 
 
+EVACK = "evack:"   # evack:<seat>:<event id> = 1, as Task 8a's driver acknowledges events (driver_exec.EVACK)
+
+
 def cmd_seat_ack(board, cfg, args) -> int:
-    """The lead acknowledges the events it was woken for, up to ID (spec [F4]): its own event mark only,
-    which only moves forward, and never past the board's newest message of the job (a mark beyond it would
-    silence every later wake). Only the live lead's own session (attested by its hook) may do it."""
+    """The lead acknowledges what it was woken for (spec [F4]), in the two id spaces the driver keeps apart
+    (Task 8a): `--upto ID` moves its MESSAGE mark `msg:<lead seat>` (only forward, never past the job's newest
+    message), and each `--event ID` acknowledges that one board event, `evack:<lead seat>:<id>` (it must be an
+    event of this job): events are acknowledged one by one, never by a high-water mark, so one far id cannot
+    hide later ones. Only the live lead's own session (attested by its hook) may do it."""
     bk = board_key(cfg)
     led = _drive_ledger(bk, args.job)
     lead = _live_lead(board, args.job, led, _caller(bk, args.job, led, args))
     if lead is None:
         raise Refuse("seat ack comes from the job's live lead session (a person cannot acknowledge for the lead)")
     if args.upto < 0:
-        raise Refuse("--upto must be an event id, 0 or more")
+        raise Refuse("--upto must be a message id, 0 or more")
     newest = board.last_message_id(args.job)
     if args.upto > newest:
-        raise Refuse(f"--upto {args.upto} is past the newest event of {args.job} ({newest})")
-    mark = f"event:{lead}"
+        raise Refuse(f"--upto {args.upto} is past the newest message of {args.job} ({newest})")
+    events = set(args.event or [])
+    if events:
+        known = {e.id for e in board.events(args.job)}
+        unknown = sorted(events - known)
+        if unknown:
+            raise Refuse(f"--event {unknown[0]} is not an event of {args.job}")
+    mark = f"msg:{lead}"
     led.watermarks[mark] = max(led.watermarks.get(mark, 0), args.upto)
+    for eid in sorted(events):
+        led.watermarks[f"{EVACK}{lead}:{eid}"] = 1
     led.save()
-    return _record("ack", args.upto, 1)   # drivegate receipts kind=ack id=<the acknowledged event id>
+    return _record("ack", args.upto, 1)   # drivegate receipts kind=ack id=<the acknowledged message id>
 
 
 SEAT_COMMANDS = {"request": cmd_seat_request, "release": cmd_seat_release, "cancel": cmd_seat_cancel,
@@ -622,8 +635,12 @@ def register(sub, handlers: dict, commands: dict | None = None) -> None:
             p.add_argument("--reason")
         if name == "cancel":
             p.add_argument("--reason")
-    ak = ss.add_parser("ack", help="the lead acknowledges the events it was woken for, up to ID")
-    ak.add_argument("--job", required=True); ak.add_argument("--upto", type=int, required=True)
+    ak = ss.add_parser("ack", help="the lead acknowledges the messages (up to an id) and events it was woken for")
+    ak.add_argument("--job", required=True)
+    ak.add_argument("--upto", type=int, required=True, metavar="MSG_ID",
+                    help="acknowledge the messages up to this id (the lead's message mark)")
+    ak.add_argument("--event", type=int, action="append", metavar="EVENT_ID",
+                    help="acknowledge this board event (repeatable; each one on its own)")
     rp = drive_subparsers(sub).add_parser(
         "repair", help="move a bad drive ledger aside; a fresh one starts halted (a person)")
     rp.add_argument("--job", required=True)
