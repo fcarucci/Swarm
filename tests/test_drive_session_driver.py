@@ -748,6 +748,11 @@ class NoSystemdContainmentTests(RunnerBase):
         p = mock.patch.dict(os.environ, {"SWARM_NO_SYSTEMD": "1"})
         p.start()
         self.addCleanup(p.stop)
+        # containment, not the Task 20 credential jail (tests/test_seat_isolation covers that): the seat's argv as is
+        from swarm.supervisor import runner
+        j = mock.patch.object(runner, "_seat_argv", lambda cfg, run: (list(run["argv"]), None))
+        j.start()
+        self.addCleanup(j.stop)
 
     def drive_run(self, argv, **kw):
         run = self.run_dict(argv, **kw)
