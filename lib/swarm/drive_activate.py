@@ -481,7 +481,9 @@ def remote_head(url: str, pin: str | None, config_dir: str | None, branch: str, 
     elif pin.startswith("ssh-agent:"):
         extra["SSH_AUTH_SOCK"] = pin[len("ssh-agent:"):]
         extra["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes -o StrictHostKeyChecking=yes"
-    argv = gitpin.git_argv("git", *args, "ls-remote", "--heads", *gitpin.url_args(url, f"refs/heads/{branch}"))
+    # a local remote runs the destination's own upload-pack: its config is defused there too
+    pack = gitpin.local_pack_args("ls-remote") if gitpin.is_local(url) else []
+    argv = gitpin.git_argv("git", *args, "ls-remote", "--heads", *pack, *gitpin.url_args(url, f"refs/heads/{branch}"))
     env = gitpin.git_env(home=str(paths.home()), extra=extra)
     try:
         res = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env,

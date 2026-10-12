@@ -13,6 +13,11 @@ seat can write decides what git does:
   transports allowed by name (GIT_ALLOW_PROTOCOL overrides any protocol.* config), no prompts;
 - SAFE_CONFIG (as `-c` pairs, git_argv): the same protocol allowlist, hooks and fsmonitor off;
 - NEUTRAL_CWD: git runs outside any work dir, so it reads no repository config there;
+- local transports (file:// or an absolute path): the path is percent-decoded and refused when any
+  segment is ".." (git decodes %2e%2e); resolve_local gives its realpath and locality says whether a URL
+  is local and lies under a root, whatever credential is pinned; local_pack_args runs the destination's
+  upload-pack/receive-pack with its config defused (hooks, fsmonitor, alternateRefsCommand off and
+  receive.denyCurrentBranch=refuse), because a local transport runs that repository's own git;
 - check_pin: a stored credential pin is re-checked against the helper allowlist when it is read back;
 - dir_problem: a config dir a helper reads (GH_CONFIG_DIR) must be this user's, not group- or
   world-writable, in a parent chain only root or this user can change, and not under a work root.
@@ -49,15 +54,43 @@ def no_controls(value: str) -> bool:
     return not any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in value)
 
 
-def _optionlike(part) -> bool:
-    """Whether a URL part starts with "-" once percent-decoded (%2d, %2D, and %252d decoded again)."""
-    text = part or ""
+def _decoded(text: str) -> str:
     for _ in range(3):
         decoded = urllib.parse.unquote(text)
         if decoded == text:
             break
         text = decoded
-    return text.startswith("-")
+    return text
+
+
+def _optionlike(part) -> bool:
+    """Whether a URL part starts with "-" once percent-decoded (%2d, %2D, and %252d decoded again)."""
+    return _decoded(part or "").startswith("-")
+
+
+def _local_path(url: str) -> str | None:
+    """The filesystem path of a local URL as git reads it (a file:// path percent-decoded), or None for a
+    network URL. A local URL with any '%' is refused by _check_local, so both readings agree."""
+    if url.lower().startswith("file://"):
+        return _decoded(urllib.parse.urlsplit(url).path)
+    if "://" in url or (SCP_URL.match(url) and not os.path.isabs(url)):
+        return None
+    return _decoded(url)
+
+
+def _check_local(url: str) -> None:
+    path = _local_path(url)
+    if path is None:
+        return
+    raw = urllib.parse.urlsplit(url).path if url.lower().startswith("file://") else url
+    if "%" in raw:
+        # git decodes a file:// path (%2e%2e is ".."), and opens a plain path literally: a local remote
+        # with any '%' would mean two different directories, so it is refused outright
+        raise GitPinError("a local remote must not contain '%' (git percent-decodes file:// paths)")
+    if not no_controls(path):
+        raise GitPinError("a local remote must not contain (encoded) whitespace or control characters")
+    if ".." in path.replace(os.sep, "/").split("/"):
+        raise GitPinError("a local remote must not contain a '..' segment (also percent-encoded)")
 
 
 def check_url(url) -> str:
@@ -88,6 +121,7 @@ def check_url(url) -> str:
         if scheme == "file":
             if parts.netloc or not os.path.isabs(parts.path):
                 raise GitPinError("a file:// remote must name an absolute local path")
+            _check_local(url)
             return url
         if not host or _optionlike(host) or _optionlike(parts.username):
             raise GitPinError("a remote URL must name a host that is not an option")
@@ -107,7 +141,59 @@ def check_url(url) -> str:
         return url
     if not os.path.isabs(url):
         raise GitPinError("a local remote must be an absolute path")
+    _check_local(url)
     return url
+
+
+def is_local(url: str) -> bool:
+    """Whether git reaches `url` through the local transport (file:// or an absolute path), which runs
+    the destination repository's own upload-pack/receive-pack; checked first (GitPinError when refused)."""
+    return _local_path(check_url(url)) is not None
+
+
+def resolve_local(url: str) -> str:
+    """The realpath of a local URL's repository, as git will open it (decoded, symlinks resolved).
+    GitPinError for a refused or a network URL."""
+    path = _local_path(check_url(url))
+    if path is None:
+        raise GitPinError("not a local remote")
+    return os.path.realpath(path)
+
+
+def locality(url: str, root: str | None = None) -> tuple:
+    """(local, under): whether `url` is local, and whether its realpath lies under realpath(`root`) (False
+    for a network URL or no root). Decided from the URL alone, for every credential kind: a local
+    transport ignores an ssh or helper pin."""
+    if not is_local(url):
+        return False, False
+    if root is None:
+        return True, False
+    return True, _under(resolve_local(url), os.path.realpath(root))
+
+
+# The destination's own config, when git runs its upload-pack/receive-pack locally: no hooks, no
+# fsmonitor, no alternateRefsCommand (it runs a shell command from that repository's config), and no
+# push into a checked-out branch (updateInstead would run fsmonitor and smudge filters in its worktree).
+LOCAL_PACK_CONFIG = ("core.hooksPath=" + os.devnull, "core.fsmonitor=false", "core.alternateRefsCommand=",
+                     "receive.denyCurrentBranch=refuse", "receive.denyDeleteCurrent=refuse")
+
+
+def local_pack_args(op: str, git: str = "git") -> list:
+    """The pack-program flag for a local destination, for `op` "push" (["--receive-pack=<cmd>"]) or a
+    read: "fetch", "ls-remote" or "clone" (["--upload-pack=<cmd>"]). <cmd> is
+    `git -c <LOCAL_PACK_CONFIG>... receive-pack|upload-pack`, shell-quoted (git runs it with sh).
+    Callers add it only for a local URL (is_local)."""
+    import shlex
+    if op == "push":
+        flag, which = "--receive-pack", "receive-pack"
+    elif op in ("fetch", "ls-remote", "clone"):
+        flag, which = "--upload-pack", "upload-pack"
+    else:
+        raise GitPinError(f"local_pack_args: unknown git operation {op!r}")
+    parts = [git]
+    for item in LOCAL_PACK_CONFIG:
+        parts += ["-c", item]
+    return [f"{flag}=" + " ".join(shlex.quote(p) for p in parts + [which])]
 
 
 def check_branch(branch) -> str:
