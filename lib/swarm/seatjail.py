@@ -58,16 +58,76 @@ KEEP_ENV = frozenset((
     "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL",
     "ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
-    "DISABLE_AUTOUPDATER", "DISABLE_TELEMETRY", "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_ORG_ID",
-    # what a process needs to run at all on Windows (best-effort seats)
-    "SYSTEMROOT", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "SYSTEMDRIVE", "PROCESSOR_ARCHITECTURE",
-    "NUMBER_OF_PROCESSORS", "OS"))
+    "DISABLE_AUTOUPDATER", "DISABLE_TELEMETRY", "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_ORG_ID"))
+# What a process needs to run at all on Windows (best-effort seats there only).
+WINDOWS_KEEP_ENV = frozenset(("SYSTEMROOT", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "SYSTEMDRIVE",
+                              "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS", "OS"))
 
 
-def scrub_env(env: dict) -> dict:
-    """The allowlisted part of `env` (KEEP_ENV and LC_*): every other name is dropped, whatever
-    [supervise] pass_env says (PGPASSWORD, AWS_*, DATABASE_URL, TMUX, HERDR_SOCKET_PATH, *_TOKEN, ...)."""
-    return {k: v for k, v in env.items() if k in KEEP_ENV or re.fullmatch(r"LC_[A-Z_]+", k)}
+def scrub_env(env: dict, platform: str | None = None) -> dict:
+    """The allowlisted part of `env` (KEEP_ENV and LC_*, plus WINDOWS_KEEP_ENV on Windows): every other name is
+    dropped, whatever [supervise] pass_env says (PGPASSWORD, AWS_*, DATABASE_URL, TMUX, HERDR_SOCKET_PATH, ...)."""
+    keep = KEEP_ENV | WINDOWS_KEEP_ENV if (platform or sys.platform).startswith("win") else KEEP_ENV
+    return {k: v for k, v in env.items() if k in keep or re.fullmatch(r"LC_[A-Z_]+", k)}
+
+
+# Git settings that override every config scope (GIT_CONFIG_COUNT: command scope wins over system, global, a
+# repository's own .git/config and includes): no credential helper, no askpass. `sshCommand` is set by the caller.
+def git_overrides(ssh_command: str) -> dict:
+    pairs = [("credential.helper", ""), ("core.askPass", ""), ("core.sshCommand", ssh_command)]
+    out = {"GIT_CONFIG_COUNT": str(len(pairs))}
+    for i, (k, v) in enumerate(pairs):
+        out[f"GIT_CONFIG_KEY_{i}"], out[f"GIT_CONFIG_VALUE_{i}"] = k, v
+    return out
+
+
+_SYSCTLS = (("/proc/sys/kernel/unprivileged_userns_clone", "0", "kernel.unprivileged_userns_clone=0"),
+            ("/proc/sys/user/max_user_namespaces", "0", "user.max_user_namespaces=0"),
+            ("/proc/sys/kernel/apparmor_restrict_unprivileged_userns", "1",
+             "kernel.apparmor_restrict_unprivileged_userns=1"))
+_USERNS_CHECK = (
+    "import os, sys\n"
+    "uid = os.getuid()\n"
+    "try:\n"
+    "    os.unshare(0x10000000)\n"
+    "except OSError as e:\n"
+    "    sys.exit(3 if e.errno == 1 else 4)\n"
+    "for f, t in (('/proc/self/setgroups', 'deny'), ('/proc/self/uid_map', '0 %d 1\\n' % uid)):\n"
+    "    try:\n"
+    "        fd = os.open(f, os.O_WRONLY); os.write(fd, t.encode()); os.close(fd)\n"
+    "    except FileNotFoundError:\n"
+    "        pass\n"
+    "    except OSError as e:\n"
+    "        sys.exit(3 if e.errno == 1 else 4)\n"
+    "sys.exit(0)\n")
+
+
+def no_userns_reason(python: str | None = None, timeout: float = 10.0, read=None, run=None) -> str | None:
+    """Why this host has NO unprivileged user namespaces, decided deterministically: a sysctl that disables them,
+    or an unshare(CLONE_NEWUSER) / setgroups / uid_map write refused with EPERM. None for anything else (it works,
+    or it failed in a way that is not a fixed property of the host: a timeout, ENOSPC, EAGAIN, ENOMEM...): the
+    caller must then refuse, never downgrade (a seat can cause those)."""
+    import subprocess
+    if not sys.platform.startswith("linux"):
+        return None
+
+    def _read(path):
+        with open(path, encoding="ascii") as fh:
+            return fh.read().strip()
+    for path, bad, label in _SYSCTLS:
+        try:
+            if (read or _read)(path) == bad:
+                return f"unprivileged user namespaces are disabled ({label})"
+        except (OSError, ValueError):
+            continue
+    try:
+        res = (run or subprocess.run)([python or sys.executable, "-I", "-c", _USERNS_CHECK], capture_output=True,
+                                      timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if res.returncode == 3:
+        return "unprivileged user namespaces are refused here (EPERM)"
+    return None
 
 
 def seat_env(env: dict, spec: dict) -> dict:
