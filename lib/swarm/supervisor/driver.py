@@ -402,7 +402,11 @@ def _control(board, cfg, state, led, job: str, now, jdeadline: float, m) -> bool
     CONTROL-REFUSED) and consumed either way. `led` is None for a ledger that does not read (a `repair`
     request). Stops at the job's time slot. True when the ledger on disk may have changed (reloaded here)."""
     ctl = getattr(m, "control", None)
-    if ctl is None:
+    if ctl is None:   # never in an integrated build: say so loudly, a Codex seat's requests would wait for ever
+        log.error("control requests of %s cannot be applied: swarm.drive_cli is not in this build", job)
+        from swarm.supervisor import driver_events as ev
+        _notice(board, state, f"control-missing|{job}", job,
+                f"{ev.DRIVER_ERROR} control requests cannot be applied: swarm.drive_cli is not in this build")
         return False
     from swarm.board.autoinit import store_key
     bk = store_key(cfg)

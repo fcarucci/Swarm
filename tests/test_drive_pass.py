@@ -100,7 +100,10 @@ class PassCase(unittest.TestCase):
         self.snap = FakeSnapshot()
         self.actions: list = []
         self.model = SimpleNamespace(next_actions=lambda s, c: list(self.actions), DEFAULT_CFG=dm.DEFAULT_CFG)
-        self.mods = SimpleNamespace(exec=self.exec, life=life, model=self.model, snapshot=self.snap)
+        no_requests = SimpleNamespace(find_control_requests=lambda *a, **k: [],
+                                      apply_control_request=lambda *a, **k: (False, "no requests in this fake"))
+        self.mods = SimpleNamespace(exec=self.exec, life=life, model=self.model, snapshot=self.snap,
+                                    control=no_requests)   # an integrated build always has drive_cli
         patch = mock.patch.object(driver, "_modules", lambda: self.mods)
         patch.start()
         self.addCleanup(patch.stop)
