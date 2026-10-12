@@ -228,10 +228,19 @@ def cmd_seat_request(board, cfg, args) -> int:
     led = _drive_ledger(bk, args.job)
     # In a Codex session the CLI cannot know its caller (its sandbox can use no grant); the row is a request
     # the driver launches only with the seat_request receipt the hook writes for the lead or the requester.
-    who = ("codex session" if person.codex_session(os.environ)
-           else _lead_or_person(board, bk, args.job, led, os.environ, "seat request", args))
+    codex = person.codex_session(os.environ)
+    who = "codex session" if codex else _lead_or_person(board, bk, args.job, led, os.environ, "seat request", args)
     workdir = _check_workdir(bk, args.job, args.workdir or os.getcwd())
     model = _model_for(cfg, args.role, args.model)
+    if codex:   # CX1 X4: without a known caller, an existing row is never changed (it would void its receipt)
+        row = board.seat(args.job, led.generation, args.seat)
+        if row is not None:
+            want = dict(role=args.role, harness=args.harness, model=model, workdir=workdir, brief_path=args.brief,
+                        title=args.title, task_ref=args.task, complexity=args.complexity or "standard")
+            if any(getattr(row, k) != v for k, v in want.items()):
+                raise Refuse(f"seat {args.seat} exists: in a Codex session `seat request` creates a seat or repeats "
+                             "it unchanged, never changes it (the lead releases it first)")
+            return _record("seat", row.id, row.revision)   # the same request: the row as it is
     seat = board.request_seat(args.job, led.generation, args.seat, role=args.role, harness=args.harness,
                               model=model, workdir=workdir, brief_path=args.brief, title=args.title,
                               task_ref=args.task, complexity=args.complexity or "standard", requested_by=who)

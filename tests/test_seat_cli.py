@@ -1368,6 +1368,26 @@ class CodexControlRequests(ControlCase):
         self.assertIn(drive_control.FLOOR, wm)
         self.assertEqual(self.driver(), [])
 
+    def test_X4_a_codex_seat_cannot_rewrite_a_requested_row(self):
+        """CX1 X4: a Codex `seat request` never changes an existing row (its owner's receipt would be void)."""
+        self.set_session(REQ_SESSION)
+        argv = ("seat", "request", "--job", JOB, "--seat", "eng9", "--role", "engineer", "--brief", "B.md",
+                "--workdir", str(self.work))
+        self.assertEqual(self.run_cmd(*argv)[0], 0)
+        before = self.board.seat(JOB, 1, "eng9")
+        evil = list(argv)
+        evil[evil.index("B.md")] = "EVIL.md"
+        rc, _, err, receipted = self.codex("ENG-SESSION", *evil)
+        self.assertEqual(rc, 1)
+        self.assertIn("never changes it", err)
+        self.assertFalse(receipted)
+        rc, out, err, _ = self.codex("ENG-SESSION", *argv)                   # the same request: untouched
+        self.assertEqual(rc, 0, err)
+        after = self.board.seat(JOB, 1, "eng9")
+        self.assertEqual((after.brief_path, after.revision, after.requested_by),
+                         (before.brief_path, before.revision, before.requested_by))
+        self.assertEqual(drivegate.record_of({"tool_response": out}), ("seat", after.id, after.revision))
+
     def test_a_claude_session_keeps_the_direct_path(self):
         self.assertEqual(self.run_cmd("halt", "--job", JOB)[0], 0)
         rc, out, err = self.run_cmd("unhalt", "--job", JOB)
