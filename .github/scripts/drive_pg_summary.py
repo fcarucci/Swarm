@@ -8,7 +8,7 @@ whose name ends in "Postgres", made by tests/support.add_backend_variants). Fail
   - a test_drive_*.py module ran no test at all;
   - a module that builds Postgres variants (it calls add_backend_variants) ran none of them;
   - any test was skipped for a reason other than Windows-only, systemd-only, or one starting with
-    "memory-only:" (a test that forges rows through the memory store's internals,
+    "memory-only:" (a test that fakes rows through the memory store's internals,
     support.memory_store_only);
   - a module builds a board harness itself (it names harness_factory, MemoryHarness, FileHarness,
     SqliteHarness, PostgresHarness, drive_backends or open_board) without calling

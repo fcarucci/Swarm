@@ -683,7 +683,7 @@ MEMORY_ONLY = "memory-only: raw row forgery"     # the skip reason drive_pg_summ
 
 
 def memory_store_only(test):
-    """A test that forges rows through the memory store's internals (`self.h.store`): it runs on the
+    """A test that fakes rows through the memory store's internals (`self.h.store`): it runs on the
     memory and file backends, and skips elsewhere with the reason the CI summary allow-lists."""
     import functools
 
