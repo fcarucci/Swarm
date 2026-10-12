@@ -631,6 +631,19 @@ class Mirror:
             reason = self._last_line(proc)
             raise PushRejectedError(f"push of {sha[:12]} to {branch} failed: {reason}", reason)
 
+    def delete_branch_at(self, branch: str, sha: str, *, timeout: float = MAX_CALL_TIMEOUT) -> None:
+        """Delete `branch` on the remote only while it names exactly `sha` (a compare-and-delete:
+        `--force-with-lease=refs/heads/<branch>:<sha>`), pinned credential. A branch that moved is left alone
+        (PushRejectedError)."""
+        _sha(sha)
+        name = self._branch(branch)
+        seconds = _timeout(timeout)
+        proc = self._git(["push", "--porcelain", f"--force-with-lease=refs/heads/{name}:{sha}", *self._pack("push"),
+                          *self._u(f":refs/heads/{name}")], timeout=seconds, pinned=True, check=False)
+        if proc.returncode != 0:
+            reason = self._last_line(proc)
+            raise PushRejectedError(f"deleting {name} at {sha[:12]} failed: {reason}", reason)
+
     def delete_branch(self, branch: str, *, timeout: float = MAX_CALL_TIMEOUT) -> None:
         """Delete a branch on the remote (`git push <url> :refs/heads/<branch>`), pinned credential."""
         name = self._branch(branch)

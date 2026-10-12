@@ -672,18 +672,18 @@ def _finish(board, env: LandEnv, job: str, request: Request, branch: str, sha: s
         l.integrated[branch] = ig
     update_ledger(led, apply)
     notes = []
-    if env.delete_branch:
-        for d in dests:
-            try:
-                mirrors[d.url].delete_branch(branch, timeout=_budget(env, PUSH_SECONDS))
-            except MirrorError as exc:
-                if mirrors[d.url].head(branch) is not None:       # a published-only hand-off has no branch there
-                    notes.append(f"{d.name}: branch {branch} not deleted ({exc})")
-    for d in dests:                                               # the driver's own publish ref goes either way
+    # Only the driver's own publish ref is removed, and only where it still names this exact SHA (compare-and-
+    # delete). The hand-off branch name is the seat's: an unrelated branch of that name on a destination is never
+    # touched (review of 4fda7fc).
+    pub = publish_ref(sha)
+    for d in dests:
+        m = mirrors[d.url]
         try:
-            mirrors[d.url].delete_branch(publish_ref(sha), timeout=_budget(env, PUSH_SECONDS))
-        except MirrorError:
-            pass
+            if m.ls_remote(_budget(env, FETCH_SECONDS)).get(f"refs/heads/{pub}") != sha:
+                continue
+            m.delete_branch_at(pub, sha, timeout=_budget(env, PUSH_SECONDS))
+        except MirrorError as exc:
+            notes.append(f"{d.name}: {pub} not deleted ({exc})")
     for note in notes:
         env.say(note)
     return LandResult(True, sha, "landed", land_id=str(request.id), land_rev=rev)

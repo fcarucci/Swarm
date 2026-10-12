@@ -144,6 +144,12 @@ class LandCase(unittest.TestCase):
         return land.execute(self.board, self.env(**kw.pop("env", {})), "J", request or self.request(),
                             action_id="gen1|land|-|feat/x|1|7", **kw)
 
+    def local_only(self):
+        for r in (self.a, self.b):
+            git(r, "branch", "-D", GROUP)
+        self.branch_commit("w.txt", "w\n", push=False)
+        self.owner["roots"] = [self.work]
+        self.judged = {self.sha}
 
 class Landing(LandCase):
     def test_land_fast_forwards_every_destination(self):
@@ -152,13 +158,6 @@ class Landing(LandCase):
         self.assertEqual(res.landed_sha, self.sha)
         self.assertEqual(self.head(self.a), self.sha)
         self.assertEqual(self.head(self.b), self.sha)
-
-    def local_only(self):
-        for r in (self.a, self.b):
-            git(r, "branch", "-D", GROUP)
-        self.branch_commit("w.txt", "w\n", push=False)
-        self.owner["roots"] = [self.work]
-        self.judged = {self.sha}
 
     def test_a_branch_only_in_the_work_repository_is_published_by_the_driver_then_landed(self):
         """Seats never push (QA real MET): the hand-off exists only in the job's work repository. The driver
@@ -170,6 +169,23 @@ class Landing(LandCase):
             self.assertEqual(self.head(r), self.sha)
             self.assertFalse(self.has_branch(r, land.publish_ref(self.sha)))   # cleaned up after landing
         self.assertIn((self.a, self.sha, land.publish_ref(self.sha)), self.pushes)
+
+    def test_an_unrelated_destination_branch_of_the_hand_off_name_is_never_deleted(self):
+        """Review of 4fda7fc: a hand-off named like an existing destination branch (develop) lands, and the
+        destinations' develop stays where it was; only the driver's swarm/land/<sha> ref is removed."""
+        for r in (self.a, self.b):
+            git(r, "branch", "-D", GROUP)
+            git(r, "branch", "develop", "main")
+        before = self.head(self.a, "develop")
+        git(self.work, "checkout", "-q", "-B", "develop", self.base)
+        self.sha = self.commit(self.work, "w.txt", "w\n", "feature")
+        self.owner["roots"] = [self.work]
+        self.judged = {self.sha}
+        res = self.go(Request(7, land.integrator_seat("develop"), f"develop@{self.sha}", 1))
+        self.assertTrue(res.ok, res.why)
+        for r in (self.a, self.b):
+            self.assertEqual(self.head(r, "develop"), before)
+            self.assertFalse(self.has_branch(r, land.publish_ref(self.sha)))
 
     def test_an_unjudged_sha_never_leaves_the_mirror(self):
         """Review blocker 1: nothing is published before the judged check."""
@@ -249,8 +265,8 @@ class Landing(LandCase):
 
     def test_branch_deleted_and_ledger_and_receipts_written(self):
         res = self.go()
-        self.assertFalse(self.has_branch(self.a))
-        self.assertFalse(self.has_branch(self.b))
+        self.assertTrue(self.has_branch(self.a))      # the seat's branch name is never deleted by the driver
+        self.assertTrue(self.has_branch(self.b))
         ig = self.led.integrated[GROUP]
         self.assertEqual((ig["landed"], ig["land_id"], ig["land_rev"]), (self.sha, "7", res.land_rev))
         stored = ledger.load(BK, "J")
@@ -281,10 +297,11 @@ class Landing(LandCase):
         def make(url, cred):
             m = Mirror(url, cred)
 
-            def boom(branch, **kw):
+            def boom(branch, sha, **kw):
                 raise PushRejectedError("denied", "denied")
-            m.delete_branch = boom
+            m.delete_branch_at = boom
             return m
+        self.local_only()                            # published under swarm/land/<sha>: removed after landing
         res = self.go(env={"mirror_factory": make, "say": notes.append})
         self.assertTrue(res.ok)
         self.assertEqual(len(notes), 2)
@@ -979,11 +996,12 @@ class Budget(LandCase):
 
         def make(url, cred):
             m = real(url, cred)
-            fb, push, dele = m.fetch_branches, m.push, m.delete_branch
+            fb, push, dele = m.fetch_branches, m.push, m.delete_branch_at
             m.fetch_branches = lambda b, t: (seen.append(("fetch", t)), fb(b, t))[1]
             m.push = lambda sha, target, timeout=None: (seen.append(("push", timeout)), push(sha, target, timeout=timeout))[1]
-            m.delete_branch = lambda b, timeout=None: (seen.append(("delete", timeout)), dele(b, timeout=timeout))[1]
+            m.delete_branch_at = lambda b, sha, timeout=None: (seen.append(("delete", timeout)), dele(b, sha, timeout=timeout))[1]
             return m
+        self.local_only()               # published under swarm/land/<sha>, so the driver also deletes its own ref
         res = self.go(env={"left": lambda: 7.0, "mirror_factory": make})
         self.assertTrue(res.ok, res.why)
         kinds = {k for k, _ in seen}
