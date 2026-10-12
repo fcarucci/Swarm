@@ -167,10 +167,11 @@ class Grants(PersonCase):
 
     def test_N1_a_call_that_may_not_run_gets_no_grant(self):
         """R1: a grant is never planted for a command that does not (or may not) run."""
-        for cmd in ("false && swarm halt --job J", "true || swarm halt --job J",
+        for cmd in ("false && swarm halt --job J", "test -n \"$X\" && swarm halt --job J", "test x && swarm halt --job J", "true || swarm halt --job J",
                     "if false; then swarm halt --job J; fi", "f(){ swarm halt --job J; }",
                     "swarm unhalt --job J; swarm halt --job J", "swarm halt --job J &",
-                    "echo x\nswarm halt --job J", "(swarm halt --job J)", "bash -c 'swarm halt --job J'"):
+                    "echo x\nswarm halt --job J", "(swarm halt --job J)", "bash -c 'swarm halt --job J'",
+                    "swarm halt --job J || true"):
             self.assertEqual(self.hook("REQ", command=cmd), 0, cmd)
         self.assertIsNone(self.caller())
 

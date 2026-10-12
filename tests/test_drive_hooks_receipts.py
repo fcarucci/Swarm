@@ -466,7 +466,7 @@ class PostAskAnswerReceipts(DriveCase):
         b = self.open_question(sid, to="eng-a")
         with self.board() as bd:
             bd.resolve_blocker(b.id, "sqlite", actor=bd.active_agent_name(sid))
-        self.assertTrue(self.post(sid, f"swarm answer {b.id} --key {sid} sqlite", rec("answer", b.id)))
+        self.assertTrue(self.post(sid, f"swarm answer {b.id} sqlite --key {sid}", rec("answer", b.id)))
         r = self.receipt("answer", b.id)
         self.assertTrue(receipts.matches(r, {"kind": "answer", "id": str(b.id), "rev": 1, "ask_id": str(b.id),
                                              "answer": "sqlite"}))
