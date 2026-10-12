@@ -16,7 +16,9 @@ seat's runner (outside the jail, alive exactly as long as the session), answers 
 - hooks have their own lane (HOOK_WORKERS, HOOK_TIMEOUT) and cli calls theirs (CLI_WORKERS, at most CLI_QUEUE
   queued), so a seat's long `swarm wait` never starves its guard; a guard hook that cannot run is answered with
   a deny (fail closed);
-- grants (person.host_pid) bind to the seat's own session process (BROKER_PID_ENV).
+- grants (person.host_pid) bind to the seat's own session process: each call carries a fresh secret
+  (person.BROKER_TOKEN_ENV) naming a record only the broker writes in the supervisor's private dir, so a variable
+  an agent sets attests nothing (rr19).
 
 Requests are read through the directory's descriptor without following links, size-capped."""
 from __future__ import annotations
@@ -41,7 +43,8 @@ CLI_WORKERS, CLI_QUEUE, CLI_TIMEOUT, CLI_WAIT_TIMEOUT = 2, 8, 300.0, 900.0
 SESSION_VARS = ("CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT",
                 "CODEX_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED",
                 "SWARM_HOST", "SWARM_SEAT_BROKER", "SWARM_RESUME_TOKEN", "SWARM_CONFIG", "PYTHONPATH",
-                "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE", "CLAUDE_CONFIG_DIR", "CODEX_HOME")
+                "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE", "CLAUDE_CONFIG_DIR", "CODEX_HOME",
+                "SWARM_BROKER_TOKEN", "SWARM_BROKER_HOST_PID")
 AUDIT_EXIT = 97
 LIB_DIR = str(Path(__file__).resolve().parents[2])
 # The brokered CLI: the supervisor's code only (python -I: no PYTHONPATH, no user site, no script dir), and an
@@ -189,9 +192,14 @@ class SeatBroker:
     def __init__(self, run: dict, directory: str, *, workdir: str, forbid: list[str], seat_dir: str,
                  config: str, host_pid: int | None, token: str | None = None, base_env: dict | None = None,
                  python: str | None = None, runner=subprocess.run, file_dir: str | None = None,
-                 cfg: dict | None = None):
+                 cfg: dict | None = None, attest_dir: str | None = None):
         self.run, self.dir, self.workdir = run, directory, workdir
         self.cfg = cfg
+        if attest_dir is None:
+            from swarm import person
+            from swarm.supervisor.settings import private_dir
+            attest_dir = str(private_dir() / person.BROKER_ATTEST_DIR)
+        self.attest_dir = attest_dir
         self.forbid = [os.path.realpath(p) for p in forbid if p]
         self.seat_dir, self.config = seat_dir.rstrip("/"), config
         self.host_pid, self.token = host_pid, token
@@ -228,9 +236,38 @@ class SeatBroker:
                 env["SWARM_RESUME_TOKEN"] = self.token
         else:
             env["CLAUDE_CODE_SESSION_ID"] = sid or ""
-        if self.host_pid:
-            env[person.BROKER_PID_ENV] = str(self.host_pid)
         return env
+
+    def _attest(self) -> tuple[str | None, str | None]:
+        """A per-call secret and the record it names (the seat's session pid, an expiry), written where only the
+        supervisor writes. (token, record name) or (None, None) when there is no pid to attest."""
+        import secrets
+        import time
+        from swarm import person, safefs
+        if not self.host_pid:
+            return None, None
+        token = secrets.token_hex(32)
+        name = person.broker_attest_name(token)
+        fd = safefs.open_base(self.attest_dir, create=True, strict_mode=0o700)
+        try:
+            safefs.write_atomic(fd, name, json.dumps({"pid": int(self.host_pid),
+                                                      "expires_at": time.time() + CLI_WAIT_TIMEOUT + 60}))
+        finally:
+            os.close(fd)
+        return token, name
+
+    def _unattest(self, name: str | None) -> None:
+        if not name:
+            return
+        from swarm import safefs
+        try:
+            fd = safefs.open_base(self.attest_dir, create=False, strict_mode=0o700)
+        except Exception:
+            return
+        try:
+            safefs.unlink(fd, name)
+        finally:
+            os.close(fd)
 
     def payload(self, raw) -> bytes:
         """The hook payload as the broker passes it on: only HOOK_FIELDS, then session_id, transcript_path
@@ -257,8 +294,15 @@ class SeatBroker:
     def _exec(self, argv: list[str], stdin: bytes | None, timeout: float, extra_env=None) -> tuple[int, bytes, bytes]:
         cmd = [self.python, "-I", "-c", BOOT, LIB_DIR, "\n".join([self.workdir, self.seat_dir, *self.forbid]),
                "--config", self.config, *argv]
-        env = {**self.env(), **(extra_env or {})}
-        res = self._run(cmd, input=stdin, capture_output=True, cwd="/", env=env, timeout=timeout)
+        from swarm import person
+        env = {k: v for k, v in {**self.env(), **(extra_env or {})}.items() if k != person.BROKER_TOKEN_ENV}
+        token, name = self._attest()
+        if token:
+            env[person.BROKER_TOKEN_ENV] = token
+        try:
+            res = self._run(cmd, input=stdin, capture_output=True, cwd="/", env=env, timeout=timeout)
+        finally:
+            self._unattest(name)
         return res.returncode, res.stdout or b"", res.stderr or b""
 
     def _requirement(self, path: str, made: list) -> list[str]:
