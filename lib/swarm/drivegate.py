@@ -25,7 +25,7 @@ import re
 import time
 from types import SimpleNamespace
 
-from swarm import driveroles, receipts, shellguard
+from swarm import driveroles, person, receipts, shellguard
 
 KICK_SECONDS = 20.0
 KICK_UNIT = "swarm-supervise.service"
@@ -897,28 +897,83 @@ def _barrier(name: str) -> None:
 # command, so it cannot tell the CLI who is calling while the command runs: the CLI's own ledger writes
 # (halt, unhalt, an ack's mark, a withdrawal, pins, a repair) need that before. A grant is the same kind of
 # host-private receipt, written by this PreToolUse hook from the same contexts (requester_context: the
-# requester's MAIN session; seat_context: the seat the host-private chain names), bound to args_sha of the
-# submitted argv (submitted_argv: the CLI computes the same from its parsed arguments), single use
-# (receipts.take) and short-lived. A subagent (a payload with an agent_id) gets none, like receipts.
+# requester's MAIN session; seat_context: the seat the host-private chain names). It is bound (record id) to
+# args_sha of the submitted argv, the config path and the pid of the agent host process (claude/codex) the
+# call runs under, so only a process of that session's own tree can match it. It is written only when the
+# whole shell call is one swarm invocation that runs (optional `cd DIR &&` before it, pipes, redirections and
+# `&& ...` after it), never for a call pre_tool refused; the CLI uses it once (receipts.take) and the
+# PostToolUse of the same call removes whatever is left (drop_grants), so it lives no longer than the call
+# (GRANT_SECONDS bounds a call the host denied, which has no PostToolUse). A subagent gets none.
 
-GRANT_SECONDS = 120.0
+GRANT_SECONDS = 60.0
 GRANT_SUBS = ("halt", "unhalt", "seat", "goal-ready", "drive", "deactivate")
+_PUNCT = "();<>|&\n"
+_REDIRECTS = {">", ">>", "<", ">&", "<&", ">|", "&>", "&>>"}
 
 
-def grant_id(ns) -> str:
-    """The record id of the grant for the parsed command `ns`: args_sha of its submitted argv."""
-    return receipts.args_sha(submitted_argv(ns))
+def grant_id(ns, pid=None) -> str:
+    """The record id of the grant for the parsed command `ns` run under the agent host process `pid`
+    (person.host_pid(): the hook and the CLI find the same one): args_sha of its submitted argv, its config
+    path (`--config`, default included) and that pid."""
+    return receipts.args_sha(submitted_argv(ns) + [f"--config={getattr(ns, 'config', None)}", f"host-pid={pid}"])
+
+
+def _tokens(command: str):
+    import shlex
+    try:
+        lex = shlex.shlex(command, posix=True, punctuation_chars=_PUNCT)
+        lex.whitespace = " \t\r"
+        lex.whitespace_split = True
+        return list(lex)
+    except ValueError:
+        return None
+
+
+def _punct(tok: str) -> bool:
+    return bool(tok) and all(c in _PUNCT for c in tok)
+
+
+def simple_call(command: str):
+    """The argv after `swarm` when the whole shell call is ONE swarm invocation that runs: optional `cd DIR &&`
+    segments before it, and only redirections, pipes or `&& ...` after it. None for anything else (`;`, `||`,
+    a background `&`, a newline, a subshell or function body, an `if`, another command first, a substitution):
+    such a call gets no grant, so a grant is never planted for a command that does not run."""
+    toks = _tokens(command or "")
+    if not toks:
+        return None
+    i = 0
+    while i + 2 < len(toks) and toks[i] == "cd" and not _punct(toks[i + 1]) and toks[i + 2] == "&&":
+        i += 3
+    if i >= len(toks) or os.path.basename(toks[i]) != "swarm":
+        return None
+    j = i + 1
+    while j < len(toks) and not _punct(toks[j]):
+        j += 1
+    argv = toks[i + 1:j]
+    if not argv or any(c in "$`" for a in argv for c in a):
+        return None
+    rest = toks[j:]
+    if rest and rest[0] in _REDIRECTS and argv[-1].isdigit():
+        argv = argv[:-1]                       # `2>&1`: the fd number is the shell's, not an argument
+    k = 0
+    while k < len(rest):                       # what may follow: redirections, then `|` or `&&` and anything
+        t = rest[k]
+        if t in _REDIRECTS:
+            k += 2
+            continue
+        if t in ("|", "&&"):
+            tail = rest[k + 1:]
+            return argv if tail and not any(x in (";", "&", "||", "\n", "(", ")") for x in tail) else None
+        return None
+    return argv
 
 
 def _grant_calls(command: str) -> list:
-    out = []
-    for prog, args, _wrappers in shellguard.iter_commands(command):
-        if prog != "swarm":
-            continue
-        sub, argv = _sub_of(args)
-        if sub in GRANT_SUBS:
-            out.append(argv)
-    return out
+    argv = simple_call(command)
+    if argv is None:
+        return []
+    sub, argv = _sub_of(argv)
+    return [argv] if sub in GRANT_SUBS else []
 
 
 def _grant_owner(board_key: str, payload: dict, ns):
@@ -972,7 +1027,7 @@ def write_grants(cfg: dict, payload: dict, host, ctx=None, now=None) -> int:
         if owner is None:
             continue
         led, action, attempt, seat = owner
-        rid = grant_id(ns)
+        rid = grant_id(ns, person.host_pid())
         receipts.write(bk, receipts.Receipt(
             board_key=bk, job=ns.job, generation=led.generation if led else 1,
             incarnation=led.incarnation if led else receipts.GRANT_INCARNATION_NO_LEDGER,
@@ -981,3 +1036,23 @@ def write_grants(cfg: dict, payload: dict, host, ctx=None, now=None) -> int:
             expires_at=now + GRANT_SECONDS))
         n += 1
     return n
+
+
+def drop_grants(cfg: dict, payload: dict, host) -> int:
+    """PostToolUse (or a refused PreToolUse): remove every grant this shell call could have been given, used
+    or not, so none outlives its call. Returns how many were removed. Never raises."""
+    try:
+        command = host.shell_command(payload) or ""
+        calls = _grant_calls(command) if "swarm" in command else []
+        if not calls:
+            return 0
+        from swarm.board.autoinit import store_key
+        bk = store_key(cfg)
+        n = 0
+        for argv in calls:
+            ns = parse_swarm(argv)
+            if ns is not None and isinstance(getattr(ns, "job", None), str):
+                n += receipts.drop(bk, ns.job, "grant", grant_id(ns, person.host_pid()))
+        return n
+    except Exception:
+        return 0
