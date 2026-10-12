@@ -1032,6 +1032,41 @@ def own_name_verdict_command(command: str, name: str, job: str | None = None) ->
     return command
 
 
+_OWN_JOB_SUBS = ("done", "review", "verdict", "post", "ask", "goal-ready", "land")
+_OWN_JOB_SEAT_SUBS = ("request", "list", "show", "release", "ack")
+
+
+def own_job_command(command: str, job: str | None) -> str | None:
+    """`command` with `--job JOB` (the caller's own job) added to every real `swarm` call that needs one and has
+    none (done, review, verdict, post, ask, goal-ready, land, seat ...): a drive seat's first `swarm done` just
+    works, and its receipt is read from a command that names the job. A call that names a --job is left as it is
+    (another job stays refused where it is refused). None when there is nothing to add."""
+    if not job:
+        return None
+    from swarm.shellguard import mask_heredocs
+    masked = mask_heredocs(command)
+    inserts = []
+    for sub in (*_OWN_JOB_SUBS, "seat"):
+        for args in _swarm_calls(masked, sub):
+            if sub == "seat":
+                if not args or args[0][2] not in _OWN_JOB_SEAT_SUBS:
+                    continue
+                at = args[1][0] if len(args) > 1 else args[0][1]
+                lead = "" if len(args) > 1 else " "
+            else:
+                at = args[0][0] if args else None
+                lead = ""
+            if at is None or any(_flag_value(args, m, "--job")[0] is not None for m in range(len(args))):
+                continue
+            inserts.append((at, lead))
+    if not inserts:
+        return None
+    q = shlex.quote(job)
+    for at, lead in sorted(inserts, reverse=True):
+        command = command[:at] + (f" --job {q}" if lead else f"--job {q} ") + command[at:]
+    return command
+
+
 def own_key_question_command(command: str, agent_id: str, job: str | None = None) -> str | None:
     """`command` with every real `swarm ask` and `swarm answer` invocation made to run as the caller's
     own agent: a call with no --key gets `--key AGENT_ID` (the hook knows who is calling, as for
@@ -1084,6 +1119,7 @@ def _reuse_identity(agent_id: str, job: str, payload: dict, name: str | None = N
     if command and name:
         new = own_name_verdict_command(new or command, name, job) or new
         new = own_key_question_command(new or command, agent_id, job) or new
+        new = own_job_command(new or command, job) or new
     if command:
         new = own_key_review_command(new or command, agent_id, job) or new
     wrapped = None

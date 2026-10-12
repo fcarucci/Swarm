@@ -170,7 +170,7 @@ def parse_cli(argv: list[str], cwd: str, stdin=None) -> dict:
             v = [os.path.normpath(os.path.join(cwd, os.path.expanduser(x))) for x in v]
         fields[name] = v
     req = {"v": VERSION, "kind": "cli", "command": command, "fields": fields}
-    validate(req)
+    validate(req, OWN_JOB)   # a missing --job is the broker's to fill (the seat's own job)
     return req
 
 
@@ -188,9 +188,14 @@ def _check_ident(name: str, v) -> None:
         raise ProtocolError(f"field {name}: an identifier may not start with '-' or hold control characters")
 
 
-def validate(req) -> tuple[str, dict]:
+OWN_JOB = object()   # parse_cli's `own_job`: the seat side does not know its job; the broker fills it in
+
+
+def validate(req, own_job=None) -> tuple[str, dict]:
     """(command, fields) of a well-formed cli request; ProtocolError otherwise. Unknown, identity-like or
-    mistyped fields are refused, never ignored."""
+    mistyped fields are refused, never ignored. `own_job` (the broker: the seat's job from its launch record)
+    fills a missing --job of a command that takes one (a seat's first `swarm done` must just work), and a --job
+    naming another job is refused. OWN_JOB (the seat side) only lets --job be missing."""
     if not isinstance(req, dict) or req.get("v") != VERSION or req.get("kind") != "cli":
         raise ProtocolError("not a v2 cli request")
     if set(req) - {"v", "kind", "command", "fields"}:
@@ -232,7 +237,14 @@ def validate(req) -> tuple[str, dict]:
             _check_text(name, v)
         else:
             _check_ident(name, v)
-    missing = [r for r in spec.get("required", ()) if r not in fields]
+    if own_job is not None and "job" in spec["fields"]:
+        if "job" not in fields:
+            if own_job is not OWN_JOB:
+                _check_ident("job", own_job)
+                fields["job"] = own_job
+        elif own_job is not OWN_JOB and fields["job"] != own_job:
+            raise ProtocolError(f"--job {fields['job']} is not this seat's job: a seat runs its own job's commands")
+    missing = [r for r in spec.get("required", ()) if r not in fields and not (r == "job" and own_job is OWN_JOB)]
     if missing:
         raise ProtocolError(f"missing {', '.join(missing)}")
     return command, fields

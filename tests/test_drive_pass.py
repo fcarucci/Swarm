@@ -1446,6 +1446,15 @@ class PromptTests(PassCase):
                               self.seat("engineering_lead", "lead"))
         self.assertIn("Pending wake event ids: none", text)
 
+    def test_seat_prompt_gives_the_literal_hand_off_command_and_what_a_seat_may_run(self):
+        led = self.job()
+        text = prompts.render(self.board, self.cfg, led, self.action("seat"), self.seat("engineer", "eng-a"))
+        self.assertIn("`swarm done --job J --artifact <BRANCH>@<FULL SHA> --summary", text)
+        self.assertIn("no `;`, `&&`", text)
+        self.assertIn("Not `swarm ci wait`", text)
+        self.assertIn("`swarm --help`", text)
+        self.assertNotIn("Wait for CI with `swarm ci wait", text)
+
     def test_goal_judge_prompt_names_candidate_and_pinned_req(self):
         led = self.job()
         led.pinned_requirements = {"REQ.md": "b" * 40}
