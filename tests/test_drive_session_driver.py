@@ -667,6 +667,20 @@ class IdleOrchestratorEndToEnd(unittest.TestCase):
         patch.start()
         self.addCleanup(patch.stop)
 
+    def evidence(self) -> str:
+        """What a failure shows: the seats' log, the supervisor log and the runners' kept output tails."""
+        out = []
+        for p in [self.seat_log, self.home / ".local/share/swarm/supervisor/supervise.log",
+                  *sorted((self.home / ".local/share/swarm/supervisor").rglob("*.tail.txt")),
+                  *sorted((self.home / ".local/share/swarm/supervisor").glob("driver-*.json")),
+                  self.home / ".local/share/swarm/host/hook-stderr.log",
+                  self.home / ".local/share/swarm/host/receipt-failures.log"]:
+            try:
+                out.append(f"== {p.name}\n{p.read_text(errors='replace')[-3000:]}")
+            except OSError:
+                out.append(f"== {p.name}: none")
+        return "\n".join(out)
+
     def swarm_cli(self, *args):
         r = subprocess.run([str(self.launcher), *args], env=self.env, capture_output=True, text=True,
                            cwd=self.work, timeout=300)
@@ -695,8 +709,11 @@ class IdleOrchestratorEndToEnd(unittest.TestCase):
             with open_board(cfg) as b:
                 js = b.job_status("J")
             return js.status, js.verdict
-        wait_until(lambda: status()[0] != "active", timeout=240, interval=0.5)
-        self.assertEqual(status(), ("completed", "met"))
+        try:
+            wait_until(lambda: status()[0] != "active", timeout=240, interval=0.5)
+        except AssertionError:
+            self.fail(f"not terminal after 240 s: {status()}\n{self.evidence()}")
+        self.assertEqual(status(), ("completed", "met"), self.evidence())
         self.assertEqual(box["p"].wait(30), 0)       # the driver ends itself once its last job is done
         st = json.loads(settings.read_private(sd.state_name(sd.lock_name("sess-1"))))
         self.assertEqual(st["exit"], "no unfinished drive job")

@@ -233,7 +233,8 @@ class TtyPath(PersonCase):
 
     def test_the_real_ancestor_walk_sees_a_codex_or_claude_parent(self):
         fake = {10: (9, ["bash"]), 9: (8, ["codex", "exec"]), 8: (1, ["init"])}
-        with mock.patch.object(person.hosts, "_proc_parent", side_effect=lambda pid: fake.get(pid)), \
+        from swarm.supervisor import procwatch      # the walk reads procwatch.parent_of (Toolhelp32 on Windows)
+        with mock.patch.object(procwatch, "parent_of", side_effect=lambda pid: fake.get(pid)), \
                 mock.patch.object(person.os, "getppid", return_value=10):
             self.assertEqual(person._ancestor_host(), "codex")
 
