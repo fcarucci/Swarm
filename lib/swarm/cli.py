@@ -4388,6 +4388,15 @@ def _board_status(board, cfg: dict, args) -> None:
         print(term_safe(line))
 
 
+def _drive_join_judge_refused(board, cfg: dict, args) -> bool:
+    """In a drive job, `join --judge` grants nothing unless the joining session is the driver's judge seat
+    (drivegate.is_drive_judge: its launch record and receipted role). Plain jobs: never refused here."""
+    from swarm import drivegate, hooks
+    if not hooks._drive_job(cfg, args.job):
+        return False
+    return not drivegate.is_drive_judge(cfg, board, args.job, {"session_id": args.key})
+
+
 def _board_join(board, cfg: dict, args) -> int:
     """Allocate (or return) the agent's name. --judge / --verifier give agents that run outside
     Claude Code the seat the hooks give a tagged subagent: they have no hooks, so the CLI is how
@@ -4396,6 +4405,10 @@ def _board_join(board, cfg: dict, args) -> int:
     if board.active_agent_name(args.key) is None:   # allocate_name never revives a stuck close
         print(f"refused: {name} ({args.key}) was closed as stuck by the swarm supervisor and "
               f"can't rejoin: its replacement does the work", file=sys.stderr)
+        return 1
+    if args.judge and _drive_join_judge_refused(board, cfg, args):
+        print(f"refused: job {args.job} is driven: only the driver's judge seat is its judge (a join "
+              f"cannot claim it)", file=sys.stderr)
         return 1
     if args.judge and not board.take_judge_seat(args.key, args.job):
         js = board.job_status(args.job)

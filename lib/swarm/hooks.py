@@ -1474,18 +1474,11 @@ def _enrol_resumed(board, agent_id: str, resume: dict, payload: dict, cfg: dict)
 
 def _drive_judge_flag(board, cfg: dict, agent_id: str, job: str, payload: dict, resume: dict) -> None:
     """A driver-launched seat whose ledger-authorized role is judge takes the job's judge seat (QA bug 4): the
-    flag comes from the host-private launch (the intent the run file names) and the seat's receipted role,
-    never from a tag in the prompt. Never raises: a seat that is not a judge stays a worker."""
+    flag comes from the host-private launch and the seat's receipted role (drivegate.is_drive_judge), never
+    from a tag in the prompt. Never raises: a seat that is not a judge stays a worker."""
     try:
         from swarm import drivegate
-        from swarm.board.autoinit import store_key
-        from swarm.supervisor import drive_authz
-        bk = store_key(cfg)
-        ctx = drivegate.seat_context(cfg, bk, payload, resume=resume)
-        if ctx is None or ctx.led is None or not ctx.seat:
-            return
-        row = board.seat(job, ctx.led.generation, ctx.seat)
-        if row is not None and drive_authz.receipted_role(bk, ctx.led, row) == "judge":
+        if drivegate.is_drive_judge(cfg, board, job, payload, resume=resume):
             board.take_judge_seat(agent_id, job)
     except Exception as exc:
         _log_error("drive judge", agent_id, exc)

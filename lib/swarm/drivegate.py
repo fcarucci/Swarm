@@ -1127,3 +1127,20 @@ def control_request_receipt(cfg: dict, payload: dict, ns, rid: int, rev: int, *,
         return False
     kick()
     return True
+
+
+def is_drive_judge(cfg: dict, board, job: str, payload: dict, resume=None) -> bool:
+    """Whether the session of `payload` is the driver's judge seat of `job`: its host-private launch (the
+    resume marker and run file name the seat's intent) and the seat row's receipted role say "judge". A
+    prompt tag, a board row or a `join --judge` never decide it (QA bug 4). Fails closed."""
+    try:
+        from swarm.board.autoinit import store_key
+        from swarm.supervisor import drive_authz
+        bk = store_key(cfg)
+        ctx = seat_context(cfg, bk, payload, resume=resume)
+        if ctx is None or ctx.led is None or not ctx.seat or ctx.job != job:
+            return False
+        row = board.seat(job, ctx.led.generation, ctx.seat)
+        return row is not None and drive_authz.receipted_role(bk, ctx.led, row) == "judge"
+    except Exception:
+        return False

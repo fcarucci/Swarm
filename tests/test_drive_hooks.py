@@ -969,3 +969,45 @@ class DriveJobDetection(unittest.TestCase):
         import inspect
         self.assertIn("_drive_judge_flag(board, cfg, agent_id, job, payload, resume)", inspect.getsource(hooks._enrol_resumed))
         self.assertIn("_goal_roles(board, agent_id, job, payload, marker, prompt, cfg)", inspect.getsource(hooks))
+
+
+class DriveJoinJudge(Env):
+    """`swarm join --judge` in a drive job grants nothing unless the joining session is the driver's judge
+    seat (the same rule as bug 4, by the CLI door); plain jobs keep today's behaviour."""
+
+    def setUp(self):
+        super().setUp()
+        rc, _, err = self.cli("activate", "--job", "J", "--session", "orchestrator-sess")
+        self.assertEqual(rc, 0, err)
+
+    def join(self):
+        from swarm import cli
+        args = types.SimpleNamespace(key="k-judge", job="J", role=None, judge=True, verifier=False, title=None)
+        with self.board() as b:
+            rc = cli._board_join(b, cli.load_config(self.config), args)
+            js = b.job_status("J")
+        return rc, js.judge
+
+    def test_plain_job_join_judge_still_takes_the_seat(self):
+        with mock.patch.object(hooks, "_drive_job", return_value=False):
+            rc, judge = self.join()
+        self.assertEqual(rc, 0)
+        self.assertIsNotNone(judge)
+
+    def test_drive_job_join_judge_is_refused_for_a_non_judge_session(self):
+        with mock.patch.object(hooks, "_drive_job", return_value=True), \
+                mock.patch.object(drivegate, "is_drive_judge", return_value=False):
+            rc, judge = self.join()
+        self.assertEqual(rc, 1)
+        self.assertIsNone(judge)
+
+    def test_drive_job_join_judge_works_for_the_drivers_judge_seat(self):
+        with mock.patch.object(hooks, "_drive_job", return_value=True), \
+                mock.patch.object(drivegate, "is_drive_judge", return_value=True):
+            rc, judge = self.join()
+        self.assertEqual(rc, 0)
+        self.assertIsNotNone(judge)
+
+    def test_is_drive_judge_fails_closed(self):
+        with self.board() as b, mock.patch.object(drivegate, "seat_context", side_effect=OSError("x")):
+            self.assertFalse(drivegate.is_drive_judge({}, b, "J", {"session_id": "s"}))
