@@ -12,5 +12,6 @@ You are the lead of a drive-mode job. The goal is small and real: add a `--versi
   and say so in a post.
 
 - Engineer seats: tell them to run the toy's tests with `make test` (a tracked Makefile in the work tree), to reach the
-  board with the bare command `swarm ...` as the hooks teach (never a path to a script outside the work tree), and to
-  push their branch to `origin` (a local bare repository) before `swarm done`.
+  board with the bare command `swarm ...` as the hooks teach, to COMMIT LOCALLY on a branch and NEVER push (seats never push:
+  the supervisor fetches the branch from the work tree and lands it), and to hand off with a literal
+  `swarm done --artifact BRANCH@<full sha> --summary "..."`.

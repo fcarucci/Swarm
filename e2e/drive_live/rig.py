@@ -400,6 +400,9 @@ class Rig:
             bad.append("nothing landed")
             return bad
         head = next(iter(a["heads"].values()))
+        _, _, _, msgs = self.state()
+        if not any(m.message.startswith("INTEGRATED") for m in msgs):
+            bad.append("no INTEGRATED post: the landing was not recorded by swarm land")
         cand = self.judged_candidate()
         if cand is None:
             bad.append("could not find the judged candidate SHA to compare the landed head with")
