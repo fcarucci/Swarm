@@ -441,21 +441,25 @@ class Driver:
         """Sleep until a reason or the timeout; changes that come within MIN_GAP of the previous pass are
         coalesced into one pass (review rr5: a burst of touches is one pass, latency stays under a second)."""
         reasons = self.hub.wait(timeout)
-        if reasons == {wake.CHANGE}:
-            left = MIN_GAP - (time.monotonic() - self.last_pass)
-            if left > 0:
-                reasons |= self.hub.wait(left)
+        until = self.last_pass + MIN_GAP
+        while reasons <= {wake.CHANGE}:          # only changes so far: gather them until the gap has passed
+            left = until - time.monotonic()
+            if left <= 0:
+                break
+            reasons |= self.hub.wait(left)
         return reasons
 
     def run(self) -> str:
         self.setup()
         try:
             while True:
-                why = self.why_stop()
+                why = self.stop_reason()
+                jobs = self.jobs() if why is None else []      # read once per turn
+                if why is None and jobs == []:
+                    why = "no unfinished drive job"
                 if why is not None:
                     self.exit_reason = why
                     return why
-                jobs = self.jobs()
                 if jobs is None:                 # the ledgers do not read now: retry, with backoff
                     _log(f"ledgers unreadable ({self.session or 'drive run'}); retrying")
                     reasons = self.wait(self.pending.next(False))
