@@ -760,7 +760,40 @@ class WakeMapping(unittest.TestCase):
         self.assertEqual(got, {})
 
 
-class MemorySnapshot(SnapshotCase, unittest.TestCase):
+class GoalNeedsLandedWorkOnTheBoard:
+    """E-land on int/rc 32d21ea6: an engineer's DONE never receipted leaves no hand-off group, and the goal step
+    read "no groups" as "all integrated" (a coding job reached goal MET with nothing landed). Mixed into
+    SnapshotCase: every backend."""
+
+    def goal_prompts(self, led=None, recipe="coding"):
+        from swarm.supervisor.driver_model import next_actions
+        from test_drive_next_actions import ARTIFEXT_CFG, CFG
+        acts = next_actions(self.read(led), CFG if recipe == "coding" else ARTIFEXT_CFG)
+        return [x.prompt_kind for x in acts]
+
+    def test_unreceipted_done_is_no_group_and_no_goal_judge_for_a_coding_job(self):
+        self.done("feat/a@" + SHA1, receipted=False)
+        self.goal_ready()
+        self.assertEqual(self.read().handoffs, [])
+        self.assertNotIn("goal", self.goal_prompts())
+
+    def test_artifact_job_with_no_groups_is_unaffected(self):
+        self.goal_ready()
+        self.assertIn("goal", self.goal_prompts(recipe="artifact"))
+
+    def test_goal_judge_launches_once_every_group_is_integrated(self):
+        art = "feat/a@" + SHA1
+        self.done(art)
+        self.artifact_verdict(art, verdict="met", open_count=0)
+        self.goal_ready()
+        self.assertNotIn("goal", self.goal_prompts(), "a receipted but unlanded group is not ready")
+        dest = {"https://example.test/r.git": {"state": "verified", "sha": SHA1}}
+        self.led.integrated = {"feat/a": {"landed": SHA1, "land_id": 7, "land_rev": 1, "destinations": dest}}
+        self.receipt("land", 7, 1, {"destinations": dest}, seat=None)
+        self.assertIn("goal", self.goal_prompts())
+
+
+class MemorySnapshot(GoalNeedsLandedWorkOnTheBoard, SnapshotCase, unittest.TestCase):
     harness_factory = staticmethod(drive_backends()["memory"])
 
 
