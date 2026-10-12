@@ -291,6 +291,14 @@ codex_usd_per_mtok = 10             # Codex has no cost report: tokens x this ra
 # record, never read from this file; recipe = "coding" with review_role = "reviewer" is the default.
 # Models by role: these are the shipped defaults. Build staffing is cheap engineers, strict reviewers.
 allowed_models = ["haiku", "sonnet", "opus"]   # the models a job may pick (activation refuses others)
+# Seat credential isolation (Linux): every drive seat runs in its own user/mount/pid namespaces where the
+# person's ~/.ssh, gh config, git credential stores, ~/.netrc, other secret dirs and the jobs' pinned
+# credentials are covered; only the supervisor lands. A host that cannot isolate a seat does not start it.
+seat_isolation = "required"         # or "off": seats run with the person's credentials (doctor warns)
+# seat_git_name = "..."              # the seats' git identity (default: the person's global one)
+# seat_git_email = "..."
+# seat_cover_paths = ["~/vault"]     # more paths no seat may read
+# seat_ssh_key = "/home/me/.local/state/swarm/seat-keys/ro-deploy"   # a READ-ONLY deploy key for fetching a private repo
 # credential_helpers = ["gh auth git-credential"]   # planned, wired by `swarm land`: credential helpers a pinned `--credential` may name (absolute path pinned at activation)
 
 [drive.models]

@@ -791,7 +791,20 @@ def start(cfg: dict, run: dict, popen=subprocess.Popen) -> int:
     return proc.pid
 
 
-def _child_env(token: str | None = None, tag: str | None = None, pass_env=()) -> dict:
+def _seat_argv(cfg: dict, run: dict) -> tuple[list, str | None]:
+    """The argv the scope runs: a drive seat's (run["launch_id"]) wrapped in its credential jail
+    (seathome.wrap), any other replacement's as it is. (argv, why refused)."""
+    argv = list(run["argv"])
+    if not run.get("launch_id"):
+        return argv, None
+    from swarm.supervisor import seathome
+    try:
+        return seathome.wrap(cfg, argv, job=run["job"], seat=str(run.get("seat") or run["name"])), None
+    except (seathome.SeatIsolationError, OSError) as exc:
+        return argv, str(exc)
+
+
+def _child_env(token: str | None = None, tag: str | None = None, pass_env=(), drive: bool = False) -> dict:
     """The replacement's environment: an allowlist of ours (_allowed_env) plus the names in
     [supervise] pass_env, never what would make it look like it runs inside another Claude or
     Codex session (tests/support.HOST_ENV); plus its resume token if any and its run tag (RUN_ENV:
@@ -800,6 +813,9 @@ def _child_env(token: str | None = None, tag: str | None = None, pass_env=()) ->
     drop = ("CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDECODE", "CLAUDE_PLUGIN_ROOT",
             "CODEX_SESSION_ID", "CODEX_THREAD_ID", "PLUGIN_ROOT", "SWARM_HOST", TOKEN_ENV, RUN_ENV)
     env = {k: v for k, v in _allowed_env(os.environ, pass_env).items() if k not in drop}
+    if drive:   # a drive seat never gets a push credential variable, whatever pass_env names (Task 20)
+        from swarm import seatjail
+        env = seatjail.scrub_env(env)   # XDG_RUNTIME_DIR comes back for systemd-run (manager_env); the jail drops it
     if token:
         env[TOKEN_ENV] = token
     if tag:
@@ -1065,14 +1081,23 @@ def _execute(cfg: dict, run: dict, *, popen, clock, sleep, poll: float, board_ev
         _keep_output_tail(rid, run["board"])
         finish(cfg, run, "refused")
         return "refused"
+    seat_argv, jail_refused = _seat_argv(cfg, run)   # Task 20: a drive seat runs without push credentials
+    if jail_refused:
+        os.close(wfd)
+        log(f"restart {rid} of {run['name']} on {run['job']} not launched: {jail_refused}")
+        run.update(exited=True, outcome="refused", agent_key=run.get("session_id"), refused_reason=jail_refused)
+        write_run(run)
+        _keep_output_tail(rid, run["board"])
+        finish(cfg, run, "refused")
+        return "refused"
     import secrets
     run["run_tag"] = f"r{rid}-{secrets.token_hex(8)}"
     run.update(unit=f"swarm-r{rid}-{secrets.token_hex(4)}.scope", unit_seen_active=False,
                launch_epoch=time.time())
     argv = [SYSTEMD_RUN, "--user", "--scope", f"--unit={run['unit']}", "--collect", "--quiet", "--",
-            *run["argv"]]
+            *seat_argv]
     from swarm.supervisor.settings import settings
-    env = _manager_env(_child_env(token, run["run_tag"], settings(cfg)["pass_env"]))
+    env = _manager_env(_child_env(token, run["run_tag"], settings(cfg)["pass_env"], drive=bool(run.get("launch_id"))))
     write_run(run)   # the unit name is known before anything runs in it
     fd_err = _fresh_output(f"r{rid}.err", run["board"])
     try:
