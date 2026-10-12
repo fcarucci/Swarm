@@ -397,6 +397,24 @@ class SnapshotCase:
                 self.b.set_job_data("J", k, v)
         self.assertEqual(self.read().goal_verdict.receipt_id, rec["message_id"])
 
+    def test_a_recorded_unreachable_ruling_closes_the_job_and_launches_nothing(self):
+        """QA release blocker: a ruling verdict stored by the verdict CLI never terminalized the job, so seats kept
+        relaunching. Read as stored, it is the goal verdict, and the next actions are the close alone."""
+        import datetime as _dt
+        from swarm.supervisor import driver_model as _dm
+        rec = self.record(None, verdict="unreachable", scope="ruling", open_count=None, candidate=SHA1)
+        self.publish(rec)
+        raw = review.verdict_data(None, None, "unreachable", rec.get("reason", "no"), None, "judge",
+                                  _dt.datetime.now(_dt.timezone.utc), scope="ruling", generation=1,
+                                  candidate=SHA1, req=rec.get("req"), message_id=rec["message_id"])
+        for k, v in json.loads(raw).items():
+            if k.startswith("drive.verdict."):
+                self.b.set_job_data("J", k, v)
+        snap = self.read()
+        self.assertEqual((snap.goal_verdict.verdict, snap.goal_verdict.scope), ("unreachable", "ruling"))
+        acts = _dm.next_actions(snap, {})
+        self.assertEqual([(a.kind, a.reason) for a in acts], [("close", "unreachable")])
+
     def test_goal_verdict_under_another_records_key_is_refused(self):
         rec = self.record(None, verdict="met", scope="goal", open_count=None, candidate=SHA1)
         self.publish(rec)
