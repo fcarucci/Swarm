@@ -79,7 +79,63 @@ def _under(path: str, root: str) -> bool:
     return path == root or path.startswith(root.rstrip("/") + "/")
 
 
-_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+_O_BINARY = getattr(os, "O_BINARY", 0)
+_DIR_FLAGS = os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC
+# Descriptor-relative file access (Linux, macOS). Windows has no dir_fd: the broker then works by path, refusing a
+# link it sees at each step (best effort: the seat there is not jailed anyway).
+FD_MODE = bool(_O_DIRECTORY and _O_NOFOLLOW and all(f in os.supports_dir_fd for f in (os.open, os.rename, os.unlink))
+               and os.listdir in os.supports_fd and os.scandir in os.supports_fd)
+
+
+def _no_link(path: str) -> None:
+    if os.path.islink(path):
+        import errno
+        raise OSError(errno.ELOOP, "a link is never followed", path)
+
+
+def _opendir(name: str, parent=None):
+    """A directory handle: a descriptor opened without following a link (FD_MODE), else its checked path."""
+    if FD_MODE:
+        return os.open(name, _DIR_FLAGS) if parent is None else os.open(name, _DIR_FLAGS, dir_fd=parent)
+    full = name if parent is None else os.path.join(parent, name)
+    _no_link(full)
+    if not os.path.isdir(full):
+        raise NotADirectoryError(full)
+    return full
+
+
+def _closedir(d) -> None:
+    if FD_MODE:
+        os.close(d)
+
+
+def _open_in(d, name: str, flags: int, mode: int = 0o600) -> int:
+    flags |= _O_CLOEXEC | _O_BINARY
+    if FD_MODE:
+        return os.open(name, flags | _O_NOFOLLOW, mode, dir_fd=d)
+    full = os.path.join(d, name)
+    if os.path.lexists(full):
+        _no_link(full)
+    return os.open(full, flags, mode)
+
+
+def _rename_in(d, src: str, dst: str) -> None:
+    if FD_MODE:
+        os.rename(src, dst, src_dir_fd=d, dst_dir_fd=d)
+    else:
+        _no_link(os.path.join(d, src))
+        os.rename(os.path.join(d, src), os.path.join(d, dst))
+
+
+def _unlink_in(d, name: str) -> None:
+    if FD_MODE:
+        os.unlink(name, dir_fd=d)
+    else:
+        os.unlink(os.path.join(d, name))
 
 
 def _read_fd(fd: int, limit: int) -> bytes | None:
@@ -103,19 +159,19 @@ def read_under(root: str, rel: str, limit: int) -> bytes | None:
     if not parts or ".." in parts:
         return None
     try:
-        fd = os.open(root, _DIR_FLAGS)
+        d = _opendir(root)
     except OSError:
         return None
     try:
         for part in parts[:-1]:
-            nfd = os.open(part, _DIR_FLAGS, dir_fd=fd)
-            os.close(fd)
-            fd = nfd
-        leaf = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=fd)
+            nd = _opendir(part, d)
+            _closedir(d)
+            d = nd
+        leaf = _open_in(d, parts[-1], os.O_RDONLY | _O_NONBLOCK)
     except OSError:
-        os.close(fd)
+        _closedir(d)
         return None
-    os.close(fd)
+    _closedir(d)
     try:
         return _read_fd(leaf, limit)
     finally:
@@ -137,9 +193,9 @@ def _find_transcript(seat_dir: str, harness: str, key: str | None) -> str | None
     base, depth, want = _transcript_shape(harness, key)
     found: list = []
 
-    def walk(fd: int, rel: list, left: int) -> None:
+    def walk(d, rel: list, left: int) -> None:
         try:
-            with os.scandir(fd) as it:
+            with os.scandir(d) as it:
                 entries = [(e.name, e.is_dir(follow_symlinks=False), e.is_file(follow_symlinks=False)) for e in it]
         except OSError:
             return
@@ -149,27 +205,27 @@ def _find_transcript(seat_dir: str, harness: str, key: str | None) -> str | None
                     found.append("/".join([*rel, name]))
             elif is_dir:
                 try:
-                    sub = os.open(name, _DIR_FLAGS, dir_fd=fd)
+                    sub = _opendir(name, d)
                 except OSError:
                     continue
                 try:
                     walk(sub, [*rel, name], left - 1)
                 finally:
-                    os.close(sub)
+                    _closedir(sub)
     try:
-        fd = os.open(seat_dir, _DIR_FLAGS)
+        d = _opendir(seat_dir)
     except OSError:
         return None
     try:
         for part in base:
-            nfd = os.open(part, _DIR_FLAGS, dir_fd=fd)
-            os.close(fd)
-            fd = nfd
-        walk(fd, list(base), depth)
+            nd = _opendir(part, d)
+            _closedir(d)
+            d = nd
+        walk(d, list(base), depth)
     except OSError:
         return None
     finally:
-        os.close(fd)
+        _closedir(d)
     return sorted(found)[0] if found else None
 
 
@@ -300,7 +356,7 @@ class SeatBroker:
         if token:
             env[person.BROKER_TOKEN_ENV] = token
         try:
-            res = self._run(cmd, input=stdin, capture_output=True, cwd="/", env=env, timeout=timeout)
+            res = self._run(cmd, input=stdin, capture_output=True, cwd=os.path.abspath(os.sep), env=env, timeout=timeout)
         finally:
             self._unattest(name)
         return res.returncode, res.stdout or b"", res.stderr or b""
@@ -378,16 +434,16 @@ class SeatBroker:
 
     # --- the loop ---------------------------------------------------------------------------------
 
-    def _open_dir(self) -> int:
-        fd = os.open(self.dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-        if os.fstat(fd).st_uid != os.getuid():
-            os.close(fd)
+    def _open_dir(self):
+        d = _opendir(self.dir)
+        if FD_MODE and hasattr(os, "getuid") and os.fstat(d).st_uid != os.getuid():
+            _closedir(d)
             raise OSError("the broker directory is not this user's")
-        return fd
+        return d
 
-    def _read(self, d: int, name: str) -> bytes | None:
+    def _read(self, d, name: str) -> bytes | None:
         try:
-            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=d)
+            fd = _open_in(d, name, os.O_RDONLY | _O_NONBLOCK)
         except OSError:
             return None
         try:
@@ -403,15 +459,15 @@ class SeatBroker:
                            "err": base64.b64encode(err[:OUT_MAX]).decode()}).encode()
         tmp = f"{rid}.answer"
         try:
-            os.unlink(tmp, dir_fd=d)
+            _unlink_in(d, tmp)
         except FileNotFoundError:
             pass
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=d)
+        fd = _open_in(d, tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
             os.write(fd, body)
         finally:
             os.close(fd)
-        os.rename(tmp, f"{rid}.resp", src_dir_fd=d, dst_dir_fd=d)
+        _rename_in(d, tmp, f"{rid}.resp")
 
     def handle(self, d: int, rid: str, req) -> None:
         from swarm import seatbroker_client, seatproto
@@ -452,12 +508,12 @@ class SeatBroker:
             if not re.fullmatch(r"[0-9a-f]{32}", rid):
                 continue
             try:
-                os.rename(name, f"{rid}.work", src_dir_fd=d, dst_dir_fd=d)
+                _rename_in(d, name, f"{rid}.work")
             except OSError:
                 continue
             raw = self._read(d, f"{rid}.work")
             try:
-                os.unlink(f"{rid}.work", dir_fd=d)
+                _unlink_in(d, f"{rid}.work")
             except OSError:
                 pass
             try:
@@ -495,7 +551,7 @@ class SeatBroker:
         finally:
             self._hooks.shutdown(wait=True, cancel_futures=True)
             self._cli.shutdown(wait=True, cancel_futures=True)
-            os.close(d)
+            _closedir(d)
 
     def start(self) -> "SeatBroker":
         self._thread = threading.Thread(target=self._loop, name="seat-broker", daemon=True)

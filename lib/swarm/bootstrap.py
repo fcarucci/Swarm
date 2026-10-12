@@ -1881,6 +1881,10 @@ def _seat_isolation_check(cfg: dict, probe=None) -> Check:
     if ok:
         return Check("seat isolation", True, f"drive seats: {detail}")
     if ok is None:
+        if detail.startswith("best-effort"):
+            return Check("seat isolation", None, detail,
+                         "drive seats here get no filesystem jail (Linux only): the seat env has no credential, "
+                         "helper or agent, but files of yours stay readable to them")
         if detail.startswith("off"):
             return Check("seat isolation", None, f"drive seats: {detail}",
                          "a person runs `swarm supervise seat-isolation on` to jail every drive seat again")
@@ -2052,7 +2056,10 @@ def drive_checks(cfg: dict, *, run=None, which=None, now=None, platform: str | N
     if not relevant and not (linux and bk is not None and _board_store_exists(cfg)):
         return []
     if not linux:
-        return [Check("drive mode", True, "drive mode unavailable: no supervisor timer")]
+        from swarm.supervisor import seathome
+        note = seathome.BEST_EFFORT_NOTE.format(platform=platform or sys.platform)
+        return [Check("drive mode", True, "drive mode unavailable: no supervisor timer"),
+                _seat_isolation_check(cfg, probe=lambda c: (None, note))]
     jobs = [x for x in found if isinstance(x, ledger.Ledger)]
     has_jobs = bool(found) or unreadable is not None
     out: list[Check] = []

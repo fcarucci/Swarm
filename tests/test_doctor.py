@@ -765,9 +765,12 @@ class DriveDoctorTests(unittest.TestCase):
         self.write_cfg("[drive]\nmax_cost_usd = 10\n")
         for plat in ("darwin", "win32"):
             checks = self.run_checks(platform=plat)
-            self.assertEqual(list(checks), ["drive mode"])
+            self.assertEqual(list(checks), ["drive mode", "seat isolation"])
             self.assertTrue(checks["drive mode"].ok)
             self.assertEqual(checks["drive mode"].detail, "drive mode unavailable: no supervisor timer")
+            # Task 20: no filesystem jail there; seats are best-effort, and doctor says so (WARN)
+            self.assertIsNone(checks["seat isolation"].ok)
+            self.assertEqual(checks["seat isolation"].detail, f"best-effort on {plat} (no filesystem jail)")
 
     # ---- git
     def test_git_below_2_40_fails_with_drive_jobs(self):
