@@ -11,7 +11,7 @@ Where each record lives (the carriers written by the board, hook, goal-ready and
 - review: a `REVIEW <artifact> VERIFIED|CHANGES <report>` message; record id = message id, rev 1.
 - verdict (artifact, goal, ruling): a `VERDICT <verdict>: <reason>` message; record id = its message id, rev 1.
   The judgment (artifact, scope, open, progress, candidate, req, message_id) is job data: the artifact's
-  `pipeline.verdict.<hash>` record, and the goal or ruling record at `drive.verdict.<generation>.<scope>`. A record
+  `pipeline.verdict.<hash>` record, and the goal or ruling records at `drive.verdict.<generation>.<scope>.<digest>`. A record
   binds through its own `message_id`, and the receipt for that message must bind its verdict fields and its artifact
   (for goal and ruling verdicts, the candidate). Text is not compared.
 - goal_ready: a `GOAL-READY <candidate> req=<digest>` message; record id = message id. `req` must equal the digest
@@ -110,6 +110,8 @@ class _Receipts:
             return None
         found = receipts.find(self.board_key, self.job, kind, str(record_id), rev=rev,
                               incarnation=self.incarnation, generation=self.generation, now=self.now)
+        if row is None:     # the caller binds the receipt's content itself (a land journal: _landed)
+            return found
         return found if found is not None and receipts.matches(found, row) else None
 
 
@@ -183,11 +185,19 @@ def _blocked(msgs: list, handoffs: list[dm.HandoffView], rc: _Receipts) -> dict[
 
 
 def _landed(entry: dict, rc: _Receipts) -> str | None:
-    """The sha of a group's landing, only from a land receipt whose every destination is verified at that sha."""
-    row = {"kind": "land", "id": str(entry.get("land_id")), "rev": entry.get("land_rev", 1),
-           "destinations": entry.get("destinations")}
-    found = rc.get("land", entry.get("land_id"), entry.get("land_rev", 1), row)
-    if found is None or not found.destinations:
+    """The sha of a group's landing, only from a land receipt whose every destination is verified at that sha.
+    The ledger entry names the receipt (`land_id`, as swarm.land writes it: the request's message id, a digit
+    string; `land_rev`); the destinations are the receipt's own, bound by its content digest (as
+    land.read_journal reads them), never the ledger's."""
+    lid, rev = entry.get("land_id"), entry.get("land_rev", 1)
+    if isinstance(lid, str) and re.fullmatch(r"[0-9]{1,18}", lid):
+        lid = int(lid)
+    if type(lid) is not int or type(rev) is not int:
+        return None
+    found = rc.get("land", lid, rev, None)
+    if found is None or not isinstance(found.destinations, dict) or not found.destinations:
+        return None
+    if found.content_sha != receipts.content_sha("land", {"destinations": found.destinations}):
         return None
     sha = entry.get("landed")
     verified = all(isinstance(d, dict) and d.get("state") == "verified" and d.get("sha") == sha
@@ -252,13 +262,18 @@ def _bind_verdicts(records: list[dict], msgs: list, rc: _Receipts) -> list[dm.Ve
 def _verdicts(board: Any, data: dict, job: str, gen: int, msgs: list,
               rc: _Receipts) -> tuple[dict[str, dm.VerdictView], dm.VerdictView | None]:
     """The receipted artifact verdicts, by artifact, and the newest receipted goal or ruling verdict of this
-    generation (the record at drive.verdict.<gen>.<scope>, whose scope must be that key's)."""
+    generation (the records at drive.verdict.<gen>.<scope>.<digest of candidate and req>, each under its own key)."""
     artifacts = {v.artifact: v for v in _bind_verdicts(list(review.artifact_verdicts(board, job).values()), msgs, rc)}
     goal_records = []
     for scope in ("goal", "ruling"):
-        rec = _json_value(data, f"drive.verdict.{gen}.{scope}")
-        if rec is not None and rec.get("scope") == scope and rec.get("generation") == gen:
-            goal_records.append(rec)
+        # review.verdict_data stores one record per (generation, scope, candidate, req) under
+        # review.drive_verdict_key(): `drive.verdict.<gen>.<scope>.<32 hex>`; a record must sit under its own key
+        prefix = f"drive.verdict.{gen}.{scope}."
+        for key in sorted(k for k in data if k.startswith(prefix) and re.fullmatch(r"[0-9a-f]{32}", k[len(prefix):])):
+            rec = _json_value(data, key)
+            if (rec is not None and rec.get("scope") == scope and rec.get("generation") == gen
+                    and key == review.drive_verdict_key(gen, scope, rec.get("candidate"), rec.get("req"))):
+                goal_records.append(rec)
     goals = _bind_verdicts(goal_records, msgs, rc)
     return artifacts, (max(goals, key=lambda v: v.receipt_id) if goals else None)
 

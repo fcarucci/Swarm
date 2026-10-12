@@ -82,6 +82,38 @@ class RecordFormat(DriveCase):
         self.assertNotEqual(drivegate.submitted_argv(ns), drivegate.submitted_argv(other))
 
 
+
+class LandReceipts(DriveCase):
+    """QA live-met: an integrator seat's `swarm land` printed `kind=post` and got no receipt, so the driver never
+    saw a receipted LAND-REQUEST and nothing landed. Its LAND-REQUEST post is receipted like a post, from the
+    integrator seat only."""
+    SEAT = "integrator-feat-a-00000000"
+    CMD = f"swarm land --job J --artifact {ART}"
+
+    def test_land_from_the_integrator_seat_writes_a_post_receipt_the_driver_finds(self):
+        from swarm import land
+        sid, _ = self.launch_seat(self.SEAT, role="integrator", kind="integrate")
+        rid = self.post_as(sid, land.request_text(ART))
+        self.assertTrue(self.post(sid, self.CMD, rec("post", rid)))
+        r = self.receipt("post", rid)
+        self.assertEqual((r.seat, r.kind), (self.SEAT, "post"))
+        self.assertTrue(receipts.matches(r, {"kind": "post", "id": str(rid), "rev": 1, "to": None,
+                                             "body": land.request_text(ART)}))
+
+    def test_land_naming_another_artifact_or_from_a_non_integrator_gets_no_receipt(self):
+        from swarm import land
+        sid, _ = self.launch_seat(self.SEAT, role="integrator", kind="integrate")
+        rid = self.post_as(sid, land.request_text("feat/a@" + "c" * 40))
+        self.assertFalse(self.post(sid, self.CMD, rec("post", rid)))
+        eng, _ = self.launch_seat("eng-a")
+        rid = self.post_as(eng, land.request_text(ART))
+        self.assertFalse(self.post(eng, self.CMD, rec("post", rid)))
+        self.assertIsNone(self.receipt("post", rid))
+
+    def test_land_hosts_records_nothing(self):
+        sid, _ = self.launch_seat(self.SEAT, role="integrator", kind="integrate")
+        self.assertFalse(self.post(sid, "swarm land hosts add git@h:o/r.git", rec("post", 1)))
+
 class DoneReceipts(DriveCase):
     CMD = f"swarm done --job J --artifact {ART} --summary x"
 

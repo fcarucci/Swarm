@@ -323,6 +323,16 @@ class ViewCliTests(Env):
         self.assertEqual((rc, out.strip()), (0, name), err)
         self.assertEqual(len(self.rows()), 1)
 
+    def test_review_runs_with_the_callers_own_key(self):
+        """QA bug 5: a driver-launched reviewer never learns its key; the hook gives `swarm review` its own."""
+        self.member()
+        self.assertEqual(self.rewritten("/x/bin/swarm review --job J --artifact b@x VERIFIED --report r.md"),
+                         "/x/bin/swarm review --key agent-1 --job J --artifact b@x VERIFIED --report r.md")
+        self.assertEqual(self.rewritten("swarm review --job J --key someone-else --artifact b VERIFIED --report r"),
+                         "swarm review --job J --key agent-1 --artifact b VERIFIED --report r")
+        self.assertIsNone(self.rewritten("swarm review --job J --key agent-1 --artifact b VERIFIED --report r"))
+        self.assertIsNone(self.rewritten("swarm review --job OTHER --artifact b VERIFIED --report r"))
+
     def test_join_with_the_agents_own_key_is_left_alone(self):
         self.member()
         self.assertIsNone(self.rewritten("swarm join --job J --key agent-1"))

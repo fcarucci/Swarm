@@ -449,7 +449,6 @@ class LandTests(PassCase):
         from swarm import land as real
         @dataclasses.dataclass
         class Env(real.LandEnv):
-            left: float = 0.0
             activation_heads: dict = dataclasses.field(default_factory=dict)
             config_dirs: dict = dataclasses.field(default_factory=dict)
         led = self.job()
@@ -458,7 +457,7 @@ class LandTests(PassCase):
         with mock.patch.object(real, "LandEnv", Env):
             env = driver._land_env(self.cfg, led, owner, SimpleNamespace(verdicts={}), print,
                                    time.monotonic() + 12, self.mods)
-        self.assertTrue(0 < env.left <= 12)
+        self.assertTrue(0 < env.left() <= 12)
         self.assertEqual((env.activation_heads, env.config_dirs), ({"u": "b" * 40}, {"u": "/gh"}))
 
     def test_left_is_the_remaining_job_slot(self):
@@ -470,7 +469,21 @@ class LandTests(PassCase):
         owner = SimpleNamespace(owner={"remotes": {}})
         env = driver._land_env(self.cfg, led, owner, SimpleNamespace(verdicts={}), print,
                                time.monotonic() + 12, self.mods)
-        self.assertTrue(0 < env.left <= 12)
+        self.assertTrue(callable(env.left))   # land._budget calls env.left() before each network step (QA live-met)
+        self.assertTrue(0 < env.left() <= 12)
+
+    def test_a_team_evidence_command_checks_ci_and_a_team_repository_names_the_ci_repo(self):
+        led = self.job()
+        owner = SimpleNamespace(owner={"remotes": {"origin": "file:///srv/hub/origin.git"}})
+        seen = []
+        self.land.ci_status_evidence = lambda t: (lambda sha, timeout=None: seen.append((t, sha)) or "green")
+        self.land.team_ci = lambda cp: {"kind": "none", "evidence_command": "check {sha}"}
+        env = driver._land_env(self.cfg, led, owner, SimpleNamespace(verdicts={}), print, time.monotonic() + 5,
+                               self.mods, "/cfg/config.toml")
+        self.assertEqual((env.ci_status("a" * 40), seen), ("green", [("check {sha}", "a" * 40)]))
+        self.land.team_ci = lambda cp: {"kind": "github", "repository": "o/r"}
+        driver._land_env(self.cfg, led, owner, SimpleNamespace(verdicts={}), print, time.monotonic() + 5, self.mods)
+        self.assertEqual(self.land.repo, "o/r")
 
     def test_unknown_env_fields_are_left_out_not_fatal(self):
         led = self.job()

@@ -492,7 +492,7 @@ def record_of(payload: dict):
 
 _SEAT_RECORD_SUBS = ("request", "ack", "release", "cancel")
 _RECORD_SUBS = ("done", "review", "verdict", "post", "ask", "answer", "goal-ready", "halt", "unhalt",
-                "deactivate", "activate")
+                "deactivate", "activate", "land")
 
 
 def _sub_of(args: list[str]) -> tuple[str | None, list[str]]:
@@ -722,6 +722,16 @@ def _build(cfg, bk, board, ctx, who: Policy | None, ns, rid: int, rev: int, payl
             raise Refused("the ledger pins no requirements: the goal-ready is invalid")
         _expect_message(board, job, rid, f"GOAL-READY {ns.candidate} req={digest}", None)
         return "goal_ready", {"generation": led.generation, "candidate": ns.candidate}, argv
+    if sub == "land":
+        # The integrator seat's `swarm land`: its LAND-REQUEST post is what the driver executes (land.find_requests
+        # checks this receipt and that its seat is the integrator seat of the artifact's branch).
+        if getattr(ns, "land_cmd", None):
+            raise Refused("`land hosts` records nothing", log=False)
+        need(seat and who is not None and who.known and not who.read_only and bool(ctx.seat)
+             and ctx.seat.startswith("integrator-"), "swarm land")
+        from swarm import land
+        m = _expect_message(board, job, rid, land.request_text((ns.artifact or "").strip()), author)
+        return "post", {"to": m.to_agent, "body": m.message}, argv
     if sub == "post":
         need((seat and who is not None) or requester, "swarm post")
         if not ns.to:
@@ -898,7 +908,7 @@ def drive_kind(ns) -> str:
         if ns.scmd == "ack":
             return "ack"
         return "withdraw" if ns.scmd == "release" and getattr(ns, "withdraw_artifact", None) else "seat"
-    return {"goal-ready": "goal_ready"}.get(ns.cmd, ns.cmd)
+    return {"goal-ready": "goal_ready", "land": "post"}.get(ns.cmd, ns.cmd)   # a LAND-REQUEST is a post (land.REQUEST_KIND)
 
 
 def requester_action(ns) -> str:

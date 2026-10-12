@@ -962,15 +962,50 @@ def own_key_command(command: str, agent_id: str, job: str | None = None) -> str 
     return command if edits else None
 
 
+def own_key_review_command(command: str, agent_id: str, job: str | None = None) -> str | None:
+    """`command` with every real `swarm review` invocation made to run with the caller's own key: a call
+    with no --key gets `--key AGENT_ID` (a driver-launched reviewer never learns its key: QA bug 5), and a
+    plain --key naming another agent is replaced (it would be refused anyway). None when there is nothing
+    to change. A review for another --job than `job` is left alone."""
+    from swarm.shellguard import mask_heredocs
+    inserts, edits = [], []
+    for args in _swarm_calls(mask_heredocs(command), "review"):
+        has_key, other_job, bad = False, False, None
+        for m, (_, _, text, _) in enumerate(args):
+            value, tok = _flag_value(args, m, "--job")
+            other_job = other_job or (value is not None and job is not None and value != job)
+            value, tok = _flag_value(args, m, "--key")
+            if value is not None:
+                has_key = True
+                if tok[3] and value != agent_id:
+                    bad = (tok, text.startswith("--key="))
+        if other_job:
+            continue
+        if bad is not None:
+            tok, joined = bad
+            edits.append((tok[0] + (len("--key=") if joined else 0), tok[1]))
+        elif not has_key and args:
+            inserts.append(args[0][0])
+    if not (inserts or edits):
+        return None
+    q = shlex.quote(agent_id)
+    for a, b in sorted(edits, reverse=True):
+        command = command[:a] + q + command[b:]
+    for at in sorted(inserts, reverse=True):
+        command = command[:at] + f"--key {q} " + command[at:]
+    return command
+
+
 def own_name_verdict_command(command: str, name: str, job: str | None = None) -> str | None:
-    """`command` with every real `swarm verdict` and `swarm done` invocation made to run as `name`: a call with no
+    """`command` with every real `swarm verdict`, `swarm done` and `swarm land` invocation made to run as `name`: a call with no
     --as gets `--as NAME` (a judge needs no join and no --as: the hook knows who is calling), and
     a plain --as naming someone else is replaced (it would be refused anyway). None when there is
     nothing to change. A verdict for another --job than `job` is left alone."""
     from swarm.shellguard import mask_heredocs
     inserts, edits = [], []
-    calls = [a for sub in ("verdict", "done") for a in _swarm_calls(mask_heredocs(command), sub)]
-    for args in calls:   # a heredoc report is not shell; `done` too: a seat never needs --as (QA bug 4)
+    calls = [a for sub in ("verdict", "done", "land") for a in _swarm_calls(mask_heredocs(command), sub)
+             if not (sub == "land" and a and a[0][2] == "hosts")]   # `land hosts add` is a person's
+    for args in calls:   # a heredoc report is not shell; `done` and `land` too: a seat never needs --as (QA bugs 4, 5)
         has_as, other_job, bad = False, False, None
         for m, (_, _, text, _) in enumerate(args):
             value, tok = _flag_value(args, m, "--job")
@@ -1012,6 +1047,8 @@ def _reuse_identity(agent_id: str, job: str, payload: dict, name: str | None = N
     new = own_key_command(command, agent_id, job) if command else None
     if command and name:
         new = own_name_verdict_command(new or command, name, job) or new
+    if command:
+        new = own_key_review_command(new or command, agent_id, job) or new
     wrapped = None
     if command and name and cfg is not None and host.is_background_shell(payload):
         from swarm import bg
@@ -1022,8 +1059,9 @@ def _reuse_identity(agent_id: str, job: str, payload: dict, name: str | None = N
         _set_input_rewrite(host.input_rewrite_output({**ti, "command": wrapped or new}))
     if new:
         _out("PreToolUse", "[swarm] You already have a swarm identity (your hooks joined you): "
-                           "`swarm join` runs with it (no second name) and `swarm verdict` records "
-                           "as you. You don't need to run join or pass --as.")
+                           "`swarm join` runs with it (no second name), `swarm verdict` records "
+                           "as you and `swarm review` runs with your key. You don't need to run join "
+                           "or pass --as or --key.")
     if wrapped:
         _out("PreToolUse", "[swarm] This background command runs under `swarm bg`: the board records "
                            "it, and it is stopped if it is still running after you finish or the job "
@@ -1472,6 +1510,19 @@ def _enrol_resumed(board, agent_id: str, resume: dict, payload: dict, cfg: dict)
         _deny_replacement_spawn(board, agent_id)
 
 
+def _reuse_identity_resumed(board, agent_id: str, resume: dict, payload: dict, cfg: dict) -> None:
+    """The enrolling tool call of a resumed or driver-launched seat runs with the seat's own identity
+    too: its very first `swarm verdict`, `done` or `review` is rewritten like every later one (QA: a
+    headless seat's first call is often that command). Nothing when the enrolment refused the seat
+    (a deny is never combined with a rewrite) or it did not become active."""
+    try:
+        name = board.active_agent_name(agent_id)
+        if name:
+            _reuse_identity(agent_id, resume["job"], payload, name, cfg)
+    except Exception as exc:
+        _log_error("resumed identity", agent_id, exc)
+
+
 def _drive_judge_flag(board, cfg: dict, agent_id: str, job: str, payload: dict, resume: dict) -> None:
     """A driver-launched seat whose ledger-authorized role is judge takes the job's judge seat (QA bug 4): the
     flag comes from the host-private launch and the seat's receipted role (drivegate.is_drive_judge), never
@@ -1792,6 +1843,7 @@ def _on_event(board, event: str, agent_id: str, sid: str | None, bound: dict, un
             # and its `join --key orchestrator` is its own. Any other replacement (a worker) is refused.
             if not _restarted_coordinator(board, resume):
                 _deny_orchestrator_join(agent_id, payload)
+            _reuse_identity_resumed(board, agent_id, resume, payload, cfg)
             return
         if _deny_orchestrator_join(agent_id, payload):
             return
@@ -1806,6 +1858,7 @@ def _on_event(board, event: str, agent_id: str, sid: str | None, bound: dict, un
         return
     if resume is not None and _first_call_of_resumed(board, agent_id, member.job):
         _enrol_resumed(board, agent_id, resume, payload, cfg)   # its seat was claimed by `swarm resume`
+        _reuse_identity_resumed(board, agent_id, resume, payload, cfg)
         return
     if resume is not None and current_host().is_spawn(payload):
         row = next((r for r in board.restarts(job=member.job)

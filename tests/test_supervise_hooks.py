@@ -57,6 +57,19 @@ class ResumeHookTests(SupervisedEnv):
         self.assertTrue(out is None or "Stop now" not in str(out))
         self.assertEqual(self.agent(sid).tool_calls, 2)
 
+    def test_first_tool_call_already_runs_with_the_seats_identity(self):
+        """A headless seat's first tool call is often its `swarm done`/`verdict`/`review`: the enrolling
+        call is rewritten to the seat's own identity like every later one (QA live-met run)."""
+        self.resume()
+        sid = "11111111-2222-4333-8444-555555555555"
+        out = self.hook("turn", agent_id=None, session=sid, tool_name="Bash",
+                        tool_input={"command": "/x/bin/swarm review --job J --artifact b@x VERIFIED --report r"})
+        spec = (out or {}).get("hookSpecificOutput", {})
+        self.assertEqual(spec.get("updatedInput", {}).get("command"),
+                         f"/x/bin/swarm review --key {sid} --job J --artifact b@x VERIFIED --report r")
+        self.assertIn(self.name, spec.get("additionalContext", ""))   # the enrolment's welcome is kept
+        self.assertNotEqual(spec.get("permissionDecision"), "deny")
+
     def test_restarted_coordinator_can_spawn_on_first_and_later_calls(self):
         self.h.update_agent("orig", role="coordinator")
         self.resume()

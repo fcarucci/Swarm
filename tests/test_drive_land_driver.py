@@ -522,6 +522,49 @@ class Ci(unittest.TestCase):
         self.assertEqual(driver_land.ci_status_cli("o/r", run=self.fake('{"state": 1}'))("a" * 40), "unknown")
 
 
+class EvidenceCi(unittest.TestCase):
+    """A CI host with no `swarm ci` adapter (`[ci] kind = "none"` + `evidence_command`, the QA hub's shape): the
+    driver checks the exact SHA with the person's own command from team.toml, never from the board."""
+
+    def fake(self, code, calls):
+        def run(cmd, **kw):
+            calls.append((cmd, kw))
+            return subprocess.CompletedProcess(cmd, code, "", "")
+        return run
+
+    def test_green_only_on_exit_zero_with_the_exact_sha_outside_any_work_tree(self):
+        from swarm.supervisor.settings import private_dir
+        calls = []
+        status = driver_land.ci_status_evidence("check-ci --run {sha}", run=self.fake(0, calls))
+        self.assertTrue(status.takes_timeout)
+        self.assertEqual(status("a" * 40), "green")
+        cmd, kw = calls[0]
+        self.assertEqual(cmd, "check-ci --run " + "a" * 40)
+        self.assertEqual(kw["cwd"], str(private_dir()))
+        self.assertEqual(driver_land.ci_status_evidence("x {sha}", run=self.fake(1, []))("a" * 40), "failed")
+
+    def test_bad_templates_and_shas_hold_the_landing(self):
+        for t in ("check-ci", "check {branch} {sha}", "check {artifact} {sha}", None):
+            with self.subTest(t=t), self.assertRaises(ValueError):
+                driver_land.ci_status_evidence(t)
+        status = driver_land.ci_status_evidence("x {sha}", run=self.fake(0, []))
+        for sha in ("a" * 39, "A" * 40, "a" * 40 + "; rm -rf /", None):
+            with self.subTest(sha=sha), self.assertRaises(ValueError):
+                status(sha)
+
+    def test_team_ci_reads_the_hosts_team_toml(self):
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"SWARM_TEAM_CONFIG": ""}):
+            cfg = os.path.join(d, "config.toml")
+            with open(os.path.join(d, "team.toml"), "w") as fh:
+                fh.write('[ci]\nkind = "none"\nevidence_command = "check {sha}"\n')
+            self.assertEqual(driver_land.team_ci(cfg), {"kind": "none", "evidence_command": "check {sha}"})
+            with open(os.path.join(d, "team.toml"), "w") as fh:
+                fh.write("not toml [")
+            self.assertEqual(driver_land.team_ci(cfg), {})
+            self.assertEqual(driver_land.team_ci(os.path.join(d, "none", "config.toml")), {})
+
 def ledger_load(led):
     from swarm.supervisor import ledger
     return ledger.load(led.board_key, led.job)

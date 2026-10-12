@@ -70,9 +70,9 @@ case "${1:-}" in turn|done)
     case "$KEY" in ''|session-|*[!A-Za-z0-9_.-]*) VALID="";; esac
     # Spawn limits/model selection, follow-ups, judge/verifier checks and provenance retain
     # the ordinary path. Verifiers are never issued a skipping lease.
-    # `swarm join` and `swarm verdict` are rewritten to the caller's own identity by the Python hook.
+    # `swarm join`, `verdict`, `done`, `review` and `land` are rewritten to the caller's own identity by the Python hook.
     case "$PAYLOAD" in *spawn_agent*|*followup_task*|*SendMessage*|*\"Agent\"*|*\"Task\"*|*memory*|*remember*) VALID="";; esac
-    case "$PAYLOAD" in *swarm*join*|*swarm*verdict*|*swarm*done*) VALID="";; esac
+    case "$PAYLOAD" in *swarm*join*|*swarm*verdict*|*swarm*done*|*swarm*review*|*swarm*land*) VALID="";; esac
     # A drive control command's record line always reaches Python (its receipt), lease or not.
     case "$PAYLOAD" in *"swarm-record: kind="*) VALID="";; esac
     # Drive control commands get their caller's grant from the Python hook (drivegate.write_grants).

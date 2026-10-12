@@ -952,6 +952,21 @@ class DriveJudgeFlag(Env):
         self.assertIsNone(hooks.own_name_verdict_command("swarm done --job OTHER --artifact x", "Homer", "J"))
 
 
+    def test_land_runs_as_the_caller_but_land_hosts_is_left_alone(self):
+        out = hooks.own_name_verdict_command("swarm land --job J --artifact b@" + "a" * 40, "Homer", "J")
+        self.assertEqual(out, "swarm land --as Homer --job J --artifact b@" + "a" * 40)
+        self.assertIsNone(hooks.own_name_verdict_command("swarm land hosts add git@h:o/r.git", "Homer", "J"))
+
+    def test_review_gets_the_callers_key(self):
+        out = hooks.own_key_review_command("swarm review --job J --artifact b VERIFIED --report r", "k-1", "J")
+        self.assertEqual(out, "swarm review --key k-1 --job J --artifact b VERIFIED --report r")
+        out = hooks.own_key_review_command("swarm review --job J --key=other --artifact b CHANGES --report r",
+                                           "k-1", "J")
+        self.assertEqual(out, "swarm review --job J --key=k-1 --artifact b CHANGES --report r")
+        self.assertIsNone(hooks.own_key_review_command("echo swarm review --job J", "k-1", "J"))
+        self.assertIsNone(hooks.own_key_review_command("swarm review --job OTHER --artifact b VERIFIED --report r",
+                                                       "k-1", "J"))
+
 class DriveJobDetection(unittest.TestCase):
     """hooks._drive_job, unmocked: a real ledger makes a drive job; an error is the stricter case."""
 

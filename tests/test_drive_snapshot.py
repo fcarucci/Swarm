@@ -18,7 +18,7 @@ from unittest import mock
 
 import support  # noqa: F401  (puts lib/ on sys.path)
 from support import SANDBOX, add_backend_variants, drive_backends, home_env
-from swarm import receipts
+from swarm import receipts, review
 from swarm.supervisor import driver_snapshot as ds
 from swarm.supervisor.drive_authz import requirements_digest
 from swarm.supervisor.ledger import Intent, Ledger
@@ -35,6 +35,10 @@ PINS = {"/w/req.md": "b" * 40}
 def verdict_key(artifact: str) -> str:
     return "pipeline.verdict." + hashlib.sha256(artifact.encode()).hexdigest()[:32]
 
+
+def goal_key(rec, scope="goal", generation=1):
+    """Where review.verdict_data stores a goal or ruling verdict: one key per (generation, scope, candidate, req)."""
+    return review.drive_verdict_key(generation, scope, rec.get("candidate"), rec.get("req"))
 
 class SnapshotCase:
     """Shared body; each backend's subclass sets harness_factory."""
@@ -312,7 +316,7 @@ class SnapshotCase:
         rec = self.record(None, verdict="met", scope="goal", open_count=None, candidate=SHA1, reason="ok")
         decision = self.task5_receipt(mid, ns, rec)
         self.assertIsNone(decision["artifact"])
-        self.store_json("drive.verdict.1.goal", rec)
+        self.store_json(goal_key(rec), rec)
         gv = self.read().goal_verdict
         self.assertEqual((gv.verdict, gv.candidate, gv.receipt_id), ("met", SHA1, mid))
 
@@ -335,7 +339,7 @@ class SnapshotCase:
                              reason=["ok"], reason_opt=None)
         rec = self.record(None, verdict="met", scope="goal", open_count=None, candidate=SHA1, reason="ok")
         self.task5_receipt(mid, ns, rec)
-        self.store_json("drive.verdict.1.goal", dict(rec, artifact=SHA1))
+        self.store_json(goal_key(dict(rec, artifact=SHA1)), dict(rec, artifact=SHA1))
         gv = self.read().goal_verdict
         self.assertEqual((gv.receipt_id, gv.artifact), (mid, None))
 
@@ -375,34 +379,54 @@ class SnapshotCase:
     def test_goal_verdict_is_bound_by_its_candidate(self):
         rec = self.record(None, verdict="met", scope="goal", open_count=None, candidate=SHA1)
         self.publish(rec)
-        self.store_json("drive.verdict.1.goal", rec)
+        self.store_json(goal_key(rec), rec)
         gv = self.read().goal_verdict
         self.assertEqual((gv.verdict, gv.scope, gv.receipt_id), ("met", "goal", rec["message_id"]))
+
+    def test_goal_verdict_as_the_verdict_cli_stores_it_binds(self):
+        """QA live-met: review.verdict_data stores a goal verdict under drive.verdict.<gen>.goal.<digest>; the
+        snapshot read drive.verdict.<gen>.goal and never saw it, so a met goal never closed the job."""
+        import datetime as _dt
+        rec = self.record(None, verdict="met", scope="goal", open_count=None, candidate=SHA1)
+        self.publish(rec)
+        raw = review.verdict_data(None, None, "met", rec.get("reason", "ok"), None, "judge",
+                                  _dt.datetime.now(_dt.timezone.utc), scope="goal", generation=1,
+                                  candidate=SHA1, req=rec.get("req"), message_id=rec["message_id"])
+        for k, v in json.loads(raw).items():
+            if k.startswith("drive.verdict."):
+                self.b.set_job_data("J", k, v)
+        self.assertEqual(self.read().goal_verdict.receipt_id, rec["message_id"])
+
+    def test_goal_verdict_under_another_records_key_is_refused(self):
+        rec = self.record(None, verdict="met", scope="goal", open_count=None, candidate=SHA1)
+        self.publish(rec)
+        self.store_json(goal_key(dict(rec, candidate=SHA2)), rec)
+        self.assertIsNone(self.read().goal_verdict)
 
     def test_goal_verdict_whose_candidate_changed_is_refused(self):
         rec = self.record(None, verdict="met", scope="goal", open_count=None, candidate=SHA1)
         self.publish(rec)
         rec["candidate"] = SHA2
-        self.store_json("drive.verdict.1.goal", rec)
+        self.store_json(goal_key(rec), rec)
         self.assertIsNone(self.read().goal_verdict)
 
     def test_goal_verdict_without_a_candidate_is_refused(self):
         rec = self.record(None, verdict="met", scope="goal", open_count=None, candidate=None)
         self.publish(rec)
-        self.store_json("drive.verdict.1.goal", rec)
+        self.store_json(goal_key(rec), rec)
         self.assertIsNone(self.read().goal_verdict)
 
     def test_goal_key_refuses_a_record_of_another_scope(self):
         # an artifact verdict, validly receipted for its artifact, stored under the goal key: not a goal verdict
         rec = self.record(f"feat/a@{SHA1}", verdict="met", scope="artifact", open_count=None)
         self.publish(rec)
-        self.store_json("drive.verdict.1.goal", rec)
+        self.store_json(goal_key(rec), rec)
         self.assertIsNone(self.read().goal_verdict)
 
     def test_goal_verdict_of_another_generation_is_not_read(self):
         rec = self.record(None, verdict="met", scope="goal", generation=2, open_count=None, candidate=SHA1)
         self.publish(rec, generation=2)
-        self.store_json("drive.verdict.1.goal", rec)
+        self.store_json(goal_key(rec), rec)
         self.assertIsNone(self.read().goal_verdict)
 
     # ---- integration and blocking
@@ -439,6 +463,32 @@ class SnapshotCase:
             "feat/a": {"landed": SHA1, "land_id": 8, "land_rev": 1, "destinations": pushed}})
         self.receipt("land", 8, 1, {"destinations": pushed}, seat=None)
         self.assertIsNone(self.read(led2).integrated["feat/a"]["landed"])
+
+    def test_landed_from_the_entry_swarm_land_writes(self):
+        """QA live-met: swarm.land's _finish records land_id as the request's id in text and no destinations;
+        the snapshot read nothing from it, so a landed group was integrated again and again."""
+        dest = {"https://example.test/r.git": {"state": "verified", "sha": SHA1}}
+        led = Ledger(board_key=BK, job="J", generation=1, incarnation=INC, integrated={
+            "feat/a": {"landed": SHA1, "land_id": "25", "land_rev": 3}})
+        self.receipt("land", 25, 3, {"destinations": dest}, seat=None)
+        self.assertEqual(self.read(led).integrated["feat/a"]["landed"], SHA1)
+        for lid in ("x25", "", None, 2.5):
+            with self.subTest(land_id=lid):
+                bad = Ledger(board_key=BK, job="J", generation=1, incarnation=INC, integrated={
+                    "feat/a": {"landed": SHA1, "land_id": lid, "land_rev": 3}})
+                self.assertIsNone(self.read(bad).integrated["feat/a"]["landed"])
+
+    def test_a_land_receipt_whose_digest_does_not_bind_its_destinations_lands_nothing(self):
+        dest = {"https://example.test/r.git": {"state": "verified", "sha": SHA1}}
+        r = receipts.Receipt(
+            board_key=BK, job="J", generation=1, incarnation=INC, action_id="a", attempt=1, seat=None, kind="land",
+            record_id="26", rev=1, content_sha=receipts.content_sha("land", {"destinations": {}}),
+            args_sha=receipts.args_sha(["swarm"]), expires_at=(NOW + dt.timedelta(hours=1)).timestamp(),
+            destinations=dest)
+        receipts.write(BK, r)
+        led = Ledger(board_key=BK, job="J", generation=1, incarnation=INC, integrated={
+            "feat/a": {"landed": SHA1, "land_id": "26", "land_rev": 1}})
+        self.assertIsNone(self.read(led).integrated["feat/a"]["landed"])
 
     def test_landed_needs_every_destination_verified_not_just_one(self):
         dest = {"https://example.test/a.git": {"state": "verified", "sha": SHA1},

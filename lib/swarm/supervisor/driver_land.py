@@ -239,12 +239,52 @@ def repo_slug(url: str) -> str | None:
     return m.group(1) if m else None
 
 
+def team_ci(config_path) -> dict:
+    """The [ci] table of the host's team.toml (SWARM_TEAM_CONFIG, else next to the swarm config): written by the
+    person on this host, never read from the board. {} when there is none or it does not parse."""
+    import tomllib
+    from swarm import paths
+    base = str(config_path) if config_path else str(paths.config_path())
+    team = os.path.expanduser(os.environ.get("SWARM_TEAM_CONFIG") or os.path.join(os.path.dirname(base), "team.toml"))
+    try:
+        with open(team, "rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, ValueError):
+        return {}
+    ci = data.get("ci")
+    return dict(ci) if isinstance(ci, dict) else {}
+
+
+_SHA = re.compile(r"[0-9a-f]{40}")
+
+
+def ci_status_evidence(template: str, *, run=subprocess.run):
+    """ci_status(sha) from the project's own CI check, team.toml's `[ci] evidence_command` (a CI host with no
+    `swarm ci` adapter, `[ci] kind = "none"`): the command with `{sha}` replaced by the exact SHA exits 0 only
+    when CI is green on it. It runs in the supervisor's private directory, never in an agent-writable
+    repository. Green, else "failed" (the integrator asks to land only once its own check is green)."""
+    if not isinstance(template, str) or "{sha}" not in template:
+        raise ValueError("[ci] evidence_command must check the exact {sha}")
+    if any(k in template for k in ("{branch}", "{artifact}")):
+        raise ValueError("the driver checks CI by {sha} only: [ci] evidence_command may not use {branch} or {artifact}")
+
+    def status(sha: str, timeout: float | None = None) -> str:
+        if not isinstance(sha, str) or not _SHA.fullmatch(sha):
+            raise ValueError("CI is checked on an exact 40-hex SHA")
+        from swarm.supervisor.settings import private_dir
+        proc = run(template.replace("{sha}", sha), shell=True, cwd=str(private_dir()), capture_output=True,
+                   text=True, timeout=min(CI_TIMEOUT, timeout or CI_TIMEOUT), stdin=subprocess.DEVNULL)
+        return "green" if proc.returncode == 0 else "failed"
+    status.takes_timeout = True
+    return status
+
+
 def ci_status_cli(repo: str | None, *, run=subprocess.run):
     """ci_status(sha) -> "green"|"failed"|"running"|"queued"|"none" through `swarm ci status --json` (the
     ci plugin's shared poller), asked as this host user. A CLI that fails raises (the landing holds)."""
     def status(sha: str, timeout: float | None = None) -> str:
         if not repo:
-            raise ValueError("no CI repository is known: set [land] ci_repo")
+            raise ValueError("no CI repository is known: set [ci] repository (or [ci] evidence_command) in team.toml")
         swarm = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
             os.path.abspath(__file__))))), "bin", "swarm")
         proc = run([swarm, "ci", "status", "--repo", repo, "--sha", sha, "--json"], capture_output=True,
