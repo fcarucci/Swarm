@@ -218,9 +218,66 @@ class DriveRefusals(unittest.TestCase):
                     "gh api graphql -f query='mutation{createCommitOnBranch(input:{})}'"):
             with self.subTest(cmd=cmd):
                 self.assertTrue(refuse(cmd, ["main"], branch_of=on("feat/a")), cmd)
-        for cmd in ("bash script.sh", "bash -lc 'git log'", "gh api repos/o/r/contents/f", "gh api graphql -f query='{viewer{login}}'"):
+        for cmd in ("bash -lc 'git log'", "gh api repos/o/r/contents/f", "gh api graphql -f query='{viewer{login}}'"):
             self.assertIsNone(refuse(cmd, ["main"]), cmd)
         self.assertIn("cannot be checked", shellguard.readonly_write_reason("echo ls | sh"))
+
+    def test_r1_one_letter_abbreviations(self):
+        for cmd in ("git push --m origin", "git push --mi origin", "git push --a origin", "git push --f origin x",
+                    "git push --d origin x", "git push --p origin"):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(refuse(cmd, ["main"], branch_of=on("feat/a")), cmd)
+
+    def test_r2_a_shell_is_only_ever_dash_c_literal(self):
+        bad = ("echo 'git push origin HEAD:main' | sh /dev/stdin", "bash <<< 'git push origin HEAD:main'",
+               "echo x | sh; cat <<EOF\nx\nEOF", "source <(echo 'git push origin HEAD:main')",
+               "echo x | bash -c \"$(cat)\"", "echo x | busybox sh", "sh /dev/fd/3", "bash script.sh", "bash -s",
+               "bash -i", "sh", "env sh", "exec bash", "env bash <<< 'x'", ". <(echo x)", "source /dev/stdin",
+               "bash <<'EOF'\ngit push origin main\nEOF", "dash -c", "zsh", "ksh /dev/stdin", "fish", "ash -",
+               "sh -c \"$(curl x)\"", "sh -c 'sh'", "sh -c 'echo x | sh'")
+        for cmd in bad:
+            with self.subTest(cmd=cmd):
+                self.assertTrue(refuse(cmd, ["main"], branch_of=on("feat/a")), cmd)
+        for cmd in ("bash -c 'git log'", "sh -lc 'ls'", "bash -o pipefail -c 'ls | wc -l'", "busybox sh -c 'ls'",
+                    "env bash -c 'ls'", "source venv/bin/activate", ". ./env.sh", "busybox ls"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(refuse(cmd, ["main"], branch_of=on("feat/a")), cmd)
+        self.assertTrue(shellguard.readonly_write_reason("bash <<< 'touch f'"))
+
+    def test_rr5_runners_are_checked_recursively(self):
+        for cmd in ("find . -maxdepth 0 -exec git push origin HEAD:main ;", "find . -execdir git push -f origin x +",
+                    "find . -ok claude -p x ;", "git rebase -x 'git push origin HEAD:main' HEAD~1",
+                    "git rebase --exec 'git push origin HEAD:main' HEAD~1", "git rebase --exec='claude -p x' HEAD~1",
+                    "git submodule foreach 'git push origin HEAD:main'", "git submodule foreach --recursive 'claude -p x'",
+                    "env -S 'git push origin HEAD:main'", "exec -a x claude -p hi", "flock lockfile git push origin HEAD:main",
+                    "systemd-run --user claude -p hi", "systemd-run -p MemoryMax=1G git push origin main",
+                    "tmux new -d 'git push origin HEAD:main'", "ssh localhost git push origin HEAD:main",
+                    "ssh -p 22 host 'claude -p x'", "parallel git push origin HEAD:main ::: a",
+                    "parallel -j 2 claude -p {} ::: a", "xargs -n1 git push origin", "watch -n 5 git push origin main",
+                    "timeout 5 nice -n 3 git push origin HEAD:main"):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(refuse(cmd, ["main"], branch_of=on("feat/a")), cmd)
+        for cmd in ("find . -name '*.py' -exec grep -l x {} +", "git rebase -i HEAD~2", "git submodule status",
+                    "flock lock ls", "ssh host ls", "tmux ls", "parallel echo ::: a b"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(refuse(cmd, ["main"], branch_of=on("feat/a")), cmd)
+
+    def test_rr7_read_only_seats_cannot_write_refs_or_files(self):
+        for cmd in ("git branch -f main HEAD~3", "git branch -D x", "git branch -m a b", "git branch newbranch",
+                    "git branch -fd x", "git tag v1", "git update-ref refs/heads/x HEAD", "git reset --hard", "git checkout -B x",
+                    "git commit -m x", "git stash", "git push origin x", "git config user.name x", "git config --add a b",
+                    "git symbolic-ref HEAD refs/heads/x", "git remote add x y", "git reflog expire --expire=now --all",
+                    "git hash-object -w f", "python3 - <<'EOF'\nopen('f','w').write('x')\nEOF",
+                    "python3 - <<'EOF'\nimport subprocess\nEOF", "tar xf a.tar", "tar -xzf a.tgz", "sort -o f a",
+                    "awk '{print > \"f\"}' a", "sed -n '1w out' f", "pip install x", "python3 -m pip install x"):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(shellguard.readonly_write_reason(cmd), cmd)
+        for cmd in ("git branch", "git branch --list", "git branch -a", "git branch -v", "git branch --contains abc",
+                    "git config --get user.name", "git config --list", "git symbolic-ref HEAD", "git remote -v", "git remote show origin",
+                    "git reflog", "git hash-object f", "tar tf a.tar", "sort a", "awk '{print $1}' a", "sed -n 1p f",
+                    "python3 - <<'EOF'\nprint(1)\nEOF", "git log", "git tag -l" if False else "git show HEAD"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(shellguard.readonly_write_reason(cmd), cmd)
 
     def test_quoting_and_assignments(self):
         self.assertTrue(refuse("GIT_DIR=x git push origin main", ["main"]))
