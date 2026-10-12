@@ -7,7 +7,8 @@ Per test_drive_* module: tests run, and how many of them ran in a Postgres varia
 whose name ends in "Postgres", made by tests/support.add_backend_variants). Fails when
   - a test_drive_*.py module ran no test at all;
   - a module that builds Postgres variants (it calls add_backend_variants) ran none of them;
-  - any test was skipped for a reason other than Windows-only, systemd-only, or one starting with
+  - any test was skipped for a reason other than Windows-only, systemd-only, the QA harness's
+    throwaway-cluster test (no initdb in CI), or one starting with
     "memory-only:" (a test that fakes rows through the memory store's internals,
     support.memory_store_only);
   - a module builds a board harness itself (it names harness_factory, MemoryHarness, FileHarness,
@@ -24,7 +25,8 @@ import sys
 from pathlib import Path
 
 RESULT = re.compile(r"\((?P<id>[\w.]+)\)[^\n]*?(?:\n[^\n]*?)? \.\.\. (?P<res>ok|FAIL|ERROR|skipped[^\n]*|expected failure|unexpected success)")
-ALLOWED_SKIP = re.compile(r"windows|systemd|^skipped '(?:memory-only:)", re.I)
+# the QA harness's own throwaway-cluster test needs initdb binaries, which the CI service container does not give
+ALLOWED_SKIP = re.compile(r"windows|systemd|^skipped '(?:memory-only:|no runnable Postgres for the QA harness)", re.I)
 
 
 def summarise(log: str, modules: dict[str, bool]) -> tuple[list[str], list[str]]:
