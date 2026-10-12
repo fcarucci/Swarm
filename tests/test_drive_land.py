@@ -153,6 +153,34 @@ class Landing(LandCase):
         self.assertEqual(self.head(self.a), self.sha)
         self.assertEqual(self.head(self.b), self.sha)
 
+    def test_a_branch_only_in_the_work_repository_is_pushed_by_the_driver_then_landed(self):
+        """Seats never push (QA real MET): the hand-off branch exists only in the job's work repository. The driver
+        brings it into its mirror, pushes it to every destination (no force), and lands the exact SHA."""
+        for r in (self.a, self.b):
+            git(r, "branch", "-D", GROUP)
+        self.branch_commit("w.txt", "w\n", push=False)
+        self.judged = {self.sha}
+        self.owner["roots"] = [self.work]
+        self.assertFalse(self.has_branch(self.a))
+        res = self.go()
+        self.assertTrue(res.ok, res.why)
+        for r in (self.a, self.b):
+            self.assertEqual(self.head(r), self.sha)
+        self.assertIn((self.a, self.sha, GROUP), self.pushes)
+
+    def test_a_work_branch_at_another_sha_is_refused(self):
+        for r in (self.a, self.b):
+            git(r, "branch", "-D", GROUP)
+        self.branch_commit("w.txt", "w\n", push=False)
+        want = self.sha
+        self.commit(self.work, "later.txt", "later\n", "later")
+        self.owner["roots"] = [self.work]
+        self.judged = {want}
+        res = self.go(self.request(f"{GROUP}@{want}"))
+        self.assertFalse(res.ok)
+        self.assertIn("is not at", res.why)
+        self.assertFalse(self.has_branch(self.a))
+
     def test_pushes_exactly_the_judged_sha_once_per_destination(self):
         self.go()
         self.assertEqual(sorted(self.pushes), sorted([(self.a, self.sha, "main"), (self.b, self.sha, "main")]))
@@ -228,10 +256,9 @@ class Landing(LandCase):
 
     def test_branch_not_on_every_remote_is_refused_with_instructions(self):
         git(self.b, "branch", "-D", GROUP)
-        res = self.go()
+        res = self.go()          # not on b and not in any pinned work root: nothing to publish (seats never push)
         self.assertFalse(res.ok)
-        self.assertIn("push", res.why)
-        self.assertIn("every pinned remote", res.why)
+        self.assertIn("work repository", res.why)
         self.assertEqual(self.pushes, [])
 
     def test_branch_moved_after_the_verdict_is_refused(self):

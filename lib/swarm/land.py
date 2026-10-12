@@ -402,6 +402,34 @@ def _fetch_why(env: LandEnv, d: Destination, exc: MirrorError) -> str:
     return f"fetch from {d.name} failed: {exc}"
 
 
+def _publish_branch(env: LandEnv, dests: list, mirrors: dict, branch: str, sha: str) -> None:
+    """Seats never push (they hold no credentials, Task 20): a hand-off is a commit on a branch of the job's own
+    work repository. Where a destination does not have `branch` yet, the driver brings it from the pinned work
+    roots into its private mirror and pushes it there itself (pinned credential, never a force), so CI runs on that
+    exact SHA; the landing then waits for CI as usual. A branch already on a destination is left as it is."""
+    roots = [r for r in ((env.owner or {}).get("roots") or []) if isinstance(r, str) and r]
+    for d in dests:
+        m = mirrors[d.url]
+        try:
+            present = f"refs/heads/{branch}" in m.ls_remote(_budget(env, FETCH_SECONDS))
+        except MirrorError as exc:
+            raise LandPending(f"cannot list {d.name} ({type(exc).__name__}); retrying next pass") from exc
+        if present:
+            continue
+        got = None
+        for root in roots:
+            got = m.fetch_local_branch(root, branch, _budget(env, FETCH_SECONDS))
+            if got:
+                break
+        if got != sha:
+            raise LandRefused(f"branch {branch} is not at {sha[:12]} in the job's work repository"
+                              + (f" (it is at {got[:12]})" if got else "") + ": commit there and hand off its exact SHA")
+        try:
+            m.push(sha, branch, timeout=_budget(env, PUSH_SECONDS))
+        except MirrorError as exc:
+            raise LandRefused(f"pushing {branch} to {d.name} failed: {exc}") from exc
+
+
 def _fetch(env: LandEnv, dests: list, mirrors: dict, branches: list) -> None:
     """Bring `branches` into every destination's mirror; whatever does not arrive in time stays in the
     ledger's mirror_fetch_pending and LandPending is raised (the next pass continues it)."""
@@ -496,6 +524,7 @@ def _execute(board, env: LandEnv, job: str, request: Request, action_id: str, ne
     if need_leases:
         check_leases(board, env, dests, job)
     mirrors = _mirrors(env, dests)
+    _publish_branch(env, dests, mirrors, branch, sha)
     _fetch(env, dests, mirrors, [target, branch])
     journal = read_journal(led, request.id, now, destinations=len(dests))
     if journal is None:

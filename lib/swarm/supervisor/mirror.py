@@ -585,6 +585,25 @@ class Mirror:
                 got[f"refs/heads/{name}"] = sha
         return got, []
 
+    def fetch_local_branch(self, path: str, branch: str, timeout: float) -> str | None:
+        """Bring `branch` from the job's own work repository at `path` (seats commit there and never push: spec
+        rev 7, only the supervisor lands) into this mirror; returns its sha, or None when it has no such branch.
+        The path is agent-writable, so only objects come from it: git reads it through upload-pack with the safe
+        local settings (gitpin.local_pack_args), never its config, hooks or filters, from a neutral cwd."""
+        name = self._branch(branch)
+        try:
+            from pathlib import Path as _P
+            url = _P(os.path.realpath(path)).as_uri()
+            args = gitpin.url_args(url, f"+refs/heads/{name}:refs/heads/{name}")
+        except (gitpin.GitPinError, ValueError) as exc:
+            raise MirrorError(str(exc)) from exc
+        proc = self._git(["fetch", "--no-tags", "--no-write-fetch-head", "--quiet", "--no-recurse-submodules",
+                          *gitpin.local_pack_args("fetch", self._git_bin), *args],
+                         timeout=_timeout(timeout), check=False)
+        if proc.returncode != 0:
+            return None
+        return self.head(name)
+
     def ls_remote(self, timeout: float) -> dict[str, str]:
         """The remote's branches (refname -> sha), asked with the same pinned credential and
         environment as fetch and push. Used by doctor, and to verify a landing."""

@@ -23,8 +23,11 @@ STANDING_RULES = (
     "run only in CI.",
     "- Wait for CI with `swarm ci wait --repo R --sha S --timeout 540` in the foreground; never `gh run watch`.",
     "- Never put work trees, clones or builds under /tmp.",
-    "- Landing is rebase-only (fast-forward pushes, never a force push), through the integrator.",
-    "- Post `DONE` with evidence when you finish; hand work off with `swarm done --artifact REF`.",
+    "- Never push: commit on your branch in your workdir. Only the supervisor pushes and lands (rebase-only, "
+    "fast-forward, never a force push).",
+    "- Run swarm commands literally as `swarm ...` (never through a shell variable or function): only a literal "
+    "call is recorded.",
+    "- Post `DONE` with evidence when you finish; hand work off with `swarm done --artifact BRANCH@<full sha>`.",
 )
 GATES = ("Review gates (haiku-strict): read the whole diff line by line; check that every new test fails on the "
          "base commit; run a mutation gate (at least 5 targeted mutants of the changed logic, in a scratch copy "
@@ -194,9 +197,10 @@ def _review_body(cfg, led, seat, action) -> list[str]:
 
 def _integrate_body(led, seat, action) -> list[str]:
     ref = _ref(action.artifact or _group(action) or "the accepted artifact", what="artifact")
-    return [f"You are the integrator of {ref}: rebase it onto the target, push the exact rebased commit "
-            "(fast-forward only), wait for CI on that exact SHA, then post INTEGRATED, or FINALIZE_BLOCKED "
-            "with the reason."]
+    return [f"You are the integrator of {ref}: rebase its branch onto the target in your workdir (never push, "
+            "never merge), then run `swarm land --job " + str(led.job) + " --artifact BRANCH@<rebased full sha>`. "
+            "The supervisor pushes that exact commit, waits for CI on it and lands it, then posts INTEGRATED or "
+            "LAND-REFUSED; if the rebase needs real changes, post FINALIZE_BLOCKED with the reason."]
 
 
 def render(board, cfg, led, action, seat) -> str:
