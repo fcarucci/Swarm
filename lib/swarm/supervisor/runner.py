@@ -809,6 +809,32 @@ def _seat_argv(cfg: dict, run: dict) -> tuple[list, str | None]:
     return wrapped, None
 
 
+SEAT_TRANSCRIPT_MAX = 64 * 1024 * 1024
+
+
+def _keep_seat_transcript(run: dict) -> None:
+    """A jailed seat's transcript lives in its seat directory, where the host's capture does not look (Task 20
+    rr14): copy it into the run's directory (r<id>.transcript.jsonl, private), read without following a link,
+    and let finish capture it from there."""
+    from swarm.supervisor import privfs, seatbroker
+    from swarm.supervisor.settings import log
+    src = seatbroker.seat_transcript(run["seat_home"], run.get("harness") or "claude",
+                                     run.get("agent_key") or run.get("session_id"))
+    if not src:
+        return
+    try:
+        data = seatbroker.read_seat_file(src, SEAT_TRANSCRIPT_MAX)
+        if data is None:
+            return
+        name = f"r{run['restart_id']}.transcript.jsonl"
+        with _runs_fd(run["board"]) as d:
+            privfs.write_atomic(d, name, data)
+        run["transcript_copy"] = str(run_file(run["restart_id"], run["board"]).with_name(name))
+        write_run(run)
+    except OSError as exc:
+        log(f"restart {run['restart_id']}: the seat's transcript was not kept ({type(exc).__name__})")
+
+
 def _child_env(token: str | None = None, tag: str | None = None, pass_env=(), drive: bool = False) -> dict:
     """The replacement's environment: an allowlist of ours (_allowed_env) plus the names in
     [supervise] pass_env, never what would make it look like it runs inside another Claude or
@@ -1220,6 +1246,8 @@ def _execute(cfg: dict, run: dict, *, popen, clock, sleep, poll: float, board_ev
             outcome = "max_turns" if sub == "error_max_turns" else "failed"
     if broker is not None:
         broker.stop()
+    if run.get("seat_home"):
+        _keep_seat_transcript(run)
     t.join(5)
     feeder.join(1)
     run.update(exited=True, outcome=outcome)
@@ -1265,7 +1293,8 @@ def finish(cfg: dict, run: dict, outcome: str) -> bool:
                     js = b.job_status(run["job"])
                     if a is not None and js is not None:
                         try:
-                            lost.capture_final(b, cfg, js, a, time.monotonic() + FINISH_CAPTURE_SECONDS)
+                            lost.capture_final(b, cfg, js, a, time.monotonic() + FINISH_CAPTURE_SECONDS,
+                                               path=run.get("transcript_copy"))
                         except Exception as exc:
                             log(f"transcript of {run['name']} ({key}) not captured: {type(exc).__name__}")
                 _finish_row_and_post(b, run, outcome, SUPERVISOR_NAME)

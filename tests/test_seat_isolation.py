@@ -230,101 +230,6 @@ class FailClosedTest(SeatHomeCase):
         fork.assert_not_called()
 
 
-class BrokerUnitTest(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tmpdir(self)
-        self.wd = self.tmp / "wt"
-        self.wd.mkdir()
-        (self.wd / "report.md").write_text("ok")
-        self.seat = self.tmp / "seat"
-        (self.seat / "broker").mkdir(parents=True)
-        self.outside = self.tmp / "secret"
-        self.outside.write_text("x")
-        self.calls = []
-
-        def fake_run(argv, **kw):
-            self.calls.append((argv, kw))
-            return subprocess.CompletedProcess(argv, 0, b"ran\n", b"")
-        self.run = {"harness": "claude", "session_id": "sid-1", "name": "Lisa"}
-        self.b = seatbroker.SeatBroker(self.run, str(self.seat / "broker"), workdir=str(self.wd),
-                                       roots=[str(self.wd), str(self.seat)], jail_home="/home/u",
-                                       seat_dir=str(self.seat), host_pid=4242, bin_dir="/plugin/bin",
-                                       base_env={"PATH": "/bin", "CLAUDE_CODE_SESSION_ID": "other",
-                                                 "SWARM_CONFIG": "/c"}, runner=fake_run)
-
-    def ask(self, kind, argv, stdin=None, cwd=None):
-        d = os.open(str(self.seat / "broker"), os.O_RDONLY)
-        try:
-            out = {}
-
-            def go():
-                out["r"] = seatbroker_client.request(kind, argv, str(self.seat / "broker"), stdin, timeout=10)
-            with mock.patch("os.getcwd", lambda: cwd or str(self.wd)):
-                t = threading.Thread(target=go)
-                t.start()
-                for _ in range(200):
-                    if self.b.poll_once(d, inline=True):
-                        break
-                    threading.Event().wait(0.02)
-                t.join(10)
-            return out["r"]
-        finally:
-            os.close(d)
-
-    def test_a_post_runs_outside_as_the_seat(self):
-        rc, out, _ = self.ask("cli", ["post", "--job", "J", "--as", "Lisa", "hello"])
-        self.assertEqual((rc, out), (0, b"ran\n"))
-        argv, kw = self.calls[-1]
-        self.assertEqual(argv, ["/plugin/bin/swarm", "post", "--job", "J", "--as", "Lisa", "hello"])
-        self.assertEqual(kw["env"]["CLAUDE_CODE_SESSION_ID"], "sid-1")
-        self.assertEqual(kw["env"]["SWARM_HOST"], "claude")
-        self.assertEqual(kw["env"][person.BROKER_PID_ENV], "4242")
-        self.assertEqual(kw["cwd"], str(self.wd))
-
-    def test_refusals(self):
-        for argv in (["bg", "--", "id"], ["config", "set", "x", "y"], ["supervise", "seat-isolation", "off"],
-                     ["--config", "/x", "post"], ["transcript", "show"], ["activate", "--job", "J"],
-                     ["post", "--job", "J", "--as", "Bart", "forged"], ["post", "--job", "J", "--key=other", "x"],
-                     ["verdict", "--job", "J", "met", "--details", str(self.outside)],
-                     ["verdict", "--job", "J", "met", f"--details={self.outside}"]):
-            rc, _, err = self.ask("cli", argv)
-            self.assertEqual(rc, 2, argv)
-            self.assertIn(b"refused in a drive seat", err)
-        self.assertEqual(self.calls, [])
-
-    def test_a_file_in_the_work_tree_may_be_named(self):
-        rc, _, _ = self.ask("cli", ["verdict", "--job", "J", "met", "--details", "report.md"])
-        self.assertEqual(rc, 0)
-
-    def test_a_hook_payload_is_stamped(self):
-        payload = {"session_id": "forged", "transcript_path": "/home/u/.claude/projects/p/x.jsonl",
-                   "agent_transcript_path": "/home/u/.ssh/id", "cwd": "/home/u", "tool_name": "Bash"}
-        rc, _, _ = self.ask("hook", ["--host", "claude", "turn"], json.dumps(payload).encode())
-        self.assertEqual(rc, 0)
-        argv, kw = self.calls[-1]
-        self.assertEqual(argv, ["/plugin/bin/swarm-hook", "--host", "claude", "turn"])
-        sent = json.loads(kw["input"])
-        self.assertEqual(sent["session_id"], "sid-1")
-        self.assertEqual(sent["transcript_path"], f"{self.seat}/claude/projects/p/x.jsonl")
-        self.assertNotIn("agent_transcript_path", sent)
-        self.assertEqual(sent["cwd"], str(self.wd))
-
-    def test_a_hook_of_another_harness_is_refused(self):
-        rc, _, _ = self.ask("hook", ["--host", "codex", "turn"], b"{}")
-        self.assertEqual(rc, 2)
-
-    def test_a_planted_link_request_is_not_read(self):
-        (self.seat / "broker" / f"{'a' * 32}.req").symlink_to(self.outside)
-        d = os.open(str(self.seat / "broker"), os.O_RDONLY)
-        try:
-            self.b.poll_once(d, inline=True)
-        finally:
-            os.close(d)
-        resp = json.loads((self.seat / "broker" / f"{'a' * 32}.resp").read_text())
-        self.assertEqual(resp["rc"], 2)
-        self.assertEqual(self.calls, [])
-
-
 class DoctorTest(unittest.TestCase):
     def test_lines(self):
         self.assertTrue(bootstrap._seat_isolation_check({}, probe=lambda c: (True, "active")).ok)
@@ -435,17 +340,348 @@ class JailTest(SeatHomeCase):
         self.assertEqual((self.home / ".ssh" / "id_ed25519").read_text(), "not a real key\n")
 
 
+def recording_runner(calls, rc=0, out=b"ran\n", gate=None):
+    def run(argv, **kw):
+        calls.append((argv, kw))
+        if gate is not None:
+            gate.wait(10)
+        return subprocess.CompletedProcess(argv, rc, out, b"")
+    return run
+
+
+def cli_argv(call) -> list[str]:
+    """The swarm argv of a brokered call: what follows the pinned --config."""
+    argv = call[0]
+    i = argv.index("--config")
+    return argv[i + 2:]
+
+
+class BrokerCase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tmpdir(self)
+        self.wd = self.tmp / "wt"
+        self.wd.mkdir()
+        self.seat = self.tmp / "seat"
+        (self.seat / "broker").mkdir(parents=True)
+        self.files = self.tmp / "private-files"
+        self.files.mkdir()
+        self.calls = []
+        self.run = {"harness": "claude", "session_id": "11111111-2222-3333-4444-555555555555", "name": "Lisa"}
+        self.b = self.broker()
+
+    def broker(self, runner=None, **kw):
+        return seatbroker.SeatBroker(self.run, str(self.seat / "broker"), workdir=str(self.wd), forbid=[],
+                                     seat_dir=str(self.seat), config="/sup/config.toml", host_pid=4242,
+                                     base_env={"PATH": "/bin", "CLAUDE_CODE_SESSION_ID": "other",
+                                               "PYTHONPATH": str(self.wd)},
+                                     runner=runner or recording_runner(self.calls), file_dir=str(self.files), **kw)
+
+    def cli(self, argv, broker=None):
+        """The seat side (seatbroker_client.run_cli, cwd the work tree) against this broker, inline."""
+        b = broker or self.b
+        d = os.open(str(self.seat / "broker"), os.O_RDONLY)
+        out = {}
+        old = os.getcwd()
+        os.chdir(self.wd)
+        try:
+            def go():
+                out["r"] = seatbroker_client.run_cli(argv, str(self.seat / "broker"), timeout=10)
+            t = threading.Thread(target=go)
+            t.start()
+            for _ in range(300):
+                if b.poll_once(d, inline=True) or not t.is_alive():
+                    break
+                threading.Event().wait(0.02)
+            t.join(10)
+            return out["r"]
+        finally:
+            os.chdir(old)
+            os.close(d)
+
+    def raw(self, body: dict):
+        """A request written straight into the broker dir (a seat need not use the client)."""
+        rid = uuid.uuid4().hex
+        (self.seat / "broker" / f"{rid}.req").write_text(json.dumps(body))
+        d = os.open(str(self.seat / "broker"), os.O_RDONLY)
+        try:
+            self.b.poll_once(d, inline=True)
+        finally:
+            os.close(d)
+        r = json.loads((self.seat / "broker" / f"{rid}.resp").read_text())
+        return r["rc"], base64.b64decode(r["out"]), base64.b64decode(r["err"])
+
+
+class TypedProtocolTest(BrokerCase):
+    def test_a_post_is_built_by_the_broker(self):
+        rc, out, _ = self.cli(["post", "--job", "J", "--as", "Bart", "hello", "world"])
+        self.assertEqual((rc, out), (0, b"ran\n"))
+        argv, kw = self.calls[-1]
+        self.assertEqual(argv[1:3], ["-I", "-c"])
+        self.assertEqual(argv[argv.index("--config") + 1], "/sup/config.toml")
+        self.assertEqual(cli_argv(self.calls[-1]),
+                         ["post", "--job", "J", "--key", self.run["session_id"], "--", "hello", "world"])
+        self.assertEqual(kw["cwd"], "/")
+        self.assertEqual(kw["env"]["CLAUDE_CODE_SESSION_ID"], self.run["session_id"])
+        self.assertEqual(kw["env"]["SWARM_CONFIG"], "/sup/config.toml")
+        self.assertNotIn("PYTHONPATH", kw["env"])
+        self.assertEqual(kw["env"][person.BROKER_PID_ENV], "4242")
+
+    def test_rr9_no_config_or_plugin_reaches_the_cli(self):
+        (self.wd / "evil").mkdir()
+        (self.wd / "evil" / "none.toml").write_text("")
+        for argv in (["post", "--job", "J", "--config", "evil/none.toml", "x"],
+                     ["post", "--job", "J", "--conf=evil/none.toml", "x"],
+                     ["post", "--config=evil/none.toml", "--job", "J", "x"],
+                     ["--config", "evil/none.toml", "post", "--job", "J", "x"]):
+            rc, _, err = self.cli(argv)
+            self.assertEqual(rc, 2, argv)
+        rc, _, _ = self.raw({"v": 2, "kind": "cli", "command": "post",
+                             "fields": {"job": "J", "message": ["x"], "config": "evil/none.toml"}})
+        self.assertEqual(rc, 2)
+        self.assertEqual(self.calls, [])
+
+    def test_rr9_the_cli_honours_only_a_leading_config_for_plugins(self):
+        from swarm import cli
+        seen = []
+        with mock.patch("swarm.plugins.Registry") as reg:
+            reg.side_effect = lambda cfg, path, **kw: seen.append(str(path)) or mock.MagicMock()
+            cli._load_plugins(["post", "--config", "/evil/none.toml", "--job", "J", "x"], cli._parser())
+            cli._load_plugins(["post", "--conf=/evil/none.toml"], cli._parser())
+            cli._load_plugins(["--config", "/good/c.toml", "post"], cli._parser())
+        self.assertNotIn("/evil/none.toml", seen)
+        self.assertEqual(seen[-1], "/good/c.toml")
+
+    def test_rr10_abbreviated_and_explicit_identity_is_never_passed(self):
+        for argv in (["post", "--job", "J", "--a", "Bart", "x"], ["post", "--job", "J", "--a=Bart", "x"],
+                     ["land", "--job", "J", "--ke", "OTHER"], ["review", "--job", "J", "verified", "--k", "OTHER"],
+                     ["done", "--job", "J", "--ke", "OTHER"], ["read", "--job", "J", "--sess", "x"]):
+            rc, _, _ = self.cli(argv)
+            self.assertEqual(rc, 2, argv)
+        self.assertEqual(self.calls, [])
+        rc, _, _ = self.cli(["done", "--job", "J", "--key", "OTHER"])   # accepted and DROPPED
+        self.assertEqual(rc, 0)
+        self.assertEqual(cli_argv(self.calls[-1]), ["done", "--job", "J", "--key", self.run["session_id"]])
+        for field in ("as", "key", "session", "name", "_as", "agent_key"):
+            rc, _, err = self.raw({"v": 2, "kind": "cli", "command": "done", "fields": {"job": "J", field: "x"}})
+            self.assertEqual(rc, 2, field)
+        rc, _, _ = self.cli(["verdict", "--job", "J", "--as", "Bart", "met", "ok"])
+        self.assertEqual(cli_argv(self.calls[-1]), ["verdict", "--job", "J", "--as", "Lisa", "--", "met", "ok"])
+
+    def test_rr11_a_file_field_is_content_never_a_seat_path(self):
+        (self.wd / "r.md").write_text("the report")
+        seen = []
+
+        def runner(argv, **kw):
+            p = cli_argv((argv,))[cli_argv((argv,)).index("--details") + 1]
+            seen.append((p, Path(p).read_text()))
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+        b = self.broker(runner)
+        rc, _, _ = self.cli(["verdict", "--job", "J", "met", "ok", "--details", "r.md"], broker=b)
+        self.assertEqual(rc, 0)
+        path, content = seen[0]
+        self.assertTrue(path.startswith(str(self.files)))
+        self.assertEqual(content, "the report")
+        self.assertFalse(Path(path).exists())       # removed after the call
+        rc, _, _ = self.raw({"v": 2, "kind": "cli", "command": "verdict",
+                             "fields": {"job": "J", "verdict": "met", "details": "/home/u/.secrets/x"}})
+        argv = cli_argv(self.calls[-1]) if self.calls else []
+        # the content "/home/u/.secrets/x" is what lands in the file: the broker never opens that path
+        self.assertTrue(all(not a.startswith("/home/u") for a in argv))
+
+    def test_rr12_a_codex_seat_waits_for_its_thread(self):
+        self.run.clear()
+        self.run.update({"harness": "codex", "session_id": None, "name": "Bart"})
+        rc, _, err = self.cli(["post", "--job", "J", "x"])
+        self.assertEqual(rc, 2)
+        self.assertIn(b"not known yet", err)
+        rc, out, _ = self.raw({"v": 2, "kind": "hook", "event": "turn", "payload": {"session_id": "forged"}})
+        self.assertEqual(json.loads(out)["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(self.calls, [])
+        self.run["agent_key"] = "019a0000-0000-7000-8000-000000000001"
+        self.raw({"v": 2, "kind": "hook", "event": "turn", "payload": {"session_id": "forged", "tool_name": "Bash"}})
+        argv, kw = self.calls[-1]
+        self.assertEqual(json.loads(kw["input"])["session_id"], self.run["agent_key"])
+        self.assertEqual(kw["env"]["CODEX_THREAD_ID"], self.run["agent_key"])
+
+    def test_hook_payload_is_whitelisted_and_stamped(self):
+        proj = self.seat / "claude" / "projects" / "p"
+        proj.mkdir(parents=True)
+        (proj / f"{self.run['session_id']}.jsonl").write_text("")
+        self.raw({"v": 2, "kind": "hook", "event": "turn",
+                  "payload": {"session_id": "forged", "transcript_path": "/home/u/.ssh/id", "cwd": "/home/u",
+                              "tool_name": "Bash", "tool_input": {"command": "ls"}, "evil": "x"}})
+        argv, kw = self.calls[-1]
+        self.assertEqual(cli_argv(self.calls[-1]), ["hook", "--host", "claude", "turn"])
+        sent = json.loads(kw["input"])
+        self.assertEqual(sent, {"tool_name": "Bash", "tool_input": {"command": "ls"},
+                                "session_id": self.run["session_id"],
+                                "transcript_path": str(proj / f"{self.run['session_id']}.jsonl"),
+                                "cwd": str(self.wd)})
+        rc, _, _ = self.raw({"v": 2, "kind": "hook", "event": "../bin", "payload": {}})
+        self.assertEqual(rc, 2)
+
+    def test_rr13_hooks_have_their_own_lane_and_fail_closed(self):
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        b = self.broker(recording_runner(self.calls, gate=gate)).start()
+        self.addCleanup(b.stop)
+        bdir = str(self.seat / "broker")
+        for _ in range(seatbroker.CLI_WORKERS + 1):     # every cli worker blocked on a long call
+            threading.Thread(target=seatbroker_client.request,
+                             args=({"v": 2, "kind": "cli", "command": "wait",
+                                    "fields": {"job": "J", "for": "15m"}}, bdir, 5), daemon=True).start()
+        threading.Event().wait(0.5)
+        gate_hooks = threading.Event()
+        b._run = recording_runner(self.calls, out=b'{"ok": 1}')   # hooks answer at once
+        r = seatbroker_client.request({"v": 2, "kind": "hook", "event": "turn", "payload": {}}, bdir, 5)
+        self.assertIsNotNone(r)
+        self.assertEqual(r[1], b'{"ok": 1}')
+        gate_hooks.set()
+        # no broker at all, or no answer: the guard denies
+        rc, out, _ = seatbroker_client.run_hook(["--host", "claude", "turn"], str(self.tmp / "missing"), b"{}")
+        self.assertEqual(json.loads(out)["hookSpecificOutput"]["permissionDecision"], "deny")
+        empty = tmpdir(self)
+        rc, out, _ = seatbroker_client.run_hook(["--host", "claude", "turn"], str(empty), b"{}", timeout=0.2)
+        self.assertEqual(json.loads(out)["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_rr13_a_failing_guard_hook_denies(self):
+        b = self.broker(recording_runner(self.calls, rc=1, out=b""))
+        d = os.open(str(self.seat / "broker"), os.O_RDONLY)
+        try:
+            rid = uuid.uuid4().hex
+            (self.seat / "broker" / f"{rid}.req").write_text(
+                json.dumps({"v": 2, "kind": "hook", "event": "turn", "payload": {}}))
+            b.poll_once(d, inline=True)
+        finally:
+            os.close(d)
+        r = json.loads((self.seat / "broker" / f"{rid}.resp").read_text())
+        self.assertEqual(json.loads(base64.b64decode(r["out"]))["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_rr14_the_seat_transcript_is_kept(self):
+        proj = self.seat / "claude" / "projects" / "p"
+        proj.mkdir(parents=True)
+        sid = self.run["session_id"]
+        (proj / f"{sid}.jsonl").write_text('{"type":"user"}\n')
+        self.assertEqual(seatbroker.seat_transcript(str(self.seat), "claude", sid), str(proj / f"{sid}.jsonl"))
+        (proj / f"{sid}.jsonl").unlink()
+        (proj / f"{sid}.jsonl").symlink_to(self.tmp / "elsewhere")
+        self.assertIsNone(seatbroker.seat_transcript(str(self.seat), "claude", sid))
+        rollouts = self.seat / "codex" / "sessions" / "2026" / "10" / "12"
+        rollouts.mkdir(parents=True)
+        tid = "019a0000-0000-7000-8000-000000000001"
+        (rollouts / f"rollout-2026-10-12T10-00-00-{tid}.jsonl").write_text("{}\n")
+        self.assertTrue(seatbroker.seat_transcript(str(self.seat), "codex", tid).endswith(f"{tid}.jsonl"))
+
+    def test_rr14_the_runner_copies_it_privately(self):
+        proj = self.seat / "claude" / "projects" / "p"
+        proj.mkdir(parents=True)
+        sid = self.run["session_id"]
+        (proj / f"{sid}.jsonl").write_text('{"type":"user"}\n')
+        runs = self.tmp / "runs"
+        runs.mkdir(mode=0o700)
+        run = {"restart_id": 7, "board": None, "seat_home": str(self.seat), "harness": "claude", "session_id": sid}
+        import contextlib
+
+        @contextlib.contextmanager
+        def runs_fd(board, create=True):
+            fd = os.open(runs, os.O_RDONLY)
+            try:
+                yield fd
+            finally:
+                os.close(fd)
+        with mock.patch.object(runner, "_runs_fd", runs_fd), \
+                mock.patch.object(runner, "run_file", lambda rid, board: runs / f"r{rid}.json"), \
+                mock.patch.object(runner, "write_run", lambda r: None):
+            runner._keep_seat_transcript(run)
+        self.assertEqual(Path(run["transcript_copy"]).read_text(), '{"type":"user"}\n')
+
+
+class FuzzTest(BrokerCase):
+    """Every seat command with extra, abbreviated or identity flags, and every unknown field: refused."""
+
+    def test_every_command(self):
+        from swarm import seatproto
+        bad_flags = (["--config", "x.toml"], ["--conf=x.toml"], ["--a", "Bart"], ["--ke", "K"], ["--k=K"],
+                     ["--sess", "S"], ["--bogus"], ["--plugin-dir", "/x"], ["-c", "x"])
+        for command, spec in seatproto.SCHEMA.items():
+            base = command.split(" ")
+            for flag in bad_flags:
+                with self.assertRaises(seatproto.ProtocolError, msg=(command, flag)):
+                    seatproto.parse_cli([*base, *flag], str(self.wd))
+            for field in ("config", "argv", "env", "as", "key", "session", "unknown_field"):
+                with self.assertRaises(seatproto.ProtocolError, msg=(command, field)):
+                    seatproto.validate({"v": 2, "kind": "cli", "command": command,
+                                        "fields": {**{r: "x" for r in spec.get("required", ())}, field: "x"}})
+            for name, (typ, opt) in spec["fields"].items():
+                if typ != "str" or opt is None:
+                    continue
+                fields = {r: (["x"] if spec["fields"][r][0] in ("list", "files", "repeat") else
+                              spec["fields"][r][0][1][0] if isinstance(spec["fields"][r][0], tuple) else "x")
+                          for r in spec.get("required", ())}
+                fields[name] = "--config=/evil"
+                with self.assertRaises(seatproto.ProtocolError, msg=(command, name)):
+                    seatproto.build_argv(command, seatproto.validate(
+                        {"v": 2, "kind": "cli", "command": command, "fields": fields})[1],
+                        key="k", name="n", file_path=lambda c: "/f")
+        for bad in ({"v": 1, "kind": "cli", "command": "post", "fields": {}},
+                    {"v": 2, "kind": "cli", "command": "bg", "fields": {}},
+                    {"v": 2, "kind": "cli", "command": "post", "fields": {"job": "J", "message": "x"}},
+                    {"v": 2, "kind": "cli", "command": "post", "fields": {"job": "J", "message": ["x"]}, "argv": []}):
+            with self.assertRaises(seatproto.ProtocolError):
+                seatproto.validate(bad)
+
+
+EVIL = 'open({marker!r}, "a").write(__name__ + "\\n")\n'
+
+
+class NoSeatCodeTest(BrokerCase):
+    """A brokered CLI (the real one, through BOOT) imports nothing from the seat's files."""
+
+    def setUp(self):
+        super().setUp()
+        self.marker = self.tmp / "imported"
+        for rel in ("swarm/__init__.py", "json.py", "argparse.py", "plugins/evil.py", "evil/plugins/evil.py"):
+            p = self.wd / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(EVIL.format(marker=str(self.marker)))
+        (self.wd / "evil" / "none.toml").write_text("")
+        board = self.tmp / "board"
+        board.mkdir()
+        self.config = board / "config.toml"
+        self.config.write_text(f'[board]\nbackend = "sqlite"\nspool_dir = "{board}/spool"\n'
+                               f'[sqlite]\npath = "{board}/board.sqlite3"\n')
+
+    def test_brokered_cli_runs_only_the_supervisors_code(self):
+        b = seatbroker.SeatBroker(self.run, str(self.seat / "broker"), workdir=str(self.wd), forbid=[str(self.wd)],
+                                  seat_dir=str(self.seat), config=str(self.config), host_pid=None,
+                                  base_env={**os.environ, "PYTHONPATH": str(self.wd), "SWARM_AUTO_INIT": "1"},
+                                  file_dir=str(self.files))
+        rc, out, err = self.cli(["who", "--job", "J"], broker=b)
+        self.assertNotEqual(rc, seatbroker.AUDIT_EXIT, err)
+        self.assertFalse(self.marker.exists(), self.marker.read_text() if self.marker.exists() else "")
+
+    def test_the_audit_refuses_a_forbidden_module(self):
+        b = seatbroker.SeatBroker(self.run, str(self.seat / "broker"), workdir=str(self.wd),
+                                  forbid=[seatbroker.LIB_DIR], seat_dir=str(self.seat), config=str(self.config),
+                                  host_pid=None, base_env=dict(os.environ), file_dir=str(self.files))
+        rc, _, err = b._exec(["who", "--job", "J"], None, 60)
+        self.assertEqual(rc, seatbroker.AUDIT_EXIT, err)
+
+
 FAKE_SEAT = textwrap.dedent("""\
     import json, subprocess, sys
-    job, name = sys.argv[1], sys.argv[2]
+    job, other = sys.argv[1], sys.argv[2]
     def sw(*a):
         r = subprocess.run(["swarm", *a], capture_output=True, text=True)
         return {"rc": r.returncode, "out": r.stdout.strip()[-300:], "err": r.stderr.strip()[-300:]}
+    open("report.md", "w").write("all requirements hold")
     print(json.dumps({
-        "post": sw("post", "--job", job, "--as", name, "hello from the jail"),
-        "forged": sw("post", "--job", job, "--as", "Somebody Else", "forged"),
-        "read": sw("read", "--job", job, "--as", name),
-        "verdict": sw("verdict", "--job", job, "--as", name, "met", "all requirements hold"),
+        "post": sw("post", "--job", job, "hello from the jail"),
+        "forged_as": sw("post", "--job", job, "--as", other, "forged-as"),
+        "forged_abbrev": sw("post", "--job", job, "--a", other, "forged-abbrev"),
+        "config": sw("post", "--job", job, "--config", "x.toml", "forged-config"),
+        "read": sw("read", "--job", job),
+        "verdict": sw("verdict", "--job", job, "met", "all requirements hold", "--details", "report.md"),
         "bg": sw("bg", "--", "id"),
     }))
     """)
@@ -454,7 +690,7 @@ FAKE_SEAT = textwrap.dedent("""\
 @unittest.skipUnless(CAN_JAIL, "needs unprivileged user namespaces (Linux)")
 class BrokerEndToEndTest(SeatHomeCase):
     """A fake-harness seat in the real jail, with no board access of its own, posts, reads and records a
-    verdict through its broker; the broker stamps who it is."""
+    verdict through the typed broker; who it is comes from its launch record."""
 
     def test_post_read_verdict(self):
         board_dir = self.tmp / "board"
@@ -462,17 +698,13 @@ class BrokerEndToEndTest(SeatHomeCase):
         config = board_dir / "config.toml"
         config.write_text(f'[board]\nbackend = "sqlite"\nspool_dir = "{board_dir}/spool"\n'
                           f'[sqlite]\npath = "{board_dir}/board.sqlite3"\n[hook]\nmarker_dir = "{board_dir}/m"\n')
-        bindir = self.tmp / "bin"
-        bindir.mkdir()
-        (bindir / "swarm").write_text(f'#!/bin/sh\nexec "{sys.executable}" -m swarm.cli "$@"\n')
-        os.chmod(bindir / "swarm", 0o755)
         env = {**os.environ, "SWARM_CONFIG": str(config), "PYTHONPATH": str(LIB), "SWARM_AUTO_INIT": "1"}
         for v in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "CLAUDECODE"):
             env.pop(v, None)
 
-        def sw(*a, **kw):
-            r = subprocess.run([str(bindir / "swarm"), *a], capture_output=True, text=True,
-                               env={**env, **kw}, timeout=60)
+        def sw(*a):
+            r = subprocess.run([sys.executable, "-m", "swarm.cli", *a], capture_output=True, text=True, env=env,
+                               timeout=60)
             self.assertEqual(r.returncode, 0, r.stderr)
             return r.stdout.strip().splitlines()[-1]
         sw("activate", "--job", "T20", "--session", "main-1")
@@ -482,21 +714,25 @@ class BrokerEndToEndTest(SeatHomeCase):
         wt = self.worktree()
         (Path(wt) / "seat.py").write_text(FAKE_SEAT)
         with mock.patch("swarm.seatjail.available", lambda: (True, "")):
-            argv = seathome.wrap(self.cfg, [sys.executable, "-I", "seat.py", "T20", name], job="T20", seat="judge",
+            argv = seathome.wrap(self.cfg, [sys.executable, "-I", "seat.py", "T20", other], job="T20", seat="judge",
                                  workdir=wt)
         sh = str(seathome.home_dir("T20", "judge"))
+        files = self.tmp / "files"
+        files.mkdir(mode=0o700)
         run = {"harness": "claude", "session_id": sid, "name": name, "cwd": wt}
-        broker = seatbroker.SeatBroker(run, f"{sh}/broker", workdir=wt, roots=[wt, sh], jail_home=str(self.home),
-                                       seat_dir=sh, host_pid=None, bin_dir=str(bindir), base_env=env).start()
+        broker = seatbroker.SeatBroker(run, f"{sh}/broker", workdir=wt, forbid=[wt], seat_dir=sh, config=str(config),
+                                       host_pid=None, base_env=env, file_dir=str(files)).start()
         try:
             r = subprocess.run(argv, capture_output=True, text=True, env={**env, "PGPASSWORD": "never"},
-                               timeout=120)
+                               timeout=180)
         finally:
             broker.stop()
         self.assertEqual(r.returncode, 0, r.stderr)
         out = json.loads(r.stdout.strip().splitlines()[-1])
         self.assertEqual(out["post"]["rc"], 0, out)
-        self.assertEqual(out["forged"]["rc"], 2, out)
+        self.assertEqual(out["forged_as"]["rc"], 0, out)          # --as dropped: posted as the seat itself
+        self.assertEqual(out["forged_abbrev"]["rc"], 2, out)
+        self.assertEqual(out["config"]["rc"], 2, out)
         self.assertEqual(out["read"]["rc"], 0, out)
         self.assertEqual(out["verdict"]["rc"], 0, out)
         self.assertIn("recorded", out["verdict"]["out"])
@@ -505,33 +741,22 @@ class BrokerEndToEndTest(SeatHomeCase):
         with sqlite3.connect(board_dir / "board.sqlite3") as c:
             rows = c.execute("select * from messages").fetchall()
         self.assertTrue(any(name in row and "hello from the jail" in row for row in rows), rows)
-        self.assertFalse(any("forged" in row for row in rows))
+        self.assertTrue(any(name in row and "forged-as" in row for row in rows), rows)
+        self.assertFalse(any(other in row for row in rows if "forged-as" in row))
+        self.assertFalse(any("forged-abbrev" in row or "forged-config" in row for row in rows))
 
 
 class ClientTest(unittest.TestCase):
     def test_no_broker_dir(self):
         with mock.patch.dict(os.environ, {"SWARM_SEAT_BROKER": "/nonexistent"}):
-            self.assertEqual(seatbroker_client.main(["hook", "--host", "claude", "turn"]), 0)
-            self.assertEqual(seatbroker_client.main(["cli", "post"]), 1)
+            self.assertEqual(seatbroker_client.main(["cli", "who", "--job", "J"]), 1)
 
     def test_a_dead_broker_times_out(self):
         d = tmpdir(self)
         clock = iter(range(0, 1000, 10))
-        rc, _, err = seatbroker_client.request("cli", ["read"], str(d), timeout=5, clock=lambda: next(clock),
-                                               sleep=lambda s: None)
-        self.assertEqual(rc, 124)
-        self.assertIn(b"did not answer", err)
-
-    def test_answer_roundtrip(self):
-        d = tmpdir(self)
-        resp = {"rc": 3, "out": base64.b64encode(b"o").decode(), "err": base64.b64encode(b"e").decode()}
-
-        def sleep(_):
-            for n in os.listdir(d):
-                if n.endswith(".req"):
-                    (d / (n[:-4] + ".resp")).write_text(json.dumps(resp))
-        self.assertEqual(seatbroker_client.request("cli", ["read"], str(d), timeout=5, sleep=sleep), (3, b"o", b"e"))
-
+        self.assertIsNone(seatbroker_client.request({"v": 2}, str(d), 5, clock=lambda: next(clock),
+                                                    sleep=lambda s: None))
+        self.assertEqual(os.listdir(d), [])     # the unanswered request is withdrawn
 
 if __name__ == "__main__":
     unittest.main()

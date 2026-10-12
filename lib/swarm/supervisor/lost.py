@@ -37,7 +37,7 @@ def transcript_path(js, a, cfg: dict | None = None) -> Path | None:
     return None
 
 
-def capture_final(board, cfg: dict, js, a, deadline: float | None = None) -> bool:
+def capture_final(board, cfg: dict, js, a, deadline: float | None = None, path=None) -> bool:
     """The final transcript of `a` (one of this host user's agents) now. A capture that fails
     (or runs out of time) is recorded as a pending final (note_pending: the sweeps and the
     supervisor pass retry it) and raised."""
@@ -46,7 +46,7 @@ def capture_final(board, cfg: dict, js, a, deadline: float | None = None) -> boo
     from swarm.supervisor.settings import log
     if not transcripts.enabled(cfg) or not transcripts.owns(a, cfg):
         return False
-    path = transcript_path(js, a, cfg)
+    path = path or transcript_path(js, a, cfg)   # `path`: a jailed seat's transcript the runner kept (Task 20)
     if path is None:
         log(f"transcript of {a.name} ({a.agent_key}) on {js.job} not found; not captured")
         return False

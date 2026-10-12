@@ -1,22 +1,24 @@
-"""A jailed drive seat's only way to the board (Task 20, rr4). The seat has no board password and no
-host-private file in its jail; its `swarm` command and its swarm hooks (swarm.seatbroker_client) leave
-request files in the seat's broker directory, which is bound into that seat's jail only. This broker, a
-thread of the seat's runner (outside the jail, alive exactly as long as the session), runs each request as
-the seat and writes the answer back:
+"""A jailed drive seat's only way to the board (Task 20). The seat has no board password and no host-private file
+in its jail; its `swarm` command and swarm hooks (swarm.seatbroker_client) leave TYPED requests
+(swarm.seatproto) in the seat's broker directory, bound into that seat's jail only. This broker, threads of the
+seat's runner (outside the jail, alive exactly as long as the session), answers them:
 
-- who the seat is comes from the runner's launch record, never from the request: the harness session id
-  (CLAUDE_CODE_SESSION_ID / CODEX_SESSION_ID and CODEX_THREAD_ID), SWARM_HOST and the resume token are
-  stamped into the command's environment, a hook payload's session_id is overwritten with it, and its
-  transcript paths are mapped to the seat's own transcript dir (anything else dropped);
-- a command is one of SEAT_COMMANDS (post, read, verdict, done, seat, review, ...): never bg, config,
-  supervise, transcript, activate or a person's command, and no global option before it;
-- an argument naming an existing file outside the seat's work tree, git dir and seat directory is refused
-  (the command runs outside the jail and could read it for the seat);
-- grants (person.host_pid) bind to the seat's own session process (BROKER_PID_ENV), so a grant written by a
-  seat's hook is used up only by that seat's command.
+- a cli request is validated against seatproto.SCHEMA (unknown command, unknown or identity-like field: refused)
+  and the broker builds the CLI argv itself (seatproto.build_argv): the seat's identity (--key <its session> or
+  --as <its name>) comes from the launch record; a file field arrives as content and is handed to the CLI as a
+  file the broker wrote in the supervisor's private dir, so the CLI never opens a path the seat chose;
+- the CLI runs as `python -I` from the supervisor's own code with cwd "/" and `--config` pinned to the
+  supervisor's config (the only one the CLI's plugin discovery reads: swarm.cli._load_plugins honours a leading
+  --config only), and refuses to finish when a module from the seat's work tree or seat dir was imported;
+- a hook request keeps only seatproto.HOOK_FIELDS of its payload; session_id, transcript_path and cwd are set
+  from the launch record. A Codex seat's session is its thread id, known once the runner read thread.started:
+  before that its cli requests are refused and its guard hook denies (rr12);
+- hooks have their own lane (HOOK_WORKERS, HOOK_TIMEOUT) and cli calls theirs (CLI_WORKERS, at most CLI_QUEUE
+  queued), so a seat's long `swarm wait` never starves its guard; a guard hook that cannot run is answered with
+  a deny (fail closed);
+- grants (person.host_pid) bind to the seat's own session process (BROKER_PID_ENV).
 
-Requests are read through the directory's descriptor without following links, size-capped, at most
-MAX_PARALLEL at once; each command has a wall clock (TIMEOUT)."""
+Requests are read through the directory's descriptor without following links, size-capped."""
 from __future__ import annotations
 
 import base64
@@ -25,23 +27,45 @@ import os
 import re
 import stat
 import subprocess
+import sys
+import tempfile
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 REQ_MAX = 4 * 1024 * 1024
 OUT_MAX = 8 * 1024 * 1024
-MAX_PARALLEL = 4
 POLL = 0.05
-TIMEOUT = {"cli": 900.0, "hook": 50.0}
-SEAT_COMMANDS = frozenset(("post", "read", "who", "verdict", "done", "wait", "status", "snapshot", "tail",
-                           "leave", "seat", "review", "goal-ready", "ask", "answer", "land", "-h", "--help"))
-_EVENT = re.compile(r"^[a-z][a-z-]{0,30}$")
-_PATH_KEYS = ("transcript_path", "agent_transcript_path")
+HOOK_WORKERS, HOOK_TIMEOUT = 4, 20.0
+CLI_WORKERS, CLI_QUEUE, CLI_TIMEOUT, CLI_WAIT_TIMEOUT = 2, 8, 300.0, 900.0
 SESSION_VARS = ("CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT",
                 "CODEX_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED",
-                "SWARM_HOST", "SWARM_SEAT_BROKER", "SWARM_RESUME_TOKEN")
+                "SWARM_HOST", "SWARM_SEAT_BROKER", "SWARM_RESUME_TOKEN", "SWARM_CONFIG", "PYTHONPATH",
+                "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE", "CLAUDE_CONFIG_DIR", "CODEX_HOME")
+AUDIT_EXIT = 97
+LIB_DIR = str(Path(__file__).resolve().parents[2])
+# The brokered CLI: the supervisor's code only (python -I: no PYTHONPATH, no user site, no script dir), and an
+# audit that no module came from the seat's paths.
+BOOT = r"""
+import os, sys
+lib, forbid = sys.argv[1], [p for p in sys.argv[2].split("\n") if p]
+argv = sys.argv[3:]
+sys.path.insert(0, lib)
+def _audit():
+    for m in list(sys.modules.values()):
+        f = getattr(m, "__file__", None)
+        if f and any(os.path.realpath(f).startswith(r.rstrip("/") + "/") for r in forbid):
+            os.write(2, b"swarm: refused: a module from the seat's files was imported\n")
+            os._exit(97)
+import atexit
+atexit.register(_audit)
+from swarm import cli
+_audit()
+sys.argv = ["swarm", *argv]
+rc = cli.main(argv)
+_audit()
+sys.exit(rc or 0)
+"""
 
 
 class Refused(ValueError):
@@ -52,123 +76,169 @@ def _under(path: str, root: str) -> bool:
     return path == root or path.startswith(root.rstrip("/") + "/")
 
 
-class SeatBroker:
-    """The broker of one running seat. `run` is the runner's run dict (harness, session_id, agent_key);
-    `roots` the host paths a command argument may name (work tree, git dir, seat directory); `jail_home`
-    and `seat_claude` map the seat's ~/.claude to its own directory on the host."""
+def seat_transcript(seat_dir: str, harness: str, key: str | None) -> str | None:
+    """The seat's own transcript in its seat directory (Claude: claude/projects/<p>/<session>.jsonl; Codex:
+    codex/sessions/Y/M/D/rollout-*-<thread>.jsonl), found without following a link, or None."""
+    if not key or not re.fullmatch(r"[A-Za-z0-9-]{8,80}", key):
+        return None
+    if harness == "codex":
+        base, depth, want = os.path.join(seat_dir, "codex", "sessions"), 3, lambda n: n.endswith(f"-{key}.jsonl")
+    else:
+        base, depth, want = os.path.join(seat_dir, "claude", "projects"), 1, lambda n: n == f"{key}.jsonl"
+    level = [base]
+    for _ in range(depth):
+        nxt = []
+        for d in level:
+            try:
+                with os.scandir(d) as it:
+                    nxt += [e.path for e in it if e.is_dir(follow_symlinks=False)]
+            except OSError:
+                pass
+        level = nxt
+    for d in level:
+        try:
+            with os.scandir(d) as it:
+                found = [e.path for e in it if want(e.name) and e.is_file(follow_symlinks=False)]
+        except OSError:
+            found = []
+        if found:
+            return sorted(found)[0]
+    return None
 
-    def __init__(self, run: dict, directory: str, *, workdir: str, roots: list[str], jail_home: str,
-                 seat_dir: str, host_pid: int | None, token: str | None = None, bin_dir: str | None = None,
-                 base_env: dict | None = None, runner=subprocess.run):
+
+def read_seat_file(path: str, limit: int) -> bytes | None:
+    """A file of the seat's directory (written by the seat): read without following a link, a regular file of
+    at most `limit` bytes, else None."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > limit:
+            return None
+        chunks, left = [], limit
+        while left > 0:
+            c = os.read(fd, min(left, 1 << 20))
+            if not c:
+                break
+            chunks.append(c)
+            left -= len(c)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
+class SeatBroker:
+    """The broker of one running seat. `run` is the runner's run dict (harness, session_id, agent_key, name),
+    read live: a Codex thread id the runner binds later is used from then on."""
+
+    def __init__(self, run: dict, directory: str, *, workdir: str, forbid: list[str], seat_dir: str,
+                 config: str, host_pid: int | None, token: str | None = None, base_env: dict | None = None,
+                 python: str | None = None, runner=subprocess.run, file_dir: str | None = None):
         self.run, self.dir, self.workdir = run, directory, workdir
-        self.roots = [os.path.realpath(r) for r in roots]
-        self.jail_home, self.seat_dir = jail_home.rstrip("/"), seat_dir.rstrip("/")
+        self.forbid = [os.path.realpath(p) for p in forbid if p]
+        self.seat_dir, self.config = seat_dir.rstrip("/"), config
         self.host_pid, self.token = host_pid, token
-        self.bin = bin_dir or str(Path(__file__).resolve().parents[3] / "bin")
         self.base_env = dict(os.environ if base_env is None else base_env)
+        self.python = python or sys.executable
         self._run = runner
+        self.file_dir = file_dir
         self._stop = threading.Event()
-        self._pool = ThreadPoolExecutor(MAX_PARALLEL)
+        self._hooks = ThreadPoolExecutor(HOOK_WORKERS)
+        self._cli = ThreadPoolExecutor(CLI_WORKERS)
+        self._cli_pending = 0
+        self._lock = threading.Lock()
         self._thread = None
         self.handled = 0
 
     # --- identity ---------------------------------------------------------------------------------
 
     def session(self) -> str | None:
-        return self.run.get("agent_key") or self.run.get("session_id")
+        """The seat's session as the launch record knows it: a Claude seat's session id (set at launch), a
+        Codex seat's thread id (once the runner read it); None until then."""
+        if self.run.get("harness") == "codex":
+            return self.run.get("agent_key") or None
+        return self.run.get("session_id") or self.run.get("agent_key") or None
 
     def env(self) -> dict:
         from swarm import person
         env = {k: v for k, v in self.base_env.items() if k not in SESSION_VARS}
         harness, sid = self.run.get("harness"), self.session()
         env["SWARM_HOST"] = harness
+        env["SWARM_CONFIG"] = self.config
         if harness == "codex":
-            if sid:
-                env["CODEX_SESSION_ID"] = env["CODEX_THREAD_ID"] = sid
+            env["CODEX_SESSION_ID"] = env["CODEX_THREAD_ID"] = sid or ""
             if self.token:
                 env["SWARM_RESUME_TOKEN"] = self.token
-        elif sid:
-            env["CLAUDE_CODE_SESSION_ID"] = sid
+        else:
+            env["CLAUDE_CODE_SESSION_ID"] = sid or ""
         if self.host_pid:
             env[person.BROKER_PID_ENV] = str(self.host_pid)
         return env
 
-    def _map_path(self, value) -> str | None:
-        """A path from a hook payload (a jail path), as the host path of the seat's own file, or None."""
-        if not isinstance(value, str):
-            return None
-        claude = f"{self.jail_home}/.claude/"
-        codex = f"{self.jail_home}/.codex/"
-        for prefix, sub in ((claude, "claude"), (codex, "codex")):
-            if value.startswith(prefix) and ".." not in value.split("/"):
-                return f"{self.seat_dir}/{sub}/{value[len(prefix):]}"
-        return None
+    def payload(self, raw) -> bytes:
+        """The hook payload as the broker passes it on: only HOOK_FIELDS, then session_id, transcript_path
+        and cwd from the launch record."""
+        from swarm import seatproto
+        src = raw if isinstance(raw, dict) else {}
+        out = {k: src[k] for k in seatproto.HOOK_FIELDS if k in src}
+        out["session_id"] = self.session()
+        t = seat_transcript(self.seat_dir, self.run.get("harness") or "claude", self.session())
+        if t:
+            out["transcript_path"] = t
+        out["cwd"] = self.workdir
+        return json.dumps(out).encode()
 
-    def stamp_payload(self, raw: bytes) -> bytes:
+    # --- running ----------------------------------------------------------------------------------
+
+    def _store(self, content: str, made: list) -> str:
+        fd, path = tempfile.mkstemp(prefix="seat-file-", dir=self.file_dir)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(content.encode("utf-8"))
+        made.append(path)
+        return path
+
+    def _exec(self, argv: list[str], stdin: bytes | None, timeout: float, extra_env=None) -> tuple[int, bytes, bytes]:
+        cmd = [self.python, "-I", "-c", BOOT, LIB_DIR, "\n".join([self.workdir, self.seat_dir, *self.forbid]),
+               "--config", self.config, *argv]
+        env = {**self.env(), **(extra_env or {})}
+        res = self._run(cmd, input=stdin, capture_output=True, cwd="/", env=env, timeout=timeout)
+        return res.returncode, res.stdout or b"", res.stderr or b""
+
+    def do_cli(self, req) -> tuple[int, bytes, bytes]:
+        from swarm import seatproto
+        command, fields = seatproto.validate(req)
+        if self.session() is None:
+            raise Refused("the seat's session is not known yet (a Codex seat before its thread started)")
+        made: list = []
         try:
-            payload = json.loads(raw or b"{}")
-        except ValueError:
-            raise Refused("the hook payload is not JSON") from None
-        if not isinstance(payload, dict):
-            raise Refused("the hook payload is not an object")
-        sid = self.session()
-        if sid:
-            payload["session_id"] = sid
-        for key in _PATH_KEYS:
-            if key in payload:
-                mapped = self._map_path(payload[key])
-                if mapped is None:
-                    payload.pop(key)
-                else:
-                    payload[key] = mapped
-        cwd = payload.get("cwd")
-        if not (isinstance(cwd, str) and _under(os.path.realpath(cwd), self.workdir)):
-            payload["cwd"] = self.workdir
-        return json.dumps(payload).encode()
+            argv = seatproto.build_argv(command, fields, key=self.session(), name=self.run.get("name"),
+                                        file_path=lambda c: self._store(c, made))
+            if command == "seat request" and "workdir" not in fields:
+                argv[2:2] = ["--workdir", self.workdir]
+            limit = CLI_WAIT_TIMEOUT if command == "wait" else CLI_TIMEOUT
+            return self._exec(argv, None, limit)
+        finally:
+            for p in made:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
 
-    # --- what may run -----------------------------------------------------------------------------
-
-    def check_args(self, argv: list[str], cwd: str) -> None:
-        for arg in argv:
-            values = [arg] + ([arg.split("=", 1)[1]] if arg.startswith("-") and "=" in arg else [])
-            for v in values:
-                v = v[1:] if v.startswith("@") else v
-                if not v or not ("/" in v or v.startswith(("~", "."))):
-                    continue
-                p = os.path.realpath(os.path.join(cwd, os.path.expanduser(v)))
-                if os.path.lexists(p) and not any(_under(p, r) for r in self.roots):
-                    raise Refused(f"argument {arg[:80]!r} names a file outside the seat's work tree")
-
-    def check_identity(self, args: list[str]) -> None:
-        """Who a command is from is the seat's: --key/--session must name its own session, --as its own name."""
-        own = {"--key": self.session(), "--session": self.session(), "--as": self.run.get("name")}
-        for i, arg in enumerate(args):
-            if arg == "--":
-                return
-            opt, eq, val = arg.partition("=")
-            if opt in own:
-                val = val if eq else (args[i + 1] if i + 1 < len(args) else "")
-                if not own[opt] or val != own[opt]:
-                    raise Refused(f"{opt} must name this seat itself")
-
-    def command(self, req: dict) -> tuple[list[str], bytes | None, str, float]:
-        kind, argv = req.get("kind"), req.get("argv")
-        if kind not in TIMEOUT or not isinstance(argv, list) or not all(isinstance(a, str) for a in argv):
-            raise Refused("malformed request")
-        stdin = req.get("stdin")
-        data = base64.b64decode(stdin) if isinstance(stdin, str) else None
-        cwd = req.get("cwd") if isinstance(req.get("cwd"), str) else self.workdir
-        cwd = os.path.realpath(cwd) if _under(os.path.realpath(cwd), self.workdir) else self.workdir
-        if kind == "hook":
-            if len(argv) != 3 or argv[0] != "--host" or argv[1] != self.run.get("harness") \
-                    or not _EVENT.match(argv[2]):
-                raise Refused("not a hook call of this seat's harness")
-            return [os.path.join(self.bin, "swarm-hook"), *argv], self.stamp_payload(data or b""), cwd, TIMEOUT[kind]
-        if not argv or argv[0] not in SEAT_COMMANDS:
-            raise Refused(f"`swarm {argv[0] if argv else ''}` is not a command a drive seat runs")
-        self.check_identity(argv[1:])
-        self.check_args(argv[1:], cwd)
-        return [os.path.join(self.bin, "swarm"), *argv], data, cwd, TIMEOUT[kind]
+    def do_hook(self, req) -> tuple[int, bytes, bytes]:
+        from swarm import seatbroker_client, seatproto
+        event = req.get("event") if isinstance(req, dict) else None
+        if event not in seatproto.HOOK_EVENTS or set(req) - {"v", "kind", "event", "payload"}:
+            raise Refused("not a hook request")
+        if self.session() is None:
+            return 0, seatbroker_client.deny_output(event, "the seat's session is not known yet"), b""
+        rc, out, err = self._exec(["hook", "--host", self.run.get("harness") or "claude", event],
+                                  self.payload(req.get("payload")), HOOK_TIMEOUT,
+                                  {"SWARM_HOOK_EVENT": event, "SWARM_HOOK_FASTPATH": "1"})
+        if rc != 0 and event in seatproto.GUARD_EVENTS and not out.strip():
+            out = seatbroker_client.deny_output(event, "the seat's guard hook failed")
+        return 0 if event in seatproto.GUARD_EVENTS else rc, out, err
 
     # --- the loop ---------------------------------------------------------------------------------
 
@@ -207,31 +277,35 @@ class SeatBroker:
             os.close(fd)
         os.rename(tmp, f"{rid}.resp", src_dir_fd=d, dst_dir_fd=d)
 
-    def handle(self, d: int, rid: str) -> None:
-        work = f"{rid}.work"
-        raw = self._read(d, work)
+    def handle(self, d: int, rid: str, req) -> None:
+        from swarm import seatbroker_client, seatproto
+        event = req.get("event") if isinstance(req, dict) else ""
         try:
-            os.unlink(work, dir_fd=d)
-        except OSError:
-            pass
-        try:
-            req = json.loads(raw) if raw else None
-            if not isinstance(req, dict):
-                raise Refused("unreadable request")
-            argv, data, cwd, limit = self.command(req)
-            res = self._run(argv, input=data, capture_output=True, cwd=cwd, env=self.env(), timeout=limit)
-            rc, out, err = res.returncode, res.stdout or b"", res.stderr or b""
-        except Refused as exc:
+            if isinstance(req, dict) and req.get("kind") == "hook":
+                rc, out, err = self.do_hook(req)
+            else:
+                rc, out, err = self.do_cli(req)
+        except (Refused, seatproto.ProtocolError) as exc:
             rc, out, err = 2, b"", f"swarm: refused in a drive seat: {exc}\n".encode()
+            if event in seatproto.GUARD_EVENTS:
+                rc, out = 0, seatbroker_client.deny_output(event, f"refused ({exc})")
         except subprocess.TimeoutExpired:
             rc, out, err = 124, b"", b"swarm: the command ran out of time in the seat broker\n"
+            if event in seatproto.GUARD_EVENTS:
+                rc, out = 0, seatbroker_client.deny_output(event, "the seat's guard hook ran out of time")
         except Exception as exc:   # never let one request stop the broker
             rc, out, err = 1, b"", f"swarm: seat broker error ({type(exc).__name__})\n".encode()
+            if event in seatproto.GUARD_EVENTS:
+                rc, out = 0, seatbroker_client.deny_output(event, "the seat broker failed")
         try:
             self._answer(d, rid, rc, out, err)
             self.handled += 1
         except OSError:
             pass
+
+    def _cli_done(self, *_):
+        with self._lock:
+            self._cli_pending -= 1
 
     def poll_once(self, d: int, inline: bool = False) -> int:
         n = 0
@@ -245,11 +319,29 @@ class SeatBroker:
                 os.rename(name, f"{rid}.work", src_dir_fd=d, dst_dir_fd=d)
             except OSError:
                 continue
+            raw = self._read(d, f"{rid}.work")
+            try:
+                os.unlink(f"{rid}.work", dir_fd=d)
+            except OSError:
+                pass
+            try:
+                req = json.loads(raw) if raw else None
+            except ValueError:
+                req = None
             n += 1
             if inline:
-                self.handle(d, rid)
+                self.handle(d, rid, req)
+            elif isinstance(req, dict) and req.get("kind") == "hook":
+                self._hooks.submit(self.handle, d, rid, req)
             else:
-                self._pool.submit(self.handle, d, rid)
+                with self._lock:
+                    busy = self._cli_pending >= CLI_QUEUE
+                    if not busy:
+                        self._cli_pending += 1
+                if busy:
+                    self._answer(d, rid, 75, b"", b"swarm: too many swarm commands of this seat at once; retry\n")
+                    continue
+                self._cli.submit(self.handle, d, rid, req).add_done_callback(self._cli_done)
         return n
 
     def _loop(self) -> None:
@@ -265,7 +357,8 @@ class SeatBroker:
                     pass
                 self._stop.wait(POLL)
         finally:
-            self._pool.shutdown(wait=True, cancel_futures=True)
+            self._hooks.shutdown(wait=True, cancel_futures=True)
+            self._cli.shutdown(wait=True, cancel_futures=True)
             os.close(d)
 
     def start(self) -> "SeatBroker":
@@ -279,20 +372,30 @@ class SeatBroker:
             self._thread.join(timeout)
 
 
+def config_path(cfg: dict, run: dict) -> str:
+    """The supervisor's own config file: the run's, else the one cfg was loaded from, else the default."""
+    p = run.get("config") or (cfg or {}).get("_config_path")
+    if p:
+        return str(p)
+    from swarm import cli
+    return str(cli.DEFAULT_CONFIG)
+
+
 def for_run(cfg: dict, run: dict, *, host_pid: int | None, token: str | None) -> SeatBroker | None:
     """The broker of a jailed drive run (run["seat_home"] set by the runner when it jailed it), or None."""
-    from swarm import paths
     from swarm.supervisor import seathome
+    from swarm.supervisor.settings import private_dir
     sh = run.get("seat_home")
     if not sh:
         return None
     workdir = os.path.realpath(run["cwd"])
-    roots = [workdir, sh]
+    forbid = [workdir, sh]
     try:
-        _, common = seathome.git_dirs(cfg, workdir)
-        if common:
-            roots.append(common)
+        gitdir, common = seathome.git_dirs(cfg, workdir)
+        forbid += [p for p in (gitdir, common) if p]
     except seathome.SeatIsolationError:
         pass
-    return SeatBroker(run, os.path.join(sh, "broker"), workdir=workdir, roots=roots,
-                      jail_home=str(paths.home()), seat_dir=sh, host_pid=host_pid, token=token)
+    files = private_dir() / "broker-files"
+    files.mkdir(mode=0o700, exist_ok=True)
+    return SeatBroker(run, os.path.join(sh, "broker"), workdir=workdir, forbid=forbid, seat_dir=sh,
+                      config=config_path(cfg, run), host_pid=host_pid, token=token, file_dir=str(files))

@@ -3025,10 +3025,15 @@ def _load_plugins(argv, parser: argparse.ArgumentParser):
     from swarm import plugins
     PLUGINS = None
     PLUGIN_DISCOVERY_ERROR = None
-    pre = argparse.ArgumentParser(add_help=False)
+    # Only a LEADING global --config names the config whose plugin dirs are searched (Task 20 rr9): a
+    # `--config` (or an abbreviation of it) further along is a subcommand's argument, never a plugin source.
+    pre = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     pre.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     try:
-        known, rest = pre.parse_known_args(argv)
+        lead = list(argv[:2]) if argv[:1] == ["--config"] else list(argv[:1]) if argv[:1] and \
+            argv[0].startswith("--config=") else []
+        known, _ = pre.parse_known_args(lead)
+        rest = list(argv[len(lead):])
         if rest[:1] == ["hook"]:
             return None
         try:
