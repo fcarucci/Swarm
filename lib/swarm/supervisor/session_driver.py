@@ -42,6 +42,7 @@ LOCK_TRIES = 5              # a doctor or starter probe holds the lock shared fo
 LOCK_RETRY_SECONDS = 0.1
 BUSY_MIN, BUSY_MAX = 1.0, 30.0          # the host pass lock is held by another pass: retry on this backoff
 PENDING_MIN, PENDING_MAX = 2.0, 60.0    # a launch or a close still pending after a pass: attempt backoff
+MIN_GAP = 0.25              # changes within this of the previous pass are one pass (review rr5)
 
 
 def _sha(text: str) -> str:
@@ -137,15 +138,19 @@ def unfinished(board_key: str) -> list:
     except Exception:
         from swarm.supervisor import driver
         try:
-            return driver._scan_files(board_key)[0]
+            leds, bad = driver._scan_files(board_key)
         except Exception:
-            return []
+            return None                  # cannot be read now: unknown, never "none left" (review rr6)
+        return None if bad and not leds else leds
 
 
-def session_jobs(board_key: str, session: str | None, job: str | None = None) -> list[str]:
+def session_jobs(board_key: str, session: str | None, job: str | None = None) -> list[str] | None:
     """The jobs a driver drives: the unfinished drive ledgers whose requester is `session` (every one when
-    `session` is None: `swarm drive run`), only `job` when given."""
-    return sorted(led.job for led in unfinished(board_key)
+    `session` is None: `swarm drive run`), only `job` when given. None when the ledgers cannot be read now."""
+    found = unfinished(board_key)
+    if found is None:
+        return None
+    return sorted(led.job for led in found
                   if (session is None or led.requester_session == session) and (job is None or led.job == job))
 
 
@@ -336,6 +341,7 @@ class Driver:
         self.busy = wake.Backoff(BUSY_MIN, BUSY_MAX)
         self.pending = wake.Backoff(PENDING_MIN, PENDING_MAX)
         self.started = clock()
+        self.last_pass = 0.0
         self.exit_reason: str | None = None
 
     # -- sources
@@ -424,11 +430,22 @@ class Driver:
         return min(waits) if waits else None
 
     def why_stop(self) -> str | None:
-        """Why the loop ends now (kill switch, session gone, no unfinished job of the session), or None."""
+        """Why the loop ends now (kill switch, session gone, positively no unfinished job of the session), or
+        None. Ledgers that cannot be read now are not "none left" (review rr6): the loop retries them."""
         why = self.stop_reason()
-        if why is None and not self.jobs():
+        if why is None and self.jobs() == []:
             why = "no unfinished drive job"
         return why
+
+    def wait(self, timeout) -> set:
+        """Sleep until a reason or the timeout; changes that come within MIN_GAP of the previous pass are
+        coalesced into one pass (review rr5: a burst of touches is one pass, latency stays under a second)."""
+        reasons = self.hub.wait(timeout)
+        if reasons == {wake.CHANGE}:
+            left = MIN_GAP - (time.monotonic() - self.last_pass)
+            if left > 0:
+                reasons |= self.hub.wait(left)
+        return reasons
 
     def run(self) -> str:
         self.setup()
@@ -438,8 +455,17 @@ class Driver:
                 if why is not None:
                     self.exit_reason = why
                     return why
-                res = self.pass_fn(self.jobs())
+                jobs = self.jobs()
+                if jobs is None:                 # the ledgers do not read now: retry, with backoff
+                    _log(f"ledgers unreadable ({self.session or 'drive run'}); retrying")
+                    reasons = self.wait(self.pending.next(False))
+                    if wake.EXIT in reasons:
+                        self.exit_reason = "session gone"
+                        return self.exit_reason
+                    continue
+                res = self.pass_fn(jobs)
                 self.passes += 1
+                self.last_pass = time.monotonic()
                 if res.status == "off":
                     self.exit_reason = "kill switch"
                     return self.exit_reason
@@ -448,7 +474,7 @@ class Driver:
                 if why is not None:
                     self.exit_reason = why
                     return why
-                reasons = self.hub.wait(self.timeout(res))
+                reasons = self.wait(self.timeout(res))
                 if wake.ERROR in reasons:
                     self.degrade()
                 if wake.EXIT in reasons:
@@ -461,7 +487,47 @@ class Driver:
 
 # --- starting a driver -----------------------------------------------------------------------------------
 
-def _child_env(cfg: dict, config_path: str | None) -> dict:
+# --- what the requester's own activation recorded (review rr1) ------------------------------------------
+
+def record_name(session: str) -> str:
+    return f"{PREFIX}{_sha(session)}.env.json"
+
+
+def record_launch_env(session: str, config_path: str | None) -> None:
+    """Record, from the requester's own `swarm activate`, the PATH and config its driver runs with: a driver
+    started later by a hook, or by anything else, takes these, never the starter's (review rr1: a seat must not
+    give a driver its PATH or config, through which a planted harness binary would be launched)."""
+    from swarm import paths
+    from swarm.supervisor.settings import write_private
+    cfgp = os.path.abspath(os.path.expanduser(str(config_path or os.environ.get("SWARM_CONFIG")
+                                                   or paths.config_path())))
+    write_private(record_name(session), json.dumps({"path": os.environ.get("PATH", os.defpath), "config": cfgp}))
+
+
+def launch_env(session: str) -> dict | None:
+    """The recorded {"path", "config"} of `session`, or None (no activation by this session recorded one)."""
+    from swarm.supervisor.settings import read_private
+    try:
+        data = json.loads(read_private(record_name(session)) or b"null")
+    except ValueError:
+        return None
+    if isinstance(data, dict) and isinstance(data.get("path"), str) and isinstance(data.get("config"), str):
+        return data
+    return None
+
+
+def seat_caller(host_pid: int | None = None) -> str | None:
+    """Why the calling process may not start a driver (it is a seat), or None. A seat's environment carries the
+    runner's tag (an agent can unset it, so its host process's environment and ancestry are checked too)."""
+    from swarm.supervisor import procwatch, runner
+    if os.environ.get(runner.RUN_ENV) or os.environ.get("SWARM_RESUME_TOKEN"):
+        return "a supervisor-launched seat never starts a session driver"
+    if host_pid and procwatch.under_runner(host_pid):
+        return "its agent host was launched by the supervisor (a seat), which never starts a session driver"
+    return None
+
+
+def _child_env(cfg: dict, config_path: str | None, path: str | None = None) -> dict:
     """The runner's sanitized environment (runner._allowed_env and [supervise] pass_env), plus where the
     library and the config are."""
     from swarm import paths
@@ -478,6 +544,8 @@ def _child_env(cfg: dict, config_path: str | None) -> dict:
     env.update(paths.pycache_env(os.environ))
     if config_path:
         env["SWARM_CONFIG"] = str(config_path)
+    if path is not None:
+        env["PATH"] = path                      # the requester's recorded PATH, never the starter's
     for k in ("SWARM_NO_SYSTEMD", "SYSTEMROOT", "SystemRoot", "COMSPEC", "PATHEXT", "WINDIR", "USERPROFILE",
               "APPDATA", "LOCALAPPDATA", "TEMP", "TMP"):
         if k in os.environ and k not in env:
@@ -497,9 +565,13 @@ def start(cfg: dict, session: str, host_pid: int, *, config_path: str | None = N
     if token is None:
         _log(f"not started: the session's process {host_pid} cannot be identified")
         return None
-    payload = json.dumps({"session": session, "pid": int(host_pid), "token": token,
-                          "config": str(config_path or "")})
-    proc = popen([sys.executable, "-m", "swarm.supervisor.session_driver"], env=_child_env(cfg, config_path),
+    rec = launch_env(session)
+    if rec is None:
+        _log(f"not started for {session}: no launch environment recorded by its activation")
+        return None
+    payload = json.dumps({"session": session, "pid": int(host_pid), "token": token})
+    proc = popen([sys.executable, "-m", "swarm.supervisor.session_driver"],
+                 env=_child_env(cfg, rec["config"], rec["path"]),
                  stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True,
                  cwd=os.path.expanduser("~"), **_detach())
     try:
@@ -517,20 +589,29 @@ def _detach() -> dict:
 
 
 def ensure(cfg: dict, session: str | None, *, host_pid: int | None = None, config_path: str | None = None,
-           popen=subprocess.Popen) -> str:
+           popen=subprocess.Popen, activation: bool = False) -> str:
     """Start the session's driver when it owns an unfinished drive job of this board and none runs. Returns
-    what happened ("started", "running", "no job", "no session", "no host process"). Never raises."""
+    what happened ("started", "running", "no job", "no session", "no host process", "refused: ..."). Never
+    raises. `activation`: the requester's own `swarm activate`, which records the PATH and config every later
+    start of this session's driver uses (record_launch_env); any other start (a hook) uses those, and a seat,
+    or a caller whose agent host is a seat, never starts one (review rr1)."""
     try:
         if not session:
             return "no session"
+        from swarm.supervisor import procwatch
+        pid = host_pid or procwatch.nearest_host()
+        why = seat_caller(pid)
+        if why:
+            _log(f"refused for {session}: {why}")
+            return f"refused: {why}"
+        if activation:
+            record_launch_env(session, config_path)
         if os.environ.get("SWARM_SESSION_DRIVER") == "0":
             return "disabled"
         if held(lock_name(session)):
             return "running"
         if not session_jobs(_store_key(cfg), session):
             return "no job"
-        from swarm.supervisor import procwatch
-        pid = host_pid or procwatch.nearest_host()
         if not pid:
             return "no host process"
         return "started" if start(cfg, session, pid, config_path=config_path, popen=popen) else "running"
@@ -574,7 +655,6 @@ def serve(cfg: dict, *, session: str | None, job: str | None, watch, config_path
 def main(argv=None) -> int:
     """`python -m swarm.supervisor.session_driver`, its parameters as JSON on stdin (what start() writes)."""
     from pathlib import Path
-    from swarm import paths
     from swarm.cli import load_config
     from swarm.supervisor import procwatch
     try:
@@ -582,7 +662,14 @@ def main(argv=None) -> int:
         session, pid, token = str(params["session"]), int(params["pid"]), params.get("token")
     except Exception:
         return 2
-    config_path = params.get("config") or os.environ.get("SWARM_CONFIG") or str(paths.config_path())
+    rec = launch_env(session)          # however it was started: the requester's recorded PATH and config only
+    why = "no launch environment recorded by its activation" if rec is None else seat_caller(pid)
+    if why:
+        _log(f"driver for {session} not run: {why}")
+        return 1
+    config_path = rec["config"]
+    os.environ["PATH"] = rec["path"]   # what the runners (and the harness binaries they resolve) see
+    os.environ["SWARM_CONFIG"] = config_path
     try:
         cfg = load_config(Path(config_path).expanduser())
     except Exception as exc:
