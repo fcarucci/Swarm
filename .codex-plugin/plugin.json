@@ -1,6 +1,6 @@
 {
   "name": "swarm",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "Coordinate subagents through a shared message board: names, roster, messages, judges and verifiers. Hooks act on tool calls only inside an active swarm job (trust them in /hooks); a first session sets up a venv, a launcher, config and Codex sandbox roots, and on Linux a background supervisor timer. See README: What Swarm changes on your machine.",
   "author": {
     "name": "Francesco Carucci",
