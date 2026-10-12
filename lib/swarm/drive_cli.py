@@ -29,6 +29,10 @@ DEFAULT_MODELS = {"lead": "opus", "judge": "opus", "security": "opus", "engineer
 REPORT_MAX = 64 * 1024
 REQUIREMENT_MAX = 1024 * 1024
 CANDIDATE = re.compile(r"(?:report:)?[^\s@]+@[0-9a-f]{7,64}")
+PINS_MAX = 256                 # requirement files a job may pin (N5)
+PIN_PATH_MAX = 256             # characters of a pinned path (the ledger's key limit)
+CLI_LEDGER_MAX = 2 * 1024 * 1024   # a CLI write keeps the ledger under this: headroom up to ledger.MAX_BYTES
+                                   # stays for the driver's own writes (N5)
 WITHDRAW_REASON_MAX = 1024     # characters of a --withdraw-artifact reason (the ledger keeps it)
 INTEGRATED_MAX = 512           # groups a ledger may record as integrated or withdrawn
 
@@ -112,6 +116,15 @@ def _owner_roots(bk: str, job: str) -> list:
     owner = enrolment.find_job_owner(bk, job)
     roots = getattr(owner, "roots", None) if owner is not None else None
     return list(roots) if isinstance(roots, (list, tuple)) else []
+
+
+def _check_headroom(led) -> None:
+    """Refuse a CLI change that would leave the ledger over CLI_LEDGER_MAX: the room above it, up to
+    ledger.MAX_BYTES, is the driver's, so a lead's pins, acks or withdrawals can never wedge the driver."""
+    size = ledger.serialized_size(led)
+    if size > CLI_LEDGER_MAX:
+        raise Refuse(f"the drive ledger would be {size} bytes, over the {CLI_LEDGER_MAX} a command may fill "
+                     "(the rest is the driver's): a person must look at this job")
 
 
 def _drive_ledger(bk: str, job: str):
@@ -240,6 +253,7 @@ def cmd_seat_release(board, cfg, args) -> int:
         if group not in led.integrated and len(led.integrated) >= INTEGRATED_MAX:
             raise Refuse(f"the ledger already records {INTEGRATED_MAX} groups: a person must look at this job")
         led.integrated[group] = {**(led.integrated.get(group) or {}), "withdrawn": reason}
+        _check_headroom(led)
         led.save()
     new = _set_state(board, row, "released", args.job)
     # a withdrawal is its own record (drivegate receipts kind=withdraw, id = the seat row)
@@ -303,6 +317,7 @@ def cmd_seat_ack(board, cfg, args) -> int:
     led.watermarks[mark] = max(led.watermarks.get(mark, 0), args.upto)
     for eid in sorted(events):
         led.watermarks[f"{EVACK}{lead}:{eid}"] = 1
+    _check_headroom(led)
     led.save()
     return _record("ack", args.upto, 1)   # drivegate receipts kind=ack id=<the acknowledged message id>
 
@@ -365,16 +380,21 @@ def cmd_goal_ready(board, cfg, args) -> int:
     roots = [os.path.realpath(r) for r in _owner_roots(bk, args.job)]
     for path in args.add_requirements or []:
         real = os.path.realpath(os.path.expanduser(path))
+        if len(real) > PIN_PATH_MAX:
+            raise Refuse(f"requirement path {real[:80]}... is over {PIN_PATH_MAX} characters: pin a shorter path")
         if not any(_within(real, r) for r in roots):
             raise Refuse(f"requirement {path} is outside the job's work roots")
         blob = blob_id(_read_regular(path, REQUIREMENT_MAX, "requirement"))
         if real in pins and pins[real] != blob:
             raise Refuse(f"requirement {path} is pinned at another blob: a pinned requirement cannot be replaced")
         pins[real] = blob
+        if len(pins) > PINS_MAX:
+            raise Refuse(f"a job pins at most {PINS_MAX} requirement files: name the requirements, not every file")
     if not pins:
         raise Refuse("a goal-ready needs at least one pinned requirement (--add-requirements PATH)")
     if pins != led.pinned_requirements:
         led.pinned_requirements = pins
+        _check_headroom(led)
         led.save()
     req = requirements_digest(pins)
     name = board.active_agent_name(who.split(" ", 1)[1]) if who.startswith("lead ") else "person"
