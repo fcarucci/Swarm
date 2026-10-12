@@ -1807,7 +1807,8 @@ class Board(abc.ABC):
             return None
         quiet_since = quiet_start(js, since, now)
         total = max(close_minutes or 0, notice_minutes)
-        if close_minutes and close_minutes > 0 and now - quiet_since >= _dt.timedelta(minutes=total):
+        closable = self._stale_closable(js)
+        if closable and close_minutes and close_minutes > 0 and now - quiet_since >= _dt.timedelta(minutes=total):
             from swarm.review import auto_close_pending
             met = js.verdict == "met"
             unfinalized = bool(js.goal) and auto_close_pending(self, js.job)
@@ -1818,14 +1819,26 @@ class Board(abc.ABC):
                        else "auto-closed: waiting with no live agents; verdict unreachable"
                        if js.verdict == "unreachable"
                        else "auto-closed: waiting with no live agents and no verdict")
-            guard = CloseGuard() if met or not goal_unmet(js) else CloseGuard(False, js.goal, js.max_hours)
+            guard = CloseGuard()
             return ExpiryAction("completed" if met else "failed", outcome, None, guard, stale=True)
         if notice is None:
             left = f"; auto-closes in {max(1, int(total - (now - quiet_since).total_seconds() / 60))} min" \
-                if close_minutes and close_minutes > 0 else ""
+                if closable and close_minutes and close_minutes > 0 else ""
             self.post(js.job, "swarm", f"{STALE_NOTICE}{quiet_since.isoformat(timespec='seconds')}; "
                       f"waiting on {self._waiting_reason(js)}{left}. Close it (swarm deactivate) or resume work.")
         return None
+
+    def _stale_closable(self, js: JobStatus) -> bool:
+        """Whether the stale-waiting rule may CLOSE the job (it may always post its notice). Never a job
+        with an unmet goal (only a met or unreachable verdict, or a person, ends it), never one whose own
+        limit is 0 (`--stall-hours 0`: never closed by quiet time), never one waiting on a person."""
+        if goal_unmet(js) or js.max_hours == 0:
+            return False
+        try:
+            from swarm.supervisor.orphans import human_question
+            return not human_question(self, js)
+        except ImportError:
+            return True
 
     @staticmethod
     def _waiting_reason(js: JobStatus) -> str:

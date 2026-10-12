@@ -49,6 +49,14 @@ class StaleWaitingTests(Env):
             b.allocate_name(key, job, "worker")
             b.agent_stopped(key)
 
+    def waiting_job(self, seconds, job="J"):
+        """A goal-less job waiting on a wait, its only agent gone: the stale-waiting rule may close it."""
+        self.activate(job)
+        self.finished_agent(job)
+        rc, _, err = self.cli("wait", "--job", job, "--on", "the human")
+        self.assertEqual(rc, 0, err)
+        self.quiet(seconds, job)
+
     def waiting_goal_job(self, seconds, job="J"):
         """A goal job with no verdict whose only agent has left: `waiting (goal not met)`."""
         self.activate(job, "--no-drive", "--reason", "legacy goal test", "--goal", "ship it")
@@ -60,8 +68,8 @@ class StaleWaitingTests(Env):
 
     # ---- a reopened job's quiet time starts at the reopening, not at the old silence
     def test_a_reactivated_job_is_not_closed_by_its_old_silence(self):
-        self.waiting_goal_job(10 * 3600)            # idle for hours, past the close threshold
-        self.activate("J", "--goal", "ship it")     # reopened now
+        self.waiting_job(10 * 3600)            # idle for hours, past the close threshold
+        self.activate("J")     # reopened now
         self.sweep()
         self.assertEqual(self.job().status, "active")
         self.assertEqual(self.notices(), [])
@@ -71,8 +79,8 @@ class StaleWaitingTests(Env):
         self.assertEqual(self.notices(), [])
 
     def test_a_reactivated_job_still_closes_once_quiet_again(self):
-        self.waiting_goal_job(10 * 3600)
-        self.activate("J", "--goal", "ship it")
+        self.waiting_job(10 * 3600)
+        self.activate("J")
         self.h.backdate_job("J", activated_at=CLOSE_AT)
         self.sweep()
         self.assertEqual(self.job().status, "failed")
@@ -86,14 +94,28 @@ class StaleWaitingTests(Env):
         self.assertEqual(len(self.notices()), 1)
 
     def test_the_notices_quiet_start_decides_the_close(self):
-        self.waiting_goal_job(250 * MIN)
+        self.waiting_job(250 * MIN)
         since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=250)).isoformat(timespec="seconds")
         with self.board() as b:
+            b.post("J", "agent-1", "still thinking")
+            last = b.messages_after(0, "J")[-1].id
             b.post("J", "swarm", f"{STALE_NOTICE}{since}; auto-closes in 5 min")
-            mid = b.messages_after(0, "J")[-1].id
-        self.h.backdate_message(mid, 119 * MIN)      # the notice is the newest activity, 119 min old
+            notice = b.messages_after(0, "J")[-1].id
+        self.h.backdate_message(last, 100 * MIN)       # the newest activity: 100 min old
+        self.h.backdate_message(notice, 90 * MIN)      # the notice after it, carrying a quiet start 250 min ago
         self.sweep()
-        self.assertEqual(self.job().status, "failed")     # quiet since the notice's start: 250 min
+        self.assertEqual(self.job().status, "failed")  # the notice's quiet start decides, not the 100 min
+
+    def test_a_notice_from_before_the_reopening_does_not_count_the_old_quiet(self):
+        self.waiting_job(300 * MIN)
+        since = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=300)).isoformat(timespec="seconds")
+        with self.board() as b:
+            b.post("J", "swarm", f"{STALE_NOTICE}{since}; auto-closes in 5 min")
+            notice = b.messages_after(0, "J")[-1].id
+        self.h.backdate_message(notice, 200 * MIN)
+        self.h.backdate_job("J", activated_at=150 * MIN)      # reopened 150 min ago: quiet for 150, not 300
+        self.sweep()
+        self.assertEqual(self.job().status, "active")
 
     # ---- the notice
     def test_one_notice_when_quiet_past_stale_waiting_minutes(self):
@@ -121,13 +143,51 @@ class StaleWaitingTests(Env):
 
     # ---- the close
     def test_auto_closes_failed_without_a_verdict(self):
-        self.waiting_goal_job(CLOSE_AT)
-        _, out, _ = self.sweep()
+        self.waiting_job(CLOSE_AT)
+        self.sweep()
         s = self.job()
         self.assertEqual((s.status, s.closed_by), ("failed", "auto"))
         self.assertEqual(s.outcome, OUTCOME)
         self.assertIsNotNone(s.finished_at)
         self.assertLessEqual(len(self.notices()), 1)
+
+    def test_a_goal_job_without_a_met_verdict_is_never_closed_but_gets_its_notice(self):
+        self.waiting_goal_job(CLOSE_AT + 10 * 3600)
+        for _ in range(3):
+            self.sweep()
+        self.assertEqual(self.job().status, "active")
+        self.assertEqual(len(self.notices()), 1)
+        self.assertNotIn("auto-closes in", self.notices()[0].message)
+
+    def test_a_reactivated_long_idle_goal_job_with_stall_hours_zero_stays_open(self):
+        self.waiting_goal_job(10 * 3600)
+        self.activate("J", "--goal", "ship it", "--stall-hours", "0")
+        self.h.backdate_job("J", activated_at=CLOSE_AT + 3600)
+        self.finished_agent("J", "agent-2")
+        for _ in range(3):
+            self.sweep()
+        self.assertEqual(self.job().status, "active")
+
+    def test_a_job_with_its_own_limit_of_zero_is_never_closed_by_quiet_time(self):
+        self.activate("J", "--stall-hours", "0")
+        self.finished_agent()
+        rc, _, err = self.cli("wait", "--job", "J", "--on", "the human")
+        self.assertEqual(rc, 0, err)
+        self.quiet(CLOSE_AT + 3600)
+        self.sweep()
+        self.assertEqual(self.job().status, "active")
+
+    def test_a_job_with_a_question_for_a_person_is_never_closed(self):
+        self.config.write_text(self.config.read_text() + "[job]\nstall_hours = 0\n")   # (the stale rule alone)
+        self.activate("J")
+        self.finished_agent()
+        rc, _, err = self.cli("wait", "--job", "J", "--on", "the human")
+        self.assertEqual(rc, 0, err)
+        with self.board() as b:
+            b.post("J", "agent-1", "Francesco, shall I merge it?", to="Francesco")
+        self.quiet(CLOSE_AT + 3600)
+        self.sweep()
+        self.assertEqual(self.job().status, "active")
 
     def test_a_wait_job_without_a_goal_also_closes(self):
         self.activate("J")

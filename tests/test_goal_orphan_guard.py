@@ -55,6 +55,22 @@ class OrphanGuardTests(unittest.TestCase):
         self.h.conn.execute("UPDATE jobs SET status = 'failed', outcome = 'x', closed_by = 'auto' WHERE job = 'd'")
         self.assertEqual(self.status("d"), "failed")
 
+    def test_the_stale_waiting_close_of_a_goal_job_or_a_zero_limit_job_is_refused(self):
+        stale = "auto-closed: waiting with no live agents and no verdict"
+        self.board.open_job("g2", None, "t", None, "u", goal="ship it")
+        self.h.conn.execute("UPDATE jobs SET status='failed', outcome=%s, closed_by='auto' WHERE job='g2'", (stale,))
+        self.assertEqual(self.status("g2"), "active")
+        self.h.conn.execute("UPDATE jobs SET verdict='unreachable' WHERE job='g2'")
+        self.h.conn.execute("UPDATE jobs SET status='failed', outcome=%s, closed_by='auto' WHERE job='g2'", (stale,))
+        self.assertEqual(self.status("g2"), "failed")                  # a settled goal may close
+        self.board.open_job("z", None, "t", None, "u")
+        self.h.conn.execute("UPDATE jobs SET max_hours=0 WHERE job='z'")
+        self.h.conn.execute("UPDATE jobs SET status='failed', outcome=%s, closed_by='auto' WHERE job='z'", (stale,))
+        self.assertEqual(self.status("z"), "active")
+        self.board.open_job("p", None, "t", None, "u")
+        self.h.conn.execute("UPDATE jobs SET status='failed', outcome=%s, closed_by='auto' WHERE job='p'", (stale,))
+        self.assertEqual(self.status("p"), "failed")                   # a plain stale job still closes
+
     def test_the_view_and_python_agree_on_a_future_run_start(self):
         import datetime as dt
         from swarm.board import base
