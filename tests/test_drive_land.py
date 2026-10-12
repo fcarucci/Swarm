@@ -11,6 +11,7 @@ import unittest
 from unittest import mock
 
 import support  # noqa: F401
+from support import add_backend_variants, subclasses_of
 from swarm import compat, land, receipts
 from swarm.land import (Destination, LandEnv, LandRefused, Request, credential_from_pin,
                         destinations_from_owner, lease_key, lease_keys, normalize_url, parse_artifact)
@@ -29,6 +30,7 @@ class Crash(BaseException):
 
 
 class LandCase(unittest.TestCase):
+    harness_factory = staticmethod(support.drive_backends()["memory"])    # variants at the end swap it
     def setUp(self):
         self.root = os.path.realpath(tempfile.mkdtemp(prefix="land-", dir=support.SANDBOX))
         self.addCleanup(shutil.rmtree, self.root, True)
@@ -37,7 +39,8 @@ class LandCase(unittest.TestCase):
         p = mock.patch.dict(os.environ, support.home_env(self.home))
         p.start()
         self.addCleanup(p.stop)
-        self.h = support.MemoryHarness()
+        self.h = self.harness_factory(self.id().rsplit(".", 1)[0])
+        self.addCleanup(self.h.close)
         self.h.reset()
         self.board = self.h.board()
         self.addCleanup(self.board.close)
@@ -1186,6 +1189,10 @@ class Requests(LandCase):
             self.receipt(mid)
             ids.append(mid)
         self.assertEqual([r.id for r in self.find()], ids)
+
+
+# one subclass per backend of support.drive_backends() beyond memory (Postgres only with SWARM_TEST_CONFIG)
+add_backend_variants(globals(), *subclasses_of(globals(), LandCase))
 
 
 if __name__ == "__main__":

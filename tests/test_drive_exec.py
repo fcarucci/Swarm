@@ -12,7 +12,7 @@ import unittest
 from types import SimpleNamespace as NS
 from unittest import mock
 
-from support import MemoryHarness, SqliteHarness
+from support import MEMORY_ONLY, SqliteHarness, add_backend_variants, drive_backends
 from test_hooks_cli import Env
 from drive_fixtures import ho, seat as sv, snap, v
 
@@ -73,7 +73,7 @@ class ExecEnv(Env):
                 c.execute("UPDATE seats SET " + ", ".join(f"{k} = ?" for k in keys) + " WHERE job = ? AND seat = ?",
                           [cols[k] for k in keys] + ["J", name])
         else:
-            self.skipTest("no raw row access on this backend")
+            self.skipTest(MEMORY_ONLY)
 
     def delete_restarts(self):
         if hasattr(self.b, "_s"):
@@ -83,7 +83,7 @@ class ExecEnv(Env):
             with self.b._tx() as c:
                 c.execute("DELETE FROM restarts")
         else:
-            self.skipTest("no raw row access on this backend")
+            self.skipTest(MEMORY_ONLY)
 
     # -- helpers
     def now(self, seconds=0):
@@ -835,12 +835,20 @@ class ReconcileTests(ExecEnv):
 
 class UnlaunchedSeatSweepTests(unittest.TestCase):
     """A seat `running` with no launch_id can be ended on every backend (board/seats.py)."""
+    harness_factory = staticmethod(drive_backends()["memory"])    # variants at the end swap it
+
+    def make(self):
+        h = self.harness_factory(self.id().rsplit(".", 1)[0])
+        self.addCleanup(h.close)
+        return h
 
     def plant(self, h, b):
         b.open_job("J", None, None, None, "me", goal="G")
         s = b.request_seat("J", 1, "a", role="engineer", harness="claude", model="haiku", workdir="/w/a",
                            brief_path="/w/a/B.md", requested_by="lead")
-        if h.name == "memory":
+        if h.name == "postgres":
+            h.conn.execute("UPDATE seats SET state = 'running', launch_id = NULL WHERE id = %s", (s.id,))
+        elif hasattr(h, "store"):
             with h.store.lock:
                 next(r for r in h.store.seats if r["id"] == s.id).update(state="running", launch_id=None)
         else:
@@ -858,16 +866,11 @@ class UnlaunchedSeatSweepTests(unittest.TestCase):
         self.assertEqual(driver_exec.sweep_unlaunched_seats(b, "J"), 0)
         return s
 
-    def test_memory(self):
-        self.run_on(MemoryHarness("t8a-sweep"))
-
-    def test_sqlite(self):
-        h = SqliteHarness()
-        self.addCleanup(h.close)
-        self.run_on(h)
+    def test_the_sweep_ends_an_unlaunched_running_seat_once(self):
+        self.run_on(self.make())
 
     def test_a_running_seat_with_an_open_launch_still_cannot_leave_running(self):
-        h = MemoryHarness("t8a-open")
+        h = self.make()
         h.reset()
         b = h.board()
         self.addCleanup(b.close)
@@ -1135,7 +1138,7 @@ class FixRoundTests(ExecEnv):
 
     def memory_only(self):
         if not hasattr(self.b, "_s"):
-            self.skipTest("raw row forging is done on the memory backend (sqlite refuses it by index)")
+            self.skipTest(MEMORY_ONLY)
 
     # -- H1: a forged duplicate restart row never unbooks, cancels or releases a live session
     def test_H1_a_forged_duplicate_row_does_not_unbook_or_cancel_a_live_session(self):
@@ -1718,6 +1721,9 @@ class BarrierTests(ExecEnv):
         src = open(runner.__file__).read()
         loop = src.index("while proc.poll() is None:")
         self.assertIn('barrier.hit("runner_mid_session")', src[loop:loop + 200])
+
+
+add_backend_variants(globals(), UnlaunchedSeatSweepTests)   # file, sqlite, and postgres with SWARM_TEST_CONFIG
 
 
 if __name__ == "__main__":

@@ -11,13 +11,12 @@ import os
 import tempfile
 import time
 import unittest
-import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 import support  # noqa: E402
-from support import SANDBOX, MemoryHarness, home_env  # noqa: F401  (puts lib/ on sys.path)
+from support import SANDBOX, add_backend_variants, drive_backends, home_env, subclasses_of  # noqa: F401  (puts lib/ on sys.path)
 
 from swarm import enrolment, receipts  # noqa: E402
 from swarm.board.autoinit import store_key  # noqa: E402
@@ -83,12 +82,14 @@ support_posix = support.posix_only("planted symlinks (drive mode is Linux-only)"
 
 
 class PassCase(unittest.TestCase):
+    harness_factory = staticmethod(drive_backends()["memory"])
     def setUp(self):
         self.home = Path(tempfile.mkdtemp(dir=SANDBOX, prefix="pass-home-"))
         env = mock.patch.dict(os.environ, home_env(self.home))
         env.start()
         self.addCleanup(env.stop)
-        self.h = MemoryHarness("pass-" + uuid.uuid4().hex[:8])
+        self.h = self.harness_factory(self.id().rsplit(".", 1)[0])
+        self.addCleanup(self.h.close)
         self.h.reset()
         self.cfg = self.h.cfg
         self.board = self.h.board()
@@ -1485,6 +1486,9 @@ class PromptTests(PassCase):
         from swarm.supervisor import driver_snapshot
         pins = {"B.md": "2" * 40, "A.md": "1" * 40}
         self.assertEqual(prompts.requirements_digest(pins), driver_snapshot.requirements_digest(pins))
+
+
+add_backend_variants(globals(), *subclasses_of(globals(), PassCase))
 
 
 if __name__ == "__main__":

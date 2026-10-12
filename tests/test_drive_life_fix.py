@@ -7,7 +7,7 @@ import os
 import unittest
 from unittest import mock
 
-from support import MemoryHarness  # noqa: F401
+from support import add_backend_variants, memory_store_only, subclasses_of  # noqa: F401
 import drive_fixtures as fx
 import test_drive_lifecycle as T
 from test_drive_lifecycle import life, ledger, MIN, CAND, REQ
@@ -73,6 +73,7 @@ class QuestionExpiryTests(T.LifeCase):
                                 default_value="left", created_by=seat, seat=seat, generation=1)
         return b, fx.q(b.id, seat=seat, default="left", until=self.t0 + until * MIN, receipt_id=1, **q)
 
+    @memory_store_only
     def test_a_backdated_board_created_at_does_not_shorten_the_deadline(self):
         b, q = self.ask(until=240)
         with self.h.store.lock:
@@ -146,6 +147,7 @@ class OrphanQuestionLedgerTests(T.LifeCase):
 
 
 class LockHostTests(T.LifeCase):
+    @memory_store_only
     def test_a_row_on_another_host_is_neither_fenced_nor_ended(self):
         lid = self.launch(locks=["repo:x"])
         with self.h.store.lock:
@@ -157,6 +159,7 @@ class LockHostTests(T.LifeCase):
         self.assertEqual(len(self.b.drive_locks()), 1)                 # it keeps blocking
         self.assertEqual(self.run.calls, [])                           # nothing was stopped
 
+    @memory_store_only
     def test_a_lock_rehomed_to_another_host_is_not_touched_here(self):
         lid = self.launch(locks=["repo:x"])
         with self.h.store.lock:
@@ -165,6 +168,7 @@ class LockHostTests(T.LifeCase):
         self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.at(200), hooks=self.run.hooks()), 0)
         self.assertIsNone(self.row(lid).ended_at)
 
+    @memory_store_only
     def test_a_forged_ended_duplicate_row_does_not_release_a_live_launchs_locks(self):
         lid = self.launch(locks=["repo:x"])
         live = self.row(lid)
@@ -196,6 +200,7 @@ class LockHostTests(T.LifeCase):
             self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.at(1), hooks=self.run.hooks(),
                                                       board_key="bk"), 0)
 
+    @memory_store_only
     def test_another_hosts_lock_is_never_released_here_even_when_its_row_ended(self):
         lid = self.launch(locks=["repo:x"])
         self.b.finish_restart(self.row(lid).id, "cancelled")
@@ -231,6 +236,7 @@ class RolloverLeadTests(T.LifeCase):
         new = self.b.seat("J", 2, "lead")
         self.assertEqual((new.brief_path, new.workdir, new.model, new.role), ("/w/lead/B.md", "/w/lead", "opus", "lead"))
 
+    @memory_store_only
     def test_an_edited_board_row_does_not_pick_the_new_leads_brief_or_workdir(self):
         s = self.lead()
         with self.h.store.lock:
@@ -304,6 +310,7 @@ class StuckTerminalTests(T.LifeCase):
 
 
 class HaltLedgerTests(T.LifeCase):
+    @memory_store_only
     def test_a_halt_killed_attempt_is_halted_but_a_board_edit_cannot_make_one(self):
         keep = self.launch("old")
         old_ended = self.launch("pre")
@@ -346,6 +353,7 @@ class HaltLedgerTests(T.LifeCase):
 
 
 class RereviewTests(T.LifeCase):
+    @memory_store_only
     def test_a_forged_open_duplicate_does_not_hide_the_real_session(self):
         lid = self.launch(locks=["repo:x"])
         real = self.row(lid)
@@ -360,6 +368,7 @@ class RereviewTests(T.LifeCase):
         self.assertEqual(len(self.b.drive_locks()), 1)
         self.assertEqual(self.run.calls[0][0], "stop")
 
+    @memory_store_only
     def test_an_ended_row_on_another_host_does_not_free_the_lock(self):
         lid = self.launch(locks=["repo:x"])
         self.b.finish_restart(self.row(lid).id, "cancelled")
@@ -369,6 +378,7 @@ class RereviewTests(T.LifeCase):
         self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.at(200), hooks=self.run.hooks()), 0)
         self.assertEqual(len(self.b.drive_locks()), 1)
 
+    @memory_store_only
     def _dup_rows(self, lid):
         real = self.row(lid)
         with self.h.store.lock:
@@ -396,6 +406,7 @@ class RereviewTests(T.LifeCase):
         self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.at(200), hooks=self.run.hooks()), 1)
         self.assertTrue(all(r.ended_at is not None for r in self.b.restarts("J") if r.id in ids))
 
+    @memory_store_only
     def test_a_lock_and_row_on_another_host_are_left_alone(self):
         lid = self.launch(locks=["repo:x"])
         with self.h.store.lock:
@@ -709,6 +720,10 @@ class QuietStartTests(T.LifeCase):
         now = self.b.now()
         self.assertFalse(bb.orphaned(js, now, 30))                      # reopened 10 min ago
         self.assertTrue(bb.orphaned(js, now + dt.timedelta(minutes=21), 30))
+
+
+# one subclass per backend beyond memory; the raw-row forgery tests skip off the memory store
+add_backend_variants(globals(), *subclasses_of(globals(), T.LifeCase))
 
 
 if __name__ == "__main__":
