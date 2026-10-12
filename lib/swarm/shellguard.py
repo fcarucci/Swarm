@@ -1591,7 +1591,8 @@ def _swarm_launchers() -> set[str]:
     """The swarm command given to agents (the plugin's bin/swarm) and the user launcher: trusted as programs."""
     try:
         from swarm import paths
-        return {os.path.realpath(str(p)) for p in (paths.agent_bin(), paths.launcher_path())}
+        found = [str(p) for p in (paths.agent_bin(), paths.launcher_path())]
+        return {os.path.realpath(p) for p in found} | {os.path.realpath(os.path.splitext(p)[0]) for p in found}
     except Exception:
         return set()
 

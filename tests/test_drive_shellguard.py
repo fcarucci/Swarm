@@ -417,6 +417,7 @@ class Round4ScriptFiles(unittest.TestCase):
         self.td = tempfile.TemporaryDirectory()
         self.addCleanup(self.td.cleanup)
         self.repo = os.path.realpath(self.td.name)
+        self.rs = self.repo.replace(os.sep, "/")          # as a shell word (a Windows path has backslashes)
         git = ["git", "-C", self.repo, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
         subprocess.run(["git", "init", "-q", self.repo], check=True)
         os.makedirs(os.path.join(self.repo, "scripts"))
@@ -440,7 +441,7 @@ class Round4ScriptFiles(unittest.TestCase):
     def test_tracked_unmodified_scripts_run_in_every_form(self):
         for cmd in ("./scripts/check.sh", "scripts/check.sh", "bash scripts/check.sh", "sh ./scripts/check.sh",
                     "python3 tool.py", "source env.sh", ". ./env.sh", "make -f Makefile", "bash -- scripts/check.sh",
-                    f"bash {self.repo}/scripts/check.sh", "cd scripts && ./check.sh", "cd scripts; bash check.sh",
+                    f"bash {self.rs}/scripts/check.sh", "cd scripts && ./check.sh", "cd scripts; bash check.sh",
                     "timeout 60 ./scripts/check.sh", "env A=1 ./scripts/check.sh"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(self.at(cmd), cmd)
@@ -461,7 +462,7 @@ class Round4ScriptFiles(unittest.TestCase):
         self.assertTrue(self.at("env -C scripts ./scripts/check.sh"))   # the command runs elsewhere
         self.assertTrue(self.at("cd \"$D\"/.. && ./scripts/check.sh"))
         self.assertTrue(self.at("(cd scripts) ; ./check.sh"))          # a subshell's cd does not last
-        self.assertIsNone(self.at(f"{self.repo}/scripts/check.sh", cwd=None))
+        self.assertIsNone(self.at(f"{self.rs}/scripts/check.sh", cwd=None))
 
     @unittest.skipIf(os.name == "nt", "symlinks")
     def test_a_link_out_of_the_repository_and_a_renamed_shell_are_refused(self):
@@ -490,7 +491,7 @@ class Round4ScriptFiles(unittest.TestCase):
 
     def test_the_swarm_launcher_runs(self):
         from swarm import paths
-        launcher = os.path.join(self.repo, "new.sh")
+        launcher = f"{self.rs}/new.sh"
         with mock.patch.object(paths, "agent_bin", return_value=shellguard.os.path.realpath(launcher)):
             self.assertIsNone(self.at(f"{launcher} post --job J hi"))
         self.assertTrue(self.at(f"{launcher} post --job J hi"))
