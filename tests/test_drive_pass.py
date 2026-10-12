@@ -1484,9 +1484,11 @@ class PromptTests(PassCase):
         standard = prompts.render(self.board, {**self.cfg, "review_gates": "standard"}, led,
                                   self.action("review", artifact="feat/a@" + "a" * 40),
                                   self.seat("reviewer", "rev"))
-        for needle in ("line by line", "fails on the base commit", "at least 5 targeted mutants", "never /tmp"):
+        for needle in ("line by line", "read-only", "skipped in this release"):
             self.assertIn(needle, strict)
             self.assertNotIn(needle, standard)
+        for copy_step in ("scratch copy under", "cp -r", "worktree add", "mutation gate (at least"):
+            self.assertNotIn(copy_step, strict)          # the seat is never asked to copy the tree (0.3.0)
         self.assertIn("swarm review", standard)
         self.assertIn("never edit files", standard)
 
@@ -1497,7 +1499,7 @@ class PromptTests(PassCase):
                                   review_gates="haiku-strict")
         text = prompts.render(self.board, self.cfg, led, self.action("review", artifact="feat/a@" + "a" * 40),
                               self.seat("reviewer", "rev"))
-        self.assertIn("mutation gate", text)
+        self.assertIn("Review gates (haiku-strict)", text)
 
     def test_integrator_and_artifact_judge_prompts(self):
         led = self.job()

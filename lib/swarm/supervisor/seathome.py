@@ -437,7 +437,10 @@ def _exe_dirs(home: str, names) -> list[str]:
 
 
 def jail_spec(cfg: dict, seat_home: Path, workdir: str | None, home: Path | None = None,
-              exes=()) -> dict:
+              exes=(), read_only: bool = False) -> dict:
+    """The jail of one seat. `read_only` (a reviewer or judge seat): its work tree and git dir are bound
+    READ-ONLY, so whatever it runs cannot change the tree, commit or push from it (writable only for the roles
+    that write: engineer, integrator, lead, ...); tools keep their temp files in the seat's private /tmp."""
     home_s = str(home or paths.home())
     h, sh = home_s, str(seat_home)
     binds: list = [[f"{sh}/claude", f"{h}/.claude", "rw"]]
@@ -467,14 +470,19 @@ def jail_spec(cfg: dict, seat_home: Path, workdir: str | None, home: Path | None
             binds.append([p, p, "ro", "follow"])
             seen.add(p)
     rw = list(_list(cfg, "seat_rw_paths"))
+    tree: list = []
     overlays = []
     if workdir:
-        rw.insert(0, workdir)
+        tree.append(workdir)
         gitdir, common = git_dirs(cfg, workdir)
         if common and not _under(common, workdir):
-            rw.insert(1, common)
+            tree.append(common)
         for d in {x for x in (gitdir, common) if x}:
             overlays += [os.path.join(d, n) for n in ("hooks", "config", "config.worktree")]
+    for p in tree:
+        if os.path.exists(p) and p not in seen:
+            binds.append([p, p, "ro" if read_only else "rw"])
+            seen.add(p)
     for p in rw:
         if os.path.exists(p) and p not in seen:
             binds.append([p, p, "rw"])
@@ -487,7 +495,12 @@ def jail_spec(cfg: dict, seat_home: Path, workdir: str | None, home: Path | None
             "runtime_dir": f"/run/user/{os.getuid()}", "cwd": workdir or h,
             "path_prepend": [f"{h}/.swarm-seat/bin"],
             "env": {"GIT_CONFIG_GLOBAL": f"{h}/.gitconfig", "GIT_SSH_COMMAND": f"ssh -F {h}/.ssh/config",
-                    "SWARM_SEAT_BROKER": f"{h}/.swarm-seat/broker", **_jail_git_overrides(h)}}
+                    "SWARM_SEAT_BROKER": f"{h}/.swarm-seat/broker", **_jail_git_overrides(h),
+                    **(READ_ONLY_ENV if read_only else {})}}
+
+
+# A read-only seat runs the tests read-only: no bytecode next to the sources, no pytest cache in the tree.
+READ_ONLY_ENV = {"PYTHONDONTWRITEBYTECODE": "1", "PYTEST_ADDOPTS": "-p no:cacheprovider"}
 
 
 def best_effort_env(cfg: dict, seat_home: Path, platform: str | None = None) -> dict:
@@ -529,7 +542,7 @@ BEST_EFFORT_NOTE = "best-effort on {platform} (no filesystem jail)"
 last_fallback_reason: list = [None]   # why the last Linux launch fell back (the runner logs it)
 
 
-def launch(cfg: dict, argv: list, *, job: str, seat: str, workdir: str | None = None,
+def launch(cfg: dict, argv: list, *, job: str, seat: str, workdir: str | None = None, read_only: bool = False,
            platform: str | None = None, probe=None, no_userns=None) -> tuple[list, dict | None, str]:
     """How a drive seat starts: (argv, env overrides or None, mode). Linux: the jail (wrap; fail closed).
     macOS/Windows: best-effort (argv unchanged, best_effort_env). "off" (a person's act): unchanged, nothing."""
@@ -540,7 +553,8 @@ def launch(cfg: dict, argv: list, *, job: str, seat: str, workdir: str | None = 
         from swarm import seatjail
         ok, why = (probe or seatjail.available)()
         if ok:
-            return wrap(cfg, argv, job=job, seat=seat, workdir=workdir, probe=lambda: (True, "")), None, m
+            return wrap(cfg, argv, job=job, seat=seat, workdir=workdir, probe=lambda: (True, ""),
+                        read_only=read_only), None, m
         if strict(cfg):
             raise SeatIsolationError(f"this host cannot jail a drive seat ({why}) and [drive] seat_isolation = "
                                      "\"strict\": not started")
@@ -578,6 +592,7 @@ def jail_script() -> str:
 
 
 def wrap(cfg: dict, argv: list, *, job: str, seat: str, workdir: str | None = None, python: str | None = None,
+         read_only: bool = False,
          probe=None) -> list:
     """The drive seat's argv, jailed: [python, -I, seatjail.py, SPEC, --, *argv]. Unchanged only when a person
     turned isolation off. SeatIsolationError when this host cannot jail a seat (`probe()`, default
@@ -591,7 +606,7 @@ def wrap(cfg: dict, argv: list, *, job: str, seat: str, workdir: str | None = No
                                  "not started. Enable unprivileged user namespaces, or have a person run "
                                  "`swarm supervise seat-isolation off` to accept seats that can read them")
     h = prepare(cfg, job, seat)
-    spec = jail_spec(cfg, h, workdir, exes=(str(argv[0]),) if argv else ())
+    spec = jail_spec(cfg, h, workdir, exes=(str(argv[0]),) if argv else (), read_only=read_only)
     return [python or sys.executable, "-I", jail_script(), json.dumps(spec, separators=(",", ":")), "--",
             *[str(a) for a in argv]]
 

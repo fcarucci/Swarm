@@ -40,10 +40,11 @@ def standing_rules(job: str) -> list[str]:
             "command, after posting `DONE` with your evidence."]
 
 
-GATES = ("Review gates (haiku-strict): read the whole diff line by line; check that every new test fails on the "
-         "base commit; run a mutation gate (at least 5 targeted mutants of the changed logic, in a scratch copy "
-         "under your work root, never /tmp; every mutant must be killed). A surviving mutant, a test that passes "
-         "on the base, or an unexplained behaviour change is CHANGES. Report it with `swarm review ... --report`.")
+GATES = ("Review gates (haiku-strict): read the whole diff line by line; check that every changed behaviour has "
+         "a test that would catch it, and run the test command read-only in your work tree (your seat cannot write "
+         "the tree; tools may use $TMPDIR). Do not make a copy of the tree: the mutation and fails-on-base gates are "
+         "skipped in this release (a supervisor-provided scratch copy is a 0.3.1 item). A missing test, a failing "
+         "test, or an unexplained behaviour change is CHANGES. Report it with `swarm review ... --report`.")
 _BREAKS = re.compile("[\r\v\f\x85\u2028\u2029]")
 _MARKER = re.compile(r"\b(begin|end)\b.*\b(untrusted|id)\b", re.I)
 _SAFE_REF = re.compile(r"[A-Za-z0-9._/@:+~=,#-]{1,300}")

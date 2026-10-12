@@ -897,7 +897,8 @@ def _seat_argv(cfg: dict, run: dict) -> tuple[list, str | None]:
     from swarm.supervisor import seathome
     seat = str(run.get("seat") or run["name"])
     try:
-        launched, env, mode = seathome.launch(cfg, argv, job=run["job"], seat=seat, workdir=run["cwd"])
+        launched, env, mode = seathome.launch(cfg, argv, job=run["job"], seat=seat, workdir=run["cwd"],
+                                              read_only=bool(run.get("read_only")))
     except (seathome.SeatIsolationError, OSError) as exc:
         return argv, str(exc)
     run["seat_mode"] = mode

@@ -1232,5 +1232,74 @@ class FallbackHardeningTest(SeatHomeCase):
         self.assertIn("(k=0)", logged[0])
 
 
+REVIEWER_RO = textwrap.dedent("""\
+    import errno, json, os, subprocess
+    def tries(path):
+        try:
+            with open(path, "w") as fh:
+                fh.write("x")
+            return "written"
+        except OSError as exc:
+            return errno.errorcode.get(exc.errno, str(exc.errno))
+    git_dir = sys_git = subprocess.run(["git", "rev-parse", "--git-common-dir"], capture_output=True, text=True).stdout.strip()
+    r = subprocess.run(["python3", "-m", "unittest", "-q", "tests.test_toy"], capture_output=True, text=True)
+    c = subprocess.run(["git", "-c", "user.name=r", "-c", "user.email=r@r", "commit", "-q", "--allow-empty", "-m", "x"],
+                       capture_output=True, text=True)
+    print(json.dumps({"tree": tries("planted.py"), "gitdir": tries(os.path.join(git_dir, "planted")),
+                      "tmp": tries(os.path.join(os.environ["TMPDIR"], "t")), "tests_rc": r.returncode,
+                      "tests_err": r.stderr[-300:], "commit_rc": c.returncode,
+                      "pycache": os.path.exists("__pycache__") or os.path.exists("tests/__pycache__"),
+                      "env": {k: os.environ.get(k) for k in ("PYTHONDONTWRITEBYTECODE", "PYTEST_ADDOPTS")}}))
+    """)
+
+
+@unittest.skipUnless(CAN_JAIL, "needs unprivileged user namespaces (Linux)")
+class ReadOnlyReviewerJailTest(SeatHomeCase):
+    """fix/rc-scratch2: a reviewer's (judge's) work tree and git dir are bound read-only in its jail."""
+
+    def run_seat(self, read_only: bool):
+        wt = Path(self.worktree())
+        (wt / "toy.py").write_text("def f():\n    return 1\n")
+        (wt / "tests").mkdir(exist_ok=True)
+        (wt / "tests" / "__init__.py").write_text("")
+        (wt / "tests" / "test_toy.py").write_text("import unittest, toy\nclass T(unittest.TestCase):\n"
+                                                  "    def test(self):\n        self.assertEqual(toy.f(), 1)\n")
+        (wt / "rev.py").write_text(REVIEWER_RO)
+        with mock.patch("swarm.seatjail.available", lambda: (True, "")):
+            argv = seathome.wrap(self.cfg, [sys.executable, "-I", "rev.py"], job="J", seat="rev",
+                                 workdir=str(wt), read_only=read_only)
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout.strip().splitlines()[-1])
+
+    def test_a_reviewer_cannot_write_the_tree_or_the_git_dir(self):
+        out = self.run_seat(read_only=True)
+        self.assertEqual(out["tree"], "EROFS", out)
+        self.assertEqual(out["gitdir"], "EROFS", out)
+        self.assertNotEqual(out["commit_rc"], 0, out)            # no commit from a read-only tree
+        self.assertEqual(out["tmp"], "written", out)             # its private /tmp stays writable
+        self.assertEqual(out["tests_rc"], 0, out["tests_err"])   # and it runs the tests read-only
+        self.assertFalse(out["pycache"], out)
+        self.assertEqual(out["env"], seathome.READ_ONLY_ENV)
+        self.assertFalse((Path(self.work) / "wt" / "planted.py").exists())
+
+    def test_an_engineer_still_writes_its_tree(self):
+        out = self.run_seat(read_only=False)
+        self.assertEqual(out["tree"], "written", out)
+        self.assertEqual(out["commit_rc"], 0, out)
+
+    def test_the_runner_passes_the_role(self):
+        wt = self.worktree()
+        run = {"argv": ["claude"], "job": "J", "name": "R", "seat": "rev", "cwd": wt, "launch_id": "L1",
+               "read_only": True}
+        with mock.patch("swarm.seatjail.available", lambda: (True, "")):
+            argv, why = runner._seat_argv(self.cfg, run)
+        self.assertIsNone(why)
+        spec = json.loads(argv[3])
+        modes = {b[1]: b[2] for b in spec["binds"]}
+        self.assertEqual(modes[wt], "ro")
+        self.assertEqual(modes[str(self.work / "repo" / ".git")], "ro")
+
+
 if __name__ == "__main__":
     unittest.main()
