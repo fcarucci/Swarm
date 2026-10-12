@@ -103,6 +103,24 @@ def caller(board_key: str, job: str, led, args, now: float | None = None) -> Cal
     return who
 
 
+CODEX_ENV = ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED")
+
+
+def codex_session(env, ancestor=None) -> bool:
+    """Whether this command runs in a Codex session: a Codex variable is set, or the nearest agent host above
+    the process is codex. Such a command cannot use a grant (its sandbox cannot touch the enrolled
+    directory), so its ledger-writing control commands go to the driver as CONTROL-REQUESTs."""
+    if any(env.get(k) for k in CODEX_ENV):
+        return True
+    if any(env.get(k) for k in ("CLAUDE_CODE_SESSION_ID", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")):
+        return False
+    try:
+        host = (ancestor or (lambda: hosts.nearest_ancestor_host(hosts._proc_parent, os.getppid())))()
+    except Exception:
+        return False
+    return host == "codex"
+
+
 def _ancestor_host() -> str | None:
     try:
         return hosts.nearest_ancestor_host(hosts._proc_parent, os.getppid())

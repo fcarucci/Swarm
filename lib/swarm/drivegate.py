@@ -501,7 +501,8 @@ def record_calls(command: str) -> list[list[str]]:
         if prog != "swarm":
             continue
         sub, argv = _sub_of(args)
-        if sub in _RECORD_SUBS or (sub == "seat" and argv[1:2] and argv[1] in _SEAT_RECORD_SUBS):
+        if sub in _RECORD_SUBS or (sub == "seat" and argv[1:2] and argv[1] in _SEAT_RECORD_SUBS) or (
+                sub == "drive" and argv[1:2] == ["repair"]):   # a Codex repair's CONTROL-REQUEST
             out.append(argv)
     return out
 
@@ -822,6 +823,8 @@ def post_tool(cfg: dict, payload: dict, host, *, resume=None, resume_lookup=None
         return False
     ns = parse_swarm(calls[0])
     kind, rid, rev = rec
+    if ns is not None and kind == "control_request":
+        return control_request_receipt(cfg, payload, ns, rid, rev, resume=resume, resume_lookup=resume_lookup)
     if ns is None or drive_kind(ns) != kind:
         return False
     from swarm.board.autoinit import store_key
@@ -1062,3 +1065,58 @@ def drop_grants(cfg: dict, payload: dict, host) -> int:
         return n
     except Exception:
         return 0
+
+
+# --- PostToolUse: control requests (a Codex session's ledger-writing commands, drive_control) -------------
+
+def control_request_receipt(cfg: dict, payload: dict, ns, rid: int, rev: int, *, resume=None,
+                            resume_lookup=None) -> bool:
+    """The receipt of a CONTROL-REQUEST the command just posted (record kind control_request): the message
+    `rid` must be exactly the request the submitted command makes (drive_control.request_text), and the caller
+    one this hook can name from host-private state, as for every receipt: the seat the marker, run file and
+    ledger intent name, or the job's requester main session (for a repair of a ledger that does not read: the
+    owner record's session). Never a subagent (post_tool returned before). The driver decides authority and
+    applies the request (drive_control.apply). True when a receipt was written."""
+    from swarm import drive_control
+    from swarm.board.autoinit import store_key
+    kind = drive_control.kind_of(ns)
+    job = getattr(ns, "job", None)
+    if kind is None or rev != 1 or not isinstance(job, str):
+        return False
+    bk = store_key(cfg)
+    try:
+        ctx = seat_context(cfg, bk, payload, resume, resume_lookup)
+        owner = None
+        if ctx is not None and ctx.kind == "seat" and ctx.job == job and ctx.led and ctx.seat and ctx.intent:
+            owner = ctx.led, ctx.intent.action_id, ctx.intent.attempt, ctx.seat
+        else:
+            owner = _grant_owner(bk, payload, ns)
+        if owner is None:
+            return False
+        led, action, attempt, seat = owner
+        if (led is None) != (kind == "repair"):
+            return False
+        board = _open_board(cfg)
+        with contextlib.closing(board):
+            m = _message(board, job, rid)
+            if m is None or m.message != drive_control.request_text(ns):
+                raise Refused(f"message {rid} is not the request the command posts")
+        fields = drive_control.fields_of(ns)
+        sha = drive_control.args_sha(fields)
+        r = receipts.Receipt(
+            board_key=bk, job=job, generation=led.generation if led else 1,
+            incarnation=led.incarnation if led else receipts.GRANT_INCARNATION_NO_LEDGER,
+            action_id=action, attempt=attempt, seat=seat, kind=drive_control.KIND, record_id=str(rid), rev=1,
+            content_sha=receipts.content_sha(drive_control.KIND, {"request": kind, "args_sha": sha}),
+            args_sha=sha, expires_at=time.time() + RECEIPT_HOURS * 3600)
+        drive_control.store_body(bk, job, rid, fields)   # the arguments first: a receipt never lacks them
+        receipts.write(bk, r)
+    except Refused as why:
+        if why.log:
+            log_receipt_failure(f"{job} control_request id={rid}: not receipted: {why.why}")
+        return False
+    except Exception as exc:
+        log_receipt_failure(f"{job} control_request id={rid}: {type(exc).__name__}: {exc}")
+        return False
+    kick()
+    return True
