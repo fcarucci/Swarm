@@ -92,7 +92,7 @@ def run_goal(args, expect: str) -> list[tuple[str, str, str]]:
     script = "met" if expect == "met" else "unreachable"
     try:
         with Rig(name, script=script, backend=args.backend, harness=args.harness, budget_usd=args.budget_usd,
-                 systemd=args.systemd) as rig:
+                 systemd=args.systemd, driver=args.driver) as rig:
             if args.harness == "real" and expect == "met" and have_codex:
                 rig.lead_brief = HERE / "LEAD-met-codex.md"      # asks for one engineer seat on the codex harness
             st: dict = {}
@@ -163,6 +163,9 @@ def main(argv=None) -> int:
     ap.add_argument("--interval-s", type=float, default=None)
     ap.add_argument("--kill-supervisor-once", action="store_true")
     ap.add_argument("--systemd", action="store_true", help="run passes with real systemd scopes (needs a user manager)")
+    ap.add_argument("--driver", default="session", choices=["session", "passes"],
+                    help="session: `swarm drive run` drives the job (spec 3.11 [T21], no timer); passes: `swarm "
+                         "supervise` passes every --interval-s (the timer era; chaos crash barriers need it)")
     ap.add_argument("--list", action="store_true", help="chaos: list scenario names")
     ap.add_argument("--today-only", action="store_true",
                     help="chaos: only the no-driver `<name>/today` layers (fast; what the unit tests run)")

@@ -1761,9 +1761,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if take:
         lock_fd = own(run["restart_id"], run["board"])
-        print("owned" if lock_fd is not None else "busy", flush=True)
-        sys.stdout.close()
-        sys.stdout = open(os.devnull, "w")
+        print("owned" if lock_fd is not None else "busy", flush=True)   # the last thing it writes to stdout
         if lock_fd is None:
             return 1
     execute(cfg, run, lock_fd=lock_fd)

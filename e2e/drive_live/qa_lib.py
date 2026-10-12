@@ -382,6 +382,16 @@ class Run:
                      f"{r.stdout}{r.stderr}")
         return r
 
+    def drive_run(self) -> subprocess.Popen:
+        """`swarm drive run --job ...`: the session driver's loop in the foreground (spec 3.11 [T21]), as a
+        background process of this harness; its output goes to logs/driver.log. The caller stops it."""
+        log = open(self.logs / "driver.log", "a")
+        try:
+            return subprocess.Popen([str(self.bin / "swarm"), "drive", "run"], stdout=log, stderr=subprocess.STDOUT,
+                                    stdin=subprocess.DEVNULL, env=self.env())
+        finally:
+            log.close()
+
     def board(self):
         """An in-process board on the run's own config (this process must run under apply_env())."""
         sys.path.insert(0, str(self.root / "lib"))
