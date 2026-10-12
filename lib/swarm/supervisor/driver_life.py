@@ -342,6 +342,10 @@ def enforce_deadlines(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks |
     if intent is not None and intent["verdict"] == "met" and "terminal_stuck" in led.watermarks:
         led.terminal_intent = None         # a pending MET that cannot finish closing: the deadline wins
         led.closing = None
+        by = next((k[len(_CANCEL_BY):] for k in led.watermarks if k.startswith(_CANCEL_BY)), None)
+        if by is not None:                 # ... unless a person's cancel is waiting: that wins over both
+            cancel_job(board, cfg, led, by, now, hooks=hooks)
+            return True
     if not begin_terminal(board, led, "unreachable", "ruling", MECHANICAL, cause, now):
         return False
     _post(board, led.job, f"{ev.DRIVER_MECHANICAL_UNREACHABLE} (no judge verdict): {cause}")
