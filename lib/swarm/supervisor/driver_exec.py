@@ -533,7 +533,9 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
            "enrol_seconds": sup["enrol_minutes"] * 60, "config": config_path, "board": store_key(cfg),
            "launch_id": launch_id, "action_id": action.action_id, "seat": seat.seat,
            "generation": led.generation,
-           "read_only": read_only_role(seat.role)}   # Task 20: a reviewer's or judge's work tree is bound read-only
+           # Task 20: a reviewer's or judge's work tree is bound read-only; the lead writes its briefs and an
+           # artifact job's report in the tree, so its tree stays writable (it still has no write rights elsewhere)
+           "read_only": read_only_role(seat.role) and seat.role != driveroles.LEAD_ROLE}
     marker = None
     try:
         # 3. run file, then the resume marker
