@@ -24,8 +24,6 @@ JOB_SECONDS = 30.0            # one job's share of the pass (spec 3.2)
 RECONCILE_SECONDS = 20.0
 ACTIVATION_GRACE_SECONDS = 120.0
 CLOSED = ("completed", "cancelled", "failed")
-PERSON_RECEIPT_ACTION = "requester:deactivate"
-CLOSE_WINDOW_KEY = "closing.window"
 
 
 def _modules():
@@ -198,35 +196,21 @@ def _orphans(board, cfg: dict, state: dict, key: str, known: set, now, say) -> s
 
 # --- tamper ([F17], [G6]) ------------------------------------------------------------------------
 
-RECEIPT_TTL = 24 * 3600        # hooks.drive_post_tool writes receipts that expire after a day
-CLOSE_WINDOW = (-60.0, 600.0)  # a receipt is issued this many seconds after the close it excuses
+DEACTIVATE_HOWS = ("requester:deactivate", "tty:deactivate")
 
 
-def _requester_deactivated(led, key: str, now: dt.datetime, js=None) -> bool:
-    """A receipted `swarm deactivate` by the job's requester session (receipt kind person) of this incarnation
-    and generation, unexpired, and issued at the close it excuses (an old receipt cannot excuse a later
-    close). NOTE: Task 6b's receipts.find/matches by the close record id replaces the directory scan when its
-    API is on the base; until then the receipt's issue time (expiry minus its TTL) is bound to `finished_at`."""
-    from swarm import enrolment, receipts, safefs
-    closed = getattr(js, "finished_at", None)
-    if closed is None:
-        return False
-    try:
-        with enrolment._dir(create=False) as d:
-            found = safefs.scan(d, ".json", limit=receipts.RECORD_MAX,
-                                match=lambda n: n.startswith("receipt-"))
-    except OSError:
-        return False                       # fail safe: not a cancel (the row is repaired and the job halted)
-    want = receipts.content_sha("person", {"action": "deactivate", "target": led.job})
-    for _name, data in found:
-        r = receipts._parse(data)
-        if (r is not None and r.board_key == led.board_key and r.job == led.job and r.kind == "person"
-                and r.incarnation == led.incarnation and r.generation == led.generation
-                and r.action_id == PERSON_RECEIPT_ACTION and r.content_sha == want
-                and r.expires_at > now.timestamp()
-                and CLOSE_WINDOW[0] <= (r.expires_at - RECEIPT_TTL) - closed.timestamp() <= CLOSE_WINDOW[1]):
-            return True
-    return False
+def _person_deactivated(led, key: str, now: dt.datetime) -> bool:
+    """A person's `swarm deactivate` of this job, receipted by Task 6b on either path (the requester session's
+    hook and the tty): kind person, record id `deactivate:<generation>`, rev 1, of this incarnation and
+    generation, unexpired, whose decision is {deactivate, this job}. One per generation: a valid cancel ends the
+    ledger, and a cancel that cannot complete holds the job."""
+    from swarm import receipts
+    rid = f"deactivate:{led.generation}"
+    r = receipts.find(key, led.job, "person", rid, rev=1, incarnation=led.incarnation, generation=led.generation,
+                      now=now.timestamp())
+    return (r is not None and r.seat is None and r.action_id in DEACTIVATE_HOWS
+            and receipts.matches(r, {"kind": "person", "id": rid, "rev": 1, "action": "deactivate",
+                                     "target": led.job}))
 
 
 def tamper(led, js, owner, data: dict) -> str | None:
@@ -273,38 +257,27 @@ def _cancel(board, cfg: dict, led, now: dt.datetime, m) -> bool:
     return bool(cancel(board, cfg, led, "requester session", now, reason="deactivate by the requester session"))
 
 
-def _own_close(led, js) -> bool:
-    """The closed row is the driver's own close only when the ledger says it was closing: the window marker the
-    pass writes (and fsyncs) right before it terminalizes, and a status that matches the pending outcome. The
-    board's `closed_by` is board-writable and never trusted ([H1])."""
+def _own_close(led, js, m) -> bool:
+    """The closed row is the driver's own close only when the LEDGER says it was closing: 8b's `_closing_key`
+    marker, written (and saved) before `close_job`, and a status that matches the pending outcome. The board's
+    `closed_by` is board-writable and never trusted ([H1])."""
     intent = led.terminal_intent
-    if intent is None or not led.watermarks.get(CLOSE_WINDOW_KEY):
+    if intent is None or m.life._closing_key(intent) not in led.watermarks:
         return False
     return js.status == ("completed" if intent["verdict"] == "met" else "failed")
-
-
-def _terminalize(board, cfg, led, now, m) -> bool:
-    """`life.terminalize` inside the ledger's close window: the marker is saved before the board is written and
-    dropped again unless the job is terminal, so a close made between passes is never taken for ours."""
-    _mutate(led, lambda l: l.watermarks.__setitem__(CLOSE_WINDOW_KEY, int(now.timestamp())))
-    try:
-        return m.life.terminalize(board, cfg, led, now)
-    finally:
-        if led.terminal is None:
-            _mutate(led, lambda l: l.watermarks.pop(CLOSE_WINDOW_KEY, None))
 
 
 def _check_tamper(board, cfg, state, led, js, owner, data, now, m, say) -> str | None:
     """None when the row agrees; else "cancelled" (the requester's deactivate, done) or "held"."""
     if getattr(led, "state", "active") == "activating":
         return None                                    # the activation is still being completed
-    if js is not None and js.status in CLOSED and _own_close(led, js):
+    if js is not None and js.status in CLOSED and _own_close(led, js, m):
         return None                                    # the driver's own close; terminalize commits it
     what = tamper(led, js, owner, data)
     if what is None:
         _forget(state, f"tamper|{led.job}|")
         return None
-    if js is not None and js.status in CLOSED and _requester_deactivated(led, led.board_key, now, js):
+    if js is not None and js.status in CLOSED and _person_deactivated(led, led.board_key, now):
         if _cancel(board, cfg, led, now, m):
             say(f"drive: {led.job} cancelled by its requester")
             return "cancelled"
@@ -316,9 +289,11 @@ def _check_tamper(board, cfg, state, led, js, owner, data, now, m, say) -> str |
     if not led.halted:
         m.life.halt(board, cfg, led, "driver (tamper)", now, reason=f"tamper: {what}"[:200])
     if _notice(board, state, f"tamper|{led.job}|{what}", led.job,
-               f"{ev.DRIVER_TAMPER} {what}: " + ("the row was restored from the ledger; " if repaired
-                                           else "the row could not be restored; ")
-               + "the job is halted until a person unhalts it"):
+               f"{ev.DRIVER_TAMPER} {what}: " + (
+                   "the job is paused and stays paused: a person must `swarm resume` it and unhalt it"
+                   if js is not None and js.status == "paused" else
+                   ("the row was restored from the ledger; " if repaired else "the row could not be restored; ")
+                   + "the job is halted until a person unhalts it")):
         say(f"drive: tamper on {led.job}: {what}")
     return "held"
 
@@ -359,7 +334,7 @@ def _act(board, cfg, sup, led, snap, actions, now, start_runner, config_path, jd
             m.exec.execute(board, cfg, sup, led, a, start_runner=start_runner, now=now, config_path=config_path)
         elif a.kind in ("record_unreachable", "close"):
             if _terminal_from(snap, led, board, now, m, a):
-                _terminalize(board, cfg, led, now, m)
+                m.life.terminalize(board, cfg, led, now)
         elif a.kind == "rollover":
             m.life.rollover(board, cfg, led, now)
         elif a.kind == "stop_seat" and a.seat:
@@ -470,7 +445,7 @@ def _step(board, cfg, sup, state, led, owner, now, say, start_runner, config_pat
         life.settle_halt(board, flat, led, now)
         return
     if led.terminal_intent is not None:
-        _terminalize(board, flat, led, now, m)
+        m.life.terminalize(board, flat, led, now)
         return
     if life.rollover(board, flat, led, now):
         return
