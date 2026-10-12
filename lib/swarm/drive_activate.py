@@ -749,15 +749,18 @@ def add_activate_args(parser) -> None:
 
 
 def add_drive_parser(sub) -> None:
-    """`swarm drive budget|models` (person path or the requester session)."""
-    dv = sub.add_parser("drive", help="change a running drive job: `drive budget`, `drive models`")
-    dvs = dv.add_subparsers(dest="dcmd", required=True)
+    """`swarm drive budget|models` (person path or the requester session), on 6b's one `drive` parser tree
+    (drive_cli.drive_subparsers: argparse refuses a second `drive` parser)."""
+    from swarm import drive_cli
+    dvs = drive_cli.drive_subparsers(sub)
     db = dvs.add_parser("budget", help="change budgets without a rollover: KEY=VALUE ...")
     db.add_argument("--job", required=True)
     db.add_argument("pairs", nargs="+", metavar="KEY=VALUE")
     dm = dvs.add_parser("models", help="change a role's model for the job: ROLE=MODEL ...")
     dm.add_argument("--job", required=True)
     dm.add_argument("pairs", nargs="+", metavar="ROLE=MODEL")
+    drive_cli.add_drive_command("budget", cmd_drive, board=False)
+    drive_cli.add_drive_command("models", cmd_drive, board=False)
 
 
 def wants_drive(args) -> bool:

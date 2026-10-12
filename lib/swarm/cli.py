@@ -3805,7 +3805,6 @@ COMMANDS = {
     "upgrade": cmd_update,
     "update": cmd_update,      # the old name, a hidden alias
     "activate": cmd_activate,
-    "drive": lambda cfg, args: __import__("swarm.drive_activate", fromlist=["cmd_drive"]).cmd_drive(cfg, args),
     "plugins": cmd_plugins,
     "deactivate": cmd_deactivate,
     "bg": lambda cfg, args: cmd_bg(cfg, args),

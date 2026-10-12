@@ -951,8 +951,8 @@ class DriveDoctorTests(unittest.TestCase):
         self.assertIn(f"{self.home}/gone/gh", gone.detail)
         self.assertIn("--credential", gone.fix)
         self.assertIs(checks["drive credential other"].ok, False)
-        (self.home / "bin/adir").mkdir(mode=0o755)
-        self.owner({"d": f"helper:{self.home}/bin/adir"})
+        (self.home / "bin/adir/gh").mkdir(mode=0o755, parents=True)   # an allowlisted name that is a directory
+        self.owner({"d": f"helper:{self.home}/bin/adir/gh auth git-credential"})
         self.assertIs(self.run_checks()["drive credential d"].ok, False)
 
     def test_non_helper_credentials_and_missing_owner_add_no_helper_line(self):
