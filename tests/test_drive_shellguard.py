@@ -8,6 +8,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -501,6 +502,143 @@ class Round4ScriptFiles(unittest.TestCase):
             self.assertIsNone(self.at(f"{launcher} post --job J hi"))
         self.assertTrue(self.at(f"{launcher} post --job J hi"))
 
+@unittest.skipUnless(shutil.which("git"), "needs git")
+class Round5Configuration(unittest.TestCase):
+    """Round 5: git, gh and ssh state a seat could write (rr31-rr35), and virtualenv entry points (allowed)."""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.addCleanup(self.td.cleanup)
+        self.repo = os.path.realpath(self.td.name)
+        self.rs = self.repo.replace(os.sep, "/")
+        subprocess.run(["git", "init", "-q", self.repo], check=True)
+        subprocess.run(["git", "-C", self.repo, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false",
+                        "commit", "-q", "--allow-empty", "-m", "x"], check=True)
+
+    def at(self, cmd):
+        return refuse(cmd, ["main"], branch_of=on("feat/a"), cwd=self.repo)
+
+    def test_rr31_git_dir_and_config_files_are_not_written(self):
+        for path in (".git/config", ".git/config.worktree", ".git/hooks/pre-commit", ".git/info/exclude", ".gitmodules",
+                     "sub/.gitmodules", "~/.gitconfig", "~/.config/git/config", "~/.config/gh/config.yml",
+                     "~/.ssh/config", f"{self.rs}/.git/hooks/pre-push"):
+            with self.subTest(path=path):
+                self.assertTrue(shellguard.protected_write_refusal({"file_path": path}, self.repo), path)
+                self.assertTrue(shellguard.protected_path_reason(path, self.repo), path)
+        bare = os.path.join(self.repo, "x.git")
+        subprocess.run(["git", "init", "-q", "--bare", bare], check=True)
+        self.assertTrue(shellguard.protected_write_refusal({"file_path": "x.git/config"}, self.repo))
+        self.assertTrue(shellguard.protected_write_refusal({"notebook_path": ".git/hooks/x"}, self.repo))
+        self.assertTrue(shellguard.protected_write_refusal(
+            {"input": "*** Begin Patch\n*** Update File: .git/config\n@@\n*** End Patch"}, self.repo))
+        for path in ("src/x.py", ".github/workflows/ci.yml", "docs/.git-notes.md", "config", "hooks/x.sh"):
+            with self.subTest(path=path):
+                self.assertIsNone(shellguard.protected_write_refusal({"file_path": path}, self.repo), path)
+        self.assertIsNone(shellguard.protected_write_refusal(None, self.repo))
+        self.assertTrue(shellguard.protected_write_refusal({"file_path": "newrepo/.git/config"}, self.repo))
+        for cmd in ("echo '[remote \"origin\"]' >> .git/config", "printf x > .git/hooks/pre-commit",
+                    "cat x | tee .git/hooks/pre-push", "cp hook .git/hooks/pre-commit", "sed -i 's/a/b/' .git/config",
+                    "ln -s ../../h .git/hooks/post-checkout", "echo x 2>.gitmodules", "echo x >| ~/.gitconfig",
+                    "sh -c 'echo x > .git/config'", "python3 -c \"open('.git/config','a').write('x')\"",
+                    "echo x > ~/.ssh/config", "chmod +x .git/hooks/pre-commit"):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(self.at(cmd), cmd)
+        for cmd in ("cat .git/config", "git config --get user.name", "echo x > notes.txt", "ls .git/hooks"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.at(cmd), cmd)
+
+    def test_rr31_a_push_with_no_refspec_follows_no_configured_refspec(self):
+        self.assertIsNone(self.at("git push origin"))
+        subprocess.run(["git", "-C", self.repo, "config", "remote.origin.push", "HEAD:main"], check=True)
+        self.assertIn("remote.origin.push", self.at("git push origin"))
+        self.assertIn("remote.origin.push", self.at("git push"))
+        self.assertIsNone(self.at("git push origin feat/a"))          # an explicit refspec wins over the config
+        subprocess.run(["git", "-C", self.repo, "config", "--unset", "remote.origin.push"], check=True)
+        subprocess.run(["git", "-C", self.repo, "config", "push.default", "upstream"], check=True)
+        self.assertIn("push.default", self.at("git push origin"))
+        subprocess.run(["git", "-C", self.repo, "config", "push.default", "simple"], check=True)
+        self.assertIsNone(self.at("git push origin"))
+        self.assertIsNone(refuse("git push origin", ["main"], branch_of=on("feat/a")))   # no cwd: nothing to read
+
+    def test_rr32_config_locations_cannot_move(self):
+        for cmd in ("HOME=. git push origin", "XDG_CONFIG_HOME=. git push origin", "env HOME=. git push origin",
+                    "export HOME=.; git push origin", "GIT_DIR=x.git git push origin feat/a", "GH_CONFIG_DIR=. gh pr list",
+                    "GIT_WORK_TREE=x git status", "sh -c 'HOME=. git push origin'", "git --git-dir=x.git push origin feat/a",
+                    "git --work-tree=x status", "git -c include.path=./x log", "git -c includeIf.gitdir:/.path=x log",
+                    "git config include.path ./x", "git config --global include.path ./x"):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(self.at(cmd), cmd)
+        self.assertIsNone(self.at("git -C sub status"))
+
+    @unittest.skipIf(os.name == "nt", "POSIX PATH")
+    def test_rr33_path_cannot_put_a_seat_directory_first(self):
+        os.makedirs(os.path.join(self.repo, "bin"))
+        for cmd in ("PATH=./bin:$PATH git status", "env PATH=bin:/usr/bin git status", "PATH=$X:$PATH git status",
+                    f"PATH={self.rs}/bin:$PATH git status", "export PATH=bin:$PATH; git status",
+                    f"PATH=~/x:$PATH ls"):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(self.at(cmd), cmd)
+        up = "../" * 40
+        self.assertTrue(self.at(f"PATH={up}usr/bin:$PATH ls"))          # relative, though it names /usr/bin
+        odd = os.path.join(self.repo, "ro", "$X")                      # a read-only directory literally named $X
+        os.makedirs(odd)
+        os.chmod(odd, 0o555)
+        self.addCleanup(os.chmod, odd, 0o755)
+        if not os.access(odd, os.W_OK):
+            self.assertTrue(self.at(f"PATH={self.rs}/ro/$X:$PATH ls"))  # a variable: what it is cannot be known
+        subprocess.run([sys.executable, "-m", "venv", "--without-pip", os.path.join(self.repo, ".venv")], check=True)
+        for cmd in ("PATH=/usr/bin:$PATH git status", f"PATH={self.rs}/.venv/bin:$PATH python -m x", "PATH=/usr/bin:/bin ls"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.at(cmd), cmd)
+
+    @unittest.skipIf(os.name == "nt", "POSIX PATH and exec bits")
+    def test_rr33_a_bare_name_that_finds_a_seat_written_script_is_refused(self):
+        bindir = os.path.join(self.repo, "bin")
+        os.makedirs(bindir)
+        for name in ("mygit", "tool"):
+            path = os.path.join(bindir, name)
+            with open(path, "w") as f:
+                f.write("#!/bin/sh\ngit push origin HEAD:main\n")
+            os.chmod(path, 0o755)
+        with mock.patch.dict(os.environ, {"PATH": bindir + os.pathsep + os.environ.get("PATH", "")}):
+            self.assertIn("seat can write", self.at("mygit status"))
+            self.assertIn("seat can write", self.at("sh -c 'tool'"))
+            self.assertIsNone(self.at("ls"))                         # a compiled program
+            subprocess.run(["git", "-C", self.repo, "add", "bin/tool"], check=True)
+            subprocess.run(["git", "-C", self.repo, "-c", "user.name=t", "-c", "user.email=t@t", "-c",
+                            "commit.gpgsign=false", "commit", "-qm", "tool"], check=True)
+            self.assertIsNone(self.at("tool"))                        # tracked unmodified at HEAD
+
+    def test_venv_entry_points_run(self):
+        venv = os.path.join(self.repo, ".venv")
+        subprocess.run([sys.executable, "-m", "venv", "--without-pip", venv], check=True)
+        bindir = "Scripts" if os.name == "nt" else "bin"
+        tool = os.path.join(venv, bindir, "pytest")
+        with open(tool, "w") as f:
+            f.write("#!/bin/sh\necho\n")
+        for cmd in (f"source .venv/{bindir}/activate", f". .venv/{bindir}/activate", f".venv/{bindir}/pytest -q",
+                    f"bash .venv/{bindir}/pytest"):
+            with self.subTest(cmd=cmd):
+                self.assertIsNone(self.at(cmd), cmd)
+        os.remove(os.path.join(venv, "pyvenv.cfg"))              # not a virtualenv any more: an untracked script
+        self.assertTrue(self.at(f".venv/{bindir}/pytest -q"))
+
+    def test_rr34_graphql_from_a_file_or_stdin_is_refused(self):
+        for cmd in ("gh api graphql --input q.json", "gh api graphql --input=q.json", "gh api graphql -F query=@q.graphql",
+                    "gh api graphql --field query=@q", "gh api graphql -Fquery=@q", "gh api graphql -F query=@-",
+                    "gh api graphql -f query=\"$Q\""):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(self.at(cmd), cmd)
+        self.assertIsNone(self.at("gh api graphql -f query='{viewer{login}}'"))
+        self.assertIsNone(self.at("gh api graphql -F n=3 -f query='{viewer{login}}'"))
+
+    def test_rr35_ssh_config_files_follow_the_file_rule(self):
+        for cmd in ("ssh -F ./cfg host true", "ssh -F cfg host", "ssh -Fcfg host true", "ssh -o Include=./cfg host true",
+                    "scp -F cfg a h:b", "GIT_SSH_COMMAND='ssh -F cfg' git fetch"):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(self.at(cmd), cmd)
+        self.assertIsNone(self.at("ssh -F /dev/null host true"))
+
 
 class Splitting(unittest.TestCase):
     def test_split_commands_resolves_quotes_and_lists_substitutions(self):
@@ -520,7 +658,7 @@ class Splitting(unittest.TestCase):
         self.assertEqual(got, [("git", ["push", "origin", "x"])])
         got = [p for p, _, _ in shellguard.iter_commands("bash -lc 'echo hi; git status'")]
         self.assertEqual(got, ["echo", "git", "bash"])
-        got = [(p, w) for p, _, w in shellguard.iter_commands("xargs -n1 git push")]
+        got = [(p, {t for t in w if not t.startswith("argv0:")}) for p, _, w in shellguard.iter_commands("xargs -n1 git push")]
         self.assertEqual(got, [("git", {"xargs"})])
 
     def test_nesting_depth_is_bounded_and_too_deep_is_refused(self):

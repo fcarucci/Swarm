@@ -400,7 +400,7 @@ def _read_backticks(text: str, i: int) -> tuple[str, int]:
 _PARAM_START = re.compile(r"[A-Za-z_{0-9@*#?!$-]")
 
 
-def split_commands(text: str, _depth: int = 0) -> list[list[str]]:
+def split_commands(text: str, _depth: int = 0, _keep_redirections: bool = False) -> list[list[str]]:
     """The words of each simple command of a shell text, quotes resolved. Command separators are ; & | ( )
     and newlines outside quotes; the commands inside `$(...)` and backticks are listed as commands of their
     own (and leave a placeholder word where they stood). Redirections are dropped. Each word is a _Word whose
@@ -498,7 +498,7 @@ def split_commands(text: str, _depth: int = 0) -> list[list[str]]:
             has = True
             i += 1
     end_command()
-    return [_drop_redirections(w) for w in out if w]
+    return [w if _keep_redirections else _drop_redirections(w) for w in out if w]
 
 
 def _drop_redirections(words: list[str]) -> list[str]:
@@ -955,6 +955,8 @@ def _ssh_option(opt: str):
     key, value = parts[0].lower(), (parts[1] if len(parts) > 1 else "")
     if key in _SSH_CODE_OPTIONS and value.strip().lower() not in ("", "none"):
         return [_text(_w(value.strip(), _dyn(opt)), f"ssh {key}")]
+    if key == "include" and value.strip():
+        return [_file(_w(value.strip(), _dyn(opt)), "an ssh config file")]
     return []
 
 
@@ -965,6 +967,12 @@ def _ssh_items(prog: str, args: list[str]):
         if a.startswith("-o"):
             opt = a[2:] if len(a) > 2 else (args[k + 1] if k + 1 < n else "")
             out.extend(_ssh_option(_w(opt, _dyn(a) if len(a) > 2 else _dyn(opt))))
+            k += 1 if len(a) > 2 else 2
+            continue
+        if a.startswith("-F"):
+            cfg = _w(a[2:], _dyn(a)) if len(a) > 2 else (args[k + 1] if k + 1 < n else None)
+            if cfg != "/dev/null":
+                out.append(_file(cfg, "an ssh config file"))
             k += 1 if len(a) > 2 else 2
             continue
         if prog in ("scp", "sftp") and a == "-S" and k + 1 < n:
@@ -1057,6 +1065,8 @@ _ENV_SSH = frozenset(("GIT_SSH_COMMAND", "RSYNC_RSH"))
 _ENV_PROGRAM = frozenset(("GIT_SSH",))
 _ENV_REFUSED = re.compile(r"BASH_ENV|ENV|ZDOTDIR|LD_PRELOAD|LD_AUDIT|DYLD_INSERT_LIBRARIES|GIT_EXEC_PATH|"
                           r"GIT_TEMPLATE_DIR|PERL5OPT|RUBYOPT|PYTHONSTARTUP|SHELLOPTS|BASHOPTS|BASH_FUNC_.*")
+# where git and gh read their configuration (a seat-written .gitconfig with a push refspec, an alias, a hook path)
+_ENV_CONFIG = re.compile(r"HOME|XDG_CONFIG_HOME|GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE|GH_CONFIG_DIR")
 _NODE_CODE = re.compile(r"(?:^|\s)(?:-r|--require|--import|--loader|--experimental-loader|-e|--eval|-p|--print)\b")
 _SSH_TAIL = " swarm-host true"     # git and rsync append the host and command to an ssh command
 
@@ -1067,6 +1077,11 @@ def _assignment_items(name: str, value):
     and a refusal for what loads code no command line shows (BASH_ENV, LD_PRELOAD, BASH_FUNC_*, ...)."""
     if _ENV_REFUSED.fullmatch(name) or (name == "NODE_OPTIONS" and _NODE_CODE.search(str(value))):
         return [_bad(f"setting {name} loads code that cannot be checked")]
+    if _ENV_CONFIG.fullmatch(name):
+        return [_bad(f"setting {name} moves where git and gh read their configuration")]
+    if name == "PATH":
+        why = _path_value_refusal(value)
+        return [_bad(why)] if why else []
     if name in _ENV_SHELL or name in _ENV_SSH:
         if not str(value).strip():
             return []
@@ -1300,7 +1315,7 @@ def _walk(lists, depth: int):
         yield from _items(_nested(prog, args), depth)
         if prog in ("cd", "pushd", "popd") and depth == 0:
             seen = seen | {"depth0"}
-        yield prog, args, (seen | {"argv0:" + w0}) if _is_path(w0) else seen
+        yield prog, args, seen | {"argv0:" + w0}
 
 
 def _items(items, depth: int):
@@ -1371,7 +1386,7 @@ _GIT_WRITES = frozenset(("commit", "push", "reset", "checkout", "switch", "merge
                          "add", "update-ref", "worktree", "gc", "prune", "filter-branch", "send-pack",
                          "fast-import", "replace", "notes", "submodule"))
 _GIT_CONFIG_RISK = re.compile(r"(?i)^(?:alias\.|remote\.[^.]+\.push(?:url)?$|url\..*\.pushinsteadof$|push\.|"
-                              r"core\.(?:sshcommand|hookspath|fsmonitor)$|protocol\.)")
+                              r"core\.(?:sshcommand|hookspath|fsmonitor)$|protocol\.|include\.|includeif\.)")
 
 
 def _git_args(args: list[str]):
@@ -1390,6 +1405,8 @@ def _git_args(args: list[str]):
             return None, [], f"git -c {args[i + 1].split('=', 1)[0]} (an alias or push setting) is refused", cdir
         if name == "-C" and i + 1 < len(args):
             cdir = args[i + 1]
+        if name in ("--git-dir", "--work-tree"):
+            return None, [], f"git {name} (another repository and its configuration) is refused: use git -C <dir>", cdir
         i += 2 if (name in _GIT_VALUE_OPTS and "=" not in opt) else 1
     return (args[i] if i < len(args) else None), args[i + 1:], None, cdir
 
@@ -1587,14 +1604,71 @@ def tracked_unmodified(path: str) -> bool:
         return False
 
 
+def _real_home() -> str | None:
+    try:
+        import pwd
+        return pwd.getpwuid(os.getuid()).pw_dir
+    except Exception:
+        return None
+
+
 def _swarm_launchers() -> set[str]:
-    """The swarm command given to agents (the plugin's bin/swarm) and the user launcher: trusted as programs."""
+    """The swarm command given to agents (the plugin's bin/swarm) and the user launcher (in the account's real home
+    too): trusted as programs."""
     try:
         from swarm import paths
         found = [str(p) for p in (paths.agent_bin(), paths.launcher_path())]
+        home = _real_home()
+        if home:
+            found.append(os.path.join(home, ".local", "bin", "swarm"))
         return {os.path.realpath(p) for p in found} | {os.path.realpath(os.path.splitext(p)[0]) for p in found}
     except Exception:
         return set()
+
+
+def _venv_entry(path: str) -> bool:
+    """Whether `path` is a virtualenv entry point: a file in <venv>/bin (Scripts on Windows) whose <venv>/pyvenv.cfg
+    exists (`source .venv/bin/activate`, `.venv/bin/pytest`). Running the venv's code is what `python -m` does too."""
+    try:
+        d = os.path.dirname(os.path.abspath(path))
+        return os.path.basename(d) in ("bin", "Scripts") and os.path.isfile(os.path.join(os.path.dirname(d),
+                                                                                        "pyvenv.cfg"))
+    except Exception:
+        return False
+
+
+def _path_value_refusal(value) -> str | None:
+    """Why a PATH value is refused: every entry must be `$PATH`, a virtualenv's bin, or an absolute directory the seat
+    cannot write (a seat-written ./bin/git must not shadow git)."""
+    for entry in str(value).split(":"):
+        if entry in ("$PATH", "${PATH}", ""):
+            continue
+        if "$" in entry or "`" in entry:
+            return "a PATH entry given by a variable or $(...) cannot be checked"
+        d = os.path.normpath(os.path.expanduser(entry))
+        if not os.path.isabs(d):
+            return f"the PATH entry {entry!r} is relative: a program there could be one the seat wrote"
+        if _venv_entry(os.path.join(d, "python")):
+            continue
+        if not os.path.isdir(d) or os.access(d, os.W_OK):
+            return f"the PATH entry {entry!r} is a directory the seat can write: a program there could be one it wrote"
+    return None
+
+
+def _bare_program_refusal(word: str) -> str | None:
+    """A program named by a bare word runs what PATH finds: a compiled program, a script the seat cannot write, a
+    virtualenv entry point, the swarm launcher, or a script tracked unmodified at HEAD. Any other script in a
+    directory the seat can write (a seat-written script on PATH) is refused."""
+    try:
+        found = shutil.which(str(word))
+    except Exception:
+        return None
+    if not found:
+        return None        # a builtin, a function, or not found (the shell says so)
+    real = os.path.realpath(found)
+    if _is_native(real) or real in _swarm_launchers() or _trusted_script(found):
+        return None
+    return f"{str(word)!r} runs the script {found!r}: the seat can write it and it is not tracked unmodified at HEAD"
 
 
 def _trusted_script(path: str) -> bool:
@@ -1605,7 +1679,7 @@ def _trusted_script(path: str) -> bool:
             return False
         if not (os.access(real, os.W_OK) or os.access(os.path.dirname(real) or ".", os.W_OK)):
             return True
-        return tracked_unmodified(real)
+        return _venv_entry(path) or tracked_unmodified(real)
     except Exception:
         return False
 
@@ -1628,7 +1702,7 @@ def _locations(word, cands, wrappers) -> list[str] | None:
 def _script_refusal(word, cands, wrappers=frozenset()) -> str | None:
     paths = _locations(word, cands, wrappers)
     if paths is None:
-        return f"the script {str(word)!r} cannot be located (the directory is not known): {_SCRIPT_RULE}"
+        return f"the file {str(word)!r} cannot be located (the directory is not known): {_SCRIPT_RULE}"
     for p in paths:
         if not _trusted_script(p):
             return f"the script {str(word)!r} is not tracked unmodified at HEAD: {_SCRIPT_RULE}"
@@ -1686,6 +1760,147 @@ def _cd(cands, prog: str, args: list[str], command: str, wrappers=frozenset()):
     return new if len(new) <= 16 else None
 
 
+# ---- git and tool configuration a seat may not write (rr31, rr32, rr35) ---------------------------------------
+# A push refspec in .git/config, a hook in .git/hooks, an alias or hooksPath in a .gitconfig, a ProxyCommand in
+# ~/.ssh/config: each changes what a later, innocent-looking command does. Write, Edit, MultiEdit, NotebookEdit,
+# apply_patch and the shell's writers (a redirection, tee, cp, mv, ...) may not touch them in a drive seat.
+
+_GIT_DIR_PROTECTED = re.compile(r"(?:config|config\.worktree|hooks|info|commondir|gitdir)(?:/.*)?")
+_PROTECTED_TEXT = re.compile(r"(?:^|[/\s'\"=])(?:\.git/(?:config|hooks|info|commondir)|\.gitmodules|\.gitconfig|"
+                             r"\.ssh/|\.config/(?:git|gh)/)")
+_FILE_WRITERS = frozenset(("tee", "cp", "mv", "install", "ln", "touch", "truncate", "dd", "rsync", "patch", "sed",
+                           "perl", "chmod", "rm", "shred", "unlink", "mkdir", "tar", "unzip", "curl", "wget"))
+
+
+def _git_dir_of(directory: str) -> list[str]:
+    """The git dir (a .git directory, or where a .git file's gitdir: points) and its commondir, for the checkout
+    that contains `directory`."""
+    out, d = [], os.path.abspath(directory)
+    while True:
+        dot = os.path.join(d, ".git")
+        if os.path.isdir(dot):
+            out.append(dot)
+            break
+        if os.path.isfile(dot):
+            try:
+                with open(dot, encoding="utf-8", errors="replace") as f:
+                    first = f.readline().strip()
+            except OSError:
+                break
+            if first.startswith("gitdir:"):
+                gd = first[len("gitdir:"):].strip()
+                gd = gd if os.path.isabs(gd) else os.path.join(d, gd)
+                out.append(gd)
+                try:
+                    with open(os.path.join(gd, "commondir"), encoding="utf-8") as f:
+                        common = f.readline().strip()
+                    out.append(common if os.path.isabs(common) else os.path.join(gd, common))
+                except OSError:
+                    pass
+            break
+        up = os.path.dirname(d)
+        if up == d:
+            break
+        d = up
+    return [os.path.realpath(x) for x in out]
+
+
+def _is_git_dir(d: str) -> bool:
+    return os.path.basename(d) == ".git" or (os.path.isfile(os.path.join(d, "HEAD")) and
+                                             (os.path.isdir(os.path.join(d, "objects")) or
+                                              os.path.isfile(os.path.join(d, "commondir"))))
+
+
+def protected_path_reason(path, cwd=None) -> str | None:
+    """Why a seat may not write `path` (resolved against `cwd`), or None: a git dir's config, hooks or info (the
+    checkout's, a worktree's common dir, any directory that is a git dir), .gitmodules, a .gitconfig or
+    ~/.config/git, ~/.config/gh, ~/.ssh."""
+    if not isinstance(path, str) or not path or _dyn(path):
+        return None
+    try:
+        p = os.path.expanduser(path)
+        if not os.path.isabs(p):
+            p = os.path.join(cwd or os.getcwd(), p)
+        p = os.path.normpath(p)
+        real = os.path.realpath(p)
+        why = f"a drive seat may not write {path!r}: git, gh and ssh configuration changes what later commands do"
+        for q in {p, real}:
+            parts = q.replace(os.sep, "/").split("/")
+            if parts[-1] in (".gitmodules", ".gitconfig"):
+                return why
+            for k, part in enumerate(parts[:-1]):
+                rest = "/".join(parts[k + 1:])
+                if part == ".ssh" or (part == ".config" and parts[k + 1] in ("git", "gh")):
+                    return why
+                if (part == ".git" or _is_git_dir("/".join(parts[:k + 1]) or "/")) and _GIT_DIR_PROTECTED.fullmatch(rest):
+                    return why
+        for gd in _git_dir_of(cwd or os.getcwd()) + _git_dir_of(os.path.dirname(real)):
+            rel = os.path.relpath(real, gd).replace(os.sep, "/")
+            if not rel.startswith("..") and _GIT_DIR_PROTECTED.fullmatch(rel):
+                return why
+    except Exception:
+        return None
+    return None
+
+
+def _configured_push_refusal(rest: list[str], cdir, cwd) -> str | None:
+    """A push that names no refspec pushes what the configuration says: refused when that is a configured push
+    refspec (remote.<name>.push) or a push.default other than simple/current/nothing (upstream, matching)."""
+    pos, k = [], 0
+    while k < len(rest):
+        a = rest[k]
+        if a == "--":
+            pos.extend(rest[k + 1:])
+            break
+        if not a.startswith("-"):
+            pos.append(a)
+        elif a in _PUSH_VALUE_OPTS and a not in ("--signed", "--recurse-submodules"):
+            k += 1
+        k += 1
+    if len(pos) > 1 or not isinstance(cwd, str) or not cwd:
+        return None
+    where = cdir if cdir and os.path.isabs(os.path.expanduser(cdir)) else os.path.join(cwd, cdir or "")
+    out = _git_out(os.path.expanduser(where), "config", "--get-regexp", r"^(remote\..*\.push|push\.default)$")
+    for line in (out or "").splitlines():
+        key, _sep, value = line.partition(" ")
+        if key.endswith(".push") and key.startswith("remote."):
+            return f"a push that names no refspec follows {key} = {value!r}: name the branch (git push origin <branch>)"
+        if key == "push.default" and value.strip().lower() not in ("simple", "current", "nothing"):
+            return f"a push that names no refspec follows push.default = {value!r}: name the branch"
+    return None
+
+
+_PATCH_FILE = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$|^\*\*\* Move to: (.+)$", re.M)
+
+
+def protected_write_refusal(tool_input, cwd=None) -> str | None:
+    """Why a file-writing tool call (Write, Edit, MultiEdit, NotebookEdit; Codex apply_patch) may not go ahead in a
+    drive seat: it writes git, gh or ssh configuration (protected_path_reason)."""
+    if not isinstance(tool_input, dict):
+        return None
+    paths = [tool_input.get(k) for k in ("file_path", "notebook_path", "path")]
+    for value in tool_input.values():
+        if isinstance(value, str):
+            paths += [m.group(1) or m.group(2) for m in _PATCH_FILE.finditer(value)]
+    for path in paths:
+        why = protected_path_reason(path.strip(), cwd) if isinstance(path, str) else None
+        if why:
+            return why
+    return None
+
+
+def _redirect_targets(words: list[str]) -> list[str]:
+    """The files a simple command's output redirections (>, >>, >|, &>, 2>, <>) write."""
+    out = []
+    for k, w in enumerate(words):
+        m = re.match(r"\d*(?:>>|>\||&>>|&>|<>|>)(?!&)(.*)$", str(w))
+        if m:
+            target = m.group(1) or (words[k + 1] if k + 1 < len(words) else "")
+            if target:
+                out.append(target)
+    return out
+
+
 _UNCHECKED = ("A shell is allowed only as `sh -c '<literal>'` in a drive job: code that runs commands must be a "
               "literal argument (`sh -c '...'`, `python3 -c '...'`) or a script tracked unmodified at HEAD; stdin, a "
               "pipe, a here-string, a heredoc, <(...), a variable and $(...) cannot be checked")
@@ -1712,6 +1927,11 @@ def drive_command_refusal(command: str, targets=(), *, branch_of=None, cwd=None)
         for words in split_commands(text):
             if any(_GIT_ENV.match(w) for w in words):
                 return "git configuration through GIT_CONFIG_* environment variables is refused"
+        for words in split_commands(text, _keep_redirections=True):
+            for target in _redirect_targets(words):
+                why = protected_path_reason(target, cwd)
+                if why:
+                    return why
     cands = {os.path.normpath(os.path.abspath(cwd))} if isinstance(cwd, str) and cwd else None
     script_why = None        # a script refusal is given when nothing more specific (a push, a launch) is found
     for prog, args, wrappers in iter_commands(command):
@@ -1723,13 +1943,22 @@ def drive_command_refusal(command: str, targets=(), *, branch_of=None, cwd=None)
             why = _inline_refusal(args[0], get_targets())
             if why:
                 return why
+            if _PROTECTED_TEXT.search(args[0]):
+                return "inline code that names git, gh or ssh configuration (.git/config, .git/hooks, ...) is refused"
             continue
         if prog == SCRIPT:
             script_why = script_why or _script_refusal(args[0], cands, wrappers)
             continue
         argv0 = next((w[6:] for w in wrappers if w.startswith("argv0:")), None)
-        if argv0 is not None:
+        if argv0 is not None and _is_path(argv0):
             script_why = script_why or _program_path_refusal(argv0, cands, wrappers)
+        elif argv0 is not None:
+            script_why = script_why or _bare_program_refusal(argv0)
+        if prog in _FILE_WRITERS:
+            for a in args:
+                why = protected_path_reason(a, cwd)
+                if why:
+                    return why
         if prog in ("cd", "pushd", "popd"):
             cands = _cd(cands, prog, args, command, wrappers)
             continue
@@ -1742,7 +1971,7 @@ def drive_command_refusal(command: str, targets=(), *, branch_of=None, cwd=None)
             if sub in ("push", "send-pack"):
                 if "xargs" in wrappers:
                     return "a push through xargs is refused: name the branch on the command line"
-                why = _push_refusal(rest, get_targets(), branch_of, cdir)
+                why = _push_refusal(rest, get_targets(), branch_of, cdir) or _configured_push_refusal(rest, cdir, cwd)
                 if why:
                     return why
             elif sub == "subtree" and rest[:1] == ["push"]:
@@ -1764,6 +1993,12 @@ def drive_command_refusal(command: str, targets=(), *, branch_of=None, cwd=None)
                     skip = True
                 elif not a.startswith("-"):
                     gargs.append(a)
+            if gargs[:2] == ["api", "graphql"] and (
+                    any(a == "--input" or a.startswith("--input=") or _dyn(a) for a in args)
+                    or any(re.match(r"[^=]*=@", str(b)) for a, b in zip(args, args[1:]) if a in ("-F", "--field"))
+                    or any(re.match(r"-F[^=]*=@|--field=[^=]*=@", str(a)) for a in args)):
+                return ("a gh api graphql query from a file, stdin or a variable is refused: give it literally "
+                        "(-f query='...'), so it can be checked")
             if gargs[:2] == ["pr", "merge"]:
                 return "`gh pr merge` is refused: landing goes through `swarm land`"
             if gargs[:1] == ["api"] and (any(_GH_GRAPHQL_RISK.search(a) for a in args)

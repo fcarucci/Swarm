@@ -968,7 +968,19 @@ repository (`git diff --quiet HEAD -- <path>`, compared by blob hash) or the sea
 both spellings behave the same. A compiled program runs by path, but a shell or interpreter only under its own name
 (a symlink or copy named otherwise is refused); a bare name is resolved through PATH and its real name decides
 (`rbash` is bash). `at`, `batch` and `crontab` (except `-l`) are refused, and so are `codex app-server|proto|exec`.
-Seats run a new script by committing it first, or by giving the code as a literal `-c` argument.
+Seats run a new script by committing it first, or by giving the code as a literal `-c` argument. A virtualenv's
+entry points (`source <venv>/bin/activate`, `<venv>/bin/<tool>`, where `<venv>/pyvenv.cfg` exists) run.
+**Configuration a seat may not change (round 5).** No drive seat writes git, gh or ssh configuration, by a file tool
+(Write, Edit, MultiEdit, NotebookEdit, apply_patch) or by the shell (a redirection, tee, cp, mv, sed -i, inline
+code): a git dir's `config`, `hooks/`, `info/` (the checkout's, its worktree common dir, any directory that is a
+git dir), `.gitmodules`, a `.gitconfig`, `~/.config/git`, `~/.config/gh`, `~/.ssh`. `HOME`, `XDG_CONFIG_HOME`,
+`GIT_DIR`, `GIT_WORK_TREE`, `GH_CONFIG_DIR` and `GIT_CONFIG_*` may not be set, `git --git-dir/--work-tree` and
+`include.*` settings are refused, and a push that names no refspec is refused when the configuration gives one
+(`remote.<name>.push`, a `push.default` other than simple/current/nothing). A `PATH` setting may only add `$PATH`,
+a virtualenv's bin or absolute directories the seat cannot write, and a bare program name that PATH resolves to a
+seat-writable script (not a virtualenv entry point, the swarm launcher, or a file tracked unmodified at HEAD) is
+refused. `gh api graphql` takes its query only literally (`-f query=...`, scanned): `--input`, `-F query=@file` and
+stdin are refused. `ssh -F <file>` and `-o Include=` follow the file rule.
 
 ### 4.5 Idempotence and crash recovery (the one authoritative protocol)
 
