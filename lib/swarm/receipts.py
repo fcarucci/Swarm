@@ -22,7 +22,6 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
-import os
 import math
 import re
 import unicodedata
@@ -82,13 +81,15 @@ class Receipt:
     destinations: dict | None = None   # land receipts: url -> {"state": ..., "sha": ...}
 
 
-GRANTS_SUBDIR = "grants"   # ~/.local/share/swarm/host/grants: grants only (a Codex writable root, N6)
+GRANTS_SUBDIR = "grants"   # ~/.local/state/swarm/grants: grants only (a Codex writable root, N6)
 
 
 def grants_dir() -> Path:
-    """Where grants live: their own 0700 directory next to `enrolled`, so a Codex seat's sandbox can be given
-    it (to use a grant up) without the enrolled directory, where every other receipt is."""
-    return paths.host_dir() / GRANTS_SUBDIR
+    """Where grants live: their own 0700 directory in the state dir, next to the spool and marker dirs (the
+    other Codex writable roots), so a Codex seat's sandbox can be given it to use a grant up, and never the
+    enrolled directory where every other receipt is, nor anything under ~/.local/share/swarm (the supervisor
+    refuses a writable root there: settings.ensure_private_dir)."""
+    return paths.state_dir() / GRANTS_SUBDIR
 
 
 @contextlib.contextmanager
@@ -98,15 +99,8 @@ def _dir(kind: str, create: bool):
         with enrolment._dir(create=create) as d:
             yield d
         return
-    base = safefs.open_base(paths.host_dir(), create=create, strict_mode=0o700)
-    try:
-        fd = safefs.open_sub(base, GRANTS_SUBDIR, create=create, strict_mode=0o700)
-    finally:
-        os.close(base)
-    try:
+    with safefs.dir_fd(grants_dir(), create=create, strict_mode=0o700) as fd:
         yield fd
-    finally:
-        os.close(fd)
 
 
 def drop(board_key: str, job: str, kind: str, record_id: str) -> bool:

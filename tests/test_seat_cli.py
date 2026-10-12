@@ -1005,7 +1005,7 @@ class CodexParity(ControlCase):
         self.assertEqual(self.run_cmd("halt", "--job", JOB)[0], 0)      # a person receipt (enrolled)
         self.codex_hook(REQ_SESSION, "unhalt", "--job", JOB)              # a grant (grants)
         grants = receipts.grants_dir()
-        self.assertEqual(grants, self.home / ".local/share/swarm/host/grants")
+        self.assertEqual(grants, self.home / ".local/state/swarm/grants")
         self.assertEqual(grants.stat().st_mode & 0o777, 0o700)
         names = [p.name for p in grants.iterdir()]
         self.assertEqual(len(names), 1)
