@@ -71,6 +71,18 @@ class OrphanGuardTests(unittest.TestCase):
         self.h.conn.execute("UPDATE jobs SET status='failed', outcome=%s, closed_by='auto' WHERE job='p'", (stale,))
         self.assertEqual(self.status("p"), "failed")                   # a plain stale job still closes
 
+    def test_a_quiet_time_close_of_a_job_waiting_on_a_person_is_refused(self):
+        self.board.open_job("w", None, "t", None, "u")
+        self.board.post("w", "agent-1", "Francesco, which one?", to="Francesco")
+        for outcome in ("auto-closed: no live agents for 30 min", "auto-closed: no progress for 4 h",
+                        "auto-closed: waiting with no live agents and no verdict"):
+            self.h.conn.execute("UPDATE jobs SET status='failed', outcome=%s, closed_by='auto' WHERE job='w'", (outcome,))
+            self.assertEqual(self.status("w"), "active", outcome)
+        self.board.post("w", "Francesco", "the first")                 # answered: the sweep may close it again
+        self.h.conn.execute("UPDATE jobs SET status='failed', outcome='auto-closed: no progress for 4 h', "
+                            "closed_by='auto' WHERE job='w'")
+        self.assertEqual(self.status("w"), "failed")
+
     def test_the_view_and_python_agree_on_a_future_run_start(self):
         import datetime as dt
         from swarm.board import base

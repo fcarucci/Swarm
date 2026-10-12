@@ -1832,13 +1832,16 @@ class Board(abc.ABC):
         """Whether the stale-waiting rule may CLOSE the job (it may always post its notice). Never a job
         with an unmet goal (only a met or unreachable verdict, or a person, ends it), never one whose own
         limit is 0 (`--stall-hours 0`: never closed by quiet time), never one waiting on a person."""
-        if goal_unmet(js) or js.max_hours == 0:
-            return False
+        return not (goal_unmet(js) or js.max_hours == 0 or self._waits_on_person(js))
+
+    def _waits_on_person(self, js: JobStatus) -> bool:
+        """An open question to the job's owner or requester that nobody has answered: the job waits on a
+        person, so no quiet-time sweep (stale-waiting, stall, orphan) may close it."""
         try:
             from swarm.supervisor.orphans import human_question
-            return not human_question(self, js)
         except ImportError:
-            return True
+            return False
+        return bool(human_question(self, js))
 
     @staticmethod
     def _waiting_reason(js: JobStatus) -> str:
@@ -1864,7 +1867,7 @@ class Board(abc.ABC):
         if js.goal and js.max_hours is None and auto_close_pending(self, js.job):
             return None
         unmet = goal_unmet(js)
-        if wait_protects(js):   # a protected wait/question/person blocker: neither rule applies
+        if wait_protects(js) or self._waits_on_person(js):   # waiting on a person: no quiet-time close at all
             return None
         cap = stall_cap(js, stall_hours, goal_stall_hours)
         if cap and now - run_start(js) >= _dt.timedelta(hours=cap) and \

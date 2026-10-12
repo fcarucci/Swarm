@@ -129,6 +129,15 @@ BEGIN
        AND OLD.plugin_data ~ '"drive\\.enabled"\\s*:\\s*"1"' THEN
         RETURN NULL;
     END IF;
+    IF NEW.status <> 'active' AND OLD.status = 'active' AND NEW.closed_by = 'auto'
+       AND (NEW.outcome LIKE 'auto-closed: no progress%' OR NEW.outcome LIKE 'auto-closed: %no live agents%')
+       AND EXISTS (SELECT 1 FROM messages m WHERE m.job = NEW.job AND m.to_agent IS NOT NULL
+                   AND lower(m.to_agent) IN ('user', 'human', 'owner', 'francesco', lower(coalesce(NEW.created_by, '')))
+                   AND rtrim(m.message) LIKE '%?'
+                   AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.job = NEW.job AND r.id > m.id
+                                   AND lower(r.agent_name) = lower(m.to_agent))) THEN
+        RETURN NULL;     -- waiting on a person (an unanswered question to the owner): no quiet-time close
+    END IF;
     RETURN NEW;
 END $$;
 DROP TRIGGER IF EXISTS jobs_keep_goal_jobs ON jobs;

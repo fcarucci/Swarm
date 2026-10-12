@@ -151,6 +151,48 @@ class StaleWaitingTests(Env):
         self.assertIsNotNone(s.finished_at)
         self.assertLessEqual(len(self.notices()), 1)
 
+    def test_the_orphan_rule_leaves_a_job_waiting_on_a_person_alone(self):
+        for ask, expect in ((False, "cancelled"), (True, "active")):
+            with self.subTest(question=ask):
+                self.setUp()
+                self.activate("J")
+                with self.board() as b:
+                    b.allocate_name("agent-1", "J", "worker")      # a dead agent: no heartbeat, never left
+                    if ask:
+                        b.post("J", "agent-1", "Francesco, which one?", to="Francesco")
+                    ids = [m.id for m in b.messages_after(0, "J")]
+                self.h.backdate_job("J", created_at=3 * 3600, activated_at=3 * 3600)
+                self.h.backdate_agent("agent-1", joined_at=2 * 3600 + 60, last_seen=2 * 3600)
+                for i in ids:
+                    self.h.backdate_message(i, 2 * 3600)
+                self.sweep()
+                self.assertEqual(self.job().status, expect)
+
+    def test_the_stall_rule_leaves_a_job_waiting_on_a_person_alone_with_the_default_limit(self):
+        for ask, expect in ((False, "failed"), (True, "active")):
+            with self.subTest(question=ask):
+                self.setUp()
+                self.waiting_job(CLOSE_AT + 3600)
+                if ask:
+                    with self.board() as b:
+                        b.post("J", "agent-1", "Francesco, shall I merge it?", to="Francesco")
+                        mid = b.messages_after(0, "J")[-1].id
+                    self.h.backdate_message(mid, CLOSE_AT + 3000)
+                self.sweep()
+                self.assertEqual(self.job().status, expect)
+
+    def test_an_answered_question_no_longer_protects(self):
+        self.waiting_job(CLOSE_AT + 3600)
+        with self.board() as b:
+            b.post("J", "agent-1", "Francesco, shall I merge it?", to="Francesco")
+            q = b.messages_after(0, "J")[-1].id
+            b.post("J", "Francesco", "yes")
+            a = b.messages_after(0, "J")[-1].id
+        self.h.backdate_message(q, CLOSE_AT + 3200)
+        self.h.backdate_message(a, CLOSE_AT + 3100)
+        self.sweep()
+        self.assertEqual(self.job().status, "failed")
+
     def test_a_goal_job_without_a_met_verdict_is_never_closed_but_gets_its_notice(self):
         self.waiting_goal_job(CLOSE_AT + 10 * 3600)
         for _ in range(3):
@@ -178,7 +220,6 @@ class StaleWaitingTests(Env):
         self.assertEqual(self.job().status, "active")
 
     def test_a_job_with_a_question_for_a_person_is_never_closed(self):
-        self.config.write_text(self.config.read_text() + "[job]\nstall_hours = 0\n")   # (the stale rule alone)
         self.activate("J")
         self.finished_agent()
         rc, _, err = self.cli("wait", "--job", "J", "--on", "the human")
