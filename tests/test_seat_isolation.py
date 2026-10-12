@@ -730,7 +730,7 @@ class Round3Test(BrokerCase):
         board.active_agent_name.return_value = "Lisa"
         board.post.return_value = mock.Mock(id=42)
         args = mock.Mock(job="J", key="k", artifact="b@" + "a" * 40, outcome="verified", report="r.md",
-                         report_content=str(content))
+                         report_content=str(content), report_text=None)
         with mock.patch("swarm.enrolment.owns", lambda bk, key, job: True), \
                 mock.patch.object(drive_cli, "board_key", lambda cfg: "bk"), \
                 mock.patch("swarm.supervisor.settings.private_dir", lambda: priv), \
@@ -742,6 +742,41 @@ class Round3Test(BrokerCase):
         self.assertTrue(str(kept).startswith(str(priv)))
         rc, _, _ = self.cli(["review", "--job", "J", "verified", "--report", "missing.md"])
         self.assertEqual(rc, 2)    # read in the jail: a missing report never reaches the broker
+
+    def test_a_reviewer_records_an_inline_report_through_the_broker(self):
+        # QA live-met c1bd8f3: a read-only reviewer could not create a --report file, and wrote CHANGES in capitals
+        art = "b@" + "a" * 40
+        rc, out, err = self.cli(["review", "--job", "J", "--artifact", art, "CHANGES", "--report-text",
+                                 "the test does not fail on the base"])
+        self.assertEqual((rc, out), (0, b"ran\n"), err)
+        argv = cli_argv(self.calls[-1])
+        self.assertIn("--report-text=the test does not fail on the base", argv)
+        self.assertIn("changes", argv)
+        self.assertFalse(any(a.startswith("--report=") for a in argv))
+        n = len(self.calls)
+        rc, _, err = self.cli(["review", "--job", "J", "--artifact", art, "verified"])
+        self.assertEqual((rc, len(self.calls)), (2, n), "no report at all is refused before the broker")
+        rc, _, _ = self.cli(["review", "--job", "J", "--artifact", art, "verified", "--report-text", "x",
+                             "--report", "r.md"])
+        self.assertEqual(rc, 2)
+
+    def test_an_inline_review_report_is_posted_as_inline_and_kept(self):
+        from swarm import drive_cli
+        priv = self.tmp / "priv"
+        priv.mkdir(mode=0o700)
+        board = mock.Mock()
+        board.active_agent_name.return_value = "Lisa"
+        board.post.return_value = mock.Mock(id=43)
+        args = mock.Mock(job="J", key="k", artifact="b@" + "a" * 40, outcome="changes", report=None,
+                         report_content=None, report_text="fix the test")
+        with mock.patch("swarm.enrolment.owns", lambda bk, key, job: True), \
+                mock.patch.object(drive_cli, "board_key", lambda cfg: "bk"), \
+                mock.patch("swarm.supervisor.settings.private_dir", lambda: priv), \
+                contextlib.redirect_stdout(io.StringIO()):
+            drive_cli.cmd_review(board, {}, args)
+            kept = drive_cli.review_report_path("J", 43)
+        self.assertEqual(board.post.call_args[0][2], f"REVIEW b@{'a' * 40} CHANGES {drive_cli.INLINE_REPORT}")
+        self.assertEqual(kept.read_text(), "fix the test")
 
     def test_rr17_free_text_may_start_with_a_dash(self):
         from swarm import seatproto

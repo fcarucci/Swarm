@@ -1455,6 +1455,17 @@ class PromptTests(PassCase):
         self.assertIn("`swarm --help`", text)
         self.assertNotIn("Wait for CI with `swarm ci wait", text)
 
+    def test_reviewer_and_judge_prompts_give_the_literal_commands(self):
+        led = self.job()
+        ref = "feat/a@" + "a" * 40
+        text = prompts.render(self.board, self.cfg, led, self.action("review", artifact=ref), self.seat("reviewer", "rev"))
+        self.assertIn(f'`swarm review --job J --artifact {ref} verified --report-text "<your report>"`', text)
+        self.assertIn(f"`swarm review --job J --artifact {ref} changes --report-text", text)
+        self.assertNotIn("VERIFIED|CHANGES", text)
+        judge = prompts.render(self.board, self.cfg, led, self.action("judge", artifact=ref), self.seat("judge", "j"))
+        self.assertIn("--details - <<'EOF'", judge)
+        self.assertIn("lowercase", judge)
+
     def test_goal_judge_prompt_names_candidate_and_pinned_req(self):
         led = self.job()
         led.pinned_requirements = {"REQ.md": "b" * 40}
