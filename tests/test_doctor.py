@@ -355,7 +355,8 @@ class DoctorTests(unittest.TestCase):
         from swarm.cli import load_config
         roots = probe.call_args.args[0]
         self.assertEqual(roots, codex_config.required(load_config(self.cfg))[("sandbox_workspace_write", "writable_roots")])
-        self.assertEqual(roots, [str(self.home / "spool"), str(self.home / "markers")])     # no state dir
+        self.assertEqual(roots, [str(self.home / "spool"), str(self.home / "markers"),
+                                 str(self.home / ".local/share/swarm/host/grants")])     # no state dir
 
     def test_sandbox_probe_reports_a_missing_root_without_creating_it(self):
         """A session whose sandbox was set up before a granted root existed has already failed to
