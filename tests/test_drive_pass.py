@@ -553,6 +553,141 @@ class PausedAndPipelineTests(PassCase):
             self.assertFalse(pipeline.complete_finalized(self.board, self.cfg, js, []))
 
 
+class FakeControl:
+    """Task 6b's drive_cli control-request API as the pass calls it."""
+
+    def __init__(self):
+        self.pending, self.found, self.applied, self.refuse = [], [], [], set()
+        self.order = None
+
+    def find_control_requests(self, board, bk, job, led, now, after=0):
+        self.found.append((job, led is None, after))
+        return [r for r in self.pending if r.job == job and r.id > after]
+
+    def apply_control_request(self, board, cfg, led, req, now):
+        self.applied.append((req.id, led is None))
+        if self.order is not None:
+            self.order.append(("apply", req.id))
+        return (req.id not in self.refuse, "why")
+
+
+class ControlTests(PassCase):
+    def setUp(self):
+        super().setUp()
+        self.ctl = FakeControl()
+        self.mods.control = self.ctl
+
+    def req(self, rid, job="J"):
+        return SimpleNamespace(id=rid, job=job)
+
+    def test_requests_are_applied_in_id_order_before_the_actions(self):
+        self.job()
+        order = []
+        self.ctl.order = order
+        self.ctl.pending = [self.req(9), self.req(4), self.req(7)]
+        self.actions = [self.launch_action()]
+        self.exec.execute = lambda *a, **k: order.append("execute")
+        self.drive()
+        self.assertEqual(order, [("apply", 4), ("apply", 7), ("apply", 9), "execute"])
+
+    def test_the_watermark_is_kept_in_the_ledger_and_requests_are_not_replayed(self):
+        self.job()
+        self.ctl.pending = [self.req(4), self.req(7)]
+        self.drive()
+        self.assertEqual(self.load().watermarks[driver.CONTROL_KEY], 7)
+        self.drive()
+        self.assertEqual([a[0] for a in self.ctl.applied], [4, 7])
+        self.assertEqual(self.ctl.found[-1], ("J", False, 7))
+
+    def test_a_refused_request_is_consumed_too(self):
+        self.job()
+        self.ctl.pending, self.ctl.refuse = [self.req(4)], {4}
+        self.drive()
+        self.drive()
+        self.assertEqual([a[0] for a in self.ctl.applied], [4])
+
+    def test_requests_are_handled_while_the_job_is_halted_and_before_the_tamper_check(self):
+        led = self.job()
+        life.halt(self.board, {}, led, "person", self.t0)
+        self.ctl.pending = [self.req(3)]
+        with mock.patch.object(life, "settle_halt", return_value=True):
+            self.drive()
+        self.assertEqual([a[0] for a in self.ctl.applied], [3])
+
+    def test_the_job_slot_bounds_the_requests(self):
+        self.job()
+        self.ctl.pending = [self.req(1), self.req(2), self.req(3)]
+        real = self.ctl.apply_control_request
+        clock = {"t": 0.0}
+        def apply(*a):
+            clock["t"] += 100
+            return real(*a)
+        self.ctl.apply_control_request = apply
+        with mock.patch.object(time, "monotonic", lambda: clock["t"]):
+            self.drive(deadline=1e9)
+        self.assertEqual(len(self.ctl.applied), 1)
+        self.assertEqual(self.load().watermarks[driver.CONTROL_KEY], 1)         # the rest wait for next pass
+
+    def test_a_ledger_that_does_not_read_gets_its_repair_requests_with_led_none(self):
+        self.job()
+        from swarm.supervisor import privfs
+        with privfs.dir_fd(ledger.SUBDIR) as d:
+            privfs.write_atomic(d, ledger._name(self.key, "J"), '{"job": "J", "v": 1, "broken": true}',
+                                durable=False)
+        self.ctl.pending = [self.req(5)]
+        self.drive()
+        self.assertEqual(self.ctl.applied, [(5, True)])
+        self.assertEqual(self.state["ctlreq"]["J"], 5)
+        self.drive()
+        self.assertEqual(self.ctl.applied, [(5, True)])                         # not replayed
+
+    def plant_bad(self, name):
+        from swarm.supervisor import privfs
+        with privfs.dir_fd(ledger.SUBDIR) as d:
+            privfs.write_atomic(d, ledger._name(self.key, name), f'{{"job": "{name}", "v": 1, "broken": true}}',
+                                durable=False)
+
+    def test_a_repair_request_for_a_bad_ledger_gets_no_ledger_even_when_others_read(self):
+        self.job()
+        self.job("K")
+        self.plant_bad("J")
+        self.ctl.pending = [self.req(5, "J")]
+        self.drive()
+        self.assertEqual(self.ctl.applied, [(5, True)])
+
+    def test_the_job_argument_leaves_other_bad_ledgers_alone(self):
+        self.job()
+        self.job("K")
+        self.plant_bad("J")
+        self.ctl.pending = [self.req(5, "J")]
+        self.drive(job="K")
+        self.assertEqual(self.ctl.applied, [])
+
+    def test_other_jobs_requests_are_not_applied_here(self):
+        self.job()
+        self.job("K")
+        self.ctl.pending = [self.req(2, "K")]
+        self.drive(job="J")
+        self.assertEqual(self.ctl.applied, [])
+
+    def test_without_the_control_api_the_pass_goes_on(self):
+        self.job()
+        self.mods.control = None
+        self.actions = [self.launch_action()]
+        self.drive()
+        self.assertEqual(len(self.exec.launched), 1)
+
+    def test_an_exception_in_apply_still_consumes_the_request_and_isolates_the_job(self):
+        self.job()
+        self.job("K")
+        self.ctl.pending = [self.req(2, "J")]
+        self.ctl.apply_control_request = mock.Mock(side_effect=RuntimeError("boom"))
+        self.actions = [self.launch_action()]
+        self.drive()
+        self.assertEqual(self.load().watermarks[driver.CONTROL_KEY], 2)
+        self.assertEqual({j for j, _ in self.exec.launched}, {"K"})
+
+
 class StallTests(PassCase):
     NOBODY = dm.Action(kind="nothing", action_id="gen1|nothing|-|-|0|-", seat=None, prompt_kind=None, reason="x")
 

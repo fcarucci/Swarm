@@ -33,8 +33,12 @@ def _modules():
         from swarm.supervisor import driver_land      # Task 11b: absent on builds without landing
     except ImportError:
         driver_land = None
+    try:
+        from swarm import drive_cli                   # Task 6b: the control requests of Codex sessions
+    except ImportError:
+        drive_cli = None
     return SimpleNamespace(exec=driver_exec, life=driver_life, model=driver_model, snapshot=driver_snapshot,
-                           land=driver_land)
+                           land=driver_land, control=drive_cli)
 
 
 def _iso(now: dt.datetime) -> str:
@@ -375,6 +379,56 @@ def _watch_stalled(board, state, led, actions, now, sup) -> None:
                 f"{dt.datetime.fromtimestamp(since, dt.timezone.utc).isoformat()}")
 
 
+CONTROL_KEY = "ctlreq"          # ledger watermark: the highest control request id handled
+
+
+def _control_mark(state: dict, led, job: str) -> int:
+    if led is not None:
+        return int(led.watermarks.get(CONTROL_KEY, 0))
+    return int((state.get("ctlreq") or {}).get(job, 0))      # a ledger that does not read keeps no watermark
+
+
+def _control_advance(state: dict, led, job: str, rid: int) -> None:
+    if led is not None:
+        _mutate(led, lambda l: l.watermarks.__setitem__(CONTROL_KEY, max(rid, int(l.watermarks.get(CONTROL_KEY, 0)))))
+    else:
+        marks = state.setdefault("ctlreq", {})
+        marks[job] = max(rid, int(marks.get(job, 0)))
+
+
+def _control(board, cfg, state, led, job: str, now, jdeadline: float, m) -> bool:
+    """Task 6b's control requests (a Codex session's ledger-writing commands): the receipted requests after the
+    watermark, in id order, each applied by `drive_cli.apply_control_request` (which posts CONTROL-APPLIED or
+    CONTROL-REFUSED) and consumed either way. `led` is None for a ledger that does not read (a `repair`
+    request). Stops at the job's time slot. True when the ledger on disk may have changed (reloaded here)."""
+    ctl = getattr(m, "control", None)
+    if ctl is None:
+        return False
+    from swarm.board.autoinit import store_key
+    bk = store_key(cfg)
+    reqs = sorted(ctl.find_control_requests(board, bk, job, led, now, after=_control_mark(state, led, job)),
+                  key=lambda r: r.id)
+    changed = False
+    for req in reqs:
+        if _over(jdeadline):
+            break
+        try:
+            applied, why = ctl.apply_control_request(board, cfg, led, req, now)
+        finally:
+            _control_advance(state, led, job, req.id)       # a request is handled once, whatever came of it
+        changed = True
+        log.info("control request %s of %s: %s (%s)", req.id, job, "applied" if applied else "refused", why)
+        if led is None or applied:
+            fresh = ledger.load(bk, job) if led is None else ledger.load(led.board_key, job)
+            if fresh is None:
+                break
+            if led is not None:
+                led.__dict__.update(fresh.__dict__)
+            else:
+                break            # a repaired ledger is driven from the next pass
+    return changed
+
+
 LAND_PENDING_KEY = "land.pending"
 LAND_PENDING_PASSES = 6        # consecutive passes with a pending landing before a ruling is made due
 
@@ -437,6 +491,7 @@ def _step(board, cfg, sup, state, led, owner, now, say, start_runner, config_pat
     exe.reconcile(board, cfg, led, now, min(jdeadline, time.monotonic() + RECONCILE_SECONDS))
     if led.terminal is not None:
         return
+    _control(board, cfg, state, led, led.job, now, jdeadline, m)     # before anything is decided from the ledger
     js = board.job_status(led.job)
     verdict = _check_tamper(board, cfg, state, led, js, owner, board.job_data(led.job), now, m, say)
     if verdict is not None:
@@ -489,7 +544,7 @@ def drive(board, cfg: dict, sup: dict, state: dict, *, now: dt.datetime, say=pri
     managed = set(held) | {led.job for led in leds}
     managed |= _orphans(board, cfg, state, key, managed, now, say)
     m = None
-    if leds:
+    if leds or held:
         try:
             m = _modules()
         except ImportError as exc:                # a half-installed build: loud, and every job holds
@@ -504,6 +559,13 @@ def drive(board, cfg: dict, sup: dict, state: dict, *, now: dt.datetime, say=pri
                 m.life.enforce_deadlines(board, _flat_cfg(cfg, led), led, now)
             except Exception as exc:
                 log.warning("deadlines of %s failed: %s", led.job, type(exc).__name__)
+    for hint in sorted(held):                    # a ledger that does not read: only a repair request can mend it
+        if time.monotonic() >= deadline or (job and hint != job):
+            continue
+        try:
+            _control(board, cfg, state, None, hint, now, min(deadline, time.monotonic() + JOB_SECONDS), m)
+        except Exception as exc:
+            log.warning("control requests of %s failed: %s", hint, type(exc).__name__)
     for led in sorted(leds, key=lambda l: l.last_pass or ""):      # least recently driven first
         if time.monotonic() >= deadline:
             break
