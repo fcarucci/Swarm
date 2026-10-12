@@ -831,7 +831,7 @@ integrator pushes the rebased branch and waits on CI itself ([G2]).
   person locally). This design does not claim more; sandboxing Claude seats is recorded as future work (R19).
 
 **[CX1] Codex control commands are requests (PM ruling, 6b follow-up).** A grants directory writable by the
-Codex sandbox would let a seat forge its own grants, so it is not used. A Codex seat's ledger-changing control
+Codex sandbox would let a seat fake its own grants, so it is not used. A Codex seat's ledger-changing control
 commands (seat requests and releases, acks, withdrawals, halt/unhalt where allowed) are posted as receipted
 `CONTROL-REQUEST` records; the driver is the only writer of the ledger and applies each request in the pass
 (`apply_control_request`, Task 6b; called from the pass, Task 8c), with the same checks the CLI would make for a
