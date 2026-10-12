@@ -12,7 +12,7 @@ from drive_fixtures import L, T0, Intent, Receipt, ho, intent, iso, minutes, q, 
 from swarm.supervisor import driver_model as dm
 
 # Pinned against eng-ledger at 534cfce. If these change, update drive_fixtures.py to match.
-# Field names of the Ledger dataclass (lib/swarm/supervisor/ledger.py @ 534cfce): 28 fields.
+# Field names of the Ledger dataclass (lib/swarm/supervisor/ledger.py), pinned to the real class below.
 LEDGER_FIELDS = (
     "board_key", "job", "generation", "generation_requested", "activated_at", "budgets", "intents",
     "owners", "integrated", "ruling_due_at", "ruling_attempts", "rounds_without_progress", "last_progress_at", "errors",
@@ -20,7 +20,6 @@ LEDGER_FIELDS = (
     "terminal_intent", "halted_total_seconds", "requester_session", "pinned_requirements",
     "incarnation", "ledger_rev", "state", "models", "activation_heads",
 )
-assert len(LEDGER_FIELDS) == 28
 
 # The Intent dataclass (lib/swarm/supervisor/ledger.py @ 534cfce): 11 fields.
 INTENT_FIELDS = (
