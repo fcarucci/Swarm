@@ -76,19 +76,34 @@ def _orchestrators(board, job: str, roles) -> list:
     return [r for r in board.roster(job) if r.active and (r.role or "").lower() in roles]
 
 
-def drive_ledgers(cfg: dict) -> dict:
-    """job -> the unfinished host-private ledger of every drive job owned by this host. The board's
-    `drive.enabled` flag is board-writable and decides nothing here (spec 4.0): a job is a drive job for the
-    watchdog only when this host holds its ledger. {} when there is no ledger directory or it cannot be read."""
+class DriveLedgers(dict):
+    """job -> ledger, plus `unreadable`: the ledger directory could not be read in full (a planted lock, a bad
+    file), so which jobs are drive jobs is not known and the watchdog must not act on a guess."""
+    unreadable = False
+
+
+def drive_ledgers(cfg: dict) -> DriveLedgers:
+    """The unfinished host-private ledger of every drive job owned by this host. The board's `drive.enabled`
+    flag is board-writable and decides nothing here (spec 4.0): a job is a drive job for the watchdog only when
+    this host holds its ledger. Empty when there is no ledger directory. When it cannot be read, the result
+    is empty with `unreadable` set: it fails closed (no model call is made, see report)."""
     import os
     from swarm.board.autoinit import store_key
     from swarm.supervisor import ledger, settings
+    out = DriveLedgers()
     try:
         if not os.path.lexists(settings.private_dir() / ledger.SUBDIR):
-            return {}
-        return {e.job: e for e in ledger.unfinished(store_key(cfg)) if isinstance(e, ledger.Ledger)}
+            return out
+        entries = ledger.unfinished(store_key(cfg))
     except Exception:
-        return {}
+        out.unreadable = True
+        return out
+    for e in entries:
+        if isinstance(e, ledger.Ledger):
+            out[e.job] = e
+        else:
+            out.unreadable = True            # a bad entry: its job is unknown
+    return out
 
 
 def driver_stale(led, cfg: dict, now: _dt.datetime) -> bool:
@@ -231,6 +246,7 @@ def report(board, cfg: dict, problems: list[Problem], now=None, run=subprocess.r
     s = events_listener.settings(cfg)
     n = _now(now)
     bucket = int(n.timestamp() // (s["alert_repeat_minutes"] * 60))
+    drive = drive_ledgers(cfg)      # once per report: a drive job, or an unreadable ledger, gets no model call
     jobs = {p.job for p in problems if p.job}
     if any(p.job is None for p in problems):
         jobs |= {js.job for js in board.jobs(False) if js.status == "active"}
@@ -238,7 +254,7 @@ def report(board, cfg: dict, problems: list[Problem], now=None, run=subprocess.r
     for job in sorted(jobs):
         mine = [p for p in problems if p.job in (job, None)]
         text = "SWARM-ALERT " + "; ".join(f"{p.code}: {p.text}" for p in mine)
-        line = None if job in drive_ledgers(cfg) else triage(board, cfg, job, mine, run=run)   # no model call outside a seat
+        line = None if (job in drive or drive.unreadable) else triage(board, cfg, job, mine, run=run)   # no model call outside a seat
         if line:
             text = f"SWARM-ALERT {line} [{', '.join(p.code for p in mine)}]"
         text = text[:events_listener.TEXT_MAX]

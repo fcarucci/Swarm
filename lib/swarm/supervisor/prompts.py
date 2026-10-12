@@ -128,7 +128,7 @@ def _header(led, seat, role: str, name: str) -> list[str]:
 
 
 def _seat_body(board, led, seat, action) -> list[str]:
-    out = [f"Your task brief is the file {_ref(seat.brief_path, what="brief path")}; read it first and work in {_ref(seat.workdir, what="workdir")}."]
+    out = [f"Your task brief is the file {_ref(seat.brief_path, what='brief path')}; read it first and work in {_ref(seat.workdir, what='workdir')}."]
     kind = action.prompt_kind
     if kind == "wake":
         out.append(f"You were woken ({_ref(action.reason or 'wake', re.compile(r'[A-Za-z0-9 _:./-]{1,80}'), 'reason')}): check the board for what changed (answers, "

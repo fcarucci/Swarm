@@ -321,6 +321,9 @@ def complete_finalized(board, cfg, js, handoffs, *, dry_run=False, say=print):
     and agent activity under the board lock. A racing hand-off keeps the job open.
     """
     from swarm import cli, review
+    from swarm.supervisor import orphans
+    if orphans.drive_view(board, cfg, js.job)[0]:
+        return False        # a drive job is closed only by the driver (ledger first), never by this recovery
     if not review.latest_handoffs(board, js.job) or any(a.status in LIVE and a.ended_at is None for a in board.agents(js.job)):
         return False
     if any(r.ended_at is None for r in board.restarts(job=js.job)):
