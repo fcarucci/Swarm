@@ -339,6 +339,7 @@ def _locks(seat) -> tuple[list[str], dict]:
 # --- execute -------------------------------------------------------------------------------------
 
 UNCOUNTED = ("outage", "lost", "cancelled-before-start")        # attempts that do not count toward max_attempts
+MAX_EVENTS_SHOWN = 50                                 # event ids one launch shows (and later acknowledges), oldest first
 EVACK = "evack:"                                      # evack:<seat>:<event id> = 1: that event was shown and answered
 ACK_OUTCOMES = ("completed", "max_turns", "timeout")   # [F4]: the session completed at least one turn
 
@@ -572,7 +573,6 @@ def _board_marks(board, led, seat, now) -> tuple[int, list]:
     ledger's own `post` receipt (host-private, so a database writer cannot fake one), and events addressed
     to that agent, returned as the list of ids shown (each acknowledged on its own). Nothing else moves a mark."""
     prev_msg = led.watermarks.get(f"msg:{seat.seat}", 0)
-    prev_event = led.watermarks.get(f"event:{seat.seat}", 0)
     seen = f"{EVACK}{seat.seat}:"
     from swarm.supervisor import driver_snapshot
     names = {a.agent_key: a.name for a in board.agents(led.job, include_departed=True)}
@@ -584,8 +584,8 @@ def _board_marks(board, led, seat, now) -> tuple[int, list]:
             and rc.get("post", m.id, 1, {"kind": "post", "id": str(m.id), "rev": 1, "to": m.to_agent,
                                          "body": m.message}) is not None]
     events = [e.id for e in board.pending_events(led.job) if e.to and e.to.lower() == name.lower()
-              and e.id > prev_event and f"{seen}{e.id}" not in led.watermarks]
-    return max(msgs, default=prev_msg), sorted(events)
+              and f"{seen}{e.id}" not in led.watermarks]
+    return max(msgs, default=prev_msg), sorted(events)[:MAX_EVENTS_SHOWN]
 
 
 def _render_prompt(board, cfg, led, action, seat) -> str:
@@ -753,7 +753,24 @@ def reconcile(board, cfg, led, now, deadline: float) -> None:
         _conclude(led, intent.launch_id, "failed", False, 0.0)
     _settle_seats(board, cfg, led, _matched_rows(led, _rows_by_launch(board, led.job), cfg, here), now)
     sweep_unlaunched_seats(board, led.job)
+    _settle_event_acks(board, led)
     _sweep_locks(board, cfg, now)
+
+
+def _settle_event_acks(board, led) -> None:
+    """Keep the ledger's `evack:` keys bounded: acknowledge on the board the events a session answered (so
+    they stop being pending), and drop the key of every event that is no longer pending (acknowledged,
+    expired or gone): nothing can wake a seat on it any more."""
+    keys = [k for k in led.watermarks if k.startswith(EVACK)]
+    if not keys:
+        return
+    pending = {e.id for e in board.pending_events(led.job)}
+    answered = sorted({int(k.rsplit(":", 1)[1]) for k in keys} & pending)
+    if answered:
+        board.ack_events(led.job, answered, "swarm driver")
+    stale = [k for k in keys if int(k.rsplit(":", 1)[1]) not in pending or int(k.rsplit(":", 1)[1]) in answered]
+    if stale:
+        mutate(led, lambda l: [l.watermarks.pop(k, None) for k in stale])
 
 
 def _sweep_locks(board, cfg: dict, now) -> None:
