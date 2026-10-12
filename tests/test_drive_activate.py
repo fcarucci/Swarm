@@ -284,6 +284,7 @@ class CredentialAndWorkdirTests(HomeCase):
                 with self.subTest(ssh=remote):
                     self.assertEqual(da.default_credential(remote), "ssh-agent:" + sock)
 
+    @posix_only("drive mode is not supported on Windows")
     def test_local_remote_activates_without_an_ssh_agent(self):
         work = self.home / "repo"
         work.mkdir()
@@ -382,6 +383,7 @@ class PinnedGitTests(HomeCase):
         self.assertEqual(kw["cwd"], os.path.abspath(os.sep))
         self.assertNotEqual(kw["cwd"], os.getcwd())
 
+    @posix_only("drive mode is not supported on Windows")
     def test_planted_insteadof_in_the_workdir_config_does_not_run(self):
         """The reviewer's second PoC: the work dir's .git/config (seat-writable) rewrites the URL to ext::
         and allows ext. With the process inside that work dir, the read still goes to the pinned URL."""
@@ -398,6 +400,7 @@ class PinnedGitTests(HomeCase):
         self.assertEqual(da.remote_head(url, None, None, "main"), head)
         self.assertFalse(marker.exists())
 
+    @posix_only("drive mode is not supported on Windows")
     def test_local_remote_runs_upload_pack_with_its_config_defused(self):
         done = types.SimpleNamespace(returncode=0, stdout="", stderr="")
         with mock.patch.object(da.subprocess, "run", return_value=done) as run:
@@ -408,6 +411,7 @@ class PinnedGitTests(HomeCase):
         self.assertFalse(any(a.startswith("--upload-pack") for a in network))
         self.assertLess(local.index(da.gitpin.local_pack_args("ls-remote")[0]), local.index("--"))
 
+    @posix_only("drive mode is not supported on Windows")
     def test_planted_global_config_does_not_redirect_the_url(self):
         repo, head = self.upstream()
         decoy = self.home / "decoy"
@@ -559,6 +563,7 @@ class ConfigDirTests(HomeCase):
             da.build_plan(self.cfg, ns(job="J", workdir=str(work), remote=["origin=https://example.com/o/r.git"],
                                        credential=["origin=helper:" + gh + " auth git-credential"]), GOAL)
 
+    @posix_only("drive mode is not supported on Windows")
     def test_config_dir_rechecked_when_read_back_from_the_record(self):
         """A record whose config dir became unsafe (or was planted) refuses before git runs."""
         work = self.root / "repo"
@@ -574,6 +579,7 @@ class ConfigDirTests(HomeCase):
             da._record_activation_heads(self.cfg, "bk", "J", o)
         head.assert_not_called()
 
+    @posix_only("drive mode is not supported on Windows")
     def test_pin_rechecked_when_read_back_from_the_record(self):
         o = {"target_branch": "main", "remotes": {"origin": "https://example.com/r.git"},
              "credentials": {"origin": "helper:/usr/bin/curl"}, "config_dirs": {}, "roots": [str(self.root)]}
@@ -600,6 +606,7 @@ class OwnerRecordTests(HomeCase):
         return enrolment.write_job_owner("bk", job="J", harness="claude", session_id=None, cwd=absolute("w"),
                                          **self.owner(**kw))
 
+    @posix_only("drive mode is not supported on Windows")
     def test_valid_owner_record_round_trips_with_its_format(self):
         self.write()
         rec = enrolment.find_job_owner("bk", "J", strict=True)
@@ -924,6 +931,7 @@ class DriveCli(Env):
                               text=True, env=env).stdout.strip()
         return repo, head, env
 
+    @posix_only("drive mode is not supported on Windows")
     def test_activation_records_the_target_head_per_remote(self):
         """[11b] the target's head on each pinned remote is recorded at activation: the audit's `since`."""
         repo, head, _ = self.make_repo()
@@ -932,6 +940,7 @@ class DriveCli(Env):
         self.assertEqual(rc, 0, err)
         self.assertEqual(self.ledger_of().activation_heads, {url: head})
 
+    @posix_only("drive mode is not supported on Windows")
     def test_activation_head_survives_a_rollover_unchanged(self):
         import subprocess
         repo, head, env = self.make_repo()
@@ -944,6 +953,7 @@ class DriveCli(Env):
         led = self.ledger_of()
         self.assertEqual((led.generation_requested, led.activation_heads), (2, {url: head}))
 
+    @posix_only("drive mode is not supported on Windows")
     def test_missing_target_branch_refuses_activation_and_holds_it_activating(self):
         repo, _, _ = self.make_repo(branch="dev")
         rc, _, err = self.activate("--workdir", str(self.work), "--remote", "origin=file://" + str(repo))
@@ -1000,12 +1010,14 @@ class DriveCli(Env):
         self.assertIn("cannot be determined", err)
         self.assertIsNone(self.ledger_of())
 
+    @posix_only("drive mode is not supported on Windows")
     def test_gh_config_dir_resolution_order(self):
         self.assertEqual(da.gh_config_dir({"GH_CONFIG_DIR": "/x/one", "XDG_CONFIG_HOME": "/x/two"}), "/x/one")
         self.assertEqual(da.gh_config_dir({"XDG_CONFIG_HOME": "/x/two"}), os.path.join("/x/two", "gh"))
         with self.assertRaises(da.DriveError):
             da.gh_config_dir({"GH_CONFIG_DIR": "relative/gh"})
 
+    @posix_only("drive mode is not supported on Windows")
     def test_the_helper_is_given_the_pinned_config_dir(self):
         gh = absolute("home", "u", ".local", "bin", "gh")
         cfgdir = absolute("home", "u", "gh-config")
@@ -1140,6 +1152,7 @@ class DriveCli(Env):
         self.assertIn("enrolled agent session", err)
         self.assertEqual(self.ledger_of().generation_requested, 1)
 
+    @posix_only("drive mode is not supported on Windows")
     def test_supervise_disable_stops_the_live_seats(self):
         self.activate("--workdir", str(self.work))
         run = {"job": "J", "unit": "unit-1.scope"}

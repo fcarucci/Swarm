@@ -955,6 +955,7 @@ class DriveDoctorTests(unittest.TestCase):
         self.owner({"d": f"helper:{self.home}/bin/adir/gh auth git-credential"})
         self.assertIs(self.run_checks()["drive credential d"].ok, False)
 
+    @posix_only("drive mode is not supported on Windows")
     def test_non_helper_credentials_and_missing_owner_add_no_helper_line(self):
         self.ledger()
         self.owner({"ssh": "ssh-agent:/run/user/1/agent.sock", "key": f"ssh-key:{self.home}/k"})
@@ -962,6 +963,7 @@ class DriveDoctorTests(unittest.TestCase):
         self.ledger("NOOWNER")
         self.assertFalse([n for n in self.run_checks() if n.startswith("drive credential")])
 
+    @posix_only("drive mode is not supported on Windows")
     def test_land_lines_are_added_for_each_jobs_pinned_destinations(self):
         import sys
         import types
