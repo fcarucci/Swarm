@@ -87,7 +87,8 @@ class Session:
 
     def sh(self, argv: list[str], *, input: str | None = None, cwd: str | None = None,
            timeout: float = 300) -> subprocess.CompletedProcess:
-        cmd = " ".join(argv)
+        import shlex
+        cmd = shlex.join(argv)
         out = self.hook("turn", tool_name="Bash", tool_input={"command": cmd})
         spec = (out or {}).get("hookSpecificOutput") or {}
         rewritten = (spec.get("updatedInput") or {}).get("command")   # the hook adds `--as NAME` for an enrolled judge
