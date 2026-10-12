@@ -57,7 +57,7 @@ jobs:
           SWARM_TEST_BACKEND: ${{ matrix.backend }}
         run: |
           set -o pipefail
-          python -B -m unittest discover -s tests -q 2>&1 | tee test.log || { python .github/scripts/annotate.py test.log; exit 1; }
+          python -B -m unittest discover -s tests -q </dev/null 2>&1 | tee test.log || { python .github/scripts/annotate.py test.log; exit 1; }
 
   # Native Windows: the unit suite on the offline backends. POSIX-only tests carry skip markers
   # with a reason; nothing is skipped on Linux.
@@ -90,7 +90,7 @@ jobs:
           PYTHONUTF8: "1"
         run: |
           set -o pipefail
-          python -B -m unittest discover -s tests -q 2>&1 | tee test.log || { python .github/scripts/annotate.py test.log; exit 1; }
+          python -B -m unittest discover -s tests -q </dev/null 2>&1 | tee test.log || { python .github/scripts/annotate.py test.log; exit 1; }
 
   # install.sh must keep working under macOS's stock bash (3.2, no arrays): e2e/install_test.sh
   # exercises it end to end. Also runs the unit suite on sqlite, the backend the e2e script uses
@@ -126,7 +126,7 @@ jobs:
           SWARM_TEST_BACKEND: sqlite
         run: |
           set -o pipefail
-          .venv/bin/python -B -m unittest discover -s tests -q 2>&1 | tee test.log || { python3 .github/scripts/annotate.py test.log; exit 1; }
+          .venv/bin/python -B -m unittest discover -s tests -q </dev/null 2>&1 | tee test.log || { python3 .github/scripts/annotate.py test.log; exit 1; }
 
   # The Postgres-backed classes (tests/support.py PostgresHarness, tests/test_stall.py's Postgres
   # proxy tests) are skipped everywhere else because they need SWARM_TEST_CONFIG. Give them a
@@ -206,12 +206,12 @@ jobs:
         run: |
           set -o pipefail
           cd tests
-          python -B -m unittest -v $(ls test_drive_*.py | sed 's/\.py$//') 2>&1 | tee ../drive-pg.log || { cd .. && python .github/scripts/annotate.py drive-pg.log; exit 1; }
+          python -B -m unittest -v $(ls test_drive_*.py | sed 's/\.py$//') </dev/null 2>&1 | tee ../drive-pg.log || { cd .. && python .github/scripts/annotate.py drive-pg.log; exit 1; }
           cd .. && python .github/scripts/drive_pg_summary.py drive-pg.log
 
       - name: Known-stall recovery tests (swarm tail/watch vs a stalling proxy; allowed to fail)
         continue-on-error: true
-        run: cd tests && python -B -m unittest test_stall.PostgresFollowRecoveryTests -v
+        run: cd tests && python -B -m unittest test_stall.PostgresFollowRecoveryTests -v </dev/null
 
   complexity-analyzer:
     defaults:
