@@ -693,6 +693,7 @@ class Withdraw(ControlCase):
         self.assertIsNotNone(ledger.load(self.bkey, JOB))   # the stored ledger still reads
 
 
+@posix_only("drive repair moves the bad ledger with a dir_fd rename (POSIX); drive mode is refused on Windows")
 class DriveRepair(ControlCase):
     def entry(self):
         hits = list(self.home.rglob(ledger._name(self.bkey, JOB)))
@@ -888,6 +889,18 @@ class DriveRepair(ControlCase):
         self.assertIsNotNone(led.halted)                                  # which stays halted
 
 
+class RepairWithoutDirFdRename(ControlCase):
+    def test_a_platform_without_dir_fd_rename_gets_a_clear_refusal(self):
+        """Windows (no drive mode): repair says it cannot run here, instead of "the ledger is unreadable"."""
+        entry = next(self.home.rglob(ledger._name(self.bkey, JOB)))
+        entry.write_bytes(b"bad")
+        with mock.patch.object(ledger.os, "supports_dir_fd", set()):
+            rc, _, err = self.run_cmd("drive", "repair", "--job", JOB, "--generation", "1")
+        self.assertEqual(rc, 1)
+        self.assertIn("drive repair cannot run here", err)
+        self.assertEqual(entry.read_bytes(), b"bad")   # nothing moved
+
+
 class TtyReceipt(ControlCase):
     def test_codex_seat_cancel_goes_through_the_same_gate(self):
         self.assertEqual(self.request_seat()[0], 0)
@@ -935,6 +948,7 @@ class PersonReceipts(ControlCase):
         self.assertEqual(self.receipt("seat cancel", self.board.seat(JOB, 1, "eng").id).action_id,
                          "requester:seat_cancel")
 
+    @posix_only("drive repair moves the bad ledger with a dir_fd rename (POSIX); drive mode is refused on Windows")
     def test_tty_halt_and_repair_write_person_receipts(self):
         self.as_person_at_a_terminal()
         rc, _, err = self.run_cmd("halt", "--job", JOB)
