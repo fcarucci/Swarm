@@ -781,6 +781,8 @@ passed, and never while the job is halted. So a halt cannot let a default be app
   exists; full suites only in CI; `swarm ci wait --repo R --sha S --timeout 540` in the foreground, never
   `gh run watch`; never put work trees or builds under /tmp; rebase-only landing; post DONE with evidence.
 
+**[CX1]** Codex seats' ledger-changing control commands are receipted `CONTROL-REQUEST`s the driver applies (§4.0).
+
 **[F18] Codex seats must reach the board directly (ruling).** Today the Codex sandbox has no network and only
 `post`/`wait`/`resume`/`verdict` spool; `done`, `seat`, `review`, `ask`, `answer` and `land` fail, and spooled
 records have no id to bind a receipt to. Ruling: drive mode supports a Codex seat only when it is
@@ -827,6 +829,13 @@ integrator pushes the rebased branch and waits on CI itself ([G2]).
   launches and target pushes), and the driver independently verifies everything that decides an outcome, but
   a same-user Claude agent that defeats the classifier can do what the user can (including impersonating a
   person locally). This design does not claim more; sandboxing Claude seats is recorded as future work (R19).
+
+**[CX1] Codex control commands are requests (PM ruling, 6b follow-up).** A grants directory writable by the
+Codex sandbox would let a seat forge its own grants, so it is not used. A Codex seat's ledger-changing control
+commands (seat requests and releases, acks, withdrawals, halt/unhalt where allowed) are posted as receipted
+`CONTROL-REQUEST` records; the driver is the only writer of the ledger and applies each request in the pass
+(`apply_control_request`, Task 6b; called from the pass, Task 8c), with the same checks the CLI would make for a
+Claude seat. This is the same pattern as `LAND-REQUEST` ([RR8]).
 
 **Trust assumption (after the Task 7b review):** a database writer can alter the board state of a genuinely
 launched seat (e.g. mark it idle or failed, or change its row): that is denial only, never settlement — it can make
