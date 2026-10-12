@@ -41,6 +41,7 @@ MECHANICAL = "swarm supervisor (mechanical)"   # terminal_intent["by"] of a verd
 JUDGE_KEY = "driver-"                       # + job: the agent key the mechanical verdict is recorded under
 DEFAULTS = {"max_wall_hours": 24, "ruling_deadline_minutes": 120, "close_deadline_minutes": 60,
             "question_expiry": "4h"}
+_CANCEL_BY = "cancel_by:"                      # watermark: a person asked to cancel while a close was under way
 _HOPEN = "hopen:"                           # watermark: an intent that was open when the halt began
 _GEN = re.compile(r"gen(\d+)\|")
 
@@ -432,6 +433,10 @@ def terminalize(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks | None 
     led.save()
     if intent["verdict"] == "met":
         verdict = _check_met(board, cfg, led, js, now, hooks)
+        if verdict == "rejected":
+            by = next((k[len(_CANCEL_BY):] for k in led.watermarks if k.startswith(_CANCEL_BY)), None)
+            if by is not None:         # a person's cancel was waiting behind the close: it applies now
+                return cancel_job(board, cfg, led, by, now, hooks=hooks)
         if verdict != "ok":
             return False
     barrier.hit("mid_terminalization")       # sessions gone, nothing settled yet
@@ -470,7 +475,11 @@ def cancel_job(board, cfg: dict, led, actor: str, now: dt.datetime, *, reason: s
         return False
     pending = led.terminal_intent
     if pending is not None and _closing_key(pending) in led.watermarks:
-        return terminalize(board, cfg, led, now, hooks=hooks)     # its close already began: finish that, not a cancel
+        # its close already began: finish that, but keep the person's cancel pending, to be applied
+        # should the closing gate reject the MET meanwhile
+        led.watermarks[f"{_CANCEL_BY}{actor}"[:256]] = 1
+        led.save()
+        return terminalize(board, cfg, led, now, hooks=hooks)
     cause = (reason or "cancelled by a person").strip()[:200]
     led.terminal_intent = {"verdict": "cancelled", "scope": "job", "generation": led.generation,
                            "candidate": None, "req": None, "by": actor, "at": _iso(now)}
