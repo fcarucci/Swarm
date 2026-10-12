@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import stat
 import subprocess
 import tempfile
@@ -126,6 +127,8 @@ class CheckUrlTests(unittest.TestCase):
     def test_refused_with_the_reason(self):
         self.assertGreaterEqual(len(REFUSED), 50)
         for url, why in REFUSED:
+            if sys.platform == "win32" and (url.startswith("/") or url.startswith("file://")):
+                continue   # POSIX local paths: drive mode is refused on Windows, and these name no Windows path
             with self.subTest(url=url), self.assertRaisesRegex(gitpin.GitPinError, re.escape(why)):
                 gitpin.check_url(url)
 

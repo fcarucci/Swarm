@@ -635,6 +635,7 @@ class GitpinUse(MirrorCase):
         self.assertIn("'-'", str(cm.exception))
         self.assertEqual(calls, [])
 
+    @support.posix_only("drive mode is not supported on Windows")
     def test_decoded_control_characters_in_a_local_path_are_refused(self):
         for tail in ("%0A", "%0d", "%00", "%1b"):
             with self.subTest(tail=tail), self.assertRaises(MirrorError) as cm:
