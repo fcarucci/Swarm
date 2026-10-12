@@ -1060,6 +1060,32 @@ class CodexControlRequests(ControlCase):
         self.assertEqual(self.posts("CONTROL-APPLIED"), [f"CONTROL-APPLIED {req.id} unhalt"])
         self.assertEqual(self.driver(), [])                                    # decided: never again
 
+    def test_codex_unhalt_is_applied_by_a_real_driver_pass(self):
+        """End to end: the Codex session's request, receipted by the real hook, is applied by driver.drive (the
+        pass the supervisor runs), not by a test helper."""
+        from swarm.supervisor import driver
+        self.board.set_job_data(JOB, "drive.enabled", "1")   # what activation writes ([RR1a]); else it is tamper
+        self.assertEqual(self.run_cmd("halt", "--job", JOB)[0], 0)
+        rc, out, err, receipted = self.codex(REQ_SESSION, "unhalt", "--job", JOB)
+        self.assertEqual((rc, receipted), (0, True), err)
+        self.assertIsNotNone(ledger.load(self.bkey, JOB).halted)
+        state = {}
+        driver.drive(self.board, self.cfg, {}, state, now=self.board.now(), say=lambda *_: None,
+                     start_runner=lambda *a, **k: None, which=lambda b: b, scope_ok=lambda: True, job=JOB)
+        self.assertIsNone(ledger.load(self.bkey, JOB).halted)
+        self.assertEqual(len(self.posts("CONTROL-APPLIED")), 1)
+        driver.drive(self.board, self.cfg, {}, state, now=self.board.now(), say=lambda *_: None,
+                     start_runner=lambda *a, **k: None, which=lambda b: b, scope_ok=lambda: True, job=JOB)
+        self.assertEqual(len(self.posts("CONTROL-APPLIED")), 1)            # applied once, never again
+
+    def test_a_build_without_drive_cli_says_so_loudly(self):
+        from types import SimpleNamespace
+        from swarm.supervisor import driver
+        state = {}
+        driver._control(self.board, self.cfg, state, ledger.load(self.bkey, JOB), JOB, self.board.now(),
+                        float("inf"), SimpleNamespace(control=None))
+        self.assertTrue(any("drive_cli is not in this build" in m for m in self.posts("DRIVER-ERROR")))
+
     def test_codex_lead_ack_goes_through_the_driver(self):
         eid, _ = self.board.post_event(JOB, "ci", "k1", "CI failed", "Lead", None)
         newest = self.board.last_message_id(JOB)
