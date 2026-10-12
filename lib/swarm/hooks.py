@@ -963,13 +963,14 @@ def own_key_command(command: str, agent_id: str, job: str | None = None) -> str 
 
 
 def own_name_verdict_command(command: str, name: str, job: str | None = None) -> str | None:
-    """`command` with every real `swarm verdict` invocation made to run as `name`: a call with no
+    """`command` with every real `swarm verdict` and `swarm done` invocation made to run as `name`: a call with no
     --as gets `--as NAME` (a judge needs no join and no --as: the hook knows who is calling), and
     a plain --as naming someone else is replaced (it would be refused anyway). None when there is
     nothing to change. A verdict for another --job than `job` is left alone."""
     from swarm.shellguard import mask_heredocs
     inserts, edits = [], []
-    for args in _swarm_calls(mask_heredocs(command), "verdict"):   # a heredoc report is not shell
+    calls = [a for sub in ("verdict", "done") for a in _swarm_calls(mask_heredocs(command), sub)]
+    for args in calls:   # a heredoc report is not shell; `done` too: a seat never needs --as (QA bug 4)
         has_as, other_job, bad = False, False, None
         for m, (_, _, text, _) in enumerate(args):
             value, tok = _flag_value(args, m, "--job")
@@ -1243,7 +1244,7 @@ def _auto_init(event: str, agent_id: str, cfg: dict) -> None:
 
 
 def _goal_roles(board, agent_id: str, job: str, payload: dict, marker: dict | None,
-                prompt: str | None) -> tuple[str | None, str | None, bool, str | None]:
+                prompt: str | None, cfg: dict | None = None) -> tuple[str | None, str | None, bool, str | None]:
     """For a job with a goal: (goal, judge name, whether this agent is the judge, a note if its
     judge tag was refused). (None, None, False, None) for a job without one."""
     if not (marker or {}).get("goal"):
@@ -1251,6 +1252,8 @@ def _goal_roles(board, agent_id: str, job: str, payload: dict, marker: dict | No
     if prompt is None:
         prompt = _spawn_prompt(payload, agent_id)
     wants = _role(payload, agent_id, prompt) == "judge"
+    if wants and cfg is not None and _drive_job(cfg, job):
+        wants = False   # in a drive job the judge is the driver's seat (ledger), never a prompt tag
     is_judge = wants and board.take_judge_seat(agent_id, job)
     js = board.job_status(job)
     goal, judge = (js.goal, js.judge) if js else (None, None)
@@ -1354,7 +1357,7 @@ def _enrol(board, event: str, agent_id: str, job: str, payload: dict, cfg: dict,
         board.bind_job_session(job, sid)
     if event == "turn":
         board.tool_started(agent_id, payload.get("tool_name"))
-    goal, judge, is_judge, note = _goal_roles(board, agent_id, job, payload, marker, prompt)
+    goal, judge, is_judge, note = _goal_roles(board, agent_id, job, payload, marker, prompt, cfg)
     if prompt is None:
         prompt = _spawn_prompt(payload, agent_id)   # None at SubagentStart: see _verify_route
     is_verifier = (not is_judge and _role(payload, agent_id, prompt) == "verifier"
@@ -1443,6 +1446,7 @@ def _enrol_resumed(board, agent_id: str, resume: dict, payload: dict, cfg: dict)
               f"restart isn't needed. Stop now: end your turn without further tool calls.")
         return
     _record_enrolment(cfg, agent_id, job, payload.get("session_id"), payload)
+    _drive_judge_flag(board, cfg, agent_id, job, payload, resume)
     if coordinator:
         from swarm import enrolment
         from swarm.board.autoinit import store_key
@@ -1466,6 +1470,35 @@ def _enrol_resumed(board, agent_id: str, resume: dict, payload: dict, cfg: dict)
              heading=f"messages since {name} stopped", payload=payload)
     if not coordinator and current_host().is_spawn(payload):   # workers cannot spawn even on first call
         _deny_replacement_spawn(board, agent_id)
+
+
+def _drive_judge_flag(board, cfg: dict, agent_id: str, job: str, payload: dict, resume: dict) -> None:
+    """A driver-launched seat whose ledger-authorized role is judge takes the job's judge seat (QA bug 4): the
+    flag comes from the host-private launch (the intent the run file names) and the seat's receipted role,
+    never from a tag in the prompt. Never raises: a seat that is not a judge stays a worker."""
+    try:
+        from swarm import drivegate
+        from swarm.board.autoinit import store_key
+        from swarm.supervisor import drive_authz
+        bk = store_key(cfg)
+        ctx = drivegate.seat_context(cfg, bk, payload, resume=resume)
+        if ctx is None or ctx.led is None or not ctx.seat:
+            return
+        row = board.seat(job, ctx.led.generation, ctx.seat)
+        if row is not None and drive_authz.receipted_role(bk, ctx.led, row) == "judge":
+            board.take_judge_seat(agent_id, job)
+    except Exception as exc:
+        _log_error("drive judge", agent_id, exc)
+
+
+def _drive_job(cfg: dict, job: str) -> bool:
+    """Whether `job` is a drive job on this host (it has a ledger, readable or not)."""
+    try:
+        from swarm.board.autoinit import store_key
+        from swarm.supervisor import ledger
+        return ledger.exists(store_key(cfg), job)
+    except Exception:
+        return True   # cannot tell: treat as drive (the stricter case)
 
 
 def _first_call_of_resumed(board, agent_id: str, job: str) -> bool:

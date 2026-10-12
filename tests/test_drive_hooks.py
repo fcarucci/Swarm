@@ -901,3 +901,52 @@ class SeatEnrolsFromMarker(Env):
         self.assertIsNotNone(self.agent("seat-session-1", job="J1"))
         self.assertIsNone(self.agent("seat-session-1", job="J2"))
         self.assertIsNone(self.agent("seat-session-2", job="J2"))
+
+
+class DriveJudgeFlag(Env):
+    """QA bug 4: a driver-launched judge seat records verdicts; the flag comes from the ledger's receipted
+    seat role, never from a prompt tag; `swarm done` runs as the caller like `swarm verdict`."""
+
+    def setUp(self):
+        super().setUp()
+        rc, _, err = self.cli("activate", "--job", "J", "--session", "orchestrator-sess")
+        self.assertEqual(rc, 0, err)
+        from swarm import cli
+        self.cfg = cli.load_config(self.config)
+        with self.board() as b:
+            b.set_job_goal("J", "ship it")
+            self.name = b.allocate_name("seat-agent", "J", "worker")
+
+    def flag(self, role):
+        ctx = drivegate.Ctx(kind="seat", job="J", led=types.SimpleNamespace(generation=1), agent_key="seat-agent")
+        ctx.seat = "judge"
+        from swarm.supervisor import drive_authz
+        with self.board() as b, \
+                mock.patch.object(drivegate, "seat_context", return_value=ctx), \
+                mock.patch.object(b, "seat", return_value=types.SimpleNamespace(role=role)), \
+                mock.patch.object(drive_authz, "receipted_role", return_value=role):
+            hooks._drive_judge_flag(b, self.cfg, "seat-agent", "J", {"session_id": "s"}, {})
+            return b.record_verdict("J", self.name, "met", "evidence", None, None)
+
+    def test_a_driver_launched_judge_seat_records_a_verdict(self):
+        self.assertTrue(self.flag("judge"))
+
+    def test_a_non_judge_seat_does_not_become_the_judge(self):
+        self.assertFalse(self.flag("engineer"))
+        self.assertFalse(self.flag(None))     # a role a board writer changed after the receipt
+
+    def test_a_judge_tag_in_a_drive_jobs_prompt_is_ignored(self):
+        with self.board() as b, mock.patch.object(hooks, "_drive_job", return_value=True), \
+                mock.patch.object(hooks, "_role", return_value="judge"):
+            goal, judge, is_judge, note = hooks._goal_roles(b, "seat-agent", "J", {}, {"goal": True},
+                                                            "[swarm role: judge]", self.cfg)
+            self.assertFalse(is_judge)
+            self.assertFalse(b.record_verdict("J", self.name, "met", "evidence", None, None))
+
+    def test_done_runs_as_the_caller_like_verdict(self):
+        out = hooks.own_name_verdict_command("swarm done --job J --artifact b@" + "a" * 40, "Homer", "J")
+        self.assertIn("--as Homer", out)
+        out = hooks.own_name_verdict_command("swarm done --job J --as Marge --artifact x", "Homer", "J")
+        self.assertIn("--as Homer", out)
+        self.assertNotIn("Marge", out)
+        self.assertIsNone(hooks.own_name_verdict_command("swarm done --job OTHER --artifact x", "Homer", "J"))
