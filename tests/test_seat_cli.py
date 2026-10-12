@@ -1122,6 +1122,41 @@ class GoalReady(ControlCase):
                                     "report:docs/r.md@" + "a" * 40, "--add-requirements", str(self.req_a))
         self.assertEqual(rc, 0, err)
 
+    def test_N5_the_number_of_pinned_requirements_is_capped(self):
+        d = self.work / "many"
+        d.mkdir()
+        args = []
+        for i in range(drive_cli.PINS_MAX + 1):
+            p = d / f"r{i}.md"
+            p.write_text(str(i), encoding="utf-8")
+            args += ["--add-requirements", str(p)]
+        rc, _, err = self.candidate(*args)
+        self.assertEqual(rc, 1)
+        self.assertIn(f"at most {drive_cli.PINS_MAX}", err)
+        self.assertEqual(ledger.load(self.bkey, JOB).pinned_requirements, {})
+
+    def test_N5_a_pin_path_over_256_characters_is_refused_cleanly(self):
+        deep = self.work
+        while len(str(deep)) < 260:
+            deep = deep / ("d" * 40)
+        deep.mkdir(parents=True)
+        p = deep / "req.md"
+        p.write_text("x", encoding="utf-8")
+        rc, _, err = self.candidate("--add-requirements", str(p))
+        self.assertEqual(rc, 1)
+        self.assertTrue(err.startswith("refused:"), err)
+        self.assertIn("256 characters", err)
+
+    def test_N5_a_command_never_fills_the_ledger_past_the_drivers_headroom(self):
+        led = ledger.load(self.bkey, JOB)
+        led.watermarks = {f"driver:{i:06d}": 1 for i in range(drive_cli.CLI_LEDGER_MAX // 16)}
+        led.save()                                           # the driver may: still under ledger.MAX_BYTES
+        size = ledger.serialized_size(ledger.load(self.bkey, JOB))
+        self.assertTrue(drive_cli.CLI_LEDGER_MAX < size < ledger.MAX_BYTES, size)
+        rc, _, err = self.candidate("--add-requirements", str(self.req_a))
+        self.assertEqual(rc, 1)
+        self.assertIn("the driver's", err)
+
     def test_requirement_outside_roots_refused(self):
         outside = self.home / "outside.md"
         outside.write_text("x", encoding="utf-8")

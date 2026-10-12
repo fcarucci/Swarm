@@ -179,6 +179,12 @@ def _safe_text(value, limit: int) -> bool:
             and not any(unicodedata.category(c) in _BAD_CATEGORIES for c in value))
 
 
+def serialized_size(led) -> int:
+    """The bytes the ledger `led` would take on disk (as _commit writes it)."""
+    body = json.dumps({"v": FORMAT, **asdict(led), "ledger_rev": led.ledger_rev + 1}, sort_keys=True, allow_nan=False)
+    return len(body.encode("utf-8"))
+
+
 def _check_key(board_key, job) -> None:
     if not _safe_text(board_key, enrolment.MAX_BOARD_KEY):
         raise ValueError("board_key must be 1-%d safe characters" % enrolment.MAX_BOARD_KEY)
