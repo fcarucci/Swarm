@@ -111,6 +111,18 @@ class HostsAdd(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
         self.url = "git@example.test:o/r.git"
+        from swarm import person
+        anc = mock.patch.object(person, "_ancestor_host", lambda: None)   # these tests run under an agent host
+        anc.start()
+        self.addCleanup(anc.stop)
+        for var in person.HOST_ENV:   # nor with any agent host variable (CI has none; this box's shells do)
+            if var in os.environ:
+                p = mock.patch.dict(os.environ)
+                p.start()
+                self.addCleanup(p.stop)
+                for v in person.HOST_ENV:
+                    os.environ.pop(v, None)
+                break
 
     def add(self, answer=None, tty=True, keys=None, stdout_tty=None):
         fake_keys = [(EXAMPLE_LINE, "ssh-ed25519 SHA256:abc")] if keys is None else keys
@@ -164,9 +176,23 @@ class HostsAdd(unittest.TestCase):
                 self.assertFalse(self.trusted())
         self.assertEqual(scanned, [])
 
+    def test_an_agent_that_unset_its_session_variables_is_still_refused(self):
+        """S2: `env -u CLAUDECODE ...` inside an agent's pty: no host variable is left, but a claude ancestor is."""
+        from swarm import person
+        env = {k: v for k, v in os.environ.items() if k not in person.HOST_ENV}
+        scanned = []
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(person, "_ancestor_host", lambda: "claude"), \
+                mock.patch.object(mirror, "scan_host_keys", lambda *a: scanned.append(a) or []):
+            code, out, err = self.add(answer="example.test", tty=True)
+        self.assertEqual(code, 1)
+        self.assertIn("claude process", err)
+        self.assertFalse(self.trusted())
+        self.assertEqual(scanned, [])
+
     def test_a_person_outside_any_session_still_can(self):
-        env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID",
-                                                                 "CODEX_THREAD_ID", "CODEX_SESSION_ID")}
+        from swarm import person
+        env = {k: v for k, v in os.environ.items() if k not in person.HOST_ENV}
         with mock.patch.dict(os.environ, env, clear=True):
             code, out, err = self.add(answer="example.test")
         self.assertEqual(code, 0, err)
