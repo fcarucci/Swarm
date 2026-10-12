@@ -141,14 +141,9 @@ def _check_url(url, loopback_http: bool) -> str:
             raise MirrorError("loopback_http only applies to http:// on 127.0.0.1 or localhost")
         return url
     try:
-        gitpin.check_url(url)
+        return gitpin.check_url(url)
     except gitpin.GitPinError as exc:
         raise MirrorError(str(exc)) from exc
-    if "://" not in url and not os.path.isabs(url):
-        head = url.split("/", 1)[0]               # scp-style `user:secret@host:path` is a credential, not a host
-        if "@" in head and ":" in head.split("@", 1)[0]:
-            raise MirrorError("the remote url must not carry credentials")
-    return url
 
 
 def _check_local(url: str) -> None:
@@ -374,8 +369,12 @@ class Mirror:
         self._deadline: float | None = None
         self._trusted_paths = tuple(trusted_helper_paths)
         self._local = False if loopback_http else gitpin.is_local(self.url)
+        self._shown_url = self.url                # what errors hide; git is given the resolved path below
         if self._local:
             _check_local(self.url)
+            # The checks ran on the resolved path: git gets exactly that path, never the URL, so a seat-writable
+            # symlink swapped after the check cannot redirect a later fetch, push or audit.
+            self.url = gitpin.resolve_local(self.url)
         allowed = ALLOWED_HELPERS if allowed_helpers is None else tuple(allowed_helpers)
         self._git_bin = _resolve("git")
         self._ssh_bin = _resolve("ssh")
@@ -502,7 +501,7 @@ class Mirror:
     def _last_line(self, proc) -> str:
         lines = proc.stderr.decode("utf-8", "replace").strip().splitlines()
         text = lines[-1] if lines else f"exit status {proc.returncode}"
-        return text.replace(self.url, "<remote>")
+        return text.replace(self._shown_url, "<remote>").replace(self.url, "<remote>")
 
     def _lines(self, args: list, stdin: bytes | None = None) -> list[str]:
         return self._git(args, stdin=stdin).stdout.decode().split()

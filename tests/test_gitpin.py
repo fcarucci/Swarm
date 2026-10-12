@@ -83,6 +83,8 @@ REFUSED = (
     ("https://user:TOKEN@example.com/r.git", "credentials"),
     ("https://TOKEN@example.com/r.git", "credentials"),
     ("ssh://git:pw@example.com/r.git", "credentials"),
+    ("user:FAKE@example.com:r.git", "credentials"),          # scp-style user:secret@host:path
+    ("git:pw@host:o/r.git", "credentials"),
     ("ssh://h\\@evil/r", "backslash"),
     ("https://example.com\\@evil/r", "credentials"),   # urlsplit sees userinfo first; refused either way
     ("ssh://host:99999/r", "port must be 1-65535"),

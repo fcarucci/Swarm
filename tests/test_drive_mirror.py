@@ -267,11 +267,12 @@ class MirrorBasics(MirrorCase):
 
     def test_git_error_message_does_not_echo_the_remote_url(self):
         nowhere = self.repo("nowhere", bare=True)
-        url = "file://" + nowhere + "?token=SECRET-ISH"
-        m = Mirror(url, self.agent_cred())
+        m = Mirror("file://" + nowhere, self.agent_cred())
+        shutil.rmtree(nowhere)                  # the destination vanishes: git fails and names the path
         with self.assertRaises(MirrorError) as cm:
             m.fetch(timeout=30)
-        self.assertNotIn("SECRET-ISH", str(cm.exception))
+        self.assertNotIn(nowhere, str(cm.exception))
+        self.assertNotIn(os.path.realpath(nowhere), str(cm.exception))
 
     @support.posix_only("symlinks")
     def test_symlinked_mirror_path_refused(self):

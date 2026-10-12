@@ -567,6 +567,40 @@ class LocalDestinations(PushCase):
         self.assertEqual(m._pack("ls-remote"), [pack_cmd("upload")])
 
 
+class SymlinkSwap(PushCase):
+    """[Q1] git is given the path that was checked, so a link swapped after construction changes nothing."""
+
+    def test_a_swapped_link_cannot_redirect_a_later_call(self):
+        Mirror(self.remote, {"kind": "none"})                  # creates the private directory
+        private = os.path.realpath(str(mirror.private_dir()))
+        good_dir = os.path.join(private, "dests")
+        os.makedirs(good_dir)
+        good = os.path.join(good_dir, "d.git")
+        subprocess.run(["git", "clone", "-q", "--bare", self.remote, good], check=True)
+        evil_dir = os.path.join(self.root, "evil")
+        os.makedirs(evil_dir)
+        evil = os.path.join(evil_dir, "d.git")
+        subprocess.run(["git", "clone", "-q", "--bare", self.remote, evil], check=True)
+        git(evil, "update-ref", "refs/heads/main", self.tip)       # evil's main differs from good's
+        link = os.path.join(self.root, "seat-link")
+        os.symlink(good_dir, link)
+        with mock.patch.dict(os.environ, {k: v for k, v in os.environ.items() if k != mirror.TEST_MARKER}, clear=True):
+            m = Mirror(os.path.join(link, "d.git"), {"kind": "none"})
+            os.remove(link)
+            os.symlink(evil_dir, link)
+            refs = m.fetch(timeout=30)
+        self.assertEqual(refs["refs/heads/main"], self.base)
+        self.assertEqual(m.url, good)
+        self.assertNotIn(link, m.url)
+
+    def test_errors_hide_both_the_given_and_the_resolved_path(self):
+        dest = self.repo("hide.git", bare=True)
+        m = Mirror("file://" + dest, {"kind": "none"})
+        self.assertEqual(m.url, os.path.realpath(dest))
+        self.assertEqual(m._last_line(subprocess.CompletedProcess([], 1, b"", f"fatal: {dest} and file://{dest}".encode())).count("<remote>") >= 1, True)
+        self.assertNotIn(dest, m._last_line(subprocess.CompletedProcess([], 1, b"", f"fatal: {dest}".encode())))
+
+
 class GitpinUse(MirrorCase):
     """Every pinned-URL git call goes through gitpin: `--` before the URL, its env, its cwd, its URL rule."""
 
