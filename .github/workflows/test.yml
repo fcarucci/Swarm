@@ -36,6 +36,11 @@ jobs:
       matrix:
         backend: ${{ fromJSON(startsWith(github.ref, 'refs/heads/feat/drive-') && '["memory","sqlite"]' || '["memory","sqlite","file"]') }}
         python-version: ${{ fromJSON(startsWith(github.ref, 'refs/heads/feat/drive-') && '["3.13"]' || '["3.11","3.13"]') }}
+        # The oldest supported Python on the memory backend always runs (on the full matrix this entry is
+        # already one of its cells): 3.11-only breakages (argparse, f-string quoting) must fail seat CI too.
+        include:
+          - backend: memory
+            python-version: "3.11"
     steps:
       - uses: actions/checkout@v4
         with:
