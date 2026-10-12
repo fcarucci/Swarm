@@ -176,9 +176,16 @@ def find(board, bk: str, job: str, led, now, after: int = 0) -> list:
     out = []
     for msg in board.messages_after(after, job):
         parsed = parse_text(msg.message)
-        if parsed is None or (led is not None and decided(led, msg.id)):
+        if parsed is None or (led is not None and f"{MARK}{msg.id}" in led.watermarks):
             continue
         kind, sha = parsed
+        if led is not None and decided(led, msg.id):
+            # at or below the floor but never decided (its receipt came after MARKS_KEEP later decisions):
+            # tell the caller once, and use it up, so it asks again instead of waiting for nothing
+            if _receipt(bk, job, led, msg.id, kind, sha, now) is not None:
+                _consume(bk, job, msg.id)
+                _post(board, job, f"{REFUSED}{msg.id} expired-below-floor")
+            continue
         if (led is None) != (kind == "repair"):
             continue
         r = _receipt(bk, job, led, msg.id, kind, sha, now)
