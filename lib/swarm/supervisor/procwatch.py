@@ -116,6 +116,34 @@ def ancestor_host(pid: int, parent=None, max_hops: int = 64) -> str | None:
     raise LookupError("the ancestry is deeper than it can be walked")
 
 
+def under_runner(pid: int, parent=None, max_hops: int = 64) -> bool:
+    """Whether `pid` is a supervisor-launched seat or runs under one (review rr1): its environment carries the
+    runner's RUN_ENV tag (where it can be read: /proc), or a `swarm.supervisor.runner` process is among its
+    ancestors. A walk that cannot be read at all counts as yes (fails closed)."""
+    from swarm.supervisor.runner import RUN_ENV
+    try:
+        with open(f"/proc/{int(pid)}/environ", "rb") as fh:
+            if any(e.startswith(RUN_ENV.encode() + b"=") for e in fh.read().split(b"\0")):
+                return True
+    except OSError:
+        pass
+    parent = parent or parent_of
+    cur = int(pid)
+    for hop in range(max_hops):
+        if cur <= (0 if compat.IS_WINDOWS else 1):
+            return False
+        info = parent(cur)
+        if not info:
+            return hop == 0
+        ppid, argv = info
+        if any("swarm.supervisor.runner" in str(a) for a in argv):
+            return True
+        if ppid == cur:
+            return False
+        cur = ppid
+    return True
+
+
 # --- identity ----------------------------------------------------------------------------------------
 
 def _win_creation(pid: int) -> str | None:

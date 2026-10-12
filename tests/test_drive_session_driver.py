@@ -92,6 +92,7 @@ class Home(unittest.TestCase):
         led.requester_session = session
         led.halted = {"by": "person", "at": dt.datetime.now(dt.timezone.utc).isoformat(), "reason": "test"}
         led.save()
+        sd.record_launch_env(session, str(self.config))     # what the requester's activation records
         return led
 
     def stats(self, session="sess-1") -> dict:
@@ -449,6 +450,48 @@ class LifecycleTests(Home):
         self.assertTrue(kw.get("start_new_session") or kw.get("creationflags"))
         for secret in ("PGPASSWORD", "ANTHROPIC_API_KEY"):
             self.assertNotIn(secret, kw["env"])
+
+    def test_a_seat_never_starts_a_driver(self):
+        """Review rr1: a seat (its runner tag, or an agent host the supervisor launched) starts nothing, even
+        with the requester's session id in a forged SessionStart payload."""
+        import io
+        from swarm.supervisor import runner
+        self.held_job(session="sess-1")
+        popen = mock.Mock()
+        with mock.patch.dict(os.environ, {"SWARM_SESSION_DRIVER": "1", runner.RUN_ENV: "r7-00"}):
+            self.assertTrue(sd.ensure(self.cfg, "sess-1", host_pid=os.getpid(), popen=popen).startswith("refused"))
+        with mock.patch.dict(os.environ, {"SWARM_SESSION_DRIVER": "1"}), \
+                mock.patch.object(procwatch, "under_runner", return_value=True), \
+                mock.patch.object(procwatch, "nearest_host", return_value=os.getpid()), \
+                mock.patch.object(sd, "start", popen):
+            sd.hook_session_start(self.cfg, io.StringIO(json.dumps({"session_id": "sess-1"})))
+        popen.assert_not_called()
+
+    def test_a_driver_takes_the_requesters_recorded_path_and_config_never_the_starters(self):
+        self.held_job(session="sess-1")       # recorded with this test's PATH and config
+        recorded = sd.launch_env("sess-1")
+        popen = mock.Mock(return_value=SimpleNamespace(pid=4242, stdin=mock.Mock()))
+        with mock.patch.dict(os.environ, {"PATH": "/planted/bin", "SWARM_CONFIG": "/planted/config.toml"}):
+            sd.start(self.cfg, "sess-1", os.getpid(), config_path="/planted/config.toml", popen=popen)
+        env = popen.call_args.kwargs["env"]
+        self.assertEqual((env["PATH"], env["SWARM_CONFIG"]), (recorded["path"], recorded["config"]))
+        self.assertNotIn("/planted", json.dumps(popen.return_value.stdin.write.call_args.args[0].decode()))
+
+    def test_no_recorded_activation_starts_nothing(self):
+        self.held_job(session="sess-1")
+        from swarm.supervisor import privfs
+        with privfs.dir_fd() as d:
+            privfs.unlink(d, sd.record_name("sess-1"))
+        popen = mock.Mock()
+        self.assertIsNone(sd.start(self.cfg, "sess-1", os.getpid(), popen=popen))
+        popen.assert_not_called()
+
+    def test_under_runner_sees_a_runner_ancestor_and_fails_closed(self):
+        tree = {10: (9, ["claude", "-p"]), 9: (8, ["python3", "-m", "swarm.supervisor.runner", "--lock-fd", "3"]),
+                8: (1, ["python3", "-m", "swarm.supervisor.session_driver"])}
+        self.assertTrue(procwatch.under_runner(10, parent=tree.get))
+        self.assertFalse(procwatch.under_runner(8, parent=tree.get))
+        self.assertTrue(procwatch.under_runner(10, parent=lambda pid: None))       # unreadable: a seat
 
     def test_the_session_start_hook_starts_the_requesters_driver(self):
         import io
@@ -892,8 +935,32 @@ class DriveVerdictRecordTests(unittest.TestCase):
 class DriveRunTests(Home):
     """`swarm drive run [--job J]`: the loop in the foreground, no session to watch, until no job is left."""
 
-    def args(self, job="J"):
-        return SimpleNamespace(job=job, config=str(self.config))
+    def args(self, job="J", yes=True):
+        return SimpleNamespace(job=job, config=str(self.config), yes=yes)
+
+    def setUp(self):
+        super().setUp()
+        from swarm import person   # a person at a terminal (these tests may run under an agent host)
+        p = mock.patch.object(person, "_ancestor_host", lambda: None)
+        p.start()
+        self.addCleanup(p.stop)
+        e = mock.patch.dict(os.environ)
+        e.start()
+        self.addCleanup(e.stop)
+        for k in person.HOST_ENV:
+            os.environ.pop(k, None)
+
+    def test_it_is_refused_inside_an_agent_host_and_for_a_seat(self):
+        from swarm import drive_cli, person
+        from swarm.supervisor import runner
+        self.held_job()
+        with mock.patch.object(person, "_ancestor_host", lambda: "claude"):
+            self.assertEqual(drive_cli.cmd_drive_run(self.cfg, self.args()), 1)
+        with mock.patch.dict(os.environ, {runner.RUN_ENV: "r1-00"}):
+            self.assertEqual(drive_cli.cmd_drive_run(self.cfg, self.args()), 1)
+        with mock.patch.object(person, "_tty_confirm", return_value=False):
+            self.assertEqual(drive_cli.cmd_drive_run(self.cfg, self.args(yes=False)), 1)   # no person said yes
+        self.assertFalse(sd.held(sd.run_lock_name(self.key, "J")))
 
     def test_nothing_to_drive_returns_at_once(self):
         from swarm import drive_cli
@@ -1071,3 +1138,47 @@ class StopReasonTests(Home):
         self.addCleanup(stop, p)
         with mock.patch.object(procwatch, "start_token", return_value=None):
             self.assertFalse(procwatch.ProcWatch(p.pid, None).alive())
+
+
+class ReviewRetryAndCoalesceTests(Home):
+    def test_unreadable_ledgers_are_unknown_not_none_left(self):
+        """Review rr6: a ledger enumeration that fails is retried, never taken for "no job left"."""
+        from swarm.supervisor import driver
+        self.held_job()
+        with mock.patch.object(ledger, "unfinished", side_effect=OSError("busy")), \
+                mock.patch.object(driver, "_scan_files", side_effect=OSError("busy")):
+            self.assertIsNone(sd.unfinished(self.key))
+            self.assertIsNone(sd.session_jobs(self.key, "sess-1"))
+        self.assertEqual(sd.session_jobs(self.key, "sess-1"), ["J"])
+
+    def test_the_driver_retries_through_an_unreadable_moment(self):
+        answers = iter([None, None, ["J"], ["J"], ["J"], []])
+        passes = []
+        drv = sd.Driver(self.cfg, session="sess-1", pass_fn=lambda jobs: passes.append(jobs) or sd.PassResult("ok"))
+        drv.pending = wake.Backoff(0.01, 0.02)
+        drv.jobs = lambda: next(answers)
+        with mock.patch.object(wake, "run_source"):
+            self.assertEqual(drv.run(), "no unfinished drive job")
+        self.assertEqual(passes, [["J"]])
+
+    def test_a_burst_of_touches_is_one_pass(self):
+        """Review rr5: fifty touches in a row cost one or two passes, not fifty."""
+        self.held_job()
+        times = []
+        drv = sd.Driver(self.cfg, session="sess-1", pass_fn=lambda jobs: times.append(time.monotonic())
+                        or sd.PassResult("ok"))
+        done = threading.Event()
+        drv.jobs = lambda: [] if done.is_set() else ["J"]
+        t = threading.Thread(target=drv.run, daemon=True)
+        t.start()
+        wait_until(lambda: times, timeout=10)
+        time.sleep(0.3)
+        for _ in range(50):
+            wake.touch(self.key)
+        time.sleep(1.5)
+        n = len(times) - 1
+        done.set()
+        drv.hub.signal(wake.CHANGE)
+        t.join(10)
+        self.assertGreaterEqual(n, 1)
+        self.assertLessEqual(n, 3, f"{n} passes for one burst")

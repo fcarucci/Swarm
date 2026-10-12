@@ -387,7 +387,7 @@ class Run:
         background process of this harness; its output goes to logs/driver.log. The caller stops it."""
         log = open(self.logs / "driver.log", "a")
         try:
-            return subprocess.Popen([str(self.bin / "swarm"), "drive", "run"], stdout=log, stderr=subprocess.STDOUT,
+            return subprocess.Popen([str(self.bin / "swarm"), "drive", "run", "--yes"], stdout=log, stderr=subprocess.STDOUT,
                                     stdin=subprocess.DEVNULL, env=self.env())
         finally:
             log.close()
