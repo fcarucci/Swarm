@@ -44,6 +44,10 @@ exit 0
 """
 
 
+needs_proc = unittest.skipUnless(Path("/proc/sys/kernel/random/boot_id").exists(),
+                                 "no /proc/sys/kernel/random/boot_id (macOS, Windows): the lock records '-' there")
+
+
 def cksum_of(*files: Path) -> str:
     data = b"".join(f.read_bytes() for f in files)
     return subprocess.run(["cksum"], input=data, capture_output=True).stdout.split()[0].decode()
@@ -305,21 +309,25 @@ lock_steal; echo "rc=$?"
         start = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
         return boot, start
 
+    @needs_proc
     def test_a_lock_from_before_a_reboot_is_stale_even_if_its_pid_is_alive_now(self):
         boot, start = self.real_owner()
         lock = self.hold_lock(self.v22, f"{os.getpid()} {socket.gethostname()} not-this-boot {start}")
         self.assert_builds_through_a_stale_lock(lock)
 
+    @needs_proc
     def test_a_reused_pid_is_stale(self):
         boot, start = self.real_owner()
         lock = self.hold_lock(self.v22, f"{os.getpid()} {socket.gethostname()} {boot} {int(start) + 1}")
         self.assert_builds_through_a_stale_lock(lock)
 
+    @needs_proc
     def test_the_real_owner_is_respected(self):
         boot, start = self.real_owner()
         self.assert_waits_on_a_live_lock(
             self.hold_lock(self.v22, f"{os.getpid()} {socket.gethostname()} {boot} {start}", age_minutes=45))
 
+    @needs_proc
     def test_a_running_owner_is_stale_past_the_backstop_cap(self):
         boot, start = self.real_owner()
         lock = self.hold_lock(self.v22, f"{os.getpid()} {socket.gethostname()} {boot} {start}", age_minutes=361)
@@ -328,6 +336,20 @@ lock_steal; echo "rc=$?"
         shutil.rmtree(self.venv_of(self.v22))
         self.assert_builds_through_a_stale_lock(lock)
 
+    def test_without_proc_the_lock_records_dashes_and_the_pid_and_age_cap_decide(self):
+        text = (ROOT / "bin/swarm").read_text()
+        res = self.steal_script(
+            'lock_boot_id() { echo -; }; lock_start_time() { echo -; }\n'
+            'rm -rf "$LOCK"; mkdir "$LOCK"; echo "$$ $HOST - -" > "$LOCK/owner"\n'
+            'lock_stale "$LOCK"; echo live=$?\n'
+            'echo "999999 $HOST - -" > "$LOCK/owner"; lock_stale "$LOCK"; echo dead=$?\n'
+            'echo "$$ $HOST - -" > "$LOCK/owner"; touch -d "7 hours ago" "$LOCK" 2>/dev/null || touch -t 200001010000 "$LOCK"; '
+            'lock_stale "$LOCK"; echo capped=$?')
+        self.assertIn("live=1", res.stdout)
+        self.assertIn("dead=0", res.stdout)
+        self.assertIn("capped=0", res.stdout)
+
+    @needs_proc
     def test_the_launcher_records_boot_id_and_start_time_in_its_lock(self):
         out = self.home / "owner-copy"
         res = self.launch(self.v22, timeout=30, FAKE_LOG_OWNER=str(out))
@@ -493,14 +515,14 @@ class WinLaunchVenvTests(unittest.TestCase):
         winlaunch.release_lock(lock, token)
         self.assertFalse(lock.exists())
 
-    @posix_only("needs /proc")
+    @needs_proc
     def test_boot_id_and_start_time_come_from_proc(self):
         self.assertEqual(winlaunch._boot_id(), Path("/proc/sys/kernel/random/boot_id").read_text().strip())
         self.assertEqual(winlaunch._start_time(os.getpid()),
                          Path("/proc/self/stat").read_text().rsplit(")", 1)[1].split()[19])
         self.assertEqual(winlaunch._start_time(2 ** 22 + 12345), "-")
 
-    @posix_only("needs /proc")
+    @needs_proc
     def test_a_lock_from_another_boot_or_a_reused_pid_is_stale_a_real_owner_is_not(self):
         boot, start = winlaunch._boot_id(), winlaunch._start_time(os.getpid())
         host, me = socket.gethostname(), os.getpid()
@@ -512,14 +534,14 @@ class WinLaunchVenvTests(unittest.TestCase):
             self.assertEqual(winlaunch.lock_is_stale(lock), stale, owner)
             shutil.rmtree(lock)
 
-    @posix_only("needs /proc")
+    @needs_proc
     def test_a_running_owner_is_stale_only_past_the_cap(self):
         host, me = socket.gethostname(), os.getpid()
         self.assertFalse(winlaunch.lock_is_stale(self.make_lock(f"{me} {host} tok", age_minutes=359)))
         shutil.rmtree(self.tmp / "venv.building")
         self.assertTrue(winlaunch.lock_is_stale(self.make_lock(f"{me} {host} tok", age_minutes=361)))
 
-    @posix_only("needs /proc")
+    @needs_proc
     def test_take_lock_records_boot_id_and_start_time(self):
         lock = self.tmp / "venv.building"
         winlaunch.take_lock(lock, timeout=1)
