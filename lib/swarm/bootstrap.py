@@ -1893,6 +1893,10 @@ def _seat_isolation_check(cfg: dict, probe=None) -> Check:
     if ok:
         return Check("seat isolation", True, f"drive seats: {detail}")
     if ok is None:
+        if detail.startswith("best-effort"):
+            return Check("seat isolation", None, detail,
+                         "drive seats here get no filesystem jail (Linux only): the seat env has no credential, "
+                         "helper or agent, but files of yours stay readable to them")
         if detail.startswith("off"):
             return Check("seat isolation", None, f"drive seats: {detail}",
                          "a person runs `swarm supervise seat-isolation on` to jail every drive seat again")
@@ -2040,7 +2044,7 @@ def drive_checks(cfg: dict, *, run=None, which=None, now=None, platform: str | N
     """The drive-mode doctor lines (spec 3.2-3.3, 4.0, 4.5). Read-only: nothing here creates a
     directory or a file. The host lines (session drivers, git, sandbox, Codex) only on a host with
     unfinished drive jobs (or a [drive] section); the board lines whenever a board is there to read.
-    Every platform: no timer is needed ([T21]). `platform` is kept for callers and ignored."""
+    Every platform: no timer is needed ([T21]). `platform` only decides the seat isolation line (Task 20)."""
     import datetime as dt
     import subprocess
     from swarm import drive_activate as da, edition
@@ -2068,7 +2072,12 @@ def drive_checks(cfg: dict, *, run=None, which=None, now=None, platform: str | N
     if relevant:
         out = (_drive_driver_checks(jobs, unreadable=not jobs) + [_drive_containment_check()]) if has_jobs else []
         out += [_drive_git_check(run, has_jobs), _claude_sandbox_check()]
-        if os.environ.get("SWARM_NO_SYSTEMD") != "1":   # no scopes, no drive seat starts here (the test suite)
+        plat = platform or sys.platform
+        if not plat.startswith("linux"):   # Task 20: no filesystem jail there; seats are best-effort (a WARN)
+            from swarm.supervisor import seathome
+            note = seathome.BEST_EFFORT_NOTE.format(platform=plat)
+            out.append(_seat_isolation_check(cfg, probe=lambda c: (None, note)))
+        elif os.environ.get("SWARM_NO_SYSTEMD") != "1":   # no scopes, no drive seat starts here (the test suite)
             out.append(_seat_isolation_check(cfg))
         out += _codex_drive_checks(cfg, which)
     if unreadable is not None:

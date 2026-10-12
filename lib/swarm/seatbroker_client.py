@@ -24,6 +24,8 @@ import time
 STDIN_MAX = 2 * 1024 * 1024
 TIMEOUT = {"cli": 960.0, "hook": 30.0}
 POLL = 0.05
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)   # Windows has none
+_BINARY = getattr(os, "O_BINARY", 0)
 
 
 def _proto():
@@ -39,7 +41,7 @@ def request(body: dict, directory: str, timeout: float, clock=time.monotonic,
     """Send one request; (rc, stdout, stderr), or None when no answer came in time."""
     rid = secrets.token_hex(16)
     tmp = os.path.join(directory, f"{rid}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW | _BINARY, 0o600)
     try:
         os.write(fd, json.dumps(body).encode())
     finally:
@@ -49,7 +51,7 @@ def request(body: dict, directory: str, timeout: float, clock=time.monotonic,
     deadline = clock() + timeout
     while clock() < deadline:
         try:
-            fd = os.open(resp, os.O_RDONLY | os.O_NOFOLLOW)
+            fd = os.open(resp, os.O_RDONLY | _NOFOLLOW | _BINARY)
         except FileNotFoundError:
             sleep(POLL)
             continue

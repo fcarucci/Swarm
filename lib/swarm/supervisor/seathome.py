@@ -93,13 +93,22 @@ def off_granted() -> dict | None:
         return None
 
 
-def mode(cfg: dict) -> str:
-    """"required" unless a person turned isolation off on this host (`swarm supervise seat-isolation off`).
-    [drive] seat_isolation in config.toml is only checked: it cannot turn isolation off."""
+def jail_platform(platform: str | None = None) -> bool:
+    """Whether seats on `platform` (sys.platform) get the filesystem jail (Linux); elsewhere they are best-effort."""
+    return (platform or sys.platform).startswith("linux")
+
+
+def mode(cfg: dict, platform: str | None = None) -> str:
+    """"required" (Linux: the jail, fail closed) or "best-effort" (macOS, Windows: no filesystem jail; the seat
+    gets the allowlisted environment, no credential helper, no agent, a scratch HOME and the broker), unless a
+    person turned isolation off on this host (`swarm supervise seat-isolation off`): "off". [drive]
+    seat_isolation in config.toml is only checked: it cannot turn isolation off."""
     value = str(_drive(cfg).get("seat_isolation", "required")).strip().lower()
     if value not in ("required", "off"):
         raise SeatIsolationError(f"[drive] seat_isolation must be \"required\", not {value!r}")
-    return "off" if off_granted() is not None else "required"
+    if off_granted() is not None:
+        return "off"
+    return "required" if jail_platform(platform) else "best-effort"
 
 
 def set_off(off: bool, *, env=None, confirm=None, ancestor=None) -> str:
@@ -210,6 +219,19 @@ exec python3 -I "$(dirname "$0")/seatbroker_client.py" cli "$@"
 """
 
 
+def client_scripts(platform: str | None = None, python: str | None = None) -> dict:
+    """The seat's `swarm` command(s): in the Linux jail the system python3; on a best-effort host the
+    supervisor's own python, by absolute path (a Windows seat gets swarm.cmd too)."""
+    if jail_platform(platform):
+        return {"swarm": CLIENT_SH}
+    py = python or sys.executable
+    out = {"swarm": "#!/bin/sh\n# the swarm command of a drive seat: everything goes to the supervisor through "
+                    f"the seat's broker\nexec \"{py}\" -I \"$(dirname \"$0\")/seatbroker_client.py\" cli \"$@\"\n"}
+    if (platform or sys.platform).startswith("win"):
+        out["swarm.cmd"] = f'@echo off\r\n"{py}" -I "%~dp0seatbroker_client.py" cli %*\r\nexit /b %ERRORLEVEL%\r\n'
+    return out
+
+
 def _read_person(path: Path) -> bytes | None:
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
@@ -240,7 +262,7 @@ def prepare(cfg: dict, job: str, seat: str) -> Path:
         for name in (_slug(job), _slug(seat)):
             fds.append(safefs.open_sub(fds[-1], name, strict_mode=0o700))
         h = fds[-1]
-        for sub in ("home", "tmp", "claude", "codex", ".ssh", "broker", "bin"):
+        for sub in ("home", "tmp", "claude", "codex", ".ssh", "broker", "bin", "gh"):
             os.close(safefs.open_sub(h, sub, strict_mode=0o700))
         privfs.write_atomic(h, "gitconfig", gitconfig_text(cfg))
 
@@ -252,7 +274,8 @@ def prepare(cfg: dict, job: str, seat: str) -> Path:
                 os.close(d)
         into(".ssh", "known_hosts", known)
         into(".ssh", "config", ssh_config_text(cfg))
-        into("bin", "swarm", CLIENT_SH, 0o700)
+        for script, text in client_scripts().items():
+            into("bin", script, text, 0o700)
         into("bin", "seatbroker_client.py", client, 0o600)
         into("bin", "seatproto.py", proto, 0o600)
         if claude_json is not None:
@@ -433,6 +456,54 @@ def jail_spec(cfg: dict, seat_home: Path, workdir: str | None, home: Path | None
                     "SWARM_SEAT_BROKER": f"{h}/.swarm-seat/broker"}}
 
 
+def best_effort_env(cfg: dict, seat_home: Path, platform: str | None = None) -> dict:
+    """What a best-effort seat (no filesystem jail: macOS, Windows) runs with on top of the allowlisted
+    environment (seatjail.scrub_env): no system git config and a seat gitconfig with an empty credential helper,
+    ssh with no agent and no default identity, an empty gh config dir, a scratch HOME (the harness keeps its
+    own config dir), and the seat's broker as its only way to the board."""
+    h = str(seat_home)
+    real = str(paths.home())
+    scratch = os.path.join(h, "home")
+    ssh_cfg = os.path.join(h, ".ssh", "config")
+    env = {"HOME": scratch, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.path.join(h, "gitconfig"),
+           "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never",
+           "GIT_SSH_COMMAND": f'ssh -F "{ssh_cfg}" -o IdentityAgent=none -o IdentitiesOnly=yes '
+                              f'-o IdentityFile=none -o BatchMode=yes',
+           "GH_CONFIG_DIR": os.path.join(h, "gh"), "SWARM_SEAT_BROKER": os.path.join(h, "broker"),
+           "CLAUDE_CONFIG_DIR": os.path.join(real, ".claude"), "CODEX_HOME": os.path.join(real, ".codex"),
+           "SWARM_SEAT_ISOLATION": "best-effort"}
+    if (platform or sys.platform).startswith("win"):
+        env.update({"USERPROFILE": scratch, "APPDATA": os.path.join(scratch, "AppData", "Roaming"),
+                    "LOCALAPPDATA": os.path.join(scratch, "AppData", "Local")})
+    return env
+
+
+def best_effort_child_env(base: dict, overrides: dict, seat_home: str) -> dict:
+    """A best-effort seat's whole environment: the allowlist of `base`, the overrides, the seat's `swarm` first
+    on PATH."""
+    from swarm import seatjail
+    out = seatjail.scrub_env(dict(base))
+    out.update(overrides)
+    out["PATH"] = os.pathsep.join([os.path.join(seat_home, "bin"), out.get("PATH", "")]).rstrip(os.pathsep)
+    return out
+
+
+BEST_EFFORT_NOTE = "best-effort on {platform} (no filesystem jail)"
+
+
+def launch(cfg: dict, argv: list, *, job: str, seat: str, workdir: str | None = None,
+           platform: str | None = None, probe=None) -> tuple[list, dict | None, str]:
+    """How a drive seat starts: (argv, env overrides or None, mode). Linux: the jail (wrap; fail closed).
+    macOS/Windows: best-effort (argv unchanged, best_effort_env). "off" (a person's act): unchanged, nothing."""
+    m = mode(cfg, platform)
+    if m == "off":
+        return list(argv), None, m
+    if m == "required":
+        return wrap(cfg, argv, job=job, seat=seat, workdir=workdir, probe=probe), None, m
+    h = prepare(cfg, job, seat)
+    return list(argv), best_effort_env(cfg, h, platform), m
+
+
 def jail_script() -> str:
     return str(Path(__file__).resolve().parent.parent / "seatjail.py")
 
@@ -487,8 +558,11 @@ def probe(cfg: dict, *, network: bool = False, run=None, available=None) -> tupl
     """Run PROBE in a seat's jail. (True, detail) when no credential is reachable; (False, what is
     reachable); (None, why) when a person turned isolation off or this host cannot jail a seat."""
     import subprocess
-    if mode(cfg) == "off":
+    m = mode(cfg)
+    if m == "off":
         return None, "off (a person ran `swarm supervise seat-isolation off`): drive seats can read the person's files"
+    if m == "best-effort":
+        return None, BEST_EFFORT_NOTE.format(platform=sys.platform)
     from swarm import seatjail
     ok, why = (available or seatjail.available)()
     if not ok:

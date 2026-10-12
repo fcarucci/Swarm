@@ -129,6 +129,8 @@ def session_start(host: str, priv: Path | None) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if os.environ.get("SWARM_SEAT_BROKER"):   # a drive seat (Task 20): its broker runs this outside the seat
+        return _seat_broker("hook", list(argv))
     host = ""
     if argv and argv[0] == "--host":
         if len(argv) < 3:
@@ -166,6 +168,16 @@ def main(argv: list[str] | None = None) -> int:
     except Exception:   # a hook never fails the agent
         pass
     return 0
+
+
+def _seat_broker(kind: str, argv: list) -> int:
+    """Hand the call to the seat's broker (swarm.seatbroker_client, loaded by path: no import from elsewhere)."""
+    import importlib.util
+    here = os.path.dirname(os.path.abspath(__file__))
+    spec = importlib.util.spec_from_file_location("_swarm_seatbroker_client", os.path.join(here, "seatbroker_client.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.main([kind, *argv])
 
 
 if __name__ == "__main__":

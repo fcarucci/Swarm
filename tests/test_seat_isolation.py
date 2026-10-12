@@ -930,5 +930,127 @@ class ClientTest(unittest.TestCase):
                                                     sleep=lambda s: None))
         self.assertEqual(os.listdir(d), [])     # the unanswered request is withdrawn
 
+class BestEffortTest(SeatHomeCase):
+    """macOS and Windows (mocked): no filesystem jail, but the seat's environment carries no credential."""
+
+    def test_mode_by_platform(self):
+        self.assertEqual(seathome.mode(self.cfg, "linux"), "required")
+        self.assertEqual(seathome.mode(self.cfg, "darwin"), "best-effort")
+        self.assertEqual(seathome.mode(self.cfg, "win32"), "best-effort")
+
+    def test_launch_on_macos(self):
+        argv, env, m = seathome.launch(self.cfg, ["claude", "-p"], job="J", seat="s", platform="darwin")
+        h = seathome.home_dir("J", "s")
+        self.assertEqual((argv, m), (["claude", "-p"], "best-effort"))
+        self.assertEqual(env["HOME"], str(h / "home"))
+        self.assertEqual(env["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertEqual(env["GIT_CONFIG_GLOBAL"], str(h / "gitconfig"))
+        self.assertIn("[credential]\n\thelper =\n", (h / "gitconfig").read_text())
+        self.assertIn("IdentityAgent=none", env["GIT_SSH_COMMAND"])
+        self.assertIn("IdentitiesOnly=yes", env["GIT_SSH_COMMAND"])
+        self.assertEqual(env["GH_CONFIG_DIR"], str(h / "gh"))
+        self.assertEqual(os.listdir(h / "gh"), [])
+        self.assertEqual(env["SWARM_SEAT_BROKER"], str(h / "broker"))
+        self.assertNotIn("USERPROFILE", env)
+        with mock.patch.object(sys, "platform", "darwin"):
+            scripts = seathome.client_scripts()
+        self.assertIn(sys.executable, scripts["swarm"])
+
+    def test_launch_on_windows(self):
+        _argv, env, _m = seathome.launch(self.cfg, ["claude"], job="J", seat="w", platform="win32")
+        h = seathome.home_dir("J", "w")
+        self.assertEqual(env["USERPROFILE"], str(h / "home"))
+        self.assertTrue(env["APPDATA"].startswith(str(h / "home")))
+        self.assertTrue(env["LOCALAPPDATA"].startswith(str(h / "home")))
+        scripts = seathome.client_scripts("win32", python="C:\\\\Py\\\\python.exe")
+        self.assertIn("swarm.cmd", scripts)
+        self.assertIn('"C:\\\\Py\\\\python.exe" -I "%~dp0seatbroker_client.py" cli %*', scripts["swarm.cmd"])
+
+    def test_the_whole_environment(self):
+        _argv, over, _m = seathome.launch(self.cfg, ["claude"], job="J", seat="s", platform="darwin")
+        base = {"PATH": "/usr/bin", "HOME": str(self.home), "LANG": "C", "SSH_AUTH_SOCK": "/tmp/agent",
+                "GH_TOKEN": "x", "PGPASSWORD": "y", "GIT_ASKPASS": "/a", "GIT_CONFIG_GLOBAL": "/evil",
+                "SYSTEMROOT": "C:\\\\Windows", "SWARM_RUN_ID": "r1"}
+        env = seathome.best_effort_child_env(base, over, str(seathome.home_dir("J", "s")))
+        for k in ("SSH_AUTH_SOCK", "GH_TOKEN", "PGPASSWORD", "GIT_ASKPASS"):
+            self.assertNotIn(k, env)
+        self.assertEqual(env["GIT_CONFIG_GLOBAL"], over["GIT_CONFIG_GLOBAL"])
+        self.assertEqual(env["HOME"], over["HOME"])
+        self.assertTrue(env["PATH"].startswith(str(seathome.home_dir("J", "s") / "bin") + os.pathsep))
+        self.assertEqual(env["SYSTEMROOT"], "C:\\\\Windows")
+        self.assertEqual(env["SWARM_RUN_ID"], "r1")
+
+    def test_runner_starts_a_best_effort_seat_and_logs_once(self):
+        logged = []
+        run = {"argv": ["claude", "-p"], "job": "J", "name": "Lisa", "seat": "eng", "cwd": str(self.work),
+               "launch_id": "L1"}
+        with mock.patch.object(seathome, "jail_platform", lambda platform=None: False), \
+                mock.patch("swarm.supervisor.settings.log", logged.append), \
+                mock.patch.object(runner, "_BEST_EFFORT_LOGGED", False):
+            a, why = runner._seat_argv(self.cfg, dict(run))
+            r2 = dict(run)
+            b, _ = runner._seat_argv(self.cfg, r2)
+        self.assertIsNone(why)
+        self.assertEqual(a, ["claude", "-p"])
+        self.assertEqual(r2["seat_mode"], "best-effort")
+        self.assertIn("SWARM_SEAT_BROKER", r2["seat_env"])
+        self.assertTrue(r2["seat_home"])
+        self.assertEqual(len([m for m in logged if "best-effort" in m]), 1)
+        self.assertIn("(no filesystem jail)", logged[0])
+
+    def test_doctor_warns(self):
+        with mock.patch.object(seathome, "jail_platform", lambda platform=None: False):
+            ok, detail = seathome.probe(self.cfg)
+        self.assertIsNone(ok)
+        self.assertEqual(detail, f"best-effort on {sys.platform} (no filesystem jail)")
+        check = bootstrap._seat_isolation_check(self.cfg, probe=lambda c: (None, "best-effort on darwin (no filesystem jail)"))
+        self.assertIsNone(check.ok)                     # WARN
+        self.assertEqual(check.name, "seat isolation")
+        self.assertEqual(check.detail, "best-effort on darwin (no filesystem jail)")
+
+    def test_linux_stays_fail_closed(self):
+        with mock.patch.object(seathome, "jail_platform", lambda platform=None: True):
+            with self.assertRaises(seathome.SeatIsolationError):
+                seathome.launch(self.cfg, ["claude"], job="J", seat="s", probe=lambda: (False, "no userns"))
+
+
+class BrokerPathModeTest(BrokerCase):
+    """The broker without descriptor-relative calls (Windows), on this host: same answers, links still refused."""
+
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.object(seatbroker, "FD_MODE", False)
+        p.start()
+        self.addCleanup(p.stop)
+        q = mock.patch.object(seatbroker_client, "_NOFOLLOW", 0)
+        q.start()
+        self.addCleanup(q.stop)
+
+    def raw(self, body):
+        rid = uuid.uuid4().hex
+        (self.seat / "broker" / f"{rid}.req").write_text(json.dumps(body))
+        self.b.poll_once(str(self.seat / "broker"), inline=True)
+        r = json.loads((self.seat / "broker" / f"{rid}.resp").read_text())
+        return r["rc"], base64.b64decode(r["out"]), base64.b64decode(r["err"])
+
+    def test_post_and_refusals(self):
+        rc, out, _ = self.raw({"v": 2, "kind": "cli", "command": "post", "fields": {"job": "J", "message": ["hi"]}})
+        self.assertEqual((rc, out), (0, b"ran\n"))
+        self.assertEqual(cli_argv(self.calls[-1]), ["post", "--job=J", f"--key={self.run['session_id']}", "--", "hi"])
+        rc, _, _ = self.raw({"v": 2, "kind": "cli", "command": "bg", "fields": {}})
+        self.assertEqual(rc, 2)
+
+    def test_links_are_refused(self):
+        rid = "b" * 32
+        (self.seat / "broker" / f"{rid}.req").symlink_to(self.tmp / "nowhere")
+        self.b.poll_once(str(self.seat / "broker"), inline=True)
+        self.assertEqual(self.calls, [])
+        (self.wd / "d").mkdir()
+        (self.wd / "d" / "f").write_text("x")
+        (self.wd / "l").symlink_to(self.wd / "d")
+        self.assertEqual(seatbroker.read_under(str(self.wd), "d/f", 10), b"x")
+        self.assertIsNone(seatbroker.read_under(str(self.wd), "l/f", 10))
+
+
 if __name__ == "__main__":
     unittest.main()

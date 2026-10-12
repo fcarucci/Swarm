@@ -747,8 +747,12 @@ class DriveDoctorTests(unittest.TestCase):
         for plat in ("darwin", "win32"):
             with self.subTest(plat=plat):
                 checks = self.run_checks(platform=plat)
-                self.assertEqual(list(checks), list(linux))
                 self.assertNotIn("drive mode", checks)
+                # Task 20: no filesystem jail there; seats are best-effort, and doctor says so (WARN)
+                self.assertIsNone(checks["seat isolation"].ok)
+                self.assertEqual(checks["seat isolation"].detail, f"best-effort on {plat} (no filesystem jail)")
+                self.assertEqual([k for k in checks if k != "seat isolation"],
+                                 [k for k in linux if k != "seat isolation"])
 
     # ---- git
     def test_git_below_2_40_fails_with_drive_jobs(self):
