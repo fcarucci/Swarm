@@ -102,7 +102,9 @@ class NoVacuousPass(Tmp):
     def test_a_barrier_that_is_absent_is_a_skip_naming_it(self):
         import argparse
         import chaos
-        row = chaos.SCENARIOS["barrier_after_run_file"][1](argparse.Namespace(backend="sqlite", harness="fake"))
+        from unittest import mock
+        with mock.patch.object(chaos.q, "barrier_present", lambda name, *a, **k: False):   # as if not built yet
+            row = chaos.SCENARIOS["barrier_after_run_file"][1](argparse.Namespace(backend="sqlite", harness="fake"))
         self.assertEqual(row[1], "SKIP")
         self.assertIn("after_run_file", row[2])
 
