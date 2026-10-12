@@ -291,7 +291,7 @@ def drive_job(ctx, job: str) -> bool:
         from swarm.supervisor import ledger
         try:
             return ledger.load(store_key(ctx.cfg), job) is not None
-        except ledger.LedgerBadError:
+        except (ledger.LedgerBadError, OSError):
             return True            # an unreadable ledger is still a drive job: fail closed, never git facts
     except Exception:
         return False

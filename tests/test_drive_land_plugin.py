@@ -68,6 +68,12 @@ class DriveJob(PluginCase):
             fh.write("{not a ledger")
         self.assertTrue(self.sp.drive_job(self.ctx, "J"))
 
+    def test_an_unreadable_ledger_directory_is_still_a_drive_job(self):
+        with mock.patch.object(ledger, "load", side_effect=PermissionError("denied")):
+            self.assertTrue(self.sp.drive_job(self.ctx, "J"))
+        with mock.patch("swarm.board.autoinit.store_key", side_effect=KeyError("x")):
+            self.assertFalse(self.sp.drive_job(self.ctx, "J"))      # no board identity at all: not a drive job
+
     def test_a_cleared_board_claim_cannot_turn_a_drive_job_into_git_inference(self):
         self.ledger()
         board = FakeBoard({})                         # the claim is gone: agents can write it
