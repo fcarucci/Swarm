@@ -1678,7 +1678,7 @@ class Board(abc.ABC):
         before = self.now() - _dt.timedelta(minutes=minutes)
         closed = []
         for js in self.jobs(False):
-            if not auto_close_candidate(js, before) or self.drive_job_claimed(js.job):
+            if not auto_close_candidate(js, before) or self.drive_job_claimed(js.job) or self._waits_on_person(js):
                 continue
             run = run_agents(self.agents(js.job), run_start(js))
             if not any(a.status in ("completed", "left") for a in run) or \
@@ -1874,7 +1874,7 @@ class Board(abc.ABC):
                 now - self.progress_at(js, grace=js.waiting_until) >= _dt.timedelta(hours=cap):
             guard = CloseGuard(False, js.goal, js.max_hours) if unmet else CloseGuard()
             return ExpiryAction("failed", stall_outcome(js, cap), cap, guard)
-        if not unmet and orphaned(js, now, orphan_minutes) and not (watch is not None and watch(js.job).active()):
+        if not unmet and js.max_hours != 0 and orphaned(js, now, orphan_minutes) and not (watch is not None and watch(js.job).active()):
             return ExpiryAction("cancelled", f"auto-closed: no live agents for {orphan_minutes:g} min", None,
                                 CloseGuard())
         return None

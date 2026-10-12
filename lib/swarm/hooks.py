@@ -519,6 +519,7 @@ def _judge_instructions(name: str, job: str, goal: str, cfg: dict, cap: int | No
 
 def _board_lines(name: str, job: str, cap: int, cfg: dict) -> list[str]:
     """How to use the board: the same for workers and the judge."""
+    from swarm.owners import owner_names
     lines = [
         f"- Post: `{_post_cmd(job, name)}` (add `--to '<agent name>'` to address someone). "
         f"Max {cap} characters, plain text, no secrets.",
@@ -528,6 +529,9 @@ def _board_lines(name: str, job: str, cap: int, cfg: dict) -> list[str]:
         "messages addressed to you and acknowledge requests. If another agent owns something, "
         "ask its owner on the board instead of doing it yourself. Post a short status every few "
         "steps and a final one when you are done.",
+        "- A question for the person behind this job (its owner) must be addressed `--to owner`"
+        + (f" (or `--to '{names[0]}'`)" if (names := owner_names(cfg)) else "")
+        + " and end with `?`; only then does the swarm treat the job as waiting on a person and leave it open.",
         "- New messages from other agents are shown to you automatically before your tool calls, "
         "prefixed `[swarm board]`. Act on anything addressed to you or touching what you are doing.",
         "- Who else is on the job is shown prefixed `[swarm roster]`: in full now and "

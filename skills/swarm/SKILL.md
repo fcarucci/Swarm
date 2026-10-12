@@ -27,7 +27,9 @@ The instructions ask agents to use the board actively: broadcast (no `--to`) cla
 touching anything shared, findings, warnings, blockers and results; `--to '<exact name>'` for
 questions, requests, handoffs and answers, picking the recipient from the roster; always reply
 to messages addressed to them and acknowledge requests; ask the owner on the board instead of
-doing something another agent owns; a short status every few steps. The hooks back this up:
+doing something another agent owns; a short status every few steps. A question for the person behind the job
+is posted `--to owner` (or to a name in `[board] owner_names`, recorded on the job at activation) and ends with `?`:
+only then is the job treated as waiting on a person and left open by every quiet-time close. The hooks back this up:
 - messages addressed to an agent are flagged with a ready-made reply command;
 - **reply owed:** if the agent's next tool call comes and it still hasn't posted anything
   `--to` that sender, it gets one reminder

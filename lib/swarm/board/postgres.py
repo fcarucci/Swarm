@@ -130,9 +130,13 @@ BEGIN
         RETURN NULL;
     END IF;
     IF NEW.status <> 'active' AND OLD.status = 'active' AND NEW.closed_by = 'auto'
-       AND (NEW.outcome LIKE 'auto-closed: no progress%' OR NEW.outcome LIKE 'auto-closed: %no live agents%')
+       AND (NEW.outcome LIKE 'auto-closed: no progress%' OR NEW.outcome LIKE 'auto-closed: %no live agents%'
+            OR NEW.outcome LIKE 'auto-closed: %agents completed%')
        AND EXISTS (SELECT 1 FROM messages m WHERE m.job = NEW.job AND m.to_agent IS NOT NULL
-                   AND lower(m.to_agent) IN ('user', 'human', 'owner', lower(coalesce(NEW.created_by, '')))
+                   AND (lower(m.to_agent) IN ('user', 'human', 'owner')
+                        OR (NEW.created_by IS NOT NULL AND NEW.created_by <> '' AND lower(m.to_agent) = lower(NEW.created_by))
+                        OR lower(m.to_agent) = ANY (string_to_array(lower(coalesce(
+                               substring(OLD.plugin_data from '"owner\\.names":\\s*"([^"]*)"'), '')), ',')))
                    AND rtrim(m.message) LIKE '%?'
                    AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.job = NEW.job AND r.id > m.id
                                    AND lower(r.agent_name) = lower(m.to_agent))) THEN

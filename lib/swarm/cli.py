@@ -84,7 +84,7 @@ DEFAULTS = {
     # directly when a pooler in front of it mishandles LISTEN/NOTIFY. Any [database] key; each
     # one left unset or empty falls back to [database]. Empty: the watchers use [database].
     "watch_database": {},
-    "board": {"retention_days": 7, "message_max_chars": 200,   # a NEW board's cap (the board's own is authoritative)
+    "board": {"retention_days": 7, "message_max_chars": 200, "owner_names": [],   # a NEW board's cap (the board's own is authoritative)
                "agent_stale_hours": 12,
               "read_limit": 50,
               # a new agent's first read: the job's newest join_history messages (0 = none)
@@ -3195,6 +3195,9 @@ def cmd_activate(cfg: dict, args) -> int:
         board.open_job(args.job, args.description, task, session, os.environ.get("USER"),
                        project=args.project or "", goal=goal)
         board.set_job_data(args.job, "pipeline.started_at", board.now().isoformat())
+        from swarm.owners import JOB_DATA_KEY, owner_names
+        names = ",".join(owner_names(cfg))
+        board.set_job_data(args.job, JOB_DATA_KEY, names[:1900] or None)   # who the agents' questions for the person go to
         if new_job:
             from swarm import enrolment
             from swarm.board.autoinit import store_key

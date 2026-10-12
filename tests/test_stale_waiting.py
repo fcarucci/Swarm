@@ -117,6 +117,51 @@ class StaleWaitingTests(Env):
         self.sweep()
         self.assertEqual(self.job().status, "active")
 
+    def test_an_orphan_close_spares_a_job_with_its_own_limit_of_zero(self):
+        self.activate("J", "--stall-hours", "0")
+        with self.board() as b:
+            b.allocate_name("agent-1", "J", "worker")
+            ids = [m.id for m in b.messages_after(0, "J")]
+        self.h.backdate_job("J", created_at=3 * 3600, activated_at=3 * 3600)
+        self.h.backdate_agent("agent-1", joined_at=2 * 3600 + 60, last_seen=2 * 3600)
+        self.sweep()
+        self.assertEqual(self.job().status, "active")
+
+    def test_auto_close_spares_a_job_whose_last_agent_asked_the_owner(self):
+        for ask, expect in ((False, "completed"), (True, "active")):
+            with self.subTest(question=ask):
+                self.setUp()
+                self.activate("J")
+                self.finished_agent()
+                if ask:
+                    with self.board() as b:
+                        b.post("J", "agent-1", "owner, ship it?", to="owner")
+                self.quiet(3 * 3600)
+                self.sweep()
+                self.assertEqual(self.job().status, expect)
+
+    def test_a_configured_owner_name_is_recorded_at_activation_and_protects(self):
+        text = self.config.read_text()
+        self.config.write_text(text.replace("[board]\n", '[board]\nowner_names = ["Marigold"]\n', 1) if "[board]\n" in text
+                               else text + '\n[board]\nowner_names = ["Marigold"]\n')
+        self.activate("J")
+        self.finished_agent()
+        with self.board() as b:
+            self.assertEqual(b.job_data("J").get("owner.names"), "Marigold")
+            b.post("J", "agent-1", "Marigold, ship it?", to="Marigold")
+        self.quiet(3 * 3600)
+        self.sweep()
+        self.assertEqual(self.job().status, "active")
+
+    def test_a_name_that_is_not_configured_protects_nothing(self):
+        self.activate("J")
+        self.finished_agent()
+        with self.board() as b:
+            b.post("J", "agent-1", "Marigold, ship it?", to="Marigold")
+        self.quiet(3 * 3600)
+        self.sweep()
+        self.assertEqual(self.job().status, "completed")
+
     # ---- the notice
     def test_one_notice_when_quiet_past_stale_waiting_minutes(self):
         self.waiting_goal_job(NOTICE_AT)

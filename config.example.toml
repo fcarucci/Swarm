@@ -34,6 +34,8 @@ retention_days = 7                 # messages (and departed agents) older than t
 message_max_chars = 200             # message cap (50..4000): the value a NEW board starts with. The cap itself lives in the
                                     # board (every client and host obeys that one); change it later, online, with
                                     # `swarm config board.message_max_chars 500` (add --save to write this line too)
+owner_names = []                    # names agents may address a question for the person to (besides `owner`, `user`, `human` and the job's creator);
+                                    # empty: git's user.name when set. Recorded on the job at activation. A job with an unanswered such question is never auto-closed
 agent_stale_hours = 12              # an agent silent this long gives its name back
 read_limit = 50                     # max messages returned by one read
 join_history = 30                   # a new agent is first shown the job's newest N messages (0 = none)
