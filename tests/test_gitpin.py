@@ -96,6 +96,16 @@ REFUSED = (
     ("~user/repo.git", "absolute path"),
     ("file://host/srv/r.git", "absolute local path"),
     ("file://relative", "absolute local path"),
+    # local paths with traversal, encoded or not (git decodes a file:// path)
+    ("file:///srv/%2e%2e/etc/repo", "'%'"),
+    ("file:///srv/%2E%2E/%2E%2E/repo", "'%'"),
+    ("file:///srv/.%2e/repo", "'%'"),
+    ("file:///srv/%252e%252e/repo", "'%'"),
+    ("/srv/%2e%2e/repo", "'%'"),
+    ("file:///srv/repo%00", "'%'"),
+    ("file:///srv/../etc/repo", "'..' segment"),
+    ("/srv/../etc/repo", "'..' segment"),
+    ("/srv/repo/..", "'..' segment"),
     # malformed
     ("ssh://[::1/r", "not a valid URL"),
     ("[::1]:path", "absolute path"),
@@ -132,6 +142,156 @@ class CheckUrlTests(unittest.TestCase):
             gitpin.url_args("--upload-pack=x")
 
 
+def git(*args, cwd=None, env=None):
+    base = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"}
+    return subprocess.run(["git", *args], capture_output=True, text=True, cwd=cwd, env={**base, **(env or {})},
+                          timeout=60)
+
+
+class LocalityTests(unittest.TestCase):
+    """The 11b re-review's local-transport probes, adapted: R1 (percent-encoded escape), R2 (locality decided
+    from the URL for every credential kind), R3 (the destination's config runs in a local pack)."""
+
+    def setUp(self):
+        self.base = Path(os.path.realpath(tempfile.mkdtemp(dir=SANDBOX, prefix="gitpin-local-")))
+        self.private = self.base / "private"
+        self.private.mkdir()
+        self.outside = self.base / "outside.git"
+        git("init", "-q", "--bare", "-b", "main", str(self.outside))
+
+    def escape_url(self) -> str:
+        """file://<private>/%2e%2e/<target>: realpath of the undecoded path stays under <private>; git decodes it."""
+        return "file://" + str(self.private) + "/%2e%2e/" + self.outside.name
+
+    def test_r1_percent_encoded_escape_is_refused(self):
+        url = self.escape_url()
+        self.assertTrue(os.path.realpath(urllib_path(url)).startswith(str(self.private)))   # the old check passed it
+        for call in (gitpin.check_url, gitpin.is_local, gitpin.resolve_local, lambda u: gitpin.locality(u, str(self.private))):
+            with self.subTest(call=call), self.assertRaisesRegex(gitpin.GitPinError, "'%'"):
+                call(url)
+
+    def test_r1_plain_traversal_is_refused_and_a_symlink_resolves(self):
+        with self.assertRaisesRegex(gitpin.GitPinError, "'..'"):
+            gitpin.locality(str(self.private) + "/../" + self.outside.name, str(self.private))
+        link = self.private / "link.git"
+        link.symlink_to(self.outside)
+        self.assertEqual(gitpin.resolve_local(str(link)), str(self.outside))
+        self.assertEqual(gitpin.locality(str(link), str(self.private)), (True, False))
+        self.assertEqual(gitpin.locality("file://" + str(link), str(self.private)), (True, False))
+
+    def test_r2_locality_is_decided_from_the_url_alone(self):
+        """A local path is local whatever credential kind is pinned (the local transport ignores an ssh pin):
+        the helper takes no pin at all, and the private-dir rule is the caller's for every kind."""
+        inside = self.private / "r.git"
+        git("init", "-q", "--bare", str(inside))
+        self.assertEqual(gitpin.locality(str(self.outside), str(self.private)), (True, False))
+        self.assertEqual(gitpin.locality("file://" + str(self.outside), str(self.private)), (True, False))
+        self.assertEqual(gitpin.locality(str(inside), str(self.private)), (True, True))
+        self.assertEqual(gitpin.locality("file://" + str(inside), str(self.private)), (True, True))
+        self.assertEqual(gitpin.locality(str(inside)), (True, False))
+        self.assertEqual(gitpin.locality(str(self.private) + "-sibling/r.git", str(self.private)), (True, False))
+        for url in ("https://example.com/r.git", "ssh://git@example.com/r.git", "git@example.com:o/r.git"):
+            with self.subTest(url=url):
+                self.assertEqual(gitpin.locality(url, str(self.private)), (False, False))
+                self.assertFalse(gitpin.is_local(url))
+                with self.assertRaisesRegex(gitpin.GitPinError, "not a local remote"):
+                    gitpin.resolve_local(url)
+
+    def source(self):
+        src = self.base / "src"
+        git("init", "-q", "-b", "main", str(src))
+        git("-C", str(src), "commit", "-q", "--allow-empty", "-m", "one")
+        return src
+
+    def push(self, src, dest, *pack):
+        argv = gitpin.git_argv("git", "-C", str(src), "push", "-q", *pack,
+                               *gitpin.url_args(str(dest), "HEAD:refs/heads/main"))
+        return subprocess.run(argv, capture_output=True, text=True, timeout=60, cwd=gitpin.NEUTRAL_CWD,
+                              env=gitpin.git_env(home=str(self.private)))
+
+    def plant_alternate_refs_command(self, dest, marker):
+        alt = self.base / "alt.git"
+        git("init", "-q", "--bare", str(alt))
+        (dest / "objects" / "info").mkdir(parents=True, exist_ok=True)
+        (dest / "objects" / "info" / "alternates").write_text(str(alt / "objects") + "\n")
+        git("-C", str(dest), "config", "core.alternateRefsCommand", f"sh -c 'echo ran >> {marker}; true'")
+
+    def test_r3_alternate_refs_command_does_not_run_in_a_local_push(self):
+        src = self.source()
+        marker = self.base / "ALT-RAN"
+        self.plant_alternate_refs_command(self.outside, marker)
+        control = self.push(src, self.outside, "--receive-pack=git -c core.hooksPath=/dev/null receive-pack")
+        self.assertEqual(control.returncode, 0, control.stderr)
+        self.assertTrue(marker.exists(), "the probe must work without local_pack_args")      # the hole is real
+        marker.unlink()
+        git("-C", str(self.outside), "update-ref", "-d", "refs/heads/main")
+        res = self.push(src, self.outside, *gitpin.local_pack_args("push"))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertFalse(marker.exists())
+
+    def test_r3_hooks_do_not_run_in_a_local_push(self):
+        src = self.source()
+        marker = self.base / "HOOK-RAN"
+        hook = self.outside / "hooks" / "pre-receive"
+        hook.parent.mkdir(exist_ok=True)
+        hook.write_text(f"#!/bin/sh\necho ran >> {marker}\n")
+        hook.chmod(0o755)
+        res = self.push(src, self.outside, *gitpin.local_pack_args("push"))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertFalse(marker.exists())
+
+    def test_r3_update_instead_into_a_worktree_is_refused_and_fsmonitor_does_not_run(self):
+        src = self.source()
+        dest = self.base / "nonbare"
+        git("init", "-q", "-b", "main", str(dest))
+        git("-C", str(dest), "commit", "-q", "--allow-empty", "-m", "base")
+        marker = self.base / "FSMON-RAN"
+        git("-C", str(dest), "config", "receive.denyCurrentBranch", "updateInstead")
+        git("-C", str(dest), "config", "core.fsmonitor", f"sh -c 'echo ran >> {marker}; true'")
+        git("-C", str(src), "fetch", "-q", str(dest), "main")
+        git("-C", str(src), "reset", "-q", "--hard", "FETCH_HEAD")
+        git("-C", str(src), "commit", "-q", "--allow-empty", "-m", "two")
+        res = self.push(src, dest, *gitpin.local_pack_args("push"))
+        self.assertNotEqual(res.returncode, 0)                 # denyCurrentBranch=refuse wins over the repo's config
+        self.assertIn("checked out", res.stderr)
+        self.assertFalse(marker.exists())
+        control = self.push(src, dest, "--receive-pack=git -c core.hooksPath=/dev/null receive-pack")
+        self.assertEqual(control.returncode, 0, control.stderr)
+        self.assertTrue(marker.exists(), "the probe must work without local_pack_args")      # the hole is real
+
+    def test_r3_local_fetch_with_upload_pack_args_still_reads_heads(self):
+        src = self.source()
+        self.assertEqual(self.push(src, self.outside, *gitpin.local_pack_args("push")).returncode, 0)
+        argv = gitpin.git_argv("git", "ls-remote", "--heads", gitpin.local_pack_args("ls-remote")[0],
+                               *gitpin.url_args(str(self.outside)))
+        res = subprocess.run(argv, capture_output=True, text=True, timeout=60, cwd=gitpin.NEUTRAL_CWD,
+                             env=gitpin.git_env(home=str(self.private)))
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("refs/heads/main", res.stdout)
+
+    def test_local_pack_args_shape(self):
+        (up,) = gitpin.local_pack_args("fetch", "/usr/bin/git")
+        (recv,) = gitpin.local_pack_args("push", "/usr/bin/git")
+        self.assertEqual(gitpin.local_pack_args("clone", "/usr/bin/git"), [up])
+        self.assertEqual(gitpin.local_pack_args("ls-remote", "/usr/bin/git"), [up])
+        with self.assertRaises(gitpin.GitPinError):
+            gitpin.local_pack_args("archive")
+        self.assertTrue(up.startswith("--upload-pack=/usr/bin/git ") and up.endswith(" upload-pack"))
+        self.assertTrue(recv.startswith("--receive-pack=/usr/bin/git ") and recv.endswith(" receive-pack"))
+        for item in ("core.hooksPath=" + os.devnull, "core.fsmonitor=false", "core.alternateRefsCommand=",
+                     "receive.denyCurrentBranch=refuse"):
+            with self.subTest(item=item):
+                self.assertIn(item, gitpin.LOCAL_PACK_CONFIG)
+                self.assertIn("-c " + item, up)
+                self.assertIn("-c " + item, recv)
+
+
+def urllib_path(url):
+    import urllib.parse
+    return urllib.parse.urlsplit(url).path
+
+
 class CheckBranchTests(unittest.TestCase):
     def test_branches(self):
         for good in ("main", "release/1.2", "feat/x_y-z", "v1.0"):
@@ -156,7 +316,8 @@ class CheckPinTests(unittest.TestCase):
                     "helper:/usr/bin/gh auth login", "helper:/usr/bin/gh auth git-credential --x",
                     "helper:/usr/bin/gh  auth git-credential", "helper:/opt/git-credential-store extra",
                     "ssh-key:id", "ssh-key:/home/u/my key", "ssh-agent:sock", "ssh-agent", "nonsense",
-                    "token:abc", "", None, 3, "helper:/usr/bin/gh auth git-credential\n", "x" * (gitpin.URL_MAX + 1)):
+                    "token:abc", "", None, 3, "helper:/usr/bin/gh auth git-credential\n", "ssh-agent:/run/s\x01", "ssh-key:/home/u/id\x00",
+                    "ssh-key:/home/u/id\x7f", "x" * (gitpin.URL_MAX + 1)):
             with self.subTest(pin=pin), self.assertRaises(gitpin.GitPinError):
                 gitpin.check_pin(pin)
 

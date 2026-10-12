@@ -391,6 +391,16 @@ class PinnedGitTests(HomeCase):
         self.assertEqual(da.remote_head(url, None, None, "main"), head)
         self.assertFalse(marker.exists())
 
+    def test_local_remote_runs_upload_pack_with_its_config_defused(self):
+        done = types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        with mock.patch.object(da.subprocess, "run", return_value=done) as run:
+            da.remote_head("/srv/repo.git", None, None, "main")
+            da.remote_head("https://example.com/r.git", None, None, "main")
+        local, network = (c.args[0] for c in run.call_args_list)
+        self.assertIn(da.gitpin.local_pack_args("ls-remote")[0], local)
+        self.assertFalse(any(a.startswith("--upload-pack") for a in network))
+        self.assertLess(local.index(da.gitpin.local_pack_args("ls-remote")[0]), local.index("--"))
+
     def test_planted_global_config_does_not_redirect_the_url(self):
         repo, head = self.upstream()
         decoy = self.home / "decoy"
