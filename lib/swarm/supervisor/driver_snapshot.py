@@ -300,7 +300,7 @@ def _questions(board: Any, job: str, gen: int, rc: _Receipts) -> dict[str, list[
 def _wakes(board: Any, job: str, seats: dict[str, dm.SeatView], msgs: list, events: list, led: Any,
            rc: _Receipts) -> dict[str, list[int]]:
     """Per seat, the receipted posts and the events to its agent above that seat's own watermarks. Message ids and
-    event ids are separate id spaces, so the ledger keeps two watermarks per seat (`msg:<seat>`, `event:<seat>`).
+    event ids are separate id spaces, so the ledger keeps a message watermark per seat (`msg:<seat>`) and an acknowledgement per event (`evack:<seat>:<id>`).
     The agent is looked up among departed members too: a resumable seat's agent has usually left."""
     names = {a.agent_key: a.name for a in board.agents(job, include_departed=True)}
     out: dict[str, list[int]] = {}
@@ -309,11 +309,11 @@ def _wakes(board: Any, job: str, seats: dict[str, dm.SeatView], msgs: list, even
         if name is None:
             continue                                    # nothing has joined for this seat yet
         msg_mark = led.watermarks.get(f"msg:{seat}", 0)
-        event_mark = led.watermarks.get(f"event:{seat}", 0)
         ids = [m.id for m in msgs if m.to_agent == name and m.id > msg_mark
                and rc.get("post", m.id, 1, {"kind": "post", "id": str(m.id), "rev": 1, "to": m.to_agent,
                                             "body": m.message}) is not None]
-        ids += [e.id for e in events if e.to and e.to.lower() == name.lower() and e.id > event_mark]
+        ids += [e.id for e in events if e.to and e.to.lower() == name.lower()
+                and f"evack:{seat}:{e.id}" not in led.watermarks]   # acknowledged one by one, never a high-water mark
         if ids:
             out[seat] = sorted(ids)
     return out

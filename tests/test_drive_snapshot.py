@@ -661,13 +661,25 @@ class WakeMapping(unittest.TestCase):
 
     def test_the_event_watermark_does_not_hide_posts(self):
         got = self.wakes(agents={"k1": "A"}, seats=self.seats(a="k1"), msgs=[self.msg(4, "A")],
-                         events=[self.ev(50, "a")], watermarks={"event:a": 50})
+                         events=[self.ev(50, "a")], watermarks={"evack:a:50": 1})
         self.assertEqual(got, {"a": [4]})
 
-    def test_events_at_the_event_watermark_are_not_wakes(self):
+    def test_an_acknowledged_event_is_not_a_wake_and_hides_no_other(self):
         got = self.wakes(agents={"k1": "A"}, seats=self.seats(a="k1"),
-                         events=[self.ev(50, "a"), self.ev(51, "a")], watermarks={"event:a": 50})
+                         events=[self.ev(50, "a"), self.ev(51, "a")], watermarks={"evack:a:50": 1})
         self.assertEqual(got, {"a": [51]})
+
+    def test_an_acknowledged_far_event_never_wakes_again_and_a_lower_one_still_does(self):
+        got = self.wakes(agents={"k1": "A"}, seats=self.seats(a="k1"),
+                         events=[self.ev(10 ** 9, "a"), self.ev(60, "a")], watermarks={f"evack:a:{10 ** 9}": 1})
+        self.assertEqual(got, {"a": [60]})
+        self.assertEqual(self.wakes(agents={"k1": "A"}, seats=self.seats(a="k1"), events=[self.ev(10 ** 9, "a")],
+                                    watermarks={f"evack:a:{10 ** 9}": 1}), {})
+
+    def test_an_event_ack_of_another_seat_does_not_count(self):
+        got = self.wakes(agents={"k1": "A"}, seats=self.seats(a="k1"), events=[self.ev(50, "a")],
+                         watermarks={"evack:b:50": 1, "event:a": 99})
+        self.assertEqual(got, {"a": [50]})
 
     def test_event_names_match_case_insensitively(self):
         got = self.wakes(agents={"k1": "Mixed Case"}, seats=self.seats(a="k1"),
