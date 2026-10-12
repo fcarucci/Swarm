@@ -952,6 +952,57 @@ class PersonReceipts(ControlCase):
                                         rev=1, incarnation=led.incarnation, generation=led.generation, now=0))
 
 
+class CodexParity(ControlCase):
+    """N6 (coordinator ruling, spec 6.2 scenario 4): a Codex session's `swarm` command uses up the grant its
+    PreToolUse hook wrote, in the grants directory (a Codex writable root), which holds grants only."""
+    def codex_hook(self, session, *argv):
+        from swarm import hosts
+        payload = {"session_id": session, "tool_name": "Bash", "tool_input": {"command": shlex.join(["swarm", *argv])}}
+        return drivegate.write_grants(self.cfg, payload, hosts.get("codex"), None)
+
+    def test_a_codex_requester_unhalts_with_its_grant(self):
+        self.assertEqual(self.run_cmd("halt", "--job", JOB)[0], 0)
+        self.set_session(None)
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": REQ_SESSION, "CODEX_SANDBOX": "seatbelt"}):
+            self.assertEqual(self.codex_hook(REQ_SESSION, "unhalt", "--job", JOB), 1)
+            rc, out, err = self.run_cmd("unhalt", "--job", JOB)
+        self.assertEqual(rc, 0, err)
+        self.assertIsNone(ledger.load(self.bkey, JOB).halted)
+        self.assertEqual(drivegate.record_of({"tool_response": out})[0], "unhalt")   # Codex: plain string output
+
+    def test_without_its_grant_a_codex_session_is_refused(self):
+        self.assertEqual(self.run_cmd("halt", "--job", JOB)[0], 0)
+        self.set_session(None)
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": REQ_SESSION}):
+            rc, _, err = self.run_cmd("unhalt", "--job", JOB)
+        self.assertEqual(rc, 1)
+        self.assertIn("agent host", err)
+
+    def test_the_grants_directory_holds_only_grants(self):
+        from swarm import receipts
+        self.assertEqual(self.run_cmd("halt", "--job", JOB)[0], 0)      # a person receipt (enrolled)
+        self.codex_hook(REQ_SESSION, "unhalt", "--job", JOB)              # a grant (grants)
+        grants = receipts.grants_dir()
+        self.assertEqual(grants, self.home / ".local/share/swarm/host/grants")
+        self.assertEqual(grants.stat().st_mode & 0o777, 0o700)
+        names = [p.name for p in grants.iterdir()]
+        self.assertEqual(len(names), 1)
+        body = json.loads((grants / names[0]).read_text())
+        self.assertEqual(body["kind"], "grant")
+        enrolled = self.home / ".local/share/swarm/host/enrolled"
+        kinds = [json.loads(p.read_text()).get("kind") for p in enrolled.glob("receipt-*.json")]
+        self.assertIn("person", kinds)
+        self.assertNotIn("grant", kinds)
+
+    def test_codex_writable_roots_name_the_grants_directory_not_the_enrolled_one(self):
+        from swarm import codex_config, receipts
+        roots = codex_config.required(self.cfg)[("sandbox_workspace_write", "writable_roots")]
+        self.assertIn(str(receipts.grants_dir()), roots)
+        for root in roots:
+            self.assertFalse(str(self.home / ".local/share/swarm/host/enrolled").startswith(root), root)
+            self.assertNotEqual(root, str(self.home / ".local/share/swarm/host"))
+
+
 class Probes(ControlCase):
     """The Task 6b security probes P1 and P6 against the real CLI (P2-P5, P7-P10 live above and in test_person)."""
     def test_P1_enrolled_seat_exporting_the_requester_session_id_is_refused(self):
