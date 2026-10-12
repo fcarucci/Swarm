@@ -70,7 +70,7 @@ def human_question(board, js, cfg=None):
     if drive_gate(board, cfg, js.job) is not None:
         return False
     owner = (getattr(js, "created_by", None) or "").casefold()
-    humans = {"user", "human", "owner", "francesco", owner} - {""}
+    humans = {"user", "human", "owner", owner} - {""}
     answered = set()
     for m in reversed(board.recent_messages(100, job=js.job)):
         target = (getattr(m, "to_agent", None) or "").casefold()
