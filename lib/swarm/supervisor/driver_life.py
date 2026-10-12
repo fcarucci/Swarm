@@ -75,15 +75,15 @@ def _stub_gate(board, cfg, led, intent, now) -> Gate:
 def landed_gate(board, cfg, led, intent, now) -> Gate:
     """The close-time check of a pending MET of a coding job: the judged candidate must be landed, i.e. the
     head of a group whose land receipt is verified at that sha on every pinned destination (the snapshot's own
-    rule, driver_model.candidate_landed). A MET on unlanded work is refused. An artifact job, and a job whose
-    owner record names no recipe here (it is not driven on this host), are not checked."""
+    rule, driver_model.candidate_landed). A MET on unlanded work is refused. An artifact job is not checked; a job
+    whose owner record cannot be read is "unknown" (fails closed)."""
     if intent.get("verdict") != "met":
         return Gate()
     from swarm.supervisor import driver_model as dm, driver_snapshot as ds
     try:
         recipe = ds.drive_cfg(led.board_key, led.job, cfg or {})["recipe"]
-    except ds.DriveConfigError:
-        return Gate()
+    except ds.DriveConfigError as exc:     # fails closed: a missing or bad owner record never closes a MET
+        return Gate("unknown", f"the owner record of this job cannot be read ({exc}): the landing is not known")
     if recipe == "artifact":
         return Gate()
     rc = ds._Receipts(led, led.job, intent.get("generation") or led.generation, now)

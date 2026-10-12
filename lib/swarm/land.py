@@ -397,37 +397,95 @@ def _fetch_why(env: LandEnv, d: Destination, exc: MirrorError) -> str:
     if m and m.group(1) == env.target:
         return f"{env.target} does not exist on {d.name}"
     if m:
-        return (f"branch {m.group(1)} is not on {d.name}: push the rebased branch to every pinned remote, "
-                f"then run swarm land again")
+        return (f"branch {m.group(1)} is not on {d.name}: hand off the exact SHA from the job's work "
+                f"repository, then run swarm land again")
     return f"fetch from {d.name} failed: {exc}"
 
 
-def _publish_branch(env: LandEnv, dests: list, mirrors: dict, branch: str, sha: str) -> None:
+def publish_ref(sha: str) -> str:
+    """The driver-owned branch a hand-off is published under: one per SHA (never a seat-chosen name, never moved,
+    so no force is ever needed and a rebased re-hand-off gets its own)."""
+    return f"swarm/land/{sha}"
+
+
+def work_root_problem(root: str) -> str | None:
+    """Why the pinned work root may not be read as the job's repository, or None. Its location and object store
+    are seat-writable: a symlink, a `.git` gitdir file, a linked common dir, alternates, grafts or a shallow file
+    could point the driver's fetch at another repository's commits, so each is refused."""
+    import stat as _stat
+    if not isinstance(root, str) or not os.path.isabs(root):
+        return "not an absolute path"
+    if os.path.realpath(root) != os.path.normpath(root):
+        return "it is or passes through a symbolic link"
+    g = os.path.join(root, ".git")
+    try:
+        st = os.lstat(g)
+    except OSError:
+        return "it has no .git directory"
+    if not _stat.S_ISDIR(st.st_mode):
+        return ".git is not a directory (a gitdir file or a link)"
+    if hasattr(os, "getuid") and st.st_uid != os.getuid():
+        return ".git belongs to another user"
+    for rel in ("commondir", "objects/info/alternates", "objects/info/http-alternates", "info/grafts", "shallow"):
+        if os.path.lexists(os.path.join(g, rel)):
+            return f".git/{rel} exists"
+    return None
+
+
+def _stage(env: LandEnv, dests: list, mirrors: dict, branch: str, sha: str) -> set:
     """Seats never push (they hold no credentials, Task 20): a hand-off is a commit on a branch of the job's own
-    work repository. Where a destination does not have `branch` yet, the driver brings it from the pinned work
-    roots into its private mirror and pushes it there itself (pinned credential, never a force), so CI runs on that
-    exact SHA; the landing then waits for CI as usual. A branch already on a destination is left as it is."""
-    roots = [r for r in ((env.owner or {}).get("roots") or []) if isinstance(r, str) and r]
+    work repository. Returns the urls of the destinations that do not carry `branch` at `sha`; for each, the
+    commit is brought into the private mirror under publish_ref(sha): from the destination if the driver already
+    published it there, else from a verified pinned work root. Nothing is pushed here (see _publish)."""
+    pub = publish_ref(sha)
+    staged = set()
+    work = None
     for d in dests:
         m = mirrors[d.url]
         try:
-            present = f"refs/heads/{branch}" in m.ls_remote(_budget(env, FETCH_SECONDS))
+            refs = m.ls_remote(_budget(env, FETCH_SECONDS))
         except MirrorError as exc:
             raise LandPending(f"cannot list {d.name} ({type(exc).__name__}); retrying next pass") from exc
-        if present:
+        if refs.get(f"refs/heads/{branch}") == sha:
             continue
-        got = None
-        for root in roots:
-            got = m.fetch_local_branch(root, branch, _budget(env, FETCH_SECONDS))
-            if got:
-                break
+        staged.add(d.url)
+        if refs.get(f"refs/heads/{pub}") == sha:
+            _, left = m.fetch_branches([pub], _budget(env, FETCH_SECONDS))
+            if left:
+                raise LandPending(f"fetch of {pub} from {d.name} did not finish; it continues next pass")
+            continue
+        if work is None:
+            work = _work_roots(env)
+        got, why = None, "no pinned work root"
+        for root in work:
+            why = work_root_problem(root)
+            if why is None:
+                got = m.fetch_local_branch(root, branch, _budget(env, FETCH_SECONDS), into=pub)
+                if got == sha:
+                    break
         if got != sha:
             raise LandRefused(f"branch {branch} is not at {sha[:12]} in the job's work repository"
-                              + (f" (it is at {got[:12]})" if got else "") + ": commit there and hand off its exact SHA")
+                              + (f" ({why})" if why else "") + ": commit there and hand off its exact SHA "
+                              "(seats never push; the supervisor publishes it)")
+    return staged
+
+
+def _work_roots(env: LandEnv) -> list:
+    return [r for r in ((env.owner or {}).get("roots") or []) if isinstance(r, str) and r]
+
+
+def _publish(env: LandEnv, dests: list, mirrors: dict, staged: set, sha: str) -> None:
+    """Push a judged (or twin-covered) SHA under publish_ref(sha) to the destinations that lack it: only after
+    _covered, so no unjudged commit ever leaves the private mirror. Pinned credential, never a force."""
+    pub = publish_ref(sha)
+    for d in dests:
+        if d.url not in staged:
+            continue
         try:
-            m.push(sha, branch, timeout=_budget(env, PUSH_SECONDS))
-        except MirrorError as exc:
-            raise LandRefused(f"pushing {branch} to {d.name} failed: {exc}") from exc
+            mirrors[d.url].push(sha, pub, timeout=_budget(env, PUSH_SECONDS))
+        except PushRejectedError as exc:
+            if "up to date" not in str(exc).lower():
+                raise LandRefused(f"publishing {sha[:12]} to {d.name} failed: {exc.reason or exc}") from exc
 
 
 def _fetch(env: LandEnv, dests: list, mirrors: dict, branches: list) -> None:
@@ -494,7 +552,7 @@ def execute(board, env: LandEnv, job: str, request: Request, *, action_id: str,
     except LandPending as exc:
         return LandResult(False, None, str(exc), pending=True)
     except MissingCommitError as exc:
-        return LandResult(False, None, f"{exc}: push the branch to every pinned remote, then run swarm land again")
+        return LandResult(False, None, f"{exc}: hand off the exact SHA from the job's work repository, then run swarm land again")
     except TargetRewoundError as exc:
         return LandResult(False, None, f"the target was reset backwards ({exc})")
     except UnpatchableCommitError as exc:
@@ -524,8 +582,10 @@ def _execute(board, env: LandEnv, job: str, request: Request, action_id: str, ne
     if need_leases:
         check_leases(board, env, dests, job)
     mirrors = _mirrors(env, dests)
-    _publish_branch(env, dests, mirrors, branch, sha)
-    _fetch(env, dests, mirrors, [target, branch])
+    staged = _stage(env, dests, mirrors, branch, sha)
+    _fetch(env, [d for d in dests if d.url not in staged], mirrors, [target, branch])
+    _fetch(env, [d for d in dests if d.url in staged], mirrors, [target])
+    pub = publish_ref(sha)
     journal = read_journal(led, request.id, now, destinations=len(dests))
     if journal is None:
         if sha not in env.judged():
@@ -541,17 +601,18 @@ def _execute(board, env: LandEnv, job: str, request: Request, action_id: str, ne
                     if left:                     # a slow fetch is a hold, never "no verdict covers it"
                         raise LandPending(f"fetch of judged branch {extra} did not finish; it continues next pass")
         _covered(env, mirrors, dests, target, sha)
+        _publish(env, dests, mirrors, staged, sha)
         _ci(env, sha)
         for d in dests:
             m = mirrors[d.url]
-            if m.head(branch) != sha:
-                raise LandRefused(f"branch {branch} does not name {sha[:12]} on {d.name}: push the rebased branch "
-                                  f"to every pinned remote, then run swarm land again")
+            if m.head(pub if d.url in staged else branch) != sha:
+                raise LandRefused(f"{sha[:12]} is not in the mirror of {d.name}: hand off the exact SHA from the "
+                                  f"job's work repository, then run swarm land again")
             head = m.head(target)
             if head is None:
                 raise LandRefused(f"{target} does not exist on {d.name}")
             if not m.is_ancestor(sha, head) and not m.is_ancestor(head, sha):
-                raise LandRefused(f"{target} on {d.name} moved: rebase {branch} onto {target}, push it and "
+                raise LandRefused(f"{target} on {d.name} moved: rebase {branch} onto {target} in the work repository and "
                                   f"hand off the new SHA (a fast-forward is impossible)")
         state = {d.url: {"state": "intent", "sha": sha} for d in dests}
         rev = 1
@@ -571,7 +632,7 @@ def _execute(board, env: LandEnv, job: str, request: Request, action_id: str, ne
         head = m.head(target)
         if head is None or not m.is_ancestor(sha, head):
             if head is None or not m.is_ancestor(head, sha):
-                raise LandRefused(f"{target} on {d.name} moved: rebase {branch} onto {target}, push it and "
+                raise LandRefused(f"{target} on {d.name} moved: rebase {branch} onto {target} in the work repository and "
                                   f"hand off the new SHA (a fast-forward is impossible)")
             m.push(sha, target, timeout=_budget(env, PUSH_SECONDS))
         if entry["state"] == "intent":
@@ -616,7 +677,13 @@ def _finish(board, env: LandEnv, job: str, request: Request, branch: str, sha: s
             try:
                 mirrors[d.url].delete_branch(branch, timeout=_budget(env, PUSH_SECONDS))
             except MirrorError as exc:
-                notes.append(f"{d.name}: branch {branch} not deleted ({exc})")
+                if mirrors[d.url].head(branch) is not None:       # a published-only hand-off has no branch there
+                    notes.append(f"{d.name}: branch {branch} not deleted ({exc})")
+    for d in dests:                                               # the driver's own publish ref goes either way
+        try:
+            mirrors[d.url].delete_branch(publish_ref(sha), timeout=_budget(env, PUSH_SECONDS))
+        except MirrorError:
+            pass
     for note in notes:
         env.say(note)
     return LandResult(True, sha, "landed", land_id=str(request.id), land_rev=rev)

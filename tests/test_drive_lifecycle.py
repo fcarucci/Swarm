@@ -546,6 +546,12 @@ class LandedGateTests(LifeCase):
         self.assertEqual(life.landed_gate(self.b, self.cfg, self.led, self.led.terminal_intent, self.at(1)).verdict,
                          "pass")
 
+    def test_no_owner_record_fails_closed(self):
+        """Review of 7d1e8ba: with no readable owner record the gate is "unknown", never a pass."""
+        self.pending_met()
+        self.assertEqual(life.landed_gate(self.b, self.cfg, self.led, self.led.terminal_intent, self.at(1)).verdict,
+                         "unknown")
+
     def test_artifact_job_met_is_not_checked(self):
         self.owner("artifact")
         self.pending_met()

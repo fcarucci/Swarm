@@ -153,33 +153,95 @@ class Landing(LandCase):
         self.assertEqual(self.head(self.a), self.sha)
         self.assertEqual(self.head(self.b), self.sha)
 
-    def test_a_branch_only_in_the_work_repository_is_pushed_by_the_driver_then_landed(self):
-        """Seats never push (QA real MET): the hand-off branch exists only in the job's work repository. The driver
-        brings it into its mirror, pushes it to every destination (no force), and lands the exact SHA."""
+    def local_only(self):
         for r in (self.a, self.b):
             git(r, "branch", "-D", GROUP)
         self.branch_commit("w.txt", "w\n", push=False)
-        self.judged = {self.sha}
         self.owner["roots"] = [self.work]
-        self.assertFalse(self.has_branch(self.a))
+        self.judged = {self.sha}
+
+    def test_a_branch_only_in_the_work_repository_is_published_by_the_driver_then_landed(self):
+        """Seats never push (QA real MET): the hand-off exists only in the job's work repository. The driver
+        brings it into its mirror and, once judged, publishes it under its own ref swarm/land/<sha> and lands it."""
+        self.local_only()
         res = self.go()
         self.assertTrue(res.ok, res.why)
         for r in (self.a, self.b):
             self.assertEqual(self.head(r), self.sha)
-        self.assertIn((self.a, self.sha, GROUP), self.pushes)
+            self.assertFalse(self.has_branch(r, land.publish_ref(self.sha)))   # cleaned up after landing
+        self.assertIn((self.a, self.sha, land.publish_ref(self.sha)), self.pushes)
+
+    def test_an_unjudged_sha_never_leaves_the_mirror(self):
+        """Review blocker 1: nothing is published before the judged check."""
+        self.local_only()
+        self.judged = {"0" * 40}
+        res = self.go()
+        self.assertFalse(res.ok)
+        self.assertEqual(self.pushes, [])
+        for r in (self.a, self.b):
+            self.assertFalse(self.has_branch(r, land.publish_ref(self.sha)))
+
+    def test_a_rebased_rehandoff_gets_its_own_publish_ref(self):
+        """Review blocker 2: a second hand-off on the same branch is not blocked by the first one's ref."""
+        self.local_only()
+        first = self.sha
+        self.ci = "running"
+        self.assertTrue(self.go().pending)
+        self.assertTrue(self.has_branch(self.a, land.publish_ref(first)))
+        self.sha = self.commit(self.work, "w2.txt", "w2\n", "feature 2")
+        self.judged, self.ci = {self.sha}, "green"
+        res = self.go(self.request(rid=8))
+        self.assertTrue(res.ok, res.why)
+        self.assertEqual(self.head(self.a), self.sha)
 
     def test_a_work_branch_at_another_sha_is_refused(self):
-        for r in (self.a, self.b):
-            git(r, "branch", "-D", GROUP)
-        self.branch_commit("w.txt", "w\n", push=False)
+        self.local_only()
         want = self.sha
         self.commit(self.work, "later.txt", "later\n", "later")
-        self.owner["roots"] = [self.work]
-        self.judged = {want}
         res = self.go(self.request(f"{GROUP}@{want}"))
         self.assertFalse(res.ok)
         self.assertIn("is not at", res.why)
-        self.assertFalse(self.has_branch(self.a))
+        self.assertEqual(self.pushes, [])
+
+    def foreign(self, name):
+        secret = self.repo(name)
+        ssha = self.commit(secret, "s.txt", "secret\n", "secret")
+        git(secret, "branch", GROUP)
+        for r in (self.a, self.b):
+            git(r, "branch", "-D", GROUP)
+        self.judged = {ssha}
+        return secret, ssha
+
+    def assert_refused_unpushed(self, ssha, root):
+        self.owner["roots"] = [root]
+        res = self.go(self.request(f"{GROUP}@{ssha}"))
+        self.assertFalse(res.ok)
+        self.assertIn("work repository", res.why)
+        self.assertEqual(self.pushes, [])
+
+    def test_a_gitdir_file_root_is_refused(self):
+        """Review blocker 3: the work root cannot redirect the fetch to another repository."""
+        secret, ssha = self.foreign("secret")
+        wr = os.path.join(self.root, "seatroot")
+        os.makedirs(wr)
+        with open(os.path.join(wr, ".git"), "w") as fh:
+            fh.write("gitdir: " + os.path.join(secret, ".git") + "\n")
+        self.assert_refused_unpushed(ssha, wr)
+
+    def test_alternates_in_the_work_root_are_refused(self):
+        secret, ssha = self.foreign("secret2")
+        os.makedirs(os.path.join(self.work, ".git/objects/info"), exist_ok=True)
+        with open(os.path.join(self.work, ".git/objects/info/alternates"), "w") as fh:
+            fh.write(os.path.join(secret, ".git/objects") + "\n")
+        git(self.work, "update-ref", "refs/heads/" + GROUP, ssha)
+        self.assert_refused_unpushed(ssha, self.work)
+
+    @support.posix_only("symlinks")
+    def test_a_symlinked_work_root_is_refused(self):
+        secret, ssha = self.foreign("secret3")
+        link = os.path.join(self.root, "lnk")
+        os.symlink(secret, link)
+        self.assert_refused_unpushed(ssha, link)
 
     def test_pushes_exactly_the_judged_sha_once_per_destination(self):
         self.go()
@@ -548,8 +610,8 @@ class Journal(LandCase):
             self.go()
         other = self.request(f"{GROUP}@{'b' * 40}")
         res = self.go(request=other)
-        self.assertFalse(res.ok)
-        self.assertIn("journal", res.why)
+        self.assertFalse(res.ok)            # another SHA: not on the destinations, not in a work root, or not the journal's
+        self.assertRegex(res.why, "journal|work repository")
 
     def test_journal_verified_needs_every_destination_at_this_sha(self):
         self.go()
@@ -677,7 +739,7 @@ class TypedErrors(LandCase):
         return make
 
     def test_each_typed_mirror_error_becomes_a_refusal_with_advice(self):
-        cases = [(MissingCommitError("commit abc is not in the mirror"), "is_ancestor", "push the branch"),
+        cases = [(MissingCommitError("commit abc is not in the mirror"), "is_ancestor", "hand off the exact SHA"),
                  (mirror.TargetRewoundError("x is not an ancestor of y"), "is_ancestor", "reset backwards"),
                  (mirror.UnpatchableCommitError("merge"), "is_ancestor", "merge or empty"),
                  (PushRejectedError("denied", "pre-receive declined"), "is_ancestor", "declined"),
