@@ -554,7 +554,7 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
         except ledger.LedgerBadError as exc:      # an unreadable ledger holds the job: nothing starts
             log(f"job {led.job}: ledger unreadable at launch: {exc}")
             held = "the ledger is unreadable"
-        off = command._switched_off_now(cfg, board, led.job) or held
+        off = command._switched_off_now(cfg, board, led.job, drive=True) or held
         if off:
             board.finish_restart(row.id, "cancelled")
             _discard(run, marker=marker)

@@ -1,7 +1,7 @@
 """`swarm activate` in drive mode (spec 3.1, [A], [RR1], [M1], [G2], [F10], [D1], [P1]): the
 budget and model tables, the supervisor checks, the pinned credential sources, the durable
-five-step activation and its recovery, `swarm drive budget|models`, and the ledger halts that
-`swarm supervise disable|enable` write. Owned by Task 6a; the seat commands live in drive_cli.py.
+five-step activation and its recovery, and `swarm drive budget|models`. Owned by Task 6a; the seat
+commands (and `swarm halt|unhalt`) live in drive_cli.py.
 
 Every control record this module creates prints, as its last stdout line, the record format of
 the plan's Global Constraints: `swarm-record: kind=activate id=<generation> rev=<ledger revision>`.
@@ -38,7 +38,6 @@ BUDGET_KEYS = ("max_sessions", "max_seats", "max_rounds", "no_progress_rounds", 
 # pin read back from the owner record too). Anything else is refused at activation.
 CREDENTIAL_HELPERS = gitpin.CREDENTIAL_HELPERS
 NO_DRIVE_HINT = "pass --no-drive --reason TEXT to run it as a goal job that nothing drives"
-HALT_REASON = "supervisor disabled"          # [F5]: the halt `supervise disable` writes
 _SESSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 _KV = re.compile(r"([a-z_]+)=(.+)", re.S)
 
@@ -950,83 +949,3 @@ def cmd_drive(cfg: dict, args) -> int:
         print(f"swarm drive: {exc}", file=sys.stderr)
         return 2
     return 0
-
-
-# --- swarm supervise disable|enable ([M1] 1 and 3, [F5]) -------------------------------------------
-
-def refuse_seat_session(cfg: dict) -> str | None:
-    """`supervise disable` is refused unless the person path allows it for every drive job of this board
-    ([M1] 3): an enrolled seat session never does. With no drive job there is nothing to protect."""
-    for led in ledger.unfinished(board_key(cfg)):
-        if isinstance(led, ledger.Ledger):
-            refusal = _person("supervise disable", cfg, led.job)
-            if refusal:
-                return refusal
-    return None
-
-
-def _halt(x, actor: str, when: str) -> None:
-    x.halted = {"by": actor, "at": when, "reason": HALT_REASON}
-
-
-def stop_job_sessions(cfg: dict, job: str) -> list:
-    """Stop the live sessions of a job's seats (their scopes), as the runner does for a stop ([F5]).
-    Returns what was stopped. The runner's run files are keyed by the config. Best effort per run: a
-    run that cannot be read is skipped."""
-    from swarm.supervisor import runner
-    stopped = []
-    for _restart, path in runner._run_paths(cfg):
-        run = runner._read_run(path.name, cfg)
-        if run and run.get("job") == job and runner._session_alive(run):
-            runner._stop_session(run)
-            stopped.append(run.get("unit") or path.name)
-    return stopped
-
-
-def halt_drive_jobs(cfg: dict, *, actor: str, now: dt.datetime | None = None) -> tuple:
-    """`supervise disable`: the [F5] halt goes into every unfinished drive ledger of this board, then the
-    live sessions of the halted jobs are stopped. A job whose ledger fails is reported and the others
-    still get their halt. Returns (halted jobs, [(job, why)] failures)."""
-    when = (now or dt.datetime.now(dt.timezone.utc)).isoformat()
-    bk = board_key(cfg)
-    halted, failed = [], []
-    for led in ledger.unfinished(bk):
-        if not isinstance(led, ledger.Ledger) or led.halted is not None:
-            continue
-        try:
-            _save(bk, led.job, lambda x: _halt(x, actor, when))
-            halted.append(led.job)
-        except (DriveError, ledger.LedgerBadError, OSError) as exc:
-            failed.append((led.job, str(exc)))
-    for job in halted:
-        try:
-            stop_job_sessions(cfg, job)
-        except Exception as exc:   # the halt stands; the pass stops what is left
-            failed.append((job, f"sessions not stopped: {type(exc).__name__}: {exc}"))
-    return halted, failed
-
-
-def _clear_halt(x, seconds: float) -> None:
-    x.halted_total_seconds += seconds
-    x.halted = None
-
-
-def unhalt_drive_jobs(cfg: dict, *, now: dt.datetime | None = None) -> tuple:
-    """`supervise enable`: unhalt exactly the supervisor's halts; each deadline shifts by the time the
-    job was halted ([F5]: halted_total_seconds). Returns (resumed jobs, [(job, why)] failures)."""
-    when = now or dt.datetime.now(dt.timezone.utc)
-    bk = board_key(cfg)
-    done, failed = [], []
-    for led in ledger.unfinished(bk):
-        if not isinstance(led, ledger.Ledger) or not led.halted or led.halted.get("reason") != HALT_REASON:
-            continue
-        try:
-            began = dt.datetime.fromisoformat(led.halted["at"])
-            if began.tzinfo is None:
-                began = began.replace(tzinfo=dt.timezone.utc)
-            seconds = max(0.0, (when - began).total_seconds())
-            _save(bk, led.job, lambda x, seconds=seconds: _clear_halt(x, seconds))
-            done.append(led.job)
-        except (DriveError, ledger.LedgerBadError, OSError, ValueError) as exc:
-            failed.append((led.job, str(exc)))
-    return done, failed

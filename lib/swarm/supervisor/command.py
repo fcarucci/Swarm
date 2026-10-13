@@ -1,5 +1,5 @@
-"""`swarm supervise`: one pass of the supervisor. The systemd user timer runs it
-every [supervise] timer_minutes; `--dry-run` prints what it would do and changes nothing (no
+"""`swarm supervise`: one pass of the supervisor, run by a person (no timer runs it: Swarm
+installs no system timer; drive jobs are driven by the session driver); `--dry-run` prints what it would do and changes nothing (no
 board write, no file written: not even the run locks, the outage file or the state).
 
 A pass: the kill switches; the supervisor's private directory (settings.ensure_private_dir: refused
@@ -58,8 +58,8 @@ class Candidate:
     record: object = None   # its enrolment.Record: the only source of its work dir and harness
 
 
-# The pass runs as a systemd oneshot with TimeoutStartSec=110 (supervisor.systemd): its
-# transcript work is bounded to stay well inside that. The sweep (stuck closing, the
+# A pass is bounded (about 110 s at most): its
+# transcript work stays well inside that. The sweep (stuck closing, the
 # sweeps' pending finals, auto-close captures) gets PASS_SWEEP_SECONDS, the capture before a
 # restart's brief BRIEF_CAPTURE_SECONDS, and the retries of slow pending finals (60 s each,
 # lost.retry_slow_finals) whatever is left of PASS_BUDGET_SECONDS, last.
@@ -633,11 +633,11 @@ def clean_resume_markers(board, cfg: dict) -> int:
     return n
 
 
-def _switched_off_now(cfg: dict, board=None, job: str | None = None) -> str | None:
+def _switched_off_now(cfg: dict, board=None, job: str | None = None, *, drive: bool = False) -> str | None:
     """A kill switch thrown since the pass began (the off files; with a board, the job's
-    --no-supervise): why, or None. Read fresh."""
+    --no-supervise): why, or None. Read fresh. `drive`: a drive seat, not gated by [supervise] enabled."""
     from swarm.supervisor.settings import off_reason
-    why = off_reason(cfg)
+    why = off_reason(cfg, drive=drive)
     if why:
         return f"the supervisor was switched off ({why})"
     if board is not None:

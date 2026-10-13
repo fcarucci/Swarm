@@ -23,8 +23,8 @@ from pathlib import Path
 from swarm import paths
 
 DEFAULTS = {
-    "enabled": False,                  # opt in (`swarm supervise enable`); explicit false also gates
-                                       # closing. Unset in an existing config file = on (enabled_implied)
+    "enabled": False,                  # opt in by hand ([supervise] enabled = true); unset = off. Gates
+                                       # stuck-agent closing and restarts, never drive jobs
     "orphan_minutes": 15,
     "orphan_max_restarts": 3,
     "silent_minutes": 90,              # no post and no tool call for this long -> stuck:silent
@@ -52,7 +52,8 @@ DEFAULTS = {
     "run_output_days": 7,              # a replacement's redacted output tail is kept this long
     "allowed_workdirs": ["~/src"],     # a replacement's work dir must be under one of these
     "pass_env": [],                    # extra environment variables a replacement gets (an allowlist)
-    "timer_minutes": 5,                # the systemd timer's period (every 5 minutes)
+    "timer_minutes": 5,                # the drive stall period unit (a driver is stalled after 2x this);
+                                       # no timer runs on it (the name is kept for existing configs)
 }
 _INTS = ("orphan_minutes", "orphan_max_restarts", "silent_minutes", "max_restarts_per_agent", "max_restarts_per_job",
          "max_concurrent_replacements", "max_turns", "max_minutes", "max_restart_minutes",
@@ -71,17 +72,6 @@ class SettingsError(ValueError):
     """[supervise] holds a value the supervisor refuses to run with (the message says which)."""
 
 
-def enabled_implied(cfg: dict) -> bool:
-    """An existing install that relied on the old on-by-default supervisor: a config file that
-    never set `[supervise] enabled` (load_config marks that). New configs are written from
-    config.example.toml, which sets `enabled = false` explicitly, so only configs from before the
-    opt-in are unset: they keep the supervisor (timer passes where systemd exists, and stuck-agent
-    closing during sweeps on every host, macOS included) with no action. No config file at all is
-    a new machine: off. `swarm supervise enable|disable` makes the choice explicit."""
-    section = (cfg or {}).get("supervise")
-    return bool((cfg or {}).get("_supervise_unset")) and not (isinstance(section, dict) and "enabled" in section)
-
-
 def settings(cfg: dict) -> dict:
     section = (cfg or {}).get("supervise")
     if section is None:
@@ -89,8 +79,6 @@ def settings(cfg: dict) -> dict:
     if not isinstance(section, dict):   # `supervise = 2` instead of a [supervise] table
         raise SettingsError(f"[supervise] must be a table of settings, not {section!r}")
     s = {**DEFAULTS, **section}
-    if "enabled" not in section and enabled_implied(cfg):
-        s["enabled"] = True
     out = dict(s)
     if not isinstance(s["enabled"], bool):   # "false" (a string) must not switch it on
         raise SettingsError(f"[supervise] enabled must be true or false, not {s['enabled']!r}")
@@ -254,11 +242,14 @@ def codex_exposure() -> list[Path]:
     return [Path(r) for r in _codex_roots(data) if _overlaps(Path(os.path.expanduser(r)))]
 
 
-def off_reason(cfg: dict) -> str | None:
+def off_reason(cfg: dict, *, drive: bool = False) -> str | None:
     """Why the local kill switches stop the supervisor now ([supervise] enabled, the off files),
-    or None. Read fresh every call: checked again right before a launch and an enrolment."""
+    or None. Read fresh every call: checked again right before a launch and an enrolment. A drive
+    seat (`drive`) is not gated by [supervise] enabled: drive jobs are driven by the session driver
+    whatever it says; only the off files (and the job's halt, checked by the driver) stop them."""
     try:
-        if not settings(cfg)["enabled"]:
+        sup = settings(cfg)
+        if not drive and not sup["enabled"]:
             return "[supervise] enabled = false"
     except SettingsError:
         return "[supervise] is invalid"

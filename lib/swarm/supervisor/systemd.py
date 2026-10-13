@@ -1,66 +1,30 @@
-"""The supervisor's private systemd user units."""
+"""The systemd user manager, as the supervisor uses it: the bus environment for `systemd-run --user
+--scope` (each seat's or replacement's containment, see swarm.supervisor.runner), the linger check, and
+the removal of the legacy swarm-supervise timer.
+
+Swarm installs no system timer of any kind: no systemd timer or service unit, no launchd agent, no
+Task Scheduler task, no cron entry. Drive jobs are driven by the event-driven session driver
+(swarm.supervisor.session_driver); `swarm drive run` is the same loop in the foreground and
+`swarm supervise` is a one-shot pass a person runs by hand. Earlier builds could install
+swarm-supervise.timer and swarm-supervise.service in the user unit directory: `swarm bootstrap` and
+`swarm upgrade` remove them (remove_legacy), `swarm doctor` fails while they are there, and
+`swarm uninstall` removes them too."""
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import subprocess
 from pathlib import Path
 
-SERVICE = "swarm-supervise.service"
-TIMER = "swarm-supervise.timer"
-
-# The PATH the service unit sets (Environment=PATH= below, %h resolved): doctor's harness check
-# must look a binary up on this same PATH, or a pass that finds `claude`/`codex` in doctor's shell
-# can still fail in the timer, which never gets the user's shell rc files.
-SERVICE_PATH_DIRS = (".local/bin", "/usr/local/bin", "/usr/bin", "/bin")
-
-
-def service_path() -> str:
-    """The resolved PATH the service unit's `Environment=PATH=...` sets, for shutil.which."""
-    from swarm import paths
-    home = paths.home()
-    return os.pathsep.join(str(home / d) if not d.startswith("/") else d for d in SERVICE_PATH_DIRS)
-
-
-def _pct_escape(value: str) -> str:
-    """systemd unit files use % to introduce specifiers (%h, %%, ...); a literal % must be
-    doubled or a path containing one silently corrupts the unit."""
-    return value.replace("%", "%%")
-
-
-def _quote_if_needed(value: str) -> str:
-    """C-style double-quote a value for a systemd unit line (ExecStart= argv splitting,
-    Environment= assignments) when it contains whitespace; systemd would otherwise split it into
-    more than one argument/assignment."""
-    if not re.search(r"\s", value):
-        return value
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}"'
+# The names of the legacy units (earlier builds). Kept only so they can be found and removed.
+LEGACY_SERVICE = "swarm-supervise.service"
+LEGACY_TIMER = "swarm-supervise.timer"
+LEGACY_FOUND = "legacy swarm-supervise timer found; run swarm upgrade to remove it"
 
 
 def unit_dir() -> Path:
     from swarm import paths
     return Path(os.environ.get("XDG_CONFIG_HOME") or paths.home() / ".config") / "systemd" / "user"
-
-
-def service_text(launcher: Path, config: Path) -> str:
-    exec_start = _quote_if_needed(_pct_escape(str(launcher)))
-    swarm_config = _quote_if_needed(f"SWARM_CONFIG={_pct_escape(str(config))}")
-    return ("# Written by `swarm bootstrap` ([supervise] enabled = true): one supervisor pass.\n"
-            "[Unit]\nDescription=swarm supervisor: close stuck agents, restart them headless\n\n"
-            "[Service]\nType=oneshot\n"
-            f"ExecStart={exec_start} supervise\n"
-            f"Environment={swarm_config}\n"
-            "Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin\n"
-            "# the replacements' runners outlive this oneshot\nKillMode=process\nTimeoutStartSec=110\n")
-
-
-def timer_text(minutes: int) -> str:
-    return ("# Written by `swarm bootstrap` ([supervise] enabled = true).\n"
-            "[Unit]\nDescription=swarm supervisor timer\n\n"
-            f"[Timer]\nOnBootSec=2min\nOnUnitActiveSec={int(minutes)}min\nAccuracySec=15s\n\n"
-            "[Install]\nWantedBy=timers.target\n")
 
 
 def manager_env(env=None) -> dict:
@@ -80,47 +44,67 @@ def _disabled() -> bool:
     return os.environ.get("SWARM_NO_SYSTEMD") == "1"
 
 
-def install(config: Path, minutes: int, run=subprocess.run):
-    from swarm import paths
-    from swarm.bootstrap import Step
-    from swarm.safefile import write_preserving
-    if _disabled():
-        return Step("supervisor", "skipped", "SWARM_NO_SYSTEMD set")
-    if shutil.which("systemctl") is None:
-        return Step("supervisor", "manual", f"no systemctl here: run `{paths.agent_bin()} supervise` "
-                                            f"every {minutes} minutes (cron)")
-    directory = unit_dir()
-    directory.mkdir(parents=True, exist_ok=True)
-    changed = False
-    for name, content in ((SERVICE, service_text(paths.agent_bin(), config)),
-                          (TIMER, timer_text(minutes))):
-        path = directory / name
-        if not path.exists() or path.read_text(encoding="utf-8") != content:
-            write_preserving(path, content, mode=0o600)
-            changed = True
-    commands = ([["systemctl", "--user", "daemon-reload"]] if changed else []) + [
-        ["systemctl", "--user", "enable", "--now", TIMER]]
-    for command in commands:
+def legacy_files() -> list[Path]:
+    """The legacy timer's files that exist: the unit files and the enablement link
+    (timers.target.wants). Symlinks count even when dangling."""
+    d = unit_dir()
+    candidates = (d / LEGACY_TIMER, d / LEGACY_SERVICE, d / "timers.target.wants" / LEGACY_TIMER)
+    return [p for p in candidates if os.path.lexists(p)]
+
+
+def stop_legacy(run=None) -> str | None:
+    """Disable and stop the legacy timer and its service through the user manager. Returns an error
+    text, or None (also when there is no systemctl or SWARM_NO_SYSTEMD is set: nothing to stop)."""
+    run = run or subprocess.run
+    if _disabled() or shutil.which("systemctl") is None:
+        return None
+    for command in (["systemctl", "--user", "disable", "--now", LEGACY_TIMER],
+                    ["systemctl", "--user", "stop", LEGACY_SERVICE]):
         try:
             result = run(command, capture_output=True, text=True, timeout=20, env=manager_env())
         except (OSError, subprocess.SubprocessError) as exc:
-            return Step("supervisor", "failed", f"`{' '.join(command)}`: {type(exc).__name__}")
-        if result.returncode != 0:
+            return f"`{' '.join(command)}`: {type(exc).__name__}"
+        if result.returncode != 0 and "not loaded" not in (result.stderr or "").lower() \
+                and "does not exist" not in (result.stderr or "").lower():
             if "bus" in (result.stderr or "").lower():
-                return Step("supervisor", "failed", "no user systemd manager (fix: loginctl enable-linger $USER)")
-            return Step("supervisor", "failed", f"`{' '.join(command)}` exited {result.returncode}")
-    return Step("supervisor", "changed" if changed else "ok", f"{TIMER}: every {minutes} min")
+                return f"`{' '.join(command)}`: no user systemd bus in this shell"
+            return f"`{' '.join(command)}` exited {result.returncode}"
+    return None
 
 
-def timer_state(run=subprocess.run) -> dict:
-    try:
-        result = run(["systemctl", "--user", "show", TIMER, "-p", "ActiveState", "-p", "UnitFileState"],
-                     capture_output=True, text=True, timeout=10, env=manager_env())
-    except (OSError, subprocess.SubprocessError):
-        return {}
-    if result.returncode != 0:
-        return {}
-    return dict(line.split("=", 1) for line in (result.stdout or "").splitlines() if "=" in line)
+def remove_legacy(run=None):
+    """Remove the legacy swarm-supervise timer and service when their files are there: stop and
+    disable them (best effort), delete the files, reload the manager. A Step for bootstrap's output,
+    or None when there was nothing to remove. The files are deleted even when the manager can't be
+    asked (no user bus in this shell): with them gone nothing starts the timer again."""
+    from swarm.bootstrap import Step
+    files = legacy_files()
+    if not files:
+        return None
+    run = run or subprocess.run
+    err = stop_legacy(run)
+    failed = []
+    for path in files:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            failed.append(f"{path}: {type(exc).__name__}")
+    if not _disabled() and shutil.which("systemctl") is not None:
+        try:
+            run(["systemctl", "--user", "daemon-reload"], capture_output=True, text=True, timeout=20,
+                env=manager_env())
+        except (OSError, subprocess.SubprocessError):
+            pass
+    if failed:
+        return Step("legacy timer", "failed", f"could not remove the legacy {LEGACY_TIMER}: "
+                                              f"{'; '.join(failed)}; delete those files by hand")
+    detail = (f"removed the legacy {LEGACY_TIMER} and {LEGACY_SERVICE} (Swarm installs no system timers: "
+              f"the session driver drives jobs)")
+    if err:
+        detail += f"; {err}: it stays loaded until `systemctl --user daemon-reload` or the next login"
+    return Step("legacy timer", "changed", detail)
 
 
 def linger(run=subprocess.run) -> bool | None:

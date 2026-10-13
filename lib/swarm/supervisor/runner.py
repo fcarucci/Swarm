@@ -1122,7 +1122,7 @@ def _kill_switch(cfg: dict, run: dict) -> str | None:
     asked doesn't stop it (the enrol deadline does, if the board stays away)."""
     from swarm.board import open_board
     from swarm.supervisor.settings import off_reason
-    why = off_reason(cfg)
+    why = off_reason(cfg, drive=bool(run.get("launch_id")))   # a drive seat ignores [supervise] enabled
     if why:
         return f"the supervisor is switched off ({why})"
     try:

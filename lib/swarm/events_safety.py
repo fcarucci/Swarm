@@ -107,7 +107,7 @@ def drive_ledgers(cfg: dict) -> DriveLedgers:
 
 
 def driver_stale(led, cfg: dict, now: _dt.datetime) -> bool:
-    """The driver has not completed a pass over this ledger for more than two timer periods."""
+    """The driver has not completed a pass over this ledger for more than two stall periods (2x timer_minutes)."""
     from swarm.supervisor import settings
     try:
         last = led.last_pass or led.activated_at
@@ -120,12 +120,12 @@ def driver_stale(led, cfg: dict, now: _dt.datetime) -> bool:
 def check_job(board, s: dict, js, now: _dt.datetime, drive=None, cfg=None) -> list[Problem]:
     """`drive`: the drive ledgers of this host (drive_ledgers). A drive job gets no waiter-stale, unacked, unread or
     stalled alerts (nobody waits for it; the driver raises DRIVER-STALLED), but one outside check: its driver
-    has not passed for more than two timer periods."""
+    has not passed for more than two stall periods (2x [supervise] timer_minutes)."""
     job, out = js.job, []
     if drive and job in drive:
         if cfg is not None and driver_stale(drive[job], cfg, now):
             out.append(Problem(job, "driver-stalled", "the driver has not passed over this drive job for more "
-                               "than two timer periods (is the supervisor timer running?)"))
+                               "than two stall periods (is the session driver running? `swarm drive run` drives it by hand)"))
         return out
     pending = _pending(board, job)
     old = [e for e in pending if getattr(e, "to", None) in (None, "") or str(e.to).lstrip("@") in

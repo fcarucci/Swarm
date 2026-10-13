@@ -1,6 +1,6 @@
 """`swarm uninstall [--purge] [--dry-run]`: remove what Swarm set up outside the plugin.
 
-Removed: the supervisor's systemd user units (stopped first), the ~/.local/bin launcher when it is
+Removed: a legacy swarm-supervise timer and service (stopped first), the ~/.local/bin launcher when it is
 the one Swarm wrote, ~/.local/share/swarm (venv, bytecode cache, host-only files), the spool path
 Swarm added to Claude's sandbox.filesystem.allowWrite, and the writable roots it added to Codex's
 config.toml (each file backed up first). With --purge also ~/.local/state/swarm (local file
@@ -21,9 +21,9 @@ def _plan(cfg: dict, config: Path, purge: bool) -> list[tuple[str, str, object]]
     from swarm.supervisor import systemd
     out: list[tuple[str, str, object]] = []
     units = systemd.unit_dir()
-    if any((units / n).exists() for n in (systemd.TIMER, systemd.SERVICE)):
-        out.append(("timer", f"stop and disable {systemd.TIMER}", None))
-        for n in (systemd.TIMER, systemd.SERVICE):
+    if any((units / n).exists() for n in (systemd.LEGACY_TIMER, systemd.LEGACY_SERVICE)):
+        out.append(("timer", f"stop and disable the legacy {systemd.LEGACY_TIMER}", None))
+        for n in (systemd.LEGACY_TIMER, systemd.LEGACY_SERVICE):
             if (units / n).exists():
                 out.append(("file", f"remove {units / n}", units / n))
     launcher = paths.launcher_path()
@@ -66,8 +66,8 @@ def _under(path: Path, root: Path) -> bool:
 def _manual_timer_steps() -> str:
     from swarm.supervisor import systemd
     d = systemd.unit_dir()
-    return (f"  systemctl --user disable --now {systemd.TIMER}\n"
-            f"  rm -f {d / systemd.SERVICE} {d / systemd.TIMER}\n"
+    return (f"  systemctl --user disable --now {systemd.LEGACY_TIMER}\n"
+            f"  rm -f {d / systemd.LEGACY_SERVICE} {d / systemd.LEGACY_TIMER}\n"
             "  systemctl --user daemon-reload\n"
             "then run `swarm uninstall` again")
 
@@ -93,11 +93,10 @@ def _writable_roots(codex: Path) -> list:
 def _do(kind: str, target) -> str | None:
     """Carry out one step. Returns an error text, or None."""
     from swarm import codex_config, safefile
-    from swarm.supervisor import switch, systemd
+    from swarm.supervisor import systemd
     try:
         if kind == "timer":
-            msg = switch.stop_timer()
-            return None if "disabled" in msg or "nothing to stop" in msg else msg
+            return systemd.stop_legacy()
         if kind == "file":
             target.unlink(missing_ok=True)
             if target.parent == systemd.unit_dir() and shutil.which("systemctl"):

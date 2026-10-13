@@ -955,20 +955,14 @@ def _move_old_spool(cfg: dict) -> list[Step]:
     return [Step("migrate", "changed" if not skipped else "manual", detail)]
 
 
-def supervisor_step(cfg: dict, config: Path, run=None) -> Step:
-    """Install the user timer when [supervise] is enabled. Skipped on Windows: the supervisor is
-    Linux only (systemd user timers)."""
-    if paths.IS_WINDOWS:
-        return Step("supervisor", "skipped", "not available on Windows (needs a systemd user timer)")
-    import subprocess
-    from swarm.supervisor import settings as st, systemd
-    try:
-        sup = st.settings(cfg)
-    except st.SettingsError as exc:
-        return Step("supervisor", "failed", str(exc))
-    if not sup["enabled"]:
-        return Step("supervisor", "skipped", "off ([supervise] enabled = false)")
-    return systemd.install(config, sup["timer_minutes"], run=run or subprocess.run)
+def legacy_timer_step(run=None) -> Step | None:
+    """Remove the swarm-supervise timer and service an earlier build installed: Swarm
+    installs no system timer (systemd, launchd, Task Scheduler or cron); the session driver drives jobs.
+    A Step when something was removed (or could not be), None when there was nothing to remove."""
+    if paths.IS_WINDOWS:   # no release ever installed a timer there
+        return None
+    from swarm.supervisor import systemd
+    return systemd.remove_legacy(run)
 
 
 def bootstrap(host: str | None, *, config: Path | None = None, stamp: Path | None = None,
@@ -996,8 +990,11 @@ def bootstrap(host: str | None, *, config: Path | None = None, stamp: Path | Non
     except Exception as exc:   # unreadable or not TOML: a failed step (no stamp, a notice), never a traceback
         steps.append(Step("config", "failed", f"can't read {config}: {_error_kind(exc)}; fix it (it is the swarm's "
                           f"config), then start a new session or run `swarm bootstrap`"))
-        for name in ("board", "host", "supervisor", "migrate"):     # each needs the config
+        for name in ("board", "host", "migrate"):     # each needs the config
             steps.append(Step(name, "skipped", "fix the config first"))
+        legacy = legacy_timer_step()   # needs no config: a legacy timer goes either way
+        if legacy is not None:
+            steps.append(legacy)
         write_notices(host, steps)
         return steps
     # by name, never by position: a "local dirs" step may follow the config step
@@ -1008,7 +1005,9 @@ def bootstrap(host: str | None, *, config: Path | None = None, stamp: Path | Non
     steps.append(host_setup(host, cfg, apply_settings=apply_settings))
     if board_step.status in ("ok", "changed"):   # the board is usable: prune old enrolment records too (TZ concern 4)
         _prune_enrolments(cfg)
-    steps.append(supervisor_step(cfg, config))
+    legacy = legacy_timer_step()
+    if legacy is not None:
+        steps.append(legacy)
     if os.environ.get("SWARM_NO_MIGRATE") == "1":
         steps.append(Step("migrate", "skipped", "SWARM_NO_MIGRATE set"))
     else:
@@ -1059,7 +1058,7 @@ def _touch_stamp(stamp: Path) -> None:
 # built by hook_output() from a fixed template, with every step re-validated: a known step name,
 # a to-do status, and a detail of printable ASCII only, bounded in size.
 
-NOTICE_STEPS = ("venv", "local dirs", "launcher", "config", "board", "host", "supervisor", "migrate")
+NOTICE_STEPS = ("venv", "local dirs", "launcher", "config", "board", "host", "legacy timer", "migrate")
 NOTICE_STATUSES = ("manual", "failed", "refused")
 NOTICE_LINE_MAX = 400        # one line of a step's detail (the longest fixed step text fits)
 NOTICE_LINES_MAX = 8
@@ -1263,59 +1262,34 @@ def supervisor_checks(cfg: dict, host: str | None, run=None, which=None) -> list
     if edition.is_directory():   # the directory edition has no supervisor
         return []
     if paths.IS_WINDOWS:
-        return [Check("supervise", True, "not available on Windows (Linux systemd only)")]
-    import datetime as dt
+        return [Check("supervise", True, "not available on Windows (Linux only)")]
     import subprocess
     from swarm.supervisor import settings as st, systemd
     run, which = run or subprocess.run, which or shutil.which
+    # Swarm installs no system timer: one left by an earlier build is a failure
+    out = [Check("legacy timer", False, systemd.LEGACY_FOUND, "swarm upgrade")] if systemd.legacy_files() else []
     try:
         sup = st.settings(cfg)
     except st.SettingsError as exc:
-        return [Check("supervise config", False, str(exc), "fix [supervise] in the swarm config")]
+        return out + [Check("supervise config", False, str(exc), "fix [supervise] in the swarm config")]
     if not sup["enabled"]:
-        return [Check("supervise", True, "off (opt in: `swarm supervise enable`)")]
-    out = [Check("supervise config", True, "valid")]
-    if st.enabled_implied(cfg):
-        out.append(Check("supervise choice", None, "on because this config predates the opt-in (it has no "
-                         "[supervise] enabled); make it explicit", "swarm supervise enable"))
+        return out + [Check("supervise", True, "off ([supervise] enabled = false); drive jobs are driven by the "
+                                               "session driver either way")]
+    out.append(Check("supervise config", True, "valid; `swarm supervise` is a one-shot pass, run by hand"))
     off_file = st.switched_off()
     if off_file is not None:
         out.append(Check("supervise off file", None, f"switched off by {off_file}", f"rm {off_file}"))
     else:
         out.append(Check("supervise off file", True, "absent"))
-    # One place for every supervise check (the containment check included): with no user
-    # systemd manager, the timer can never be active and linger is moot (it only controls whether
-    # that same manager survives logout), so one WARN here replaces what would otherwise be three
-    # contradictory timer/last-run/linger lines for the same root cause.
+    # with no user systemd manager linger is moot (it only controls whether that same manager
+    # survives logout): the containment check's WARN says so once
     scope = _containment_checks(cfg)
     out += scope
-    no_manager = bool(scope) and scope[0].ok is not True
-    if not no_manager:
-        state = systemd.timer_state(run)
-        last = st.load_state().get("last_run_at")
-        age = None
-        if last:
-            try:
-                age = (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(last)).total_seconds() / 60
-            except (TypeError, ValueError):
-                pass
-        active = state.get("ActiveState") == "active" and state.get("UnitFileState") == "enabled"
-        if not state and age is not None and 0 <= age <= 2 * sup["timer_minutes"]:
-            # no user bus from this shell (agent shells lack it): the timer can't be read, but the
-            # last pass ran recently, so the timer is evidently running
-            out.append(Check("supervise timer", True,
-                             "unknown (no user bus from this shell); last run recent"))
-        else:
-            out.append(Check("supervise timer", active,
-                             f"{systemd.TIMER}: {state.get('ActiveState', '?')}/{state.get('UnitFileState', '?')}",
-                             f"swarm bootstrap, or systemctl --user enable --now {systemd.TIMER}"))
-        fresh = age is not None and 0 <= age <= 3 * sup["timer_minutes"]
-        out.append(Check("supervise last run", fresh, "never" if age is None else f"{age:.0f} min ago",
-                         "journalctl --user -u swarm-supervise.service -n 50"))
+    if not (bool(scope) and scope[0].ok is not True):
         linger = systemd.linger(run)
         out.append(Check("linger", True if linger else None,
                          {True: "yes", False: "no", None: "unknown"}[linger]
-                         + ("" if linger else ": user timers stop when you log out"),
+                         + ("" if linger else ": replacement sessions stop when you log out"),
                          "loginctl enable-linger $USER (may need root)"))
     exposed = st.codex_exposure()
     out.append(Check("supervise private dir", not exposed,
@@ -1328,8 +1302,7 @@ def supervisor_checks(cfg: dict, host: str | None, run=None, which=None) -> list
                      "allowed_workdirs: " + ", ".join(sup["allowed_workdirs"])
                      + ("" if any(w.is_dir() for w in wds) else " (none exists: every restart will be refused)"),
                      "set [supervise] allowed_workdirs to the directories your jobs run in"))
-    path = systemd.service_path()
-    found = {h: which(sup[f"{h}_bin"], path=path) for h in ("claude", "codex")}
+    found = {h: which(sup[f"{h}_bin"]) for h in ("claude", "codex")}
     # The harness of the user running doctor: --host (or the session doctor runs in), else
     # the harnesses whose hooks ran for this user, else whichever is installed
     hs = [host] if host else [h for h in ("claude", "codex") if _hooks_ran(h)] or \
@@ -1472,7 +1445,7 @@ def _containment_checks(cfg: dict) -> list[Check]:
     return [Check("replacement scope", None,
                   "no systemd user manager: auto-restart inactive until loginctl enable-linger "
                   "$USER (each replacement runs in its own systemd scope)",
-                  "loginctl enable-linger $USER, so the user manager (and the supervisor timer) always runs")]
+                  "loginctl enable-linger $USER, so the user manager always runs")]
 
 
 def _claude_checks(plugins_dir: Path) -> list[Check]:

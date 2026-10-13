@@ -138,10 +138,10 @@ DEFAULTS = {
     # re-captured every snapshot_minutes; one over max_mb compressed keeps its head and tail.
     "transcripts": {"enabled": False, "retention_days": 30, "max_total_mb": 2048,
                     "snapshot_minutes": 15, "max_mb": 50},
-    # The supervisor (swarm.supervisor): closes stuck agents and restarts them headless. Off by
-    # default (opt in: `swarm supervise enable`); an install whose timer is already there and whose
-    # config never set `enabled` keeps it on. Every key and its default is in
-    # swarm/supervisor/settings.py (DEFAULTS).
+    # The supervisor (swarm.supervisor): closes stuck agents and restarts them headless. Off unless
+    # [supervise] enabled = true (a missing key is off). No system timer runs it: drive jobs are
+    # driven by the session driver, `swarm supervise` is a one-shot pass. Every key and its default
+    # is in swarm/supervisor/settings.py (DEFAULTS).
     "supervise": {},
     # External events (swarm.events_listener): `swarm events serve` is an HTTP listener that plugins'
     # event sources feed; off by default. [events.sources.<name>] holds a source's own settings.
@@ -212,10 +212,6 @@ def load_config(path: Path = DEFAULT_CONFIG) -> dict:
             user = tomllib.load(fh)
         for section, values in user.items():
             cfg.setdefault(section, {}).update(values)
-        if "enabled" not in (user.get("supervise") if isinstance(user.get("supervise"), dict) else {}):
-            # an install from before the supervisor became opt-in: if its timer is installed it
-            # stays on (swarm.supervisor.settings decides; `swarm doctor` says to set it explicitly)
-            cfg["_supervise_unset"] = True
         for key in implicit_legacy_database_keys(user):
             cfg["database"][key] = LEGACY_DATABASE_DEFAULTS[key]
         db = user.get("database")
@@ -309,8 +305,9 @@ def cmd_init(cfg: dict, args) -> int:
     print(f"schema ready; name pool: {result.pool}")
     for note in ci_migrate.migrate_team_config(config):
         print(note)
-    step = bootstrap.supervisor_step(cfg, config)
-    print(f"supervisor: {step.status}: {step.detail}")
+    step = bootstrap.legacy_timer_step()
+    if step is not None:
+        print(f"{step.name}: {step.status}: {step.detail}")
     setup += [bootstrap.host_setup(h, cfg, apply_settings=apply) for h in _init_hosts(args, existing)]
     print(bootstrap.format_steps(setup, _use_color(args)))
     print(f"setup done: launcher, config and board are in place (venv: {paths.venv_dir()})")
@@ -2696,8 +2693,8 @@ def _parser() -> argparse.ArgumentParser:
     mg = sub.add_parser("migrate", help="remove the old ~/.claude/skills/swarm install (hooks in settings.json, the directory)")
     mg.add_argument("--force", action="store_true")
     mg.add_argument("--no-color", action="store_true")
-    sv = sub.add_parser("supervise", help="close stuck agents and restart them headless (one pass; "
-                                          "the systemd timer runs it; [supervise] enabled)")
+    sv = sub.add_parser("supervise", help="close stuck agents and restart them headless: one pass, run by "
+                                          "hand ([supervise] enabled); no timer runs it")
     sv.add_argument("--dry-run", action="store_true", help="print what it would do; change nothing")
     sv.add_argument("--job", help="only this job")
     svs = sv.add_subparsers(dest="scmd")
@@ -2705,14 +2702,11 @@ def _parser() -> argparse.ArgumentParser:
                                           ".claude/hooks, .mcp.json, .codex, ...) for supervisor launches; "
                                           "interactive only")
     sva.add_argument("dir", help="the work dir whose current project configuration files you approve")
-    svs.add_parser("enable", help="turn the supervisor on: [supervise] enabled = true in the config, "
-                                  "and install and start the systemd user timer")
-    svs.add_parser("disable", help="turn the supervisor off: [supervise] enabled = false, and stop the timer")
     svi = svs.add_parser("seat-isolation", help="drive seats' jail on this host: show it, or (a person at a "
                                                 "terminal) turn it off or back on")
     svi.add_argument("state", nargs="?", choices=["on", "off"])
-    un = sub.add_parser("uninstall", help="remove what Swarm set up outside the plugin: the supervisor "
-                                          "timer, the launcher, the venv and caches, and the settings "
+    un = sub.add_parser("uninstall", help="remove what Swarm set up outside the plugin: a legacy "
+                                          "supervisor timer, the launcher, the venv and caches, and the settings "
                                           "entries it added (then remove the plugin with the host)")
     un.add_argument("--purge", action="store_true",
                     help="also remove ~/.local/state/swarm (local boards, markers) and this config file")
@@ -3486,9 +3480,6 @@ def _cmd_supervise(cfg: dict, args) -> int:
     if getattr(args, "scmd", None) == "seat-isolation":
         from swarm.supervisor import seathome
         return seathome.cmd_seat_isolation(cfg, args)
-    if getattr(args, "scmd", None) in ("enable", "disable"):
-        from swarm.supervisor.switch import cmd_switch
-        return cmd_switch(cfg, args)
     from swarm.supervisor.command import cmd_supervise
     return cmd_supervise(cfg, args)
 

@@ -1625,7 +1625,7 @@ def _supervise_off(board, cfg: dict, job: str) -> str | None:
     """Why no replacement may join now (a kill switch: [supervise] enabled, supervise.off, the
     job's --no-supervise), or None."""
     from swarm.supervisor.settings import off_reason
-    why = off_reason(cfg)
+    why = off_reason(cfg, drive=_drive_job(cfg, job))   # a drive seat ignores [supervise] enabled
     if why:
         return why
     js = board.job_status(job)
