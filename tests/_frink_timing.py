@@ -35,7 +35,15 @@ def main():
             elif type(t).__name__ != "PostgresFollowRecoveryTests": kept.addTest(t)
         return kept
     loader = unittest.TestLoader()
-    suite = loader.loadTestsFromNames(mods) if mods else loader.discover(".", pattern="test_*.py")
+    if mods:
+        suite = unittest.TestSuite()
+        for name in mods:
+            try:
+                suite.addTest(loader.loadTestsFromName(name))
+            except unittest.SkipTest:          # a module skipped as a whole (POSIX-only), as discover does
+                pass
+    else:
+        suite = loader.discover(".", pattern="test_*.py")
     suite = drop_stall(suite)
     rows = []
     global R
