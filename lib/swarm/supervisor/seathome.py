@@ -241,8 +241,13 @@ def client_scripts(platform: str | None = None, python: str | None = None) -> di
 
 
 def _read_person(path: Path) -> bytes | None:
+    """A regular file of the person's (or a seat's .git file), read without following a link: O_NOFOLLOW where the
+    platform has it; on Windows (no O_NOFOLLOW) an explicit link check first, and the open refused if that fails."""
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        if not nofollow and os.path.islink(path):
+            return None
+        fd = os.open(path, os.O_RDONLY | nofollow | getattr(os, "O_BINARY", 0))
     except OSError:
         return None
     try:
@@ -492,7 +497,7 @@ def jail_spec(cfg: dict, seat_home: Path, workdir: str | None, home: Path | None
             binds.append([p, p, "ro"])
     cover = [p for p in pinned_paths(cfg) + _list(cfg, "seat_cover_paths") if not _under(p, h)]
     return {"home": h, "home_base": f"{sh}/home", "tmp": f"{sh}/tmp", "binds": binds, "cover": cover,
-            "runtime_dir": f"/run/user/{os.getuid()}", "cwd": workdir or h,
+            "runtime_dir": f"/run/user/{os.getuid()}" if hasattr(os, "getuid") else None, "cwd": workdir or h,
             "path_prepend": [f"{h}/.swarm-seat/bin"],
             "env": {"GIT_CONFIG_GLOBAL": f"{h}/.gitconfig", "GIT_SSH_COMMAND": f"ssh -F {h}/.ssh/config",
                     "SWARM_SEAT_BROKER": f"{h}/.swarm-seat/broker", **_jail_git_overrides(h),
