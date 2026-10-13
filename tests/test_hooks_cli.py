@@ -115,7 +115,7 @@ class CliTests(Env):
         rc, out, _ = self.cli("init", "--no-hooks")
         self.assertEqual(rc, 0)
         self.assertRegex(out, r"^schema ready; name pool: \{'simpsons': \d+, 'english': \d+\}\n")
-        self.assertRegex(out, r"supervisor: skipped: (SWARM_NO_SYSTEMD set|not available on Windows[^\n]*)\n")
+        self.assertNotIn("supervisor", out)          # init installs no supervisor timer, so it reports none
         self.assertFalse((Path(os.environ["HOME"]) / "settings.json").exists())
 
     def fresh(self):
