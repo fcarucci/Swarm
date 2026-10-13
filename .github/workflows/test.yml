@@ -17,7 +17,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: {python-version: "3.13", cache: pip}
       - run: pip install -r requirements.txt -r requirements-postgres.txt
-      - name: timed shard (modules i::3, test_drive_session_driver excluded: measured separately)
+      - name: timed shard, modules i mod 3, session driver excluded
         env:
           PYTHONUTF8: "1"
           SWARM_TEST_BACKEND: ${{ matrix.backend }}
