@@ -691,6 +691,7 @@ class MemoryIdle(Home):
 
 # --- the end-to-end proof --------------------------------------------------------------------------------
 
+@unittest.skipIf(sys.platform == "win32", "drive seats on Windows arrive in 0.3.1")
 class IdleOrchestratorEndToEnd(unittest.TestCase):
     """A real drive job (artifact recipe) on a sqlite board: `swarm activate`, then nothing but the session
     driver. The orchestrating session is an idle child process that never makes a hook call; seats are launched

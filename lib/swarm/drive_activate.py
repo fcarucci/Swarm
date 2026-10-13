@@ -181,6 +181,10 @@ def driver_problem(cfg: dict) -> str | None:
     """Why a drive job cannot be activated on this host, or None. Spec 3.11 [T21]: no timer is needed or
     installed, on any platform; the session driver drives the job. Only the kill switch (`supervise.off`)
     refuses: every driver exits while it exists, so the job would never move."""
+    from swarm import compat
+    unsupported = compat.drive_unsupported()
+    if unsupported:
+        return f"{unsupported}; {NO_DRIVE_HINT}"
     off = sup_settings.switched_off()
     if off is not None:
         return f"the supervisor is switched off ({off} exists): remove it first, or {NO_DRIVE_HINT}"

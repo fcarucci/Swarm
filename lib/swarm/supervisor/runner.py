@@ -894,6 +894,10 @@ def _seat_argv(cfg: dict, run: dict) -> tuple[list, str | None]:
     argv = list(run["argv"])
     if not run.get("launch_id"):
         return argv, None
+    from swarm import compat
+    unsupported = compat.drive_unsupported()
+    if unsupported:
+        return argv, unsupported            # a drive seat is never launched where drive mode is unsupported
     from swarm.supervisor import seathome
     seat = str(run.get("seat") or run["name"])
     try:

@@ -54,6 +54,13 @@ LIB = ROOT / "lib"
 if str(LIB) not in sys.path:
     sys.path.insert(0, str(LIB))
 
+if sys.platform == "win32":
+    # 0.3.0 refuses drive mode on Windows (compat.drive_unsupported); the in-process drive suites still exercise
+    # the platform-neutral driver code there. test_drive_platform checks the refusal itself.
+    from swarm import compat as _compat
+    _compat.REAL_DRIVE_UNSUPPORTED = _compat.drive_unsupported
+    _compat.drive_unsupported = lambda: None
+
 from swarm import cli as swarm  # noqa: E402
 from swarm.board import open_board, setup_board  # noqa: E402
 

@@ -34,6 +34,12 @@ def tmpdir(test) -> Path:
     return d
 
 
+
+def setUpModule():
+    if sys.platform == "win32":
+        from swarm import compat
+        raise unittest.SkipTest(compat.WINDOWS_DRIVE_REFUSAL)
+
 class ScrubEnvTest(unittest.TestCase):
     def test_only_the_allowlist_passes(self):
         env = {"PATH": "/bin", "HOME": "/h", "LANG": "C", "LC_ALL": "C", "SSH_AUTH_SOCK": "/s", "GH_TOKEN": "x",

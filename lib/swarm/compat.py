@@ -26,6 +26,13 @@ import sys
 
 IS_WINDOWS = sys.platform == "win32"
 HAS_MODES = not IS_WINDOWS
+# 0.3.0: drive seats are not supported on Windows yet (activation and seat launch refuse; plain jobs work).
+WINDOWS_DRIVE_REFUSAL = "drive seats on Windows arrive in 0.3.1; drive mode works on Linux and macOS"
+
+
+def drive_unsupported() -> str | None:
+    """Why drive mode cannot run on this host's platform, or None."""
+    return WINDOWS_DRIVE_REFUSAL if IS_WINDOWS else None
 
 
 class Unsupported(RuntimeError):
