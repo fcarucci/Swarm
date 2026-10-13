@@ -329,17 +329,13 @@ class SuperviseTests(SuperviseEnv):
             self.supervise()
         self.assertEqual([c.args[3].job for c in decide.call_args_list if c.args[3].job == "J"], [])
 
-    def test_job_with_unreachable_verdict_is_not_restarted(self):
-        self.h.update_job("J", verdict="unreachable")
-        self.supervise()
-        self.assertEqual(self.started, [])
-        self.assertIsNone(self.agent("orig").left_reason)
-
-    def test_job_with_met_verdict_is_not_restarted(self):
-        self.h.update_job("J", verdict="met")
-        self.supervise()
-        self.assertEqual(self.started, [])
-        self.assertIsNone(self.agent("orig").left_reason)
+    def test_job_with_a_verdict_is_not_restarted(self):
+        for verdict in ("met", "unreachable"):
+            with self.subTest(verdict):
+                self.h.update_job("J", verdict=verdict)
+                self.supervise()
+                self.assertEqual(self.started, [])
+                self.assertIsNone(self.agent("orig").left_reason)
 
     def test_cli_entry(self):
         rc, out, err = self.cli("supervise", "--dry-run")
@@ -923,18 +919,13 @@ class SuperviseTests(SuperviseEnv):
             return b.job_status("J").waiting_on
 
     def test_wait_flag_cleared_when_the_job_gets_a_verdict(self):
-        self._flagged()
-        self.h.update_job("J", verdict="met")
-        self.supervise()
-        self.assertEqual(self.started, [])
-        self.assertIsNone(self.waiting())
-
-    def test_wait_flag_cleared_when_the_job_gets_an_unreachable_verdict(self):
-        self._flagged()
-        self.h.update_job("J", verdict="unreachable")
-        self.supervise()
-        self.assertEqual(self.started, [])
-        self.assertIsNone(self.waiting())
+        for verdict in ("met", "unreachable"):
+            with self.subTest(verdict):
+                self._flagged()
+                self.h.update_job("J", verdict=verdict)
+                self.supervise()
+                self.assertEqual(self.started, [])
+                self.assertIsNone(self.waiting())
 
     def test_wait_flag_cleared_when_the_name_is_taken_again(self):
         self._flagged()

@@ -486,27 +486,24 @@ class ColorTests(TranscriptEnv):
             b.save_transcript(self.marge_row)
         self.assertGreater(self.marge_row.redactions, 0)   # sanity: the fake AWS key was redacted
 
-    def test_show_default_is_uncolored(self):
-        rc, out, _ = self.cli("transcript", "show", "--job", "J1", "--agent", "Homer Simpson")
-        self.assertEqual(rc, 0)
-        self.assertNotIn("\033[", out)
+    def test_color_precedence_default_and_no_color_are_uncolored(self):
+        show = ("transcript", "show", "--job", "J1", "--agent", "Homer Simpson")
+        cases = (("show default", show, {}),
+                 ("show --no-color overrides --color always", show + ("--color", "always", "--no-color"), {}),
+                 ("show NO_COLOR env overrides --color always", show + ("--color", "always"), {"NO_COLOR": "1"}),
+                 ("list default", ("transcript", "list"), {}),
+                 ("list --no-color overrides --color always",
+                  ("transcript", "list", "--color", "always", "--no-color"), {}))
+        for name, argv, env in cases:
+            with self.subTest(name), mock.patch.dict("os.environ", env):
+                rc, out, _ = self.cli(*argv)
+                self.assertEqual(rc, 0)
+                self.assertNotIn("\033[", out)
 
     def test_show_color_always_adds_codes(self):
         rc, out, _ = self.cli("transcript", "show", "--job", "J1", "--agent", "Homer Simpson", "--color", "always")
         self.assertEqual(rc, 0)
         self.assertIn("\033[1;34muser\033[0m", out)
-
-    def test_show_no_color_overrides_color_always(self):
-        rc, out, _ = self.cli("transcript", "show", "--job", "J1", "--agent", "Homer Simpson",
-                              "--color", "always", "--no-color")
-        self.assertEqual(rc, 0)
-        self.assertNotIn("\033[", out)
-
-    def test_show_no_color_env_overrides_color_always(self):
-        with mock.patch.dict("os.environ", {"NO_COLOR": "1"}):
-            rc, out, _ = self.cli("transcript", "show", "--job", "J1", "--agent", "Homer Simpson", "--color", "always")
-        self.assertEqual(rc, 0)
-        self.assertNotIn("\033[", out)
 
     def test_show_jsonl_is_never_colored(self):
         rc, out, _ = self.cli("transcript", "show", "--job", "J1", "--agent", "Homer Simpson",
@@ -521,11 +518,6 @@ class ColorTests(TranscriptEnv):
         self.assertEqual(rc, 0)
         self.assertNotIn("\033[", path.read_text())
 
-    def test_list_default_is_uncolored(self):
-        rc, out, _ = self.cli("transcript", "list")
-        self.assertEqual(rc, 0)
-        self.assertNotIn("\033[", out)
-
     def test_list_color_always_bolds_header_and_paints_columns(self):
         rc, out, _ = self.cli("transcript", "list", "--color", "always")
         self.assertEqual(rc, 0)
@@ -534,11 +526,6 @@ class ColorTests(TranscriptEnv):
         self.assertIn("\033[35mcodex", out)                 # HOST: codex (cell is padded before the reset)
         self.assertIn(f"\033[33m{self.marge_row.redactions}", out)   # REDACTED > 0, yellow
         self.assertIn("\033[32myes", out)                    # FINAL: yes, green
-
-    def test_list_no_color_overrides_color_always(self):
-        rc, out, _ = self.cli("transcript", "list", "--color", "always", "--no-color")
-        self.assertEqual(rc, 0)
-        self.assertNotIn("\033[", out)
 
     def test_list_alignment_unaffected_by_color(self):
         """Column widths come from the plain text either way, so a coloured and an uncoloured run

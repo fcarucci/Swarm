@@ -92,6 +92,12 @@ class BgContract:
         clean = self.b.bg_start("J", "k-homer", self.homer, "true", **start_kw())
         self.b.bg_end(clean, "exited", 0)
         self.assertFalse(self.b.bg_end(clean, "reaped", None, "x", signalled_at=signalled))   # not a signal exit
+        # a signal exit recorded before the reap signalled is not claimed by it
+        early = self.b.bg_start("J", "k-homer", self.homer, "x", **start_kw())
+        self.b.bg_end(early, "exited", 143)
+        later = self.b.now() + dt.timedelta(seconds=5)
+        self.assertFalse(self.b.bg_end(early, "reaped", None, "late", signalled_at=later))
+        self.assertEqual([c.outcome for c in self.b.bg_commands("J") if c.id == early], ["exited"])
 
     def test_checks_refuse_bad_rows(self):
         with self.assertRaises(ValueError):
@@ -565,17 +571,6 @@ class LiveWrapperReapTests(SqliteBoardDir, unittest.TestCase):
         self.assertEqual(p.wait(20), 137)
         (r,) = self.rows()
         self.assertEqual((r.outcome, r.exit_code), ("killed", 137))
-
-    def test_a_signal_exit_before_the_reap_is_not_claimed(self):
-        with self.board() as b:
-            bid = b.bg_start("J", "k1", self.name, "x", host="h", boot=None, pid=1, pgid=1, proc_start=1, tag="t")
-            b.bg_end(bid, "exited", 143)
-            later = b.now() + dt.timedelta(seconds=5)
-            self.assertFalse(b.bg_end(bid, "reaped", None, "late", signalled_at=later))
-            self.assertEqual(b.bg_commands("J")[0].outcome, "exited")
-            bid2 = b.bg_start("J", "k1", self.name, "y", host="h", boot=None, pid=1, pgid=1, proc_start=1, tag="t")
-            b.bg_end(bid2, "exited", 0)
-            self.assertFalse(b.bg_end(bid2, "reaped", None, "x", signalled_at=b.now() - dt.timedelta(seconds=5)))
 
 
 @unittest.skipUnless(LINUX, "the launcher test runs bin/swarm (POSIX sh)")

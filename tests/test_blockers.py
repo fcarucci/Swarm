@@ -118,12 +118,6 @@ class BlockerContract:
         self.b.set_waiting("j", None)
         self.assertEqual([b.id for b in self.b.blockers("j")], [a.id])
 
-    def test_unbounded_blocker_protects_goal_stall_and_orphan(self):
-        self.h.backdate_job("j", created_at=86400, activated_at=86400)
-        self.b.open_blocker("j", "question", "human", "choose")
-        self.assertEqual(self.b.sweep_expiry(1, 1, goal_stall_hours=1), [])
-        self.assertEqual(self.b.job_status("j").status, "active")
-
     def test_protection_depends_on_kind_addressee_and_deadline(self):
         now = self.b.now()
         for i, (kind, addressee, offset, protected) in enumerate(
@@ -187,8 +181,12 @@ class BlockerContract:
             self.assertEqual(self.b.job_status(job).protected_blockers, 0)
             self.assertTrue(self.b.close_job(job, 'failed', 'stall', guard=CloseGuard(False, 'ship')))
 
-    def test_overdue_question_still_protects_goal_stall(self):
+    def test_unbounded_and_overdue_questions_protect_goal_stall_and_orphan(self):
         self.h.backdate_job("j", created_at=86400, activated_at=86400)
+        unbounded = self.b.open_blocker("j", "question", "human", "choose")
+        self.assertEqual(self.b.sweep_expiry(1, 1, goal_stall_hours=1), [])
+        self.assertEqual(self.b.job_status("j").status, "active")
+        self.assertTrue(self.b.resolve_blocker(unbounded.id, "blue", actor="human"))   # the overdue one alone below
         with mock.patch.object(self.b, "now", return_value=NOW):
             question = self.b.open_blocker(
                 "j", "question", "human", "choose", until=NOW - dt.timedelta(hours=2)

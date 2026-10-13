@@ -42,19 +42,20 @@ class WatcherConfigTests(unittest.TestCase):
         self.database = ('[database]\nhost = "pooler.example"\nport = 5432\nuser = "board"\n'
                          'dbname = "board-db"\npassword_env_file = "/secrets/board.env"\n')
 
-    def test_missing_section_is_the_swarm_connection(self):
+    def test_missing_or_empty_section_is_the_swarm_connection(self):
         cfg = swarm.load_config(_write(self.tmp, self.database))
         self.assertEqual(swarm.watcher_config(cfg)["database"], cfg["database"])
         self.assertIsNone(swarm.watcher_db_label(cfg))
-
-    def test_empty_section_is_the_swarm_connection(self):
+        # an empty section, or one whose values are all empty, falls back the same way
         cfg = swarm.load_config(_write(self.tmp, self.database + "[watch_database]\n"))
         self.assertEqual(swarm.watcher_config(cfg)["database"], cfg["database"])
         self.assertIsNone(swarm.watcher_db_label(cfg))
-
-    def test_empty_values_fall_back(self):
         cfg = swarm.load_config(_write(self.tmp, self.database
                                        + '[watch_database]\nhost = ""\npassword_env_file = ""\n'))
+        self.assertEqual(swarm.watcher_config(cfg)["database"], cfg["database"])
+        # the defaults document the section
+        cfg = swarm.load_config(Path("/nonexistent/swarm.toml"))
+        self.assertEqual(cfg["watch_database"], {})
         self.assertEqual(swarm.watcher_config(cfg)["database"], cfg["database"])
 
     def test_partial_override_merges_per_key(self):
@@ -100,11 +101,6 @@ class WatcherConfigTests(unittest.TestCase):
         cfg = swarm.load_config(_write(self.tmp, self.database + '[board]\nbackend = "sqlite"\n'
                                        + '[watch_database]\nhost = "primary.example"\n'))
         self.assertIsNone(swarm.watcher_db_label(cfg))
-
-    def test_defaults_document_the_section(self):
-        cfg = swarm.load_config(Path("/nonexistent/swarm.toml"))
-        self.assertEqual(cfg["watch_database"], {})
-        self.assertEqual(swarm.watcher_config(cfg)["database"], cfg["database"])
 
 
 class DefaultPathsTests(unittest.TestCase):

@@ -111,8 +111,6 @@ class DetailsContract:
         self.assertIsNone(self.b.verdict_details("j"))
         self.assertTrue(self.b.record_verdict("j", self.judge, "met", "again", None, "a", "fresh"))
         self.assertEqual(self.b.verdict_details("j").details, "fresh")
-
-    def test_record_verdict_is_a_write_method(self):
         from swarm.board.base import WRITE_METHODS
         self.assertIn("record_verdict", WRITE_METHODS)
 

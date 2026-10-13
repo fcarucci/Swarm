@@ -74,13 +74,6 @@ class CiWaitGuardTests(BgHookEnv):
                     "gh api repos/o/r/pulls", "ls"):
             self.assertIsNone(self.denied(self.bash("w1", cmd)), cmd)
 
-    def test_poll_loops_and_watch_flags_are_refused(self):
-        for cmd in ("while true; do gh run view 1 --json status; sleep 60; done",
-                    'until [ "$(gh run list -L1 --json status -q .[0].status)" = completed ]; do sleep 30; done',
-                    "watch -n 60 gh run list", "gh pr checks 7 --watch",
-                    "for i in 1 2 3; do gh api repos/o/r/actions/runs; sleep 9; done"):
-            self.assertIsNotNone(self.denied(self.bash("w1", cmd)), cmd)
-
     def test_the_orchestrator_is_not_gated(self):
         out = self.hook("turn", agent_id=None, session="sess-1", tool_name="Bash",
                         tool_input={"command": "gh run watch 1"}, transcript_path=self.main_transcript())
@@ -124,7 +117,11 @@ class CiWaitShellguardTests(BgHookEnv):
         for cmd in ("while gh run view 1 --json status | grep -q in_progress; do sleep 30; done",
                     "until gh run view 1 --exit-status; do sleep 30; done",
                     "while ! gh run view 1 --json conclusion -q .conclusion | grep -q success; do sleep 9; done",
-                    "until ! gh api repos/o/r/actions/runs/5 >/dev/null; do :; done"):
+                    "until ! gh api repos/o/r/actions/runs/5 >/dev/null; do :; done",
+                    "while true; do gh run view 1 --json status; sleep 60; done",
+                    'until [ "$(gh run list -L1 --json status -q .[0].status)" = completed ]; do sleep 30; done',
+                    "watch -n 60 gh run list", "gh pr checks 7 --watch",
+                    "for i in 1 2 3; do gh api repos/o/r/actions/runs; sleep 9; done"):
             self.assertIsNotNone(shellguard.ci_wait(cmd), cmd)
             self.assertIsNotNone(self.denied(self.bash("w1", cmd)), cmd)
 

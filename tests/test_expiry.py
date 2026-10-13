@@ -723,7 +723,10 @@ class ExpiryCliTests(Env):
         self.assertIn("job        P  [idle]", self.cli("status", "--job", "P", "--no-color")[1])
         self.assertIn("waiting (goal not met)", self.frame())              # watch: all jobs
         self.assertIn("[waiting (goal not met)]", self.frame("G"))         # watch --job
-        self.assertIn("G [waiting (goal not met)]", self.frame(compact=True))
+        compact = self.frame(compact=True)
+        self.assertIn("G [waiting (goal not met)]", compact)
+        self.assertIn("P [idle]", compact)                                 # the stored status "active" is derived
+        self.assertNotIn("P [active]", compact)
         self.cli("purge")
         self.assertEqual(self.job("G").status, "active")                    # shown as waiting, never closed
         # an agent joining takes it out of waiting
@@ -731,17 +734,6 @@ class ExpiryCliTests(Env):
             b.allocate_name("newcomer", "G")
         self.assertRegex(next(ln for ln in self.cli("status", "--no-color")[1].splitlines() if ln.startswith("G ")),
                          r"^G\s+active\s")
-
-    def test_compact_watch_shows_the_shared_derived_word_for_every_job(self):
-        self.activate("G", "--no-drive", "--reason", "legacy goal test", "--goal", "ship it")
-        self.activate("P")                             # no goal, idle since 10 minutes: stored status "active"
-        self.age("G", 2 * HOUR)
-        self.age("P", 10 * MIN)
-        self.assertIn("[idle]", self.cli("status", "--job", "P", "--no-color")[1])   # status derives it
-        compact = self.frame(compact=True)
-        self.assertIn("G [waiting (goal not met)]", compact)
-        self.assertIn("P [idle]", compact)
-        self.assertNotIn("P [active]", compact)
 
     def test_wait_for_bounds_the_wait(self):
         self.activate()

@@ -49,35 +49,32 @@ class DefaultTests(_unittest.TestCase):
         d.mkdir(parents=True, exist_ok=True)
         (d / systemd.LEGACY_TIMER).write_text("[Timer]\n")
 
-    def test_off_with_no_config(self):
-        self.assertFalse(st.settings(base_config())["enabled"])
-
-    def test_off_for_a_new_config_written_from_the_example(self):
-        shutil.copyfile(ROOT / "config.example.toml", self.config)   # what bootstrap/init write
-        self.install_timer()                                          # even with a timer around
-        self.assertFalse(st.settings(swarm.load_config(self.config))["enabled"])
-
-    def test_existing_config_without_the_key_is_off(self):
-        # a config from before the opt-in: no key is off (no "implied on"), with or without a legacy timer
-        self.config.write_text('[board]\nbackend = "file"\n')
-        self.assertFalse(st.enabled(swarm.load_config(self.config)))
+    def test_enabled_only_by_an_explicit_true_never_implied_by_a_config_or_a_timer(self):
+        def enabled():
+            return st.settings(swarm.load_config(self.config))["enabled"]
+        # without a timer around (cases that install one come after, the timer stays)
+        with self.subTest("off with no config"):
+            self.assertFalse(st.settings(base_config())["enabled"])
+        with self.subTest("an existing config without the key is off (no implied on)"):
+            self.config.write_text('[board]\nbackend = "file"\n')
+            self.assertFalse(st.enabled(swarm.load_config(self.config)))
+        with self.subTest("explicit true"):
+            self.config.write_text('[supervise]\nenabled = true\n')
+            cfg = swarm.load_config(self.config)
+            self.assertTrue(st.settings(cfg)["enabled"])
         self.install_timer()
-        self.assertFalse(st.settings(swarm.load_config(self.config))["enabled"])
-
-    def test_no_config_file_with_a_timer_is_off(self):
-        # no config file at all is a new machine (bootstrap writes the example, enabled = false)
-        self.install_timer()
-        self.assertFalse(st.settings(swarm.load_config(self.home / "missing.toml"))["enabled"])
-
-    def test_explicit_false_wins_over_an_installed_timer(self):
-        self.config.write_text('[supervise]\nenabled = false\n')
-        self.install_timer()
-        self.assertFalse(st.settings(swarm.load_config(self.config))["enabled"])
-
-    def test_explicit_true(self):
-        self.config.write_text('[supervise]\nenabled = true\n')
-        cfg = swarm.load_config(self.config)
-        self.assertTrue(st.settings(cfg)["enabled"])
+        with self.subTest("a config from the example is off even with a timer around"):
+            shutil.copyfile(ROOT / "config.example.toml", self.config)   # what bootstrap/init write
+            self.assertFalse(enabled())
+        with self.subTest("an existing config without the key is off with a legacy timer"):
+            self.config.write_text('[board]\nbackend = "file"\n')
+            self.assertFalse(enabled())
+        with self.subTest("no config file with a timer is off"):
+            # no config file at all is a new machine (bootstrap writes the example, enabled = false)
+            self.assertFalse(st.settings(swarm.load_config(self.home / "missing.toml"))["enabled"])
+        with self.subTest("explicit false wins over an installed timer"):
+            self.config.write_text('[supervise]\nenabled = false\n')
+            self.assertFalse(enabled())
 
 
 class SafeEnv(Env):

@@ -226,33 +226,24 @@ class ScopeTests(ReceiptCase):
 
 
 class ValidationTests(ReceiptCase):
-    def test_invalid_kind_is_refused_and_nothing_is_written(self):
-        with self.assertRaises(ValueError):
-            receipts.write(BOARD, self.receipt(kind="bogus"))
+    def test_an_invalid_field_is_refused_and_nothing_is_written(self):
+        dest = {"https://example.test/r.git": {"state": "pushed", "sha": "a" * 40}}
+        bad_dest = {"https://example.test/r.git": {"state": "merged", "sha": "a" * 40}}
+        cases = [("kind", dict(kind="bogus")),
+                 ("args_sha", dict(args_sha="not-a-digest")),
+                 ("content_sha", dict(content_sha="x" * 64)),
+                 ("negative generation", dict(generation=-1)),
+                 ("bool is not an integer field", dict(attempt=True)),
+                 ("control characters in record_id", dict(record_id="42\n43")),
+                 ("destination state must be known",
+                  dict(kind="land", record_id="7", destinations=bad_dest,
+                       content_sha=receipts.content_sha("land", {"destinations": bad_dest}))),
+                 ("destinations only on land receipts", dict(kind="done", destinations=dest))]
+        cases += [(f"rev {bad!r} is not a positive integer", dict(rev=bad)) for bad in (0, -1, True, "1")]
+        for name, kw in cases:
+            with self.subTest(name), self.assertRaises(ValueError):
+                receipts.write(BOARD, self.receipt(**kw))
         self.assertIsNone(receipts.find(BOARD, "J", "bogus", "42", rev=1, incarnation=INC, generation=1, now=NOW))
-
-    def test_args_sha_and_content_sha_must_be_64_hex_digits(self):
-        with self.assertRaises(ValueError):
-            receipts.write(BOARD, self.receipt(args_sha="not-a-digest"))
-        with self.assertRaises(ValueError):
-            receipts.write(BOARD, self.receipt(content_sha="x" * 64))
-
-    def test_rev_is_a_positive_integer(self):
-        for bad in (0, -1, True, "1"):
-            with self.subTest(rev=bad), self.assertRaises(ValueError):
-                receipts.write(BOARD, self.receipt(rev=bad))
-
-    def test_negative_generation_is_refused(self):
-        with self.assertRaises(ValueError):
-            receipts.write(BOARD, self.receipt(generation=-1))
-
-    def test_bool_is_not_an_integer_field(self):
-        with self.assertRaises(ValueError):
-            receipts.write(BOARD, self.receipt(attempt=True))
-
-    def test_control_characters_in_record_id_are_refused(self):
-        with self.assertRaises(ValueError):
-            receipts.write(BOARD, self.receipt(record_id="42\n43"))
 
     def test_a_receipt_with_a_different_version_is_not_found(self):
         path = receipts.write(BOARD, self.receipt())
@@ -290,17 +281,6 @@ class ValidationTests(ReceiptCase):
         receipts.write(BOARD, r)
         found = receipts.find(BOARD, "J", "land", "7", rev=1, incarnation=INC, generation=1, now=NOW)
         self.assertEqual(found.destinations, dest)
-
-    def test_destination_state_must_be_known(self):
-        dest = {"https://example.test/r.git": {"state": "merged", "sha": "a" * 40}}
-        with self.assertRaises(ValueError):
-            receipts.write(BOARD, self.receipt(kind="land", record_id="7", destinations=dest,
-                                               content_sha=receipts.content_sha("land", {"destinations": dest})))
-
-    def test_destinations_only_on_land_receipts(self):
-        dest = {"https://example.test/r.git": {"state": "pushed", "sha": "a" * 40}}
-        with self.assertRaises(ValueError):
-            receipts.write(BOARD, self.receipt(kind="done", destinations=dest))
 
 
 if __name__ == "__main__":

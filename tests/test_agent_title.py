@@ -73,12 +73,9 @@ class TitleContract:
         self.assertTrue(self.b.set_agent_title("k", "QA"))
         self.assertTrue(self.b.set_agent_title("k", None))
         self.assertIsNone(self.agent("k").title)
-        self.assertEqual(self.agent("k").role, "engineer")   # the role is another thing
-
-    def test_the_cap_is_applied_by_the_board(self):
-        self.b.allocate_name("k", "j")
-        self.b.set_agent_title("k", "z" * 100)
+        self.b.set_agent_title("k", "z" * 100)      # the cap is applied by the board
         self.assertEqual(self.agent("k").title, "z" * 60)
+        self.assertEqual(self.agent("k").role, "engineer")   # the role is another thing
 
     def test_only_an_active_agent_has_its_title_changed(self):
         self.b.allocate_name("k", "j")
@@ -95,12 +92,11 @@ class TitleContract:
         self.assertEqual(self.b.claim_resume("new", "old", "j"), name)
         self.assertEqual(self.agent("new").title, "Eng: api")
         self.assertEqual(self.agent("old").title, "Eng: api")
-
-    def test_a_replacement_of_an_untitled_agent_has_none(self):
-        self.b.allocate_name("old", "j")
-        self.b.close_agent("old", "stuck:dead")
-        self.b.claim_resume("new", "old", "j")
-        self.assertIsNone(self.agent("new").title)
+        # a replacement of an untitled agent has none
+        self.b.allocate_name("old2", "j")
+        self.b.close_agent("old2", "stuck:dead")
+        self.b.claim_resume("new2", "old2", "j")
+        self.assertIsNone(self.agent("new2").title)
 
     def test_a_revived_agent_keeps_its_title(self):
         self.b.allocate_name("k", "j")
@@ -250,11 +246,9 @@ class TitleCliTests(RoutingEnv):
         self.spawn("e1", "[swarm job: J]\n[swarm role: engineer]\n[swarm title: Eng: board view]\nBuild it.")
         self.assertEqual(self.member("e1").title, "Eng: board view")
         self.assertEqual(self.member("e1").role, "engineer")   # separate from the role
-
-    def test_a_spawn_without_the_tag_has_no_title(self):
-        self.activate("J")
-        self.spawn("e1", "[swarm job: J]\n[swarm role: engineer]\nBuild it.")
-        self.assertIsNone(self.member("e1").title)
+        # a spawn without the tag has no title
+        self.spawn("e2", "[swarm job: J]\n[swarm role: engineer]\nBuild it.")
+        self.assertIsNone(self.member("e2").title)
 
     def test_the_tag_works_without_a_role_and_on_a_job_picked_by_the_tag(self):
         self.activate("A")

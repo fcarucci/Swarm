@@ -87,17 +87,17 @@ class DoctorTests(unittest.TestCase):
         self.assertIs(checks["launcher"].ok, False)
         self.assertIn("swarm bootstrap", checks["launcher"].fix)
 
-    def test_unreachable_board_fails_without_secret(self):
+    def test_unreachable_board_fails_with_a_concrete_fix_and_no_secret_or_config_value(self):
         (self.cfg.parent / "pg.env").write_text("PGPASSWORD=hunter2-secret\n")
-        self.cfg.write_text('[database]\nhost = "db.invalid"\nconnect_timeout = 1\npassword_env_file = "~/.config/swarm/pg.env"\n')
-        checks = bootstrap.doctor("claude", config=self.cfg)
-        self.assertIs(self.by_name(checks)["board"].ok, False)
-        self.assertNotIn("hunter2", bootstrap.format_checks(checks))
-
-    def test_no_config_values_in_output(self):
         self.cfg.write_text('[database]\nhost = "db-host-value.invalid"\nuser = "role-value"\ndbname = "db-name-value"\n'
-                            'connect_timeout = 1\n')
-        text = bootstrap.format_checks(bootstrap.doctor("claude", config=self.cfg))
+                            'connect_timeout = 1\npassword_env_file = "~/.config/swarm/pg.env"\n')
+        checks = bootstrap.doctor("claude", config=self.cfg)
+        c = self.by_name(checks)["board"]
+        self.assertIs(c.ok, False)
+        self.assertIn("swarm status", c.fix)
+        self.assertIn(str(self.cfg), c.fix)
+        text = bootstrap.format_checks(checks)
+        self.assertNotIn("hunter2", text)
         for value in ("db-host-value", "role-value", "db-name-value"):
             self.assertNotIn(value, text)
 
@@ -175,13 +175,6 @@ class DoctorTests(unittest.TestCase):
         self.assertNotRegex(text, r"(?m)^\w+ +board +(schema|unreachable)")                   # needs the config: not run
         for name in ("venv", "launcher", "plugin", "old hooks"):
             self.assertIn(name, text)
-
-    def test_unreachable_board_fix_is_a_concrete_step(self):
-        self.cfg.write_text('[database]\nhost = "db.invalid"\nconnect_timeout = 1\n')
-        c = self.by_name(bootstrap.doctor("claude", config=self.cfg))["board"]
-        self.assertIs(c.ok, False)
-        self.assertIn("swarm status", c.fix)
-        self.assertIn(str(self.cfg), c.fix)
 
     def test_empty_settings_warn_but_missing_is_ok(self):
         s = self.home / ".claude/settings.json"

@@ -71,6 +71,10 @@ class HiddenAgentsCliTests(Env):
         _, out, _ = self.cli("status", "--job", "J")
         self.assert_listed(out, "live", "fresh", absent=("old1", "old2"))
         self.assertTrue(out.endswith("\n(2 older finished agents hidden · --all-agents to show)\n"), out)
+        # one hidden agent reads in the singular
+        self.h.update_agent("old2", left_at=dt.datetime.now(UTC))
+        _, out, _ = self.cli("status", "--job", "J")
+        self.assertIn("(1 older finished agent hidden · --all-agents to show)", out)
 
     def test_status_all_agents_shows_everyone_without_hint(self):
         _, out, _ = self.cli("status", "--job", "J", "--all-agents")
@@ -154,12 +158,6 @@ class HiddenAgentsCliTests(Env):
         with self.board() as b:
             out = swarm.agents_table(b, "J", True, b.now(), 10, "press a to show all")
         self.assertTrue(out.endswith("\n\033[2m(2 older finished agents hidden · press a to show all)\033[0m"))
-
-    def test_singular(self):
-        self.h.update_agent("old2", left_at=dt.datetime.now(UTC))
-        _, out, _ = self.cli("status", "--job", "J")
-        self.assertIn("(1 older finished agent hidden · --all-agents to show)", out)
-
 
 
 class ControlsInTablesTests(Env):

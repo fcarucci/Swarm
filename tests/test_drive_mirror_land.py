@@ -755,15 +755,6 @@ class SshHosts(MirrorCase):
         self.assertEqual(ran, [])
 
 
-class RealTimeout(MirrorCase):
-    @support.posix_only("sleep")
-    def test_a_real_git_timeout_is_a_typed_timeout_error(self):
-        remote, _ = self.remote_with_main()
-        m = Mirror(remote, self.agent_cred())
-        with self.assertRaises(MirrorTimeoutError):
-            m._exec(["sleep", "5"], env={"PATH": "/usr/bin:/bin"}, timeout=0.2)
-
-
 class ToolTimeout(unittest.TestCase):
     @support.posix_only("sleep")
     def test_a_slow_tool_is_a_typed_timeout_and_is_killed(self):

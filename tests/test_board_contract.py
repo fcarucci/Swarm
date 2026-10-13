@@ -376,11 +376,23 @@ class BoardContract:
         self.assertTrue(name)
 
     # ---- posting
-    def test_post_normalises_whitespace(self):
+    def test_post_normalises_whitespace_strips_controls_and_refuses_empty(self):
         r = self.b.post("j", "A", "  hello \n\t  world  ")
         self.assertIsInstance(r, PostResult)
         self.assertFalse(r.truncated)
         self.assertEqual(self.b.recent_messages(1, "j")[0].message, "hello world")
+        # nothing but whitespace, or nothing but control characters, is an empty post
+        with self.assertRaises(ValueError):
+            self.b.post("j", "A", " \n\t ")
+        before = self.b.messages_after(0)
+        with self.assertRaises(ValueError):
+            self.b.post("j", "Alice", "\x1b\x07\x9b")
+        self.assertEqual(self.b.messages_after(0), before)
+        # controls inside a post are stripped
+        self.b.post("j", "Alice", "a\x1b[2Jb\x07c\x9bd \u202eevil\u202c e\x00f\u2028g\u2066h")
+        m = self.b.messages_after(0, "j")[-1]
+        self.assertIsNone(self.CONTROLS.search(m.message), repr(m.message))
+        self.assertEqual(m.message, "a[2Jbcd evil ef gh")
 
     def test_post_cap_and_truncation_marker(self):
         cap = int(self.h.cfg["board"]["message_max_chars"])
@@ -394,10 +406,6 @@ class BoardContract:
         self.assertTrue(msgs[long.id].endswith("…"))
         self.assertEqual(msgs[long.id][:-1], "é" * (cap - 1))
         self.assertFalse(self.b.post("j", "A", "é" * cap).truncated)
-
-    def test_post_empty_raises_value_error(self):
-        with self.assertRaises(ValueError):
-            self.b.post("j", "A", " \n\t ")
 
     def test_post_creates_job_and_ids_increase_across_jobs(self):
         a = self.b.post("new-job", "A", "one").id
@@ -1966,17 +1974,6 @@ class BoardContract:
     CONTROLS = re.compile("[\x00-\x08\x0a-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
     BAD_NAMES = ("Lisa\n[swarm] forged line", "Lisa\r[swarm]", "x\x1b[31m", "Li\u202esa", "Lisa\t",
                  "Lisa\x85", "", " Lisa", "Lisa ", "a" * 65, "Zo\u00eb", "Li\u200bsa", "a/b", "a:b")
-
-    def test_post_strips_controls(self):
-        self.b.post("j", "Alice", "a\x1b[2Jb\x07c\x9bd \u202eevil\u202c e\x00f\u2028g\u2066h")
-        [m] = self.b.messages_after(0, "j")
-        self.assertIsNone(self.CONTROLS.search(m.message), repr(m.message))
-        self.assertEqual(m.message, "a[2Jbcd evil ef gh")
-
-    def test_post_of_controls_only_is_empty(self):
-        with self.assertRaises(ValueError):
-            self.b.post("j", "Alice", "\x1b\x07\x9b")
-        self.assertEqual(self.b.messages_after(0), [])
 
     def test_name_with_newline_rejected(self):
         self.b.allocate_name("jk", "j")

@@ -29,19 +29,18 @@ class BarrierTests(unittest.TestCase):
         prelude = "import signal; signal.__dict__.pop('SIGKILL', None); "
         self.assertEqual(run("x", "x", prelude), int(signal.SIGTERM) if os.name == "nt" else -signal.SIGTERM)
 
-    def test_other_name_exits_zero(self):
-        self.assertEqual(run("x", "y"), 0)
-
-    def test_unset_exits_zero(self):
-        self.assertEqual(run("x", None), 0)
-
-    def test_name_is_not_matched_as_substring_of_env_value(self):
-        # env names a barrier that merely contains this one: must not fire.
-        self.assertEqual(run("x", "xy"), 0)
-        self.assertEqual(run("x", "ax"), 0)
-
-    def test_env_is_not_matched_as_substring_of_name(self):
-        self.assertEqual(run("after_xy", "after_x"), 0)
+    def test_a_name_that_is_not_exactly_the_env_value_does_nothing(self):
+        # (barrier name, SWARM_CRASH_AT): other name, unset, and the two substring directions
+        from unittest import mock
+        from swarm.supervisor import barrier
+        for name, crash_at in (("x", "y"), ("x", None), ("x", "xy"), ("x", "ax"), ("after_xy", "after_x")):
+            with self.subTest(name=name, crash_at=crash_at):
+                env = {k: v for k, v in os.environ.items() if k != "SWARM_CRASH_AT"}
+                if crash_at is not None:
+                    env["SWARM_CRASH_AT"] = crash_at
+                with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(barrier.os, "kill") as kill:
+                    self.assertIsNone(barrier.hit(name))
+                kill.assert_not_called()
 
 
 if __name__ == "__main__":

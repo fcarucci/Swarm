@@ -68,9 +68,19 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(namespace["ROOT"], skill)
         self.assertEqual(namespace["OUT"], skill / "references/refactorings")
 
-    def test_release_archive_ships_refactoring_skill(self):
+    def test_release_archive_ships_the_refactoring_and_complexity_analyzer_skills(self):
         # Match release.yml: git archive applies export-ignore. The root /scripts exclusion
         # must never strip a skill's own scripts or reference/language context files.
+        analyzer = ROOT / "skills/complexity-analyzer"
+        text = (analyzer / "SKILL.md").read_text()
+        self.assertTrue(text.startswith("---\nname: complexity-analyzer\n"))
+        self.assertNotIn("~/.claude/skills/complexity-analyzer", text)
+        self.assertFalse((analyzer / "docs").exists())
+        tracked = subprocess.check_output(["git", "ls-files", "-z"], cwd=ROOT).decode().split("\0")
+        staged = subprocess.check_output(["git", "ls-files", "--stage", "-z"], cwd=ROOT).decode().split("\0")
+        executable = {entry.split("\t", 1)[1] for entry in staged if entry.startswith("100755 ")}
+        for rel in filter(None, tracked):
+            self.assertTrue({"tools", "node_modules"}.isdisjoint(rel.split("/")), rel)
         archive = subprocess.check_output(["git", "archive", "--format=tar", "HEAD"], cwd=ROOT)
         with tarfile.open(fileobj=io.BytesIO(archive)) as packaged:
             for manifest in (".claude-plugin/plugin.json", ".codex-plugin/plugin.json"):
@@ -84,22 +94,6 @@ class ManifestTests(unittest.TestCase):
                         self.assertEqual(packaged.extractfile(rel).read(), path.read_bytes())
                         if path.parent.name == "scripts":
                             self.assertTrue(packaged.getmember(rel).mode & 0o111)
-
-    def test_complexity_analyzer_skill_ships_for_both_hosts(self):
-        skill = ROOT / "skills/complexity-analyzer"
-        text = (skill / "SKILL.md").read_text()
-        self.assertTrue(text.startswith("---\nname: complexity-analyzer\n"))
-        self.assertNotIn("~/.claude/skills/complexity-analyzer", text)
-        self.assertFalse((skill / "docs").exists())
-        tracked = subprocess.check_output(["git", "ls-files", "-z"], cwd=ROOT).decode().split("\0")
-        staged = subprocess.check_output(["git", "ls-files", "--stage", "-z"], cwd=ROOT).decode().split("\0")
-        executable = {entry.split("\t", 1)[1] for entry in staged if entry.startswith("100755 ")}
-        for rel in filter(None, tracked):
-            self.assertTrue({"tools", "node_modules"}.isdisjoint(rel.split("/")), rel)
-        archive = subprocess.check_output(["git", "archive", "--format=tar", "HEAD"], cwd=ROOT)
-        with tarfile.open(fileobj=io.BytesIO(archive)) as packaged:
-            for manifest in (".claude-plugin/plugin.json", ".codex-plugin/plugin.json"):
-                self.assertEqual(json.load(packaged.extractfile(manifest))["name"], "swarm")
             for rel in tracked:
                 if rel.startswith("skills/complexity-analyzer/") and not rel.endswith((".gitignore", ".gitattributes")):
                     self.assertEqual(packaged.extractfile(rel).read().replace(b"\r\n", b"\n"),

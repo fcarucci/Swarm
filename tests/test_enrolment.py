@@ -41,10 +41,6 @@ class Env(unittest.TestCase):
 
 
 class WriteFindTests(Env):
-    def test_original_prompt_round_trip(self):
-        rec = self.enrol(prompt="[swarm job: job-a]\nBuild parser")
-        self.assertEqual(enrolment.find(BOARD,"k1").prompt, rec.prompt)
-
     def test_creation_proof_is_separate_from_coordinator_attachment(self):
         owner = enrolment.write_job_owner(BOARD,job="job-a",harness=None,session_id=None,cwd=self.cwd)
         enrolment.write_job(BOARD,job="job-a",harness="codex",session_id="other",cwd=self.cwd)
@@ -59,6 +55,11 @@ class WriteFindTests(Env):
         self.assertEqual((got.kind, got.board_key, got.job, got.agent_key, got.harness,
                           got.session_id, got.cwd, got.created_at),
                          ("agent", BOARD, "job-a", "k1", "claude", "s-1", self.cwd, 1000.0))
+        # the original prompt is another field of the round trip, and the session id is optional
+        rec = self.enrol("k2", prompt="[swarm job: job-a]\nBuild parser")
+        self.assertEqual(enrolment.find(BOARD, "k2").prompt, rec.prompt)
+        self.enrol("k3", session_id=None)
+        self.assertIsNone(enrolment.find(BOARD, "k3").session_id)
 
     @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_location_and_modes(self):
@@ -98,10 +99,6 @@ class WriteFindTests(Env):
         enrolment.remove(BOARD, "k1")
         enrolment.remove(BOARD, "k1")
         self.assertIsNone(enrolment.find(BOARD, "k1"))
-
-    def test_session_id_optional(self):
-        self.enrol(session_id=None)
-        self.assertIsNone(enrolment.find(BOARD, "k1").session_id)
 
 
 class ValidationTests(Env):
@@ -183,9 +180,6 @@ class JobRecordTests(Env):
         self.assertIsNone(enrolment.find_job(BOARD, "job-b"))
         self.assertIsNone(enrolment.find(BOARD, "job-a"))   # separate namespaces
         self.assertRegex(enrolment.job_record_name(BOARD, "job-a"), r"^job-[0-9a-f]{64}\.json$")
-
-    def test_remove_job(self):
-        enrolment.write_job(BOARD, job="job-a", harness="claude", session_id="s", cwd=self.cwd)
         enrolment.remove_job(BOARD, "job-a")
         self.assertIsNone(enrolment.find_job(BOARD, "job-a"))
 

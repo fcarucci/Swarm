@@ -200,14 +200,10 @@ class PresenceTests(unittest.TestCase):
                 with mock.patch.object(runner, "_systemctl", return_value=None):
                     self.assertEqual(runner.unit_presence(UNIT, slice_name=SLICE), want, text)
 
-    def test_populated_key_must_appear_once_with_0_or_1(self):
-        for text in ("populated 1\npopulated 0\n", "populated 2\nfrozen 0\n", "frozen 0\n", "populated 1 2\n"):
-            with _Tree(scope=(SLICE, UNIT), events=text):
-                with mock.patch.object(runner, "_systemctl", return_value=None):
-                    self.assertEqual(runner.unit_presence(UNIT, slice_name=SLICE), "unknown", text)
-
-    def test_missing_or_unexpected_events_is_unknown(self):
-        for events in (None, "populated maybe\n", "frozen 1\n", ""):
+    def test_a_missing_or_malformed_populated_key_is_unknown(self):
+        # the populated key must appear once with 0 or 1; a missing file or any other text is unknown
+        for events in ("populated 1\npopulated 0\n", "populated 2\nfrozen 0\n", "frozen 0\n", "populated 1 2\n",
+                       None, "populated maybe\n", "frozen 1\n", ""):
             with _Tree(scope=(SLICE, UNIT), events=events):
                 with mock.patch.object(runner, "_systemctl", return_value=None):
                     self.assertEqual(runner.unit_presence(UNIT, slice_name=SLICE), "unknown", events)

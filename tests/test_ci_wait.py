@@ -130,6 +130,8 @@ class FloorAndBackoffTests(Base):
         self.clock.t += 2
         p.poll(REPO, SHA)
         self.assertEqual(host.calls, 2)
+        p.poll("me/other", SHA)      # the floor is per repo: another repo has its own
+        self.assertEqual(host.calls, 3)
 
     def test_queued_backs_off_60_120_300_cap(self):
         host = FakeHost("queued")

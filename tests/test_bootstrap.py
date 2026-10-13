@@ -107,15 +107,20 @@ class BootstrapTests(unittest.TestCase):
         (t / "bin").mkdir(); (t / "bin/swarm").write_text("#!/bin/sh\n")
         return t
 
-    def test_launcher_repointed_from_same_version_other_tree(self):
-        # e.g. a long-lived install: ~/.local/bin/swarm -> ~/src/swarm-release, an old frozen tree that
-        # also says 0.1.0. The version alone must not keep it: this install's tree takes over.
-        frozen = self._tree("swarm-release", paths.plugin_version())
+    def test_launcher_is_repointed_from_a_stale_target(self):
+        # same version, other tree: e.g. a long-lived install, ~/.local/bin/swarm -> ~/src/swarm-release,
+        # an old frozen tree that also says 0.1.0. The version alone must not keep it: this install's
+        # tree takes over. An older tree and a target that is gone are repointed the same way.
+        stale = {"same version, other tree": self._tree("swarm-release", paths.plugin_version()),
+                 "older tree": self._tree("older", "0.1.0"),
+                 "target gone": self.home / "gone"}
         paths.launcher_path().parent.mkdir(parents=True)
-        paths.launcher_path().write_text(bootstrap.LAUNCHER.format(root=frozen))
-        step = bootstrap.ensure_launcher()
-        self.assertEqual(step.status, "changed")
-        self.assertEqual(bootstrap.launcher_target(paths.launcher_path()), paths.PLUGIN_ROOT)
+        for name, root in stale.items():
+            with self.subTest(name):
+                paths.launcher_path().write_text(bootstrap.LAUNCHER.format(root=root))
+                step = bootstrap.ensure_launcher()
+                self.assertEqual(step.status, "changed")
+                self.assertEqual(bootstrap.launcher_target(paths.launcher_path()), paths.PLUGIN_ROOT)
 
     def test_launcher_same_tree_through_symlink_is_ok(self):
         link = self.home / "link-to-plugin"
@@ -124,19 +129,6 @@ class BootstrapTests(unittest.TestCase):
         paths.launcher_path().write_text(bootstrap.LAUNCHER.format(root=link))
         self.assertEqual(bootstrap.ensure_launcher().status, "ok")
         self.assertEqual(bootstrap.launcher_target(paths.launcher_path()), link)
-
-    def test_launcher_repointed_from_older_tree(self):
-        older = self._tree("older", "0.1.0")
-        paths.launcher_path().parent.mkdir(parents=True)
-        paths.launcher_path().write_text(bootstrap.LAUNCHER.format(root=older))
-        self.assertEqual(bootstrap.ensure_launcher().status, "changed")
-        self.assertEqual(bootstrap.launcher_target(paths.launcher_path()), paths.PLUGIN_ROOT)
-
-    def test_launcher_repointed_when_target_gone(self):
-        gone = self.home / "gone"
-        paths.launcher_path().parent.mkdir(parents=True)
-        paths.launcher_path().write_text(bootstrap.LAUNCHER.format(root=gone))
-        self.assertEqual(bootstrap.ensure_launcher().status, "changed")
 
     @posix_only("needs POSIX file modes (Windows has ACLs)")
     def test_missing_config_copied_from_example_and_needs_nothing_filled_in(self):

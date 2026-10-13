@@ -242,40 +242,41 @@ class SqliteBackendTests(unittest.TestCase):
         cols = {r[1] for r in self.h._db().execute("PRAGMA table_info(jobs)")}
         self.assertIn("extra_note", cols)
 
-    def test_a_version_1_board_needs_init_which_adds_closed_by(self):
-        self.b.open_job("j", "d", None, None, "me")
-        self.b.close()
-        db = self.h._db()
-        db.execute("ALTER TABLE jobs DROP COLUMN closed_by")   # as the previous release left it
-        db.execute("PRAGMA user_version = 1")
-        with self.assertRaises(BoardUnavailable) as cm:
-            self.h.board()
-        self.assertIn("swarm init", str(cm.exception))
-        setup_board(self.h.cfg, SMALL_POOL)
-        self.assertIn("closed_by", {r[1] for r in db.execute("PRAGMA table_info(jobs)")})
-        with self.h.board() as b:
-            self.assertEqual((b.job_status("j").description, b.job_status("j").closed_by), ("d", None))
-            self.assertTrue(b.close_job("j", "completed", "ok", closed_by="me"))
-            self.assertEqual(b.job_status("j").closed_by, "me")
-
-    def test_a_board_without_verdict_next_needs_init_and_keeps_its_verdict(self):
-        self.b.open_job("j", "d", None, None, "me", goal="g")
-        self.b.allocate_name("jk", "j")
-        self.b.claim_judge("jk", "j")
-        judge = self.b.active_agent_name("jk")
-        self.assertTrue(self.b.record_verdict("j", judge, "not_met", "old reason"))
-        self.b.close()
-        db = self.h._db()
-        db.execute("ALTER TABLE jobs DROP COLUMN verdict_next")   # as the previous release left it
-        db.execute("PRAGMA user_version = 9")
-        with self.assertRaises(BoardUnavailable):
-            self.h.board()
-        setup_board(self.h.cfg, SMALL_POOL)
-        with self.h.board() as b:
-            s = b.job_status("j")
-            self.assertEqual((s.verdict, s.verdict_reason, s.verdict_next), ("not_met", "old reason", None))
-            self.assertTrue(b.record_verdict("j", judge, "not_met", "r", "n"))
-            self.assertEqual(b.job_status("j").verdict_next, "n")
+    def test_a_board_missing_a_column_of_the_previous_release_needs_init_and_keeps_its_data(self):
+        # dropped column + old user_version -> init required, then the data is kept and the column works
+        with self.subTest("version 1 board gains closed_by"):
+            self.b.open_job("j", "d", None, None, "me")
+            self.b.close()
+            db = self.h._db()
+            db.execute("ALTER TABLE jobs DROP COLUMN closed_by")   # as the previous release left it
+            db.execute("PRAGMA user_version = 1")
+            with self.assertRaises(BoardUnavailable) as cm:
+                self.h.board()
+            self.assertIn("swarm init", str(cm.exception))
+            setup_board(self.h.cfg, SMALL_POOL)
+            self.assertIn("closed_by", {r[1] for r in db.execute("PRAGMA table_info(jobs)")})
+            with self.h.board() as b:
+                self.assertEqual((b.job_status("j").description, b.job_status("j").closed_by), ("d", None))
+                self.assertTrue(b.close_job("j", "completed", "ok", closed_by="me"))
+                self.assertEqual(b.job_status("j").closed_by, "me")
+        with self.subTest("board without verdict_next keeps its verdict"):
+            with self.h.board() as b:
+                b.open_job("v", "d", None, None, "me", goal="g")
+                b.allocate_name("jk", "v")
+                b.claim_judge("jk", "v")
+                judge = b.active_agent_name("jk")
+                self.assertTrue(b.record_verdict("v", judge, "not_met", "old reason"))
+            db = self.h._db()
+            db.execute("ALTER TABLE jobs DROP COLUMN verdict_next")   # as the previous release left it
+            db.execute("PRAGMA user_version = 9")
+            with self.assertRaises(BoardUnavailable):
+                self.h.board()
+            setup_board(self.h.cfg, SMALL_POOL)
+            with self.h.board() as b:
+                s = b.job_status("v")
+                self.assertEqual((s.verdict, s.verdict_reason, s.verdict_next), ("not_met", "old reason", None))
+                self.assertTrue(b.record_verdict("v", judge, "not_met", "r", "n"))
+                self.assertEqual(b.job_status("v").verdict_next, "n")
 
     def test_message_cap_is_the_boards_not_the_clients(self):
         with self.h.board(message_max_chars=500) as b:   # a client's own config no longer matters

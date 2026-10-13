@@ -515,33 +515,27 @@ class SurvivorKills(unittest.TestCase):
 class Progress(unittest.TestCase):
     """progress(prev, new) takes judge VerdictViews and the board's bool flag (plan eceb35e)."""
 
-    def test_first_judged_round_is_no_progress(self):
-        self.assertFalse(progress(None, v("not_met", artifact="x", open=1)))
-
-    def test_new_artifact_and_open_decreased_is_progress(self):
-        self.assertTrue(progress(v("not_met", artifact="a", open=3), v("not_met", artifact="b", open=2)))
-
-    def test_same_artifact_is_not_progress(self):
-        self.assertFalse(progress(v("not_met", artifact="a", open=3), v("not_met", artifact="a", open=2)))
-
-    def test_open_not_decreased_is_not_progress(self):
-        self.assertFalse(progress(v("not_met", artifact="a", open=3), v("not_met", artifact="b", open=3)))
-
-    def test_judge_progress_flag_is_progress(self):
-        self.assertTrue(progress(v("not_met", artifact="a", open=3),
-                                 v("not_met", artifact="a", open=3, progress=True)))
-
-    def test_judge_progress_flag_false_is_not_progress_by_itself(self):
-        self.assertFalse(progress(v("not_met", artifact="a", open=3),
-                                  v("not_met", artifact="a", open=3, progress=False)))
-
-    def test_integration_is_progress(self):
-        self.assertTrue(progress(v("not_met", artifact="a", open=3), v("not_met", artifact="a", open=3),
-                                 integrated=True))
-
-    def test_goal_open_decrease_is_progress_on_the_same_target(self):
-        self.assertTrue(progress(v("not_met", scope="goal", artifact="t", open=3),
-                                 v("not_met", scope="goal", artifact="t", open=2)))
+    def test_progress_table(self):
+        cases = (
+            ("first judged round is no progress", False, None, v("not_met", artifact="x", open=1), {}),
+            ("new artifact and open decreased is progress", True,
+             v("not_met", artifact="a", open=3), v("not_met", artifact="b", open=2), {}),
+            ("same artifact is not progress", False,
+             v("not_met", artifact="a", open=3), v("not_met", artifact="a", open=2), {}),
+            ("open not decreased is not progress", False,
+             v("not_met", artifact="a", open=3), v("not_met", artifact="b", open=3), {}),
+            ("judge progress flag is progress", True,
+             v("not_met", artifact="a", open=3), v("not_met", artifact="a", open=3, progress=True), {}),
+            ("judge progress flag false is not progress by itself", False,
+             v("not_met", artifact="a", open=3), v("not_met", artifact="a", open=3, progress=False), {}),
+            ("integration is progress", True,
+             v("not_met", artifact="a", open=3), v("not_met", artifact="a", open=3), {"integrated": True}),
+            ("goal open decrease is progress on the same target", True,
+             v("not_met", scope="goal", artifact="t", open=3), v("not_met", scope="goal", artifact="t", open=2), {}),
+        )
+        for name, expected, prev, new, kw in cases:
+            with self.subTest(name):
+                self.assertIs(bool(progress(prev, new, **kw)), expected)
 
 
 class MaxRounds(unittest.TestCase):

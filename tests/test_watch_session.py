@@ -157,14 +157,6 @@ class CompactTests(Env):
                 "scroll": 0, "mark": None, "page": 1, "recent_minutes": 10, "session": session,
                 "compact": True}
 
-    def test_no_line_wider_than_the_pane(self):
-        for cols in (30, 40, 50, 60, 70):
-            for color in (False, True):
-                lines = self.frame(cols, color=color)
-                self.assertLessEqual(len(lines), 29)
-                for ln in lines:
-                    self.assertLessEqual(swarm._visible_len(ln), cols, (cols, ln))
-
     def test_content_at_50_columns(self):
         text = "\n".join(self.frame(50))
         self.assertIn("session 11111111", text)
@@ -175,17 +167,19 @@ class CompactTests(Env):
         self.assertNotIn("JB", text)
         self.assertNotIn("LAST CONTACT", text)
 
-    def test_colored_output_fits_and_has_no_broken_escape(self):
+    def test_output_fits_the_pane_and_escapes_only_when_colored(self):
         import re
         for cols in range(12, 71):
-            for ln in self.frame(cols, color=True):
-                self.assertLessEqual(swarm._visible_len(ln), cols, (cols, ln))
-                self.assertIsNone(re.search(r"\033(\[[0-9;?]*)?$", ln), (cols, ln))
-                self.assertEqual(len(re.findall(r"\033(?!\[[0-9;?]*[A-Za-z])", ln)), 0, (cols, ln))
-
-    def test_no_color_has_no_escapes(self):
-        for cols in (20, 50, 70):
-            self.assertNotIn("\033", "\n".join(self.frame(cols, color=False)))
+            for color in (False, True):
+                lines = self.frame(cols, color=color)
+                self.assertLessEqual(len(lines), 29, (cols, color))
+                for ln in lines:
+                    self.assertLessEqual(swarm._visible_len(ln), cols, (cols, ln))
+                    if color:
+                        self.assertIsNone(re.search(r"\033(\[[0-9;?]*)?$", ln), (cols, ln))
+                        self.assertEqual(len(re.findall(r"\033(?!\[[0-9;?]*[A-Za-z])", ln)), 0, (cols, ln))
+                if not color:
+                    self.assertNotIn("\033", "\n".join(lines))
 
     def test_names_use_the_tail_color(self):
         with self.board() as b:

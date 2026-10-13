@@ -150,14 +150,6 @@ class WinHookTests(Base):
         self.assertIn("not set up", msg)
         self.assertFalse((self.tmp / ".local").exists())                     # nothing written, not even the host dir
 
-    def test_session_start_keeps_bootstrapping_an_existing_install(self):
-        Path(os.environ["SWARM_CONFIG"]).write_text("")
-        started = []
-        with mock.patch.object(winhook, "_detached", lambda cmd, log: started.append(cmd)):
-            rc, out = self.run_hook("--host", "claude", "session-start")
-        self.assertEqual((rc, len(started)), (0, 1))
-        self.assertNotIn("not set up", out)
-
     def test_session_start_stamps_and_starts_a_detached_bootstrap_once(self):
         Path(os.environ["SWARM_CONFIG"]).write_text("")        # an existing install (B2)
         started = []
@@ -172,6 +164,12 @@ class WinHookTests(Base):
             stamp.touch()                                   # bootstrap finished
             self.run_hook("--host", "codex", "session-start")
             self.assertEqual(len(started), 1)                # not again
+        # claude keeps bootstrapping an existing install too, without saying it is not set up
+        started = []
+        with mock.patch.object(winhook, "_detached", lambda cmd, log: started.append(cmd)):
+            rc, out = self.run_hook("--host", "claude", "session-start")
+        self.assertEqual((rc, len(started)), (0, 1))
+        self.assertNotIn("not set up", out)
 
     def test_other_events_do_nothing_without_a_job_marker(self):
         fake_python(self.py, self.log)
