@@ -98,7 +98,7 @@ class LearnBanksTests(HindsightEnv):
         self.cli('activate', '--job', 'J', '--project', 'job-bank')
         rc, _, err = self.cli('deactivate', '--job', 'J', '--delete-bank')
         self.assertEqual(rc, 1, err)
-        self.assertIn('retain learnings elsewhere first', err)
+        self.assertIn('nothing has been stored', err)     # the close gate answers first
         self.assertTrue((self.markers / 'J.json').exists())
         self.assertEqual(self.learn()[0], 0)
         self.cli('deactivate', '--job', 'J')
@@ -168,8 +168,13 @@ class LearnBanksTests(HindsightEnv):
         self.assertEqual(rc, 0, err)
         self.assertNotIn('learn', out)     # learnings belong at close, after integration
         rc, out, err = self.cli('deactivate', '--job', 'J')
+        self.assertEqual(rc, 1, err)       # the close gate: the judge never stopped, nothing stored
+        self.assertIn('learnings step is not done', err)
+        self.assertEqual(self.cli('learn', '--job', 'J', '--none', 'nothing durable to keep here')[0], 0)
+        self.assertEqual(self.cli('remember', '--job', 'J', '--as', 'orchestrator', 'verdict was met')[0], 0)
+        rc, out, err = self.cli('deactivate', '--job', 'J')
         self.assertEqual(rc, 0, err)
-        self.assertIn('best-matching EXISTING bank', out)
+        self.assertNotIn('best-matching EXISTING bank', out)   # the gate enforced the step: no reminder
 
     def test_cli_recall_general_and_project_with_bank_error(self):
         self.fake.add_memory('coding', 'General fact')

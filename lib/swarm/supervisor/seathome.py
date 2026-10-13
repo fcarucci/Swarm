@@ -272,7 +272,8 @@ def _read_person(path: Path) -> bytes | None:
 
 
 SEAT_SWARM_COMMANDS = ("post", "read", "done", "review", "verdict", "goal-ready", "land", "ask", "answer", "seat",
-                       "who", "status")
+                       "who", "status",
+                       "remember", "recall", "learn")   # the memory life cycle: every seat stores or declares; a learner learns
 SEAT_ALLOW = tuple(f"Bash(swarm {c}:*)" for c in SEAT_SWARM_COMMANDS) + ("Bash(make test:*)",)
 SEAT_SETTINGS = "claude-settings.json"     # in the seat's directory: ~/.claude/settings.json for the seat
 

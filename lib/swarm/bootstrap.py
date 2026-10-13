@@ -1354,6 +1354,19 @@ def _claude_plugin_root(plugins_dir: Path) -> Path | None:
     return None
 
 
+def _retired_memory_keys_check(config: Path, cfg: dict) -> list[Check]:
+    """WARN when [hindsight] still sets a retired timer (recall_minutes, remember_nudge_minutes): the
+    keys are ignored, so the config loads as before and nothing repeats on a timer."""
+    from swarm.cli import RETIRED_MEMORY_KEYS
+    keys = [k for k in RETIRED_MEMORY_KEYS if k in (cfg.get("hindsight") or {})]
+    if not keys:
+        return []
+    return [Check("memory timers", None,
+                  "[hindsight] " + " and ".join(keys) + " are retired and ignored: the start recall runs once "
+                  "and nothing is timed; agents run `swarm recall` on demand",
+                  f"delete {' and '.join(keys)} from [hindsight] in {config}")]
+
+
 def _legacy_database_check(config: Path, cfg: dict) -> list[Check]:
     """WARN when [database] leaves out user or dbname on Postgres: the config still gets the
     pre-rename default (LEGACY_DATABASE_DEFAULTS), not the current one."""
@@ -1417,6 +1430,7 @@ def _common_checks(config: Path) -> list[Check]:
                          f'add backend = "postgres" under [board] in {config} to make it explicit'))
     if cfg is not None:
         out += _legacy_database_check(config, cfg)
+        out += _retired_memory_keys_check(config, cfg)
         from swarm.board import SCHEMA_VERSION, backend_class
         try:
             ver = backend_class(cfg).schema_version(cfg)

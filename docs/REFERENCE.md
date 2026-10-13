@@ -840,13 +840,14 @@ On Postgres, re-run `swarm init` after changing `idle_minutes`, `dead_minutes` o
 | `api_key_file` | (none) | file holding the API key (chmod 600); sent as a Bearer token, never printed |
 | `timeout_seconds` | `3` | timeout of each Hindsight call |
 | `retry_after_seconds` | `60` | when Hindsight is unreachable, it is skipped this long; a spooled memory that failed waits this long before its next attempt |
-| `recall_minutes` | `15` | how often a working agent gets a fresh recall (only unseen memories) |
-| `recall_start_seconds` | `6` | most a joining agent waits for its first recall (1.5-4 s on a local Hindsight with a reranker; the per-call timeout is raised to match; capped at 8, under the 10 s hook limit); mid-work recalls wait at most 2 s. A start recall that runs out of time is retried on the agent's next turn, not after `recall_minutes`. The env var `SWARM_HOOK_RECALL_SECONDS` overrides it |
+| `recall_start_seconds` | `6` | most a joining agent waits for its one start recall (1.5-4 s on a local Hindsight with a reranker; the per-call timeout is raised to match; capped at 8, under the 10 s hook limit); a start recall that runs out of time counts as done and is never retried (the agent recalls on demand). The env var `SWARM_HOOK_RECALL_SECONDS` overrides it |
 | `recall_max_items` | `8` | memories injected per recall |
 | `recall_max_chars` | `1500` | characters of memories injected per recall |
 | `recall_max_tokens` | `1024` | `max_tokens` passed to Hindsight's recall |
-| `remember_nudge_minutes` | `20` | remind an agent that stored nothing for this long |
 | `remember_max_chars` | `1000` | cap on one `swarm remember` fact |
+
+`recall_minutes` and `remember_nudge_minutes` were removed (no periodic recall, no timed reminder); a config
+that still has them works, and the keys are ignored: delete them.
 
 **`[provenance]`** (see [Memory provenance](#memory-provenance-optional))
 
@@ -1201,8 +1202,8 @@ once the agent joins, in its agent row, so the transcript is read at most once p
   completed: Bart Simpson`). At least every `roster_refresh_minutes` they get the full roster
   again, even if nothing changed. What each agent was last shown is stored in its agent row, so
   the diff survives across hook processes.
-- **Memory** (with Hindsight): new memories every `recall_minutes`, and a reminder after
-  `remember_nudge_minutes` without storing anything. See
+- **Memory** (with Hindsight): nothing after the start recall; the stop is blocked once for an
+  agent that stored nothing and declared nothing. See
   [Project memory](#project-memory-hindsight-optional).
 
 ### Waiting, idle and active jobs
@@ -2507,17 +2508,48 @@ recall_banks = ["coding", "hermes"]
   bank only when strictly necessary, explicitly with `--create-bank`. Learnings carry memory
   provenance. `deactivate --delete-bank` only deletes an explicit project bank after learnings
   have successfully been retained elsewhere.
-- **What is stored:** what agents choose to store with `swarm remember`: durable findings, root
-  causes, decisions and gotchas, one fact per call, never secrets or narration. Each is tagged
-  `swarm`, `job:<job>`, `agent:<name>`, with metadata `source=swarm`, `job`, `agent`, `project`.
-  Retain is asynchronous, so `remember` returns once Hindsight has queued it. Facts are capped
-  at `remember_max_chars`.
-- **When memories are recalled:** when an agent joins, with the job's task (else description,
-  else name) as the query, under `[swarm memory]`; then every `recall_minutes` while it works,
-  showing only memories it hasn't seen yet. Both are capped by `recall_max_items` and
-  `recall_max_chars`.
-- **Reminders:** an agent that stored nothing for `remember_nudge_minutes` gets one reminder,
-  and another only after the next quiet stretch.
+- **What is stored:** durable findings, the moment they are confirmed: root causes, why a setting
+  is what it is, traps, measured numbers; one fact per `swarm remember` call, with its evidence,
+  never secrets or narration. Facts are capped at `remember_max_chars`; retain is asynchronous.
+- **Tags are subjects, never ids.** A job carries subject tags (the systems and projects it is
+  about): `swarm activate --tags swarm,astro-loom`, changed at any time and in any job state with
+  `swarm job tags --job J --add T / --remove T / --set T,U` (no flag lists them; every change is
+  posted on the board). Without `--tags` a job gets its explicit project's name, else its git
+  repository's name; a set emptied on purpose (`--set ""`, removing the last tag) stays empty. Every `swarm remember` and `swarm learn` reads the job's tags when it runs
+  and stamps exactly those, plus any given with `--tags`. The job name, agent, session, host and
+  time go into the memory's metadata (`source=swarm`, `job`, `agent`, `project`, provenance),
+  never into tags: unique tags defeat Hindsight's consolidation dedup and slow recall. A tag that
+  looks like an id (any `x:y`, an id word such as `run`, `session`, `job`, `agent` alone or as
+  `run-7`/`session-xyz`, a numeric part, a date, a hex or uuid run) is refused. If the job's tags
+  cannot be read, `swarm remember` refuses the memory rather than store it untagged.
+- **When memories are recalled:** once, when an agent joins: the configured banks filtered to the
+  job's subject tags (Hindsight `tags_match` `any_strict`: untagged memories and other subjects are
+  left out), queried with the job's topic (`--topic`, else task, else description), under
+  `[swarm memory]`, capped by `recall_max_items` and `recall_max_chars`. It happens exactly once:
+  one that times out is recorded and never retried. A job with no subject tags gets no start recall. After that nothing is pushed: an agent asks with
+  `swarm recall --job J "<anything>"`, which searches every subject of the configured banks
+  (`--tags T` or `--bank B` narrow it).
+- **Mandatory at agent end:** when an agent ends normally (SubagentStop), it must have stored at
+  least one memory during its run, or declared there is none with
+  `swarm remember --job J --as NAME --none "<reason>"` (posted on the board). If neither, the hook
+  blocks the stop once with that instruction, then lets it go. An agent that ends abnormally
+  (closed stuck, dead, lost, over a limit) is marked UNHARVESTED on the job (job data
+  `memory.u.*`), by the supervisor or at close, with no LLM call.
+- **Mandatory at job close:** `swarm deactivate` is refused while an agent is unharvested (every
+  agent of the run is checked against its evidence, a completed or still-active one too) or the run
+  has neither a stored memory, nor a recorded learnings step, nor an agent's `--none` declaration. The closing seat runs the learnings step:
+  `swarm learn --job J --harvest` prints each unharvested agent with its transcript, then
+  `swarm learn --job J --bank BANK -` (or `--from FILE`) retains the distilled facts, or
+  `swarm learn --job J --none "<reason>"` records that they learned nothing durable; either clears
+  the markers it covered and is recorded (`memory.harvest`). Only a person may close without it:
+  `swarm deactivate --job J --no-learn "<reason>"` (the requester session's grant, or a confirmed
+  tty outside any agent host), recorded on the job. A drive job does the step itself: once a MET
+  or UNREACHABLE verdict is there, the driver launches its `learner` seat (an ordinary ledger
+  intent, so a crashed driver resumes it) and closes only after the step is recorded. If the
+  learner used `max_attempts` without finishing, the job holds (it never closes past the step)
+  until a person runs `swarm learn` or `swarm deactivate --no-learn`; while a verdict is held for
+  its learnings no deadline closes the job (the ledger records the hold), and a learnings check that
+  fails keeps the step pending. The drive loop makes no LLM call.
 - **Failure:** one `timeout_seconds` timeout per call. Only a sign that Hindsight itself can't
   be reached (a connection failure, a timeout, or a 502/503/504 from a proxy in front of it) is
   logged to the hook error log and marks all of Hindsight unreachable for `retry_after_seconds`

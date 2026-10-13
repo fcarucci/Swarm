@@ -7,8 +7,8 @@
                    configured) the project's memories
   PreToolUse    -> inject what is new for this agent: unread messages (paged, with a count of
                    what is left), roster changes (a short diff, a full roster every
-                   roster_refresh_minutes) and, with Hindsight, new memories every recall_minutes
-                   and a reminder to store findings; nothing if nothing is new. Routes and
+                   roster_refresh_minutes); never a memory recall (the one recall is at the join);
+                   nothing if nothing is new. Routes and
                    joins agents whose job was not known at SubagentStart, and agents already
                    running at activation only with --adopt-running; records the agent as
                    running with this tool in flight
@@ -17,7 +17,8 @@
   PostToolUse   -> clear the in-flight tool (so a long command shows as running, not idle); a
                    shell call that saved a memory (swarm remember, or a writer under [provenance] writers) is
                    pinned to the agent's transcript (swarm.provenance)
-  SubagentStop  -> mark the agent completed and release its name
+  SubagentStop  -> (with Hindsight) block the stop once if the agent stored no memory and declared
+                   none (`swarm remember --none`); then mark the agent completed and release its name
 
 A hook only acts while a swarm job is active: a marker file <marker_dir>/<job>.json written by
 `swarm activate`, bound to one Claude session. With no marker the shell wrapper exits before
@@ -546,12 +547,20 @@ def _board_lines(name: str, job: str, cap: int, cfg: dict) -> list[str]:
             "`read` need the board and fail there: rely on the `[swarm board]` and "
             "`[swarm roster]` lines instead.")
     if _memory_on(cfg):
+        rem = f"{_bin()} remember --job {_q(job)} --as {_q(name)}"
         lines.append(
-            f"- Project memory: whenever you learn something durable (a finding, root cause, "
-            f"decision or gotcha that would help a later agent on this project), store it: "
-            f"`{_bin()} remember --job {_q(job)} --as {_q(name)} \"<fact>\"`. One self-contained fact "
-            f"per call; never secrets, never narration of what you are doing. Relevant memories "
-            f"are shown to you prefixed `[swarm memory]`.")
+            f"- Project memory, recall: you were shown what memory knows about this job's subjects once, at "
+            f"your start, prefixed `[swarm memory]`; nothing is pushed to you after that. Fetch memories "
+            f"yourself with `{_bin()} recall` whenever you need them (a system, an error, a past decision): "
+            f"`{_bin()} recall --job {_q(job)} \"<what you want to know>\"`. It searches every subject of the "
+            f"configured banks; `--tags T` and `--bank B` narrow it.")
+        lines.append(
+            f"- Project memory, remember: the moment a durable finding is CONFIRMED, store it, before you "
+            f"move on: root causes, why a setting is what it is, traps and gotchas, measured numbers. "
+            f"`{rem} \"<one fact, with its evidence>\"`. One self-contained fact per call, with the evidence "
+            f"(the command, the number, the file); never secrets, never narration of what you are doing. "
+            f"You cannot stop until you have stored at least one, or declared there is none worth keeping: "
+            f"`{rem} --none \"<why>\"`.")
     return lines
 
 
@@ -748,12 +757,18 @@ def _start_recall_seconds(cfg: dict) -> float:
 
 
 def _recall(board, cfg: dict, agent_id: str, job: str, seen, heading: str, *, start: bool = False) -> str | None:
-    """Recall configured banks, show facts this agent has not seen, and record them.
-    Hindsight trouble is logged and skipped (the recall still counts, so it isn't retried
-    before recall_minutes), except a start recall that ran out of time: that one is not
-    recorded, so the agent's next turn tries again (Hindsight is usually warm by then)."""
-    from swarm import hindsight
+    """The start recall: the configured banks, filtered to the job's subject tags (swarm.learnings.job_tags,
+    the job's subjects; none: no start recall) and queried with the job's topic (else its task), so an agent is
+    never shown memories of unrelated systems. Shows facts this agent has not seen and records them.
+    Hindsight trouble (an outage, a timeout) is logged and the recall still counts: it happens exactly once,
+    at the join, and is never retried; the agent recalls on demand (`swarm recall`) after that."""
+    from swarm import hindsight, learnings
     js = board.job_status(job)
+    data = board.job_data(job)
+    tags = learnings.job_tags(board, job, data, js)
+    if not tags:   # no subject: an unscoped recall would show unrelated systems; recall on demand instead
+        board.record_memory_recall(agent_id, ())
+        return None
     banks = hindsight.recall_banks(cfg, js)
     project = ", ".join(banks)
     # one deadline for the whole call, name resolution included (hindsight.Client): a hook never
@@ -769,32 +784,58 @@ def _recall(board, cfg: dict, agent_id: str, job: str, seen, heading: str, *, st
         _log_error("memory", agent_id, exc)
 
     items = hindsight.Client(bounded).recall_many(
-        banks, hindsight.recall_query(js, job), on_error=failed)
-    if not items and start and any(isinstance(exc, hindsight.HindsightOutOfTime) for exc in errors):
-        return None  # retry a cold join recall on the next turn
+        banks, learnings.job_topic(board, job, js, data), on_error=failed,
+        tags=tags)
+    # recorded whatever happened (a timeout included): the start recall happens exactly once; after it the
+    # agent recalls on demand
     text, shown = hindsight.format_memories([i for i in items if i["id"] not in seen], project, cfg, heading)
     board.record_memory_recall(agent_id, shown)
     return text
 
 
-def _memory_turn(board, cfg: dict, agent_id: str, job: str, state) -> list[str]:
-    """Periodic recall (new memories only) and the "store what you learned" reminder."""
-    if not _memory_on(cfg) or state is None:
-        return []
-    h = cfg["hindsight"]
-    out = []
-    if _minutes_since(state, state.memory_recalled_at) >= float(h["recall_minutes"]):
-        text = _recall(board, cfg, agent_id, job, set(state.memory_seen), "new memories from configured banks")
-        if text:
-            out.append(text)
-    quiet_since = max(t for t in (state.remembered_at, state.nudged_at, state.joined_at) if t is not None)
-    if _minutes_since(state, quiet_since) >= float(h["remember_nudge_minutes"]):
+def _memory_stop(board, cfg: dict, agent_id: str) -> bool:
+    """SubagentStop of an agent that ends normally (memory on): it must have stored at least one memory
+    during its run (`swarm remember`), or declared it has none (`swarm remember --none "<reason>"`), both
+    read from its agent row (remembered_at). If neither, the stop is blocked ONCE (nudged_at records it)
+    with the instruction. The next stop goes through, and the agent is marked unharvested (memory.u.*,
+    learnings.mark_unharvested) so the job's learnings step can harvest its transcript. Learner seats and
+    the orchestrator are exempt. An error here never blocks the stop. Returns False when it blocked."""
+    if not _memory_on(cfg):
+        return True
+    from swarm import learnings
+    try:
+        job = board.route(agent_id).member_job
+        if not job:
+            return True
+        me = next((a for a in board.agents(job, include_departed=False) if a.agent_key == agent_id), None)
+        if me is None or not learnings._counts(me):
+            return True
+        state = board.sync_state(agent_id)
+        if state is None:
+            return True
+        if state.remembered_at is not None and state.remembered_at >= state.joined_at:
+            return True
+        if state.nudged_at is not None and state.nudged_at >= state.joined_at:
+            # blocked once already: let it go, and leave the agent marked for the learnings step
+            learnings.mark_unharvested(board, job, agent_id, me.name,
+                                       "stopped without storing or declaring learnings")
+            return True
         board.record_nudge(agent_id)
-        out.append(f"[swarm memory] reminder: you have stored nothing in project memory for "
-                   f"{int(h['remember_nudge_minutes'])} minutes. If you learned something durable "
-                   f"(a finding, root cause, decision), store it now: `{_bin()} remember --job {_q(job)} "
-                   f"--as {_q(state.name)} \"<fact>\"`. Skip it if nothing qualifies.")
-    return out
+        _OUTPUT.update({"decision": "block", "reason":
+            f"[swarm memory] Before you stop: store your durable learnings with `{_bin()} remember --job "
+            f"{_q(job)} --as {_q(me.name)} \"<fact>\"`, or declare none with `{_bin()} remember --job "
+            f"{_q(job)} --as {_q(me.name)} --none \"<reason>\"`."})
+        return False
+    except Exception as exc:   # never at the cost of the stop itself, but it stays harvestable
+        _log_error("memory stop", agent_id, exc)
+        try:
+            job = board.route(agent_id).member_job
+            me = next((a for a in board.agents(job) if a.agent_key == agent_id), None) if job else None
+            if me is not None:
+                learnings.mark_unharvested(board, job, agent_id, me.name, "stop gate failed: unverified")
+        except Exception as exc2:
+            _log_error("memory stop mark", agent_id, exc2)   # the close sweep re-checks it from the board
+        return True
 
 
 # --------------------------------------------------------------------------- events
@@ -1764,7 +1805,6 @@ def _on_turn(board, agent_id: str, name: str, job: str, cfg: dict, sid: str | No
         parts.append(_silence_nudge(board, agent_id, job, name, state, cfg))
         if not moved:
             parts.append(_roster_update(board, agent_id, job, roster, state, cfg))
-        parts += _memory_turn(board, cfg, agent_id, job, state)
     parts.extend(_agent_plugin_lines(board, cfg, job, agent_id))
     events = _agent_events(board, agent_id, job, name, roster)
     parts.append(events)
@@ -1857,6 +1897,8 @@ def _on_event(board, event: str, agent_id: str, sid: str | None, bound: dict, un
         if not _judge_stop(board, agent_id, cfg, payload):
             return
         host = current_host()
+        if host.completes_on(event) and not _memory_stop(board, cfg, agent_id):
+            return
         try:        # before the stop: set_agent_runtime only touches active rows
             board.set_agent_runtime(agent_id, None, payload.get("model") or host.agent_model(payload, agent_id))
         except Exception as exc:   # never at the cost of the stop itself

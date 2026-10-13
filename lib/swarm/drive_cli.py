@@ -818,6 +818,7 @@ def _with_person_receipt(fn):
 
     def handler(cfg, args):
         led, how = deactivate_person(cfg, args)
+        args._person_how = how     # a person's --no-learn: the grant this command already used up
         rc = fn(cfg, args)
         if not rc and _closed(cfg, args.job):
             deactivate_receipt(cfg, args, led, how)

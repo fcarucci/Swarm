@@ -113,6 +113,9 @@ class Snapshot:
     integrated: dict[str, dict]
     rounds: dict[str, int]
     now: datetime
+    # The job's learnings step has not run since its terminal verdict, or agents are unharvested (swarm.learnings;
+    # filled in by the pass only once a terminal goal or ruling verdict is there).
+    learn_pending: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,11 +317,31 @@ def _terminal(c: _Ctx) -> list[Action] | None:
         if gv.verdict == "met" and c.cfg["recipe"] != "artifact" and not candidate_landed(c.s.integrated,
                                                                                          gv.candidate):
             if gv.scope == "ruling":
-                return [c.act("record_unreachable", None, "ruling", 0, prompt="mechanical", trigger=gv.receipt_id,
-                              ruling=True, reason="ruling met, but the candidate is not landed")]
+                return _learn_first(c, gv.receipt_id) or [
+                    c.act("record_unreachable", None, "ruling", 0, prompt="mechanical", trigger=gv.receipt_id,
+                          ruling=True, reason="ruling met, but the candidate is not landed")]
             return None
-        return [c.act("close", None, None, 0, prompt="close", trigger=gv.receipt_id, reason=gv.verdict)]
+        return _learn_first(c, gv.receipt_id) or [
+            c.act("close", None, None, 0, prompt="close", trigger=gv.receipt_id, reason=gv.verdict)]
     return None
+
+
+def _learn_first(c: _Ctx, trigger) -> list[Action] | None:
+    """The learnings step before a close (swarm.learnings): while it is pending, launch the driver-owned
+    `learner` seat (its session runs `swarm learn` over the job; the drive loop itself makes no LLM call), or
+    wait for the one running. Its attempts are ledger intents like any launch, so a crashed driver resumes it.
+    None (close now) once the step is done; a hold once the learner has used max_attempts without finishing."""
+    if not c.s.learn_pending:
+        return None
+    if c.inflight("learn") or "learner" in c.live:
+        return [c.act("nothing", None, None, 0, responsible="learner", reason="responsible")]
+    action = c.act("launch", None, "learn", 0, prompt="learn", trigger=trigger, reason="learnings step before close")
+    if c.attempts(action.action_id) >= c.cfg["max_attempts"]:
+        # Never close past an undone learnings step: the job stays open (hold) for a person's `swarm learn`
+        # or `swarm deactivate --no-learn`; the unharvested markers stay on it.
+        return [c.act("hold", None, None, 0, prompt="learn", trigger=trigger,
+                      reason="learnings step failed: attempts exhausted; not closing")]
+    return [action]
 
 
 def _ruling(c: _Ctx) -> list[Action] | None:
