@@ -222,6 +222,15 @@ class SpecTest(SeatHomeCase):
 
 
 class FailClosedTest(SeatHomeCase):
+    """The Linux jail's fail-closed rules: run on every platform as if on Linux (macOS and Windows seats are
+    best-effort, covered by their own tests)."""
+
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.object(seathome, "jail_platform", lambda platform=None: True)
+        p.start()
+        self.addCleanup(p.stop)
+
     def test_unreadable_pins_refuse(self):
         mock.patch.stopall()
         with mock.patch.dict(os.environ, {"HOME": str(self.home)}), \
@@ -1199,6 +1208,7 @@ class FallbackHardeningTest(SeatHomeCase):
             self.assertEqual((ok, detail), (None, "unavailable: TimeoutExpired"))
             self.assertFalse(bootstrap._seat_isolation_check(self.cfg, probe=lambda c: (ok, detail)).ok)
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "user namespaces are Linux's")
     def test_only_a_deterministic_no_userns_result_falls_back(self):
         files = {"/proc/sys/kernel/unprivileged_userns_clone": "0"}
 
