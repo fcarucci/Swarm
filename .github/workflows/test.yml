@@ -4,59 +4,25 @@ on:
     branches: ["perf/frink"]
   workflow_dispatch:
 jobs:
-  linux-full:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: {python-version: "3.13", cache: pip}
-      - run: pip install -r requirements.txt -r requirements-postgres.txt
-      - name: timed suite (prototype test code)
-        env: {SWARM_TEST_BACKEND: sqlite}
-        run: python -B tests/_frink_timing.py "$GITHUB_WORKSPACE/t-linux-full.csv" </dev/null 2>&1 | tail -5
-      - uses: actions/upload-artifact@v4
-        with: {name: t-linux-full, path: "t-*.csv"}
-  sd-before-after:
-    runs-on: ${{ matrix.os }}
-    defaults: {run: {shell: bash}}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    steps:
-      - uses: actions/checkout@v4
-        with: {fetch-depth: 0}
-      - uses: actions/setup-python@v5
-        with: {python-version: "3.13", cache: pip}
-      - run: pip install -r requirements.txt -r requirements-postgres.txt
-      - run: git show 33ce51c:tests/test_drive_session_driver.py > tests/test_drive_session_driver_base.py
-      - name: before (33ce51c test file)
-        env: {SWARM_TEST_BACKEND: sqlite, PYTHONUTF8: "1"}
-        run: python -B tests/_frink_timing.py "$GITHUB_WORKSPACE/t-sd-before-${{ runner.os }}.csv" test_drive_session_driver_base </dev/null 2>&1 | tail -3
-      - name: after (prototype)
-        env: {SWARM_TEST_BACKEND: sqlite, PYTHONUTF8: "1"}
-        run: python -B tests/_frink_timing.py "$GITHUB_WORKSPACE/t-sd-after-${{ runner.os }}.csv" test_drive_session_driver </dev/null 2>&1 | tail -3
-      - uses: actions/upload-artifact@v4
-        with: {name: "t-sd-${{ runner.os }}", path: "t-*.csv"}
-  win-sqlite:
+  win-full:
     runs-on: windows-latest
     defaults: {run: {shell: bash}}
     strategy:
       fail-fast: false
       matrix:
-        cell: [memory, sqlite, sqlite-syncoff, sqlite-syncnormal]
+        backend: [memory, sqlite]
+        shard: [0, 1, 2]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: "3.13", cache: pip}
       - run: pip install -r requirements.txt -r requirements-postgres.txt
-      - name: timed subset
+      - name: timed shard (modules i::3, test_drive_session_driver excluded: measured separately)
         env:
           PYTHONUTF8: "1"
-          CELL: ${{ matrix.cell }}
+          SWARM_TEST_BACKEND: ${{ matrix.backend }}
         run: |
-          export SWARM_TEST_BACKEND=${CELL%%-*}
-          case "$CELL" in *syncoff) export SWARM_PERF_SQLITE_SYNC=OFF;; *syncnormal) export SWARM_PERF_SQLITE_SYNC=NORMAL;; esac
-          python -B tests/_frink_timing.py "$GITHUB_WORKSPACE/t-win-$CELL.csv" test_board_contract test_drive_pass test_sqlite test_seat_cli test_hooks_cli test_verdict_details test_watch_database </dev/null 2>&1 | tail -3
+          mods=$(cd tests && ls test_*.py | sed 's/\.py$//' | grep -v '^test_drive_session_driver$' | awk -v s=${{ matrix.shard }} '(NR-1)%3==s')
+          python -B tests/_frink_timing.py "$GITHUB_WORKSPACE/t-wf-${{ matrix.backend }}-${{ matrix.shard }}.csv" $mods </dev/null 2>&1 | tail -3
       - uses: actions/upload-artifact@v4
-        with: {name: "t-win-${{ matrix.cell }}", path: "t-*.csv"}
+        with: {name: "t-wf-${{ matrix.backend }}-${{ matrix.shard }}", path: "t-*.csv"}
