@@ -189,7 +189,7 @@ def start_token(pid: int) -> str | None:
     except (OSError, ValueError, IndexError):
         return None
     try:
-        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=5)
+        out = subprocess.run([compat.ps_path(), "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
         return None
     text = " ".join(out.stdout.split())
