@@ -283,7 +283,7 @@ class FailClosedTest(SeatHomeCase):
 
     def test_no_namespaces_means_nothing_runs(self):
         with mock.patch.object(seatjail, "_unshare", side_effect=OSError(1, "unshare: EPERM")), \
-                mock.patch("os.execvpe") as ex, mock.patch("os.fork") as fork:
+                mock.patch("os.execvpe") as ex, mock.patch("os.fork", create=True) as fork:
             self.assertEqual(seatjail.run({}, ["true"]), seatjail.EXIT_UNAVAILABLE)
         ex.assert_not_called()
         fork.assert_not_called()
@@ -1344,6 +1344,44 @@ class ReadOnlyReviewerJailTest(SeatHomeCase):
         modes = {b[1]: b[2] for b in spec["binds"]}
         self.assertEqual(modes[wt], "ro")
         self.assertEqual(modes[str(self.work / "repo" / ".git")], "ro")
+
+
+class WindowsCodePathTest(SeatHomeCase):
+    """The best-effort seat path with the POSIX-only os attributes taken away (as on Windows)."""
+
+    # (getuid/getgid stay: swarm.compat picks its own Windows code for those at import, as on Windows)
+    POSIX_ONLY = ("O_NOFOLLOW", "O_DIRECTORY", "O_CLOEXEC", "O_NONBLOCK", "fork")
+
+    def without_posix(self):
+        import contextlib as _c
+        stack = _c.ExitStack()
+        for name in self.POSIX_ONLY:
+            if hasattr(os, name):
+                stack.enter_context(mock.patch.object(os, name, create=False, new=mock.DEFAULT))
+                delattr(os, name)
+        return stack
+
+    def test_prepare_and_launch_without_posix_attributes(self):
+        with self.without_posix():
+            for name in self.POSIX_ONLY:
+                self.assertFalse(hasattr(os, name), name)
+            h = seathome.prepare(self.cfg, "J", "win")
+            self.assertTrue((h / "gitconfig").is_file())
+            self.assertEqual((h / "home" / ".claude.json").read_text(), '{"x": 1}')
+            _argv, env, m = seathome.launch(self.cfg, ["claude"], job="J", seat="win", platform="win32")
+            self.assertEqual(m, "best-effort")
+            self.assertEqual(env["USERPROFILE"], str(h / "home"))
+            self.assertEqual(seatjail.run({}, ["true"]), seatjail.EXIT_UNAVAILABLE)
+        self.assertTrue(hasattr(os, "O_NOFOLLOW") or not sys.platform.startswith("linux"))   # restored
+
+    def test_a_link_is_still_not_followed_without_o_nofollow(self):
+        target = self.tmp / "secret"
+        target.write_text("person's secret")
+        link = self.tmp / "link"
+        link.symlink_to(target)
+        with self.without_posix():
+            self.assertIsNone(seathome._read_person(link))
+            self.assertEqual(seathome._read_person(target), b"person's secret")
 
 
 if __name__ == "__main__":

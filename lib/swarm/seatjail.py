@@ -335,6 +335,10 @@ def run(spec: dict, argv: list[str]) -> int:
     if not argv:
         print("seatjail: no command", file=sys.stderr)
         return 2
+    if not (hasattr(os, "getuid") and hasattr(os, "fork")):   # no namespaces off POSIX (Windows): nothing runs
+        print(f"seatjail: cannot isolate the seat (no user namespaces on {sys.platform}); not started",
+              file=sys.stderr)
+        return EXIT_UNAVAILABLE
     uid, gid = os.getuid(), os.getgid()
     try:
         _unshare(CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID)
