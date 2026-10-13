@@ -4,25 +4,58 @@ on:
     branches: ["perf/frink"]
   workflow_dispatch:
 jobs:
-  win-full:
-    runs-on: windows-latest
-    defaults: {run: {shell: bash}}
-    strategy:
-      fail-fast: false
-      matrix:
-        backend: [memory, sqlite]
-        shard: [0, 1, 2]
+  postgres-selected:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: public.ecr.aws/docker/library/postgres:16
+        env:
+          POSTGRES_USER: swarm_test
+          POSTGRES_PASSWORD: swarm_test_pw
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U swarm_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: "3.13", cache: pip}
       - run: pip install -r requirements.txt -r requirements-postgres.txt
-      - name: timed shard, modules i mod 3, session driver excluded
-        env:
-          PYTHONUTF8: "1"
-          SWARM_TEST_BACKEND: ${{ matrix.backend }}
+      - name: ids that run without Postgres (load only)
+        run: python -B tests/_frink_pg_select.py list "$RUNNER_TEMP/nonpg.json"
+      - name: throwaway SWARM_TEST_CONFIG
         run: |
-          mods=$(cd tests && ls test_*.py | sed 's/\.py$//' | grep -v '^test_drive_session_driver$' | awk -v s=${{ matrix.shard }} '(NR-1)%3==s')
-          python -B tests/_frink_timing.py "$GITHUB_WORKSPACE/t-wf-${{ matrix.backend }}-${{ matrix.shard }}.csv" $mods </dev/null 2>&1 | tail -3
-      - uses: actions/upload-artifact@v4
-        with: {name: "t-wf-${{ matrix.backend }}-${{ matrix.shard }}", path: "t-*.csv"}
+          mkdir -p "$RUNNER_TEMP/swarm-pg"
+          printf 'PGPASSWORD=swarm_test_pw\n' > "$RUNNER_TEMP/swarm-pg/pg.env"
+          chmod 600 "$RUNNER_TEMP/swarm-pg/pg.env"
+          cat > "$RUNNER_TEMP/swarm-pg/test-config.toml" <<EOT
+          [database]
+          host = "127.0.0.1"
+          port = 5432
+          user = "swarm_test"
+          dbname = "swarm_ci_test"
+          admin_dbname = "postgres"
+          password_env_file = "$RUNNER_TEMP/swarm-pg/pg.env"
+          connect_timeout = 5
+          sslmode = "prefer"
+          query_timeout_seconds = 8
+          prepared_statements = false
+
+          [board]
+          backend = "postgres"
+          EOT
+          echo "SWARM_TEST_CONFIG=$RUNNER_TEMP/swarm-pg/test-config.toml" >> "$GITHUB_ENV"
+      - name: A. only the tests Postgres adds (was - the whole suite, 1095 s)
+        run: python -B tests/_frink_pg_select.py pg "$RUNNER_TEMP/nonpg.json" x </dev/null 2>&1 | tail -4
+      - name: B. drive CLI tests on a Postgres board (was - all test_drive_* again, 584 s)
+        if: ${{ !cancelled() }}
+        env: {SWARM_TEST_BACKEND: postgres}
+        run: python -B tests/_frink_pg_select.py env "$RUNNER_TEMP/nonpg.json" x </dev/null 2>&1 | tail -4
+      - name: C. same as A with fsync off on the server
+        if: ${{ !cancelled() }}
+        run: |
+          PGPASSWORD=swarm_test_pw psql -h 127.0.0.1 -U swarm_test -d postgres -c "ALTER SYSTEM SET fsync = off" -c "ALTER SYSTEM SET synchronous_commit = off" -c "ALTER SYSTEM SET full_page_writes = off" -c "SELECT pg_reload_conf()"
+          python -B tests/_frink_pg_select.py pg "$RUNNER_TEMP/nonpg.json" x </dev/null 2>&1 | tail -4
