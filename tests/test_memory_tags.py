@@ -98,7 +98,7 @@ class MemoryTagsTests(HindsightEnv):
 
     def test_tags_can_change_when_the_job_is_closed(self):
         with self.board() as b:
-            self.assertTrue(b.close_job("J", "closed", "tag test"))   # a person's `deactivate` is not needed here
+            self.assertTrue(b.close_job("J", "completed", "tag test"))   # a person's `deactivate` is not needed here
         rc, _, err = self.job_tags("--add", "etcd")
         self.assertEqual((rc, err), (0, ""), err)
         self.assertIn("etcd", self.job_tags()[1])

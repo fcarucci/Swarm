@@ -350,10 +350,10 @@ def _with_learn(board, cfg, led, snap):
     """The snapshot with `learn_pending` (swarm.learnings.learn_pending): only once a terminal goal or ruling
     verdict of this generation is there, i.e. the job is about to close and its learnings step must run first.
     Deterministic board reads, no LLM; a failure leaves it False (the close is never blocked by a read error)."""
-    gv = snap.goal_verdict
-    if gv is None or gv.verdict not in ("met", "unreachable") or gv.generation != snap.generation:
-        return snap
     try:
+        gv = snap.goal_verdict
+        if gv is None or gv.verdict not in ("met", "unreachable") or gv.generation != snap.generation:
+            return snap
         from dataclasses import replace
         from swarm import learnings
         return replace(snap, learn_pending=learnings.learn_pending(board, cfg, led.job, gv.at))

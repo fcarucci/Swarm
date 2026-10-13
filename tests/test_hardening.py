@@ -963,8 +963,6 @@ _PATH_HELPERS = {"write_preserving", "append_private", "create_exclusive"}   # s
 # sandbox-writable place. A new plain call in a gated module fails the gate until it goes
 # through safefs or is reviewed here; an entry that no longer matches fails it too.
 REVIEWED = {
-    ("cli.py", "cmd_learn", ".read_text"): "swarm learn --from FILE: a file the caller names (a seat's goes "
-                                            "through the broker, which reads it in the jail); read only",
     ("bootstrap.py", "launcher_target", ".read_text"): "~/.local/bin/swarm: no sandbox writes there",
     ("bootstrap.py", "ensure_launcher", ".mkdir"): "~/.local/bin (the launcher)",
     ("bootstrap.py", "prune_pycache", ".rmdir"): "the launchers' own 0700 bytecode cache, outside every sandbox root; symlinks never followed",
