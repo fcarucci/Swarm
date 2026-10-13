@@ -60,7 +60,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: "3.13", cache: pip}
-      - run: pip install -r requirements.txt -r requirements-postgres.txt pytest pytest-xdist
+      - run: |
+          pip install -r requirements.txt -r requirements-postgres.txt
+          pip install pytest pytest-xdist
       - env: {SWARM_TEST_BACKEND: memory}
         run: |
           s=$(date +%s)
@@ -73,7 +75,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: "3.13", cache: pip}
-      - run: pip install -r requirements.txt -r requirements-postgres.txt "coverage>=7.10"
+      - run: |
+          pip install -r requirements.txt -r requirements-postgres.txt
+          pip install "coverage>=7.10"
       - env: {SWARM_TEST_BACKEND: memory}
         run: |
           s=$(date +%s)
