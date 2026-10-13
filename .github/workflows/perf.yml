@@ -32,8 +32,8 @@ jobs:
           - {jobs: 1, flags: "-B", name: j1}
           - {jobs: 4, flags: "-B", name: j4-B}
           - {jobs: 4, flags: "", name: j4}
-          - {jobs: 6, flags: "", name: j6}
-          - {jobs: 8, flags: "", name: j8}
+          - {jobs: 4, flags: "", name: j4-lpt, dur: 1}
+          - {jobs: 3, flags: "", name: j3-lpt, dur: 1}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -42,9 +42,9 @@ jobs:
       - name: pool ${{ matrix.name }}
         env: {SWARM_TEST_BACKEND: memory}
         run: |
-          d=""; [ -f .github/scripts/durations.json ] && d="--durations .github/scripts/durations.json"
+          d=""; [ "${{ matrix.dur }}" = 1 ] && d="--durations .github/scripts/durations.json"
           s=$(date +%s)
-          python .github/scripts/shard.py --jobs ${{ matrix.jobs }} --flags "${{ matrix.flags }}" $d --out res-${{ matrix.name }}.json
+          python .github/scripts/shard.py --jobs ${{ matrix.jobs }} --flags="${{ matrix.flags }}" $d --out res-${{ matrix.name }}.json
           echo "POOL_WALL=$(( $(date +%s) - s ))s"
       - if: always()
         uses: actions/upload-artifact@v4
@@ -147,7 +147,7 @@ jobs:
           for i in 1 2; do
             for f in "" "-B"; do
               s=$(date +%s.%N)
-              python .github/scripts/shard.py --jobs 1 --flags "$f" --only $SUB --out /dev/null | head -1
+              python .github/scripts/shard.py --jobs 1 --flags="$f" --only $SUB --out /dev/null | head -1
               echo "flag[$f] round $i: $(echo "$(date +%s.%N) - $s" | bc)s"
             done
           done

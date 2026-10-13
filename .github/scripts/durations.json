@@ -1,0 +1,1064 @@
+{
+ "test_addressing": {
+  "rc": 0,
+  "sec": 2.36,
+  "start": 151.6,
+  "tests": 18
+ },
+ "test_agent_title": {
+  "rc": 0,
+  "sec": 1.1,
+  "start": 109.0,
+  "tests": 70
+ },
+ "test_ask_answer": {
+  "rc": 0,
+  "sec": 1.55,
+  "start": 110.1,
+  "tests": 60
+ },
+ "test_auto_close": {
+  "rc": 0,
+  "sec": 2.83,
+  "start": 63.3,
+  "tests": 115
+ },
+ "test_autoinit": {
+  "rc": 0,
+  "sec": 4.56,
+  "start": 61.0,
+  "tests": 97
+ },
+ "test_bank_defaults_provenance": {
+  "rc": 0,
+  "sec": 2.42,
+  "start": 165.0,
+  "tests": 4
+ },
+ "test_bg_commands": {
+  "rc": 0,
+  "sec": 7.88,
+  "start": 90.3,
+  "tests": 66
+ },
+ "test_bg_hooks": {
+  "rc": 0,
+  "sec": 0.89,
+  "start": 121.7,
+  "tests": 24
+ },
+ "test_blockers": {
+  "rc": 0,
+  "sec": 1.9,
+  "start": 65.5,
+  "tests": 67
+ },
+ "test_board_contract": {
+  "rc": 0,
+  "sec": 22.23,
+  "start": 0.0,
+  "tests": 867
+ },
+ "test_board_read_only": {
+  "rc": 0,
+  "sec": 0.4,
+  "start": 144.7,
+  "tests": 18
+ },
+ "test_board_view": {
+  "rc": 0,
+  "sec": 4.3,
+  "start": 112.8,
+  "tests": 95
+ },
+ "test_bootstrap": {
+  "rc": 0,
+  "sec": 0.56,
+  "start": 101.2,
+  "tests": 36
+ },
+ "test_changelog": {
+  "rc": 0,
+  "sec": 0.09,
+  "start": 164.9,
+  "tests": 3
+ },
+ "test_channel": {
+  "rc": 0,
+  "sec": 0.44,
+  "start": 146.4,
+  "tests": 15
+ },
+ "test_ci_adapters": {
+  "rc": 0,
+  "sec": 0.14,
+  "start": 107.8,
+  "tests": 35
+ },
+ "test_ci_migrate": {
+  "rc": 0,
+  "sec": 0.11,
+  "start": 160.0,
+  "tests": 7
+ },
+ "test_ci_poller_budget": {
+  "rc": 0,
+  "sec": 0.11,
+  "start": 160.2,
+  "tests": 6
+ },
+ "test_ci_wait": {
+  "rc": 0,
+  "sec": 1.2,
+  "start": 109.4,
+  "tests": 43
+ },
+ "test_codex_config": {
+  "rc": 0,
+  "sec": 0.19,
+  "start": 107.9,
+  "tests": 29
+ },
+ "test_codex_directory": {
+  "rc": 1,
+  "sec": 29.66,
+  "start": 107.9,
+  "tests": 23
+ },
+ "test_codex_hooks": {
+  "rc": 0,
+  "sec": 1.3,
+  "start": 68.3,
+  "tests": 39
+ },
+ "test_codex_host": {
+  "rc": 0,
+  "sec": 0.21,
+  "start": 112.3,
+  "tests": 31
+ },
+ "test_db_default": {
+  "rc": 0,
+  "sec": 0.1,
+  "start": 162.8,
+  "tests": 8
+ },
+ "test_default_backend": {
+  "rc": 0,
+  "sec": 0.51,
+  "start": 157.3,
+  "tests": 11
+ },
+ "test_doctor": {
+  "rc": 0,
+  "sec": 3.04,
+  "start": 22.2,
+  "tests": 84
+ },
+ "test_drive_activate": {
+  "rc": 0,
+  "sec": 6.57,
+  "start": 15.5,
+  "tests": 131
+ },
+ "test_drive_backends": {
+  "rc": 0,
+  "sec": 0.22,
+  "start": 141.3,
+  "tests": 22
+ },
+ "test_drive_barrier": {
+  "rc": 0,
+  "sec": 0.29,
+  "start": 167.5,
+  "tests": 6
+ },
+ "test_drive_clock": {
+  "rc": 0,
+  "sec": 0.12,
+  "start": 165.1,
+  "tests": 6
+ },
+ "test_drive_docs": {
+  "rc": 0,
+  "sec": 0.13,
+  "start": 139.7,
+  "tests": 19
+ },
+ "test_drive_exec": {
+  "rc": 0,
+  "sec": 5.71,
+  "start": 0.0,
+  "tests": 174
+ },
+ "test_drive_hooks": {
+  "rc": 0,
+  "sec": 2.76,
+  "start": 24.2,
+  "tests": 108
+ },
+ "test_drive_hooks_receipts": {
+  "rc": 0,
+  "sec": 3.8,
+  "start": 25.3,
+  "tests": 117
+ },
+ "test_drive_land": {
+  "rc": 0,
+  "sec": 49.38,
+  "start": 22.1,
+  "tests": 273
+ },
+ "test_drive_land_cli": {
+  "rc": 0,
+  "sec": 0.47,
+  "start": 141.5,
+  "tests": 28
+ },
+ "test_drive_land_doctor": {
+  "rc": 0,
+  "sec": 0.28,
+  "start": 154.2,
+  "tests": 13
+ },
+ "test_drive_land_driver": {
+  "rc": 0,
+  "sec": 4.96,
+  "start": 102.6,
+  "tests": 45
+ },
+ "test_drive_land_plugin": {
+  "rc": 0,
+  "sec": 0.23,
+  "start": 155.2,
+  "tests": 9
+ },
+ "test_drive_ledger": {
+  "rc": 0,
+  "sec": 0.38,
+  "start": 107.5,
+  "tests": 42
+ },
+ "test_drive_life_fix": {
+  "rc": 0,
+  "sec": 5.14,
+  "start": 52.8,
+  "tests": 213
+ },
+ "test_drive_lifecycle": {
+  "rc": 0,
+  "sec": 6.19,
+  "start": 34.0,
+  "tests": 249
+ },
+ "test_drive_mirror": {
+  "rc": 0,
+  "sec": 5.6,
+  "start": 57.6,
+  "tests": 49
+ },
+ "test_drive_mirror_land": {
+  "rc": 0,
+  "sec": 5.45,
+  "start": 43.0,
+  "tests": 73
+ },
+ "test_drive_model": {
+  "rc": 0,
+  "sec": 0.11,
+  "start": 138.6,
+  "tests": 29
+ },
+ "test_drive_next_actions": {
+  "rc": 0,
+  "sec": 0.13,
+  "start": 67.4,
+  "tests": 95
+ },
+ "test_drive_pass": {
+  "rc": 0,
+  "sec": 14.03,
+  "start": 10.1,
+  "tests": 387
+ },
+ "test_drive_qa_harness": {
+  "rc": 0,
+  "sec": 2.24,
+  "start": 66.1,
+  "tests": 41
+ },
+ "test_drive_questions": {
+  "rc": 0,
+  "sec": 1.7,
+  "start": 110.6,
+  "tests": 84
+ },
+ "test_drive_runner": {
+  "rc": 0,
+  "sec": 0.15,
+  "start": 135.4,
+  "tests": 33
+ },
+ "test_drive_session_driver": {
+  "rc": 0,
+  "sec": 222.32,
+  "start": 18.4,
+  "tests": 78
+ },
+ "test_drive_shellguard": {
+  "rc": 0,
+  "sec": 4.89,
+  "start": 29.1,
+  "tests": 62
+ },
+ "test_drive_snapshot": {
+  "rc": 0,
+  "sec": 1.99,
+  "start": 48.4,
+  "tests": 220
+ },
+ "test_drive_sweep_skip": {
+  "rc": 0,
+  "sec": 0.61,
+  "start": 152.9,
+  "tests": 13
+ },
+ "test_driver_events": {
+  "rc": 0,
+  "sec": 0.21,
+  "start": 168.0,
+  "tests": 3
+ },
+ "test_enrolment": {
+  "rc": 0,
+  "sec": 0.21,
+  "start": 140.6,
+  "tests": 27
+ },
+ "test_events": {
+  "rc": 0,
+  "sec": 4.59,
+  "start": 141.8,
+  "tests": 61
+ },
+ "test_events_cli": {
+  "rc": 0,
+  "sec": 2.09,
+  "start": 142.6,
+  "tests": 14
+ },
+ "test_events_listener": {
+  "rc": 0,
+  "sec": 9.11,
+  "start": 67.6,
+  "tests": 47
+ },
+ "test_expiry": {
+  "rc": 0,
+  "sec": 2.37,
+  "start": 50.4,
+  "tests": 203
+ },
+ "test_file_board": {
+  "rc": 0,
+  "sec": 16.69,
+  "start": 86.0,
+  "tests": 31
+ },
+ "test_final_retry": {
+  "rc": 0,
+  "sec": 5.31,
+  "start": 52.3,
+  "tests": 34
+ },
+ "test_gitpin": {
+  "rc": 0,
+  "sec": 0.28,
+  "start": 107.5,
+  "tests": 26
+ },
+ "test_goal_orphan_guard": {
+  "rc": 0,
+  "sec": 0.14,
+  "start": 154.7,
+  "tests": 9
+ },
+ "test_goals": {
+  "rc": 0,
+  "sec": 1.76,
+  "start": 117.6,
+  "tests": 30
+ },
+ "test_hardening": {
+  "rc": 0,
+  "sec": 18.36,
+  "start": 0.0,
+  "tests": 93
+ },
+ "test_hindsight": {
+  "rc": 0,
+  "sec": 25.17,
+  "start": 69.6,
+  "tests": 38
+ },
+ "test_hindsight_banks": {
+  "rc": 0,
+  "sec": 3.9,
+  "start": 161.2,
+  "tests": 7
+ },
+ "test_hindsight_documents": {
+  "rc": 0,
+  "sec": 5.3,
+  "start": 155.9,
+  "tests": 10
+ },
+ "test_hook_fastpath": {
+  "rc": 0,
+  "sec": 6.88,
+  "start": 94.8,
+  "tests": 49
+ },
+ "test_hooks_cli": {
+  "rc": 0,
+  "sec": 2.82,
+  "start": 40.1,
+  "tests": 63
+ },
+ "test_hosts": {
+  "rc": 0,
+  "sec": 0.17,
+  "start": 153.8,
+  "tests": 18
+ },
+ "test_hosts_resume": {
+  "rc": 0,
+  "sec": 0.17,
+  "start": 137.2,
+  "tests": 27
+ },
+ "test_install_channel": {
+  "rc": 0,
+  "sec": 1.63,
+  "start": 155.6,
+  "tests": 7
+ },
+ "test_install_ps1": {
+  "rc": 0,
+  "sec": 0.51,
+  "start": 159.1,
+  "tests": 2
+ },
+ "test_install_sh": {
+  "rc": 0,
+  "sec": 35.01,
+  "start": 163.0,
+  "tests": 1
+ },
+ "test_judge_handover": {
+  "rc": 0,
+  "sec": 0.37,
+  "start": 162.9,
+  "tests": 3
+ },
+ "test_judge_hook_identity": {
+  "rc": 0,
+  "sec": 0.62,
+  "start": 145.1,
+  "tests": 14
+ },
+ "test_launcher_selfheal": {
+  "rc": 0,
+  "sec": 0.11,
+  "start": 159.9,
+  "tests": 7
+ },
+ "test_launchers": {
+  "rc": 0,
+  "sec": 0.83,
+  "start": 101.7,
+  "tests": 19
+ },
+ "test_layout": {
+  "rc": 0,
+  "sec": 1.55,
+  "start": 163.3,
+  "tests": 5
+ },
+ "test_learn_banks": {
+  "rc": 0,
+  "sec": 8.84,
+  "start": 142.8,
+  "tests": 16
+ },
+ "test_learnings_gate": {
+  "rc": 0,
+  "sec": 2.45,
+  "start": 160.6,
+  "tests": 4
+ },
+ "test_memory_refs_race": {
+  "rc": 0,
+  "sec": 0.96,
+  "start": 161.2,
+  "tests": 3
+ },
+ "test_message_cap": {
+  "rc": 0,
+  "sec": 1.22,
+  "start": 102.7,
+  "tests": 57
+ },
+ "test_message_count_upgrade": {
+  "rc": 0,
+  "sec": 0.15,
+  "start": 159.8,
+  "tests": 2
+ },
+ "test_migrate": {
+  "rc": 0,
+  "sec": 0.33,
+  "start": 111.6,
+  "tests": 22
+ },
+ "test_models": {
+  "rc": 0,
+  "sec": 0.44,
+  "start": 139.8,
+  "tests": 20
+ },
+ "test_move_merge": {
+  "rc": 0,
+  "sec": 1.32,
+  "start": 137.1,
+  "tests": 42
+ },
+ "test_no_retired_ci_name": {
+  "rc": 0,
+  "sec": 0.21,
+  "start": 168.2,
+  "tests": 2
+ },
+ "test_owners": {
+  "rc": 0,
+  "sec": 0.12,
+  "start": 163.2,
+  "tests": 7
+ },
+ "test_pause_board": {
+  "rc": 0,
+  "sec": 0.49,
+  "start": 142.1,
+  "tests": 37
+ },
+ "test_pause_e2e": {
+  "rc": 0,
+  "sec": 0.6,
+  "start": 155.0,
+  "tests": 4
+ },
+ "test_pause_flow": {
+  "rc": 0,
+  "sec": 0.74,
+  "start": 137.5,
+  "tests": 28
+ },
+ "test_person": {
+  "rc": 0,
+  "sec": 1.08,
+  "start": 135.7,
+  "tests": 31
+ },
+ "test_pg_hosts": {
+  "rc": 0,
+  "sec": 0.47,
+  "start": 113.4,
+  "tests": 35
+ },
+ "test_pinned_deps": {
+  "rc": 0,
+  "sec": 0.82,
+  "start": 141.3,
+  "tests": 20
+ },
+ "test_pipeline_plugins": {
+  "rc": 0,
+  "sec": 1.12,
+  "start": 140.2,
+  "tests": 14
+ },
+ "test_plugin_manifest": {
+  "rc": 0,
+  "sec": 0.22,
+  "start": 146.9,
+  "tests": 12
+ },
+ "test_plugins": {
+  "rc": 0,
+  "sec": 0.67,
+  "start": 138.7,
+  "tests": 19
+ },
+ "test_provenance_cli": {
+  "rc": 0,
+  "sec": 1.96,
+  "start": 113.8,
+  "tests": 32
+ },
+ "test_provenance_detect": {
+  "rc": 0,
+  "sec": 0.19,
+  "start": 158.8,
+  "tests": 12
+ },
+ "test_provenance_excerpt": {
+  "rc": 0,
+  "sec": 1.73,
+  "start": 129.9,
+  "tests": 22
+ },
+ "test_provenance_fixtures": {
+  "rc": 0,
+  "sec": 0.06,
+  "start": 167.4,
+  "tests": 4
+ },
+ "test_provenance_hooks": {
+  "rc": 0,
+  "sec": 7.73,
+  "start": 101.7,
+  "tests": 39
+ },
+ "test_provenance_purge": {
+  "rc": 0,
+  "sec": 17.5,
+  "start": 119.4,
+  "tests": 33
+ },
+ "test_provenance_remember": {
+  "rc": 0,
+  "sec": 7.55,
+  "start": 146.2,
+  "tests": 14
+ },
+ "test_receipts": {
+  "rc": 0,
+  "sec": 0.16,
+  "start": 135.6,
+  "tests": 40
+ },
+ "test_redact_budget": {
+  "rc": 0,
+  "sec": 7.6,
+  "start": 153.5,
+  "tests": 8
+ },
+ "test_release_notes": {
+  "rc": 0,
+  "sec": 0.38,
+  "start": 158.3,
+  "tests": 8
+ },
+ "test_respawn": {
+  "rc": 0,
+  "sec": 1.99,
+  "start": 133.5,
+  "tests": 33
+ },
+ "test_resume_identity": {
+  "rc": 0,
+  "sec": 0.62,
+  "start": 141.9,
+  "tests": 13
+ },
+ "test_review_hooks": {
+  "rc": 0,
+  "sec": 2.04,
+  "start": 122.6,
+  "tests": 31
+ },
+ "test_roles": {
+  "rc": 0,
+  "sec": 0.13,
+  "start": 167.8,
+  "tests": 2
+ },
+ "test_roster_reads": {
+  "rc": 0,
+  "sec": 1.36,
+  "start": 138.4,
+  "tests": 19
+ },
+ "test_routing": {
+  "rc": 0,
+  "sec": 1.05,
+  "start": 132.4,
+  "tests": 24
+ },
+ "test_safefile": {
+  "rc": 0,
+  "sec": 0.1,
+  "start": 158.7,
+  "tests": 10
+ },
+ "test_safefs": {
+  "rc": 0,
+  "sec": 0.22,
+  "start": 111.9,
+  "tests": 41
+ },
+ "test_schema_retry": {
+  "rc": 0,
+  "sec": 0.23,
+  "start": 154.0,
+  "tests": 9
+ },
+ "test_seat_cli": {
+  "rc": 0,
+  "sec": 10.12,
+  "start": 0.0,
+  "tests": 118
+ },
+ "test_seat_isolation": {
+  "rc": 0,
+  "sec": 9.8,
+  "start": 5.7,
+  "tests": 80
+ },
+ "test_shellguard": {
+  "rc": 0,
+  "sec": 0.16,
+  "start": 155.8,
+  "tests": 11
+ },
+ "test_snapshot": {
+  "rc": 0,
+  "sec": 9.36,
+  "start": 76.7,
+  "tests": 37
+ },
+ "test_spawn": {
+  "rc": 0,
+  "sec": 0.55,
+  "start": 145.7,
+  "tests": 16
+ },
+ "test_spool": {
+  "rc": 0,
+  "sec": 0.71,
+  "start": 139.9,
+  "tests": 17
+ },
+ "test_sqlite": {
+  "rc": 0,
+  "sec": 5.27,
+  "start": 124.6,
+  "tests": 17
+ },
+ "test_stale_waiting": {
+  "rc": 0,
+  "sec": 1.84,
+  "start": 115.8,
+  "tests": 28
+ },
+ "test_stall": {
+  "rc": 0,
+  "sec": 2.61,
+  "start": 104.9,
+  "tests": 21
+ },
+ "test_status_views": {
+  "rc": 0,
+  "sec": 0.18,
+  "start": 162.6,
+  "tests": 8
+ },
+ "test_supervise_approve": {
+  "rc": 0,
+  "sec": 0.51,
+  "start": 154.7,
+  "tests": 10
+ },
+ "test_supervise_brief": {
+  "rc": 0,
+  "sec": 0.84,
+  "start": 112.5,
+  "tests": 31
+ },
+ "test_supervise_budget": {
+  "rc": 0,
+  "sec": 0.12,
+  "start": 154.0,
+  "tests": 19
+ },
+ "test_supervise_close": {
+  "rc": 0,
+  "sec": 0.83,
+  "start": 118.4,
+  "tests": 28
+ },
+ "test_supervise_command": {
+  "rc": 0,
+  "sec": 4.4,
+  "start": 26.9,
+  "tests": 82
+ },
+ "test_supervise_hooks": {
+  "rc": 0,
+  "sec": 0.83,
+  "start": 108.1,
+  "tests": 29
+ },
+ "test_supervise_launch": {
+  "rc": 0,
+  "sec": 0.17,
+  "start": 136.9,
+  "tests": 28
+ },
+ "test_supervise_markers": {
+  "rc": 0,
+  "sec": 0.39,
+  "start": 138.3,
+  "tests": 22
+ },
+ "test_supervise_optin": {
+  "rc": 0,
+  "sec": 0.41,
+  "start": 139.3,
+  "tests": 21
+ },
+ "test_supervise_orphans": {
+  "rc": 0,
+  "sec": 0.2,
+  "start": 138.8,
+  "tests": 21
+ },
+ "test_supervise_pipeline": {
+  "rc": 0,
+  "sec": 0.47,
+  "start": 103.9,
+  "tests": 40
+ },
+ "test_supervise_runner": {
+  "rc": 0,
+  "sec": 20.49,
+  "start": 31.3,
+  "tests": 71
+ },
+ "test_supervise_settings": {
+  "rc": 0,
+  "sec": 0.17,
+  "start": 155.6,
+  "tests": 13
+ },
+ "test_supervise_setup": {
+  "rc": 0,
+  "sec": 0.39,
+  "start": 136.8,
+  "tests": 28
+ },
+ "test_supervise_status": {
+  "rc": 0,
+  "sec": 0.39,
+  "start": 162.2,
+  "tests": 7
+ },
+ "test_supervise_stuck": {
+  "rc": 0,
+  "sec": 0.12,
+  "start": 148.0,
+  "tests": 25
+ },
+ "test_supervise_transcript_cli": {
+  "rc": 0,
+  "sec": 0.32,
+  "start": 160.3,
+  "tests": 6
+ },
+ "test_supervise_trust": {
+  "rc": 0,
+  "sec": 3.06,
+  "start": 57.9,
+  "tests": 64
+ },
+ "test_team_land": {
+  "rc": 0,
+  "sec": 0.07,
+  "start": 167.8,
+  "tests": 2
+ },
+ "test_team_plugin": {
+  "rc": 0,
+  "sec": 0.93,
+  "start": 147.1,
+  "tests": 18
+ },
+ "test_textsafe": {
+  "rc": 0,
+  "sec": 0.11,
+  "start": 161.1,
+  "tests": 13
+ },
+ "test_transcript_cli": {
+  "rc": 0,
+  "sec": 1.36,
+  "start": 99.8,
+  "tests": 41
+ },
+ "test_transcript_fixes": {
+  "rc": 0,
+  "sec": 0.18,
+  "start": 142.6,
+  "tests": 15
+ },
+ "test_transcript_images": {
+  "rc": 0,
+  "sec": 0.41,
+  "start": 141.4,
+  "tests": 17
+ },
+ "test_transcript_view": {
+  "rc": 0,
+  "sec": 0.14,
+  "start": 138.7,
+  "tests": 29
+ },
+ "test_transcripts_capture": {
+  "rc": 0,
+  "sec": 0.65,
+  "start": 131.6,
+  "tests": 18
+ },
+ "test_transcripts_codex": {
+  "rc": 0,
+  "sec": 0.6,
+  "start": 112.2,
+  "tests": 19
+ },
+ "test_transcripts_store": {
+  "rc": 0,
+  "sec": 0.52,
+  "start": 51.8,
+  "tests": 48
+ },
+ "test_update": {
+  "rc": 0,
+  "sec": 0.48,
+  "start": 104.4,
+  "tests": 33
+ },
+ "test_update_sh": {
+  "rc": 0,
+  "sec": 20.36,
+  "start": 165.2,
+  "tests": 1
+ },
+ "test_upgrade_cmd": {
+  "rc": 0,
+  "sec": 0.34,
+  "start": 141.1,
+  "tests": 15
+ },
+ "test_venv_per_stamp": {
+  "rc": 0,
+  "sec": 18.82,
+  "start": 71.5,
+  "tests": 47
+ },
+ "test_verdict_binding": {
+  "rc": 0,
+  "sec": 0.14,
+  "start": 154.5,
+  "tests": 13
+ },
+ "test_verdict_details": {
+  "rc": 0,
+  "sec": 1.63,
+  "start": 98.2,
+  "tests": 84
+ },
+ "test_verifier": {
+  "rc": 0,
+  "sec": 0.51,
+  "start": 157.8,
+  "tests": 8
+ },
+ "test_waiting": {
+  "rc": 0,
+  "sec": 0.64,
+  "start": 154.1,
+  "tests": 10
+ },
+ "test_watch_agents": {
+  "rc": 0,
+  "sec": 1.15,
+  "start": 137.4,
+  "tests": 21
+ },
+ "test_watch_coalescing": {
+  "rc": 0,
+  "sec": 0.3,
+  "start": 141.0,
+  "tests": 13
+ },
+ "test_watch_database": {
+  "rc": 0,
+  "sec": 2.51,
+  "start": 119.2,
+  "tests": 24
+ },
+ "test_watch_keys": {
+  "rc": 0,
+  "sec": 4.73,
+  "start": 148.1,
+  "tests": 8
+ },
+ "test_watch_loops_plan": {
+  "rc": 0,
+  "sec": 0.12,
+  "start": 159.0,
+  "tests": 3
+ },
+ "test_watch_push": {
+  "rc": 0,
+  "sec": 0.12,
+  "start": 132.3,
+  "tests": 23
+ },
+ "test_watch_scroll": {
+  "rc": 0,
+  "sec": 1.3,
+  "start": 117.1,
+  "tests": 29
+ },
+ "test_watch_session": {
+  "rc": 0,
+  "sec": 2.07,
+  "start": 139.0,
+  "tests": 24
+ },
+ "test_watch_snapshot": {
+  "rc": 0,
+  "sec": 0.21,
+  "start": 154.8,
+  "tests": 8
+ },
+ "test_windows_entry": {
+  "rc": 0,
+  "sec": 0.17,
+  "start": 140.8,
+  "tests": 20
+ },
+ "test_windows_install": {
+  "rc": 0,
+  "sec": 0.18,
+  "start": 155.4,
+  "tests": 12
+ },
+ "test_writer_check_migration": {
+  "rc": 0,
+  "sec": 0.21,
+  "start": 159.6,
+  "tests": 3
+ }
+}
