@@ -549,10 +549,11 @@ def _board_lines(name: str, job: str, cap: int, cfg: dict) -> list[str]:
     if _memory_on(cfg):
         rem = f"{_bin()} remember --job {_q(job)} --as {_q(name)}"
         lines.append(
-            f"- Project memory, recall: you were shown what memory knows about this job's subject once, "
-            f"prefixed `[swarm memory]`; nothing more is pushed to you. Whenever you need context on "
-            f"anything (a system, an error, a past decision), ask it: `{_bin()} recall --job {_q(job)} "
-            f"\"<what you want to know>\"`. It searches every subject; `--tags T` narrows it.")
+            f"- Project memory, recall: you were shown what memory knows about this job's subjects once, at "
+            f"your start, prefixed `[swarm memory]`; nothing is pushed to you after that. Fetch memories "
+            f"yourself with `{_bin()} recall` whenever you need them (a system, an error, a past decision): "
+            f"`{_bin()} recall --job {_q(job)} \"<what you want to know>\"`. It searches every subject of the "
+            f"configured banks; `--tags T` and `--bank B` narrow it.")
         lines.append(
             f"- Project memory, remember: the moment a durable finding is CONFIRMED, store it, before you "
             f"move on: root causes, why a setting is what it is, traps and gotchas, measured numbers. "

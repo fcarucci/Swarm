@@ -67,6 +67,9 @@ DEFAULT_CONFIG = Path(os.environ.get("SWARM_CONFIG", "~/.config/swarm/config.tom
 # [database] section but leaves one of these keys out relied on the old default, and keeps it
 # (see load_config); `swarm doctor` warns and asks for the key to be set explicitly.
 LEGACY_DATABASE_DEFAULTS = {"user": "agent_board", "dbname": "agent-message-board"}
+# [hindsight] timers, retired: memory is recalled once at an agent's start and on demand, with no
+# timers. A config that still sets them loads fine (the keys are ignored); `swarm doctor` says so.
+RETIRED_MEMORY_KEYS = ("recall_minutes", "remember_nudge_minutes")
 
 DEFAULTS = {
     "database": {"host": "localhost", "port": 5432, "user": "swarm",

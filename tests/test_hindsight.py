@@ -131,21 +131,60 @@ class MemoryTests(HindsightEnv):
         self.assertEqual(memory.splitlines()[1], "- fact number 0")
         self.assertLessEqual(sum(len(l) for l in memory.splitlines()[1:]), 60)
 
-    def test_periodic_recall_injects_only_unseen_memories(self):
+    def test_no_re_recall_after_the_start(self):
+        # one recall at the start (one request per bank); no timer makes another, however long the
+        # agent works and whatever new memories the banks gain
         self.fake.add_memory("coding", "old fact")
         self.cli("activate", "--job", "J")
         self.assertIn("old fact", self.start())
-        self.assertNotIn("[swarm memory]", self.turn())
-        self.assertEqual(len(self.fake.calls("POST", "/memories/recall")), 2)  # not due yet
+        started = len(self.fake.calls("POST", "/memories/recall"))
+        self.assertEqual(started, 2)   # coding, hermes
         self.fake.add_memory("coding", "new fact")
-        self.backdate("agent-1", memory_recalled_at=16)
-        ctx = self.turn()
-        self.assertIn("[swarm memory] new memories from configured banks", ctx)
-        self.assertIn("new fact", ctx)
-        self.assertNotIn("old fact", ctx)
-        self.backdate("agent-1", memory_recalled_at=16)
-        self.assertNotIn("[swarm memory]", self.turn())  # recalled, nothing new: silent
-        self.assertEqual(len(self.fake.calls("POST", "/memories/recall")), 6)
+        self.backdate("agent-1", joined_at=600, memory_recalled_at=600)
+        for _ in range(3):
+            self.assertNotIn("[swarm memory]", self.turn())
+        self.assertEqual(len(self.fake.calls("POST", "/memories/recall")), started)
+
+    def test_start_recall_passes_the_job_tags_and_the_topic_as_query(self):
+        self.cli("activate", "--job", "J", "--project", "PG HA", "--task", "build the cluster")
+        self.start()
+        recall = self.fake.calls("POST", "/memories/recall")
+        self.assertTrue(recall)
+        self.assertEqual({r["body"]["query"] for r in recall}, {"build the cluster"})
+        for r in recall:
+            self.assertEqual(r["body"].get("tags"), ["pg-ha"])
+            self.assertEqual(r["body"].get("tags_match"), "any_strict")
+
+    def test_on_demand_recall_without_tags_sends_no_tag_filter(self):
+        self.cli("activate", "--job", "J", "--project", "PG HA", "--task", "build the cluster")
+        self.start()
+        before = len(self.fake.calls("POST", "/memories/recall"))
+        rc, out, err = self.cli("recall", "--job", "J", "why did etcd split brain")
+        self.assertEqual(rc, 0, err)
+        new = self.fake.calls("POST", "/memories/recall")[before:]
+        self.assertTrue(new)
+        for r in new:
+            self.assertEqual(r["body"]["query"], "why did etcd split brain")
+            self.assertNotIn("tags", r["body"])
+            self.assertNotIn("tags_match", r["body"])
+        # --tags narrows an on-demand recall when asked
+        before = len(self.fake.calls("POST", "/memories/recall"))
+        self.assertEqual(self.cli("recall", "--job", "J", "--tags", "etcd", "x")[0], 0)
+        narrowed = self.fake.calls("POST", "/memories/recall")[before:]
+        self.assertTrue(narrowed)
+        for r in narrowed:
+            self.assertEqual(r["body"]["tags"], ["etcd"])
+
+    def test_retired_timer_keys_still_load_and_doctor_warns(self):
+        from swarm import bootstrap
+        self.enable(recall_minutes=15, remember_nudge_minutes=20)
+        self.assertEqual(self.cfg["hindsight"]["url"], self.fake.url)   # loads; the keys are ignored
+        checks = bootstrap._retired_memory_keys_check(self.config, self.cfg)
+        self.assertEqual(len(checks), 1)
+        self.assertIsNone(checks[0].ok)
+        self.assertIn("recall_minutes and remember_nudge_minutes are retired and ignored", checks[0].detail)
+        self.enable()
+        self.assertEqual(bootstrap._retired_memory_keys_check(self.config, self.cfg), [])
 
     def test_remember_writes_to_the_project_bank_creating_it(self):
         self.cli("activate", "--job", "J", "--project", "proj")
@@ -169,21 +208,18 @@ class MemoryTests(HindsightEnv):
         self.cli("remember", "--job", "J", "--as", me, "second fact")
         self.assertEqual(len(self.fake.calls("PUT", "/v1/default/banks/proj")), 1)  # exists now
 
-    def test_nudge_once_per_quiet_stretch(self):
+    def test_no_remember_reminder_on_a_timer(self):
+        # the timed "you stored nothing for N minutes" reminder is gone: however long an agent works
+        # without storing, no turn carries a memory reminder (the stop gate is the only nudge)
         self.cli("activate", "--job", "J")
         self.hook("start")
-        me = self.agent("agent-1").name
-        self.assertNotIn("reminder", self.turn())
-        self.backdate("agent-1", joined_at=21)
-        ctx = self.turn()
-        self.assertIn("[swarm memory] reminder: you have stored nothing in project memory for 20 minutes", ctx)
-        self.assertIn(f"remember --job 'J' --as '{me}'", ctx)
-        self.assertNotIn("reminder", self.turn())
-        self.backdate("agent-1", nudged_at=21)
-        self.cli("remember", "--job", "J", "--as", me, "a finding")
-        self.assertNotIn("reminder", self.turn())  # stored something recently
-        self.backdate("agent-1", remembered_at=21)
-        self.assertIn("reminder", self.turn())
+        self.assertNotIn("[swarm memory]", self.turn())
+        self.backdate("agent-1", joined_at=600)
+        for _ in range(3):
+            ctx = self.turn()
+            self.assertNotIn("stored nothing", ctx)
+            self.assertNotIn("reminder", ctx)
+            self.assertNotIn("[swarm memory]", ctx)
 
     def test_remember_spools_when_the_board_is_unreachable(self):
         self.cli("activate", "--job", "J")
