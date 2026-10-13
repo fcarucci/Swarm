@@ -1,0 +1,5 @@
+[run]
+source = lib/swarm
+parallel = True
+patch = subprocess
+relative_files = False

@@ -1,0 +1,162 @@
+name: Perf
+on:
+  push:
+    branches: [perf/homer]
+env:
+  ONLY: ${{ github.event.head_commit.message }}
+defaults:
+  run:
+    shell: bash
+jobs:
+  baseline:
+    if: ${{ contains(github.event.head_commit.message, '[baseline]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.13", cache: pip}
+      - run: pip install -r requirements.txt -r requirements-postgres.txt
+      - name: serial discover (control)
+        env: {SWARM_TEST_BACKEND: memory}
+        run: |
+          nproc; s=$(date +%s)
+          python -B -m unittest discover -s tests -q </dev/null 2>&1 | tail -5
+          echo "BASELINE_WALL=$(( $(date +%s) - s ))s"
+  pool:
+    if: ${{ contains(github.event.head_commit.message, '[pool]') }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {jobs: 1, flags: "-B", name: j1}
+          - {jobs: 4, flags: "-B", name: j4-B}
+          - {jobs: 4, flags: "", name: j4}
+          - {jobs: 6, flags: "", name: j6}
+          - {jobs: 8, flags: "", name: j8}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.13", cache: pip}
+      - run: pip install -r requirements.txt -r requirements-postgres.txt
+      - name: pool ${{ matrix.name }}
+        env: {SWARM_TEST_BACKEND: memory}
+        run: |
+          d=""; [ -f .github/scripts/durations.json ] && d="--durations .github/scripts/durations.json"
+          s=$(date +%s)
+          python .github/scripts/shard.py --jobs ${{ matrix.jobs }} --flags "${{ matrix.flags }}" $d --out res-${{ matrix.name }}.json
+          echo "POOL_WALL=$(( $(date +%s) - s ))s"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with: {name: "res-${{ matrix.name }}", path: "res-*.json"}
+  xdist:
+    if: ${{ contains(github.event.head_commit.message, '[xdist]') }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dist: [loadfile, load, loadgroup]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.13", cache: pip}
+      - run: pip install -r requirements.txt -r requirements-postgres.txt pytest pytest-xdist
+      - env: {SWARM_TEST_BACKEND: memory}
+        run: |
+          s=$(date +%s)
+          python -B -m pytest tests -n 4 --dist ${{ matrix.dist }} -q -p no:cacheprovider -x --maxfail=40 --durations=25 2>&1 | tail -70 || true
+          echo "XDIST_WALL=$(( $(date +%s) - s ))s"
+  coverage:
+    if: ${{ contains(github.event.head_commit.message, '[coverage]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.13", cache: pip}
+      - run: pip install -r requirements.txt -r requirements-postgres.txt "coverage>=7.10"
+      - env: {SWARM_TEST_BACKEND: memory}
+        run: |
+          s=$(date +%s)
+          python .github/scripts/shard.py --jobs 4 --coverage covdata --out res-cov.json || true
+          echo "COV_WALL=$(( $(date +%s) - s ))s"
+          python - <<'PY'
+          import coverage, glob, json, collections, os
+          out = collections.defaultdict(set)
+          for m in sorted(os.listdir("covdata")):
+              pass
+          mods = {f.split(".coverage.")[1].split(".")[0] for f in glob.glob("covdata/.coverage.*")}
+          for m in sorted(mods):
+              cd = coverage.CoverageData(basename=f"covdata/.coverage.{m}")
+              files = glob.glob(f"covdata/.coverage.{m}.*")
+              for f in files:
+                  d = coverage.CoverageData(basename=f); d.read()
+                  for p in d.measured_files():
+                      if "lib/swarm" in p: out[p.split("lib/swarm/",1)[1]].add(m)
+          json.dump({k: sorted(v) for k, v in out.items()}, open("covmap.json", "w"), indent=1, sort_keys=True)
+          print("files mapped", len(out))
+          PY
+      - uses: actions/upload-artifact@v4
+        with: {name: covmap, path: "covmap.json\nres-cov.json"}
+  setup-nocache:
+    if: ${{ contains(github.event.head_commit.message, '[setup]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.13"}
+      - run: pip install -r requirements.txt -r requirements-postgres.txt
+  setup-cache:
+    if: ${{ contains(github.event.head_commit.message, '[setup]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.13", cache: pip}
+      - run: pip install -r requirements.txt -r requirements-postgres.txt
+  setup-venvcache:
+    if: ${{ contains(github.event.head_commit.message, '[setup]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        id: py
+        with: {python-version: "3.13"}
+      - uses: actions/cache@v4
+        id: venv
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ steps.py.outputs.python-version }}-${{ hashFiles('requirements*.txt') }}
+      - if: steps.venv.outputs.cache-hit != 'true'
+        run: python -m venv .venv && .venv/bin/pip install -r requirements.txt -r requirements-postgres.txt
+      - run: .venv/bin/python -c "import psycopg; print('ok')"
+  bflag:
+    if: ${{ contains(github.event.head_commit.message, '[bflag]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.13", cache: pip}
+      - run: pip install -r requirements.txt -r requirements-postgres.txt
+      - env: {SWARM_TEST_BACKEND: memory}
+        run: |
+          SUB=test_addressing,test_agent_title,test_blockers,test_channel,test_clock,test_models,test_owners,test_roles,test_routing,test_safefile,test_textsafe,test_spool,test_person,test_receipts,test_expiry,test_goals,test_layout,test_waiting
+          for i in 1 2; do
+            for f in "" "-B"; do
+              s=$(date +%s.%N)
+              python .github/scripts/shard.py --jobs 1 --flags "$f" --only $SUB --out /dev/null | head -1
+              echo "flag[$f] round $i: $(echo "$(date +%s.%N) - $s" | bc)s"
+            done
+          done
+          s=$(date +%s.%N); python -B -c "pass"; python -c "pass"; python -X importtime -c "import sys; sys.path.insert(0,'lib'); import swarm.cli" 2>&1 | tail -1
+  pgstart:
+    if: ${{ contains(github.event.head_commit.message, '[pgstart]') }}
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: public.ecr.aws/docker/library/postgres:16
+        env: {POSTGRES_USER: swarm_test, POSTGRES_PASSWORD: swarm_test_pw, POSTGRES_DB: postgres}
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U swarm_test" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - run: echo up
