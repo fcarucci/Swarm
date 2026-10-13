@@ -240,6 +240,18 @@ def client_scripts(platform: str | None = None, python: str | None = None) -> di
     return out
 
 
+def _windows_readonly(path: Path, on: bool) -> None:
+    """On Windows, set or clear a file's read-only attribute (POSIX modes are not enforced there); elsewhere
+    nothing (the file mode does it). Best effort: a missing file is fine."""
+    if os.name != "nt":
+        return
+    import stat
+    try:
+        os.chmod(path, stat.S_IREAD if on else stat.S_IREAD | stat.S_IWRITE)
+    except OSError:
+        pass
+
+
 def _read_person(path: Path) -> bytes | None:
     """A regular file of the person's (or a seat's .git file), read without following a link: O_NOFOLLOW where the
     platform has it; on Windows (no O_NOFOLLOW) an explicit link check first, and the open refused if that fails."""
@@ -302,7 +314,10 @@ def prepare(cfg: dict, job: str, seat: str) -> Path:
         for sub in ("home", "tmp", "claude", "codex", ".ssh", "broker", "bin", "gh"):
             os.close(safefs.open_sub(h, sub, strict_mode=0o700))
         privfs.write_atomic(h, "gitconfig", gitconfig_text(cfg))
+        settings_path = home_dir(job, seat) / SEAT_SETTINGS
+        _windows_readonly(settings_path, False)    # Windows cannot replace a read-only file: clear it first
         privfs.write_atomic(h, SEAT_SETTINGS, seat_settings(person_settings), 0o400)   # read-only for the seat
+        _windows_readonly(settings_path, True)     # Windows: the read-only attribute (POSIX: mode 0400 above)
 
         def into(sub, name, data, mode=0o600):
             d = safefs.open_sub(h, sub, strict_mode=0o700)

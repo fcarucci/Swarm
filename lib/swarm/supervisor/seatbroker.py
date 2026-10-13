@@ -236,7 +236,7 @@ def _find_transcript(seat_dir: str, harness: str, key: str | None) -> str | None
 def seat_transcript(seat_dir: str, harness: str, key: str | None) -> str | None:
     """The path of the seat's own transcript in its seat directory (see _find_transcript), or None."""
     rel = _find_transcript(seat_dir, harness, key)
-    return os.path.join(seat_dir, rel) if rel else None
+    return os.path.join(seat_dir, *rel.split("/")) if rel else None   # native separators
 
 
 def read_seat_transcript(seat_dir: str, harness: str, key: str | None, limit: int) -> bytes | None:

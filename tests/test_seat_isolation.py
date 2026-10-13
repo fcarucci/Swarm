@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -106,7 +107,8 @@ class PrepareTest(SeatHomeCase):
     def test_the_seat_directory(self):
         h = seathome.prepare(self.cfg, "J", "eng-1")
         self.assertTrue(str(h).startswith(str(self.priv)))
-        self.assertEqual(os.stat(h).st_mode & 0o777, 0o700)
+        if os.name == "posix":   # Windows has no POSIX modes (the seat dir is in the private dir there too)
+            self.assertEqual(os.stat(h).st_mode & 0o777, 0o700)
         self.assertEqual(sorted(os.listdir(h / ".ssh")), ["config", "known_hosts"])
         self.assertIn("IdentityAgent none", (h / ".ssh" / "config").read_text())
         git = (h / "gitconfig").read_text()
@@ -154,7 +156,10 @@ class SeatAllowTest(SeatHomeCase):
         self.assertIn("Bash(make test:*)", allow)
         self.assertEqual(len(allow), 1 + 13)                         # nothing broader
         self.assertFalse(any(r in ("Bash", "Bash(*)", "Bash(swarm:*)") for r in allow))
-        self.assertEqual(os.stat(path).st_mode & 0o777, 0o400)
+        if os.name == "posix":
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o400)
+        else:   # Windows has no POSIX modes: the read-only attribute
+            self.assertFalse(os.stat(path).st_mode & stat.S_IWRITE)
         seathome.prepare(self.cfg, "J", "eng-1")                     # refreshed, not duplicated
         self.assertEqual(json.loads(path.read_text())["permissions"]["allow"], allow)
 
@@ -177,6 +182,7 @@ class SpecTest(SeatHomeCase):
         h = seathome.prepare(self.cfg, "J", "s")
         return seathome.jail_spec(self.cfg, h, workdir, self.home), h
 
+    @unittest.skipUnless(seathome.jail_platform(), "the jail spec exists only where the jail does (Linux)")
     def test_an_allowlist(self):
         wt = self.worktree()
         spec, h = self.spec(wt)
@@ -508,7 +514,7 @@ class TypedProtocolTest(BrokerCase):
         self.assertEqual(argv[argv.index("--config") + 1], "/sup/config.toml")
         self.assertEqual(cli_argv(self.calls[-1]),
                          ["post", "--job=J", f"--key={self.run['session_id']}", "--", "hello", "world"])
-        self.assertEqual(kw["cwd"], "/")
+        self.assertEqual(kw["cwd"], os.path.abspath(os.sep))   # the neutral cwd: "/" (Windows: the drive root)
         self.assertEqual(kw["env"]["CLAUDE_CODE_SESSION_ID"], self.run["session_id"])
         self.assertEqual(kw["env"]["SWARM_CONFIG"], "/sup/config.toml")
         self.assertNotIn("PYTHONPATH", kw["env"])
@@ -605,10 +611,10 @@ class TypedProtocolTest(BrokerCase):
         argv, kw = self.calls[-1]
         self.assertEqual(cli_argv(self.calls[-1]), ["hook", "--host", "claude", "turn"])
         sent = json.loads(kw["input"])
+        self.assertEqual(os.path.normpath(sent.pop("transcript_path")),
+                         os.path.normpath(str(proj / f"{self.run['session_id']}.jsonl")))
         self.assertEqual(sent, {"tool_name": "Bash", "tool_input": {"command": "ls"},
-                                "session_id": self.run["session_id"],
-                                "transcript_path": str(proj / f"{self.run['session_id']}.jsonl"),
-                                "cwd": str(self.wd)})
+                                "session_id": self.run["session_id"], "cwd": str(self.wd)})
         rc, _, _ = self.raw({"v": 2, "kind": "hook", "event": "../bin", "payload": {}})
         self.assertEqual(rc, 2)
 
@@ -1399,6 +1405,28 @@ class WindowsPathsTest(unittest.TestCase):
                 self.assertTrue(mod._under(r"C:\Users\Runner\work", "C:/Users/Runner/work/"))
                 self.assertFalse(mod._under(r"C:\Users\Runner\work2", r"C:\Users\Runner\work"))
                 self.assertFalse(mod._under(r"D:\Users\Runner\work", r"C:\Users\Runner\work"))
+
+
+class WindowsSettingsTest(SeatHomeCase):
+    """The seat settings file gets the read-only attribute on Windows, and is still refreshed there."""
+
+    def test_readonly_attribute_set_and_cleared_on_windows(self):
+        calls = []
+        with mock.patch.object(os, "name", "nt"), mock.patch.object(os, "chmod", lambda p, m: calls.append(m)):
+            seathome._windows_readonly(Path("x"), True)
+            seathome._windows_readonly(Path("x"), False)
+        self.assertEqual(calls, [stat.S_IREAD, stat.S_IREAD | stat.S_IWRITE])
+        with mock.patch.object(os, "chmod", lambda p, m: calls.append(("posix", m))):
+            seathome._windows_readonly(Path("x"), True)
+        self.assertEqual(len(calls), 2)          # nothing on POSIX
+
+    def test_the_transcript_path_uses_native_separators(self):
+        import ntpath
+        sid = "11111111-2222-3333-4444-555555555555"
+        with mock.patch.object(seatbroker, "_find_transcript", lambda d, h, k: f"claude/projects/p/{sid}.jsonl"), \
+                mock.patch.object(os, "path", ntpath):
+            got = seatbroker.seat_transcript("C:\\seat", "claude", sid)
+        self.assertEqual(got, f"C:\\seat\\claude\\projects\\p\\{sid}.jsonl")
 
 
 if __name__ == "__main__":
