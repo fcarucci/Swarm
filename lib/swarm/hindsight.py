@@ -483,7 +483,10 @@ def remember(board, cfg: dict, job: str, name: str, text: str, project: str | No
     keys source, job, agent and project, which always win."""
     project = project or project_of(board.job_status(job), job, cfg)
     from swarm import learnings
-    Client(cfg).retain(bank_id(project), text, tags=learnings.stamp_tags(board, job, extra_tags),
+    # a job or agent named like a subject tag (`swarm activate --job swarm`) must not become one: those are metadata
+    names = {str(job).lower(), str(name).lower()}
+    tags = [t for t in learnings.stamp_tags(board, job, extra_tags) if t not in names]
+    Client(cfg).retain(bank_id(project), text, tags=tags,
                        metadata={**(metadata or {}), "source": "swarm", "job": job, "agent": name,
                                  "project": project},
                        context=f"swarm job {job}", document_id=document_id,
