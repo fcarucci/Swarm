@@ -810,7 +810,7 @@ class IdleOrchestratorEndToEnd(unittest.TestCase):
                 js = b.job_status("J")
             return js.status, js.verdict
         try:
-            wait_until(lambda: status()[0] != "active", timeout=240, interval=0.5)
+            wait_until(lambda: status()[0] != "active", timeout=240, interval=0.05)
         except AssertionError:
             self.fail(f"not terminal after 240 s: {status()}\n{self.evidence()}")
         self.assertEqual(status(), ("completed", "met"), self.evidence())

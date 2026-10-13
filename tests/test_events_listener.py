@@ -88,7 +88,7 @@ def running(src, cfg_events=None, board=None, logs=None, **kw):
                       write_token=lambda token: None)   # never the real private dir
     lst.cfg["port"] = 0
     host, port = lst.bind()
-    t = threading.Thread(target=lst.serve_forever, daemon=True)
+    t = threading.Thread(target=lst.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     t.start()
     try:
         yield lst, board, port
