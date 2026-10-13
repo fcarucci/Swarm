@@ -2542,9 +2542,10 @@ recall_banks = ["coding", "hermes"]
   `swarm deactivate --job J --no-learn "<reason>"` (the requester session's grant, or a confirmed
   tty outside any agent host), recorded on the job. A drive job does the step itself: once a MET
   or UNREACHABLE verdict is there, the driver launches its `learner` seat (an ordinary ledger
-  intent, so a crashed driver resumes it) and closes after the step is recorded, or after the
-  learner used `max_attempts` (the markers then stay for a later `swarm learn`). The drive loop
-  makes no LLM call.
+  intent, so a crashed driver resumes it) and closes only after the step is recorded. If the
+  learner used `max_attempts` without finishing, the job holds (it never closes past the step)
+  until a person runs `swarm learn` or `swarm deactivate --no-learn`. The drive loop makes no LLM
+  call.
 - **Failure:** one `timeout_seconds` timeout per call. Only a sign that Hindsight itself can't
   be reached (a connection failure, a timeout, or a 502/503/504 from a proxy in front of it) is
   logged to the hook error log and marks all of Hindsight unreachable for `retry_after_seconds`
