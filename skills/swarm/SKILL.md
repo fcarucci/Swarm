@@ -233,7 +233,7 @@ do with an event is the business of the plugin or skill that posts it.
 
 A job activated with `--goal` is **driven**: the requester session's session driver (no timer, any platform; `swarm drive run` when no session is open) runs it (the lead, the seats, review, fixes, the judge, landing) and the activating session is only the requester/observer. Full reference: `docs/REFERENCE.md#drive-mode`; the engineering-team skill has the brief template. The rest of "Running a swarm" below, where the orchestrating session starts agents itself, applies to jobs nothing drives: no goal, or `--no-drive --reason TEXT`.
 
-Four breaking changes: a goal implies drive; a question in a drive job needs `--default` (applied when it expires); the requester's Agent-tool spawns are refused in drive jobs (staffing is `swarm seat request`); and no timer: the session driver runs drive jobs, so `swarm supervise enable` is no longer needed (`swarm supervise disable` still halts them).
+Four breaking changes: a goal implies drive; a question in a drive job needs `--default` (applied when it expires); the requester's Agent-tool spawns are refused in drive jobs (staffing is `swarm seat request`); and no timer: Swarm installs none, the session driver runs drive jobs (`swarm halt` stops one).
 
 - **Activate:** `swarm activate --job J --goal G [--lead-brief PATH] [--workdir DIR] [--requirements PATH]... [--remote NAME=URL] [--credential DEST=SOURCE] [--max-cost-usd N] [--ruling-reserve-usd N] [--budget KEY=VALUE] [--model ROLE=MODEL]`. The spending cap and every `[drive]` value are configurable defaults (shipped: 40 USD cap, 5 USD ruling reserve); `[drive.models]` sets the model per role (haiku engineers, sonnet reviewers and QA, opus judge, lead and security). `--no-drive --reason TEXT` opts out. Change a running job with `swarm drive budget|models`.
 - **Seats:** the lead runs `swarm seat request --job J --seat NAME --role ROLE --brief PATH [--model M] [--workdir DIR]`, `swarm seat release` (`--withdraw-artifact GROUP --reason TEXT` withdraws a group), `swarm seat list|show`; `seat cancel` is a person's. Workdirs lie under the job's work roots, never under `/tmp`.
@@ -548,10 +548,9 @@ way its own host does it. `swarm status --job <job>` shows each agent's HOST and
 | `who --job J` | active agents on the job, tab-separated: exact name (paste into `--to`), host, role, status, last contact, current tool |
 | `leave --as NAME \| --key K` | release a name (exit 1 if no active agent matched) |
 | `purge` | apply retention now (it also runs on every join and activate), and auto-close the jobs that are done and quiet |
-| `supervise [--dry-run] [--job J]` | one supervisor pass (the systemd user timer runs it every `[supervise] timer_minutes`; off unless `[supervise] enabled = true`, which `supervise enable` sets, or the key is missing from a config written before the opt-in): recover this machine's crashed agents and orphaned coordinators within budgets, or post once why not; then print the caps. `--dry-run` prints what it would do and changes nothing |
-| `supervise enable\|disable` | opt in or out of the supervisor: write `[supervise] enabled = true\|false` in the config and install and start, or stop and disable, the systemd user timer |
+| `supervise [--dry-run] [--job J]` | one supervisor pass, run by hand (no timer runs it; off unless `[supervise] enabled = true`, a missing key is off; drive jobs are driven by the session driver, not by this): recover this machine's crashed agents and orphaned coordinators within budgets, or post once why not; then print the caps. `--dry-run` prints what it would do and changes nothing |
 | `drive budget\|models` | change a running drive job without a rollover: `drive budget --job J KEY=VALUE ...` (cost cap, reserve, sessions, wall hours) or `drive models --job J ROLE=MODEL ...`; the person at a terminal or the job's requester session only |
-| `uninstall [--purge] [--dry-run]` | remove what Swarm set up outside the plugin: the supervisor units, the launcher it wrote, `~/.local/share/swarm`, the entries it added to Claude's and Codex's sandbox settings (backed up first); `--purge` also deletes `~/.local/state/swarm`, the default SQLite board and the config; then remove the plugin with the host |
+| `uninstall [--purge] [--dry-run]` | remove what Swarm set up outside the plugin: a legacy supervisor timer, the launcher it wrote, `~/.local/share/swarm`, the entries it added to Claude's and Codex's sandbox settings (backed up first); `--purge` also deletes `~/.local/state/swarm`, the default SQLite board and the config; then remove the plugin with the host |
 | `events serve` / `events check` | `serve`: the HTTP listener plugins' event sources feed (`[events] enabled`; the supervisor keeps it running). `check`: the safety-net checks once (listener up, `event wait` armed, job stalled, events unacked), one `SWARM-ALERT` per job; exit 1 on a problem |
 | `transcript list [--job J] [--agent NAME]` | archived transcripts: job, agent, role, host (`claude`/`codex`), raw/stored size, ratio, redactions, final, captured, key; then a total line |
 | `transcript show --job J --agent NAME \| --agent NAME \| --job J --orchestrator \| [--job J] --key K [--format text\|jsonl] [--tail N] [--grep RE] [-o FILE]` | one transcript: `text` (default) = readable turns (user, assistant, tool call, tool result; long tool output trimmed, thinking left out), `jsonl` = the stored redacted JSONL. `--agent` alone searches every job; several matches are listed (job, role, date, size) and it exits 1 asking for `--job`. `--tail`/`--grep` (case-insensitive regex) work on turns, or lines with `jsonl` |
@@ -814,10 +813,11 @@ for b in memory sqlite file; do SWARM_TEST_BACKEND=$b .venv/bin/python -B -m uni
 
 ## Supervisor (automatic crash recovery)
 
-Automatic crash recovery is enabled by default. `swarm init` or `swarm upgrade` installs the
-systemd user timer. It runs every 5 minutes (`timer_minutes`); an explicit `enabled = false`
-keeps recovery off. The timer needs a user systemd manager; `swarm doctor` warns when it or the
-harness is missing.
+Crash recovery is off unless `[supervise] enabled = true` (a missing key is off). Swarm installs
+no timer: `swarm supervise` is a one-shot pass you run by hand, and drive jobs are driven by the
+session driver instead. Replacements launch in systemd user scopes, so they need a user systemd
+manager; `swarm doctor` warns when it or the harness is missing, and fails on a legacy
+`swarm-supervise` timer (`swarm upgrade` removes it).
 Recovery holds with one board notice when the recorded harness is unavailable for this OS user.
 
 The supervisor restarts crashed agents under their previous name and role, using their recorded
@@ -842,8 +842,8 @@ and `swarm supervise approve` checks apply to automatic recovery.
 
 ### Review pipeline
 
-`[pipeline] enabled = true` is the default alongside the supervisor. It uses the same timer
-and private owner enrolment records. New `DONE REF` board posts (or `swarm done`) start
+`[pipeline] enabled = true` is the default alongside the supervisor. It runs in the same
+`swarm supervise` pass and uses the private owner enrolment records. New `DONE REF` board posts (or `swarm done`) start
 artifact-bound review; multiple artifacts keep independent verdict histories shown in `status`.
 `swarm done --branch B --sha S` and `DONE B S` remain coding hand-off aliases.
 Only the newest SHA per branch counts. Multi-word references must be JSON-quoted;

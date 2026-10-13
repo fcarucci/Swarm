@@ -243,7 +243,7 @@ This could not be verified on a real Codex for Windows (CI has none): if `swarm 
 codex` reports the hooks as not running, tell us which shell Codex used.
 
 **Not available or different on Windows.**
-- `swarm supervise` (stuck-agent restarts, systemd timer) is Linux only and says so.
+- `swarm supervise` (stuck-agent restarts, a one-shot pass) is Linux only and says so. Drive mode works on Windows (the session driver); Swarm installs no Task Scheduler task.
 - The `0700`/`0600` mode and owner checks of the host and state directories do not exist: the
   profile's NTFS permissions apply. Symlinks and junctions in those directories are still refused.
 - `swarm migrate` has nothing to do (the old skill install never existed there).
@@ -1330,11 +1330,11 @@ automatically by the hooks) on one host before the others run the new code.
 `/proc/self/fd` and reaps them through `/proc`; on macOS it refuses to launch (safely) until that
 is ported.
 
-Off by default: `swarm supervise enable` writes `[supervise] enabled = true` and installs and starts the timer; `swarm supervise disable` writes `false` and stops it. New configs (written from config.example.toml) say `enabled = false`; an existing config without the key, written before the opt-in, keeps the supervisor on on every host, so stuck-agent closing keeps running on macOS and hosts without systemd too (`swarm doctor` suggests making it explicit). On macOS no launchd agent or timer is installed and `supervise enable` says replacements can't be launched there yet. `swarm uninstall [--purge] [--dry-run]` removes the units with everything else Swarm set up outside the plugin. Removed: the supervisor's units (stopped first), the `~/.local/bin` launcher Swarm wrote, `~/.local/share/swarm` (the venv, bytecode cache, host-only files and logs, the supervisor's private dir, the complexity-analyzer `tools/`, and `legacy-skill-*` backups), and the entries Swarm added to Claude's `sandbox.filesystem.allowWrite` and Codex's `writable_roots` (each file backed up first). `--purge` also deletes `~/.local/state/swarm` (local file boards, markers, spool), the default SQLite board dir `~/.local/share/swarm-board`, and the config file when it is in `~/.config/swarm`. Kept even with `--purge`: a Postgres board (never dropped), a SQLite or file board at a non-default path, the other files in `~/.config/swarm` (`team.toml`, `webhook-secret`, `ci-github-state.json`, `*.bak*`), a config file outside `~/.config/swarm` (`--config`/`SWARM_CONFIG`), the `*.pre-swarm-*` backups uninstall itself makes of the settings files, and any cron entry you added. If stopping the timer fails (for example no user systemd bus in this shell), uninstall removes nothing and prints the commands to run. With recovery enabled, the swarm closes agents that are stuck and,
+Off by default: set `[supervise] enabled = true` in the config by hand to turn it on (a missing key is off, whatever the config's age). No timer runs it: Swarm installs no systemd timer or service, launchd agent, Task Scheduler task or cron entry. `swarm supervise` is a one-shot pass you run by hand; drive jobs are driven by the session driver ([Drive mode](#drive-mode)) whatever `[supervise] enabled` says. `swarm bootstrap` and `swarm upgrade` remove a `swarm-supervise.timer` and `swarm-supervise.service` left by an earlier build, printing one line, and `swarm doctor` fails while they are there ("legacy swarm-supervise timer found; run swarm upgrade to remove it"). `swarm uninstall [--purge] [--dry-run]` removes everything Swarm set up outside the plugin. Removed: a legacy `swarm-supervise` timer and service (stopped first), the `~/.local/bin` launcher Swarm wrote, `~/.local/share/swarm` (the venv, bytecode cache, host-only files and logs, the supervisor's private dir, the complexity-analyzer `tools/`, and `legacy-skill-*` backups), and the entries Swarm added to Claude's `sandbox.filesystem.allowWrite` and Codex's `writable_roots` (each file backed up first). `--purge` also deletes `~/.local/state/swarm` (local file boards, markers, spool), the default SQLite board dir `~/.local/share/swarm-board`, and the config file when it is in `~/.config/swarm`. Kept even with `--purge`: a Postgres board (never dropped), a SQLite or file board at a non-default path, the other files in `~/.config/swarm` (`team.toml`, `webhook-secret`, `ci-github-state.json`, `*.bak*`), a config file outside `~/.config/swarm` (`--config`/`SWARM_CONFIG`), the `*.pre-swarm-*` backups uninstall itself makes of the settings files, and any cron entry you added. If stopping a legacy timer fails (for example no user systemd bus in this shell), uninstall removes nothing and prints the commands to run. With recovery enabled, the swarm closes agents that are stuck and,
 while their job is open, restarts them as headless sessions under the same name.
 
 **What counts as stuck** (checked by every sweep: `status`, `watch`, joins, the hooks' start and
-stop, and the supervisor's timer), only for agents this machine and OS user started:
+stop, and every `swarm supervise` pass), only for agents this machine and OS user started:
 
 - `stuck:dead`: no hook contact for `[board] dead_minutes` (30). Checked first: at the
   documented defaults (30 below 90) an agent with no current tool call reaches `stuck:dead`
@@ -1351,8 +1351,7 @@ is logged and a later sweep retries it (see [failed finals](#transcript-archive-
 restart can be briefed from a partial or (rarely) absent transcript. Either way the board says why the agent was closed, and the job waits for the
 restart.
 
-**Restarts.** `swarm supervise` runs every `timer_minutes` (5) from a systemd user timer that
-`swarm init`, `swarm bootstrap` or `swarm upgrade` installs. Each replacement launches in its own systemd user scope
+**Restarts.** `swarm supervise` is a one-shot pass, run by hand (nothing schedules it). Each replacement launches in its own systemd user scope
 (`systemd-run --user --scope`); with no user systemd manager at all, no replacement can be
 launched, a notice is posted once per job, and `swarm doctor` reports WARN with the fix
 `loginctl enable-linger $USER`. A manager that is up but with linger off is a separate, milder
@@ -1449,7 +1448,7 @@ truncated), and a session's output file that is already there is moved aside to 
 never opened. Each pass also reads (never writes) `$CODEX_HOME/config.toml` (default
 `~/.codex/config.toml`): a writable root there that covers, or lies inside, `~/.local/share/swarm`
 (the venv, `host/` and the private directory) makes the pass refuse to run: one log line, no
-pass, exit status 1, so the timer's journal shows it. `swarm doctor` shows `supervise private
+pass, exit status 1. `swarm doctor` shows `supervise private
 dir` and `sandbox roots` as FAIL. A run is handed to its runner over a pipe, never read back from
 a file, and the brief is never written to disk. Before acting on a run file left by a dead
 runner, a pass checks every field (its restart id, scope unit name, resume marker path, board,
@@ -1527,20 +1526,20 @@ they hold across passes, OS users and hosts:
 | `run_output_days` | 7 | a replacement's redacted output tail is kept this long |
 | `pass_env` | [] | extra environment variable names passed to replacements (they get a minimal allowlisted environment otherwise; never the supervisor's `PGPASSWORD`) |
 | `allowed_workdirs` | ["~/src"] | a replacement only runs in a directory under one of these (real path, no dot-directory below the root, owned by you, never home or above); anything else is refused with `can't restart <name>: work dir <d> not under [supervise] allowed_workdirs` |
-| `timer_minutes` | 5 | the timer's period |
+| `timer_minutes` | 5 | the drive stall period: a driver that has not passed over a job for 2x this is stalled (`DRIVER-STALLED`); no timer runs on it |
 
 **After a board outage**, only agents whose last contact falls inside the outage window (from
 just before it started to when it recovered) get `dead_minutes` of grace once the board is back;
 an agent last heard from outside that window is judged on its real contact time as usual. Agents
 that stay silent past their grace are restarted once.
 
-**Setup checks:** `swarm doctor` reports the timer, its last run, `loginctl` linger (user timers
-stop at logout without it), whether the Codex config's writable roots cover the private
+**Setup checks:** `swarm doctor` fails on a legacy `swarm-supervise` timer, and reports `loginctl` linger (replacement
+scopes stop at logout without it), whether the Codex config's writable roots cover the private
 directory (`supervise private dir`), the `allowed_workdirs` (`supervise workdirs`, WARN when none
 exists) and the harness binary: with `--host` (or run inside a session) that
 host's, otherwise the harnesses whose hooks have run for this OS user, else whichever is installed. On Codex, replacements need the plugin's hooks
 trusted (`/hooks`); one that never joins is killed after `enrol_minutes`. Logs:
-`~/.local/share/swarm/supervisor/supervise.log`, `journalctl --user -u swarm-supervise.service`.
+`~/.local/share/swarm/supervisor/supervise.log`.
 
 ## External events: the listener and the safety nets
 
@@ -1599,7 +1598,7 @@ the listener. A TCP forwarder run as the listener's own user (socat, `ssh -L`, a
 relay their requests to `/github-forward/<token>` with the listener's uid, and the socket check
 would pass. So run none of those as the listener's user while the listener is up.
 
-**Keep-alive.** Every `swarm supervise` pass (the existing timer) starts the listener detached when
+**Keep-alive.** Every `swarm supervise` pass starts the listener detached when
 `[events] enabled` and nothing answers on the port; a listener that holds its lock but does not answer
 is left alone and alerted. Sources with a `poll` are polled by the listener on their own
 `poll_interval_s`.
@@ -1620,7 +1619,7 @@ writes the one-line summary. The model is never inherited from the orchestrator 
 
 ## Review pipeline
 
-The owner supervisor drives review on the same timer as crash recovery. `[pipeline] enabled`
+The owner supervisor drives review in the same `swarm supervise` pass as crash recovery (run by hand; no timer). `[pipeline] enabled`
 defaults to true; `[supervise] enabled = false`, an off file, a paused/closed job,
 `--no-supervise`, or an explicit human/external wait holds it. Only this machine/user's private
 activation enrolment record authorizes launches. Work directory approvals, launch permissions,
@@ -1765,7 +1764,7 @@ sends no CI webhooks): never faster than 600 s (`poll_interval_s` can only raise
 ## Drive mode
 
 A goal job is **driven**: the requester session's **session driver** runs the job, not a coordinator session and
-not a timer. `swarm activate
+not a timer (Swarm installs none). `swarm activate
 --job J --goal G` implies drive (`--drive` is accepted and does nothing); `--no-drive --reason TEXT` runs the
 goal job the old way, with nothing driving it. Nothing else needs to stay alive after activation: the session that
 activated the job is the **requester/observer**. It may watch (`swarm watch`, `swarm snapshot --follow`) and, as the
@@ -1798,7 +1797,7 @@ Drive mode changes four things for anyone who scripted the old flow:
 1. **A goal implies drive.** `swarm activate --goal` starts a driven job; use `--no-drive --reason TEXT` for the old behaviour.
 2. **`--default` is required** on every `swarm ask` in a drive job: the driver applies it when the question expires (`question_expiry`, 4h).
 3. **Requester Agent-tool spawns are refused in drive jobs.** The requester no longer staffs the job with the host's spawn tool; the lead requests seats with `swarm seat request` and the supervisor launches them.
-4. **No timer: the session driver.** Drive jobs need no `swarm supervise enable` and no timer, on any platform (an earlier draft refused `activate --goal` without them, and refused macOS and Windows); the requester session's driver runs them while it is open, `swarm drive run` when none is. `swarm supervise` stays an optional legacy pass; `swarm supervise disable` still halts drive jobs.
+4. **No timer: the session driver.** Swarm installs no timer on any platform, and `swarm supervise enable`/`disable` are gone (an earlier draft refused `activate --goal` without a timer, and refused macOS and Windows); the requester session's driver runs drive jobs while it is open, `swarm drive run` when none is. `[supervise] enabled` does not gate drive jobs; `swarm halt` stops one.
 
 ### Terminal states
 
@@ -1816,7 +1815,7 @@ the driver records the mechanical UNREACHABLE and says so in the outcome.
 - **Rounds.** A hand-off (`swarm done`) starts an independent review (`swarm review`), then a fix round or a judge verdict, bounded by `max_rounds` and by progress.
 - **Landing.** `swarm land --job J --artifact REF` records a receipted land request and ends the integrator's turn; the driver executes it: rebase only (or `[land] strategy = squash-ff`), fast-forward pushes only, never a force push, CI green on the exact rebased SHA (`swarm ci wait --repo OWNER/REPO --sha <sha> --timeout 540`, in the foreground), the landed tree verified.
 - **Records.** Every CLI command that creates or changes a drive record prints, as its last stdout line, `swarm-record: kind=<kind> id=<n> rev=<n>`. In a drive job the CLI never spools a control command: it fails with a clear error.
-- **Halt.** `swarm halt --job J [--reason TEXT]` (a person, or the requester session) stops progress; `swarm unhalt` resumes it. `swarm supervise disable` halts every drive job on the host and `enable` resumes exactly those halts, shifting each deadline by the time it was halted.
+- **Halt.** `swarm halt --job J [--reason TEXT]` (a person, or the requester session) stops progress; `swarm unhalt` resumes it, shifting each deadline by the time it was halted. The kill switch (`supervise.off`) stops every driver on the host.
 
 ### Models, review gates and staffing
 
@@ -2754,10 +2753,9 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `who --job J` | active agents on the job, tab-separated: exact name, host, role, status, last contact, current tool |
 | `leave (--as NAME \| --key K \| --session S)` | release a name (exit 1 if no active agent matched); `--session S` marks every unfinished agent of that session's jobs left ("session restarted"), for a session start after a restart killed them |
 | `purge` | apply retention now, and [auto-close](#auto-close) the jobs that are done and quiet (`status`, `join`, `activate`, `watch` and `tail` do that too) |
-| `supervise [--dry-run] [--job J]` | one supervisor pass (the systemd user timer runs it every `[supervise] timer_minutes`; off unless `[supervise] enabled = true`, which `supervise enable` sets, or the key is missing from a config written before the opt-in): recover this machine's crashed agents and orphaned coordinators within budgets, or post once why not; then print the caps. `--dry-run` prints what it would do and changes nothing |
-| `supervise enable\|disable` | opt in or out of the supervisor: write `[supervise] enabled = true\|false` in the config and install and start, or stop and disable, the systemd user timer |
+| `supervise [--dry-run] [--job J]` | one supervisor pass, run by hand (no timer runs it; off unless `[supervise] enabled = true`, a missing key is off; drive jobs are driven by the session driver, not by this): recover this machine's crashed agents and orphaned coordinators within budgets, or post once why not; then print the caps. `--dry-run` prints what it would do and changes nothing |
 | `drive budget\|models` | change a running drive job without a rollover: `drive budget --job J KEY=VALUE ...` (cost cap, reserve, sessions, wall hours) or `drive models --job J ROLE=MODEL ...`; the person at a terminal or the job's requester session only |
-| `uninstall [--purge] [--dry-run]` | remove what Swarm set up outside the plugin: the supervisor units, the launcher it wrote, `~/.local/share/swarm`, the entries it added to Claude's and Codex's sandbox settings (backed up first); `--purge` also deletes `~/.local/state/swarm`, the default SQLite board and the config; then remove the plugin with the host |
+| `uninstall [--purge] [--dry-run]` | remove what Swarm set up outside the plugin: a legacy supervisor timer, the launcher it wrote, `~/.local/share/swarm`, the entries it added to Claude's and Codex's sandbox settings (backed up first); `--purge` also deletes `~/.local/state/swarm`, the default SQLite board and the config; then remove the plugin with the host |
 | `events serve` / `events check` | `serve`: the HTTP listener plugins' event sources feed (`[events] enabled`; the supervisor keeps it running). `check`: the safety-net checks once (listener up, `event wait` armed, job stalled, events unacked), one `SWARM-ALERT` per job; exit 1 on a problem |
 | `transcript list [--job J] [--agent NAME] [--color auto\|always] [--no-color]` | archived transcripts with their host (`claude`/`codex`), raw/stored size, ratio, redactions, final flag and capture time, then a total (see [Transcript archive](#transcript-archive-optional)). Coloured by kind (host, size/ratio, redactions) on a real terminal or `--color=always`; `--no-color`/`NO_COLOR` always wins |
 | `transcript show (--job J --agent NAME \| --agent NAME \| --job J --orchestrator \| [--job J] --key K) [--format text\|jsonl] [--tail N] [--grep RE] [-o FILE] [--color auto\|always] [--no-color]` | print one transcript as readable turns, or its redacted JSONL. Coloured by turn kind (user/assistant/tool call/tool result/memory) on a real terminal or `--color=always` (`--format jsonl` is never coloured); `--no-color`/`NO_COLOR` always wins, and never with `-o`/`--output` |
@@ -2836,7 +2834,7 @@ Known limits of this release:
   hold them; nothing stops a same-user process from `chmod`-ing one back to something readable
   afterwards, which would let a read-only holder block it again (a pre-existing, low-severity
   DoS). A `swarm doctor` check for "the last pass finished recently" is planned for a later release;
-  meanwhile a stuck pass lock shows up as the supervisor timer simply not doing anything.
+  meanwhile a stuck pass lock shows up as `swarm supervise` (or the session driver's pass) reporting busy.
 - **The failed-final retry state is per machine and OS user, not per board.** Two boards used by
   the same user on the same machine share one `supervise-transcript-retries.json`, so pruning
   one board's entries can reset another board's try counts and "slow" flag. A per-board file name

@@ -46,7 +46,7 @@ def kick(now=time.time, cfg: dict | None = None) -> bool:
     """Wake the session drivers (spec 3.11 [T21]): touch the wake file of `cfg`'s board, or every wake file of
     this host when no config is given. No systemctl, no unit, no debounce (a touch is cheap and a swallowed
     kick would be a missed wake); nothing depends on it: the drivers also wake on board changes and deadlines.
-    True when a wake file was touched; never raises. (`now` is kept for callers of the timer-era kick.)"""
+    True when a wake file was touched; never raises. (`now` is kept for older callers of the kick.)"""
     from swarm.supervisor import wake
     try:
         if cfg is not None:

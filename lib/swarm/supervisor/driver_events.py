@@ -16,7 +16,7 @@ DRIVER_MECHANICAL_UNREACHABLE = "DRIVER-MECHANICAL-UNREACHABLE"  # a deadline pa
 DRIVER_ROLLOVER = "DRIVER-ROLLOVER"        # a generation rollover could not build the new lead
 DRIVER_TERMINAL_STUCK = "DRIVER-TERMINAL-STUCK"  # sessions not confirmed gone at the close deadline
 DRIVER_UNHALT = "DRIVER-UNHALT"            # a halt ended: deadlines shifted by the halted time
-DRIVER_STALLED = "DRIVER-STALLED"          # events check: no responsible actor for >2 timer periods
+DRIVER_STALLED = "DRIVER-STALLED"          # events check: no responsible actor for >2 stall periods
 DRIVER_TAMPER = "DRIVER-TAMPER"            # board row changed without a trusted record (spec 3.2)
 
 ALL = (DRIVER_AUDIT, DRIVER_CLOSE_REJECTED, DRIVER_MECHANICAL_UNREACHABLE, DRIVER_ROLLOVER, DRIVER_TERMINAL_STUCK,

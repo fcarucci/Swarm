@@ -1,4 +1,4 @@
-"""Owner-only hand-off -> judge -> fix/finalize transitions on the supervisor timer.
+"""Owner-only hand-off -> judge -> fix/finalize transitions in the supervisor pass.
 
 Artifacts are opaque. Evidence and execution recipes belong to plugins; this module
 never interprets a repository, deployment or report reference.
@@ -342,7 +342,7 @@ def complete_finalized(board, cfg, js, handoffs, *, dry_run=False, say=print):
         return False
     closed = board.auto_close_job(js.job, board.now(), "pipeline completed: all artifacts finalized with learnings")
     if closed is None:
-        say(f"pipeline completion held {js.job}: board state changed; retry next timer")
+        say(f"pipeline completion held {js.job}: board state changed; retry next pass")
         return False
     say(f"completed pipeline {js.job}: all artifacts finalized with learnings")
     # Existing cleanup preserves markers rewritten by a concurrent new activation; locked

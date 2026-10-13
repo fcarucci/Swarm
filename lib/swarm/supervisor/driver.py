@@ -359,7 +359,7 @@ def _plan(board, cfg, led, dcfg, now, m):
 
 def _watch_stalled(board, state, led, actions, now, sup) -> None:
     """DRIVER-STALLED (spec 3.13): the model names no responsible actor (nothing live, no launch, no record) for
-    more than two timer periods. The first such pass is remembered in the ledger; any other pass forgets it."""
+    more than two stall periods (2x [supervise] timer_minutes). The first such pass is remembered in the ledger; any other pass forgets it."""
     idle = (led.halted is None and led.terminal_intent is None
             and not any(i.state != "concluded" for i in led.intents)
             and all(a.kind in ("hold", "nothing") and not a.responsible for a in actions))

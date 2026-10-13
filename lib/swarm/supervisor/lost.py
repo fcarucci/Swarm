@@ -118,7 +118,7 @@ def _write_retries(state: dict) -> None:
 # - The supervisor pass (retry_slow_finals) retries the slow ones of both harnesses in one list,
 #   least recently tried first, each with transcripts.FINAL_RETRY_SECONDS (60 s), only while the
 #   pass's own budget has that much left and no kill switch is thrown. Throughput: one 60 s retry
-#   per pass in practice (PASS_BUDGET_SECONDS 95 leaves room for one), so with the timer every
+#   per pass in practice (PASS_BUDGET_SECONDS 95 leaves room for one), so with a pass every
 #   2 minutes a never-finishing agent gets its capture-failed row after ~3 passes, and N of them
 #   after ~3N; a retry that succeeds quickly leaves room for the next one.
 # - An attempt that fails with the full retry budget (or with no deadline at all) counts as a

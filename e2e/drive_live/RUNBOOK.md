@@ -7,8 +7,8 @@ Covers plan Tasks 15 (E2E), 16 (chaos), 19 (live acceptance) and what the judge 
 ## What this is
 
 `e2e/drive_live.sh` activates a tiny throwaway goal job ("add a `--version` flag with a test" to a scratch repo, or an
-impossible goal) in drive mode on an ISOLATED board, then runs only `swarm supervise` passes (what the systemd timer
-runs) until the job is terminal. Nothing else touches the job: zero coordinator turns, no Claude Code session.
+impossible goal) in drive mode on an ISOLATED board, then drives it only with `swarm drive run` (the session driver's loop; `--driver passes`
+runs one-shot `swarm supervise` passes instead) until the job is terminal. Nothing else touches the job: zero coordinator turns, no Claude Code session.
 It asserts the end state, the budget, that every seat was launched and stopped by the supervisor, and that the target
 branch was fast-forwarded to the judged candidate on every destination. It writes the timeline and the costs.
 
@@ -100,7 +100,7 @@ checkout is a SKIP naming it (`pending barrier: ...`), never a pass.
 |---|---|---|
 | `kill_seat_mid_task`, `kill_lead_mid_turn` | SIGKILL the engineer / lead session at its hang point | seat relaunched (2+ starts), MET |
 | `kill_runner_mid_session` | SIGKILL the runner of a live session | next pass reaps and relaunches, MET |
-| `kill_supervisor_and_runner_once` (also `--kill-supervisor-once` on live runs) | SIGKILL a supervisor pass in flight while a runner is live, then SIGKILL a runner | both kills recorded, no duplicate attempt, MET. The real-timer variant (`systemctl --user kill swarm-supervise.service`) is never run here: it names the shared unit (Task 17) |
+| `kill_supervisor_and_runner_once` (also `--kill-supervisor-once` on live runs) | SIGKILL a supervisor pass in flight while a runner is live, then SIGKILL a runner | both kills recorded, no duplicate attempt, MET. Swarm installs no timer or service unit, so there is no unit-level variant |
 | `barrier_<name>` x16 | `SWARM_CRASH_AT=<name>` armed on every pass until a pass dies by SIGKILL (or a seat hook / runner session is killed: barriers `runner_mid_session`, `before_finish`, `hook_after_cli_before_receipt` live in seat processes and are passed through `[supervise] pass_env`) | fired (evidence recorded), no duplicate attempt, ends MET/UNREACHABLE. The 13 plan barriers plus `terminal_intent_saved`, `terminal_verdict_recorded`, `terminal_closed_before_ledger`. **In the tree today: `terminal_*`, `mid_rollover_after_ledger`, `land_after_first_destination`; the other 10 are SKIP until their owners add the `hit()` (posted on the board)**; `mid_terminalization` is covered by the three `terminal_*` names |
 | `corrupt_ledger` | garbage over the ledger, restored 3 passes later | held, `DRIVER-LEDGER-BAD` posted, not closed while corrupt, MET after restore. Today: five corruption kinds raise `LedgerBadError` / are reported, never "no ledger" |
 | `stale_lock` | stale `.lock` file (after the ledger exists) and an expired `drive_locks` row (postgres), both read back | planted proof, MET. Today: stale lock file blocks no save; planted lock symlink refused, target untouched |

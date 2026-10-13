@@ -142,7 +142,7 @@ def run_goal(args, expect: str) -> list[tuple[str, str, str]]:
                 row("unreachable-details", rig.check_unreachable_details(), "verdict ruling/mechanical with details")
             rows.append((f"{name}/real-systemd", q.Outcome.PASS if args.systemd and not problems else q.Outcome.SKIP,
                          "passes ran with real scopes" if args.systemd else
-                         "not run (add --systemd; the harness never touches the shared swarm-supervise unit; "
+                         "not run (add --systemd; the harness never touches a systemd unit; "
                          "Task 17 tests/test_drive_systemd.py covers containment)"))
             return rows
     except q.Pending as exc:
@@ -165,7 +165,7 @@ def main(argv=None) -> int:
     ap.add_argument("--systemd", action="store_true", help="run passes with real systemd scopes (needs a user manager)")
     ap.add_argument("--driver", default="session", choices=["session", "passes"],
                     help="session: `swarm drive run` drives the job (spec 3.11 [T21], no timer); passes: `swarm "
-                         "supervise` passes every --interval-s (the timer era; chaos crash barriers need it)")
+                         "supervise` one-shot passes every --interval-s (chaos crash barriers need it)")
     ap.add_argument("--list", action="store_true", help="chaos: list scenario names")
     ap.add_argument("--today-only", action="store_true",
                     help="chaos: only the no-driver `<name>/today` layers (fast; what the unit tests run)")

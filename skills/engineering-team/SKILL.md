@@ -14,7 +14,7 @@ Read [host procedures](references/hosts.md) before activating a job. They cover 
 1. A goal implies drive: `swarm activate --goal` starts a driven job. `--no-drive --reason TEXT` opts out and gives the old, coordinator-run job (see [Non-drive jobs](#non-drive-jobs)).
 2. `swarm ask` in a drive job needs `--default`: the driver applies it when the question expires (`question_expiry`, 4h by default), so no question blocks the job.
 3. The requester's Agent-tool spawns are refused in drive jobs. Staffing goes through `swarm seat request`, made by the lead (or a person); the supervisor launches the seat.
-4. No timer: `swarm activate --goal` starts this session's session driver, which drives the job while the session is open (idle is fine); `swarm supervise enable` is not needed. With no session open, `swarm drive run` drives it.
+4. No timer: `swarm activate --goal` starts this session's session driver, which drives the job while the session is open (idle is fine); Swarm installs no timer. With no session open, `swarm drive run` drives it.
 
 ## Run a driven team
 

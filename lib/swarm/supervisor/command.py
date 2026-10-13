@@ -729,7 +729,7 @@ def _act(board, cfg: dict, sup: dict, c: Candidate, state: dict, *, start_runner
     model = launch.replacement_model(cfg, harness, a.role, a.model)
     from swarm.supervisor.settings import today_start
     # every cap the decision used, checked again with the insert (atomically: other passes, other
-    # OS users' timers and other hosts may have recorded restarts since)
+    # OS users' passes and other hosts may have recorded restarts since)
     r = board.record_restart(js.job, c.lineage, a.agent_key, reason, harness, d.minutes, max_per_job=max_job,
                              max_job_minutes=float(sup["max_restart_minutes"]),
                              max_host_running=int(sup["max_concurrent_replacements"]),

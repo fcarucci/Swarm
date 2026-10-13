@@ -10,12 +10,12 @@ requester/observer. Staffing, dispatch and landing by the invoking agent (PM) ex
 
 ### Activation checklist (requester/observer)
 
-- Check the host first: `swarm doctor --host claude` or `--host codex` (hooks, supervisor timer,
+- Check the host first: `swarm doctor --host claude` or `--host codex` (hooks, the session driver,
   git 2.40 or newer, the pinned credential and a dry-run `git ls-remote` per landing destination,
   Claude Bash sandbox "boundary" or "guardrail only", Codex drive-readiness per role, the per-job
-  budget and model lines). Run `swarm supervise enable` if the supervisor is off: without it
-  `swarm activate --goal` fails (use `--no-drive --reason TEXT` only for a job nothing drives).
-  Drive mode is refused on Windows and macOS (no timer host); a Windows UNC worktree root is refused.
+  budget and model lines). No timer is needed or installed: `swarm activate --goal` starts this
+  session's session driver, which drives the job on Linux, macOS and Windows (`swarm drive run` with no
+  session open; `--no-drive --reason TEXT` only for a job nothing drives). A Windows UNC worktree root is refused.
 - Pin the landing destinations and credentials at activation: `--remote NAME=URL` and
   `--credential DEST=SOURCE` (an absolute helper path, an ssh key or the agent socket; the driver's
   mirrors read no global git config). Pin the requirements with `--requirements PATH`.

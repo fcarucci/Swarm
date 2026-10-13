@@ -77,9 +77,11 @@ See [Windows setup and limits](docs/REFERENCE.md#windows).
 [Installation details](docs/REFERENCE.md#install) cover all-users mode, channels,
 flags, and migration from the old skill install.
 
-Platforms: Linux has every feature. Drive mode (goal jobs) needs no timer and runs on Linux, macOS
-and Windows: the requester session's driver drives them. The legacy stuck-agent supervisor still
-needs a systemd user timer; see [Windows setup and limits](docs/REFERENCE.md#windows). The same
+Platforms: Linux has every feature. Swarm installs no system timer (no systemd timer, launchd
+agent, Task Scheduler task or cron entry). Drive mode (goal jobs) runs on Linux, macOS and Windows:
+the requester session's event-driven session driver drives them, and `swarm drive run` is the same
+loop in a terminal. The stuck-agent supervisor (`swarm supervise`, a one-shot pass you run by hand)
+launches replacements on Linux only; see [Windows setup and limits](docs/REFERENCE.md#windows). The same
 repository is a plugin for both hosts: Claude Code reads `.claude-plugin/` and
 `hooks/hooks.json`, Codex reads `.codex-plugin/` and `hooks/codex-hooks.json`; each host
 ignores the other's files. In Codex, Swarm needs the CLI or desktop app with trusted hooks;
@@ -107,10 +109,14 @@ Swarm is installed from its own marketplace (this repository).
   the spool and marker directories to `[sandbox_workspace_write] writable_roots` and sets
   `[agents] max_depth = 2` in `~/.codex/config.toml` (only with your consent: `--apply-settings`, the installer, or an
   install from before the opt-in); it backs up each file first.
-- **Supervisor (opt-in).** Off for new installs (`[supervise] enabled = false`); a config from
-  before the opt-in has no key and stays on. `swarm supervise enable` turns it on and, on Linux,
-  installs and enables the systemd user timer `swarm-supervise.timer` (every 5 minutes). Each
-  pass of this supervisor, for this OS user's jobs on this machine only:
+- **No timers.** Swarm installs no systemd timer or service, launchd agent, Task Scheduler task
+  or cron entry. Drive jobs are driven by the session driver, a process of the session that
+  requested the job that wakes on board changes and ledger deadlines (`swarm drive run` when no
+  session is open). `swarm bootstrap` and `swarm upgrade` remove a `swarm-supervise.timer` an
+  earlier build installed, and `swarm doctor` fails while one is there.
+- **Supervisor (opt-in).** Off unless `[supervise] enabled = true` (a missing key is off; set it
+  by hand). It never runs on its own: `swarm supervise` is a one-shot pass you run by hand. Each
+  pass, for this OS user's jobs on this machine only:
   - restarts stuck agents of active jobs as headless `claude -p` or `codex exec` sessions;
   - runs the review pipeline: after a hand-off it launches headless judge, fix and
     finalizer/integrator sessions (a finalizer acts, for example by merging, as its brief says);
@@ -118,8 +124,8 @@ Swarm is installed from its own marketplace (this repository).
   - reaps background commands left running after their agent or job ended.
 
   Replacements run only in work dirs under `[supervise] allowed_workdirs` (default `~/src`).
-  Switches: `swarm supervise disable` (`[supervise] enabled = false`) turns all of this off;
-  `[pipeline] enabled = false` turns off only the review pipeline.
+  Switches: `[supervise] enabled = false` turns all of this off (drive jobs are not affected;
+  `swarm halt` stops one); `[pipeline] enabled = false` turns off only the review pipeline.
 - **Network.** No telemetry: Swarm sends nothing to its author. The venv setup downloads from
   PyPI. Everything else is opt-in or user-run: `swarm upgrade` (GitHub), `swarm ci` (your
   CI host), the events listener (off by default; binds 127.0.0.1:8923), Hindsight memory (your
@@ -138,7 +144,7 @@ First stop running work: deactivate any active job (`swarm deactivate --job J --
 and stop leftover background commands (`swarm bg reap`), so no headless replacement or
 background command keeps running.
 
-On Linux, stop and remove the supervisor:
+On Linux, if an earlier build left a `swarm-supervise.timer` (`swarm doctor` says so), remove it:
 
 ```sh
 systemctl --user disable --now swarm-supervise.timer
@@ -237,9 +243,9 @@ Transcripts are off by default. Set `[transcripts] enabled = true` to archive th
 redaction is best effort, and board readers can read them.
 See [transcript settings and provenance](docs/REFERENCE.md#transcript-archive-optional).
 
-On Linux, [automatic recovery](docs/REFERENCE.md#supervisor-stuck-agents-and-automatic-restarts) and the [review pipeline](docs/REFERENCE.md#review-pipeline) (hand-off → judge → fix or finalizer) need the supervisor, a systemd user timer. It is off until you run `swarm supervise enable`; `swarm supervise disable` turns it off again. An existing install whose config predates this change (no `[supervise] enabled` key) keeps it on, on every host; new configs say `enabled = false`.
+On Linux, [automatic recovery](docs/REFERENCE.md#supervisor-stuck-agents-and-automatic-restarts) and the [review pipeline](docs/REFERENCE.md#review-pipeline) (hand-off → judge → fix or finalizer) need the supervisor. It is off unless `[supervise] enabled = true` in the config (a missing key is off), and no timer runs it: `swarm supervise` is a one-shot pass you run by hand. Drive jobs don't need it: the session driver drives them.
 
-To remove what Swarm set up outside the plugin (timer, launcher, venv, settings entries), run `swarm uninstall` (`--dry-run` to see the list, `--purge` to also delete local boards and the config), then remove the plugin with the host. Removed: the supervisor's units (stopped first), the `~/.local/bin` launcher Swarm wrote, `~/.local/share/swarm` (the venv, bytecode cache, host-only files and logs, the supervisor's private dir, the complexity-analyzer `tools/`, and `legacy-skill-*` backups), and the entries Swarm added to Claude's `sandbox.filesystem.allowWrite` and Codex's `writable_roots` (each file backed up first). `--purge` also deletes `~/.local/state/swarm` (local file boards, markers, spool), the default SQLite board dir `~/.local/share/swarm-board`, and the config file when it is in `~/.config/swarm`. Kept even with `--purge`: a Postgres board (never dropped), a SQLite or file board at a non-default path, the other files in `~/.config/swarm` (`team.toml`, `webhook-secret`, `ci-github-state.json`, `*.bak*`), a config file outside `~/.config/swarm` (`--config`/`SWARM_CONFIG`), the `*.pre-swarm-*` backups uninstall itself makes of the settings files, and any cron entry you added. If stopping the timer fails (for example no user systemd bus in this shell), uninstall removes nothing and prints the commands to run. macOS: Swarm installs no launchd agent and no timer there, so `uninstall` has nothing launchd-related to remove; replacement sessions can't be launched on macOS yet.
+To remove what Swarm set up outside the plugin (launcher, venv, settings entries), run `swarm uninstall` (`--dry-run` to see the list, `--purge` to also delete local boards and the config), then remove the plugin with the host. Removed: a legacy `swarm-supervise` timer and service from an earlier build (stopped first), the `~/.local/bin` launcher Swarm wrote, `~/.local/share/swarm` (the venv, bytecode cache, host-only files and logs, the supervisor's private dir, the complexity-analyzer `tools/`, and `legacy-skill-*` backups), and the entries Swarm added to Claude's `sandbox.filesystem.allowWrite` and Codex's `writable_roots` (each file backed up first). `--purge` also deletes `~/.local/state/swarm` (local file boards, markers, spool), the default SQLite board dir `~/.local/share/swarm-board`, and the config file when it is in `~/.config/swarm`. Kept even with `--purge`: a Postgres board (never dropped), a SQLite or file board at a non-default path, the other files in `~/.config/swarm` (`team.toml`, `webhook-secret`, `ci-github-state.json`, `*.bak*`), a config file outside `~/.config/swarm` (`--config`/`SWARM_CONFIG`), the `*.pre-swarm-*` backups uninstall itself makes of the settings files, and any cron entry you added. If stopping a legacy timer fails (for example no user systemd bus in this shell), uninstall removes nothing and prints the commands to run. Swarm installs no launchd agent or Task Scheduler task on any platform; replacement sessions can't be launched on macOS yet.
 
 The engineering team uses `~/.config/swarm/team.toml` (or `$SWARM_TEAM_CONFIG`), separately
 from core configuration. `swarm team --job J --show` displays the effective team;
