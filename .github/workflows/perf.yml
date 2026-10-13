@@ -164,3 +164,14 @@ jobs:
           --health-cmd "pg_isready -U swarm_test" --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - run: echo up
+  classtime:
+    if: ${{ contains(github.event.head_commit.message, '[classtime]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.13", cache: pip}
+      - run: pip install -r requirements.txt -r requirements-postgres.txt
+      - env: {SWARM_TEST_BACKEND: memory}
+        working-directory: tests
+        run: python ../.github/scripts/classtime.py test_drive_session_driver test_drive_land test_install_sh test_codex_directory test_hindsight test_board_contract test_supervise_runner test_update_sh test_venv_per_stamp test_hardening 2>&1 | tail -90
