@@ -593,9 +593,9 @@ class Mirror:
         name = self._branch(branch)
         dest = self._branch(into or branch)
         try:
-            from pathlib import Path as _P
-            url = _P(os.path.realpath(path)).as_uri()
-            args = gitpin.url_args(url, f"+refs/heads/{name}:refs/heads/{dest}")
+            # the plain absolute path, as pinned local destinations are given (a file:// URI of a Windows path
+            # is not one gitpin accepts)
+            args = gitpin.url_args(os.path.realpath(path), f"+refs/heads/{name}:refs/heads/{dest}")
         except (gitpin.GitPinError, ValueError) as exc:
             raise MirrorError(str(exc)) from exc
         proc = self._git(["fetch", "--no-tags", "--no-write-fetch-head", "--quiet", "--no-recurse-submodules",

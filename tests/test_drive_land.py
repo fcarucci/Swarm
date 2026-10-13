@@ -248,7 +248,7 @@ class Landing(LandCase):
         secret, ssha = self.foreign("secret2")
         os.makedirs(os.path.join(self.work, ".git/objects/info"), exist_ok=True)
         with open(os.path.join(self.work, ".git/objects/info/alternates"), "w") as fh:
-            fh.write(os.path.join(secret, ".git/objects") + "\n")
+            fh.write(os.path.join(secret, ".git", "objects").replace(os.sep, "/") + "\n")
         git(self.work, "update-ref", "refs/heads/" + GROUP, ssha)
         self.assert_refused_unpushed(ssha, self.work)
 
