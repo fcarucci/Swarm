@@ -840,7 +840,7 @@ On Postgres, re-run `swarm init` after changing `idle_minutes`, `dead_minutes` o
 | `api_key_file` | (none) | file holding the API key (chmod 600); sent as a Bearer token, never printed |
 | `timeout_seconds` | `3` | timeout of each Hindsight call |
 | `retry_after_seconds` | `60` | when Hindsight is unreachable, it is skipped this long; a spooled memory that failed waits this long before its next attempt |
-| `recall_start_seconds` | `6` | most a joining agent waits for its first recall (1.5-4 s on a local Hindsight with a reranker; the per-call timeout is raised to match; capped at 8, under the 10 s hook limit); a start recall that runs out of time is retried on the agent's next turn. The env var `SWARM_HOOK_RECALL_SECONDS` overrides it |
+| `recall_start_seconds` | `6` | most a joining agent waits for its one start recall (1.5-4 s on a local Hindsight with a reranker; the per-call timeout is raised to match; capped at 8, under the 10 s hook limit); a start recall that runs out of time counts as done and is never retried (the agent recalls on demand). The env var `SWARM_HOOK_RECALL_SECONDS` overrides it |
 | `recall_max_items` | `8` | memories injected per recall |
 | `recall_max_chars` | `1500` | characters of memories injected per recall |
 | `recall_max_tokens` | `1024` | `max_tokens` passed to Hindsight's recall |

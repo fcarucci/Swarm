@@ -30,6 +30,7 @@ def remember_none(cfg: dict, args) -> int:
         with open_board(cfg) as board:
             board.record_remembered(args.name)
             learnings.note_declared(board, args.job)
+            learnings.clear_own_marker(board, args.job, args.name)
             try:
                 board.post(args.job, args.name, ("no durable learnings: " + reason)[: board.message_cap()])
             except Exception:
@@ -233,7 +234,11 @@ def job_tags(board, cfg: dict, args) -> int:
     if board.job_status(job) is None:
         print(f"no such job: {term_safe(job)}", file=sys.stderr)
         return 1
-    stored = [t for t in (board.job_data(job).get(learnings.TAGS_KEY) or "").split(",") if t]
+    data = board.job_data(job)
+    explicit = learnings.TAGS_KEY in data
+    # a job whose tags were never set works from its effective ones (its project's name): a change starts there
+    stored = [t for t in (data.get(learnings.TAGS_KEY) or "").split(",") if t] if explicit \
+        else learnings.job_tags(board, job, data)
     if change is not None:
         kind, given = change
         if kind == "set":
@@ -247,16 +252,15 @@ def job_tags(board, cfg: dict, args) -> int:
             print(f"swarm job tags: at most {learnings.MAX_TAGS} subject tags a job (it would have {len(tags)})",
                   file=sys.stderr)
             return 2
-        if tags != stored:
-            board.set_job_data(job, learnings.TAGS_KEY, ",".join(tags))   # "" = emptied on purpose
+        if tags != stored or not explicit:     # a change always leaves an explicit set ("" = emptied on purpose)
+            board.set_job_data(job, learnings.TAGS_KEY, ",".join(tags))
             who = os.environ.get("USER") or "person"
             board.post(job, "swarm", term_safe(f"subject tags of {job} changed by {who}: "
                        f"{', '.join(stored) or '(none)'} -> {', '.join(tags) or '(none)'}")[:900])
-            stored = tags
+            stored, explicit = tags, True
             print(f"{job}: tags changed")
-    shown = stored or learnings.job_tags(board, job)
-    print(f"{job}: " + (", ".join(shown) if shown else "(no subject tags: its memories carry none)")
-          + ("" if stored else "  [from its project]" if shown else ""))
+    print(f"{job}: " + (", ".join(stored) if stored else "(no subject tags: its memories carry none)")
+          + ("" if explicit or not stored else "  [from its project]"))
     return 0
 
 
@@ -294,13 +298,27 @@ def learnings_gate(cfg: dict, board, js, args) -> int:
 
 
 
-def record_memory_scope(cfg: dict, args, explicit: list, cwd: str) -> None:
-    """The job's memory subjects and topic (swarm.learnings), after a drive activation. Never fails it."""
+def record_memory_scope(cfg: dict, args, explicit: list, cwd: str) -> int:
+    """The job's memory subjects and topic (swarm.learnings), right after a drive activation, read back to
+    check them. 0 when saved; 1 (the activation fails, with what to run) when they could not be: a job
+    never runs without the scope it asked for."""
     from swarm import learnings
     from swarm.board import open_board
+    tags = learnings.derive_tags(args.project, cwd, explicit)
+    topic = getattr(args, "topic", None)
     try:
         with open_board(cfg) as board:
-            learnings.record_scope(board, args.job, learnings.derive_tags(args.project, cwd, explicit),
-                                   getattr(args, "topic", None))
+            learnings.record_scope(board, args.job, tags, topic)
+            data = board.job_data(args.job)
+            if tags and data.get(learnings.TAGS_KEY) != ",".join(tags):
+                raise ValueError("the saved subject tags do not read back")
+            if topic and topic.strip() and data.get(learnings.TOPIC_KEY) != " ".join(topic.split())[:1900]:
+                raise ValueError("the saved topic does not read back")
     except Exception as exc:
-        print(f"note: the job's memory subjects were not recorded ({_error_name(exc)})", file=sys.stderr)
+        fix = (f"swarm job tags --job {args.job} --set {','.join(tags)}" if tags else "")
+        print(term_safe(f"swarm activate: {args.job} is activated, but its memory subjects/topic were NOT saved "
+                        f"({_error_name(exc)}: {exc}). The activation failed: "
+                        + (f"set them with `{fix}` before any agent works on it, or " if fix else "")
+                        + f"deactivate it and activate again"), file=sys.stderr)
+        return 1
+    return 0

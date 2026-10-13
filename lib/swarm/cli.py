@@ -3222,7 +3222,7 @@ def cmd_activate(cfg: dict, args) -> int:
     if _da.wants_drive(args):   # [A] a goal implies drive
         rc = _da.cmd_activate_drive(cfg, args)
         if rc == 0:
-            _record_memory_scope(cfg, args, explicit_tags, args.workdir or os.getcwd())
+            rc = _record_memory_scope(cfg, args, explicit_tags, args.workdir or os.getcwd())
         return rc
     rc = _da.legacy_goal_check(args)
     if rc is not None:
@@ -3787,9 +3787,9 @@ def _learnings_gate(cfg: dict, board, js, args) -> int:
     return learn_cli.learnings_gate(cfg, board, js, args)
 
 
-def _record_memory_scope(cfg: dict, args, explicit: list, cwd: str) -> None:
+def _record_memory_scope(cfg: dict, args, explicit: list, cwd: str) -> int:
     from swarm import learn_cli
-    learn_cli.record_memory_scope(cfg, args, explicit, cwd)
+    return learn_cli.record_memory_scope(cfg, args, explicit, cwd)
 
 
 def cmd_recall(cfg: dict, args) -> int:

@@ -227,20 +227,137 @@ class DriverLearnFailClosedTests(unittest.TestCase):
         from swarm.supervisor import driver, driver_life
         led = SimpleNamespace(watermarks={}, save=lambda: None)
         m = SimpleNamespace(life=driver_life)
-        driver._note_learn_hold(led, F.snap(goal_verdict=MET, learn_pending=True), m)
+        pending = F.snap(goal_verdict=MET, learn_pending=True)
+        driver._note_learn_hold(led, pending, dm.next_actions(pending, ARTIFEXT_CFG), m)
         self.assertIn(driver_life.LEARN_HOLD, led.watermarks)
-        driver._note_learn_hold(led, F.snap(goal_verdict=MET, learn_pending=False), m)
+        done = F.snap(goal_verdict=MET, learn_pending=False)
+        driver._note_learn_hold(led, done, dm.next_actions(done, ARTIFEXT_CFG), m)
         self.assertNotIn(driver_life.LEARN_HOLD, led.watermarks)
 
-    def test_a_deadline_never_closes_a_verdict_held_for_its_learnings(self):
-        import datetime as dt
+
+class ClosePerAgentEvidenceTests(CloseGateTests):
+    """Round 2: coverage is per agent (Y1), a marker clears on the agent's own evidence (Y2), a legacy job's
+    tags can be cleared (2b), a scope that cannot be saved fails the activation (Y3)."""
+
+    def test_an_agent_not_covered_by_the_learnings_step_is_still_harvested(self):
+        from swarm import learnings
+        self.join("worker")
+        self.kill("worker")
+        with self.board() as b:
+            learnings.sweep(b, "J")
+            pending = learnings.unharvested(b, "J")      # what the step covers: the worker only
+        late = self.join("late")                         # joins while the step is retaining
+        with self.board() as b:
+            b.agent_stopped("late")
+            learnings.harvest(b, "J", "test", 1, None, pending)
+            self.assertEqual([e["name"] for e in learnings.unharvested(b, "J")], [])
+            learnings.sweep(b, "J")
+            self.assertEqual([e["name"] for e in learnings.unharvested(b, "J")], [late])
+
+    def test_a_marker_from_a_refused_close_clears_once_the_agent_declares_none(self):
+        name = self.join("worker")
+        rc, out, err = self.cli("deactivate", "--job", "J")
+        self.assertEqual(rc, 1, (out, err))
+        self.assertIn(name, err)                          # still working at the refused close: marked
+        rc, out, err = self.cli("remember", "--job", "J", "--as", name, "--none", "only renamed files here")
+        self.assertEqual(rc, 0, err)
+        with self.board() as b:
+            from swarm import learnings
+            self.assertEqual(learnings.unharvested(b, "J"), [])
+            b.agent_stopped("worker")
+        rc, out, err = self.cli("deactivate", "--job", "J")
+        self.assertEqual(rc, 0, (out, err))
+
+    def test_a_marker_clears_once_the_agent_stores_a_memory(self):
+        name = self.join("worker")
+        self.assertEqual(self.cli("deactivate", "--job", "J")[0], 1)
+        self.assertEqual(self.cli("remember", "--job", "J", "--as", name, "a durable fact")[0], 0)
+        with self.board() as b:
+            from swarm import learnings
+            self.assertEqual(learnings.unharvested(b, "J"), [])
+
+    def test_a_scope_that_cannot_be_saved_fails_the_activation(self):
         from types import SimpleNamespace
+        from swarm import learn_cli
+        args = SimpleNamespace(job="NoSuchJob", project=None, topic="what it is about")
+        self.assertEqual(learn_cli.record_memory_scope(self.cfg, args, ["swarm"], "/"), 1)
+
+
+class LegacyTagsTests(HindsightEnv):
+    def setUp(self):
+        super().setUp()
+        self.enable()
+        self.fake.banks["proj"] = []
+        self.assertEqual(self.cli("activate", "--job", "J", "--project", "proj")[0], 0)
+        with self.board() as b:
+            b.set_job_data("J", "memory.tags", None)       # a job from before subject tags: never set
+
+    def remembered_tags(self):
+        rc, _, err = self.cli("remember", "--job", "J", "--as", "Homer Simpson", "a fact")
+        self.assertEqual(rc, 0, err)
+        return self.fake.calls("POST", "/v1/default/banks/proj/memories")[-1]["body"]["items"][0]["tags"]
+
+    def test_set_empty_on_a_legacy_job_clears_it(self):
+        self.assertEqual(self.remembered_tags(), ["proj"])
+        self.assertEqual(self.cli("job", "tags", "--job", "J", "--set", "")[0], 0)
+        self.assertEqual(self.remembered_tags(), [])
+
+    def test_removing_the_implicit_project_tag_clears_it(self):
+        self.assertEqual(self.cli("job", "tags", "--job", "J", "--remove", "proj")[0], 0)
+        self.assertEqual(self.remembered_tags(), [])
+
+    def test_adding_to_a_legacy_job_keeps_its_project_tag(self):
+        self.assertEqual(self.cli("job", "tags", "--job", "J", "--add", "swarm")[0], 0)
+        self.assertEqual(self.remembered_tags(), ["proj", "swarm"])
+
+
+from test_drive_pass import PassCase  # noqa: E402
+
+
+class LearnHoldAcrossTheDeadlineTests(PassCase):
+    """Multi-pass, through the real driver, model and deadline dispatcher: a MET whose learner seat ran out of
+    attempts holds; the pass records the hold in the ledger; a later pass past every deadline neither records
+    UNREACHABLE nor closes."""
+
+    def test_an_unlanded_met_gets_no_learn_hold(self):
+        """No hold unless the model actually holds the close for learnings: the deadline still applies."""
+        from unittest import mock
+        from swarm import learnings
         from swarm.supervisor import driver_life
-        old = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=30)).isoformat()
-        led = SimpleNamespace(terminal=None, halted=None, terminal_intent=None, watermarks={driver_life.LEARN_HOLD: 3},
-                              ruling_due_at=old, activated_at=old, halted_total_seconds=0, budgets={},
-                              save=lambda: (_ for _ in ()).throw(AssertionError("nothing may be written")))
-        now = dt.datetime.now(dt.timezone.utc)
-        self.assertIsNotNone(driver_life._deadline_cause({}, led, now))      # the deadline has passed
-        self.assertFalse(driver_life.enforce_deadlines(None, {}, led, now))
+        self.job()
+        self.mods.model = dm
+        self.snap.read = lambda board, l, job, *, cfg, now: F.snap(job=job, goal_verdict=MET, ledger=l, now=now)
+        with mock.patch.object(learnings, "learn_pending", return_value=True):
+            self.drive(now=self.t0)
+        self.assertNotIn(driver_life.LEARN_HOLD, self.load().watermarks)
+
+
+    def test_an_exhausted_learner_holds_the_met_across_the_deadline(self):
+        import datetime as dt
+        from unittest import mock
+        from swarm import learnings
+        from swarm.supervisor import driver_life, ledger as ledger_mod
+        led = self.job()
+        action_id = _learn_action_id().action_id
+        led.intents = [ledger_mod.Intent(launch_id=f"L{i}", action_id=action_id, attempt=i + 1, seat="learner",
+                                         reserved_usd=0.0, reserved_minutes=0.0, locks=[], state="concluded",
+                                         outcome="error", success=False, charged_usd=0.0)
+                       for i in range(dm.DEFAULT_CFG["max_attempts"])]
+        led.save()
+        self.mods.model = dm
+        landed = {"main": {"landed": "a" * 40}}                       # the judged candidate landed: MET closes
+        self.snap.read = lambda board, l, job, *, cfg, now: F.snap(job=job, goal_verdict=MET, ledger=l, now=now,
+                                                                   integrated=landed)
+        with mock.patch.object(learnings, "learn_pending", return_value=True), \
+                mock.patch.object(driver_life, "terminalize", side_effect=AssertionError("never closes")):
+            self.drive(now=self.t0)                                   # pass 1: hold, recorded in the ledger
+            self.assertIn(driver_life.LEARN_HOLD, self.load().watermarks)
+            later = self.t0 + dt.timedelta(days=30)                   # past the wall-clock and ruling deadlines
+            self.assertIsNotNone(driver_life._deadline_cause({}, self.load(), later))
+            self.drive(now=later)                                     # pass 2: the deadline dispatcher runs first
+        led = self.load()
         self.assertIsNone(led.terminal_intent)
+        self.assertIsNone(led.terminal)
+        self.assertIn(driver_life.LEARN_HOLD, led.watermarks)
+        self.assertEqual(self.board.job_status("J").status, "active")
+        self.assertEqual(self.exec.launched, [])                      # no fourth learner

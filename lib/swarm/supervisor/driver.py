@@ -368,13 +368,20 @@ def _with_learn(board, cfg, led, snap):
             return snap
 
 
-def _note_learn_hold(led, snap, m) -> None:
-    """Ledger first: while a receipted terminal verdict waits for the learnings step, the ledger says so
-    (watermark LEARN_HOLD = the verdict's receipt id), so the ledger-only deadline dispatcher
+def _learn_holding(actions) -> bool:
+    """The model is holding a terminal verdict for its learnings step (driver_model._learn_first): launching or
+    awaiting the learner, or holding after its attempts ran out."""
+    return any(a.prompt_kind == "learn" or (a.kind == "nothing" and a.responsible == "learner") for a in actions)
+
+
+def _note_learn_hold(led, snap, actions, m) -> None:
+    """Ledger first: while the model holds a receipted terminal verdict for its learnings step, the ledger
+    says so (watermark LEARN_HOLD = the verdict's receipt id), so the ledger-only deadline dispatcher
     (driver_life.enforce_deadlines) never turns a MET held for its learnings into a mechanical UNREACHABLE.
-    Cleared once the step is done (the close follows) or the verdict is no longer terminal."""
+    Only while the model actually holds for it (a verdict that is not closing yet, e.g. an unlanded MET, gets
+    no hold). Cleared once the step is done (the close follows) or nothing waits for it any more."""
     key = m.life.LEARN_HOLD
-    held = bool(getattr(snap, "learn_pending", False))
+    held = bool(getattr(snap, "learn_pending", False)) and _learn_holding(actions)
     gv = getattr(snap, "goal_verdict", None)
     rid = getattr(gv, "receipt_id", None) or 1
     if held and led.watermarks.get(key) != rid:
@@ -387,11 +394,11 @@ def _plan(board, cfg, led, dcfg, now, m):
     """Snapshot, progress rule and the model's actions. A ruling that has just become due is recorded in
     the ledger first, so its action ids carry the due time as their trigger from the start."""
     snap = _with_learn(board, cfg, led, m.snapshot.read(board, led, led.job, cfg=dcfg, now=now))
-    _note_learn_hold(led, snap, m)
     m.exec.settle_progress(led, snap, now)
     actions = m.model.next_actions(snap, dcfg)
     if led.ruling_due_at is None and any(a.ruling for a in actions) and m.exec.note_ruling_due(led, now):
         actions = m.model.next_actions(snap, dcfg)
+    _note_learn_hold(led, snap, actions, m)
     return snap, actions
 
 

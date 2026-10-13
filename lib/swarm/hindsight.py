@@ -497,6 +497,7 @@ def remember(board, cfg: dict, job: str, name: str, text: str, project: str | No
                        create_bank=create_bank, synchronous=synchronous)
     board.record_remembered(name)
     learnings.note_stored(board, job)
+    learnings.clear_own_marker(board, job, name)
     return project
 
 

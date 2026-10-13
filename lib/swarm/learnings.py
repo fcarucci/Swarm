@@ -12,6 +12,7 @@ Keys (job_data, `[a-z0-9_.-]`, at most 64 characters):
   memory.u.<hash>    an UNHARVESTED agent: it ended without the normal stop (killed, dead, lost, closed by
                      the supervisor) and without storing a memory or declaring it had none. JSON
                      {"key", "name", "why", "at"}. `swarm learn` removes it once it has run over the job.
+  memory.c.<hash>    a learnings step covered that agent: its last contact as the step saw it (per agent)
   memory.declared_at the last `swarm remember --none` of an agent of the job
   memory.harvest     the last learnings step: JSON {"at", "by", "agents", "facts", "none"}
 
@@ -33,6 +34,7 @@ HARVEST_KEY = "memory.harvest"
 DECLARED_KEY = "memory.declared_at"
 NO_LEARN_KEY = "memory.no_learn"
 UNHARVESTED_PREFIX = "memory.u."
+COVERED_PREFIX = "memory.c."
 TAG = re.compile(r"[a-z0-9][a-z0-9._-]{0,39}")
 MAX_TAGS = 8
 LEARNER_ROLE = "learner"          # the drive seat that runs the learnings step; never itself unharvested
@@ -138,11 +140,12 @@ def derive_tags(project: str | None, cwd: str | None, explicit=()) -> list[str]:
 
 
 def record_scope(board, job: str, tags: list[str], topic: str | None) -> None:
-    """Store the job's memory scope (activation). An empty list keeps whatever the job had."""
-    if tags:
-        board.set_job_data(job, TAGS_KEY, ",".join(tags)[:1900])
-    if topic and topic.strip():
-        board.set_job_data(job, TOPIC_KEY, " ".join(topic.split())[:1900])
+    """Store the job's memory scope (activation). An empty list keeps whatever the job had. Raises when it
+    could not be saved (the activation then fails: never a job running without the scope it asked for)."""
+    if tags and not board.set_job_data(job, TAGS_KEY, ",".join(tags)[:1900]):
+        raise ValueError(f"the subject tags of job {job} were not saved (no such job)")
+    if topic and topic.strip() and not board.set_job_data(job, TOPIC_KEY, " ".join(topic.split())[:1900]):
+        raise ValueError(f"the topic of job {job} was not saved (no such job)")
 
 
 def job_tags(board, job: str, data: dict | None = None, js=None) -> list[str]:
@@ -228,6 +231,10 @@ def _hkey(agent_key: str) -> str:
     return UNHARVESTED_PREFIX + hashlib.sha256(agent_key.encode()).hexdigest()[:16]
 
 
+def _ckey(agent_key: str) -> str:
+    return COVERED_PREFIX + hashlib.sha256(agent_key.encode()).hexdigest()[:16]
+
+
 # left_reason of rows that were never an agent's own run: a placeholder a launch closes before its session
 # takes the row over (claim_resume), or the driver's one-write judge.
 _PLACEHOLDER_REASONS = ("drive predecessor", "pipeline predecessor", "pipeline judge seat busy",
@@ -252,19 +259,38 @@ def mark_ended(board, cfg: dict, job: str, a, why: str) -> None:
         pass
 
 
-def mark_unharvested(board, job: str, agent_key: str, name: str, why: str) -> bool:
-    """Record that `agent_key` ended abnormally without storing or declaring its learnings. Idempotent;
-    nothing when it stored something during its run. Returns whether a marker exists now."""
-    state = board.sync_state(agent_key)
-    if state is not None and state.remembered_at is not None and state.remembered_at >= state.joined_at:
+def _has_evidence(state) -> bool:
+    """The agent stored a memory, or declared none, during its run (its row's remembered_at)."""
+    return state is not None and state.remembered_at is not None and state.remembered_at >= state.joined_at
+
+
+def mark_unharvested(board, job: str, agent_key: str, name: str, why: str, seen=None) -> bool:
+    """Record that `agent_key` ended (or is ending) without storing or declaring its learnings. Idempotent;
+    nothing when it stored something during its run. `seen`: its last contact, which a learnings step
+    covering it records as its own coverage. Returns whether a marker exists now."""
+    if _has_evidence(board.sync_state(agent_key)):
         return False
     key = _hkey(agent_key)
     data = board.job_data(job)
     if key in data:
         return True
     value = json.dumps({"key": agent_key, "name": name, "why": (why or "ended")[:200],
-                        "at": _now(board).isoformat()})
+                        "at": _now(board).isoformat(),
+                        "seen": seen.isoformat() if hasattr(seen, "isoformat") else seen})
     return bool(board.set_job_data(job, key, value[:1900]))
+
+
+def clear_own_marker(board, job: str, name: str) -> None:
+    """The active agent `name` of the job stored a memory or declared none: its own unharvested marker (a
+    refused close may have set it while it was still working) is cleared. Never raises."""
+    try:
+        for a in board.agents(job, include_departed=False):
+            if a.name == name:
+                key = _hkey(a.agent_key)
+                if key in board.job_data(job):
+                    board.set_job_data(job, key, None)
+    except Exception:
+        pass
 
 
 def sweep(board, job: str, *, active_too: bool = True) -> list[str]:
@@ -280,23 +306,27 @@ def sweep(board, job: str, *, active_too: bool = True) -> list[str]:
     start = _start(js)
     rows = board.agents(job)
     resumed = {a.resume_of for a in rows if a.resume_of}   # a replacement carried its run on
-    try:
-        harvested = _ts(json.loads(data.get(HARVEST_KEY) or "{}").get("at"))
-    except (ValueError, AttributeError):
-        harvested = None
     for a in rows:
-        if not _counts(a) or _hkey(a.agent_key) in data or a.agent_key in resumed:
+        if not _counts(a) or a.agent_key in resumed:
             continue
         if start is not None and a.joined_at is not None and a.joined_at < start:
             continue                       # an earlier run of the job (closed before this one opened)
-        if harvested is not None and a.last_contact_at is not None and harvested >= a.last_contact_at:
-            continue                       # a learnings step ran after everything it did
+        mark = _hkey(a.agent_key)
+        if mark in data:
+            # reconciled against current evidence: a marker set while it was working (a refused close) goes
+            # once it stores or declares none
+            if _has_evidence(board.sync_state(a.agent_key)):
+                board.set_job_data(job, mark, None)
+            continue
+        covered = _ts(data.get(_ckey(a.agent_key)))
+        if covered is not None and a.last_contact_at is not None and covered >= a.last_contact_at:
+            continue                       # a learnings step covered this agent, and it did nothing since
         ended = a.ended_at is not None
         if not ended and not active_too and a.status != "dead":
             continue
         why = ((a.left_reason or a.status) if ended
                else "dead" if a.status == "dead" else "still working at close")
-        if mark_unharvested(board, job, a.agent_key, a.name, why):
+        if mark_unharvested(board, job, a.agent_key, a.name, why, seen=a.last_contact_at):
             marked.append(a.name)
     return marked
 
@@ -315,8 +345,12 @@ def unharvested(board, job: str, data: dict | None = None) -> list[dict]:
 
 
 def harvest(board, job: str, by: str, facts: int, none: str | None, entries: list[dict]) -> None:
-    """The learnings step ran over the job: record it and clear the unharvested markers it covered."""
+    """The learnings step ran over the job: for each unharvested agent it covered (the markers read before
+    the step), record that agent's coverage (memory.c.<hash> = its last contact as seen then) and clear its
+    marker. Coverage is per agent: one that joined or kept working after it is not covered."""
     for e in entries:
+        if e.get("key"):
+            board.set_job_data(job, _ckey(e["key"]), str(e.get("seen") or e.get("at") or _now(board).isoformat()))
         board.set_job_data(job, e["_k"], None)
     record = {"at": _now(board).isoformat(), "by": by, "facts": facts,
               "agents": [e.get("name") for e in entries][:20], "none": (none or "")[:300] or None}
