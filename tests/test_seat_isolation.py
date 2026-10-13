@@ -1412,9 +1412,10 @@ class WindowsSettingsTest(SeatHomeCase):
 
     def test_readonly_attribute_set_and_cleared_on_windows(self):
         calls = []
+        x = Path("x")           # built before os.name is patched (Python 3.11's pathlib picks its class from it)
         with mock.patch.object(os, "name", "nt"), mock.patch.object(os, "chmod", lambda p, m: calls.append(m)):
-            seathome._windows_readonly(Path("x"), True)
-            seathome._windows_readonly(Path("x"), False)
+            seathome._windows_readonly(x, True)
+            seathome._windows_readonly(x, False)
         self.assertEqual(calls, [stat.S_IREAD, stat.S_IREAD | stat.S_IWRITE])
         with mock.patch.object(os, "chmod", lambda p, m: calls.append(("posix", m))):
             seathome._windows_readonly(Path("x"), True)
