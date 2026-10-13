@@ -330,15 +330,17 @@ def _learn_first(c: _Ctx, trigger) -> list[Action] | None:
     """The learnings step before a close (swarm.learnings): while it is pending, launch the driver-owned
     `learner` seat (its session runs `swarm learn` over the job; the drive loop itself makes no LLM call), or
     wait for the one running. Its attempts are ledger intents like any launch, so a crashed driver resumes it.
-    None (close now) once the step is done, or when the learner has used max_attempts without finishing: the
-    unharvested markers then stay on the closed job for a later `swarm learn`."""
+    None (close now) once the step is done; a hold once the learner has used max_attempts without finishing."""
     if not c.s.learn_pending:
         return None
     if c.inflight("learn") or "learner" in c.live:
         return [c.act("nothing", None, None, 0, responsible="learner", reason="responsible")]
     action = c.act("launch", None, "learn", 0, prompt="learn", trigger=trigger, reason="learnings step before close")
     if c.attempts(action.action_id) >= c.cfg["max_attempts"]:
-        return None
+        # Never close past an undone learnings step: the job stays open (hold) for a person's `swarm learn`
+        # or `swarm deactivate --no-learn`; the unharvested markers stay on it.
+        return [c.act("hold", None, None, 0, prompt="learn", trigger=trigger,
+                      reason="learnings step failed: attempts exhausted; not closing")]
     return [action]
 
 

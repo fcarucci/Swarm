@@ -227,6 +227,22 @@ def _integrate_body(led, seat, action) -> list[str]:
             "LAND-REFUSED; if the rebase needs real changes, post FINALIZE_BLOCKED with the reason."]
 
 
+def _learn_body(led, seat, action) -> list[str]:
+    """The learner seat: the job's learnings step before it closes. Deterministic bookkeeping plus the
+    agent's own distillation; the drive loop itself never calls a model for this."""
+    job = _ref(led.job, what="job")
+    return [f"You are the learner of job {job}: its learnings step, before the job closes. Nothing else.",
+            f"1. Run `swarm learn --job {job} --harvest` and read what it prints: each agent that ended without "
+            "storing its learnings, with an excerpt of its transcript. Do not change any work.",
+            "2. Distill only what is durable (a root cause, a decision, a gotcha, a fix that worked) into "
+            "self-contained facts, one per line, each understandable without this job. Write them to a file "
+            "in your workdir, then run `swarm learn --job " + job + " --bank BANK --from FILE`, where BANK is "
+            "the best-matching existing bank from `swarm learn --list-banks`.",
+            f"3. If nothing is worth keeping, run `swarm learn --job {job} --none \"<why nothing is durable>\"` "
+            "instead (8 characters or more).",
+            "Post `DONE: learnings for " + job + "` on the board when the command succeeds, then exit."]
+
+
 def render(board, cfg, led, action, seat) -> str:
     """The seat prompt of one launch action (a `driver_model.Action`) for `seat` (a board `Seat`)."""
     kind = action.prompt_kind or "seat"
@@ -242,6 +258,8 @@ def render(board, cfg, led, action, seat) -> str:
         parts += _review_body(cfg, led, seat, action)
     elif kind == "integrate":
         parts += _integrate_body(led, seat, action)
+    elif kind == "learn":
+        parts += _learn_body(led, seat, action)
     else:
         parts += _seat_body(board, led, seat, action)
     parts += standing_rules(_ref(led.job, what="job"))
