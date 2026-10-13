@@ -6,6 +6,11 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 ## [Unreleased]
 
+### Changed
+- **Memory: no periodic recall, no timed reminder.** An agent gets one start recall, scoped to its job's subject tags and topic; after that it asks with `swarm recall "<query>"`, which searches every subject (`--tags`/`--bank` narrow it). Migration: `[hindsight] recall_minutes` and `remember_nudge_minutes` are gone; configs that still have them keep working (the keys are ignored), delete them.
+- **Memory tags are subjects, never ids.** A job carries subject tags (`swarm activate --tags swarm,astro-loom`; `swarm job tags --job J --add/--remove/--set`, any time, posted on the board); `swarm remember` and `swarm learn` stamp exactly those (plus `--tags`), read at the moment they run. The job, agent, session and host go into metadata only; `job:`/`agent:` tags are no longer written. Memories already stored are not rewritten.
+- **Learnings are mandatory.** An agent cannot stop normally until it stored a memory or declared none (`swarm remember --none "<reason>"`): the stop is blocked once. Agents that end abnormally are marked unharvested, with no LLM call. `swarm deactivate` is refused until every agent is harvested and something was stored (`swarm learn --job J --harvest`, then `swarm learn ... -` or `--none`); a person may waive it with `--no-learn "<reason>"`. Drive jobs run the step through a `learner` seat before they close.
+
 ## [0.3.2] - 2026-10-13
 
 Same code as the withdrawn 0.3.0 and 0.3.1, re-cut so the release files exist: Swarm installs no supervise timer. Run `swarm upgrade --force` if you installed 0.3.0 or 0.3.1.

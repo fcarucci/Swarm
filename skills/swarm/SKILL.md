@@ -20,8 +20,9 @@ Before each of its tool calls, they show it:
   "N more unread" note);
 - roster changes as a short diff (`joined: X (role)`, `completed: Y`, `idle: Z`, `back: Z`), and
   the full roster again at least every `roster_refresh_minutes` (default 10);
-- with the optional [project memory](#project-memory-hindsight-optional): new memories every
-  `recall_minutes`, and a reminder to store findings.
+- with the optional [project memory](#project-memory-hindsight-optional): nothing after the
+  one start recall (agents recall on demand), and the stop is blocked once until the agent has
+  stored its learnings or declared none.
 
 The instructions ask agents to use the board actively: broadcast (no `--to`) claims before
 touching anything shared, findings, warnings, blockers and results; `--to '<exact name>'` for
@@ -676,18 +677,30 @@ imports the Hindsight client. When on:
   `activate --project NAME` explicitly opts into a project bank, normalized to lower-case
   `a-z0-9_-` (max 64). Missing banks fail clearly; only an explicit `--create-bank` on a write
   authorizes creating one.
-- **General recall:** start and turn hooks and `swarm recall` query `recall_banks` (default
-  `["coding", "hermes"]`) plus the job's explicit project bank. Results are deduplicated within
-  the existing time, item and character budgets. The 6000-character cache drops whole trailing
-  facts, never slices JSON. A bank error leaves other banks available.
-- **Recall while working:** every `recall_minutes` (default 15) the next tool call re-recalls
-  and shows only memories that agent hasn't been shown (ids kept in its agent row).
-- **Storing:** agents are told to store durable findings, root causes, decisions and gotchas
-  (never secrets, never narration) with `swarm remember --job J --as NAME "<fact>"`. Each fact is
-  retained asynchronously, tagged `swarm`, `job:<job>`, `agent:<name>`, with metadata
-  `source=swarm`, `job`, `agent`, `project`. An agent that stored nothing for
-  `remember_nudge_minutes` (default 20) gets one reminder, then another only after the next
-  quiet stretch.
+- **Start recall, once, scoped:** when an agent joins, the hook queries `recall_banks` (default
+  `["coding", "hermes"]`) plus the job's explicit project bank, filtered to the job's SUBJECT tags
+  (only memories carrying one of them) and queried with its topic (`activate --topic`, else the
+  task). A job with no subject tags gets no start recall. Results are deduplicated within the time,
+  item and character budgets. There is no periodic recall.
+- **On-demand recall, unrestricted:** `swarm recall --job J "<anything>"` searches every subject
+  of the configured banks; `--tags T` or `--bank B` narrow it. Agents are told to use it whenever
+  they need context.
+- **Subject tags, never ids:** `activate --tags swarm,astro-loom` (default: the project's name,
+  else the git repository's); `swarm job tags --job J --add/--remove/--set` changes them at any
+  time (posted on the board). `swarm remember` and `swarm learn` read them when they run and stamp
+  exactly those plus `--tags`; job, agent, session and host go into metadata only. Id-like tags
+  (`job:x`, dates, hex ids, numbers, any `a:b`) are refused.
+- **Storing, proactively:** agents store a durable finding the moment it is confirmed (root
+  causes, why a setting is what it is, traps, measured numbers), one fact per call with its
+  evidence: `swarm remember --job J --as NAME "<fact>"`. Never secrets, never narration.
+- **Mandatory at agent end:** a normal stop is blocked once unless the agent stored a memory or
+  declared none (`swarm remember --job J --as NAME --none "<reason>"`). An abnormal end (stuck,
+  dead, lost, a limit) marks the agent unharvested, with no LLM call.
+- **Mandatory at job close:** `swarm deactivate` is refused while agents are unharvested or
+  nothing was stored for the run. The closing seat runs `swarm learn --job J --harvest`, then
+  `swarm learn --job J --bank BANK -` (or `--none "<reason>"`). Only a person may skip it:
+  `swarm deactivate --job J --no-learn "<reason>"`. Drive jobs run it through a driver-launched
+  `learner` seat before closing.
 - **Failure:** every call has one `timeout_seconds` timeout (default 3). A connection failure,
   timeout or 502/503/504 is logged to the hook error log and marks all of Hindsight unreachable
   for `retry_after_seconds` (a marker file outside the sandbox's reach), so an outage costs one timeout, not one

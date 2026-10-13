@@ -183,12 +183,12 @@ recall_banks = ["coding", "hermes"] # general recall, plus any explicit project 
 api_key_file = ""                   # optional file holding the API key; chmod 600, never printed
 timeout_seconds = 3                 # one short timeout per call; hooks never wait longer
 retry_after_seconds = 60            # after a failure, skip Hindsight this long (one timeout per outage)
-recall_minutes = 15                 # re-recall for each working agent this often; only unseen memories are shown
-recall_start_seconds = 6           # most a joining agent waits for its first recall (a recall takes 1.5-4 s); mid-work recalls wait at most 2 s; max 8. Env SWARM_HOOK_RECALL_SECONDS overrides
+recall_start_seconds = 6           # most a joining agent waits for its one start recall (a recall takes 1.5-4 s); max 8. Env SWARM_HOOK_RECALL_SECONDS overrides
+# No periodic recall and no timed reminder: agents recall on demand (`swarm recall "<query>"`) and must store or
+# declare their learnings before they stop. The old keys recall_minutes and remember_nudge_minutes are ignored.
 recall_max_items = 8                # memories injected per recall
 recall_max_chars = 1500             # and at most this many characters of them
 recall_max_tokens = 1024            # max_tokens passed to Hindsight's recall
-remember_nudge_minutes = 20         # remind an agent that stored nothing for this long (once per quiet stretch)
 remember_max_chars = 1000           # cap on one `swarm remember` fact
 
 [provenance]
