@@ -245,6 +245,15 @@ def read_seat_transcript(seat_dir: str, harness: str, key: str | None, limit: in
     return read_under(seat_dir, rel, limit) if rel else None
 
 
+def neutral_cwd() -> str:
+    """Where a brokered command runs: no seat's directory. "/" on POSIX; on Windows the system drive's root
+    (%SystemDrive%, else the drive of this Python), whatever the current directory is."""
+    if os.name != "nt":
+        return "/"
+    drive = os.environ.get("SystemDrive") or os.path.splitdrive(sys.executable)[0] or "C:"
+    return drive.rstrip("\\/") + "\\"
+
+
 class SeatBroker:
     """The broker of one running seat. `run` is the runner's run dict (harness, session_id, agent_key, name),
     read live: a Codex thread id the runner binds later is used from then on."""
@@ -360,7 +369,7 @@ class SeatBroker:
         if token:
             env[person.BROKER_TOKEN_ENV] = token
         try:
-            res = self._run(cmd, input=stdin, capture_output=True, cwd=os.path.abspath(os.sep), env=env, timeout=timeout)
+            res = self._run(cmd, input=stdin, capture_output=True, cwd=neutral_cwd(), env=env, timeout=timeout)
         finally:
             self._unattest(name)
         return res.returncode, res.stdout or b"", res.stderr or b""
