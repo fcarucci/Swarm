@@ -338,6 +338,7 @@ class TerminalizeTests(LifeCase):
 
     def guard_refuses(self, **board_verdict):
         """The pending MET names (goal, CAND, REQ, generation 1); the board holds a different verdict."""
+        rejected = self.led.watermarks.get("close_rejected", 0)
         self.judge_verdict(**board_verdict)
         self.led.terminal_intent = {"verdict": "met", "scope": "goal", "generation": 1, "candidate": CAND,
                                     "req": REQ, "by": "judge", "at": fx.iso(self.t0)}
@@ -347,22 +348,14 @@ class TerminalizeTests(LifeCase):
         self.assertEqual(self.job().status, "active")
         self.assertIsNone(self.led.terminal_intent)
         self.assertIsNone(self.led.terminal)
-        self.assertEqual(self.led.watermarks["close_rejected"], 1)
+        self.assertEqual(self.led.watermarks["close_rejected"], rejected + 1)
 
-    def test_driver_close_guard_checks_generation(self):
-        self.guard_refuses(gen=2)
-
-    def test_driver_close_guard_checks_scope(self):
-        self.guard_refuses(scope="artifact")
-
-    def test_driver_close_guard_checks_candidate(self):
-        self.guard_refuses(candidate="d" * 40)
-
-    def test_driver_close_guard_checks_req(self):
-        self.guard_refuses(req="x" * 16)
-
-    def test_driver_close_guard_checks_verdict(self):
-        self.guard_refuses(verdict="not_met", scope="goal")
+    def test_driver_close_guard_checks_generation_scope_candidate_req_and_verdict(self):
+        for field, board_verdict in (("generation", dict(gen=2)), ("scope", dict(scope="artifact")),
+                                     ("candidate", dict(candidate="d" * 40)), ("req", dict(req="x" * 16)),
+                                     ("verdict", dict(verdict="not_met", scope="goal"))):
+            with self.subTest(field):
+                self.guard_refuses(**board_verdict)
 
     def test_driver_close_guard_refuses_when_the_board_has_no_verdict(self):
         self.led.terminal_intent = {"verdict": "met", "scope": "goal", "generation": 1, "candidate": CAND,

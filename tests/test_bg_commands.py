@@ -21,7 +21,7 @@ from support import (FileHarness, MemoryHarness, PostgresHarness, SqliteHarness,
                      ROOT)
 
 from swarm import bg
-from swarm.board import BgCommand, SCHEMA_VERSION
+from swarm.board import BgCommand
 from swarm.board.base import BG_COMMAND_MAX
 
 LINUX = sys.platform.startswith("linux") and hasattr(os, "pidfd_open")
@@ -54,10 +54,6 @@ class BgContract:
         self.b.open_job("K", "other", None, None, None)
         self.homer = self.b.allocate_name("k-homer", "J", "worker")
         self.marge = self.b.allocate_name("k-marge", "J", "worker")
-
-    def test_schema_is_24(self):
-        self.assertGreaterEqual(SCHEMA_VERSION, 24)
-        self.assertEqual(type(self.b).schema_version(self.h.cfg), SCHEMA_VERSION)
 
     def test_setup_twice_is_idempotent_and_keeps_rows(self):
         from swarm.board import setup_board
@@ -96,6 +92,12 @@ class BgContract:
         clean = self.b.bg_start("J", "k-homer", self.homer, "true", **start_kw())
         self.b.bg_end(clean, "exited", 0)
         self.assertFalse(self.b.bg_end(clean, "reaped", None, "x", signalled_at=signalled))   # not a signal exit
+        # a signal exit recorded before the reap signalled is not claimed by it
+        early = self.b.bg_start("J", "k-homer", self.homer, "x", **start_kw())
+        self.b.bg_end(early, "exited", 143)
+        later = self.b.now() + dt.timedelta(seconds=5)
+        self.assertFalse(self.b.bg_end(early, "reaped", None, "late", signalled_at=later))
+        self.assertEqual([c.outcome for c in self.b.bg_commands("J") if c.id == early], ["exited"])
 
     def test_checks_refuse_bad_rows(self):
         with self.assertRaises(ValueError):
@@ -415,8 +417,6 @@ def _members_raw(pgid, tag):
     return _members(pgid, tag, 0, bg.TAG_ENV)
 
 
-
-
 # --------------------------------------------------------------------------- the wrapper
 
 @unittest.skipUnless(LINUX, "the wrapper records /proc start times (Linux)")
@@ -572,17 +572,6 @@ class LiveWrapperReapTests(SqliteBoardDir, unittest.TestCase):
         (r,) = self.rows()
         self.assertEqual((r.outcome, r.exit_code), ("killed", 137))
 
-    def test_a_signal_exit_before_the_reap_is_not_claimed(self):
-        with self.board() as b:
-            bid = b.bg_start("J", "k1", self.name, "x", host="h", boot=None, pid=1, pgid=1, proc_start=1, tag="t")
-            b.bg_end(bid, "exited", 143)
-            later = b.now() + dt.timedelta(seconds=5)
-            self.assertFalse(b.bg_end(bid, "reaped", None, "late", signalled_at=later))
-            self.assertEqual(b.bg_commands("J")[0].outcome, "exited")
-            bid2 = b.bg_start("J", "k1", self.name, "y", host="h", boot=None, pid=1, pgid=1, proc_start=1, tag="t")
-            b.bg_end(bid2, "exited", 0)
-            self.assertFalse(b.bg_end(bid2, "reaped", None, "x", signalled_at=b.now() - dt.timedelta(seconds=5)))
-
 
 @unittest.skipUnless(LINUX, "the launcher test runs bin/swarm (POSIX sh)")
 class WrapperEnvironmentTests(SqliteBoardDir, unittest.TestCase):
@@ -612,6 +601,12 @@ class WrapperEnvironmentTests(SqliteBoardDir, unittest.TestCase):
         self.assertNotIn("PYTHONPYCACHEPREFIX", wrapped)
         (r,) = self.rows()
         self.assertEqual((r.outcome, r.exit_code), ("exited", 0))   # and it was recorded
+
+
+from support import gate_backends  # noqa: E402
+
+# a CI leg runs only its own backend's copies ($SWARM_TEST_BACKEND); unset runs all
+gate_backends(globals(), memory=[MemoryBg], sqlite=[SqliteBg], file=[FileBg])
 
 
 if __name__ == "__main__":

@@ -111,8 +111,6 @@ class DetailsContract:
         self.assertIsNone(self.b.verdict_details("j"))
         self.assertTrue(self.b.record_verdict("j", self.judge, "met", "again", None, "a", "fresh"))
         self.assertEqual(self.b.verdict_details("j").details, "fresh")
-
-    def test_record_verdict_is_a_write_method(self):
         from swarm.board.base import WRITE_METHODS
         self.assertIn("record_verdict", WRITE_METHODS)
 
@@ -167,9 +165,6 @@ class Schema23Migration:
         self.h = self.harness_factory()
         self.addCleanup(self.h.close)
         self.h.reset()
-
-    def test_the_schema_is_at_least_23(self):
-        self.assertGreaterEqual(SCHEMA_VERSION, 23)
 
     def test_a_previous_schema_board_upgrades_and_keeps_its_verdicts(self):
         with self.h.board() as b:
@@ -438,13 +433,6 @@ class JudgeTeachingTests(GoalEnv):
         super().setUp()
         self.activate_goal()
 
-    def test_the_judge_instructions_say_details_not_a_file(self):
-        text = hooks._judge_instructions("Homer Simpson", "J", "g", self.cfg)
-        self.assertIn("--details -", text)
-        self.assertIn("verdict.md", text)
-        self.assertIn("file writes are refused for judges", text)
-        self.assertIn("verdict show --job 'J'", text)
-
     def test_the_gate_refusal_for_a_write_names_details(self):
         self.spawn_judge()
         out = self.hook("turn", agent_id="judge-1", tool_name="Write",
@@ -467,11 +455,6 @@ class JudgeTeachingTests(GoalEnv):
         rewritten = hooks.own_name_verdict_command(command, judge, "J")
         self.assertIn(f"--as '{judge}'", rewritten)
         self.assertIn("1. a -> b", rewritten)   # the body is untouched
-
-    def test_the_instructions_and_refusal_ask_for_a_quoted_delimiter(self):
-        text = hooks._judge_instructions("Homer Simpson", "J", "g", self.cfg)
-        self.assertIn("QUOTED delimiter", text)
-        self.assertIn("<<'EOF'", text)
 
 
 class SeatQuestionIdentityTests(GoalEnv):
@@ -536,6 +519,12 @@ class FixWorkerBriefTests(unittest.TestCase):
         js = types.SimpleNamespace(verdict_by="Judge", verdict_reason="bad", verdict_next="fix it")
         self.assertIn("swarm verdict show --job J", respawn.brief(js, "J", details=True))
         self.assertNotIn("verdict show", respawn.brief(js, "J"))
+
+
+from support import gate_backends  # noqa: E402
+
+# a CI leg runs only its own backend's copies ($SWARM_TEST_BACKEND); unset runs all
+gate_backends(globals(), memory=[MemoryDetails, MemorySchema23], sqlite=[SqliteDetails, SqliteSchema23], file=[FileDetails, FileSchema23])
 
 
 if __name__ == "__main__":

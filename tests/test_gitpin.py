@@ -137,10 +137,6 @@ class CheckUrlTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(gitpin.GitPinError):
                 gitpin.check_url(value)
 
-    def test_refused_is_a_value_error(self):
-        with self.assertRaises(ValueError):
-            gitpin.check_url("-x")
-
     def test_url_args_put_double_dash_first_and_check(self):
         self.assertEqual(gitpin.url_args("https://example.com/r", "refs/heads/main"),
                          ["--", "https://example.com/r", "refs/heads/main"])

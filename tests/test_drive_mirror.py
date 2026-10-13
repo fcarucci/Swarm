@@ -20,8 +20,8 @@ from unittest import mock
 
 import support  # noqa: F401  (puts lib/ on sys.path, sets up the suite sandbox)
 from swarm.supervisor import mirror
-from swarm.supervisor.mirror import (Mirror, MirrorError, MissingCommitError, TargetRewoundError,
-                                     UnpatchableCommitError)
+from swarm.supervisor.mirror import (Mirror, MirrorError, MirrorTimeoutError, MissingCommitError,
+                                     TargetRewoundError, UnpatchableCommitError)
 
 # POSIX-looking absolute paths, made absolute on Windows too (support.abs_).
 SOCK = support.abs_("/run/agent.sock")
@@ -241,10 +241,6 @@ class MirrorBasics(MirrorCase):
             Mirror("http://127.0.0.1:9/x.git", self.agent_cred(), loopback_http=True)
             Mirror("http://localhost:9/x.git", self.agent_cred(), loopback_http=True)
 
-    def test_loopback_flag_is_keyword_only(self):
-        with self.assertRaises(TypeError):
-            Mirror("http://127.0.0.1:9/x.git", self.agent_cred(), True)
-
     def test_url_with_embedded_credentials_refused(self):
         for url in ("https://x-access-token:FAKE@example.com/r.git", "https://user@example.com/r.git",
                     "user:FAKE@example.com:r.git"):
@@ -320,18 +316,18 @@ class MirrorBasics(MirrorCase):
             self.assertEqual(kw["env"]["PATH"], "/usr/local/bin:/usr/bin:/bin")
 
     @support.posix_only("process groups")
-    def test_timeout_kills_the_whole_process_group(self):
-        if not sys.platform.startswith("linux"):
-            self.skipTest("checks /proc")
+    def test_timeout_is_typed_and_kills_the_whole_process_group(self):
         remote, _ = self.remote_with_main()
         m = Mirror(remote, self.agent_cred())
         pidfile = os.path.join(self.root, "grandchild.pid")
         started = time.time()
-        with self.assertRaises(MirrorError):
+        with self.assertRaises(MirrorTimeoutError):
             m._exec(["/bin/sh", "-c", f"sleep 60 & echo $! > {pidfile}; sleep 60"],
                     env=m._env(pinned=False), timeout=1)
         # A grandchild that kept the pipe open would make the call wait out its sleep.
         self.assertLess(time.time() - started, 20)
+        if not sys.platform.startswith("linux"):
+            self.skipTest("checks /proc")
         pid = int(open(pidfile).read().strip())
         deadline = time.time() + 5
         while time.time() < deadline and _alive(pid):

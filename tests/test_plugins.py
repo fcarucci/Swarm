@@ -142,9 +142,18 @@ class PluginTests(PluginEnv):
         self.assertEqual(out.count("loaded"), 1)
 
     @posix_only("POSIX file ownership and permissions; Windows uses ACLs")
-    def test_own_group_writable_plugin_file_loads(self):
-        self.plugin("good", GOOD)
+    def test_own_group_writable_plugin_file_package_and_init_load(self):
+        self.plugin("good", GOOD)                      # a plugin file
         (self.pdir / "good.py").chmod(0o664)
+        self.assertIn("good\tloaded", self.cli("plugins")[1])
+        self.assertEqual(self.cli("hello"), (0, "hello world good\n", ""))
+        (self.pdir / "good.py").unlink()
+        package = self.pdir / "good"                   # a package and its __init__
+        package.mkdir()
+        init = package / "__init__.py"
+        init.write_text(GOOD)
+        package.chmod(0o775)
+        init.chmod(0o664)
         self.assertIn("good\tloaded", self.cli("plugins")[1])
         self.assertEqual(self.cli("hello"), (0, "hello world good\n", ""))
 
@@ -180,17 +189,6 @@ class PluginTests(PluginEnv):
         self.assertEqual(rc, 0)
         self.assertIn("refused:", out)
         self.assertNotIn("executed unsafe code", out)
-
-    @posix_only("POSIX package ownership and permissions; Windows uses ACLs")
-    def test_own_group_writable_package_and_init_load(self):
-        package = self.pdir / "good"
-        package.mkdir()
-        init = package / "__init__.py"
-        init.write_text(GOOD)
-        package.chmod(0o775)
-        init.chmod(0o664)
-        self.assertIn("good\tloaded", self.cli("plugins")[1])
-        self.assertEqual(self.cli("hello"), (0, "hello world good\n", ""))
 
     @posix_only("POSIX package ownership and permissions; Windows uses ACLs")
     def test_unsafe_package_directory_or_init_is_refused_without_execution(self):
@@ -231,33 +229,34 @@ class PluginTests(PluginEnv):
         self.assertNotIn("executed unsafe code", out)
 
     @posix_only("POSIX symlinks; Windows skips file trust checks")
-    def test_symlink_plugin_is_refused(self):
+    def test_symlinked_plugins_are_refused_without_execution(self):
         target = self.tmp / "target.py"
         target.write_text("raise RuntimeError('executed unsafe code')")
-        (self.pdir / "unsafe.py").symlink_to(target)
-        rc, out, _ = self.cli("plugins")
-        self.assertEqual(rc, 0)
-        self.assertIn("refused: symlink", out)
-        self.assertNotIn("executed unsafe code", out)
-
-    @posix_only("POSIX symlinks; Windows skips file trust checks")
-    def test_broken_plugin_symlink_is_reported_as_refused(self):
-        (self.pdir / "unsafe.py").symlink_to(self.tmp / "missing.py")
-        rc, out, _ = self.cli("plugins")
-        self.assertEqual(rc, 0)
-        self.assertIn("unsafe\tERROR", out)
-        self.assertIn("refused: symlink", out)
-
-    @posix_only("POSIX symlinks; Windows skips file trust checks")
-    def test_symlink_package_directory_is_refused(self):
-        target = self.tmp / "package"
-        target.mkdir()
-        (target / "__init__.py").write_text("raise RuntimeError('executed unsafe code')")
-        (self.pdir / "unsafe").symlink_to(target, target_is_directory=True)
-        rc, out, _ = self.cli("plugins")
-        self.assertEqual(rc, 0)
-        self.assertIn("refused: symlink", out)
-        self.assertNotIn("executed unsafe code", out)
+        package = self.tmp / "package"
+        package.mkdir()
+        (package / "__init__.py").write_text("raise RuntimeError('executed unsafe code')")
+        link = self.pdir / "unsafe.py"
+        dirlink = self.pdir / "unsafe"
+        with self.subTest("symlinked plugin file"):
+            link.symlink_to(target)
+            rc, out, _ = self.cli("plugins")
+            self.assertEqual(rc, 0)
+            self.assertIn("refused: symlink", out)
+            self.assertNotIn("executed unsafe code", out)
+            link.unlink()
+        with self.subTest("broken plugin symlink"):
+            link.symlink_to(self.tmp / "missing.py")
+            rc, out, _ = self.cli("plugins")
+            self.assertEqual(rc, 0)
+            self.assertIn("unsafe\tERROR", out)
+            self.assertIn("refused: symlink", out)
+            link.unlink()
+        with self.subTest("symlinked package directory"):
+            dirlink.symlink_to(package, target_is_directory=True)
+            rc, out, _ = self.cli("plugins")
+            self.assertEqual(rc, 0)
+            self.assertIn("refused: symlink", out)
+            self.assertNotIn("executed unsafe code", out)
 
     def test_discovery_failure_is_reported_and_core_still_runs(self):
         with mock.patch("swarm.plugins.Registry._discover", side_effect=RuntimeError("discovery boom")):
@@ -267,11 +266,6 @@ class PluginTests(PluginEnv):
             self.assertNotIn("no plugins found", out)
             self.assertEqual(self.cli("activate", "--job", "J")[0], 0)
         self.assertNotIn("discovery failed", self.cli("plugins")[1])
-
-    def test_a_broken_config_still_runs_core(self):
-        self.plugin("good", GOOD)
-        rc, out, _ = self.cli("hello")
-        self.assertEqual(rc, 0)
 
     def test_job_data_is_namespaced_per_plugin(self):
         self.plugin("kv", '''

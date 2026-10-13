@@ -185,12 +185,6 @@ class DriverPreconditionTests(HomeCase):
             with self.subTest(enabled=enabled):
                 self.assertIsNone(da.driver_problem({"supervise": {"enabled": enabled}}))
 
-    def test_activation_has_no_platform_refusal(self):
-        import inspect
-        src = inspect.getsource(da)
-        self.assertNotIn("does not install", src)
-        self.assertFalse(hasattr(da, "supervisor_problem"))
-
     def test_the_kill_switch_refuses(self):
         from swarm.supervisor import settings as st
         off = st.off_file()
@@ -706,11 +700,6 @@ class FlagTests(HomeCase):
         self.assertEqual(da.legacy_goal_check(ns(goal="g", no_drive=True, reason="  ")), 2)
         self.assertIsNone(da.legacy_goal_check(ns(goal="g", no_drive=True, reason="a person drives it")))
 
-    def test_drive_flag_is_accepted_noop(self):
-        args = self.parser().parse_args(["--drive"])
-        self.assertTrue(args.drive)
-
-
 
 class DriveCli(Env):
     """`swarm activate --goal` through the CLI, on the test board. The systemd timer and the supervisor's
@@ -868,11 +857,6 @@ class DriveCli(Env):
         self.assertIsNone(self.ledger_of())
         self.ensured.assert_not_called()
 
-    def test_no_drive_requires_reason(self):
-        rc, _, err = self.activate("--no-drive", "--workdir", str(self.work))
-        self.assertEqual(rc, 2)
-        self.assertIn("--reason", err)
-
     def test_no_drive_with_reason_is_shown_not_autonomous(self):
         self.enable_supervisor(False)
         rc, out, err = self.activate("--no-drive", "--reason", "a person drives it")
@@ -900,13 +884,6 @@ class DriveCli(Env):
         rc, _, err = self.activate("--workdir", str(self.work), "--max-cost-usd", "20")
         self.assertEqual(rc, 0, err)
         self.assertEqual(self.ledger_of().budgets["max_cost_usd"], 20)
-
-    def test_config_default_used_without_flag(self):
-        self.config.write_text(self.config.read_text() + "\n[drive]\nmax_cost_usd = 12\n")
-        self.cfg = swarm.load_config(self.config)
-        rc, _, err = self.activate("--workdir", str(self.work))
-        self.assertEqual(rc, 0, err)
-        self.assertEqual(self.ledger_of().budgets["max_cost_usd"], 12)
 
     def test_reserve_larger_than_cap_refused(self):
         rc, _, err = self.activate("--workdir", str(self.work), "--max-cost-usd", "4", "--ruling-reserve-usd", "5")

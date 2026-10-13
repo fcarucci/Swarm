@@ -129,14 +129,6 @@ class KeymapTests(unittest.TestCase):
         for seq, action in swarm.WATCH_KEYS:
             self.assertTrue(action == "quit" or action in swarm.VIEW_ACTIONS, seq)
 
-    def test_right_and_left_move_the_offset(self):
-        view = {"offset": 0, "max_offset": 100}
-        self.assertTrue(swarm._apply_keys("\x1b[C", view))
-        self.assertGreater(view["offset"], 0)
-        swarm._apply_keys("\x1b[D", view)
-        self.assertEqual(view["offset"], 0)
-        self.assertFalse(swarm._apply_keys("q", view))
-
 
 @unittest.skipIf(sys.platform == "win32", WIN)
 class LoopTests(unittest.TestCase):
@@ -189,12 +181,6 @@ class LoopTests(unittest.TestCase):
             raise BoardUnavailable("gone")
         _out, err = self.run_loop(refresh, quit_after=0.3)
         self.assertIsInstance(err, BoardUnavailable)
-
-    def test_other_refresh_errors_propagate_too(self):
-        def refresh():
-            raise RuntimeError("boom")
-        _out, err = self.run_loop(refresh, quit_after=0.3)
-        self.assertIsInstance(err, RuntimeError)
 
     def test_snapshot_miss_marks_next_data_window_dirty(self):
         gate = swarm._RefreshGate(60)

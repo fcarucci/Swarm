@@ -210,5 +210,11 @@ class TestSqliteMigration(unittest.TestCase):
                 self.assertEqual(b.job_status("j").status, "paused")
 
 
+from support import gate_backends  # noqa: E402
+
+# a CI leg runs only its own backend's copies ($SWARM_TEST_BACKEND); unset runs all
+gate_backends(globals(), memory=[TestMemoryPause], sqlite=[TestSqlitePause], file=[TestFilePause])
+
+
 if __name__ == "__main__":
     unittest.main()

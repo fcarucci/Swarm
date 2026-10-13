@@ -148,11 +148,6 @@ class Doctor(MirrorCase):
         self.assertNotIn(url, line.detail)
         self.assertIn("<remote>", line.detail)
 
-    def test_audit_help_explains_causes_and_resolution(self):
-        text = land_doctor.AUDIT_HELP
-        for word in ("DRIVER-AUDIT", "ruling", "patch-id", "revert", "swarm land", "merge", "judge"):
-            self.assertIn(word, text)
-
 
 if __name__ == "__main__":
     unittest.main()

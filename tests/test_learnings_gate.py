@@ -9,24 +9,24 @@ class LearnThenDeactivateTests(HindsightEnv):
         super().setUp()
         self.enable()
 
-    def learn_then_deactivate(self, bank, *activate_args):
-        self.assertEqual(self.cli("activate", "--job", "J", *activate_args)[0], 0)
-        rc, out, err = self.cli("learn", "--job", "J", "--bank", bank, "-", stdin="A self-contained fact.\n")
+    def learn_then_deactivate(self, bank, *activate_args, job="J"):
+        self.assertEqual(self.cli("activate", "--job", job, *activate_args)[0], 0)
+        rc, out, err = self.cli("learn", "--job", job, "--bank", bank, "-", stdin="A self-contained fact.\n")
         self.assertEqual(rc, 0, err)
         self.assertIn(f'learned in bank "{bank}"', out)
-        rc, out, err = self.cli("deactivate", "--job", "J")
+        rc, out, err = self.cli("deactivate", "--job", job)
         self.assertEqual(rc, 0, err)
         with self.board() as b:
-            s = b.job_status("J")
+            s = b.job_status(job)
         self.assertEqual(s.status, "completed", (out, err))
         return out
 
-    def test_deactivate_after_learn_in_the_default_bank(self):
-        out = self.learn_then_deactivate("coding")
-        self.assertIn("deactivated J (completed)", out)
-
-    def test_deactivate_after_learn_in_another_bank_and_project(self):
-        self.learn_then_deactivate("hermes", "--project", "job-bank")
+    def test_deactivate_after_learn_in_the_default_bank_and_in_another_bank_and_project(self):
+        for bank, args, job in (("coding", (), "J"), ("hermes", ("--project", "job-bank"), "J2")):
+            with self.subTest(bank=bank):
+                out = self.learn_then_deactivate(bank, *args, job=job)
+                if bank == "coding":
+                    self.assertIn("deactivated J (completed)", out)
 
     def test_deactivate_after_learn_on_a_goal_job_with_met_verdict(self):
         self.assertEqual(self.cli("activate", "--job", "J", "--no-drive", "--reason", "legacy goal test", "--goal", "ship it")[0], 0)

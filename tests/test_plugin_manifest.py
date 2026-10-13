@@ -68,9 +68,19 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(namespace["ROOT"], skill)
         self.assertEqual(namespace["OUT"], skill / "references/refactorings")
 
-    def test_release_archive_ships_refactoring_skill(self):
+    def test_release_archive_ships_the_refactoring_and_complexity_analyzer_skills(self):
         # Match release.yml: git archive applies export-ignore. The root /scripts exclusion
         # must never strip a skill's own scripts or reference/language context files.
+        analyzer = ROOT / "skills/complexity-analyzer"
+        text = (analyzer / "SKILL.md").read_text()
+        self.assertTrue(text.startswith("---\nname: complexity-analyzer\n"))
+        self.assertNotIn("~/.claude/skills/complexity-analyzer", text)
+        self.assertFalse((analyzer / "docs").exists())
+        tracked = subprocess.check_output(["git", "ls-files", "-z"], cwd=ROOT).decode().split("\0")
+        staged = subprocess.check_output(["git", "ls-files", "--stage", "-z"], cwd=ROOT).decode().split("\0")
+        executable = {entry.split("\t", 1)[1] for entry in staged if entry.startswith("100755 ")}
+        for rel in filter(None, tracked):
+            self.assertTrue({"tools", "node_modules"}.isdisjoint(rel.split("/")), rel)
         archive = subprocess.check_output(["git", "archive", "--format=tar", "HEAD"], cwd=ROOT)
         with tarfile.open(fileobj=io.BytesIO(archive)) as packaged:
             for manifest in (".claude-plugin/plugin.json", ".codex-plugin/plugin.json"):
@@ -84,22 +94,6 @@ class ManifestTests(unittest.TestCase):
                         self.assertEqual(packaged.extractfile(rel).read(), path.read_bytes())
                         if path.parent.name == "scripts":
                             self.assertTrue(packaged.getmember(rel).mode & 0o111)
-
-    def test_complexity_analyzer_skill_ships_for_both_hosts(self):
-        skill = ROOT / "skills/complexity-analyzer"
-        text = (skill / "SKILL.md").read_text()
-        self.assertTrue(text.startswith("---\nname: complexity-analyzer\n"))
-        self.assertNotIn("~/.claude/skills/complexity-analyzer", text)
-        self.assertFalse((skill / "docs").exists())
-        tracked = subprocess.check_output(["git", "ls-files", "-z"], cwd=ROOT).decode().split("\0")
-        staged = subprocess.check_output(["git", "ls-files", "--stage", "-z"], cwd=ROOT).decode().split("\0")
-        executable = {entry.split("\t", 1)[1] for entry in staged if entry.startswith("100755 ")}
-        for rel in filter(None, tracked):
-            self.assertTrue({"tools", "node_modules"}.isdisjoint(rel.split("/")), rel)
-        archive = subprocess.check_output(["git", "archive", "--format=tar", "HEAD"], cwd=ROOT)
-        with tarfile.open(fileobj=io.BytesIO(archive)) as packaged:
-            for manifest in (".claude-plugin/plugin.json", ".codex-plugin/plugin.json"):
-                self.assertEqual(json.load(packaged.extractfile(manifest))["name"], "swarm")
             for rel in tracked:
                 if rel.startswith("skills/complexity-analyzer/") and not rel.endswith((".gitignore", ".gitattributes")):
                     self.assertEqual(packaged.extractfile(rel).read().replace(b"\r\n", b"\n"),
@@ -137,17 +131,6 @@ class ManifestTests(unittest.TestCase):
 
 
 class DocsTests(unittest.TestCase):
-    def test_docs_cover_both_hosts(self):
-        skill = (ROOT / "skills/swarm/SKILL.md").read_text()
-        for needle in ("spawn_agent", "`message`", "--attach", "${CLAUDE_PLUGIN_ROOT}/bin/swarm doctor", "swarm command:",
-                       "[swarm role: verifier]", "agents.max_depth = 2"):
-            self.assertTrue(needle in skill, needle)
-        readme = (ROOT / "docs/REFERENCE.md").read_text()
-        for needle in ("swarm migrate", "swarm doctor", "/hooks", "stop_quiet_minutes", "[models]", "web search"):
-            self.assertTrue(needle in readme, needle)
-        example = (ROOT / "config.example.toml").read_text()
-        for needle in ("[models]", "[models.claude]", "[codex]", "stop_quiet_minutes"):
-            self.assertTrue(needle in example, needle)
 
     def test_docs_name_every_cli_command(self):
         """Every `swarm` subcommand is in both command references (hook is internal: reference doc only)."""

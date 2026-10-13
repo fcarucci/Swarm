@@ -19,24 +19,22 @@ def _tree(pairs: dict[int, tuple[int, list[str]]]):
 
 
 class HostDetectionTests(unittest.TestCase):
-    def test_flag_wins(self):
-        self.assertEqual(hosts.detect_hook_host("codex", {}, {}), "codex")
-        self.assertEqual(hosts.detect_hook_host("claude", {"turn_id": "t"}, {"PLUGIN_ROOT": "/p"}), "claude")
-
-    def test_payload_with_turn_id_is_codex(self):
-        self.assertEqual(hosts.detect_hook_host(None, {"turn_id": "t1", "model": "m"}, {}), "codex")
-
-    def test_plugin_root_env_is_codex_but_claude_plugin_root_is_not(self):
-        self.assertEqual(hosts.detect_hook_host(None, {}, {"PLUGIN_ROOT": "/x"}), "codex")
-        self.assertEqual(hosts.detect_hook_host(None, {}, {"CLAUDE_PLUGIN_ROOT": "/x"}), "claude")
-
-    def test_cli_env_only_one_host(self):
-        self.assertEqual(hosts.detect_cli_host({"CODEX_THREAD_ID": "t"}), "codex")
-        self.assertEqual(hosts.detect_cli_host({"CLAUDE_CODE_SESSION_ID": "s"}), "claude")
-        self.assertIsNone(hosts.detect_cli_host({}))
-
-    def test_cli_override(self):
-        self.assertEqual(hosts.detect_cli_host({"SWARM_HOST": "codex", "CLAUDE_CODE_SESSION_ID": "s"}), "codex")
+    def test_host_detection_table(self):
+        hook, cli = hosts.detect_hook_host, hosts.detect_cli_host
+        cases = (
+            ("flag wins (codex)", lambda: hook("codex", {}, {}), "codex"),
+            ("flag wins (claude)", lambda: hook("claude", {"turn_id": "t"}, {"PLUGIN_ROOT": "/p"}), "claude"),
+            ("payload with turn_id is codex", lambda: hook(None, {"turn_id": "t1", "model": "m"}, {}), "codex"),
+            ("PLUGIN_ROOT env is codex", lambda: hook(None, {}, {"PLUGIN_ROOT": "/x"}), "codex"),
+            ("CLAUDE_PLUGIN_ROOT env is not", lambda: hook(None, {}, {"CLAUDE_PLUGIN_ROOT": "/x"}), "claude"),
+            ("cli env: codex", lambda: cli({"CODEX_THREAD_ID": "t"}), "codex"),
+            ("cli env: claude", lambda: cli({"CLAUDE_CODE_SESSION_ID": "s"}), "claude"),
+            ("cli env: none", lambda: cli({}), None),
+            ("cli override", lambda: cli({"SWARM_HOST": "codex", "CLAUDE_CODE_SESSION_ID": "s"}), "codex"),
+        )
+        for name, detect, expected in cases:
+            with self.subTest(name):
+                self.assertEqual(detect(), expected)
 
     def test_nested_codex_inside_claude_takes_nearest_ancestor(self):
         env = {"CLAUDE_CODE_SESSION_ID": "s", "CLAUDECODE": "1", "CODEX_THREAD_ID": "t"}

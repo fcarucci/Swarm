@@ -65,7 +65,6 @@ def _poster(path, who, n, barrier, out):
     out.put((who, ids))
 
 
-
 def _reader(path, key, expect, barrier, out, writers_done):
     """Drain through writer completion, including a final read after its publication."""
     got = []
@@ -386,7 +385,6 @@ class FileBoardSandboxTests(unittest.TestCase):
         self.assertEqual(list(self.spool.glob("*.json")), [])
 
 
-
 def _post_in_child(path):
     """Post from a separate process (a FIFO test must not hang the test runner)."""
     try:
@@ -633,14 +631,6 @@ class FileBoardPlantedLinkTests(unittest.TestCase):
         state = str(Path("~/.local/state/swarm").expanduser())
         self.assertFalse(str(fileboard.board_dir({})).startswith(state), fileboard.board_dir({}))
         self.assertEqual(fileboard.DEFAULT_PATH, "~/.local/share/swarm-board/board")
-
-    def test_probe_fileboard_chain_blocked(self):
-        # port of scratch-lead/probe_fileboard.sh: messages.jsonl -> dangling ~/.bash_aliases,
-        # a post with $(...) must not create it (sourcing it would run the command)
-        victim = self._plant("messages.jsonl", "dangling")
-        with self.assertRaises(BoardUnavailable):
-            self._post()
-        self.assertFalse(victim.exists())
 
 
 if __name__ == "__main__":

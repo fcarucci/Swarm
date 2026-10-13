@@ -130,6 +130,8 @@ class FloorAndBackoffTests(Base):
         self.clock.t += 2
         p.poll(REPO, SHA)
         self.assertEqual(host.calls, 2)
+        p.poll("me/other", SHA)      # the floor is per repo: another repo has its own
+        self.assertEqual(host.calls, 3)
 
     def test_queued_backs_off_60_120_300_cap(self):
         host = FakeHost("queued")
@@ -364,17 +366,6 @@ class EventTests(Base):
         host = FakeHost("green")
         self.assertEqual(self.wait(self.poller(host), events=lambda: None)[0], 0)
         self.assertEqual(host.calls, 1)
-
-    def test_event_lookup_without_event_core_says_so(self):
-        import swarm.board as sb
-        had = hasattr(sb.Board, "events")
-        if had:
-            self.skipTest("event core is installed: the 'not installed' path cannot run")
-        err = io.StringIO()
-        with redirect_stderr(err):
-            look = cw.event_lookup(SimpleNamespace(), SHA, "J", note=print)
-        self.assertIsNone(look)
-        self.assertIn("event core not installed", err.getvalue())
 
     def test_event_lookup_reads_board_events(self):
         import swarm.board as sb

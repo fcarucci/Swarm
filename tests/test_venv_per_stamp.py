@@ -198,13 +198,20 @@ class LauncherVenvTests(unittest.TestCase):
         lock = self.hold_lock(self.v22, f"{self.dead_pid()} {socket.gethostname()}")
         self.assert_builds_through_a_stale_lock(lock)
 
-    def test_old_lock_of_a_live_owner_on_this_host_is_never_stolen(self):
-        self.assert_waits_on_a_live_lock(
-            self.hold_lock(self.v22, f"{os.getpid()} {socket.gethostname()}", age_minutes=45))
-
-    def test_a_process_of_another_user_counts_as_alive(self):
-        # pid 1 belongs to root: kill -0 says EPERM to anyone else, which is "alive", not "dead"
-        self.assert_waits_on_a_live_lock(self.hold_lock(self.v22, f"1 {socket.gethostname()}", age_minutes=45))
+    def test_a_lock_that_may_still_be_live_is_left_alone(self):
+        host = socket.gethostname()
+        cases = (
+            ("old lock of a live owner on this host is never stolen", f"{os.getpid()} {host}", 45),
+            # pid 1 belongs to root: kill -0 says EPERM to anyone else, which is "alive", not "dead"
+            ("a process of another user counts as alive", f"1 {host}", 45),
+            ("dead-looking pid on another host is not stale while fresh", f"{self.dead_pid()} some-other-host", 0),
+            ("fresh lock with no owner record is respected", None, 0),
+        )
+        for name, owner, age in cases:
+            with self.subTest(name):
+                lock = self.hold_lock(self.v22, owner, age_minutes=age)
+                self.assert_waits_on_a_live_lock(lock)
+                shutil.rmtree(lock)
 
     def test_old_lock_of_another_host_is_removed_by_age(self):
         lock = self.hold_lock(self.v22, f"{self.dead_pid()} some-other-host", age_minutes=45)
@@ -244,19 +251,14 @@ class LauncherVenvTests(unittest.TestCase):
             self.assertIn(f"rc={rc}", res.stdout, (age, res.stderr))
 
     def assert_waits_on_a_live_lock(self, lock: Path):
-        with self.assertRaises(subprocess.TimeoutExpired):
-            self.launch(self.v22, timeout=3)
+        res = self.launch(self.v22, timeout=30, SWARM_LOCK_WAIT_TRIES="0")   # one look at the lock, then give up
+        self.assertEqual(res.returncode, 1, res.stderr)
+        self.assertIn("is held (not stale", res.stderr)
         self.assertTrue(lock.is_dir(), "a live lock is left alone")
         self.assertFalse((self.venv_of(self.v22) / ".swarm-requirements").exists(), "no build while it is held")
 
     def test_fresh_lock_of_a_live_owner_is_respected(self):
         self.assert_waits_on_a_live_lock(self.hold_lock(self.v22, f"{os.getpid()} {socket.gethostname()}"))
-
-    def test_dead_looking_pid_on_another_host_is_not_stale_while_fresh(self):
-        self.assert_waits_on_a_live_lock(self.hold_lock(self.v22, f"{self.dead_pid()} some-other-host"))
-
-    def test_fresh_lock_with_no_owner_record_is_respected(self):
-        self.assert_waits_on_a_live_lock(self.hold_lock(self.v22, None))
 
     def test_the_other_versions_lock_does_not_block_this_one(self):
         self.hold_lock(self.v23, f"{os.getpid()} {socket.gethostname()}")

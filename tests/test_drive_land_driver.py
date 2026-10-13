@@ -62,15 +62,9 @@ class Run(DriverCase):
         self.assertEqual(self.led.integrated[GROUP]["land_id"], str(mid))
         self.assertEqual(self.led.watermarks[driver_land.WATERMARK], mid)
         self.assertEqual(ledger_load(self.led).watermarks[driver_land.WATERMARK], mid)
-
-    def test_integrator_exits_after_land_request_driver_posts_integrated(self):
-        self.submit()
-        self.run_pass()
+        # the driver posts INTEGRATED for the integrator
         self.assertEqual(self.texts(), [f"INTEGRATED {GROUP}@{self.sha}"])
-
-    def test_leases_and_seat_are_released_after_landing(self):
-        mid = self.submit()
-        self.run_pass()
+        # leases and seat are released after landing
         self.assertEqual(self.locks(), [])
         self.assertEqual(self.board.seat("J", 1, SEAT).state, "idle")
         rows = [r for r in self.board.restarts("J") if r.action_id and r.action_id.endswith(f"|{mid}")]

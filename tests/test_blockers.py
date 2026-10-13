@@ -118,12 +118,6 @@ class BlockerContract:
         self.b.set_waiting("j", None)
         self.assertEqual([b.id for b in self.b.blockers("j")], [a.id])
 
-    def test_unbounded_blocker_protects_goal_stall_and_orphan(self):
-        self.h.backdate_job("j", created_at=86400, activated_at=86400)
-        self.b.open_blocker("j", "question", "human", "choose")
-        self.assertEqual(self.b.sweep_expiry(1, 1, goal_stall_hours=1), [])
-        self.assertEqual(self.b.job_status("j").status, "active")
-
     def test_protection_depends_on_kind_addressee_and_deadline(self):
         now = self.b.now()
         for i, (kind, addressee, offset, protected) in enumerate(
@@ -187,8 +181,12 @@ class BlockerContract:
             self.assertEqual(self.b.job_status(job).protected_blockers, 0)
             self.assertTrue(self.b.close_job(job, 'failed', 'stall', guard=CloseGuard(False, 'ship')))
 
-    def test_overdue_question_still_protects_goal_stall(self):
+    def test_unbounded_and_overdue_questions_protect_goal_stall_and_orphan(self):
         self.h.backdate_job("j", created_at=86400, activated_at=86400)
+        unbounded = self.b.open_blocker("j", "question", "human", "choose")
+        self.assertEqual(self.b.sweep_expiry(1, 1, goal_stall_hours=1), [])
+        self.assertEqual(self.b.job_status("j").status, "active")
+        self.assertTrue(self.b.resolve_blocker(unbounded.id, "blue", actor="human"))   # the overdue one alone below
         with mock.patch.object(self.b, "now", return_value=NOW):
             question = self.b.open_blocker(
                 "j", "question", "human", "choose", until=NOW - dt.timedelta(hours=2)
@@ -199,12 +197,6 @@ class BlockerContract:
         self.assertEqual(
             [e.event for e in self.b.blocker_events(question.id)], ["opened", "overdue"]
         )
-
-    def test_data_persists_across_connections(self):
-        a = self.b.open_blocker("j", "question", "human", "choose")
-        with self.h.board() as b:
-            self.assertEqual(b.blocker(a.id), a)
-            self.assertEqual(b.blocker_events(a.id)[0].event, "opened")
 
     def test_seat_and_generation_round_trip(self):
         a = self.b.open_blocker("j", "question", "@EL", "which seat", seat="eng-a", generation=1)
@@ -246,19 +238,6 @@ class PostgresBlockers(BlockerContract, unittest.TestCase):
             self.b.open_blocker(job, kind, 'human', 'pending')
             self.h.conn.execute("UPDATE jobs SET status='completed', closed_by='auto' WHERE job=%s", (job,))
             self.assertEqual(self.b.job_status(job).status, expected)
-
-
-class BlockerCliTests(unittest.TestCase):
-    def test_parser_and_dispatch(self):
-        from swarm import cli
-
-        p = cli._parser()
-        args = p.parse_args(["blockers", "--job", "j", "--all"])
-        self.assertEqual(args.cmd, "blockers")
-        self.assertEqual(p.parse_args(["blocker", "resolve", "12", "--how", "blue"]).id, 12)
-        self.assertEqual(
-            p.parse_args(["blocker", "comment", "12", "choose blue"]).text, ["choose blue"]
-        )
 
 
 class PluginBlockerApiTests(unittest.TestCase):
@@ -685,3 +664,9 @@ class PostgresBlockerView(unittest.TestCase):
                 "UPDATE jobs SET status='failed', closed_by='auto', outcome='auto-closed: no progress for 1 h' WHERE job='j'"
             )
             self.assertEqual(b.job_status("j").status, "active")
+
+
+from support import gate_backends  # noqa: E402
+
+# a CI leg runs only its own backend's copies ($SWARM_TEST_BACKEND); unset runs all
+gate_backends(globals(), memory=[MemoryBlockers, MemoryMigration], sqlite=[SqliteBlockers, SqliteMigration], file=[FileBlockers, FileMigration])

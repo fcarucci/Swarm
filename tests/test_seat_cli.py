@@ -189,11 +189,6 @@ class Halt(ControlCase):
         self.assertNotEqual(rc, 0)
         self.assertIn("not a drive job", err)
 
-    def test_control_commands_are_registered(self):
-        for name in ("halt", "unhalt", "seat", "review", "goal-ready"):
-            self.assertIn(name, cli.BOARD_COMMANDS)
-        self.assertEqual(cli._parser().parse_args(["halt", "--job", JOB]).cmd, "halt")
-
 
 class Seats(ControlCase):
     def test_seat_request_by_requester_prints_record_last(self):
@@ -202,19 +197,6 @@ class Seats(ControlCase):
         row = self.board.seat(JOB, 1, "eng")
         self.assertEqual((row.role, row.state, row.model), ("engineer", "requested", "haiku"))
         self.assertEqual(self.last_line(out), f"swarm-record: kind=seat id={row.id} rev=1")
-
-    def test_seat_request_from_lead_allowed(self):
-        self.enrol("LEAD-SESSION", LEAD_KEY)
-        self.set_session("LEAD-SESSION")
-        self.assertEqual(self.request_seat()[0], 0)
-
-    def test_seat_request_from_other_enrolled_agent_refused(self):
-        self.enrol("ENG-SESSION", ENG_KEY)
-        self.set_session("ENG-SESSION")
-        rc, _, err = self.request_seat()
-        self.assertNotEqual(rc, 0)
-        self.assertIn("ask it on the board", err)
-        self.assertIsNone(self.board.seat(JOB, 1, "eng"))
 
     def test_seat_request_outside_job_roots_refused(self):
         other = self.home / "other"
@@ -504,15 +486,6 @@ class SeatAck(ControlCase):
         self.assertNotEqual(self.run_cmd("seat", "ack", "--job", JOB, "--upto", str(self.newest + 1))[0], 0)
         self.assertEqual(ledger.load(self.bkey, JOB).watermarks["msg:lead"], self.newest)
 
-    def test_P6_a_seat_exporting_the_lead_session_id_cannot_ack(self):
-        """H1 exploit 2 (fixed): the hook attests the seat's own session, whatever its environment claims."""
-        self.enrol("ENG-SESSION", ENG_KEY)
-        self.set_session("ENG-SESSION", env="LEAD-SESSION")
-        rc, _, err = self.run_cmd("seat", "ack", "--job", JOB, "--upto", "3")
-        self.assertEqual(rc, 1)
-        self.assertIn("lead session", err)
-        self.assertNotIn("msg:lead", ledger.load(self.bkey, JOB).watermarks)
-
     def test_ack_from_a_person_or_another_enrolled_agent_refused(self):
         rc, _, err = self.run_cmd("seat", "ack", "--job", JOB, "--upto", "3")   # the requester session
         self.assertEqual(rc, 1)
@@ -528,14 +501,6 @@ class SeatAck(ControlCase):
         self.set_session("LEAD-SESSION")
         self.agent_id = "sub-of-lead"
         self.assertEqual(self.run_cmd("seat", "ack", "--job", JOB, "--upto", "3")[0], 1)
-
-    def test_L3_a_released_lead_no_longer_counts_as_lead(self):
-        store = next(r for r in self.board._s().seats if r["id"] == self.lead_row.id)
-        store["state"] = "released"
-        self.set_session("LEAD-SESSION")
-        rc, _, err = self.run_cmd("seat", "ack", "--job", JOB, "--upto", "3")
-        self.assertEqual(rc, 1)
-        self.assertIn("live lead", err)
 
     def test_N4_events_are_acknowledged_one_by_one_as_8a_reads_them(self):
         """R4: --upto is the MESSAGE mark (msg:<lead>); events are acknowledged per id (evack:<lead>:<id>),

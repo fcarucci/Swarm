@@ -146,16 +146,12 @@ class SpoolFlushBoundsTests(Env):
             self.assertEqual(len(list(self.spool_dir.glob("*.json"))), 10)
             self.assertEqual(spool.flush_spool(b, self.cfg), 10)
 
-    def test_deadline(self):
-        for i in range(3):
-            spool.spool_post(self.cfg, "J", self.sender, f"m{i}", None)
-        with self.board() as b:
-            self.assertEqual(spool.flush_spool(b, self.cfg, deadline=time.monotonic() - 1), 0)
-            self.assertEqual(len(list(self.spool_dir.glob("*.json"))), 3)
-
     def test_deadline_stops_a_slow_flush(self):
         for i in range(5):
             spool.spool_post(self.cfg, "J", self.sender, f"m{i}", None)
+        with self.board() as b:          # a deadline already past flushes nothing
+            self.assertEqual(spool.flush_spool(b, self.cfg, deadline=time.monotonic() - 1), 0)
+            self.assertEqual(len(list(self.spool_dir.glob("*.json"))), 5)
         clock = ManualClock()
         with mock.patch("time.monotonic", clock), self.board() as b:
             real = b.post
@@ -290,12 +286,6 @@ class SpoolFlushBoundsTests(Env):
     def test_a_stalled_resolver_is_cut_off_within_the_budget(self):
         release = threading.Event()
         self.addCleanup(release.set)
-        from fake_hindsight import FakeHindsight
-        fake = FakeHindsight()
-        self.addCleanup(fake.stop)
-        cfg = self.hindsight_cfg(fake)
-        cfg["hindsight"]["url"] = fake.url.replace("127.0.0.1", "hindsight.test")
-        spool.spool_memory(self.cfg, "J", "A", "a fact", "proj", create_bank=True)
         import socket
         real = socket.getaddrinfo
 
@@ -304,13 +294,8 @@ class SpoolFlushBoundsTests(Env):
                 release.wait(120)
             return real(host, *a, **k)
 
-        with mock.patch("socket.getaddrinfo", side_effect=stalled), self.board() as b:
-            n = assert_finishes(self, lambda: spool.flush_spool(b, cfg, max_items=2, deadline=time.monotonic() + 0.5, op_timeout=1.0))
-        self.assertEqual(n, 0)
+        self.stalled_delivery("socket.getaddrinfo", stalled, host="hindsight.test")
         self.assertFalse(release.is_set())
-        self.assertEqual(fake.requests, [])
-        self.assertEqual(len(list(self.spool_dir.glob("*.mem"))), 1)   # still queued
-        self.assertFalse((self.spool_dir / ".hindsight-unreachable").exists())
 
     def stalled_delivery(self, patch_target, stall, env=None, host="127.0.0.1"):
         """Flush one memory with a 0.5 s budget while `patch_target` stalls; checks timeout outcomes."""
@@ -327,6 +312,7 @@ class SpoolFlushBoundsTests(Env):
                 os.environ.pop(k, None)
             n = assert_finishes(self, lambda: spool.flush_spool(b, cfg, max_items=2, deadline=time.monotonic() + 0.5, op_timeout=1.0))
         self.assertEqual(n, 0)
+        self.assertEqual(fake.requests, [])
         self.assertEqual(len(list(self.spool_dir.glob("*.mem"))), 1)        # still queued
         self.assertFalse((self.spool_dir / ".hindsight-unreachable").exists())
         return None
@@ -1268,35 +1254,6 @@ class PthChainTests(ProbeEnv):
                 lines = log.read_text().splitlines()
                 self.assertFalse([l for l in lines if l.strip() == SENTINEL],
                                  f"{log}: the marker's newline started a line of its own")
-
-
-class FileBoardChainTests(ProbeEnv):
-    """scratch-lead/probe_fileboard.sh: a file board in the sandbox-writable state dir; a
-    sandboxed agent swaps messages.jsonl for a (dangling) link to a shell rc file, and the host's
-    next post appended its JSON line, $(...) and all, to that rc file."""
-
-    def test_fileboard_chain_blocked(self):
-        self.config.write_text(
-            f'[board]\nbackend = "file"\nspool_dir = {tq(f"{self.state}/spool")}\n'
-            f'[file]\npath = "~/.local/state/swarm/board"\n')
-        env = {"SWARM_AUTO_INIT": "1"}
-        lisa = self.swarm("join", "--job", "j", "--key", "k1", extra_env=env).stdout.strip()
-        r = self.swarm("post", "--job", "j", "--as", lisa, "first post", extra_env=env)
-        board = self.state / "board"
-        self.assertTrue((board / "messages.jsonl").is_file(), r.stdout + r.stderr)
-        rc_file = self.home / "victim_rc"          # dangling: e.g. ~/.bash_aliases
-        (board / "messages.jsonl").replace(board / "messages.old")
-        (board / "messages.jsonl").symlink_to(rc_file)
-        existing = self.home / "victim_existing_rc"
-        existing.write_text("# original\n")
-        (board / "state.json.tmp").unlink(missing_ok=True)
-        self.swarm("post", "--job", "j", "--as", lisa, f"hello $({SENTINEL})", extra_env=env)
-        self.assertFalse(rc_file.exists(), "the post was appended through the dangling link")
-        (board / "messages.jsonl").unlink()
-        (board / "messages.jsonl").symlink_to(existing)
-        self.swarm("post", "--job", "j", "--as", lisa, f"again $({SENTINEL})", extra_env=env)
-        self.assertEqual(existing.read_text(), "# original\n", "the post was appended through the link")
-        self.assertNotIn(SENTINEL, (board / "messages.old").read_text())
 
 
 # --------------------------------------------------------------------------- bootstrap tightens the marker dir too

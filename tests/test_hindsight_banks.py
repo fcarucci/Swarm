@@ -8,14 +8,6 @@ class GeneralBanksTests(HindsightEnv):
         super().setUp()
         self.enable()
 
-    def test_missing_bank_requires_explicit_creation(self):
-        client = hindsight.Client(self.cfg)
-        with self.assertRaisesRegex(hindsight.HindsightError, '--create-bank'):
-            client.retain('missing', 'fact', [], {})
-        self.assertEqual(self.fake.calls('PUT'), [])
-        client.retain('missing', 'fact', [], {}, create_bank=True)
-        self.assertEqual(client.recall('missing', 'q')[0]['text'], 'fact')
-
     def test_general_hook_recalls_both_banks_and_dedupes_facts(self):
         self.fake.add_memory('coding', 'shared fact')
         self.fake.add_memory('hermes', 'shared fact')

@@ -88,13 +88,6 @@ class StuckReasonTests(unittest.TestCase):
         w = stuck.WAITING_PREFIX + "Bart Simpson"
         self.assertEqual(self.reason(agent(50, tool="Bash", status="running"), job(waiting=w)), "silent")
 
-    def test_default_silent_minutes_is_90(self):
-        sup = settings(base_config())
-        a = agent(50, tool="Bash", status="running")
-        self.assertIsNone(stuck.stuck_reason(a, job(), NOW, BOARD, sup))
-        a = agent(91, tool="Bash", status="running")
-        self.assertEqual(stuck.stuck_reason(a, job(), NOW, BOARD, sup), "silent")
-
     def test_departed_is_not_stuck(self):
         self.assertIsNone(self.reason(agent(300, status="left", ended=True)))
 

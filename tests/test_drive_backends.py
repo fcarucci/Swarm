@@ -33,10 +33,40 @@ class DriveBackendsHelper(unittest.TestCase):
                 pass
         ns = {"__name__": "somemodule"}
         with mock.patch.dict(os.environ, {"SWARM_TEST_CONFIG": "/some/throwaway.toml"}):
+            os.environ.pop("SWARM_TEST_BACKEND", None)
             add_backend_variants(ns, Case)
         self.assertEqual(sorted(k for k in ns if k != "__name__"), ["CaseFile", "CasePostgres", "CaseSqlite"])
         self.assertTrue(all(issubclass(ns[k], Case) and ns[k].__module__ == "somemodule"
                             for k in ("CaseFile", "CasePostgres", "CaseSqlite")))
+
+    def test_a_leg_runs_only_its_own_backend_and_unset_runs_all(self):
+        class Case(unittest.TestCase):
+            def test_x(self):
+                pass
+        for chosen, expect in (("memory", ["Case"]), ("sqlite", ["CaseSqlite"]), ("file", ["CaseFile"]),
+                               ("postgres", ["Case", "CaseFile", "CaseSqlite"]), (None, ["Case", "CaseFile", "CaseSqlite"])):
+            with self.subTest(chosen=chosen), mock.patch.dict(os.environ, {"SWARM_TEST_CONFIG": ""}):
+                os.environ.pop("SWARM_TEST_BACKEND", None)
+                if chosen:
+                    os.environ["SWARM_TEST_BACKEND"] = chosen
+                ns = {"__name__": "somemodule", "Case": Case}
+                add_backend_variants(ns, Case)
+                self.assertEqual(sorted(k for k in ns if k != "__name__"), expect)
+
+    def test_gate_backends_drops_the_unselected_hard_coded_copies(self):
+        class A(unittest.TestCase):
+            pass
+
+        class B(unittest.TestCase):
+            pass
+        for chosen, expect in (("memory", ["A"]), ("sqlite", ["B"]), (None, ["A", "B"])):
+            with self.subTest(chosen=chosen), mock.patch.dict(os.environ):
+                os.environ.pop("SWARM_TEST_BACKEND", None)
+                if chosen:
+                    os.environ["SWARM_TEST_BACKEND"] = chosen
+                ns = {"A": A, "B": B}
+                support.gate_backends(ns, memory=[A], sqlite=[B])
+                self.assertEqual(sorted(ns), expect)
 
     def test_postgres_harness_refuses_to_run_without_a_test_config(self):
         with mock.patch.dict(os.environ):
@@ -208,6 +238,27 @@ class PostgresStepSummary(unittest.TestCase):
                                  ["test_drive_bad: builds a board harness but never calls add_backend_variants"], word)
             (tests / "test_drive_bad.py").write_text("h = MemoryHarness()\n# add_backend_variants( in a comment\n")
             self.assertEqual(len(self.s.source_problems(tests)), 1)
+
+    def test_a_pure_logic_module_need_not_run_on_postgres(self):
+        """The Postgres job runs only what Postgres adds: a drive module with neither variants nor
+        Env (CLI) tests runs in the offline jobs only."""
+        log = _log(("test_drive_a.CasePostgres.test_x", "ok"))
+        self.assertEqual(self.s.summarise(log, self.modules, expected={"test_drive_a"})[1], [])
+        self.assertEqual(self.s.summarise(log, self.modules, expected={"test_drive_a", "test_drive_b"})[1],
+                         ["test_drive_b: no test ran"])
+
+    def test_main_reads_several_logs(self):
+        with tempfile.TemporaryDirectory(dir=SANDBOX) as d:
+            tests = Path(d) / "tests"
+            tests.mkdir()
+            (tests / "test_drive_a.py").write_text("add_backend_variants(globals(), A)\n")
+            (tests / "test_drive_c.py").write_text("from test_hooks_cli import Env\n")
+            (tests / "test_drive_p.py").write_text("pass\n")
+            one, two = Path(d) / "one", Path(d) / "two"
+            one.write_text(_log(("test_drive_a.CasePostgres.test_x", "ok")))
+            two.write_text(_log(("test_drive_c.Cli.test_y", "ok")))
+            self.assertEqual(self.s.main(["x", str(one), str(two), "--tests", str(tests)]), 0)
+            self.assertEqual(self.s.main(["x", str(one), "--tests", str(tests)]), 1)   # the CLI module ran nothing
 
     def test_main_exit_status_follows_the_problems(self):
         with tempfile.TemporaryDirectory(dir=SANDBOX) as d:

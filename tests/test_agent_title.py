@@ -16,7 +16,7 @@ from test_routing import RoutingEnv  # noqa: E402  (sets sys.path)
 from test_team_plugin import TeamEnv  # noqa: E402
 
 from swarm import cli as swarm  # noqa: E402
-from swarm.board import SCHEMA_VERSION, setup_board  # noqa: E402
+from swarm.board import setup_board  # noqa: E402
 
 
 class CleanTitleTests(unittest.TestCase):
@@ -73,12 +73,9 @@ class TitleContract:
         self.assertTrue(self.b.set_agent_title("k", "QA"))
         self.assertTrue(self.b.set_agent_title("k", None))
         self.assertIsNone(self.agent("k").title)
-        self.assertEqual(self.agent("k").role, "engineer")   # the role is another thing
-
-    def test_the_cap_is_applied_by_the_board(self):
-        self.b.allocate_name("k", "j")
-        self.b.set_agent_title("k", "z" * 100)
+        self.b.set_agent_title("k", "z" * 100)      # the cap is applied by the board
         self.assertEqual(self.agent("k").title, "z" * 60)
+        self.assertEqual(self.agent("k").role, "engineer")   # the role is another thing
 
     def test_only_an_active_agent_has_its_title_changed(self):
         self.b.allocate_name("k", "j")
@@ -88,12 +85,6 @@ class TitleContract:
         self.assertFalse(self.b.set_agent_title("nobody", "x"))
         self.assertEqual(self.agent("k").title, "QA")
 
-    def test_roster_and_status_rows_keep_working_with_titles(self):
-        self.b.allocate_name("k", "j", "qa")
-        self.b.set_agent_title("k", "QA")
-        self.assertEqual([r.role for r in self.b.roster("j")], ["qa"])
-        self.assertEqual([a.title for a in self.b.agents("j", include_departed=False)], ["QA"])
-
     def test_a_supervisor_replacement_inherits_the_title(self):
         name = self.b.allocate_name("old", "j", "engineer")
         self.b.set_agent_title("old", "Eng: api")
@@ -101,12 +92,11 @@ class TitleContract:
         self.assertEqual(self.b.claim_resume("new", "old", "j"), name)
         self.assertEqual(self.agent("new").title, "Eng: api")
         self.assertEqual(self.agent("old").title, "Eng: api")
-
-    def test_a_replacement_of_an_untitled_agent_has_none(self):
-        self.b.allocate_name("old", "j")
-        self.b.close_agent("old", "stuck:dead")
-        self.b.claim_resume("new", "old", "j")
-        self.assertIsNone(self.agent("new").title)
+        # a replacement of an untitled agent has none
+        self.b.allocate_name("old2", "j")
+        self.b.close_agent("old2", "stuck:dead")
+        self.b.claim_resume("new2", "old2", "j")
+        self.assertIsNone(self.agent("new2").title)
 
     def test_a_revived_agent_keeps_its_title(self):
         self.b.allocate_name("k", "j")
@@ -164,13 +154,6 @@ class Schema20Migration:
         self.h = self.harness_factory()
         self.addCleanup(self.h.close)
         self.h.reset()
-
-    def test_the_schema_is_at_least_20(self):
-        self.assertGreaterEqual(SCHEMA_VERSION, 20)
-        with self.h.board() as b:
-            name = b.allocate_name("k", "j")
-            self.assertTrue(b.set_agent_title("k", "EL"))   # the title column exists
-            self.assertEqual(b.agents("j")[0].title, "EL")
 
     def test_a_schema_19_board_upgrades_and_keeps_its_agents(self):
         with self.h.board() as b:
@@ -263,18 +246,9 @@ class TitleCliTests(RoutingEnv):
         self.spawn("e1", "[swarm job: J]\n[swarm role: engineer]\n[swarm title: Eng: board view]\nBuild it.")
         self.assertEqual(self.member("e1").title, "Eng: board view")
         self.assertEqual(self.member("e1").role, "engineer")   # separate from the role
-
-    def test_a_spawn_without_the_tag_has_no_title(self):
-        self.activate("J")
-        self.spawn("e1", "[swarm job: J]\n[swarm role: engineer]\nBuild it.")
-        self.assertIsNone(self.member("e1").title)
-
-    def test_the_tag_is_capped_and_cleaned(self):
-        self.activate("J")
-        self.spawn("e1", "[swarm job: J]\n[swarm title:   " + "word  " * 30 + "]\nBuild it.")
-        t = self.member("e1").title
-        self.assertTrue(55 <= len(t) <= 60, t)
-        self.assertNotIn("  ", t)
+        # a spawn without the tag has no title
+        self.spawn("e2", "[swarm job: J]\n[swarm role: engineer]\nBuild it.")
+        self.assertIsNone(self.member("e2").title)
 
     def test_the_tag_works_without_a_role_and_on_a_job_picked_by_the_tag(self):
         self.activate("A")
@@ -402,19 +376,6 @@ class TeamTitleTests(TeamEnv):
         super().setUp()
         self.assertEqual(self.cli("activate", "--job", "J")[0], 0)
 
-    def test_seat_titles_are_short_labels(self):
-        import importlib.util
-        from swarm import paths
-        spec = importlib.util.spec_from_file_location(
-            "team_plugin_t", paths.PLUGIN_ROOT / "skills" / "engineering-team" / "swarm_plugin.py")
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        self.assertEqual(mod.SEAT_TITLES, {
-            "project_manager": "PM", "engineering_lead": "EL", "product_manager": "Product", "qa": "QA",
-            "judge": "Judge", "build_engineer": "Build", "reviewer": "Reviewer", "verifier": "Verifier",
-            "engineer": "Eng"})
-        self.assertTrue(all(len(t) <= 8 for t in mod.SEAT_TITLES.values()))
-
     def test_team_show_lists_the_titles_of_the_effective_team(self):
         rc, out, err = self.team("--show")
         self.assertEqual(rc, 0, err)
@@ -425,26 +386,11 @@ class TeamTitleTests(TeamEnv):
         self.team("--add", "build_engineer")
         self.assertIn("build_engineer=Build", self.team("--show")[1])
 
-    def test_the_skill_text_tags_every_seat_and_tells_el_to_keep_titles_current(self):
-        from swarm import paths
-        skill = paths.PLUGIN_ROOT / "skills" / "engineering-team"
-        hosts = (skill / "references" / "hosts.md").read_text()
-        for tag in ("[swarm title: EL]", "[swarm title: Eng: board view]"):
-            self.assertIn(tag, hosts)
-        text = (skill / "SKILL.md").read_text()
-        self.assertIn("swarm title", text)
-        self.assertIn("titles", (skill / "references" / "team-roles.md").read_text())
 
-    def test_the_coding_recipe_titles_the_pipeline_seats(self):
-        import importlib.util
-        from swarm import paths
-        spec = importlib.util.spec_from_file_location(
-            "team_plugin_t2", paths.PLUGIN_ROOT / "skills" / "engineering-team" / "swarm_plugin.py")
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        self.assertEqual(mod.PIPELINE_TITLES["judge"], "Judge")
-        self.assertTrue(mod.PIPELINE_TITLES["integrator"].startswith("Eng"))
-        self.assertTrue(mod.PIPELINE_TITLES["worker"].startswith("Eng"))
+from support import gate_backends  # noqa: E402
+
+# a CI leg runs only its own backend's copies ($SWARM_TEST_BACKEND); unset runs all
+gate_backends(globals(), memory=[MemoryTitleContract, MemorySchema20], sqlite=[SqliteTitleContract, SqliteSchema20], file=[FileTitleContract, FileSchema20])
 
 
 if __name__ == "__main__":

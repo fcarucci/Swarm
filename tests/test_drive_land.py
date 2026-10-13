@@ -152,13 +152,6 @@ class LandCase(unittest.TestCase):
         self.judged = {self.sha}
 
 class Landing(LandCase):
-    def test_land_fast_forwards_every_destination(self):
-        res = self.go()
-        self.assertTrue(res.ok, res.why)
-        self.assertEqual(res.landed_sha, self.sha)
-        self.assertEqual(self.head(self.a), self.sha)
-        self.assertEqual(self.head(self.b), self.sha)
-
     def test_a_branch_only_in_the_work_repository_is_published_by_the_driver_then_landed(self):
         """Seats never push (QA real MET): the hand-off exists only in the job's work repository. The driver
         brings it into its mirror and, once judged, publishes it under its own ref swarm/land/<sha> and lands it."""
@@ -262,12 +255,15 @@ class Landing(LandCase):
         os.symlink(secret, link)
         self.assert_refused_unpushed(ssha, link)
 
-    def test_pushes_exactly_the_judged_sha_once_per_destination(self):
-        self.go()
-        self.assertEqual(sorted(self.pushes), sorted([(self.a, self.sha, "main"), (self.b, self.sha, "main")]))
-
-    def test_branch_deleted_and_ledger_and_receipts_written(self):
+    def test_land_fast_forwards_every_destination_and_writes_ledger_and_receipts(self):
         res = self.go()
+        self.assertTrue(res.ok, res.why)
+        self.assertEqual(res.landed_sha, self.sha)
+        self.assertEqual(self.head(self.a), self.sha)
+        self.assertEqual(self.head(self.b), self.sha)
+        # exactly the judged sha is pushed once per destination
+        self.assertEqual(sorted(self.pushes), sorted([(self.a, self.sha, "main"), (self.b, self.sha, "main")]))
+        self.assertEqual(res.land_rev, 1 + 2 * 2)   # intent, then pushed and verified per destination
         self.assertTrue(self.has_branch(self.a))      # the seat's branch name is never deleted by the driver
         self.assertTrue(self.has_branch(self.b))
         ig = self.led.integrated[GROUP]
@@ -284,15 +280,6 @@ class Landing(LandCase):
                               generation=1, now=NOW.timestamp())
         self.assertEqual(integ.content_sha, receipts.content_sha(
             "integrated", {"group": GROUP, "sha": self.sha, "into": "main"}))
-
-    def test_land_rev_counts_every_journal_step(self):
-        res = self.go()
-        self.assertEqual(res.land_rev, 1 + 2 * 2)   # intent, then pushed and verified per destination
-
-    def test_branch_kept_when_deletion_is_off_and_deletion_failure_is_not_fatal(self):
-        res = self.go(env={"delete_branch": False})
-        self.assertTrue(res.ok)
-        self.assertTrue(self.has_branch(self.a) and self.has_branch(self.b))
 
     def test_deletion_failure_is_noted_not_fatal(self):
         notes = []

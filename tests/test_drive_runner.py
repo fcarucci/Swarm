@@ -34,12 +34,6 @@ class ParseUsageTests(unittest.TestCase):
         u = runner.parse_usage("claude", tail)
         self.assertEqual((u.cost_usd, u.tokens_in, u.tokens_out), (0.5, 7, 3))
 
-    def test_two_complete_result_lines_the_last_one_wins(self):
-        tail = (cres(total_cost_usd=9.0, usage={"input_tokens": 1, "output_tokens": 1}) + "\n"
-                + cres(total_cost_usd=0.5, usage={"input_tokens": 7, "output_tokens": 3}) + "\n")
-        u = runner.parse_usage("claude", tail)
-        self.assertEqual((u.cost_usd, u.tokens_in, u.tokens_out), (0.5, 7, 3))
-
     def test_negative_cost_is_unreadable(self):
         self.assertIsNone(runner.parse_usage("claude", cres(total_cost_usd=-1.0, usage={})))
 
@@ -196,14 +190,6 @@ class PresenceTests(unittest.TestCase):
                 for bad in ("../x", "x/" + SLICE, "/abs.slice", "app.slice/..", "", "app.scope"):
                     self.assertEqual(runner.unit_presence(UNIT, slice_name=bad), "unknown", bad)
 
-    def test_populated_events_decide_presence(self):
-        with _Tree(scope=(SLICE, UNIT), events="populated 1\nfrozen 0\n") as t:
-            with mock.patch.object(runner, "_systemctl", return_value=None):
-                self.assertEqual(runner.unit_presence(UNIT, slice_name=SLICE), "present")
-        with _Tree(scope=(SLICE, UNIT), events="populated 0\nfrozen 0\n") as t:
-            with mock.patch.object(runner, "_systemctl", return_value=None):
-                self.assertEqual(runner.unit_presence(UNIT, slice_name=SLICE), "absent")
-
     def test_real_events_file_with_extra_keys_reads_populated(self):
         # the kernel's file is two lines (populated, frozen); newer kernels add keys: only `populated` counts
         for text, want in (("populated 1\nfrozen 0\n", "present"),
@@ -214,14 +200,10 @@ class PresenceTests(unittest.TestCase):
                 with mock.patch.object(runner, "_systemctl", return_value=None):
                     self.assertEqual(runner.unit_presence(UNIT, slice_name=SLICE), want, text)
 
-    def test_populated_key_must_appear_once_with_0_or_1(self):
-        for text in ("populated 1\npopulated 0\n", "populated 2\nfrozen 0\n", "frozen 0\n", "populated 1 2\n"):
-            with _Tree(scope=(SLICE, UNIT), events=text):
-                with mock.patch.object(runner, "_systemctl", return_value=None):
-                    self.assertEqual(runner.unit_presence(UNIT, slice_name=SLICE), "unknown", text)
-
-    def test_missing_or_unexpected_events_is_unknown(self):
-        for events in (None, "populated maybe\n", "frozen 1\n", ""):
+    def test_a_missing_or_malformed_populated_key_is_unknown(self):
+        # the populated key must appear once with 0 or 1; a missing file or any other text is unknown
+        for events in ("populated 1\npopulated 0\n", "populated 2\nfrozen 0\n", "frozen 0\n", "populated 1 2\n",
+                       None, "populated maybe\n", "frozen 1\n", ""):
             with _Tree(scope=(SLICE, UNIT), events=events):
                 with mock.patch.object(runner, "_systemctl", return_value=None):
                     self.assertEqual(runner.unit_presence(UNIT, slice_name=SLICE), "unknown", events)

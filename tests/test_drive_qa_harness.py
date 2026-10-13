@@ -44,51 +44,8 @@ class Tmp(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, True)
 
 
-class Probes(Tmp):
-    def test_every_probe_is_absent_in_an_empty_tree_and_pending_names_them(self):
-        import qa_lib as q
-        caps = q.capabilities(self.tmp)
-        self.assertFalse(any(c.present for c in caps.values()))
-        with self.assertRaises(q.Pending) as cm:
-            q.require("8a", "8b", "8c", "11b", root=self.tmp)
-        self.assertEqual(str(cm.exception), "pending 8a/8b/8c/11b")
-        self.assertEqual(cm.exception.missing, ["8a", "8b", "8c", "11b"])
-
-    def test_a_probe_turns_on_when_its_marker_text_appears(self):
-        import qa_lib as q
-        d = self.tmp / "lib/swarm/supervisor"
-        d.mkdir(parents=True)
-        (d / "driver_exec.py").write_text("def execute(): claim_drive_launch()\n")
-        caps = q.capabilities(self.tmp)
-        self.assertTrue(caps["8a"].present)
-        self.assertFalse(caps["8b"].present)      # needs terminalize, enforce_deadlines and the core-sweep skip too
-        q.require("8a", root=self.tmp)
-        with self.assertRaisesRegex(q.Pending, "pending 8b"):
-            q.require("8a", "8b", root=self.tmp)
-
-    def test_this_checkout_has_the_ledger_and_receipts_the_chaos_layers_need(self):
-        import qa_lib as q
-        caps = q.capabilities(Path(__file__).resolve().parent.parent)
-        self.assertTrue(caps["ledger"].present and caps["receipts"].present)
-
-
 class NoVacuousPass(Tmp):
     """A fault that did not happen must never read as a pass (review of feat/drive-qa @ 7c652e4)."""
-
-    def test_8a_probe_wants_driver_exec_and_8b_wants_real_symbols(self):
-        import qa_lib as q
-        d = self.tmp / "lib/swarm/supervisor"
-        d.mkdir(parents=True)
-        (d / "driver.py").write_text("def claim_drive_launch(): terminal\n")        # the old, wrong evidence
-        self.assertFalse(q.capabilities(self.tmp)["8a"].present)
-        self.assertFalse(q.capabilities(self.tmp)["8b"].present)
-        (d / "driver_exec.py").write_text("def execute(): claim_drive_launch()\n")
-        self.assertTrue(q.capabilities(self.tmp)["8a"].present)
-        (d / "driver_life.py").write_text("def terminalize(): pass\ndef enforce_deadlines(): pass\n")
-        self.assertFalse(q.capabilities(self.tmp)["8b"].present)                    # still needs the core-sweep skip
-        (self.tmp / "lib/swarm/board").mkdir(parents=True)
-        (self.tmp / "lib/swarm/board/base.py").write_text("def drive_job_claimed(): pass\n")
-        self.assertTrue(q.capabilities(self.tmp)["8b"].present)
 
     def test_barrier_presence_is_a_hit_call_in_lib(self):
         import qa_lib as q

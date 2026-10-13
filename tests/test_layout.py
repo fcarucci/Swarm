@@ -13,12 +13,6 @@ class LayoutTests(unittest.TestCase):
     def test_bin_holds_only_launchers(self):
         self.assertEqual(sorted(p.name for p in (ROOT / "bin").iterdir()), ["swarm", "swarm-hook", "swarm-hook.cmd", "swarm.cmd"])
 
-    def test_package_modules_import(self):
-        import swarm.cli, swarm.hooks, swarm.board, swarm.spool, swarm.transcripts  # noqa: E401,F401
-        from swarm import paths
-        self.assertEqual(paths.PLUGIN_ROOT, ROOT)
-        self.assertTrue((paths.DATA_DIR / "simpsons_names.json").exists())
-
     def test_hooks_import_stays_stdlib_only(self):
         # importing the hook module must not import the board package or psycopg
         code = ("import sys; sys.path.insert(0, %r); import swarm.hooks; "

@@ -346,7 +346,7 @@ class Listener:
         self.server.daemon_threads = True
         return self.server.server_address[:2]
 
-    def serve_forever(self) -> None:
+    def serve_forever(self, poll_interval: float = 0.5) -> None:
         if self.server is None:
             self.bind()
         threading.Thread(target=self._poll_loop, daemon=True).start()
@@ -359,7 +359,7 @@ class Listener:
         self.helpers = HelperSupervisor(self, self.log)
         threading.Thread(target=self.helpers.run, daemon=True).start()
         try:
-            self.server.serve_forever(poll_interval=0.5)
+            self.server.serve_forever(poll_interval=poll_interval)
         finally:
             self.stop.set()
             if getattr(self, "helpers", None):

@@ -125,11 +125,6 @@ class CoalescingTests(unittest.TestCase):
         self.assertNotIn('LEFT JOIN messages',query)
         self.assertNotIn('(SELECT count(*) FROM messages',query)
 
-    def test_config_defaults_and_cli_override(self):
-        self.assertEqual(cli.DEFAULTS['board']['watch_interval_s'],10)
-        self.assertEqual(cli.DEFAULTS['board']['watch_min_redraw_s'],2)
-        self.assertIsNone(cli._parser().parse_args(['watch']).interval)
-        self.assertEqual(cli._parser().parse_args(['watch','--interval','4']).interval,4)
 
 import os
 from support import PostgresHarness

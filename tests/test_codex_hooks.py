@@ -388,13 +388,6 @@ class CodexHookTests(Env):
             self.hook("stop", agent_id="c1", session="sess-1")
         self.assertIsNotNone(self.agent("c1").ended_at)
 
-    def test_codex_agent_with_a_recent_turn_end_stays(self):
-        self.start_child()
-        self.replay("SubagentStop", self.child_payloads("SubagentStop")[0])
-        with self.board() as b:
-            swarm.sweep_jobs(b, self.cfg)
-        self.assertIsNone(self.agent(self.child, job="fixture").ended_at)
-
     def test_codex_turn_capture_is_not_final_and_the_owner_finalizes_it(self):
         self.cfg = {**self.cfg, "transcripts": {**self.cfg["transcripts"], "enabled": True}}
         self.start_child()

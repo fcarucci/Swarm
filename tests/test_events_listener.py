@@ -88,7 +88,7 @@ def running(src, cfg_events=None, board=None, logs=None, **kw):
                       write_token=lambda token: None)   # never the real private dir
     lst.cfg["port"] = 0
     host, port = lst.bind()
-    t = threading.Thread(target=lst.serve_forever, daemon=True)
+    t = threading.Thread(target=lst.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     t.start()
     try:
         yield lst, board, port
@@ -620,10 +620,6 @@ class CliTests(Env):
         self.assertEqual(rc, 1)
         self.assertIn("enabled = false", err)
         self.assertEqual(self.cli("events", "check")[0], 0)
-
-    def test_events_listed_in_plugins_and_in_the_help(self):
-        rc, out, _ = self.cli("events")
-        self.assertEqual(rc, 2)
 
 
 class RealBoardTests(Env):

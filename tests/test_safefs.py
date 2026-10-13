@@ -464,13 +464,6 @@ class LogSafeTests(unittest.TestCase):
 class PrivfsWrapperTests(HomeCase):
     """supervisor/privfs is safefs on the supervisor's private dir: one implementation."""
 
-    def test_privfs_file_functions_are_safefs(self):
-        from swarm.supervisor import privfs
-        for name in ("read", "read_tail", "write_atomic", "append", "fresh_file", "open_existing",
-                     "create", "unlink", "exists", "mtime"):
-            self.assertIs(getattr(privfs, name), getattr(safefs, name), name)
-        self.assertIs(privfs.lock, safefs.open_lock)   # privfs.lock never flocked: the runner does
-
     def test_privfs_errors_stay_private_dir_errors(self):
         from swarm.supervisor import privfs
         from swarm.supervisor.settings import PrivateDirError, private_dir

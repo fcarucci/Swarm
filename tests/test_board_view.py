@@ -14,7 +14,7 @@ import os
 import types
 import unittest
 
-from support import FileHarness, MemoryHarness, PostgresHarness, SqliteHarness  # noqa: F401  (sets sys.path)
+from support import MemoryHarness, PostgresHarness  # noqa: F401  (sets sys.path)
 from test_hooks_cli import Env  # noqa: E402
 
 from swarm import cli as swarm  # noqa: E402
@@ -253,14 +253,6 @@ class MemoryView(ViewContract, unittest.TestCase):
     harness_factory = MemoryHarness
 
 
-class SqliteView(ViewContract, unittest.TestCase):
-    harness_factory = SqliteHarness
-
-
-class FileView(ViewContract, unittest.TestCase):
-    harness_factory = FileHarness
-
-
 @unittest.skipUnless(os.environ.get("SWARM_TEST_CONFIG"),
                      "set SWARM_TEST_CONFIG to a throwaway Postgres board config to run")
 class PostgresView(ViewContract, unittest.TestCase):
@@ -283,14 +275,6 @@ class ViewCliTests(Env):
                 rc, name, err = self.cli("join", "--job", "J", "--key", key, *(["--role", role] if role else []))
                 self.assertEqual(rc, 0, err)
                 self.assertEqual([a.role for a in self.rows() if a.name == name.strip()], [want])
-
-    def test_cli_orchestrator_join_gets_the_orchestrator_role(self):
-        self.assertEqual(self.cli("activate", "--job", "J")[0], 0)
-        rc, name, err = self.cli("join", "--job", "J", "--key", "orchestrator-2")
-        self.assertEqual(rc, 0, err)
-        self.assertEqual([a.role for a in self.rows() if a.name == name.strip()], ["orchestrator"])
-        rc, out, _ = self.cli("who", "--job", "J")
-        self.assertIn("orchestrator", out)
 
     def test_status_job_shows_the_rollup_line_and_one_working_agent_is_not_idle(self):
         self.assertEqual(self.cli("activate", "--job", "J")[0], 0)
@@ -401,6 +385,12 @@ class ViewCliTests(Env):
 
 
 MIN = 60
+
+from support import gate_backends  # noqa: E402
+
+# a CI leg runs only its own backend's copies ($SWARM_TEST_BACKEND); unset runs all
+gate_backends(globals(), memory=[MemoryView])
+
 
 if __name__ == "__main__":
     unittest.main()

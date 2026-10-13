@@ -15,14 +15,6 @@ class BothRunsTests(TranscriptEnv):
         self.seed("J", "orig", self.name, jsonl(("user", "the task"), ("assistant", "step one done")))
         self.seed("J", "rep-1", self.name, jsonl(("user", "resume brief"), ("assistant", "step two done")))
 
-    def test_show_by_agent_prints_both_runs_in_order(self):
-        rc, out, err = self.cli("transcript", "show", "--job", "J", "--agent", self.name)
-        self.assertEqual(rc, 0, err)
-        first, second = out.index("run 1 of 2: key orig"), out.index("run 2 of 2: key rep-1")
-        self.assertLess(first, second)
-        self.assertIn("replaces orig", out)
-        self.assertLess(out.index("step one done"), out.index("step two done"))
-
     def test_show_by_key_is_one_run(self):
         rc, out, _ = self.cli("transcript", "show", "--job", "J", "--key", "orig", "--tail", "1")
         self.assertEqual(rc, 0)

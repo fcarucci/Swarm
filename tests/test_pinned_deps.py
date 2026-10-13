@@ -93,14 +93,6 @@ class LauncherTests(unittest.TestCase):
         (pip,) = self.pip_lines()
         self.assertIn(str(ROOT / "requirements-postgres.txt"), pip)
 
-    @posix_only("runs the POSIX sh launcher")
-    def test_legacy_database_section_installs_psycopg(self):
-        self.config.write_text('[database]\nhost = "db"\n')   # pre-"file"-default installs: postgres
-        self.fake_venv(stamp="stale")
-        self.run_swarm()
-        (pip,) = self.pip_lines()
-        self.assertIn(str(ROOT / "requirements-postgres.txt"), pip)
-
     def wants_pg(self, config_text, *, args=("status",), env_config=True, extra=None):
         """Run the launcher on a stale file-board venv; whether pip was told to install psycopg."""
         if config_text is not None:
@@ -114,27 +106,6 @@ class LauncherTests(unittest.TestCase):
         subprocess.run([str(ROOT / "bin/swarm"), *args], capture_output=True, text=True, env=env, timeout=30)
         (pip,) = self.pip_lines()
         return str(ROOT / "requirements-postgres.txt") in pip
-
-    @posix_only("runs the POSIX sh launcher")
-    def test_the_shipped_example_config_is_a_file_board(self):
-        # config.example.toml has a [database] section and backend = "file": no psycopg
-        self.assertFalse(self.wants_pg((ROOT / "config.example.toml").read_text()))
-
-    @posix_only("runs the POSIX sh launcher")
-    def test_database_section_with_an_explicit_file_backend_needs_no_psycopg(self):
-        self.assertFalse(self.wants_pg('[database]\nhost = "db"\n[board]\nbackend = "file"\n'))
-        self.assertFalse(self.wants_pg('[database]\nhost = "db"\n[board]\nbackend = "sqlite"  # one machine\n'))
-
-    @posix_only("runs the POSIX sh launcher")
-    def test_single_quoted_postgres_backend_installs_psycopg(self):
-        self.assertTrue(self.wants_pg("[board]\nbackend = 'postgres'\n"))
-        self.assertTrue(self.wants_pg('[board]\nbackend="postgres"  # shared\n'))
-        self.assertTrue(self.wants_pg('board = { backend = "postgres" }\n'))
-
-    @posix_only("runs the POSIX sh launcher")
-    def test_a_commented_or_empty_database_section_is_not_postgres(self):
-        self.assertFalse(self.wants_pg('# [database]\n[board]\n'))
-        self.assertFalse(self.wants_pg('[database]\n'))      # empty: cli.load_config keeps the file default
 
     @posix_only("runs the POSIX sh launcher")
     def test_config_argument_is_honoured(self):

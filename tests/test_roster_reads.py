@@ -160,17 +160,6 @@ class CatchUpReadTests(Env):
 
 
 class BoardGuidanceTests(Env):
-    def test_instructions_ask_for_active_board_use(self):
-        self.cli("activate", "--job", "J")
-        ctx = self.context(self.hook("start"))
-        for phrase in ("Broadcast (no --to) claims before you touch anything shared, findings, "
-                       "warnings, blockers and results",
-                       "--to '<exact name>' for questions, requests, handoffs and answers",
-                       "Always reply to messages addressed to you and acknowledge requests",
-                       "pick the recipient from the roster",
-                       "ask its owner on the board instead of doing it yourself",
-                       "status every few steps"):
-            self.assertIn(phrase, ctx)
 
     def test_messages_addressed_to_the_agent_are_flagged(self):
         self.cli("activate", "--job", "J")

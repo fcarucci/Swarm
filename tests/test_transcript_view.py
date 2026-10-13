@@ -208,49 +208,38 @@ class ColorTests(unittest.TestCase):
         self.assertEqual(tv.render_text(items), tv.render_text(items, color=False))
         self.assertNotIn("\033[", tv.render_text(items, color=False))
 
-    def test_user_header_is_bold_blue(self):
-        out = tv.render_text(tv.turns(entry("user", "hi")), color=True)
-        self.assertIn("\033[1;34muser\033[0m", out)
-
-    def test_assistant_header_is_bold_green(self):
-        out = tv.render_text(tv.turns(entry("assistant", [{"type": "text", "text": "hi"}])), color=True)
-        self.assertIn("\033[1;32massistant\033[0m", out)
-
-    def test_tool_call_header_is_magenta_with_bold_name(self):
-        items = tv.turns(entry("assistant", [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}]))
-        out = tv.render_text(items, color=True)
-        self.assertIn("\033[35mtool call\033[0m", out)
-        self.assertIn("\033[1;35mBash\033[0m", out)
-
-    def test_tool_result_is_cyan_and_red_on_error(self):
-        ok = tv.turns(entry("user", [{"type": "tool_result", "tool_use_id": "t1", "content": "fine"}]))
-        err = tv.turns(entry("user", [{"type": "tool_result", "tool_use_id": "t1", "is_error": True,
-                                       "content": "boom"}]))
-        self.assertIn("\033[36mtool result\033[0m", tv.render_text(ok, color=True))
-        out_err = tv.render_text(err, color=True)
-        self.assertIn("\033[31mtool result\033[0m", out_err)
-        self.assertIn("\033[31m (error)\033[0m", out_err)
-
-    def test_memory_saved_header_is_yellow(self):
-        e = json.dumps({"type": "swarm-memory", "timestamp": "2026-09-28T12:00:00Z", "harness": "claude",
-                        "memories": [{"writer": "note-tool", "bank": "notes", "document_id": "d1"}],
-                        "output": "retained 1"})
-        out = tv.render_text(tv.turns(e), color=True)
-        self.assertIn("\033[33mmemory saved\033[0m", out)
-
-    def test_clock_is_dim(self):
-        out = tv.render_text(tv.turns(entry("user", "hi", ts="2026-09-26T12:00:01.000Z")), color=True)
-        self.assertRegex(out, r"\033\[2m\d\d:\d\d:\d\d\033\[0m")
-
-    def test_redaction_marker_is_highlighted_yellow(self):
-        out = tv.render_text(tv.turns(entry("user", [{"type": "tool_result", "tool_use_id": "t1",
-                                                       "content": "key [REDACTED:api-key] here"}])),
-                             color=True)
-        self.assertIn("\033[33m[REDACTED:api-key]\033[0m", out)
-
-    def test_image_placeholder_is_dim(self):
-        out = tv.render_text(tv.turns(entry("user", [{"type": "image", "source": {}}])), color=True)
-        self.assertIn("\033[2m[image]\033[0m", out)
+    def test_the_palette_per_turn_kind(self):
+        memory = json.dumps({"type": "swarm-memory", "timestamp": "2026-09-28T12:00:00Z", "harness": "claude",
+                             "memories": [{"writer": "note-tool", "bank": "notes", "document_id": "d1"}],
+                             "output": "retained 1"})
+        ok = entry("user", [{"type": "tool_result", "tool_use_id": "t1", "content": "fine"}])
+        err = entry("user", [{"type": "tool_result", "tool_use_id": "t1", "is_error": True, "content": "boom"}])
+        # (kind, the transcript entry, strings that must appear, regexes that must match)
+        cases = (
+            ("user header is bold blue", entry("user", "hi"), ["\033[1;34muser\033[0m"], []),
+            ("assistant header is bold green", entry("assistant", [{"type": "text", "text": "hi"}]),
+             ["\033[1;32massistant\033[0m"], []),
+            ("tool call header is magenta with bold name",
+             entry("assistant", [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}]),
+             ["\033[35mtool call\033[0m", "\033[1;35mBash\033[0m"], []),
+            ("tool result is cyan", ok, ["\033[36mtool result\033[0m"], []),
+            ("tool result is red on error", err, ["\033[31mtool result\033[0m", "\033[31m (error)\033[0m"], []),
+            ("memory saved header is yellow", memory, ["\033[33mmemory saved\033[0m"], []),
+            ("clock is dim", entry("user", "hi", ts="2026-09-26T12:00:01.000Z"), [],
+             [r"\033\[2m\d\d:\d\d:\d\d\033\[0m"]),
+            ("redaction marker is highlighted yellow",
+             entry("user", [{"type": "tool_result", "tool_use_id": "t1", "content": "key [REDACTED:api-key] here"}]),
+             ["\033[33m[REDACTED:api-key]\033[0m"], []),
+            ("image placeholder is dim", entry("user", [{"type": "image", "source": {}}]),
+             ["\033[2m[image]\033[0m"], []),
+        )
+        for name, raw, contains, patterns in cases:
+            with self.subTest(name):
+                out = tv.render_text(tv.turns(raw), color=True)
+                for text in contains:
+                    self.assertIn(text, out)
+                for pattern in patterns:
+                    self.assertRegex(out, pattern)
 
     def test_tool_call_json_keys_are_dimmed_without_reformatting(self):
         items = tv.turns(entry("assistant", [{"type": "tool_use", "id": "t1", "name": "Bash",

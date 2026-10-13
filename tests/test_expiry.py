@@ -614,10 +614,6 @@ class ExpiryCliTests(Env):
     def age(self, job="J", seconds=5 * HOUR):
         self.h.backdate_job(job, created_at=seconds + 60, activated_at=seconds)
 
-    def test_defaults(self):
-        self.assertEqual(self.cfg["job"]["stall_hours"], 4)
-        self.assertEqual(self.cfg["job"]["orphan_minutes"], 30)
-
     def test_status_closes_an_old_job_and_all_shows_it(self):
         self.activate()
         self.hook("start", agent_id="agent-1")
@@ -660,17 +656,6 @@ class ExpiryCliTests(Env):
         rc, out, _ = self.cli("purge")
         self.assertIn("J: auto-closed: no live agents for 30 min", out)
         self.assertEqual(self.job().status, "cancelled")
-
-    # ---- a goal job is never closed by the orphan or stall sweeps (the stale-waiting rule is off here)
-    def test_a_goal_job_survives_every_sweep(self):
-        self.config.write_text(self.config.read_text() + "[job]\nstale_waiting_minutes = 0\n")   # (stale waiting is tested apart)
-        self.activate("J", "--no-drive", "--reason", "legacy goal test", "--goal", "ship it")
-        self.age("J", 40 * MIN)
-        _, out, _ = self.cli("purge")
-        self.assertNotIn("auto-closed", out)
-        self.age("J", 99 * HOUR)
-        self.cli("status")
-        self.assertEqual(self.job().status, "active")
 
     def test_an_idle_goal_job_can_be_attached_to_by_any_session(self):
         self.config.write_text(self.config.read_text() + "[job]\nstale_waiting_minutes = 0\n")   # (stale waiting is tested apart)
@@ -738,7 +723,10 @@ class ExpiryCliTests(Env):
         self.assertIn("job        P  [idle]", self.cli("status", "--job", "P", "--no-color")[1])
         self.assertIn("waiting (goal not met)", self.frame())              # watch: all jobs
         self.assertIn("[waiting (goal not met)]", self.frame("G"))         # watch --job
-        self.assertIn("G [waiting (goal not met)]", self.frame(compact=True))
+        compact = self.frame(compact=True)
+        self.assertIn("G [waiting (goal not met)]", compact)
+        self.assertIn("P [idle]", compact)                                 # the stored status "active" is derived
+        self.assertNotIn("P [active]", compact)
         self.cli("purge")
         self.assertEqual(self.job("G").status, "active")                    # shown as waiting, never closed
         # an agent joining takes it out of waiting
@@ -746,17 +734,6 @@ class ExpiryCliTests(Env):
             b.allocate_name("newcomer", "G")
         self.assertRegex(next(ln for ln in self.cli("status", "--no-color")[1].splitlines() if ln.startswith("G ")),
                          r"^G\s+active\s")
-
-    def test_compact_watch_shows_the_shared_derived_word_for_every_job(self):
-        self.activate("G", "--no-drive", "--reason", "legacy goal test", "--goal", "ship it")
-        self.activate("P")                             # no goal, idle since 10 minutes: stored status "active"
-        self.age("G", 2 * HOUR)
-        self.age("P", 10 * MIN)
-        self.assertIn("[idle]", self.cli("status", "--job", "P", "--no-color")[1])   # status derives it
-        compact = self.frame(compact=True)
-        self.assertIn("G [waiting (goal not met)]", compact)
-        self.assertIn("P [idle]", compact)
-        self.assertNotIn("P [active]", compact)
 
     def test_wait_for_bounds_the_wait(self):
         self.activate()
@@ -804,6 +781,12 @@ class ExpiryCliTests(Env):
         with mock.patch("swarm.board.base.Board.sweep_expiry", side_effect=RuntimeError("boom")):
             rc, _, _ = self.cli("status")
         self.assertEqual(rc, 0)
+
+
+from support import gate_backends  # noqa: E402
+
+# a CI leg runs only its own backend's copies ($SWARM_TEST_BACKEND); unset runs all
+gate_backends(globals(), memory=[MemoryExpiry], sqlite=[SqliteExpiry], file=[FileExpiry])
 
 
 if __name__ == "__main__":

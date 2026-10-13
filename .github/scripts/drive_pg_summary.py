@@ -1,7 +1,11 @@
-"""Summarise the `unittest -v` log of CI's "Drive suites on Postgres" step and fail it when the
-step did not really run the drive tests on Postgres.
+"""Summarise the `unittest -v` logs of CI's Postgres job and fail it when the job did not really run
+the drive tests on Postgres.
 
-    python .github/scripts/drive_pg_summary.py drive-pg.log [tests-dir]
+    python .github/scripts/drive_pg_summary.py LOG [LOG ...] [--tests tests-dir | tests-dir]
+
+The job runs only what Postgres adds (run_tests.py --only-postgres: the Postgres variants) and the
+Env-based CLI tests on a Postgres board (--only-env-backend); a pure-logic drive module runs in the
+offline unit jobs only, so "no test ran" is a problem only for a module with variants or Env tests.
 
 Per test_drive_* module: tests run, and how many of them ran in a Postgres variant (a class
 whose name ends in "Postgres", made by tests/support.add_backend_variants). Fails when
@@ -29,7 +33,10 @@ RESULT = re.compile(r"\((?P<id>[\w.]+)\)[^\n]*?(?:\n[^\n]*?)? \.\.\. (?P<res>ok|
 ALLOWED_SKIP = re.compile(r"windows|systemd|^skipped '(?:memory-only:|no runnable Postgres for the QA harness)", re.I)
 
 
-def summarise(log: str, modules: dict[str, bool]) -> tuple[list[str], list[str]]:
+USES_ENV = re.compile(r"\btest_hooks_cli\b")
+
+
+def summarise(log: str, modules: dict[str, bool], expected: set[str] | None = None) -> tuple[list[str], list[str]]:
     """(table lines, problems). `modules` maps each test_drive_* module to whether it builds
     Postgres variants."""
     runs: dict[str, list[tuple[str, str]]] = {m: [] for m in modules}
@@ -44,7 +51,7 @@ def summarise(log: str, modules: dict[str, bool]) -> tuple[list[str], list[str]]
         variants = [r for r in results if r[0].split(".")[1].endswith("Postgres")] if builds_variants else []
         skipped = [r for r in results if r[1].startswith("skipped")]
         lines.append(f"{module:28} {len(results):>6} {len(variants):>12} {len(skipped):>8}")
-        if not results:
+        if not results and (expected is None or module in expected):
             problems.append(f"{module}: no test ran")
         if builds_variants and not variants:
             problems.append(f"{module}: builds Postgres variants but none ran")
@@ -68,11 +75,19 @@ def source_problems(tests: Path) -> list[str]:
 
 
 def main(argv: list[str]) -> int:
-    log = Path(argv[1]).read_text(errors="replace")
-    tests = Path(argv[2]) if len(argv) > 2 else Path("tests")
-    modules = {p.stem: CALLS_VARIANTS.search(p.read_text()) is not None
-               for p in sorted(tests.glob("test_drive_*.py"))}
-    lines, problems = summarise(log, modules)
+    args = argv[1:]
+    tests = Path("tests")
+    if "--tests" in args:
+        i = args.index("--tests")
+        tests = Path(args[i + 1])
+        del args[i:i + 2]
+    if args and Path(args[-1]).is_dir():       # the old form: LOG TESTS-DIR
+        tests = Path(args.pop())
+    log = "".join(Path(a).read_text(errors="replace") for a in args)
+    texts = {p.stem: p.read_text() for p in sorted(tests.glob("test_drive_*.py"))}
+    modules = {m: CALLS_VARIANTS.search(t) is not None for m, t in texts.items()}
+    expected = {m for m, t in texts.items() if modules[m] or USES_ENV.search(t)}
+    lines, problems = summarise(log, modules, expected)
     problems += source_problems(tests)
     print("\n".join(lines))
     for p in problems:

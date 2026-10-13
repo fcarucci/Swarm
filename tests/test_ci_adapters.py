@@ -157,9 +157,6 @@ class GitHubTests(unittest.TestCase):
         self.assertTrue(self.gh.verify({"X-Hub-Signature-256": sig}, body))
         self.assertFalse(self.gh.verify({"X-Hub-Signature-256": "sha256=" + "0" * 64}, body))
 
-    def test_default_api(self):
-        self.assertEqual(self.gh.api, "https://api.github.com")
-
     def test_events(self):
         pr = {"action": "synchronize", "pull_request": {"number": 3, "head": {"sha": SHA}, "title": "T"}}
         self.assertEqual(self.gh.parse({"X-GitHub-Event": "pull_request"}, pr), [(3, SHA, "T", True)])

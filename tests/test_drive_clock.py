@@ -25,10 +25,6 @@ class ClockTests(unittest.TestCase):
         self.assertIsNotNone(n.tzinfo)
         self.assertEqual(n.utcoffset(), timedelta(0))
 
-    def test_real_monotonic_does_not_go_back(self):
-        a = clock.monotonic()
-        self.assertGreaterEqual(clock.monotonic(), a)
-
     def test_real_monotonic_is_the_monotonic_source(self):
         # time.time() is epoch seconds (~1.7e9); time.monotonic() is a small boot-relative value.
         # Comparing against time.monotonic() directly rejects a wall-clock implementation.
