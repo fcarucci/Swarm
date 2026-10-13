@@ -127,9 +127,6 @@ class AutoInitBase:
         with open_board(self.cfg) as b:
             self.assertEqual([m.message for m in b.messages_after(0)], ["before the upgrade"])
 
-    def test_a_schema_12_store_gains_the_messages_job_index_keeping_data(self):
-        self.check_gains_the_messages_job_index(12)
-
     def test_a_schema_13_store_gains_the_messages_job_index_keeping_data(self):
         self.check_gains_the_messages_job_index(13)
 

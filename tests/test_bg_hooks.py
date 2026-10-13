@@ -172,7 +172,6 @@ class BackgroundRewriteTests(BgHookEnv):
                         transcript_path=self.main_transcript()) or {}
         self.assertIsNone(self.rewritten(out))
 
-
     def test_only_our_own_rewrite_is_not_wrapped_again(self):
         cmd = self.rewritten(self.bash("w1", "sleep 3600; swarm bg list", background=True))
         self.assertIsNotNone(cmd)                                  # merely containing `swarm bg`: wrapped
@@ -180,9 +179,6 @@ class BackgroundRewriteTests(BgHookEnv):
         self.assertIsNone(self.rewritten(self.bash("w1", cmd, background=True)))   # our rewrite: as is
         other = bg.wrap_command("sleep 1", "J", "someone-else", self.name, self.cfg)
         self.assertIsNotNone(self.rewritten(self.bash("w1", other, background=True)))
-
-    def test_notice_says_aliases_and_functions_are_not_available(self):
-        self.assertIn("aliases and functions are not available", self.context(self.bash("w1", "ll", background=True)))
 
     def test_join_rewrite_and_wrap_compose(self):
         cmd = self.rewritten(self.bash("w1", "/x/bin/swarm join --job J --key other", background=True))

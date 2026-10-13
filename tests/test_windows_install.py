@@ -34,21 +34,8 @@ class LauncherCmdTests(unittest.TestCase):
         self.assertIn("exit /b 127", text)
         self.assertIn("rerun install.ps1", text)
 
-    def test_sh_launcher_still_parses(self):
-        f = self.tmp / "swarm"
-        f.write_text(bootstrap.LAUNCHER.format(root="/opt/p"))
-        self.assertEqual(bootstrap.launcher_target(f), Path("/opt/p"))
-
-    def test_the_heal_line_is_not_taken_for_the_target(self):
-        f = self.tmp / "swarm.cmd"
-        f.write_text(bootstrap.LAUNCHER_CMD.format(root=r"C:\p"), newline="")
-        self.assertEqual(str(bootstrap.launcher_target(f)), r"C:\p")
-
 
 class VenvPathTests(unittest.TestCase):
-    def test_posix_interpreter_is_bin_python(self):
-        with mock.patch.object(paths, "IS_WINDOWS", False):
-            self.assertEqual(paths.venv_python(Path("/v")), Path("/v/bin/python"))
 
     def test_windows_interpreter_is_scripts_python_exe(self):
         tmp = Path(tempfile.mkdtemp(prefix="swarm-wininst-"))

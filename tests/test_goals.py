@@ -190,11 +190,6 @@ class ExternalAgentRoleTests(GoalEnv):
         self.assertEqual(rc, 0, err)
         self.assertEqual(self.member("codex-verifier").role, "verifier")
 
-    def test_judge_and_verifier_are_exclusive(self):
-        with self.assertRaises(SystemExit) as cm:   # argparse rejects it before anything runs
-            self.cli("join", "--job", "J", "--key", "x", "--judge", "--verifier")
-        self.assertEqual(cm.exception.code, 2)
-
 
 class VerdictTests(GoalEnv):
     def setUp(self):

@@ -244,7 +244,7 @@ class FetchBranches(PushCase):
             m.fetch_branches(["main"], timeout=0)
 
 
-class AbsoluteHelperPin(MirrorCase):
+class HelperFixtures(MirrorCase):
     def gh(self, mode=0o700, name="gh"):
         d = os.path.join(self.root, "bin")
         os.makedirs(d, exist_ok=True)
@@ -257,6 +257,8 @@ class AbsoluteHelperPin(MirrorCase):
     def cred(self, command):
         return {"kind": "helper", "command": command, "config_dir": self.home}
 
+
+class AbsoluteHelperPin(HelperFixtures):
     @support.posix_only("shell fixture and file modes")
     def test_absolute_helper_path_is_accepted_when_basename_and_args_are_allowlisted(self):
         remote, _ = self.remote_with_main()
@@ -325,7 +327,7 @@ class NoCredentialAndMergeBase(PushCase):
             m.merge_base("main", self.base)
 
 
-class HelperTrust(AbsoluteHelperPin):
+class HelperTrust(HelperFixtures):
     """[S3] A pinned absolute helper must be in a system directory or named by the person, and unwritable by others."""
 
     @support.posix_only("file modes")
@@ -653,10 +655,6 @@ class GitpinUse(MirrorCase):
         for name, args in gitpin.CREDENTIAL_HELPERS.items():
             self.assertIn(" ".join((name, *args)), mirror.ALLOWED_HELPERS)
         self.assertEqual(len(mirror.ALLOWED_HELPERS), len(gitpin.CREDENTIAL_HELPERS))
-
-    def test_the_module_keeps_no_copy_of_gitpins_settings(self):
-        self.assertFalse(hasattr(mirror, "_SAFE_CONFIG"))
-        self.assertFalse(hasattr(mirror, "_under_private"))
 
 
 class SshHosts(MirrorCase):

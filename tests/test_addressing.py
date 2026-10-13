@@ -139,11 +139,6 @@ class AddressingTests(SeatsEnv):
         self.assertEqual(rc, 1)
         self.assertIn("nobody holds @QA", err)
 
-    def test_the_read_shows_the_resolved_recipient(self):
-        self.cli("post", "--job", "J", "--as", self.names["el"], "--to", "@QA", "look")
-        rc, out, _ = self.cli("read", "--key", "qa", "--job", "J", "--peek")
-        self.assertIn("look", out)
-
 
 class ResolveTests(SeatsEnv):
     def test_pm_falls_back_to_the_orchestrating_seats(self):

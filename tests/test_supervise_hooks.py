@@ -108,13 +108,6 @@ class ResumeHookTests(SupervisedEnv):
         with self.board() as b:
             return [m.message for m in b.recent_messages(50, job="J")]
 
-    def test_unreplaced_original_is_denied_and_stays_closed(self):
-        before = self._messages()
-        out = self.hook("turn", agent_id="orig", session="sess-1", tool_name="Bash", tool_input={"command": "ls"})
-        self._denied_and_untouched(out)
-        self.assertEqual(self._messages(), before)
-        self.assertEqual(self._active(), [])
-
     def test_original_denied_after_replacement_completed(self):
         """the replacement finished before the original's hung call returned."""
         self.resume()

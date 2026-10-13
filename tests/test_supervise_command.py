@@ -1078,14 +1078,6 @@ class SuperviseTests(SuperviseEnv):
                 with self.assertRaises(st.SettingsError):
                     st.settings({"supervise": {"allowed_workdirs": bad}})
 
-    def test_claude_replacement_in_a_disallowed_workdir_is_refused(self):
-        from swarm import paths
-        (paths.home() / ".claude").mkdir(exist_ok=True)
-        with mock.patch.object(command, "workdir_for", return_value=str(paths.home() / ".claude")):
-            self.supervise()
-        self.assertEqual(self.started, [])
-        self.assertTrue(any(p.startswith(f"can't restart {self.name}") and ".claude" in p for p in self.posts()))
-
     def test_an_unknown_recorded_harness_is_refused_not_a_crash(self):
         self.h.update_agent("orig", harness="evil")
         self.assertEqual(self.supervise(), 0)

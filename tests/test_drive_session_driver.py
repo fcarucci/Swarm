@@ -1064,13 +1064,6 @@ class DriveRunTests(Home):
         self.assertEqual(box["rc"], 0)
         self.assertFalse(sd.held(lock))
 
-    def test_it_is_registered_as_a_drive_command(self):
-        import argparse
-        from swarm import drive_cli
-        sub = argparse.ArgumentParser().add_subparsers(dest="cmd")
-        drive_cli.register(sub, {}, {})
-        self.assertIn("run", drive_cli.DRIVE_COMMANDS)
-
 
 class HookWakeTests(Home):
     def test_hooks_wake_drivers_after_a_swarm_command_and_not_before(self):

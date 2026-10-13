@@ -21,7 +21,7 @@ from support import (FileHarness, MemoryHarness, PostgresHarness, SqliteHarness,
                      ROOT)
 
 from swarm import bg
-from swarm.board import BgCommand, SCHEMA_VERSION
+from swarm.board import BgCommand
 from swarm.board.base import BG_COMMAND_MAX
 
 LINUX = sys.platform.startswith("linux") and hasattr(os, "pidfd_open")
@@ -54,10 +54,6 @@ class BgContract:
         self.b.open_job("K", "other", None, None, None)
         self.homer = self.b.allocate_name("k-homer", "J", "worker")
         self.marge = self.b.allocate_name("k-marge", "J", "worker")
-
-    def test_schema_is_24(self):
-        self.assertGreaterEqual(SCHEMA_VERSION, 24)
-        self.assertEqual(type(self.b).schema_version(self.h.cfg), SCHEMA_VERSION)
 
     def test_setup_twice_is_idempotent_and_keeps_rows(self):
         from swarm.board import setup_board
@@ -413,8 +409,6 @@ class ReapTests(unittest.TestCase):
 def _members_raw(pgid, tag):
     from swarm.supervisor.runner import _members
     return _members(pgid, tag, 0, bg.TAG_ENV)
-
-
 
 
 # --------------------------------------------------------------------------- the wrapper

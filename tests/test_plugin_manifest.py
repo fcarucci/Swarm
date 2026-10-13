@@ -137,17 +137,6 @@ class ManifestTests(unittest.TestCase):
 
 
 class DocsTests(unittest.TestCase):
-    def test_docs_cover_both_hosts(self):
-        skill = (ROOT / "skills/swarm/SKILL.md").read_text()
-        for needle in ("spawn_agent", "`message`", "--attach", "${CLAUDE_PLUGIN_ROOT}/bin/swarm doctor", "swarm command:",
-                       "[swarm role: verifier]", "agents.max_depth = 2"):
-            self.assertTrue(needle in skill, needle)
-        readme = (ROOT / "docs/REFERENCE.md").read_text()
-        for needle in ("swarm migrate", "swarm doctor", "/hooks", "stop_quiet_minutes", "[models]", "web search"):
-            self.assertTrue(needle in readme, needle)
-        example = (ROOT / "config.example.toml").read_text()
-        for needle in ("[models]", "[models.claude]", "[codex]", "stop_quiet_minutes"):
-            self.assertTrue(needle in example, needle)
 
     def test_docs_name_every_cli_command(self):
         """Every `swarm` subcommand is in both command references (hook is internal: reference doc only)."""

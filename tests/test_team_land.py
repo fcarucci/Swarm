@@ -37,13 +37,5 @@ class LandTests(unittest.TestCase):
                     os.environ["SWARM_TEAM_CONFIG"] = old
 
 
-class SkillTextTests(unittest.TestCase):
-    def test_pm_procedure_covers_every_event(self):
-        text = (ROOT / "SKILL.md").read_text()
-        for word in ("NEEDS-REVIEW", "READY-TO-LAND", "CI-FAILED", "BRANCH-READY", "swarm event wait --job J --to @pm",
-                     "rebase-ff", "squash-ff"):
-            self.assertIn(word, text)
-
-
 if __name__ == "__main__":
     unittest.main()

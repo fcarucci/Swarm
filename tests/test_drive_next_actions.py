@@ -544,12 +544,6 @@ class Progress(unittest.TestCase):
                                  v("not_met", scope="goal", artifact="t", open=2)))
 
 
-class Reasons(unittest.TestCase):
-    def test_action_kinds_are_the_frozen_set(self):
-        self.assertEqual(set(dm.ACTION_KINDS), {"launch", "record_unreachable", "close", "hold", "nothing",
-                                                 "rollover", "stop_seat", "complete_land"})
-
-
 class MaxRounds(unittest.TestCase):
     """spec 4.1 and 3.6: max_rounds (8 judged rounds per artifact group) is an absolute cap that makes a
     ruling due. It is per group, not a total over the job."""

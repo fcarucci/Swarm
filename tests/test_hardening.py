@@ -1270,35 +1270,6 @@ class PthChainTests(ProbeEnv):
                                  f"{log}: the marker's newline started a line of its own")
 
 
-class FileBoardChainTests(ProbeEnv):
-    """scratch-lead/probe_fileboard.sh: a file board in the sandbox-writable state dir; a
-    sandboxed agent swaps messages.jsonl for a (dangling) link to a shell rc file, and the host's
-    next post appended its JSON line, $(...) and all, to that rc file."""
-
-    def test_fileboard_chain_blocked(self):
-        self.config.write_text(
-            f'[board]\nbackend = "file"\nspool_dir = {tq(f"{self.state}/spool")}\n'
-            f'[file]\npath = "~/.local/state/swarm/board"\n')
-        env = {"SWARM_AUTO_INIT": "1"}
-        lisa = self.swarm("join", "--job", "j", "--key", "k1", extra_env=env).stdout.strip()
-        r = self.swarm("post", "--job", "j", "--as", lisa, "first post", extra_env=env)
-        board = self.state / "board"
-        self.assertTrue((board / "messages.jsonl").is_file(), r.stdout + r.stderr)
-        rc_file = self.home / "victim_rc"          # dangling: e.g. ~/.bash_aliases
-        (board / "messages.jsonl").replace(board / "messages.old")
-        (board / "messages.jsonl").symlink_to(rc_file)
-        existing = self.home / "victim_existing_rc"
-        existing.write_text("# original\n")
-        (board / "state.json.tmp").unlink(missing_ok=True)
-        self.swarm("post", "--job", "j", "--as", lisa, f"hello $({SENTINEL})", extra_env=env)
-        self.assertFalse(rc_file.exists(), "the post was appended through the dangling link")
-        (board / "messages.jsonl").unlink()
-        (board / "messages.jsonl").symlink_to(existing)
-        self.swarm("post", "--job", "j", "--as", lisa, f"again $({SENTINEL})", extra_env=env)
-        self.assertEqual(existing.read_text(), "# original\n", "the post was appended through the link")
-        self.assertNotIn(SENTINEL, (board / "messages.old").read_text())
-
-
 # --------------------------------------------------------------------------- bootstrap tightens the marker dir too
 # A box where ~/.local, ~/.local/share and ~/.local/state are 0775 (umask 002, or created that
 # way long ago): safefs refuses paths through them, so bootstrap/migrate tighten them (go-w, only

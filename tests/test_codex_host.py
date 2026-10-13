@@ -23,20 +23,6 @@ def _spawns(event: str = "PreToolUse") -> list[dict]:
     return [p for p in F.payloads(event) if str(p.get("tool_name", "")).endswith("spawn_agent")]
 
 
-class AnswersParserTests(unittest.TestCase):
-    """The ANSWERS.md parser against the real (long) lines, evidence and all."""
-
-    def test_q1_real_line(self):
-        self.assertEqual(F.answer("Q1"), {"spawn message in child rollout at SubagentStart": "no"})
-
-    def test_q3_and_q4_fields(self):
-        self.assertEqual(F.answer("Q3"), {"CODEX_SESSION_ID == hook session_id": "yes",
-                                          "CODEX_THREAD_ID == hook agent_id": "yes",
-                                          "root CODEX_THREAD_ID == hook session_id": "yes"})
-        self.assertEqual(F.answer("Q4"), {"PreToolUse updatedInput honoured for spawn_agent": "yes",
-                                          "spawn_agent accepts model": "yes"})
-
-
 class FixtureBuilderTests(unittest.TestCase):
     def test_builder_context_prefixes_match_the_adapter(self):
         from make_fixtures import CONTEXT

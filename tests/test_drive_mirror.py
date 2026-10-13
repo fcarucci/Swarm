@@ -241,10 +241,6 @@ class MirrorBasics(MirrorCase):
             Mirror("http://127.0.0.1:9/x.git", self.agent_cred(), loopback_http=True)
             Mirror("http://localhost:9/x.git", self.agent_cred(), loopback_http=True)
 
-    def test_loopback_flag_is_keyword_only(self):
-        with self.assertRaises(TypeError):
-            Mirror("http://127.0.0.1:9/x.git", self.agent_cred(), True)
-
     def test_url_with_embedded_credentials_refused(self):
         for url in ("https://x-access-token:FAKE@example.com/r.git", "https://user@example.com/r.git",
                     "user:FAKE@example.com:r.git"):

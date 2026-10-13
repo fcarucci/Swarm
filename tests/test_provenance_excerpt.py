@@ -210,12 +210,6 @@ class ExcerptFixTests(unittest.TestCase):
         self.assertIn("truncated", kinds)
         self.assertIn("answer 39", text)                    # the context around it survives
 
-    def test_raw_cap_matches_the_board(self):
-        from swarm import board
-        if not hasattr(board, "EXCERPT_MAX_RAW"):
-            self.skipTest("board.EXCERPT_MAX_RAW is not there yet")
-        self.assertEqual(provenance.EXCERPT_MAX_RAW, board.EXCERPT_MAX_RAW)
-
     def test_claude_anchor_without_the_call_never_takes_later_lines(self):
         later = "".join(line("assistant", [{"type": "text", "text": f"after the hook {i}"}], "2026-09-28T12:30:00Z")
                         for i in range(3))

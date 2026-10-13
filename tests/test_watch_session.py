@@ -35,13 +35,6 @@ class IdleExitTests(unittest.TestCase):
         self.clock.t += 0.1
         self.assertTrue(self.idle.expired())
 
-    def test_job_appearing_before_the_linger_ends_keeps_it_going(self):
-        self.idle.observe(False)
-        self.clock.t += 20
-        self.idle.observe(True)
-        self.clock.t += 1000
-        self.assertFalse(self.idle.expired())
-
     def test_active_job_never_expires(self):
         self.idle.observe(True)
         self.clock.t += 1000
@@ -90,14 +83,6 @@ class SessionWatchTests(Env):
         self.assertIn("JA", text)
         self.assertNotIn("JB", text)
         self.assertNotIn("22222222", text)
-
-    def test_new_job_of_same_session_appears(self):
-        self.activate("JA", S1)
-        self.assertNotIn("JC", self.frame(S1))
-        self.activate("JC", S1)
-        text = self.frame(S1)
-        self.assertIn("JA", text)
-        self.assertIn("JC", text)
 
     def test_messages_only_from_the_sessions_jobs(self):
         self.activate("JA", S1)

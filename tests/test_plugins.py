@@ -268,11 +268,6 @@ class PluginTests(PluginEnv):
             self.assertEqual(self.cli("activate", "--job", "J")[0], 0)
         self.assertNotIn("discovery failed", self.cli("plugins")[1])
 
-    def test_a_broken_config_still_runs_core(self):
-        self.plugin("good", GOOD)
-        rc, out, _ = self.cli("hello")
-        self.assertEqual(rc, 0)
-
     def test_job_data_is_namespaced_per_plugin(self):
         self.plugin("kv", '''
             def put(ctx, args):

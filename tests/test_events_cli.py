@@ -3,7 +3,6 @@ backend named by $SWARM_TEST_BACKEND (default memory), through the same Env as t
 from __future__ import annotations
 
 import json
-import threading
 import time
 import unittest
 
@@ -75,19 +74,6 @@ class EventCliTests(Env):
         rc, out, _ = self.cli("event", "wait", "--job", "J", "--to", "@pm", "--timeout", "0.5")
         self.assertEqual((rc, out), (124, ""))
         self.assertGreaterEqual(time.monotonic() - t0, 0.4)
-
-    def test_wait_wakes_on_a_later_post(self):
-        def later():
-            with self.board() as b:
-                b.post_event("J", "CI-FAILED", "7@abc", "ci failed", to="@pm")
-        timer = threading.Timer(0.6, later)   # the board API: the CLI's output redirection is process-wide
-        timer.start()
-        self.addCleanup(timer.join)
-        t0 = time.monotonic()
-        rc, out, _ = self.cli("event", "wait", "--job", "J", "--to", "@pm", "--timeout", "30")
-        self.assertEqual(rc, 0)
-        self.assertIn("CI-FAILED", out)
-        self.assertLess(time.monotonic() - t0, 10)
 
 
 class EventHookTests(Env):

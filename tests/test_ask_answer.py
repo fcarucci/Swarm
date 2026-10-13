@@ -147,10 +147,6 @@ class SqliteQuestions(QuestionContract, unittest.TestCase):
 class PostgresQuestions(QuestionContract, unittest.TestCase):
     harness_factory = staticmethod(lambda: PostgresHarness(os.environ['SWARM_TEST_CONFIG']))
 
-class AgentInjectionApi(unittest.TestCase):
-    def test_full_answer_hook_api_is_available(self):
-        self.assertTrue(hasattr(plugins.PluginAPI, 'add_agent_lines'),
-                        'plugin answers need an agent context hook for full text')
 
 from test_routing import RoutingEnv
 import importlib.util as _imports

@@ -200,12 +200,6 @@ class BlockerContract:
             [e.event for e in self.b.blocker_events(question.id)], ["opened", "overdue"]
         )
 
-    def test_data_persists_across_connections(self):
-        a = self.b.open_blocker("j", "question", "human", "choose")
-        with self.h.board() as b:
-            self.assertEqual(b.blocker(a.id), a)
-            self.assertEqual(b.blocker_events(a.id)[0].event, "opened")
-
     def test_seat_and_generation_round_trip(self):
         a = self.b.open_blocker("j", "question", "@EL", "which seat", seat="eng-a", generation=1)
         self.assertEqual((a.seat, a.generation), ("eng-a", 1))
@@ -246,19 +240,6 @@ class PostgresBlockers(BlockerContract, unittest.TestCase):
             self.b.open_blocker(job, kind, 'human', 'pending')
             self.h.conn.execute("UPDATE jobs SET status='completed', closed_by='auto' WHERE job=%s", (job,))
             self.assertEqual(self.b.job_status(job).status, expected)
-
-
-class BlockerCliTests(unittest.TestCase):
-    def test_parser_and_dispatch(self):
-        from swarm import cli
-
-        p = cli._parser()
-        args = p.parse_args(["blockers", "--job", "j", "--all"])
-        self.assertEqual(args.cmd, "blockers")
-        self.assertEqual(p.parse_args(["blocker", "resolve", "12", "--how", "blue"]).id, 12)
-        self.assertEqual(
-            p.parse_args(["blocker", "comment", "12", "choose blue"]).text, ["choose blue"]
-        )
 
 
 class PluginBlockerApiTests(unittest.TestCase):

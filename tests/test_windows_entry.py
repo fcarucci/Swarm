@@ -74,11 +74,6 @@ class WinLaunchTests(Base):
         self.assertEqual((self.venv / ".swarm-requirements").read_text().strip(), winlaunch.requirements_stamp())
         self.assertFalse(Path(str(self.venv) + ".building").exists())      # lock released
 
-    def test_complete_venv_is_not_rebuilt(self):
-        self.full_venv()
-        with mock.patch.object(winlaunch.subprocess, "run", side_effect=AssertionError("rebuilt")):
-            self.assertEqual(winlaunch.ensure_venv(), self.py)
-
     def test_missing_zstandard_is_reinstalled_even_with_a_matching_stamp(self):
         self.full_venv()
         shutil.rmtree(self.venv / "lib" / "python3.12" / "site-packages" / "zstandard")

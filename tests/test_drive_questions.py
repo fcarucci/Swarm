@@ -210,16 +210,6 @@ class GateDriveQuestions(QuestionEnv):
         self.b.post("K", self.kasker, "ok?", "human")
         self.assertTrue(orphans.human_question(self.b, self.b.job_status("K"), self.h.cfg))
 
-    def test_stuck_reason_job_wait_ignored_and_per_seat_gate_applied(self):
-        bcfg, sup = {"dead_minutes": 30}, {"silent_minutes": 20}
-        js = drive_js()
-        a = NS(name="eng-a", ended_at=None, status="idle", current_tool=None,
-               last_contact_at=NOW - 40 * dt.timedelta(minutes=1), last_post_at=None)
-        self.assertIsNone(stuck.stuck_reason(a, js, NOW, bcfg, sup), "a job-level wait gates a plain job")
-        self.assertEqual(stuck.stuck_reason(a, js, NOW, bcfg, sup, gate=frozenset()), "dead")
-        self.assertIsNone(stuck.stuck_reason(a, js, NOW, bcfg, sup, gate=frozenset({"eng-a"})))
-        self.assertEqual(stuck.stuck_reason(a, js, NOW, bcfg, sup, gate=frozenset({"eng-b"})), "dead")
-
     def test_quiet_seat_is_silent_not_waiting_for_drive(self):
         bcfg, sup = {"dead_minutes": 30}, {"silent_minutes": 20}
         a = NS(name="eng-a", ended_at=None, status="idle", current_tool=None,

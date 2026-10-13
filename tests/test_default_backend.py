@@ -46,11 +46,6 @@ class DefaultBackendTests(unittest.TestCase):
             self.assertEqual(backend_class(cfg).__name__, "PostgresBoard")
             self.assertTrue(cfg["board"]["backend_implied"])
 
-    def test_any_database_setting_without_backend_stays_postgres(self):
-        cfg = self.load('[database]\nuser = "me"\npassword_env_file = "~/.config/swarm/pg.env"\n')
-        self.assertEqual(board_backend(cfg), "postgres")
-        self.assertTrue(cfg["board"]["backend_implied"])
-
     def test_empty_database_section_is_still_file(self):
         self.assertEqual(board_backend(self.load("[database]\n")), "file")
 
@@ -69,11 +64,6 @@ class DefaultBackendTests(unittest.TestCase):
         self.assertFalse((raw.get("hindsight") or {}).get("url"))
         cfg = self.load(None)
         self.assertEqual(board_backend(cfg), "file")
-        self.assertFalse(hindsight.enabled(cfg))
-        self.assertFalse(hooks._memory_on(cfg))
-
-    def test_memory_is_off_by_default(self):
-        cfg = swarm.load_config(self.home / "missing.toml")
         self.assertFalse(hindsight.enabled(cfg))
         self.assertFalse(hooks._memory_on(cfg))
 

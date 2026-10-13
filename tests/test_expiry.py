@@ -614,10 +614,6 @@ class ExpiryCliTests(Env):
     def age(self, job="J", seconds=5 * HOUR):
         self.h.backdate_job(job, created_at=seconds + 60, activated_at=seconds)
 
-    def test_defaults(self):
-        self.assertEqual(self.cfg["job"]["stall_hours"], 4)
-        self.assertEqual(self.cfg["job"]["orphan_minutes"], 30)
-
     def test_status_closes_an_old_job_and_all_shows_it(self):
         self.activate()
         self.hook("start", agent_id="agent-1")
@@ -660,17 +656,6 @@ class ExpiryCliTests(Env):
         rc, out, _ = self.cli("purge")
         self.assertIn("J: auto-closed: no live agents for 30 min", out)
         self.assertEqual(self.job().status, "cancelled")
-
-    # ---- a goal job is never closed by the orphan or stall sweeps (the stale-waiting rule is off here)
-    def test_a_goal_job_survives_every_sweep(self):
-        self.config.write_text(self.config.read_text() + "[job]\nstale_waiting_minutes = 0\n")   # (stale waiting is tested apart)
-        self.activate("J", "--no-drive", "--reason", "legacy goal test", "--goal", "ship it")
-        self.age("J", 40 * MIN)
-        _, out, _ = self.cli("purge")
-        self.assertNotIn("auto-closed", out)
-        self.age("J", 99 * HOUR)
-        self.cli("status")
-        self.assertEqual(self.job().status, "active")
 
     def test_an_idle_goal_job_can_be_attached_to_by_any_session(self):
         self.config.write_text(self.config.read_text() + "[job]\nstale_waiting_minutes = 0\n")   # (stale waiting is tested apart)

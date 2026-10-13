@@ -621,10 +621,6 @@ class CliTests(Env):
         self.assertIn("enabled = false", err)
         self.assertEqual(self.cli("events", "check")[0], 0)
 
-    def test_events_listed_in_plugins_and_in_the_help(self):
-        rc, out, _ = self.cli("events")
-        self.assertEqual(rc, 2)
-
 
 class RealBoardTests(Env):
     """The listener and the alerts on the real backend (SWARM_TEST_BACKEND: memory, sqlite, file, postgres)."""

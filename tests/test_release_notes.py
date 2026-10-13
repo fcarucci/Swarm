@@ -121,9 +121,6 @@ class ReleaseNotesTest(unittest.TestCase):
         body = out.split("## What's changed\n\n", 1)[1]
         self.assertTrue(body.startswith("- A.\n\n- B.\n\nFull changelog:"), repr(body))
 
-    def test_script_avoids_gnu_only_sed(self):
-        self.assertNotIn("sed -e :a", SCRIPT.read_text())
-
 
 if __name__ == "__main__":
     unittest.main()

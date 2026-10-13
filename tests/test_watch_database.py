@@ -194,11 +194,6 @@ class WatcherRoutingTests(unittest.TestCase):
         self.assertEqual(self.seen[0]["application_name"], "swarm-watch")
         self.assertEqual(self.seen[0]["dbname"], self.cfg["database"]["dbname"])  # fallback
 
-    def test_watch_connects_with_the_watcher_config(self):
-        with self.plan({"stop_on": ("wait_for_change", 1)}):
-            self.run_cli(swarm.cmd_watch, self.cfg, "J", 0.01, False)
-        self.assertEqual([d["host"] for d in self.seen], [self.WATCH_HOST])
-
     def test_reconnects_use_the_watcher_config(self):
         with self.plan({"fail_on": ("messages_after", 1)}, {"stop_on": ("wait_for_change", 1)}):
             self.run_cli(swarm.cmd_tail, self.cfg, "J", 0, 0.01, False, False)

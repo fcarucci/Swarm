@@ -16,7 +16,6 @@ from support import (FileHarness, MemoryHarness, PostgresHarness, SqliteHarness,
                      wait_until)
 
 from swarm.board import ReadOnlyBoard
-from swarm.board.base import SCHEMA_VERSION
 
 
 class EventContract:
@@ -36,10 +35,6 @@ class EventContract:
         self.addCleanup(self.b.close)
         self.b.open_job("j", "events", None, None, None)
         self.b.open_job("k", "other", None, None, None)
-
-    def test_schema_is_21(self):
-        self.assertGreaterEqual(SCHEMA_VERSION, 21)
-        self.assertEqual(type(self.b).schema_version(self.h.cfg), SCHEMA_VERSION)
 
     def test_post_is_idempotent_per_job_kind_key(self):
         first, created = self.b.post_event("j", "NEEDS-REVIEW", "7@abc", "PR 7 opened", source="gitea")

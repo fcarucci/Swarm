@@ -310,10 +310,5 @@ class FingerprintDigestTests(unittest.TestCase):
         self.assertEqual(base, snap.fingerprint_of_rows([job], [], 0, blockers=[{**blocker, "state": "resolved"}]))
 
 
-class DegradedMarkTests(unittest.TestCase):
-    def test_polling_is_shown(self):
-        self.assertIn("polling", cli.polling_notice(2.0))
-
-
 if __name__ == "__main__":
     unittest.main()

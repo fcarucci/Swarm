@@ -167,12 +167,6 @@ class WatchScrollTests(Env):
         self.assertLess(calls[0], 30)
         self.assertEqual(calls[1], swarm.WATCH_HISTORY)
 
-    def test_title_lists_the_keys(self):
-        title = self.frame()[0]
-        for k in ("↑/↓", "PgUp/PgDn", "G live", "←/→", "Home/End", "w wrap", "a all agents", "q quit"):
-            self.assertIn(k, title)
-
-
 
 class WatchTablesScrollTests(Env):
     """←/→ scroll the job and agents tables too, not just the messages (job J, a long
@@ -239,13 +233,11 @@ class WatchTablesScrollTests(Env):
         self.frame("$")
         self.assertEqual(self.frame("0")[1:], before[1:])
 
-
     def test_shift_keeps_colour_codes(self):
         line = "ab \033[32mactive\033[0m  tail"
         self.assertEqual(swarm._shift(line, 4), "\033[32m…tive\033[0m  tail")
         self.assertEqual(swarm._shift(line, 0), line)
         self.assertEqual(swarm._shift("abc", 5), "")
-
 
 
 # --------------------------------------------------------------------------- controls

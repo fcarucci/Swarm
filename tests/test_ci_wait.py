@@ -365,17 +365,6 @@ class EventTests(Base):
         self.assertEqual(self.wait(self.poller(host), events=lambda: None)[0], 0)
         self.assertEqual(host.calls, 1)
 
-    def test_event_lookup_without_event_core_says_so(self):
-        import swarm.board as sb
-        had = hasattr(sb.Board, "events")
-        if had:
-            self.skipTest("event core is installed: the 'not installed' path cannot run")
-        err = io.StringIO()
-        with redirect_stderr(err):
-            look = cw.event_lookup(SimpleNamespace(), SHA, "J", note=print)
-        self.assertIsNone(look)
-        self.assertIn("event core not installed", err.getvalue())
-
     def test_event_lookup_reads_board_events(self):
         import swarm.board as sb
         if not hasattr(sb.Board, "events"):

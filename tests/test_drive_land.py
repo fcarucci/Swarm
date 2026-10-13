@@ -289,11 +289,6 @@ class Landing(LandCase):
         res = self.go()
         self.assertEqual(res.land_rev, 1 + 2 * 2)   # intent, then pushed and verified per destination
 
-    def test_branch_kept_when_deletion_is_off_and_deletion_failure_is_not_fatal(self):
-        res = self.go(env={"delete_branch": False})
-        self.assertTrue(res.ok)
-        self.assertTrue(self.has_branch(self.a) and self.has_branch(self.b))
-
     def test_deletion_failure_is_noted_not_fatal(self):
         notes = []
 

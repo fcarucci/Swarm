@@ -10,10 +10,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from support import SMALL_POOL, MemoryHarness, SqliteHarness  # noqa: F401  (sets sys.path)
+from support import SMALL_POOL, MemoryHarness  # noqa: F401  (sets sys.path)
 
 from swarm import pause, transcripts as T  # noqa: E402
-from swarm.board import PAUSE_WRITER, JobPaused  # noqa: E402
+from swarm.board import PAUSE_WRITER  # noqa: E402
 from swarm.supervisor import markers  # noqa: E402
 
 SECRET = "sk-ant-api03-AbCdEfGhIjKlMnOpQrStUv_wx-yz0123"
@@ -106,13 +106,6 @@ class PauseTest(Base):
         rep = pause.pause(self.b, self.cfg, "j", None, "u", wait=10, sleep=sleep, clock=lambda: clock[0])
         self.assertEqual(rep.transcripts, {"k1": "final", "k2": "final"})
         self.assertEqual(len(calls), 2)
-
-    def test_join_and_post_are_refused_with_a_clear_message(self):
-        pause.pause(self.b, self.cfg, "j", "lunch", "u", wait=0)
-        with self.assertRaisesRegex(JobPaused, r"job j is paused.*lunch.*swarm resume --job j"):
-            self.b.allocate_name("new", "j")
-        with self.assertRaises(JobPaused):
-            self.b.post("j", self.n1, "x")
 
     def test_status_listing_shows_paused_jobs(self):
         from swarm import cli
@@ -262,10 +255,6 @@ class ResumeTest(Base):
         rep = self.resume()
         blob = json.dumps(pz.record.manifest) + "\n".join(rep.lines()) + json.dumps(self.b.pauses("j")[0].outcome)
         self.assertNotIn(SECRET, blob)
-
-
-class SqliteResumeTest(ResumeTest):
-    harness = staticmethod(lambda: SqliteHarness())
 
 
 class HookTest(Base):

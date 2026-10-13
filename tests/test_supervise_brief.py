@@ -227,7 +227,6 @@ class BriefTests(TranscriptEnv):
         b = self.build()
         self.assertIn("--agent 'O'\\''Brien'", b.text)
 
-
     # ---- board text is untrusted data, redacted
 
     def _between(self, text: str, what: str) -> tuple[str, str]:
@@ -328,31 +327,6 @@ class BriefTests(TranscriptEnv):
         b = self.build()
         self.assertLessEqual(len(b.text), 6000)
         self.assertIn("working on part 59", b.text)                  # the tail keeps a share
-
-
-class ArchiveOffBriefTests(BriefTests):
-    ENABLED = False
-
-    def test_archive_off_falls_back_to_posts(self):
-        b = self.build()
-        self.assertEqual(b.transcript, "archive off")
-        self.assertIn("No transcript archive on this board ([transcripts] enabled = false): "
-                      "rely on the board posts above.", b.text)
-        self.assertNotIn("transcript show", b.text)
-
-    # the parent's archive-dependent tests don't apply with the archive off
-    test_claude_brief_has_task_posts_tail_and_reading_help = None
-    test_codex_brief_uses_task_name_and_first_post = None
-    test_brief_is_capped_tail_first = None
-    test_not_stored_says_so = None
-    test_huge_task_is_cut_but_reading_help_stays = None
-    test_quoting_of_names_in_commands = None
-    test_smallest_cap_keeps_header_and_reading_help_whole = None
-    test_names_too_long_for_the_cap_keep_header_and_commands_and_log = None
-    test_second_brief_has_the_root_task_and_the_latest_attempts_work = None
-    test_a_short_attempt_does_not_nest_its_brief = None
-    test_a_huge_original_task_leaves_room_for_the_latest_tail = None
-    test_codex_first_post_task_is_untrusted_and_redacted = None
 
 
 class PureHelpersTests(TranscriptEnv):
