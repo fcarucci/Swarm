@@ -4,25 +4,15 @@ on:
     branches: ["perf/frink"]
   workflow_dispatch:
 jobs:
-  win-full:
-    runs-on: windows-latest
-    defaults: {run: {shell: bash}}
-    strategy:
-      fail-fast: false
-      matrix:
-        backend: [memory, sqlite]
-        shard: [0, 1, 2]
+  linux-instrumented:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: "3.13", cache: pip}
       - run: pip install -r requirements.txt -r requirements-postgres.txt
-      - name: timed shard, modules i mod 3, session driver excluded
-        env:
-          PYTHONUTF8: "1"
-          SWARM_TEST_BACKEND: ${{ matrix.backend }}
-        run: |
-          mods=$(cd tests && ls test_*.py | sed 's/\.py$//' | grep -v '^test_drive_session_driver$' | awk -v s=${{ matrix.shard }} '(NR-1)%3==s')
-          python -B tests/_frink_timing.py "$GITHUB_WORKSPACE/t-wf-${{ matrix.backend }}-${{ matrix.shard }}.csv" $mods </dev/null 2>&1 | tail -3
+      - name: timed suite with popen and sleep counters
+        env: {SWARM_TEST_BACKEND: sqlite}
+        run: python -B tests/_frink_timing.py "$GITHUB_WORKSPACE/t-linux-inst.csv" </dev/null 2>&1 | tail -5
       - uses: actions/upload-artifact@v4
-        with: {name: "t-wf-${{ matrix.backend }}-${{ matrix.shard }}", path: "t-*.csv"}
+        with: {name: t-linux-inst, path: "t-*.csv"}
