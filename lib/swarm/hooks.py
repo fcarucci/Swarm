@@ -806,33 +806,38 @@ def _memory_stop(board, cfg: dict, agent_id: str) -> bool:
     """SubagentStop of an agent that ends normally (memory on): it must have stored at least one memory
     during its run (`swarm remember`), or declared it has none (`swarm remember --none "<reason>"`), both
     read from its agent row (remembered_at). If neither, the stop is blocked ONCE (nudged_at records it)
-    with the instruction; the next stop goes through. Learner seats and the orchestrator are exempt.
-    Returns False when it blocked."""
+    with the instruction. The next stop goes through, and the agent is marked unharvested (memory.u.*,
+    learnings.mark_unharvested) so the job's learnings step can harvest its transcript. Learner seats and
+    the orchestrator are exempt. An error here never blocks the stop. Returns False when it blocked."""
     if not _memory_on(cfg):
         return True
     from swarm import learnings
-    route = board.route(agent_id)
-    job = route.member_job
-    if not job:
+    try:
+        job = board.route(agent_id).member_job
+        if not job:
+            return True
+        me = next((a for a in board.agents(job, include_departed=False) if a.agent_key == agent_id), None)
+        if me is None or not learnings._counts(me):
+            return True
+        state = board.sync_state(agent_id)
+        if state is None:
+            return True
+        if state.remembered_at is not None and state.remembered_at >= state.joined_at:
+            return True
+        if state.nudged_at is not None and state.nudged_at >= state.joined_at:
+            # blocked once already: let it go, and leave the agent marked for the learnings step
+            learnings.mark_unharvested(board, job, agent_id, me.name,
+                                       "stopped without storing or declaring learnings")
+            return True
+        board.record_nudge(agent_id)
+        _OUTPUT.update({"decision": "block", "reason":
+            f"[swarm memory] Before you stop: store your durable learnings with `{_bin()} remember --job "
+            f"{_q(job)} --as {_q(me.name)} \"<fact>\"`, or declare none with `{_bin()} remember --job "
+            f"{_q(job)} --as {_q(me.name)} --none \"<reason>\"`."})
+        return False
+    except Exception as exc:   # never at the cost of the stop itself
+        _log_error("memory stop", agent_id, exc)
         return True
-    me = next((a for a in board.agents(job, include_departed=False) if a.agent_key == agent_id), None)
-    if me is None or not learnings._counts(me):
-        return True
-    state = board.sync_state(agent_id)
-    if state is None:
-        return True
-    if state.remembered_at is not None and state.remembered_at >= state.joined_at:
-        return True
-    if state.nudged_at is not None and state.nudged_at >= state.joined_at:
-        return True     # blocked once already: let it go
-    board.record_nudge(agent_id)
-    _OUTPUT.update({"decision": "block", "reason":
-        f"[swarm memory] Before you stop: you have stored nothing in project memory during this run. Store "
-        f"each durable thing you learned, one fact per call with its evidence (root causes, why a setting is "
-        f"what it is, traps, measured numbers): `{_bin()} remember --job {_q(job)} --as {_q(me.name)} "
-        f"\"<fact, with evidence>\"`. If there is genuinely nothing worth keeping, say so: "
-        f"`{_bin()} remember --job {_q(job)} --as {_q(me.name)} --none \"<why>\"`. Then stop."})
-    return False
 
 
 # --------------------------------------------------------------------------- events
