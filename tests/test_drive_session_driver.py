@@ -36,6 +36,7 @@ from swarm.board import open_board
 from swarm.board.autoinit import store_key
 from swarm.supervisor import ledger, procwatch, session_driver as sd, settings, wake
 
+FIRST_PASS_SECONDS = 180 if sys.platform == "win32" else 60
 IDLE_SECONDS = float(os.environ.get("SWARM_DRIVER_IDLE_SECONDS", "60"))   # spec: 60 s (never lower in CI)
 REPO = Path(__file__).resolve().parent.parent
 GOAL = "write a report"
@@ -73,7 +74,7 @@ class Home(unittest.TestCase):
     harness_factory = staticmethod(drive_backends()["sqlite"])
 
     def setUp(self):
-        watchdog(self, 300)
+        watchdog(self, 300 + FIRST_PASS_SECONDS)
         self.home = Path(tempfile.mkdtemp(dir=SANDBOX, prefix="sdrv-home-"))
         self.addCleanup(shutil.rmtree, self.home, True)
         self.h = self.harness_factory(self.id())
@@ -124,7 +125,14 @@ class Home(unittest.TestCase):
         self.assertIsNotNone(pid)
         proc = box["p"]
         self.addCleanup(stop, proc)
-        wait_until(lambda: self.stats(session).get("passes", 0) >= 1, timeout=60)
+        # the first pass starts a fresh interpreter and opens the board: slow Windows runners (antivirus on every
+        # new process) have taken over a minute; the idle and latency assertions below are not loosened
+        try:
+            wait_until(lambda: self.stats(session).get("passes", 0) >= 1, timeout=FIRST_PASS_SECONDS)
+        except AssertionError:
+            log = settings.read_private("supervise.log") or b""
+            self.fail(f"no first pass in {FIRST_PASS_SECONDS} s (driver exit code {proc.poll()}); state "
+                      f"{self.stats(session)}; supervise.log: {log[-2000:].decode(errors='replace')}")
         return proc
 
 
