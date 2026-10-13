@@ -32,6 +32,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 TESTS = ROOT / "tests"
 TIERS = Path(__file__).with_name("test_tiers.json")
+SPLIT_SECONDS = 60.0
 
 
 def all_modules() -> list[str]:
@@ -138,10 +139,18 @@ def main() -> int:
     ap.add_argument("--record")
     ap.add_argument("--verbose", action="store_true", help="unittest -v in every module")
     ap.add_argument("--log", help="write every module's full output to this file")
-    ap.add_argument("--shard", help="i/n: run only the i-th (1-based) of n duration-balanced shards")
+    ap.add_argument("--list", help=argparse.SUPPRESS)
     ap.add_argument("--child")
     ap.add_argument("modules", nargs="*")
     a = ap.parse_args()
+    if a.list:
+        sys.path.insert(0, str(TESTS))
+        names = set()
+        for suite in unittest.defaultTestLoader.loadTestsFromName(a.list):
+            for t in suite:
+                names.add(type(t).__name__)
+        print("\n".join(sorted(names)))
+        return 0
     if a.child:
         return run_child(a.child, a.skip_class, 2 if a.verbose else 1)
 
@@ -155,17 +164,20 @@ def main() -> int:
         picked = affected(Path(a.select).read_text().splitlines(), mods)
         if picked is not None:
             mods = picked
-    durations = t.get("durations", {})
-    mods.sort(key=lambda m: -durations.get(m, 30.0))
-    if a.shard:
-        i, n = (int(x) for x in a.shard.split("/"))
-        loads = [0.0] * n
-        groups: list[list[str]] = [[] for _ in range(n)]
-        for m in mods:              # greedy: longest module onto the least loaded shard
-            k = loads.index(min(loads))
-            groups[k].append(m)
-            loads[k] += durations.get(m, 30.0)
-        mods = groups[i - 1]
+    durations = t["durations_postgres" if os.environ.get("SWARM_TEST_CONFIG") else "durations"]
+    # A module that takes a minute or more runs one process per test class, so one slow module
+    # does not set the wall time.
+    units: dict[str, float] = {}
+    for m in mods:
+        d = durations.get(m, 30.0)
+        classes = []
+        if d >= SPLIT_SECONDS:
+            out = subprocess.run([sys.executable, "-B", __file__, "--list", m], cwd=ROOT, text=True,
+                                 stdin=subprocess.DEVNULL, capture_output=True).stdout.split()
+            classes = [f"{m}.{c}" for c in out]
+        for u in classes or [m]:
+            units[u] = d / (len(classes) or 1)
+    mods = sorted(units, key=lambda u: -units[u])
     print(f"running {len(mods)} test modules, {a.jobs} at a time: {' '.join(sorted(mods))}", flush=True)
 
     tmp = Path(tempfile.mkdtemp(prefix="swarm-ci-"))
@@ -223,7 +235,10 @@ def main() -> int:
     if a.log:
         Path(a.log).write_text("".join(results[m][2] for m in sorted(results)))
     if a.record:
-        Path(a.record).write_text(json.dumps({m: round(t, 1) for m, (_, t, _) in sorted(results.items())},
+        per_module: dict[str, float] = {}
+        for u, (_, took, _) in results.items():
+            per_module[u.split(".")[0]] = per_module.get(u.split(".")[0], 0.0) + took
+        Path(a.record).write_text(json.dumps({m: round(t, 1) for m, t in sorted(per_module.items())},
                                              indent=1) + "\n")
     if failed:
         print(f"\nFAILED modules: {' '.join(failed)}")
