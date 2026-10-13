@@ -41,7 +41,7 @@ LEDGER_TRIES = 5
 AUTH_HOURS = 24 * 7          # a driver-authored seat authorization receipt is valid this long
 LOCK_SLACK_MINUTES = 15      # a launch's drive locks outlive its wall clock by this
 RULING_RESERVE_SESSIONS = 2  # sessions past max_sessions that only a ruling may use (spec 4.1)
-DRIVER_SEATS = ("judge", "goal-judge", "ruling-judge")
+DRIVER_SEATS = ("judge", "goal-judge", "ruling-judge", "learner")
 # `[drive.models]` shipped defaults (plan Global Constraints, [P1]); 6a's model table overrides them.
 DEFAULT_MODELS = {"engineer": "haiku", "worker": "haiku", "integrator": "haiku", "reviewer": "sonnet",
                   "qa": "sonnet", "judge": "opus", "lead": "opus", "security": "opus"}
@@ -51,7 +51,7 @@ TMP_ROOTS = ("/tmp", "/dev/shm")   # seat workdirs under these are refused (host
 # plain token that cannot start with "-" and holds no "=" or other option syntax.
 _RESUME_HANDLE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
                             r"|[A-Za-z0-9][A-Za-z0-9_.]{7,79}")
-_RESERVED_SEAT = re.compile(r"(judge|goal-judge|ruling-judge)|(reviewer|integrator)[-:].*|lead~\d+")
+_RESERVED_SEAT = re.compile(r"(judge|goal-judge|ruling-judge|learner)|(reviewer|integrator)[-:].*|lead~\d+")
 _ABSENT_LOGGED: set = set()
 
 
@@ -104,6 +104,8 @@ def _action_group(action) -> str | None:
 def _driver_seat(action) -> tuple[str, str] | None:
     """(seat name, role) of the driver-owned seat an action with no seat runs on, or None."""
     kind, group = action.prompt_kind, _action_group(action)
+    if kind == "learn":
+        return "learner", "learner"
     if action.ruling or group == "ruling":
         return "ruling-judge", "judge"
     if kind == "goal" or group == "goal":

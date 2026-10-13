@@ -393,9 +393,12 @@ class Client:
             item["document_id"] = document_id
         self._call("POST", self._bank_path(bank) + "/memories", {"items": [item], "async": not synchronous})
 
-    def recall(self, bank: str, query: str) -> list[dict]:
-        """[{"id", "text"}] most relevant first; [] if the bank doesn't exist yet."""
+    def recall(self, bank: str, query: str, tags=None) -> list[dict]:
+        """[{"id", "text"}] most relevant first; [] if the bank doesn't exist yet. `tags`: only memories
+        carrying at least one of them (Hindsight's tags_match "any_strict": untagged ones excluded)."""
         body = {"query": query[:QUERY_MAX], "budget": "low", "max_tokens": self.max_tokens}
+        if tags:
+            body["tags"], body["tags_match"] = list(tags), "any_strict"
         reply = self._call("POST", self._bank_path(bank) + "/memories/recall", body, missing_ok=True)
         return [{"id": str(r["id"]), "text": r.get("text", "")} for r in (reply or {}).get("results", [])]
 
@@ -406,14 +409,14 @@ class Client:
         return sorted({str(b.get("bank_id") or b.get("id")) if isinstance(b, dict) else str(b)
                        for b in entries if not isinstance(b, dict) or b.get("bank_id") or b.get("id")})
 
-    def recall_many(self, banks: list[str], query: str, on_error=None) -> list[dict]:
+    def recall_many(self, banks: list[str], query: str, on_error=None, tags=None) -> list[dict]:
         """Recall banks independently, dedupe facts, and bound serialized cache size.
         The client's deadline and global outage breaker apply to the whole call;
         errors about a bank or request never hide results from other banks."""
         items, seen_ids, seen_text = [], set(), set()
         for bank in dict.fromkeys(banks):
             try:
-                recalled = self.recall(bank, query)
+                recalled = self.recall(bank, query, tags)
             except (HindsightError, HindsightUnavailable) as exc:
                 if on_error:
                     on_error(bank, exc)
@@ -470,19 +473,23 @@ class Client:
 
 def remember(board, cfg: dict, job: str, name: str, text: str, project: str | None = None,
              document_id: str | None = None, metadata: dict[str, str] | None = None,
-             create_bank: bool = False, synchronous: bool = False) -> str:
-    """Store one fact in the explicit project or general bank, tagged with job and agent; marks the agent as
-    having stored something. Returns the project. Raises HindsightUnavailable/HindsightError.
+             create_bank: bool = False, synchronous: bool = False, extra_tags=()) -> str:
+    """Store one fact in the explicit project or general bank, tagged ONLY with the job's subject tags
+    (swarm.learnings.stamp_tags, plus `extra_tags`: subjects, never ids); job and agent go into
+    the metadata. Marks the agent, and the job, as having
+    stored something. Returns the project. Raises HindsightUnavailable/HindsightError.
     `document_id`: stable across retries of the same fact (the spool passes its record's).
     `metadata`: provenance the caller knows (provenance.cli_metadata), merged under the four
     keys source, job, agent and project, which always win."""
     project = project or project_of(board.job_status(job), job, cfg)
-    Client(cfg).retain(bank_id(project), text, tags=["swarm", f"job:{job}", f"agent:{name}"],
+    from swarm import learnings
+    Client(cfg).retain(bank_id(project), text, tags=learnings.stamp_tags(board, job, extra_tags),
                        metadata={**(metadata or {}), "source": "swarm", "job": job, "agent": name,
                                  "project": project},
                        context=f"swarm job {job}", document_id=document_id,
                        create_bank=create_bank, synchronous=synchronous)
     board.record_remembered(name)
+    learnings.note_stored(board, job)
     return project
 
 

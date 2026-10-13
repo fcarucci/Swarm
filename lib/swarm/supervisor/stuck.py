@@ -153,6 +153,8 @@ def close_stuck_owned(board, cfg: dict, deadline: float | None = None, now=None)
             break
         if not board.close_agent(a.agent_key, STUCK_PREFIX + why, seen_before=a.last_contact_at):
             continue
+        from swarm import learnings
+        learnings.mark_ended(board, cfg, js.job, a, STUCK_PREFIX + why)   # durable, no LLM: the close harvests it
         try:
             lost.capture_final(board, cfg, js, a, deadline)
         except Exception as exc:

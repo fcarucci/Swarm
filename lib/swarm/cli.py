@@ -164,8 +164,7 @@ DEFAULTS = {
     "hindsight": {"url": "", "api_key_file": "", "timeout_seconds": 3,
                   "default_bank": "coding", "recall_banks": ["coding", "hermes"],
                   "recall_max_items": 8, "recall_max_chars": 1500, "recall_max_tokens": 1024,
-                  "recall_minutes": 15, "recall_start_seconds": 6.0, "remember_nudge_minutes": 20,
-                  "remember_max_chars": 1000, "retry_after_seconds": 60},
+                  "recall_start_seconds": 6.0, "remember_max_chars": 1000, "retry_after_seconds": 60},
 }
 
 
@@ -2785,15 +2784,33 @@ def _parser() -> argparse.ArgumentParser:
     rm.add_argument("--job", required=True); rm.add_argument("--as", dest="name", required=True)
     rm.add_argument("--project", help="default: the job's explicit project, else [hindsight] default_bank")
     rm.add_argument("--create-bank", action="store_true", help="explicitly create the target bank if missing")
-    rm.add_argument("fact", nargs="+")
-    le = sub.add_parser("learn", help="retain self-contained job learnings in an existing bank")
+    rm.add_argument("--tags", action="append", default=[], metavar="SUBJECTS",
+                    help="more subject tags for this memory (the job's own are always added); never ids or names")
+    rm.add_argument("--none", metavar="REASON",
+                    help="declare there is nothing durable to store from this run (satisfies the stop gate)")
+    rm.add_argument("fact", nargs="*")
+    le = sub.add_parser("learn", help="the job's learnings step: harvest unharvested agents, retain learnings")
     le.add_argument("--job"); le.add_argument("--bank", help="default: [hindsight] default_bank")
     le.add_argument("--list-banks", action="store_true", help="list existing Hindsight banks")
     le.add_argument("--create-bank", action="store_true", help="explicitly create the target bank if strictly necessary")
+    le.add_argument("--harvest", action="store_true",
+                    help="print the agents that ended without storing their learnings, with their transcripts")
+    le.add_argument("--from", dest="from_file", metavar="FILE", help="read the facts from FILE (one per line)")
+    le.add_argument("--none", metavar="REASON",
+                    help="the unharvested agents learned nothing durable: record the learnings step without facts")
+    le.add_argument("--tags", action="append", default=[], metavar="SUBJECTS",
+                    help="more subject tags for these learnings (the job's own are always added)")
     le.add_argument("facts", nargs="?", help="use - to read facts from stdin; one fact per nonempty line")
-    rc = sub.add_parser("recall", help="query configured recall_banks and any explicit job project")
+    tg = sub.add_parser("tags", help="show or change a job's memory subject tags")
+    tg.add_argument("--job", required=True)
+    tg.add_argument("--set", metavar="SUBJECTS", help="replace them, e.g. swarm,astro-loom")
+    tg.add_argument("--add", metavar="SUBJECTS"); tg.add_argument("--remove", metavar="SUBJECTS")
+    rc = sub.add_parser("recall", help="search project memory for any subject (all tags of the configured banks)")
     rc.add_argument("--job", required=True)
-    rc.add_argument("query", nargs="*", help="default: the job task or description")
+    rc.add_argument("--tags", metavar="SUBJECTS", help="narrow to memories with one of these subject tags")
+    rc.add_argument("--bank", action="append", metavar="BANK", help="narrow to these banks (default: recall_banks "
+                    "and the job's explicit project)")
+    rc.add_argument("query", nargs="*", help="what you want to know (default: the job's topic or task)")
     sp = sub.add_parser("spool", help="manage the spool of queued posts and memories")
     sp.add_argument("action", choices=["retry"],
                     help="retry: requeue memories parked as .stuck after 24 hours of failing")
@@ -2813,6 +2830,11 @@ def _parser() -> argparse.ArgumentParser:
     ac.add_argument("--session", help="bind to this host session id (default: the calling Claude Code or Codex session)")
     ac.add_argument("--project", help="explicit memory project (Hindsight bank); omitted: configured general banks "
                     "(1-64 letters, digits, spaces and . ' _ -)")
+    ac.add_argument("--tags", metavar="SUBJECTS",
+                    help="the job's memory subjects, e.g. swarm,astro-loom (default: the project, else the "
+                         "git repository; never the job name): the start recall filters on them and "
+                         "the job's memories carry them")
+    ac.add_argument("--topic", help="what the job is about: the start recall's query (default: the task)")
     ac.add_argument("--goal", help="what \"done\" means; one judge agent decides whether it is met, "
                                    "and completion waits for its met verdict; '-' reads it from stdin")
     ac.add_argument("--evidence-cmd", help="command to wait for external evidence before judging")
@@ -2851,6 +2873,8 @@ def _parser() -> argparse.ArgumentParser:
                     help="complete a job with a goal without the judge's met verdict (recorded as forced)")
     de.add_argument("--delete-bank", action="store_true",
                     help="delete an explicit project bank only after learnings are retained elsewhere")
+    de.add_argument("--no-learn", metavar="REASON",
+                    help="a person closes the job without its learnings step (nothing stored, agents unharvested)")
     vd = sub.add_parser("verdict", help="the job's judge records whether the goal is met (posted on the board)")
     vd.add_argument("--job", required=True)
     vd.add_argument("--as", dest="name",
@@ -3116,6 +3140,18 @@ def valid_session_id(session: str) -> bool:
     return isinstance(session, str) and SESSION_ID.fullmatch(session) is not None
 
 
+def _record_memory_scope(cfg: dict, args, explicit: list, cwd: str) -> None:
+    """The job's memory subjects and topic (swarm.learnings), after a drive activation. Never fails it."""
+    from swarm import learnings
+    from swarm.board import open_board
+    try:
+        with open_board(cfg) as board:
+            learnings.record_scope(board, args.job, learnings.derive_tags(args.project, cwd, explicit),
+                                   getattr(args, "topic", None))
+    except Exception as exc:
+        print(f"note: the job's memory subjects were not recorded ({_error_name(exc)})", file=sys.stderr)
+
+
 def cmd_activate(cfg: dict, args) -> int:
     from swarm.board import open_board
     from swarm import hosts, safefs
@@ -3132,6 +3168,12 @@ def cmd_activate(cfg: dict, args) -> int:
         except ValueError as exc:
             print(f"swarm activate: --project: {term_safe(exc)}", file=sys.stderr)
             return 2
+    from swarm import learnings
+    try:
+        explicit_tags = learnings.parse_tags(getattr(args, "tags", None))
+    except ValueError as exc:
+        print(term_safe(f"swarm activate: --tags: {exc}"), file=sys.stderr)
+        return 2
     marker = _marker(cfg, args.job)
     session = args.session or hosts.cli_session_id(os.environ)
     if session is not None and not valid_session_id(session):
@@ -3186,7 +3228,10 @@ def cmd_activate(cfg: dict, args) -> int:
     from swarm import drive_activate as _da
     args.goal = goal
     if _da.wants_drive(args):   # [A] a goal implies drive
-        return _da.cmd_activate_drive(cfg, args)
+        rc = _da.cmd_activate_drive(cfg, args)
+        if rc == 0:
+            _record_memory_scope(cfg, args, explicit_tags, args.workdir or os.getcwd())
+        return rc
     rc = _da.legacy_goal_check(args)
     if rc is not None:
         return rc
@@ -3198,6 +3243,8 @@ def cmd_activate(cfg: dict, args) -> int:
         board.open_job(args.job, args.description, task, session, os.environ.get("USER"),
                        project=args.project or "", goal=goal)
         board.set_job_data(args.job, "pipeline.started_at", board.now().isoformat())
+        learnings.record_scope(board, args.job, learnings.derive_tags(args.project, os.getcwd(), explicit_tags),
+                               getattr(args, "topic", None))
         from swarm.owners import JOB_DATA_KEY, owner_names
         names = ",".join(owner_names(cfg))
         board.set_job_data(args.job, JOB_DATA_KEY, names[:1900] or None)   # who the agents' questions for the person go to
@@ -3330,6 +3377,11 @@ def cmd_deactivate(cfg: dict, args) -> int:
         board.close()
         print(refusal, file=sys.stderr)
         return 1
+    if board is not None and js is not None and js.status in ("active", "paused"):
+        rc = _learnings_gate(cfg, board, js, args)
+        if rc:
+            board.close()
+            return rc
     if args.delete_bank:
         try:
             _delete_learned_bank(board, cfg, js, args.job)
@@ -3372,6 +3424,38 @@ def cmd_deactivate(cfg: dict, args) -> int:
         print(f"deactivated {args.job}; could not record status ({_error_name(exc)})",
               file=sys.stderr)
     _learning_instructions(args.job, learned=learned, closed=True)
+    return 0
+
+
+def _learnings_gate(cfg: dict, board, js, args) -> int:
+    """The mandatory learnings step of a close (swarm.learnings.close_blockers): refused (1) while agents are
+    unharvested or nothing was stored for this run, unless a PERSON passes --no-learn "<reason>" (the same
+    person gate as the other person-only actions: the requester's grant, or a confirmed tty outside any
+    agent host). The waiver is recorded on the job. 0: go ahead."""
+    from swarm import learnings
+    blockers = learnings.close_blockers(board, cfg, js)
+    if not args.no_learn:
+        if blockers:
+            print(f"not closing {js.job}: the learnings step is not done:\n- " + "\n- ".join(blockers),
+                  file=sys.stderr)
+            return 1
+        return 0
+    reason = " ".join(args.no_learn.split())
+    if len(reason) < 8:
+        print("swarm deactivate --no-learn: give the reason (8 characters or more)", file=sys.stderr)
+        return 2
+    how = getattr(args, "_person_how", None)
+    if not how:
+        from swarm import person
+        from swarm.drive_cli import board_key
+        try:
+            person.forget()
+            how = person.require("deactivate --no-learn", js.job, board_key=board_key(cfg), who=None)
+        except person.PersonRefused as exc:
+            print(term_safe(str(exc)), file=sys.stderr)
+            return 1
+    board.set_job_data(js.job, learnings.NO_LEARN_KEY, json.dumps(
+        {"by": how, "reason": reason[:300], "at": board.now().isoformat(), "blockers": len(blockers)}))
     return 0
 
 
@@ -3645,9 +3729,16 @@ def cmd_remember(cfg: dict, args) -> int:
     if not str((cfg.get("hindsight") or {}).get("url") or "").strip():
         print("project memory is off: set [hindsight] url in the swarm config", file=sys.stderr)
         return 1
-    from swarm import hindsight, provenance
+    from swarm import hindsight, provenance, learnings
     from swarm.board import open_board
     from swarm.spool import flush_spool, spool_memory
+    if args.none is not None:
+        return _remember_none(cfg, args)
+    try:
+        extra = learnings.parse_tags(",".join(args.tags))
+    except ValueError as exc:
+        print(term_safe(f"swarm remember: {exc}"), file=sys.stderr)
+        return 2
     text = " ".join(" ".join(args.fact).split())
     cap = int(cfg["hindsight"]["remember_max_chars"])
     truncated = len(text) > cap
@@ -3688,10 +3779,11 @@ def cmd_remember(cfg: dict, args) -> int:
                 return 1
             project = hindsight.remember(board, cfg, args.job, args.name, text, project,
                                          document_id=doc, metadata=meta,
-                                         create_bank=args.create_bank)
+                                         create_bank=args.create_bank, extra_tags=extra)
         except hindsight.HindsightUnavailable as exc:
             tag = queue(project)
             board.record_remembered(args.name)
+            learnings.note_stored(board, args.job)
             print(term_safe(f"queued (memory not reachable from here: {exc}); the swarm hooks store it "
                             f"once Hindsight answers.{tag}"))
             return 0
@@ -3701,6 +3793,7 @@ def cmd_remember(cfg: dict, args) -> int:
                 return 1
             tag = queue(project)  # the bank's trouble
             board.record_remembered(args.name)
+            learnings.note_stored(board, args.job)
             print(term_safe(f"queued (memory refused it for now: {exc}); the swarm hooks retry it.{tag}"))
             return 0
     print(term_safe(f'remembered in project "{project}"' + (f" (truncated to {cap} chars)" if truncated else "")
@@ -3708,12 +3801,92 @@ def cmd_remember(cfg: dict, args) -> int:
     return 0
 
 
+def _remember_none(cfg: dict, args) -> int:
+    """`swarm remember --none "<reason>"`: the agent declares it has nothing durable to store from this
+    run. Recorded on its agent row (what the stop gate reads) and posted on the board, so the others see
+    it; it stores nothing and does not count as the job having stored something."""
+    from swarm.board import open_board
+    reason = " ".join(str(args.none).split())
+    if args.fact:
+        print("swarm remember: --none takes no fact (store facts without it)", file=sys.stderr)
+        return 2
+    if len(reason) < 8:
+        print("swarm remember --none: say why there is nothing worth keeping (8 characters or more)",
+              file=sys.stderr)
+        return 2
+    try:
+        with open_board(cfg) as board:
+            board.record_remembered(args.name)
+            try:
+                board.post(args.job, args.name, ("no durable learnings: " + reason)[: board.message_cap()])
+            except Exception:
+                pass
+    except Exception as exc:
+        print(f"swarm remember --none: board not reachable ({_error_name(exc)}); retry", file=sys.stderr)
+        return 1
+    print(term_safe(f"recorded: {args.name} has no durable learnings to store ({reason})"))
+    return 0
+
+
+HARVEST_EXCERPT_CHARS = 4000   # of one unharvested agent's transcript, shown by `swarm learn --harvest`
+
+
+def _assistant_text(body: bytes, limit: int) -> str:
+    """The last `limit` characters of what the agent said (assistant text turns) in a JSONL transcript."""
+    said = []
+    for line in body.decode("utf-8", "replace").splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        msg = row.get("message") if isinstance(row, dict) else None
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        content = msg.get("content")
+        parts = [content] if isinstance(content, str) else [
+            c.get("text", "") for c in content or [] if isinstance(c, dict) and c.get("type") == "text"]
+        said += [" ".join(p.split()) for p in parts if p and p.strip()]
+    text = "\n".join(said)
+    return text[-limit:]
+
+
+def _learn_harvest(board, js, job: str) -> int:
+    from swarm import learnings
+    learnings.sweep(board, job, active_too=True)
+    pending = learnings.unharvested(board, job)
+    if not pending:
+        print(f"no unharvested agents on {job}")
+        return 0
+    print(f"{len(pending)} agent(s) of {job} ended without storing their learnings. Read what each did, distill "
+          f"the durable findings (root causes, settings and why, traps, measured numbers) into one self-contained "
+          f"fact per line, and retain them: `swarm learn --job {job} --bank BANK -` (stdin) or `--from FILE`; if "
+          f"none of them learned anything durable: `swarm learn --job {job} --none \"<why>\"`.")
+    for e in pending:
+        key, name = e.get("key"), e.get("name")
+        print(f"\n=== {term_safe(name)} (ended: {term_safe(e.get('why'))}; key {term_safe(key)})")
+        body = None
+        try:
+            body = board.transcript_body(job, key) if key else None
+        except Exception as exc:
+            print(f"(transcript unreadable: {_error_name(exc)})")
+        text = _assistant_text(body, HARVEST_EXCERPT_CHARS) if body else ""
+        if text:
+            print(term_safe(text))
+        else:
+            print(f"(no archived transcript text; read its board posts: `swarm read --job {job} --peek`)")
+        if key:
+            print(f"full transcript: swarm transcript show --job {job} --key {term_safe(key)}")
+    return 0
+
+
 def cmd_learn(cfg: dict, args) -> int:
-    """Retain one self-contained fact per stdin line with durable provenance.
-    Unlike remember, this never queues or truncates: success certifies a completed
-    retain, which is required before a disposable project bank may be deleted.
+    """The job's learnings step. Retain one self-contained fact per line (stdin `-` or --from FILE) with
+    durable provenance, or declare with --none that the unharvested agents learned nothing durable; either
+    clears the job's unharvested markers it covered (swarm.learnings.harvest) and is recorded. --harvest
+    prints those agents with their transcripts first. Unlike remember, this never queues or truncates:
+    success certifies a completed retain, which is required before a disposable project bank may be deleted.
     """
-    from swarm import hindsight, provenance, hosts
+    from swarm import hindsight, provenance, hosts, learnings
     from swarm.board import open_board
     from swarm.board.base import MemoryRef, valid_name
     if not hindsight.enabled(cfg):
@@ -3721,7 +3894,7 @@ def cmd_learn(cfg: dict, args) -> int:
         return 1
     client = hindsight.Client(cfg)
     if args.list_banks:
-        if args.job or args.bank or args.facts or args.create_bank:
+        if args.job or args.bank or args.facts or args.create_bank or args.harvest or args.none or args.from_file:
             print("swarm learn --list-banks cannot be combined with retain options", file=sys.stderr)
             return 2
         try:
@@ -3730,14 +3903,52 @@ def cmd_learn(cfg: dict, args) -> int:
             print(f"cannot list banks: {term_safe(exc)}", file=sys.stderr)
             return 1
         return 0
-    if not args.job or args.facts != "-":
-        print("usage: swarm learn --job JOB [--bank BANK] [--create-bank] -", file=sys.stderr)
+    usage = "usage: swarm learn --job JOB [--harvest] | [--bank BANK] [--create-bank] (- | --from FILE) | --none REASON"
+    sources = sum(1 for x in (args.facts == "-", bool(args.from_file), args.none is not None) if x)
+    if not args.job or (args.facts not in (None, "-")) or (sources != 1 and not args.harvest) or \
+            (args.harvest and sources):
+        print(usage, file=sys.stderr)
+        return 2
+    if args.harvest:
+        with open_board(cfg) as board:
+            js = board.job_status(args.job)
+            if js is None:
+                print(f"no such job: {term_safe(args.job)}", file=sys.stderr)
+                return 1
+            return _learn_harvest(board, js, args.job)
+    if args.none is not None:
+        reason = " ".join(args.none.split())
+        if len(reason) < 8:
+            print("swarm learn --none: say why nothing is worth keeping (8 characters or more)", file=sys.stderr)
+            return 2
+        with open_board(cfg) as board:
+            if board.job_status(args.job) is None:
+                print(f"no such job: {term_safe(args.job)}", file=sys.stderr)
+                return 1
+            learnings.sweep(board, args.job, active_too=True)
+            pending = learnings.unharvested(board, args.job)
+            learnings.harvest(board, args.job, _learn_by(), 0, reason, pending)
+        print(term_safe(f"learnings step recorded for {args.job}: nothing durable ({reason}); "
+                        f"{len(pending)} unharvested agent(s) covered"))
+        return 0
+    try:
+        extra = learnings.parse_tags(",".join(args.tags))
+    except ValueError as exc:
+        print(term_safe(f"swarm learn: {exc}"), file=sys.stderr)
         return 2
     bank = args.bank or cfg["hindsight"].get("default_bank", "coding")
     if not valid_name(bank):
         print("invalid bank: use 1-64 letters, digits, spaces and . ' _ -", file=sys.stderr)
         return 2
-    facts = [line.strip() for line in sys.stdin.read().splitlines() if line.strip()]
+    if args.from_file:
+        try:
+            raw = Path(args.from_file).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            print(f"cannot read {term_safe(args.from_file)}: {_error_name(exc)}", file=sys.stderr)
+            return 1
+    else:
+        raw = sys.stdin.read()
+    facts = [line.strip() for line in raw.splitlines() if line.strip()]
     cap = int(cfg["hindsight"]["remember_max_chars"])
     if not facts:
         print("no learnings supplied", file=sys.stderr)
@@ -3755,6 +3966,8 @@ def cmd_learn(cfg: dict, args) -> int:
             if js is None:
                 print(f"no such job: {term_safe(args.job)}", file=sys.stderr)
                 return 1
+            learnings.sweep(board, args.job, active_too=True)
+            pending = learnings.unharvested(board, args.job)   # what this step covers
             meta = {**provenance.cli_metadata(os.environ), "learning": "true"}
             name = "orchestrator"
             retained = []
@@ -3762,7 +3975,7 @@ def cmd_learn(cfg: dict, args) -> int:
                 doc = provenance.new_document_id()
                 hindsight.remember(board, learn_cfg, args.job, name, fact, bank,
                                    document_id=doc, metadata=meta, create_bank=args.create_bank,
-                                   synchronous=True)
+                                   synchronous=True, extra_tags=extra)
                 retained.append(doc)
             # A partial batch must not authorise deletion: publish the durable evidence
             # only after every fact in this invocation has been retained successfully.
@@ -3774,10 +3987,39 @@ def cmd_learn(cfg: dict, args) -> int:
                     session_id=hosts.cli_session_id(os.environ) or js.session_id,
                     tool_call_id=None, writer="swarm-learn"))
                 print(term_safe(f'learned in bank "{bank}" ' + provenance.output_tag(doc, bank)))
+            learnings.harvest(board, args.job, _learn_by(), len(retained), None, pending)
     except (hindsight.HindsightError, hindsight.HindsightUnavailable) as exc:
         print(f"learning not retained: {term_safe(exc)}; retry before deleting the project bank",
               file=sys.stderr)
         return 1
+    return 0
+
+
+def _learn_by() -> str:
+    from swarm import hosts
+    return f"{hosts.detect_cli_host(os.environ) or 'cli'}:{os.environ.get('USER') or 'person'}"[:60]
+
+
+def cmd_tags(cfg: dict, args) -> int:
+    """`swarm tags --job J [--set|--add|--remove SUBJECTS]`: the job's memory subject tags (swarm.learnings)."""
+    from swarm import learnings
+    from swarm.board import open_board
+    try:
+        new = {k: learnings.parse_tags(getattr(args, k)) for k in ("set", "add", "remove") if getattr(args, k)}
+    except ValueError as exc:
+        print(term_safe(f"swarm tags: {exc}"), file=sys.stderr)
+        return 2
+    with open_board(cfg) as board:
+        if board.job_status(args.job) is None:
+            print(f"no such job: {term_safe(args.job)}", file=sys.stderr)
+            return 1
+        tags = [t for t in (board.job_data(args.job).get(learnings.TAGS_KEY) or "").split(",") if t]
+        if new:
+            tags = new.get("set", tags) + new.get("add", [])
+            tags = [t for t in dict.fromkeys(tags) if t not in new.get("remove", [])][:learnings.MAX_TAGS]
+            board.set_job_data(args.job, learnings.TAGS_KEY, ",".join(tags) or None)
+        shown = tags or learnings.job_tags(board, args.job)
+    print(f"{args.job}: " + (", ".join(shown) if shown else "(no subject tags: its memories carry none)"))
     return 0
 
 
@@ -3787,12 +4029,20 @@ def cmd_recall(cfg: dict, args) -> int:
     if not hindsight.enabled(cfg):
         print("memory is off: set [hindsight] url in the swarm config", file=sys.stderr)
         return 1
+    from swarm import learnings
+    try:
+        tags = learnings.parse_tags(args.tags) if args.tags else None
+    except ValueError as exc:
+        print(term_safe(f"swarm recall: {exc}"), file=sys.stderr)
+        return 2
     with open_board(cfg, readers=True) as board:
         js = board.job_status(args.job)
-    banks = hindsight.recall_banks(cfg, js)
-    query = " ".join(args.query) or hindsight.recall_query(js, args.job)
+        query = " ".join(args.query) or learnings.job_topic(board, args.job, js)
+    # On demand: any subject the agent asks about, across every tag of the banks (only the automatic start
+    # recall is scoped to the job's subjects); --tags and --bank narrow it.
+    banks = [hindsight.bank_id(b) for b in args.bank] if args.bank else hindsight.recall_banks(cfg, js)
     items = hindsight.Client(cfg).recall_many(
-        banks, query, on_error=lambda bank, exc: print(
+        banks, query, tags=tags, on_error=lambda bank, exc: print(
             f'recall bank "{bank}" failed: {term_safe(exc)}', file=sys.stderr))
     text, _ = hindsight.format_memories(items, ", ".join(banks), cfg, "recalled memories")
     print(text or "(no memories)")
@@ -3841,6 +4091,7 @@ COMMANDS = {
     "remember": cmd_remember,
     "learn": cmd_learn,
     "recall": cmd_recall,
+    "tags": cmd_tags,
     "spool": lambda cfg, args: cmd_spool_retry(cfg),
     "snapshot": lambda cfg, args: cmd_snapshot(cfg, args),
     "tail": lambda cfg, args: cmd_tail(cfg, args.job, args.backlog, args.interval, not args.no_agents,

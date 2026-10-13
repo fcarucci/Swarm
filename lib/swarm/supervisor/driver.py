@@ -346,10 +346,26 @@ def _act(board, cfg, sup, led, snap, actions, now, start_runner, config_path, jd
         # hold, nothing and complete_land (terminalize step 0) need no action here
 
 
+def _with_learn(board, cfg, led, snap):
+    """The snapshot with `learn_pending` (swarm.learnings.learn_pending): only once a terminal goal or ruling
+    verdict of this generation is there, i.e. the job is about to close and its learnings step must run first.
+    Deterministic board reads, no LLM; a failure leaves it False (the close is never blocked by a read error)."""
+    gv = snap.goal_verdict
+    if gv is None or gv.verdict not in ("met", "unreachable") or gv.generation != snap.generation:
+        return snap
+    try:
+        from dataclasses import replace
+        from swarm import learnings
+        return replace(snap, learn_pending=learnings.learn_pending(board, cfg, led.job, gv.at))
+    except Exception as exc:
+        log.warning("learnings check of %s failed: %s", led.job, type(exc).__name__)
+        return snap
+
+
 def _plan(board, cfg, led, dcfg, now, m):
     """Snapshot, progress rule and the model's actions. A ruling that has just become due is recorded in
     the ledger first, so its action ids carry the due time as their trigger from the start."""
-    snap = m.snapshot.read(board, led, led.job, cfg=dcfg, now=now)
+    snap = _with_learn(board, cfg, led, m.snapshot.read(board, led, led.job, cfg=dcfg, now=now))
     m.exec.settle_progress(led, snap, now)
     actions = m.model.next_actions(snap, dcfg)
     if led.ruling_due_at is None and any(a.ruling for a in actions) and m.exec.note_ruling_due(led, now):

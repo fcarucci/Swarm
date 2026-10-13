@@ -1550,6 +1550,8 @@ def finish(cfg: dict, run: dict, outcome: str) -> bool:
                             b.agent_stopped(key)
                         else:
                             b.close_agent(key, f"limit:{outcome}")
+                            from swarm import learnings
+                            learnings.mark_ended(b, cfg, run["job"], a, f"limit:{outcome}")
                     a = next((x for x in b.agents(run["job"]) if x.agent_key == key), a)
                     js = b.job_status(run["job"])
                     if a is not None and js is not None:
