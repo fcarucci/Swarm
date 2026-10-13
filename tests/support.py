@@ -699,17 +699,46 @@ def memory_store_only(test):
     return wrapper
 
 
-def add_backend_variants(namespace: dict, *cases: type, skip: tuple = ("memory",)) -> None:
+OFFLINE_BACKENDS = ("memory", "sqlite", "file")
+
+
+def backend_selected(backend: str) -> bool:
+    """Whether this run covers `backend`'s copy of a contract test. A CI leg names its backend in
+    $SWARM_TEST_BACKEND (memory, sqlite or file) and runs only that backend's copy: the per-push
+    matrix has a leg for each, so every copy still runs once. Unset (a local run), or any other value
+    (postgres: that job runs everything the Postgres config enables), selects every backend."""
+    chosen = os.environ.get("SWARM_TEST_BACKEND", "")
+    return chosen not in OFFLINE_BACKENDS or chosen == backend
+
+
+def gate_backends(namespace: dict, **by_backend) -> None:
+    """Drop from `namespace` (the module's globals(), called after its last class) the hard-coded
+    per-backend copies of a contract that $SWARM_TEST_BACKEND does not select:
+    gate_backends(globals(), memory=[MemoryX], sqlite=[SqliteX], file=[FileX]). Subclasses made from a
+    dropped class keep working; only the loader stops seeing the dropped name."""
+    for backend, classes in by_backend.items():
+        assert backend in OFFLINE_BACKENDS, backend
+        for case in classes:
+            assert namespace.get(case.__name__) is case, f"{case.__name__} is not a class of the module"
+            if not backend_selected(backend):
+                del namespace[case.__name__]
+
+
+def add_backend_variants(namespace: dict, *cases: type, skip: tuple = ("memory",), own: str = "memory") -> None:
     """For every case class (a TestCase whose harness comes from `self.harness_factory(key)`) add to
     `namespace` (the module's globals()) one subclass per backend of drive_backends() not in `skip`
-    (the backend the case itself runs on), named <Case><Backend>."""
+    (the backend the case itself runs on, `own`), named <Case><Backend>. Only the backends
+    $SWARM_TEST_BACKEND selects (`backend_selected`) are added, and the case itself is dropped from
+    `namespace` when its own backend is not selected."""
     for case in cases:
         for backend, factory in drive_backends().items():
-            if backend in skip:
+            if backend in skip or not backend_selected(backend):
                 continue
             name = case.__name__ + backend.capitalize()
             namespace[name] = type(name, (case,), {"harness_factory": staticmethod(factory),
                                                    "__module__": namespace["__name__"]})
+        if not backend_selected(own) and namespace.get(case.__name__) is case:
+            del namespace[case.__name__]
 
 
 def e2e_harness(tmp: Path, name: str):

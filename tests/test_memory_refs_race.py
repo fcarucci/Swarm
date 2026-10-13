@@ -80,5 +80,11 @@ class PostgresRace(RaceBase, unittest.TestCase):
     harness_factory = staticmethod(lambda: PostgresHarness(os.environ["SWARM_TEST_CONFIG"]))
 
 
+from support import gate_backends  # noqa: E402
+
+# a CI leg runs only its own backend's copies ($SWARM_TEST_BACKEND); unset runs all
+gate_backends(globals(), sqlite=[SqliteRace], file=[FileRace])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -641,7 +641,7 @@ class IdleCase(Home):
 
 
 # IdleCase runs on sqlite; IdleCaseFile, and IdleCasePostgres with SWARM_TEST_CONFIG (CI's postgres job)
-add_backend_variants(globals(), IdleCase, skip=("memory", "sqlite"))
+add_backend_variants(globals(), IdleCase, skip=("memory", "sqlite"), own="sqlite")
 
 
 class MemoryIdle(Home):
@@ -1302,3 +1302,9 @@ class NoProcPsTests(unittest.TestCase):
         finally:
             for x in reversed(patches):
                 x.stop()
+
+
+from support import gate_backends  # noqa: E402
+
+# a CI leg runs only its own backend's copies ($SWARM_TEST_BACKEND); unset runs all
+gate_backends(globals(), memory=[MemoryIdle])

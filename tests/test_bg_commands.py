@@ -614,5 +614,11 @@ class WrapperEnvironmentTests(SqliteBoardDir, unittest.TestCase):
         self.assertEqual((r.outcome, r.exit_code), ("exited", 0))   # and it was recorded
 
 
+from support import gate_backends  # noqa: E402
+
+# a CI leg runs only its own backend's copies ($SWARM_TEST_BACKEND); unset runs all
+gate_backends(globals(), memory=[MemoryBg], sqlite=[SqliteBg], file=[FileBg])
+
+
 if __name__ == "__main__":
     unittest.main()

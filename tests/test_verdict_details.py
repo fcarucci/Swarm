@@ -538,5 +538,11 @@ class FixWorkerBriefTests(unittest.TestCase):
         self.assertNotIn("verdict show", respawn.brief(js, "J"))
 
 
+from support import gate_backends  # noqa: E402
+
+# a CI leg runs only its own backend's copies ($SWARM_TEST_BACKEND); unset runs all
+gate_backends(globals(), memory=[MemoryDetails, MemorySchema23], sqlite=[SqliteDetails, SqliteSchema23], file=[FileDetails, FileSchema23])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -301,5 +301,11 @@ class GoalTests(MoveEnv):
         self.assertEqual(self.cli("job", "B", "--goal", "  ")[0], 2)
 
 
+from support import gate_backends  # noqa: E402
+
+# a CI leg runs only its own backend's copies ($SWARM_TEST_BACKEND); unset runs all
+gate_backends(globals(), memory=[MemoryMove], sqlite=[SqliteMove], file=[FileMove])
+
+
 if __name__ == "__main__":
     unittest.main()

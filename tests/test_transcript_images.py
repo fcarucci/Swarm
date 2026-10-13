@@ -250,5 +250,11 @@ class PostgresSaveChecksImages(SaveChecksImagesContract, unittest.TestCase):
     harness_factory = staticmethod(lambda: PostgresHarness(os.environ["SWARM_TEST_CONFIG"]))
 
 
+from support import gate_backends  # noqa: E402
+
+# a CI leg runs only its own backend's copies ($SWARM_TEST_BACKEND); unset runs all
+gate_backends(globals(), memory=[MemorySaveChecksImages], sqlite=[SqliteSaveChecksImages], file=[FileSaveChecksImages])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -493,5 +493,11 @@ class PostgresUpgrade(unittest.TestCase):
         self.assertTrue(posted)
 
 
+from support import gate_backends  # noqa: E402
+
+# a CI leg runs only its own backend's copies ($SWARM_TEST_BACKEND); unset runs all
+gate_backends(globals(), memory=[MemoryCap], sqlite=[SqliteCap], file=[FileCap])
+
+
 if __name__ == "__main__":
     unittest.main()

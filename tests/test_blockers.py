@@ -685,3 +685,9 @@ class PostgresBlockerView(unittest.TestCase):
                 "UPDATE jobs SET status='failed', closed_by='auto', outcome='auto-closed: no progress for 1 h' WHERE job='j'"
             )
             self.assertEqual(b.job_status("j").status, "active")
+
+
+from support import gate_backends  # noqa: E402
+
+# a CI leg runs only its own backend's copies ($SWARM_TEST_BACKEND); unset runs all
+gate_backends(globals(), memory=[MemoryBlockers, MemoryMigration], sqlite=[SqliteBlockers, SqliteMigration], file=[FileBlockers, FileMigration])

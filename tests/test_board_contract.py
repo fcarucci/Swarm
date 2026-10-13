@@ -3294,5 +3294,11 @@ class SchemaVersionPin(unittest.TestCase):
         self.assertEqual(SCHEMA_VERSION, 25)
 
 
+from support import gate_backends  # noqa: E402
+
+# a CI leg runs only its own backend's copies ($SWARM_TEST_BACKEND); unset runs all
+gate_backends(globals(), memory=[MemoryBoardContract, MemorySchemaUpgrade], sqlite=[SqliteBoardContract, SqliteSchemaUpgrade, SqliteDriveClaimRace], file=[FileBoardContract, FileSchemaUpgrade])
+
+
 if __name__ == "__main__":
     unittest.main()

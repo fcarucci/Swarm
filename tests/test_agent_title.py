@@ -447,5 +447,11 @@ class TeamTitleTests(TeamEnv):
         self.assertTrue(mod.PIPELINE_TITLES["worker"].startswith("Eng"))
 
 
+from support import gate_backends  # noqa: E402
+
+# a CI leg runs only its own backend's copies ($SWARM_TEST_BACKEND); unset runs all
+gate_backends(globals(), memory=[MemoryTitleContract, MemorySchema20], sqlite=[SqliteTitleContract, SqliteSchema20], file=[FileTitleContract, FileSchema20])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -33,10 +33,40 @@ class DriveBackendsHelper(unittest.TestCase):
                 pass
         ns = {"__name__": "somemodule"}
         with mock.patch.dict(os.environ, {"SWARM_TEST_CONFIG": "/some/throwaway.toml"}):
+            os.environ.pop("SWARM_TEST_BACKEND", None)
             add_backend_variants(ns, Case)
         self.assertEqual(sorted(k for k in ns if k != "__name__"), ["CaseFile", "CasePostgres", "CaseSqlite"])
         self.assertTrue(all(issubclass(ns[k], Case) and ns[k].__module__ == "somemodule"
                             for k in ("CaseFile", "CasePostgres", "CaseSqlite")))
+
+    def test_a_leg_runs_only_its_own_backend_and_unset_runs_all(self):
+        class Case(unittest.TestCase):
+            def test_x(self):
+                pass
+        for chosen, expect in (("memory", ["Case"]), ("sqlite", ["CaseSqlite"]), ("file", ["CaseFile"]),
+                               ("postgres", ["Case", "CaseFile", "CaseSqlite"]), (None, ["Case", "CaseFile", "CaseSqlite"])):
+            with self.subTest(chosen=chosen), mock.patch.dict(os.environ, {"SWARM_TEST_CONFIG": ""}):
+                os.environ.pop("SWARM_TEST_BACKEND", None)
+                if chosen:
+                    os.environ["SWARM_TEST_BACKEND"] = chosen
+                ns = {"__name__": "somemodule", "Case": Case}
+                add_backend_variants(ns, Case)
+                self.assertEqual(sorted(k for k in ns if k != "__name__"), expect)
+
+    def test_gate_backends_drops_the_unselected_hard_coded_copies(self):
+        class A(unittest.TestCase):
+            pass
+
+        class B(unittest.TestCase):
+            pass
+        for chosen, expect in (("memory", ["A"]), ("sqlite", ["B"]), (None, ["A", "B"])):
+            with self.subTest(chosen=chosen), mock.patch.dict(os.environ):
+                os.environ.pop("SWARM_TEST_BACKEND", None)
+                if chosen:
+                    os.environ["SWARM_TEST_BACKEND"] = chosen
+                ns = {"A": A, "B": B}
+                support.gate_backends(ns, memory=[A], sqlite=[B])
+                self.assertEqual(sorted(ns), expect)
 
     def test_postgres_harness_refuses_to_run_without_a_test_config(self):
         with mock.patch.dict(os.environ):

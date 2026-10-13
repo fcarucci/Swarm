@@ -704,5 +704,11 @@ class PostgresPureReadTests(unittest.TestCase):
         self.assertEqual(boards[0].change_mode, "push")
 
 
+from support import gate_backends  # noqa: E402
+
+# a CI leg runs only its own backend's copies ($SWARM_TEST_BACKEND); unset runs all
+gate_backends(globals(), memory=[MemoryProperty], sqlite=[SqliteProperty], file=[FileProperty])
+
+
 if __name__ == "__main__":
     unittest.main()

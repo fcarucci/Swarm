@@ -228,5 +228,11 @@ class PostgresEventWake(unittest.TestCase):
         self.assertEqual(len(out[0]), 1)
 
 
+from support import gate_backends  # noqa: E402
+
+# a CI leg runs only its own backend's copies ($SWARM_TEST_BACKEND); unset runs all
+gate_backends(globals(), memory=[MemoryEvents], sqlite=[SqliteEvents], file=[FileEvents])
+
+
 if __name__ == "__main__":
     unittest.main()
