@@ -36,10 +36,13 @@ class Seat:
 
     def hook(self, event: str, **extra):
         payload = {"session_id": self.sid, "cwd": os.getcwd(), **extra}
-        if os.environ.get("SWARM_SEAT_BROKER") and os.name != "nt":
-            # a jailed seat (Task 20): Claude runs the plugin's hook entry, which hands the hook to the seat's
-            # broker outside the jail (the board, the ledger and the receipts are not reachable from inside)
-            argv = [os.path.join(os.path.dirname(self.swarm), "swarm-hook"), "--host", "claude", event]
+        if os.environ.get("SWARM_SEAT_BROKER"):
+            # a drive seat (Task 20): Claude runs the plugin's hook entry, which hands the hook to the seat's
+            # broker outside the seat (jailed: the board, the ledger and the receipts are not reachable; best-effort,
+            # macOS and Windows: HOME/USERPROFILE are the seat's scratch home, so a hook run here would write its
+            # receipts and state there, where the driver never looks). Windows: the entry is swarm-hook.cmd.
+            entry = "swarm-hook.cmd" if os.name == "nt" else "swarm-hook"
+            argv = [os.path.join(os.path.dirname(self.swarm), entry), "--host", "claude", event]
         else:
             argv = [sys.executable, "-m", "swarm.cli", "hook", "--host", "claude", event]
         r = subprocess.run(argv, input=json.dumps(payload), capture_output=True, text=True, timeout=120)
