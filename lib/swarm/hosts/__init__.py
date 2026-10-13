@@ -63,7 +63,7 @@ def _proc_parent(pid: int) -> tuple[int, list[str]] | None:
     except (OSError, ValueError):
         return None
     try:
-        out = subprocess.run(["ps", "-o", "ppid=,args=", "-p", str(pid)], capture_output=True,
+        out = subprocess.run([compat.ps_path(), "-o", "ppid=,args=", "-p", str(pid)], capture_output=True,
                              text=True, timeout=2).stdout.strip()
         ppid, _, args = out.partition(" ")
         return int(ppid), args.split()

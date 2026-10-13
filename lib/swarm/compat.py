@@ -50,6 +50,17 @@ def setup_stdio() -> None:
                 pass
 
 
+def ps_path() -> str:
+    """`ps` from the system directories, never looked up through PATH: process ancestry, start times and group
+    members decide who may act, and a `ps` planted on PATH could answer anything (macOS reads them all
+    through ps). /bin/ps on macOS and Linux."""
+    for d in ("/bin", "/usr/bin"):
+        p = os.path.join(d, "ps")
+        if os.path.isfile(p) and os.access(p, os.X_OK):
+            return p
+    return "/bin/ps"
+
+
 def node() -> str:
     """The host name (os.uname().nodename on POSIX)."""
     if IS_WINDOWS:

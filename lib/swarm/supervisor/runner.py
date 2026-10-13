@@ -358,7 +358,7 @@ def _ps_members(pgid: int, want: str) -> list[int] | None:
     when `ps -E` (its environment, readable for this user's own processes) carries `want`. None when ps
     cannot be run or read (the caller then knows nothing)."""
     try:
-        out = subprocess.run(["ps", "-A", "-o", "pid=,pgid=,stat="], capture_output=True, text=True, timeout=5)
+        out = subprocess.run([compat.ps_path(), "-A", "-o", "pid=,pgid=,stat="], capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
         return None
     if out.returncode != 0:
@@ -371,7 +371,7 @@ def _ps_members(pgid: int, want: str) -> list[int] | None:
         if int(parts[1]) != pgid or parts[2].startswith("Z"):
             continue
         try:
-            env = subprocess.run(["ps", "-E", "-ww", "-p", parts[0], "-o", "command="], capture_output=True,
+            env = subprocess.run([compat.ps_path(), "-E", "-ww", "-p", parts[0], "-o", "command="], capture_output=True,
                                  text=True, timeout=5)
         except (OSError, subprocess.SubprocessError):
             return None

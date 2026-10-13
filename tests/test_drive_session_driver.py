@@ -481,7 +481,6 @@ class LifecycleTests(Home):
             sd.hook_session_start(self.cfg, io.StringIO(json.dumps({"session_id": "sess-1"})))
         popen.assert_not_called()
 
-    @unittest.skipIf(sys.platform == "darwin", "macOS CI: start/main return early here; tracked for 0.3.1")
     def test_a_driver_takes_the_requesters_recorded_path_and_config_never_the_starters(self):
         self.held_job(session="sess-1")       # recorded with this test's PATH and config
         recorded = sd.launch_env("sess-1")
@@ -516,7 +515,6 @@ class LifecycleTests(Home):
             rc, seen = self.run_main(payload)
         self.assertEqual((rc, seen), (1, {}))
 
-    @unittest.skipIf(sys.platform == "darwin", "macOS CI: start/main return early here; tracked for 0.3.1")
     def test_the_module_entry_rebuilds_its_environment_from_the_record(self):
         self.held_job(session="sess-1")
         rec = sd.launch_env("sess-1")
@@ -935,7 +933,8 @@ class GroupPresenceTests(unittest.TestCase):
         listing = f"{p.pid} {p.pid} S\n999999 {p.pid} Z\n7 7 S\n"
 
         def ps(argv, **kw):
-            if argv[:2] == ["ps", "-A"]:
+            self.assertTrue(os.path.isabs(argv[0]), "ps must never be looked up through PATH")
+            if argv[1] == "-A":
                 return SimpleNamespace(returncode=0, stdout=listing)
             pid = argv[argv.index("-p") + 1]
             env = f"{runner.RUN_ENV}={tag}" if pid == str(p.pid) else "OTHER=1"
@@ -1266,3 +1265,40 @@ class ReviewRetryAndCoalesceTests(Home):
         t.join(10)
         self.assertGreaterEqual(n, 1)
         self.assertLessEqual(n, 5, f"{n} passes for one burst of 50")
+
+
+@unittest.skipUnless(POSIX and os.path.exists("/bin/ps"), "needs /bin/ps")
+class NoProcPsTests(unittest.TestCase):
+    """macOS has no /proc: start tokens, ancestry and group members come from `ps`, which must be the system's
+    /bin/ps and never one found through the caller's PATH (the macOS CI failure of 8351649: the tests' planted
+    PATH made `ps` unfindable, so start() refused the session and main() took the caller for a seat; a ps planted
+    on PATH could also lie about who is a seat)."""
+
+    def no_proc(self):
+        import builtins
+        real_open, real_isdir = builtins.open, os.path.isdir
+
+        def fake_open(path, *a, **k):
+            if str(path).startswith("/proc/"):
+                raise FileNotFoundError(path)
+            return real_open(path, *a, **k)
+        return [mock.patch("builtins.open", fake_open),
+                mock.patch("os.path.isdir", lambda p: False if str(p).startswith("/proc") else real_isdir(p)),
+                mock.patch.dict(os.environ, {"PATH": "/planted/bin"})]
+
+    def test_a_planted_path_does_not_blind_the_macos_paths(self):
+        from swarm import compat, hosts
+        p = idle_process()
+        self.addCleanup(stop, p)
+        patches = self.no_proc()
+        for x in patches:
+            x.start()
+        try:
+            self.assertEqual(compat.ps_path(), "/bin/ps")
+            self.assertIsNotNone(procwatch.start_token(p.pid))
+            info = hosts._proc_parent(p.pid)
+            self.assertEqual(info[0], os.getpid())
+            self.assertFalse(procwatch.under_runner(p.pid))
+        finally:
+            for x in reversed(patches):
+                x.stop()
