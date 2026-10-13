@@ -1,0 +1,35 @@
+name: Profile tests
+
+# Measurement only: per-test wall time for the offline unit suite (memory backend, Python 3.13).
+# Manual dispatch only; never runs on push or pull request.
+on:
+  workflow_dispatch:
+
+jobs:
+  profile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-postgres.txt
+
+      - name: Time every test (backend=memory)
+        env:
+          SWARM_TEST_BACKEND: memory
+        run: |
+          set -o pipefail
+          python -B tests/_timing_runner.py test-times.csv </dev/null 2>&1 | tee test.log
+
+      - name: Upload per-test timings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-times
+          path: test-times.csv
+          if-no-files-found: error
