@@ -169,7 +169,7 @@ if stale; then
     if lock_stale "$LOCK" && lock_steal; then
       continue
     fi
-    i=$((i + 1)); [ "$i" -gt 300 ] && { echo "swarm: $LOCK is held (not stale: its owner is running, or it is younger than $STALE_MIN minutes); remove it if you are sure no build is running, then retry" >&2; exit 1; }
+    i=$((i + 1)); [ "$i" -gt "${SWARM_LOCK_WAIT_TRIES:-300}" ] && { echo "swarm: $LOCK is held (not stale: its owner is running, or it is younger than $STALE_MIN minutes); remove it if you are sure no build is running, then retry" >&2; exit 1; }
     sleep 1
   done
   trap lock_release EXIT

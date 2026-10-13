@@ -244,8 +244,9 @@ class LauncherVenvTests(unittest.TestCase):
             self.assertIn(f"rc={rc}", res.stdout, (age, res.stderr))
 
     def assert_waits_on_a_live_lock(self, lock: Path):
-        with self.assertRaises(subprocess.TimeoutExpired):
-            self.launch(self.v22, timeout=3)
+        res = self.launch(self.v22, timeout=30, SWARM_LOCK_WAIT_TRIES="0")   # one look at the lock, then give up
+        self.assertEqual(res.returncode, 1, res.stderr)
+        self.assertIn("is held (not stale", res.stderr)
         self.assertTrue(lock.is_dir(), "a live lock is left alone")
         self.assertFalse((self.venv_of(self.v22) / ".swarm-requirements").exists(), "no build while it is held")
 
