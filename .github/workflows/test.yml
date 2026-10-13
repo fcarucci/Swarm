@@ -4,24 +4,37 @@ on:
     branches: ["perf/frink"]
   workflow_dispatch:
 jobs:
-  timing:
-    runs-on: ${{ matrix.os }}
-    defaults: {run: {shell: bash}}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - {os: ubuntu-latest, backend: sqlite}
-          - {os: ubuntu-latest, backend: memory}
-          - {os: windows-latest, backend: sqlite}
-          - {os: windows-latest, backend: memory}
+  linux-full:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: "3.13", cache: pip}
       - run: pip install -r requirements.txt -r requirements-postgres.txt
       - name: timed suite
-        env: {SWARM_TEST_BACKEND: "${{ matrix.backend }}", PYTHONUTF8: "1"}
-        run: python -B tests/_frink_timing.py "$GITHUB_WORKSPACE/t-${{ matrix.os }}-${{ matrix.backend }}.csv" </dev/null 2>&1 | tail -30
+        env: {SWARM_TEST_BACKEND: sqlite}
+        run: python -B tests/_frink_timing.py "$GITHUB_WORKSPACE/t-linux-sqlite.csv" </dev/null 2>&1 | tail -5
       - uses: actions/upload-artifact@v4
-        with: {name: "t-${{ matrix.os }}-${{ matrix.backend }}", path: "t-*.csv"}
+        with: {name: t-linux-sqlite, path: "t-*.csv"}
+  win-diag:
+    runs-on: windows-latest
+    defaults: {run: {shell: bash}}
+    strategy:
+      fail-fast: false
+      matrix:
+        cell: [memory, sqlite, sqlite-syncoff]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.13", cache: pip}
+      - run: pip install -r requirements.txt -r requirements-postgres.txt
+      - name: timed subset
+        env:
+          PYTHONUTF8: "1"
+          CELL: ${{ matrix.cell }}
+        run: |
+          export SWARM_TEST_BACKEND=${CELL%%-*}
+          [ "$CELL" = sqlite-syncoff ] && export SWARM_PERF_SQLITE_SYNC=OFF
+          python -B tests/_frink_timing.py "$GITHUB_WORKSPACE/t-win-$CELL.csv" test_board_contract test_drive_pass test_sqlite test_seat_cli test_hooks_cli </dev/null 2>&1 | tail -5
+      - uses: actions/upload-artifact@v4
+        with: {name: "t-win-${{ matrix.cell }}", path: "t-*.csv"}

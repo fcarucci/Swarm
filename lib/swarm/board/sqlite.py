@@ -420,6 +420,9 @@ def _connect(cfg: dict, create: bool = False, read_only: bool = False) -> sqlite
                                check_same_thread=False)
         conn.execute(f"PRAGMA busy_timeout = {_busy_ms(cfg)}")
         conn.execute("PRAGMA foreign_keys = ON")
+        _sync = os.environ.get("SWARM_PERF_SQLITE_SYNC")   # perf/frink measurement knob only
+        if _sync:
+            conn.execute(f"PRAGMA synchronous = {_sync}")
         return conn
     except (sqlite3.Error, OSError) as exc:
         raise BoardUnavailable(str(exc)) from exc
