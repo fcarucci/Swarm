@@ -7,8 +7,8 @@
                    configured) the project's memories
   PreToolUse    -> inject what is new for this agent: unread messages (paged, with a count of
                    what is left), roster changes (a short diff, a full roster every
-                   roster_refresh_minutes) and, with Hindsight, the start recall again only if it
-                   ran out of time at the join (no periodic recall); nothing if nothing is new. Routes and
+                   roster_refresh_minutes); never a memory recall (the one recall is at the join);
+                   nothing if nothing is new. Routes and
                    joins agents whose job was not known at SubagentStart, and agents already
                    running at activation only with --adopt-running; records the agent as
                    running with this tool in flight
@@ -760,8 +760,8 @@ def _recall(board, cfg: dict, agent_id: str, job: str, seen, heading: str, *, st
     """The start recall: the configured banks, filtered to the job's subject tags (swarm.learnings.job_tags,
     the job's subjects; none: no start recall) and queried with the job's topic (else its task), so an agent is
     never shown memories of unrelated systems. Shows facts this agent has not seen and records them.
-    Hindsight trouble is logged and skipped (the recall still counts), except a recall that ran out of
-    time: that one is not recorded, so the agent's next turn tries again (Hindsight is usually warm)."""
+    Hindsight trouble (an outage, a timeout) is logged and the recall still counts: it happens exactly once,
+    at the join, and is never retried; the agent recalls on demand (`swarm recall`) after that."""
     from swarm import hindsight, learnings
     js = board.job_status(job)
     data = board.job_data(job)
@@ -786,21 +786,11 @@ def _recall(board, cfg: dict, agent_id: str, job: str, seen, heading: str, *, st
     items = hindsight.Client(bounded).recall_many(
         banks, learnings.job_topic(board, job, js, data), on_error=failed,
         tags=tags)
-    if not items and any(isinstance(exc, hindsight.HindsightOutOfTime) for exc in errors):
-        return None  # retry a cold start recall on the next turn
+    # recorded whatever happened (a timeout included): the start recall happens exactly once; after it the
+    # agent recalls on demand
     text, shown = hindsight.format_memories([i for i in items if i["id"] not in seen], project, cfg, heading)
     board.record_memory_recall(agent_id, shown)
     return text
-
-
-def _memory_turn(board, cfg: dict, agent_id: str, job: str, state) -> list[str]:
-    """No periodic recall and no timed reminder: the one recall is the start recall, retried here only
-    while it has not completed (a cold Hindsight ran out of time at the join). Agents recall on demand
-    (`swarm recall "<query>"`) and store findings as they confirm them; the stop gate makes it mandatory."""
-    if not _memory_on(cfg) or state is None or state.memory_recalled_at is not None:
-        return []
-    text = _recall(board, cfg, agent_id, job, set(state.memory_seen), "what the configured memory banks know")
-    return [text] if text else []
 
 
 def _memory_stop(board, cfg: dict, agent_id: str) -> bool:
@@ -836,8 +826,15 @@ def _memory_stop(board, cfg: dict, agent_id: str) -> bool:
             f"{_q(job)} --as {_q(me.name)} \"<fact>\"`, or declare none with `{_bin()} remember --job "
             f"{_q(job)} --as {_q(me.name)} --none \"<reason>\"`."})
         return False
-    except Exception as exc:   # never at the cost of the stop itself
+    except Exception as exc:   # never at the cost of the stop itself, but it stays harvestable
         _log_error("memory stop", agent_id, exc)
+        try:
+            job = board.route(agent_id).member_job
+            me = next((a for a in board.agents(job) if a.agent_key == agent_id), None) if job else None
+            if me is not None:
+                learnings.mark_unharvested(board, job, agent_id, me.name, "stop gate failed: unverified")
+        except Exception as exc2:
+            _log_error("memory stop mark", agent_id, exc2)   # the close sweep re-checks it from the board
         return True
 
 
@@ -1808,7 +1805,6 @@ def _on_turn(board, agent_id: str, name: str, job: str, cfg: dict, sid: str | No
         parts.append(_silence_nudge(board, agent_id, job, name, state, cfg))
         if not moved:
             parts.append(_roster_update(board, agent_id, job, roster, state, cfg))
-        parts += _memory_turn(board, cfg, agent_id, job, state)
     parts.extend(_agent_plugin_lines(board, cfg, job, agent_id))
     events = _agent_events(board, agent_id, job, name, roster)
     parts.append(events)

@@ -12,6 +12,7 @@ Keys (job_data, `[a-z0-9_.-]`, at most 64 characters):
   memory.u.<hash>    an UNHARVESTED agent: it ended without the normal stop (killed, dead, lost, closed by
                      the supervisor) and without storing a memory or declaring it had none. JSON
                      {"key", "name", "why", "at"}. `swarm learn` removes it once it has run over the job.
+  memory.declared_at the last `swarm remember --none` of an agent of the job
   memory.harvest     the last learnings step: JSON {"at", "by", "agents", "facts", "none"}
 
 The closing rules (`close_blockers`): a job may close only when no agent is unharvested and something was
@@ -29,6 +30,7 @@ TAGS_KEY = "memory.tags"
 TOPIC_KEY = "memory.topic"
 STORED_KEY = "memory.stored_at"
 HARVEST_KEY = "memory.harvest"
+DECLARED_KEY = "memory.declared_at"
 NO_LEARN_KEY = "memory.no_learn"
 UNHARVESTED_PREFIX = "memory.u."
 TAG = re.compile(r"[a-z0-9][a-z0-9._-]{0,39}")
@@ -66,8 +68,18 @@ def _ts(text) -> _dt.datetime | None:
 # are provenance and go into the memory's METADATA.
 
 # What a tag must never look like: a namespaced id, a number, a date, a long hex or uuid run.
-ID_LIKE = re.compile(r"(?:job|agent|session|run|host|seat|key|id|user|parent)[:=].*|.*\d{4}-\d{2}-\d{2}.*|"
-                     r".*[0-9a-f]{8,}.*|\d+|.*:.*")
+ID_WORDS = ("job", "agent", "session", "run", "host", "seat", "key", "id", "uid", "uuid", "user", "parent",
+            "pid", "build", "pr", "issue", "ticket", "commit", "sha", "task", "launch", "attempt", "gen", "rev")
+ID_LIKE = re.compile(r".*[:=/].*"                                   # <prefix>:<x> (and = or /)
+                     r"|(?:" + "|".join(ID_WORDS) + r")(?:[-_.].*)?"  # <id word>, <id word>-<x>: run-7, session-xyz
+                     r"|.*(?:^|[-_.])\d+(?:[-_.]|$).*"                # a numeric part: run-7, 2026, build-12-x
+                     r"|.*\d{4}-?\d{2}-?\d{2}.*"                     # a date
+                     r"|.*[0-9a-f]{8,}.*"                              # a hex or uuid run
+                     r"|.*[0-9a-f]{4,}[-_][0-9a-f]{4,}.*")             # uuid-like groups
+
+
+class ScopeUnreadable(Exception):
+    """The job's subject tags could not be read: hindsight.remember refuses (a HindsightError, not stored)."""
 
 
 def check_tag(tag: str) -> str:
@@ -134,8 +146,8 @@ def record_scope(board, job: str, tags: list[str], topic: str | None) -> None:
 
 
 def job_tags(board, job: str, data: dict | None = None, js=None) -> list[str]:
-    """The job's subject tags (the start recall's filter, what its memories are stamped with); with none
-    recorded, its explicit project's name. Never the job's own name."""
+    """The job's subject tags (the start recall's filter, what its memories are stamped with). Only when they
+    were never set: its explicit project's name. A set emptied on purpose stays empty. Never the job's name."""
     data = board.job_data(job) if data is None else data
     tags = []
     for t in (data.get(TAGS_KEY) or "").split(","):
@@ -143,6 +155,8 @@ def job_tags(board, job: str, data: dict | None = None, js=None) -> list[str]:
             tags.append(check_tag(t)) if t else None
         except ValueError:
             continue
+    if TAGS_KEY in data:
+        return list(dict.fromkeys(tags))    # set (an explicitly emptied set stays empty)
     if not tags:
         js = board.job_status(job) if js is None else js
         project = _subject(getattr(js, "project", None))
@@ -163,8 +177,9 @@ def stamp_tags(board, job: str, extra=()) -> list[str]:
     `--tags`), each checked once more. Never a job, agent, session, run or other id."""
     try:
         scope = job_tags(board, job)
-    except Exception:
-        scope = []
+    except Exception as exc:     # fail closed: a memory is never stored without its job's subjects
+        raise ScopeUnreadable(f"the subject tags of job {job} cannot be read now ({type(exc).__name__}); "
+                              f"nothing was stored, retry") from exc
     out = []
     for t in [*scope, *extra]:
         try:
@@ -191,6 +206,19 @@ def _start(js) -> _dt.datetime | None:
 def stored_this_run(board, js, data: dict | None = None) -> bool:
     data = board.job_data(js.job) if data is None else data
     at, start = _ts(data.get(STORED_KEY)), _start(js)
+    return at is not None and (start is None or at >= start)
+
+
+def note_declared(board, job: str) -> None:
+    """An agent of the job declared it has no durable learnings (`swarm remember --none`)."""
+    board.set_job_data(job, DECLARED_KEY, _now(board).isoformat())
+
+
+def declared_this_run(board, js, data: dict | None = None) -> bool:
+    """A declaration of this run counts as the job's learnings being accounted for (with every agent
+    harvested or declared, which close_blockers checks separately)."""
+    data = board.job_data(js.job) if data is None else data
+    at, start = _ts(data.get(DECLARED_KEY)), _start(js)
     return at is not None and (start is None or at >= start)
 
 
@@ -239,13 +267,17 @@ def mark_unharvested(board, job: str, agent_key: str, name: str, why: str) -> bo
     return bool(board.set_job_data(job, key, value[:1900]))
 
 
-def sweep(board, job: str, *, active_too: bool = False) -> list[str]:
-    """Mark every agent of the job that ended without the normal stop (any state but completed: killed,
-    dead, lost, closed by the supervisor or a driver) and stored nothing. `active_too` (the job is being
-    closed): the agents still active are ending now, without a stop of their own, and count as well. A
-    derived-dead agent (silent past dead_minutes) counts always. Returns the names newly marked."""
+def sweep(board, job: str, *, active_too: bool = True) -> list[str]:
+    """Mark every agent of this run of the job that has no evidence of its learnings: it stored nothing and
+    declared nothing (remembered_at), and no learnings step ran after everything it did. Every ended agent
+    is checked against that evidence, a normally completed one too (its stop gate may have failed). The
+    agents still active count as well (`active_too`, the default: a close or a learnings step covers what
+    they did so far; one that keeps working past it is checked again at the next close). Returns the names
+    newly marked."""
     marked = []
     data = board.job_data(job)
+    js = board.job_status(job)
+    start = _start(js)
     rows = board.agents(job)
     resumed = {a.resume_of for a in rows if a.resume_of}   # a replacement carried its run on
     try:
@@ -255,15 +287,15 @@ def sweep(board, job: str, *, active_too: bool = False) -> list[str]:
     for a in rows:
         if not _counts(a) or _hkey(a.agent_key) in data or a.agent_key in resumed:
             continue
+        if start is not None and a.joined_at is not None and a.joined_at < start:
+            continue                       # an earlier run of the job (closed before this one opened)
         if harvested is not None and a.last_contact_at is not None and harvested >= a.last_contact_at:
             continue                       # a learnings step ran after everything it did
-
         ended = a.ended_at is not None
-        if ended and a.status == "completed":
-            continue                       # the normal stop: its own gate ran (SubagentStop)
         if not ended and not active_too and a.status != "dead":
             continue
-        why = (a.left_reason or a.status) if ended else ("dead" if a.status == "dead" else "job closing")
+        why = ((a.left_reason or a.status) if ended
+               else "dead" if a.status == "dead" else "still working at close")
         if mark_unharvested(board, job, a.agent_key, a.name, why):
             marked.append(a.name)
     return marked
@@ -323,10 +355,12 @@ def close_blockers(board, cfg: dict, js, *, active_too: bool = True) -> list[str
         out.append(f"{len(pending)} agent(s) ended without storing their learnings and are unharvested "
                    f"({names}): run `swarm learn --job {js.job} --harvest`, then retain what they learned "
                    f"with `swarm learn --job {js.job} --bank BANK -` (or `--none \"<reason>\"`)")
-    if not stored_this_run(board, js, data):
-        out.append(f"nothing has been stored in project memory for this run of {js.job}: store the job's "
-                   f"learnings (`swarm learn --job {js.job} --bank BANK -`), or a person closes it with "
-                   f"`--no-learn \"<reason>\"`")
+    if not (stored_this_run(board, js, data) or harvested_since(board, js.job, _start(js), data)
+            or declared_this_run(board, js, data)):
+        out.append(f"nothing has been stored in project memory for this run of {js.job}, and no learnings step "
+                   f"or declaration says there is nothing: store the job's learnings (`swarm learn --job "
+                   f"{js.job} --bank BANK -`), record that there are none (`swarm learn --job {js.job} --none "
+                   f"\"<reason>\"`), or a person closes it with `--no-learn \"<reason>\"`")
     return out
 
 
@@ -335,6 +369,6 @@ def learn_pending(board, cfg: dict, job: str, since: _dt.datetime | None) -> boo
     terminal verdict) or left agents unharvested. Sweeps the ended agents first."""
     if not applies(cfg):
         return False
-    sweep(board, job)
+    sweep(board, job, active_too=True)
     data = board.job_data(job)
     return bool(unharvested(board, job, data)) or not harvested_since(board, job, since, data)

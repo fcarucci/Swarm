@@ -55,9 +55,38 @@ class MemoryTagsTests(HindsightEnv):
         self.assertNotIn("job:J", item["tags"])
         self.assertNotIn(SESSION, item["tags"])
 
-    def test_no_subject_tags_falls_back_to_the_project_name(self):
-        self.job_tags("--set", "")
+    def test_tags_never_set_fall_back_to_the_project_name(self):
+        with self.board() as b:
+            b.set_job_data("J", "memory.tags", None)      # never set (a job from before subject tags)
         self.assertEqual(self.remember()["tags"], ["proj"])
+
+    def test_an_emptied_set_stays_empty(self):
+        self.job_tags("--set", "")
+        self.assertEqual(self.remember()["tags"], [])
+
+    def test_removing_the_last_tag_stays_removed(self):
+        self.assertEqual(self.job_tags("--set", "proj")[0], 0)
+        self.assertEqual(self.remember()["tags"], ["proj"])
+        self.assertEqual(self.job_tags("--remove", "proj")[0], 0)
+        self.assertEqual(self.remember()["tags"], [])
+
+    def test_id_like_words_are_refused_as_tags(self):
+        for tag in ("run-7", "session-xyz", "job", "agent-homer", "build-12", "2026-10-13", "a1b2c3d4e5",
+                    "x:y", "3f2a9c1e-0b7d"):
+            with self.subTest(tag=tag):
+                self.assertRaises(ValueError, learnings.check_tag, tag)
+                rc, _, err = self.cli("remember", "--job", "J", "--as", "Homer Simpson", "--tags", tag, "f")
+                self.assertEqual(rc, 2, err)
+        for tag in ("swarm", "astro-loom", "coder-box", "home-assistant", "pg16"):
+            self.assertEqual(learnings.check_tag(tag), tag)
+
+    def test_an_unreadable_scope_refuses_the_memory(self):
+        n = len(self.retained())
+        with mock.patch.object(learnings, "job_tags", side_effect=RuntimeError("board read failed")):
+            rc, out, err = self.cli("remember", "--job", "J", "--as", "Homer Simpson", "a fact")
+        self.assertEqual(rc, 1, (out, err))
+        self.assertIn("cannot be read", err)
+        self.assertEqual(len(self.retained()), n)          # never stored untagged
 
     def test_the_job_name_and_agent_name_are_never_tags(self):
         item = self.remember("--tags", "j,astro-loom")   # the job J's name, from the agent's --tags

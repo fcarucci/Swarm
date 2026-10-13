@@ -3415,8 +3415,14 @@ def cmd_deactivate(cfg: dict, args) -> int:
     except Exception as exc:
         print(f"deactivated {args.job}; could not record status ({_error_name(exc)})",
               file=sys.stderr)
-    _learning_instructions(args.job, learned=learned, closed=True)
+    if not _lifecycle_on(cfg):   # with the memory life cycle, the gate above already enforced the step
+        _learning_instructions(args.job, learned=learned, closed=True)
     return 0
+
+
+def _lifecycle_on(cfg: dict) -> bool:
+    from swarm import learnings
+    return learnings.applies(cfg)
 
 
 def _reap_closed_job(board, job: str) -> None:

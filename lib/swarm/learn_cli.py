@@ -15,7 +15,8 @@ from swarm.cli import _error_name, term_safe
 def remember_none(cfg: dict, args) -> int:
     """`swarm remember --none "<reason>"`: the agent declares it has nothing durable to store from this
     run. Recorded on its agent row (what the stop gate reads) and posted on the board, so the others see
-    it; it stores nothing and does not count as the job having stored something."""
+    it, and on the job (memory.declared_at). It stores nothing."""
+    from swarm import learnings
     from swarm.board import open_board
     reason = " ".join(str(args.none).split())
     if args.fact:
@@ -28,6 +29,7 @@ def remember_none(cfg: dict, args) -> int:
     try:
         with open_board(cfg) as board:
             board.record_remembered(args.name)
+            learnings.note_declared(board, args.job)
             try:
                 board.post(args.job, args.name, ("no durable learnings: " + reason)[: board.message_cap()])
             except Exception:
@@ -106,7 +108,8 @@ def cmd_learn(cfg: dict, args) -> int:
         return 1
     client = hindsight.Client(cfg)
     if args.list_banks:
-        if args.job or args.bank or args.facts or args.create_bank or args.harvest or args.none or args.from_file:
+        # --job is accepted (a drive seat's broker always adds its own job), and ignored
+        if args.bank or args.facts or args.create_bank or args.harvest or args.none or args.from_file:
             print("swarm learn --list-banks cannot be combined with retain options", file=sys.stderr)
             return 2
         try:
@@ -245,7 +248,7 @@ def job_tags(board, cfg: dict, args) -> int:
                   file=sys.stderr)
             return 2
         if tags != stored:
-            board.set_job_data(job, learnings.TAGS_KEY, ",".join(tags) or None)
+            board.set_job_data(job, learnings.TAGS_KEY, ",".join(tags))   # "" = emptied on purpose
             who = os.environ.get("USER") or "person"
             board.post(job, "swarm", term_safe(f"subject tags of {job} changed by {who}: "
                        f"{', '.join(stored) or '(none)'} -> {', '.join(tags) or '(none)'}")[:900])

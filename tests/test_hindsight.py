@@ -266,7 +266,7 @@ class MemoryTests(HindsightEnv):
 
     def test_slow_hindsight_is_cut_off_by_the_recall_budget(self):
         # The recall's own budget (not Hindsight being down) ends the wait, so there is no
-        # unreachable marker; the join recall is retried on the next turn, bounded again.
+        # unreachable marker; the start recall happened, once: the next turn does not retry it.
         self.enable(timeout_seconds=0.5, recall_start_seconds=0.5, retry_after_seconds=60)
         from swarm import hindsight
         clock, recalls = ManualClock(), []
@@ -286,7 +286,7 @@ class MemoryTests(HindsightEnv):
             ctx = self.start()
             self.assertNotIn("[swarm memory] what", ctx)
             self.turn()
-        self.assertEqual(len(recalls), 2)  # no unreachable breaker; the next turn retried
+        self.assertEqual(len(recalls), 1)  # no unreachable breaker, and no retry: exactly one start recall
         self.assertRegex(self.error_log.read_text(), r"memory agent-1: HindsightOutOfTime: ")
 
     def test_api_key_never_printed_on_errors(self):
@@ -330,7 +330,9 @@ class ColdRecallTests(HindsightEnv):
         self.assertEqual(hooks._start_recall_seconds({"hindsight": {"recall_start_seconds": 60}}),
                          hooks.HOOK_RECALL_MAX_SECONDS)
 
-    def test_start_recall_that_runs_out_of_time_is_retried_on_the_next_turn(self):
+    def test_start_recall_that_runs_out_of_time_is_not_retried(self):
+        """Exactly one automatic recall: a start recall that ran out of time is recorded as done, and later
+        turns never recall; the agent asks with `swarm recall` instead."""
         self.enable(timeout_seconds=10, recall_start_seconds=5)
         self.fake.add_memory("coding", "late fact")
         import threading
@@ -344,7 +346,11 @@ class ColdRecallTests(HindsightEnv):
         self.assertRegex(self.error_log.read_text(), r"memory agent-1: HindsightOutOfTime: ")
         release.set()
         self.fake.gates.clear()
-        self.assertIn("late fact", assert_finishes(self, self.turn))
+        with self.board() as b:
+            self.assertIsNotNone(b.sync_state("agent-1").memory_recalled_at)
+        before = len(self.fake.calls("POST", "/memories/recall"))
+        self.assertNotIn("late fact", assert_finishes(self, self.turn))
+        self.assertEqual(len(self.fake.calls("POST", "/memories/recall")), before)
 
 
 class FailureScopeTests(HindsightEnv):

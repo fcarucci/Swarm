@@ -154,7 +154,7 @@ class SeatAllowTest(SeatHomeCase):
                   "who", "status"):
             self.assertIn(f"Bash(swarm {c}:*)", allow)
         self.assertIn("Bash(make test:*)", allow)
-        self.assertEqual(len(allow), 1 + 13)                         # nothing broader
+        self.assertEqual(len(allow), 1 + 16)                         # nothing broader (13 + remember, recall, learn)
         self.assertFalse(any(r in ("Bash", "Bash(*)", "Bash(swarm:*)") for r in allow))
         if os.name == "posix":
             self.assertEqual(os.stat(path).st_mode & 0o777, 0o400)

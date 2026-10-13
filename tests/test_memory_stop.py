@@ -68,8 +68,12 @@ class MemoryStopTests(HindsightEnv):
         with self.board() as b:
             self.assertEqual(len(learnings.unharvested(b, "J")), 1)
 
-    def test_a_gate_error_never_blocks_the_stop(self):
+    def test_a_gate_error_never_blocks_the_stop_and_leaves_the_agent_unharvested(self):
         with mock.patch.object(learnings, "_counts", side_effect=RuntimeError("boom")):
             out = self.stop()
         self.assertFalse(self.blocked(out), out)
         self.assertIsNotNone(self.status().ended_at)
+        with self.board() as b:
+            marks = learnings.unharvested(b, "J")
+        self.assertEqual([m["key"] for m in marks], ["agent-1"])
+        self.assertIn("unverified", marks[0]["why"])

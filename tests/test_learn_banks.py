@@ -174,7 +174,7 @@ class LearnBanksTests(HindsightEnv):
         self.assertEqual(self.cli('remember', '--job', 'J', '--as', 'orchestrator', 'verdict was met')[0], 0)
         rc, out, err = self.cli('deactivate', '--job', 'J')
         self.assertEqual(rc, 0, err)
-        self.assertIn('best-matching EXISTING bank', out)
+        self.assertNotIn('best-matching EXISTING bank', out)   # the gate enforced the step: no reminder
 
     def test_cli_recall_general_and_project_with_bank_error(self):
         self.fake.add_memory('coding', 'General fact')

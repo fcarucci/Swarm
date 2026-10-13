@@ -18,7 +18,9 @@ Ledger conventions this module writes, for the readers of the ledger (the snapsh
   * `watermarks["close_rejected"]` counts the rejected closes; `watermarks["rejected:<candidate>"] = 1`
     marks a goal verdict whose candidate was rejected by the closing gate: that verdict is no longer
     terminal and the goal judge reruns on the new candidate.
-  * `watermarks["qdone:<blocker id>"] = 1` marks a question whose default the driver has applied."""
+  * `watermarks["qdone:<blocker id>"] = 1` marks a question whose default the driver has applied.
+  * `watermarks[LEARN_HOLD]` (the verdict's receipt id, written by the pass) holds a terminal verdict for its
+    learnings step: no deadline closes the job meanwhile."""
 from __future__ import annotations
 
 import datetime as dt
@@ -43,6 +45,7 @@ DEFAULTS = {"max_wall_hours": 24, "ruling_deadline_minutes": 120, "close_deadlin
             "question_expiry": "4h"}
 _CANCEL_BY = "cancel_by:"                      # watermark: a person asked to cancel while a close was under way
 _HOPEN = "hopen:"                           # watermark: an intent that was open when the halt began
+LEARN_HOLD = "learn.hold"                   # watermark: a terminal verdict waits for the learnings step (driver)
 _GEN = re.compile(r"gen(\d+)\|")
 
 
@@ -355,6 +358,10 @@ def enforce_deadlines(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks |
     ledger-first (then on the board, if it can be now) and starts terminalization. Skips halted jobs.
     True when it did (begin_terminal refuses while an outcome is already pending)."""
     if led.terminal is not None or led.halted is not None:
+        return False
+    if LEARN_HOLD in led.watermarks and led.terminal_intent is None:
+        # a receipted MET or UNREACHABLE is held for its learnings step (swarm.learnings): elapsed time neither
+        # harvests the agents nor waives the step, so no deadline closes it; the learner seat or a person does
         return False
     cause = _deadline_cause(cfg, led, now)
     if cause is None:

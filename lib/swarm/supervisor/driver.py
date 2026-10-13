@@ -349,7 +349,7 @@ def _act(board, cfg, sup, led, snap, actions, now, start_runner, config_path, jd
 def _with_learn(board, cfg, led, snap):
     """The snapshot with `learn_pending` (swarm.learnings.learn_pending): only once a terminal goal or ruling
     verdict of this generation is there, i.e. the job is about to close and its learnings step must run first.
-    Deterministic board reads, no LLM; a failure leaves it False (the close is never blocked by a read error)."""
+    Deterministic board reads, no LLM; a failed read keeps the step pending (fail closed: never a close past it)."""
     try:
         gv = snap.goal_verdict
         if gv is None or gv.verdict not in ("met", "unreachable") or gv.generation != snap.generation:
@@ -358,14 +358,36 @@ def _with_learn(board, cfg, led, snap):
         from swarm import learnings
         return replace(snap, learn_pending=learnings.learn_pending(board, cfg, led.job, gv.at))
     except Exception as exc:
+        # fail closed: an unverified learnings step stays pending (the close waits; the learner seat is
+        # launched or awaited), never a close past it
         log.warning("learnings check of %s failed: %s", led.job, type(exc).__name__)
-        return snap
+        try:
+            from dataclasses import replace
+            return replace(snap, learn_pending=True)
+        except Exception:
+            return snap
+
+
+def _note_learn_hold(led, snap, m) -> None:
+    """Ledger first: while a receipted terminal verdict waits for the learnings step, the ledger says so
+    (watermark LEARN_HOLD = the verdict's receipt id), so the ledger-only deadline dispatcher
+    (driver_life.enforce_deadlines) never turns a MET held for its learnings into a mechanical UNREACHABLE.
+    Cleared once the step is done (the close follows) or the verdict is no longer terminal."""
+    key = m.life.LEARN_HOLD
+    held = bool(getattr(snap, "learn_pending", False))
+    gv = getattr(snap, "goal_verdict", None)
+    rid = getattr(gv, "receipt_id", None) or 1
+    if held and led.watermarks.get(key) != rid:
+        _mutate(led, lambda l: l.watermarks.__setitem__(key, rid))
+    elif not held and key in led.watermarks:
+        _mutate(led, lambda l: l.watermarks.pop(key, None))
 
 
 def _plan(board, cfg, led, dcfg, now, m):
     """Snapshot, progress rule and the model's actions. A ruling that has just become due is recorded in
     the ledger first, so its action ids carry the due time as their trigger from the start."""
     snap = _with_learn(board, cfg, led, m.snapshot.read(board, led, led.job, cfg=dcfg, now=now))
+    _note_learn_hold(led, snap, m)
     m.exec.settle_progress(led, snap, now)
     actions = m.model.next_actions(snap, dcfg)
     if led.ruling_due_at is None and any(a.ruling for a in actions) and m.exec.note_ruling_due(led, now):

@@ -485,7 +485,11 @@ def remember(board, cfg: dict, job: str, name: str, text: str, project: str | No
     from swarm import learnings
     # a job or agent named like a subject tag (`swarm activate --job swarm`) must not become one: those are metadata
     names = {str(job).lower(), str(name).lower()}
-    tags = [t for t in learnings.stamp_tags(board, job, extra_tags) if t not in names]
+    try:
+        stamped = learnings.stamp_tags(board, job, extra_tags)
+    except learnings.ScopeUnreadable as exc:
+        raise HindsightError(str(exc)) from exc       # fail closed: refused, never stored untagged
+    tags = [t for t in stamped if t not in names]
     Client(cfg).retain(bank_id(project), text, tags=tags,
                        metadata={**(metadata or {}), "source": "swarm", "job": job, "agent": name,
                                  "project": project},

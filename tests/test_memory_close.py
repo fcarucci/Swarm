@@ -62,11 +62,7 @@ class CloseGateTests(HindsightEnv):
         with self.board() as b:
             self.assertEqual(b.job_data("J").get("memory.harvest") is not None, True)
             self.assertFalse([k for k in b.job_data("J") if k.startswith("memory.u.")])
-        # the run stored nothing, so the close still needs a memory or a person's waiver
-        rc, out, err = self.cli("deactivate", "--job", "J")
-        self.assertEqual(rc, 1, (out, err))
-        self.assertIn("nothing has been stored", err)
-        self.assertEqual(self.cli("remember", "--job", "J", "--as", "orchestrator", "a fact stored after")[0], 0)
+        # a recorded learnings step that found nothing durable accounts for the run: no memory or waiver needed
         rc, out, err = self.cli("deactivate", "--job", "J")
         self.assertEqual(rc, 0, (out, err))
         self.assertEqual(self.status(), "completed")
@@ -77,6 +73,36 @@ class CloseGateTests(HindsightEnv):
         rc, out, err = self.cli("learn", "--job", "J", "--harvest")
         self.assertEqual(rc, 0, err)
         self.assertIn("worker", out + err)
+
+    def test_all_agents_declaring_none_lets_the_close_through(self):
+        a, b = self.join("worker"), self.join("reviewer")
+        for name in (a, b):
+            rc, out, err = self.cli("remember", "--job", "J", "--as", name, "--none", "only renamed files, nothing durable")
+            self.assertEqual(rc, 0, err)
+        for key in ("worker", "reviewer"):
+            with self.board() as bd:
+                bd.agent_stopped(key)
+        rc, out, err = self.cli("deactivate", "--job", "J")
+        self.assertEqual(rc, 0, (out, err))
+        self.assertEqual(self.status(), "completed")
+
+    def test_a_completed_agent_without_evidence_is_still_checked_at_close(self):
+        """A normal stop whose gate did not run (or failed) is not assumed harvested: the close sweep checks
+        every ended agent against its stored/none evidence."""
+        name = self.join("worker")
+        self.assertEqual(self.cli("remember", "--job", "J", "--as", "orchestrator", "a fact")[0], 0)
+        with self.board() as b:
+            b.agent_stopped("worker")
+        rc, out, err = self.cli("deactivate", "--job", "J")
+        self.assertEqual(rc, 1, (out, err))
+        self.assertIn(name, err)
+
+    def test_a_still_active_worker_is_included_in_the_close_check(self):
+        name = self.join("worker")
+        self.assertEqual(self.cli("remember", "--job", "J", "--as", "orchestrator", "a fact")[0], 0)
+        rc, out, err = self.cli("deactivate", "--job", "J")
+        self.assertEqual(rc, 1, (out, err))
+        self.assertIn(name, err)
 
 
 # --- the drive learner seat (driver_model._learn_first): a terminal verdict closes only after the step ----------
@@ -139,6 +165,38 @@ class LearnSeatProtocolTests(unittest.TestCase):
         self.assertIn("--none=nothing durable came out of this run", argv)
         self.assertEqual(argv[0:1], ["learn"])
 
+    def test_the_learner_prompt_command_sequence_goes_through_the_broker(self):
+        """Every `swarm learn` the learner prompt asks for parses on the seat side, validates with the seat's
+        own job filled in by the broker, and builds a CLI argv the CLI's own parser accepts."""
+        import os
+        import tempfile
+        from swarm import cli, seatproto
+        with tempfile.TemporaryDirectory(dir=os.path.dirname(__file__)) as d:
+            facts = os.path.join(d, "facts.txt")
+            with open(facts, "w") as fh:
+                fh.write("one durable fact\n")
+            for argv in (["learn", "--list-banks"], ["learn", "--harvest"],
+                         ["learn", "--bank", "coding", "--from", "facts.txt"],
+                         ["learn", "--none", "nothing durable came out of this run"]):
+                with self.subTest(argv=argv):
+                    req = seatproto.parse_cli(argv, d)
+                    cmd, fields = seatproto.validate(req, "J")
+                    built = seatproto.build_argv(cmd, fields, key="k", name="n", file_path=lambda c: facts)
+                    ns = cli._parser().parse_args(built)
+                    self.assertEqual((ns.cmd, ns.job), ("learn", "J"))
+
+    def test_a_seat_may_run_learn_remember_and_recall(self):
+        """The seat's settings allow the memory commands (seathome.SEAT_ALLOW): a learner's `swarm learn
+        --harvest`, `--from` and `--none`, and every seat's `swarm remember` (the stop gate) are not denied."""
+        import fnmatch
+        from swarm.supervisor import seathome
+        rules = [r[len("Bash("):-1].replace(":*", "*") for r in seathome.SEAT_ALLOW]
+        for cmd in ("swarm learn --harvest", "swarm learn --bank coding --from facts.txt",
+                    "swarm learn --none nothing durable here", "swarm learn --list-banks",
+                    "swarm remember --none nothing worth keeping", "swarm recall why did it fail"):
+            with self.subTest(cmd=cmd):
+                self.assertTrue(any(fnmatch.fnmatchcase(cmd, r) for r in rules), cmd)
+
     def test_learn_prompt_names_the_harvest_and_the_retain_steps(self):
         from types import SimpleNamespace
         from swarm.supervisor import prompts
@@ -146,3 +204,43 @@ class LearnSeatProtocolTests(unittest.TestCase):
         self.assertIn("swarm learn --job J --harvest", out)
         self.assertIn("--from FILE", out)
         self.assertIn("--none", out)
+
+
+class DriverLearnFailClosedTests(unittest.TestCase):
+    """A failed learnings read keeps the step pending; a verdict held for its learnings is never closed by a
+    deadline (the ledger-only dispatcher reads the hold the pass wrote)."""
+
+    def test_a_driver_read_failure_keeps_learn_pending(self):
+        from unittest import mock
+        from types import SimpleNamespace
+        from swarm import learnings
+        from swarm.supervisor import driver
+        snap = F.snap(goal_verdict=MET)
+        with mock.patch.object(learnings, "learn_pending", side_effect=RuntimeError("board down")):
+            out = driver._with_learn(None, {}, SimpleNamespace(job="J"), snap)
+        self.assertTrue(out.learn_pending)
+        (a,) = dm.next_actions(out, ARTIFEXT_CFG)
+        self.assertNotEqual(a.kind, "close")
+
+    def test_the_pass_records_the_hold_and_clears_it_when_done(self):
+        from types import SimpleNamespace
+        from swarm.supervisor import driver, driver_life
+        led = SimpleNamespace(watermarks={}, save=lambda: None)
+        m = SimpleNamespace(life=driver_life)
+        driver._note_learn_hold(led, F.snap(goal_verdict=MET, learn_pending=True), m)
+        self.assertIn(driver_life.LEARN_HOLD, led.watermarks)
+        driver._note_learn_hold(led, F.snap(goal_verdict=MET, learn_pending=False), m)
+        self.assertNotIn(driver_life.LEARN_HOLD, led.watermarks)
+
+    def test_a_deadline_never_closes_a_verdict_held_for_its_learnings(self):
+        import datetime as dt
+        from types import SimpleNamespace
+        from swarm.supervisor import driver_life
+        old = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=30)).isoformat()
+        led = SimpleNamespace(terminal=None, halted=None, terminal_intent=None, watermarks={driver_life.LEARN_HOLD: 3},
+                              ruling_due_at=old, activated_at=old, halted_total_seconds=0, budgets={},
+                              save=lambda: (_ for _ in ()).throw(AssertionError("nothing may be written")))
+        now = dt.datetime.now(dt.timezone.utc)
+        self.assertIsNotNone(driver_life._deadline_cause({}, led, now))      # the deadline has passed
+        self.assertFalse(driver_life.enforce_deadlines(None, {}, led, now))
+        self.assertIsNone(led.terminal_intent)

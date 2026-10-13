@@ -2515,16 +2515,18 @@ recall_banks = ["coding", "hermes"]
   about): `swarm activate --tags swarm,astro-loom`, changed at any time and in any job state with
   `swarm job tags --job J --add T / --remove T / --set T,U` (no flag lists them; every change is
   posted on the board). Without `--tags` a job gets its explicit project's name, else its git
-  repository's name. Every `swarm remember` and `swarm learn` reads the job's tags when it runs
+  repository's name; a set emptied on purpose (`--set ""`, removing the last tag) stays empty. Every `swarm remember` and `swarm learn` reads the job's tags when it runs
   and stamps exactly those, plus any given with `--tags`. The job name, agent, session, host and
   time go into the memory's metadata (`source=swarm`, `job`, `agent`, `project`, provenance),
   never into tags: unique tags defeat Hindsight's consolidation dedup and slow recall. A tag that
-  looks like an id (`job:`, `agent:`, `session:`, any `x:y`, a date, a hex id, a number) is refused.
+  looks like an id (any `x:y`, an id word such as `run`, `session`, `job`, `agent` alone or as
+  `run-7`/`session-xyz`, a numeric part, a date, a hex or uuid run) is refused. If the job's tags
+  cannot be read, `swarm remember` refuses the memory rather than store it untagged.
 - **When memories are recalled:** once, when an agent joins: the configured banks filtered to the
   job's subject tags (Hindsight `tags_match` `any_strict`: untagged memories and other subjects are
   left out), queried with the job's topic (`--topic`, else task, else description), under
-  `[swarm memory]`, capped by `recall_max_items` and `recall_max_chars`. A job with no subject tags
-  gets no start recall. After that nothing is pushed: an agent asks with
+  `[swarm memory]`, capped by `recall_max_items` and `recall_max_chars`. It happens exactly once:
+  one that times out is recorded and never retried. A job with no subject tags gets no start recall. After that nothing is pushed: an agent asks with
   `swarm recall --job J "<anything>"`, which searches every subject of the configured banks
   (`--tags T` or `--bank B` narrow it).
 - **Mandatory at agent end:** when an agent ends normally (SubagentStop), it must have stored at
@@ -2533,8 +2535,9 @@ recall_banks = ["coding", "hermes"]
   blocks the stop once with that instruction, then lets it go. An agent that ends abnormally
   (closed stuck, dead, lost, over a limit) is marked UNHARVESTED on the job (job data
   `memory.u.*`), by the supervisor or at close, with no LLM call.
-- **Mandatory at job close:** `swarm deactivate` is refused while an agent is unharvested or
-  nothing was stored for this run of the job. The closing seat runs the learnings step:
+- **Mandatory at job close:** `swarm deactivate` is refused while an agent is unharvested (every
+  agent of the run is checked against its evidence, a completed or still-active one too) or the run
+  has neither a stored memory, nor a recorded learnings step, nor an agent's `--none` declaration. The closing seat runs the learnings step:
   `swarm learn --job J --harvest` prints each unharvested agent with its transcript, then
   `swarm learn --job J --bank BANK -` (or `--from FILE`) retains the distilled facts, or
   `swarm learn --job J --none "<reason>"` records that they learned nothing durable; either clears
@@ -2544,8 +2547,9 @@ recall_banks = ["coding", "hermes"]
   or UNREACHABLE verdict is there, the driver launches its `learner` seat (an ordinary ledger
   intent, so a crashed driver resumes it) and closes only after the step is recorded. If the
   learner used `max_attempts` without finishing, the job holds (it never closes past the step)
-  until a person runs `swarm learn` or `swarm deactivate --no-learn`. The drive loop makes no LLM
-  call.
+  until a person runs `swarm learn` or `swarm deactivate --no-learn`; while a verdict is held for
+  its learnings no deadline closes the job (the ledger records the hold), and a learnings check that
+  fails keeps the step pending. The drive loop makes no LLM call.
 - **Failure:** one `timeout_seconds` timeout per call. Only a sign that Hindsight itself can't
   be reached (a connection failure, a timeout, or a 502/503/504 from a proxy in front of it) is
   logged to the hook error log and marks all of Hindsight unreachable for `retry_after_seconds`
