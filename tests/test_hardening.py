@@ -909,16 +909,13 @@ from test_hindsight import HindsightEnv  # noqa: E402
 
 class BoundedRecallTests(HindsightEnv):
     def test_a_stalled_resolver_during_a_per_tool_recall_is_cut_off(self):
+        """The only per-tool recall left is a start recall that has not completed (no periodic recall): with
+        the resolver stalled, the join and the next turn are cut off by their budgets and the hook carries on."""
         release = threading.Event()
         self.addCleanup(release.set)
-        self.enable()
+        self.enable(url=self.fake.url.replace("127.0.0.1", "hindsight.test"), recall_start_seconds=1)
         self.fake.add_memory("coding", "old fact")
         self.cli("activate", "--job", "J")
-        self.assertIn("old fact", self.start())
-        self.enable(url=self.fake.url.replace("127.0.0.1", "hindsight.test"))
-        self.backdate("agent-1", memory_recalled_at=16)             # a recall is due
-        someone = self.peer()
-        self.cli("post", "--job", "J", "--as", someone, "hello")
         import socket
         real = socket.getaddrinfo
 
@@ -927,13 +924,16 @@ class BoundedRecallTests(HindsightEnv):
                 release.wait(120)
             return real(host, *a, **k)
 
-        recalls = len(self.fake.calls("POST", "/memories/recall"))
         with mock.patch("socket.getaddrinfo", side_effect=stalled):
+            self.assertNotIn("old fact", assert_finishes(self, self.start))
+            someone = self.peer()
+            self.cli("post", "--job", "J", "--as", someone, "hello")
+            recalls = len(self.fake.calls("POST", "/memories/recall"))
             ctx = assert_finishes(self, self.turn)
         self.assertFalse(release.is_set())
         self.assertLessEqual(swarm_hooks.HOOK_RECALL_SECONDS, 2)
         self.assertIn(f"{someone}: hello", ctx)                        # the hook carried on
-        self.assertNotIn("[swarm memory] new memories", ctx)
+        self.assertNotIn("old fact", ctx)
         self.assertEqual(len(self.fake.calls("POST", "/memories/recall")), recalls)
         self.assertFalse((self.spool_dir / ".hindsight-unreachable").exists())
         self.assertIn("out of time", self.error_log.read_text())
@@ -963,6 +963,8 @@ _PATH_HELPERS = {"write_preserving", "append_private", "create_exclusive"}   # s
 # sandbox-writable place. A new plain call in a gated module fails the gate until it goes
 # through safefs or is reviewed here; an entry that no longer matches fails it too.
 REVIEWED = {
+    ("cli.py", "cmd_learn", ".read_text"): "swarm learn --from FILE: a file the caller names (a seat's goes "
+                                            "through the broker, which reads it in the jail); read only",
     ("bootstrap.py", "launcher_target", ".read_text"): "~/.local/bin/swarm: no sandbox writes there",
     ("bootstrap.py", "ensure_launcher", ".mkdir"): "~/.local/bin (the launcher)",
     ("bootstrap.py", "prune_pycache", ".rmdir"): "the launchers' own 0700 bytecode cache, outside every sandbox root; symlinks never followed",

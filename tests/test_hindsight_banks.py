@@ -57,17 +57,18 @@ class GeneralBanksTests(HindsightEnv):
         self.assertLess(len(items), 10)
         self.assertEqual(items[-1]['text'], str(len(items) - 1) + '\\"' * 900)
 
-    def test_periodic_recall_uses_all_banks_and_output_bounds(self):
+    def test_start_recall_uses_all_banks_and_output_bounds_and_nothing_follows(self):
         self.enable(recall_max_items=2, recall_max_chars=35)
-        self.fake.add_memory('coding', 'old fact')
-        self.cli('activate', '--job', 'J')
-        self.assertIn('old fact', self.start())
-        self.fake.add_memory('hermes', 'new shared bank fact')
-        self.fake.add_memory('coding', 'new coding fact')
-        self.backdate('agent-1', memory_recalled_at=16)
-        ctx = self.turn()
-        self.assertIn('new coding fact', ctx)
-        self.assertNotIn('- old fact', ctx)
-        memory = ctx[ctx.index('[swarm memory]'):].splitlines()[1:]
+        self.fake.add_memory('hermes', 'shared bank fact')
+        self.fake.add_memory('coding', 'coding fact')
+        self.cli('activate', '--job', 'J', '--tags', 'swarm')
+        ctx = self.start()
+        self.assertIn('fact', ctx)
+        self.assertEqual({c['path'] for c in self.fake.calls('POST', '/memories/recall')},
+                         {'/v1/default/banks/coding/memories/recall', '/v1/default/banks/hermes/memories/recall'})
+        memory = ctx[ctx.index('[swarm memory] what'):].split('\n\n')[0].splitlines()[1:]
         self.assertLessEqual(len(memory), 2)
+        self.assertLessEqual(sum(len(line) for line in memory), 35)
+        self.backdate('agent-1', memory_recalled_at=16)
+        self.assertNotIn('[swarm memory]', self.turn())   # no periodic recall
         self.assertLessEqual(sum(len(line) for line in memory), 35)

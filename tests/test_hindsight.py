@@ -695,3 +695,35 @@ class LiveHindsightSmokeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RecallScopeCanaryTests(HindsightEnv):
+    """Canaries: the start recall shows only memories of the job's subjects; an on-demand recall finds any."""
+
+    def setUp(self):
+        super().setUp()
+        self.enable()
+
+    def test_start_recall_shows_only_the_jobs_subjects_and_on_demand_finds_any(self):
+        self.fake.add_memory("coding", "CANARY-ON-TOPIC astro-loom stacks with drizzle 2x", ["astro-loom"])
+        self.fake.add_memory("coding", "CANARY-OTHER-SUBJECT unifi vlan 30 is iot", ["unifi"])
+        self.fake.add_memory("coding", "CANARY-UNTAGGED a fact with no subject", [])
+        self.assertEqual(self.cli("activate", "--job", "J", "--tags", "astro-loom",
+                                  "--task", "stack tonight's frames")[0], 0)
+        ctx = self.start()
+        self.assertIn("CANARY-ON-TOPIC", ctx)
+        self.assertNotIn("CANARY-OTHER-SUBJECT", ctx)
+        self.assertNotIn("CANARY-UNTAGGED", ctx)
+        rc, out, err = self.cli("recall", "--job", "J", "unifi vlan")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("CANARY-OTHER-SUBJECT", out)   # on demand: any subject
+        rc, out, _ = self.cli("recall", "--job", "J", "--tags", "astro-loom", "anything")
+        self.assertIn("CANARY-ON-TOPIC", out)
+        self.assertNotIn("CANARY-OTHER-SUBJECT", out)
+
+    def test_a_job_without_subject_tags_gets_no_start_recall(self):
+        self.fake.add_memory("coding", "CANARY-ANY unrelated", ["unifi"])
+        self.assertEqual(self.cli("activate", "--job", "J")[0], 0)
+        with self.board() as b:
+            b.set_job_data("J", "memory.tags", None)
+        self.assertNotIn("CANARY-ANY", self.start())

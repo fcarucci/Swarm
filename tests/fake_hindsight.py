@@ -111,9 +111,11 @@ class FakeHindsight:
                 timeout=timeout)
 
     # ---- state helpers
-    def add_memory(self, bank: str, text: str) -> str:
+    def add_memory(self, bank: str, text: str, tags=None) -> str:
+        """`tags` None: a test that doesn't care about scope (the memory matches any tag filter); a list,
+        [] included: the memory's real tags, filtered as Hindsight does."""
         mid = str(uuid.uuid4())
-        self.banks.setdefault(bank, []).append({"id": mid, "text": text, "type": "world"})
+        self.banks.setdefault(bank, []).append({"id": mid, "text": text, "type": "world", "tags": tags})
         return mid
 
     def fail(self, code: int, detail, bank: str | None = None, method: str | None = None,
@@ -203,7 +205,7 @@ class FakeHindsight:
                          "async": bool(body.get("async"))}
         if method == "POST" and rest == "/memories/recall":
             return 200, {"results": [{k: v for k, v in mem.items() if k in ("id", "text", "type")}
-                                     for mem in self.banks[bank]]}
+                                     for mem in self.banks[bank] if _tag_match(mem, body)]}
         if rest.startswith("/documents/") and method in ("GET", "PATCH"):
             doc = urllib.parse.unquote(rest[len("/documents/"):])
             entry = self.documents.get(bank, {}).get(doc)
@@ -222,6 +224,19 @@ class FakeHindsight:
                 return 422, {"detail": "At least one field must be provided"}
             return 200, {"success": True}
         return 404, {"detail": "Not Found"}
+
+
+def _tag_match(mem: dict, body) -> bool:
+    """Hindsight's recall tag filter (tags + tags_match; "any" and "all" include untagged memories, the
+    _strict modes exclude them). No `tags` in the request: every memory."""
+    want = (body or {}).get("tags") if isinstance(body, dict) else None
+    if not want or mem.get("tags") is None:
+        return True
+    have = set(mem.get("tags"))
+    mode = body.get("tags_match", "any")
+    if not have:
+        return not mode.endswith("_strict")
+    return bool(have & set(want)) if mode.startswith("any") else set(want) <= have
 
 
 def dead_url() -> str:
