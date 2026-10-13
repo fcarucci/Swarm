@@ -86,7 +86,7 @@ class SeatHomeCase(unittest.TestCase):
         self.work = self.home / "work"
         self.cfg = {"drive": {"seat_git_name": "Seat", "seat_git_email": "seat@example.test"},
                     "supervise": {"allowed_workdirs": [str(self.work)]}}
-        for p in (mock.patch.dict(os.environ, {"HOME": str(self.home)}),
+        for p in (mock.patch.dict(os.environ, {"HOME": str(self.home), "USERPROFILE": str(self.home)}),
                   mock.patch("swarm.supervisor.seathome.pinned_paths", lambda cfg: [])):
             p.start()
             self.addCleanup(p.stop)
@@ -234,7 +234,7 @@ class FailClosedTest(SeatHomeCase):
 
     def test_unreadable_pins_refuse(self):
         mock.patch.stopall()
-        with mock.patch.dict(os.environ, {"HOME": str(self.home)}), \
+        with mock.patch.dict(os.environ, {"HOME": str(self.home), "USERPROFILE": str(self.home)}), \
                 mock.patch("swarm.supervisor.ledger.unfinished", side_effect=OSError("boom")):
             with self.assertRaises(seathome.SeatIsolationError):
                 seathome.pinned_paths(self.cfg)
@@ -452,7 +452,7 @@ class BrokerCase(unittest.TestCase):
     def cli(self, argv, broker=None):
         """The seat side (seatbroker_client.run_cli, cwd the work tree) against this broker, inline."""
         b = broker or self.b
-        d = os.open(str(self.seat / "broker"), os.O_RDONLY)
+        d = seatbroker._opendir(str(self.seat / "broker"))
         out = {}
         old = os.getcwd()
         os.chdir(self.wd)
@@ -469,17 +469,17 @@ class BrokerCase(unittest.TestCase):
             return out["r"]
         finally:
             os.chdir(old)
-            os.close(d)
+            seatbroker._closedir(d)
 
     def raw(self, body: dict):
         """A request written straight into the broker dir (a seat need not use the client)."""
         rid = uuid.uuid4().hex
         (self.seat / "broker" / f"{rid}.req").write_text(json.dumps(body))
-        d = os.open(str(self.seat / "broker"), os.O_RDONLY)
+        d = seatbroker._opendir(str(self.seat / "broker"))
         try:
             self.b.poll_once(d, inline=True)
         finally:
-            os.close(d)
+            seatbroker._closedir(d)
         r = json.loads((self.seat / "broker" / f"{rid}.resp").read_text())
         return r["rc"], base64.b64decode(r["out"]), base64.b64decode(r["err"])
 
@@ -638,14 +638,14 @@ class TypedProtocolTest(BrokerCase):
 
     def test_rr13_a_failing_guard_hook_denies(self):
         b = self.broker(recording_runner(self.calls, rc=1, out=b""))
-        d = os.open(str(self.seat / "broker"), os.O_RDONLY)
+        d = seatbroker._opendir(str(self.seat / "broker"))
         try:
             rid = uuid.uuid4().hex
             (self.seat / "broker" / f"{rid}.req").write_text(
                 json.dumps({"v": 2, "kind": "hook", "event": "turn", "payload": {}}))
             b.poll_once(d, inline=True)
         finally:
-            os.close(d)
+            seatbroker._closedir(d)
         r = json.loads((self.seat / "broker" / f"{rid}.resp").read_text())
         self.assertEqual(json.loads(base64.b64decode(r["out"]))["hookSpecificOutput"]["permissionDecision"], "deny")
 
@@ -677,12 +677,12 @@ class TypedProtocolTest(BrokerCase):
 
         @contextlib.contextmanager
         def runs_fd(board, create=True):
-            fd = os.open(runs, os.O_RDONLY)
-            try:
-                yield fd
-            finally:
-                os.close(fd)
+            yield str(runs)
+
+        def write_atomic(d, name, data, *a, **kw):
+            Path(d, name).write_bytes(data)
         with mock.patch.object(runner, "_runs_fd", runs_fd), \
+                mock.patch("swarm.supervisor.privfs.write_atomic", write_atomic), \
                 mock.patch.object(runner, "run_file", lambda rid, board: runs / f"r{rid}.json"), \
                 mock.patch.object(runner, "write_run", lambda r: None):
             runner._keep_seat_transcript(run)
@@ -1386,6 +1386,19 @@ class WindowsCodePathTest(SeatHomeCase):
         with self.without_posix():
             self.assertIsNone(seathome._read_person(link))
             self.assertEqual(seathome._read_person(target), b"person's secret")
+
+
+class WindowsPathsTest(unittest.TestCase):
+    """Path containment compared as Windows compares paths (emulated with ntpath)."""
+
+    def test_under_with_drive_letters_separators_and_case(self):
+        import ntpath
+        for mod in (seathome, seatbroker):
+            with mock.patch.object(os, "path", ntpath), mock.patch.object(os, "sep", "\\"):
+                self.assertTrue(mod._under("C:/Users/Runner/work/repo/.git/worktrees/wt", r"c:\users\runner\work"))
+                self.assertTrue(mod._under(r"C:\Users\Runner\work", "C:/Users/Runner/work/"))
+                self.assertFalse(mod._under(r"C:\Users\Runner\work2", r"C:\Users\Runner\work"))
+                self.assertFalse(mod._under(r"D:\Users\Runner\work", r"C:\Users\Runner\work"))
 
 
 if __name__ == "__main__":

@@ -76,7 +76,11 @@ class Refused(ValueError):
 
 
 def _under(path: str, root: str) -> bool:
-    return path == root or path.startswith(root.rstrip("/") + "/")
+    """Whether `path` is `root` or below it, compared as the platform compares paths (Windows: separators and
+    case normalised, so a drive letter or a `/` from a .git file still matches)."""
+    p = os.path.normcase(os.path.normpath(str(path)))
+    r = os.path.normcase(os.path.normpath(str(root)))
+    return p == r or p.startswith(r.rstrip(os.sep) + os.sep)
 
 
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
@@ -155,7 +159,7 @@ def _read_fd(fd: int, limit: int) -> bytes | None:
 def read_under(root: str, rel: str, limit: int) -> bytes | None:
     """The file `rel` below the directory `root`, reached one component at a time with O_NOFOLLOW (a link
     anywhere on the way, a non-directory component, "..", or a non-regular or oversize file: None)."""
-    parts = [p for p in rel.split("/") if p not in ("", ".")]
+    parts = [p for p in re.split(r"[\\/]", rel) if p not in ("", ".")]
     if not parts or ".." in parts:
         return None
     try:

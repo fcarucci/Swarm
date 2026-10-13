@@ -378,7 +378,11 @@ def platform_cover(platform: str | None = None) -> tuple:
 
 
 def _under(path: str, root: str) -> bool:
-    return path == root or path.startswith(root.rstrip("/") + "/")
+    """Whether `path` is `root` or below it, compared as the platform compares paths (Windows: separators and
+    case normalised, so a drive letter or a `/` from a .git file still matches)."""
+    p = os.path.normcase(os.path.normpath(str(path)))
+    r = os.path.normcase(os.path.normpath(str(root)))
+    return p == r or p.startswith(r.rstrip(os.sep) + os.sep)
 
 
 def git_dirs(cfg: dict, workdir: str) -> tuple[str | None, str | None]:
