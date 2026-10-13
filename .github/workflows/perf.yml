@@ -13,10 +13,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {name: j4-split, jobs: 4, dur: 0, idle: "60", excl: ""}
-          - {name: j4-split-lpt, jobs: 4, dur: 1, idle: "60", excl: ""}
-          - {name: fast-j4, jobs: 4, dur: 1, idle: "5", excl: "test_install_sh,test_update_sh,test_codex_directory,test_drive_session_driver.IdleOrchestratorEndToEnd"}
+          - {name: full-j4, jobs: 4, dur: 1, idle: "60", excl: ""}
+          - {name: full-j8, jobs: 8, dur: 1, idle: "60", excl: ""}
           - {name: fast-j6, jobs: 6, dur: 1, idle: "5", excl: "test_install_sh,test_update_sh,test_codex_directory,test_drive_session_driver.IdleOrchestratorEndToEnd"}
+          - {name: fast-j8, jobs: 8, dur: 1, idle: "5", excl: "test_install_sh,test_update_sh,test_codex_directory,test_drive_session_driver.IdleOrchestratorEndToEnd"}
+          - {name: fast-j12, jobs: 12, dur: 1, idle: "5", excl: "test_install_sh,test_update_sh,test_codex_directory,test_drive_session_driver.IdleOrchestratorEndToEnd"}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

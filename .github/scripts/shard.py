@@ -48,6 +48,7 @@ t0 = time.time()
 
 def run(m):
     env = dict(os.environ)
+    env.pop("SWARM_TEST_SANDBOX", None)   # the parent imported support (class split): each module gets its own sandbox
     cmd = [sys.executable, *flags]
     if a.coverage:
         Path(a.coverage).mkdir(parents=True, exist_ok=True)
