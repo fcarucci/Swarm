@@ -88,6 +88,8 @@ def running(src, cfg_events=None, board=None, logs=None, **kw):
                       write_token=lambda token: None)   # never the real private dir
     lst.cfg["port"] = 0
     host, port = lst.bind()
+    fast = lst.server.serve_forever       # shutdown() waits out one poll_interval (0.5 s): poll at 10 ms in tests
+    lst.server.serve_forever = lambda poll_interval=0.5: fast(poll_interval=0.01)
     t = threading.Thread(target=lst.serve_forever, daemon=True)
     t.start()
     try:
