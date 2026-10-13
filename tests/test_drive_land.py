@@ -249,7 +249,10 @@ class Landing(LandCase):
         os.makedirs(os.path.join(self.work, ".git/objects/info"), exist_ok=True)
         with open(os.path.join(self.work, ".git/objects/info/alternates"), "w") as fh:
             fh.write(os.path.join(secret, ".git", "objects").replace(os.sep, "/") + "\n")
-        git(self.work, "update-ref", "refs/heads/" + GROUP, ssha)
+        try:            # the ref makes the probe realistic; the root is refused for the alternates file alone
+            git(self.work, "update-ref", "refs/heads/" + GROUP, ssha)
+        except subprocess.CalledProcessError:
+            pass        # Windows git may not resolve an alternates line it did not write
         self.assert_refused_unpushed(ssha, self.work)
 
     @support.posix_only("symlinks")
