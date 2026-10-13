@@ -48,14 +48,37 @@ jobs:
           backend = "postgres"
           EOT
           echo "SWARM_TEST_CONFIG=$RUNNER_TEMP/swarm-pg/test-config.toml" >> "$GITHUB_ENV"
-      - name: A. only the tests Postgres adds (was - the whole suite, 1095 s)
+      - name: A. only the tests Postgres adds (baseline - the whole suite, 1095 s)
         run: python -B tests/_frink_pg_select.py pg "$RUNNER_TEMP/nonpg.json" x </dev/null 2>&1 | tail -4
-      - name: B. drive CLI tests on a Postgres board (was - all test_drive_* again, 584 s)
+      - name: B. drive CLI tests on a Postgres board (baseline - all test_drive_* again, 584 s)
         if: ${{ !cancelled() }}
         env: {SWARM_TEST_BACKEND: postgres}
         run: python -B tests/_frink_pg_select.py env "$RUNNER_TEMP/nonpg.json" x </dev/null 2>&1 | tail -4
-      - name: C. same as A with fsync off on the server
+      - name: C. A again with fsync, synchronous_commit and full_page_writes off
         if: ${{ !cancelled() }}
         run: |
           PGPASSWORD=swarm_test_pw psql -h 127.0.0.1 -U swarm_test -d postgres -c "ALTER SYSTEM SET fsync = off" -c "ALTER SYSTEM SET synchronous_commit = off" -c "ALTER SYSTEM SET full_page_writes = off" -c "SELECT pg_reload_conf()"
           python -B tests/_frink_pg_select.py pg "$RUNNER_TEMP/nonpg.json" x </dev/null 2>&1 | tail -4
+  win-shard2:
+    runs-on: windows-latest
+    defaults: {run: {shell: bash}}
+    strategy:
+      fail-fast: false
+      matrix:
+        cell: [memory-x1, sqlite-x2]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.13", cache: pip}
+      - run: pip install -r requirements.txt -r requirements-postgres.txt
+      - name: shard 2 modules, sqlite twice in one process
+        env:
+          PYTHONUTF8: "1"
+          CELL: ${{ matrix.cell }}
+        run: |
+          export SWARM_TEST_BACKEND=${CELL%%-*}
+          mods=$(cd tests && ls test_*.py | sed 's/\.py$//' | grep -v '^test_drive_session_driver$' | awk '(NR-1)%3==2')
+          [ "$CELL" = sqlite-x2 ] && mods="$mods $mods"
+          python -B tests/_frink_timing.py "$GITHUB_WORKSPACE/t-s2-$CELL.csv" $mods </dev/null 2>&1 | tail -3
+      - uses: actions/upload-artifact@v4
+        with: {name: "t-s2-${{ matrix.cell }}", path: "t-*.csv"}
