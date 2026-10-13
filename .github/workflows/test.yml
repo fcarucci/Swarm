@@ -24,30 +24,36 @@ concurrency:
   # Never cancel main, int/rc or tag runs; superseded runs on every other ref free their runners.
   cancel-in-progress: ${{ !(github.ref == 'refs/heads/main' || github.ref == 'refs/heads/int/rc' || startsWith(github.ref, 'refs/tags/v')) }}
 
-# macOS and Windows (the `windows` and `macos` jobs and the complexity-analyzer windows/macos cells)
-# run only when releasing: pushes to main and int/rc, v* tags, workflow_dispatch / workflow_call
-# (the release workflow), and pull requests targeting main (the main ruleset requires those checks).
-# Every other ref (feat/*, fix/*, ci/*, other int/*) runs Linux only. Job and check names are
-# unchanged so the required status contexts still match when the jobs run.
+# Two lanes, one set of check names (the main ruleset requires them by name, so every job always
+# runs and reports; a job with nothing to do skips its steps and passes in seconds):
+#  - release lane: pushes to main and int/rc, v* tags, workflow_dispatch / workflow_call (the
+#    release workflow), and pull requests targeting main. The full matrix, every test module
+#    including the slow ones, sharded across processes (.github/scripts/run_tests.py); macOS and
+#    Windows run only here; the Postgres suite and the drive-on-Postgres suites in parallel jobs.
+#  - fast lane: every other ref (feat/*, fix/*, ci/*, other int/*). One unit cell (memory, 3.13)
+#    runs the test modules the change affects plus a smoke set, without the slow modules
+#    (.github/scripts/test_tiers.json); the other cells, Postgres, macOS and Windows skip.
+# A docs-only change (.github/scripts/code_changed.sh) skips everything, on either lane.
 jobs:
-  # Docs-only changes skip the tests and builds. Every job below keeps its name and matrix (the
-  # main ruleset requires those checks by name) but skips its steps when this job says only
-  # documentation changed, so a docs-only push or PR still reports every check green in seconds.
-  # Fails open: workflow_call / workflow_dispatch (the Release workflow), tags, new branches,
-  # force pushes, an unknown base, or this job failing all run everything.
+  # Decides what runs. Fails open: if it cannot tell, everything runs.
   changes:
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.diff.outputs.code }}
+      lane: ${{ steps.diff.outputs.lane }}
+      files: ${{ steps.diff.outputs.files }}
+      complexity: ${{ steps.diff.outputs.complexity }}
+      install: ${{ steps.diff.outputs.install }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref || github.ref }}
           fetch-depth: 0
 
-      - name: Did anything other than documentation change?
+      - name: What changed, and which lane?
         id: diff
         env:
+          FULL: ${{ github.event_name == 'workflow_call' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/int/rc' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'pull_request' && github.base_ref == 'main') }}
           EVENT: ${{ github.event_name }}
           REF: ${{ github.ref }}
           FORCED: ${{ github.event.forced }}
@@ -56,22 +62,38 @@ jobs:
           PR_BASE: ${{ github.event.pull_request.base.sha }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
-          code=true
+          base= head=
           case "$EVENT" in
             pull_request)
-              if base=$(git merge-base "$PR_BASE" "$PR_HEAD"); then
-                code=$(.github/scripts/code_changed.sh "$base" "$PR_HEAD") || code=true
-              fi ;;
+              base=$(git merge-base "$PR_BASE" "$PR_HEAD") && head=$PR_HEAD || base= ;;
             push)
-              if [[ "$REF" == refs/heads/* && "$FORCED" != true && -n "$BEFORE" && ! "$BEFORE" =~ ^0+$ ]] \
-                && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
-                code=$(.github/scripts/code_changed.sh "$BEFORE" "$AFTER") || code=true
+              if [[ "$REF" == refs/heads/* ]]; then
+                head=$AFTER
+                if [[ "$FORCED" != true && -n "$BEFORE" && ! "$BEFORE" =~ ^0+$ ]] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+                  base=$BEFORE
+                else    # new branch or force push: what the branch changes against main
+                  base=$(git merge-base origin/main "$AFTER" 2>/dev/null) || base=
+                fi
               fi ;;
           esac
-          echo "code=$code" | tee -a "$GITHUB_OUTPUT"
+          code=true files=
+          if [ -n "$base" ]; then
+            code=$(.github/scripts/code_changed.sh "$base" "$head") || code=true
+            files=$(git diff --name-only --no-renames "$base" "$head") || files=
+          fi
+          lane=fast complexity=true install=true
+          if [ "$FULL" = true ]; then
+            lane=full
+          elif [ -n "$files" ]; then
+            grep -q '^skills/complexity-analyzer/' <<< "$files" || complexity=false
+            grep -qE '^(install\.sh|\.claude-plugin/|\.codex-plugin/)' <<< "$files" || install=false
+          fi
+          grep -q '^\.github/' <<< "$files" && complexity=true install=true
+          { echo "code=$code"; echo "lane=$lane"; echo "complexity=$complexity"; echo "install=$install"
+            echo "files<<EOF_FILES"; echo "$files"; echo "EOF_FILES"; } | tee -a "$GITHUB_OUTPUT"
 
   # Backend contract + hook/CLI suite, on every offline backend and both the minimum and the
-  # latest supported Python (README "Requirements": 3.11 or newer).
+  # latest supported Python (README "Requirements": 3.11 or newer). Fast lane: (memory, 3.13) only.
   unit:
     needs: changes
     if: ${{ !cancelled() }}
@@ -81,35 +103,44 @@ jobs:
       matrix:
         backend: [memory, sqlite, file]
         python-version: ["3.11", "3.13"]
+    env:
+      RUN: ${{ needs.changes.outputs.code != 'false' && (needs.changes.outputs.lane != 'fast' || (matrix.backend == 'memory' && matrix.python-version == '3.13')) }}
+      LANE: ${{ needs.changes.outputs.lane }}
+      FILES: ${{ needs.changes.outputs.files }}
     steps:
       - uses: actions/checkout@v4
-        if: ${{ needs.changes.outputs.code != 'false' }}
+        if: env.RUN == 'true'
         with:
           ref: ${{ inputs.ref || github.ref }}
 
       - uses: actions/setup-python@v5
-        if: ${{ needs.changes.outputs.code != 'false' }}
+        if: env.RUN == 'true'
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
       - name: Install dependencies
-        if: ${{ needs.changes.outputs.code != 'false' }}
+        if: env.RUN == 'true'
         run: pip install -r requirements.txt -r requirements-postgres.txt
 
       - name: Run tests (backend=${{ matrix.backend }})
-        if: ${{ needs.changes.outputs.code != 'false' }}
+        if: env.RUN == 'true'
         env:
           SWARM_TEST_BACKEND: ${{ matrix.backend }}
         run: |
           set -o pipefail
-          python -B -m unittest discover -s tests -q </dev/null 2>&1 | tee test.log || { python .github/scripts/annotate.py test.log; exit 1; }
+          args=()
+          if [ "$LANE" = fast ]; then
+            args=(--tier fast)
+            if [ -n "$FILES" ]; then printf '%s\n' "$FILES" > "$RUNNER_TEMP/changed.txt"; args+=(--select "$RUNNER_TEMP/changed.txt"); fi
+          fi
+          python -B .github/scripts/run_tests.py "${args[@]}" </dev/null 2>&1 | tee test.log || { python .github/scripts/annotate.py test.log; exit 1; }
 
   # Native Windows: the unit suite on the offline backends. POSIX-only tests carry skip markers
   # with a reason; nothing is skipped on Linux.
   windows:
     needs: changes
-    if: ${{ !cancelled() && (github.event_name == 'workflow_call' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/int/rc' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'pull_request' && github.base_ref == 'main')) }}
+    if: ${{ !cancelled() && needs.changes.outputs.lane != 'fast' }}
     runs-on: windows-latest
     defaults:
       run:
@@ -118,87 +149,94 @@ jobs:
       fail-fast: false
       matrix:
         backend: [memory, sqlite, file]
+    env:
+      RUN: ${{ needs.changes.outputs.code != 'false' }}
     steps:
       - uses: actions/checkout@v4
-        if: ${{ needs.changes.outputs.code != 'false' }}
+        if: env.RUN == 'true'
         with:
           ref: ${{ inputs.ref || github.ref }}
 
       - uses: actions/setup-python@v5
-        if: ${{ needs.changes.outputs.code != 'false' }}
+        if: env.RUN == 'true'
         with:
           python-version: "3.13"
           cache: pip
 
       - name: Install dependencies
-        if: ${{ needs.changes.outputs.code != 'false' }}
+        if: env.RUN == 'true'
         run: pip install -r requirements.txt -r requirements-postgres.txt
 
       - name: Run tests (backend=${{ matrix.backend }})
-        if: ${{ needs.changes.outputs.code != 'false' }}
+        if: env.RUN == 'true'
         env:
           SWARM_TEST_BACKEND: ${{ matrix.backend }}
           PYTHONUTF8: "1"
         run: |
           set -o pipefail
-          python -B -m unittest discover -s tests -q </dev/null 2>&1 | tee test.log || { python .github/scripts/annotate.py test.log; exit 1; }
+          python -B .github/scripts/run_tests.py </dev/null 2>&1 | tee test.log || { python .github/scripts/annotate.py test.log; exit 1; }
 
   # install.sh must keep working under macOS's stock bash (3.2, no arrays): e2e/install_test.sh
   # exercises it end to end. Also runs the unit suite on sqlite, the backend the e2e script uses
   # nowhere but that is otherwise only covered on Linux above.
   macos:
     needs: changes
-    if: ${{ !cancelled() && (github.event_name == 'workflow_call' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/int/rc' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'pull_request' && github.base_ref == 'main')) }}
+    if: ${{ !cancelled() && needs.changes.outputs.lane != 'fast' }}
     runs-on: macos-latest
+    env:
+      RUN: ${{ needs.changes.outputs.code != 'false' }}
     steps:
       - uses: actions/checkout@v4
-        if: ${{ needs.changes.outputs.code != 'false' }}
+        if: env.RUN == 'true'
         with:
           ref: ${{ inputs.ref || github.ref }}
 
       - uses: actions/setup-python@v5
-        if: ${{ needs.changes.outputs.code != 'false' }}
+        if: env.RUN == 'true'
         with:
           python-version: "3.11"
           cache: pip
 
       - name: Syntax-check install.sh under bash 3.2
-        if: ${{ needs.changes.outputs.code != 'false' }}
+        if: env.RUN == 'true'
         run: bash -n install.sh
 
       - name: Build the checkout's own venv (e2e/install_test.sh expects $ROOT/.venv already built)
-        if: ${{ needs.changes.outputs.code != 'false' }}
+        if: env.RUN == 'true'
         run: |
           python3 -m venv .venv
           .venv/bin/pip install -q -r requirements.txt -r requirements-postgres.txt
 
       - name: install.sh end to end (bash 3.2)
-        if: ${{ needs.changes.outputs.code != 'false' }}
+        if: env.RUN == 'true'
         run: |
           set -o pipefail
           bash e2e/install_test.sh 2>&1 | tee e2e.log || { python3 .github/scripts/annotate.py e2e.log; exit 1; }
 
       - name: Unit suite (backend=sqlite)
-        if: ${{ needs.changes.outputs.code != 'false' }}
+        if: env.RUN == 'true'
         env:
           SWARM_TEST_BACKEND: sqlite
         run: |
           set -o pipefail
-          .venv/bin/python -B -m unittest discover -s tests -q </dev/null 2>&1 | tee test.log || { python3 .github/scripts/annotate.py test.log; exit 1; }
+          .venv/bin/python -B .github/scripts/run_tests.py </dev/null 2>&1 | tee test.log || { python3 .github/scripts/annotate.py test.log; exit 1; }
 
   # The Postgres-backed classes (tests/support.py PostgresHarness, tests/test_stall.py's Postgres
   # proxy tests) are skipped everywhere else because they need SWARM_TEST_CONFIG. Give them a
-  # real, throwaway database here. PostgresFollowRecoveryTests drives `swarm tail`/`swarm watch`
-  # as real subprocesses through a stalling TCP proxy and is known to hang intermittently in CI
-  # environments; it runs separately and is allowed to fail (see the last step).
+  # real, throwaway database here (run_tests.py gives each parallel slot a database of its own).
+  # Release lane only. Two jobs in parallel: `postgres` (the whole suite, minus the known-stall
+  # recovery tests) and `postgres-drive` (the drive suites on a Postgres board, then the
+  # known-stall tests, allowed to fail).
   postgres:
     needs: changes
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
+    env:
+      RUN: ${{ needs.changes.outputs.code != 'false' && needs.changes.outputs.lane != 'fast' }}
     services:
       postgres:
-        # Empty image (docs-only change) = no service container.
-        image: ${{ needs.changes.outputs.code != 'false' && 'public.ecr.aws/docker/library/postgres:16' || '' }}
+        # Empty image (nothing to run) = no service container.
+        image: ${{ needs.changes.outputs.code != 'false' && needs.changes.outputs.lane != 'fast' && 'public.ecr.aws/docker/library/postgres:16' || '' }}
         env:
           POSTGRES_USER: swarm_test
           POSTGRES_PASSWORD: swarm_test_pw
@@ -212,72 +250,87 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@v4
-        if: ${{ needs.changes.outputs.code != 'false' }}
+        if: env.RUN == 'true'
         with:
           ref: ${{ inputs.ref || github.ref }}
 
       - uses: actions/setup-python@v5
-        if: ${{ needs.changes.outputs.code != 'false' }}
+        if: env.RUN == 'true'
         with:
           python-version: "3.13"
           cache: pip
 
       - name: Install dependencies
-        if: ${{ needs.changes.outputs.code != 'false' }}
+        if: env.RUN == 'true'
         run: pip install -r requirements.txt -r requirements-postgres.txt
 
       - name: Write a throwaway SWARM_TEST_CONFIG
-        if: ${{ needs.changes.outputs.code != 'false' }}
-        run: |
-          mkdir -p "$RUNNER_TEMP/swarm-pg"
-          printf 'PGPASSWORD=swarm_test_pw\n' > "$RUNNER_TEMP/swarm-pg/pg.env"
-          chmod 600 "$RUNNER_TEMP/swarm-pg/pg.env"
-          # dbname deliberately not the default "swarm_board": PostgresHarness refuses to run
-          # against the database of the live config (tests/support.py), so a throwaway database
-          # can never collide with a real board. admin_dbname is postgres (POSTGRES_DB above); the CI role is
-          # the cluster's initdb superuser, which has CREATEDB.
-          cat > "$RUNNER_TEMP/swarm-pg/test-config.toml" <<EOF
-          [database]
-          host = "127.0.0.1"
-          port = 5432
-          user = "swarm_test"
-          dbname = "swarm_ci_test"
-          admin_dbname = "postgres"
-          password_env_file = "$RUNNER_TEMP/swarm-pg/pg.env"
-          connect_timeout = 5
-          sslmode = "prefer"
-          query_timeout_seconds = 8
-          prepared_statements = false
-
-          [board]
-          backend = "postgres"
-          EOF
-          echo "SWARM_TEST_CONFIG=$RUNNER_TEMP/swarm-pg/test-config.toml" >> "$GITHUB_ENV"
+        if: env.RUN == 'true'
+        run: .github/scripts/pg_test_config.sh
 
       - name: Postgres suite (excluding the known-stall recovery tests)
-        if: ${{ needs.changes.outputs.code != 'false' }}
+        if: env.RUN == 'true'
         run: |
           set -o pipefail
-          cd tests
-          python -B run_postgres_suite.py 2>&1 | tee ../pg.log || { cd .. && python .github/scripts/annotate.py pg.log; exit 1; }
+          python -B .github/scripts/run_tests.py --skip-class PostgresFollowRecoveryTests </dev/null 2>&1 | tee pg.log || { python .github/scripts/annotate.py pg.log; exit 1; }
+
+  postgres-drive:
+    needs: changes
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    env:
+      RUN: ${{ needs.changes.outputs.code != 'false' && needs.changes.outputs.lane != 'fast' }}
+    services:
+      postgres:
+        image: ${{ needs.changes.outputs.code != 'false' && needs.changes.outputs.lane != 'fast' && 'public.ecr.aws/docker/library/postgres:16' || '' }}
+        env:
+          POSTGRES_USER: swarm_test
+          POSTGRES_PASSWORD: swarm_test_pw
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U swarm_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        if: env.RUN == 'true'
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: actions/setup-python@v5
+        if: env.RUN == 'true'
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        if: env.RUN == 'true'
+        run: pip install -r requirements.txt -r requirements-postgres.txt
+
+      - name: Write a throwaway SWARM_TEST_CONFIG
+        if: env.RUN == 'true'
+        run: .github/scripts/pg_test_config.sh
 
       # The drive suites (tests/test_drive_*.py) again, on the Postgres board: modules with
       # backend variants (support.add_backend_variants) run their Postgres classes, the CLI ones
       # (activate, hooks) run wholly on a Postgres board through SWARM_TEST_BACKEND. The summary
       # fails the step when a module ran nothing, a Postgres variant never ran, or a test skipped.
       - name: Drive suites on Postgres
-        if: ${{ needs.changes.outputs.code != 'false' && !cancelled() }}   # its own signal, whatever the whole-suite step said
+        if: env.RUN == 'true'
         env:
           SWARM_TEST_BACKEND: postgres
         run: |
           set -o pipefail
-          cd tests
-          python -B -m unittest -v $(ls test_drive_*.py | sed 's/\.py$//') </dev/null 2>&1 | tee ../drive-pg.log || { cd .. && python .github/scripts/annotate.py drive-pg.log; exit 1; }
-          cd .. && python .github/scripts/drive_pg_summary.py drive-pg.log
+          python -B .github/scripts/run_tests.py --verbose --log drive-pg.log $(cd tests && ls test_drive_*.py | sed 's/\.py$//') </dev/null 2>&1 | tee drive-run.log || { python .github/scripts/annotate.py drive-run.log; exit 1; }
+          python .github/scripts/drive_pg_summary.py drive-pg.log
 
       - name: Known-stall recovery tests (swarm tail/watch vs a stalling proxy; allowed to fail)
-        if: ${{ needs.changes.outputs.code != 'false' }}
+        if: ${{ !cancelled() && env.RUN == 'true' }}
         continue-on-error: true
+        timeout-minutes: 5
         run: cd tests && python -B -m unittest test_stall.PostgresFollowRecoveryTests -v </dev/null
 
   complexity-analyzer:
@@ -291,20 +344,22 @@ jobs:
       fail-fast: false
       matrix:
         os: ${{ fromJSON((github.event_name == 'workflow_call' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/int/rc' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'pull_request' && github.base_ref == 'main')) && '["ubuntu-latest","windows-latest","macos-latest"]' || '["ubuntu-latest"]') }}
+    env:
+      RUN: ${{ needs.changes.outputs.code != 'false' && needs.changes.outputs.complexity != 'false' }}
     steps:
       - uses: actions/checkout@v4
-        if: ${{ needs.changes.outputs.code != 'false' }}
+        if: env.RUN == 'true'
         with:
           ref: ${{ inputs.ref || github.ref }}
       - uses: actions/setup-python@v5
-        if: ${{ needs.changes.outputs.code != 'false' }}
+        if: env.RUN == 'true'
         with:
           python-version: "3.11"
       - name: Install skill test dependencies
-        if: ${{ needs.changes.outputs.code != 'false' }}
+        if: env.RUN == 'true'
         run: python -m pip install pytest tree-sitter==0.26.0 tree-sitter-rust==0.24.2 radon==6.0.1 vulture==2.16
       - name: Skill tests (downloaded tools optional; no tool downloads)
-        if: ${{ needs.changes.outputs.code != 'false' }}
+        if: env.RUN == 'true'
         run: |
           set -o pipefail
           python -B -m pytest -q -p no:cacheprovider skills/complexity-analyzer/tests --ignore=skills/complexity-analyzer/tests/fixtures 2>&1 | tee skill-test.log || { python .github/scripts/annotate.py skill-test.log; exit 1; }
@@ -313,23 +368,25 @@ jobs:
     needs: changes
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
+    env:
+      RUN: ${{ needs.changes.outputs.code != 'false' && needs.changes.outputs.install != 'false' }}
     steps:
       - uses: actions/checkout@v4
-        if: ${{ needs.changes.outputs.code != 'false' }}
+        if: ${{ env.RUN == 'true' }}
         with:
           ref: ${{ inputs.ref || github.ref }}
 
       - uses: actions/setup-python@v5
-        if: ${{ needs.changes.outputs.code != 'false' }}
+        if: ${{ env.RUN == 'true' }}
         with:
           python-version: "3.13"
 
       - name: bash -n install.sh
-        if: ${{ needs.changes.outputs.code != 'false' }}
+        if: ${{ env.RUN == 'true' }}
         run: bash -n install.sh
 
       - name: shellcheck install.sh (severity=error, non-blocking)
-        if: ${{ needs.changes.outputs.code != 'false' }}
+        if: ${{ env.RUN == 'true' }}
         continue-on-error: true
         run: |
           if ! command -v shellcheck >/dev/null 2>&1; then
@@ -338,17 +395,17 @@ jobs:
           shellcheck --severity=error install.sh
 
       - name: Try installing the Claude Code CLI
-        if: ${{ needs.changes.outputs.code != 'false' }}
+        if: ${{ env.RUN == 'true' }}
         id: claude_cli
         continue-on-error: true
         run: npm install -g @anthropic-ai/claude-code && claude --version
 
       - name: claude plugin validate .
-        if: ${{ needs.changes.outputs.code != 'false' && steps.claude_cli.outcome == 'success' }}
+        if: ${{ env.RUN == 'true' && steps.claude_cli.outcome == 'success' }}
         run: claude plugin validate .
 
       - name: Validate plugin manifests' JSON structure (claude CLI unavailable)
-        if: ${{ needs.changes.outputs.code != 'false' && steps.claude_cli.outcome != 'success' }}
+        if: ${{ env.RUN == 'true' && steps.claude_cli.outcome != 'success' }}
         run: |
           python3 - <<'PY'
           import json, sys
