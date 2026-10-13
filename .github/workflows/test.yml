@@ -30,9 +30,51 @@ concurrency:
 # Every other ref (feat/*, fix/*, ci/*, other int/*) runs Linux only. Job and check names are
 # unchanged so the required status contexts still match when the jobs run.
 jobs:
+  # Docs-only changes skip the tests and builds. Every job below keeps its name and matrix (the
+  # main ruleset requires those checks by name) but skips its steps when this job says only
+  # documentation changed, so a docs-only push or PR still reports every check green in seconds.
+  # Fails open: workflow_call / workflow_dispatch (the Release workflow), tags, new branches,
+  # force pushes, an unknown base, or this job failing all run everything.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          fetch-depth: 0
+
+      - name: Did anything other than documentation change?
+        id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          FORCED: ${{ github.event.forced }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          code=true
+          case "$EVENT" in
+            pull_request)
+              if base=$(git merge-base "$PR_BASE" "$PR_HEAD"); then
+                code=$(.github/scripts/code_changed.sh "$base" "$PR_HEAD") || code=true
+              fi ;;
+            push)
+              if [[ "$REF" == refs/heads/* && "$FORCED" != true && -n "$BEFORE" && ! "$BEFORE" =~ ^0+$ ]] \
+                && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+                code=$(.github/scripts/code_changed.sh "$BEFORE" "$AFTER") || code=true
+              fi ;;
+          esac
+          echo "code=$code" | tee -a "$GITHUB_OUTPUT"
+
   # Backend contract + hook/CLI suite, on every offline backend and both the minimum and the
   # latest supported Python (README "Requirements": 3.11 or newer).
   unit:
+    needs: changes
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -41,18 +83,22 @@ jobs:
         python-version: ["3.11", "3.13"]
     steps:
       - uses: actions/checkout@v4
+        if: ${{ needs.changes.outputs.code != 'false' }}
         with:
           ref: ${{ inputs.ref || github.ref }}
 
       - uses: actions/setup-python@v5
+        if: ${{ needs.changes.outputs.code != 'false' }}
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
       - name: Install dependencies
+        if: ${{ needs.changes.outputs.code != 'false' }}
         run: pip install -r requirements.txt -r requirements-postgres.txt
 
       - name: Run tests (backend=${{ matrix.backend }})
+        if: ${{ needs.changes.outputs.code != 'false' }}
         env:
           SWARM_TEST_BACKEND: ${{ matrix.backend }}
         run: |
@@ -62,7 +108,8 @@ jobs:
   # Native Windows: the unit suite on the offline backends. POSIX-only tests carry skip markers
   # with a reason; nothing is skipped on Linux.
   windows:
-    if: ${{ (github.event_name == 'workflow_call' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/int/rc' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'pull_request' && github.base_ref == 'main')) }}
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name == 'workflow_call' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/int/rc' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'pull_request' && github.base_ref == 'main')) }}
     runs-on: windows-latest
     defaults:
       run:
@@ -73,18 +120,22 @@ jobs:
         backend: [memory, sqlite, file]
     steps:
       - uses: actions/checkout@v4
+        if: ${{ needs.changes.outputs.code != 'false' }}
         with:
           ref: ${{ inputs.ref || github.ref }}
 
       - uses: actions/setup-python@v5
+        if: ${{ needs.changes.outputs.code != 'false' }}
         with:
           python-version: "3.13"
           cache: pip
 
       - name: Install dependencies
+        if: ${{ needs.changes.outputs.code != 'false' }}
         run: pip install -r requirements.txt -r requirements-postgres.txt
 
       - name: Run tests (backend=${{ matrix.backend }})
+        if: ${{ needs.changes.outputs.code != 'false' }}
         env:
           SWARM_TEST_BACKEND: ${{ matrix.backend }}
           PYTHONUTF8: "1"
@@ -96,32 +147,39 @@ jobs:
   # exercises it end to end. Also runs the unit suite on sqlite, the backend the e2e script uses
   # nowhere but that is otherwise only covered on Linux above.
   macos:
-    if: ${{ (github.event_name == 'workflow_call' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/int/rc' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'pull_request' && github.base_ref == 'main')) }}
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name == 'workflow_call' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/int/rc' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'pull_request' && github.base_ref == 'main')) }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        if: ${{ needs.changes.outputs.code != 'false' }}
         with:
           ref: ${{ inputs.ref || github.ref }}
 
       - uses: actions/setup-python@v5
+        if: ${{ needs.changes.outputs.code != 'false' }}
         with:
           python-version: "3.11"
           cache: pip
 
       - name: Syntax-check install.sh under bash 3.2
+        if: ${{ needs.changes.outputs.code != 'false' }}
         run: bash -n install.sh
 
       - name: Build the checkout's own venv (e2e/install_test.sh expects $ROOT/.venv already built)
+        if: ${{ needs.changes.outputs.code != 'false' }}
         run: |
           python3 -m venv .venv
           .venv/bin/pip install -q -r requirements.txt -r requirements-postgres.txt
 
       - name: install.sh end to end (bash 3.2)
+        if: ${{ needs.changes.outputs.code != 'false' }}
         run: |
           set -o pipefail
           bash e2e/install_test.sh 2>&1 | tee e2e.log || { python3 .github/scripts/annotate.py e2e.log; exit 1; }
 
       - name: Unit suite (backend=sqlite)
+        if: ${{ needs.changes.outputs.code != 'false' }}
         env:
           SWARM_TEST_BACKEND: sqlite
         run: |
@@ -134,10 +192,13 @@ jobs:
   # as real subprocesses through a stalling TCP proxy and is known to hang intermittently in CI
   # environments; it runs separately and is allowed to fail (see the last step).
   postgres:
+    needs: changes
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: public.ecr.aws/docker/library/postgres:16
+        # Empty image (docs-only change) = no service container.
+        image: ${{ needs.changes.outputs.code != 'false' && 'public.ecr.aws/docker/library/postgres:16' || '' }}
         env:
           POSTGRES_USER: swarm_test
           POSTGRES_PASSWORD: swarm_test_pw
@@ -151,18 +212,22 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@v4
+        if: ${{ needs.changes.outputs.code != 'false' }}
         with:
           ref: ${{ inputs.ref || github.ref }}
 
       - uses: actions/setup-python@v5
+        if: ${{ needs.changes.outputs.code != 'false' }}
         with:
           python-version: "3.13"
           cache: pip
 
       - name: Install dependencies
+        if: ${{ needs.changes.outputs.code != 'false' }}
         run: pip install -r requirements.txt -r requirements-postgres.txt
 
       - name: Write a throwaway SWARM_TEST_CONFIG
+        if: ${{ needs.changes.outputs.code != 'false' }}
         run: |
           mkdir -p "$RUNNER_TEMP/swarm-pg"
           printf 'PGPASSWORD=swarm_test_pw\n' > "$RUNNER_TEMP/swarm-pg/pg.env"
@@ -190,6 +255,7 @@ jobs:
           echo "SWARM_TEST_CONFIG=$RUNNER_TEMP/swarm-pg/test-config.toml" >> "$GITHUB_ENV"
 
       - name: Postgres suite (excluding the known-stall recovery tests)
+        if: ${{ needs.changes.outputs.code != 'false' }}
         run: |
           set -o pipefail
           cd tests
@@ -200,7 +266,7 @@ jobs:
       # (activate, hooks) run wholly on a Postgres board through SWARM_TEST_BACKEND. The summary
       # fails the step when a module ran nothing, a Postgres variant never ran, or a test skipped.
       - name: Drive suites on Postgres
-        if: ${{ !cancelled() }}   # its own signal, whatever the whole-suite step said
+        if: ${{ needs.changes.outputs.code != 'false' && !cancelled() }}   # its own signal, whatever the whole-suite step said
         env:
           SWARM_TEST_BACKEND: postgres
         run: |
@@ -210,10 +276,13 @@ jobs:
           cd .. && python .github/scripts/drive_pg_summary.py drive-pg.log
 
       - name: Known-stall recovery tests (swarm tail/watch vs a stalling proxy; allowed to fail)
+        if: ${{ needs.changes.outputs.code != 'false' }}
         continue-on-error: true
         run: cd tests && python -B -m unittest test_stall.PostgresFollowRecoveryTests -v </dev/null
 
   complexity-analyzer:
+    needs: changes
+    if: ${{ !cancelled() }}
     defaults:
       run:
         shell: bash
@@ -224,33 +293,43 @@ jobs:
         os: ${{ fromJSON((github.event_name == 'workflow_call' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/int/rc' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'pull_request' && github.base_ref == 'main')) && '["ubuntu-latest","windows-latest","macos-latest"]' || '["ubuntu-latest"]') }}
     steps:
       - uses: actions/checkout@v4
+        if: ${{ needs.changes.outputs.code != 'false' }}
         with:
           ref: ${{ inputs.ref || github.ref }}
       - uses: actions/setup-python@v5
+        if: ${{ needs.changes.outputs.code != 'false' }}
         with:
           python-version: "3.11"
       - name: Install skill test dependencies
+        if: ${{ needs.changes.outputs.code != 'false' }}
         run: python -m pip install pytest tree-sitter==0.26.0 tree-sitter-rust==0.24.2 radon==6.0.1 vulture==2.16
       - name: Skill tests (downloaded tools optional; no tool downloads)
+        if: ${{ needs.changes.outputs.code != 'false' }}
         run: |
           set -o pipefail
           python -B -m pytest -q -p no:cacheprovider skills/complexity-analyzer/tests --ignore=skills/complexity-analyzer/tests/fixtures 2>&1 | tee skill-test.log || { python .github/scripts/annotate.py skill-test.log; exit 1; }
 
   install-checks:
+    needs: changes
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        if: ${{ needs.changes.outputs.code != 'false' }}
         with:
           ref: ${{ inputs.ref || github.ref }}
 
       - uses: actions/setup-python@v5
+        if: ${{ needs.changes.outputs.code != 'false' }}
         with:
           python-version: "3.13"
 
       - name: bash -n install.sh
+        if: ${{ needs.changes.outputs.code != 'false' }}
         run: bash -n install.sh
 
       - name: shellcheck install.sh (severity=error, non-blocking)
+        if: ${{ needs.changes.outputs.code != 'false' }}
         continue-on-error: true
         run: |
           if ! command -v shellcheck >/dev/null 2>&1; then
@@ -259,16 +338,17 @@ jobs:
           shellcheck --severity=error install.sh
 
       - name: Try installing the Claude Code CLI
+        if: ${{ needs.changes.outputs.code != 'false' }}
         id: claude_cli
         continue-on-error: true
         run: npm install -g @anthropic-ai/claude-code && claude --version
 
       - name: claude plugin validate .
-        if: steps.claude_cli.outcome == 'success'
+        if: ${{ needs.changes.outputs.code != 'false' && steps.claude_cli.outcome == 'success' }}
         run: claude plugin validate .
 
       - name: Validate plugin manifests' JSON structure (claude CLI unavailable)
-        if: steps.claude_cli.outcome != 'success'
+        if: ${{ needs.changes.outputs.code != 'false' && steps.claude_cli.outcome != 'success' }}
         run: |
           python3 - <<'PY'
           import json, sys
