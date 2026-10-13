@@ -471,7 +471,10 @@ def pins_for(bk: str, job: str, led, paths, pinned=()) -> dict:
             raise Refuse("a brokered requirement must be an absolute, normalised path")
         items.append((path, content))
     for path, content in items:
-        real = os.path.realpath(os.path.expanduser(path)) if content is None else path
+        # a brokered PATH is resolved too (the same key either way; on Windows a short 8.3 name or another case
+        # of the job's root still matches): the broker read it with no link on the way, and a link swapped in
+        # since resolves to where it points, so it is pinned only when that lies in the job's roots
+        real = os.path.realpath(os.path.expanduser(path)) if content is None else os.path.realpath(path)
         if len(real) > PIN_PATH_MAX:
             raise Refuse(f"requirement path {real[:80]}... is over {PIN_PATH_MAX} characters: pin a shorter path")
         if not any(_within(real, r) for r in roots):

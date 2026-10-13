@@ -514,7 +514,7 @@ class TypedProtocolTest(BrokerCase):
         self.assertEqual(argv[argv.index("--config") + 1], "/sup/config.toml")
         self.assertEqual(cli_argv(self.calls[-1]),
                          ["post", "--job=J", f"--key={self.run['session_id']}", "--", "hello", "world"])
-        self.assertEqual(kw["cwd"], os.path.abspath(os.sep))   # the neutral cwd: "/" (Windows: the drive root)
+        self.assertEqual(kw["cwd"], seatbroker.neutral_cwd())   # "/" (Windows: the system drive's root)
         self.assertEqual(kw["env"]["CLAUDE_CODE_SESSION_ID"], self.run["session_id"])
         self.assertEqual(kw["env"]["SWARM_CONFIG"], "/sup/config.toml")
         self.assertNotIn("PYTHONPATH", kw["env"])
@@ -731,12 +731,13 @@ class Round3Test(BrokerCase):
         content.write_text("pinned text")
         led = mock.Mock(pinned_requirements={})
         with mock.patch.object(drive_cli, "_owner_roots", lambda bk, job: [str(root)]):
-            pins = drive_cli.pins_for("bk", "J", led, [], [f"{root}/R.md\n{content}"])
-            self.assertEqual(pins, {f"{root}/R.md": drive_cli.blob_id(b"pinned text")})
-            with self.assertRaises(drive_cli.Refuse):
-                drive_cli.pins_for("bk", "J", led, [], [f"{self.tmp}/elsewhere.md\n{content}"])
-            with self.assertRaises(drive_cli.Refuse):
-                drive_cli.pins_for("bk", "J", led, [], [f"{root}/../wt/R.md\n{content}"])
+            req = os.path.join(str(root), "R.md")
+            pins = drive_cli.pins_for("bk", "J", led, [], [f"{req}\n{content}"])
+            self.assertEqual(pins, {os.path.realpath(req): drive_cli.blob_id(b"pinned text")})
+            with self.assertRaises(drive_cli.Refuse):       # outside the job's roots
+                drive_cli.pins_for("bk", "J", led, [], [f"{os.path.join(str(self.tmp), 'elsewhere.md')}\n{content}"])
+            with self.assertRaises(drive_cli.Refuse):       # not normalised
+                drive_cli.pins_for("bk", "J", led, [], [f"{root}{os.sep}..{os.sep}wt{os.sep}R.md\n{content}"])
 
     def test_rr16_a_brokered_review_posts_the_typed_path_and_keeps_the_report(self):
         from swarm import drive_cli
@@ -1410,16 +1411,38 @@ class WindowsPathsTest(unittest.TestCase):
 class WindowsSettingsTest(SeatHomeCase):
     """The seat settings file gets the read-only attribute on Windows, and is still refreshed there."""
 
+    @unittest.skipUnless(os.name == "nt", "the read-only attribute is Windows'")
     def test_readonly_attribute_set_and_cleared_on_windows(self):
-        calls = []
-        x = Path("x")           # built before os.name is patched (Python 3.11's pathlib picks its class from it)
-        with mock.patch.object(os, "name", "nt"), mock.patch.object(os, "chmod", lambda p, m: calls.append(m)):
-            seathome._windows_readonly(x, True)
-            seathome._windows_readonly(x, False)
-        self.assertEqual(calls, [stat.S_IREAD, stat.S_IREAD | stat.S_IWRITE])
-        with mock.patch.object(os, "chmod", lambda p, m: calls.append(("posix", m))):
-            seathome._windows_readonly(Path("x"), True)
-        self.assertEqual(len(calls), 2)          # nothing on POSIX
+        f = self.tmp / "settings.json"
+        f.write_text("{}")
+        seathome._windows_readonly(f, True)
+        self.assertFalse(os.access(f, os.W_OK))                       # the effect, not the calls
+        attrs = getattr(os.stat(f), "st_file_attributes", None)
+        if attrs is not None:
+            self.assertTrue(attrs & stat.FILE_ATTRIBUTE_READONLY)
+        seathome._windows_readonly(f, False)
+        self.assertTrue(os.access(f, os.W_OK))
+
+    @unittest.skipIf(os.name == "nt", "POSIX: the file mode does it, nothing else is touched")
+    def test_nothing_happens_on_posix(self):
+        f = self.tmp / "settings.json"
+        f.write_text("{}")
+        os.chmod(f, 0o600)
+        seathome._windows_readonly(f, True)
+        self.assertEqual(os.stat(f).st_mode & 0o777, 0o600)
+
+    def test_neutral_cwd_is_the_system_drive_root_on_windows(self):
+        with mock.patch.object(os, "name", "nt"), mock.patch.dict(os.environ, {"SystemDrive": "C:"}):
+            self.assertEqual(seatbroker.neutral_cwd(), "C:\\")
+        if os.name != "nt":
+            self.assertEqual(seatbroker.neutral_cwd(), "/")
+
+    def test_a_refresh_replaces_a_read_only_settings_file(self):
+        h = seathome.prepare(self.cfg, "J", "w")
+        seathome.prepare(self.cfg, "J", "w")                         # again, over the read-only file
+        self.assertTrue((h / seathome.SEAT_SETTINGS).is_file())
+        if os.name == "nt":
+            self.assertFalse(os.access(h / seathome.SEAT_SETTINGS, os.W_OK))
 
     def test_the_transcript_path_uses_native_separators(self):
         import ntpath
