@@ -6,6 +6,10 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-10-13
+
+Same code as the withdrawn 0.3.0 and 0.3.1, re-cut so the release files exist: Swarm installs no supervise timer. Run `swarm upgrade --force` if you installed 0.3.0 or 0.3.1.
+
 ## [0.3.1] - 2026-10-13
 
 Supersedes 0.3.0, which shipped the supervise timer. Run `swarm upgrade --force` if you installed 0.3.0.
