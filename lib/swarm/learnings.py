@@ -248,9 +248,16 @@ def sweep(board, job: str, *, active_too: bool = False) -> list[str]:
     data = board.job_data(job)
     rows = board.agents(job)
     resumed = {a.resume_of for a in rows if a.resume_of}   # a replacement carried its run on
+    try:
+        harvested = _ts(json.loads(data.get(HARVEST_KEY) or "{}").get("at"))
+    except (ValueError, AttributeError):
+        harvested = None
     for a in rows:
         if not _counts(a) or _hkey(a.agent_key) in data or a.agent_key in resumed:
             continue
+        if harvested is not None and a.last_contact_at is not None and harvested >= a.last_contact_at:
+            continue                       # a learnings step ran after everything it did
+
         ended = a.ended_at is not None
         if ended and a.status == "completed":
             continue                       # the normal stop: its own gate ran (SubagentStop)
