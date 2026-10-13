@@ -2747,6 +2747,11 @@ def _parser() -> argparse.ArgumentParser:
     j.add_argument("--goal", help="set or replace the goal of an open job (a judge decides whether it is "
                                   "met); '-' reads it from stdin")
     j.add_argument("--into", metavar="JOB", help="with merge: the job that absorbs <from>")
+    j.add_argument("--job", dest="tags_job", metavar="JOB", help="with tags: the job whose subject tags to show or change")
+    tgm = j.add_mutually_exclusive_group()
+    tgm.add_argument("--add", metavar="SUBJECTS", help="with tags: add these subject tags (e.g. astro-loom,swarm)")
+    tgm.add_argument("--remove", metavar="SUBJECTS", help="with tags: remove these subject tags")
+    tgm.add_argument("--set", metavar="SUBJECTS", help="with tags: replace them (--set '' clears them)")
     mv = sub.add_parser("move", help="move one live agent to another open job without stopping it")
     mv.add_argument("--as", dest="name"); mv.add_argument("--key")
     mv.add_argument("--to", required=True, metavar="JOB", help="the open job it moves to")
@@ -2801,10 +2806,6 @@ def _parser() -> argparse.ArgumentParser:
     le.add_argument("--tags", action="append", default=[], metavar="SUBJECTS",
                     help="more subject tags for these learnings (the job's own are always added)")
     le.add_argument("facts", nargs="?", help="use - to read facts from stdin; one fact per nonempty line")
-    tg = sub.add_parser("tags", help="show or change a job's memory subject tags")
-    tg.add_argument("--job", required=True)
-    tg.add_argument("--set", metavar="SUBJECTS", help="replace them, e.g. swarm,astro-loom")
-    tg.add_argument("--add", metavar="SUBJECTS"); tg.add_argument("--remove", metavar="SUBJECTS")
     rc = sub.add_parser("recall", help="search project memory for any subject (all tags of the configured banks)")
     rc.add_argument("--job", required=True)
     rc.add_argument("--tags", metavar="SUBJECTS", help="narrow to memories with one of these subject tags")
@@ -4000,26 +4001,47 @@ def _learn_by() -> str:
     return f"{hosts.detect_cli_host(os.environ) or 'cli'}:{os.environ.get('USER') or 'person'}"[:60]
 
 
-def cmd_tags(cfg: dict, args) -> int:
-    """`swarm tags --job J [--set|--add|--remove SUBJECTS]`: the job's memory subject tags (swarm.learnings)."""
+def _job_tags(board, cfg: dict, args) -> int:
+    """`swarm job tags --job J [--add S | --remove S | --set S]`: the job's memory subject tags (no flag: list).
+    Any job state; every change posts a board notice from "swarm". `swarm remember` reads them at each call."""
     from swarm import learnings
-    from swarm.board import open_board
-    try:
-        new = {k: learnings.parse_tags(getattr(args, k)) for k in ("set", "add", "remove") if getattr(args, k)}
-    except ValueError as exc:
-        print(term_safe(f"swarm tags: {exc}"), file=sys.stderr)
+    if not args.tags_job or args.rest or args.into or args.goal is not None or args.description:
+        print("usage: swarm job tags --job J [--add a,b | --remove a | --set a,b]", file=sys.stderr)
         return 2
-    with open_board(cfg) as board:
-        if board.job_status(args.job) is None:
-            print(f"no such job: {term_safe(args.job)}", file=sys.stderr)
-            return 1
-        tags = [t for t in (board.job_data(args.job).get(learnings.TAGS_KEY) or "").split(",") if t]
-        if new:
-            tags = new.get("set", tags) + new.get("add", [])
-            tags = [t for t in dict.fromkeys(tags) if t not in new.get("remove", [])][:learnings.MAX_TAGS]
-            board.set_job_data(args.job, learnings.TAGS_KEY, ",".join(tags) or None)
-        shown = tags or learnings.job_tags(board, args.job)
-    print(f"{args.job}: " + (", ".join(shown) if shown else "(no subject tags: its memories carry none)"))
+    job = args.tags_job
+    try:
+        change = next(((k, learnings.parse_tags(getattr(args, k))) for k in ("set", "add", "remove")
+                       if getattr(args, k) is not None), None)
+    except ValueError as exc:
+        print(term_safe(f"swarm job tags: {exc}"), file=sys.stderr)
+        return 2
+    if board.job_status(job) is None:
+        print(f"no such job: {term_safe(job)}", file=sys.stderr)
+        return 1
+    stored = [t for t in (board.job_data(job).get(learnings.TAGS_KEY) or "").split(",") if t]
+    if change is not None:
+        kind, given = change
+        if kind == "set":
+            tags = given
+        elif kind == "add":
+            tags = stored + given
+        else:
+            tags = [t for t in stored if t not in given]
+        tags = list(dict.fromkeys(tags))
+        if len(tags) > learnings.MAX_TAGS:
+            print(f"swarm job tags: at most {learnings.MAX_TAGS} subject tags a job (it would have {len(tags)})",
+                  file=sys.stderr)
+            return 2
+        if tags != stored:
+            board.set_job_data(job, learnings.TAGS_KEY, ",".join(tags) or None)
+            who = os.environ.get("USER") or "person"
+            board.post(job, "swarm", term_safe(f"subject tags of {job} changed by {who}: "
+                       f"{', '.join(stored) or '(none)'} -> {', '.join(tags) or '(none)'}")[:900])
+            stored = tags
+            print(f"{job}: tags changed")
+    shown = stored or learnings.job_tags(board, job)
+    print(f"{job}: " + (", ".join(shown) if shown else "(no subject tags: its memories carry none)")
+          + ("" if stored else "  [from its project]" if shown else ""))
     return 0
 
 
@@ -4091,7 +4113,6 @@ COMMANDS = {
     "remember": cmd_remember,
     "learn": cmd_learn,
     "recall": cmd_recall,
-    "tags": cmd_tags,
     "spool": lambda cfg, args: cmd_spool_retry(cfg),
     "snapshot": lambda cfg, args: cmd_snapshot(cfg, args),
     "tail": lambda cfg, args: cmd_tail(cfg, args.job, args.backlog, args.interval, not args.no_agents,
@@ -4161,6 +4182,8 @@ def _set_goal(board, cfg: dict, job: str, goal: str) -> int:
 def _board_job(board, cfg: dict, args) -> int | None:
     if args.job == "merge" and (args.rest or args.into):
         return _job_merge(board, cfg, args)
+    if args.job == "tags":
+        return _job_tags(board, cfg, args)
     if args.rest or args.into:
         print("swarm job: unexpected arguments (merge: swarm job merge <from> --into <to>)", file=sys.stderr)
         return 2

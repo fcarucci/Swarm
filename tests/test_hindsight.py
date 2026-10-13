@@ -159,7 +159,7 @@ class MemoryTests(HindsightEnv):
         self.assertEqual(len(retain), 1)
         item = retain[0]["body"]["items"][0]
         self.assertEqual(item["content"], "etcd needs 3 members")
-        self.assertEqual(item["tags"], ["swarm", "job:J", f"agent:{me}"])
+        self.assertEqual(item["tags"], ["proj"])  # the job's subject tags (none set: its project)
         # plus the provenance `swarm remember` knows (host, captured_at...: test_provenance_remember)
         self.assertEqual({k: item["metadata"][k] for k in ("source", "job", "agent", "project")},
                          {"source": "swarm", "job": "J", "agent": me, "project": "proj"})
