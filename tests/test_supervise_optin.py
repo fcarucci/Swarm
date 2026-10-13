@@ -47,7 +47,7 @@ class DefaultTests(_unittest.TestCase):
     def install_timer(self):
         d = systemd.unit_dir()
         d.mkdir(parents=True, exist_ok=True)
-        (d / systemd.TIMER).write_text("[Timer]\n")
+        (d / systemd.LEGACY_TIMER).write_text("[Timer]\n")
 
     def test_off_with_no_config(self):
         self.assertFalse(st.settings(base_config())["enabled"])
@@ -57,21 +57,12 @@ class DefaultTests(_unittest.TestCase):
         self.install_timer()                                          # even with a timer around
         self.assertFalse(st.settings(swarm.load_config(self.config))["enabled"])
 
-    def test_existing_config_without_the_key_stays_on_without_a_timer(self):
-        # Francesco's Mac, a Linux box without systemd: no timer file, a config from before the
-        # opt-in. Stuck-agent closing (gated by enabled) must keep running.
+    def test_existing_config_without_the_key_is_off(self):
+        # a config from before the opt-in: no key is off (no "implied on"), with or without a legacy timer
         self.config.write_text('[board]\nbackend = "file"\n')
-        with mock.patch("sys.platform", "darwin"):
-            cfg = swarm.load_config(self.config)
-            self.assertTrue(st.enabled(cfg))
-            self.assertTrue(st.enabled_implied(cfg))
-
-    def test_existing_config_without_the_key_and_a_timer_stays_on(self):
-        self.config.write_text('[board]\nbackend = "file"\n')
+        self.assertFalse(st.enabled(swarm.load_config(self.config)))
         self.install_timer()
-        cfg = swarm.load_config(self.config)
-        self.assertTrue(st.settings(cfg)["enabled"])
-        self.assertTrue(st.enabled_implied(cfg))
+        self.assertFalse(st.settings(swarm.load_config(self.config))["enabled"])
 
     def test_no_config_file_with_a_timer_is_off(self):
         # no config file at all is a new machine (bootstrap writes the example, enabled = false)
@@ -87,7 +78,6 @@ class DefaultTests(_unittest.TestCase):
         self.config.write_text('[supervise]\nenabled = true\n')
         cfg = swarm.load_config(self.config)
         self.assertTrue(st.settings(cfg)["enabled"])
-        self.assertFalse(st.enabled_implied(cfg))
 
 
 class SafeEnv(Env):
@@ -103,48 +93,20 @@ class SafeEnv(Env):
 
 
 class SwitchTests(SafeEnv):
-    def test_enable_writes_the_key_and_installs_the_timer(self):
+    def test_enable_and_disable_are_gone_and_install_nothing(self):
+        before = self.config.read_text()
         run = FakeRun()
-        os.environ.pop("SWARM_NO_SYSTEMD", None)   # SafeEnv restores the environment; run is fake
-        with mock.patch("sys.platform", "linux"), mock.patch.object(systemd.shutil, "which", return_value="/usr/bin/systemctl"), \
-                mock.patch("swarm.supervisor.systemd.subprocess.run", run):
-            rc, out, err = self.cli("supervise", "enable")
-        self.assertEqual(rc, 0, err)
-        data = tomllib.loads(self.config.read_text())
-        self.assertIs(data["supervise"]["enabled"], True)
-        self.assertIn("[board]", self.config.read_text())   # the rest of the file is kept
-        self.assertIn(["systemctl", "--user", "enable", "--now", systemd.TIMER], run.calls)
-        self.assertTrue((systemd.unit_dir() / systemd.TIMER).exists())
-
-    def test_enable_without_systemctl_exits_zero_and_says_so(self):
         os.environ.pop("SWARM_NO_SYSTEMD", None)
-        with mock.patch.object(systemd.shutil, "which", return_value=None), \
-                mock.patch("sys.platform", "linux"):
-            rc, out, err = self.cli("supervise", "enable")
-        self.assertEqual(rc, 0, err)
-        self.assertIn("no systemctl here", out)
-        self.assertIs(tomllib.loads(self.config.read_text())["supervise"]["enabled"], True)
-
-    def test_enable_on_macos_suggests_no_cron(self):
-        os.environ.pop("SWARM_NO_SYSTEMD", None)
-        run = FakeRun()
-        with mock.patch("sys.platform", "darwin"), \
-                mock.patch("swarm.supervisor.systemd.subprocess.run", run):
-            rc, out, err = self.cli("supervise", "enable")
-        self.assertEqual(rc, 0, err)
-        self.assertIn("macOS", out)
-        self.assertNotIn("cron", out)
-        self.assertEqual(run.calls, [])
-        self.assertIs(tomllib.loads(self.config.read_text())["supervise"]["enabled"], True)
-
-    def test_disable_writes_false_and_stops_the_timer(self):
-        run = FakeRun()
         with mock.patch.object(systemd.shutil, "which", return_value="/usr/bin/systemctl"), \
                 mock.patch("swarm.supervisor.systemd.subprocess.run", run):
-            rc, out, err = self.cli("supervise", "disable")
-        self.assertEqual(rc, 0, err)
-        self.assertIs(tomllib.loads(self.config.read_text())["supervise"]["enabled"], False)
-        self.assertIn(["systemctl", "--user", "disable", "--now", systemd.TIMER], run.calls)
+            for sub in ("enable", "disable"):
+                with self.subTest(sub=sub):
+                    with self.assertRaises(SystemExit) as raised:   # argparse: invalid choice
+                        self.cli("supervise", sub)
+                    self.assertNotEqual(raised.exception.code, 0)
+        self.assertEqual(run.calls, [])
+        self.assertEqual(self.config.read_text(), before)
+        self.assertFalse((systemd.unit_dir() / systemd.LEGACY_TIMER).exists())
 
 
 class UninstallTests(SafeEnv):
@@ -153,7 +115,7 @@ class UninstallTests(SafeEnv):
         self.home = paths.home()
         self.units = systemd.unit_dir()
         self.units.mkdir(parents=True, exist_ok=True)
-        for name in (systemd.TIMER, systemd.SERVICE):
+        for name in (systemd.LEGACY_TIMER, systemd.LEGACY_SERVICE):
             (self.units / name).write_text("x\n")
         self.launcher = paths.launcher_path()
         self.launcher.parent.mkdir(parents=True, exist_ok=True)
@@ -167,6 +129,7 @@ class UninstallTests(SafeEnv):
 
     def uninstall(self, *extra, rc=0):
         run = FakeRun(rc)
+        os.environ.pop("SWARM_NO_SYSTEMD", None)   # SafeEnv restores the environment; run is fake
         with mock.patch.object(systemd.shutil, "which", return_value="/usr/bin/systemctl"), \
                 mock.patch("swarm.supervisor.systemd.subprocess.run", run):
             rc, out, err = self.cli("uninstall", *extra)
@@ -175,9 +138,9 @@ class UninstallTests(SafeEnv):
     def test_removes_units_launcher_venv_and_settings_entries(self):
         rc, out, err, run = self.uninstall()
         self.assertEqual(rc, 0, err)
-        self.assertIn(["systemctl", "--user", "disable", "--now", systemd.TIMER], run.calls)
-        self.assertFalse((self.units / systemd.TIMER).exists())
-        self.assertFalse((self.units / systemd.SERVICE).exists())
+        self.assertIn(["systemctl", "--user", "disable", "--now", systemd.LEGACY_TIMER], run.calls)
+        self.assertFalse((self.units / systemd.LEGACY_TIMER).exists())
+        self.assertFalse((self.units / systemd.LEGACY_SERVICE).exists())
         self.assertFalse(self.launcher.exists())
         self.assertFalse(paths.share_dir().exists())
         s = json.loads(self.claude_settings.read_text())
@@ -201,8 +164,8 @@ class UninstallTests(SafeEnv):
     def test_a_failed_timer_stop_removes_nothing(self):
         rc, out, err, run = self.uninstall(rc=1)   # e.g. no user systemd bus in this shell
         self.assertEqual(rc, 1)
-        self.assertTrue((self.units / systemd.TIMER).exists())
-        self.assertTrue((self.units / systemd.SERVICE).exists())
+        self.assertTrue((self.units / systemd.LEGACY_TIMER).exists())
+        self.assertTrue((self.units / systemd.LEGACY_SERVICE).exists())
         self.assertTrue(paths.share_dir().exists())
         self.assertTrue(self.launcher.exists())
         self.assertIn("systemctl --user disable --now", err)
@@ -263,7 +226,7 @@ class UninstallTests(SafeEnv):
         rc, out, err, run = self.uninstall("--dry-run")
         self.assertEqual(rc, 0, err)
         self.assertEqual(run.calls, [])
-        self.assertTrue((self.units / systemd.TIMER).exists())
+        self.assertTrue((self.units / systemd.LEGACY_TIMER).exists())
         self.assertTrue(self.launcher.exists())
         self.assertIn(str(self.launcher), out)
 

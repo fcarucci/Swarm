@@ -40,8 +40,9 @@ class DoctorTests(unittest.TestCase):
         failing = {n: c.detail for n, c in checks.items() if c.ok is False}
         self.assertEqual(failing, {})
         self.assertIsNone(checks["orchestrator model"].ok)
-        # this config predates the opt-in (no [supervise] enabled): the supervisor stays on
-        self.assertTrue(checks["supervise" if paths.IS_WINDOWS else "supervise config"].ok)
+        # no [supervise] enabled is off (no "implied on" for old configs), and no timer line either way
+        self.assertTrue(checks["supervise"].ok)
+        self.assertFalse([n for n in checks if "timer" in n])
 
     @posix_only("supervisor uses Linux systemd")
     def test_clean_install_without_manager_or_harness_warns(self):
@@ -58,41 +59,15 @@ class DoctorTests(unittest.TestCase):
         self.assertFalse(any(c.ok is False for c in checks.values()))
 
     @posix_only("supervisor uses Linux systemd")
-    def test_timer_unknown_from_shell_without_bus_is_not_fail(self):
-        from swarm.supervisor import settings as st, systemd
-        with open(self.cfg, "a") as fh:
-            fh.write("[supervise]\nenabled = true\n")
+    def test_a_legacy_timer_fails_doctor(self):
+        from swarm.supervisor import systemd
         bootstrap.bootstrap("claude", config=self.cfg)
-        st.save_state({"last_run_at": dt.datetime.now(dt.timezone.utc).isoformat()})
-        with mock.patch("swarm.supervisor.runner.scope_available", return_value=True), \
-             mock.patch.object(systemd, "timer_state", return_value={}), \
-             mock.patch.object(systemd, "linger", return_value=None):
-            checks = self.by_name(bootstrap.doctor("claude", config=self.cfg))
-        self.assertIs(checks["supervise timer"].ok, True)
-        self.assertIn("unknown (no user bus from this shell)", checks["supervise timer"].detail)
-
-    def _timer_check_with_last_run(self, minutes_ago):
-        from swarm.supervisor import settings as st, systemd
-        with open(self.cfg, "a") as fh:
-            fh.write("[supervise]\nenabled = true\ntimer_minutes = 2\n")
-        bootstrap.bootstrap("claude", config=self.cfg)
-        st.save_state({"last_run_at": (dt.datetime.now(dt.timezone.utc)
-                                       - dt.timedelta(minutes=minutes_ago)).isoformat()})
-        with mock.patch("swarm.supervisor.runner.scope_available", return_value=True), \
-             mock.patch.object(systemd, "timer_state", return_value={}), \
-             mock.patch.object(systemd, "linger", return_value=None):
-            return self.by_name(bootstrap.doctor("claude", config=self.cfg))["supervise timer"]
-
-    @posix_only("supervisor uses Linux systemd")
-    def test_timer_unknown_is_not_ok_for_a_future_dated_last_run(self):
-        self.assertIsNot(self._timer_check_with_last_run(-5).ok, True)
-
-    @posix_only("supervisor uses Linux systemd")
-    def test_timer_unknown_is_not_ok_for_a_stale_last_run(self):
-        # timer_minutes = 2: the recency window is 2 x 2 = 4 minutes; 5 minutes ago is outside it
-        check = self._timer_check_with_last_run(5)
-        self.assertIs(check.ok, False)
-        self.assertNotIn("unknown", check.detail)
+        units = systemd.unit_dir()
+        units.mkdir(parents=True, exist_ok=True)
+        (units / systemd.LEGACY_TIMER).write_text("x\n")
+        checks = self.by_name(bootstrap.doctor("claude", config=self.cfg))
+        self.assertIs(checks["legacy timer"].ok, False)
+        self.assertEqual(checks["legacy timer"].detail, systemd.LEGACY_FOUND)
 
     @posix_only("pre-0.1 skill hooks never existed on Windows")
     def test_doctor_flags_legacy_hooks_while_plugin_installed(self):

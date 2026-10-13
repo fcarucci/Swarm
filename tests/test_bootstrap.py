@@ -159,7 +159,9 @@ class BootstrapTests(unittest.TestCase):
         self._sqlite_config()
         stamp = paths.host_dir() / "bootstrap-claude-x"
         first = bootstrap.bootstrap("claude", config=self.cfg, stamp=stamp)
-        self.assertEqual({s.name: s.status for s in first}["supervisor"], "skipped")
+        names = {s.name for s in first}   # no timer step: nothing installs one, no legacy timer to remove
+        self.assertNotIn("supervisor", names)
+        self.assertNotIn("legacy timer", names)
         self.assertTrue(stamp.exists(), bootstrap.format_steps(first))
         second = bootstrap.bootstrap("claude", config=self.cfg, stamp=stamp)
         self.assertTrue(all(s.status in ("ok", "skipped") for s in second), bootstrap.format_steps(second))
@@ -206,8 +208,7 @@ class BootstrapTests(unittest.TestCase):
         by = {s.name: s for s in steps}
         self.assertEqual(by["config"].status, "failed")
         self.assertIn("invalid TOML at line 4", by["config"].detail)
-        self.assertEqual((by["board"].status, by["host"].status, by["supervisor"].status,
-                          by["migrate"].status), ("skipped",) * 4)
+        self.assertEqual((by["board"].status, by["host"].status, by["migrate"].status), ("skipped",) * 3)
         self.assertFalse(stamp.exists())
         self.assertFalse((self.home / ".codex").exists())                 # nothing set up from a broken config
         text = bootstrap.take_notices()

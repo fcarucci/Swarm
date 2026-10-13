@@ -165,7 +165,7 @@ class DriveReferenceSection(unittest.TestCase):
     def test_section_exists_and_covers_the_contract(self):
         self.assertTrue(self.body, "docs/REFERENCE.md needs a 'Drive mode' section")
         for needle in ("MET", "UNREACHABLE", "CANCELLED", "GOAL-READY", "swarm seat request", "requester",
-                       "--no-drive", "supervise enable", "[drive.models]", "--model", "swarm land",
+                       "--no-drive", "[drive.models]", "--model", "swarm land",
                        "swarm halt", "swarm-record:"):
             self.assertIn(needle, self.body, needle)
 
@@ -227,7 +227,7 @@ class SkillsNeverTellRequesterToSpawn(unittest.TestCase):
     def test_swarm_skill_drive_section_covers_seat_review_land_halt(self):
         body = heading_body(SWARM_SKILL.read_text(), "Drive mode")
         for needle in ("swarm seat request", "swarm review", "swarm land", "swarm halt", "swarm unhalt",
-                       "--no-drive", "supervise enable", "--default", "swarm goal-ready", "[drive.models]"):
+                       "--no-drive", "--default", "swarm goal-ready", "[drive.models]"):
             self.assertIn(needle, body, needle)
 
     def test_hosts_and_recovery_describe_the_driver(self):

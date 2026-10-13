@@ -1,8 +1,7 @@
-"""Task 6a: `swarm activate` in drive mode. A goal implies drive ([A]); the supervisor must be enabled,
-its timer running and a pass recent, on a platform with a timer ([M1]); activation is five durable steps
+"""Task 6a: `swarm activate` in drive mode. A goal implies drive ([A]); no timer is needed on any platform
+([T21]: the session driver drives the job); activation is five durable steps
 that the next pass completes after any crash ([RR1]); budgets and models are configurable ([D1], [P1]);
-credentials are pinned from an allowlist ([G2]); `swarm supervise disable|enable` halts and unhalts the
-drive ledgers ([F5]); `swarm drive budget|models` change a running job without a rollover. Unit cases
+credentials are pinned from an allowlist ([G2]); `swarm drive budget|models` change a running job without a rollover. Unit cases
 run under a temporary HOME in the suite sandbox; the CLI cases use the board of test_hooks_cli.Env."""
 from __future__ import annotations
 
@@ -23,12 +22,11 @@ from support import SANDBOX, base_config, home_env, posix_only  # noqa: F401
 from test_hooks_cli import Env  # noqa: E402  (sets sys.path)
 
 from swarm import cli as swarm, drive_activate as da, enrolment  # noqa: E402
-from swarm.supervisor import ledger, settings as sup_settings, systemd  # noqa: E402
+from swarm.supervisor import ledger, settings as sup_settings  # noqa: E402
 
 GOAL = "The service survives the loss of any one node."
 NOW = dt.datetime(2026, 10, 10, 12, 0, tzinfo=dt.timezone.utc)
 FRESH = {"last_run_at": (NOW - dt.timedelta(minutes=1)).isoformat()}
-ACTIVE_TIMER = {"ActiveState": "active", "UnitFileState": "enabled"}
 RECORD = re.compile(r"swarm-record: kind=([a-z_]+) id=(\d+) rev=(\d+)")
 
 
@@ -747,11 +745,6 @@ class DriveCli(Env):
         self.ensure = mock.patch.object(session_driver, "ensure", return_value="started")
         self.ensured = self.ensure.start()
         self.addCleanup(self.ensure.stop)
-        step = types.SimpleNamespace(name="supervisor", status="ok", detail="swarm-supervise.timer: every 5 min")
-        for target in (mock.patch.object(systemd, "install", return_value=step),
-                       mock.patch("swarm.supervisor.switch.stop_timer", return_value="stopped")):
-            target.start()
-            self.addCleanup(target.stop)
 
     def enable_supervisor(self, enabled: bool):
         self.config.write_text(self.base_toml + f"\n[supervise]\nenabled = {str(enabled).lower()}\n"
@@ -1168,20 +1161,6 @@ class DriveCli(Env):
         self.assertIn("enrolled agent session", err)
         self.assertEqual(self.ledger_of().generation_requested, 1)
 
-    @posix_only("drive mode is not supported on Windows")
-    def test_supervise_disable_stops_the_live_seats(self):
-        self.activate("--workdir", str(self.work))
-        run = {"job": "J", "unit": "unit-1.scope"}
-        stop = mock.Mock()
-        from swarm.supervisor import runner
-        with mock.patch.object(runner, "_run_paths", return_value=[(1, Path("run-1.json")), (2, Path("run-2.json"))]), \
-                mock.patch.object(runner, "_read_run", side_effect=lambda name, board: dict(run, job="J") if name == "run-1.json" else {"job": "other", "unit": "x"}), \
-                mock.patch.object(runner, "_session_alive", return_value=True), \
-                mock.patch.object(runner, "_stop_session", stop):
-            rc, _, err = self.cli("supervise", "disable")
-        self.assertEqual(rc, 0, err)
-        stop.assert_called_once_with(run)
-
     def test_drive_budget_changes_without_rollover(self):
         self.activate("--workdir", str(self.work))
         before = self.ledger_of()
@@ -1275,18 +1254,6 @@ class DriveCli(Env):
         self.assertEqual(rc, 1)
         self.assertIn("needs a person", err)
 
-    @posix_only("supervise is POSIX-only (its systemd timer)")
-    def test_supervise_disable_halts_drive_ledgers_and_enable_unhalts(self):
-        self.activate("--workdir", str(self.work))
-        rc, out, err = self.cli("supervise", "disable")
-        self.assertEqual(rc, 0, err)
-        self.assertIn("halted", out)
-        self.assertEqual(self.ledger_of().halted["reason"], "supervisor disabled")
-        rc, out, err = self.cli("supervise", "enable")
-        self.assertEqual(rc, 0, err)
-        self.assertIsNone(self.ledger_of().halted)
-        self.assertGreaterEqual(self.ledger_of().halted_total_seconds, 0.0)
-
     def test_status_shows_effective_budget_and_models(self):
         self.activate("--workdir", str(self.work), "--model", "engineer=sonnet")
         rc, out, err = self.cli("status", "--job", "J")
@@ -1294,65 +1261,6 @@ class DriveCli(Env):
         self.assertIn("drive budget J: cost 0.00/40.00 USD (reserve 5.00)", out)
         self.assertIn("engineer=sonnet", out)
         self.assertIn("lead=opus", out)
-
-    @posix_only("supervise is POSIX-only (its systemd timer)")
-    def test_supervise_disable_refused_for_seat_session(self):
-        self.activate("--workdir", str(self.work))
-        FakePerson.seat_sessions = ("seat-session",)
-        with mock.patch.object(FakePerson, "tty", False), \
-                mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "seat-session"}):
-            rc, _, err = self.cli("supervise", "disable")
-        self.assertEqual(rc, 1)
-        self.assertIsNone(self.ledger_of().halted)
-        self.assertIn("enabled = true", self.config.read_text())
-
-
-class HaltShiftTests(HomeCase):
-    def setUp(self):
-        super().setUp()
-        self.no_sessions = mock.patch.object(da, "stop_job_sessions", return_value=[])   # no runs here
-        self.no_sessions.start()
-        self.addCleanup(self.no_sessions.stop)
-
-    def test_one_failing_ledger_does_not_stop_the_others(self):
-        cfg = {"supervise": {"enabled": True}}
-        with mock.patch.object(da, "board_key", return_value="bk"):
-            for job in ("J1", "J2"):
-                ledger.create("bk", job, budgets=da.budget_defaults({}), activated_at=NOW.isoformat())
-            real_save = da._save
-
-            def flaky(bk, job, mutate):
-                if job == "J1":
-                    raise da.DriveError("ledger is busy")
-                return real_save(bk, job, mutate)
-            with mock.patch.object(da, "_save", side_effect=flaky):
-                halted, failed = da.halt_drive_jobs(cfg, actor="person", now=NOW)
-        self.assertEqual(halted, ["J2"])
-        self.assertEqual(failed, [("J1", "ledger is busy")])
-
-    def test_supervise_enable_unhalts_and_shifts_deadlines(self):
-        cfg = base_config()
-        cfg["supervise"] = {"enabled": True}
-        with mock.patch.object(da, "board_key", return_value="bk"):
-            ledger.create("bk", "J", budgets=da.budget_defaults({}), activated_at=NOW.isoformat())
-            t0 = NOW
-            self.assertEqual(da.halt_drive_jobs(cfg, actor="person", now=t0), (["J"], []))
-            self.assertEqual(da.halt_drive_jobs(cfg, actor="person", now=t0), ([], []))
-            self.assertEqual(da.unhalt_drive_jobs(cfg, now=t0 + dt.timedelta(seconds=120)), (["J"], []))
-            led = ledger.load("bk", "J")
-            self.assertIsNone(led.halted)
-            self.assertAlmostEqual(led.halted_total_seconds, 120.0)
-
-    def test_person_halts_are_not_unhalted_by_enable(self):
-        cfg = {"supervise": {"enabled": True}}
-        with mock.patch.object(da, "board_key", return_value="bk"):
-            ledger.create("bk", "J", budgets=da.budget_defaults({}), activated_at=NOW.isoformat())
-            led = ledger.load("bk", "J")
-            led.halted = {"by": "person", "at": NOW.isoformat(), "reason": "stopped by hand"}
-            led.save()
-            self.assertEqual(da.unhalt_drive_jobs(cfg, now=NOW), ([], []))
-            self.assertEqual(ledger.load("bk", "J").halted["reason"], "stopped by hand")
-
 
 def json_str(text: str) -> str:
     return json.dumps(text)

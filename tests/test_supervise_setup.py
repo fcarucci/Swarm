@@ -1,4 +1,4 @@
-"""Activation switches, marker cwd, user timer setup, and supervisor doctor checks."""
+"""Activation switches, marker cwd, the legacy timer removal, and supervisor doctor checks."""
 from __future__ import annotations
 
 import sys as _sys
@@ -56,71 +56,6 @@ class ActivateTests(Env):
             self.assertEqual(marker.stat().st_mode & 0o777, 0o600)
 
 
-class SystemdTests(Env):
-    def setUp(self):
-        super().setUp()
-        env = mock.patch.dict(os.environ, {"SWARM_NO_SYSTEMD": "0", "XDG_CONFIG_HOME": str(self.tmp / "xdg")})
-        env.start()
-        self.addCleanup(env.stop)
-
-    def test_units_text(self):
-        service = systemd.service_text(Path("/h/.local/bin/swarm"), Path("/h/.config/swarm/config.toml"))
-        self.assertIn("ExecStart=/h/.local/bin/swarm supervise", service)
-        self.assertIn("Environment=SWARM_CONFIG=/h/.config/swarm/config.toml", service)
-        self.assertIn("KillMode=process", service)
-        self.assertIn("Type=oneshot", service)
-        self.assertIn("OnUnitActiveSec=2min", systemd.timer_text(2))
-        self.assertIn("WantedBy=timers.target", systemd.timer_text(2))
-
-    def test_escapes_spaces_and_percent_in_unit_values(self):
-        launcher = Path("/h/my dir/100%cpu/swarm")
-        config = Path("/h/my config/50%done/config.toml")
-        service = systemd.service_text(launcher, config)
-        # a space in a value must be quoted; every % must be doubled (systemd specifier escaping)
-        self.assertIn('ExecStart="/h/my dir/100%%cpu/swarm" supervise', service)
-        self.assertIn('Environment="SWARM_CONFIG=/h/my config/50%%done/config.toml"', service)
-        # no unescaped single % or unquoted space slipped through
-        self.assertNotIn("100%cpu", service)
-        self.assertNotIn("50%done", service)
-
-    @posix_only("needs POSIX file modes (Windows has ACLs)")
-    def test_install_writes_private_units_and_enables(self):
-        run = FakeRun()
-        with mock.patch("shutil.which", return_value="/usr/bin/systemctl"):
-            step = systemd.install(self.config, 2, run=run)
-        self.assertEqual(step.status, "changed")
-        directory = self.tmp / "xdg/systemd/user"
-        self.assertEqual(oct((directory / systemd.SERVICE).stat().st_mode & 0o777), "0o600")
-        self.assertEqual(oct((directory / systemd.TIMER).stat().st_mode & 0o777), "0o600")
-        self.assertIn(f"ExecStart={paths.agent_bin()} supervise", (directory / systemd.SERVICE).read_text())
-        self.assertEqual(run.calls, [["systemctl", "--user", "daemon-reload"],
-                                     ["systemctl", "--user", "enable", "--now", systemd.TIMER]])
-        again = FakeRun()
-        with mock.patch("shutil.which", return_value="/usr/bin/systemctl"):
-            self.assertEqual(systemd.install(self.config, 2, run=again).status, "ok")
-        self.assertEqual(again.calls, [["systemctl", "--user", "enable", "--now", systemd.TIMER]])
-
-    def test_install_disabled_in_tests_and_without_systemctl(self):
-        with mock.patch.dict(os.environ, {"SWARM_NO_SYSTEMD": "1"}):
-            self.assertEqual(systemd.install(self.config, 2, run=FakeRun()).status, "skipped")
-        with mock.patch("shutil.which", return_value=None):
-            self.assertEqual(systemd.install(self.config, 2, run=FakeRun()).status, "manual")
-
-    def test_bus_error_gets_a_friendly_hint(self):
-        run = FakeRun(rc=1, err="Failed to connect to bus: No such file or directory\n")
-        with mock.patch("shutil.which", return_value="/usr/bin/systemctl"):
-            step = systemd.install(self.config, 2, run=run)
-        self.assertEqual(step.status, "failed")
-        self.assertEqual(step.detail, "no user systemd manager (fix: loginctl enable-linger $USER)")
-
-    def test_bootstrap_step_only_when_enabled(self):
-        self.cfg["supervise"] = {"enabled": False}
-        self.assertEqual(bootstrap.supervisor_step(self.cfg, self.config, run=FakeRun()).status, "skipped")
-        self.cfg["supervise"] = {"enabled": True}
-        with mock.patch("shutil.which", return_value="/usr/bin/systemctl"):
-            self.assertEqual(bootstrap.supervisor_step(self.cfg, self.config, run=FakeRun()).status, "changed")
-
-
 class DoctorSupervisorTests(Env):
     def checks(self, run=None, which=None, host="claude", scope=True):
         which = which or (lambda b, path=None: f"/usr/bin/{b}")
@@ -137,18 +72,15 @@ class DoctorSupervisorTests(Env):
         self.cfg["supervise"] = {"enabled": True}
         st.save_state({"last_run_at": dt.datetime.now(dt.timezone.utc).isoformat()})
         checks = self.checks()
-        for name in ("supervise config", "supervise timer", "supervise last run", "linger", "supervise harness",
-                     "replacement scope"):
+        for name in ("supervise config", "linger", "supervise harness", "replacement scope"):
             self.assertTrue(checks[name].ok, name)
+        self.assertFalse([n for n in checks if "timer" in n or "last run" in n])
 
     def test_enabled_problems_have_fixes(self):
         self.cfg["supervise"] = {"enabled": True}
         checks = self.checks(run=FakeRun(show="ActiveState=inactive\nUnitFileState=disabled\n", linger="Linger=no\n"),
                              which=lambda b, path=None: None)
-        self.assertFalse(checks["supervise timer"].ok)
-        self.assertIn("enable --now swarm-supervise.timer", checks["supervise timer"].fix)
-        self.assertFalse(checks["supervise last run"].ok)
-        self.assertIn("never", checks["supervise last run"].detail)
+        self.assertNotIn("supervise timer", checks)
         self.assertIsNone(checks["linger"].ok)
         self.assertIsNone(checks["supervise harness"].ok)
 
@@ -161,13 +93,12 @@ class DoctorSupervisorTests(Env):
         checks = self.checks()
         self.assertIsNone(checks["supervise off file"].ok)
         self.assertIn(str(off_file), checks["supervise off file"].fix)
-        self.assertFalse(checks["supervise last run"].ok)
-        self.assertIn("7 min ago", checks["supervise last run"].detail)
+        self.assertNotIn("supervise last run", checks)
 
-    def test_timer_and_linger_unknown_when_queries_fail(self):
+    def test_linger_unknown_when_queries_fail(self):
         self.cfg["supervise"] = {"enabled": True}
         checks = self.checks(run=FakeRun(rc=1))
-        self.assertFalse(checks["supervise timer"].ok)
+        self.assertNotIn("supervise timer", checks)
         self.assertIsNone(checks["linger"].ok)
 
     def test_bad_settings_fail(self):
@@ -197,7 +128,7 @@ class DoctorSupervisorTests(Env):
         self.cfg["supervise"] = {"enabled": True}
         checks = self.checks(scope=True)
         self.assertIs(checks["replacement scope"].ok, True)
-        self.assertIn("supervise timer", checks)
+        self.assertNotIn("supervise timer", checks)
         self.assertIn("linger", checks)
 
     # ---- without --host, the harness of the user running doctor
@@ -234,18 +165,6 @@ class DoctorSupervisorTests(Env):
         only_codex = lambda b, path=None: "/usr/bin/codex" if b == "codex" else None
         self.assertIsNone(self.checks(host=None, which=only_codex)["supervise harness"].ok)
 
-    def test_harness_check_uses_the_service_units_path(self):
-        self.cfg["supervise"] = {"enabled": True}
-        seen = {}
-
-        def which(binary, path=None):
-            seen["path"] = path
-            return None
-        self.checks(which=which)
-        self.assertEqual(seen["path"], systemd.service_path())
-        self.assertIsNotNone(seen["path"])
-
-
 class TimerStateEnv(_unittest.TestCase):
     def test_manager_env_leaves_runtime_dir_unset_when_no_bus_dir(self):
         with mock.patch.dict(os.environ, {}, clear=False), \
@@ -253,8 +172,7 @@ class TimerStateEnv(_unittest.TestCase):
             os.environ.pop("XDG_RUNTIME_DIR", None)
             self.assertNotIn("XDG_RUNTIME_DIR", systemd.manager_env())
 
-    @posix_only("needs POSIX file modes (Windows has ACLs)")
-    def test_install_runs_systemctl_through_manager_env(self):
+    def test_legacy_removal_runs_systemctl_through_manager_env(self):
         seen = []
 
         def run(cmd, **kw):
@@ -268,23 +186,12 @@ class TimerStateEnv(_unittest.TestCase):
              mock.patch.object(systemd, "_disabled", return_value=False), \
              mock.patch("shutil.which", return_value="/usr/bin/systemctl"), \
              mock.patch.object(systemd, "manager_env", return_value={"SENTINEL": "1"}):
-            self.assertEqual(systemd.install(tmp / "config.toml", 2, run=run).status, "changed")
+            units = tmp / "systemd" / "user"
+            units.mkdir(parents=True)
+            (units / systemd.LEGACY_TIMER).write_text("x\n")
+            self.assertEqual(systemd.remove_legacy(run).status, "changed")
         self.assertTrue(seen)
         self.assertTrue(all(e == {"SENTINEL": "1"} for e in seen))
-
-    def test_timer_state_sets_xdg_runtime_dir(self):
-        seen = {}
-
-        def run(cmd, **kw):
-            seen.update(kw.get("env") or {})
-            return subprocess.CompletedProcess(cmd, 0, "ActiveState=active\nUnitFileState=enabled\n", "")
-
-        with mock.patch.dict(os.environ, {}, clear=False), \
-             mock.patch("pathlib.Path.is_dir", return_value=True):
-            os.environ.pop("XDG_RUNTIME_DIR", None)
-            state = systemd.timer_state(run)
-        self.assertEqual(state["ActiveState"], "active")
-        self.assertEqual(seen["XDG_RUNTIME_DIR"], f"/run/user/{os.getuid()}")
 
     def test_manager_env_does_not_mutate_its_argument(self):
         given = {"PATH": "/usr/bin"}
