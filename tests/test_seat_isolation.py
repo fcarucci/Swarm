@@ -211,6 +211,7 @@ class SpecTest(SeatHomeCase):
             spec, _ = self.spec()
         self.assertEqual(spec["cover"], ["/srv/keys/id"])   # inside the home it is simply not bound
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX paths in the fixture (Windows: 0.3.1)")
     def test_pin_paths(self):
         owner = {"credentials": {"a": "ssh-key:/k/id", "b": "ssh-agent:/run/a.sock", "c": "helper:/usr/bin/gh x"},
                  "config_dirs": {"c": "/cfg/gh"}}
@@ -530,6 +531,7 @@ class TypedProtocolTest(BrokerCase):
         self.assertEqual(rc, 2)
         self.assertEqual(self.calls, [])
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX paths in the fixture (Windows: 0.3.1)")
     def test_rr9_the_cli_honours_only_a_leading_config_for_plugins(self):
         from swarm import cli
         seen = []
@@ -647,6 +649,7 @@ class TypedProtocolTest(BrokerCase):
         r = json.loads((self.seat / "broker" / f"{rid}.resp").read_text())
         self.assertEqual(json.loads(base64.b64decode(r["out"]))["hookSpecificOutput"]["permissionDecision"], "deny")
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX paths in the fixture (Windows: 0.3.1)")
     def test_rr14_the_seat_transcript_is_kept(self):
         proj = self.seat / "claude" / "projects" / "p"
         proj.mkdir(parents=True)
@@ -915,6 +918,7 @@ class NoSeatCodeTest(BrokerCase):
         self.assertNotEqual(rc, seatbroker.AUDIT_EXIT, err)
         self.assertFalse(self.marker.exists(), self.marker.read_text() if self.marker.exists() else "")
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX paths in the fixture (Windows: 0.3.1)")
     def test_the_audit_refuses_a_forbidden_module(self):
         b = seatbroker.SeatBroker(self.run, str(self.seat / "broker"), workdir=str(self.wd),
                                   forbid=[seatbroker.LIB_DIR], seat_dir=str(self.seat), config=str(self.config),
