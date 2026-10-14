@@ -516,6 +516,18 @@ class SetupResult:
     pool: dict[str, int]
 
 
+# left_reason of rows that were never an agent's own run: a placeholder a launch closes before its session
+# takes the row over (claim_resume), or the driver's one-write judge. Status, watch and the learnings
+# gate leave them out.
+PLACEHOLDER_REASONS = ("drive predecessor", "pipeline predecessor", "pipeline judge seat busy",
+                       "driver: verdict recorded")
+
+
+def is_placeholder(a) -> bool:
+    """Whether an agent row is a closed launch placeholder (see PLACEHOLDER_REASONS)."""
+    return getattr(a, "ended_at", None) is not None and (getattr(a, "left_reason", None) or "") in PLACEHOLDER_REASONS
+
+
 @dataclass(frozen=True)
 class AgentStatus:
     """One agent with its derived status (the Postgres `agent_status` view, row for row).
@@ -2555,7 +2567,7 @@ class Board(abc.ABC):
 
     def watch_agents(self, job: str, recent_minutes: int | None) -> tuple[list[AgentStatus], int]:
         """Visible rows and the count of older finished rows, for watch snapshots."""
-        rows = self.agents(job)
+        rows = [a for a in self.agents(job) if not is_placeholder(a)]
         if recent_minutes is None:
             return rows, 0
         cutoff = self.now() - _dt.timedelta(minutes=recent_minutes)

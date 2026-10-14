@@ -235,10 +235,7 @@ def _ckey(agent_key: str) -> str:
     return COVERED_PREFIX + hashlib.sha256(agent_key.encode()).hexdigest()[:16]
 
 
-# left_reason of rows that were never an agent's own run: a placeholder a launch closes before its session
-# takes the row over (claim_resume), or the driver's one-write judge.
-_PLACEHOLDER_REASONS = ("drive predecessor", "pipeline predecessor", "pipeline judge seat busy",
-                        "driver: verdict recorded")
+from swarm.board.base import PLACEHOLDER_REASONS as _PLACEHOLDER_REASONS  # noqa: E402
 
 
 def _counts(a) -> bool:

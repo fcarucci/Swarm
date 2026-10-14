@@ -145,7 +145,9 @@ def read_view(board, scope: Scope, after: int = 0) -> Fetched:
 def _read_postgres_view(board, scope: Scope, after: int) -> Fetched:
     view = board.watch_snapshot(None, None, scope.recent_minutes, scope.messages,
                                 jobs=scope.jobs, sessions=scope.sessions, after_id=after)
-    return Fetched(_plain(view.now()), [row(j) for j in view.job_rows], [row(a) for a in view.agent_rows],
+    from swarm.board.base import is_placeholder
+    return Fetched(_plain(view.now()), [row(j) for j in view.job_rows],
+                   [row(a) for a in view.agent_rows if not is_placeholder(a)],
                    {k: int(v) for k, v in view.hidden.items()}, [row(b) for b in view.blocker_rows],
                    [row(m) for m in view.message_rows], after, board.change_mode, board.degraded)
 

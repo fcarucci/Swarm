@@ -1315,7 +1315,8 @@ def agents_table(board, job: str, color: bool, now, recent_minutes: int | None =
     if hasattr(board, 'watch_agents'):
         rows, hidden = board.watch_agents(job, recent_minutes)
     else:
-        rows, hidden = _recent_agents(board.agents(job), now, recent_minutes)
+        from swarm.board.base import is_placeholder
+        rows, hidden = _recent_agents([a for a in board.agents(job) if not is_placeholder(a)], now, recent_minutes)
     if not rows and not hidden:
         return _empty_agents_note(board, job, now)
     rows = agentview.annotate(board, job, rows, now)   # the shown status: finished, waiting, orchestrator
