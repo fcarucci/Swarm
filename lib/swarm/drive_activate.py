@@ -841,7 +841,7 @@ def cmd_activate_drive(cfg: dict, args) -> int:
     try:
         existing = ledger.load(bk, args.job)
         if existing is not None and existing.state == "active":
-            refusal = _person("activate", cfg, args.job)   # re-activation is the person path ([F17])
+            refusal = _person("activate", cfg, args.job, args)   # re-activation is the person path ([F17])
             if refusal:
                 print(f"swarm activate: {refusal}", file=sys.stderr)
                 return 1
@@ -898,7 +898,7 @@ def drive_lines(cfg: dict, job: str) -> list:
 
 # --- person path and the requester session ([F17]) --------------------------------------------
 
-def _person(action: str, cfg: dict, job: str) -> str | None:
+def _person(action: str, cfg: dict, job: str, args=None) -> str | None:
     """The person path, through Task 6b's `swarm.person.require(action, job, *, board_key, env, confirm)`
     (returns the authority, or raises PermissionError): None when the action is allowed, else the refusal
     text. Until person.py is in the build the import fails and the action is refused."""
@@ -906,9 +906,15 @@ def _person(action: str, cfg: dict, job: str) -> str | None:
         from swarm import person
     except ImportError:
         return f"{action} needs the person path, which this build does not have (swarm/person.py, Task 6b)"
+    bk = board_key(cfg)
     try:
-        person.require(action, job, board_key=board_key(cfg))
-    except PermissionError as exc:
+        led = ledger.load(bk, job)
+    except Exception:   # an unreadable ledger only means no attested caller; require() still decides
+        led = None
+    try:
+        who = person.caller(bk, job, led, args) if args is not None else None
+        person.require(action, job, board_key=bk, env=os.environ, who=who)
+    except (PermissionError, person.PersonRefused) as exc:
         return str(exc) or f"{action} needs a person"
     return None
 
@@ -929,7 +935,7 @@ def cmd_drive(cfg: dict, args) -> int:
     if led is None or led.terminal is not None:
         print(f"swarm drive: {args.job} is not an active drive job on this host", file=sys.stderr)
         return 1
-    refusal = _person(f"drive {args.dcmd}", cfg, args.job)
+    refusal = _person(f"drive {args.dcmd}", cfg, args.job, args)
     if refusal:
         print(f"swarm drive: {refusal}", file=sys.stderr)
         return 1

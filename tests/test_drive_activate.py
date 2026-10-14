@@ -53,8 +53,18 @@ class FakePerson:
     def forget():
         """6b's swarm.person.forget (drop a cached caller): nothing is cached here."""
 
+    @staticmethod
+    def host_pid():
+        """6b's swarm.person.host_pid: a fixed pid in tests."""
+        return 1
+
+    @staticmethod
+    def caller(board_key, job, led, args, now=None):
+        """6b's swarm.person.caller: no hook attestation in these tests, so None."""
+        return None
+
     @classmethod
-    def require(cls, action, job, *, board_key, env=None, confirm=None):
+    def require(cls, action, job, *, board_key, who, env=None, confirm=None, ancestor=None):
         from swarm import enrolment as en, hosts as ho
         sid = ho.cli_session_id(os.environ)
         if sid and sid in cls.seat_sessions:
@@ -726,7 +736,8 @@ class DriveCli(Env):
         attr.start()
         self.addCleanup(attr.stop)
         # the real kick (Task 5's drivegate) would start the user's supervisor unit: a stub kicks here
-        stub = drivegate_stub(types.SimpleNamespace(kick=mock.Mock(return_value=True)))
+        stub = drivegate_stub(types.SimpleNamespace(kick=mock.Mock(return_value=True),
+                                                    grant_id=lambda args, pid: "grant-test"))
         stub.__enter__()
         self.addCleanup(stub.__exit__, None, None, None)
         # the session driver ([T21]) is started through session_driver.ensure: recorded here, never started
