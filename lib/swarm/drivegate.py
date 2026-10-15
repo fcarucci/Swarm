@@ -924,7 +924,7 @@ def requester_action(ns) -> str:
 # (GRANT_SECONDS bounds a call the host denied, which has no PostToolUse). A subagent gets none.
 
 GRANT_SECONDS = 60.0
-GRANT_SUBS = ("halt", "unhalt", "seat", "goal-ready", "drive", "deactivate")
+GRANT_SUBS = ("halt", "unhalt", "seat", "goal-ready", "drive", "deactivate", "activate")
 _PUNCT = "();<>|&\n"
 _REDIRECTS = {">", ">>", "<", ">&", "<&", ">|", "&>", "&>>"}
 

@@ -770,7 +770,7 @@ class DriveRepair(ControlCase):
         self.set_session("ENG-SESSION")
         rc, _, err = self.repair()
         self.assertEqual(rc, 1)
-        self.assertRegex(err, "not the requester|enrolled")
+        self.assertRegex(err, "not the requester|enrolled|agent host")
         with self.assertRaises(ledger.LedgerBadError):
             ledger.load(self.bkey, JOB)
 

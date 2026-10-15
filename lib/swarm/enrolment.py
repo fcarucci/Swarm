@@ -394,8 +394,12 @@ def find_job_owner(board_key: str, job: str, *, strict: bool = False):
 
 
 def agent_sessions(board_key: str) -> dict:
-    """session id -> agent key for the agent records of this board (every job). Read only: a
-    missing directory is an empty map; an unsafe or unreadable entry is skipped, never followed."""
+    """session id -> agent key for the agent records of this board (every job) whose agent IS its own session
+    (agent_key == session_id: a seat or other agent running as its own host session). An in-process subagent
+    has its own agent id but carries its PARENT's session id: its record says nothing about the parent session,
+    which may be a requester's main session, so it is left out (the hook still never grants a subagent: its
+    payload has an agent_id). Read only: a missing directory is an empty map; an unsafe or unreadable entry
+    is skipped, never followed."""
     out = {}
     try:
         with _dir(create=False) as d:
@@ -403,7 +407,8 @@ def agent_sessions(board_key: str) -> dict:
                 if not name.startswith("agent-") or not _FILE.fullmatch(name):
                     continue
                 rec = _parse(safefs.read(d, name, RECORD_MAX))
-                if rec and rec.kind == "agent" and rec.board_key == board_key and rec.session_id:
+                if (rec and rec.kind == "agent" and rec.board_key == board_key and rec.session_id
+                        and rec.agent_key == rec.session_id):
                     out[rec.session_id] = rec.agent_key
     except FileNotFoundError:
         pass

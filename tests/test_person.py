@@ -119,6 +119,35 @@ class RequesterByGrant(PersonCase):
         self.hook("REQ")
         self.assertEqual(self.require({"CLAUDE_CODE_SESSION_ID": "REQ"}, ancestor=UNDER_CLAUDE), "requester")
 
+    def test_requester_is_not_an_enrolled_agent_session_by_its_subagents(self):
+        """In-process subagents share the requester's session id and have records carrying it; that does not make
+        the main session an agent session: with no grant it is refused as inside an agent host, not as enrolled."""
+        self.enrol_seat("REQ", key="a0123456789abcdef")
+        self.assertNotIn("REQ", enrolment.agent_sessions(self.bk))
+        with self.assertRaises(person.PersonRefused) as cm:
+            self.require({"CLAUDE_CODE_SESSION_ID": "REQ"}, lambda a, j: True, UNDER_CLAUDE)
+        self.assertNotIn("enrolled", str(cm.exception))
+        self.assertIn("agent host", str(cm.exception))
+
+    def test_a_seat_session_is_still_an_agent_session(self):
+        self.enrol_seat("SEAT", key="SEAT")
+        self.assertEqual(enrolment.agent_sessions(self.bk), {"SEAT": "SEAT"})
+        self.enrol_seat("REQ", key="a0123456789abcdef")
+        self.assertEqual(set(enrolment.agent_sessions(self.bk)), {"SEAT"})
+
+    def test_the_requester_re_activates_a_closed_job_by_its_grant(self):
+        """`swarm activate` of a drive job whose ledger is terminal is the requester's person action: its main
+        session's hook attests it, a subagent of that session gets nothing."""
+        led = self.led()
+        led.terminal = {"at": "2026-10-11T01:00:00+00:00", "scope": "ruling", "verdict": "unreachable"}
+        led.save()
+        self.enrol_seat("REQ", key="a0123456789abcdef")
+        argv = ["activate", "--job", JOB, "--goal", "g", "--workdir", str(self.home)]
+        self.assertEqual(self.hook("REQ", argv=argv, agent_id="a0123456789abcdef"), 0)
+        self.assertEqual(self.hook("REQ", argv=argv), 1)
+        self.assertEqual(person.require("activate", JOB, board_key=self.bk, env={"CLAUDE_CODE_SESSION_ID": "REQ"},
+                                        who=self.caller(argv), ancestor=UNDER_CLAUDE), "requester")
+
     def test_a_grant_is_used_once(self):
         self.hook("REQ")
         self.assertEqual(self.require(ancestor=UNDER_CLAUDE), "requester")
@@ -239,7 +268,7 @@ class TtyPath(PersonCase):
             self.assertEqual(person._ancestor_host(), "codex")
 
     def test_enrolled_seat_refused_person_path(self):
-        self.enrol_seat("SEAT")
+        self.enrol_seat("SEAT", key="SEAT")   # a real seat is its own session: its agent key is its session id
         with self.assertRaises(person.PersonRefused) as cm:
             self.require({"CLAUDE_CODE_SESSION_ID": "SEAT"}, confirm=lambda a, j: True)
         self.assertIn("enrolled", str(cm.exception))
