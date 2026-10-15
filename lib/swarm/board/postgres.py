@@ -1484,12 +1484,14 @@ class PostgresBoard(SqlBlockers, SqlSeats, SqlEvents, SqlBgCommands, Board):
           ), visible AS MATERIALIZED (
             SELECT {{agent_cols}} FROM agent_status
              WHERE job IN (SELECT job FROM selected)
+               AND NOT (ended_at IS NOT NULL AND coalesce(left_reason, '') IN ('drive predecessor', 'pipeline predecessor', 'pipeline judge seat busy', 'driver: verdict recorded'))
                AND (%(recent)s::float IS NULL OR status NOT IN ('completed','left','dead')
                     OR greatest(ended_at,last_contact_at) >= now() - %(recent)s * interval '1 minute')
           ), hidden AS (
             SELECT job, count(*) AS n FROM agent_status
              WHERE job IN (SELECT job FROM selected) AND %(recent)s::float IS NOT NULL
                AND status IN ('completed','left','dead')
+               AND NOT (ended_at IS NOT NULL AND coalesce(left_reason, '') IN ('drive predecessor', 'pipeline predecessor', 'pipeline judge seat busy', 'driver: verdict recorded'))
                AND greatest(ended_at,last_contact_at) < now() - %(recent)s * interval '1 minute'
              GROUP BY job
           ), recent AS (

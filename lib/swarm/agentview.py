@@ -94,7 +94,8 @@ def annotate(board, job: str, rows, now=None) -> list:
     """`rows` (AgentStatus of `job`) as ShownAgent where the display differs from the stored row
     (status, role orchestrator, and a note saying why); the order is kept. Each agent's last post
     is read for all the idle and dead ones in one query (board.last_posts). See the module doc."""
-    rows = list(rows)
+    from swarm.board.base import is_placeholder
+    rows = [a for a in rows if not is_placeholder(a)]   # launch placeholders were never agents: never shown or counted
     if not any(a.status in ("idle", "dead") or a.left_reason or a.role is None or a.role == ORCHESTRATOR
                for a in rows):
         return rows

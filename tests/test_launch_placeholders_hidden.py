@@ -34,3 +34,20 @@ class LaunchPlaceholdersHidden(Env):
 if __name__ == "__main__":
     import unittest
     unittest.main()
+
+
+class PlaceholdersNotCounted(Env):
+    """The compact watch's lines and its "agents: N working, M finished" rollup never show or count
+    launch placeholders (annotate is the shared presentation path)."""
+
+    def test_annotate_and_rollup_leave_out_placeholders(self):
+        from swarm import agentview, cli
+        self.assertEqual(self.cli("activate", "--job", "J")[0], 0)
+        with self.board() as b:
+            for i in range(3):
+                b.allocate_name(f"launch:{i}", "J", "engineer")
+                b.close_agent(f"launch:{i}", "drive predecessor")
+            b.allocate_name("w", "J", "engineer")
+            rows = agentview.annotate(b, "J", b.agents("J"))
+            self.assertEqual([a.agent_key for a in rows], ["w"])
+            self.assertIn("0 finished", cli._rollup_text(b, "J"))

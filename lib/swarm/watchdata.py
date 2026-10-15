@@ -77,7 +77,8 @@ class SnapshotBoard:
         return [a for a in self.agent_rows if a.job == job and (include_departed or a.ended_at is None)]
 
     def watch_agents(self, job, recent_minutes):
-        return self.agents(job), self.hidden.get(job,0)
+        from swarm.board.base import is_placeholder
+        return [a for a in self.agents(job) if not is_placeholder(a)], self.hidden.get(job,0)
 
     def restarts(self, job=None, **kwargs):
         return [r for r in self.restart_rows if job is None or r.job == job]
