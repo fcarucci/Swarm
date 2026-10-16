@@ -6,6 +6,8 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 ## [Unreleased]
 
+- `swarm watch --compact` rolls finished and lost agents into one WORKERS summary per job, keeps live agents with tool/launch and last-post age, and avoids clock-only redraws.
+
 ## [0.3.3] - 2026-10-16
 
 ### Removed
