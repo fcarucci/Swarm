@@ -345,7 +345,7 @@ def enforce_deadlines(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks |
     True when it did (begin_terminal refuses while an outcome is already pending)."""
     if led.terminal is not None or led.halted is not None:
         return False
-    if led.terminal_intent is None and any(k.startswith("verdict-missing:") for k in led.watermarks):
+    if led.terminal_intent is None and any(k.startswith(("verdict-missing:", "lead-blocked:")) for k in led.watermarks):
         return False  # a missing verdict is a recoverable launch failure, never a goal failure
     if LEARN_HOLD in led.watermarks and led.terminal_intent is None:
         # a receipted MET or UNREACHABLE is held for its learnings step (swarm.learnings): elapsed time neither
@@ -354,6 +354,15 @@ def enforce_deadlines(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks |
     cause = _deadline_cause(cfg, led, now)
     if cause is None:
         return False
+    # A ruling that arrived before this pass wins over the mechanical deadline. In particular,
+    # not_met must reach the model's fix round before a stale ruling_due_at can fail the job.
+    js = board.job_status(led.job)
+    if js is not None and js.verdict_scope == "ruling" and js.verdict_generation == led.generation:
+        from swarm.supervisor import driver_snapshot
+        ruling = driver_snapshot.read(board, led, led.job, cfg=cfg, now=now).goal_verdict
+        if (ruling is not None and ruling.scope == "ruling" and ruling.generation == led.generation
+                and ruling.receipt_id is not None and led.watermarks.get("ruling-fix") != ruling.receipt_id):
+            return False
     intent = led.terminal_intent
     if intent is not None and intent["verdict"] == "met" and "terminal_stuck" in led.watermarks:
         led.terminal_intent = None         # a pending MET that cannot finish closing: the deadline wins

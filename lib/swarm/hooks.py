@@ -1814,6 +1814,58 @@ def _on_turn(board, agent_id: str, name: str, job: str, cfg: dict, sid: str | No
         _out("PreToolUse", text)
 
 
+def _judge_recorded_verdict(board, agent_id: str) -> bool:
+    """A current judge's recorded conclusion, independent of stop bookkeeping."""
+    from swarm import review
+    job = board.route(agent_id).member_job
+    if not job:
+        return False
+    me = next((a for a in board.agents(job) if a.agent_key == agent_id), None)
+    if me is None or me.role != 'judge':
+        return False
+    js = board.job_status(job)
+    if js is None:
+        return False
+    data = board.job_data(job)
+    gen = data.get('drive.generation')
+    def current(record):
+        if not record or record.get('judge') != me.name:
+            return False
+        if gen and str(record.get('generation')) != gen:
+            return False
+        at = dt.datetime.fromisoformat(record['at'])
+        joined = me.joined_at
+        at = at.replace(tzinfo=dt.timezone.utc) if at.tzinfo is None else at
+        joined = joined.replace(tzinfo=dt.timezone.utc) if joined.tzinfo is None else joined
+        return at >= joined
+    # Goal/ruling records need no artifact hand-off. Check them before artifact/recipe work.
+    for key in data:
+        if key.startswith('drive.verdict.') and key.count('.') == 4:
+            try:
+                record = review.bound_verdict(review._chunked(data, key))
+                if current(record):
+                    return True
+            except (KeyError, ValueError, TypeError):
+                continue
+    if gen and any(current(record) for record in review.artifact_verdicts(board, job).values()):
+        return True
+    artifact = review.judge_artifact(board, job, agent_id)
+    handoffs = review.latest_handoffs(board, job)
+    handoff = next((h for h in reversed(handoffs) if artifact is None or h.artifact == artifact), None)
+    artifact = artifact or (handoff.artifact if handoff else None)
+    if artifact is not None:
+        verdict = review.artifact_verdicts(board, job).get(artifact)
+        return bool(current(verdict) and (handoff is None or review.covered(handoff, verdict)))
+    if gen:
+        return False
+    at, joined = js.verdict_at, me.joined_at
+    if at is None or js.verdict_by != me.name:
+        return False
+    at = at.replace(tzinfo=dt.timezone.utc) if at.tzinfo is None else at
+    joined = joined.replace(tzinfo=dt.timezone.utc) if joined.tzinfo is None else joined
+    return at >= joined
+
+
 def _judge_stop(board, agent_id: str, cfg: dict, payload: dict) -> bool:
     """A judge cannot silently disappear without concluding the assigned hand-off."""
     route = board.route(agent_id)
@@ -1823,22 +1875,17 @@ def _judge_stop(board, agent_id: str, cfg: dict, payload: dict) -> bool:
     me = next((a for a in board.agents(job, include_departed=False) if a.agent_key == agent_id), None)
     if me is None or me.role != 'judge':
         return True
-    from swarm.review import latest_handoffs, artifact_verdicts, judge_artifact, covered
+    from swarm.review import latest_handoffs, judge_artifact
     js = board.job_status(job)
     if js is None or js.status != 'active':
+        return True
+    if _judge_recorded_verdict(board, agent_id):
+        _CURRENT['stop_verdict'] = True
         return True
     artifact = judge_artifact(board, job, agent_id)
     handoffs = latest_handoffs(board, job)
     handoff = next((h for h in reversed(handoffs) if artifact is None or h.artifact == artifact), None)
     artifact = artifact or (handoff.artifact if handoff else None)
-    if artifact is not None:
-        verdict = artifact_verdicts(board, job).get(artifact)
-        if (verdict and verdict.get('judge') == me.name and
-                dt.datetime.fromisoformat(verdict['at']) >= me.joined_at and
-                (handoff is None or covered(handoff, verdict))):
-            return True
-    elif js.verdict_by == me.name and js.verdict_at and js.verdict_at >= me.joined_at:
-        return True
     from swarm import plugins
     try:
         recipe = plugins.pipeline_recipe(cfg, board, job, artifact)
@@ -2290,6 +2337,7 @@ def run_hook(event: str, cfg: dict, host: str | None = None) -> int:
     _CURRENT["host"] = None
     _CURRENT["lease"] = None
     _CURRENT["payload"] = None
+    _CURRENT["stop_verdict"] = False
     try:
         _handle(event, cfg, host)
         _wake_drivers(event, cfg, _CURRENT.get("payload") or {})
@@ -2395,10 +2443,24 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
             return 0
         _log_error(event, agent_id, exc)
         if event == "stop":
+            recorded = _CURRENT.get('stop_verdict', False)
+            is_judge = resume is not None
+            if not recorded:
+                try:
+                    from swarm.board import open_board
+                    with open_board(cfg, init_timeout=HOOK_INIT_TIMEOUT) as retry_board:
+                        recorded = _judge_recorded_verdict(retry_board, agent_id)
+                        job = retry_board.route(agent_id).member_job
+                        if job:
+                            is_judge |= any(a.agent_key == agent_id and a.role == 'judge'
+                                            for a in retry_board.agents(job))
+                except Exception:
+                    pass
             prompt = _spawn_prompt(payload, agent_id)
-            if resume is not None or _role(payload, agent_id, prompt) == "judge":
+            if not recorded and (is_judge or _role(payload, agent_id, prompt) == "judge"):
                 _OUTPUT.update({'decision': 'block', 'reason':
-                    '[swarm] Judge cannot stop while the board is unavailable: retry and record a verdict.'})
+                    f'[swarm] Judge verdict check failed ({type(exc).__name__}: {exc}): '
+                    'retry and record a verdict.'})
         # ...except that the spawn caps fail closed:
         # With a job of this session active, an Agent
         # call whose limits could not be checked is refused rather than let through.

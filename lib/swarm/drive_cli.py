@@ -209,6 +209,12 @@ def _model_for(cfg: dict, role: str, given: str | None) -> str:
 def cmd_run(board, cfg, args) -> int:
     """The trusted CLI/broker caller queues a launch; no authorization receipt."""
     from swarm.supervisor import runner
+    if args.harness == "codex":
+        from swarm.supervisor.launch import codex_command
+        try:
+            codex_command(cfg, resolve=True)
+        except ValueError as exc:
+            raise Refuse(str(exc)) from exc
     bk = board_key(cfg)
     led = _drive_ledger(bk, args.job)
     workdir = _check_workdir(bk, args.job, args.workdir or os.getcwd())

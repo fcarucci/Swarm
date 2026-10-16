@@ -3357,3 +3357,21 @@ The `[drive]` launch settings use `launch_ro_paths`, `launch_rw_paths`, `launch_
 an explicitly present launch key takes precedence, including empty lists and strings. On startup,
 the supervisor moves the legacy private home directory to `launch-home/` once, preserving files.
 If both directories exist, it refuses to overwrite either tree.
+
+### Codex harness command
+
+The supervisor resolves Codex on the host before spending a launch attempt. Set a host-local
+wrapper in the swarm config when `codex` is absent from PATH:
+
+```toml
+[harness.codex]
+command = "/opt/swarm/bin/codex-wrapper"
+# An argv array is also supported:
+# command = ["/opt/swarm/bin/codex-wrapper", "--profile", "engineering"]
+```
+
+A string is split as shell words, without running a shell. The wrapper must be executable by
+the supervisor's OS user and start Codex as that same user. It receives the normal `exec`
+arguments and stdin prompt. With no command configured, lookup uses PATH, then the plugin's
+bin directory. A missing harness refuses `swarm run`; an existing queued launch is parked
+with one DRIVER-ESCALATE notice and consumes no attempts. Installing the command lets it retry.

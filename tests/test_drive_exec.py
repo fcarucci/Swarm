@@ -790,6 +790,8 @@ class FinishTests(ExecEnv):
     """runner.finish() records what a drive session cost and concludes the ledger intent."""
 
     def finished(self, tail, outcome="completed", harness="claude", launch="eng-a"):
+        if harness == "codex":  # the runner is fake; usage tests need no installed Codex
+            self.cfg["harness"] = {"codex": {"command": [sys.executable]}}
         self.get_launch(launch, harness=harness)
         run = self.go(self.act(launch))
         if tail is not None:

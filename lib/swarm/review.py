@@ -209,10 +209,7 @@ def is_drive_job(board, job: str, data: dict | None = None) -> bool:
         cfg = getattr(board, 'cfg', None)
         if cfg is None:
             return False
-        try:
-            return ledger.load(store_key(cfg), job) is not None
-        except ledger.LedgerBadError:
-            return True
+        return ledger.exists(store_key(cfg), job)
     except Exception:
         return False
 
@@ -243,7 +240,10 @@ def covered(handoff: Handoff, verdict: dict | None) -> bool:
     if not verdict:
         return False
     try:
-        return verdict['artifact'] == handoff.artifact and dt.datetime.fromisoformat(verdict['at']) >= handoff.created_at
+        at, created = dt.datetime.fromisoformat(verdict['at']), handoff.created_at
+        at = at.replace(tzinfo=dt.timezone.utc) if at.tzinfo is None else at
+        created = created.replace(tzinfo=dt.timezone.utc) if created.tzinfo is None else created
+        return verdict['artifact'] == handoff.artifact and at >= created
     except (KeyError, TypeError, ValueError):
         return False
 

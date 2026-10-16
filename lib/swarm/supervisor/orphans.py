@@ -31,6 +31,8 @@ def _ledger_state(board, cfg, job):
     if not os.path.lexists(settings.private_dir() / ledger.SUBDIR):
         return claimed, None, False   # no ledger directory here; a read must not create one (dry runs change nothing)
     try:
+        if not ledger.exists(store_key(cfg), job):
+            return claimed, None, False
         led = ledger.load(store_key(cfg), job)
     except (ledger.LedgerBadError, settings.PrivateDirError):
         return True, None, True

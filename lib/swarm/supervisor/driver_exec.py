@@ -335,6 +335,18 @@ def _idle_launch(board, led, name: str, outcome: str, now, **fields) -> None:
     if outcome in ("halted", "interrupted by driver restart"):
         board.set_launch_state(launch.id, launch.revision, "queued", job=led.job, last_outcome=outcome)
         return
+    if launch.role == driveroles.LEAD_ROLE and outcome == "blocked":
+        def blocked(l):
+            l.watermarks[f"retry-at:{name}"] = int(now.timestamp()) + 300
+            l.watermarks[f"lead-blocked:{name}"] = 1
+            for i in l.intents:
+                if i.launch_id == launch.launch_id:
+                    i.outcome, i.success = "blocked", False
+        mutate(led, blocked)
+        board.set_launch_state(launch.id, launch.revision, "queued", job=led.job, last_outcome="blocked", **fields)
+        return
+    if launch.role == driveroles.LEAD_ROLE and led.watermarks.get(f"lead-blocked:{name}"):
+        mutate(led, lambda l: l.watermarks.pop(f"lead-blocked:{name}", None))
     missing = driveroles.is_judge_role(launch.role) and outcome == "no hand-off"
     recovery = launch.role == driveroles.LEAD_ROLE and outcome == "no hand-off"
     if missing or (recovery and not led.watermarks.get(f"lead-recovery:{name}")):
@@ -381,7 +393,7 @@ def _escalate_verdict(board, led, launch, now, cause: str) -> None:
     mutate(led, lambda l: l.watermarks.__setitem__(f"retry-at:{launch.name}", int(now.timestamp()) + 300))
     history = "; ".join(f"{i.launch_id} attempt {i.attempt}: {i.outcome}"
                         for i in led.intents if i.launch == launch.name)
-    text = f"{ev.DRIVER_ESCALATE} {launch.name}: {cause}; retried with the mandatory verdict format; " \
+    text = f"{ev.DRIVER_ESCALATE} {launch.name}: {cause}; " \
            f"retry in 300s. Tried: {history}"
     board.post_event(led.job, "launch-failed", f"verdict:{launch.launch_id}:{int(now.timestamp())}",
                      text, to=launch.queued_by)
@@ -455,6 +467,21 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
     launch = materialize_launch(board, led, action, cfg, now)
     if launch is None or launch.state not in ("queued",):
         return skip("launch is missing or no longer queued")
+    if launch.harness == "codex":
+        from swarm.supervisor import driver_events as ev
+        try:
+            launcher.codex_command(cfg, resolve=True)
+        except ValueError as exc:
+            reason = str(exc)
+            key = f"harness-unavailable:{launch.name}"
+            if not led.watermarks.get(key):
+                text = f"{ev.DRIVER_ESCALATE} {launch.name}: {reason}; parked until the harness is available"
+                board.post(led.job, "swarm driver", text, to=launch.queued_by)
+                board.post_event(led.job, "launch-failed", key, text, to=launch.queued_by)
+                mutate(led, lambda l: l.watermarks.__setitem__(key, 1))
+            return skip(reason)
+        if led.watermarks.get(f"harness-unavailable:{launch.name}"):
+            mutate(led, lambda l: l.watermarks.pop(f"harness-unavailable:{launch.name}", None))
     reserve = _reservation(d, led, action.ruling, now)
     if reserve is None:
         if led.watermarks.get(f"verdict-missing:{launch.name}"):
@@ -843,29 +870,30 @@ def _settle_launches(board, cfg: dict, led, rows: dict, now) -> None:
         reason = local[1].get("refused_reason") if local else None
         if reason and outcome != "completed":
             outcome = f"{outcome}: {reason}"
+        from swarm.supervisor.prompts import LEAD_HANDOFF_FORMS, VERDICT_FORMS
+        names = {a.name for a in board.agents(led.job)
+                 if a.agent_key in (row.new_agent_key, launch.agent_key, row.old_agent_key)}
+        own_messages = [m for m in board.messages_after(0, led.job) if m.agent_name in names
+                        and row.at <= m.created_at <= row.ended_at]
         # A successful process exit still needs the role's hand-off. Roles control expectations,
         # not filesystem rights. The learner's completion is recorded by the learning pipeline.
         if outcome == "completed" and launch.role != "learner":
-            names = {a.name for a in board.agents(led.job)
-                     if a.agent_key in (row.new_agent_key, launch.agent_key, row.old_agent_key)}
-            prefix = ("VERDICT" if driveroles.is_judge_role(launch.role) else
+            prefix = (VERDICT_FORMS if driveroles.is_judge_role(launch.role) else
                       "REVIEW " if driveroles.is_read_only_role(launch.role) else
-                      "GOAL-READY " if launch.role == driveroles.LEAD_ROLE else ("DONE ", "LAND-REQUEST ") if launch.role == "integrator" else "DONE ")
-            handed_off = any(m.agent_name in names and m.message.startswith(prefix)
-                             and row.at <= m.created_at <= row.ended_at
-                             for m in board.recent_messages(200, job=led.job))
+                      LEAD_HANDOFF_FORMS if launch.role == driveroles.LEAD_ROLE else ("DONE ", "LAND-REQUEST ") if launch.role == "integrator" else "DONE ")
+            handed_off = any(m.message.startswith(prefix) for m in own_messages)
             if launch.role == driveroles.LEAD_ROLE:
-                handed_off |= any(s.queued_by in names and s.updated_at >= row.at
+                handed_off |= any(s.queued_by in names and row.at <= s.updated_at <= row.ended_at
                                   for s in board.launches(led.job, led.generation))
             if not handed_off:
                 outcome = "no hand-off"
         if driveroles.is_judge_role(launch.role) and outcome not in UNCOUNTED and outcome != "no hand-off":
-            names = {a.name for a in board.agents(led.job)
-                     if a.agent_key in (row.new_agent_key, launch.agent_key, row.old_agent_key)}
-            if not any(m.agent_name in names and m.message.startswith("VERDICT")
-                       and row.at <= m.created_at <= row.ended_at
-                       for m in board.recent_messages(200, job=led.job)):
+            if not any(m.message.startswith(VERDICT_FORMS) for m in own_messages):
                 outcome = "no hand-off"
+        blocked = next((m.message for m in reversed(own_messages) if m.message.startswith("BLOCKED ")), None)
+        if launch.role == driveroles.LEAD_ROLE and blocked:
+            outcome = "blocked"
+            _escalate_verdict(board, led, launch, now, blocked)
         if outcome == "no hand-off":
             run = local[1] if local else {}
             owner, token = run.get("driver_pid"), run.get("driver_token")

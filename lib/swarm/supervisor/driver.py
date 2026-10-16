@@ -101,21 +101,22 @@ def _forget(state: dict, prefix: str) -> None:
 
 # --- enumeration ---------------------------------------------------------------------------------
 
-def _scan_files(key: str):
+def _scan_files(key: str, *, read_only: bool = False):
     """(ledgers, bad): every ledger file of this board read on its own, so one unreadable entry (a planted
     lock, a bad body) holds only itself. Never sourced from the board."""
     from swarm import compat
     from swarm.supervisor import privfs
     leds, bad = [], []
-    with privfs.dir_fd(ledger.SUBDIR) as d:
+    with privfs.dir_fd(ledger.SUBDIR, create=not read_only) as d:
         for name in sorted(compat.listdir(d)):
             if not ledger._FILE.fullmatch(name):
                 continue
             data = None
             try:
                 data = privfs.read(d, name, ledger.MAX_BYTES)
-                with privfs.locked(d, ledger._lock_name(name)):
-                    data = privfs.read(d, name, ledger.MAX_BYTES)
+                if not read_only:
+                    with privfs.locked(d, ledger._lock_name(name)):
+                        data = privfs.read(d, name, ledger.MAX_BYTES)
                 led = ledger._parse(data, None, None) if data is not None else None
                 if led is None:
                     raise ValueError("not a regular private file")
@@ -311,6 +312,12 @@ def _terminal_from(snap, led, board, now, m, action) -> bool:
         gv = snap.goal_verdict
         if gv is None:
             return False
+        if gv.verdict == "unreachable" and not led.watermarks.get(f"escalated:{gv.receipt_id}"):
+            text = f"{ev.DRIVER_ESCALATE} {gv.by}: unreachable ruling: {gv.reason}; next: {gv.next}"
+            board.post(led.job, SUPERVISOR, text, to=led.requester_session or "owner")
+            board.post_event(led.job, "launch-failed", f"unreachable:{gv.receipt_id}", text,
+                             to=led.requester_session or "owner")
+            _mutate(led, lambda l: l.watermarks.__setitem__(f"escalated:{gv.receipt_id}", 1))
         life.begin_terminal(board, led, gv.verdict, gv.scope, gv.by or "judge", action.reason or gv.verdict,
                             now, candidate=gv.candidate, req=gv.req)
     return True
@@ -333,6 +340,20 @@ def _act(board, cfg, sup, led, snap, actions, now, start_runner, config_path, jd
         elif a.kind in ("record_unreachable", "close"):
             if _terminal_from(snap, led, board, now, m, a):
                 m.life.terminalize(board, cfg, led, now)
+        elif a.kind == "fix_lead":
+            gv = snap.goal_verdict
+            lead = board.get_launch(led.job, led.generation, a.launch) if a.launch else None
+            if lead is None:
+                m.life.default_request_lead(board, cfg, led, led.generation)
+                lead = board.get_launch(led.job, led.generation, "lead")
+            board.post(led.job, SUPERVISOR, f"Ruling not_met: {gv.reason}; next: {gv.next}", to=lead.name)
+            m.exec._queue_existing(board, lead)
+            def fix(l):
+                l.ruling_due_at, l.ruling_attempts, l.rounds_without_progress, l.errors = None, 0, 0, 0
+                l.watermarks["ruling-fix"] = gv.receipt_id
+                key = f"requeue:{l.generation}:{lead.name}"
+                l.watermarks[key] = l.watermarks.get(key, 0) + 1
+            _mutate(led, fix)
         elif a.kind == "rollover":
             m.life.rollover(board, cfg, led, now)
         elif a.kind == "stop_launch" and a.launch:
@@ -712,7 +733,8 @@ def drive_jobs(board, cfg: dict) -> set[str]:
     from swarm.board.autoinit import store_key
     key = store_key(cfg)
     try:
-        leds, held = _enumerate(board, cfg, {}, key, lambda _m: None)
+        leds, bad = _scan_files(key, read_only=True)
+        held = {job for job, _name, _why in bad if job}
     except Exception:
         leds, held = [], set()
     return set(held) | {led.job for led in leds} | {js.job for js in _claimed_jobs(board)}

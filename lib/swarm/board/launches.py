@@ -43,7 +43,7 @@ def check_renewal(now, expires_at):
 
 def _check_state(state, fields):
     if state not in ("done", "failed") and not (state == "queued" and
-            fields.get("last_outcome") in ("halted", "interrupted by driver restart")):
+            fields.get("last_outcome") in ("halted", "interrupted by driver restart", "blocked")):
         raise ValueError("only queue_launch or claim_drive_launch may queue or start a launch")
     if set(fields) - set(STATE_FIELDS):
         raise ValueError("unknown launch settlement field")

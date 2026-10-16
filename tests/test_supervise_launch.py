@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 import unittest
 import uuid
+from unittest import mock
 from pathlib import Path
 
 from support import ROOT, base_config
@@ -75,6 +76,31 @@ class CodexSpecTests(unittest.TestCase):
         self.assertEqual(s.argv, ("codex", "exec", "--json", "--sandbox", "workspace-write",
                                   "--skip-git-repo-check", "-m", "gpt-6-sol", "-"))
         self.assertIsNone(s.session_id)
+
+    def test_configured_wrapper_string_and_argv(self):
+        for value in ('"/opt/codex wrapper" --profile engineering',
+                      ['/opt/codex wrapper', '--profile', 'engineering']):
+            c = cfg()
+            c['harness'] = {'codex': {'command': value}}
+            with mock.patch.object(launch.shutil, 'which', return_value='/opt/codex wrapper') as which:
+                spec = launch.codex_spec(c, prompt='p', workdir='/w', model=None, minutes=1,
+                                         budget_usd=1, drive=True)
+            self.assertEqual(spec.argv[:4], ('/opt/codex wrapper', '--profile', 'engineering', 'exec'))
+            which.assert_called_once_with('/opt/codex wrapper')
+
+    def test_path_then_plugin_bin_fallback(self):
+        with mock.patch.object(launch.shutil, 'which', side_effect=[None, '/plugin/bin/codex']) as which:
+            self.assertEqual(launch.codex_command(cfg(), resolve=True), ['/plugin/bin/codex'])
+        self.assertEqual(which.call_args_list[0].args, ('codex',))
+        self.assertEqual(Path(which.call_args_list[1].args[0]), ROOT / 'bin' / 'codex')
+
+    def test_missing_explicit_command_does_not_silently_substitute_path(self):
+        c = cfg()
+        c['harness'] = {'codex': {'command': '/missing/wrapper'}}
+        with mock.patch.object(launch.shutil, 'which', return_value=None) as which:
+            with self.assertRaisesRegex(ValueError, 'codex harness not available'):
+                launch.codex_command(c, resolve=True)
+        which.assert_called_once_with('/missing/wrapper')
 
     def test_token_limit(self):
         s = launch.codex_spec(cfg(codex_token_limit=200000), prompt="p", workdir="/w", model=None, minutes=1)

@@ -12,6 +12,9 @@ from __future__ import annotations
 import math
 import os
 import re
+import shlex
+import shutil
+from pathlib import Path
 import uuid
 from dataclasses import dataclass
 
@@ -138,6 +141,30 @@ def _codex_tokens_for(cfg: dict, budget_usd: float) -> int:
     return n
 
 
+def codex_command(cfg: dict, *, resolve: bool = False) -> list[str]:
+    """Configured wrapper argv, otherwise PATH, then the plugin's bin directory."""
+    from swarm.supervisor.settings import settings
+    value = ((cfg.get("harness") or {}).get("codex") or {}).get("command")
+    if value is not None:
+        if not isinstance(value, (str, list)):
+            raise ValueError("[harness.codex] command must be a path or argv")
+        argv = shlex.split(value) if isinstance(value, str) else list(value)
+        if not argv or not all(isinstance(a, str) and a for a in argv):
+            raise ValueError("[harness.codex] command must be a path or argv")
+    else:
+        argv = [settings(cfg)["codex_bin"]]
+    check_safe(argv)
+    if not resolve:
+        return argv
+    executable = shutil.which(os.path.expanduser(argv[0]))
+    if executable is None and value is None:
+        executable = shutil.which(str(Path(__file__).resolve().parents[3] / "bin" / argv[0]))
+    if executable is None:
+        from swarm import compat
+        raise ValueError(f"codex harness not available on host {compat.node()}: set [harness.codex] command")
+    return [os.path.abspath(executable), *argv[1:]]
+
+
 def codex_spec(cfg: dict, *, prompt: str, workdir: str, model: str | None, minutes: float,
                budget_usd: float | None = None, read_only: bool = False,
                resume: str | None = None, drive: bool = False) -> LaunchSpec:
@@ -151,9 +178,9 @@ def codex_spec(cfg: dict, *, prompt: str, workdir: str, model: str | None, minut
     if resume:
         # `codex exec resume <thread>`: the sandbox goes in as a config override (as hosts.codex
         # always passed it on resume)
-        argv = [s["codex_bin"], "exec", "resume", "--json", "--skip-git-repo-check"]
+        argv = [*codex_command(cfg, resolve=drive), "exec", "resume", "--json", "--skip-git-repo-check"]
     else:
-        argv = [s["codex_bin"], "exec", "--json", "--sandbox", sandbox, "--skip-git-repo-check"]
+        argv = [*codex_command(cfg, resolve=drive), "exec", "--json", "--sandbox", sandbox, "--skip-git-repo-check"]
     if model:
         argv += ["-m", model]
     if resume:

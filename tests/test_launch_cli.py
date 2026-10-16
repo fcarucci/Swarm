@@ -147,6 +147,7 @@ class Run(ControlCase):
         self.assertGreater(new.revision, failed.revision)
 
     def test_run_preserves_codex_judge_model(self):
+        self.cfg["harness"] = {"codex": {"command": [sys.executable]}}
         self.cfg["drive"] = {"allowed_models": ["gpt-6-astra"]}
         rc, _, err = self.run_cmd("run", "--job", JOB, "--name", "astra", "--role", "judge", "--brief", "B.md",
                                   "--workdir", str(self.work), "--harness", "codex", "--model", "gpt-6-astra")

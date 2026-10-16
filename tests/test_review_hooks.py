@@ -183,6 +183,52 @@ class ReviewHookTests(GoalEnv):
         self.assertIsNone(self.hook('stop', agent_id='judge-1'))
         self.assertIsNone(self.job().judge)
 
+    def test_judge_stop_accepts_naive_verdict_timestamp(self):
+        self.done()
+        self.verdict()
+        original = review.artifact_verdicts
+        def naive(board, job):
+            records = original(board, job)
+            for record in records.values():
+                record['at'] = dt.datetime.fromisoformat(record['at']).replace(tzinfo=None).isoformat()
+            return records
+        with mock.patch.object(review, 'artifact_verdicts', side_effect=naive):
+            self.assertIsNone(self.hook('stop', agent_id='judge-1'))
+        self.assertEqual(self.agent('judge-1').status, 'completed')
+
+    def test_recorded_verdict_allows_stop_despite_unrelated_exception(self):
+        from swarm import hooks
+        self.done()
+        self.verdict()
+        with mock.patch.object(hooks, '_on_event', side_effect=RuntimeError('unrelated bookkeeping')):
+            self.assertIsNone(self.hook('stop', agent_id='judge-1'))
+
+    def test_stop_error_reports_real_exception_and_blocks_without_verdict(self):
+        from swarm import hooks
+        with mock.patch.object(hooks, '_on_event', side_effect=TypeError('bad timestamp')):
+            out = self.hook('stop', agent_id='judge-1')
+        self.assertEqual(out['decision'], 'block')
+        self.assertIn('TypeError: bad timestamp', out['reason'])
+        self.assertNotIn('board is unavailable', out['reason'])
+
+    def test_ruling_verdict_allows_stop_with_pending_artifact(self):
+        self.done()
+        with self.board() as b:
+            b.set_job_data('J', 'drive.generation', '2')
+            from swarm.spool import deliver_verdict
+            self.assertTrue(deliver_verdict(b, 'J', self.judge, 'not_met', 'missing review', 'staff review',
+                                           scope='ruling', generation=2, candidate='a' * 40, req='r1'))
+        self.assertIsNone(self.hook('stop', agent_id='judge-1'))
+
+    def test_previous_generation_ruling_does_not_allow_stop(self):
+        self.done()
+        with self.board() as b:
+            b.set_job_data('J', 'drive.generation', '2')
+            from swarm.spool import deliver_verdict
+            self.assertTrue(deliver_verdict(b, 'J', self.judge, 'not_met', 'old review', 'staff review',
+                                           scope='ruling', generation=1, candidate='a' * 40, req='r1'))
+        self.assertEqual(self.hook('stop', agent_id='judge-1')['decision'], 'block')
+
     def test_pending_external_evidence_always_concludes_not_met(self):
         self.done()
         with self.board() as b:
@@ -257,7 +303,7 @@ class ReviewHookTests(GoalEnv):
                 mock.patch('swarm.board.open_board', side_effect=BoardUnavailable('offline')):
             out = self.hook('session-stop', agent_id=None)
         self.assertEqual(out['decision'], 'block')
-        self.assertIn('board is unavailable', out['reason'])
+        self.assertIn('BoardUnavailable: offline', out['reason'])
 
     def test_recipe_failure_still_blocks_stop(self):
         self.done()

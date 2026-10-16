@@ -4724,6 +4724,7 @@ def _reads_only(args) -> bool:
             or (args.cmd == "config" and args.value is None and not args.save)
             or (args.cmd == "learn" and args.list_banks)
             or args.cmd == "snapshot"
+            or (args.cmd == "supervise" and args.dry_run)
             or (args.cmd == "transcript" and args.tcmd in TRANSCRIPT_COMMANDS))
 
 

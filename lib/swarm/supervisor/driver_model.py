@@ -135,7 +135,7 @@ NO_PROGRESS_REASONS = frozenset({"invariant-fallback", "stall", "finalize-blocke
 
 # Concluded attempts that never count against `max_attempts` (spec 3.3 [F12], 4.3 [F5]): an outage, a lost
 # claim race, an attempt a halt ended.
-UNCOUNTED_OUTCOMES = ("outage", "lost", "halted", "interrupted by driver restart", "cancelled-before-start")
+UNCOUNTED_OUTCOMES = ("outage", "lost", "halted", "interrupted by driver restart", "cancelled-before-start", "blocked")
 
 # Shipped `[drive]` defaults (spec 4.1 and 3.x); a job's `ledger.budgets` overrides them, and the caller's cfg
 # overrides these. `recipe` and `review_role` are the recipe keys of spec 3.6 and 3.7 (coding: a reviewer).
@@ -229,7 +229,7 @@ class _Ctx:
 
     def finished(self, action_id: str) -> bool:
         """An ended launch is never retried for the same trigger. A lost claim did not launch."""
-        retryable = ("lost", "halted", "interrupted by driver restart", "cancelled-before-start")
+        retryable = ("lost", "halted", "interrupted by driver restart", "cancelled-before-start", "blocked")
         return any(i.action_id == action_id and i.state == "concluded" and i.outcome not in retryable
                    for i in self.s.ledger.intents)
 
@@ -391,6 +391,15 @@ def _ruling(c: _Ctx) -> list[Action] | None:
     return [c.ruling_action(reason)]
 
 
+def _ruling_fix(c: _Ctx) -> list[Action] | None:
+    vd = c.s.goal_verdict
+    if (not _valid(vd, c.s.generation) or vd.scope != "ruling" or vd.verdict != "not_met"
+            or c.s.ledger.watermarks.get("ruling-fix") == vd.receipt_id):
+        return None
+    return [c.act("fix_lead", c.lead, None, 0, prompt="fix", trigger=vd.receipt_id,
+                  reason=vd.reason, artifact=vd.candidate)]
+
+
 def _judge_retries(c: _Ctx) -> list[Action] | None:
     """Missing verdicts keep their original task, with fresh action ids and bounded retry frequency."""
     for name, row in c.launches.items():
@@ -426,12 +435,19 @@ def _resume_action(c: _Ctx, name: str, row: LaunchView, prior, trigger: str) -> 
 def _recover_launches(c: _Ctx) -> list[Action] | None:
     """A driver interruption and the promised lead recovery precede mechanical ruling triggers."""
     for name, row in c.launches.items():
+        if _is_lead_name(name) and row.last_outcome == "blocked":
+            if name in c.live or c.launch_has_open_intent(name):
+                return [c.act("nothing", name, None, 0, responsible=name, reason="blocked-retry-running")]
+            until = c.s.ledger.watermarks.get(f"retry-at:{name}", 0)
+            if until > c.now.timestamp():
+                return [c.act("hold", name, None, 0, reason="blocked-retry-backoff",
+                              not_before=dt.datetime.fromtimestamp(until, dt.timezone.utc))]
         if _is_lead_name(name) and c.s.ledger.watermarks.get(f"lead-recovery:{name}") and (
                 name in c.live or c.launch_has_open_intent(name)):
             return [c.act("nothing", name, None, 0, responsible=name, reason="lead-recovery-running")]
         if row.state != "queued" or name in c.live or c.launch_has_open_intent(name) or c.gated(name):
             continue
-        if row.last_outcome not in ("halted", "interrupted by driver restart") and not (
+        if row.last_outcome not in ("halted", "interrupted by driver restart", "blocked") and not (
                 _is_lead_name(name) and c.s.ledger.watermarks.get(f"lead-recovery:{name}")):
             continue
         prior = next((i for i in reversed(c.s.ledger.intents) if i.launch == name), None)
@@ -646,7 +662,7 @@ def next_actions(s: Snapshot, cfg: dict) -> list[Action]:
         return [c.act("nothing", None, None, 0, reason="halted" if s.halted else "inactive")]
     if s.ledger.terminal is not None:
         return [c.act("nothing", None, None, 0, reason="terminal")]
-    for step in (_terminal, _judge_retries, _recover_launches, _ruling):                               # steps 2, 3, 4
+    for step in (_terminal, _ruling_fix, _judge_retries, _recover_launches, _ruling):                    # steps 2, 3, 4
         found = step(c)
         if found:
             return found

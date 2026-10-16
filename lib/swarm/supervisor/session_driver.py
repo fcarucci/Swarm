@@ -182,7 +182,7 @@ def ledger_deadlines(led, flat: dict, sup: dict | None = None) -> list:
     shift = dt.timedelta(seconds=float(led.halted_total_seconds or 0))
     ruling = dt.timedelta(minutes=_minutes(flat.get("ruling_deadline_minutes", 120)))
     due = _ts(led.ruling_due_at)
-    verdict_retry = any(k.startswith("verdict-missing:") for k in led.watermarks)
+    verdict_retry = any(k.startswith(("verdict-missing:", "lead-blocked:")) for k in led.watermarks)
     if due is not None and not verdict_retry:
         out += [due + dt.timedelta(minutes=_minutes(flat.get("ruling_grace_minutes", 15))), due + ruling + shift]
     start = _ts(led.activated_at)
@@ -219,7 +219,7 @@ def snapshot_deadlines(snap, dcfg: dict, actions: list) -> list:
     return out
 
 
-ACTING = ("launch", "stop_launch", "close", "record_unreachable", "rollover", "complete_land")
+ACTING = ("launch", "stop_launch", "close", "record_unreachable", "rollover", "complete_land", "fix_lead")
 
 
 def job_deadline(board, cfg: dict, sup: dict, job: str, now: dt.datetime):
