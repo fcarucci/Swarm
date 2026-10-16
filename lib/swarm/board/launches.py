@@ -42,7 +42,8 @@ def check_renewal(now, expires_at):
 
 
 def _check_state(state, fields):
-    if state not in ("done", "failed"):
+    if state not in ("done", "failed") and not (state == "queued" and
+            fields.get("last_outcome") in ("halted", "interrupted by driver restart")):
         raise ValueError("only queue_launch or claim_drive_launch may queue or start a launch")
     if set(fields) - set(STATE_FIELDS):
         raise ValueError("unknown launch settlement field")
@@ -109,6 +110,8 @@ class MemoryLaunches:
             if row["state"] == "running" and any(r["launch_id"] == row["launch_id"] and
                     r["ended_at"] is None for r in s.restarts):
                 raise ValueError("launch is still open: end it first")
+            if state == "queued" and row["state"] == "running":
+                row["attempts"] = max(0, row["attempts"] - 1)
             row.update(fields, state=state, revision=row["revision"] + 1, updated_at=self.now())
             s.touch()
             return Launch(**row)
@@ -328,6 +331,8 @@ class SqlLaunches:
                     (current.launch_id,)).fetchone():
                 raise ValueError("launch is still open: end it first")
             assignments = "".join(f", {k}=?" for k in fields)
+            if state == "queued" and current.state == "running":
+                assignments += ", attempts=CASE WHEN attempts>0 THEN attempts-1 ELSE 0 END"
             row = self._exec(c, "UPDATE launches SET state=?, revision=revision+1, updated_at=?" + assignments +
                              f" WHERE id=? AND job=? AND revision=? RETURNING {LAUNCH_COLS}",
                              (state, self._launch_time(self.now()), *fields.values(), launch_row_id, job,

@@ -275,6 +275,17 @@ def render(board, cfg, led, action, launch) -> str:
         parts += _learn_body(led, launch, action)
     else:
         parts += _launch_body(board, led, launch, action)
+    if led.watermarks.get(f"verdict-missing:{launch.name}"):
+        parts.append("The previous run ended without the mandatory verdict line. Exact verdict format: "
+                     + " ".join(_judge_lines(board, cfg, led, launch, action)))
+    if led.watermarks.get(f"lead-recovery:{launch.name}"):
+        parts.append("The previous lead run exhausted its attempts with no hand-off. This is one recovery round: "
+                     "read the board and worktree, continue completed work, queue the required launches or "
+                     "post GOAL-READY before exiting.")
+    if kind == "ruling" or action.ruling:
+        history = [f"{i.launch}: {i.launch_id}, attempt {i.attempt}, {i.state}, {i.outcome}"
+                   for i in led.intents]
+        parts.append(fence("Launch history", "\n".join(history)))
     parts += standing_rules(_ref(led.job, what="job"))
     parts += _EXTRA
     parts.append(fence("JOB BOARD", _posts(board, led.job)))

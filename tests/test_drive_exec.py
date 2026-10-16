@@ -482,9 +482,9 @@ class ReconcileTests(ExecEnv):
         lid = self.claim_only()
         led = self.rec(91)
         (i,) = led.intents
-        self.assertEqual((i.state, i.success, i.outcome, i.charged_usd), ("concluded", False, "failed", 0.0))
-        self.assertEqual(self.b.restarts(job="J")[-1].outcome, "failed")
-        self.assertEqual(self.b.get_launch("J", 1, "eng-a").state, "failed")
+        self.assertEqual((i.state, i.success, i.outcome, i.charged_usd), ("concluded", False, "interrupted by driver restart", 0.0))
+        self.assertEqual(self.b.restarts(job="J")[-1].outcome, "cancelled")
+        self.assertEqual(self.b.get_launch("J", 1, "eng-a").state, "queued")
 
     def test_a_claim_within_the_grace_period_is_left_alone(self):
         self.claim_only()
@@ -531,7 +531,7 @@ class ReconcileTests(ExecEnv):
         self.led.save()
         led = self.rec(0)
         self.assertEqual((led.intents[0].state, led.intents[0].outcome, led.intents[0].charged_usd),
-                         ("concluded", "failed", 0.0))
+                         ("concluded", "interrupted by driver restart", 0.0))
 
     def test_an_intent_without_a_row_inside_the_grace_period_waits(self):
         lid = driver_exec.new_launch_id(self.now(-10))

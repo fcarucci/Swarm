@@ -28,9 +28,11 @@ import json
 import logging
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
+import threading
 
 from swarm import compat
 from swarm.supervisor import wake
@@ -180,10 +182,11 @@ def ledger_deadlines(led, flat: dict, sup: dict | None = None) -> list:
     shift = dt.timedelta(seconds=float(led.halted_total_seconds or 0))
     ruling = dt.timedelta(minutes=_minutes(flat.get("ruling_deadline_minutes", 120)))
     due = _ts(led.ruling_due_at)
-    if due is not None:
+    verdict_retry = any(k.startswith("verdict-missing:") for k in led.watermarks)
+    if due is not None and not verdict_retry:
         out += [due + dt.timedelta(minutes=_minutes(flat.get("ruling_grace_minutes", 15))), due + ruling + shift]
     start = _ts(led.activated_at)
-    if start is not None:
+    if start is not None and not verdict_retry:
         wall = dt.timedelta(hours=float(flat.get("max_wall_hours", 24)))
         out += [start + wall, start + wall + ruling + shift]
     intent = led.terminal_intent
@@ -343,6 +346,7 @@ class Driver:
         self.started = clock()
         self.last_pass = 0.0
         self.exit_reason: str | None = None
+        self.restart_requested = False
 
     # -- sources
     def _start(self, source, reason: str, name: str) -> None:
@@ -403,6 +407,8 @@ class Driver:
     # -- the loop
     def stop_reason(self) -> str | None:
         from swarm.supervisor.settings import switched_off
+        if self.restart_requested:
+            return "driver restart"
         if switched_off() is not None:
             return "kill switch"
         if not self.watch.alive():
@@ -671,7 +677,23 @@ def serve(cfg: dict, *, session: str | None, job: str | None, watch, config_path
         drv = Driver(cfg, session=session, job=job, watch=watch, config_path=config_path,
                      open_board=lambda: open_board(cfg), notify=notify, stats_name=state_name(lock),
                      say=say)
-        why = drv.run()
+        def interrupted(signum, frame):
+            drv.restart_requested = True
+            drv.hub.signal(wake.CHANGE)
+        main_thread = threading.current_thread() is threading.main_thread()
+        previous = signal.signal(signal.SIGTERM, interrupted) if main_thread else None
+        try:
+            why = drv.run()
+        finally:
+            if main_thread:
+                signal.signal(signal.SIGTERM, previous)
+            if drv.restart_requested:
+                from swarm.supervisor import ledger, driver_exec
+                for name in drv.jobs() or []:
+                    led = ledger.load(drv.board_key, name)
+                    if led is not None:
+                        driver_exec.mutate(led, lambda l: l.watermarks.update(
+                            {f"driver-restart:{i.launch_id}": 1 for i in l.intents if i.state != "concluded"}))
         _log(f"exit ({session or 'drive run'}): {why}; {drv.passes} passes, {drv.hub.wakeups} wakeups, mode {drv.mode}")
         return why
     finally:

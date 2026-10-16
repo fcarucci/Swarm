@@ -135,7 +135,7 @@ NO_PROGRESS_REASONS = frozenset({"invariant-fallback", "stall", "finalize-blocke
 
 # Concluded attempts that never count against `max_attempts` (spec 3.3 [F12], 4.3 [F5]): an outage, a lost
 # claim race, an attempt a halt ended.
-UNCOUNTED_OUTCOMES = ("outage", "lost", "halted")
+UNCOUNTED_OUTCOMES = ("outage", "lost", "halted", "interrupted by driver restart", "cancelled-before-start")
 
 # Shipped `[drive]` defaults (spec 4.1 and 3.x); a job's `ledger.budgets` overrides them, and the caller's cfg
 # overrides these. `recipe` and `review_role` are the recipe keys of spec 3.6 and 3.7 (coding: a reviewer).
@@ -221,7 +221,8 @@ class _Ctx:
 
     def finished(self, action_id: str) -> bool:
         """An ended launch is never retried for the same trigger. A lost claim did not launch."""
-        return any(i.action_id == action_id and i.state == "concluded" and i.outcome != "lost"
+        retryable = ("lost", "halted", "interrupted by driver restart", "cancelled-before-start")
+        return any(i.action_id == action_id and i.state == "concluded" and i.outcome not in retryable
                    for i in self.s.ledger.intents)
 
     def inflight(self, group: str) -> bool:
@@ -250,7 +251,7 @@ class _Ctx:
         return self.lead is not None and self.launches[self.lead].state == "done" and self.gated(self.lead) is None
 
     def sessions(self) -> int:
-        return sum(1 for i in self.s.ledger.intents if i.outcome not in ("lost", "halted"))
+        return sum(1 for i in self.s.ledger.intents if i.outcome not in UNCOUNTED_OUTCOMES)
 
     def due_reason(self) -> str | None:
         """Why a ruling is due now (spec 3.3 step 3, 4.1, 3.6, 3.8 [F19], 3.2 [F22], 3.5 [F3])."""
@@ -352,6 +353,8 @@ def _ruling(c: _Ctx) -> list[Action] | None:
         return None
     since = _ts(led.ruling_due_at) or c.now
     reason = reason or "ledger"
+    if c.lead and c.launches[c.lead].last_outcome == "no hand-off":
+        reason = f"{c.lead}: no hand-off after recovery round: {reason}"
     elapsed = c.now - since
     if c.live:                                                                # quiesce (spec 3.6)
         grace = dt.timedelta(minutes=c.cfg["ruling_grace_minutes"])
@@ -372,10 +375,61 @@ def _ruling(c: _Ctx) -> list[Action] | None:
     if led.charged_usd() >= c.cfg["max_cost_usd"]:                            # reserve gone too (4.1)
         return [c.act("record_unreachable", None, "ruling", 0, prompt="mechanical", trigger=c.rtrig,
                       ruling=True, reason="budget reserve spent")]
-    if c.finished(c.ruling_action(reason).action_id):
-        return [c.act("record_unreachable", None, "ruling", 0, prompt="mechanical", trigger=c.rtrig,
-                      ruling=True, reason="ruling launch ended without a verdict")]
+    prior = [i for i in led.intents if i.launch == "ruling-judge" and i.state == "concluded"
+             and i.outcome not in UNCOUNTED_OUTCOMES]
+    if prior:
+        return [c.act("launch", None, "ruling", len(prior), prompt="ruling", trigger=c.rtrig,
+                      ruling=True, reason=reason)]
     return [c.ruling_action(reason)]
+
+
+def _judge_retries(c: _Ctx) -> list[Action] | None:
+    """Missing verdicts keep their original task, with fresh action ids and bounded retry frequency."""
+    for name, row in c.launches.items():
+        if not c.s.ledger.watermarks.get(f"verdict-missing:{name}"):
+            continue
+        if name in c.live or c.launch_has_open_intent(name):
+            return [c.act("nothing", name, None, 0, responsible=name, reason="verdict-retry-running")]
+        if row.state != "queued":
+            continue
+        until = c.s.ledger.watermarks.get(f"retry-at:{name}", 0)
+        if until > c.now.timestamp():
+            return [c.act("hold", name, None, 0, reason="verdict-retry-backoff",
+                          not_before=dt.datetime.fromtimestamp(until, dt.timezone.utc))]
+        prior = next((i for i in reversed(c.s.ledger.intents) if i.launch == name), None)
+        if prior is None:
+            continue
+        return [_resume_action(c, name, row, prior, "verdict-retry")]
+    return None
+
+
+def _resume_action(c: _Ctx, name: str, row: LaunchView, prior, trigger: str) -> Action:
+    parts = prior.action_id.split("|")
+    kind, group = parts[1], parts[3]
+    artifact = next((h.artifact for h in reversed(c.s.handoffs) if h.group == group), None)
+    if kind == "goal":
+        artifact = (c.s.goal_ready or {}).get("candidate")
+    reason = next((k[len("ruling-trigger:"):] for k in c.s.ledger.watermarks
+                   if k.startswith("ruling-trigger:")), trigger)
+    return c.act("launch", name, None if group == "-" else group, row.revision,
+                 prompt=kind, trigger=trigger, artifact=artifact, ruling=kind == "ruling", reason=reason)
+
+
+def _recover_launches(c: _Ctx) -> list[Action] | None:
+    """A driver interruption and the promised lead recovery precede mechanical ruling triggers."""
+    for name, row in c.launches.items():
+        if _is_lead_name(name) and c.s.ledger.watermarks.get(f"lead-recovery:{name}") and (
+                name in c.live or c.launch_has_open_intent(name)):
+            return [c.act("nothing", name, None, 0, responsible=name, reason="lead-recovery-running")]
+        if row.state != "queued" or name in c.live or c.launch_has_open_intent(name) or c.gated(name):
+            continue
+        if row.last_outcome not in ("halted", "interrupted by driver restart") and not (
+                _is_lead_name(name) and c.s.ledger.watermarks.get(f"lead-recovery:{name}")):
+            continue
+        prior = next((i for i in reversed(c.s.ledger.intents) if i.launch == name), None)
+        if prior is not None:
+            return [_resume_action(c, name, row, prior, "recovery")]
+    return None
 
 
 def _verdict(c: _Ctx, artifact: str) -> VerdictView | None:
@@ -570,6 +624,8 @@ def _fallback(c: _Ctx) -> list[Action]:
     if lead is not None and c.launches[lead].state in ("done", "queued"):
         return [c.act("launch", lead, None, 0, prompt="fallback", trigger=c.s.ledger.rounds_without_progress,
                       reason="invariant-fallback")]
+    if lead and c.launches[lead].last_outcome == "no hand-off":
+        return [c.ruling_action(f"{lead}: no hand-off after recovery round")]
     return [c.ruling_action("lead-unavailable")]          # the lead cannot run: a ruling (spec 3.3 step 10)
 
 
@@ -582,7 +638,7 @@ def next_actions(s: Snapshot, cfg: dict) -> list[Action]:
         return [c.act("nothing", None, None, 0, reason="halted" if s.halted else "inactive")]
     if s.ledger.terminal is not None:
         return [c.act("nothing", None, None, 0, reason="terminal")]
-    for step in (_terminal, _ruling):                               # steps 2, 3, 4
+    for step in (_terminal, _judge_retries, _recover_launches, _ruling):                               # steps 2, 3, 4
         found = step(c)
         if found:
             return found

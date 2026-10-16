@@ -1618,6 +1618,8 @@ def _finish_row_and_post(b, run: dict, outcome: str, poster: str) -> None:
         # Settle before removing the run file, so a refusal's full reason stays on the launch.
         from swarm.supervisor import driver_exec, ledger
         b.finish_restart(run["restart_id"], outcome, **spent)
+        if not driver_exec.conclude_run({}, run, outcome, run.get("cost_usd"), bool(run.get("outage"))):
+            raise ledger.LedgerConflict("launch settlement deferred until its intent is concluded")
         led = ledger.load(run["board"], run["job"])
         if led is not None:
             rows = {r.launch_id: r for r in b.restarts(run["job"]) if r.id == run["restart_id"]}
@@ -1826,6 +1828,13 @@ def reap(cfg: dict, board, deadline: float | None = None) -> int:
                 from swarm.supervisor.settings import log
                 log(f"restart {rid}: process group {pgid} has no process of this run (its id was "
                     f"reused, or it cleared its environment); not signalled")
+            if r.get("launch_id") and not r.get("exited") and outcome == "failed":
+                from swarm.supervisor import procwatch
+                owner = r.get("driver_pid")
+                token = r.get("driver_token")
+                if owner is None or token is None or procwatch.start_token(owner) != token:
+                    r["driver_interrupted"] = True
+                    outcome = "cancelled"
             _keep_output_tail(rid, here)
             n += finish(cfg, r, outcome)
         finally:

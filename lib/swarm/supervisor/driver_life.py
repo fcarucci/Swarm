@@ -332,6 +332,8 @@ def enforce_deadlines(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks |
     True when it did (begin_terminal refuses while an outcome is already pending)."""
     if led.terminal is not None or led.halted is not None:
         return False
+    if led.terminal_intent is None and any(k.startswith("verdict-missing:") for k in led.watermarks):
+        return False  # a missing verdict is a recoverable launch failure, never a goal failure
     if LEARN_HOLD in led.watermarks and led.terminal_intent is None:
         # a receipted MET or UNREACHABLE is held for its learnings step (swarm.learnings): elapsed time neither
         # harvests the agents nor waives the step, so no deadline closes it; the learner launch or a person does
@@ -643,7 +645,7 @@ def settle_halt(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks | None 
     for s in board.launches(led.job, include_closed=False):
         if s.state == "running":
             try:
-                board.set_launch_state(s.id, s.revision, "failed", job=led.job, last_outcome="halted")
+                board.set_launch_state(s.id, s.revision, "queued", job=led.job, last_outcome="halted")
             except ValueError:
                 return False
     return True

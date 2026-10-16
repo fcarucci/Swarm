@@ -634,7 +634,7 @@ class HaltTests(LifeCase):
         life.halt(self.b, self.cfg, self.led, "francesco", self.at(60), reason="stop", hooks=self.run.hooks())
         self.assertIn(("stop", [lid]), self.run.calls)
         launch = self.b.get_launch("J", 1, "eng-a")
-        self.assertEqual((launch.state, launch.last_outcome), ("failed", "halted"))
+        self.assertEqual((launch.state, launch.last_outcome), ("queued", "halted"))
         led = self.reload()
         self.assertEqual(led.halted, {"by": "francesco", "at": fx.iso(self.at(60)), "reason": "stop"})
         self.assertEqual(self.b.job_data("J")["drive.halted"], "francesco")
@@ -645,7 +645,7 @@ class HaltTests(LifeCase):
         led = self.reload()
         self.assertEqual((led.halted, led.halted_total_seconds), (None, 600.0))
         self.assertNotIn("drive.halted", self.b.job_data("J"))
-        self.assertEqual(self.b.get_launch("J", 1, "eng-a").state, "failed")      # the next pass wakes it
+        self.assertEqual(self.b.get_launch("J", 1, "eng-a").state, "queued")      # queued for the next pass
 
     def test_halt_waits_for_the_session_to_be_gone(self):
         lid = self.launch()
@@ -656,7 +656,7 @@ class HaltTests(LifeCase):
         self.assertEqual(self.reload().halted["by"], "me")                # halted already (ledger first)
         self.run.live = set()
         self.assertTrue(life.settle_halt(self.b, self.cfg, self.led, self.at(1), hooks=self.run.hooks()))
-        self.assertEqual(self.b.get_launch("J", 1, "eng-a").state, "failed")
+        self.assertEqual(self.b.get_launch("J", 1, "eng-a").state, "queued")
 
     def test_halt_cancelled_attempts_not_counted(self):
         self.launch()

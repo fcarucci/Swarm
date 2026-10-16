@@ -34,7 +34,7 @@ from swarm import compat, driveroles, receipts
 from swarm.board import JobPaused
 from swarm.supervisor import barrier
 from swarm.supervisor import driver_model as dm
-from swarm.supervisor import ledger
+from swarm.supervisor import ledger, procwatch
 from swarm.supervisor.settings import log
 
 LAUNCH_GRACE = 90.0          # seconds a claim may have no run file before it is concluded (runner.LAUNCH_GRACE)
@@ -238,7 +238,7 @@ def _locks(launch) -> tuple[list[str], dict]:
 
 # --- execute -------------------------------------------------------------------------------------
 
-UNCOUNTED = ("outage", "lost", "cancelled-before-start")        # attempts that do not count toward max_attempts
+UNCOUNTED = dm.UNCOUNTED_OUTCOMES        # attempts that do not count toward max_attempts
 MAX_EVENTS_SHOWN = 50                                 # event ids one launch shows (and later acknowledges), oldest first
 EVACK = "evack:"                                      # evack:<launch>:<event id> = 1: that event was shown and answered
 ACK_OUTCOMES = ("completed", "max_turns", "timeout")   # [F4]: the session completed at least one turn
@@ -281,6 +281,9 @@ def conclude_run(cfg: dict, run: dict, outcome: str, cost: float | None, outage:
         return True
     if cost is None:
         cost = 0.0 if outcome == "refused" else intent.reserved_usd
+    if run.get("driver_interrupted") or (outcome != "completed" and
+            led.watermarks.get(f"driver-restart:{run['launch_id']}")):
+        outcome = "interrupted by driver restart"
     try:
         _conclude(led, run["launch_id"], "outage" if outage and outcome == "failed" else outcome,
                   outcome == "completed", float(cost))
@@ -317,8 +320,41 @@ def _unlink_run(run: dict) -> None:
 def _idle_launch(board, led, name: str, outcome: str, now, **fields) -> None:
     """Settle once. A re-queue supersedes a prior attempt's settlement."""
     launch = board.get_launch(led.job, led.generation, name)
-    if launch is None or launch.state != "running":
+    if launch is None or (launch.state != "running" and not (
+            driveroles.is_judge_role(launch.role) and launch.state in ("done", "failed")
+            and outcome == "no hand-off")):
         return
+    if outcome in ("halted", "interrupted by driver restart"):
+        board.set_launch_state(launch.id, launch.revision, "queued", job=led.job, last_outcome=outcome)
+        return
+    missing = driveroles.is_judge_role(launch.role) and outcome == "no hand-off"
+    recovery = launch.role == driveroles.LEAD_ROLE and outcome == "no hand-off"
+    if missing or (recovery and not led.watermarks.get(f"lead-recovery:{name}")):
+        key = f"verdict-missing:{name}" if missing else f"lead-recovery:{name}"
+        def note(l):
+            once = f"recovery:{launch.launch_id}"
+            if once in l.watermarks:
+                return
+            l.watermarks[once] = 1
+            for i in l.intents:
+                if i.launch_id == launch.launch_id:
+                    i.outcome, i.success = "no hand-off", False
+            l.watermarks[key] = l.watermarks.get(key, 0) + 1
+            if missing and l.watermarks[key] >= 3:
+                l.watermarks[f"retry-at:{name}"] = int(now.timestamp()) + 300
+        mutate(led, note)
+        if missing and led.watermarks[key] >= 3:
+            _escalate_verdict(board, led, launch, now, "three or more runs ended without the mandatory verdict")
+        _queue_existing(board, launch)
+        return
+    if not missing and driveroles.is_judge_role(launch.role):
+        mutate(led, lambda l: (l.watermarks.pop(f"verdict-missing:{name}", None),
+                               l.watermarks.pop(f"retry-at:{name}", None)))
+    if launch.role == driveroles.LEAD_ROLE and outcome == "completed" and led.watermarks.get(f"lead-recovery:{name}"):
+        def recovered(l):
+            l.watermarks.pop(f"lead-recovery:{name}", None)
+            l.rounds_without_progress = 0
+        mutate(led, recovered)
     failed = outcome != "completed"
     try:
         moved = board.set_launch_state(launch.id, launch.revision, "failed" if failed else "done", job=led.job,
@@ -329,6 +365,19 @@ def _idle_launch(board, led, name: str, outcome: str, now, **fields) -> None:
         board.post(led.job, "swarm driver", f"launch {name} failed: {outcome}", to=launch.queued_by)
         board.post_event(led.job, "launch-failed", f"{launch.launch_id}:{launch.attempts}",
                          f"launch {name} failed: {outcome}", to=launch.queued_by)
+
+
+def _escalate_verdict(board, led, launch, now, cause: str) -> None:
+    """Use the launch failure notification path, keeping the job active and the retry scheduled."""
+    from swarm.supervisor import driver_events as ev
+    mutate(led, lambda l: l.watermarks.__setitem__(f"retry-at:{launch.name}", int(now.timestamp()) + 300))
+    history = "; ".join(f"{i.launch_id} attempt {i.attempt}: {i.outcome}"
+                        for i in led.intents if i.launch == launch.name)
+    text = f"{ev.DRIVER_ESCALATE} {launch.name}: {cause}; retried with the mandatory verdict format; " \
+           f"retry in 300s. Tried: {history}"
+    board.post_event(led.job, "launch-failed", f"verdict:{launch.launch_id}:{int(now.timestamp())}",
+                     text, to=launch.queued_by)
+    board.post(led.job, "swarm driver", text, to=launch.queued_by)
 
 
 def _check_resumable(launch) -> str | None:
@@ -355,6 +404,8 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
         return None
     if led.state != "active":
         return None                      # an activation not finished is never driven ([RR1])
+    if action.ruling and action.reason != "missing-verdict":
+        mutate(led, lambda l: l.watermarks.setdefault(f"ruling-trigger:{action.reason}", 1))
     d = _dcfg(cfg, led)
     mine = [i for i in led.intents if i.action_id == action.action_id]
     if any(i.state != "concluded" for i in mine):
@@ -367,6 +418,8 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
         return None
     reserve = _reservation(d, led, action.ruling, now)
     if reserve is None:
+        if led.watermarks.get(f"verdict-missing:{launch.name}"):
+            _escalate_verdict(board, led, launch, now, "retry blocked by the session, wall-clock or cost budget")
         return None
     reserve_usd, reserve_minutes = reserve
     owned = action.launch is None
@@ -432,6 +485,7 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
            "enrol_seconds": sup["enrol_minutes"] * 60, "config": config_path, "board": store_key(cfg),
            "launch_id": launch_id, "action_id": action.action_id, "launch": launch.name,
            "generation": led.generation,
+           "driver_pid": os.getpid(), "driver_token": procwatch.start_token(os.getpid()),
            # Task 20: a reviewer's or judge's work tree is bound read-only; the lead writes its briefs and an
            # artifact job's report in the tree, so its tree stays writable (it still has no write rights elsewhere)
            "read_only": read_only_role(launch.role) and launch.role != driveroles.LEAD_ROLE}
@@ -638,7 +692,9 @@ def reconcile(board, cfg, led, now, deadline: float) -> None:
             if local is not None and _live_evidence(here, local[0], local[1]):
                 continue
             if _intent_age(intent.launch_id, now) >= LAUNCH_GRACE:
-                _conclude(led, intent.launch_id, "failed", False, 0.0)
+                _conclude(led, intent.launch_id, "interrupted by driver restart", False, 0.0)
+                if intent.launch:
+                    _idle_launch(board, led, intent.launch, "interrupted by driver restart", now)
             continue
         if intent.state == "claiming":
             _set_state(led, intent.launch_id, "claimed")
@@ -646,6 +702,8 @@ def reconcile(board, cfg, led, now, deadline: float) -> None:
             if runner.has_run(cfg, row.id) or _live_evidence(here, row.id, None):
                 continue                                          # alive, or its finish is under way: it concludes
             outcome = _board_outcome(row)
+            if led.watermarks.get(f"driver-restart:{intent.launch_id}") and outcome != "completed":
+                outcome = "interrupted by driver restart"
             _conclude(led, intent.launch_id, outcome, outcome == "completed", float(intent.reserved_usd))
             continue
         if row.host != compat.node():
@@ -654,13 +712,13 @@ def reconcile(board, cfg, led, now, deadline: float) -> None:
             continue                                              # live, or the runner's reap finishes it
         if _launch_age(row, now) < LAUNCH_GRACE:
             continue
-        board.finish_restart(row.id, "failed")                    # claimed, never started
+        board.finish_restart(row.id, "cancelled")                 # driver died before starting
         try:
             markers.remove_resume_marker(markers.resume_marker_path(cfg, led.job, row.id))
         except Exception as exc:
             log(f"launch {intent.launch_id}: marker cleanup failed: {type(exc).__name__}")
         board.release_drive_locks(intent.launch_id, job=led.job, holder=intent.action_id)
-        _conclude(led, intent.launch_id, "failed", False, 0.0)
+        _conclude(led, intent.launch_id, "interrupted by driver restart", False, 0.0)
     _settle_launches(board, cfg, led, _matched_rows(led, _rows_by_launch(board, led.job), cfg, here), now)
     sweep_unlaunched_launches(board, led.job)
     _settle_event_acks(board, led)
@@ -724,9 +782,12 @@ def _finish_activation(board, cfg: dict, led) -> None:
 
 
 def _settle_launches(board, cfg: dict, led, rows: dict, now) -> None:
-    """Every ended launch settles once; failed launches require an explicit re-queue."""
+    """Settle ended launches; driver interruptions and missing verdicts are recoverable."""
     for launch in board.launches(led.job, led.generation):
-        if launch.state != "running" or launch.launch_id is None:
+        if launch.launch_id is None or (launch.state != "running" and not (
+                driveroles.is_judge_role(launch.role) and launch.state in ("done", "failed"))):
+            continue
+        if launch.state != "running" and led.watermarks.get(f"verdict-checked:{launch.launch_id}"):
             continue
         row = rows.get(launch.launch_id)
         if row is None or row.ended_at is None:
@@ -734,7 +795,10 @@ def _settle_launches(board, cfg: dict, led, rows: dict, now) -> None:
         fields = {}
         if row.new_agent_key and valid_resume_handle(row.new_agent_key):
             fields.update(agent_key=row.new_agent_key, session_id=row.new_agent_key)
-        outcome = row.outcome or "failed"
+        intent = next((i for i in led.intents if i.launch_id == launch.launch_id), None)
+        outcome = intent.outcome if intent and intent.outcome in UNCOUNTED else row.outcome or "failed"
+        if led.halted is not None and led.watermarks.get(f"hopen:{launch.launch_id}"):
+            outcome = "halted"
         local = _local_run(cfg, led.board_key, launch.launch_id)
         reason = local[1].get("refused_reason") if local else None
         if reason and outcome != "completed":
@@ -755,6 +819,27 @@ def _settle_launches(board, cfg: dict, led, rows: dict, now) -> None:
                                   for s in board.launches(led.job, led.generation))
             if not handed_off:
                 outcome = "no hand-off"
+        if driveroles.is_judge_role(launch.role) and outcome not in UNCOUNTED and outcome != "no hand-off":
+            names = {a.name for a in board.agents(led.job)
+                     if a.agent_key in (row.new_agent_key, launch.agent_key, row.old_agent_key)}
+            if not any(m.agent_name in names and m.message.startswith("VERDICT")
+                       and row.at <= m.created_at <= row.ended_at
+                       for m in board.recent_messages(200, job=led.job)):
+                outcome = "no hand-off"
+        if outcome == "no hand-off":
+            run = local[1] if local else {}
+            owner, token = run.get("driver_pid"), run.get("driver_token")
+            interrupted = led.watermarks.get(f"driver-restart:{launch.launch_id}") or (
+                owner is not None and token is not None and procwatch.start_token(owner) != token)
+            if interrupted:
+                outcome = "interrupted by driver restart"
+                def mark_interrupted(l):
+                    for i in l.intents:
+                        if i.launch_id == launch.launch_id:
+                            i.outcome, i.success = outcome, False
+                mutate(led, mark_interrupted)
+        if driveroles.is_judge_role(launch.role) and outcome == "completed":
+            mutate(led, lambda l: l.watermarks.__setitem__(f"verdict-checked:{launch.launch_id}", 1))
         _idle_launch(board, led, launch.name, outcome, now, **fields)
 
 

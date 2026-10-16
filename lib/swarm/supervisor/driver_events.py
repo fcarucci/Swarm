@@ -6,6 +6,7 @@ from __future__ import annotations
 DRIVER_AUDIT = "DRIVER-AUDIT"              # close-time target audit flagged a commit (spec 3.8 [F24])
 DRIVER_BUG = "DRIVER-BUG"                  # queued launches stranded across consecutive passes
 DRIVER_CONFIG = "DRIVER-CONFIG"            # owner-record recipe fields missing: job held
+DRIVER_ESCALATE = "DRIVER-ESCALATE"          # repeated judge runs omitted their mandatory verdict
 DRIVER_ERROR = "DRIVER-ERROR"              # driver step raised on driver_error_passes passes
 DRIVER_INVARIANT = "DRIVER-INVARIANT"      # a pass ended with nobody responsible (spec 3.3)
 DRIVER_LAND_PARTIAL = "DRIVER-LAND-PARTIAL"  # a landing left destinations partially landed ([RR5])
@@ -20,6 +21,6 @@ DRIVER_UNHALT = "DRIVER-UNHALT"            # a halt ended: deadlines shifted by 
 DRIVER_STALLED = "DRIVER-STALLED"          # events check: no responsible actor for >2 stall periods
 DRIVER_TAMPER = "DRIVER-TAMPER"            # board row changed without a trusted record (spec 3.2)
 
-ALL = (DRIVER_AUDIT, DRIVER_BUG, DRIVER_CLOSE_REJECTED, DRIVER_MECHANICAL_UNREACHABLE, DRIVER_ROLLOVER, DRIVER_TERMINAL_STUCK,
+ALL = (DRIVER_ESCALATE, DRIVER_AUDIT, DRIVER_BUG, DRIVER_CLOSE_REJECTED, DRIVER_MECHANICAL_UNREACHABLE, DRIVER_ROLLOVER, DRIVER_TERMINAL_STUCK,
        DRIVER_UNHALT, DRIVER_CONFIG, DRIVER_ERROR, DRIVER_INVARIANT, DRIVER_LAND_PARTIAL,
        DRIVER_LEDGER_BAD, DRIVER_LOCK_ORPHAN, DRIVER_ORPHAN, DRIVER_STALLED, DRIVER_TAMPER)
