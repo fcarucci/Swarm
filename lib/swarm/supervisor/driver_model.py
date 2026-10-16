@@ -5,7 +5,7 @@
 this module does not depend on it. `Launch` is the board's row (Task 3); the driver reads it as `LaunchView`."""
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import datetime as dt
 from datetime import datetime
 from typing import Any
@@ -15,7 +15,7 @@ from swarm import driveroles
 # Action kinds the pure `next_actions` may return (spec 3.2-3.3, plus the rollover completion of 3.5-3.6).
 ACTION_KINDS = (
     "launch", "record_unreachable", "close", "hold", "nothing", "rollover", "stop_launch", "complete_land",
-    "escalate_landing", "fix_lead", "no_progress",
+    "escalate_landing", "fix_lead", "no_progress", "cancel_ruling",
 )
 
 # Verdict values a judge may return; a `not_met` in drive mode carries `open` (spec 3.6).
@@ -113,6 +113,8 @@ class Snapshot:
     # The job's learnings step has not run since its terminal verdict, or agents are unharvested (swarm.learnings;
     # filled in by the pass only once a terminal goal or ruling verdict is there).
     learn_pending: bool = False
+    # Last board post by this launch or commit in its workdir (not a contact heartbeat).
+    launch_progress: dict[str, datetime] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,7 +150,8 @@ DEFAULT_CFG: dict = {
     "max_sessions": 60, "max_rounds": 8, "no_progress_rounds": 3, "max_attempts": 3,
     "max_cost_usd": 40, "ruling_reserve_usd": 5, "session_usd_cap": 5, "min_session_usd": 0.5,
     "max_session_minutes": 60, "max_wall_hours": 24, "ruling_attempts": 2, "ruling_deadline_minutes": 120,
-    "ruling_grace_minutes": 15, "question_expiry": "4h", "stall_minutes": 90, "driver_error_passes": 6,
+    "ruling_grace_minutes": 15, "ruling_progress_minutes": 15, "question_expiry": "4h",
+    "stall_minutes": 90, "driver_error_passes": 6,
     "max_concurrent_sessions": 4, "lease_hold_minutes": 60, "recipe": "coding", "review_role": "reviewer",
 }
 
@@ -383,6 +386,11 @@ def _ruling(c: _Ctx) -> list[Action] | None:
     """Quiesce for a ruling; exhausted attempts and deadlines wait for a person."""
     led = c.s.ledger
     vd = c.s.goal_verdict
+    reason = c.due_reason()
+    if led.ruling_due_at is not None and reason is None and _engineers_pending(c) \
+            and led.ruling_attempts < c.cfg["ruling_attempts"] and not c.inflight("ruling"):
+        return [c.act("cancel_ruling", None, None, 0,
+                      reason="ledger-only ruling cancelled: engineers queued or running")]
     if _engineers_pending(c) and (c.s.goal_ready or any(_is_lead_name(h.by) for h in c.s.handoffs)
             or _valid(vd, c.s.generation) and vd.scope == "goal" and vd.verdict == "not_met"):
         return None
@@ -390,7 +398,6 @@ def _ruling(c: _Ctx) -> list[Action] | None:
             and same_head(_goal_candidate(c), vd.candidate)
             and (_engineers_pending(c) or c.lead and (c.launches[c.lead].state == "queued" or c.lead in c.live))):
         return None
-    reason = c.due_reason()
     if led.ruling_due_at is None and reason is None:
         return None
     since = _ts(led.ruling_due_at) or c.now
@@ -403,9 +410,23 @@ def _ruling(c: _Ctx) -> list[Action] | None:
         if elapsed < grace:
             return [c.act("hold", None, "ruling", 0, prompt="quiesce", trigger=c.rtrig, ruling=True,
                           reason=reason, not_before=since + grace)]
-        return [c.act("stop_launch", name, "ruling", 0, prompt="quiesce", trigger=c.launches[name].revision,
-                      ruling=True, reason=reason)
-                for name in sorted(c.live)]
+        window = dt.timedelta(minutes=c.cfg["ruling_progress_minutes"])
+        working, stops = [], []
+        for name in sorted(c.live):
+            row = c.launches[name]
+            last = max(stamp for stamp in (c.s.launch_progress.get(name), row.updated_at, since)
+                       if stamp is not None)
+            if c.now - last <= window:
+                working.append(name)
+            else:
+                stops.append(c.act("stop_launch", name, "ruling", 0, prompt="quiesce", trigger=row.revision,
+                                   ruling=True, reason=f"{reason}: {name} silent for longer than "
+                                   f"{c.cfg['ruling_progress_minutes']} minutes"))
+        if working:
+            stops.append(c.act("hold", None, "ruling", 0, prompt="ruling-pending", ruling=True,
+                               reason=f"ruling pending: {len(working)} launches still working",
+                               responsible=", ".join(working)))
+        return stops
     deadline = dt.timedelta(minutes=c.cfg["ruling_deadline_minutes"])
     if led.ruling_attempts >= c.cfg["ruling_attempts"] or elapsed >= deadline:  # 2.2: mechanical
         cause = "ruling attempts exhausted" if led.ruling_attempts >= c.cfg["ruling_attempts"] \
@@ -881,6 +902,10 @@ def next_actions(s: Snapshot, cfg: dict) -> list[Action]:
         return no_progress
     reason = reservation_reason(c.cfg, s.ledger, False, s.now)
     if reason:
+        if c.live:
+            pending = _ruling(c)
+            if pending:
+                return pending
         return [budget_hold(c, reason)]
     actions = _next_actions(s, cfg)
     if any(a.kind == "launch" and judge_action(a, c.launches)

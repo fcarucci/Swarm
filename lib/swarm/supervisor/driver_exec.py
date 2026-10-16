@@ -406,7 +406,10 @@ def note_waiting(board, led, snap, actions) -> None:
             reason += f"; retry after {a.not_before.isoformat()}"
         if a.launch:
             reason = f"{a.launch}: {reason}"
-        waits.append(f"{kind}: {reason}; {remedy}")
+        if kind == "ruling-pending":
+            waits.append(reason)
+        else:
+            waits.append(f"{kind}: {reason}; {remedy}")
     key = "\n".join(waits)
     if board.job_data(led.job).get("drive.waiting-key", "") == key:
         return
@@ -414,6 +417,9 @@ def note_waiting(board, led, snap, actions) -> None:
     if waits:
         msg = board.post(led.job, "swarm driver", "Waiting: " + "; ".join(waits))
         for text in waits:
+            if text.startswith("ruling pending:"):
+                lines.append(f"waiting on: {text}; see #{msg.id}")
+                continue
             actor = "learner" if text.startswith("learn.hold:") else "judge" if text.startswith("verdict-retry:") else "person"
             lines.append(f"waiting on: {actor} ({text}; see #{msg.id})")
     board.set_job_data(led.job, "drive.waiting-key", key or None)

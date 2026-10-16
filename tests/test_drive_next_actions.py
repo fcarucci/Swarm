@@ -97,10 +97,12 @@ class NextActions(unittest.TestCase):
         self.assertEqual(a[0].reason, "no-progress")
 
     def test_ruling_quiesces_live_launches_first(self):
-        s = snap(ledger=L(ruling_due_at=iso(T0)), live={"a"}, launches={"a": launch("a", "running")})
+        s = snap(ledger=L(ruling_due_at=iso(T0), rounds_without_progress=3),
+                 live={"a"}, launches={"a": launch("a", "running")})
         self.assertEqual(kinds(next_actions(s, CFG)), ["hold"])           # within grace
-        s2 = snap(ledger=L(ruling_due_at=iso(T0 - minutes(16))), live={"a"}, launches={"a": launch("a", "running")})
-        self.assertEqual(kinds(next_actions(s2, CFG)), ["stop_launch"])
+        s2 = snap(ledger=L(ruling_due_at=iso(T0 - minutes(16)), rounds_without_progress=3),
+                  live={"a"}, launches={"a": launch("a", "running")})
+        self.assertEqual(kinds(next_actions(s2, CFG)), ["hold"])  # productive past grace
 
     def test_budget_exhausted_holds_without_spending_reserve(self):
         s = snap(ledger=L(spent_usd=35.5), launches={"a": launch("a", "queued")})
@@ -405,9 +407,10 @@ class MetNeedsTheCandidateLanded(unittest.TestCase):
 class SurvivorKills(unittest.TestCase):
     """One test per mutant the review (task7-next.md) found surviving the first gate."""
 
-    def test_ruling_grace_boundary_stops_at_exactly_grace(self):          # M1
-        s = snap(ledger=L(ruling_due_at=iso(T0 - minutes(15))), live={"a"}, launches={"a": launch("a", "running")})
-        self.assertEqual(kinds(next_actions(s, CFG)), ["stop_launch"])
+    def test_ruling_grace_boundary_keeps_productive_launches(self):
+        s = snap(ledger=L(ruling_due_at=iso(T0 - minutes(15)), rounds_without_progress=3),
+                 live={"a"}, launches={"a": launch("a", "running")})
+        self.assertEqual(kinds(next_actions(s, CFG)), ["hold"])
 
     def test_question_until_is_capped_at_question_expiry(self):          # M2
         s = snap(launches={"lead": launch("lead", "done", **LEAD)},
@@ -439,7 +442,8 @@ class SurvivorKills(unittest.TestCase):
         self.assertNotIn("goal", [x.prompt_kind for x in next_actions(s, ARTIFEXT_CFG)])
 
     def test_stop_launch_is_a_ruling_action(self):                         # M18
-        s = snap(ledger=L(ruling_due_at=iso(T0 - minutes(16))), live={"a"}, launches={"a": launch("a", "running")})
+        s = snap(ledger=L(ruling_due_at=iso(T0 - minutes(16)), rounds_without_progress=3),
+                 live={"a"}, launches={"a": launch("a", "running", updated_at=T0 - minutes(20))})
         (a,) = next_actions(s, CFG)
         self.assertEqual((a.kind, a.ruling), ("stop_launch", True))
 

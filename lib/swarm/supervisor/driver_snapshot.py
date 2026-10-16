@@ -31,6 +31,7 @@ import datetime as dt
 import hashlib
 import json
 import re
+import subprocess
 from typing import Any
 
 from swarm import enrolment, receipts, review
@@ -358,6 +359,27 @@ def _rounds(verdicts: dict[str, dm.VerdictView], integrated: dict[str, dict], ge
     return out
 
 
+def _launch_progress(board, job, launches, msgs):
+    """Board posts and commits count as progress; tool/contact heartbeats do not."""
+    names = {a.agent_key: a.name for a in board.agents(job, include_departed=True)}
+    out, commits = {}, {}
+    for name, row in launches.items():
+        stamps = [m.created_at for m in msgs if m.agent_name == names.get(row.agent_key)]
+        if row.workdir and row.state == "running":
+            if row.workdir not in commits:
+                try:
+                    result = subprocess.run(['git', '-C', row.workdir, 'log', '-1', '--format=%ct'],
+                                            capture_output=True, text=True, timeout=2, check=True)
+                    commits[row.workdir] = dt.datetime.fromtimestamp(int(result.stdout.strip()), dt.timezone.utc)
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    commits[row.workdir] = None
+            if commits[row.workdir] is not None:
+                stamps.append(commits[row.workdir])
+        if stamps:
+            out[name] = max(stamps)
+    return out
+
+
 def read(board: Any, led: Any, job: str, *, cfg: dict, now: dt.datetime) -> dm.Snapshot:
     """One consistent read of `job` for next_actions (spec 3.2). `led` is the job's host-private ledger. `cfg` is
     accepted for the caller's symmetry: the recipe keys come from drive_cfg, and the caller passes its result."""
@@ -382,4 +404,5 @@ def read(board: Any, led: Any, job: str, *, cfg: dict, now: dt.datetime) -> dm.S
         goal_verdict=goal_verdict, goal_ready=_goal_ready(msgs, led, gen, rc),
         questions=_questions(board, job, gen, rc),
         wakes=_wakes(board, job, launches, msgs, events, led, rc),
-        integrated=integrated, rounds=_rounds(verdicts, integrated, gen), now=now)
+        integrated=integrated, rounds=_rounds(verdicts, integrated, gen), now=now,
+        launch_progress=_launch_progress(board, job, launches, msgs))

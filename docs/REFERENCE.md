@@ -1803,12 +1803,18 @@ Drive mode changes four things for anyone who scripted the old flow:
 ### Terminal states
 
 A drive job ends in exactly one of: **MET** (a current-generation goal or ruling verdict `met`, then the close-time
-checks), **UNREACHABLE** (the judge's verdict with reasons and details, or the labelled mechanical one when the
-budget, deadline or reserve is gone) or **CANCELLED** (a person ran `swarm deactivate`). A drive job is never
+checks), **UNREACHABLE** (the judge's verdict with reasons and details) or **CANCELLED**
+(a person ran `swarm deactivate`). A drive job is never
 left idle, stalled or waiting for a coordinator. When a budget is exhausted, or `no_progress_rounds` pass without
 progress, a **ruling** becomes due: the ruling judge decides MET, UNREACHABLE or one more bounded stretch of work, drawing on the reserve
-(`ruling_reserve_usd`, `ruling_attempts`). `ruling_deadline_minutes` and `ruling_grace_minutes` bound it; past them
-the driver records the mechanical UNREACHABLE and says so in the outcome.
+(`ruling_reserve_usd`, `ruling_attempts`). A pending ruling waits for running engineers and leads to finish
+or hand off. After `ruling_grace_minutes`, status shows `waiting on: ruling pending: <n> launches still working`.
+A board post by the launch or a commit in its workdir within `ruling_progress_minutes` (default 15) keeps it
+working; only launches silent longer than that window may be stopped after the grace period. Before stopping,
+the driver posts the reason and each dirty file and asks for a `wip:` commit on the launch's branch; it never
+stashes or discards changes. If the dirty-file scan fails, it posts that failure and postpones the stop.
+A ledger-only ruling with no current limit cause is cancelled when engineers are queued or running. Exhausted ruling attempts or
+`ruling_deadline_minutes` hold for a person; they do not mechanically declare the goal unreachable.
 
 ### Launches, rounds and landing
 
@@ -1845,10 +1851,11 @@ on a running job with `swarm drive budget --job J KEY=VALUE ...` (no rollover). 
 | `min_session_usd` | 0.5 | the launch is held and a ruling becomes due |
 | `max_session_minutes` | 60 | the session ends, the launch goes idle |
 | `max_wall_hours` | 24 | ruling |
-| `ruling_attempts` | 2 | the mechanical UNREACHABLE |
+| `ruling_attempts` | 2 | ruling hold for a person |
 | `close_deadline_minutes` | 60 | the close is abandoned and the job ends with the labelled mechanical outcome |
-| `ruling_deadline_minutes` | 120 | the mechanical UNREACHABLE |
-| `ruling_grace_minutes` | 15 | the mechanical UNREACHABLE |
+| `ruling_deadline_minutes` | 120 | ruling hold for a person; productive launches keep working |
+| `ruling_grace_minutes` | 15 | grace before checking whether launches are silent; productive engineers and leads keep working |
+| `ruling_progress_minutes` | 15 | recent board post or workdir commit keeps a running engineer or lead working |
 | `question_expiry` | `"4h"` | the question's `--default` is applied |
 | `stall_minutes` | 90 | the lead is woken or the lost actor relaunched |
 | `driver_error_passes` | 6 | `DRIVER-ERROR` is posted once and a ruling becomes due |

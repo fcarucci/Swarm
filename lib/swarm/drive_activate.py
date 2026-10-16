@@ -33,7 +33,8 @@ DEFAULT_ALLOWED_MODELS = ("haiku", "sonnet", "opus")
 BUDGET_KEYS = ("max_sessions", "max_rounds", "no_progress_rounds", "max_attempts",
                "max_cost_usd", "ruling_reserve_usd", "session_usd_cap", "min_session_usd",
                "max_session_minutes", "max_wall_hours", "ruling_attempts", "ruling_deadline_minutes",
-               "ruling_grace_minutes", "stall_minutes", "driver_error_passes", "max_concurrent_sessions")
+               "ruling_grace_minutes", "ruling_progress_minutes", "stall_minutes", "driver_error_passes",
+               "max_concurrent_sessions")
 # [G2] the helper commands a pinned credential may name (gitpin owns the allowlist; it re-checks a
 # pin read back from the owner record too). Anything else is refused at activation.
 CREDENTIAL_HELPERS = gitpin.CREDENTIAL_HELPERS

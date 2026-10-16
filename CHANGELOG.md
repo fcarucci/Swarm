@@ -6,6 +6,8 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 ## [Unreleased]
 
+- Rulings wait for productive engineers and leads, cancel stale ledger-only triggers while engineers are pending, and disclose dirty files with a WIP commit request before stopping a silent launch.
+
 ## [0.3.3] - 2026-10-16
 
 ### Removed

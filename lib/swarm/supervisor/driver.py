@@ -12,6 +12,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import os
+import subprocess
 import time
 import traceback
 from types import SimpleNamespace
@@ -332,11 +333,31 @@ def _terminal_from(snap, led, board, now, m, action) -> bool:
     return True
 
 
-def _stop_launch(board, cfg, led, launch: str, m) -> None:
+def _stop_launch(board, cfg, led, launch: str, m, reason: str = "stop requested") -> None:
     life = m.life
     launches = {i.launch_id for i in led.intents if i.launch == launch and i.state != "concluded"}
     rows = [r for r in life._open_rows(board, led) if r.launch_id in launches]
     if rows:
+        row = board.get_launch(led.job, led.generation, launch)
+        board.post(led.job, SUPERVISOR, f"Stopping {launch}: {reason}")
+        if row and row.workdir:
+            try:
+                result = subprocess.run(['git', '-C', row.workdir, 'status', '--porcelain', '-z',
+                                         '--untracked-files=all'], capture_output=True, text=True,
+                                        timeout=2, check=True)
+                dirty = [entry for entry in result.stdout.split('\0') if entry]
+                if dirty:
+                    board.post(led.job, SUPERVISOR,
+                               f"{launch}: commit partial work as a wip: commit on your branch; dirty files follow",
+                               to=row.name)
+                    # One file per post avoids losing the tail to the board's message cap.
+                    for entry in dirty:
+                        board.post(led.job, SUPERVISOR, f"{launch} dirty: {entry}")
+            except (OSError, subprocess.SubprocessError):
+                board.post(led.job, SUPERVISOR,
+                           f"{launch}: dirty-file scan failed; stop postponed; preserve partial work with a wip: commit",
+                           to=row.name)
+                return
         life.Hooks().stop_rows(board, cfg, rows)
 
 
@@ -406,7 +427,11 @@ def _act(board, cfg, sup, led, snap, actions, now, start_runner, config_path, jd
         elif a.kind == "rollover":
             m.life.rollover(board, cfg, led, now)
         elif a.kind == "stop_launch" and a.launch:
-            _stop_launch(board, cfg, led, a.launch, m)
+            _stop_launch(board, cfg, led, a.launch, m, a.reason)
+        elif a.kind == "cancel_ruling":
+            if led.ruling_due_at is not None:
+                _mutate(led, lambda l: setattr(l, "ruling_due_at", None))
+                board.post(led.job, SUPERVISOR, a.reason)
         # hold, nothing and complete_land (terminalize step 0) need no action here
 
 
