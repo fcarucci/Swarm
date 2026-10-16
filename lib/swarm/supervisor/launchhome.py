@@ -391,12 +391,36 @@ def prepare(cfg: dict, job: str, launch: str) -> Path:
         into("bin", "launchproto.py", proto, 0o600)
         if claude_json is not None:
             into("home", ".claude.json", claude_json)
+        _seed_standing_rules(h, home / ".cache" / "coder-box" / "standing-rules.json")
     except (safefs.UnsafePathError, PrivateDirError, OSError) as exc:
         raise LaunchIsolationError(f"the launch's directory cannot be prepared safely: {exc}") from exc
     finally:
         for fd in fds:
             os.close(fd)
     return home_dir(job, launch)
+
+
+def _seed_standing_rules(h: int, source: Path) -> None:
+    """Carry the person's cached rules into the scratch home; keep a launch's newer cache."""
+    from swarm import safefs
+    from swarm.supervisor import privfs
+    try:
+        modified = source.stat().st_mtime
+    except OSError:
+        return
+    data = _read_person(source)
+    if not data:
+        return
+    fds = []
+    try:
+        for name in ("home", ".cache", "coder-box"):
+            fds.append(safefs.open_sub(fds[-1] if fds else h, name, strict_mode=0o700))
+        d, name = fds[-1], "standing-rules.json"
+        if not privfs.read(d, name) or modified > (privfs.mtime(d, name) or 0):
+            privfs.write_atomic(d, name, data, 0o600)
+    finally:
+        for fd in fds:
+            os.close(fd)
 
 
 # --- what the launch sees -----------------------------------------------------------------------------

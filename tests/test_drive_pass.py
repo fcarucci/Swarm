@@ -1293,6 +1293,14 @@ class PromptTests(PassCase):
             self.assertIn("Never put work trees, clones or builds under /tmp", text)
             self.assertIn("/w/B.md", text)
 
+    def test_engineer_lead_and_reviewer_proceed_during_a_hindsight_outage(self):
+        led = self.job()
+        for role, kind in (("engineer", "launch"), ("engineering_lead", "lead"), ("reviewer", "review")):
+            with self.subTest(role=role):
+                text = prompts.render(self.board, self.cfg, led, self.action(kind), self.get_launch(role))
+                self.assertIn("Your standing rules are the ones in this brief; a Hindsight outage notice at "
+                              "session start is not a reason to stop.", text)
+
     def test_lead_prompt_lists_pending_wake_ids_and_watermark(self):
         led = self.job()
         self.board.post("J", "someone", "hello")

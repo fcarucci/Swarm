@@ -744,9 +744,11 @@ def next_actions(s: Snapshot, cfg: dict) -> list[Action]:
     c = _Ctx(s, cfg)
     if s.halted or s.status != "active" or s.ledger.terminal is not None:
         return _next_actions(s, cfg)
-    # A real terminal verdict still closes; an unlanded MET needs a funded integrator.
+    # Closing and an exhausted learnings hold need no session; preserve both past the limits.
+    # An unlanded MET still needs a funded integrator.
     terminal = _terminal(c)
-    if terminal and all(a.kind == "close" for a in terminal):
+    if terminal and all(a.kind == "close" or a.kind == "hold" and a.prompt_kind == "learn"
+                        for a in terminal):
         return terminal
     reason = reservation_reason(c.cfg, s.ledger, False, s.now)
     if reason:

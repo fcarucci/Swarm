@@ -104,6 +104,53 @@ class LaunchHomeCase(unittest.TestCase):
 
 
 class PrepareTest(LaunchHomeCase):
+    def test_standing_rules_cache_is_seeded_privately(self):
+        source = self.home / ".cache/coder-box/standing-rules.json"
+        source.parent.mkdir(parents=True)
+        source.write_text('{"rules": ["keep working"]}')
+        h = launchhome.prepare(self.cfg, "J", "eng-1")
+        cached = h / "home/.cache/coder-box/standing-rules.json"
+        self.assertEqual(cached.read_bytes(), source.read_bytes())
+        if os.name == "posix":
+            self.assertEqual(cached.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(cached.stat().st_uid, os.getuid())
+
+    def test_missing_or_empty_standing_rules_cache_is_not_seeded(self):
+        source = self.home / ".cache/coder-box/standing-rules.json"
+        for empty in (False, True):
+            with self.subTest(empty=empty):
+                if empty:
+                    source.parent.mkdir(parents=True)
+                    source.touch()
+                h = launchhome.prepare(self.cfg, "J", "eng-1")
+                self.assertFalse((h / "home/.cache/coder-box/standing-rules.json").exists())
+
+    def test_standing_rules_cache_refreshes_on_launch_start(self):
+        source = self.home / ".cache/coder-box/standing-rules.json"
+        source.parent.mkdir(parents=True)
+        source.write_text('{"rules": ["first"]}')
+        # Use the real launch entry point: restarting an existing launch must refresh its home too.
+        with mock.patch.object(launchhome, "off_granted", return_value=None):
+            launchhome.launch(self.cfg, ["codex", "exec"], job="J", launch="eng-1", platform="darwin")
+            cached = launchhome.home_dir("J", "eng-1") / "home/.cache/coder-box/standing-rules.json"
+            source.write_text('{"rules": ["updated"]}')
+            newer = cached.stat().st_mtime + 10
+            os.utime(source, (newer, newer))
+            launchhome.launch(self.cfg, ["codex", "exec"], job="J", launch="eng-1", platform="darwin")
+        self.assertEqual(cached.read_bytes(), source.read_bytes())
+
+    def test_a_launch_keeps_its_newer_standing_rules_cache(self):
+        source = self.home / ".cache/coder-box/standing-rules.json"
+        source.parent.mkdir(parents=True)
+        source.write_text('{"rules": ["old"]}')
+        h = launchhome.prepare(self.cfg, "J", "eng-1")
+        cached = h / "home/.cache/coder-box/standing-rules.json"
+        cached.write_text('{"rules": ["from the launch hook"]}')
+        newer = source.stat().st_mtime + 10
+        os.utime(cached, (newer, newer))
+        launchhome.prepare(self.cfg, "J", "eng-1")
+        self.assertEqual(cached.read_text(), '{"rules": ["from the launch hook"]}')
+
     def test_the_launch_directory(self):
         h = launchhome.prepare(self.cfg, "J", "eng-1")
         self.assertTrue(str(h).startswith(str(self.priv)))
