@@ -271,6 +271,19 @@ class ExclusiveCreateTests(LedgerCase):
             self.assertEqual(got.intents, [])
         self.assertIn(stored, ledger.unfinished("bk"))           # the driver drives it again
 
+    def test_activate_abandons_a_pending_terminal_intent(self):
+        # swarm-job-delete 2026-10-15: board row closed by a person while a ruling intent was pending; every
+        # re-activation bumped generation_requested (to 8) but rollover() never ran because the intent stayed.
+        led = ledger.create("bk", "J", budgets={}, activated_at=ACTIVATED)
+        led.terminal_intent = {"verdict": "unreachable", "scope": "ruling", "generation": 1, "candidate": None,
+                               "req": None, "by": "ruling-judge", "at": ACTIVATED}
+        led.closing = "ruling"
+        led.save()
+        again = ledger.activate("bk", "J", budgets={}, activated_at="2026-10-11T00:00:00+00:00")
+        self.assertIsNone(again.terminal_intent)
+        self.assertIsNone(again.closing)
+        self.assertEqual(again.generation_requested, 2)
+
     def test_reactivation_over_a_bad_file_is_refused(self):
         self.drive_dir().parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         self.drive_dir().mkdir(mode=0o700)

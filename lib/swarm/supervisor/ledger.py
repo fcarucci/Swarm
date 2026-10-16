@@ -679,7 +679,10 @@ def activate(board_key: str, job: str, *, budgets: dict, activated_at: str) -> L
                 return create(board_key, job, budgets=budgets, activated_at=activated_at)
             except LedgerExistsError:
                 continue   # created by someone else since the load: roll it over instead
-        if led.terminal is not None:
+        if led.terminal is not None or led.terminal_intent is not None or led.closing is not None:
+            # A pending terminal intent (a ruling or close that never committed, e.g. the board row was closed
+            # by a person first) blocks rollover() forever: swarm-job-delete reached generation_requested 8
+            # without ever rolling over (2026-10-15). An explicit re-activation abandons it.
             # A finished job is REOPENED by activation (Francesco, 2026-10-15): one piece of work is one job
             # with one stable name for its whole life, so a retry re-activates the same job instead of a new
             # numbered one. The new run keeps the owners and incarnation (the same job); its budget window
