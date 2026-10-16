@@ -356,21 +356,28 @@ def enforce_deadlines(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks |
         # a receipted MET or UNREACHABLE is held for its learnings step (swarm.learnings): elapsed time neither
         # harvests the agents nor waives the step, so no deadline closes it; the learner launch or a person does
         return False
+    ruling = None
+    js = board.job_status(led.job)
+    if js is not None and js.verdict_generation == led.generation:
+        from swarm.supervisor import driver_exec, driver_snapshot
+        snap = driver_snapshot.read(board, led, led.job, cfg=cfg, now=now)
+        driver_exec.settle_progress(led, snap, now)
+        ruling = snap.goal_verdict
     cause = _deadline_cause(cfg, led, now)
     if cause is None:
         return False
     # A receipted terminal verdict or a new fix round wins over the stale deadline.
-    js = board.job_status(led.job)
     if js is not None and js.verdict_generation == led.generation:
-        from swarm.supervisor import driver_snapshot
-        ruling = driver_snapshot.read(board, led, led.job, cfg=cfg, now=now).goal_verdict
         if (ruling is not None and ruling.generation == led.generation and ruling.receipt_id is not None
                 and (ruling.verdict == "met" or (ruling.scope == "ruling"
                      and led.watermarks.get("ruling-fix") != ruling.receipt_id))):
             return False
-    # A deadline is a limit a person can raise, never evidence the goal cannot be met.
+    # Only wall-clock exhaustion is a budget cause; an expired ruling needs its own remedy.
     from swarm.supervisor import driver_exec
-    driver_exec.hold_budget(board, led, driver_exec._dcfg({"drive": cfg}, led), now, cause)
+    if cause == "ruling deadline passed":
+        driver_exec.hold_ruling(board, led, now, cause, ruling)
+    else:
+        driver_exec.hold_budget(board, led, driver_exec._dcfg({"drive": cfg}, led), now, cause)
     return False
 
 

@@ -638,10 +638,16 @@ def _step(board, cfg, sup, state, led, owner, now, say, start_runner, config_pat
             driver_exec.skip_launch(board, led, row.name, f"owner configuration invalid: {exc}")
         return
     snap, actions = _plan(board, cfg, led, dcfg, now, m)
-    budget = next((a for a in actions if a.prompt_kind in ("budget", "goal-hold")), None)
+    if not driver_exec.reservation_reason(driver_exec._dcfg(cfg, led), led, False, now):
+        driver_exec.clear_budget_hold(board, led)
+    if not any(a.prompt_kind == "ruling-hold" for a in actions):
+        driver_exec.clear_ruling_hold(board, led)
+    budget = next((a for a in actions if a.prompt_kind in ("budget", "goal-hold", "ruling-hold")), None)
     if budget:
         if budget.prompt_kind == "goal-hold":
             driver_exec.hold_goal(board, led, now, budget.reason)
+        elif budget.prompt_kind == "ruling-hold":
+            driver_exec.hold_ruling(board, led, now, budget.reason, snap.goal_verdict)
         else:
             driver_exec.hold_budget(board, led, driver_exec._dcfg(cfg, led), now, budget.reason)
         for row in board.launches(led.job, led.generation):

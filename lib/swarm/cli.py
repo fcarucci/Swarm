@@ -1121,6 +1121,8 @@ def _job_status_word(board, j, now) -> str:
     from swarm.board import derive_job_status
     if j.status == "active" and board.job_data(j.job).get("drive.budget-hold"):
         return "waiting on a person (budget)"
+    if j.status == "active" and board.job_data(j.job).get("drive.ruling-hold"):
+        return "waiting on a person (ruling)"
     return derive_job_status(j, float(board.board_cfg.get("idle_minutes", 5)), now)
 
 

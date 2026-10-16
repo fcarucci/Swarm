@@ -182,6 +182,8 @@ def ledger_deadlines(led, flat: dict, sup: dict | None = None) -> list:
         return [dt.datetime.fromtimestamp(led.watermarks.get("goal-notify-at", 0), dt.timezone.utc)]
     if led.watermarks.get("budget-hold"):
         return [dt.datetime.fromtimestamp(led.watermarks["budget-notify-at"], dt.timezone.utc)]
+    if led.watermarks.get("ruling-hold"):
+        return [dt.datetime.fromtimestamp(led.watermarks.get("ruling-notify-at", 0), dt.timezone.utc)]
     retry_at = led.watermarks.get("driver-error:retry-at")
     if retry_at:
         return [dt.datetime.fromtimestamp(retry_at, dt.timezone.utc)]

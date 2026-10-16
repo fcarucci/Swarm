@@ -148,13 +148,14 @@ class DeadlineTests(LifeCase):
         for key, value in (("ruling_due_at", fx.iso(self.at(-121))),
                            ("activated_at", fx.iso(self.at(-26 * 60)))):
             with self.subTest(key=key):
+                self.led.ruling_due_at = None
                 setattr(self.led, key, value)
                 self.led.save()
                 with mock.patch("swarm.supervisor.driver_snapshot.read", side_effect=RuntimeError):
                     self.assertFalse(life.enforce_deadlines(self.b, self.cfg, self.led, self.t0))
                 self.assertIsNone(self.job().verdict)
                 self.assertIsNone(self.reload().terminal_intent)
-                self.assertTrue(self.led.watermarks["budget-hold"])
+                self.assertTrue(self.led.watermarks["ruling-hold" if key == "ruling_due_at" else "budget-hold"])
                 self.assertEqual(self.led.intents, [])
         self.assertEqual(len(self.posts("DRIVER-ESCALATE budget:")), 1)
 
@@ -165,7 +166,7 @@ class DeadlineTests(LifeCase):
         self.assertFalse(life.enforce_deadlines(self.b, self.cfg, self.led, self.at(-0.001)))
         self.assertNotIn("budget-hold", self.reload().watermarks)
         self.assertFalse(life.enforce_deadlines(self.b, self.cfg, self.led, self.t0))
-        self.assertTrue(self.reload().watermarks["budget-hold"])
+        self.assertTrue(self.reload().watermarks["ruling-hold"])
 
     def test_halted_jobs_do_not_escalate(self):
         self.led.ruling_due_at = fx.iso(self.at(-500))
@@ -181,7 +182,7 @@ class DeadlineTests(LifeCase):
         life.enforce_deadlines(self.b, self.cfg, self.led, self.at(39))
         self.assertNotIn("budget-hold", self.reload().watermarks)
         life.enforce_deadlines(self.b, self.cfg, self.led, self.at(40))
-        self.assertTrue(self.reload().watermarks["budget-hold"])
+        self.assertTrue(self.reload().watermarks["ruling-hold"])
 
     def test_pending_met_is_never_replaced(self):
         self.pending_met()

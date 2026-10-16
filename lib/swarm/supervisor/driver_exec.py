@@ -249,6 +249,38 @@ def clear_budget_hold(board, led) -> None:
         board.set_job_data(led.job, "drive.budget-hold", None)
 
 
+def ruling_wait(job, cause, verdict=None) -> str:
+    last = (f"{verdict.verdict} #{verdict.receipt_id} on {verdict.candidate or 'unknown'}"
+            if verdict else "none #none on unknown")
+    return (f"ruling: {cause}; the last ruling was {last}; resume with "
+            f"swarm run --job {job} --name lead ... or swarm activate --drive")
+
+
+def hold_ruling(board, led, now, reason, verdict=None) -> None:
+    """A ruling needs person intervention; use the budget hold's notification cadence."""
+    from swarm.supervisor import driver_events as ev
+    wait = ruling_wait(led.job, reason, verdict)
+    text = f"{ev.DRIVER_ESCALATE} {wait}"
+    target = led.requester_session or "owner"
+    if not led.watermarks.get("ruling-hold"):
+        board.post(led.job, "swarm driver", text, to=target)
+    if led.watermarks.get("ruling-notify-at", 0) <= now.timestamp():
+        board.post_event(led.job, "launch-failed", f"ruling:{led.generation}:{int(now.timestamp())}", text, to=target)
+        mutate(led, lambda l: l.watermarks.__setitem__("ruling-notify-at", int(now.timestamp()) + 300))
+    if not led.watermarks.get("ruling-hold"):
+        mutate(led, lambda l: l.watermarks.__setitem__("ruling-hold", 1))
+    board.set_job_data(led.job, "drive.ruling-hold", wait)
+
+
+def clear_ruling_hold(board, led) -> None:
+    if led.watermarks.get("ruling-hold"):
+        def clear(l):
+            l.watermarks.pop("ruling-hold", None)
+            l.watermarks.pop("ruling-notify-at", None)
+        mutate(led, clear)
+        board.set_job_data(led.job, "drive.ruling-hold", None)
+
+
 def note_no_progress(board, led, snap, action) -> None:
     from swarm.supervisor import driver_events as ev
     key = f"no-progress:{action.launch}"
@@ -553,7 +585,7 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
     limit = d["ruling_attempts"] if action.ruling else d["max_attempts"]
     if sum(1 for i in mine if i.outcome not in UNCOUNTED) >= limit:
         reason = f"attempt limit reached ({limit}); requeue with swarm run to authorize another attempt"
-        hold_budget(board, led, d, now, reason)
+        hold_ruling(board, led, now, reason)
         return skip(reason)
     launch = materialize_launch(board, led, action, cfg, now)
     if launch is None or launch.state not in ("queued",):
@@ -1065,6 +1097,19 @@ def settle_progress(led, snap, now) -> bool:
     verdict with progress moves `last_progress_at`; an integration or progress also resets the counter.
     Idempotent: what was seen is kept in the ledger's watermarks. True when the ledger changed."""
     wm = led.watermarks
+    ruling = snap.goal_verdict
+    head = max((h for h in snap.handoffs if h.artifact and h.receipt_id is not None),
+               key=lambda h: h.receipt_id, default=None)
+    head_hash = _hash_int(dm.ruling_head(head.artifact)) if head else None
+    clear_due = (ruling is not None and ruling.generation == led.generation and ruling.scope == "ruling"
+                 and ruling.receipt_id is not None and ruling.verdict in ("met", "not_met", "unreachable")
+                 and (ruling.receipt_id > wm.get("p.verdict", 0)
+                      or dm.same_head(dm._goal_candidate(dm._Ctx(snap, {})) or ruling.candidate, ruling.candidate)))
+    changed_head = (head is not None and head.receipt_id > wm.get("p.handoff", 0)
+                    and head_hash != wm.get("p.head"))
+    cleared_due = led.ruling_due_at is not None and (clear_due or changed_head)
+    if cleared_due:
+        mutate(led, lambda l: setattr(l, "ruling_due_at", None))
     handoff_id = max([h.receipt_id for h in snap.handoffs if h.receipt_id is not None] or [0])
     landed = sum(1 for e in snap.integrated.values() if (e or {}).get("landed"))
     # Only this generation's verdicts count: a rollover (or a reopen) clears the watermarks, and replaying every
@@ -1075,7 +1120,7 @@ def settle_progress(led, snap, now) -> bool:
               and getattr(v, "generation", led.generation) == led.generation]
     judged.sort(key=lambda v: v.receipt_id)
     if handoff_id <= wm.get("p.handoff", 0) and landed <= wm.get("p.landed", 0) and not judged:
-        return False
+        return cleared_due
     # the time of the progress events themselves (new hand-offs, judged rounds), never later than now: launch
     # row churn is not progress, and a forged future time cannot hold the stall wake off
     fired = [h.at for h in snap.handoffs if h.receipt_id is not None and h.receipt_id > wm.get("p.handoff", 0)]
@@ -1110,6 +1155,8 @@ def settle_progress(led, snap, now) -> bool:
 
     def apply(l):
         l.watermarks.update(plan["wm"])
+        if head_hash is not None:
+            l.watermarks["p.head"] = head_hash
         if plan["reset"]:
             l.rounds_without_progress = 0
         l.rounds_without_progress += plan["rounds"]

@@ -240,6 +240,12 @@ def cmd_run(board, cfg, args) -> int:
     row = board.queue_launch(args.job, led.generation, args.name, role=args.role, harness=args.harness,
                              model=_model_for(cfg, args.role, args.model), workdir=workdir,
                              brief=args.brief, queued_by=queued_by)
+    if args.name == "lead" and (caller is None or caller.requester):
+        from swarm.supervisor.driver_exec import mutate
+        def reset(l):
+            l.ruling_due_at, l.ruling_attempts = None, 0
+            l.rounds_without_progress, l.errors = 0, 0
+        mutate(led, reset)
     board.set_job_data(args.job, f"drive.skip.{led.generation}.{args.name}", None)
     print(f"{row.name}: {row.state}")
     from swarm.drivegate import kick

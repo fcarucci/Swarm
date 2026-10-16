@@ -387,8 +387,8 @@ def _ruling(c: _Ctx) -> list[Action] | None:
             or _valid(vd, c.s.generation) and vd.scope == "goal" and vd.verdict == "not_met"):
         return None
     if (_valid(vd, c.s.generation) and vd.scope == "ruling" and vd.verdict == "not_met"
-            and same_head((c.s.goal_ready or {}).get("candidate"), vd.candidate)
-            and c.lead and (c.launches[c.lead].state == "queued" or c.lead in c.live)):
+            and same_head(_goal_candidate(c), vd.candidate)
+            and (_engineers_pending(c) or c.lead and (c.launches[c.lead].state == "queued" or c.lead in c.live))):
         return None
     reason = c.due_reason()
     if led.ruling_due_at is None and reason is None:
@@ -410,7 +410,7 @@ def _ruling(c: _Ctx) -> list[Action] | None:
     if led.ruling_attempts >= c.cfg["ruling_attempts"] or elapsed >= deadline:  # 2.2: mechanical
         cause = "ruling attempts exhausted" if led.ruling_attempts >= c.cfg["ruling_attempts"] \
             else "ruling deadline passed"
-        return [budget_hold(c, cause)]
+        return [ruling_hold(c, cause)]
     if c.inflight("ruling"):
         return [c.act("nothing", None, None, 0, responsible="ruling", reason="ruling-in-flight")]
     if led.charged_usd() >= c.cfg["max_cost_usd"]:                            # reserve gone too (4.1)
@@ -787,6 +787,10 @@ def budget_hold(c: _Ctx, reason: str) -> Action:
                  not_before=c.now + dt.timedelta(seconds=300))
 
 
+def ruling_hold(c: _Ctx, reason: str) -> Action:
+    return replace(budget_hold(c, reason), prompt_kind="ruling-hold")
+
+
 def ruling_head(candidate: str | None) -> str:
     return (candidate or "unknown").rpartition("@")[2].lower()
 
@@ -911,7 +915,7 @@ def next_actions(s: Snapshot, cfg: dict) -> list[Action]:
     for a in actions:
         limit = c.cfg["ruling_attempts"] if a.ruling else c.cfg["max_attempts"]
         if a.kind == "launch" and c.attempts(a.action_id) >= limit:
-            return [budget_hold(c, f"attempt limit reached ({limit}) for {a.launch or a.prompt_kind}")]
+            return [ruling_hold(c, f"attempt limit reached ({limit}) for {a.launch or a.prompt_kind}")]
     if not any(a.ruling and a.kind == "launch" or a.launch == "ruling-judge" and a.kind == "launch"
                for a in actions):
         return actions
@@ -925,7 +929,7 @@ def next_actions(s: Snapshot, cfg: dict) -> list[Action]:
             if ready:
                 return ready
         if c.lead and c.launches[c.lead].state in ("done", "failed"):
-            return [budget_hold(c, f"ruling launch limit (head {head} already ruled not_met #{vd.receipt_id})")]
+            return [ruling_hold(c, f"ruling launch limit (head {head} already ruled not_met #{vd.receipt_id})")]
         return [c.act("hold", None, None, 0,
                       reason=f"waiting for the lead's fix round (head {head} already ruled not_met #{vd.receipt_id})")]
     key = f"ruling-head:{s.generation}:{head}"
@@ -935,7 +939,7 @@ def next_actions(s: Snapshot, cfg: dict) -> list[Action]:
     ruled = s.ledger.watermarks.get(key, 0) or any(
         s.ledger.watermarks.get(f"{key}:{i.launch_id}", 0) for i in prior)
     if ruled or len(prior) >= 3:
-        return [budget_hold(c, f"ruling launch limit (generation {s.generation}, head {head})")]
+        return [ruling_hold(c, f"ruling launch limit (generation {s.generation}, head {head})")]
     return actions
 
 

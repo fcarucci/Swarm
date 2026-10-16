@@ -901,6 +901,11 @@ def drive_lines(cfg: dict, job: str) -> list:
     landing = ("landing: required (destinations pinned)" if landing_required(details)
                else "landing: none (no destination pinned)")
     waiting = []
+    if led.terminal is None and led.watermarks.get("ruling-hold"):
+        from swarm.board import open_board
+        with open_board(cfg) as board:
+            text = board.job_data(job).get("drive.ruling-hold", "ruling: needs a person")
+        waiting = ["waiting on a person (ruling)", f"waiting on: person ({text})"]
     if led.terminal is None and led.watermarks.get("budget-hold"):
         cap = {**budget_defaults(cfg), **led.budgets}["max_cost_usd"]
         waiting = ["waiting on a person (budget)",
@@ -954,6 +959,9 @@ def cmd_drive(cfg: dict, args) -> int:
         return 1
     try:
         if args.dcmd == "budget":
+            if led.watermarks.get("ruling-hold"):
+                print(f"warning: the ruling hold is not about budget; resume with swarm run --job {args.job} "
+                      "--name lead ... or swarm activate --drive", file=sys.stderr)
             changes = parse_budget_args(args.pairs)
             merged = check_budgets({**led.budgets, **changes})
             _save(bk, args.job, lambda x: x.budgets.update(merged))

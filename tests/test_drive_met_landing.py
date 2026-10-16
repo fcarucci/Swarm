@@ -98,6 +98,7 @@ class MetLanding(unittest.TestCase):
         for scope in ("goal", "ruling"):
             s = self.snapshot(scope)
             led = s.ledger
+            led.save = lambda: None  # lifecycle now persists the cleared ruling deadline
             led.ruling_due_at = (T0 - dt.timedelta(days=2)).isoformat()
             board = mock.Mock()
             board.job_status.return_value = SimpleNamespace(verdict_scope="artifact", verdict="not_met", verdict_generation=1)

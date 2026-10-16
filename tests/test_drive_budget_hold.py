@@ -50,7 +50,7 @@ class BudgetModelTests(unittest.TestCase):
         self.assertIn(f"head {HEAD} already ruled not_met #77", a.reason)
         s = snap(ledger=led, goal_ready={"candidate": HEAD}, goal_verdict=s.goal_verdict,
                  launches={"lead": launch("lead", "done")})
-        self.assertEqual(dm.next_actions(s, {})[0].prompt_kind, "budget")
+        self.assertEqual(dm.next_actions(s, {})[0].prompt_kind, "ruling-hold")
 
     def test_head_and_generation_ruling_caps(self):
         for wm, prior in (({f'ruling-head:1:{HEAD}': 1}, []), ({}, [
@@ -58,7 +58,7 @@ class BudgetModelTests(unittest.TestCase):
                        state='concluded', charged=0) for n in range(3)])):
             s = snap(ledger=L(watermarks=wm, intents=prior), goal_ready={'candidate': HEAD})
             (a,) = dm.next_actions(s, {})
-            self.assertEqual((a.kind, a.prompt_kind), ('hold', 'goal-hold' if wm else 'budget'))
+            self.assertEqual((a.kind, a.prompt_kind), ('hold', 'goal-hold' if wm else 'ruling-hold'))
         s = snap(ledger=L(watermarks={f'ruling-head:1:{HEAD}': 1}), goal_ready={'candidate': 'b' * 40})
         (a,) = dm.next_actions(s, {})
         self.assertEqual((a.kind, a.artifact), ('launch', 'b' * 40))
