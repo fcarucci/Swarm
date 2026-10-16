@@ -671,7 +671,7 @@ def repair(board_key: str, job: str, *, at: str, by: str, generation: int | None
         return Repaired(fresh, archived, source, kept, lost, finished, gen if ok else None)
 
 
-def activate(board_key: str, job: str, *, budgets: dict, activated_at: str) -> Ledger:
+def activate(board_key: str, job: str, *, budgets: dict, activated_at: str, reopen: bool = False) -> Ledger:
     """Create the job's ledger, or re-activate it: load it, bump generation_requested (a rollover),
     update the budgets and the activation time, keep intents, charges and the incarnation. A bad
     entry is refused, never replaced."""
@@ -683,7 +683,7 @@ def activate(board_key: str, job: str, *, budgets: dict, activated_at: str) -> L
                 return create(board_key, job, budgets=budgets, activated_at=activated_at)
             except LedgerExistsError:
                 continue   # created by someone else since the load: roll it over instead
-        if led.terminal is not None or led.terminal_intent is not None or led.closing is not None:
+        if reopen or led.terminal is not None or led.terminal_intent is not None or led.closing is not None:
             # A pending terminal intent (a ruling or close that never committed, e.g. the board row was closed
             # by a person first) blocks rollover() forever: swarm-job-delete reached generation_requested 8
             # without ever rolling over (2026-10-15). An explicit re-activation abandons it.

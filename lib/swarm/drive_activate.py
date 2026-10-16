@@ -831,6 +831,8 @@ def cmd_activate_drive(cfg: dict, args) -> int:
                 return 1
             reopen = existing.terminal is not None
             with open_board(cfg) as board:
+                js = board.job_status(args.job)
+                reopen |= js is not None and js.status in ("completed", "failed", "cancelled")
                 if reopen:
                     # Reopening a finished job ([RR1] order: owner record, board claim, then the ledger): the
                     # owner record takes this activation's goal and pins, so the driver's tamper check sees the
@@ -842,8 +844,11 @@ def cmd_activate_drive(cfg: dict, args) -> int:
                                               review_role=plan.review_role, review_gates=plan.review_gates,
                                               target_branch=plan.target_branch, config_dirs=plan.config_dirs)
                     claim(board, plan)
-                led = ledger.activate(bk, args.job, budgets=plan.budgets, activated_at=_now())
+                led = ledger.activate(bk, args.job, budgets=plan.budgets, activated_at=_now(), reopen=reopen)
                 board.set_job_data(args.job, "drive.generation_requested", str(led.generation_requested))
+                if reopen:
+                    from swarm.supervisor import driver_life
+                    driver_life.rollover(board, cfg, led, board.now())
             print(f"{'reopened' if reopen else 're-activated'} {args.job}: generation {led.generation} -> "
                   f"{led.generation_requested} at the next pass")
             kick()

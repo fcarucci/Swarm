@@ -29,6 +29,7 @@ import re
 import sys
 import time
 import uuid
+from dataclasses import replace
 
 from swarm import compat, driveroles, receipts
 from swarm.board import JobPaused
@@ -214,21 +215,28 @@ def _queue_existing(board, row):
 
 # --- budget and locks ----------------------------------------------------------------------------
 
-def _reservation(d: dict, led, ruling: bool, now=None) -> tuple[float, float] | None:
-    """(usd, minutes) to reserve for one launch, or None when the budget does not allow it (spec 4.1):
-    launches leave the ruling reserve alone, a ruling draws on it."""
+def reservation_reason(d: dict, led, ruling: bool, now=None) -> str | None:
+    """Why the job cannot reserve another session, shared with queued-launch diagnostics."""
     if now is not None and led.activated_at:
         activated = dt.datetime.fromisoformat(led.activated_at)
         if now - activated >= dt.timedelta(hours=d["max_wall_hours"]):
-            return None
+            return "wall-clock budget exhausted"
     sessions = sum(1 for i in led.intents if i.outcome not in UNCOUNTED)
     if sessions >= d["max_sessions"]:
-        return None
+        return "session budget exhausted"
     left = d["max_cost_usd"] - led.charged_usd() - (0 if ruling else d["ruling_reserve_usd"])
     usd = min(float(d["session_usd_cap"]), left)
     if usd < d["min_session_usd"] and not (ruling and usd > 0):
+        return "cost budget cannot fund a session while keeping the ruling reserve"
+    return None
+
+
+def _reservation(d: dict, led, ruling: bool, now=None) -> tuple[float, float] | None:
+    """Reserve a session only when the job's wall, session and cost budgets allow it."""
+    if reservation_reason(d, led, ruling, now):
         return None
-    return usd, float(d["max_session_minutes"])
+    left = d["max_cost_usd"] - led.charged_usd() - (0 if ruling else d["ruling_reserve_usd"])
+    return min(float(d["session_usd_cap"]), left), float(d["max_session_minutes"])
 
 
 def _locks(launch) -> tuple[list[str], dict]:
@@ -392,6 +400,30 @@ def _check_resumable(launch) -> str | None:
     return launch.session_id
 
 
+def skip_launch(board, led, name: str | None, reason: str) -> None:
+    """Keep the latest hold next to its queued row; the pass reporter handles notices."""
+    if name and (row := board.get_launch(led.job, led.generation, name)) is not None and row.state == "queued":
+        board.set_job_data(led.job, f"drive.skip.{led.generation}.{name}", reason)
+
+
+def _claim_reason(board, led, launch, d, locks) -> str:
+    """Explain the refused atomic claim using the board state now visible."""
+    current = board.get_launch(led.job, led.generation, launch.name)
+    if current is None or current.revision != launch.revision or current.state != "queued":
+        return "launch changed while claiming it"
+    live = [r for r in board.restarts() if r.ended_at is None]
+    if any(r.launch_id == launch.launch_id for r in live):
+        return "previous attempt of this launch is still running"
+    if sum(r.job == led.job for r in live) >= int(d["max_concurrent_sessions"]):
+        return "job concurrency limit reached"
+    if d.get("max_host_running") is not None and sum(r.host == compat.node() for r in live) >= d["max_host_running"]:
+        return "host concurrency limit reached"
+    held = [lock.key for lock in board.drive_locks() if lock.key in locks]
+    if held:
+        return "drive lock held: " + ", ".join(held)
+    return "claim lost a race with another driver or an existing action/attempt"
+
+
 def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str | None = None,
             config_path: str = ""):
     """Run one `launch` action (spec 4.5 steps 1a-4). Returns the run dict handed to the runner, or None
@@ -400,27 +432,34 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
     concluded `failed`."""
     from swarm.board.autoinit import store_key
     from swarm.supervisor import command, launch as launcher, markers, runner
-    if action.kind != "launch" or not action.action_id.startswith(f"gen{led.generation}|"):
+    launch_name_ = action.launch or ((_driver_launch(action) or (None,))[0])
+
+    def skip(reason):
+        skip_launch(board, led, launch_name_, reason)
         return None
+
+    if action.kind != "launch" or not action.action_id.startswith(f"gen{led.generation}|"):
+        return skip("action is not a launch of the current generation")
     if led.state != "active":
-        return None                      # an activation not finished is never driven ([RR1])
+        return skip("ledger is not active: activation has not finished")
+    action = replace(action, action_id=dm.requeue_action_id(led, action.action_id, action.launch))
     if action.ruling and action.reason != "missing-verdict":
         mutate(led, lambda l: l.watermarks.setdefault(f"ruling-trigger:{action.reason}", 1))
     d = _dcfg(cfg, led)
     mine = [i for i in led.intents if i.action_id == action.action_id]
     if any(i.state != "concluded" for i in mine):
-        return None                      # an open attempt of this action blocks a second one
+        return skip("an open attempt of this action is still pending")
     limit = d["ruling_attempts"] if action.ruling else d["max_attempts"]
     if sum(1 for i in mine if i.outcome not in UNCOUNTED) >= limit:
-        return None
+        return skip(f"attempt limit reached ({limit}); requeue with swarm run to authorize another attempt")
     launch = materialize_launch(board, led, action, cfg, now)
     if launch is None or launch.state not in ("queued",):
-        return None
+        return skip("launch is missing or no longer queued")
     reserve = _reservation(d, led, action.ruling, now)
     if reserve is None:
         if led.watermarks.get(f"verdict-missing:{launch.name}"):
             _escalate_verdict(board, led, launch, now, "retry blocked by the session, wall-clock or cost budget")
-        return None
+        return skip(reservation_reason(d, led, action.ruling, now) or "session reservation refused")
     reserve_usd, reserve_minutes = reserve
     owned = action.launch is None
     resume = None if owned else _check_resumable(launch)
@@ -444,7 +483,7 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
             name = board.allocate_name(old, led.job, launch.role)
         except JobPaused:                # nobody joins a paused job: nothing was claimed
             _conclude(led, launch_id, "lost", False, 0.0)
-            return None
+            return skip("job is paused; name allocation refused")
         if launch.role == "judge":
             # the session takes over this row (claim_resume copies its judge flag), so the job's judge launch goes
             # to it as for a pipeline judge (pipeline.py): its verdict is recorded under its own name
@@ -462,7 +501,8 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
         raise
     if row is None:                      # lost the race: not an attempt, nothing counted (F7)
         _conclude(led, launch_id, "lost", False, 0.0)
-        return None
+        return skip(_claim_reason(board, led, launch, d, lock_keys))
+    board.set_job_data(led.job, f"drive.skip.{led.generation}.{launch.name}", None)
     barrier.hit("after_claim")
     # the claim is recorded; a launch of a no-progress kind advances the progress counter, and the
     # board position the session starts from is kept until its turn is acknowledged
@@ -514,7 +554,7 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
             board.release_drive_locks(launch_id, job=led.job, holder=action.action_id)
             _idle_launch(board, led, launch.name, "cancelled", now)
             _conclude(led, launch_id, "cancelled-before-start", False, 0.0)
-            return None
+            return skip(f"kill switch: {off}")
         (start_runner or runner.start)(cfg, run)
         barrier.hit("after_runner_start")
         return run

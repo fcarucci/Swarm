@@ -112,8 +112,10 @@ class LifeCase(unittest.TestCase):
                                             now or self.t0, candidate=CAND, req=REQ))
 
     def get_launch(self, name="eng-a", gen=1):
+        workdir = self.home / "work" / name
+        workdir.mkdir(parents=True, exist_ok=True)
         s = self.b.queue_launch("J", gen, name, role="engineer", harness="claude", model="haiku",
-                                workdir=f"/w/{name}", brief=f"/w/{name}/B.md", queued_by="lead")
+                                workdir=str(workdir), brief=str(workdir / "B.md"), queued_by="lead")
         return s
 
     def launch(self, name="eng-a", gen=1, usd=5.0, locks=()):

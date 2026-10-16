@@ -184,6 +184,13 @@ def _valid(vd: VerdictView | None, gen: int) -> bool:
     return vd is not None and vd.receipt_id is not None and vd.generation == gen
 
 
+def requeue_action_id(led, action_id: str, launch: str | None) -> str:
+    """An explicit run grants a fresh attempt allowance, retaining old charges."""
+    epoch = led.watermarks.get(f"requeue:{led.generation}:{launch}", 0) if launch else 0
+    suffix = f"|requeue{epoch}"
+    return action_id + suffix if epoch and not action_id.endswith(suffix) else action_id
+
+
 class _Ctx:
     """Read-only view of one snapshot plus the helpers every step shares."""
 
@@ -203,7 +210,8 @@ class _Ctx:
 
     def aid(self, prompt: str, launch: str | None, group: str | None, rnd: int, trigger: str) -> str:
         """`gen<N>|<prompt kind>|<launch>|<group>|<round>|<trigger>`: retries of one trigger share the id."""
-        return f"gen{self.s.generation}|{prompt}|{launch or '-'}|{group or '-'}|{rnd}|{trigger}"
+        aid = f"gen{self.s.generation}|{prompt}|{launch or '-'}|{group or '-'}|{rnd}|{trigger}"
+        return requeue_action_id(self.s.ledger, aid, launch)
 
     def act(self, kind: str, launch: str | None, group: str | None, rnd: int, *, prompt: str | None = None,
             trigger: object = None, artifact: str | None = None, ruling: bool = False, reason: str = "",

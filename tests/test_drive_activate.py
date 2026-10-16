@@ -1138,6 +1138,38 @@ class DriveCli(Env):
         led = self.ledger_of()
         self.assertEqual((led.generation, led.generation_requested), (1, 2))
 
+    def test_reopen_without_goal_starts_new_generation_and_lead(self):
+        self.assertEqual(self.activate("--workdir", str(self.work))[0], 0)
+        with self.board() as b:
+            old = b.get_launch("J", 1, "lead")
+            b.queue_launch("J", 1, "lead", role=old.role, harness="codex", model="gpt-6-astra",
+                           workdir=old.workdir, brief=old.brief, queued_by=old.queued_by)
+            b.close_job("J", "failed", "test", forced=True)
+        led = self.ledger_of()
+        led.terminal = {"verdict": "unreachable", "at": NOW.isoformat()}
+        led.save()
+        rc, out, err = self.cli("activate", "--job", "J")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.ledger_of().generation, 2)
+        with self.board() as b:
+            lead = b.get_launch("J", 2, "lead")
+            self.assertIsNotNone(lead)
+            self.assertEqual((lead.state, lead.role, lead.harness, lead.model, lead.workdir),
+                             ("queued", old.role, "codex", "gpt-6-astra", old.workdir))
+            self.assertEqual(b.job_status("J").goal, GOAL)
+            self.assertIn(GOAL, Path(lead.brief).read_text())
+
+    def test_reopen_failed_board_without_terminal_ledger(self):
+        self.assertEqual(self.activate("--workdir", str(self.work))[0], 0)
+        with self.board() as b:
+            b.close_job("J", "failed", "test", forced=True)
+        rc, _, err = self.cli("activate", "--job", "J")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.ledger_of().generation, 2)
+        with self.board() as b:
+            self.assertEqual(b.job_status("J").status, "active")
+            self.assertEqual(b.get_launch("J", 2, "lead").state, "queued")
+
     def test_reactivation_refused_for_a_launch_session(self):
         with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "sess-1"}):
             self.assertEqual(self.activate("--workdir", str(self.work))[0], 0)

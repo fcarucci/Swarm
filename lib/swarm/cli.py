@@ -3220,6 +3220,18 @@ def cmd_activate(cfg: dict, args) -> int:
     goal = (sys.stdin.read() if args.goal == "-" else args.goal or "").strip() or None
     from swarm import drive_activate as _da
     args.goal = goal
+    if not goal and not args.no_drive:
+        # A bare activate of an existing drive job must not bypass its generation protocol.
+        from swarm.supervisor import ledger as _ledger
+        existing = _ledger.load(_da.board_key(cfg), args.job)
+        if existing is not None:
+            with open_board(cfg) as board:
+                js = board.job_status(args.job)
+            owner = _da._owner(_da.board_key(cfg), args.job)
+            args.goal = goal = (js.goal if js else None) or ((owner.owner or {}).get("goal") if owner else None)
+            if owner:
+                args.workdir = args.workdir or owner.cwd
+                args.recipe = args.recipe or (owner.owner or {}).get("recipe")
     if _da.wants_drive(args):   # [A] a goal implies drive
         rc = _da.cmd_activate_drive(cfg, args)
         if rc == 0:
@@ -4406,10 +4418,20 @@ def _board_status(board, cfg: dict, args) -> None:
     from swarm import drive_activate as _da
     for line in _da.drive_lines(cfg, args.job):   # effective budget and models of a drive job ([D1], [P1])
         print(line)
+    from swarm.supervisor import ledger as _ledger
+    try:
+        led = _ledger.load(_da.board_key(cfg), args.job)
+    except (_ledger.LedgerBadError, OSError):
+        led = None                        # drive_lines already explains the unreadable ledger
+    data = board.job_data(args.job)
     for launch in board.launches(args.job):
-        reason = f": {launch.last_outcome}" if launch.last_outcome else ""
+        reason = (data.get(f"drive.skip.{launch.generation}.{launch.name}") if launch.state == "queued"
+                  else launch.last_outcome)
+        reason = f": {reason}" if reason else ""
+        requeues = led.watermarks.get(f"requeue:{launch.generation}:{launch.name}", 0) if led else 0
+        retried = f", requeued {requeues}" if requeues else ""
         print(term_safe(f"launch {launch.name} gen {launch.generation}: {launch.state} "
-                        f"({launch.role}, attempts {launch.attempts}){reason}"))
+                        f"({launch.role}, attempts {launch.attempts}{retried}){reason}"))
     line = bg_line(board, args.job) if board.job_status(args.job) else None
     if line:
         print(line)

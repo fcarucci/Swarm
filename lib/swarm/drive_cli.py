@@ -227,9 +227,14 @@ def cmd_run(board, cfg, args) -> int:
         if source_run:
             keys.update((source_run.new_agent_key, source_run.old_agent_key))
         queued_by = next((a.name for a in board.agents(args.job) if a.agent_key in keys), caller.launch)
+    if board.get_launch(args.job, led.generation, args.name) is not None:
+        from swarm.supervisor.driver_exec import mutate
+        key = f"requeue:{led.generation}:{args.name}"
+        mutate(led, lambda l: l.watermarks.__setitem__(key, l.watermarks.get(key, 0) + 1))
     row = board.queue_launch(args.job, led.generation, args.name, role=args.role, harness=args.harness,
                              model=_model_for(cfg, args.role, args.model), workdir=workdir,
                              brief=args.brief, queued_by=queued_by)
+    board.set_job_data(args.job, f"drive.skip.{led.generation}.{args.name}", None)
     print(f"{row.name}: {row.state}")
     from swarm.drivegate import kick
     kick(cfg=cfg)

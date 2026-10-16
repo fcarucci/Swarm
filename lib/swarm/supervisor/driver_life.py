@@ -138,10 +138,23 @@ def default_request_lead(board, cfg: dict, led, generation: int) -> None:
         return
     old = sorted((s for s in board.launches(led.job) if s.name == "lead" and s.generation < generation),
                  key=lambda x: x.generation, reverse=True)
-    if old:
-        s = old[0]
-        board.queue_launch(led.job, generation, "lead", role=s.role, harness=s.harness, model=s.model,
-                           workdir=s.workdir, brief=s.brief, queued_by=SUPERVISOR)
+    from swarm import drive_activate, enrolment
+    from swarm.supervisor import driver_exec as exe
+    owner = enrolment.find_job_owner(led.board_key, led.job)
+    s = old[0] if old else None
+    fields = (dict(role=s.role, harness=s.harness, model=s.model, workdir=s.workdir) if s else
+              exe._driver_fields(cfg, led, "engineering_lead"))
+    if fields is None:
+        raise ValueError("cannot queue lead: no previous lead or owner workdir")
+    fields.pop("brief_path", None)
+    if s is None:
+        fields["model"] = exe._models(cfg, led).get("lead")
+    js = board.job_status(led.job)
+    goal = (js.goal if js else None) or ((owner.owner or {}).get("goal") if owner else None)
+    requirements = sorted((owner.owner or {}).get("requirements") or {}) if owner else []
+    brief = drive_activate.write_lead_brief(fields["workdir"], led.job,
+                                          drive_activate.lead_brief_text(led.job, goal or "", requirements))
+    board.queue_launch(led.job, generation, "lead", **fields, brief=str(brief), queued_by=SUPERVISOR)
 
 
 def _no_capture(board, cfg, led) -> None:

@@ -118,6 +118,7 @@ class QuestionExpiryTests(T.LifeCase):
         self.assertEqual(life.apply_question_expiry(self.b, self.cfg, self.led, self.at(31), [q]), [])
 
     def test_rollover_keeps_the_once_only_marks(self):
+        self.get_launch("lead")
         b, q = self.ask(until=30)
         self.assertEqual(life.apply_question_expiry(self.b, self.cfg, self.led, self.at(31), [q]), [b.id])
         self.led.generation_requested = 2

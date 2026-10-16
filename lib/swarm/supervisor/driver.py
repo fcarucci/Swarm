@@ -15,7 +15,7 @@ import os
 import time
 from types import SimpleNamespace
 
-from swarm.supervisor import driver_events as ev, ledger
+from swarm.supervisor import driver_events as ev, driver_exec, ledger
 
 log = logging.getLogger("swarm.supervisor.driver")
 
@@ -558,10 +558,26 @@ def _step(board, cfg, sup, state, led, owner, now, say, start_runner, config_pat
     except m.snapshot.DriveConfigError as exc:
         _notice(board, state, f"config|{led.job}", led.job,
                 f"{ev.DRIVER_CONFIG} the owner record of this job lacks what the driver needs ({exc}); the job holds")
+        for row in board.launches(led.job, led.generation):
+            driver_exec.skip_launch(board, led, row.name, f"owner configuration invalid: {exc}")
         return
     snap, actions = _plan(board, cfg, led, dcfg, now, m)
     _watch_stalled(board, state, led, actions, now, sup)
     _land(board, cfg, led, owner, snap, flat, now, say, jdeadline, m, config_path)
+    for row in board.launches(led.job, led.generation):
+        if row.state == "queued":
+            holds = [a.reason for a in actions if a.kind in ("hold", "nothing") and a.reason]
+            reason = driver_exec.reservation_reason(driver_exec._dcfg(cfg, led), led, False, now)
+            if not reason and row.name in snap.questions:
+                reason = "launch has an open question"
+            if not reason and led.watermarks.get(f"retry-at:{row.name}", 0) > now.timestamp():
+                reason = "scheduled retry backoff has not elapsed"
+            if not reason and any(i.launch == row.name and i.state != "concluded" for i in led.intents):
+                reason = "an open attempt of this launch is still pending"
+            if not reason and len(snap.live) >= flat["max_concurrent_sessions"]:
+                reason = "job concurrency limit reached"
+            reason = reason or "; ".join(holds) or "pass deadline reached before launch execution"
+            driver_exec.skip_launch(board, led, row.name, reason)
     _act(board, cfg, sup, led, snap, actions, now, start_runner, config_path, jdeadline, m)
     queued = board.launches(led.job, led.generation, include_closed=False)
     stranded = any(s.state == "queued" for s in queued) and not any(s.state == "running" for s in queued)
@@ -572,6 +588,34 @@ def _step(board, cfg, sup, state, led, owner, now, say, start_runner, config_pat
                 f"{ev.DRIVER_BUG} queued launches with none running for more than one pass")
     elif not stranded:
         _forget(state, f"queued-bug|{led.job}")
+
+
+def _report_skips(board, led) -> None:
+    """A queued launch explains every held pass, with one durable notice per job."""
+    data = board.job_data(led.job)
+    for row in board.launches(led.job, led.generation):
+        key = f"skip-passes:{led.generation}:{row.name}:{row.revision}"
+        if row.state != "queued":
+            continue
+        reason_key = f"drive.skip.{led.generation}.{row.name}"
+        reason = data.get(reason_key)
+        if not reason:
+            if led.halted:
+                reason = "job is halted: " + str(led.halted.get("reason", ""))
+            elif led.generation_requested > led.generation:
+                reason = "generation rollover is waiting for previous sessions to stop"
+            elif led.terminal_intent or led.terminal:
+                reason = "job is closing or finished"
+            elif any(i.launch == row.name and i.state != "concluded" for i in led.intents):
+                reason = "an open attempt of this launch is still pending"
+            else:
+                reason = "driver pass did not reach launch execution"
+            driver_exec.skip_launch(board, led, row.name, reason)
+        count = led.watermarks.get(key, 0) + 1
+        _mutate(led, lambda l: l.watermarks.__setitem__(key, count))
+        if count > 1 and not led.watermarks.get("qdone:driver-skip"):
+            board.post(led.job, SUPERVISOR, f"{ev.DRIVER_SKIP} {row.name}: {reason}")
+            _mutate(led, lambda l: l.watermarks.__setitem__("qdone:driver-skip", 1))
 
 
 def _failed(board, state, led, exc, now, flat: dict, m) -> None:
@@ -635,9 +679,15 @@ def drive(board, cfg: dict, sup: dict, state: dict, *, now: dt.datetime, say=pri
         if owner is None:
             _notice(board, state, f"orphan|{led.job}", led.job,
                     f"{ev.DRIVER_ORPHAN} this job has a ledger but no owner record on this host; it holds")
+            for row in board.launches(led.job, led.generation):
+                driver_exec.skip_launch(board, led, row.name, "owner record missing on this host")
+            _report_skips(board, led)
             continue
         jdeadline = min(deadline, time.monotonic() + JOB_SECONDS)
         try:
+            for row in board.launches(led.job, led.generation):
+                if row.state == "queued":
+                    board.set_job_data(led.job, f"drive.skip.{led.generation}.{row.name}", None)
             _step(board, cfg, sup, state, led, owner, now, say, start_runner, config_path, jdeadline, m)
             if led.errors:
                 _mutate(led, lambda l: setattr(l, "errors", 0))
@@ -646,7 +696,10 @@ def drive(board, cfg: dict, sup: dict, state: dict, *, now: dt.datetime, say=pri
             _bad(board, state, led.job, str(exc)[:200], say)
         except Exception as exc:
             _failed(board, state, led, exc, now, _flat_cfg(cfg, led), m)
+            for row in board.launches(led.job, led.generation):
+                driver_exec.skip_launch(board, led, row.name, f"driver step failed: {type(exc).__name__}: {str(exc)[:300]}")
         try:
+            _report_skips(board, led)
             _mutate(led, lambda l: setattr(l, "last_pass", _iso(now)))
         except Exception as exc:
             log.warning("last_pass of %s not saved: %s", led.job, type(exc).__name__)
