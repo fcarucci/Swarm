@@ -104,7 +104,7 @@ class Mutants(Tmp):
     def test_stale_lock_plants_every_not_null_column_of_drive_locks(self):
         import re
         import chaos
-        ddl = (Path(__file__).resolve().parent.parent / "lib/swarm/board/seats.py").read_text()
+        ddl = (Path(__file__).resolve().parent.parent / "lib/swarm/board/launches.py").read_text()
         body = re.search(r"CREATE TABLE IF NOT EXISTS drive_locks \((.*?)\);", ddl, re.S).group(1)
         required = {m.group(1) for m in re.finditer(r"(\w+) [^,]*NOT NULL", body.replace("{big}", "BIG").replace("{ts}", "TS"))}
         required.add("key")                                   # the PRIMARY KEY

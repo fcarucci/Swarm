@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import unittest
 from unittest import mock
+from types import SimpleNamespace
 
 import support  # noqa: F401
 from support import add_backend_variants, subclasses_of
@@ -416,10 +417,10 @@ class Checks(LandCase):
         res = land.land(self.board, env, "J", f"{GROUP}@{self.sha}", caller_session="")
         self.assertFalse(res.ok)
 
-    def test_an_empty_session_never_matches_an_empty_seat_session(self):
+    def test_an_empty_session_never_matches_an_empty_launch_session(self):
         self.receipted_request()
-        with mock.patch.object(type(self.board), "seats", lambda s, job, gen=None, include_closed=True: [
-                mock.Mock(seat=SEAT, session_id="")]):
+        with mock.patch.object(type(self.board), "launches", lambda s, job, gen=None, include_closed=True: [
+                SimpleNamespace(name=SEAT, session_id="")]):
             res = land.land(self.board, self.env(), "J", f"{GROUP}@{self.sha}", caller_session="")
         self.assertFalse(res.ok)
         self.assertEqual(self.pushes, [])
@@ -436,8 +437,8 @@ class Checks(LandCase):
         return mid
 
     def land_as(self, session="sess-int"):
-        with mock.patch.object(type(self.board), "seats", lambda s, job, gen=None, include_closed=True: [
-                mock.Mock(seat=SEAT, session_id="sess-int")]):
+        with mock.patch.object(type(self.board), "launches", lambda s, job, gen=None, include_closed=True: [
+                SimpleNamespace(name=SEAT, session_id="sess-int")]):
             return land.land(self.board, self.env(), "J", f"{GROUP}@{self.sha}", caller_session=session)
 
     def test_integrator_session_may_land_synchronously_with_its_real_request_id(self):

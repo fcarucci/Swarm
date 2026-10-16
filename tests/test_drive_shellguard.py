@@ -129,6 +129,8 @@ class DriveRefusals(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(refuse(cmd, ["main"]), cmd)
 
+    # These command syntax cases are independent of executables installed on PATH.
+    @mock.patch.object(shellguard.shutil, "which", new=lambda _: None)
     def test_ordinary_commands_allowed(self):
         for cmd in ("git status", "git fetch origin", "swarm done --job J", "python3 -m unittest test_x",
                     "echo 'git push origin main'", "codex --version", "claude", "claude --version", "claude mcp list",
@@ -405,6 +407,8 @@ class Round4OneRule(unittest.TestCase):
                  "find . -name x -exec sh {} ;")
         self.good("parallel echo ::: a b", "xargs grep x", "xargs sed -i s/a/b/", "find . -exec grep -l x {} +")
 
+    # These command syntax cases are independent of executables installed on PATH.
+    @mock.patch.object(shellguard.shutil, "which", new=lambda _: None)
     def test_headless_launches(self):
         self.bad("codex app-server", "codex proto", "codex mcp-server", "codex e hi", "npx @openai/codex app-server",
                  "codex --model x app-server", "claude mcp serve")

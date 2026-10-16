@@ -569,7 +569,7 @@ def _step(board, cfg, sup, state, led, owner, now, say, start_runner, config_pat
     _mutate(led, lambda l: l.watermarks.__setitem__("queued.empty_passes", previous + 1 if stranded else 0))
     if stranded and previous:
         _notice(board, state, f"queued-bug|{led.job}", led.job,
-                "DRIVER-BUG queued launches with none running for more than one pass")
+                f"{ev.DRIVER_BUG} queued launches with none running for more than one pass")
     elif not stranded:
         _forget(state, f"queued-bug|{led.job}")
 
