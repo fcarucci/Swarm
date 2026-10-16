@@ -3,7 +3,7 @@
 
 A pinned URL comes from a work dir's .git/config or a flag, and stays in the host-private owner
 record, so it is checked wherever it enters, and every git call that takes it runs so that nothing a
-seat can write decides what git does:
+launch can write decides what git does:
 
 - check_url: no option-like URL (a leading "-": `--upload-pack=CMD` would run CMD), no transport
   helper (`ext::`, `fd::`), no whitespace or control characters, and only the pinned transports:
@@ -281,7 +281,7 @@ def _under(path: str, root: str) -> bool:
 
 def dir_problem(path: str, forbidden_roots=()) -> str | None:
     """Why `path` cannot be trusted as a helper's private config dir (None when it can): missing or
-    not a directory; under a root a seat can write (`forbidden_roots`); not owned by this user, or
+    not a directory; under a root a launch can write (`forbidden_roots`); not owned by this user, or
     writable by group or others; or a parent directory another user, or group or others, can change
     (a sticky directory such as /tmp is allowed as a parent: others cannot replace our entry)."""
     if not isinstance(path, str) or not os.path.isabs(path):
@@ -289,7 +289,7 @@ def dir_problem(path: str, forbidden_roots=()) -> str | None:
     real = os.path.realpath(path)
     for root in forbidden_roots:
         if _under(real, os.path.realpath(root)):
-            return f"lies under the work root {root} (a seat could write it)"
+            return f"lies under the work root {root} (a launch could write it)"
     try:
         st = os.stat(real)
     except OSError:

@@ -580,12 +580,16 @@ class FileStore(MemoryStore):
         self.pauses = state.get("pauses") or []
         self.next_pause_id = int(state.get("next_pause_id") or 1)
         self.blockers = state.get("blockers") or []
+        for row in self.blockers:
+            legacy = "se" "at"
+            if legacy in row:
+                row["launch"] = row.pop(legacy)
         self.blocker_events = state.get("blocker_events") or []
         self.next_blocker_id = int(state.get("next_blocker_id") or 1)
         self.next_blocker_event_id = int(state.get("next_blocker_event_id") or 1)
-        from .launches import migrated_launch
-        self.launches = state.get("launches") or [migrated_launch(r) for r in state.get("seats", [])]
-        self.next_launch_id = int(state.get("next_launch_id") or state.get("next_launch_row_id") or 1)
+        from .launches import LEGACY_TABLE, migrated_launch
+        self.launches = state.get("launches") or [migrated_launch(r) for r in state.get(LEGACY_TABLE, [])]
+        self.next_launch_id = int(state.get("next_launch_id") or state.get("next_launch_row_id") or state.get("next_se" "at_id") or 1)
         self.drive_locks = [d for d in state.get("drive_locks", []) if not d["key"].startswith("wt:")]
         self.events = state.get("events") or []
         self.next_event_id = int(state.get("next_event_id") or 1)

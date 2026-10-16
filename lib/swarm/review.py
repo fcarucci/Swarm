@@ -256,7 +256,7 @@ def pipeline_status(raw: str | None) -> dict:
 
 
 def judge_artifact(board, job: str, agent_key: str | None = None, *, name: str | None = None) -> str | None:
-    """The supervisor's hand-off binding follows resume_of when a session takes its seat."""
+    """The supervisor's hand-off binding follows resume_of when a session takes its launch."""
     data = board.job_data(job)
     agent = next((a for a in board.agents(job) if (agent_key and a.agent_key == agent_key)
                   or (name and a.name == name and a.role == 'judge' and a.status not in ('left', 'completed'))), None)

@@ -76,7 +76,7 @@ class MemoryStore:
         self.blocker_events: list[dict] = []
         self.next_blocker_id = 1
         self.next_blocker_event_id = 1
-        self.launches: list[dict] = []            # drive seats (schema 25), by id
+        self.launches: list[dict] = []            # drive launches (schema 25), by id
         self.next_launch_id = 1
         self.drive_locks: list[dict] = []      # drive locks (schema 25), by key
         self.events: list[dict] = []           # external events (Board.post_event), by id
@@ -222,7 +222,7 @@ def _drop_quiet_jobs(s: MemoryStore, keep: _dt.datetime) -> bool:
     for job in doomed:
         del s.jobs[job]
     _drop_agents(s, lambda a: a["job"] in doomed)
-    s.launches[:] = [r for r in s.launches if r["job"] not in doomed]   # seats cascade with their job (schema 25)
+    s.launches[:] = [r for r in s.launches if r["job"] not in doomed]   # launches cascade with their job (schema 25)
     return bool(doomed)
 
 

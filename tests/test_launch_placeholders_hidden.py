@@ -1,6 +1,6 @@
 """A drive launch allocates a placeholder agent row and closes it as "drive predecessor" before
 its session takes the row over. Those rows were never agents: status and watch must not list them
-(a seat resumed every turn left dozens of them in the pane)."""
+(a launch resumed every turn left dozens of them in the pane)."""
 from test_hooks_cli import Env
 
 

@@ -212,7 +212,7 @@ def _person_deactivated(led, key: str, now: dt.datetime) -> bool:
     rid = f"deactivate:{led.generation}"
     r = receipts.find(key, led.job, "person", rid, rev=1, incarnation=led.incarnation, generation=led.generation,
                       now=now.timestamp())
-    return (r is not None and r.seat is None and r.action_id in DEACTIVATE_HOWS
+    return (r is not None and r.launch is None and r.action_id in DEACTIVATE_HOWS
             and receipts.matches(r, {"kind": "person", "id": rid, "rev": 1, "action": "deactivate",
                                      "target": led.job}))
 
@@ -316,9 +316,9 @@ def _terminal_from(snap, led, board, now, m, action) -> bool:
     return True
 
 
-def _stop_seat(board, cfg, led, seat: str, m) -> None:
+def _stop_launch(board, cfg, led, launch: str, m) -> None:
     life = m.life
-    launches = {i.launch_id for i in led.intents if i.seat == seat and i.state != "concluded"}
+    launches = {i.launch_id for i in led.intents if i.launch == launch and i.state != "concluded"}
     rows = [r for r in life._open_rows(board, led) if r.launch_id in launches]
     if rows:
         life.Hooks().stop_rows(board, cfg, rows)
@@ -335,8 +335,8 @@ def _act(board, cfg, sup, led, snap, actions, now, start_runner, config_path, jd
                 m.life.terminalize(board, cfg, led, now)
         elif a.kind == "rollover":
             m.life.rollover(board, cfg, led, now)
-        elif a.kind == "stop_seat" and a.seat:
-            _stop_seat(board, cfg, led, a.seat, m)
+        elif a.kind == "stop_launch" and a.launch:
+            _stop_launch(board, cfg, led, a.launch, m)
         # hold, nothing and complete_land (terminalize step 0) need no action here
 
 
@@ -352,7 +352,7 @@ def _with_learn(board, cfg, led, snap):
         from swarm import learnings
         return replace(snap, learn_pending=learnings.learn_pending(board, cfg, led.job, gv.at))
     except Exception as exc:
-        # fail closed: an unverified learnings step stays pending (the close waits; the learner seat is
+        # fail closed: an unverified learnings step stays pending (the close waits; the learner launch is
         # launched or awaited), never a close past it
         log.warning("learnings check of %s failed: %s", led.job, type(exc).__name__)
         try:
@@ -414,7 +414,7 @@ def _watch_stalled(board, state, led, actions, now, sup) -> None:
     limit = 2 * 60 * float((sup or {}).get("timer_minutes", 5))
     if now.timestamp() - since > limit:
         _notice(board, state, f"stalled|{led.job}", led.job,
-                f"{ev.DRIVER_STALLED} no seat, launch or record is responsible for this job since "
+                f"{ev.DRIVER_STALLED} no launch, launch or record is responsible for this job since "
                 f"{dt.datetime.fromtimestamp(since, dt.timezone.utc).isoformat()}")
 
 
@@ -441,7 +441,7 @@ def _control(board, cfg, state, led, job: str, now, jdeadline: float, m) -> bool
     CONTROL-REFUSED) and consumed either way. `led` is None for a ledger that does not read (a `repair`
     request). Stops at the job's time slot. True when the ledger on disk may have changed (reloaded here)."""
     ctl = getattr(m, "control", None)
-    if ctl is None:   # never in an integrated build: say so loudly, a Codex seat's requests would wait for ever
+    if ctl is None:   # never in an integrated build: say so loudly, a Codex launch's requests would wait for ever
         log.error("control requests of %s cannot be applied: swarm.drive_cli is not in this build", job)
         from swarm.supervisor import driver_events as ev
         _notice(board, state, f"control-missing|{job}", job,
@@ -502,19 +502,19 @@ def _land_env(cfg, led, owner, snap, say, jdeadline, m, config_path=None):
 
 
 def _idle_integrator(board, led, branch: str, m) -> None:
-    """The integrator seat of a group goes idle once its hand-off is landed or refused."""
-    name = m.exec.seat_name("integrator", branch)
-    for seat in board.launches(led.job, led.generation):
-        if seat.name == name and seat.state == "running":
+    """The integrator launch of a group goes idle once its hand-off is landed or refused."""
+    name = m.exec.launch_name("integrator", branch)
+    for launch in board.launches(led.job, led.generation):
+        if launch.name == name and launch.state == "running":
             try:
-                board.set_launch_state(seat.id, seat.revision, "done", job=led.job, last_outcome="landed")
+                board.set_launch_state(launch.id, launch.revision, "done", job=led.job, last_outcome="landed")
             except ValueError as exc:
                 log.warning("integrator %s of %s not idled: %s", name, led.job, exc)
 
 
 def _land(board, cfg, led, owner, snap, flat, now, say, jdeadline, m, config_path=None) -> None:
     """Task 11b's `driver_land.run`, once per pass before any other action: executes the receipted land
-    requests. A finished request leaves its integrator seat idle. After `land_pending_passes` consecutive
+    requests. A finished request leaves its integrator launch idle. After `land_pending_passes` consecutive
     passes with a landing still pending a ruling is made due (the lease or the CI never comes)."""
     if getattr(m, "land", None) is None:
         return
@@ -596,6 +596,8 @@ def drive(board, cfg: dict, sup: dict, state: dict, *, now: dt.datetime, say=pri
     time.monotonic() value. Returns the names of the jobs the other passes must skip."""
     from swarm import enrolment
     from swarm.board.autoinit import store_key
+    from swarm.supervisor import launchhome
+    launchhome.migrate_home()
     key = store_key(cfg)
     deadline = time.monotonic() + 90 if deadline is None else deadline
     leds, held = _enumerate(board, cfg, state, key, say)

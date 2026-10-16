@@ -4,7 +4,7 @@ Adds `swarm team`, `swarm activate --team`, the team line of `swarm status --job
 default composition from team.toml. Core swarm knows nothing about teams: without this file those
 commands do not exist and everything else works unchanged. See docs/PLUGINS.md for the plugin API.
 
-Seats. Mandatory, always present and not removable: engineering_lead, qa, engineer (one or more),
+Launches. Mandatory, always present and not removable: engineering_lead, qa, engineer (one or more),
 judge. Optional, the user's choice: product_manager (default on), build_engineer (default off),
 reviewer, verifier. A job's own composition (kept with the job on the board) wins over team.toml,
 which wins over the built-in default.
@@ -22,17 +22,17 @@ from pathlib import Path
 MANDATORY = ("engineering_lead", "qa", "engineer", "judge")
 OPTIONAL = ("product_manager", "build_engineer", "reviewer", "verifier")
 DEFAULT_OPTIONAL = ("product_manager",)
-ABSENT = {   # who carries a missing optional seat's duties (shown by `swarm team --show`)
+ABSENT = {   # who carries a missing optional launch's duties (shown by `swarm team --show`)
     "product_manager": "engineering_lead writes the change criteria compactly; engineering_lead and qa "
                        "record the product acceptance",
     "build_engineer": "engineering_lead owns the build, CI, integration-gate and build-slot duties",
 }
-# The short board label (`[swarm title: EL]`) each seat is spawned with: what `swarm who`, `status` and
+# The short board label (`[swarm title: EL]`) each launch is spawned with: what `swarm who`, `status` and
 # `watch` show beside the name. Display only; several engineers may add a short scope (`Eng: board view`).
-SEAT_TITLES = {"project_manager": "PM", "engineering_lead": "EL", "product_manager": "Product", "qa": "QA",
+LAUNCH_TITLES = {"project_manager": "PM", "engineering_lead": "EL", "product_manager": "Product", "qa": "QA",
                "judge": "Judge", "build_engineer": "Build", "reviewer": "Reviewer", "verifier": "Verifier",
                "engineer": "Eng"}
-# The review pipeline's own seats (a plugin recipe's `titles`, keyed by the seat's role).
+# The review pipeline's own launches (a plugin recipe's `titles`, keyed by the launch's role).
 PIPELINE_TITLES = {"judge": "Judge", "worker": "Eng: fix", "integrator": "Eng: integrate"}
 
 LAND_STRATEGIES = ("rebase-ff", "squash-ff")   # [land] strategy; rebase-ff is the default
@@ -108,7 +108,7 @@ def describe(optional: list[str], source: str) -> list[str]:
     for role in ("product_manager", "build_engineer"):
         if role not in optional:
             lines.append(f"absent     {role}: {ABSENT[role]}")
-    lines.append("titles     " + ", ".join(f"{r}={SEAT_TITLES[r]}" for r in ("project_manager", *MANDATORY, *optional)) +
+    lines.append("titles     " + ", ".join(f"{r}={LAUNCH_TITLES[r]}" for r in ("project_manager", *MANDATORY, *optional)) +
                  "  (tag each spawn `[swarm title: <title>]`)")
 
     lines.append(CI_RULE)
@@ -311,7 +311,7 @@ def drive_landed(ctx, job: str, branch: str, sha: str) -> bool:
 
 def drive_finalize(artifact: str, branch: str, sha: str, job: str, config: dict, ci_instructions: str) -> str:
     """The integrator's brief in a drive job: rebase, push the BRANCH, wait for exact-SHA CI, then hand off to the
-    driver with `swarm land`. The seat never pushes the target and never posts INTEGRATED."""
+    driver with `swarm land`. The launch never pushes the target and never posts INTEGRATED."""
     strategy = ("Rebase with git rebase only; never create a merge commit, squash or force-push. "
                 if config["land_strategy"] == "rebase-ff" else
                 "This project lands with [land] strategy squash-ff: squash the approved branch into ONE commit on the "

@@ -2,7 +2,7 @@
 (spec 3.3, plan Task 7). The dataclasses hold no logic; `next_actions` and `progress` do no I/O.
 
 `Ledger` is the host-private drive ledger (Task 4, supervisor/ledger.py), referenced here by name only so
-this module does not depend on it. `Seat` is the board's row (Task 3); the driver reads it as `LaunchView`."""
+this module does not depend on it. `Launch` is the board's row (Task 3); the driver reads it as `LaunchView`."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -12,7 +12,7 @@ from typing import Any
 
 # Action kinds the pure `next_actions` may return (spec 3.2-3.3, plus the rollover completion of 3.5-3.6).
 ACTION_KINDS = (
-    "launch", "record_unreachable", "close", "hold", "nothing", "rollover", "stop_seat", "complete_land",
+    "launch", "record_unreachable", "close", "hold", "nothing", "rollover", "stop_launch", "complete_land",
 )
 
 # Verdict values a judge may return; a `not_met` in drive mode carries `open` (spec 3.6).
@@ -21,7 +21,7 @@ VERDICTS = ("met", "not_met", "unreachable")
 
 @dataclass(frozen=True, slots=True)
 class LaunchView:
-    """One row of the `launches` table (spec 3.4). `seat` is the stable name, unique per job and generation."""
+    """One row of the `launches` table (spec 3.4). `launch` is the stable name, unique per job and generation."""
     id: int
     job: str
     name: str
@@ -43,10 +43,10 @@ class LaunchView:
 
 @dataclass(frozen=True, slots=True)
 class Question:
-    """An open human question of one seat, receipted by the requester or the asking agent (spec 3.10)."""
+    """An open human question of one launch, receipted by the requester or the asking agent (spec 3.10)."""
     id: int
     job: str
-    seat: str
+    launch: str
     generation: int
     text: str
     default: str | None
@@ -87,7 +87,7 @@ class VerdictView:
 
 @dataclass(frozen=True, slots=True)
 class Snapshot:
-    """One consistent read of a drive job for the pure `next_actions` (spec 3.2). `live` holds the seat
+    """One consistent read of a drive job for the pure `next_actions` (spec 3.2). `live` holds the launch
     names with a live attempt; `handoffs`, `verdicts`, `goal_verdict`, `questions` are receipted only."""
     job: str
     generation: int
@@ -114,12 +114,12 @@ class Snapshot:
 
 @dataclass(frozen=True, slots=True)
 class Action:
-    """One decision of `next_actions`. `action_id` is `gen|kind|seat|artifact-group|round|event-id`; `attempt`
+    """One decision of `next_actions`. `action_id` is `gen|kind|launch|artifact-group|round|event-id`; `attempt`
     numbering is the caller's. `not_before` is set on `hold`; `responsible` names who is making progress on
-    `nothing` (a running seat or runner)."""
+    `nothing` (a running launch or runner)."""
     kind: str
     action_id: str
-    seat: str | None
+    launch: str | None
     prompt_kind: str | None
     artifact: str | None = None
     ruling: bool = False
@@ -201,16 +201,16 @@ class _Ctx:
         # finds a due reason (Task 8); until it does, the quiesce holds from now.
         self.rtrig = s.ledger.ruling_due_at or "unrecorded"
 
-    def aid(self, prompt: str, seat: str | None, group: str | None, rnd: int, trigger: str) -> str:
-        """`gen<N>|<prompt kind>|<seat>|<group>|<round>|<trigger>`: retries of one trigger share the id."""
-        return f"gen{self.s.generation}|{prompt}|{seat or '-'}|{group or '-'}|{rnd}|{trigger}"
+    def aid(self, prompt: str, launch: str | None, group: str | None, rnd: int, trigger: str) -> str:
+        """`gen<N>|<prompt kind>|<launch>|<group>|<round>|<trigger>`: retries of one trigger share the id."""
+        return f"gen{self.s.generation}|{prompt}|{launch or '-'}|{group or '-'}|{rnd}|{trigger}"
 
-    def act(self, kind: str, seat: str | None, group: str | None, rnd: int, *, prompt: str | None = None,
+    def act(self, kind: str, launch: str | None, group: str | None, rnd: int, *, prompt: str | None = None,
             trigger: object = None, artifact: str | None = None, ruling: bool = False, reason: str = "",
             not_before: datetime | None = None, responsible: str | None = None) -> Action:
         slot = prompt or kind
         trig = "-" if trigger is None else str(trigger)
-        return Action(kind=kind, action_id=self.aid(slot, seat, group, rnd, trig), seat=seat, prompt_kind=prompt,
+        return Action(kind=kind, action_id=self.aid(slot, launch, group, rnd, trig), launch=launch, prompt_kind=prompt,
                       artifact=artifact, ruling=ruling, reason=reason, not_before=not_before,
                       responsible=responsible)
 
@@ -228,15 +228,15 @@ class _Ctx:
         """An unconcluded launch for this artifact group (or the goal/ruling slot) is still running."""
         return any((i.action_id or "").split("|")[3:4] == [group] for i in self.open)
 
-    def seat_has_open_intent(self, name: str) -> bool:
-        return any(i.seat == name for i in self.open)
+    def launch_has_open_intent(self, name: str) -> bool:
+        return any(i.launch == name for i in self.open)
 
     def last_launch(self, name: str) -> str:
-        ids = [i.launch_id for i in self.s.ledger.intents if i.seat == name]
+        ids = [i.launch_id for i in self.s.ledger.intents if i.launch == name]
         return ids[-1] if ids else "none"
 
     def gated(self, name: str) -> datetime | None:
-        """The time a seat's open question holds it until (spec 3.10, [F1]): capped at question_expiry."""
+        """The time a launch's open question holds it until (spec 3.10, [F1]): capped at question_expiry."""
         until = None
         for question in self.s.questions.get(name, []):
             if question.receipt_id is None:
@@ -280,8 +280,8 @@ class _Ctx:
         return None
 
     def last_activity(self) -> datetime | None:
-        """The newest activity time that a stall wake reacts to: seat rows, hand-offs and verdicts. A woken lead
-        updates its own seat row, so the clock restarts and wakes recur every stall_minutes (bounded by budgets)."""
+        """The newest activity time that a stall wake reacts to: launch rows, hand-offs and verdicts. A woken lead
+        updates its own launch row, so the clock restarts and wakes recur every stall_minutes (bounded by budgets)."""
         stamps = [x.updated_at for x in self.launches.values() if x.updated_at is not None]
         stamps += [h.at for h in self.s.handoffs if h.at is not None]
         stamps += [vd.at for vd in self.s.verdicts.values() if vd.at is not None]
@@ -327,7 +327,7 @@ def _terminal(c: _Ctx) -> list[Action] | None:
 
 def _learn_first(c: _Ctx, trigger) -> list[Action] | None:
     """The learnings step before a close (swarm.learnings): while it is pending, launch the driver-owned
-    `learner` seat (its session runs `swarm learn` over the job; the drive loop itself makes no LLM call), or
+    `learner` launch (its session runs `swarm learn` over the job; the drive loop itself makes no LLM call), or
     wait for the one running. Its attempts are ledger intents like any launch, so a crashed driver resumes it.
     None (close now) once the step is done; a hold once the learner has used max_attempts without finishing."""
     if not c.s.learn_pending:
@@ -358,7 +358,7 @@ def _ruling(c: _Ctx) -> list[Action] | None:
         if elapsed < grace:
             return [c.act("hold", None, "ruling", 0, prompt="quiesce", trigger=c.rtrig, ruling=True,
                           reason=reason, not_before=since + grace)]
-        return [c.act("stop_seat", name, "ruling", 0, prompt="quiesce", trigger=c.launches[name].revision,
+        return [c.act("stop_launch", name, "ruling", 0, prompt="quiesce", trigger=c.launches[name].revision,
                       ruling=True, reason=reason)
                 for name in sorted(c.live)]
     deadline = dt.timedelta(minutes=c.cfg["ruling_deadline_minutes"])
@@ -383,8 +383,8 @@ def _verdict(c: _Ctx, artifact: str) -> VerdictView | None:
     return vd if _valid(vd, c.s.generation) else None
 
 
-def _owner_seat(c: _Ctx, owner: str) -> str | None:
-    """The seat that resumes a fix round (spec 3.4 ownership transfer): the owner, or its successor
+def _owner_launch(c: _Ctx, owner: str) -> str | None:
+    """The launch that resumes a fix round (spec 3.4 ownership transfer): the owner, or its successor
     `<owner>~<n>` when the owner is released, failed or cancelled."""
     st = c.launches.get(owner)
     if st is None:
@@ -442,10 +442,10 @@ def _pipeline(c: _Ctx) -> list[Action] | None:
 
 
 def _fix(c: _Ctx, group: str, art: str, rnd: int, owner: str, reason: str, trigger: object) -> Action | None:
-    seat = _owner_seat(c, owner)
-    if seat is None or c.gated(seat) is not None:
+    launch = _owner_launch(c, owner)
+    if launch is None or c.gated(launch) is not None:
         return None
-    return c.act("launch", seat, group, rnd, prompt="fix", trigger=trigger, artifact=art, reason=reason)
+    return c.act("launch", launch, group, rnd, prompt="fix", trigger=trigger, artifact=art, reason=reason)
 
 
 def _queued_launches(c: _Ctx) -> list[Action]:
@@ -456,15 +456,15 @@ def _queued_launches(c: _Ctx) -> list[Action]:
         st = c.launches[name]
         if room <= 0:
             break
-        if st.state != "queued" or name in c.live or c.seat_has_open_intent(name) or c.gated(name):
+        if st.state != "queued" or name in c.live or c.launch_has_open_intent(name) or c.gated(name):
             continue
-        out.append(c.act("launch", name, None, 0, prompt="seat", trigger=st.revision, reason="queued"))
+        out.append(c.act("launch", name, None, 0, prompt="launch", trigger=st.revision, reason="queued"))
         room -= 1
     return out
 
 
 def _launch_wakes(c: _Ctx) -> list[Action]:
-    """Step 6 (spec 3.4, 3.10): an idle non-lead seat with pending wake events resumes, unless gated. The
+    """Step 6 (spec 3.4, 3.10): an idle non-lead launch with pending wake events resumes, unless gated. The
     trigger is the smallest pending event id (coalesced wakes)."""
     out: list[Action] = []
     for name in sorted(c.s.wakes):
@@ -479,12 +479,12 @@ def _launch_wakes(c: _Ctx) -> list[Action]:
 
 
 def _stalls(c: _Ctx) -> list[Action] | None:
-    """Step 7 (spec 3.9): a running seat that is not live is relaunched (stall, counted); with launches live and no
+    """Step 7 (spec 3.9): a running launch that is not live is relaunched (stall, counted); with launches live and no
     progress for `stall_minutes`, the lead is woken (counted). The relaunch trigger is the lost launch."""
     out = []
     for name in sorted(c.launches):
         st = c.launches[name]
-        if st.state == "running" and name not in c.live and not c.seat_has_open_intent(name) \
+        if st.state == "running" and name not in c.live and not c.launch_has_open_intent(name) \
                 and c.gated(name) is None:
             out.append(c.act("launch", name, None, 0, prompt="relaunch", trigger=c.last_launch(name),
                              reason="stall"))
@@ -554,8 +554,8 @@ def _goal(c: _Ctx) -> list[Action] | None:
 
 
 def _fallback(c: _Ctx) -> list[Action]:
-    """Step 10 (spec 3.3 invariant): nothing live, nothing pending. A gated seat holds the job until its question
-    expires (F1; the lead is not woken, the gated seat is responsible). Otherwise wake the lead (counted), or
+    """Step 10 (spec 3.3 invariant): nothing live, nothing pending. A gated launch holds the job until its question
+    expires (F1; the lead is not woken, the gated launch is responsible). Otherwise wake the lead (counted), or
     rule when the lead cannot run."""
     gates = []
     for name in sorted(c.launches):

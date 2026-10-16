@@ -1,4 +1,4 @@
-"""The optional agent title: a short free-text seat label (`EL`, `PM`, `Eng: board view`) kept apart
+"""The optional agent title: a short free-text launch label (`EL`, `PM`, `Eng: board view`) kept apart
 from the role, set by a `[swarm title: ...]` spawn tag, `swarm join --title` or `swarm title`, stored
 by schema 20 on every backend, and shown by `who`, `status` and `watch` (never on board messages).
 
@@ -356,13 +356,13 @@ class TitleCliTests(RoutingEnv):
         self.assertNotIn("\x1b", self.cli("status", "--job", "J", "--no-color")[1])
 
 
-class PipelineSeatTitleTests(unittest.TestCase):
+class PipelineLaunchTitleTests(unittest.TestCase):
     def action(self, role):
         job = types.SimpleNamespace(job="J", goal="g", task="t", description="d")
         handoff = types.SimpleNamespace(id=1, artifact="b@" + "a" * 40, agent_name="X", summary="s")
         return types.SimpleNamespace(job=job, handoff=handoff, role=role, verdict=None)
 
-    def test_a_recipe_title_is_tagged_in_the_seat_prompt(self):
+    def test_a_recipe_title_is_tagged_in_the_launch_prompt(self):
         from swarm.supervisor import pipeline
         text = pipeline.prompt_for(self.action("judge"), {"titles": {"judge": "Judge"}})
         self.assertIn("\n[swarm title: Judge]\n", text)

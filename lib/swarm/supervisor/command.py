@@ -177,7 +177,7 @@ def candidates(board, cfg: dict, sup: dict, *, job: str | None = None, now=None,
                 continue
             if a.agent_key in replaced or a.name in active_names:
                 continue
-            if gate and a.name in gate:   # a drive seat with an open question waits; the others go on
+            if gate and a.name in gate:   # a drive launch with an open question waits; the others go on
                 continue
             rec = enrolment_of(cfg, a, js.job)
             if rec is None:
@@ -214,7 +214,7 @@ def _invalid(board, job: str, agent_key: str, cfg: dict | None = None):
     if any(x.name == a.name and x.ended_at is None for x in rows):
         return "its name is active again", js, a
     if gate and a.name in gate:
-        return "its seat has an unanswered question", js, a
+        return "its launch has an unanswered question", js, a
     if any(r.old_agent_key == agent_key for r in board.restarts(job=job)):
         return "it was already replaced", js, a
     if cfg is not None and enrolment_of(cfg, a, job) is None:
@@ -635,7 +635,7 @@ def clean_resume_markers(board, cfg: dict) -> int:
 
 def _switched_off_now(cfg: dict, board=None, job: str | None = None, *, drive: bool = False) -> str | None:
     """A kill switch thrown since the pass began (the off files; with a board, the job's
-    --no-supervise): why, or None. Read fresh. `drive`: a drive seat, not gated by [supervise] enabled."""
+    --no-supervise): why, or None. Read fresh. `drive`: a drive launch, not gated by [supervise] enabled."""
     from swarm.supervisor.settings import off_reason
     why = off_reason(cfg, drive=drive)
     if why:

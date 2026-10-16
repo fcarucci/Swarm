@@ -254,7 +254,7 @@ def report(board, cfg: dict, problems: list[Problem], now=None, run=subprocess.r
     for job in sorted(jobs):
         mine = [p for p in problems if p.job in (job, None)]
         text = "SWARM-ALERT " + "; ".join(f"{p.code}: {p.text}" for p in mine)
-        line = None if (job in drive or drive.unreadable) else triage(board, cfg, job, mine, run=run)   # no model call outside a seat
+        line = None if (job in drive or drive.unreadable) else triage(board, cfg, job, mine, run=run)   # no model call outside a launch
         if line:
             text = f"SWARM-ALERT {line} [{', '.join(p.code for p in mine)}]"
         text = text[:events_listener.TEXT_MAX]

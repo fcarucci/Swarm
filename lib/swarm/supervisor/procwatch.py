@@ -117,7 +117,7 @@ def ancestor_host(pid: int, parent=None, max_hops: int = 64) -> str | None:
 
 
 def under_runner(pid: int, parent=None, max_hops: int = 64) -> bool:
-    """Whether `pid` is a supervisor-launched seat or runs under one (review rr1): its environment carries the
+    """Whether `pid` is a supervisor-launched launch or runs under one (review rr1): its environment carries the
     runner's RUN_ENV tag (where it can be read: /proc), or a `swarm.supervisor.runner` process is among its
     ancestors. A walk that cannot be read at all counts as yes (fails closed)."""
     from swarm.supervisor.runner import RUN_ENV

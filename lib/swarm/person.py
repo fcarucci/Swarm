@@ -5,14 +5,14 @@ whoever starts the process, and an agent can export another session's id or unse
 caller comes from a **grant**, a host-private receipt (swarm.receipts, kind "grant") that the unsandboxed
 PreToolUse hook writes before the command runs (drivegate.write_grants), from the same contexts as Task 5's
 receipts: the job's requester MAIN session (requester_context: the ledger's requester_session, no agent_id),
-or the seat the host-private chain names (seat_context: marker, run file, ledger intent). It is bound to
+or the launch the host-private chain names (launch_context: marker, run file, ledger intent). It is bound to
 args_sha of the submitted argv (drivegate.submitted_argv, computed here from the parsed arguments), to the
 job's incarnation and generation, lives GRANT_SECONDS, and is used up by the first command that takes it
-(receipts.take). A subagent never gets one. A Codex seat cannot write one (its sandbox is the boundary) nor
-use one up (the unlink fails in the sandbox). A same-user unsandboxed Claude seat could write one itself: that is the
+(receipts.take). A subagent never gets one. A Codex launch cannot write one (its sandbox is the boundary) nor
+use one up (the unlink fails in the sandbox). A same-user unsandboxed Claude launch could write one itself: that is the
 guardrail line of spec 4.0 [F24].
 
-Person authority (halt, unhalt, seat cancel, a person's seat request, drive repair) is held by exactly two
+Person authority (halt, unhalt, launch cancel, a person's launch, drive repair) is held by exactly two
 callers ([G6] reconciling [F17]):
   (a) the job's requester session, by its grant;
   (b) a person at a terminal: no grant, no agent host around the process (no host session variables and no
@@ -42,18 +42,18 @@ class PersonRefused(Exception):
 
 @dataclass(frozen=True)
 class Caller:
-    """Who the hook attested for this command: the job's requester session (seat None), or a seat by name."""
-    seat: str | None
+    """Who the hook attested for this command: the job's requester session (launch None), or a launch by name."""
+    launch: str | None
     action_id: str
 
     @property
     def requester(self) -> bool:
-        return self.seat is None and self.action_id.startswith("requester:")
+        return self.launch is None and self.action_id.startswith("requester:")
 
 
 _TAKEN: dict = {}
-# A jailed seat's broker (Task 20) attests the commands it runs for the seat with a per-call SECRET (env), whose
-# record (the seat's session pid, an expiry) only the broker writes, in the supervisor's private dir, under the
+# A jailed launch's broker (Task 20) attests the commands it runs for the launch with a per-call SECRET (env), whose
+# record (the launch's session pid, an expiry) only the broker writes, in the supervisor's private dir, under the
 # secret's hash. A bare variable an agent sets attests nothing: without the record it names, it is ignored (rr19).
 BROKER_TOKEN_ENV = "SWARM_BROKER_TOKEN"
 BROKER_ATTEST_DIR = "broker-attest"
@@ -66,7 +66,7 @@ def broker_attest_name(token: str) -> str:
 
 
 def broker_attested(env=None, attest_dir=None) -> int | None:
-    """The seat session pid the broker attested for this process (BROKER_TOKEN_ENV names a live record the broker
+    """The launch session pid the broker attested for this process (BROKER_TOKEN_ENV names a live record the broker
     wrote), else None. Never raises."""
     import json
     import re
@@ -104,8 +104,8 @@ def host_pid(parent_of=None, pid: int | None = None, max_hops: int = 40) -> int 
     if pid is None and parent_of is None:
         brokered = broker_attested()
         if brokered is not None:
-            # a jailed seat's hook or command, run outside the jail by its runner's broker (seatbroker): no
-            # claude/codex process is above it here, so the broker's record names the seat's own session process
+            # a jailed launch's hook or command, run outside the jail by its runner's broker (launchbroker): no
+            # claude/codex process is above it here, so the broker's record names the launch's own session process
             return brokered
     if parent_of is None:
         from swarm.supervisor import procwatch
@@ -148,7 +148,7 @@ def caller(board_key: str, job: str, led, args, now: float | None = None) -> Cal
                       now=time.time() if now is None else now)
     who = None
     if r is not None and r.content_sha == receipts.content_sha("grant", {"argv_sha": rid}) and r.args_sha == rid:
-        who = Caller(r.seat, r.action_id)
+        who = Caller(r.launch, r.action_id)
     _TAKEN[key] = who
     return who
 
@@ -161,7 +161,7 @@ def codex_session(env, ancestor=None) -> bool:
     the process is codex. Such a command cannot use a grant (its sandbox cannot touch the enrolled
     directory), so its ledger-writing control commands go to the driver as CONTROL-REQUESTs."""
     if broker_attested(env) is not None:
-        return False   # run by a jailed seat's broker outside the jail: the broker attests the caller (its grant)
+        return False   # run by a jailed launch's broker outside the jail: the broker attests the caller (its grant)
     if any(env.get(k) for k in CODEX_ENV):
         return True
     if any(env.get(k) for k in ("CLAUDE_CODE_SESSION_ID", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")):
@@ -238,7 +238,7 @@ def require(action: str, job: str, *, board_key: str, who: Caller | None, env=No
     if who is not None:
         if who.requester:
             return "requester"
-        raise PersonRefused(f"refused: {action} is a person's action, and this session (seat {who.seat}) is not "
+        raise PersonRefused(f"refused: {action} is a person's action, and this session (launch {who.launch}) is not "
                             f"the requester session of {job}. Ask the job's lead (--to @EL) or a person.")
     sid = session_of(env)
     if sid and sid in enrolment.agent_sessions(board_key):

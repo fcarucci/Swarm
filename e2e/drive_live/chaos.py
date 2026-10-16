@@ -149,7 +149,7 @@ def today_forged_receipt(args):
         dec = {"verdict": "met", "scope": "goal", "generation": 1, "candidate": "main@" + "a" * 40, "req": None,
                "artifact": None}   # Task 5's verdict decision fields (a goal verdict's artifact is None)
         r = receipts.Receipt(board_key=key, job="J", generation=1, incarnation="f" * 32, action_id="a1", attempt=1,
-                             seat="judge", kind="verdict", record_id="7", rev=1,
+                             launch="judge", kind="verdict", record_id="7", rev=1,
                              content_sha=receipts.content_sha("verdict", dec), args_sha=receipts.args_sha(["swarm", "verdict"]),
                              expires_at=time.time() + 600)
         receipts.write(key, r)
@@ -228,7 +228,7 @@ def _drive(args, name, *, expect="met", script="met", patch=None, inject=None, f
            budget=None, timeout_min=None, activate_extra=None, pass_env=None, systemd=False,
            check_landing=None, harness=None) -> tuple[str, str, str]:
     """One driven scenario: activate, drive with `inject(rig, k, snap, st)` before each pass, then assert: the
-    fault fired, the terminal state, no coordinator, every seat supervisor-launched, landing (for MET),
+    fault fired, the terminal state, no coordinator, every launch supervisor-launched, landing (for MET),
     `after(rig, st)` extras. Skipped as pending until the driver is integrated."""
     try:
         q.require(*q.LIVE_NEEDS, what="driven chaos")
@@ -257,7 +257,7 @@ def _drive(args, name, *, expect="met", script="met", patch=None, inject=None, f
                     st["note"] = ev
                 else:
                     bad.append("the injected fault never fired: nothing was tested")
-            bad += rig.check_terminal(expect) + rig.check_no_coordinator() + rig.check_every_seat_supervisor_launched()
+            bad += rig.check_terminal(expect) + rig.check_no_coordinator() + rig.check_every_launch_supervisor_launched()
             if (check_landing if check_landing is not None else expect == "met"):
                 bad += rig.check_landing()
             if after:
@@ -282,8 +282,8 @@ def _starts(rig, **match):
 # not in the checkout the row is a SKIP that names it. where = which process the barrier lives in.
 BARRIERS = {
     "before_claim": "pass", "after_claim": "pass", "after_run_file": "pass", "after_marker": "pass",
-    "after_runner_start": "pass", "runner_mid_session": "seat", "before_finish": "seat",
-    "mid_terminalization": "pass", "mid_rollover": "pass", "hook_after_cli_before_receipt": "seat",
+    "after_runner_start": "pass", "runner_mid_session": "launch", "before_finish": "launch",
+    "mid_terminalization": "pass", "mid_rollover": "pass", "hook_after_cli_before_receipt": "launch",
     "land_after_first_destination": "pass", "after_intent_before_claim": "pass", "mid_rollover_after_ledger": "pass",
     "terminal_intent_saved": "pass", "terminal_verdict_recorded": "pass", "terminal_closed_before_ledger": "pass",
 }
@@ -311,13 +311,13 @@ def _barrier(barrier: str):
             ev = st.get("fired") or rig.barrier_fired(barrier)
             rig.disarm()
             return f"barrier {barrier}: {ev}" if ev else None
-        return _drive(args, name, inject=inject, fired=fired, pass_env=["SWARM_CRASH_AT"] if where == "seat" else None)
+        return _drive(args, name, inject=inject, fired=fired, pass_env=["SWARM_CRASH_AT"] if where == "launch" else None)
     return run
 
 
 # -- kills -------------------------------------------------------------------------------------
 
-def _kill_seat(args, name, key, role, script_key):
+def _kill_launch(args, name, key, role, script_key):
     def patch(s):
         if script_key == "lead":
             s["lead"] = {**s["lead"], "hang_once": True}
@@ -333,17 +333,17 @@ def _kill_seat(args, name, key, role, script_key):
             rig.run.event("chaos", st["killed"])
 
     def after(rig, st):
-        starts = [e for e in rig.harness_log() if e.get("ev") == "start" and (e.get("seat") == key or e.get("role") == role)]
+        starts = [e for e in rig.harness_log() if e.get("ev") == "start" and (e.get("launch") == key or e.get("role") == role)]
         return [f"the killed {role} was not relaunched"] if len(starts) < 2 else []
     return _drive(args, name, patch=patch, inject=inject, fired=lambda rig, st: st.get("killed"), after=after)
 
 
-def drv_kill_seat_mid_task(args):
-    return _kill_seat(args, "kill_seat_mid_task", "eng-a", "engineer", "engineer")
+def drv_kill_launch_mid_task(args):
+    return _kill_launch(args, "kill_launch_mid_task", "eng-a", "engineer", "engineer")
 
 
 def drv_kill_lead_mid_turn(args):
-    return _kill_seat(args, "kill_lead_mid_turn", "lead", "lead", "lead")
+    return _kill_launch(args, "kill_lead_mid_turn", "lead", "lead", "lead")
 
 
 def drv_kill_runner(args):
@@ -429,7 +429,7 @@ def drv_corrupt_ledger(args):
                   fired=lambda rig, st: f"ledger corrupted at pass {st['at']}" if "bak" in st else None, after=after)
 
 
-# every NOT NULL column of drive_locks (lib/swarm/board/seats.py): key, holder, job, generation, launch_id, host, expires_at
+# every NOT NULL column of drive_locks (lib/swarm/board/launches.py): key, holder, job, generation, launch_id, host, expires_at
 STALE_LOCK_COLUMNS = ("key", "holder", "job", "generation", "launch_id", "host", "expires_at")
 STALE_LOCK_SQL = ("INSERT INTO drive_locks (key, holder, job, generation, launch_id, host, expires_at) "
                   "VALUES ('land:' || repeat('0', 64) || ':main', 'dead-attempt', 'qa-dead-job', 1, 'dead-launch', "
@@ -496,7 +496,7 @@ def question_default_applied(text: str) -> bool:
 
 
 def question_companions(log: list[dict], expires_s: float) -> list[str]:
-    """Real events, tied to the expiry: the ask command ran at t0; (a) some seat's `done` succeeded between t0 and
+    """Real events, tied to the expiry: the ask command ran at t0; (a) some launch's `done` succeeded between t0 and
     t0+expires (progress WHILE the question was open); (b) a lead session STARTED after t0+expires (woken by the default)."""
     asks = [e for e in log if e.get("ev") == "cmd" and re.search(r"swarm\S* ask ", e.get("cmd", ""))]
     if not asks:
@@ -505,7 +505,7 @@ def question_companions(log: list[dict], expires_s: float) -> list[str]:
     bad = []
     if not any(e.get("ev") == "cmd" and re.search(r"swarm\S* done ", e.get("cmd", "")) and e.get("rc") == 0
                and t0 <= e["at"] < t0 + expires_s for e in log):
-        bad.append("no other seat finished work (`done` rc 0) while the question was open")
+        bad.append("no other launch finished work (`done` rc 0) while the question was open")
     if not any(e.get("ev") == "start" and e.get("role") == "lead" and e["at"] >= t0 + expires_s for e in log):
         bad.append("no lead session started after the default expired: the asker was not woken")
     return bad
@@ -585,8 +585,8 @@ def drv_forged_person_commands(args):
                 "verdict": ["verdict", "met", "forged", "--job", rig.job, "--artifact", f"main@{sha}"],
                 "done": ["done", "--job", rig.job, "--artifact", f"feat/x@{sha}", "--summary", "forged"],
                 "review": ["review", "--job", rig.job, "--artifact", f"feat/x@{sha}", "verified", "--report", "/dev/null"],
-                "seat_in_tmp": ["seat", "request", "--job", rig.job, "--seat", "forged-seat", "--role", "engineer",
-                                "--brief", "/dev/null", "--workdir", "/tmp/forged-seat"],
+                "launch_in_tmp": ["launch", "request", "--job", rig.job, "--launch", "forged-launch", "--role", "engineer",
+                                "--brief", "/dev/null", "--workdir", "/tmp/forged-launch"],
             }
             st["tried"] = {n: rig.run.swarm(*a).returncode for n, a in cmds.items()}
             st["accepted"] = [n for n, rc in st["tried"].items() if rc == 0]
@@ -595,21 +595,21 @@ def drv_forged_person_commands(args):
     return _drive(args, "forged_person_commands", inject=inject,
                   fired=lambda rig, st: st.get("note") if st.get("tried") else None,
                   after=lambda rig, st: [f"forged `{n}` was accepted" for n in st.get("accepted", [])]
-                  + ([] if not any(e.get("seat") == "forged-seat" for e in rig.harness_log()) else
-                     ["a seat was launched for the forged /tmp request"]))
+                  + ([] if not any(e.get("launch") == "forged-launch" for e in rig.harness_log()) else
+                     ["a launch was launched for the forged /tmp request"]))
 
 
-def drv_forged_seat_row(args):
-    """A seat row written straight into the database, with no authorization record: it must never launch."""
+def drv_forged_launch_row(args):
+    """A launch row written straight into the database, with no authorization record: it must never launch."""
     if args.backend != "postgres":
-        return ("forged_seat_row", S, "not run (needs --backend postgres to insert the row)")
+        return ("forged_launch_row", S, "not run (needs --backend postgres to insert the row)")
 
     def inject(rig, k, snap, st):
         if snap["agents"] and not st.get("planted"):
             cols = _pg_sql(rig, "SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns "
-                                "WHERE table_name = 'seats' ORDER BY ordinal_position") or []
-            known = {"job": rig.job, "seat": "forged-seat", "role": "engineer", "harness": "claude", "model": "haiku",
-                     "workdir": str(rig.run.work / "forged-seat"), "brief_path": "/dev/null", "state": "requested",
+                                "WHERE table_name = 'launches' ORDER BY ordinal_position") or []
+            known = {"job": rig.job, "launch": "forged-launch", "role": "engineer", "harness": "claude", "model": "haiku",
+                     "workdir": str(rig.run.work / "forged-launch"), "brief_path": "/dev/null", "state": "requested",
                      "generation": 1, "revision": 1, "requested_by": "lead", "complexity": "standard"}
             use, vals = [], []
             for c, typ, nullable, default in cols:
@@ -619,22 +619,22 @@ def drv_forged_seat_row(args):
                     use.append(c); vals.append(0 if "int" in typ else ("x" if typ in ("text", "character varying") else None))
             from psycopg import sql as _sql  # noqa: F401
             try:
-                _pg_sql(rig, f"INSERT INTO seats ({', '.join(use)}) VALUES ({', '.join(['%s'] * len(use))})", tuple(vals))
-                rows = _pg_sql(rig, "SELECT count(*) FROM seats WHERE seat = 'forged-seat'")
+                _pg_sql(rig, f"INSERT INTO launches ({', '.join(use)}) VALUES ({', '.join(['%s'] * len(use))})", tuple(vals))
+                rows = _pg_sql(rig, "SELECT count(*) FROM launches WHERE launch = 'forged-launch'")
                 st["planted"] = bool(rows and rows[0][0])
             except Exception as exc:
                 st["plant_error"] = f"{type(exc).__name__}: {exc}"[:200]
                 st["planted"] = False
-            st["note"] = "forged seat row inserted" if st["planted"] else f"could not insert: {st.get('plant_error')}"
+            st["note"] = "forged launch row inserted" if st["planted"] else f"could not insert: {st.get('plant_error')}"
 
-    return _drive(args, "forged_seat_row", inject=inject,
+    return _drive(args, "forged_launch_row", inject=inject,
                   fired=lambda rig, st: st.get("note") if st.get("planted") else None,
-                  after=lambda rig, st: ["a seat was launched for the forged row"]
-                  if any(e.get("seat") == "forged-seat" for e in rig.harness_log()) else [])
+                  after=lambda rig, st: ["a launch was launched for the forged row"]
+                  if any(e.get("launch") == "forged-launch" for e in rig.harness_log()) else [])
 
 
-def drv_forged_unhalt_by_seat(args):
-    return ("forged_unhalt_by_seat", S, "not automated: needs an enrolled seat shell running while the job is "
+def drv_forged_unhalt_by_launch(args):
+    return ("forged_unhalt_by_launch", S, "not automated: needs an enrolled launch shell running while the job is "
             "halted (the fake harness cannot be started by hand during a halt); covered by tests/test_drive_hooks")
 
 
@@ -741,7 +741,7 @@ def drv_rollover(args):
 
 def drv_codex_parity(args):
     def patch(s):
-        s["lead"]["seats"][0]["harness"] = "codex"
+        s["lead"]["launches"][0]["harness"] = "codex"
 
     def after(rig, st):
         codex = [e for e in rig.harness_log() if e.get("ev") == "start" and e.get("harness") == "codex"]
@@ -751,7 +751,7 @@ def drv_codex_parity(args):
 
 
 SCENARIOS = {
-    "kill_seat_mid_task": (None, drv_kill_seat_mid_task),
+    "kill_launch_mid_task": (None, drv_kill_launch_mid_task),
     "kill_lead_mid_turn": (None, drv_kill_lead_mid_turn),
     "kill_runner_mid_session": (None, drv_kill_runner),
     "kill_supervisor_and_runner_once": (None, drv_kill_supervisor_and_runner),
@@ -762,8 +762,8 @@ SCENARIOS = {
     "forged_closed_by_driver": (None, drv_forged_closed_by_driver),
     "forged_receipt": ("forged_receipt", drv_forged_receipt),
     "forged_person_commands": (None, drv_forged_person_commands),
-    "forged_seat_row": (None, drv_forged_seat_row),
-    "forged_unhalt_by_seat": (None, drv_forged_unhalt_by_seat),
+    "forged_launch_row": (None, drv_forged_launch_row),
+    "forged_unhalt_by_launch": (None, drv_forged_unhalt_by_launch),
     "ci_red_twice": (None, drv_ci_red_twice),
     "budget_ruling_max_sessions_8": (None, drv_budget_ruling_max_sessions),
     "ruling_judge_fails_twice": (None, drv_ruling_judge_fails_twice),

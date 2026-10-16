@@ -1,4 +1,4 @@
-"""Runner helpers for drive seats: usage capture, failure classes, and the tri-state containment check."""
+"""Runner helpers for drive launches: usage capture, failure classes, and the tri-state containment check."""
 from __future__ import annotations
 
 import json

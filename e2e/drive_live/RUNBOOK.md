@@ -9,7 +9,7 @@ Covers plan Tasks 15 (E2E), 16 (chaos), 19 (live acceptance) and what the judge 
 `e2e/drive_live.sh` activates a tiny throwaway goal job ("add a `--version` flag with a test" to a scratch repo, or an
 impossible goal) in drive mode on an ISOLATED board, then drives it only with `swarm drive run` (the session driver's loop; `--driver passes`
 runs one-shot `swarm supervise` passes instead) until the job is terminal. Nothing else touches the job: zero coordinator turns, no Claude Code session.
-It asserts the end state, the budget, that every seat was launched and stopped by the supervisor, and that the target
+It asserts the end state, the budget, that every launch was launched and stopped by the supervisor, and that the target
 branch was fast-forwarded to the judged candidate on every destination. It writes the timeline and the costs.
 
 The chaos suite injects the faults below into the same kind of run and asserts MET, UNREACHABLE or CANCELLED: never
@@ -48,7 +48,7 @@ cd ~/src/Swarm-autonomy-qa && e2e/drive_live.sh pending                         
 e2e/drive_live.sh preflight                                                       # works on any checkout (~5 s)
 e2e/drive_live.sh met                                                             # fake harness, MET run
 e2e/drive_live.sh unreachable
-e2e/drive_live.sh chaos                                                           # all scenarios; or: chaos kill_seat_mid_task corrupt_ledger
+e2e/drive_live.sh chaos                                                           # all scenarios; or: chaos kill_launch_mid_task corrupt_ledger
 e2e/drive_live.sh all                                                             # preflight + met + unreachable + chaos
 SWARM_QA_REPO=/path/to/other/checkout e2e/drive_live.sh pending                  # probe another checkout read-only
 ```
@@ -67,7 +67,7 @@ Options: `--backend postgres|sqlite|file` (default postgres), `--harness fake|re
   CLI, real git against the fake hub; cost is the script's `cost_usd` per session. $0, minutes.
 * `--harness real` (the Task 19 gate): the real `claude` (and a real Codex engineer, plan [F18], on a drive-ready host).
   The run's HOME is isolated: `~/.claude/.credentials.json` is copied (mode 600) into it automatically (or export `ANTHROPIC_API_KEY`), and `claude_plugin_dir` points at the checkout under
-  test so the seats load THIS plugin. Budget cap defaults to `max_cost_usd=10`.
+  test so the launches load THIS plugin. Budget cap defaults to `max_cost_usd=10`.
 
 ### What it needs from the integrated head (adapt points)
 
@@ -75,7 +75,7 @@ The harness was written against the plan and the in-flight branches, not a lande
 expect to touch, at most:
 
 1. `fake_harness.py` role functions (`role_lead`, `role_engineer`, `role_reviewer`, `role_judge`, `role_integrator`): the
-   seat tag name in the drive prompts (it reads `[swarm seat: X]`, else `[swarm title: X]`), the exact `swarm seat request`,
+   launch tag name in the drive prompts (it reads `[swarm launch: X]`, else `[swarm title: X]`), the exact `swarm launch`,
    `swarm review`, `swarm verdict ... --open N`, `swarm land`, `swarm goal-ready`, `swarm ask` flags (taken from 6b's
    `drive_cli.py` and the ask-answer skill).
 2. `rig.py` `check_*` (restart rows vs launches, ledger fields) if the landed ledger or restart schema differs.
@@ -98,19 +98,19 @@ checkout is a SKIP naming it (`pending barrier: ...`), never a pass.
 
 | scenario | injected fault | passes when |
 |---|---|---|
-| `kill_seat_mid_task`, `kill_lead_mid_turn` | SIGKILL the engineer / lead session at its hang point | seat relaunched (2+ starts), MET |
+| `kill_launch_mid_task`, `kill_lead_mid_turn` | SIGKILL the engineer / lead session at its hang point | launch relaunched (2+ starts), MET |
 | `kill_runner_mid_session` | SIGKILL the runner of a live session | next pass reaps and relaunches, MET |
 | `kill_supervisor_and_runner_once` (also `--kill-supervisor-once` on live runs) | SIGKILL a supervisor pass in flight while a runner is live, then SIGKILL a runner | both kills recorded, no duplicate attempt, MET. Swarm installs no timer or service unit, so there is no unit-level variant |
-| `barrier_<name>` x16 | `SWARM_CRASH_AT=<name>` armed on every pass until a pass dies by SIGKILL (or a seat hook / runner session is killed: barriers `runner_mid_session`, `before_finish`, `hook_after_cli_before_receipt` live in seat processes and are passed through `[supervise] pass_env`) | fired (evidence recorded), no duplicate attempt, ends MET/UNREACHABLE. The 13 plan barriers plus `terminal_intent_saved`, `terminal_verdict_recorded`, `terminal_closed_before_ledger`. **In the tree today: `terminal_*`, `mid_rollover_after_ledger`, `land_after_first_destination`; the other 10 are SKIP until their owners add the `hit()` (posted on the board)**; `mid_terminalization` is covered by the three `terminal_*` names |
+| `barrier_<name>` x16 | `SWARM_CRASH_AT=<name>` armed on every pass until a pass dies by SIGKILL (or a launch hook / runner session is killed: barriers `runner_mid_session`, `before_finish`, `hook_after_cli_before_receipt` live in launch processes and are passed through `[supervise] pass_env`) | fired (evidence recorded), no duplicate attempt, ends MET/UNREACHABLE. The 13 plan barriers plus `terminal_intent_saved`, `terminal_verdict_recorded`, `terminal_closed_before_ledger`. **In the tree today: `terminal_*`, `mid_rollover_after_ledger`, `land_after_first_destination`; the other 10 are SKIP until their owners add the `hit()` (posted on the board)**; `mid_terminalization` is covered by the three `terminal_*` names |
 | `corrupt_ledger` | garbage over the ledger, restored 3 passes later | held, `DRIVER-LEDGER-BAD` posted, not closed while corrupt, MET after restore. Today: five corruption kinds raise `LedgerBadError` / are reported, never "no ledger" |
 | `stale_lock` | stale `.lock` file (after the ledger exists) and an expired `drive_locks` row (postgres), both read back | planted proof, MET. Today: stale lock file blocks no save; planted lock symlink refused, target untouched |
 | `reactivated_long_idle` | job halted, silent 10 h (postgres backdating), swept (`purge`, `status`, a pass), unhalted | still open after the sweeps, MET. Today (postgres): reproduces the bug; SKIP "known bug, pending 8b" until `quiet_start` is present (verified passing on `feat/drive-eng-life`) |
-| `question_default_expires` | lead asks a human, `--default left --expires 2m` | `swarm questions --all` shows the **default applied** event for that question, the lead was woken (2+ starts), another seat made progress, MET |
+| `question_default_expires` | lead asks a human, `--default left --expires 2m` | `swarm questions --all` shows the **default applied** event for that question, the lead was woken (2+ starts), another launch made progress, MET |
 | `forged_closed_by_driver` | `close_job(completed, closed_by="driver")` straight into the board, then one pass | not left `completed` without a ledger terminal; ends MET via the real flow |
 | `forged_receipt` | `DONE`, `INTEGRATED`, `GOAL-READY` rows posted without receipts | no session launched for the forged SHA, forged SHA never on the target, MET. Today: forged row, other incarnation/generation, expiry, missing receipt all refused |
-| `forged_person_commands` | `verdict`, `done`, `review` from a plain shell; `seat request` with a /tmp work dir | all refused (exit codes recorded), no seat launched |
-| `forged_seat_row` (postgres) | seat row inserted into the database with no authorization | never launched (SKIP if the row cannot be inserted) |
-| `forged_unhalt_by_seat` | an enrolled seat's `unhalt` | **not automated** (SKIP with reason; covered by `tests/test_drive_hooks`) |
+| `forged_person_commands` | `verdict`, `done`, `review` from a plain shell; `launch` with a /tmp work dir | all refused (exit codes recorded), no launch launched |
+| `forged_launch_row` (postgres) | launch row inserted into the database with no authorization | never launched (SKIP if the row cannot be inserted) |
+| `forged_unhalt_by_launch` | an enrolled launch's `unhalt` | **not automated** (SKIP with reason; covered by `tests/test_drive_hooks`) |
 | `ci_red_twice` | CI red on the rebased SHA twice (`hub.py ci-fail`) | two reds recorded, FINALIZE_BLOCKED/fix rounds/ruling, ends MET or UNREACHABLE |
 | `budget_ruling_max_sessions_8` | `--budget max_sessions=8` with a reviewer that keeps asking for changes | 8 launches reached, ruling from the reserve, ends terminal within the cap + reserve |
 | `ruling_judge_fails_twice` | the ruling judge exits without a verdict twice | mechanical UNREACHABLE (scope labelled mechanical) |
@@ -155,7 +155,7 @@ Per run, `<run>/logs/evidence/` (written by every live and chaos run):
 
 * `status.txt`, `snapshot.json` (`swarm snapshot --json --job J`), `transcript.txt` (`swarm transcript export`)
 * `supervise-tail.log` (last 400 lines of the passes), `timeline.jsonl` (every command, pass, state change, injected fault
-  with elapsed seconds), `harness.jsonl` (every session: role, seat, model, harness, budget, cost), `costs.json`
+  with elapsed seconds), `harness.jsonl` (every session: role, launch, model, harness, budget, cost), `costs.json`
   (sessions, launches, passes, ledger cost vs harness cost, by role, wall seconds)
 * `<run>/logs/supervise.log` (all passes in full), `<run>/pg/pg.log`, the hub audit (`hub.py audit --hub <run>/hub --since <initial>`)
 * `~/work/swarm-autonomy/qa/runs/last-report.txt` (the PASS/FAIL/SKIP table of the last invocation)

@@ -77,7 +77,7 @@ class DriveBackendsHelper(unittest.TestCase):
 
 class ClaimContract:
     """One attempt of an action is claimed once, whatever the backend (the unique (job, action_id,
-    attempt) of spec 4.5): the second claim of it is refused and moves no seat."""
+    attempt) of spec 4.5): the second claim of it is refused and moves no launch."""
     harness_factory = staticmethod(drive_backends()["memory"])
 
     def setUp(self):
@@ -96,9 +96,9 @@ class ClaimContract:
         return self.b.queue_launch("J", 1, name, role="engineer", harness="claude", model="haiku",
                                    workdir=f"/w/{name}", brief=f"/w/{name}/B.md", queued_by="lead")
 
-    def claim(self, seat, launch_id, action="gen1|seat|eng|-|1|1", attempt=1):
+    def claim(self, launch, launch_id, action="gen1|launch|eng|-|1|1", attempt=1):
         return self.b.claim_drive_launch(job="J", generation=1, action_id=action, attempt=attempt,
-                                         launch_id=launch_id, launch_row_id=seat.id, queue_version=seat.revision,
+                                         launch_id=launch_id, launch_row_id=launch.id, queue_version=launch.revision,
                                          harness="claude", reserve_usd=1, reserve_minutes=1, locks=[],
                                          lock_seconds=60, max_host_running=4)
 
@@ -113,7 +113,7 @@ class ClaimContract:
         a, b, c = self.get_launch("eng-a"), self.get_launch("eng-b"), self.get_launch("eng-c")
         self.assertIsNotNone(self.claim(a, "L1"))
         self.assertIsNotNone(self.claim(b, "L2", attempt=2))
-        self.assertIsNotNone(self.claim(c, "L3", action="gen1|seat|eng|-|1|2"))
+        self.assertIsNotNone(self.claim(c, "L3", action="gen1|launch|eng|-|1|2"))
 
 
 class MemoryClaimContract(ClaimContract, unittest.TestCase):

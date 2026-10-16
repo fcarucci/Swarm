@@ -1723,7 +1723,7 @@ RECEIPT_LOG_TAIL = 64 * 1024   # the newest bytes of receipt-failures.log doctor
 
 def _receipt_failures_check() -> list[Check]:
     """A drive hook could not write a receipt (or a record disagreed with what was submitted) in the last 24 h
-    (receipt-failures.log in the host dir): the driver then ignores that control record, so a seat request or a
+    (receipt-failures.log in the host dir): the driver then ignores that control record, so a launch or a
     hand-off stalls. Reads the tail of the log, so a long log never hides a fresh failure."""
     import time
     from swarm import paths, safefs
@@ -1755,8 +1755,8 @@ def _receipt_failures_check() -> list[Check]:
 
 
 def _codex_drive_check() -> list[Check]:
-    """[G1] Codex readiness for drive seats, per role. A writer seat on Codex needs the installed Codex to have
-    the rollout budget feature (the per-session spending cap); judge and reviewer seats always run on Claude
+    """[G1] Codex readiness for drive launches, per role. A writer launch on Codex needs the installed Codex to have
+    the rollout budget feature (the per-session spending cap); judge and reviewer launches always run on Claude
     (Codex's read-only sandbox has no board access)."""
     import shutil
     import subprocess
@@ -1764,7 +1764,7 @@ def _codex_drive_check() -> list[Check]:
     exe = shutil.which("codex")
     if not exe:
         return [Check("codex drive-ready", None, f"writer no (codex is not installed); {tail}",
-                      "install Codex to run writer seats on it (drive seats run on Claude without it)")]
+                      "install Codex to run writer launches on it (drive launches run on Claude without it)")]
     try:
         out = subprocess.run([exe, "features", "list"], capture_output=True, text=True, timeout=15, check=False)
         listed = out.stdout if out.returncode == 0 else ""
@@ -1774,7 +1774,7 @@ def _codex_drive_check() -> list[Check]:
         return [Check("codex drive-ready", True, f"writer yes (rollout budget available); {tail}")]
     return [Check("codex drive-ready", None,
                   f"writer no (the installed codex has no rollout budget feature); {tail}",
-                  "update Codex to a version with `features.rollout_budget`, or run writer seats on Claude")]
+                  "update Codex to a version with `features.rollout_budget`, or run writer launches on Claude")]
 
 # ------------------------------------------------------------- doctor: drive mode
 
@@ -1822,15 +1822,15 @@ def _drive_driver_checks(jobs, unreadable: bool = False) -> list[Check]:
 
 
 def _drive_containment_check() -> Check:
-    """Spec 3.11 [T21]: how drive seats are contained here. A missing systemd user manager never refuses a
-    launch: the seat gets its own process group (POSIX) or Job Object (Windows) instead of a scope."""
+    """Spec 3.11 [T21]: how drive launches are contained here. A missing systemd user manager never refuses a
+    launch: the launch gets its own process group (POSIX) or Job Object (Windows) instead of a scope."""
     from swarm import compat
     from swarm.supervisor.runner import scope_available
     if compat.IS_WINDOWS:
-        return Check("drive containment", True, "drive seats: a Job Object each (killed with it)")
+        return Check("drive containment", True, "drive launches: a Job Object each (killed with it)")
     if scope_available():
-        return Check("drive containment", True, "drive seats: systemd user scopes (systemd-run --user --scope)")
-    return Check("drive containment", True, "drive seats: their own process group each (no systemd user "
+        return Check("drive containment", True, "drive launches: systemd user scopes (systemd-run --user --scope)")
+    return Check("drive containment", True, "drive launches: their own process group each (no systemd user "
                  "manager here; stopped by group)")
 
 
@@ -1857,46 +1857,46 @@ def _claude_sandbox_check() -> Check:
     except (OSError, ValueError):
         enabled = False
     if enabled:
-        return Check("claude sandbox", True, "claude read-only seats: the Bash sandbox is on (boundary)")
+        return Check("claude sandbox", True, "claude read-only launches: the Bash sandbox is on (boundary)")
     return Check("claude sandbox", None,
-                 f"claude read-only seats: guardrail only (the Bash sandbox is not enabled in {path}; "
+                 f"claude read-only launches: guardrail only (the Bash sandbox is not enabled in {path}; "
                  "the hook refuses commits and pushes, nothing stops other writes)",
                  f'set "sandbox": {{"enabled": true}} in {path}')
 
 
-def _seat_isolation_check(cfg: dict, probe=None) -> Check:
-    """Task 20: whether drive seats on this host run in their credential jail, and whether any push
+def _launch_isolation_check(cfg: dict, probe=None) -> Check:
+    """Task 20: whether drive launches on this host run in their credential jail, and whether any push
     credential is reachable from inside it (ssh -T to GitHub, gh auth status, git credential helpers,
-    agent and token variables, the covered paths). `probe` replaces seathome.probe (tests)."""
-    from swarm.supervisor import seathome
+    agent and token variables, the covered paths). `probe` replaces launchhome.probe (tests)."""
+    from swarm.supervisor import launchhome
     fix = ("enable unprivileged user namespaces for this user (sysctl kernel.unprivileged_userns_clone=1; on "
            "Ubuntu kernel.apparmor_restrict_unprivileged_userns=0), or move the credential named out of reach")
     try:
-        ok, detail = (probe or (lambda c: seathome.probe(c, network=True)))(cfg)
-    except seathome.SeatIsolationError as exc:
-        return Check("seat isolation", False, str(exc), "fix [drive] seat_isolation")
+        ok, detail = (probe or (lambda c: launchhome.probe(c, network=True)))(cfg)
+    except launchhome.LaunchIsolationError as exc:
+        return Check("launch isolation", False, str(exc), "fix [drive] launch_isolation")
     except Exception as exc:   # never let the probe break doctor
-        return Check("seat isolation", False, f"probe error: {type(exc).__name__}: {exc}", fix)
+        return Check("launch isolation", False, f"probe error: {type(exc).__name__}: {exc}", fix)
     if ok:
-        return Check("seat isolation", True, f"drive seats: {detail}")
+        return Check("launch isolation", True, f"drive launches: {detail}")
     if ok is None:
         if detail.startswith("best-effort"):
-            return Check("seat isolation", None, detail,
-                         "drive seats here get no filesystem jail: their environment carries no credential, credential "
+            return Check("launch isolation", None, detail,
+                         "drive launches here get no filesystem jail: their environment carries no credential, credential "
                          "helper or agent, but your files (and keychain or Credential Manager) stay reachable to them. "
-                         "Best-effort guards against accidental credential use, not a hostile seat. On Linux, enable "
-                         "unprivileged user namespaces for the full jail; [drive] seat_isolation = \"strict\" refuses "
-                         "seats instead")
+                         "Best-effort guards against accidental credential use, not a hostile launch. On Linux, enable "
+                         "unprivileged user namespaces for the full jail; [drive] launch_isolation = \"strict\" refuses "
+                         "launches instead")
         if detail.startswith("off"):
-            return Check("seat isolation", None, f"drive seats: {detail}",
-                         "a person runs `swarm supervise seat-isolation on` to jail every drive seat again")
-        return Check("seat isolation", False, f"drive seats are NOT started on this host: {detail}", fix)
-    return Check("seat isolation", False, f"drive seats can reach a credential: {detail}",
-                 "cover the path named ([drive] seat_cover_paths) or remove the credential from the seat env")
+            return Check("launch isolation", None, f"drive launches: {detail}",
+                         "a person runs `swarm supervise launch-isolation on` to jail every drive launch again")
+        return Check("launch isolation", False, f"drive launches are NOT started on this host: {detail}", fix)
+    return Check("launch isolation", False, f"drive launches can reach a credential: {detail}",
+                 "cover the path named ([drive] launch_cover_paths) or remove the credential from the launch env")
 
 
 def _codex_drive_checks(cfg: dict, which) -> list[Check]:
-    """Whether a Codex writer seat can reach the board ([F18]): on a server board the swarm
+    """Whether a Codex writer launch can reach the board ([F18]): on a server board the swarm
     config's [codex] network_access and the Codex profile that carries it; on a local board the
     store dir as a Codex writable root. (The rollout budget and the per-role line are
     _codex_drive_check's.) Nothing without Codex installed."""
@@ -1918,7 +1918,7 @@ def _codex_drive_checks(cfg: dict, which) -> list[Check]:
         ready = str(store) in [str(Path(str(r)).expanduser()) for r in roots]
         why = f"the board store {store} is not a codex writable root"
     return [Check("codex board access", True if ready else None,
-                  "codex writer seats reach the board" if ready else f"codex writer seats cannot reach the board: {why}",
+                  "codex writer launches reach the board" if ready else f"codex writer launches cannot reach the board: {why}",
                   "swarm bootstrap --host codex")]
 
 
@@ -2034,7 +2034,7 @@ def drive_checks(cfg: dict, *, run=None, which=None, now=None, platform: str | N
     """The drive-mode doctor lines (spec 3.2-3.3, 4.0, 4.5). Read-only: nothing here creates a
     directory or a file. The host lines (session drivers, git, sandbox, Codex) only on a host with
     unfinished drive jobs (or a [drive] section); the board lines whenever a board is there to read.
-    Every platform: no timer is needed ([T21]). `platform` only decides the seat isolation line (Task 20)."""
+    Every platform: no timer is needed ([T21]). `platform` only decides the launch isolation line (Task 20)."""
     import datetime as dt
     import subprocess
     from swarm import drive_activate as da, edition
@@ -2063,12 +2063,12 @@ def drive_checks(cfg: dict, *, run=None, which=None, now=None, platform: str | N
         out = (_drive_driver_checks(jobs, unreadable=not jobs) + [_drive_containment_check()]) if has_jobs else []
         out += [_drive_git_check(run, has_jobs), _claude_sandbox_check()]
         plat = platform or sys.platform
-        if not plat.startswith("linux"):   # Task 20: no filesystem jail there; seats are best-effort (a WARN)
-            from swarm.supervisor import seathome
-            note = seathome.BEST_EFFORT_NOTE.format(platform=plat)
-            out.append(_seat_isolation_check(cfg, probe=lambda c: (None, note)))
-        elif os.environ.get("SWARM_NO_SYSTEMD") != "1":   # no scopes, no drive seat starts here (the test suite)
-            out.append(_seat_isolation_check(cfg))
+        if not plat.startswith("linux"):   # Task 20: no filesystem jail there; launches are best-effort (a WARN)
+            from swarm.supervisor import launchhome
+            note = launchhome.BEST_EFFORT_NOTE.format(platform=plat)
+            out.append(_launch_isolation_check(cfg, probe=lambda c: (None, note)))
+        elif os.environ.get("SWARM_NO_SYSTEMD") != "1":   # no scopes, no drive launch starts here (the test suite)
+            out.append(_launch_isolation_check(cfg))
         out += _codex_drive_checks(cfg, which)
     if unreadable is not None:
         out.append(Check("drive ledgers", False,

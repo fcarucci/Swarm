@@ -46,27 +46,27 @@ def drive_view(board, cfg, job):
 
 
 def drive_gate(board, cfg, job):
-    """None for a job that is not a drive job; otherwise the seats the job's questions hold (spec 3.10). A
-    drive job's own waits and questions gate only the seats that asked them. With an unreadable ledger the
-    gate fails closed: every seat that asked any open question, and the coordinator, are held."""
-    from swarm.board.blockers import open_question_seats
+    """None for a job that is not a drive job; otherwise the launches the job's questions hold (spec 3.10). A
+    drive job's own waits and questions gate only the launches that asked them. With an unreadable ledger the
+    gate fails closed: every launch that asked any open question, and the coordinator, are held."""
+    from swarm.board.blockers import open_question_launches
     drive, generation, bad = _ledger_state(board, cfg, job)
     if not drive:
         return None
     if bad:
-        asked = {b.seat for b in board.blockers(job) if b.kind == "question" and b.seat is not None}
+        asked = {b.launch for b in board.blockers(job) if b.kind == "question" and b.launch is not None}
         return frozenset(asked | {"lead"})
-    return frozenset(open_question_seats(board, job, generation))
+    return frozenset(open_question_launches(board, job, generation))
 
 
-def coordinator_seat(name):
-    """The seat that coordinates a drive job (the lead, or a successor lead)."""
+def coordinator_launch(name):
+    """The launch that coordinates a drive job (the lead, or a successor lead)."""
     return name == "lead" or name.startswith("lead~")
 
 
 def human_question(board, js, cfg=None):
     """An unanswered question addressed to the owner/user is an external wait. Never for a drive job:
-    its questions gate their own seats (drive_gate), not the job."""
+    its questions gate their own launches (drive_gate), not the job."""
     if drive_gate(board, cfg, js.job) is not None:
         return False
     from swarm.owners import person_names
@@ -85,13 +85,13 @@ def eligible(board, cfg, js, sup, now):
     if js.status != "active" or not js.supervise:
         return False
     if drive_view(board, cfg, js.job)[0]:
-        return False          # the driver restarts its own seats; never a generic orphan coordinator
+        return False          # the driver restarts its own launches; never a generic orphan coordinator
     gate = drive_gate(board, cfg, js.job)
     if gate is None and js.waiting_on and not js.waiting_on.startswith(WAITING_PREFIX):
         return False  # all explicit external/human waits stay under owner control
     if human_question(board, js, cfg):
         return False
-    if gate and any(coordinator_seat(seat) for seat in gate):
+    if gate and any(coordinator_launch(launch) for launch in gate):
         return False  # the coordinator itself waits on a question: it is not restarted
     cutoff = now - dt.timedelta(minutes=sup["orphan_minutes"])
     activity = quiet_start(js, now=now)

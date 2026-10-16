@@ -920,7 +920,7 @@ def _install_schema(conn: psycopg.Connection, b: dict) -> None:
         conn.execute(events_schema(True))
         conn.execute(bg_schema(True))   # schema 24
         conn.execute(launches_schema(True))
-        migrate_launches(conn, pg=True)   # schema 25: seats, drive locks, the claim's restart columns
+        migrate_launches(conn, pg=True)   # schema 25: launches, drive locks, the claim's restart columns
         conn.execute("""
     CREATE OR REPLACE FUNCTION swarm_keep_blocked_jobs() RETURNS trigger LANGUAGE plpgsql AS $$
     BEGIN
@@ -1282,7 +1282,7 @@ class PostgresBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
         if row[1] is not None and ((row[2] or "").startswith(STUCK_PREFIX) or self.was_replaced(agent_key)):
             return row[0]      # supervisor-closed or replaced: stays departed, never revived
         if row[1] is None:
-            # a move to another job gives up the judge seat (judge/job on the right are the old values)
+            # a move to another job gives up the judge launch (judge/job on the right are the old values)
             conn.execute("UPDATE agents SET last_seen = now(), job = %s, judge = (judge AND job = %s), "
                          "verifier = (verifier AND job = %s) "
                          "WHERE agent_key = %s", (job, job, job, agent_key))
@@ -1485,14 +1485,14 @@ class PostgresBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
           ), visible AS MATERIALIZED (
             SELECT {{agent_cols}} FROM agent_status
              WHERE job IN (SELECT job FROM selected)
-               AND NOT (ended_at IS NOT NULL AND coalesce(left_reason, '') IN ('drive predecessor', 'pipeline predecessor', 'pipeline judge seat busy', 'driver: verdict recorded'))
+               AND NOT (ended_at IS NOT NULL AND coalesce(left_reason, '') IN ('drive predecessor', 'pipeline predecessor', 'pipeline judge launch busy', 'driver: verdict recorded'))
                AND (%(recent)s::float IS NULL OR status NOT IN ('completed','left','dead')
                     OR greatest(ended_at,last_contact_at) >= now() - %(recent)s * interval '1 minute')
           ), hidden AS (
             SELECT job, count(*) AS n FROM agent_status
              WHERE job IN (SELECT job FROM selected) AND %(recent)s::float IS NOT NULL
                AND status IN ('completed','left','dead')
-               AND NOT (ended_at IS NOT NULL AND coalesce(left_reason, '') IN ('drive predecessor', 'pipeline predecessor', 'pipeline judge seat busy', 'driver: verdict recorded'))
+               AND NOT (ended_at IS NOT NULL AND coalesce(left_reason, '') IN ('drive predecessor', 'pipeline predecessor', 'pipeline judge launch busy', 'driver: verdict recorded'))
                AND greatest(ended_at,last_contact_at) < now() - %(recent)s * interval '1 minute'
              GROUP BY job
           ), recent AS (
@@ -1701,7 +1701,7 @@ class PostgresBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
                 conn.execute(_CLAIM_RESUME, (agent_key, name, job, role, compat.node(),
                                              getpass.getuser(), cursor, judge, bool(verifier), resume_of, title))
                 return name
-        except psycopg.errors.UniqueViolation:   # the name (or the judge seat) was taken meanwhile
+        except psycopg.errors.UniqueViolation:   # the name (or the judge launch) was taken meanwhile
             return None
 
     def job_state(self, job: str) -> str | None:

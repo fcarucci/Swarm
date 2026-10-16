@@ -218,11 +218,11 @@ class ReviewHookTests(GoalEnv):
             b.post('J', 'executor', 'FINALIZED b')
             self.assertIsNotNone(b.auto_close_job('J', before, 'finalized'))
 
-    def test_headless_judge_stop_before_first_tool_call_takes_seat_and_blocks(self):
+    def test_headless_judge_stop_before_first_tool_call_takes_launch_and_blocks(self):
         from swarm import hooks
         with self.board() as b:
             b.agent_stopped('judge-1')
-        marker = {'job': 'J', 'resume': {'agent_key': 'new-judge', 'resume_of': 'previous-seat'}}
+        marker = {'job': 'J', 'resume': {'agent_key': 'new-judge', 'resume_of': 'previous-launch'}}
         def enroll(board, key, resume, payload, cfg):
             board.allocate_name(key, 'J', 'judge')
             board.claim_judge(key, 'J')
@@ -238,7 +238,7 @@ class ReviewHookTests(GoalEnv):
         from swarm.board.autoinit import store_key
         self.done()
         self.verdict()
-        marker = {'job': 'J', 'resume': {'agent_key': 'judge-1', 'resume_of': 'previous-seat'}}
+        marker = {'job': 'J', 'resume': {'agent_key': 'judge-1', 'resume_of': 'previous-launch'}}
         with self.board() as b:
             b.set_agent_runtime('judge-1', 'codex', None)
         enrolment.write(store_key(self.cfg), job='J', agent_key='judge-1',
@@ -252,7 +252,7 @@ class ReviewHookTests(GoalEnv):
     def test_headless_judge_session_stop_blocks_when_board_is_down(self):
         from swarm import hooks
         from swarm.board.base import BoardUnavailable
-        marker = {'resume': {'agent_key': 'judge-1', 'resume_of': 'previous-seat'}}
+        marker = {'resume': {'agent_key': 'judge-1', 'resume_of': 'previous-launch'}}
         with mock.patch.object(hooks, '_resume_binding', return_value=marker), \
                 mock.patch('swarm.board.open_board', side_effect=BoardUnavailable('offline')):
             out = self.hook('session-stop', agent_id=None)

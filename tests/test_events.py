@@ -101,7 +101,7 @@ class EventContract:
         bob, _ = self.b.post_event("j", "A", "bob", "for bob", to="Bob")
         ids = lambda **kw: [e.id for e in self.b.pending_events("j", **kw)]   # noqa: E731
         self.assertEqual(ids(), [orch, pm, el, bob])                  # no filter: everything
-        self.assertEqual(ids(to="@pm"), [orch, pm])                   # the PM seat also hears the orchestrator's
+        self.assertEqual(ids(to="@pm"), [orch, pm])                   # the PM launch also hears the orchestrator's
         self.assertEqual(ids(to="@PM"), [orch, pm])                   # roles compare case-insensitively
         self.assertEqual(ids(to="@el"), [el])
         self.assertEqual(ids(to="Bob"), [bob])

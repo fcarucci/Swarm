@@ -1,5 +1,5 @@
 """A drive job on the hook Env, for the drive hook tests: a ledger with a requester session, supervisor-launched
-seats (resume marker, run file, ledger intent, driver-authored seat authorization, board agent), and payload
+launches (resume marker, run file, ledger intent, driver-authored launch authorization, board agent), and payload
 builders that have the shapes the hosts send (Claude's PostToolUse tool_response has no exit_code; Codex's is a
 plain string)."""
 from __future__ import annotations
@@ -21,8 +21,8 @@ LEAD = "lead"
 
 
 class DriveCase(Env):
-    """Job J (a drive job: ledger, owner record, board claim) with the requester session REQ. `launch_seat`
-    stands in for the supervisor's launch of a seat (what driver_exec does around claim_drive_launch)."""
+    """Job J (a drive job: ledger, owner record, board claim) with the requester session REQ. `launch_launch`
+    stands in for the supervisor's launch of a launch (what driver_exec does around claim_drive_launch)."""
 
     def setUp(self):
         super().setUp()
@@ -49,9 +49,9 @@ class DriveCase(Env):
         self.led = ledger.load(self.key, "J")
         return self.led
 
-    def launch_seat(self, name, role="engineer", *, kind="seat", state="claimed", model="haiku", harness="claude",
+    def launch_launch(self, name, role="engineer", *, kind="launch", state="claimed", model="haiku", harness="claude",
                     authorize=True, bind=True):
-        """A seat the supervisor launched: its row, the driver's authorization, the ledger intent, the restart
+        """A launch the supervisor launched: its row, the driver's authorization, the ledger intent, the restart
         row, the resume marker bound to its session, the run file, and (bind) its board identity. Returns
         (session id, row)."""
         sid = "sid-" + name
@@ -67,14 +67,14 @@ class DriveCase(Env):
                 b.claim_resume(sid, old, "J")
         action = f"gen1|{kind}|{name}|-|0|1"
         self.edit(lambda l: l.intents.append(ledger.Intent(
-            launch_id=launch, action_id=action, attempt=1, seat=name, reserved_usd=0.5, reserved_minutes=60.0,
+            launch_id=launch, action_id=action, attempt=1, launch=name, reserved_usd=0.5, reserved_minutes=60.0,
             locks=[], state=state, **({"outcome": "completed", "success": True, "charged_usd": 0.1}
                                       if state == "concluded" else {}))))
-        path = markers.write_resume_marker(self.cfg, "J", rid, resume_of=old, name="seat", harness=harness,
+        path = markers.write_resume_marker(self.cfg, "J", rid, resume_of=old, name="launch", harness=harness,
                                            session_id=sid)
-        runner.write_run({"restart_id": rid, "board": self.key, "job": "J", "name": "seat", "resume_of": old,
+        runner.write_run({"restart_id": rid, "board": self.key, "job": "J", "name": "launch", "resume_of": old,
                           "marker": str(path), "harness": harness, "limit_seconds": 3600.0,
-                          "enrol_seconds": 300.0, "launch_id": launch, "action_id": action, "seat": name,
+                          "enrol_seconds": 300.0, "launch_id": launch, "action_id": action, "launch": name,
                           "generation": 1, "session_id": sid})
         self.action, self.restart_id = action, rid
         return sid, row
@@ -84,7 +84,7 @@ class DriveCase(Env):
             return b.active_agent_name(sid)
 
     def post_as(self, sid: str, text: str, to: str | None = None) -> int:
-        """A board message from the seat session `sid`, as `swarm post`/`done`/`verdict` write it."""
+        """A board message from the launch session `sid`, as `swarm post`/`done`/`verdict` write it."""
         with self.board() as b:
             return b.post("J", b.active_agent_name(sid), text, to).id
 

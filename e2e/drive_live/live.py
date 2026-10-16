@@ -94,7 +94,7 @@ def run_goal(args, expect: str) -> list[tuple[str, str, str]]:
         with Rig(name, script=script, backend=args.backend, harness=args.harness, budget_usd=args.budget_usd,
                  systemd=args.systemd, driver=args.driver) as rig:
             if args.harness == "real" and expect == "met" and have_codex:
-                rig.lead_brief = HERE / "LEAD-met-codex.md"      # asks for one engineer seat on the codex harness
+                rig.lead_brief = HERE / "LEAD-met-codex.md"      # asks for one engineer launch on the codex harness
             st: dict = {}
 
             def on_pass(k, snap):
@@ -111,7 +111,7 @@ def run_goal(args, expect: str) -> list[tuple[str, str, str]]:
             except TimeoutError as exc:
                 rig.write_costs(); rig.export_evidence()
                 return [(name, q.Outcome.FAIL, f"STUCK: {exc}")]
-            problems = rig.check_terminal(expect) + rig.check_no_coordinator() + rig.check_every_seat_supervisor_launched()
+            problems = rig.check_terminal(expect) + rig.check_no_coordinator() + rig.check_every_launch_supervisor_launched()
             if args.kill_supervisor_once and not st.get("killed_pass"):
                 problems.append("--kill-supervisor-once: the pass was never killed in flight: nothing was tested")
             costs = rig.write_costs()
@@ -131,7 +131,7 @@ def run_goal(args, expect: str) -> list[tuple[str, str, str]]:
                     "landed head == judged candidate on both destinations; linear; green CI on that SHA, consulted")
                 if args.harness == "real":
                     if have_codex:
-                        row("codex-engineer", rig.check_codex_engineer(), "a codex engineer seat ran")
+                        row("codex-engineer", rig.check_codex_engineer(), "a codex engineer launch ran")
                     else:
                         rows.append((f"{name}/codex-engineer", q.Outcome.SKIP,
                                      "not run (no codex binary on this box; [F18] is unchecked)"))

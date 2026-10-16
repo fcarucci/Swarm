@@ -123,7 +123,7 @@ class Rig:
                 "--budget", f"max_cost_usd={self.budget_usd:g}", *self.activate_extra, *(extra or [])]
 
     def activate(self, extra: list[str] | None = None, goal: str | None = None) -> None:
-        q.require("6a", "6b", what="swarm activate --drive and seats")
+        q.require("6a", "6b", what="swarm activate --drive and launches")
         if getattr(self, "driver", "passes") == "passes":
             self.run.supervise_pass()    # the timer-era precondition: an older checkout refuses without a pass
         res = self.run.swarm(*self.activate_args(goal, extra))
@@ -258,14 +258,14 @@ class Rig:
         self.pass_env.pop("SWARM_CRASH_AT", None)
 
     def barrier_fired(self, name: str) -> str | None:
-        """Evidence that the named barrier killed something: a pass that died by SIGKILL while armed, or a seat
+        """Evidence that the named barrier killed something: a pass that died by SIGKILL while armed, or a launch
         hook that was killed (harness log), or a session that started and never ended. None = it never fired."""
         if KILLED in self.rcs:
             return f"supervisor pass #{self.rcs.index(KILLED) + 1} died by SIGKILL (rc {KILLED})"
         log = self.harness_log()
         hk = [e for e in log if e.get("ev") == "hook_killed"]
         if hk:
-            return f"a seat hook was SIGKILLed ({hk[0].get('role')}/{hk[0].get('event')})"
+            return f"a launch hook was SIGKILLed ({hk[0].get('role')}/{hk[0].get('event')})"
         started = {e["sid"] for e in log if e.get("ev") == "start"}
         ended = {e["sid"] for e in log if e.get("ev") == "end"}
         if name in ("runner_mid_session", "before_finish") and started - ended:
@@ -315,7 +315,7 @@ class Rig:
                 if (a.role or "") in ("orchestrator", "project_manager")]
         return bad
 
-    def check_every_seat_supervisor_launched(self) -> list[str]:
+    def check_every_launch_supervisor_launched(self) -> list[str]:
         """Every agent of the job was started by a supervisor launch (a restart row) and has ended; in fake
         mode the harness log has one session per launch; no process of this run is left."""
         js, agents, restarts, msgs = self.state()
@@ -388,7 +388,7 @@ class Rig:
         return bad
 
     def check_models(self) -> list[str]:
-        """Spec 6.3: the per-role model table is what the seats actually ran on (agent rows)."""
+        """Spec 6.3: the per-role model table is what the launches actually ran on (agent rows)."""
         _, agents, _, _ = self.state()
         bad, seen = [], set()
         for a in agents:
@@ -403,7 +403,7 @@ class Rig:
                 bad.append(f"{a.name} ({role}) ran on {a.model!r}, want a {MODELS[key]} model")
         for need in ("lead", "judge", "engineer"):
             if need not in seen:
-                bad.append(f"no {need} seat found to check its model")
+                bad.append(f"no {need} launch found to check its model")
         return bad
 
     def check_unreachable_details(self) -> list[str]:
@@ -420,7 +420,7 @@ class Rig:
     def check_codex_engineer(self) -> list[str]:
         _, agents, _, _ = self.state()
         if not any((a.harness or "") == "codex" for a in agents):
-            return ["no codex seat ran ([F18]: the live MET run includes one real Codex engineer)"]
+            return ["no codex launch ran ([F18]: the live MET run includes one real Codex engineer)"]
         return []
 
     # -- reports

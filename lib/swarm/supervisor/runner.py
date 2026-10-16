@@ -39,7 +39,7 @@ everything it starts, however it forks, daemonises or clears its environment. Th
 launch. Stopping it (wall clock, enrol deadline, stuck, leftovers, reap of a dead runner's
 session) is `systemctl --user kill` SIGTERM, a grace, SIGKILL, then `stop`; no pid or process
 group is signalled. With no systemd user manager (macOS, Windows, minimal Linux; spec 3.11 [T21]) a
-drive seat (a run with a launch_id) runs in its own process group (start_new_session), every member
+drive launch (a run with a launch_id) runs in its own process group (start_new_session), every member
 tagged with RUN_ENV: it is stopped by group as below, and its presence (group_presence) is "absent"
 only where the members can be listed; any other replacement doesn't launch at all: the restart ends
 "refused" (no user systemd manager), and `swarm doctor` fails the scope check. Run files
@@ -79,7 +79,7 @@ LAUNCH_GRACE = 90.0   # seconds an unseen scope of a dead runner may still appea
 NO_MANAGER = "no user systemd manager"
 SYSTEMD_RUN = "systemd-run"
 SYSTEMCTL = "systemctl"
-JAIL_UNAVAILABLE = 125   # seatjail.EXIT_UNAVAILABLE
+JAIL_UNAVAILABLE = 125   # launchjail.EXIT_UNAVAILABLE
 RUN_ENV = "SWARM_RUN_ID"   # set on every session: marks the processes that belong to one run
 TAIL_BYTES = 32 * 1024    # of each of stdout and stderr, kept redacted after a run (r<id>.tail.txt)
 TAIL_REDACT_SECONDS = 10.0   # its redaction at most (past it: no tail file)
@@ -888,24 +888,24 @@ def start(cfg: dict, run: dict, popen=subprocess.Popen) -> int:
     return proc.pid
 
 
-def _seat_argv(cfg: dict, run: dict) -> tuple[list, str | None]:
-    """The argv the scope runs: a drive seat's (run["launch_id"]) wrapped in its credential jail
-    (seathome.wrap), any other replacement's as it is. (argv, why refused)."""
+def _launch_argv(cfg: dict, run: dict) -> tuple[list, str | None]:
+    """The argv the scope runs: a drive launch's (run["launch_id"]) wrapped in its credential jail
+    (launchhome.wrap), any other replacement's as it is. (argv, why refused)."""
     argv = list(run["argv"])
     if not run.get("launch_id"):
         return argv, None
-    from swarm.supervisor import seathome
-    seat = str(run.get("seat") or run["name"])
+    from swarm.supervisor import launchhome
+    launch = str(run.get("launch") or run["name"])
     try:
-        launched, env, mode = seathome.launch(cfg, argv, job=run["job"], seat=seat, workdir=run["cwd"],
+        launched, env, mode = launchhome.launch(cfg, argv, job=run["job"], launch=launch, workdir=run["cwd"],
                                               read_only=bool(run.get("read_only")))
-    except (seathome.SeatIsolationError, OSError) as exc:
+    except (launchhome.LaunchIsolationError, OSError) as exc:
         return argv, str(exc)
-    run["seat_mode"] = mode
-    if mode != "off":   # jailed or best-effort: its broker serves the seat's directory
-        run["seat_home"] = str(seathome.home_dir(run["job"], seat))
+    run["launch_mode"] = mode
+    if mode != "off":   # jailed or best-effort: its broker serves the launch's directory
+        run["launch_home"] = str(launchhome.home_dir(run["job"], launch))
     if env is not None:
-        run["seat_env"] = env
+        run["launch_env"] = env
         _note_best_effort()
     return launched, None
 
@@ -914,14 +914,14 @@ _BEST_EFFORT_LOGGED = False
 
 
 def _note_best_effort() -> None:
-    """Log that a seat starts best-effort (no filesystem jail): once per process on macOS/Windows (that is how
+    """Log that a launch starts best-effort (no filesystem jail): once per process on macOS/Windows (that is how
     those hosts are), every time on Linux with its reason (a fallback there is a security event)."""
     global _BEST_EFFORT_LOGGED
-    from swarm.supervisor import seathome
+    from swarm.supervisor import launchhome
     from swarm.supervisor.settings import log
-    note = "seat isolation: " + seathome.BEST_EFFORT_NOTE.format(platform=sys.platform)
-    if seathome.jail_platform():
-        log(f"{note}: {seathome.last_fallback_reason[0] or 'no user namespaces'}")
+    note = "launch isolation: " + launchhome.BEST_EFFORT_NOTE.format(platform=sys.platform)
+    if launchhome.jail_platform():
+        log(f"{note}: {launchhome.last_fallback_reason[0] or 'no user namespaces'}")
         return
     if _BEST_EFFORT_LOGGED:
         return
@@ -929,18 +929,18 @@ def _note_best_effort() -> None:
     log(note)
 
 
-SEAT_TRANSCRIPT_MAX = 64 * 1024 * 1024
+LAUNCH_TRANSCRIPT_MAX = 64 * 1024 * 1024
 
 
-def _keep_seat_transcript(run: dict) -> None:
-    """A jailed seat's transcript lives in its seat directory, where the host's capture does not look (Task 20
+def _keep_launch_transcript(run: dict) -> None:
+    """A jailed launch's transcript lives in its launch directory, where the host's capture does not look (Task 20
     rr14): copy it into the run's directory (r<id>.transcript.jsonl, private), read without following a link,
     and let finish capture it from there."""
-    from swarm.supervisor import privfs, seatbroker
+    from swarm.supervisor import privfs, launchbroker
     from swarm.supervisor.settings import log
     try:
-        data = seatbroker.read_seat_transcript(run["seat_home"], run.get("harness") or "claude",
-                                               run.get("agent_key") or run.get("session_id"), SEAT_TRANSCRIPT_MAX)
+        data = launchbroker.read_launch_transcript(run["launch_home"], run.get("harness") or "claude",
+                                               run.get("agent_key") or run.get("session_id"), LAUNCH_TRANSCRIPT_MAX)
         if data is None:
             return
         name = f"r{run['restart_id']}.transcript.jsonl"
@@ -949,7 +949,7 @@ def _keep_seat_transcript(run: dict) -> None:
         run["transcript_copy"] = str(run_file(run["restart_id"], run["board"]).with_name(name))
         write_run(run)
     except OSError as exc:
-        log(f"restart {run['restart_id']}: the seat's transcript was not kept ({type(exc).__name__})")
+        log(f"restart {run['restart_id']}: the launch's transcript was not kept ({type(exc).__name__})")
 
 
 def _start_windows(run: dict, popen) -> int:
@@ -977,9 +977,9 @@ def _start_windows(run: dict, popen) -> int:
     return proc.pid
 
 
-# -- Windows: a seat in a Job Object (spec 3.11 [T21]) -----------------------------------------------
+# -- Windows: a launch in a Job Object (spec 3.11 [T21]) -----------------------------------------------
 
-_JOBS: dict = {}   # restart id -> the Job Object handle this runner holds (closing it kills the seat)
+_JOBS: dict = {}   # restart id -> the Job Object handle this runner holds (closing it kills the launch)
 
 
 def _k32():
@@ -999,7 +999,7 @@ def _k32():
 
 def _job_contain(rid: int, proc) -> None:
     """Put the (suspended) session in a new Job Object that kills every process in it when its last handle
-    closes (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: if this runner dies, the seat dies with it), then resume it.
+    closes (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: if this runner dies, the launch dies with it), then resume it.
     Anything it starts is in the job too. Raises when the job cannot be made: the caller stops the session."""
     import ctypes
     k32 = _k32()
@@ -1039,7 +1039,7 @@ def _job_contain(rid: int, proc) -> None:
 
 
 def _job_active(rid: int) -> int | None:
-    """How many processes the seat's Job Object holds (None: this process holds no job for the run)."""
+    """How many processes the launch's Job Object holds (None: this process holds no job for the run)."""
     import ctypes
     job = _JOBS.get(rid)
     if job is None:
@@ -1051,7 +1051,7 @@ def _job_active(rid: int) -> int | None:
 
 
 def _job_stop(rid: int, proc=None, grace: float | None = None) -> None:
-    """End every process of the seat's job: TerminateJobObject (Windows has no SIGTERM for a console-less
+    """End every process of the launch's job: TerminateJobObject (Windows has no SIGTERM for a console-less
     process tree), then close the job."""
     job = _JOBS.pop(rid, None)
     if job is not None:
@@ -1076,9 +1076,9 @@ def _child_env(token: str | None = None, tag: str | None = None, pass_env=(), dr
     drop = ("CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDECODE", "CLAUDE_PLUGIN_ROOT",
             "CODEX_SESSION_ID", "CODEX_THREAD_ID", "PLUGIN_ROOT", "SWARM_HOST", TOKEN_ENV, RUN_ENV)
     env = {k: v for k, v in _allowed_env(os.environ, pass_env).items() if k not in drop}
-    if drive:   # a drive seat never gets a push credential variable, whatever pass_env names (Task 20)
-        from swarm import seatjail
-        env = seatjail.scrub_env(env)   # XDG_RUNTIME_DIR comes back for systemd-run (manager_env); the jail drops it
+    if drive:   # a drive launch never gets a push credential variable, whatever pass_env names (Task 20)
+        from swarm import launchjail
+        env = launchjail.scrub_env(env)   # XDG_RUNTIME_DIR comes back for systemd-run (manager_env); the jail drops it
     if token:
         env[TOKEN_ENV] = token
     if tag:
@@ -1122,7 +1122,7 @@ def _kill_switch(cfg: dict, run: dict) -> str | None:
     asked doesn't stop it (the enrol deadline does, if the board stays away)."""
     from swarm.board import open_board
     from swarm.supervisor.settings import off_reason
-    why = off_reason(cfg, drive=bool(run.get("launch_id")))   # a drive seat ignores [supervise] enabled
+    why = off_reason(cfg, drive=bool(run.get("launch_id")))   # a drive launch ignores [supervise] enabled
     if why:
         return f"the supervisor is switched off ({why})"
     try:
@@ -1324,7 +1324,7 @@ def _execute(cfg: dict, run: dict, *, popen, clock, sleep, poll: float, board_ev
         _keep_output_tail(rid, run["board"])
         finish(cfg, run, "cancelled")
         return "cancelled"
-    # spec 3.11 [T21]: a drive seat with no user manager runs in its own process group; any other replacement
+    # spec 3.11 [T21]: a drive launch with no user manager runs in its own process group; any other replacement
     # is refused there, as before (the legacy supervisor's restarts need a scope)
     scoped = scope_available()
     token, refused = (None, "refused") if not (scoped or run.get("launch_id")) else _token_for(run)
@@ -1351,7 +1351,7 @@ def _execute(cfg: dict, run: dict, *, popen, clock, sleep, poll: float, board_ev
         _keep_output_tail(rid, run["board"])
         finish(cfg, run, "refused")
         return "refused"
-    seat_argv, jail_refused = _seat_argv(cfg, run)   # Task 20: a drive seat runs without push credentials
+    launch_argv, jail_refused = _launch_argv(cfg, run)   # Task 20: a drive launch runs without push credentials
     if jail_refused:
         os.close(wfd)
         log(f"restart {rid} of {run['name']} on {run['job']} not launched: {jail_refused}")
@@ -1364,18 +1364,18 @@ def _execute(cfg: dict, run: dict, *, popen, clock, sleep, poll: float, board_ev
     run["run_tag"] = f"r{rid}-{secrets.token_hex(8)}"
     from swarm.supervisor.settings import settings
     env = _child_env(token, run["run_tag"], settings(cfg)["pass_env"], drive=bool(run.get("launch_id")))
-    if run.get("seat_env"):   # a best-effort seat (no jail): the allowlist, no credential helper, its broker
-        from swarm.supervisor import seathome
-        env = seathome.best_effort_child_env(env, run["seat_env"], run["seat_home"])
+    if run.get("launch_env"):   # a best-effort launch (no jail): the allowlist, no credential helper, its broker
+        from swarm.supervisor import launchhome
+        env = launchhome.best_effort_child_env(env, run["launch_env"], run["launch_home"])
     if scoped:
         run.update(unit=f"swarm-r{rid}-{secrets.token_hex(4)}.scope", unit_seen_active=False,
                    launch_epoch=time.time())
         argv = [SYSTEMD_RUN, "--user", "--scope", f"--unit={run['unit']}", "--collect", "--quiet", "--",
-                *seat_argv]
+                *launch_argv]
         env = _manager_env(env)
     else:   # its own process group (start_new_session), every member tagged with RUN_ENV; Windows: a Job Object
         run.update(unit=None, contained="job" if compat.IS_WINDOWS else "group", launch_epoch=time.time())
-        argv = list(seat_argv)
+        argv = list(launch_argv)
     write_run(run)   # the unit name is known before anything runs in it
     fd_err = _fresh_output(f"r{rid}.err", run["board"])
     try:
@@ -1412,9 +1412,9 @@ def _execute(cfg: dict, run: dict, *, popen, clock, sleep, poll: float, board_ev
                child_token=procwatch.start_token(proc.pid))
     write_run(run)
     broker = None
-    if run.get("seat_home"):   # a jailed seat reaches the board only through its broker (Task 20)
-        from swarm.supervisor import seatbroker
-        broker = seatbroker.for_run(cfg, run, host_pid=proc.pid, token=token)
+    if run.get("launch_home"):   # a jailed launch reaches the board only through its broker (Task 20)
+        from swarm.supervisor import launchbroker
+        broker = launchbroker.for_run(cfg, run, host_pid=proc.pid, token=token)
         if broker is not None:
             broker.start()
     feeder = threading.Thread(target=_feed, args=(proc, str(run["stdin"]).encode()), daemon=True)
@@ -1496,9 +1496,9 @@ def _execute(cfg: dict, run: dict, *, popen, clock, sleep, poll: float, board_ev
         t.join(5)
         if proc.returncode == 0:
             outcome = "completed"
-        elif run.get("seat_home") and run.get("seat_mode") == "required" and proc.returncode == JAIL_UNAVAILABLE:
+        elif run.get("launch_home") and run.get("launch_mode") == "required" and proc.returncode == JAIL_UNAVAILABLE:
             outcome = "refused"   # the jail could not be built: nothing ran (not an attempt to retry blindly)
-            run["refused_reason"] = "the seat's jail could not be built (seatjail exit 125)"
+            run["refused_reason"] = "the launch jail could not be built (launchjail exit 125)"
         else:
             try:
                 sub = json.loads(last_line["text"]).get("subtype")
@@ -1507,8 +1507,8 @@ def _execute(cfg: dict, run: dict, *, popen, clock, sleep, poll: float, board_ev
             outcome = "max_turns" if sub == "error_max_turns" else "failed"
     if broker is not None:
         broker.stop()
-    if run.get("seat_home"):
-        _keep_seat_transcript(run)
+    if run.get("launch_home"):
+        _keep_launch_transcript(run)
     t.join(5)
     feeder.join(1)
     run.update(exited=True, outcome=outcome)
@@ -1621,7 +1621,7 @@ def _finish_row_and_post(b, run: dict, outcome: str, poster: str) -> None:
         led = ledger.load(run["board"], run["job"])
         if led is not None:
             rows = {r.launch_id: r for r in b.restarts(run["job"]) if r.id == run["restart_id"]}
-            driver_exec._settle_seats(b, {}, led, rows, b.now())
+            driver_exec._settle_launches(b, {}, led, rows, b.now())
         run.update(posted=True, post_pending=None)
         _save_progress(run)
         return

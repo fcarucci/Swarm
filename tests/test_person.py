@@ -45,7 +45,7 @@ class PersonCase(unittest.TestCase):
     def led(self):
         return ledger.load(self.bk, JOB)
 
-    def enrol_seat(self, session="SEAT", key="k-eng"):
+    def enrol_launch(self, session="LAUNCH", key="k-eng"):
         enrolment.write(self.bk, job=JOB, agent_key=key, harness="claude", session_id=session, cwd=str(self.home))
 
     def hook(self, session, argv=HALT, agent_id=None, command=None, ctx=None, now=None):
@@ -82,29 +82,29 @@ class RequesterByGrant(PersonCase):
         rid = drivegate.grant_id(self.ns(), person.host_pid())
         r = receipts.find(self.bk, JOB, "grant", rid, rev=1, incarnation=led.incarnation,
                           generation=led.generation, now=time.time())
-        self.assertEqual((r.seat, r.action_id, r.args_sha), (None, "requester:halt", rid))
+        self.assertEqual((r.launch, r.action_id, r.args_sha), (None, "requester:halt", rid))
 
     def test_P1_the_environment_alone_gives_no_authority(self):
         with self.assertRaises(person.PersonRefused):
             self.require({"CLAUDE_CODE_SESSION_ID": "REQ"}, lambda a, j: True, UNDER_CLAUDE)
 
     def test_another_session_gets_no_grant(self):
-        self.enrol_seat("SEAT")
-        self.assertEqual(self.hook("SEAT"), 0)
+        self.enrol_launch("LAUNCH")
+        self.assertEqual(self.hook("LAUNCH"), 0)
         with self.assertRaises(person.PersonRefused):
             self.require({"CLAUDE_CODE_SESSION_ID": "REQ"}, lambda a, j: True, UNDER_CLAUDE)
 
-    def test_a_seat_grant_is_not_the_requester(self):
-        ctx = drivegate.Ctx(kind="seat", job=JOB, led=self.led(), seat="eng",
+    def test_a_launch_grant_is_not_the_requester(self):
+        ctx = drivegate.Ctx(kind="launch", job=JOB, led=self.led(), launch="eng",
                             intent=ledger.Intent("L", "A", 1, "eng", 0.0, 0.0, [], "claimed"))
-        self.assertEqual(self.hook("SEAT", ctx=ctx), 1)
+        self.assertEqual(self.hook("LAUNCH", ctx=ctx), 1)
         with self.assertRaises(person.PersonRefused) as cm:
             self.require({"CLAUDE_CODE_SESSION_ID": "REQ"}, lambda a, j: True, UNDER_CLAUDE)
         self.assertIn("not the requester", str(cm.exception))
 
-    def test_a_seat_of_another_job_gets_no_grant_for_this_one(self):
+    def test_a_launch_of_another_job_gets_no_grant_for_this_one(self):
         other = ledger.create(self.bk, "K", budgets={}, activated_at="2026-10-11T00:00:00+00:00")
-        ctx = drivegate.Ctx(kind="seat", job="K", led=other, seat="lead",
+        ctx = drivegate.Ctx(kind="launch", job="K", led=other, launch="lead",
                             intent=ledger.Intent("L", "A", 1, "lead", 0.0, 0.0, [], "claimed"))
         self.assertEqual(self.hook("K-LEAD", ctx=ctx), 0)
         self.assertEqual(self.hook("K-LEAD", argv=["halt", "--job", "K"], ctx=ctx), 1)
@@ -115,25 +115,25 @@ class RequesterByGrant(PersonCase):
             self.require({"CLAUDE_CODE_SESSION_ID": "REQ"}, lambda a, j: True, UNDER_CLAUDE)
 
     def test_P4_requester_still_allowed_after_one_of_its_subagents_enrolled(self):
-        self.enrol_seat("REQ", key="k-sub-of-requester")
+        self.enrol_launch("REQ", key="k-sub-of-requester")
         self.hook("REQ")
         self.assertEqual(self.require({"CLAUDE_CODE_SESSION_ID": "REQ"}, ancestor=UNDER_CLAUDE), "requester")
 
     def test_requester_is_not_an_enrolled_agent_session_by_its_subagents(self):
         """In-process subagents share the requester's session id and have records carrying it; that does not make
         the main session an agent session: with no grant it is refused as inside an agent host, not as enrolled."""
-        self.enrol_seat("REQ", key="a0123456789abcdef")
+        self.enrol_launch("REQ", key="a0123456789abcdef")
         self.assertNotIn("REQ", enrolment.agent_sessions(self.bk))
         with self.assertRaises(person.PersonRefused) as cm:
             self.require({"CLAUDE_CODE_SESSION_ID": "REQ"}, lambda a, j: True, UNDER_CLAUDE)
         self.assertNotIn("enrolled", str(cm.exception))
         self.assertIn("agent host", str(cm.exception))
 
-    def test_a_seat_session_is_still_an_agent_session(self):
-        self.enrol_seat("SEAT", key="SEAT")
-        self.assertEqual(enrolment.agent_sessions(self.bk), {"SEAT": "SEAT"})
-        self.enrol_seat("REQ", key="a0123456789abcdef")
-        self.assertEqual(set(enrolment.agent_sessions(self.bk)), {"SEAT"})
+    def test_a_launch_session_is_still_an_agent_session(self):
+        self.enrol_launch("LAUNCH", key="LAUNCH")
+        self.assertEqual(enrolment.agent_sessions(self.bk), {"LAUNCH": "LAUNCH"})
+        self.enrol_launch("REQ", key="a0123456789abcdef")
+        self.assertEqual(set(enrolment.agent_sessions(self.bk)), {"LAUNCH"})
 
     def test_the_requester_re_activates_a_closed_job_by_its_grant(self):
         """`swarm activate` of a drive job whose ledger is terminal is the requester's person action: its main
@@ -141,7 +141,7 @@ class RequesterByGrant(PersonCase):
         led = self.led()
         led.terminal = {"at": "2026-10-11T01:00:00+00:00", "scope": "ruling", "verdict": "unreachable"}
         led.save()
-        self.enrol_seat("REQ", key="a0123456789abcdef")
+        self.enrol_launch("REQ", key="a0123456789abcdef")
         argv = ["activate", "--job", JOB, "--goal", "g", "--workdir", str(self.home)]
         self.assertEqual(self.hook("REQ", argv=argv, agent_id="a0123456789abcdef"), 0)
         self.assertEqual(self.hook("REQ", argv=argv), 1)
@@ -172,7 +172,7 @@ class RequesterByGrant(PersonCase):
         self.assertIsNone(person.caller(self.bk, JOB, led, self.ns()))
 
     def test_a_grant_that_cannot_be_used_up_is_refused(self):
-        """A Codex seat's sandbox can read the enrolled directory but not unlink in it: no grant."""
+        """A Codex launch's sandbox can read the enrolled directory but not unlink in it: no grant."""
         self.hook("REQ")
         with mock.patch("swarm.compat.unlink", side_effect=PermissionError("read-only")):
             with self.assertRaises(person.PersonRefused):
@@ -250,7 +250,7 @@ class TtyPath(PersonCase):
 
     def test_P2_unset_session_variables_under_an_agent_host_refused(self):
         """P2 (fixed): `env -u CLAUDE_CODE_SESSION_ID swarm halt` still runs under the claude process."""
-        self.enrol_seat("ENG-SESSION")
+        self.enrol_launch("ENG-SESSION")
         with self.assertRaises(person.PersonRefused) as cm:
             self.require({"HOME": str(self.home)}, confirm=lambda a, j: True, ancestor=UNDER_CLAUDE)
         self.assertIn("agent host", str(cm.exception))
@@ -267,10 +267,10 @@ class TtyPath(PersonCase):
                 mock.patch.object(person.os, "getppid", return_value=10):
             self.assertEqual(person._ancestor_host(), "codex")
 
-    def test_enrolled_seat_refused_person_path(self):
-        self.enrol_seat("SEAT", key="SEAT")   # a real seat is its own session: its agent key is its session id
+    def test_enrolled_launch_refused_person_path(self):
+        self.enrol_launch("LAUNCH", key="LAUNCH")   # a real launch is its own session: its agent key is its session id
         with self.assertRaises(person.PersonRefused) as cm:
-            self.require({"CLAUDE_CODE_SESSION_ID": "SEAT"}, confirm=lambda a, j: True)
+            self.require({"CLAUDE_CODE_SESSION_ID": "LAUNCH"}, confirm=lambda a, j: True)
         self.assertIn("enrolled", str(cm.exception))
 
     def test_tty_unavailable_is_a_refusal(self):

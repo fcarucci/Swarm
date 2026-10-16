@@ -1,4 +1,4 @@
-"""A resumed subagent keeps its own name and role, and never gets the judge seat unless its own
+"""A resumed subagent keeps its own name and role, and never gets the judge launch unless its own
 prompt asks for it.
 
 Field case (job ha-energy, 2026-10-09): the engineer subagent was spawned at 18:19, before the job
@@ -6,10 +6,10 @@ was activated at 18:24, so its hooks never adopted it (no --adopt-running). It w
 by hand with `swarm join --key energy-eng --role engineer` (Otto Mann). When the orchestrator resumed
 it through SendMessage, SubagentStart found no row for its real agent id and enrolled it afresh: a
 random pool name, "Judge Constance Harm", with the agent type as its role. It never held the judge
-seat (judge=false on its row), but the name read like one.
+launch (judge=false on its row), but the name read like one.
 
 Fixed: such a subagent's own `swarm join` runs with its agent id as the key (the rewrite members
-already had), and pool names that read like a seat are never given out."""
+already had), and pool names that read like a launch are never given out."""
 from __future__ import annotations
 
 import shlex
@@ -86,12 +86,12 @@ class ResumeIdentityTests(GoalEnv):
         self.assertIsNone(self.member("eng-1"))
         self.assertIsNone(self.agent("orchestrator"))
 
-    def test_resumed_after_judge_finished_keeps_name_and_role_and_no_seat(self):
+    def test_resumed_after_judge_finished_keeps_name_and_role_and_no_launch(self):
         name = self.join_engineer_by_hand()
         self.spawn_judge("judge-1")
         judge = self.member("judge-1").name
         self.run_cli(self.bash("judge-1", VERDICT))
-        self.hook("stop", agent_id="judge-1")   # the judge has finished: its seat may be handed over
+        self.hook("stop", agent_id="judge-1")   # the judge has finished: its launch may be handed over
         self.hook("stop", agent_id="eng-1")
         self.start("eng-1")                       # SendMessage resumes the engineer
         me = self.member("eng-1")
@@ -120,7 +120,7 @@ class ResumeIdentityTests(GoalEnv):
         self.assertIsNone(self.bash("eng-1", "/x/bin/swarm join --job OTHER --key k1"))
         self.assertIsNone(self.bash("eng-1", "echo swarm join --job J --key k1"))
 
-    def test_seat_like_pool_names_are_never_given(self):
+    def test_launch_like_pool_names_are_never_given(self):
         self.assertFalse(assignable_name("Judge Constance Harm"))
         self.assertFalse(assignable_name("judge snyder"))
         self.assertTrue(assignable_name("Homer Simpson"))

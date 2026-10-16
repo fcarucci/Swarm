@@ -1,7 +1,7 @@
 # Claude host preflight: engineering-team-impl-20260929
 
 **Date:** 2026-09-29 (16:44–16:46 local)
-**Owner:** Krusty the Clown (board key `engineering-impl-claude-preflight`, role `project_manager`). This seat owns only this preflight. The PM is still Rabbi Hyman Krustofsky.
+**Owner:** Krusty the Clown (board key `engineering-impl-claude-preflight`, role `project_manager`). This launch owns only this preflight. The PM is still Rabbi Hyman Krustofsky.
 **Scope:** a source-backed Claude host preflight. It is not the behavioral fixture suite.
 **Result:** **PASS**. Claude custom-role routing works from this source snapshot. Behavioral host evaluation has not run yet, so it is **PENDING**.
 

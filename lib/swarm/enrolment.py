@@ -395,7 +395,7 @@ def find_job_owner(board_key: str, job: str, *, strict: bool = False):
 
 def agent_sessions(board_key: str) -> dict:
     """session id -> agent key for the agent records of this board (every job) whose agent IS its own session
-    (agent_key == session_id: a seat or other agent running as its own host session). An in-process subagent
+    (agent_key == session_id: a launch or other agent running as its own host session). An in-process subagent
     has its own agent id but carries its PARENT's session id: its record says nothing about the parent session,
     which may be a requester's main session, so it is left out (the hook still never grants a subagent: its
     payload has an agent_id). Read only: a missing directory is an empty map; an unsafe or unreadable entry

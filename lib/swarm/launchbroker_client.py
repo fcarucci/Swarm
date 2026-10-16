@@ -1,15 +1,15 @@
-"""The swarm command and hooks of a jailed drive seat (Task 20). The seat has no board password and no
-host-private file, so it hands each call to its runner's broker (swarm.supervisor.seatbroker) through its broker
-directory ($SWARM_SEAT_BROKER, bound into this seat's jail only), as a TYPED request (swarm.seatproto):
+"""The swarm command and hooks of a jailed drive launch (Task 20). The launch has no board password and no
+host-private file, so it hands each call to its runner's broker (swarm.supervisor.launchbroker) through its broker
+directory ($SWARM_LAUNCH_BROKER, bound into this launch jail only), as a TYPED request (swarm.launchproto):
 
-- `swarm ...`: parsed here against seatproto.SCHEMA (only seat commands and their fields; --as/--key are dropped,
-  the broker injects who the seat is); a file named on the command line is read here, in the jail, and sent as
+- `swarm ...`: parsed here against launchproto.SCHEMA (only launch commands and their fields; --as/--key are dropped,
+  the broker injects who the launch is); a file named on the command line is read here, in the jail, and sent as
   its content;
 - a hook: its event name and payload; the broker keeps only the payload fields it knows.
 
 A guard hook (PreToolUse) that gets no answer fails CLOSED: the tool call is denied.
 
-Standard library only: run as `python3 -I seatbroker_client.py cli|hook ARG...`; seatproto is loaded from this
+Standard library only: run as `python3 -I launchbroker_client.py cli|hook ARG...`; launchproto is loaded from this
 file's own directory by path."""
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ _BINARY = getattr(os, "O_BINARY", 0)
 
 def _proto():
     here = os.path.dirname(os.path.abspath(__file__))
-    spec = importlib.util.spec_from_file_location("_swarm_seatproto", os.path.join(here, "seatproto.py"))
+    spec = importlib.util.spec_from_file_location("_swarm_launchproto", os.path.join(here, "launchproto.py"))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -91,15 +91,15 @@ def run_hook(argv: list[str], directory: str, stdin_bytes: bytes, **kw) -> tuple
         payload = {}
     body = {"v": 2, "kind": "hook", "event": event, "payload": payload if isinstance(payload, dict) else {}}
     if not os.path.isdir(directory):
-        return 0, deny_output(event, "the seat broker is missing"), b""
+        return 0, deny_output(event, "the launch broker is missing"), b""
     try:
         r = request(body, directory, kw.pop("timeout", TIMEOUT["hook"]), **kw)
     except OSError:
         r = None
     if r is None:
-        return 0, deny_output(event, "the seat broker did not answer"), b""
+        return 0, deny_output(event, "the launch broker did not answer"), b""
     if r[0] != 0 and event == "turn" and not r[1].strip():
-        return 0, deny_output(event, "the seat's guard hook failed"), r[2]
+        return 0, deny_output(event, "the launch's guard hook failed"), r[2]
     return r
 
 
@@ -108,21 +108,21 @@ def run_cli(argv: list[str], directory: str, **kw) -> tuple[int, bytes, bytes]:
     try:
         body = proto.parse_cli(argv, os.getcwd(), sys.stdin if "-" in argv else None)
     except proto.ProtocolError as exc:
-        return 2, b"", f"swarm: refused in a drive seat: {exc}\n".encode()
+        return 2, b"", f"swarm: refused in a drive launch: {exc}\n".encode()
     if not os.path.isdir(directory):
-        return 1, b"", b"swarm: no seat broker here ($SWARM_SEAT_BROKER)\n"
+        return 1, b"", b"swarm: no launch broker here ($SWARM_LAUNCH_BROKER)\n"
     r = request(body, directory, kw.pop("timeout", TIMEOUT["cli"]), **kw)
     if r is None:
-        return 124, b"", b"swarm: the seat broker did not answer in time (is the seat's runner alive?)\n"
+        return 124, b"", b"swarm: the launch broker did not answer in time (is the launch's runner alive?)\n"
     return r
 
 
 def main(args: list[str]) -> int:
     if not args or args[0] not in TIMEOUT:
-        print("usage: seatbroker_client.py cli|hook ARG...", file=sys.stderr)
+        print("usage: launchbroker_client.py cli|hook ARG...", file=sys.stderr)
         return 2
     kind, argv = args[0], args[1:]
-    directory = os.environ.get("SWARM_SEAT_BROKER", "")
+    directory = os.environ.get("SWARM_LAUNCH_BROKER", "")
     if kind == "hook":
         data = sys.stdin.buffer.read(STDIN_MAX)
         rc, out, err = run_hook(argv, directory, data)

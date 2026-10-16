@@ -99,4 +99,4 @@ class VerifierWithGoalTests(VerifierEnv):
         self.assertIn("a VERIFIER on job", ctx)
         self.assertIn(f"{judge} is the one who rules on it", ctx)
         self.assertNotIn("replaces the worker instructions", ctx)
-        self.assertEqual(self.job().judge, judge)   # the verifier took no judge seat
+        self.assertEqual(self.job().judge, judge)   # the verifier took no judge launch

@@ -26,7 +26,7 @@ def minutes(n: float) -> dt.timedelta:
     return dt.timedelta(minutes=n)
 
 
-def seat(name: str = "a", state: str = "done", role: str = "engineer", **kw: Any) -> dm.LaunchView:
+def launch(name: str = "a", state: str = "done", role: str = "engineer", **kw: Any) -> dm.LaunchView:
     base = dict(
         id=1, job="J", name=name, role=role, harness="claude", model="haiku",
         workdir="/home/claude/src/wt-" + name, brief="/home/claude/src/briefs/" + name + ".md",
@@ -37,9 +37,9 @@ def seat(name: str = "a", state: str = "done", role: str = "engineer", **kw: Any
     return dm.LaunchView(**{**base, **kw})
 
 
-def q(id: int = 1, seat: str = "a", **kw: Any) -> dm.Question:
+def q(id: int = 1, launch: str = "a", **kw: Any) -> dm.Question:
     base = dict(
-        id=id, job="J", seat=seat, generation=1, text="which way?", default="left",
+        id=id, job="J", launch=launch, generation=1, text="which way?", default="left",
         until=T0 + minutes(240), receipt_id=1,
     )
     return dm.Question(**{**base, **kw})
@@ -65,7 +65,7 @@ class Intent:
     launch_id: str
     action_id: str
     attempt: int
-    seat: str | None
+    launch: str | None
     reserved_usd: float
     reserved_minutes: float
     locks: list
@@ -84,7 +84,7 @@ class Receipt:
     incarnation: str
     action_id: str
     attempt: int
-    seat: str | None
+    launch: str | None
     kind: str
     record_id: str
     rev: int
@@ -97,7 +97,7 @@ class Receipt:
 def receipt(**kw: Any) -> Receipt:
     base = dict(
         board_key="board-key", job="J", generation=1, incarnation="0" * 32,
-        action_id="gen1|launch|a|-|1|-", attempt=1, seat="a", kind="done", record_id="1", rev=1,
+        action_id="gen1|launch|a|-|1|-", attempt=1, launch="a", kind="done", record_id="1", rev=1,
         content_sha="c" * 64, args_sha="a" * 64, expires_at=T0.timestamp() + 3600, destinations=None,
     )
     return Receipt(**{**base, **kw})
@@ -140,7 +140,7 @@ class L:
     def __post_init__(self, spent_usd: float | None) -> None:
         if spent_usd is not None:
             self.intents.append(Intent(
-                launch_id="L0", action_id="gen1|launch|a|-|1|-", attempt=1, seat="a",
+                launch_id="L0", action_id="gen1|launch|a|-|1|-", attempt=1, launch="a",
                 reserved_usd=spent_usd, reserved_minutes=0.0, locks=[], state="concluded",
                 outcome="completed", success=True, charged_usd=spent_usd,
             ))
@@ -156,8 +156,8 @@ class L:
 
 
 def intent(state: str = "concluded", reserved: float = 0.0, charged: float | None = None,
-           seat: str | None = "a", **kw: Any) -> Intent:
-    base = dict(launch_id="L0", action_id="gen1|launch|" + str(seat) + "|-|1|-", attempt=1, seat=seat,
+           launch: str | None = "a", **kw: Any) -> Intent:
+    base = dict(launch_id="L0", action_id="gen1|launch|" + str(launch) + "|-|1|-", attempt=1, launch=launch,
                 reserved_usd=reserved, reserved_minutes=0.0, locks=[], state=state, outcome=None,
                 success=None, charged_usd=charged)
     return Intent(**{**base, **kw})

@@ -659,19 +659,19 @@ EVENT_LINE_MAX = 160     # characters of one event line
 
 def _event_targets_of(name: str, role: str | None) -> tuple[str, ...]:
     """What an agent's events are addressed to: its name, its role ("@engineering_lead") and the
-    short aliases of that seat ("@el"; addressing.ALIASES)."""
+    short aliases of that launch ("@el"; addressing.ALIASES)."""
     from swarm.addressing import ALIASES
     from swarm.roles import valid_name
     # a role that is no @role token ("general-purpose", a Claude agent type) is addressed by name only
     tokens = {role} if valid_name(role) else set()
-    tokens |= {alias for alias, seats in ALIASES.items() if role in seats}
+    tokens |= {alias for alias, launches in ALIASES.items() if role in launches}
     return (name, *sorted("@" + t for t in tokens))
 
 
 def _event_text(board, job: str, targets, ack_cmd: str, keep=None) -> str | None:
     """The pending events for `targets` as compact lines (one per event, EVENT_SHOWN_MAX at most,
     the rest counted), shown on every call until they are acked. None when nothing is pending.
-    `keep(event)` drops events another seat takes (see _orchestrator_event_lines)."""
+    `keep(event)` drops events another launch takes (see _orchestrator_event_lines)."""
     events = board.pending_events(job, to=targets)
     if keep is not None:
         events = [e for e in events if keep(e)]
@@ -798,7 +798,7 @@ def _memory_stop(board, cfg: dict, agent_id: str) -> bool:
     during its run (`swarm remember`), or declared it has none (`swarm remember --none "<reason>"`), both
     read from its agent row (remembered_at). If neither, the stop is blocked ONCE (nudged_at records it)
     with the instruction. The next stop goes through, and the agent is marked unharvested (memory.u.*,
-    learnings.mark_unharvested) so the job's learnings step can harvest its transcript. Learner seats and
+    learnings.mark_unharvested) so the job's learnings step can harvest its transcript. Learner launches and
     the orchestrator are exempt. An error here never blocks the stop. Returns False when it blocked."""
     if not _memory_on(cfg):
         return True
@@ -1046,7 +1046,7 @@ def own_name_verdict_command(command: str, name: str, job: str | None = None) ->
     inserts, edits = [], []
     calls = [a for sub in ("verdict", "done", "land") for a in _swarm_calls(mask_heredocs(command), sub)
              if not (sub == "land" and a and a[0][2] == "hosts")]   # `land hosts add` is a person's
-    for args in calls:   # a heredoc report is not shell; `done` and `land` too: a seat never needs --as (QA bugs 4, 5)
+    for args in calls:   # a heredoc report is not shell; `done` and `land` too: a launch never needs --as (QA bugs 4, 5)
         has_as, other_job, bad = False, False, None
         for m, (_, _, text, _) in enumerate(args):
             value, tok = _flag_value(args, m, "--job")
@@ -1078,7 +1078,7 @@ _OWN_JOB_SUBS = ("done", "review", "verdict", "post", "ask", "goal-ready", "land
 
 def own_job_command(command: str, job: str | None) -> str | None:
     """`command` with `--job JOB` (the caller's own job) added to every real `swarm` call that needs one and has
-    none (done, review, verdict, post, ask, goal-ready, land, run): a drive seat's first `swarm done` just
+    none (done, review, verdict, post, ask, goal-ready, land, run): a drive launch's first `swarm done` just
     works, and its receipt is read from a command that names the job. A call that names a --job is left as it is
     (another job stays refused where it is refused). None when there is nothing to add."""
     if not job:
@@ -1104,7 +1104,7 @@ def own_job_command(command: str, job: str | None) -> str | None:
 def own_key_question_command(command: str, agent_id: str, job: str | None = None) -> str | None:
     """`command` with every real `swarm ask` and `swarm answer` invocation made to run as the caller's
     own agent: a call with no --key gets `--key AGENT_ID` (the hook knows who is calling, as for
-    `swarm verdict`; a drive seat's session alone does not name it), and a plain --key naming another
+    `swarm verdict`; a drive launch's session alone does not name it), and a plain --key naming another
     agent is replaced: a question is only ever asked or answered as the caller itself. None when there
     is nothing to change. An ask for another --job than `job` is left alone."""
     from swarm.shellguard import mask_heredocs
@@ -1289,7 +1289,7 @@ def _own_job(agent_id: str, bound: dict, payload: dict) -> str | None:
 
 def _orchestrator_join(command: str) -> bool:
     """True when `command` runs a `swarm join` whose --key starts with "orchestrator" (orchestrator,
-    orchestrator-2, orchestrator_x): the key that seats the orchestrator role, whatever follows
+    orchestrator-2, orchestrator_x): the key that launches the orchestrator role, whatever follows
     it (agentview.ORCHESTRATOR_KEY reads these keys case-insensitively, so this does too)."""
     for args in _swarm_calls(command, "join"):
         for m in range(len(args)):
@@ -1404,8 +1404,8 @@ def _goal_roles(board, agent_id: str, job: str, payload: dict, marker: dict | No
         prompt = _spawn_prompt(payload, agent_id)
     wants = _role(payload, agent_id, prompt) == "judge"
     if wants and cfg is not None and _drive_job(cfg, job):
-        wants = False   # in a drive job the judge is the driver's seat (ledger), never a prompt tag
-    is_judge = wants and board.take_judge_seat(agent_id, job)
+        wants = False   # in a drive job the judge is the driver's launch (ledger), never a prompt tag
+    is_judge = wants and board.take_judge_launch(agent_id, job)
     js = board.job_status(job)
     goal, judge = (js.goal, js.judge) if js else (None, None)
     note = None
@@ -1624,9 +1624,9 @@ def _enrol_resumed(board, agent_id: str, resume: dict, payload: dict, cfg: dict)
 
 
 def _reuse_identity_resumed(board, agent_id: str, resume: dict, payload: dict, cfg: dict) -> None:
-    """The enrolling tool call of a resumed or driver-launched seat runs with the seat's own identity
+    """The enrolling tool call of a resumed or driver-launched launch runs with the launch's own identity
     too: its very first `swarm verdict`, `done` or `review` is rewritten like every later one (QA: a
-    headless seat's first call is often that command). Nothing when the enrolment refused the seat
+    headless launch's first call is often that command). Nothing when the enrolment refused the launch
     (a deny is never combined with a rewrite) or it did not become active."""
     try:
         name = board.active_agent_name(agent_id)
@@ -1637,13 +1637,13 @@ def _reuse_identity_resumed(board, agent_id: str, resume: dict, payload: dict, c
 
 
 def _drive_judge_flag(board, cfg: dict, agent_id: str, job: str, payload: dict, resume: dict) -> None:
-    """A driver-launched seat whose ledger-authorized role is judge takes the job's judge seat (QA bug 4): the
-    flag comes from the host-private launch and the seat's receipted role (drivegate.is_drive_judge), never
-    from a tag in the prompt. Never raises: a seat that is not a judge stays a worker."""
+    """A driver-launched launch whose ledger-authorized role is judge takes the job's judge launch (QA bug 4): the
+    flag comes from the host-private launch and the launch's receipted role (drivegate.is_drive_judge), never
+    from a tag in the prompt. Never raises: a launch that is not a judge stays a worker."""
     try:
         from swarm import drivegate
         if drivegate.is_drive_judge(cfg, board, job, payload, resume=resume):
-            board.take_judge_seat(agent_id, job)
+            board.take_judge_launch(agent_id, job)
     except Exception as exc:
         _log_error("drive judge", agent_id, exc)
 
@@ -1655,7 +1655,7 @@ def _drive_job(cfg: dict, job: str) -> bool:
 
 
 def _first_call_of_resumed(board, agent_id: str, job: str) -> bool:
-    """Whether this tool call is the first of a session `swarm resume` started: its seat (a row with
+    """Whether this tool call is the first of a session `swarm resume` started: its launch (a row with
     resume_of) was claimed up front, so it is a member already, but it has not been welcomed yet."""
     me = next((a for a in board.agents(job, include_departed=False) if a.agent_key == agent_id), None)
     return me is not None and me.resume_of is not None and me.tool_calls <= 1
@@ -1665,7 +1665,7 @@ def _supervise_off(board, cfg: dict, job: str) -> str | None:
     """Why no replacement may join now (a kill switch: [supervise] enabled, supervise.off, the
     job's --no-supervise), or None."""
     from swarm.supervisor.settings import off_reason
-    why = off_reason(cfg, drive=_drive_job(cfg, job))   # a drive seat ignores [supervise] enabled
+    why = off_reason(cfg, drive=_drive_job(cfg, job))   # a drive launch ignores [supervise] enabled
     if why:
         return why
     js = board.job_status(job)
@@ -1891,7 +1891,7 @@ def _on_event(board, event: str, agent_id: str, sid: str | None, bound: dict, un
     if event == "stop":
         if resume is not None and board.active_agent_name(agent_id) is None:
             # A headless agent may finish before its first tool call. Its authenticated
-            # restart marker must take the seat before the mandatory judge conclusion gate.
+            # restart marker must take the launch before the mandatory judge conclusion gate.
             _enrol_resumed(board, agent_id, resume, payload, cfg)
         if not _judge_stop(board, agent_id, cfg, payload):
             return
@@ -1971,7 +1971,7 @@ def _on_event(board, event: str, agent_id: str, sid: str | None, bound: dict, un
             _own_key_join(agent_id, bound, payload)
         return
     if resume is not None and _first_call_of_resumed(board, agent_id, member.job):
-        _enrol_resumed(board, agent_id, resume, payload, cfg)   # its seat was claimed by `swarm resume`
+        _enrol_resumed(board, agent_id, resume, payload, cfg)   # its launch was claimed by `swarm resume`
         _reuse_identity_resumed(board, agent_id, resume, payload, cfg)
         return
     if resume is not None and current_host().is_spawn(payload):
@@ -2170,15 +2170,15 @@ def _orchestrator_events_text(cfg: dict, markers: list[dict]) -> str | None:
         with open_board(cfg, init_timeout=HOOK_INIT_TIMEOUT) as board:
             for m in markers:
                 job = m['job']
-                pm_seated = None
+                pm_launched = None
 
                 def keep(e, job=job):
-                    nonlocal pm_seated
+                    nonlocal pm_launched
                     if e.to != '@pm':
                         return True
-                    if pm_seated is None:
-                        pm_seated = any(r.active and r.role == 'project_manager' for r in board.roster(job))
-                    return not pm_seated
+                    if pm_launched is None:
+                        pm_launched = any(r.active and r.role == 'project_manager' for r in board.roster(job))
+                    return not pm_launched
                 text = _event_text(board, job, (None, '@orchestrator', '@pm'),
                                    f"{_bin()} event ack --job {_q(job)}", keep)
                 if text:
@@ -2190,7 +2190,7 @@ def _orchestrator_events_text(cfg: dict, markers: list[dict]) -> str | None:
 
 def _orchestrator_event_lines(event, cfg, sid):
     """Pending events for the orchestrating session: those addressed to nobody in particular, to
-    "@orchestrator", or to "@pm" while no agent holds the project_manager seat. Listed on every
+    "@orchestrator", or to "@pm" while no agent holds the project_manager launch. Listed on every
     tool call of the session until acked. The board is read at most every EVENT_CHECK_SECONDS
     (sooner when this host's board generation changed: a local post or ack); in between, the last
     result is shown again. Never raises."""
@@ -2326,7 +2326,7 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
     if resume is not None:   # a supervisor replacement's root session: it is the member
         agent_id = resume["resume"].get("agent_key") or sid
     elif not agent_id and _replacement_token():
-        if event in ("turn", "done"):   # a drive seat whose marker is gone is still gated, and its receipts written
+        if event in ("turn", "done"):   # a drive launch whose marker is gone is still gated, and its receipts written
             _drive_event(event, cfg, payload, None)
         return 0   # a session started by (or inside) a replacement that isn't it: never an orchestrator
     if event == "session-end" and current_host().completes_on(event):
@@ -2468,9 +2468,9 @@ def _ensure_driver(cfg: dict, payload: dict) -> None:
 
 def _drive_event(event: str, cfg: dict, payload: dict, resume: dict | None) -> bool:
     """The drive gate of PreToolUse (every call of every session, before anything else a hook does: a join, a
-    first call and a seat of an unbound job included) and the receipts of PostToolUse. True when the call was
+    first call and a launch of an unbound job included) and the receipts of PostToolUse. True when the call was
     refused (the denial is written). The payload's own agent_id is what tells a main session from a subagent.
-    A session of a drive job (a seat, its subagents, the requester) never holds a fast-path lease: the shell
+    A session of a drive job (a launch, its subagents, the requester) never holds a fast-path lease: the shell
     entry would serve its next calls without Python, and with them the gate and the receipts."""
     from swarm import paths
     if not (paths.share_dir() / "supervisor" / "drive").is_dir():
@@ -2501,7 +2501,7 @@ def _drive_event(event: str, cfg: dict, payload: dict, resume: dict | None) -> b
                 drivegate.write_grants(cfg, payload, host, ctx)
             except Exception as exc:
                 _log_error("drive grant", str(payload.get("agent_id") or payload.get("session_id")), exc)
-    except Exception as exc:   # never break the agent (a known drive seat's errors are refused inside pre_tool)
+    except Exception as exc:   # never break the agent (a known drive launch's errors are refused inside pre_tool)
         _log_error("drive", str(payload.get("agent_id") or payload.get("session_id")), exc)
         return False
     if why is None:

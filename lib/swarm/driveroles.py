@@ -10,11 +10,11 @@ LEAD_ROLE = "engineering_lead"
 JUDGE_ROLES = ("judge", "goal_judge", "ruling_judge")
 REVIEW_ROLES = ("reviewer", "security", "security_reviewer")
 READ_ONLY_ROLES = JUDGE_ROLES + REVIEW_ROLES
-# Seats the driver names itself (driver_exec.seat_name): the name alone says what they are.
-_JUDGE_SEAT = re.compile(r"(?:judge|goal-judge|ruling-judge)")
-_REVIEW_SEAT = re.compile(r"reviewer-[a-z0-9_~-]*")
-_LEAD_SEAT = re.compile(r"lead(?:~[0-9]+)?")
-# The prompt kinds of an action id (`gen<N>|<kind>|<seat or ->|<group or ->|<round>|<trigger>`) that run a
+# Launches the driver names itself (driver_exec.launch_name): the name alone says what they are.
+_JUDGE_LAUNCH = re.compile(r"(?:judge|goal-judge|ruling-judge)")
+_REVIEW_LAUNCH = re.compile(r"reviewer-[a-z0-9_~-]*")
+_LEAD_LAUNCH = re.compile(r"lead(?:~[0-9]+)?")
+# The prompt kinds of an action id (`gen<N>|<kind>|<launch or ->|<group or ->|<round>|<trigger>`) that run a
 # judge or a reviewer session.
 JUDGE_KINDS = ("judge", "goal", "ruling")
 REVIEW_KINDS = ("review",)
@@ -22,7 +22,7 @@ REVIEW_KINDS = ("review",)
 
 
 def is_read_only_role(role) -> bool:
-    """Whether a seat role may only read: judges and reviewers (by exact role, or a `...judge` /
+    """Whether a launch role may only read: judges and reviewers (by exact role, or a `...judge` /
     `...reviewer` suffix such as `ruling_reviewer`)."""
     if not isinstance(role, str):
         return False
@@ -38,22 +38,22 @@ def is_judge_role(role) -> bool:
     return r in JUDGE_ROLES or r.endswith("judge")
 
 
-def seat_name_is_read_only(seat) -> bool:
-    """A driver-named judge or reviewer seat (the names a seat request cannot make: the driver creates them)."""
-    return isinstance(seat, str) and bool(_JUDGE_SEAT.fullmatch(seat) or _REVIEW_SEAT.fullmatch(seat))
+def launch_name_is_read_only(launch) -> bool:
+    """A driver-named judge or reviewer launch (the names a launch cannot make: the driver creates them)."""
+    return isinstance(launch, str) and bool(_JUDGE_LAUNCH.fullmatch(launch) or _REVIEW_LAUNCH.fullmatch(launch))
 
 
-def seat_name_is_judge(seat) -> bool:
-    return isinstance(seat, str) and _JUDGE_SEAT.fullmatch(seat) is not None
+def launch_name_is_judge(launch) -> bool:
+    return isinstance(launch, str) and _JUDGE_LAUNCH.fullmatch(launch) is not None
 
 
-def seat_name_is_lead(seat) -> bool:
+def launch_name_is_lead(launch) -> bool:
     """`lead` and its successors `lead~N`."""
-    return isinstance(seat, str) and _LEAD_SEAT.fullmatch(seat) is not None
+    return isinstance(launch, str) and _LEAD_LAUNCH.fullmatch(launch) is not None
 
 
 def action_kind(action_id) -> str | None:
-    """The prompt kind slot of a driver action id (None for anything else, e.g. `requester:seat`)."""
+    """The prompt kind slot of a driver action id (None for anything else, e.g. `requester:launch`)."""
     parts = action_id.split("|") if isinstance(action_id, str) else []
     return parts[1] if len(parts) > 1 and parts[0].startswith("gen") else None
 

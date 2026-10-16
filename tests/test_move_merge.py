@@ -29,7 +29,7 @@ class MoveContract:
         self.b.open_job("a", "job a", None, "s1", "u")
         self.b.open_job("b", "job b", None, "s1", "u")
 
-    def test_move_keeps_name_drops_seats_and_sets_a_catch_up_cursor(self):
+    def test_move_keeps_name_drops_launches_and_sets_a_catch_up_cursor(self):
         name = self.b.allocate_name("k1", "a", "worker")
         for i in range(5):
             self.b.post("b", "Someone", f"old {i}")
@@ -84,7 +84,7 @@ class MoveContract:
         r = self.b.route("k1")
         self.assertEqual((r.state, r.job, r.member_job, r.session_id), ("final", "b", "b", "s1"))
 
-    def test_moving_the_judge_frees_the_seat_for_another(self):
+    def test_moving_the_judge_frees_the_launch_for_another(self):
         self.b.allocate_name("j1", "a"); self.b.allocate_name("j2", "a")
         self.b.claim_judge("j1", "a")
         self.b.move_agent("j1", "b")
@@ -243,7 +243,7 @@ class MergeTests(MoveEnv):
         self.assertEqual(self.member("ja").ended_at, None)
         self.assertIn("goal of A", ctx)   # the goal now covers both
         rc, _, err = self.cli("verdict", "--job", "B", "--as", ja, "met", "x")
-        self.assertEqual(rc, 1); self.assertIn("is not the judge", err)   # the seat did not move
+        self.assertEqual(rc, 1); self.assertIn("is not the judge", err)   # the launch did not move
         self.assertEqual(self.cli("verdict", "--job", "B", "--as", jb, "met", "x")[0], 0)
 
     def test_merge_goal_only_on_the_absorbed_job_needs_a_judge(self):
@@ -276,7 +276,7 @@ class MergeTests(MoveEnv):
 
 
 class GoalTests(MoveEnv):
-    def test_goal_can_be_set_after_activation_and_a_judge_seated(self):
+    def test_goal_can_be_set_after_activation_and_a_judge_launched(self):
         self.activate("A")
         rc, out, err = self.cli("job", "A", "--goal", "later goal")
         self.assertEqual(rc, 0, err)

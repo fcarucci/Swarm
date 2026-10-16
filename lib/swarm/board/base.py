@@ -83,7 +83,7 @@ VERDICT_SCOPES = ("artifact", "goal", "ruling")
 AUTO_CLOSED_BY = "auto"
 AUTO_CLOSE_BLOCKING = ("started", "running", "idle")
 AUTO_CLOSE_OUTCOME_MAX = 200
-JUDGE_HANDOVER = "judge seat handed to a new judge"   # left_reason of a finished judge replaced by a new one
+JUDGE_HANDOVER = "judge launch handed to a new judge"   # left_reason of a finished judge replaced by a new one
 # The supervisor (swarm.supervisor): an agent it closed has left_reason STUCK_PREFIX + one of
 # STUCK_REASONS; only those are restarted. A replacement's row has resume_of = the
 # agent_key it replaced.
@@ -272,15 +272,15 @@ def check_name(name, what: str = "name") -> str:
     return name
 
 
-# Pool names an agent is never given: a name that reads like a seat ("Judge Constance Harm") makes
+# Pool names an agent is never given: a name that reads like a launch ("Judge Constance Harm") makes
 # a worker look like the job's judge to itself and to everyone else. Kept in the shipped list (a
 # board's name_pool table may hold them already); every backend skips them when it allocates.
-SEAT_NAME_PREFIXES = ("judge ", "verifier ")
+LAUNCH_NAME_PREFIXES = ("judge ", "verifier ")
 
 
 def assignable_name(name: str) -> bool:
-    """Whether a pool name may be given to an agent (it does not read like a seat)."""
-    return not name.lower().startswith(SEAT_NAME_PREFIXES)
+    """Whether a pool name may be given to an agent (it does not read like a launch)."""
+    return not name.lower().startswith(LAUNCH_NAME_PREFIXES)
 
 
 def valid_pool(names: Mapping[str, Sequence[str]]) -> dict[str, list[str]]:
@@ -519,7 +519,7 @@ class SetupResult:
 # left_reason of rows that were never an agent's own run: a placeholder a launch closes before its session
 # takes the row over (claim_resume), or the driver's one-write judge. Status, watch and the learnings
 # gate leave them out.
-PLACEHOLDER_REASONS = ("drive predecessor", "pipeline predecessor", "pipeline judge seat busy",
+PLACEHOLDER_REASONS = ("drive predecessor", "pipeline predecessor", "pipeline judge launch busy",
                        "driver: verdict recorded")
 
 
@@ -574,7 +574,7 @@ class Blocker:
     resolved_how: str | None = None
     resolved_at: _dt.datetime | None = None
     protection_rule: str = "addressed"
-    seat: str | None = None          # schema 25: the drive seat it concerns (None: the job)
+    launch: str | None = None          # schema 25: the drive launch it concerns (None: the job)
     generation: int | None = None    # schema 25: the drive generation it was opened in
 
 
@@ -1348,7 +1348,7 @@ def event_target(to) -> str | None:
 def event_targets(to) -> frozenset | None:
     """The stored `to` values a filter matches; None: no filter (every event). A string is one
     target; a tuple/list/set holds several, None among them meaning "addressed to nobody in
-    particular" (the orchestrator's). The PM seat and the orchestrator hear each other's events:
+    particular" (the orchestrator's). The PM launch and the orchestrator hear each other's events:
     "@pm" and "@orchestrator" also match the unaddressed ones."""
     if to is None:
         return None
@@ -1434,7 +1434,7 @@ def load_name_pool(data_dir: Path = DATA_DIR) -> dict[str, list[str]]:
 # are writes only when they advance the cursor.
 WRITE_METHODS = (
     "purge", "ensure_job", "open_job", "close_job", "auto_close_job", "undo_auto_close",
-    "sweep_auto_close", "bind_job_session", "allocate_name", "claim_judge", "take_judge_seat", "claim_verifier",
+    "sweep_auto_close", "bind_job_session", "allocate_name", "claim_judge", "take_judge_launch", "claim_verifier",
     "set_waiting", "set_job_max_hours", "set_job_goal", "move_agent", "sweep_expiry", "reserve_spawn", "record_verdict", "tool_started", "record_route",
     "claim_route", "tool_finished", "agent_stopped", "set_agent_role", "set_agent_title", "set_agent_runtime",
     "agent_turn_ended",
@@ -1920,7 +1920,7 @@ class Board(abc.ABC):
 
         Runs purge() first, then ensure_job(job). Then:
           * key is active: last_seen = now, job = `job` (moves it; a move to another job
-            drops its judge seat), return its current name (role and everything else unchanged);
+            drops its judge launch), return its current name (role and everything else unchanged);
           * key departed with left_reason STUCK_PREFIX..., or named by a restart row
             (was_replaced): the supervisor closed it, so it stays departed (never revived,
             never reset): return its name, change nothing;
@@ -1949,12 +1949,12 @@ class Board(abc.ABC):
         """Make the ACTIVE agent with this key, on `job`, the job's judge, unless another active
         agent of the job is. Returns whether it is the judge now (True again for the judge
         itself). At most one active judge per job, even under concurrent claims (Postgres:
-        partial unique index). A judge's derived role (roster, agents()) is "judge"; the seat
+        partial unique index). A judge's derived role (roster, agents()) is "judge"; the launch
         frees when it departs."""
 
-    def take_judge_seat(self, agent_key: str, job: str) -> bool:
+    def take_judge_launch(self, agent_key: str, job: str) -> bool:
         """claim_judge, plus the handover: a judge that has completed or died (no longer started,
-        running or idle) gives up the seat to a new one, so a fix round's fresh judge records
+        running or idle) gives up the launch to a new one, so a fix round's fresh judge records
         under its own name and never needs `--as` another agent. The old judge leaves (close_agent,
         reason JUDGE_HANDOVER); a live holder (AUTO_CLOSE_BLOCKING) is never displaced. Returns
         whether `agent_key` is the judge now."""
@@ -1971,8 +1971,8 @@ class Board(abc.ABC):
         """One transaction of move_agent: the ACTIVE agent with this key goes to `job`, which must
         be an open job (status active). Returns the job it was on, or None if nothing was done
         (the key is not active, or `job` is missing or closed). Already on `job`: returns it and
-        changes nothing. Otherwise: job = `job`; the judge and verifier seats are dropped (a
-        seat belongs to one job); last_seen = now; the read cursor is set so exactly the newest
+        changes nothing. Otherwise: job = `job`; the judge and verifier launches are dropped (a
+        launch belongs to one job); last_seen = now; the read cursor is set so exactly the newest
         `keep` messages of `job` are unread (a join's catch-up, delivered once; the old job's
         cursor would hide or flood); reply_reminded_id = the highest message id (owed replies of
         the old job are not nagged about), calls_at_post = tool_calls, silence_nudged_at None;
@@ -1997,7 +1997,7 @@ class Board(abc.ABC):
         """Set or replace the goal of an OPEN job (status active); False if the job is missing or
         closed. A goal different from the current one starts the judging afresh: verdict,
         verdict_reason, verdict_next, verdict_by and verdict_at are cleared (a met verdict
-        covered the old goal). The same goal changes nothing. Judge seats are not touched."""
+        covered the old goal). The same goal changes nothing. Judge launches are not touched."""
 
     @abc.abstractmethod
     def claim_verifier(self, agent_key: str, job: str) -> bool:
@@ -2015,10 +2015,10 @@ class Board(abc.ABC):
     @abc.abstractmethod
     def open_blocker(self, job: str, kind: str, waiting_on: str, reason: str,
                      until: _dt.datetime | None = None, default_value: str | None = None,
-                     created_by: str | None = None, seat: str | None = None,
+                     created_by: str | None = None, launch: str | None = None,
                      generation: int | None = None) -> Blocker:
         """Open a blocker on an active job, append opened, and return its immutable record.
-        seat and generation (schema 25) name the drive seat and generation it concerns."""
+        launch and generation (schema 25) name the drive launch and generation it concerns."""
 
     @abc.abstractmethod
     def blockers(self, job: str | None = None, include_closed: bool = False) -> list[Blocker]:

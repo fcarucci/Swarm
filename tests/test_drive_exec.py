@@ -14,7 +14,7 @@ from unittest import mock
 
 from support import MEMORY_ONLY, SqliteHarness, add_backend_variants, drive_backends
 from test_hooks_cli import Env
-from drive_fixtures import ho, seat as sv, snap, v
+from drive_fixtures import ho, launch as sv, snap, v
 
 from swarm import cli as swarm
 from swarm import enrolment, receipts
@@ -62,8 +62,8 @@ class ExecEnv(Env):
         p.start()
         self.addCleanup(p.stop)
 
-    def tamper_seat(self, name, **cols):
-        """Write columns straight into a seat row, as a database writer would (any backend)."""
+    def tamper_launch(self, name, **cols):
+        """Write columns straight into a launch row, as a database writer would (any backend)."""
         if hasattr(self.b, "_s"):
             with self.b._s().lock:
                 next(r for r in self.b._s().launches if r["name"] == name).update(cols)
@@ -97,11 +97,11 @@ class ExecEnv(Env):
                                   queued_by="lead")
         return row
 
-    def agent_of(self, seat="eng-a"):
-        """Give the seat an agent (as a first session would) and return its name."""
-        key = f"k-{seat}"
+    def agent_of(self, launch="eng-a"):
+        """Give the launch an agent (as a first session would) and return its name."""
+        key = f"k-{launch}"
         name = self.b.allocate_name(key, "J", "engineer")
-        self.tamper_seat(seat, agent_key=key)
+        self.tamper_launch(launch, agent_key=key)
         return name
 
     def wake_msg(self, name, text="hello", receipted=True):
@@ -112,14 +112,14 @@ class ExecEnv(Env):
             row = {"kind": "post", "id": str(res.id), "rev": 1, "to": name, "body": text}
             receipts.write(self.bk, receipts.Receipt(
                 board_key=self.bk, job="J", generation=1, incarnation=self.led.incarnation,
-                action_id="gen1|fix|x|-|1|-", attempt=1, seat="eng-a", kind="post", record_id=str(res.id), rev=1,
+                action_id="gen1|fix|x|-|1|-", attempt=1, launch="eng-a", kind="post", record_id=str(res.id), rev=1,
                 content_sha=receipts.content_sha("post", row), args_sha=receipts.args_sha(["swarm"]),
                 expires_at=self.now().timestamp() + 3600))
         return res.id
 
-    def act(self, seat="eng-a", kind="seat", group=None, trigger="1", **kw):
-        aid = f"gen{self.led.generation}|{kind}|{seat or '-'}|{group or '-'}|0|{trigger}"
-        return dm.Action(kind="launch", action_id=aid, seat=seat, prompt_kind=kind, **kw)
+    def act(self, launch="eng-a", kind="launch", group=None, trigger="1", **kw):
+        aid = f"gen{self.led.generation}|{kind}|{launch or '-'}|{group or '-'}|0|{trigger}"
+        return dm.Action(kind="launch", action_id=aid, launch=launch, prompt_kind=kind, **kw)
 
     def go(self, action, **kw):
         kw.setdefault("prompt", "PROMPT")
@@ -140,22 +140,22 @@ class ExecEnv(Env):
 
     def end(self, run, outcome="failed", idle=True, **fields):
         """The end of a launch as the runner and reconcile leave it: row finished, locks released, the
-        intent concluded, the seat idle (authorization carried)."""
+        intent concluded, the launch idle (authorization carried)."""
         self.b.finish_restart(run["restart_id"], outcome)
         self.b.release_drive_locks(run["launch_id"], job="J", holder=run["action_id"])
         self.reload()
         self.conclude_intent(outcome)
         if idle:
-            driver_exec._idle_seat(self.b, self.led, run["seat"], outcome, self.now(), **fields)
+            driver_exec._idle_launch(self.b, self.led, run["launch"], outcome, self.now(), **fields)
 
-    def conclude_intent(self, outcome="failed", seat="eng-a", usd=0.0):
+    def conclude_intent(self, outcome="failed", launch="eng-a", usd=0.0):
         for i in self.led.intents:
             if i.state != "concluded":
                 i.state, i.outcome, i.success, i.charged_usd = "concluded", outcome, outcome == "completed", usd
         self.led.save()
 
     def spent(self, usd, outcome="completed"):
-        self.led.intents.append(ledger.Intent(f"old{len(self.led.intents)}", f"gen1|seat|x{len(self.led.intents)}|-|0|1", 1, "x",
+        self.led.intents.append(ledger.Intent(f"old{len(self.led.intents)}", f"gen1|launch|x{len(self.led.intents)}|-|0|1", 1, "x",
                                               usd, 1.0, [], "concluded", outcome, True, usd))
         self.led.save()
 
@@ -167,7 +167,7 @@ class ExecuteTests(ExecEnv):
         self.assertIsNotNone(run)
         self.reload()
         (intent,) = self.led.intents
-        self.assertEqual((intent.state, intent.seat, intent.attempt), ("claimed", "eng-a", 1))
+        self.assertEqual((intent.state, intent.launch, intent.attempt), ("claimed", "eng-a", 1))
         self.assertEqual((intent.reserved_usd, intent.reserved_minutes), (5.0, 60.0))   # session cap, session minutes
         self.assertTrue(intent.locks == [])
         row = self.row_of(run)
@@ -189,9 +189,9 @@ class ExecuteTests(ExecEnv):
 
     def test_only_launch_actions_in_this_generation_run(self):
         self.get_launch()
-        self.assertIsNone(self.go(dm.Action(kind="hold", action_id="gen1|hold|-|-|0|-", seat=None, prompt_kind=None)))
-        self.assertIsNone(self.go(self.act().__class__(kind="launch", action_id="gen2|seat|eng-a|-|0|1",
-                                                        seat="eng-a", prompt_kind="seat")))
+        self.assertIsNone(self.go(dm.Action(kind="hold", action_id="gen1|hold|-|-|0|-", launch=None, prompt_kind=None)))
+        self.assertIsNone(self.go(self.act().__class__(kind="launch", action_id="gen2|launch|eng-a|-|0|1",
+                                                        launch="eng-a", prompt_kind="launch")))
         self.assertEqual(self.reload().intents, [])
 
     def test_intent_is_written_before_the_claim(self):
@@ -201,7 +201,7 @@ class ExecuteTests(ExecEnv):
 
         def claim(**kw):
             led = ledger.load(self.bk, "J")
-            seen.append([(i.launch_id, i.state, i.seat) for i in led.intents])
+            seen.append([(i.launch_id, i.state, i.launch) for i in led.intents])
             return real(**kw)
         with mock.patch.object(self.b, "claim_drive_launch", side_effect=claim):
             run = self.go(self.act())
@@ -238,7 +238,7 @@ class ExecuteTests(ExecEnv):
         self.assertIsNone(self.go(self.act()))
         self.assertEqual(len(self.reload().intents), 1)
 
-    def test_an_open_attempt_blocks_even_when_the_seat_is_launchable(self):
+    def test_an_open_attempt_blocks_even_when_the_launch_is_launchable(self):
         self.get_launch()
         self.led.intents.append(ledger.Intent("t1-" + "0" * 32, self.act().action_id, 1, "other", 5.0, 60.0, [],
                                               "claimed"))
@@ -263,13 +263,13 @@ class ExecuteTests(ExecEnv):
         self.get_launch()
         self.spent(36.0)                      # 40 - 5 reserve - 36 < min_session_usd
         self.assertIsNone(self.go(self.act()))
-        run = self.go(self.act(seat=None, kind="ruling", group="ruling", ruling=True))
+        run = self.go(self.act(launch=None, kind="ruling", group="ruling", ruling=True))
         self.assertIsNotNone(run)
         self.assertEqual(self.reload().intents[-1].reserved_usd, 4.0)   # what is left of the cap
 
     def test_reservation_is_capped_by_the_session_cap_and_by_what_is_left(self):
         self.get_launch()
-        self.spent(31.0)                      # 40 - 5 - 31 = 4 left for a seat
+        self.spent(31.0)                      # 40 - 5 - 31 = 4 left for a launch
         run = self.go(self.act())
         self.assertEqual(self.reload().intents[-1].reserved_usd, 4.0)
         self.assertEqual(run["argv"][run["argv"].index("--max-budget-usd") + 1], "4")
@@ -287,11 +287,11 @@ class ExecuteTests(ExecEnv):
         self.spent(0.1)
         self.get_launch()
         self.assertIsNone(self.go(self.act()))
-        self.assertIsNone(self.go(self.act(seat=None, kind="ruling", group="ruling", ruling=True)))
+        self.assertIsNone(self.go(self.act(launch=None, kind="ruling", group="ruling", ruling=True)))
 
     def test_lost_intents_do_not_count_as_sessions(self):
         self.led.budgets = {"max_sessions": 1}
-        self.led.intents.append(ledger.Intent("L0", "gen1|seat|z|-|0|1", 1, "z", 1.0, 1.0, [], "concluded", "lost",
+        self.led.intents.append(ledger.Intent("L0", "gen1|launch|z|-|0|1", 1, "z", 1.0, 1.0, [], "concluded", "lost",
                                               False, 0.0))
         self.led.save()
         self.get_launch()
@@ -364,7 +364,7 @@ class ExecuteTests(ExecEnv):
             self.go(self.act("lead", kind="fallback", reason="stall"))
         self.assertEqual(self.reload().rounds_without_progress, 0)
 
-    def test_a_seat_that_ran_before_resumes_its_session_and_a_new_one_does_not(self):
+    def test_a_launch_that_ran_before_resumes_its_session_and_a_new_one_does_not(self):
         self.get_launch()
         self.assertNotIn("--resume", self.go(self.act())["argv"])
         self.end(self.launched[-1], "completed", agent_key=SESS9, session_id=SESS9)
@@ -391,46 +391,46 @@ class ExecuteTests(ExecEnv):
         self.assertEqual((wm[f"launch-msg:{run['launch_id']}"], wm[f"launch-ev:{run['launch_id']}:{eid}"]), (mid, eid))
 
 
-class DriverSeatTests(ExecEnv):
+class DriverLaunchTests(ExecEnv):
     def test_judge_launch_uses_judge_model_without_read_only_restrictions(self):
-        run = self.go(self.act(seat=None, kind="judge", group="feat/a"))
+        run = self.go(self.act(launch=None, kind="judge", group="feat/a"))
         self.assertIsNotNone(run)
-        seat = self.b.get_launch("J", 1, "judge")
-        self.assertEqual((seat.role, seat.harness, seat.model, seat.queued_by, seat.state),
+        launch = self.b.get_launch("J", 1, "judge")
+        self.assertEqual((launch.role, launch.harness, launch.model, launch.queued_by, launch.state),
                          ("judge", "claude", "opus", "requester", "running"))
-        self.assertEqual(seat.workdir, str(self.work))
+        self.assertEqual(launch.workdir, str(self.work))
         self.assertNotIn("--disallowedTools", run["argv"])
         self.assertEqual(run["argv"][run["argv"].index("--model") + 1], "opus")
         self.assertEqual(self.b.drive_locks(), [])
 
     def test_reviewer_and_integrator_names_are_valid_deterministic_and_per_group(self):
-        a = driver_exec.seat_name("reviewer", "feat/Auth Login")
+        a = driver_exec.launch_name("reviewer", "feat/Auth Login")
         self.assertRegex(a, r"^reviewer-feat-auth-login-[0-9a-f]{8}$")
-        self.assertEqual(a, driver_exec.seat_name("reviewer", "feat/Auth Login"))
-        self.assertNotEqual(a, driver_exec.seat_name("reviewer", "feat/auth-login"))   # same slug, another group
-        self.assertNotEqual(driver_exec.seat_name("reviewer", "g"), driver_exec.seat_name("integrator", "g"))
-        self.assertEqual(driver_exec.seat_name("goal-judge"), "goal-judge")
-        run = self.go(self.act(seat=None, kind="review", group="feat/a"))
+        self.assertEqual(a, driver_exec.launch_name("reviewer", "feat/Auth Login"))
+        self.assertNotEqual(a, driver_exec.launch_name("reviewer", "feat/auth-login"))   # same slug, another group
+        self.assertNotEqual(driver_exec.launch_name("reviewer", "g"), driver_exec.launch_name("integrator", "g"))
+        self.assertEqual(driver_exec.launch_name("goal-judge"), "goal-judge")
+        run = self.go(self.act(launch=None, kind="review", group="feat/a"))
         self.assertIsNotNone(run)
-        seat = self.b.get_launch("J", 1, driver_exec.seat_name("reviewer", "feat/a"))
-        self.assertEqual((seat.role, seat.model), ("reviewer", "sonnet"))
+        launch = self.b.get_launch("J", 1, driver_exec.launch_name("reviewer", "feat/a"))
+        self.assertEqual((launch.role, launch.model), ("reviewer", "sonnet"))
 
     def test_integrator_is_a_writer_on_the_haiku_model(self):
-        run = self.go(self.act(seat=None, kind="integrate", group="feat/a"))
-        seat = self.b.get_launch("J", 1, driver_exec.seat_name("integrator", "feat/a"))
-        self.assertEqual((seat.role, seat.model), ("integrator", "haiku"))
+        run = self.go(self.act(launch=None, kind="integrate", group="feat/a"))
+        launch = self.b.get_launch("J", 1, driver_exec.launch_name("integrator", "feat/a"))
+        self.assertEqual((launch.role, launch.model), ("integrator", "haiku"))
         self.assertTrue(self.reload().intents[0].locks == [])
         self.assertNotIn("--disallowedTools", run["argv"])
 
-    def test_goal_and_ruling_judges_have_their_own_seats(self):
-        self.assertIsNotNone(self.go(self.act(seat=None, kind="goal", group="goal")))
-        self.assertIsNotNone(self.go(self.act(seat=None, kind="ruling", group="ruling", ruling=True)))
+    def test_goal_and_ruling_judges_have_their_own_launches(self):
+        self.assertIsNotNone(self.go(self.act(launch=None, kind="goal", group="goal")))
+        self.assertIsNotNone(self.go(self.act(launch=None, kind="ruling", group="ruling", ruling=True)))
         self.assertEqual({s.name for s in self.b.launches("J")}, {"goal-judge", "ruling-judge"})
 
-    def test_driver_seats_never_resume_an_old_session(self):
-        run = self.go(self.act(seat=None, kind="judge", group="a"))
+    def test_driver_launches_never_resume_an_old_session(self):
+        run = self.go(self.act(launch=None, kind="judge", group="a"))
         self.end(run, "completed", agent_key=SESS9, session_id=SESS9)
-        again = self.go(self.act(seat=None, kind="judge", group="b"))
+        again = self.go(self.act(launch=None, kind="judge", group="b"))
         self.assertNotIn("--resume", again["argv"])
 
     def test_the_jobs_model_table_wins_over_the_drive_config_and_the_defaults(self):
@@ -443,16 +443,16 @@ class DriverSeatTests(ExecEnv):
 
     def test_the_drive_config_overrides_the_default_model(self):
         self.cfg["drive"] = {"models": {"reviewer": "haiku"}}
-        self.go(self.act(seat=None, kind="review", group="feat/a"))
-        self.assertEqual(self.b.get_launch("J", 1, driver_exec.seat_name("reviewer", "feat/a")).model, "haiku")
+        self.go(self.act(launch=None, kind="review", group="feat/a"))
+        self.assertEqual(self.b.get_launch("J", 1, driver_exec.launch_name("reviewer", "feat/a")).model, "haiku")
 
-    def test_no_owner_record_means_no_driver_seat(self):
+    def test_no_owner_record_means_no_driver_launch(self):
         os.unlink(next(p for p in (enrolment.enrolled_dir()).glob("owner-*.json")))
-        self.assertIsNone(self.go(self.act(seat=None, kind="judge", group="a")))
+        self.assertIsNone(self.go(self.act(launch=None, kind="judge", group="a")))
         self.assertEqual(self.b.launches("J"), [])
 
-    def test_an_action_with_no_seat_and_no_driver_kind_launches_nothing(self):
-        self.assertIsNone(self.go(self.act(seat=None, kind="lead")))
+    def test_an_action_with_no_launch_and_no_driver_kind_launches_nothing(self):
+        self.assertIsNone(self.go(self.act(launch=None, kind="lead")))
         self.assertEqual(self.b.launches("J"), [])
 
 
@@ -461,15 +461,15 @@ class DriverSeatTests(ExecEnv):
 
 
 class ReconcileTests(ExecEnv):
-    def claim_only(self, seat="eng-a", age=0.0):
+    def claim_only(self, launch="eng-a", age=0.0):
         """A claim whose process crashed after the claim: an intent and a board row, no run file."""
-        self.get_launch(seat)
-        row = self.b.get_launch("J", 1, seat)
+        self.get_launch(launch)
+        row = self.b.get_launch("J", 1, launch)
         lid = driver_exec.new_launch_id(self.now())
-        self.led.intents.append(ledger.Intent(lid, self.act(seat).action_id, 1, seat, 5.0, 60.0, [], "claiming"))
+        self.led.intents.append(ledger.Intent(lid, self.act(launch).action_id, 1, launch, 5.0, 60.0, [], "claiming"))
         self.led.save()
         self.b.allocate_name(f"launch:{lid}", "J", "engineer")
-        self.b.claim_drive_launch(job="J", generation=1, action_id=self.act(seat).action_id, attempt=1, launch_id=lid,
+        self.b.claim_drive_launch(job="J", generation=1, action_id=self.act(launch).action_id, attempt=1, launch_id=lid,
                                   launch_row_id=row.id, queue_version=row.revision, harness="claude", reserve_usd=5,
                                   reserve_minutes=60, locks=[], lock_seconds=4200, max_host_running=4)
         return lid
@@ -517,7 +517,7 @@ class ReconcileTests(ExecEnv):
     def test_forged_restart_row_ignored(self):
         self.get_launch()
         row = self.b.get_launch("J", 1, "eng-a")
-        self.b.claim_drive_launch(job="J", generation=1, action_id="gen1|seat|eng-a|-|0|9", attempt=1,
+        self.b.claim_drive_launch(job="J", generation=1, action_id="gen1|launch|eng-a|-|0|9", attempt=1,
                                   launch_id="FORGED", launch_row_id=row.id, queue_version=row.revision, harness="claude",
                                   reserve_usd=5, reserve_minutes=60, locks=[], lock_seconds=60, max_host_running=4)
         led = self.rec(500)
@@ -527,7 +527,7 @@ class ReconcileTests(ExecEnv):
 
     def test_a_row_without_a_matching_intent_and_an_intent_without_a_row_after_grace(self):
         lid = driver_exec.new_launch_id(self.now(-200))
-        self.led.intents.append(ledger.Intent(lid, "gen1|seat|a|-|0|1", 1, "a", 5.0, 60.0, [], "claiming"))
+        self.led.intents.append(ledger.Intent(lid, "gen1|launch|a|-|0|1", 1, "a", 5.0, 60.0, [], "claiming"))
         self.led.save()
         led = self.rec(0)
         self.assertEqual((led.intents[0].state, led.intents[0].outcome, led.intents[0].charged_usd),
@@ -535,7 +535,7 @@ class ReconcileTests(ExecEnv):
 
     def test_an_intent_without_a_row_inside_the_grace_period_waits(self):
         lid = driver_exec.new_launch_id(self.now(-10))
-        self.led.intents.append(ledger.Intent(lid, "gen1|seat|a|-|0|1", 1, "a", 5.0, 60.0, [], "claiming"))
+        self.led.intents.append(ledger.Intent(lid, "gen1|launch|a|-|0|1", 1, "a", 5.0, 60.0, [], "claiming"))
         self.led.save()
         self.assertEqual(self.rec(0).intents[0].state, "claiming")
 
@@ -697,15 +697,15 @@ class ReconcileTests(ExecEnv):
             self.rec(500)
         self.assertIsNone(self.b.restarts(job="J")[0].outcome)
 
-    def test_a_seat_whose_launch_ended_goes_idle_and_keeps_its_session(self):
+    def test_a_launch_whose_launch_ended_goes_idle_and_keeps_its_session(self):
         self.get_launch()
         run = self.go(self.act())
         self.b.set_restart_agent(run["restart_id"], SESS1)
         self.b.finish_restart(run["restart_id"], "completed", cost_usd=0.1)
         os.unlink(runner.run_file(run["restart_id"], self.bk))
         self.rec(1)
-        seat = self.b.get_launch("J", 1, "eng-a")
-        self.assertEqual((seat.state, seat.last_outcome, seat.agent_key, seat.session_id),
+        launch = self.b.get_launch("J", 1, "eng-a")
+        self.assertEqual((launch.state, launch.last_outcome, launch.agent_key, launch.session_id),
                          ("failed", "no hand-off", SESS1, SESS1))
 
     def test_max_attempts_comes_from_the_drive_config(self):
@@ -717,7 +717,7 @@ class ReconcileTests(ExecEnv):
         self.assertEqual(self.b.get_launch("J", 1, "eng-a").state, "failed")
 
 
-    def test_a_running_seat_with_a_live_launch_is_left_alone(self):
+    def test_a_running_launch_with_a_live_launch_is_left_alone(self):
         self.get_launch()
         run = self.go(self.act())
         fd = runner.own(run["restart_id"], self.bk)
@@ -725,16 +725,16 @@ class ReconcileTests(ExecEnv):
         self.rec(1)
         self.assertEqual(self.b.get_launch("J", 1, "eng-a").state, "running")
 
-    def test_reconcile_ends_running_seats_with_no_launch(self):
+    def test_reconcile_ends_running_launches_with_no_launch(self):
         self.get_launch()
-        self.tamper_seat("eng-a", state="running", launch_id=None)
+        self.tamper_launch("eng-a", state="running", launch_id=None)
         self.rec(1)
-        seat = self.b.get_launch("J", 1, "eng-a")
-        self.assertEqual((seat.state, seat.last_outcome), ("done", "no launch"))
+        launch = self.b.get_launch("J", 1, "eng-a")
+        self.assertEqual((launch.state, launch.last_outcome), ("done", "no launch"))
 
 
-class UnlaunchedSeatSweepTests(unittest.TestCase):
-    """A seat `running` with no launch_id can be ended on every backend (board/seats.py)."""
+class UnlaunchedLaunchSweepTests(unittest.TestCase):
+    """A launch `running` with no launch_id can be ended on every backend (board/launches.py)."""
     harness_factory = staticmethod(drive_backends()["memory"])    # variants at the end swap it
 
     def make(self):
@@ -760,16 +760,16 @@ class UnlaunchedSeatSweepTests(unittest.TestCase):
         b = h.board()
         self.addCleanup(b.close)
         s = self.plant(h, b)
-        self.assertEqual(driver_exec.sweep_unlaunched_seats(b, "J"), 1)
-        seat = b.get_launch("J", 1, "a")
-        self.assertEqual((seat.state, seat.last_outcome), ("done", "no launch"))
-        self.assertEqual(driver_exec.sweep_unlaunched_seats(b, "J"), 0)
+        self.assertEqual(driver_exec.sweep_unlaunched_launches(b, "J"), 1)
+        launch = b.get_launch("J", 1, "a")
+        self.assertEqual((launch.state, launch.last_outcome), ("done", "no launch"))
+        self.assertEqual(driver_exec.sweep_unlaunched_launches(b, "J"), 0)
         return s
 
-    def test_the_sweep_ends_an_unlaunched_running_seat_once(self):
+    def test_the_sweep_ends_an_unlaunched_running_launch_once(self):
         self.run_on(self.make())
 
-    def test_a_running_seat_with_an_open_launch_still_cannot_leave_running(self):
+    def test_a_running_launch_with_an_open_launch_still_cannot_leave_running(self):
         h = self.make()
         h.reset()
         b = h.board()
@@ -777,21 +777,21 @@ class UnlaunchedSeatSweepTests(unittest.TestCase):
         b.open_job("J", None, None, None, "me", goal="G")
         s = b.queue_launch("J", 1, "a", role="engineer", harness="claude", model="haiku", workdir="/w/a",
                            brief="/w/a/B.md", queued_by="lead")
-        b.claim_drive_launch(job="J", generation=1, action_id="1|seat|a", attempt=1, launch_id="L1", launch_row_id=s.id,
+        b.claim_drive_launch(job="J", generation=1, action_id="1|launch|a", attempt=1, launch_id="L1", launch_row_id=s.id,
                              queue_version=s.revision, harness="claude", reserve_usd=1, reserve_minutes=1, locks=[],
                              lock_seconds=60, max_host_running=4)
         cur = b.get_launch("J", 1, "a")
         with self.assertRaisesRegex(ValueError, "still open"):
             b.set_launch_state(cur.id, cur.revision, "done", job="J")
-        self.assertEqual(driver_exec.sweep_unlaunched_seats(b, "J"), 0)
+        self.assertEqual(driver_exec.sweep_unlaunched_launches(b, "J"), 0)
 
 
 class FinishTests(ExecEnv):
     """runner.finish() records what a drive session cost and concludes the ledger intent."""
 
-    def finished(self, tail, outcome="completed", harness="claude", seat="eng-a"):
-        self.get_launch(seat, harness=harness)
-        run = self.go(self.act(seat))
+    def finished(self, tail, outcome="completed", harness="claude", launch="eng-a"):
+        self.get_launch(launch, harness=harness)
+        run = self.go(self.act(launch))
         if tail is not None:
             self.write_tail(run, tail)
         self.assertTrue(runner.finish(self.cfg, run, outcome))
@@ -1166,7 +1166,7 @@ class FixRoundTests(ExecEnv):
         (i,) = self.rec(500).intents
         self.assertEqual(i.state, "claimed")
 
-    def test_n20_a_forged_later_duplicate_does_not_idle_a_running_seat(self):
+    def test_n20_a_forged_later_duplicate_does_not_idle_a_running_launch(self):
         self.memory_only()
         self.get_launch()
         run = self.go(self.act())
@@ -1178,8 +1178,8 @@ class FixRoundTests(ExecEnv):
                 mock.patch.object(self.b, "set_launch_state") as moved:      # the board's own guard must not be the only defence
             self.rec(1)
         moved.assert_not_called()
-        seat = self.b.get_launch("J", 1, "eng-a")
-        self.assertEqual((seat.state, seat.session_id), ("running", None))
+        launch = self.b.get_launch("J", 1, "eng-a")
+        self.assertEqual((launch.state, launch.session_id), ("running", None))
 
     def test_R4_last_progress_never_moves_backwards(self):
         t = dt.datetime(2026, 10, 10, 12, 0, tzinfo=dt.timezone.utc)
@@ -1203,13 +1203,13 @@ class FixRoundTests(ExecEnv):
         self.get_launch()
         run = self.go(self.act())
         self.end(run, "completed")
-        self.tamper_seat("eng-a", session_id='--mcp-config={"mcpServers":{"x":{"command":"sh"}}}')
+        self.tamper_launch("eng-a", session_id='--mcp-config={"mcpServers":{"x":{"command":"sh"}}}')
         driver_exec._queue_existing(self.b, self.b.get_launch("J", 1, "eng-a"))
         run2 = self.go(self.act(trigger="2"))
         self.assertNotIn("--resume", run2["argv"])
         self.assertFalse(any(a.startswith("--mcp-config") for a in run2["argv"]))
 
-    def test_H3_a_forged_new_agent_key_never_reaches_the_seat(self):
+    def test_H3_a_forged_new_agent_key_never_reaches_the_launch(self):
         self.memory_only()
         self.get_launch()
         run = self.go(self.act())
@@ -1231,7 +1231,7 @@ class FixRoundTests(ExecEnv):
         driver_exec.conclude_run(self.cfg, run, "completed", 0.1)
         self.assertLess(self.reload().watermarks.get("msg:eng-a", 0), 10 ** 6)
 
-    def test_M2_a_forged_event_id_not_addressed_to_the_seat_moves_nothing(self):
+    def test_M2_a_forged_event_id_not_addressed_to_the_launch_moves_nothing(self):
         self.memory_only()
         self.get_launch()
         self.agent_of()
@@ -1334,12 +1334,12 @@ class FixRoundTests(ExecEnv):
         driver_exec.conclude_run(self.cfg, run, "completed", 0.1)
         self.assertEqual(self.reload().watermarks.get("msg:eng-a", 0), 0)
 
-    def test_M2_a_seat_with_no_agent_yet_keeps_its_marks(self):
+    def test_M2_a_launch_with_no_agent_yet_keeps_its_marks(self):
         self.get_launch()
         self.assertEqual(driver_exec._board_marks(self.b, self.led, self.b.get_launch("J", 1, "eng-a"), self.now()), (0, []))
 
     # -- M3: last_progress_at is the time of the progress event, never later than now
-    def test_M3_a_future_seat_time_does_not_move_last_progress(self):
+    def test_M3_a_future_launch_time_does_not_move_last_progress(self):
         t = dt.datetime(2026, 10, 10, 12, 0, tzinfo=dt.timezone.utc)
         s = snap(ledger=self.led, handoffs=[ho(receipt_id=5, at=t - dt.timedelta(hours=1))],
                  launches={"a": sv("a", updated_at=dt.datetime(2099, 1, 1, tzinfo=dt.timezone.utc))})
@@ -1397,11 +1397,11 @@ class FixRoundTests(ExecEnv):
 
 
 
-    def test_the_no_launch_sweep_does_not_even_try_a_seat_with_a_launch(self):
+    def test_the_no_launch_sweep_does_not_even_try_a_launch_with_a_launch(self):
         self.get_launch()
         self.go(self.act())
         with mock.patch.object(self.b, "set_launch_state") as moved:
-            self.assertEqual(driver_exec.sweep_unlaunched_seats(self.b, "J"), 0)
+            self.assertEqual(driver_exec.sweep_unlaunched_launches(self.b, "J"), 0)
         moved.assert_not_called()
 
     def test_an_unreadable_ledger_at_the_recheck_cancels_the_launch_and_never_crashes(self):
@@ -1436,7 +1436,7 @@ class FixRoundTests(ExecEnv):
         self.assertFalse(fields["brief_path"].startswith(str(self.work)))
         self.assertNotIn(".swarm", fields["brief_path"].split(os.sep)[-2:-1])
 
-    def test_claude_seats_always_pass_setting_sources_user(self):
+    def test_claude_launches_always_pass_setting_sources_user(self):
         self.get_launch()
         run = self.go(self.act())
         pairs = list(zip(run["argv"], run["argv"][1:]))
@@ -1509,7 +1509,7 @@ class BarrierTests(ExecEnv):
         self.assertIn('barrier.hit("runner_mid_session")', src[loop:loop + 200])
 
 
-add_backend_variants(globals(), UnlaunchedSeatSweepTests)   # file, sqlite, and postgres with SWARM_TEST_CONFIG
+add_backend_variants(globals(), UnlaunchedLaunchSweepTests)   # file, sqlite, and postgres with SWARM_TEST_CONFIG
 
 
 if __name__ == "__main__":

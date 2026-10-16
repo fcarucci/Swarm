@@ -1,22 +1,22 @@
-"""A jailed drive seat's only way to the board (Task 20). The seat has no board password and no host-private file
-in its jail; its `swarm` command and swarm hooks (swarm.seatbroker_client) leave TYPED requests
-(swarm.seatproto) in the seat's broker directory, bound into that seat's jail only. This broker, threads of the
-seat's runner (outside the jail, alive exactly as long as the session), answers them:
+"""A jailed drive launch's only way to the board (Task 20). The launch has no board password and no host-private file
+in its jail; its `swarm` command and swarm hooks (swarm.launchbroker_client) leave TYPED requests
+(swarm.launchproto) in the launch's broker directory, bound into that launch jail only. This broker, threads of the
+launch's runner (outside the jail, alive exactly as long as the session), answers them:
 
-- a cli request is validated against seatproto.SCHEMA (unknown command, unknown or identity-like field: refused)
-  and the broker builds the CLI argv itself (seatproto.build_argv): the seat's identity (--key <its session> or
+- a cli request is validated against launchproto.SCHEMA (unknown command, unknown or identity-like field: refused)
+  and the broker builds the CLI argv itself (launchproto.build_argv): the launch's identity (--key <its session> or
   --as <its name>) comes from the launch record; a file field arrives as content and is handed to the CLI as a
-  file the broker wrote in the supervisor's private dir, so the CLI never opens a path the seat chose;
+  file the broker wrote in the supervisor's private dir, so the CLI never opens a path the launch chose;
 - the CLI runs as `python -I` from the supervisor's own code with cwd "/" and `--config` pinned to the
   supervisor's config (the only one the CLI's plugin discovery reads: swarm.cli._load_plugins honours a leading
-  --config only), and refuses to finish when a module from the seat's work tree or seat dir was imported;
-- a hook request keeps only seatproto.HOOK_FIELDS of its payload; session_id, transcript_path and cwd are set
-  from the launch record. A Codex seat's session is its thread id, known once the runner read thread.started:
+  --config only), and refuses to finish when a module from the launch's work tree or launch dir was imported;
+- a hook request keeps only launchproto.HOOK_FIELDS of its payload; session_id, transcript_path and cwd are set
+  from the launch record. A Codex launch's session is its thread id, known once the runner read thread.started:
   before that its cli requests are refused and its guard hook denies (rr12);
 - hooks have their own lane (HOOK_WORKERS, HOOK_TIMEOUT) and cli calls theirs (CLI_WORKERS, at most CLI_QUEUE
-  queued), so a seat's long `swarm wait` never starves its guard; a guard hook that cannot run is answered with
+  queued), so a launch's long `swarm wait` never starves its guard; a guard hook that cannot run is answered with
   a deny (fail closed);
-- grants (person.host_pid) bind to the seat's own session process: each call carries a fresh secret
+- grants (person.host_pid) bind to the launch's own session process: each call carries a fresh secret
   (person.BROKER_TOKEN_ENV) naming a record only the broker writes in the supervisor's private dir, so a variable
   an agent sets attests nothing (rr19).
 
@@ -42,13 +42,13 @@ HOOK_WORKERS, HOOK_TIMEOUT = 4, 20.0
 CLI_WORKERS, CLI_QUEUE, CLI_TIMEOUT, CLI_WAIT_TIMEOUT = 2, 8, 300.0, 900.0
 SESSION_VARS = ("CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT",
                 "CODEX_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED",
-                "SWARM_HOST", "SWARM_SEAT_BROKER", "SWARM_RESUME_TOKEN", "SWARM_CONFIG", "PYTHONPATH",
+                "SWARM_HOST", "SWARM_LAUNCH_BROKER", "SWARM_RESUME_TOKEN", "SWARM_CONFIG", "PYTHONPATH",
                 "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE", "CLAUDE_CONFIG_DIR", "CODEX_HOME",
                 "SWARM_BROKER_TOKEN", "SWARM_BROKER_HOST_PID")
 AUDIT_EXIT = 97
 LIB_DIR = str(Path(__file__).resolve().parents[2])
 # The brokered CLI: the supervisor's code only (python -I: no PYTHONPATH, no user site, no script dir), and an
-# audit that no module came from the seat's paths.
+# audit that no module came from the launch's paths.
 BOOT = r"""
 import os, sys
 lib, forbid = sys.argv[1], [p for p in sys.argv[2].split("\n") if p]
@@ -58,7 +58,7 @@ def _audit():
     for m in list(sys.modules.values()):
         f = getattr(m, "__file__", None)
         if f and any(os.path.realpath(f).startswith(r.rstrip("/") + "/") for r in forbid):
-            os.write(2, b"swarm: refused: a module from the seat's files was imported\n")
+            os.write(2, b"swarm: refused: a module from the launch's files was imported\n")
             os._exit(97)
 import atexit
 atexit.register(_audit)
@@ -90,7 +90,7 @@ _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 _O_BINARY = getattr(os, "O_BINARY", 0)
 _DIR_FLAGS = os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC
 # Descriptor-relative file access (Linux, macOS). Windows has no dir_fd: the broker then works by path, refusing a
-# link it sees at each step (best effort: the seat there is not jailed anyway).
+# link it sees at each step (best effort: the launch there is not jailed anyway).
 FD_MODE = bool(_O_DIRECTORY and _O_NOFOLLOW and all(f in os.supports_dir_fd for f in (os.open, os.rename, os.unlink))
                and os.listdir in os.supports_fd and os.scandir in os.supports_fd)
 
@@ -188,8 +188,8 @@ def _transcript_shape(harness: str, key: str):
     return ("claude", "projects"), 1, (lambda n: n == f"{key}.jsonl")
 
 
-def _find_transcript(seat_dir: str, harness: str, key: str | None) -> str | None:
-    """The seat's own transcript as a path relative to its seat directory, found through directory descriptors
+def _find_transcript(launch_dir: str, harness: str, key: str | None) -> str | None:
+    """The launch's own transcript as a path relative to its launch directory, found through directory descriptors
     without following a link (Claude: claude/projects/<p>/<session>.jsonl; Codex: codex/sessions/Y/M/D/
     rollout-*-<thread>.jsonl), or None."""
     if not key or not re.fullmatch(r"[A-Za-z0-9-]{8,80}", key):
@@ -217,7 +217,7 @@ def _find_transcript(seat_dir: str, harness: str, key: str | None) -> str | None
                 finally:
                     _closedir(sub)
     try:
-        d = _opendir(seat_dir)
+        d = _opendir(launch_dir)
     except OSError:
         return None
     try:
@@ -233,20 +233,20 @@ def _find_transcript(seat_dir: str, harness: str, key: str | None) -> str | None
     return sorted(found)[0] if found else None
 
 
-def seat_transcript(seat_dir: str, harness: str, key: str | None) -> str | None:
-    """The path of the seat's own transcript in its seat directory (see _find_transcript), or None."""
-    rel = _find_transcript(seat_dir, harness, key)
-    return os.path.join(seat_dir, *rel.split("/")) if rel else None   # native separators
+def launch_transcript(launch_dir: str, harness: str, key: str | None) -> str | None:
+    """The path of the launch's own transcript in its launch directory (see _find_transcript), or None."""
+    rel = _find_transcript(launch_dir, harness, key)
+    return os.path.join(launch_dir, *rel.split("/")) if rel else None   # native separators
 
 
-def read_seat_transcript(seat_dir: str, harness: str, key: str | None, limit: int) -> bytes | None:
-    """The seat's own transcript, found and read through descriptors, no link followed anywhere (rr18)."""
-    rel = _find_transcript(seat_dir, harness, key)
-    return read_under(seat_dir, rel, limit) if rel else None
+def read_launch_transcript(launch_dir: str, harness: str, key: str | None, limit: int) -> bytes | None:
+    """The launch's own transcript, found and read through descriptors, no link followed anywhere (rr18)."""
+    rel = _find_transcript(launch_dir, harness, key)
+    return read_under(launch_dir, rel, limit) if rel else None
 
 
 def neutral_cwd() -> str:
-    """Where a brokered command runs: no seat's directory. "/" on POSIX; on Windows the system drive's root
+    """Where a brokered command runs: no launch's directory. "/" on POSIX; on Windows the system drive's root
     (%SystemDrive%, else the drive of this Python), whatever the current directory is."""
     if os.name != "nt":
         return "/"
@@ -254,11 +254,11 @@ def neutral_cwd() -> str:
     return drive.rstrip("\\/") + "\\"
 
 
-class SeatBroker:
-    """The broker of one running seat. `run` is the runner's run dict (harness, session_id, agent_key, name),
+class LaunchBroker:
+    """The broker of one running launch. `run` is the runner's run dict (harness, session_id, agent_key, name),
     read live: a Codex thread id the runner binds later is used from then on."""
 
-    def __init__(self, run: dict, directory: str, *, workdir: str, forbid: list[str], seat_dir: str,
+    def __init__(self, run: dict, directory: str, *, workdir: str, forbid: list[str], launch_dir: str,
                  config: str, host_pid: int | None, token: str | None = None, base_env: dict | None = None,
                  python: str | None = None, runner=subprocess.run, file_dir: str | None = None,
                  cfg: dict | None = None, attest_dir: str | None = None):
@@ -270,7 +270,7 @@ class SeatBroker:
             attest_dir = str(private_dir() / person.BROKER_ATTEST_DIR)
         self.attest_dir = attest_dir
         self.forbid = [os.path.realpath(p) for p in forbid if p]
-        self.seat_dir, self.config = seat_dir.rstrip("/"), config
+        self.launch_dir, self.config = launch_dir.rstrip("/"), config
         self.host_pid, self.token = host_pid, token
         self.base_env = dict(os.environ if base_env is None else base_env)
         self.python = python or sys.executable
@@ -287,8 +287,8 @@ class SeatBroker:
     # --- identity ---------------------------------------------------------------------------------
 
     def session(self) -> str | None:
-        """The seat's session as the launch record knows it: a Claude seat's session id (set at launch), a
-        Codex seat's thread id (once the runner read it); None until then."""
+        """The launch's session as the launch record knows it: a Claude launch's session id (set at launch), a
+        Codex launch's thread id (once the runner read it); None until then."""
         if self.run.get("harness") == "codex":
             return self.run.get("agent_key") or None
         return self.run.get("session_id") or self.run.get("agent_key") or None
@@ -308,7 +308,7 @@ class SeatBroker:
         return env
 
     def _attest(self) -> tuple[str | None, str | None]:
-        """A per-call secret and the record it names (the seat's session pid, an expiry), written where only the
+        """A per-call secret and the record it names (the launch's session pid, an expiry), written where only the
         supervisor writes. (token, record name) or (None, None) when there is no pid to attest."""
         import secrets
         import time
@@ -341,11 +341,11 @@ class SeatBroker:
     def payload(self, raw) -> bytes:
         """The hook payload as the broker passes it on: only HOOK_FIELDS, then session_id, transcript_path
         and cwd from the launch record."""
-        from swarm import seatproto
+        from swarm import launchproto
         src = raw if isinstance(raw, dict) else {}
-        out = {k: src[k] for k in seatproto.HOOK_FIELDS if k in src}
+        out = {k: src[k] for k in launchproto.HOOK_FIELDS if k in src}
         out["session_id"] = self.session()
-        t = seat_transcript(self.seat_dir, self.run.get("harness") or "claude", self.session())
+        t = launch_transcript(self.launch_dir, self.run.get("harness") or "claude", self.session())
         if t:
             out["transcript_path"] = t
         out["cwd"] = self.workdir
@@ -354,14 +354,14 @@ class SeatBroker:
     # --- running ----------------------------------------------------------------------------------
 
     def _store(self, content, made: list) -> str:
-        fd, path = tempfile.mkstemp(prefix="seat-file-", dir=self.file_dir)
+        fd, path = tempfile.mkstemp(prefix="launch-file-", dir=self.file_dir)
         with os.fdopen(fd, "wb") as fh:
             fh.write(content if isinstance(content, bytes) else content.encode("utf-8"))
         made.append(path)
         return path
 
     def _exec(self, argv: list[str], stdin: bytes | None, timeout: float, extra_env=None) -> tuple[int, bytes, bytes]:
-        cmd = [self.python, "-I", "-c", BOOT, LIB_DIR, "\n".join([self.workdir, self.seat_dir, *self.forbid]),
+        cmd = [self.python, "-I", "-c", BOOT, LIB_DIR, "\n".join([self.workdir, self.launch_dir, *self.forbid]),
                "--config", self.config, *argv]
         from swarm import person
         env = {k: v for k, v in {**self.env(), **(extra_env or {})}.items() if k != person.BROKER_TOKEN_ENV}
@@ -375,40 +375,40 @@ class SeatBroker:
         return res.returncode, res.stdout or b"", res.stderr or b""
 
     def _requirement(self, path: str, made: list) -> list[str]:
-        """A requirement the seat names in its work tree: read here through descriptors (no link followed),
+        """A requirement the launch names in its work tree: read here through descriptors (no link followed),
         pinned by the CLI at that content (--add-requirements-pinned PATH\\nFILE)."""
-        from swarm import seatproto
+        from swarm import launchproto
         rel = os.path.relpath(path, self.workdir)
         if not _under(path, self.workdir) or rel.startswith(".."):
-            raise Refused(f"requirement {path} is not in the seat's work tree")
-        data = read_under(self.workdir, rel, seatproto.REQUIREMENT_MAX)
+            raise Refused(f"requirement {path} is not in the launch's work tree")
+        data = read_under(self.workdir, rel, launchproto.REQUIREMENT_MAX)
         if data is None:
             raise Refused(f"requirement {path} is not a regular file of the work tree (a link, or too large)")
         return [f"--add-requirements-pinned={path}\n{self._store(data, made)}"]
 
     def _grant(self, argv: list[str]) -> tuple:
         """For a control command that needs its caller attested (drivegate.GRANT_SUBS): the broker writes the
-        grant itself, for the seat its launch record names. (board key, job, grant id) or Nones."""
+        grant itself, for the launch its launch record names. (board key, job, grant id) or Nones."""
         from swarm import drivegate
         if not argv or argv[0] not in drivegate.GRANT_SUBS or self.cfg is None:
             return None, None, None
         from swarm.board.autoinit import store_key
         bk = store_key(self.cfg)
-        ctx = drivegate.seat_context(self.cfg, bk, {"session_id": self.session()})
+        ctx = drivegate.launch_context(self.cfg, bk, {"session_id": self.session()})
         full = ["--config", self.config, *argv]
         rid = drivegate.write_grant_argv(self.cfg, full, ctx, self.host_pid)
         ns = drivegate.parse_swarm(full) if rid else None
         return bk, getattr(ns, "job", None), rid
 
     def do_cli(self, req) -> tuple[int, bytes, bytes]:
-        from swarm import receipts, seatproto
-        command, fields = seatproto.validate(req, self.run.get("job") or None)   # fills/checks --job (own job)
+        from swarm import receipts, launchproto
+        command, fields = launchproto.validate(req, self.run.get("job") or None)   # fills/checks --job (own job)
         if self.session() is None:
-            raise Refused("the seat's session is not known yet (a Codex seat before its thread started)")
+            raise Refused("the launch's session is not known yet (a Codex launch before its thread started)")
         made: list = []
         grant = (None, None, None)
         try:
-            argv = seatproto.build_argv(
+            argv = launchproto.build_argv(
                 command, fields, key=self.session(), name=self.run.get("name"),
                 file_path=lambda c: self._store(c, made),
                 report=lambda path, content: [f"--report={path}", f"--report-content={self._store(content, made)}"],
@@ -432,18 +432,18 @@ class SeatBroker:
                     pass
 
     def do_hook(self, req) -> tuple[int, bytes, bytes]:
-        from swarm import seatbroker_client, seatproto
+        from swarm import launchbroker_client, launchproto
         event = req.get("event") if isinstance(req, dict) else None
-        if event not in seatproto.HOOK_EVENTS or set(req) - {"v", "kind", "event", "payload"}:
+        if event not in launchproto.HOOK_EVENTS or set(req) - {"v", "kind", "event", "payload"}:
             raise Refused("not a hook request")
         if self.session() is None:
-            return 0, seatbroker_client.deny_output(event, "the seat's session is not known yet"), b""
+            return 0, launchbroker_client.deny_output(event, "the launch's session is not known yet"), b""
         rc, out, err = self._exec(["hook", "--host", self.run.get("harness") or "claude", event],
                                   self.payload(req.get("payload")), HOOK_TIMEOUT,
                                   {"SWARM_HOOK_EVENT": event, "SWARM_HOOK_FASTPATH": "1"})
-        if rc != 0 and event in seatproto.GUARD_EVENTS and not out.strip():
-            out = seatbroker_client.deny_output(event, "the seat's guard hook failed")
-        return 0 if event in seatproto.GUARD_EVENTS else rc, out, err
+        if rc != 0 and event in launchproto.GUARD_EVENTS and not out.strip():
+            out = launchbroker_client.deny_output(event, "the launch's guard hook failed")
+        return 0 if event in launchproto.GUARD_EVENTS else rc, out, err
 
     # --- the loop ---------------------------------------------------------------------------------
 
@@ -483,25 +483,25 @@ class SeatBroker:
         _rename_in(d, tmp, f"{rid}.resp")
 
     def handle(self, d: int, rid: str, req) -> None:
-        from swarm import seatbroker_client, seatproto
+        from swarm import launchbroker_client, launchproto
         event = req.get("event") if isinstance(req, dict) else ""
         try:
             if isinstance(req, dict) and req.get("kind") == "hook":
                 rc, out, err = self.do_hook(req)
             else:
                 rc, out, err = self.do_cli(req)
-        except (Refused, seatproto.ProtocolError) as exc:
-            rc, out, err = 2, b"", f"swarm: refused in a drive seat: {exc}\n".encode()
-            if event in seatproto.GUARD_EVENTS:
-                rc, out = 0, seatbroker_client.deny_output(event, f"refused ({exc})")
+        except (Refused, launchproto.ProtocolError) as exc:
+            rc, out, err = 2, b"", f"swarm: refused in a drive launch: {exc}\n".encode()
+            if event in launchproto.GUARD_EVENTS:
+                rc, out = 0, launchbroker_client.deny_output(event, f"refused ({exc})")
         except subprocess.TimeoutExpired:
-            rc, out, err = 124, b"", b"swarm: the command ran out of time in the seat broker\n"
-            if event in seatproto.GUARD_EVENTS:
-                rc, out = 0, seatbroker_client.deny_output(event, "the seat's guard hook ran out of time")
+            rc, out, err = 124, b"", b"swarm: the command ran out of time in the launch broker\n"
+            if event in launchproto.GUARD_EVENTS:
+                rc, out = 0, launchbroker_client.deny_output(event, "the launch's guard hook ran out of time")
         except Exception as exc:   # never let one request stop the broker
-            rc, out, err = 1, b"", f"swarm: seat broker error ({type(exc).__name__})\n".encode()
-            if event in seatproto.GUARD_EVENTS:
-                rc, out = 0, seatbroker_client.deny_output(event, "the seat broker failed")
+            rc, out, err = 1, b"", f"swarm: launch broker error ({type(exc).__name__})\n".encode()
+            if event in launchproto.GUARD_EVENTS:
+                rc, out = 0, launchbroker_client.deny_output(event, "the launch broker failed")
         try:
             self._answer(d, rid, rc, out, err)
             self.handled += 1
@@ -544,7 +544,7 @@ class SeatBroker:
                     if not busy:
                         self._cli_pending += 1
                 if busy:
-                    self._answer(d, rid, 75, b"", b"swarm: too many swarm commands of this seat at once; retry\n")
+                    self._answer(d, rid, 75, b"", b"swarm: too many swarm commands of this launch at once; retry\n")
                     continue
                 self._cli.submit(self.handle, d, rid, req).add_done_callback(self._cli_done)
         return n
@@ -566,8 +566,8 @@ class SeatBroker:
             self._cli.shutdown(wait=True, cancel_futures=True)
             _closedir(d)
 
-    def start(self) -> "SeatBroker":
-        self._thread = threading.Thread(target=self._loop, name="seat-broker", daemon=True)
+    def start(self) -> "LaunchBroker":
+        self._thread = threading.Thread(target=self._loop, name="launch-broker", daemon=True)
         self._thread.start()
         return self
 
@@ -586,21 +586,21 @@ def config_path(cfg: dict, run: dict) -> str:
     return str(cli.DEFAULT_CONFIG)
 
 
-def for_run(cfg: dict, run: dict, *, host_pid: int | None, token: str | None) -> SeatBroker | None:
-    """The broker of a jailed drive run (run["seat_home"] set by the runner when it jailed it), or None."""
-    from swarm.supervisor import seathome
+def for_run(cfg: dict, run: dict, *, host_pid: int | None, token: str | None) -> LaunchBroker | None:
+    """The broker of a jailed drive run (run["launch_home"] set by the runner when it jailed it), or None."""
+    from swarm.supervisor import launchhome
     from swarm.supervisor.settings import private_dir
-    sh = run.get("seat_home")
+    sh = run.get("launch_home")
     if not sh:
         return None
     workdir = os.path.realpath(run["cwd"])
     forbid = [workdir, sh]
     try:
-        gitdir, common = seathome.git_dirs(cfg, workdir)
+        gitdir, common = launchhome.git_dirs(cfg, workdir)
         forbid += [p for p in (gitdir, common) if p]
-    except seathome.SeatIsolationError:
+    except launchhome.LaunchIsolationError:
         pass
     files = private_dir() / "broker-files"
     files.mkdir(mode=0o700, exist_ok=True)
-    return SeatBroker(run, os.path.join(sh, "broker"), workdir=workdir, forbid=forbid, seat_dir=sh,
+    return LaunchBroker(run, os.path.join(sh, "broker"), workdir=workdir, forbid=forbid, launch_dir=sh,
                       config=config_path(cfg, run), host_pid=host_pid, token=token, file_dir=str(files), cfg=cfg)

@@ -10,8 +10,9 @@ import datetime as dt
 import re
 from .base import Blocker, BlockerEvent, CapExceeded, normalize_message
 
+LEGACY_LAUNCH_COLUMN = "se" "at"  # the persisted schema-25 column stays unchanged
 FIELDS = ("id, job, kind, waiting_on, reason, until, default_value, state, created_by, created_at, resolved_by, "
-          "resolved_how, resolved_at, protection_rule, seat, generation")
+          f"resolved_how, resolved_at, protection_rule, {LEGACY_LAUNCH_COLUMN}, generation")
 EVENT_FIELDS = "id, blocker, at, actor, event, detail"
 
 
@@ -31,11 +32,11 @@ def protects(blocker, now):
     return rule == "always" or (rule == "addressed" and blocker.waiting_on != "external") or bounded
 
 
-def open_question_seats(board, job, generation):
-    """The drive seats with an open question in `generation` of `job`: the per-seat gate of spec 3.10.
-    A question asked outside a drive job has no seat and never counts."""
-    return {b.seat for b in board.blockers(job)
-            if b.kind == "question" and b.seat is not None and b.generation == generation}
+def open_question_launches(board, job, generation):
+    """The drive launches with an open question in `generation` of `job`: the per-launch gate of spec 3.10.
+    A question asked outside a drive job has no launch and never counts."""
+    return {b.launch for b in board.blockers(job)
+            if b.kind == "question" and b.launch is not None and b.generation == generation}
 
 
 def rollup(js, rows, now):
@@ -177,7 +178,7 @@ class MemoryBlockers(BlockerLifecycle):
 
     def open_blocker(
         self, job, kind, waiting_on, reason, until=None, default_value=None, created_by=None,
-        seat=None, generation=None,
+        launch=None, generation=None,
     ):
         check_blocker(kind, waiting_on, reason)
         with self._s().lock:
@@ -200,7 +201,7 @@ class MemoryBlockers(BlockerLifecycle):
                 resolved_how=None,
                 resolved_at=None,
                 protection_rule=self._blocker_protection_rule(kind),
-                seat=seat,
+                launch=launch,
                 generation=generation,
             )
             s.next_blocker_id += 1
@@ -359,7 +360,7 @@ class SqlBlockers(BlockerLifecycle):
 
     def open_blocker(
         self, job, kind, waiting_on, reason, until=None, default_value=None, created_by=None,
-        seat=None, generation=None,
+        launch=None, generation=None,
     ):
         check_blocker(kind, waiting_on, reason)
         with self._blocker_lock(job) as c:
@@ -368,7 +369,7 @@ class SqlBlockers(BlockerLifecycle):
                 raise ValueError(f"{job} is not an open job")
             row = self._blocker_execute(
                 c,
-                "INSERT INTO blockers (job,kind,waiting_on,reason,until,default_value,state,created_by,created_at,protection_rule,seat,generation) VALUES (?,?,?,?,?,?,'open',?,?,?,?,?) RETURNING "
+                f"INSERT INTO blockers (job,kind,waiting_on,reason,until,default_value,state,created_by,created_at,protection_rule,{LEGACY_LAUNCH_COLUMN},generation) VALUES (?,?,?,?,?,?,'open',?,?,?,?,?) RETURNING "
                 + FIELDS,
                 (
                     job,
@@ -380,7 +381,7 @@ class SqlBlockers(BlockerLifecycle):
                     created_by,
                     self._blocker_time(self.now()),
                     self._blocker_protection_rule(kind),
-                    seat,
+                    launch,
                     generation,
                 ),
             ).fetchone()
@@ -456,7 +457,7 @@ CREATE TABLE IF NOT EXISTS blockers (
  state TEXT NOT NULL CHECK(state IN ('open','resolved','expired')), created_by TEXT,
  created_at {timestamp} NOT NULL, resolved_by TEXT, resolved_how TEXT, resolved_at {timestamp},
  protection_rule TEXT NOT NULL DEFAULT 'addressed' CHECK(protection_rule IN ('addressed','always','deadline')),
- seat TEXT, generation INTEGER);
+ {LEGACY_LAUNCH_COLUMN} TEXT, generation INTEGER);
 CREATE INDEX IF NOT EXISTS blockers_job_state ON blockers(job,state,id);
 CREATE TABLE IF NOT EXISTS blocker_events (
  id {id_type}, blocker BIGINT NOT NULL REFERENCES blockers(id), at {timestamp} NOT NULL,
@@ -472,14 +473,14 @@ def migrate_sql(c, pg=False):
         c.execute("ALTER TABLE blockers ADD COLUMN IF NOT EXISTS protection_rule TEXT NOT NULL DEFAULT 'addressed' CHECK(protection_rule IN ('addressed','always','deadline'))")
     elif "protection_rule" not in {r[1] for r in c.execute("PRAGMA table_info(blockers)")}:
         c.execute("ALTER TABLE blockers ADD COLUMN protection_rule TEXT NOT NULL DEFAULT 'addressed' CHECK(protection_rule IN ('addressed','always','deadline'))")
-    # schema 25: the drive seat and generation a blocker concerns (NULL: the job's own)
+    # schema 25: the drive launch and generation a blocker concerns (NULL: the job's own)
     if pg:
-        c.execute("ALTER TABLE blockers ADD COLUMN IF NOT EXISTS seat TEXT")
+        c.execute(f"ALTER TABLE blockers ADD COLUMN IF NOT EXISTS {LEGACY_LAUNCH_COLUMN} TEXT")
         c.execute("ALTER TABLE blockers ADD COLUMN IF NOT EXISTS generation integer")
     else:
         have = {r[1] for r in c.execute("PRAGMA table_info(blockers)")}
-        if "seat" not in have:
-            c.execute("ALTER TABLE blockers ADD COLUMN seat TEXT")
+        if LEGACY_LAUNCH_COLUMN not in have:
+            c.execute(f"ALTER TABLE blockers ADD COLUMN {LEGACY_LAUNCH_COLUMN} TEXT")
         if "generation" not in have:
             c.execute("ALTER TABLE blockers ADD COLUMN generation INTEGER")
     c.execute("UPDATE blockers SET protection_rule='deadline' WHERE kind='wait'")

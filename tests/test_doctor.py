@@ -716,11 +716,11 @@ class DriveDoctorTests(unittest.TestCase):
             with self.subTest(plat=plat):
                 checks = self.run_checks(platform=plat)
                 self.assertNotIn("drive mode", checks)
-                # Task 20: no filesystem jail there; seats are best-effort, and doctor says so (WARN)
-                self.assertIsNone(checks["seat isolation"].ok)
-                self.assertEqual(checks["seat isolation"].detail, f"best-effort on {plat} (no filesystem jail)")
-                self.assertEqual([k for k in checks if k != "seat isolation"],
-                                 [k for k in linux if k != "seat isolation"])
+                # Task 20: no filesystem jail there; launches are best-effort, and doctor says so (WARN)
+                self.assertIsNone(checks["launch isolation"].ok)
+                self.assertEqual(checks["launch isolation"].detail, f"best-effort on {plat} (no filesystem jail)")
+                self.assertEqual([k for k in checks if k != "launch isolation"],
+                                 [k for k in linux if k != "launch isolation"])
 
     # ---- git
     def test_git_below_2_40_fails_with_drive_jobs(self):
@@ -789,7 +789,7 @@ class DriveDoctorTests(unittest.TestCase):
         self.codex_home(f'[sandbox_workspace_write]\nwritable_roots = [{tq(self.home)}]\n')
         c = self.run_checks(which=which)["codex board access"]
         self.assertTrue(c.ok)
-        self.assertEqual(c.detail, "codex writer seats reach the board")
+        self.assertEqual(c.detail, "codex writer launches reach the board")
         self.codex_home('[sandbox_workspace_write]\nwritable_roots = ["/elsewhere"]\n')
         c = self.run_checks(which=which)["codex board access"]
         self.assertIsNone(c.ok)
@@ -804,7 +804,7 @@ class DriveDoctorTests(unittest.TestCase):
             cfg["codex"] = {"network_access": True}
             yes = {c.name: c for c in bootstrap.drive_checks(cfg, run=FakeRun(), which=which, now=self.NOW,
                                                              platform="linux")}["codex board access"]
-            self.assertEqual(yes.detail, "codex writer seats reach the board")
+            self.assertEqual(yes.detail, "codex writer launches reach the board")
             cfg["codex"] = {}
             no = {c.name: c for c in bootstrap.drive_checks(cfg, run=FakeRun(), which=which, now=self.NOW,
                                                             platform="linux")}["codex board access"]

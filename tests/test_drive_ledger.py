@@ -60,12 +60,12 @@ class LedgerCase(unittest.TestCase):
 class LedgerTests(LedgerCase):
     def test_roundtrip_and_charges(self):
         led = ledger.create("bk", "J", budgets={"max_cost_usd": 40}, activated_at=ACTIVATED)
-        led.intents.append(ledger.Intent("L1", "1|seat|a", 1, "a", 5.0, 60.0, [], "claimed"))
+        led.intents.append(ledger.Intent("L1", "1|launch|a", 1, "a", 5.0, 60.0, [], "claimed"))
         led.save()
         again = ledger.load("bk", "J")
         self.assertIsNotNone(again)
         self.assertEqual(again.charged_usd(), 5.0)
-        self.assertEqual(again.intents, [ledger.Intent("L1", "1|seat|a", 1, "a", 5.0, 60.0, [], "claimed")])
+        self.assertEqual(again.intents, [ledger.Intent("L1", "1|launch|a", 1, "a", 5.0, 60.0, [], "claimed")])
         self.assertEqual(again.budgets, {"max_cost_usd": 40})
         self.assertEqual([x.job for x in ledger.unfinished("bk")], ["J"])
 
@@ -252,7 +252,7 @@ class ExclusiveCreateTests(LedgerCase):
         led.terminal = {"verdict": "unreachable", "at": ACTIVATED}
         led.halted = {"by": "driver", "at": ACTIVATED, "reason": "x"}
         led.ruling_attempts, led.rounds_without_progress, led.errors = 2, 3, 1
-        led.intents.append(ledger.Intent("l1", "gen1|seat|eng|-|1|x", 1, "eng", 5.0, 10.0, [], "concluded",
+        led.intents.append(ledger.Intent("l1", "gen1|launch|eng|-|1|x", 1, "eng", 5.0, 10.0, [], "concluded",
                                          outcome="completed", success=True, charged_usd=35.0))
         self.assertEqual(led.charged_usd(), 35.0)
         incarnation = led.incarnation
@@ -387,7 +387,7 @@ class ValidationTests(LedgerCase):
     def test_negative_amounts_are_refused(self):
         def intent(field, value):
             def m(obj):
-                obj["intents"] = [{"launch_id": "L", "action_id": "a", "attempt": 1, "seat": None,
+                obj["intents"] = [{"launch_id": "L", "action_id": "a", "attempt": 1, "launch": None,
                                    "reserved_usd": 1.0, "reserved_minutes": 1.0, "locks": [],
                                    "state": "claimed", "outcome": None, "success": None,
                                    "charged_usd": None}]
@@ -399,7 +399,7 @@ class ValidationTests(LedgerCase):
         self.assertRefused(lambda o: o.update(halted_total_seconds=-1.0), "halted_total_seconds")
         self.assertRefused(lambda o: o.update(errors=-1), "errors")
         self.assertRefused(lambda o: o.update(generation=0), "generation 0")
-        self.assertRefused(lambda o: o.update(watermarks={"seat": -3}), "watermark")
+        self.assertRefused(lambda o: o.update(watermarks={"launch": -3}), "watermark")
         self.assertRefused(lambda o: o.update(budgets={"max_cost_usd": -40}), "budget")
 
     def test_non_finite_amounts_are_refused(self):
@@ -412,7 +412,7 @@ class ValidationTests(LedgerCase):
 
     def test_concluded_intent_must_carry_a_charge(self):
         def m(obj):
-            obj["intents"] = [{"launch_id": "L", "action_id": "a", "attempt": 1, "seat": None,
+            obj["intents"] = [{"launch_id": "L", "action_id": "a", "attempt": 1, "launch": None,
                                "reserved_usd": 1.0, "reserved_minutes": 1.0, "locks": [],
                                "state": "concluded", "outcome": "done", "success": True,
                                "charged_usd": None}]
@@ -460,7 +460,7 @@ class ValidationTests(LedgerCase):
     def test_save_refuses_a_nul_in_a_key_field_and_writes_nothing(self):
         led = self.good()
         before = self.path_of("bk", "J").read_bytes()
-        led.owners = {"group\0x": "seat"}
+        led.owners = {"group\0x": "launch"}
         with self.assertRaises(ValueError):
             led.save()
         self.assertEqual(self.path_of("bk", "J").read_bytes(), before)

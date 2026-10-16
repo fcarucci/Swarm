@@ -101,7 +101,7 @@ def open_question(ctx, board, job, actor, to, text, options=None, default=None, 
             expires = ((ctx.cfg or {}).get('drive') or {}).get('question_expiry', DEFAULT_CFG['question_expiry'])
         if blocks is None and actor != 'human':
             blocks = actor
-    seat = actor if drive and actor != 'human' else None
+    launch = actor if drive and actor != 'human' else None
     until = None
     if expires:
         epoch = cli.wait_deadline(None, expires, board.now().timestamp())
@@ -110,7 +110,7 @@ def open_question(ctx, board, job, actor, to, text, options=None, default=None, 
     with board._blocker_lock(job):
         b = board.open_blocker(job, 'question', to, text, until=until,
                                default_value=default, created_by=actor,
-                               seat=seat, generation=generation if drive else None)
+                               launch=launch, generation=generation if drive else None)
         save_question(ctx, board, b, {'text': text, 'options': options, 'default': default,
                                      'blocks': blocks, 'asked_by': actor})
     pointer = f' (answer: swarm answer {b.id} ...)'

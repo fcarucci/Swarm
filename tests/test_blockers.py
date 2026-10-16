@@ -198,14 +198,14 @@ class BlockerContract:
             [e.event for e in self.b.blocker_events(question.id)], ["opened", "overdue"]
         )
 
-    def test_seat_and_generation_round_trip(self):
-        a = self.b.open_blocker("j", "question", "@EL", "which seat", seat="eng-a", generation=1)
-        self.assertEqual((a.seat, a.generation), ("eng-a", 1))
-        self.assertEqual(self.b.blocker(a.id).seat, "eng-a")
+    def test_launch_and_generation_round_trip(self):
+        a = self.b.open_blocker("j", "question", "@EL", "which launch", launch="eng-a", generation=1)
+        self.assertEqual((a.launch, a.generation), ("eng-a", 1))
+        self.assertEqual(self.b.blocker(a.id).launch, "eng-a")
         self.assertEqual(self.b.blockers("j")[0].generation, 1)
         plain = self.b.open_blocker("j", "question", "human", "anything")
-        self.assertEqual((plain.seat, plain.generation), (None, None))
-        self.assertEqual(self.b.blocker(plain.id).seat, None)
+        self.assertEqual((plain.launch, plain.generation), (None, None))
+        self.assertEqual(self.b.blocker(plain.id).launch, None)
 
 
 class MemoryBlockers(BlockerContract, unittest.TestCase):
@@ -497,7 +497,7 @@ class MigrationContract:
         # schema 25 adds the typed-verdict columns the same way (the old fixture has none of them)
         typed = (("verdict_scope", "TEXT"), ("verdict_generation", "INTEGER"),
                  ("verdict_candidate", "TEXT"), ("verdict_req", "TEXT"))
-        # schema 25 also adds blockers.seat and blockers.generation (the drive seat a blocker concerns)
+        # schema 25 also adds the persisted blocker column and blockers.generation (the drive launch a blocker concerns)
         if self.h.name == "sqlite":
             self.h._db().execute("ALTER TABLE agents ADD COLUMN title TEXT")
             for column, decl in typed:

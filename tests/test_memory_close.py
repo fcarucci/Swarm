@@ -105,7 +105,7 @@ class CloseGateTests(HindsightEnv):
         self.assertIn(name, err)
 
 
-# --- the drive learner seat (driver_model._learn_first): a terminal verdict closes only after the step ----------
+# --- the drive learner launch (driver_model._learn_first): a terminal verdict closes only after the step ----------
 
 import unittest  # noqa: E402
 
@@ -122,7 +122,7 @@ def _learn_action_id():
     return a
 
 
-class DriverLearnSeatTests(unittest.TestCase):
+class DriverLearnLaunchTests(unittest.TestCase):
     def test_pending_learnings_launch_the_learner_before_the_close(self):
         (a,) = dm.next_actions(F.snap(goal_verdict=MET, learn_pending=True), ARTIFEXT_CFG)
         self.assertEqual((a.kind, a.prompt_kind), ("launch", "learn"))
@@ -133,16 +133,16 @@ class DriverLearnSeatTests(unittest.TestCase):
 
     def test_a_crashed_driver_resumes_the_unconcluded_learn_launch(self):
         """The learn launch is an ordinary ledger intent: after a crash mid-harvest it is still open, so the
-        next pass waits for that seat instead of launching a second learner or closing."""
+        next pass waits for that launch instead of launching a second learner or closing."""
         action_id = _learn_action_id().action_id
-        open_intent = F.intent(state="running", seat="learner", action_id=action_id, launch_id="L1")
+        open_intent = F.intent(state="running", launch="learner", action_id=action_id, launch_id="L1")
         s = F.snap(goal_verdict=MET, learn_pending=True, ledger=F.L(intents=[open_intent]))
         (a,) = dm.next_actions(s, ARTIFEXT_CFG)
         self.assertEqual((a.kind, a.responsible), ("nothing", "learner"))
 
     def test_exhausted_learn_attempts_hold_the_job_open_instead_of_closing(self):
         action_id = _learn_action_id().action_id
-        failed = [F.intent(state="concluded", outcome="error", success=False, seat="learner",
+        failed = [F.intent(state="concluded", outcome="error", success=False, launch="learner",
                            action_id=action_id, launch_id=f"L{i}") for i in range(ARTIFEXT_CFG["max_attempts"])]
         s = F.snap(goal_verdict=MET, learn_pending=True, ledger=F.L(intents=failed))
         (a,) = dm.next_actions(s, ARTIFEXT_CFG)
@@ -150,27 +150,27 @@ class DriverLearnSeatTests(unittest.TestCase):
         self.assertIn("not closing", a.reason)
 
 
-class LearnSeatProtocolTests(unittest.TestCase):
-    """The learner seat's `swarm learn` goes through the broker's typed schema: harvest, --from, --none."""
+class LearnLaunchProtocolTests(unittest.TestCase):
+    """The learner launch's `swarm learn` goes through the broker's typed schema: harvest, --from, --none."""
 
     def test_learn_verbs_parse_and_build(self):
-        from swarm import seatproto
-        req = seatproto.parse_cli(["learn", "--harvest"], ".")
+        from swarm import launchproto
+        req = launchproto.parse_cli(["learn", "--harvest"], ".")
         self.assertEqual(req["command"], "learn")
         self.assertTrue(req["fields"]["harvest"])
-        req = seatproto.parse_cli(["learn", "--none", "nothing durable came out of this run"], ".")
-        cmd, fields = seatproto.validate(req, "J")
+        req = launchproto.parse_cli(["learn", "--none", "nothing durable came out of this run"], ".")
+        cmd, fields = launchproto.validate(req, "J")
         self.assertEqual((cmd, fields["job"]), ("learn", "J"))
-        argv = seatproto.build_argv(cmd, fields, key="k", name="n", file_path=lambda c: "/x")
+        argv = launchproto.build_argv(cmd, fields, key="k", name="n", file_path=lambda c: "/x")
         self.assertIn("--none=nothing durable came out of this run", argv)
         self.assertEqual(argv[0:1], ["learn"])
 
     def test_the_learner_prompt_command_sequence_goes_through_the_broker(self):
-        """Every `swarm learn` the learner prompt asks for parses on the seat side, validates with the seat's
+        """Every `swarm learn` the learner prompt asks for parses on the launch side, validates with the launch's
         own job filled in by the broker, and builds a CLI argv the CLI's own parser accepts."""
         import os
         import tempfile
-        from swarm import cli, seatproto
+        from swarm import cli, launchproto
         with tempfile.TemporaryDirectory(dir=os.path.dirname(__file__)) as d:
             facts = os.path.join(d, "facts.txt")
             with open(facts, "w") as fh:
@@ -179,18 +179,18 @@ class LearnSeatProtocolTests(unittest.TestCase):
                          ["learn", "--bank", "coding", "--from", "facts.txt"],
                          ["learn", "--none", "nothing durable came out of this run"]):
                 with self.subTest(argv=argv):
-                    req = seatproto.parse_cli(argv, d)
-                    cmd, fields = seatproto.validate(req, "J")
-                    built = seatproto.build_argv(cmd, fields, key="k", name="n", file_path=lambda c: facts)
+                    req = launchproto.parse_cli(argv, d)
+                    cmd, fields = launchproto.validate(req, "J")
+                    built = launchproto.build_argv(cmd, fields, key="k", name="n", file_path=lambda c: facts)
                     ns = cli._parser().parse_args(built)
                     self.assertEqual((ns.cmd, ns.job), ("learn", "J"))
 
-    def test_a_seat_may_run_learn_remember_and_recall(self):
-        """The seat's settings allow the memory commands (seathome.SEAT_ALLOW): a learner's `swarm learn
-        --harvest`, `--from` and `--none`, and every seat's `swarm remember` (the stop gate) are not denied."""
+    def test_a_launch_may_run_learn_remember_and_recall(self):
+        """The launch's settings allow the memory commands (launchhome.LAUNCH_ALLOW): a learner's `swarm learn
+        --harvest`, `--from` and `--none`, and every launch's `swarm remember` (the stop gate) are not denied."""
         import fnmatch
-        from swarm.supervisor import seathome
-        rules = [r[len("Bash("):-1].replace(":*", "*") for r in seathome.SEAT_ALLOW]
+        from swarm.supervisor import launchhome
+        rules = [r[len("Bash("):-1].replace(":*", "*") for r in launchhome.LAUNCH_ALLOW]
         for cmd in ("swarm learn --harvest", "swarm learn --bank coding --from facts.txt",
                     "swarm learn --none nothing durable here", "swarm learn --list-banks",
                     "swarm remember --none nothing worth keeping", "swarm recall why did it fail"):
@@ -315,7 +315,7 @@ from test_drive_pass import PassCase  # noqa: E402
 
 
 class LearnHoldAcrossTheDeadlineTests(PassCase):
-    """Multi-pass, through the real driver, model and deadline dispatcher: a MET whose learner seat ran out of
+    """Multi-pass, through the real driver, model and deadline dispatcher: a MET whose learner launch ran out of
     attempts holds; the pass records the hold in the ledger; a later pass past every deadline neither records
     UNREACHABLE nor closes."""
 
@@ -339,7 +339,7 @@ class LearnHoldAcrossTheDeadlineTests(PassCase):
         from swarm.supervisor import driver_life, ledger as ledger_mod
         led = self.job()
         action_id = _learn_action_id().action_id
-        led.intents = [ledger_mod.Intent(launch_id=f"L{i}", action_id=action_id, attempt=i + 1, seat="learner",
+        led.intents = [ledger_mod.Intent(launch_id=f"L{i}", action_id=action_id, attempt=i + 1, launch="learner",
                                          reserved_usd=0.0, reserved_minutes=0.0, locks=[], state="concluded",
                                          outcome="error", success=False, charged_usd=0.0)
                        for i in range(dm.DEFAULT_CFG["max_attempts"])]

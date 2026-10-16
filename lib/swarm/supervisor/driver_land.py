@@ -26,7 +26,7 @@ CI_TIMEOUT = 25.0
 
 
 class Held:
-    """The lease claim of one landing: the launch that holds the keys, and the seat it borrowed."""
+    """The lease claim of one landing: the launch that holds the keys, and the launch it borrowed."""
 
     def __init__(self, launch_id: str, holder: str, restart_id: int | None, launch_row_id: int | None, adopted: bool):
         self.launch_id, self.holder, self.restart_id, self.launch_row_id, self.adopted = (
@@ -39,7 +39,7 @@ def action_id(led, request: Request, branch: str) -> str:
 
 def claim_leases(board, cfg: dict, env: LandEnv, job: str, request: Request, dests: list, action: str) -> Held:
     """Claim every destination's land lease, all or none, through the atomic launch claim on the
-    group's integrator seat. A lease of another job or host is never taken over (LeaseHeld). Leases an
+    group's integrator launch. A lease of another job or host is never taken over (LeaseHeld). Leases an
     earlier, interrupted pass of this same landing left behind are adopted."""
     led = env.led
     branch, _ = land.parse_artifact(request.artifact)
@@ -54,26 +54,26 @@ def claim_leases(board, cfg: dict, env: LandEnv, job: str, request: Request, des
                                                                   ["an earlier landing still to be fenced"]))
         first = next(iter(held.values()))
         row = next((r for r in board.restarts(job) if r.launch_id == first.launch_id and r.ended_at is None), None)
-        seat = board.get_launch(job, led.generation, land.integrator_seat(branch))   # a dead pass left it `running`
-        return Held(first.launch_id, action, row.id if row else None, seat.id if seat else None, True)
-    seat = board.get_launch(job, led.generation, land.integrator_seat(branch))
-    if seat is None or seat.state not in ("queued", "done"):
+        launch = board.get_launch(job, led.generation, land.integrator_launch(branch))   # a dead pass left it `running`
+        return Held(first.launch_id, action, row.id if row else None, launch.id if launch else None, True)
+    launch = board.get_launch(job, led.generation, land.integrator_launch(branch))
+    if launch is None or launch.state not in ("queued", "done"):
         raise LandPending("the integrator launch is still running")
-    if seat.state == "done":
-        seat = board.queue_launch(job, led.generation, seat.name, role=seat.role, harness=seat.harness,
-                                  model=seat.model, workdir=seat.workdir, brief=seat.brief,
-                                  queued_by=seat.queued_by)
+    if launch.state == "done":
+        launch = board.queue_launch(job, led.generation, launch.name, role=launch.role, harness=launch.harness,
+                                  model=launch.model, workdir=launch.workdir, brief=launch.brief,
+                                  queued_by=launch.queued_by)
     attempt = 1 + sum(1 for r in board.restarts(job) if r.action_id == action)
     launch_id = f"land-{request.id}-{attempt}"
     restart = board.claim_drive_launch(
         job=job, generation=led.generation, action_id=action, attempt=attempt, launch_id=launch_id,
-        launch_row_id=seat.id, queue_version=seat.revision, harness=seat.harness, reserve_usd=0, reserve_minutes=1,
+        launch_row_id=launch.id, queue_version=launch.revision, harness=launch.harness, reserve_usd=0, reserve_minutes=1,
         locks=keys, lock_seconds=land.LEASE_SECONDS,
         max_host_running=cfg.get("max_host_running"),
         max_job_running=int(cfg.get("max_concurrent_sessions", 4)))
     if restart is None:
         raise LeaseHeld("the land lease could not be claimed (held elsewhere, or the host's launch limit)")
-    return Held(launch_id, action, restart.id, seat.id, False)
+    return Held(launch_id, action, restart.id, launch.id, False)
 
 
 def release_leases(board, env: LandEnv, job: str, held: Held, outcome: str) -> None:
@@ -119,7 +119,7 @@ def _set_mark(env: LandEnv, branch: str, key: str, on: bool) -> None:
 
 def _marks(env: LandEnv, branch: str, res: LandResult) -> None:
     """A lease hold feeds `lease_held_since` ([F19]); any other pending state (CI not final, fetch not done, the
-    integrator seat busy) feeds `land_pending_since`, so no hold is unbounded; a landed or refused request clears both."""
+    integrator launch busy) feeds `land_pending_since`, so no hold is unbounded; a landed or refused request clears both."""
     _set_mark(env, branch, LEASE_MARK, res.pending and res.lease_held)
     _set_mark(env, branch, PENDING_MARK, res.pending and not res.lease_held)
 
@@ -173,7 +173,7 @@ def _group_mark(branch: str) -> str:
 def run(board, cfg: dict, env: LandEnv, job: str) -> list:
     """Execute the job's pending land requests, once. Returns [(Request, LandResult)].
 
-    Groups are independent: a pending request (lease held, CI or fetch not done, the seat busy) holds only the later
+    Groups are independent: a pending request (lease held, CI or fetch not done, the launch busy) holds only the later
     requests of its own group, which keeps their order; other groups go on. Each group has its own watermark
     (`land.request:<group>`), and `land.request` is the lowest id below which every request is settled."""
     done, held_groups, open_ids = [], set(), []

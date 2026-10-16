@@ -236,7 +236,7 @@ class ExpiryContract:
         self.assertEqual(self.sweep(), [])
         self.assertEqual(self.sweep(cap=0), [])
         self.assertEqual(self.status().status, "active")
-        # no orchestrator: a new agent joins, takes the judge seat, and a met verdict is recorded
+        # no orchestrator: a new agent joins, takes the judge launch, and a met verdict is recorded
         self.b.allocate_name("late", "j")
         self.assertTrue(self.b.claim_judge("late", "j"))
         self.assertTrue(self.b.record_verdict("j", self.b.active_agent_name("late"), "met", "done", None))

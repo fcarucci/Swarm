@@ -41,10 +41,10 @@ def real_tmp() -> str:
 
 class FakePerson:
     """Task 6b's swarm.person as the activation code calls it until that module is in this build: a person at
-    a terminal, the requester session that owns the job, or a refusal (seat sessions first). Like the real
+    a terminal, the requester session that owns the job, or a refusal (launch sessions first). Like the real
     require, it returns the authority or raises PermissionError."""
     tty = True
-    seat_sessions = ()
+    launch_sessions = ()
 
     class PersonRefused(PermissionError):
         """6b's swarm.person.PersonRefused, which drive_cli's dispatcher catches."""
@@ -67,7 +67,7 @@ class FakePerson:
     def require(cls, action, job, *, board_key, who, env=None, confirm=None, ancestor=None):
         from swarm import enrolment as en, hosts as ho
         sid = ho.cli_session_id(os.environ)
-        if sid and sid in cls.seat_sessions:
+        if sid and sid in cls.launch_sessions:
             raise PermissionError(f"refused: {action} is a person's action; this is an enrolled agent session")
         owner = en.find_job_owner(board_key, job)
         if sid and owner is not None and owner.session_id == sid:
@@ -323,7 +323,7 @@ class CredentialAndWorkdirTests(HomeCase):
 class PinnedGitTests(HomeCase):
     """[G2] every git call that takes a pinned URL: the URL is never an option (`--` before it, and a URL
     starting with "-" is refused everywhere it enters), the transports are pinned (https, ssh, file), and
-    git runs in a neutral directory with no system or global config, so config a seat wrote (a work dir's
+    git runs in a neutral directory with no system or global config, so config a launch wrote (a work dir's
     .git/config, ~/.gitconfig) cannot rewrite the URL or enable a protocol."""
 
     def git(self, *args, cwd=None):
@@ -373,7 +373,7 @@ class PinnedGitTests(HomeCase):
 
     @posix_only("drive mode is not supported on Windows")
     def test_planted_insteadof_in_the_workdir_config_does_not_run(self):
-        """The reviewer's second PoC: the work dir's .git/config (seat-writable) rewrites the URL to ext::
+        """The reviewer's second PoC: the work dir's .git/config (launch-writable) rewrites the URL to ext::
         and allows ext. With the process inside that work dir, the read still goes to the pinned URL."""
         repo, head = self.upstream()
         work = self.home / "work"
@@ -469,8 +469,8 @@ class PinnedGitTests(HomeCase):
 
 
 class ConfigDirTests(HomeCase):
-    """[G2a] a gh helper's GH_CONFIG_DIR must be private: a seat that can write it can plant hosts.yml, and
-    the pushes then use the seat's token."""
+    """[G2a] a gh helper's GH_CONFIG_DIR must be private: a launch that can write it can plant hosts.yml, and
+    the pushes then use the launch's token."""
 
     def setUp(self):
         super().setUp()
@@ -725,7 +725,7 @@ class DriveCli(Env):
         tmp = mock.patch.object(da, "TMP_ROOTS", ())   # the suite's temp dir is the temp dir; see HomeCase
         tmp.start()
         self.addCleanup(tmp.stop)
-        FakePerson.tty, FakePerson.seat_sessions = True, ()
+        FakePerson.tty, FakePerson.launch_sessions = True, ()
         # `from swarm import person` reads the package attribute first, so an earlier import of the real
         # module would shadow a sys.modules stub: replace both, whatever was imported before this test
         person = mock.patch.dict(sys.modules, {"swarm.person": FakePerson})
@@ -760,7 +760,7 @@ class DriveCli(Env):
     def plan(self, job="J", **kw):
         return da.build_plan(self.cfg, ns(job=job, workdir=str(self.work), session="sess-1", **kw), GOAL)
 
-    def test_activate_drive_creates_ledger_and_lead_seat(self):
+    def test_activate_drive_creates_ledger_and_lead_launch(self):
         rc, out, err = self.activate("--drive", "--workdir", str(self.work))
         self.assertEqual(rc, 0, err)
         self.assertIsNotNone(self.ledger_of())
@@ -1138,11 +1138,11 @@ class DriveCli(Env):
         led = self.ledger_of()
         self.assertEqual((led.generation, led.generation_requested), (1, 2))
 
-    def test_reactivation_refused_for_a_seat_session(self):
+    def test_reactivation_refused_for_a_launch_session(self):
         with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "sess-1"}):
             self.assertEqual(self.activate("--workdir", str(self.work))[0], 0)
-        FakePerson.seat_sessions = ("seat-x",)
-        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "seat-x"}):
+        FakePerson.launch_sessions = ("launch-x",)
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "launch-x"}):
             rc, _, err = self.activate("--workdir", str(self.work))
         self.assertEqual(rc, 1)
         self.assertIn("enrolled agent session", err)

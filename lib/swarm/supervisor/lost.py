@@ -46,7 +46,7 @@ def capture_final(board, cfg: dict, js, a, deadline: float | None = None, path=N
     from swarm.supervisor.settings import log
     if not transcripts.enabled(cfg) or not transcripts.owns(a, cfg):
         return False
-    path = path or transcript_path(js, a, cfg)   # `path`: a jailed seat's transcript the runner kept (Task 20)
+    path = path or transcript_path(js, a, cfg)   # `path`: a jailed launch's transcript the runner kept (Task 20)
     if path is None:
         log(f"transcript of {a.name} ({a.agent_key}) on {js.job} not found; not captured")
         return False

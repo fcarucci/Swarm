@@ -17,7 +17,7 @@ Where each record lives (the carriers written by the board, hook, goal-ready and
 - goal_ready: a `GOAL-READY <candidate> req=<digest>` message; record id = message id. `req` must equal the digest
   of the ledger's pinned requirements; `added_requirements` come from the ledger, never from the message.
 - post: a FINALIZE_BLOCKED message (the fix trigger); record id = message id, rev 1.
-- ask (question): an open blocker with a seat and generation; record id = blocker id, rev 1.
+- ask (question): an open blocker with a launch and generation; record id = blocker id, rev 1.
 - launches: every stored launch of this generation is admitted without a receipt.
 
 - land: the ledger's integrated[group] entry, which names its land record (`land_id`, `land_rev`).
@@ -133,7 +133,7 @@ def _handoffs(msgs: list, since: dt.datetime | None, rc: _Receipts) -> list[dm.H
         found = rc.get("done", m.id, 1, row)
         if found is not None:
             out.append(dm.HandoffView(artifact=h.artifact, group=_group(h.artifact),
-                                      by=found.seat or h.agent_name, at=h.created_at, receipt_id=m.id))
+                                      by=found.launch or h.agent_name, at=h.created_at, receipt_id=m.id))
     return out
 
 
@@ -239,7 +239,7 @@ def _bind_verdicts(records: list[dict], msgs: list, rc: _Receipts) -> list[dm.Ve
             open=rec.get("open") if type(rec.get("open")) is int else None,
             progress=rec.get("progress") if type(rec.get("progress")) is bool else None,
             reason=rec.get("reason") or "", next=rec.get("next_steps") or "",
-            by=found.seat or rec.get("judge"), at=_ts(rec.get("at")), receipt_id=mid))
+            by=found.launch or rec.get("judge"), at=_ts(rec.get("at")), receipt_id=mid))
     return out
 
 
@@ -300,37 +300,37 @@ def _goal_ready(msgs: list, led: Any, gen: int, rc: _Receipts) -> dict | None:
 def _questions(board: Any, job: str, gen: int, rc: _Receipts) -> dict[str, list[dm.Question]]:
     out: dict[str, list[dm.Question]] = {}
     for b in board.blockers(job, include_closed=False):
-        if b.seat is None or b.generation != gen:
+        if b.launch is None or b.generation != gen:
             continue
         row = {"kind": "ask", "id": str(b.id), "rev": 1, "question": b.reason,
                "until": canonical_until(b.until), "default": b.default_value}
         if rc.get("ask", b.id, 1, row) is None:
             continue
-        out.setdefault(b.seat, []).append(dm.Question(
-            id=b.id, job=job, seat=b.seat, generation=gen, text=b.reason, default=b.default_value,
+        out.setdefault(b.launch, []).append(dm.Question(
+            id=b.id, job=job, launch=b.launch, generation=gen, text=b.reason, default=b.default_value,
             until=b.until, receipt_id=b.id))
     return out
 
 
 def _wakes(board: Any, job: str, launches: dict[str, dm.LaunchView], msgs: list, events: list, led: Any,
            rc: _Receipts) -> dict[str, list[int]]:
-    """Per seat, the receipted posts and the events to its agent above that seat's own watermarks. Message ids and
-    event ids are separate id spaces, so the ledger keeps a message watermark per seat (`msg:<seat>`) and an acknowledgement per event (`evack:<seat>:<id>`).
-    The agent is looked up among departed members too: a resumable seat's agent has usually left."""
+    """Per launch, the receipted posts and the events to its agent above that launch's own watermarks. Message ids and
+    event ids are separate id spaces, so the ledger keeps a message watermark per launch (`msg:<launch>`) and an acknowledgement per event (`evack:<launch>:<id>`).
+    The agent is looked up among departed members too: a resumable launch's agent has usually left."""
     names = {a.agent_key: a.name for a in board.agents(job, include_departed=True)}
     out: dict[str, list[int]] = {}
-    for seat, st in launches.items():
+    for launch, st in launches.items():
         name = names.get(st.agent_key) if st.agent_key else None
         if name is None:
-            continue                                    # nothing has joined for this seat yet
-        msg_mark = led.watermarks.get(f"msg:{seat}", 0)
+            continue                                    # nothing has joined for this launch yet
+        msg_mark = led.watermarks.get(f"msg:{launch}", 0)
         ids = [m.id for m in msgs if m.to_agent == name and m.id > msg_mark
                and rc.get("post", m.id, 1, {"kind": "post", "id": str(m.id), "rev": 1, "to": m.to_agent,
                                             "body": m.message}) is not None]
         ids += [e.id for e in events if e.to and e.to.lower() == name.lower()
-                and f"evack:{seat}:{e.id}" not in led.watermarks]   # acknowledged one by one, never a high-water mark
+                and f"evack:{launch}:{e.id}" not in led.watermarks]   # acknowledged one by one, never a high-water mark
         if ids:
-            out[seat] = sorted(ids)
+            out[launch] = sorted(ids)
     return out
 
 
@@ -375,7 +375,7 @@ def read(board: Any, led: Any, job: str, *, cfg: dict, now: dt.datetime) -> dm.S
         job=job, generation=gen, goal=stored.goal if stored else None,
         status=stored.status if stored else "missing", halted=led.halted is not None,
         ledger=led, launches=launches,
-        live={i.seat for i in led.intents if i.state in ("claiming", "claimed") and i.seat},
+        live={i.launch for i in led.intents if i.state in ("claiming", "claimed") and i.launch},
         handoffs=handoffs, reviews=_reviews(msgs, rc), verdicts=verdicts,
         goal_verdict=goal_verdict, goal_ready=_goal_ready(msgs, led, gen, rc),
         questions=_questions(board, job, gen, rc),

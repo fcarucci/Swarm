@@ -2677,7 +2677,7 @@ def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="swarm", description=__doc__.split("\n\n")[0])
     p.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     sub = p.add_subparsers(dest="cmd", required=True)
-    from swarm import drive_cli; drive_cli.register(sub, BOARD_COMMANDS, COMMANDS)   # drive control (seat, halt, ...)
+    from swarm import drive_cli; drive_cli.register(sub, BOARD_COMMANDS, COMMANDS)   # drive control (launch, halt, ...)
     ini = sub.add_parser("init", help="set up: config, launcher, board; host settings only with --apply-settings")
     ini.add_argument("--no-hooks", action="store_true", help="ignored (hooks come from the plugin)")
     ini.add_argument("--host", choices=["claude", "codex"], help="the host to set up (default: the one running this, "
@@ -2705,7 +2705,7 @@ def _parser() -> argparse.ArgumentParser:
                                           ".claude/hooks, .mcp.json, .codex, ...) for supervisor launches; "
                                           "interactive only")
     sva.add_argument("dir", help="the work dir whose current project configuration files you approve")
-    svi = svs.add_parser("seat-isolation", help="drive seats' jail on this host: show it, or (a person at a "
+    svi = svs.add_parser("launch-isolation", help="drive launches' jail on this host: show it, or (a person at a "
                                                 "terminal) turn it off or back on")
     svi.add_argument("state", nargs="?", choices=["on", "off"])
     un = sub.add_parser("uninstall", help="remove what Swarm set up outside the plugin: a legacy "
@@ -2764,18 +2764,18 @@ def _parser() -> argparse.ArgumentParser:
     jn.add_argument("--role")
     jn.add_argument("--title", help="a short display label for the agent (at most 60 characters), "
                                     "shown by who, status and watch; not the role")
-    seat = jn.add_mutually_exclusive_group()
-    seat.add_argument("--judge", action="store_true",
-                      help="take the job's judge seat (for agents outside Claude Code, which get no hooks)")
-    seat.add_argument("--verifier", action="store_true",
+    launch = jn.add_mutually_exclusive_group()
+    launch.add_argument("--judge", action="store_true",
+                      help="take the job's judge launch (for agents outside Claude Code, which get no hooks)")
+    launch.add_argument("--verifier", action="store_true",
                       help="join as a read-only verifier (for agents outside Claude Code)")
     tt = sub.add_parser("title", help="set, replace or clear (with an empty text) an agent's display title "
-                                      "(a short seat label such as EL or 'Eng: board view'); not the role")
+                                      "(a short launch label such as EL or 'Eng: board view'); not the role")
     tt.add_argument("--job", required=True)
     tt.add_argument("--as", dest="name"); tt.add_argument("--key")
     tt.add_argument("text", nargs="*", help="the title; empty (\"\") clears it")
     po = sub.add_parser("post", help="post a message; --to NAME, or --to @EL|@PM|@QA|@judge|@<role> for "
-                                     "whoever holds that seat now (rejected if nobody does)")
+                                     "whoever holds that launch now (rejected if nobody does)")
     po.add_argument("--job", required=True); po.add_argument("--as", dest="name")
     po.add_argument("--key", help="the agent's key (instead of --as: its name is looked up)")
     po.add_argument("--to", help="an agent's name, or @role (@EL, @PM, @QA, @judge, @build_engineer, ...)")
@@ -3278,7 +3278,7 @@ def cmd_activate(cfg: dict, args) -> int:
             from swarm.supervisor import pipeline, settings as supervise_settings
             if pipeline.settings(cfg)["enabled"] and supervise_settings.enabled(cfg) and not args.no_supervise:
                 print(f"the job has a goal: publish a worker hand-off with swarm done; the supervisor "
-                      f"starts the judge. An explicitly seated judge uses:\n{JUDGE_TAG_LINE}")
+                      f"starts the judge. An explicitly launched judge uses:\n{JUDGE_TAG_LINE}")
             else:
                 print(f"the job has a goal: spawn exactly one judge, with this line too in its prompt; it "
                       f"can't complete until the judge's verdict is met:\n{JUDGE_TAG_LINE}")
@@ -3528,9 +3528,9 @@ def _cmd_supervise(cfg: dict, args) -> int:
         return 1
     if getattr(args, "scmd", None) == "approve":
         return cmd_supervise_approve(cfg, args)
-    if getattr(args, "scmd", None) == "seat-isolation":
-        from swarm.supervisor import seathome
-        return seathome.cmd_seat_isolation(cfg, args)
+    if getattr(args, "scmd", None) == "launch-isolation":
+        from swarm.supervisor import launchhome
+        return launchhome.cmd_launch_isolation(cfg, args)
     from swarm.supervisor.command import cmd_supervise
     return cmd_supervise(cfg, args)
 
@@ -4418,7 +4418,7 @@ def _board_status(board, cfg: dict, args) -> None:
 
 
 def _drive_join_judge_refused(board, cfg: dict, args) -> bool:
-    """In a drive job, `join --judge` grants nothing unless the joining session is the driver's judge seat
+    """In a drive job, `join --judge` grants nothing unless the joining session is the driver's judge launch
     (drivegate.is_drive_judge: its launch record and receipted role). Plain jobs: never refused here."""
     from swarm import drivegate   # (hooks.py is not in the Codex directory edition)
     if not drivegate.drive_job(cfg, args.job):
@@ -4428,7 +4428,7 @@ def _drive_join_judge_refused(board, cfg: dict, args) -> bool:
 
 def _board_join(board, cfg: dict, args) -> int:
     """Allocate (or return) the agent's name. --judge / --verifier give agents that run outside
-    Claude Code the seat the hooks give a tagged subagent: they have no hooks, so the CLI is how
+    Claude Code the launch the hooks give a tagged subagent: they have no hooks, so the CLI is how
     they read, post and record verdicts."""
     name = board.allocate_name(args.key, args.job, agentview.default_role(args.key, args.role))
     if board.active_agent_name(args.key) is None:   # allocate_name never revives a stuck close
@@ -4436,10 +4436,10 @@ def _board_join(board, cfg: dict, args) -> int:
               f"can't rejoin: its replacement does the work", file=sys.stderr)
         return 1
     if args.judge and _drive_join_judge_refused(board, cfg, args):
-        print(f"refused: job {args.job} is driven: only the driver's judge seat is its judge (a join "
+        print(f"refused: job {args.job} is driven: only the driver's judge launch is its judge (a join "
               f"cannot claim it)", file=sys.stderr)
         return 1
-    if args.judge and not board.take_judge_seat(args.key, args.job):
+    if args.judge and not board.take_judge_launch(args.key, args.job):
         js = board.job_status(args.job)
         print(f"refused: {term_safe(js.judge) if js and js.judge else 'another agent'} is already the judge of "
               f"job {args.job} (one per job)", file=sys.stderr)
@@ -4772,7 +4772,7 @@ def _run_command(cfg: dict, args) -> int:
     from swarm.spool import flush_spool, spool_post, spool_verdict
     if args.cmd == "join" and not args.key:
         print("swarm join: --key is required (a stable id for this agent).\n"
-              "A judge in Claude Code does NOT join: its hooks seated it when it started (the spawn "
+              "A judge in Claude Code does NOT join: its hooks launched it when it started (the spawn "
               "prompt carries [swarm role: judge]). Record the verdict with no join and no --as:\n"
               f"  swarm verdict --job {args.job} met \"<reason>\"   (or not_met --reason ... --next ...)",
               file=sys.stderr)

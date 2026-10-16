@@ -67,11 +67,11 @@ class SnapshotCase:
     def read(self, led=None, now=NOW):
         return ds.read(self.b, led or self.led, "J", cfg={}, now=now)
 
-    def receipt(self, kind, record_id, rev, row, *, generation=1, seat="a", expires=None):
+    def receipt(self, kind, record_id, rev, row, *, generation=1, launch="a", expires=None):
         """Write the receipt the hook would write for this record and row (decision fields of `row`)."""
         r = receipts.Receipt(
             board_key=BK, job="J", generation=generation, incarnation=INC, action_id="gen1|fix|a|-|1|-",
-            attempt=1, seat=seat, kind=kind, record_id=str(record_id), rev=rev,
+            attempt=1, launch=launch, kind=kind, record_id=str(record_id), rev=rev,
             content_sha=receipts.content_sha(kind, row), args_sha=receipts.args_sha(["swarm"]),
             expires_at=(NOW + dt.timedelta(hours=1)).timestamp() if expires is None else expires,
             destinations=row.get("destinations"))
@@ -96,7 +96,7 @@ class SnapshotCase:
         for i, chunk in enumerate(chunks):
             self.b.set_job_data("J", f"{key}.{i}", chunk)
 
-    def publish(self, rec, *, receipted=True, generation=1, seat="j", text=None, addressed=None):
+    def publish(self, rec, *, receipted=True, generation=1, launch="j", text=None, addressed=None):
         """Post a VERDICT message for `rec`, store its id in rec as message_id, and write the receipt the hook would
         write for it (the artifact, or the candidate of a goal or ruling verdict, is part of the row)."""
         msg = self.b.post("J", "judge", text or f"VERDICT {rec['verdict']}: {rec['reason']}", to=addressed)
@@ -106,7 +106,7 @@ class SnapshotCase:
                    "scope": rec["scope"], "generation": rec["generation"], "candidate": rec["candidate"],
                    "req": rec["req"],
                    "artifact": rec["artifact"] if rec["scope"] == "artifact" else None}
-            self.receipt("verdict", msg.id, 1, row, generation=generation, seat=seat)
+            self.receipt("verdict", msg.id, 1, row, generation=generation, launch=launch)
         return msg.id
 
     @staticmethod
@@ -128,7 +128,7 @@ class SnapshotCase:
         return requirements_digest(pins)
 
     # ---- hand-offs
-    def test_receipted_done_is_a_hand_off_attributed_to_its_seat(self):
+    def test_receipted_done_is_a_hand_off_attributed_to_its_launch(self):
         mid = self.done(f"feat/a@{SHA1}")
         handoffs = self.read().handoffs
         self.assertEqual([(h.artifact, h.group, h.by, h.receipt_id) for h in handoffs],
@@ -175,7 +175,7 @@ class SnapshotCase:
 
 
 
-    def test_seats_of_another_generation_are_not_read(self):
+    def test_launches_of_another_generation_are_not_read(self):
         st = self.request("b", generation=2)
         self.assertEqual(self.read().launches, {})
 
@@ -437,12 +437,12 @@ class SnapshotCase:
         dest = {"https://example.test/r.git": {"state": "verified", "sha": SHA1}}
         led = Ledger(board_key=BK, job="J", generation=1, incarnation=INC, integrated={
             "feat/a": {"landed": SHA1, "land_id": 7, "land_rev": 1, "destinations": dest}})
-        self.receipt("land", 7, 1, {"destinations": dest}, seat=None)
+        self.receipt("land", 7, 1, {"destinations": dest}, launch=None)
         self.assertEqual(self.read(led).integrated["feat/a"]["landed"], SHA1)
         pushed = {"https://example.test/r.git": {"state": "pushed", "sha": SHA1}}
         led2 = Ledger(board_key=BK, job="J", generation=1, incarnation=INC, integrated={
             "feat/a": {"landed": SHA1, "land_id": 8, "land_rev": 1, "destinations": pushed}})
-        self.receipt("land", 8, 1, {"destinations": pushed}, seat=None)
+        self.receipt("land", 8, 1, {"destinations": pushed}, launch=None)
         self.assertIsNone(self.read(led2).integrated["feat/a"]["landed"])
 
     def test_landed_from_the_entry_swarm_land_writes(self):
@@ -451,7 +451,7 @@ class SnapshotCase:
         dest = {"https://example.test/r.git": {"state": "verified", "sha": SHA1}}
         led = Ledger(board_key=BK, job="J", generation=1, incarnation=INC, integrated={
             "feat/a": {"landed": SHA1, "land_id": "25", "land_rev": 3}})
-        self.receipt("land", 25, 3, {"destinations": dest}, seat=None)
+        self.receipt("land", 25, 3, {"destinations": dest}, launch=None)
         self.assertEqual(self.read(led).integrated["feat/a"]["landed"], SHA1)
         for lid in ("x25", "", None, 2.5):
             with self.subTest(land_id=lid):
@@ -462,7 +462,7 @@ class SnapshotCase:
     def test_a_land_receipt_whose_digest_does_not_bind_its_destinations_lands_nothing(self):
         dest = {"https://example.test/r.git": {"state": "verified", "sha": SHA1}}
         r = receipts.Receipt(
-            board_key=BK, job="J", generation=1, incarnation=INC, action_id="a", attempt=1, seat=None, kind="land",
+            board_key=BK, job="J", generation=1, incarnation=INC, action_id="a", attempt=1, launch=None, kind="land",
             record_id="26", rev=1, content_sha=receipts.content_sha("land", {"destinations": {}}),
             args_sha=receipts.args_sha(["swarm"]), expires_at=(NOW + dt.timedelta(hours=1)).timestamp(),
             destinations=dest)
@@ -476,21 +476,21 @@ class SnapshotCase:
                 "https://example.test/b.git": {"state": "pushed", "sha": SHA1}}
         led = Ledger(board_key=BK, job="J", generation=1, incarnation=INC, integrated={
             "feat/a": {"landed": SHA1, "land_id": 9, "land_rev": 1, "destinations": dest}})
-        self.receipt("land", 9, 1, {"destinations": dest}, seat=None)
+        self.receipt("land", 9, 1, {"destinations": dest}, launch=None)
         self.assertIsNone(self.read(led).integrated["feat/a"]["landed"])
 
     def test_landed_needs_the_destination_sha_to_be_the_landed_sha(self):
         dest = {"https://example.test/a.git": {"state": "verified", "sha": SHA2}}
         led = Ledger(board_key=BK, job="J", generation=1, incarnation=INC, integrated={
             "feat/a": {"landed": SHA1, "land_id": 10, "land_rev": 1, "destinations": dest}})
-        self.receipt("land", 10, 1, {"destinations": dest}, seat=None)
+        self.receipt("land", 10, 1, {"destinations": dest}, launch=None)
         self.assertIsNone(self.read(led).integrated["feat/a"]["landed"])
 
     # ---- questions and goal-ready
     def test_question_counts_only_when_receipted(self):
         until = NOW + dt.timedelta(hours=4)
         bl = self.b.open_blocker("J", "ask", "lead", "which way?", until=until, default_value="left",
-                                 seat="a", generation=1)
+                                 launch="a", generation=1)
         self.assertEqual(self.read().questions, {})
         self.receipt("ask", bl.id, 1, {"kind": "ask", "id": str(bl.id), "rev": 1, "question": "which way?",
                                        "until": until.isoformat(), "default": "left"})
@@ -498,7 +498,7 @@ class SnapshotCase:
         self.assertEqual((q.text, q.default, q.receipt_id, q.generation), ("which way?", "left", bl.id, 1))
 
     def test_question_whose_blocker_names_another_generation_is_not_read(self):
-        bl = self.b.open_blocker("J", "ask", "lead", "which way?", seat="a", generation=2)
+        bl = self.b.open_blocker("J", "ask", "lead", "which way?", launch="a", generation=2)
         self.receipt("ask", bl.id, 1, {"kind": "ask", "id": str(bl.id), "rev": 1, "question": "which way?",
                                        "until": None, "default": None}, generation=1)
         self.assertEqual(self.read().questions, {})
@@ -508,13 +508,13 @@ class SnapshotCase:
         until_utc = NOW + dt.timedelta(hours=4)
         zone = dt.timezone(dt.timedelta(hours=2))
         bl = self.b.open_blocker("J", "ask", "lead", "which way?", until=until_utc.astimezone(zone),
-                                 default_value="left", seat="a", generation=1)
+                                 default_value="left", launch="a", generation=1)
         self.receipt("ask", bl.id, 1, {"kind": "ask", "id": str(bl.id), "rev": 1, "question": "which way?",
                                        "until": until_utc.isoformat(), "default": "left"})
         self.assertEqual(len(self.read().questions.get("a", [])), 1)
 
     def test_question_of_another_generation_is_not_read(self):
-        bl = self.b.open_blocker("J", "ask", "lead", "which way?", seat="a", generation=2)
+        bl = self.b.open_blocker("J", "ask", "lead", "which way?", launch="a", generation=2)
         self.receipt("ask", bl.id, 1, {"kind": "ask", "id": str(bl.id), "rev": 1, "question": "which way?",
                                        "until": None, "default": None}, generation=2)
         self.assertEqual(self.read().questions, {})
@@ -576,11 +576,11 @@ class SnapshotCase:
         self.assertEqual((gr["id"], gr["candidate"]), (newer, SHA2))
 
     # ---- the ledger's own state
-    def test_live_seats_are_those_with_a_claiming_or_claimed_intent(self):
+    def test_live_launches_are_those_with_a_claiming_or_claimed_intent(self):
         self.led.intents = [
-            Intent("L1", "gen1|seat|a|-|1|-", 1, "a", 1.0, 1.0, [], "claimed"),
-            Intent("L2", "gen1|seat|b|-|1|-", 1, "b", 1.0, 1.0, [], "claiming"),
-            Intent("L3", "gen1|seat|c|-|1|-", 1, "c", 1.0, 1.0, [], "concluded", "completed", True, 0.5),
+            Intent("L1", "gen1|launch|a|-|1|-", 1, "a", 1.0, 1.0, [], "claimed"),
+            Intent("L2", "gen1|launch|b|-|1|-", 1, "b", 1.0, 1.0, [], "claiming"),
+            Intent("L3", "gen1|launch|c|-|1|-", 1, "c", 1.0, 1.0, [], "concluded", "completed", True, 0.5),
         ]
         self.assertEqual(self.read().live, {"a", "b"})
 
@@ -635,7 +635,7 @@ class SnapshotCase:
 
 
 class WakeMapping(unittest.TestCase):
-    """_wakes on a stand-in board: the seat-to-agent mapping (departed members too), the two watermarks, the
+    """_wakes on a stand-in board: the launch-to-agent mapping (departed members too), the two watermarks, the
     receipt gate on posts, and events matched by name case-insensitively."""
 
     class Board:
@@ -655,8 +655,8 @@ class WakeMapping(unittest.TestCase):
             return object() if record_id in self.ok_ids else None
 
     @staticmethod
-    def launches(**by_seat):
-        return {s: SimpleNamespace(agent_key=k) for s, k in by_seat.items()}
+    def launches(**by_launch):
+        return {s: SimpleNamespace(agent_key=k) for s, k in by_launch.items()}
 
     @staticmethod
     def msg(id, to, text="x"):
@@ -671,7 +671,7 @@ class WakeMapping(unittest.TestCase):
         ok = [m.id for m in msgs] if ok is None else ok
         return ds._wakes(self.Board(agents, departed), "J", launches, list(msgs), list(events), led, self.Rc(ok))
 
-    def test_a_departed_members_post_wakes_its_resumable_seat(self):
+    def test_a_departed_members_post_wakes_its_resumable_launch(self):
         got = self.wakes(agents={"k1": "Gone Agent"}, launches=self.launches(a="k1"),
                          msgs=[self.msg(5, "Gone Agent")], departed=["k1"])
         self.assertEqual(got, {"a": [5]})
@@ -707,7 +707,7 @@ class WakeMapping(unittest.TestCase):
         self.assertEqual(self.wakes(agents={"k1": "A"}, launches=self.launches(a="k1"), events=[self.ev(10 ** 9, "a")],
                                     watermarks={f"evack:a:{10 ** 9}": 1}), {})
 
-    def test_an_event_ack_of_another_seat_does_not_count(self):
+    def test_an_event_ack_of_another_launch_does_not_count(self):
         got = self.wakes(agents={"k1": "A"}, launches=self.launches(a="k1"), events=[self.ev(50, "a")],
                          watermarks={"evack:b:50": 1, "event:a": 99})
         self.assertEqual(got, {"a": [50]})
@@ -717,7 +717,7 @@ class WakeMapping(unittest.TestCase):
                          events=[self.ev(7, "mixed case")])
         self.assertEqual(got, {"a": [7]})
 
-    def test_a_seat_without_an_agent_key_gets_no_wakes(self):
+    def test_a_launch_without_an_agent_key_gets_no_wakes(self):
         got = self.wakes(agents={"k1": "A"}, launches={"a": SimpleNamespace(agent_key=None)},
                          msgs=[self.msg(5, "A"), self.msg(6, None)])     # a broadcast is no one's wake
         self.assertEqual(got, {})
@@ -752,7 +752,7 @@ class GoalNeedsLandedWorkOnTheBoard:
         self.assertNotIn("goal", self.goal_prompts(), "a receipted but unlanded group is not ready")
         dest = {"https://example.test/r.git": {"state": "verified", "sha": SHA1}}
         self.led.integrated = {"feat/a": {"landed": SHA1, "land_id": 7, "land_rev": 1, "destinations": dest}}
-        self.receipt("land", 7, 1, {"destinations": dest}, seat=None)
+        self.receipt("land", 7, 1, {"destinations": dest}, launch=None)
         self.assertIn("goal", self.goal_prompts())
 
 

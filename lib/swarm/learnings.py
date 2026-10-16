@@ -37,7 +37,7 @@ UNHARVESTED_PREFIX = "memory.u."
 COVERED_PREFIX = "memory.c."
 TAG = re.compile(r"[a-z0-9][a-z0-9._-]{0,39}")
 MAX_TAGS = 8
-LEARNER_ROLE = "learner"          # the drive seat that runs the learnings step; never itself unharvested
+LEARNER_ROLE = "learner"          # the drive launch that runs the learnings step; never itself unharvested
 # Agent rows that are not workers of the job: the orchestrator and the driver's own one-write judge.
 _NOT_AGENTS = ("orchestrator",)
 _NOT_AGENT_PREFIXES = ("driver-", "learn:")
@@ -70,7 +70,7 @@ def _ts(text) -> _dt.datetime | None:
 # are provenance and go into the memory's METADATA.
 
 # What a tag must never look like: a namespaced id, a number, a date, a long hex or uuid run.
-ID_WORDS = ("job", "agent", "session", "run", "host", "seat", "key", "id", "uid", "uuid", "user", "parent",
+ID_WORDS = ("job", "agent", "session", "run", "host", "launch", "key", "id", "uid", "uuid", "user", "parent",
             "pid", "build", "pr", "issue", "ticket", "commit", "sha", "task", "launch", "attempt", "gen", "rev")
 ID_LIKE = re.compile(r".*[:=/].*"                                   # <prefix>:<x> (and = or /)
                      r"|(?:" + "|".join(ID_WORDS) + r")(?:[-_.].*)?"  # <id word>, <id word>-<x>: run-7, session-xyz
@@ -240,10 +240,10 @@ from swarm.board.base import PLACEHOLDER_REASONS as _PLACEHOLDER_REASONS  # noqa
 
 def _counts(a) -> bool:
     """Whether an agent row is a worker whose learnings matter (not the orchestrator, a coordinator, a
-    learner seat, the driver's own row or a launch placeholder)."""
+    learner launch, the driver's own row or a launch placeholder)."""
     key = a.agent_key or ""
     return not (key in _NOT_AGENTS or key.startswith(_NOT_AGENT_PREFIXES) or (a.role or "") in _NOT_ROLES
-                or key.startswith("pipeline-seat-") or (a.left_reason or "") in _PLACEHOLDER_REASONS)
+                or key.startswith("pipeline-launch-") or (a.left_reason or "") in _PLACEHOLDER_REASONS)
 
 
 def mark_ended(board, cfg: dict, job: str, a, why: str) -> None:

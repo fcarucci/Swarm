@@ -141,7 +141,7 @@ class FileBoardProcessTests(unittest.TestCase):
         self.assertEqual({a.agent_key: a.name for a in self.b.agents("j")}, res)
         self.validate()
 
-    def test_concurrent_judge_claims_seat_exactly_one(self):
+    def test_concurrent_judge_claims_launch_exactly_one(self):
         for i in range(10):
             self.b.allocate_name(f"k{i}", "j")
         res = _run(_claim_judge, [(self.path, f"k{i}") for i in range(10)])

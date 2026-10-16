@@ -5,7 +5,7 @@ Every command that creates or changes a control record prints, as its last stdou
 `swarm-record: kind=<kind> id=<n> rev=<n>`; a refusal says why on stderr and exits 1. Drive commands never
 spool (spec F18): an unreachable board is an error, not a queued post. Who may act (the caller is the one the
 PreToolUse hook attested for this exact command, swarm.person; never an environment variable):
-- goal-ready: the job's live lead seat (its own main session) or a person;
+- goal-ready: the job's live lead launch (its own main session) or a person;
 - halt, unhalt, drive repair: a person (person.require: the requester session or a confirmed tty);
 - review: an enrolled agent of the job, by its key.
 Kept out of cli.py (a 256 KiB file cap): cli.py only calls register()."""
@@ -112,7 +112,7 @@ def _record(kind: str, rec_id: int, rev: int) -> int:
 
 def _owner_roots(bk: str, job: str) -> list:
     """The job's authorized work roots, from the host-private owner record. None of them recorded (or
-    an owner record without them) means no seat workdir and no requirement is accepted: fails closed."""
+    an owner record without them) means no launch workdir and no requirement is accepted: fails closed."""
     owner = enrolment.find_job_owner(bk, job)
     # the roots are in the owner record's `owner` mapping (6a's format), not an attribute of the Record
     data = getattr(owner, "owner", None) if owner is not None else None
@@ -145,7 +145,7 @@ def _within(path: str, root: str) -> bool:
         return False
 
 
-TMP_ROOTS = ("/tmp", "/private/tmp")   # a seat's workdir is never under these (tests patch it: the suite sandbox is under /tmp)
+TMP_ROOTS = ("/tmp", "/private/tmp")   # a launch's workdir is never under these (tests patch it: the suite sandbox is under /tmp)
 
 
 def _under_tmp(path: str) -> bool:
@@ -155,14 +155,14 @@ def _under_tmp(path: str) -> bool:
 def _check_workdir(bk: str, job: str, workdir: str) -> str:
     real = os.path.realpath(os.path.expanduser(workdir))
     if _under_tmp(real):
-        raise Refuse("a seat's workdir is never /tmp: use a checkout under ~/src or ~/work")
+        raise Refuse("a launch's workdir is never /tmp: use a checkout under ~/src or ~/work")
     roots = [os.path.realpath(r) for r in _owner_roots(bk, job)]
     if not any(_within(real, r) for r in roots):
         raise Refuse(f"the workdir {real} is outside the job's work roots (swarm activate --allow-workdir)")
     return real
 
 
-def _is_lead_seat(name: str) -> bool:
+def _is_lead_launch(name: str) -> bool:
     return name == "lead" or name.startswith("lead~")
 
 
@@ -172,17 +172,17 @@ def _caller(bk: str, job: str, led, args):
 
 
 def _live_lead(board, job: str, led, who) -> str | None:
-    """The attested caller's seat name when it is a LIVE lead seat (lead, lead~N) of this generation."""
+    """The attested caller's launch name when it is a LIVE lead launch (lead, lead~N) of this generation."""
     from swarm.board.base import LAUNCH_CLOSED
-    if who is None or who.seat is None or not _is_lead_seat(who.seat):
+    if who is None or who.launch is None or not _is_lead_launch(who.launch):
         return None
-    row = board.get_launch(job, led.generation, who.seat)
-    return who.seat if row is not None and row.state not in LAUNCH_CLOSED else None
+    row = board.get_launch(job, led.generation, who.launch)
+    return who.launch if row is not None and row.state not in LAUNCH_CLOSED else None
 
 
 def _lead_or_person(board, bk: str, job: str, led, env, action: str, args) -> str:
-    """Authority for a seat-staffing command: the live lead seat (attested by its hook), else a person
-    (person.require). Other seats are refused (they ask the lead on the board)."""
+    """Authority for a launch-staffing command: the live lead launch (attested by its hook), else a person
+    (person.require). Other launches are refused (they ask the lead on the board)."""
     who = _caller(bk, job, led, args)
     lead = _live_lead(board, job, led, who)
     if lead is not None:
@@ -219,14 +219,14 @@ def cmd_run(board, cfg, args) -> int:
     os.close(fd)
     caller = _caller(bk, args.job, led, args)
     queued_by = led.requester_session or "requester"
-    if caller is not None and caller.seat:
-        source = board.get_launch(args.job, led.generation, caller.seat)
+    if caller is not None and caller.launch:
+        source = board.get_launch(args.job, led.generation, caller.launch)
         source_run = next((r for r in board.restarts(args.job)
                            if source is not None and r.launch_id == source.launch_id), None)
         keys = {source.agent_key} if source else set()
         if source_run:
             keys.update((source_run.new_agent_key, source_run.old_agent_key))
-        queued_by = next((a.name for a in board.agents(args.job) if a.agent_key in keys), caller.seat)
+        queued_by = next((a.name for a in board.agents(args.job) if a.agent_key in keys), caller.launch)
     row = board.queue_launch(args.job, led.generation, args.name, role=args.role, harness=args.harness,
                              model=_model_for(cfg, args.role, args.model), workdir=workdir,
                              brief=args.brief, queued_by=queued_by)
@@ -291,7 +291,7 @@ def review_ref(report: str | None) -> str:
 
 def review_report_path(job: str, message_id: int):
     """Where a brokered review's report is kept (the supervisor's private dir): readable later by the driver and a
-    person, whatever happens to the seat's work tree."""
+    person, whatever happens to the launch's work tree."""
     from swarm.supervisor.settings import private_dir
     return private_dir() / REVIEW_REPORTS / f"{hashlib.sha256(job.encode()).hexdigest()[:16]}-{int(message_id)}.md"
 
@@ -318,7 +318,7 @@ def blob_id(data: bytes) -> str:
 def pins_for(bk: str, job: str, led, paths, pinned=()) -> dict:
     """The pin map `led` would hold with `paths` added (nothing changed): each path must lie under the job's
     roots, be a regular file of at most REQUIREMENT_MAX bytes and keep the blob it is pinned at, and the job
-    pins at most PINS_MAX files. `pinned`: a seat broker's "PATH\nFILE" pairs (the content it read from PATH)."""
+    pins at most PINS_MAX files. `pinned`: a launch broker's "PATH\nFILE" pairs (the content it read from PATH)."""
     pins = dict(led.pinned_requirements)
     roots = [os.path.realpath(r) for r in _owner_roots(bk, job)]
     items = [(p, None) for p in paths]
@@ -388,8 +388,8 @@ PERSON_RECEIPT_DAYS = 30   # long enough for any pass of the driver to see it (a
 
 def person_record_id(action: str, ref) -> str:
     """The record id of a person receipt: `<action>:<ref>`, the action with `_` for spaces (halt, unhalt,
-    drive_repair, seat_cancel, deactivate) and `ref` what the command printed as its record id (the ledger
-    revision for halt, unhalt and drive repair; the seat row id for a cancel; the generation for deactivate)."""
+    drive_repair, launch_cancel, deactivate) and `ref` what the command printed as its record id (the ledger
+    revision for halt, unhalt and drive repair; the launch row id for a cancel; the generation for deactivate)."""
     return f"{action.replace(' ', '_')}:{ref}"
 
 
@@ -406,7 +406,7 @@ def person_receipt(bk: str, led, action: str, how: str, args, ref) -> None:
     try:
         receipts.write(bk, receipts.Receipt(
             board_key=bk, job=led.job, generation=led.generation, incarnation=led.incarnation,
-            action_id=f"{how}:{action.replace(' ', '_')}", attempt=0, seat=None, kind="person",
+            action_id=f"{how}:{action.replace(' ', '_')}", attempt=0, launch=None, kind="person",
             record_id=person_record_id(action, ref), rev=1,
             content_sha=receipts.content_sha("person", {"action": action, "target": led.job}),
             args_sha=drivegate.grant_id(args, person.host_pid()), expires_at=time.time() + PERSON_RECEIPT_DAYS * 86400))
@@ -576,7 +576,7 @@ def cmd_drive_run(cfg, args) -> int:
     Installs nothing and never calls a model. One per board (and job filter) at a time."""
     from swarm.supervisor import session_driver
     bk = board_key(cfg)
-    why = session_driver.seat_caller(os.getpid())       # its env, its own environment and every ancestor
+    why = session_driver.launch_caller(os.getpid())       # its env, its own environment and every ancestor
     if why:
         print(f"swarm drive run: refused: {why}", file=sys.stderr)
         return 1
@@ -734,13 +734,13 @@ def register(sub, handlers: dict, commands: dict | None = None) -> None:
     rg.add_argument("--report-text", metavar="TEXT", help="the review report itself (one literal argument)")
     rg.add_argument("--report", metavar="FILE", help="a file holding the review report")
     rv.add_argument("--key", help="the reviewing agent's key")
-    # A jailed seat's broker (Task 20): the report's content, in a file only the supervisor writes; --report is
-    # then the path as the seat typed it (posted, not read here)
+    # A jailed launch's broker (Task 20): the report's content, in a file only the supervisor writes; --report is
+    # then the path as the launch typed it (posted, not read here)
     rv.add_argument("--report-content", help=argparse.SUPPRESS)
     gr = sub.add_parser("goal-ready", help="declare the goal ready for the judge (the lead or a person)")
     gr.add_argument("--job", required=True); gr.add_argument("--candidate", required=True)
     gr.add_argument("--add-requirements", action="append", metavar="PATH")
-    # A jailed seat's broker (Task 20): "PATH\nFILE": the requirement PATH in the seat's work tree (the broker
+    # A jailed launch's broker (Task 20): "PATH\nFILE": the requirement PATH in the launch's work tree (the broker
     # reached it without following a link), pinned at the content the broker read into FILE
     gr.add_argument("--add-requirements-pinned", action="append", help=argparse.SUPPRESS)
     handlers.update({"halt": _run(cmd_halt), "unhalt": _run(cmd_unhalt), "run": _run(cmd_run),

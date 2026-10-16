@@ -8,7 +8,7 @@ Everything a run touches lives under ONE run directory below QA_ROOT (default
     <run>/pg/          a throwaway Postgres cluster (127.0.0.1, its own random port, trust auth); the
                        sqlite and file backends need none
     <run>/hub/       the fake hub: bare repositories reached by file:// URLs only
-    <run>/work/        the job's work tree(s) and the seats' work trees
+    <run>/work/        the job's work tree(s) and the launches' work trees
     <run>/bin/         `swarm`, `claude`, `codex` shims (the fake harness in fake mode)
     <run>/logs/        supervisor passes, harness logs, the timeline and the cost report
 
@@ -108,8 +108,8 @@ def capabilities(root: Path = REPO) -> dict[str, Cap]:
         "6a": Cap("6a activate --drive/--no-drive, budgets, --lead-brief, --remote",
                   _has(root, "lib/swarm/drive_activate.py", "--no-drive", "--lead-brief")
                   or _has(root, "lib/swarm/cli.py", "--no-drive", "--lead-brief"), "lib/swarm/drive_activate.py"),
-        "6b": Cap("6b swarm seat|halt|unhalt|review|goal-ready",
-                  _has(root, "lib/swarm/drive_cli.py", '"seat"', '"halt"', '"goal-ready"'), "lib/swarm/drive_cli.py"),
+        "6b": Cap("6b swarm launch|halt|unhalt|review|goal-ready",
+                  _has(root, "lib/swarm/drive_cli.py", '"launch"', '"halt"', '"goal-ready"'), "lib/swarm/drive_cli.py"),
         "7": Cap("7 pure next_actions", _has(root, "lib/swarm/supervisor/driver_model.py", "next_actions")
                  or _has(root, "lib/swarm/supervisor/next_actions.py"), "driver_model / next_actions"),
         "8a": Cap("8a driver execution (claims, reconciliation)",

@@ -68,10 +68,10 @@ class ForgedCloseTests(T.LifeCase):
 
 
 class QuestionExpiryTests(T.LifeCase):
-    def ask(self, until=240, seat="a", **q):
+    def ask(self, until=240, launch="a", **q):
         b = self.b.open_blocker("J", "question", "human", "which way?", until=self.t0 + until * MIN,
-                                default_value="left", created_by=seat, seat=seat, generation=1)
-        return b, fx.q(b.id, seat=seat, default="left", until=self.t0 + until * MIN, receipt_id=1, **q)
+                                default_value="left", created_by=launch, launch=launch, generation=1)
+        return b, fx.q(b.id, launch=launch, default="left", until=self.t0 + until * MIN, receipt_id=1, **q)
 
     @memory_store_only
     def test_a_backdated_board_created_at_does_not_shorten_the_deadline(self):
@@ -95,7 +95,7 @@ class QuestionExpiryTests(T.LifeCase):
 
     def test_a_question_with_no_until_gets_the_cap(self):
         b = self.b.open_blocker("J", "question", "human", "which way?", until=None, default_value="left",
-                                created_by="a", seat="a", generation=1)
+                                created_by="a", launch="a", generation=1)
         q = fx.q(b.id, default="left", until=None, receipt_id=1, opened_at=self.t0)
         self.assertEqual(life.apply_question_expiry(self.b, self.cfg, self.led, self.at(239), [q]), [])
         self.assertEqual(life.apply_question_expiry(self.b, self.cfg, self.led, self.at(240), [q]), [b.id])
@@ -103,9 +103,9 @@ class QuestionExpiryTests(T.LifeCase):
     def test_a_blocker_of_another_job_or_kind_is_not_resolved(self):
         self.b.open_job("K", None, None, None, "me")
         other = self.b.open_blocker("K", "question", "human", "q", until=self.t0 + MIN, default_value="x",
-                                    created_by="a", seat="a", generation=1)
+                                    created_by="a", launch="a", generation=1)
         wait = self.b.open_blocker("J", "wait", "external", "w", until=self.t0 + MIN, default_value="x",
-                                   created_by="a", seat="a", generation=1)
+                                   created_by="a", launch="a", generation=1)
         qs = [fx.q(other.id, until=self.t0 + MIN, receipt_id=1), fx.q(wait.id, until=self.t0 + MIN, receipt_id=1)]
         self.assertEqual(life.apply_question_expiry(self.b, self.cfg, self.led, self.at(60), qs), [])
         self.assertEqual((self.b.blocker(other.id).state, self.b.blocker(wait.id).state), ("open", "open"))
@@ -131,7 +131,7 @@ class QuestionExpiryTests(T.LifeCase):
 class OrphanQuestionContractTests(T.LifeCase):
     def test_a_job_with_a_ledger_here_is_not_the_orphan_paths(self):
         b = self.b.open_blocker("J", "question", "human", "q", until=self.t0 + MIN, default_value="left",
-                                created_by="a", seat="a", generation=1)
+                                created_by="a", launch="a", generation=1)
         self.assertEqual(life.expire_orphan_questions(self.b, "J", self.at(5), board_key="bk"), [])
         self.assertEqual(self.b.blocker(b.id).state, "open")
         self.assertEqual(life.expire_orphan_questions(self.b, "J", self.at(5)), [b.id])   # the board-only path
@@ -140,7 +140,7 @@ class OrphanQuestionContractTests(T.LifeCase):
 class OrphanQuestionLedgerTests(T.LifeCase):
     def test_a_damaged_ledger_still_keeps_the_orphan_path_out(self):
         b = self.b.open_blocker("J", "question", "human", "q", until=self.t0 + MIN, default_value="left",
-                                created_by="a", seat="a", generation=1)
+                                created_by="a", launch="a", generation=1)
         with mock.patch.object(ledger, "load", side_effect=ledger.LedgerBadError("bad")):
             self.assertEqual(life.expire_orphan_questions(self.b, "J", self.at(5), board_key="bk"), [])
         self.assertEqual(self.b.blocker(b.id).state, "open")
@@ -477,10 +477,10 @@ class CancelTests(T.LifeCase):
         self.assertEqual(led.intents[0].outcome, "cancelled")
         self.assertIn(("stop", [lid]), self.run.calls)
 
-    def test_questions_are_settled_and_seats_released(self):
-        seat = self.get_launch("idle-b")
+    def test_questions_are_settled_and_launches_released(self):
+        launch = self.get_launch("idle-b")
         q = self.b.open_blocker("J", "question", "human", "which way?", until=self.t0 + 600 * MIN,
-                                default_value="left", created_by="a", seat="idle-b", generation=1)
+                                default_value="left", created_by="a", launch="idle-b", generation=1)
         self.assertTrue(self.cancel())
         self.assertEqual(self.b.blocker(q.id).state, "expired")
         self.assertEqual(self.b.launches("J", include_closed=True)[0].state, "done")

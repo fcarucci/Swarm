@@ -149,7 +149,7 @@ class JudgeHookTests(GoalEnv):
         self.assertNotIn("JUDGE", ctx)
         self.assertIsNone(self.job("K").judge)
 
-    def test_resumed_judge_gets_its_seat_back(self):
+    def test_resumed_judge_gets_its_launch_back(self):
         self.spawn_judge()
         name = self.member("judge-1").name
         self.cli("verdict", "--job", "J", "--as", name, "met", "checked")
@@ -162,13 +162,13 @@ class JudgeHookTests(GoalEnv):
 
 class ExternalAgentRoleTests(GoalEnv):
     """Agents outside Claude Code (e.g. a Codex CLI judge) get no hooks: `join --judge` or
-    `--verifier` gives them the seat, and the CLI (read, post, verdict) is all they need."""
+    `--verifier` gives them the launch, and the CLI (read, post, verdict) is all they need."""
 
     def setUp(self):
         super().setUp()
         self.activate_goal()
 
-    def test_join_as_judge_takes_the_seat_and_may_record_a_verdict(self):
+    def test_join_as_judge_takes_the_launch_and_may_record_a_verdict(self):
         rc, out, err = self.cli("join", "--job", "J", "--key", "codex-judge", "--role", "codex", "--judge")
         self.assertEqual(rc, 0, err)
         name = out.strip()
@@ -177,7 +177,7 @@ class ExternalAgentRoleTests(GoalEnv):
         self.assertEqual(rc, 0)
         self.assertEqual(self.job().verdict, "met")
 
-    def test_second_judge_is_refused_and_keeps_no_seat(self):
+    def test_second_judge_is_refused_and_keeps_no_launch(self):
         self.spawn_judge()
         first = self.member("judge-1").name
         rc, out, err = self.cli("join", "--job", "J", "--key", "codex-judge", "--judge")

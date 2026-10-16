@@ -1,7 +1,7 @@
 #!/bin/sh
-# A jailed drive seat (Task 20) has no board access of its own: its broker runs this outside the jail.
-if [ -n "${SWARM_SEAT_BROKER:-}" ]; then
-  exec python3 -I "$(cd "$(dirname "$0")/.." && pwd)/lib/swarm/seatbroker_client.py" hook "$@"
+# A jailed drive launch (Task 20) has no board access of its own: its broker runs this outside the jail.
+if [ -n "${SWARM_LAUNCH_BROKER:-}" ]; then
+  exec python3 -I "$(cd "$(dirname "$0")/.." && pwd)/lib/swarm/launchbroker_client.py" hook "$@"
 fi
 # Hook entry for Claude Code and Codex: `swarm-hook [--host H] start|turn|done|stop|session-start`
 # (hook JSON on stdin). Never fails the agent and never builds anything: session-start only

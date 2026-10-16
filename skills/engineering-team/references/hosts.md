@@ -2,7 +2,7 @@
 
 Use with the [role contract](team-roles.md), [artifact contract](artifacts.md), and
 [Swarm CLI/host reference](../../swarm/SKILL.md). **A goal job is driven**: the supervisor runs
-it, EL requests its seats with `swarm run`, and the invoking agent is the
+it, EL requests its launches with `swarm run`, and the invoking agent is the
 requester/observer. Staffing, dispatch and landing by the invoking agent (PM) exist only in
 [non-drive jobs](#non-drive-jobs) (`--no-drive --reason TEXT`).
 
@@ -37,14 +37,14 @@ The lead brief (`--lead-brief PATH`; a default is generated) is a file. It state
 2. The requirement files (pinned at activation; `swarm goal-ready --add-requirements PATH` may pin more) with their blob ids.
 3. Authorization: what may be changed, pushed, published, spent; secrets by path only.
 4. Staffing rules: queue each launch with `swarm run --job J --name NAME --role ROLE --brief PATH [--model M --harness H --workdir DIR]`. Names can be re-queued in any state. Workdirs must pass the launcher’s validation at request time. Agents may share a workdir and coordinate their own git worktrees. Concurrency is counted per job; every start checks budgets.
-5. Gates: every hand-off is `swarm done`, reviewed by an independent reviewer seat; landing is `swarm land` by an integrator seat; the lead never lands or pushes the target.
+5. Gates: every hand-off is `swarm done`, reviewed by an independent reviewer launch; landing is `swarm land` by an integrator launch; the lead never lands or pushes the target.
 6. Every brief carries this CI line: "CI: wait for CI ONLY with swarm ci wait --repo OWNER/REPO --sha <exact head> --timeout 540 in the foreground; never gh run watch."
 7. Finish: when the integrated target meets the requirements run `swarm goal-ready --job J --candidate branch@sha`, which posts `GOAL-READY <candidate> req=<requirements blob id digest>`; the goal judge decides MET or UNREACHABLE. If the goal cannot be met, say so with evidence: UNREACHABLE needs a report of what was tried and what would change it.
 
-### Seats and the requester
+### Launches and the requester
 
 - Launches are `queued`, `running`, `done` or `failed`; `swarm status --job J` shows them and their reasons. Any trusted caller may queue or re-queue by name with `swarm run`; failed launches are reported once and not retried unchanged.
-- Every agent joins the board: a seat that does not enrol within `enrol_minutes` is killed. A seat prompt carries the `[swarm job: J]` line and its role tags; the supervisor writes them, not you.
+- Every agent joins the board: a launch that does not enrol within `enrol_minutes` is killed. A launch prompt carries the `[swarm job: J]` line and its role tags; the supervisor writes them, not you.
 - The requester session answers with `swarm answer`, halts with `swarm halt`, resumes with `swarm unhalt`, cancels with `swarm deactivate`. A requester Agent-tool spawn is refused in a drive job; ask the lead through the board (`swarm post --to @EL`) when more staffing is needed.
 
 ## Non-drive jobs
@@ -181,7 +181,7 @@ as proof. Shared board history remains visible: a fresh context is not a blind r
 #### Claude Code
 
 PM calls the host's `Agent` tool with `prompt` and a bounded `description`; use a fresh
-agent for each independent role. Put the job and role tags, and the seat's title tag, on their own lines in **every** prompt:
+agent for each independent role. Put the job and role tags, and the launch's title tag, on their own lines in **every** prompt:
 
 ```text
 [swarm job: J]
@@ -193,7 +193,7 @@ Own only the files named in that brief. Finish the bounded task, post a handoff,
 and return action, task_id, artifact_path, blocker, and result to PM.
 ```
 
-Change the role tag per seat: `engineering_lead`, `product_manager`, `build_engineer`, `qa`, `engineer`, `reviewer`, `verifier`, `judge`. `swarm post --to @EL` and the other role addresses resolve to the agents holding that tag now, so the tag must be exact; the invoking PM joins with `swarm join --job J --key "$PM_KEY" --role project_manager` so `@PM` reaches it; address the optional product manager with `@product`. The tag determines
+Change the role tag per launch: `engineering_lead`, `product_manager`, `build_engineer`, `qa`, `engineer`, `reviewer`, `verifier`, `judge`. `swarm post --to @EL` and the other role addresses resolve to the agents holding that tag now, so the tag must be exact; the invoking PM joins with `swarm join --job J --key "$PM_KEY" --role project_manager` so `@PM` reaches it; address the optional product manager with `@product`. The tag determines
 the Swarm role; the host's agent type does not substitute for it. A member's exceptional
 synchronous helper also needs `[swarm spawn: <why strictly needed>]` and the job tag;
 meet configured `min_justification_chars` and all child caps.

@@ -332,7 +332,7 @@ def resume(board, cfg: dict, job: str, *, host: str | None = None, workdir: str 
             start(restored, runner._child_env(token, None, pass_env))
             res.status = "launched"
             launched.append((e, row, res))
-        except Exception as exc:   # the restart row stays open for `--retry`; the pre-claimed seat is freed
+        except Exception as exc:   # the restart row stays open for `--retry`; the pre-claimed launch is freed
             if restored.session_id:
                 board.close_agent(restored.session_id, "resume failed")
             res.status, res.note = "failed", f"{type(exc).__name__}: {exc}"[:200]

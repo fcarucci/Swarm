@@ -85,10 +85,10 @@ class NoVacuousPass(Tmp):
                 "after_intent_before_claim", "mid_rollover", "mid_rollover_after_ledger"]
         for b in plan:
             self.assertIn(f"barrier_{b}", chaos.SCENARIOS)
-        for n in ("kill_seat_mid_task", "kill_lead_mid_turn", "ci_red_twice", "budget_ruling_max_sessions_8",
+        for n in ("kill_launch_mid_task", "kill_lead_mid_turn", "ci_red_twice", "budget_ruling_max_sessions_8",
                   "ruling_judge_fails_twice", "provider_outage", "bus_down", "stale_met", "rollover", "codex_parity",
-                  "forged_closed_by_driver", "forged_receipt", "forged_person_commands", "forged_seat_row",
-                  "forged_unhalt_by_seat", "question_default_expires", "stale_lock", "corrupt_ledger",
+                  "forged_closed_by_driver", "forged_receipt", "forged_person_commands", "forged_launch_row",
+                  "forged_unhalt_by_launch", "question_default_expires", "stale_lock", "corrupt_ledger",
                   "reactivated_long_idle", "kill_supervisor_and_runner_once"):
             self.assertIn(n, chaos.SCENARIOS)
 
@@ -200,7 +200,7 @@ class Mutants(Tmp):
             fake = q.Run("fakemode", backend="sqlite", harness="fake", stamp="t")
             self.assertNotIn(str(bindir), fake.env()["PATH"])
 
-    def run_harness(self, scope, seat, prompt_extra=""):
+    def run_harness(self, scope, launch, prompt_extra=""):
         """One fake judge session as a subprocess; returns the `swarm` arguments it ran."""
         run = self.tmp / "hrun"
         (run / "home").mkdir(parents=True, exist_ok=True)
@@ -216,19 +216,19 @@ class Mutants(Tmp):
         (run / "harness.json").write_text(json.dumps({"repo": str(run / "repo"), "script": str(run / "script.json"),
                                                       "hub": str(run / "hub"), "job": "J"}))
         before = (run / "swarm-calls").read_text().splitlines() if (run / "swarm-calls").exists() else []
-        prompt = f"[swarm job: J]\n[swarm role: judge]\n[swarm seat: {seat}]\n[swarm scope: {scope}]\n{prompt_extra}"
+        prompt = f"[swarm job: J]\n[swarm role: judge]\n[swarm launch: {launch}]\n[swarm scope: {scope}]\n{prompt_extra}"
         r = subprocess.run([sys.executable, "-B", str(HARNESS / "fake_harness.py"), "--harness", "claude", "-p"],
                            input=prompt, capture_output=True, text=True,
                            env={"HOME": str(run / "home"), "PATH": os.environ["PATH"]})
         self.assertEqual(r.returncode, 0, r.stderr)
         return (run / "swarm-calls").read_text().splitlines()[len(before):]
 
-    def test_judge_sessions_follow_the_script_by_scope_not_by_seat(self):
+    def test_judge_sessions_follow_the_script_by_scope_not_by_launch(self):
         first = self.run_harness("goal", "judge-1")
         self.assertTrue(first and first[0].startswith("verdict met "), first)             # goal: first entry is met
         art1 = self.run_harness("artifact", "judge-2")
         self.assertTrue(art1 and art1[0].startswith("verdict not_met"), art1)             # artifact: first entry
-        art2 = self.run_harness("artifact", "judge-OTHER-SEAT")                           # a different seat, same scope
+        art2 = self.run_harness("artifact", "judge-OTHER-LAUNCH")                           # a different launch, same scope
         self.assertTrue(art2 and art2[0].startswith("verdict met "), art2)                # ...gets the SECOND entry
         ruling = self.run_harness("ruling", "judge-1")
         self.assertTrue(ruling and ruling[0].startswith("verdict unreachable"), ruling)
@@ -249,7 +249,7 @@ class Mutants(Tmp):
             def drive(self, **k): return {}
             def check_terminal(self, expect): return []
             def check_no_coordinator(self): return []
-            def check_every_seat_supervisor_launched(self): return []
+            def check_every_launch_supervisor_launched(self): return []
             def check_landing(self): return []
             def write_costs(self): return {"launches": 1, "passes": 1, "spent_usd": 0}
             def export_evidence(self): pass
@@ -543,7 +543,7 @@ class ScriptedEngineer(Tmp):
         fh.edit_toy(w, "impossible", 0)
         self.assertNotEqual(self.make_test(w).returncode, 0)
 
-    def test_judge_scope_and_script_are_keyed_by_scope_not_seat(self):
+    def test_judge_scope_and_script_are_keyed_by_scope_not_launch(self):
         fh = self.load_harness()
         self.assertEqual(fh.judge_scope("You are the goal judge"), "goal")
         self.assertEqual(fh.judge_scope("[swarm scope: ruling]\nx"), "ruling")

@@ -1,4 +1,4 @@
-"""`swarm post --to @role` resolves to the seat's current holders; unknown recipients and authors
+"""`swarm post --to @role` resolves to the launch's current holders; unknown recipients and authors
 outside the job are rejected, never stored. Runs on the backend under test (SWARM_TEST_BACKEND)."""
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from unittest import mock
 from swarm import addressing, spool  # noqa: E402
 
 
-class SeatsEnv(Env):
+class LaunchesEnv(Env):
     def setUp(self):
         super().setUp()
         self.assertEqual(self.cli("activate", "--job", "J")[0], 0)
@@ -22,7 +22,7 @@ class SeatsEnv(Env):
             return [(m.agent_name, m.to_agent, m.message) for m in b.recent_messages(50, job="J")]
 
 
-class AddressingTests(SeatsEnv):
+class AddressingTests(LaunchesEnv):
     def test_role_alias_resolves_to_the_holder(self):
         for alias, key in (("@EL", "el"), ("@PM", "pm"), ("@product", "product"), ("@QA", "qa"), ("@build_engineer", "be")):
             with self.subTest(alias=alias):
@@ -65,14 +65,14 @@ class AddressingTests(SeatsEnv):
         self.assertTrue(any(a == "swarm" and to == self.names["qa"] and "--key does not belong" in msg
                             for a, to, msg in self.messages()))
 
-    def test_offline_empty_seat_gets_a_refusal_note(self):
-        self.queue_offline(self.names["e1"], "missing seat", "@verifier")
+    def test_offline_empty_launch_gets_a_refusal_note(self):
+        self.queue_offline(self.names["e1"], "missing launch", "@verifier")
         with self.board() as b:
             spool.flush_spool(b, self.cfg)
         self.assertTrue(any(a == "swarm" and to == self.names["e1"] and "nobody holds" in msg
                             for a, to, msg in self.messages()))
 
-    def test_a_seat_with_several_holders_gets_one_message_each(self):
+    def test_a_launch_with_several_holders_gets_one_message_each(self):
         rc, out, _ = self.cli("post", "--job", "J", "--as", self.names["el"], "--to", "@engineer", "go")
         self.assertEqual(rc, 0)
         got = {to for _, to, msg in self.messages() if msg == "go"}
@@ -84,7 +84,7 @@ class AddressingTests(SeatsEnv):
         self.assertEqual(rc, 0)
         self.assertIn((self.names["el"], judge, "proof"), self.messages())
 
-    def test_a_seat_nobody_holds_is_rejected_and_nothing_is_stored(self):
+    def test_a_launch_nobody_holds_is_rejected_and_nothing_is_stored(self):
         before = self.messages()
         rc, _, err = self.cli("post", "--job", "J", "--as", self.names["el"], "--to", "@verifier", "x")
         self.assertEqual(rc, 1)
@@ -132,7 +132,7 @@ class AddressingTests(SeatsEnv):
         rc, _, _ = self.cli("post", "--job", "J", "--to", "@QA", "no author")
         self.assertEqual(rc, 2)
 
-    def test_a_departed_holder_no_longer_holds_the_seat(self):
+    def test_a_departed_holder_no_longer_holds_the_launch(self):
         with self.board() as b:
             b.agent_stopped("qa")
         rc, _, err = self.cli("post", "--job", "J", "--as", self.names["el"], "--to", "@QA", "x")
@@ -140,8 +140,8 @@ class AddressingTests(SeatsEnv):
         self.assertIn("nobody holds @QA", err)
 
 
-class ResolveTests(SeatsEnv):
-    def test_pm_falls_back_to_the_orchestrating_seats(self):
+class ResolveTests(LaunchesEnv):
+    def test_pm_falls_back_to_the_orchestrating_launches(self):
         with self.board() as b:
             b.agent_stopped("pm")
             b.allocate_name("or", "J", "orchestrator")

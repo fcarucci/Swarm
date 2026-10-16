@@ -265,7 +265,7 @@ finalize_enabled = true
 # `--budget KEY=VALUE`, `--model ROLE=MODEL`), or on a running job with `swarm drive budget|models`.
 # The values shown are the shipped defaults. See docs/REFERENCE.md#drive-mode.
 [drive]
-max_sessions = 60                   # launches, all seats and kinds; exhausted: a ruling becomes due
+max_sessions = 60                   # launches, all launches and kinds; exhausted: a ruling becomes due
 max_rounds = 8                      # judged rounds per artifact group; exhausted: a ruling
 no_progress_rounds = 3              # rounds without progress before a ruling
 max_attempts = 3                    # per logical action; then the action fails and the lead is woken
@@ -273,7 +273,7 @@ max_cost_usd = 40                   # job spending cap; shipped default 40 USD, 
 ruling_reserve_usd = 5              # kept back so a ruling can always run; shipped default 5 USD, configurable
 session_usd_cap = 5                 # ceiling reserved for one session
 min_session_usd = 0.5               # a launch with less than this available is held (a ruling becomes due)
-max_session_minutes = 60            # wall clock per session; the seat goes idle
+max_session_minutes = 60            # wall clock per session; the launch goes idle
 max_wall_hours = 24                 # from activation; exhausted: a ruling
 ruling_attempts = 2                 # judge attempts for a ruling (the ruling reserve is USD only: ruling_reserve_usd)
 close_deadline_minutes = 60         # a MET close that cannot complete within this ends with the labelled mechanical outcome
@@ -284,25 +284,25 @@ stall_minutes = 90                  # no progress this long wakes the lead (or r
 driver_error_passes = 6             # consecutive failing driver passes before the job is held and reported
 max_concurrent_sessions = 4         # this job’s running launches only
 # max_host_running = 16             # optional separate host-wide launch cap; unset means no host cap
-lease_hold_minutes = 60             # how long a seat may hold a writer lease on a work tree
+lease_hold_minutes = 60             # how long a launch may hold a writer lease on a work tree
 codex_usd_per_mtok = 10             # Codex has no cost report: tokens x this rate (USD per million) charge the budget
 # Recipe fields (`--recipe coding|artifact`, `review_role`) are fixed at activation in the owner
 # record, never read from this file; recipe = "coding" with review_role = "reviewer" is the default.
 # Models by role: these are the shipped defaults. Build staffing is cheap engineers, strict reviewers.
 allowed_models = ["haiku", "sonnet", "opus"]   # the models a job may pick (activation refuses others)
-# Seat isolation (Linux): every drive seat runs in a jail that sees an ALLOWLIST of your files (its work tree,
+# Launch isolation (Linux): every drive launch runs in a jail that sees an ALLOWLIST of your files (its work tree,
 # the harness login and settings read-only, the swarm venv, the tools on PATH), its own $HOME, /tmp and
 # transcripts, no board password: it reaches the board only through its runner's broker. Only the supervisor
-# lands. A host that cannot jail a seat (macOS, Windows, no user namespaces) runs it best-effort (doctor warns)
-# unless seat_isolation = "strict". Turning it off is a person's act at a terminal:
-# `swarm supervise seat-isolation off` (this file cannot turn it off).
-seat_isolation = "required"         # the jail where it can be built, else best-effort (doctor warns); "strict": refuse instead
-# seat_git_name = "..."              # the seats' git identity (default: the person's global one)
-# seat_git_email = "..."
-# seat_ro_paths = ["~/.npm"]         # more paths a seat may read
-# seat_rw_paths = ["/var/tmp/cargo-target-me"]   # more paths a seat may write
-# seat_cover_paths = ["/srv/secrets"]   # paths outside the home no seat may read
-# seat_ssh_key = "/home/me/.local/state/swarm/seat-keys/ro-deploy"   # a READ-ONLY deploy key for fetching a private repo
+# lands. A host that cannot jail a launch (macOS, Windows, no user namespaces) runs it best-effort (doctor warns)
+# unless launch_isolation = "strict". Turning it off is a person's act at a terminal:
+# `swarm supervise launch-isolation off` (this file cannot turn it off).
+launch_isolation = "required"         # the jail where it can be built, else best-effort (doctor warns); "strict": refuse instead
+# launch_git_name = "..."              # the launches' git identity (default: the person's global one)
+# launch_git_email = "..."
+# launch_ro_paths = ["~/.npm"]         # more paths a launch may read
+# launch_rw_paths = ["/var/tmp/cargo-target-me"]   # more paths a launch may write
+# launch_cover_paths = ["/srv/secrets"]   # paths outside the home no launch may read
+# launch_ssh_key = "/home/me/.local/state/swarm/launch-keys/ro-deploy"   # a READ-ONLY deploy key for fetching a private repo
 # credential_helpers = ["gh auth git-credential"]   # planned, wired by `swarm land`: credential helpers a pinned `--credential` may name (absolute path pinned at activation)
 
 [drive.models]

@@ -11,7 +11,7 @@ import support  # noqa: F401
 from swarm import compat, land, receipts
 from swarm.supervisor import barrier, driver_land
 from swarm.land import LeaseHeld
-from test_drive_land import BK, GROUP, NOW, SEAT, Crash, LandCase, Request
+from test_drive_land import BK, GROUP, NOW, LAUNCH, Crash, LandCase, Request
 
 
 class DriverCase(LandCase):
@@ -21,21 +21,21 @@ class DriverCase(LandCase):
         self.release_first()
         for r in self.board.restarts("J"):
             self.board.finish_restart(r.id, "completed")
-        seat = self.board.get_launch("J", 1, SEAT)
-        self.board.set_launch_state(seat.id, seat.revision, "done", job="J")
+        launch = self.board.get_launch("J", 1, LAUNCH)
+        self.board.set_launch_state(launch.id, launch.revision, "done", job="J")
         self.posts = []
 
     def texts(self):
         return [m.message for m in self.board.messages_after(0, "J") if m.agent_name == "swarm supervisor"]
 
-    def submit(self, artifact=None, seat=SEAT, receipted=True):
+    def submit(self, artifact=None, launch=LAUNCH, receipted=True):
         artifact = artifact or f"{GROUP}@{self.sha}"
         body = land.request_text(artifact)
         mid = self.board.post("J", "integrator-bot", body).id
         if receipted:
             receipts.write(BK, receipts.Receipt(
                 board_key=BK, job="J", generation=1, incarnation=self.led.incarnation, action_id="a", attempt=1,
-                seat=seat, kind="post", record_id=str(mid), rev=1,
+                launch=launch, kind="post", record_id=str(mid), rev=1,
                 content_sha=receipts.content_sha("post", {"to": None, "body": body}), args_sha="0" * 64,
                 expires_at=NOW.timestamp() + 3600))
         return mid
@@ -54,7 +54,7 @@ class Run(DriverCase):
         done = self.run_pass()
         self.assertEqual(len(done), 1)
         request, res = done[0]
-        self.assertEqual((request.id, request.seat), (mid, SEAT))
+        self.assertEqual((request.id, request.launch), (mid, LAUNCH))
         self.assertTrue(res.ok, res.why)
         self.assertEqual(self.head(self.a), self.sha)
         self.assertEqual(self.head(self.b), self.sha)
@@ -64,9 +64,9 @@ class Run(DriverCase):
         self.assertEqual(ledger_load(self.led).watermarks[driver_land.WATERMARK], mid)
         # the driver posts INTEGRATED for the integrator
         self.assertEqual(self.texts(), [f"INTEGRATED {GROUP}@{self.sha}"])
-        # leases and seat are released after landing
+        # leases and launch are released after landing
         self.assertEqual(self.locks(), [])
-        self.assertEqual(self.board.get_launch("J", 1, SEAT).state, "done")
+        self.assertEqual(self.board.get_launch("J", 1, LAUNCH).state, "done")
         rows = [r for r in self.board.restarts("J") if r.action_id and r.action_id.endswith(f"|{mid}")]
         self.assertEqual(len(rows), 1)
         self.assertEqual((rows[0].outcome, bool(rows[0].ended_at)), ("completed", True))
@@ -143,11 +143,11 @@ class Run(DriverCase):
         self.assertEqual(self.pushes, [])
         self.assertEqual(self.texts(), [])
 
-    def test_request_from_the_wrong_seat_is_refused_and_posted(self):
-        self.submit(seat="reviewer-x")
+    def test_request_from_the_wrong_launch_is_refused_and_posted(self):
+        self.submit(launch="reviewer-x")
         done = self.run_pass()
         self.assertFalse(done[0][1].ok)
-        self.assertIn("not from the integrator seat", self.texts()[0])
+        self.assertIn("not from the integrator launch", self.texts()[0])
         self.assertEqual(self.pushes, [])
 
     def test_unusable_owner_record_refuses_without_claiming(self):
@@ -158,9 +158,9 @@ class Run(DriverCase):
         self.assertTrue(self.texts()[0].startswith("LAND-REFUSED"))
         self.assertEqual(self.board.restarts("J")[-1].launch_id, self.board.restarts("J")[0].launch_id)
 
-    def test_integrator_seat_not_idle_is_a_hold(self):
-        seat = self.board.get_launch("J", 1, SEAT)
-        self.board.set_launch_state(seat.id, seat.revision, "failed", job="J")
+    def test_integrator_launch_not_idle_is_a_hold(self):
+        launch = self.board.get_launch("J", 1, LAUNCH)
+        self.board.set_launch_state(launch.id, launch.revision, "failed", job="J")
         self.submit()
         done = self.run_pass()
         self.assertTrue(done[0][1].pending)
@@ -183,7 +183,7 @@ class LeaseHolds(DriverCase):
         self.assertEqual(self.led.integrated[GROUP]["lease_held_since"], NOW.isoformat())
         self.assertEqual(self.texts(), [])
         self.assertEqual(self.pushes, [])
-        self.assertEqual(self.board.get_launch("J", 1, SEAT).state, "done")
+        self.assertEqual(self.board.get_launch("J", 1, LAUNCH).state, "done")
 
     def test_the_hold_start_is_kept_until_the_landing_clears_it(self):
         self.other_job()
@@ -222,7 +222,7 @@ class LeaseHolds(DriverCase):
     def test_orphan_lock_row_is_not_adopted_or_stolen(self):
         # a row with our job but another action holder is not "ours": hold
         self.board.release_drive_locks("x", job="J", holder="y")
-        self.assertIsNotNone(self.lease("J", name=SEAT))
+        self.assertIsNotNone(self.lease("J", name=LAUNCH))
         self.submit()
         res = self.run_pass()[0][1]
         self.assertTrue(res.pending and res.lease_held)
@@ -264,7 +264,7 @@ class Recovery(DriverCase):
         self.assertEqual(self.texts(), [f"INTEGRATED {GROUP}@{self.sha}"])
         open_rows = [r for r in self.board.restarts("J") if r.ended_at is None]
         self.assertEqual(open_rows, [])
-        self.assertEqual(self.board.get_launch("J", 1, SEAT).state, "done")      # the dead pass left it running
+        self.assertEqual(self.board.get_launch("J", 1, LAUNCH).state, "done")      # the dead pass left it running
 
     def test_quiesce_exempts_inflight_land(self):
         # the journal of an interrupted landing is found by complete_all whatever else the group does
@@ -311,7 +311,7 @@ class Groups(DriverCase):
     """[S5] One group's pending request never blocks another group; each pending state has its own clock."""
 
     def requests(self, *pairs):
-        return [land.Request(i, land.integrator_seat(g), f"{g}@{c * 40}", 1) for i, g, c in pairs]
+        return [land.Request(i, land.integrator_launch(g), f"{g}@{c * 40}", 1) for i, g, c in pairs]
 
     def run_with(self, reqs, results):
         seen = []
@@ -336,7 +336,7 @@ class Groups(DriverCase):
 
     def test_head_of_line(self):
         reqs = self.requests((5, "a", "1"), (6, "b", "2"))
-        pending = {5: land.LandResult(False, None, "the integrator seat is not idle", pending=True)}
+        pending = {5: land.LandResult(False, None, "the integrator launch is not idle", pending=True)}
         for _ in range(3):
             seen = self.run_with(reqs, pending)
             self.assertEqual(seen, [5, 6] if _ == 0 else [5])    # b settled in the first pass, a is retried
@@ -408,18 +408,18 @@ class Claims(DriverCase):
 
     def parts(self):
         mid = self.submit()
-        req = Request(mid, SEAT, f"{GROUP}@{self.sha}", 1)
+        req = Request(mid, LAUNCH, f"{GROUP}@{self.sha}", 1)
         dests = land.destinations_from_owner(self.owner)
         action = driver_land.action_id(self.led, req, GROUP)
         return req, dests, action
 
     def hold_with(self, keys, action):
-        seat = self.board.get_launch("J", 1, SEAT)
-        seat = self.board.queue_launch("J", 1, seat.name, role=seat.role, harness=seat.harness, model=seat.model,
-                                       workdir=seat.workdir, brief=seat.brief, queued_by=seat.queued_by)
+        launch = self.board.get_launch("J", 1, LAUNCH)
+        launch = self.board.queue_launch("J", 1, launch.name, role=launch.role, harness=launch.harness, model=launch.model,
+                                       workdir=launch.workdir, brief=launch.brief, queued_by=launch.queued_by)
         return self.board.claim_drive_launch(
-            job="J", generation=1, action_id=action, attempt=1, launch_id="own", launch_row_id=seat.id,
-            queue_version=seat.revision, harness="claude", reserve_usd=0, reserve_minutes=1, locks=keys,
+            job="J", generation=1, action_id=action, attempt=1, launch_id="own", launch_row_id=launch.id,
+            queue_version=launch.revision, harness="claude", reserve_usd=0, reserve_minutes=1, locks=keys,
             lock_seconds=600, max_host_running=8)
 
     def test_own_unexpired_leases_are_adopted(self):

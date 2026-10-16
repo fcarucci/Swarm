@@ -1,4 +1,4 @@
-"""Judge seat handover: a fresh judge of a fix round takes the seat from a judge that has completed
+"""Judge launch handover: a fresh judge of a fix round takes the launch from a judge that has completed
 or died, under its own name; a live judge keeps it; `--as` another agent is still refused."""
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ class JudgeHandoverTests(Env):
 
     def go_dead(self, key):
         """The judge's session ended without a stop: no contact for longer than dead_minutes, its
-        row still active, so it still holds the seat."""
+        row still active, so it still holds the launch."""
         self.h.backdate_agent(key, joined_at=3 * 3600, last_seen=2 * 3600)
 
     def join_judge(self, key):

@@ -79,7 +79,7 @@ def replacement_model(cfg: dict, harness: str, role: str | None, recorded: str |
     return models.model_for(cfg, harness, role if roles.valid_name(role) else "worker") or recorded
 
 
-# Read-only seats (judges, reviewers) get no edit tool and no MCP tool: an MCP tool is outside the Bash
+# Read-only launches (judges, reviewers) get no edit tool and no MCP tool: an MCP tool is outside the Bash
 # sandbox, so the PreToolUse allowlist of read verbs (shellguard.mcp_read_allowed) is only the second line.
 READ_ONLY_CLAUDE_DISALLOWED = "Edit,Write,NotebookEdit,MultiEdit,mcp__*"
 
@@ -93,9 +93,9 @@ def _budget(budget_usd) -> float:
 
 
 def _need_budget(budget_usd, drive: bool) -> None:
-    """A drive seat never runs uncapped: its launch must carry a budget (the reservation)."""
+    """A drive launch never runs uncapped: its launch must carry a budget (the reservation)."""
     if drive and budget_usd is None:
-        raise ValueError("a drive seat launch needs its budget_usd: it never runs without a cap")
+        raise ValueError("a drive launch needs its budget_usd: it never runs without a cap")
 
 
 def claude_spec(cfg: dict, *, prompt: str, workdir: str, model: str | None, minutes: float,
@@ -172,10 +172,10 @@ def spec_for(cfg: dict, harness: str, *, prompt: str, workdir: str, model: str |
              session_id: str | None = None, budget_usd: float | None = None, read_only: bool = False,
              resume: str | None = None, drive: bool = False) -> LaunchSpec:
     """The launch spec for a fresh replacement, or a resume, on `harness` ("codex" or "claude").
-    The one contract for drive seats: model, sandbox or permission mode, turn and wall-clock
+    The one contract for drive launches: model, sandbox or permission mode, turn and wall-clock
     limits, and the per-session budget are the same whether the session is new or resumed.
     `resume` is the harness's session handle (Claude session id; Codex thread id). `drive=True`
-    (every drive seat launch) refuses a missing budget_usd: a drive session never runs uncapped."""
+    (every drive launch) refuses a missing budget_usd: a drive session never runs uncapped."""
     kw = dict(prompt=prompt, workdir=workdir, model=model, minutes=minutes, budget_usd=budget_usd,
               read_only=read_only, resume=resume, drive=drive)
     if harness == "codex":

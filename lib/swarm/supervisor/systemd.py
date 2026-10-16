@@ -1,5 +1,5 @@
 """The systemd user manager, as the supervisor uses it: the bus environment for `systemd-run --user
---scope` (each seat's or replacement's containment, see swarm.supervisor.runner), the linger check, and
+--scope` (each launch's or replacement's containment, see swarm.supervisor.runner), the linger check, and
 the removal of the legacy swarm-supervise timer.
 
 Swarm installs no system timer of any kind: no systemd timer or service unit, no launchd agent, no

@@ -245,7 +245,7 @@ def codex_exposure() -> list[Path]:
 def off_reason(cfg: dict, *, drive: bool = False) -> str | None:
     """Why the local kill switches stop the supervisor now ([supervise] enabled, the off files),
     or None. Read fresh every call: checked again right before a launch and an enrolment. A drive
-    seat (`drive`) is not gated by [supervise] enabled: drive jobs are driven by the session driver
+    launch (`drive`) is not gated by [supervise] enabled: drive jobs are driven by the session driver
     whatever it says; only the off files (and the job's halt, checked by the driver) stop them."""
     try:
         sup = settings(cfg)

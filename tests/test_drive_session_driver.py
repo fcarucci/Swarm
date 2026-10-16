@@ -7,7 +7,7 @@ board writes, a runner's exit.
 Real drivers run as detached subprocesses on real boards (sqlite, file, and postgres when SWARM_TEST_CONFIG names
 a throwaway one); the memory board lives in one process, so its driver runs in a thread. The end-to-end test runs
 a real drive job (artifact recipe) to MET with the orchestrating "session" an idle child process that never makes
-a hook call, seats launched by the real runner as a scripted fake `claude` (tests/drive_fake_seat.py).
+a hook call, launches launched by the real runner as a scripted fake `claude` (tests/drive_fake_launch.py).
 
 Run: cd tests && /var/tmp/test-slots/test-slot -- python3 -B -m unittest test_drive_session_driver
 """
@@ -281,7 +281,7 @@ class LedgerDeadlineTests(unittest.TestCase):
             got = sorted(sd.snapshot_deadlines(snap, {}, [hold, launch]))
         self.assertEqual(got, [T0 + dt.timedelta(minutes=3), T0 + dt.timedelta(minutes=7),
                                T0 + dt.timedelta(minutes=30, seconds=1), T0 + dt.timedelta(minutes=90)])
-        ctx.live = set()                              # no live seat: no stall wake
+        ctx.live = set()                              # no live launch: no stall wake
         with mock.patch.object(dm, "_Ctx", return_value=ctx):
             self.assertNotIn(T0 + dt.timedelta(minutes=90), sd.snapshot_deadlines(snap, {}, [hold]))
 
@@ -467,8 +467,8 @@ class LifecycleTests(Home):
         for secret in ("PGPASSWORD", "ANTHROPIC_API_KEY"):
             self.assertNotIn(secret, kw["env"])
 
-    def test_a_seat_never_starts_a_driver(self):
-        """Review rr1: a seat (its runner tag, or an agent host the supervisor launched) starts nothing, even
+    def test_a_launch_never_starts_a_driver(self):
+        """Review rr1: a launch (its runner tag, or an agent host the supervisor launched) starts nothing, even
         with the requester's session id in a forged SessionStart payload."""
         import io
         from swarm.supervisor import runner
@@ -549,7 +549,7 @@ class LifecycleTests(Home):
                 8: (1, ["python3", "-m", "swarm.supervisor.session_driver"])}
         self.assertTrue(procwatch.under_runner(10, parent=tree.get))
         self.assertFalse(procwatch.under_runner(8, parent=tree.get))
-        self.assertTrue(procwatch.under_runner(10, parent=lambda pid: None))       # unreadable: a seat
+        self.assertTrue(procwatch.under_runner(10, parent=lambda pid: None))       # unreadable: a launch
 
     def test_the_session_start_hook_starts_the_requesters_driver(self):
         import io
@@ -559,7 +559,7 @@ class LifecycleTests(Home):
             sd.hook_session_start(self.cfg, io.StringIO("not json"))
         ensure.assert_called_once_with(self.cfg, "sess-1")
 
-    def test_the_requesters_first_hook_starts_its_driver_and_a_seat_does_not(self):
+    def test_the_requesters_first_hook_starts_its_driver_and_a_launch_does_not(self):
         from swarm import hooks
         self.held_job(session="sess-1")
         with mock.patch.object(sd, "ensure", return_value="started") as ensure, \
@@ -578,7 +578,7 @@ class LifecycleTests(Home):
 class NoModelCallTests(Home):
     def test_driver_makes_no_model_call(self):
         """The loop's own code imports no model client and opens no connection on a local board; a pass that
-        launches a seat does it only through the runner (runner.start), never by running a harness."""
+        launches a launch does it only through the runner (runner.start), never by running a harness."""
         import socket
         for name in ("session_driver", "wake", "procwatch"):
             src = (REPO / "lib" / "swarm" / "supervisor" / f"{name}.py").read_text()
@@ -709,7 +709,7 @@ class MemoryIdle(Home):
 
 class IdleOrchestratorEndToEnd(unittest.TestCase):
     """A real drive job (artifact recipe) on a sqlite board: `swarm activate`, then nothing but the session
-    driver. The orchestrating session is an idle child process that never makes a hook call; seats are launched
+    driver. The orchestrating session is an idle child process that never makes a hook call; launches are launched
     by the real runner (no systemd: their own process group, a Job Object on Windows) as a scripted `claude`;
     the job reaches MET. Linux, macOS and Windows."""
 
@@ -753,20 +753,20 @@ class IdleOrchestratorEndToEnd(unittest.TestCase):
         bindir.mkdir()
         venv = self.x / "venv"
         self.venv(venv)
-        self.seat_log = self.x / "seats.jsonl"
-        seat = REPO / "tests" / "drive_fake_seat.py"
+        self.launch_log = self.x / "launches.jsonl"
+        launch = REPO / "tests" / "drive_fake_launch.py"
         if POSIX:
             self.launcher = REPO / "bin" / "swarm"
             claude = bindir / "claude"
-            claude.write_text(f'#!/bin/sh\nexport FAKE_SWARM="{self.launcher}" FAKE_SEAT_LOG="{self.seat_log}"\n'
-                              f'PYTHONPATH="{REPO / "lib"}" exec "{sys.executable}" "{seat}" "$@"\n')
+            claude.write_text(f'#!/bin/sh\nexport FAKE_SWARM="{self.launcher}" FAKE_LAUNCH_LOG="{self.launch_log}"\n'
+                              f'PYTHONPATH="{REPO / "lib"}" exec "{sys.executable}" "{launch}" "$@"\n')
             claude.chmod(0o755)
             path = f"{bindir}{os.pathsep}/usr/local/bin:/usr/bin:/bin"
         else:
             self.launcher = REPO / "bin" / "swarm.cmd"
             claude = bindir / "claude.cmd"
-            claude.write_text(f'@echo off\r\nset "FAKE_SWARM={self.launcher}"\r\nset "FAKE_SEAT_LOG={self.seat_log}"\r\n'
-                              f'set "PYTHONPATH={REPO / "lib"}"\r\n"{sys.executable}" "{seat}" %*\r\n')
+            claude.write_text(f'@echo off\r\nset "FAKE_SWARM={self.launcher}"\r\nset "FAKE_LAUNCH_LOG={self.launch_log}"\r\n'
+                              f'set "PYTHONPATH={REPO / "lib"}"\r\n"{sys.executable}" "{launch}" %*\r\n')
             path = os.pathsep.join([str(bindir), os.path.dirname(sys.executable), os.environ.get("PATH", "")])
         self.config = self.home / ".config" / "swarm" / "config.toml"
         self.config.parent.mkdir(parents=True)
@@ -784,9 +784,9 @@ class IdleOrchestratorEndToEnd(unittest.TestCase):
         self.addCleanup(patch.stop)
 
     def evidence(self) -> str:
-        """What a failure shows: the seats' log, the supervisor log and the runners' kept output tails."""
+        """What a failure shows: the launches' log, the supervisor log and the runners' kept output tails."""
         out = []
-        for p in [self.seat_log, self.home / ".local/share/swarm/supervisor/supervise.log",
+        for p in [self.launch_log, self.home / ".local/share/swarm/supervisor/supervise.log",
                   *sorted((self.home / ".local/share/swarm/supervisor").rglob("*.tail.txt")),
                   *sorted((self.home / ".local/share/swarm/supervisor").glob("driver-*.json")),
                   self.home / ".local/share/swarm/host/hook-stderr.log",
@@ -834,17 +834,17 @@ class IdleOrchestratorEndToEnd(unittest.TestCase):
         st = json.loads(settings.read_private(sd.state_name(sd.lock_name("sess-1"))))
         self.assertEqual(st["exit"], "no unfinished drive job")
         self.assertIsNone(session.poll())             # the session never did anything and is still open
-        seats = [json.loads(line) for line in self.seat_log.read_text().splitlines()]
-        roles = [e["head"] for e in seats if e["ev"] == "start"]
+        launches = [json.loads(line) for line in self.launch_log.read_text().splitlines()]
+        roles = [e["head"] for e in launches if e["ev"] == "start"]
         self.assertTrue(any("role engineering_lead" in r for r in roles))
         self.assertTrue(any("goal judge" in r or "role judge" in r for r in roles))
-        self.assertFalse([e for e in seats if e["ev"] == "denied"])
+        self.assertFalse([e for e in launches if e["ev"] == "denied"])
         led = ledger.load(store_key(cfg), "J")
         self.assertEqual((led.terminal or {}).get("verdict"), "met")
         self.assertEqual(led.requester_session, "sess-1")
 
 
-# --- seat containment without systemd ---------------------------------------------------------------------
+# --- launch containment without systemd ---------------------------------------------------------------------
 
 try:
     from test_supervise_runner import RunnerBase, SURVIVOR, _gone, fake  # noqa: E402  (the runner fixture)
@@ -855,7 +855,7 @@ except Exception:          # a platform the runner fixture does not load on (Win
 
 
 class NoSystemdContainmentTests(RunnerBase):
-    """Spec 3.11 [T21]: with no systemd user manager (SWARM_NO_SYSTEMD=1, macOS, a container), a drive seat
+    """Spec 3.11 [T21]: with no systemd user manager (SWARM_NO_SYSTEMD=1, macOS, a container), a drive launch
     launches in its own process group, and stopping it kills its whole process tree. Nothing goes through
     systemd-run or systemctl."""
 
@@ -864,9 +864,9 @@ class NoSystemdContainmentTests(RunnerBase):
         p = mock.patch.dict(os.environ, {"SWARM_NO_SYSTEMD": "1"})
         p.start()
         self.addCleanup(p.stop)
-        # containment, not the Task 20 credential jail (tests/test_seat_isolation covers that): the seat's argv as is
+        # containment, not the Task 20 credential jail (tests/test_launch_isolation covers that): the launch's argv as is
         from swarm.supervisor import runner
-        j = mock.patch.object(runner, "_seat_argv", lambda cfg, run: (list(run["argv"]), None))
+        j = mock.patch.object(runner, "_launch_argv", lambda cfg, run: (list(run["argv"]), None))
         j.start()
         self.addCleanup(j.stop)
         g = mock.patch.object(runner, "KILL_GRACE", 0.5)   # a SIGTERM-ignoring member: KILL after 0.5 s, not 10
@@ -875,8 +875,8 @@ class NoSystemdContainmentTests(RunnerBase):
 
     def drive_run(self, argv, **kw):
         run = self.run_dict(argv, **kw)
-        run.update(launch_id="t1-0123456789abcdef0123456789abcdef", action_id="gen1|seat|eng|-|0|1",
-                   seat="eng")
+        run.update(launch_id="t1-0123456789abcdef0123456789abcdef", action_id="gen1|launch|eng|-|0|1",
+                   launch="eng")
         return run
 
     def survivor_pid(self):
@@ -884,7 +884,7 @@ class NoSystemdContainmentTests(RunnerBase):
         wait_until(lambda: f.exists() and f.read_text().strip())
         return int(f.read_text())
 
-    def test_a_drive_seat_launches_without_a_user_manager(self):
+    def test_a_drive_launch_launches_without_a_user_manager(self):
         from swarm.supervisor import runner
         sid = "3f0c1e9a-0000-4000-8000-000000000001"
         argv = [fake(self.bin / "claude", 'touch "$0.ran"\necho \'{"subtype":"success"}\'\n')]
@@ -910,7 +910,7 @@ class NoSystemdContainmentTests(RunnerBase):
 
 @unittest.skipUnless(POSIX and os.path.isdir("/proc"), "process groups are listed through /proc")
 class GroupPresenceTests(unittest.TestCase):
-    """A seat contained by its process group is "present" while a tagged member lives, "absent" only when the
+    """A launch contained by its process group is "present" while a tagged member lives, "absent" only when the
     members can be listed and none is left; the driver's reconcile treats it as live meanwhile."""
 
     def test_presence_follows_the_tagged_group(self):
@@ -1035,7 +1035,7 @@ class DriveRunTests(Home):
         for k in person.HOST_ENV:
             os.environ.pop(k, None)
 
-    def test_it_is_refused_inside_an_agent_host_and_for_a_seat(self):
+    def test_it_is_refused_inside_an_agent_host_and_for_a_launch(self):
         from swarm import drive_cli, person
         from swarm.supervisor import runner
         self.held_job()
@@ -1045,7 +1045,7 @@ class DriveRunTests(Home):
             self.assertEqual(drive_cli.cmd_drive_run(self.cfg, self.args()), 1)
         with mock.patch.object(person, "_tty_confirm", return_value=False):
             self.assertEqual(drive_cli.cmd_drive_run(self.cfg, self.args(yes=False)), 1)   # no person said yes
-        # rr1a: a seat that cleared its variables and detached is still under its runner: refused
+        # rr1a: a launch that cleared its variables and detached is still under its runner: refused
         with mock.patch.object(procwatch, "under_runner", side_effect=lambda pid, **k: pid == os.getpid()):
             self.assertEqual(drive_cli.cmd_drive_run(self.cfg, self.args()), 1)
         self.assertFalse(sd.held(sd.run_lock_name(self.key, "J")))
@@ -1253,8 +1253,8 @@ class ReviewRetryAndCoalesceTests(Home):
 class NoProcPsTests(unittest.TestCase):
     """macOS has no /proc: start tokens, ancestry and group members come from `ps`, which must be the system's
     /bin/ps and never one found through the caller's PATH (the macOS CI failure of 8351649: the tests' planted
-    PATH made `ps` unfindable, so start() refused the session and main() took the caller for a seat; a ps planted
-    on PATH could also lie about who is a seat)."""
+    PATH made `ps` unfindable, so start() refused the session and main() took the caller for a launch; a ps planted
+    on PATH could also lie about who is a launch)."""
 
     def no_proc(self):
         import builtins

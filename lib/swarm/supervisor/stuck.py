@@ -21,7 +21,7 @@ def effective_contact(last_contact: _dt.datetime, out, dead: _dt.timedelta) -> _
 
 
 def stuck_reason(a, js, now: _dt.datetime, board_cfg: dict, sup: dict, out=None, gate=None) -> str | None:
-    """`gate`: None for a plain job (its job-level wait holds every agent); for a drive job, the seats
+    """`gate`: None for a plain job (its job-level wait holds every agent); for a drive job, the launches
     with an open question, which hold only themselves (spec 3.10)."""
     if a.ended_at is not None:
         return None
@@ -31,7 +31,7 @@ def stuck_reason(a, js, now: _dt.datetime, board_cfg: dict, sup: dict, out=None,
         if js.waiting_on and not str(js.waiting_on).startswith(WAITING_PREFIX):
             return None
     elif a.name in gate:
-        return None   # a seat blocked on its own question is waiting, not stuck
+        return None   # a launch blocked on its own question is waiting, not stuck
     dead = _dt.timedelta(minutes=float(board_cfg["dead_minutes"]))
     silent = _dt.timedelta(minutes=float(sup["silent_minutes"]))
     contact = effective_contact(a.last_contact_at, out, dead)
@@ -110,7 +110,7 @@ def find_stuck_owned(board, cfg: dict, now=None, deadline: float | None = None) 
             continue
         from swarm.supervisor.orphans import drive_gate, drive_view, human_question
         if drive_view(board, cfg, js.job)[0]:
-            continue          # a drive job's seats are the driver's: never closed as stuck by this pass
+            continue          # a drive job's launches are the driver's: never closed as stuck by this pass
         if human_question(board, js, cfg):
             continue
         gate = drive_gate(board, cfg, js.job)

@@ -1,6 +1,6 @@
-"""Worktree roots of drive writer seats (schema 25, spec §3.4 [F20]).
+"""Worktree roots of drive writer launches (schema 25, spec §3.4 [F20]).
 
-A writer seat owns the checkout its workdir lies in: the first directory, walking up from the
+A writer launch owns the checkout its workdir lies in: the first directory, walking up from the
 realpath, that holds a `.git` file (a linked worktree) or directory (a clone). Found without running
 git. Two live writers may not share a checkout, and may not nest one inside the other, so the drive
 lock of a `wt:` key stores the root and the claim refuses any overlap (roots_overlap).

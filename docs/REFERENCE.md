@@ -633,7 +633,7 @@ busy_timeout_ms = 10000                             # a writer waits this long f
   `swarm migrate`.
 - **Concurrency.** Every hook call is its own process with its own connection. The file is in
   WAL mode (readers never block the writer), every connection has a busy timeout, and every
-  read-modify-write (name allocation, the judge seat, spawn caps, route claims, posting) runs in
+  read-modify-write (name allocation, the judge launch, spawn caps, route claims, posting) runs in
   `BEGIN IMMEDIATE`, which takes SQLite's single write lock up front. Partial unique indexes
   also keep names unique among active agents and one active judge per job. Message ids are
   `AUTOINCREMENT` (never reused) and commit in id order under the write lock. A cursor read
@@ -1007,7 +1007,7 @@ Two jobs that turn out to be one, or an agent that belongs on another job, are h
 spawning duplicates and without stopping anyone. Nothing here changes the schema.
 
 - `swarm move (--as NAME | --key K) --to J` moves one live agent to the open job J. Its row gets
-  the new job, keeps its name, role and counters, and loses a judge or verifier seat (a seat
+  the new job, keeps its name, role and counters, and loses a judge or verifier launch (a launch
   belongs to one job). Its read cursor is set so that the newest `join_history` messages of J
   are unread, once: it sees J's recent board, neither the old job's cursor nor a flood. Refused
   when the agent is not active, J is missing or closed, or it is already on J. The command
@@ -1023,7 +1023,7 @@ spawning duplicates and without stopping anyone. Nothing here changes the schema
 - `swarm job J --goal G|-` sets or replaces the goal of an open job after activation, so a judge
   can be added later (`X is not the judge` was the symptom of a job without a goal). It posts a
   notice on the board, marks the job's markers as having a goal, clears a verdict given for the
-  old goal, and prints the judge tag line when no judge is seated.
+  old goal, and prints the judge tag line when no judge is launched.
 
 The agent is not restarted: every hook call resolves its job from its board row. Its next
 PreToolUse shows, once: where it was moved from and to, the job's description, task and goal,
@@ -1094,7 +1094,7 @@ sit between rounds, or on a question for a person, for hours with no live subage
 only the judge's `met` or a person (`swarm deactivate`) ends it. While no agent is started,
 running or idle on it, `status`, `watch` and the Postgres `job_status` view's `shown_status`
 column show it as `waiting (goal not met)`. Anyone can resume it, with no orchestrator:
-`activate --attach`, spawning agents, taking the judge seat; a `met` verdict then lets the
+`activate --attach`, spawning agents, taking the judge launch; a `met` verdict then lets the
 ordinary rules close it. The sweep re-checks the goal at the moment of the close (a goal set, or
 a verdict changed, since it looked keeps the job open).
 
@@ -1217,7 +1217,7 @@ open job as one of four words:
 | `active` | an agent is started or running, or anything happened within `idle_minutes` |
 | `waiting` | the orchestrator said what the job waits for: `swarm wait --job J --on "<what>"`. The reason and how long it has waited are shown in the WAITING ON column, and in `status --job J` |
 | `idle` | nobody is at work and no reason is recorded: give it one, or close the job (once every agent is done it [auto-closes](#auto-close) after `auto_close_minutes`) |
-| `waiting (goal not met)` | the job has a goal without a `met` verdict and no agent is started, running or idle on it. No sweep closes it (see [Jobs with a goal](#auto-close)): spawn an agent, seat the judge, or `swarm deactivate` it |
+| `waiting (goal not met)` | the job has a goal without a `met` verdict and no agent is started, running or idle on it. No sweep closes it (see [Jobs with a goal](#auto-close)): spawn an agent, launch the judge, or `swarm deactivate` it |
 
 `swarm wait --job J --on "<what>" --for 2h` (or `--until 17:30`, or `--until "2026-10-06 09:00"`)
 bounds the wait. A bounded wait that has not ended protects the job from the orphan rule and from
@@ -1293,7 +1293,7 @@ on this machine or another one that reaches the same board:
   its messages, departed agents and transcripts are kept past the retention limits;
 - every active agent is recorded in a **resume manifest** (stored on the board, table `job_pauses`,
   schema 12): name, role, host, harness, model, agent key, session id, read cursor, last tool, task,
-  working directory (where this machine knows it), judge/verifier seats. The agents are closed
+  working directory (where this machine knows it), judge/verifier launches. The agents are closed
   (`left_reason = paused`); an agent that is still running is told at its next tool call to stop;
 - the final transcript of each agent is captured (this machine's directly, other machines' by their own
   hooks, waited for up to `--wait` seconds, default 15). The report shows `final`, `snapshot` or
@@ -1634,8 +1634,8 @@ runtime budgets and concurrency caps are shared with ordinary replacements.
    excludes earlier posts. Attaching, completion checks, or the first supervisor pass adopt
    a pre-pipeline job with a cutoff at that point, without replaying historical DONE posts.
 2. For a goal job, a hand-off newer than its artifact's verdict starts a judge when the judge
-   seat is free. The brief includes the task, goal, hand-off and previous fix instructions.
-   Artifacts retain independent verdict histories; a job's judge seat is reused sequentially.
+   launch is free. The brief includes the task, goal, hand-off and previous fix instructions.
+   Artifacts retain independent verdict histories; a job's judge launch is reused sequentially.
    `status --job J` shows each artifact's verdict. A met for reference A never covers reference B,
    and a repeated hand-off of A after its verdict also needs review. The coding adapter groups
    revisions by branch: a newer SHA supersedes only that branch's earlier hand-offs.
@@ -1769,7 +1769,7 @@ not a timer (Swarm installs none). `swarm activate
 --job J --goal G` implies drive (`--drive` is accepted and does nothing); `--no-drive --reason TEXT` runs the
 goal job the old way, with nothing driving it. Nothing else needs to stay alive after activation: the session that
 activated the job is the **requester/observer**. It may watch (`swarm watch`, `swarm snapshot --follow`) and, as the
-requester session, answer questions, `swarm halt`/`unhalt`, `deactivate` and request seats through receipted
+requester session, answer questions, `swarm halt`/`unhalt`, `deactivate` and request launches through receipted
 commands. Its turns and its blocking change nothing: the job advances while that session is open, idle or busy.
 
 ### The session driver (no timers)
@@ -1784,11 +1784,11 @@ ruling or close deadline, the wall clock, a stall wake). Without any OS notifica
 60 s, and `swarm doctor` says so. Idle, it costs nothing measurable. It exits when its session ends, when its
 jobs are finished, or on the kill switch (`supervise.off`).
 
-When the requester session closes, its jobs pause (seats already running finish, nothing new launches) and
+When the requester session closes, its jobs pause (launches already running finish, nothing new launches) and
 resume when a session that owns them opens, or under **`swarm drive run [--job J]`**: the same loop in the
 foreground, for progress with no session open. `swarm doctor` reports "session driver running for S (mode:
-listen|notify|poll)" or "no live session driver", and how seats are contained: a systemd user scope where a
-user manager answers, else the seat's own process group (POSIX) or Job Object (Windows). A missing systemd never
+listen|notify|poll)" or "no live session driver", and how launches are contained: a systemd user scope where a
+user manager answers, else the launch's own process group (POSIX) or Job Object (Windows). A missing systemd never
 refuses a launch.
 
 ### Breaking changes
@@ -1797,7 +1797,7 @@ Drive mode changes four things for anyone who scripted the old flow:
 
 1. **A goal implies drive.** `swarm activate --goal` starts a driven job; use `--no-drive --reason TEXT` for the old behaviour.
 2. **`--default` is required** on every `swarm ask` in a drive job: the driver applies it when the question expires (`question_expiry`, 4h).
-3. **Requester Agent-tool spawns are refused in drive jobs.** The requester no longer staffs the job with the host's spawn tool; the lead requests seats with `swarm run` and the supervisor launches them.
+3. **Requester Agent-tool spawns are refused in drive jobs.** The requester no longer staffs the job with the host's spawn tool; the lead requests launches with `swarm run` and the supervisor launches them.
 4. **No timer: the session driver.** Swarm installs no timer on any platform, and `swarm supervise enable`/`disable` are gone (an earlier draft refused `activate --goal` without a timer, and refused macOS and Windows); the requester session's driver runs drive jobs while it is open, `swarm drive run` when none is. `[supervise] enabled` does not gate drive jobs; `swarm halt` stops one.
 
 ### Terminal states
@@ -1843,7 +1843,7 @@ on a running job with `swarm drive budget --job J KEY=VALUE ...` (no rollover). 
 | `ruling_reserve_usd` | 5 (USD), configurable | the reserve is what a ruling draws on |
 | `session_usd_cap` | 5 | a session's reserved ceiling |
 | `min_session_usd` | 0.5 | the launch is held and a ruling becomes due |
-| `max_session_minutes` | 60 | the session ends, the seat goes idle |
+| `max_session_minutes` | 60 | the session ends, the launch goes idle |
 | `max_wall_hours` | 24 | ruling |
 | `ruling_attempts` | 2 | the mechanical UNREACHABLE |
 | `close_deadline_minutes` | 60 | the close is abandoned and the job ends with the labelled mechanical outcome |
@@ -1864,10 +1864,10 @@ on a running job with `swarm drive budget --job J KEY=VALUE ...` (no rollover). 
 `swarm land`, the git 2.40 and per-destination `ls-remote` doctor checks and the UNC refusal arrive with this release (Tasks 11b, 1 and 3); this section describes them as designed.
 
 - **Pinned credentials.** Verification and landing run in supervisor-private bare mirrors with a minimal environment. Activation pins, per destination, one credential source with `--credential DEST=SOURCE`: an allowlisted helper, an ssh key or an agent socket. A helper is pinned as an **absolute** path in the owner record (the mirror resolves helpers only from system directories, and `gh` often lives in `~/.local/bin`), together with its config location. For ssh destinations activation or doctor seeds `known_hosts` in the private mirrors directory (BatchMode fails closed). `swarm doctor` runs a dry-run `git ls-remote` per destination and fails on an unresolvable helper; it also needs git 2.40 or newer on hosts with drive jobs.
-- **Drive seats run in a jail (Linux).** Every drive seat (Claude or Codex, every role) runs in its own user, mount and pid namespaces (`lib/swarm/seatjail.py`) and sees an **allowlist** of the person's files (`lib/swarm/supervisor/seathome.py`). Its `$HOME` and `/tmp` are its own directories (in the supervisor's private dir, on disk), and so are its `~/.claude` and `~/.codex`: its transcripts, todos and sessions, never another session's. Bound back read-only: the harness settings, plugins, skills, hooks and instructions, the Codex config, the swarm venv, the tools on PATH below the home and the harness install dirs, the seat's `.ssh` (a copy of `known_hosts`, no identity) and `gitconfig` (no credential helper; GitHub ssh URLs fetched over anonymous HTTPS), `[drive] seat_ro_paths`. Bound back writable: the work tree and its git dir (the git `hooks` and `config` read-only), the harness login file (a token refresh writes it; it is not a repository credential), `[drive] seat_rw_paths`. Nothing else of the home is there: `~/.config`, `~/.ssh` keys, tokens, `~/.local/share/pki`, the supervisor's private dir, shell rc files, systemd units, the person's tmux/herdr/agent sockets. `/run/user/<uid>` and `/dev/shm` are empty, paths a job pins outside the home are covered, the mounts are locked (a nested user namespace), and the environment is an allowlist (locale, terminal, PATH, the run's swarm variables, the model API variables). **Board access:** a jailed seat has no board password and no host-private file. Its `swarm` command and swarm hooks hand each call, as a request file in the seat's broker directory (bound into that seat's jail only), to its runner's broker, which runs it outside the jail as that seat: the session identity comes from the launch record, a hook payload's session id is overwritten, `--as`/`--key` must name the seat itself, an argument naming a file outside the work tree is refused, and only seat commands run (`post`, `read`, `verdict`, `done`, `run`, `review`, `goal-ready`, `ask`, `answer`, `land`, `wait`, ...; never `bg`, `config`, `supervise`, `transcript` or a person's command). A private repository needs a **read-only** deploy key per destination, named in `[drive] seat_ssh_key`. Only the supervisor lands. On macOS and Windows there is no filesystem jail: seats are **best-effort** (the allowlisted environment, `GIT_CONFIG_NOSYSTEM=1` and a seat gitconfig with an empty credential helper, ssh with no agent and no default identity, an empty gh config dir, a scratch `HOME` with the harness keeping its own config dir, and the same broker); `swarm doctor` warns "best-effort on <platform> (no filesystem jail)" and the runner logs it once. A Linux host that cannot build the jail (unprivileged user namespaces disabled) falls back to best-effort the same way (WARN, logged once); `[drive] seat_isolation = "strict"` makes every host without the jail refuse drive seats instead. The fallback happens only when the host deterministically has no unprivileged user namespaces (a disabling sysctl, or EPERM from unshare/setgroups/uid_map); any other failure to build the jail (a timeout, ENOSPC, EAGAIN, ENOMEM) refuses the seat. In the jail a reviewer's or judge's work tree and git dir are bound read-only (it runs the tests read-only, with PYTHONDONTWRITEBYTECODE=1 and no pytest cache; temp files go to its private /tmp); best-effort seats have no jail, so there the read-only roles are a guardrail only (known issue). Best-effort guards against accidental credential use, not against a hostile seat: an unjailed seat can still read the person's files and reach the keychain or Credential Manager, and the broker's per-call attestation (rr19) does not hold against it (it can write the supervisor's private dir). Git credential helpers, askPass and sshCommand are overridden at command scope (GIT_CONFIG_COUNT), which wins over a repository's own config; a person can accept that risk with `swarm supervise seat-isolation off` at a terminal (person.require; `config.toml` cannot turn it off). `swarm doctor` shows "seat isolation", probed from inside a jail. Residuals: the network is shared (a seat reaches what the host reaches, without credentials), and the harness login file is readable by the seat (the seat must run the harness).
+- **Drive launches run in a jail (Linux).** Every drive launch (Claude or Codex, every role) runs in its own user, mount and pid namespaces (`lib/swarm/launchjail.py`) and sees an **allowlist** of the person's files (`lib/swarm/supervisor/launchhome.py`). Its `$HOME` and `/tmp` are its own directories (in the supervisor's private dir, on disk), and so are its `~/.claude` and `~/.codex`: its transcripts, todos and sessions, never another session's. Bound back read-only: the harness settings, plugins, skills, hooks and instructions, the Codex config, the swarm venv, the tools on PATH below the home and the harness install dirs, the launch's `.ssh` (a copy of `known_hosts`, no identity) and `gitconfig` (no credential helper; GitHub ssh URLs fetched over anonymous HTTPS), `[drive] launch_ro_paths`. Bound back writable: the work tree and its git dir (the git `hooks` and `config` read-only), the harness login file (a token refresh writes it; it is not a repository credential), `[drive] launch_rw_paths`. Nothing else of the home is there: `~/.config`, `~/.ssh` keys, tokens, `~/.local/share/pki`, the supervisor's private dir, shell rc files, systemd units, the person's tmux/herdr/agent sockets. `/run/user/<uid>` and `/dev/shm` are empty, paths a job pins outside the home are covered, the mounts are locked (a nested user namespace), and the environment is an allowlist (locale, terminal, PATH, the run's swarm variables, the model API variables). **Board access:** a jailed launch has no board password and no host-private file. Its `swarm` command and swarm hooks hand each call, as a request file in the launch's broker directory (bound into that launch jail only), to its runner's broker, which runs it outside the jail as that launch: the session identity comes from the launch record, a hook payload's session id is overwritten, `--as`/`--key` must name the launch itself, an argument naming a file outside the work tree is refused, and only launch commands run (`post`, `read`, `verdict`, `done`, `run`, `review`, `goal-ready`, `ask`, `answer`, `land`, `wait`, ...; never `bg`, `config`, `supervise`, `transcript` or a person's command). A private repository needs a **read-only** deploy key per destination, named in `[drive] launch_ssh_key`. Only the supervisor lands. On macOS and Windows there is no filesystem jail: launches are **best-effort** (the allowlisted environment, `GIT_CONFIG_NOSYSTEM=1` and a launch gitconfig with an empty credential helper, ssh with no agent and no default identity, an empty gh config dir, a scratch `HOME` with the harness keeping its own config dir, and the same broker); `swarm doctor` warns "best-effort on <platform> (no filesystem jail)" and the runner logs it once. A Linux host that cannot build the jail (unprivileged user namespaces disabled) falls back to best-effort the same way (WARN, logged once); `[drive] launch_isolation = "strict"` makes every host without the jail refuse drive launches instead. The fallback happens only when the host deterministically has no unprivileged user namespaces (a disabling sysctl, or EPERM from unshare/setgroups/uid_map); any other failure to build the jail (a timeout, ENOSPC, EAGAIN, ENOMEM) refuses the launch. In the jail a reviewer's or judge's work tree and git dir are bound read-only (it runs the tests read-only, with PYTHONDONTWRITEBYTECODE=1 and no pytest cache; temp files go to its private /tmp); best-effort launches have no jail, so there the read-only roles are a guardrail only (known issue). Best-effort guards against accidental credential use, not against a hostile launch: an unjailed launch can still read the person's files and reach the keychain or Credential Manager, and the broker's per-call attestation (rr19) does not hold against it (it can write the supervisor's private dir). Git credential helpers, askPass and sshCommand are overridden at command scope (GIT_CONFIG_COUNT), which wins over a repository's own config; a person can accept that risk with `swarm supervise launch-isolation off` at a terminal (person.require; `config.toml` cannot turn it off). `swarm doctor` shows "launch isolation", probed from inside a jail. Residuals: the network is shared (a launch reaches what the host reaches, without credentials), and the harness login file is readable by the launch (the launch must run the harness).
 - **Windows UNC roots.** A worktree root that is a Windows UNC path (or has a leading `//`) is refused, fail safe; drive mode is refused on Windows anyway.
 - **Flagged audit.** Before a MET close the driver audits the target's history since activation: every commit must be reachable from a judged-met SHA of the job or have the same patch-id as one. A **flagged** audit (`DRIVER-AUDIT`) blocks the close and makes a ruling due with the finding in its prompt. It can flag legitimate cases: twin runs spanning two judged artifacts, a judged chain with a merge or empty commit, a judged branch forked before activation. Drive landings avoid these because `swarm land` pushes the exact judged SHA. To resolve a flag, re-judge the flagged commits (a new hand-off of the exact SHA), or let the ruling decide with the finding in front of it.
-- **Never /tmp.** Work trees, clones and build output never go under `/tmp` (seat workdirs there are refused). Targeted tests run through `/var/tmp/test-slots/test-slot`; the full suite runs only in CI.
+- **Never /tmp.** Work trees, clones and build output never go under `/tmp` (launch workdirs there are refused). Targeted tests run through `/var/tmp/test-slots/test-slot`; the full suite runs only in CI.
 
 ## Roles
 
@@ -1908,7 +1908,7 @@ load a persona or supply a workflow. Configure its model under `[models.<host>]`
 ### Agent titles
 
 An agent can carry an optional **title**: a short free-text label for the board, such as `EL`, `PM`,
-`QA` or `Eng: board view`. It is separate from the role, which drives judge and verifier seats and
+`QA` or `Eng: board view`. It is separate from the role, which drives judge and verifier launches and
 role addressing (`--to @EL`); nothing keys off a title, it is only shown. A title is whitespace-collapsed,
 control characters are dropped, and it is cut at 60 characters. Never put a secret in one: it is shown to
 everyone on the board.
@@ -1923,7 +1923,7 @@ everyone on the board.
 TITLE column after AGENT when at least one agent has a title (the compact `watch` shows `Name (title)`,
 cutting the title after the tool and model under width pressure). Agents without a title show nothing, and
 board message lines stay `Name: text`. A supervisor replacement inherits its predecessor's title, as does a
-resumed or paused-and-resumed agent. The engineering-team plugin tags each seat (`EL`, `PM`, `Product`, `QA`,
+resumed or paused-and-resumed agent. The engineering-team plugin tags each launch (`EL`, `PM`, `Product`, `QA`,
 `Judge`, `Build`, `Reviewer`, `Verifier`, `Eng`) and `swarm team --job J --show` lists them.
 
 Titles are schema 20 on every backend: a nullable `agents.title` and a last column of the `agent_status`
@@ -1934,17 +1934,17 @@ sharing a board together.
 
 ### Addressing a role
 
-`swarm post --to @EL "..."` addresses a seat instead of a display name: the message goes to the
+`swarm post --to @EL "..."` addresses a launch instead of a display name: the message goes to the
 agents that hold that role on the job now (a role is the `[swarm role: ...]` tag, or `join --role`;
 `@judge` and `@verifier` are the job's judge and verifiers). Matching ignores case. Four short
-aliases name the usual seats of the engineering team: `@EL` is `engineering_lead`, `@QA` is `qa`,
-`@PM` is `project_manager`, else `orchestrator` (the first seat with a holder), and `@product`
-is `product_manager`. The invoking PM joins with `--role project_manager`. A seat held by several
+aliases name the usual launches of the engineering team: `@EL` is `engineering_lead`, `@QA` is `qa`,
+`@PM` is `project_manager`, else `orchestrator` (the first launch with a holder), and `@product`
+is `product_manager`. The invoking PM joins with `--role project_manager`. A launch held by several
 agents (`@engineer`) gets one message each, up to 8. The post confirmation shows who it reached, and a reader sees the resolved name (`A -> B`), because the
 stored recipient is the name, not the role.
 
 A post is refused, with one line on stderr and exit status 1 and nothing stored, when the recipient
-is not an agent of the job, when the seat has no holder (the error lists the seats that have one),
+is not an agent of the job, when the launch has no holder (the error lists the launches that have one),
 or when the author (`--as` or `--key`) is not an agent of `--job`. For compatibility with moved
 agents carrying old command lines, an author active on another open job is redirected to that job
 before these checks. This applies even if the agent never joined the requested job; the CLI names the actual job on stderr. Offline delivery checks the
@@ -1958,9 +1958,9 @@ the author explaining why it was not delivered.
 whether it has been met. `activate` also prints `[swarm role: judge]` for explicit judges.
 With the default review pipeline, a worker hand-off starts the judge automatically.
 
-- **One judge per job.** The seat is taken atomically (a partial unique index on active judges).
+- **One judge per job.** The launch is taken atomically (a partial unique index on active judges).
   A second agent tagged as judge joins as a worker, and is told who the judge is and that its
-  verdicts will be refused. A judge that leaves frees the seat; resumed, it takes it back if it
+  verdicts will be refused. A judge that leaves frees the launch; resumed, it takes it back if it
   is still free. A spawned helper cannot be a judge. Judges never spawn fix agents;
   the supervisor starts them from the verdict brief.
 - **What the judge is told.** It doesn't do the work. It gathers evidence: reads what the
@@ -2070,11 +2070,11 @@ The engineering-team skill ships one (`skills/engineering-team/swarm_plugin.py`)
 
 | command | what it does |
 |---|---|
-| `team --job J [--show]` | print the job's team: the always-present seats, the optional seats on, who carries the duties of an absent one, and the board title each seat is spawned with (`[swarm title: EL]`, `PM`, `Product`, `QA`, `Judge`, `Build`, `Reviewer`, `Verifier`, `Eng`) |
-| `team --job J --add ROLE` / `--remove ROLE` | change the optional seats of the job (repeatable). A mandatory seat (`engineering_lead`, `qa`, `engineer`, `judge`) can't be removed: exit status 2 |
+| `team --job J [--show]` | print the job's team: the always-present launches, the optional launches on, who carries the duties of an absent one, and the board title each launch is spawned with (`[swarm title: EL]`, `PM`, `Product`, `QA`, `Judge`, `Build`, `Reviewer`, `Verifier`, `Eng`) |
+| `team --job J --add ROLE` / `--remove ROLE` | change the optional launches of the job (repeatable). A mandatory launch (`engineering_lead`, `qa`, `engineer`, `judge`) can't be removed: exit status 2 |
 | `activate ... --team ROLES` | the job's optional roles at activation, comma separated (`''` for none); a bad name stops the activation |
 
-Optional seats: `product_manager` (on by default), `build_engineer` (off), `reviewer`, `verifier`.
+Optional launches: `product_manager` (on by default), `build_engineer` (off), `reviewer`, `verifier`.
 The default comes from `team.toml`: `$SWARM_TEAM_CONFIG`, else next to the swarm config
 (`~/.config/swarm/team.toml`); a missing file means the defaults; see `team.example.toml`. A job's
 own composition (set with `--team` or `team --add/--remove`) is kept with the job, survives
@@ -2536,14 +2536,14 @@ recall_banks = ["coding", "hermes"]
   `memory.u.*`), by the supervisor or at close, with no LLM call.
 - **Mandatory at job close:** `swarm deactivate` is refused while an agent is unharvested (every
   agent of the run is checked against its evidence, a completed or still-active one too) or the run
-  has neither a stored memory, nor a recorded learnings step, nor an agent's `--none` declaration. The closing seat runs the learnings step:
+  has neither a stored memory, nor a recorded learnings step, nor an agent's `--none` declaration. The closing launch runs the learnings step:
   `swarm learn --job J --harvest` prints each unharvested agent with its transcript, then
   `swarm learn --job J --bank BANK -` (or `--from FILE`) retains the distilled facts, or
   `swarm learn --job J --none "<reason>"` records that they learned nothing durable; either clears
   the markers it covered and is recorded (`memory.harvest`). Only a person may close without it:
   `swarm deactivate --job J --no-learn "<reason>"` (the requester session's grant, or a confirmed
   tty outside any agent host), recorded on the job. A drive job does the step itself: once a MET
-  or UNREACHABLE verdict is there, the driver launches its `learner` seat (an ordinary ledger
+  or UNREACHABLE verdict is there, the driver launches its `learner` launch (an ordinary ledger
   intent, so a crashed driver resumes it) and closes only after the step is recorded. If the
   learner used `max_attempts` without finishing, the job holds (it never closes past the step)
   until a person runs `swarm learn` or `swarm deactivate --no-learn`; while a verdict is held for
@@ -2752,7 +2752,7 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `activate … --goal G\|-` | give the job a goal, judged by one judge agent; the tag lines include `[swarm role: judge]`. A goal implies drive: the requester session's driver drives it (no timer, any platform; `swarm drive run` without a session); `--no-drive --reason TEXT` opts out |
 | `deactivate --job J [--status completed\|cancelled\|failed] [--outcome O] [--force] [--delete-bank]` | switch the board off and close the job (default `completed`). A job with a goal completes only with the judge's `met` verdict, or with `--force` (recorded). On an already closed (e.g. auto-closed) job it replaces the status and outcome |
 | `verdict --job J [--as NAME] [--artifact REF] met\|not_met REASON...` | the job's judge records an artifact-bound verdict and posts it; anyone else is refused; spooled when the board is unreachable |
-| `land --job J --artifact BRANCH@SHA [--as NAME]` | drive jobs, the integrator seat only: ask the driver to land the exact judged, rebased, CI-green SHA on the target of every pinned remote; it is the integrator's hand-off (the driver posts `INTEGRATED` or `LAND-REFUSED <why>`). `land hosts add URL`: a person at a terminal confirms an ssh destination's host key fingerprints |
+| `land --job J --artifact BRANCH@SHA [--as NAME]` | drive jobs, the integrator launch only: ask the driver to land the exact judged, rebased, CI-green SHA on the target of every pinned remote; it is the integrator's hand-off (the driver posts `INTEGRATED` or `LAND-REFUSED <why>`). `land hosts add URL`: a person at a terminal confirms an ssh destination's host key fingerprints |
 | `done --job J --as NAME [--artifact REF] [--summary TEXT]` | hand off work for independent judging; `--branch B --sha S` is the coding alias |
 | `wait --job J [--for DURATION \| --until TIME] --on WHAT...` | mark an open job as waiting for something; shown as `waiting` with the reason and, when bounded, its end. `--for 90m` (`h`/`m`/`s`, bare = minutes) or `--until` (a duration, a time of day such as `17:30`, or `2026-10-06 09:00`) bounds it. A bounded wait that has not ended protects the job from the orphan rule and the stall limits (including `goal_stall_hours`); once it ends the job is judged as not waiting, and the end counts as progress. An unbounded wait is not orphaned; stall limits still apply. A board read by the orchestrating session (`status --job`, `who`, `read`, `tail --job`) counts as contact for liveness |
 | `blockers --job J [--open\|--all]` | list open blockers, or include resolved/expired history with `--all` |
@@ -2771,9 +2771,9 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `tail [--job J] [-n N] [--interval S] [--no-agents] [--no-color]` | follow the board live |
 | `snapshot --json [--job J] [--session S] [--messages N] [--follow]` | the board's view as JSON (pure read); `--follow` streams NDJSON |
 | `title --job J (--as NAME \| --key K) [TEXT...]` | set, replace or (empty text) clear an agent's display title (at most 60 characters), shown by `who`, `status` and `watch`; see [Agent titles](#agent-titles) |
-| `join --job J --key K [--role R] [--title T] [--judge\|--verifier]` | allocate a unique name for agent key K, or return the one it already has. `--title` sets its display title. `--judge` takes the job's judge seat (refused if another agent holds it) and `--verifier` makes it a verifier: for agents without the swarm's hooks, such as a one-off `codex exec` judge. They read the board with `read --key K`, and post and record verdicts with the CLI. |
+| `join --job J --key K [--role R] [--title T] [--judge\|--verifier]` | allocate a unique name for agent key K, or return the one it already has. `--title` sets its display title. `--judge` takes the job's judge launch (refused if another agent holds it) and `--verifier` makes it a verifier: for agents without the swarm's hooks, such as a one-off `codex exec` judge. They read the board with `read --key K`, and post and record verdicts with the CLI. |
 | `config [board.message_max_chars [N]] [--save]` | print or set the board's message cap (200 by default, 50 to 4000; online; existing messages are kept; `--save` also writes `[board] message_max_chars`, which only seeds a new board) |
-| `post --job J (--as NAME \| --key K) [--to NAME\|@ROLE] MESSAGE...` | post a message; whitespace is collapsed and the text capped at the board's message cap; spooled when the board is unreachable. `--to @EL`, `@PM`, `@QA`, `@judge` or `@<role>` goes to whoever holds that seat on the job now (one message each); a name that is not on the job, a seat nobody holds, or an author who is not an agent of `--job` is refused with an error and nothing is stored. `@EL` is `engineering_lead`, `@PM` is `project_manager` (else `orchestrator`), `@product` is `product_manager`; compatibility exception: an author active on another open job is redirected there with a note on stderr before validation |
+| `post --job J (--as NAME \| --key K) [--to NAME\|@ROLE] MESSAGE...` | post a message; whitespace is collapsed and the text capped at the board's message cap; spooled when the board is unreachable. `--to @EL`, `@PM`, `@QA`, `@judge` or `@<role>` goes to whoever holds that launch on the job now (one message each); a name that is not on the job, a launch nobody holds, or an author who is not an agent of `--job` is refused with an error and nothing is stored. `@EL` is `engineering_lead`, `@PM` is `project_manager` (else `orchestrator`), `@product` is `product_manager`; compatibility exception: an author active on another open job is redirected there with a note on stderr before validation |
 | `read (--as NAME \| --key K) [--job J] [--peek]` | messages new since the last read, excluding your own, `read_limit` at a time with a count of what is left; `--peek` doesn't advance the cursor |
 | `learn --job J [--bank B] [--create-bank] -` / `learn --list-banks` | retain self-contained job learnings with provenance in an existing bank (default_bank if omitted), one fact per nonblank stdin line; list existing banks |
 | `recall --job J [QUERY...]` | query recall_banks plus an explicit project bank, deduplicated within existing budgets |
@@ -3225,7 +3225,7 @@ swarm event ack  --job J 12 13
   `(kind, key)` is posted again, so nothing is told twice. Use a key that names the thing and its
   version (`kind:N@sha`).
 - **Targets.** `--to` is a role address (`@pm`, `@EL`; stored lower-case), an agent name, or
-  omitted for the orchestrator. The PM seat and the orchestrator hear each other's events:
+  omitted for the orchestrator. The PM launch and the orchestrator hear each other's events:
   a filter or wait for `@pm` (or `@orchestrator`) also matches events with no target.
   Other roles and agent names match exactly (names are case-sensitive). `--to` may be repeated.
 - **Wait.** `event wait` returns at once when something is already pending. On Postgres it sleeps
@@ -3236,8 +3236,8 @@ swarm event ack  --job J 12 13
 - **In the hooks.** Pending events show in the PreToolUse context, one compact line each
   (`[swarm events] #12 NEEDS-REVIEW 7@3f9a1c: PR 7 opened`), at most five lines and a count of the
   rest, on every tool call until they are acked. The orchestrating session sees the events addressed
-  to nobody, to `@orchestrator`, or to `@pm` while no agent holds the project_manager seat; an agent
-  sees those for its name, its role and the short aliases of its seat (`@el` for `engineering_lead`).
+  to nobody, to `@orchestrator`, or to `@pm` while no agent holds the project_manager launch; an agent
+  sees those for its name, its role and the short aliases of its launch (`@el` for `engineering_lead`).
   Agents ack with `swarm event ack --job J --as NAME ID...`.
 - **Retention.** Acked events older than `[board] retention_days` are removed with the other history,
   as are the events of jobs that no longer exist; a pending event is kept.
@@ -3274,7 +3274,7 @@ job data. Values are chunked within the existing per-value storage bound, withou
 length limit. A short board summary preserves an `answer: swarm answer ID` pointer. Each ask opens
 one blocker: only dependent work waits, and agents continue independent work.
 
-A role address uses the current seat holder at answer time, including when the seat has changed
+A role address uses the current launch holder at answer time, including when the launch has changed
 since asking. Named agents and the human are also valid addressees. Only the addressee may answer;
 the human can answer any question; everyone else can comment. Agents cannot answer human questions,
 including through `blocker resolve` while this plugin is loaded. Agent identity comes from the host
@@ -3311,12 +3311,12 @@ by `swarm doctor`. No notification command means no worker is launched.
 
 ## Landing in drive jobs
 
-In a drive job the integrator seat never pushes the target branch. It rebases the artifact branch, pushes the
+In a drive job the integrator launch never pushes the target branch. It rebases the artifact branch, pushes the
 branch to every pinned remote, waits for CI on the exact SHA, then runs `swarm land --job J --artifact BRANCH@SHA`
 and exits: that request is its hand-off. The supervisor's driver does the rest, with code that reads nothing
 from the agent for its decisions:
 
-- It checks that the request came from the integrator seat of the current generation, that a receipted `met`
+- It checks that the request came from the integrator launch of the current generation, that a receipted `met`
   verdict covers that exact SHA (or a rebase that changed no patch-id: the whole range must have the same sorted
   multiset of patch-ids), and that `swarm ci status` is green on it. A merge or empty commit never counts as a twin.
 - It claims one land lease per pinned destination (`land:<sha256 of the normalised push URL>:<target>`), all or
@@ -3351,3 +3351,9 @@ overall deadline of 120 seconds; when it runs out the close is retried in a late
 ## License
 
 Apache-2.0, © Francesco Carucci. Modify and redistribute freely; keep the `NOTICE` file and credit the author. See `LICENSE` and `NOTICE`.
+
+The `[drive]` launch settings use `launch_ro_paths`, `launch_rw_paths`, `launch_ssh_key`,
+`launch_git_name`, `launch_git_email`, and `launch_isolation`. Legacy config keys are still read;
+an explicitly present launch key takes precedence, including empty lists and strings. On startup,
+the supervisor moves the legacy private home directory to `launch-home/` once, preserving files.
+If both directories exist, it refuses to overwrite either tree.

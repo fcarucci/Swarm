@@ -1,10 +1,10 @@
 """A hook-registered judge records its verdict under its OWN hook identity: no `join`, no `--as`.
 
 Root cause of the field failure (Claude Code 2.1.28x): the judge's prompt said `[swarm title: Judge]`,
-which no hook read, so it was seated as a plain worker; a worker holds a fast-path lease and
+which no hook read, so it was launched as a plain worker; a worker holds a fast-path lease and
 bin/swarm-hook then exits in shell before Python runs, so `swarm join --judge --key judge` was never
 rewritten to the agent's own key. It joined a second identity, and `--as <that name>` is
-impersonation. Now the title seats the judge, join/verdict calls always take the Python path, and
+impersonation. Now the title launches the judge, join/verdict calls always take the Python path, and
 `swarm verdict` is rewritten to run as the caller."""
 from __future__ import annotations
 
@@ -94,7 +94,7 @@ class JudgeIdentityTests(GoalEnv):
         self.assertIn("not the judge", err)
         self.assertIsNone(self.job().verdict)
 
-    # -- the title seats the judge, with the handover rules -----------------------------------
+    # -- the title launches the judge, with the handover rules -----------------------------------
     def test_title_judge_does_not_displace_a_live_judge(self):
         self.spawn_judge("judge-1")
         first = self.member("judge-1").name

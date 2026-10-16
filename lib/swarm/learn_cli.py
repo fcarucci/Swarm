@@ -109,7 +109,7 @@ def cmd_learn(cfg: dict, args) -> int:
         return 1
     client = hindsight.Client(cfg)
     if args.list_banks:
-        # --job is accepted (a drive seat's broker always adds its own job), and ignored
+        # --job is accepted (a drive launch's broker always adds its own job), and ignored
         if args.bank or args.facts or args.create_bank or args.harvest or args.none or args.from_file:
             print("swarm learn --list-banks cannot be combined with retain options", file=sys.stderr)
             return 2

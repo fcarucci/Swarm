@@ -63,7 +63,7 @@ P20 says "PM verifies actual host slot availability before scheduling another in
 ### Other checks that passed
 
 - The verdict reason format fits Swarm: a 64-hex SHA-256 plus `req=<rev>` is about 90 characters, within the 200-character board limit.
-- The fresh judge path is consistent with the source. A departed judge frees the seat; a fresh judge must be spawned by the PM at the top level, because a spawned subagent can't be a judge (`hooks.py:400-402`).
+- The fresh judge path is consistent with the source. A departed judge frees the launch; a fresh judge must be spawned by the PM at the top level, because a spawned subagent can't be a judge (`hooks.py:400-402`).
 - Resuming or respawning roles, fencing, and the declared-budget approach invent no runtime behavior beyond what the source shows. D81 lists the remaining limits honestly.
 
 ## Verdict

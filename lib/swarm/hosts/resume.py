@@ -123,10 +123,10 @@ def restore(board, manifest: dict, host: str | None = None, dest_root=None,
     under (default: the host's own, CLAUDE_CONFIG_DIR / CODEX_HOME). `native="codex"` lets Codex
     use its experimental rollout write. `write=False`: build the command without writing.
 
-    `drive=True` (a drive seat): a resume returns only the handle, `session_id`, with an empty
+    `drive=True` (a drive launch): a resume returns only the handle, `session_id`, with an empty
     argv; the caller starts it with launch.spec_for(..., resume=session_id), the one launch
     contract, so no resume argv is built here. A briefing is a fresh launch and goes through
-    launch.spec_for too, with `budget_usd` and `read_only` (the seat's reservation and sandbox)."""
+    launch.spec_for too, with `budget_usd` and `read_only` (the launch's reservation and sandbox)."""
     cfg = cfg or {}
     harness = host
     job, key = manifest.get("job"), manifest.get("agent_key")

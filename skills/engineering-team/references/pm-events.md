@@ -6,8 +6,8 @@ is an observer.
 
 | Event | In a drive job |
 |---|---|
-| `NEEDS-REVIEW` / `BRANCH-READY` | the driver starts an independent reviewer seat for the hand-off |
-| `REVIEW-CHANGES` | the findings become the fix round's brief on the writer seat |
+| `NEEDS-REVIEW` / `BRANCH-READY` | the driver starts an independent reviewer launch for the hand-off |
+| `REVIEW-CHANGES` | the findings become the fix round's brief on the writer launch |
 | `CI-FAILED` | the integrator's `FINALIZE_BLOCKED` text and the CI logs pointer go into the fix round |
 | `CI-GREEN` | `swarm ci wait` returns; the integrator runs `swarm land` |
 | `READY-TO-LAND` | the driver executes the receipted land request (rebase only, fast-forward only) |

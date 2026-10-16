@@ -1,7 +1,7 @@
-"""Seat prompts of the drive driver (spec 3.5, 3.12, plan Task 8c).
+"""Launch prompts of the drive driver (spec 3.5, 3.12, plan Task 8c).
 
-`render(board, cfg, led, action, seat)` is what Task 8a's `execute` calls for a launch: the first user turn of a
-seat session. Everything an agent or a person posted is untrusted data: it goes between BEGIN/END lines that carry
+`render(board, cfg, led, action, launch)` is what Task 8a's `execute` calls for a launch: the first user turn of a
+launch session. Everything an agent or a person posted is untrusted data: it goes between BEGIN/END lines that carry
 a random id, and the body can never contain a line that looks like the end of its fence. The standing rules of
 spec 3.12 are in every prompt; the reviewer's gates, the lead's wake list and watermark, and the goal and
 ruling judges' `--candidate`/`--req` are filled from the ledger and the board, never from the posts."""
@@ -33,7 +33,7 @@ STANDING_RULES = (
 
 
 def standing_rules(job: str) -> list[str]:
-    """The standing rules, with the exact hand-off command for `job` (a seat's first attempt must just work)."""
+    """The standing rules, with the exact hand-off command for `job` (a launch's first attempt must just work)."""
     return [*STANDING_RULES,
             f"- Hand work off with exactly `swarm done --job {job} --artifact <BRANCH>@<FULL SHA> --summary "
             "\"<what you did and how to check it>\"` (the full 40-character sha of your commit), as its own "
@@ -89,7 +89,7 @@ _EXTRA: list = []          # the fenced raw text of the unsafe values of the pro
 
 
 def _ref(value, pattern=_SAFE_REF, what: str = "reference") -> str:
-    """A seat-controlled value for the instruction text: itself when it is a plain token, otherwise a pointer
+    """A launch-controlled value for the instruction text: itself when it is a plain token, otherwise a pointer
     to a fenced block that carries the raw text (never inline, never with a line break)."""
     text = "" if value is None else str(value)
     if pattern.fullmatch(text):
@@ -135,15 +135,15 @@ def _gates(cfg, job: str) -> str | None:
     return value
 
 
-def _header(led, seat, role: str, name: str) -> list[str]:
+def _header(led, launch, role: str, name: str) -> list[str]:
     return [f"[swarm job: {led.job}]",
             f"You are the drive agent `{name}` (role {role}) of job {led.job}, generation {led.generation}, "
             "launched by the supervisor. Join the board first; the supervisor cannot see work you do not post.",
             UNTRUSTED]
 
 
-def _seat_body(board, led, seat, action) -> list[str]:
-    out = [f"Your task brief is the file {_ref(seat.brief, what='brief path')}; read it first and work in {_ref(seat.workdir, what='workdir')}."]
+def _launch_body(board, led, launch, action) -> list[str]:
+    out = [f"Your task brief is the file {_ref(launch.brief, what='brief path')}; read it first and work in {_ref(launch.workdir, what='workdir')}."]
     kind = action.prompt_kind
     if kind == "wake":
         out.append(f"You were woken ({_ref(action.reason or 'wake', re.compile(r'[A-Za-z0-9 _:./-]{1,80}'), 'reason')}): check the board for what changed (answers, "
@@ -158,19 +158,19 @@ def _seat_body(board, led, seat, action) -> list[str]:
     return out
 
 
-def _lead_body(board, led, seat, action) -> list[str]:
+def _lead_body(board, led, launch, action) -> list[str]:
     msg_mark, ev_mark = _marks(board, led.job)
     pending = [e for e in board.pending_events(led.job)
-               if not led.watermarks.get(f"evack:{seat.name}:{e.id}")]
+               if not led.watermarks.get(f"evack:{launch.name}:{e.id}")]
     out = ["You are the lead: read the board and the goal, plan the work, write task briefs as files in the "
            "workdir, queue launches with `swarm run`, answer engineers, and post "
            "`swarm goal-ready --candidate SHA` when you believe the goal is met, then exit. You never spawn agents "
            "yourself.",
-           "Staff exactly what the goal names. When the goal or a brief names a harness or a model for a seat (for "
+           "Staff exactly what the goal names. When the goal or a brief names a harness or a model for a launch (for "
            "example \"Astra\" means `--harness codex --model gpt-6-astra`; \"Sonnet\" means `--model sonnet`), "
-           "request that seat with exactly that `--harness` and `--model`, as an engineer-role seat when it must "
+           "request that launch with exactly that `--harness` and `--model`, as an engineer-role launch when it must "
            "write (reviewer and judge roles are forced onto Claude). Never substitute another model or harness. "
-           "If the request is refused, post the refusal `--to owner` with the exact seat you need and keep the "
+           "If the request is refused, post the refusal `--to owner` with the exact launch you need and keep the "
            "rest of the job moving; never let the job sit or reach a ruling with required work unstaffed.",
            f"Your watermark for this turn: messages up to #{msg_mark}. Wake events are acknowledged one by one: "
            "exactly the event ids listed below are the ones shown to you, and no others are acknowledged "
@@ -187,7 +187,7 @@ def _judge_body(*a) -> list[str]:
     return [*_judge_lines(*a), JUDGE_RECORD]
 
 
-def _judge_lines(board, cfg, led, seat, action) -> list[str]:
+def _judge_lines(board, cfg, led, launch, action) -> list[str]:
     kind = action.prompt_kind
     digest = requirements_digest(led.pinned_requirements)
     if kind == "goal":
@@ -207,7 +207,7 @@ def _judge_lines(board, cfg, led, seat, action) -> list[str]:
                 "--reason ... --details -`. unreachable ENDS THE JOB for good: record it only when the evidence shows "
                 "the goal cannot be met, and say why. When the gap is work that was never staffed or was staffed "
                 "with the wrong model or harness (for example a required Astra review that never ran), that is not "
-                "a reason the goal cannot be met: say exactly which seat (role, harness, model) is missing in "
+                "a reason the goal cannot be met: say exactly which launch (role, harness, model) is missing in "
                 "--details and --reason, so the coordinator restaffs it. Judge only."]
     ref = _ref(action.artifact or _group(action) or "the hand-off", what="artifact")
     return [f"You are the artifact judge. Judge {ref}: `swarm verdict --job {led.job} --artifact {ref} "
@@ -220,7 +220,7 @@ JUDGE_RECORD = ("Write the verdict in lowercase (met, not_met, unreachable) and 
                 "then `EOF`.")
 
 
-def _review_body(cfg, led, seat, action) -> list[str]:
+def _review_body(cfg, led, launch, action) -> list[str]:
     ref = _ref(action.artifact or _group(action) or "the hand-off", what="artifact")
     out = [f"You are the reviewer of {ref}. Review it, then record your review with exactly one of "
            f"`swarm review --job {led.job} --artifact {ref} verified --report-text \"<your report>\"` or "
@@ -232,7 +232,7 @@ def _review_body(cfg, led, seat, action) -> list[str]:
     return out
 
 
-def _integrate_body(led, seat, action) -> list[str]:
+def _integrate_body(led, launch, action) -> list[str]:
     ref = _ref(action.artifact or _group(action) or "the accepted artifact", what="artifact")
     return [f"You are the integrator of {ref}: rebase its branch onto the target in your workdir (never push, "
             "never merge), then run `swarm land --job " + str(led.job) + " --artifact BRANCH@<rebased full sha>`. "
@@ -240,8 +240,8 @@ def _integrate_body(led, seat, action) -> list[str]:
             "LAND-REFUSED; if the rebase needs real changes, post FINALIZE_BLOCKED with the reason."]
 
 
-def _learn_body(led, seat, action) -> list[str]:
-    """The learner seat: the job's learnings step before it closes. Deterministic bookkeeping plus the
+def _learn_body(led, launch, action) -> list[str]:
+    """The learner launch: the job's learnings step before it closes. Deterministic bookkeeping plus the
     agent's own distillation; the drive loop itself never calls a model for this."""
     job = _ref(led.job, what="job")
     return [f"You are the learner of job {job}: its learnings step, before the job closes. Nothing else.",
@@ -256,25 +256,25 @@ def _learn_body(led, seat, action) -> list[str]:
             "Post `DONE: learnings for " + job + "` on the board when the command succeeds, then exit."]
 
 
-def render(board, cfg, led, action, seat) -> str:
-    """The seat prompt of one launch action (a `driver_model.Action`) for `seat` (a board `Seat`)."""
-    kind = action.prompt_kind or "seat"
+def render(board, cfg, led, action, launch) -> str:
+    """The launch prompt of one launch action (a `driver_model.Action`) for `launch` (a board `Launch`)."""
+    kind = action.prompt_kind or "launch"
     del _EXTRA[:]
-    role = _ref(getattr(seat, "role", "engineer"), _SAFE_ROLE, "role")
-    name = _ref(getattr(seat, "name", "agent"), re.compile(r"[A-Za-z0-9._~:-]{1,80}"), "seat name")
-    parts = _header(led, seat, role, name)
-    if kind == "lead" or getattr(seat, "role", "") == "engineering_lead":
-        parts += _lead_body(board, led, seat, action)
+    role = _ref(getattr(launch, "role", "engineer"), _SAFE_ROLE, "role")
+    name = _ref(getattr(launch, "name", "agent"), re.compile(r"[A-Za-z0-9._~:-]{1,80}"), "launch name")
+    parts = _header(led, launch, role, name)
+    if kind == "lead" or getattr(launch, "role", "") == "engineering_lead":
+        parts += _lead_body(board, led, launch, action)
     elif kind in ("goal", "ruling", "judge") or action.ruling:
-        parts += _judge_body(board, cfg, led, seat, action)
+        parts += _judge_body(board, cfg, led, launch, action)
     elif kind == "review":
-        parts += _review_body(cfg, led, seat, action)
+        parts += _review_body(cfg, led, launch, action)
     elif kind == "integrate":
-        parts += _integrate_body(led, seat, action)
+        parts += _integrate_body(led, launch, action)
     elif kind == "learn":
-        parts += _learn_body(led, seat, action)
+        parts += _learn_body(led, launch, action)
     else:
-        parts += _seat_body(board, led, seat, action)
+        parts += _launch_body(board, led, launch, action)
     parts += standing_rules(_ref(led.job, what="job"))
     parts += _EXTRA
     parts.append(fence("JOB BOARD", _posts(board, led.job)))

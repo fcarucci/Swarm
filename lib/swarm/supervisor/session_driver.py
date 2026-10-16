@@ -1,6 +1,6 @@
 """The session driver (spec 3.11 [T21]): one event-driven process per orchestrating session that owns an
 unfinished drive job. It replaces every timer: nothing is installed (no systemd, launchd, Task Scheduler or
-cron unit), and the driver never calls a model (seats are launched through the runner, never called).
+cron unit), and the driver never calls a model (launches are launched through the runner, never called).
 
 Lifecycle. `ensure(cfg, session, host_pid)` (from `swarm activate` and from the session's SessionStart or first
 hook) starts it when the session is the requester of an unfinished drive ledger of this board and no driver of
@@ -197,8 +197,8 @@ def ledger_deadlines(led, flat: dict, sup: dict | None = None) -> list:
 
 
 def snapshot_deadlines(snap, dcfg: dict, actions: list) -> list:
-    """The deadlines the board fixes, through the pure model (no I/O): every hold's `not_before`, each seat's
-    question `until`, the stall wake (last activity + stall_minutes while seats are live) and lease holds."""
+    """The deadlines the board fixes, through the pure model (no I/O): every hold's `not_before`, each launch's
+    question `until`, the stall wake (last activity + stall_minutes while launches are live) and lease holds."""
     from swarm.supervisor import driver_model as dm
     out = [a.not_before for a in actions if a.kind == "hold" and a.not_before is not None]
     c = dm._Ctx(snap, dcfg)
@@ -216,7 +216,7 @@ def snapshot_deadlines(snap, dcfg: dict, actions: list) -> list:
     return out
 
 
-ACTING = ("launch", "stop_seat", "close", "record_unreachable", "rollover", "complete_land")
+ACTING = ("launch", "stop_launch", "close", "record_unreachable", "rollover", "complete_land")
 
 
 def job_deadline(board, cfg: dict, sup: dict, job: str, now: dt.datetime):
@@ -499,7 +499,7 @@ def record_name(session: str) -> str:
 
 def record_launch_env(session: str, config_path: str | None) -> None:
     """Record, from the requester's own `swarm activate`, the PATH and config its driver runs with: a driver
-    started later by a hook, or by anything else, takes these, never the starter's (review rr1: a seat must not
+    started later by a hook, or by anything else, takes these, never the starter's (review rr1: a launch must not
     give a driver its PATH or config, through which a planted harness binary would be launched)."""
     from swarm import paths
     from swarm.supervisor.settings import write_private
@@ -542,14 +542,14 @@ def launch_env(session: str) -> dict | None:
     return None
 
 
-def seat_caller(host_pid: int | None = None) -> str | None:
-    """Why the calling process may not start a driver (it is a seat), or None. A seat's environment carries the
+def launch_caller(host_pid: int | None = None) -> str | None:
+    """Why the calling process may not start a driver (it is a launch), or None. A launch's environment carries the
     runner's tag (an agent can unset it, so its host process's environment and ancestry are checked too)."""
     from swarm.supervisor import procwatch, runner
     if os.environ.get(runner.RUN_ENV) or os.environ.get("SWARM_RESUME_TOKEN"):
-        return "a supervisor-launched seat never starts a session driver"
+        return "a supervisor-launched launch never starts a session driver"
     if host_pid and procwatch.under_runner(host_pid):
-        return "its agent host was launched by the supervisor (a seat), which never starts a session driver"
+        return "its agent host was launched by the supervisor (a launch), which never starts a session driver"
     return None
 
 
@@ -619,14 +619,14 @@ def ensure(cfg: dict, session: str | None, *, host_pid: int | None = None, confi
     """Start the session's driver when it owns an unfinished drive job of this board and none runs. Returns
     what happened ("started", "running", "no job", "no session", "no host process", "refused: ..."). Never
     raises. `activation`: the requester's own `swarm activate`, which records the PATH and config every later
-    start of this session's driver uses (record_launch_env); any other start (a hook) uses those, and a seat,
-    or a caller whose agent host is a seat, never starts one (review rr1)."""
+    start of this session's driver uses (record_launch_env); any other start (a hook) uses those, and a launch,
+    or a caller whose agent host is a launch, never starts one (review rr1)."""
     try:
         if not session:
             return "no session"
         from swarm.supervisor import procwatch
         pid = host_pid or procwatch.nearest_host()
-        why = seat_caller(pid)
+        why = launch_caller(pid)
         if why:
             _log(f"refused for {session}: {why}")
             return f"refused: {why}"
@@ -690,7 +690,7 @@ def main(argv=None) -> int:
         return 2
     rec = launch_env(session)          # however it was started: the requester's recorded environment only
     why = ("no launch environment recorded by its activation" if rec is None
-           else seat_caller(os.getpid()) or seat_caller(pid))   # the caller itself, then the watched host
+           else launch_caller(os.getpid()) or launch_caller(pid))   # the caller itself, then the watched host
     if why:
         _log(f"driver for {session} not run: {why}")
         return 1

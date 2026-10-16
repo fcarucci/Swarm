@@ -1,6 +1,6 @@
 """`swarm activate` in drive mode (spec 3.1, [A], [RR1], [M1], [G2], [F10], [D1], [P1]): the
 budget and model tables, the supervisor checks, the pinned credential sources, the durable
-five-step activation and its recovery, and `swarm drive budget|models`. Owned by Task 6a; the seat
+five-step activation and its recovery, and `swarm drive budget|models`. Owned by Task 6a; the launch
 commands (and `swarm halt|unhalt`) live in drive_cli.py.
 
 Every control record this module creates prints, as its last stdout line, the record format of
@@ -256,7 +256,7 @@ def sanitize_remote(url: str) -> str:
 
 def git_remotes(workdir: str) -> dict:
     """The fetch URLs of the work dir's git remotes, read once with the pinned git environment (no system
-    or global config, hooks and fsmonitor off). The work dir's own config is seat-writable, so each URL
+    or global config, hooks and fsmonitor off). The work dir's own config is launch-writable, so each URL
     is then checked like a --remote one: a relative local path is made absolute against the work dir, and
     a URL a pinned call refuses (an option, ext::, another transport) is left out, with a warning."""
     env = gitpin.git_env(home=str(paths.home()))
@@ -314,7 +314,7 @@ def check_pin(pin: str) -> str:
 
 def check_config_dir(path: str, cfg: dict, roots=()) -> str:
     """[G2a] a gh helper's GH_CONFIG_DIR must be private to this user: refused under any [supervise]
-    allowed_workdirs root or job root (a seat could plant hosts.yml there), when it is not this user's,
+    allowed_workdirs root or job root (a launch could plant hosts.yml there), when it is not this user's,
     when group or others can write it, or when a parent directory another user, or group or others, can
     change (gitpin.dir_problem)."""
     forbidden = [*sup_settings.settings(cfg)["allowed_workdirs"], *roots]
@@ -430,7 +430,7 @@ def remote_head(url: str, pin: str | None, config_dir: str | None, branch: str, 
     the branch is absent. A failed read is a DriveError that names no URL and prints no stderr.
     The URL, the pin and the branch are checked again here (they may come back from the owner record), and
     git runs with the gitpin hygiene: `--` before the URL, the transports pinned, no system or global
-    config, and a neutral working directory (never the seat-writable work dir)."""
+    config, and a neutral working directory (never the launch-writable work dir)."""
     url = _pinned_url(url)
     if pin is not None:
         pin = check_pin(pin)
@@ -533,7 +533,7 @@ def claim(board, plan: "Plan") -> None:
 def activate_drive(cfg: dict, board, plan: Plan, *, crash_after: str | None = None) -> ledger.Ledger:
     """Steps 1 to 4 of [RR1] for a new drive job, each durable before the next: the generated lead brief
     (if any), the host-private owner record, the board claim `drive.enabled=1` (with the job row), then
-    the ledger in state "activating". The rest (the board data, the lead seat, the final "active") is
+    the ledger in state "activating". The rest (the board data, the lead launch, the final "active") is
     finish_activation's, which the next pass also runs. `crash_after` is for tests."""
     bk = board_key(cfg)
     if plan.brief_path.startswith(plan.workdir + os.sep) and not os.path.exists(plan.brief_path):
@@ -599,7 +599,7 @@ def _record_activation_heads(cfg: dict, bk: str, job: str, o: dict) -> None:
 
 def finish_activation(cfg: dict, board, job: str, *, crash_after: str | None = None) -> ledger.Ledger | None:
     """Steps 5 to 7 of [RR1] for a job whose ledger is "activating" and whose owner record and board claim
-    exist: the board's generation data, the lead seat request, then the ledger "active".
+    exist: the board's generation data, the lead launch, then the ledger "active".
     Idempotent: the activate command and the pass (Task 8a's reconcile) both run it, after any crash.
     `crash_after` is for tests ("data", "lead")."""
     bk = board_key(cfg)
@@ -691,7 +691,7 @@ def build_plan(cfg: dict, args, goal: str) -> Plan:
         if pin is not None:
             credentials[name] = pin
             if pin.startswith("helper:") and os.path.basename(pin[len("helper:"):].split(" ")[0]) == "gh":
-                # refused here when it cannot be determined, or when a seat could write it
+                # refused here when it cannot be determined, or when a launch could write it
                 config_dirs[name] = check_config_dir(gh_config_dir(), cfg, roots)
     budgets = effective_budgets(cfg, parse_budget_args(args.budget, args.max_cost_usd, args.ruling_reserve_usd))
     overrides = parse_model_args(args.model)

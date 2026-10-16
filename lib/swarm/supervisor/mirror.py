@@ -250,7 +250,7 @@ def known_hosts_file() -> str:
 
 
 def _check_helper_file(path: str, trusted: tuple) -> None:
-    """A pinned absolute credential helper must be a regular executable that a seat cannot replace:
+    """A pinned absolute credential helper must be a regular executable that a launch cannot replace:
     in a system directory or named exactly by the person ([drive] credential_helpers paths), owned by root
     or this user, and neither the file nor any parent directory writable by group or others."""
     real = os.path.realpath(path)
@@ -372,7 +372,7 @@ class Mirror:
         self._shown_url = self.url                # what errors hide; git is given the resolved path below
         if self._local:
             _check_local(self.url)
-            # The checks ran on the resolved path: git gets exactly that path, never the URL, so a seat-writable
+            # The checks ran on the resolved path: git gets exactly that path, never the URL, so a launch-writable
             # symlink swapped after the check cannot redirect a later fetch, push or audit.
             self.url = gitpin.resolve_local(self.url)
         allowed = ALLOWED_HELPERS if allowed_helpers is None else tuple(allowed_helpers)
@@ -586,7 +586,7 @@ class Mirror:
         return got, []
 
     def fetch_local_branch(self, path: str, branch: str, timeout: float, into: str | None = None) -> str | None:
-        """Bring `branch` from the job's own work repository at `path` (seats commit there and never push: spec
+        """Bring `branch` from the job's own work repository at `path` (launches commit there and never push: spec
         rev 7, only the supervisor lands) into this mirror; returns its sha, or None when it has no such branch.
         The path is agent-writable, so only objects come from it: git reads it through upload-pack with the safe
         local settings (gitpin.local_pack_args), never its config, hooks or filters, from a neutral cwd."""

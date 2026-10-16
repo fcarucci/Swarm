@@ -119,7 +119,7 @@ class LifeCase(unittest.TestCase):
     def launch(self, name="eng-a", gen=1, usd=5.0, locks=()):
         s = self.get_launch(name, gen)
         lid = f"L-{name}-{gen}"
-        action = f"gen{gen}|seat|{name}|-|1|1"
+        action = f"gen{gen}|launch|{name}|-|1|1"
         r = self.b.claim_drive_launch(job="J", generation=gen, action_id=action, attempt=1, launch_id=lid,
                                       launch_row_id=s.id, queue_version=s.revision, harness="claude", reserve_usd=usd,
                                       reserve_minutes=60, locks=list(locks), lock_seconds=4200, max_host_running=4)
@@ -231,7 +231,7 @@ class DeadlineTests(LifeCase):
         self.assertFalse(life.enforce_deadlines(self.b, self.cfg, self.led, self.at(wall - 1)))
         self.assertTrue(life.enforce_deadlines(self.b, self.cfg, self.led, self.at(wall)))
 
-    def test_mechanical_verdict_not_recorded_while_a_live_judge_holds_the_seat(self):
+    def test_mechanical_verdict_not_recorded_while_a_live_judge_holds_the_launch(self):
         key = "judge-live"
         self.b.allocate_name(key, "J", "judge")
         self.assertTrue(self.b.claim_judge(key, "J"))
@@ -270,7 +270,7 @@ class TerminalizeTests(LifeCase):
     def test_terminalize_settles_questions_and_closes(self):
         self.pending_met()
         qb = self.b.open_blocker("J", "question", "human", "which way?", until=self.t0 + 240 * MIN,
-                                 default_value="left", created_by="a", seat="a", generation=1)
+                                 default_value="left", created_by="a", launch="a", generation=1)
         self.assertTrue(life.terminalize(self.b, self.cfg, self.led, self.at(1), hooks=self.run.hooks()))
         js = self.job()
         self.assertEqual((js.status, js.closed_by), ("completed", life.CLOSED_BY))
@@ -314,7 +314,7 @@ class TerminalizeTests(LifeCase):
         self.assertTrue(life.terminalize(self.b, self.cfg, self.led, self.at(2), hooks=self.run.hooks()))
         self.assertEqual(self.job().status, "completed")
 
-    def test_terminalize_ends_sessions_charges_reservation_releases_locks_and_seats(self):
+    def test_terminalize_ends_sessions_charges_reservation_releases_locks_and_launches(self):
         lid = self.launch(locks=("land:x:main",))
         lid2 = self.launch("eng-b")
         self.b.finish_restart(self.row(lid2).id, "completed", cost_usd=1.25)
@@ -465,7 +465,7 @@ class TerminalizeTests(LifeCase):
     def test_a_row_not_in_the_ledger_is_never_touched(self):
         lid = self.launch()
         s = self.get_launch("forged")
-        self.b.claim_drive_launch(job="J", generation=1, action_id="gen1|seat|forged|-|1|1", attempt=1,
+        self.b.claim_drive_launch(job="J", generation=1, action_id="gen1|launch|forged|-|1|1", attempt=1,
                                   launch_id="FORGED", launch_row_id=s.id, queue_version=s.revision, harness="claude",
                                   reserve_usd=1, reserve_minutes=1, locks=[], lock_seconds=60, max_host_running=4)
         self.pending_met()
@@ -502,7 +502,7 @@ class LandedGateTests(LifeCase):
         self.led.save()
         receipts.write("bk", receipts.Receipt(
             board_key="bk", job="J", generation=1, incarnation=self.led.incarnation, action_id="t|land", attempt=0,
-            seat=None, kind="land", record_id="7", rev=1,
+            launch=None, kind="land", record_id="7", rev=1,
             content_sha=receipts.content_sha("land", {"destinations": dest}), args_sha="0" * 64,
             expires_at=time.time() + 3600, destinations=dest))
 
@@ -568,7 +568,7 @@ class RolloverTests(LifeCase):
 
     def test_rollover_releases_locks_and_expires_blockers_of_the_old_generation_only(self):
         self.launch("lead", locks=("land:x:main",))
-        old = self.b.open_blocker("J", "question", "human", "q1", seat="lead", generation=1, default_value="d")
+        old = self.b.open_blocker("J", "question", "human", "q1", launch="lead", generation=1, default_value="d")
         self.request()
         self.assertTrue(life.rollover(self.b, self.cfg, self.led, self.at(1), hooks=self.run.hooks()))
         self.assertEqual(self.b.drive_locks(), [])
@@ -629,12 +629,12 @@ class RolloverTests(LifeCase):
 
 
 class HaltTests(LifeCase):
-    def test_halt_idles_seats_and_shifts_deadlines(self):
+    def test_halt_idles_launches_and_shifts_deadlines(self):
         lid = self.launch()
         life.halt(self.b, self.cfg, self.led, "francesco", self.at(60), reason="stop", hooks=self.run.hooks())
         self.assertIn(("stop", [lid]), self.run.calls)
-        seat = self.b.get_launch("J", 1, "eng-a")
-        self.assertEqual((seat.state, seat.last_outcome), ("failed", "halted"))
+        launch = self.b.get_launch("J", 1, "eng-a")
+        self.assertEqual((launch.state, launch.last_outcome), ("failed", "halted"))
         led = self.reload()
         self.assertEqual(led.halted, {"by": "francesco", "at": fx.iso(self.at(60)), "reason": "stop"})
         self.assertEqual(self.b.job_data("J")["drive.halted"], "francesco")
@@ -708,10 +708,10 @@ class HaltTests(LifeCase):
 
 
 class QuestionTests(LifeCase):
-    def ask(self, seat="a", until=240, default="left", receipt=1, created=None):
+    def ask(self, launch="a", until=240, default="left", receipt=1, created=None):
         b = self.b.open_blocker("J", "question", "human", "which way?", until=self.t0 + until * MIN,
-                                default_value=default, created_by=seat, seat=seat, generation=1)
-        return b, fx.q(b.id, seat=seat, default=default, until=self.t0 + until * MIN, receipt_id=receipt)
+                                default_value=default, created_by=launch, launch=launch, generation=1)
+        return b, fx.q(b.id, launch=launch, default=default, until=self.t0 + until * MIN, receipt_id=receipt)
 
     def test_default_applied_once_after_the_deadline(self):
         b, q = self.ask(until=30)
@@ -775,7 +775,7 @@ class QuestionTests(LifeCase):
         self.assertNotIn(f"qdone:{b.id}", self.led.watermarks)
 
     def test_question_whose_blocker_is_gone_is_skipped(self):
-        q = fx.q(999, seat="a", default="left", until=self.t0 + 30 * MIN, receipt_id=1)
+        q = fx.q(999, launch="a", default="left", until=self.t0 + 30 * MIN, receipt_id=1)
         self.assertEqual(life.apply_question_expiry(self.b, self.cfg, self.led, self.at(500), [q]), [])
 
     def test_question_without_default_is_not_applied(self):
@@ -787,22 +787,22 @@ class QuestionTests(LifeCase):
         self.pending = life.begin_terminal(self.b, self.led, "met", "goal", "judge", "x", self.t0)
         self.assertEqual(life.apply_question_expiry(self.b, self.cfg, self.led, self.at(500), [q]), [])
 
-    def test_other_seats_progress_while_question_open(self):
-        b, q = self.ask(seat="a", until=30)
-        s = fx.snap(launches={"a": fx.seat("a", "done"), "b": fx.seat("b", "queued")}, questions={"a": [q]},
+    def test_other_launches_progress_while_question_open(self):
+        b, q = self.ask(launch="a", until=30)
+        s = fx.snap(launches={"a": fx.launch("a", "done"), "b": fx.launch("b", "queued")}, questions={"a": [q]},
                     wakes={"a": [5]})
-        launches = lambda: [x.seat for x in dm.next_actions(s, dm.DEFAULT_CFG) if x.kind == "launch"]
+        launches = lambda: [x.launch for x in dm.next_actions(s, dm.DEFAULT_CFG) if x.kind == "launch"]
         self.assertEqual(launches(), ["b"])                               # a waits for its answer, b runs
-        other, qo = self.ask(seat="b", until=30)
-        for minute in (10, 29):                                           # before the deadline: nothing, for either seat
+        other, qo = self.ask(launch="b", until=30)
+        for minute in (10, 29):                                           # before the deadline: nothing, for either launch
             self.assertEqual(life.apply_question_expiry(self.b, self.cfg, self.led, self.at(minute), [q, qo]), [])
             self.assertEqual(self.b.blocker(b.id).state, "open")          # and nothing was applied behind its back
         self.assertEqual(life.apply_question_expiry(self.b, self.cfg, self.led, self.at(31), [q]), [b.id])
-        self.assertEqual(self.b.blocker(b.id).state, "expired")           # at expiry only that seat's question settles
+        self.assertEqual(self.b.blocker(b.id).state, "expired")           # at expiry only that launch's question settles
         self.assertEqual(self.b.blocker(other.id).state, "open")
-        s2 = fx.snap(launches={"a": fx.seat("a", "done"), "b": fx.seat("b", "queued")}, questions={},
+        s2 = fx.snap(launches={"a": fx.launch("a", "done"), "b": fx.launch("b", "queued")}, questions={},
                      wakes={"a": [5]})
-        self.assertEqual(sorted(x.seat for x in dm.next_actions(s2, dm.DEFAULT_CFG) if x.kind == "launch"), ["a", "b"])
+        self.assertEqual(sorted(x.launch for x in dm.next_actions(s2, dm.DEFAULT_CFG) if x.kind == "launch"), ["a", "b"])
 
 
 class OrphanQuestionTests(LifeCase):
@@ -810,7 +810,7 @@ class OrphanQuestionTests(LifeCase):
 
     def ask(self, minutes=30, default="left", kind="question"):
         return self.b.open_blocker("J", kind, "human", "which way?", until=self.t0 + minutes * MIN,
-                                   default_value=default, created_by="a", seat="a", generation=1)
+                                   default_value=default, created_by="a", launch="a", generation=1)
 
     def test_overdue_default_applied_once(self):
         b = self.ask()

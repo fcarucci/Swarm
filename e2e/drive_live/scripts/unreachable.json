@@ -1,6 +1,6 @@
 {
   "_doc": "impossible goal: the artifact judge finds no progress twice (open stays 2); the ruling judge records unreachable with a reason",
-  "lead": {"seats": [{"seat": "eng-a", "role": "engineer", "complexity": "simple"}]},
+  "lead": {"launches": [{"launch": "eng-a", "role": "engineer", "complexity": "simple"}]},
   "engineer": {"change": "impossible"},
   "reviewer": [{"outcome": "verified"}],
   "judge": {"artifact": [{"verdict": "not_met", "open": 2}],

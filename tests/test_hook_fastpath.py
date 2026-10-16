@@ -100,7 +100,7 @@ class ShellFastPathTests(unittest.TestCase):
             self.assertTrue(run('done','swarm-record: kind=halt id=1 rev=1\n'))
 
     def test_a_drive_control_command_is_never_served_by_a_lease(self):
-        """PreToolUse of `swarm halt|seat|goal-ready|drive|deactivate` always reaches Python, which writes the
+        """PreToolUse of `swarm halt|launch|goal-ready|drive|deactivate` always reaches Python, which writes the
         caller's grant (drivegate.write_grants); an ordinary call of the same session is served by its lease."""
         with tempfile.TemporaryDirectory() as td:
             home=Path(td); hd=home/'.local/share/swarm/host'; hd.mkdir(parents=True,mode=0o700)

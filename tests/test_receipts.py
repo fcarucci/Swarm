@@ -32,8 +32,8 @@ class ReceiptCase(unittest.TestCase):
         self.addCleanup(self.env.stop)
 
     def receipt(self, **kw) -> receipts.Receipt:
-        args = dict(board_key=BOARD, job="J", generation=1, incarnation=INC, action_id="1|seat|a",
-                    attempt=1, seat="a", kind="done", record_id="42", rev=1,
+        args = dict(board_key=BOARD, job="J", generation=1, incarnation=INC, action_id="1|launch|a",
+                    attempt=1, launch="a", kind="done", record_id="42", rev=1,
                     content_sha=receipts.content_sha("done", DONE), args_sha=receipts.args_sha(ARGV),
                     expires_at=NOW + 3600)
         args.update(kw)

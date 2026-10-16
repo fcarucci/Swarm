@@ -6,7 +6,7 @@
   request's record id; the hook receipts it as a `post`) and returns. The integrator does not wait.
 - execute() / land(): what the driver runs in its pass, in code that takes no agent input for its
   decisions. It decides from the ledger, the owner record, receipts and the private mirrors:
-  the request came from the generation's integrator seat; a receipted `met` verdict covers the exact
+  the request came from the generation's integrator launch; a receipted `met` verdict covers the exact
   SHA (or, for a rebase that changed nothing, its patch-id twin: the whole range's sorted multiset of
   patch-ids is equal); CI is green on it; the land leases for every destination are held. Then, per
   destination in sorted order, it journals `intent` -> `pushed` -> `verified` in a host-private `land`
@@ -83,9 +83,9 @@ class Destination:
 
 @dataclass(frozen=True)
 class Request:
-    """A LAND-REQUEST board message with the receipt that binds it to a seat."""
+    """A LAND-REQUEST board message with the receipt that binds it to a launch."""
     id: int
-    seat: str
+    launch: str
     artifact: str
     generation: int
 
@@ -208,7 +208,7 @@ def _epoch(now: dt.datetime) -> float:
 def _journal_receipt(led, *, request: Request, action_id: str, rev: int, dests: dict, now) -> receipts.Receipt:
     return receipts.Receipt(
         board_key=led.board_key, job=led.job, generation=led.generation, incarnation=led.incarnation,
-        action_id=action_id, attempt=1, seat=request.seat, kind="land", record_id=str(request.id), rev=rev,
+        action_id=action_id, attempt=1, launch=request.launch, kind="land", record_id=str(request.id), rev=rev,
         content_sha=receipts.content_sha("land", {"destinations": dests}),
         args_sha=receipts.args_sha(["swarm", "land", request.artifact]),
         expires_at=_epoch(now) + JOURNAL_DAYS * 86400, destinations=dests)
@@ -282,18 +282,18 @@ def find_requests(board, env: LandEnv, job: str, *, after: int = 0) -> list[Requ
         r = receipts.find(led.board_key, job, REQUEST_KIND, str(msg.id), rev=1, incarnation=led.incarnation,
                           generation=led.generation, now=_epoch(now))
         row = {"kind": REQUEST_KIND, "id": msg.id, "rev": 1, "to": msg.to_agent, "body": msg.message}
-        if r is None or not receipts.matches(r, row) or not r.seat:
+        if r is None or not receipts.matches(r, row) or not r.launch:
             continue
-        out.append(Request(msg.id, r.seat, artifact, r.generation))
+        out.append(Request(msg.id, r.launch, artifact, r.generation))
     return out
 
 
 _SLUG = re.compile(r"[^a-z0-9_-]+")
 
 
-def integrator_seat(group: str) -> str:
-    """The driver-owned integrator seat of an artifact group (the name driver_exec.seat_name gives it:
-    `integrator-<slug of the group>-<8 hex digits of its hash>`; kept equal by test_seat_name_matches)."""
+def integrator_launch(group: str) -> str:
+    """The driver-owned integrator launch of an artifact group (the name driver_exec.launch_name gives it:
+    `integrator-<slug of the group>-<8 hex digits of its hash>`; kept equal by test_launch_name_matches)."""
     slug = _SLUG.sub("-", (group or "").lower()).strip("-")[:30] or "group"
     return f"integrator-{slug}-{hashlib.sha256((group or '').encode()).hexdigest()[:8]}"
 
@@ -304,8 +304,8 @@ def _check_request(env: LandEnv, request: Request, branch: str) -> None:
     led = env.led
     if request.generation != led.generation:
         raise LandRefused("the request belongs to an earlier generation of the job")
-    if request.seat != integrator_seat(branch):
-        raise LandRefused(f"the request is not from the integrator seat of {branch}")
+    if request.launch != integrator_launch(branch):
+        raise LandRefused(f"the request is not from the integrator launch of {branch}")
 
 
 def _twin(mirrors: dict, dests: list, target: str, sha: str, judged: set) -> bool:
@@ -403,14 +403,14 @@ def _fetch_why(env: LandEnv, d: Destination, exc: MirrorError) -> str:
 
 
 def publish_ref(sha: str) -> str:
-    """The driver-owned branch a hand-off is published under: one per SHA (never a seat-chosen name, never moved,
+    """The driver-owned branch a hand-off is published under: one per SHA (never a launch-chosen name, never moved,
     so no force is ever needed and a rebased re-hand-off gets its own)."""
     return f"swarm/land/{sha}"
 
 
 def work_root_problem(root: str) -> str | None:
     """Why the pinned work root may not be read as the job's repository, or None. Its location and object store
-    are seat-writable: a symlink, a `.git` gitdir file, a linked common dir, alternates, grafts or a shallow file
+    are launch-writable: a symlink, a `.git` gitdir file, a linked common dir, alternates, grafts or a shallow file
     could point the driver's fetch at another repository's commits, so each is refused."""
     import stat as _stat
     if not isinstance(root, str) or not os.path.isabs(root):
@@ -433,7 +433,7 @@ def work_root_problem(root: str) -> str | None:
 
 
 def _stage(env: LandEnv, dests: list, mirrors: dict, branch: str, sha: str) -> set:
-    """Seats never push (they hold no credentials, Task 20): a hand-off is a commit on a branch of the job's own
+    """Launches never push (they hold no credentials, Task 20): a hand-off is a commit on a branch of the job's own
     work repository. Returns the urls of the destinations that do not carry `branch` at `sha`; for each, the
     commit is brought into the private mirror under publish_ref(sha): from the destination if the driver already
     published it there, else from a verified pinned work root. Nothing is pushed here (see _publish)."""
@@ -466,7 +466,7 @@ def _stage(env: LandEnv, dests: list, mirrors: dict, branch: str, sha: str) -> s
         if got != sha:
             raise LandRefused(f"branch {branch} is not at {sha[:12]} in the job's work repository"
                               + (f" ({why})" if why else "") + ": commit there and hand off its exact SHA "
-                              "(seats never push; the supervisor publishes it)")
+                              "(launches never push; the supervisor publishes it)")
     return staged
 
 
@@ -659,7 +659,7 @@ def _finish(board, env: LandEnv, job: str, request: Request, branch: str, sha: s
     led, now = env.led, env.now()
     receipts.write(led.board_key, receipts.Receipt(
         board_key=led.board_key, job=job, generation=led.generation, incarnation=led.incarnation,
-        action_id=action_id, attempt=1, seat=request.seat, kind="integrated", record_id=str(request.id), rev=1,
+        action_id=action_id, attempt=1, launch=request.launch, kind="integrated", record_id=str(request.id), rev=1,
         content_sha=receipts.content_sha("integrated", {"group": branch, "sha": sha, "into": env.target}),
         args_sha=receipts.args_sha(["swarm", "land", request.artifact]),
         expires_at=_epoch(now) + JOURNAL_DAYS * 86400))
@@ -673,7 +673,7 @@ def _finish(board, env: LandEnv, job: str, request: Request, branch: str, sha: s
     update_ledger(led, apply)
     notes = []
     # Only the driver's own publish ref is removed, and only where it still names this exact SHA (compare-and-
-    # delete). The hand-off branch name is the seat's: an unrelated branch of that name on a destination is never
+    # delete). The hand-off branch name is the launch's: an unrelated branch of that name on a destination is never
     # touched (review of 4fda7fc).
     pub = publish_ref(sha)
     for d in dests:
@@ -699,18 +699,18 @@ def complete_land(board, env: LandEnv, job: str, request: Request, *, action_id:
 def land(board, env: LandEnv, job: str, artifact: str, *, caller_session: str, action_id: str | None = None,
          need_leases: bool = True) -> LandResult:
     """The synchronous form (plan interface): check that `caller_session` is the generation's integrator
-    seat for the artifact's group, then execute. The driver uses execute() with the receipted request."""
+    launch for the artifact's group, then execute. The driver uses execute() with the receipted request."""
     try:
         branch, _ = parse_artifact(artifact)
     except ValueError as exc:
         return LandResult(False, None, str(exc))
-    seat = next((s for s in board.launches(job, env.led.generation)
-                 if s.name == integrator_seat(branch)), None)
-    if seat is None or not caller_session or seat.session_id != caller_session:
-        return LandResult(False, None, f"the caller is not the integrator seat of {branch}")
-    mine = [r for r in find_requests(board, env, job) if r.artifact == artifact and r.seat == seat.name]
+    launch = next((s for s in board.launches(job, env.led.generation)
+                 if s.name == integrator_launch(branch)), None)
+    if launch is None or not caller_session or launch.session_id != caller_session:
+        return LandResult(False, None, f"the caller is not the integrator launch of {branch}")
+    mine = [r for r in find_requests(board, env, job) if r.artifact == artifact and r.launch == launch.name]
     if not mine:
-        return LandResult(False, None, "no receipted land request for this artifact from this seat: run swarm land")
+        return LandResult(False, None, "no receipted land request for this artifact from this launch: run swarm land")
     request = mine[-1]
     return execute(board, env, job, request, action_id=action_id or f"gen{env.led.generation}|land|-|{branch}|1|{request.id}",
                    need_leases=need_leases)

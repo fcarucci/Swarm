@@ -1241,8 +1241,8 @@ class BoardContract:
         self.assertEqual({e.agent_key: e.role for e in self.b.roster("j")}, {"a": "judge", "b": None})
         self.b.agent_stopped("a")
         self.assertIsNone(self.b.job_status("j").judge)
-        self.assertTrue(self.b.claim_judge("b", "j"))  # the seat is free again
-        # the departed judge resumed: back as a plain member, the seat stays with b
+        self.assertTrue(self.b.claim_judge("b", "j"))  # the launch is free again
+        # the departed judge resumed: back as a plain member, the launch stays with b
         self.assertEqual(self.b.allocate_name("a", "j"), first)
         self.assertFalse(self.b.claim_judge("a", "j"))
         self.assertEqual(self.b.job_status("j").judge, self.b.active_agent_name("b"))
@@ -2321,7 +2321,7 @@ class DriveVerdicts:
 
 
 class DriveHelpers:
-    """Seat and claim helpers shared by the drive claim tests (no tests here)."""
+    """Launch and claim helpers shared by the drive claim tests (no tests here)."""
 
     def goal_job(self, job="J"):
         self.b.open_job(job, None, None, None, "me", goal="G")
@@ -2336,7 +2336,7 @@ class DriveHelpers:
               max_host_running=4, generation=None, lock_seconds=4200):
         return self.b.claim_drive_launch(
             job=s.job, generation=s.generation if generation is None else generation,
-            action_id=action or f"1|seat|{s.name}", attempt=attempt, launch_id=launch_id or f"L-{s.name}-{attempt}",
+            action_id=action or f"1|launch|{s.name}", attempt=attempt, launch_id=launch_id or f"L-{s.name}-{attempt}",
             launch_row_id=s.id, queue_version=s.revision, harness="claude", reserve_usd=5, reserve_minutes=60,
             locks=list(locks), lock_paths=dict(paths or {}), lock_seconds=lock_seconds,
             max_host_running=max_host_running, ruling=ruling)
@@ -2376,14 +2376,14 @@ class DriveHelpers:
 _CLAIM_CHILD = """
 import hashlib, json, os, sys, time
 from swarm.board import open_board
-cfg, seat, root, start = json.loads(os.environ["SWARM_RACE_CFG"]), sys.argv[1], sys.argv[2], float(sys.argv[3])
+cfg, launch, root, start = json.loads(os.environ["SWARM_RACE_CFG"]), sys.argv[1], sys.argv[2], float(sys.argv[3])
 root = os.path.normpath(os.path.abspath(root)).replace(os.sep, "/")
 b = open_board(cfg)
-s = b.get_launch("J", 1, seat)
+s = b.get_launch("J", 1, launch)
 key = "wt:" + hashlib.sha256(root.encode()).hexdigest()
 time.sleep(max(0.0, start - time.time()))
-won = b.claim_drive_launch(job="J", generation=1, action_id="1|seat|" + seat, attempt=1,
-                           launch_id="L-" + seat, launch_row_id=s.id, queue_version=s.revision, harness="claude",
+won = b.claim_drive_launch(job="J", generation=1, action_id="1|launch|" + launch, attempt=1,
+                           launch_id="L-" + launch, launch_row_id=s.id, queue_version=s.revision, harness="claude",
                            reserve_usd=5, reserve_minutes=60, locks=[key], lock_paths={key: root},
                            lock_seconds=4200, max_host_running=4) is not None
 print("won" if won else "lost")

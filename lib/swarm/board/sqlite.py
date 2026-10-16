@@ -916,7 +916,7 @@ class SqliteBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
             now = self._now()
             row = c.execute("SELECT name, left_at, job, left_reason FROM agents WHERE agent_key = ?",
                             (agent_key,)).fetchone()
-            if row is not None and row[1] is None:      # active: moves (a move drops the seats)
+            if row is not None and row[1] is None:      # active: moves (a move drops the launches)
                 same = int(row[2] == job)
                 c.execute("UPDATE agents SET last_seen = ?, job = ?, judge = judge AND ?, "
                           "verifier = verifier AND ? WHERE agent_key = ?", (now, job, same, same, agent_key))

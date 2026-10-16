@@ -1,7 +1,7 @@
 """Control requests: a Codex session's ledger-writing control commands (Task 6b round 3, coordinator ruling;
 the LAND-REQUEST pattern of Task 11b).
 
-A Codex seat's sandbox can neither write the drive ledger nor use a grant, so the CLI cannot know who calls
+A Codex launch's sandbox can neither write the drive ledger nor use a grant, so the CLI cannot know who calls
 it and must not write the ledger. Instead (drive_cli.control_request):
 
 1. the CLI posts `CONTROL-REQUEST <kind> <args sha>` (args sha: receipts.args_sha of the submitted argv of
@@ -9,9 +9,9 @@ it and must not write the ledger. Instead (drive_cli.control_request):
 2. the unsandboxed PostToolUse hook (drivegate.control_request_receipt) parses the command it saw, checks
    that the message is exactly the request that command makes, and writes a `control_request` receipt naming
    the caller from the same host-private contexts as every receipt (the job's requester main session, or the
-   seat the marker, run file and ledger intent name; never a subagent), and next to it the request's
+   launch the marker, run file and ledger intent name; never a subagent), and next to it the request's
    arguments (store_body: a host-private file, so a board message's length never limits them and a sandboxed
-   seat cannot write them);
+   launch cannot write them);
 3. the driver, in its pass, is the only writer: find() lists the receipted requests, apply() checks them
    again (the receipt, its decision fields, the message, the args digest, the generation and incarnation,
    expiry, the caller's authority under the same rules as the Claude path) and applies the change ledger
@@ -131,13 +131,13 @@ def load_body(bk: str, job: str, msg_id: int, kind: str, sha: str):
 @dataclass(frozen=True)
 class ControlRequest:
     """A receipted CONTROL-REQUEST: its message id, kind, args digest and fields, and the caller the receipt
-    names (seat None and an action id `requester:...` for the requester session)."""
+    names (launch None and an action id `requester:...` for the requester session)."""
     id: int
     job: str
     kind: str
     args_sha: str
     fields: dict
-    seat: str | None
+    launch: str | None
     action_id: str
     generation: int
 
@@ -184,7 +184,7 @@ def find(board, bk: str, job: str, led, now, after: int = 0) -> list:
         fields = load_body(bk, job, msg.id, kind, sha) if r is not None else None
         if fields is None:
             continue
-        out.append(ControlRequest(msg.id, job, kind, sha, fields, r.seat, r.action_id, r.generation))
+        out.append(ControlRequest(msg.id, job, kind, sha, fields, r.launch, r.action_id, r.generation))
     return out
 
 
@@ -193,25 +193,25 @@ class _Refused(Exception):
 
 
 def _authorize(board, led, req: ControlRequest) -> str:
-    """Who the request may act as ("requester" or "lead <seat>"), under the Claude path's rules; _Refused."""
-    from swarm.drive_cli import _is_lead_seat
+    """Who the request may act as ("requester" or "lead <launch>"), under the Claude path's rules; _Refused."""
+    from swarm.drive_cli import _is_lead_launch
     from swarm.board.base import LAUNCH_CLOSED
-    requester = req.seat is None and req.action_id.startswith("requester:")
+    requester = req.launch is None and req.action_id.startswith("requester:")
     lead = None
-    if req.seat and _is_lead_seat(req.seat) and led is not None:
-        row = board.get_launch(led.job, led.generation, req.seat)
-        lead = req.seat if row is not None and row.state not in LAUNCH_CLOSED else None
+    if req.launch and _is_lead_launch(req.launch) and led is not None:
+        row = board.get_launch(led.job, led.generation, req.launch)
+        lead = req.launch if row is not None and row.state not in LAUNCH_CLOSED else None
     if req.kind in REQUESTER_KINDS:
         if not requester:
             raise _Refused(f"{req.kind} is a person's action: only the job's requester session may request it")
         return "requester"
     if req.kind in LEAD_KINDS:
         if lead is None:
-            raise _Refused(f"{req.kind} comes from the job's live lead seat")
+            raise _Refused(f"{req.kind} comes from the job's live lead launch")
         return f"lead {lead}"
     if req.kind in LEAD_OR_REQUESTER_KINDS:
         if lead is None and not requester:
-            raise _Refused(f"{req.kind} comes from the job's live lead seat or its requester session")
+            raise _Refused(f"{req.kind} comes from the job's live lead launch or its requester session")
         return f"lead {lead}" if lead else "requester"
     raise _Refused(f"unknown request kind {req.kind!r:.40}")
 
@@ -244,7 +244,7 @@ def apply(board, cfg: dict, led, req: ControlRequest, now) -> tuple:
     if load_body(bk, job, req.id, req.kind, req.args_sha) != req.fields:
         return False, "no matching receipt (the request's arguments are not the receipted ones)"
     r = _receipt(bk, job, led, req.id, req.kind, req.args_sha, now)
-    if r is None or (r.seat, r.action_id) != (req.seat, req.action_id):
+    if r is None or (r.launch, r.action_id) != (req.launch, req.action_id):
         return False, "no matching receipt (a request counts only when the caller's hook receipted it)"
     if (led is None) != (req.kind == "repair"):
         return False, "a repair needs an unreadable ledger; every other request a readable one"

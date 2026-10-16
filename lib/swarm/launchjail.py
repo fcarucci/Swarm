@@ -1,27 +1,27 @@
-"""The seat boundary (Task 20, spec 4.0): a drive seat runs in its own user, mount and pid namespaces and
+"""The launch boundary (Task 20, spec 4.0): a drive launch runs in its own user, mount and pid namespaces and
 sees an ALLOWLIST of the person's files, nothing else.
 
-A drive seat (Claude or Codex, every role) runs as the person's unix user, so a changed $HOME alone is no
+A drive launch (Claude or Codex, every role) runs as the person's unix user, so a changed $HOME alone is no
 boundary (ssh finds the key through the password database; any process opens an absolute path) and a
 denylist of credential paths misses the next secret. Inside the jail:
 
-- $HOME is the seat's own directory (on disk, in the supervisor's private dir), and /tmp is the seat's own
+- $HOME is the launch's own directory (on disk, in the supervisor's private dir), and /tmp is the launch's own
   too: nothing of the person's home, and no socket of the person's /tmp (tmux, herdr, ssh agents, IDE
   servers), is there unless the spec binds it back;
-- the spec binds back exactly what the seat needs: its work tree and git dir (writable; the git hooks and
+- the spec binds back exactly what the launch needs: its work tree and git dir (writable; the git hooks and
   config read-only), the harness's login and settings (read-only, except the login file a token refresh
-  writes), the swarm code and the tools on PATH (read-only), the seat's .ssh (known_hosts only), and the
-  seat's broker directory (the only way to the board: swarm.supervisor.seatbroker);
+  writes), the swarm code and the tools on PATH (read-only), the launch's .ssh (known_hosts only), and the
+  launch's broker directory (the only way to the board: swarm.supervisor.launchbroker);
 - /run/user/<uid> (the systemd user manager, dbus, agent sockets) and /dev/shm are empty tmpfs, and every
   `cover` path (pinned credentials outside the home) is covered;
 - a fresh /proc of the jail's own pid namespace: no /proc/<pid>/root or environ of a process outside;
-- the mounts are made in a first user namespace and the seat runs in a second one nested in it, so they are
-  locked (the kernel refuses to unmount them) and read-only binds cannot be remounted writable; the seat runs
+- the mounts are made in a first user namespace and the launch runs in a second one nested in it, so they are
+  locked (the kernel refuses to unmount them) and read-only binds cannot be remounted writable; the launch runs
   with no capability (a non-root uid after execve) and no_new_privs;
-- the environment is an allowlist (seat_env): the locale and terminal, PATH, the seat's swarm run variables
+- the environment is an allowlist (launch_env): the locale and terminal, PATH, the launch's swarm run variables
   and the harness's model API variables; nothing else.
 
-A host that cannot make the namespaces (not Linux; unprivileged user namespaces disabled) never runs a seat
+A host that cannot make the namespaces (not Linux; unprivileged user namespaces disabled) never runs a launch
 unjailed: the jail exits EXIT_UNAVAILABLE before it execs anything. `available()` says beforehand.
 
 This file imports the standard library only: it is run as `python -I <this file> SPEC -- argv...`."""
@@ -36,7 +36,7 @@ import stat
 import sys
 
 EXIT_UNAVAILABLE = 125
-JAIL_ENV = "SWARM_SEAT_JAIL"      # set to "1" inside the jail (probes and doctor read it)
+JAIL_ENV = "SWARM_LAUNCH_JAIL"      # set to "1" inside the jail (probes and doctor read it)
 
 CLONE_NEWNS = 0x00020000
 CLONE_NEWUSER = 0x10000000
@@ -49,17 +49,17 @@ PR_SET_NO_NEW_PRIVS = 38
 _KEEP_FLAGS = ((2, MS_NOSUID), (4, MS_NODEV), (8, MS_NOEXEC), (1024, MS_NOATIME), (2048, MS_NODIRATIME),
                (4096, MS_RELATIME))
 
-# The environment a seat keeps (rr5: an allowlist). Exact names, plus LC_*.
+# The environment a launch keeps (rr5: an allowlist). Exact names, plus LC_*.
 KEEP_ENV = frozenset((
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "TERM", "TZ", "COLORTERM", "NO_COLOR",
-    # the seat's swarm run variables the runner sets
+    # the launch's swarm run variables the runner sets
     "SWARM_RUN_ID", "SWARM_RESUME_TOKEN",
     # the harness's model API (its own login, not a repository credential)
     "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL",
     "ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
     "DISABLE_AUTOUPDATER", "DISABLE_TELEMETRY", "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_ORG_ID"))
-# What a process needs to run at all on Windows (best-effort seats there only).
+# What a process needs to run at all on Windows (best-effort launches there only).
 WINDOWS_KEEP_ENV = frozenset(("SYSTEMROOT", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "SYSTEMDRIVE",
                               "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS", "OS"))
 
@@ -106,7 +106,7 @@ def no_userns_reason(python: str | None = None, timeout: float = 10.0, read=None
     """Why this host has NO unprivileged user namespaces, decided deterministically: a sysctl that disables them,
     or an unshare(CLONE_NEWUSER) / setgroups / uid_map write refused with EPERM. None for anything else (it works,
     or it failed in a way that is not a fixed property of the host: a timeout, ENOSPC, EAGAIN, ENOMEM...): the
-    caller must then refuse, never downgrade (a seat can cause those)."""
+    caller must then refuse, never downgrade (a launch can cause those)."""
     import subprocess
     if not sys.platform.startswith("linux"):
         return None
@@ -130,9 +130,9 @@ def no_userns_reason(python: str | None = None, timeout: float = 10.0, read=None
     return None
 
 
-def seat_env(env: dict, spec: dict) -> dict:
-    """The environment a jailed seat execs with: scrub_env, then the spec's own variables (git and ssh
-    pointed at the seat's config, the broker directory, the seat's PATH)."""
+def launch_env(env: dict, spec: dict) -> dict:
+    """The environment a jailed launch execs with: scrub_env, then the spec's own variables (git and ssh
+    pointed at the launch's config, the broker directory, the launch's PATH)."""
     out = scrub_env(env)
     out.update({JAIL_ENV: "1", "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
                 "GCM_INTERACTIVE": "never", "TMPDIR": "/tmp"})
@@ -217,19 +217,19 @@ def _readonly(path: str) -> None:
 
 
 def _mountpoint(dst: str, is_dir: bool, writable_roots: tuple) -> None:
-    """Make `dst` a mount point of the right kind. Below a seat-writable root (its own home or /tmp) a
-    symbolic link on the way is removed first: a link the seat planted never redirects a bind."""
+    """Make `dst` a mount point of the right kind. Below a launch-writable root (its own home or /tmp) a
+    symbolic link on the way is removed first: a link the launch planted never redirects a bind."""
     parts = dst.strip("/").split("/")
     cur = ""
     for i, part in enumerate(parts):
         cur += "/" + part
         last = i == len(parts) - 1
-        seat_owned = any(cur.startswith(r + "/") for r in writable_roots)
+        launch_owned = any(cur.startswith(r + "/") for r in writable_roots)
         try:
             st = os.lstat(cur)
         except FileNotFoundError:
             st = None
-        if st is not None and stat.S_ISLNK(st.st_mode) and seat_owned:
+        if st is not None and stat.S_ISLNK(st.st_mode) and launch_owned:
             os.unlink(cur)
             st = None
         if st is None:
@@ -275,7 +275,7 @@ def _open_source(src: str, follow: bool) -> int | None:
 
 
 def setup_mounts(spec: dict, uid: int) -> list[str]:
-    """In the first namespace (root there): private propagation, a fresh /proc, the seat's home over the
+    """In the first namespace (root there): private propagation, a fresh /proc, the launch's home over the
     person's and its /tmp over /tmp, the runtime dir and /dev/shm emptied, then the allowlisted binds
     (sources opened before anything is covered), the covers, and last the read-only remounts. The paths
     mounted, in order."""
@@ -293,7 +293,7 @@ def setup_mounts(spec: dict, uid: int) -> list[str]:
         if spec.get(key):
             fd = _open_source(spec[key], False)
             if fd is None:
-                raise OSError(2, f"the seat's {key} {spec[key]} is missing")
+                raise OSError(2, f"the launch's {key} {spec[key]} is missing")
             base_fds[key] = fd
     done = []
     home = spec.get("home")
@@ -333,10 +333,10 @@ def setup_mounts(spec: dict, uid: int) -> list[str]:
 def run(spec: dict, argv: list[str]) -> int:
     """Run `argv` in the jail; its exit status (EXIT_UNAVAILABLE when the jail cannot be made: nothing ran)."""
     if not argv:
-        print("seatjail: no command", file=sys.stderr)
+        print("launchjail: no command", file=sys.stderr)
         return 2
     if not (hasattr(os, "getuid") and hasattr(os, "fork")):   # no namespaces off POSIX (Windows): nothing runs
-        print(f"seatjail: cannot isolate the seat (no user namespaces on {sys.platform}); not started",
+        print(f"launchjail: cannot isolate the launch (no user namespaces on {sys.platform}); not started",
               file=sys.stderr)
         return EXIT_UNAVAILABLE
     uid, gid = os.getuid(), os.getgid()
@@ -344,7 +344,7 @@ def run(spec: dict, argv: list[str]) -> int:
         _unshare(CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID)
         _map_ids(0, uid, 0, gid)
     except OSError as exc:
-        print(f"seatjail: cannot isolate the seat ({exc}); not started", file=sys.stderr)
+        print(f"launchjail: cannot isolate the launch ({exc}); not started", file=sys.stderr)
         return EXIT_UNAVAILABLE
     init = os.fork()
     if init:                                   # outside the pid namespace: wait for the jail's init
@@ -352,28 +352,28 @@ def run(spec: dict, argv: list[str]) -> int:
     try:                                       # pid 1 of the jail, root of the first user namespace
         setup_mounts(spec, uid)
     except OSError as exc:
-        os.write(2, f"seatjail: cannot build the seat's file view ({exc}); not started\n".encode())
+        os.write(2, f"launchjail: cannot build the launch's file view ({exc}); not started\n".encode())
         os._exit(EXIT_UNAVAILABLE)
-    seat = os.fork()
-    if seat:
-        os._exit(_forward_and_wait(seat))
-    try:                                       # the seat: a nested user namespace locks the mounts
+    launch = os.fork()
+    if launch:
+        os._exit(_forward_and_wait(launch))
+    try:                                       # the launch: a nested user namespace locks the mounts
         _unshare(CLONE_NEWUSER | CLONE_NEWNS)
         _map_ids(uid, 0, gid, 0)
         _check(_lib().prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), "no_new_privs")
-        env = seat_env(dict(os.environ), spec)
+        env = launch_env(dict(os.environ), spec)
         # the inherited cwd and any inherited descriptor (the runner's work-dir descriptor) still point into
-        # the person's file system below the covers: the seat starts from its own view, with only 0-2 open
+        # the person's file system below the covers: the launch starts from its own view, with only 0-2 open
         os.chdir(spec.get("cwd") or spec.get("home") or "/")
         os.closerange(3, 65536)
         os.execvpe(argv[0], argv, env)
     except OSError as exc:
-        os.write(2, f"seatjail: cannot start {argv[0]} in the jail ({exc})\n".encode())
+        os.write(2, f"launchjail: cannot start {argv[0]} in the jail ({exc})\n".encode())
         os._exit(EXIT_UNAVAILABLE)
 
 
 def available(python: str | None = None, timeout: float = 10.0) -> tuple[bool, str]:
-    """Whether this host can jail a seat: run `true` in the jail. (ok, why not)."""
+    """Whether this host can jail a launch: run `true` in the jail. (ok, why not)."""
     import subprocess
     if not sys.platform.startswith("linux"):
         return False, f"no user namespaces on {sys.platform}"
@@ -389,14 +389,14 @@ def available(python: str | None = None, timeout: float = 10.0) -> tuple[bool, s
 
 def main(args: list[str]) -> int:
     if len(args) < 3 or args[1] != "--":
-        print("usage: seatjail.py SPEC_JSON -- COMMAND [ARG...]", file=sys.stderr)
+        print("usage: launchjail.py SPEC_JSON -- COMMAND [ARG...]", file=sys.stderr)
         return 2
     try:
         spec = json.loads(args[0])
         if not isinstance(spec, dict):
             raise ValueError("not an object")
     except ValueError as exc:
-        print(f"seatjail: bad spec ({exc})", file=sys.stderr)
+        print(f"launchjail: bad spec ({exc})", file=sys.stderr)
         return 2
     return run(spec, args[2:])
 

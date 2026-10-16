@@ -232,13 +232,13 @@ do with an event is the business of the plugin or skill that posts it.
 
 ## Drive mode (goal jobs)
 
-A job activated with `--goal` is **driven**: the requester session's session driver (no timer, any platform; `swarm drive run` when no session is open) runs it (the lead, the seats, review, fixes, the judge, landing) and the activating session is only the requester/observer. Full reference: `docs/REFERENCE.md#drive-mode`; the engineering-team skill has the brief template. The rest of "Running a swarm" below, where the orchestrating session starts agents itself, applies to jobs nothing drives: no goal, or `--no-drive --reason TEXT`.
+A job activated with `--goal` is **driven**: the requester session's session driver (no timer, any platform; `swarm drive run` when no session is open) runs it (the lead, the launches, review, fixes, the judge, landing) and the activating session is only the requester/observer. Full reference: `docs/REFERENCE.md#drive-mode`; the engineering-team skill has the brief template. The rest of "Running a swarm" below, where the orchestrating session starts agents itself, applies to jobs nothing drives: no goal, or `--no-drive --reason TEXT`.
 
 Four breaking changes: a goal implies drive; a question in a drive job needs `--default` (applied when it expires); the requester's Agent-tool spawns are refused in drive jobs (staffing is `swarm run`); and no timer: Swarm installs none, the session driver runs drive jobs (`swarm halt` stops one).
 
 - **Activate:** `swarm activate --job J --goal G [--lead-brief PATH] [--workdir DIR] [--requirements PATH]... [--remote NAME=URL] [--credential DEST=SOURCE] [--max-cost-usd N] [--ruling-reserve-usd N] [--budget KEY=VALUE] [--model ROLE=MODEL]`. The spending cap and every `[drive]` value are configurable defaults (shipped: 40 USD cap, 5 USD ruling reserve); `[drive.models]` sets the model per role (haiku engineers, sonnet reviewers and QA, opus judge, lead and security). `--no-drive --reason TEXT` opts out. Change a running job with `swarm drive budget|models`.
 - **Launches:** `swarm run --job J --name NAME --role ROLE --brief PATH [--model M --harness H --workdir DIR]` queues or re-queues a name in any state. Leads, engineers and requesters can call it without an authorization receipt. Workdirs are validated immediately with the launcher’s root, dot-directory, home and project-config rules. Agents may share a workdir; coordinate git changes yourselves. Each pass starts queued launches within this job’s `max_concurrent_sessions`; optional `[drive] max_host_running` is a separate host cap. `swarm status --job J` shows `queued/running/done/failed` and the reason. A failed launch posts once to its queuer and requires an explicit re-queue; cost, session and wall-clock budgets are checked before every start. Roles are prompt instructions; all roles have writable workdirs. Credentials, production access, pushes and landing remain protected. The board goal may change without halting the driver.
-- **Review and landing:** `swarm done` hands a change off; an independent reviewer seat records `swarm review --job J --artifact REF verified|changes --report PATH`; the judge records `swarm verdict`; the integrator, after CI is green on the exact rebased SHA (`swarm ci wait --timeout 540`), runs `swarm land --job J --artifact REF`, and the driver executes it (rebase only, fast-forward only, never a force push).
+- **Review and landing:** `swarm done` hands a change off; an independent reviewer launch records `swarm review --job J --artifact REF verified|changes --report PATH`; the judge records `swarm verdict`; the integrator, after CI is green on the exact rebased SHA (`swarm ci wait --timeout 540`), runs `swarm land --job J --artifact REF`, and the driver executes it (rebase only, fast-forward only, never a force push).
 - **Goal:** the lead runs `swarm goal-ready --job J --candidate branch@sha [--add-requirements PATH]`, which posts `GOAL-READY <candidate> req=<digest>`. The job ends MET, UNREACHABLE (a judge verdict, or the labelled mechanical one when a budget or deadline ran out) or CANCELLED (`swarm deactivate`); it never idles waiting for the requester.
 - **Halt:** a person (the requester session, or a confirmation at the terminal) runs `swarm halt --job J [--reason TEXT]` and `swarm unhalt --job J`; an enrolled agent is refused.
 - **Output:** each command that creates or changes a drive record ends with `swarm-record: kind=<kind> id=<n> rev=<n>`; in a drive job the CLI never spools a control command, it fails with an error.
@@ -251,7 +251,7 @@ job's `[swarm job: <job>]` line in the prompt. Create a new job (step 1) only fo
 work that needs several coordinating agents. Don't create a one-agent-plus-judge job unless the
 user asks for one. Don't run duplicate jobs: merge similar ones (`swarm job merge <from> --into
 <to>`) and move agents between jobs (`swarm move`). When a job has a judge, activate it with
-`--goal`, so a judge can be seated and record its verdict.
+`--goal`, so a judge can be launched and record its verdict.
 
 1. **Pick a short job id**, e.g. `recall-latency-2026-09`, and activate it:
    ```
@@ -308,15 +308,15 @@ user asks for one. Don't run duplicate jobs: merge similar ones (`swarm job merg
    - **Hand off to the judge:** with `--goal` and the default supervisor pipeline, workers
      publish `swarm done --job J --as NAME --artifact REF --summary "what changed"`.
      References are opaque: a report path, deployment id, URL, or coding `branch@sha`.
-     The supervisor starts a judge on each new hand-off, reusing the job's single judge seat
-     between artifacts. You may also seat a judge explicitly with `[swarm role: judge]`.
-     **A judge spawned in Claude Code** (prompt carries `[swarm role: judge]` or `[swarm title: Judge]`) is seated by its hooks at its first tool call. It runs **no `swarm join` and no `--as`**: `swarm verdict --job J --artifact REF met "reason"` is the whole command, and the hooks run it as the judge's own name. (`join --key` without `--key` stays an error.) **A judge run outside the board** (a one-off `codex exec`, another tool, a person) **MUST
-     record its result with `swarm verdict --job J --as NAME ...`** (seat it first with
+     The supervisor starts a judge on each new hand-off, reusing the job's single judge launch
+     between artifacts. You may also launch a judge explicitly with `[swarm role: judge]`.
+     **A judge spawned in Claude Code** (prompt carries `[swarm role: judge]` or `[swarm title: Judge]`) is launched by its hooks at its first tool call. It runs **no `swarm join` and no `--as`**: `swarm verdict --job J --artifact REF met "reason"` is the whole command, and the hooks run it as the judge's own name. (`join --key` without `--key` stays an error.) **A judge run outside the board** (a one-off `codex exec`, another tool, a person) **MUST
+     record its result with `swarm verdict --job J --as NAME ...`** (launch it first with
      `swarm join --job J --key K --judge`). A verdict only in its own output is invisible to the
      job: the goal stays unmet and the job waits for ever. As soon as the verdict is `met`, the
      orchestrator closes the job (`learn`, then `deactivate`); do not leave it waiting.
-     **Judge seat handover:** a new judge (a fix round's, tagged `[swarm role: judge]` or `[swarm title: Judge]`, or `swarm join --judge`)
-     takes the seat itself when the previous judge completed, left or died (no contact for `dead_minutes`);
+     **Judge launch handover:** a new judge (a fix round's, tagged `[swarm role: judge]` or `[swarm title: Judge]`, or `swarm join --judge`)
+     takes the launch itself when the previous judge completed, left or died (no contact for `dead_minutes`);
      a live judge keeps it. Always record as yourself: never use `--as` another agent.
      Judges only inspect and record `swarm verdict --job J --as NAME --artifact REF met
      --reason "evidence"` or `not_met --reason "missing" --next "fix brief"`.
@@ -458,7 +458,7 @@ same; what differs:
     the task suffix must be nonempty. The explicit form is checked first, so
     `judge_assistant__research` is a custom worker role. Legacy names starting with
     `verifier` or `judge` still select those built-in roles when no `__` is present.
-    Other task names keep the default behavior. With `--goal`, the pipeline seats a judge on hand-off;
+    Other task names keep the default behavior. With `--goal`, the pipeline launches a judge on hand-off;
   - a swarm agent's own spawns are checked against the caps and the depth only: the
     `[swarm spawn: <why>]` line can't be read, so agents are told to say on the board why they
     spawned (the spawn itself is announced there), and a spawn requesting the `judge` role is refused.
@@ -509,7 +509,7 @@ way its own host does it. `swarm status --job <job>` shows each agent's HOST and
 | `activate … --goal G\|-` | give the job a goal: one judge (`[swarm role: judge]` in its prompt) decides when it is met; prints both tag lines. A goal implies drive: the requester session's driver drives it (no timer; `swarm drive run` without a session); `--no-drive --reason TEXT` opts out |
 | `deactivate --job J [--status S] [--outcome O] [--force] [--delete-bank]` | switch the board off and close the job; `completed` needs the judge's `met` verdict when the job has a goal, unless `--force` (recorded). On a job that is already closed (e.g. auto-closed) it replaces the status and outcome |
 | `verdict --job J [--as NAME] [--artifact REF] [--details -\|PATH] met\|not_met "reason"` | the job's judge only (a judge with Claude Code hooks leaves `--as` out: its hooks add its own name; other hosts and humans pass it) (a judge outside the board must run this too, or the job waits): record the verdict on its goal and post it on the board (queued like `post` when the board is unreachable; a non-judge is refused); `--details` is the full Markdown report (stdin or a file, at most 64 KiB, stored with the verdict). `verdict --job J [--artifact REF] show` prints the latest report (anyone; read-only) |
-| `land --job J --artifact BRANCH@SHA [--as NAME]` | drive jobs, the integrator seat only: ask the driver to land the exact judged, rebased, CI-green SHA on the target of every pinned remote; it is the integrator's hand-off (the driver posts `INTEGRATED` or `LAND-REFUSED <why>`). `land hosts add URL`: a person at a terminal confirms an ssh destination's host key fingerprints |
+| `land --job J --artifact BRANCH@SHA [--as NAME]` | drive jobs, the integrator launch only: ask the driver to land the exact judged, rebased, CI-green SHA on the target of every pinned remote; it is the integrator's hand-off (the driver posts `INTEGRATED` or `LAND-REFUSED <why>`). `land hosts add URL`: a person at a terminal confirms an ssh destination's host key fingerprints |
 | `wait --job J --on "<what>" [--for DURATION\|--until TIME]` / `resume --job J` | mark an open job as waiting for something (shown as `waiting` with the reason; `--for 90m` or `--until 17:30` bounds it, and a bounded wait that has not ended protects the job from auto-close) / working again (an agent joining does this too) |
 | `blockers --job J [--open\|--all]` | list open blockers, or include resolved/expired history with `--all` |
 | `blocker resolve ID [--how TEXT]` / `blocker comment ID TEXT...` | resolve a blocker with an audit reason, or append a comment |
@@ -524,9 +524,9 @@ way its own host does it. `swarm status --job <job>` shows each agent's HOST and
 | `watch [--job J] [--interval S] [--no-color]` | live full-screen dashboard of jobs, agents and messages |
 | `tail [--job J] [-n N] [--interval S] [--no-agents] [--no-color]` | follow the board live (messages plus join/leave) |
 | `snapshot --json [--job J] [--session S] [--messages N] [--follow]` | the board's view as JSON, read-only; `--follow` streams NDJSON deltas (for dashboards) |
-| `job J [--description D] [--goal G\|-]` | create a job, or update its description; `--goal` sets or replaces the goal of an open job after activation (a changed goal clears the old verdict; the marker gets the goal flag; prints the judge tag line when no judge is seated) |
+| `job J [--description D] [--goal G\|-]` | create a job, or update its description; `--goal` sets or replaces the goal of an open job after activation (a changed goal clears the old verdict; the marker gets the goal flag; prints the judge tag line when no judge is launched) |
 | `job merge FROM --into TO` | merge two open jobs: FROM's active agents move to TO (live, keeping names), FROM's goal is appended to TO's, FROM closes `completed` with outcome `merged into TO`. TO keeps its judge; FROM's judge becomes a normal member (the command says so, so you can stop it). Refused for the same job, or a closed FROM or TO |
-| `move (--as NAME \| --key K) --to J` | move one live agent to another open job, without stopping it. Its next tool call shows a moved notice (job description, task, goal, roster) plus the new job's recent messages, once; posts made with its old `--job` land on its new job. A judge's seat is dropped. Refused for a closed or missing job |
+| `move (--as NAME \| --key K) --to J` | move one live agent to another open job, without stopping it. Its next tool call shows a moved notice (job description, task, goal, roster) plus the new job's recent messages, once; posts made with its old `--job` land on its new job. A judge's launch is dropped. Refused for a closed or missing job |
 | `halt --job J [--reason TEXT]` / `unhalt --job J` | a person stops a drive job on purpose (nothing progresses until it is unhalted or cancelled) / resumes it. A person's action: the job's requester session (its own main session, run as a plain `swarm ...` command: its hook attests the caller, never an environment variable), or a person at a terminal outside any agent who confirms on it; every other agent session is refused |
 | `run --job J --name NAME --role ROLE --brief PATH [--model M --harness H --workdir DIR]` | queue or re-queue a named launch in any state; anyone the hooks trust may call it. Workdir refusal happens now; `status --job J` lists launch states and reasons. Failed launches are not retried unchanged. |
 | (Codex sessions) | in a Codex session, `halt`, `unhalt`, `goal-ready --add-requirements` (new pins) and `drive repair` change nothing themselves: each posts `CONTROL-REQUEST <kind> <digest>`, and the supervisor applies it in its next pass if the caller may (CONTROL-APPLIED or CONTROL-REFUSED on the board) |
@@ -534,9 +534,9 @@ way its own host does it. `swarm status --job <job>` shows each agent's HOST and
 | `review --job J --artifact REF verified\|changes --report PATH --key K` | an enrolled reviewer of the job posts its structured review: `REVIEW <artifact> VERIFIED\|CHANGES <path>` |
 | `goal-ready --job J --candidate REF@SHA [--add-requirements PATH]...` | the lead or a person declares the goal ready for the judge; the requirement files it names are pinned (added, never replaced) |
 | `title --job J (--as NAME \| --key K) [TEXT...]` | set, replace or (empty text) clear an agent's display title (at most 60 characters): a short label such as `EL` or `Eng: board view`, shown by `who`, `status` and `watch`; not the role |
-| `join --job J --key K [--role R] [--title T] [--judge\|--verifier]` | allocate or return the unique name for agent key K; `--title` sets its display title; `--judge`/`--verifier` give that seat to an agent without the swarm's hooks (e.g. a one-off `codex exec` judge), which reads with `read --key K` and posts, and records verdicts, through the CLI |
+| `join --job J --key K [--role R] [--title T] [--judge\|--verifier]` | allocate or return the unique name for agent key K; `--title` sets its display title; `--judge`/`--verifier` give that launch to an agent without the swarm's hooks (e.g. a one-off `codex exec` judge), which reads with `read --key K` and posts, and records verdicts, through the CLI |
 | `done --job J --as NAME [--artifact REF] [--summary TEXT]` | worker hand-off for artifact-bound review; `--branch B --sha S` is the coding alias |
-| `post --job J --as NAME [--to NAME\|@ROLE] "message"` | post (whitespace collapsed; capped at the board's message cap); `--to @EL\|@PM\|@QA\|@judge\|@<role>` goes to the current holders of that seat, and an unknown name, an empty seat or an author outside the job is refused |
+| `post --job J --as NAME [--to NAME\|@ROLE] "message"` | post (whitespace collapsed; capped at the board's message cap); `--to @EL\|@PM\|@QA\|@judge\|@<role>` goes to the current holders of that launch, and an unknown name, an empty launch or an author outside the job is refused |
 | `config board.message_max_chars [N] [--save]` | print the board's message cap, or set it to N (50-4000). When a user says "make board messages 500 characters", run `swarm config board.message_max_chars 500` (add `--save` to keep it in the config file too) |
 | `read --as NAME \| --key K [--job J] [--peek]` | messages new since the last read, excluding your own (`read_limit` at a time, then "(N more unread: run read again)"); `--peek` doesn't advance the cursor |
 | `learn --job J [--bank B] [--create-bank] -` / `learn --list-banks` | retain distilled learnings with provenance; list existing banks to choose the best topic match |
@@ -696,10 +696,10 @@ imports the Hindsight client. When on:
   declared none (`swarm remember --job J --as NAME --none "<reason>"`). An abnormal end (stuck,
   dead, lost, a limit) marks the agent unharvested, with no LLM call.
 - **Mandatory at job close:** `swarm deactivate` is refused while agents are unharvested or
-  nothing was stored for the run. The closing seat runs `swarm learn --job J --harvest`, then
+  nothing was stored for the run. The closing launch runs `swarm learn --job J --harvest`, then
   `swarm learn --job J --bank BANK -` (or `--none "<reason>"`). Only a person may skip it:
   `swarm deactivate --job J --no-learn "<reason>"`. Drive jobs run it through a driver-launched
-  `learner` seat before closing.
+  `learner` launch before closing.
 - **Failure:** every call has one `timeout_seconds` timeout (default 3). A connection failure,
   timeout or 502/503/504 is logged to the hook error log and marks all of Hindsight unreachable
   for `retry_after_seconds` (a marker file outside the sandbox's reach), so an outage costs one timeout, not one

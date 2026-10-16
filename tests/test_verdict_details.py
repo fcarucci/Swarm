@@ -457,7 +457,7 @@ class JudgeTeachingTests(GoalEnv):
         self.assertIn("1. a -> b", rewritten)   # the body is untouched
 
 
-class SeatQuestionIdentityTests(GoalEnv):
+class LaunchQuestionIdentityTests(GoalEnv):
     """`swarm ask` and `swarm answer` run as the caller's own agent, as `swarm verdict` does: the hook adds
     the caller's --key (QA live-unreachable: a driver-launched lead got "no board identity")."""
 

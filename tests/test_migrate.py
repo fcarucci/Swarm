@@ -174,8 +174,8 @@ class SettingsWriterTests(unittest.TestCase):
         # uninstall.py: `swarm uninstall` removes that same entry again (backup first, safefile).
         # supervisor/command.py and launch.py name a *project's* .claude/settings.json (hashing for
         # `supervise approve`): allowed, as long as it never touches the user's settings.
-        # supervisor/seathome.py names the user's settings.json only to bind it READ-ONLY into a drive seat's jail.
-        readers = {"swarm/supervisor/command.py", "swarm/supervisor/launch.py", "swarm/supervisor/seathome.py"}
+        # supervisor/launchhome.py names the user's settings.json only to bind it READ-ONLY into a drive launch jail.
+        readers = {"swarm/supervisor/command.py", "swarm/supervisor/launch.py", "swarm/supervisor/launchhome.py"}
         for r in readers & set(users):
             self.assertNotIn("claude_settings_path", (ROOT / "lib" / r).read_text())
             self.assertNotIn("write_preserving", (ROOT / "lib" / r).read_text())

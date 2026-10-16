@@ -6,7 +6,7 @@ agents, so a record's existence on the board never says the host's driver caused
 A receipt binds what the driver later relies on:
 - the job, board key, incarnation (a random id per ledger, so a deleted and re-created job's
   receipts never validate) and generation;
-- the action, attempt and seat the driver launched;
+- the action, attempt and launch the driver launched;
 - the record's kind, id and revision (rev), so a rev-2 row is not a rev-1 receipt;
 - content_sha: a digest of the record's decision fields (content_sha()). matches() recomputes it
   from the board row, so a row rewritten after the hook's receipt is not matched. Task 5 must use
@@ -53,7 +53,7 @@ DECISION = {
     "withdraw": ("request_id",),
     "land": ("destinations",),
     # A grant is the hook's attestation, BEFORE a control command runs, of who submitted it (drivegate.
-    # write_grants): record_id is args_sha(submitted argv), seat/action_id say who. Single use (take()).
+    # write_grants): record_id is args_sha(submitted argv), launch/action_id say who. Single use (take()).
     "grant": ("argv_sha",),
     # A Codex session's ledger-writing control command, posted as CONTROL-REQUEST <request> <args_sha> ...
     # (drive_control): record_id is the message id; the driver applies it after checking this receipt.
@@ -73,7 +73,7 @@ class Receipt:
     incarnation: str
     action_id: str
     attempt: int
-    seat: str | None
+    launch: str | None
     kind: str
     record_id: str
     rev: int
@@ -86,7 +86,7 @@ class Receipt:
 @contextlib.contextmanager
 def _dir(kind: str, create: bool):
     """A verified descriptor of the directory receipts live in: the host-private enrolled directory (safefs,
-    0700), for every kind, grants included. It is never a Codex writable root: a sandboxed seat can neither
+    0700), for every kind, grants included. It is never a Codex writable root: a sandboxed launch can neither
     write nor use up a receipt there (a Codex session's control command goes through a CONTROL-REQUEST)."""
     with enrolment._dir(create=create) as d:
         yield d
@@ -169,7 +169,7 @@ def _validate(r: Receipt) -> Receipt:
         raise ValueError("receipt: incarnation must be 32 hex digits")
     _text(r.action_id, "action_id", 1024)
     _int(r.attempt, "attempt")
-    _text(r.seat, "seat", optional=True)
+    _text(r.launch, "launch", optional=True)
     if r.kind not in KINDS:
         raise ValueError(f"receipt: kind {r.kind!r:.40}")
     _text(r.record_id, "record_id")

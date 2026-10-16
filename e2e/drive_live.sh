@@ -3,7 +3,7 @@
 # Runbook: ~/work/swarm-autonomy/qa/RUNBOOK.md  (a copy: e2e/drive_live/RUNBOOK.md)
 #
 #   e2e/drive_live.sh preflight                 what can run today: throwaway board, hub, harness (no driver needed)
-#   e2e/drive_live.sh met [--harness real]      MET run: zero coordinator turns, supervisor launches every seat
+#   e2e/drive_live.sh met [--harness real]      MET run: zero coordinator turns, supervisor launches every launch
 #   e2e/drive_live.sh unreachable               impossible goal -> UNREACHABLE
 #   e2e/drive_live.sh chaos [NAME ...]          the chaos suite (or the named scenarios)
 #   e2e/drive_live.sh all                       preflight, met, unreachable, chaos

@@ -230,7 +230,7 @@ class ResumeTest(Base):
         st = {r.name: r.status for r in rep.results}
         self.assertEqual(st, {self.n1: "launched", self.n2: "failed"})
         self.assertEqual(self.b.job_status("j").status, "active")
-        self.assertEqual({a.name for a in self.b.agents("j", include_departed=False)}, {self.n1})   # seat freed
+        self.assertEqual({a.name for a in self.b.agents("j", include_departed=False)}, {self.n1})   # launch freed
         rep2 = self.resume(start=start, retry=True)
         self.assertEqual([(r.name, r.status) for r in rep2.results], [(self.n2, "launched")])
         self.assertEqual({a.name for a in self.b.agents("j", include_departed=False)}, {self.n1, self.n2})

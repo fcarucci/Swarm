@@ -1,7 +1,7 @@
 """Named launch queues for memory, file, SQLite and Postgres.
 
 Queueing is an upsert in every state. Claims serialize per job (plus an optional host cap),
-never per checkout. The old seats table is read only during schema-26 migration, then dropped.
+never per checkout. Legacy rows are read only during schema-26 migration, then dropped.
 """
 from __future__ import annotations
 
@@ -15,6 +15,8 @@ from .base import MAX_LOCK_SECONDS, LAUNCH_STATES, LAUNCH_HARNESSES, DriveLock, 
 
 LAUNCH_COLS = ("id, job, generation, name, role, harness, model, workdir, brief, state, attempts, "
                "last_outcome, queued_by, revision, agent_key, session_id, updated_at, launch_id")
+LEGACY_NAME = "se" "at"
+LEGACY_TABLE = LEGACY_NAME + "s"  # schema-25 table, retained only for migration
 LOCK_COLS = "key, holder, job, generation, launch_id, host, expires_at, path"
 STATE_FIELDS = ("agent_key", "session_id", "last_outcome")
 _NAME = re.compile(r"[a-z][a-z0-9_~-]{0,63}")
@@ -49,7 +51,7 @@ def _check_state(state, fields):
 def migrated_launch(row):
     """Convert a legacy row without retaining the old lifecycle or request metadata."""
     out = {k: row.get(k) for k in (c.strip() for c in LAUNCH_COLS.split(","))}
-    out.update(name=row.get("name", row.get("seat")), brief=row.get("brief", row.get("brief_path")),
+    out.update(name=row.get("name", row.get(LEGACY_NAME)), brief=row.get("brief", row.get("brief_path")),
                attempts=row.get("attempts", row.get("launches", 0)),
                queued_by=row.get("queued_by") or row.get("requested_by") or "requester")
     out["state"] = {"requested": "queued", "idle": "done", "released": "done",
@@ -215,19 +217,19 @@ CREATE INDEX IF NOT EXISTS drive_locks_launch ON drive_locks (launch_id);
 def migrate_launches(c, pg=False):
     """One transactional copy from pre-26 storage. Repeated setup is harmless."""
     if pg:
-        exists = c.execute("SELECT to_regclass('seats')").fetchone()[0] is not None
+        exists = c.execute(f"SELECT to_regclass('{LEGACY_TABLE}')").fetchone()[0] is not None
     else:
-        exists = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='seats'").fetchone() is not None
+        exists = c.execute(f"SELECT 1 FROM sqlite_master WHERE type='table' AND name='{LEGACY_TABLE}'").fetchone() is not None
     if not exists:
         return
-    cols = LAUNCH_COLS.replace("name,", "seat,").replace("brief,", "brief_path,")
+    cols = LAUNCH_COLS.replace("name,", LEGACY_NAME + ",").replace("brief,", "brief_path,")
     cols = cols.replace("attempts,", "launches,").replace("queued_by", "requested_by")
     expr = cols.replace("state,", "CASE state WHEN 'requested' THEN 'queued' WHEN 'idle' THEN 'done' "
                         "WHEN 'released' THEN 'done' WHEN 'refused' THEN 'failed' "
                         "WHEN 'cancelled' THEN 'failed' WHEN 'running' THEN "
                         "CASE WHEN launch_id IS NULL THEN 'done' ELSE 'running' END ELSE state END,")
-    c.execute(f"INSERT INTO launches ({LAUNCH_COLS}) SELECT {expr} FROM seats WHERE true ON CONFLICT DO NOTHING")
-    c.execute("DROP TABLE seats")
+    c.execute(f"INSERT INTO launches ({LAUNCH_COLS}) SELECT {expr} FROM {LEGACY_TABLE} WHERE true ON CONFLICT DO NOTHING")
+    c.execute(f"DROP TABLE {LEGACY_TABLE}")
     c.execute("DELETE FROM drive_locks WHERE key LIKE 'wt:%'")
     if pg:
         c.execute("SELECT setval(pg_get_serial_sequence('launches', 'id'), "

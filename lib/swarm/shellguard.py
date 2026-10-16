@@ -307,12 +307,12 @@ def ci_repo(command: str) -> str | None:
     return None
 
 
-# ---- drive jobs (spec 3.4, 4.0): what no seat may run, and what a read-only seat may not write -----
-# A guardrail, not a boundary (spec 4.0, [F24]): the boundary is the Bash sandbox and the seats' lack of landing
+# ---- drive jobs (spec 3.4, 4.0): what no launch may run, and what a read-only launch may not write -----
+# A guardrail, not a boundary (spec 4.0, [F24]): the boundary is the Bash sandbox and the launches' lack of landing
 # credentials. It stops recognisable misuse, and the driver's own checks (`swarm land`, the mirror audit) decide
 # outcomes. The refusals are a push to the job's target branch (any spelling that names it, or that names none and
 # so pushes whatever is checked out), any force or mirror push, a headless Claude or Codex session, a merge through
-# gh, and scheduling (at, batch, crontab). Read-only seats (judges, reviewers) also refuse writes and SQL writes,
+# gh, and scheduling (at, batch, crontab). Read-only launches (judges, reviewers) also refuse writes and SQL writes,
 # and only judges run `swarm verdict`. Words are split like a shell does (quotes resolved, not blanked).
 #
 # ONE RULE for code (the coordinator's ruling, round 4): code that can run commands must be a LITERAL ARGUMENT,
@@ -322,7 +322,7 @@ def ci_repo(command: str) -> str | None:
 # scanned as text (_inline_refusal). Code that arrives any other way cannot be checked and is refused: stdin, a
 # pipe, a here-string, a heredoc, `<(...)`, a variable or `$(...)` (as the program, as -c code or under eval), a
 # glob or brace expansion as the program, and a script FILE, unless that file is tracked unmodified at HEAD in its
-# repository (or is a file the seat cannot write, such as /usr/bin/...). The same file rule covers `./script.sh`,
+# repository (or is a file the launch cannot write, such as /usr/bin/...). The same file rule covers `./script.sh`,
 # `bash script.sh`, `python3 x.py`, `source f`, `awk -f f`, `make -f f`. A program reached through a path that
 # resolves to a shell or interpreter under another name (`ln -s /bin/sh x; ./x`) is refused; a bare name is
 # resolved through PATH and its real name decides (rbash, a symlink to bash, is bash).
@@ -1065,7 +1065,7 @@ _ENV_SSH = frozenset(("GIT_SSH_COMMAND", "RSYNC_RSH"))
 _ENV_PROGRAM = frozenset(("GIT_SSH",))
 _ENV_REFUSED = re.compile(r"BASH_ENV|ENV|ZDOTDIR|LD_PRELOAD|LD_AUDIT|DYLD_INSERT_LIBRARIES|GIT_EXEC_PATH|"
                           r"GIT_TEMPLATE_DIR|PERL5OPT|RUBYOPT|PYTHONSTARTUP|SHELLOPTS|BASHOPTS|BASH_FUNC_.*")
-# where git and gh read their configuration (a seat-written .gitconfig with a push refspec, an alias, a hook path)
+# where git and gh read their configuration (a launch-written .gitconfig with a push refspec, an alias, a hook path)
 _ENV_CONFIG = re.compile(r"HOME|XDG_CONFIG_HOME|GIT_DIR|GIT_WORK_TREE|GIT_COMMON_DIR|GIT_INDEX_FILE|GH_CONFIG_DIR")
 _NODE_CODE = re.compile(r"(?:^|\s)(?:-r|--require|--import|--loader|--experimental-loader|-e|--eval|-p|--print)\b")
 _SSH_TAIL = " swarm-host true"     # git and rsync append the host and command to an ssh command
@@ -1661,7 +1661,7 @@ _GUARDED_NAMES = _SHELLS | {"git", "gh", "ssh", "scp", "sftp", "rsync", "claude"
 def _venv_bin_ok(d: str) -> bool:
     """Whether directory `d` is a virtualenv's bin (Scripts on Windows): <venv>/pyvenv.cfg exists, and no file in it
     is named like a program the guard checks (git, gh, ssh, a shell, claude, codex, ...): a venv that shadows one is a
-    seat-made trap, not a virtualenv."""
+    launch-made trap, not a virtualenv."""
     try:
         d = os.path.abspath(d)
         if os.path.basename(d) not in ("bin", "Scripts") or not os.path.isfile(
@@ -1682,8 +1682,8 @@ def _venv_entry(path: str) -> bool:
 
 
 def _path_value_refusal(value) -> str | None:
-    """Why a PATH value is refused: every entry must be `$PATH`, a virtualenv's bin, or an absolute directory the seat
-    cannot write (a seat-written ./bin/git must not shadow git)."""
+    """Why a PATH value is refused: every entry must be `$PATH`, a virtualenv's bin, or an absolute directory the launch
+    cannot write (a launch-written ./bin/git must not shadow git)."""
     for entry in str(value).split(":"):
         if entry in ("$PATH", "${PATH}", ""):
             continue
@@ -1691,18 +1691,18 @@ def _path_value_refusal(value) -> str | None:
             return "a PATH entry given by a variable or $(...) cannot be checked"
         d = os.path.normpath(os.path.expanduser(entry))
         if not os.path.isabs(d):
-            return f"the PATH entry {entry!r} is relative: a program there could be one the seat wrote"
+            return f"the PATH entry {entry!r} is relative: a program there could be one the launch wrote"
         if _venv_bin_ok(d):
             continue
         if not os.path.isdir(d) or os.access(d, os.W_OK):
-            return f"the PATH entry {entry!r} is a directory the seat can write: a program there could be one it wrote"
+            return f"the PATH entry {entry!r} is a directory the launch can write: a program there could be one it wrote"
     return None
 
 
 def _bare_program_refusal(word: str) -> str | None:
-    """A program named by a bare word runs what PATH finds: a compiled program, a script the seat cannot write, a
+    """A program named by a bare word runs what PATH finds: a compiled program, a script the launch cannot write, a
     virtualenv entry point, the swarm launcher, or a script tracked unmodified at HEAD. Any other script in a
-    directory the seat can write (a seat-written script on PATH) is refused."""
+    directory the launch can write (a launch-written script on PATH) is refused."""
     try:
         found = shutil.which(str(word))
     except Exception:
@@ -1712,11 +1712,11 @@ def _bare_program_refusal(word: str) -> str | None:
     real = os.path.realpath(found)
     if _is_native(real) or real in _swarm_launchers() or _trusted_script(found):
         return None
-    return f"{str(word)!r} runs the script {found!r}: the seat can write it and it is not tracked unmodified at HEAD"
+    return f"{str(word)!r} runs the script {found!r}: the launch can write it and it is not tracked unmodified at HEAD"
 
 
 def _trusted_script(path: str) -> bool:
-    """A script may run when the seat cannot write it (nor its directory), or it is tracked unmodified at HEAD."""
+    """A script may run when the launch cannot write it (nor its directory), or it is tracked unmodified at HEAD."""
     try:
         real = os.path.realpath(path)
         if not os.path.isfile(real):
@@ -1728,7 +1728,7 @@ def _trusted_script(path: str) -> bool:
         return False
 
 
-_SCRIPT_RULE = ("in a drive seat a script runs only when it is tracked unmodified at HEAD in its repository "
+_SCRIPT_RULE = ("in a drive launch a script runs only when it is tracked unmodified at HEAD in its repository "
                 "(commit it, or give the code as a literal `-c` argument)")
 
 
@@ -1804,10 +1804,10 @@ def _cd(cands, prog: str, args: list[str], command: str, wrappers=frozenset()):
     return new if len(new) <= 16 else None
 
 
-# ---- git and tool configuration a seat may not write (rr31, rr32, rr35) ---------------------------------------
+# ---- git and tool configuration a launch may not write (rr31, rr32, rr35) ---------------------------------------
 # A push refspec in .git/config, a hook in .git/hooks, an alias or hooksPath in a .gitconfig, a ProxyCommand in
 # ~/.ssh/config: each changes what a later, innocent-looking command does. Write, Edit, MultiEdit, NotebookEdit,
-# apply_patch and the shell's writers (a redirection, tee, cp, mv, ...) may not touch them in a drive seat.
+# apply_patch and the shell's writers (a redirection, tee, cp, mv, ...) may not touch them in a drive launch.
 
 _GIT_DIR_PROTECTED = re.compile(r"(?:config|config\.worktree|hooks|info|commondir|gitdir|remotes|branches)(?:/.*)?")
 _PROTECTED_TEXT = re.compile(r"(?:^|[/\s'\"=])(?:\.git/(?:config|hooks|info|commondir)|\.gitmodules|\.gitconfig|"
@@ -1856,7 +1856,7 @@ def _is_git_dir(d: str) -> bool:
 
 
 def protected_path_reason(path, cwd=None) -> str | None:
-    """Why a seat may not write `path` (resolved against `cwd`), or None: a git dir's config, hooks or info (the
+    """Why a launch may not write `path` (resolved against `cwd`), or None: a git dir's config, hooks or info (the
     checkout's, a worktree's common dir, any directory that is a git dir), .gitmodules, a .gitconfig or
     ~/.config/git, ~/.config/gh, ~/.ssh."""
     if not isinstance(path, str) or not path or _dyn(path):
@@ -1867,7 +1867,7 @@ def protected_path_reason(path, cwd=None) -> str | None:
             p = os.path.join(cwd or os.getcwd(), p)
         p = os.path.normpath(p)
         real = os.path.realpath(p)
-        why = f"a drive seat may not write {path!r}: git, gh and ssh configuration changes what later commands do"
+        why = f"a drive launch may not write {path!r}: git, gh and ssh configuration changes what later commands do"
         for q in {p, real}:
             parts = q.replace(os.sep, "/").split("/")
             if parts[-1] in (".gitmodules", ".gitconfig"):
@@ -1888,7 +1888,7 @@ def protected_path_reason(path, cwd=None) -> str | None:
 
 
 def _protected_name(name) -> bool:
-    """A variable a drive seat may not set by any means: where git and gh read configuration, PATH, every GIT_*, and
+    """A variable a drive launch may not set by any means: where git and gh read configuration, PATH, every GIT_*, and
     the variables that load or name code (BASH_ENV, LD_PRELOAD, GIT_EDITOR, PAGER, ...)."""
     n = re.sub(r"\[.*$", "", str(name))
     return bool(n) and (n == "PATH" or n.startswith("GIT_") or bool(_ENV_CONFIG.fullmatch(n)) or
@@ -1983,7 +1983,7 @@ _PATCH_FILE = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$|^\*\*\* Mov
 
 def protected_write_refusal(tool_input, cwd=None) -> str | None:
     """Why a file-writing tool call (Write, Edit, MultiEdit, NotebookEdit; Codex apply_patch) may not go ahead in a
-    drive seat: it writes git, gh or ssh configuration (protected_path_reason)."""
+    drive launch: it writes git, gh or ssh configuration (protected_path_reason)."""
     if not isinstance(tool_input, dict):
         return None
     paths = [tool_input.get(k) for k in ("file_path", "notebook_path", "path")]
@@ -2015,7 +2015,7 @@ _UNCHECKED = ("A shell is allowed only as `sh -c '<literal>'` in a drive job: co
 
 
 def drive_command_refusal(command: str, targets=(), *, branch_of=None, cwd=None) -> str | None:
-    """Why a drive seat may not run `command` (its reason, for the agent), or None. `targets` are the
+    """Why a drive launch may not run `command` (its reason, for the agent), or None. `targets` are the
     branch names a push may not update (the recipe's target, e.g. "main"; compared without case), or a
     function giving them (called only when a push or an inline script needs them).
     `branch_of(directory)` names the branch checked out in `directory` (the -C value, None for where the
@@ -2033,7 +2033,7 @@ def drive_command_refusal(command: str, targets=(), *, branch_of=None, cwd=None)
         return done[0]
     m = next((m for m in _PARAM_ASSIGN.finditer(command) if _protected_name(m.group(1))), None)
     if m:
-        return f"setting {m.group(1)} through ${{{m.group(1)}:=...}} is refused in a drive seat"
+        return f"setting {m.group(1)} through ${{{m.group(1)}:=...}} is refused in a drive launch"
     for text in _nested_scripts(command):
         for words in split_commands(text):
             if any(_GIT_ENV.match(w) for w in words):
@@ -2072,13 +2072,13 @@ def drive_command_refusal(command: str, targets=(), *, branch_of=None, cwd=None)
                     return why
         name = _builtin_sets(prog, args)
         if name:
-            return (f"setting {name} is refused in a drive seat (it changes where git, gh or the shell find their "
+            return (f"setting {name} is refused in a drive launch (it changes where git, gh or the shell find their "
                     "configuration or programs)")
         if prog in ("cd", "pushd", "popd"):
             cands = _cd(cands, prog, args, command, wrappers)
             continue
         if prog in ("at", "batch") or (prog == "crontab" and "-l" not in args):
-            return f"scheduling a command ({prog}) is refused in a drive seat"
+            return f"scheduling a command ({prog}) is refused in a drive launch"
         if prog in ("git", "git-push", "git-send-pack"):
             sub, rest, why, cdir = _git_args(args) if prog == "git" else (prog[4:], args, None, None)
             if why:
@@ -2178,7 +2178,7 @@ _INLINE_WRITE = re.compile(r"open\([^)]*,\s*['\"][wax]|write_text|write_bytes|wr
 
 
 def readonly_write_reason(command: str) -> str | None:
-    """Why `command` writes (for a read-only seat), or None: the writer patterns of writes_files over the
+    """Why `command` writes (for a read-only launch), or None: the writer patterns of writes_files over the
     command and over every string a wrapper in it runs (sh -c, eval, ...), git's own writing subcommands
     whatever options come before them (`git -c k=v commit`), interpreter code that writes or runs commands, code
     that cannot be checked, and sqlite3 with a writing statement."""
@@ -2249,7 +2249,7 @@ _WRITE_VERBS = frozenset(("create", "update", "delete", "write", "post", "send",
 
 
 def mcp_read_allowed(tool_name) -> bool:
-    """Whether a read-only seat may call this MCP tool: an allowlist, not a denylist. The tool's own name
+    """Whether a read-only launch may call this MCP tool: an allowlist, not a denylist. The tool's own name
     (after `mcp__<server>__`) is split on `_`; it must contain a read verb (get, list, search, read, find,
     count, describe, query, fetch, view, ...) and no write verb. Anything else is refused: a tool whose name
     says neither is not known to be read-only."""

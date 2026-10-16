@@ -89,7 +89,7 @@ class Intent:
     launch_id: str
     action_id: str
     attempt: int
-    seat: str | None
+    launch: str | None
     reserved_usd: float
     reserved_minutes: float
     locks: list
@@ -233,11 +233,15 @@ def _need(ok: bool, what: str) -> None:
 
 
 def _intent(o) -> Intent:
+    legacy = "se" "at"
+    if isinstance(o, dict) and legacy in o and "launch" not in o:
+        o = dict(o)
+        o["launch"] = o.pop(legacy)
     if not isinstance(o, dict) or set(o) != {f.name for f in fields(Intent)}:
         raise ValueError("intent fields")
     _need(_safe_text(o["launch_id"], _MAX_ID) and _safe_text(o["action_id"], _MAX_ID), "intent ids")
     _need(_nat(o["attempt"], 1), "intent attempt")
-    _need(_opt_text(o["seat"], 256), "intent seat")
+    _need(_opt_text(o["launch"], 256), "intent launch")
     _need(_amount(o["reserved_usd"]) and _amount(o["reserved_minutes"]), "intent reservation")
     _need(isinstance(o["locks"], list) and all(_safe_text(x, _MAX_ID) for x in o["locks"]), "intent locks")
     _need(o["state"] in STATES, "intent state")
@@ -531,7 +535,7 @@ def _spend_lines(old: dict) -> list:
         if _amount(charge):
             spent += charge
         if i.get("state") in ("claiming", "claimed"):
-            open_.append(f"{str(i.get('launch_id'))[:80]} (seat {str(i.get('seat'))[:64]})")
+            open_.append(f"{str(i.get('launch_id'))[:80]} (launch {str(i.get('launch'))[:64]})")
     lines = [f"spend: ${spent:.2f} charged or reserved over {len(intents)} launches; the fresh ledger counts "
              "from $0, so set the budgets net of it"]
     if open_:

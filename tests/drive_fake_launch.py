@@ -5,7 +5,7 @@ turn|done`, with the session id the runner bound to its marker) around every `sw
 Claude session, and prints a Claude-style result line with `total_cost_usd`.
 
 The lead posts GOAL-READY for a report file in its workdir; the goal judge records `met` for the candidate and
-requirements digest its prompt names. Everything it does is appended to $FAKE_SEAT_LOG (JSON lines)."""
+requirements digest its prompt names. Everything it does is appended to $FAKE_LAUNCH_LOG (JSON lines)."""
 from __future__ import annotations
 
 import json
@@ -21,13 +21,13 @@ def opt(args, flag):
 
 
 def log(**kw) -> None:
-    path = os.environ.get("FAKE_SEAT_LOG")
+    path = os.environ.get("FAKE_LAUNCH_LOG")
     if path:
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps({"pid": os.getpid(), "ppid": os.getppid(), **kw}) + "\n")
 
 
-class Seat:
+class Launch:
     def __init__(self, sid: str) -> None:
         self.sid = sid
         self.swarm = os.environ["FAKE_SWARM"]
@@ -36,10 +36,10 @@ class Seat:
 
     def hook(self, event: str, **extra):
         payload = {"session_id": self.sid, "cwd": os.getcwd(), **extra}
-        if os.environ.get("SWARM_SEAT_BROKER"):
-            # a drive seat (Task 20): Claude runs the plugin's hook entry, which hands the hook to the seat's
-            # broker outside the seat (jailed: the board, the ledger and the receipts are not reachable; best-effort,
-            # macOS and Windows: HOME/USERPROFILE are the seat's scratch home, so a hook run here would write its
+        if os.environ.get("SWARM_LAUNCH_BROKER"):
+            # a drive launch (Task 20): Claude runs the plugin's hook entry, which hands the hook to the launch's
+            # broker outside the launch (jailed: the board, the ledger and the receipts are not reachable; best-effort,
+            # macOS and Windows: HOME/USERPROFILE are the launch's scratch home, so a hook run here would write its
             # receipts and state there, where the driver never looks). Windows: the entry is swarm-hook.cmd.
             entry = "swarm-hook.cmd" if os.name == "nt" else "swarm-hook"
             argv = [os.path.join(os.path.dirname(self.swarm), entry), "--host", "claude", event]
@@ -84,16 +84,16 @@ def main() -> int:
     sid = opt(args, "--session-id") or opt(args, "--resume") or str(uuid.uuid4())
     m = re.search(r"^\[swarm job: ([^\]]+)\]", prompt, re.M)
     job = m.group(1) if m else "?"
-    seat = Seat(sid)
+    launch = Launch(sid)
     log(ev="start", sid=sid, job=job, head=prompt[:300])
-    try:   # a root session: no SubagentStart; its first tool call's hook enrols it in its predecessor's seat
-        seat.run("read", "--job", job)
+    try:   # a root session: no SubagentStart; its first tool call's hook enrols it in its predecessor's launch
+        launch.run("read", "--job", job)
         if "You are the goal judge" in prompt:
             # inline, or in its fenced block (which comes before the board's posts)
             found = re.findall(r"(?<![=\w:])(?:report:)?[A-Za-z0-9._/-]+@[0-9a-f]{7,64}", prompt)
             cand = found[0] if found else re.search(r"Judge candidate (\S+) against", prompt).group(1)
             req = re.search(r"--req ([0-9a-f]+)", prompt).group(1)
-            seat.run("verdict", "--job", job, "--scope", "goal", "--candidate", cand, "--req", req, "met",
+            launch.run("verdict", "--job", job, "--scope", "goal", "--candidate", cand, "--req", req, "met",
                      "the report meets the goal")
         elif "You are the lead" in prompt:
             report = os.path.join(os.getcwd(), "REPORT.md")
@@ -102,11 +102,11 @@ def main() -> int:
             data = open(report, "rb").read()
             import hashlib
             blob = hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
-            seat.run("goal-ready", "--job", job, "--candidate", f"report:REPORT.md@{blob}")
+            launch.run("goal-ready", "--job", job, "--candidate", f"report:REPORT.md@{blob}")
         else:
             log(ev="idle-role", sid=sid)
     finally:
-        seat.hook("session-stop")
+        launch.hook("session-stop")
         log(ev="end", sid=sid)
     print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "session_id": sid,
                       "total_cost_usd": 0.01, "num_turns": 2, "result": "done"}))

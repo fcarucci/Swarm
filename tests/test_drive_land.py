@@ -22,7 +22,7 @@ from test_drive_mirror import git
 
 BK = "board-key"
 GROUP = "feat/x"
-SEAT = land.integrator_seat(GROUP)
+LAUNCH = land.integrator_launch(GROUP)
 NOW = dt.datetime(2026, 10, 11, 12, 0, tzinfo=dt.timezone.utc)
 
 
@@ -55,7 +55,7 @@ class LandCase(unittest.TestCase):
         self.judged = {self.sha}
         self.owner = {"remotes": {"a": self.a, "b": self.b}, "credentials": {}}
         self.pushes = []
-        self.seat = self.board.queue_launch("J", 1, SEAT, role="integrator", harness="claude", model="haiku",
+        self.launch = self.board.queue_launch("J", 1, LAUNCH, role="integrator", harness="claude", model="haiku",
                                             workdir=self.root, brief=os.path.join(self.root, "B.md"),
                                             queued_by="driver")
         self._claims = 0
@@ -103,21 +103,21 @@ class LandCase(unittest.TestCase):
         return bool(git(remote, "branch", "--list", branch))
 
     # --- board, leases, environment ----------------------------------------------------------
-    def lease(self, job, keys=None, name=SEAT, host=None):
+    def lease(self, job, keys=None, name=LAUNCH, host=None):
         keys = keys or lease_keys(land.destinations_from_owner(self.owner), "main")
-        seat = self.board.get_launch("J", 1, name) if job == "J" else self.board.queue_launch(
+        launch = self.board.get_launch("J", 1, name) if job == "J" else self.board.queue_launch(
             job, 1, "other", role="integrator", harness="claude", model="haiku", workdir=self.root,
             brief=os.path.join(self.root, "B.md"), queued_by="driver")
-        if seat.state != "queued":
-            seat = self.board.queue_launch(job, 1, seat.name, role=seat.role, harness=seat.harness,
-                                          model=seat.model, workdir=seat.workdir, brief=seat.brief,
-                                          queued_by=seat.queued_by)
+        if launch.state != "queued":
+            launch = self.board.queue_launch(job, 1, launch.name, role=launch.role, harness=launch.harness,
+                                          model=launch.model, workdir=launch.workdir, brief=launch.brief,
+                                          queued_by=launch.queued_by)
         ctx = mock.patch.object(compat, "node", lambda: host) if host else mock.patch.object(compat, "node", compat.node)
         with ctx:
             n, self._claims = self._claims, self._claims + 1
             return self.board.claim_drive_launch(
                 job=job, generation=1, action_id=f"gen1|land|-|{job}|1|{n}", attempt=1, launch_id=f"L-{job}-{host}-{n}",
-                launch_row_id=seat.id, queue_version=seat.revision, harness="claude", reserve_usd=0, reserve_minutes=1,
+                launch_row_id=launch.id, queue_version=launch.revision, harness="claude", reserve_usd=0, reserve_minutes=1,
                 locks=keys, lock_seconds=3000, max_host_running=8)
 
     def release_first(self):
@@ -142,8 +142,8 @@ class LandCase(unittest.TestCase):
             return m
         return make
 
-    def request(self, artifact=None, seat=SEAT, generation=1, rid=7):
-        return Request(rid, seat, artifact or f"{GROUP}@{self.sha}", generation)
+    def request(self, artifact=None, launch=LAUNCH, generation=1, rid=7):
+        return Request(rid, launch, artifact or f"{GROUP}@{self.sha}", generation)
 
     def go(self, request=None, **kw):
         return land.execute(self.board, self.env(**kw.pop("env", {})), "J", request or self.request(),
@@ -158,7 +158,7 @@ class LandCase(unittest.TestCase):
 
 class Landing(LandCase):
     def test_a_branch_only_in_the_work_repository_is_published_by_the_driver_then_landed(self):
-        """Seats never push (QA real MET): the hand-off exists only in the job's work repository. The driver
+        """Launches never push (QA real MET): the hand-off exists only in the job's work repository. The driver
         brings it into its mirror and, once judged, publishes it under its own ref swarm/land/<sha> and lands it."""
         self.local_only()
         res = self.go()
@@ -179,7 +179,7 @@ class Landing(LandCase):
         self.sha = self.commit(self.work, "w.txt", "w\n", "feature")
         self.owner["roots"] = [self.work]
         self.judged = {self.sha}
-        res = self.go(Request(7, land.integrator_seat("develop"), f"develop@{self.sha}", 1))
+        res = self.go(Request(7, land.integrator_launch("develop"), f"develop@{self.sha}", 1))
         self.assertTrue(res.ok, res.why)
         for r in (self.a, self.b):
             self.assertEqual(self.head(r, "develop"), before)
@@ -236,7 +236,7 @@ class Landing(LandCase):
     def test_a_gitdir_file_root_is_refused(self):
         """Review blocker 3: the work root cannot redirect the fetch to another repository."""
         secret, ssha = self.foreign("secret")
-        wr = os.path.join(self.root, "seatroot")
+        wr = os.path.join(self.root, "launchroot")
         os.makedirs(wr)
         with open(os.path.join(wr, ".git"), "w") as fh:
             fh.write("gitdir: " + os.path.join(secret, ".git") + "\n")
@@ -269,7 +269,7 @@ class Landing(LandCase):
         # exactly the judged sha is pushed once per destination
         self.assertEqual(sorted(self.pushes), sorted([(self.a, self.sha, "main"), (self.b, self.sha, "main")]))
         self.assertEqual(res.land_rev, 1 + 2 * 2)   # intent, then pushed and verified per destination
-        self.assertTrue(self.has_branch(self.a))      # the seat's branch name is never deleted by the driver
+        self.assertTrue(self.has_branch(self.a))      # the launch's branch name is never deleted by the driver
         self.assertTrue(self.has_branch(self.b))
         ig = self.led.integrated[GROUP]
         self.assertEqual((ig["landed"], ig["land_id"], ig["land_rev"]), (self.sha, "7", res.land_rev))
@@ -280,7 +280,7 @@ class Landing(LandCase):
                           generation=1, now=NOW.timestamp())
         self.assertEqual(sorted(r.destinations), urls)
         self.assertTrue(all(v == {"state": "verified", "sha": self.sha} for v in r.destinations.values()))
-        self.assertEqual(r.seat, SEAT)
+        self.assertEqual(r.launch, LAUNCH)
         integ = receipts.find(BK, "J", "integrated", "7", rev=1, incarnation=self.led.incarnation,
                               generation=1, now=NOW.timestamp())
         self.assertEqual(integ.content_sha, receipts.content_sha(
@@ -330,7 +330,7 @@ class Landing(LandCase):
 
     def test_branch_not_on_every_remote_is_refused_with_instructions(self):
         git(self.b, "branch", "-D", GROUP)
-        res = self.go()          # not on b and not in any pinned work root: nothing to publish (seats never push)
+        res = self.go()          # not on b and not in any pinned work root: nothing to publish (launches never push)
         self.assertFalse(res.ok)
         self.assertIn("work repository", res.why)
         self.assertEqual(self.pushes, [])
@@ -366,7 +366,7 @@ class Landing(LandCase):
         self.assertEqual(self.pushes, [])
 
     def test_branch_equal_to_target_refused(self):
-        res = self.go(request=self.request(f"main@{self.sha}", seat=land.integrator_seat("main")))
+        res = self.go(request=self.request(f"main@{self.sha}", launch=land.integrator_launch("main")))
         self.assertFalse(res.ok)
         self.assertIn("target", res.why)
 
@@ -400,8 +400,8 @@ class Checks(LandCase):
         self.assertTrue(res.pending)
         self.assertFalse(res.ok)
 
-    def test_wrong_seat_wrong_generation_refused(self):
-        for request in (self.request(seat="engineer:a"), self.request(seat=land.integrator_seat("other")),
+    def test_wrong_launch_wrong_generation_refused(self):
+        for request in (self.request(launch="engineer:a"), self.request(launch=land.integrator_launch("other")),
                         self.request(generation=2)):
             res = self.go(request=request)
             self.assertFalse(res.ok)
@@ -420,25 +420,25 @@ class Checks(LandCase):
     def test_an_empty_session_never_matches_an_empty_launch_session(self):
         self.receipted_request()
         with mock.patch.object(type(self.board), "launches", lambda s, job, gen=None, include_closed=True: [
-                SimpleNamespace(name=SEAT, session_id="")]):
+                SimpleNamespace(name=LAUNCH, session_id="")]):
             res = land.land(self.board, self.env(), "J", f"{GROUP}@{self.sha}", caller_session="")
         self.assertFalse(res.ok)
         self.assertEqual(self.pushes, [])
 
-    def receipted_request(self, artifact=None, seat=SEAT):
+    def receipted_request(self, artifact=None, launch=LAUNCH):
         artifact = artifact or f"{GROUP}@{self.sha}"
         body = land.request_text(artifact)
         mid = self.board.post("J", "integrator-bot", body).id
         receipts.write(BK, receipts.Receipt(
             board_key=BK, job="J", generation=1, incarnation=self.led.incarnation, action_id="a", attempt=1,
-            seat=seat, kind="post", record_id=str(mid), rev=1,
+            launch=launch, kind="post", record_id=str(mid), rev=1,
             content_sha=receipts.content_sha("post", {"to": None, "body": body}), args_sha="0" * 64,
             expires_at=NOW.timestamp() + 3600))
         return mid
 
     def land_as(self, session="sess-int"):
         with mock.patch.object(type(self.board), "launches", lambda s, job, gen=None, include_closed=True: [
-                SimpleNamespace(name=SEAT, session_id="sess-int")]):
+                SimpleNamespace(name=LAUNCH, session_id="sess-int")]):
             return land.land(self.board, self.env(), "J", f"{GROUP}@{self.sha}", caller_session=session)
 
     def test_integrator_session_may_land_synchronously_with_its_real_request_id(self):
@@ -447,9 +447,9 @@ class Checks(LandCase):
         self.assertTrue(res.ok, res.why)
         self.assertEqual(res.land_id, str(mid))
 
-    def test_synchronous_land_needs_a_receipted_request_for_that_artifact_and_seat(self):
+    def test_synchronous_land_needs_a_receipted_request_for_that_artifact_and_launch(self):
         self.receipted_request(f"{GROUP}@{'b' * 40}")
-        self.receipted_request(seat="reviewer-x")
+        self.receipted_request(launch="reviewer-x")
         res = self.land_as()
         self.assertFalse(res.ok)
         self.assertIn("no receipted land request", res.why)
@@ -1163,21 +1163,21 @@ class OwnerPins(LandCase):
         self.assertEqual(len(land.audit(self.env(), None, self.sha).findings), 2)
 
 
-class SeatName(unittest.TestCase):
-    def test_integrator_seat_name_shape(self):
-        n = land.integrator_seat("feat/x")
+class LaunchName(unittest.TestCase):
+    def test_integrator_launch_name_shape(self):
+        n = land.integrator_launch("feat/x")
         self.assertRegex(n, r"integrator-feat-x-[0-9a-f]{8}")
-        self.assertNotEqual(land.integrator_seat("feat/x"), land.integrator_seat("feat-x"))
-        self.assertEqual(land.integrator_seat(""), land.integrator_seat(""))
-        self.assertTrue(land.integrator_seat("A" * 100).startswith("integrator-" + "a" * 30 + "-"))
+        self.assertNotEqual(land.integrator_launch("feat/x"), land.integrator_launch("feat-x"))
+        self.assertEqual(land.integrator_launch(""), land.integrator_launch(""))
+        self.assertTrue(land.integrator_launch("A" * 100).startswith("integrator-" + "a" * 30 + "-"))
 
-    def test_seat_name_matches_driver_exec_when_present(self):
+    def test_launch_name_matches_driver_exec_when_present(self):
         try:
             from swarm.supervisor import driver_exec
         except ImportError:
             self.skipTest("driver_exec (Task 8a) is not integrated yet")
         for g in ("feat/x", "A b", "", "x" * 90):
-            self.assertEqual(land.integrator_seat(g), driver_exec.seat_name("integrator", g))
+            self.assertEqual(land.integrator_launch(g), driver_exec.launch_name("integrator", g))
 
 
 class Pins(unittest.TestCase):
@@ -1234,11 +1234,11 @@ class Requests(LandCase):
     def post(self, text=None, to=None, name="integrator-bot"):
         return self.board.post("J", name, text or f"LAND-REQUEST {GROUP}@{self.sha}", to=to).id
 
-    def receipt(self, mid, *, seat=SEAT, body=None, rev=1, generation=1, to=None, kind="post"):
+    def receipt(self, mid, *, launch=LAUNCH, body=None, rev=1, generation=1, to=None, kind="post"):
         body = body or f"LAND-REQUEST {GROUP}@{self.sha}"
         receipts.write(BK, receipts.Receipt(
             board_key=BK, job="J", generation=generation, incarnation=self.led.incarnation, action_id="a", attempt=1,
-            seat=seat, kind=kind, record_id=str(mid), rev=rev,
+            launch=launch, kind=kind, record_id=str(mid), rev=rev,
             content_sha=receipts.content_sha("post", {"to": to, "body": body}), args_sha="0" * 64,
             expires_at=NOW.timestamp() + 3600))
 
@@ -1255,11 +1255,11 @@ class Requests(LandCase):
         with self.assertRaises(ValueError):
             land.request_land(self.board, "J", "feat/x", name="int-bot")
 
-    def test_a_receipted_request_is_found_with_its_seat(self):
+    def test_a_receipted_request_is_found_with_its_launch(self):
         mid = self.post()
         self.receipt(mid)
         got = self.find()
-        self.assertEqual(got, [Request(mid, SEAT, f"{GROUP}@{self.sha}", 1)])
+        self.assertEqual(got, [Request(mid, LAUNCH, f"{GROUP}@{self.sha}", 1)])
         self.assertEqual(self.find(after=mid), [])
 
     def test_unreceipted_forged_or_swapped_requests_are_ignored(self):

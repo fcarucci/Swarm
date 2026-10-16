@@ -77,7 +77,7 @@ class MissingEnabledIsOff(unittest.TestCase):
         self.assertFalse(st.settings({"supervise": {}, "_supervise_unset": True})["enabled"])
         self.assertFalse(st.settings({})["enabled"])
 
-    def test_drive_seats_ignore_supervise_enabled(self):
+    def test_drive_launches_ignore_supervise_enabled(self):
         cfg = {"supervise": {"enabled": False}}
         with mock.patch.object(st, "switched_off", return_value=None):
             self.assertIsNotNone(st.off_reason(cfg))

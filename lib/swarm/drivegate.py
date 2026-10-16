@@ -26,7 +26,7 @@ RECORD_LINE = re.compile(r"swarm-record: kind=([a-z_]+) id=(\d+) rev=(\d+)")
 PERSON_SUBS = ("halt", "unhalt", "deactivate", "activate")
 HOOK_INIT_TIMEOUT = 4.0
 
-SPAWN_REFUSAL = ("a spawn by {who} is refused: seats are staffed by the lead's `swarm run` (the "
+SPAWN_REFUSAL = ("a spawn by {who} is refused: launches are staffed by the lead's `swarm run` (the "
                  "supervisor launches and budgets them), never by subagents")
 
 
@@ -113,13 +113,13 @@ def load_ledger(board_key: str, job: str):
 
 @dataclasses.dataclass
 class Ctx:
-    """Who is calling. `kind` is "seat" (a supervisor-launched session, or a subagent of one), "requester" (the
-    job's requester main session) or "enrolled" (a subagent that joined a drive job by its tag). `seat` and
+    """Who is calling. `kind` is "launch" (a supervisor-launched session, or a subagent of one), "requester" (the
+    job's requester main session) or "enrolled" (a subagent that joined a drive job by its tag). `launch` and
     `intent` are the ledger's: None when the session could not be resolved to a launch."""
     kind: str
     job: str
     led: object
-    seat: str | None = None
+    launch: str | None = None
     intent: object = None
     agent_key: str | None = None
 
@@ -129,7 +129,7 @@ class Policy:
     read_only: bool
     judge: bool
     lead: bool
-    known: bool = True        # False: the seat's role could not be verified (the strictest rules apply)
+    known: bool = True        # False: the launch's role could not be verified (the strictest rules apply)
 
 
 def _resume_lookup(cfg: dict, sid: str):
@@ -137,12 +137,12 @@ def _resume_lookup(cfg: dict, sid: str):
     return hooks._resume_binding(cfg, sid)
 
 
-def seat_context(cfg: dict, board_key: str, payload: dict, resume=None, resume_lookup=None):
-    """The Ctx of a seat session, or of a subagent of one, from the resume marker bound to the payload's
-    session, its run file and the ledger. None when the session is no drive seat (no marker and no
-    enrolment in a drive job, or the job has no ledger). A seat whose launch cannot be read from the run
+def launch_context(cfg: dict, board_key: str, payload: dict, resume=None, resume_lookup=None):
+    """The Ctx of a launch session, or of a subagent of one, from the resume marker bound to the payload's
+    session, its run file and the ledger. None when the session is no drive launch (no marker and no
+    enrolment in a drive job, or the job has no ledger). A launch whose launch cannot be read from the run
     file and the ledger (or whose marker was removed: the enrolment record still names its job) is still
-    a seat of its job (kind "seat", seat None): it is held to the strictest rules, never to none."""
+    a launch of its job (kind "launch", launch None): it is held to the strictest rules, never to none."""
     from swarm import enrolment
     from swarm.supervisor import ledger, runner
     sid = payload.get("session_id")
@@ -161,7 +161,7 @@ def seat_context(cfg: dict, board_key: str, payload: dict, resume=None, resume_l
         led = False          # a drive job whose ledger cannot be read
     if led is None:
         return None
-    ctx = Ctx(kind="seat", job=job, led=led or None, agent_key=agent_key)
+    ctx = Ctx(kind="launch", job=job, led=led or None, agent_key=agent_key)
     if not led or not marker:
         return ctx
     rid = m["resume"].get("restart_id")
@@ -169,8 +169,8 @@ def seat_context(cfg: dict, board_key: str, payload: dict, resume=None, resume_l
     if (isinstance(run, dict) and runner.run_problem(cfg, run, rid) is None and run.get("job") == job
             and isinstance(run.get("launch_id"), str) and sid in (run.get("session_id"), run.get("agent_key"))):
         intent = next((i for i in led.intents if i.launch_id == run["launch_id"]), None)
-        if intent is not None and intent.seat:
-            ctx.intent, ctx.seat = intent, intent.seat
+        if intent is not None and intent.launch:
+            ctx.intent, ctx.launch = intent, intent.launch
     return ctx
 
 
@@ -209,7 +209,7 @@ def requester_of_unfinished(board_key: str, sid) -> bool:
 
 def enrolled_context(board_key: str, payload: dict):
     """The Ctx of a subagent that joined a drive job by its tag (enrolment record, ledger): guarded like
-    any seat, with no role it could be relied on for."""
+    any launch, with no role it could be relied on for."""
     from swarm import enrolment
     agent = payload.get("agent_id")
     if not agent:
@@ -225,7 +225,7 @@ def enrolled_context(board_key: str, payload: dict):
 
 
 def drive_targets(board_key: str, ctx: Ctx) -> set[str]:
-    """The branch names no seat may push to: what the owner record names (target_branch / target_branches),
+    """The branch names no launch may push to: what the owner record names (target_branch / target_branches),
     the branches the ledger has integrated into, and, for the coding recipe (the default when the record says
     nothing), main and master. The artifact recipe has no target."""
     from swarm import enrolment
@@ -277,21 +277,21 @@ def head_branch(directory: str | None) -> str | None:
         return None
 
 
-# --- the role of a seat -----------------------------------------------------------------------------
+# --- the role of a launch -----------------------------------------------------------------------------
 
 def _open_board(cfg: dict):
     from swarm.board import open_board
     return open_board(cfg, init_timeout=HOOK_INIT_TIMEOUT)
 
 
-def seat_policy(cfg: dict, board_key: str, ctx: Ctx, board=None) -> Policy:
+def launch_policy(cfg: dict, board_key: str, ctx: Ctx, board=None) -> Policy:
     """Roles guide prompts. All launched agents have the same tool permissions."""
-    if ctx.seat is None or ctx.led is None:
+    if ctx.launch is None or ctx.led is None:
         return Policy(read_only=False, judge=False, lead=False, known=False)
     own = board is None
     try:
         board = board or _open_board(cfg)
-        row = board.get_launch(ctx.job, ctx.led.generation, ctx.seat)
+        row = board.get_launch(ctx.job, ctx.led.generation, ctx.launch)
         role = row.role if row else None
     except Exception:
         role = None
@@ -319,7 +319,7 @@ def _write_call(host, payload: dict, command: str) -> str | None:
     if host.tool_matches(tool, host.write_tools):
         return f"{tool} writes files"
     if tool == "Monitor":
-        return "Monitor runs commands outside the seat's limits"
+        return "Monitor runs commands outside the launch's limits"
     if isinstance(tool, str) and tool.startswith("mcp__") and not shellguard.mcp_read_allowed(tool):
         return f"the MCP tool {tool} is not on the read allowlist (get, list, search, read, ...)"
     if command:
@@ -334,7 +334,7 @@ _UNSET = object()
 
 
 def classify(cfg: dict, payload: dict, resume=None, resume_lookup=None):
-    """The Ctx of a session that belongs to a drive job: a seat (or a subagent of one), a subagent enrolled in
+    """The Ctx of a session that belongs to a drive job: a launch (or a subagent of one), a subagent enrolled in
     the job by its tag, or the job's requester main session. None for every other session, and for any host
     with no drive ledger (one directory check). Raises only on a bug: callers treat that as "unknown"."""
     sid = payload.get("session_id")
@@ -346,7 +346,7 @@ def classify(cfg: dict, payload: dict, resume=None, resume_lookup=None):
         job = requester_job(bk, sid)
         if job:
             return Ctx(kind="requester", job=job, led=None)
-    ctx = seat_context(cfg, bk, payload, resume, resume_lookup)
+    ctx = launch_context(cfg, bk, payload, resume, resume_lookup)
     if ctx is not None:
         return ctx
     if payload.get("agent_id"):
@@ -357,8 +357,8 @@ def classify(cfg: dict, payload: dict, resume=None, resume_lookup=None):
 def pre_tool(cfg: dict, payload: dict, host, *, resume=None, resume_lookup=None, ctx=_UNSET) -> str | None:
     """Why this tool call of a drive session is refused (the reason shown to the agent), None when it may
     go ahead. Runs before everything else a hook does, on every call: the join, the first call of a resumed
-    session and a seat whose job is not one of the session's bound markers are gated like any other. An
-    error in the decision of a known drive seat refuses the call (retry); in anything else it lets it
+    session and a launch whose job is not one of the session's bound markers are gated like any other. An
+    error in the decision of a known drive launch refuses the call (retry); in anything else it lets it
     through. Cheap first: no ledger on the host, no work. `ctx` is classify()'s answer when the caller has it."""
     tool, sid = payload.get("tool_name"), payload.get("session_id")
     if not isinstance(tool, str) or not isinstance(sid, str) or not sid:
@@ -391,25 +391,25 @@ def pre_tool(cfg: dict, payload: dict, host, *, resume=None, resume_lookup=None,
         write = _write_call(host, payload, command)
         if not (spawn or wants_verdict or write):
             return None
-        policy = seat_policy(cfg, bk, ctx) if ctx.kind == "seat" else Policy(True, False, False, known=False)
+        policy = launch_policy(cfg, bk, ctx) if ctx.kind == "launch" else Policy(True, False, False, known=False)
         if spawn and (policy.lead or policy.read_only):
-            who = "the lead seat" if policy.lead else "a read-only seat (judge or reviewer)"
+            who = "the lead launch" if policy.lead else "a read-only launch (judge or reviewer)"
             if not policy.known:
-                who = "a seat whose role could not be verified"
+                who = "a launch whose role could not be verified"
             return SPAWN_REFUSAL.format(who=who)
         if wants_verdict and not policy.judge:
-            return ("only the judge seat records a verdict: `swarm verdict` is refused for every other seat "
+            return ("only the judge launch records a verdict: `swarm verdict` is refused for every other launch "
                     "(say what you found on the board, `swarm post --to @judge`)")
         if write and policy.read_only:
             if not policy.known:
-                return (f"{write}: this seat's role could not be verified, so it may not write (retry in a "
-                        "moment; the supervisor re-authorizes a seat at each state change)")
-            return f"a read-only seat (judge or reviewer) may not write: {write}"
+                return (f"{write}: this launch's role could not be verified, so it may not write (retry in a "
+                        "moment; the supervisor re-authorizes a launch at each state change)")
+            return f"a read-only launch (judge or reviewer) may not write: {write}"
         return None
     except Exception as exc:
         from swarm.jobmarkers import _log_line
         _log_line("drive gate", str(payload.get("agent_id") or sid), f"{type(exc).__name__}: {exc}")
-        return ("the drive gate could not decide this call; retry it (a seat fails closed)") if known else None
+        return ("the drive gate could not decide this call; retry it (a launch fails closed)") if known else None
 
 
 def _branch_of(payload: dict, command: str):
@@ -598,7 +598,7 @@ class Refused(Exception):
 
 
 def default_model(cfg: dict, role: str) -> str | None:
-    """The model `swarm run` picks for `role` when `--model` is not given: the seat command's own
+    """The model `swarm run` picks for `role` when `--model` is not given: the launch command's own
     resolver (None when it cannot be asked: the hook then cannot confirm the row's model and writes no
     receipt)."""
     try:
@@ -635,7 +635,7 @@ def _build(cfg, bk, board, ctx, who: Policy | None, ns, rid: int, rev: int, payl
     led, job = ctx.led, ctx.job
     sub = ns.cmd
     requester = ctx.kind == "requester"
-    seat = ctx.kind == "seat"
+    launch = ctx.kind == "launch"
     lead = bool(who and who.lead)
 
     def need(ok: bool, what: str):
@@ -649,7 +649,7 @@ def _build(cfg, bk, board, ctx, who: Policy | None, ns, rid: int, rev: int, payl
             _activation_ok(board, ctx, payload)
         return "person", {"action": sub, "target": job}, argv
     if sub == "done":
-        need(seat and who is not None and who.known and not who.read_only, "swarm done")
+        need(launch and who is not None and who.known and not who.read_only, "swarm done")
         artifact = ns.artifact or (f"{ns.branch}@{ns.sha}" if ns.branch and ns.sha else None)
         if not artifact or not artifact.strip():
             raise Refused("a hand-off in a drive job names its artifact (--artifact REF)")
@@ -658,7 +658,7 @@ def _build(cfg, bk, board, ctx, who: Policy | None, ns, rid: int, rev: int, payl
         group, _, sha = artifact.partition("@")
         return "done", {"artifact": artifact, "sha": sha, "group": group}, argv
     if sub == "review":
-        need(seat and who is not None and who.known and not who.judge, "swarm review")
+        need(launch and who is not None and who.known and not who.judge, "swarm review")
         artifact = ns.artifact.strip()
         outcome = ns.outcome.lower()
         from swarm.drive_cli import review_ref
@@ -666,7 +666,7 @@ def _build(cfg, bk, board, ctx, who: Policy | None, ns, rid: int, rev: int, payl
                         author)
         return "review", {"group": artifact.partition("@")[0], "artifact": artifact, "outcome": outcome}, argv
     if sub == "verdict":
-        need(seat and who is not None and who.known and who.judge, "swarm verdict")
+        need(launch and who is not None and who.known and who.judge, "swarm verdict")
         return "verdict", _verdict_decision(board, ctx, ns, rid, author), argv
     if sub == "goal-ready":
         need(requester or lead, "swarm goal-ready")
@@ -677,24 +677,24 @@ def _build(cfg, bk, board, ctx, who: Policy | None, ns, rid: int, rev: int, payl
         _expect_message(board, job, rid, f"GOAL-READY {ns.candidate} req={digest}", None)
         return "goal_ready", {"generation": led.generation, "candidate": ns.candidate}, argv
     if sub == "land":
-        # The integrator seat's `swarm land`: its LAND-REQUEST post is what the driver executes (land.find_requests
-        # checks this receipt and that its seat is the integrator seat of the artifact's branch).
+        # The integrator launch's `swarm land`: its LAND-REQUEST post is what the driver executes (land.find_requests
+        # checks this receipt and that its launch is the integrator launch of the artifact's branch).
         if getattr(ns, "land_cmd", None):
             raise Refused("`land hosts` records nothing", log=False)
-        need(seat and who is not None and who.known and not who.read_only and bool(ctx.seat)
-             and ctx.seat.startswith("integrator-"), "swarm land")
+        need(launch and who is not None and who.known and not who.read_only and bool(ctx.launch)
+             and ctx.launch.startswith("integrator-"), "swarm land")
         from swarm import land
         m = _expect_message(board, job, rid, land.request_text((ns.artifact or "").strip()), author)
         return "post", {"to": m.to_agent, "body": m.message}, argv
     if sub == "post":
-        need((seat and who is not None) or requester, "swarm post")
+        need((launch and who is not None) or requester, "swarm post")
         if not ns.to:
-            raise Refused("an unaddressed post wakes no seat", log=False)
+            raise Refused("an unaddressed post wakes no launch", log=False)
         m = _expect_message(board, job, rid, " ".join(ns.message), author, ns.to if not ns.to.startswith("@") else None,
                             any_to=ns.to.startswith("@"))
         return "post", {"to": m.to_agent, "body": m.message}, argv
     if sub == "ask":
-        need(seat and who is not None, "swarm ask")
+        need(launch and who is not None, "swarm ask")
         b = board.blocker(rid)
         if b is None or b.kind != "question" or b.job != job or rev != 1:
             raise Refused(f"question {rid} is not the record the command made")
@@ -707,7 +707,7 @@ def _build(cfg, bk, board, ctx, who: Policy | None, ns, rid: int, rev: int, payl
         return "ask", {"question": b.reason, "until": drive_authz.canonical_until(b.until),
                        "default": b.default_value}, argv
     if sub == "answer":
-        need((seat and who is not None) or requester, "swarm answer")
+        need((launch and who is not None) or requester, "swarm answer")
         qid = int(str(ns.id).lstrip("Qq"))
         b = board.blocker(qid)
         if b is None or b.kind != "question" or b.job != job or rid != qid:
@@ -763,7 +763,7 @@ def post_tool(cfg: dict, payload: dict, host, *, resume=None, resume_lookup=None
     """PostToolUse of a Bash call that ran one control command in a drive job: writes the receipt the
     driver checks (receipts.write), then kicks the session drivers (their wake file). True when a receipt was written. Cheap
     prechecks first (the command mentions swarm and printed a record line), the board only after them.
-    Only a seat's own session or the requester's main session (never a subagent: a payload with an
+    Only a launch's own session or the requester's main session (never a subagent: a payload with an
     `agent_id`) gets a receipt, and only for the commands its authority covers. A record that disagrees
     with the submitted arguments, or a failed write, is logged and writes nothing."""
     command = host.shell_command(payload) or ""
@@ -787,9 +787,9 @@ def post_tool(cfg: dict, payload: dict, host, *, resume=None, resume_lookup=None
     try:
         ctx = None
         if not payload.get("agent_id") and getattr(ns, "job", None) and requester_context(bk, payload, ns.job):
-            ctx = None          # the job's requester: a planted marker must not make it a seat
+            ctx = None          # the job's requester: a planted marker must not make it a launch
         else:
-            ctx = seat_context(cfg, bk, payload, resume, resume_lookup)
+            ctx = launch_context(cfg, bk, payload, resume, resume_lookup)
         board = _open_board(cfg)
         with contextlib.closing(board):
             if ctx is None:
@@ -803,19 +803,19 @@ def post_tool(cfg: dict, payload: dict, host, *, resume=None, resume_lookup=None
             job_label = ctx.job
             who = None
             author = None
-            if ctx.kind == "seat":
-                if ctx.seat is None or ctx.intent is None or ctx.intent.state == "concluded":
+            if ctx.kind == "launch":
+                if ctx.launch is None or ctx.intent is None or ctx.intent.state == "concluded":
                     return False
-                who = seat_policy(cfg, bk, ctx, board)
+                who = launch_policy(cfg, bk, ctx, board)
                 author = board.active_agent_name(ctx.agent_key)
                 if author is None:
                     return False
             rkind, decision, argv = _build(cfg, bk, board, ctx, who, ns, rid, rev, payload, author)
-            action, attempt, seat = ((ctx.intent.action_id, ctx.intent.attempt, ctx.seat) if ctx.kind == "seat"
+            action, attempt, launch = ((ctx.intent.action_id, ctx.intent.attempt, ctx.launch) if ctx.kind == "launch"
                                      else (requester_action(ns), 0, None))
             r = receipts.Receipt(
                 board_key=bk, job=ctx.job, generation=ctx.led.generation, incarnation=ctx.led.incarnation,
-                action_id=action, attempt=attempt, seat=seat, kind=rkind, record_id=str(rid), rev=rev,
+                action_id=action, attempt=attempt, launch=launch, kind=rkind, record_id=str(rid), rev=rev,
                 content_sha=receipts.content_sha(rkind, decision), args_sha=receipts.args_sha(argv),
                 expires_at=time.time() + RECEIPT_HOURS * 3600)
     except Refused as why:
@@ -851,7 +851,7 @@ def requester_action(ns) -> str:
 # command, so it cannot tell the CLI who is calling while the command runs: the CLI's own ledger writes
 # (halt, unhalt, an ack's mark, a withdrawal, pins, a repair) need that before. A grant is the same kind of
 # host-private receipt, written by this PreToolUse hook from the same contexts (requester_context: the
-# requester's MAIN session; seat_context: the seat the host-private chain names). It is bound (record id) to
+# requester's MAIN session; launch_context: the launch the host-private chain names). It is bound (record id) to
 # args_sha of the submitted argv, the config path and the pid of the agent host process (claude/codex) the
 # call runs under, so only a process of that session's own tree can match it. It is written only when the
 # whole shell call is one swarm invocation that runs (optional `cd DIR &&` before it, pipes, redirections and
@@ -930,7 +930,7 @@ def _grant_calls(command: str) -> list:
 
 
 def _grant_owner(board_key: str, payload: dict, ns):
-    """(led or None, action_id, attempt, seat) of the caller this grant attests for `ns`, or None."""
+    """(led or None, action_id, attempt, launch) of the caller this grant attests for `ns`, or None."""
     from swarm import enrolment
     job = getattr(ns, "job", None)
     if not isinstance(job, str):
@@ -952,7 +952,7 @@ def _grant_owner(board_key: str, payload: dict, ns):
 
 def write_grants(cfg: dict, payload: dict, host, ctx=None, now=None) -> int:
     """Write a grant for each direct `swarm` control command (GRANT_SUBS) of this shell call whose caller is
-    the requester's main session of its job, or a seat the host-private chain resolves (`ctx`, classify()'s
+    the requester's main session of its job, or a launch the host-private chain resolves (`ctx`, classify()'s
     answer). Returns how many were written. Never for a subagent. Raises on an unsafe enrolled directory
     (the caller logs it; the CLI then finds no grant and refuses)."""
     if payload.get("agent_id") or not isinstance(payload.get("session_id"), str):
@@ -972,19 +972,19 @@ def write_grants(cfg: dict, payload: dict, host, ctx=None, now=None) -> int:
         if ns is None:
             continue
         owner = None
-        if ctx is not None and ctx.kind == "seat" and ctx.job == getattr(ns, "job", None) and ctx.led \
-                and ctx.seat and ctx.intent is not None:
-            owner = ctx.led, ctx.intent.action_id, ctx.intent.attempt, ctx.seat
+        if ctx is not None and ctx.kind == "launch" and ctx.job == getattr(ns, "job", None) and ctx.led \
+                and ctx.launch and ctx.intent is not None:
+            owner = ctx.led, ctx.intent.action_id, ctx.intent.attempt, ctx.launch
         else:
             owner = _grant_owner(bk, payload, ns)
         if owner is None:
             continue
-        led, action, attempt, seat = owner
+        led, action, attempt, launch = owner
         rid = grant_id(ns, person.host_pid())
         receipts.write(bk, receipts.Receipt(
             board_key=bk, job=ns.job, generation=led.generation if led else 1,
             incarnation=led.incarnation if led else receipts.GRANT_INCARNATION_NO_LEDGER,
-            action_id=action, attempt=attempt, seat=seat, kind="grant", record_id=rid, rev=1,
+            action_id=action, attempt=attempt, launch=launch, kind="grant", record_id=rid, rev=1,
             content_sha=receipts.content_sha("grant", {"argv_sha": rid}), args_sha=rid,
             expires_at=now + GRANT_SECONDS))
         n += 1
@@ -992,11 +992,11 @@ def write_grants(cfg: dict, payload: dict, host, ctx=None, now=None) -> int:
 
 
 def write_grant_argv(cfg: dict, argv: list[str], ctx, pid: int | None, now=None) -> str | None:
-    """A seat broker's grant (Task 20): the broker, outside the jail, attests that the seat `ctx` (resolved from
+    """A launch broker's grant (Task 20): the broker, outside the jail, attests that the launch `ctx` (resolved from
     its own launch record, as the hook would) submits exactly the brokered `argv` (leading `--config` included),
-    run under the seat's session process `pid`. The grant id, or None when `argv` is no grant command or `ctx`
-    is no resolved seat of its job."""
-    if not argv or not ctx or getattr(ctx, "kind", None) != "seat" or not ctx.led or not ctx.seat \
+    run under the launch's session process `pid`. The grant id, or None when `argv` is no grant command or `ctx`
+    is no resolved launch of its job."""
+    if not argv or not ctx or getattr(ctx, "kind", None) != "launch" or not ctx.led or not ctx.launch \
             or ctx.intent is None:
         return None
     ns = parse_swarm(list(argv))
@@ -1009,7 +1009,7 @@ def write_grant_argv(cfg: dict, argv: list[str], ctx, pid: int | None, now=None)
     led = ctx.led
     receipts.write(bk, receipts.Receipt(
         board_key=bk, job=ns.job, generation=led.generation, incarnation=led.incarnation,
-        action_id=ctx.intent.action_id, attempt=ctx.intent.attempt, seat=ctx.seat, kind="grant", record_id=rid,
+        action_id=ctx.intent.action_id, attempt=ctx.intent.attempt, launch=ctx.launch, kind="grant", record_id=rid,
         rev=1, content_sha=receipts.content_sha("grant", {"argv_sha": rid}), args_sha=rid,
         expires_at=now + GRANT_SECONDS))
     return rid
@@ -1041,7 +1041,7 @@ def control_request_receipt(cfg: dict, payload: dict, ns, rid: int, rev: int, *,
                             resume_lookup=None) -> bool:
     """The receipt of a CONTROL-REQUEST the command just posted (record kind control_request): the message
     `rid` must be exactly the request the submitted command makes (drive_control.request_text), and the caller
-    one this hook can name from host-private state, as for every receipt: the seat the marker, run file and
+    one this hook can name from host-private state, as for every receipt: the launch the marker, run file and
     ledger intent name, or the job's requester main session (for a repair of a ledger that does not read: the
     owner record's session). Never a subagent (post_tool returned before). The driver decides authority and
     applies the request (drive_control.apply). True when a receipt was written."""
@@ -1053,15 +1053,15 @@ def control_request_receipt(cfg: dict, payload: dict, ns, rid: int, rev: int, *,
         return False
     bk = store_key(cfg)
     try:
-        ctx = seat_context(cfg, bk, payload, resume, resume_lookup)
+        ctx = launch_context(cfg, bk, payload, resume, resume_lookup)
         owner = None
-        if ctx is not None and ctx.kind == "seat" and ctx.job == job and ctx.led and ctx.seat and ctx.intent:
-            owner = ctx.led, ctx.intent.action_id, ctx.intent.attempt, ctx.seat
+        if ctx is not None and ctx.kind == "launch" and ctx.job == job and ctx.led and ctx.launch and ctx.intent:
+            owner = ctx.led, ctx.intent.action_id, ctx.intent.attempt, ctx.launch
         else:
             owner = _grant_owner(bk, payload, ns)
         if owner is None:
             return False
-        led, action, attempt, seat = owner
+        led, action, attempt, launch = owner
         if (led is None) != (kind == "repair"):
             return False
         board = _open_board(cfg)
@@ -1074,7 +1074,7 @@ def control_request_receipt(cfg: dict, payload: dict, ns, rid: int, rev: int, *,
         r = receipts.Receipt(
             board_key=bk, job=job, generation=led.generation if led else 1,
             incarnation=led.incarnation if led else receipts.GRANT_INCARNATION_NO_LEDGER,
-            action_id=action, attempt=attempt, seat=seat, kind=drive_control.KIND, record_id=str(rid), rev=1,
+            action_id=action, attempt=attempt, launch=launch, kind=drive_control.KIND, record_id=str(rid), rev=1,
             content_sha=receipts.content_sha(drive_control.KIND, {"request": kind, "args_sha": sha}),
             args_sha=sha, expires_at=time.time() + RECEIPT_HOURS * 3600)
         drive_control.store_body(bk, job, rid, fields)   # the arguments first: a receipt never lacks them
@@ -1091,17 +1091,17 @@ def control_request_receipt(cfg: dict, payload: dict, ns, rid: int, rev: int, *,
 
 
 def is_drive_judge(cfg: dict, board, job: str, payload: dict, resume=None) -> bool:
-    """Whether the session of `payload` is the driver's judge seat of `job`: its host-private launch (the
-    resume marker and run file name the seat's intent) and the seat row's receipted role say "judge". A
+    """Whether the session of `payload` is the driver's judge launch of `job`: its host-private launch (the
+    resume marker and run file name the launch's intent) and the launch row's receipted role say "judge". A
     prompt tag, a board row or a `join --judge` never decide it (QA bug 4). Fails closed."""
     try:
         from swarm.board.autoinit import store_key
         from swarm.supervisor import drive_authz
         bk = store_key(cfg)
-        ctx = seat_context(cfg, bk, payload, resume=resume)
-        if ctx is None or ctx.led is None or not ctx.seat or ctx.job != job:
+        ctx = launch_context(cfg, bk, payload, resume=resume)
+        if ctx is None or ctx.led is None or not ctx.launch or ctx.job != job:
             return False
-        row = board.get_launch(job, ctx.led.generation, ctx.seat)
+        row = board.get_launch(job, ctx.led.generation, ctx.launch)
         return row is not None and driveroles.is_judge_role(row.role)
     except Exception:
         return False

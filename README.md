@@ -249,7 +249,7 @@ To remove what Swarm set up outside the plugin (launcher, venv, settings entries
 
 The engineering team uses `~/.config/swarm/team.toml` (or `$SWARM_TEAM_CONFIG`), separately
 from core configuration. `swarm team --job J --show` displays the effective team;
-`swarm activate ... --team product_manager,build_engineer` selects optional seats.
+`swarm activate ... --team product_manager,build_engineer` selects optional launches.
 See [team commands and CLI plugins](docs/REFERENCE.md#cli-plugins).
 
 All keys are in [config.example.toml](config.example.toml) and the

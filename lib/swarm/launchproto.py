@@ -1,18 +1,18 @@
-"""The typed request protocol between a jailed drive seat and its runner's broker (Task 20, round 2).
+"""The typed request protocol between a jailed drive launch and its runner's broker (Task 20, round 2).
 
-A seat never hands the broker an argv. Its `swarm` command (seatbroker_client, inside the jail) parses the
+A launch never hands the broker an argv. Its `swarm` command (launchbroker_client, inside the jail) parses the
 command line itself against SCHEMA and sends {"v": 2, "kind": "cli", "command": NAME, "fields": {...}}:
 only the commands in SCHEMA, only their fields, no global option (no --config, no plugin, no env). A field of
-type "file" is read INSIDE the jail by the seat side (size-capped) and sent as its content; the broker never
-opens a path a seat chose. Who the caller is (--as, --key, --session) is not a field: the seat side accepts
-and drops those options (seats were taught to pass them), and the broker injects the seat's own identity from
+type "file" is read INSIDE the jail by the launch side (size-capped) and sent as its content; the broker never
+opens a path a launch chose. Who the caller is (--as, --key, --session) is not a field: the launch side accepts
+and drops those options (launches were taught to pass them), and the broker injects the launch's own identity from
 its launch record (build_argv). The broker validates every request again (validate): unknown command, unknown
 field, wrong type or an identity-like field means refused.
 
 Hooks: {"v": 2, "kind": "hook", "event": EVENT, "payload": {...}}; the broker keeps only HOOK_FIELDS of the
 payload and sets session_id, transcript_path and cwd itself.
 
-Standard library only: the seat side loads this file by path in `python -I`."""
+Standard library only: the launch side loads this file by path in `python -I`."""
 from __future__ import annotations
 
 import argparse
@@ -31,9 +31,9 @@ IDENTITY = ("as", "key", "session", "name", "agent", "agent_key", "session_id", 
 #   "bool"    a flag; "list" free-text words (a positional, or one option value joined by spaces);
 #   "repeat"  a repeatable identifier option; ("choice", (...)) one of the values;
 #   "file"    a file read in the jail and sent as its content (verdict --details);
-#   "report"  a file sent as {"path": as typed, "content": its content}: the post names the path the seat typed,
+#   "report"  a file sent as {"path": as typed, "content": its content}: the post names the path the launch typed,
 #             the broker keeps the content (review --report);
-#   "paths"   files the BROKER reads from the seat's work tree, without following a link, and pins at the
+#   "paths"   files the BROKER reads from the launch's work tree, without following a link, and pins at the
 #             content it read (goal-ready --add-requirements: the pin is the path in the work tree).
 # option: the CLI option ("--job"), or None for a positional.
 # "id" says which identity the broker injects: "key" (--key <session>), "as" (--as <name>), or None.
@@ -99,10 +99,10 @@ HOOK_FIELDS = ("hook_event_name", "tool_name", "tool_input", "tool_response", "t
 
 
 class ProtocolError(ValueError):
-    """A request that is not one a seat may send."""
+    """A request that is not one a launch may send."""
 
 
-# --- the seat side ----------------------------------------------------------------------------------
+# --- the launch side ----------------------------------------------------------------------------------
 
 class _Parser(argparse.ArgumentParser):
     def error(self, message):
@@ -112,7 +112,7 @@ class _Parser(argparse.ArgumentParser):
 def _command_parser(command: str) -> _Parser:
     spec = SCHEMA[command]
     p = _Parser(prog=f"swarm {command}", allow_abbrev=False, add_help=False)
-    for opt in ("--as", "--key", "--session"):   # accepted and DROPPED: the broker injects who the seat is
+    for opt in ("--as", "--key", "--session"):   # accepted and DROPPED: the broker injects who the launch is
         p.add_argument(opt, dest="_drop" + opt[2:])
     for name, (typ, opt) in spec["fields"].items():
         kw = {}
@@ -134,7 +134,7 @@ def _command_parser(command: str) -> _Parser:
 
 
 def _read_file(path: str, cwd: str) -> str:
-    """A file named on the seat's command line, read here in the jail (size-capped), as text."""
+    """A file named on the launch's command line, read here in the jail (size-capped), as text."""
     full = os.path.join(cwd, os.path.expanduser(path))
     try:
         with open(full, "rb") as fh:
@@ -150,13 +150,13 @@ def _read_file(path: str, cwd: str) -> str:
 
 
 def parse_cli(argv: list[str], cwd: str, stdin=None) -> dict:
-    """The typed request for a seat's `swarm ARGV` (ProtocolError when it is not a seat command)."""
+    """The typed request for a launch's `swarm ARGV` (ProtocolError when it is not a launch command)."""
     if not argv:
         raise ProtocolError("no command")
     command = argv[0]
     rest = argv[1:]
     if command not in SCHEMA:
-        raise ProtocolError(f"`swarm {command}` is not a command a drive seat runs")
+        raise ProtocolError(f"`swarm {command}` is not a command a drive launch runs")
     ns = _command_parser(command).parse_args(rest)
     fields = {}
     for name, (typ, _opt) in SCHEMA[command]["fields"].items():
@@ -171,7 +171,7 @@ def parse_cli(argv: list[str], cwd: str, stdin=None) -> dict:
             v = [os.path.normpath(os.path.join(cwd, os.path.expanduser(x))) for x in v]
         fields[name] = v
     req = {"v": VERSION, "kind": "cli", "command": command, "fields": fields}
-    validate(req, OWN_JOB)   # a missing --job is the broker's to fill (the seat's own job)
+    validate(req, OWN_JOB)   # a missing --job is the broker's to fill (the launch's own job)
     return req
 
 
@@ -189,14 +189,14 @@ def _check_ident(name: str, v) -> None:
         raise ProtocolError(f"field {name}: an identifier may not start with '-' or hold control characters")
 
 
-OWN_JOB = object()   # parse_cli's `own_job`: the seat side does not know its job; the broker fills it in
+OWN_JOB = object()   # parse_cli's `own_job`: the launch side does not know its job; the broker fills it in
 
 
 def validate(req, own_job=None) -> tuple[str, dict]:
     """(command, fields) of a well-formed cli request; ProtocolError otherwise. Unknown, identity-like or
-    mistyped fields are refused, never ignored. `own_job` (the broker: the seat's job from its launch record)
-    fills a missing --job of a command that takes one (a seat's first `swarm done` must just work), and a --job
-    naming another job is refused. OWN_JOB (the seat side) only lets --job be missing."""
+    mistyped fields are refused, never ignored. `own_job` (the broker: the launch's job from its launch record)
+    fills a missing --job of a command that takes one (a launch's first `swarm done` must just work), and a --job
+    naming another job is refused. OWN_JOB (the launch side) only lets --job be missing."""
     if not isinstance(req, dict) or req.get("v") != VERSION or req.get("kind") != "cli":
         raise ProtocolError("not a v2 cli request")
     if set(req) - {"v", "kind", "command", "fields"}:
@@ -207,7 +207,7 @@ def validate(req, own_job=None) -> tuple[str, dict]:
     spec = SCHEMA[command]
     for name, v in fields.items():
         if (name in IDENTITY or name.lstrip("_") in IDENTITY) and not (command == "run" and name == "name"):
-            raise ProtocolError(f"field {name} names a caller: the broker sets who the seat is")
+            raise ProtocolError(f"field {name} names a caller: the broker sets who the launch is")
         if name not in spec["fields"]:
             raise ProtocolError(f"unknown field {name!r} for {command}")
         typ = spec["fields"][name][0]
@@ -244,7 +244,7 @@ def validate(req, own_job=None) -> tuple[str, dict]:
                 _check_ident("job", own_job)
                 fields["job"] = own_job
         elif own_job is not OWN_JOB and fields["job"] != own_job:
-            raise ProtocolError(f"--job {fields['job']} is not this seat's job: a seat runs its own job's commands")
+            raise ProtocolError(f"--job {fields['job']} is not this launch's job: a launch runs its own job's commands")
     one_of = spec.get("one_of")
     if one_of and sum(1 for f in one_of if f in fields) != 1:
         raise ProtocolError(f"give exactly one of {', '.join('--' + f.replace('_', '-') for f in one_of)}")
@@ -257,7 +257,7 @@ def validate(req, own_job=None) -> tuple[str, dict]:
 def build_argv(command: str, fields: dict, *, key: str | None, name: str | None, file_path,
                report=None, requirement=None) -> list[str]:
     """The CLI argv the broker runs for a validated request: every option as ONE `--opt=value` argument (argparse
-    never reads a value as an option), then the seat's identity, then positionals after "--". `file_path(content)`
+    never reads a value as an option), then the launch's identity, then positionals after "--". `file_path(content)`
     stores a file field's content where only the supervisor can write and returns that path; `report(path,
     content)` and `requirement(path)` give the arguments of a report and of each requirement (the broker's)."""
     spec = SCHEMA[command]
@@ -290,11 +290,11 @@ def build_argv(command: str, fields: dict, *, key: str | None, name: str | None,
             argv.append(f"{opt}={v}")
     if spec["id"] == "key":
         if not key:
-            raise ProtocolError("the seat's session is not known yet")
+            raise ProtocolError("the launch's session is not known yet")
         argv.append(f"--key={key}")
     elif spec["id"] == "as":
         if not name:
-            raise ProtocolError("the seat's name is not known")
+            raise ProtocolError("the launch's name is not known")
         argv.append(f"--as={name}")
     if positional:
         argv += ["--", *positional]

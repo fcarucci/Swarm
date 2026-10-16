@@ -589,7 +589,7 @@ class SymlinkSwap(PushCase):
         evil = os.path.join(evil_dir, "d.git")
         subprocess.run(["git", "clone", "-q", "--bare", self.remote, evil], check=True)
         git(evil, "update-ref", "refs/heads/main", self.tip)       # evil's main differs from good's
-        link = os.path.join(self.root, "seat-link")
+        link = os.path.join(self.root, "launch-link")
         os.symlink(good_dir, link)
         with mock.patch.dict(os.environ, {k: v for k, v in os.environ.items() if k != mirror.TEST_MARKER}, clear=True):
             m = Mirror(os.path.join(link, "d.git"), {"kind": "none"})

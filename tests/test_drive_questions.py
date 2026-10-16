@@ -1,6 +1,6 @@
-"""Per-seat questions in drive jobs (spec 3.10, Task 12): the plugin's drive defaults and the goal
-job --default rule, the core seat/generation binding, the generic sweep's skip of drive questions
-([RR3]), and the supervisor passes' per-seat gate (stuck, candidates, orphans)."""
+"""Per-launch questions in drive jobs (spec 3.10, Task 12): the plugin's drive defaults and the goal
+job --default rule, the core launch/generation binding, the generic sweep's skip of drive questions
+([RR3]), and the supervisor passes' per-launch gate (stuck, candidates, orphans)."""
 from __future__ import annotations
 
 import datetime as dt
@@ -17,7 +17,7 @@ from support import SANDBOX, ROOT, add_backend_variants, drive_backends, home_en
 from swarm import plugins
 from swarm.board import STUCK_PREFIX
 from swarm.board.autoinit import store_key
-from swarm.board.blockers import open_question_seats
+from swarm.board.blockers import open_question_launches
 from swarm.supervisor import command, ledger, orphans, stuck
 from swarm.supervisor import settings as sup_settings
 
@@ -86,7 +86,7 @@ class PluginDriveQuestions(QuestionEnv):
         q = self.ask(job="K", actor=self.kasker)
         self.assertIsNone(q.default_value)
         self.assertIsNone(q.until)
-        self.assertIsNone(q.seat)
+        self.assertIsNone(q.launch)
 
     def test_drive_question_expires_after_question_expiry_by_default(self):
         q = self.ask(default="postgres")
@@ -102,27 +102,27 @@ class PluginDriveQuestions(QuestionEnv):
         q = self.ask(default="postgres", expires="2h")
         self.assertAlmostEqual(self.remaining(q), 2 * 3600, delta=60)
 
-    def test_drive_question_binds_the_asking_seat_and_blocks_it_by_default(self):
+    def test_drive_question_binds_the_asking_launch_and_blocks_it_by_default(self):
         q = self.ask(default="postgres")
         blocker = self.b.blocker(q.id)
-        self.assertEqual(blocker.seat, self.a)
+        self.assertEqual(blocker.launch, self.a)
         self.assertIsNone(blocker.generation, "no ledger on this host: no generation")
         self.assertEqual(self.p.question_data(self.ctx, self.b, q)["blocks"], self.a)
 
-    def test_explicit_blocks_is_kept_and_the_seat_is_still_the_asker(self):
+    def test_explicit_blocks_is_kept_and_the_launch_is_still_the_asker(self):
         q = self.ask(default="postgres", blocks="rendering")
         self.assertEqual(self.p.question_data(self.ctx, self.b, q)["blocks"], "rendering")
-        self.assertEqual(self.b.blocker(q.id).seat, self.a)
+        self.assertEqual(self.b.blocker(q.id).launch, self.a)
 
     def test_drive_question_records_the_ledger_generation(self):
         self.create_ledger("J")
         q = self.ask(default="postgres")
         self.assertEqual(self.b.blocker(q.id).generation, 1)
 
-    def test_non_drive_question_is_not_bound_to_a_seat(self):
+    def test_non_drive_question_is_not_bound_to_a_launch(self):
         q = self.ask(job="K", actor=self.kasker)
         blocker = self.b.blocker(q.id)
-        self.assertIsNone(blocker.seat)
+        self.assertIsNone(blocker.launch)
         self.assertIsNone(blocker.generation)
         self.assertIsNone(self.p.question_data(self.ctx, self.b, q).get("blocks"))
 
@@ -137,14 +137,14 @@ class PluginDriveQuestions(QuestionEnv):
         self.b.expire_blockers(self.b.now() + 2 * HOUR)
         self.assertEqual(self.b.blocker(q.id).state, "expired")
 
-    def test_open_question_seats_is_the_per_seat_gate(self):
+    def test_open_question_launches_is_the_per_launch_gate(self):
         q1 = self.ask(default="postgres", actor=self.a)
         self.ask(default="redis", actor=self.bn)
-        self.assertEqual(open_question_seats(self.b, "J", None), {self.a, self.bn})
+        self.assertEqual(open_question_launches(self.b, "J", None), {self.a, self.bn})
         self.p.answer_question(self.ctx, self.b, q1.id, "human", text="postgres")
-        self.assertEqual(open_question_seats(self.b, "J", None), {self.bn})
-        self.assertEqual(open_question_seats(self.b, "J", 2), set(), "another generation holds nothing")
-        self.assertEqual(open_question_seats(self.b, "K", None), set(), "job-scoped")
+        self.assertEqual(open_question_launches(self.b, "J", None), {self.bn})
+        self.assertEqual(open_question_launches(self.b, "J", 2), set(), "another generation holds nothing")
+        self.assertEqual(open_question_launches(self.b, "K", None), set(), "job-scoped")
 
 
 class FakeBoard:
@@ -193,8 +193,8 @@ def drive_js(**kw):
     return NS(**{**base, **kw})
 
 
-def question(seat, generation=None):
-    return NS(kind="question", seat=seat, generation=generation)
+def question(launch, generation=None):
+    return NS(kind="question", launch=launch, generation=generation)
 
 
 def agent(name, key, *, ended=None, left=None):
@@ -210,7 +210,7 @@ class GateDriveQuestions(QuestionEnv):
         self.b.post("K", self.kasker, "ok?", "human")
         self.assertTrue(orphans.human_question(self.b, self.b.job_status("K"), self.h.cfg))
 
-    def test_quiet_seat_is_silent_not_waiting_for_drive(self):
+    def test_quiet_launch_is_silent_not_waiting_for_drive(self):
         bcfg, sup = {"dead_minutes": 30}, {"silent_minutes": 20}
         a = NS(name="eng-a", ended_at=None, status="idle", current_tool=None,
                last_contact_at=NOW - 25 * dt.timedelta(minutes=1), last_post_at=None)
@@ -218,7 +218,7 @@ class GateDriveQuestions(QuestionEnv):
         self.assertIsNone(stuck.stuck_reason(a, js, NOW, bcfg, sup))
         self.assertEqual(stuck.stuck_reason(a, js, NOW, bcfg, sup, gate=frozenset()), "silent")
 
-    def test_candidates_hold_only_the_blocked_seat(self):
+    def test_candidates_hold_only_the_blocked_launch(self):
         js = drive_js()
         rows = [agent("eng-a", "ka", ended=NOW - HOUR, left=STUCK_PREFIX + "dead"),
                 agent("eng-b", "kb", ended=NOW - HOUR, left=STUCK_PREFIX + "dead")]
@@ -235,7 +235,7 @@ class GateDriveQuestions(QuestionEnv):
             self.assertEqual(command.candidates(plain, self.h.cfg, sup, now=NOW), [],
                              "a plain job waits on its job-level wait, as before")
 
-    def test_invalid_holds_only_the_blocked_seat(self):
+    def test_invalid_holds_only_the_blocked_launch(self):
         js = drive_js()
         rows = [agent("eng-a", "ka", ended=NOW - HOUR, left=STUCK_PREFIX + "dead"),
                 agent("eng-b", "kb", ended=NOW - HOUR, left=STUCK_PREFIX + "dead")]
@@ -263,7 +263,7 @@ class GateDriveQuestions(QuestionEnv):
         self.assertIsNotNone(gate, "a bad ledger must classify the job as a drive job")
         self.assertIn("lead", gate)
 
-    def test_bad_ledger_holds_the_asking_seat_and_the_coordinator(self):
+    def test_bad_ledger_holds_the_asking_launch_and_the_coordinator(self):
         # Real questions carry the ledger's generation (1+). An unreadable ledger must still hold them.
         self.create_ledger("J")
         q = self.ask(default="postgres")
@@ -272,7 +272,7 @@ class GateDriveQuestions(QuestionEnv):
         gate = orphans.drive_gate(self.b, self.h.cfg, "J")
         self.assertIn(self.a, gate)
         self.assertIn("lead", gate)
-        self.assertNotIn(self.bn, gate, "a seat with no open question is not held")
+        self.assertNotIn(self.bn, gate, "a launch with no open question is not held")
         rows = [agent("eng-a", "ka", ended=NOW - HOUR, left=STUCK_PREFIX + "dead"),
                 agent("eng-b", "kb", ended=NOW - HOUR, left=STUCK_PREFIX + "dead")]
         held = FakeBoard(drive_js(), rows, [question("eng-a", generation=1)], {"drive.enabled": "1"})
@@ -292,9 +292,9 @@ class GateDriveQuestions(QuestionEnv):
         self.assertFalse(os.path.lexists(sup_settings.private_dir()),
                          "a read must not create the private drive directory")
 
-    def test_wait_blocker_with_a_seat_is_not_a_question(self):
-        self.b.open_blocker("J", "wait", "external", "waiting on the lab", seat=self.a)
-        self.assertEqual(open_question_seats(self.b, "J", None), set())
+    def test_wait_blocker_with_a_launch_is_not_a_question(self):
+        self.b.open_blocker("J", "wait", "external", "waiting on the lab", launch=self.a)
+        self.assertEqual(open_question_launches(self.b, "J", None), set())
         self.assertEqual(orphans.drive_gate(self.b, self.h.cfg, "J"), frozenset())
 
     def test_drive_job_is_not_a_generic_orphan_and_plain_job_is_gated_by_its_wait(self):
@@ -308,24 +308,24 @@ class GateDriveQuestions(QuestionEnv):
             self.assertFalse(orphans.eligible(held, self.h.cfg, js, sup, NOW))
             free = FakeBoard(js, rows, [question("eng-a")], {"drive.enabled": "1"})
             # (8b ruling: the generic orphan pass never restarts a drive job's coordinator, whatever its
-            # seats' questions say; the driver restarts its own seats)
+            # launches' questions say; the driver restarts its own launches)
             self.assertFalse(orphans.eligible(free, self.h.cfg, js, sup, NOW))
             plain = FakeBoard(js, rows, [question("lead")], {})
             self.assertTrue(orphans.eligible(plain, self.h.cfg, js, sup, NOW),
-                            "a plain job's gate is the job-level wait, not a seat's question")
+                            "a plain job's gate is the job-level wait, not a launch's question")
 
 
 class PersonAddressee(QuestionEnv):
-    """A drive seat escalates to the person behind the job (QA live-unreachable, 12:31:18): `--to owner`, a
+    """A drive launch escalates to the person behind the job (QA live-unreachable, 12:31:18): `--to owner`, a
     `[board] owner_names` name or the job's creator is an addressee, by the rule human_question reads."""
 
-    def test_seat_question_to_owner_is_opened_with_the_drive_default_and_expiry(self):
+    def test_launch_question_to_owner_is_opened_with_the_drive_default_and_expiry(self):
         q = self.ask(to="owner", default="unreachable")
         self.assertEqual(q.waiting_on, "owner")
-        self.assertEqual(self.b.blocker(q.id).seat, self.a)
+        self.assertEqual(self.b.blocker(q.id).launch, self.a)
         self.assertAlmostEqual(self.remaining(q), 4 * 3600, delta=60)
 
-    def test_seat_question_to_owner_still_needs_a_default_in_a_goal_job(self):
+    def test_launch_question_to_owner_still_needs_a_default_in_a_goal_job(self):
         with self.assertRaisesRegex(ValueError, "default"):
             self.ask(to="owner", default=None)
         self.assertEqual(self.b.blockers("J"), [])
@@ -352,14 +352,14 @@ class PersonAddressee(QuestionEnv):
         self.assertTrue(self.p.orchestrator_lines(self.ctx, "J"))
         self.assertEqual(self.p.answer_question(self.ctx, self.b, q.id, "human", text="rule it").state, "resolved")
 
-    def test_seat_asks_by_its_own_key(self):
+    def test_launch_asks_by_its_own_key(self):
         args = NS(job="J", key="eng-a", to="owner", text=["Rule", "it?"], options=None,
                   default="unreachable", expires=None, blocks=None)
         with mock.patch.object(self.ctx, "open_board", return_value=_NoClose(self.b)), \
                 mock.patch("swarm.drive_cli.drive_record"):
             self.p.run_ask(self.ctx, args)
         (q,) = [b for b in self.b.blockers("J") if b.kind == "question"]
-        self.assertEqual((q.created_by, q.waiting_on, q.seat), (self.a, "owner", self.a))
+        self.assertEqual((q.created_by, q.waiting_on, q.launch), (self.a, "owner", self.a))
 
     def test_human_question_reads_the_same_person_names(self):
         self.b.allocate_name("k-other", "K", role="engineer")

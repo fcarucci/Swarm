@@ -155,7 +155,7 @@ class BoardLevelSkip(SkipBase):
         self.activate("K")
         with self.board() as b:
             q = b.open_blocker("K", "question", "human", "which way?", until=b.now() + dt.timedelta(minutes=1),
-                               default_value="left", created_by="a", seat="a", generation=1)
+                               default_value="left", created_by="a", launch="a", generation=1)
         self.claim("K")
         later = dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)
         with self.board() as b:
@@ -170,7 +170,7 @@ class BoardLevelSkip(SkipBase):
         self.activate("K")
         with self.board() as b:
             q = b.open_blocker("K", "question", "human", "which way?", until=b.now() + dt.timedelta(minutes=1),
-                               default_value="left", created_by="a", seat="a", generation=1)
+                               default_value="left", created_by="a", launch="a", generation=1)
             b.drive_ledger = lambda job: job == "K"
             b.expire_blockers(dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1))
             self.assertEqual(b.blocker(q.id).state, "open")

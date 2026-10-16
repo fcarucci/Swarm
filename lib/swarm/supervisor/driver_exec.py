@@ -1,8 +1,8 @@
 """Execution half of the job driver (spec 3.2, 3.4, 4.5; plan Task 8a): turn one `launch` action of
-`driver_model.next_actions` into a running seat session, and keep the host's books straight afterwards.
+`driver_model.next_actions` into a running launch session, and keep the host's books straight afterwards.
 
     execute()    steps 1a-4 of the one authoritative protocol (4.5): write-ahead intent (fsynced),
-                 `claim_drive_launch` (one transaction: seat CAS, budget, caps, locks, restart row),
+                 `claim_drive_launch` (one transaction: launch CAS, budget, caps, locks, restart row),
                  run file, resume marker, kill-switch recheck, `runner.start`.
     reconcile()  at the start of a pass: ledger <-> board <-> local run evidence (4.5 and [F7]).
     settle_progress() / note_ruling_due()
@@ -13,9 +13,9 @@ The ledger (host-private) is authoritative for budgets and attempts; a board row
 its launch_id matches a ledger intent. The runner's `finish()` concludes an intent with the cost it
 read (runner.py); this module concludes the ones the runner could not.
 
-Seat names of driver-owned seats: `judge`, `goal-judge`, `ruling-judge`, `reviewer-<slug>-<hash8>`,
-`integrator-<slug>-<hash8>` (a group is a branch name, and a seat name may hold only a-z 0-9 _ - ~, so
-`reviewer:<group>` of the plan cannot be stored; seat_name() is the one place that spells them).
+Launch names of driver-owned launches: `judge`, `goal-judge`, `ruling-judge`, `reviewer-<slug>-<hash8>`,
+`integrator-<slug>-<hash8>` (a group is a branch name, and a launch name may hold only a-z 0-9 _ - ~, so
+`reviewer:<group>` of the plan cannot be stored; launch_name() is the one place that spells them).
 """
 from __future__ import annotations
 
@@ -40,13 +40,13 @@ from swarm.supervisor.settings import log
 LAUNCH_GRACE = 90.0          # seconds a claim may have no run file before it is concluded (runner.LAUNCH_GRACE)
 LEDGER_TRIES = 5
 LOCK_SLACK_MINUTES = 15      # a launch's drive locks outlive its wall clock by this
-DRIVER_SEATS = ("judge", "goal-judge", "ruling-judge", "learner")
+DRIVER_LAUNCHES = ("judge", "goal-judge", "ruling-judge", "learner")
 # `[drive.models]` shipped defaults (plan Global Constraints, [P1]); 6a's model table overrides them.
 DEFAULT_MODELS = {"engineer": "haiku", "worker": "haiku", "integrator": "haiku", "reviewer": "sonnet",
                   "qa": "sonnet", "judge": "opus", "lead": "opus", "security": "opus"}
 _SLUG = re.compile(r"[^a-z0-9_-]+")
-TMP_ROOTS = ("/tmp", "/dev/shm")   # seat workdirs under these are refused (host RAM, swept; Global Constraints)
-# A resume handle goes into the argv of the seat's CLI: a UUID (Claude sessions and Codex threads), or a
+TMP_ROOTS = ("/tmp", "/dev/shm")   # launch workdirs under these are refused (host RAM, swept; Global Constraints)
+# A resume handle goes into the argv of the launch's CLI: a UUID (Claude sessions and Codex threads), or a
 # plain token that cannot start with "-" and holds no "=" or other option syntax.
 _RESUME_HANDLE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
                             r"|[A-Za-z0-9][A-Za-z0-9_.]{7,79}")
@@ -85,10 +85,10 @@ def mutate(led, fn) -> None:
     raise ledger.LedgerConflict(f"job {led.job!r}: the ledger kept changing")
 
 
-def seat_name(kind: str, group: str | None = None) -> str:
-    """The deterministic seat name of a driver-owned seat: `judge`, `goal-judge`, `ruling-judge`, or
+def launch_name(kind: str, group: str | None = None) -> str:
+    """The deterministic launch name of a driver-owned launch: `judge`, `goal-judge`, `ruling-judge`, or
     `reviewer`/`integrator` + a slug of the artifact group + 8 hex digits of its hash."""
-    if kind in DRIVER_SEATS:
+    if kind in DRIVER_LAUNCHES:
         return kind
     slug = _SLUG.sub("-", (group or "").lower()).strip("-")[:30] or "group"
     return f"{kind}-{slug}-{hashlib.sha256((group or '').encode()).hexdigest()[:8]}"
@@ -99,8 +99,8 @@ def _action_group(action) -> str | None:
     return parts[3] if len(parts) > 3 and parts[3] != "-" else None
 
 
-def _driver_seat(action) -> tuple[str, str] | None:
-    """(seat name, role) of the driver-owned seat an action with no seat runs on, or None."""
+def _driver_launch(action) -> tuple[str, str] | None:
+    """(launch name, role) of the driver-owned launch an action with no launch runs on, or None."""
     kind, group = action.prompt_kind, _action_group(action)
     if kind == "learn":
         return "learner", "learner"
@@ -111,9 +111,9 @@ def _driver_seat(action) -> tuple[str, str] | None:
     if kind == "judge":
         return "judge", "judge"
     if kind == "review":
-        return seat_name("reviewer", group), "reviewer"
+        return launch_name("reviewer", group), "reviewer"
     if kind == "integrate":
-        return seat_name("integrator", group), "integrator"
+        return launch_name("integrator", group), "integrator"
     return None
 
 
@@ -160,7 +160,7 @@ def _models(cfg: dict, led) -> dict:
 
 
 def _driver_fields(cfg: dict, led, role: str) -> dict | None:
-    """The fields of a driver-owned seat (judge, reviewer, integrator): the owner record decides."""
+    """The fields of a driver-owned launch (judge, reviewer, integrator): the owner record decides."""
     owner = _owner(led)
     if owner is None:
         return None
@@ -175,14 +175,14 @@ def _driver_fields(cfg: dict, led, role: str) -> dict | None:
             "brief_path": brief}
 
 
-def materialize_seat(board, led, action, cfg: dict, now):
+def materialize_launch(board, led, action, cfg: dict, now):
     """Find a queued launch; new pipeline/wake triggers can re-queue successful names."""
-    if action.seat is not None:
-        row = board.get_launch(led.job, led.generation, action.seat)
-        if row is not None and row.state == "done" and action.prompt_kind != "seat":
+    if action.launch is not None:
+        row = board.get_launch(led.job, led.generation, action.launch)
+        if row is not None and row.state == "done" and action.prompt_kind != "launch":
             return _queue_existing(board, row)
         return row
-    spec = _driver_seat(action)
+    spec = _driver_launch(action)
     if spec is None:
         return None
     name, role = spec
@@ -216,7 +216,7 @@ def _queue_existing(board, row):
 
 def _reservation(d: dict, led, ruling: bool, now=None) -> tuple[float, float] | None:
     """(usd, minutes) to reserve for one launch, or None when the budget does not allow it (spec 4.1):
-    seats leave the ruling reserve alone, a ruling draws on it."""
+    launches leave the ruling reserve alone, a ruling draws on it."""
     if now is not None and led.activated_at:
         activated = dt.datetime.fromisoformat(led.activated_at)
         if now - activated >= dt.timedelta(hours=d["max_wall_hours"]):
@@ -231,7 +231,7 @@ def _reservation(d: dict, led, ruling: bool, now=None) -> tuple[float, float] | 
     return usd, float(d["max_session_minutes"])
 
 
-def _locks(seat) -> tuple[list[str], dict]:
+def _locks(launch) -> tuple[list[str], dict]:
     """Agents may share a workdir. Git coordination belongs to the agents."""
     return [], {}
 
@@ -240,13 +240,13 @@ def _locks(seat) -> tuple[list[str], dict]:
 
 UNCOUNTED = ("outage", "lost", "cancelled-before-start")        # attempts that do not count toward max_attempts
 MAX_EVENTS_SHOWN = 50                                 # event ids one launch shows (and later acknowledges), oldest first
-EVACK = "evack:"                                      # evack:<seat>:<event id> = 1: that event was shown and answered
+EVACK = "evack:"                                      # evack:<launch>:<event id> = 1: that event was shown and answered
 ACK_OUTCOMES = ("completed", "max_turns", "timeout")   # [F4]: the session completed at least one turn
 
 
 def _conclude(led, launch_id: str, outcome: str, success: bool, charged: float) -> None:
     """Conclude an open intent (once) and settle its wake watermarks: the ids the launch was started
-    with become the seat's acknowledged `msg:<seat>`/`event:<seat>` marks when its session completed a
+    with become the launch's acknowledged `msg:<launch>`/`event:<launch>` marks when its session completed a
     turn ([F4]); either way the pending marks of the launch are dropped."""
     def apply(l):
         for i in l.intents:
@@ -254,16 +254,16 @@ def _conclude(led, launch_id: str, outcome: str, success: bool, charged: float) 
                 continue
             i.state, i.outcome, i.success, i.charged_usd = "concluded", outcome, success, charged
             pending = l.watermarks.pop(f"launch-msg:{launch_id}", None)
-            if pending is not None and outcome in ACK_OUTCOMES and i.seat:
-                key = f"msg:{i.seat}"
+            if pending is not None and outcome in ACK_OUTCOMES and i.launch:
+                key = f"msg:{i.launch}"
                 l.watermarks[key] = max(l.watermarks.get(key, 0), pending)
-            # events are acknowledged one by one (`evack:<seat>:<id>`), never as a high-water mark: one event
+            # events are acknowledged one by one (`evack:<launch>:<id>`), never as a high-water mark: one event
             # with a far id would otherwise hide every later one
             shown = [k for k in l.watermarks if k.startswith(f"launch-ev:{launch_id}:")]
             for k in shown:
                 eid = l.watermarks.pop(k)
-                if outcome in ACK_OUTCOMES and i.seat:
-                    l.watermarks[f"{EVACK}{i.seat}:{eid}"] = 1
+                if outcome in ACK_OUTCOMES and i.launch:
+                    l.watermarks[f"{EVACK}{i.launch}:{eid}"] = 1
     mutate(led, apply)
 
 
@@ -314,33 +314,33 @@ def _unlink_run(run: dict) -> None:
         privfs.unlink(d, runner.run_file(run["restart_id"], run["board"]).name)
 
 
-def _idle_seat(board, led, name: str, outcome: str, now, **fields) -> None:
+def _idle_launch(board, led, name: str, outcome: str, now, **fields) -> None:
     """Settle once. A re-queue supersedes a prior attempt's settlement."""
-    seat = board.get_launch(led.job, led.generation, name)
-    if seat is None or seat.state != "running":
+    launch = board.get_launch(led.job, led.generation, name)
+    if launch is None or launch.state != "running":
         return
     failed = outcome != "completed"
     try:
-        moved = board.set_launch_state(seat.id, seat.revision, "failed" if failed else "done", job=led.job,
+        moved = board.set_launch_state(launch.id, launch.revision, "failed" if failed else "done", job=led.job,
                                        last_outcome=outcome, **fields)
     except ValueError:
         return
     if moved is not None and failed:
-        board.post(led.job, "swarm driver", f"launch {name} failed: {outcome}", to=seat.queued_by)
-        board.post_event(led.job, "launch-failed", f"{seat.launch_id}:{seat.attempts}",
-                         f"launch {name} failed: {outcome}", to=seat.queued_by)
+        board.post(led.job, "swarm driver", f"launch {name} failed: {outcome}", to=launch.queued_by)
+        board.post_event(led.job, "launch-failed", f"{launch.launch_id}:{launch.attempts}",
+                         f"launch {name} failed: {outcome}", to=launch.queued_by)
 
 
-def _check_resumable(seat) -> str | None:
-    """The session handle to resume, for a seat that has run before and is not driver-owned. The handle
+def _check_resumable(launch) -> str | None:
+    """The session handle to resume, for a launch that has run before and is not driver-owned. The handle
     came through the board, so it must look like a session id (never an option for the CLI): otherwise
-    the seat starts a fresh session."""
-    if not seat.session_id:
+    the launch starts a fresh session."""
+    if not launch.session_id:
         return None
-    if not valid_resume_handle(seat.session_id):
-        log(f"seat {seat.name}: the session handle is not a session id; starting fresh")
+    if not valid_resume_handle(launch.session_id):
+        log(f"launch {launch.name}: the session handle is not a session id; starting fresh")
         return None
-    return seat.session_id
+    return launch.session_id
 
 
 def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str | None = None,
@@ -350,7 +350,7 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
     kill switch went off). An exception from the runner's start propagates after the attempt is
     concluded `failed`."""
     from swarm.board.autoinit import store_key
-    from swarm.supervisor import command, launch, markers, runner
+    from swarm.supervisor import command, launch as launcher, markers, runner
     if action.kind != "launch" or not action.action_id.startswith(f"gen{led.generation}|"):
         return None
     if led.state != "active":
@@ -362,44 +362,44 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
     limit = d["ruling_attempts"] if action.ruling else d["max_attempts"]
     if sum(1 for i in mine if i.outcome not in UNCOUNTED) >= limit:
         return None
-    seat = materialize_seat(board, led, action, cfg, now)
-    if seat is None or seat.state not in ("queued",):
+    launch = materialize_launch(board, led, action, cfg, now)
+    if launch is None or launch.state not in ("queued",):
         return None
     reserve = _reservation(d, led, action.ruling, now)
     if reserve is None:
         return None
     reserve_usd, reserve_minutes = reserve
-    owned = action.seat is None
-    resume = None if owned else _check_resumable(seat)
-    model = seat.model or _models(cfg, led).get(seat.role) or launch.replacement_model(cfg, seat.harness, seat.role, None)
-    text = prompt if prompt is not None else _render_prompt(board, cfg, led, action, seat)
-    spec = launch.spec_for(cfg, seat.harness, prompt=text, workdir=seat.workdir, model=model,
-                           minutes=reserve_minutes, budget_usd=reserve_usd, read_only=read_only_role(seat.role),
+    owned = action.launch is None
+    resume = None if owned else _check_resumable(launch)
+    model = launch.model or _models(cfg, led).get(launch.role) or launcher.replacement_model(cfg, launch.harness, launch.role, None)
+    text = prompt if prompt is not None else _render_prompt(board, cfg, led, action, launch)
+    spec = launcher.spec_for(cfg, launch.harness, prompt=text, workdir=launch.workdir, model=model,
+                           minutes=reserve_minutes, budget_usd=reserve_usd, read_only=read_only_role(launch.role),
                            resume=resume, drive=True)
-    lock_keys, lock_paths = _locks(seat)
-    marks = _board_marks(board, led, seat, now)
+    lock_keys, lock_paths = _locks(launch)
+    marks = _board_marks(board, led, launch, now)
     launch_id, attempt = new_launch_id(now), max((i.attempt for i in mine), default=0) + 1
     barrier.hit("before_claim")
     # 1a. write-ahead intent, fsynced (ledger.save), before anything reaches the board
     mutate(led, lambda l: l.intents.append(ledger.Intent(
-        launch_id=launch_id, action_id=action.action_id, attempt=attempt, seat=seat.name,
+        launch_id=launch_id, action_id=action.action_id, attempt=attempt, launch=launch.name,
         reserved_usd=reserve_usd, reserved_minutes=reserve_minutes, locks=list(lock_keys), state="claiming")))
     barrier.hit("after_intent_before_claim")
     old = f"launch:{launch_id}"
     try:
         try:
-            name = board.allocate_name(old, led.job, seat.role)
+            name = board.allocate_name(old, led.job, launch.role)
         except JobPaused:                # nobody joins a paused job: nothing was claimed
             _conclude(led, launch_id, "lost", False, 0.0)
             return None
-        if seat.role == "judge":
-            # the session takes over this row (claim_resume copies its judge flag), so the job's judge seat goes
+        if launch.role == "judge":
+            # the session takes over this row (claim_resume copies its judge flag), so the job's judge launch goes
             # to it as for a pipeline judge (pipeline.py): its verdict is recorded under its own name
-            board.take_judge_seat(old, led.job)
+            board.take_judge_launch(old, led.job)
         board.close_agent(old, "drive predecessor")
         row = board.claim_drive_launch(
             job=led.job, generation=led.generation, action_id=action.action_id, attempt=attempt,
-            launch_id=launch_id, launch_row_id=seat.id, queue_version=seat.revision, harness=seat.harness,
+            launch_id=launch_id, launch_row_id=launch.id, queue_version=launch.revision, harness=launch.harness,
             reserve_usd=reserve_usd, reserve_minutes=reserve_minutes, locks=lock_keys,
             lock_seconds=min((reserve_minutes + LOCK_SLACK_MINUTES) * 60, 24 * 3600),
             max_host_running=d.get("max_host_running"), max_job_running=int(d["max_concurrent_sessions"]),
@@ -426,20 +426,20 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
                 for eid in marks[1]:
                     l.watermarks[f"launch-ev:{launch_id}:{eid}"] = eid
     mutate(led, claimed)
-    run = {"restart_id": row.id, "job": led.job, "name": name, "harness": seat.harness, "resume_of": old,
+    run = {"restart_id": row.id, "job": led.job, "name": name, "harness": launch.harness, "resume_of": old,
            "marker": "", "argv": list(spec.argv), "cwd": spec.cwd, "stdin": spec.stdin,
            "session_id": spec.session_id, "limit_seconds": reserve_minutes * 60,
            "enrol_seconds": sup["enrol_minutes"] * 60, "config": config_path, "board": store_key(cfg),
-           "launch_id": launch_id, "action_id": action.action_id, "seat": seat.name,
+           "launch_id": launch_id, "action_id": action.action_id, "launch": launch.name,
            "generation": led.generation,
            # Task 20: a reviewer's or judge's work tree is bound read-only; the lead writes its briefs and an
            # artifact job's report in the tree, so its tree stays writable (it still has no write rights elsewhere)
-           "read_only": read_only_role(seat.role) and seat.role != driveroles.LEAD_ROLE}
+           "read_only": read_only_role(launch.role) and launch.role != driveroles.LEAD_ROLE}
     marker = None
     try:
         # 3. run file, then the resume marker
         marker = markers.write_resume_marker(cfg, led.job, row.id, resume_of=old, name=name,
-                                             harness=seat.harness, session_id=spec.session_id)
+                                             harness=launch.harness, session_id=spec.session_id)
         run["marker"] = str(marker)
         barrier.hit("after_marker")
         if spec.session_id:
@@ -458,7 +458,7 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
             board.finish_restart(row.id, "cancelled")
             _discard(run, marker=marker)
             board.release_drive_locks(launch_id, job=led.job, holder=action.action_id)
-            _idle_seat(board, led, seat.name, "cancelled", now)
+            _idle_launch(board, led, launch.name, "cancelled", now)
             _conclude(led, launch_id, "cancelled-before-start", False, 0.0)
             return None
         (start_runner or runner.start)(cfg, run)
@@ -468,21 +468,21 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
         board.finish_restart(row.id, "failed")
         _discard(run, marker=marker)
         board.release_drive_locks(launch_id, job=led.job, holder=action.action_id)
-        _idle_seat(board, led, seat.name, "failed", now)
+        _idle_launch(board, led, launch.name, "failed", now)
         _conclude(led, launch_id, "failed", False, 0.0)
         raise
 
 
-def _board_marks(board, led, seat, now) -> tuple[int, list]:
+def _board_marks(board, led, launch, now) -> tuple[int, list]:
     """The message id and event id a session is launched knowing about: only the ids the snapshot would list
-    as this seat's pending wakes (driver_snapshot._wakes): messages to the seat's agent that carry the
+    as this launch's pending wakes (driver_snapshot._wakes): messages to the launch's agent that carry the
     ledger's own `post` receipt (host-private, so a database writer cannot fake one), and events addressed
     to that agent, returned as the list of ids shown (each acknowledged on its own). Nothing else moves a mark."""
-    prev_msg = led.watermarks.get(f"msg:{seat.name}", 0)
-    seen = f"{EVACK}{seat.name}:"
+    prev_msg = led.watermarks.get(f"msg:{launch.name}", 0)
+    seen = f"{EVACK}{launch.name}:"
     from swarm.supervisor import driver_snapshot
     names = {a.agent_key: a.name for a in board.agents(led.job, include_departed=True)}
-    name = names.get(seat.agent_key) if seat.agent_key else None
+    name = names.get(launch.agent_key) if launch.agent_key else None
     if name is None:
         return prev_msg, []
     rc = driver_snapshot._Receipts(led, led.job, led.generation, now)
@@ -494,12 +494,12 @@ def _board_marks(board, led, seat, now) -> tuple[int, list]:
     return max(msgs, default=prev_msg), sorted(events)[:MAX_EVENTS_SHOWN]
 
 
-def _render_prompt(board, cfg, led, action, seat) -> str:
-    """The seat prompt from Task 8c's `prompts.render` (callers pass `prompt=` until that lands)."""
+def _render_prompt(board, cfg, led, action, launch) -> str:
+    """The launch prompt from Task 8c's `prompts.render` (callers pass `prompt=` until that lands)."""
     prompts = _module("swarm.supervisor.prompts")
     if prompts is None:
         raise RuntimeError("no prompt renderer: pass prompt=")
-    return prompts.render(board, cfg, led, action, seat)
+    return prompts.render(board, cfg, led, action, launch)
 
 
 # --- reconcile -----------------------------------------------------------------------------------
@@ -661,8 +661,8 @@ def reconcile(board, cfg, led, now, deadline: float) -> None:
             log(f"launch {intent.launch_id}: marker cleanup failed: {type(exc).__name__}")
         board.release_drive_locks(intent.launch_id, job=led.job, holder=intent.action_id)
         _conclude(led, intent.launch_id, "failed", False, 0.0)
-    _settle_seats(board, cfg, led, _matched_rows(led, _rows_by_launch(board, led.job), cfg, here), now)
-    sweep_unlaunched_seats(board, led.job)
+    _settle_launches(board, cfg, led, _matched_rows(led, _rows_by_launch(board, led.job), cfg, here), now)
+    sweep_unlaunched_launches(board, led.job)
     _settle_event_acks(board, led)
     _sweep_locks(board, cfg, now)
 
@@ -670,7 +670,7 @@ def reconcile(board, cfg, led, now, deadline: float) -> None:
 def _settle_event_acks(board, led) -> None:
     """Keep the ledger's `evack:` keys bounded: acknowledge on the board the events a session answered (so
     they stop being pending), and drop the key of every event that is no longer pending (acknowledged,
-    expired or gone): nothing can wake a seat on it any more."""
+    expired or gone): nothing can wake a launch on it any more."""
     keys = [k for k in led.watermarks if k.startswith(EVACK)]
     if not keys:
         return
@@ -693,24 +693,24 @@ def _sweep_locks(board, cfg: dict, now) -> None:
         life.sweep_locks_by_host(board, cfg, now, **extra)      # 8b's sweep matches runs by local evidence in this board's key
 
 
-def sweep_unlaunched_seats(board, job: str) -> int:
-    """End any seat left `running` with no launch (a dev board from before launch ids): it becomes
+def sweep_unlaunched_launches(board, job: str) -> int:
+    """End any launch left `running` with no launch (a dev board from before launch ids): it becomes
     `idle` with last_outcome "no launch". The number ended."""
     n = 0
-    for seat in board.launches(job):
-        if seat.state != "running" or seat.launch_id is not None:
+    for launch in board.launches(job):
+        if launch.state != "running" or launch.launch_id is not None:
             continue
         try:
-            if board.set_launch_state(seat.id, seat.revision, "done", job=job, last_outcome="no launch") is not None:
+            if board.set_launch_state(launch.id, launch.revision, "done", job=job, last_outcome="no launch") is not None:
                 n += 1
         except ValueError as exc:
-            log(f"seat {seat.name} of {job}: not ended: {exc}")
+            log(f"launch {launch.name} of {job}: not ended: {exc}")
     return n
 
 
 def _finish_activation(board, cfg: dict, led) -> None:
     """Recover a crashed activation: a ledger still "activating" gets Task 6a's idempotent
-    finish_activation (board row, lead seat request, ledger "active"). Unguarded: an error (no owner
+    finish_activation (board row, lead launch, ledger "active"). Unguarded: an error (no owner
     record: DRIVER-ORPHAN) is the pass's to report, and the job stays undriven (execute holds an
     "activating" ledger)."""
     if led.state != "activating":
@@ -723,39 +723,39 @@ def _finish_activation(board, cfg: dict, led) -> None:
         led.__dict__.update(done.__dict__)
 
 
-def _settle_seats(board, cfg: dict, led, rows: dict, now) -> None:
+def _settle_launches(board, cfg: dict, led, rows: dict, now) -> None:
     """Every ended launch settles once; failed launches require an explicit re-queue."""
-    for seat in board.launches(led.job, led.generation):
-        if seat.state != "running" or seat.launch_id is None:
+    for launch in board.launches(led.job, led.generation):
+        if launch.state != "running" or launch.launch_id is None:
             continue
-        row = rows.get(seat.launch_id)
+        row = rows.get(launch.launch_id)
         if row is None or row.ended_at is None:
             continue
         fields = {}
         if row.new_agent_key and valid_resume_handle(row.new_agent_key):
             fields.update(agent_key=row.new_agent_key, session_id=row.new_agent_key)
         outcome = row.outcome or "failed"
-        local = _local_run(cfg, led.board_key, seat.launch_id)
+        local = _local_run(cfg, led.board_key, launch.launch_id)
         reason = local[1].get("refused_reason") if local else None
         if reason and outcome != "completed":
             outcome = f"{outcome}: {reason}"
         # A successful process exit still needs the role's hand-off. Roles control expectations,
         # not filesystem rights. The learner's completion is recorded by the learning pipeline.
-        if outcome == "completed" and seat.role != "learner":
+        if outcome == "completed" and launch.role != "learner":
             names = {a.name for a in board.agents(led.job)
-                     if a.agent_key in (row.new_agent_key, seat.agent_key, row.old_agent_key)}
-            prefix = ("VERDICT" if driveroles.is_judge_role(seat.role) else
-                      "REVIEW " if driveroles.is_read_only_role(seat.role) else
-                      "GOAL-READY " if seat.role == driveroles.LEAD_ROLE else ("DONE ", "LAND-REQUEST ") if seat.role == "integrator" else "DONE ")
+                     if a.agent_key in (row.new_agent_key, launch.agent_key, row.old_agent_key)}
+            prefix = ("VERDICT" if driveroles.is_judge_role(launch.role) else
+                      "REVIEW " if driveroles.is_read_only_role(launch.role) else
+                      "GOAL-READY " if launch.role == driveroles.LEAD_ROLE else ("DONE ", "LAND-REQUEST ") if launch.role == "integrator" else "DONE ")
             handed_off = any(m.agent_name in names and m.message.startswith(prefix)
                              and row.at <= m.created_at <= row.ended_at
                              for m in board.recent_messages(200, job=led.job))
-            if seat.role == driveroles.LEAD_ROLE:
+            if launch.role == driveroles.LEAD_ROLE:
                 handed_off |= any(s.queued_by in names and s.updated_at >= row.at
                                   for s in board.launches(led.job, led.generation))
             if not handed_off:
                 outcome = "no hand-off"
-        _idle_seat(board, led, seat.name, outcome, now, **fields)
+        _idle_launch(board, led, launch.name, outcome, now, **fields)
 
 
 # --- executor-side state: progress and rulings ---------------------------------------------------
@@ -794,14 +794,14 @@ def settle_progress(led, snap, now) -> bool:
     landed = sum(1 for e in snap.integrated.values() if (e or {}).get("landed"))
     # Only this generation's verdicts count: a rollover (or a reopen) clears the watermarks, and replaying every
     # earlier run's not_met / unreachable verdicts as new rounds made "no-progress" fire on the new run's first
-    # pass, so a ruling judge ended it before any seat started (2026-10-15).
+    # pass, so a ruling judge ended it before any launch started (2026-10-15).
     judged = [v for v in list(snap.verdicts.values()) + ([snap.goal_verdict] if snap.goal_verdict else [])
               if v.receipt_id is not None and v.receipt_id > wm.get("p.verdict", 0)
               and getattr(v, "generation", led.generation) == led.generation]
     judged.sort(key=lambda v: v.receipt_id)
     if handoff_id <= wm.get("p.handoff", 0) and landed <= wm.get("p.landed", 0) and not judged:
         return False
-    # the time of the progress events themselves (new hand-offs, judged rounds), never later than now: seat
+    # the time of the progress events themselves (new hand-offs, judged rounds), never later than now: launch
     # row churn is not progress, and a forged future time cannot hold the stall wake off
     fired = [h.at for h in snap.handoffs if h.receipt_id is not None and h.receipt_id > wm.get("p.handoff", 0)]
     fired += [v.at for v in judged]

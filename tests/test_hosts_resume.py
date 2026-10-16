@@ -266,13 +266,13 @@ class StartTest(ResumeBase):
             R.start(bad, popen=mock.MagicMock())
 
 
-class DriveSeatHandleTest(ResumeBase):
-    """Drive seats: restore returns a resume handle only; the argv comes from launch.spec_for."""
+class DriveLaunchHandleTest(ResumeBase):
+    """Drive launches: restore returns a resume handle only; the argv comes from launch.spec_for."""
 
     def test_drive_resume_returns_a_handle_and_builds_no_argv(self):
         self.store(claude_lines())
         with mock.patch.object(hosts.get("claude").__class__, "resume_argv",
-                               side_effect=AssertionError("drive seats must not build a resume argv")):
+                               side_effect=AssertionError("drive launches must not build a resume argv")):
             r = R.restore(self.b, self.manifest(), "claude", self.root, cfg={}, workdir=str(self.work),
                           host_label="box-b", drive=True)
         self.assertEqual((r.mode, r.harness, r.argv), ("resume", "claude", ()))

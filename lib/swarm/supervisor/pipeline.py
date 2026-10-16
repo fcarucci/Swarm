@@ -200,7 +200,7 @@ def prompt_for(action, recipe, board=None):
     role = recipe.get("finalizer_role", "finalizer") if action.role == "finalizer" else action.role
     ref_arg = shlex.quote(h.artifact)
     from swarm.board.base import clean_title
-    title = clean_title((recipe.get("titles") or {}).get(role))   # a plugin's seat label (display only)
+    title = clean_title((recipe.get("titles") or {}).get(role))   # a plugin's launch label (display only)
     lines = [f"[swarm job: {js.job}]", f"[swarm role: {role}]"] + ([f"[swarm title: {title}]"] if title else []) + [
              f"Goal: {_clean(js.goal, 12000)}", f"Task: {_clean(js.task or js.description, 12000)}",
              f"Hand-off artifact: {_clean(h.artifact, 2000)}",
@@ -248,19 +248,19 @@ def prompt_for(action, recipe, board=None):
 
 
 def launch_action(board, cfg, sup, action, owner, recipe, decision, *, start_runner=None, config_path=""):
-    """Use replacement seats, markers and bounded runner, just like orphan recovery."""
+    """Use replacement launches, markers and bounded runner, just like orphan recovery."""
     from swarm.board.autoinit import store_key
     from swarm.supervisor import command, launch, markers, runner, settings as ss
     role = recipe.get("finalizer_role", "finalizer") if action.role == "finalizer" else action.role
     if role not in (*EXECUTORS, "judge", "worker"):
         raise ValueError("invalid pipeline executing role")
     harness = settings(cfg)["judge_host"] if role == "judge" else owner.harness
-    old = "pipeline-seat-" + str(uuid.uuid4())
+    old = "pipeline-launch-" + str(uuid.uuid4())
     name = board.allocate_name(old, action.job.job, role)
     if (recipe.get("titles") or {}).get(role):
         board.set_agent_title(old, recipe["titles"][role])   # the replacement inherits it
-    if role == "judge" and not board.take_judge_seat(old, action.job.job):
-        board.close_agent(old, "pipeline judge seat busy")
+    if role == "judge" and not board.take_judge_launch(old, action.job.job):
+        board.close_agent(old, "pipeline judge launch busy")
         return None
     board.close_agent(old, "pipeline predecessor")
     row = board.record_restart(action.job.job, action.lineage, old, "pipeline:" + role + ":" + _digest(action.token), harness,
@@ -461,7 +461,7 @@ def run(board, cfg, sup, state, *, job=None, now=None, dry_run=False, say=print,
             if dry_run:
                 say(f"would launch pipeline {action.role} on {js.job}: {action.handoff.artifact}")
                 continue
-            # Check all transition inputs again, immediately before claiming a seat.
+            # Check all transition inputs again, immediately before claiming a launch.
             fresh = board.job_status(js.job)
             try:
                 valid = fresh and any(t.token == action.token for t in transitions(board, fresh, cfg, config_path=config_path))

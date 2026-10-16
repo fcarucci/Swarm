@@ -9,7 +9,7 @@ points the chaos tests kill at).
 
 The collaborators that belong to other tasks are injected through `Hooks`, so this module has no import
 of them: the runner (stopping sessions and confirming their scopes absent, Task 9/8a), the closing gate
-(target moved, requirements changed, audit; Tasks 10/11b), `complete_land` (11b), the lead-seat request
+(target moved, requirements changed, audit; Tasks 10/11b), `complete_land` (11b), the lead-launch
 with its driver authorization (Tasks 5/8a) and the post-close capture. The defaults are the safe stubs
 (no gate, no land journal, no capture).
 
@@ -239,7 +239,7 @@ def _release_locks(board, led, generation: int | None = None) -> None:
             board.release_drive_locks(lock.launch_id, job=lock.job, holder=lock.holder)
 
 
-def _release_seats(board, led, generation: int | None, why: str) -> None:
+def _release_launches(board, led, generation: int | None, why: str) -> None:
     for s in board.launches(led.job, generation, include_closed=False):
         try:
             board.set_launch_state(s.id, s.revision, "done", job=led.job, last_outcome=why)
@@ -286,7 +286,7 @@ def _report(led, cause: str) -> str:
 
 def _record_mechanical(board, led) -> bool:
     """Make the board's verdict the ledger's mechanical UNREACHABLE (the supervisor joins as the job's
-    judge for the one write). False when it cannot be done now (a live judge holds the seat, the job is
+    judge for the one write). False when it cannot be done now (a live judge holds the launch, the job is
     paused, the board is down): terminalize tries again after the sessions are stopped."""
     intent = led.terminal_intent
     js = board.job_status(led.job)
@@ -301,7 +301,7 @@ def _record_mechanical(board, led) -> bool:
     try:
         name = board.allocate_name(key, led.job, "worker")
         try:
-            return bool(board.take_judge_seat(key, led.job)) and board.record_verdict(
+            return bool(board.take_judge_launch(key, led.job)) and board.record_verdict(
                 led.job, name, "unreachable", f"mechanical: {cause}", details=_report(led, cause),
                 scope=intent["scope"], generation=intent["generation"])
         finally:
@@ -334,7 +334,7 @@ def enforce_deadlines(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks |
         return False
     if LEARN_HOLD in led.watermarks and led.terminal_intent is None:
         # a receipted MET or UNREACHABLE is held for its learnings step (swarm.learnings): elapsed time neither
-        # harvests the agents nor waives the step, so no deadline closes it; the learner seat or a person does
+        # harvests the agents nor waives the step, so no deadline closes it; the learner launch or a person does
         return False
     cause = _deadline_cause(cfg, led, now)
     if cause is None:
@@ -445,10 +445,10 @@ def terminalize(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks | None 
         if verdict != "ok":
             return False
     barrier.hit("mid_terminalization")       # sessions gone, nothing settled yet
-    # steps 3-4: settle the questions, release the locks and seats
+    # steps 3-4: settle the questions, release the locks and launches
     _settle_blockers(board, led, f"job concluded: {intent['verdict']}")
     _release_locks(board, led)
-    _release_seats(board, led, None, "job concluded")
+    _release_launches(board, led, None, "job concluded")
     # step 5: the verdict is on the board, then the guarded close
     for a in board.agents(led.job, include_departed=False):
         if a.role == "judge" and intent["by"] == MECHANICAL:
@@ -472,7 +472,7 @@ def cancel_job(board, cfg: dict, led, actor: str, now: dt.datetime, *, reason: s
     """CANCELLED: a person ended the job (`swarm deactivate`, or the pass found it closed by one). The
     caller has checked that `actor` is a person. Ledger first (the terminal intent, over whatever intent
     was pending: a person's word ends the job, even a halted one), then the sessions are stopped and
-    confirmed gone, the questions settled, the locks and seats released, the board job closed if it is
+    confirmed gone, the questions settled, the locks and launches released, the board job closed if it is
     still open, the claim cleared and `led.terminal` committed. Resumable like terminalize, which it
     calls: True once done, False while the sessions are still stopping or when it is already terminal."""
     if led.terminal is not None:
@@ -506,7 +506,7 @@ def _terminalize_cancelled(board, cfg, led, intent: dict, js, now, hooks: Hooks)
     barrier.hit("mid_terminalization")
     _settle_blockers(board, led, "job concluded: cancelled")
     _release_locks(board, led)
-    _release_seats(board, led, None, "job concluded")
+    _release_launches(board, led, None, "job concluded")
     if js.status == "active":      # a person's deactivate has usually closed it already
         cause = (led.closing or "cancelled").partition(": ")[2] or "cancelled"
         if not board.close_job(led.job, "cancelled", f"cancelled: {cause}"[:500], forced=False, closed_by=CLOSED_BY):
@@ -559,16 +559,16 @@ def _commit(board, cfg, led, intent: dict, now, reasons: list, hooks: Hooks) -> 
         hooks.after_close(board, cfg, led)
     except Exception as exc:
         log.warning("post-close capture for %s failed: %s", led.job, type(exc).__name__)
-    # A closed job deletes its garbage, deterministically (Francesco, 2026-10-15): every seat's home (its
+    # A closed job deletes its garbage, deterministically (Francesco, 2026-10-15): every launch's home (its
     # $HOME, /tmp, transcripts copies, venvs and caches) goes once the sessions are gone and the transcripts
     # are captured above. A reopened job builds fresh homes. Best effort: a leftover never blocks the close.
     try:
-        from swarm.supervisor import seathome
-        freed = seathome.remove_job_homes(led.job)
+        from swarm.supervisor import launchhome
+        freed = launchhome.remove_job_homes(led.job)
         if freed:
-            log.info("job %s closed: removed its seat homes (%d bytes)", led.job, freed)
+            log.info("job %s closed: removed its launch homes (%d bytes)", led.job, freed)
     except Exception as exc:
-        log.warning("seat-home cleanup for %s failed: %s", led.job, type(exc).__name__)
+        log.warning("launch-home cleanup for %s failed: %s", led.job, type(exc).__name__)
     return True
 
 
@@ -589,8 +589,8 @@ def _board_rollover(board, cfg, led, hooks: Hooks) -> bool:
 
 def rollover(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks | None = None) -> bool:
     """Spec 3.1 rollover, resumable: (a) stop generation n's sessions, (b) wait for the scopes to be
-    absent, (c) release its locks and reservations, release its seats, expire its open blockers, (d) the
-    ledger first (generation, counters), then the board (job data, the new lead seat). True when it
+    absent, (c) release its locks and reservations, release its launches, expire its open blockers, (d) the
+    ledger first (generation, counters), then the board (job data, the new lead launch). True when it
     advanced or repaired the generation, False while waiting or when there is nothing to do."""
     hooks = hooks or Hooks()
     if led.terminal is not None or led.terminal_intent is not None or led.halted is not None:
@@ -606,7 +606,7 @@ def rollover(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks | None = N
     _end_sessions(board, led, "cancelled", old)
     barrier.hit("mid_rollover")              # the old generation's sessions ended, nothing released or advanced
     _release_locks(board, led, old)
-    _release_seats(board, led, old, "generation rolled over")
+    _release_launches(board, led, old, "generation rolled over")
     _settle_blockers(board, led, "generation rolled over", old)
     led.generation = led.generation_requested
     led.ruling_due_at, led.ruling_attempts, led.rounds_without_progress, led.errors = None, 0, 0, 0
@@ -623,7 +623,7 @@ def rollover(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks | None = N
 def settle_halt(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks | None = None) -> bool:
     """[F5] Stop the halted job's sessions, conclude what they were doing as `halted` (not counted against
     attempts or sessions; cost charged as everywhere: actual usage, else the reservation, [RR4]) and
-    idle every seat with wake reason `halted`. Idempotent: the pass repeats it while the job is halted.
+    idle every launch with wake reason `halted`. Idempotent: the pass repeats it while the job is halted.
     True once no session is left."""
     hooks = hooks or Hooks()
     if led.halted is None:
@@ -669,7 +669,7 @@ def halt(board, cfg: dict, led, actor: str, now: dt.datetime, *, reason: str | N
 
 
 def unhalt(board, cfg: dict, led, actor: str, now: dt.datetime) -> bool:
-    """[F5] End the halt: every deadline shifts by the halted time (`halted_total_seconds`). Seats stay idle
+    """[F5] End the halt: every deadline shifts by the halted time (`halted_total_seconds`). Launches stay idle
     with wake reason `halted`; the next pass wakes them."""
     if led.halted is None:
         return False

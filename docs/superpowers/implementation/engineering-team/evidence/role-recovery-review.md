@@ -60,7 +60,7 @@ is a **custom worker role**. Verified directly:
 
 The docs now teach `<role>__<task>`, so a Codex orchestrator that follows this brief can
 reasonably write `judge2__verdict` or `judge_r2__final`. The next-round agent then enrols as an
-ordinary worker, nobody takes the judge seat, and `deactivate --status completed` stays gated
+ordinary worker, nobody takes the judge launch, and `deactivate --status completed` stays gated
 until someone intervenes. This is the not_met → next-round path the brief asked about.
 
 **Fix:** say "a task name `judge__<task>` (e.g. `judge__round2`)" and add a `test_respawn` assertion on the Codex text.

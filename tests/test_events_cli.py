@@ -168,7 +168,7 @@ class EventHookTests(Env):
         self.cli("event", "ack", "--job", "J", "1", "2")
         self.assertIsNone(self.hook("turn", tool_name="Read"))
 
-    def test_an_agent_holding_the_pm_seat_takes_pm_events_from_the_orchestrator(self):
+    def test_an_agent_holding_the_pm_launch_takes_pm_events_from_the_orchestrator(self):
         self.assertEqual(self.cli("join", "--job", "J", "--key", "agent-1", "--role", "project_manager")[0], 0)
         self.hook("turn", tool_name="Bash")
         self.post("A", "1", "to the pm", "--to", "@pm")

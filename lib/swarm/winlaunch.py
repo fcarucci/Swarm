@@ -288,8 +288,8 @@ def run_env(root: Path = PLUGIN_ROOT) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    if os.environ.get("SWARM_SEAT_BROKER"):   # a drive seat (Task 20): its broker runs this outside the seat
-        return _seat_broker("cli", list(argv))
+    if os.environ.get("SWARM_LAUNCH_BROKER"):   # a drive launch (Task 20): its broker runs this outside the launch
+        return _launch_broker("cli", list(argv))
     py = ensure_venv()
     try:
         return subprocess.run([str(py), "-B", "-m", "swarm.cli", *argv], env=run_env()).returncode
@@ -297,11 +297,11 @@ def main(argv: list[str] | None = None) -> int:
         return 130
 
 
-def _seat_broker(kind: str, argv: list) -> int:
-    """Hand the call to the seat's broker (swarm.seatbroker_client, loaded by path: no import from elsewhere)."""
+def _launch_broker(kind: str, argv: list) -> int:
+    """Hand the call to the launch's broker (swarm.launchbroker_client, loaded by path: no import from elsewhere)."""
     import importlib.util
     here = os.path.dirname(os.path.abspath(__file__))
-    spec = importlib.util.spec_from_file_location("_swarm_seatbroker_client", os.path.join(here, "seatbroker_client.py"))
+    spec = importlib.util.spec_from_file_location("_swarm_launchbroker_client", os.path.join(here, "launchbroker_client.py"))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod.main([kind, *argv])

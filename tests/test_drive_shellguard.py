@@ -1,4 +1,4 @@
-"""Drive-seat command refusals (spec 3.4, 4.0, 4.4): target pushes in every recognisable spelling, force pushes,
+"""Drive-launch command refusals (spec 3.4, 4.0, 4.4): target pushes in every recognisable spelling, force pushes,
 headless sessions, merges through gh, and the shell-aware splitting that finds them inside sh -c, bash -lc, eval,
 script -c, $(...) and backticks. A guardrail, not a boundary: what decides an outcome is `swarm land` and the
 driver's mirror audit."""
@@ -270,7 +270,7 @@ class DriveRefusals(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(refuse(cmd, ["main"], branch_of=on("feat/a")), cmd)
 
-    def test_rr7_read_only_seats_cannot_write_refs_or_files(self):
+    def test_rr7_read_only_launches_cannot_write_refs_or_files(self):
         for cmd in ("git branch -f main HEAD~3", "git branch -D x", "git branch -m a b", "git branch newbranch",
                     "git branch -fd x", "git tag v1", "git update-ref refs/heads/x HEAD", "git reset --hard", "git checkout -B x",
                     "git commit -m x", "git stash", "git push origin x", "git config user.name x", "git config --add a b",
@@ -300,7 +300,7 @@ P = "git push origin HEAD:main"
 
 class Round4OneRule(unittest.TestCase):
     """Round 4: code that can run commands is a literal argument that is scanned; code that arrives any other way
-    (stdin, a pipe, a here-string, a heredoc, <(...), a variable or $(...), eval of a non-literal, a script the seat
+    (stdin, a pipe, a here-string, a heredoc, <(...), a variable or $(...), eval of a non-literal, a script the launch
     could write) is refused. Each command below is a bypass the round-3 guard let through."""
 
     def bad(self, *cmds, branch="feat/a"):
@@ -418,7 +418,7 @@ class Round4OneRule(unittest.TestCase):
 @unittest.skipUnless(shutil.which("git"), "needs git")
 class Round4ScriptFiles(unittest.TestCase):
     """A script file runs (directly, through a shell or an interpreter, or sourced) only when it is tracked
-    unmodified at HEAD in its repository, or when the seat cannot write it."""
+    unmodified at HEAD in its repository, or when the launch cannot write it."""
 
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
@@ -491,7 +491,7 @@ class Round4ScriptFiles(unittest.TestCase):
             self.assertTrue(self.at(f"mysh -c '{P}'"))
             self.assertIsNone(self.at("mysh -c 'ls'"))
 
-    def test_files_the_seat_cannot_write_run(self):
+    def test_files_the_launch_cannot_write_run(self):
         with mock.patch.object(shellguard.os, "access", return_value=False):
             self.assertIsNone(self.at("./new.sh"))
         self.assertFalse(shellguard.tracked_unmodified(os.path.join(self.repo, "new.sh")))
@@ -508,7 +508,7 @@ class Round4ScriptFiles(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("git"), "needs git")
 class Round5Configuration(unittest.TestCase):
-    """Round 5: git, gh and ssh state a seat could write (rr31-rr35), and virtualenv entry points (allowed)."""
+    """Round 5: git, gh and ssh state a launch could write (rr31-rr35), and virtualenv entry points (allowed)."""
 
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
@@ -575,7 +575,7 @@ class Round5Configuration(unittest.TestCase):
         self.assertIsNone(self.at("git -C sub status"))
 
     @unittest.skipIf(os.name == "nt", "POSIX PATH")
-    def test_rr33_path_cannot_put_a_seat_directory_first(self):
+    def test_rr33_path_cannot_put_a_launch_directory_first(self):
         os.makedirs(os.path.join(self.repo, "bin"))
         for cmd in ("PATH=./bin:$PATH git status", "env PATH=bin:/usr/bin git status", "PATH=$X:$PATH git status",
                     f"PATH={self.rs}/bin:$PATH git status", "export PATH=bin:$PATH; git status",
@@ -596,7 +596,7 @@ class Round5Configuration(unittest.TestCase):
                 self.assertIsNone(self.at(cmd), cmd)
 
     @unittest.skipIf(os.name == "nt", "POSIX PATH and exec bits")
-    def test_rr33_a_bare_name_that_finds_a_seat_written_script_is_refused(self):
+    def test_rr33_a_bare_name_that_finds_a_launch_written_script_is_refused(self):
         bindir = os.path.join(self.repo, "bin")
         os.makedirs(bindir)
         for name in ("mygit", "tool"):
@@ -605,8 +605,8 @@ class Round5Configuration(unittest.TestCase):
                 f.write("#!/bin/sh\ngit push origin HEAD:main\n")
             os.chmod(path, 0o755)
         with mock.patch.dict(os.environ, {"PATH": bindir + os.pathsep + os.environ.get("PATH", "")}):
-            self.assertIn("seat can write", self.at("mygit status"))
-            self.assertIn("seat can write", self.at("sh -c 'tool'"))
+            self.assertIn("launch can write", self.at("mygit status"))
+            self.assertIn("launch can write", self.at("sh -c 'tool'"))
             self.assertIsNone(self.at("ls"))                         # a compiled program
             subprocess.run(["git", "-C", self.repo, "add", "bin/tool"], check=True)
             subprocess.run(["git", "-C", self.repo, "-c", "user.name=t", "-c", "user.email=t@t", "-c",
@@ -759,7 +759,7 @@ class ReadOnlyWrites(unittest.TestCase):
                     "git -c a=b commit -am x", "git -C /w commit -m x", "git --git-dir=.git add -A",
                     "git -c k=v push origin x", "git worktree add ../x", "git clone u d",
                     "git update-ref refs/heads/x HEAD",
-                    "sqlite3 board.db 'update seats set role=1'", "sqlite3 b.db \"insert into t values (1)\"",
+                    "sqlite3 board.db 'update launches set role=1'", "sqlite3 b.db \"insert into t values (1)\"",
                     "sqlite3 b.db < dump.sql", "sqlite3 b.db '.import f t'", "sqlite3 b.db 'PRAGMA user_version = 2'",
                     "echo $(touch f)", "watch 'rm f'", "python3 -c \"import subprocess; subprocess.run(['touch', 'f'])\"",
                     "awk 'BEGIN{system(\"touch f\")}'", "perl -e 'system(\"touch f\")'"):
@@ -773,7 +773,7 @@ class ReadOnlyWrites(unittest.TestCase):
     def test_reads_are_not_writes(self):
         for cmd in ("git log --oneline -3", "git diff HEAD~1", "git show HEAD:f", "git -C /w status", "git -c a=b log",
                     "cd tests && python3 -B -m unittest test_x", "ls -la", "sqlite3 -readonly b.db 'select 1'",
-                    "sqlite3 b.db 'select * from seats'", "swarm status --job J", "cat f | grep x", "git branch",
+                    "sqlite3 b.db 'select * from launches'", "swarm status --job J", "cat f | grep x", "git branch",
                     "git fetch origin", "echo hi", "bash -lc 'git log'", "find . -name '*.py'", "wc -l f"):
             with self.subTest(cmd=cmd):
                 self.assertIsNone(shellguard.readonly_write_reason(cmd), cmd)

@@ -152,7 +152,7 @@ class PipelineTests(unittest.TestCase):
         self.tick()
         self.assertEqual(len(self.launched), 2)
 
-    def test_recipe_titles_tag_the_seat_prompt_and_the_replacement_inherits_them(self):
+    def test_recipe_titles_tag_the_launch_prompt_and_the_replacement_inherits_them(self):
         self.recipe.return_value = dict(titles={'judge': 'Judge'})
         self.done()
         self.tick()

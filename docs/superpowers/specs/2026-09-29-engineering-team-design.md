@@ -35,7 +35,7 @@ The EL records the final size, engineer assignments, review depth, and any upgra
 | Verifier (`verifier`, optional) | Independent checks of `DONE` claims | Claim and reproducible evidence | `VERIFIED` or `FAILED` board reply | Validates specific claims, not overall product acceptance |
 | Judge (`judge`, recommended for moderate and complex jobs) | Job goal decision | Requirements, evidence, product/EL/QA results | `met` or `not_met` verdict with reason | Controls the existing Swarm completion gate when `--goal` is used |
 
-Custom role labels grant ordinary worker permissions only. PM, product, EL, engineer, reviewer, and QA powers in this table are **prompt and workflow conventions**. Only existing Swarm controls enforce the judge seat and verdict, verifier write/spawn restrictions, per-agent/per-job spawn caps, maximum depth, and some host routing. The skill must not present peer review, quality approval, or product signoff as code-enforced when they are evidence and PM checks.
+Custom role labels grant ordinary worker permissions only. PM, product, EL, engineer, reviewer, and QA powers in this table are **prompt and workflow conventions**. Only existing Swarm controls enforce the judge launch and verdict, verifier write/spawn restrictions, per-agent/per-job spawn caps, maximum depth, and some host routing. The skill must not present peer review, quality approval, or product signoff as code-enforced when they are evidence and PM checks.
 
 ## Artifacts and traceability
 

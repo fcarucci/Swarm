@@ -2,11 +2,11 @@
 """A scripted stand-in for `claude -p` and `codex exec`, started by the real supervisor runner.
 
 It behaves like an agent session as far as the board can tell: it reads its prompt on stdin, finds its
-`[swarm job: J]` / `[swarm role: R]` / seat tags, goes through the REAL hooks (`bin/swarm-hook turn|done|stop`,
+`[swarm job: J]` / `[swarm role: R]` / launch tags, goes through the REAL hooks (`bin/swarm-hook turn|done|stop`,
 with a synthetic session id, as tests/test_pause_e2e.py does) around every `swarm` command it runs, does
 the role's work with real git against the fake hub, and prints a Claude-style result JSON with
 `total_cost_usd` (or Codex-style JSONL). Behaviour per role comes from the scenario script (scripts/*.json):
-the n-th session of a role (or of a seat) takes the n-th entry of a list.
+the n-th session of a role (or of a launch) takes the n-th entry of a list.
 
 Stdlib only; it finds its run directory from $HOME (<run>/home) and reads <run>/harness.json
 ({"repo": <checkout under test>, "script": <script path>, "hub": <hub dir>, "job": <job>}).
@@ -69,8 +69,8 @@ def nth(entries, n: int, default=None):
 
 
 class Session:
-    def __init__(self, sid: str, job: str, role: str, seat: str | None, model: str | None):
-        self.sid, self.job, self.role, self.seat, self.model = sid, job, role, seat, model
+    def __init__(self, sid: str, job: str, role: str, launch: str | None, model: str | None):
+        self.sid, self.job, self.role, self.launch, self.model = sid, job, role, launch, model
         self.denied: str | None = None
 
     # -- a tool call, the way Claude does it: PreToolUse hook, the command, PostToolUse hook
@@ -78,7 +78,7 @@ class Session:
         payload = {"session_id": self.sid, "agent_id": None, "cwd": str(RUN / "work"), **extra}
         r = subprocess.run([HOOK, event], input=json.dumps(payload), capture_output=True, text=True,
                            env=os.environ, timeout=60)
-        if r.returncode < 0:   # a crash barrier killed the hook (SWARM_CRASH_AT reached the seat's environment)
+        if r.returncode < 0:   # a crash barrier killed the hook (SWARM_CRASH_AT reached the launch's environment)
             log(ev="hook_killed", sid=self.sid, role=self.role, event=event, signal=-r.returncode)
         try:
             return json.loads(r.stdout) if r.stdout.strip() else None
@@ -98,7 +98,7 @@ class Session:
                            timeout=timeout)
         self.hook("done", tool_name="Bash", tool_input={"command": cmd},
                   tool_response={"stdout": r.stdout[-2000:], "stderr": r.stderr[-500:], "exit_code": r.returncode})
-        log(ev="cmd", sid=self.sid, role=self.role, seat=self.seat, cmd=cmd[:200], rc=r.returncode)
+        log(ev="cmd", sid=self.sid, role=self.role, launch=self.launch, cmd=cmd[:200], rc=r.returncode)
         return r
 
     def swarm(self, *a, **kw):
@@ -144,7 +144,7 @@ def edit_toy(w: Path, change: str, round_no: int) -> None:
 # --- roles ------------------------------------------------------------------------------------
 
 def hang_if_asked(s: Session, spec: dict, key: str) -> None:
-    """Chaos hook: `"hang_once": true` makes the FIRST session of this seat write its pid and sleep, so a
+    """Chaos hook: `"hang_once": true` makes the FIRST session of this launch write its pid and sleep, so a
     test can SIGKILL it mid-task; the relaunch (second session) continues normally."""
     if spec.get("hang_once") and counter("hang:" + key) == 0:
         hd = RUN / "hang"
@@ -178,24 +178,24 @@ def role_lead(s: Session, n: int) -> None:
     hang_if_asked(s, lead, "lead")
     flag = RUN / "lead-requested"
     if not flag.exists():
-        flag.write_text("1")   # idempotent across a killed first session: seats are requested once
+        flag.write_text("1")   # idempotent across a killed first session: launches are requested once
         ask = lead.get("ask")
         if ask:   # a human question with a default that expires (spec 3.10); the lead keeps working
             s.swarm("ask", "--job", s.job, "--to", "human", ask["text"], "--options", ask.get("options", "left,right"),
                     "--default", ask.get("default", "left"), "--expires", ask.get("expires", "2m"),
-                    "--blocks", "nothing: the seats go on")
-        for seat in lead.get("seats", []):
-            brief = RUN / "briefs" / f"{seat['seat']}.md"
+                    "--blocks", "nothing: the launches go on")
+        for launch in lead.get("launches", []):
+            brief = RUN / "briefs" / f"{launch['launch']}.md"
             brief.parent.mkdir(exist_ok=True)
-            brief.write_text(f"# {seat['seat']}\nDo the {seat['role']} work for the goal. Branch feat/{seat['seat']}.\n")
-            args = ["seat", "request", "--job", s.job, "--seat", seat["seat"], "--role", seat["role"],
+            brief.write_text(f"# {launch['launch']}\nDo the {launch['role']} work for the goal. Branch feat/{launch['launch']}.\n")
+            args = ["launch", "request", "--job", s.job, "--launch", launch["launch"], "--role", launch["role"],
                     "--brief", str(brief)]
-            if seat.get("complexity"):
-                args += ["--complexity", seat["complexity"]]
-            if seat["role"] == "engineer":
-                args += ["--workdir", str(RUN / "work" / seat["seat"])]
-            if seat.get("harness"):
-                args += ["--harness", seat["harness"]]
+            if launch.get("complexity"):
+                args += ["--complexity", launch["complexity"]]
+            if launch["role"] == "engineer":
+                args += ["--workdir", str(RUN / "work" / launch["launch"])]
+            if launch.get("harness"):
+                args += ["--harness", launch["harness"]]
             s.swarm(*args)
         return
     head = subprocess.run(["git", "--git-dir", str(HUB / "origin.git"), "rev-parse", "main"],
@@ -207,19 +207,19 @@ def role_lead(s: Session, n: int) -> None:
 
 def role_engineer(s: Session, n: int) -> None:
     spec = nth(SCRIPT.get("engineer"), 0, {}) or {}
-    hang_if_asked(s, spec, s.seat or "engineer")
-    w = RUN / "work" / (s.seat or "engineer")
+    hang_if_asked(s, spec, s.launch or "engineer")
+    w = RUN / "work" / (s.launch or "engineer")
     if not (w / ".git").exists():
         w.parent.mkdir(parents=True, exist_ok=True)
         s.git(w.parent, "clone", "-q", "file://" + str(HUB / "origin.git"), str(w))
-        s.git(w, "checkout", "-q", "-b", f"feat/{s.seat}")
+        s.git(w, "checkout", "-q", "-b", f"feat/{s.launch}")
     edit_toy(w, spec.get("change", "version"), n)
     s.git(w, "add", "-A")
-    s.git(w, "commit", "-q", "-m", f"{s.seat}: round {n}")
+    s.git(w, "commit", "-q", "-m", f"{s.launch}: round {n}")
     sha = s.git(w, "rev-parse", "HEAD").stdout.strip()
-    s.git(w, "push", "-q", "-f", "origin", f"feat/{s.seat}")
-    ref = f"feat/{s.seat}@{sha}"
-    (RUN / "handoff.json").write_text(json.dumps({"artifact": ref, "seat": s.seat, "round": n}))
+    s.git(w, "push", "-q", "-f", "origin", f"feat/{s.launch}")
+    ref = f"feat/{s.launch}@{sha}"
+    (RUN / "handoff.json").write_text(json.dumps({"artifact": ref, "launch": s.launch, "round": n}))
     s.swarm("done", "--job", s.job, "--artifact", ref, "--summary", f"round {n}: toy change + test")
 
 
@@ -291,13 +291,13 @@ def main() -> int:
     sid = opt("--session-id") or opt("--resume") or str(uuid.uuid4())
     model = opt("--model") or opt("-m")
     job, role = tag(prompt, "job") or CONF.get("job"), (tag(prompt, "role") or "worker").split(":")[0]
-    seat = tag(prompt, "seat") or tag(prompt, "title")
-    if "engineer" in role and not seat:
-        seat = "eng-a"
+    launch = tag(prompt, "launch") or tag(prompt, "title")
+    if "engineer" in role and not launch:
+        launch = "eng-a"
     scope = judge_scope(prompt) if "judge" in role else None
-    # judges and reviewers are keyed by ROLE (and the judge's scope), never by seat: the scripted verdict
-    # sequence is the same however the driver names or orders its seats
-    key = f"judge:{scope}" if scope else (f"{role}:" if "review" in role else f"{role}:{seat or ''}")
+    # judges and reviewers are keyed by ROLE (and the judge's scope), never by launch: the scripted verdict
+    # sequence is the same however the driver names or orders its launches
+    key = f"judge:{scope}" if scope else (f"{role}:" if "review" in role else f"{role}:{launch or ''}")
     n = counter(key)
     if outage_now():
         print(json.dumps({"type": "result", "subtype": "error_during_execution", "is_error": True,
@@ -305,9 +305,9 @@ def main() -> int:
         log(ev="outage", sid=sid, role=role)
         return 1
     cost = float(SCRIPT.get("cost_usd", 0.05))
-    s = Session(sid, job, role, seat, model)
+    s = Session(sid, job, role, launch, model)
     s.scope = scope
-    log(ev="start", scope=scope, sid=sid, role=role, seat=seat, job=job, model=model, harness=a.harness, nth=n,
+    log(ev="start", scope=scope, sid=sid, role=role, launch=launch, job=job, model=model, harness=a.harness, nth=n,
         budget=opt("--max-budget-usd"), artifact=current_artifact(prompt) if role not in ("lead", "engineer") else None)
     s.hook("start")
     try:
@@ -323,7 +323,7 @@ def main() -> int:
             role_integrator(s, n, prompt)
     finally:
         s.hook("stop")
-        log(ev="end", sid=sid, role=role, seat=seat, cost=cost, denied=s.denied)
+        log(ev="end", sid=sid, role=role, launch=launch, cost=cost, denied=s.denied)
     if a.harness == "codex":
         print(json.dumps({"type": "thread.started", "thread_id": sid}))
         print(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 1000, "output_tokens": 200}}))

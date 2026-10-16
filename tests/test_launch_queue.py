@@ -25,7 +25,7 @@ class LaunchQueue(unittest.TestCase):
         return self.b.queue_launch("J", 1, name, **fields)
 
     def claim(self, row, suffix="1", **over):
-        fields = dict(job="J", generation=1, action_id="gen1|seat|" + row.name + "|-|0|" + suffix,
+        fields = dict(job="J", generation=1, action_id="gen1|launch|" + row.name + "|-|0|" + suffix,
                       attempt=1, launch_id=row.name + suffix, launch_row_id=row.id, queue_version=row.revision,
                       harness=row.harness, reserve_usd=1, reserve_minutes=1, locks=[], lock_seconds=60,
                       max_job_running=4)

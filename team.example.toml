@@ -4,7 +4,7 @@
 # Always present, whatever this says (they cannot be removed): engineering_lead (EL), qa, engineer
 # (one or more) and an independent judge.
 #
-# optional_roles lists the optional seats that are on by default:
+# optional_roles lists the optional launches that are on by default:
 #   product_manager  owns the user-facing requirements and the acceptance
 #   build_engineer   owns build, CI and gating, rebased-result gating, scoped fix rounds, build-slot use
 #   reviewer, verifier  the existing optional peer-review and checking roles
@@ -16,8 +16,8 @@
 optional_roles = ["product_manager"]
 
 # DRIVE JOBS (`swarm activate --goal`, driven by the session driver): the lead (EL) staffs the job with
-# `swarm seat request`, so the invoking session is only the requester/observer and no PM spawns or PM event
-# loop is needed. The driver reads [land] and [ci] below for its integrator seats and for `swarm land`
+# `swarm launch`, so the invoking session is only the requester/observer and no PM spawns or PM event
+# loop is needed. The driver reads [land] and [ci] below for its integrator launches and for `swarm land`
 # (fast-forward only, CI green on the exact rebased SHA); per-role models are `[drive.models]` in
 # config.toml (docs/REFERENCE.md#drive-mode). The "PM procedure per event" in the engineering-team skill
 # applies to non-drive jobs only (`--no-drive --reason TEXT`).

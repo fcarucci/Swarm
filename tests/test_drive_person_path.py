@@ -21,13 +21,13 @@ class PersonPathTest(unittest.TestCase):
 
     def test_requester_session_is_allowed(self):
         """The job's requester session (the hook attested it) may run `swarm drive models`."""
-        who = person.Caller(seat=None, action_id="requester:sess-1")
+        who = person.Caller(launch=None, action_id="requester:sess-1")
         with mock.patch.object(person, "caller", return_value=who):
             self.assertIsNone(drive_activate._person("drive models", self.cfg, "J", args=object()))
 
-    def test_seat_is_refused_with_a_message(self):
-        """A seat is refused with text, never an exception escaping the CLI."""
-        who = person.Caller(seat="eng-1", action_id="seat:eng-1")
+    def test_launch_is_refused_with_a_message(self):
+        """A launch is refused with text, never an exception escaping the CLI."""
+        who = person.Caller(launch="eng-1", action_id="launch:eng-1")
         with mock.patch.object(person, "caller", return_value=who):
             refusal = drive_activate._person("drive models", self.cfg, "J", args=object())
         self.assertIsNotNone(refusal)

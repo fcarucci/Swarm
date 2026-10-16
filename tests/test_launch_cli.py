@@ -1,9 +1,9 @@
-"""Drive control commands (Task 6b): halt/unhalt, seat request/list/show/release/cancel, review,
+"""Drive control commands (Task 6b): halt/unhalt, launch/list/show/release/cancel, review,
 goal-ready, drive repair. Handlers run through the real CLI parser against the memory board, under a temporary
 HOME inside the suite sandbox. The caller is attested the way the PreToolUse hook does it
 (drivegate.write_grants for the session's own shell call: the requester by the ledger's requester_session, a
-seat by the context the host-private chain gives it, built here directly); the job's lead is a real `lead`
-seat row (its state set on the memory store: a seat starts running only through a launch claim)."""
+launch by the context the host-private chain gives it, built here directly); the job's lead is a real `lead`
+launch row (its state set on the memory store: a launch starts running only through a launch claim)."""
 from __future__ import annotations
 
 import contextlib
@@ -32,7 +32,7 @@ ENG_KEY = "k-eng"
 
 class ControlCase(unittest.TestCase):
     def setUp(self):
-        self.home = Path(tempfile.mkdtemp(dir=SANDBOX, prefix="seatcli-home-"))
+        self.home = Path(tempfile.mkdtemp(dir=SANDBOX, prefix="launchcli-home-"))
         self.work = self.home / "work"
         self.work.mkdir()
         p = mock.patch.dict(os.environ, home_env(self.home))
@@ -48,7 +48,7 @@ class ControlCase(unittest.TestCase):
         led = ledger.create(self.bkey, JOB, budgets={}, activated_at=self.board.now().isoformat())
         led.requester_session = REQ_SESSION   # what activation records (the hook's requester_context reads it)
         led.save()
-        self.seat_of = {}   # session -> (job, seat) the host-private chain resolves (drivegate.seat_context)
+        self.launch_of = {}   # session -> (job, launch) the host-private chain resolves (drivegate.launch_context)
         enrolment.write_job_owner(self.bkey, job=JOB, harness="claude", session_id=REQ_SESSION,
                                   cwd=str(self.work))
         self.cfg["supervise"] = {"allowed_workdirs": [str(self.work)]}
@@ -63,9 +63,9 @@ class ControlCase(unittest.TestCase):
         self.agent_id = None
         self.set_session(REQ_SESSION)
 
-    def make_lead(self, key, seat="lead", state="running"):
-        """A real lead seat row of generation 1 holding `key` (what a launch and the seat's enrolment make)."""
-        row = self.board.queue_launch(JOB, 1, seat, role="engineering_lead", harness="claude", model="opus",
+    def make_lead(self, key, launch="lead", state="running"):
+        """A real lead launch row of generation 1 holding `key` (what a launch and the launch's enrolment make)."""
+        row = self.board.queue_launch(JOB, 1, launch, role="engineering_lead", harness="claude", model="opus",
                                       workdir=str(self.work), brief="L.md", queued_by="activation")
         store = next(r for r in self.board._s().launches if r["id"] == row.id)
         store.update(agent_key=key, state=state)
@@ -83,26 +83,26 @@ class ControlCase(unittest.TestCase):
             for var in person.HOST_ENV:
                 os.environ.pop(var, None)
 
-    SEATS = {LEAD_KEY: "lead", ENG_KEY: "eng"}
+    LAUNCHES = {LEAD_KEY: "lead", ENG_KEY: "eng"}
 
-    def enrol(self, session, key, job=JOB, seat=None):
+    def enrol(self, session, key, job=JOB, launch=None):
         enrolment.write(self.bkey, job=job, agent_key=key, harness="claude", session_id=session,
                         cwd=str(self.work))
-        seat = seat or self.SEATS.get(key)
-        if seat:
-            self.seat_of[session] = (job, seat)
+        launch = launch or self.LAUNCHES.get(key)
+        if launch:
+            self.launch_of[session] = (job, launch)
 
-    def seat_ctx(self, session):
-        """The drivegate.Ctx seat_context gives a seat session (marker, run file and intent, here direct)."""
-        if session not in self.seat_of:
+    def launch_ctx(self, session):
+        """The drivegate.Ctx launch_context gives a launch session (marker, run file and intent, here direct)."""
+        if session not in self.launch_of:
             return None
-        job, seat = self.seat_of[session]
+        job, launch = self.launch_of[session]
         try:
             led = ledger.load(self.bkey, job)
         except ledger.LedgerBadError:
             led = None
-        intent = ledger.Intent(f"L-{seat}", f"A-{seat}", 1, seat, 0.0, 0.0, [], "claimed")
-        return drivegate.Ctx(kind="seat", job=job, led=led, seat=seat if led else None,
+        intent = ledger.Intent(f"L-{launch}", f"A-{launch}", 1, launch, 0.0, 0.0, [], "claimed")
+        return drivegate.Ctx(kind="launch", job=job, led=led, launch=launch if led else None,
                              intent=intent if led else None)
 
     def run_cmd(self, *argv):
@@ -113,7 +113,7 @@ class ControlCase(unittest.TestCase):
             payload = {"session_id": self.session, "tool_name": "Bash", "tool_input": {"command": command},
                        **({"agent_id": self.agent_id} if self.agent_id else {})}
             from swarm import hosts
-            drivegate.write_grants(self.cfg, payload, hosts.get("claude"), self.seat_ctx(self.session))
+            drivegate.write_grants(self.cfg, payload, hosts.get("claude"), self.launch_ctx(self.session))
         args = cli._parser().parse_args(list(argv))
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
@@ -121,8 +121,8 @@ class ControlCase(unittest.TestCase):
             rc = cli.BOARD_COMMANDS[args.cmd](self.board, self.cfg, args) or 0
         return rc, out.getvalue(), err.getvalue()
 
-    def queue_launch(self, seat="eng", role="engineer", workdir=None):
-        return self.run_cmd("run", "--job", JOB, "--name", seat, "--role", role,
+    def queue_launch(self, launch="eng", role="engineer", workdir=None):
+        return self.run_cmd("run", "--job", JOB, "--name", launch, "--role", role,
                             "--brief", "B.md", "--workdir", str(workdir or self.work))
 
     @staticmethod
@@ -160,13 +160,13 @@ class Run(ControlCase):
         self.assertIn("not a directory", err)
         self.assertIsNone(self.board.get_launch(JOB, 1, "eng"))
 
-    def test_run_is_in_the_broker_protocol_and_seat_is_removed(self):
-        from swarm import seatproto
-        req = seatproto.parse_cli(["run", "--job", JOB, "--name", "engineer", "--role", "engineer",
+    def test_run_is_in_the_broker_protocol_and_legacy_command_is_removed(self):
+        from swarm import launchproto
+        req = launchproto.parse_cli(["run", "--job", JOB, "--name", "engineer", "--role", "engineer",
                                    "--brief", "B.md"], str(self.work))
-        command, fields = seatproto.validate(req, JOB)
+        command, fields = launchproto.validate(req, JOB)
         self.assertEqual((command, fields["name"]), ("run", "engineer"))
-        self.assertFalse(any(c.startswith("seat ") for c in seatproto.SCHEMA))
+        self.assertFalse(any(c.startswith("seat ") for c in launchproto.SCHEMA))
         self.assertIn("run", drivegate.GRANT_SUBS)
         self.assertNotIn("seat", drivegate.GRANT_SUBS)
         choices = next(a.choices for a in cli._parser()._actions if isinstance(a, __import__("argparse")._SubParsersAction))

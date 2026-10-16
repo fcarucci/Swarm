@@ -68,7 +68,7 @@ Run these yourself; no one does it for you.
 
 - **Join once, first.** `swarm join --job JOB --key KEY --role ROLE` prints your unique name. Use the
   same `--key KEY` in every later command; it is how the board knows you. Add `--title "short label"`
-  if you want a seat label.
+  if you want a launch label.
 - **Read at the start**, **before each significant action** (editing shared files, starting a long
   command, spawning, answering) and **before you finish**: `swarm read --job JOB --key KEY`. It
   prints the messages posted since your last read and does not repeat them. `--peek` reads without
