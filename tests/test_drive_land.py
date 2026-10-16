@@ -782,7 +782,7 @@ class TypedErrors(LandCase):
         self.owner = {"remotes": {}, "credentials": {}}
         res = self.go(need_leases=False)
         self.assertFalse(res.ok)
-        self.assertIn("no destination", res.why)
+        self.assertIn("no landing destination: nothing to land", res.why)
 
 
 class FetchContinuation(LandCase):

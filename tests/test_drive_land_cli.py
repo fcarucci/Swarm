@@ -66,6 +66,14 @@ class LandCli(unittest.TestCase):
         self.assertEqual((m.group(1), int(m.group(2)), m.group(3)), ("post", msgs[0].id, "1"))
         self.assertIn("INTEGRATED", out)
 
+    def test_no_destination_prints_nothing_to_land_without_posting_a_request(self):
+        from types import SimpleNamespace
+        with mock.patch("swarm.enrolment.find_job_owner", return_value=SimpleNamespace(owner={"remotes": {}})):
+            code, out, err = run(land_cli._board_land, self.board, {}, ns())
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out.strip(), "this job has no landing destination: nothing to land")
+        self.assertEqual(self.messages(), [])
+
     def test_not_a_drive_job_is_refused(self):
         self.board.set_job_data("J", "drive.enabled", None)
         code, out, err = run(land_cli._board_land, self.board, {}, ns())

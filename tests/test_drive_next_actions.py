@@ -18,7 +18,7 @@ CFG = {
     "ruling_grace_minutes": 15, "question_expiry": "4h", "stall_minutes": 90, "driver_error_passes": 6,
     "max_concurrent_sessions": 4, "lease_hold_minutes": 60, "recipe": "coding", "review_role": "reviewer",
 }
-ARTIFEXT_CFG = {**CFG, "recipe": "artifact", "review_role": None}
+ARTIFEXT_CFG = {**CFG, "recipe": "artifact", "review_role": None, "landing_required": False}
 
 A = "feat/a@" + "a" * 40          # artifact of group feat/a
 B = "feat/b@" + "b" * 40          # artifact of group feat/b
@@ -374,11 +374,11 @@ class MetNeedsTheCandidateLanded(unittest.TestCase):
     landed (origin and backup main still at the initial commit; no reviewer, integrator or INTEGRATED)."""
     CAND = "c" * 40
 
-    def test_ruling_met_on_an_unlanded_candidate_is_recorded_unreachable_not_closed(self):
+    def test_ruling_met_on_an_unlanded_candidate_escalates_if_artifact_is_missing(self):
         s = snap(goal_verdict=v("met", scope="ruling", candidate=self.CAND))
         (a,) = next_actions(s, CFG)
-        self.assertEqual((a.kind, a.ruling), ("record_unreachable", True))
-        self.assertIn("not landed", a.reason)
+        self.assertEqual((a.kind, a.ruling), ("escalate_landing", False))
+        self.assertIn("met, landing blocked", a.reason)
 
     def test_goal_met_on_an_unlanded_candidate_does_not_close(self):
         s = snap(launches={"lead": launch("lead", "done", **LEAD)}, goal_verdict=v("met", scope="goal", candidate=self.CAND),

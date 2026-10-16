@@ -491,10 +491,12 @@ class LandedGateTests(LifeCase):
     when the judged candidate is landed, verified on every destination (QA live-met 20261012T132049 closed MET
     with nothing landed)."""
 
-    def owner(self, recipe):
+    def owner(self, recipe, remotes=None):
         from swarm import enrolment
         enrolment.write_job_owner("bk", job="J", harness="claude", session_id=None, cwd=str(self.home),
                                   roots=[str(self.home)], recipe=recipe, goal="G", review_role="reviewer",
+                                  remotes=remotes if remotes is not None else ({"origin": "https://example.test/r.git"}
+                                                                            if recipe == "coding" else {}),
                                   review_gates="standard")
 
     def land(self, sha=CAND, state="verified"):
@@ -507,6 +509,12 @@ class LandedGateTests(LifeCase):
             launch=None, kind="land", record_id="7", rev=1,
             content_sha=receipts.content_sha("land", {"destinations": dest}), args_sha="0" * 64,
             expires_at=time.time() + 3600, destinations=dest))
+
+    def test_destination_free_coding_met_passes_the_close_gate(self):
+        self.owner("coding", remotes={})
+        self.pending_met()
+        self.assertEqual(life.landed_gate(self.b, self.cfg, self.led, self.led.terminal_intent, self.at(1)).verdict,
+                         "pass")
 
     def test_unlanded_coding_met_is_refused_at_close(self):
         self.owner("coding")

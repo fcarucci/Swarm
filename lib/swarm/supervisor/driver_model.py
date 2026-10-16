@@ -5,7 +5,7 @@
 this module does not depend on it. `Launch` is the board's row (Task 3); the driver reads it as `LaunchView`."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import datetime as dt
 from datetime import datetime
 from typing import Any
@@ -13,6 +13,7 @@ from typing import Any
 # Action kinds the pure `next_actions` may return (spec 3.2-3.3, plus the rollover completion of 3.5-3.6).
 ACTION_KINDS = (
     "launch", "record_unreachable", "close", "hold", "nothing", "rollover", "stop_launch", "complete_land",
+    "escalate_landing",
 )
 
 # Verdict values a judge may return; a `not_met` in drive mode carries `open` (spec 3.6).
@@ -196,7 +197,7 @@ class _Ctx:
 
     def __init__(self, s: Snapshot, cfg: dict) -> None:
         self.s = s
-        self.cfg = {**DEFAULT_CFG, **cfg, **(s.ledger.budgets or {})}
+        self.cfg = {"landing_required": True, **DEFAULT_CFG, **cfg, **(s.ledger.budgets or {})}
         self.now = s.now
         self.live = s.live
         self.launches = s.launches
@@ -314,22 +315,46 @@ def candidate_landed(integrated: dict, candidate: str | None) -> bool:
 
 
 def _terminal(c: _Ctx) -> list[Action] | None:
-    """Step 2 (spec 3.3): a receipted terminal goal or ruling verdict closes the job (spec 3.7). In a coding job a
-    MET closes only when the judged candidate has landed (candidate_landed): a MET on unlanded work is not the
-    goal met. An unlanded ruling MET is recorded UNREACHABLE (the ruling is the job's last word: the work exists
-    but did not land within the budget); an unlanded goal MET does not close and the job keeps driving."""
+    """A terminal verdict closes after learnings; a MET waits only for pinned destinations."""
     gv = c.s.goal_verdict
     if _valid(gv, c.s.generation) and gv.verdict in ("met", "unreachable") and gv.scope in ("goal", "ruling"):
-        if gv.verdict == "met" and c.cfg["recipe"] != "artifact" and not candidate_landed(c.s.integrated,
-                                                                                         gv.candidate):
-            if gv.scope == "ruling":
-                return _learn_first(c, gv.receipt_id) or [
-                    c.act("record_unreachable", None, "ruling", 0, prompt="mechanical", trigger=gv.receipt_id,
-                          ruling=True, reason="ruling met, but the candidate is not landed")]
-            return None
+        if gv.verdict == "met" and c.cfg["landing_required"] and not candidate_landed(
+                c.s.integrated, gv.candidate):
+            return _met_landing(c, gv)
         return _learn_first(c, gv.receipt_id) or [
             c.act("close", None, None, 0, prompt="close", trigger=gv.receipt_id, reason=gv.verdict)]
     return None
+
+
+def _met_landing(c: _Ctx, gv: VerdictView) -> list[Action]:
+    """MET is settled goal evidence: retry landing, or notify on backoff, never rule unreachable."""
+    candidate = gv.candidate or ""
+    sha = candidate.rpartition("@")[2]
+    h = next((h for h in reversed(c.s.handoffs) if h.artifact.endswith("@" + sha)), None)
+    artifact = h.artifact if h else candidate
+    group = artifact.partition("@")[0] if "@" in artifact else "landing"
+    if c.inflight(group):
+        return [c.act("nothing", None, None, 0, responsible="integrator", reason="met, landing in flight")]
+    key = f"met-landing:{gv.receipt_id}"
+    until = c.s.ledger.watermarks.get(key + ":retry-at", 0)
+    if until > c.now.timestamp():
+        return [c.act("hold", None, group, 0, reason="met, landing retry backoff",
+                      not_before=dt.datetime.fromtimestamp(until, dt.timezone.utc))]
+    base = c.aid("integrate", None, group, 0, str(gv.receipt_id))
+    prior = [i for i in c.s.ledger.intents if i.action_id.startswith(base + "|retry")]
+    n = sum(i.outcome not in UNCOUNTED_OUTCOMES for i in prior)
+    error = (c.s.integrated.get(group) or {}).get("landing_error")
+    reason = error or (prior[-1].outcome if prior else None) or "integrator attempts exhausted"
+    if ("@" not in artifact or n >= c.cfg["max_attempts"]
+            or (prior and prior[-1].outcome not in UNCOUNTED_OUTCOMES
+                and c.s.ledger.watermarks.get(key + ":notified", 0) < len(prior))):
+        if "@" not in artifact:
+            reason = "no artifact identifies the candidate to land"
+        return [c.act("escalate_landing", None, group, n, trigger=gv.receipt_id, artifact=artifact,
+                      reason=f"met, landing blocked: {reason}")]
+    action = c.act("launch", None, group, 0, prompt="integrate", trigger=gv.receipt_id,
+                   artifact=artifact, reason="met, candidate awaits landing")
+    return [replace(action, action_id=base + f"|retry{len(prior)}")]
 
 
 def _learn_first(c: _Ctx, trigger) -> list[Action] | None:
@@ -502,7 +527,7 @@ def _pipeline(c: _Ctx) -> list[Action] | None:
         elif vd.verdict == "not_met":                                          # not_met → fix (3.6)
             act = _fix(c, group, art, rnd, owner, "not-met", vd.receipt_id)
         elif vd.verdict == "met":
-            if cfg["recipe"] == "artifact":                                    # 3.7 [G3]: no integration
+            if not cfg["landing_required"]:                                    # no pinned destination
                 continue
             if ig.get("blocked"):                                              # FINALIZE_BLOCKED (3.8)
                 act = _fix(c, group, art, rnd, owner, "finalize-blocked", ig.get("blocked_id", rec))
@@ -595,9 +620,9 @@ def _ts_of(gr: dict) -> datetime | None:
 
 
 def _goal(c: _Ctx) -> list[Action] | None:
-    """Step 9 (spec 3.7, 3.7 [G3], [F9]): GOAL-READY with nothing live and every non-withdrawn group integrated
-    (coding: at least one such group; none is not ready) or judged met (artifact) launches the goal judge. The verdict must bind the pinned requirements
-    (`req`), so a GOAL-READY without one is not judged."""
+    """GOAL-READY with nothing live launches the goal judge once every group is landed
+    (when destinations are pinned, at least one group) or judged met (no destinations).
+    The verdict binds pinned requirements (`req`); GOAL-READY without them is not judged."""
     s = c.s
     gr = s.goal_ready
     if gr is None or not gr.get("req") or c.live or c.inflight("goal"):
@@ -606,20 +631,20 @@ def _goal(c: _Ctx) -> list[Action] | None:
     at = _ts_of(gr)
     if _valid(gv, s.generation) and (gv.verdict != "not_met" or at is None or gv.at is None or at <= gv.at):
         return None
-    artifact = c.cfg["recipe"] == "artifact"
+    no_landing = not c.cfg["landing_required"]
     landed = 0
     for group, h in {x.group: x for x in s.handoffs}.items():
         ig = s.integrated.get(group) or {}
         if ig.get("withdrawn"):
             continue
-        if artifact:
+        if no_landing:
             vd = _verdict(c, h.artifact)
             if vd is None or vd.verdict != "met":
                 return None
         elif not ig.get("landed") or ig.get("blocked"):
             return None
         landed += 1
-    if not artifact and not landed:
+    if not no_landing and not landed:
         # a coding job with no (non-withdrawn) hand-off group has landed nothing: "no groups" is not "all
         # integrated" (an engineer's DONE that was never receipted leaves none). Not ready: the fallback
         # wakes the lead for work, never the goal judge on an unlanded branch.

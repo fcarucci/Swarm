@@ -274,6 +274,8 @@ def _check_tamper(board, cfg, state, led, js, owner, data, now, m, say) -> str |
     if js is not None and js.status in CLOSED and _own_close(led, js, m):
         return None                                    # the driver's own close; terminalize commits it
     if js is not None and js.status in CLOSED and _person_deactivated(led, led.board_key, now):
+        if js.status == "completed":
+            return "completed" if m.life.complete_by_person(board, cfg, led, now) else "held"
         if _cancel(board, cfg, led, now, m):
             say(f"drive: {led.job} cancelled by its requester")
             return "cancelled"
@@ -332,12 +334,36 @@ def _stop_launch(board, cfg, led, launch: str, m) -> None:
         life.Hooks().stop_rows(board, cfg, rows)
 
 
+def _escalate_landing(board, led, snap, now, reason: str) -> None:
+    """Use F03's launch failure notification path and keep MET active for retry."""
+    key = f"met-landing:{snap.goal_verdict.receipt_id}"
+    if led.watermarks.get(key + ":retry-at", 0) > now.timestamp():
+        return
+    # The model counts this candidate's attempts in its action; remember all completed retries here.
+    n = sum(1 for i in led.intents if "|integrate|" in i.action_id
+            and f"|{snap.goal_verdict.receipt_id}|retry" in i.action_id)
+    def mark(l):
+        l.watermarks[key + ":retry-at"] = int(now.timestamp()) + 300
+        l.watermarks[key + ":notified"] = n
+    _mutate(led, mark)
+    text = f"{ev.DRIVER_ESCALATE} {reason}; retry in 300s"
+    target = led.requester_session or "owner"
+    board.post_event(led.job, "launch-failed", f"met-landing:{led.generation}:{int(now.timestamp())}",
+                     text, to=target)
+    board.post(led.job, SUPERVISOR, text, to=target)
+
+
 def _act(board, cfg, sup, led, snap, actions, now, start_runner, config_path, jdeadline, m) -> None:
     for a in actions:
         if _over(jdeadline):
             return
         if a.kind == "launch":
-            m.exec.execute(board, cfg, sup, led, a, start_runner=start_runner, now=now, config_path=config_path)
+            result = m.exec.execute(board, cfg, sup, led, a, start_runner=start_runner, now=now, config_path=config_path)
+            if result is None and a.reason == "met, candidate awaits landing":
+                reason = m.exec.reservation_reason(m.exec._dcfg(cfg, led), led, False, now)
+                _escalate_landing(board, led, snap, now, "met, landing blocked: " + (reason or "integrator refused"))
+        elif a.kind == "escalate_landing":
+            _escalate_landing(board, led, snap, now, a.reason)
         elif a.kind in ("record_unreachable", "close"):
             if _terminal_from(snap, led, board, now, m, a):
                 m.life.terminalize(board, cfg, led, now)
@@ -545,6 +571,11 @@ def _land(board, cfg, led, owner, snap, flat, now, say, jdeadline, m, config_pat
     pending = any(r.pending for _req, r in results)
     for request, res in results:
         if not res.pending:
+            if not res.ok:
+                branch = (request.artifact or "").partition("@")[0]
+                def note(l):
+                    l.integrated.setdefault(branch, {})["landing_error"] = res.why
+                _mutate(led, note)
             _idle_integrator(board, led, (request.artifact or "").partition("@")[0], m)
     count = led.watermarks.get(LAND_PENDING_KEY, 0)
     if pending:

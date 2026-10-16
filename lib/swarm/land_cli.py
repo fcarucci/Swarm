@@ -85,6 +85,12 @@ def _board_land(board, cfg: dict, args) -> int:
         print(f"refused: {safe(args.job)} is not a drive job; there the integrator lands as the team recipe says",
               file=sys.stderr)
         return 1
+    from swarm import enrolment
+    from swarm.board.autoinit import store_key
+    owner = enrolment.find_job_owner(store_key(cfg), args.job)
+    if owner is not None and not land.landing_required(owner.owner):
+        print("this job has no landing destination: nothing to land")
+        return 0
     if not args.name and args.key:
         args.name = board.active_agent_name(args.key)
     if not args.name:

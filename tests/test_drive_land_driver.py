@@ -49,6 +49,19 @@ class DriverCase(LandCase):
 
 
 class Run(DriverCase):
+    def test_no_destination_refuses_once_and_consumes_repeated_requests(self):
+        self.owner["remotes"] = {}
+        for _ in range(53):
+            self.submit()
+        with mock.patch.object(driver_land, "claim_leases", side_effect=AssertionError("must not land")):
+            results = self.run_pass()
+            self.assertEqual(len(results), 1)
+            self.assertIn("nothing to land", results[0][1].why)
+            self.submit()
+            self.assertEqual(self.run_pass(), [])
+        self.assertEqual(len([m for m in self.texts() if m.startswith("LAND-REFUSED")]), 1)
+        self.assertEqual(driver_land.complete_all(self.board, {}, self.env(), "J"), [])
+
     def test_land_request_executed_by_driver(self):
         mid = self.submit()
         done = self.run_pass()

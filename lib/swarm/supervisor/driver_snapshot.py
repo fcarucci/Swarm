@@ -61,7 +61,8 @@ def drive_cfg(board_key: str, job: str, cfg: dict) -> dict:
         raise DriveConfigError(f"job {job!r}: owner record lacks {missing}")
     if details["recipe"] not in RECIPES:
         raise DriveConfigError(f"job {job!r}: owner recipe {details['recipe']!r} is not one of {list(RECIPES)}")
-    return {**cfg, "recipe": details["recipe"], "review_role": details["review_role"],
+    from swarm.land import landing_required
+    return {**cfg, "landing_required": landing_required(details), "recipe": details["recipe"], "review_role": details["review_role"],
             "review_gates": details["review_gates"]}
 
 
@@ -199,6 +200,7 @@ def _integrated(led: Any, rc: _Receipts, blocked: dict[str, tuple[int, str]]) ->
             "blocked": block[1] if block else None,
             "blocked_id": block[0] if block else None,
             "withdrawn": entry.get("withdrawn") or None,
+            "landing_error": entry.get("landing_error"),
             "lease_held_since": entry.get("lease_held_since"),
         }
     return out

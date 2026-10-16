@@ -179,6 +179,16 @@ def run(board, cfg: dict, env: LandEnv, job: str) -> list:
     done, held_groups, open_ids = [], set(), []
     low = env.led.watermarks.get(WATERMARK, 0)
     requests = land.find_requests(board, env, job, after=low)
+    if requests and not land.landing_required(env.owner):
+        # No destination is permanent for this activation. Refuse once, consume the rest;
+        # the destination-free MET path completes instead of re-staffing integrators.
+        if not env.led.watermarks.get("land.no-destination"):
+            done.append((requests[0], execute_request(board, cfg, env, job, requests[0])))
+        def consume(led):
+            led.watermarks["land.no-destination"] = 1
+            led.watermarks[WATERMARK] = max(r.id for r in requests)
+        land.update_ledger(env.led, consume)
+        return done
     for request in requests:
         branch = land.parse_artifact(request.artifact)[0]
         if request.id <= env.led.watermarks.get(_group_mark(branch), 0):
@@ -204,6 +214,8 @@ def run(board, cfg: dict, env: LandEnv, job: str) -> list:
 def _unfinished(board, env: LandEnv, job: str) -> list:
     """Requests with a land journal that is not complete, or complete but not recorded landed."""
     out = []
+    if not land.landing_required(env.owner):
+        return out
     now = env.now()
     for request in land.find_requests(board, env, job, after=0):
         branch, sha = land.parse_artifact(request.artifact)

@@ -455,7 +455,7 @@ class FakeLand:
 
     def run(self, board, cfg, env, job):
         self.envs.append(env)
-        return [(r, SimpleNamespace(pending=self.pending)) for r in self.requests]
+        return [(r, SimpleNamespace(pending=self.pending, ok=not self.pending, why="")) for r in self.requests]
 
 
 class LandTests(PassCase):
@@ -896,6 +896,19 @@ class TamperTests(PassCase):
 
 
 
+
+    def test_person_completed_met_preserves_outcome_and_commits_met_in_the_ledger(self):
+        self.job()
+        self.requester_deactivate_receipt()
+        key = "j-met"
+        name = self.board.allocate_name(key, "J", "judge")
+        self.board.claim_judge(key, "J")
+        self.assertTrue(self.board.record_verdict("J", name, "met", "goal met", scope="goal", generation=1))
+        self.board.close_job("J", "completed", "Person accepts the unlanded work", closed_by="cli")
+        self.drive()
+        self.assertEqual(self.board.job_status("J").outcome, "Person accepts the unlanded work")
+        self.assertEqual(self.load().terminal["verdict"], "met")
+        self.assertEqual(self.board.job_status("J").status, "completed")
 
     def test_a_cancel_needs_the_job_to_be_closed(self):
         self.job()

@@ -3358,9 +3358,23 @@ def cmd_deactivate(cfg: dict, args) -> int:
             print(f"not completing {args.job}: cannot check the judge's verdict (board not reachable: "
                   f"{_error_name(exc)}). Retry, or override with --force.", file=sys.stderr)
             return 1
-    refusal = _completion_refusal(js) if completing else None
-    if completing and board is not None and js is not None and js.goal and not args.force:
-        from swarm.review import latest_handoffs, pending_artifacts, auto_close_pending
+    met = js is not None and js.verdict == "met" and js.verdict_scope in (None, "goal", "ruling")
+    if (completing and board is not None and js is not None and not met and not args.force
+            and board.job_data(args.job).get("drive.enabled") == "1"):
+        # Artifact verdicts can overwrite the legacy latest-verdict column. The drive snapshot
+        # retains the latest goal/ruling verdict independently of those artifact updates.
+        from swarm import drive_activate
+        from swarm.supervisor import driver_snapshot, ledger
+        try:
+            led = ledger.load(drive_activate.board_key(cfg), args.job)
+        except (ledger.LedgerBadError, OSError):
+            led = None
+        if led is not None:
+            gv = driver_snapshot.read(board, led, args.job, cfg=cfg, now=board.now()).goal_verdict
+            met = gv is not None and gv.verdict == "met"
+    refusal = _completion_refusal(js) if completing and not met else None
+    if completing and board is not None and js is not None and js.goal and not met and not args.force:
+        from swarm.review import latest_handoffs, pending_artifacts, unfinalized_artifacts
         from swarm.supervisor.pipeline import sync_handoffs
         from swarm.review import ensure_started
         ensure_started(board, args.job)
@@ -3374,10 +3388,12 @@ def cmd_deactivate(cfg: dict, args) -> int:
             pending = pending_artifacts(board, args.job)
             refusal = (f"not completing {args.job}: artifacts await a met verdict: " + ', '.join(pending)
                        if pending else None)
-            if not refusal and auto_close_pending(board, args.job):
+            unfinalized = unfinalized_artifacts(board, args.job)
+            if not refusal and unfinalized:
                 refusal = (f'not completing {args.job}: accepted artifacts await finalization: finish '
                            f'integration (rebase, PR, CI), then the executor posts FINALIZED <artifact> '
-                           f'(INTEGRATED for coding); a learning does not replace it. Retry deactivate after that')
+                           f"(INTEGRATED for coding); unfinalized: {', '.join(unfinalized)}. "
+                           f'Retry deactivate after that')
     if refusal and not args.force:
         board.close()
         print(refusal, file=sys.stderr)

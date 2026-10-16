@@ -285,23 +285,27 @@ def pending_artifacts(board, job: str, handoffs=None) -> list[str]:
     return pending
 
 
-def auto_close_pending(board, job: str) -> bool:
-    """A pipeline hand-off stays open until a separate executor records finalization."""
+def unfinalized_artifacts(board, job: str) -> list[str]:
+    """Current artifacts still awaiting acceptance or separate executor finalization."""
     messages = board.pipeline_messages(job)   # read once: a long job has thousands of messages
     handoffs = latest_handoffs(board, job, messages)
-    if pending_artifacts(board, job, handoffs):
-        return True
+    pending = pending_artifacts(board, job, handoffs)
     data = board.job_data(job)
     verdicts = artifact_verdicts(board, job)
     for h in handoffs:
         superseded = 'pipeline.superseded.' + hashlib.sha256(h.artifact.encode()).hexdigest()[:32]
-        if data.get(superseded) or integrated(board, job, h.artifact):
+        if h.artifact in pending or data.get(superseded) or integrated(board, job, h.artifact):
             continue
         since = dt.datetime.fromisoformat(verdicts[h.artifact]['at'])
         if not any(m.created_at >= since and m.message.startswith(('FINALIZED ', 'INTEGRATED '))
                    and m.message.partition(' ')[2] == h.artifact for m in messages):
-            return True
-    return False
+            pending.append(h.artifact)
+    return pending
+
+
+def auto_close_pending(board, job: str) -> bool:
+    """A pipeline hand-off stays open until a separate executor records finalization."""
+    return bool(unfinalized_artifacts(board, job))
 
 
 def clear_verdict_data(raw: str | None) -> str:

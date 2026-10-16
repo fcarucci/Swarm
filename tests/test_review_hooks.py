@@ -29,6 +29,33 @@ class ReviewHookTests(GoalEnv):
                                '--artifact', artifact, verdict, *extra)
         self.assertEqual(rc, 0, err)
 
+    def test_person_can_complete_goal_met_despite_unfinalized_handoff_and_preserves_outcome(self):
+        self.done('report.md')
+        self.verdict('report.md')
+        with self.board() as b:
+            self.assertTrue(b.record_verdict('J', self.judge, 'met', 'goal satisfied', scope='goal'))
+        with self.board() as b:
+            self.assertTrue(review.auto_close_pending(b, 'J'))
+        rc, _, err = self.cli('deactivate', '--job', 'J', '--status', 'completed', '--outcome', 'Owner accepts report')
+        self.assertEqual(rc, 0, err)
+        self.assertEqual((self.job().status, self.job().outcome), ('completed', 'Owner accepts report'))
+
+    def test_person_can_complete_ruling_met_despite_unfinalized_handoff(self):
+        self.done('report.md')
+        self.verdict('report.md')
+        with self.board() as b:
+            self.assertTrue(b.record_verdict('J', self.judge, 'met', 'ruling met', scope='ruling'))
+        rc, _, err = self.cli('deactivate', '--job', 'J', '--status', 'completed', '--outcome', 'Accepted by owner')
+        self.assertEqual(rc, 0, err)
+        self.assertEqual((self.job().status, self.job().outcome), ('completed', 'Accepted by owner'))
+
+    def test_without_goal_met_completion_lists_unfinalized_artifacts(self):
+        self.done('report.md')
+        self.verdict('report.md')
+        rc, _, err = self.cli('deactivate', '--job', 'J', '--status', 'completed')
+        self.assertEqual(rc, 1)
+        self.assertIn('unfinalized: report.md', err)
+
     def test_changed_goal_invalidates_artifact_verdicts(self):
         self.done()
         self.verdict()

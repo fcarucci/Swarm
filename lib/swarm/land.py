@@ -180,6 +180,15 @@ def credential_from_pin(pin: str | None, *, config_dir: str | None = None) -> di
     raise LandRefused(f"the pinned credential {kind!r} is not usable (helper:/abs, ssh-key:/abs, ssh-agent:/abs)")
 
 
+def landing_required(owner: dict | None) -> bool:
+    """Landing is required only when activation pinned a remote destination.
+
+    target_branch selects the branch on those remotes (legacy records default to main);
+    a branch name alone does not name a destination.
+    """
+    return bool((owner or {}).get("remotes"))
+
+
 def destinations_from_owner(owner: dict, *, config_dir: str | None = None) -> list[Destination]:
     """The pinned destinations, sorted by normalised URL, duplicates (the same push URL under two
     remote names) collapsed. LandRefused when the owner record pins none."""
@@ -195,7 +204,7 @@ def destinations_from_owner(owner: dict, *, config_dir: str | None = None) -> li
         where = ((owner or {}).get("config_dirs") or {}).get(name) or config_dir
         out.append(Destination(name, url, credential_from_pin(creds.get(name), config_dir=where)))
     if not out:
-        raise LandRefused("the owner record pins no destination to land on")
+        raise LandRefused("this job has no landing destination: nothing to land")
     return sorted(out, key=lambda d: normalize_url(d.url))
 
 

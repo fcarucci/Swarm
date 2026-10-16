@@ -76,18 +76,18 @@ def _stub_gate(board, cfg, led, intent, now) -> Gate:
 
 
 def landed_gate(board, cfg, led, intent, now) -> Gate:
-    """The close-time check of a pending MET of a coding job: the judged candidate must be landed, i.e. the
+    """The close-time check of a pending MET with pinned destinations: the judged candidate must be landed, i.e. the
     head of a group whose land receipt is verified at that sha on every pinned destination (the snapshot's own
-    rule, driver_model.candidate_landed). A MET on unlanded work is refused. An artifact job is not checked; a job
+    rule, driver_model.candidate_landed). A destination-free job passes; a job
     whose owner record cannot be read is "unknown" (fails closed)."""
     if intent.get("verdict") != "met":
         return Gate()
     from swarm.supervisor import driver_model as dm, driver_snapshot as ds
     try:
-        recipe = ds.drive_cfg(led.board_key, led.job, cfg or {})["recipe"]
+        required = ds.drive_cfg(led.board_key, led.job, cfg or {})["landing_required"]
     except ds.DriveConfigError as exc:     # fails closed: a missing or bad owner record never closes a MET
         return Gate("unknown", f"the owner record of this job cannot be read ({exc}): the landing is not known")
-    if recipe == "artifact":
+    if not required:
         return Gate()
     rc = ds._Receipts(led, led.job, intent.get("generation") or led.generation, now)
     if dm.candidate_landed(ds._integrated(led, rc, {}), intent.get("candidate")):
@@ -343,7 +343,7 @@ def enforce_deadlines(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks |
     or a snapshot). Past a deadline with no terminal outcome pending, records the mechanical UNREACHABLE
     ledger-first (then on the board, if it can be now) and starts terminalization. Skips halted jobs.
     True when it did (begin_terminal refuses while an outcome is already pending)."""
-    if led.terminal is not None or led.halted is not None:
+    if led.terminal is not None or led.halted is not None or led.watermarks.get("person-complete"):
         return False
     if led.terminal_intent is None and any(k.startswith(("verdict-missing:", "lead-blocked:", "driver-error:")) for k in led.watermarks):
         return False  # driver and launch failures are retried, never judged as goal failures
@@ -357,11 +357,12 @@ def enforce_deadlines(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks |
     # A ruling that arrived before this pass wins over the mechanical deadline. In particular,
     # not_met must reach the model's fix round before a stale ruling_due_at can fail the job.
     js = board.job_status(led.job)
-    if js is not None and js.verdict_scope == "ruling" and js.verdict_generation == led.generation:
+    if js is not None and js.verdict_generation == led.generation:
         from swarm.supervisor import driver_snapshot
         ruling = driver_snapshot.read(board, led, led.job, cfg=cfg, now=now).goal_verdict
-        if (ruling is not None and ruling.scope == "ruling" and ruling.generation == led.generation
-                and ruling.receipt_id is not None and led.watermarks.get("ruling-fix") != ruling.receipt_id):
+        if (ruling is not None and ruling.generation == led.generation and ruling.receipt_id is not None
+                and (ruling.verdict == "met" or (ruling.scope == "ruling"
+                     and led.watermarks.get("ruling-fix") != ruling.receipt_id))):
             return False
     intent = led.terminal_intent
     if intent is not None and intent["verdict"] == "met" and "terminal_stuck" in led.watermarks:
@@ -516,6 +517,24 @@ def cancel_job(board, cfg: dict, led, actor: str, now: dt.datetime, *, reason: s
     led.save()
     barrier.hit("terminal_intent_saved")
     return terminalize(board, cfg, led, now, hooks=hooks)
+
+
+def complete_by_person(board, cfg, led, now: dt.datetime) -> bool:
+    """Drain a receipted person's completed job, preserving its status and supplied outcome.
+
+    The caller verified the deactivate receipt and completed status. This bypasses landing gates,
+    just as the person's CLI completion does, and shares cancellation's session cleanup.
+    """
+    if led.terminal is not None:
+        repair_claim(board, led)
+        return True
+    if not led.watermarks.get("person-complete"):
+        led.terminal_intent = {"verdict": "met", "scope": "job", "generation": led.generation,
+                               "candidate": None, "req": None, "by": "person", "at": _iso(now)}
+        led.closing = "met: completed by a person"
+        led.watermarks["person-complete"] = 1
+        led.save()
+    return _terminalize_cancelled(board, cfg, led, led.terminal_intent, board.job_status(led.job), now, Hooks())
 
 
 def _terminalize_cancelled(board, cfg, led, intent: dict, js, now, hooks: Hooks) -> bool:

@@ -895,7 +895,12 @@ def drive_lines(cfg: dict, job: str) -> list:
         return [f"drive      ledger of {job} unreadable ({exc}): run swarm doctor"]
     if led is None:
         return []
-    return [budget_line(led), f"drive models {job}: {_models_text({**model_defaults(cfg), **led.models})}"]
+    from swarm.land import landing_required
+    owner = enrolment.find_job_owner(board_key(cfg), job)
+    details = getattr(owner, "owner", None)
+    landing = ("landing: required (destinations pinned)" if landing_required(details)
+               else "landing: none (no destination pinned)")
+    return [budget_line(led), f"drive models {job}: {_models_text({**model_defaults(cfg), **led.models})}", landing]
 
 
 # --- person path and the requester session ([F17]) --------------------------------------------
