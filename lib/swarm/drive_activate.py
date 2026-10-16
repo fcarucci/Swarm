@@ -900,7 +900,13 @@ def drive_lines(cfg: dict, job: str) -> list:
     details = getattr(owner, "owner", None)
     landing = ("landing: required (destinations pinned)" if landing_required(details)
                else "landing: none (no destination pinned)")
-    return [budget_line(led), f"drive models {job}: {_models_text({**model_defaults(cfg), **led.models})}", landing]
+    waiting = []
+    if led.terminal is None and led.watermarks.get("budget-hold"):
+        cap = {**budget_defaults(cfg), **led.budgets}["max_cost_usd"]
+        waiting = ["waiting on a person (budget)",
+                   f"waiting on: person (budget: cost {led.charged_usd():.2f}/{cap:.2f} USD; "
+                   f"raise with swarm drive budget --job {job} max_cost_usd=N)"]
+    return waiting + [budget_line(led), f"drive models {job}: {_models_text({**model_defaults(cfg), **led.models})}", landing]
 
 
 # --- person path and the requester session ([F17]) --------------------------------------------

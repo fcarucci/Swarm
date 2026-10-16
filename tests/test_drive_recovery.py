@@ -135,32 +135,17 @@ class Recovery(ExecEnv):
         self.assertGreater(held.not_before, self.now())
         self.assertEqual(self.b.job_status("J").status, "active")
 
-    def test_judge_missing_verdict_retries_then_escalates_with_backoff(self):
+    def test_ruling_missing_verdict_cannot_repeat_the_same_head(self):
         action = self.act(launch=None, kind="ruling", group="ruling", ruling=True,
                           reason="lead-no-hand-off")
-        for n in range(1, 4):
-            run = self.go(action)
-            self.assertIsNotNone(run)
-            self.settle(run, "no hand-off")
-            row = self.b.get_launch("J", 1, "ruling-judge")
-            self.assertEqual((row.state, row.attempts), ("queued", n))
-            s = snap(ledger=self.led, launches={"ruling-judge": launch("ruling-judge", "queued",
-                     role="judge", revision=row.revision)}, now=self.now())
-            (action,) = dm.next_actions(s, {})
-            if n < 3:
-                self.assertEqual((action.kind, action.prompt_kind), ("launch", "ruling"))
-                text = prompts.render(self.b, self.cfg, self.led, action, row)
-                self.assertIn("previous run ended without the mandatory verdict line", text)
-                self.assertIn("swarm verdict --job J --scope ruling", text)
-                self.assertIn("lead-no-hand-off", text)
-            else:
-                self.assertEqual(action.kind, "hold")
-                self.assertGreater(action.not_before, s.now)
+        self.settle(self.go(action), "no hand-off")
+        row = self.b.get_launch("J", 1, "ruling-judge")
+        s = snap(ledger=self.led, launches={"ruling-judge": launch("ruling-judge", "queued",
+                 role="judge", revision=row.revision)}, now=self.now())
+        (action,) = dm.next_actions(s, {})
+        self.assertEqual((action.kind, action.prompt_kind), ("hold", "budget"))
         self.assertEqual(self.b.job_status("J").status, "active")
         self.assertIsNone(self.led.terminal_intent)
-        self.assertTrue(any("DRIVER-ESCALATE" in m.message for m in self.b.recent_messages(100, job="J")))
-        self.led.ruling_due_at = iso(self.now() - dt.timedelta(hours=4))
-        self.assertFalse(life.enforce_deadlines(self.b, {}, self.led, self.now()))
 
     def test_artifact_judge_retry_preserves_task_and_stops_after_verdict(self):
         from drive_fixtures import ho

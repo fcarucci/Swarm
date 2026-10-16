@@ -1119,6 +1119,8 @@ def _table(headers: list[str], rows: list[list[str]], color: bool, status_col: i
 def _job_status_word(board, j, now) -> str:
     """The job's shown status: waiting / idle / active for an open job (derive_job_status)."""
     from swarm.board import derive_job_status
+    if j.status == "active" and board.job_data(j.job).get("drive.budget-hold"):
+        return "waiting on a person (budget)"
     return derive_job_status(j, float(board.board_cfg.get("idle_minutes", 5)), now)
 
 

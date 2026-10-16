@@ -206,9 +206,16 @@ def _judge_lines(board, cfg, led, launch, action) -> list[str]:
     if kind == "ruling" or action.ruling:
         cand = _ref(action.artifact or "the current target head", re.compile(r"[0-9a-f]{7,64}|the current target head"), "candidate")
         why = _ref(action.reason or "ledger", re.compile(r"[A-Za-z0-9 _:./-]{1,80}"), "reason")
-        spent = f"{led.charged_usd():.2f} of {float((led.budgets or {}).get('max_cost_usd', 0) or 0):.2f} USD"
-        return [f"You are the ruling judge. The driver called this ruling because: {why}. Do not assume the "
-                f"budget ran out: so far {spent} is spent (check `swarm status --job {led.job}` for the real limits). "
+        from swarm.supervisor.driver_exec import _dcfg
+        budget = _dcfg(cfg, led)
+        spent = f"{led.charged_usd():.2f} of {budget['max_cost_usd']:.2f} USD"
+        facts = ("This ruling is due to budget exhaustion. Record not_met with budget as the blocker; "
+                 "never record unreachable for a budget or limit. " if any(
+                     x in (action.reason or "") for x in ("budget", "wall-clock", "limit")) else
+                 "Do not assume the budget ran out. ")
+        return [f"You are the ruling judge. The driver called this ruling because: {why}. {facts}"
+                f"So far {spent} is spent, reserve {budget['ruling_reserve_usd']:.2f} USD, "
+                f"sessions {len(led.intents)}/{budget['max_sessions']}, wall limit {budget['max_wall_hours']} hours. "
                 f"Judge the current target head ({cand}) against the pinned requirements (digest {digest}) and record "
                 f"`swarm verdict --job {led.job} --scope ruling --candidate <sha> --req {digest} met|not_met|unreachable "
                 "--reason ... --details -`. unreachable ENDS THE JOB for good: record it only when the evidence shows "

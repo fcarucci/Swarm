@@ -144,128 +144,50 @@ class LifeCase(unittest.TestCase):
 
 
 class DeadlineTests(LifeCase):
-    def test_deadline_records_mechanical_unreachable_without_snapshot(self):
-        self.led.ruling_due_at = fx.iso(self.at(-121))
-        self.led.save()
-        try:
-            import swarm.supervisor.driver_snapshot  # noqa: F401
-            guard = mock.patch("swarm.supervisor.driver_snapshot.read", side_effect=RuntimeError)
-        except ImportError:                       # Task 7b not integrated yet: nothing to forbid
-            guard = contextlib.nullcontext()
-        with guard:
-            self.assertTrue(life.enforce_deadlines(self.b, self.cfg, self.led, self.t0))
-        js = self.job()
-        self.assertEqual((js.verdict, js.verdict_scope, js.verdict_generation), ("unreachable", "ruling", 1))
-        self.assertIn("mechanical", js.verdict_reason)
-        led = self.reload()
-        self.assertEqual((led.terminal_intent["verdict"], led.terminal_intent["scope"],
-                          led.terminal_intent["by"], led.terminal_intent["generation"]),
-                         ("unreachable", "ruling", life.MECHANICAL, 1))
-        self.assertEqual(led.closing, "unreachable: ruling deadline passed")
-        self.assertIsNone(led.terminal)
-        self.assertEqual(len(self.posts("DRIVER-MECHANICAL-UNREACHABLE")), 1)
+    def test_deadlines_escalate_without_a_verdict_or_attempt(self):
+        for key, value in (("ruling_due_at", fx.iso(self.at(-121))),
+                           ("activated_at", fx.iso(self.at(-26 * 60)))):
+            with self.subTest(key=key):
+                setattr(self.led, key, value)
+                self.led.save()
+                with mock.patch("swarm.supervisor.driver_snapshot.read", side_effect=RuntimeError):
+                    self.assertFalse(life.enforce_deadlines(self.b, self.cfg, self.led, self.t0))
+                self.assertIsNone(self.job().verdict)
+                self.assertIsNone(self.reload().terminal_intent)
+                self.assertTrue(self.led.watermarks["budget-hold"])
+                self.assertEqual(self.led.intents, [])
+        self.assertEqual(len(self.posts("DRIVER-ESCALATE budget:")), 1)
 
-    def test_ruling_deadline_boundary(self):
-        self.led.ruling_due_at = fx.iso(self.at(-120))
+    def test_ruling_deadline_boundary_and_budget_override(self):
+        self.led.ruling_due_at = fx.iso(self.at(-30))
+        self.led.budgets["ruling_deadline_minutes"] = 30
         self.led.save()
         self.assertFalse(life.enforce_deadlines(self.b, self.cfg, self.led, self.at(-0.001)))
-        self.assertIsNone(self.reload().terminal_intent)
-        self.assertTrue(life.enforce_deadlines(self.b, self.cfg, self.led, self.t0))
+        self.assertNotIn("budget-hold", self.reload().watermarks)
+        self.assertFalse(life.enforce_deadlines(self.b, self.cfg, self.led, self.t0))
+        self.assertTrue(self.reload().watermarks["budget-hold"])
 
-    def test_ruling_deadline_comes_from_config_and_the_jobs_budget(self):
-        self.led.ruling_due_at = fx.iso(self.at(-31))
-        self.assertFalse(life.enforce_deadlines(self.b, dict(self.cfg), self.led, self.t0))
-        self.assertTrue(life.enforce_deadlines(self.b, {**self.cfg, "ruling_deadline_minutes": 30}, self.led, self.t0))
-
-    def test_budget_overrides_config(self):
-        self.led.ruling_due_at = fx.iso(self.at(-31))
-        self.led.budgets = {"ruling_deadline_minutes": 30}
-        self.assertTrue(life.enforce_deadlines(self.b, self.cfg, self.led, self.t0))
-
-    def test_wall_clock_deadline_includes_the_ruling_deadline(self):
-        wall = 24 * 60
-        self.assertFalse(life.enforce_deadlines(self.b, self.cfg, self.led, self.at(wall + 119)))
-        self.assertTrue(life.enforce_deadlines(self.b, self.cfg, self.led, self.at(wall + 120)))
-        self.assertIn("wall-clock", self.reload().closing)
-
-    def test_no_deadline_no_record(self):
-        self.assertFalse(life.enforce_deadlines(self.b, self.cfg, self.led, self.at(60)))
-        self.assertIsNone(self.job().verdict)
-        self.assertIsNone(self.reload().terminal_intent)
-
-    def test_enforce_deadlines_ignores_board_verdict_column(self):
-        self.judge_verdict("met", scope="goal")            # a forged (or any) board met does not stop the deadline
-        self.led.ruling_due_at = fx.iso(self.at(-121))
-        self.led.save()
-        self.assertTrue(life.enforce_deadlines(self.b, self.cfg, self.led, self.t0))
-        self.assertEqual(self.reload().terminal_intent["verdict"], "unreachable")
-        self.assertEqual(self.job().verdict, "unreachable")
-
-    def test_enforce_deadlines_skips_halted_jobs(self):
+    def test_halted_jobs_do_not_escalate(self):
         self.led.ruling_due_at = fx.iso(self.at(-500))
         self.led.halted = {"by": "me", "at": fx.iso(self.at(-10))}
         self.led.save()
         self.assertFalse(life.enforce_deadlines(self.b, self.cfg, self.led, self.t0))
-        self.assertIsNone(self.reload().terminal_intent)
-
-    def test_enforce_deadlines_does_nothing_once_terminal_or_pending(self):
-        self.led.ruling_due_at = fx.iso(self.at(-500))
-        self.led.terminal = {"verdict": "met", "at": fx.iso(self.t0)}
-        self.assertFalse(life.enforce_deadlines(self.b, self.cfg, self.led, self.t0))
-        self.led.terminal = None
-        self.led.terminal_intent = {"verdict": "met", "scope": "goal", "generation": 1, "candidate": None,
-                                    "req": None, "by": "judge", "at": fx.iso(self.t0)}
-        self.assertFalse(life.enforce_deadlines(self.b, self.cfg, self.led, self.t0))
-        self.assertEqual(self.led.terminal_intent["verdict"], "met")      # the pending MET is not replaced
+        self.assertNotIn("budget-hold", self.reload().watermarks)
 
     def test_halted_time_shifts_the_ruling_deadline(self):
         self.led.ruling_due_at = fx.iso(self.at(-110))
+        self.led.halted_total_seconds = 1800
         self.led.save()
-        life.halt(self.b, self.cfg, self.led, "me", self.at(0), hooks=self.run.hooks())
-        life.unhalt(self.b, self.cfg, self.led, "me", self.at(30))
-        self.assertEqual(self.led.halted_total_seconds, 1800)
-        self.assertFalse(life.enforce_deadlines(self.b, self.cfg, self.led, self.at(39)))   # 10 + 30 min after
-        self.assertTrue(life.enforce_deadlines(self.b, self.cfg, self.led, self.at(40)))
+        life.enforce_deadlines(self.b, self.cfg, self.led, self.at(39))
+        self.assertNotIn("budget-hold", self.reload().watermarks)
+        life.enforce_deadlines(self.b, self.cfg, self.led, self.at(40))
+        self.assertTrue(self.reload().watermarks["budget-hold"])
 
-    def test_halted_time_shifts_the_wall_clock_deadline(self):
-        self.led.halted_total_seconds = 3600
-        wall = 24 * 60 + 120 + 60
-        self.assertFalse(life.enforce_deadlines(self.b, self.cfg, self.led, self.at(wall - 1)))
-        self.assertTrue(life.enforce_deadlines(self.b, self.cfg, self.led, self.at(wall)))
-
-    def test_mechanical_verdict_not_recorded_while_a_live_judge_holds_the_launch(self):
-        key = "judge-live"
-        self.b.allocate_name(key, "J", "judge")
-        self.assertTrue(self.b.claim_judge(key, "J"))
-        self.b.tool_started(key, "Bash")
-        self.led.ruling_due_at = fx.iso(self.at(-121))
-        self.assertTrue(life.enforce_deadlines(self.b, self.cfg, self.led, self.t0))
-        self.assertIsNone(self.job().verdict)                     # the ledger decided; the board write waits
-        self.assertEqual(self.reload().terminal_intent["verdict"], "unreachable")
-
-    def test_terminal_intent_fsynced_before_board_verdict(self):
-        self.led.ruling_due_at = fx.iso(self.at(-121))
-        self.led.save()
-        with self.barrier_crash("terminal_intent_saved"), self.assertRaises(Crash):
-            life.enforce_deadlines(self.b, self.cfg, self.led, self.t0)
-        self.assertIsNone(self.job().verdict)                                  # the board knows nothing yet
-        led = self.reload()                                                    # the ledger does
-        self.assertEqual(led.terminal_intent["verdict"], "unreachable")
-        self.assertTrue(led.closing)
-        self.assertTrue(life.terminalize(self.b, self.cfg, led, self.at(1), hooks=self.run.hooks()))
-        self.assertEqual((self.job().status, self.job().verdict), ("failed", "unreachable"))
-        self.assertEqual(self.reload().terminal["verdict"], "unreachable")
-
-    def test_mechanical_verdict_recognised_from_ledger_not_receipts(self):
-        self.led.ruling_due_at = fx.iso(self.at(-121))
-        self.led.save()
+    def test_pending_met_is_never_replaced(self):
+        self.pending_met()
+        self.led.ruling_due_at = fx.iso(self.at(-500))
         life.enforce_deadlines(self.b, self.cfg, self.led, self.t0)
-        # no receipt exists anywhere and the verdict has no judge: the ledger alone closes the job
-        self.assertTrue(life.terminalize(self.b, self.cfg, self.led, self.at(1), hooks=self.run.hooks()))
-        js = self.job()
-        self.assertEqual((js.status, js.closed_by), ("failed", life.CLOSED_BY))
-        self.assertTrue(js.outcome.startswith("unreachable: "))
-        self.assertEqual(self.reload().terminal["scope"], "ruling")
+        self.assertEqual(self.reload().terminal_intent["verdict"], "met")
 
 
 class TerminalizeTests(LifeCase):
@@ -371,7 +293,7 @@ class TerminalizeTests(LifeCase):
         self.assertEqual(len(self.posts("DRIVER-CLOSE-REJECTED the target moved")), 1)
         # the deadlines keep running: a ruling can still be due and enforce_deadlines still fires
         led.ruling_due_at = fx.iso(self.at(-121))
-        self.assertTrue(life.enforce_deadlines(self.b, self.cfg, led, self.at(1)))
+        self.assertFalse(life.enforce_deadlines(self.b, self.cfg, led, self.at(1)))
 
     def test_unevaluable_pending_met_rejected_after_close_deadline(self):
         self.pending_met()
@@ -386,8 +308,10 @@ class TerminalizeTests(LifeCase):
         self.assertEqual(self.job().status, "active")
         # later enforce_deadlines applies normally
         self.assertFalse(life.enforce_deadlines(self.b, self.cfg, led, self.at(60 + 119)))
-        self.assertTrue(life.enforce_deadlines(self.b, self.cfg, led, self.at(60 + 120)))
-        self.assertEqual(self.reload().terminal_intent["by"], life.MECHANICAL)
+        self.assertFalse(life.enforce_deadlines(self.b, self.cfg, led, self.at(60 + 120)))
+        self.assertIsNone(self.reload().terminal_intent)
+        # The receipted MET still wins over the stale deadline.
+        self.assertNotIn("budget-hold", self.led.watermarks)
 
     def test_close_deadline_comes_from_config(self):
         self.pending_met()
@@ -400,7 +324,7 @@ class TerminalizeTests(LifeCase):
 
     def test_mechanical_unreachable_has_no_gate(self):
         self.led.ruling_due_at = fx.iso(self.at(-121))
-        life.enforce_deadlines(self.b, self.cfg, self.led, self.t0)
+        life.begin_terminal(self.b, self.led, "unreachable", "ruling", life.MECHANICAL, "legacy", self.t0)
         self.run.gate = life.Gate("reject", "would refuse a met")
         self.assertTrue(life.terminalize(self.b, self.cfg, self.led, self.at(1), hooks=self.run.hooks()))
         self.assertNotIn(("gate",), self.run.calls)
@@ -460,7 +384,7 @@ class TerminalizeTests(LifeCase):
         self.assertTrue(self.b.claim_judge(key, "J"))
         self.b.tool_started(key, "Bash")
         self.led.ruling_due_at = fx.iso(self.at(-121))
-        life.enforce_deadlines(self.b, self.cfg, self.led, self.t0)
+        life.begin_terminal(self.b, self.led, "unreachable", "ruling", life.MECHANICAL, "legacy", self.t0)
         self.assertTrue(life.terminalize(self.b, self.cfg, self.led, self.at(1), hooks=self.run.hooks()))
         self.assertEqual(self.job().verdict, "unreachable")
 

@@ -615,6 +615,14 @@ def _step(board, cfg, sup, state, led, owner, now, say, start_runner, config_pat
             driver_exec.skip_launch(board, led, row.name, f"owner configuration invalid: {exc}")
         return
     snap, actions = _plan(board, cfg, led, dcfg, now, m)
+    budget = next((a for a in actions if a.prompt_kind == "budget"), None)
+    if budget:
+        driver_exec.hold_budget(board, led, driver_exec._dcfg(cfg, led), now, budget.reason)
+        for row in board.launches(led.job, led.generation):
+            if row.state == "queued":
+                driver_exec.skip_launch(board, led, row.name, budget.reason)
+        return
+    driver_exec.clear_budget_hold(board, led)
     _watch_stalled(board, state, led, actions, now, sup)
     _land(board, cfg, led, owner, snap, flat, now, say, jdeadline, m, config_path)
     for row in board.launches(led.job, led.generation):

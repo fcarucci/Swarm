@@ -102,11 +102,11 @@ class NextActions(unittest.TestCase):
         s2 = snap(ledger=L(ruling_due_at=iso(T0 - minutes(16))), live={"a"}, launches={"a": launch("a", "running")})
         self.assertEqual(kinds(next_actions(s2, CFG)), ["stop_launch"])
 
-    def test_budget_exhausted_ruling_uses_reserve(self):
+    def test_budget_exhausted_holds_without_spending_reserve(self):
         s = snap(ledger=L(spent_usd=35.5), launches={"a": launch("a", "queued")})
         a = next_actions(s, CFG)            # 40 - 35.5 < 5 reserve + 0.5 min → no launch launch
         self.assertTrue(all(x.ruling or x.kind != "launch" for x in a))
-        self.assertTrue(any(x.ruling for x in a))
+        self.assertEqual((a[0].kind, a[0].prompt_kind), ("hold", "budget"))
 
     def test_not_met_resumes_owner_launch(self):
         s = snap(launches={"a": launch("a", "done")}, ledger=L(owners={"feat/a": "a"}),
@@ -222,18 +222,18 @@ class NextActions(unittest.TestCase):
         (a,) = next_actions(s, CFG)
         self.assertEqual((a.kind, a.responsible), ("nothing", "ruling"))
 
-    def test_ruling_attempts_exhausted_records_unreachable(self):
+    def test_ruling_attempts_exhausted_holds(self):
         s = snap(ledger=L(ruling_due_at=iso(T0 - minutes(1)), ruling_attempts=2),
                  launches={"lead": launch("lead", "done", **LEAD)})
-        self.assertEqual(kinds(next_actions(s, CFG)), ["record_unreachable"])
+        self.assertEqual(kinds(next_actions(s, CFG)), ["hold"])
 
-    def test_ruling_deadline_records_unreachable(self):
+    def test_ruling_deadline_holds(self):
         s = snap(ledger=L(ruling_due_at=iso(T0 - minutes(121))), launches={"lead": launch("lead", "done", **LEAD)})
-        self.assertEqual(kinds(next_actions(s, CFG)), ["record_unreachable"])
+        self.assertEqual(kinds(next_actions(s, CFG)), ["hold"])
 
-    def test_reserve_gone_records_unreachable(self):
+    def test_reserve_gone_holds(self):
         s = snap(ledger=L(spent_usd=40), launches={"lead": launch("lead", "done", **LEAD)})
-        self.assertEqual(kinds(next_actions(s, CFG)), ["record_unreachable"])
+        self.assertEqual(kinds(next_actions(s, CFG)), ["hold"])
 
     def test_stuck_running_launch_is_relaunched(self):
         s = snap(launches={"a": launch("a", "running")})
@@ -430,8 +430,8 @@ class SurvivorKills(unittest.TestCase):
     def test_wall_clock_ruling_at_max_wall_hours(self):                  # M16
         s = snap(ledger=L(activated_at=iso(T0 - minutes(25 * 60))), launches={"lead": launch("lead", "done", **LEAD)})
         a = next_actions(s, CFG)
-        self.assertTrue(any(x.ruling for x in a))
-        self.assertEqual(a[0].reason, "wall-clock")
+        self.assertEqual((a[0].kind, a[0].prompt_kind), ("hold", "budget"))
+        self.assertEqual(a[0].reason, "wall-clock budget exhausted")
 
     def test_artifact_recipe_unreachable_artifact_does_not_gate_goal(self):  # M17
         s = snap(launches={"a": launch("a", "done")}, handoffs=[ho(R, by="a")], verdicts={R: v("unreachable")},

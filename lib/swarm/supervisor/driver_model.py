@@ -13,7 +13,7 @@ from typing import Any
 # Action kinds the pure `next_actions` may return (spec 3.2-3.3, plus the rollover completion of 3.5-3.6).
 ACTION_KINDS = (
     "launch", "record_unreachable", "close", "hold", "nothing", "rollover", "stop_launch", "complete_land",
-    "escalate_landing",
+    "escalate_landing", "fix_lead",
 )
 
 # Verdict values a judge may return; a `not_met` in drive mode carries `open` (spec 3.6).
@@ -297,7 +297,7 @@ class _Ctx:
 
     def ruling_action(self, reason: str) -> Action:
         return self.act("launch", None, "ruling", 0, prompt="ruling", trigger=self.rtrig, ruling=True,
-                        reason=reason)
+                        reason=reason, artifact=(self.s.goal_ready or {}).get("candidate"))
 
 
 def candidate_landed(integrated: dict, candidate: str | None) -> bool:
@@ -376,9 +376,13 @@ def _learn_first(c: _Ctx, trigger) -> list[Action] | None:
 
 
 def _ruling(c: _Ctx) -> list[Action] | None:
-    """Step 3 (spec 3.3, 3.6 ruling judge, 2.2 deadlines): quiesce, then one ruling judge, then mechanical
-    UNREACHABLE when ruling attempts or the ruling deadline run out."""
+    """Quiesce for a ruling; exhausted attempts and deadlines wait for a person."""
     led = c.s.ledger
+    vd = c.s.goal_verdict
+    if (_valid(vd, c.s.generation) and vd.scope == "ruling" and vd.verdict == "not_met"
+            and same_head((c.s.goal_ready or {}).get("candidate"), vd.candidate)
+            and c.lead and (c.launches[c.lead].state == "queued" or c.lead in c.live)):
+        return None
     reason = c.due_reason()
     if led.ruling_due_at is None and reason is None:
         return None
@@ -399,18 +403,16 @@ def _ruling(c: _Ctx) -> list[Action] | None:
     if led.ruling_attempts >= c.cfg["ruling_attempts"] or elapsed >= deadline:  # 2.2: mechanical
         cause = "ruling attempts exhausted" if led.ruling_attempts >= c.cfg["ruling_attempts"] \
             else "ruling deadline passed"
-        return [c.act("record_unreachable", None, "ruling", 0, prompt="mechanical", trigger=c.rtrig,
-                      ruling=True, reason=cause)]
+        return [budget_hold(c, cause)]
     if c.inflight("ruling"):
         return [c.act("nothing", None, None, 0, responsible="ruling", reason="ruling-in-flight")]
     if led.charged_usd() >= c.cfg["max_cost_usd"]:                            # reserve gone too (4.1)
-        return [c.act("record_unreachable", None, "ruling", 0, prompt="mechanical", trigger=c.rtrig,
-                      ruling=True, reason="budget reserve spent")]
+        return [budget_hold(c, "budget reserve spent")]
     prior = [i for i in led.intents if i.launch == "ruling-judge" and i.state == "concluded"
              and i.outcome not in UNCOUNTED_OUTCOMES]
     if prior:
         return [c.act("launch", None, "ruling", len(prior), prompt="ruling", trigger=c.rtrig,
-                      ruling=True, reason=reason)]
+                      ruling=True, reason=reason, artifact=(c.s.goal_ready or {}).get("candidate"))]
     return [c.ruling_action(reason)]
 
 
@@ -447,7 +449,7 @@ def _resume_action(c: _Ctx, name: str, row: LaunchView, prior, trigger: str) -> 
     parts = prior.action_id.split("|")
     kind, group = parts[1], parts[3]
     artifact = next((h.artifact for h in reversed(c.s.handoffs) if h.group == group), None)
-    if kind == "goal":
+    if kind in ("goal", "ruling"):
         artifact = (c.s.goal_ready or {}).get("candidate")
     reason = next((k[len("ruling-trigger:"):] for k in c.s.ledger.watermarks
                    if k.startswith("ruling-trigger:")), trigger)
@@ -555,6 +557,8 @@ def _queued_launches(c: _Ctx) -> list[Action]:
     out = []
     for name in sorted(c.launches, key=lambda n: c.launches[n].id):
         st = c.launches[name]
+        if name == "ruling-judge":
+            continue  # ruling retries go through the head and generation guards
         if room <= 0:
             break
         if st.state != "queued" or name in c.live or c.launch_has_open_intent(name) or c.gated(name):
@@ -676,7 +680,7 @@ def _fallback(c: _Ctx) -> list[Action]:
     return [c.ruling_action("lead-unavailable")]          # the lead cannot run: a ruling (spec 3.3 step 10)
 
 
-def next_actions(s: Snapshot, cfg: dict) -> list[Action]:
+def _next_actions(s: Snapshot, cfg: dict) -> list[Action]:
     """The pure decision of one driver pass for one job (spec 3.3, steps 1-10, invariant included). Never
     returns an empty list: an active unhalted job always gets a launch, a hold, a record, or a `nothing` that
     names who is responsible."""
@@ -702,6 +706,81 @@ def next_actions(s: Snapshot, cfg: dict) -> list[Action]:
     if c.exhausted:                                                            # 3: nothing else to do
         return [c.ruling_action("attempts-exhausted")]
     return _fallback(c)
+
+
+def reservation_reason(d: dict, led, ruling: bool, now=None) -> str | None:
+    """Why the job cannot reserve another session, shared with queued-launch diagnostics."""
+    if now is not None and led.activated_at:
+        activated = dt.datetime.fromisoformat(led.activated_at)
+        if now - activated >= dt.timedelta(hours=d["max_wall_hours"]):
+            return "wall-clock budget exhausted"
+    sessions = sum(1 for i in led.intents if i.outcome not in UNCOUNTED_OUTCOMES)
+    if sessions >= d["max_sessions"]:
+        return "session budget exhausted"
+    left = d["max_cost_usd"] - led.charged_usd() - (0 if ruling else d["ruling_reserve_usd"])
+    usd = min(float(d["session_usd_cap"]), left)
+    if usd < d["min_session_usd"] and not (ruling and usd > 0):
+        return "cost budget cannot fund a session while keeping the ruling reserve"
+    return None
+
+
+def budget_hold(c: _Ctx, reason: str) -> Action:
+    return c.act("hold", None, None, 0, prompt="budget", reason=reason,
+                 not_before=c.now + dt.timedelta(seconds=300))
+
+
+def ruling_head(candidate: str | None) -> str:
+    return (candidate or "unknown").rpartition("@")[2].lower()
+
+
+def same_head(candidate: str | None, judged: str | None) -> bool:
+    head, prior = ruling_head(candidate), ruling_head(judged)
+    return head == prior or (min(len(head), len(prior)) >= 7
+                             and (head.startswith(prior) or prior.startswith(head)))
+
+
+def next_actions(s: Snapshot, cfg: dict) -> list[Action]:
+    """Limits wait for a person; a judged head never spends another ruling session."""
+    c = _Ctx(s, cfg)
+    if s.halted or s.status != "active" or s.ledger.terminal is not None:
+        return _next_actions(s, cfg)
+    # A real terminal verdict still closes; an unlanded MET needs a funded integrator.
+    terminal = _terminal(c)
+    if terminal and all(a.kind == "close" for a in terminal):
+        return terminal
+    reason = reservation_reason(c.cfg, s.ledger, False, s.now)
+    if reason:
+        return [budget_hold(c, reason)]
+    actions = _next_actions(s, cfg)
+    for a in actions:
+        limit = c.cfg["ruling_attempts"] if a.ruling else c.cfg["max_attempts"]
+        if a.kind == "launch" and c.attempts(a.action_id) >= limit:
+            return [budget_hold(c, f"attempt limit reached ({limit}) for {a.launch or a.prompt_kind}")]
+    if not any(a.ruling and a.kind == "launch" or a.launch == "ruling-judge" and a.kind == "launch"
+               for a in actions):
+        return actions
+    vd = s.goal_verdict
+    head = ruling_head((s.goal_ready or {}).get("candidate"))
+    if (_valid(vd, s.generation) and vd.scope == "ruling" and vd.verdict == "not_met"
+            and same_head(head, vd.candidate)):
+        lead_actions = _recover_launches(c) or _queued_launches(c)
+        if c.lead and c.launches[c.lead].state == "queued":
+            ready = [a for a in (lead_actions or []) if a.launch == c.lead]
+            if ready:
+                return ready
+        if c.lead and c.launches[c.lead].state in ("done", "failed"):
+            return [budget_hold(c, f"ruling launch limit (head {head} already ruled not_met #{vd.receipt_id})")]
+        return [c.act("hold", None, None, 0,
+                      reason=f"waiting for the lead's fix round (head {head} already ruled not_met #{vd.receipt_id})")]
+    key = f"ruling-head:{s.generation}:{head}"
+    prior = [i for i in s.ledger.intents if i.launch == "ruling-judge"
+             and i.action_id.startswith(f"gen{s.generation}|")
+             and i.outcome not in ("lost", "cancelled-before-start")]
+    ruled = s.ledger.watermarks.get(key, 0) or any(
+        s.ledger.watermarks.get(f"{key}:{i.launch_id}", 0) for i in prior)
+    if ruled or len(prior) >= 3:
+        return [budget_hold(c, f"ruling launch limit (generation {s.generation}, head {head})")]
+    return actions
 
 
 def counts_as_no_progress(action: Action) -> bool:

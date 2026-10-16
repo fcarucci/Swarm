@@ -178,6 +178,8 @@ def ledger_deadlines(led, flat: dict, sup: dict | None = None) -> list:
     command (which touches the wake file) is what moves it."""
     if led.terminal is not None or led.halted is not None:
         return []
+    if led.watermarks.get("budget-hold"):
+        return [dt.datetime.fromtimestamp(led.watermarks["budget-notify-at"], dt.timezone.utc)]
     retry_at = led.watermarks.get("driver-error:retry-at")
     if retry_at:
         return [dt.datetime.fromtimestamp(retry_at, dt.timezone.utc)]

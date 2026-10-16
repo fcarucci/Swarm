@@ -339,11 +339,16 @@ def _deadline_cause(cfg: dict, led, now: dt.datetime) -> str | None:
 
 
 def enforce_deadlines(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks | None = None) -> bool:
-    """The minimal recovery path (spec 3.2): reads the ledger only (never the job row's verdict, a recipe
-    or a snapshot). Past a deadline with no terminal outcome pending, records the mechanical UNREACHABLE
-    ledger-first (then on the board, if it can be now) and starts terminalization. Skips halted jobs.
-    True when it did (begin_terminal refuses while an outcome is already pending)."""
+    """Escalate expired limits without terminalizing the goal. A pending person cancel still wins.
+    Return True only when that cancellation was handled."""
     if led.terminal is not None or led.halted is not None or led.watermarks.get("person-complete"):
+        return False
+    if led.terminal_intent is not None:
+        by = next((k[len(_CANCEL_BY):] for k in led.watermarks if k.startswith(_CANCEL_BY)), None)
+        if by is not None and "terminal_stuck" in led.watermarks:
+            led.terminal_intent, led.closing = None, None
+            cancel_job(board, cfg, led, by, now, hooks=hooks)
+            return True
         return False
     if led.terminal_intent is None and any(k.startswith(("verdict-missing:", "lead-blocked:", "driver-error:")) for k in led.watermarks):
         return False  # driver and launch failures are retried, never judged as goal failures
@@ -354,8 +359,7 @@ def enforce_deadlines(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks |
     cause = _deadline_cause(cfg, led, now)
     if cause is None:
         return False
-    # A ruling that arrived before this pass wins over the mechanical deadline. In particular,
-    # not_met must reach the model's fix round before a stale ruling_due_at can fail the job.
+    # A receipted terminal verdict or a new fix round wins over the stale deadline.
     js = board.job_status(led.job)
     if js is not None and js.verdict_generation == led.generation:
         from swarm.supervisor import driver_snapshot
@@ -364,20 +368,10 @@ def enforce_deadlines(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks |
                 and (ruling.verdict == "met" or (ruling.scope == "ruling"
                      and led.watermarks.get("ruling-fix") != ruling.receipt_id))):
             return False
-    intent = led.terminal_intent
-    if intent is not None and intent["verdict"] == "met" and "terminal_stuck" in led.watermarks:
-        led.terminal_intent = None         # a pending MET that cannot finish closing: the deadline wins
-        led.closing = None
-        by = next((k[len(_CANCEL_BY):] for k in led.watermarks if k.startswith(_CANCEL_BY)), None)
-        if by is not None:                 # ... unless a person's cancel is waiting: that wins over both
-            cancel_job(board, cfg, led, by, now, hooks=hooks)
-            return True
-    if not begin_terminal(board, led, "unreachable", "ruling", MECHANICAL, cause, now):
-        return False
-    _post(board, led.job, f"{ev.DRIVER_MECHANICAL_UNREACHABLE} (no judge verdict): {cause}")
-    _record_mechanical(board, led)
-    barrier.hit("terminal_verdict_recorded")
-    return True
+    # A deadline is a limit a person can raise, never evidence the goal cannot be met.
+    from swarm.supervisor import driver_exec
+    driver_exec.hold_budget(board, led, driver_exec._dcfg({"drive": cfg}, led), now, cause)
+    return False
 
 
 def _reject_pending(board, led, reason: str, now: dt.datetime, *, ruling_due: bool = False) -> None:

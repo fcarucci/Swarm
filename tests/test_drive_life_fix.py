@@ -222,7 +222,7 @@ class StuckTerminalTests(T.LifeCase):
     def stuck_pending(self):
         lid = self.launch()
         self.run.live.add(lid)
-        self.assertTrue(life.enforce_deadlines(self.b, self.cfg, self.led, self.at(60 * 27), hooks=self.run.hooks()))
+        life.begin_terminal(self.b, self.led, "unreachable", "ruling", life.MECHANICAL, "legacy", self.at(60 * 27))
         return lid
 
     def test_a_notice_is_posted_once_after_the_close_deadline(self):
@@ -242,20 +242,20 @@ class StuckTerminalTests(T.LifeCase):
         self.assertFalse(life.terminalize(self.b, self.cfg, self.led, self.at(60 * 29), hooks=self.run.hooks()))
         self.assertFalse(life.enforce_deadlines(self.b, self.cfg, self.led, self.at(60 * 40), hooks=self.run.hooks()))
         self.assertEqual(self.reload().terminal_intent["at"], at)
-        self.assertEqual(len(self.posts("DRIVER-MECHANICAL-UNREACHABLE")), 1)
+        self.assertEqual(len(self.posts("DRIVER-MECHANICAL-UNREACHABLE")), 0)
 
-    def test_a_stuck_pending_met_is_superseded_by_the_deadline(self):
+    def test_a_stuck_pending_met_survives_the_deadline(self):
         lid = self.launch()
         self.run.live.add(lid)
         self.pending_met(now=self.at(1))
         self.assertFalse(life.terminalize(self.b, self.cfg, self.led, self.at(100), hooks=self.run.hooks()))
         self.assertEqual(len(self.posts("DRIVER-TERMINAL-STUCK")), 1)
         far = self.at(60 * 30)
-        self.assertTrue(life.enforce_deadlines(self.b, self.cfg, self.led, far, hooks=self.run.hooks()))
-        self.assertEqual(self.reload().terminal_intent["verdict"], "unreachable")
+        self.assertFalse(life.enforce_deadlines(self.b, self.cfg, self.led, far, hooks=self.run.hooks()))
+        self.assertEqual(self.reload().terminal_intent["verdict"], "met")
         self.run.live.clear()
         self.assertTrue(life.terminalize(self.b, self.cfg, self.reload(), far, hooks=self.run.hooks()))
-        self.assertEqual(self.reload().terminal["verdict"], "unreachable")
+        self.assertEqual(self.reload().terminal["verdict"], "met")
 
     def test_a_pending_met_not_yet_stuck_is_not_superseded(self):
         self.pending_met()
@@ -544,7 +544,7 @@ class EveryTerminalClearsTheClaim(T.LifeCase):
         self.assertIsNone(self.b.job_data("J").get("drive.enabled"))
 
     def test_the_mechanical_unreachable(self):
-        life.enforce_deadlines(self.b, self.cfg, self.led, self.at(60 * 27), hooks=self.run.hooks())
+        life.begin_terminal(self.b, self.led, "unreachable", "ruling", life.MECHANICAL, "legacy", self.at(60 * 27))
         self.assertTrue(life.terminalize(self.b, self.cfg, self.led, self.at(60 * 27 + 1), hooks=self.run.hooks()))
         self.assertIsNone(self.b.job_data("J").get("drive.enabled"))
 

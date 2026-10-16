@@ -216,19 +216,32 @@ def _queue_existing(board, row):
 # --- budget and locks ----------------------------------------------------------------------------
 
 def reservation_reason(d: dict, led, ruling: bool, now=None) -> str | None:
-    """Why the job cannot reserve another session, shared with queued-launch diagnostics."""
-    if now is not None and led.activated_at:
-        activated = dt.datetime.fromisoformat(led.activated_at)
-        if now - activated >= dt.timedelta(hours=d["max_wall_hours"]):
-            return "wall-clock budget exhausted"
-    sessions = sum(1 for i in led.intents if i.outcome not in UNCOUNTED)
-    if sessions >= d["max_sessions"]:
-        return "session budget exhausted"
-    left = d["max_cost_usd"] - led.charged_usd() - (0 if ruling else d["ruling_reserve_usd"])
-    usd = min(float(d["session_usd_cap"]), left)
-    if usd < d["min_session_usd"] and not (ruling and usd > 0):
-        return "cost budget cannot fund a session while keeping the ruling reserve"
-    return None
+    return dm.reservation_reason(d, led, ruling, now)
+
+
+def hold_budget(board, led, d: dict, now, reason: str) -> None:
+    """Post once; repeat launch-failed notifications on the existing five minute cadence."""
+    from swarm.supervisor import driver_events as ev
+    text = (f"{ev.DRIVER_ESCALATE} budget: {reason}; next session needs at least {d['min_session_usd']:.2f} USD; "
+            f"cost {led.charged_usd():.2f}/{d['max_cost_usd']:.2f} USD, reserve {d['ruling_reserve_usd']:.2f}")
+    target = led.requester_session or "owner"
+    if not led.watermarks.get("budget-hold"):
+        board.post(led.job, "swarm driver", text, to=target)
+    if led.watermarks.get("budget-notify-at", 0) <= now.timestamp():
+        board.post_event(led.job, "launch-failed", f"budget:{led.generation}:{int(now.timestamp())}", text, to=target)
+        mutate(led, lambda l: l.watermarks.__setitem__("budget-notify-at", int(now.timestamp()) + 300))
+    if not led.watermarks.get("budget-hold"):
+        mutate(led, lambda l: l.watermarks.__setitem__("budget-hold", 1))
+        board.set_job_data(led.job, "drive.budget-hold", text)
+
+
+def clear_budget_hold(board, led) -> None:
+    if led.watermarks.get("budget-hold"):
+        def clear(l):
+            l.watermarks.pop("budget-hold", None)
+            l.watermarks.pop("budget-notify-at", None)
+        mutate(led, clear)
+        board.set_job_data(led.job, "drive.budget-hold", None)
 
 
 def _reservation(d: dict, led, ruling: bool, now=None) -> tuple[float, float] | None:
@@ -463,7 +476,9 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
         return skip("an open attempt of this action is still pending")
     limit = d["ruling_attempts"] if action.ruling else d["max_attempts"]
     if sum(1 for i in mine if i.outcome not in UNCOUNTED) >= limit:
-        return skip(f"attempt limit reached ({limit}); requeue with swarm run to authorize another attempt")
+        reason = f"attempt limit reached ({limit}); requeue with swarm run to authorize another attempt"
+        hold_budget(board, led, d, now, reason)
+        return skip(reason)
     launch = materialize_launch(board, led, action, cfg, now)
     if launch is None or launch.state not in ("queued",):
         return skip("launch is missing or no longer queued")
@@ -484,8 +499,7 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
             mutate(led, lambda l: l.watermarks.pop(f"harness-unavailable:{launch.name}", None))
     reserve = _reservation(d, led, action.ruling, now)
     if reserve is None:
-        if led.watermarks.get(f"verdict-missing:{launch.name}"):
-            _escalate_verdict(board, led, launch, now, "retry blocked by the session, wall-clock or cost budget")
+        hold_budget(board, led, d, now, reservation_reason(d, led, action.ruling, now) or "reservation refused")
         return skip(reservation_reason(d, led, action.ruling, now) or "session reservation refused")
     reserve_usd, reserve_minutes = reserve
     owned = action.launch is None
@@ -500,9 +514,14 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
     launch_id, attempt = new_launch_id(now), max((i.attempt for i in mine), default=0) + 1
     barrier.hit("before_claim")
     # 1a. write-ahead intent, fsynced (ledger.save), before anything reaches the board
-    mutate(led, lambda l: l.intents.append(ledger.Intent(
-        launch_id=launch_id, action_id=action.action_id, attempt=attempt, launch=launch.name,
-        reserved_usd=reserve_usd, reserved_minutes=reserve_minutes, locks=list(lock_keys), state="claiming")))
+    def prepare(l):
+        l.intents.append(ledger.Intent(
+            launch_id=launch_id, action_id=action.action_id, attempt=attempt, launch=launch.name,
+            reserved_usd=reserve_usd, reserved_minutes=reserve_minutes, locks=list(lock_keys), state="claiming"))
+        if action.ruling:
+            head = dm.ruling_head(action.artifact)
+            l.watermarks[f"ruling-head:{l.generation}:{head}:{launch_id}"] = 1
+    mutate(led, prepare)
     barrier.hit("after_intent_before_claim")
     old = f"launch:{launch_id}"
     try:
