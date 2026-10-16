@@ -777,6 +777,13 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
            # artifact job's report in the tree, so its tree stays writable (it still has no write rights elsewhere)
            "read_only": read_only_role(launch.role) and launch.role != driveroles.LEAD_ROLE}
     marker = None
+    if (launch.harness == "codex"
+            and ((cfg.get("harness") or {}).get("codex") or {}).get("command") is not None):
+        import shlex
+        run["stdin"] = (f'Join first: `swarm join --job {shlex.quote(led.job)} --key "${{CODEX_SESSION_ID:-$CODEX_THREAD_ID}}" '
+                        f'--resume-of {shlex.quote(old)}`. Use your Codex thread id as the key and keep '
+                        'the returned name for board commands; your launch already carries its role.\n'
+                        + run["stdin"])
     try:
         # 3. run file, then the resume marker
         marker = markers.write_resume_marker(cfg, led.job, row.id, resume_of=old, name=name,

@@ -2800,6 +2800,7 @@ def _parser() -> argparse.ArgumentParser:
     mv.add_argument("--as", dest="name"); mv.add_argument("--key")
     mv.add_argument("--to", required=True, metavar="JOB", help="the open job it moves to")
     jn = sub.add_parser("join"); jn.add_argument("--job", required=True)
+    jn.add_argument("--resume-of", help="join a trusted Codex wrapper launch's predecessor")
     jn.add_argument("--key", help="stable unique id of the agent (e.g. hook agent_id); required")
     jn.add_argument("--role")
     jn.add_argument("--title", help="a short display label for the agent (at most 60 characters), "
@@ -4572,7 +4573,27 @@ def _board_join(board, cfg: dict, args) -> int:
     """Allocate (or return) the agent's name. --judge / --verifier give agents that run outside
     Claude Code the launch the hooks give a tagged subagent: they have no hooks, so the CLI is how
     they read, post and record verdicts."""
-    name = board.allocate_name(args.key, args.job, agentview.default_role(args.key, args.role))
+    predecessor = getattr(args, "resume_of", None)
+    if predecessor:
+        row = next((r for r in board.restarts(job=args.job) if r.old_agent_key == predecessor
+                    and r.harness == "codex" and r.launch_id and r.ended_at is None
+                    and r.new_agent_key in (None, args.key)), None)
+        name = board.claim_resume(args.key, predecessor, args.job) if row else None
+        if name is None:
+            print("refused: no open Codex launch for this predecessor and key", file=sys.stderr)
+            return 1
+        agent = next((a for a in board.agents(args.job) if a.agent_key == args.key), None)
+        if agent is None or agent.resume_of != predecessor:
+            print("refused: key already belongs to another agent", file=sys.stderr)
+            return 1
+        from swarm import enrolment, hosts
+        from swarm.board.autoinit import store_key
+        sid = hosts.cli_session_id(os.environ) or os.environ.get("CODEX_THREAD_ID")
+        if hosts.detect_cli_host(os.environ) == "codex" and sid == args.key:
+            enrolment.write(store_key(cfg), job=args.job, agent_key=args.key, harness="codex",
+                            session_id=args.key, cwd=os.getcwd())
+    else:
+        name = board.allocate_name(args.key, args.job, agentview.default_role(args.key, args.role))
     if board.active_agent_name(args.key) is None:   # allocate_name never revives a stuck close
         print(f"refused: {name} ({args.key}) was closed as stuck by the swarm supervisor and "
               f"can't rejoin: its replacement does the work", file=sys.stderr)

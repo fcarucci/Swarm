@@ -890,9 +890,14 @@ def start(cfg: dict, run: dict, popen=subprocess.Popen) -> int:
 
 def _launch_argv(cfg: dict, run: dict) -> tuple[list, str | None]:
     """The argv the scope runs: a drive launch's (run["launch_id"]) wrapped in its credential jail
-    (launchhome.wrap), any other replacement's as it is. (argv, why refused)."""
+    (launchhome.wrap), a trusted Codex wrapper or any other replacement's as it is. (argv, why refused)."""
     argv = list(run["argv"])
     if not run.get("launch_id"):
+        return argv, None
+    if (run["harness"] == "codex"
+            and ((cfg.get("harness") or {}).get("codex") or {}).get("command") is not None):
+        # A trusted wrapper may change OS user or host; the local credential jail cannot contain it.
+        run["launch_mode"] = "wrapper"
         return argv, None
     from swarm.supervisor import launchhome
     launch = str(run.get("launch") or run["name"])

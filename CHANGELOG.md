@@ -6,6 +6,8 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 ## [Unreleased]
 
+- Codex drive launches can use a trusted local or remote argv wrapper outside the launch jail, retaining stdin briefs, model selection, board identity and usage accounting.
+
 ## [0.3.3] - 2026-10-16
 
 ### Removed

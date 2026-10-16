@@ -2393,6 +2393,16 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
     if event == "turn" and sid and current_host().is_followup(payload):
         _resume_turns(cfg, sid, agent_id)
     resume = _resume_binding(cfg, sid) if not agent_id else None
+    joined = None
+    if not agent_id and resume is None and sid and current_host().name == "codex":
+        # A wrapper's remote OS user has no access to the driver's private resume marker.
+        # Only an explicit join of this very thread can create this local ownership record.
+        from swarm import enrolment
+        from swarm.board.autoinit import store_key
+        record = enrolment.find(store_key(cfg), sid)
+        if record and record.harness == "codex" and record.session_id == sid:
+            joined = record
+            agent_id = sid
     if resume is not None:   # a supervisor replacement's root session: it is the member
         agent_id = resume["resume"].get("agent_key") or sid
     elif not agent_id and _replacement_token():
@@ -2402,7 +2412,7 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
     if event == "session-end" and current_host().completes_on(event):
         _codex_session_end(cfg, sid, agent_id if resume is None and agent_id != sid else None, payload)
         return 0
-    if event == "session-stop" and resume is not None:
+    if event == "session-stop" and (resume is not None or joined is not None):
         event = "stop"  # headless pipeline judges must conclude at their root Stop hook
     elif event == "session-stop" and agent_id:
         return 0   # harness subagents use SubagentStop
@@ -2437,6 +2447,8 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
     bound: dict = {}
     try:
         bound, unbound = _session_markers(cfg, sid) if sid else ({}, {})
+        if joined is not None:
+            bound.setdefault(joined.job, {"job": joined.job, "session_id": sid})
         # A session with nothing to do here doesn't touch the database (SubagentStop always does:
         # the agent may be on a job whose marker is gone).
         if event != "stop" and not (sid and _may_concern_session(event, bound, unbound)):

@@ -1,5 +1,5 @@
 """A drive launch's file view (Task 20; spec 4.0: the shell guard is a guardrail, this is the boundary). Every
-drive launch (Claude and Codex, every role) goes through `wrap`, which runs it in swarm.launchjail with an
+drive launch (except a configured trusted Codex wrapper) goes through `wrap`, which runs it in swarm.launchjail with an
 ALLOWLIST of the person's files:
 
 - the launch's own directory, <supervisor private dir>/launch-home/<job>/<launch> (0700, privfs), holds:
