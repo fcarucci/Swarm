@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -37,10 +38,17 @@ class OrchestratorWakeTests(unittest.TestCase):
         patcher = mock.patch.object(ow.session_driver, "unfinished", return_value=[])
         self.unfinished = patcher.start()
         self.addCleanup(patcher.stop)
+        # the board's active jobs (job -> activating session); activate() adds one unless told not to
+        self.owners = {}
+        patcher = mock.patch.object(ow, "_active_owners", side_effect=lambda cfg: dict(self.owners))
+        patcher.start()
+        self.addCleanup(patcher.stop)
         hooks._OUTPUT.clear()
         self.addCleanup(hooks._OUTPUT.clear)
 
-    def activate(self, job, session=SESSION, **extra):
+    def activate(self, job, session=SESSION, active=True, **extra):
+        if active:
+            self.owners[job] = session
         d = self.tmp / "markers"
         d.mkdir(parents=True, exist_ok=True)
         (d / f"{job}.json").write_text(json.dumps({"job": job, "session_id": session, **extra}))
@@ -126,6 +134,36 @@ class OrchestratorWakeTests(unittest.TestCase):
             "`swarm await --job J1` running": None,
         })
 
+    def test_a_closed_job_is_never_named_whatever_its_marker_or_lock_says(self):
+        # a closed job is not among the board's active jobs; its marker is stale
+        for status in ("completed", "failed", "cancelled"):
+            with self.subTest(status=status):
+                self.activate(f"C-{status}", active=False)
+        self.assertEqual(ow.owned_pairs(self.cfg), [])
+        self.assertEqual(ow.pending_lines(self.cfg, SESSION), [])
+        hooks._orchestrator_wake("turn", self.cfg, SESSION)
+        self.assertEqual(hooks._OUTPUT, {})
+        self.assertEqual(bootstrap._orchestrator_wake_checks(self.cfg), [])
+
+    def test_a_job_another_session_now_owns_is_not_named(self):
+        self.activate("J1", session=SESSION)
+        self.owners["J1"] = OTHER          # the board says another session activated it since
+        self.assertEqual(ow.pending_lines(self.cfg, SESSION), [])
+        self.assertEqual(ow.pending_lines(self.cfg, OTHER), [])
+        self.assertEqual(bootstrap._orchestrator_wake_checks(self.cfg), [])
+
+    def test_an_active_owned_unarmed_job_still_gets_the_line(self):
+        self.activate("J1")
+        self.activate("Done", active=False)
+        lines = ow.pending_lines(self.cfg, SESSION)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("NOT ARMED for J1", lines[0])
+
+    def test_an_unreadable_board_names_nothing(self):
+        self.activate("J1")
+        with mock.patch.object(ow, "_active_owners", return_value=None):
+            self.assertEqual(ow.owned_pairs(self.cfg), [])
+
     def test_the_lock_name_is_per_session_and_job(self):
         self.assertNotEqual(ow.lock_name(SESSION, "J1"), ow.lock_name(SESSION, "J2"))
         self.assertNotEqual(ow.lock_name(SESSION, "J1"), ow.lock_name(OTHER, "J1"))
@@ -147,6 +185,47 @@ class WakeHookIntegrationTests(Env):
                 os.close(fd)
             text = self.context(self.hook("turn", agent_id=None, session=SESSION))
             self.assertIn("orchestrator wake NOT ARMED for J", text)
+
+    def test_hook_is_silent_once_the_job_is_closed(self):
+        self.cli("activate", "--job", "J", "--session", SESSION)
+        with mock.patch.dict(os.environ, {"SWARM_SESSION_DRIVER": "1"}):
+            self.assertIn("NOT ARMED for J", self.context(self.hook("turn", agent_id=None, session=SESSION)))
+            with self.board() as b:
+                b.close_job("J", "completed", None)
+            self.assertIsNone(self.hook("turn", agent_id=None, session=SESSION))
+
+    def test_await_on_a_closed_job_returns_at_once(self):
+        for status in ("completed", "failed", "cancelled"):
+            with self.subTest(status=status):
+                job = f"J-{status}"
+                self.cli("activate", "--job", job, "--session", SESSION)
+                with self.board() as b:
+                    b.close_job(job, status, None)
+                rc, out, err = self.cli("await", "--job", job, "--timeout", "30")
+                self.assertEqual(rc, 0, err)
+                self.assertIn(f"job {job} is {status}: nothing to await", out)
+
+    def test_await_returns_when_the_job_closes_while_awaiting(self):
+        from swarm.supervisor import session_driver
+        for status in ("completed", "failed", "cancelled"):
+            with self.subTest(status=status):
+                job = f"W-{status}"
+                self.cli("activate", "--job", job, "--session", SESSION)
+                polls = []
+
+                def close_on_second_poll(board, cfg, jobs):
+                    polls.append(jobs)
+                    if len(polls) == 2:
+                        with self.board() as b:
+                            b.close_job(job, status, None)
+
+                with mock.patch.object(session_driver, "stall_check", close_on_second_poll):
+                    t0 = time.monotonic()
+                    rc, out, err = self.cli("await", "--job", job, "--timeout", "5", "--poll", "0.05")
+                self.assertEqual(rc, 0, err)
+                self.assertLess(time.monotonic() - t0, 3)
+                self.assertGreaterEqual(len(polls), 2)
+                self.assertIn(f"job {job} is {status}: nothing to await", out)
 
     def test_disabled_session_automation_preserves_silent_tool_hooks(self):
         self.cli("activate", "--job", "J", "--session", SESSION)

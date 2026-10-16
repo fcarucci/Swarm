@@ -39,9 +39,22 @@ def armed(session: str, job: str) -> bool:
     return session_driver.held(lock_name(session, job))
 
 
+def _active_owners(cfg: dict) -> dict[str, str | None] | None:
+    """job -> the session that activated it, for the active jobs on the board (the authority: a marker
+    outlives its job). None when the board is unreadable."""
+    from swarm.board import open_board
+    try:
+        with open_board(cfg) as board:
+            return {j.job: j.session_id for j in board.jobs()}
+    except Exception:
+        return None
+
+
 def owned_pairs(cfg: dict) -> list[tuple[str, str]]:
-    """(session, job) for every open job of this host that a session activated, except drive jobs (their
-    session driver wakes them). Sorted. Reads no ledger and takes no lock when no job is active."""
+    """(session, job) for every active job of this host that a session activated and still owns, except drive
+    jobs (their session driver wakes them). Sorted. A closed job, or one the board says another session
+    activated, is never listed, whatever its marker says. Reads no ledger and takes no lock when no marker
+    names a job."""
     from swarm.jobmarkers import _markers
     pairs = {(m["session_id"], m["job"]) for m in _markers(cfg)
              if m.get("session_id") and "resume" not in m and m.get("job")}
@@ -51,7 +64,10 @@ def owned_pairs(cfg: dict) -> list[tuple[str, str]]:
     if drive is None:   # the drive ledgers are unreadable now: unknown, so arm nothing (never a second driver)
         return []
     drive_jobs = {led.job for led in drive}
-    return sorted((s, j) for s, j in pairs if j not in drive_jobs)
+    owners = _active_owners(cfg)
+    if owners is None:   # the board is unreadable now: unknown, so name nothing
+        return []
+    return sorted((s, j) for s, j in pairs if j not in drive_jobs and owners.get(j) == s)
 
 
 def pending_lines(cfg: dict, session: str) -> list[str]:

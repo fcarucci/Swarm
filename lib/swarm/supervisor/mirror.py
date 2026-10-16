@@ -363,11 +363,12 @@ class Mirror:
     only inside the test suite (TEST_MARKER must be set); production never passes it."""
 
     def __init__(self, url: str, credential: dict, *, allowed_helpers=None,
-                 loopback_http: bool = False, trusted_helper_paths=()):
+                 loopback_http: bool = False, trusted_helper_paths=(), any_args_helper_paths=()):
         self.url = _check_url(url, loopback_http)
         self._loopback = loopback_http
         self._deadline: float | None = None
         self._trusted_paths = tuple(trusted_helper_paths)
+        self._any_args_paths = tuple(any_args_helper_paths)    # listed by path only: these accept any arguments
         self._local = False if loopback_http else gitpin.is_local(self.url)
         self._shown_url = self.url                # what errors hide; git is given the resolved path below
         if self._local:
@@ -418,8 +419,9 @@ class Mirror:
                 # A pinned absolute executable ([11b] ruling a): its basename plus the fixed
                 # arguments must be on the allowlist, and it must be a runnable regular file.
                 named = " ".join(p for p in (os.path.basename(first), rest) if p)
-                if named not in allowed:
-                    raise MirrorError(f"credential helper is not on the allowlist: {command!r}")
+                if named not in allowed and first not in self._any_args_paths:
+                    raise MirrorError(f"credential helper {command!r} is not allowed: add its absolute path "
+                                      f"to [drive] credential_helpers")
                 _check_helper_file(first, self._trusted_paths)
                 absolute = command
             else:

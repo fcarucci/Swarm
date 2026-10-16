@@ -34,7 +34,7 @@ from urllib.parse import urlsplit
 
 from swarm import receipts
 from swarm.supervisor import barrier, ledger, mirror as mirror_mod
-from swarm.supervisor.mirror import (AuditDeadlineError, Mirror, MirrorError, MirrorTimeoutError,
+from swarm.supervisor.mirror import (ALLOWED_HELPERS, AuditDeadlineError, Mirror, MirrorError, MirrorTimeoutError,
                                      MissingCommitError, PushRejectedError, TargetRewoundError,
                                      UnpatchableCommitError)
 
@@ -169,7 +169,8 @@ def credential_from_pin(pin: str | None, *, config_dir: str | None = None) -> di
     kind, _, value = pin.partition(":")
     if kind == "helper":
         if not value or not os.path.isabs(value.split(" ", 1)[0]):
-            raise LandRefused("the pinned credential helper is not an absolute path")
+            raise LandRefused(f"credential helper {value!r} is not allowed: its program must be an absolute path "
+                              f"(add it to [drive] credential_helpers)")
         if not config_dir:
             raise LandRefused("no helper config location (GH_CONFIG_DIR) is pinned for this destination")
         return {"kind": "helper", "command": value, "config_dir": config_dir}
@@ -381,7 +382,13 @@ def _budget(env: LandEnv, cap: float) -> float:
 def _make_mirror(env: LandEnv, d: Destination):
     if env.mirror_factory is not None:
         return env.mirror_factory(d.url, d.credential)
-    return Mirror(d.url, d.credential, trusted_helper_paths=env.trusted_helpers)
+    listed = [h for h in env.trusted_helpers if isinstance(h, str) and os.path.isabs(h.split(" ", 1)[0])]
+    paths = tuple(h.split(" ", 1)[0] for h in listed)
+    # A helper listed by its path alone is allowed with any arguments; one listed with arguments, with exactly those.
+    bare = tuple(h for h in listed if " " not in h)
+    named = tuple(" ".join((os.path.basename(h.split(" ", 1)[0]), *h.split(" ", 1)[1:])) for h in listed)
+    return Mirror(d.url, d.credential, trusted_helper_paths=paths, any_args_helper_paths=bare,
+                  allowed_helpers=ALLOWED_HELPERS + named)
 
 
 def _mirrors(env: LandEnv, dests: list) -> dict:

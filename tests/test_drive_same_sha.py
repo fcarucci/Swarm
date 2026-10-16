@@ -138,7 +138,8 @@ class SameHeadModelTests(unittest.TestCase):
         s = self.snapshot(ledger=L(watermarks={'goal-fix': 77, 'no-progress:lead': 81}))
         a, = dm.next_actions(s, {})
         self.assertEqual((a.kind, a.prompt_kind), ('hold', 'goal-hold'))
-        self.assertIn('needs a person', a.reason)
+        self.assertIn('waiting for', a.reason)
+        self.assertNotIn('needs a person', a.reason)
         self.assertIn('update the report', a.reason)
 
     def test_goal_not_met_same_head_cannot_spend_a_ruling_session(self):
@@ -219,7 +220,11 @@ class SameHeadModelTests(unittest.TestCase):
                                       launches={} if prompt == 'goal' else {
                                           launch_name: launch(launch_name, 'queued', role='judge')})
                     a, = dm.next_actions(s, {'landing_required': False})
-                    self.assertEqual((a.kind, a.prompt_kind), ('hold', 'goal-hold'))
+                    if count == 1:   # a judged head waits for a new head (never a person)
+                        self.assertEqual((a.kind, a.prompt_kind), ('hold', 'goal-hold'))
+                        self.assertNotIn('needs a person', a.reason)
+                    else:            # slice 10: no per-generation judge cap; a new head is judged
+                        self.assertEqual((a.kind, a.prompt_kind), ('launch', 'goal'))
 
     def test_new_head_and_new_generation_are_eligible(self):
         for generation, candidate in ((1, 'b' * 40), (2, HEAD)):
@@ -319,20 +324,17 @@ class SameHeadExecTests(ExecEnv):
         self.assertEqual(self.led.watermarks['no-progress:lead'], 81)
         s.handoffs.append(ho(ART, by='lead', receipt_id=82))
         a, = self.act_on(s)
+        # slice 10: an unchanged head is a scheduled wait for the lead or the coordinator, never a person hold
         self.assertEqual(a.prompt_kind, 'goal-hold')
-        self.assertTrue(any('lead hands off an unchanged head; needs a person: update the report' in e.text
-                            for e in self.b.pending_events('J')))
+        self.assertIn('update the report', a.reason)
+        self.assertNotIn('needs a person', a.reason)
+        self.assertGreater(a.not_before, s.now)
+        self.assertNotIn('goal-hold', self.led.watermarks)
         self.assertEqual(self.b.job_status('J').status, 'active')
+        # a queued launch (a person's swarm run, an engineer) is never blocked by the wait
         s.live.clear()
         s.launches['r3-main'] = launch('r3-main', 'queued')
-        self.assertEqual(dm.next_actions(s, {})[0].kind, 'hold')
-        self.b.post('J', 'engineer', 'try again')
-        ex.refresh_goal_hold(self.b, self.led)
-        self.assertIn('goal-hold', self.led.watermarks)
-        self.b.post('J', 'owner', 'I will supply the missing decision')
-        ex.refresh_goal_hold(self.b, self.led)
-        self.assertNotIn('goal-hold', self.led.watermarks)
-        self.assertEqual(dm.next_actions(s, {})[0].launch, 'r3-main')
+        self.assertEqual((dm.next_actions(s, {})[0].kind, dm.next_actions(s, {})[0].launch), ('launch', 'r3-main'))
 
     def test_goal_head_is_bound_before_claim(self):
         run = self.go(self.act(None, kind='goal', group='goal', artifact=ART))
@@ -392,3 +394,49 @@ class SameHeadExecTests(ExecEnv):
         from test_drive_handoff import HandoffTests
         s = HandoffTests.view(self, self.now(301))
         self.assertEqual(dm.next_actions(s, {})[0].kind, 'hold')
+
+
+class NoPersonParkingTests(SameHeadModelTests):
+    """Slices 9-11 (2026-10-16): a judged head never parks the job on a person."""
+
+    def test_unknown_head_is_never_the_same_head(self):
+        self.assertFalse(dm.same_head('unknown', 'unknown'))
+        self.assertFalse(dm.same_head('runbook-0.22@unknown', 'runbook-0.22@unknown'))
+        self.assertFalse(dm.same_head('main@abc', 'main@abc'))
+        self.assertTrue(dm.same_head(ART, ART))
+
+    def test_goal_wait_has_backoff_and_no_person(self):
+        s = self.snapshot(ledger=L(watermarks={'goal-fix': 77, 'no-progress:lead': 81}, rounds_without_progress=2))
+        a, = dm.next_actions(s, {})
+        self.assertEqual((a.kind, a.prompt_kind), ('hold', 'goal-hold'))
+        self.assertNotIn('person', a.reason)
+        self.assertEqual(a.not_before, s.now + dt.timedelta(seconds=dm.GOAL_WAIT_MIN_SECONDS * 3))
+
+    def test_queued_engineer_runs_while_the_judged_head_waits(self):
+        s = self.snapshot(ledger=L(watermarks={'goal-fix': 77, 'no-progress:lead': 81}),
+                          launches={'lead': launch('lead', role='engineering_lead'),
+                                    'eng-fix': launch('eng-fix', 'queued', role='engineer')})
+        acts = dm.next_actions(s, {})
+        self.assertEqual([(a.kind, a.launch) for a in acts], [('launch', 'eng-fix')])
+
+    def test_queued_lead_requeued_by_a_person_runs_while_the_judged_head_waits(self):
+        s = self.snapshot(ledger=L(watermarks={'goal-fix': 77, 'no-progress:lead': 81}),
+                          launches={'lead': launch('lead', 'queued', role='engineering_lead')})
+        acts = dm.next_actions(s, {})
+        self.assertTrue(any(a.kind == 'launch' and a.launch == 'lead' for a in acts), acts)
+
+    def test_legacy_goal_hold_watermark_does_not_block_a_queued_launch(self):
+        s = self.snapshot(ledger=L(watermarks={'goal-hold': 1, 'goal-fix': 77}),
+                          launches={'lead': launch('lead', role='engineering_lead'),
+                                    'integrate-all': launch('integrate-all', 'queued', role='engineer')})
+        acts = dm.next_actions(s, {})
+        self.assertIn(('launch', 'integrate-all'), [(a.kind, a.launch) for a in acts])
+        self.assertFalse(any(a.kind == 'hold' for a in acts))
+
+    def test_named_person_hold_still_waits_on_the_person(self):
+        s = self.snapshot(ledger=L(watermarks={'goal-hold': 1, 'goal-hold-person': 1}),
+                          launches={'lead': launch('lead', role='engineering_lead'),
+                                    'eng': launch('eng', 'queued', role='engineer')})
+        a, = dm.next_actions(s, {})
+        self.assertEqual((a.kind, a.prompt_kind), ('hold', 'goal-hold'))
+        self.assertIn('named person', a.reason)

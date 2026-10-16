@@ -141,16 +141,31 @@ def _codex_tokens_for(cfg: dict, budget_usd: float) -> int:
     return n
 
 
+def codex_wrapper(cfg: dict) -> bool:
+    """`[harness.codex] wrapper = true`: `command` is an argv prefix that runs codex somewhere else (as another
+    OS user, over ssh). Such a launch is not jailed: the remote user is its isolation boundary."""
+    conf = (cfg.get("harness") or {}).get("codex") or {}
+    wrapper = conf.get("wrapper", False)
+    if not isinstance(wrapper, bool):
+        raise ValueError("[harness.codex] wrapper must be true or false")
+    if wrapper and conf.get("command") is None:
+        raise ValueError("[harness.codex] wrapper = true needs a command: the wrapper argv")
+    return wrapper
+
+
 def codex_command(cfg: dict, *, resolve: bool = False) -> list[str]:
     """Configured wrapper argv, otherwise PATH, then the plugin's bin directory."""
     from swarm.supervisor.settings import settings
     value = ((cfg.get("harness") or {}).get("codex") or {}).get("command")
+    wrapper = codex_wrapper(cfg)
     if value is not None:
         if not isinstance(value, (str, list)):
             raise ValueError("[harness.codex] command must be a path or argv")
         argv = shlex.split(value) if isinstance(value, str) else list(value)
         if not argv or not all(isinstance(a, str) and a for a in argv):
             raise ValueError("[harness.codex] command must be a path or argv")
+        if wrapper and not os.path.isabs(argv[0]) and os.path.basename(argv[0]) != argv[0]:
+            raise ValueError("[harness.codex] wrapper command must start with an absolute path or a program on PATH")
     else:
         argv = [settings(cfg)["codex_bin"]]
     check_safe(argv)

@@ -886,6 +886,46 @@ def budget_line(led: ledger.Ledger, now: dt.datetime | None = None) -> str:
             f"wall {minutes / 60:.1f}/{b['max_wall_hours']:g} h")
 
 
+HOLD_KINDS = ("ruling-hold", "budget-hold")   # the watermark holds that need a person (a goal-hold waits by itself)
+_WAITING_LINE = re.compile(r"^waiting on: [^(]*\(([\w.-]+): (.*?)(?:; see #\w+)?\)$")
+
+
+def active_holds(led: ledger.Ledger | None, data: dict) -> list:
+    """The one definition of "the job is held", for `swarm status` and `swarm doctor`: (kind, reason) per hold.
+    The person holds (watermarks), every held pass the driver published in drive.waiting (scheduled retries,
+    judge backoff, question gate, learnings), a pending ruling deadline, a halt or pause, and a close in progress."""
+    if led is None or led.terminal is not None:
+        return []
+    out = []
+    for kind in HOLD_KINDS:
+        if led.watermarks.get(kind):
+            out.append((kind, data.get(f"drive.{kind}")
+                        or f"needs a person; see #{led.watermarks.get(f'{kind}-msg', 'unknown')}"))
+    if led.watermarks.get("goal-hold"):   # not a person hold since slice 10, but a known wait, not a stall
+        out.append(("goal-hold", "a named person was asked on the board" if led.watermarks.get("goal-hold-person")
+                    else "goal-hold left by an older driver; released on the next pass"))
+    for line in (data.get("drive.waiting") or "").splitlines():
+        m = _WAITING_LINE.match(line.strip())
+        if m and all(m.group(1) != kind for kind, _ in out):
+            out.append((m.group(1), m.group(2)))
+    if led.ruling_due_at:
+        out.append(("ruling-pending", f"a ruling is due by {led.ruling_due_at}"))
+    if led.halted:
+        out.append(("halted", f"{led.halted.get('by', '?')} {led.halted.get('reason', '')}".strip()))
+    if led.closing:
+        out.append(("closing", str(led.closing)))
+    return out
+
+
+def why_lines(led: ledger.Ledger | None, data: dict, launches) -> list:
+    """One `why not progressing:` line per queued launch (its latest DRIVER-SKIP reason) and per active hold."""
+    out = [f"why not progressing: {row.name}: "
+           f"{data.get(f'drive.skip.{row.generation}.{row.name}') or 'queued, not yet picked up by the driver'}"
+           for row in launches if row.state == "queued"]
+    out += [f"why not progressing: hold {kind}: {reason}" for kind, reason in active_holds(led, data)]
+    return [" ".join(line.split()) for line in out]
+
+
 def drive_lines(cfg: dict, job: str) -> list:
     """The effective budget and model lines of an active drive job, for `swarm status --job J`. A ledger
     that cannot be read is said so (doctor reports it), never a crash of status."""
@@ -918,9 +958,7 @@ def drive_lines(cfg: dict, job: str) -> list:
                    f"see #{led.watermarks.get('budget-hold-msg', 'unknown')}; "
                    f"budget-hold: {data.get('drive.budget-hold', 'budget exhausted')})"]
     if led.terminal is None and led.watermarks.get("goal-hold"):
-        text = data.get("drive.goal-hold", f"goal-hold: needs a person; see #{led.watermarks.get('goal-hold-msg', 'unknown')}; "
-                        f"re-queue with swarm run --job {job} --name lead ... or cancel")
-        waiting.append(f"waiting on: person ({text})")
+        waiting.append("waiting on: lead or coordinator (goal-hold left by an older driver; released on the next pass)")
     if led.terminal is None and data.get("drive.waiting"):
         waiting.extend(line for line in data["drive.waiting"].splitlines()
                        if not any(led.watermarks.get(kind) and f"({kind}:" in line

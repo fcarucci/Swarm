@@ -331,9 +331,10 @@ class TitleCliTests(RoutingEnv):
         self.cli("title", "--job", "J", "--as", a, "EL")
         with self.board() as b:
             rows = [x for x in b.agents("J") if x.name == a]
-            wide = swarm._compact_agent_line(rows[0], 100, False)
-            narrow = swarm._compact_agent_line(rows[0], 24, False)
-            plain = swarm._compact_agent_line([x for x in b.agents("J") if x.name != a][0], 100, False)
+            now = b.now()
+            wide = swarm._compact_agent_line(rows[0], 100, False, now)
+            narrow = swarm._compact_agent_line(rows[0], 24, False, now)
+            plain = swarm._compact_agent_line([x for x in b.agents("J") if x.name != a][0], 100, False, now)
             table = swarm.agents_table(b, "J", False, b.now())
         self.assertIn(f"{a} (EL) ", wide)
         self.assertLessEqual(len(narrow), 24)

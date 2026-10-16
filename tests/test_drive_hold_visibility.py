@@ -95,15 +95,16 @@ class HoldTests(ExecEnv):
         ex.refresh_goal_hold(self.b, self.led, s)
         self.assertNotIn('goal-hold', self.reload().watermarks)
 
-    def test_goal_hold_writer_publishes_head_and_receipt(self):
+    def test_legacy_goal_hold_is_released_on_the_next_pass(self):
+        # slice 10: a goal-hold watermark left by an older driver parks nothing; the first pass releases it
         ex.hold_goal(self.b, self.led, self.now(), 'unchanged head', ART)
+        self.assertIn('goal-hold', self.reload().watermarks)
         s = snap(ledger=self.led, handoffs=[ho(ART, by='lead')])
         ex.refresh_goal_hold(self.b, self.led, s)
+        self.assertNotIn('goal-hold', self.reload().watermarks)
         lines = '\n'.join(drive_activate.drive_lines(self.cfg, 'J'))
-        self.assertIn('goal-hold: no progress: the lead handed off the same head ' + HEAD, lines)
-        self.assertIn('see #' + str(self.led.watermarks['goal-hold-msg']), lines)
-        self.assertEqual(cli._job_status_word(self.b, self.b.job_status('J'), self.now()), 'waiting')
-        self.assertIn('goal-hold', self.reload().watermarks)
+        self.assertNotIn('waiting on: person', lines)
+        self.assertFalse(self.b.job_data('J').get('drive.goal-hold'))
 
     def test_new_handoff_head_releases_goal_hold_but_keeps_judge_cap(self):
         ex.hold_goal(self.b, self.led, self.now(), 'unchanged head', ART)

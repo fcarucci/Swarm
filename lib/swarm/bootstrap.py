@@ -1914,6 +1914,22 @@ def _launch_isolation_check(cfg: dict, probe=None) -> Check:
                  "cover the path named ([drive] launch_cover_paths) or remove the credential from the launch env")
 
 
+def _codex_wrapper_checks(cfg: dict) -> list[Check]:
+    """[harness.codex] wrapper = true: codex launches are not jailed here (a WARN naming the trust boundary).
+    Empty when no wrapper is configured; an invalid one is a FAIL."""
+    from swarm.supervisor.launch import codex_command, codex_wrapper
+    try:
+        if not codex_wrapper(cfg):
+            return []
+        argv = codex_command(cfg)
+    except ValueError as exc:
+        return [Check("codex wrapper", False, str(exc), "fix [harness.codex] in the swarm config")]
+    return [Check("codex wrapper", None,
+                  f"codex launches run through `{' '.join(argv)}` and are NOT jailed by swarm: the wrapper's OS "
+                  "user is the trust boundary (its credentials, files and network are what the launch can reach)",
+                  "run the wrapper as a user that holds only the credentials a reviewer or judge needs")]
+
+
 def _codex_drive_checks(cfg: dict, which) -> list[Check]:
     """Whether a Codex writer launch can reach the board ([F18]): on a server board the swarm
     config's [codex] network_access and the Codex profile that carries it; on a local board the
@@ -2089,7 +2105,7 @@ def drive_checks(cfg: dict, *, run=None, which=None, now=None, platform: str | N
             out.append(_launch_isolation_check(cfg, probe=lambda c: (None, note)))
         elif os.environ.get("SWARM_NO_SYSTEMD") != "1":   # no scopes, no drive launch starts here (the test suite)
             out.append(_launch_isolation_check(cfg))
-        out += _codex_drive_checks(cfg, which)
+        out += _codex_wrapper_checks(cfg) or _codex_drive_checks(cfg, which)
     if unreadable is not None:
         out.append(Check("drive ledgers", False,
                          f"{driver_events.DRIVER_LEDGER_BAD}: the drive ledgers can't be read "
@@ -2101,13 +2117,34 @@ def drive_checks(cfg: dict, *, run=None, which=None, now=None, platform: str | N
                          f"{driver_events.DRIVER_LEDGER_BAD}: {bad.why}",
                          "restore or repair the ledger (`swarm drive repair`), then rerun doctor"))
     for led in jobs:
-        out += _drive_orphan_checks(bk, led)
+        out += _drive_orphan_checks(bk, led) + _drive_stall_checks(cfg, led)
         if relevant:
             out += _drive_job_checks(cfg, led, now) + _drive_credential_checks(bk, led)
     if bk is not None and _board_store_exists(cfg):
         out += _drive_board_checks(cfg, bk, {x.job for x in jobs} | {x.job_hint for x in found
                                                                    if isinstance(x, ledger.LedgerBad) and x.job_hint}, now)
     return out + (_land_checks(cfg, bk, jobs) if relevant else []) + _orchestrator_wake_checks(cfg)
+
+
+def _drive_stall_checks(cfg: dict, led) -> list[Check]:
+    """A silent stall: an active drive job with no running or queued launch and no hold of any kind."""
+    from swarm import drive_activate
+    from swarm.board import open_board
+    if (led.state != "active" or led.terminal is not None or led.terminal_intent
+            or any(i.state != "concluded" for i in led.intents)):   # an open intent is a launch the board may not show yet
+        return []
+    try:
+        with open_board(cfg, readers=True) as board:
+            gens = {led.generation, led.generation_requested}
+            if any(r.state in ("queued", "running") and r.generation in gens for r in board.launches(led.job)):
+                return []
+            if drive_activate.active_holds(led, board.job_data(led.job)):
+                return []
+    except Exception:     # an unreachable board is the board checks' finding
+        return []
+    return [Check(f"drive stalled {led.job}", False,
+                  f"drive job {led.job}: no running or queued launch and no hold (stalled)",
+                  f"`swarm run --job {led.job} --name lead ...` to queue a launch, or `swarm deactivate --job {led.job}`")]
 
 
 def _drive_orphan_checks(bk, led) -> list[Check]:

@@ -97,9 +97,10 @@ class NextActions(unittest.TestCase):
         self.assertEqual(a[0].reason, "no-progress")
 
     def test_ruling_quiesces_live_launches_first(self):
-        s = snap(ledger=L(ruling_due_at=iso(T0)), live={"a"}, launches={"a": launch("a", "running")})
+        qa = {"a": launch("a", "running", role="qa")}               # a budget cause; qa is not engineer work
+        s = snap(ledger=L(rounds_without_progress=3, ruling_due_at=iso(T0)), live={"a"}, launches=qa)
         self.assertEqual(kinds(next_actions(s, CFG)), ["hold"])           # within grace
-        s2 = snap(ledger=L(ruling_due_at=iso(T0 - minutes(16))), live={"a"}, launches={"a": launch("a", "running")})
+        s2 = snap(ledger=L(rounds_without_progress=3, ruling_due_at=iso(T0 - minutes(16))), live={"a"}, launches=qa)
         self.assertEqual(kinds(next_actions(s2, CFG)), ["stop_launch"])
 
     def test_budget_exhausted_holds_without_spending_reserve(self):
@@ -406,7 +407,8 @@ class SurvivorKills(unittest.TestCase):
     """One test per mutant the review (task7-next.md) found surviving the first gate."""
 
     def test_ruling_grace_boundary_stops_at_exactly_grace(self):          # M1
-        s = snap(ledger=L(ruling_due_at=iso(T0 - minutes(15))), live={"a"}, launches={"a": launch("a", "running")})
+        s = snap(ledger=L(rounds_without_progress=3, ruling_due_at=iso(T0 - minutes(15))), live={"a"},
+                 launches={"a": launch("a", "running", role="qa")})
         self.assertEqual(kinds(next_actions(s, CFG)), ["stop_launch"])
 
     def test_question_until_is_capped_at_question_expiry(self):          # M2
@@ -439,7 +441,8 @@ class SurvivorKills(unittest.TestCase):
         self.assertNotIn("goal", [x.prompt_kind for x in next_actions(s, ARTIFEXT_CFG)])
 
     def test_stop_launch_is_a_ruling_action(self):                         # M18
-        s = snap(ledger=L(ruling_due_at=iso(T0 - minutes(16))), live={"a"}, launches={"a": launch("a", "running")})
+        s = snap(ledger=L(rounds_without_progress=3, ruling_due_at=iso(T0 - minutes(16))), live={"a"},
+                 launches={"a": launch("a", "running", role="qa")})
         (a,) = next_actions(s, CFG)
         self.assertEqual((a.kind, a.ruling), ("stop_launch", True))
 

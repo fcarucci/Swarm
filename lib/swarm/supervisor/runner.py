@@ -896,6 +896,16 @@ def _launch_argv(cfg: dict, run: dict) -> tuple[list, str | None]:
         return argv, None
     from swarm.supervisor import launchhome
     launch = str(run.get("launch") or run["name"])
+    if run.get("harness") == "codex":
+        from swarm.supervisor.launch import codex_wrapper
+        try:
+            wrapped = codex_wrapper(cfg)
+        except ValueError as exc:
+            return argv, str(exc)
+        if wrapped:   # codex runs as another OS user: that user is the boundary, nothing local to jail
+            _note_wrapper()
+            run["launch_mode"] = "off"
+            return argv, None
     try:
         launched, env, mode = launchhome.launch(cfg, argv, job=run["job"], launch=launch, workdir=run["cwd"],
                                               read_only=bool(run.get("read_only")))
@@ -911,6 +921,18 @@ def _launch_argv(cfg: dict, run: dict) -> tuple[list, str | None]:
 
 
 _BEST_EFFORT_LOGGED = False
+_WRAPPER_LOGGED = False
+
+
+def _note_wrapper() -> None:
+    """Log once per process that codex launches go through a wrapper and are not jailed."""
+    global _WRAPPER_LOGGED
+    if _WRAPPER_LOGGED:
+        return
+    _WRAPPER_LOGGED = True
+    from swarm.supervisor.settings import log
+    log("launch isolation: codex launches run through [harness.codex] wrapper: not jailed here "
+        "(the wrapper's OS user is the isolation boundary)")
 
 
 def _note_best_effort() -> None:

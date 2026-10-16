@@ -402,7 +402,7 @@ def _act(board, cfg, sup, led, snap, actions, now, start_runner, config_path, jd
         elif a.kind == "no_progress":
             m.exec.note_no_progress(board, led, snap, a)
         elif a.prompt_kind == "goal-hold":
-            m.exec.hold_goal(board, led, now, a.reason, m.model._goal_candidate(m.model._Ctx(snap, {})))
+            pass   # a judged head waits on a backoff (note_waiting publishes it); nothing is parked on a person
         elif a.kind == "rollover":
             m.life.rollover(board, cfg, led, now)
         elif a.kind == "stop_launch" and a.launch:
@@ -550,6 +550,13 @@ LAND_PENDING_KEY = "land.pending"
 LAND_PENDING_PASSES = 6        # consecutive passes with a pending landing before a ruling is made due
 
 
+def _credential_helpers(cfg) -> tuple:
+    """`[drive] credential_helpers`: the credential helpers the person named (a list of strings; anything else is ignored)."""
+    section = (cfg or {}).get("drive")
+    listed = section.get("credential_helpers") if isinstance(section, dict) else None
+    return tuple(h for h in listed if isinstance(h, str) and h) if isinstance(listed, (list, tuple)) else ()
+
+
 def _land_env(cfg, led, owner, snap, say, jdeadline, m, config_path=None):
     """A `land.LandEnv` from the owner record (`target_branch`, `config_dirs`, remotes, credentials), the
     ledger (`activation_heads`) and the snapshot's judged SHAs; `left` is what is left of the job's slot.
@@ -570,7 +577,8 @@ def _land_env(cfg, led, owner, snap, say, jdeadline, m, config_path=None):
             "target": d.get("target_branch") or "main", "say": say,
             "left": lambda: max(0.0, jdeadline - time.monotonic()),   # land._budget calls it before each step
             "activation_heads": dict(getattr(led, "activation_heads", None) or {}),
-            "config_dirs": dict(d.get("config_dirs") or {})}
+            "config_dirs": dict(d.get("config_dirs") or {}),
+            "trusted_helpers": _credential_helpers(cfg)}
     have = {f.name for f in dataclasses.fields(land.LandEnv)}
     return land.LandEnv(**{k: v for k, v in want.items() if k in have})
 
@@ -645,11 +653,9 @@ def _step(board, cfg, sup, state, led, owner, now, say, start_runner, config_pat
         driver_exec.clear_budget_hold(board, led)
     if not any(a.prompt_kind == "ruling-hold" for a in actions):
         driver_exec.clear_ruling_hold(board, led)
-    budget = next((a for a in actions if a.prompt_kind in ("budget", "goal-hold", "ruling-hold")), None)
+    budget = next((a for a in actions if a.prompt_kind in ("budget", "ruling-hold")), None)
     if budget:
-        if budget.prompt_kind == "goal-hold":
-            driver_exec.hold_goal(board, led, now, budget.reason, m.model._goal_candidate(m.model._Ctx(snap, {})))
-        elif budget.prompt_kind == "ruling-hold":
+        if budget.prompt_kind == "ruling-hold":
             driver_exec.hold_ruling(board, led, now, budget.reason, snap.goal_verdict)
         else:
             driver_exec.hold_budget(board, led, driver_exec._dcfg(cfg, led), now, budget.reason)

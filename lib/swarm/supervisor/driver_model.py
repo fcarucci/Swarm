@@ -393,6 +393,8 @@ def _ruling(c: _Ctx) -> list[Action] | None:
     reason = c.due_reason()
     if led.ruling_due_at is None and reason is None:
         return None
+    if reason is None and _engineers_pending(c):                              # ledger-only: work is coming
+        return None
     since = _ts(led.ruling_due_at) or c.now
     reason = reason or "ledger"
     if c.lead and c.launches[c.lead].last_outcome == "no hand-off":
@@ -403,6 +405,10 @@ def _ruling(c: _Ctx) -> list[Action] | None:
         if elapsed < grace:
             return [c.act("hold", None, "ruling", 0, prompt="quiesce", trigger=c.rtrig, ruling=True,
                           reason=reason, not_before=since + grace)]
+        working = sorted(n for n in c.live if _is_lead_name(n) or c.launches[n].role in ("engineer", "engineering_lead"))
+        if working:                                                           # never cancel productive work
+            return [c.act("hold", None, "ruling", 0, prompt="quiesce", trigger=c.rtrig, ruling=True,
+                          reason=f"ruling waits for running work: {', '.join(working)}")]
         return [c.act("stop_launch", name, "ruling", 0, prompt="quiesce", trigger=c.launches[name].revision,
                       ruling=True, reason=reason)
                 for name in sorted(c.live)]
@@ -718,7 +724,7 @@ def _fallback(c: _Ctx) -> list[Action]:
                       reason="question-gated", not_before=until)]
     lead = c.lead
     if _unchanged_goal(c, _goal_candidate(c)):
-        return [goal_hold(c, "waiting for the work the judge asked for; needs a person: "
+        return [goal_hold(c, "waiting for the work the judge asked for: "
                           + (c.s.goal_verdict.next or c.s.goal_verdict.reason))]
     if lead is not None and c.launches[lead].state in ("done", "queued"):
         return [c.act("launch", lead, None, 0, prompt="fallback", trigger=c.s.ledger.rounds_without_progress,
@@ -796,9 +802,12 @@ def ruling_head(candidate: str | None) -> str:
 
 
 def same_head(candidate: str | None, judged: str | None) -> bool:
+    """Two candidates name the same head only when both heads are known (>= 7 hex chars, not "unknown"):
+    an unresolved hand-off never counts as a repeat of anything (slice 9)."""
     head, prior = ruling_head(candidate), ruling_head(judged)
-    return head == prior or (min(len(head), len(prior)) >= 7
-                             and (head.startswith(prior) or prior.startswith(head)))
+    if "unknown" in (head, prior) or min(len(head), len(prior)) < 7:
+        return False
+    return head == prior or head.startswith(prior) or prior.startswith(head)
 
 
 def _engineers_pending(c: _Ctx) -> bool:
@@ -822,8 +831,20 @@ def _unchanged_goal(c: _Ctx, candidate: str | None) -> bool:
             and vd.verdict == "not_met" and same_head(candidate, vd.candidate))
 
 
+GOAL_WAIT_MIN_SECONDS = 300
+GOAL_WAIT_MAX_SECONDS = 1800
+
+
 def goal_hold(c: _Ctx, reason: str) -> Action:
-    return replace(budget_hold(c, reason), prompt_kind="goal-hold")
+    """A judged head is not judged again (that is what the goal-hold protects), but the job is NOT parked on a
+    person (slice 10): the driver re-checks on a backoff (5 min, growing with the rounds without progress, at most
+    30 min), every queued launch still runs, and a new head, a new hand-off or an external gate landing on the
+    board (ASTRA-REQUEST, a committed review) is progress that ends the wait by itself (slice 11)."""
+    reason = reason.replace("needs a person: ", "waiting for a new head: ").replace("; needs a person", "")
+    rounds = getattr(c.s.ledger, "rounds_without_progress", 0) or 0
+    delay = min(GOAL_WAIT_MAX_SECONDS, GOAL_WAIT_MIN_SECONDS * (1 + int(rounds)))
+    return c.act("hold", None, None, 0, prompt="goal-hold", reason=reason,
+                 not_before=c.now + dt.timedelta(seconds=delay))
 
 
 def judge_action(action: Action, launches: dict) -> bool:
@@ -853,8 +874,22 @@ def _same_sha_handoff(c: _Ctx) -> list[Action] | None:
     reason = (f"lead: same head {ruling_head(h.artifact)} already ruled not_met #{vd.receipt_id}; "
               "waiting for the work the judge asked for")
     if len(repeats) >= 2 or c.s.ledger.watermarks.get(f"no-progress-verdict:{name}") == vd.receipt_id:
-        return [goal_hold(c, "lead hands off an unchanged head; needs a person: " + (vd.next or vd.reason))]
-    return [c.act("no_progress", name, None, 0, trigger=rec, artifact=h.artifact, reason=reason)]
+        movable = _movable(c)
+        if movable:
+            return movable
+        return [goal_hold(c, "lead hands off an unchanged head; waiting for a new head: " + (vd.next or vd.reason))]
+    # the no-progress record is written and, in the same pass, every queued non-judge launch still runs
+    return [c.act("no_progress", name, None, 0, trigger=rec, artifact=h.artifact, reason=reason)] + _movable(c)
+
+
+def _movable(c: _Ctx) -> list[Action]:
+    """The launches that may run while a judged head waits for new work: everything queued that is not a judge
+    (a person's `swarm run`, the lead's engineers, reviewers, integrators). A goal-hold never blocks them."""
+    try:
+        pending = _next_actions(c.s, c.cfg)
+    except Exception:
+        return []
+    return [a for a in pending if a.kind == "launch" and not judge_action(a, c.launches)]
 
 
 def next_actions(s: Snapshot, cfg: dict) -> list[Action]:
@@ -869,9 +904,11 @@ def next_actions(s: Snapshot, cfg: dict) -> list[Action]:
                      all(a.kind == "close" or a.prompt_kind == "learn" or a.responsible == "learner"
                          for a in terminal)):
         return terminal
-    if s.ledger.watermarks.get("goal-hold"):
-        vd = s.goal_verdict
-        return [goal_hold(c, "goal judge held; needs a person: " + ((vd.next or vd.reason) if vd else "judge launch cap"))]
+    if s.ledger.watermarks.get("goal-hold") and s.ledger.watermarks.get("goal-hold-person"):
+        # the lead's BLOCKED named a person: an open question to a human is the one wait that is theirs
+        return [c.act("hold", None, None, 0, prompt="goal-hold",
+                      reason="a named person was asked on the board (BLOCKED); waiting for their answer",
+                      not_before=c.now + dt.timedelta(seconds=GOAL_WAIT_MIN_SECONDS))]
     if _valid(s.goal_verdict, s.generation) and s.goal_verdict.scope == "goal":
         fix = _ruling_fix(c)
         if fix:
@@ -883,9 +920,13 @@ def next_actions(s: Snapshot, cfg: dict) -> list[Action]:
     if reason:
         return [budget_hold(c, reason)]
     actions = _next_actions(s, cfg)
-    if any(a.kind == "launch" and judge_action(a, c.launches)
-           and _unchanged_goal(c, a.artifact or _goal_candidate(c)) for a in actions):
-        return [goal_hold(c, "head already ruled not_met; needs a person: "
+    unchanged = [a for a in actions if a.kind == "launch" and judge_action(a, c.launches)
+                 and _unchanged_goal(c, a.artifact or _goal_candidate(c))]
+    if unchanged:
+        others = [a for a in actions if a not in unchanged and a.kind == "launch"]
+        if others:
+            return others
+        return [goal_hold(c, "head already ruled not_met; waiting for a new head: "
                           + (s.goal_verdict.next or s.goal_verdict.reason))]
     admitted_heads, duplicate_judges = [], set()
     for index, a in enumerate(actions):
@@ -908,8 +949,11 @@ def next_actions(s: Snapshot, cfg: dict) -> list[Action]:
                     and key.rpartition(":")[2] not in unlaunched
                     for prefix in (f"goal-head:{s.generation}:", f"ruling-head:{s.generation}:")
                     for key, value in s.ledger.watermarks.items() if key.startswith(prefix))
-        if ruled or len(prior) >= 6 or _unchanged_goal(c, head):
-            return [goal_hold(c, f"goal judge launch limit (generation {s.generation}, head {head}); needs a person")]
+        if ruled or _unchanged_goal(c, head):
+            others = [x for x in actions if x.kind == "launch" and not judge_action(x, c.launches)]
+            if others:
+                return others
+            return [goal_hold(c, f"goal judge already ran on head {head} (generation {s.generation}); waiting for a new head")]
         if _engineers_pending(c):
             return [c.act("nothing", None, None, 0, responsible="engineers", reason="waiting for queued engineers")]
     actions = [a for index, a in enumerate(actions) if index not in duplicate_judges]
@@ -939,7 +983,9 @@ def next_actions(s: Snapshot, cfg: dict) -> list[Action]:
              and i.outcome not in UNLAUNCHED_OUTCOMES]
     ruled = s.ledger.watermarks.get(key, 0) or any(
         s.ledger.watermarks.get(f"{key}:{i.launch_id}", 0) for i in prior)
-    if ruled or len(prior) >= 3:
+    if ruled:
+        return [goal_hold(c, f"ruling judge already ran on head {head} (generation {s.generation}); waiting for a new head")]
+    if len(prior) >= 3:
         return [ruling_hold(c, f"ruling launch limit (generation {s.generation}, head {head})")]
     return actions
 

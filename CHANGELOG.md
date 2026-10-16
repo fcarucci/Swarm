@@ -5,10 +5,14 @@ section here, so every release adds a `## [x.y.z] - YYYY-MM-DD` section (see `sc
 Keep entries short and user-facing: one line per change, what it does, not how.
 
 ## [Unreleased]
+- **A judged head never parks a job on a person.** "Same head handed off twice", "head already judged" and the old per-generation judge cap are now a scheduled wait (5 to 30 min backoff) shown as `waiting on: lead or coordinator`; every queued launch (a person's `swarm run`, the lead's engineers, reviewers, integrators) still runs, only re-judging the same head is withheld; an unresolved hand-off (`head unknown`) never counts as a repeat; goal-hold watermarks left by older drivers are released on the first pass. The only remaining person wait is a lead's BLOCKED that names a person.
 
 - Fix driver.log portability checks on Windows and macOS; normalize log newlines and keep rotation bounded.
 
 - Fix Windows portability of the F03 driver cache and release tests while preserving POSIX permission checks.
+
+- **A ruling never cancels running engineers or the lead.** It waits for them (a visible hold), and a ledger-only ruling is cancelled while engineers are queued or running.
+- `swarm watch --compact` rolls finished and lost agents into one WORKERS summary per job, keeps live agents with tool/launch and last-post age, and avoids clock-only redraws.
 
 ## [0.3.3] - 2026-10-16
 
@@ -30,6 +34,7 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 - A `met` verdict clears every hold; every hold is visible as `waiting on:` in `swarm status`; `settle_halt` saves a fresh ledger (F03l).
 
 ### Added
+- **Codex through an argv wrapper (`[harness.codex] wrapper = true`).** `command` is then a wrapper prefix (for example `ssh root@node pct exec 118 -- runuser -u codex -- codex`) that runs Codex as another OS user: the launch argv is the wrapper plus Codex's own arguments, the brief goes in on stdin, and the launch is not put in swarm's jail (the remote user is the trust boundary; the log notes it once and `swarm doctor` warns).
 - **`swarm await --job J`: the orchestrator's wake-up.** It blocks until something needs the orchestrating session and prints one line per item (kind, key, age, action), then exits: an open question or blocker (`answer Q492`), a post addressed to the orchestrator or its role, a BRANCH READY, INFRA REQUEST, VERDICT or ORDER post, or a job state change. `--once` prints the open items without blocking; `--timeout S` exits with no items after S seconds; `--poll S` (default 5) sets the check interval; `--remind S` (default 60) reports an open item again once it was last reported S seconds ago, so a dropped wake-up comes back on the next call. Items collapse by key (one per question, per branch@sha) and stay open until resolved, not merely read. The await keeps its own cursor per (job, session) in the board's metadata, so it never consumes the messages a `read` or another await would see.
 - **The orchestrator is woken for its own job.** An orchestrating session that activated a non-drive job is told on each tool call, until it runs one, to start `swarm await --job J` as a background command; one await runs per session and job, and it is restarted after each exit. `swarm doctor` shows `orchestrator wake: armed` or `NOT ARMED` per owned job.
 - **PM-STALL: a job never silently waits on its orchestrator.** A blocker or a message addressed to the orchestrator (or its role, `@PM`) that stays unhandled for `[job] orchestrator_stall_minutes` (default 5, 0 = off) gets a `PM-STALL <item> age=<m>` board post, once, then again every that many minutes while it is unhandled. `[job] notify_on_stall = true` also tells the person through `[notify]` (`push_url`, or `telegram_token` and `telegram_chat`). `swarm status` and `swarm watch` show `waiting on ORCHESTRATOR since <age>`, distinct from a wait on a person.
@@ -37,6 +42,11 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 - **Stale blockers are flagged.** `swarm blockers` marks an open blocker `POSSIBLY STALE` when its subject is resolved: its PR landed or merged, or a later message names the same branch with another sha. `blocker resolve` takes several ids in one call (nothing is resolved if one id is unknown).
 - **`swarm answer` works for the orchestrating session without a join.** The session that owns an open job (its activation marker is bound to it) answers as its previous board name, else as `orchestrator`, instead of failing with "no active board identity".
 - **Addressed posts are delivered whole.** A `--to` post longer than the board's message cap keeps its head on the board and puts the full text in a file under the swarm data dir (`~/.local/share/swarm/posts/<job>/`), named in the message. Broadcasts keep the cap.
+
+### Fixed
+- **No wake nudge for closed or foreign jobs.** `orchestrator wake NOT ARMED` (hook and `swarm doctor`) names only active jobs the session still owns on the board, and `swarm await --job J` on a completed, failed or cancelled job exits at once with `job J is <status>: nothing to await`.
+- **A person can complete a job whose goal is met without `--force`.** `swarm deactivate --status completed` compares the met verdict's `REF@SHA` candidate with the latest hand-off (a bare SHA, `REF@SHA` or `report:<path>@<blob>`) by head, and counts only a verdict of the current generation; the refused learnings step now lists the exact `swarm learn` and `--no-learn` commands.
+- `swarm status --job J` says why a drive job is not progressing (`why not progressing: <launch>: <reason>` per queued launch, `why not progressing: hold <kind>: <reason>` per hold), and `swarm doctor` flags an active drive job with no running or queued launch and no hold as stalled.
 
 ### Changed
 - **Memory: no periodic recall, no timed reminder.** An agent gets one start recall, scoped to its job's subject tags and topic; after that it asks with `swarm recall "<query>"`, which searches every subject (`--tags`/`--bank` narrow it). Migration: `[hindsight] recall_minutes` and `remember_nudge_minutes` are gone; configs that still have them keep working (the keys are ignored), delete them.
@@ -93,6 +103,7 @@ Supersedes 0.3.0, which shipped the supervise timer. Run `swarm upgrade --force`
 - `swarm watch` on Postgres no longer re-reads the whole view on a timer. A notification reads only the new messages and refreshes the jobs and agents; idle and dead are aged on screen from the snapshot, so a quiet board costs one cheap fingerprint statement a minute (was one ~150 KB snapshot every 10 s) and a full read happens only when the fingerprint differs, on connect, after a reconnect, or when push comes back. A watch that has fallen back to polling says so under the title. Blockers in the watch snapshot are the open ones.
 
 ### Fixed
+- `[drive] credential_helpers` is wired into `swarm land`: a drive integrator can land to a destination whose credential helper is an absolute path you list there (e.g. `/home/you/.local/bin/gh`), and a refused helper's message names the key.
 - `swarm doctor` no longer reports `FAIL supervise timer ?/?` from agent shells: it reads the timer through the user manager's environment (`XDG_RUNTIME_DIR`), and says "unknown (no user bus from this shell)" instead of failing when the bus is unreachable but the last pass is recent.
 - The Codex directory edition ZIP ships `requirements-postgres.txt`, which its launcher reads on first run.
 - `swarm ci wait` and `swarm ci status` no longer return a cached failure for a commit that was re-run: a failure is re-checked with the CI host (within the 60 s floor) and a newer run attempt, or a run still queued or in progress, reads as running until its result is in. A cached green stays final.

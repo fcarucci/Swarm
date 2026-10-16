@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 from unittest import mock
 
+from test_drive_exec import ExecEnv
 from test_hooks_cli import Env
 
 from swarm import cli as swarm
@@ -70,3 +71,46 @@ class StatusTests(Env):
         self.assertEqual(rc, 0, err)
         rc, out, err = self.cli("status", "--no-color")
         self.assertEqual(rc, 0, err)
+
+
+class WhyNotProgressingTests(ExecEnv):
+    def why(self):
+        rc, out, err = self.cli("status", "--job", "J", "--no-color")
+        self.assertEqual(rc, 0, err)
+        return [line for line in out.splitlines() if line.startswith("why not progressing:")]
+
+    def test_queued_launch_with_a_skip_reason_has_one_why_line(self):
+        self.get_launch("eng-a")
+        self.b.set_job_data("J", "drive.skip.1.eng-a", "job concurrency limit reached")
+        self.assertEqual(self.why(), ["why not progressing: eng-a: job concurrency limit reached"])
+
+    def test_queued_launch_without_a_skip_reason_has_a_fallback_why_line(self):
+        self.get_launch("eng-a")
+        self.assertEqual(self.why(), ["why not progressing: eng-a: queued, not yet picked up by the driver"])
+
+    def test_active_hold_has_one_why_line(self):
+        self.led.watermarks["budget-hold"] = 1
+        self.led.save()
+        self.b.set_job_data("J", "drive.budget-hold", "budget exhausted")
+        self.assertEqual(self.why(), ["why not progressing: hold budget-hold: budget exhausted"])
+
+    def test_every_other_hold_kind_has_one_why_line(self):
+        self.b.set_job_data("J", "drive.waiting", "waiting on: judge (verdict-retry: judge backoff; "
+                            "retry after 2026-10-16T16:42:22+00:00; see #5)")
+        self.led.ruling_due_at = "2026-10-16T16:42:22+00:00"
+        self.led.halted = {"by": "person: pause", "at": "2026-10-16T16:00:00+00:00"}
+        self.led.save()
+        self.assertEqual(self.why(), [
+            "why not progressing: hold verdict-retry: judge backoff; retry after 2026-10-16T16:42:22+00:00",
+            "why not progressing: hold ruling-pending: a ruling is due by 2026-10-16T16:42:22+00:00",
+            "why not progressing: hold halted: person: pause"])
+
+    def test_waiting_line_of_a_watermark_hold_is_not_repeated(self):
+        self.led.watermarks["budget-hold"] = 1
+        self.led.save()
+        self.b.set_job_data("J", "drive.budget-hold", "budget exhausted")
+        self.b.set_job_data("J", "drive.waiting", "waiting on: person (budget-hold: budget exhausted; see #5)")
+        self.assertEqual(self.why(), ["why not progressing: hold budget-hold: budget exhausted"])
+
+    def test_nothing_queued_and_no_hold_has_no_why_line(self):
+        self.assertEqual(self.why(), [])

@@ -164,3 +164,47 @@ class RulingHoldTests(ExecEnv):
                     mock.patch('swarm.drivegate.kick'), contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(drive_cli.cmd_run(self.b, self.cfg, args), 0)
             self.assertIsNone(self.reload().ruling_due_at)
+
+
+class RulingKeepsWorkTests(ExecEnv):
+    def ruling(self, due_seconds, launches, live, budget=True, **kw):
+        self.led.ruling_due_at = iso(self.now(due_seconds))
+        if budget:
+            self.led.rounds_without_progress = 3
+        s = snap(ledger=self.led, now=self.now(), launches=launches, live=live, **kw)
+        return dm.next_actions(s, {})
+
+    def test_live_engineer_past_grace_is_not_stopped(self):
+        actions = self.ruling(-3600, {'eng-a': launch('eng-a', 'running')}, {'eng-a'})
+        self.assertEqual([(a.kind, a.launch) for a in actions], [('hold', None)])
+        self.assertIn('eng-a', actions[0].reason)
+
+    def test_live_lead_past_grace_is_not_stopped(self):
+        actions = self.ruling(-3600, {'lead': launch('lead', 'running', role='engineering_lead')}, {'lead'})
+        self.assertEqual([a.kind for a in actions], ['hold'])
+        self.assertIn('ruling waits for running work: lead', actions[0].reason)
+
+    def test_before_grace_holds_with_not_before(self):
+        action, = self.ruling(-60, {'eng-a': launch('eng-a', 'running')}, {'eng-a'})
+        self.assertEqual(action.kind, 'hold')
+        self.assertIsNotNone(action.not_before)
+
+    def test_other_live_launches_are_still_stopped_past_grace(self):
+        actions = self.ruling(-3600, {'qa-a': launch('qa-a', 'running', role='qa')}, {'qa-a'})
+        self.assertEqual([(a.kind, a.launch) for a in actions], [('stop_launch', 'qa-a')])
+
+    def test_ledger_only_ruling_with_queued_engineer_is_cancelled_and_cleared(self):
+        launches = {'eng-a': launch('eng-a', 'queued')}
+        s = snap(ledger=self.led, now=self.now(), launches=launches)
+        self.led.ruling_due_at = iso(self.now(-3600))
+        self.assertFalse([a for a in dm.next_actions(s, {}) if a.ruling])
+        ex.settle_progress(self.led, s, self.now())
+        self.assertIsNone(self.led.ruling_due_at)
+
+    def test_ledger_only_ruling_with_running_engineer_takes_no_action(self):
+        actions = self.ruling(-3600, {'eng-a': launch('eng-a', 'running')}, {'eng-a'}, budget=False)
+        self.assertFalse([a for a in actions if a.ruling])
+
+    def test_budget_ruling_with_nothing_live_launches_the_judge(self):
+        actions = self.ruling(-60, {}, set())
+        self.assertTrue([a for a in actions if a.kind == 'launch' and a.ruling])

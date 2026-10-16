@@ -981,6 +981,96 @@ class DriveDoctorTests(unittest.TestCase):
         self.owner({})
         self.assertNotIn("drive orphan J", self.run_checks())
 
+    # ---- a silent stall
+    def stall_job(self, state=None, hold=None):
+        from swarm.board import open_board
+        led = self.ledger("J")
+        if hold:
+            led.watermarks[hold] = 1
+            led.save()
+        with open_board(self.cfg()) as b:
+            b.open_job("J", "d", None, None, "me", goal="G")
+            if state:
+                b.queue_launch("J", led.generation, "lead", role="engineering_lead", harness="claude", model=None,
+                               workdir=str(self.home), brief="b", queued_by="me")
+                if state == "running":
+                    row = b.get_launch("J", led.generation, "lead")
+                    b.claim_drive_launch(job="J", generation=led.generation, action_id="1|launch|lead", attempt=1,
+                                         launch_id="L-lead-1", launch_row_id=row.id, queue_version=row.revision,
+                                         harness="claude", reserve_usd=5, reserve_minutes=60, locks=[],
+                                         lock_seconds=60)
+
+    def test_drive_job_with_no_launch_and_no_hold_is_stalled(self):
+        self.stall_job()
+        c = self.run_checks()["drive stalled J"]
+        self.assertIs(c.ok, False)
+        self.assertIn("drive job J: no running or queued launch and no hold (stalled)", c.detail)
+
+    def test_queued_launch_is_not_stalled(self):
+        self.stall_job("queued")
+        self.assertNotIn("drive stalled J", self.run_checks())
+
+    def test_running_launch_is_not_stalled(self):
+        self.stall_job("running")
+        self.assertNotIn("drive stalled J", self.run_checks())
+
+    def test_held_drive_job_is_not_stalled(self):
+        self.stall_job(hold="budget-hold")
+        self.assertNotIn("drive stalled J", self.run_checks())
+
+    def held_job(self, data=None, **attrs):
+        from swarm.board import open_board
+        from swarm.supervisor import ledger
+        led = ledger.load(self.key(), "J") or self.ledger("J")
+        led.ruling_due_at = led.halted = led.closing = None
+        led.watermarks = {}
+        for k, v in attrs.items():
+            setattr(led, k, v)
+        led.save()
+        with open_board(self.cfg()) as b:
+            if b.job_status("J") is None:
+                b.open_job("J", "d", None, None, "me", goal="G")
+            b.set_job_data("J", "drive.waiting", None)
+            for k, v in (data or {}).items():
+                b.set_job_data("J", k, v)
+
+    def test_every_hold_kind_is_not_stalled(self):
+        waiting = "waiting on: judge (verdict-retry: judge backoff; retry after 2026-10-16T16:42:22+00:00; see #5)"
+        for name, data, attrs in (
+                ("scheduled retry", {"drive.waiting": waiting}, {}),
+                ("quiesce", {"drive.waiting": "waiting on: person (driver: quiesce: ledger; retry after 2026-10-16T16:42:22+00:00; "
+                                              "await scheduled retry; see #6)"}, {}),
+                ("ruling due", {}, {"ruling_due_at": "2026-10-16T16:42:22+00:00"}),
+                ("pause", {}, {"halted": {"by": "person: pause", "at": "2026-10-16T16:00:00+00:00"}}),
+                ("closing", {}, {"closing": "met: landing"}),
+                ("goal-hold", {}, {"watermarks": {"goal-hold": 1}})):
+            with self.subTest(name):
+                self.held_job(data, **attrs)
+                self.assertNotIn("drive stalled J", self.run_checks())
+
+    def test_open_intent_counts_as_a_launch(self):
+        from swarm.supervisor import ledger
+        self.held_job(intents=[ledger.Intent(launch_id="L-1", action_id="1|launch|lead", attempt=1, launch="lead",
+                                             reserved_usd=1.0, reserved_minutes=1.0, locks=[], state="claimed")])
+        self.assertNotIn("drive stalled J", self.run_checks())
+
+    def test_a_launch_of_the_requested_generation_counts(self):
+        from swarm.board import open_board
+        led = self.ledger("J")
+        led.generation_requested = led.generation + 1
+        led.save()
+        with open_board(self.cfg()) as b:
+            b.open_job("J", "d", None, None, "me", goal="G")
+            b.queue_launch("J", led.generation_requested, "lead", role="engineering_lead", harness="claude", model=None,
+                           workdir=str(self.home), brief="b", queued_by="me")
+        self.assertNotIn("drive stalled J", self.run_checks())
+
+    def test_job_without_a_drive_ledger_is_not_stalled(self):
+        from swarm.board import open_board
+        with open_board(self.cfg()) as b:
+            b.open_job("J", "d", None, None, "me", goal="G")
+        self.assertNotIn("drive stalled J", self.run_checks())
+
     def test_board_claim_without_ledger_fails_only_past_the_grace(self):
         from swarm.supervisor import driver_events
         self.board_job("C", claim=True)

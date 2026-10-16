@@ -1992,8 +1992,8 @@ def _fit(text: str, width: int) -> str:
     return text if len(text) <= width else text[:max(0, width - 1)] + "…"[:width]
 
 
-def _compact_agent_line(a, width: int, color: bool) -> str:
-    """One agent, at most `width` columns: name [judge|verifier] (title) status model tool. Under
+def _compact_agent_line(a, width: int, color: bool, now) -> str:
+    """One live agent: name [judge|verifier] (title) status model, last-post age and tool. Under
     pressure the tool is cut (or dropped) first, then the model, then the title, then the name is cut."""
     name = term_safe(a.name) + (f" [{a.role}]" if a.role in ("judge", "verifier", agentview.ORCHESTRATOR) else "")
     status = term_safe(a.left_reason if a.ended_at is not None and a.left_reason else a.status)
@@ -2010,7 +2010,9 @@ def _compact_agent_line(a, width: int, color: bool) -> str:
     tool = _fit(tool, left - 1) if tool and left >= 6 else ""
     line = ("  " + _paint_head(name, term_safe(a.name), color) + title + " "
             + _paint_status(a.status, status, color))
-    return _clip(line + (" " + model if model else "") + (" " + tool if tool else ""), width)
+    post = _ago(a.last_post_at, now) if a.last_post_at is not None else "never"
+    return _clip(line + (" " + model if model else "") + f" · post {post}"
+                 + (" " + tool if tool else ""), width)
 
 
 NATURAL = 10 ** 6   # "no width limit": a compact line is built whole, then windowed to the pane
@@ -2028,15 +2030,13 @@ def _window(line: str, offset: int, cols: int) -> str:
 def _compact_frame(board, job: str | None, color: bool, view: dict, rows: list | None,
                    cols: int, height: int) -> list[str]:
     """The narrow view (`watch --compact`, for a side pane of 50-70 columns): a title, then per
-    open job (all of the session's, one section each) its id line and one line per agent, then
+    open job (all of the session's, one section each) its id, live agents and WORKERS rollup, then
     as many recent messages as the height leaves, one line each. Lines are built whole and cut
     to `cols` visible columns after scrolling sideways by view["offset"] (Left/Right, Home
     resets), which is clamped to the longest line and kept in the view; the title stays."""
-    import datetime as dt
     now = board.now()
-    recent = None if view.get("all_agents") else view.get("recent_minutes")
     scope = f"session {term_safe(view['session'])[:8]}" if view.get("session") else "active jobs"
-    title = _clip(_bold(_fit(f"swarm · {scope} · {dt.datetime.now().strftime('%H:%M:%S')}", cols), color), cols)
+    title = _clip(_bold(_fit(f"swarm · {scope}", cols), color), cols)
     out = []
     if rows is None:
         rows = [board.job_status(job)] if job else open_and_paused(board, False)
@@ -2046,18 +2046,17 @@ def _compact_frame(board, job: str | None, color: bool, view: dict, rows: list |
     for j in rows:
         out.append(_bold(_job_heading(board, j, now, color), color))
         if hasattr(board, 'watch_agents'):
-            agents, hidden = board.watch_agents(j.job, recent)
+            agents, _hidden = board.watch_agents(j.job, None)
         else:
-            agents, hidden = _recent_agents(board.agents(j.job), now, recent)
+            agents = board.agents(j.job)
         agents = agentview.annotate(board, j.job, agents, now)
-        out += [_compact_agent_line(a, NATURAL, color) for a in agents]
+        out += [_compact_agent_line(a, NATURAL, color, now) for a in agents
+                if a.status in ("running", "started", "idle", "waiting")]
         if agents:
-            line = _rollup_text(board, j.job, now)
+            line = "WORKERS: " + agentview.rollup(agents).text()
             out.append("  " + (_sgr(2, line) if color else line))
         if not agents:
             out.append("  " + _empty_agents_note(board, j.job, now))
-        if hidden:
-            out.append(f"  ({hidden} older hidden)")
         out += ['  ' + _blocker_line(board, blocker) for blocker in board.blockers(j.job)]
         if PLUGINS is not None:
             out += [term_safe(line) for line in PLUGINS.watch_panes(j.job, board)]
@@ -2315,7 +2314,7 @@ class _Replay:
 def _watch_board(board, view: dict, job, source, kind):
     """What a frame is drawn from: the source's read (Postgres: full, incremental or the fingerprint
     check, None when nothing differs), a full snapshot of a Postgres board, or the board itself."""
-    recent = None if view.get('all_agents') else view.get('recent_minutes')
+    recent = None if view.get('compact') or view.get('all_agents') else view.get('recent_minutes')
     if source is not None:
         return source.read(recent, kind)
     if hasattr(board, 'watch_snapshot'):
@@ -3396,6 +3395,13 @@ def _completion_refusal(js) -> str | None:
             f"override with --force (recorded).")
 
 
+def _met_covers_handoff(candidate: str | None, handoffs) -> bool:
+    """Whether a met verdict's candidate (REF@SHA) is the latest hand-off (a bare SHA, REF@SHA or
+    report:<path>@<blob>): compared by head, as the driver does (same_head). No hand-off: nothing to differ."""
+    from swarm.supervisor.driver_model import same_head
+    return not handoffs or same_head(candidate, handoffs[-1].artifact)
+
+
 def cmd_deactivate(cfg: dict, args) -> int:
     from swarm.board import AUTO_CLOSED_BY, open_board
     marker = _marker(cfg, args.job)
@@ -3425,8 +3431,10 @@ def cmd_deactivate(cfg: dict, args) -> int:
         except (ledger.LedgerBadError, OSError):
             led = None
         if led is not None:
-            gv = driver_snapshot.read(board, led, args.job, cfg=cfg, now=board.now()).goal_verdict
-            met = gv is not None and gv.verdict == "met"
+            snap = driver_snapshot.read(board, led, args.job, cfg=cfg, now=board.now())
+            gv = snap.goal_verdict
+            met = (gv is not None and gv.verdict == "met" and gv.generation == led.generation
+                   and _met_covers_handoff(gv.candidate, snap.handoffs))
     refusal = _completion_refusal(js) if completing and not met else None
     if completing and board is not None and js is not None and js.goal and not met and not args.force:
         from swarm.review import latest_handoffs, pending_artifacts, unfinalized_artifacts
@@ -4355,10 +4363,14 @@ def _board_read(board, cfg: dict, args) -> None:
 def _board_await(board, cfg: dict, args) -> int:
     """swarm await: the items for the orchestrating session (its own cursor, never the read cursor)."""
     from swarm import awaititems, hosts
+    from swarm.board import CLOSED_JOB_STATUSES
     session = hosts.cli_session_id(os.environ) or f"name:{args.name or 'anonymous'}"
     if args.once:
         items = awaititems.report(board, args.job, session)
     else:
+        if board.job_state(args.job) in CLOSED_JOB_STATUSES:
+            print(f"job {args.job} is {board.job_state(args.job)}: nothing to await")
+            return 0
         from swarm.supervisor import orchestrator_wake
         lock = orchestrator_wake.hold(session, args.job)   # one blocking await per session and job: the wake is armed
         if lock is None:
@@ -4375,6 +4387,8 @@ def _board_await(board, cfg: dict, args) -> int:
         print(term_safe(awaititems.format_item(item)))
     if not items:
         print("(no items)")
+    if not args.once and board.job_state(args.job) in CLOSED_JOB_STATUSES:   # it closed while awaiting
+        print(f"job {args.job} is {board.job_state(args.job)}: nothing to await")
     return 0
 
 
@@ -4552,6 +4566,8 @@ def _board_status(board, cfg: dict, args) -> None:
         retried = f", requeued {requeues}" if requeues else ""
         print(term_safe(f"launch {launch.name} gen {launch.generation}: {launch.state} "
                         f"({launch.role}, attempts {launch.attempts}{retried}){reason}"))
+    for line in _da.why_lines(led, data, board.launches(args.job)):
+        print(term_safe(line))
     line = bg_line(board, args.job) if board.job_status(args.job) else None
     if line:
         print(line)

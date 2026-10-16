@@ -1807,7 +1807,7 @@ checks), **UNREACHABLE** (the judge's verdict with reasons and details, or the l
 budget, deadline or reserve is gone) or **CANCELLED** (a person ran `swarm deactivate`). A drive job is never
 left idle, stalled or waiting for a coordinator. When a budget is exhausted, or `no_progress_rounds` pass without
 progress, a **ruling** becomes due: the ruling judge decides MET, UNREACHABLE or one more bounded stretch of work, drawing on the reserve
-(`ruling_reserve_usd`, `ruling_attempts`). `ruling_deadline_minutes` and `ruling_grace_minutes` bound it; past them
+(`ruling_reserve_usd`, `ruling_attempts`). A ruling never stops a running engineer or lead: it waits (a visible hold, "ruling waits for running work") until they finish, and a ruling due only on the ledger is cancelled while engineers are queued or running. `ruling_deadline_minutes` and `ruling_grace_minutes` bound it; past them
 the driver records the mechanical UNREACHABLE and says so in the outcome.
 
 ### Launches, rounds and landing
@@ -1856,7 +1856,7 @@ on a running job with `swarm drive budget --job J KEY=VALUE ...` (no rollover). 
 | `lease_hold_minutes` | 60 | a ruling becomes due |
 | `codex_usd_per_mtok` | 10 | Codex tokens times this rate charge the budget |
 | `allowed_models` | `["haiku", "sonnet", "opus"]` | activation refuses other models |
-| `credential_helpers` | `["gh auth git-credential"]` | planned: the credential helpers a pinned `--credential` may name; wired by `swarm land` (until then only the built-in default list applies) |
+| `credential_helpers` | `[]` | absolute credential-helper paths (or `"<path> <fixed args>"`) a pinned `helper:` credential may name, beside the built-in `gh auth git-credential`, `git-credential-manager`, `git-credential-store` and `git-credential-cache` (matched by basename and fixed arguments; a path listed alone allows that helper with any arguments, a `"<path> <args>"` entry only those arguments). A helper's program must be an absolute path that is listed here or in a system directory (`/usr/local/bin`, `/usr/bin`, `/bin`), owned by root or you and not writable by others; anything else is refused with a message naming this key |
 | `recipe`, `review_role` | `coding`, `reviewer` | fixed at activation in the owner record (`--recipe`), never read from `config.toml` |
 
 ### Landing destinations, credentials and worktrees
@@ -2775,7 +2775,7 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `config [board.message_max_chars [N]] [--save]` | print or set the board's message cap (200 by default, 50 to 4000; online; existing messages are kept; `--save` also writes `[board] message_max_chars`, which only seeds a new board) |
 | `post --job J (--as NAME \| --key K) [--to NAME\|@ROLE] MESSAGE...` | post a message; whitespace is collapsed and the board text capped at the board's message cap. An addressed post over the cap attaches its full text in a file named in the message; broadcasts stay capped. Spooled when the board is unreachable. `--to @EL`, `@PM`, `@QA`, `@judge` or `@<role>` goes to whoever holds that launch on the job now (one message each); a launch nobody holds is queued for its next holder; a name that is not on the job or an author who is not an agent of `--job` is refused with an error and nothing is stored. `@EL` is `engineering_lead`, `@PM` is `project_manager` (else `orchestrator`), `@product` is `product_manager`; compatibility exception: an author active on another open job is redirected there with a note on stderr before validation |
 | `read (--as NAME \| --key K) [--job J] [--peek]` | messages new since the last read, excluding your own, `read_limit` at a time with a count of what is left; `--peek` doesn't advance the cursor |
-| `await --job J [--once] [--timeout S] [--poll S] [--remind S] [--as NAME]` | block until an open question, blocker, addressed post, orchestration message, or job state change needs the orchestrator; print the items and exit. `--once` reports without blocking. Its cursor is independent of `read`; unresolved items are reported again after `--remind` seconds. Run in a background host task and restart after each exit to keep the wake armed |
+| `await --job J [--once] [--timeout S] [--poll S] [--remind S] [--as NAME]` | block until an open question, blocker, addressed post, orchestration message, or job state change needs the orchestrator; print the items and exit. `--once` reports without blocking. Its cursor is independent of `read`; unresolved items are reported again after `--remind` seconds. Run in a background host task and restart after each exit to keep the wake armed. On a completed, failed or cancelled job it exits 0 at once with `job J is <status>: nothing to await` (also when the job closes while it waits) |
 | `learn --job J [--bank B] [--create-bank] -` / `learn --list-banks` | retain self-contained job learnings with provenance in an existing bank (default_bank if omitted), one fact per nonblank stdin line; list existing banks |
 | `recall --job J [QUERY...]` | query recall_banks plus an explicit project bank, deduplicated within existing budgets |
 | `remember --job J --as NAME [--project P] [--create-bank] FACT...` | store a durable fact in its explicit project bank or default_bank (needs `[hindsight] url`); spooled when unreachable |
@@ -3376,3 +3376,32 @@ the supervisor's OS user and start Codex as that same user. It receives the norm
 arguments and stdin prompt. With no command configured, lookup uses PATH, then the plugin's
 bin directory. A missing harness refuses `swarm run`; an existing queued launch is parked
 with one DRIVER-ESCALATE notice and consumes no attempts. Installing the command lets it retry.
+
+#### Running Codex as another OS user (`wrapper = true`)
+
+When Codex lives under a different OS user, or on another machine, `command` can be an argv
+*prefix* that starts Codex there, and `wrapper = true` says so:
+
+```toml
+[harness.codex]
+wrapper = true
+command = ["ssh", "root@node", "pct", "exec", "118", "--", "runuser", "-u", "codex", "--", "codex"]
+```
+
+The launch argv is the wrapper followed by Codex's own arguments (`exec --json ... -m <model> -`),
+and the brief is written to the wrapper's **stdin** (Codex reads it from `-`): it is never an argv
+element or a local file path. No local path is passed for the working directory, the Codex home or
+the jail's binds; the wrapper is responsible for starting Codex in the right remote working
+directory and for making the code it works on reachable there. The first word must be an absolute
+path or a bare program name found on PATH (`ssh`); a relative path such as `./ssh` is refused, and
+so is `wrapper = true` without a `command`. The other `command` errors are unchanged. Without
+`wrapper`, a configured `command` is a local wrapper as above.
+
+**Trust boundary.** A wrapper launch is *not* put in swarm's launch jail (`launch_isolation` does
+not apply to it): the remote OS user is the isolation boundary. That user has its own credentials,
+files and network, and swarm does not restrict or probe them. The supervisor logs this once per
+process, and `swarm doctor` shows a `codex wrapper` WARN naming it. What still applies: the
+launch's budget (passed as Codex's rollout token limit), the run's wall-clock limit, and
+the driver's own gates on what a launch hands off (a reviewer or judge verdict is still recorded
+by the driver, and landing stays with the supervisor). The board broker does not apply: the
+launch's `swarm` commands run as the remote user and need the board reachable from there.

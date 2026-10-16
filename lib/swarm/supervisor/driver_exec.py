@@ -302,8 +302,10 @@ def _requeue_mark(led) -> int:
     return sum(v for k, v in led.watermarks.items() if k.startswith(f"requeue:{led.generation}:"))
 
 
-def hold_goal(board, led, now, reason: str, candidate=None) -> None:
-    """Hold this head until progress, a person or an explicit requeue releases it."""
+def hold_goal(board, led, now, reason: str, candidate=None, *, person: bool = False) -> None:
+    """Hold this head until progress, a person or an explicit requeue releases it. Since slice 10 only a lead's
+    BLOCKED that names a person (an open question to a human) creates this hold (`person=True`); every other
+    no-progress case is a scheduled wait (driver_model.goal_hold)."""
     from swarm.supervisor import driver_events as ev
     target = led.requester_session or "owner"
     if not led.watermarks.get("goal-hold"):
@@ -311,6 +313,8 @@ def hold_goal(board, led, now, reason: str, candidate=None) -> None:
         mark = msg.id
         def hold(l):
             l.watermarks["goal-hold"] = 1
+            if person:
+                l.watermarks["goal-hold-person"] = 1
             l.watermarks["goal-hold-msg"] = mark
             l.watermarks["goal-hold-requeue"] = _requeue_mark(l)
             if candidate:
@@ -328,6 +332,25 @@ def hold_goal(board, led, now, reason: str, candidate=None) -> None:
 
 
 def refresh_goal_hold(board, led, snap=None) -> None:
+    """Release a goal-hold watermark left by an older driver: since slice 10 a judged head is a scheduled wait
+    (`goal_hold` actions with `not_before`), never a watermark that parks the job on a person."""
+    if not led.watermarks.get("goal-hold"):
+        return
+    if led.watermarks.get("goal-hold-person"):
+        return _refresh_person_hold(board, led, snap)
+    mark = max((m.id for m in board.messages_after(0, led.job)), default=0)
+    def release(l):
+        for key in ("goal-hold", "goal-hold-msg", "goal-hold-requeue", "goal-hold-head", "goal-notify-at"):
+            l.watermarks.pop(key, None)
+        for row in board.launches(led.job, led.generation):
+            if dm._is_lead_name(row.name):
+                l.watermarks[f"no-progress:{row.name}"] = mark
+    mutate(led, release)
+    board.set_job_data(led.job, "drive.goal-hold", None)
+
+
+def _refresh_person_hold(board, led, snap=None) -> None:
+    """A hold on a named person's answer ends when a person posts, the head changes or a person re-queues."""
     from swarm.owners import is_person
     if not led.watermarks.get("goal-hold"):
         return
@@ -348,7 +371,7 @@ def refresh_goal_hold(board, led, snap=None) -> None:
         return
     mark = max((m.id for m in board.messages_after(0, led.job)), default=0)
     def release(l):
-        for key in ("goal-hold", "goal-hold-msg", "goal-hold-requeue", "goal-hold-head", "goal-notify-at"):
+        for key in ("goal-hold", "goal-hold-person", "goal-hold-msg", "goal-hold-requeue", "goal-hold-head", "goal-notify-at"):
             l.watermarks.pop(key, None)
         for row in board.launches(led.job, led.generation):
             if dm._is_lead_name(row.name):
@@ -390,8 +413,9 @@ def note_waiting(board, led, snap, actions) -> None:
             kind = "learn.hold"
         if kind == "goal-hold":
             head = dm.ruling_head(dm._goal_candidate(dm._Ctx(snap, {}))) or "unknown"
-            reason = f"no progress: the lead handed off the same head {head} twice; {a.reason}"
-            remedy = f"re-queue the lead with swarm run --job {led.job} --name lead ... or cancel"
+            reason = f"no progress: head {head} is already judged; {a.reason}"
+            remedy = ("the lead's next hand-off of a new head, a committed review (ASTRA-REQUEST) or any queued "
+                      "launch ends this wait; re-checked on a backoff; a person may also swarm run --name lead")
         else:
             reason = "learnings step still running" if a.responsible == "learner" else a.reason or "learnings step before close"
             remedy = {"budget-hold": f"raise with swarm drive budget --job {led.job} KEY=VALUE or cancel",
@@ -414,7 +438,16 @@ def note_waiting(board, led, snap, actions) -> None:
     if waits:
         msg = board.post(led.job, "swarm driver", "Waiting: " + "; ".join(waits))
         for text in waits:
-            actor = "learner" if text.startswith("learn.hold:") else "judge" if text.startswith("verdict-retry:") else "person"
+            if text.startswith("learn.hold:"):
+                actor = "learner"
+            elif text.startswith("verdict-retry:"):
+                actor = "judge"
+            elif text.startswith("goal-hold:"):
+                actor = "person" if "named person" in text else "lead or coordinator"
+            elif text.startswith(("budget-hold:", "ruling-hold:", "question-gated:")):
+                actor = "person"
+            else:
+                actor = "driver"
             lines.append(f"waiting on: {actor} ({text}; see #{msg.id})")
     board.set_job_data(led.job, "drive.waiting-key", key or None)
     board.set_job_data(led.job, "drive.waiting", "\n".join(lines) or None)
@@ -1131,7 +1164,7 @@ def _settle_launches(board, cfg: dict, led, rows: dict, now) -> None:
             from swarm.owners import person_names
             people = person_names(board, led.job)
             if any(re.search(r"(?<!\w)" + re.escape(person) + r"(?!\w)", blocked, re.I) for person in people):
-                hold_goal(board, led, now, blocked)
+                hold_goal(board, led, now, blocked, person=True)
             else:
                 _escalate_verdict(board, led, launch, now, blocked)
         if outcome == "no hand-off":
@@ -1193,7 +1226,9 @@ def settle_progress(led, snap, now) -> bool:
                       or dm.same_head(dm._goal_candidate(dm._Ctx(snap, {})) or ruling.candidate, ruling.candidate)))
     changed_head = (head is not None and head.receipt_id > wm.get("p.handoff", 0)
                     and head_hash != wm.get("p.head"))
-    cleared_due = led.ruling_due_at is not None and (clear_due or changed_head)
+    ctx = dm._Ctx(snap, {})
+    ledger_only = led.ruling_due_at is not None and ctx.due_reason() is None and dm._engineers_pending(ctx)
+    cleared_due = led.ruling_due_at is not None and (clear_due or changed_head or ledger_only)
     if cleared_due:
         mutate(led, lambda l: setattr(l, "ruling_due_at", None))
     handoff_id = max([h.receipt_id for h in snap.handoffs if h.receipt_id is not None] or [0])

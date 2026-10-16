@@ -274,8 +274,11 @@ def learnings_gate(cfg: dict, board, js, args) -> int:
     blockers = learnings.close_blockers(board, cfg, js)
     if not args.no_learn:
         if blockers:
-            print(f"not closing {js.job}: the learnings step is not done:\n- " + "\n- ".join(blockers),
-                  file=sys.stderr)
+            print(f"not closing {js.job}: the learnings step is not done:\n- " + "\n- ".join(blockers)
+                  + f"\nRun one of:\n  swarm learn --job {js.job} --bank BANK -\n"
+                  f"  swarm learn --job {js.job} --none \"<reason>\"\n"
+                  f"  swarm deactivate --job {js.job} --status {args.status} --no-learn \"<reason>\" "
+                  f"(a person; --force does not skip this step)", file=sys.stderr)
             return 1
         return 0
     reason = " ".join(args.no_learn.split())
