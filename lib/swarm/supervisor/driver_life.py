@@ -345,8 +345,8 @@ def enforce_deadlines(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks |
     True when it did (begin_terminal refuses while an outcome is already pending)."""
     if led.terminal is not None or led.halted is not None:
         return False
-    if led.terminal_intent is None and any(k.startswith(("verdict-missing:", "lead-blocked:")) for k in led.watermarks):
-        return False  # a missing verdict is a recoverable launch failure, never a goal failure
+    if led.terminal_intent is None and any(k.startswith(("verdict-missing:", "lead-blocked:", "driver-error:")) for k in led.watermarks):
+        return False  # driver and launch failures are retried, never judged as goal failures
     if LEARN_HOLD in led.watermarks and led.terminal_intent is None:
         # a receipted MET or UNREACHABLE is held for its learnings step (swarm.learnings): elapsed time neither
         # harvests the agents nor waives the step, so no deadline closes it; the learner launch or a person does

@@ -134,6 +134,14 @@ class SnapshotCase:
         self.assertEqual([(h.artifact, h.group, h.by, h.receipt_id) for h in handoffs],
                          [(f"feat/a@{SHA1}", "feat/a", "a", mid)])
 
+    def test_done_without_artifact_is_not_a_judge_candidate(self):
+        msg = self.b.post("J", "lead", "DONE")
+        handoff = review.Handoff(None, "finished", msg.id, NOW, "lead")
+        with mock.patch.object(review, "handoff_of", return_value=handoff):
+            self.assertEqual(self.read().handoffs, [])
+        self.assertEqual(ds._group(None), "")
+        self.assertEqual(ds._sha(None), "")
+
     def test_unreceipted_done_is_displayed_not_used(self):
         self.done(f"feat/a@{SHA1}", receipted=False)
         self.assertEqual(self.read().handoffs, [])

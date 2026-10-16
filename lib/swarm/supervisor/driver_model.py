@@ -264,8 +264,6 @@ class _Ctx:
     def due_reason(self) -> str | None:
         """Why a ruling is due now (spec 3.3 step 3, 4.1, 3.6, 3.8 [F19], 3.2 [F22], 3.5 [F3])."""
         led, cfg = self.s.ledger, self.cfg
-        if led.errors >= cfg["driver_error_passes"]:
-            return "driver-errors"
         if led.rounds_without_progress >= cfg["no_progress_rounds"]:
             return "no-progress"
         # 4.1: per group, `>=` (the 8th judged round is the cap). `rounds` already excludes met, landed and

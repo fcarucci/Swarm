@@ -285,18 +285,69 @@ class IsolationTests(PassCase):
             self.drive(deadline=1e10)
         self.assertLessEqual(len(self.exec.launched), 1)
 
-    def test_driver_error_after_n_passes_posts_once_and_makes_a_ruling_due(self):
+    def error_passes(self, count):
+        for i in range(count):
+            self.drive(now=self.t0 + dt.timedelta(seconds=301 * i))
+
+    def test_driver_errors_escalate_without_a_ruling_or_closing(self):
         self.job()
         self.snap.fail_for = {"J"}
-        for _ in range(driver._flat_cfg(self.cfg, self.load())["driver_error_passes"] - 1):
-            self.drive()
-        self.assertFalse(self.has_post("DRIVER-ERROR"))
+        self.drive()
+        self.assertTrue(self.has_post("DRIVER-ERROR RuntimeError"))
         self.assertIsNone(self.load().ruling_due_at)
-        self.drive()
-        self.assertTrue(self.has_post("DRIVER-ERROR"))                       # exactly at the Nth pass
-        self.drive()
+        n = driver._flat_cfg(self.cfg, self.load())["driver_error_passes"]
+        self.error_passes(n + 1)
+        self.assertTrue(self.has_post("DRIVER-ESCALATE"))
         self.assertEqual(sum("DRIVER-ERROR RuntimeError" in p for p in self.posts()), 1)
-        self.assertIsNotNone(self.load().ruling_due_at)
+        self.assertIsNone(self.load().ruling_due_at)
+        self.assertIsNone(self.load().terminal_intent)
+        self.assertEqual(self.board.job_status("J").status, "active")
+        events = [e for e in self.board.pending_events("J") if "DRIVER-ESCALATE" in e.text]
+        self.assertTrue(events)
+        self.assertIn("snapshot broke", events[-1].text)
+        self.assertIn("step read", events[-1].text)
+
+    def test_driver_error_traceback_is_private_logged_and_saved(self):
+        self.job()
+        self.snap.fail_for = {"J"}
+        self.drive()
+        text = (settings.private_dir() / "driver.log").read_text()
+        self.assertIn("Traceback (most recent call last)", text)
+        self.assertIn("RuntimeError: snapshot broke", text)
+        self.assertEqual((settings.private_dir() / "driver.log").stat().st_mode & 0o777, 0o600)
+        note = self.board.job_data("J")["drive.error.1"]
+        self.assertIn("RuntimeError: snapshot broke", note)
+        self.assertIn("raise RuntimeError", note)
+        self.assertLessEqual(len(note), 1500)
+
+    def test_driver_log_rotates_and_caps_large_records(self):
+        import logging
+        from swarm.supervisor import privfs
+        handler = driver._DriverLog()
+        with privfs.dir_fd() as d:
+            privfs.append(d, "driver.log", "previous\n")
+        handler.emit(logging.LogRecord("test", logging.WARNING, __file__, 1, "x" * (2 * 1024 * 1024), (), None))
+        self.assertEqual((settings.private_dir() / "driver.log.1").read_text(), "previous\n")
+        path = settings.private_dir() / "driver.log"
+        self.assertLessEqual(path.stat().st_size, 1024 * 1024)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(path.with_name("driver.log.1").stat().st_mode & 0o777, 0o600)
+
+    def test_error_backoff_has_a_wake_deadline_and_recovers(self):
+        from swarm.supervisor import session_driver
+        self.job()
+        self.snap.fail_for = {"J"}
+        self.drive()
+        self.drive()
+        self.assertEqual(self.load().errors, 1)
+        due = session_driver.ledger_deadlines(self.load(), {})
+        self.assertEqual(due, [self.t0.replace(microsecond=0) + dt.timedelta(seconds=2)])
+        self.assertFalse(life.enforce_deadlines(self.board, {}, self.load(),
+                                              self.t0 + dt.timedelta(days=10)))
+        self.snap.fail_for = set()
+        self.drive(now=self.t0 + dt.timedelta(seconds=301))
+        self.assertEqual(self.load().errors, 0)
+        self.assertNotIn("driver-error:retry-at", self.load().watermarks)
 
     def test_ledger_turning_bad_mid_step_holds_and_posts_not_counts_an_error(self):
         self.job()
@@ -314,39 +365,29 @@ class IsolationTests(PassCase):
         self.assertEqual(self.load("J").errors, 0)
         self.assertEqual({j for j, _ in self.exec.launched}, {"K"})
 
-    def test_second_error_streak_gets_its_own_ruling_and_notice_after_a_rollover(self):
+    def test_second_error_generation_gets_its_own_notice(self):
         self.job()
         self.snap.fail_for = {"J"}
         n = driver._flat_cfg(self.cfg, self.load())["driver_error_passes"]
-        for _ in range(n):
-            self.drive()
+        self.error_passes(n)
         led = self.load()
-        led.ruling_due_at, led.errors, led.generation = None, 0, 2           # a rollover clears them
-        led.generation_requested = 2
+        led.errors, led.generation, led.generation_requested = 0, 2, 2
+        led.watermarks.pop("driver-error:retry-at", None)
         led.save()
         with mock.patch.object(life, "rollover", return_value=False):
-            for _ in range(n):
-                self.drive()
+            self.error_passes(n)
         self.assertEqual(sum("DRIVER-ERROR" in p for p in self.posts()), 2)
-        self.assertIsNotNone(self.load().ruling_due_at)
+        self.assertIsNone(self.load().ruling_due_at)
 
-    def test_ruling_is_made_due_even_when_the_notice_cannot_be_posted(self):
+    def test_driver_error_never_rules_when_notice_cannot_be_posted(self):
         self.job()
         self.snap.fail_for = {"J"}
         n = driver._flat_cfg(self.cfg, self.load())["driver_error_passes"]
         with mock.patch.object(self.board, "post", side_effect=RuntimeError("down")):
-            for _ in range(n):
-                self.drive()
-        self.assertIsNotNone(self.load().ruling_due_at)
-
-    def test_a_ruling_that_cannot_be_made_due_still_posts_the_notice(self):
-        self.job()
-        self.snap.fail_for = {"J"}
-        self.exec.note_ruling_due = mock.Mock(side_effect=ledger.LedgerConflict("x"))
-        n = driver._flat_cfg(self.cfg, self.load())["driver_error_passes"]
-        for _ in range(n):
-            self.drive()
-        self.assertTrue(self.has_post("DRIVER-ERROR"))
+            self.error_passes(n)
+        self.assertIsNone(self.load().ruling_due_at)
+        self.assertIsNone(self.load().terminal_intent)
+        self.assertTrue(any("DRIVER-ESCALATE" in e.text for e in self.board.pending_events("J")))
 
     def test_missing_driver_modules_hold_loudly(self):
         self.job()
@@ -367,11 +408,10 @@ class IsolationTests(PassCase):
     def test_success_resets_the_error_count(self):
         self.job()
         self.snap.fail_for = {"J"}
-        self.drive()
-        self.drive()
+        self.error_passes(2)
         self.assertEqual(self.load().errors, 2)
         self.snap.fail_for = set()
-        self.drive()
+        self.drive(now=self.t0 + dt.timedelta(seconds=602))
         self.assertEqual(self.load().errors, 0)
 
     def test_the_job_argument_drives_only_that_job_but_manages_all(self):
@@ -516,6 +556,13 @@ class LandTests(PassCase):
         self.board.finish_restart(row.id, "completed")                         # the session ended
         self.drive()
         self.assertEqual(self.board.get_launch("J", 1, name).state, "done")
+
+    def test_finished_request_without_artifact_does_not_raise(self):
+        self.job()
+        self.land.requests = [SimpleNamespace(id=5, artifact=None)]
+        self.drive()
+        self.assertEqual(self.load().errors, 0)
+        self.assertEqual(len(self.land.envs), 1)
 
     def test_a_pending_request_keeps_the_integrator_and_counts(self):
         self.job()

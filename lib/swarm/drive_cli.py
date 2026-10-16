@@ -660,6 +660,16 @@ def _with_record(fn):
                 row = board.post(*a, **k)
                 posted.append(row)
                 return row
+        if args.cmd == "done" and not (args.artifact or args.branch):
+            try:
+                led = ledger.load(board_key(cfg), args.job)
+            except (ledger.LedgerBadError, OSError):
+                led = None
+            name = args.name or board.active_agent_name(getattr(args, "key", None))
+            if led and any(agent.role == "engineering_lead" and agent.name == name
+                           for agent in board.agents(args.job, include_departed=False)):
+                print("warning: a hand-off meant for the judge needs --artifact <BRANCH>@<FULL SHA>",
+                      file=sys.stderr)
         rc = fn(Recording(), cfg, args)
         if not rc and len(posted) == 1 and (args.cmd == "done" or getattr(args, "to", None)):
             drive_record(cfg, args.job, "done" if args.cmd == "done" else "post", posted[0].id)

@@ -65,12 +65,12 @@ def drive_cfg(board_key: str, job: str, cfg: dict) -> dict:
             "review_gates": details["review_gates"]}
 
 
-def _group(artifact: str) -> str:
-    return artifact.partition("@")[0]
+def _group(artifact: str | None) -> str:
+    return (artifact or "").partition("@")[0]
 
 
-def _sha(artifact: str) -> str:
-    return artifact.partition("@")[2]
+def _sha(artifact: str | None) -> str:
+    return (artifact or "").partition("@")[2]
 
 
 def _ts(text: Any) -> dt.datetime | None:
@@ -126,7 +126,7 @@ def _handoffs(msgs: list, since: dt.datetime | None, rc: _Receipts) -> list[dm.H
     out = []
     for m in msgs:
         h = review.handoff_of(m, since)           # judged one message at a time: an unreceipted newer DONE
-        if h is None:                             # never hides an older receipted one
+        if h is None or not h.artifact:           # never hides an older receipted one
             continue
         row = {"kind": "done", "id": str(m.id), "rev": 1, "artifact": h.artifact,
                "sha": _sha(h.artifact), "group": _group(h.artifact)}

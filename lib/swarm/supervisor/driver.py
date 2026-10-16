@@ -13,6 +13,7 @@ import datetime as dt
 import logging
 import os
 import time
+import traceback
 from types import SimpleNamespace
 
 from swarm.supervisor import driver_events as ev, driver_exec, ledger
@@ -544,7 +545,7 @@ def _land(board, cfg, led, owner, snap, flat, now, say, jdeadline, m, config_pat
     pending = any(r.pending for _req, r in results)
     for request, res in results:
         if not res.pending:
-            _idle_integrator(board, led, request.artifact.partition("@")[0], m)
+            _idle_integrator(board, led, (request.artifact or "").partition("@")[0], m)
     count = led.watermarks.get(LAND_PENDING_KEY, 0)
     if pending:
         _mutate(led, lambda l: l.watermarks.__setitem__(LAND_PENDING_KEY, count + 1))
@@ -639,20 +640,55 @@ def _report_skips(board, led) -> None:
             _mutate(led, lambda l: l.watermarks.__setitem__("qdone:driver-skip", 1))
 
 
+class _DriverLog(logging.Handler):
+    """Size-capped private logging shared by session drivers, without following planted paths."""
+    def emit(self, record):
+        from swarm.supervisor import privfs
+        try:
+            text = (self.format(record) + "\n").encode("utf-8", "replace")[-1024 * 1024:]
+            with privfs.dir_fd() as d, privfs.locked(d, "driver.log.lock"):
+                previous = privfs.read_tail(d, "driver.log", 1024 * 1024)
+                if previous and len(previous[0]) + len(text) > 1024 * 1024:
+                    privfs.write_atomic(d, "driver.log.1", previous[0])
+                    privfs.write_atomic(d, "driver.log", "")
+                privfs.append(d, "driver.log", text)
+        except Exception:
+            self.handleError(record)
+
+
+def configure_log() -> None:
+    logger = logging.getLogger("swarm.supervisor")
+    if not any(isinstance(h, _DriverLog) for h in logger.handlers):
+        handler = _DriverLog()
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        logger.addHandler(handler)
+
+
 def _failed(board, state, led, exc, now, flat: dict, m) -> None:
-    """A driver step raised: count it. At `driver_error_passes` in a row the ruling is made due first (whether or
-    not the notice can be posted), then DRIVER-ERROR is posted once per streak (spec 3.2)."""
-    log.warning("driver step for %s failed: %s", led.job, type(exc).__name__, exc_info=True)
+    """A broken driver is retried and escalated, never judged as a failed goal."""
+    configure_log()
+    frames = traceback.extract_tb(exc.__traceback__)
+    step = frames[-1].name if frames else "_step"
+    cause = f"{type(exc).__name__}: {str(exc)[:500]} (step {step})"
+    trace = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    log.warning("driver step for %s failed: %s", led.job, cause,
+                exc_info=(type(exc), exc, exc.__traceback__))
     try:
-        _mutate(led, lambda l: setattr(l, "errors", l.errors + 1))
+        def count(l):
+            l.errors += 1
+            l.watermarks["driver-error:retry-at"] = int(now.timestamp()) + min(300, 2 ** min(l.errors, 9))
+        _mutate(led, count)
+        board.set_job_data(led.job, f"drive.error.{led.generation}", trace[-1500:])
+        _notice(board, state, f"error|{led.job}|{led.generation}", led.job,
+                f"{ev.DRIVER_ERROR} {cause}; see driver.log")
         if led.errors >= int(flat["driver_error_passes"]):
-            try:
-                m.exec.note_ruling_due(led, now)
-            finally:
-                _notice(board, state, f"error|{led.job}|{led.generation}", led.job,
-                        f"{ev.DRIVER_ERROR} {type(exc).__name__}")
+            text = f"{ev.DRIVER_ESCALATE} {cause}; driver will retry with backoff; see driver.log"
+            target = led.requester_session or "owner"
+            board.post_event(led.job, "launch-failed",
+                             f"driver-error:{led.generation}:{int(now.timestamp())}", text, to=target)
+            board.post(led.job, SUPERVISOR, text, to=target)
     except Exception as exc2:
-        log.warning("error count for %s not saved: %s", led.job, type(exc2).__name__)
+        log.warning("driver error recovery for %s failed: %s", led.job, type(exc2).__name__, exc_info=True)
 
 
 def drive(board, cfg: dict, sup: dict, state: dict, *, now: dt.datetime, say=print, start_runner=None, which=None,
@@ -704,6 +740,9 @@ def drive(board, cfg: dict, sup: dict, state: dict, *, now: dt.datetime, say=pri
                 driver_exec.skip_launch(board, led, row.name, "owner record missing on this host")
             _report_skips(board, led)
             continue
+        retry_at = led.watermarks.get("driver-error:retry-at", 0)
+        if retry_at > now.timestamp():
+            continue
         jdeadline = min(deadline, time.monotonic() + JOB_SECONDS)
         try:
             for row in board.launches(led.job, led.generation):
@@ -711,7 +750,10 @@ def drive(board, cfg: dict, sup: dict, state: dict, *, now: dt.datetime, say=pri
                     board.set_job_data(led.job, f"drive.skip.{led.generation}.{row.name}", None)
             _step(board, cfg, sup, state, led, owner, now, say, start_runner, config_path, jdeadline, m)
             if led.errors:
-                _mutate(led, lambda l: setattr(l, "errors", 0))
+                def recovered(l):
+                    l.errors = 0
+                    l.watermarks.pop("driver-error:retry-at", None)
+                _mutate(led, recovered)
                 _forget(state, f"error|{led.job}|")
         except ledger.LedgerBadError as exc:      # the ledger went bad under us (halt, unhalt, a save): hold
             _bad(board, state, led.job, str(exc)[:200], say)
@@ -744,6 +786,7 @@ def run(board, cfg: dict, sup: dict, state: dict, *, now, say=print, start_runne
         config_path: str = "", deadline: float | None = None, job: str | None = None) -> set[str]:
     """`drive`, guarded for the pass: a failure of the driver itself (an import, the enumeration) is logged and
     the job names that can be named without it are still returned, so the other passes leave them alone."""
+    configure_log()
     if now is None:   # the CLI's `swarm supervise` passes none: the board's clock
         now = board.now()
     try:

@@ -42,6 +42,15 @@ class HandoffTests(ExecEnv):
             self.assertNotIn('lead-recovery:lead', self.led.watermarks)
             ex._queue_existing(self.b, row)
 
+    def test_lead_done_without_artifact_warns_and_still_hands_off(self):
+        self.get_launch("lead", role="engineering_lead")
+        run = self.go(self.act("lead"))
+        name = self.joined(run)
+        rc, out, err = self.cli("done", "--job", "J", "--as", name, "--summary", "finished")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("--artifact <BRANCH>@<FULL SHA>", err)
+        self.assertEqual(self.settle(run).state, "done")
+
     def test_lead_accepts_structured_done_record(self):
         self.get_launch('lead', role='engineering_lead')
         run = self.go(self.act('lead'))

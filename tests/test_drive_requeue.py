@@ -42,6 +42,12 @@ class RequeueTests(ExecEnv):
         ctx = dm._Ctx(snap(ledger=self.led), {})
         self.assertEqual(ctx.aid("launch", row.name, None, 0, "1"), run["action_id"])
 
+    def test_status_shows_last_driver_error(self):
+        self.b.set_job_data("J", "drive.error.1", "Traceback (most recent call last):\nRuntimeError: broken step\n")
+        rc, out, err = self.cli("status", "--job", "J")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("last driver error: RuntimeError: broken step (see driver.log)", out)
+
     def test_new_generation_queues_lead_from_owner_when_no_previous_launch_exists(self):
         driver_life.default_request_lead(self.b, self.cfg, self.led, 2)
         lead = self.b.get_launch("J", 2, "lead")

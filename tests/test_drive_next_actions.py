@@ -180,11 +180,10 @@ class NextActions(unittest.TestCase):
                  integrated={"feat/a": {"lease_held_since": iso(T0 - minutes(61))}})
         self.assertTrue(any(x.ruling for x in next_actions(s, CFG)))
 
-    def test_driver_error_passes_make_ruling_due(self):
+    def test_driver_error_passes_never_make_ruling_due(self):
         s = snap(launches={"lead": launch("lead", "done", **LEAD)}, ledger=L(errors=6))
         a = next_actions(s, CFG)
-        self.assertTrue(any(x.ruling for x in a))
-        self.assertEqual(a[0].reason, "driver-errors")
+        self.assertFalse(any(x.ruling for x in a))
 
     def test_stall_minutes_wakes_lead(self):
         s = snap(launches={"a": launch("a", "running", updated_at=T0 - minutes(91)),

@@ -4424,6 +4424,9 @@ def _board_status(board, cfg: dict, args) -> None:
     except (_ledger.LedgerBadError, OSError):
         led = None                        # drive_lines already explains the unreadable ledger
     data = board.job_data(args.job)
+    error = data.get(f"drive.error.{led.generation}") if led else None
+    if error and error.strip():
+        print(term_safe(f"last driver error: {error.strip().splitlines()[-1]} (see driver.log)"))
     for launch in board.launches(args.job):
         reason = (data.get(f"drive.skip.{launch.generation}.{launch.name}") if launch.state == "queued"
                   else launch.last_outcome)

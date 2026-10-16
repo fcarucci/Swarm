@@ -178,11 +178,14 @@ def ledger_deadlines(led, flat: dict, sup: dict | None = None) -> list:
     command (which touches the wake file) is what moves it."""
     if led.terminal is not None or led.halted is not None:
         return []
+    retry_at = led.watermarks.get("driver-error:retry-at")
+    if retry_at:
+        return [dt.datetime.fromtimestamp(retry_at, dt.timezone.utc)]
     out = []
     shift = dt.timedelta(seconds=float(led.halted_total_seconds or 0))
     ruling = dt.timedelta(minutes=_minutes(flat.get("ruling_deadline_minutes", 120)))
     due = _ts(led.ruling_due_at)
-    verdict_retry = any(k.startswith(("verdict-missing:", "lead-blocked:")) for k in led.watermarks)
+    verdict_retry = any(k.startswith(("verdict-missing:", "lead-blocked:", "driver-error:")) for k in led.watermarks)
     if due is not None and not verdict_retry:
         out += [due + dt.timedelta(minutes=_minutes(flat.get("ruling_grace_minutes", 15))), due + ruling + shift]
     start = _ts(led.activated_at)
@@ -670,6 +673,8 @@ def serve(cfg: dict, *, session: str | None, job: str | None, watch, config_path
           notify: bool = True, say=None) -> str:
     """Hold `lock` and run the loop; the exit reason ("already running" when the lock is held elsewhere)."""
     from swarm.board import open_board
+    from swarm.supervisor.driver import configure_log
+    configure_log()
     fd = take_lock(lock)
     if fd is None:
         return "already running"
