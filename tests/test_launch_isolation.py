@@ -130,9 +130,10 @@ class PrepareTest(LaunchHomeCase):
                 cached.chmod(0o644)
                 launchhome.prepare(self.cfg, "J", "eng-1")
                 self.assertEqual(cached.read_bytes(), source.read_bytes())
-                for path in (cached.parent.parent, cached.parent):
-                    self.assertEqual(path.stat().st_mode & 0o777, 0o700)
-                self.assertEqual(cached.stat().st_mode & 0o777, 0o600)
+                if os.name == "posix":
+                    for path in (cached.parent.parent, cached.parent):
+                        self.assertEqual(path.stat().st_mode & 0o777, 0o700)
+                    self.assertEqual(cached.stat().st_mode & 0o777, 0o600)
 
     def test_seed_cache_repair_does_not_follow_a_symlink(self):
         source = self.home / ".cache/coder-box/standing-rules.json"
@@ -143,10 +144,11 @@ class PrepareTest(LaunchHomeCase):
         moved = h / "home/moved-cache"
         cache.rename(moved)
         moved.chmod(0o755)
+        previous_mode = stat.S_IMODE(moved.stat().st_mode)
         cache.symlink_to(moved, target_is_directory=True)
         with self.assertRaises(launchhome.LaunchIsolationError):
             launchhome.prepare(self.cfg, "J", "eng-1")
-        self.assertEqual(moved.stat().st_mode & 0o777, 0o755)
+        self.assertEqual(stat.S_IMODE(moved.stat().st_mode), previous_mode)
 
     def test_missing_or_empty_standing_rules_cache_is_not_seeded(self):
         source = self.home / ".cache/coder-box/standing-rules.json"

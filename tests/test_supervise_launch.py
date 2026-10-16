@@ -1,6 +1,7 @@
 """Launch specs: exact argv per host, caps, model choice, and never a bypass flag."""
 from __future__ import annotations
 
+import os
 import re
 import unittest
 import uuid
@@ -85,12 +86,13 @@ class CodexSpecTests(unittest.TestCase):
             with mock.patch.object(launch.shutil, 'which', return_value='/opt/codex wrapper') as which:
                 spec = launch.codex_spec(c, prompt='p', workdir='/w', model=None, minutes=1,
                                          budget_usd=1, drive=True)
-            self.assertEqual(spec.argv[:4], ('/opt/codex wrapper', '--profile', 'engineering', 'exec'))
+            self.assertEqual(spec.argv[:4], (os.path.abspath('/opt/codex wrapper'),
+                                             '--profile', 'engineering', 'exec'))
             which.assert_called_once_with('/opt/codex wrapper')
 
     def test_path_then_plugin_bin_fallback(self):
         with mock.patch.object(launch.shutil, 'which', side_effect=[None, '/plugin/bin/codex']) as which:
-            self.assertEqual(launch.codex_command(cfg(), resolve=True), ['/plugin/bin/codex'])
+            self.assertEqual(launch.codex_command(cfg(), resolve=True), [os.path.abspath('/plugin/bin/codex')])
         self.assertEqual(which.call_args_list[0].args, ('codex',))
         self.assertEqual(Path(which.call_args_list[1].args[0]), ROOT / 'bin' / 'codex')
 

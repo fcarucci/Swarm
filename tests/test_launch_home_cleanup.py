@@ -76,8 +76,8 @@ class TestRemoveJobHomes(unittest.TestCase):
         legacy = {"drive": {old + "ro_paths": ["/read"], old + "rw_paths": ["/write"],
                             old + "ssh_key": "/key", old + "git_name": "Legacy",
                             old + "git_email": "legacy@example.test"}}
-        self.assertEqual(launchhome._list(legacy, "launch_ro_paths"), ["/read"])
-        self.assertEqual(launchhome._list(legacy, "launch_rw_paths"), ["/write"])
+        self.assertEqual(launchhome._list(legacy, "launch_ro_paths"), [os.path.normpath("/read")])
+        self.assertEqual(launchhome._list(legacy, "launch_rw_paths"), [os.path.normpath("/write")])
         self.assertIn('/key', launchhome.ssh_config_text(legacy))
         self.assertEqual(launchhome._git_identity(legacy), ("Legacy", "legacy@example.test"))
         legacy["drive"].update(launch_ro_paths=[], launch_rw_paths=[], launch_ssh_key="",

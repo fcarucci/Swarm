@@ -352,7 +352,7 @@ def launch_settings(person: bytes | None) -> str:
 
 
 def prepare(cfg: dict, job: str, launch: str) -> Path:
-    """Create or refresh the launch's directory (privfs: no link followed, this user's, 0700); its path."""
+    """Create or refresh the launch's directory; no links followed, POSIX mode 0700 (Windows: ACLs)."""
     from swarm import safefs
     from swarm.supervisor import privfs
     from swarm.supervisor.settings import PrivateDirError
@@ -401,7 +401,11 @@ def prepare(cfg: dict, job: str, launch: str) -> Path:
 
 
 def _seed_standing_rules(h: int, source: Path) -> None:
-    """Carry the person's cached rules into the scratch home; keep a launch's newer cache."""
+    """Carry the person's cached rules into the scratch home; keep a launch's newer cache.
+
+    Mode repair is POSIX-only. Windows cannot represent 0700/0600; its profile ACLs apply,
+    while link checks and cache content/refresh behaviour still run on every platform.
+    """
     from swarm import safefs
     from swarm.supervisor import privfs
     try:
@@ -424,14 +428,16 @@ def _seed_standing_rules(h: int, source: Path) -> None:
             fds.append(compat.open(name, safefs.DIR_FLAGS, dir_fd=fds[-1]))
             if compat.HAS_MODES and os.fstat(fds[-1]).st_uid != compat.uid():
                 raise safefs.UnsafePathError(f"{name} belongs to another user: refusing to use it")
-            compat.fchmod(fds[-1], 0o700)
+            if compat.HAS_MODES:
+                compat.fchmod(fds[-1], 0o700)
         d, name = fds[-1], "standing-rules.json"
         if not privfs.read(d, name) or modified > (privfs.mtime(d, name) or 0):
             privfs.write_atomic(d, name, data, 0o600)
         else:
             fd = safefs.open_existing(d, name, os.O_RDONLY)
             try:
-                compat.fchmod(fd, 0o600)
+                if compat.HAS_MODES:
+                    compat.fchmod(fd, 0o600)
             finally:
                 os.close(fd)
     finally:

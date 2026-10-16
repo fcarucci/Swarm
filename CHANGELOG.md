@@ -6,6 +6,8 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 ## [Unreleased]
 
+- Fix Windows portability of the F03 driver cache and release tests while preserving POSIX permission checks.
+
 ## [0.3.3] - 2026-10-16
 
 ### Removed

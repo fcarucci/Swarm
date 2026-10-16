@@ -4,7 +4,7 @@ once, and the next stop goes through, marked unharvested for the learnings step.
 from unittest import mock
 
 from test_hindsight import HindsightEnv
-from swarm import learnings
+from swarm import hooks, learnings
 
 
 class MemoryStopTests(HindsightEnv):
@@ -47,7 +47,7 @@ class MemoryStopTests(HindsightEnv):
     def test_neither_is_blocked_once_then_allowed_and_marked_unharvested(self):
         out = self.stop()
         self.assertTrue(self.blocked(out), out)
-        self.assertIn("swarm remember", out["reason"])
+        self.assertIn(f"{hooks._bin()} remember", out["reason"])
         self.assertIn("--none", out["reason"])
         self.assertIsNone(self.status().ended_at)          # still active: the stop was refused
 

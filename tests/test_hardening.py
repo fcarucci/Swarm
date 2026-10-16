@@ -243,22 +243,38 @@ class SpoolFlushBoundsTests(Env):
                                           "timeout_seconds": timeout}}
 
     def test_a_memory_delivery_stays_within_the_budget_over_several_calls(self):
-        """remember() makes several HTTP calls (profile, create bank, retain); each blocks 0.4 s.
+        """remember() makes several HTTP calls (profile, create bank, retain); each costs 0.4 s.
         One absolute deadline covers them all, and running out of it is not an outage."""
+        import io
+        import urllib.error
+        import urllib.parse
         from fake_hindsight import FakeHindsight
         fake = FakeHindsight()
         self.addCleanup(fake.stop)
         clock = ManualClock()
-        fake.on_request = lambda *a: clock.advance(0.4)
+
+        def fetch_within(req, timeout, seconds):
+            # Exercise the real client and fake API, but give each reply a deterministic cost.
+            # Real HTTP/thread startup can consume the 0.2 s left for call two on Windows.
+            path = urllib.parse.urlsplit(req.full_url).path
+            body = json.loads(req.data) if req.data else None
+            fake.requests.append({"method": req.method, "path": path, "body": body})
+            clock.advance(0.4)
+            code, reply = fake.route(req.method, path, body)
+            data = json.dumps(reply).encode()
+            if code >= 400:
+                raise urllib.error.HTTPError(req.full_url, code, "fake reply", {}, io.BytesIO(data))
+            return data
+
         cfg = self.hindsight_cfg(fake)
         spool.spool_memory(self.cfg, "J", "A", "a fact", "proj", create_bank=True)
-        with mock.patch("time.monotonic", clock), self.board() as b:
+        with mock.patch("time.monotonic", clock), \
+                mock.patch("swarm.hindsight._fetch_within", side_effect=fetch_within), self.board() as b:
             n = spool.flush_spool(b, cfg, max_items=2, deadline=clock() + 0.6, op_timeout=1.0)
         self.assertEqual(n, 0)
         self.assertGreaterEqual(len(fake.requests), 2)            # it did get past the first call
         self.assertEqual(len(list(self.spool_dir.glob("*.mem"))), 1)   # put back, not failed
         self.assertFalse((self.spool_dir / ".hindsight-unreachable").exists())
-        fake.on_request = None
         with self.board() as b:
             self.assertEqual(spool.flush_spool(b, cfg), 1)          # delivered once there is time
 
