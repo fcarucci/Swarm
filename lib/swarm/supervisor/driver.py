@@ -221,13 +221,8 @@ def tamper(led, js, owner, data: dict) -> str | None:
     """What the board row says that the ledger and the owner record do not allow, or None."""
     if js is None:
         return "job row missing"
-    if js.status in CLOSED:
-        return f"job closed ({js.status}) by {js.closed_by or 'someone'}"
     if js.status == "paused":
         return "job paused"
-    goal = (getattr(owner, "owner", None) or {}).get("goal")
-    if goal and (js.goal or "") != goal:
-        return "goal changed"
     if not js.supervise:
         return "supervise switched off"
     if (data or {}).get("drive.enabled") != "1":
@@ -237,10 +232,9 @@ def tamper(led, js, owner, data: dict) -> str | None:
 
 def _repair(board, led, owner, js) -> bool:
     """Rewrite the board row from the ledger and the owner record, where the backend allows."""
-    goal = (getattr(owner, "owner", None) or {}).get("goal") or None
     try:
-        if js is not None and (js.status in CLOSED or (goal and (js.goal or "") != goal)):
-            board.open_job(led.job, None, None, None, None, goal=goal)
+        if js is not None and js.status in CLOSED:
+            board.open_job(led.job, None, None, None, None, goal=js.goal)
         if js is not None:
             board.set_job_supervise(led.job, True)
             board.set_job_data(led.job, "drive.enabled", "1")
@@ -277,10 +271,6 @@ def _check_tamper(board, cfg, state, led, js, owner, data, now, m, say) -> str |
         return None                                    # the activation is still being completed
     if js is not None and js.status in CLOSED and _own_close(led, js, m):
         return None                                    # the driver's own close; terminalize commits it
-    what = tamper(led, js, owner, data)
-    if what is None:
-        _forget(state, f"tamper|{led.job}|")
-        return None
     if js is not None and js.status in CLOSED and _person_deactivated(led, led.board_key, now):
         if _cancel(board, cfg, led, now, m):
             say(f"drive: {led.job} cancelled by its requester")
@@ -289,6 +279,10 @@ def _check_tamper(board, cfg, state, led, js, owner, data, now, m, say) -> str |
                 f"{ev.DRIVER_TAMPER} the requester session deactivated this job but the cancellation could not "
                 "be completed; the job holds and the cancel is retried each pass")
         return "held"
+    what = tamper(led, js, owner, data)
+    if what is None:
+        _forget(state, f"tamper|{led.job}|")
+        return None
     repaired = _repair(board, led, owner, js)
     if not led.halted:
         m.life.halt(board, cfg, led, "driver (tamper)", now, reason=f"tamper: {what}"[:200])
@@ -510,10 +504,10 @@ def _land_env(cfg, led, owner, snap, say, jdeadline, m, config_path=None):
 def _idle_integrator(board, led, branch: str, m) -> None:
     """The integrator seat of a group goes idle once its hand-off is landed or refused."""
     name = m.exec.seat_name("integrator", branch)
-    for seat in board.seats(led.job, led.generation):
-        if seat.seat == name and seat.state == "running":
+    for seat in board.launches(led.job, led.generation):
+        if seat.name == name and seat.state == "running":
             try:
-                board.set_seat_state(seat.id, seat.revision, "idle", job=led.job, last_outcome="landed")
+                board.set_launch_state(seat.id, seat.revision, "done", job=led.job, last_outcome="landed")
             except ValueError as exc:
                 log.warning("integrator %s of %s not idled: %s", name, led.job, exc)
 
@@ -556,7 +550,8 @@ def _step(board, cfg, sup, state, led, owner, now, say, start_runner, config_pat
     if led.terminal_intent is not None:
         m.life.terminalize(board, flat, led, now)
         return
-    if life.rollover(board, flat, led, now):
+    life.rollover(board, flat, led, now)
+    if led.generation_requested > led.generation:
         return
     try:
         dcfg = m.snapshot.drive_cfg(led.board_key, led.job, flat)
@@ -568,6 +563,15 @@ def _step(board, cfg, sup, state, led, owner, now, say, start_runner, config_pat
     _watch_stalled(board, state, led, actions, now, sup)
     _land(board, cfg, led, owner, snap, flat, now, say, jdeadline, m, config_path)
     _act(board, cfg, sup, led, snap, actions, now, start_runner, config_path, jdeadline, m)
+    queued = board.launches(led.job, led.generation, include_closed=False)
+    stranded = any(s.state == "queued" for s in queued) and not any(s.state == "running" for s in queued)
+    previous = led.watermarks.get("queued.empty_passes", 0)
+    _mutate(led, lambda l: l.watermarks.__setitem__("queued.empty_passes", previous + 1 if stranded else 0))
+    if stranded and previous:
+        _notice(board, state, f"queued-bug|{led.job}", led.job,
+                "DRIVER-BUG queued launches with none running for more than one pass")
+    elif not stranded:
+        _forget(state, f"queued-bug|{led.job}")
 
 
 def _failed(board, state, led, exc, now, flat: dict, m) -> None:

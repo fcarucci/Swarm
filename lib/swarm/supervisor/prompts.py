@@ -24,8 +24,8 @@ STANDING_RULES = (
     "- Never put work trees, clones or builds under /tmp.",
     "- Never push: commit on your branch in your workdir. Only the supervisor pushes and lands (rebase-only, "
     "fast-forward, never a force push).",
-    "- What you may run: the swarm seat commands (post, read, who, status, wait, done, review, verdict, "
-    "goal-ready, ask, answer, seat ...) and the build and test commands of your worktree. Not `swarm ci wait`, "
+    "- What you may run: the swarm commands (post, read, who, status, wait, done, review, verdict, "
+    "goal-ready, ask, answer, run ...) and the build and test commands of your worktree. Not `swarm ci wait`, "
     "not `swarm --help`, never `gh run watch`, never a push: the supervisor waits for CI and lands.",
     "- Run swarm commands literally as `swarm ...` (never through a shell variable or function), each as its own "
     "command: no `;`, `&&`, `|` or `echo` before or after it. Only a single literal call is recorded.",
@@ -41,8 +41,8 @@ def standing_rules(job: str) -> list[str]:
 
 
 GATES = ("Review gates (haiku-strict): read the whole diff line by line; check that every changed behaviour has "
-         "a test that would catch it, and run the test command read-only in your work tree (your seat cannot write "
-         "the tree; tools may use $TMPDIR). Do not make a copy of the tree: the mutation and fails-on-base gates are "
+         "a test that would catch it, and run the test command in your work tree (follow your review role; "
+         "tools may use $TMPDIR). Do not make a copy of the tree: the mutation and fails-on-base gates are "
          "skipped in this release (a supervisor-provided scratch copy is a 0.3.1 item). A missing test, a failing "
          "test, or an unexplained behaviour change is CHANGES. Report it with `swarm review ... changes --report-text \"...\"`.")
 _BREAKS = re.compile("[\r\v\f\x85\u2028\u2029]")
@@ -137,13 +137,13 @@ def _gates(cfg, job: str) -> str | None:
 
 def _header(led, seat, role: str, name: str) -> list[str]:
     return [f"[swarm job: {led.job}]",
-            f"You are the drive seat `{name}` (role {role}) of job {led.job}, generation {led.generation}, "
+            f"You are the drive agent `{name}` (role {role}) of job {led.job}, generation {led.generation}, "
             "launched by the supervisor. Join the board first; the supervisor cannot see work you do not post.",
             UNTRUSTED]
 
 
 def _seat_body(board, led, seat, action) -> list[str]:
-    out = [f"Your task brief is the file {_ref(seat.brief_path, what='brief path')}; read it first and work in {_ref(seat.workdir, what='workdir')}."]
+    out = [f"Your task brief is the file {_ref(seat.brief, what='brief path')}; read it first and work in {_ref(seat.workdir, what='workdir')}."]
     kind = action.prompt_kind
     if kind == "wake":
         out.append(f"You were woken ({_ref(action.reason or 'wake', re.compile(r'[A-Za-z0-9 _:./-]{1,80}'), 'reason')}): check the board for what changed (answers, "
@@ -160,10 +160,10 @@ def _seat_body(board, led, seat, action) -> list[str]:
 
 def _lead_body(board, led, seat, action) -> list[str]:
     msg_mark, ev_mark = _marks(board, led.job)
-    floor = seat.wake_watermark or 0
-    pending = [e for e in board.pending_events(led.job) if e.id > floor]
-    out = ["You are the lead: read the board and the goal, plan the seats, write task briefs as files in the "
-           "workdir, request seats with `swarm seat request`, release finished ones, answer engineers, and post "
+    pending = [e for e in board.pending_events(led.job)
+               if not led.watermarks.get(f"evack:{seat.name}:{e.id}")]
+    out = ["You are the lead: read the board and the goal, plan the work, write task briefs as files in the "
+           "workdir, queue launches with `swarm run`, answer engineers, and post "
            "`swarm goal-ready --candidate SHA` when you believe the goal is met, then exit. You never spawn agents "
            "yourself.",
            "Staff exactly what the goal names. When the goal or a brief names a harness or a model for a seat (for "
@@ -261,7 +261,7 @@ def render(board, cfg, led, action, seat) -> str:
     kind = action.prompt_kind or "seat"
     del _EXTRA[:]
     role = _ref(getattr(seat, "role", "engineer"), _SAFE_ROLE, "role")
-    name = _ref(getattr(seat, "seat", "seat"), re.compile(r"[A-Za-z0-9._~:-]{1,80}"), "seat name")
+    name = _ref(getattr(seat, "name", "agent"), re.compile(r"[A-Za-z0-9._~:-]{1,80}"), "seat name")
     parts = _header(led, seat, role, name)
     if kind == "lead" or getattr(seat, "role", "") == "engineering_lead":
         parts += _lead_body(board, led, seat, action)

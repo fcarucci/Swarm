@@ -18,8 +18,8 @@ Where each record lives (the carriers written by the board, hook, goal-ready and
   of the ledger's pinned requirements; `added_requirements` come from the ledger, never from the message.
 - post: a FINALIZE_BLOCKED message (the fix trigger); record id = message id, rev 1.
 - ask (question): an open blocker with a seat and generation; record id = blocker id, rev 1.
-- seat_request: a seat row in state `requested`; record id = seat row id, rev = seat revision. Rows in any other
-  state are admitted only when the ledger knows the seat (an intent for it, or an owner).
+- launches: every stored launch of this generation is admitted without a receipt.
+
 - land: the ledger's integrated[group] entry, which names its land record (`land_id`, `land_rev`).
 
 The recipe keys come from the job's owner record (`drive_cfg`), never from config.toml; a missing or unknown
@@ -115,27 +115,11 @@ class _Receipts:
         return found if found is not None and receipts.matches(found, row) else None
 
 
-def _seats(board: Any, job: str, gen: int, rc: _Receipts, led: Any) -> dict[str, dm.SeatView]:
-    """A requested row needs its seat_request receipt. Any other row is admitted only when this host's ledger knows
-    the seat (an intent for it, or an owner), so a row written straight into the board is not trusted."""
-    out = {}
-    names = [f.name for f in dataclasses.fields(dm.SeatView)]
-    prefix = f"gen{gen}|"
-    known = {i.seat for i in led.intents
-             if i.seat and i.outcome not in ("lost", "halted") and (i.action_id or "").startswith(prefix)}
-    known |= set((led.owners or {}).values())
-    for st in board.seats(job, gen, include_closed=True):
-        if st.generation != gen:
-            continue
-        if st.state == "requested":
-            row = {"kind": "seat_request", "id": str(st.id), "rev": st.revision, "role": st.role,
-                   "model": st.model, "brief": st.brief_path, "workdir": st.workdir}
-            if rc.get("seat_request", st.id, st.revision, row) is None:
-                continue                                  # an unreceipted request is displayed, not admitted
-        elif st.seat not in known:
-            continue                                      # a row the ledger never launched or owned
-        out[st.seat] = dm.SeatView(**{n: getattr(st, n) for n in names})
-    return out
+def _launches(board: Any, job: str, gen: int, rc: _Receipts, led: Any) -> dict[str, dm.LaunchView]:
+    """Launches need no authorization receipt."""
+    names = [f.name for f in dataclasses.fields(dm.LaunchView)]
+    return {st.name: dm.LaunchView(**{n: getattr(st, n) for n in names})
+            for st in board.launches(job, gen, include_closed=True) if st.generation == gen}
 
 
 def _handoffs(msgs: list, since: dt.datetime | None, rc: _Receipts) -> list[dm.HandoffView]:
@@ -328,14 +312,14 @@ def _questions(board: Any, job: str, gen: int, rc: _Receipts) -> dict[str, list[
     return out
 
 
-def _wakes(board: Any, job: str, seats: dict[str, dm.SeatView], msgs: list, events: list, led: Any,
+def _wakes(board: Any, job: str, launches: dict[str, dm.LaunchView], msgs: list, events: list, led: Any,
            rc: _Receipts) -> dict[str, list[int]]:
     """Per seat, the receipted posts and the events to its agent above that seat's own watermarks. Message ids and
     event ids are separate id spaces, so the ledger keeps a message watermark per seat (`msg:<seat>`) and an acknowledgement per event (`evack:<seat>:<id>`).
     The agent is looked up among departed members too: a resumable seat's agent has usually left."""
     names = {a.agent_key: a.name for a in board.agents(job, include_departed=True)}
     out: dict[str, list[int]] = {}
-    for seat, st in seats.items():
+    for seat, st in launches.items():
         name = names.get(st.agent_key) if st.agent_key else None
         if name is None:
             continue                                    # nothing has joined for this seat yet
@@ -383,17 +367,17 @@ def read(board: Any, led: Any, job: str, *, cfg: dict, now: dt.datetime) -> dm.S
     msgs = board.messages_after(0, job)               # one scan per pass, one read of the events
     events = board.pending_events(job)
     stored = board.job_status(job)
-    seats = _seats(board, job, gen, rc, led)
+    launches = _launches(board, job, gen, rc, led)
     handoffs = _handoffs(msgs, since, rc)
     verdicts, goal_verdict = _verdicts(board, data, job, gen, msgs, rc)
     integrated = _integrated(led, rc, _blocked(msgs, handoffs, rc))
     return dm.Snapshot(
         job=job, generation=gen, goal=stored.goal if stored else None,
         status=stored.status if stored else "missing", halted=led.halted is not None,
-        ledger=led, seats=seats,
+        ledger=led, launches=launches,
         live={i.seat for i in led.intents if i.state in ("claiming", "claimed") and i.seat},
         handoffs=handoffs, reviews=_reviews(msgs, rc), verdicts=verdicts,
         goal_verdict=goal_verdict, goal_ready=_goal_ready(msgs, led, gen, rc),
         questions=_questions(board, job, gen, rc),
-        wakes=_wakes(board, job, seats, msgs, events, led, rc),
+        wakes=_wakes(board, job, launches, msgs, events, led, rc),
         integrated=integrated, rounds=_rounds(verdicts, integrated, gen), now=now)

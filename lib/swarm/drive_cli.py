@@ -1,13 +1,12 @@
-"""Drive control commands (spec 3.4, 3.6, 4.3; Task 6b): `swarm seat request|list|show|release|cancel`,
+"""Drive control commands: `swarm run`,
 `swarm review`, `swarm goal-ready`, `swarm halt` and `swarm unhalt`.
 
 Every command that creates or changes a control record prints, as its last stdout line,
 `swarm-record: kind=<kind> id=<n> rev=<n>`; a refusal says why on stderr and exits 1. Drive commands never
 spool (spec F18): an unreachable board is an error, not a queued post. Who may act (the caller is the one the
 PreToolUse hook attested for this exact command, swarm.person; never an environment variable):
-- seat request, seat release, goal-ready: the job's live lead seat (its own main session) or a person;
-- seat ack: the job's live lead seat only;
-- seat cancel, halt, unhalt, drive repair: a person (person.require: the requester session or a confirmed tty);
+- goal-ready: the job's live lead seat (its own main session) or a person;
+- halt, unhalt, drive repair: a person (person.require: the requester session or a confirmed tty);
 - review: an enrolled agent of the job, by its key.
 Kept out of cli.py (a 256 KiB file cap): cli.py only calls register()."""
 from __future__ import annotations
@@ -174,11 +173,11 @@ def _caller(bk: str, job: str, led, args):
 
 def _live_lead(board, job: str, led, who) -> str | None:
     """The attested caller's seat name when it is a LIVE lead seat (lead, lead~N) of this generation."""
-    from swarm.board.base import SEAT_CLOSED
+    from swarm.board.base import LAUNCH_CLOSED
     if who is None or who.seat is None or not _is_lead_seat(who.seat):
         return None
-    row = board.seat(job, led.generation, who.seat)
-    return who.seat if row is not None and row.state not in SEAT_CLOSED else None
+    row = board.get_launch(job, led.generation, who.seat)
+    return who.seat if row is not None and row.state not in LAUNCH_CLOSED else None
 
 
 def _lead_or_person(board, bk: str, job: str, led, env, action: str, args) -> str:
@@ -187,7 +186,7 @@ def _lead_or_person(board, bk: str, job: str, led, env, action: str, args) -> st
     who = _caller(bk, job, led, args)
     lead = _live_lead(board, job, led, who)
     if lead is not None:
-        row = board.seat(job, led.generation, lead)
+        row = board.get_launch(job, led.generation, lead)
         return f"lead {row.agent_key or lead}"
     if who is not None and not who.requester:
         raise Refuse(f"{action} comes from the job's lead: ask it on the board (post --to @EL)")
@@ -207,176 +206,34 @@ def _model_for(cfg: dict, role: str, given: str | None) -> str:
     return model
 
 
-def _seat_row(board, job: str, generation: int, seat: str):
-    row = board.seat(job, generation, seat)
-    if row is None:
-        raise Refuse(f"no seat {seat} in {job}")
-    return row
-
-
-def _set_state(board, row, state: str, job: str, **fields):
-    try:
-        new = board.set_seat_state(row.id, row.revision, state, job=job, **fields)
-    except ValueError as exc:
-        raise Refuse(str(exc))
-    if new is None:
-        raise Refuse(f"seat {row.seat} changed meanwhile: look at it (swarm seat show) and retry")
-    return new
-
-
-# --- seats -------------------------------------------------------------------------------------
-
-def cmd_seat_request(board, cfg, args) -> int:
+def cmd_run(board, cfg, args) -> int:
+    """The trusted CLI/broker caller queues a launch; no authorization receipt."""
+    from swarm.supervisor import runner
     bk = board_key(cfg)
     led = _drive_ledger(bk, args.job)
-    # In a Codex session the CLI cannot know its caller (its sandbox can use no grant); the row is a request
-    # the driver launches only with the seat_request receipt the hook writes for the lead or the requester.
-    codex = person.codex_session(os.environ)
-    who = "codex session" if codex else _lead_or_person(board, bk, args.job, led, os.environ, "seat request", args)
     workdir = _check_workdir(bk, args.job, args.workdir or os.getcwd())
-    model = _model_for(cfg, args.role, args.model)
-    if codex:   # CX1 X4: without a known caller, an existing row is never changed (it would void its receipt)
-        row = board.seat(args.job, led.generation, args.seat)
-        if row is not None:
-            want = dict(role=args.role, harness=args.harness, model=model, workdir=workdir, brief_path=args.brief,
-                        title=args.title, task_ref=args.task, complexity=args.complexity or "standard")
-            if any(getattr(row, k) != v for k, v in want.items()):
-                raise Refuse(f"seat {args.seat} exists: in a Codex session `seat request` creates a seat or repeats "
-                             "it unchanged, never changes it (the lead releases it first)")
-            return _record("seat", row.id, row.revision)   # the same request: the row as it is
-    seat = board.request_seat(args.job, led.generation, args.seat, role=args.role, harness=args.harness,
-                              model=model, workdir=workdir, brief_path=args.brief, title=args.title,
-                              task_ref=args.task, complexity=args.complexity or "standard", requested_by=who)
-    return _record("seat", seat.id, seat.revision)
-
-
-def _open_seat_row(board, job: str, led, seat: str):
-    """The seat row, if it is not closed (released, failed, cancelled, refused); Refuse otherwise."""
-    from swarm.board.base import SEAT_CLOSED
-    row = _seat_row(board, job, led.generation, seat)
-    if row.state in SEAT_CLOSED:
-        raise Refuse(f"seat {row.seat} is {row.state} already")
-    return row
-
-
-def check_withdraw_args(group, reason) -> tuple:
-    """(group, reason) of a --withdraw-artifact, stripped; Refuse for a missing, overlong or empty one."""
-    group, reason = (group or "").strip(), (reason or "").strip()
-    if not reason:
-        raise Refuse("--withdraw-artifact needs --reason: say why the artifact is withdrawn")
-    if not group or len(group) > 256 or len(reason) > WITHDRAW_REASON_MAX:
-        raise Refuse(f"--withdraw-artifact takes a group of 1-256 characters and a --reason of at most "
-                     f"{WITHDRAW_REASON_MAX} characters")
-    return group, reason
-
-
-def core_withdraw(board, job: str, led, seat: str, group: str, reason: str):
-    """The ledger side of a withdrawal (no save): the seat row must still be open; the group is recorded
-    withdrawn. Returns the seat row, to release once the ledger is saved (ledger first)."""
-    row = _open_seat_row(board, job, led, seat)   # before any ledger write: a refused release changes nothing
-    if group not in led.integrated and len(led.integrated) >= INTEGRATED_MAX:
-        raise Refuse(f"the ledger already records {INTEGRATED_MAX} groups: a person must look at this job")
-    led.integrated[group] = {**(led.integrated.get(group) or {}), "withdrawn": reason}
-    _check_headroom(led)
-    return row
-
-
-def cmd_seat_release(board, cfg, args) -> int:
-    bk = board_key(cfg)
-    led = _drive_ledger(bk, args.job)
-    if args.withdraw_artifact:
-        group, reason = check_withdraw_args(args.withdraw_artifact, args.reason)
-    if person.codex_session(os.environ):
-        return control_request(board, cfg, args)
-    _lead_or_person(board, bk, args.job, led, os.environ, "seat release", args)
-    if args.withdraw_artifact:
-        row = core_withdraw(board, args.job, led, args.seat, group, reason)   # refuses a closed seat first
-        led.save()
-    else:
-        row = _open_seat_row(board, args.job, led, args.seat)
-    new = _set_state(board, row, "released", args.job)
-    # a withdrawal is its own record (drivegate receipts kind=withdraw, id = the seat row)
-    return _record("withdraw" if args.withdraw_artifact else "seat", new.id, new.revision)
-
-
-def cmd_seat_cancel(board, cfg, args) -> int:
-    bk = board_key(cfg)
-    led = _drive_ledger(bk, args.job)
-    if person.codex_session(os.environ):
-        return control_request(board, cfg, args)
-    who = person.require("seat cancel", args.job, board_key=bk, env=os.environ,
-                         who=_caller(bk, args.job, led, args))
-    row = _seat_row(board, args.job, led.generation, args.seat)
-    new = _set_state(board, row, "cancelled", args.job)
-    person_receipt(bk, led, "seat cancel", who, args, new.id)
-    return _record("seat", new.id, new.revision)
-
-
-def cmd_seat_list(board, cfg, args) -> int:
-    bk = board_key(cfg)
-    led = _drive_ledger(bk, args.job)
-    for s in board.seats(args.job, led.generation):
-        print(f"{s.seat}\t{s.state}\t{s.role}\t{s.model}\trev {s.revision}\t{s.workdir}")
+    # The same descriptor walk, roots, dot-dir, home, ownership and config rules as at launch.
+    fd, why = runner.open_workdir(cfg, workdir)
+    if fd is None:
+        raise Refuse(why)
+    os.close(fd)
+    caller = _caller(bk, args.job, led, args)
+    queued_by = led.requester_session or "requester"
+    if caller is not None and caller.seat:
+        source = board.get_launch(args.job, led.generation, caller.seat)
+        source_run = next((r for r in board.restarts(args.job)
+                           if source is not None and r.launch_id == source.launch_id), None)
+        keys = {source.agent_key} if source else set()
+        if source_run:
+            keys.update((source_run.new_agent_key, source_run.old_agent_key))
+        queued_by = next((a.name for a in board.agents(args.job) if a.agent_key in keys), caller.seat)
+    row = board.queue_launch(args.job, led.generation, args.name, role=args.role, harness=args.harness,
+                             model=_model_for(cfg, args.role, args.model), workdir=workdir,
+                             brief=args.brief, queued_by=queued_by)
+    print(f"{row.name}: {row.state}")
+    from swarm.drivegate import kick
+    kick(cfg=cfg)
     return 0
-
-
-def cmd_seat_show(board, cfg, args) -> int:
-    bk = board_key(cfg)
-    led = _drive_ledger(bk, args.job)
-    s = _seat_row(board, args.job, led.generation, args.seat)
-    for k in ("seat", "role", "state", "model", "harness", "workdir", "brief_path", "revision", "last_outcome"):
-        print(f"{k}: {getattr(s, k)}")
-    return 0
-
-
-EVACK = "evack:"   # evack:<seat>:<event id> = 1, as Task 8a's driver acknowledges events (driver_exec.EVACK)
-
-
-def cmd_seat_ack(board, cfg, args) -> int:
-    """The lead acknowledges what it was woken for (spec [F4]), in the two id spaces the driver keeps apart
-    (Task 8a): `--upto ID` moves its MESSAGE mark `msg:<lead seat>` (only forward, never past the job's newest
-    message), and each `--event ID` acknowledges that one board event, `evack:<lead seat>:<id>` (it must be an
-    event of this job): events are acknowledged one by one, never by a high-water mark, so one far id cannot
-    hide later ones. Only the live lead's own session (attested by its hook) may do it."""
-    bk = board_key(cfg)
-    led = _drive_ledger(bk, args.job)
-    if person.codex_session(os.environ):
-        return control_request(board, cfg, args)
-    lead = _live_lead(board, args.job, led, _caller(bk, args.job, led, args))
-    if lead is None:
-        raise Refuse("seat ack comes from the job's live lead session (a person cannot acknowledge for the lead)")
-    core_ack(board, args.job, led, lead, args.upto, args.event or [])
-    led.save()
-    return _record("ack", args.upto, 1)   # drivegate receipts kind=ack id=<the acknowledged message id>
-
-
-def core_ack(board, job: str, led, lead: str, upto: int, events) -> None:
-    """The ledger side of a lead's ack (no save): msg:<lead> moves forward to `upto` (never past the job's
-    newest message), and each event of the job in `events` is acknowledged on its own (evack:<lead>:<id>)."""
-    if upto < 0:
-        raise Refuse("--upto must be a message id, 0 or more")
-    newest = board.last_message_id(job)
-    if upto > newest:
-        raise Refuse(f"--upto {upto} is past the newest message of {job} ({newest})")
-    events = set(events or [])
-    if events:
-        known = {e.id for e in board.events(job)}
-        unknown = sorted(events - known)
-        if unknown:
-            raise Refuse(f"--event {unknown[0]} is not an event of {job}")
-    mark = f"msg:{lead}"
-    led.watermarks[mark] = max(led.watermarks.get(mark, 0), upto)
-    for eid in sorted(events):
-        led.watermarks[f"{EVACK}{lead}:{eid}"] = 1
-    _check_headroom(led)
-
-
-SEAT_COMMANDS = {"request": cmd_seat_request, "release": cmd_seat_release, "cancel": cmd_seat_cancel,
-                 "list": cmd_seat_list, "show": cmd_seat_show, "ack": cmd_seat_ack}
-
-
-def cmd_seat(board, cfg, args) -> int:
-    return SEAT_COMMANDS[args.scmd](board, cfg, args) or 0
 
 
 # --- review and goal-ready ---------------------------------------------------------------------
@@ -854,30 +711,11 @@ def register(sub, handlers: dict, commands: dict | None = None) -> None:
     h.add_argument("--job", required=True); h.add_argument("--reason")
     u = sub.add_parser("unhalt", help="a person resumes a halted drive job")
     u.add_argument("--job", required=True)
-    s = sub.add_parser("seat", help="drive seats: request, list, show, release or cancel a seat")
-    ss = s.add_subparsers(dest="scmd", required=True)
-    rq = ss.add_parser("request", help="ask for a seat (the lead or a person)")
-    rq.add_argument("--job", required=True); rq.add_argument("--seat", required=True)
+    rq = sub.add_parser("run", help="queue or re-queue a named launch")
+    rq.add_argument("--job", required=True); rq.add_argument("--name", required=True)
     rq.add_argument("--role", required=True); rq.add_argument("--brief", required=True)
     rq.add_argument("--model"); rq.add_argument("--harness", default="claude", choices=("claude", "codex"))
-    rq.add_argument("--workdir"); rq.add_argument("--title"); rq.add_argument("--task")
-    rq.add_argument("--complexity", choices=("simple", "standard", "complex"))
-    for name in ("list", "show", "release", "cancel"):
-        p = ss.add_parser(name)
-        p.add_argument("--job", required=True)
-        if name != "list":
-            p.add_argument("--seat", required=True)
-        if name == "release":
-            p.add_argument("--withdraw-artifact", metavar="GROUP")
-            p.add_argument("--reason")
-        if name == "cancel":
-            p.add_argument("--reason")
-    ak = ss.add_parser("ack", help="the lead acknowledges the messages (up to an id) and events it was woken for")
-    ak.add_argument("--job", required=True)
-    ak.add_argument("--upto", type=int, required=True, metavar="MSG_ID",
-                    help="acknowledge the messages up to this id (the lead's message mark)")
-    ak.add_argument("--event", type=int, action="append", metavar="EVENT_ID",
-                    help="acknowledge this board event (repeatable; each one on its own)")
+    rq.add_argument("--workdir")
     rp = drive_subparsers(sub).add_parser(
         "repair", help="move a bad drive ledger aside; a fresh one starts halted (a person)")
     rp.add_argument("--job", required=True)
@@ -905,7 +743,7 @@ def register(sub, handlers: dict, commands: dict | None = None) -> None:
     # A jailed seat's broker (Task 20): "PATH\nFILE": the requirement PATH in the seat's work tree (the broker
     # reached it without following a link), pinned at the content the broker read into FILE
     gr.add_argument("--add-requirements-pinned", action="append", help=argparse.SUPPRESS)
-    handlers.update({"halt": _run(cmd_halt), "unhalt": _run(cmd_unhalt), "seat": _run(cmd_seat),
+    handlers.update({"halt": _run(cmd_halt), "unhalt": _run(cmd_unhalt), "run": _run(cmd_run),
                      "review": _run(cmd_review), "goal-ready": _run(cmd_goal_ready),
                      "drive": _run(cmd_drive)})
 

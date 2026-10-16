@@ -202,7 +202,7 @@ def snapshot_deadlines(snap, dcfg: dict, actions: list) -> list:
     from swarm.supervisor import driver_model as dm
     out = [a.not_before for a in actions if a.kind == "hold" and a.not_before is not None]
     c = dm._Ctx(snap, dcfg)
-    for name in c.seats:
+    for name in c.launches:
         until = c.gated(name)
         if until is not None:
             out.append(until)

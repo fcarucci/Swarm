@@ -92,25 +92,25 @@ class ClaimContract:
         self.addCleanup(self.b.close)
         self.b.open_job("J", None, None, None, "me", goal="G")
 
-    def seat(self, name):
-        return self.b.request_seat("J", 1, name, role="engineer", harness="claude", model="haiku",
-                                   workdir=f"/w/{name}", brief_path=f"/w/{name}/B.md", requested_by="lead")
+    def get_launch(self, name):
+        return self.b.queue_launch("J", 1, name, role="engineer", harness="claude", model="haiku",
+                                   workdir=f"/w/{name}", brief=f"/w/{name}/B.md", queued_by="lead")
 
     def claim(self, seat, launch_id, action="gen1|seat|eng|-|1|1", attempt=1):
         return self.b.claim_drive_launch(job="J", generation=1, action_id=action, attempt=attempt,
-                                         launch_id=launch_id, seat_id=seat.id, seat_revision=seat.revision,
+                                         launch_id=launch_id, launch_row_id=seat.id, queue_version=seat.revision,
                                          harness="claude", reserve_usd=1, reserve_minutes=1, locks=[],
                                          lock_seconds=60, max_host_running=4)
 
     def test_the_same_attempt_of_an_action_is_claimed_once(self):
-        a, b = self.seat("eng-a"), self.seat("eng-b")
+        a, b = self.get_launch("eng-a"), self.get_launch("eng-b")
         self.assertIsNotNone(self.claim(a, "L1"))
         self.assertIsNone(self.claim(b, "L2"), "the same (job, action, attempt) under another launch id")
-        self.assertEqual({s.seat: s.state for s in self.b.seats("J")}["eng-b"], "requested", "no seat moved")
+        self.assertEqual({s.name: s.state for s in self.b.launches("J")}["eng-b"], "queued", "no launch moved")
         self.assertEqual(len(self.b.restarts()), 1)
 
     def test_another_attempt_and_another_action_are_not_refused(self):
-        a, b, c = self.seat("eng-a"), self.seat("eng-b"), self.seat("eng-c")
+        a, b, c = self.get_launch("eng-a"), self.get_launch("eng-b"), self.get_launch("eng-c")
         self.assertIsNotNone(self.claim(a, "L1"))
         self.assertIsNotNone(self.claim(b, "L2", attempt=2))
         self.assertIsNotNone(self.claim(c, "L3", action="gen1|seat|eng|-|1|2"))

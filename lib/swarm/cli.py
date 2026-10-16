@@ -4406,6 +4406,10 @@ def _board_status(board, cfg: dict, args) -> None:
     from swarm import drive_activate as _da
     for line in _da.drive_lines(cfg, args.job):   # effective budget and models of a drive job ([D1], [P1])
         print(line)
+    for launch in board.launches(args.job):
+        reason = f": {launch.last_outcome}" if launch.last_outcome else ""
+        print(term_safe(f"launch {launch.name} gen {launch.generation}: {launch.state} "
+                        f"({launch.role}, attempts {launch.attempts}){reason}"))
     line = bg_line(board, args.job) if board.job_status(args.job) else None
     if line:
         print(line)

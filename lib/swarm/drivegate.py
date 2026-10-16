@@ -1,18 +1,8 @@
-"""Hooks of drive jobs (spec 3.4, 3.11, 4.0, 4.5): the unsandboxed PreToolUse and PostToolUse side of
-autonomy. Receipts for the control records the driver acts on, the refusals that keep read-only seats
-read-only and every seat off the target branch, and the kick that wakes the session drivers sooner.
-Nothing here decides an outcome: the driver checks receipts and verifies what it relies on.
+"""Drive hook policy, caller grants and receipts for handoffs and job control.
 
-Who is calling comes from host-private state only, never from a board row (an untrusted writer owns those):
-the resume marker bound to the session names the restart, the supervisor's run file for that restart names
-the launch, and the ledger's intent for that launch names the seat and the action. A seat's role is the one
-its `seat_request` receipt carries (drive_authz.receipted_role); a seat that cannot be resolved is treated
-as the strictest case, never as the most permissive. The requester's authority belongs to its main session
-(a payload with no `agent_id`) and to nothing that shares its session id (its subagents).
-
-A receipt binds the exact submitted argv (every flag the CLI parsed, defaults included) and the decision
-fields of the record, and is written only when the record on the board agrees with what was submitted, field
-by field; a disagreement writes nothing and is logged (receipt-failures.log, which doctor reports)."""
+Launch queues are trusted at the command boundary; roles are prompt instructions.
+The hook retains credential, production, push and landing protections.
+"""
 from __future__ import annotations
 
 import argparse
@@ -36,7 +26,7 @@ RECORD_LINE = re.compile(r"swarm-record: kind=([a-z_]+) id=(\d+) rev=(\d+)")
 PERSON_SUBS = ("halt", "unhalt", "deactivate", "activate")
 HOOK_INIT_TIMEOUT = 4.0
 
-SPAWN_REFUSAL = ("a spawn by {who} is refused: seats are staffed by the lead's `swarm seat request` (the "
+SPAWN_REFUSAL = ("a spawn by {who} is refused: seats are staffed by the lead's `swarm run` (the "
                  "supervisor launches and budgets them), never by subagents")
 
 
@@ -295,33 +285,22 @@ def _open_board(cfg: dict):
 
 
 def seat_policy(cfg: dict, board_key: str, ctx: Ctx, board=None) -> Policy:
-    """What a seat may do, from host-private state. A driver-named judge or reviewer, or a session running a
-    judge or review action, is read-only without a board lookup; any other seat's role is the one its
-    seat_request receipt carries (a board row's role is never taken on its own). Unresolvable means the
-    strictest rules (read-only, not a judge, not a lead, known=False)."""
-    strict = Policy(read_only=True, judge=False, lead=False, known=False)
+    """Roles guide prompts. All launched agents have the same tool permissions."""
     if ctx.seat is None or ctx.led is None:
-        return strict
-    kind = driveroles.action_kind(getattr(ctx.intent, "action_id", None))
-    judge = driveroles.seat_name_is_judge(ctx.seat) or kind in driveroles.JUDGE_KINDS
-    if judge or driveroles.seat_name_is_read_only(ctx.seat) or kind in driveroles.REVIEW_KINDS:
-        return Policy(read_only=True, judge=judge, lead=False)
-    from swarm.supervisor import drive_authz
+        return Policy(read_only=False, judge=False, lead=False, known=False)
     own = board is None
     try:
         board = board or _open_board(cfg)
-        row = board.seat(ctx.job, ctx.led.generation, ctx.seat)
-        role = drive_authz.receipted_role(board_key, ctx.led, row) if row is not None else None
+        row = board.get_launch(ctx.job, ctx.led.generation, ctx.seat)
+        role = row.role if row else None
     except Exception:
-        return strict
+        role = None
     finally:
         if own and board is not None:
             with contextlib.suppress(Exception):
                 board.close()
-    if role is None:
-        return strict
-    return Policy(read_only=driveroles.is_read_only_role(role), judge=driveroles.is_judge_role(role),
-                  lead=role == driveroles.LEAD_ROLE and driveroles.seat_name_is_lead(ctx.seat))
+    return Policy(read_only=False, judge=driveroles.is_judge_role(role),
+                  lead=role == driveroles.LEAD_ROLE, known=role is not None)
 
 
 # --- PreToolUse -------------------------------------------------------------------------------------
@@ -477,7 +456,6 @@ def record_of(payload: dict):
     return (m.group(1), int(m.group(2)), int(m.group(3))) if m else None
 
 
-_SEAT_RECORD_SUBS = ("request", "ack", "release", "cancel")
 _RECORD_SUBS = ("done", "review", "verdict", "post", "ask", "answer", "goal-ready", "halt", "unhalt",
                 "deactivate", "activate", "land")
 
@@ -498,7 +476,7 @@ def record_calls(command: str) -> list[list[str]]:
         if prog != "swarm":
             continue
         sub, argv = _sub_of(args)
-        if sub in _RECORD_SUBS or (sub == "seat" and argv[1:2] and argv[1] in _SEAT_RECORD_SUBS) or (
+        if sub in _RECORD_SUBS or (
                 sub == "drive" and argv[1:2] == ["repair"]):   # a Codex repair's CONTROL-REQUEST
             out.append(argv)
     return out
@@ -509,23 +487,12 @@ def _fallback_parser() -> argparse.ArgumentParser:
     first; this one covers a command it does not know in this build)."""
     p = argparse.ArgumentParser(prog="swarm", add_help=False, allow_abbrev=False, exit_on_error=False)
     sub = p.add_subparsers(dest="cmd", required=True)
-    s = sub.add_parser("seat", add_help=False, allow_abbrev=False)
-    ss = s.add_subparsers(dest="scmd", required=True)
-    rq = ss.add_parser("request", add_help=False, allow_abbrev=False)
-    for f in ("job", "seat", "role", "brief"):
+    rq = sub.add_parser("run", add_help=False, allow_abbrev=False)
+    for f in ("job", "name", "role", "brief"):
         rq.add_argument("--" + f, required=True)
     rq.add_argument("--harness", default="claude", choices=("claude", "codex"))
-    for f in ("model", "workdir", "title", "task"):
+    for f in ("model", "workdir"):
         rq.add_argument("--" + f)
-    rq.add_argument("--complexity", choices=("simple", "standard", "complex"))
-    ack = ss.add_parser("ack", add_help=False, allow_abbrev=False)
-    ack.add_argument("--job", required=True)
-    ack.add_argument("--upto", required=True, type=int)
-    rel = ss.add_parser("release", add_help=False, allow_abbrev=False)
-    rel.add_argument("--job", required=True)
-    rel.add_argument("--seat", required=True)
-    rel.add_argument("--withdraw-artifact")
-    rel.add_argument("--reason")
     rv = sub.add_parser("review", add_help=False, allow_abbrev=False)
     rv.add_argument("--job", required=True)
     rv.add_argument("--artifact", required=True)
@@ -628,11 +595,10 @@ class Refused(Exception):
         self.why, self.log = why, log
 
 
-_FIELDS = ("job", "seat", "role", "harness", "model", "brief_path", "workdir", "title", "task_ref", "complexity")
 
 
 def default_model(cfg: dict, role: str) -> str | None:
-    """The model `swarm seat request` picks for `role` when `--model` is not given: the seat command's own
+    """The model `swarm run` picks for `role` when `--model` is not given: the seat command's own
     resolver (None when it cannot be asked: the hook then cannot confirm the row's model and writes no
     receipt)."""
     try:
@@ -682,21 +648,6 @@ def _build(cfg, bk, board, ctx, who: Policy | None, ns, rid: int, rev: int, payl
         if sub == "activate":
             _activation_ok(board, ctx, payload)
         return "person", {"action": sub, "target": job}, argv
-    if sub == "seat":
-        scmd = ns.scmd
-        need(requester or lead, f"swarm seat {scmd}")
-        if scmd == "request":
-            return _seat_request(cfg, board, ctx, ns, rid, rev, payload)
-        if scmd == "ack":
-            if rid != ns.upto:
-                raise Refused("the acknowledged id is not the one submitted")
-            return "ack", {"request_id": str(ns.upto)}, argv
-        if scmd == "release" and ns.withdraw_artifact:
-            row = board.seat(job, led.generation, ns.seat)
-            if row is None or row.id != rid:
-                raise Refused("the withdrawn seat is not the row the command printed")
-            return "withdraw", {"request_id": str(row.id)}, argv
-        raise Refused("not a receipted seat command", log=False)
     if sub == "done":
         need(seat and who is not None and who.known and not who.read_only, "swarm done")
         artifact = ns.artifact or (f"{ns.branch}@{ns.sha}" if ns.branch and ns.sha else None)
@@ -707,7 +658,7 @@ def _build(cfg, bk, board, ctx, who: Policy | None, ns, rid: int, rev: int, payl
         group, _, sha = artifact.partition("@")
         return "done", {"artifact": artifact, "sha": sha, "group": group}, argv
     if sub == "review":
-        need(seat and who is not None and who.known and who.read_only and not who.judge, "swarm review")
+        need(seat and who is not None and who.known and not who.judge, "swarm review")
         artifact = ns.artifact.strip()
         outcome = ns.outcome.lower()
         from swarm.drive_cli import review_ref
@@ -775,26 +726,6 @@ def _build(cfg, bk, board, ctx, who: Policy | None, ns, rid: int, rev: int, payl
             raise Refused(f"question {qid} was not answered as submitted")
         return "answer", {"ask_id": str(qid), "answer": value}, argv
     raise Refused("not a receipted command", log=False)
-
-
-def _seat_request(cfg, board, ctx, ns, rid, rev, payload):
-    """`seat_request` kind, decision and canonical argv of a `swarm seat request`: every field of the row (the
-    ten the command sets, defaults included) must equal what the submitted arguments give."""
-    from swarm.supervisor import drive_authz
-    led = ctx.led
-    row = board.seat(ctx.job, led.generation, ns.seat)
-    if row is None or row.id != rid or row.revision != rev:
-        raise Refused("the row is not the one the command printed (replaced since)")
-    harness, _why = driveroles.effective_harness(ns.role, ns.harness)
-    model = ns.model or default_model(cfg, ns.role)
-    workdir = os.path.realpath(os.path.expanduser(ns.workdir or payload.get("cwd") or ""))
-    want = SimpleNamespace(job=ctx.job, seat=ns.seat, role=ns.role, harness=harness, model=model,
-                           brief_path=ns.brief, workdir=workdir, title=ns.title, task_ref=ns.task,
-                           complexity=ns.complexity or "standard")
-    differ = [f for f in _FIELDS if getattr(row, f) != getattr(want, f)]
-    if differ:
-        raise Refused(f"the row differs from the submitted arguments in {', '.join(differ)}")
-    return ("seat_request", drive_authz.seat_decision(row), drive_authz.canonical_seat_args(want))
 
 
 def _verdict_decision(board, ctx, ns, rid: int, author) -> dict:
@@ -907,18 +838,11 @@ def post_tool(cfg: dict, payload: dict, host, *, resume=None, resume_lookup=None
 
 def drive_kind(ns) -> str:
     """The record-format kind (swarm-record: kind=...) the parsed command prints."""
-    if ns.cmd == "seat":
-        if ns.scmd == "ack":
-            return "ack"
-        return "withdraw" if ns.scmd == "release" and getattr(ns, "withdraw_artifact", None) else "seat"
     return {"goal-ready": "goal_ready", "land": "post"}.get(ns.cmd, ns.cmd)   # a LAND-REQUEST is a post (land.REQUEST_KIND)
 
 
 def requester_action(ns) -> str:
-    """The action id of a receipt the requester session's command earns: `requester:seat` for every seat
-    command (drive_authz checks that one for a seat request), else `requester:<command>`."""
-    return "requester:seat" if ns.cmd == "seat" else "requester:" + ns.cmd.replace("-", "_")
-
+    return "requester:" + ns.cmd.replace("-", "_")
 
 
 # --- PreToolUse: grants (who runs a control command, attested before it runs) -------------------------------
@@ -936,7 +860,7 @@ def requester_action(ns) -> str:
 # (GRANT_SECONDS bounds a call the host denied, which has no PostToolUse). A subagent gets none.
 
 GRANT_SECONDS = 60.0
-GRANT_SUBS = ("halt", "unhalt", "seat", "goal-ready", "drive", "deactivate", "activate")
+GRANT_SUBS = ("halt", "unhalt", "run", "goal-ready", "drive", "deactivate", "activate")
 _PUNCT = "();<>|&\n"
 _REDIRECTS = {">", ">>", "<", ">&", "<&", ">|", "&>", "&>>"}
 
@@ -1177,8 +1101,8 @@ def is_drive_judge(cfg: dict, board, job: str, payload: dict, resume=None) -> bo
         ctx = seat_context(cfg, bk, payload, resume=resume)
         if ctx is None or ctx.led is None or not ctx.seat or ctx.job != job:
             return False
-        row = board.seat(job, ctx.led.generation, ctx.seat)
-        return row is not None and drive_authz.receipted_role(bk, ctx.led, row) == "judge"
+        row = board.get_launch(job, ctx.led.generation, ctx.seat)
+        return row is not None and driveroles.is_judge_role(row.role)
     except Exception:
         return False
 

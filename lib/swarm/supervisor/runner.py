@@ -1614,6 +1614,17 @@ def _finish_row_and_post(b, run: dict, outcome: str, poster: str) -> None:
     already finished posts nothing. At least once, not exactly once, only if the process dies
     between the post and recording it (the board's post isn't idempotent)."""
     spent = {k: run[k] for k in ("cost_usd", "tokens_in", "tokens_out") if run.get(k) is not None}
+    if run.get("launch_id"):
+        # Settle before removing the run file, so a refusal's full reason stays on the launch.
+        from swarm.supervisor import driver_exec, ledger
+        b.finish_restart(run["restart_id"], outcome, **spent)
+        led = ledger.load(run["board"], run["job"])
+        if led is not None:
+            rows = {r.launch_id: r for r in b.restarts(run["job"]) if r.id == run["restart_id"]}
+            driver_exec._settle_seats(b, {}, led, rows, b.now())
+        run.update(posted=True, post_pending=None)
+        _save_progress(run)
+        return
     if run.get("posted"):
         b.finish_restart(run["restart_id"], outcome, **spent)
         return

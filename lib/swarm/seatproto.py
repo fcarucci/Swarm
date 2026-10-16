@@ -73,12 +73,11 @@ SCHEMA: dict = {
     "answer": {"id": "key", "fields": {"id": ("str", None), "text": ("list", None), "option": ("text", "--option"),
                                        "default": ("bool", "--default"), "comment": ("text", "--comment"),
                                        "reopen": ("text", "--reopen")}, "required": ("id",)},
-    "seat request": {"id": None, "fields": {
-        "job": ("str", "--job"), "seat": ("str", "--seat"), "role": ("str", "--role"), "brief": ("str", "--brief"),
-        "model": ("str", "--model"), "harness": (("choice", ("claude", "codex")), "--harness"),
-        "workdir": ("str", "--workdir"), "title": ("text", "--title"), "task": ("text", "--task"),
-        "complexity": (("choice", ("simple", "standard", "complex")), "--complexity")},
-        "required": ("job", "role", "brief")},
+    "run": {"id": None, "fields": {
+        "job": ("str", "--job"), "name": ("str", "--name"), "role": ("str", "--role"),
+        "brief": ("str", "--brief"), "model": ("str", "--model"),
+        "harness": (("choice", ("claude", "codex")), "--harness"), "workdir": ("str", "--workdir")},
+        "required": ("job", "name", "role", "brief")},
     "remember": {"id": "as", "fields": {"job": ("str", "--job"), "tags": ("repeat", "--tags"),
                                         "none": ("text", "--none"), "fact": ("list", None)},
                  "required": ("job",)},
@@ -90,13 +89,7 @@ SCHEMA: dict = {
                                      "bank": ("str", "--bank"), "tags": ("str", "--tags"),
                                      "from": ("file", "--from"), "none": ("text", "--none")},
               "required": ("job",)},
-    "seat list": {"id": None, "fields": {"job": ("str", "--job")}},
-    "seat show": {"id": None, "fields": {"job": ("str", "--job"), "seat": ("str", "--seat")}},
-    "seat release": {"id": None, "fields": {"job": ("str", "--job"), "seat": ("str", "--seat"),
-                                            "withdraw_artifact": ("str", "--withdraw-artifact"),
-                                            "reason": ("text", "--reason")}},
-    "seat ack": {"id": None, "fields": {"job": ("str", "--job"), "upto": ("str", "--upto"),
-                                        "event": ("repeat", "--event")}},
+
 }
 HOOK_EVENTS = ("session-start", "session-end", "start", "turn", "done", "session-stop", "stop")
 GUARD_EVENTS = ("turn",)       # a guard hook that cannot run fails CLOSED (the tool call is denied)
@@ -162,10 +155,6 @@ def parse_cli(argv: list[str], cwd: str, stdin=None) -> dict:
         raise ProtocolError("no command")
     command = argv[0]
     rest = argv[1:]
-    if command == "seat":
-        if not rest:
-            raise ProtocolError("seat: say request, list, show, release or ack")
-        command, rest = f"seat {rest[0]}", rest[1:]
     if command not in SCHEMA:
         raise ProtocolError(f"`swarm {command}` is not a command a drive seat runs")
     ns = _command_parser(command).parse_args(rest)
@@ -217,7 +206,7 @@ def validate(req, own_job=None) -> tuple[str, dict]:
         raise ProtocolError("unknown command")
     spec = SCHEMA[command]
     for name, v in fields.items():
-        if name in IDENTITY or name.lstrip("_") in IDENTITY:
+        if (name in IDENTITY or name.lstrip("_") in IDENTITY) and not (command == "run" and name == "name"):
             raise ProtocolError(f"field {name} names a caller: the broker sets who the seat is")
         if name not in spec["fields"]:
             raise ProtocolError(f"unknown field {name!r} for {command}")

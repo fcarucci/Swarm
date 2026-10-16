@@ -36,9 +36,9 @@ MARK = "ctlreq:"                        # ledger watermark ctlreq:<message id> =
 FLOOR = "ctlreq-floor"                  # every request id at or below it counts as decided
 MARKS_KEEP = 64                         # decided ids kept above the floor (the rest raise the floor)
 KIND = "control_request"                # the receipt kind
-REQUESTER_KINDS = ("halt", "unhalt", "repair", "cancel")
-LEAD_KINDS = ("ack",)
-LEAD_OR_REQUESTER_KINDS = ("pins", "withdraw", "release")
+REQUESTER_KINDS = ("halt", "unhalt", "repair")
+LEAD_KINDS = ()
+LEAD_OR_REQUESTER_KINDS = ("pins",)
 _SKIP = ("config", "no_color", "func")
 
 
@@ -51,14 +51,6 @@ def kind_of(ns) -> str | None:
         return "pins"
     if cmd == "drive" and getattr(ns, "dcmd", None) == "repair":
         return "repair"
-    if cmd == "seat":
-        scmd = getattr(ns, "scmd", None)
-        if scmd == "ack":
-            return "ack"
-        if scmd == "cancel":
-            return "cancel"
-        if scmd == "release":
-            return "withdraw" if getattr(ns, "withdraw_artifact", None) else "release"
     return None
 
 
@@ -203,12 +195,12 @@ class _Refused(Exception):
 def _authorize(board, led, req: ControlRequest) -> str:
     """Who the request may act as ("requester" or "lead <seat>"), under the Claude path's rules; _Refused."""
     from swarm.drive_cli import _is_lead_seat
-    from swarm.board.base import SEAT_CLOSED
+    from swarm.board.base import LAUNCH_CLOSED
     requester = req.seat is None and req.action_id.startswith("requester:")
     lead = None
     if req.seat and _is_lead_seat(req.seat) and led is not None:
-        row = board.seat(led.job, led.generation, req.seat)
-        lead = req.seat if row is not None and row.state not in SEAT_CLOSED else None
+        row = board.get_launch(led.job, led.generation, req.seat)
+        lead = req.seat if row is not None and row.state not in LAUNCH_CLOSED else None
     if req.kind in REQUESTER_KINDS:
         if not requester:
             raise _Refused(f"{req.kind} is a person's action: only the job's requester session may request it")
@@ -271,15 +263,8 @@ def apply(board, cfg: dict, led, req: ControlRequest, now) -> tuple:
             drive_cli.core_halt(board, led, f"person ({by})", getattr(f, "reason", None))
         elif req.kind == "unhalt":
             drive_cli.core_unhalt(board, led)
-        elif req.kind == "ack":
-            drive_cli.core_ack(board, job, led, who.split(" ", 1)[1], int(f.upto), list(getattr(f, "event", None) or []))
         elif req.kind == "pins":
             drive_cli.core_pins(bk, job, led, list(getattr(f, "add_requirements", None) or []))
-        elif req.kind == "withdraw":
-            group, reason = drive_cli.check_withdraw_args(f.withdraw_artifact, getattr(f, "reason", None))
-            row = drive_cli.core_withdraw(board, job, led, f.seat, group, reason)
-        elif req.kind in ("release", "cancel"):
-            row = drive_cli._open_seat_row(board, job, led, f.seat)
     except (_Refused, drive_cli.Refuse) as exc:
         why = str(exc).removeprefix("refused: ")
         if led is not None:
@@ -293,14 +278,8 @@ def apply(board, cfg: dict, led, req: ControlRequest, now) -> tuple:
     except ledger_mod.LedgerConflict:
         return False, "the ledger changed meanwhile: the next pass tries again"
     _consume(bk, job, req.id)                        # decided: the receipt and its arguments are used up
-    if row is not None:
-        try:
-            drive_cli._set_state(board, row, "cancelled" if req.kind == "cancel" else "released", job)
-        except drive_cli.Refuse as exc:
-            _post(board, job, f"{APPLIED}{req.id} {req.kind} (the seat row: {exc})")
-            return True, str(exc)
-    if req.kind in ("halt", "unhalt", "cancel"):
-        drive_cli.person_receipt(bk, led, {"cancel": "seat cancel"}.get(req.kind, req.kind), "requester",
+    if req.kind in ("halt", "unhalt"):
+        drive_cli.person_receipt(bk, led, req.kind, "requester",
                                  SimpleNamespace(**req.fields), led.ledger_rev if row is None else row.id)
     _post(board, job, f"{APPLIED}{req.id} {req.kind}")
     return True, req.kind

@@ -413,7 +413,7 @@ class SeatBroker:
                 file_path=lambda c: self._store(c, made),
                 report=lambda path, content: [f"--report={path}", f"--report-content={self._store(content, made)}"],
                 requirement=lambda path: self._requirement(path, made))
-            if command == "seat request" and "workdir" not in fields:
+            if command == "run" and "workdir" not in fields:
                 argv[2:2] = [f"--workdir={self.workdir}"]
             limit = CLI_WAIT_TIMEOUT if command == "wait" else CLI_TIMEOUT
             grant = self._grant(argv)

@@ -266,7 +266,6 @@ finalize_enabled = true
 # The values shown are the shipped defaults. See docs/REFERENCE.md#drive-mode.
 [drive]
 max_sessions = 60                   # launches, all seats and kinds; exhausted: a ruling becomes due
-max_seats = 12                      # distinct seats; further requests are refused (the lead is woken)
 max_rounds = 8                      # judged rounds per artifact group; exhausted: a ruling
 no_progress_rounds = 3              # rounds without progress before a ruling
 max_attempts = 3                    # per logical action; then the action fails and the lead is woken
@@ -283,7 +282,8 @@ ruling_grace_minutes = 15           # extra time before the mechanical verdict i
 question_expiry = "4h"              # an unanswered question applies its --default after this
 stall_minutes = 90                  # no progress this long wakes the lead (or relaunches the lost actor)
 driver_error_passes = 6             # consecutive failing driver passes before the job is held and reported
-max_concurrent_sessions = 4         # sessions running at once for one job
+max_concurrent_sessions = 4         # this job’s running launches only
+# max_host_running = 16             # optional separate host-wide launch cap; unset means no host cap
 lease_hold_minutes = 60             # how long a seat may hold a writer lease on a work tree
 codex_usd_per_mtok = 10             # Codex has no cost report: tokens x this rate (USD per million) charge the budget
 # Recipe fields (`--recipe coding|artifact`, `review_role`) are fixed at activation in the owner

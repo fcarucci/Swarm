@@ -30,7 +30,7 @@ from swarm.supervisor.driver_model import DEFAULT_CFG
 ROLE_MODELS = {"engineer": "haiku", "worker": "haiku", "integrator": "haiku", "reviewer": "sonnet",
                "qa": "sonnet", "judge": "opus", "lead": "opus", "security": "opus"}   # [P1] shipped defaults
 DEFAULT_ALLOWED_MODELS = ("haiku", "sonnet", "opus")
-BUDGET_KEYS = ("max_sessions", "max_seats", "max_rounds", "no_progress_rounds", "max_attempts",
+BUDGET_KEYS = ("max_sessions", "max_rounds", "no_progress_rounds", "max_attempts",
                "max_cost_usd", "ruling_reserve_usd", "session_usd_cap", "min_session_usd",
                "max_session_minutes", "max_wall_hours", "ruling_attempts", "ruling_deadline_minutes",
                "ruling_grace_minutes", "stall_minutes", "driver_error_passes", "max_concurrent_sessions")
@@ -387,8 +387,8 @@ def lead_brief_text(job: str, goal: str, requirements: list) -> str:
     """The generated brief: the goal, the pinned requirements, the standing rules and the lead's task."""
     req = "\n".join(f"- {r}" for r in requirements) or "- (the goal text above)"
     return (f"# Lead brief for {job}\n\n## Goal\n\n{goal}\n\n## Requirements (pinned)\n\n{req}\n\n"
-            "## Your task\n\nPlan the seats this goal needs, request each with `swarm seat request`, "
-            "and post GOAL-READY when the target meets the requirements. Seats write; reviewers and the "
+            "## Your task\n\nPlan the work and queue launches with `swarm run`, "
+            "and post GOAL-READY when the target meets the requirements. Roles are instructions: reviewers and the "
             "judge only read. Targeted tests only, through /var/tmp/test-slots/test-slot when it exists; "
             "full suites only in CI; never put work trees or builds under /tmp; rebase-only landing.\n")
 
@@ -597,21 +597,6 @@ def _record_activation_heads(cfg: dict, bk: str, job: str, o: dict) -> None:
         _save(bk, job, lambda x: [x.activation_heads.setdefault(u, h) for u, h in pending.items()])
 
 
-def _authorize_lead(led, row, owner: dict, harness: str, model: str) -> None:
-    """The lead seat this activation requested is authorized like a seat the driver creates (spec 3.4: a
-    seat runs only on a receipted request): a seat_request receipt for its row's id and revision, written here
-    because the activation is the requester's own command. Only the row this activation would have written,
-    still requested and not yet authorized; a row a board writer changed stays unauthorized (fails closed)."""
-    from swarm.supervisor import driver_exec
-    now = dt.datetime.now(dt.timezone.utc)
-    want = {"role": "engineering_lead", "harness": harness, "model": model, "workdir": owner["roots"][0],
-            "brief_path": owner["brief"]}
-    if row is None or row.state != "requested" or any(getattr(row, k) != v for k, v in want.items()):
-        return
-    if not driver_exec.seat_authorized(led, row, now):
-        driver_exec.authorize_seat(led, row, now)
-
-
 def finish_activation(cfg: dict, board, job: str, *, crash_after: str | None = None) -> ledger.Ledger | None:
     """Steps 5 to 7 of [RR1] for a job whose ledger is "activating" and whose owner record and board claim
     exist: the board's generation data, the lead seat request, then the ledger "active".
@@ -643,12 +628,11 @@ def finish_activation(cfg: dict, board, job: str, *, crash_after: str | None = N
     _record_activation_heads(cfg, bk, job, o)
     if crash_after == "heads":
         raise RuntimeError("crash after heads")
-    lead = board.seat(job, led.generation, "lead")
+    lead = board.get_launch(job, led.generation, "lead")
     if lead is None:
-        lead = board.request_seat(job, led.generation, "lead", role="engineering_lead", harness=owner.harness,
-                                  model=models["lead"], workdir=o["roots"][0], brief_path=o["brief"],
-                                  requested_by=session or user)
-    _authorize_lead(led, lead, o, owner.harness, models["lead"])
+        lead = board.queue_launch(job, led.generation, "lead", role="engineering_lead", harness=owner.harness,
+                                  model=models["lead"], workdir=o["roots"][0], brief=o["brief"],
+                                  queued_by=session or user)
     if crash_after == "lead":
         raise RuntimeError("crash after lead")
 
@@ -876,7 +860,7 @@ def cmd_activate_drive(cfg: dict, args) -> int:
     models = {**model_defaults(cfg), **led.models}
     kick()
     driven = start_driver(cfg, led.requester_session, getattr(args, "config", None))
-    print(f"activated {args.job} (drive): the session driver drives it from here; the lead is seat 1 "
+    print(f"activated {args.job} (drive): the session driver drives it from here; the lead launch is queued "
           f"(generation {led.generation}); models {_models_text(models)}")
     print(driven)
     print(f"swarm-record: kind=activate id={led.generation} rev={led.ledger_rev}")
@@ -889,7 +873,8 @@ def _models_text(models: dict) -> str:
 
 def budget_line(led: ledger.Ledger, now: dt.datetime | None = None) -> str:
     """`drive budget J: cost x/y USD (reserve r), sessions a/b, wall h/H h` (spec 4.1 [D1])."""
-    b = led.budgets
+    from swarm.supervisor.driver_model import DEFAULT_CFG
+    b = {**DEFAULT_CFG, **led.budgets}
     minutes = _age_minutes(led.activated_at, now or dt.datetime.now(dt.timezone.utc)) or 0.0
     return (f"drive budget {led.job}: cost {led.charged_usd():.2f}/{b['max_cost_usd']:.2f} USD "
             f"(reserve {b['ruling_reserve_usd']:.2f}), sessions {len(led.intents)}/{b['max_sessions']:g}, "
@@ -903,7 +888,7 @@ def drive_lines(cfg: dict, job: str) -> list:
         led = ledger.load(board_key(cfg), job)
     except (ledger.LedgerBadError, OSError) as exc:
         return [f"drive      ledger of {job} unreadable ({exc}): run swarm doctor"]
-    if led is None or led.terminal is not None:
+    if led is None:
         return []
     return [budget_line(led), f"drive models {job}: {_models_text({**model_defaults(cfg), **led.models})}"]
 

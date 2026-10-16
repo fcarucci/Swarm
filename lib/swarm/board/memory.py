@@ -76,8 +76,8 @@ class MemoryStore:
         self.blocker_events: list[dict] = []
         self.next_blocker_id = 1
         self.next_blocker_event_id = 1
-        self.seats: list[dict] = []            # drive seats (schema 25), by id
-        self.next_seat_id = 1
+        self.launches: list[dict] = []            # drive seats (schema 25), by id
+        self.next_launch_id = 1
         self.drive_locks: list[dict] = []      # drive locks (schema 25), by key
         self.events: list[dict] = []           # external events (Board.post_event), by id
         self.next_event_id = 1
@@ -150,7 +150,7 @@ def reset_store(name: str = "default") -> MemoryStore:
                      "transcript_bodies", "image_bodies", "next_id", "schema_version",
                      "restarts", "next_restart_id", "memory_refs", "pauses", "next_pause_id",
                      "message_max_chars", "blockers", "blocker_events", "next_blocker_id", "next_blocker_event_id",
-                     "events", "next_event_id", "bg_commands", "next_bg_id", "seats", "next_seat_id",
+                     "events", "next_event_id", "bg_commands", "next_bg_id", "launches", "next_launch_id",
                      "drive_locks"):
             setattr(store, attr, getattr(fresh, attr))
         store.touch(messages=True)
@@ -222,17 +222,17 @@ def _drop_quiet_jobs(s: MemoryStore, keep: _dt.datetime) -> bool:
     for job in doomed:
         del s.jobs[job]
     _drop_agents(s, lambda a: a["job"] in doomed)
-    s.seats[:] = [r for r in s.seats if r["job"] not in doomed]   # seats cascade with their job (schema 25)
+    s.launches[:] = [r for r in s.launches if r["job"] not in doomed]   # seats cascade with their job (schema 25)
     return bool(doomed)
 
 
 from .blockers import MemoryBlockers, rollup, protects
-from .seats import MemorySeats
+from .launches import MemoryLaunches
 from .events import MemoryEvents, drop_old_events
 from .bgcmds import MemoryBgCommands, drop_old_bg
 
 
-class MemoryBoard(MemorySeats, MemoryBlockers, MemoryEvents, MemoryBgCommands, Board):
+class MemoryBoard(MemoryLaunches, MemoryBlockers, MemoryEvents, MemoryBgCommands, Board):
     """In-process Board over a shared MemoryStore. Reference/test backend only."""
 
     def __init__(self, cfg: dict):

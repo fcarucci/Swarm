@@ -49,17 +49,6 @@ class DriveCase(Env):
         self.led = ledger.load(self.key, "J")
         return self.led
 
-    def authorize(self, row, *, action=None, attempt=0, seat="__row__", argv=None):
-        """The driver's own authorization of a seat row (what driver_exec.authorize_seat writes)."""
-        seat = row.seat if seat == "__row__" else seat
-        receipts.write(self.key, receipts.Receipt(
-            board_key=self.key, job="J", generation=row.generation, incarnation=self.led.incarnation,
-            action_id=action or f"driver|authorize|{row.seat}", attempt=attempt, seat=seat, kind="seat_request",
-            record_id=str(row.id), rev=row.revision,
-            content_sha=receipts.content_sha("seat_request", drive_authz.seat_decision(row)),
-            args_sha=receipts.args_sha(argv or drive_authz.canonical_seat_args(row)),
-            expires_at=time.time() + 3600))
-
     def launch_seat(self, name, role="engineer", *, kind="seat", state="claimed", model="haiku", harness="claude",
                     authorize=True, bind=True):
         """A seat the supervisor launched: its row, the driver's authorization, the ledger intent, the restart
@@ -69,15 +58,13 @@ class DriveCase(Env):
         launch = "L-" + name
         old = "launch:" + launch
         with self.board() as b:
-            row = b.request_seat("J", 1, name, role=role, harness=harness, model=model, workdir=str(self.work),
-                                 brief_path="B.md", requested_by="person")
+            row = b.queue_launch("J", 1, name, role=role, harness=harness, model=model, workdir=str(self.work),
+                                 brief="B.md", queued_by="person")
             b.allocate_name(old, "J", role)
             b.close_agent(old, "drive predecessor")
             rid = b.record_restart("J", old, old, "drive", harness, 60).id
             if bind:
                 b.claim_resume(sid, old, "J")
-        if authorize:
-            self.authorize(row)
         action = f"gen1|{kind}|{name}|-|0|1"
         self.edit(lambda l: l.intents.append(ledger.Intent(
             launch_id=launch, action_id=action, attempt=1, seat=name, reserved_usd=0.5, reserved_minutes=60.0,

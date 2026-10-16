@@ -123,7 +123,7 @@ class ShellFastPathTests(unittest.TestCase):
                 self.assertEqual(r.returncode,0,r.stderr)
                 return (home/'ran').exists()
             self.assertFalse(ran('ls -la'), 'the lease serves an ordinary call')
-            for command in ('swarm halt --job J', 'swarm seat ack --job J --upto 3', 'swarm deactivate --job J',
+            for command in ('swarm halt --job J', 'swarm run --job J --name a --role engineer --brief B.md', 'swarm deactivate --job J',
                             'swarm drive repair --job J', 'swarm goal-ready --job J --candidate a@1234567'):
                 self.assertTrue(ran(command), command)
 

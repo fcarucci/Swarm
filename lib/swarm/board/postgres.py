@@ -919,7 +919,8 @@ def _install_schema(conn: psycopg.Connection, b: dict) -> None:
         migrate_sql(conn, True)
         conn.execute(events_schema(True))
         conn.execute(bg_schema(True))   # schema 24
-        conn.execute(seats_schema(True))   # schema 25: seats, drive locks, the claim's restart columns
+        conn.execute(launches_schema(True))
+        migrate_launches(conn, pg=True)   # schema 25: seats, drive locks, the claim's restart columns
         conn.execute("""
     CREATE OR REPLACE FUNCTION swarm_keep_blocked_jobs() RETURNS trigger LANGUAGE plpgsql AS $$
     BEGIN
@@ -1005,13 +1006,13 @@ _SCOPE_SQL = """
 
 
 from .blockers import SqlBlockers, sql_schema, migrate_sql, rollup, protects
-from .seats import SqlSeats, seats_schema
+from .launches import SqlLaunches, launches_schema, migrate_launches
 from .events import SqlEvents, sql_schema as events_schema
 from .bgcmds import SqlBgCommands, sql_schema as bg_schema
 
 
-class PostgresBoard(SqlBlockers, SqlSeats, SqlEvents, SqlBgCommands, Board):
-    _seat_pg = True
+class PostgresBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
+    _launch_pg = True
     _blocker_pg = True
     _event_pg = True
     _bg_pg = True

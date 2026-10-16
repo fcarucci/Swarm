@@ -272,7 +272,7 @@ class LedgerDeadlineTests(unittest.TestCase):
         from swarm.supervisor import driver_model as dm
         hold = SimpleNamespace(kind="hold", not_before=T0 + dt.timedelta(minutes=3))
         launch = SimpleNamespace(kind="launch", not_before=T0 + dt.timedelta(minutes=1))
-        ctx = SimpleNamespace(seats={"a": None, "b": None}, live={"a"}, cfg={"stall_minutes": 90,
+        ctx = SimpleNamespace(launches={"a": None, "b": None}, live={"a"}, cfg={"stall_minutes": 90,
                                                                             "lease_hold_minutes": 30},
                               gated=lambda n: T0 + dt.timedelta(minutes=7) if n == "b" else None,
                               last_activity=lambda: T0)
@@ -1170,36 +1170,6 @@ class GitpinWindowsPathTests(unittest.TestCase):
         from swarm import gitpin
         self.assertEqual(gitpin.native_path("/C:/x", nt=False), "/C:/x")
         self.assertEqual(gitpin.native_path("//srv/x", nt=False), "//srv/x")
-
-
-class LeadAuthorizationTests(unittest.TestCase):
-    """The activation authorizes only the lead row it would have written, still requested and not yet authorized."""
-    OWNER = {"roots": ["/w"], "brief": "/w/LEAD.md"}
-
-    def row(self, **kw):
-        base = dict(role="engineering_lead", harness="claude", model="opus", workdir="/w", brief_path="/w/LEAD.md",
-                    state="requested")
-        base.update(kw)
-        return SimpleNamespace(**base)
-
-    def authorize(self, row, authorized=False):
-        from swarm import drive_activate as da
-        from swarm.supervisor import driver_exec
-        with mock.patch.object(driver_exec, "authorize_seat") as auth, \
-                mock.patch.object(driver_exec, "seat_authorized", return_value=authorized):
-            da._authorize_lead(SimpleNamespace(), row, self.OWNER, "claude", "opus")
-        return auth.called
-
-    def test_the_row_it_wrote_is_authorized(self):
-        self.assertTrue(self.authorize(self.row()))
-
-    def test_a_changed_or_running_or_authorized_row_is_not(self):
-        for change in ({"model": "haiku"}, {"role": "engineer"}, {"workdir": "/elsewhere"},
-                       {"brief_path": "/x.md"}, {"harness": "codex"}, {"state": "running"}):
-            with self.subTest(change=change):
-                self.assertFalse(self.authorize(self.row(**change)))
-        self.assertFalse(self.authorize(self.row(), authorized=True))
-        self.assertFalse(self.authorize(None))
 
 
 class StopReasonTests(Home):

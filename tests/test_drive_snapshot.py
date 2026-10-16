@@ -164,46 +164,20 @@ class SnapshotCase:
         self.receipt("done", msg.id, 1, self.done_row(msg.id, f"feat/a@{SHA2}"))   # receipted another sha
         self.assertEqual(self.read().handoffs, [])
 
-    # ---- seats
+    # ---- launches
     def request(self, name, generation=1, **over):
         fields = dict(role="engineer", harness="claude", model="haiku", workdir=f"/w/{name}",
-                      brief_path=f"/w/{name}/B.md", requested_by="lead")
+                      brief=f"/w/{name}/B.md", queued_by="lead")
         fields.update(over)
-        return self.b.request_seat("J", generation, name, **fields)
+        return self.b.queue_launch("J", generation, name, **fields)
 
-    def test_unreceipted_seat_request_is_not_admitted(self):
-        self.request("a")
-        self.assertEqual(self.read().seats, {})
 
-    def test_receipted_seat_request_is_admitted_as_a_seat_view(self):
-        st = self.request("a")
-        row = {"kind": "seat_request", "id": str(st.id), "rev": st.revision, "role": st.role, "model": st.model,
-               "brief": st.brief_path, "workdir": st.workdir}
-        self.receipt("seat_request", st.id, st.revision, row)
-        seats = self.read().seats
-        self.assertEqual(list(seats), ["a"])
-        self.assertEqual((seats["a"].state, seats["a"].role, seats["a"].generation), ("requested", "engineer", 1))
 
-    def test_a_released_row_is_admitted_only_when_the_ledger_knows_its_seat(self):
-        st = self.request("x")
-        self.b.set_seat_state(st.id, st.revision, "cancelled", job="J")   # no receipt, no launch
-        self.assertEqual(self.read().seats, {})
-        self.led.intents = [Intent("L1", "gen1|seat|x|-|1|-", 1, "x", 1.0, 1.0, [], "concluded", "completed",
-                                   True, 0.5)]
-        self.assertEqual(list(self.read().seats), ["x"])
 
-    def test_an_owner_of_the_ledger_also_makes_its_seat_known(self):
-        st = self.request("x")
-        self.b.set_seat_state(st.id, st.revision, "cancelled", job="J")
-        self.led.owners = {"feat/x": "x"}
-        self.assertEqual(list(self.read().seats), ["x"])
 
     def test_seats_of_another_generation_are_not_read(self):
         st = self.request("b", generation=2)
-        row = {"kind": "seat_request", "id": str(st.id), "rev": st.revision, "role": st.role, "model": st.model,
-               "brief": st.brief_path, "workdir": st.workdir}
-        self.receipt("seat_request", st.id, st.revision, row)
-        self.assertEqual(self.read().seats, {})
+        self.assertEqual(self.read().launches, {})
 
     # ---- review
     def review(self, artifact, outcome, *, receipted=True):
@@ -343,18 +317,7 @@ class SnapshotCase:
         gv = self.read().goal_verdict
         self.assertEqual((gv.receipt_id, gv.artifact), (mid, None))
 
-    def test_an_intent_that_was_lost_does_not_make_a_seat_known(self):
-        st = self.request("x")
-        self.b.set_seat_state(st.id, st.revision, "cancelled", job="J")
-        self.led.intents = [Intent("L1", "gen1|seat|x|-|1|-", 1, "x", 1.0, 1.0, [], "concluded", "lost", None, None)]
-        self.assertEqual(self.read().seats, {})
 
-    def test_an_intent_of_another_generation_does_not_make_a_seat_known(self):
-        st = self.request("x")
-        self.b.set_seat_state(st.id, st.revision, "cancelled", job="J")
-        self.led.intents = [Intent("L1", "gen2|seat|x|-|1|-", 1, "x", 1.0, 1.0, [], "concluded", "completed",
-                                   True, 0.5)]
-        self.assertEqual(self.read().seats, {})
 
     def test_rounds_count_judged_artifacts_per_group_for_this_generation(self):
         for art in (f"feat/a@{SHA1}", f"feat/a@{SHA2}", f"feat/b@{SHA3}"):
@@ -398,7 +361,7 @@ class SnapshotCase:
         self.assertEqual(self.read().goal_verdict.receipt_id, rec["message_id"])
 
     def test_a_recorded_unreachable_ruling_closes_the_job_and_launches_nothing(self):
-        """QA release blocker: a ruling verdict stored by the verdict CLI never terminalized the job, so seats kept
+        """QA release blocker: a ruling verdict stored by the verdict CLI never terminalized the job, so launches kept
         relaunching. Read as stored, it is the goal verdict, and the next actions are the close alone."""
         import datetime as _dt
         from swarm.supervisor import driver_model as _dm
@@ -692,7 +655,7 @@ class WakeMapping(unittest.TestCase):
             return object() if record_id in self.ok_ids else None
 
     @staticmethod
-    def seats(**by_seat):
+    def launches(**by_seat):
         return {s: SimpleNamespace(agent_key=k) for s, k in by_seat.items()}
 
     @staticmethod
@@ -703,59 +666,59 @@ class WakeMapping(unittest.TestCase):
     def ev(id, to):
         return SimpleNamespace(id=id, to=to)
 
-    def wakes(self, *, agents, seats, msgs=(), events=(), watermarks=None, ok=None, departed=()):
+    def wakes(self, *, agents, launches, msgs=(), events=(), watermarks=None, ok=None, departed=()):
         led = SimpleNamespace(watermarks=watermarks or {})
         ok = [m.id for m in msgs] if ok is None else ok
-        return ds._wakes(self.Board(agents, departed), "J", seats, list(msgs), list(events), led, self.Rc(ok))
+        return ds._wakes(self.Board(agents, departed), "J", launches, list(msgs), list(events), led, self.Rc(ok))
 
     def test_a_departed_members_post_wakes_its_resumable_seat(self):
-        got = self.wakes(agents={"k1": "Gone Agent"}, seats=self.seats(a="k1"),
+        got = self.wakes(agents={"k1": "Gone Agent"}, launches=self.launches(a="k1"),
                          msgs=[self.msg(5, "Gone Agent")], departed=["k1"])
         self.assertEqual(got, {"a": [5]})
 
     def test_an_unreceipted_post_does_not_wake(self):
-        got = self.wakes(agents={"k1": "A"}, seats=self.seats(a="k1"), msgs=[self.msg(5, "A")], ok=[])
+        got = self.wakes(agents={"k1": "A"}, launches=self.launches(a="k1"), msgs=[self.msg(5, "A")], ok=[])
         self.assertEqual(got, {})
 
     def test_a_post_at_the_message_watermark_is_not_a_wake(self):
-        got = self.wakes(agents={"k1": "A"}, seats=self.seats(a="k1"),
+        got = self.wakes(agents={"k1": "A"}, launches=self.launches(a="k1"),
                          msgs=[self.msg(5, "A"), self.msg(6, "A")], watermarks={"msg:a": 5})
         self.assertEqual(got, {"a": [6]})
 
     def test_the_message_watermark_does_not_hide_events(self):
-        got = self.wakes(agents={"k1": "A"}, seats=self.seats(a="k1"), msgs=[self.msg(900, "A")],
+        got = self.wakes(agents={"k1": "A"}, launches=self.launches(a="k1"), msgs=[self.msg(900, "A")],
                          events=[self.ev(3, "a")], watermarks={"msg:a": 900})
         self.assertEqual(got, {"a": [3]})
 
     def test_the_event_watermark_does_not_hide_posts(self):
-        got = self.wakes(agents={"k1": "A"}, seats=self.seats(a="k1"), msgs=[self.msg(4, "A")],
+        got = self.wakes(agents={"k1": "A"}, launches=self.launches(a="k1"), msgs=[self.msg(4, "A")],
                          events=[self.ev(50, "a")], watermarks={"evack:a:50": 1})
         self.assertEqual(got, {"a": [4]})
 
     def test_an_acknowledged_event_is_not_a_wake_and_hides_no_other(self):
-        got = self.wakes(agents={"k1": "A"}, seats=self.seats(a="k1"),
+        got = self.wakes(agents={"k1": "A"}, launches=self.launches(a="k1"),
                          events=[self.ev(50, "a"), self.ev(51, "a")], watermarks={"evack:a:50": 1})
         self.assertEqual(got, {"a": [51]})
 
     def test_an_acknowledged_far_event_never_wakes_again_and_a_lower_one_still_does(self):
-        got = self.wakes(agents={"k1": "A"}, seats=self.seats(a="k1"),
+        got = self.wakes(agents={"k1": "A"}, launches=self.launches(a="k1"),
                          events=[self.ev(10 ** 9, "a"), self.ev(60, "a")], watermarks={f"evack:a:{10 ** 9}": 1})
         self.assertEqual(got, {"a": [60]})
-        self.assertEqual(self.wakes(agents={"k1": "A"}, seats=self.seats(a="k1"), events=[self.ev(10 ** 9, "a")],
+        self.assertEqual(self.wakes(agents={"k1": "A"}, launches=self.launches(a="k1"), events=[self.ev(10 ** 9, "a")],
                                     watermarks={f"evack:a:{10 ** 9}": 1}), {})
 
     def test_an_event_ack_of_another_seat_does_not_count(self):
-        got = self.wakes(agents={"k1": "A"}, seats=self.seats(a="k1"), events=[self.ev(50, "a")],
+        got = self.wakes(agents={"k1": "A"}, launches=self.launches(a="k1"), events=[self.ev(50, "a")],
                          watermarks={"evack:b:50": 1, "event:a": 99})
         self.assertEqual(got, {"a": [50]})
 
     def test_event_names_match_case_insensitively(self):
-        got = self.wakes(agents={"k1": "Mixed Case"}, seats=self.seats(a="k1"),
+        got = self.wakes(agents={"k1": "Mixed Case"}, launches=self.launches(a="k1"),
                          events=[self.ev(7, "mixed case")])
         self.assertEqual(got, {"a": [7]})
 
     def test_a_seat_without_an_agent_key_gets_no_wakes(self):
-        got = self.wakes(agents={"k1": "A"}, seats={"a": SimpleNamespace(agent_key=None)},
+        got = self.wakes(agents={"k1": "A"}, launches={"a": SimpleNamespace(agent_key=None)},
                          msgs=[self.msg(5, "A"), self.msg(6, None)])     # a broadcast is no one's wake
         self.assertEqual(got, {})
 

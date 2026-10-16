@@ -132,55 +132,20 @@ def default_rows_live(board, cfg: dict, rows: list) -> list:
     return live
 
 
-def _seat_decision(seat) -> dict:
-    return {"kind": "seat_request", "id": str(seat.id), "rev": seat.revision, "role": seat.role,
-            "model": seat.model, "brief": seat.brief_path, "workdir": seat.workdir}
-
-
-def seat_receipted(led, seat) -> bool:
-    """Whether the board row of `seat` still carries what its receipted `seat_request` decided (role,
-    model, brief, workdir). The receipt is bound to a revision and a state change makes a new one, so
-    the current row is matched against the receipts of its own and every earlier revision: one that
-    matches proves the decision fields have not changed since it was receipted. Fails closed."""
-    now = time.time()
-    for rev in range(seat.revision, 0, -1):
-        r = receipts.find(led.board_key, led.job, "seat_request", str(seat.id), rev=rev,
-                          incarnation=led.incarnation, generation=seat.generation, now=now)
-        if r is not None and receipts.matches(r, {**_seat_decision(seat), "rev": rev}):
-            return True
-    return False
-
-
 def default_request_lead(board, cfg: dict, led, generation: int) -> None:
-    """Request generation `generation`'s lead from the previous lead's row (spec 3.1 rollover (d)), but
-    only from a row that still matches its receipted seat request (Task 5 ruling: a seat's brief,
-    workdir, model and role come from what the host receipted, never from an editable board row).
-    The driver-authored authorization of Task 5 is added where that module lands."""
-    old = sorted((s for s in board.seats(led.job) if s.seat == "lead" and s.generation < generation),
+    """Queue the new generation's lead using the latest lead launch."""
+    if board.get_launch(led.job, generation, "lead") is not None:
+        return
+    old = sorted((s for s in board.launches(led.job) if s.name == "lead" and s.generation < generation),
                  key=lambda x: x.generation, reverse=True)
-    if not old:
-        board.post(led.job, SUPERVISOR, f"{ev.DRIVER_ROLLOVER} generation {generation}: no earlier lead seat to copy")
-        return
-    s = next((x for x in old if seat_receipted(led, x)), None)
-    if s is None:
-        board.post(led.job, SUPERVISOR,
-                   f"{ev.DRIVER_ROLLOVER} generation {generation}: no earlier lead seat matches its receipted request")
-        return
-    row = board.request_seat(led.job, generation, "lead", role=s.role, harness=s.harness, model=s.model,
-                             workdir=s.workdir, brief_path=s.brief_path, title=s.title, task_ref=s.task_ref,
-                             complexity=s.complexity, requested_by=SUPERVISOR)
-    # The new generation's lead is a seat the driver itself created from a receipted row: authorize it like any
-    # driver seat (spec 3.4). Unauthorized, the snapshot had no lead, the fallback ruled "lead-unavailable", and
-    # every rollover or reopen ended in a ruling before any seat ran (2026-10-15).
-    if row is not None:
-        from swarm.supervisor import driver_exec
-        now = dt.datetime.now(dt.timezone.utc)
-        if not driver_exec.seat_authorized(led, row, now):
-            driver_exec.authorize_seat(led, row, now)
+    if old:
+        s = old[0]
+        board.queue_launch(led.job, generation, "lead", role=s.role, harness=s.harness, model=s.model,
+                           workdir=s.workdir, brief=s.brief, queued_by=SUPERVISOR)
 
 
 def _no_capture(board, cfg, led) -> None:
-    return None                  # step 6 (transcripts, `swarm learn`), best effort, wired by the pass
+    return None
 
 
 @dataclass(frozen=True)
@@ -275,9 +240,9 @@ def _release_locks(board, led, generation: int | None = None) -> None:
 
 
 def _release_seats(board, led, generation: int | None, why: str) -> None:
-    for s in board.seats(led.job, generation, include_closed=False):
+    for s in board.launches(led.job, generation, include_closed=False):
         try:
-            board.set_seat_state(s.id, s.revision, "released", job=led.job, last_outcome=why)
+            board.set_launch_state(s.id, s.revision, "done", job=led.job, last_outcome=why)
         except ValueError:
             continue                 # its launch is still open: the next pass
 
@@ -616,7 +581,7 @@ def _board_rollover(board, cfg, led, hooks: Hooks) -> bool:
     if have is not None and have != str(led.generation) or (have is None and led.generation > 1):
         board.set_job_data(led.job, "drive.generation", str(led.generation))
         changed = True
-    if led.generation > 1 and board.seat(led.job, led.generation, "lead") is None:
+    if led.generation > 1 and board.get_launch(led.job, led.generation, "lead") is None:
         hooks.request_lead(board, cfg, led, led.generation)
         changed = True
     return changed
@@ -675,11 +640,10 @@ def settle_halt(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks | None 
         if i.state == "concluded" and i.outcome == "cancelled" and f"{_HOPEN}{i.launch_id}"[:256] in led.watermarks:
             i.outcome = "halted"
     led.save()
-    for s in board.seats(led.job, include_closed=False):
+    for s in board.launches(led.job, include_closed=False):
         if s.state == "running":
             try:
-                board.set_seat_state(s.id, s.revision, "idle", job=led.job, last_outcome="halted",
-                                     wake_reason="halted")
+                board.set_launch_state(s.id, s.revision, "failed", job=led.job, last_outcome="halted")
             except ValueError:
                 return False
     return True

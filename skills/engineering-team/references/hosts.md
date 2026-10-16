@@ -2,7 +2,7 @@
 
 Use with the [role contract](team-roles.md), [artifact contract](artifacts.md), and
 [Swarm CLI/host reference](../../swarm/SKILL.md). **A goal job is driven**: the supervisor runs
-it, EL requests its seats with `swarm seat request`, and the invoking agent is the
+it, EL requests its seats with `swarm run`, and the invoking agent is the
 requester/observer. Staffing, dispatch and landing by the invoking agent (PM) exist only in
 [non-drive jobs](#non-drive-jobs) (`--no-drive --reason TEXT`).
 
@@ -36,14 +36,14 @@ The lead brief (`--lead-brief PATH`; a default is generated) is a file. It state
 1. The original request (verbatim or a stable link), constraints, approvals given and exclusions.
 2. The requirement files (pinned at activation; `swarm goal-ready --add-requirements PATH` may pin more) with their blob ids.
 3. Authorization: what may be changed, pushed, published, spent; secrets by path only.
-4. Staffing rules: request each seat with `swarm seat request --job J --seat NAME --role ROLE --brief PATH [--model M] [--harness claude|codex] [--workdir DIR]`, one **worktree per writer** under the job's work roots (never `/tmp`), exclusive file ownership, a task brief file per seat, `swarm seat release` when a seat is done; the seat count is capped by `max_seats`.
+4. Staffing rules: queue each launch with `swarm run --job J --name NAME --role ROLE --brief PATH [--model M --harness H --workdir DIR]`. Names can be re-queued in any state. Workdirs must pass the launcher’s validation at request time. Agents may share a workdir and coordinate their own git worktrees. Concurrency is counted per job; every start checks budgets.
 5. Gates: every hand-off is `swarm done`, reviewed by an independent reviewer seat; landing is `swarm land` by an integrator seat; the lead never lands or pushes the target.
 6. Every brief carries this CI line: "CI: wait for CI ONLY with swarm ci wait --repo OWNER/REPO --sha <exact head> --timeout 540 in the foreground; never gh run watch."
 7. Finish: when the integrated target meets the requirements run `swarm goal-ready --job J --candidate branch@sha`, which posts `GOAL-READY <candidate> req=<requirements blob id digest>`; the goal judge decides MET or UNREACHABLE. If the goal cannot be met, say so with evidence: UNREACHABLE needs a report of what was tried and what would change it.
 
 ### Seats and the requester
 
-- Seats are `requested`, `idle`, `running`, `released`, `failed` or `cancelled`; `swarm seat list|show --job J` prints them. The lead, a person and (for release) the requester session may change them; an enrolled engineer cannot.
+- Launches are `queued`, `running`, `done` or `failed`; `swarm status --job J` shows them and their reasons. Any trusted caller may queue or re-queue by name with `swarm run`; failed launches are reported once and not retried unchanged.
 - Every agent joins the board: a seat that does not enrol within `enrol_minutes` is killed. A seat prompt carries the `[swarm job: J]` line and its role tags; the supervisor writes them, not you.
 - The requester session answers with `swarm answer`, halts with `swarm halt`, resumes with `swarm unhalt`, cancels with `swarm deactivate`. A requester Agent-tool spawn is refused in a drive job; ask the lead through the board (`swarm post --to @EL`) when more staffing is needed.
 

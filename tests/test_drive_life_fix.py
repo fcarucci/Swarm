@@ -217,64 +217,6 @@ class LockHostTests(T.LifeCase):
         self.assertEqual(self.run.calls, [("stop", [lid])])
 
 
-class RolloverLeadTests(T.LifeCase):
-    def lead(self):
-        s = self.b.request_seat("J", 1, "lead", role="lead", harness="claude", model="opus",
-                                workdir="/w/lead", brief_path="/w/lead/B.md", requested_by="me")
-        self.receipt_seat(s)
-        return s
-
-    def roll(self):
-        self.led.generation_requested = 2
-        self.led.save()
-        return life.rollover(self.b, self.cfg, self.led, self.at(1), hooks=life.Hooks(
-            stop_rows=self.run.stop_rows, rows_live=self.run.rows_live))
-
-    def test_the_new_lead_is_built_from_the_receipted_seat(self):
-        self.lead()
-        self.assertTrue(self.roll())
-        new = self.b.seat("J", 2, "lead")
-        self.assertEqual((new.brief_path, new.workdir, new.model, new.role), ("/w/lead/B.md", "/w/lead", "opus", "lead"))
-
-    @memory_store_only
-    def test_an_edited_board_row_does_not_pick_the_new_leads_brief_or_workdir(self):
-        s = self.lead()
-        with self.h.store.lock:
-            row = next(x for x in self.h.store.seats if x["id"] == s.id)
-            row["brief_path"], row["workdir"] = "/evil/B.md", "/evil"
-        self.assertTrue(self.roll())
-        self.assertIsNone(self.b.seat("J", 2, "lead"))
-        self.assertEqual(len(self.posts("matches its receipted request")), 1)
-
-    def test_an_unreceipted_lead_row_gives_no_new_lead(self):
-        self.b.request_seat("J", 1, "lead", role="lead", harness="claude", model="opus",
-                            workdir="/w/lead", brief_path="/w/lead/B.md", requested_by="me")
-        self.roll()
-        self.assertIsNone(self.b.seat("J", 2, "lead"))
-
-    def test_an_older_receipted_generation_is_used_when_the_latest_is_forged(self):
-        self.lead()
-        self.led.generation = 2
-        s2 = self.b.request_seat("J", 2, "lead", role="lead", harness="claude", model="opus",
-                                 workdir="/evil", brief_path="/evil/B.md", requested_by="me")   # never receipted
-        self.led.generation_requested = 3
-        self.led.save()
-        life.default_request_lead(self.b, self.cfg, self.led, 3)
-        new = self.b.seat("J", 3, "lead")
-        self.assertEqual(new.workdir, "/w/lead")
-
-    def test_the_new_generations_lead_is_authorized(self):
-        # 2026-10-15: unauthorized, the new lead was invisible to the model, which ruled "lead-unavailable".
-        from swarm.supervisor import driver_exec
-        self.lead()
-        self.led.generation_requested = 2
-        self.led.save()
-        life.default_request_lead(self.b, self.cfg, self.led, 2)
-        new = self.b.seat("J", 2, "lead")
-        self.assertIsNotNone(new)
-        self.assertTrue(driver_exec.seat_authorized(self.led, new, dt.datetime.now(dt.timezone.utc)))
-
-
 class StuckTerminalTests(T.LifeCase):
     def stuck_pending(self):
         lid = self.launch()
@@ -536,12 +478,12 @@ class CancelTests(T.LifeCase):
         self.assertIn(("stop", [lid]), self.run.calls)
 
     def test_questions_are_settled_and_seats_released(self):
-        seat = self.seat("idle-b")
+        seat = self.get_launch("idle-b")
         q = self.b.open_blocker("J", "question", "human", "which way?", until=self.t0 + 600 * MIN,
                                 default_value="left", created_by="a", seat="idle-b", generation=1)
         self.assertTrue(self.cancel())
         self.assertEqual(self.b.blocker(q.id).state, "expired")
-        self.assertEqual(self.b.seats("J", include_closed=True)[0].state, "released")
+        self.assertEqual(self.b.launches("J", include_closed=True)[0].state, "done")
 
     def test_a_job_a_person_already_closed_is_cleaned_up_and_committed(self):
         self.launch(locks=["repo:x"])

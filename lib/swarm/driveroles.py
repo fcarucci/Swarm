@@ -1,10 +1,7 @@
-"""Which drive seats judge or review (read-only), which lead, and which harness they may run on (spec 3.12
-[G1], 4.4). Pure and dependency-free: the board's seat requests, the hooks and the launch contract all
-read the same rules, so none of them can drift.
+"""Role names and prompt expectations for drive launches. No role grants filesystem restrictions.
 
-Roles are the board's seat roles. A judge or reviewer never writes (Claude: edit tools disallowed and the
-hook's write refusals; Codex: a read-only sandbox, which has no board access), so in drive mode those roles
-always run on Claude, whatever a request asked for."""
+Judges and reviewers keep the requested harness and model.
+"""
 from __future__ import annotations
 
 import re
@@ -22,8 +19,6 @@ _LEAD_SEAT = re.compile(r"lead(?:~[0-9]+)?")
 JUDGE_KINDS = ("judge", "goal", "ruling")
 REVIEW_KINDS = ("review",)
 
-CODEX_OVERRIDE_REASON = ("a judge or reviewer seat runs on Claude in a drive job: Codex's read-only sandbox "
-                         "has no board access, so the Codex request was overridden")
 
 
 def is_read_only_role(role) -> bool:
@@ -64,8 +59,5 @@ def action_kind(action_id) -> str | None:
 
 
 def effective_harness(role, harness) -> tuple[str, str | None]:
-    """(harness, reason): a judge or reviewer requested on Codex runs on Claude, with the reason to post.
-    Every other request keeps its harness and gives no reason."""
-    if harness == "codex" and is_read_only_role(role):
-        return "claude", CODEX_OVERRIDE_REASON
+    """Keep the requested harness for every role."""
     return harness, None

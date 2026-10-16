@@ -21,8 +21,8 @@ class DriverCase(LandCase):
         self.release_first()
         for r in self.board.restarts("J"):
             self.board.finish_restart(r.id, "completed")
-        seat = self.board.seat("J", 1, SEAT)
-        self.board.set_seat_state(seat.id, seat.revision, "idle", job="J")
+        seat = self.board.get_launch("J", 1, SEAT)
+        self.board.set_launch_state(seat.id, seat.revision, "done", job="J")
         self.posts = []
 
     def texts(self):
@@ -66,7 +66,7 @@ class Run(DriverCase):
         self.assertEqual(self.texts(), [f"INTEGRATED {GROUP}@{self.sha}"])
         # leases and seat are released after landing
         self.assertEqual(self.locks(), [])
-        self.assertEqual(self.board.seat("J", 1, SEAT).state, "idle")
+        self.assertEqual(self.board.get_launch("J", 1, SEAT).state, "done")
         rows = [r for r in self.board.restarts("J") if r.action_id and r.action_id.endswith(f"|{mid}")]
         self.assertEqual(len(rows), 1)
         self.assertEqual((rows[0].outcome, bool(rows[0].ended_at)), ("completed", True))
@@ -159,12 +159,12 @@ class Run(DriverCase):
         self.assertEqual(self.board.restarts("J")[-1].launch_id, self.board.restarts("J")[0].launch_id)
 
     def test_integrator_seat_not_idle_is_a_hold(self):
-        seat = self.board.seat("J", 1, SEAT)
-        self.board.set_seat_state(seat.id, seat.revision, "released", job="J")
+        seat = self.board.get_launch("J", 1, SEAT)
+        self.board.set_launch_state(seat.id, seat.revision, "failed", job="J")
         self.submit()
         done = self.run_pass()
         self.assertTrue(done[0][1].pending)
-        self.assertIn("integrator seat", done[0][1].why)
+        self.assertIn("integrator launch", done[0][1].why)
         self.assertEqual(self.texts(), [])
 
 
@@ -183,7 +183,7 @@ class LeaseHolds(DriverCase):
         self.assertEqual(self.led.integrated[GROUP]["lease_held_since"], NOW.isoformat())
         self.assertEqual(self.texts(), [])
         self.assertEqual(self.pushes, [])
-        self.assertEqual(self.board.seat("J", 1, SEAT).state, "idle")
+        self.assertEqual(self.board.get_launch("J", 1, SEAT).state, "done")
 
     def test_the_hold_start_is_kept_until_the_landing_clears_it(self):
         self.other_job()
@@ -264,7 +264,7 @@ class Recovery(DriverCase):
         self.assertEqual(self.texts(), [f"INTEGRATED {GROUP}@{self.sha}"])
         open_rows = [r for r in self.board.restarts("J") if r.ended_at is None]
         self.assertEqual(open_rows, [])
-        self.assertEqual(self.board.seat("J", 1, SEAT).state, "idle")      # the dead pass left it running
+        self.assertEqual(self.board.get_launch("J", 1, SEAT).state, "done")      # the dead pass left it running
 
     def test_quiesce_exempts_inflight_land(self):
         # the journal of an interrupted landing is found by complete_all whatever else the group does
@@ -414,10 +414,12 @@ class Claims(DriverCase):
         return req, dests, action
 
     def hold_with(self, keys, action):
-        seat = self.board.seat("J", 1, SEAT)
+        seat = self.board.get_launch("J", 1, SEAT)
+        seat = self.board.queue_launch("J", 1, seat.name, role=seat.role, harness=seat.harness, model=seat.model,
+                                       workdir=seat.workdir, brief=seat.brief, queued_by=seat.queued_by)
         return self.board.claim_drive_launch(
-            job="J", generation=1, action_id=action, attempt=1, launch_id="own", seat_id=seat.id,
-            seat_revision=seat.revision, harness="claude", reserve_usd=0, reserve_minutes=1, locks=keys,
+            job="J", generation=1, action_id=action, attempt=1, launch_id="own", launch_row_id=seat.id,
+            queue_version=seat.revision, harness="claude", reserve_usd=0, reserve_minutes=1, locks=keys,
             lock_seconds=600, max_host_running=8)
 
     def test_own_unexpired_leases_are_adopted(self):

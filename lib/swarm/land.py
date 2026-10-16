@@ -704,11 +704,11 @@ def land(board, env: LandEnv, job: str, artifact: str, *, caller_session: str, a
         branch, _ = parse_artifact(artifact)
     except ValueError as exc:
         return LandResult(False, None, str(exc))
-    seat = next((s for s in board.seats(job, env.led.generation)
-                 if s.seat == integrator_seat(branch)), None)
+    seat = next((s for s in board.launches(job, env.led.generation)
+                 if s.name == integrator_seat(branch)), None)
     if seat is None or not caller_session or seat.session_id != caller_session:
         return LandResult(False, None, f"the caller is not the integrator seat of {branch}")
-    mine = [r for r in find_requests(board, env, job) if r.artifact == artifact and r.seat == seat.seat]
+    mine = [r for r in find_requests(board, env, job) if r.artifact == artifact and r.seat == seat.name]
     if not mine:
         return LandResult(False, None, "no receipted land request for this artifact from this seat: run swarm land")
     request = mine[-1]

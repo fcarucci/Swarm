@@ -1073,13 +1073,12 @@ def own_name_verdict_command(command: str, name: str, job: str | None = None) ->
     return command
 
 
-_OWN_JOB_SUBS = ("done", "review", "verdict", "post", "ask", "goal-ready", "land")
-_OWN_JOB_SEAT_SUBS = ("request", "list", "show", "release", "ack")
+_OWN_JOB_SUBS = ("done", "review", "verdict", "post", "ask", "goal-ready", "land", "run")
 
 
 def own_job_command(command: str, job: str | None) -> str | None:
     """`command` with `--job JOB` (the caller's own job) added to every real `swarm` call that needs one and has
-    none (done, review, verdict, post, ask, goal-ready, land, seat ...): a drive seat's first `swarm done` just
+    none (done, review, verdict, post, ask, goal-ready, land, run): a drive seat's first `swarm done` just
     works, and its receipt is read from a command that names the job. A call that names a --job is left as it is
     (another job stays refused where it is refused). None when there is nothing to add."""
     if not job:
@@ -1087,16 +1086,10 @@ def own_job_command(command: str, job: str | None) -> str | None:
     from swarm.shellguard import mask_heredocs
     masked = mask_heredocs(command)
     inserts = []
-    for sub in (*_OWN_JOB_SUBS, "seat"):
+    for sub in _OWN_JOB_SUBS:
         for args in _swarm_calls(masked, sub):
-            if sub == "seat":
-                if not args or args[0][2] not in _OWN_JOB_SEAT_SUBS:
-                    continue
-                at = args[1][0] if len(args) > 1 else args[0][1]
-                lead = "" if len(args) > 1 else " "
-            else:
-                at = args[0][0] if args else None
-                lead = ""
+            at = args[0][0] if args else None
+            lead = ""
             if at is None or any(_flag_value(args, m, "--job")[0] is not None for m in range(len(args))):
                 continue
             inserts.append((at, lead))
@@ -1185,6 +1178,8 @@ def _reuse_identity(agent_id: str, job: str, payload: dict, name: str | None = N
 
 
 def _gate_judge(board, agent_id: str, job: str, payload: dict) -> bool:
+    if _drive_job(board.cfg, job):
+        return True  # drive roles are prompt instructions
     me = next((a for a in board.agents(job, include_departed=False) if a.agent_key == agent_id), None)
     if me is None or me.role != "judge":
         return True
@@ -1260,6 +1255,10 @@ def _gate_ci(board, agent_id: str, payload: dict, cfg: dict) -> bool:
 def _gate_verifier(board, agent_id: str, is_verifier: bool, payload: dict) -> bool:
     """A verifier's writing tools and spawns are refused, and so are shell commands that look like
     they write (best effort, swarm.shellguard). True = go ahead."""
+    if is_verifier:
+        job = board.route(agent_id).member_job
+        if job and _drive_job(board.cfg, job):
+            return True
     if not is_verifier:
         return True
     host = current_host()
@@ -2507,8 +2506,8 @@ def _drive_event(event: str, cfg: dict, payload: dict, resume: dict | None) -> b
         return False
     if why is None:
         return False
-    _deny(f"[swarm] Refused in a drive job: {why}. Land work with `swarm land`; ask the lead for a seat "
-          f"with `swarm seat request`.")
+    _deny(f"[swarm] Refused in a drive job: {why}. Land work with `swarm land`; queue launches "
+          f"with `swarm run`.")
     return True
 
 

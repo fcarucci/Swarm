@@ -111,26 +111,17 @@ class LifeCase(unittest.TestCase):
         self.assertTrue(life.begin_terminal(self.b, self.led, "met", "goal", "judge", "goal met",
                                             now or self.t0, candidate=CAND, req=REQ))
 
-    def seat(self, name="eng-a", gen=1):
-        s = self.b.request_seat("J", gen, name, role="engineer", harness="claude", model="haiku",
-                                workdir=f"/w/{name}", brief_path=f"/w/{name}/B.md", requested_by="lead")
-        self.receipt_seat(s)
+    def get_launch(self, name="eng-a", gen=1):
+        s = self.b.queue_launch("J", gen, name, role="engineer", harness="claude", model="haiku",
+                                workdir=f"/w/{name}", brief=f"/w/{name}/B.md", queued_by="lead")
         return s
 
-    def receipt_seat(self, seat):
-        """The host's seat_request receipt for the row as it is (what a lead's own request leaves)."""
-        receipts.write(self.led.board_key, receipts.Receipt(
-            board_key=self.led.board_key, job="J", generation=seat.generation, incarnation=self.led.incarnation,
-            action_id="t|seat", attempt=0, seat=seat.seat, kind="seat_request", record_id=str(seat.id),
-            rev=seat.revision, content_sha=receipts.content_sha("seat_request", life._seat_decision(seat)),
-            args_sha="0" * 64, expires_at=time.time() + 3600))
-
     def launch(self, name="eng-a", gen=1, usd=5.0, locks=()):
-        s = self.seat(name, gen)
+        s = self.get_launch(name, gen)
         lid = f"L-{name}-{gen}"
         action = f"gen{gen}|seat|{name}|-|1|1"
         r = self.b.claim_drive_launch(job="J", generation=gen, action_id=action, attempt=1, launch_id=lid,
-                                      seat_id=s.id, seat_revision=s.revision, harness="claude", reserve_usd=usd,
+                                      launch_row_id=s.id, queue_version=s.revision, harness="claude", reserve_usd=usd,
                                       reserve_minutes=60, locks=list(locks), lock_seconds=4200, max_host_running=4)
         self.assertIsNotNone(r)
         self.led.intents.append(ledger.Intent(lid, action, 1, name, usd, 60.0, list(locks), "claimed"))
@@ -334,7 +325,7 @@ class TerminalizeTests(LifeCase):
         self.assertEqual((first.state, first.outcome, first.success, first.charged_usd), ("concluded", "cancelled", False, 5.0))
         self.assertEqual(self.row(lid).outcome, "cancelled")
         self.assertEqual(self.b.drive_locks(), [])
-        self.assertEqual({s.state for s in self.b.seats("J")}, {"released"})
+        self.assertEqual({s.state for s in self.b.launches("J")}, {"done"})
 
     def guard_refuses(self, **board_verdict):
         """The pending MET names (goal, CAND, REQ, generation 1); the board holds a different verdict."""
@@ -473,9 +464,9 @@ class TerminalizeTests(LifeCase):
 
     def test_a_row_not_in_the_ledger_is_never_touched(self):
         lid = self.launch()
-        s = self.seat("forged")
+        s = self.get_launch("forged")
         self.b.claim_drive_launch(job="J", generation=1, action_id="gen1|seat|forged|-|1|1", attempt=1,
-                                  launch_id="FORGED", seat_id=s.id, seat_revision=s.revision, harness="claude",
+                                  launch_id="FORGED", launch_row_id=s.id, queue_version=s.revision, harness="claude",
                                   reserve_usd=1, reserve_minutes=1, locks=[], lock_seconds=60, max_host_running=4)
         self.pending_met()
         self.assertTrue(life.terminalize(self.b, self.cfg, self.led, self.at(1), hooks=self.run.hooks()))
@@ -570,8 +561,8 @@ class RolloverTests(LifeCase):
         led = self.reload()
         self.assertEqual(led.generation, 2)
         self.assertEqual(self.b.job_data("J")["drive.generation"], "2")
-        self.assertEqual(self.b.seat("J", 2, "lead").state, "requested")
-        self.assertEqual(self.b.seat("J", 1, "lead").state, "released")
+        self.assertEqual(self.b.get_launch("J", 2, "lead").state, "queued")
+        self.assertEqual(self.b.get_launch("J", 1, "lead").state, "done")
         self.assertEqual(led.intents[0].outcome, "cancelled")
         self.assertEqual(led.intents[0].charged_usd, 5.0)
 
@@ -594,10 +585,10 @@ class RolloverTests(LifeCase):
         self.assertEqual(led.generation, 2)                                # the ledger moved first ...
         self.assertEqual((led.rounds_without_progress, led.ruling_due_at), (0, None))
         self.assertNotEqual(self.b.job_data("J").get("drive.generation"), "2")      # ... the board did not
-        self.assertIsNone(self.b.seat("J", 2, "lead"))
+        self.assertIsNone(self.b.get_launch("J", 2, "lead"))
         self.assertTrue(life.rollover(self.b, self.cfg, led, self.at(2), hooks=self.run.hooks()))
         self.assertEqual(self.b.job_data("J")["drive.generation"], "2")
-        self.assertEqual(self.b.seat("J", 2, "lead").state, "requested")
+        self.assertEqual(self.b.get_launch("J", 2, "lead").state, "queued")
         self.assertFalse(life.rollover(self.b, self.cfg, led, self.at(3), hooks=self.run.hooks()))   # then idle
 
     def test_rollover_does_nothing_unless_requested(self):
@@ -626,7 +617,7 @@ class RolloverTests(LifeCase):
         self.assertIsNone(self.row(new).ended_at)
         by = {i.launch_id: i.state for i in self.reload().intents}
         self.assertEqual(by, {old: "concluded", new: "claimed"})
-        self.assertEqual(self.b.seat("J", 2, "lead2").state, "running")
+        self.assertEqual(self.b.get_launch("J", 2, "lead2").state, "running")
 
     def test_rollover_keeps_charges_and_budgets(self):
         self.launch("lead")
@@ -642,8 +633,8 @@ class HaltTests(LifeCase):
         lid = self.launch()
         life.halt(self.b, self.cfg, self.led, "francesco", self.at(60), reason="stop", hooks=self.run.hooks())
         self.assertIn(("stop", [lid]), self.run.calls)
-        seat = self.b.seat("J", 1, "eng-a")
-        self.assertEqual((seat.state, seat.last_outcome, seat.wake_reason), ("idle", "halted", "halted"))
+        seat = self.b.get_launch("J", 1, "eng-a")
+        self.assertEqual((seat.state, seat.last_outcome), ("failed", "halted"))
         led = self.reload()
         self.assertEqual(led.halted, {"by": "francesco", "at": fx.iso(self.at(60)), "reason": "stop"})
         self.assertEqual(self.b.job_data("J")["drive.halted"], "francesco")
@@ -654,18 +645,18 @@ class HaltTests(LifeCase):
         led = self.reload()
         self.assertEqual((led.halted, led.halted_total_seconds), (None, 600.0))
         self.assertNotIn("drive.halted", self.b.job_data("J"))
-        self.assertEqual(self.b.seat("J", 1, "eng-a").state, "idle")      # the next pass wakes it
+        self.assertEqual(self.b.get_launch("J", 1, "eng-a").state, "failed")      # the next pass wakes it
 
     def test_halt_waits_for_the_session_to_be_gone(self):
         lid = self.launch()
         self.run.live = {lid}
         life.halt(self.b, self.cfg, self.led, "me", self.at(0), hooks=self.run.hooks())
-        self.assertEqual(self.b.seat("J", 1, "eng-a").state, "running")
+        self.assertEqual(self.b.get_launch("J", 1, "eng-a").state, "running")
         self.assertIsNone(self.row(lid).ended_at)
         self.assertEqual(self.reload().halted["by"], "me")                # halted already (ledger first)
         self.run.live = set()
         self.assertTrue(life.settle_halt(self.b, self.cfg, self.led, self.at(1), hooks=self.run.hooks()))
-        self.assertEqual(self.b.seat("J", 1, "eng-a").state, "idle")
+        self.assertEqual(self.b.get_launch("J", 1, "eng-a").state, "failed")
 
     def test_halt_cancelled_attempts_not_counted(self):
         self.launch()
@@ -798,7 +789,7 @@ class QuestionTests(LifeCase):
 
     def test_other_seats_progress_while_question_open(self):
         b, q = self.ask(seat="a", until=30)
-        s = fx.snap(seats={"a": fx.seat("a", "idle"), "b": fx.seat("b", "requested")}, questions={"a": [q]},
+        s = fx.snap(launches={"a": fx.seat("a", "done"), "b": fx.seat("b", "queued")}, questions={"a": [q]},
                     wakes={"a": [5]})
         launches = lambda: [x.seat for x in dm.next_actions(s, dm.DEFAULT_CFG) if x.kind == "launch"]
         self.assertEqual(launches(), ["b"])                               # a waits for its answer, b runs
@@ -809,7 +800,7 @@ class QuestionTests(LifeCase):
         self.assertEqual(life.apply_question_expiry(self.b, self.cfg, self.led, self.at(31), [q]), [b.id])
         self.assertEqual(self.b.blocker(b.id).state, "expired")           # at expiry only that seat's question settles
         self.assertEqual(self.b.blocker(other.id).state, "open")
-        s2 = fx.snap(seats={"a": fx.seat("a", "idle"), "b": fx.seat("b", "requested")}, questions={},
+        s2 = fx.snap(launches={"a": fx.seat("a", "done"), "b": fx.seat("b", "queued")}, questions={},
                      wakes={"a": [5]})
         self.assertEqual(sorted(x.seat for x in dm.next_actions(s2, dm.DEFAULT_CFG) if x.kind == "launch"), ["a", "b"])
 
@@ -855,75 +846,11 @@ class OrphanQuestionTests(LifeCase):
         self.assertEqual({self.b.blocker(w.id).state, self.b.blocker(d.id).state}, {"open"})
 
 
-class LockSweepTests(LifeCase):
-    def other_host_lock(self, key="land:z:main"):
-        self.h.plant_drive_lock(key=key, holder="gen1|x", job="J", generation=1, launch_id="L-far",
-                                host="another-host", expires_at=self.t0 - 10 * MIN)
-
-    def test_released_by_host_whatever_the_job(self):
-        self.b.open_job("K", None, None, None, "me", goal="G")
-        a = self.launch("eng-a", locks=("land:a:main",))
-        s = self.b.request_seat("K", 1, "eng-k", role="engineer", harness="claude", model="haiku", workdir="/w/k",
-                                brief_path="/w/k/B.md", requested_by="lead")
-        self.b.claim_drive_launch(job="K", generation=1, action_id="gen1|seat|eng-k|-|1|1", attempt=1,
-                                  launch_id="L-k", seat_id=s.id, seat_revision=s.revision, harness="claude",
-                                  reserve_usd=1, reserve_minutes=1, locks=["land:k:main"], lock_seconds=60,
-                                  max_host_running=4)
-        for lid in (a, "L-k"):
-            self.b.finish_restart(next(r.id for r in self.b.restarts() if r.launch_id == lid), "completed")
-        self.other_host_lock()
-        self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.t0, hooks=self.run.hooks()), 2)
-        self.assertEqual([l.key for l in self.b.drive_locks()], ["land:z:main"])      # another host's is not ours
-
-    def test_live_valid_lock_is_kept(self):
-        lid = self.launch(locks=("land:a:main",))
-        self.run.live = {lid}
-        self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.t0, hooks=self.run.hooks()), 0)
-        self.assertEqual(self.run.calls, [])
-        self.assertEqual(len(self.b.drive_locks()), 1)
-
-    def test_expired_lock_blocks_until_its_holder_is_fenced(self):
-        lid = self.launch(locks=("land:a:main",))
-        self.run.live = {lid}
-        later = self.at(4200 // 60 + 1)
-        self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, later, hooks=self.run.hooks()), 0)
-        self.assertEqual(self.run.calls, [("stop", [lid])])                  # the holder is fenced first ...
-        self.assertEqual(len(self.b.drive_locks()), 1)                       # ... and the lock keeps blocking
-        self.assertIsNone(self.row(lid).ended_at)
-        self.run.live = set()
-        self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, later, hooks=self.run.hooks()), 1)
-        self.assertEqual(self.b.drive_locks(), [])
-        self.assertEqual(self.row(lid).outcome, "timeout")
-
-    def test_lock_of_a_deleted_row_is_held_without_local_evidence(self):
-        self.launch(locks=("land:a:main",))
-        self.h.delete_restarts()
-        self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.t0, hooks=self.run.hooks()), 0)
-        self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.t0, hooks=self.run.hooks(),
-                                                  board_key="bk"), 0)             # the ledger holds the launch open
-        self.assertEqual(len(self.b.drive_locks()), 1)
-
-    def test_lock_of_a_deleted_row_is_released_once_the_ledger_concluded_the_launch(self):
-        self.launch(locks=("land:a:main",))
-        self.h.delete_restarts()
-        for i in self.led.intents:
-            i.state, i.outcome, i.success, i.charged_usd = "concluded", "cancelled", False, 1.0
-        self.led.save()
-        self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.t0, hooks=self.run.hooks(),
-                                                  board_key="bk"), 1)
-
-    def test_an_ended_row_with_a_live_session_does_not_free_the_lock(self):
-        lid = self.launch(locks=("land:a:main",))
-        self.b.finish_restart(self.row(lid).id, "cancelled")
-        self.run.live.add(lid)
-        self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.t0, hooks=self.run.hooks()), 0)
-        self.run.live.clear()
-        self.assertEqual(life.sweep_locks_by_host(self.b, self.cfg, self.t0, hooks=self.run.hooks()), 1)
 
 
 # one subclass per backend of support.drive_backends() beyond memory (Postgres only with SWARM_TEST_CONFIG)
 add_backend_variants(globals(), DeadlineTests, TerminalizeTests, RolloverTests, HaltTests, QuestionTests,
-                     OrphanQuestionTests, LockSweepTests, LandedGateTests)
+                     OrphanQuestionTests, LandedGateTests)
 
 
 if __name__ == "__main__":

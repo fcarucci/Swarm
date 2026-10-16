@@ -766,21 +766,20 @@ class DriveCli(Env):
         self.assertIsNotNone(self.ledger_of())
         self.assertEqual(self.ledger_of().state, "active")
         with self.board() as b:
-            lead = b.seat("J", 1, "lead")
-        self.assertEqual((lead.role, lead.model, lead.state), ("engineering_lead", "opus", "requested"))
+            lead = b.get_launch("J", 1, "lead")
+        self.assertEqual((lead.role, lead.model, lead.state), ("engineering_lead", "opus", "queued"))
         last = out.strip().splitlines()[-1]
         self.assertRegex(last, RECORD)
         self.assertEqual(RECORD.fullmatch(last).group(1), "activate")
 
-    def test_a_plain_shell_activation_authorizes_its_lead_seat(self):
-        """QA bug 2: no hook sees a plain-shell activation, so the activation itself writes the lead seat's
-        driver-authored seat_request receipt; otherwise the snapshot never admits the lead."""
+    def test_plain_shell_activation_queues_lead_without_receipt(self):
+        """A plain-shell activation queues a lead that the first snapshot can launch without a receipt."""
         from swarm.supervisor import driver_exec
         rc, out, err = self.activate("--drive", "--workdir", str(self.work))
         self.assertEqual(rc, 0, err)
         with self.board() as b:
-            lead = b.seat("J", 1, "lead")
-            self.assertTrue(driver_exec.seat_authorized(self.ledger_of(), lead, b.now()))
+            lead = b.get_launch("J", 1, "lead")
+            self.assertTrue(lead.state == "queued")
 
     def test_owner_roots_are_read_from_the_owner_record(self):
         """QA bug 3: the roots live in the owner record's `owner` mapping."""
@@ -854,8 +853,8 @@ class DriveCli(Env):
         led = self.ledger_of()
         self.assertEqual(led.requester_session, "sess-9")
         with self.board() as b:
-            lead = b.seat("J", led.generation, "lead")
-        self.assertTrue(driver_exec.seat_authorized(led, lead, dt.datetime.now(dt.timezone.utc)))
+            lead = b.get_launch("J", led.generation, "lead")
+        self.assertTrue(lead.state == "queued")
         self.assertTrue(out.strip().splitlines()[-1].startswith("swarm-record: kind=activate "))
 
     def test_drive_activation_refused_while_switched_off(self):
@@ -1051,7 +1050,7 @@ class DriveCli(Env):
                     da.finish_activation(self.cfg, b, job)           # the next pass
                     da.finish_activation(self.cfg, b, job)           # and again: a no-op
                     self.assertEqual(self.ledger_of(job).state, "active")
-                    self.assertEqual(len(b.seats(job, 1)), 1)
+                    self.assertEqual(len(b.launches(job, 1)), 1)
                     self.assertEqual(b.job_status(job).status, "active")
                     self.assertEqual(b.job_data(job).get("drive.enabled"), "1")
 

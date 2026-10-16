@@ -1,6 +1,6 @@
 """Drive mode documentation (Task 14): the shipped `[drive]` defaults, the "Drive mode" reference
 section, and the engineering-team / swarm skills that must never tell the requester to spawn agents
-in a drive job (staffing goes through `swarm seat request`)."""
+in a drive job (staffing goes through `swarm run`)."""
 from __future__ import annotations
 
 import re
@@ -134,7 +134,7 @@ class SkillsNeverTellRequesterToSpawn(unittest.TestCase):
     def test_checker_flags_instructions_and_accepts_refusals(self):
         bad = ["Spawn the engineers in waves.", "PM calls `spawn_agent` with a role-prefixed task name.",
                "Schedule its requested roles through root spawns.", "Use the Agent tool to start a reviewer."]
-        good = ["The requester never spawns agents: request seats with `swarm seat request`.",
+        good = ["The requester never spawns agents: queue launches with `swarm run`.",
                 "Agent-tool spawns by the requester are refused in drive jobs.", "No staffing text here."]
         self.assertEqual(spawn_violations([(0, l) for l in bad]), bad)
         self.assertEqual(spawn_violations([(0, l) for l in good]), [])

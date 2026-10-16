@@ -54,9 +54,9 @@ class LandCase(unittest.TestCase):
         self.judged = {self.sha}
         self.owner = {"remotes": {"a": self.a, "b": self.b}, "credentials": {}}
         self.pushes = []
-        self.seat = self.board.request_seat("J", 1, SEAT, role="integrator", harness="claude", model="haiku",
-                                            workdir=self.root, brief_path=os.path.join(self.root, "B.md"),
-                                            requested_by="driver")
+        self.seat = self.board.queue_launch("J", 1, SEAT, role="integrator", harness="claude", model="haiku",
+                                            workdir=self.root, brief=os.path.join(self.root, "B.md"),
+                                            queued_by="driver")
         self._claims = 0
         self.first_claim = self.lease("J")
 
@@ -104,15 +104,19 @@ class LandCase(unittest.TestCase):
     # --- board, leases, environment ----------------------------------------------------------
     def lease(self, job, keys=None, name=SEAT, host=None):
         keys = keys or lease_keys(land.destinations_from_owner(self.owner), "main")
-        seat = self.board.seat("J", 1, name) if job == "J" else self.board.request_seat(
+        seat = self.board.get_launch("J", 1, name) if job == "J" else self.board.queue_launch(
             job, 1, "other", role="integrator", harness="claude", model="haiku", workdir=self.root,
-            brief_path=os.path.join(self.root, "B.md"), requested_by="driver")
+            brief=os.path.join(self.root, "B.md"), queued_by="driver")
+        if seat.state != "queued":
+            seat = self.board.queue_launch(job, 1, seat.name, role=seat.role, harness=seat.harness,
+                                          model=seat.model, workdir=seat.workdir, brief=seat.brief,
+                                          queued_by=seat.queued_by)
         ctx = mock.patch.object(compat, "node", lambda: host) if host else mock.patch.object(compat, "node", compat.node)
         with ctx:
             n, self._claims = self._claims, self._claims + 1
             return self.board.claim_drive_launch(
                 job=job, generation=1, action_id=f"gen1|land|-|{job}|1|{n}", attempt=1, launch_id=f"L-{job}-{host}-{n}",
-                seat_id=seat.id, seat_revision=seat.revision, harness="claude", reserve_usd=0, reserve_minutes=1,
+                launch_row_id=seat.id, queue_version=seat.revision, harness="claude", reserve_usd=0, reserve_minutes=1,
                 locks=keys, lock_seconds=3000, max_host_running=8)
 
     def release_first(self):

@@ -150,11 +150,12 @@ class SeatAllowTest(SeatHomeCase):
         self.assertEqual(got["permissions"]["deny"], ["Bash(rm:*)"])
         allow = got["permissions"]["allow"]
         self.assertEqual(allow[0], "Read")
-        for c in ("post", "read", "done", "review", "verdict", "goal-ready", "land", "ask", "answer", "seat",
+        for c in ("post", "read", "done", "review", "verdict", "goal-ready", "land", "ask", "answer", "run",
                   "who", "status"):
             self.assertIn(f"Bash(swarm {c}:*)", allow)
         self.assertIn("Bash(make test:*)", allow)
-        self.assertEqual(len(allow), 1 + 16)                         # nothing broader (13 + remember, recall, learn)
+        self.assertNotIn("Bash(swarm seat:*)", allow)
+        self.assertEqual(len(allow), 1 + 15 + 1)                         # nothing broader (13 + remember, recall, learn)
         self.assertFalse(any(r in ("Bash", "Bash(*)", "Bash(swarm:*)") for r in allow))
         if os.name == "posix":
             self.assertEqual(os.stat(path).st_mode & 0o777, 0o400)
@@ -807,7 +808,7 @@ class Round3Test(BrokerCase):
             built = seatproto.build_argv(req["command"], req["fields"], key="k", name="n", file_path=str)
             self.assertIn(want, built, argv)
         for argv in (["done", "--job=-J"], ["done", "--job", "J", "--artifact=-x"],
-                     ["post", "--job", "J\nX", "hi"], ["seat", "request", "--job", "J", "--role", "-r", "--brief", "b"]):
+                     ["post", "--job", "J\nX", "hi"], ["run", "--job", "J", "--name", "x", "--role", "-r", "--brief", "b"]):
             with self.assertRaises(seatproto.ProtocolError, msg=argv):
                 seatproto.parse_cli(argv, str(self.wd))
 

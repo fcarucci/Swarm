@@ -82,7 +82,7 @@ case "${1:-}" in turn|done)
     # Drive control commands get their caller's grant from the Python hook (drivegate.write_grants).
     # (NOLEASE, not VALID: the cached marker directory stays valid, only the lease is not used.)
     NOLEASE=""
-    case "$PAYLOAD" in *swarm*halt*|*swarm*seat*|*swarm*goal-ready*|*swarm*drive*|*swarm*deactivate*) NOLEASE=1;; esac
+    case "$PAYLOAD" in *swarm*halt*|*swarm*run*|*swarm*goal-ready*|*swarm*drive*|*swarm*deactivate*) NOLEASE=1;; esac
     # PreToolUse only, and only its tool_input (never a tool's output): a background shell call is
     # rewritten to run under `swarm bg`, and a CI wait (gh run watch, gh pr checks --watch, a
     # gh/curl poll loop) is refused, by the Python hook. A gh word must start a command (after a

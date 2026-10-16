@@ -26,15 +26,15 @@ def minutes(n: float) -> dt.timedelta:
     return dt.timedelta(minutes=n)
 
 
-def seat(name: str = "a", state: str = "idle", role: str = "engineer", **kw: Any) -> dm.SeatView:
+def seat(name: str = "a", state: str = "done", role: str = "engineer", **kw: Any) -> dm.LaunchView:
     base = dict(
-        id=1, job="J", seat=name, role=role, title=None, harness="claude", model="haiku",
-        workdir="/home/claude/src/wt-" + name, brief_path="/home/claude/src/briefs/" + name + ".md",
-        task_ref=None, complexity="standard", requested_by="lead", requested_at=T0, state=state,
-        agent_key=None, session_id=None, generation=1, revision=1, launches=0, last_outcome=None,
-        wake_reason=None, wake_watermark=None, updated_at=T0,
+        id=1, job="J", name=name, role=role, harness="claude", model="haiku",
+        workdir="/home/claude/src/wt-" + name, brief="/home/claude/src/briefs/" + name + ".md",
+        queued_by="lead", state=state,
+        agent_key=None, session_id=None, generation=1, revision=1, attempts=0, last_outcome=None,
+        updated_at=T0,
     )
-    return dm.SeatView(**{**base, **kw})
+    return dm.LaunchView(**{**base, **kw})
 
 
 def q(id: int = 1, seat: str = "a", **kw: Any) -> dm.Question:
@@ -165,7 +165,7 @@ def intent(state: str = "concluded", reserved: float = 0.0, charged: float | Non
 
 def snap(**kw: Any) -> dm.Snapshot:
     base = dict(
-        job="J", generation=1, goal="g", status="active", halted=False, ledger=L(), seats={},
+        job="J", generation=1, goal="g", status="active", halted=False, ledger=L(), launches={},
         live=set(), handoffs=[], reviews={}, verdicts={}, goal_verdict=None, goal_ready=None,
         questions={}, wakes={}, integrated={}, rounds={}, now=T0,
     )

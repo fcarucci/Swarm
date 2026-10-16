@@ -2,7 +2,7 @@
 (spec 3.3, plan Task 7). The dataclasses hold no logic; `next_actions` and `progress` do no I/O.
 
 `Ledger` is the host-private drive ledger (Task 4, supervisor/ledger.py), referenced here by name only so
-this module does not depend on it. `Seat` is the board's row (Task 3); the driver reads it as `SeatView`."""
+this module does not depend on it. `Seat` is the board's row (Task 3); the driver reads it as `LaunchView`."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -20,30 +20,24 @@ VERDICTS = ("met", "not_met", "unreachable")
 
 
 @dataclass(frozen=True, slots=True)
-class SeatView:
-    """One row of the `seats` table (spec 3.4). `seat` is the stable name, unique per job and generation."""
+class LaunchView:
+    """One row of the `launches` table (spec 3.4). `seat` is the stable name, unique per job and generation."""
     id: int
     job: str
-    seat: str
+    name: str
     role: str
-    title: str | None
     harness: str
     model: str | None
     workdir: str | None
-    brief_path: str | None
-    task_ref: str | None
-    complexity: str
-    requested_by: str | None
-    requested_at: datetime | None
+    brief: str | None
     state: str
     agent_key: str | None
     session_id: str | None
     generation: int
     revision: int
-    launches: int
+    attempts: int
     last_outcome: str | None
-    wake_reason: str | None
-    wake_watermark: int | None
+    queued_by: str
     updated_at: datetime | None
 
 
@@ -101,7 +95,7 @@ class Snapshot:
     status: str
     halted: bool
     ledger: Any
-    seats: dict[str, SeatView]
+    launches: dict[str, LaunchView]
     live: set[str]
     handoffs: list[HandoffView]
     reviews: dict[str, str]
@@ -137,7 +131,7 @@ class Action:
 # --- decisions ---------------------------------------------------------------------------------
 # Action reasons that count against the single progress counter `rounds_without_progress` (spec 3.3, "One
 # progress counter"). A judged round counts unless `progress()` says it moved.
-NO_PROGRESS_REASONS = frozenset({"invariant-fallback", "stall", "max-seats-refused", "finalize-blocked"})
+NO_PROGRESS_REASONS = frozenset({"invariant-fallback", "stall", "finalize-blocked"})
 
 # Concluded attempts that never count against `max_attempts` (spec 3.3 [F12], 4.3 [F5]): an outage, a lost
 # claim race, an attempt a halt ended.
@@ -146,15 +140,15 @@ UNCOUNTED_OUTCOMES = ("outage", "lost", "halted")
 # Shipped `[drive]` defaults (spec 4.1 and 3.x); a job's `ledger.budgets` overrides them, and the caller's cfg
 # overrides these. `recipe` and `review_role` are the recipe keys of spec 3.6 and 3.7 (coding: a reviewer).
 DEFAULT_CFG: dict = {
-    "max_sessions": 60, "max_seats": 12, "max_rounds": 8, "no_progress_rounds": 3, "max_attempts": 3,
+    "max_sessions": 60, "max_rounds": 8, "no_progress_rounds": 3, "max_attempts": 3,
     "max_cost_usd": 40, "ruling_reserve_usd": 5, "session_usd_cap": 5, "min_session_usd": 0.5,
     "max_session_minutes": 60, "max_wall_hours": 24, "ruling_attempts": 2, "ruling_deadline_minutes": 120,
     "ruling_grace_minutes": 15, "question_expiry": "4h", "stall_minutes": 90, "driver_error_passes": 6,
     "max_concurrent_sessions": 4, "lease_hold_minutes": 60, "recipe": "coding", "review_role": "reviewer",
 }
 
-_LIVE_SEAT_STATES = ("requested", "idle", "running")
-_DEAD_SEAT_STATES = ("released", "failed", "cancelled")
+_LIVE_LAUNCH_STATES = ("queued", "done", "running")
+_DEAD_LAUNCH_STATES = ("failed",)
 
 
 def _minutes(value: Any) -> float:
@@ -180,8 +174,8 @@ def _lead_index(name: str) -> int:
     return 0 if name == "lead" else int(name.split("~", 1)[1])
 
 
-def _active_lead(seats: dict[str, SeatView]) -> str | None:
-    names = [n for n in seats if _is_lead_name(n)]
+def _active_lead(launches: dict[str, LaunchView]) -> str | None:
+    names = [n for n in launches if _is_lead_name(n)]
     return max(names, key=_lead_index) if names else None
 
 
@@ -198,8 +192,8 @@ class _Ctx:
         self.cfg = {**DEFAULT_CFG, **cfg, **(s.ledger.budgets or {})}
         self.now = s.now
         self.live = s.live
-        self.seats = s.seats
-        self.lead = _active_lead(s.seats)
+        self.launches = s.launches
+        self.lead = _active_lead(s.launches)
         self.open = [i for i in s.ledger.intents if i.state != "concluded"]
         self.exhausted = False
         self.expiry = dt.timedelta(minutes=_minutes(self.cfg["question_expiry"]))
@@ -225,6 +219,11 @@ class _Ctx:
         return sum(1 for i in self.s.ledger.intents
                    if i.action_id == action_id and i.outcome not in UNCOUNTED_OUTCOMES)
 
+    def finished(self, action_id: str) -> bool:
+        """An ended launch is never retried for the same trigger. A lost claim did not launch."""
+        return any(i.action_id == action_id and i.state == "concluded" and i.outcome != "lost"
+                   for i in self.s.ledger.intents)
+
     def inflight(self, group: str) -> bool:
         """An unconcluded launch for this artifact group (or the goal/ruling slot) is still running."""
         return any((i.action_id or "").split("|")[3:4] == [group] for i in self.open)
@@ -248,7 +247,7 @@ class _Ctx:
         return until
 
     def is_lead_wakeable(self) -> bool:
-        return self.lead is not None and self.seats[self.lead].state == "idle" and self.gated(self.lead) is None
+        return self.lead is not None and self.launches[self.lead].state == "done" and self.gated(self.lead) is None
 
     def sessions(self) -> int:
         return sum(1 for i in self.s.ledger.intents if i.outcome not in ("lost", "halted"))
@@ -265,7 +264,7 @@ class _Ctx:
         if any(judged >= cfg["max_rounds"] for judged in self.s.rounds.values()):
             return "max-rounds"
         cap, reserve, charged = cfg["max_cost_usd"], cfg["ruling_reserve_usd"], led.charged_usd()
-        if cap - reserve - charged < cfg["min_session_usd"]:                 # 4.1: seats keep the reserve
+        if cap - reserve - charged < cfg["min_session_usd"]:                 # 4.1: launches keep the reserve
             return "budget-cost"
         if self.sessions() >= cfg["max_sessions"]:
             return "budget-sessions"
@@ -276,14 +275,14 @@ class _Ctx:
             since = _ts((entry or {}).get("lease_held_since"))
             if since is not None and self.now - since > dt.timedelta(minutes=cfg["lease_hold_minutes"]):
                 return "lease-hold"                                           # [F19]
-        if any(n != "lead" and _is_lead_name(n) and self.seats[n].state == "failed" for n in self.seats):
+        if any(n != "lead" and _is_lead_name(n) and self.launches[n].state == "failed" for n in self.launches):
             return "lead-successor-failed"                                    # [F3]
         return None
 
     def last_activity(self) -> datetime | None:
         """The newest activity time that a stall wake reacts to: seat rows, hand-offs and verdicts. A woken lead
         updates its own seat row, so the clock restarts and wakes recur every stall_minutes (bounded by budgets)."""
-        stamps = [x.updated_at for x in self.seats.values() if x.updated_at is not None]
+        stamps = [x.updated_at for x in self.launches.values() if x.updated_at is not None]
         stamps += [h.at for h in self.s.handoffs if h.at is not None]
         stamps += [vd.at for vd in self.s.verdicts.values() if vd.at is not None]
         return max(stamps) if stamps else None
@@ -336,7 +335,7 @@ def _learn_first(c: _Ctx, trigger) -> list[Action] | None:
     if c.inflight("learn") or "learner" in c.live:
         return [c.act("nothing", None, None, 0, responsible="learner", reason="responsible")]
     action = c.act("launch", None, "learn", 0, prompt="learn", trigger=trigger, reason="learnings step before close")
-    if c.attempts(action.action_id) >= c.cfg["max_attempts"]:
+    if c.finished(action.action_id):
         # Never close past an undone learnings step: the job stays open (hold) for a person's `swarm learn`
         # or `swarm deactivate --no-learn`; the unharvested markers stay on it.
         return [c.act("hold", None, None, 0, prompt="learn", trigger=trigger,
@@ -359,7 +358,7 @@ def _ruling(c: _Ctx) -> list[Action] | None:
         if elapsed < grace:
             return [c.act("hold", None, "ruling", 0, prompt="quiesce", trigger=c.rtrig, ruling=True,
                           reason=reason, not_before=since + grace)]
-        return [c.act("stop_seat", name, "ruling", 0, prompt="quiesce", trigger=c.seats[name].revision,
+        return [c.act("stop_seat", name, "ruling", 0, prompt="quiesce", trigger=c.launches[name].revision,
                       ruling=True, reason=reason)
                 for name in sorted(c.live)]
     deadline = dt.timedelta(minutes=c.cfg["ruling_deadline_minutes"])
@@ -373,6 +372,9 @@ def _ruling(c: _Ctx) -> list[Action] | None:
     if led.charged_usd() >= c.cfg["max_cost_usd"]:                            # reserve gone too (4.1)
         return [c.act("record_unreachable", None, "ruling", 0, prompt="mechanical", trigger=c.rtrig,
                       ruling=True, reason="budget reserve spent")]
+    if c.finished(c.ruling_action(reason).action_id):
+        return [c.act("record_unreachable", None, "ruling", 0, prompt="mechanical", trigger=c.rtrig,
+                      ruling=True, reason="ruling launch ended without a verdict")]
     return [c.ruling_action(reason)]
 
 
@@ -384,21 +386,14 @@ def _verdict(c: _Ctx, artifact: str) -> VerdictView | None:
 def _owner_seat(c: _Ctx, owner: str) -> str | None:
     """The seat that resumes a fix round (spec 3.4 ownership transfer): the owner, or its successor
     `<owner>~<n>` when the owner is released, failed or cancelled."""
-    st = c.seats.get(owner)
+    st = c.launches.get(owner)
     if st is None:
         return owner
     if owner in c.live:
         return None
-    if st.state not in _DEAD_SEAT_STATES:
+    if st.state not in _DEAD_LAUNCH_STATES:
         return owner
-    base = owner.split("~", 1)[0]
-    alive = sorted(n for n in c.seats if n.startswith(base + "~") and c.seats[n].state in _LIVE_SEAT_STATES)
-    if alive:
-        return alive[0]
-    n = 1
-    while f"{base}~{n}" in c.seats:
-        n += 1
-    return f"{base}~{n}"
+    return None
 
 
 def _pipeline(c: _Ctx) -> list[Action] | None:
@@ -439,7 +434,7 @@ def _pipeline(c: _Ctx) -> list[Action] | None:
                 act = c.act("launch", None, group, rnd, prompt="integrate", trigger=rec, artifact=art)
         if act is None:
             continue
-        if c.attempts(act.action_id) >= cfg["max_attempts"]:                  # out of attempts (3.2)
+        if c.finished(act.action_id):
             c.exhausted = True
             continue
         out.append(act)
@@ -453,44 +448,29 @@ def _fix(c: _Ctx, group: str, art: str, rnd: int, owner: str, reason: str, trigg
     return c.act("launch", seat, group, rnd, prompt="fix", trigger=trigger, artifact=art, reason=reason)
 
 
-def _seat_requests(c: _Ctx) -> list[Action]:
-    """Step 5 (spec 3.4): fill requested seats within the host cap. `max_seats` counts distinct seats of the
-    generation, dead ones included (spec 4.1): a request beyond the cap is refused, and wakes the lead once
-    (counted, spec 3.3 [F11]). Launch attempts are counted per trigger (the seat revision)."""
-    out: list[Action] = []
-    refused: list[int] = []
-    room = c.cfg["max_concurrent_sessions"] - len(c.live)     # per job; the host-wide cap is Task 8
-    admitted = sum(1 for st in c.seats.values() if st.state != "requested")
-    for name in sorted(c.seats, key=lambda n: c.seats[n].id):
-        st = c.seats[name]
-        if st.state != "requested" or c.gated(name) is not None:
-            continue
-        if admitted >= c.cfg["max_seats"]:
-            refused.append(st.revision)
-            continue
-        admitted += 1
+def _queued_launches(c: _Ctx) -> list[Action]:
+    """Start queued launches in insertion order, within this job's concurrency budget."""
+    room = c.cfg["max_concurrent_sessions"] - len(c.live)
+    out = []
+    for name in sorted(c.launches, key=lambda n: c.launches[n].id):
+        st = c.launches[name]
         if room <= 0:
+            break
+        if st.state != "queued" or name in c.live or c.seat_has_open_intent(name) or c.gated(name):
             continue
-        act = c.act("launch", name, None, 0, prompt="seat", trigger=st.revision, reason="request")
-        if c.attempts(act.action_id) >= c.cfg["max_attempts"]:
-            c.exhausted = True
-            continue
-        out.append(act)
+        out.append(c.act("launch", name, None, 0, prompt="seat", trigger=st.revision, reason="queued"))
         room -= 1
-    if refused and c.is_lead_wakeable():
-        out.append(c.act("launch", c.lead, None, 0, prompt="wake", trigger=min(refused),
-                         reason="max-seats-refused"))
     return out
 
 
-def _seat_wakes(c: _Ctx) -> list[Action]:
+def _launch_wakes(c: _Ctx) -> list[Action]:
     """Step 6 (spec 3.4, 3.10): an idle non-lead seat with pending wake events resumes, unless gated. The
     trigger is the smallest pending event id (coalesced wakes)."""
     out: list[Action] = []
     for name in sorted(c.s.wakes):
         ids = c.s.wakes[name] or []
-        st = c.seats.get(name)
-        if not ids or st is None or st.state != "idle" or name in c.live or _is_lead_name(name):
+        st = c.launches.get(name)
+        if not ids or st is None or st.state != "done" or name in c.live or _is_lead_name(name):
             continue
         if c.gated(name) is not None:
             continue
@@ -499,11 +479,11 @@ def _seat_wakes(c: _Ctx) -> list[Action]:
 
 
 def _stalls(c: _Ctx) -> list[Action] | None:
-    """Step 7 (spec 3.9): a running seat that is not live is relaunched (stall, counted); with seats live and no
+    """Step 7 (spec 3.9): a running seat that is not live is relaunched (stall, counted); with launches live and no
     progress for `stall_minutes`, the lead is woken (counted). The relaunch trigger is the lost launch."""
     out = []
-    for name in sorted(c.seats):
-        st = c.seats[name]
+    for name in sorted(c.launches):
+        st = c.launches[name]
         if st.state == "running" and name not in c.live and not c.seat_has_open_intent(name) \
                 and c.gated(name) is None:
             out.append(c.act("launch", name, None, 0, prompt="relaunch", trigger=c.last_launch(name),
@@ -523,12 +503,10 @@ def _lead_wake(c: _Ctx) -> list[Action] | None:
     name = c.lead
     if name is None:
         return None
-    st = c.seats[name]
-    if st.state == "failed" and name == "lead":
-        return [c.act("launch", "lead~1", None, 0, prompt="lead", trigger=st.revision, reason="lead-successor")]
+    st = c.launches[name]
     if c.gated(name) is not None:
         return None
-    if st.state == "idle" and c.s.wakes.get(name):
+    if st.state == "done" and c.s.wakes.get(name):
         return [c.act("launch", name, None, 0, prompt="wake", trigger=min(c.s.wakes[name]), reason="wake")]
     return None
 
@@ -570,8 +548,9 @@ def _goal(c: _Ctx) -> list[Action] | None:
         # integrated" (an engineer's DONE that was never receipted leaves none). Not ready: the fallback
         # wakes the lead for work, never the goal judge on an unlanded branch.
         return None
-    return [c.act("launch", None, "goal", 0, prompt="goal", trigger=gr.get("id"), artifact=gr.get("candidate"),
-                  reason="goal-ready")]
+    action = c.act("launch", None, "goal", 0, prompt="goal", trigger=gr.get("id"), artifact=gr.get("candidate"),
+                   reason="goal-ready")
+    return None if c.finished(action.action_id) else [action]
 
 
 def _fallback(c: _Ctx) -> list[Action]:
@@ -579,7 +558,7 @@ def _fallback(c: _Ctx) -> list[Action]:
     expires (F1; the lead is not woken, the gated seat is responsible). Otherwise wake the lead (counted), or
     rule when the lead cannot run."""
     gates = []
-    for name in sorted(c.seats):
+    for name in sorted(c.launches):
         until = c.gated(name)
         if until is not None:
             gates.append((until, name))
@@ -588,7 +567,7 @@ def _fallback(c: _Ctx) -> list[Action]:
         return [c.act("hold", None, None, 0, prompt="question", trigger=until.isoformat(),
                       reason="question-gated", not_before=until)]
     lead = c.lead
-    if lead is not None and c.seats[lead].state in ("idle", "requested"):
+    if lead is not None and c.launches[lead].state in ("done", "queued"):
         return [c.act("launch", lead, None, 0, prompt="fallback", trigger=c.s.ledger.rounds_without_progress,
                       reason="invariant-fallback")]
     return [c.ruling_action("lead-unavailable")]          # the lead cannot run: a ruling (spec 3.3 step 10)
@@ -603,14 +582,14 @@ def next_actions(s: Snapshot, cfg: dict) -> list[Action]:
         return [c.act("nothing", None, None, 0, reason="halted" if s.halted else "inactive")]
     if s.ledger.terminal is not None:
         return [c.act("nothing", None, None, 0, reason="terminal")]
-    for step in (_terminal, _ruling, _pipeline):                               # steps 2, 3, 4
+    for step in (_terminal, _ruling):                               # steps 2, 3, 4
         found = step(c)
         if found:
             return found
-    accumulated = _seat_requests(c) + _seat_wakes(c)                           # steps 5, 6
+    accumulated = _queued_launches(c) + _launch_wakes(c)                           # steps 5, 6
     if accumulated:
         return accumulated
-    for step in (_stalls, _lead_wake, _goal):                                  # steps 7, 8, 9
+    for step in (_pipeline, _stalls, _lead_wake, _goal):                                  # steps 7, 8, 9
         found = step(c)
         if found:
             return found

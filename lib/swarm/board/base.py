@@ -136,7 +136,7 @@ RESTART_OUTCOMES = ("running", "completed", "timeout", "max_turns", "failed", "n
 # recorded them (pid, pgid, /proc start ticks, tag), so orphans can be listed and reaped safely.
 # 25 typed verdicts: the verdict CHECK accepts `unreachable`; jobs.verdict_scope, verdict_generation,
 # verdict_candidate and verdict_req hold the latest verdict's scope, drive generation, candidate and req.
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 
 VERDICT_DETAILS_MAX = 64 * 1024   # bytes of UTF-8: the largest `swarm verdict --details` report
 
@@ -765,49 +765,33 @@ RESTART_COLS = ("id, job, agent_key, attempt, at, reason, old_agent_key, new_age
                 "tokens_in, tokens_out")   # the Restart field order, for every backend's SELECT
 
 
-# Drive seats (schema 25, spec §3.4). `closed` seats are finished: a fix round or the lead asks for a
-# successor instead of reviving them.
-SEAT_STATES = ("requested", "running", "idle", "released", "failed", "cancelled", "refused")
-SEAT_CLOSED = ("released", "failed", "cancelled", "refused")
-# Where set_seat_state may move a seat. A seat starts running only through a launch claim, and leaves
-# running only once that launch has ended (its restart row is finished).
-SEAT_TRANSITIONS = {
-    "requested": ("released", "cancelled", "refused"),
-    "running": ("idle", "failed", "released", "cancelled", "refused"),
-    "idle": ("released", "cancelled"),
-}
-SEAT_HARNESSES = ("claude", "codex")
-SEAT_COMPLEXITY = ("simple", "standard", "complex")
+# Durable named launches. Version is only a compare-and-swap token, never an authorization.
+LAUNCH_STATES = ("queued", "running", "done", "failed")
+LAUNCH_CLOSED = ("done", "failed")
+LAUNCH_HARNESSES = ("claude", "codex")
 
 
 @dataclass(frozen=True)
-class Seat:
-    """A named drive seat (schema 25): one agent's role in one drive generation of a job. `revision`
-    counts every change (compare-and-swap); `launches` counts claimed launches."""
+class Launch:
+    """A named launch plus the storage version and runner identity used for atomic claims."""
     id: int
     job: str
     generation: int
-    seat: str
+    name: str
     role: str
-    title: str | None
     harness: str
     model: str | None
     workdir: str
-    brief_path: str
-    task_ref: str | None
-    complexity: str
-    requested_by: str
-    requested_at: _dt.datetime
+    brief: str
     state: str
+    attempts: int
+    last_outcome: str | None
+    queued_by: str
+    revision: int
     agent_key: str | None
     session_id: str | None
-    revision: int
-    launches: int
-    last_outcome: str | None
-    wake_reason: str | None
-    wake_watermark: int | None
     updated_at: _dt.datetime
-    launch_id: str | None = None   # the launch that started the seat running (its restart row's launch_id)
+    launch_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1461,7 +1445,7 @@ WRITE_METHODS = (
     "save_transcript", "refresh_transcript", "mark_capture_failed", "rotate_transcripts",
     "save_memory_ref", "mark_memory_refs_checked", "delete_memory_refs",
     "open_blocker", "resolve_blocker", "reopen_blocker", "comment_blocker", "expire_blockers", "_overdue_blocker",
-    "request_seat", "set_seat_state", "claim_drive_launch", "renew_drive_locks", "release_drive_locks",
+    "queue_launch", "set_launch_state", "claim_drive_launch", "renew_drive_locks", "release_drive_locks",
     "post_event", "ack_events",
     "pause_job", "begin_resume", "record_resume_outcome", "set_message_cap",
 )
@@ -2492,49 +2476,34 @@ class Board(abc.ABC):
         only if the row hasn't ended yet. Returns whether this call finished it. The spend given
         (schema 25) is stored; a None leaves the stored value as it is."""
 
-    # ---- drive seats, drive locks and the atomic launch claim (schema 25, spec §3.4, §4.5) ----
+    # ---- named launches and atomic claims ----
 
     @abc.abstractmethod
-    def request_seat(self, job: str, generation: int, seat: str, *, role: str, harness: str,
-                     model: str | None, workdir: str, brief_path: str, title: str | None = None,
-                     task_ref: str | None = None, complexity: str = "standard",
-                     requested_by: str) -> Seat:
-        """Create or update the seat (job, generation, seat). Idempotent: the same fields give the
-        same row and revision. Changed fields while `requested` give revision + 1. Otherwise
-        ValueError("seat is <state>: release it first")."""
+    def queue_launch(self, job: str, generation: int, name: str, *, role: str, harness: str,
+                     model: str | None, workdir: str, brief: str, queued_by: str) -> Launch:
+        """Queue by name, in any state. Every call creates a new queue version; names never die."""
 
     @abc.abstractmethod
-    def seats(self, job: str, generation: int | None = None, include_closed: bool = True) -> list[Seat]:
-        """The job's seats (of one generation when given) in id order; include_closed=False drops
-        the SEAT_CLOSED ones."""
+    def launches(self, job: str, generation: int | None = None, include_closed: bool = True) -> list[Launch]:
+        """Launches in insertion order; include_closed=False returns queued/running only."""
 
     @abc.abstractmethod
-    def seat(self, job: str, generation: int, seat: str) -> Seat | None:
-        """The seat (job, generation, seat), or None."""
+    def get_launch(self, job: str, generation: int, name: str) -> Launch | None:
+        """A named launch, or None."""
 
     @abc.abstractmethod
-    def set_seat_state(self, seat_id: int, expected_revision: int, state: str, *, job: str,
-                       **fields) -> Seat | None:
-        """Compare-and-swap on a seat of `job`: when it is at expected_revision, move it to state (along
-        SEAT_TRANSITIONS; ValueError otherwise, and ValueError while a seat's launch is still open) and
-        set the given fields (agent_key, session_id, last_outcome, wake_reason, wake_watermark), revision
-        + 1. Returns the new row; None when the seat is not of this job, the revision differs or it
-        doesn't exist."""
+    def set_launch_state(self, launch_row_id: int, expected_revision: int, state: str, *, job: str,
+                         **fields) -> Launch | None:
+        """CAS settlement. A stale completion cannot overwrite a new queue version."""
 
     @abc.abstractmethod
     def claim_drive_launch(self, *, job: str, generation: int, action_id: str, attempt: int, launch_id: str,
-                           seat_id: int, seat_revision: int, harness: str, reserve_usd: float,
+                           launch_row_id: int, queue_version: int, harness: str, reserve_usd: float,
                            reserve_minutes: float, locks: list[str], lock_seconds: float,
-                           max_host_running: int, ruling: bool = False,
-                           lock_paths: dict[str, str] | None = None) -> Restart | None:
-        """One transaction, under a host-wide lock: the seat (of this job and generation, in
-        requested or idle) at seat_revision moves to running (revision + 1, launches + 1); every
-        lock in `locks` is inserted for lock_seconds, all or none (sorted; a `wt:` key needs its
-        root in lock_paths and must not be equal to, an ancestor of, or a descendant of a live
-        `wt:` root of this host); the host's open restarts stay below max_host_running (ruling: one
-        more); the restart row (action_id, attempt, launch_id, reserved_usd) is inserted, unique on
-        (job, action_id, attempt). Returns the restart row, or None on any conflict (nothing
-        changed)."""
+                           max_host_running: int | None = None, max_job_running: int = 4,
+                           ruling: bool = False, lock_paths: dict[str, str] | None = None) -> Restart | None:
+        """Atomically start a queue version with a unique restart row and this job's concurrency cap.
+        An optional host cap is independent. Workdirs are never locked."""
 
     @abc.abstractmethod
     def renew_drive_locks(self, launch_id: str, expires_at: _dt.datetime, *, job: str, holder: str) -> int:

@@ -28,9 +28,9 @@ CI_TIMEOUT = 25.0
 class Held:
     """The lease claim of one landing: the launch that holds the keys, and the seat it borrowed."""
 
-    def __init__(self, launch_id: str, holder: str, restart_id: int | None, seat_id: int | None, adopted: bool):
-        self.launch_id, self.holder, self.restart_id, self.seat_id, self.adopted = (
-            launch_id, holder, restart_id, seat_id, adopted)
+    def __init__(self, launch_id: str, holder: str, restart_id: int | None, launch_row_id: int | None, adopted: bool):
+        self.launch_id, self.holder, self.restart_id, self.launch_row_id, self.adopted = (
+            launch_id, holder, restart_id, launch_row_id, adopted)
 
 
 def action_id(led, request: Request, branch: str) -> str:
@@ -54,18 +54,23 @@ def claim_leases(board, cfg: dict, env: LandEnv, job: str, request: Request, des
                                                                   ["an earlier landing still to be fenced"]))
         first = next(iter(held.values()))
         row = next((r for r in board.restarts(job) if r.launch_id == first.launch_id and r.ended_at is None), None)
-        seat = board.seat(job, led.generation, land.integrator_seat(branch))   # a dead pass left it `running`
+        seat = board.get_launch(job, led.generation, land.integrator_seat(branch))   # a dead pass left it `running`
         return Held(first.launch_id, action, row.id if row else None, seat.id if seat else None, True)
-    seat = board.seat(job, led.generation, land.integrator_seat(branch))
-    if seat is None or seat.state not in ("requested", "idle"):
-        raise LandPending("the integrator seat is not idle")
+    seat = board.get_launch(job, led.generation, land.integrator_seat(branch))
+    if seat is None or seat.state not in ("queued", "done"):
+        raise LandPending("the integrator launch is still running")
+    if seat.state == "done":
+        seat = board.queue_launch(job, led.generation, seat.name, role=seat.role, harness=seat.harness,
+                                  model=seat.model, workdir=seat.workdir, brief=seat.brief,
+                                  queued_by=seat.queued_by)
     attempt = 1 + sum(1 for r in board.restarts(job) if r.action_id == action)
     launch_id = f"land-{request.id}-{attempt}"
     restart = board.claim_drive_launch(
         job=job, generation=led.generation, action_id=action, attempt=attempt, launch_id=launch_id,
-        seat_id=seat.id, seat_revision=seat.revision, harness=seat.harness, reserve_usd=0, reserve_minutes=1,
+        launch_row_id=seat.id, queue_version=seat.revision, harness=seat.harness, reserve_usd=0, reserve_minutes=1,
         locks=keys, lock_seconds=land.LEASE_SECONDS,
-        max_host_running=int(cfg.get("max_concurrent_sessions", 4)) + 1)
+        max_host_running=cfg.get("max_host_running"),
+        max_job_running=int(cfg.get("max_concurrent_sessions", 4)))
     if restart is None:
         raise LeaseHeld("the land lease could not be claimed (held elsewhere, or the host's launch limit)")
     return Held(launch_id, action, restart.id, seat.id, False)
@@ -75,13 +80,13 @@ def release_leases(board, env: LandEnv, job: str, held: Held, outcome: str) -> N
     board.release_drive_locks(held.launch_id, job=job, holder=held.holder)
     if held.restart_id is not None:
         board.finish_restart(held.restart_id, "completed" if outcome == "landed" else "failed")
-    seat_id = held.seat_id
-    if seat_id is None:
+    launch_row_id = held.launch_row_id
+    if launch_row_id is None:
         return
-    row = next((s for s in board.seats(job, env.led.generation) if s.id == seat_id), None)
+    row = next((s for s in board.launches(job, env.led.generation) if s.id == launch_row_id), None)
     if row is not None and row.state == "running":
         try:
-            board.set_seat_state(row.id, row.revision, "idle", job=job, last_outcome=f"land {outcome}")
+            board.set_launch_state(row.id, row.revision, "done", job=job, last_outcome=f"land {outcome}")
         except ValueError:
             pass
 

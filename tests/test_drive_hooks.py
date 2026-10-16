@@ -26,187 +26,6 @@ READS = ("git log --oneline -3", "cd tests && python3 -B -m unittest test_x", "l
          "sqlite3 -readonly board.db 'select 1'", "swarm status --job J", "swarm verdict --job J show")
 
 
-class ReadOnlyGate(DriveCase):
-    def judge(self):
-        return self.launch_seat("judge", role="judge", kind="judge")[0]
-
-    def test_readonly_judge_bash_write_blocked(self):
-        sid = self.judge()
-        for cmd in JUDGE_WRITES:
-            with self.subTest(cmd=cmd):
-                self.assertIn("read-only", self.pre(sid, command=cmd))
-
-    def test_readonly_judge_powershell_write_blocked(self):
-        sid = self.judge()
-        for cmd in ("Set-Content f.txt x", "Remove-Item f", "git commit -m x", "echo hi > out.txt"):
-            with self.subTest(cmd=cmd):
-                self.assertIn("read-only", self.pre(sid, "PowerShell", command=cmd))
-
-    def test_readonly_judge_monitor_and_mcp_write_blocked(self):
-        sid = self.judge()
-        self.assertIn("read-only", self.pre(sid, "Monitor", command="tail -f x"))
-        self.assertIn("read-only", self.pre(sid, "mcp__jira__create_issue"))
-        for tool in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
-            self.assertIn("read-only", self.pre(sid, tool, tool_input={"file_path": "x"}))
-
-    def test_readonly_judge_can_read_and_run_targeted_tests(self):
-        sid = self.judge()
-        for cmd in READS:
-            with self.subTest(cmd=cmd):
-                self.assertIsNone(self.pre(sid, command=cmd))
-        self.assertIsNone(self.pre(sid, "mcp__jira__get_issue"))
-        self.assertIsNone(self.pre(sid, "Read", tool_input={"file_path": "x"}))
-
-    def test_a_judge_may_record_its_report_through_the_verdict_heredoc(self):
-        sid = self.judge()
-        cmd = ("swarm verdict --job J --artifact a@1234567 not_met --reason r --next n --details - <<'EOF'\n"
-               "# Report\nrun `git commit` and `echo x > f` and rm -rf x\nEOF")
-        self.assertIsNone(self.pre(sid, command=cmd))
-        self.assertIn("read-only", self.pre(sid, command=cmd + "\necho x > f"))
-
-    def test_a_reviewer_by_receipted_role_is_read_only_and_an_engineer_is_not(self):
-        rev, _ = self.launch_seat("qa-1", role="reviewer")
-        eng, _ = self.launch_seat("eng-a", role="engineer")
-        self.assertIn("read-only", self.pre(rev, command="git commit -m x"))
-        self.assertIsNone(self.pre(eng, command="git commit -m x"))
-        self.assertIsNone(self.pre(eng, "Edit", tool_input={"file_path": "x"}))
-        self.assertIsNone(self.pre(eng, command="echo x > out.txt"))
-
-    def test_driver_named_judge_and_reviewer_seats_are_read_only_without_a_board_lookup(self):
-        for name, kind in (("judge", "judge"), ("goal-judge", "goal"), ("ruling-judge", "ruling"),
-                           ("reviewer-feat-a-1234abcd", "review")):
-            sid, _ = self.launch_seat(name, role="engineer", kind=kind)     # even a mislabelled row
-            with mock.patch.object(drivegate, "_open_board", side_effect=AssertionError("board opened")):
-                with self.subTest(seat=name):
-                    self.assertIn("read-only", self.pre(sid, command="git commit -m x"))
-
-    def test_the_action_alone_makes_a_seat_read_only_and_a_judge(self):
-        """A judge, goal, ruling or review action is read-only whatever the seat is called; only the first three
-        may run `swarm verdict`."""
-        for name, kind, judge in (("x-1", "judge", True), ("x-2", "goal", True), ("x-3", "ruling", True),
-                                  ("x-4", "review", False)):
-            sid, _ = self.launch_seat(name, role="engineer", kind=kind)
-            with self.subTest(kind=kind), mock.patch.object(drivegate, "_open_board", side_effect=AssertionError("board")):
-                self.assertIn("read-only", self.pre(sid, command="git commit -m x"))
-                verdict = self.pre(sid, command="swarm verdict --job J --artifact a@1234567 met ok")
-                self.assertEqual(verdict is None, judge)
-
-    def test_a_driver_name_alone_makes_a_seat_read_only_and_a_judge(self):
-        """The driver's own seat names say what they are, whatever action the session runs."""
-        for name, judge in (("judge", True), ("goal-judge", True), ("ruling-judge", True),
-                            ("reviewer-feat-a-1234abcd", False)):
-            sid, _ = self.launch_seat(name, role="engineer", kind="wake")
-            with self.subTest(seat=name), mock.patch.object(drivegate, "_open_board", side_effect=AssertionError("board")):
-                self.assertIn("read-only", self.pre(sid, command="git commit -m x"))
-                verdict = self.pre(sid, command="swarm verdict --job J --artifact a@1234567 met ok")
-                self.assertEqual(verdict is None, judge)
-
-    def test_a_seat_named_like_a_lead_but_not_a_lead_role_may_spawn_and_one_that_is_a_lead_role_but_not_named_so_too(self):
-        """A lead needs the lead role (receipted) AND the driver's lead name."""
-        for name, role in (("boss", "engineering_lead"), ("lead", "engineer")):
-            sid, _ = self.launch_seat(name, role=role, kind="seat")
-            with self.subTest(seat=name):
-                self.assertIsNone(self.pre(sid, "Agent", tool_input={"prompt": "x", "description": "x"}))
-        sid, _ = self.launch_seat("lead~1", role="engineering_lead", kind="lead")
-        self.assertIn("lead seat", self.pre(sid, "Agent", tool_input={"prompt": "x", "description": "x"}))
-
-    def test_P5_a_judge_row_rewritten_to_engineer_stays_read_only(self):
-        """The role comes from the seat's receipt, never from the row a writer can change."""
-        sid, _ = self.launch_seat("qa-1", role="judge", kind="seat")
-        real = drivegate._open_board
-
-        class Flip:
-            def __init__(self, b):
-                self.b = b
-
-            def __getattr__(self, name):
-                return getattr(self.b, name)
-
-            def seat(self, job, gen, seat):
-                s = self.b.seat(job, gen, seat)
-                return dataclasses.replace(s, role="engineer") if s else s
-        with mock.patch.object(drivegate, "_open_board", lambda cfg: Flip(real(cfg))):
-            self.assertIn("could not be verified", self.pre(sid, command="git commit -m x"))
-            self.assertIsNone(self.pre(sid, command="git log"))
-
-    def test_a_seat_without_a_valid_authorization_is_held_to_the_strictest_rules(self):
-        sid, _ = self.launch_seat("eng-a", authorize=False)
-        self.assertIn("could not be verified", self.pre(sid, command="git commit -m x"))
-        self.assertIsNone(self.pre(sid, command="git status"))
-
-    def test_a_seat_whose_launch_cannot_be_resolved_is_strict_not_free(self):
-        sid, _ = self.launch_seat("eng-a")
-        self.edit(lambda l: setattr(l, "intents", []))
-        self.assertIn("could not be verified", self.pre(sid, command="echo x > f"))
-
-    def run_file(self):
-        from swarm.supervisor import runner
-        return runner._read_run(f"r{self.restart_id}.json", self.key)
-
-    def rewrite_run(self, **over):
-        from swarm.supervisor import runner
-        run = self.run_file()
-        run.update(over)
-        runner.write_run(run)
-
-    def test_a_run_file_that_is_not_this_sessions_does_not_name_its_seat(self):
-        """The seat comes from the supervisor's run file, checked against the marker, the job and the session."""
-        for what, over in (("another session", {"session_id": "someone-else"}), ("another job", {"job": "OTHER"}),
-                           ("a malformed run", {"limit_seconds": "soon"}), ("no launch", {"launch_id": None})):
-            sid, _ = self.launch_seat("eng-" + what.split()[-1][:3] + str(len(what)))
-            with self.subTest(what=what):
-                self.assertIsNone(self.pre(sid, command="echo x > f"))            # the run is fine: a writer
-                self.rewrite_run(**over)
-                self.assertIn("could not be verified", self.pre(sid, command="echo x > f"))
-
-    def test_a_run_of_another_job_with_a_matching_marker_name_still_names_no_seat(self):
-        sid, _ = self.launch_seat("eng-a")
-        marker = markers.resume_binding(self.cfg, sid)
-        self.assertEqual(drivegate.seat_context(self.cfg, self.key, self.payload(sid), resume=marker).seat, "eng-a")
-        self.rewrite_run(job="OTHER", marker=str(Path(self.run_file()["marker"]).with_name(
-            f"OTHER--resume-r{self.restart_id}.json")))
-        self.assertIsNone(drivegate.seat_context(self.cfg, self.key, self.payload(sid), resume=marker).seat)
-
-    def test_a_seat_session_is_not_the_run_of_another_session(self):
-        sid, _ = self.launch_seat("eng-a")
-        ctx = drivegate.seat_context(self.cfg, self.key, self.payload(sid))
-        self.assertEqual((ctx.seat, ctx.intent.launch_id), ("eng-a", "L-eng-a"))
-        self.rewrite_run(session_id="x", agent_key="y")
-        self.assertIsNone(drivegate.seat_context(self.cfg, self.key, self.payload(sid)).seat)
-
-    def test_requester_context_is_the_main_session_only(self):
-        self.assertEqual(drivegate.requester_context(self.key, self.payload(REQ), "J").kind, "requester")
-        self.assertIsNone(drivegate.requester_context(self.key, self.payload(REQ, agent_id="sub-1"), "J"))
-        self.assertIsNone(drivegate.requester_context(self.key, self.payload("other"), "J"))
-        self.assertIsNone(drivegate.requester_context(self.key, self.payload(REQ), "NOPE"))
-
-    def test_classify(self):
-        sid, _ = self.launch_seat("eng-a")
-        self.assertEqual(drivegate.classify(self.cfg, self.payload(sid)).kind, "seat")
-        self.assertEqual(drivegate.classify(self.cfg, self.payload(sid, agent_id="sub-1")).seat, "eng-a")
-        self.assertEqual(drivegate.classify(self.cfg, self.payload(REQ)).kind, "requester")
-        self.assertIsNone(drivegate.classify(self.cfg, self.payload(REQ, agent_id="sub-1")))
-        self.assertIsNone(drivegate.classify(self.cfg, self.payload("stranger")))
-        self.assertIsNone(drivegate.classify(self.cfg, {"tool_name": "Bash"}))
-        enrolment.write(self.key, job="J", agent_key="sub-9", harness="claude", session_id="w", cwd=str(self.work))
-        self.assertEqual(drivegate.classify(self.cfg, self.payload("w", agent_id="sub-9")).kind, "enrolled")
-        with mock.patch.object(drivegate, "has_ledgers", return_value=False):
-            self.assertIsNone(drivegate.classify(self.cfg, self.payload(sid)))
-
-    def test_a_removed_marker_leaves_the_session_strict_through_its_enrolment(self):
-        sid, _ = self.launch_seat("judge", role="judge", kind="judge")
-        enrolment.write(self.key, job="J", agent_key=sid, harness="claude", session_id=sid, cwd=str(self.work))
-        for p in Path(self.cfg["hook"]["marker_dir"]).expanduser().glob("*resume*"):
-            p.unlink()
-        self.assertIn("could not be verified", self.pre(sid, command="git commit -m x"))
-
-    def test_a_session_of_no_drive_job_is_never_gated(self):
-        with self.board() as b:
-            b.open_job("PLAIN", None, None, None, "me")
-        enrolment.write(self.key, job="PLAIN", agent_key="plain-1", harness="claude", session_id="plain-1",
-                        cwd=str(self.work))
-        self.assertIsNone(self.pre("plain-1", command="git push --force origin main"))
-        self.assertIsNone(self.pre("stranger", command="git push --force origin main"))
 
 
 class EveryCall(DriveCase):
@@ -216,50 +35,30 @@ class EveryCall(DriveCase):
     def test_first_call_of_a_launched_judge_is_gated_before_it_is_enrolled(self):
         sid, _ = self.launch_seat("judge", role="judge", kind="judge", bind=False)
         out = self.hook("turn", agent_id=None, session=sid, cwd=str(self.work), tool_name="Bash",
-                        tool_input={"command": "git commit -am x && git push origin HEAD:feat/a"})
+                        tool_input={"command": "git push origin HEAD:main"})
         o = out["hookSpecificOutput"]
         self.assertEqual(o["permissionDecision"], "deny")
-        self.assertIn("read-only", o["permissionDecisionReason"])
+        self.assertIn("target branch", o["permissionDecisionReason"])
         self.assertIn("swarm land", o["permissionDecisionReason"])
 
-    def test_a_joined_judge_is_gated_on_a_later_call_too(self):
-        sid, _ = self.launch_seat("judge", role="judge", kind="judge")
-        out = self.hook("turn", agent_id=None, session=sid, cwd=str(self.work), tool_name="Bash",
-                        tool_input={"command": "echo x > f"})
-        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
 
     def test_a_denied_call_leaves_no_tool_running(self):
         """A denied call gets no PostToolUse: it must not have been marked as running a tool either."""
         sid, _ = self.launch_seat("judge", role="judge", kind="judge")
         out = self.hook("turn", agent_id=None, session=sid, cwd=str(self.work), tool_name="Bash",
-                        tool_input={"command": "git commit -am x"})
+                        tool_input={"command": "git push origin HEAD:main"})
         self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
         self.assertIsNone(self.agent(sid).current_tool)
         self.hook("turn", agent_id=None, session=sid, cwd=str(self.work), tool_name="Bash",
                   tool_input={"command": "git log"})
         self.assertEqual(self.agent(sid).current_tool, "Bash")      # an allowed call is marked as usual
 
-    def test_subagent_of_a_judge_inherits_its_restrictions(self):
-        sid, _ = self.launch_seat("judge", role="judge", kind="judge")
-        for cmd in ("echo x > f", "git commit -am x"):
-            self.assertIn("read-only", self.pre(sid, command=cmd, agent_id="sub-1"))
-        out = self.hook("turn", agent_id="sub-1", session=sid, cwd=str(self.work), tool_name="Bash",
-                        tool_input={"command": "git commit -am x"})
-        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
-        self.assertIsNone(self.pre(sid, command="git log", agent_id="sub-1"))
 
     def test_subagent_of_an_engineer_is_not_made_read_only_and_keeps_the_target_guard(self):
         sid, _ = self.launch_seat("eng-a")
         self.assertIsNone(self.pre(sid, command="git commit -m x", agent_id="sub-1"))
         self.assertIn("target branch", self.pre(sid, command="git push origin HEAD:main", agent_id="sub-1"))
 
-    def test_a_judge_of_an_unbound_job_is_gated(self):
-        """The job is not one of the session's bound markers: the old gate never ran for it."""
-        sid, _ = self.launch_seat("judge", role="judge", kind="judge")
-        with mock.patch.object(hooks, "_session_markers", return_value=({}, {})):
-            out = self.hook("turn", agent_id=None, session=sid, cwd=str(self.work), tool_name="Bash",
-                            tool_input={"command": "git commit -am x"})
-        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
 
     def test_an_enrolled_subagent_of_a_drive_job_is_guarded(self):
         enrolment.write(self.key, job="J", agent_key="sub-9", harness="claude", session_id="whoever",
@@ -359,10 +158,10 @@ class SpawnRefusals(DriveCase):
         return self.pre(sid, "Agent", tool_input=dict(self.SPAWN), **kw)
 
     def test_requester_cannot_spawn_subagents_in_drive_job(self):
-        self.assertIn("seat request", self.spawn(REQ))
+        self.assertIn("swarm run", self.spawn(REQ))
         out = self.hook("turn", agent_id=None, session=REQ, tool_name="Agent", tool_input=dict(self.SPAWN))
         self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
-        self.assertIn("swarm seat request", out["hookSpecificOutput"]["permissionDecisionReason"])
+        self.assertIn("swarm run", out["hookSpecificOutput"]["permissionDecisionReason"])
 
     def test_a_stranger_may_spawn(self):
         self.assertIsNone(self.spawn("stranger"))
@@ -378,13 +177,7 @@ class SpawnRefusals(DriveCase):
         out = self.hook("turn", agent_id=None, session=sid, tool_name="Agent", tool_input=dict(self.SPAWN))
         self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
 
-    def test_read_only_seats_cannot_spawn(self):
-        sid, _ = self.launch_seat("judge", role="judge", kind="judge")
-        self.assertIn("read-only", self.spawn(sid))
 
-    def test_an_unverifiable_seat_cannot_spawn(self):
-        sid, _ = self.launch_seat("eng-a", authorize=False)
-        self.assertIn("could not be verified", self.spawn(sid))
 
     def test_task_is_a_spawn_tool_too(self):
         sid, _ = self.launch_seat("lead", role="engineering_lead", kind="lead")
@@ -445,27 +238,6 @@ MCP_READS = ("mcp__x__get_comments", "mcp__claude_ai_Slack__slack_read_channel",
              "mcp__claude_ai_MaaS_NVBugs__nvbugs_search_v2")
 
 
-class McpAllowlist(DriveCase):
-    def test_a_read_only_seat_may_call_only_read_tools(self):
-        sid, _ = self.launch_seat("judge", role="judge", kind="judge")
-        for tool in MCP_WRITES:
-            with self.subTest(tool=tool):
-                self.assertIn("read allowlist", self.pre(sid, tool, tool_input={}))
-        for tool in MCP_READS:
-            with self.subTest(tool=tool):
-                self.assertIsNone(self.pre(sid, tool, tool_input={}))
-
-    def test_a_writer_seat_may_call_any_mcp_tool(self):
-        sid, _ = self.launch_seat("eng-a")
-        for tool in MCP_WRITES + MCP_READS:
-            self.assertIsNone(self.pre(sid, tool, tool_input={}))
-
-    def test_allowlist_function_is_a_read_verb_and_no_write_verb(self):
-        self.assertTrue(shellguard.mcp_read_allowed("mcp__s__get_x"))
-        self.assertFalse(shellguard.mcp_read_allowed("mcp__s__get_and_delete"))
-        self.assertFalse(shellguard.mcp_read_allowed("mcp__s__frobnicate"))
-        self.assertTrue(shellguard.mcp_read_allowed("Bash"))     # not an MCP tool: no opinion
-        self.assertTrue(shellguard.mcp_read_allowed(None))
 
 
 class PushGuard(DriveCase):
@@ -608,11 +380,6 @@ class FailClosed(DriveCase):
         with mock.patch.object(drivegate, "seat_context", side_effect=RuntimeError("boom")):
             self.assertIsNone(self.pre("stranger", command="ls"))
 
-    def test_an_unreadable_ledger_makes_the_seat_strict(self):
-        sid, _ = self.launch_seat("eng-a")
-        with mock.patch.object(drivegate, "load_ledger", side_effect=ledger.LedgerBadError("bad")):
-            self.assertIn("could not be verified", self.pre(sid, command="echo x > f"))
-            self.assertIsNone(self.pre(sid, command="git status"))
 
     def test_a_classify_error_does_not_stop_the_receipts(self):
         with mock.patch.object(drivegate, "classify", side_effect=RuntimeError("boom")), \
@@ -625,7 +392,7 @@ class FailClosed(DriveCase):
         sid, _ = self.launch_seat("judge", role="judge", kind="judge")
         with mock.patch.object(drivegate, "classify", side_effect=RuntimeError("boom")):
             out = self.hook("turn", agent_id=None, session=sid, cwd=str(self.work), tool_name="Bash",
-                            tool_input={"command": "git commit -am x"})
+                            tool_input={"command": "git push origin HEAD:main"})
         self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
 
     def test_a_codex_seat_with_a_replacement_token_and_no_marker_is_still_gated(self):
@@ -778,17 +545,17 @@ class DoctorReceipts(Env):
         (d / "receipt-failures.log").write_text(text)
 
     def test_doctor_fails_on_receipt_write_failure(self):
-        self.write(f"{time.time():.0f} J seat_request id=7 rev=1: OSError: gone\n")
+        self.write(f"{time.time():.0f} J goal_ready id=7 rev=1: OSError: gone\n")
         checks = [c for c in bootstrap._receipt_failures_check() if c.name == "drive receipts"]
         self.assertEqual([c.ok for c in checks], [False])
 
     def test_doctor_ignores_an_old_receipt_failure(self):
-        self.write("1000 J seat_request id=7 rev=1: OSError: old\n")
+        self.write("1000 J goal_ready id=7 rev=1: OSError: old\n")
         self.assertEqual(bootstrap._receipt_failures_check(), [])
 
     def test_P9_a_big_log_does_not_blind_the_doctor(self):
-        old = "1000 J seat_request id=7 rev=1: OSError: old\n" * 4000     # more than 64 KiB
-        self.write(old + f"{time.time():.0f} J seat_request id=8 rev=1: OSError: new\n")
+        old = "1000 J goal_ready id=7 rev=1: OSError: old\n" * 4000     # more than 64 KiB
+        self.write(old + f"{time.time():.0f} J goal_ready id=8 rev=1: OSError: new\n")
         checks = bootstrap._receipt_failures_check()
         self.assertEqual([c.ok for c in checks], [False])
         self.assertIn("1 control record receipt", checks[0].detail)
@@ -863,11 +630,6 @@ class RoleRules(DriveCase):
         from swarm.supervisor import launch
         self.assertEqual(launch.READ_ONLY_CLAUDE_DISALLOWED, "Edit,Write,NotebookEdit,MultiEdit,mcp__*")
 
-    def test_codex_judges_and_reviewers_run_on_claude(self):
-        self.assertEqual(driveroles.effective_harness("judge", "codex")[0], "claude")
-        self.assertIn("Codex", driveroles.effective_harness("reviewer", "codex")[1])
-        self.assertEqual(driveroles.effective_harness("engineer", "codex"), ("codex", None))
-        self.assertEqual(driveroles.effective_harness("judge", "claude"), ("claude", None))
 
 
 class SeatEnrolsFromMarker(Env):
@@ -937,8 +699,7 @@ class DriveJudgeFlag(Env):
         from swarm.supervisor import drive_authz
         with self.board() as b, \
                 mock.patch.object(drivegate, "seat_context", return_value=ctx), \
-                mock.patch.object(b, "seat", return_value=types.SimpleNamespace(role=role)), \
-                mock.patch.object(drive_authz, "receipted_role", return_value=role):
+                mock.patch.object(b, "get_launch", return_value=types.SimpleNamespace(role=role)):
             hooks._drive_judge_flag(b, self.cfg, "seat-agent", "J", {"session_id": "s"}, {})
             return b.record_verdict("J", self.name, "met", "evidence", None, None)
 

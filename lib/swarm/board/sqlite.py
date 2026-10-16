@@ -579,14 +579,14 @@ def _allow_paused(conn: sqlite3.Connection) -> None:
 
 
 from .blockers import SqlBlockers, sql_schema, migrate_sql, rollup, protects
-from .seats import SqlSeats, seats_schema
+from .launches import SqlLaunches, launches_schema, migrate_launches
 from .events import SqlEvents, sql_schema as events_schema
 from .bgcmds import SqlBgCommands, sql_schema as bg_schema
 
 
-class SqliteBoard(SqlBlockers, SqlSeats, SqlEvents, SqlBgCommands, Board):
+class SqliteBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
     _blocker_pg = False
-    _seat_pg = False
+    _launch_pg = False
     _event_pg = False
     _bg_pg = False
     """A Board over one SQLite connection to the shared database file."""
@@ -670,8 +670,9 @@ class SqliteBoard(SqlBlockers, SqlSeats, SqlEvents, SqlBgCommands, Board):
                             conn.execute(COUNT_BACKFILL)
                 for trigger in COUNT_TRIGGERS:
                     conn.execute(trigger)
-                for statement in (sql_schema() + events_schema() + bg_schema() + seats_schema()).split(";"):
+                for statement in (sql_schema() + events_schema() + bg_schema() + launches_schema()).split(";"):
                     if statement.strip(): conn.execute(statement)
+                migrate_launches(conn)
                 migrate_sql(conn)
                 for source in NAME_SOURCES:
                     conn.executemany("INSERT OR IGNORE INTO name_pool (name, source) VALUES (?, ?)",

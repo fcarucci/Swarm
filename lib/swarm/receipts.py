@@ -32,7 +32,7 @@ from swarm import enrolment, paths, safefs
 
 FORMAT = 1
 RECORD_MAX = 64 * 1024
-KINDS = ("done", "review", "verdict", "goal_ready", "integrated", "seat_request", "post", "ask",
+KINDS = ("done", "review", "verdict", "goal_ready", "integrated", "post", "ask",
          "answer", "blocker_resolution", "person", "ack", "withdraw", "land", "grant", "control_request")
 # The decision fields of each kind: the values whose digest is content_sha. A kind's row must
 # carry every one of them. Task 5 and Task 6 write and read records with these names. A verdict binds
@@ -44,7 +44,6 @@ DECISION = {
     "verdict": ("verdict", "scope", "generation", "candidate", "req", "artifact"),
     "goal_ready": ("generation", "candidate"),
     "integrated": ("group", "sha", "into"),
-    "seat_request": ("role", "model", "brief", "workdir"),
     "post": ("to", "body"),
     "ask": ("question", "until", "default"),
     "answer": ("ask_id", "answer"),
