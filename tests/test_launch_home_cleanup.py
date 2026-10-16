@@ -9,12 +9,13 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
+from support import SANDBOX  # noqa: E402  (canonical temp root, including macOS /private/var)
 from swarm.supervisor import launchhome  # noqa: E402
 
 
 class TestRemoveJobHomes(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = tempfile.TemporaryDirectory(dir=SANDBOX)
         self.addCleanup(self.tmp.cleanup)
         self.priv = Path(self.tmp.name) / "supervisor"
         p = mock.patch("swarm.supervisor.settings.private_dir", return_value=self.priv)

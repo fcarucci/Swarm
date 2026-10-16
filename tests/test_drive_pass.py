@@ -314,7 +314,8 @@ class IsolationTests(PassCase):
         text = (settings.private_dir() / "driver.log").read_text()
         self.assertIn("Traceback (most recent call last)", text)
         self.assertIn("RuntimeError: snapshot broke", text)
-        self.assertEqual((settings.private_dir() / "driver.log").stat().st_mode & 0o777, 0o600)
+        if os.name == "posix":
+            self.assertEqual((settings.private_dir() / "driver.log").stat().st_mode & 0o777, 0o600)
         note = self.board.job_data("J")["drive.error.1"]
         self.assertIn("RuntimeError: snapshot broke", note)
         self.assertIn("raise RuntimeError", note)
@@ -330,8 +331,45 @@ class IsolationTests(PassCase):
         self.assertEqual((settings.private_dir() / "driver.log.1").read_text(), "previous\n")
         path = settings.private_dir() / "driver.log"
         self.assertLessEqual(path.stat().st_size, 1024 * 1024)
-        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
-        self.assertEqual(path.with_name("driver.log.1").stat().st_mode & 0o777, 0o600)
+        if os.name == "posix":
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(path.with_name("driver.log.1").stat().st_mode & 0o777, 0o600)
+
+    def test_driver_log_normalizes_newlines_before_byte_cap(self):
+        import logging
+        handler = driver._DriverLog()
+        message = "é\r\nx\r" * 300000
+        handler.emit(logging.LogRecord("test", logging.WARNING, __file__, 1, message, (), None))
+        data = (settings.private_dir() / "driver.log").read_bytes()
+        expected = (message.replace("\r\n", "\n").replace("\r", "\n") + "\n").encode("utf-8")[-1024 * 1024:]
+        self.assertEqual(data, expected)
+        self.assertLessEqual(len(data), 1024 * 1024)
+
+    def test_driver_log_rotates_an_already_oversized_file(self):
+        import logging
+        from swarm.supervisor import privfs
+        with privfs.dir_fd() as d:
+            privfs.append(d, "driver.log", b"x" * (1024 * 1024 + 1))
+        # Even an empty record must rotate an oversized existing log.
+        driver._DriverLog().emit(logging.LogRecord("test", logging.WARNING, __file__, 1, "", (), None))
+        path = settings.private_dir() / "driver.log"
+        self.assertEqual(path.read_bytes(), b"\n")
+        self.assertEqual(path.with_name("driver.log.1").stat().st_size, 1024 * 1024)
+
+    def test_driver_log_independent_writers_share_the_lock(self):
+        import concurrent.futures
+        import logging
+
+        def write(i):
+            handler = driver._DriverLog()
+            for j in range(10):
+                handler.emit(logging.LogRecord("test", logging.WARNING, __file__, 1,
+                                               f"writer-{i}-{j}", (), None))
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(write, range(4)))
+        lines = (settings.private_dir() / "driver.log").read_bytes().splitlines()
+        self.assertCountEqual(lines, [f"writer-{i}-{j}".encode() for i in range(4) for j in range(10)])
 
     def test_error_backoff_has_a_wake_deadline_and_recovers(self):
         from swarm.supervisor import session_driver

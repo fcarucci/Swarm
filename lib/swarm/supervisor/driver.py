@@ -720,10 +720,13 @@ class _DriverLog(logging.Handler):
     def emit(self, record):
         from swarm.supervisor import privfs
         try:
-            text = (self.format(record) + "\n").encode("utf-8", "replace")[-1024 * 1024:]
+            # Count the bytes we actually write: CRLF and CR records use LF on every OS.
+            formatted = self.format(record).replace("\r\n", "\n").replace("\r", "\n")
+            text = (formatted + "\n").encode("utf-8", "replace")[-1024 * 1024:]
             with privfs.dir_fd() as d, privfs.locked(d, "driver.log.lock"):
                 previous = privfs.read_tail(d, "driver.log", 1024 * 1024)
-                if previous and len(previous[0]) + len(text) > 1024 * 1024:
+                # read_tail closes its reader before replacement (also required on Windows).
+                if previous and (previous[1] or len(previous[0]) + len(text) > 1024 * 1024):
                     privfs.write_atomic(d, "driver.log.1", previous[0])
                     privfs.write_atomic(d, "driver.log", "")
                 privfs.append(d, "driver.log", text)
