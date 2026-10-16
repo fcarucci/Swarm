@@ -5,7 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
@@ -74,19 +74,35 @@ class TestRemoveJobHomes(unittest.TestCase):
 
     def test_legacy_config_keys_and_explicit_new_values(self):
         old = "se" "at_"
-        legacy = {"drive": {old + "ro_paths": ["/read"], old + "rw_paths": ["/write"],
-                            old + "ssh_key": "/key", old + "git_name": "Legacy",
+        read, write, key = (str(Path(self.tmp.name) / name) for name in ("read", "write", "key"))
+        ssh_key = (Path(self.tmp.name) / "key").as_posix()
+        legacy = {"drive": {old + "ro_paths": [read], old + "rw_paths": [write],
+                            old + "ssh_key": key, old + "git_name": "Legacy",
                             old + "git_email": "legacy@example.test"}}
-        self.assertEqual(launchhome._list(legacy, "launch_ro_paths"), [os.path.normpath("/read")])
-        self.assertEqual(launchhome._list(legacy, "launch_rw_paths"), [os.path.normpath("/write")])
-        self.assertIn('/key', launchhome.ssh_config_text(legacy))
+        self.assertEqual(launchhome._list(legacy, "launch_ro_paths"), [read])
+        self.assertEqual(launchhome._list(legacy, "launch_rw_paths"), [write])
+        self.assertIn(f'IdentityFile "{ssh_key}"', launchhome.ssh_config_text(legacy))
         self.assertEqual(launchhome._git_identity(legacy), ("Legacy", "legacy@example.test"))
         legacy["drive"].update(launch_ro_paths=[], launch_rw_paths=[], launch_ssh_key="",
                                launch_git_name="Current", launch_git_email="current@example.test")
         self.assertEqual(launchhome._list(legacy, "launch_ro_paths"), [])
         self.assertEqual(launchhome._list(legacy, "launch_rw_paths"), [])
-        self.assertNotIn('/key', launchhome.ssh_config_text(legacy))
+        self.assertNotIn(ssh_key, launchhome.ssh_config_text(legacy))
         self.assertEqual(launchhome._git_identity(legacy), ("Current", "current@example.test"))
+
+    def test_posix_config_key_is_absolute_with_windows_path_rules(self):
+        # Python 3.13 Windows rejects a drive-less /path in os.path.isabs.
+        with mock.patch.object(launchhome.os.path, "isabs",
+                               side_effect=lambda value: PureWindowsPath(value).is_absolute()):
+            cfg = {"drive": {"launch_ssh_key": "/srv/keys/read-only"}}
+            self.assertIn('IdentityFile "/srv/keys/read-only"', launchhome.ssh_config_text(cfg))
+            cfg["drive"]["launch_ssh_key"] = "C:/keys/read-only"
+            self.assertIn('IdentityFile "C:/keys/read-only"', launchhome.ssh_config_text(cfg))
+
+    def test_relative_config_keys_are_refused(self):
+        for key in ("key", "keys/read-only", "../key", "C:key", "C:keys/read-only"):
+            with self.subTest(key=key), self.assertRaises(launchhome.LaunchIsolationError):
+                launchhome.ssh_config_text({"drive": {"launch_ssh_key": key}})
 
     def test_a_symlink_is_unlinked_never_followed(self):
         outside = Path(self.tmp.name) / "outside"

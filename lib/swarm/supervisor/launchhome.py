@@ -31,7 +31,7 @@ import os
 import re
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from swarm import compat, paths
 
@@ -269,9 +269,11 @@ def ssh_config_text(cfg: dict) -> str:
              "Host *", "\tIdentityAgent none", "\tIdentitiesOnly yes", "\tBatchMode yes",
              "\tForwardAgent no", "\tControlMaster no", "\tControlPath none"]
     if key:
-        if not os.path.isabs(str(key)):
+        # Keep POSIX configs usable on Windows (3.13 no longer calls /key absolute).
+        # Neither flavour accepts a relative key, including a drive-relative C:key.
+        if not (os.path.isabs(str(key)) or PurePosixPath(str(key)).is_absolute()):
             raise LaunchIsolationError("[drive] launch_ssh_key must be an absolute path (a read-only deploy key)")
-        lines.append(f'\tIdentityFile "{_clean(str(key))}"')
+        lines.append(f'\tIdentityFile "{_clean(Path(key).as_posix())}"')
     else:
         lines.append("\tIdentityFile /dev/null")
     return "\n".join(lines) + "\n"

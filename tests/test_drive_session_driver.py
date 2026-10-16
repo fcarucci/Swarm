@@ -382,15 +382,29 @@ class LifecycleTests(Home):
         session = idle_process()
         self.addCleanup(stop, session)
         procs = []
+        logs = []
 
         def popen(*a, **kw):
-            procs.append(subprocess.Popen(*a, **kw))
+            path = self.home / f"driver-start-{len(procs)}.log"
+            with path.open("wb") as output:
+                kw["stderr"] = output
+                procs.append(subprocess.Popen(*a, **kw))
+            logs.append(path)
+            self.addCleanup(stop, procs[-1])
             return procs[-1]
         for _ in range(3):   # started at once: the lock decides
             sd.start(self.cfg, "sess-1", session.pid, config_path=str(self.config), popen=popen)
-        for p in procs:
-            self.addCleanup(stop, p)
-        wait_until(lambda: sum(p.poll() is None for p in procs) == 1 and self.stats().get("pid"), timeout=30)
+        def ready():
+            live = [p for p in procs if p.poll() is None]
+            self.assertTrue(live, "all drivers exited before publishing state")
+            return len(live) == 1 and self.stats().get("pid") == live[0].pid
+
+        try:
+            # Three cold Python starts on Windows need the same allowance as start_driver.
+            wait_until(ready, timeout=60)
+        except AssertionError as exc:
+            self.fail(f"{exc}; drivers={[(p.pid, p.poll()) for p in procs]}; "
+                      f"state={self.stats()}; stderr={[p.read_text(errors='replace') for p in logs]}")
         time.sleep(1.0)
         live = [p for p in procs if p.poll() is None]
         self.assertEqual(len(live), 1)
