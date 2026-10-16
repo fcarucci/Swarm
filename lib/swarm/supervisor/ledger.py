@@ -682,8 +682,11 @@ def activate(board_key: str, job: str, *, budgets: dict, activated_at: str) -> L
         if led.terminal is not None:
             # A finished job is REOPENED by activation (Francesco, 2026-10-15): one piece of work is one job
             # with one stable name for its whole life, so a retry re-activates the same job instead of a new
-            # numbered one. The new run keeps the intents, charges, owners and incarnation (its history and
-            # session count carry forward); only the finished run's terminal, halt and ruling state reset.
+            # numbered one. The new run keeps the owners and incarnation (the same job); its budget window
+            # starts fresh: the finished run's intents (their charges and session count) are dropped, or the
+            # reopened run is "out of budget" before it starts (2026-10-15: coder-kanban and hermes-022-port
+            # were ruled unreachable minutes after reopening). The board keeps the full history.
+            led.intents = [i for i in led.intents if i.state != "concluded"]
             led.terminal = None
             led.terminal_intent = None
             led.halted = None

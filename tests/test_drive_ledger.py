@@ -252,6 +252,9 @@ class ExclusiveCreateTests(LedgerCase):
         led.terminal = {"verdict": "unreachable", "at": ACTIVATED}
         led.halted = {"by": "driver", "at": ACTIVATED, "reason": "x"}
         led.ruling_attempts, led.rounds_without_progress, led.errors = 2, 3, 1
+        led.intents.append(ledger.Intent("l1", "gen1|seat|eng|-|1|x", 1, "eng", 5.0, 10.0, [], "concluded",
+                                         outcome="completed", success=True, charged_usd=35.0))
+        self.assertEqual(led.charged_usd(), 35.0)
         incarnation = led.incarnation
         led.save()
         again = ledger.activate("bk", "J", budgets={"max_cost_usd": 40}, activated_at="2026-10-11T00:00:00+00:00")
@@ -263,7 +266,9 @@ class ExclusiveCreateTests(LedgerCase):
             self.assertEqual((got.ruling_attempts, got.rounds_without_progress, got.errors), (0, 0, 0))
             self.assertEqual(got.generation_requested, 2)          # a new run of the same job
             self.assertEqual(got.budgets, {"max_cost_usd": 40})
-            self.assertEqual(got.incarnation, incarnation)       # the same job, history carried forward
+            self.assertEqual(got.incarnation, incarnation)       # the same job
+            self.assertEqual(got.charged_usd(), 0.0)             # a fresh budget window, not "out of budget"
+            self.assertEqual(got.intents, [])
         self.assertIn(stored, ledger.unfinished("bk"))           # the driver drives it again
 
     def test_reactivation_over_a_bad_file_is_refused(self):
