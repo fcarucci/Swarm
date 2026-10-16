@@ -166,6 +166,12 @@ def _lead_body(board, led, seat, action) -> list[str]:
            "workdir, request seats with `swarm seat request`, release finished ones, answer engineers, and post "
            "`swarm goal-ready --candidate SHA` when you believe the goal is met, then exit. You never spawn agents "
            "yourself.",
+           "Staff exactly what the goal names. When the goal or a brief names a harness or a model for a seat (for "
+           "example \"Astra\" means `--harness codex --model gpt-6-astra`; \"Sonnet\" means `--model sonnet`), "
+           "request that seat with exactly that `--harness` and `--model`, as an engineer-role seat when it must "
+           "write (reviewer and judge roles are forced onto Claude). Never substitute another model or harness. "
+           "If the request is refused, post the refusal `--to owner` with the exact seat you need and keep the "
+           "rest of the job moving; never let the job sit or reach a ruling with required work unstaffed.",
            f"Your watermark for this turn: messages up to #{msg_mark}. Wake events are acknowledged one by one: "
            "exactly the event ids listed below are the ones shown to you, and no others are acknowledged "
            "(an event id above them, however high, is never skipped over)."]
@@ -192,10 +198,17 @@ def _judge_lines(board, cfg, led, seat, action) -> list[str]:
                 "--reason and --details). You only judge: never edit files."]
     if kind == "ruling" or action.ruling:
         cand = _ref(action.artifact or "the current target head", re.compile(r"[0-9a-f]{7,64}|the current target head"), "candidate")
-        return ["You are the ruling judge: the job's budget or deadline ran out. Judge the current target head "
-                f"({cand}) against the pinned requirements (digest {digest}) and record "
+        why = _ref(action.reason or "ledger", re.compile(r"[A-Za-z0-9 _:./-]{1,80}"), "reason")
+        spent = f"{led.charged_usd():.2f} of {float((led.budgets or {}).get('max_cost_usd', 0) or 0):.2f} USD"
+        return [f"You are the ruling judge. The driver called this ruling because: {why}. Do not assume the "
+                f"budget ran out: so far {spent} is spent (check `swarm status --job {led.job}` for the real limits). "
+                f"Judge the current target head ({cand}) against the pinned requirements (digest {digest}) and record "
                 f"`swarm verdict --job {led.job} --scope ruling --candidate <sha> --req {digest} met|unreachable "
-                "--reason ... --details -` (unreachable needs the reasons and what was tried). Judge only."]
+                "--reason ... --details -`. unreachable ENDS THE JOB for good: record it only when the evidence shows "
+                "the goal cannot be met, and say why. When the gap is work that was never staffed or was staffed "
+                "with the wrong model or harness (for example a required Astra review that never ran), that is not "
+                "a reason the goal cannot be met: say exactly which seat (role, harness, model) is missing in "
+                "--details and --reason, so the coordinator restaffs it. Judge only."]
     ref = _ref(action.artifact or _group(action) or "the hand-off", what="artifact")
     return [f"You are the artifact judge. Judge {ref}: `swarm verdict --job {led.job} --artifact {ref} "
             "met|not_met ...` (not_met needs --open N, --reason and --next; add --progress yes when the round "
