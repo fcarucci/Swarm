@@ -567,6 +567,9 @@ def _land_env(cfg, led, owner, snap, say, jdeadline, m, config_path=None):
     else:
         ci = m.land.ci_status_cli(tci.get("repository") or (m.land.repo_slug(urls[0]) if urls else None))
     want = {"led": led, "owner": d, "judged": lambda: set(judged), "ci_status": ci,
+            "trusted_helpers": tuple(command.partition(" ")[0]
+                                     for command in (cfg.get("drive") or {}).get("credential_helpers", [])
+                                     if isinstance(command, str) and os.path.isabs(command.partition(" ")[0])),
             "target": d.get("target_branch") or "main", "say": say,
             "left": lambda: max(0.0, jdeadline - time.monotonic()),   # land._budget calls it before each step
             "activation_heads": dict(getattr(led, "activation_heads", None) or {}),

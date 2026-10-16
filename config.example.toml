@@ -308,7 +308,9 @@ launch_isolation = "required"         # the jail where it can be built, else bes
 # launch_rw_paths = ["/var/tmp/cargo-target-me"]   # more paths a launch may write
 # launch_cover_paths = ["/srv/secrets"]   # paths outside the home no launch may read
 # launch_ssh_key = "/home/me/.local/state/swarm/launch-keys/ro-deploy"   # a READ-ONLY deploy key for fetching a private repo
-# credential_helpers = ["gh auth git-credential"]   # planned, wired by `swarm land`: credential helpers a pinned `--credential` may name (absolute path pinned at activation)
+# credential_helpers = ["gh auth git-credential", "git-credential-manager", "git-credential-store", "git-credential-cache"]
+# Add an absolute helper path or command (e.g. "/home/claude/.local/bin/gh auth git-credential")
+# to trust a landing helper outside system directories; relative paths never grant trust.
 
 [drive.models]
 engineer = "haiku"

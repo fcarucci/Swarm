@@ -46,6 +46,7 @@ MAX_CALL_TIMEOUT = 60.0
 AUDIT_DEADLINE = 120.0
 KEYSCAN_TIMEOUT = 15.0
 SYSTEM_DIRS = ("/usr/local/bin", "/usr/bin", "/bin")
+HELPER_SYSTEM_DIRS = (*SYSTEM_DIRS, "/usr/lib/git-core", "/usr/libexec/git-core")
 # The suite sets this to its sandbox; loopback_http is refused without it.
 TEST_MARKER = "SWARM_TEST_SANDBOX"
 
@@ -256,7 +257,7 @@ def _check_helper_file(path: str, trusted: tuple) -> None:
     real = os.path.realpath(path)
     if not os.path.isfile(real) or not os.access(real, os.X_OK):
         raise MirrorError(f"credential helper {path} is missing or not executable")
-    system = {os.path.realpath(d) for d in SYSTEM_DIRS}
+    system = {os.path.realpath(d) for d in HELPER_SYSTEM_DIRS}
     named = {os.path.realpath(t) for t in trusted}
     if os.path.dirname(real) not in system and real not in named:
         raise MirrorError(f"credential helper {path} is not in a system directory or named in "

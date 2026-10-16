@@ -6,6 +6,8 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 ## [Unreleased]
 
+- Landing honours `[drive] credential_helpers` for absolute helper paths outside system directories, accepts helpers in Git system directories, and names the path and config key when refusing an untrusted or relative helper.
+
 ## [0.3.3] - 2026-10-16
 
 ### Removed

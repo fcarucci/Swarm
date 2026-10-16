@@ -169,7 +169,8 @@ def credential_from_pin(pin: str | None, *, config_dir: str | None = None) -> di
     kind, _, value = pin.partition(":")
     if kind == "helper":
         if not value or not os.path.isabs(value.split(" ", 1)[0]):
-            raise LandRefused("the pinned credential helper is not an absolute path")
+            raise LandRefused(f"credential helper {value.split(' ', 1)[0]!r} is not an absolute path "
+                              "([drive] credential_helpers requires absolute helper paths)")
         if not config_dir:
             raise LandRefused("no helper config location (GH_CONFIG_DIR) is pinned for this destination")
         return {"kind": "helper", "command": value, "config_dir": config_dir}

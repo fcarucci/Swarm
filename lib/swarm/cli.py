@@ -151,6 +151,8 @@ DEFAULTS = {
     # driven by the session driver, `swarm supervise` is a one-shot pass. Every key and its default
     # is in swarm/supervisor/settings.py (DEFAULTS).
     "supervise": {},
+    "drive": {"credential_helpers": ["gh auth git-credential", "git-credential-manager",
+                                      "git-credential-store", "git-credential-cache"]},
     # External events (swarm.events_listener): `swarm events serve` is an HTTP listener that plugins'
     # event sources feed; off by default. [events.sources.<name>] holds a source's own settings.
     "events": {"enabled": False, "bind": "127.0.0.1", "port": 8923, "max_body_bytes": 1048576,
