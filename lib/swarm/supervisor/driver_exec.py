@@ -887,8 +887,12 @@ def settle_progress(led, snap, now) -> bool:
     wm = led.watermarks
     handoff_id = max([h.receipt_id for h in snap.handoffs if h.receipt_id is not None] or [0])
     landed = sum(1 for e in snap.integrated.values() if (e or {}).get("landed"))
+    # Only this generation's verdicts count: a rollover (or a reopen) clears the watermarks, and replaying every
+    # earlier run's not_met / unreachable verdicts as new rounds made "no-progress" fire on the new run's first
+    # pass, so a ruling judge ended it before any seat started (2026-10-15).
     judged = [v for v in list(snap.verdicts.values()) + ([snap.goal_verdict] if snap.goal_verdict else [])
-              if v.receipt_id is not None and v.receipt_id > wm.get("p.verdict", 0)]
+              if v.receipt_id is not None and v.receipt_id > wm.get("p.verdict", 0)
+              and getattr(v, "generation", led.generation) == led.generation]
     judged.sort(key=lambda v: v.receipt_id)
     if handoff_id <= wm.get("p.handoff", 0) and landed <= wm.get("p.landed", 0) and not judged:
         return False

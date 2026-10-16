@@ -1053,6 +1053,16 @@ class ProgressTests(ExecEnv):
         changed, led = self.settle(verdicts={art: vd})                 # the same verdict again: nothing
         self.assertEqual((changed, led.rounds_without_progress), (False, 1))
 
+    def test_an_earlier_generations_verdicts_are_not_this_runs_rounds(self):
+        # 2026-10-15: after a rollover (or a reopen) cleared the watermarks, replaying the earlier runs'
+        # not_met verdicts made "no-progress" fire on the new run's first pass.
+        self.led.generation = self.led.generation_requested = 4
+        self.led.save()
+        old = {f"feat/a@{c * 40}": v("not_met", artifact=f"feat/a@{c * 40}", open=3, receipt_id=i, generation=3)
+               for i, c in enumerate("abcde", start=1)}
+        _, led = self.settle(verdicts=old)
+        self.assertEqual(led.rounds_without_progress, 0)
+
     def test_a_round_whose_open_count_fell_on_a_new_artifact_is_progress(self):
         a1, a2 = "feat/a@" + "a" * 40, "feat/a@" + "b" * 40
         self.settle(verdicts={a1: v("not_met", artifact=a1, open=3, receipt_id=5)})
