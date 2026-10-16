@@ -4441,6 +4441,9 @@ def _board_status(board, cfg: dict, args) -> None:
         led = _ledger.load(_da.board_key(cfg), args.job)
     except (_ledger.LedgerBadError, OSError):
         led = None                        # drive_lines already explains the unreadable ledger
+    if led and led.halted:
+        print(term_safe(f"halted: {led.halted.get('by', '?')} ({led.halted.get('reason', '')})"
+                        f" - unhalt with swarm unhalt --job {args.job}"))
     data = board.job_data(args.job)
     error = data.get(f"drive.error.{led.generation}") if led else None
     if error and error.strip():

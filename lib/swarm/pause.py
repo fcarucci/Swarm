@@ -101,6 +101,12 @@ def local_cwds(board, cfg: dict, job: str) -> dict:
     return out
 
 
+def _drive_ledger(cfg, job):
+    from swarm.drive_activate import board_key
+    from swarm.supervisor import ledger
+    return ledger.load(board_key(cfg), job)
+
+
 def pause(board, cfg: dict, job: str, reason: str | None = None, by: str | None = None,
           wait: float = WAIT_DEFAULT, sleep=time.sleep, clock=time.monotonic) -> PauseReport | None:
     """Pause `job`. None if there is no such job or it is closed (completed, cancelled, failed)."""
@@ -115,6 +121,10 @@ def pause(board, cfg: dict, job: str, reason: str | None = None, by: str | None 
     rec = board.pause_job(job, by, reason, None if already else local_cwds(board, cfg, job))
     if rec is None:
         return None
+    led = _drive_ledger(cfg, job)
+    if led is not None:
+        from swarm.supervisor import driver_life
+        driver_life.halt(board, cfg, led, "person: pause", board.now(), reason=rec.reason)
     report = PauseReport(rec, already)
     if not already:
         who = ", ".join(e["agent_name"] for e in rec.manifest["agents"]) or "no agents"
@@ -241,6 +251,17 @@ def resume(board, cfg: dict, job: str, *, host: str | None = None, workdir: str 
     by = by or current_user()
     manifest = rec.manifest
     report = ResumeReport(job, rec.id, label, dry_run=dry_run)
+    led = _drive_ledger(cfg, job)
+    if led is not None:
+        report.hints.append("drive launches are re-queued by the driver; no sessions restarted here")
+        if not dry_run and reopen and board.begin_resume(job, rec.id, by, label):
+            from swarm.supervisor import driver_life
+            driver_life.settle_halt(board, cfg, led, board.now())
+            driver_life.unhalt(board, cfg, led, by, board.now())
+            report.reopened = True
+            board.record_resume_outcome(rec.id, {})
+            board.post(job, PAUSE_WRITER, f"job resumed by {by}; driver launches re-queued")
+        return report
     prior = dict(rec.outcome or {})
     wanted = {n.casefold() for n in only}
     entries = []
@@ -254,6 +275,12 @@ def resume(board, cfg: dict, job: str, *, host: str | None = None, workdir: str 
             report.hints.append(f"{e['agent_name']} is the orchestrator session, not started here: resume it yourself"
                                 + (f" (claude --resume {sid})" if sid and (e.get("harness") or "claude") == "claude" else ""))
             report.results.append(AgentResult(e["agent_key"], e["agent_name"], "skipped", note="orchestrator"))
+            continue
+        if e.get("status_at_pause") in ("dead", "completed", "left"):
+            report.results.append(AgentResult(e["agent_key"], e["agent_name"], "skipped", note="agent finished"))
+            continue
+        if host == "claude" and e.get("harness") not in (None, "claude"):
+            report.results.append(AgentResult(e["agent_key"], e["agent_name"], "skipped", note="harness mismatch"))
             continue
         entries.append(e)
     if wanted:

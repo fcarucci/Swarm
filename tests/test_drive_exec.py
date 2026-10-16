@@ -364,13 +364,13 @@ class ExecuteTests(ExecEnv):
             self.go(self.act("lead", kind="fallback", reason="stall"))
         self.assertEqual(self.reload().rounds_without_progress, 0)
 
-    def test_a_launch_that_ran_before_resumes_its_session_and_a_new_one_does_not(self):
+    def test_a_launch_with_no_live_board_session_starts_fresh(self):
         self.get_launch()
         self.assertNotIn("--resume", self.go(self.act())["argv"])
         self.end(self.launched[-1], "completed", agent_key=SESS9, session_id=SESS9)
         driver_exec._queue_existing(self.b, self.b.get_launch("J", 1, "eng-a"))
         again = self.go(self.act(trigger="2"))
-        self.assertEqual(again["argv"][again["argv"].index("--resume") + 1], SESS9)
+        self.assertNotIn("--resume", again["argv"])
 
     def test_each_launch_gets_a_placeholder_agent_and_a_marker(self):
         self.get_launch()
@@ -697,7 +697,7 @@ class ReconcileTests(ExecEnv):
             self.rec(500)
         self.assertIsNone(self.b.restarts(job="J")[0].outcome)
 
-    def test_a_launch_whose_launch_ended_goes_idle_and_keeps_its_session(self):
+    def test_a_launch_without_a_handoff_drops_its_session(self):
         self.get_launch()
         run = self.go(self.act())
         self.b.set_restart_agent(run["restart_id"], SESS1)
@@ -706,7 +706,7 @@ class ReconcileTests(ExecEnv):
         self.rec(1)
         launch = self.b.get_launch("J", 1, "eng-a")
         self.assertEqual((launch.state, launch.last_outcome, launch.agent_key, launch.session_id),
-                         ("failed", "no hand-off", SESS1, SESS1))
+                         ("failed", "no hand-off", None, None))
 
     def test_max_attempts_comes_from_the_drive_config(self):
         self.cfg["drive"] = {"max_attempts": 1}
@@ -905,7 +905,9 @@ class FinishTests(ExecEnv):
     def test_finish_acknowledges_the_wake_watermarks_of_a_completed_turn(self):
         self.get_launch()
         newest = self.wake_msg(self.agent_of())
-        self.finished(self.claude_tail())
+        run = self.go(self.act())
+        self.write_tail(run, self.claude_tail())
+        self.assertTrue(runner.finish(self.cfg, run, "completed"))
         led = self.reload()
         self.assertEqual(led.watermarks["msg:eng-a"], newest)
         self.assertEqual([k for k in led.watermarks if k.startswith("evack:")], [])    # no event was pending

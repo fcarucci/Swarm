@@ -136,7 +136,7 @@ NO_PROGRESS_REASONS = frozenset({"invariant-fallback", "stall", "finalize-blocke
 
 # Concluded attempts that never count against `max_attempts` (spec 3.3 [F12], 4.3 [F5]): an outage, a lost
 # claim race, an attempt a halt ended.
-UNCOUNTED_OUTCOMES = ("outage", "lost", "halted", "interrupted by driver restart", "cancelled-before-start", "blocked")
+UNCOUNTED_OUTCOMES = ("outage", "lost", "halted", "interrupted by pause", "interrupted by driver restart", "cancelled-before-start", "blocked")
 
 # Shipped `[drive]` defaults (spec 4.1 and 3.x); a job's `ledger.budgets` overrides them, and the caller's cfg
 # overrides these. `recipe` and `review_role` are the recipe keys of spec 3.6 and 3.7 (coding: a reviewer).
@@ -230,7 +230,7 @@ class _Ctx:
 
     def finished(self, action_id: str) -> bool:
         """An ended launch is never retried for the same trigger. A lost claim did not launch."""
-        retryable = ("lost", "halted", "interrupted by driver restart", "cancelled-before-start", "blocked")
+        retryable = ("lost", "halted", "interrupted by pause", "interrupted by driver restart", "cancelled-before-start", "blocked")
         return any(i.action_id == action_id and i.state == "concluded" and i.outcome not in retryable
                    for i in self.s.ledger.intents)
 
@@ -481,7 +481,7 @@ def _recover_launches(c: _Ctx) -> list[Action] | None:
             return [c.act("nothing", name, None, 0, responsible=name, reason="lead-recovery-running")]
         if row.state != "queued" or name in c.live or c.launch_has_open_intent(name) or c.gated(name):
             continue
-        if row.last_outcome not in ("halted", "interrupted by driver restart", "blocked") and not (
+        if row.last_outcome not in ("halted", "interrupted by pause", "interrupted by driver restart", "blocked") and not (
                 _is_lead_name(name) and c.s.ledger.watermarks.get(f"lead-recovery:{name}")):
             continue
         prior = next((i for i in reversed(c.s.ledger.intents) if i.launch == name), None)
@@ -570,6 +570,8 @@ def _queued_launches(c: _Ctx) -> list[Action]:
     out = []
     for name in sorted(c.launches, key=lambda n: c.launches[n].id):
         st = c.launches[name]
+        if c.s.ledger.watermarks.get(f"verdict-missing:{name}"):
+            continue  # verdict retries own this launch, including its backoff
         if name == "ruling-judge":
             continue  # ruling retries go through the head and generation guards
         if st.role == "judge" and _judges_wait(c):
@@ -716,6 +718,10 @@ def _next_actions(s: Snapshot, cfg: dict) -> list[Action]:
     for step in (_terminal, _ruling_fix, _judge_retries, _recover_launches, _ruling):                    # steps 2, 3, 4
         found = step(c)
         if found:
+            if all(a.reason == "verdict-retry-backoff" for a in found):
+                others = [a for a in _queued_launches(c) + _launch_wakes(c)
+                          if a.launch not in {h.launch for h in found}]
+                return found + others
             return found
     accumulated = _queued_launches(c) + _launch_wakes(c)                           # steps 5, 6
     if accumulated:

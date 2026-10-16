@@ -208,9 +208,14 @@ def materialize_launch(board, led, action, cfg: dict, now):
 
 
 def _queue_existing(board, row):
-    return board.queue_launch(row.job, row.generation, row.name, role=row.role, harness=row.harness,
-                              model=row.model, workdir=row.workdir, brief=row.brief,
-                              queued_by=row.queued_by)
+    queued = board.queue_launch(row.job, row.generation, row.name, role=row.role, harness=row.harness,
+                                model=row.model, workdir=row.workdir, brief=row.brief,
+                                queued_by=row.queued_by)
+    # Internal wakes retain identity for addressed events; explicit run requests start fresh.
+    if row.last_outcome != "no hand-off" and "refused" not in (row.last_outcome or "").lower():
+        return board.set_launch_state(queued.id, queued.revision, "queued", job=row.job,
+                                      session_id=row.session_id, agent_key=row.agent_key) or queued
+    return queued
 
 
 # --- budget and locks ----------------------------------------------------------------------------
@@ -358,6 +363,8 @@ def conclude_run(cfg: dict, run: dict, outcome: str, cost: float | None, outage:
     if run.get("driver_interrupted") or (outcome != "completed" and
             led.watermarks.get(f"driver-restart:{run['launch_id']}")):
         outcome = "interrupted by driver restart"
+    if led.watermarks.get(f"pause-interrupted:{run['launch_id']}"):
+        outcome = "interrupted by pause"
     try:
         _conclude(led, run["launch_id"], "outage" if outage and outcome == "failed" else outcome,
                   outcome == "completed", float(cost))
@@ -398,8 +405,9 @@ def _idle_launch(board, led, name: str, outcome: str, now, **fields) -> None:
             driveroles.is_judge_role(launch.role) and launch.state in ("done", "failed")
             and outcome == "no hand-off")):
         return
-    if outcome in ("halted", "interrupted by driver restart"):
-        board.set_launch_state(launch.id, launch.revision, "queued", job=led.job, last_outcome=outcome)
+    if outcome in ("halted", "interrupted by pause", "interrupted by driver restart"):
+        board.set_launch_state(launch.id, launch.revision, "queued", job=led.job, last_outcome=outcome,
+                               session_id=None, agent_key=None)
         return
     if launch.role == driveroles.LEAD_ROLE and outcome == "blocked":
         def blocked(l):
@@ -431,7 +439,7 @@ def _idle_launch(board, led, name: str, outcome: str, now, **fields) -> None:
         mutate(led, note)
         if missing and led.watermarks[key] >= 3:
             _escalate_verdict(board, led, launch, now, "three or more runs ended without the mandatory verdict")
-        _queue_existing(board, launch)
+        _queue_existing(board, replace(launch, session_id=None, agent_key=None))
         return
     if not missing and driveroles.is_judge_role(launch.role):
         mutate(led, lambda l: (l.watermarks.pop(f"verdict-missing:{name}", None),
@@ -442,6 +450,9 @@ def _idle_launch(board, led, name: str, outcome: str, now, **fields) -> None:
             l.rounds_without_progress = 0
         mutate(led, recovered)
     failed = outcome != "completed"
+    if failed and (outcome == "no hand-off" or "refused" in outcome.lower()
+                   or led.watermarks.get(f"resuming:{launch.launch_id}")):
+        fields.update(session_id=None, agent_key=None)
     try:
         moved = board.set_launch_state(launch.id, launch.revision, "failed" if failed else "done", job=led.job,
                                        last_outcome=outcome, **fields)
@@ -457,6 +468,9 @@ def _escalate_verdict(board, led, launch, now, cause: str) -> None:
     """Use the launch failure notification path, keeping the job active and the retry scheduled."""
     from swarm.supervisor import driver_events as ev
     mutate(led, lambda l: l.watermarks.__setitem__(f"retry-at:{launch.name}", int(now.timestamp()) + 300))
+    attempts = [i for i in led.intents if i.launch == launch.name]
+    if attempts and attempts[-1].charged_usd == 0:
+        cause += "; the session ended before any turn: stale resume handle or start failure; see driver.log"
     history = "; ".join(f"{i.launch_id} attempt {i.attempt}: {i.outcome}"
                         for i in led.intents if i.launch == launch.name)
     text = f"{ev.DRIVER_ESCALATE} {launch.name}: {cause}; " \
@@ -466,14 +480,23 @@ def _escalate_verdict(board, led, launch, now, cause: str) -> None:
     board.post(led.job, "swarm driver", text, to=launch.queued_by)
 
 
-def _check_resumable(launch) -> str | None:
-    """The session handle to resume, for a launch that has run before and is not driver-owned. The handle
-    came through the board, so it must look like a session id (never an option for the CLI): otherwise
-    the launch starts a fresh session."""
+def _check_resumable(launch, board, led) -> str | None:
+    """Only reuse a live session owned by this launch, with no failed hand-off."""
     if not launch.session_id:
         return None
-    if not valid_resume_handle(launch.session_id):
-        log(f"launch {launch.name}: the session handle is not a session id; starting fresh")
+    agent = next((a for a in board.agents(launch.job) if a.agent_key == launch.agent_key), None)
+    rows = [r for r in board.restarts(job=launch.job) if r.new_agent_key == launch.session_id]
+    valid = (valid_resume_handle(launch.session_id) and agent is not None
+             and agent.status not in ("dead", "left", "completed")
+             and bool(rows) and all(r.launch_id == launch.launch_id for r in rows))
+    prior = next((i for i in reversed(led.intents) if i.launch == launch.name), None)
+    outcomes = [launch.last_outcome or "", (prior.outcome if prior else None) or ""]
+    outcomes += [r.outcome or "" for r in rows]
+    valid = valid and not any("no hand-off" in o or "refused" in o.lower() for o in outcomes)
+    if not valid:
+        log(f"launch {launch.name}: stale session handle; starting fresh")
+        board.set_launch_state(launch.id, launch.revision, launch.state, job=launch.job,
+                               session_id=None, agent_key=None)
         return None
     return launch.session_id
 
@@ -556,18 +579,22 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
         return skip(reservation_reason(d, led, action.ruling, now) or "session reservation refused")
     reserve_usd, reserve_minutes = reserve
     owned = action.launch is None
-    resume = None if owned else _check_resumable(launch)
+    previous = launch
+    resume = None if owned else _check_resumable(launch, board, led)
+    launch = board.get_launch(led.job, led.generation, launch.name)
     model = launch.model or _models(cfg, led).get(launch.role) or launcher.replacement_model(cfg, launch.harness, launch.role, None)
     text = prompt if prompt is not None else _render_prompt(board, cfg, led, action, launch)
     spec = launcher.spec_for(cfg, launch.harness, prompt=text, workdir=launch.workdir, model=model,
                            minutes=reserve_minutes, budget_usd=reserve_usd, read_only=read_only_role(launch.role),
                            resume=resume, drive=True)
     lock_keys, lock_paths = _locks(launch)
-    marks = _board_marks(board, led, launch, now)
+    marks = _board_marks(board, led, previous, now)
     launch_id, attempt = new_launch_id(now), max((i.attempt for i in mine), default=0) + 1
     barrier.hit("before_claim")
     # 1a. write-ahead intent, fsynced (ledger.save), before anything reaches the board
     def prepare(l):
+        if resume:
+            l.watermarks[f"resuming:{launch_id}"] = 1
         l.intents.append(ledger.Intent(
             launch_id=launch_id, action_id=action.action_id, attempt=attempt, launch=launch.name,
             reserved_usd=reserve_usd, reserved_minutes=reserve_minutes, locks=list(lock_keys), state="claiming"))
@@ -623,7 +650,7 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
     mutate(led, claimed)
     run = {"restart_id": row.id, "job": led.job, "name": name, "harness": launch.harness, "resume_of": old,
            "marker": "", "argv": list(spec.argv), "cwd": spec.cwd, "stdin": spec.stdin,
-           "session_id": spec.session_id, "limit_seconds": reserve_minutes * 60,
+           "session_id": spec.session_id, "resuming": bool(resume), "limit_seconds": reserve_minutes * 60,
            "enrol_seconds": sup["enrol_minutes"] * 60, "config": config_path, "board": store_key(cfg),
            "launch_id": launch_id, "action_id": action.action_id, "launch": launch.name,
            "generation": led.generation,
@@ -940,7 +967,7 @@ def _settle_launches(board, cfg: dict, led, rows: dict, now) -> None:
         intent = next((i for i in led.intents if i.launch_id == launch.launch_id), None)
         outcome = intent.outcome if intent and intent.outcome in UNCOUNTED else row.outcome or "failed"
         if led.halted is not None and led.watermarks.get(f"hopen:{launch.launch_id}"):
-            outcome = "halted"
+            outcome = "interrupted by pause" if led.halted.get("by") == "person: pause" else "halted"
         local = _local_run(cfg, led.board_key, launch.launch_id)
         reason = local[1].get("refused_reason") if local else None
         if reason and outcome != "completed":

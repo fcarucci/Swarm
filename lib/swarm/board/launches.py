@@ -41,9 +41,11 @@ def check_renewal(now, expires_at):
         raise ValueError("a renewal must lie in the future, at most a lock's maximum lifetime ahead")
 
 
-def _check_state(state, fields):
+def _check_state(state, fields, current=None):
+    if state == current and set(fields) <= {"session_id", "agent_key"}:
+        return
     if state not in ("done", "failed") and not (state == "queued" and
-            fields.get("last_outcome") in ("halted", "interrupted by driver restart", "blocked")):
+            fields.get("last_outcome") in ("halted", "interrupted by pause", "interrupted by driver restart", "blocked")):
         raise ValueError("only queue_launch or claim_drive_launch may queue or start a launch")
     if set(fields) - set(STATE_FIELDS):
         raise ValueError("unknown launch settlement field")
@@ -75,12 +77,13 @@ class MemoryLaunches:
                 raise ValueError(f"{job} is not a job")
             now = self.now()
             fields = dict(role=role, harness=harness, model=model, workdir=workdir, brief=brief,
-                          queued_by=queued_by, state="queued", last_outcome=None, updated_at=now)
+                          queued_by=queued_by, state="queued", last_outcome=None, updated_at=now,
+                          session_id=None, agent_key=None)
             row = next((r for r in s.launches if (r["job"], r["generation"], r["name"]) ==
                         (job, generation, name)), None)
             if row is None:
                 row = dict(id=s.next_launch_id, job=job, generation=generation, name=name, **fields,
-                           revision=1, attempts=0, agent_key=None, session_id=None, launch_id=None)
+                           revision=1, attempts=0, launch_id=None)
                 s.next_launch_id += 1
                 s.launches.append(row)
             else:
@@ -99,13 +102,13 @@ class MemoryLaunches:
         return next((r for r in self.launches(job, generation) if r.name == name), None)
 
     def set_launch_state(self, launch_row_id, expected_revision, state, *, job, **fields):
-        _check_state(state, fields)
         s = self._s()
         with s.lock:
             row = next((r for r in s.launches if r["id"] == launch_row_id and r["job"] == job), None)
             if row is None or row["revision"] != expected_revision:
                 return None
-            if row["state"] == state:
+            _check_state(state, fields, row["state"])
+            if row["state"] == state and all(row[k] == v for k, v in fields.items()):
                 return None
             if row["state"] == "running" and any(r["launch_id"] == row["launch_id"] and
                     r["ended_at"] is None for r in s.restarts):
@@ -295,7 +298,7 @@ class SqlLaunches:
                 "queued_by, state, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?) "
                 "ON CONFLICT (job, generation, name) DO UPDATE SET role=excluded.role, harness=excluded.harness, "
                 "model=excluded.model, workdir=excluded.workdir, brief=excluded.brief, "
-                "queued_by=excluded.queued_by, state='queued', last_outcome=NULL, "
+                "queued_by=excluded.queued_by, state='queued', last_outcome=NULL, session_id=NULL, agent_key=NULL, "
                 "revision=launches.revision+1, updated_at=excluded.updated_at "
                 f"RETURNING {LAUNCH_COLS}",
                 (job, generation, name, role, harness, model, workdir, brief, queued_by, now)).fetchone()
@@ -317,14 +320,15 @@ class SqlLaunches:
         return self._launch_obj(Launch, LAUNCH_COLS, row) if row else None
 
     def set_launch_state(self, launch_row_id, expected_revision, state, *, job, **fields):
-        _check_state(state, fields)
         with self._launch_tx() as c:
             row = self._exec(c, f"SELECT {LAUNCH_COLS} FROM launches WHERE id=? AND job=?",
                              (launch_row_id, job)).fetchone()
             if row is None:
                 return None
             current = self._launch_obj(Launch, LAUNCH_COLS, row)
-            if current.revision != expected_revision or current.state == state:
+            _check_state(state, fields, current.state)
+            if current.revision != expected_revision or (current.state == state and
+                    all(getattr(current, k) == v for k, v in fields.items())):
                 return None
             if current.state == "running" and self._exec(c,
                     "SELECT 1 FROM restarts WHERE launch_id=? AND ended_at IS NULL",

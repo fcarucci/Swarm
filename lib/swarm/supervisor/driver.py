@@ -223,8 +223,6 @@ def tamper(led, js, owner, data: dict) -> str | None:
     """What the board row says that the ledger and the owner record do not allow, or None."""
     if js is None:
         return "job row missing"
-    if js.status == "paused":
-        return "job paused"
     if not js.supervise:
         return "supervise switched off"
     if (data or {}).get("drive.enabled") != "1":
@@ -284,6 +282,13 @@ def _check_tamper(board, cfg, state, led, js, owner, data, now, m, say) -> str |
                 "be completed; the job holds and the cancel is retried each pass")
         return "held"
     what = tamper(led, js, owner, data)
+    if what is None and js is not None and js.status == "paused":
+        rec = board.open_pause(led.job)
+        m.life.halt(board, cfg, led, "person: pause", now, reason=rec.reason if rec else None)
+        _notice(board, state, f"pause|{led.job}", led.job,
+                "Job paused; swarm resume --job " + led.job + " re-queues driver launches")
+        return "held"
+
     if what is None:
         _forget(state, f"tamper|{led.job}|")
         return None
@@ -636,7 +641,8 @@ def _step(board, cfg, sup, state, led, owner, now, say, start_runner, config_pat
     _land(board, cfg, led, owner, snap, flat, now, say, jdeadline, m, config_path)
     for row in board.launches(led.job, led.generation):
         if row.state == "queued":
-            holds = [a.reason for a in actions if a.kind in ("hold", "nothing") and a.reason]
+            holds = [a.reason for a in actions if a.kind in ("hold", "nothing") and a.reason
+                     and a.launch in (None, row.name)]
             reason = driver_exec.reservation_reason(driver_exec._dcfg(cfg, led), led, False, now)
             if not reason and row.name in snap.questions:
                 reason = "launch has an open question"

@@ -670,17 +670,20 @@ def settle_halt(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks | None 
         hooks.stop_rows(board, cfg, rows)
         if hooks.rows_live(board, cfg, rows):
             return False
-    _end_sessions(board, led, "halted")
+    outcome = "interrupted by pause" if led.halted.get("by") == "person: pause" else "halted"
+    _end_sessions(board, led, outcome)
     for i in led.intents:                  # a reconcile may have concluded a halt-killed attempt as cancelled:
         # decided from the ledger alone: the intents open when the halt was written (the board's
         # ended_at is a column a writer could move)
-        if i.state == "concluded" and i.outcome == "cancelled" and f"{_HOPEN}{i.launch_id}"[:256] in led.watermarks:
-            i.outcome = "halted"
+        if (i.state == "concluded" and f"{_HOPEN}{i.launch_id}"[:256] in led.watermarks
+                and (i.outcome == "cancelled" or outcome == "interrupted by pause")):
+            i.outcome, i.success = outcome, False
     led.save()
     for s in board.launches(led.job, include_closed=False):
         if s.state == "running":
             try:
-                board.set_launch_state(s.id, s.revision, "queued", job=led.job, last_outcome="halted")
+                board.set_launch_state(s.id, s.revision, "queued", job=led.job, last_outcome=outcome,
+                                       session_id=None, agent_key=None)
             except ValueError:
                 return False
     return True
@@ -696,6 +699,8 @@ def halt(board, cfg: dict, led, actor: str, now: dt.datetime, *, reason: str | N
         for i in led.intents:
             if i.state != "concluded":
                 led.watermarks[f"{_HOPEN}{i.launch_id}"[:256]] = 1
+                if actor == "person: pause":
+                    led.watermarks[f"pause-interrupted:{i.launch_id}"] = 1
         led.save()
         try:
             board.set_job_data(led.job, "drive.halted", actor)

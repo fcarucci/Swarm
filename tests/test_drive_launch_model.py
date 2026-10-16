@@ -52,7 +52,7 @@ class LaunchModel(ExecEnv):
         owner = NS(owner={"goal": "old goal"})
         self.assertIsNone(driver.tamper(self.led, js, owner, {"drive.enabled": "1"}))
 
-    def test_tamper_keeps_only_missing_row_pause_supervise_and_drive_flag(self):
+    def test_tamper_keeps_only_missing_row_supervise_and_drive_flag(self):
         owner = NS(owner={"goal": "old goal"})
         flags = {"drive.enabled": "1"}
         self.assertEqual(driver.tamper(self.led, None, owner, flags), "job row missing")
@@ -60,7 +60,7 @@ class LaunchModel(ExecEnv):
             row = NS(status=state, supervise=True, goal="new goal")
             self.assertIsNone(driver.tamper(self.led, row, owner, flags))
         row = NS(status="paused", supervise=True, goal="new goal")
-        self.assertEqual(driver.tamper(self.led, row, owner, flags), "job paused")
+        self.assertIsNone(driver.tamper(self.led, row, owner, flags))
         row = NS(status="active", supervise=False, goal="new goal")
         self.assertEqual(driver.tamper(self.led, row, owner, flags), "supervise switched off")
         row.supervise = True

@@ -601,7 +601,7 @@ class LandTests(PassCase):
 
 
 class PausedAndPipelineTests(PassCase):
-    def test_the_paused_tamper_notice_says_what_a_person_must_do(self):
+    def test_the_pause_notice_says_what_a_person_must_do(self):
         self.job()
         self.board.pause_job("J", "launch", "x")
         self.drive()
@@ -1007,7 +1007,9 @@ class TamperTests(PassCase):
             self.skipTest("no pause")
         self.board.pause_job("J", "launch", "x")
         self.drive()
-        self.assertTrue(self.has_post("DRIVER-TAMPER"), self.posts())
+        self.assertFalse(self.has_post("DRIVER-TAMPER"), self.posts())
+        self.assertTrue(self.has_post("swarm resume"), self.posts())
+        self.assertEqual(self.load().halted["by"], "person: pause")
 
 
     def test_the_receipt_record_id_carries_the_ledgers_generation(self):

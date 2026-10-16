@@ -8,6 +8,7 @@ import json
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from support import SMALL_POOL, MemoryHarness  # noqa: F401  (sets sys.path)
@@ -66,6 +67,20 @@ class Base(unittest.TestCase):
         kw.setdefault("start", self.fake_start)
         kw.setdefault("enrol_wait", 0)
         return pause.resume(self.b, self.cfg, "j", **kw)
+
+
+class ResumeEligibilityTest(Base):
+    def test_finished_and_codex_agents_never_start_as_claude(self):
+        rec = pause.pause(self.b, self.cfg, "j", wait=0).record
+        for status, harness in (("dead", "claude"), ("completed", "claude"),
+                                ("left", "claude"), ("running", "codex")):
+            with self.subTest(status=status, harness=harness):
+                for e in rec.manifest["agents"]:
+                    e["status_at_pause"], e["harness"] = status, harness
+                with mock.patch.object(pause, "find_pause", return_value=(rec, False)):
+                    report = self.resume(host="claude")
+                self.assertTrue(all(r.status == "skipped" for r in report.results))
+                self.assertEqual(self.launched, [])
 
 
 class PauseTest(Base):
