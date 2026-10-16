@@ -669,6 +669,10 @@ def settle_halt(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks | None 
     attempts or sessions; cost charged as everywhere: actual usage, else the reservation, [RR4]) and
     idle every launch with wake reason `halted`. Idempotent: the pass repeats it while the job is halted.
     True once no session is left."""
+    from swarm.supervisor import ledger
+    fresh = ledger.load(led.board_key, led.job)
+    if fresh is not None:
+        led.__dict__.update(fresh.__dict__)
     hooks = hooks or Hooks()
     if led.halted is None:
         return True
@@ -678,14 +682,14 @@ def settle_halt(board, cfg: dict, led, now: dt.datetime, *, hooks: Hooks | None 
         if hooks.rows_live(board, cfg, rows):
             return False
     outcome = "interrupted by pause" if led.halted.get("by") == "person: pause" else "halted"
-    _end_sessions(board, led, outcome)
-    for i in led.intents:                  # a reconcile may have concluded a halt-killed attempt as cancelled:
-        # decided from the ledger alone: the intents open when the halt was written (the board's
-        # ended_at is a column a writer could move)
-        if (i.state == "concluded" and f"{_HOPEN}{i.launch_id}"[:256] in led.watermarks
-                and (i.outcome == "cancelled" or outcome == "interrupted by pause")):
-            i.outcome, i.success = outcome, False
-    led.save()
+    from swarm.supervisor.driver_exec import mutate
+    def settle(l):
+        _end_sessions(board, l, outcome)
+        for i in l.intents:  # reconcile may have concluded a halt-killed attempt as cancelled
+            if (i.state == "concluded" and f"{_HOPEN}{i.launch_id}"[:256] in l.watermarks
+                    and (i.outcome == "cancelled" or outcome == "interrupted by pause")):
+                i.outcome, i.success = outcome, False
+    mutate(led, settle)
     for s in board.launches(led.job, include_closed=False):
         if s.state == "running":
             try:

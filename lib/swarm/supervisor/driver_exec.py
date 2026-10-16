@@ -231,7 +231,8 @@ def hold_budget(board, led, d: dict, now, reason: str) -> None:
             f"cost {led.charged_usd():.2f}/{d['max_cost_usd']:.2f} USD, reserve {d['ruling_reserve_usd']:.2f}")
     target = led.requester_session or "owner"
     if not led.watermarks.get("budget-hold"):
-        board.post(led.job, "swarm driver", text, to=target)
+        msg = board.post(led.job, "swarm driver", text, to=target)
+        mutate(led, lambda l: l.watermarks.__setitem__("budget-hold-msg", msg.id))
     if led.watermarks.get("budget-notify-at", 0) <= now.timestamp():
         board.post_event(led.job, "launch-failed", f"budget:{led.generation}:{int(now.timestamp())}", text, to=target)
         mutate(led, lambda l: l.watermarks.__setitem__("budget-notify-at", int(now.timestamp()) + 300))
@@ -245,6 +246,7 @@ def clear_budget_hold(board, led) -> None:
         def clear(l):
             l.watermarks.pop("budget-hold", None)
             l.watermarks.pop("budget-notify-at", None)
+            l.watermarks.pop("budget-hold-msg", None)
         mutate(led, clear)
         board.set_job_data(led.job, "drive.budget-hold", None)
 
@@ -263,7 +265,8 @@ def hold_ruling(board, led, now, reason, verdict=None) -> None:
     text = f"{ev.DRIVER_ESCALATE} {wait}"
     target = led.requester_session or "owner"
     if not led.watermarks.get("ruling-hold"):
-        board.post(led.job, "swarm driver", text, to=target)
+        msg = board.post(led.job, "swarm driver", text, to=target)
+        mutate(led, lambda l: l.watermarks.__setitem__("ruling-hold-msg", msg.id))
     if led.watermarks.get("ruling-notify-at", 0) <= now.timestamp():
         board.post_event(led.job, "launch-failed", f"ruling:{led.generation}:{int(now.timestamp())}", text, to=target)
         mutate(led, lambda l: l.watermarks.__setitem__("ruling-notify-at", int(now.timestamp()) + 300))
@@ -277,6 +280,7 @@ def clear_ruling_hold(board, led) -> None:
         def clear(l):
             l.watermarks.pop("ruling-hold", None)
             l.watermarks.pop("ruling-notify-at", None)
+            l.watermarks.pop("ruling-hold-msg", None)
         mutate(led, clear)
         board.set_job_data(led.job, "drive.ruling-hold", None)
 
@@ -298,40 +302,122 @@ def _requeue_mark(led) -> int:
     return sum(v for k, v in led.watermarks.items() if k.startswith(f"requeue:{led.generation}:"))
 
 
-def hold_goal(board, led, now, reason: str) -> None:
-    """Use F03f's notification path, requiring a person or explicit requeue to release the hold."""
+def hold_goal(board, led, now, reason: str, candidate=None) -> None:
+    """Hold this head until progress, a person or an explicit requeue releases it."""
     from swarm.supervisor import driver_events as ev
     target = led.requester_session or "owner"
     if not led.watermarks.get("goal-hold"):
-        board.post(led.job, "swarm driver", f"{ev.DRIVER_ESCALATE} {reason}", to=target)
-        mark = max((m.id for m in board.messages_after(0, led.job)), default=0)
+        msg = board.post(led.job, "swarm driver", f"{ev.DRIVER_ESCALATE} {reason}", to=target)
+        mark = msg.id
         def hold(l):
             l.watermarks["goal-hold"] = 1
             l.watermarks["goal-hold-msg"] = mark
             l.watermarks["goal-hold-requeue"] = _requeue_mark(l)
+            if candidate:
+                l.watermarks["goal-hold-head"] = _hash_int(dm.ruling_head(candidate))
         mutate(led, hold)
+        head = dm.ruling_head(candidate) or "unknown"
+        board.set_job_data(led.job, "drive.goal-hold",
+                           f"goal-hold: no progress: the lead handed off the same head {head} twice; "
+                           f"{reason}; see #{mark}; re-queue the lead with swarm run --job {led.job} "
+                           "--name lead ... or cancel")
     if led.watermarks.get("goal-notify-at", 0) <= now.timestamp():
         board.post_event(led.job, "launch-failed", f"goal-hold:{led.generation}:{int(now.timestamp())}",
                          f"{ev.DRIVER_ESCALATE} {reason}", to=target)
         mutate(led, lambda l: l.watermarks.__setitem__("goal-notify-at", int(now.timestamp()) + 300))
 
 
-def refresh_goal_hold(board, led) -> None:
+def refresh_goal_hold(board, led, snap=None) -> None:
     from swarm.owners import is_person
     if not led.watermarks.get("goal-hold"):
         return
     msgs = board.messages_after(led.watermarks.get("goal-hold-msg", 0), led.job)
-    if not any(is_person(board, led.job, m.agent_name) for m in msgs) and (
+    candidate = dm._goal_candidate(dm._Ctx(snap, {})) if snap else None
+    if snap:
+        newest = max((h for h in snap.handoffs if h.receipt_id is not None
+                      and h.receipt_id > led.watermarks.get("goal-hold-msg", 0)),
+                     key=lambda h: h.receipt_id, default=None)
+        if newest:
+            candidate = newest.artifact
+    held_head = led.watermarks.get("goal-hold-head", led.watermarks.get("p.head"))
+    if held_head is None and snap and snap.goal_verdict:
+        held_head = _hash_int(dm.ruling_head(snap.goal_verdict.candidate))
+    changed = bool(candidate and held_head is not None and _hash_int(dm.ruling_head(candidate)) != held_head)
+    if not changed and not any(is_person(board, led.job, m.agent_name) for m in msgs) and (
             _requeue_mark(led) == led.watermarks.get("goal-hold-requeue", 0)):
         return
     mark = max((m.id for m in board.messages_after(0, led.job)), default=0)
     def release(l):
-        for key in ("goal-hold", "goal-hold-msg", "goal-hold-requeue", "goal-notify-at"):
+        for key in ("goal-hold", "goal-hold-msg", "goal-hold-requeue", "goal-hold-head", "goal-notify-at"):
             l.watermarks.pop(key, None)
         for row in board.launches(led.job, led.generation):
             if dm._is_lead_name(row.name):
                 l.watermarks[f"no-progress:{row.name}"] = mark
     mutate(led, release)
+    board.set_job_data(led.job, "drive.goal-hold", None)
+
+
+def clear_met_holds(board, led, snap) -> None:
+    """Verified terminal goal evidence supersedes every intervention hold, even on replay."""
+    vd = snap.goal_verdict
+    if not (dm._valid(vd, led.generation) and vd.scope in ("goal", "ruling") and vd.verdict == "met"):
+        return
+    for kind in ("goal-hold", "ruling-hold", "budget-hold"):
+        if not led.watermarks.get(kind) and board.job_data(led.job).get("drive." + kind):
+            board.set_job_data(led.job, "drive." + kind, None)
+    if led.watermarks.get("met-holds-cleared") == vd.receipt_id:
+        return
+    clear_budget_hold(board, led)
+    clear_ruling_hold(board, led)
+    if led.watermarks.get("goal-hold"):
+        def clear(l):
+            for key in ("goal-hold", "goal-hold-msg", "goal-hold-requeue", "goal-hold-head", "goal-notify-at"):
+                l.watermarks.pop(key, None)
+        mutate(led, clear)
+    board.set_job_data(led.job, "drive.goal-hold", None)
+    mutate(led, lambda l: l.watermarks.__setitem__("met-holds-cleared", vd.receipt_id))
+
+
+def note_waiting(board, led, snap, actions) -> None:
+    """Publish every held pass through the same status field, with a durable explanation receipt."""
+    waits = []
+    for a in actions:
+        if a.kind != "hold" and a.prompt_kind != "learn" and a.responsible != "learner":
+            continue
+        kind = {"budget": "budget-hold", "learn": "learn.hold", "question": "question-gated"}.get(
+            a.prompt_kind, a.prompt_kind or ("verdict-retry" if a.reason.startswith("verdict-retry") else "driver"))
+        if a.responsible == "learner":
+            kind = "learn.hold"
+        if kind == "goal-hold":
+            head = dm.ruling_head(dm._goal_candidate(dm._Ctx(snap, {}))) or "unknown"
+            reason = f"no progress: the lead handed off the same head {head} twice; {a.reason}"
+            remedy = f"re-queue the lead with swarm run --job {led.job} --name lead ... or cancel"
+        else:
+            reason = "learnings step still running" if a.responsible == "learner" else a.reason or "learnings step before close"
+            remedy = {"budget-hold": f"raise with swarm drive budget --job {led.job} KEY=VALUE or cancel",
+                      "ruling-hold": f"resume with swarm run --job {led.job} --name lead ... or swarm activate --drive",
+                      "question-gated": f"answer the open question with swarm answer --job {led.job} or await its default",
+                      "learn.hold": f"finish with swarm learn --job {led.job} or swarm deactivate --no-learn",
+                      }.get(kind, "await scheduled retry or re-queue the judge with swarm run")
+        if kind == "question-gated":
+            questions = [f"#{q.id} {q.text}" for qs in snap.questions.values() for q in qs]
+            reason += ": " + "; ".join(questions)
+        if a.not_before and kind not in ("goal-hold", "ruling-hold", "budget-hold"):
+            reason += f"; retry after {a.not_before.isoformat()}"
+        if a.launch:
+            reason = f"{a.launch}: {reason}"
+        waits.append(f"{kind}: {reason}; {remedy}")
+    key = "\n".join(waits)
+    if board.job_data(led.job).get("drive.waiting-key", "") == key:
+        return
+    lines = []
+    if waits:
+        msg = board.post(led.job, "swarm driver", "Waiting: " + "; ".join(waits))
+        for text in waits:
+            actor = "learner" if text.startswith("learn.hold:") else "judge" if text.startswith("verdict-retry:") else "person"
+            lines.append(f"waiting on: {actor} ({text}; see #{msg.id})")
+    board.set_job_data(led.job, "drive.waiting-key", key or None)
+    board.set_job_data(led.job, "drive.waiting", "\n".join(lines) or None)
 
 
 def _reservation(d: dict, led, ruling: bool, now=None) -> tuple[float, float] | None:

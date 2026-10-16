@@ -1082,7 +1082,8 @@ class StepOrderTests(PassCase):
 
     def test_close_action_carries_the_goal_verdict_into_the_intent(self):
         self.job()
-        gv = SimpleNamespace(verdict="met", scope="goal", by="judge", candidate="c" * 40, req="r" * 16)
+        gv = SimpleNamespace(verdict="met", scope="goal", by="judge", candidate="c" * 40, req="r" * 16,
+                             generation=1, receipt_id=3)
         self.snap.read = lambda board, led, job, *, cfg, now: SimpleNamespace(job=job, goal_verdict=gv, ledger=led, verdicts={})
         self.actions = [dm.Action(kind="close", action_id="gen1|close|-|-|0|3", launch=None, prompt_kind="close",
                                   reason="met")]

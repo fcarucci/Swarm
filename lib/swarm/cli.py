@@ -1123,6 +1123,20 @@ def _job_status_word(board, j, now) -> str:
         return "waiting on a person (budget)"
     if j.status == "active" and board.job_data(j.job).get("drive.ruling-hold"):
         return "waiting on a person (ruling)"
+    if j.status == "active":
+        data = board.job_data(j.job)
+        if data.get("drive.goal-hold") or data.get("drive.waiting"):
+            return "waiting"
+        if data.get("drive.enabled"):
+            from swarm.board.autoinit import store_key
+            from swarm.supervisor import ledger
+            try:
+                led = ledger.load(store_key(board.cfg), j.job)
+            except (ledger.LedgerBadError, OSError):
+                led = None
+            if led and led.terminal is None and any(led.watermarks.get(k) for k in
+                                                    ("goal-hold", "ruling-hold", "budget-hold", "learn.hold")):
+                return "waiting"
     return derive_job_status(j, float(board.board_cfg.get("idle_minutes", 5)), now)
 
 

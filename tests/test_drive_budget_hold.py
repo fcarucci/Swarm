@@ -80,7 +80,7 @@ class BudgetHoldTests(ExecEnv):
         self.assertEqual(len(events), 2)
         self.assertEqual(cli._job_status_word(self.b, self.b.job_status('J'), now), 'waiting on a person (budget)')
         lines = '\n'.join(drive_activate.drive_lines(self.cfg, 'J'))
-        self.assertIn('waiting on: person (budget: cost 0.00/5.00 USD; raise with swarm drive budget --job J max_cost_usd=N)', lines)
+        self.assertIn('waiting on: person (budget: cost 0.00/5.00 USD; raise with swarm drive budget --job J max_cost_usd=N; see #', lines)
         self.assertEqual(session_driver.ledger_deadlines(self.led, {}), [
             dt.datetime.fromtimestamp(self.led.watermarks['budget-notify-at'], dt.timezone.utc)])
         self.led.budgets['max_cost_usd'] = 20

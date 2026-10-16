@@ -865,8 +865,9 @@ def next_actions(s: Snapshot, cfg: dict) -> list[Action]:
     # Closing and an exhausted learnings hold need no session; preserve both past the limits.
     # An unlanded MET still needs a funded integrator.
     terminal = _terminal(c)
-    if terminal and all(a.kind == "close" or a.kind == "hold" and a.prompt_kind == "learn"
-                        for a in terminal):
+    if terminal and (not c.cfg["landing_required"] or
+                     all(a.kind == "close" or a.prompt_kind == "learn" or a.responsible == "learner"
+                         for a in terminal)):
         return terminal
     if s.ledger.watermarks.get("goal-hold"):
         vd = s.goal_verdict

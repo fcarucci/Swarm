@@ -593,6 +593,37 @@ class HaltTests(LifeCase):
         self.assertTrue(life.settle_halt(self.b, self.cfg, self.led, self.at(1), hooks=self.run.hooks()))
         self.assertEqual(self.b.get_launch("J", 1, "eng-a").state, "queued")
 
+    def test_settle_halt_preserves_a_concurrent_ledger_write(self):
+        lid = self.launch()
+        self.run.live = {lid}
+        life.halt(self.b, self.cfg, self.led, "me", self.at(0), hooks=self.run.hooks())
+        stale = self.reload()
+        fresh = self.reload()
+        fresh.budgets['max_cost_usd'] = 321
+        fresh.save()
+        self.run.live.clear()
+        self.assertTrue(life.settle_halt(self.b, self.cfg, stale, self.at(1), hooks=self.run.hooks()))
+        saved = self.reload()
+        self.assertEqual(saved.budgets['max_cost_usd'], 321)
+        self.assertEqual(saved.intents[0].outcome, 'halted')
+        self.assertEqual(self.b.get_launch('J', 1, 'eng-a').state, 'queued')
+
+    def test_settle_halt_retries_a_write_during_session_settlement(self):
+        lid = self.launch()
+        self.run.live = {lid}
+        life.halt(self.b, self.cfg, self.led, "me", self.at(0), hooks=self.run.hooks())
+        self.run.live.clear()
+        finish = self.b.finish_restart
+        def concurrent_finish(*args, **kwargs):
+            fresh = self.reload()
+            fresh.budgets['max_cost_usd'] = 456
+            fresh.save()
+            return finish(*args, **kwargs)
+        with mock.patch.object(self.b, 'finish_restart', side_effect=concurrent_finish):
+            self.assertTrue(life.settle_halt(self.b, self.cfg, self.led, self.at(1), hooks=self.run.hooks()))
+        self.assertEqual(self.reload().budgets['max_cost_usd'], 456)
+        self.assertEqual(self.reload().intents[0].outcome, 'halted')
+
     def test_halt_cancelled_attempts_not_counted(self):
         self.launch()
         aid = self.led.intents[0].action_id

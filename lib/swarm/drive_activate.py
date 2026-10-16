@@ -900,17 +900,31 @@ def drive_lines(cfg: dict, job: str) -> list:
     details = getattr(owner, "owner", None)
     landing = ("landing: required (destinations pinned)" if landing_required(details)
                else "landing: none (no destination pinned)")
+    from swarm.board import open_board
+    data = {}
+    if cfg.get("board"):
+        with open_board(cfg) as board:
+            data = board.job_data(job)
     waiting = []
     if led.terminal is None and led.watermarks.get("ruling-hold"):
-        from swarm.board import open_board
-        with open_board(cfg) as board:
-            text = board.job_data(job).get("drive.ruling-hold", "ruling: needs a person")
-        waiting = ["waiting on a person (ruling)", f"waiting on: person ({text})"]
+        text = data.get("drive.ruling-hold", "ruling: needs a person; re-queue with swarm run or cancel")
+        waiting += ["waiting on a person (ruling)",
+                    f"waiting on: person ({text}; ruling-hold; see #{led.watermarks.get('ruling-hold-msg', 'unknown')})"]
     if led.terminal is None and led.watermarks.get("budget-hold"):
         cap = {**budget_defaults(cfg), **led.budgets}["max_cost_usd"]
-        waiting = ["waiting on a person (budget)",
+        waiting += ["waiting on a person (budget)",
                    f"waiting on: person (budget: cost {led.charged_usd():.2f}/{cap:.2f} USD; "
-                   f"raise with swarm drive budget --job {job} max_cost_usd=N)"]
+                   f"raise with swarm drive budget --job {job} max_cost_usd=N; "
+                   f"see #{led.watermarks.get('budget-hold-msg', 'unknown')}; "
+                   f"budget-hold: {data.get('drive.budget-hold', 'budget exhausted')})"]
+    if led.terminal is None and led.watermarks.get("goal-hold"):
+        text = data.get("drive.goal-hold", f"goal-hold: needs a person; see #{led.watermarks.get('goal-hold-msg', 'unknown')}; "
+                        f"re-queue with swarm run --job {job} --name lead ... or cancel")
+        waiting.append(f"waiting on: person ({text})")
+    if led.terminal is None and data.get("drive.waiting"):
+        waiting.extend(line for line in data["drive.waiting"].splitlines()
+                       if not any(led.watermarks.get(kind) and f"({kind}:" in line
+                                  for kind in ("goal-hold", "ruling-hold", "budget-hold")))
     return waiting + [budget_line(led), f"drive models {job}: {_models_text({**model_defaults(cfg), **led.models})}", landing]
 
 

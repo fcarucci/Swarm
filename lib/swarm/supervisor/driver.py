@@ -402,7 +402,7 @@ def _act(board, cfg, sup, led, snap, actions, now, start_runner, config_path, jd
         elif a.kind == "no_progress":
             m.exec.note_no_progress(board, led, snap, a)
         elif a.prompt_kind == "goal-hold":
-            m.exec.hold_goal(board, led, now, a.reason)
+            m.exec.hold_goal(board, led, now, a.reason, m.model._goal_candidate(m.model._Ctx(snap, {})))
         elif a.kind == "rollover":
             m.life.rollover(board, cfg, led, now)
         elif a.kind == "stop_launch" and a.launch:
@@ -459,11 +459,14 @@ def _plan(board, cfg, led, dcfg, now, m):
     the ledger first, so its action ids carry the due time as their trigger from the start."""
     driver_exec.refresh_goal_hold(board, led)
     snap = _with_learn(board, cfg, led, m.snapshot.read(board, led, led.job, cfg=dcfg, now=now))
+    driver_exec.clear_met_holds(board, led, snap)
+    driver_exec.refresh_goal_hold(board, led, snap)
     m.exec.settle_progress(led, snap, now)
     actions = m.model.next_actions(snap, dcfg)
     if led.ruling_due_at is None and any(a.ruling for a in actions) and m.exec.note_ruling_due(led, now):
         actions = m.model.next_actions(snap, dcfg)
     _note_learn_hold(led, snap, actions, m)
+    driver_exec.note_waiting(board, led, snap, actions)
     return snap, actions
 
 
@@ -645,7 +648,7 @@ def _step(board, cfg, sup, state, led, owner, now, say, start_runner, config_pat
     budget = next((a for a in actions if a.prompt_kind in ("budget", "goal-hold", "ruling-hold")), None)
     if budget:
         if budget.prompt_kind == "goal-hold":
-            driver_exec.hold_goal(board, led, now, budget.reason)
+            driver_exec.hold_goal(board, led, now, budget.reason, m.model._goal_candidate(m.model._Ctx(snap, {})))
         elif budget.prompt_kind == "ruling-hold":
             driver_exec.hold_ruling(board, led, now, budget.reason, snap.goal_verdict)
         else:
