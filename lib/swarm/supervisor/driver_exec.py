@@ -601,7 +601,7 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
         if action.ruling:
             head = dm.ruling_head(action.artifact)
             l.watermarks[f"ruling-head:{l.generation}:{head}:{launch_id}"] = 1
-        if action.prompt_kind == "goal" or launch.name == "goal-judge":
+        if driveroles.is_judge_role(launch.role):
             head = dm.ruling_head(action.artifact)
             l.watermarks[f"goal-head:{l.generation}:{head}:{launch_id}"] = 1
     mutate(led, prepare)
@@ -970,6 +970,21 @@ def _settle_launches(board, cfg: dict, led, rows: dict, now) -> None:
             outcome = "interrupted by pause" if led.halted.get("by") == "person: pause" else "halted"
         local = _local_run(cfg, led.board_key, launch.launch_id)
         reason = local[1].get("refused_reason") if local else None
+        if reason and "cannot be prepared safely" in reason and outcome != "completed":
+            from swarm.supervisor import driver_events as ev
+            key = f"home-error:{launch.name}:{hashlib.sha256(reason.encode()).hexdigest()}"
+            if not led.watermarks.get(key):
+                board.post(led.job, "swarm driver", f"{ev.DRIVER_ERROR} {launch.name}: {reason}",
+                           to=launch.queued_by)
+            def home_error(l):
+                l.watermarks[key] = 1
+                for i in l.intents:
+                    if i.launch_id == launch.launch_id:
+                        i.outcome, i.success, i.charged_usd = "driver-error", False, 0.0
+            mutate(led, home_error)
+            board.set_launch_state(launch.id, launch.revision, "queued", job=led.job,
+                                   last_outcome="driver-error", session_id=None, agent_key=None)
+            continue
         if reason and outcome != "completed":
             outcome = f"{outcome}: {reason}"
         from swarm.supervisor.prompts import LEAD_HANDOFF_FORMS, VERDICT_FORMS

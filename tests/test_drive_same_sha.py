@@ -2,17 +2,85 @@
 import datetime as dt
 import time
 import unittest
+from dataclasses import replace
 
 from drive_fixtures import L, T0, ho, intent, launch, snap, v
 import test_drive_handoff as handoff
 from test_drive_exec import ExecEnv
-from swarm.supervisor import driver, driver_exec as ex, driver_model as dm, prompts
+from swarm.supervisor import driver, driver_exec as ex, driver_model as dm, prompts, runner
 
 HEAD = 'a' * 40
 ART = 'master@' + HEAD
 
 
 class SameHeadModelTests(unittest.TestCase):
+    def test_fix_round_uses_open_engineer_or_lead_never_read_only_owner(self):
+        for owner, role, state, target in (
+                ('judge', 'judge', 'done', 'lead'),
+                ('reviewer', 'reviewer', 'done', 'lead'),
+                ('security', 'security', 'done', 'lead'),
+                ('eng', 'engineer', 'done', 'eng'),
+                ('eng', 'engineer', 'failed', 'lead'),
+                ('missing', None, None, 'lead')):
+            with self.subTest(owner=owner, state=state):
+                rows = {'lead': launch('lead', role='engineering_lead')}
+                if role:
+                    rows[owner] = launch(owner, role=role, state=state)
+                s = snap(ledger=L(owners={'master': owner}), launches=rows,
+                         handoffs=[ho(ART, by='judge')],
+                         verdicts={ART: v('not_met', artifact=ART, receipt_id=77)})
+                a, = dm.next_actions(s, {'review_role': None})
+                self.assertEqual((a.prompt_kind, a.launch), ('fix', target))
+
+    def test_every_judge_action_kind_obeys_the_head_cap(self):
+        for name, kind in (('judge', 'fix'), ('judge', 'verdict-retry'),
+                           ('ruling-judge', 'ruling'), ('goal-judge', 'goal')):
+            with self.subTest(name=name, kind=kind):
+                prior = intent(launch=name, action_id=f'gen1|{kind}|{name}|master|1|70')
+                s = snap(ledger=L(intents=[prior], watermarks={f'goal-head:1:{HEAD}:L0': 1}),
+                         handoffs=[ho(ART, by='eng', receipt_id=80)],
+                         launches={name: launch(name, role='judge')})
+                a, = dm.next_actions(s, {'review_role': None})
+                self.assertEqual((a.kind, a.prompt_kind), ('hold', 'goal-hold'))
+
+    def test_recovery_of_a_legacy_fix_judge_targets_the_lead(self):
+        s = snap(ledger=L(intents=[intent(launch='judge', action_id='gen1|fix|judge|master|1|77',
+                                         outcome='driver-error')]),
+                 launches={'lead': launch('lead', role='engineering_lead'),
+                           'judge': launch('judge', 'queued', role='judge', last_outcome='driver-error')},
+                 handoffs=[ho(ART, by='judge')])
+        a, = dm.next_actions(s, {})
+        self.assertEqual((a.kind, a.prompt_kind, a.launch, a.responsible), ('fix_lead', 'fix', 'lead', 'judge'))
+
+    def test_one_pass_admits_only_one_judge_per_head(self):
+        s = snap(launches={name: launch(name, 'queued', role='judge') for name in ('audit-a', 'audit-b')},
+                 goal_ready={'id': 70, 'candidate': ART, 'req': 'r1', 'at': T0})
+        acts = dm.next_actions(s, {'max_concurrent_sessions': 2})
+        self.assertEqual(len([a for a in acts if a.kind == 'launch']), 1)
+
+    def test_distinct_artifact_judgments_do_not_consume_the_generation_goal_cap(self):
+        prior = [intent(launch='judge', launch_id=f'L{n}', action_id=f'gen1|judge|-|master|1|{n}')
+                 for n in range(6)]
+        wm = {f'goal-head:1:{n:040x}:L{n}': 1 for n in range(6)}
+        s = snap(ledger=L(intents=prior, watermarks=wm),
+                 goal_ready={'id': 70, 'candidate': ART, 'req': 'r1', 'at': T0})
+        a, = dm.next_actions(s, {'landing_required': False})
+        self.assertEqual((a.kind, a.prompt_kind), ('launch', 'goal'))
+
+    def test_not_met_fix_then_same_sha_cannot_launch_a_second_judge(self):
+        s = snap(launches={'lead': launch('lead', role='engineering_lead'),
+                          'judge': launch('judge', role='judge')},
+                 ledger=L(owners={'master': 'judge'}),
+                 handoffs=[ho(ART, by='judge', receipt_id=70)],
+                 verdicts={ART: v('not_met', artifact=ART, receipt_id=77)})
+        a, = dm.next_actions(s, {'review_role': None})
+        self.assertEqual((a.prompt_kind, a.launch), ('fix', 'lead'))
+        s = replace(s, goal_verdict=v('not_met', scope='goal', candidate=HEAD, receipt_id=77))
+        s.ledger.watermarks['goal-fix'] = 77
+        s.handoffs.append(ho(ART, by='lead', receipt_id=80))
+        a, = dm.next_actions(s, {'review_role': None})
+        self.assertEqual(a.kind, 'no_progress')
+
     def snapshot(self, **kw):
         base = dict(ledger=L(watermarks={'goal-fix': 77}),
                     launches={'lead': launch('lead', role='engineering_lead')},
@@ -175,6 +243,59 @@ class SameHeadModelTests(unittest.TestCase):
 class SameHeadExecTests(ExecEnv):
     joined = handoff.HandoffTests.joined
     settle = handoff.HandoffTests.settle
+
+    def test_legacy_fix_judge_transfer_retires_the_recovery_source(self):
+        self.get_launch('lead', role='engineering_lead')
+        self.get_launch('judge', role='judge')
+        run = self.go(self.act('judge', kind='fix', group='master', artifact=ART))
+        run['refused_reason'] = "the launch's directory cannot be prepared safely: .cache has mode 0o755"
+        runner.write_run(run)
+        self.assertTrue(runner.finish(self.cfg, run, 'refused'))
+        self.reload()
+        s = snap(ledger=self.led, handoffs=[ho(ART, by='judge')],
+                 launches={'lead': launch('lead', role='engineering_lead'),
+                           'judge': launch('judge', 'queued', role='judge', last_outcome='driver-error')})
+        a, = self.act_on(s)
+        self.assertEqual(a.kind, 'fix_lead')
+        # A runner can leave its file behind while finish/cleanup is being retried.
+        runner.write_run(run)
+        ex._settle_launches(self.b, self.cfg, self.led, {run['launch_id']: self.row_of(run)}, self.now())
+        self.assertEqual(self.b.get_launch('J', 1, 'judge').state, 'done')
+        self.assertEqual(self.b.get_launch('J', 1, 'lead').state, 'queued')
+        self.get_launch('eng')
+        s = replace(s, handoffs=[], launches={
+            'judge': launch('judge', role='judge', last_outcome='fix transferred to lead'),
+            'lead': launch('lead', role='engineering_lead'), 'eng': launch('eng', 'queued')})
+        acts = dm.next_actions(s, {})
+        self.assertEqual([a.launch for a in acts], ['eng'])
+
+    def test_fix_lead_execution_redirects_read_only_targets_for_goal_and_ruling(self):
+        self.get_launch('lead', role='engineering_lead')
+        self.get_launch('judge', role='judge')
+        for scope in ('goal', 'ruling'):
+            s = snap(ledger=self.led, goal_verdict=v('not_met', scope=scope, receipt_id=77))
+            a = dm.Action(kind='fix_lead', action_id='gen1|fix|judge|-|0|77',
+                          launch='judge', prompt_kind='fix')
+            driver._act(self.b, self.cfg, self.sup, self.led, s, [a], self.now(), None, '',
+                        time.monotonic() + 10, driver._modules())
+            self.assertEqual(self.led.watermarks[f'{scope}-fix'], 77)
+        posts = [m for m in self.b.messages_after(0, 'J') if 'not_met:' in m.message]
+        self.assertEqual([m.to_agent for m in posts], ['lead', 'lead'])
+
+    def test_artifact_fix_without_owner_creates_a_lead(self):
+        s = snap(ledger=self.led, handoffs=[ho(ART, by='judge')],
+                 verdicts={ART: v('not_met', artifact=ART, receipt_id=77)})
+        a, = self.act_on(s)
+        self.assertEqual(a.kind, 'fix_lead')
+        self.assertEqual(self.b.get_launch('J', 1, 'lead').role, 'engineering_lead')
+
+    def test_fix_judge_and_ruling_bind_the_head_before_claim(self):
+        for kind, name in (('fix', 'judge'), ('ruling', 'ruling-judge')):
+            with self.subTest(kind=kind):
+                self.get_launch(name, role='judge')
+                run = self.go(self.act(name, kind=kind, group='master', artifact=ART,
+                                       ruling=kind == 'ruling'))
+                self.assertEqual(self.reload().watermarks[f"goal-head:1:{HEAD}:{run['launch_id']}"], 1)
 
     def act_on(self, s):
         acts = dm.next_actions(s, {'review_role': None})

@@ -112,8 +112,41 @@ class PrepareTest(LaunchHomeCase):
         cached = h / "home/.cache/coder-box/standing-rules.json"
         self.assertEqual(cached.read_bytes(), source.read_bytes())
         if os.name == "posix":
+            self.assertEqual(cached.parent.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(cached.parent.parent.stat().st_mode & 0o777, 0o700)
             self.assertEqual(cached.stat().st_mode & 0o777, 0o600)
             self.assertEqual(cached.stat().st_uid, os.getuid())
+
+    def test_previous_seed_cache_modes_are_repaired(self):
+        source = self.home / ".cache/coder-box/standing-rules.json"
+        source.parent.mkdir(parents=True)
+        source.write_text('{"rules": ["keep working"]}')
+        h = launchhome.prepare(self.cfg, "J", "eng-1")
+        cached = h / "home/.cache/coder-box/standing-rules.json"
+        for mode in (0o755, 0o775, 0o777):
+            with self.subTest(mode=mode):
+                for path in (cached.parent.parent, cached.parent):
+                    path.chmod(mode)
+                cached.chmod(0o644)
+                launchhome.prepare(self.cfg, "J", "eng-1")
+                self.assertEqual(cached.read_bytes(), source.read_bytes())
+                for path in (cached.parent.parent, cached.parent):
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o700)
+                self.assertEqual(cached.stat().st_mode & 0o777, 0o600)
+
+    def test_seed_cache_repair_does_not_follow_a_symlink(self):
+        source = self.home / ".cache/coder-box/standing-rules.json"
+        source.parent.mkdir(parents=True)
+        source.write_text('{"rules": ["keep working"]}')
+        h = launchhome.prepare(self.cfg, "J", "eng-1")
+        cache = h / "home/.cache"
+        moved = h / "home/moved-cache"
+        cache.rename(moved)
+        moved.chmod(0o755)
+        cache.symlink_to(moved, target_is_directory=True)
+        with self.assertRaises(launchhome.LaunchIsolationError):
+            launchhome.prepare(self.cfg, "J", "eng-1")
+        self.assertEqual(moved.stat().st_mode & 0o777, 0o755)
 
     def test_missing_or_empty_standing_rules_cache_is_not_seeded(self):
         source = self.home / ".cache/coder-box/standing-rules.json"

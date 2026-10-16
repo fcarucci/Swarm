@@ -33,7 +33,7 @@ import sys
 import time
 from pathlib import Path
 
-from swarm import paths
+from swarm import compat, paths
 
 LAUNCH_HOME = "launch-home"
 OFF_FLAG = "launch-isolation.off"
@@ -413,11 +413,27 @@ def _seed_standing_rules(h: int, source: Path) -> None:
         return
     fds = []
     try:
-        for name in ("home", ".cache", "coder-box"):
-            fds.append(safefs.open_sub(fds[-1] if fds else h, name, strict_mode=0o700))
+        fds.append(safefs.open_sub(h, "home", strict_mode=0o700))
+        for name in (".cache", "coder-box"):
+            # Only these driver-owned seed dirs may have their modes repaired. Never follow a link
+            # or chmod another user's directory; tighten the opened descriptor before walking on.
+            try:
+                compat.mkdir(name, 0o700, dir_fd=fds[-1])
+            except FileExistsError:
+                pass
+            fds.append(compat.open(name, safefs.DIR_FLAGS, dir_fd=fds[-1]))
+            if compat.HAS_MODES and os.fstat(fds[-1]).st_uid != compat.uid():
+                raise safefs.UnsafePathError(f"{name} belongs to another user: refusing to use it")
+            compat.fchmod(fds[-1], 0o700)
         d, name = fds[-1], "standing-rules.json"
         if not privfs.read(d, name) or modified > (privfs.mtime(d, name) or 0):
             privfs.write_atomic(d, name, data, 0o600)
+        else:
+            fd = safefs.open_existing(d, name, os.O_RDONLY)
+            try:
+                compat.fchmod(fd, 0o600)
+            finally:
+                os.close(fd)
     finally:
         for fd in fds:
             os.close(fd)

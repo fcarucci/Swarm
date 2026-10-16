@@ -45,7 +45,7 @@ def _check_state(state, fields, current=None):
     if state == current and set(fields) <= {"session_id", "agent_key"}:
         return
     if state not in ("done", "failed") and not (state == "queued" and
-            fields.get("last_outcome") in ("halted", "interrupted by pause", "interrupted by driver restart", "blocked")):
+            fields.get("last_outcome") in ("halted", "interrupted by pause", "interrupted by driver restart", "blocked", "driver-error")):
         raise ValueError("only queue_launch or claim_drive_launch may queue or start a launch")
     if set(fields) - set(STATE_FIELDS):
         raise ValueError("unknown launch settlement field")

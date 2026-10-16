@@ -58,7 +58,7 @@ class BudgetModelTests(unittest.TestCase):
                        state='concluded', charged=0) for n in range(3)])):
             s = snap(ledger=L(watermarks=wm, intents=prior), goal_ready={'candidate': HEAD})
             (a,) = dm.next_actions(s, {})
-            self.assertEqual((a.kind, a.prompt_kind), ('hold', 'budget'))
+            self.assertEqual((a.kind, a.prompt_kind), ('hold', 'goal-hold' if wm else 'budget'))
         s = snap(ledger=L(watermarks={f'ruling-head:1:{HEAD}': 1}), goal_ready={'candidate': 'b' * 40})
         (a,) = dm.next_actions(s, {})
         self.assertEqual((a.kind, a.artifact), ('launch', 'b' * 40))

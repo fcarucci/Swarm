@@ -11,6 +11,47 @@ from swarm.supervisor import prompts, runner, procwatch, session_driver as sd
 
 
 class Recovery(ExecEnv):
+    def test_home_preparation_refusal_is_an_uncounted_driver_error(self):
+        reason = "the launch's directory cannot be prepared safely: .cache has mode 0o755, not 0o700"
+        for role in ('judge', 'engineering_lead', 'engineer'):
+            with self.subTest(role=role):
+                name = 'home-' + role
+                self.get_launch(name, role=role)
+                action = self.act(name)
+                for _ in range(2):
+                    run = self.go(action)
+                    run['refused_reason'] = reason
+                    runner.write_run(run)
+                    self.assertTrue(runner.finish(self.cfg, run, 'refused'))
+                    self.reload()
+                    row = self.b.get_launch('J', 1, name)
+                    self.assertEqual((row.state, row.attempts), ('queued', 0))
+                    self.assertEqual(dm._Ctx(snap(ledger=self.led), {}).attempts(action.action_id), 0)
+                    self.assertFalse(dm._Ctx(snap(ledger=self.led), {}).finished(action.action_id))
+                    self.assertNotIn('verdict-missing:' + name, self.led.watermarks)
+                    self.assertNotIn('retry-at:' + name, self.led.watermarks)
+                posts = [m.message for m in self.b.messages_after(0, 'J')
+                         if m.message.startswith('DRIVER-ERROR ' + name + ':')]
+                self.assertEqual(len(posts), 1)
+                self.assertIn(reason, posts[0])
+
+    def test_refused_judge_home_retries_same_candidate_on_the_next_pass(self):
+        from drive_fixtures import ho
+        art = 'master@' + 'a' * 40
+        action = self.act(None, kind='judge', group='master', artifact=art)
+        run = self.go(action)
+        run['refused_reason'] = "the launch's directory cannot be prepared safely: .cache has mode 0o755"
+        runner.write_run(run)
+        self.assertTrue(runner.finish(self.cfg, run, 'refused'))
+        self.reload()
+        row = self.b.get_launch('J', 1, 'judge')
+        s = snap(ledger=self.led, handoffs=[ho(art)],
+                 launches={'judge': launch('judge', 'queued', role='judge', revision=row.revision,
+                                           last_outcome=row.last_outcome)})
+        retry, = dm.next_actions(s, {})
+        self.assertEqual((retry.kind, retry.prompt_kind, retry.artifact), ('launch', 'judge', art))
+        self.assertIsNotNone(self.go(retry))
+
     def settle(self, run, outcome):
         self.end(run, "completed", idle=False)
         if outcome == "interrupted by driver restart":
@@ -79,16 +120,21 @@ class Recovery(ExecEnv):
         self.assertEqual(self.reload().watermarks["driver-restart:" + run["launch_id"]], 1)
         self.assertEqual(handlers[-1], "previous-handler")
 
-    def test_interrupted_judge_preserves_artifact_and_role_prompt(self):
+    def test_interrupted_judge_needs_new_head_and_preserves_role_prompt(self):
         from drive_fixtures import ho
         art = "feat/a@" + "a" * 40
         action = self.act(launch=None, kind="judge", group="feat/a", artifact=art)
         run = self.go(action)
         self.settle(run, "interrupted by driver restart")
         row = self.b.get_launch("J", 1, "judge")
-        (retry,) = dm.next_actions(snap(ledger=self.led, handoffs=[ho(art)],
-            launches={"judge": launch("judge", "queued", role="judge", revision=row.revision,
-                                     last_outcome=row.last_outcome)}), {})
+        s = snap(ledger=self.led, handoffs=[ho(art)],
+                 launches={"judge": launch("judge", "queued", role="judge", revision=row.revision,
+                                           last_outcome=row.last_outcome)})
+        held, = dm.next_actions(s, {})
+        self.assertEqual((held.kind, held.prompt_kind), ('hold', 'goal-hold'))
+        art = 'feat/a@' + 'b' * 40
+        s.handoffs.append(ho(art, receipt_id=2))
+        retry, = dm.next_actions(s, {})
         self.assertEqual((retry.prompt_kind, retry.artifact), ("judge", art))
 
     def test_lead_recovery_precedes_no_progress_ruling(self):
@@ -143,18 +189,23 @@ class Recovery(ExecEnv):
         s = snap(ledger=self.led, launches={"ruling-judge": launch("ruling-judge", "queued",
                  role="judge", revision=row.revision)}, now=self.now())
         (action,) = dm.next_actions(s, {})
-        self.assertEqual((action.kind, action.prompt_kind), ("hold", "budget"))
+        self.assertEqual((action.kind, action.prompt_kind), ("hold", "goal-hold"))
         self.assertEqual(self.b.job_status("J").status, "active")
         self.assertIsNone(self.led.terminal_intent)
 
-    def test_artifact_judge_retry_preserves_task_and_stops_after_verdict(self):
+    def test_artifact_judge_retry_requires_new_head_and_stops_after_verdict(self):
         from drive_fixtures import ho
         art = "feat/a@" + "a" * 40
         action = self.act(launch=None, kind="judge", group="feat/a", artifact=art)
         self.settle(self.go(action), "no hand-off")
         row = self.b.get_launch("J", 1, "judge")
-        (retry,) = dm.next_actions(snap(ledger=self.led, handoffs=[ho(art)],
-            launches={"judge": launch("judge", "queued", role="judge", revision=row.revision)}), {})
+        s = snap(ledger=self.led, handoffs=[ho(art)],
+                 launches={"judge": launch("judge", "queued", role="judge", revision=row.revision)})
+        held, = dm.next_actions(s, {})
+        self.assertEqual((held.kind, held.prompt_kind), ('hold', 'goal-hold'))
+        art = "feat/a@" + "b" * 40
+        s.handoffs.append(ho(art, receipt_id=2))
+        retry, = dm.next_actions(s, {})
         self.assertEqual((retry.prompt_kind, retry.artifact), ("judge", art))
         run = self.go(retry)
         key = "judge-session-001"

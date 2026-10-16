@@ -16,6 +16,7 @@ import time
 import traceback
 from types import SimpleNamespace
 
+from swarm import driveroles
 from swarm.supervisor import driver_events as ev, driver_exec, ledger
 
 log = logging.getLogger("swarm.supervisor.driver")
@@ -373,17 +374,28 @@ def _act(board, cfg, sup, led, snap, actions, now, start_runner, config_path, jd
             if _terminal_from(snap, led, board, now, m, a):
                 m.life.terminalize(board, cfg, led, now)
         elif a.kind == "fix_lead":
-            gv = snap.goal_verdict
-            lead = board.get_launch(led.job, led.generation, a.launch) if a.launch else None
+            gv = snap.goal_verdict or snap.verdicts.get(a.artifact)
+            rows = {r.name: r for r in board.launches(led.job, led.generation)}
+            target = m.model.fix_target(rows, a.launch)
+            lead = rows.get(target)
             if lead is None:
                 m.life.default_request_lead(board, cfg, led, led.generation)
                 lead = board.get_launch(led.job, led.generation, "lead")
-            board.post(led.job, SUPERVISOR, f"{gv.scope.title()} not_met: {gv.reason}; next: {gv.next}", to=lead.name)
+            text = (f"{gv.scope.title()} not_met: {gv.reason}; next: {gv.next}" if gv else
+                    f"Fix {a.artifact}: {a.reason}")
+            board.post(led.job, SUPERVISOR, text, to=lead.name)
             if lead.state != "running" and lead.name not in snap.live:
                 m.exec._queue_existing(board, lead)
+            transferred = rows.get(a.responsible)
+            if transferred is not None and driveroles.is_read_only_role(transferred.role) and transferred.state == "queued":
+                board.set_launch_state(transferred.id, transferred.revision, "done", job=led.job,
+                                       last_outcome=f"fix transferred to {lead.name}")
             def fix(l):
                 l.ruling_due_at, l.ruling_attempts, l.rounds_without_progress, l.errors = None, 0, 0, 0
-                l.watermarks[f"{gv.scope}-fix"] = gv.receipt_id
+                if transferred is not None and transferred.launch_id:
+                    l.watermarks[f"verdict-checked:{transferred.launch_id}"] = 1
+                if gv:
+                    l.watermarks[f"{gv.scope}-fix"] = gv.receipt_id
                 key = f"requeue:{l.generation}:{lead.name}"
                 l.watermarks[key] = l.watermarks.get(key, 0) + 1
             _mutate(led, fix)

@@ -10,6 +10,8 @@ import datetime as dt
 from datetime import datetime
 from typing import Any
 
+from swarm import driveroles
+
 # Action kinds the pure `next_actions` may return (spec 3.2-3.3, plus the rollover completion of 3.5-3.6).
 ACTION_KINDS = (
     "launch", "record_unreachable", "close", "hold", "nothing", "rollover", "stop_launch", "complete_land",
@@ -136,7 +138,9 @@ NO_PROGRESS_REASONS = frozenset({"invariant-fallback", "stall", "finalize-blocke
 
 # Concluded attempts that never count against `max_attempts` (spec 3.3 [F12], 4.3 [F5]): an outage, a lost
 # claim race, an attempt a halt ended.
-UNCOUNTED_OUTCOMES = ("outage", "lost", "halted", "interrupted by pause", "interrupted by driver restart", "cancelled-before-start", "blocked")
+UNCOUNTED_OUTCOMES = ("outage", "lost", "halted", "interrupted by pause", "interrupted by driver restart", "cancelled-before-start", "blocked", "driver-error")
+# Only these outcomes never launched a session, so they also release its candidate's judge allowance.
+UNLAUNCHED_OUTCOMES = ("lost", "cancelled-before-start", "driver-error")
 
 # Shipped `[drive]` defaults (spec 4.1 and 3.x); a job's `ledger.budgets` overrides them, and the caller's cfg
 # overrides these. `recipe` and `review_role` are the recipe keys of spec 3.6 and 3.7 (coding: a reviewer).
@@ -230,7 +234,7 @@ class _Ctx:
 
     def finished(self, action_id: str) -> bool:
         """An ended launch is never retried for the same trigger. A lost claim did not launch."""
-        retryable = ("lost", "halted", "interrupted by pause", "interrupted by driver restart", "cancelled-before-start", "blocked")
+        retryable = ("lost", "halted", "interrupted by pause", "interrupted by driver restart", "cancelled-before-start", "blocked", "driver-error")
         return any(i.action_id == action_id and i.state == "concluded" and i.outcome not in retryable
                    for i in self.s.ledger.intents)
 
@@ -456,6 +460,11 @@ def _resume_action(c: _Ctx, name: str, row: LaunchView, prior, trigger: str) -> 
     parts = prior.action_id.split("|")
     kind, group = parts[1], parts[3]
     artifact = next((h.artifact for h in reversed(c.s.handoffs) if h.group == group), None)
+    if kind == "fix":
+        target = fix_target(c.launches, name)
+        if target != name:
+            return c.act("fix_lead", target, group, row.revision, prompt="fix", trigger=trigger,
+                         artifact=artifact, responsible=name)
     if kind in ("goal", "ruling"):
         artifact = (c.s.goal_ready or {}).get("candidate")
     reason = next((k[len("ruling-trigger:"):] for k in c.s.ledger.watermarks
@@ -481,7 +490,7 @@ def _recover_launches(c: _Ctx) -> list[Action] | None:
             return [c.act("nothing", name, None, 0, responsible=name, reason="lead-recovery-running")]
         if row.state != "queued" or name in c.live or c.launch_has_open_intent(name) or c.gated(name):
             continue
-        if row.last_outcome not in ("halted", "interrupted by pause", "interrupted by driver restart", "blocked") and not (
+        if row.last_outcome not in ("halted", "interrupted by pause", "interrupted by driver restart", "blocked", "driver-error") and not (
                 _is_lead_name(name) and c.s.ledger.watermarks.get(f"lead-recovery:{name}")):
             continue
         prior = next((i for i in reversed(c.s.ledger.intents) if i.launch == name), None)
@@ -506,6 +515,16 @@ def _owner_launch(c: _Ctx, owner: str) -> str | None:
     if st.state not in _DEAD_LAUNCH_STATES:
         return owner
     return None
+
+
+def fix_target(launches: dict, owner: str | None) -> str | None:
+    """Only an open engineer owns a fix; otherwise the active lead coordinates the work."""
+    row = launches.get(owner)
+    if row is not None and row.role == "engineer" and row.state not in _DEAD_LAUNCH_STATES:
+        return owner
+    lead = _active_lead(launches)
+    row = launches.get(lead)
+    return lead if row is not None and not driveroles.is_read_only_role(row.role) else None
 
 
 def _pipeline(c: _Ctx) -> list[Action] | None:
@@ -558,6 +577,9 @@ def _pipeline(c: _Ctx) -> list[Action] | None:
 
 
 def _fix(c: _Ctx, group: str, art: str, rnd: int, owner: str, reason: str, trigger: object) -> Action | None:
+    owner = fix_target(c.launches, owner)
+    if owner is None:
+        return c.act("fix_lead", None, group, rnd, prompt="fix", trigger=trigger, artifact=art, reason=reason)
     launch = _owner_launch(c, owner)
     if launch is None or c.gated(launch) is not None:
         return None
@@ -800,6 +822,13 @@ def goal_hold(c: _Ctx, reason: str) -> Action:
     return replace(budget_hold(c, reason), prompt_kind="goal-hold")
 
 
+def judge_action(action: Action, launches: dict) -> bool:
+    row = launches.get(action.launch)
+    return (action.ruling or action.prompt_kind in driveroles.JUDGE_KINDS
+            or driveroles.launch_name_is_judge(action.launch)
+            or row is not None and driveroles.is_judge_role(row.role))
+
+
 def _same_sha_handoff(c: _Ctx) -> list[Action] | None:
     vd = c.s.goal_verdict
     if not _valid(vd, c.s.generation) or vd.scope != "goal" or vd.verdict != "not_met":
@@ -849,29 +878,36 @@ def next_actions(s: Snapshot, cfg: dict) -> list[Action]:
     if reason:
         return [budget_hold(c, reason)]
     actions = _next_actions(s, cfg)
-    if any(a.kind == "launch" and (a.ruling or a.prompt_kind in ("goal", "judge", "ruling")
-           or a.launch in c.launches and c.launches[a.launch].role == "judge")
+    if any(a.kind == "launch" and judge_action(a, c.launches)
            and _unchanged_goal(c, a.artifact or _goal_candidate(c)) for a in actions):
         return [goal_hold(c, "head already ruled not_met; needs a person: "
                           + (s.goal_verdict.next or s.goal_verdict.reason))]
+    admitted_heads, duplicate_judges = [], set()
     for index, a in enumerate(actions):
-        if a.kind != "launch" or not (a.prompt_kind == "goal" or a.launch == "goal-judge"):
+        if a.kind != "launch" or not judge_action(a, c.launches):
             continue
-        a = replace(a, prompt_kind="goal", artifact=a.artifact or _goal_candidate(c))
+        a = replace(a, artifact=a.artifact or _goal_candidate(c))
+        if a.prompt_kind == "goal" or a.launch == "goal-judge":
+            a = replace(a, prompt_kind="goal")
         actions[index] = a
         head = ruling_head(a.artifact or _goal_candidate(c))
+        if head and any(same_head(head, prior) for prior in admitted_heads):
+            duplicate_judges.add(index)
+            continue
+        admitted_heads.append(head)
         prior = [i for i in s.ledger.intents if i.action_id.startswith(f"gen{s.generation}|")
-                 and (i.launch == "goal-judge" or "|goal|" in i.action_id)
-                 and i.outcome not in ("lost", "cancelled-before-start")]
-        prefix = f"goal-head:{s.generation}:"
-        unlaunched = {i.launch_id for i in s.ledger.intents if i.outcome in ("lost", "cancelled-before-start")}
+                 and (i.launch == "goal-judge" or driveroles.action_kind(i.action_id) == "goal")
+                 and i.outcome not in UNLAUNCHED_OUTCOMES]
+        unlaunched = {i.launch_id for i in s.ledger.intents if i.outcome in UNLAUNCHED_OUTCOMES}
         ruled = any(value and same_head(key[len(prefix):].split(":", 1)[0], head)
                     and key.rpartition(":")[2] not in unlaunched
+                    for prefix in (f"goal-head:{s.generation}:", f"ruling-head:{s.generation}:")
                     for key, value in s.ledger.watermarks.items() if key.startswith(prefix))
         if ruled or len(prior) >= 6 or _unchanged_goal(c, head):
             return [goal_hold(c, f"goal judge launch limit (generation {s.generation}, head {head}); needs a person")]
         if _engineers_pending(c):
             return [c.act("nothing", None, None, 0, responsible="engineers", reason="waiting for queued engineers")]
+    actions = [a for index, a in enumerate(actions) if index not in duplicate_judges]
     for a in actions:
         limit = c.cfg["ruling_attempts"] if a.ruling else c.cfg["max_attempts"]
         if a.kind == "launch" and c.attempts(a.action_id) >= limit:
@@ -895,7 +931,7 @@ def next_actions(s: Snapshot, cfg: dict) -> list[Action]:
     key = f"ruling-head:{s.generation}:{head}"
     prior = [i for i in s.ledger.intents if i.launch == "ruling-judge"
              and i.action_id.startswith(f"gen{s.generation}|")
-             and i.outcome not in ("lost", "cancelled-before-start")]
+             and i.outcome not in UNLAUNCHED_OUTCOMES]
     ruled = s.ledger.watermarks.get(key, 0) or any(
         s.ledger.watermarks.get(f"{key}:{i.launch_id}", 0) for i in prior)
     if ruled or len(prior) >= 3:
