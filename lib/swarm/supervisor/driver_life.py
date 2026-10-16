@@ -166,9 +166,17 @@ def default_request_lead(board, cfg: dict, led, generation: int) -> None:
         board.post(led.job, SUPERVISOR,
                    f"{ev.DRIVER_ROLLOVER} generation {generation}: no earlier lead seat matches its receipted request")
         return
-    board.request_seat(led.job, generation, "lead", role=s.role, harness=s.harness, model=s.model,
-                       workdir=s.workdir, brief_path=s.brief_path, title=s.title, task_ref=s.task_ref,
-                       complexity=s.complexity, requested_by=SUPERVISOR)
+    row = board.request_seat(led.job, generation, "lead", role=s.role, harness=s.harness, model=s.model,
+                             workdir=s.workdir, brief_path=s.brief_path, title=s.title, task_ref=s.task_ref,
+                             complexity=s.complexity, requested_by=SUPERVISOR)
+    # The new generation's lead is a seat the driver itself created from a receipted row: authorize it like any
+    # driver seat (spec 3.4). Unauthorized, the snapshot had no lead, the fallback ruled "lead-unavailable", and
+    # every rollover or reopen ended in a ruling before any seat ran (2026-10-15).
+    if row is not None:
+        from swarm.supervisor import driver_exec
+        now = dt.datetime.now(dt.timezone.utc)
+        if not driver_exec.seat_authorized(led, row, now):
+            driver_exec.authorize_seat(led, row, now)
 
 
 def _no_capture(board, cfg, led) -> None:

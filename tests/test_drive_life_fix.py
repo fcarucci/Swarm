@@ -263,6 +263,17 @@ class RolloverLeadTests(T.LifeCase):
         new = self.b.seat("J", 3, "lead")
         self.assertEqual(new.workdir, "/w/lead")
 
+    def test_the_new_generations_lead_is_authorized(self):
+        # 2026-10-15: unauthorized, the new lead was invisible to the model, which ruled "lead-unavailable".
+        from swarm.supervisor import driver_exec
+        self.lead()
+        self.led.generation_requested = 2
+        self.led.save()
+        life.default_request_lead(self.b, self.cfg, self.led, 2)
+        new = self.b.seat("J", 2, "lead")
+        self.assertIsNotNone(new)
+        self.assertTrue(driver_exec.seat_authorized(self.led, new, dt.datetime.now(dt.timezone.utc)))
+
 
 class StuckTerminalTests(T.LifeCase):
     def stuck_pending(self):
