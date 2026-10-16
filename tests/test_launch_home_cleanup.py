@@ -2,6 +2,7 @@
 Run: cd tests && python3 -m unittest -v test_launch_home_cleanup
 """
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -92,8 +93,10 @@ class TestRemoveJobHomes(unittest.TestCase):
 
     def test_posix_config_key_is_absolute_with_windows_path_rules(self):
         # Python 3.13 Windows rejects a drive-less /path in os.path.isabs.
+        # No pathlib in the fake: on Windows PureWindowsPath.is_absolute() calls the
+        # very os.path.isabs being patched here and recurses forever.
         with mock.patch.object(launchhome.os.path, "isabs",
-                               side_effect=lambda value: PureWindowsPath(value).is_absolute()):
+                               side_effect=lambda value: bool(re.match(r"^[A-Za-z]:[\\/]", str(value)))):
             cfg = {"drive": {"launch_ssh_key": "/srv/keys/read-only"}}
             self.assertIn('IdentityFile "/srv/keys/read-only"', launchhome.ssh_config_text(cfg))
             cfg["drive"]["launch_ssh_key"] = "C:/keys/read-only"
