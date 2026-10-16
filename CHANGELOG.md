@@ -6,6 +6,25 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-10-16
+
+### Removed
+- **Seats are gone.** Drive jobs run named launches (`swarm run --job J --name N --role R --brief B`), concurrency is per job, agents share a workdir, roles are prompt text; the seat vocabulary is renamed to launches everywhere (the credential jail remains).
+
+### Fixed (drive: jobs no longer get stuck)
+- An interrupted or exhausted launch is re-queued; a judge that ends without a verdict is re-queued and then escalated (`DRIVER-ESCALATE`), never closed "mechanical: unreachable" (F03).
+- A re-queue restarts the attempt counter, a reopen starts a new generation and queues the lead, and every skipped launch says why (`DRIVER-SKIP`) (F03b).
+- The lead's `swarm done` is recognised as a hand-off; a ruling `not_met` keeps the job active and re-queues the lead; the judge Stop hook no longer blocks on a false "board unavailable"; the codex command is configurable and refused up front when missing (F03c).
+- A driver step exception escalates instead of scheduling a ruling; tracebacks go to `driver.log`; hand-offs without an artifact are tolerated (F03d).
+- A job with no landing destination completes on `met`; `met` on unlanded work is never unreachable; a person can always complete a met job (F03e).
+- Budget, session, wall-clock and attempt exhaustion escalate and hold for a person instead of ruling unreachable; an unchanged head is never re-ruled (F03f).
+- The learnings hold survives a budget hold; launch homes carry the standing-rules cache (F03g).
+- A same-sha hand-off is "no progress", the goal judge runs once per head, and a hand-off no longer cancels the lead's engineers (F03h).
+- `swarm pause`/`swarm resume` keep the drive ledger consistent; stale resume handles are dropped; the judge backoff holds only the judge (F03i).
+- Seeded cache directories are 0700 and repaired; fix rounds never target the judge; the per-head judge cap covers fix rounds (F03j).
+- Ruling holds are distinct from budget holds, stale ruling deadlines clear, and engineers run after a per-head ruling (F03k).
+- A `met` verdict clears every hold; every hold is visible as `waiting on:` in `swarm status`; `settle_halt` saves a fresh ledger (F03l).
+
 ### Added
 - **`swarm await --job J`: the orchestrator's wake-up.** It blocks until something needs the orchestrating session and prints one line per item (kind, key, age, action), then exits: an open question or blocker (`answer Q492`), a post addressed to the orchestrator or its role, a BRANCH READY, INFRA REQUEST, VERDICT or ORDER post, or a job state change. `--once` prints the open items without blocking; `--timeout S` exits with no items after S seconds; `--poll S` (default 5) sets the check interval; `--remind S` (default 60) reports an open item again once it was last reported S seconds ago, so a dropped wake-up comes back on the next call. Items collapse by key (one per question, per branch@sha) and stay open until resolved, not merely read. The await keeps its own cursor per (job, session) in the board's metadata, so it never consumes the messages a `read` or another await would see.
 - **The orchestrator is woken for its own job.** An orchestrating session that activated a non-drive job is told on each tool call, until it runs one, to start `swarm await --job J` as a background command; one await runs per session and job, and it is restarted after each exit. `swarm doctor` shows `orchestrator wake: armed` or `NOT ARMED` per owned job.
