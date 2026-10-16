@@ -821,8 +821,9 @@ class DriveDoctorTests(unittest.TestCase):
         from swarm.supervisor import ledger
         led = self.ledger(budgets={"max_cost_usd": 10, "ruling_reserve_usd": 2, "max_sessions": 5,
                                    "max_wall_hours": 3})
-        led.intents.append(ledger.Intent("L1", "a1", 1, "a", 2.0, 60.0, [], "concluded", "ok", True, 1.5))
-        led.intents.append(ledger.Intent("L2", "a2", 1, "b", 0.5, 60.0, [], "claimed"))
+        led.intents.append(ledger.Intent("L1", "gen1|launch|a|-|0|1", 1, "a", 2.0, 60.0, [], "concluded", "ok", True, 1.5))
+        led.intents.append(ledger.Intent("L2", "gen1|launch|b|-|0|1", 1, "b", 0.5, 60.0, [], "claimed"))
+        led.intents.append(ledger.Intent("old", "gen0|launch|a|-|0|1", 1, "a", 0.0, 60.0, [], "concluded", "ok", True, 0.0))
         led.save()
         c = self.run_checks()["drive budget J"]
         self.assertTrue(c.ok)
@@ -847,7 +848,7 @@ class DriveDoctorTests(unittest.TestCase):
         led.save()
         self.assertIsNone(self.run_checks()["drive budget J"].ok)
         led = self.ledger("K", budgets={"max_sessions": 1})
-        led.intents.append(ledger.Intent("L1", "a1", 1, "a", 1.0, 60.0, [], "concluded", "ok", True, 0.1))
+        led.intents.append(ledger.Intent("L1", "gen1|launch|a|-|0|1", 1, "a", 1.0, 60.0, [], "concluded", "ok", True, 0.1))
         led.save()
         self.assertIsNone(self.run_checks()["drive budget K"].ok)
         self.ledger("W", budgets={"max_wall_hours": 0.5})

@@ -244,6 +244,59 @@ def clear_budget_hold(board, led) -> None:
         board.set_job_data(led.job, "drive.budget-hold", None)
 
 
+def note_no_progress(board, led, snap, action) -> None:
+    from swarm.supervisor import driver_events as ev
+    key = f"no-progress:{action.launch}"
+    rec = int(action.action_id.split("|")[5])
+    if rec <= led.watermarks.get(key, 0):
+        return
+    board.post(led.job, "swarm driver", f"{ev.DRIVER_NO_PROGRESS} {action.reason}")
+    def note(l):
+        l.watermarks[key] = rec
+        l.watermarks[f"no-progress-verdict:{action.launch}"] = snap.goal_verdict.receipt_id
+    mutate(led, note)
+
+
+def _requeue_mark(led) -> int:
+    return sum(v for k, v in led.watermarks.items() if k.startswith(f"requeue:{led.generation}:"))
+
+
+def hold_goal(board, led, now, reason: str) -> None:
+    """Use F03f's notification path, requiring a person or explicit requeue to release the hold."""
+    from swarm.supervisor import driver_events as ev
+    target = led.requester_session or "owner"
+    if not led.watermarks.get("goal-hold"):
+        board.post(led.job, "swarm driver", f"{ev.DRIVER_ESCALATE} {reason}", to=target)
+        mark = max((m.id for m in board.messages_after(0, led.job)), default=0)
+        def hold(l):
+            l.watermarks["goal-hold"] = 1
+            l.watermarks["goal-hold-msg"] = mark
+            l.watermarks["goal-hold-requeue"] = _requeue_mark(l)
+        mutate(led, hold)
+    if led.watermarks.get("goal-notify-at", 0) <= now.timestamp():
+        board.post_event(led.job, "launch-failed", f"goal-hold:{led.generation}:{int(now.timestamp())}",
+                         f"{ev.DRIVER_ESCALATE} {reason}", to=target)
+        mutate(led, lambda l: l.watermarks.__setitem__("goal-notify-at", int(now.timestamp()) + 300))
+
+
+def refresh_goal_hold(board, led) -> None:
+    from swarm.owners import is_person
+    if not led.watermarks.get("goal-hold"):
+        return
+    msgs = board.messages_after(led.watermarks.get("goal-hold-msg", 0), led.job)
+    if not any(is_person(board, led.job, m.agent_name) for m in msgs) and (
+            _requeue_mark(led) == led.watermarks.get("goal-hold-requeue", 0)):
+        return
+    mark = max((m.id for m in board.messages_after(0, led.job)), default=0)
+    def release(l):
+        for key in ("goal-hold", "goal-hold-msg", "goal-hold-requeue", "goal-notify-at"):
+            l.watermarks.pop(key, None)
+        for row in board.launches(led.job, led.generation):
+            if dm._is_lead_name(row.name):
+                l.watermarks[f"no-progress:{row.name}"] = mark
+    mutate(led, release)
+
+
 def _reservation(d: dict, led, ruling: bool, now=None) -> tuple[float, float] | None:
     """Reserve a session only when the job's wall, session and cost budgets allow it."""
     if reservation_reason(d, led, ruling, now):
@@ -521,6 +574,9 @@ def execute(board, cfg, sup, led, action, *, start_runner=None, now, prompt: str
         if action.ruling:
             head = dm.ruling_head(action.artifact)
             l.watermarks[f"ruling-head:{l.generation}:{head}:{launch_id}"] = 1
+        if action.prompt_kind == "goal" or launch.name == "goal-judge":
+            head = dm.ruling_head(action.artifact)
+            l.watermarks[f"goal-head:{l.generation}:{head}:{launch_id}"] = 1
     mutate(led, prepare)
     barrier.hit("after_intent_before_claim")
     old = f"launch:{launch_id}"
@@ -912,7 +968,12 @@ def _settle_launches(board, cfg: dict, led, rows: dict, now) -> None:
         blocked = next((m.message for m in reversed(own_messages) if m.message.startswith("BLOCKED ")), None)
         if launch.role == driveroles.LEAD_ROLE and blocked:
             outcome = "blocked"
-            _escalate_verdict(board, led, launch, now, blocked)
+            from swarm.owners import person_names
+            people = person_names(board, led.job)
+            if any(re.search(r"(?<!\w)" + re.escape(person) + r"(?!\w)", blocked, re.I) for person in people):
+                hold_goal(board, led, now, blocked)
+            else:
+                _escalate_verdict(board, led, launch, now, blocked)
         if outcome == "no hand-off":
             run = local[1] if local else {}
             owner, token = run.get("driver_pid"), run.get("driver_token")
@@ -981,7 +1042,9 @@ def settle_progress(led, snap, now) -> bool:
     stamp = _iso(min(max(fired), now) if fired else now)
     plan = {"moved": False, "reset": False, "rounds": 0, "wm": {}}
     if handoff_id > wm.get("p.handoff", 0):
-        plan["moved"] = True
+        plan["moved"] = any(h.receipt_id is not None and h.receipt_id > wm.get("p.handoff", 0)
+                            and not (dm._is_lead_name(h.by) and dm._unchanged_goal(dm._Ctx(snap, {}), h.artifact))
+                            for h in snap.handoffs)
         plan["wm"]["p.handoff"] = handoff_id
     if landed > wm.get("p.landed", 0):
         plan["moved"] = plan["reset"] = True

@@ -564,6 +564,8 @@ Extends `pipeline.transitions` (shared by drive mode and the existing non-drive 
 
 ### 3.7 Goal judgment (MET)
 
+F03h: a lead hand-off ends only its own attempt; its running and queued engineers survive, and judges wait until those engineers hand off or fail. A hand-off or GOAL-READY on the same SHA as this generation's goal not_met is no progress: record a lead watermark and `DRIVER-NO-PROGRESS lead: same head <sha> already ruled not_met #<id>; waiting for the work the judge asked for`, without advancing the progress clock or launching another judge. Requeue the lead with the open items at most once per verdict; a second unchanged hand-off posts `DRIVER-ESCALATE lead hands off an unchanged head; needs a person: <open items>` and holds the active job with repeated notifications until a person posts or explicitly requeues work. A new SHA is work evidence; BLOCKED naming a person escalates the missing decision rather than claiming that the open items are fixed. Goal judges run at most once per (generation, candidate SHA), including queued retries, and at most six times per generation; either cap escalates and holds, never records unreachable. Session budgets and their displayed counts include only current-generation intents; monetary charges remain job-wide.
+
 Artifact verdicts judge changes; the **goal verdict** judges the job. When the lead posts `GOAL-READY <target
 ref>@<sha>` (normally the target branch after landing), every current hand-off is integrated, and no launch is
 live, the driver launches the goal judge (Opus) on the target SHA with the goal, the requirements files the

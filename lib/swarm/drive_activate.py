@@ -878,11 +878,11 @@ def _models_text(models: dict) -> str:
 
 def budget_line(led: ledger.Ledger, now: dt.datetime | None = None) -> str:
     """`drive budget J: cost x/y USD (reserve r), sessions a/b, wall h/H h` (spec 4.1 [D1])."""
-    from swarm.supervisor.driver_model import DEFAULT_CFG
+    from swarm.supervisor.driver_model import DEFAULT_CFG, session_count
     b = {**DEFAULT_CFG, **led.budgets}
     minutes = _age_minutes(led.activated_at, now or dt.datetime.now(dt.timezone.utc)) or 0.0
     return (f"drive budget {led.job}: cost {led.charged_usd():.2f}/{b['max_cost_usd']:.2f} USD "
-            f"(reserve {b['ruling_reserve_usd']:.2f}), sessions {len(led.intents)}/{b['max_sessions']:g}, "
+            f"(reserve {b['ruling_reserve_usd']:.2f}), sessions {session_count(led)}/{b['max_sessions']:g}, "
             f"wall {minutes / 60:.1f}/{b['max_wall_hours']:g} h")
 
 

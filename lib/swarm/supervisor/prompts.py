@@ -174,6 +174,9 @@ def _lead_body(board, led, launch, action) -> list[str]:
            "Accepted hand-off forms: " + ", ".join(f"`{form.strip()}`" for form in LEAD_HANDOFF_FORMS)
            + "; queueing work with `swarm run` also hands off. If blocked, post `BLOCKED <reason>`; "
            "the supervisor escalates and retries your turn after a backoff.",
+           "Hand off a NEW sha only when the judge's open items are addressed. If you cannot progress "
+           "(a launch you need is refused, a person's decision is needed), post BLOCKED naming what you need "
+           "and end your run; do not hand off the same sha again.",
            "Staff exactly what the goal names. When the goal or a brief names a harness or a model for a launch (for "
            "example \"Astra\" means `--harness codex --model gpt-6-astra`; \"Sonnet\" means `--model sonnet`), "
            "request that launch with exactly that `--harness` and `--model`, as an engineer-role launch when it must "
@@ -199,7 +202,8 @@ def _judge_lines(board, cfg, led, launch, action) -> list[str]:
     kind = action.prompt_kind
     digest = requirements_digest(led.pinned_requirements)
     if kind == "goal":
-        cand = _ref(action.artifact or "(the GOAL-READY candidate)", re.compile(r"[0-9a-f]{7,64}|\(the GOAL-READY candidate\)"), "candidate")
+        candidate = action.artifact.rpartition("@")[2] if action.artifact else "(the GOAL-READY candidate)"
+        cand = _ref(candidate, re.compile(r"[0-9a-f]{7,64}|\(the GOAL-READY candidate\)"), "candidate")
         return [f"You are the goal judge. Judge candidate {cand} against the pinned requirements (digest {digest}). "
                 f"Record it with `swarm verdict --job {led.job} --scope goal --candidate {cand} --req {digest} "
                 "met|not_met|unreachable ...` (not_met needs --open N, --reason and --next; unreachable needs "
@@ -208,6 +212,7 @@ def _judge_lines(board, cfg, led, launch, action) -> list[str]:
         cand = _ref(action.artifact or "the current target head", re.compile(r"[0-9a-f]{7,64}|the current target head"), "candidate")
         why = _ref(action.reason or "ledger", re.compile(r"[A-Za-z0-9 _:./-]{1,80}"), "reason")
         from swarm.supervisor.driver_exec import _dcfg
+        from swarm.supervisor.driver_model import session_count
         budget = _dcfg(cfg, led)
         spent = f"{led.charged_usd():.2f} of {budget['max_cost_usd']:.2f} USD"
         facts = ("This ruling is due to budget exhaustion. Record not_met with budget as the blocker; "
@@ -216,7 +221,7 @@ def _judge_lines(board, cfg, led, launch, action) -> list[str]:
                  "Do not assume the budget ran out. ")
         return [f"You are the ruling judge. The driver called this ruling because: {why}. {facts}"
                 f"So far {spent} is spent, reserve {budget['ruling_reserve_usd']:.2f} USD, "
-                f"sessions {len(led.intents)}/{budget['max_sessions']}, wall limit {budget['max_wall_hours']} hours. "
+                f"sessions {session_count(led)}/{budget['max_sessions']}, wall limit {budget['max_wall_hours']} hours. "
                 f"Judge the current target head ({cand}) against the pinned requirements (digest {digest}) and record "
                 f"`swarm verdict --job {led.job} --scope ruling --candidate <sha> --req {digest} met|not_met|unreachable "
                 "--reason ... --details -`. unreachable ENDS THE JOB for good: record it only when the evidence shows "

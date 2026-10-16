@@ -373,14 +373,19 @@ def _act(board, cfg, sup, led, snap, actions, now, start_runner, config_path, jd
             if lead is None:
                 m.life.default_request_lead(board, cfg, led, led.generation)
                 lead = board.get_launch(led.job, led.generation, "lead")
-            board.post(led.job, SUPERVISOR, f"Ruling not_met: {gv.reason}; next: {gv.next}", to=lead.name)
-            m.exec._queue_existing(board, lead)
+            board.post(led.job, SUPERVISOR, f"{gv.scope.title()} not_met: {gv.reason}; next: {gv.next}", to=lead.name)
+            if lead.state != "running" and lead.name not in snap.live:
+                m.exec._queue_existing(board, lead)
             def fix(l):
                 l.ruling_due_at, l.ruling_attempts, l.rounds_without_progress, l.errors = None, 0, 0, 0
-                l.watermarks["ruling-fix"] = gv.receipt_id
+                l.watermarks[f"{gv.scope}-fix"] = gv.receipt_id
                 key = f"requeue:{l.generation}:{lead.name}"
                 l.watermarks[key] = l.watermarks.get(key, 0) + 1
             _mutate(led, fix)
+        elif a.kind == "no_progress":
+            m.exec.note_no_progress(board, led, snap, a)
+        elif a.prompt_kind == "goal-hold":
+            m.exec.hold_goal(board, led, now, a.reason)
         elif a.kind == "rollover":
             m.life.rollover(board, cfg, led, now)
         elif a.kind == "stop_launch" and a.launch:
@@ -435,6 +440,7 @@ def _note_learn_hold(led, snap, actions, m) -> None:
 def _plan(board, cfg, led, dcfg, now, m):
     """Snapshot, progress rule and the model's actions. A ruling that has just become due is recorded in
     the ledger first, so its action ids carry the due time as their trigger from the start."""
+    driver_exec.refresh_goal_hold(board, led)
     snap = _with_learn(board, cfg, led, m.snapshot.read(board, led, led.job, cfg=dcfg, now=now))
     m.exec.settle_progress(led, snap, now)
     actions = m.model.next_actions(snap, dcfg)
@@ -615,9 +621,12 @@ def _step(board, cfg, sup, state, led, owner, now, say, start_runner, config_pat
             driver_exec.skip_launch(board, led, row.name, f"owner configuration invalid: {exc}")
         return
     snap, actions = _plan(board, cfg, led, dcfg, now, m)
-    budget = next((a for a in actions if a.prompt_kind == "budget"), None)
+    budget = next((a for a in actions if a.prompt_kind in ("budget", "goal-hold")), None)
     if budget:
-        driver_exec.hold_budget(board, led, driver_exec._dcfg(cfg, led), now, budget.reason)
+        if budget.prompt_kind == "goal-hold":
+            driver_exec.hold_goal(board, led, now, budget.reason)
+        else:
+            driver_exec.hold_budget(board, led, driver_exec._dcfg(cfg, led), now, budget.reason)
         for row in board.launches(led.job, led.generation):
             if row.state == "queued":
                 driver_exec.skip_launch(board, led, row.name, budget.reason)

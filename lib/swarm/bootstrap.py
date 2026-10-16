@@ -1925,11 +1925,12 @@ def _codex_drive_checks(cfg: dict, which) -> list[Check]:
 def _drive_job_checks(cfg: dict, led, now) -> list[Check]:
     import datetime as dt
     from swarm import drive_activate as da
+    from swarm.supervisor.driver_model import session_count
     out = []
     try:
         budgets = {**da.budget_defaults(cfg), **{k: v for k, v in led.budgets.items() if k in da.BUDGET_KEYS}}
         cap, reserve = float(budgets["max_cost_usd"]), float(budgets["ruling_reserve_usd"])
-        cost, sessions, max_sessions = led.charged_usd(), len(led.intents), float(budgets["max_sessions"])
+        cost, sessions, max_sessions = led.charged_usd(), session_count(led), float(budgets["max_sessions"])
         wall_max = float(budgets["max_wall_hours"])
         try:
             started = dt.datetime.fromisoformat(led.activated_at)
