@@ -105,6 +105,11 @@ goal_stall_hours = 0
 #   record `swarm verdict`, or the job waits until this closes it. 0 = off.
 stale_waiting_minutes = 120
 stale_waiting_close_minutes = 240
+# An item for the orchestrator (a blocker waiting on it, or a message addressed to it) unhandled this many
+# minutes gets a `PM-STALL <item> age=<m>` board post, again every that many minutes. 0 turns it off.
+# notify_on_stall also tells the person through [notify] (push_url, or telegram_token and telegram_chat).
+orchestrator_stall_minutes = 5
+notify_on_stall = false
 
 [plugins]
 # CLI plugins (see docs/PLUGINS.md) are found in <config dir>/plugins/, $SWARM_PLUGIN_PATH, the skills'

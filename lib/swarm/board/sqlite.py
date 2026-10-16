@@ -699,6 +699,14 @@ class SqliteBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
         self._conn.execute("INSERT INTO board_meta (key, value) VALUES ('message_max_chars', ?) "
                            "ON CONFLICT (key) DO UPDATE SET value = excluded.value", (str(cap),))
 
+    def _read_meta(self, key: str) -> str | None:
+        row = self._conn.execute("SELECT value FROM board_meta WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else None
+
+    def _write_meta(self, key: str, value: str) -> None:
+        self._conn.execute("INSERT INTO board_meta (key, value) VALUES (?, ?) "
+                           "ON CONFLICT (key) DO UPDATE SET value = excluded.value", (key, value))
+
     @classmethod
     def schema_version(cls, cfg: dict) -> int | None:
         if not db_path(cfg).exists():

@@ -65,12 +65,12 @@ class AddressingTests(LaunchesEnv):
         self.assertTrue(any(a == "swarm" and to == self.names["qa"] and "--key does not belong" in msg
                             for a, to, msg in self.messages()))
 
-    def test_offline_empty_launch_gets_a_refusal_note(self):
+    def test_offline_empty_launch_post_is_queued_not_refused(self):
         self.queue_offline(self.names["e1"], "missing launch", "@verifier")
         with self.board() as b:
             spool.flush_spool(b, self.cfg)
-        self.assertTrue(any(a == "swarm" and to == self.names["e1"] and "nobody holds" in msg
-                            for a, to, msg in self.messages()))
+        self.assertIn((self.names["e1"], "queue.verifier", "missing launch"), self.messages())
+        self.assertFalse(any(a == "swarm" and "nobody holds" in msg for a, _, msg in self.messages()))
 
     def test_a_launch_with_several_holders_gets_one_message_each(self):
         rc, out, _ = self.cli("post", "--job", "J", "--as", self.names["el"], "--to", "@engineer", "go")
@@ -84,12 +84,11 @@ class AddressingTests(LaunchesEnv):
         self.assertEqual(rc, 0)
         self.assertIn((self.names["el"], judge, "proof"), self.messages())
 
-    def test_a_launch_nobody_holds_is_rejected_and_nothing_is_stored(self):
-        before = self.messages()
-        rc, _, err = self.cli("post", "--job", "J", "--as", self.names["el"], "--to", "@verifier", "x")
-        self.assertEqual(rc, 1)
-        self.assertIn("nobody holds @verifier", err)
-        self.assertEqual(self.messages(), before)
+    def test_a_launch_nobody_holds_queues_the_post_for_its_next_holder(self):
+        rc, out, _ = self.cli("post", "--job", "J", "--as", self.names["el"], "--to", "@verifier", "x")
+        self.assertEqual(rc, 0)
+        self.assertIn("queued", out)
+        self.assertIn((self.names["el"], "queue.verifier", "x"), self.messages())
 
     def test_an_unknown_name_is_rejected(self):
         before = self.messages()
@@ -135,9 +134,9 @@ class AddressingTests(LaunchesEnv):
     def test_a_departed_holder_no_longer_holds_the_launch(self):
         with self.board() as b:
             b.agent_stopped("qa")
-        rc, _, err = self.cli("post", "--job", "J", "--as", self.names["el"], "--to", "@QA", "x")
-        self.assertEqual(rc, 1)
-        self.assertIn("nobody holds @QA", err)
+        rc, out, _ = self.cli("post", "--job", "J", "--as", self.names["el"], "--to", "@QA", "x")
+        self.assertEqual(rc, 0)   # queued for the next QA, never rejected
+        self.assertIn("queued", out)
 
 
 class ResolveTests(LaunchesEnv):

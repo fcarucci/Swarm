@@ -128,7 +128,12 @@ DEFAULTS = {
     # stale_waiting_close_minutes of quiet it is closed (completed with a met verdict, else failed).
     # 0 turns the notice and close off.
     "job": {"auto_close_minutes": 30, "stall_hours": 4, "orphan_minutes": 30, "goal_stall_hours": 0,
-            "stale_waiting_minutes": 120, "stale_waiting_close_minutes": 240},
+            "stale_waiting_minutes": 120, "stale_waiting_close_minutes": 240,
+            # orchestrator_stall_minutes: an item for the orchestrator (a blocker or a message addressed to it)
+            # unhandled that long gets a `PM-STALL <item> age=<m>` board post, again every that many minutes
+            # while it stays unhandled; 0 turns it off. notify_on_stall also tells the person through [notify]
+            # (push_url, or telegram_token and telegram_chat).
+            "orchestrator_stall_minutes": 5, "notify_on_stall": False},
     # Codex fires SubagentStop after every turn of a child: it counts as completed once no new
     # turn came for this long
     "codex": {"stop_quiet_minutes": 3},
@@ -1144,8 +1149,10 @@ def _job_heading(board, j, now, color: bool = False) -> str:
     """A job and its shared display state, plus the wait context when present."""
     shown = _job_status_word(board, j, now)
     waiting = _waiting_word(j, now)
+    orchestrator = _orchestrator_wait(board, j, now)
     return (f"{term_safe(j.job)} [{_paint_status(shown, shown, color)}]"
-            + (f" · {term_safe(waiting)}" if waiting else ""))
+            + (f" · {term_safe(waiting)}" if waiting else "")
+            + (f" · {orchestrator}" if orchestrator else ""))
 
 
 def _empty_agents_note(board, job, now) -> str:
@@ -1164,6 +1171,18 @@ def _until_note(j, now) -> str:
         return ""
     left = (j.waiting_until - now).total_seconds()
     return f" · until {j.waiting_until.astimezone().strftime('%H:%M')}" + ("" if left > 0 else " (expired)")
+
+
+def _orchestrator_wait(board, j, now) -> str:
+    """"waiting on ORCHESTRATOR since <age>" when an open job has an item its orchestrator has not handled
+    (swarm.stall), else "": distinct from the job's wait on a person (_waiting_word)."""
+    if j.status != "active":
+        return ""
+    from swarm import stall
+    try:
+        return stall.waiting_text(board, j.job, now)
+    except Exception:
+        return ""
 
 
 def _waiting_word(j, now) -> str:
@@ -1283,6 +1302,9 @@ def job_detail(board, job: str, color: bool, recent_minutes: int | None = None, 
                 (sup_line, sup_line or ""),
                 (transcripts is not None, _transcripts_line(transcripts or [])))
     head += [line for value, line in optional if value]
+    orchestrator = _orchestrator_wait(board, j, now)
+    if orchestrator:
+        head.append("waiting    " + orchestrator.removeprefix("waiting "))
     from swarm.review import artifact_verdicts
     for artifact, verdict in artifact_verdicts(board, job).items():
         head.append(f"artifact   {ts(artifact)}: {ts(verdict['verdict'])} by {ts(verdict['judge'])}")
@@ -2806,6 +2828,15 @@ def _parser() -> argparse.ArgumentParser:
     cf.add_argument("--save", action="store_true", help="also write it to the config file")
     rd = sub.add_parser("read"); rd.add_argument("--as", dest="name"); rd.add_argument("--key")
     rd.add_argument("--job"); rd.add_argument("--peek", action="store_true", help="don't advance the cursor")
+    aw = sub.add_parser("await", help="block until something needs the orchestrator of a job: an open "
+                                      "question or blocker, a post addressed to it, BRANCH READY, "
+                                      "INFRA REQUEST, VERDICT, ORDER, or a job state change")
+    aw.add_argument("--job", required=True); aw.add_argument("--as", dest="name")
+    aw.add_argument("--once", action="store_true", help="print the open items now and don't block")
+    aw.add_argument("--timeout", type=float, metavar="S", help="exit with no items after S seconds")
+    aw.add_argument("--poll", type=float, default=5.0, metavar="S", help="seconds between checks (default 5)")
+    aw.add_argument("--remind", type=float, default=60.0, metavar="S",
+                    help="report an open item again once it was last reported S seconds ago (default 60)")
     w = sub.add_parser("who"); w.add_argument("--job", required=True)
     rm = sub.add_parser("remember", help="store a durable fact in the project's memory (needs [hindsight] url)")
     rm.add_argument("--job", required=True); rm.add_argument("--as", dest="name", required=True)
@@ -3027,7 +3058,7 @@ def _parser() -> argparse.ArgumentParser:
     group.add_argument('--open', action='store_true'); group.add_argument('--all', action='store_true')
     bl = sub.add_parser('blocker', help='resolve or comment on a blocker')
     actions = bl.add_subparsers(dest='bcmd', required=True)
-    resolve = actions.add_parser('resolve'); resolve.add_argument('id', type=int)
+    resolve = actions.add_parser('resolve'); resolve.add_argument('id', type=int, nargs='+')
     resolve.add_argument('--how')
     comment = actions.add_parser('comment'); comment.add_argument('id', type=int)
     comment.add_argument('text', nargs='+')
@@ -3262,9 +3293,15 @@ def cmd_activate(cfg: dict, args) -> int:
     # session at once: no other session can claim it, and it can share the session with others.
     with open_board(cfg) as board:
         board.purge()
-        new_job = board.job_status(args.job) is None
+        before = board.job_status(args.job)
+        new_job = before is None
+        from swarm import seatcont
+        seat = seatcont.previous_seat(board, args.job, session) if before is not None and before.status != "active" else None
         board.open_job(args.job, args.description, task, session, os.environ.get("USER"),
                        project=args.project or "", goal=goal)
+        rejoined = seatcont.rejoin(board, args.job, session, seat)   # reopened: back in its old seat, same name
+        if rejoined:
+            print(f"rejoined {args.job} as {term_safe(rejoined)} ({term_safe(seat[1])})")
         board.set_job_data(args.job, "pipeline.started_at", board.now().isoformat())
         learnings.record_scope(board, args.job, learnings.derive_tags(args.project, os.getcwd(), explicit_tags),
                                getattr(args, "topic", None))
@@ -4159,8 +4196,18 @@ def _board_post(board, cfg: dict, args) -> int | None:
     from swarm import addressing
     try:
         addressing.check_author(board, args.job, args.name, getattr(args, "key", None))
-        targets = addressing.resolve(board, args.job, args.to) if args.to else [None]
-        results = [board.post(args.job, args.name, " ".join(args.message), t) for t in targets]
+        text = " ".join(args.message)
+        if args.to:   # an addressed order arrives whole: the overflow goes to a file, the message names it
+            from swarm.longpost import attach_overflow
+            text = attach_overflow(args.job, text, board.message_cap())
+        try:
+            targets = addressing.resolve(board, args.job, args.to) if args.to else [None]
+            results = [board.post(args.job, args.name, text, t) for t in targets]
+        except addressing.NoHolder as exc:   # a seat nobody holds yet: kept for its next holder
+            from swarm import seatcont
+            results = [seatcont.queue_post(board, args.job, args.name, text, exc.token,
+                                           getattr(args, "key", None))]
+            targets = [seatcont.queue_name(exc.token)]
     except ValueError as exc:   # a refused name (board.base.valid_name) or an AddressError
         print(f"not posted: {term_safe(exc)}", file=sys.stderr)
         return 1
@@ -4168,6 +4215,8 @@ def _board_post(board, cfg: dict, args) -> int | None:
     changed(args.job)
     ids = ", ".join(f"#{r.id}" for r in results)
     to = f" to {args.to} ({', '.join(term_safe(t) for t in targets)})" if args.to and args.to.startswith("@") else ""
+    if targets and targets[0] and targets[0].startswith("queue."):
+        to = f" to {args.to} (queued: nobody holds that seat yet; the next holder gets it on joining)"
     print(f"posted {ids}{to}" + (f" (truncated to {board.message_cap()} chars)"
                                   if any(r.truncated for r in results) else ""))
 
@@ -4303,6 +4352,32 @@ def _board_read(board, cfg: dict, args) -> None:
         print(f"({res.remaining} more unread: run read again)")
 
 
+def _board_await(board, cfg: dict, args) -> int:
+    """swarm await: the items for the orchestrating session (its own cursor, never the read cursor)."""
+    from swarm import awaititems, hosts
+    session = hosts.cli_session_id(os.environ) or f"name:{args.name or 'anonymous'}"
+    if args.once:
+        items = awaititems.report(board, args.job, session)
+    else:
+        from swarm.supervisor import orchestrator_wake
+        lock = orchestrator_wake.hold(session, args.job)   # one blocking await per session and job: the wake is armed
+        if lock is None:
+            print("(an await of this session and job already runs)")
+            return 0
+        try:
+            from swarm.supervisor.session_driver import stall_check
+            items = awaititems.await_items(board, args.job, session, timeout=args.timeout, poll=args.poll,
+                                           remind=args.remind,
+                                           on_poll=lambda: stall_check(board, cfg, [args.job]))
+        finally:
+            os.close(lock)
+    for item in items:
+        print(term_safe(awaititems.format_item(item)))
+    if not items:
+        print("(no items)")
+    return 0
+
+
 def _board_who(board, cfg: dict, args) -> None:
     rows = agentview.annotate(board, args.job, board.agents(args.job, include_departed=False))
     if not rows:
@@ -4337,21 +4412,26 @@ def _blocker_line(board, blocker):
 
 def _board_blockers(board, cfg, args):
     rows = board.blockers(args.job, include_closed=args.all)
-    for blocker in rows: print(_blocker_line(board, blocker))
+    from swarm.blockers_stale import stale_reason
+    for blocker in rows:
+        why = stale_reason(blocker, board)
+        print(_blocker_line(board, blocker) + (f' POSSIBLY STALE: {term_safe(why)}' if why else ''))
     if not rows: print('(no blockers)')
 
 
 def _board_blocker(board, cfg, args):
-    blocker = board.blocker(args.id)
-    if blocker is None:
-        print(f'no such blocker: {args.id}', file=sys.stderr); return 1
+    ids = args.id if args.bcmd == 'resolve' else [args.id]
+    missing = [i for i in ids if board.blocker(i) is None]
+    for i in missing: print(f'no such blocker: {i}', file=sys.stderr)
+    if missing: return 1   # nothing is resolved when one id is wrong
     actor = _blocker_actor(board, cfg)
-    if args.bcmd == 'resolve':
-        changed = board.resolve_blocker(args.id, args.how, actor=actor)
-        print(f'blocker {args.id} resolved' if changed else f'blocker {args.id} is already {blocker.state}')
-    else:
-        board.comment_blocker(args.id, ' '.join(args.text), actor=actor)
-        print(f'commented on blocker {args.id}')
+    for i in ids:
+        if args.bcmd == 'resolve':
+            changed = board.resolve_blocker(i, args.how, actor=actor)
+            print(f'blocker {i} resolved' if changed else f'blocker {i} is already {board.blocker(i).state}')
+        else:
+            board.comment_blocker(i, ' '.join(args.text), actor=actor)
+            print(f'commented on blocker {i}')
     return 0
 
 
@@ -4502,9 +4582,9 @@ def _board_join(board, cfg: dict, args) -> int:
               f"cannot claim it)", file=sys.stderr)
         return 1
     if args.judge and not board.take_judge_launch(args.key, args.job):
-        js = board.job_status(args.job)
-        print(f"refused: {term_safe(js.judge) if js and js.judge else 'another agent'} is already the judge of "
-              f"job {args.job} (one per job)", file=sys.stderr)
+        from swarm import seatcont
+        print(f"refused: {seatcont.judge_refusal(board, args.job, args.key) or 'another agent holds the judge launch'}",
+              file=sys.stderr)
         return 1
     if args.verifier and not board.claim_verifier(args.key, args.job):
         print(f"refused: could not make {name} a verifier of job {args.job}", file=sys.stderr)
@@ -4666,6 +4746,7 @@ BOARD_COMMANDS = {
     "pause": _board_pause,
     "resume": _board_resume,
     "read": _board_read,
+    "await": _board_await,
     "who": _board_who,
     "status": _board_status,
     "blockers": _board_blockers,

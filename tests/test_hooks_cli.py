@@ -313,14 +313,19 @@ class CliTests(Env):
         self.assertEqual(rc, 0)
         self.assertRegex(out, r"^posted #\d+\n$")
         _, out, _ = self.cli("post", "--job", "J", "--as", a, "--to", b, "x" * 250)
-        self.assertRegex(out, r"^posted #\d+ \(truncated to 200 chars\)\n$")
+        # The orchestrator-wake spec preserves addressed posts beyond the cap
+        # through an attachment (also recorded in the original job goal).
+        self.assertRegex(out, r"^posted #\d+\n$")
         self.assertEqual(self.cli("read", "--as", a)[1], "(no new messages)\n")
         _, out, _ = self.cli("read", "--key", "kb", "--peek")
         lines = out.splitlines()
         self.assertEqual(len(lines), 2)
         self.assertTrue(all(LINE.match(l) for l in lines))
         self.assertTrue(lines[0].endswith(f"] {a}: hello there"))
-        self.assertIn(f"] {a} → {b}: {'x' * 199}…", lines[1])
+        self.assertIn(f"] {a} → {b}: ", lines[1])
+        self.assertIn("full text: ", lines[1])
+        attachment = Path(lines[1].split("full text: ", 1)[1])
+        self.assertEqual(attachment.read_text(), "x" * 250 + "\n")
         self.assertEqual(self.cli("read", "--as", b)[1], out)  # peek left the cursor alone
         self.assertEqual(self.cli("read", "--as", b)[1], "(no new messages)\n")
         _, out, _ = self.cli("who", "--job", "J")

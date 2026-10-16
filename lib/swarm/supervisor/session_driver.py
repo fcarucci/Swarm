@@ -262,6 +262,16 @@ class PassResult:
         return f"PassResult({self.status!r}, {self.deadline!r}, pending={self.pending})"
 
 
+def stall_check(board, cfg: dict, jobs: list) -> None:
+    """PM-STALL for each job's unhandled orchestrator items (swarm.stall); a failure never ends the pass."""
+    from swarm import stall
+    for job in jobs:
+        try:
+            stall.check(board, job, cfg)
+        except Exception as exc:
+            _log(f"pm-stall {job}: {exc}")
+
+
 def one_pass(cfg: dict, jobs: list, *, start_runner=None, config_path: str = "", say=None,
              scope_available=None) -> PassResult:
     """One pass over `jobs` under the host pass lock: the driver's steps for each job (the deadlines of every
@@ -311,6 +321,7 @@ def one_pass(cfg: dict, jobs: list, *, start_runner=None, config_path: str = "",
                                    deadline=min(began + command.PASS_BUDGET_SECONDS,
                                                 time.monotonic() + command.PASS_DRIVE_SECONDS), job=job)
                     runner.reap(cfg, board, deadline=time.monotonic() + command.PASS_REAP_SECONDS)
+                stall_check(board, cfg, jobs)
                 now = board.now()
                 found, pending = [], False
                 for job in jobs:

@@ -57,6 +57,6 @@ class JudgeHandoverTests(Env):
         self.h.backdate_agent("judge-1", joined_at=3600, last_seen=10 * 60)   # idle, not dead: still live
         rc, _, err = self.join_judge("judge-2")
         self.assertEqual(rc, 1)
-        self.assertIn("already the judge", err)
+        self.assertIn(f"judge seat held by {first} (joined 1h ago)", err)
         with self.board() as b:
             self.assertEqual(b.job_status("J").judge, first)

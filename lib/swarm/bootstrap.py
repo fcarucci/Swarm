@@ -1821,6 +1821,25 @@ def _drive_driver_checks(jobs, unreadable: bool = False) -> list[Check]:
     return out
 
 
+def _orchestrator_wake_checks(cfg: dict) -> list[Check]:
+    """Spec 2 (orchestrator wake): per open job a session of this host owns (not a drive job), whether its
+    `swarm await` runs. Nothing without an active job; a missing wake is a warning, never a failure."""
+    from swarm.supervisor import orchestrator_wake
+    try:
+        pairs = orchestrator_wake.owned_pairs(cfg)
+    except Exception as exc:   # a doctor line never breaks the doctor
+        return [Check("orchestrator wake", None, f"orchestrator wake: can't be checked ({type(exc).__name__})")]
+    out = []
+    for session, job in pairs:
+        if orchestrator_wake.armed(session, job):
+            out.append(Check("orchestrator wake", True, f"orchestrator wake: armed for {job}"))
+        else:
+            out.append(Check("orchestrator wake", None, f"orchestrator wake: NOT ARMED for {job}: the orchestrating "
+                             "session has no `swarm await --job " + job + "` running",
+                             "the session starts it on its next tool call, or run it as a background command"))
+    return out
+
+
 def _drive_containment_check() -> Check:
     """Spec 3.11 [T21]: how drive launches are contained here. A missing systemd user manager never refuses a
     launch: the launch gets its own process group (POSIX) or Job Object (Windows) instead of a scope."""
@@ -2088,7 +2107,7 @@ def drive_checks(cfg: dict, *, run=None, which=None, now=None, platform: str | N
     if bk is not None and _board_store_exists(cfg):
         out += _drive_board_checks(cfg, bk, {x.job for x in jobs} | {x.job_hint for x in found
                                                                    if isinstance(x, ledger.LedgerBad) and x.job_hint}, now)
-    return out + (_land_checks(cfg, bk, jobs) if relevant else [])
+    return out + (_land_checks(cfg, bk, jobs) if relevant else []) + _orchestrator_wake_checks(cfg)
 
 
 def _drive_orphan_checks(bk, led) -> list[Check]:

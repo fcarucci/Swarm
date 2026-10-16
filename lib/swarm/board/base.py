@@ -490,6 +490,12 @@ def decompress_transcript(body: bytes) -> bytes:
 
 # --------------------------------------------------------------------------- data
 
+def await_state_key(job: str, session: str) -> str:
+    """The board_meta key of the await state of (job, session): a digest, so any job or session
+    text fits the key column."""
+    return "await:" + hashlib.sha256(json.dumps([job, session]).encode()).hexdigest()
+
+
 @dataclass(frozen=True)
 class Message:
     """One board message. `to_agent` is the addressee's name or None (broadcast)."""
@@ -1899,7 +1905,11 @@ class Board(abc.ABC):
         claim_resume). The check and the join are two steps: an agent racing a pause can end up
         active on the paused job; its next hook turn is denied by the pause notice."""
         self.require_unpaused(job)
-        return self._allocate_name(agent_key, job, role)
+        name = self._allocate_name(agent_key, job, role)
+        if role:   # posts queued for the seat while nobody held it reach its new holder
+            from swarm import seatcont
+            seatcont.deliver_queued(self, job, name, role)
+        return name
 
     def job_state(self, job: str) -> str | None:
         """The job's stored status (JOB_STATUSES), None if there is no such job. One cheap lookup
@@ -2657,6 +2667,31 @@ class Board(abc.ABC):
         """Store `cap` (already validated) as the board's cap, so that the backend itself refuses
         longer messages from now on; existing rows are untouched. `_insert_message` raises
         CapExceeded(current cap) for a text longer than the stored cap."""
+
+    @abc.abstractmethod
+    def _read_meta(self, key: str) -> str | None:
+        """The board-metadata value stored under `key`, None when there is none."""
+
+    @abc.abstractmethod
+    def _write_meta(self, key: str, value: str) -> None:
+        """Store `value` under `key`, replacing any value there. Touches no message or agent row."""
+
+    def await_state(self, job: str, session: str) -> dict:
+        """The orchestrator wake state of one (job, orchestrator session): the await cursor (the
+        newest message id reported), the time each open item was last reported, and the job status
+        last seen. Stored apart from the read cursor, so `swarm await` and `swarm read` never
+        consume each other's items (swarm.awaititems)."""
+        raw = self._read_meta(await_state_key(job, session))
+        if not raw:
+            return {"cursor": 0, "reported": {}, "status": None}
+        state = json.loads(raw)
+        state.setdefault("cursor", 0)
+        state.setdefault("reported", {})
+        state.setdefault("status", None)
+        return state
+
+    def save_await_state(self, job: str, session: str, state: dict) -> None:
+        self._write_meta(await_state_key(job, session), json.dumps(state, sort_keys=True))
 
     @abc.abstractmethod
     def _insert_message(self, job: str, name: str, text: str, to: str | None,

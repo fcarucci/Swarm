@@ -23,6 +23,14 @@ class AddressError(ValueError):
     """The post's author or recipient doesn't check out; the message says why and what to do."""
 
 
+class NoHolder(AddressError):
+    """`@role` is a valid launch role that nobody holds now: the post is queued for it (seatcont), not refused.
+    `token` is the address without its @."""
+    def __init__(self, message: str, token: str):
+        super().__init__(message)
+        self.token = token
+
+
 def launch_candidates(token: str) -> tuple[str, ...]:
     """The role names an `@token` stands for (tried in order, the first with a holder wins)."""
     key = token.lower()
@@ -73,5 +81,5 @@ def resolve(board, job: str, to: str) -> list[str]:
                 raise AddressError(f"{to} has {len(names)} holders on {job}: address one by name")
             return names
     on_job = ", ".join(sorted({a.role for a in live if a.role})) or "none"
-    raise AddressError(f"nobody holds {to} on job {job} now (launches with a holder: {on_job}); "
-                       f"nothing was posted")
+    raise NoHolder(f"nobody holds {to} on job {job} now (launches with a holder: {on_job}); "
+                   f"queued for the launch", token)

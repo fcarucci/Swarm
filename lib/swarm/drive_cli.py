@@ -223,6 +223,11 @@ def cmd_run(board, cfg, args) -> int:
     if fd is None:
         raise Refuse(why)
     os.close(fd)
+    if args.role == "judge" and board.get_launch(args.job, led.generation, args.name) is None:
+        from swarm import seatcont   # a second judge would only find out after it started
+        held = seatcont.judge_refusal(board, args.job)
+        if held:
+            raise Refuse(held)
     caller = _caller(bk, args.job, led, args)
     queued_by = led.requester_session or "requester"
     if caller is not None and caller.launch:

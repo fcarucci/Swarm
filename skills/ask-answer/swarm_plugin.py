@@ -56,15 +56,45 @@ def identity(board, cfg=None, key=None):
                     job = board.job_status(marker['job'])
                     if job and job.status == 'active' and job.session_id == sid:
                         return 'human'
+        # The session that owns an open job answers as its orchestrator with no join: under its
+        # previous board name if it had one, else 'orchestrator'.
+        owned = owned_job(board, sid, cfg)
+        if owned:
+            return previous_name(board, owned, sid) or 'orchestrator'
         # An orchestrator is the human's interface, but an unregistered child must not impersonate it.
         if os.environ.get('CLAUDE_CODE_CHILD_SESSION') or os.environ.get('CODEX_THREAD_ID'):
             raise ValueError('agent session has no active board identity; join the job first')
     return 'human'
 
 
+def owned_job(board, sid, cfg=None):
+    """The open job whose board record names session `sid` as its owner, else None. With `cfg`,
+    the job must also still carry its activation marker for `sid` (a deactivated job has none)."""
+    marked = None
+    if cfg is not None:
+        from swarm.jobmarkers import _markers
+        marked = {m.get('job') for m in _markers(cfg) if m.get('session_id') == sid}
+    for job in board.jobs(True):
+        if job.session_id == sid and job.status == 'active' and (marked is None or job.job in marked):
+            return job.job
+    return None
+
+
+def previous_name(board, job, sid):
+    """The board name a departed agent of `job` bound to session `sid` held, else None."""
+    for agent in board.agents(job, include_departed=True):
+        if board.route(agent.agent_key).session_id == sid:
+            return agent.name
+    return None
+
+
 def authorized(board, blocker, actor):
     if actor == 'human':
         return True
+    sid = hosts.cli_session_id(os.environ)
+    if sid and owned_job(board, sid) == blocker.job and (
+            to_person(board, blocker) or blocker.waiting_on.lower().lstrip('@') in ('orchestrator', 'pm')):
+        return True   # the owning session speaks for the human and for the orchestrator seat
     if to_person(board, blocker):
         return False
     try:
@@ -395,10 +425,11 @@ def guard_core_resolution(ctx, args):
     if args.bcmd != 'resolve':
         return
     with ctx.open_board() as board:
-        b = board.blocker(args.id)
-        if b and b.kind == 'question' and not authorized(board, b, identity(board, ctx.cfg)):
-            print(f'Q{b.id} is addressed to {b.waiting_on}; you may only comment', file=sys.stderr)
-            return 1
+        for id in args.id:   # `blocker resolve` takes several ids: one unauthorized question refuses the call
+            b = board.blocker(id)
+            if b and b.kind == 'question' and not authorized(board, b, identity(board, ctx.cfg)):
+                print(f'Q{b.id} is addressed to {b.waiting_on}; you may only comment', file=sys.stderr)
+                return 1
 
 
 def register(api):

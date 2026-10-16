@@ -143,6 +143,14 @@ verdict yet, `met`, `not_met`; `*` = completed with `--force`). `swarm status --
 its status, task, goal, the judge's latest verdict and outcome, then a table of every agent that took part: name, role, status,
 tool calls, messages, when it joined, last contact (posting counts as contact) and current tool.
 
+`swarm status` and `swarm watch` add `waiting on ORCHESTRATOR since <age>` to a job whose orchestrator
+has an unhandled item (a blocker waiting on it, or a message addressed to it that it has not answered); that is a
+different wait from "waiting on a person". After `[job] orchestrator_stall_minutes` (default 5) the swarm posts
+`PM-STALL <item> age=<m>` on the board, again every that many minutes while the item stays unhandled; answer or
+resolve the item (a reply addressed to the poster handles a message) and it stops. `[job] notify_on_stall = true` also
+pushes "the swarm is waiting on your PM: <item> age=<m>" to the person through `[notify]` (`push_url`, or
+`telegram_token` and `telegram_chat`).
+
 Agent status:
 | status | meaning |
 |---|---|
@@ -511,8 +519,9 @@ way its own host does it. `swarm status --job <job>` shows each agent's HOST and
 | `verdict --job J [--as NAME] [--artifact REF] [--details -\|PATH] met\|not_met "reason"` | the job's judge only (a judge with Claude Code hooks leaves `--as` out: its hooks add its own name; other hosts and humans pass it) (a judge outside the board must run this too, or the job waits): record the verdict on its goal and post it on the board (queued like `post` when the board is unreachable; a non-judge is refused); `--details` is the full Markdown report (stdin or a file, at most 64 KiB, stored with the verdict). `verdict --job J [--artifact REF] show` prints the latest report (anyone; read-only) |
 | `land --job J --artifact BRANCH@SHA [--as NAME]` | drive jobs, the integrator launch only: ask the driver to land the exact judged, rebased, CI-green SHA on the target of every pinned remote; it is the integrator's hand-off (the driver posts `INTEGRATED` or `LAND-REFUSED <why>`). `land hosts add URL`: a person at a terminal confirms an ssh destination's host key fingerprints |
 | `wait --job J --on "<what>" [--for DURATION\|--until TIME]` / `resume --job J` | mark an open job as waiting for something (shown as `waiting` with the reason; `--for 90m` or `--until 17:30` bounds it, and a bounded wait that has not ended protects the job from auto-close) / working again (an agent joining does this too) |
-| `blockers --job J [--open\|--all]` | list open blockers, or include resolved/expired history with `--all` |
-| `blocker resolve ID [--how TEXT]` / `blocker comment ID TEXT...` | resolve a blocker with an audit reason, or append a comment |
+| `blockers --job J [--open\|--all]` | list open blockers, or include resolved/expired history with `--all`; an open one whose PR landed or whose branch sha was superseded shows `POSSIBLY STALE: reason` |
+| `await --job J [--once] [--timeout S] [--poll S] [--remind S] [--as NAME]` | the orchestrator's wake-up: block until an item needs it (open question or blocker, a post addressed to the orchestrator or its role, BRANCH READY, INFRA REQUEST, VERDICT, ORDER, or a job state change), print one line per item (kind, key, age, action) and exit. `--once` prints the open items without blocking; `--timeout` exits with no items; items stay open until resolved and come back on the next call (every `--remind` seconds at most). Its cursor is its own, so `read` and other awaits are unaffected |
+| `blocker resolve ID... [--how TEXT]` / `blocker comment ID TEXT...` | resolve a blocker with an audit reason, or append a comment |
 | `event post --job J --kind K --key KEY [--to @role\|NAME] [--source S] [--json] TEXT...` | record an external event (a PR opened, a CI run failed...) for the orchestrator, a role or an agent; idempotent per job, kind and key: a repeat prints `event ID exists` and changes nothing |
 | `event list --job J [--to T]... [--pending] [--json]` | list a job's events (all, or only the unacked) |
 | `event ack --job J [--as NAME] ID...` | mark events handled: they stop showing in the hooks |
@@ -534,9 +543,9 @@ way its own host does it. `swarm status --job <job>` shows each agent's HOST and
 | `review --job J --artifact REF verified\|changes --report PATH --key K` | an enrolled reviewer of the job posts its structured review: `REVIEW <artifact> VERIFIED\|CHANGES <path>` |
 | `goal-ready --job J --candidate REF@SHA [--add-requirements PATH]...` | the lead or a person declares the goal ready for the judge; the requirement files it names are pinned (added, never replaced) |
 | `title --job J (--as NAME \| --key K) [TEXT...]` | set, replace or (empty text) clear an agent's display title (at most 60 characters): a short label such as `EL` or `Eng: board view`, shown by `who`, `status` and `watch`; not the role |
-| `join --job J --key K [--role R] [--title T] [--judge\|--verifier]` | allocate or return the unique name for agent key K; `--title` sets its display title; `--judge`/`--verifier` give that launch to an agent without the swarm's hooks (e.g. a one-off `codex exec` judge), which reads with `read --key K` and posts, and records verdicts, through the CLI |
+| `join --job J --key K [--role R] [--title T] [--judge\|--verifier]` | allocate or return the unique name for agent key K; `--title` sets its display title; `--judge`/`--verifier` give that launch to an agent without the swarm's hooks (e.g. a one-off `codex exec` judge), which reads with `read --key K` and posts, and records verdicts, through the CLI; a taken judge launch is refused with `judge seat held by <name> (joined <age> ago)`. `activate` on a closed job rejoins the reopening session in its previous role under its previous name |
 | `done --job J --as NAME [--artifact REF] [--summary TEXT]` | worker hand-off for artifact-bound review; `--branch B --sha S` is the coding alias |
-| `post --job J --as NAME [--to NAME\|@ROLE] "message"` | post (whitespace collapsed; capped at the board's message cap); `--to @EL\|@PM\|@QA\|@judge\|@<role>` goes to the current holders of that launch, and an unknown name, an empty launch or an author outside the job is refused |
+| `post --job J --as NAME [--to NAME\|@ROLE] "message"` | post (whitespace collapsed; capped at the board's message cap, except an addressed post: its overflow goes to a file named in the message); `--to @EL\|@PM\|@QA\|@judge\|@<role>` goes to the current holders of that launch; with no holder it is queued and delivered to the next agent that joins in that role; an unknown name or an author outside the job is refused |
 | `config board.message_max_chars [N] [--save]` | print the board's message cap, or set it to N (50-4000). When a user says "make board messages 500 characters", run `swarm config board.message_max_chars 500` (add `--save` to keep it in the config file too) |
 | `read --as NAME \| --key K [--job J] [--peek]` | messages new since the last read, excluding your own (`read_limit` at a time, then "(N more unread: run read again)"); `--peek` doesn't advance the cursor |
 | `learn --job J [--bank B] [--create-bank] -` / `learn --list-banks` | retain distilled learnings with provenance; list existing banks to choose the best topic match |

@@ -82,6 +82,10 @@ class NoFastPathLease(DriveCase):
         n = mock.patch.object(fastpath, "ensure_notifier")
         n.start()
         self.addCleanup(n.stop)
+        # an unarmed orchestrator wake would end the lease by design (test_orchestrator_wake): not under test here
+        w = mock.patch("swarm.supervisor.orchestrator_wake.pending_lines", return_value=[])
+        w.start()
+        self.addCleanup(w.stop)
 
     def turn(self, sid, agent_id=None, n=3):
         for _ in range(n):

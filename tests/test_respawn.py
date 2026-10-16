@@ -31,6 +31,10 @@ class RespawnEnv(GoalEnv):
         p = mock.patch.object(respawn, "CHECK_SECONDS", 0.0)
         p.start()
         self.addCleanup(p.stop)
+        # the orchestrator wake has its own tests (test_orchestrator_wake): no await runs in these
+        p = mock.patch("swarm.supervisor.orchestrator_wake.pending_lines", return_value=[])
+        p.start()
+        self.addCleanup(p.stop)
         self.activate_goal()
         self.spawn_judge()
         self.spawn_worker("w1")

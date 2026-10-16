@@ -1959,6 +1959,14 @@ class PostgresBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
             "INSERT INTO board_meta (key, value) VALUES ('message_max_chars', %s) "
             "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"], [(), (str(cap),)])
 
+    def _read_meta(self, key: str) -> str | None:
+        row = self._conn.execute("SELECT value FROM board_meta WHERE key = %s", (key,)).fetchone()
+        return row[0] if row else None
+
+    def _write_meta(self, key: str, value: str) -> None:
+        self._conn.execute("INSERT INTO board_meta (key, value) VALUES (%s, %s) "
+                           "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (key, value))
+
     def _insert_message(self, job: str, name: str, text: str, to: str | None,
                         agent_key: str | None) -> int:
         self.ensure_job(job)

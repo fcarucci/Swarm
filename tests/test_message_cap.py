@@ -5,9 +5,12 @@ SWARM_TEST_BACKEND; the upgrade tests start from boards as schema 12-14 left the
 from __future__ import annotations
 
 import os
+import shutil
 import sqlite3
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from support import (FileHarness, MemoryHarness, PostgresHarness, SqliteHarness, SMALL_POOL,  # noqa: F401
                      setup_board, tq)
@@ -217,13 +220,19 @@ class CliTests(Env):
         author = self.peer()
         judge = self.cli("join", "--job", "J", "--key", "judge", "--judge")[1].strip()
         self.cli("config", "board.message_max_chars", "500")
-        rc, out, err = self.cli("post", "--job", "J", "--as", author, "--to", "@judge", "x" * 600)
+        share = Path(tempfile.mkdtemp(dir=Path.home()))   # an addressed overflow is written to a file
+        self.addCleanup(shutil.rmtree, share, ignore_errors=True)
+        with mock.patch("swarm.paths.share_dir", return_value=share):
+            rc, out, err = self.cli("post", "--job", "J", "--as", author, "--to", "@judge", "x" * 600)
         self.assertEqual(rc, 0, err)
         self.assertIn(f"to @judge ({judge})", out)
-        self.assertIn("truncated to 500 chars", out)
+        self.assertNotIn("truncated", out)   # delivered whole: the head is within the live cap, the rest is in the file
         with self.board() as b:
             message = b.recent_messages(1, "J")[0]
-            self.assertEqual((message.to_agent, len(message.message)), (judge, 500))
+            self.assertEqual(message.to_agent, judge)
+            self.assertLessEqual(len(message.message), 500)
+            self.assertGreater(len(message.message), 400)
+            self.assertIn("full text:", message.message)
 
     def test_a_client_with_another_config_value_still_sees_the_board_cap(self):
         self.cli("init")

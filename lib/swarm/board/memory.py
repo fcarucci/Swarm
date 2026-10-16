@@ -84,6 +84,7 @@ class MemoryStore:
         self.bg_commands: list[dict] = []      # background commands (Board.bg_start), by id
         self.next_bg_id = 1
         self.message_max_chars: int | None = None   # the board's message cap (None: not set yet)
+        self.meta: dict[str, str] = {}         # board metadata (Board._read_meta): the await state
         self.schema_version: int | None = None  # set by setup (the version a real store records)
         self.msg_version = 0                   # bumped on every new message
         self.state_version = 0                 # bumped on every agent/job change
@@ -149,7 +150,7 @@ def reset_store(name: str = "default") -> MemoryStore:
         for attr in ("available", "pool", "jobs", "agents", "messages", "routes", "transcripts",
                      "transcript_bodies", "image_bodies", "next_id", "schema_version",
                      "restarts", "next_restart_id", "memory_refs", "pauses", "next_pause_id",
-                     "message_max_chars", "blockers", "blocker_events", "next_blocker_id", "next_blocker_event_id",
+                     "message_max_chars", "meta", "blockers", "blocker_events", "next_blocker_id", "next_blocker_event_id",
                      "events", "next_event_id", "bg_commands", "next_bg_id", "launches", "next_launch_id",
                      "drive_locks"):
             setattr(store, attr, getattr(fresh, attr))
@@ -298,6 +299,16 @@ class MemoryBoard(MemoryLaunches, MemoryBlockers, MemoryEvents, MemoryBgCommands
         s = self._s()
         with s.lock:
             s.message_max_chars = cap
+
+    def _read_meta(self, key: str) -> str | None:
+        s = self._s()
+        with s.lock:
+            return s.meta.get(key)
+
+    def _write_meta(self, key: str, value: str) -> None:
+        s = self._s()
+        with s.lock:
+            s.meta[key] = value
 
     def _s(self) -> MemoryStore:
         if self._closed:

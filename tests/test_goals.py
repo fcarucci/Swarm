@@ -135,8 +135,8 @@ class JudgeHookTests(GoalEnv):
         first = self.member("judge-1").name
         _, turn = self.spawn_judge("judge-2")
         ctx = self.context(turn)
-        self.assertIn(f"[swarm] Your prompt makes you a judge, but {first} is already the judge of "
-                      f"job \"J\" (one per job).", ctx)
+        self.assertIn(f"[swarm] Your prompt makes you a judge, but job \"J\" has one judge: "
+                      f"judge seat held by {first} (joined ", ctx)
         self.assertIn('working on job "J"', ctx)  # on the board as a worker
         self.assertEqual(self.job().judge, first)
         self.assertNotEqual(self.member("judge-2").role, "judge")
@@ -182,7 +182,7 @@ class ExternalAgentRoleTests(GoalEnv):
         first = self.member("judge-1").name
         rc, out, err = self.cli("join", "--job", "J", "--key", "codex-judge", "--judge")
         self.assertEqual(rc, 1)
-        self.assertIn(f"{first} is already the judge", err)
+        self.assertIn(f"judge seat held by {first} (joined ", err)
         self.assertEqual(self.job().judge, first)
 
     def test_join_as_verifier(self):
