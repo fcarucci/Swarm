@@ -580,8 +580,20 @@ def parse_swarm(argv: list[str]):
 
 
 def _cli_parser():
-    from swarm.cli import _parser
-    return _parser()
+    """The CLI's own parser WITH its plugins' commands and arguments, exactly as `swarm` builds it. Without
+    them a plugin option (e.g. engineering-team's `activate --team`) fails the parse here, no grant is
+    written, and the CLI refuses the requester's own control command as "needs a person" (2026-10-15).
+    The CLI module's run-global plugin state is restored: a hook process never keeps plugins loaded."""
+    from swarm import cli
+    parser = cli._parser()
+    saved = (cli.PLUGINS, getattr(cli, "PLUGIN_DISCOVERY_ERROR", None))
+    try:
+        cli._load_plugins([], parser)
+    except Exception:   # discovery never fails a parse: without plugins, a core command still parses
+        pass
+    finally:
+        cli.PLUGINS, cli.PLUGIN_DISCOVERY_ERROR = saved
+    return parser
 
 
 _ARGV_SKIP = ("config", "cmd", "scmd", "no_color", "func")

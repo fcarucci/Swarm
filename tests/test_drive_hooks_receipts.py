@@ -68,7 +68,8 @@ class RecordFormat(DriveCase):
 
     def test_intermixed_positionals_parse_on_every_python(self):
         ns = drivegate.parse_swarm(["answer", "3", "--key", "k", "sqlite", "now"])
-        self.assertEqual((ns.cmd, ns.id, ns.key, ns.text), ("answer", "3", "k", ["sqlite", "now"]))
+        # The CLI's own parser (with its plugins) may type the id; the grant fingerprint stringifies every value.
+        self.assertEqual((ns.cmd, str(ns.id), ns.key, ns.text), ("answer", "3", "k", ["sqlite", "now"]))
         ns = drivegate.parse_swarm(["ask", "--job", "J", "--to", "human", "Which", "DB?", "--default", "x"])
         self.assertEqual((ns.text, ns.default), (["Which", "DB?"], "x"))
 

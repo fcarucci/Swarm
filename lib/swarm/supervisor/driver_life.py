@@ -586,6 +586,16 @@ def _commit(board, cfg, led, intent: dict, now, reasons: list, hooks: Hooks) -> 
         hooks.after_close(board, cfg, led)
     except Exception as exc:
         log.warning("post-close capture for %s failed: %s", led.job, type(exc).__name__)
+    # A closed job deletes its garbage, deterministically (Francesco, 2026-10-15): every seat's home (its
+    # $HOME, /tmp, transcripts copies, venvs and caches) goes once the sessions are gone and the transcripts
+    # are captured above. A reopened job builds fresh homes. Best effort: a leftover never blocks the close.
+    try:
+        from swarm.supervisor import seathome
+        freed = seathome.remove_job_homes(led.job)
+        if freed:
+            log.info("job %s closed: removed its seat homes (%d bytes)", led.job, freed)
+    except Exception as exc:
+        log.warning("seat-home cleanup for %s failed: %s", led.job, type(exc).__name__)
     return True
 
 

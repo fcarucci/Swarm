@@ -845,11 +845,23 @@ def cmd_activate_drive(cfg: dict, args) -> int:
             if refusal:
                 print(f"swarm activate: {refusal}", file=sys.stderr)
                 return 1
-            led = ledger.activate(bk, args.job, budgets=plan.budgets, activated_at=_now())
+            reopen = existing.terminal is not None
             with open_board(cfg) as board:
+                if reopen:
+                    # Reopening a finished job ([RR1] order: owner record, board claim, then the ledger): the
+                    # owner record takes this activation's goal and pins, so the driver's tamper check sees the
+                    # new goal as the owner's, and the closed board row opens again with that goal.
+                    enrolment.write_job_owner(bk, job=plan.job, harness=plan.harness, session_id=plan.session,
+                                              cwd=plan.workdir, roots=plan.roots, remotes=plan.remotes,
+                                              credentials=plan.credentials, requirements=plan.requirements,
+                                              recipe=plan.recipe, goal=plan.goal, brief=plan.brief_path,
+                                              review_role=plan.review_role, review_gates=plan.review_gates,
+                                              target_branch=plan.target_branch, config_dirs=plan.config_dirs)
+                    claim(board, plan)
+                led = ledger.activate(bk, args.job, budgets=plan.budgets, activated_at=_now())
                 board.set_job_data(args.job, "drive.generation_requested", str(led.generation_requested))
-            print(f"re-activated {args.job}: generation {led.generation} -> {led.generation_requested} "
-                  f"at the next pass")
+            print(f"{'reopened' if reopen else 're-activated'} {args.job}: generation {led.generation} -> "
+                  f"{led.generation_requested} at the next pass")
             kick()
             print(start_driver(cfg, led.requester_session, getattr(args, "config", None)))
             print(f"swarm-record: kind=activate id={led.generation_requested} rev={led.ledger_rev}")

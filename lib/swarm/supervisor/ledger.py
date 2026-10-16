@@ -64,8 +64,8 @@ class LedgerExistsError(RuntimeError):
 
 
 class LedgerFinishedError(RuntimeError):
-    """activate() on a job whose ledger is terminal (MET, UNREACHABLE or CANCELLED): a finished job is
-    not re-opened by activation; a new job is needed."""
+    """Kept for callers that still catch it: since 2026-10-15 activate() reopens a finished job instead of
+    raising (one job per piece of work, retried under the same name)."""
 
 
 class LedgerTooLargeError(RuntimeError):
@@ -680,8 +680,18 @@ def activate(board_key: str, job: str, *, budgets: dict, activated_at: str) -> L
             except LedgerExistsError:
                 continue   # created by someone else since the load: roll it over instead
         if led.terminal is not None:
-            raise LedgerFinishedError(f"job {job!r} is finished ({led.terminal.get('verdict')}); "
-                                      f"activate a new job instead")
+            # A finished job is REOPENED by activation (Francesco, 2026-10-15): one piece of work is one job
+            # with one stable name for its whole life, so a retry re-activates the same job instead of a new
+            # numbered one. The new run keeps the intents, charges, owners and incarnation (its history and
+            # session count carry forward); only the finished run's terminal, halt and ruling state reset.
+            led.terminal = None
+            led.terminal_intent = None
+            led.halted = None
+            led.closing = None
+            led.ruling_due_at = None
+            led.ruling_attempts = 0
+            led.rounds_without_progress = 0
+            led.errors = 0
         led.generation_requested += 1
         led.budgets.update(budgets)
         led.activated_at = activated_at

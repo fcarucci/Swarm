@@ -246,14 +246,25 @@ class ExclusiveCreateTests(LedgerCase):
         self.assertEqual(stored.budgets, {"max_cost_usd": 20})
         self.assertEqual(stored.activated_at, "2026-10-11T00:00:00+00:00")   # a rollover starts a new window
 
-    def test_activate_refuses_a_finished_job_and_changes_nothing(self):
-        led = ledger.create("bk", "J", budgets={}, activated_at=ACTIVATED)
-        led.terminal = {"verdict": "met", "at": ACTIVATED}
+    def test_activate_reopens_a_finished_job_under_the_same_name(self):
+        # One job per piece of work (2026-10-15): a retry reopens the finished job, never a new numbered one.
+        led = ledger.create("bk", "J", budgets={"max_cost_usd": 10}, activated_at=ACTIVATED)
+        led.terminal = {"verdict": "unreachable", "at": ACTIVATED}
+        led.halted = {"by": "driver", "at": ACTIVATED, "reason": "x"}
+        led.ruling_attempts, led.rounds_without_progress, led.errors = 2, 3, 1
+        incarnation = led.incarnation
         led.save()
-        before = self.path_of("bk", "J").read_bytes()
-        with self.assertRaises(ledger.LedgerFinishedError):
-            ledger.activate("bk", "J", budgets={}, activated_at="2026-10-11T00:00:00+00:00")
-        self.assertEqual(self.path_of("bk", "J").read_bytes(), before)
+        again = ledger.activate("bk", "J", budgets={"max_cost_usd": 40}, activated_at="2026-10-11T00:00:00+00:00")
+        stored = ledger.load("bk", "J")
+        for got in (again, stored):
+            self.assertIsNone(got.terminal)
+            self.assertIsNone(got.terminal_intent)
+            self.assertIsNone(got.halted)
+            self.assertEqual((got.ruling_attempts, got.rounds_without_progress, got.errors), (0, 0, 0))
+            self.assertEqual(got.generation_requested, 2)          # a new run of the same job
+            self.assertEqual(got.budgets, {"max_cost_usd": 40})
+            self.assertEqual(got.incarnation, incarnation)       # the same job, history carried forward
+        self.assertIn(stored, ledger.unfinished("bk"))           # the driver drives it again
 
     def test_reactivation_over_a_bad_file_is_refused(self):
         self.drive_dir().parent.mkdir(parents=True, mode=0o700, exist_ok=True)

@@ -170,6 +170,32 @@ def home_dir(job: str, seat: str) -> Path:
     return private_dir() / SEAT_HOME / _slug(job) / _slug(seat)
 
 
+def remove_job_homes(job: str) -> int:
+    """Delete every seat home of `job` (the closed job's garbage: 2026-10-15) and return the bytes freed.
+    Only the job's own <private dir>/seat-home/<slug(job)> is removed, never through a symlink: a link at
+    that path is unlinked, not followed."""
+    import shutil
+    from swarm.supervisor.settings import private_dir
+    root = private_dir() / SEAT_HOME
+    target = root / _slug(job)
+    if target.parent != root:
+        return 0
+    if target.is_symlink():
+        target.unlink()
+        return 0
+    if not target.is_dir():
+        return 0
+    freed = 0
+    for dirpath, _dirs, files in os.walk(target, followlinks=False):
+        for f in files:
+            try:
+                freed += os.lstat(os.path.join(dirpath, f)).st_size
+            except OSError:
+                pass
+    shutil.rmtree(target, ignore_errors=True)
+    return freed
+
+
 def _git_identity(cfg: dict) -> tuple[str | None, str | None]:
     """[drive] seat_git_name / seat_git_email, else the person's global git identity."""
     d = _drive(cfg)
