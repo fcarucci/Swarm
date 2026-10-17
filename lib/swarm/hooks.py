@@ -1587,7 +1587,10 @@ def _enrol_resumed(board, agent_id: str, resume: dict, payload: dict, cfg: dict)
     row = next((x for x in board.restarts(job=job) if x.id == r.get("restart_id")), None)
     from_pause = row is not None and (row.reason or "").startswith(PAUSE_RESUME_REASON)
     coordinator = _restarted_coordinator(board, resume)
-    off = None if from_pause else _supervise_off(board, cfg, job)   # a resume the user asked for is not the supervisor's
+    # a resume the user asked for, or a launch `swarm pass` started (its restart row names the launch),
+    # is not the supervisor's: the supervisor's kill switches never stop it
+    launched = row is not None and bool(getattr(row, "launch_id", None))
+    off = None if (from_pause or launched) else _supervise_off(board, cfg, job)
     if off:   # the kill switches hold at the enrolment too
         _deny(f"[swarm] The swarm supervisor is switched off ({off}), so this restart won't go "
               f"ahead. Stop now: end your turn without further tool calls.")
