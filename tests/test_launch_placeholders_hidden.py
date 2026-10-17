@@ -15,7 +15,7 @@ class LaunchPlaceholdersHidden(Env):
             b.close_agent("w", "done")
 
     def test_status_does_not_list_launch_placeholders(self):
-        rc, out, err = self.cli("status", "--job", "J")
+        rc, out, err = self.cli("status", "--job", "J", "--all-agents")   # finished agents are hidden by default
         self.assertEqual(rc, 0, err)
         self.assertIn(self.worker, out)
         self.assertNotIn("drive predecessor", out)   # the worker may reuse the placeholder's freed name
