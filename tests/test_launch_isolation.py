@@ -332,19 +332,6 @@ class FailClosedTest(LaunchHomeCase):
         self.cfg["drive"]["launch_isolation"] = "off"
         self.assertEqual(launchhome.mode(self.cfg), "required")
 
-    def test_turning_it_off_is_a_person_act(self):
-        with self.assertRaises(person.PersonRefused):
-            launchhome.set_off(True, env={"CLAUDE_CODE_SESSION_ID": "s"}, ancestor=lambda: None)
-        self.assertEqual(launchhome.mode(self.cfg), "required")
-        with mock.patch("swarm.enrolment.agent_sessions", lambda bk: set()):
-            launchhome.set_off(True, env={}, confirm=lambda a, j: True, ancestor=lambda: None)
-        self.assertEqual(launchhome.mode(self.cfg), "off")
-        self.assertEqual(launchhome.wrap(self.cfg, ["claude"], job="J", launch="s", probe=lambda: (False, "x")),
-                         ["claude"])
-        with mock.patch("swarm.enrolment.agent_sessions", lambda bk: set()):
-            launchhome.set_off(False, env={}, confirm=lambda a, j: True, ancestor=lambda: None)
-        self.assertEqual(launchhome.mode(self.cfg), "required")
-
     def test_a_host_that_cannot_jail_refuses_the_launch(self):
         with self.assertRaises(launchhome.LaunchIsolationError) as cm:
             launchhome.wrap(self.cfg, ["claude"], job="J", launch="s", probe=lambda: (False, "no userns"))

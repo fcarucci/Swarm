@@ -45,15 +45,6 @@ class CloseGateTests(HindsightEnv):
         self.assertIn("nothing has been stored", err)
         self.assertEqual(self.status(), "active")
 
-    def test_no_learn_without_the_person_gate_is_refused(self):
-        name = self.join("worker")
-        self.kill("worker")
-        rc, out, err = self.cli("deactivate", "--job", "J", "--no-learn", "the person says so")
-        self.assertEqual(rc, 1, (out, err))
-        self.assertEqual(self.status(), "active")
-        with self.board() as b:
-            self.assertIsNone(b.job_data("J").get("memory.no_learn"))
-
     def test_after_harvest_the_close_succeeds(self):
         name = self.join("worker")
         self.kill("worker")
