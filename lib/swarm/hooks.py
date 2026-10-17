@@ -373,9 +373,7 @@ def _spawn_refusal(board, agent_id: str, member, payload: dict, cfg: dict) -> st
     # child joins this session's job anyway
     from swarm.roles import from_prompt
     if ((from_prompt(prompt) if host.reads_prompt_tags else None) or host.spawn_role_hint(call)) == "judge":
-        from swarm import seatcont
-        held = seatcont.judge_refusal(board, job)
-        return f"a spawned subagent can't be a judge" + (f": {held}" if held else "")
+        return "a spawned subagent can't be a judge"
     grant = board.reserve_spawn(agent_id, job, per_agent, per_job)
     if grant.refused == "agent":
         return f"you have already spawned {grant.agent_spawns} (limit {per_agent} per agent)"
@@ -1412,8 +1410,7 @@ def _goal_roles(board, agent_id: str, job: str, payload: dict, marker: dict | No
     goal, judge = (js.goal, js.judge) if js else (None, None)
     note = None
     if wants and not is_judge:
-        from swarm import seatcont
-        held = seatcont.judge_refusal(board, job, agent_id) or f"judge seat held by {judge or 'another agent'}"
+        held = f"judge seat held by {judge or 'another agent'}"
         note = (f"[swarm] Your prompt makes you a judge, but job \"{job}\" has one judge: {held}. "
                 f"You are on the board as a worker: your "
                 f"verdicts would be refused. Say so in your report.")
@@ -2275,24 +2272,6 @@ def _orchestrator_event_lines(event, cfg, sid):
         _log_error(event, 'main', exc)
 
 
-def _orchestrator_wake(event, cfg, sid):
-    """Spec 2 (orchestrator wake): name each open job this session owns whose `swarm await` is not running, on
-    every tool call until the agent starts it (supervisor/orchestrator_wake.py). Nothing without an active job.
-    Never raises."""
-    if not sid or event != 'turn':
-        return
-    try:
-        from swarm.supervisor import orchestrator_wake
-        lines = orchestrator_wake.pending_lines(cfg, sid)
-        if lines:
-            lease = _CURRENT.get('lease')
-            if lease:
-                lease.allowed = False   # an unarmed wake must surface on every turn
-            _out('PreToolUse', '\n'.join(lines))
-    except Exception as exc:
-        _log_error(event, 'main', exc)
-
-
 def _orchestrator_respawn(event: str, cfg: dict, sid: str | None, payload: dict) -> None:
     """A not_met verdict with nobody left at work: tell the orchestrator (the only one who can
     spawn) to start the next round (swarm.respawn). Tool-call hooks add context; Stop refuses to
@@ -2423,10 +2402,6 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
                 lease.contacted = True
         _orchestrator_plugin_lines(event, cfg, sid)
         _orchestrator_event_lines(event, cfg, sid)
-        # The explicit session-automation opt-out also disables requests to arm
-        # a wake in the host. Keep ordinary hook output unchanged when disabled.
-        if os.environ.get("SWARM_SESSION_DRIVER") != "0":
-            _orchestrator_wake(event, cfg, sid)
         _orchestrator_respawn(event, cfg, sid, payload)
         if event == "turn" and current_host().is_spawn(payload):
             try:
@@ -2544,16 +2519,6 @@ def _wake_drivers(event: str, cfg: dict, payload: dict) -> None:
         _log_error("drive wake", str(payload.get("agent_id") or payload.get("session_id")), exc)
 
 
-def _ensure_driver(cfg: dict, payload: dict) -> None:
-    """Spec 3.11 [T21]: the requester main session's first hook starts its session driver when none runs (the
-    SessionStart hook does too). Cheap when one runs: a lock probe. Never raises."""
-    try:
-        from swarm.supervisor import session_driver
-        session_driver.ensure(cfg, payload.get("session_id"))
-    except Exception as exc:
-        _log_error("drive driver", str(payload.get("session_id")), exc)
-
-
 def _drive_event(event: str, cfg: dict, payload: dict, resume: dict | None) -> bool:
     """The drive gate of PreToolUse (every call of every session, before anything else a hook does: a join, a
     first call and a launch of an unbound job included) and the receipts of PostToolUse. True when the call was
@@ -2577,8 +2542,6 @@ def _drive_event(event: str, cfg: dict, payload: dict, resume: dict | None) -> b
                 return True
         if ctx is not None:
             _no_lease(payload)
-            if ctx.kind == "requester" and not payload.get("agent_id"):
-                _ensure_driver(cfg, payload)
         if event == "done":
             drivegate.drop_grants(cfg, payload, host)   # a grant never outlives its call
             drivegate.post_tool(cfg, payload, host, resume=resume, resume_lookup=_resume_binding)
