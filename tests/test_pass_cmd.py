@@ -55,6 +55,8 @@ class PassCmd(unittest.TestCase):
         self.assertTrue(self.b.claim_judge("judge", "J"))
         self.assertTrue(self.b.record_verdict("J", judge, verdict, reason, next_steps, artifact=artifact))
         self.b.close_agent("judge", "done")
+        for r in self.open_restarts():   # the judge's session ends with its verdict
+            self.b.finish_restart(r.id, "completed")
 
     def job(self):
         return self.b.job_status("J")
@@ -127,6 +129,7 @@ class PassCmd(unittest.TestCase):
     def test_not_met_requeues_the_lead_once_for_that_artifact(self):
         artifact = self.hand_off()
         self.pass_()
+        self.pass_()   # the judge is started
         self.verdict("not_met", "tests missing", next_steps="add tests", artifact=artifact)
         self.pass_()
         self.pass_()
