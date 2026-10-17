@@ -45,6 +45,7 @@ class SnapshotTests(unittest.TestCase):
         import dataclasses
         from swarm.watchdata import SnapshotBoard
         self.board.set_waiting("J1", "30-minute watch")
+        self.board.open_blocker("J1", "question", "Francesco", "go on?")   # the wait shows; the question makes it "waiting"
         job = self.board.job_status("J1")
         data = dataclasses.asdict(job)
         data = {k: v.isoformat() if isinstance(v, dt.datetime) else v for k, v in data.items()}

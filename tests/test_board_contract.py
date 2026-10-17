@@ -54,6 +54,8 @@ class BoardContract:
     def parked_job(self, paused=False):
         self.b.open_job("parked", "30-minute watch", None, "session-parked", "Francesco")
         self.b.set_waiting("parked", "30-minute watch")
+        # a wait is context, not a state: only an open question to a person shows "waiting"
+        self.b.open_blocker("parked", "question", "Francesco", "30-minute watch: go on?")
         if paused:
             self.b.pause_job("parked", "Francesco", "hold")
         return "paused" if paused else "waiting"

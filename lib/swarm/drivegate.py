@@ -159,18 +159,23 @@ def launch_context(cfg: dict, board_key: str, payload: dict, resume=None, resume
         led = load_ledger(board_key, job)
     except (ledger.LedgerBadError, OSError):
         led = False          # a drive job whose ledger cannot be read
-    if led is None:
+    if led is None and not marker:
         return None
+    # Without a ledger (the session driver is gone; `swarm pass` starts launches) the launch is still a
+    # launch of its job: its name comes from the run file and its role from the board's launch row.
     ctx = Ctx(kind="launch", job=job, led=led or None, agent_key=agent_key)
-    if not led or not marker:
+    if not marker:
         return ctx
     rid = m["resume"].get("restart_id")
     run = runner._read_run(f"r{rid}.json", board_key) if isinstance(rid, int) else None
     if (isinstance(run, dict) and runner.run_problem(cfg, run, rid) is None and run.get("job") == job
             and isinstance(run.get("launch_id"), str) and sid in (run.get("session_id"), run.get("agent_key"))):
-        intent = next((i for i in led.intents if i.launch_id == run["launch_id"]), None)
-        if intent is not None and intent.launch:
-            ctx.intent, ctx.launch = intent, intent.launch
+        if led:
+            intent = next((i for i in led.intents if i.launch_id == run["launch_id"]), None)
+            if intent is not None and intent.launch:
+                ctx.intent, ctx.launch = intent, intent.launch
+        if ctx.launch is None and isinstance(run.get("launch"), str) and run["launch"]:
+            ctx.launch = run["launch"]
     return ctx
 
 
@@ -284,15 +289,23 @@ def _open_board(cfg: dict):
     return open_board(cfg, init_timeout=HOOK_INIT_TIMEOUT)
 
 
+def _launch_role(board, ctx: Ctx) -> str | None:
+    """The role of the launch row ctx names: by generation with a ledger, else the newest row of that name."""
+    if ctx.led is not None:
+        row = board.get_launch(ctx.job, ctx.led.generation, ctx.launch)
+        return row.role if row else None
+    rows = [r for r in board.launches(ctx.job) if r.name == ctx.launch]
+    return rows[-1].role if rows else None
+
+
 def launch_policy(cfg: dict, board_key: str, ctx: Ctx, board=None) -> Policy:
     """Roles guide prompts. All launched agents have the same tool permissions."""
-    if ctx.launch is None or ctx.led is None:
+    if ctx.launch is None:
         return Policy(read_only=False, judge=False, lead=False, known=False)
     own = board is None
     try:
         board = board or _open_board(cfg)
-        row = board.get_launch(ctx.job, ctx.led.generation, ctx.launch)
-        role = row.role if row else None
+        role = _launch_role(board, ctx)
     except Exception:
         role = None
     finally:
@@ -1099,10 +1112,9 @@ def is_drive_judge(cfg: dict, board, job: str, payload: dict, resume=None) -> bo
         from swarm.supervisor import drive_authz
         bk = store_key(cfg)
         ctx = launch_context(cfg, bk, payload, resume=resume)
-        if ctx is None or ctx.led is None or not ctx.launch or ctx.job != job:
+        if ctx is None or not ctx.launch or ctx.job != job:
             return False
-        row = board.get_launch(job, ctx.led.generation, ctx.launch)
-        return row is not None and driveroles.is_judge_role(row.role)
+        return driveroles.is_judge_role(_launch_role(board, ctx))
     except Exception:
         return False
 

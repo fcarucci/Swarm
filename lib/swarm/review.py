@@ -67,8 +67,11 @@ def handoff_of(message, since: dt.datetime | None = None) -> Handoff | None:
             summary = suffix[1:].strip() if suffix else summary
         except ValueError:
             return None
-    # Compatibility with the original DONE branch sha convention.
+    # Compatibility with the original DONE branch sha convention; `DONE ref | summary` unquoted too.
     if not first[5:].strip().startswith('"'):
+        head, bar, rest = artifact.partition('|')
+        if bar:
+            artifact, summary = head.strip(), rest.strip()
         parts = artifact.split()
         if len(parts) == 2 and branch_revision('@'.join(parts)):
             artifact = '@'.join(parts)

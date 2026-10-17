@@ -1591,13 +1591,6 @@ def finish(cfg: dict, run: dict, outcome: str) -> bool:
             return False
         run.update(board_done=True, outcome=run.get("outcome") or outcome)
         _save_progress(run)
-    if run.get("launch_id") and not run.get("ledger_done"):
-        from swarm.supervisor import driver_exec
-        if not driver_exec.conclude_run(cfg, run, outcome, run.get("cost_usd"), bool(run.get("outage"))):
-            log(f"ledger of restart {run['restart_id']} busy; finish retried later")
-            return False
-        _release_drive_locks(cfg, run)
-        run["ledger_done"] = True
         _save_progress(run)
     bad_marker = _marker_problem(cfg, run)
     if bad_marker:
@@ -1612,22 +1605,6 @@ def finish(cfg: dict, run: dict, outcome: str) -> bool:
     return True
 
 
-def _release_drive_locks(cfg: dict, run: dict) -> None:
-    """Release the drive locks of an ended launch, once its scope unit is confirmed gone (writer
-    fencing, spec 3.9): with the unit present or unknown they stay until they expire and the host
-    sweep takes them."""
-    from swarm.supervisor.settings import log
-    unit = run.get("unit")
-    if unit and unit_presence(unit, run.get("slice")) != "absent":
-        return
-    try:
-        from swarm.board import open_board
-        with open_board(cfg) as b:
-            b.release_drive_locks(run["launch_id"], job=run["job"], holder=run["action_id"])
-    except Exception as exc:
-        log(f"drive locks of restart {run['restart_id']} not released: {type(exc).__name__}")
-
-
 def _finish_row_and_post(b, run: dict, outcome: str, poster: str) -> None:
     """Finish the restart row and post its end, exactly once in the normal case. The message is
     recorded in the run file (post_pending) before the row is finished, so a crash or a failed post
@@ -1636,19 +1613,6 @@ def _finish_row_and_post(b, run: dict, outcome: str, poster: str) -> None:
     already finished posts nothing. At least once, not exactly once, only if the process dies
     between the post and recording it (the board's post isn't idempotent)."""
     spent = {k: run[k] for k in ("cost_usd", "tokens_in", "tokens_out") if run.get(k) is not None}
-    if run.get("launch_id"):
-        # Settle before removing the run file, so a refusal's full reason stays on the launch.
-        from swarm.supervisor import driver_exec, ledger
-        b.finish_restart(run["restart_id"], outcome, **spent)
-        if not driver_exec.conclude_run({}, run, outcome, run.get("cost_usd"), bool(run.get("outage"))):
-            raise ledger.LedgerConflict("launch settlement deferred until its intent is concluded")
-        led = ledger.load(run["board"], run["job"])
-        if led is not None:
-            rows = {r.launch_id: r for r in b.restarts(run["job"]) if r.id == run["restart_id"]}
-            driver_exec._settle_launches(b, {}, led, rows, b.now())
-        run.update(posted=True, post_pending=None)
-        _save_progress(run)
-        return
     if run.get("posted"):
         b.finish_restart(run["restart_id"], outcome, **spent)
         return

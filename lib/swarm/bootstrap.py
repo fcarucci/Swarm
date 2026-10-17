@@ -1523,7 +1523,7 @@ def doctor(host: str | None = None, *, config: Path | None = None, claude_plugin
             cfg = load_config(config)
         except Exception:          # already a config FAIL above: check Codex against the defaults
             cfg = load_config(Path("/nonexistent/swarm-config.toml"))
-        checks += _codex_checks(cfg, env)
+        checks += _codex_checks(cfg, env) + _codex_wrapper_checks(cfg)
     from swarm.cli import load_config
     try:
         cfg, cfg_ok = load_config(config), True
@@ -1536,10 +1536,55 @@ def doctor(host: str | None = None, *, config: Path | None = None, claude_plugin
         checks += _bg_orphans_check(cfg)
     checks += supervisor_checks(cfg, host)
     checks += _receipt_failures_check()
-    checks += _codex_drive_check()
     if cfg_ok:
-        checks += drive_checks(cfg)
+        checks += _launch_sandbox_checks(cfg)
     return checks
+
+
+def _launch_sandbox_checks(cfg: dict, platform: str | None = None) -> list[Check]:
+    """The launch sandbox stays after the driver's removal: with a [drive] section configured, say whether launches
+    run in their credential jail (best-effort off Linux; no probe under SWARM_NO_SYSTEMD, i.e. the test suite)."""
+    if not isinstance(cfg.get("drive"), dict):
+        return []
+    plat = platform or sys.platform
+    if not plat.startswith("linux"):
+        from swarm.supervisor import launchhome
+        note = launchhome.BEST_EFFORT_NOTE.format(platform=plat)
+        return [_launch_isolation_check(cfg, probe=lambda c: (None, note))]
+    if os.environ.get("SWARM_NO_SYSTEMD") == "1":
+        return []
+    return [_launch_isolation_check(cfg)]
+
+
+def _launch_isolation_check(cfg: dict, probe=None) -> Check:
+    """Task 20: whether drive launches on this host run in their credential jail, and whether any push
+    credential is reachable from inside it (ssh -T to GitHub, gh auth status, git credential helpers,
+    agent and token variables, the covered paths). `probe` replaces launchhome.probe (tests)."""
+    from swarm.supervisor import launchhome
+    fix = ("enable unprivileged user namespaces for this user (sysctl kernel.unprivileged_userns_clone=1; on "
+           "Ubuntu kernel.apparmor_restrict_unprivileged_userns=0), or move the credential named out of reach")
+    try:
+        ok, detail = (probe or (lambda c: launchhome.probe(c, network=True)))(cfg)
+    except launchhome.LaunchIsolationError as exc:
+        return Check("launch isolation", False, str(exc), "fix [drive] launch_isolation")
+    except Exception as exc:   # never let the probe break doctor
+        return Check("launch isolation", False, f"probe error: {type(exc).__name__}: {exc}", fix)
+    if ok:
+        return Check("launch isolation", True, f"drive launches: {detail}")
+    if ok is None:
+        if detail.startswith("best-effort"):
+            return Check("launch isolation", None, detail,
+                         "drive launches here get no filesystem jail: their environment carries no credential, credential "
+                         "helper or agent, but your files (and keychain or Credential Manager) stay reachable to them. "
+                         "Best-effort guards against accidental credential use, not a hostile launch. On Linux, enable "
+                         "unprivileged user namespaces for the full jail; [drive] launch_isolation = \"strict\" refuses "
+                         "launches instead")
+        if detail.startswith("off"):
+            return Check("launch isolation", None, f"drive launches: {detail}",
+                         "a person runs `swarm supervise launch-isolation on` to jail every drive launch again")
+        return Check("launch isolation", False, f"drive launches are NOT started on this host: {detail}", fix)
+    return Check("launch isolation", False, f"drive launches can reach a credential: {detail}",
+                 "cover the path named ([drive] launch_cover_paths) or remove the credential from the launch env")
 
 
 # ------------------------------------------------------------- doctor: what a sandbox may write
@@ -1754,428 +1799,6 @@ def _receipt_failures_check() -> list[Check]:
                   "re-send the failed command")]
 
 
-def _codex_drive_check() -> list[Check]:
-    """[G1] Codex readiness for drive launches, per role. A writer launch on Codex needs the installed Codex to have
-    the rollout budget feature (the per-session spending cap); judge and reviewer launches always run on Claude
-    (Codex's read-only sandbox has no board access)."""
-    import shutil
-    import subprocess
-    tail = "judge/reviewer: claude (codex read-only has no board access)"
-    exe = shutil.which("codex")
-    if not exe:
-        return [Check("codex drive-ready", None, f"writer no (codex is not installed); {tail}",
-                      "install Codex to run writer launches on it (drive launches run on Claude without it)")]
-    try:
-        out = subprocess.run([exe, "features", "list"], capture_output=True, text=True, timeout=15, check=False)
-        listed = out.stdout if out.returncode == 0 else ""
-    except (OSError, subprocess.SubprocessError):
-        listed = ""
-    if "rollout_budget" in listed:
-        return [Check("codex drive-ready", True, f"writer yes (rollout budget available); {tail}")]
-    return [Check("codex drive-ready", None,
-                  f"writer no (the installed codex has no rollout budget feature); {tail}",
-                  "update Codex to a version with `features.rollout_budget`, or run writer launches on Claude")]
-
-# ------------------------------------------------------------- doctor: drive mode
-
-DRIVE_GIT_MIN = (2, 40)          # `git merge-tree --merge-base` (11a/11b) fails closed below this
-
-
-def _drive_exec(run, argv, timeout=10):
-    """argv's stdout, or None when it can't run or fails (doctor never raises over a probe)."""
-    import subprocess
-    try:
-        res = run(argv, capture_output=True, text=True, timeout=timeout)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return (res.stdout or "") if res.returncode == 0 else None
-
-
-def _drive_driver_checks(jobs, unreadable: bool = False) -> list[Check]:
-    """Spec 3.11 [T21]: per requester session of the unfinished drive jobs, whether its session driver runs
-    (and in which mode). No timer is needed or checked; a missing driver is a warning, never a failure: the job
-    advances while its session is open, or under `swarm drive run`."""
-    from swarm.supervisor import session_driver
-    sessions: dict = {}
-    for led in jobs:
-        sessions.setdefault(led.requester_session, []).append(led.job)
-    out = []
-    if unreadable and not sessions:
-        out.append(Check("drive driver", None, "which sessions drive the drive jobs here is unknown (their ledgers "
-                         "can't be read)", "see the drive ledger lines"))
-    for session, names in sorted(sessions.items(), key=lambda kv: str(kv[0])):
-        label = ", ".join(sorted(names))
-        info = session_driver.running(session) if session else None
-        if info is not None:
-            out.append(Check("drive driver", True,
-                             f"session driver running for {session} (mode: {info.get('mode') or '?'}): {label}"))
-            if info.get("mode") == "poll":
-                out.append(Check("drive driver mode", None,
-                                 f"the session driver of {session} polls (no OS change notification here)",
-                                 "nothing to do; wakes are up to 60 s late in this mode"))
-        else:
-            out.append(Check("drive driver", None,
-                             f"no live session driver for {session or 'an unknown session'} ({label}): the job "
-                             "advances while its session is open, or with `swarm drive run`",
-                             "open the session that activated it, or run `swarm drive run`"))
-    return out
-
-
-def _orchestrator_wake_checks(cfg: dict) -> list[Check]:
-    """Spec 2 (orchestrator wake): per open job a session of this host owns (not a drive job), whether its
-    `swarm await` runs. Nothing without an active job; a missing wake is a warning, never a failure."""
-    from swarm.supervisor import orchestrator_wake
-    try:
-        pairs = orchestrator_wake.owned_pairs(cfg)
-    except Exception as exc:   # a doctor line never breaks the doctor
-        return [Check("orchestrator wake", None, f"orchestrator wake: can't be checked ({type(exc).__name__})")]
-    out = []
-    for session, job in pairs:
-        if orchestrator_wake.armed(session, job):
-            out.append(Check("orchestrator wake", True, f"orchestrator wake: armed for {job}"))
-        else:
-            out.append(Check("orchestrator wake", None, f"orchestrator wake: NOT ARMED for {job}: the orchestrating "
-                             "session has no `swarm await --job " + job + "` running",
-                             "the session starts it on its next tool call, or run it as a background command"))
-    return out
-
-
-def _drive_containment_check() -> Check:
-    """Spec 3.11 [T21]: how drive launches are contained here. A missing systemd user manager never refuses a
-    launch: the launch gets its own process group (POSIX) or Job Object (Windows) instead of a scope."""
-    from swarm import compat
-    from swarm.supervisor.runner import scope_available
-    if compat.IS_WINDOWS:
-        return Check("drive containment", True, "drive launches: a Job Object each (killed with it)")
-    if scope_available():
-        return Check("drive containment", True, "drive launches: systemd user scopes (systemd-run --user --scope)")
-    return Check("drive containment", True, "drive launches: their own process group each (no systemd user "
-                 "manager here; stopped by group)")
-
-
-def _drive_git_check(run, has_jobs: bool) -> Check:
-    out = _drive_exec(run, ["git", "--version"])
-    m = re.search(r"(\d+)\.(\d+)", out or "")
-    if not m:
-        return Check("drive git", None, "can't read the git version (drive needs git >= 2.40)",
-                     "install git >= 2.40")
-    version = out.strip().removeprefix("git version ")
-    if (int(m.group(1)), int(m.group(2))) >= DRIVE_GIT_MIN:
-        return Check("drive git", True, f"git {version} (drive needs >= 2.40)")
-    return Check("drive git", False if has_jobs else None,
-                 f"git {version}: drive needs >= 2.40 (merge-tree --merge-base)", "upgrade git to 2.40 or newer")
-
-
-def _claude_sandbox_check() -> Check:
-    from swarm import cli
-    path = cli.claude_settings_path()
-    try:
-        data = json.loads(path.read_text())
-        enabled = isinstance(data, dict) and isinstance(data.get("sandbox"), dict) \
-            and data["sandbox"].get("enabled") is True
-    except (OSError, ValueError):
-        enabled = False
-    if enabled:
-        return Check("claude sandbox", True, "claude read-only launches: the Bash sandbox is on (boundary)")
-    return Check("claude sandbox", None,
-                 f"claude read-only launches: guardrail only (the Bash sandbox is not enabled in {path}; "
-                 "the hook refuses commits and pushes, nothing stops other writes)",
-                 f'set "sandbox": {{"enabled": true}} in {path}')
-
-
-def _launch_isolation_check(cfg: dict, probe=None) -> Check:
-    """Task 20: whether drive launches on this host run in their credential jail, and whether any push
-    credential is reachable from inside it (ssh -T to GitHub, gh auth status, git credential helpers,
-    agent and token variables, the covered paths). `probe` replaces launchhome.probe (tests)."""
-    from swarm.supervisor import launchhome
-    fix = ("enable unprivileged user namespaces for this user (sysctl kernel.unprivileged_userns_clone=1; on "
-           "Ubuntu kernel.apparmor_restrict_unprivileged_userns=0), or move the credential named out of reach")
-    try:
-        ok, detail = (probe or (lambda c: launchhome.probe(c, network=True)))(cfg)
-    except launchhome.LaunchIsolationError as exc:
-        return Check("launch isolation", False, str(exc), "fix [drive] launch_isolation")
-    except Exception as exc:   # never let the probe break doctor
-        return Check("launch isolation", False, f"probe error: {type(exc).__name__}: {exc}", fix)
-    if ok:
-        return Check("launch isolation", True, f"drive launches: {detail}")
-    if ok is None:
-        if detail.startswith("best-effort"):
-            return Check("launch isolation", None, detail,
-                         "drive launches here get no filesystem jail: their environment carries no credential, credential "
-                         "helper or agent, but your files (and keychain or Credential Manager) stay reachable to them. "
-                         "Best-effort guards against accidental credential use, not a hostile launch. On Linux, enable "
-                         "unprivileged user namespaces for the full jail; [drive] launch_isolation = \"strict\" refuses "
-                         "launches instead")
-        if detail.startswith("off"):
-            return Check("launch isolation", None, f"drive launches: {detail}",
-                         "a person runs `swarm supervise launch-isolation on` to jail every drive launch again")
-        return Check("launch isolation", False, f"drive launches are NOT started on this host: {detail}", fix)
-    return Check("launch isolation", False, f"drive launches can reach a credential: {detail}",
-                 "cover the path named ([drive] launch_cover_paths) or remove the credential from the launch env")
-
-
-def _codex_wrapper_checks(cfg: dict) -> list[Check]:
-    """[harness.codex] wrapper = true: codex launches are not jailed here (a WARN naming the trust boundary).
-    Empty when no wrapper is configured; an invalid one is a FAIL."""
-    from swarm.supervisor.launch import codex_command, codex_wrapper
-    try:
-        if not codex_wrapper(cfg):
-            return []
-        argv = codex_command(cfg)
-    except ValueError as exc:
-        return [Check("codex wrapper", False, str(exc), "fix [harness.codex] in the swarm config")]
-    return [Check("codex wrapper", None,
-                  f"codex launches run through `{' '.join(argv)}` and are NOT jailed by swarm: the wrapper's OS "
-                  "user is the trust boundary (its credentials, files and network are what the launch can reach)",
-                  "run the wrapper as a user that holds only the credentials a reviewer or judge needs")]
-
-
-def _codex_drive_checks(cfg: dict, which) -> list[Check]:
-    """Whether a Codex writer launch can reach the board ([F18]): on a server board the swarm
-    config's [codex] network_access and the Codex profile that carries it; on a local board the
-    store dir as a Codex writable root. (The rollout budget and the per-role line are
-    _codex_drive_check's.) Nothing without Codex installed."""
-    import tomllib
-    from swarm import codex_config
-    if not which("codex"):
-        return []
-    try:
-        data = tomllib.loads((_codex_home() / "config.toml").read_text())
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
-        data = {}
-    sw = data.get("sandbox_workspace_write") if isinstance(data.get("sandbox_workspace_write"), dict) else {}
-    store = codex_config.board_dir(cfg)
-    if store is None:
-        ready = sw.get("network_access") is True and codex_config._opt(cfg, "network_access")
-        why = "[codex] network_access = true is not installed (set it in the swarm config, then `swarm bootstrap --host codex`)"
-    else:
-        roots = sw.get("writable_roots") if isinstance(sw.get("writable_roots"), list) else []
-        ready = str(store) in [str(Path(str(r)).expanduser()) for r in roots]
-        why = f"the board store {store} is not a codex writable root"
-    return [Check("codex board access", True if ready else None,
-                  "codex writer launches reach the board" if ready else f"codex writer launches cannot reach the board: {why}",
-                  "swarm bootstrap --host codex")]
-
-
-def _drive_job_checks(cfg: dict, led, now) -> list[Check]:
-    import datetime as dt
-    from swarm import drive_activate as da
-    from swarm.supervisor.driver_model import session_count
-    out = []
-    try:
-        budgets = {**da.budget_defaults(cfg), **{k: v for k, v in led.budgets.items() if k in da.BUDGET_KEYS}}
-        cap, reserve = float(budgets["max_cost_usd"]), float(budgets["ruling_reserve_usd"])
-        cost, sessions, max_sessions = led.charged_usd(), session_count(led), float(budgets["max_sessions"])
-        wall_max = float(budgets["max_wall_hours"])
-        try:
-            started = dt.datetime.fromisoformat(led.activated_at)
-            started = started if started.tzinfo else started.replace(tzinfo=dt.timezone.utc)
-            wall = max(0.0, (now - started).total_seconds() - led.halted_total_seconds) / 3600
-        except ValueError:
-            wall = 0.0
-        spent = cost >= cap or sessions >= max_sessions or wall >= wall_max
-        out.append(Check(f"drive budget {led.job}", None if spent else True,
-                         f"cost {cost:.2f}/{cap:.2f} USD (reserve {reserve:.2f}), sessions {sessions}/{max_sessions:g}, "
-                         f"wall {wall:.1f}/{wall_max:g} h",
-                         f"raise it with `swarm drive budget {led.job} KEY=VALUE`" if spent else ""))
-    except da.DriveError as exc:
-        out.append(Check(f"drive budget {led.job}", None, f"can't compute the budget: {exc}", "fix [drive] in the swarm config"))
-    try:
-        table = da.effective_models(cfg, led.models)
-        out.append(Check(f"drive models {led.job}", True, ", ".join(f"{r}={m}" for r, m in table.items())))
-    except da.DriveError as exc:
-        out.append(Check(f"drive models {led.job}", None, f"can't compute the model table: {exc}",
-                         "fix [drive] models and allowed_models in the swarm config"))
-    return out
-
-
-def _drive_credential_checks(bk: str, led) -> list[Check]:
-    from swarm import enrolment
-    owner = enrolment.find_job_owner(bk, led.job)
-    creds = (owner.owner or {}).get("credentials") if owner is not None else None
-    out = []
-    for dest, pin in sorted((creds or {}).items()):
-        if not isinstance(pin, str) or not pin.startswith("helper:"):
-            continue
-        exe = pin[len("helper:"):].split(" ")[0]
-        ok = os.path.isfile(exe) and os.access(exe, os.X_OK)
-        out.append(Check(f"drive credential {dest}", ok,
-                         f"{dest}: credential helper {exe}" + ("" if ok else " is not an executable file"),
-                         f"install it, or re-activate with --credential {dest}=helper:/abs/path/to/gh"))
-    return out
-
-
-DRIVE_ACTIVATION_GRACE = 120      # seconds a board drive claim may exist before its ledger does ([RR1])
-
-
-def _board_store_exists(cfg: dict) -> bool:
-    """Whether a board is there to read without creating it: a server board always, a local one
-    when its database file or directory exists."""
-    from swarm import codex_config
-    backend = board_backend(cfg)
-    if backend not in ("sqlite", "file"):
-        return True
-    return codex_config._absolute(cfg[backend]["path"]).exists()
-
-
-def _aware(when, default=None):
-    import datetime as dt
-    if when is None:
-        return default
-    return when if when.tzinfo else when.replace(tzinfo=dt.timezone.utc)
-
-
-def _drive_board_checks(cfg: dict, bk, led_jobs: set, now) -> list[Check]:
-    """DRIVER-ORPHAN for a board drive claim with no ledger past the activation grace, and the
-    list of goal jobs activated before drive mode (nothing drives them)."""
-    import datetime as dt
-    from swarm.board import open_board
-    from swarm.supervisor import driver_events, ledger
-    grace = dt.timedelta(seconds=(cfg.get("drive") or {}).get("activation_grace_seconds", DRIVE_ACTIVATION_GRACE))
-    out, legacy = [], []
-    try:
-        with open_board(cfg, readers=True) as board:
-            for js in board.jobs():
-                claimed = (board.job_data(js.job) or {}).get("drive.enabled") == "1"
-                if js.job in led_jobs:
-                    continue
-                if not claimed:
-                    if js.goal:
-                        legacy.append(js.job)
-                    continue
-                since = _aware(js.activated_at, _aware(js.created_at))
-                if since is not None and now - since <= grace:
-                    continue
-                try:
-                    if ledger.load(bk, js.job) is not None:
-                        continue                 # a finished job's ledger: nothing is orphaned
-                except ledger.LedgerBadError:
-                    continue                     # reported as a bad ledger
-                out.append(Check(f"drive orphan {js.job}", False,
-                                 f"{driver_events.DRIVER_ORPHAN}: job {js.job!r} claims drive mode on the board "
-                                 f"but has no ledger on this host (past the {grace.total_seconds():.0f} s activation grace)",
-                                 "re-run `swarm activate` for it on the host that owns it, or `swarm deactivate` it"))
-    except Exception as exc:     # an unreachable board is the board checks' finding
-        return [Check("drive board", None, f"drive claims not checked: can't read the board ({type(exc).__name__})")]
-    if legacy:
-        shown = ", ".join(sorted(legacy)[:10]) + (f" and {len(legacy) - 10} more" if len(legacy) > 10 else "")
-        out.append(Check("drive not autonomous", None,
-                         f"{len(legacy)} goal job(s) not autonomous: activated before drive mode: {shown}",
-                         "re-activate each with `swarm activate --goal` to have the supervisor drive it, "
-                         "or leave it with its coordinator"))
-    return out
-
-
-def drive_checks(cfg: dict, *, run=None, which=None, now=None, platform: str | None = None) -> list[Check]:
-    """The drive-mode doctor lines (spec 3.2-3.3, 4.0, 4.5). Read-only: nothing here creates a
-    directory or a file. The host lines (session drivers, git, sandbox, Codex) only on a host with
-    unfinished drive jobs (or a [drive] section); the board lines whenever a board is there to read.
-    Every platform: no timer is needed ([T21]). `platform` only decides the launch isolation line (Task 20)."""
-    import datetime as dt
-    import subprocess
-    from swarm import drive_activate as da, edition
-    from swarm.supervisor import driver_events, ledger, settings as st
-    if edition.is_directory():
-        return []
-    run, which = run or subprocess.run, which or shutil.which
-    now = now or dt.datetime.now(dt.timezone.utc)
-    try:
-        bk = da.board_key(cfg)
-    except Exception:          # an unreachable board: the board checks report it
-        bk = None
-    found, unreadable = [], None
-    if bk is not None and os.path.lexists(st.private_dir() / ledger.SUBDIR):
-        try:
-            found = ledger.unfinished(bk)
-        except (OSError, ValueError, st.PrivateDirError) as exc:   # fail closed: a held job must show
-            unreadable = exc
-    relevant = bool(found) or unreadable is not None or bool(cfg.get("drive"))
-    if not relevant and not (bk is not None and _board_store_exists(cfg)):
-        return []
-    jobs = [x for x in found if isinstance(x, ledger.Ledger)]
-    has_jobs = bool(found) or unreadable is not None
-    out: list[Check] = []
-    if relevant:
-        out = (_drive_driver_checks(jobs, unreadable=not jobs) + [_drive_containment_check()]) if has_jobs else []
-        out += [_drive_git_check(run, has_jobs), _claude_sandbox_check()]
-        plat = platform or sys.platform
-        if not plat.startswith("linux"):   # Task 20: no filesystem jail there; launches are best-effort (a WARN)
-            from swarm.supervisor import launchhome
-            note = launchhome.BEST_EFFORT_NOTE.format(platform=plat)
-            out.append(_launch_isolation_check(cfg, probe=lambda c: (None, note)))
-        elif os.environ.get("SWARM_NO_SYSTEMD") != "1":   # no scopes, no drive launch starts here (the test suite)
-            out.append(_launch_isolation_check(cfg))
-        out += _codex_wrapper_checks(cfg) or _codex_drive_checks(cfg, which)
-    if unreadable is not None:
-        out.append(Check("drive ledgers", False,
-                         f"{driver_events.DRIVER_LEDGER_BAD}: the drive ledgers can't be read "
-                         f"({type(unreadable).__name__}: {unreadable}); drive jobs are held",
-                         "fix or remove what is named (a planted link or a bad file in the supervisor's drive dir), "
-                         "then rerun doctor"))
-    for bad in (x for x in found if isinstance(x, ledger.LedgerBad)):
-        out.append(Check(f"drive ledger {bad.job_hint or bad.path[:12]}", False,
-                         f"{driver_events.DRIVER_LEDGER_BAD}: {bad.why}",
-                         "restore or repair the ledger (`swarm drive repair`), then rerun doctor"))
-    for led in jobs:
-        out += _drive_orphan_checks(bk, led) + _drive_stall_checks(cfg, led)
-        if relevant:
-            out += _drive_job_checks(cfg, led, now) + _drive_credential_checks(bk, led)
-    if bk is not None and _board_store_exists(cfg):
-        out += _drive_board_checks(cfg, bk, {x.job for x in jobs} | {x.job_hint for x in found
-                                                                   if isinstance(x, ledger.LedgerBad) and x.job_hint}, now)
-    return out + (_land_checks(cfg, bk, jobs) if relevant else []) + _orchestrator_wake_checks(cfg)
-
-
-def _drive_stall_checks(cfg: dict, led) -> list[Check]:
-    """A silent stall: an active drive job with no running or queued launch and no hold of any kind."""
-    from swarm import drive_activate
-    from swarm.board import open_board
-    if (led.state != "active" or led.terminal is not None or led.terminal_intent
-            or any(i.state != "concluded" for i in led.intents)):   # an open intent is a launch the board may not show yet
-        return []
-    try:
-        with open_board(cfg, readers=True) as board:
-            gens = {led.generation, led.generation_requested}
-            if any(r.state in ("queued", "running") and r.generation in gens for r in board.launches(led.job)):
-                return []
-            if drive_activate.active_holds(led, board.job_data(led.job)):
-                return []
-    except Exception:     # an unreachable board is the board checks' finding
-        return []
-    return [Check(f"drive stalled {led.job}", False,
-                  f"drive job {led.job}: no running or queued launch and no hold (stalled)",
-                  f"`swarm run --job {led.job} --name lead ...` to queue a launch, or `swarm deactivate --job {led.job}`")]
-
-
-def _drive_orphan_checks(bk, led) -> list[Check]:
-    from swarm import enrolment
-    from swarm.supervisor import driver_events
-    if enrolment.find_job_owner(bk, led.job) is not None:
-        return []
-    return [Check(f"drive orphan {led.job}", False,
-                  f"{driver_events.DRIVER_ORPHAN}: job {led.job!r} has a drive ledger but no owner record on this host",
-                  "the job was activated on another host or user, or its owner record was lost: deactivate it "
-                  "and activate it again here")]
-
-
-def _land_checks(cfg: dict, bk, jobs) -> list[Check]:
-    """Task 11b's per-destination lines (ls-remote, known_hosts, agent socket, flagged-audit text),
-    for the pinned destinations of the active jobs; nothing where the landing module is absent."""
-    from swarm import enrolment
-    try:
-        from swarm import land_doctor
-    except ImportError:
-        return []
-    if not jobs:
-        return []
-    owners = []
-    for led in jobs:
-        rec = enrolment.find_job_owner(bk, led.job)
-        if rec is not None and rec.owner:
-            owners.append(rec.owner)
-    return [Check(line.name, line.ok, line.detail, line.fix or "") for line in land_doctor.checks(cfg, owners)]
-
-
 PENDING_FINAL_WARN_HOURS = 1.0   # doctor: an ended agent without a final transcript this long is shown
 
 
@@ -2325,6 +1948,22 @@ def plugin_table_state(output: str) -> bool | None:
             if cols[1].strip().lower() in PLUGIN_OK_STATUSES:
                 return True
     return False if header or found else None
+
+
+def _codex_wrapper_checks(cfg: dict) -> list[Check]:
+    """[harness.codex] wrapper = true: codex launches are not jailed here (a WARN naming the trust boundary).
+    Empty when no wrapper is configured; an invalid one is a FAIL."""
+    from swarm.supervisor.launch import codex_command, codex_wrapper
+    try:
+        if not codex_wrapper(cfg):
+            return []
+        argv = codex_command(cfg)
+    except ValueError as exc:
+        return [Check("codex wrapper", False, str(exc), "fix [harness.codex] in the swarm config")]
+    return [Check("codex wrapper", None,
+                  f"codex launches run through `{' '.join(argv)}` and are NOT jailed by swarm: the wrapper's OS "
+                  "user is the trust boundary (its credentials, files and network are what the launch can reach)",
+                  "run the wrapper as a user that holds only the credentials a reviewer or judge needs")]
 
 
 def _codex_checks(cfg: dict, env=os.environ) -> list[Check]:

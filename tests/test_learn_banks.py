@@ -161,7 +161,7 @@ class LearnBanksTests(HindsightEnv):
         self.assertEqual(self.fake.calls('DELETE'), [])
 
     def test_met_verdict_does_not_ask_for_learnings_but_close_does(self):
-        self.cli('activate', '--job', 'J', '--no-drive', '--reason', 'legacy goal test', '--goal', 'done')
+        self.cli('activate', '--job', 'J', '--goal', 'done')
         self.cli('join', '--job', 'J', '--key', 'judge', '--judge')
         name = self.agent('judge').name
         rc, out, err = self.cli('verdict', '--job', 'J', '--as', name, 'met', 'Done')
@@ -189,7 +189,7 @@ class LearnBanksTests(HindsightEnv):
         self.assertEqual({r['body']['query'] for r in self.fake.calls('POST', '/memories/recall')}, {'Job task'})
 
     def test_queued_met_verdict_does_not_ask_for_learnings(self):
-        self.cli('activate', '--job', 'J', '--no-drive', '--reason', 'legacy goal test', '--goal', 'done')
+        self.cli('activate', '--job', 'J', '--goal', 'done')
         self.cli('join', '--job', 'J', '--key', 'judge', '--judge')
         name = self.agent('judge').name
         self.h.set_available(False)

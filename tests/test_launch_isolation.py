@@ -332,19 +332,6 @@ class FailClosedTest(LaunchHomeCase):
         self.cfg["drive"]["launch_isolation"] = "off"
         self.assertEqual(launchhome.mode(self.cfg), "required")
 
-    def test_turning_it_off_is_a_person_act(self):
-        with self.assertRaises(person.PersonRefused):
-            launchhome.set_off(True, env={"CLAUDE_CODE_SESSION_ID": "s"}, ancestor=lambda: None)
-        self.assertEqual(launchhome.mode(self.cfg), "required")
-        with mock.patch("swarm.enrolment.agent_sessions", lambda bk: set()):
-            launchhome.set_off(True, env={}, confirm=lambda a, j: True, ancestor=lambda: None)
-        self.assertEqual(launchhome.mode(self.cfg), "off")
-        self.assertEqual(launchhome.wrap(self.cfg, ["claude"], job="J", launch="s", probe=lambda: (False, "x")),
-                         ["claude"])
-        with mock.patch("swarm.enrolment.agent_sessions", lambda bk: set()):
-            launchhome.set_off(False, env={}, confirm=lambda a, j: True, ancestor=lambda: None)
-        self.assertEqual(launchhome.mode(self.cfg), "required")
-
     def test_a_host_that_cannot_jail_refuses_the_launch(self):
         with self.assertRaises(launchhome.LaunchIsolationError) as cm:
             launchhome.wrap(self.cfg, ["claude"], job="J", launch="s", probe=lambda: (False, "no userns"))
@@ -806,80 +793,6 @@ class Round3Test(BrokerCase):
             self.assertEqual(rc, 2, (p, err))
         self.assertEqual(len(seen), 1)
 
-    def test_rr15_the_cli_pins_a_brokered_requirement(self):
-        from swarm import drive_cli
-        root = self.wd
-        (root / "R.md").write_text("pinned text")
-        content = self.files / "c"
-        content.write_text("pinned text")
-        led = mock.Mock(pinned_requirements={})
-        with mock.patch.object(drive_cli, "_owner_roots", lambda bk, job: [str(root)]):
-            req = os.path.join(str(root), "R.md")
-            pins = drive_cli.pins_for("bk", "J", led, [], [f"{req}\n{content}"])
-            self.assertEqual(pins, {os.path.realpath(req): drive_cli.blob_id(b"pinned text")})
-            with self.assertRaises(drive_cli.Refuse):       # outside the job's roots
-                drive_cli.pins_for("bk", "J", led, [], [f"{os.path.join(str(self.tmp), 'elsewhere.md')}\n{content}"])
-            with self.assertRaises(drive_cli.Refuse):       # not normalised
-                drive_cli.pins_for("bk", "J", led, [], [f"{root}{os.sep}..{os.sep}wt{os.sep}R.md\n{content}"])
-
-    def test_rr16_a_brokered_review_posts_the_typed_path_and_keeps_the_report(self):
-        from swarm import drive_cli
-        priv = self.tmp / "priv"
-        priv.mkdir(mode=0o700)
-        content = self.files / "c"
-        content.write_text("the review report")
-        board = mock.Mock()
-        board.active_agent_name.return_value = "Lisa"
-        board.post.return_value = mock.Mock(id=42)
-        args = mock.Mock(job="J", key="k", artifact="b@" + "a" * 40, outcome="verified", report="r.md",
-                         report_content=str(content), report_text=None)
-        with mock.patch("swarm.enrolment.owns", lambda bk, key, job: True), \
-                mock.patch.object(drive_cli, "board_key", lambda cfg: "bk"), \
-                mock.patch("swarm.supervisor.settings.private_dir", lambda: priv), \
-                contextlib.redirect_stdout(io.StringIO()):
-            drive_cli.cmd_review(board, {}, args)
-            kept = drive_cli.review_report_path("J", 42)
-        self.assertEqual(board.post.call_args[0][2], f"REVIEW b@{'a' * 40} VERIFIED r.md")
-        self.assertEqual(kept.read_text(), "the review report")
-        self.assertTrue(str(kept).startswith(str(priv)))
-        rc, _, _ = self.cli(["review", "--job", "J", "verified", "--report", "missing.md"])
-        self.assertEqual(rc, 2)    # read in the jail: a missing report never reaches the broker
-
-    def test_a_reviewer_records_an_inline_report_through_the_broker(self):
-        # QA live-met c1bd8f3: a read-only reviewer could not create a --report file, and wrote CHANGES in capitals
-        art = "b@" + "a" * 40
-        rc, out, err = self.cli(["review", "--job", "J", "--artifact", art, "CHANGES", "--report-text",
-                                 "the test does not fail on the base"])
-        self.assertEqual((rc, out), (0, b"ran\n"), err)
-        argv = cli_argv(self.calls[-1])
-        self.assertIn("--report-text=the test does not fail on the base", argv)
-        self.assertIn("changes", argv)
-        self.assertFalse(any(a.startswith("--report=") for a in argv))
-        n = len(self.calls)
-        rc, _, err = self.cli(["review", "--job", "J", "--artifact", art, "verified"])
-        self.assertEqual((rc, len(self.calls)), (2, n), "no report at all is refused before the broker")
-        rc, _, _ = self.cli(["review", "--job", "J", "--artifact", art, "verified", "--report-text", "x",
-                             "--report", "r.md"])
-        self.assertEqual(rc, 2)
-
-    def test_an_inline_review_report_is_posted_as_inline_and_kept(self):
-        from swarm import drive_cli
-        priv = self.tmp / "priv"
-        priv.mkdir(mode=0o700)
-        board = mock.Mock()
-        board.active_agent_name.return_value = "Lisa"
-        board.post.return_value = mock.Mock(id=43)
-        args = mock.Mock(job="J", key="k", artifact="b@" + "a" * 40, outcome="changes", report=None,
-                         report_content=None, report_text="fix the test")
-        with mock.patch("swarm.enrolment.owns", lambda bk, key, job: True), \
-                mock.patch.object(drive_cli, "board_key", lambda cfg: "bk"), \
-                mock.patch("swarm.supervisor.settings.private_dir", lambda: priv), \
-                contextlib.redirect_stdout(io.StringIO()):
-            drive_cli.cmd_review(board, {}, args)
-            kept = drive_cli.review_report_path("J", 43)
-        self.assertEqual(board.post.call_args[0][2], f"REVIEW b@{'a' * 40} CHANGES {drive_cli.INLINE_REPORT}")
-        self.assertEqual(kept.read_text(), "fix the test")
-
     def test_rr17_free_text_may_start_with_a_dash(self):
         from swarm import launchproto
         for argv, want in ((["done", "--job", "J", "--summary", "- fixed the parser"], "--summary=- fixed the parser"),
@@ -1031,9 +944,6 @@ FAKE_LAUNCH = textwrap.dedent("""\
         "config": sw("post", "--job", job, "--config", "x.toml", "forged-config"),
         "read": sw("read", "--job", job),
         "verdict": sw("verdict", "--job", job, "met", "all requirements hold", "--details", "report.md"),
-        "review": sw("review", "--job", job, "--artifact", "b@" + "a" * 40, "verified", "--report", "report.md"),
-        "goal_ready": sw("goal-ready", "--job", job, "--candidate", "b@" + "a" * 40, "--add-requirements",
-                         "report.md"),
         "dash": sw("post", "--job", job, "- a line that starts with a dash"),
         "bg": sw("bg", "--", "id"),
     }))
@@ -1095,19 +1005,6 @@ class BrokerEndToEndTest(LaunchHomeCase):
         self.assertIn("recorded", out["verdict"]["out"])
         self.assertEqual(out["bg"]["rc"], 2, out)
         self.assertEqual(out["dash"]["rc"], 0, out)
-        # review and goal-ready reach the CLI with the files' content (no "cannot read", no "outside the job's
-        # work roots"): this plain board job has no drive ledger, so the drive commands stop there
-        self.assertEqual(out["review"]["rc"], 0, out)          # the report read in the jail, kept privately
-        self.assertIn("swarm-record: kind=review", out["review"]["out"])
-        kept = list((self.priv / "review-reports").iterdir())
-        self.assertEqual([p.read_text() for p in kept], ["all requirements hold"])
-        self.assertTrue(any(name in row and f"REVIEW b@{'a' * 40} VERIFIED report.md" in row for row in
-                            __import__("sqlite3").connect(board_dir / "board.sqlite3").execute(
-                                "select * from messages").fetchall()))
-        for k in ("review", "goal_ready"):
-            self.assertNotIn("cannot read", out[k]["err"], out)
-            self.assertNotIn("outside the job's work roots", out[k]["err"], out)
-            self.assertNotIn("refused in a drive launch", out[k]["err"], out)
         import sqlite3
         with sqlite3.connect(board_dir / "board.sqlite3") as c:
             rows = c.execute("select * from messages").fetchall()

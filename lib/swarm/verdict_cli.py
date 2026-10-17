@@ -80,10 +80,7 @@ def _board_verdict(board, cfg: dict, args) -> int:
     if text is None:
         return 1
     scope = _verdict_scope(args)
-    # a goal or ruling verdict is stored under its drive generation (review.verdict_data), from the ledger
-    # every verdict of a drive job carries its ledger generation (so it is bound to its VERDICT message,
-    # spool.deliver_verdict); a goal or ruling verdict is stored under it (review.verdict_data)
-    generation = _drive_generation(cfg, args.job)
+    generation = None   # no drive generations: the verdict carries no generation
     from swarm.spool import VerdictUnbound
     try:
         message_id = deliver_verdict(board, args.job, args.name, args.verdict, text[0], text[1],
@@ -107,9 +104,15 @@ def _board_verdict(board, cfg: dict, args) -> int:
     changed(args.job)
     print(f"verdict {args.verdict} recorded for {args.job}, and posted on the board")
     print(f"swarm-record: kind=verdict id={message_id} rev=1")
+    if args.verdict == "not_met":   # the judge itself starts the next run; nobody waits for the pass
+        from swarm import passcmd
+        try:
+            import os
+            started = passcmd.on_not_met(board, cfg, args.job, start=not os.environ.get("SWARM_RUN_ID"))
+        except Exception as exc:   # the verdict stands; the pass retries the run within a minute
+            started = f"next run not started here ({type(exc).__name__}: {exc}); the pass will start it"
+        if started:
+            print(f"next run: {_cli().term_safe(started)}")
     return 0
 
 
-def _drive_generation(cfg: dict, job: str) -> int | None:
-    from swarm.drive_cli import drive_generation
-    return drive_generation(cfg, job, warn=True)

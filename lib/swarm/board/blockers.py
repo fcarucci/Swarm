@@ -41,7 +41,7 @@ def open_question_launches(board, job, generation):
 
 def rollup(js, rows, now):
     if not rows or js.status not in ("active", "paused"):
-        return dataclasses.replace(js, open_blockers=0, protected_blockers=0)
+        return dataclasses.replace(js, open_blockers=0, protected_blockers=0, open_questions=0)
     first = rows[0]
     return dataclasses.replace(
         js,
@@ -50,6 +50,7 @@ def rollup(js, rows, now):
         waiting_until=first.until,
         open_blockers=len(rows),
         protected_blockers=sum(protects(b, now) for b in rows),
+        open_questions=sum(b.kind == "question" for b in rows),
     )
 
 

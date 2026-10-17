@@ -373,9 +373,7 @@ def _spawn_refusal(board, agent_id: str, member, payload: dict, cfg: dict) -> st
     # child joins this session's job anyway
     from swarm.roles import from_prompt
     if ((from_prompt(prompt) if host.reads_prompt_tags else None) or host.spawn_role_hint(call)) == "judge":
-        from swarm import seatcont
-        held = seatcont.judge_refusal(board, job)
-        return f"a spawned subagent can't be a judge" + (f": {held}" if held else "")
+        return "a spawned subagent can't be a judge"
     grant = board.reserve_spawn(agent_id, job, per_agent, per_job)
     if grant.refused == "agent":
         return f"you have already spawned {grant.agent_spawns} (limit {per_agent} per agent)"
@@ -1412,8 +1410,7 @@ def _goal_roles(board, agent_id: str, job: str, payload: dict, marker: dict | No
     goal, judge = (js.goal, js.judge) if js else (None, None)
     note = None
     if wants and not is_judge:
-        from swarm import seatcont
-        held = seatcont.judge_refusal(board, job, agent_id) or f"judge seat held by {judge or 'another agent'}"
+        held = f"judge seat held by {judge or 'another agent'}"
         note = (f"[swarm] Your prompt makes you a judge, but job \"{job}\" has one judge: {held}. "
                 f"You are on the board as a worker: your "
                 f"verdicts would be refused. Say so in your report.")
@@ -1590,7 +1587,10 @@ def _enrol_resumed(board, agent_id: str, resume: dict, payload: dict, cfg: dict)
     row = next((x for x in board.restarts(job=job) if x.id == r.get("restart_id")), None)
     from_pause = row is not None and (row.reason or "").startswith(PAUSE_RESUME_REASON)
     coordinator = _restarted_coordinator(board, resume)
-    off = None if from_pause else _supervise_off(board, cfg, job)   # a resume the user asked for is not the supervisor's
+    # a resume the user asked for, or a launch `swarm pass` started (its restart row names the launch),
+    # is not the supervisor's: the supervisor's kill switches never stop it
+    launched = row is not None and bool(getattr(row, "launch_id", None))
+    off = None if (from_pause or launched) else _supervise_off(board, cfg, job)
     if off:   # the kill switches hold at the enrolment too
         _deny(f"[swarm] The swarm supervisor is switched off ({off}), so this restart won't go "
               f"ahead. Stop now: end your turn without further tool calls.")
@@ -1831,11 +1831,9 @@ def _judge_recorded_verdict(board, agent_id: str) -> bool:
     if js is None:
         return False
     data = board.job_data(job)
-    gen = data.get('drive.generation')
+    gen = None   # no drive generations any more: a leftover drive.generation must not hide a verdict
     def current(record):
         if not record or record.get('judge') != me.name:
-            return False
-        if gen and str(record.get('generation')) != gen:
             return False
         at = dt.datetime.fromisoformat(record['at'])
         joined = me.joined_at
@@ -1851,7 +1849,7 @@ def _judge_recorded_verdict(board, agent_id: str) -> bool:
                     return True
             except (KeyError, ValueError, TypeError):
                 continue
-    if gen and any(current(record) for record in review.artifact_verdicts(board, job).values()):
+    if any(current(record) for record in review.artifact_verdicts(board, job).values()):
         return True
     artifact = review.judge_artifact(board, job, agent_id)
     handoffs = review.latest_handoffs(board, job)
@@ -2275,24 +2273,6 @@ def _orchestrator_event_lines(event, cfg, sid):
         _log_error(event, 'main', exc)
 
 
-def _orchestrator_wake(event, cfg, sid):
-    """Spec 2 (orchestrator wake): name each open job this session owns whose `swarm await` is not running, on
-    every tool call until the agent starts it (supervisor/orchestrator_wake.py). Nothing without an active job.
-    Never raises."""
-    if not sid or event != 'turn':
-        return
-    try:
-        from swarm.supervisor import orchestrator_wake
-        lines = orchestrator_wake.pending_lines(cfg, sid)
-        if lines:
-            lease = _CURRENT.get('lease')
-            if lease:
-                lease.allowed = False   # an unarmed wake must surface on every turn
-            _out('PreToolUse', '\n'.join(lines))
-    except Exception as exc:
-        _log_error(event, 'main', exc)
-
-
 def _orchestrator_respawn(event: str, cfg: dict, sid: str | None, payload: dict) -> None:
     """A not_met verdict with nobody left at work: tell the orchestrator (the only one who can
     spawn) to start the next round (swarm.respawn). Tool-call hooks add context; Stop refuses to
@@ -2354,6 +2334,22 @@ def _codex_session_end(cfg: dict, sid: str | None, agent_id: str | None, payload
         _log_error("session-end", agent_id or sid, exc)
 
 
+def _pass_sweep(cfg: dict) -> None:
+    """The stateless swarm pass (swarm.passcmd), run by every hook call and at most once per THROTTLE_SECONDS per
+    host: the board is opened only when a pass is due. Never raises."""
+    from swarm.board import BoardUnavailable, open_board
+    try:
+        from swarm import passcmd
+        if not passcmd.due():
+            return
+        with open_board(cfg, init_timeout=HOOK_INIT_TIMEOUT) as board:
+            passcmd.throttled(board, cfg)
+    except BoardUnavailable:   # no board from this host (a plain shell): the next hook tries again, quietly
+        return
+    except Exception as exc:
+        _log_error("swarm pass", "", exc)
+
+
 def run_hook(event: str, cfg: dict, host: str | None = None) -> int:
     _OUTPUT.clear()
     _CURRENT["host"] = None
@@ -2363,6 +2359,8 @@ def run_hook(event: str, cfg: dict, host: str | None = None) -> int:
     try:
         _handle(event, cfg, host)
         _wake_drivers(event, cfg, _CURRENT.get("payload") or {})
+        if event == "turn":   # once a minute at most, from the hook every session runs before each tool call
+            _pass_sweep(cfg)
     finally:
         lease = _CURRENT.get('lease')
         if lease:
@@ -2423,10 +2421,6 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
                 lease.contacted = True
         _orchestrator_plugin_lines(event, cfg, sid)
         _orchestrator_event_lines(event, cfg, sid)
-        # The explicit session-automation opt-out also disables requests to arm
-        # a wake in the host. Keep ordinary hook output unchanged when disabled.
-        if os.environ.get("SWARM_SESSION_DRIVER") != "0":
-            _orchestrator_wake(event, cfg, sid)
         _orchestrator_respawn(event, cfg, sid, payload)
         if event == "turn" and current_host().is_spawn(payload):
             try:
@@ -2544,16 +2538,6 @@ def _wake_drivers(event: str, cfg: dict, payload: dict) -> None:
         _log_error("drive wake", str(payload.get("agent_id") or payload.get("session_id")), exc)
 
 
-def _ensure_driver(cfg: dict, payload: dict) -> None:
-    """Spec 3.11 [T21]: the requester main session's first hook starts its session driver when none runs (the
-    SessionStart hook does too). Cheap when one runs: a lock probe. Never raises."""
-    try:
-        from swarm.supervisor import session_driver
-        session_driver.ensure(cfg, payload.get("session_id"))
-    except Exception as exc:
-        _log_error("drive driver", str(payload.get("session_id")), exc)
-
-
 def _drive_event(event: str, cfg: dict, payload: dict, resume: dict | None) -> bool:
     """The drive gate of PreToolUse (every call of every session, before anything else a hook does: a join, a
     first call and a launch of an unbound job included) and the receipts of PostToolUse. True when the call was
@@ -2577,8 +2561,6 @@ def _drive_event(event: str, cfg: dict, payload: dict, resume: dict | None) -> b
                 return True
         if ctx is not None:
             _no_lease(payload)
-            if ctx.kind == "requester" and not payload.get("agent_id"):
-                _ensure_driver(cfg, payload)
         if event == "done":
             drivegate.drop_grants(cfg, payload, host)   # a grant never outlives its call
             drivegate.post_tool(cfg, payload, host, resume=resume, resume_lookup=_resume_binding)
