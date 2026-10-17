@@ -4700,7 +4700,9 @@ def _board_ack(board, cfg: dict, args) -> int | None:
 def _board_run(board, cfg: dict, args) -> int | None:
     from swarm import passcmd
     try:
-        if args.workdir:
+        # the job's work dir (where re-queued leads and judges run) is the lead's, or the first one given:
+        # an engineer's own worktree must never become it
+        if args.workdir and (args.role == "lead" or not board.job_data(args.job).get("workdir")):
             board.set_job_data(args.job, "workdir", args.workdir)
         workdir = args.workdir or passcmd._workdir(board, args.job)
         if not workdir:
