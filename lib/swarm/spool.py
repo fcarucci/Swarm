@@ -571,7 +571,10 @@ def _deliver_post(board, rec: tuple) -> bool:
     from swarm import addressing
     try:
         addressing.check_author(board, job, name, key)
-        targets = addressing.resolve(board, job, to) if to else [None]
+        try:
+            targets = addressing.resolve(board, job, to) if to else [None]
+        except addressing.NoHolder as exc:   # kept for the launch's next holder
+            targets = [addressing.queue_name(exc.token)]
     except addressing.AddressError as exc:
         board.post(job, "swarm", f"not delivered: {exc}", to=name)
         return False

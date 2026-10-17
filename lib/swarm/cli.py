@@ -4136,8 +4136,12 @@ def _board_post(board, cfg: dict, args) -> int | None:
         if args.to:   # an addressed order arrives whole: the overflow goes to a file, the message names it
             from swarm.longpost import attach_overflow
             text = attach_overflow(args.job, text, board.message_cap())
-        targets = addressing.resolve(board, args.job, args.to) if args.to else [None]
-        results = [board.post(args.job, args.name, text, t) for t in targets]
+        try:
+            targets = addressing.resolve(board, args.job, args.to) if args.to else [None]
+            results = [board.post(args.job, args.name, text, t) for t in targets]
+        except addressing.NoHolder as exc:   # a launch nobody holds yet: kept for its next holder
+            targets = [addressing.queue_name(exc.token)]
+            results = [board.post(args.job, args.name, text, targets[0], agent_key=getattr(args, "key", None))]
     except ValueError as exc:   # a refused name (board.base.valid_name) or an AddressError
         print(f"not posted: {term_safe(exc)}", file=sys.stderr)
         return 1

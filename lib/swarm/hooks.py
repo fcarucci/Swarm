@@ -2358,7 +2358,8 @@ def run_hook(event: str, cfg: dict, host: str | None = None) -> int:
     try:
         _handle(event, cfg, host)
         _wake_drivers(event, cfg, _CURRENT.get("payload") or {})
-        _pass_sweep(cfg)
+        if event == "turn":   # once a minute at most, from the hook every session runs before each tool call
+            _pass_sweep(cfg)
     finally:
         lease = _CURRENT.get('lease')
         if lease:
