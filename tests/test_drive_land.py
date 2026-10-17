@@ -1171,13 +1171,6 @@ class LaunchName(unittest.TestCase):
         self.assertEqual(land.integrator_launch(""), land.integrator_launch(""))
         self.assertTrue(land.integrator_launch("A" * 100).startswith("integrator-" + "a" * 30 + "-"))
 
-    def test_launch_name_matches_driver_exec_when_present(self):
-        try:
-            from swarm.supervisor import driver_exec
-        except ImportError:
-            self.skipTest("driver_exec (Task 8a) is not integrated yet")
-        for g in ("feat/x", "A b", "", "x" * 90):
-            self.assertEqual(land.integrator_launch(g), driver_exec.launch_name("integrator", g))
 
 
 class Pins(unittest.TestCase):

@@ -1536,7 +1536,55 @@ def doctor(host: str | None = None, *, config: Path | None = None, claude_plugin
         checks += _bg_orphans_check(cfg)
     checks += supervisor_checks(cfg, host)
     checks += _receipt_failures_check()
+    if cfg_ok:
+        checks += _launch_sandbox_checks(cfg)
     return checks
+
+
+def _launch_sandbox_checks(cfg: dict, platform: str | None = None) -> list[Check]:
+    """The launch sandbox stays after the driver's removal: with a [drive] section configured, say whether launches
+    run in their credential jail (best-effort off Linux; no probe under SWARM_NO_SYSTEMD, i.e. the test suite)."""
+    if not isinstance(cfg.get("drive"), dict):
+        return []
+    plat = platform or sys.platform
+    if not plat.startswith("linux"):
+        from swarm.supervisor import launchhome
+        note = launchhome.BEST_EFFORT_NOTE.format(platform=plat)
+        return [_launch_isolation_check(cfg, probe=lambda c: (None, note))]
+    if os.environ.get("SWARM_NO_SYSTEMD") == "1":
+        return []
+    return [_launch_isolation_check(cfg)]
+
+
+def _launch_isolation_check(cfg: dict, probe=None) -> Check:
+    """Task 20: whether drive launches on this host run in their credential jail, and whether any push
+    credential is reachable from inside it (ssh -T to GitHub, gh auth status, git credential helpers,
+    agent and token variables, the covered paths). `probe` replaces launchhome.probe (tests)."""
+    from swarm.supervisor import launchhome
+    fix = ("enable unprivileged user namespaces for this user (sysctl kernel.unprivileged_userns_clone=1; on "
+           "Ubuntu kernel.apparmor_restrict_unprivileged_userns=0), or move the credential named out of reach")
+    try:
+        ok, detail = (probe or (lambda c: launchhome.probe(c, network=True)))(cfg)
+    except launchhome.LaunchIsolationError as exc:
+        return Check("launch isolation", False, str(exc), "fix [drive] launch_isolation")
+    except Exception as exc:   # never let the probe break doctor
+        return Check("launch isolation", False, f"probe error: {type(exc).__name__}: {exc}", fix)
+    if ok:
+        return Check("launch isolation", True, f"drive launches: {detail}")
+    if ok is None:
+        if detail.startswith("best-effort"):
+            return Check("launch isolation", None, detail,
+                         "drive launches here get no filesystem jail: their environment carries no credential, credential "
+                         "helper or agent, but your files (and keychain or Credential Manager) stay reachable to them. "
+                         "Best-effort guards against accidental credential use, not a hostile launch. On Linux, enable "
+                         "unprivileged user namespaces for the full jail; [drive] launch_isolation = \"strict\" refuses "
+                         "launches instead")
+        if detail.startswith("off"):
+            return Check("launch isolation", None, f"drive launches: {detail}",
+                         "a person runs `swarm supervise launch-isolation on` to jail every drive launch again")
+        return Check("launch isolation", False, f"drive launches are NOT started on this host: {detail}", fix)
+    return Check("launch isolation", False, f"drive launches can reach a credential: {detail}",
+                 "cover the path named ([drive] launch_cover_paths) or remove the credential from the launch env")
 
 
 # ------------------------------------------------------------- doctor: what a sandbox may write

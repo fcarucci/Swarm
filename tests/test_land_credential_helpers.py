@@ -8,7 +8,7 @@ from unittest import mock
 import support  # noqa: F401
 from swarm import land
 from swarm.land import Destination, LandEnv, LandRefused, credential_from_pin
-from swarm.supervisor import driver, mirror
+from swarm.supervisor import mirror
 from test_drive_mirror_land import HelperFixtures
 
 
@@ -80,16 +80,6 @@ class CredentialHelperKey(HelperFixtures):
                 credential_from_pin(pin, config_dir=self.home)
             self.assertIn("credential_helpers", str(cm.exception))
             self.assertIn("absolute", str(cm.exception))
-
-    @support.posix_only("file modes")
-    def test_the_config_list_flows_into_the_landing_environment(self):
-        gh = self.gh()
-        cfg = {"drive": {"credential_helpers": [gh, 7, "", "gh auth git-credential"]}}
-        self.assertEqual(driver._credential_helpers(cfg), (gh, "gh auth git-credential"))
-        self.assertEqual(driver._credential_helpers({"drive": {}}), ())
-        self.assertEqual(driver._credential_helpers({"drive": {"credential_helpers": gh}}), ())
-        self.assertEqual(driver._credential_helpers(None), ())
-        self.assertEqual(len(self.mirrors(f"{gh} auth git-credential", driver._credential_helpers(cfg))), 1)
 
 
 if __name__ == "__main__":
