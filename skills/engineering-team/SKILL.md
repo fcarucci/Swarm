@@ -5,26 +5,17 @@ description: Use when a software project needs a coordinated engineering lead, e
 
 # Engineering team
 
-Use `swarm:swarm` for the job and board. **Every goal job is driven**: `swarm activate --job J --goal G` hands the job to the supervisor, which runs an engineering lead (EL) launch, the engineers, reviewers, QA, the judge and the landing. You, the invoking agent, are the **requester/observer**: you state the request, activate, answer questions and report. You do not schedule, spawn or integrate. Custom Swarm roles identify responsibilities; they do not grant product, technical, review, or QA authority in code. The built-in `judge` and `verifier` have separate Swarm controls.
+Use `swarm:swarm` for the job and board. **Every goal job is kept moving by `swarm pass`**: you activate it with a goal and queue the engineering lead (EL) launch; the lead queues engineers, reviewers and QA with `swarm run`, and the pass runs the judge on each hand-off. You, the invoking agent, are the **requester/observer**: you state the request, activate, answer questions and report. You do not schedule, spawn or integrate. Custom Swarm roles identify responsibilities; they do not grant product, technical, review, or QA authority in code. The built-in `judge` and `verifier` have separate Swarm controls.
 
 Read [host procedures](references/hosts.md) before activating a job. They cover the drive activation checklist, the EL brief template, Claude and Codex syntax for non-drive jobs, and recovery. Read [role authority](references/team-roles.md) before writing the lead brief, [artifact contracts](references/artifacts.md) before creating baselines or freezing a candidate, [integration gates and hand-offs](references/gates.md) before the first change is opened for review, and [authorization and recovery](references/recovery.md) before writing briefs and when a launch is lost. Use the project's existing document layout; a small change can use compact records that preserve the same decisions.
 
-## Breaking changes in drive mode
+## How a goal job runs
 
-1. A goal implies drive: `swarm activate --goal` starts a driven job. `--no-drive --reason TEXT` opts out and gives the old, coordinator-run job (see [Non-drive jobs](#non-drive-jobs)).
-2. `swarm ask` in a drive job needs `--default`: the driver applies it when the question expires (`question_expiry`, 4h by default), so no question blocks the job.
-3. The requester's Agent-tool spawns are refused in drive jobs. Staffing goes through `swarm run`, made by the lead (or a person); the supervisor launches the launch.
-4. No timer: `swarm activate --goal` starts this session's session driver, which drives the job while the session is open (idle is fine); Swarm installs no timer. With no session open, `swarm drive run` drives it.
-
-## Run a driven team
-
-1. Small work: skip the team and do it yourself. Otherwise capture the user's request verbatim or by stable link, constraints, approvals already given, and a provisional size.
-2. Check the host once: `swarm doctor` (session driver, git 2.40 or newer, pinned credentials and a dry-run `git ls-remote` per landing destination). Choose the optional launches only with the user's say-so (`product_manager` and `build_engineer`; `team.toml` or `--team`).
-3. Write the requirements as files (PR criteria, observable, with exclusions) and the **lead brief** from the [EL brief template](references/hosts.md#el-brief-template). Pin the requirements at activation: `--requirements PATH` (a requirement is pinned by blob id and cannot be replaced).
-4. Activate and leave: `swarm activate --job J --goal "<what done means>" --lead-brief PATH --workdir DIR [--requirements PATH]... [--max-cost-usd N] [--ruling-reserve-usd N] [--model ROLE=MODEL]`. The spending cap (shipped default 40 USD, ruling reserve 5 USD) and every other `[drive]` value are configurable defaults; ask the user whether the default cap suits the job. The command writes the job, the lead launch and the budgets, kicks the supervisor and returns.
-5. Observe with `swarm watch --job J` or `swarm snapshot --job J --follow` (no polling loop). As the requester session you may `swarm ask`/answer questions, `swarm halt --job J` / `unhalt`, `swarm deactivate` (that is CANCELLED), and `swarm drive budget --job J KEY=VALUE` or `swarm drive models --job J ROLE=MODEL` on a running job. Everything else is the lead's and the driver's.
-6. The lead requests launches with `swarm run` and posts `GOAL-READY <candidate> req=<digest>` (via `swarm goal-ready`) when it believes the goal is met. The goal judge then judges the integrated target. A job ends in **MET**, **UNREACHABLE** (the judge's verdict with reasons, or the labelled mechanical one when budget, deadline or reserve ran out: it says what was tried and what would change it) or **CANCELLED** (a person). It is never idle, stalled or waiting for you. A ruling is the judge's decision at an exhausted budget or no progress: relay UNREACHABLE reports to the user as a result, not as a failure of the process.
-7. Report delivered scope, checks, limits, accepted risks, the final verdict, cost against the cap, and any separate authorization needed for deployment or publication. Never merge, push to the target or close the job yourself.
+1. `swarm activate --job J --goal "<what done means>"`, then `swarm run --job J --name lead-1 --role lead --brief PATH --workdir DIR`. Write the lead brief from the [EL brief template](references/hosts.md#el-brief-template).
+2. The lead staffs with `swarm run` and hands off with `DONE <branch@sha> | summary` or `swarm done --artifact branch@sha`. `swarm pass` (run by the hooks) starts queued launches, runs one judge per hand-off, closes a met job completed, re-queues the lead on not_met, and fails a job after three lead launches with no hand-off, on the cost cap, or on an expired question.
+3. A job is only ever `active`, `waiting` on an open `swarm ask` question to a person, `completed`, `failed` or `cancelled`. It never idles and never waits for anything else.
+4. Observe with `swarm watch --job J`. Answer questions addressed to you; `swarm deactivate` cancels; `swarm ack --job J` stops a failed job's notices.
+5. Report delivered scope, checks, limits, the verdict and cost. Never merge, push to the target or close the job yourself unless the user asked.
 
 ### What the driver does instead of the PM
 
@@ -65,9 +56,9 @@ are in the ci skill). Set `evidence_command` to the project's CI checker with `{
 does not apply: zero exit status must mean all required checks passed on that exact rebased SHA. An absent
 checker holds integration. Completing a request must preserve the approved rebased SHA and linear history.
 
-## Non-drive jobs
+## Jobs without a goal
 
-Everything below applies only to a goal job activated with `--no-drive --reason TEXT`, or to a job without a goal: nothing drives it, so the invoking agent is the project manager (PM) and schedules, dispatches and integrates as before. In a driven job none of it applies.
+Everything below applies only to a job without a goal: the pass does not run its judge, so the invoking agent is the project manager (PM) and schedules, dispatches and integrates as before.
 
 ### Run the team (non-drive)
 

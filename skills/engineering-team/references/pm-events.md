@@ -1,6 +1,6 @@
 # PM event procedure
 
-**Non-drive jobs only.** In a drive job (every goal job unless `--no-drive --reason TEXT`) nobody
+**Jobs without a goal only.** In a goal job `swarm pass` does this and nobody
 polls and no PM acts per event: the driver turns the same events into actions and the requester
 is an observer.
 
