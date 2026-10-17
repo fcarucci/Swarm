@@ -146,7 +146,7 @@ def _start_one(board, cfg: dict, job: str, row, reserve: float, starter) -> str 
     # The session enrols as the replacement of a departed predecessor (hooks._enrol_resumed ->
     # claim_resume): give it one, under the launch's role, closed before the claim.
     old = f"launch:{launch_id}"
-    board.allocate_name(old, job, row.role)
+    name = board.allocate_name(old, job, row.role)   # the session takes this name over (claim_resume)
     if row.role == "judge":
         board.take_judge_launch(old, job)   # its verdict is recorded under the session's own name
     board.close_agent(old, "drive predecessor")
@@ -162,11 +162,11 @@ def _start_one(board, cfg: dict, job: str, row, reserve: float, starter) -> str 
         workdir = os.path.realpath(row.workdir)
         spec = launch.spec_for(cfg, row.harness, prompt=row.brief, workdir=workdir, model=model,
                                minutes=minutes, budget_usd=reserve, drive=True)
-        marker = markers.write_resume_marker(cfg, job, r.id, resume_of=old, name=row.name,
+        marker = markers.write_resume_marker(cfg, job, r.id, resume_of=old, name=name,
                                              harness=row.harness, session_id=spec.session_id)
         if spec.session_id:
             board.set_restart_agent(r.id, spec.session_id)
-        run = {"restart_id": r.id, "job": job, "name": row.name, "harness": row.harness,
+        run = {"restart_id": r.id, "job": job, "name": name, "harness": row.harness,
                "resume_of": old, "marker": str(marker), "argv": list(spec.argv), "cwd": spec.cwd,
                "stdin": spec.stdin, "session_id": spec.session_id, "limit_seconds": minutes * 60,
                "enrol_seconds": float(settings(cfg)["enrol_minutes"]) * 60, "config": None,

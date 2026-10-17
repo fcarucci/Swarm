@@ -77,7 +77,8 @@ class PassCmd(unittest.TestCase):
         self.assertEqual(self.b.get_launch("J", 1, "lead-1").state, "running")
         self.assertEqual(len(self.runs), 1)
         self.assertTrue(self.runs[0]["launch_id"].startswith("lead-1-"))
-        self.assertEqual(self.runs[0]["name"], "lead-1")
+        self.assertEqual(self.runs[0]["launch"], "lead-1")
+        self.assertTrue(self.runs[0]["name"] and self.runs[0]["name"] != "lead-1")   # the session's own agent name
         self.pass_()
         self.assertEqual(len(self.runs), 1)   # running and not re-started
 
