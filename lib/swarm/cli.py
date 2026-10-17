@@ -2845,6 +2845,14 @@ def _parser() -> argparse.ArgumentParser:
                                      "judge, notices failed jobs (the hooks run it too, every minute at most)")
     ak = sub.add_parser("ack", help="the owner has seen a failed job's notice from `swarm pass`: its notices stop")
     ak.add_argument("--job", required=True)
+    rv = sub.add_parser("review", help="post a review of an artifact: REVIEW <artifact> VERIFIED|CHANGES <report>")
+    rv.add_argument("--job", required=True); rv.add_argument("--artifact", required=True)
+    rv.add_argument("outcome", choices=["verified", "changes"], type=str.lower)
+    rg = rv.add_mutually_exclusive_group(required=True)
+    rg.add_argument("--report", metavar="FILE", help="a file holding the review report (its path is posted)")
+    rg.add_argument("--report-text", metavar="TEXT", help="the review report itself, posted after the line")
+    rv.add_argument("--key", help="the reviewing agent's key (the hooks add it)")
+    rv.add_argument("--as", dest="name", help="the reviewing agent's name")
     rn = sub.add_parser("run", help="queue a named launch for the job: `swarm pass` (or the hooks) starts it "
                                     "when the job's concurrency and cost caps allow")
     rn.add_argument("--job", required=True); rn.add_argument("--name", required=True)
@@ -4611,6 +4619,31 @@ def _board_pass(board, cfg: dict, args) -> None:
         print("nothing to do")
 
 
+def _board_review(board, cfg: dict, args) -> int | None:
+    """REVIEW <artifact> VERIFIED|CHANGES <report>: a reviewer's result on the board, under its own name."""
+    name = args.name or (board.active_agent_name(args.key) if args.key else None)
+    if not name:
+        print("swarm review: who is reviewing is unknown here: give --as NAME or --key KEY", file=sys.stderr)
+        return 1
+    artifact = args.artifact.strip()
+    if not artifact or any(c.isspace() for c in artifact):
+        print("swarm review: --artifact must be one reference without spaces", file=sys.stderr)
+        return 1
+    if args.report is not None:
+        path = os.path.abspath(os.path.expanduser(args.report))
+        if not os.path.isfile(path) or os.path.getsize(path) == 0:
+            print(f"swarm review: the report {term_safe(path)} is missing or empty", file=sys.stderr)
+            return 1
+        tail = path
+    else:
+        tail = " ".join(args.report_text.split())
+        if not tail:
+            print("swarm review: the review report is empty", file=sys.stderr)
+            return 1
+    res = board.post(args.job, name, f"REVIEW {artifact} {args.outcome.upper()} {tail}", None, agent_key=args.key)
+    print(f"posted #{res.id}" + (f" (truncated to {board.message_cap()} chars)" if res.truncated else ""))
+
+
 def _board_ack(board, cfg: dict, args) -> int | None:
     from swarm import passcmd
     if not passcmd.ack(board, args.job):
@@ -4698,6 +4731,7 @@ BOARD_COMMANDS = {
     "purge": _board_purge,
     "pass": _board_pass,
     "ack": _board_ack,
+    "review": _board_review,
     "run": _board_run,
     "transcript": _board_transcript,
     "memory": _board_memory,
