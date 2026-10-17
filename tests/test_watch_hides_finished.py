@@ -3,7 +3,8 @@ import datetime as dt
 import unittest
 from types import SimpleNamespace
 
-from swarm import cli
+import support  # noqa: F401  (sets sys.path)
+from swarm import cli  # noqa: E402
 
 
 def _a(status, ended_s=5):
