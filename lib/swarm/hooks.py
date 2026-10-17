@@ -2336,13 +2336,15 @@ def _codex_session_end(cfg: dict, sid: str | None, agent_id: str | None, payload
 def _pass_sweep(cfg: dict) -> None:
     """The stateless swarm pass (swarm.passcmd), run by every hook call and at most once per THROTTLE_SECONDS per
     host: the board is opened only when a pass is due. Never raises."""
+    from swarm.board import BoardUnavailable, open_board
     try:
         from swarm import passcmd
         if not passcmd.due():
             return
-        from swarm.board import open_board
         with open_board(cfg, init_timeout=HOOK_INIT_TIMEOUT) as board:
             passcmd.throttled(board, cfg)
+    except BoardUnavailable:   # no board from this host (a plain shell): the next hook tries again, quietly
+        return
     except Exception as exc:
         _log_error("swarm pass", "", exc)
 
