@@ -21,7 +21,7 @@ class GoalEnv(RoutingEnv):
         self.cfg = swarm.load_config(self.config)
 
     def activate_goal(self, job: str = "J", goal: str = GOAL, **kw):
-        return self.activate(job, "--no-drive", "--reason", "legacy goal test", "--goal", goal, **kw)
+        return self.activate(job, "--goal", goal, **kw)
 
     def judge_prompt(self, job: str = "J") -> str:
         return f"[swarm job: {job}]\n[swarm role: judge]\nDecide whether the goal is met."
