@@ -1905,11 +1905,7 @@ class Board(abc.ABC):
         claim_resume). The check and the join are two steps: an agent racing a pause can end up
         active on the paused job; its next hook turn is denied by the pause notice."""
         self.require_unpaused(job)
-        name = self._allocate_name(agent_key, job, role)
-        if role:   # posts queued for the seat while nobody held it reach its new holder
-            from swarm import seatcont
-            seatcont.deliver_queued(self, job, name, role)
-        return name
+        return self._allocate_name(agent_key, job, role)
 
     def job_state(self, job: str) -> str | None:
         """The job's stored status (JOB_STATUSES), None if there is no such job. One cheap lookup

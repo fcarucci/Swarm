@@ -124,9 +124,6 @@ def check(marker: Path, job: str, *, force: bool, host, open_board,
         with open_board() as board:
             js = board.job_status(job)
             has_details = idle_not_met(js) and board.verdict_details(job) is not None
-            if idle_not_met(js):
-                from swarm import seatcont
-                held = seatcont.judge_refusal(board, job)
             if idle_not_met(js) and js.verdict_at:
                 agents = board.agents(job)
                 judges = {a.name for a in agents if a.role == "judge"} | {js.verdict_by}
