@@ -2845,6 +2845,10 @@ def _parser() -> argparse.ArgumentParser:
                     "session's jobs leaves (for a session start: a restart killed them without a stop)")
     lv.add_argument("--as", dest="name"); lv.add_argument("--key"); lv.add_argument("--session")
     sub.add_parser("purge")
+    sub.add_parser("pass", help="one stateless sweep over the open jobs: starts their queued launches, runs the "
+                                     "judge, notices failed jobs (the hooks run it too, every minute at most)")
+    ak = sub.add_parser("ack", help="the owner has seen a failed job's notice from `swarm pass`: its notices stop")
+    ak.add_argument("--job", required=True)
     tl = sub.add_parser("tail", help="follow the board live (Ctrl-C to stop)")
     tl.add_argument("--job", help="only this job (default: all jobs)")
     tl.add_argument("-n", "--backlog", type=int, default=20, help="show the last N messages first")
@@ -4592,6 +4596,23 @@ def _board_leave(board, cfg: dict, args) -> int | None:
     print("left")
 
 
+def _board_pass(board, cfg: dict, args) -> None:
+    from swarm import passcmd
+    acts = passcmd.run_pass(board, cfg)
+    for a in acts:
+        print(term_safe(a))
+    if not acts:
+        print("nothing to do")
+
+
+def _board_ack(board, cfg: dict, args) -> int | None:
+    from swarm import passcmd
+    if not passcmd.ack(board, args.job):
+        print(f"no job {term_safe(args.job)}", file=sys.stderr)
+        return 1
+    print(f"{term_safe(args.job)}: acked")
+
+
 def _board_purge(board, cfg: dict, args) -> None:
     board.purge()
     if transcripts_enabled(cfg):
@@ -4652,6 +4673,8 @@ BOARD_COMMANDS = {
     "event": _board_event,
     "leave": _board_leave,
     "purge": _board_purge,
+    "pass": _board_pass,
+    "ack": _board_ack,
     "transcript": _board_transcript,
     "memory": _board_memory,
 }

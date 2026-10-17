@@ -94,6 +94,12 @@ def _settle(board, job: str) -> None:
                                job=job, last_outcome=outcome)
 
 
+def managed(board, job: str) -> bool:
+    """Whether the pass manages the job: it has a work dir of its own or launches. Any other open job
+    (a plain one, never launched) is left alone: the pass would otherwise fail it for lacking a work dir."""
+    return bool(board.job_data(job).get("workdir")) or bool(board.launches(job))
+
+
 def _running(board, job: str) -> bool:
     """Whether a launch of the job has an open restart (its session is still running)."""
     open_ids = {r.launch_id for r in board.restarts(job) if r.launch_id and r.ended_at is None}
@@ -210,6 +216,8 @@ def _judge_brief(js, artifact: str) -> str:
 
 def _advance(board, cfg: dict, js, now: _dt.datetime, starter) -> list[str]:
     job = js.job
+    if not managed(board, job):
+        return []
     _settle(board, job)
     acts, cost_reason = _start_queued(board, cfg, job, starter)
     if cost_reason:
@@ -269,7 +277,7 @@ def _notices(board, now: _dt.datetime) -> list[str]:
     """Repeat the notice of every failed job not yet acked, once per NOTICE_MINUTES."""
     acts = []
     for js in board.jobs(include_closed=True):
-        if js.status != "failed":
+        if js.status != "failed" or not managed(board, js.job):
             continue
         data = board.job_data(js.job)
         if data.get("pass_acked"):
@@ -304,17 +312,23 @@ def ack(board, job: str, now: _dt.datetime | None = None) -> bool:
     return board.set_job_data(job, "pass_acked", (now or board.now()).isoformat())
 
 
+def due() -> bool:
+    """Whether a pass is due on this host: the last one started THROTTLE_SECONDS ago or more. Cheap: the hooks
+    check it before they connect to the board."""
+    try:
+        return time.time() - (paths.state_dir() / "pass.stamp").stat().st_mtime >= THROTTLE_SECONDS
+    except FileNotFoundError:
+        return True
+
+
 def throttled(board, cfg: dict) -> list[str] | None:
     """The hooks' pass: at most one per THROTTLE_SECONDS per host, never two at once (a lock file).
     None when skipped."""
+    if not due():
+        return None
     d = paths.state_dir()
     d.mkdir(parents=True, exist_ok=True)
     stamp = d / "pass.stamp"
-    try:
-        if time.time() - stamp.stat().st_mtime < THROTTLE_SECONDS:
-            return None
-    except FileNotFoundError:
-        pass
     try:
         import fcntl
     except ImportError:   # Windows: no flock; the stamp alone throttles

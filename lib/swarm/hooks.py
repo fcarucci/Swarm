@@ -2333,6 +2333,20 @@ def _codex_session_end(cfg: dict, sid: str | None, agent_id: str | None, payload
         _log_error("session-end", agent_id or sid, exc)
 
 
+def _pass_sweep(cfg: dict) -> None:
+    """The stateless swarm pass (swarm.passcmd), run by every hook call and at most once per THROTTLE_SECONDS per
+    host: the board is opened only when a pass is due. Never raises."""
+    try:
+        from swarm import passcmd
+        if not passcmd.due():
+            return
+        from swarm.board import open_board
+        with open_board(cfg, init_timeout=HOOK_INIT_TIMEOUT) as board:
+            passcmd.throttled(board, cfg)
+    except Exception as exc:
+        _log_error("swarm pass", "", exc)
+
+
 def run_hook(event: str, cfg: dict, host: str | None = None) -> int:
     _OUTPUT.clear()
     _CURRENT["host"] = None
@@ -2342,6 +2356,7 @@ def run_hook(event: str, cfg: dict, host: str | None = None) -> int:
     try:
         _handle(event, cfg, host)
         _wake_drivers(event, cfg, _CURRENT.get("payload") or {})
+        _pass_sweep(cfg)
     finally:
         lease = _CURRENT.get('lease')
         if lease:

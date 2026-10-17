@@ -153,10 +153,20 @@ class PassCmd(unittest.TestCase):
         self.pass_(minutes=10 * passcmd.NOTICE_MINUTES)
         self.assertEqual(notices(), before + 1)
 
+    def test_a_plain_job_without_launches_or_work_dir_is_left_alone(self):
+        self.b.open_job("P", None, None, None, "me", goal="plain")
+        self.b.open_blocker("P", "question", "alice", "ship now?", until=self.b.now() - _dt.timedelta(minutes=1),
+                            created_by="me")
+        self.pass_(minutes=passcmd.NOTICE_MINUTES + 1)
+        self.assertEqual(self.b.job_status("P").status, "active")
+        self.assertEqual(self.b.launches("P"), [])
+
     def test_hook_pass_is_throttled_per_host(self):
         with tempfile.TemporaryDirectory() as tmp, \
                 mock.patch.object(passcmd.paths, "state_dir", return_value=Path(tmp)):
+            self.assertTrue(passcmd.due())
             self.assertIsNotNone(passcmd.throttled(self.b, self.cfg))
+            self.assertFalse(passcmd.due())
             self.assertIsNone(passcmd.throttled(self.b, self.cfg))
 
 
