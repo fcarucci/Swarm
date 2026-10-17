@@ -1831,11 +1831,9 @@ def _judge_recorded_verdict(board, agent_id: str) -> bool:
     if js is None:
         return False
     data = board.job_data(job)
-    gen = data.get('drive.generation')
+    gen = None   # no drive generations any more: a leftover drive.generation must not hide a verdict
     def current(record):
         if not record or record.get('judge') != me.name:
-            return False
-        if gen and str(record.get('generation')) != gen:
             return False
         at = dt.datetime.fromisoformat(record['at'])
         joined = me.joined_at
@@ -1851,7 +1849,7 @@ def _judge_recorded_verdict(board, agent_id: str) -> bool:
                     return True
             except (KeyError, ValueError, TypeError):
                 continue
-    if gen and any(current(record) for record in review.artifact_verdicts(board, job).values()):
+    if any(current(record) for record in review.artifact_verdicts(board, job).values()):
         return True
     artifact = review.judge_artifact(board, job, agent_id)
     handoffs = review.latest_handoffs(board, job)
