@@ -1523,7 +1523,7 @@ def doctor(host: str | None = None, *, config: Path | None = None, claude_plugin
             cfg = load_config(config)
         except Exception:          # already a config FAIL above: check Codex against the defaults
             cfg = load_config(Path("/nonexistent/swarm-config.toml"))
-        checks += _codex_checks(cfg, env)
+        checks += _codex_checks(cfg, env) + _codex_wrapper_checks(cfg)
     from swarm.cli import load_config
     try:
         cfg, cfg_ok = load_config(config), True
@@ -1948,6 +1948,22 @@ def plugin_table_state(output: str) -> bool | None:
             if cols[1].strip().lower() in PLUGIN_OK_STATUSES:
                 return True
     return False if header or found else None
+
+
+def _codex_wrapper_checks(cfg: dict) -> list[Check]:
+    """[harness.codex] wrapper = true: codex launches are not jailed here (a WARN naming the trust boundary).
+    Empty when no wrapper is configured; an invalid one is a FAIL."""
+    from swarm.supervisor.launch import codex_command, codex_wrapper
+    try:
+        if not codex_wrapper(cfg):
+            return []
+        argv = codex_command(cfg)
+    except ValueError as exc:
+        return [Check("codex wrapper", False, str(exc), "fix [harness.codex] in the swarm config")]
+    return [Check("codex wrapper", None,
+                  f"codex launches run through `{' '.join(argv)}` and are NOT jailed by swarm: the wrapper's OS "
+                  "user is the trust boundary (its credentials, files and network are what the launch can reach)",
+                  "run the wrapper as a user that holds only the credentials a reviewer or judge needs")]
 
 
 def _codex_checks(cfg: dict, env=os.environ) -> list[Check]:
