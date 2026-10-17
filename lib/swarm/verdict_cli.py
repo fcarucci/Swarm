@@ -104,6 +104,15 @@ def _board_verdict(board, cfg: dict, args) -> int:
     changed(args.job)
     print(f"verdict {args.verdict} recorded for {args.job}, and posted on the board")
     print(f"swarm-record: kind=verdict id={message_id} rev=1")
+    if args.verdict == "not_met":   # the judge itself starts the next run; nobody waits for the pass
+        from swarm import passcmd
+        try:
+            import os
+            started = passcmd.on_not_met(board, cfg, args.job, start=not os.environ.get("SWARM_RUN_ID"))
+        except Exception as exc:   # the verdict stands; the pass retries the run within a minute
+            started = f"next run not started here ({type(exc).__name__}: {exc}); the pass will start it"
+        if started:
+            print(f"next run: {_cli().term_safe(started)}")
     return 0
 
 

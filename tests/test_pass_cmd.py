@@ -238,6 +238,25 @@ class PassCmd(unittest.TestCase):
         log.assert_called_once()
 
 
+class JudgeStartsNextRun(PassCmd):
+    def test_not_met_queues_and_starts_the_lead_while_the_judge_is_still_running(self):
+        artifact = self.hand_off()
+        self.pass_()          # judge queued
+        self.pass_()          # judge started (its restart stays open: the judge is still running)
+        judge = self.b.allocate_name("judge", "J", "judge")
+        self.assertTrue(self.b.claim_judge("judge", "J"))
+        self.assertTrue(self.b.record_verdict("J", judge, "not_met", "tests missing", "add tests", artifact=artifact))
+        before = len(self.runs)
+        out = passcmd.on_not_met(self.b, self.cfg, "J", starter=self.starter)
+        self.assertIn("relead-", out)
+        self.assertEqual(len(self.runs), before + 1)          # started now, not after the judge exits
+        relead = self.b.get_launch("J", 1, "relead-" + passcmd._key(artifact))
+        self.assertEqual(relead.state, "running")
+        self.assertIn("add tests", relead.brief)
+        passcmd.on_not_met(self.b, self.cfg, "J", starter=self.starter)
+        self.assertEqual(len(self.runs), before + 1)          # never twice for the same artifact
+
+
 class EmptyJobs(PassCmd):
     def test_an_unlaunched_job_nobody_works_on_fails_after_the_quiet_limit(self):
         self.b.open_job("O", None, None, None, "me", goal="g")   # an orchestrator's job: no workdir, no launches

@@ -240,7 +240,9 @@ def _lead_brief(js, steps: str) -> str:
 def _judge_brief(js, artifact: str) -> str:
     return (f"You are the judge of job {js.job}. Goal: {js.goal or '(none set)'}\n"
             f"Judge the hand-off {artifact}. Record it with swarm verdict --job {js.job} "
-            f"met|not_met|unreachable, with --candidate and --reason (and --next for not_met).")
+            f"met|not_met|unreachable, with --candidate and --reason (and --next for not_met). "
+            f"A not_met verdict starts the next lead run itself, with your --next as its brief: make --next "
+            f"the exact list of what to change and how it will be re-checked. Record the verdict, then stop.")
 
 
 EMPTY_MINUTES = 30   # an open job nobody works on, with nothing queued and no question, ends failed after this
@@ -318,6 +320,44 @@ def _advance(board, cfg: dict, js, now: _dt.datetime, starter) -> list[str]:
     name = f"lead-{len([r for r in board.launches(job) if r.role == 'lead']) + 1}"
     _queue(board, job, name, "lead", _lead_brief(js, js.verdict_next or js.verdict_reason or ""), workdir)
     return acts + [f"{job}: queued {name}"]
+
+
+def on_not_met(board, cfg: dict, job: str, *, now: _dt.datetime | None = None, starter=None,
+               start: bool = True) -> str | None:
+    """The judge's not_met starts the next run at once: called by `swarm verdict ... not_met` while the
+    judge's own session is still open (the pass would wait for it to end). Queues the lead with the
+    verdict's next steps (the same relead-<key> name the pass uses, so it is never queued twice) and
+    starts it. Returns what it did, or None when the job is not one the pass launches for."""
+    now = now or board.now()
+    if not managed(board, job):
+        return None
+    js = board.job_status(job)
+    if js is None or js.status != "active":
+        return None
+    found = handoff(board, job)
+    artifact = js.verdict_artifact or (found[1] if found else "the job")
+    key = _key(artifact)
+    since = found[0].created_at if found else (js.activated_at or js.created_at)
+    if _attempts(board, job, since) >= LEAD_ATTEMPTS:
+        return _fail(board, job, f"no met verdict after {LEAD_ATTEMPTS} launches", now)
+    workdir = _workdir(board, job)
+    if workdir is None:
+        return _fail(board, job, "no work dir is known for its launches (swarm run --workdir)", now)
+    name = f"relead-{key}"
+    row = board.get_launch(job, 1, name)
+    if row is None or row.state in ("done", "failed", "cancelled"):
+        steps = js.verdict_next or js.verdict_reason or "see the verdict"
+        board.post(job, PASS_NAME, f"NOT MET {artifact}: {steps}"[:200])
+        _queue(board, job, name, "lead", _lead_brief(js, steps), workdir)
+    if not start:   # inside a launch: the next hook pass (within a minute) starts queued launches first
+        return f"{job}: {name} queued"
+    if starter is None:
+        from swarm.supervisor import runner
+        starter = runner.start
+    acts, cost_reason = _start_queued(board, cfg, job, starter)
+    if cost_reason:
+        return _fail(board, job, cost_reason, now)
+    return "; ".join(acts) or f"{job}: {name} queued"
 
 
 def _notices(board, now: _dt.datetime) -> list[str]:
