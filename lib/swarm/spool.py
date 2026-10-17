@@ -206,9 +206,6 @@ def spool_verdict(cfg: dict, job: str, name: str, verdict: str, reason: str,
                   req: str | None = None) -> Path:
     """Queue a `swarm verdict`; whether `name` is the job's judge is checked on delivery. The typed
     fields (schema 25) are queued with it, and replayed on delivery."""
-    if generation is None:   # a drive job's verdict keeps its ledger generation while it waits (S2)
-        from swarm.verdict_cli import _drive_generation
-        generation = _drive_generation(cfg, job)
     typed = typed_verdict_fields(scope, generation, open_count, progress, candidate, req)
     return _spool(cfg, {"job": job, "name": name, "verdict": verdict, "reason": reason,
                         "next": next_steps, "artifact": artifact,

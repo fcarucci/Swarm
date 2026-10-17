@@ -887,10 +887,8 @@ def _dry_run(board, cfg: dict, sup: dict, job, now, say, scope_ok, config_path="
     from swarm.supervisor import orphans, pipeline
     from swarm.supervisor.settings import load_state
     state = load_state()
-    from swarm.supervisor import driver
-    drive_jobs = driver.drive_jobs(board, cfg)   # a dry run never drives; it only leaves the drive jobs alone
     managed = pipeline.run(board, cfg, sup, state, job=job, now=now, dry_run=True, say=say, scope_ok=scope_ok,
-                           config_path=config_path, skip_jobs=drive_jobs) | drive_jobs
+                           config_path=config_path, skip_jobs=frozenset())
     orphans.run(board, cfg, sup, state, job=job, now=now, dry_run=True, say=say, scope_ok=scope_ok, skip_jobs=managed)
     running = _host_running(board)
     unenrolled: list = []
@@ -955,15 +953,11 @@ def _pass(board, cfg: dict, sup: dict, state: dict, job, now, say, start_runner,
     from swarm.supervisor import outage, runner
     began = time.monotonic() if began is None else began
     outage.note_reachable()
-    from swarm.supervisor import driver, orphans, pipeline
-    drive_jobs = driver.run(board, cfg, sup, state, job=job, now=now, say=say, start_runner=start_runner,
-                            which=which, scope_ok=scope_ok, config_path=config_path,
-                            deadline=min(began + PASS_BUDGET_SECONDS, time.monotonic() + PASS_DRIVE_SECONDS))
+    from swarm.supervisor import orphans, pipeline
     runner.reap(cfg, board, deadline=time.monotonic() + PASS_REAP_SECONDS)
     clean_resume_markers(board, cfg)
     managed = pipeline.run(board, cfg, sup, state, job=job, now=now, say=say, start_runner=start_runner,
-                           which=which, scope_ok=scope_ok, config_path=config_path,
-                           skip_jobs=drive_jobs) | drive_jobs
+                           which=which, scope_ok=scope_ok, config_path=config_path, skip_jobs=frozenset())
     orphans.run(board, cfg, sup, state, job=job, now=now, say=say,
                 start_runner=start_runner, which=which, scope_ok=scope_ok, config_path=config_path, skip_jobs=managed)
     cli.sweep_jobs(board, cfg, time.monotonic() + PASS_SWEEP_SECONDS)
