@@ -32,7 +32,7 @@ from swarm import paths
 LEAD_ATTEMPTS = 3                 # launches with no new hand-off before the job fails
 NOTICE_MINUTES = 30               # a failed job's notice is repeated this often until acked
 LAUNCH_USD = 2.0                  # what one launch reserves of the job's max_cost_usd
-DEFAULT_MAX_COST_USD = 20.0       # the job's max_cost_usd when neither the job nor [pass] sets one
+DEFAULT_MAX_COST_USD = 200.0      # the job's max_cost_usd when neither the job nor [pass] sets one
 MAX_JOB_RUNNING = 4               # launches running at once per job
 THROTTLE_SECONDS = 60             # the hooks run a pass at most this often per host
 PASS_NAME = "swarm pass"
