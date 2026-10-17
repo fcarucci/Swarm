@@ -238,5 +238,20 @@ class PassCmd(unittest.TestCase):
         log.assert_called_once()
 
 
+class EmptyJobs(PassCmd):
+    def test_an_unlaunched_job_nobody_works_on_fails_after_the_quiet_limit(self):
+        self.b.open_job("O", None, None, None, "me", goal="g")   # an orchestrator's job: no workdir, no launches
+        self.pass_()
+        self.assertEqual(self.b.job_status("O").status, "active")
+        self.pass_(minutes=passcmd.EMPTY_MINUTES + 5)
+        self.assertEqual(self.b.job_status("O").status, "failed")
+
+    def test_an_open_question_keeps_it_open(self):
+        self.b.open_job("Q", None, None, None, "me", goal="g")
+        self.b.open_blocker("Q", "question", "alice", "go?", until=self.b.now() + _dt.timedelta(days=1), created_by="me")
+        self.pass_(minutes=passcmd.EMPTY_MINUTES + 5)
+        self.assertEqual(self.b.job_status("Q").status, "active")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -235,10 +235,28 @@ def _judge_brief(js, artifact: str) -> str:
             f"met|not_met|unreachable, with --candidate and --reason (and --next for not_met).")
 
 
+EMPTY_MINUTES = 30   # an open job nobody works on, with nothing queued and no question, ends failed after this
+
+
+def _empty(board, js, now: _dt.datetime) -> str | None:
+    """Why an open job the pass does not launch for (an orchestrator's own job) must end: no agent started,
+    running or idle, no open question, and no board activity for EMPTY_MINUTES. None while it is in use."""
+    from swarm.board.base import quiet_start
+    if js.started or js.running or js.idle:
+        return None
+    if any(b.kind == "question" for b in board.blockers(js.job)):
+        return None
+    quiet = now - quiet_start(js, now=now)
+    if quiet < _dt.timedelta(minutes=EMPTY_MINUTES):
+        return None
+    return f"no agent working and nothing queued for {int(quiet.total_seconds() // 60)} min"
+
+
 def _advance(board, cfg: dict, js, now: _dt.datetime, starter) -> list[str]:
     job = js.job
     if not managed(board, job):
-        return []
+        why = _empty(board, js, now)   # a job is active only while someone works on it
+        return [_fail(board, job, why, now)] if why else []
     _settle(board, job, cfg, now)
     acts, cost_reason = _start_queued(board, cfg, job, starter)
     if cost_reason:
