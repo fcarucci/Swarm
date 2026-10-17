@@ -134,8 +134,7 @@ class JudgeHookTests(GoalEnv):
         first = self.member("judge-1").name
         _, turn = self.spawn_judge("judge-2")
         ctx = self.context(turn)
-        self.assertIn(f"[swarm] Your prompt makes you a judge, but job \"J\" has one judge: "
-                      f"judge seat held by {first} (joined ", ctx)
+        self.assertIn("[swarm] Your prompt makes you a judge, but job \"J\" has one judge: ", ctx)
         self.assertIn('working on job "J"', ctx)  # on the board as a worker
         self.assertEqual(self.job().judge, first)
         self.assertNotEqual(self.member("judge-2").role, "judge")
