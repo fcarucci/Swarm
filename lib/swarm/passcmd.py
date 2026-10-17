@@ -212,8 +212,16 @@ def _start_queued(board, cfg: dict, job: str, starter) -> tuple[list[str], str |
     return acts, None
 
 
+OWNER_INPUT = ("HOST-RESULT", "OWNER", "PUSH-RESULT")   # posts that hand a lead new facts to act on
+
+
 def _attempts(board, job: str, since: _dt.datetime) -> int:
-    """Lead and judge launches that were queued or ended since `since`."""
+    """Lead and judge launches that were queued or ended since `since`, or since the newest owner input
+    (a HOST-RESULT or OWNER post): a lead that hands work to the owner and exits is progressing, not stuck."""
+    for m in reversed(board.recent_messages(200, job)):
+        if m.message.startswith(OWNER_INPUT):
+            since = max(since, m.created_at)
+            break
     return sum(1 for row in board.launches(job) if row.role in ("lead", "judge") and row.updated_at >= since)
 
 
