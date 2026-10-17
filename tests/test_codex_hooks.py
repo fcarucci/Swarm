@@ -167,7 +167,7 @@ class CodexHookTests(Env):
 
     def test_codex_role_from_task_name_judge(self):
         self.rename_child("/root/judge")
-        self.activate_fixture_job("fixture", "--no-drive", "--reason", "legacy goal test", "--goal", "the fixture is recorded")
+        self.activate_fixture_job("fixture", "--goal", "the fixture is recorded")
         start = F.payloads("SubagentStart")[0]
         self.replay("SubagentStart", start)          # goal job: deferred to the first tool call
         out = self.replay("PreToolUse", self.child_payloads("PreToolUse")[0])
@@ -177,7 +177,7 @@ class CodexHookTests(Env):
 
     def test_codex_judge_never_spawns_fix_agents(self):
         self.rename_child("/root/judge")
-        self.activate_fixture_job("fixture", "--no-drive", "--reason", "legacy goal test", "--goal", "the fixture is recorded")
+        self.activate_fixture_job("fixture", "--goal", "the fixture is recorded")
         self.replay("SubagentStart", F.payloads("SubagentStart")[0])
         out = self.replay("PreToolUse", self.child_payloads("PreToolUse")[0])
         ctx = self.context(out)

@@ -165,7 +165,7 @@ class ControlsInTablesTests(Env):
 
     def setUp(self):
         super().setUp()
-        self.cli("activate", "--job", "J", "--description", "d", "--no-drive", "--reason", "legacy goal test", "--goal", "g")
+        self.cli("activate", "--job", "J", "--description", "d", "--goal", "g")
         self.cli("join", "--job", "J", "--key", "a1")
         self.cli("wait", "--job", "J", "--on", "x")
 

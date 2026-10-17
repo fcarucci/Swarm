@@ -2066,7 +2066,7 @@ class PostgresBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
         from swarm.review import pipeline_status
         raw = self._conn.execute("SELECT plugin_data FROM jobs WHERE job = %s", (job,)).fetchone()
         status = JobStatus(**dict(zip((column.name for column in cursor.description), row, strict=True)))
-        return replace(status, **pipeline_status(raw[0] if raw else None))
+        return self._with_questions([replace(status, **pipeline_status(raw[0] if raw else None))])[0]
 
     def jobs(self, include_closed: bool = False) -> list[JobStatus]:
         where = "" if include_closed else "WHERE status = 'active' "
@@ -2082,7 +2082,19 @@ class PostgresBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
             return []
         data = dict(self._conn.execute("SELECT job, plugin_data FROM jobs WHERE job = ANY(%s)",
                                       ([row.job for row in rows],)).fetchall())
-        return [replace(row, **pipeline_status(data.get(row.job))) for row in rows]
+        return self._with_questions([replace(row, **pipeline_status(data.get(row.job))) for row in rows])
+
+    def _with_questions(self, rows: list[JobStatus]) -> list[JobStatus]:
+        """open_questions per job (the view counts blockers of every kind): one query for the listing."""
+        from dataclasses import replace
+        with_blockers = [row.job for row in rows if row.open_blockers]
+        if not with_blockers:
+            return rows
+        counts = dict(self._conn.execute(
+            "SELECT job, count(*) FROM blockers WHERE state = 'open' AND kind = 'question' AND job = ANY(%s) "
+            "GROUP BY job", (with_blockers,)).fetchall())
+        return [replace(row, open_questions=int(counts.get(row.job, 0))) if row.open_blockers else row
+                for row in rows]
 
     def session_jobs(self, session: str) -> list[JobStatus]:
         # Filter jobs before the view's per-job LATERAL aggregates, in one snapshot.

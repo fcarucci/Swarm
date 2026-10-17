@@ -703,6 +703,7 @@ class JobStatus:
     waiting_until: _dt.datetime | None = None
     open_blockers: int = 0
     protected_blockers: int = 0
+    open_questions: int = 0   # open `swarm ask` questions to a person: the only thing a job waits for
 
     evidence_command: str | None = None
     finalize: str | None = None
@@ -1140,23 +1141,16 @@ WAITING_GOAL = "waiting (goal not met)"   # the shown status of a goal job nobod
 
 
 def derive_job_status(js: JobStatus, idle_minutes: float, now: _dt.datetime) -> str:
-    """What `status` and `watch` show for a job. A closed job shows its stored status. An open
-    (stored "active") one shows "waiting" while it waits for something (Board.set_waiting),
-    "active" while an agent is started or running, WAITING_GOAL when it has a goal without a
-    met verdict and no agent started, running or idle (no sweep closes it: it waits for an
-    agent, the judge or a person), else "active" if anything happened within idle_minutes, else
-    "idle": open, but nobody is working on it and nobody said what it waits for. (The Postgres
-    job_status view's shown_status column is the same rule.)"""
+    """What `status` and `watch` show for a job. A closed job shows its stored status (completed,
+    failed, cancelled, paused). An open one is "waiting" only while a question asked with
+    `swarm ask` to a person is open, else "active": `swarm pass` keeps an open job moving (it
+    starts queued launches, re-queues the lead, runs the judge or fails the job), so there is no
+    other wait state (owner's rule of 2026-10-17). idle_minutes and now are kept for callers."""
     if js.status != "active":
         return js.status
-    if js.open_blockers or js.waiting_on:
+    if js.open_questions:
         return "waiting"
-    if js.started or js.running:
-        return "active"
-    if goal_unmet(js) and not js.idle:
-        return WAITING_GOAL
-    last = quiet_start(js, now=now)
-    return "active" if (now - last).total_seconds() < idle_minutes * 60 else "idle"
+    return "active"
 
 
 def run_start(js: JobStatus) -> _dt.datetime:
@@ -1267,7 +1261,7 @@ def orphaned(js: JobStatus, now: _dt.datetime, orphan_minutes: float) -> bool:
     explicit wait, and no board activity for `orphan_minutes` (the run's start counts)."""
     if not orphan_minutes or orphan_minutes <= 0 or js.started or js.running or js.idle:
         return False
-    if derive_job_status(js, 0, now) in ("waiting", "paused") or js.status != "active":
+    if js.status != "active" or js.open_blockers or js.waiting_on:   # an explicit wait or question: never an orphan
         return False
     quiet = _dt.timedelta(minutes=orphan_minutes)
     return now - quiet_start(js, now=now) >= quiet

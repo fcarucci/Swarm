@@ -363,33 +363,33 @@ class ExpiryContract:
         self.assertEqual([c.job for c in self.b.sweep_expiry(CAP, ORPHAN, None, goal_stall_hours=1)], ["met"])
         self.assertEqual(self.status("busy").status, "active")
 
-    # ---- a goal job nobody works on shows as waiting (goal not met), on every backend
+    # ---- an open job is "active" unless a question to a person is open (the SQL view's shown_status
+    # column keeps its legacy words; the CLI and watch use derive_job_status)
     def shown(self, name="j", idle_minutes=5):
-        js = self.b.job_status(name)
-        word = base.derive_job_status(js, idle_minutes, self.b.now())
-        view = self.h.shown_status(name) if hasattr(self.h, "shown_status") else word
-        self.assertEqual(view, word, "the job_status view and derive_job_status disagree")
-        return word
+        return base.derive_job_status(self.b.job_status(name), idle_minutes, self.b.now())
 
-    def test_a_goal_job_with_no_live_agent_shows_waiting_goal_not_met(self):
+    def test_a_goal_job_with_no_live_agent_is_active_for_the_pass(self):
         self.job("none", age=2 * HOUR, goal="g")                     # no agent at all
         self.job("done", age=2 * HOUR, agents={"w": 0}, goal="g")
         self.b.agent_stopped("w")                                    # all workers completed, no judge
         self.job("dead", age=2 * HOUR, agents={"d": 3 * HOUR}, goal="g")
         for j in ("none", "done", "dead"):
-            self.assertEqual(self.shown(j), base.WAITING_GOAL, j)
-            self.assertEqual(self.shown(j, idle_minutes=10000), base.WAITING_GOAL, j)   # not "idle"
+            self.assertEqual(self.shown(j), "active", j)
+            self.assertEqual(self.shown(j, idle_minutes=10000), "active", j)   # never "idle"
 
-    def test_the_shown_status_of_other_jobs_is_unchanged(self):
+    def test_the_shown_status_of_other_jobs(self):
         self.job("goalless", age=2 * HOUR)
-        self.assertEqual(self.shown("goalless"), "idle")
+        self.assertEqual(self.shown("goalless"), "active")
         self.job("live", age=2 * HOUR, agents={"a": 0}, goal="g")    # a started agent
         self.assertEqual(self.shown("live"), "active")
-        self.job("quiet", age=2 * HOUR, agents={"i": 6 * MIN}, goal="g")   # an idle agent: nobody is gone yet
-        self.assertEqual(self.shown("quiet"), "idle")
+        self.job("quiet", age=2 * HOUR, agents={"i": 6 * MIN}, goal="g")   # an idle agent
+        self.assertEqual(self.shown("quiet"), "active")
         self.job("waits", age=2 * HOUR, goal="g")
         self.b.set_waiting("waits", "the user")
-        self.assertEqual(self.shown("waits"), "waiting")
+        self.assertEqual(self.shown("waits"), "active")               # `wait --on` is context, not a state
+        self.job("asks", age=2 * HOUR, goal="g")
+        self.b.open_blocker("asks", "question", "the user", "ship it?")
+        self.assertEqual(self.shown("asks"), "waiting")               # a question to a person is the only wait
         self.job("met", age=2 * HOUR, agents={"jj": 0}, goal="g")
         self.assertTrue(self.b.claim_judge("jj", "met"))
         self.assertTrue(self.b.record_verdict("met", self.b.active_agent_name("jj"), "met", "ok", None))
@@ -398,9 +398,9 @@ class ExpiryContract:
         self.b.close_job("met", "completed", "done")
         self.assertEqual(self.shown("met"), "completed")
 
-    def test_a_joining_agent_takes_a_goal_job_out_of_waiting(self):
+    def test_a_joining_agent_keeps_a_goal_job_active(self):
         self.job("j", age=2 * HOUR, goal="g")
-        self.assertEqual(self.shown(), base.WAITING_GOAL)
+        self.assertEqual(self.shown(), "active")
         self.b.allocate_name("late", "j")
         self.assertEqual(self.shown(), "active")
 
@@ -550,7 +550,7 @@ class PostgresExpiry(ExpiryContract, unittest.TestCase):
         setup_board(self.h.cfg, SMALL_POOL)              # what ensure_initialized runs for an older board
         self.assertEqual(type(self.b).schema_version(self.h.cfg), base.SCHEMA_VERSION)
         self.job("g", age=2 * HOUR, goal="ship it")
-        self.assertEqual(self.h.shown_status("g"), base.WAITING_GOAL)
+        self.assertEqual(base.derive_job_status(self.b.job_status("g"), 5, self.b.now()), "active")
 
 
 class ExpiryRulesTests(unittest.TestCase):
@@ -659,7 +659,7 @@ class ExpiryCliTests(Env):
 
     def test_an_idle_goal_job_can_be_attached_to_by_any_session(self):
         self.config.write_text(self.config.read_text() + "[job]\nstale_waiting_minutes = 0\n")   # (stale waiting is tested apart)
-        self.activate("J", "--no-drive", "--reason", "legacy goal test", "--goal", "ship it")
+        self.activate("J", "--goal", "ship it")
         self.age("J", 99 * HOUR)
         self.markers.joinpath("J.json").unlink()      # the orchestrator's session is gone
         self.cli("purge")
@@ -672,7 +672,7 @@ class ExpiryCliTests(Env):
     def test_a_sweep_from_another_user_or_machine_spares_a_goal_job_and_closes_a_goalless_one_as_before(self):
         # a sweep with no marker of the jobs (another OS user's HOME, another machine's hooks):
         # the orphan rule's evidence is unchanged for a job without a goal, and never applies to a goal job
-        self.activate("G", "--no-drive", "--reason", "legacy goal test", "--goal", "ship it")
+        self.activate("G", "--goal", "ship it")
         self.activate("P")
         for j in ("G", "P"):
             self.age(j, 40 * MIN)
@@ -686,8 +686,8 @@ class ExpiryCliTests(Env):
     def test_goal_stall_hours_in_the_config_closes_a_stalled_goal_job_as_failed(self):
         self.assertEqual(self.cfg["job"]["goal_stall_hours"], 0)   # never, by default
         self.config.write_text(self.config.read_text() + "[job]\ngoal_stall_hours = 6\nstale_waiting_minutes = 0\n")
-        self.activate("G", "--no-drive", "--reason", "legacy goal test", "--goal", "ship it")
-        self.activate("O", "--no-drive", "--reason", "legacy goal test", "--goal", "ship it", "--stall-hours", "0")   # its own: never
+        self.activate("G", "--goal", "ship it")
+        self.activate("O", "--goal", "ship it", "--stall-hours", "0")   # its own: never
         self.age("G", 5 * HOUR)
         self.age("O", 99 * HOUR)
         self.cli("purge")
@@ -708,25 +708,24 @@ class ExpiryCliTests(Env):
         with self.board() as b, mock.patch.object(shutil, "get_terminal_size", return_value=os.terminal_size((200, 40))):
             return "\n".join(swarm._watch_frame(b, job, 2.0, False, True, view))
 
-    def test_status_and_watch_show_a_goal_job_without_agents_as_waiting_goal_not_met(self):
-        self.activate("G", "--no-drive", "--reason", "legacy goal test", "--goal", "ship it")
-        self.activate("P")                             # no goal: nothing new
+    def test_status_and_watch_show_quiet_jobs_as_active(self):
+        self.activate("G", "--goal", "ship it")
+        self.activate("P")                             # no goal
         self.age("G", 2 * HOUR)
-        self.age("P", 10 * MIN)                        # idle, but not yet an orphan
+        self.age("P", 10 * MIN)
         _, out, _ = self.cli("status", "--no-color")
         row = next(ln for ln in out.splitlines() if ln.startswith("G "))
-        self.assertRegex(row, r"^G\s+waiting \(goal not met\)\s")
-        self.assertRegex(next(ln for ln in out.splitlines() if ln.startswith("P ")), r"^P\s+idle\s")
+        self.assertRegex(row, r"^G\s+active\s")
+        self.assertRegex(next(ln for ln in out.splitlines() if ln.startswith("P ")), r"^P\s+active\s")
         _, out, _ = self.cli("status", "--job", "G", "--no-color")
-        self.assertIn("job        G  [waiting (goal not met)]", out)
-        self.assertIn("not auto-closed", out)
-        self.assertIn("job        P  [idle]", self.cli("status", "--job", "P", "--no-color")[1])
-        self.assertIn("waiting (goal not met)", self.frame())              # watch: all jobs
-        self.assertIn("[waiting (goal not met)]", self.frame("G"))         # watch --job
+        self.assertIn("job        G  [active]", out)
+        self.assertNotIn("waiting", out)
+        self.assertIn("job        P  [active]", self.cli("status", "--job", "P", "--no-color")[1])
+        self.assertNotIn("waiting", self.frame())                          # watch: all jobs
+        self.assertIn("[active]", self.frame("G"))                         # watch --job
         compact = self.frame(compact=True)
-        self.assertIn("G [waiting (goal not met)]", compact)
-        self.assertIn("P [idle]", compact)                                 # the stored status "active" is derived
-        self.assertNotIn("P [active]", compact)
+        self.assertIn("G [active]", compact)
+        self.assertIn("P [active]", compact)
         self.cli("purge")
         self.assertEqual(self.job("G").status, "active")                    # shown as waiting, never closed
         # an agent joining takes it out of waiting

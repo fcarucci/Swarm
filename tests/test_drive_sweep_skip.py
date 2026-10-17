@@ -20,7 +20,7 @@ CLOSE_AT = 241 * MIN
 class SkipBase(Env):
     def activate(self, job="J", *extra):
         if "--goal" in extra:      # a goal job nothing drives (activation would otherwise need a supervisor pass)
-            extra = (*extra, "--no-drive", "--reason", "stale-waiting test")
+            extra = (*extra, )
         rc, _, err = self.cli("activate", "--job", job, *extra)
         self.assertEqual(rc, 0, err)
 
