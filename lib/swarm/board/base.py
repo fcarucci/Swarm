@@ -2539,6 +2539,9 @@ class Board(abc.ABC):
         rows = [a for a in self.agents(job) if not is_placeholder(a)]
         if recent_minutes is None:
             return rows, 0
+        if not recent_minutes:   # 0: every finished agent is hidden (the default)
+            visible = [a for a in rows if a.status not in ('completed', 'left', 'dead')]
+            return visible, len(rows) - len(visible)
         cutoff = self.now() - _dt.timedelta(minutes=recent_minutes)
         visible = [a for a in rows if a.status not in ('completed', 'left', 'dead')
                    or max(a.last_contact_at, a.ended_at or a.last_contact_at) >= cutoff]

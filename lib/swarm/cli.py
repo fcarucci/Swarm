@@ -94,9 +94,10 @@ DEFAULTS = {
               "join_history": 30,
               # the hooks show each agent a full roster at least this often (diffs in between)
               "roster_refresh_minutes": 10,
-              # `watch` and `status --job` hide finished agents (completed/left/dead) whose end
-              # or last contact is older than this; `a` / --all-agents shows them
-              "watch_recent_minutes": 10, "watch_interval_s": 10, "watch_check_s": 60, "watch_min_redraw_s": 2,
+              # `watch` and `status --job` hide finished agents (completed/left/dead); 0 (the default,
+              # Francesco 2026-10-17) hides every finished agent, N keeps those that ended within N
+              # minutes; `a` / --all-agents shows them all
+              "watch_recent_minutes": 0, "watch_interval_s": 10, "watch_check_s": 60, "watch_min_redraw_s": 2,
               # nudge an agent to post a status after this many tool calls or minutes without
               # posting (once per quiet window; 0 disables that trigger)
               "silence_nudge_calls": 15, "silence_nudge_minutes": 10,
@@ -1304,6 +1305,9 @@ def _recent_agents(rows: list, now, recent_minutes: int | None) -> tuple[list, i
     recent_minutes None shows everyone. The order of `rows` is kept."""
     if recent_minutes is None:
         return list(rows), 0
+    if not recent_minutes:   # 0: every finished agent is hidden (the default)
+        shown = [a for a in rows if a.status not in FINISHED]
+        return shown, len(rows) - len(shown)
     import datetime as dt
     cutoff = now - dt.timedelta(minutes=recent_minutes)
     last = lambda a: max(t for t in (a.ended_at, a.last_contact_at) if t is not None)  # noqa: E731
@@ -2979,7 +2983,7 @@ def _parser() -> argparse.ArgumentParser:
     st = sub.add_parser("status", help="jobs overview, or one job's agents with --job")
     st.add_argument("--job"); st.add_argument("--all", action="store_true", help="include closed jobs")
     st.add_argument("--all-agents", action="store_true",
-                    help="with --job: also list finished agents older than board.watch_recent_minutes")
+                    help="with --job: also list finished agents (hidden by default)")
     st.add_argument("--no-color", action="store_true")
     sn = sub.add_parser("snapshot", help="the board's current view as JSON (pure read); --follow streams changes as NDJSON")
     sn.add_argument("--json", action="store_true", help="JSON output (the only format; accepted for clarity)")
