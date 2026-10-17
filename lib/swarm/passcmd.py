@@ -108,6 +108,14 @@ def _settle(board, job: str, cfg: dict | None = None, now: _dt.datetime | None =
                                job=job, last_outcome=outcome)
 
 
+OBSERVER_ROLES = ("owner", "orchestrator", "requester")
+
+
+def _observer(agent) -> bool:
+    """A person's or orchestrator's own board identity: it posts and answers, it never works the job."""
+    return (getattr(agent, "role", None) or "") in OBSERVER_ROLES
+
+
 def managed(board, job: str) -> bool:
     """Whether the pass manages the job: it has a work dir of its own or launches. Any other open job
     (a plain one, never launched) is left alone: the pass would otherwise fail it for lacking a work dir."""
@@ -283,16 +291,14 @@ def _advance(board, cfg: dict, js, now: _dt.datetime, starter) -> list[str]:
         return acts + [_fail(board, job, f"judge: unreachable ({js.verdict_reason or artifact})", now)]
     if _running(board, job) or any(r.state == "queued" for r in board.launches(job, include_closed=False)):
         return acts
-    if any(a.status in ("started", "running") for a in board.agents(job, include_departed=False)):
+    if any(a.status in ("started", "running") and not _observer(a) for a in board.agents(job, include_departed=False)):
         return acts
     workdir = _workdir(board, job)
     if workdir is None:
         return acts + [_fail(board, job, "no work dir is known for its launches (swarm run --workdir)", now)]
     if found is not None:
         key = _key(artifact)
-        if judged == "not_met":   # the lead is re-queued once for this artifact
-            if board.get_launch(job, 1, f"relead-{key}") is not None:
-                return acts
+        if judged == "not_met" and board.get_launch(job, 1, f"relead-{key}") is None:   # once per artifact
             if _attempts(board, job, msg.created_at) >= LEAD_ATTEMPTS:
                 return acts + [_fail(board, job, f"no met verdict after {LEAD_ATTEMPTS} launches", now)]
             steps = js.verdict_next or js.verdict_reason or "see the verdict"
