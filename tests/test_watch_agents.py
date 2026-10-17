@@ -51,6 +51,9 @@ class HiddenAgentsCliTests(Env):
 
     def setUp(self):
         super().setUp()
+        # the default hides every finished agent (watch_recent_minutes = 0); these tests exercise a 10-minute window
+        self.config.write_text(self.config.read_text().replace("[board]\n", "[board]\nwatch_recent_minutes = 10\n", 1))
+        self.cfg = swarm.load_config(self.config)
         self.cli("activate", "--job", "J")
         for key in ("live", "fresh", "old1", "old2"):
             self.cli("join", "--job", "J", "--key", key)
@@ -87,6 +90,8 @@ class HiddenAgentsCliTests(Env):
         self.assert_listed(out, "live", absent=("fresh", "old1", "old2"))
         self.assertTrue(out.endswith("\n(3 older finished agents hidden · x)"))
         self.assertEqual(swarm.load_config(self.config)["board"]["watch_recent_minutes"], 10)
+        self.config.write_text(self.config.read_text().replace("watch_recent_minutes = 10\n", "", 1))
+        self.assertEqual(swarm.load_config(self.config)["board"]["watch_recent_minutes"], 0)   # the default
 
     def test_order_and_columns_unchanged(self):
         # Both renders describe the same instant, regardless of CLI/storage latency.
