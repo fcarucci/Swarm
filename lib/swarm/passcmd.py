@@ -37,7 +37,6 @@ MAX_JOB_RUNNING = 4               # launches running at once per job
 THROTTLE_SECONDS = 60             # the hooks run a pass at most this often per host
 PASS_NAME = "swarm pass"
 BRIEF_MAX = 64 * 1024
-_DONE = re.compile(r'^DONE ("(?:[^"\\]|\\.)*")')
 
 
 def _key(artifact: str) -> str:
@@ -46,18 +45,14 @@ def _key(artifact: str) -> str:
 
 
 def handoff(board, job: str):
-    """(message, artifact) of the job's latest DONE hand-off, or None."""
-    for m in reversed(board.pipeline_messages(job)):
-        found = _DONE.match(m.message)
-        if found is None:
-            continue
-        try:
-            artifact = json.loads(found.group(1))
-        except ValueError:
-            continue
-        if isinstance(artifact, str) and artifact.strip():
-            return m, artifact
-    return None
+    """(hand-off, artifact) of the job's latest DONE hand-off, or None. review.latest_handoffs reads every
+    form a hand-off takes on the board (`DONE main@sha | summary`, `DONE "artifact"`, `swarm done`)."""
+    from swarm.review import latest_handoffs
+    found = latest_handoffs(board, job)
+    if not found:
+        return None
+    last = found[-1]
+    return last, last.artifact
 
 
 def max_cost_usd(board, cfg: dict, job: str) -> float:
@@ -82,9 +77,28 @@ def spent_usd(board, job: str) -> float:
     return total
 
 
-def _settle(board, job: str) -> None:
+STALE_RESTART_GRACE_MINUTES = 30   # past a launch's own time limit: its restart is an orphan (the runner died)
+
+
+def _settle(board, job: str, cfg: dict | None = None, now: _dt.datetime | None = None) -> None:
     """A running launch whose restart has ended takes the restart's outcome: done when completed,
-    else failed. A launch whose restart is still open stays running."""
+    else failed. A launch whose restart is still open stays running, unless the restart is older
+    than the launch time limit plus a grace: then its runner is gone (a crashed or replaced
+    supervisor) and the restart is ended failed here, so the job is never stuck on it."""
+    from swarm.supervisor.settings import settings
+    now = now or board.now()
+    default_cap = float(settings(cfg)["max_minutes"])
+    departed = {a.agent_key: a for a in board.agents(job, include_departed=True) if a.ended_at is not None}
+    for r in board.restarts(job):
+        if not r.launch_id or r.ended_at is not None or r.at is None:
+            continue
+        gone = departed.get(r.new_agent_key) if r.new_agent_key else None
+        if gone is not None:   # its session already left the board: the runner never recorded the end
+            board.finish_restart(r.id, "completed" if gone.status == "completed" else "failed")
+            continue
+        cap = float(r.minutes_cap or 0) or default_cap
+        if now - r.at > _dt.timedelta(minutes=cap + STALE_RESTART_GRACE_MINUTES):
+            board.finish_restart(r.id, "failed")
     ended = {r.launch_id: r for r in board.restarts(job) if r.launch_id and r.ended_at is not None}
     for row in board.launches(job, include_closed=False):
         if row.state != "running" or row.launch_id not in ended:
@@ -225,7 +239,7 @@ def _advance(board, cfg: dict, js, now: _dt.datetime, starter) -> list[str]:
     job = js.job
     if not managed(board, job):
         return []
-    _settle(board, job)
+    _settle(board, job, cfg, now)
     acts, cost_reason = _start_queued(board, cfg, job, starter)
     if cost_reason:
         return acts + [_fail(board, job, cost_reason, now)]
