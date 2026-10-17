@@ -242,6 +242,8 @@ def _empty(board, js, now: _dt.datetime) -> str | None:
     """Why an open job the pass does not launch for (an orchestrator's own job) must end: no agent started,
     running or idle, no open question, and no board activity for EMPTY_MINUTES. None while it is in use."""
     from swarm.board.base import quiet_start
+    if not js.goal:   # a job without a goal has the board's own auto-close and orphan rules
+        return None
     if js.started or js.running or js.idle:
         return None
     if any(b.kind == "question" for b in board.blockers(js.job)):
