@@ -2849,6 +2849,12 @@ def _parser() -> argparse.ArgumentParser:
                                      "judge, notices failed jobs (the hooks run it too, every minute at most)")
     ak = sub.add_parser("ack", help="the owner has seen a failed job's notice from `swarm pass`: its notices stop")
     ak.add_argument("--job", required=True)
+    rn = sub.add_parser("run", help="queue a named launch for the job: `swarm pass` (or the hooks) starts it "
+                                    "when the job's concurrency and cost caps allow")
+    rn.add_argument("--job", required=True); rn.add_argument("--name", required=True)
+    rn.add_argument("--role", required=True); rn.add_argument("--brief", required=True)
+    rn.add_argument("--harness", default="claude", choices=["claude", "codex"])
+    rn.add_argument("--model"); rn.add_argument("--workdir", help="the job's work dir (kept for its later launches)")
     tl = sub.add_parser("tail", help="follow the board live (Ctrl-C to stop)")
     tl.add_argument("--job", help="only this job (default: all jobs)")
     tl.add_argument("-n", "--backlog", type=int, default=20, help="show the last N messages first")
@@ -4613,6 +4619,23 @@ def _board_ack(board, cfg: dict, args) -> int | None:
     print(f"{term_safe(args.job)}: acked")
 
 
+def _board_run(board, cfg: dict, args) -> int | None:
+    from swarm import passcmd
+    try:
+        if args.workdir:
+            board.set_job_data(args.job, "workdir", args.workdir)
+        workdir = args.workdir or passcmd._workdir(board, args.job)
+        if not workdir:
+            print("swarm run: no work dir: pass --workdir once for the job", file=sys.stderr)
+            return 1
+        row = board.queue_launch(args.job, 1, args.name, role=args.role, harness=args.harness, model=args.model,
+                                 workdir=workdir, brief=args.brief, queued_by="swarm run")
+    except ValueError as exc:
+        print(f"swarm run: {term_safe(str(exc))}", file=sys.stderr)
+        return 1
+    print(f"{term_safe(row.name)}: {row.state}")
+
+
 def _board_purge(board, cfg: dict, args) -> None:
     board.purge()
     if transcripts_enabled(cfg):
@@ -4675,6 +4698,7 @@ BOARD_COMMANDS = {
     "purge": _board_purge,
     "pass": _board_pass,
     "ack": _board_ack,
+    "run": _board_run,
     "transcript": _board_transcript,
     "memory": _board_memory,
 }
