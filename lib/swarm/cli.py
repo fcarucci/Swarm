@@ -2605,6 +2605,45 @@ def _select_loop(sel, w: "_ThreadedWatch", interval: float, view: dict) -> None:
             return
 
 
+WATCH_CODE_CHECK_S = 20   # how often a running watch looks for a newer installed swarm
+
+
+def _code_stamp() -> float:
+    """The newest modification time of the installed swarm package's .py files."""
+    root = os.path.dirname(os.path.abspath(__file__))
+    newest = 0.0
+    for d, _, files in os.walk(root):
+        for f in files:
+            if f.endswith(".py"):
+                try:
+                    newest = max(newest, os.stat(os.path.join(d, f)).st_mtime)
+                except OSError:
+                    pass
+    return newest
+
+
+def _restart_on_code_change(out, fd) -> None:
+    """A long-running watch re-executes itself when the swarm code on disk changes, so a pane never keeps
+    showing what old code computed (a deploy used to leave panes on stale status words for hours)."""
+    import threading
+    start = _code_stamp()
+
+    def check():
+        while True:
+            time.sleep(WATCH_CODE_CHECK_S)
+            if _code_stamp() > start:
+                time.sleep(2)   # let a multi-file deploy finish
+                try:
+                    _screen_off(out, fd, _WATCH_SAVED_TTY.get("attrs"))
+                except Exception:
+                    pass
+                os.execv(sys.executable, [sys.executable, "-m", "swarm.cli", *sys.argv[1:]])
+    threading.Thread(target=check, daemon=True, name="watch-code-check").start()
+
+
+_WATCH_SAVED_TTY: dict = {}
+
+
 def cmd_watch(cfg: dict, job: str | None, interval: float, color: bool, session: str | None = None,
               exit_when_idle: float | None = None, compact: bool = False) -> int:
     """Full-screen live view: jobs, each active job's agents, and the latest messages.
@@ -2638,6 +2677,8 @@ def cmd_watch(cfg: dict, job: str | None, interval: float, color: bool, session:
     interactive = out.isatty() and sys.stdin.isatty() and not compat.IS_WINDOWS   # no termios: Ctrl-C quits
     fd = sys.stdin.fileno() if interactive else None
     saved = _screen_on(out, fd)
+    _WATCH_SAVED_TTY["attrs"] = saved
+    _restart_on_code_change(out, fd)
 
     sweeper = Sweeper(cfg)
 
