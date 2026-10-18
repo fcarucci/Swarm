@@ -247,15 +247,6 @@ class ReviewHookTests(GoalEnv):
                                            scope='ruling', generation=2, candidate='a' * 40, req='r1'))
         self.assertIsNone(self.hook('stop', agent_id='judge-1'))
 
-    def test_previous_generation_ruling_does_not_allow_stop(self):
-        self.done()
-        with self.board() as b:
-            b.set_job_data('J', 'drive.generation', '2')
-            from swarm.spool import deliver_verdict
-            self.assertTrue(deliver_verdict(b, 'J', self.judge, 'not_met', 'old review', 'staff review',
-                                           scope='ruling', generation=1, candidate='a' * 40, req='r1'))
-        self.assertEqual(self.hook('stop', agent_id='judge-1')['decision'], 'block')
-
     def test_pending_external_evidence_always_concludes_not_met(self):
         self.done()
         with self.board() as b:

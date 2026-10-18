@@ -21,7 +21,7 @@ class GoalEnv(RoutingEnv):
         self.cfg = swarm.load_config(self.config)
 
     def activate_goal(self, job: str = "J", goal: str = GOAL, **kw):
-        return self.activate(job, "--no-drive", "--reason", "legacy goal test", "--goal", goal, **kw)
+        return self.activate(job, "--goal", goal, **kw)
 
     def judge_prompt(self, job: str = "J") -> str:
         return f"[swarm job: {job}]\n[swarm role: judge]\nDecide whether the goal is met."
@@ -47,8 +47,7 @@ class GoalCliTests(GoalEnv):
         self.assertTrue(json.loads((self.markers / "J.json").read_text())["goal"])
 
     def test_goal_from_stdin(self):
-        rc, _, _ = self.cli("activate", "--job", "J", "--session", "sess-1", "--no-drive",
-                            "--reason", "legacy goal test", "--goal", "-", stdin="  line one\nline two\n")
+        rc, _, _ = self.cli("activate", "--job", "J", "--session", "sess-1", "--goal", "-", stdin="  line one\nline two\n")
         self.assertEqual(rc, 0)
         self.assertEqual(self.job().goal, "line one\nline two")
 
@@ -135,8 +134,7 @@ class JudgeHookTests(GoalEnv):
         first = self.member("judge-1").name
         _, turn = self.spawn_judge("judge-2")
         ctx = self.context(turn)
-        self.assertIn(f"[swarm] Your prompt makes you a judge, but job \"J\" has one judge: "
-                      f"judge seat held by {first} (joined ", ctx)
+        self.assertIn("[swarm] Your prompt makes you a judge, but job \"J\" has one judge: ", ctx)
         self.assertIn('working on job "J"', ctx)  # on the board as a worker
         self.assertEqual(self.job().judge, first)
         self.assertNotEqual(self.member("judge-2").role, "judge")
@@ -182,7 +180,7 @@ class ExternalAgentRoleTests(GoalEnv):
         first = self.member("judge-1").name
         rc, out, err = self.cli("join", "--job", "J", "--key", "codex-judge", "--judge")
         self.assertEqual(rc, 1)
-        self.assertIn(f"judge seat held by {first} (joined ", err)
+        self.assertIn("another agent holds the judge launch", err)   # the seat words went with the driver
         self.assertEqual(self.job().judge, first)
 
     def test_join_as_verifier(self):

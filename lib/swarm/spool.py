@@ -206,9 +206,6 @@ def spool_verdict(cfg: dict, job: str, name: str, verdict: str, reason: str,
                   req: str | None = None) -> Path:
     """Queue a `swarm verdict`; whether `name` is the job's judge is checked on delivery. The typed
     fields (schema 25) are queued with it, and replayed on delivery."""
-    if generation is None:   # a drive job's verdict keeps its ledger generation while it waits (S2)
-        from swarm.verdict_cli import _drive_generation
-        generation = _drive_generation(cfg, job)
     typed = typed_verdict_fields(scope, generation, open_count, progress, candidate, req)
     return _spool(cfg, {"job": job, "name": name, "verdict": verdict, "reason": reason,
                         "next": next_steps, "artifact": artifact,
@@ -576,10 +573,8 @@ def _deliver_post(board, rec: tuple) -> bool:
         addressing.check_author(board, job, name, key)
         try:
             targets = addressing.resolve(board, job, to) if to else [None]
-        except addressing.NoHolder as exc:   # kept for the seat's next holder
-            from swarm import seatcont
-            seatcont.queue_post(board, job, name, message, exc.token, key)
-            return True
+        except addressing.NoHolder as exc:   # kept for the launch's next holder
+            targets = [addressing.queue_name(exc.token)]
     except addressing.AddressError as exc:
         board.post(job, "swarm", f"not delivered: {exc}", to=name)
         return False

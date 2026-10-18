@@ -53,6 +53,11 @@ def check_author(board, job: str, name: str, key: str | None = None) -> None:
                            f"(or join it first); nothing was posted")
 
 
+def queue_name(token: str) -> str:
+    """The addressee a post to a launch nobody holds is kept under: its next holder reads it on joining."""
+    return f"queue.{token.lower()}"
+
+
 def resolve(board, job: str, to: str) -> list[str]:
     """The agent names `to` addresses on `job`: [to] for a plain name of an agent of the job; for
     `@role` the active holders of the launch, in roster order; [to] for a name of the person behind the job

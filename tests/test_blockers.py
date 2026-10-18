@@ -142,7 +142,8 @@ class BlockerContract:
                 until = None if offset is None else now + dt.timedelta(days=offset)
                 self.b.open_blocker(job, kind, addressee, "blocked", until=until)
                 status = self.b.job_status(job)
-                self.assertEqual(derive_job_status(status, 5, now), "waiting")
+                # only a question to a person is a wait; every other blocker leaves the job active
+                self.assertEqual(derive_job_status(status, 5, now), "waiting" if kind == "question" else "active")
                 self.assertEqual(status.protected_blockers, int(protected))
                 self.assertEqual(
                     self.b.close_job(job, "failed", "stall", guard=CloseGuard(False, "ship")),

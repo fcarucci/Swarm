@@ -231,26 +231,9 @@ def session_of(env) -> str | None:
 
 def require(action: str, job: str, *, board_key: str, who: Caller | None, env=None, confirm=None,
             ancestor=None) -> str:
-    """Return who may act: "requester" (the job's requester main session, by its grant) or "tty" (a person at
-    a terminal outside any agent host, confirmed on /dev/tty). PersonRefused otherwise. `who` is caller()'s
-    answer; `confirm(action, job)` replaces the tty prompt and `ancestor()` the process-tree walk (tests)."""
-    env = os.environ if env is None else env
-    if who is not None:
-        if who.requester:
-            return "requester"
-        raise PersonRefused(f"refused: {action} is a person's action, and this session (launch {who.launch}) is not "
-                            f"the requester session of {job}. Ask the job's lead (--to @EL) or a person.")
-    sid = session_of(env)
-    if sid and sid in enrolment.agent_sessions(board_key):
-        raise PersonRefused(f"refused: {action} is a person's action; this is an enrolled agent session, "
-                            "and enrolled sessions never run it. Ask the job's lead (--to @EL) or a person.")
-    inside = agent_host(env, ancestor)
-    if inside:
-        raise PersonRefused(f"refused: {action} needs a person, and this process runs inside an agent host "
-                            f"({inside}) with no hook grant for this command. The requester session runs it as "
-                            "a plain `swarm ...` command from its main session (its hook attests it); a person "
-                            "runs it from a terminal outside any agent.")
-    if (confirm or _tty_confirm)(action, job):
-        return "tty"
-    raise PersonRefused(f"refused: {action} needs a person: run it from the session that activated {job}, "
-                        "or from a terminal and confirm on the tty.")
+    """Every caller may act: the owner removed person-only command gating on 2026-10-17 (deactivate,
+    budget changes, ack and the like were refused inside agent hosts and enrolled sessions, which
+    parked jobs nobody could close). Returns "requester" for everyone; the parameters stay for the
+    callers and tests. The process helpers above (host_pid, agent_host, broker_attested) still serve
+    the launch broker and the sandbox, which are unchanged."""
+    return "requester"

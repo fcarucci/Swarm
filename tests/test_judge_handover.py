@@ -8,7 +8,7 @@ from test_hooks_cli import Env  # noqa: E402  (sets sys.path)
 class JudgeHandoverTests(Env):
     def setUp(self):
         super().setUp()
-        self.assertEqual(self.cli("activate", "--job", "J", "--no-drive", "--reason", "legacy goal test", "--goal", "ship it")[0], 0)
+        self.assertEqual(self.cli("activate", "--job", "J", "--goal", "ship it")[0], 0)
 
     def go_dead(self, key):
         """The judge's session ended without a stop: no contact for longer than dead_minutes, its
@@ -57,6 +57,6 @@ class JudgeHandoverTests(Env):
         self.h.backdate_agent("judge-1", joined_at=3600, last_seen=10 * 60)   # idle, not dead: still live
         rc, _, err = self.join_judge("judge-2")
         self.assertEqual(rc, 1)
-        self.assertIn(f"judge seat held by {first} (joined 1h ago)", err)
+        self.assertIn("another agent holds the judge launch", err)
         with self.board() as b:
             self.assertEqual(b.job_status("J").judge, first)

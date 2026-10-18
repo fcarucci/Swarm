@@ -17,32 +17,34 @@ from swarm.board import JobStatus, derive_job_status  # noqa: E402
 NOW = dt.datetime(2026, 9, 24, 12, 0, tzinfo=dt.timezone.utc)
 
 
-def js(status="active", waiting_on=None, started=0, running=0, last_minutes_ago=30.0) -> JobStatus:
+def js(status="active", waiting_on=None, started=0, running=0, last_minutes_ago=30.0, open_questions=0) -> JobStatus:
     last = NOW - dt.timedelta(minutes=last_minutes_ago)
     return JobStatus(job="J", status=status, description=None, task=None, outcome=None,
                      created_by=None, session_id=None, created_at=last, activated_at=last,
                      finished_at=None, agents=1, started=started, running=running, idle=0,
                      completed=1, dead_or_left=0, messages=0, last_activity_at=last,
-                     waiting_on=waiting_on)
+                     waiting_on=waiting_on, open_questions=open_questions)
 
 
 class DeriveJobStatusTests(unittest.TestCase):
     def test_words(self):
         self.assertEqual(derive_job_status(js(status="completed", waiting_on="x"), 5, NOW), "completed")
-        self.assertEqual(derive_job_status(js(waiting_on="the user"), 5, NOW), "waiting")
+        self.assertEqual(derive_job_status(js(open_questions=1), 5, NOW), "waiting")   # a question to a person
+        self.assertEqual(derive_job_status(js(waiting_on="the user"), 5, NOW), "active")  # `wait --on` is not a state
         self.assertEqual(derive_job_status(js(running=1), 5, NOW), "active")
         self.assertEqual(derive_job_status(js(started=1), 5, NOW), "active")
         self.assertEqual(derive_job_status(js(last_minutes_ago=2), 5, NOW), "active")   # just now
-        self.assertEqual(derive_job_status(js(), 5, NOW), "idle")
+        self.assertEqual(derive_job_status(js(), 5, NOW), "active")   # quiet, but `swarm pass` moves it: never idle
 
 
 class WaitCliTests(RoutingEnv):
-    def test_who_shows_waiting_goal_not_met_without_agents(self):
-        rc, _, err = self.cli('activate', '--job', 'J', '--no-drive', '--reason', 'legacy goal test', '--goal', 'deliver report')
+    def test_who_shows_an_empty_goal_job_as_active(self):
+        """A goal job nobody works on is not "waiting": `swarm pass` re-queues its lead or fails it."""
+        rc, _, err = self.cli('activate', '--job', 'J', '--goal', 'deliver report')
         self.assertEqual(rc, 0, err)
         rc, out, err = self.cli('who', '--job', 'J')
         self.assertEqual(rc, 0, err)
-        self.assertIn('J [waiting (goal not met)]', out)
+        self.assertNotIn('waiting', out)
 
     def status_row(self) -> str:
         rc, out, _ = self.cli("status", "--no-color")
@@ -54,9 +56,9 @@ class WaitCliTests(RoutingEnv):
         rc, out, _ = self.cli("wait", "--job", "J", "--on", "the", "user's", "answers")
         self.assertEqual(rc, 0)
         self.assertIn("J is waiting on: the user's answers", out)
-        self.assertRegex(self.status_row(), r"^J\s+waiting\s.*the user's answers · \d+s")
+        self.assertRegex(self.status_row(), r"^J\s+active\s.*the user's answers · \d+s")
         rc, out, _ = self.cli("status", "--job", "J", "--no-color")
-        self.assertIn("job        J  [waiting]", out)
+        self.assertIn("job        J  [active]", out)
         self.assertRegex(out, r"waiting    on the user's answers, since \d+s ago")
         rc, out, _ = self.cli("resume", "--job", "J")
         self.assertEqual((rc, out), (0, "J is no longer waiting\n"))
@@ -70,7 +72,7 @@ class WaitCliTests(RoutingEnv):
     def test_idle_when_nobody_works_and_no_reason(self):
         self.activate("J")
         self.backdate_job_activity("J")
-        self.assertRegex(self.status_row(), r"^J\s+idle\s")
+        self.assertRegex(self.status_row(), r"^J\s+active\s")   # no idle state: `swarm pass` moves or fails it
 
     def test_an_agent_joining_ends_the_wait(self):
         self.activate("J")

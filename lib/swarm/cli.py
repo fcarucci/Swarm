@@ -94,9 +94,10 @@ DEFAULTS = {
               "join_history": 30,
               # the hooks show each agent a full roster at least this often (diffs in between)
               "roster_refresh_minutes": 10,
-              # `watch` and `status --job` hide finished agents (completed/left/dead) whose end
-              # or last contact is older than this; `a` / --all-agents shows them
-              "watch_recent_minutes": 10, "watch_interval_s": 10, "watch_check_s": 60, "watch_min_redraw_s": 2,
+              # `watch` and `status --job` hide finished agents (completed/left/dead); 0 (the default,
+              # Francesco 2026-10-17) hides every finished agent, N keeps those that ended within N
+              # minutes; `a` / --all-agents shows them all
+              "watch_recent_minutes": 0, "watch_interval_s": 10, "watch_check_s": 60, "watch_min_redraw_s": 2,
               # nudge an agent to post a status after this many tool calls or minutes without
               # posting (once per quiet window; 0 disables that trigger)
               "silence_nudge_calls": 15, "silence_nudge_minutes": 10,
@@ -454,16 +455,6 @@ def cli_closed_by() -> str | None:
     return None if user in ("driver", AUTO_CLOSED_BY) else user
 
 
-def drive_ledger_present(cfg: dict, job: str) -> bool:
-    """Whether this host holds an unfinished (or unreadable) drive ledger for `job`. Read-only: a sweep creates nothing. The core sweeps leave such a job to the driver."""
-    from swarm.board.autoinit import store_key
-    from swarm.supervisor import ledger
-    try:
-        return ledger.claims(store_key(cfg), job)
-    except Exception as exc:
-        from swarm import transcripts as _t
-        _t.log(f"sweep: drive ledger check for {job} failed: {type(exc).__name__}")
-        return False
 
 
 def sweep_jobs(board, cfg: dict, deadline: float | None = None) -> list:
@@ -487,7 +478,6 @@ def sweep_jobs(board, cfg: dict, deadline: float | None = None) -> list:
     if deadline is None:
         from swarm import transcripts as _tr
         deadline = time.monotonic() + _tr.SWEEP_SECONDS
-    board.drive_ledger = lambda job: drive_ledger_present(cfg, job)   # drive jobs are the driver's, not the sweeps'
     # A Codex turn ending (or staying quiet) does not prove that its process exited.
     # Completion comes from SessionEnd or the supervisor runner's exit bookkeeping.
     try:
@@ -1124,24 +1114,6 @@ def _table(headers: list[str], rows: list[list[str]], color: bool, status_col: i
 def _job_status_word(board, j, now) -> str:
     """The job's shown status: waiting / idle / active for an open job (derive_job_status)."""
     from swarm.board import derive_job_status
-    if j.status == "active" and board.job_data(j.job).get("drive.budget-hold"):
-        return "waiting on a person (budget)"
-    if j.status == "active" and board.job_data(j.job).get("drive.ruling-hold"):
-        return "waiting on a person (ruling)"
-    if j.status == "active":
-        data = board.job_data(j.job)
-        if data.get("drive.goal-hold") or data.get("drive.waiting"):
-            return "waiting"
-        if data.get("drive.enabled"):
-            from swarm.board.autoinit import store_key
-            from swarm.supervisor import ledger
-            try:
-                led = ledger.load(store_key(board.cfg), j.job)
-            except (ledger.LedgerBadError, OSError):
-                led = None
-            if led and led.terminal is None and any(led.watermarks.get(k) for k in
-                                                    ("goal-hold", "ruling-hold", "budget-hold", "learn.hold")):
-                return "waiting"
     return derive_job_status(j, float(board.board_cfg.get("idle_minutes", 5)), now)
 
 
@@ -1333,6 +1305,9 @@ def _recent_agents(rows: list, now, recent_minutes: int | None) -> tuple[list, i
     recent_minutes None shows everyone. The order of `rows` is kept."""
     if recent_minutes is None:
         return list(rows), 0
+    if not recent_minutes:   # 0: every finished agent is hidden (the default)
+        shown = [a for a in rows if a.status not in FINISHED]
+        return shown, len(rows) - len(shown)
     import datetime as dt
     cutoff = now - dt.timedelta(minutes=recent_minutes)
     last = lambda a: max(t for t in (a.ended_at, a.last_contact_at) if t is not None)  # noqa: E731
@@ -2630,6 +2605,45 @@ def _select_loop(sel, w: "_ThreadedWatch", interval: float, view: dict) -> None:
             return
 
 
+WATCH_CODE_CHECK_S = 20   # how often a running watch looks for a newer installed swarm
+
+
+def _code_stamp() -> float:
+    """The newest modification time of the installed swarm package's .py files."""
+    root = os.path.dirname(os.path.abspath(__file__))
+    newest = 0.0
+    for d, _, files in os.walk(root):
+        for f in files:
+            if f.endswith(".py"):
+                try:
+                    newest = max(newest, os.stat(os.path.join(d, f)).st_mtime)
+                except OSError:
+                    pass
+    return newest
+
+
+def _restart_on_code_change(out, fd) -> None:
+    """A long-running watch re-executes itself when the swarm code on disk changes, so a pane never keeps
+    showing what old code computed (a deploy used to leave panes on stale status words for hours)."""
+    import threading
+    start = _code_stamp()
+
+    def check():
+        while True:
+            time.sleep(WATCH_CODE_CHECK_S)
+            if _code_stamp() > start:
+                time.sleep(2)   # let a multi-file deploy finish
+                try:
+                    _screen_off(out, fd, _WATCH_SAVED_TTY.get("attrs"))
+                except Exception:
+                    pass
+                os.execv(sys.executable, [sys.executable, "-m", "swarm.cli", *sys.argv[1:]])
+    threading.Thread(target=check, daemon=True, name="watch-code-check").start()
+
+
+_WATCH_SAVED_TTY: dict = {}
+
+
 def cmd_watch(cfg: dict, job: str | None, interval: float, color: bool, session: str | None = None,
               exit_when_idle: float | None = None, compact: bool = False) -> int:
     """Full-screen live view: jobs, each active job's agents, and the latest messages.
@@ -2663,6 +2677,8 @@ def cmd_watch(cfg: dict, job: str | None, interval: float, color: bool, session:
     interactive = out.isatty() and sys.stdin.isatty() and not compat.IS_WINDOWS   # no termios: Ctrl-C quits
     fd = sys.stdin.fileno() if interactive else None
     saved = _screen_on(out, fd)
+    _WATCH_SAVED_TTY["attrs"] = saved
+    _restart_on_code_change(out, fd)
 
     sweeper = Sweeper(cfg)
 
@@ -2716,7 +2732,6 @@ def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="swarm", description=__doc__.split("\n\n")[0])
     p.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     sub = p.add_subparsers(dest="cmd", required=True)
-    from swarm import drive_cli; drive_cli.register(sub, BOARD_COMMANDS, COMMANDS)   # drive control (launch, halt, ...)
     ini = sub.add_parser("init", help="set up: config, launcher, board; host settings only with --apply-settings")
     ini.add_argument("--no-hooks", action="store_true", help="ignored (hooks come from the plugin)")
     ini.add_argument("--host", choices=["claude", "codex"], help="the host to set up (default: the one running this, "
@@ -2871,6 +2886,24 @@ def _parser() -> argparse.ArgumentParser:
                     "session's jobs leaves (for a session start: a restart killed them without a stop)")
     lv.add_argument("--as", dest="name"); lv.add_argument("--key"); lv.add_argument("--session")
     sub.add_parser("purge")
+    sub.add_parser("pass", help="one stateless sweep over the open jobs: starts their queued launches, runs the "
+                                     "judge, notices failed jobs (the hooks run it too, every minute at most)")
+    ak = sub.add_parser("ack", help="the owner has seen a failed job's notice from `swarm pass`: its notices stop")
+    ak.add_argument("--job", required=True)
+    rv = sub.add_parser("review", help="post a review of an artifact: REVIEW <artifact> VERIFIED|CHANGES <report>")
+    rv.add_argument("--job", required=True); rv.add_argument("--artifact", required=True)
+    rv.add_argument("outcome", choices=["verified", "changes"], type=str.lower)
+    rg = rv.add_mutually_exclusive_group(required=True)
+    rg.add_argument("--report", metavar="FILE", help="a file holding the review report (its path is posted)")
+    rg.add_argument("--report-text", metavar="TEXT", help="the review report itself, posted after the line")
+    rv.add_argument("--key", help="the reviewing agent's key (the hooks add it)")
+    rv.add_argument("--as", dest="name", help="the reviewing agent's name")
+    rn = sub.add_parser("run", help="queue a named launch for the job: `swarm pass` (or the hooks) starts it "
+                                    "when the job's concurrency and cost caps allow")
+    rn.add_argument("--job", required=True); rn.add_argument("--name", required=True)
+    rn.add_argument("--role", required=True); rn.add_argument("--brief", required=True)
+    rn.add_argument("--harness", default="claude", choices=["claude", "codex"])
+    rn.add_argument("--model"); rn.add_argument("--workdir", help="the job's work dir (kept for its later launches)")
     tl = sub.add_parser("tail", help="follow the board live (Ctrl-C to stop)")
     tl.add_argument("--job", help="only this job (default: all jobs)")
     tl.add_argument("-n", "--backlog", type=int, default=20, help="show the last N messages first")
@@ -2901,9 +2934,6 @@ def _parser() -> argparse.ArgumentParser:
     ac.add_argument("--stall-hours", "--max-hours", dest="max_hours", type=float, metavar="N",
                     help="close the job (failed) after N hours without progress, instead of [job] "
                          "stall_hours; 0 = never (--max-hours is the old name)")
-    from swarm import drive_activate as _da
-    _da.add_activate_args(ac)   # drive mode ([A]): --no-drive, budgets, models, workdir, credentials
-    _da.add_drive_parser(sub)   # swarm drive budget|models
     bg = sub.add_parser("bg", help="background commands of agents: `bg list`, `bg reap`; `swarm bg --job J "
                                    "--as NAME -- COMMAND` runs one recorded (the hooks wrap members' background calls)")
     bgs = bg.add_subparsers(dest="bcmd", required=True)
@@ -2994,7 +3024,7 @@ def _parser() -> argparse.ArgumentParser:
     st = sub.add_parser("status", help="jobs overview, or one job's agents with --job")
     st.add_argument("--job"); st.add_argument("--all", action="store_true", help="include closed jobs")
     st.add_argument("--all-agents", action="store_true",
-                    help="with --job: also list finished agents older than board.watch_recent_minutes")
+                    help="with --job: also list finished agents (hidden by default)")
     st.add_argument("--no-color", action="store_true")
     sn = sub.add_parser("snapshot", help="the board's current view as JSON (pure read); --follow streams changes as NDJSON")
     sn.add_argument("--json", action="store_true", help="JSON output (the only format; accepted for clarity)")
@@ -3266,41 +3296,15 @@ def cmd_activate(cfg: dict, args) -> int:
         return 2
     task = sys.stdin.read() if args.task == "-" else args.task
     goal = (sys.stdin.read() if args.goal == "-" else args.goal or "").strip() or None
-    from swarm import drive_activate as _da
     args.goal = goal
-    if not goal and not args.no_drive:
-        # A bare activate of an existing drive job must not bypass its generation protocol.
-        from swarm.supervisor import ledger as _ledger
-        existing = _ledger.load(_da.board_key(cfg), args.job)
-        if existing is not None:
-            with open_board(cfg) as board:
-                js = board.job_status(args.job)
-            owner = _da._owner(_da.board_key(cfg), args.job)
-            args.goal = goal = (js.goal if js else None) or ((owner.owner or {}).get("goal") if owner else None)
-            if owner:
-                args.workdir = args.workdir or owner.cwd
-                args.recipe = args.recipe or (owner.owner or {}).get("recipe")
-    if _da.wants_drive(args):   # [A] a goal implies drive
-        rc = _da.cmd_activate_drive(cfg, args)
-        if rc == 0:
-            rc = _record_memory_scope(cfg, args, explicit_tags, args.workdir or os.getcwd())
-        return rc
-    rc = _da.legacy_goal_check(args)
-    if rc is not None:
-        return rc
     # Run from Claude Code (the orchestrator's Bash tool), the job is bound to the calling
     # session at once: no other session can claim it, and it can share the session with others.
     with open_board(cfg) as board:
         board.purge()
         before = board.job_status(args.job)
         new_job = before is None
-        from swarm import seatcont
-        seat = seatcont.previous_seat(board, args.job, session) if before is not None and before.status != "active" else None
         board.open_job(args.job, args.description, task, session, os.environ.get("USER"),
                        project=args.project or "", goal=goal)
-        rejoined = seatcont.rejoin(board, args.job, session, seat)   # reopened: back in its old seat, same name
-        if rejoined:
-            print(f"rejoined {args.job} as {term_safe(rejoined)} ({term_safe(seat[1])})")
         board.set_job_data(args.job, "pipeline.started_at", board.now().isoformat())
         learnings.record_scope(board, args.job, learnings.derive_tags(args.project, os.getcwd(), explicit_tags),
                                getattr(args, "topic", None))
@@ -3395,13 +3399,6 @@ def _completion_refusal(js) -> str | None:
             f"override with --force (recorded).")
 
 
-def _met_covers_handoff(candidate: str | None, handoffs) -> bool:
-    """Whether a met verdict's candidate (REF@SHA) is the latest hand-off (a bare SHA, REF@SHA or
-    report:<path>@<blob>): compared by head, as the driver does (same_head). No hand-off: nothing to differ."""
-    from swarm.supervisor.driver_model import same_head
-    return not handoffs or same_head(candidate, handoffs[-1].artifact)
-
-
 def cmd_deactivate(cfg: dict, args) -> int:
     from swarm.board import AUTO_CLOSED_BY, open_board
     marker = _marker(cfg, args.job)
@@ -3420,21 +3417,6 @@ def cmd_deactivate(cfg: dict, args) -> int:
                   f"{_error_name(exc)}). Retry, or override with --force.", file=sys.stderr)
             return 1
     met = js is not None and js.verdict == "met" and js.verdict_scope in (None, "goal", "ruling")
-    if (completing and board is not None and js is not None and not met and not args.force
-            and board.job_data(args.job).get("drive.enabled") == "1"):
-        # Artifact verdicts can overwrite the legacy latest-verdict column. The drive snapshot
-        # retains the latest goal/ruling verdict independently of those artifact updates.
-        from swarm import drive_activate
-        from swarm.supervisor import driver_snapshot, ledger
-        try:
-            led = ledger.load(drive_activate.board_key(cfg), args.job)
-        except (ledger.LedgerBadError, OSError):
-            led = None
-        if led is not None:
-            snap = driver_snapshot.read(board, led, args.job, cfg=cfg, now=board.now())
-            gv = snap.goal_verdict
-            met = (gv is not None and gv.verdict == "met" and gv.generation == led.generation
-                   and _met_covers_handoff(gv.candidate, snap.handoffs))
     refusal = _completion_refusal(js) if completing and not met else None
     if completing and board is not None and js is not None and js.goal and not met and not args.force:
         from swarm.review import latest_handoffs, pending_artifacts, unfinalized_artifacts
@@ -3920,9 +3902,8 @@ def cmd_spool_retry(cfg: dict) -> int:
 
 
 def _cmd_hook(cfg: dict, args) -> int:
-    if args.event == "session-start":   # bin/swarm-hook's shell part does the rest; here: the drive session driver
-        from swarm.supervisor import session_driver
-        return session_driver.hook_session_start(cfg, sys.stdin)
+    if args.event == "session-start":   # bin/swarm-hook's shell part does the whole job
+        return 0
     try:
         from swarm.hooks import run_hook
     except ImportError:   # the directory edition ships without hooks
@@ -4211,11 +4192,9 @@ def _board_post(board, cfg: dict, args) -> int | None:
         try:
             targets = addressing.resolve(board, args.job, args.to) if args.to else [None]
             results = [board.post(args.job, args.name, text, t) for t in targets]
-        except addressing.NoHolder as exc:   # a seat nobody holds yet: kept for its next holder
-            from swarm import seatcont
-            results = [seatcont.queue_post(board, args.job, args.name, text, exc.token,
-                                           getattr(args, "key", None))]
-            targets = [seatcont.queue_name(exc.token)]
+        except addressing.NoHolder as exc:   # a launch nobody holds yet: kept for its next holder
+            targets = [addressing.queue_name(exc.token)]
+            results = [board.post(args.job, args.name, text, targets[0], agent_key=getattr(args, "key", None))]
     except ValueError as exc:   # a refused name (board.base.valid_name) or an AddressError
         print(f"not posted: {term_safe(exc)}", file=sys.stderr)
         return 1
@@ -4371,18 +4350,8 @@ def _board_await(board, cfg: dict, args) -> int:
         if board.job_state(args.job) in CLOSED_JOB_STATUSES:
             print(f"job {args.job} is {board.job_state(args.job)}: nothing to await")
             return 0
-        from swarm.supervisor import orchestrator_wake
-        lock = orchestrator_wake.hold(session, args.job)   # one blocking await per session and job: the wake is armed
-        if lock is None:
-            print("(an await of this session and job already runs)")
-            return 0
-        try:
-            from swarm.supervisor.session_driver import stall_check
-            items = awaititems.await_items(board, args.job, session, timeout=args.timeout, poll=args.poll,
-                                           remind=args.remind,
-                                           on_poll=lambda: stall_check(board, cfg, [args.job]))
-        finally:
-            os.close(lock)
+        items = awaititems.await_items(board, args.job, session, timeout=args.timeout, poll=args.poll,
+                                       remind=args.remind)
     for item in items:
         print(term_safe(awaititems.format_item(item)))
     if not items:
@@ -4543,31 +4512,9 @@ def _board_status(board, cfg: dict, args) -> None:
     recent = None if args.all_agents else int(cfg["board"]["watch_recent_minutes"])
     rows = board.transcripts(job=args.job) if enabled and board.job_status(args.job) else None
     print(job_detail(board, args.job, color, recent, "--all-agents to show", rows, sup=sup))
-    from swarm import drive_activate as _da
-    for line in _da.drive_lines(cfg, args.job):   # effective budget and models of a drive job ([D1], [P1])
-        print(line)
-    from swarm.supervisor import ledger as _ledger
-    try:
-        led = _ledger.load(_da.board_key(cfg), args.job)
-    except (_ledger.LedgerBadError, OSError):
-        led = None                        # drive_lines already explains the unreadable ledger
-    if led and led.halted:
-        print(term_safe(f"halted: {led.halted.get('by', '?')} ({led.halted.get('reason', '')})"
-                        f" - unhalt with swarm unhalt --job {args.job}"))
-    data = board.job_data(args.job)
-    error = data.get(f"drive.error.{led.generation}") if led else None
-    if error and error.strip():
-        print(term_safe(f"last driver error: {error.strip().splitlines()[-1]} (see driver.log)"))
     for launch in board.launches(args.job):
-        reason = (data.get(f"drive.skip.{launch.generation}.{launch.name}") if launch.state == "queued"
-                  else launch.last_outcome)
-        reason = f": {reason}" if reason else ""
-        requeues = led.watermarks.get(f"requeue:{launch.generation}:{launch.name}", 0) if led else 0
-        retried = f", requeued {requeues}" if requeues else ""
-        print(term_safe(f"launch {launch.name} gen {launch.generation}: {launch.state} "
-                        f"({launch.role}, attempts {launch.attempts}{retried}){reason}"))
-    for line in _da.why_lines(led, data, board.launches(args.job)):
-        print(term_safe(line))
+        reason = f": {launch.last_outcome}" if launch.last_outcome else ""
+        print(term_safe(f"launch {launch.name}: {launch.state} ({launch.role}, attempts {launch.attempts}){reason}"))
     line = bg_line(board, args.job) if board.job_status(args.job) else None
     if line:
         print(line)
@@ -4598,9 +4545,7 @@ def _board_join(board, cfg: dict, args) -> int:
               f"cannot claim it)", file=sys.stderr)
         return 1
     if args.judge and not board.take_judge_launch(args.key, args.job):
-        from swarm import seatcont
-        print(f"refused: {seatcont.judge_refusal(board, args.job, args.key) or 'another agent holds the judge launch'}",
-              file=sys.stderr)
+        print("refused: another agent holds the judge launch", file=sys.stderr)
         return 1
     if args.verifier and not board.claim_verifier(args.key, args.job):
         print(f"refused: could not make {name} a verifier of job {args.job}", file=sys.stderr)
@@ -4710,6 +4655,67 @@ def _board_leave(board, cfg: dict, args) -> int | None:
     print("left")
 
 
+def _board_pass(board, cfg: dict, args) -> None:
+    from swarm import passcmd
+    acts = passcmd.run_pass(board, cfg)
+    for a in acts:
+        print(term_safe(a))
+    if not acts:
+        print("nothing to do")
+
+
+def _board_review(board, cfg: dict, args) -> int | None:
+    """REVIEW <artifact> VERIFIED|CHANGES <report>: a reviewer's result on the board, under its own name."""
+    name = args.name or (board.active_agent_name(args.key) if args.key else None)
+    if not name:
+        print("swarm review: who is reviewing is unknown here: give --as NAME or --key KEY", file=sys.stderr)
+        return 1
+    artifact = args.artifact.strip()
+    if not artifact or any(c.isspace() for c in artifact):
+        print("swarm review: --artifact must be one reference without spaces", file=sys.stderr)
+        return 1
+    if args.report is not None:
+        path = os.path.abspath(os.path.expanduser(args.report))
+        if not os.path.isfile(path) or os.path.getsize(path) == 0:
+            print(f"swarm review: the report {term_safe(path)} is missing or empty", file=sys.stderr)
+            return 1
+        tail = path
+    else:
+        tail = " ".join(args.report_text.split())
+        if not tail:
+            print("swarm review: the review report is empty", file=sys.stderr)
+            return 1
+    res = board.post(args.job, name, f"REVIEW {artifact} {args.outcome.upper()} {tail}", None, agent_key=args.key)
+    print(f"posted #{res.id}" + (f" (truncated to {board.message_cap()} chars)" if res.truncated else ""))
+
+
+def _board_ack(board, cfg: dict, args) -> int | None:
+    from swarm import passcmd
+    if not passcmd.ack(board, args.job):
+        print(f"no job {term_safe(args.job)}", file=sys.stderr)
+        return 1
+    print(f"{term_safe(args.job)}: acked")
+
+
+def _board_run(board, cfg: dict, args) -> int | None:
+    from swarm import passcmd
+    try:
+        # the job's work dir (where re-queued leads and judges run) is the lead's, or the first one given:
+        # an engineer's own worktree must never become it
+        if args.workdir and (args.role == "lead" or not board.job_data(args.job).get("workdir")):
+            board.set_job_data(args.job, "workdir", args.workdir)
+        workdir = args.workdir or passcmd._workdir(board, args.job)
+        if not workdir:
+            print("swarm run: no work dir: pass --workdir once for the job", file=sys.stderr)
+            return 1
+        row = board.queue_launch(args.job, 1, args.name, role=args.role, harness=args.harness, model=args.model,
+                                 workdir=workdir, brief=args.brief, queued_by="swarm run")
+    except ValueError as exc:
+        print(f"swarm run: {term_safe(str(exc))}", file=sys.stderr)
+        return 1
+    print(f"{term_safe(row.name)}: {row.state}")
+
+
 def _board_purge(board, cfg: dict, args) -> None:
     board.purge()
     if transcripts_enabled(cfg):
@@ -4770,6 +4776,10 @@ BOARD_COMMANDS = {
     "event": _board_event,
     "leave": _board_leave,
     "purge": _board_purge,
+    "pass": _board_pass,
+    "ack": _board_ack,
+    "review": _board_review,
+    "run": _board_run,
     "transcript": _board_transcript,
     "memory": _board_memory,
 }

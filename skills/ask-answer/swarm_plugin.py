@@ -120,18 +120,7 @@ def open_question(ctx, board, job, actor, to, text, options=None, default=None, 
         raise ValueError('options must be distinct nonempty values')
     if options and default is not None and default not in options:
         raise ValueError('default must be one of the options')
-    from swarm.supervisor.orphans import drive_view
-    drive, generation = drive_view(board, ctx.cfg, job)
-    if drive:
-        # A drive job is driven: nobody answers in time, so the driver applies the default on expiry (spec 3.10).
-        if default is None:
-            raise ValueError('a question in a drive (goal) job needs --default: it is applied when the question expires')
-        if not expires:
-            from swarm.supervisor.driver_model import DEFAULT_CFG
-            expires = ((ctx.cfg or {}).get('drive') or {}).get('question_expiry', DEFAULT_CFG['question_expiry'])
-        if blocks is None and actor != 'human':
-            blocks = actor
-    launch = actor if drive and actor != 'human' else None
+    launch = None   # the driver that tied a question to its launch is gone; `swarm pass` fails the job on expiry
     until = None
     if expires:
         epoch = cli.wait_deadline(None, expires, board.now().timestamp())
@@ -140,7 +129,7 @@ def open_question(ctx, board, job, actor, to, text, options=None, default=None, 
     with board._blocker_lock(job):
         b = board.open_blocker(job, 'question', to, text, until=until,
                                default_value=default, created_by=actor,
-                               launch=launch, generation=generation if drive else None)
+                               launch=launch, generation=None)
         save_question(ctx, board, b, {'text': text, 'options': options, 'default': default,
                                      'blocks': blocks, 'asked_by': actor})
     pointer = f' (answer: swarm answer {b.id} ...)'
@@ -330,8 +319,6 @@ def run_ask(ctx, args):
                           options=args.options.split(',') if args.options else None,
                           default=args.default, expires=args.expires, blocks=args.blocks)
         print(f'Q{b.id}')
-        from swarm.drive_cli import drive_record
-        drive_record(ctx.cfg, args.job, 'ask', b.id)   # a drive job's record line (drivegate receipts)
 
 
 def run_answer(ctx, args):
@@ -340,9 +327,6 @@ def run_answer(ctx, args):
                             text=' '.join(args.text) if args.text else None, option=args.option,
                             use_default=args.default, comment=args.comment, reopen=args.reopen)
         print(f'Q{b.id} {b.state}')
-        if b.state != 'open':   # an answer, not a comment: a drive job's record line (drivegate receipts)
-            from swarm.drive_cli import drive_record
-            drive_record(ctx.cfg, b.job, 'answer', b.id)
 
 
 def run_questions(ctx, args):
