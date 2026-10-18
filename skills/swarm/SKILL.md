@@ -155,21 +155,24 @@ Agent status:
 | status | meaning |
 |---|---|
 | `started` | joined, no tool call yet |
-| `running` | a tool call is in flight, or it made contact within `idle_minutes` |
-| `idle` | no hook contact for `idle_minutes` (default 5) |
+| `running` | a tool call is in flight, or recent tool activity belongs to an unfinished turn |
+| `idle` | the turn ended explicitly, or no hook contact arrived for `idle_minutes` (default 5); a later actual tool call can resume work |
 | `dead` | no contact for `dead_minutes` (default 30) and no `SubagentStop` ever came |
 | `completed` | Claude: `SubagentStop` fired. Codex: SessionEnd or confirmed runner exit. |
 | `left` | released with `swarm leave`, or still active when its job was deactivated |
 
-A finished agent that is resumed (e.g. via SendMessage) gets its old name back and is running again.
-Job status: `active`, then `completed`, `cancelled` or `failed` when deactivated. While a job is
-open, `status` and `watch` show one of:
-- `active`: an agent is at work, or something happened within `idle_minutes`;
-- `waiting`: `swarm wait --on` said what it waits for, shown in the WAITING ON column;
-- `idle`: nobody is at work and no reason is recorded.
+An agent can resume under its existing identity; its actual next tool activity marks it
+working again. A board post or an open session alone does not clear an ended turn.
+Closed jobs retain `completed`, `cancelled` or `failed`. For an open job, `status` and
+`watch` derive:
 
-The stored status (`jobs.status`, the view) stays `active`; `waiting_on` and `waiting_since`
-hold the reason.
+- `active`: a started or running worker is actually at work, even if a human question is open;
+- `waiting`: no worker is at work and an unanswered question requires a human decision;
+- `idle`: no worker is at work and no human question is open. Internal task dependencies,
+  missing evidence or reconciliation failures remain visible as concrete reasons.
+
+The persisted open lifecycle state is separate from this derived display. Recent messages
+or idle agents cannot by themselves make a job active; agents never set the display label.
 
 **Auto-close.** An open job closes by itself, as `completed`, once all of this holds:
 - it has at least one agent in its current run, and every one of them is `completed` or
