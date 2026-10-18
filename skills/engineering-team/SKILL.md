@@ -5,27 +5,21 @@ description: Use when a software project needs a coordinated engineering lead, e
 
 # Engineering team
 
-Use `swarm:swarm` for the job and board. **Every goal job is kept moving by `swarm pass`**: you activate it with a goal and queue the engineering lead (EL) launch; the lead queues engineers, reviewers and QA with `swarm run`, and the pass runs the judge on each hand-off. You, the invoking agent, are the **requester/observer**: you state the request, activate, answer questions and report. You do not schedule, spawn or integrate. Custom Swarm roles identify responsibilities; they do not grant product, technical, review, or QA authority in code. The built-in `judge` and `verifier` have separate Swarm controls.
+Use `swarm:swarm` for the job and board. The engineering lead owns technical staffing and persists executable dependencies with the [native task workflow](references/dependencies.md). Swarm reconciles those records and launches eligible work even after the lead and requester end their turns. A board promise to dispatch later is not a registered dependency. Roles identify responsibilities; they do not grant authority to change job lifecycle state.
 
-Read [host procedures](references/hosts.md) before activating a job. They cover the drive activation checklist, the EL brief template, Claude and Codex syntax for non-drive jobs, and recovery. Read [role authority](references/team-roles.md) before writing the lead brief, [artifact contracts](references/artifacts.md) before creating baselines or freezing a candidate, [integration gates and hand-offs](references/gates.md) before the first change is opened for review, and [authorization and recovery](references/recovery.md) before writing briefs and when a launch is lost. Use the project's existing document layout; a small change can use compact records that preserve the same decisions.
+Read [host procedures](references/hosts.md) before staffing a job. They cover the drive activation checklist, the EL brief template, Claude and Codex syntax for non-drive jobs, and recovery. Read [role authority](references/team-roles.md) before writing the lead brief, [artifact contracts](references/artifacts.md) before creating baselines or freezing a candidate, [integration gates and hand-offs](references/gates.md) before the first change is opened for review, and [authorization and recovery](references/recovery.md) before writing briefs and when a launch is lost. Use the project's existing document layout; a small change can use compact records that preserve the same decisions.
 
 ## How a goal job runs
 
-1. `swarm activate --job J --goal "<what done means>"`, then `swarm run --job J --name lead-1 --role lead --brief PATH --workdir DIR`. Write the lead brief from the [EL brief template](references/hosts.md#el-brief-template).
-2. The lead staffs with `swarm run` and hands off with `DONE <branch@sha> | summary` or `swarm done --artifact branch@sha`. `swarm pass` (run by the hooks) starts queued launches, runs one judge per hand-off, closes a met job completed, re-queues the lead on not_met, and fails a job after three lead launches with no hand-off, on the cost cap, or on an expired question.
-3. A job is only ever `active`, `waiting` on an open `swarm ask` question to a person, `completed`, `failed` or `cancelled`. It never idles and never waits for anything else.
-4. Observe with `swarm watch --job J`. Answer questions addressed to you; `swarm deactivate` cancels; `swarm ack --job J` stops a failed job's notices.
-5. Report delivered scope, checks, limits, the verdict and cost. Never merge, push to the target or close the job yourself unless the user asked.
+1. Use the existing owner-authorized job and confirm its goal, workdir, runtime health and role model policy. Agents never activate, deactivate, pause, resume, wait or otherwise set job status.
+2. EL records the candidate's immutable artifact reference and registers every known downstream stage with `swarm task add` before its predecessors or EL exit. Include independent review, QA, build and final verification where required. See [exact commands and brief contract](references/dependencies.md).
+3. Each assigned executor reports structured exact-artifact evidence with `swarm task report`, then ends its turn. Evidence plus successful termination releases downstream tasks. A passing review alone does not complete a job with unfinished required stages.
+4. Observe `swarm task list --job J` and `swarm status --job J`. Swarm derives active from actual work and idle when no agent is working; internal dependencies are task blockers. Ask the owner a specific question only when a human decision is required.
+5. Report delivered scope, checks, limits and the verdict. Do not restart completed agents just to keep the job active or dispatch a stage already registered or already executed.
 
-### What the driver does instead of the PM
+Use the user's role model policy explicitly. For this workflow, EL and independent judge use Astra, engineers use GPT-6.1, and QA uses Luna/Terra as available and requested. Resolve supported model identifiers through configured role mappings; report unavailable required models instead of silently substituting legacy Haiku/Sonnet/Opus defaults. An independent reviewer must not review its own change.
 
-- Review: a hand-off (`swarm done`) starts an independent reviewer launch; in drive jobs the engineers run on haiku, so reviewers (sonnet) run strict gates and never the author.
-- Fixes: a verdict or review finding, or `FINALIZE_BLOCKED`, becomes a fix round on the writer's launch, bounded by `max_rounds` and `no_progress_rounds`.
-- Landing: `swarm land --job J --artifact REF` by the integrator launch; the driver lands it (rebase only, or `[land] strategy = squash-ff`; fast-forward pushes only; never a force push; CI green on the exact rebased SHA).
-- CI-FAILED triage goes into the fix round's brief; the PM-per-event procedure is [for non-drive jobs only](references/pm-events.md).
-- Models: `[drive.models]` and `--model ROLE=MODEL`: `engineer`, `worker`, `integrator` haiku; `reviewer`, `qa` sonnet; `judge`, `lead`, `security` opus.
-
-### Rules for every drive launch and brief
+### Rules for every launch and brief
 
 - Never put work trees, clones, builds or scratch repos under `/tmp` (the driver refuses such workdirs); one worktree per writer under the job's work roots.
 - On the box run targeted tests only, through `/var/tmp/test-slots/test-slot -- <cmd>`; full suites run in CI.
@@ -58,17 +52,17 @@ checker holds integration. Completing a request must preserve the approved rebas
 
 ## Jobs without a goal
 
-Everything below applies only to a job without a goal: the pass does not run its judge, so the invoking agent is the project manager (PM) and schedules, dispatches and integrates as before.
+Everything below applies only to a job without a goal: the invoking agent coordinates as PM, but still registers dependent work before ending a turn and never changes job status.
 
 ### Run the team (non-drive)
 
 1. Team composition: always present are EL, QA, one or more engineers, and an independent judge. `product_manager` and `build_engineer` are optional and chosen by the user (`team.toml`, or per job). Before staffing run `swarm team --job J --show` and staff exactly the effective set; change it only on the user's say-so with `swarm team --job J --add|--remove ROLE` (a mandatory role cannot be removed). If a role is absent, its duties move as in [role authority](references/team-roles.md): without `product_manager`, EL writes compact PR criteria and EL+QA record product acceptance; without `build_engineer`, EL owns its duties.
-2. Small work: skip the team and do it yourself. Otherwise capture the user's request verbatim or by stable link, constraints, approvals already given, and a provisional size. For moderate and complex jobs, activate with a goal and schedule one root judge as recommended; record the reason if omitted. Join the board as PM and read it at each turn start and before each staffing wave. Do not wait for a subagent's board post alone: a role needing PM action must also return a structured request.
+2. Small work: skip the team and do it yourself. Otherwise capture the user's request verbatim or by stable link, constraints, approvals already given, and a provisional size. For moderate and complex jobs, use an owner-authorized goal job and register its independent judge; record the reason if omitted. Join the board as PM and read it at each turn start and before each staffing wave. Do not wait for a subagent's board post alone: a role needing PM action must also return a structured request.
 3. If `product_manager` is present, ask it for a revisioned product brief: problem, applicable competitor research, prioritized `PR` requirements, observable criteria, marked inferences, and exclusions. Compare its first baseline to the original request yourself. Return unsupported inferences for correction or route a consequential ambiguity to the user before dependent work; continue unaffected work. A product manager can require escalation of a blocking ambiguity. Without one, EL writes the compact PR criteria and PM still compares them to the request.
 4. Ask the engineering lead (EL) for architecture, `ER` requirements mapped to `PR`, implementation tasks, dependency order, final complexity tier, engineer count, and review/test plan. EL owns staffing and assignments. Schedule its requested roles through root spawns in bounded waves, within observed host capacity. Send infeasible capacity back to EL for repartitioning. Never treat Swarm's child-spawn cap as the whole team limit. Tag every spawn with its launch title, `[swarm title: EL]`, `PM`, `Product`, `QA`, `Judge`, `Build`, `Reviewer`, `Verifier`, `Eng` (an engineer may add a short scope, `Eng: board view`); the invoking PM sets its own with `swarm join --title PM` or `swarm title`. `swarm team --job J --show` lists them. Titles are display labels on the board, separate from roles and addressing. EL keeps them current: when an engineer's scope changes, run `swarm title --job J --as "<name>" "Eng: <new scope>"`.
 5. Give engineers distinct owned tasks and immutable diffs or commits against named bases. PM assigns a fresh independent reviewer for every delivered change, including QA test code. Authors acknowledge findings, fix them, and return them to the reviewer for recheck. Follow the finding authority in [role authority](references/team-roles.md); no author accepts its own risk.
 6. QA may write tests before integration; another engineer reviews any test code. EL integrates reviewed tasks and freezes the candidate using the [source manifest](references/artifacts.md) **before final checks**. QA then runs applicable acceptance, integration, end-to-end, and performance checks on that candidate. Product manager (or, if absent, EL and QA together, recorded) directly checks delivered behavior against each criterion; EL checks architecture and ERs; QA records test evidence and omissions with EL concurrence. Each final result names the candidate ID and requirement revision. A rejection returns to the owner for repair, independent review, a new freeze, affected retest, and refreshed acceptance.
-7. Recompute the current candidate and compare its ID and requirement revision with each final product, EL, and QA result. If the goal job has a judge, require `candidate=<id> req=<revision>` in its `met` verdict reason and compare those values before closing the job: Swarm's gate checks the latest verdict, not its freshness. Report delivered scope, checks, limits, accepted risks, and any separate authorization needed for deployment or publication.
+7. Recompute the current candidate and compare its ID and requirement revision with each final product, EL, and QA result. If the goal job has a judge, require `candidate=<id> req=<revision>` in its `met` verdict reason and compare those values before reporting completion: Swarm's gate checks the latest verdict, not its freshness. Report delivered scope, checks, limits, accepted risks, and any separate authorization needed for deployment or publication.
 
 ### Rules of the road
 
@@ -80,8 +74,7 @@ A hook-registered judge (spawned with `[swarm role: judge]` or `[swarm title: Ju
 hand-off inspected.** A leading `branch@sha:` in the reason is accepted for compatibility.
 A judge run outside the board (a one-off `codex exec`, a person) must still record its result with
 `swarm verdict --job J --as NAME --artifact REF met|not_met ...` (`swarm join --job J --key K --judge`
-first; a judge with hooks never joins and never passes `--as`: its hooks add its own name); otherwise the goal stays unmet and the job waits until the stale-waiting sweep closes it. Close
-the job as soon as the verdict is `met`.
+first; a judge with hooks never joins and never passes `--as`: its hooks add its own name); otherwise the goal stays unmet and the job waits until the stale-waiting sweep closes it. Swarm derives completion only after all required stages and finalization are complete; agents never close the job.
 Judges only judge; integration, pushes and fixes belong to executors. A newer SHA on the same
 branch supersedes its earlier hand-off; separate branches keep independent verdicts.
 A separate INTEGRATOR rebases the branch onto the latest target locally with `git rebase`,
@@ -97,7 +90,7 @@ See [review pipeline](../../docs/REFERENCE.md#review-pipeline) and `team.example
 
 - Address by role: `swarm post --to @EL|@PM|@product|@QA|@judge|@build_engineer`, `@PM` means the invoking project manager and `@product` the optional product manager; never by display name; an unknown role or one with no holder is rejected. Send trivial messages straight to the peer, not through EL.
 - Long text goes in a file; the post is a one-line pointer (posts are 200 characters).
-- When the team is only waiting on CI, reviews, or a user, run `swarm wait --job J --on "<what>" --for <duration>` (or `--until <time>`) so the job reads as waiting, not orphaned; the end time is what protects it, so renew it before it passes and `swarm resume --job J` when work resumes.
+- Keep CI, review and build dependencies in registered tasks. Report their precise blockers; never change job status to represent internal waiting.
 - Verdicts are bound to a head sha and posted on the change record, not only the board; integrate on the current head's verdict, green CI, and no later changes-required ([gates](references/gates.md)).
 - Briefs state what is authorized and what is not; secrets are referenced by path only ([recovery](references/recovery.md)).
 - Final reports and `DONE:` lines follow the hand-off contract in [gates](references/gates.md).

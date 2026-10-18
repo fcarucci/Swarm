@@ -1,56 +1,48 @@
 # Host orchestration and recovery
 
 Use with the [role contract](team-roles.md), [artifact contract](artifacts.md), and
-[Swarm CLI/host reference](../../swarm/SKILL.md). **A goal job is driven**: the supervisor runs
-it, EL requests its launches with `swarm run`, and the invoking agent is the
-requester/observer. Staffing, dispatch and landing by the invoking agent (PM) exist only in
-[non-drive jobs](#non-drive-jobs) (`--no-drive --reason TEXT`).
+[native dependent-task workflow](dependencies.md). EL owns staffing and dependencies;
+Swarm owns dispatch and calculated lifecycle state. No agent changes job status.
 
-## Drive jobs
+## Autonomous jobs
 
-### Activation checklist (requester/observer)
+### Runtime and authorization checklist
 
-- Check the host first: `swarm doctor --host claude` or `--host codex` (hooks, the session driver,
-  git 2.40 or newer, the pinned credential and a dry-run `git ls-remote` per landing destination,
-  Claude Bash sandbox "boundary" or "guardrail only", Codex drive-readiness per role, the per-job
-  budget and model lines). No timer is needed or installed: `swarm activate --goal` starts this
-  session's session driver, which drives the job on Linux, macOS and Windows (`swarm drive run` with no
-  session open; `--no-drive --reason TEXT` only for a job nothing drives). A Windows UNC worktree root is refused.
-- Pin the landing destinations and credentials at activation: `--remote NAME=URL` and
-  `--credential DEST=SOURCE` (an absolute helper path, an ssh key or the agent socket; the driver's
-  mirrors read no global git config). Pin the requirements with `--requirements PATH`.
-- Set the model per role if the defaults do not fit (`--model ROLE=MODEL`; the defaults are
-  haiku for `engineer`, `worker` and `integrator`, sonnet for `reviewer` and `qa`, opus for
-  `judge`, `lead` and `security`) and the budget (`--max-cost-usd N`, `--ruling-reserve-usd N`,
-  `--budget KEY=VALUE`). Those are configurable defaults from `[drive]`, not limits.
-- Activate, then observe. After activation the invoking session may exit; nothing waits on it.
-  A question to the requester carries `--default`; if the requester session never answers, the
-  default applies at `question_expiry`.
-- Workdirs lie under the job's work roots (`--workdir`, `--allow-workdir`) and never under `/tmp`.
-  Tests: targeted, through `/var/tmp/test-slots/test-slot -- <cmd>` from the tests directory.
+- Use an existing owner-authorized job. Check installed source, hooks, native task API,
+  listener reconciliation health and workdir permissions before promising autonomous execution.
+- A listener health/startup failure is an explicit blocker. A tool-call-only wake does not
+  establish autonomous progress after every turn ends. Verify the installed recovery path.
+- Preserve the user's model policy: Astra EL/judge, GPT-6.1 engineers and Luna/Terra QA.
+  Resolve actual supported identifiers from configuration; never silently substitute.
+- Preserve scope and execution permission in each brief. Task registration does not authorize
+  a build, publication or deployment that the user has not authorized.
+- Use a workdir under the job's allowed roots, never `/tmp`; targeted tests use the configured test slots.
 
 ### EL brief template
 
-The lead brief (`--lead-brief PATH`; a default is generated) is a file. It states, in this order:
+The durable lead brief states:
 
-1. The original request (verbatim or a stable link), constraints, approvals given and exclusions.
-2. The requirement files (pinned at activation; `swarm goal-ready --add-requirements PATH` may pin more) with their blob ids.
-3. Authorization: what may be changed, pushed, published, spent; secrets by path only.
-4. Staffing rules: queue each launch with `swarm run --job J --name NAME --role ROLE --brief PATH [--model M --harness H --workdir DIR]`. Names can be re-queued in any state. Workdirs must pass the launcher’s validation at request time. Agents may share a workdir and coordinate their own git worktrees. Concurrency is counted per job; every start checks budgets.
-5. Gates: every hand-off is `swarm done`, reviewed by an independent reviewer launch; landing is `swarm land` by an integrator launch; the lead never lands or pushes the target.
-6. Every brief carries this CI line: "CI: wait for CI ONLY with swarm ci wait --repo OWNER/REPO --sha <exact head> --timeout 540 in the foreground; never gh run watch."
-7. Finish: when the integrated target meets the requirements run `swarm goal-ready --job J --candidate branch@sha`, which posts `GOAL-READY <candidate> req=<requirements blob id digest>`; the goal judge decides MET or UNREACHABLE. If the goal cannot be met, say so with evidence: UNREACHABLE needs a report of what was tried and what would change it.
+1. Original request, constraints, approvals, exclusions and requirement revision.
+2. Immutable candidate artifact, repository/workdir, assigned roles and exclusive file ownership.
+3. Authorized actions, budgets, exact gates, and referenced secret paths only.
+4. Every known stage and its dependencies. Register them using [task add](dependencies.md)
+   before predecessor turns end. A board post or a proposed next step is insufficient.
+5. Assigned executor's exact `task report` command, generation, artifact and acceptance checks.
+   Report passed only after those checks; report failed with the actual blocker. Then end the turn.
+6. Never relaunch completed work to obtain a report. An already-running seat can be registered
+   with `--reporter`; its assigned identity reports its own result. Preserve independent review.
+7. CI: use `swarm ci wait` for the exact candidate SHA in the foreground; never direct polling.
+8. Before ending the lead turn, check `swarm task list --job J`: every remaining authorized
+   dependent action is durable, has a valid executor/brief and clear prerequisites. Record runtime
+   failures precisely. Never use job status commands to manufacture activity or waiting.
 
-### Launches and the requester
-
-- Launches are `queued`, `running`, `done` or `failed`; `swarm status --job J` shows them and their reasons. Any trusted caller may queue or re-queue by name with `swarm run`; failed launches are reported once and not retried unchanged.
-- Every agent joins the board: a launch that does not enrol within `enrol_minutes` is killed. A launch prompt carries the `[swarm job: J]` line and its role tags; the supervisor writes them, not you.
-- The requester session answers with `swarm answer`, halts with `swarm halt`, resumes with `swarm unhalt`, cancels with `swarm deactivate`. A requester Agent-tool spawn is refused in a drive job; ask the lead through the board (`swarm post --to @EL`) when more staffing is needed.
+A human owner may operate lifecycle controls outside agent execution. Session reassignment uses
+its native owner-authorized command and preserves history; do not reactivate or recreate the job.
 
 ## Non-drive jobs
 
 Everything below is for a job nothing drives (`--no-drive --reason TEXT`, or no goal). The PM
-owns activation, board polling, root dispatch and user reports; EL decides technical staffing
+coordinates board reading and user reports; EL decides technical staffing
 and assignments. A `project_manager` delegate does bounded planning/reporting and returns to PM;
 its label grants no host-only powers.
 
@@ -105,7 +97,7 @@ Claude initially uses `${CLAUDE_PLUGIN_ROOT}/bin/swarm`; Codex uses
 
 ```sh
 # Optional: add --team product_manager,build_engineer to override the default composition from team.toml
-swarm activate --job J --description "Bounded engineering delivery" --task "Brief: docs/team/request.md" --goal "Meet the recorded requirements with independent review and product, EL, and QA acceptance"
+# Use the existing owner-authorized job J; agents do not activate jobs.
 # Set once for this job and root host session; record the exact key in the PM run record.
 PM_KEY="pm:<job>:<root-host>:<root-session-id>"
 swarm join --job J --key "$PM_KEY" --role project_manager
@@ -147,8 +139,7 @@ swarm post --job J --as "PM name" --to "EL name" "Capacity: one next invocation;
 
 Claude can route multiple jobs by prompt tags. Codex allows one job per session;
 prompt tags cannot select another job. A configured second session/host sharing the
-board may use `swarm activate --job J --attach` to attach to an already active job
-without reopening it. That session uses its own durable PM key, built from the same job
+board uses the native owner-authorized session binding route without reopening the job. That session uses its own durable PM key, built from the same job
 and its own host/session identity; never transfer or reuse the first session's key. Agree
 one PM scheduler; do not create competing ownership or dispatch loops.
 
@@ -283,14 +274,10 @@ Example dependency sequence (pack waves only when observed capacity permits):
 5. Optional verifier checks specific claims; the goal job's one judge evaluates all
    evidence. PM performs the freshness check below before completion.
 
-If PM ends a turn with work remaining and no agent active, record the actual reason:
-
-```sh
-swarm wait --job J --on "Fresh independent reviewer capacity; E1 queued"
-swarm resume --job J
-```
-
-Run `resume` when returning to work after the dependency clears, then poll the board.
+Before PM or EL ends a turn, persist all remaining dependent work with the
+[native task workflow](dependencies.md). Record concrete task blockers and runtime failures.
+Never run job wait/resume commands for review, CI, capacity or builds. Do not resume a
+completed agent solely to create activity; use its recorded result or a new bounded task.
 
 ### 5. Fence stopped writers and recover
 
@@ -329,9 +316,7 @@ Changed deliverables or requirements reopen affected task reviews and all final
 QA/product/EL/judge gates. Evidence-only edits outside the manifest do not. Obtain
 fresh matching decisions/verdict before proceeding; never force completion to hide gaps.
 
-```sh
-swarm deactivate --job J --status completed --outcome "Accepted candidate=<manifest-id> req=<revision>; evidence docs/team/acceptance.md"
-```
+Swarm derives completion from matching evidence and required task outcomes. Agents do not close the job.
 
 Report delivered scope, checks, omissions, risks, and each host's observed/pending
 status separately. Documentation correctness is not behavioral validation, and neither
