@@ -2268,6 +2268,13 @@ writes nothing (the Postgres session is read-only, so the server refuses a write
 size is bounded: at most 50 jobs, 200 agents and 100 blockers per job (`truncated` names what was
 cut). It connects like `watch` (`[watch_database]`).
 
+Each job's `status` is the displayed state shared with `status` and `watch`: actual work is
+`active`, an unanswered question without working agents is `waiting`, and otherwise an open
+job is `idle`. `lifecycle_status` retains the stored lifecycle value (usually `active` for an
+open job), and `status_context` names its question, dependency, queued launch or other registered
+reason. Consumers should display `status` and `status_context`, rather than infer activity from
+`lifecycle_status`. These fields are included in job upserts in the follow stream too.
+
 `--follow` streams NDJSON instead: `{"type":"snapshot","reason":"initial"...}` first, then one
 `{"type":"delta","gen":N,...}` per change (upserted jobs, agents and blockers, removed keys, new
 messages, `cursor`), `{"type":"ping"}` every `--keepalive` seconds (15), and

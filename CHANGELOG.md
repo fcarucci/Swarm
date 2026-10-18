@@ -14,6 +14,10 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 - **A ruling never cancels running engineers or the lead.** It waits for them (a visible hold), and a ledger-only ruling is cancelled while engineers are queued or running.
 - `swarm watch --compact` rolls finished and lost agents into one WORKERS summary per job, keeps live agents with tool/launch and last-post age, and avoids clock-only redraws.
 
+## [0.3.4] - 2026-10-18
+
+- JSON snapshots and their follow stream show the same actual job status and precise context as `status` and `watch`; the stored lifecycle remains available as `lifecycle_status`.
+
 ## [0.3.3] - 2026-10-16
 
 ### Removed

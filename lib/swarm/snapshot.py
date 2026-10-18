@@ -83,6 +83,15 @@ def row(obj) -> dict:
     return _plain(dataclasses.asdict(obj))
 
 
+def job_row(board, job, now) -> dict:
+    """Public display state plus the separate persisted lifecycle used by board operations."""
+    from swarm.board.base import derive_job_status
+    from swarm.statusview import job_context
+    return {**row(job), 'lifecycle_status': job.status,
+            'status': derive_job_status(job, float(board.board_cfg.get('idle_minutes', 5)), now),
+            'status_context': job_context(board, job, now)}
+
+
 def dumps(obj) -> str:
     return json.dumps(obj, separators=(",", ":"), default=str)
 
@@ -146,7 +155,7 @@ def _read_postgres_view(board, scope: Scope, after: int) -> Fetched:
     view = board.watch_snapshot(None, None, scope.recent_minutes, scope.messages,
                                 jobs=scope.jobs, sessions=scope.sessions, after_id=after)
     from swarm.board.base import is_placeholder
-    return Fetched(_plain(view.now()), [row(j) for j in view.job_rows],
+    return Fetched(_plain(view.now()), [job_row(view, j, view.now()) for j in view.job_rows],
                    [row(a) for a in view.agent_rows if not is_placeholder(a)],
                    {k: int(v) for k, v in view.hidden.items()}, [row(b) for b in view.blocker_rows],
                    [row(m) for m in view.message_rows], after, board.change_mode, board.degraded)
@@ -170,7 +179,8 @@ def _read_generic_view(board, scope: Scope, after: int) -> Fetched:
             hidden[j.job] = older
         blockers += board.blockers(j.job)
         messages += _job_messages(board, scope, j.job, after)
-    return Fetched(_plain(board.now()), [row(j) for j in jobs], [row(a) for a in agents], hidden,
+    now = board.now()
+    return Fetched(_plain(now), [job_row(board, j, now) for j in jobs], [row(a) for a in agents], hidden,
                    [row(b) for b in blockers], [row(m) for m in messages], after, board.change_mode, board.degraded)
 
 
@@ -373,7 +383,7 @@ def fingerprint_of_rows(jobs, agents, max_id: int, statuses: bool = True, blocke
     the watch could not predict (an agent in a tool call) is still caught."""
     def job_line(j) -> str:
         gd = hashlib.md5((_text(j.get("goal")) + "\x01" + _text(j.get("description"))).encode()).hexdigest()
-        return (f"{j['job']}|{j['status']}|{j['agents']}|{j['messages']}|{_usec(j.get('last_activity_at'))}"
+        return (f"{j['job']}|{j.get('lifecycle_status', j['status'])}|{j['agents']}|{j['messages']}|{_usec(j.get('last_activity_at'))}"
                 f"|{_text(j.get('waiting_on'))}|{_text(j.get('verdict'))}|{_text(j.get('judge'))}"
                 f"|{_usec(j.get('finished_at'))}|{j.get('open_blockers', 0)}|{j.get('protected_blockers', 0)}|{gd}")
     jc, jd = _digest([job_line(j) for j in jobs])
