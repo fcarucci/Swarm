@@ -504,6 +504,17 @@ _JOB_STATUS_COLS = ("job, status, description, task, outcome, created_by, sessio
                     "verdict_scope, verdict_generation, verdict_candidate, verdict_req")
 _MESSAGE_COLS = "id, created_at, job, agent_name, to_agent, message"
 _MESSAGE_COLS_M = ", ".join("m." + c.strip() for c in _MESSAGE_COLS.split(","))
+# Evaluated for alias s in both the atomic snapshot and the cheap repair fingerprint.
+# Launch revisions change with every state update; evidence is immutable. Keep raw job data
+# opaque here so a damaged legacy JSON value cannot make the read-only view fail.
+_CONTEXT_REVISION_SQL = """md5(
+    coalesce((SELECT coalesce(plugin_data, '') || chr(1) ||
+                     coalesce(extract(epoch FROM coalesce(activated_at, created_at))::text, '')
+                FROM jobs WHERE job=s.job), '') || chr(1) ||
+    coalesce((SELECT string_agg(id::text || ':' || revision::text, ',' ORDER BY id)
+                FROM launches WHERE job=s.job), '') || chr(1) ||
+    coalesce((SELECT string_agg(id::text || ':' || key || ':' || text, ',' ORDER BY id)
+                FROM events WHERE job=s.job AND kind='TASK-EVIDENCE'), ''))"""
 _RESTART_COLS = RESTART_COLS   # Restart field order (base.py)
 
 # The debounce drain after a wake-up: collects what is already on the wire (as watch did).
@@ -1526,7 +1537,10 @@ class PostgresBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
             (SELECT jsonb_object_agg(job,plugin_data) FROM jobs WHERE job IN (SELECT job FROM selected)),
             (SELECT jsonb_agg(to_jsonb(p)) FROM lastposts p),
             (SELECT jsonb_agg(to_jsonb(l) ORDER BY id) FROM launches l
-              WHERE state IN ('queued', 'running') AND job IN (SELECT job FROM selected))
+              WHERE job IN (SELECT job FROM selected)),
+            (SELECT jsonb_agg(to_jsonb(e) || jsonb_build_object('to', e.to_target) ORDER BY id)
+               FROM events e WHERE kind='TASK-EVIDENCE' AND job IN (SELECT job FROM selected)),
+            (SELECT jsonb_object_agg(s.job, {_CONTEXT_REVISION_SQL}) FROM selected s)
         """.replace('{agent_cols}', agent_cols)
         row = self._conn.execute(query, {"jobs": list(jobs), "sessions": list(sessions), "recent": recent_minutes,
                                          "limit": limit, "after": after_id}).fetchone()
@@ -1547,8 +1561,9 @@ class PostgresBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
                    || '|' || coalesce(waiting_on, '') || '|' || coalesce(verdict, '') || '|' || coalesce(judge, '')
                    || '|' || coalesce((extract(epoch from finished_at) * 1000000)::bigint::text, '')
                    || '|' || open_blockers || '|' || protected_blockers
-                   || '|' || md5(coalesce(goal, '') || chr(1) || coalesce(description, '')) AS s, job
-              FROM job_status WHERE job IN (SELECT job FROM scope)
+                   || '|' || md5(coalesce(goal, '') || chr(1) || coalesce(description, ''))
+                   || '|' || {_CONTEXT_REVISION_SQL} AS s, job
+              FROM job_status s WHERE job IN (SELECT job FROM scope)
           ), vis AS MATERIALIZED (
             SELECT job || '|' || agent_key || '|'
                    || CASE WHEN %(statuses)s OR status IN ('completed','left','dead') THEN status ELSE 'live' END

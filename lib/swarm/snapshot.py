@@ -89,7 +89,21 @@ def job_row(board, job, now) -> dict:
     from swarm.statusview import job_context
     return {**row(job), 'lifecycle_status': job.status,
             'status': derive_job_status(job, float(board.board_cfg.get('idle_minutes', 5)), now),
-            'status_context': job_context(board, job, now)}
+            'status_context': job_context(board, job, now),
+            'context_revision': context_revision(board, job.job)}
+
+
+def context_revision(board, job) -> str:
+    """Authoritative non-clock context inputs, so missed task notifications are detectable."""
+    supplied = getattr(board, 'context_revisions', None)
+    if isinstance(supplied, dict) and job in supplied:
+        return supplied[job]
+    from swarm.dependencies import KIND
+    current = board.job_status(job)
+    values = {'data': board.job_data(job), 'run': _plain(current.activated_at or current.created_at) if current else None,
+              'launches': [(r.id, r.revision) for r in board.launches(job)],
+              'evidence': [(e.id, e.key, e.text) for e in board.events(job) if e.kind == KIND]}
+    return hashlib.md5(dumps(values).encode()).hexdigest()
 
 
 def dumps(obj) -> str:
@@ -385,7 +399,8 @@ def fingerprint_of_rows(jobs, agents, max_id: int, statuses: bool = True, blocke
         gd = hashlib.md5((_text(j.get("goal")) + "\x01" + _text(j.get("description"))).encode()).hexdigest()
         return (f"{j['job']}|{j.get('lifecycle_status', j['status'])}|{j['agents']}|{j['messages']}|{_usec(j.get('last_activity_at'))}"
                 f"|{_text(j.get('waiting_on'))}|{_text(j.get('verdict'))}|{_text(j.get('judge'))}"
-                f"|{_usec(j.get('finished_at'))}|{j.get('open_blockers', 0)}|{j.get('protected_blockers', 0)}|{gd}")
+                f"|{_usec(j.get('finished_at'))}|{j.get('open_blockers', 0)}|{j.get('protected_blockers', 0)}|{gd}"
+                f"|{j.get('context_revision', '')}")
     jc, jd = _digest([job_line(j) for j in jobs])
 
     def shown(a) -> str:

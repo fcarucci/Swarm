@@ -144,7 +144,7 @@ class PostgresWatchSourceTests(unittest.TestCase):
         real = self.board._conn.execute
 
         def spy(query, *a, **k):
-            self.stmts.append(str(query).strip().split(None, 1)[0].upper() + (" fp" if "md5(" in str(query) else ""))
+            self.stmts.append(str(query).strip().split(None, 1)[0].upper() + (" fp" if "%(statuses)s" in str(query) else ""))
             return real(query, *a, **k)
         self.board._conn.execute = spy
         self.clock = FakeClock()

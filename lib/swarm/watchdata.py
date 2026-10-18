@@ -3,7 +3,7 @@ import time
 from collections import Counter
 from dataclasses import fields, replace
 from datetime import datetime
-from swarm.board.base import AgentStatus, JobStatus, Message, Restart, Blocker, Launch, parse_job_data
+from swarm.board.base import AgentStatus, JobStatus, Message, Restart, Blocker, Launch, Event, parse_job_data
 
 
 def rows(cls, data):
@@ -37,6 +37,8 @@ class SnapshotBoard:
         # Each idle or dead agent's newest post, taken in the same statement (agentview.last_post).
         self._last_posts = {(m.job, m.agent_name): m for m in rows(Message, row[9] if len(row) > 9 else [])}
         self.launch_rows = rows(Launch, row[10] if len(row) > 10 else [])
+        self.event_rows = rows(Event, row[11] if len(row) > 11 else [])
+        self.context_revisions = row[12] or {} if len(row) > 12 else {}
         from swarm.review import pipeline_status
         self.job_rows = [replace(job, **pipeline_status(self.plugin_data.get(job.job)))
                          for job in self.job_rows]
@@ -92,6 +94,16 @@ class SnapshotBoard:
         return [r for r in self.launch_rows if r.job == job
                 and (generation is None or r.generation == generation)
                 and (include_closed or r.state in ("queued", "running"))]
+
+    def get_launch(self, job, generation, name):
+        return next((r for r in self.launch_rows
+                     if (r.job, r.generation, r.name) == (job, generation, name)), None)
+
+    def events(self, job, to=None, pending=False):
+        from swarm.board.base import event_targets
+        targets = event_targets(to)
+        return [r for r in self.event_rows if r.job == job and (not pending or r.acked_at is None)
+                and (targets is None or r.to in targets)]
 
     def verification_counts(self, job):
         return tuple(self.checks.get(job,(0,0)))
@@ -155,11 +167,11 @@ class SnapshotSource:
         return self.base
 
     def _matches(self, recent) -> bool:
-        from swarm.snapshot import fingerprint_of_rows, row
+        from swarm.snapshot import fingerprint_of_rows, job_row, row
         self.counts["check"] += 1
         self.last_check = self.clock()
         b = self.base
-        mine = fingerprint_of_rows([row(j) for j in b.job_rows], [row(a) for a in b.agent_rows],
+        mine = fingerprint_of_rows([job_row(b, j, b.now()) for j in b.job_rows], [row(a) for a in b.agent_rows],
                                    b.max_message_id(), statuses=False,
                                    blockers=[row(x) for x in b.blocker_rows])
         jobs = (self.job,) if self.job else ()
