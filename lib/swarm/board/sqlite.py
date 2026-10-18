@@ -894,6 +894,10 @@ class SqliteBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
         self._c().execute("UPDATE jobs SET session_id = ? WHERE job = ? AND session_id IS NULL",
                           (session_id, job))
 
+    def reassign_job_session(self, job: str, session_id: str | None, *, expected_session: str | None) -> bool:
+        return self._c().execute("UPDATE jobs SET session_id = ? WHERE job = ? AND session_id IS ?",
+                                 (session_id, job, expected_session)).rowcount > 0
+
     # ---- agents --------------------------------------------------------------------
 
     @staticmethod

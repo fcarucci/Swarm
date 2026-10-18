@@ -470,6 +470,16 @@ class MemoryBoard(MemoryLaunches, MemoryBlockers, MemoryEvents, MemoryBgCommands
                 j["session_id"] = session_id
                 s.touch()
 
+    def reassign_job_session(self, job: str, session_id: str | None, *, expected_session: str | None) -> bool:
+        s = self._s()
+        with s.lock:
+            row = s.jobs.get(job)
+            if row is None or row["session_id"] != expected_session:
+                return False
+            row["session_id"] = session_id
+            s.touch()
+            return True
+
     # ---- agents --------------------------------------------------------------------
 
     def _active(self, agent_key: str) -> dict | None:

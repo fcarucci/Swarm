@@ -1440,7 +1440,7 @@ def load_name_pool(data_dir: Path = DATA_DIR) -> dict[str, list[str]]:
 # are writes only when they advance the cursor.
 WRITE_METHODS = (
     "purge", "ensure_job", "open_job", "close_job", "auto_close_job", "undo_auto_close",
-    "sweep_auto_close", "bind_job_session", "allocate_name", "claim_judge", "take_judge_launch", "claim_verifier",
+    "sweep_auto_close", "bind_job_session", "reassign_job_session", "allocate_name", "claim_judge", "take_judge_launch", "claim_verifier",
     "set_waiting", "set_job_max_hours", "set_job_goal", "move_agent", "sweep_expiry", "reserve_spawn", "record_verdict", "tool_started", "record_route",
     "claim_route", "tool_finished", "agent_stopped", "set_agent_role", "set_agent_title", "set_agent_runtime",
     "agent_turn_ended",
@@ -1896,6 +1896,11 @@ class Board(abc.ABC):
     def bind_job_session(self, job: str, session_id: str) -> None:
         """Set the job's session_id only if it is currently None (first spawning session wins,
         atomically). No-op if the job does not exist or is already bound."""
+
+    @abc.abstractmethod
+    def reassign_job_session(self, job: str, session_id: str | None, *, expected_session: str | None) -> bool:
+        """Compare-and-set only an existing job's coordinator binding; preserve all lifecycle fields.
+        False if absent or another coordinator changed it since the caller read it."""
 
     # ---- agents --------------------------------------------------------------------
 

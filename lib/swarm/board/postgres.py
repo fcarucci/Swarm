@@ -1256,6 +1256,11 @@ class PostgresBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
         self._conn.execute("UPDATE jobs SET session_id = %s WHERE job = %s AND session_id IS NULL",
                            (session_id, job))
 
+    def reassign_job_session(self, job: str, session_id: str | None, *, expected_session: str | None) -> bool:
+        return self._conn.execute(
+            "UPDATE jobs SET session_id = %s WHERE job = %s AND session_id IS NOT DISTINCT FROM %s RETURNING job",
+            (session_id, job, expected_session)).fetchone() is not None
+
     # ---- agents --------------------------------------------------------------------
 
     def _allocate_name(self, agent_key: str, job: str, role: str | None = None) -> str:

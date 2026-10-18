@@ -32,6 +32,7 @@ from swarm import compat
 import re
 import time
 from dataclasses import asdict, dataclass
+from contextvars import ContextVar
 
 from swarm import gitpin, paths, safefs, textsafe
 
@@ -228,7 +229,8 @@ def _dir(create: bool):
 def _store(rec: Record, name: str) -> Record:
     _validate(rec)
     body = json.dumps({"v": FORMAT, **asdict(rec)}, sort_keys=True)
-    with _dir(create=True) as d:
+    lock = coordinator_lock(rec.board_key, rec.job) if rec.kind in ("job", "owner") else contextlib.nullcontext()
+    with lock, _dir(create=True) as d:
         safefs.write_atomic(d, name, body)
     return rec
 
@@ -244,7 +246,9 @@ def _load(name: str) -> Record | None:
 def _delete(name: str) -> None:
     try:
         with _dir(create=False) as d:
-            safefs.unlink(d, name)
+            lock = coordinator_lock('', '') if name.startswith(('job-', 'owner-')) else contextlib.nullcontext()
+            with lock:
+                safefs.unlink(d, name)
     except FileNotFoundError:
         pass
 
@@ -322,12 +326,19 @@ def prune(max_age: float, *, now: float | None = None, keep=None) -> int:
             for name in sorted(compat.listdir(d)):
                 if not _FILE.fullmatch(name):
                     continue
-                rec = _parse(safefs.read(d, name, RECORD_MAX))
-                if rec is None and name.startswith("owner-"):
-                    continue   # an owner record this build cannot read holds its job ([RR1]); never dropped here
-                if rec is None or (now - rec.created_at > max_age and not (keep and keep(rec))):
-                    safefs.unlink(d, name)
-                    removed += 1
+                lock = coordinator_lock('', '') if name.startswith(('job-', 'owner-')) else contextlib.nullcontext()
+                try:
+                    with lock:
+                        # Read under the writer lock: a replacement with a fresh creation
+                        # time must not be deleted using an older retention snapshot.
+                        rec = _parse(safefs.read(d, name, RECORD_MAX))
+                        if rec is None and name.startswith("owner-"):
+                            continue   # an unreadable owner proof holds its job ([RR1])
+                        if rec is None or (now - rec.created_at > max_age and not (keep and keep(rec))):
+                            safefs.unlink(d, name)
+                            removed += 1
+                except BlockingIOError:
+                    continue   # a reassignment/writer owns the proof; retain until next sweep
     except FileNotFoundError:
         return 0
     return removed
@@ -413,3 +424,61 @@ def agent_sessions(board_key: str) -> dict:
     except FileNotFoundError:
         pass
     return out
+
+
+def coordinator_records(board_key: str, job: str) -> list[tuple[str, Record]]:
+    """Read existing local coordinator proofs strictly; never create missing authority.
+
+    Used by explicit coordinator reassignment. Worker proofs and capability payloads are separate.
+    A corrupt or unsafe existing record refuses the operation instead of looking absent.
+    """
+    names = (job_record_name(board_key, job), f"owner-{_digest('owner', board_key, job)}.json")
+    records = []
+    try:
+        with _dir(create=False) as d:
+            for name in names:
+                try:
+                    if os.stat in os.supports_dir_fd:
+                        os.stat(name, dir_fd=d, follow_symlinks=False)
+                    data = safefs.read(d, name, RECORD_MAX)
+                except FileNotFoundError:
+                    continue
+                if data is None:
+                    raise ValueError('enrolment: coordinator record is unsafe or unreadable')
+                rec = _parse_checked(data)
+                expected_kind = 'owner' if name.startswith('owner-') else 'job'
+                if rec.board_key != board_key or rec.job != job or rec.kind != expected_kind:
+                    raise ValueError('enrolment: coordinator record is for another key')
+                records.append((name, rec))
+    except FileNotFoundError:
+        pass
+    return records
+
+
+def reassign_coordinator_records(records: list[tuple[str, Record]], session_id: str) -> None:
+    """Update only existing records' session ids; preserve harness, roots, credentials and timestamps."""
+    from dataclasses import replace
+    for name, rec in records:
+        _store(replace(rec, session_id=session_id), name)
+
+
+_COORDINATOR_LOCKS = ContextVar('swarm_coordinator_locks', default=frozenset())
+
+
+@contextlib.contextmanager
+def coordinator_lock(board_key: str, job: str):
+    """Serialize local coordinator proof writers and session operations for this host user.
+    Nonblocking acquisition avoids lock inversion with existing board-then-proof writers;
+    a busy coordinator operation must be retried, never overwrite another operation.
+    Reentrant within one context so existing writer helpers take the same lock safely."""
+    name = 'coordinator.lock'
+    held = _COORDINATOR_LOCKS.get()
+    if name in held:
+        yield
+        return
+    with safefs.dir_fd(paths.host_dir(), create=True, strict_mode=0o700) as d, safefs.locked(d, name, blocking=False):
+        token = _COORDINATOR_LOCKS.set(held | {name})
+        try:
+            yield
+        finally:
+            _COORDINATOR_LOCKS.reset(token)

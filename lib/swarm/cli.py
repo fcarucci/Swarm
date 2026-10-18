@@ -2927,6 +2927,12 @@ def _parser() -> argparse.ArgumentParser:
     tl.add_argument("--interval", type=float, default=2.0, help="poll interval in seconds (LISTEN wakes it early)")
     tl.add_argument("--no-agents", action="store_true", help="don't show agents joining/leaving")
     tl.add_argument("--no-color", action="store_true")
+    se = sub.add_parser("session", help="reassign an existing job coordinator without reopening it")
+    se.add_argument("--job", required=True)
+    target = se.add_mutually_exclusive_group(required=True)
+    target.add_argument("--session", help="new coordinator session id")
+    target.add_argument("--clear", action="store_true", help="clear only the pane binding; preserve ownership and routing")
+    se.add_argument("--no-routing", action="store_true", help="preserve hook routing while rebinding pane and existing local coordinator records")
     ac = sub.add_parser("activate", help="turn the board on for subagents spawned from now on")
     ac.add_argument("--job", required=True); ac.add_argument("--description", help="one line")
     ac.add_argument("--task", help="the full brief; '-' reads it from stdin")
@@ -3947,6 +3953,7 @@ COMMANDS = {
     "doctor": cmd_doctor,
     "upgrade": cmd_update,
     "update": cmd_update,      # the old name, a hidden alias
+    "session": lambda cfg, args: __import__("swarm.session_cli", fromlist=["run"]).run(cfg, args),
     "activate": cmd_activate,
     "plugins": cmd_plugins,
     "deactivate": cmd_deactivate,
