@@ -1409,7 +1409,7 @@ def _goal_roles(board, agent_id: str, job: str, payload: dict, marker: dict | No
     goal, judge = (js.goal, js.judge) if js else (None, None)
     note = None
     if wants and not is_judge:
-        held = f"judge seat held by {judge or 'another agent'}"
+        held = f"judge launch held by {judge or 'another agent'}"
         note = (f"[swarm] Your prompt makes you a judge, but job \"{job}\" has one judge: {held}. "
                 f"You are on the board as a worker: your "
                 f"verdicts would be refused. Say so in your report.")

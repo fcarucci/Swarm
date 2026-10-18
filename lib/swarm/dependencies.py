@@ -1,7 +1,7 @@
 """Durable engineering stages using existing named launch rows and bounded runners.
 
 A task's immutable brief envelope contains its exact artifact and predecessor names. Evidence is
-append-only board event data bound to a task generation and its runner (or declared external seat).
+append-only board event data bound to a task generation and its runner (or declared external agent).
 The pass and atomic launch claim both apply the same gate; completed stages are never requeued.
 """
 from __future__ import annotations
@@ -41,9 +41,9 @@ def register(board, job, generation, name, *, artifact, depends, role, harness, 
              workdir, brief, queued_by, reporter=None):
     """Atomically insert a task once; repeated identical registration preserves all lifecycle state.
 
-    reporter names an already-working external seat whose completion must be witnessed, e.g. an
-    existing Mac build. Such a task is never launched by the pass. Its assigned seat attests the
-    exact artifact and the dependency is released only after that seat ends its current turn.
+    reporter names an external agent already in an active turn whose completion must be witnessed,
+    e.g. an existing Mac build. Such a task is never launched by the pass. That assigned agent
+    attests the exact artifact and the dependency is released only after that turn ends.
     """
     from swarm.board.base import run_start
     from swarm.board.launches import check_launch
@@ -63,9 +63,11 @@ def register(board, job, generation, name, *, artifact, depends, role, harness, 
     reporter_agent = next((a for a in board.agents(job, include_departed=True)
                            if a.name == reporter and a.role == role and (
                                (old_spec is not None and a.agent_key == old_spec.get('reporter_key'))
-                               or (old_spec is None and a.ended_at is None))), None) if reporter else None
+                               or (old_spec is None and a.ended_at is None
+                                   and getattr(a, 'turn_ended_at', None) is None
+                                   and a.status in ('started', 'running')))), None) if reporter else None
     if reporter is not None and reporter_agent is None:
-        raise ValueError('external reporter must be a current named agent in the declared role')
+        raise ValueError('external reporter must be a named agent in the declared role with an active agent turn')
     value = dict(version=1, artifact=artifact, depends=sorted(depends), brief=brief,
                  run=run_start(js).isoformat(), reporter=reporter, reporter_key=reporter_agent.agent_key if reporter_agent else None,
                  registered_by=queued_by)
@@ -83,7 +85,7 @@ def register(board, job, generation, name, *, artifact, depends, role, harness, 
 
 
 def report(board, job, generation, name, *, artifact, outcome, reason, actor):
-    """Accept evidence only from this task's assigned live seat; the first report is immutable."""
+    """Accept evidence only from this task's assigned live agent; the first report is immutable."""
     row = board.get_launch(job, generation, name)
     value = spec(row) if row else None
     if value is None:

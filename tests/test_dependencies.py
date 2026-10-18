@@ -121,6 +121,10 @@ class DependentTasks(PassCmd):
         base = self.b.now()
         with mock.patch.object(self.b, 'now', return_value=base):
             self.b.agent_turn_ended('external-qa')
+            with self.assertRaisesRegex(ValueError, 'active agent turn'):
+                self.register('qa', reporter=actor)
+            # An explicit new tool call resumes the same agent turn and clears the old end.
+            self.b.tool_started('external-qa', 'Read')
             self.register('qa', reporter=actor)
             self.register('build', ['qa'])
         with mock.patch.object(self.b, 'now', return_value=base + dt.timedelta(seconds=10)):
@@ -336,7 +340,7 @@ class DependentTasks(PassCmd):
 
 
 
-    def test_tasks_external_reporter_replacement_cannot_inherit_old_seat_authority(self):
+    def test_tasks_external_reporter_replacement_cannot_inherit_old_agent_authority(self):
         from swarm import dependencies
         actor = self.b.allocate_name('old-external', 'J', 'engineer')
         self.register('qa', reporter=actor)
@@ -346,7 +350,7 @@ class DependentTasks(PassCmd):
             dependencies.report(self.b, 'J', 1, 'qa', artifact='main@' + 'a' * 40,
                                 outcome='passed', reason='same display name is a new identity', actor=actor)
         self.assertEqual(self.b.events('J'), [])
-        self.assertEqual(self.register('qa', reporter=actor).state, 'queued', 'repeated registration preserves the original pinned seat')
+        self.assertEqual(self.register('qa', reporter=actor).state, 'queued', 'repeated registration preserves the original assigned agent')
 
 
 

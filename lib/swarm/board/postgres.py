@@ -1106,6 +1106,16 @@ class PostgresBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
             return int(row[0]) if row else 0
 
     @classmethod
+    def schema_complete(cls, cfg: dict) -> bool:
+        """Whether hook-critical blocker tables are present in the configured search path."""
+        with _connect(cfg) as conn:
+            try:
+                rows = conn.execute("SELECT to_regclass('blockers'), to_regclass('blocker_events')").fetchone()
+            except psycopg.Error as exc:
+                raise BoardUnavailable(str(exc)) from exc
+            return all(rows)
+
+    @classmethod
     def store_missing(cls, cfg: dict, cheap: bool = True) -> bool:
         return False if cheap else bool(_database_missing(cfg))
 

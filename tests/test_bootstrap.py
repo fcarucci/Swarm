@@ -122,6 +122,24 @@ class BootstrapTests(unittest.TestCase):
                 self.assertEqual(step.status, "changed")
                 self.assertEqual(bootstrap.launcher_target(paths.launcher_path()), paths.PLUGIN_ROOT)
 
+    def test_installed_launcher_recovers_after_its_plugin_directory_is_removed(self):
+        import subprocess
+        stale = self._tree("removed-plugin", "0.3.4")
+        fallback = self._codex_cache_tree("0.3.5")
+        (fallback / "bin/swarm").write_text("#!/bin/sh\nprintf 'fallback-ok'\n")
+        (fallback / "bin/swarm").chmod(0o755)
+        paths.launcher_path().parent.mkdir(parents=True)
+        paths.launcher_path().write_text(bootstrap.LAUNCHER.format(root=stale))
+        paths.launcher_path().chmod(0o755)
+        shutil.rmtree(stale)
+
+        env = {**os.environ, **home_env(self.home), "CODEX_HOME": str(self.home / ".codex")}
+        result = subprocess.run([str(paths.launcher_path()), "status"], env=env,
+                                capture_output=True, text=True, timeout=10)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "fallback-ok")
+
     def test_launcher_same_tree_through_symlink_is_ok(self):
         link = self.home / "link-to-plugin"
         link.symlink_to(paths.PLUGIN_ROOT)

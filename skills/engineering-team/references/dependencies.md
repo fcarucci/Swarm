@@ -29,11 +29,11 @@ new exact-artifact evidence; never reuse old QA/review results by changing a lab
 
 ## Existing work and completed work
 
-For an already-running authorized seat, add `--reporter 'CURRENT_AGENT_NAME'` to its
-stage registration and use that seat's actual role. This is an external evidence stage:
+For an already-running authorized agent, add `--reporter 'CURRENT_AGENT_NAME'` to its
+stage registration and use that agent's actual role. This is an external evidence stage:
 Swarm does not launch it. Resolve its current enrolled identity before registration.
-Only that assigned live seat can attest the result, and its turn must end before the
-dependency releases. The requester must not impersonate the seat or report on its behalf.
+Only that assigned live agent can attest the result, and its turn must end before the
+dependency releases. The requester must not impersonate the agent or report on its behalf.
 
 Do not restart a completed engineer, reviewer or build merely to create activity or
 manufacture a task report. Preserve its existing evidence. If a fresh gate is necessary,

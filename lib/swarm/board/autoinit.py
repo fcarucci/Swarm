@@ -179,6 +179,17 @@ def _classify(version: int | None) -> str | None:
     return "current" if version == SCHEMA_VERSION else "newer"
 
 
+def _schema_complete(cls, cfg: dict) -> bool:
+    """Check current hook-critical tables even when a version stamp exists.
+
+    A copied or partially repaired board can retain the current version marker while losing a
+    required table. Version-only stamps let hooks fail repeatedly with UndefinedTable. Backends
+    without relational tables keep their existing version-based behavior.
+    """
+    check = getattr(cls, "schema_complete", None)
+    return True if check is None else bool(check(cfg))
+
+
 def ensure_initialized(cfg: dict, timeout: float = 60.0,
                        names: Mapping[str, Sequence[str]] | None = None) -> InitResult:
     """Set the configured store up if it isn't (for this code's SCHEMA_VERSION); see the module
@@ -190,17 +201,19 @@ def ensure_initialized(cfg: dict, timeout: float = 60.0,
     cls = backend_class(cfg)
     stamp = stamp_path(cfg)
     if stamp is not None and _stamped(stamp):
-        if not cls.store_missing(cfg):
+        if not cls.store_missing(cfg) and _schema_complete(cls, cfg):
             return InitResult("stamped")
         _drop_stamp(stamp)   # the store went away behind it (a deleted file or directory)
     version = cls.schema_version(cfg)
     action = _classify(version)
     result = None
-    if action is None:
+    complete = _schema_complete(cls, cfg) if action == "current" else True
+    if action is None or (action == "current" and not complete):
         with setup_lock(cfg, timeout):
             version = cls.schema_version(cfg)   # another process may have just done it
             action = _classify(version)
-            if action is None:
+            complete = _schema_complete(cls, cfg) if action == "current" else True
+            if action is None or (action == "current" and not complete):
                 result = cls.setup(cfg, load_name_pool() if names is None else names)
                 action = "initialized"
     _write_stamp(stamp)

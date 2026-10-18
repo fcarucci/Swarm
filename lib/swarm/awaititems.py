@@ -28,7 +28,7 @@ from dataclasses import dataclass, replace
 
 from swarm.blockers_stale import stale_reason
 
-ORCHESTRATOR_SEATS = ("project_manager", "orchestrator")
+ORCHESTRATOR_ROLES = ("project_manager", "orchestrator")
 POST_PREFIXES = {"BRANCH READY": "branch-ready", "INFRA REQUEST": "infra-request",
                  "VERDICT": "verdict", "ORDER": "order"}
 LANDED_PREFIXES = ("FINALIZED ", "INTEGRATED ")
@@ -53,8 +53,8 @@ class Item:
 
 
 def orchestrator_names(board, job: str) -> set[str]:
-    """The names of the active agents holding an orchestrator seat (project_manager, orchestrator)."""
-    return {a.name for a in board.agents(job) if a.ended_at is None and a.role in ORCHESTRATOR_SEATS}
+    """The names of active agents assigned an orchestrator role."""
+    return {a.name for a in board.agents(job) if a.ended_at is None and a.role in ORCHESTRATOR_ROLES}
 
 
 def _gist(text: str, limit: int = 80) -> str:

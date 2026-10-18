@@ -94,7 +94,7 @@ def authorized(board, blocker, actor):
     sid = hosts.cli_session_id(os.environ)
     if sid and owned_job(board, sid) == blocker.job and (
             to_person(board, blocker) or blocker.waiting_on.lower().lstrip('@') in ('orchestrator', 'pm')):
-        return True   # the owning session speaks for the human and for the orchestrator seat
+        return True   # the owning session speaks for the human and for the orchestrator
     if to_person(board, blocker):
         return False
     try:

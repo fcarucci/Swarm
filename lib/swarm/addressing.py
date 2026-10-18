@@ -24,7 +24,7 @@ class AddressError(ValueError):
 
 
 class NoHolder(AddressError):
-    """`@role` is a valid launch role that nobody holds now: the post is queued for it (seatcont), not refused.
+    """`@role` is a valid launch role that no agent holds now: the post is queued for it, not refused.
     `token` is the address without its @."""
     def __init__(self, message: str, token: str):
         super().__init__(message)

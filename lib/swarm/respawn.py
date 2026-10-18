@@ -62,7 +62,7 @@ def brief(js, job: str, spawn_tags: bool = True, informational: bool = False, de
           held: str | None = None) -> str:
     """The text the orchestrator is shown. `spawn_tags`: name the tag lines the children's
     prompts need to join the job (Claude Code reads them; Codex doesn't need them). `held`: the
-    judge seat refusal (seatcont.judge_refusal) when a judge still holds it."""
+    judge-launch refusal when another agent already owns that launch."""
     judge = _clip(js.verdict_by or "the judge", 200)
     reason = _clip(js.verdict_reason or "no reason recorded")
     nxt = _clip(js.verdict_next or "(the judge gave no instructions: read the board and the verdict "
@@ -75,8 +75,8 @@ def brief(js, job: str, spawn_tags: bool = True, informational: bool = False, de
     text = (f"[swarm] job \"{job}\": judge {judge} ruled not met: {reason}. Spawn agents now with "
             f"these instructions: {nxt}, plus a new judge for the same goal; spawn more agents if "
             f"the work needs it. Don't leave the job idle.")
-    if held:   # a new judge is refused while this one holds the seat: say so, don't let it fail silently
-        text += f" Note: {_clip(held, 200)}, so a new judge is refused until that seat is free."
+    if held:   # a second judge is refused while this agent owns the judge launch
+        text += f" Note: {_clip(held, 200)}, so a new judge is refused until it is available."
     if spawn_tags:
         text += (f" Put the line `[swarm job: {job}]` in every prompt, and `[swarm role: judge]` in "
                  f"the new judge's. Repeat until the judge rules met; tell the user only if a round "

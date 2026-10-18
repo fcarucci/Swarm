@@ -180,7 +180,7 @@ class ExternalAgentRoleTests(GoalEnv):
         first = self.member("judge-1").name
         rc, out, err = self.cli("join", "--job", "J", "--key", "codex-judge", "--judge")
         self.assertEqual(rc, 1)
-        self.assertIn("another agent holds the judge launch", err)   # the seat words went with the driver
+        self.assertIn("another agent holds the judge launch", err)
         self.assertEqual(self.job().judge, first)
 
     def test_join_as_verifier(self):

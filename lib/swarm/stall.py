@@ -1,7 +1,7 @@
 """PM-STALL: an item the orchestrator has left unhandled for too long is announced on the board.
 
 An orchestrator item is an open blocker waiting on the orchestrator, or a message addressed to it (to a
-holder of its seat, or to the role: @PM). It is handled when the blocker is resolved, or when the orchestrator
+holder of that role, or to the role: @PM). It is handled when the blocker is resolved, or when the orchestrator
 later posted to the poster. `check` posts `PM-STALL <item> age=<m>` once the oldest such item is
 `[job] orchestrator_stall_minutes` (default 5) old, then again every that many minutes while it is
 unhandled. The PM-STALL posts on the board are the only state, so any process may run the check (the

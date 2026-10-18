@@ -59,7 +59,7 @@ A terminal-hook-only patch loses wakeups under throttle, crashes, and later exte
 `references/dependencies.md` require actual native registration before predecessor exit.
 The API is `task add` (repeatable `--depends`, exact `--artifact`, `--generation`),
 `task report` (assigned executor, immutable passed/failed evidence), and `task list`.
-An already-running external seat can be declared with `--reporter`; it is not relaunched.
+An already-running external agent can be declared with `--reporter`; it is not relaunched.
 Completed work is never restarted solely to create a report. A distinct verifier may
 inspect its existing artifact when a fresh evidence gate is necessary.
 

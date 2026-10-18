@@ -30,7 +30,7 @@ def configure(sub):
             tp.add_argument("--model")
             tp.add_argument("--workdir", required=True)
             tp.add_argument("--brief", required=True)
-            tp.add_argument("--reporter", help="existing external named seat; task is never launched")
+            tp.add_argument("--reporter", help="existing active external agent; task is never launched")
 
 
 def run(board, cfg: dict, args) -> int:
@@ -52,7 +52,7 @@ def run(board, cfg: dict, args) -> int:
     actor = args.actor or (session_agents[0].name if len(session_agents) == 1 else cli._blocker_actor(board, cfg))
     agent = next((a for a in members if a.name == actor), None)
     # Ordinary job enrolment grants task registration, never drive-owner authority. Evidence
-    # additionally belongs to the concrete assigned seat's current enrolled session.
+    # additionally belongs to the concrete assigned agent's current enrolled session.
     local = enrolment.find_job(bk, args.job) or enrolment.find_job_owner(bk, args.job)
     if local is None and not any(enrolment.owns(bk, a.agent_key, args.job) for a in members):
         print("swarm task: this host has no trusted enrolment for the job", file=sys.stderr)

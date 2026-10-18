@@ -584,6 +584,28 @@ class SqliteAutoInitTests(AutoInitBase, unittest.TestCase):
         finally:
             db.close()
 
+    def test_current_version_stamp_repairs_missing_required_blocker_tables(self):
+        import sqlite3
+        ensure_initialized(self.cfg)
+        self.assertTrue(self.stamp().exists())
+        db = sqlite3.connect(self.cfg["sqlite"]["path"], isolation_level=None)
+        try:
+            db.execute("DROP TABLE blocker_events")
+            db.execute("DROP TABLE blockers")
+        finally:
+            db.close()
+
+        result = ensure_initialized(self.cfg)
+
+        self.assertEqual(result.action, "initialized")
+        db = sqlite3.connect(self.cfg["sqlite"]["path"])
+        try:
+            present = {name for (name,) in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+        finally:
+            db.close()
+        self.assertTrue({"blockers", "blocker_events"} <= present)
+
     def make_v5(self) -> None:
         import sqlite3
         db = sqlite3.connect(self.cfg["sqlite"]["path"], isolation_level=None)

@@ -29,7 +29,7 @@ The durable lead brief states:
    before predecessor turns end. A board post or a proposed next step is insufficient.
 5. Assigned executor's exact `task report` command, generation, artifact and acceptance checks.
    Report passed only after those checks; report failed with the actual blocker. Then end the turn.
-6. Never relaunch completed work to obtain a report. An already-running seat can be registered
+6. Never relaunch completed work to obtain a report. An already-running agent can be registered
    with `--reporter`; its assigned identity reports its own result. Preserve independent review.
 7. CI: use `swarm ci wait` for the exact candidate SHA in the foreground; never direct polling.
 8. Before ending the lead turn, check `swarm task list --job J`: every remaining authorized

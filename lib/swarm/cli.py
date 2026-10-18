@@ -4233,7 +4233,7 @@ def _board_post(board, cfg: dict, args) -> int | None:
     ids = ", ".join(f"#{r.id}" for r in results)
     to = f" to {args.to} ({', '.join(term_safe(t) for t in targets)})" if args.to and args.to.startswith("@") else ""
     if targets and targets[0] and targets[0].startswith("queue."):
-        to = f" to {args.to} (queued: nobody holds that seat yet; the next holder gets it on joining)"
+        to = f" to {args.to} (queued: no agent currently has that role; the next agent gets it on joining)"
     print(f"posted {ids}{to}" + (f" (truncated to {board.message_cap()} chars)"
                                   if any(r.truncated for r in results) else ""))
 

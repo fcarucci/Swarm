@@ -720,6 +720,21 @@ class SqliteBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
             conn.close()
 
     @classmethod
+    def schema_complete(cls, cfg: dict) -> bool:
+        """Whether tables used by hook-side blocker queries survived a restore/partial setup."""
+        if not db_path(cfg).exists():
+            return False
+        conn = _connect(cfg)
+        try:
+            names = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('blockers','blocker_events')")}
+            return names == {"blockers", "blocker_events"}
+        except sqlite3.Error as exc:
+            raise BoardUnavailable(str(exc)) from exc
+        finally:
+            conn.close()
+
+    @classmethod
     def store_missing(cls, cfg: dict, cheap: bool = True) -> bool:
         return not db_path(cfg).exists()
 
