@@ -11,6 +11,12 @@ for an unanswered question to a person. Agents report facts and ask questions; t
 run `activate`, `deactivate`, `pause`, `resume`, `wait`, or `job` to set status or redefine a
 job. Owner lifecycle commands run from a terminal outside an agent session.
 
+Native `swarm task add`, `swarm task report` and `swarm task list` persist exact-artifact
+dependencies before agents exit; see the [team workflow](skills/engineering-team/references/dependencies.md).
+The owner-authorized `swarm session --job J --session S` reassigns a coordinator without
+reopening the job or altering its history. For unattended listener crash recovery, see the
+[existing listener service template](docs/operations/reconciliation-service.md).
+
 ## Skills in this plugin
 
 - [`swarm`](skills/swarm/SKILL.md): the machinery for jobs, the board, hooks, judges,

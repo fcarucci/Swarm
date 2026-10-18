@@ -74,7 +74,7 @@ A hook-registered judge (spawned with `[swarm role: judge]` or `[swarm title: Ju
 hand-off inspected.** A leading `branch@sha:` in the reason is accepted for compatibility.
 A judge run outside the board (a one-off `codex exec`, a person) must still record its result with
 `swarm verdict --job J --as NAME --artifact REF met|not_met ...` (`swarm join --job J --key K --judge`
-first; a judge with hooks never joins and never passes `--as`: its hooks add its own name); otherwise the goal stays unmet and the job waits until the stale-waiting sweep closes it. Swarm derives completion only after all required stages and finalization are complete; agents never close the job.
+first; a judge with hooks never joins and never passes `--as`: its hooks add its own name); otherwise the required evidence remains missing and is reported as a concrete blocker. Swarm derives completion only after all required stages and finalization are complete; agents never close the job.
 Judges only judge; integration, pushes and fixes belong to executors. A newer SHA on the same
 branch supersedes its earlier hand-off; separate branches keep independent verdicts.
 A separate INTEGRATOR rebases the branch onto the latest target locally with `git rebase`,
