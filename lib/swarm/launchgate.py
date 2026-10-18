@@ -61,7 +61,7 @@ def launch_context(cfg: dict, board_key: str, payload: dict, resume=None, resume
             and isinstance(run.get("launch_id"), str) and sid in (run.get("session_id"), run.get("agent_key"))
             and isinstance(run.get("launch"), str) and run["launch"]):
         ctx.launch = run["launch"]
-    return ctx
+    return ctx if ctx.launch else None   # a resumed session whose run file names no launch is no launch
 
 
 def protected_branches(board_key: str, ctx: Ctx) -> set[str]:
