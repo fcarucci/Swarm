@@ -4731,7 +4731,7 @@ def _board_run(board, cfg: dict, args) -> int | None:
     from swarm import passcmd
     js = board.job_status(args.job)
     if js is None or js.status not in ("active", "failed"):
-        print("swarm run: queue work only for an active or failed job; owner-closed jobs stay closed",
+        print(f"swarm run: {term_safe(args.job)}: queue work only for an active or failed job; owner-closed jobs stay closed",
               file=sys.stderr)
         return 1
     try:
@@ -4815,6 +4815,7 @@ BOARD_COMMANDS = {
     "ack": _board_ack,
     "review": _board_review,
     "run": _board_run,
+    "task": lambda board, cfg, args: __import__("swarm.task_cli", fromlist=["run"]).run(board, cfg, args),
     "transcript": _board_transcript,
     "memory": _board_memory,
 }
@@ -4822,7 +4823,6 @@ BOARD_COMMANDS = {
 
 def _bg_wrapper(argv: list[str]) -> tuple[Path, list[str]] | None:
     """(config path, the words after `bg`) when argv is the wrapper form `[--config P] bg [--job J]
-    "task": lambda board, cfg, args: __import__("swarm.task_cli", fromlist=["run"]).run(board, cfg, args),
     [--key K] [--as NAME] -- COMMAND...`, not `bg list|reap`; else None."""
     path, i = DEFAULT_CONFIG, 0
     while True:   # argparse semantics: the last --config wins

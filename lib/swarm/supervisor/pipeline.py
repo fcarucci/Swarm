@@ -239,7 +239,8 @@ def prompt_for(action, recipe, board=None):
                       "First run swarm learn and confirm durable outcome/learnings were successfully retained.",
                       f"Only after learning succeeds, post FINALIZED {h.artifact} "
                       "(a coding integrator posts INTEGRATED). This marker certifies execution AND learning succeeded.",
-                      "End your turn normally; Swarm derives the job status after all required work settles. "
+                      "End your turn normally; Swarm completes the job only after every current handed-off artifact "
+                      "is finalized and no other work remains. "
                       "References recorded as pipeline.superseded in job data are older revisions and do not count."])
     if action.role == "judge" and previous.get("verdict") == "not_met":
         lines.append(f"Previous not_met next steps: {_clean(previous.get('next_steps'), 12000)}")
