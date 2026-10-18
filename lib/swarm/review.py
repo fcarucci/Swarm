@@ -158,7 +158,7 @@ def _chunked(data: dict, key: str):
 
 def verdict_text(verdict: str, reason: str, *, scope: str = 'artifact', generation: int | None = None,
                  candidate: str | None = None, req: str | None = None) -> str:
-    """The VERDICT message: a goal or ruling verdict of a drive generation names what it judges, so a reader
+    """The VERDICT message: a goal or ruling verdict names what it judges, so a reader
     holding the message can tell (before the reason: the board caps a message's length)."""
     if scope in ('goal', 'ruling') and generation is not None:
         return (f"VERDICT {verdict} [{scope} gen={generation} candidate={candidate or '-'} req={req or '-'}]: "

@@ -13,20 +13,18 @@ import re
 from swarm import compat
 from .base import MAX_LOCK_SECONDS, LAUNCH_STATES, LAUNCH_HARNESSES, DriveLock, Launch, RESTART_COLS, Restart
 
-LAUNCH_COLS = ("id, job, generation, name, role, harness, model, workdir, brief, state, attempts, "
+LAUNCH_COLS = ("id, job, name, role, harness, model, workdir, brief, state, attempts, "
                "last_outcome, queued_by, revision, agent_key, session_id, updated_at, launch_id")
 LEGACY_NAME = "se" "at"
 LEGACY_TABLE = LEGACY_NAME + "s"  # schema-25 table, retained only for migration
-LOCK_COLS = "key, holder, job, generation, launch_id, host, expires_at, path"
+LOCK_COLS = "key, holder, job, launch_id, host, expires_at, path"
 STATE_FIELDS = ("agent_key", "session_id", "last_outcome")
 _NAME = re.compile(r"[a-z][a-z0-9_~-]{0,63}")
 
 
-def check_launch(name, generation, role, harness, workdir, brief, queued_by):
+def check_launch(name, role, harness, workdir, brief, queued_by):
     if not isinstance(name, str) or _NAME.fullmatch(name) is None:
         raise ValueError("launch name must be 1-64 lowercase letters, digits, _, - or ~, starting with a letter")
-    if not isinstance(generation, int) or generation < 1:
-        raise ValueError("launch generation must be positive")
     if harness not in LAUNCH_HARNESSES:
         raise ValueError("launch harness must be claude or codex")
     for what, value in (("role", role), ("workdir", workdir), ("brief", brief), ("queued_by", queued_by)):
@@ -46,7 +44,7 @@ def _check_state(state, fields, current=None):
         return
     if state not in ("done", "failed") and not (state == "queued" and
             fields.get("last_outcome") in ("halted", "interrupted by pause", "interrupted by driver restart", "blocked", "driver-error")):
-        raise ValueError("only queue_launch or claim_drive_launch may queue or start a launch")
+        raise ValueError("only queue_launch or claim_launch may queue or start a launch")
     if set(fields) - set(STATE_FIELDS):
         raise ValueError("unknown launch settlement field")
 
@@ -69,8 +67,8 @@ class _Refused(Exception):
 
 
 class MemoryLaunches:
-    def queue_launch(self, job, generation, name, *, role, harness, model, workdir, brief, queued_by):
-        check_launch(name, generation, role, harness, workdir, brief, queued_by)
+    def queue_launch(self, job, name, *, role, harness, model, workdir, brief, queued_by):
+        check_launch(name, role, harness, workdir, brief, queued_by)
         s = self._s()
         with s.lock:
             if job not in s.jobs:
@@ -79,10 +77,10 @@ class MemoryLaunches:
             fields = dict(role=role, harness=harness, model=model, workdir=workdir, brief=brief,
                           queued_by=queued_by, state="queued", last_outcome=None, updated_at=now,
                           session_id=None, agent_key=None)
-            row = next((r for r in s.launches if (r["job"], r["generation"], r["name"]) ==
-                        (job, generation, name)), None)
+            row = next((r for r in s.launches if (r["job"], r["name"]) ==
+                        (job, name)), None)
             if row is None:
-                row = dict(id=s.next_launch_id, job=job, generation=generation, name=name, **fields,
+                row = dict(id=s.next_launch_id, job=job, name=name, **fields,
                            revision=1, attempts=0, launch_id=None)
                 s.next_launch_id += 1
                 s.launches.append(row)
@@ -91,15 +89,14 @@ class MemoryLaunches:
             s.touch()
             return Launch(**row)
 
-    def launches(self, job, generation=None, include_closed=True):
+    def launches(self, job, include_closed=True):
         s = self._s()
         with s.lock:
             return [Launch(**r) for r in s.launches if r["job"] == job
-                    and (generation is None or r["generation"] == generation)
                     and (include_closed or r["state"] in ("queued", "running"))]
 
-    def get_launch(self, job, generation, name):
-        return next((r for r in self.launches(job, generation) if r.name == name), None)
+    def get_launch(self, job, name):
+        return next((r for r in self.launches(job) if r.name == name), None)
 
     def set_launch_state(self, launch_row_id, expected_revision, state, *, job, **fields):
         s = self._s()
@@ -119,13 +116,13 @@ class MemoryLaunches:
             s.touch()
             return Launch(**row)
 
-    def claim_drive_launch(self, *, job, generation, action_id, attempt, launch_id, launch_row_id, queue_version,
+    def claim_launch(self, *, job, action_id, attempt, launch_id, launch_row_id, queue_version,
                            harness, reserve_usd, reserve_minutes, locks, lock_seconds, max_host_running=None,
                            max_job_running=4, ruling=False, lock_paths=None):
         s = self._s()
         with s.lock:
             row = next((r for r in s.launches if r["id"] == launch_row_id), None)
-            if (row is None or row["job"] != job or row["generation"] != generation
+            if (row is None or row["job"] != job
                     or row["revision"] != queue_version or row["state"] != "queued"):
                 return None
             if any(r["launch_id"] == row["launch_id"] and r["ended_at"] is None for r in s.restarts):
@@ -144,7 +141,7 @@ class MemoryLaunches:
                 return None
             now = self.now()
             for key in kept_locks:
-                s.drive_locks.append(dict(key=key, holder=action_id, job=job, generation=generation,
+                s.drive_locks.append(dict(key=key, holder=action_id, job=job, generation=1,
                                           launch_id=launch_id, host=host,
                                           expires_at=now + _dt.timedelta(seconds=lock_seconds), path=None))
             restart = dict(id=s.next_restart_id, job=job, agent_key=action_id, attempt=attempt, at=now,
@@ -234,7 +231,7 @@ def migrate_launches(c, pg=False):
                         "WHEN 'released' THEN 'done' WHEN 'refused' THEN 'failed' "
                         "WHEN 'cancelled' THEN 'failed' WHEN 'running' THEN "
                         "CASE WHEN launch_id IS NULL THEN 'done' ELSE 'running' END ELSE state END,")
-    c.execute(f"INSERT INTO launches ({LAUNCH_COLS}) SELECT {expr} FROM {LEGACY_TABLE} WHERE true ON CONFLICT DO NOTHING")
+    c.execute(f"INSERT INTO launches (generation, {LAUNCH_COLS}) SELECT 1, {expr} FROM {LEGACY_TABLE} WHERE true ON CONFLICT DO NOTHING")
     c.execute(f"DROP TABLE {LEGACY_TABLE}")
     c.execute("DELETE FROM drive_locks WHERE key LIKE 'wt:%'")
     if pg:
@@ -289,34 +286,31 @@ class SqlLaunches:
     def _exec(self, c, sql, args=()):
         return c.execute(self._sx(sql), args)
 
-    def queue_launch(self, job, generation, name, *, role, harness, model, workdir, brief, queued_by):
-        check_launch(name, generation, role, harness, workdir, brief, queued_by)
+    def queue_launch(self, job, name, *, role, harness, model, workdir, brief, queued_by):
+        check_launch(name, role, harness, workdir, brief, queued_by)
         with self._launch_tx() as c:
             now = self._launch_time(self.now())
             row = self._exec(c,
                 "INSERT INTO launches (job, generation, name, role, harness, model, workdir, brief, "
-                "queued_by, state, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?) "
+                "queued_by, state, updated_at) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, 'queued', ?) "
                 "ON CONFLICT (job, generation, name) DO UPDATE SET role=excluded.role, harness=excluded.harness, "
                 "model=excluded.model, workdir=excluded.workdir, brief=excluded.brief, "
                 "queued_by=excluded.queued_by, state='queued', last_outcome=NULL, session_id=NULL, agent_key=NULL, "
                 "revision=launches.revision+1, updated_at=excluded.updated_at "
                 f"RETURNING {LAUNCH_COLS}",
-                (job, generation, name, role, harness, model, workdir, brief, queued_by, now)).fetchone()
+                (job, name, role, harness, model, workdir, brief, queued_by, now)).fetchone()
             return self._launch_obj(Launch, LAUNCH_COLS, row)
 
-    def launches(self, job, generation=None, include_closed=True):
+    def launches(self, job, include_closed=True):
         sql, args = f"SELECT {LAUNCH_COLS} FROM launches WHERE job = ?", [job]
-        if generation is not None:
-            sql += " AND generation = ?"
-            args.append(generation)
         if not include_closed:
             sql += " AND state IN ('queued', 'running')"
         return [self._launch_obj(Launch, LAUNCH_COLS, r) for r in
                 self._exec(self._conn, sql + " ORDER BY id", args).fetchall()]
 
-    def get_launch(self, job, generation, name):
-        row = self._exec(self._conn, f"SELECT {LAUNCH_COLS} FROM launches WHERE job=? AND generation=? AND name=?",
-                         (job, generation, name)).fetchone()
+    def get_launch(self, job, name):
+        row = self._exec(self._conn, f"SELECT {LAUNCH_COLS} FROM launches WHERE job=? AND name=?",
+                         (job, name)).fetchone()
         return self._launch_obj(Launch, LAUNCH_COLS, row) if row else None
 
     def set_launch_state(self, launch_row_id, expected_revision, state, *, job, **fields):
@@ -343,7 +337,7 @@ class SqlLaunches:
                               expected_revision)).fetchone()
             return self._launch_obj(Launch, LAUNCH_COLS, row) if row else None
 
-    def claim_drive_launch(self, *, job, generation, action_id, attempt, launch_id, launch_row_id, queue_version,
+    def claim_launch(self, *, job, action_id, attempt, launch_id, launch_row_id, queue_version,
                            harness, reserve_usd, reserve_minutes, locks, lock_seconds, max_host_running=None,
                            max_job_running=4, ruling=False, lock_paths=None):
         try:
@@ -354,10 +348,10 @@ class SqlLaunches:
                         c.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (key,))
                 moved = self._exec(c,
                     "UPDATE launches SET state='running', revision=revision+1, attempts=attempts+1, "
-                    "updated_at=?, launch_id=? WHERE id=? AND job=? AND generation=? AND revision=? "
+                    "updated_at=?, launch_id=? WHERE id=? AND job=? AND revision=? "
                     "AND state='queued' AND NOT EXISTS (SELECT 1 FROM restarts WHERE "
                     "restarts.launch_id=launches.launch_id AND ended_at IS NULL) RETURNING id",
-                    (self._launch_time(self.now()), launch_id, launch_row_id, job, generation, queue_version)).fetchone()
+                    (self._launch_time(self.now()), launch_id, launch_row_id, job, queue_version)).fetchone()
                 if moved is None:
                     raise _Refused("launch moved or previous attempt still running")
                 n = self._exec(c, "SELECT count(*) FROM restarts WHERE job=? AND ended_at IS NULL",
@@ -373,7 +367,7 @@ class SqlLaunches:
                     locked = self._exec(c, "INSERT INTO drive_locks "
                         "(key, holder, job, generation, launch_id, host, expires_at, path) "
                         "VALUES (?, ?, ?, ?, ?, ?, ?, NULL) ON CONFLICT DO NOTHING RETURNING key",
-                        (key, action_id, job, generation, launch_id, host,
+                        (key, action_id, job, launch_id, host,
                          self._launch_time(self.now() + _dt.timedelta(seconds=lock_seconds)))).fetchone()
                     if locked is None:
                         raise _Refused("destination lease held")

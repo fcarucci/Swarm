@@ -37,7 +37,7 @@ class RunCmd(unittest.TestCase):
         rc, out, _ = self.run_cmd(workdir="/work/shared")
         self.assertEqual(rc, None)
         self.assertEqual(out, "rev: queued\n")
-        row = self.b.get_launch("J", 1, "rev")
+        row = self.b.get_launch("J", "rev")
         self.assertEqual((row.state, row.role, row.workdir, row.queued_by),
                          ("queued", "reviewer", "/work/shared", "swarm run"))
         self.assertEqual(self.b.job_data("J").get("workdir"), "/work/shared")
@@ -46,13 +46,13 @@ class RunCmd(unittest.TestCase):
         self.run_cmd(workdir="/work/shared")
         rc, out, _ = self.run_cmd(name="rev2")
         self.assertIsNone(rc)
-        self.assertEqual(self.b.get_launch("J", 1, "rev2").workdir, "/work/shared")
+        self.assertEqual(self.b.get_launch("J", "rev2").workdir, "/work/shared")
 
     def test_no_workdir_anywhere_is_refused(self):
         rc, _, err = self.run_cmd()
         self.assertEqual(rc, 1)
         self.assertIn("no work dir", err)
-        self.assertIsNone(self.b.get_launch("J", 1, "rev"))
+        self.assertIsNone(self.b.get_launch("J", "rev"))
 
     def test_an_unknown_job_is_refused(self):
         rc, _, err = self.run_cmd(job="NOPE", workdir="/work/shared")

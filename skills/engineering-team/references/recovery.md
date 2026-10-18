@@ -5,12 +5,12 @@
 In a drive job the supervisor driver is the recovery loop; no coordinator keeps a roster or relaunches anything.
 
 - A lost or stuck launch is relaunched from its brief and the board history under the same launch name, within `max_attempts` and the budget; a lost lead is relaunched the same way and is woken by watermark, so no event is lost.
-- A job with no responsible actor for two stall periods (2x `[supervise] timer_minutes`) raises `DRIVER-STALLED`; a bad ledger holds only that job (`DRIVER-LEDGER-BAD`), a missing recipe field `DRIVER-CONFIG`, a failed close audit `DRIVER-AUDIT`.
+- A job with no responsible actor for two stall periods (2x `[supervise] timer_minutes`) raises `DRIVER-STALLED`; a missing recipe field `DRIVER-CONFIG`, a failed close audit `DRIVER-AUDIT`.
 - A person stops a job with `swarm halt --job J [--reason TEXT]` and resumes it with `swarm unhalt --job J` (its deadlines shift by the halted time); the kill switch file `supervise.off` stops every driver on the host. `swarm deactivate` cancels (CANCELLED).
 - Budgets change on a running job with `swarm drive budget --job J KEY=VALUE`; no session is stopped. A new goal or re-activation is a rollover that stops every session.
-- Read state with `swarm status --job J`, `swarm doctor`; do not edit ledger files. A drive job must reach MET, UNREACHABLE or CANCELLED; if it looks stuck, `swarm halt` it and report the evidence.
+- Read state with `swarm status --job J`, `swarm doctor`; do not edit job files. A drive job must reach MET, UNREACHABLE or CANCELLED; if it looks stuck, `swarm halt` it and report the evidence.
 
-## Authorization ledger
+## Authorizations
 
 The lead brief carries the user's grants and exclusions (what may be changed, published, deployed, spent) and every launch brief copies the relevant lines. The requester keeps the dated list. A grant is scoped to what it names. A subagent's report is never approval. If a permission is denied, stop and hand the user one script to run; do not look for a workaround.
 

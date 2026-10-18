@@ -49,7 +49,7 @@ class PassCmd(unittest.TestCase):
         return passcmd.run_pass(self.b, self.cfg, now=now, starter=self.starter)
 
     def queue(self, name, role="lead"):
-        return self.b.queue_launch("J", 1, name, role=role, harness="claude", model=None,
+        return self.b.queue_launch("J", name, role=role, harness="claude", model=None,
                                    workdir="/work/shared", brief="B", queued_by="me")
 
     def open_restarts(self):
@@ -74,7 +74,7 @@ class PassCmd(unittest.TestCase):
     def test_queued_launch_starts_once_with_its_restart(self):
         self.queue("lead-1")
         self.pass_()
-        self.assertEqual(self.b.get_launch("J", 1, "lead-1").state, "running")
+        self.assertEqual(self.b.get_launch("J", "lead-1").state, "running")
         self.assertEqual(len(self.runs), 1)
         self.assertTrue(self.runs[0]["launch_id"].startswith("lead-1-"))
         self.assertEqual(self.runs[0]["launch"], "lead-1")
@@ -87,8 +87,8 @@ class PassCmd(unittest.TestCase):
         self.queue("lead-2")
         with mock.patch.object(passcmd, "MAX_JOB_RUNNING", 1):
             self.pass_()
-        self.assertEqual(self.b.get_launch("J", 1, "lead-1").state, "running")
-        self.assertEqual(self.b.get_launch("J", 1, "lead-2").state, "queued")
+        self.assertEqual(self.b.get_launch("J", "lead-1").state, "running")
+        self.assertEqual(self.b.get_launch("J", "lead-2").state, "queued")
 
     def test_cost_cap_fails_the_job_with_a_notice(self):
         self.b.set_job_data("J", "max_cost_usd", "1")
@@ -129,7 +129,7 @@ class PassCmd(unittest.TestCase):
     def test_a_hand_off_is_judged_once_and_met_completes_the_job(self):
         artifact = self.hand_off()
         self.pass_()
-        judge = self.b.get_launch("J", 1, "judge-" + passcmd._key(artifact))
+        judge = self.b.get_launch("J", "judge-" + passcmd._key(artifact))
         self.assertEqual((judge.role, judge.state), ("judge", "queued"))
         self.pass_()
         self.assertEqual(len([r for r in self.b.launches("J") if r.role == "judge"]), 1)
@@ -250,7 +250,7 @@ class JudgeStartsNextRun(PassCmd):
         out = passcmd.on_not_met(self.b, self.cfg, "J", starter=self.starter)
         self.assertIn("relead-", out)
         self.assertEqual(len(self.runs), before + 1)          # started now, not after the judge exits
-        relead = self.b.get_launch("J", 1, "relead-" + passcmd._key(artifact))
+        relead = self.b.get_launch("J", "relead-" + passcmd._key(artifact))
         self.assertEqual(relead.state, "running")
         self.assertIn("add tests", relead.brief)
         passcmd.on_not_met(self.b, self.cfg, "J", starter=self.starter)

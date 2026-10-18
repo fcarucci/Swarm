@@ -770,7 +770,7 @@ def _price(cfg: dict, tokens: int) -> float:
 
 def _read_drive_usage(cfg: dict, run: dict) -> None:
     """Once per drive run: read what the session cost from its kept output tail and keep it in the run
-    (cost_usd, tokens_in, tokens_out; None when unreadable: the ledger then charges the reservation)
+    (cost_usd, tokens_in, tokens_out; None when unreadable: the caller then charges the reservation)
     with whether it ended in a provider outage. A retried finish reuses it."""
     if "usage_read" in run:
         return

@@ -158,11 +158,11 @@ def _start_one(board, cfg: dict, job: str, row, reserve: float, starter) -> str 
     if row.role == "judge":
         board.take_judge_launch(old, job)   # its verdict is recorded under the session's own name
     board.close_agent(old, "drive predecessor")
-    r = board.claim_drive_launch(job=job, generation=row.generation, action_id=f"pass|{row.name}|{row.revision}",
-                                 attempt=row.attempts + 1, launch_id=launch_id, launch_row_id=row.id,
-                                 queue_version=row.revision, harness=row.harness, reserve_usd=reserve,
-                                 reserve_minutes=minutes, locks=[], lock_seconds=3600,
-                                 max_job_running=MAX_JOB_RUNNING)
+    r = board.claim_launch(job=job, action_id=f"pass|{row.name}|{row.revision}",
+                           attempt=row.attempts + 1, launch_id=launch_id, launch_row_id=row.id,
+                           queue_version=row.revision, harness=row.harness, reserve_usd=reserve,
+                           reserve_minutes=minutes, locks=[], lock_seconds=3600,
+                           max_job_running=MAX_JOB_RUNNING)
     if r is None:
         return None
     try:
@@ -182,7 +182,7 @@ def _start_one(board, cfg: dict, job: str, row, reserve: float, starter) -> str 
         starter(cfg, run)
     except Exception as exc:   # the start failed: the restart and the launch end failed; the job goes on
         board.finish_restart(r.id, "failed")
-        cur = board.get_launch(job, row.generation, row.name)
+        cur = board.get_launch(job, row.name)
         if cur is not None and cur.state == "running":
             board.set_launch_state(cur.id, cur.revision, "failed", job=job, last_outcome=type(exc).__name__)
         return f"{job}: {row.name} failed to start ({type(exc).__name__}: {exc})"
@@ -226,7 +226,7 @@ def _attempts(board, job: str, since: _dt.datetime) -> int:
 
 
 def _queue(board, job: str, name: str, role: str, brief: str, workdir: str) -> None:
-    board.queue_launch(job, 1, name, role=role, harness="claude", model=None, workdir=workdir,
+    board.queue_launch(job, name, role=role, harness="claude", model=None, workdir=workdir,
                        brief=brief[:BRIEF_MAX], queued_by=PASS_NAME)
 
 
@@ -308,7 +308,7 @@ def _advance(board, cfg: dict, js, now: _dt.datetime, starter) -> list[str]:
         return acts + [_fail(board, job, "no work dir is known for its launches (swarm run --workdir)", now)]
     if found is not None:
         key = _key(artifact)
-        if judged == "not_met" and board.get_launch(job, 1, f"relead-{key}") is None:   # once per artifact
+        if judged == "not_met" and board.get_launch(job, f"relead-{key}") is None:   # once per artifact
             if _attempts(board, job, msg.created_at) >= LEAD_ATTEMPTS:
                 return acts + [_fail(board, job, f"no met verdict after {LEAD_ATTEMPTS} launches", now)]
             steps = js.verdict_next or js.verdict_reason or "see the verdict"
@@ -316,7 +316,7 @@ def _advance(board, cfg: dict, js, now: _dt.datetime, starter) -> list[str]:
             _queue(board, job, f"relead-{key}", "lead", _lead_brief(js, steps), workdir)
             return acts + [f"{job}: re-queued the lead for {artifact} (not met)"]
         if judged is None:   # one judge per artifact, never again
-            if board.get_launch(job, 1, f"judge-{key}") is None:
+            if board.get_launch(job, f"judge-{key}") is None:
                 _queue(board, job, f"judge-{key}", "judge", _judge_brief(js, artifact), workdir)
                 return acts + [f"{job}: judge queued for {artifact}"]
             return acts + [_fail(board, job, f"the judge of {artifact} ended with no verdict", now)]
@@ -352,7 +352,7 @@ def on_not_met(board, cfg: dict, job: str, *, now: _dt.datetime | None = None, s
     if workdir is None:
         return _fail(board, job, "no work dir is known for its launches (swarm run --workdir)", now)
     name = f"relead-{key}"
-    row = board.get_launch(job, 1, name)
+    row = board.get_launch(job, name)
     if row is None or row.state in ("done", "failed", "cancelled"):
         steps = js.verdict_next or js.verdict_reason or "see the verdict"
         board.post(job, PASS_NAME, f"NOT MET {artifact}: {steps}"[:200])

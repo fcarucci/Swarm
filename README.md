@@ -111,7 +111,7 @@ Swarm is installed from its own marketplace (this repository).
   install from before the opt-in); it backs up each file first.
 - **No timers.** Swarm installs no systemd timer or service, launchd agent, Task Scheduler task
   or cron entry. Drive jobs are driven by the session driver, a process of the session that
-  requested the job that wakes on board changes and ledger deadlines (`swarm drive run` when no
+  requested the job that wakes on board changes and deadlines (`swarm drive run` when no
   session is open). `swarm bootstrap` and `swarm upgrade` remove a `swarm-supervise.timer` an
   earlier build installed, and `swarm doctor` fails while one is there.
 - **Supervisor (opt-in).** Off unless `[supervise] enabled = true` (a missing key is off; set it

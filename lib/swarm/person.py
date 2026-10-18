@@ -111,7 +111,7 @@ CODEX_ENV = ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_SANDBOX", "CODEX_SAND
 def codex_session(env, ancestor=None) -> bool:
     """Whether this command runs in a Codex session: a Codex variable is set, or the nearest agent host above
     the process is codex. Such a command cannot use a grant (its sandbox cannot touch the enrolled
-    directory), so its ledger-writing control commands go to the driver as CONTROL-REQUESTs."""
+    directory), so its control commands go to the driver as CONTROL-REQUESTs."""
     if broker_attested(env) is not None:
         return False   # run by a jailed launch's broker outside the jail: the broker attests the caller (its grant)
     if any(env.get(k) for k in CODEX_ENV):

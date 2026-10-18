@@ -4693,7 +4693,7 @@ def _board_run(board, cfg: dict, args) -> int | None:
         if not workdir:
             print("swarm run: no work dir: pass --workdir once for the job", file=sys.stderr)
             return 1
-        row = board.queue_launch(args.job, 1, args.name, role=args.role, harness=args.harness, model=args.model,
+        row = board.queue_launch(args.job, args.name, role=args.role, harness=args.harness, model=args.model,
                                  workdir=workdir, brief=args.brief, queued_by="swarm run")
     except ValueError as exc:
         print(f"swarm run: {term_safe(str(exc))}", file=sys.stderr)

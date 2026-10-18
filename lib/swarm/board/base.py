@@ -750,7 +750,7 @@ class Restart:
     minutes_cap: float
     ended_at: _dt.datetime | None
     outcome: str | None       # RESTART_OUTCOMES; None while running
-    # Schema 25: a drive launch (Board.claim_drive_launch) and what it reserved and spent.
+    # Schema 25: a drive launch (Board.claim_launch) and what it reserved and spent.
     action_id: str | None = None
     launch_id: str | None = None
     reserved_usd: float | None = None
@@ -777,7 +777,6 @@ class Launch:
     """A named launch plus the storage version and runner identity used for atomic claims."""
     id: int
     job: str
-    generation: int
     name: str
     role: str
     harness: str
@@ -802,7 +801,6 @@ class DriveLock:
     key: str
     holder: str
     job: str
-    generation: int
     launch_id: str
     host: str
     expires_at: _dt.datetime
@@ -1439,7 +1437,7 @@ WRITE_METHODS = (
     "save_transcript", "refresh_transcript", "mark_capture_failed", "rotate_transcripts",
     "save_memory_ref", "mark_memory_refs_checked", "delete_memory_refs",
     "open_blocker", "resolve_blocker", "reopen_blocker", "comment_blocker", "expire_blockers", "_overdue_blocker",
-    "queue_launch", "set_launch_state", "claim_drive_launch", "renew_drive_locks", "release_drive_locks",
+    "queue_launch", "set_launch_state", "claim_launch", "renew_drive_locks", "release_drive_locks",
     "post_event", "ack_events",
     "pause_job", "begin_resume", "record_resume_outcome", "set_message_cap",
 )
@@ -2461,16 +2459,16 @@ class Board(abc.ABC):
     # ---- named launches and atomic claims ----
 
     @abc.abstractmethod
-    def queue_launch(self, job: str, generation: int, name: str, *, role: str, harness: str,
+    def queue_launch(self, job: str, name: str, *, role: str, harness: str,
                      model: str | None, workdir: str, brief: str, queued_by: str) -> Launch:
         """Queue by name, in any state. Every call creates a new queue version; names never die."""
 
     @abc.abstractmethod
-    def launches(self, job: str, generation: int | None = None, include_closed: bool = True) -> list[Launch]:
+    def launches(self, job: str, include_closed: bool = True) -> list[Launch]:
         """Launches in insertion order; include_closed=False returns queued/running only."""
 
     @abc.abstractmethod
-    def get_launch(self, job: str, generation: int, name: str) -> Launch | None:
+    def get_launch(self, job: str, name: str) -> Launch | None:
         """A named launch, or None."""
 
     @abc.abstractmethod
@@ -2479,7 +2477,7 @@ class Board(abc.ABC):
         """CAS settlement. A stale completion cannot overwrite a new queue version."""
 
     @abc.abstractmethod
-    def claim_drive_launch(self, *, job: str, generation: int, action_id: str, attempt: int, launch_id: str,
+    def claim_launch(self, *, job: str, action_id: str, attempt: int, launch_id: str,
                            launch_row_id: int, queue_version: int, harness: str, reserve_usd: float,
                            reserve_minutes: float, locks: list[str], lock_seconds: float,
                            max_host_running: int | None = None, max_job_running: int = 4,

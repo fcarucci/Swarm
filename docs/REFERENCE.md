@@ -1829,7 +1829,7 @@ sonnet reviewer for every hand-off (`review_gates` of the recipe), never the aut
 ### Budgets: configurable defaults, not limits
 
 Every key under `[drive]` in `config.toml` is a configurable default; `config.example.toml` lists them with their shipped values.
-The per-job values live in the ledger, are shown by `swarm status --job J` and `swarm doctor`, and are changed
+The per-job values live on the job, are shown by `swarm status --job J` and `swarm doctor`, and are changed
 on a running job with `swarm drive budget --job J KEY=VALUE ...` (no rollover). A reserve larger than the cap, or a cap below
 `ruling_reserve_usd` plus `min_session_usd`, is refused. At activation: `--max-cost-usd N`, `--ruling-reserve-usd N`, `--budget KEY=VALUE`.
 
@@ -2543,11 +2543,11 @@ recall_banks = ["coding", "hermes"]
   the markers it covered and is recorded (`memory.harvest`). Only a person may close without it:
   `swarm deactivate --job J --no-learn "<reason>"` (the requester session's grant, or a confirmed
   tty outside any agent host), recorded on the job. A drive job does the step itself: once a MET
-  or UNREACHABLE verdict is there, the driver launches its `learner` launch (an ordinary ledger
+  or UNREACHABLE verdict is there, the driver launches its `learner` launch (an ordinary
   intent, so a crashed driver resumes it) and closes only after the step is recorded. If the
   learner used `max_attempts` without finishing, the job holds (it never closes past the step)
   until a person runs `swarm learn` or `swarm deactivate --no-learn`; while a verdict is held for
-  its learnings no deadline closes the job (the ledger records the hold), and a learnings check that
+  its learnings no deadline closes the job (the job records the hold), and a learnings check that
   fails keeps the step pending. The drive loop makes no LLM call.
 - **Failure:** one `timeout_seconds` timeout per call. Only a sign that Hindsight itself can't
   be reached (a connection failure, a timeout, or a 502/503/504 from a proxy in front of it) is
@@ -2801,8 +2801,7 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `move (--as NAME \| --key K) --to J` | move one live agent to another open job |
 | `halt --job J [--reason TEXT]` / `unhalt --job J` | a person stops a drive job on purpose (nothing progresses until it is unhalted or cancelled) / resumes it. A person's action: the job's requester session (its own main session, run as a plain `swarm ...` command: its hook attests the caller, never an environment variable), or a person at a terminal outside any agent who confirms on it; every other agent session is refused |
 | `run --job J --name NAME --role ROLE --brief PATH [--model M --harness H --workdir DIR]` | queue or re-queue a named launch in any state; anyone the hooks trust may call it. Workdir refusal happens now; `status --job J` lists launch states and reasons. Failed launches are not retried unchanged. |
-| (Codex sessions) | in a Codex session, `halt`, `unhalt`, `goal-ready --add-requirements` (new pins) and `drive repair` change nothing themselves: each posts `CONTROL-REQUEST <kind> <digest>`, and the supervisor applies it in its next pass if the caller may (CONTROL-APPLIED or CONTROL-REFUSED on the board) |
-| `drive repair --job J [--generation N]` | a person replaces a drive ledger that does not read: the bad file is kept aside, a fresh one starts halted (or stays finished) with what could be recovered, and what was lost is listed; set the budgets, then unhalt. `--generation` only when the bad file no longer tells it |
+| (Codex sessions) | in a Codex session, `halt`, `unhalt` and `goal-ready --add-requirements` (new pins) change nothing themselves: each posts `CONTROL-REQUEST <kind> <digest>`, and the supervisor applies it in its next pass if the caller may (CONTROL-APPLIED or CONTROL-REFUSED on the board) |
 | `review --job J --artifact REF verified\|changes --report PATH --key K` | an enrolled reviewer of the job posts its structured review: `REVIEW <artifact> VERIFIED\|CHANGES <path>` |
 | `goal-ready --job J --candidate REF@SHA [--add-requirements PATH]...` | the lead or a person declares the goal ready for the judge; the requirement files it names are pinned (added, never replaced) |
 | `hook [--host claude\|codex] start\|turn\|done\|stop\|session-start` | hook entry point, reads hook JSON on stdin (called by `swarm-hook`, not by hand) |

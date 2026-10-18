@@ -564,7 +564,7 @@ class Mirror:
         """Fetch the named branches one at a time inside one overall `timeout` (each call is also
         capped at MAX_CALL_TIMEOUT). Returns (refname -> sha of what arrived, branches still
         pending). A branch whose fetch times out, and every branch after it, stays pending: the
-        caller keeps the list (the ledger's mirror_fetch_pending) and calls again in a later pass,
+        caller keeps the list (its pending list) and calls again in a later pass,
         so a big repository is brought in over several passes. Any other git failure (a branch the
         remote does not have, a refused credential) raises MirrorError."""
         total = _timeout(timeout)

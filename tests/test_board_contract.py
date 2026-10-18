@@ -2307,16 +2307,16 @@ class DriveHelpers:
     def goal_job(self, job="J"):
         self.b.open_job(job, None, None, None, "me", goal="G")
 
-    def get_launch(self, job, name, generation=1, **over):
+    def get_launch(self, job, name, **over):
         fields = dict(role="engineer", harness="claude", model="sonnet", workdir=f"/w/{name}",
                       brief=f"/w/{name}/BRIEF.md", queued_by="lead")
         fields.update(over)
-        return self.b.queue_launch(job, generation, name, **fields)
+        return self.b.queue_launch(job, name, **fields)
 
     def claim(self, s, *, locks=(), paths=None, launch_id=None, action=None, attempt=1, ruling=False,
-              max_host_running=4, generation=None, lock_seconds=4200):
-        return self.b.claim_drive_launch(
-            job=s.job, generation=s.generation if generation is None else generation,
+              max_host_running=4, lock_seconds=4200):
+        return self.b.claim_launch(
+            job=s.job,
             action_id=action or f"1|launch|{s.name}", attempt=attempt, launch_id=launch_id or f"L-{s.name}-{attempt}",
             launch_row_id=s.id, queue_version=s.revision, harness="claude", reserve_usd=5, reserve_minutes=60,
             locks=list(locks), lock_paths=dict(paths or {}), lock_seconds=lock_seconds,
@@ -2360,10 +2360,10 @@ from swarm.board import open_board
 cfg, launch, root, start = json.loads(os.environ["SWARM_RACE_CFG"]), sys.argv[1], sys.argv[2], float(sys.argv[3])
 root = os.path.normpath(os.path.abspath(root)).replace(os.sep, "/")
 b = open_board(cfg)
-s = b.get_launch("J", 1, launch)
+s = b.get_launch("J", launch)
 key = "wt:" + hashlib.sha256(root.encode()).hexdigest()
 time.sleep(max(0.0, start - time.time()))
-won = b.claim_drive_launch(job="J", generation=1, action_id="1|launch|" + launch, attempt=1,
+won = b.claim_launch(job="J", action_id="1|launch|" + launch, attempt=1,
                            launch_id="L-" + launch, launch_row_id=s.id, queue_version=s.revision, harness="claude",
                            reserve_usd=5, reserve_minutes=60, locks=[key], lock_paths={key: root},
                            lock_seconds=4200, max_host_running=4) is not None

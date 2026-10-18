@@ -22,15 +22,15 @@ class LaunchQueue(unittest.TestCase):
         fields = dict(role="engineer", harness="codex", model="gpt-6-astra", workdir="/work/shared",
                       brief="B.md", queued_by="lead")
         fields.update(over)
-        return self.b.queue_launch("J", 1, name, **fields)
+        return self.b.queue_launch("J", name, **fields)
 
     def claim(self, row, suffix="1", **over):
-        fields = dict(job="J", generation=1, action_id="gen1|launch|" + row.name + "|-|0|" + suffix,
+        fields = dict(job="J", action_id="gen1|launch|" + row.name + "|-|0|" + suffix,
                       attempt=1, launch_id=row.name + suffix, launch_row_id=row.id, queue_version=row.revision,
                       harness=row.harness, reserve_usd=1, reserve_minutes=1, locks=[], lock_seconds=60,
                       max_job_running=4)
         fields.update(over)
-        return self.b.claim_drive_launch(**fields)
+        return self.b.claim_launch(**fields)
 
     def test_requeue_every_state_reuses_name_and_changes_queue_version(self):
         first = self.queue()
@@ -55,7 +55,7 @@ class LaunchQueue(unittest.TestCase):
         self.assertIsNotNone(self.claim(rows[1], max_job_running=2))
         self.assertIsNone(self.claim(rows[2], max_job_running=2))
         self.assertEqual(self.b.drive_locks("wt:"), [])
-        self.assertEqual(self.b.get_launch("J", 1, "c").state, "queued")
+        self.assertEqual(self.b.get_launch("J", "c").state, "queued")
 
     def test_host_cap_is_optional_and_independent(self):
         a, b = self.queue("a"), self.queue("b")
@@ -66,17 +66,17 @@ class LaunchQueue(unittest.TestCase):
     def test_queue_and_claim_survive_reopening_board(self):
         row = self.queue()
         with self.h.board() as other:
-            self.assertEqual(other.get_launch("J", 1, row.name), row)
+            self.assertEqual(other.get_launch("J", row.name), row)
         self.assertIsNotNone(self.claim(row))
         with self.h.board() as other:
-            self.assertEqual(other.get_launch("J", 1, row.name).state, "running")
+            self.assertEqual(other.get_launch("J", row.name).state, "running")
 
     def test_stale_claim_and_stale_settlement_do_not_overwrite_requeue(self):
         old = self.queue()
         new = self.queue()
         self.assertIsNone(self.claim(old))
         self.assertIsNone(self.b.set_launch_state(old.id, old.revision, "failed", job="J"))
-        self.assertEqual(self.b.get_launch("J", 1, old.name), new)
+        self.assertEqual(self.b.get_launch("J", old.name), new)
 
     def test_judges_keep_requested_harness_and_model(self):
         row = self.queue(role="judge")
@@ -96,7 +96,7 @@ class LaunchMigration(unittest.TestCase):
         with h.board() as b:
             b.open_job("J", None, None, None, "me", goal="g")
             for state in ("requested", "idle", "running", "released", "failed", "cancelled", "refused"):
-                b.queue_launch("J", 1, state, role="engineer", harness="claude", model="haiku", workdir="/work",
+                b.queue_launch("J", state, role="engineer", harness="claude", model="haiku", workdir="/work",
                                brief="B.md", queued_by="lead")
             with b._tx() as c:
                 c.execute("CREATE TABLE seats AS SELECT id, job, generation, name AS seat, role, harness, model, "
@@ -112,7 +112,7 @@ class LaunchMigration(unittest.TestCase):
             self.assertEqual(states, dict(requested="queued", idle="done", running="running", released="done",
                                           failed="failed", cancelled="failed", refused="failed"))
             self.assertIsNone(b._conn.execute("SELECT name FROM sqlite_master WHERE name='seats'").fetchone())
-            self.assertEqual(b.queue_launch("J", 1, "failed", role="engineer", harness="claude", model="haiku",
+            self.assertEqual(b.queue_launch("J", "failed", role="engineer", harness="claude", model="haiku",
                                             workdir="/work", brief="B.md", queued_by="lead").state, "queued")
 
     def test_file_backend_reads_legacy_rows_as_launches(self):
@@ -121,7 +121,7 @@ class LaunchMigration(unittest.TestCase):
         h.reset()
         with h.board() as b:
             b.open_job("J", None, None, None, "me", goal="g")
-            b.queue_launch("J", 1, "engineer", role="engineer", harness="claude", model="haiku", workdir="/work",
+            b.queue_launch("J", "engineer", role="engineer", harness="claude", model="haiku", workdir="/work",
                            brief="B.md", queued_by="lead")
         path = Path(h.cfg["file"]["path"]) / "state.json"
         raw = json.loads(path.read_text())
@@ -136,6 +136,6 @@ class LaunchMigration(unittest.TestCase):
         raw["next_seat_id"] = raw.pop("next_launch_id")
         path.write_text(json.dumps(raw))
         with h.board() as b:
-            row = b.get_launch("J", 1, "engineer")
+            row = b.get_launch("J", "engineer")
             self.assertEqual((row.name, row.state, row.brief), ("engineer", "queued", "B.md"))
             self.assertFalse(hasattr(row, "complexity"))

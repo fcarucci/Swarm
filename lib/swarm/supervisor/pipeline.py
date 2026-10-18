@@ -359,7 +359,7 @@ def complete_finalized(board, cfg, js, handoffs, *, dry_run=False, say=print):
 def run(board, cfg, sup, state, *, job=None, now=None, dry_run=False, say=print,
         start_runner=None, which=None, scope_ok=lambda: True, config_path="", skip_jobs=()):
     """Return owned pipeline jobs, so orphan/replacement passes do not duplicate their work.
-    `skip_jobs`: the drive jobs (a ledger owns them: the driver runs their pipeline)."""
+    `skip_jobs`: the drive jobs (owned elsewhere)."""
     from swarm.supervisor import command, orphans
     from swarm.supervisor.settings import save_state
     p = settings(cfg)
