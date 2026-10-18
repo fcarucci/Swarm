@@ -131,8 +131,9 @@ class ModelHookTests(Env):
         self.config.write_text(self.config.read_text()
                                + '[models]\nmode = "default"\n[models.codex]\nworker = "gpt-test"\n')
         self.activate()
+        # Select the host from an owner terminal; agent-session activation is forbidden.
         with mock.patch.object(type(hosts.get("codex")), "supports_spawn_model_rewrite", False), \
-                mock.patch.dict(os.environ, {"SWARM_HOST": "codex", "CODEX_THREAD_ID": "t", "CODEX_SESSION_ID": "cs"}):
+                mock.patch.dict(os.environ, {"SWARM_HOST": "codex"}):
             rc, out, err = self.cli("activate", "--job", "J", "--attach", "--session", "cs")
         self.assertEqual(rc, 0, err)
         self.assertIn("worker=gpt-test", out)
@@ -141,8 +142,8 @@ class ModelHookTests(Env):
     def test_codex_activate_prints_no_hint_when_the_hook_sets_models(self):
         self.config.write_text(self.config.read_text()
                                + '[models]\nmode = "default"\n[models.codex]\nworker = "gpt-test"\n')
-        with mock.patch.dict(os.environ, {"SWARM_HOST": "codex", "CODEX_THREAD_ID": "cs", "CODEX_SESSION_ID": "cs"}):
-            rc, out, err = self.cli("activate", "--job", "J")
+        with mock.patch.dict(os.environ, {"SWARM_HOST": "codex"}):
+            rc, out, err = self.cli("activate", "--job", "J", "--session", "cs")
         self.assertEqual(rc, 0, err)
         self.assertNotIn("gpt-test", out)
         self.assertNotIn("model hint", out)

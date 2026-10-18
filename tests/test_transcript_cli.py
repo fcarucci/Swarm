@@ -450,11 +450,15 @@ class ActivateSessionTests(TranscriptEnv):
                     self.assertIsNone(b.job_status("J"))
                 self.assertFalse(self.markers.exists() and any(self.markers.iterdir()))
 
-    def test_env_session_is_checked_too(self):
-        import os
+    def test_agent_session_is_refused_before_transcript_session_validation(self):
         with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "*"}):
             rc, _, err = self.cli("activate", "--job", "J")
-        self.assertEqual(rc, 2)
+        self.assertEqual(rc, 1)
+        self.assertIn("agents cannot set job status", err)
+        self.assertFalse(swarm.valid_session_id("*"))
+        with self.board() as b:
+            self.assertIsNone(b.job_status("J"))
+        self.assertFalse(self.markers.exists() and any(self.markers.iterdir()))
 
     def test_uuid_and_plain_ids_are_accepted(self):
         for good in ("0b4a36f1-0a3c-4c32-9a53-9d6c2c1f7e11", "sess-1"):

@@ -108,16 +108,30 @@ class ActivateTagTests(RoutingEnv):
         self.assertIn("\n[swarm job: A]\n", out)
         self.assertIn("put this line in every subagent prompt", out)
 
-    def test_activate_binds_to_the_calling_claude_session(self):
+    def test_agent_activation_is_refused_and_owner_can_bind_its_claude_session(self):
+        from swarm import hosts
         with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "sess-env"}):
-            self.activate("A", session=None)
+            session = hosts.cli_session_id(os.environ)
+            rc, _, err = self.cli("activate", "--job", "A")
+        self.assertEqual(session, "sess-env")
+        self.assertEqual(rc, 1)
+        self.assertIn("agents cannot set job status", err)
+        with self.board() as b:
+            self.assertIsNone(b.job_status("A"))
+        # The owner terminal supplies the resolved session explicitly.
+        self.activate("A", session=session)
         self.assertEqual(json.loads((self.markers / "A.json").read_text())["session_id"], "sess-env")
         with self.board() as b:
             self.assertEqual(b.job_status("A").session_id, "sess-env")
 
-    def test_explicit_session_wins_over_the_environment(self):
+    def test_agent_cannot_activate_even_with_explicit_session_but_owner_can(self):
         with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "sess-env"}):
-            self.activate("A", session="given")
+            rc, _, err = self.cli("activate", "--job", "A", "--session", "given")
+        self.assertEqual(rc, 1)
+        self.assertIn("agents cannot set job status", err)
+        with self.board() as b:
+            self.assertIsNone(b.job_status("A"))
+        self.activate("A", session="given")
         self.assertEqual(json.loads((self.markers / "A.json").read_text())["session_id"], "given")
 
 
