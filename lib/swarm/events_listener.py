@@ -42,6 +42,10 @@ DEFAULTS = {
 TEXT_MAX = 500
 DEBUG = logging.getLogger("swarm.events")
 HELPERS_FILE = "events-helpers.json"
+RECONCILE_FILE = "events-reconciler.json"
+RECONCILE_INTERVAL = 5.0
+RECONCILE_STALE_SECONDS = 120
+LOCK_FD_ENV = "SWARM_EVENTS_LOCK_FD"
 LOCAL_TOKEN_FILE = "events-local-token"   # this listener start's local-route token (private dir, 0600)
 PROXY_HEADERS = ("x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-forwarded-port",
                  "x-forwarded-server", "forwarded", "via", "x-real-ip", "cf-connecting-ip", "true-client-ip")
@@ -223,9 +227,17 @@ def own_peer(peer, local, proc="/proc/net") -> bool:
 
 class Listener:
     def __init__(self, cfg: dict, registry, board_factory: Callable, log: Callable[[str], None] | None = None,
-                 write_token: Callable[[str], None] | None = None):
+                 write_token: Callable[[str], None] | None = None, *, reconcile: bool = False,
+                 write_reconcile_health=None):
         import secrets
         self.cfg = settings(cfg)
+        self.full_cfg = cfg
+        self.config_stamp = _reconcile_stamp(cfg)
+        self.external = self.cfg["enabled"] and bool(registry.event_sources)
+        self.reconcile_enabled = reconcile
+        self.write_reconcile_health = write_reconcile_health or _write_reconcile_health
+        self._next_reconcile = 0.0
+        self._reconcile_lock = threading.Lock()
         # Local routes are served at <route>/<token>: a fresh random token per listener start, kept
         # in the private dir for the helpers' plugin (local_token()). Local users can read it in a
         # helper's argv, but the uid check stops them; it stops a remote sender behind a proxy.
@@ -336,8 +348,40 @@ class Listener:
         return ran
 
     def _poll_loop(self):
+        self.reconcile_due()
         while not self.stop.wait(1.0):
-            self.poll_due()
+            self.reconcile_due()
+            if self.external:
+                self.poll_due()
+
+    def reconcile_due(self, now: float | None = None) -> bool:
+        """A bounded native pass tick; durable claims handle repeated wakes and process restarts."""
+        now = time.monotonic() if now is None else now
+        if not self.reconcile_enabled or now < self._next_reconcile or not self._reconcile_lock.acquire(False):
+            return False
+        try:
+            self._next_reconcile = now + RECONCILE_INTERVAL
+            health = {"pid": os.getpid(), "config": _reconcile_config(self.full_cfg), "stamp": self.config_stamp, "beat": time.time(),
+                      "state": "ready"}
+            try:
+                from swarm import passcmd
+                with self.board_factory() as board:
+                    actions = passcmd.run_pass(board, self.full_cfg)
+                # Per-job failures are contained by run_pass and returned as actions.
+                # Keep exception details (which may contain credentials) out of health/logs.
+                if any(': pass error ' in action for action in actions):
+                    health.update(state="error", error="per-job pass error")
+                    self.log("reconciliation failed (per-job pass error)")
+            except Exception as exc:
+                health.update(state="error", error=type(exc).__name__)
+                self.log(f"reconciliation failed ({type(exc).__name__})")
+            try:
+                self.write_reconcile_health(health)
+            except Exception as exc:
+                self.log(f"reconciliation health write failed ({type(exc).__name__})")
+            return True
+        finally:
+            self._reconcile_lock.release()
 
     # ---- running
 
@@ -347,6 +391,12 @@ class Listener:
         return self.server.server_address[:2]
 
     def serve_forever(self, poll_interval: float = 0.5) -> None:
+        if not self.external:
+            try:
+                self._poll_loop()
+            finally:
+                self.stop.set()
+            return
         if self.server is None:
             self.bind()
         threading.Thread(target=self._poll_loop, daemon=True).start()
@@ -500,6 +550,32 @@ def read_health() -> dict | None:
         return None
 
 
+def _reconcile_config(cfg: dict) -> str:
+    value = cfg.get("_config_path")
+    return os.path.realpath(str(value)) if value else ""
+
+
+def _reconcile_stamp(cfg: dict):
+    try:
+        return os.stat(_reconcile_config(cfg)).st_mtime_ns
+    except OSError:
+        return None
+
+
+def _write_reconcile_health(data: dict) -> None:
+    from swarm.supervisor import settings as sup
+    sup.write_private(RECONCILE_FILE, json.dumps(data, sort_keys=True))
+
+
+def _read_reconcile_health() -> dict:
+    from swarm.supervisor import settings as sup
+    try:
+        value = json.loads(sup.read_private(RECONCILE_FILE) or b"{}")
+        return value if isinstance(value, dict) else {}
+    except ValueError:
+        return {}
+
+
 # ---- liveness, start, supervision -----------------------------------------------------------------
 
 def probe(cfg: dict, timeout: float = 2.0) -> bool:
@@ -552,18 +628,71 @@ def launch_env(environ, lib) -> dict:
     return env
 
 
-def start_detached(cfg: dict, popen=None) -> int:
+def start_detached(cfg: dict, popen=None, *, reconcile=False, lock_fd=None) -> int:
     """Start `swarm events serve` detached (the supervisor pass does this when the listener is down)."""
     import subprocess
     from swarm import paths
     popen = popen or subprocess.Popen
     env = launch_env(os.environ, paths.LIB_DIR)
+    extra = {}
+    if lock_fd is not None:
+        env[LOCK_FD_ENV] = str(lock_fd)
+        extra["pass_fds"] = (lock_fd,)
     cmd = [sys.executable, "-m", "swarm.cli"]
     if cfg.get("_config_path"):
         cmd += ["--config", str(cfg["_config_path"])]
-    proc = popen(cmd + ["events", "serve"], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                 stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+    cmd += ["events", "serve"] + (["--reconcile"] if reconcile else [])
+    proc = popen(cmd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                 stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True, **extra)
     return proc.pid
+
+
+def ensure_reconciler(cfg: dict) -> str | None:
+    """Coalesce startup under the existing listener lock; never require external event sources.
+    None means started/already running; an actionable error is returned without starting a duplicate.
+    """
+    try:
+        settings(cfg)
+        fd = take_lock()
+        if fd is None:
+            health = _read_reconcile_health()
+            if health.get("config") != _reconcile_config(cfg):
+                return "events listener uses another config or lacks reconciliation; restart it with --reconcile"
+            if health.get("stamp") != _reconcile_stamp(cfg):
+                return "events listener config changed; restart the existing listener to load it"
+            if time.time() - float(health.get("beat", 0)) > RECONCILE_STALE_SECONDS:
+                return "events listener holds its lock but reconciliation heartbeat is stale"
+            if health.get("state") not in ("ready", "starting"):
+                return "events reconciliation failed: " + str(health.get("error", "no healthy tick recorded"))
+            return None
+        try:
+            health = {"config": _reconcile_config(cfg), "stamp": _reconcile_stamp(cfg),
+                      "state": "starting", "beat": time.time(), "pid": 0}
+            _write_reconcile_health(health)
+            pid = start_detached(cfg, reconcile=True, lock_fd=fd)
+            _write_reconcile_health({**health, "pid": pid})
+        finally:
+            os.close(fd)
+        return None
+    except Exception as exc:
+        return f"cannot start events reconciler ({type(exc).__name__})"
+
+
+def _listener_lock():
+    """Adopt the parent's existing flock across startup, or take it normally for a service start."""
+    raw = os.environ.pop(LOCK_FD_ENV, None)
+    if raw is None:
+        return take_lock()
+    try:
+        fd = int(raw)
+        held, expected = os.fstat(fd), os.stat(_lock_path(), follow_symlinks=False)
+        if (held.st_dev, held.st_ino) != (expected.st_dev, expected.st_ino):
+            raise ValueError("different lock")
+        import fcntl
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fd
+    except (OSError, ValueError):
+        raise EventSettingsError("invalid inherited listener lock") from None
 
 
 def ensure_running(cfg: dict, say=print, *, probe_fn=probe, lock_fn=lock_held, start=start_detached) -> str:
@@ -581,23 +710,26 @@ def ensure_running(cfg: dict, say=print, *, probe_fn=probe, lock_fn=lock_held, s
     return "started"
 
 
-def serve(cfg: dict, registry, board_factory, log=None) -> int:
+def serve(cfg: dict, registry, board_factory, log=None, *, reconcile=False) -> int:
     """`swarm events serve`: run until stopped."""
     s = settings(cfg)
-    if not s["enabled"]:
+    if not s["enabled"] and not reconcile:
         print("swarm events serve: [events] enabled = false: nothing to serve", file=sys.stderr)
         return 1
-    if not registry.event_sources:
+    if not registry.event_sources and not reconcile:
         print("swarm events serve: no plugin registered an event source", file=sys.stderr)
         return 1
-    lock = take_lock()
+    lock = _listener_lock()
     if lock is None:
         print("swarm events serve: another listener is running", file=sys.stderr)
         return 1
     try:
-        lst = Listener(cfg, registry, board_factory, log=log)
-        host, port = lst.bind()
-        print(f"swarm events: serving {', '.join(sorted(lst.routes))} on {host}:{port}", flush=True)
+        lst = Listener(cfg, registry, board_factory, log=log, reconcile=True)
+        if lst.external:
+            host, port = lst.bind()
+            print(f"swarm events: serving {', '.join(sorted(lst.routes))} on {host}:{port}", flush=True)
+        else:
+            print("swarm events: internal reconciliation only (no HTTP)", flush=True)
         try:
             lst.serve_forever()
         except KeyboardInterrupt:

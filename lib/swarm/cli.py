@@ -2771,7 +2771,9 @@ def _parser() -> argparse.ArgumentParser:
     ev = sub.add_parser("events", help="external events: `events serve` runs the listener plugins feed "
                                        "([events] enabled); `events check` runs the safety-net checks once")
     evs = ev.add_subparsers(dest="scmd")
-    evs.add_parser("serve", help="serve the registered event sources over HTTP until stopped")
+    eserve = evs.add_parser("serve", help="serve registered sources or reconcile durable work internally")
+    eserve.add_argument("--reconcile", action="store_true",
+                        help="reconcile durable work even without external sources; no HTTP when events are off")
     evs.add_parser("check", help="listener up? waiter armed? job stalled? unacked events? (exit 1 on a problem)")
     nt = sub.add_parser("notices", help="what the last bootstrap left for the user (the SessionStart hook runs it)")
     nt.add_argument("--hook-output", action="store_true", required=True,
@@ -3625,7 +3627,8 @@ def _cmd_events(cfg: dict, args) -> int:
         from swarm import plugins
         reg = PLUGINS if PLUGINS is not None else plugins.Registry(cfg, cfg.get("_config_path")).load()
         from swarm.supervisor.settings import log
-        return el.serve(cfg, reg, lambda: open_board(cfg), log=lambda m: log("events " + m))
+        return el.serve(cfg, reg, lambda: open_board(cfg), log=lambda m: log("events " + m),
+                        reconcile=args.reconcile)
     if args.scmd == "check":
         with open_board(cfg) as board:
             problems = events_safety.run_check(board, cfg)
