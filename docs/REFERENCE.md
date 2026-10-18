@@ -829,6 +829,15 @@ On Postgres, re-run `swarm init` after changing `idle_minutes`, `dead_minutes` o
 | `mode` | `default` | `default`: set the role's model only when the spawn didn't pick one; `enforce`: apply configured defaults when no model was selected; explicit selections always win; `off`: never touch it |
 | `worker`, `verifier`, `judge`, `helper`, any custom role identifier | (none) | in `[models.<host>]`: the model for that role; a missing role uses `worker` (a member's child tries `helper` first); a host with no section is left alone |
 
+Jailed Codex launches use a private, read-only copy of the owner's configuration with a
+launch permission profile. The profile keeps the role's source permissions and adds write
+access only to its typed broker directory under `~/.swarm-launch/broker`; the rest of the
+scratch home stays read-only to tools. Reviewer/judge worktrees and git directories remain
+read-only in both sandbox layers. The owner's config is never edited. Off and best-effort
+launches retain their existing sandbox arguments. This requires Codex named permission
+profiles with built-in `:read-only`/`:workspace` inheritance; unsupported clients fail closed.
+See [Codex permission profiles](https://developers.openai.com/codex/permissions).
+
 **`[transcripts]`** (see [Transcript archive](#transcript-archive-optional)): `enabled` (`false`),
 `retention_days` (`30`), `max_total_mb` (`2048`), `snapshot_minutes` (`15`), `max_mb` (`50`).
 

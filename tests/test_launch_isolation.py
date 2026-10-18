@@ -32,6 +32,7 @@ CAN_JAIL = launchjail.available()[0] if sys.platform.startswith("linux") else Fa
 _BWRAPS = list((Path.home() / ".local/lib/node_modules/@openai/codex/node_modules/@openai").glob(
     "codex-*/vendor/*/codex-resources/bwrap"))
 BWRAP = shutil.which("bwrap") or (str(_BWRAPS[0]) if _BWRAPS else None)
+CODEX = shutil.which("codex")
 
 
 def tmpdir(test) -> Path:
@@ -106,6 +107,36 @@ class LaunchHomeCase(unittest.TestCase):
         self.git("-C", str(self.work / "repo"), "commit", "-q", "--allow-empty", "-m", "x")
         self.git("-C", str(self.work / "repo"), "worktree", "add", "-q", str(self.work / "wt"), "-b", "launch")
         return str(self.work / "wt")
+
+
+class CodexLaunchPermissionsTest(unittest.TestCase):
+    def test_private_config_preserves_user_values_and_selects_narrow_profile(self):
+        import tomllib
+        from swarm.supervisor.launchpermissions import codex_config, PROFILE
+        raw = (b'model="user-model"\nsandbox_mode="workspace-write"\n'
+               b'default_permissions="user-profile"\n'
+               b'[sandbox_workspace_write]\nwritable_roots=["/private-other"]\n'
+               b'[profiles.old]\nsandbox_mode="read-only"\nmodel="old-model"\n'
+               b'[permissions.user-profile]\nextends=":read-only"\n'
+               b'[custom]\nlist=[1,true,{x="y"}]\nwhen=2026-10-18T12:00:00Z\n')
+        for read_only, parent in ((True, ":read-only"), (False, ":workspace")):
+            d = tomllib.loads(codex_config(raw, '/own/broker', read_only=read_only))
+            self.assertEqual(d['model'], 'user-model')
+            self.assertEqual(d['profiles']['old'], {'model': 'old-model'})
+            self.assertEqual(d['custom'], tomllib.loads(raw.decode())['custom'])
+            self.assertEqual(d['default_permissions'], PROFILE)
+            self.assertNotIn('sandbox_mode', d)
+            self.assertNotIn('sandbox_workspace_write', d)
+            self.assertEqual(d['permissions'][PROFILE], {'extends': parent,
+                             'filesystem': {'/': 'read', '/own/broker': 'write'}, 'network': {'enabled': False}})
+            self.assertEqual(d['permissions']['user-profile'], {'extends': ':read-only'})
+        self.assertIn(b'sandbox_mode', raw)  # caller bytes unchanged
+
+    def test_reserved_profile_collision_and_invalid_config_fail_closed(self):
+        from swarm.supervisor.launchpermissions import codex_config, PROFILE
+        for raw in (b'not valid toml', ('[permissions.' + PROFILE + ']\nextends=":workspace"').encode()):
+            with self.assertRaises(ValueError):
+                codex_config(raw, '/own/broker', read_only=True)
 
 
 class PrepareTest(LaunchHomeCase):
@@ -257,6 +288,20 @@ class LaunchAllowTest(LaunchHomeCase):
         target = f"{self.home}/.claude/settings.json"
         binds = [b for b in spec["binds"] if b[1] == target]
         self.assertEqual(binds, [[f"{h}/{launchhome.LAUNCH_SETTINGS}", target, "ro"]])
+
+    def test_only_a_jailed_codex_selects_private_broker_permissions(self):
+        from swarm.supervisor.launchpermissions import PROFILE
+        for args in (["custom-wrapper", "exec", "--json", "--sandbox", "read-only", "--skip-git-repo-check", "-"],
+                     ["custom-wrapper", "exec", "resume", "--json", "--skip-git-repo-check", "-c",
+                      'sandbox_mode="read-only"', "thread", "-"]):
+            wrapped = launchhome.wrap(self.cfg, args, job="J", launch="spec", probe=lambda: (True, ""), read_only=True)
+            inner = wrapped[wrapped.index("--") + 1:]
+            self.assertIn('default_permissions="' + PROFILE + '"', inner)
+            self.assertNotIn('--sandbox', inner)
+            self.assertFalse(any(a.startswith('sandbox_mode=') for a in inner))
+            best, _, mode = launchhome.launch(self.cfg, args, job="J", launch="best", platform="darwin")
+            self.assertEqual(mode, "best-effort")
+            self.assertEqual(best, args)
 
     def test_a_best_effort_claude_launch_gets_the_settings_flag(self):
         h = launchhome.prepare(self.cfg, "J", "s")
@@ -1366,6 +1411,70 @@ class ReadOnlyReviewerJailTest(LaunchHomeCase):
         r = subprocess.run(argv, capture_output=True, text=True, timeout=30)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual((physical / "probe").read_text(), "ok")
+
+    @unittest.skipUnless(CODEX, "needs native Codex sandbox command")
+    def test_real_codex_nested_tool_can_report_through_only_own_broker(self):
+        wt = self.worktree()
+        (Path(wt) / "source.txt").write_text("readable source\n")
+        original = 'model = "keep-user-model"\nsandbox_mode = "read-only"\n'
+        config = self.home / ".codex/config.toml"
+        config.write_text(original)
+        for read_only in (True, False):
+            with self.subTest(read_only=read_only):
+                launch = "broker-review" if read_only else "broker-author"
+                config.write_text(original.replace("read-only", "read-only" if read_only else "workspace-write"))
+                before = config.read_bytes()
+                h = launchhome.prepare(self.cfg, "J", launch)
+                (h / "private-sentinel").write_text("hidden")
+                broker_alias = self.home / ".swarm-launch/broker"
+                (h / "broker/escape").symlink_to(config)
+                (h / "broker/ancestor-escape").symlink_to(self.home / ".swarm-launch/escaped")
+                code = """
+import errno, os, subprocess
+from pathlib import Path
+broker = Path(os.environ['SWARM_LAUNCH_BROKER'])
+assert subprocess.run(['git', 'show', '--format=oneline', 'HEAD'], capture_output=True).returncode == 0
+assert subprocess.run(['sed', '-n', '1p', 'source.txt'], capture_output=True, text=True).stdout == 'readable source\\n'
+(broker / 'probe').write_text('own broker only')
+for args in (['status', '--job', 'J'], ['read', '--job', 'J'],
+             ['task', 'report', '--job', 'J', '--name', 'own', '--artifact', 'r@sha',
+              '--outcome', 'passed', '--reason', 'nested sandbox proof']):
+    r = subprocess.run(['swarm', *args], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+for path in DENIED:
+    try:
+        Path(path).write_text('escape')
+    except OSError as e:
+        assert e.errno in (errno.EROFS, errno.EACCES, errno.ENOENT), (path, e)
+    else:
+        raise AssertionError('unexpected write: ' + path)
+assert not Path(HIDDEN).exists()
+"""
+                denied = [str(broker_alias / "escape"), str(broker_alias / "ancestor-escape"),
+                          str(self.home / ".swarm-launch/escape"),
+                          str(config)]
+                if read_only:
+                    denied += [str(Path(wt) / "planted.py"), str(self.work / "repo/.git/HEAD")]
+                if not read_only:
+                    code += "\nPath('author-proof').write_text('workspace still writable')\n"
+                code = "DENIED=" + repr(denied) + ";HIDDEN=" + repr(str(h / "private-sentinel")) + "\n" + code
+                argv = launchhome.wrap(self.cfg, [CODEX, 'sandbox', '--', sys.executable, '-I', '-c', code],
+                                       job="J", launch=launch, workdir=wt, read_only=read_only)
+                calls = []
+                run = {"harness": "codex", "agent_key": str(uuid.uuid4()), "name": "Own", "cwd": wt}
+                b = launchbroker.LaunchBroker(run, str(h / 'broker'), workdir=wt, forbid=[],
+                                              launch_dir=str(h), config='/private/config', host_pid=None,
+                                              runner=recording_runner(calls),
+                                              attest_dir=str(self.tmp / 'attest')).start()
+                try:
+                    r = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+                finally:
+                    b.stop()
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual((h / 'broker/probe').read_text(), 'own broker only')
+                self.assertEqual(config.read_bytes(), before)
+                self.assertEqual(len(calls), 3)
+                self.assertIn("--as=Own", cli_argv(calls[-1]))
 
     def run_launch(self, read_only: bool):
         wt = Path(self.worktree())

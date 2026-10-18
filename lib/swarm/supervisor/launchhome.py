@@ -363,6 +363,7 @@ def prepare(cfg: dict, job: str, launch: str) -> Path:
     known = _read_person(home / ".ssh" / "known_hosts") or b""
     claude_json = _read_person(home / ".claude.json")
     person_settings = _read_person(home / ".claude" / "settings.json")
+    codex_settings = (_read_person(home / ".codex" / "config.toml") or b"") if jail_platform() else None
     client = (Path(__file__).resolve().parent.parent / "launchbroker_client.py").read_bytes()
     proto = (Path(__file__).resolve().parent.parent / "launchproto.py").read_bytes()
     fds = []
@@ -374,6 +375,15 @@ def prepare(cfg: dict, job: str, launch: str) -> Path:
         for sub in ("home", "tmp", "claude", "codex", ".ssh", "broker", "bin", "gh"):
             os.close(safefs.open_sub(h, sub, strict_mode=0o700))
         privfs.write_atomic(h, "gitconfig", gitconfig_text(cfg))
+        if codex_settings is not None:
+            from swarm.supervisor.launchpermissions import codex_config
+            for read_only, name in ((False, "codex-author.toml"), (True, "codex-review.toml")):
+                try:
+                    text = codex_config(codex_settings, f"{home}/.swarm-launch/broker", read_only=read_only)
+                except (ValueError, UnicodeError) as exc:
+                    raise LaunchIsolationError("the private Codex launch policy cannot be prepared safely") from exc
+                privfs.write_atomic(h, name, text, 0o400)
+
         settings_path = home_dir(job, launch) / LAUNCH_SETTINGS
         _windows_readonly(settings_path, False)    # Windows cannot replace a read-only file: clear it first
         privfs.write_atomic(h, LAUNCH_SETTINGS, launch_settings(person_settings), 0o400)   # read-only for the launch
@@ -583,8 +593,10 @@ def jail_spec(cfg: dict, launch_home: Path, workdir: str | None, home: Path | No
     binds.append([f"{sh}/{LAUNCH_SETTINGS}", f"{h}/.claude/settings.json", "ro"])   # the person's + launch allow rules
     binds += [[f"{h}/.claude/{n}", f"{h}/.claude/{n}", "rw"] for n in CLAUDE_RW if os.path.exists(f"{h}/.claude/{n}")]
     binds.append([f"{sh}/codex", f"{h}/.codex", "rw"])
+    config_name = "codex-review.toml" if read_only else "codex-author.toml"
+    binds.append([f"{sh}/{config_name}", f"{h}/.codex/config.toml", "ro"])
     binds += [[f"{h}/.codex/{n}", f"{h}/.codex/{n}", "ro", "follow"] for n in CODEX_RO
-              if os.path.lexists(f"{h}/.codex/{n}")]
+              if n != "config.toml" and os.path.lexists(f"{h}/.codex/{n}")]
     binds += [[f"{h}/.codex/{n}", f"{h}/.codex/{n}", "rw"] for n in CODEX_RW if os.path.exists(f"{h}/.codex/{n}")]
     binds += [[f"{sh}/.ssh", f"{h}/.ssh", "ro"], [f"{sh}/gitconfig", f"{h}/.gitconfig", "ro"],
               [f"{sh}/broker", f"{h}/.swarm-launch/broker", "rw"], [f"{sh}/bin", f"{h}/.swarm-launch/bin", "ro"]]
@@ -750,6 +762,8 @@ def wrap(cfg: dict, argv: list, *, job: str, launch: str, workdir: str | None = 
                                  "`swarm supervise launch-isolation off` to accept launches that can read them")
     h = prepare(cfg, job, launch)
     spec = jail_spec(cfg, h, workdir, exes=(str(argv[0]),) if argv else (), read_only=read_only)
+    from swarm.supervisor.launchpermissions import codex_argv
+    argv = codex_argv(argv)
     return [python or sys.executable, "-I", jail_script(), json.dumps(spec, separators=(",", ":")), "--",
             *[str(a) for a in argv]]
 
