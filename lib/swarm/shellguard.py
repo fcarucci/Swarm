@@ -1375,10 +1375,20 @@ def iter_commands(command: str, _depth: int = 0):
         yield from _walk(split_commands(command), _depth)
 
 
-def job_lifecycle_command(command: str) -> str | None:
+def job_lifecycle_command(command: str, _depth: int = 0) -> str | None:
     """An agent-visible lifecycle command, including env wrappers and nested literal shells."""
-    from swarm.cli import JOB_LIFECYCLE_COMMANDS
+    if _depth > _MAX_NEST:
+        return None
+    import contextlib
+    import io
+    from swarm.cli import _parser, changes_job_lifecycle
     for prog, args, _ in iter_commands(command):
+        if prog == CODE:
+            for literal in _literal_process_commands(args[0]):
+                found = job_lifecycle_command(literal, _depth + 1)
+                if found:
+                    return found
+            continue
         if re.fullmatch(r"python(?:\d+(?:\.\d+)*)?(?:\.exe)?", prog):
             i = 0
             while i < len(args) and args[i].startswith("-") and args[i] not in ("-m", "-c", "--"):
@@ -1387,12 +1397,45 @@ def job_lifecycle_command(command: str) -> str | None:
                 prog, args = "swarm", args[i + 2:]
         if prog != "swarm":
             continue
-        i = 0
-        while i < len(args) and args[i].startswith("-"):
-            i += 2 if args[i] in ("--config", "--host") else 1
-        if i < len(args) and args[i] in JOB_LIFECYCLE_COMMANDS:
-            return args[i]
+        # Use the CLI's own grammar, including global option values and abbreviations.
+        try:
+            with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+                parsed, _ = _parser().parse_known_args(args)
+        except SystemExit:
+            continue  # An invalid CLI invocation cannot change the job.
+        if changes_job_lifecycle(parsed):
+            return parsed.cmd
     return None
+
+
+def _literal_process_commands(code: str):
+    """Known literal Python process/CLI calls only; arbitrary dynamic code is not evaluated."""
+    import ast
+    import shlex
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError):
+        return
+    process_calls = {"run", "call", "Popen", "check_call", "check_output", "system", "popen"}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = ast.unparse(node.func)
+        is_cli = name in ("swarm.cli.main", "cli.main")
+        if not is_cli and name.rsplit(".", 1)[-1] not in process_calls:
+            continue
+        argument = node.args[0] if node.args else next(
+            (kw.value for kw in node.keywords if kw.arg in ("args", "argv", "command")), None)
+        if argument is None:
+            continue
+        try:
+            value = ast.literal_eval(argument)
+        except (ValueError, TypeError, SyntaxError):
+            continue
+        if isinstance(value, (list, tuple)) and all(isinstance(v, str) for v in value):
+            yield shlex.join((["swarm"] if is_cli else []) + list(value))
+        elif isinstance(value, str) and not is_cli:
+            yield value
 
 
 def _nested_texts(command: str, _depth: int = 0) -> list[str]:

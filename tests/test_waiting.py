@@ -46,6 +46,34 @@ class DeriveJobStatusTests(unittest.TestCase):
 
 
 class WaitCliTests(RoutingEnv):
+    def test_only_owner_can_create_a_job_with_job_command(self):
+        self.activate("J")
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "agent-session"}):
+            rc, _, err = self.cli("job", "NEW")
+        self.assertNotEqual(rc, 0)
+        self.assertIn("status", err)
+        with self.board() as b:
+            self.assertIsNone(b.job_status("NEW"))
+        rc, _, err = self.cli("job", "NEW")
+        self.assertEqual(rc, 0, err)
+        with self.board() as b:
+            self.assertEqual(b.job_status("NEW").status, "active")
+
+    def test_agent_cannot_merge_jobs_to_close_one_and_clear_the_other_wait(self):
+        self.activate("J")
+        self.activate("K")
+        with self.board() as b:
+            b.set_waiting("K", "existing context")
+            before = [b.job_status(job) for job in ("J", "K")]
+            blockers = b.blockers(include_closed=True)
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "agent-session"}):
+            rc, _, err = self.cli("job", "merge", "J", "--into", "K")
+        self.assertNotEqual(rc, 0)
+        self.assertIn("status", err)
+        with self.board() as b:
+            self.assertEqual([b.job_status(job) for job in ("J", "K")], before)
+            self.assertEqual(b.blockers(include_closed=True), blockers)
+
     def test_agent_lifecycle_commands_do_not_change_job_or_blockers(self):
         self.activate("J")
         with self.board() as b:
@@ -70,7 +98,13 @@ class WaitCliTests(RoutingEnv):
                         "env -u CODEX_THREAD_ID swarm --config /tmp/cfg deactivate --job J",
                         "sh -c 'swarm pause --job J'", "swarm activate --job J",
                         "env -i python3 -m swarm.cli wait --job J --on x",
-                        "env -i python3 -B -m swarm.cli deactivate --job J"):
+                        "env -i python3 -B -m swarm.cli deactivate --job J",
+                        "env -i swarm job merge J --into K",
+                        "env -i swarm --con /tmp/cfg wait --job J --on x",
+                        "env -i python3 -c 'import subprocess; subprocess.run([\"swarm\", \"wait\", \"--job\", \"J\", \"--on\", \"x\"])'",
+                        "env -i python3 -c 'import subprocess; subprocess.run(args=[\"swarm\", \"wait\", \"--job\", \"J\", \"--on\", \"x\"])'",
+                        "env -i python3 -c 'from swarm import cli; cli.main([\"resume\", \"--job\", \"J\"])'",
+                        "env -i python3 -c 'import os; os.system(\"swarm resume --job J\")'"):
             with self.subTest(command=command):
                 out = self.hook("turn", agent_id="a1", tool_name="Bash", tool_input={"command": command})
                 self.assertIsNotNone(out)

@@ -446,7 +446,7 @@ def _instructions(name: str, job: str, cfg: dict, goal: str | None = None, judge
                  "and answer VERIFIED or FAILED with evidence: fix what fails.")
     lines.append("- Swarm derives job status: live agents mean active. Report background work and "
                  "blockers as facts; ask a specific question when a person must decide. Agents "
-                 "cannot run activate, deactivate, pause, resume or wait to set job status.")
+                 "cannot run activate, deactivate, pause, resume, wait or job to set job status.")
     lines += _board_lines(name, job, cap, cfg)
     lines += _spawn_lines(cfg, job)
     return "\n".join(lines)

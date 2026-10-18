@@ -253,6 +253,26 @@ class LeaseIntegrationTests(Env):
 
 @unittest.skipUnless(sys.platform.startswith("linux"), "the shell fast path uses Linux /proc/uptime")
 class ShellDeliveryTests(Env):
+    def test_live_shell_lease_cannot_bypass_lifecycle_denial(self):
+        self.shell()
+        generation = fastpath.read('board-J')[0]
+        fastpath.write('agent-agent-1', [9999999999, 'J', generation])
+        self.assertEqual(self.shell(quiet=True).stdout, '')
+        for command in ('activate --job J', 'deactivate --job J', 'pause --job J',
+                        'resume --job J', 'wait --job J --on x', 'job merge J --into K', 'job NEW'):
+            for invocation in (f'env -i swarm {command}',
+                               f'env -i python3 -B -m swarm.cli {command}'):
+                with self.subTest(invocation=invocation):
+                    result = self.shell(command=invocation)
+                    self.assertTrue(result.stdout, 'shell lease skipped the lifecycle policy')
+                    response = json.loads(result.stdout)
+                    self.assertEqual(response['hookSpecificOutput']['permissionDecision'], 'deny')
+        result = self.shell(command='env -i python3 -c \'import subprocess; subprocess.run(args=["swarm", "wait", "--job", "J", "--on", "x"])\'')
+        self.assertEqual(json.loads(result.stdout)['hookSpecificOutput']['permissionDecision'], 'deny')
+        with self.board() as board:
+            self.assertEqual(board.job_status('J').status, 'active')
+            self.assertEqual(board.blockers('J'), [])
+
     def setUp(self):
         # A process-shared board, and a synthetic always-healthy notifier for the shell test.
         patch=mock.patch('support.E2E_BACKEND','file'); patch.start()

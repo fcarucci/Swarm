@@ -3637,8 +3637,12 @@ def _cmd_events(cfg: dict, args) -> int:
 # Set in a harness session (Claude Code, Codex): approval is refused there. An agent's shell can
 # unset them, but has no terminal on stdin: the TTY check is the real gate.
 HARNESS_SESSION_VARS = ("CLAUDE_CODE_SESSION_ID", "CLAUDECODE", "CODEX_THREAD_ID", "CODEX_SESSION_ID")
-JOB_LIFECYCLE_COMMANDS = frozenset(("activate", "deactivate", "pause", "resume", "wait"))
+JOB_LIFECYCLE_COMMANDS = frozenset(("activate", "deactivate", "pause", "resume", "wait", "job"))
 APPROVE_WORD = "approve"
+
+
+def changes_job_lifecycle(args) -> bool:
+    return args.cmd in JOB_LIFECYCLE_COMMANDS
 
 
 def cmd_supervise_approve(cfg: dict, args) -> int:
@@ -4904,7 +4908,7 @@ def _main(argv=None) -> int:
 
 
 def _dispatch(args) -> int:
-    if args.cmd in JOB_LIFECYCLE_COMMANDS and any(os.environ.get(v) for v in HARNESS_SESSION_VARS):
+    if changes_job_lifecycle(args) and any(os.environ.get(v) for v in HARNESS_SESSION_VARS):
         print("swarm: agents cannot set job status; report facts or ask a specific question. "
               "Lifecycle commands belong to the owner terminal and Swarm automation.", file=sys.stderr)
         return 1
