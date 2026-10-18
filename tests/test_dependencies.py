@@ -129,6 +129,17 @@ class DependentTasks(PassCmd):
             self.pass_()
             self.assertEqual(self.runs, [], 'an old idle marker cannot stand in for the reporting turn end')
             self.b.agent_turn_ended('external-qa')
+            # PostgreSQL's hook timestamp uses SQL now(), independent of Board.now(). Plant
+            # the same controlled clock value in the fixture; no wall-clock delay is involved.
+            ended = base + dt.timedelta(seconds=10)
+            if self.h.name == 'postgres':
+                self.h.conn.execute('UPDATE agents SET turn_ended_at=%s WHERE agent_key=%s', (ended, 'external-qa'))
+            elif self.h.name == 'sqlite':
+                self.h._db().execute('UPDATE agents SET turn_ended_at=? WHERE agent_key=?', (ended.isoformat(), 'external-qa'))
+            else:
+                with self.h.store.lock:
+                    self.h.store.agents['external-qa']['turn_ended_at'] = ended
+                    self.h.store.touch()
             self.pass_()
             self.pass_()
         self.assertEqual([r['launch'] for r in self.runs], ['build'])
