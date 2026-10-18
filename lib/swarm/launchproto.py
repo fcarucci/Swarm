@@ -78,6 +78,20 @@ SCHEMA: dict = {
         "brief": ("str", "--brief"), "model": ("str", "--model"),
         "harness": (("choice", ("claude", "codex")), "--harness"), "workdir": ("str", "--workdir")},
         "required": ("job", "name", "role", "brief")},
+    "task add": {"id": "as", "fields": {
+        "job": ("str", "--job"), "name": ("str", "--name"), "generation": ("str", "--generation"),
+        "artifact": ("str", "--artifact"), "depends": ("repeat", "--depends"),
+        "role": ("str", "--role"), "harness": (("choice", ("claude", "codex")), "--harness"),
+        "model": ("str", "--model"), "workdir": ("str", "--workdir"), "brief": ("text", "--brief"),
+        "reporter": ("str", "--reporter")},
+        "required": ("job", "name", "artifact", "role", "harness", "workdir", "brief")},
+    "task report": {"id": "as", "fields": {
+        "job": ("str", "--job"), "name": ("str", "--name"), "generation": ("str", "--generation"),
+        "artifact": ("str", "--artifact"), "outcome": (("choice", ("passed", "failed")), "--outcome"),
+        "reason": ("text", "--reason")},
+        "required": ("job", "name", "artifact", "outcome", "reason")},
+    "task list": {"id": None, "fields": {"job": ("str", "--job"), "json": ("bool", "--json")},
+                  "required": ("job",)},
     "remember": {"id": "as", "fields": {"job": ("str", "--job"), "tags": ("repeat", "--tags"),
                                         "none": ("text", "--none"), "fact": ("list", None)},
                  "required": ("job",)},
@@ -125,7 +139,8 @@ def _command_parser(command: str) -> _Parser:
         elif isinstance(typ, tuple):
             kw = {"choices": typ[1], "type": str.lower}   # `CHANGES` is `changes`
         if opt:
-            p.add_argument(opt, dest=name, **kw)
+            aliases = ("--host",) if command == "task add" and name == "harness" else ()
+            p.add_argument(opt, *aliases, dest=name, **kw)
         else:
             if typ != "list" and name not in spec.get("required", ()):
                 kw["nargs"] = "?"
@@ -155,6 +170,8 @@ def parse_cli(argv: list[str], cwd: str, stdin=None) -> dict:
         raise ProtocolError("no command")
     command = argv[0]
     rest = argv[1:]
+    if command == "task" and rest:
+        command, rest = f"task {rest[0]}", rest[1:]
     if command not in SCHEMA:
         raise ProtocolError(f"`swarm {command}` is not a command a drive launch runs")
     ns = _command_parser(command).parse_args(rest)
@@ -206,7 +223,7 @@ def validate(req, own_job=None) -> tuple[str, dict]:
         raise ProtocolError("unknown command")
     spec = SCHEMA[command]
     for name, v in fields.items():
-        if (name in IDENTITY or name.lstrip("_") in IDENTITY) and not (command == "run" and name == "name"):
+        if (name in IDENTITY or name.lstrip("_") in IDENTITY) and not (command in ("run", "task add", "task report") and name == "name"):
             raise ProtocolError(f"field {name} names a caller: the broker sets who the launch is")
         if name not in spec["fields"]:
             raise ProtocolError(f"unknown field {name!r} for {command}")

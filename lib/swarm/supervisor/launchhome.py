@@ -330,7 +330,7 @@ def _read_person(path: Path) -> bytes | None:
 
 
 LAUNCH_SWARM_COMMANDS = ("post", "read", "done", "review", "verdict", "goal-ready", "land", "ask", "answer", "run",
-                       "who", "status",
+                       "who", "status", "task",
                        "remember", "recall", "learn")   # the memory life cycle: every launch stores or declares; a learner learns
 LAUNCH_ALLOW = tuple(f"Bash(swarm {c}:*)" for c in LAUNCH_SWARM_COMMANDS) + ("Bash(make test:*)",)
 LAUNCH_SETTINGS = "claude-settings.json"     # in the launch's directory: ~/.claude/settings.json for the launch

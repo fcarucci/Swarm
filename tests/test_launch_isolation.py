@@ -233,11 +233,11 @@ class LaunchAllowTest(LaunchHomeCase):
         allow = got["permissions"]["allow"]
         self.assertEqual(allow[0], "Read")
         for c in ("post", "read", "done", "review", "verdict", "goal-ready", "land", "ask", "answer", "run",
-                  "who", "status"):
+                  "who", "status", "task"):
             self.assertIn(f"Bash(swarm {c}:*)", allow)
         self.assertIn("Bash(make test:*)", allow)
         self.assertNotIn("Bash(swarm launch:*)", allow)
-        self.assertEqual(len(allow), 1 + 15 + 1)                         # nothing broader (13 + remember, recall, learn)
+        self.assertEqual(len(allow), 1 + 16 + 1)                         # exact launch commands, including task
         self.assertFalse(any(r in ("Bash", "Bash(*)", "Bash(swarm:*)") for r in allow))
         if os.name == "posix":
             self.assertEqual(os.stat(path).st_mode & 0o777, 0o400)
