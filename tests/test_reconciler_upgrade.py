@@ -221,5 +221,10 @@ class StartupSerialization(unittest.TestCase):
                     with el._reconciler_guard(), mock.patch.object(el, 'take_lock') as lock:
                         self.assertIn('upgrade/startup in progress', el.ensure_reconciler({}))
                         lock.assert_not_called()
+                        start = mock.Mock()
+                        self.assertEqual(el.ensure_running({'events': {'enabled': True}}, lambda text: None,
+                                                          probe_fn=lambda cfg: False, lock_fn=lambda: False,
+                                                          start=start), 'stuck')
+                        start.assert_not_called()
             finally:
                 os.close(directory)

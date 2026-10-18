@@ -895,7 +895,18 @@ def ensure_running(cfg: dict, say=print, *, probe_fn=probe, lock_fn=lock_held, s
     if lock_fn():
         say("events listener holds its lock but does not answer: not starting a second one")
         return "stuck"
-    pid = start(cfg)
+    try:
+        with _reconciler_guard():
+            # A native startup/service handoff may have won while we checked its HTTP probe.
+            if probe_fn(cfg):
+                return "up"
+            if lock_fn():
+                say("events listener holds its lock: not starting a second one")
+                return "stuck"
+            pid = start(cfg)
+    except BlockingIOError:
+        say("events reconciler service upgrade/startup in progress; not starting a detached listener")
+        return "stuck"
     say(f"events listener was down: started it (pid {pid})")
     return "started"
 
