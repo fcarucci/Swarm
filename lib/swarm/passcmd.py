@@ -451,6 +451,9 @@ def run_pass(board, cfg: dict, *, now: _dt.datetime | None = None, starter=None)
     now = now or board.now()
     board.expire_blockers(now)
     acts = []
+    for js in board.jobs(include_closed=True):
+        if board.recover_auto_close(js.job):
+            acts.append(f"{js.job}: restored unfinished automatically closed run")
     for job, failed_at, launch_id, revision in board.failed_launch_retries():
         if board.reopen_failed_job(job, failed_at, launch_id, revision):
             acts.append(f"{job}: new run for fresh queued work")

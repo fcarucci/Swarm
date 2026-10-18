@@ -47,6 +47,7 @@ def register(board, job, generation, name, *, artifact, depends, role, harness, 
     """
     from swarm.board.base import run_start
     from swarm.board.launches import check_launch
+    board.recover_auto_close(job)
     js = board.job_status(job)
     if js is None:
         raise ValueError(f'{job} is not an open job')

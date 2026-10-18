@@ -1439,7 +1439,7 @@ def load_name_pool(data_dir: Path = DATA_DIR) -> dict[str, list[str]]:
 # checks at the end of each transaction, SQLite's connection is mode=ro). read_unread/read_new
 # are writes only when they advance the cursor.
 WRITE_METHODS = (
-    "purge", "ensure_job", "open_job", "close_job", "auto_close_job", "undo_auto_close",
+    "purge", "ensure_job", "open_job", "close_job", "auto_close_job", "undo_auto_close", "recover_auto_close",
     "sweep_auto_close", "bind_job_session", "reassign_job_session", "allocate_name", "claim_judge", "take_judge_launch", "claim_verifier",
     "set_waiting", "set_job_max_hours", "set_job_goal", "move_agent", "sweep_expiry", "reserve_spawn", "record_verdict", "tool_started", "record_route",
     "claim_route", "tool_finished", "agent_stopped", "set_agent_role", "set_agent_title", "set_agent_runtime",
@@ -1640,13 +1640,25 @@ class Board(abc.ABC):
         what undo_auto_close is given), or None if it didn't close the job."""
 
     @abc.abstractmethod
-    def undo_auto_close(self, job: str, closed_at: _dt.datetime) -> bool:
+    def undo_auto_close(self, job: str, closed_at: _dt.datetime, *, invalid_only: bool = False) -> bool:
         """Revert the auto-close sweep's own close of `job`, atomically and only if the job is
         still exactly as that close left it: status completed, closed_by AUTO_CLOSED_BY and
         finished_at == closed_at (so a later deactivate, or a re-activation and another close,
         is never undone). Then status active, finished_at, outcome and closed_by None; the run
         (activated_at), the agents and the verdict are kept, so the job auto-closes again, as
-        the same run, once it is quiet. Returns whether it reverted."""
+        the same run, once it is quiet. With invalid_only, additionally prove the stored
+        automatic completion invalid under the same backend lock. Returns whether it reverted."""
+
+    def recover_auto_close(self, job: str) -> bool:
+        """Normal reconciliation/admission repairs only a proven erroneous automatic close.
+
+        Backends recheck invalidity and the exact close atomically; explicit owner decisions
+        and authoritative goal acceptance therefore win over a stale observer.
+        """
+        js = self.job_status(job)
+        if js is None or js.status != 'completed' or js.closed_by != AUTO_CLOSED_BY:
+            return False
+        return self.undo_auto_close(job, js.finished_at, invalid_only=True)
 
     def drive_job_claimed(self, job: str) -> bool:
         """Whether `job` belongs to the driver, so no core sweep may close, restart or answer for it:

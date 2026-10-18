@@ -441,13 +441,17 @@ class MemoryBoard(MemoryLaunches, MemoryBlockers, MemoryEvents, MemoryBgCommands
                             for t in (a["joined_at"], a["last_seen"], a["left_at"]))
                 and not any(m["job"] == job and m["created_at"] >= before for m in s.messages))
 
-    def undo_auto_close(self, job: str, closed_at: _dt.datetime) -> bool:
+    def undo_auto_close(self, job: str, closed_at: _dt.datetime, *, invalid_only: bool = False) -> bool:
         s = self._s()
         with s.lock:
             j = s.jobs.get(job)
             if j is None or j["status"] != "completed" or j.get("closed_by") != AUTO_CLOSED_BY \
                     or j["finished_at"] != closed_at:
                 return False
+            if invalid_only:
+                from swarm.review import erroneous_auto_close
+                if not erroneous_auto_close(self, job):
+                    return False
             j.update(status="active", finished_at=None, outcome=None, closed_by=None)
             s.touch()
             return True

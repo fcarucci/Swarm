@@ -1263,11 +1263,17 @@ class PostgresBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
             self._leave_job(job)
             return closed[0]   # the timestamp this UPDATE wrote
 
-    def undo_auto_close(self, job: str, closed_at: _dt.datetime) -> bool:
-        return self._conn.execute(
-            "UPDATE jobs SET status = 'active', finished_at = NULL, outcome = NULL, closed_by = NULL "
-            "WHERE job = %s AND status = 'completed' AND closed_by = %s AND finished_at = %s "
-            "RETURNING job", (job, AUTO_CLOSED_BY, closed_at)).fetchone() is not None
+    def undo_auto_close(self, job: str, closed_at: _dt.datetime, *, invalid_only: bool = False) -> bool:
+        with self._conn.transaction():
+            self._conn.execute('SELECT job FROM jobs WHERE job = %s FOR UPDATE', (job,)).fetchone()
+            if invalid_only:
+                from swarm.review import erroneous_auto_close
+                if not erroneous_auto_close(self, job):
+                    return False
+            return self._conn.execute(
+                "UPDATE jobs SET status = 'active', finished_at = NULL, outcome = NULL, closed_by = NULL "
+                "WHERE job = %s AND status = 'completed' AND closed_by = %s AND finished_at = %s "
+                "RETURNING job", (job, AUTO_CLOSED_BY, closed_at)).fetchone() is not None
 
     def set_job_max_hours(self, job: str, hours: float | None) -> bool:
         return self._conn.execute("UPDATE jobs SET max_hours = %s WHERE job = %s RETURNING job",

@@ -896,11 +896,16 @@ class SqliteBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
             # the timestamp this close wrote, read back inside the same write transaction
             return _dt_(c.execute("SELECT finished_at FROM jobs WHERE job = ?", (job,)).fetchone()[0])
 
-    def undo_auto_close(self, job: str, closed_at: _dt.datetime) -> bool:
-        return self._c().execute(
-            "UPDATE jobs SET status = 'active', finished_at = NULL, outcome = NULL, closed_by = NULL "
-            "WHERE job = ? AND status = 'completed' AND closed_by = ? AND finished_at = ?",
-            (job, AUTO_CLOSED_BY, _ts(closed_at))).rowcount > 0
+    def undo_auto_close(self, job: str, closed_at: _dt.datetime, *, invalid_only: bool = False) -> bool:
+        with self._tx() as c:
+            if invalid_only:
+                from swarm.review import erroneous_auto_close
+                if not erroneous_auto_close(self, job):
+                    return False
+            return c.execute(
+                "UPDATE jobs SET status = 'active', finished_at = NULL, outcome = NULL, closed_by = NULL "
+                "WHERE job = ? AND status = 'completed' AND closed_by = ? AND finished_at = ?",
+                (job, AUTO_CLOSED_BY, _ts(closed_at))).rowcount > 0
 
     def set_job_max_hours(self, job: str, hours: float | None) -> bool:
         return self._c().execute("UPDATE jobs SET max_hours = ? WHERE job = ?", (hours, job)).rowcount > 0

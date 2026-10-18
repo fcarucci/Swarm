@@ -319,9 +319,49 @@ def clear_verdict_data(raw: str | None) -> str:
 
 
 def completion_pending(board, job: str, goal: str | None, verdict: str | None) -> bool:
-    """Current artifacts govern acceptance; legacy verdicts govern jobs without hand-offs."""
+    """Task obligations, original-goal acceptance and artifact finalization all apply."""
+    from swarm.dependencies import describe
+    tasks = describe(board, job)
+    if any(t['state'] != 'done' for t in tasks):
+        return True
     if not goal:
         return False
+    js = board.job_status(job)
+    if js.verdict_scope == 'artifact':
+        return True
+    if tasks:
+        # Match the pass driver's full-goal candidate and freshness contract.
+        from swarm.passcmd import handoff
+        found = handoff(board, job)
+        if (js.verdict_scope != 'goal' or not found or js.verdict_candidate != found[1]
+                or js.verdict_at is None or js.verdict_at < found[0].created_at):
+            return True
+    if js.verdict_scope == 'goal' and verdict != 'met':
+        return True
     if latest_handoffs(board, job):
         return auto_close_pending(board, job)
     return verdict != 'met'
+
+
+def erroneous_auto_close(board, job: str) -> bool:
+    """Proven obsolete core completion, never an inferred owner/legacy decision.
+
+    Call with the job row locked; the caller also compares the exact close timestamp.
+    Do not revive agents or change the original run/evidence when restoring admission.
+    """
+    from swarm.board.base import AUTO_CLOSED_BY
+    from swarm.dependencies import describe
+    js = board.job_status(job)
+    if not (js and js.status == 'completed' and js.closed_by == AUTO_CLOSED_BY
+            and not js.completion_forced and js.finished_at):
+        return False
+    if (js.goal and js.verdict_scope == 'artifact' and js.verdict == 'met'
+            and js.verdict_at and js.verdict_at <= js.finished_at):
+        return True
+    # New work introduced after a legitimate close does not prove that close was wrong.
+    for task in describe(board, job):
+        if task['state'] != 'done':
+            row = board.get_launch(job, task['generation'], task['name'])
+            if row and row.updated_at <= js.finished_at:
+                return True
+    return False

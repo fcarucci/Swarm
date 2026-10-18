@@ -68,7 +68,7 @@ class AutoCloseContract:
         return self.b.sweep_auto_close(minutes)
 
     # ---- closing
-    def test_current_artifact_can_close_despite_superseded_legacy_not_met(self):
+    def test_finalized_artifact_does_not_replace_original_goal_acceptance(self):
         import hashlib
         self.b.open_job('j', 'Review revisions', None, None, 'owner', goal='Accepted result')
         worker = self.b.allocate_name('worker', 'j', 'worker')
@@ -83,8 +83,8 @@ class AutoCloseContract:
         self.b.close_agent('judge', 'done')
         self.b.set_job_data('j', 'pipeline.superseded.' + hashlib.sha256(b'old-ref').hexdigest()[:32], 'current-ref')
         self.assertEqual(self.b.job_status('j').verdict, 'not_met')
-        self.assertIsNotNone(self.b.auto_close_job('j', self.b.now(), 'Pipeline completed'))
-        self.assertEqual(self.b.job_status('j').status, 'completed')
+        self.assertIsNone(self.b.auto_close_job('j', self.b.now(), 'Pipeline completed'))
+        self.assertEqual(self.b.job_status('j').status, 'active')
 
     def test_closes_after_the_quiet_period(self):
         names, ids = self.run_job()
@@ -193,7 +193,7 @@ class AutoCloseContract:
         self.assertEqual(self.sweep(), [])     # a not_met verdict is no better than none
         self.b.allocate_name("x", "g")        # the judge comes back and is satisfied
         self.assertTrue(self.b.claim_judge("x", "g"))
-        self.b.record_verdict("g", judge, "met", "tests pass")
+        self.b.record_verdict("g", judge, "met", "tests pass", scope="goal")
         self.b.agent_stopped("x")
         self.age("g", "x", [])
         self.assertEqual([c.job for c in self.sweep()], ["g"])
@@ -234,7 +234,7 @@ class AutoCloseContract:
         self.b.open_job("g", None, None, None, None, goal="it works")
         judge = self.b.allocate_name("x", "g")
         self.assertTrue(self.b.claim_judge("x", "g"))
-        self.b.record_verdict("g", judge, "met", "tests pass")
+        self.b.record_verdict("g", judge, "met", "tests pass", scope="goal")
         self.b.agent_stopped("x")
         self.age("g", "x", [])
         before = self.b.job_status("g")
