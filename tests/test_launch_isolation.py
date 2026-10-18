@@ -288,6 +288,53 @@ class SpecTest(LaunchHomeCase):
             self.assertNotIn(f"{H}/{hidden}", binds)
         self.assertEqual(spec["cwd"], wt)
 
+    @unittest.skipUnless(launchhome.jail_platform(), "native bubblewrap companion is Linux-only")
+    def test_native_codex_bubblewrap_companion_is_read_only(self):
+        # Removing companion binds must break this: the native executable alone
+        # starts, but its first sandboxed tool cannot find its bundled bwrap.
+        for layout in ("native", "symlink"):
+            with self.subTest(layout=layout):
+                install = self.home / ".local/lib/native" / layout
+                executable = install / "bin/codex"
+                executable.parent.mkdir(parents=True, exist_ok=True)
+                executable.write_text("native executable")
+                resource = install / "codex-resources/bwrap"
+                resource.parent.mkdir(parents=True, exist_ok=True)
+                resource.write_text("sandbox executable")
+                (resource.parent / "private-token").write_text("hidden")
+                h = launchhome.prepare(self.cfg, "J", "s")
+                command = executable
+                if layout == "symlink":
+                    command = self.home / "codex-link"
+                    command.symlink_to(executable)
+                spec = launchhome.jail_spec(self.cfg, h, None, self.home, exes=(str(command),))
+                binds = {b[1]: b[2] for b in spec["binds"]}
+                self.assertEqual(binds.get(str(resource)), "ro")
+                self.assertNotIn(str(resource.parent), binds)
+                self.assertNotIn(str(install), binds)
+
+    @unittest.skipUnless(CAN_JAIL, "requires Linux user namespaces")
+    def test_bundled_bubblewrap_visible_but_package_siblings_hidden_in_jail(self):
+        install = self.home / ".local/lib/native"
+        executable = install / "bin/codex"
+        executable.parent.mkdir(parents=True)
+        executable.write_text("native executable")
+        helper = install / "codex-resources/bwrap"
+        helper.parent.mkdir()
+        helper.write_text("sandbox executable")
+        secret = helper.parent / "private-token"
+        secret.write_text("hidden")
+        h = launchhome.prepare(self.cfg, "J", "s")
+        spec = launchhome.jail_spec(self.cfg, h, None, self.home, exes=(str(executable),))
+        probe = ('cat "$1"; test ! -e "$2" || exit 8; '
+                 'if (echo changed >> "$1") 2>/dev/null; then exit 9; fi')
+        result = subprocess.run([sys.executable, "-I", JAIL, json.dumps(spec), "--",
+                                 "/bin/sh", "-c", probe, "probe", str(helper), str(secret)],
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "sandbox executable")
+        self.assertEqual(helper.read_text(), "sandbox executable")
+
     def test_a_gitdir_line_pointing_elsewhere_is_refused(self):
         wt = self.work / "evil"
         wt.mkdir()

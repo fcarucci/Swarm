@@ -585,7 +585,16 @@ def jail_spec(cfg: dict, launch_home: Path, workdir: str | None, home: Path | No
     binds += [[f"{sh}/.ssh", f"{h}/.ssh", "ro"], [f"{sh}/gitconfig", f"{h}/.gitconfig", "ro"],
               [f"{sh}/broker", f"{h}/.swarm-launch/broker", "rw"], [f"{sh}/bin", f"{h}/.swarm-launch/bin", "ro"]]
     ro = [p for p in glob.glob(f"{h}/.local/share/swarm/venv*") if os.path.isdir(p)]
-    ro += _path_dirs(h) + _exe_dirs(h, (*exes, *HARNESS_EXES)) + [f"{h}/{p}" for p in DEFAULT_RO]
+    exe_dirs = _exe_dirs(h, (*exes, *HARNESS_EXES))
+    ro += _path_dirs(h) + exe_dirs + [f"{h}/{p}" for p in DEFAULT_RO]
+    # Native Codex npm installs put its sandbox helper beside bin/, rather
+    # than inside it. Preserve that companion without exposing its package
+    # root or any other files beside the helper.
+    for directory in exe_dirs:
+        if os.path.basename(directory) == "bin":
+            helper = os.path.join(os.path.dirname(directory), "codex-resources", "bwrap")
+            if os.path.isfile(helper):
+                ro.append(helper)
     ro += _list(cfg, "launch_ro_paths")
     from swarm.supervisor.settings import settings
     plugin_dir = settings(cfg).get("claude_plugin_dir")
