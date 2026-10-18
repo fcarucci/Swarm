@@ -557,6 +557,56 @@ class SafetyTests(unittest.TestCase):
         b.pending_events = lambda job, to=None: []
         self.assertEqual(self.codes(b), ["waiter-stale"])   # a waiter that died armed
 
+    def test_el_event_does_not_require_an_orchestrator_waiter(self):
+        b = self.board()
+        b.pending_events = lambda job, to=None: [NS(to='@el', kind='MAC-PERF-LOGGING', created_at=NOW)]
+        self.assertEqual(self.codes(b), [])
+
+    def test_old_direct_event_keeps_its_target_without_a_false_pm_waiter(self):
+        b = self.board()
+        b.pending_events = lambda job, to=None: [NS(to='@el', kind='MAC-PERF-LOGGING',
+            created_at=NOW - dt.timedelta(minutes=31))]
+        problems = es.check(b, self.cfg, NOW)
+        self.assertEqual([p.code for p in problems], ['unacked'])
+        self.assertIn('@el', problems[0].text)
+        self.assertNotIn('orchestrator', problems[0].text)
+
+    def test_an_el_waiter_cannot_cover_pending_pm_events(self):
+        b = self.board()
+        b.data['J'] = {'events.waiter.el': NOW.isoformat()}
+        b.pending_events = lambda job, to=None: [NS(to='@pm', kind='NEEDS-REVIEW', created_at=NOW)]
+        self.assertEqual(self.codes(b), ['waiter-stale'])
+
+    def test_pm_waiter_does_not_cover_a_different_exact_role_target(self):
+        b = self.board()
+        b.data['J'] = {'events.waiter.pm': NOW.isoformat()}
+        b.pending_events = lambda job, to=None: [NS(to='@project_manager', kind='NEEDS-REVIEW', created_at=NOW)]
+        self.assertEqual(self.codes(b), ['waiter-stale'])
+
+    def test_global_waiter_covers_every_pending_target(self):
+        b = self.board()
+        b.data['J'] = {'events.waiter.orchestrator': NOW.isoformat(),
+            'events.waiter_scope.fixture': json.dumps({'at': NOW.isoformat(), 'targets': None,
+                'legacy_key': 'events.waiter.orchestrator'})}
+        b.pending_events = lambda job, to=None: [NS(to='@pm', kind='NEEDS-REVIEW', created_at=NOW)]
+        self.assertEqual(self.codes(b), [])
+
+    def test_filtered_orchestrator_waiter_cannot_cover_pm_target(self):
+        from swarm.board.base import event_waiter_key
+        b = self.board()
+        b.data['J'] = {event_waiter_key('@orchestrator'): NOW.isoformat()}
+        b.pending_events = lambda job, to=None: [NS(to='@pm', kind='NEEDS-REVIEW', created_at=NOW)]
+        self.assertEqual(self.codes(b), ['waiter-stale'])
+
+    def test_native_task_evidence_is_not_a_pm_message(self):
+        b = self.board()
+        b.pending_events = lambda job, to=None: [NS(to=None, kind='TASK-EVIDENCE', source='swarm-task',
+            created_at=NOW - dt.timedelta(minutes=31))]
+        self.assertEqual(self.codes(b), [])
+        b.pending_events = lambda job, to=None: [NS(to=None, kind='TASK-EVIDENCE', source='external-plugin',
+            created_at=NOW - dt.timedelta(minutes=31))]
+        self.assertEqual(self.codes(b), ['unacked', 'waiter-stale'])
+
     def test_unacked_events_and_unread_messages(self):
         b = self.board()
         b.data["J"] = {"events.waiter.pm": NOW.isoformat()}

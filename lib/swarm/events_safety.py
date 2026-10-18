@@ -18,6 +18,7 @@ the orchestrator or the environment.
 from __future__ import annotations
 
 import dataclasses
+import json
 import datetime as _dt
 import subprocess
 import time
@@ -52,11 +53,13 @@ def _mins(a: _dt.datetime, b: _dt.datetime) -> int:
     return int((a - b).total_seconds() // 60)
 
 
-def waiter_age(board, job: str, now: _dt.datetime) -> float | None:
+def waiter_age(board, job: str, now: _dt.datetime, targets=None) -> float | None:
     """Seconds since the freshest events.waiter.* heartbeat of the job, None if none was ever set."""
+    from swarm.board.base import event_waiter_key
+    allowed = None if targets is None else {event_waiter_key(t) for t in targets}
     best = None
     for k, v in board.job_data(job).items():
-        if not k.startswith("events.waiter."):
+        if not k.startswith("events.waiter.") or (allowed is not None and k not in allowed):
             continue
         try:
             t = _dt.datetime.fromisoformat(str(v).replace("Z", "+00:00"))
@@ -65,6 +68,41 @@ def waiter_age(board, job: str, now: _dt.datetime) -> float | None:
         age = (now - _aware(t)).total_seconds()
         best = age if best is None else min(best, age)
     return best
+
+
+def event_waiter_age(board, job: str, now: _dt.datetime, target) -> float | None:
+    """Freshness of a waiter whose actual selector receives this event, not a slug guess.
+
+    Old producers have no coverage record. Their shared orchestrator key proves only
+    unaddressed/@orchestrator coverage, never that an arbitrary role is being watched.
+    """
+    from swarm.board.base import event_waiter_key
+    data = board.job_data(job)
+    ages, described = [], set()
+    for key, raw in data.items():
+        if not key.startswith('events.waiter_scope.'):
+            continue
+        try:
+            record = json.loads(raw)
+            at = _aware(_dt.datetime.fromisoformat(record['at']))
+            targets = record['targets']
+            if targets is not None and not isinstance(targets, list):
+                continue
+            described.add(record['legacy_key'])
+            if targets is None or target in targets:
+                ages.append((now - at).total_seconds())
+        except (ValueError, TypeError, KeyError):
+            continue
+    consumers = (None, '@pm') if target in (None, '') else (target,)
+    for consumer in consumers:
+        key = event_waiter_key(consumer)
+        if key in described or key not in data:
+            continue
+        try:
+            ages.append((now - _aware(_dt.datetime.fromisoformat(data[key]))).total_seconds())
+        except (ValueError, TypeError):
+            continue
+    return min(ages, default=None)
 
 
 def _pending(board, job: str):
@@ -127,21 +165,43 @@ def check_job(board, s: dict, js, now: _dt.datetime, drive=None, cfg=None) -> li
             out.append(Problem(job, "driver-stalled", "the driver has not passed over this drive job for more "
                                "than two stall periods (is the session driver running? `swarm drive run` drives it by hand)"))
         return out
-    pending = _pending(board, job)
+    pending = [e for e in _pending(board, job) if not (
+        getattr(e, 'kind', None) == 'TASK-EVIDENCE' and getattr(e, 'source', None) == 'swarm-task')]
     old = [e for e in pending if getattr(e, "to", None) in (None, "") or str(e.to).lstrip("@") in
            {str(r).lower() for r in s["orchestrator_roles"]} | {"pm"}]
     oldest = min((_aware(e.created_at) for e in old), default=None)
     if oldest is not None and _mins(now, oldest) >= s["unacked_minutes"]:
         out.append(Problem(job, "unacked", f"{len(old)} event(s) for the orchestrator unacked for "
                            f"{_mins(now, oldest)} min (oldest: {old[0].kind})"))
+    direct = {}
+    for event in pending:
+        if event not in old:
+            direct.setdefault(event.to, []).append(event)
+    for target, events in sorted(direct.items(), key=lambda item: str(item[0])):
+        oldest_direct = min(_aware(e.created_at) for e in events)
+        if _mins(now, oldest_direct) >= s['unacked_minutes']:
+            out.append(Problem(job, "unacked", f"{len(events)} event(s) for {target} unacked for "
+                               f"{_mins(now, oldest_direct)} min (oldest: {events[0].kind})"))
     live = [r for r in board.roster(job) if r.active]
-    if live or pending:
-        age = waiter_age(board, job, now)
-        stale = age is None or age > s["waiter_stale_seconds"]
-        if stale and (pending or age is not None):   # a stale beat: a waiter that died armed
-            out.append(Problem(job, "waiter-stale", "no orchestrator `swarm event wait` is armed "
-                               f"({'never' if age is None else f'last beat {int(age)} s ago'}) "
-                               f"and {len(pending)} event(s) are pending"))
+    missing = []
+    for event in old:
+        target = getattr(event, 'to', None)
+        # Match Board.event_targets(): @pm/@orchestrator receive unaddressed events,
+        # while distinct roles remain distinct consumers. A named/EL waiter cannot arm PM.
+        age = event_waiter_age(board, job, now, target)
+        if age is None or age > s['waiter_stale_seconds']:
+            missing.append((target or 'unaddressed', age))
+    if missing:
+        target, age = missing[0]
+        out.append(Problem(job, 'waiter-stale', f"no matching `swarm event wait` is armed for {target} "
+                           f"({'never' if age is None else f'last beat {int(age)} s ago'}) "
+                           f"and {len(missing)} matching event(s) are pending"))
+    elif live and not old:
+        targets = (None, '@pm', *("@" + r for r in s['orchestrator_roles']))
+        age = waiter_age(board, job, now, targets)
+        if age is not None and age > s['waiter_stale_seconds']:
+            out.append(Problem(job, 'waiter-stale', 'no orchestrator `swarm event wait` is armed '
+                               f'(last beat {int(age)} s ago) and 0 matching event(s) are pending'))
     last = _aware(js.last_activity_at)
     if live and last is not None and _mins(now, last) >= s["stall_minutes"]:
         out.append(Problem(job, "stalled", f"no job activity for {_mins(now, last)} min "

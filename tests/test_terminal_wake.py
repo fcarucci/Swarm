@@ -41,6 +41,29 @@ class RunnerWakeTests(RunnerBase):
         self.assertEqual(outcome, 'cancelled')
         spawned.assert_not_called()
 
+    def test_runner_preserves_terminal_outcome_and_records_returned_wake_error(self):
+        run = self.run_dict(['true'])
+        reason = 'events listener runtime changed; restart it'
+        with self.board() as board:
+            board.open_job('unrelated', None, None, None, 'owner')
+            board.set_job_data('unrelated', 'task.reconciler_error', 'keep')
+        with mock.patch.object(dependencies, 'wake', return_value=reason), \
+                mock.patch('swarm.supervisor.settings.log') as log:
+            self.assertTrue(runner.finish(self.cfg, run, 'completed'))
+        self.assertEqual(self.restart().outcome, 'completed')
+        with self.board() as board:
+            self.assertEqual(board.job_data('J').get('task.reconciler_error'), reason)
+            self.assertEqual(board.job_data('unrelated')['task.reconciler_error'], 'keep')
+        self.assertTrue(any(reason in str(call) for call in log.call_args_list))
+
+    def test_runner_retains_raised_startup_error_after_successful_completion(self):
+        run = self.run_dict(['true'])
+        with mock.patch.object(dependencies, 'wake', side_effect=OSError('listener unavailable')):
+            self.assertTrue(runner.finish(self.cfg, run, 'completed'))
+        self.assertEqual(self.restart().outcome, 'completed')
+        with self.board() as board:
+            self.assertIn('OSError', board.job_data('J')['task.reconciler_error'])
+
     def test_runner_finish_wakes_after_restart_is_settled(self):
         run = self.run_dict(['true'])
         seen = []
@@ -49,3 +72,49 @@ class RunnerWakeTests(RunnerBase):
         with mock.patch.object(dependencies, 'wake', side_effect=wake):
             self.assertTrue(runner.finish(self.cfg, run, 'completed'))
         self.assertEqual(seen, ['completed'])
+
+
+class TerminalReconciliationErrors(Env):
+    def test_returned_startup_error_is_visible_for_only_the_stopping_job(self):
+        self.cli('activate', '--job', 'J', '--session', 'sess-1')
+        self.hook('start', agent_id='a', host='codex')
+        self.hook('turn', agent_id='a', host='codex', tool_name='Bash')
+        with self.board() as board:
+            board.open_job('unrelated', None, None, None, 'owner')
+            board.set_job_data('unrelated', 'task.reconciler_error', 'unrelated failure')
+        reason = 'events listener runtime changed; restart the existing listener'
+        with mock.patch.object(dependencies, 'wake', return_value=reason):
+            self.hook('stop', agent_id='a', host='codex', turn_id='last-proof-turn')
+        with self.board() as board:
+            row = next(a for a in board.agents('J') if a.agent_key == 'a')
+            self.assertEqual(row.status, 'idle')
+            self.assertIsNotNone(row.turn_ended_at)
+            self.assertEqual(board.job_status('J').status, 'active')
+            self.assertEqual(board.job_data('J').get('task.reconciler_error'), reason)
+            self.assertEqual(board.job_data('unrelated')['task.reconciler_error'], 'unrelated failure')
+            from swarm import cli
+            self.assertIn(reason, cli.job_detail(board, 'J', False))
+        self.assertIn(reason, self.error_log.read_text())
+        with mock.patch.object(dependencies, 'wake', return_value=None):
+            self.hook('stop', agent_id='a', host='codex')
+        with self.board() as board:
+            self.assertIsNone(board.job_data('J').get('task.reconciler_error'))
+            self.assertEqual(board.job_data('unrelated')['task.reconciler_error'], 'unrelated failure')
+
+    def test_raised_startup_error_is_logged_and_retained_without_blocking_stop(self):
+        self.cli('activate', '--job', 'J', '--session', 'sess-1')
+        self.hook('start', agent_id='a', host='codex')
+        with mock.patch.object(dependencies, 'wake', side_effect=OSError('listener unavailable')):
+            self.hook('stop', agent_id='a', host='codex')
+        with self.board() as board:
+            self.assertIn('OSError', board.job_data('J')['task.reconciler_error'])
+            self.assertEqual(next(a for a in board.agents('J') if a.agent_key == 'a').status, 'idle')
+        self.assertIn('listener unavailable', self.error_log.read_text())
+
+    def test_unmapped_terminal_error_is_logged_without_creating_or_changing_a_job(self):
+        with mock.patch.object(dependencies, 'wake', return_value='listener startup refused'):
+            self.hook('session-end', agent_id=None, session='unknown-session', host='codex')
+        self.assertTrue(self.error_log.exists(), 'returned startup failures must leave a trace even without a job')
+        self.assertIn('listener startup refused', self.error_log.read_text())
+        with self.board() as board:
+            self.assertEqual(board.jobs(include_closed=True), [])

@@ -1604,7 +1604,14 @@ def finish(cfg: dict, run: dict, outcome: str) -> bool:
         _save_progress(run)
     try:
         from swarm import dependencies
-        dependencies.wake(cfg)
+        try:
+            why = dependencies.wake(cfg)
+        except Exception as exc:
+            why = f"events reconciliation startup failed ({type(exc).__name__})"
+        if why:
+            log(f"terminal reconciliation wake deferred: {why}")
+        with open_board(cfg) as board:
+            board.set_job_data(run["job"], "task.reconciler_error", why)
     except Exception as exc:
         log(f"terminal reconciliation wake deferred: {type(exc).__name__}")
     bad_marker = _marker_problem(cfg, run)

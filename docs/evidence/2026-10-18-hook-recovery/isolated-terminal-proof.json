@@ -1,0 +1,16 @@
+{
+  "action_id": "pass|1|1|build|1",
+  "artifact": "reviewed/swarm@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "effective_launch_count": 1,
+  "fixture_artifact_not_reviewed_source": true,
+  "generation": 1,
+  "launch_id": "build-72bd9c3c",
+  "model": "gpt-6.1-sol",
+  "production_handoff_proof": false,
+  "proof_kind": "isolated simulated launcher; real hooks/listener/claim",
+  "restart_id": 1,
+  "simulated_agent_key": "simulated-bounded-child",
+  "task": "build",
+  "terminal_event_id": "proof-review-terminal",
+  "test": "test_terminal_dependency_handoff.TerminalDependencyHandoff.test_last_real_terminal_hook_releases_one_claim_without_any_later_turn"
+}

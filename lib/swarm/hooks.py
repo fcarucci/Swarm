@@ -2349,18 +2349,45 @@ def _pass_sweep(cfg: dict) -> None:
         _log_error("swarm pass", "", exc)
 
 
+def _terminal_reconciliation(cfg: dict) -> None:
+    """Keep terminal semantics while exposing failed recovery for only its enrolled job(s)."""
+    from swarm import dependencies
+    from swarm.board import open_board
+    payload = _CURRENT.get("payload") or {}
+    agent_id = _CURRENT.get("agent_id") or payload.get("agent_id")
+    sid = payload.get("session_id")
+    try:
+        why = dependencies.wake(cfg)
+    except Exception as exc:
+        why = f"events reconciliation startup failed ({type(exc).__name__})"
+        _log_error("terminal reconciliation", agent_id or sid or "", exc)
+    else:
+        if why:
+            _log_error("terminal reconciliation", agent_id or sid or "", RuntimeError(why))
+    if not agent_id and not sid:
+        return
+    with open_board(cfg, init_timeout=HOOK_INIT_TIMEOUT) as board:
+        if agent_id:
+            jobs = {board.route(agent_id).member_job} - {None}
+        else:
+            jobs = {board.route(sid).member_job} - {None}
+            jobs.update(m['job'] for m in _markers(cfg) if m.get('session_id') == sid)
+        for job in jobs:
+            board.set_job_data(job, "task.reconciler_error", why)
+
+
 def run_hook(event: str, cfg: dict, host: str | None = None) -> int:
     _OUTPUT.clear()
     _CURRENT["host"] = None
     _CURRENT["lease"] = None
     _CURRENT["payload"] = None
+    _CURRENT["agent_id"] = None
     _CURRENT["stop_verdict"] = False
     try:
         _handle(event, cfg, host)
         if event in ("stop", "session-stop", "session-end"):
             try:
-                from swarm import dependencies
-                dependencies.wake(cfg)
+                _terminal_reconciliation(cfg)
             except Exception as exc:
                 _log_error("terminal reconciliation", "", exc)
         _wake_drivers(event, cfg, _CURRENT.get("payload") or {})
@@ -2415,6 +2442,7 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
         if event in ("turn", "done"):   # a drive launch whose marker is gone is still gated, and its receipts written
             _drive_event(event, cfg, payload, None)
         return 0   # a session started by (or inside) a replacement that isn't it: never an orchestrator
+    _CURRENT["agent_id"] = agent_id
     if event == "session-end" and current_host().completes_on(event):
         _codex_session_end(cfg, sid, agent_id if resume is None and agent_id != sid else None, payload)
         return 0

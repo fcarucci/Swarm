@@ -2117,16 +2117,29 @@ class Board(abc.ABC):
         once when something is already pending. Postgres sleeps in LISTEN (a post wakes it at
         once); the others poll every EVENT_POLL_SECONDS. While it waits it keeps the job_data key
         event_waiter_key(to) set to the UTC time of its last heartbeat (every EVENT_HEARTBEAT_SECONDS)
-        and removes it on the way out, so a supervisor can tell whether anybody is armed."""
+        and removes it on the way out, so a supervisor can tell whether anybody is armed.
+        Explicit effective-selector coverage is recorded beside the legacy heartbeat for
+        target-aware health checks; event filtering and delivery remain unchanged."""
         self._events_listen()
         end = None if timeout is None else time.monotonic() + max(0.0, timeout)
         key = event_waiter_key(to)
+        # The historical slug aliases global None and filtered @orchestrator, and
+        # composite slugs cannot be decoded safely. Retain it for old readers while
+        # recording this waiter's explicit effective coverage for current diagnostics.
+        import uuid
+        scope_key = "events.waiter_scope." + uuid.uuid4().hex[:24]
+        coverage = None if to is None else sorted(event_targets(to), key=lambda value: value or "")
         beat = 0.0
         try:
             while True:
                 now = time.monotonic()
                 if now >= beat:
                     self._event_heartbeat(job, key, True)
+                    try:
+                        self.set_job_data(job, scope_key, json.dumps({"at": self.now().isoformat(),
+                            "targets": coverage, "legacy_key": key}))
+                    except (BoardError, ValueError):
+                        pass
                     beat = now + EVENT_HEARTBEAT_SECONDS
                 got = self.pending_events(job, to)
                 if got:
@@ -2137,6 +2150,10 @@ class Board(abc.ABC):
                                        float("inf") if end is None else end - now))
         finally:
             self._event_heartbeat(job, key, False)
+            try:
+                self.set_job_data(job, scope_key, None)
+            except (BoardError, ValueError):
+                pass
 
     def _event_heartbeat(self, job: str, key: str, alive: bool) -> None:
         try:
