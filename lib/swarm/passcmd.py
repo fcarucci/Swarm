@@ -160,17 +160,18 @@ def _start_one(board, cfg: dict, job: str, row, reserve: float, starter) -> str 
     if row.role == "judge":
         board.take_judge_launch(old, job)   # its verdict is recorded under the session's own name
     board.close_agent(old, "drive predecessor")
-    r = board.claim_drive_launch(job=job, generation=row.generation, action_id=f"pass|{row.name}|{row.revision}",
+    r = board.claim_drive_launch(job=job, generation=row.generation, action_id=f"pass|{row.generation}|{row.id}|{row.name}|{row.revision}",
                                  attempt=row.attempts + 1, launch_id=launch_id, launch_row_id=row.id,
                                  queue_version=row.revision, harness=row.harness, reserve_usd=reserve,
                                  reserve_minutes=minutes, locks=[], lock_seconds=3600,
-                                 max_job_running=MAX_JOB_RUNNING)
+                                 max_job_running=MAX_JOB_RUNNING, max_cost_usd=max_cost_usd(board, cfg, job))
     if r is None:
         return None
     try:
         model = launch.replacement_model(cfg, row.harness, row.role, row.model)
         workdir = os.path.realpath(row.workdir)
-        spec = launch.spec_for(cfg, row.harness, prompt=row.brief, workdir=workdir, model=model,
+        from swarm.dependencies import prompt
+        spec = launch.spec_for(cfg, row.harness, prompt=prompt(row), workdir=workdir, model=model,
                                minutes=minutes, budget_usd=reserve, drive=True)
         marker = markers.write_resume_marker(cfg, job, r.id, resume_of=old, name=name,
                                              harness=row.harness, session_id=spec.session_id)
@@ -181,6 +182,14 @@ def _start_one(board, cfg: dict, job: str, row, reserve: float, starter) -> str 
                "stdin": spec.stdin, "session_id": spec.session_id, "limit_seconds": minutes * 60,
                "enrol_seconds": float(settings(cfg)["enrol_minutes"]) * 60, "config": None,
                "board": _store_key(cfg), "launch_id": launch_id, "launch": row.name}
+        current_job = board.job_status(job)
+        if current_job is None or current_job.status != "active":
+            board.finish_restart(r.id, "cancelled")
+            current_row = board.get_launch(job, row.generation, row.name)
+            if current_row is not None and current_row.state == "running":
+                board.set_launch_state(current_row.id, current_row.revision, "failed", job=job,
+                                       last_outcome="job closed before runner start")
+            return f"{job}: {row.name} cancelled before runner start"
         starter(cfg, run)
     except Exception as exc:   # the start failed: the restart and the launch end failed; the job goes on
         board.finish_restart(r.id, "failed")
@@ -202,6 +211,9 @@ def _start_queued(board, cfg: dict, job: str, starter) -> tuple[list[str], str |
     cap = max_cost_usd(board, cfg, job)
     for row in sorted((x for x in board.launches(job, include_closed=False) if x.state == "queued"),
                       key=lambda x: x.id):
+        from swarm.dependencies import block_reason
+        if block_reason(board, row, launching=True):
+            continue
         spent = spent_usd(board, job)
         reserve = min(LAUNCH_USD, cap - spent)
         if reserve <= 0:
@@ -233,7 +245,7 @@ def _attempts(board, job: str, since: _dt.datetime) -> int:
             since = max(since, m.created_at)
             break
     starts = {r.launch_id: r.at for r in board.restarts(job) if r.launch_id}
-    return sum(1 for row in board.launches(job) if row.role in ("lead", "judge")
+    return sum(1 for row in board.launches(job) if row.role in ("lead", "engineering_lead", "judge")
                and row.last_outcome != SUPERSEDED and (starts.get(row.launch_id) or row.updated_at) >= since)
 
 
@@ -251,8 +263,15 @@ def _run_launch(board, js, name):
     return row
 
 
-def _queue(board, job: str, name: str, role: str, brief: str, workdir: str) -> None:
-    board.queue_launch(job, 1, name, role=role, harness="claude", model=None, workdir=workdir,
+def _queue(board, job: str, name: str, role: str, brief: str, workdir: str, cfg: dict | None = None) -> None:
+    from swarm import models
+    from swarm.dependencies import spec
+    stages = [row for row in board.launches(job) if spec(row) is not None]
+    harness = stages[-1].harness if stages else "claude"
+    if stages and role == "lead":
+        role = "engineering_lead"
+    model = models.model_for(cfg or {}, harness, role)
+    board.queue_launch(job, 1, name, role=role, harness=harness, model=model, workdir=workdir,
                        brief=brief[:BRIEF_MAX], queued_by=PASS_NAME)
 
 
@@ -271,10 +290,11 @@ def _lead_brief(js, steps: str) -> str:
             f"Last judge notes: {steps or 'none yet'}")
 
 
-def _judge_brief(js, artifact: str) -> str:
+def _judge_brief(js, artifact: str, *, goal: bool = False) -> str:
+    scope = f" --scope goal --candidate {artifact}" if goal else ""
     return (f"You are the judge of job {js.job}. Goal: {js.goal or '(none set)'}\n"
             f"Judge the hand-off {artifact}. Record it with swarm verdict --job {js.job} "
-            f"met|not_met|unreachable, with --candidate and --reason (and --next for not_met). "
+            f"met|not_met|unreachable{scope}, with --candidate and --reason (and --next for not_met). "
             f"A not_met verdict starts the next lead run itself, with your --next as its brief: make --next "
             f"the exact list of what to change and how it will be re-checked. Record the verdict, then stop.")
 
@@ -313,6 +333,11 @@ def _advance(board, cfg: dict, js, now: _dt.datetime, starter) -> list[str]:
         return acts + [_fail(board, job, f"Q{expired[0].id} expired unanswered: {expired[0].reason}", now)]
     if questions:
         return acts   # waits on a person's answer: the only wait there is
+    from swarm.dependencies import advance, describe
+    task_rows = describe(board, job)
+    task_acts = advance(board, job)
+    if task_acts is not None:
+        return acts + task_acts
     found = handoff(board, job)
     msg = artifact = judged = None
     if found is not None:
@@ -320,6 +345,9 @@ def _advance(board, cfg: dict, js, now: _dt.datetime, starter) -> list[str]:
         if js.verdict is not None and (js.verdict_artifact == artifact or (
                 js.verdict_artifact is None and js.verdict_at is not None and js.verdict_at >= msg.created_at)):
             judged = js.verdict
+    if task_rows and (js.verdict_scope != "goal" or js.verdict_candidate != artifact
+                      or msg is None or js.verdict_at is None or js.verdict_at < msg.created_at):
+        judged = None
     if judged == "met":   # a verdict settles the job, whatever is still running
         board.close_job(job, "completed", f"met: {artifact}", closed_by=PASS_NAME)
         return acts + [f"{job}: completed ({artifact})"]
@@ -339,11 +367,12 @@ def _advance(board, cfg: dict, js, now: _dt.datetime, starter) -> list[str]:
                 return acts + [_fail(board, job, f"no met verdict after {LEAD_ATTEMPTS} launches", now)]
             steps = js.verdict_next or js.verdict_reason or "see the verdict"
             board.post(job, PASS_NAME, f"NOT MET {artifact}: {steps}"[:200])
-            _queue(board, job, f"relead-{key}", "lead", _lead_brief(js, steps), workdir)
+            _queue(board, job, f"relead-{key}", "lead", _lead_brief(js, steps), workdir, cfg)
             return acts + [f"{job}: re-queued the lead for {artifact} (not met)"]
         if judged is None:   # one judge per artifact, never again
-            if _run_launch(board, js, f"judge-{key}") is None:
-                _queue(board, job, f"judge-{key}", "judge", _judge_brief(js, artifact), workdir)
+            judge_name = f"goal-judge-{key}" if task_rows else f"judge-{key}"
+            if _run_launch(board, js, judge_name) is None:
+                _queue(board, job, judge_name, "judge", _judge_brief(js, artifact, goal=bool(task_rows)), workdir, cfg)
                 return acts + [f"{job}: judge queued for {artifact}"]
             return acts + [_fail(board, job, f"the judge of {artifact} ended with no verdict", now)]
         since = msg.created_at
@@ -352,7 +381,7 @@ def _advance(board, cfg: dict, js, now: _dt.datetime, starter) -> list[str]:
     if _attempts(board, job, since) >= LEAD_ATTEMPTS:
         return acts + [_fail(board, job, f"{LEAD_ATTEMPTS} launches with no hand-off (DONE)", now)]
     name = f"lead-{len([r for r in board.launches(job) if r.role == 'lead']) + 1}"
-    _queue(board, job, name, "lead", _lead_brief(js, js.verdict_next or js.verdict_reason or ""), workdir)
+    _queue(board, job, name, "lead", _lead_brief(js, js.verdict_next or js.verdict_reason or ""), workdir, cfg)
     return acts + [f"{job}: queued {name}"]
 
 
@@ -382,7 +411,7 @@ def on_not_met(board, cfg: dict, job: str, *, now: _dt.datetime | None = None, s
     if row is None or row.state in ("done", "failed", "cancelled"):
         steps = js.verdict_next or js.verdict_reason or "see the verdict"
         board.post(job, PASS_NAME, f"NOT MET {artifact}: {steps}"[:200])
-        _queue(board, job, name, "lead", _lead_brief(js, steps), workdir)
+        _queue(board, job, name, "lead", _lead_brief(js, steps), workdir, cfg)
     if not start:   # inside a launch: the next hook pass (within a minute) starts queued launches first
         return f"{job}: {name} queued"
     if starter is None:

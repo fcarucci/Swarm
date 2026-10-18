@@ -99,7 +99,7 @@ class MemoryLaunches:
             self.set_job_data(job, "pass_notified", None)
             return True
 
-    def queue_launch(self, job, generation, name, *, role, harness, model, workdir, brief, queued_by):
+    def queue_launch(self, job, generation, name, *, role, harness, model, workdir, brief, queued_by, if_absent=False):
         check_launch(name, generation, role, harness, workdir, brief, queued_by)
         s = self._s()
         with s.lock:
@@ -111,6 +111,8 @@ class MemoryLaunches:
                           session_id=None, agent_key=None)
             row = next((r for r in s.launches if (r["job"], r["generation"], r["name"]) ==
                         (job, generation, name)), None)
+            if row is not None and if_absent:
+                return Launch(**row)
             if row is None:
                 row = dict(id=s.next_launch_id, job=job, generation=generation, name=name, **fields,
                            revision=1, attempts=0, launch_id=None)
@@ -151,7 +153,7 @@ class MemoryLaunches:
 
     def claim_drive_launch(self, *, job, generation, action_id, attempt, launch_id, launch_row_id, queue_version,
                            harness, reserve_usd, reserve_minutes, locks, lock_seconds, max_host_running=None,
-                           max_job_running=4, ruling=False, lock_paths=None):
+                           max_job_running=4, ruling=False, lock_paths=None, max_cost_usd=None):
         s = self._s()
         with s.lock:
             if s.jobs.get(job, {}).get("status") != "active":
@@ -160,6 +162,14 @@ class MemoryLaunches:
             if (row is None or row["job"] != job or row["generation"] != generation
                     or row["revision"] != queue_version or row["state"] != "queued"):
                 return None
+            from swarm.dependencies import block_reason
+            if block_reason(self, Launch(**row), launching=True):
+                return None
+            if max_cost_usd is not None:
+                spent = sum(float(r["cost_usd"] if r["cost_usd"] is not None else r["reserved_usd"] or 0)
+                            for r in s.restarts if r["job"] == job and r["launch_id"])
+                if spent + reserve_usd > max_cost_usd:
+                    return None
             if any(r["launch_id"] == row["launch_id"] and r["ended_at"] is None for r in s.restarts):
                 return None
             host = compat.node()
@@ -351,20 +361,22 @@ class SqlLaunches:
     def _exec(self, c, sql, args=()):
         return c.execute(self._sx(sql), args)
 
-    def queue_launch(self, job, generation, name, *, role, harness, model, workdir, brief, queued_by):
+    def queue_launch(self, job, generation, name, *, role, harness, model, workdir, brief, queued_by, if_absent=False):
         check_launch(name, generation, role, harness, workdir, brief, queued_by)
         with self._launch_tx() as c:
             now = self._launch_time(self.now())
+            conflict = ("DO NOTHING" if if_absent else
+                "DO UPDATE SET role=excluded.role, harness=excluded.harness, "
+                "model=excluded.model, workdir=excluded.workdir, brief=excluded.brief, "
+                "queued_by=excluded.queued_by, state='queued', last_outcome=NULL, session_id=NULL, agent_key=NULL, "
+                "revision=launches.revision+1, updated_at=excluded.updated_at")
             row = self._exec(c,
                 "INSERT INTO launches (job, generation, name, role, harness, model, workdir, brief, "
                 "queued_by, state, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?) "
-                "ON CONFLICT (job, generation, name) DO UPDATE SET role=excluded.role, harness=excluded.harness, "
-                "model=excluded.model, workdir=excluded.workdir, brief=excluded.brief, "
-                "queued_by=excluded.queued_by, state='queued', last_outcome=NULL, session_id=NULL, agent_key=NULL, "
-                "revision=launches.revision+1, updated_at=excluded.updated_at "
+                f"ON CONFLICT (job, generation, name) {conflict} "
                 f"RETURNING {LAUNCH_COLS}",
                 (job, generation, name, role, harness, model, workdir, brief, queued_by, now)).fetchone()
-            return self._launch_obj(Launch, LAUNCH_COLS, row)
+            return self._launch_obj(Launch, LAUNCH_COLS, row) if row else self.get_launch(job, generation, name)
 
     def launches(self, job, generation=None, include_closed=True):
         sql, args = f"SELECT {LAUNCH_COLS} FROM launches WHERE job = ?", [job]
@@ -407,7 +419,7 @@ class SqlLaunches:
 
     def claim_drive_launch(self, *, job, generation, action_id, attempt, launch_id, launch_row_id, queue_version,
                            harness, reserve_usd, reserve_minutes, locks, lock_seconds, max_host_running=None,
-                           max_job_running=4, ruling=False, lock_paths=None):
+                           max_job_running=4, ruling=False, lock_paths=None, max_cost_usd=None):
         try:
             with self._launch_tx() as c:
                 host = compat.node()
@@ -417,6 +429,17 @@ class SqlLaunches:
                     status = self._exec(c, "SELECT status FROM jobs WHERE job=? FOR UPDATE", (job,)).fetchone()
                     if status is None or status[0] != "active":
                         raise _Refused("job is not active")
+                stored = self._exec(c, f"SELECT {LAUNCH_COLS} FROM launches WHERE id=? AND job=? AND generation=?",
+                                    (launch_row_id, job, generation)).fetchone()
+                current = self._launch_obj(Launch, LAUNCH_COLS, stored) if stored else None
+                from swarm.dependencies import block_reason
+                if current is None or block_reason(self, current, launching=True):
+                    raise _Refused("task dependency gate")
+                if max_cost_usd is not None:
+                    spent = self._exec(c, "SELECT COALESCE(SUM(COALESCE(cost_usd, reserved_usd, 0)), 0) "
+                                       "FROM restarts WHERE job=? AND launch_id IS NOT NULL", (job,)).fetchone()[0]
+                    if float(spent) + reserve_usd > max_cost_usd:
+                        raise _Refused("cost cap")
                 moved = self._exec(c,
                     "UPDATE launches SET state='running', revision=revision+1, attempts=attempts+1, "
                     "updated_at=?, launch_id=? WHERE id=? AND job=? AND generation=? AND revision=? "

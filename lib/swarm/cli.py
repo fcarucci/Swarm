@@ -2913,6 +2913,8 @@ def _parser() -> argparse.ArgumentParser:
     rg.add_argument("--report-text", metavar="TEXT", help="the review report itself, posted after the line")
     rv.add_argument("--key", help="the reviewing agent's key (the hooks add it)")
     rv.add_argument("--as", dest="name", help="the reviewing agent's name")
+    from swarm import task_cli
+    task_cli.configure(sub)
     rn = sub.add_parser("run", help="queue a named launch for the job: `swarm pass` (or the hooks) starts it "
                                     "when the job's concurrency and cost caps allow")
     rn.add_argument("--job", required=True); rn.add_argument("--name", required=True)
@@ -4813,6 +4815,7 @@ BOARD_COMMANDS = {
 
 def _bg_wrapper(argv: list[str]) -> tuple[Path, list[str]] | None:
     """(config path, the words after `bg`) when argv is the wrapper form `[--config P] bg [--job J]
+    "task": lambda board, cfg, args: __import__("swarm.task_cli", fromlist=["run"]).run(board, cfg, args),
     [--key K] [--as NAME] -- COMMAND...`, not `bg list|reap`; else None."""
     path, i = DEFAULT_CONFIG, 0
     while True:   # argparse semantics: the last --config wins
@@ -4891,7 +4894,7 @@ def note_orchestrator_read(cfg: dict, args) -> None:
 
 def _reads_only(args) -> bool:
     """Whether the command only reads the board, so a standby may serve it when no primary is up."""
-    return (args.cmd in ("who", "status", "blockers", "recall") or (args.cmd == "read" and args.peek)
+    return ((args.cmd == "task" and args.task_cmd == "list") or args.cmd in ("who", "status", "blockers", "recall") or (args.cmd == "read" and args.peek)
             or (args.cmd == "event" and args.ecmd == "list") or (args.cmd == "bg" and args.bcmd == "list")
             or (args.cmd == "verdict" and args.verdict == "show")
             or (args.cmd == "config" and args.value is None and not args.save)
