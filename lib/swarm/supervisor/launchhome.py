@@ -353,8 +353,12 @@ def launch_settings(person: bytes | None) -> str:
     return json.dumps({**data, "permissions": perms}, indent=2)
 
 
-def prepare(cfg: dict, job: str, launch: str) -> Path:
-    """Create or refresh the launch's directory; no links followed, POSIX mode 0700 (Windows: ACLs)."""
+def prepare(cfg: dict, job: str, launch: str, *, codex_policy: bool = False) -> Path:
+    """Create/refresh the private directory without following links.
+
+    Only an actual jailed Codex contract opts into Codex policy preparation.
+    Other harnesses and fallback routes must not parse unrelated Codex config.
+    """
     from swarm import safefs
     from swarm.supervisor import privfs
     from swarm.supervisor.settings import PrivateDirError
@@ -363,7 +367,9 @@ def prepare(cfg: dict, job: str, launch: str) -> Path:
     known = _read_person(home / ".ssh" / "known_hosts") or b""
     claude_json = _read_person(home / ".claude.json")
     person_settings = _read_person(home / ".claude" / "settings.json")
-    codex_settings = (_read_person(home / ".codex" / "config.toml") or b"") if jail_platform() else None
+    codex_settings = None
+    if codex_policy and jail_platform():
+        codex_settings = _read_person(home / ".codex" / "config.toml") or b""
     client = (Path(__file__).resolve().parent.parent / "launchbroker_client.py").read_bytes()
     proto = (Path(__file__).resolve().parent.parent / "launchproto.py").read_bytes()
     fds = []
@@ -577,7 +583,7 @@ def _exe_dirs(home: str, names) -> list[str]:
 
 
 def jail_spec(cfg: dict, launch_home: Path, workdir: str | None, home: Path | None = None,
-              exes=(), read_only: bool = False) -> dict:
+              exes=(), read_only: bool = False, codex_policy: bool = False) -> dict:
     """The jail of one launch. `read_only` (a reviewer or judge launch): its work tree and git dir are bound
     READ-ONLY, so whatever it runs cannot change the tree, commit or push from it (writable only for the roles
     that write: engineer, integrator, lead, ...); tools keep their temp files in the launch's private /tmp."""
@@ -594,9 +600,10 @@ def jail_spec(cfg: dict, launch_home: Path, workdir: str | None, home: Path | No
     binds += [[f"{h}/.claude/{n}", f"{h}/.claude/{n}", "rw"] for n in CLAUDE_RW if os.path.exists(f"{h}/.claude/{n}")]
     binds.append([f"{sh}/codex", f"{h}/.codex", "rw"])
     config_name = "codex-review.toml" if read_only else "codex-author.toml"
-    binds.append([f"{sh}/{config_name}", f"{h}/.codex/config.toml", "ro"])
+    if codex_policy:
+        binds.append([f"{sh}/{config_name}", f"{h}/.codex/config.toml", "ro"])
     binds += [[f"{h}/.codex/{n}", f"{h}/.codex/{n}", "ro", "follow"] for n in CODEX_RO
-              if n != "config.toml" and os.path.lexists(f"{h}/.codex/{n}")]
+              if (n != "config.toml" or not codex_policy) and os.path.lexists(f"{h}/.codex/{n}")]
     binds += [[f"{h}/.codex/{n}", f"{h}/.codex/{n}", "rw"] for n in CODEX_RW if os.path.exists(f"{h}/.codex/{n}")]
     binds += [[f"{sh}/.ssh", f"{h}/.ssh", "ro"], [f"{sh}/gitconfig", f"{h}/.gitconfig", "ro"],
               [f"{sh}/broker", f"{h}/.swarm-launch/broker", "rw"], [f"{sh}/bin", f"{h}/.swarm-launch/bin", "ro"]]
@@ -760,9 +767,11 @@ def wrap(cfg: dict, argv: list, *, job: str, launch: str, workdir: str | None = 
         raise LaunchIsolationError(f"this host cannot isolate a drive launch from the person's files ({why}); "
                                  "not started. Enable unprivileged user namespaces, or have a person run "
                                  "`swarm supervise launch-isolation off` to accept launches that can read them")
-    h = prepare(cfg, job, launch)
-    spec = jail_spec(cfg, h, workdir, exes=(str(argv[0]),) if argv else (), read_only=read_only)
-    from swarm.supervisor.launchpermissions import codex_argv
+    from swarm.supervisor.launchpermissions import codex_argv, is_codex_exec
+    codex_policy = is_codex_exec(argv)
+    h = prepare(cfg, job, launch, codex_policy=codex_policy)
+    spec = jail_spec(cfg, h, workdir, exes=(str(argv[0]),) if argv else (), read_only=read_only,
+                     codex_policy=codex_policy)
     argv = codex_argv(argv)
     return [python or sys.executable, "-I", jail_script(), json.dumps(spec, separators=(",", ":")), "--",
             *[str(a) for a in argv]]

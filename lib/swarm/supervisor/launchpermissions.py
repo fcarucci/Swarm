@@ -66,13 +66,18 @@ def codex_config(raw: bytes, broker: str, *, read_only: bool) -> str:
     return rendered
 
 
+def is_codex_exec(argv: list) -> bool:
+    """Recognize the trusted native Codex exec contract, including wrappers."""
+    return "exec" in argv and "--skip-git-repo-check" in argv
+
+
 def codex_argv(argv: list) -> list:
     """Select the private policy only after a real jail has been built.
 
     Match the Codex exec contract, also behind a configured wrapper. Best-effort
     and isolation-off launches never call this and keep their legacy policy.
     """
-    if "exec" not in argv or "--skip-git-repo-check" not in argv:
+    if not is_codex_exec(argv):
         return list(argv)
     out = []
     i = 0

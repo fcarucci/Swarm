@@ -303,6 +303,34 @@ class LaunchAllowTest(LaunchHomeCase):
             self.assertEqual(mode, "best-effort")
             self.assertEqual(best, args)
 
+    def test_unrelated_codex_config_does_not_block_other_launch_routes(self):
+        from swarm.supervisor.launchpermissions import PROFILE
+        codex = ["wrapper", "exec", "--sandbox", "read-only", "--skip-git-repo-check", "-"]
+        for raw in ('malformed ! toml', '[permissions.' + PROFILE + ']\nextends=":read-only"\n'):
+            (self.home / '.codex/config.toml').write_text(raw)
+            with self.subTest(config=raw, route='jailed Claude'):
+                args = launchhome.wrap(self.cfg, ['claude', '-p'], job='J', launch='claude',
+                                       probe=lambda: (True, ''))
+                spec = json.loads(args[3])
+                self.assertFalse(any('codex-author.toml' in b[0] for b in spec['binds']))
+                self.assertIn([str(self.home / '.codex/config.toml'),
+                               str(self.home / '.codex/config.toml'), 'ro', 'follow'], spec['binds'])
+                self.assertFalse((launchhome.home_dir('J', 'claude') / 'codex-author.toml').exists())
+            for argv in (['claude', '-p'], codex):
+                with self.subTest(config=raw, route='Linux best-effort', argv=argv):
+                    args, env, mode = launchhome.launch(self.cfg, argv, job='J', launch='fallback',
+                                                       probe=lambda: (False, 'no namespaces'),
+                                                       no_userns=lambda: 'no namespaces')
+                    self.assertEqual(mode, 'best-effort')
+                    self.assertEqual(args, argv if argv is codex else
+                                     launchhome.with_launch_settings(argv, launchhome.home_dir('J', 'fallback')))
+                with self.subTest(config=raw, route='off', argv=argv), \
+                     mock.patch.object(launchhome, 'mode', return_value='off'):
+                    self.assertEqual(launchhome.launch(self.cfg, argv, job='J', launch='off')[0], argv)
+            with self.subTest(config=raw, route='strict jailed Codex'):
+                with self.assertRaises(launchhome.LaunchIsolationError):
+                    launchhome.wrap(self.cfg, codex, job='J', launch='codex', probe=lambda: (True, ''))
+
     def test_a_best_effort_claude_launch_gets_the_settings_flag(self):
         h = launchhome.prepare(self.cfg, "J", "s")
         argv = launchhome.with_launch_settings(["claude", "-p", "--session-id", "x"], h)
@@ -1458,8 +1486,12 @@ assert not Path(HIDDEN).exists()
                 if not read_only:
                     code += "\nPath('author-proof').write_text('workspace still writable')\n"
                 code = "DENIED=" + repr(denied) + ";HIDDEN=" + repr(str(h / "private-sentinel")) + "\n" + code
-                argv = launchhome.wrap(self.cfg, [CODEX, 'sandbox', '--', sys.executable, '-I', '-c', code],
-                                       job="J", launch=launch, workdir=wt, read_only=read_only)
+                # Prepare the same policy and mounts as a native exec launch, then
+                # exercise them with Codex's local sandbox command (no model/API).
+                native = [CODEX, 'exec', '--sandbox', 'read-only' if read_only else 'workspace-write',
+                          '--skip-git-repo-check', '-']
+                argv = launchhome.wrap(self.cfg, native, job="J", launch=launch, workdir=wt, read_only=read_only)
+                argv = argv[:argv.index('--') + 1] + [CODEX, 'sandbox', '--', sys.executable, '-I', '-c', code]
                 calls = []
                 run = {"harness": "codex", "agent_key": str(uuid.uuid4()), "name": "Own", "cwd": wt}
                 b = launchbroker.LaunchBroker(run, str(h / 'broker'), workdir=wt, forbid=[],
