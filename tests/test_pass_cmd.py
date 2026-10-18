@@ -149,6 +149,46 @@ class PassCmd(unittest.TestCase):
         self.assertIn("add tests", relead[0].brief)
         self.assertEqual(self.job().status, "active")
 
+    def test_an_open_owner_request_holds_off_the_next_lead_until_its_result(self):
+        self.queue("lead-1")
+        self.pass_()
+        self.b.post("J", "me", "ASTRA-REQUEST round 11: eng/tls@abc")
+        for r in self.open_restarts():
+            self.b.finish_restart(r.id, "completed")
+        for _ in range(5):
+            self.pass_()
+        self.assertEqual([r.name for r in self.b.launches("J")], ["lead-1"])
+        self.assertEqual(self.job().status, "active")
+        self.b.post("J", "me", "ASTRA-RESULT round 11: NOT CLEAN")
+        self.pass_()
+        self.assertIn("lead-2", [r.name for r in self.b.launches("J")])
+
+    def test_an_owner_request_stops_holding_after_request_minutes(self):
+        self.b.post("J", "me", "HOST-REQUEST run x")
+        self.pass_(minutes=passcmd.REQUEST_MINUTES + 1)
+        self.assertEqual([r.name for r in self.b.launches("J")], ["lead-1"])
+
+    def test_any_result_post_resets_the_lead_attempts(self):
+        for i in range(1, passcmd.LEAD_ATTEMPTS + 2):
+            self.pass_()
+            for r in self.open_restarts():
+                self.b.finish_restart(r.id, "failed")
+            self.b.post("J", "me", f"ASTRA-RESULT round {i}")
+        self.assertEqual(self.job().status, "active")
+
+    def test_a_reopened_job_whose_artifact_was_judged_before_continues_with_a_lead(self):
+        artifact = self.hand_off()
+        self.pass_()
+        self.pass_()
+        self.verdict("met", "ok", artifact=artifact)
+        self.pass_()
+        self.assertEqual(self.job().status, "completed")
+        self.b.open_job("J", None, None, None, "me", goal="ship it")   # the owner reopens: verdict cleared
+        self.b.post("J", "me", "DONE " + json.dumps(artifact) + " | again")
+        self.pass_(minutes=1)
+        self.assertEqual(self.job().status, "active")
+        self.assertTrue(any(r.role == "lead" and r.state in ("queued", "running") for r in self.b.launches("J")))
+
     def test_failed_job_notice_repeats_until_acked(self):
         self.b.open_blocker("J", "question", "alice", "ship now?", until=self.b.now() - _dt.timedelta(minutes=1),
                             created_by="me")

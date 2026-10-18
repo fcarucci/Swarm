@@ -116,6 +116,20 @@ def _observer(agent) -> bool:
     return (getattr(agent, "role", None) or "") in OBSERVER_ROLES
 
 
+LIVE_CONTACT_MINUTES = 10   # an agent counts as working only with hook contact this recent
+
+
+def _working(agent, now: _dt.datetime) -> bool:
+    """A worker that is really working: started or running, not an observer, and in contact recently (a row left
+    "started" by a session that never ran, or a dead one, must not keep a job busy forever)."""
+    if agent.status not in ("started", "running") or _observer(agent):
+        return False
+    if getattr(agent, "agent_key", "") == "shell-agent" or (not agent.role and not getattr(agent, "tool_calls", 0)):
+        return False   # the CLI's own row (watches, posts from a plain shell) and roleless rows that never ran a tool
+    seen = getattr(agent, "last_contact_at", None)
+    return seen is not None and now - seen < _dt.timedelta(minutes=LIVE_CONTACT_MINUTES)
+
+
 def managed(board, job: str) -> bool:
     """Whether the pass manages the job: it has a work dir of its own or launches. Any other open job
     (a plain one, never launched) is left alone: the pass would otherwise fail it for lacking a work dir."""
@@ -212,14 +226,40 @@ def _start_queued(board, cfg: dict, job: str, starter) -> tuple[list[str], str |
     return acts, None
 
 
-OWNER_INPUT = ("HOST-RESULT", "OWNER", "PUSH-RESULT")   # posts that hand a lead new facts to act on
+REQUEST_MINUTES = 90   # how long an owner request (HOST-/PUSH-/ASTRA-REQUEST ...) holds off a new lead
+
+
+def _tag(message: str) -> str:
+    return (message.split(None, 1) or [""])[0].rstrip(":")
+
+
+def _owner_input(message: str) -> bool:
+    """A post that hands a lead new facts to act on: any <KIND>-RESULT, or an OWNER note."""
+    t = _tag(message)
+    return t.endswith("-RESULT") or t == "OWNER"
+
+
+def _owner_request(message: str) -> bool:
+    """A lead asking the owner to do something a launch cannot (run on a host, push, run a reviewer)."""
+    return _tag(message).endswith("-REQUEST")
+
+
+def _open_request(board, job: str, now: _dt.datetime):
+    """The newest owner request with no owner input after it, if younger than REQUEST_MINUTES, else None.
+    While one is open the owner is the one working the job, so the pass starts no new lead for it."""
+    for m in reversed(board.recent_messages(200, job)):
+        if _owner_input(m.message):
+            return None
+        if _owner_request(m.message):
+            return m if now - m.created_at < _dt.timedelta(minutes=REQUEST_MINUTES) else None
+    return None
 
 
 def _attempts(board, job: str, since: _dt.datetime) -> int:
     """Lead and judge launches that were queued or ended since `since`, or since the newest owner input
-    (a HOST-RESULT or OWNER post): a lead that hands work to the owner and exits is progressing, not stuck."""
+    (a <KIND>-RESULT or OWNER post): a lead that hands work to the owner and exits is progressing, not stuck."""
     for m in reversed(board.recent_messages(200, job)):
-        if m.message.startswith(OWNER_INPUT):
+        if _owner_input(m.message):
             since = max(since, m.created_at)
             break
     return sum(1 for row in board.launches(job) if row.role in ("lead", "judge") and row.updated_at >= since)
@@ -301,7 +341,7 @@ def _advance(board, cfg: dict, js, now: _dt.datetime, starter) -> list[str]:
         return acts + [_fail(board, job, f"judge: unreachable ({js.verdict_reason or artifact})", now)]
     if _running(board, job) or any(r.state == "queued" for r in board.launches(job, include_closed=False)):
         return acts
-    if any(a.status in ("started", "running") and not _observer(a) for a in board.agents(job, include_departed=False)):
+    if any(_working(a, now) for a in board.agents(job, include_departed=False)):
         return acts
     workdir = _workdir(board, job)
     if workdir is None:
@@ -315,14 +355,21 @@ def _advance(board, cfg: dict, js, now: _dt.datetime, starter) -> list[str]:
             board.post(job, PASS_NAME, f"NOT MET {artifact}: {steps}"[:200])
             _queue(board, job, f"relead-{key}", "lead", _lead_brief(js, steps), workdir)
             return acts + [f"{job}: re-queued the lead for {artifact} (not met)"]
+        reopened = js.activated_at is not None
         if judged is None:   # one judge per artifact, never again
-            if board.get_launch(job, f"judge-{key}") is None:
+            judge = board.get_launch(job, f"judge-{key}")
+            if judge is None:
                 _queue(board, job, f"judge-{key}", "judge", _judge_brief(js, artifact), workdir)
                 return acts + [f"{job}: judge queued for {artifact}"]
-            return acts + [_fail(board, job, f"the judge of {artifact} ended with no verdict", now)]
-        since = msg.created_at
+            if not (reopened and judge.updated_at < js.activated_at):
+                return acts + [_fail(board, job, f"the judge of {artifact} ended with no verdict", now)]
+            # judged before the owner reopened the job (which clears the verdict): the artifact is not met; the
+            # lead continues from the owner's notes
+        since = msg.created_at if not reopened else max(msg.created_at, js.activated_at)
     else:
         since = js.activated_at or js.created_at
+    if _open_request(board, job, now) is not None:
+        return acts   # the owner is doing what the lead asked; its result brings the next lead
     if _attempts(board, job, since) >= LEAD_ATTEMPTS:
         return acts + [_fail(board, job, f"{LEAD_ATTEMPTS} launches with no hand-off (DONE)", now)]
     name = f"lead-{len([r for r in board.launches(job) if r.role == 'lead']) + 1}"
