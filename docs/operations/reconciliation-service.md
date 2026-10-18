@@ -50,7 +50,9 @@ reconciliation is an operational blocker, not evidence of a running agent.
 2. Register a real authorized, bounded verification chain for one immutable artifact.
    Use an already-running reporter only through its assigned identity; do not impersonate
    it or restart a completed build. A fresh verifier may inspect an existing archive.
-3. End PM/EL and predecessor turns, then deliver the final assigned exact-artifact report.
+3. End PM/EL turns. The last assigned predecessor records its exact-artifact report
+   while its turn is still live, then ends that turn. Its terminal event is the final
+   prerequisite; never attempt to report after the assigned executor has already ended.
    Observe exactly one downstream runner from persisted tasks without a requester tool
    call being the dispatch trigger. Record task generation, launch/restart IDs and times.
 4. Kill only the listener process using the authorized service test. Confirm the manager

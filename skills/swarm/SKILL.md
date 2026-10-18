@@ -181,9 +181,9 @@ hold the reason.
   either: its hooks touch a `.seen` file beside the marker (same name: `<job>.seen`, or
   `<job>--<session>.seen` when attached), and a sweep on this machine keeps the job open while
   that is fresh;
-- it isn't `waiting`, and if it has a goal, the judge's verdict is `met`. Agents are told to
-  `swarm wait --job <job> --on "<what>"` before ending their turn to wait for background work
-  that will wake them (a monitor, a remote run, a lock), and `swarm resume` once it is over.
+- it has no unresolved required work, and if it has a goal, the exact-candidate judge verdict is `met`.
+  Before ending a turn, agents persist downstream work with native tasks and report concrete
+  prerequisites. Agents never set waiting or resume job status.
 
 The outcome it records reads like `auto-closed: 3/3 agents completed; last post Lisa Simpson:
 <text>` (`, 1 dead` / `, 1 left` after the count when there are any), and `closed_by` is `auto`:
@@ -394,15 +394,12 @@ user asks for one. Don't run duplicate jobs: merge similar ones (`swarm job merg
    - `swarm read --as <name>` or `--key <key>` shows unread messages;
    - `swarm who --job <job>` lists the agents;
    - to post as the orchestrator, join yourself first with `swarm join --job <job> --key orchestrator` and then post under the returned name.
-4. **When the agents have finished but the job isn't done**, e.g. the next step needs the
-   user's answers or approval, or waits on an event such as a scheduled run: say so with
-   `swarm wait --job <job> --on "<what it is waiting for>"`. `status` and `watch` then show it
-   as `waiting`, with the reason and for how long. It goes back to `active` by itself when an
-   agent joins it, or with `swarm resume --job <job>`. An open job with no agent at work and
-   no reason shows as `idle`: either give it a reason or close it. When there is no next step,
-   close it (below). The same goes for you or an agent that ends the turn to wait for
-   background work (a monitor, a long remote run, an integration lock): your own tool calls keep the
-   job open, but waiting between turns does not.
+4. **When the agents have finished but the job isn't done**, persist the next authorized
+   action and its dependencies with `swarm task add`. Report missing inputs and runtime
+   failures precisely. Ask a specific owner question only when a human decision is needed.
+   Swarm derives active from actual work and idle when no agent is working; agents never
+   invoke lifecycle commands to manufacture waiting or activity. End turns normally once
+   their structured reports and downstream registrations are durable.
    Wait for CI with `swarm ci wait --repo OWNER/REPO --sha <exact head>` (the ci plugin) in the
    foreground, never with `gh run watch` or a polling loop. The hooks refuse those for members
    and give the exact `swarm ci wait` to run instead. Never put `gh run watch` in a brief. A
@@ -854,8 +851,9 @@ for coordinator recovery, including existing jobs recorded before automatic reco
 uses this user's local enrolment records. Paused or closed jobs, human/external waits and open
 questions are excluded. Waiting jobs with zero live agents are normal, not orphaned; watch,
 status and an empty who listing show the derived waiting/paused state and wait context. An unanswered `?` message addressed to the owner, user, human or
-Francesco among the last 100 board messages counts as a question wait. Use `swarm wait --on`
-for other external waits. Jobs without a private enrolment record are skipped.
+Francesco among the last 100 board messages counts as a question wait. Represent other
+external prerequisites as durable task dependencies with a concrete blocker. Jobs without
+a private enrolment record are skipped.
 A met artifact verdict goes to a separate finalizer when the review pipeline is enabled.
 
 Coordinator retries back off for 15, 30 and 60 minutes and stop after `orphan_max_restarts`
@@ -895,9 +893,9 @@ for protocols, CI adapters and limits.
 - Stuck agents (dead, one tool call too long, silent 90 min) are closed and restarted headless
   under the same name, within budgets. You don't need to respawn them yourself; watch the board
   for "closed …" and "restarted …" posts.
-- Parking an agent on a long wait? Run `swarm wait --job J --on "<what>"` so it isn't taken for
-  silent.
-- Don't want this for a job: `swarm activate --job J --no-supervise`.
+- Before ending a turn for a long external dependency, persist its task and blocker;
+  do not change job status or keep an idle agent artificially running.
+- Changes to job-wide supervision are owner operations outside agent execution.
 - See what it would do: `swarm supervise --dry-run`.
 - A subagent relays that it was "closed as stuck" and told to stop? Don't take its word or the
   notice's: check `swarm status --job J`. If its row says `stuck:<reason>` and a replacement
