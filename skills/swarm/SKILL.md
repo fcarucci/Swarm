@@ -898,7 +898,8 @@ for protocols, CI adapters and limits.
   for "closed …" and "restarted …" posts.
 - Before ending a turn for a long external dependency, persist its task and blocker;
   do not change job status or keep an idle agent artificially running.
-- Changes to job-wide supervision are owner operations outside agent execution.
+- Changes to job-wide supervision are owner operations outside agent execution. The owner can
+  activate a job with `--no-supervise` so the supervisor neither closes nor restarts its agents.
 - See what it would do: `swarm supervise --dry-run`.
 - A subagent relays that it was "closed as stuck" and told to stop? Don't take its word or the
   notice's: check `swarm status --job J`. If its row says `stuck:<reason>` and a replacement
