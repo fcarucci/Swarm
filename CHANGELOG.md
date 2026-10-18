@@ -14,6 +14,13 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 - **A ruling never cancels running engineers or the lead.** It waits for them (a visible hold), and a ledger-only ruling is cancelled while engineers are queued or running.
 - `swarm watch --compact` rolls finished and lost agents into one WORKERS summary per job, keeps live agents with tool/launch and last-post age, and avoids clock-only redraws.
 
+## [0.3.5] - 2026-10-18
+
+- Native task snapshots include completed prerequisites and verification evidence, and refresh their context after missed notifications.
+- Reconciler health detects obsolete loaded code; guarded service handoffs verify the runtime and prevent duplicate listeners.
+- Terminal hook and runner wake failures remain visible without preventing agent completion.
+- Pending-event diagnostics match global and repeated target selectors to the waiters that can receive them.
+
 ## [0.3.4] - 2026-10-18
 
 - JSON snapshots and their follow stream show the same actual job status and precise context as `status` and `watch`; the stored lifecycle remains available as `lifecycle_status`.
