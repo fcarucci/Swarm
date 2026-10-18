@@ -69,17 +69,19 @@ _MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@\[\]-]{0,127}$")
 
 
 def replacement_model(cfg: dict, harness: str, role: str | None, recorded: str | None) -> str | None:
-    """[supervise] model_override, else the role's [models] entry, else the model the agent row
-    recorded. The row is board data (writable by agents): a recorded value that isn't a plain
-    model name (one starting with "-" would be read as a flag) is ignored."""
+    """Keep a valid caller/recorded selection, otherwise use configured defaults.
+
+    Recorded values are board data (writable by agents): a value that is not a plain
+    model name (one starting with "-" would be read as a flag) is ignored.
+    """
     from swarm import models, roles
     from swarm.supervisor.settings import settings
+    if recorded is not None and _MODEL.fullmatch(str(recorded)):
+        return str(recorded)
     override = settings(cfg)["model_override"]
     if override:
         return override
-    if recorded is not None and not _MODEL.match(str(recorded)):
-        recorded = None
-    return models.model_for(cfg, harness, role if roles.valid_name(role) else "worker") or recorded
+    return models.model_for(cfg, harness, role if roles.valid_name(role) else "worker")
 
 
 # Read-only launches (judges, reviewers) get no edit tool and no MCP tool: an MCP tool is outside the Bash

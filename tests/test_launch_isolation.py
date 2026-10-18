@@ -28,6 +28,11 @@ LIB = Path(launchjail.__file__).resolve().parent.parent
 JAIL = str(Path(launchjail.__file__).resolve())
 CAN_JAIL = launchjail.available()[0] if sys.platform.startswith("linux") else False
 
+# Exercise the same nested sandbox helper as native npm Codex when installed.
+_BWRAPS = list((Path.home() / ".local/lib/node_modules/@openai/codex/node_modules/@openai").glob(
+    "codex-*/vendor/*/codex-resources/bwrap"))
+BWRAP = shutil.which("bwrap") or (str(_BWRAPS[0]) if _BWRAPS else None)
+
 
 def tmpdir(test) -> Path:
     d = Path(tempfile.mkdtemp(dir=os.environ.get("SWARM_TEST_TMP")))
@@ -273,6 +278,9 @@ class SpecTest(LaunchHomeCase):
         H = str(self.home)
         self.assertEqual(spec["home_base"], f"{h}/home")
         self.assertEqual(spec["tmp"], f"{h}/tmp")
+        self.assertEqual(binds[f"{h}/tmp"], "rw")
+        self.assertNotIn(str(h), binds)
+        self.assertEqual((h / "tmp").stat().st_mode & 0o777, 0o700)
         self.assertEqual(binds[f"{H}/.claude"], "rw")                    # the launch's own ~/.claude
         self.assertEqual(binds[f"{H}/.claude/settings.json"], "ro")
         self.assertEqual(binds[f"{H}/.claude/plugins"], "ro")
@@ -1339,6 +1347,25 @@ REVIEWER_RO = textwrap.dedent("""\
 @unittest.skipUnless(CAN_JAIL, "needs unprivileged user namespaces (Linux)")
 class ReadOnlyReviewerJailTest(LaunchHomeCase):
     """fix/rc-scratch2: a reviewer's (judge's) work tree and git dir are bound read-only in its jail."""
+
+    @unittest.skipUnless(BWRAP, "needs bubblewrap (system or native Codex companion)")
+    def test_nested_bwrap_can_bind_own_physical_temp_without_exposing_private_siblings(self):
+        wt = self.worktree()
+        h = launchhome.prepare(self.cfg, "J", "nested")
+        physical = h / "tmp" / "codex-daemon-test"
+        physical.mkdir()
+        (h / "private-sentinel").write_text("must remain hidden")
+        script = ("from pathlib import Path; import os; "
+                  "p=Path(" + repr(str(physical / "probe")) + "); p.write_text('ok'); "
+                  "assert Path('/tmp/codex-daemon-test/probe').read_text()=='ok'; "
+                  "assert not Path(" + repr(str(h / "private-sentinel")) + ").exists(); "
+                  "assert os.environ['TMPDIR']=='/tmp'")
+        nested = [BWRAP, "--ro-bind", "/", "/", "--bind", "/tmp/codex-daemon-test",
+                  str(physical), "--", sys.executable, "-I", "-c", script]
+        argv = launchhome.wrap(self.cfg, nested, job="J", launch="nested", workdir=wt, read_only=True)
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual((physical / "probe").read_text(), "ok")
 
     def run_launch(self, read_only: bool):
         wt = Path(self.worktree())

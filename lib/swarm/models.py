@@ -1,5 +1,6 @@
 """Default model per role. [models] mode: default = set the model only when the spawn
-didn't pick one; enforce = always replace it; off = never touch it. [models.<host>] maps roles to
+didn't pick one; enforce = apply configured defaults; off = never touch it.
+Explicit caller selections always take precedence, including in enforce mode. [models.<host>] maps roles to
 model names, passed through unchanged (the host validates them)."""
 from __future__ import annotations
 
@@ -31,7 +32,7 @@ def model_for(cfg: dict, host: str, role: str, *, fallback: str = "worker") -> s
 
 def choose(cfg: dict, host: str, role: str, requested: str | None, *, fallback: str = "worker") -> str | None:
     m = model_for(cfg, host, role, fallback=fallback)
-    if not m or (mode(cfg) == "default" and requested) or m == requested:
+    if requested or not m:
         return None
     return m
 

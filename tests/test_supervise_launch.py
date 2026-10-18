@@ -170,15 +170,27 @@ class MoreSafetyTests(unittest.TestCase):
 
 
 class ModelTests(unittest.TestCase):
-    def test_override_then_role_then_recorded(self):
+    def test_explicit_then_override_then_role(self):
         c = cfg(model_override="haiku-cheap")
-        self.assertEqual(launch.replacement_model(c, "claude", "worker", "opus"), "haiku-cheap")
+        self.assertEqual(launch.replacement_model(c, "claude", "worker", "opus"), "opus")
         c = cfg()
         c["models"] = {"mode": "default", "claude": {"worker": "sonnet", "verifier": "haiku"}}
-        self.assertEqual(launch.replacement_model(c, "claude", "verifier", "opus"), "haiku")
-        self.assertEqual(launch.replacement_model(c, "claude", None, "opus"), "sonnet")
+        self.assertEqual(launch.replacement_model(c, "claude", "verifier", "opus"), "opus")
+        self.assertEqual(launch.replacement_model(c, "claude", None, "opus"), "opus")
         self.assertEqual(launch.replacement_model(cfg(), "claude", "worker", "opus"), "opus")
         self.assertIsNone(launch.replacement_model(cfg(), "codex", "worker", None))
+
+    def test_native_and_restart_explicit_model_or_safe_default(self):
+        c = cfg()
+        c["models"] = {"mode": "enforce", "codex": {"worker": "gpt-6.1-sol"}}
+        for requested in (None, "", "--unsafe", "bad model", "x\n-y", "valid\n"):
+            with self.subTest(requested=requested):
+                self.assertEqual(launch.replacement_model(c, "codex", "engineer", requested), "gpt-6.1-sol")
+        self.assertEqual(launch.replacement_model(c, "codex", "engineer", "gpt-6-astra"), "gpt-6-astra")
+        c["models"]["mode"] = "off"
+        self.assertIsNone(launch.replacement_model(c, "codex", "engineer", None))
+        self.assertEqual(launch.replacement_model(c, "codex", "engineer", "gpt-6-astra"), "gpt-6-astra")
+        self.assertEqual(launch.replacement_model(cfg(model_override="override"), "codex", "worker", None), "override")
 
     def test_replacement_preserves_custom_role_model_on_each_host(self):
         c = cfg()

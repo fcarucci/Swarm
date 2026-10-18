@@ -573,7 +573,11 @@ def jail_spec(cfg: dict, launch_home: Path, workdir: str | None, home: Path | No
     that write: engineer, integrator, lead, ...); tools keep their temp files in the launch's private /tmp."""
     home_s = str(home or paths.home())
     h, sh = home_s, str(launch_home)
-    binds: list = [[f"{sh}/claude", f"{h}/.claude", "rw"]]
+    # Codex's nested bwrap can retain the daemon temp's physical path. Expose
+    # only this launch's scratch directory at that path as well as at /tmp;
+    # the supervisor parent and other private launch files remain hidden.
+    binds: list = [[f"{sh}/tmp", f"{sh}/tmp", "rw"],
+                   [f"{sh}/claude", f"{h}/.claude", "rw"]]
     binds += [[f"{h}/.claude/{n}", f"{h}/.claude/{n}", "ro", "follow"] for n in CLAUDE_RO
               if n != "settings.json" and os.path.lexists(f"{h}/.claude/{n}")]
     binds.append([f"{sh}/{LAUNCH_SETTINGS}", f"{h}/.claude/settings.json", "ro"])   # the person's + launch allow rules

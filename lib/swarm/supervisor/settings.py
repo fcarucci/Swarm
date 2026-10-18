@@ -40,7 +40,7 @@ DEFAULTS = {
     "min_minutes": 5,                  # don't start a replacement with less time than this left
     "max_budget_usd": 0,               # claude -p --max-budget-usd (0 = not passed)
     "codex_token_limit": 0,            # codex features.rollout_budget.limit_tokens (0 = off)
-    "model_override": "",              # replacements run on this model on this host ("" = role model)
+    "model_override": "",              # replacement default if no valid recorded selection ("" = role model)
     "claude_permission_mode": "auto",  # claude -p --permission-mode (never the bypass mode)
     "enrol_minutes": 5,                # a replacement not on the board by then is killed
     "brief_posts": 20,                 # the agent's own recent posts in the brief

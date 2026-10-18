@@ -52,6 +52,26 @@ class PassCmd(unittest.TestCase):
         return self.b.queue_launch("J", 1, name, role=role, harness="claude", model=None,
                                    workdir="/work/shared", brief="B", queued_by=queued_by)
 
+    def test_native_explicit_codex_model_survives_enforced_worker_default(self):
+        self.cfg["models"] = {"mode": "enforce", "codex": {"worker": "gpt-6.1-sol"}}
+        self.b.queue_launch("J", 1, "explicit", role="engineer", harness="codex", model="gpt-6-astra",
+                            workdir="/work/shared", brief="B", queued_by="me")
+        with mock.patch("swarm.supervisor.launch.codex_command", return_value=["codex"]):
+            self.pass_()
+        self.assertEqual(len(self.runs), 1)
+        argv = self.runs[0]["argv"]
+        self.assertEqual(argv[argv.index("-m") + 1], "gpt-6-astra")
+
+    def test_native_omitted_codex_model_uses_worker_default(self):
+        self.cfg["models"] = {"mode": "enforce", "codex": {"worker": "gpt-6.1-sol"}}
+        self.b.queue_launch("J", 1, "default", role="engineer", harness="codex", model=None,
+                            workdir="/work/shared", brief="B", queued_by="me")
+        with mock.patch("swarm.supervisor.launch.codex_command", return_value=["codex"]):
+            self.pass_()
+        self.assertEqual(len(self.runs), 1)
+        argv = self.runs[0]["argv"]
+        self.assertEqual(argv[argv.index("-m") + 1], "gpt-6.1-sol")
+
     def open_restarts(self):
         return [r for r in self.b.restarts("J") if r.ended_at is None]
 

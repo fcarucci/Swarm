@@ -43,11 +43,20 @@ class ModelRuleTests(unittest.TestCase):
     def test_modes(self):
         self.assertEqual(models.choose(cfg_with(claude=CLAUDE), "claude", "verifier", None), "sonnet")
         self.assertIsNone(models.choose(cfg_with(claude=CLAUDE), "claude", "verifier", "opus"))       # default: caller's pick stays
-        self.assertEqual(models.choose(cfg_with("enforce", claude=CLAUDE), "claude", "verifier", "opus"), "sonnet")
+        self.assertIsNone(models.choose(cfg_with("enforce", claude=CLAUDE), "claude", "verifier", "opus"))
         self.assertIsNone(models.choose(cfg_with("off", claude=CLAUDE), "claude", "worker", None))
         self.assertIsNone(models.choose(cfg_with(claude=CLAUDE), "codex", "worker", None))            # no host section: off
         self.assertEqual(models.choose(cfg_with(claude={"worker": "opus"}), "claude", "judge", None), "opus")  # falls back to worker
         self.assertEqual(models.choose(cfg_with(claude={"worker": "my-custom-model"}), "claude", "worker", None), "my-custom-model")
+
+    def test_explicit_selection_wins_in_every_mode_on_both_hosts(self):
+        for mode in ("default", "enforce", "off", "invalid"):
+            for host in ("claude", "codex"):
+                with self.subTest(mode=mode, host=host):
+                    cfg = cfg_with(mode, **{host: {"worker": "gpt-6.1-sol"}})
+                    self.assertIsNone(models.choose(cfg, host, "engineer", "gpt-6-astra"))
+                    self.assertEqual(models.choose(cfg, host, "engineer", None),
+                                     None if mode == "off" else "gpt-6.1-sol")
 
     def test_hint(self):
         self.assertIn("verifier=sonnet", models.spawn_hint(cfg_with(claude=CLAUDE), "claude"))
@@ -90,6 +99,15 @@ class ModelHookTests(Env):
     def test_orchestrator_choice_kept_in_default_mode(self):
         self.activate()
         self.assertIsNone(self.orchestrator_spawn("[swarm job: J]\nwork", model="haiku"))
+
+    def test_enforce_keeps_explicit_models_on_both_hooks(self):
+        self.activate()
+        self.cfg["models"]["mode"] = "enforce"
+        self.assertIsNone(self.orchestrator_spawn("[swarm job: J]\nwork", model="haiku"))
+        self.cfg["models"]["codex"] = {"worker": "gpt-6.1-sol"}
+        args = {"message": "[swarm job: J]\nwork", "model": "gpt-6-astra", "fork_turns": "none"}
+        self.assertIsNone(self.hook("turn", agent_id=None, host="codex",
+                                   tool_name="spawn_agent", tool_input=args))
 
     def test_no_active_job_no_rewrite(self):
         self.assertIsNone(self.orchestrator_spawn("[swarm job: J]\nwork"))

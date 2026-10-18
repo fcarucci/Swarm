@@ -826,7 +826,7 @@ On Postgres, re-run `swarm init` after changing `idle_minutes`, `dead_minutes` o
 
 | key | default | meaning |
 |---|---|---|
-| `mode` | `default` | `default`: set the role's model only when the spawn didn't pick one; `enforce`: always replace it; `off`: never touch it |
+| `mode` | `default` | `default`: set the role's model only when the spawn didn't pick one; `enforce`: apply configured defaults when no model was selected; explicit selections always win; `off`: never touch it |
 | `worker`, `verifier`, `judge`, `helper`, any custom role identifier | (none) | in `[models.<host>]`: the model for that role; a missing role uses `worker` (a member's child tries `helper` first); a host with no section is left alone |
 
 **`[transcripts]`** (see [Transcript archive](#transcript-archive-optional)): `enabled` (`false`),
@@ -1518,7 +1518,7 @@ they hold across passes, OS users and hosts:
 | `min_minutes` | 5 | don't start one with less time left than this |
 | `max_budget_usd` | 0 | `claude -p --max-budget-usd` (0 = not passed) |
 | `codex_token_limit` | 0 | Codex `features.rollout_budget.limit_tokens` (experimental in 0.157.1; 0 = off) |
-| `model_override` | "" | replacements run on this model on this host (else the role's `[models]`, else the agent's) |
+| `model_override` | "" | default replacement model when the agent has no valid recorded selection (else the role's `[models]`) |
 | `claude_permission_mode` | auto | `claude -p --permission-mode` (`bypassPermissions` is refused) |
 | `enrol_minutes` | 5 | a replacement not on the board by then is killed |
 | `brief_posts` / `brief_turns` / `brief_max_chars` | 20 / 40 / 24000 | the brief's size |
@@ -2154,7 +2154,7 @@ with `swarm ask`, `swarm answer`, and `swarm questions`.
 ```toml
 [models]
 mode = "default"      # default: set the model only when the spawn didn't pick one;
-                      # enforce: always replace it; off: never touch it
+                      # enforce: apply defaults; explicit selections always win; off: never touch it
 
 [models.claude]
 worker = "opus"

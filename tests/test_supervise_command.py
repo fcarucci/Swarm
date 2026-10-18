@@ -1075,6 +1075,15 @@ class SuperviseTests(SuperviseEnv):
         self.assertEqual(self.started, [])
         self.assertTrue(any(p.startswith(f"can't restart {self.name}") and "harness" in p for p in self.posts()))
 
+    def test_restart_keeps_recorded_codex_model_under_enforced_default(self):
+        self.cfg["models"] = {"mode": "enforce", "codex": {"worker": "gpt-6.1-sol"}}
+        self.h.update_agent("orig", harness="codex", model="gpt-6-astra")
+        enrol(self.cfg, "orig", harness="codex", cwd=self.work)
+        with mock.patch("swarm.supervisor.launch.codex_command", return_value=["codex"]):
+            self.supervise()
+        [run] = self.started
+        self.assertEqual(run["argv"][run["argv"].index("-m") + 1], "gpt-6-astra")
+
     def test_a_recorded_model_that_is_not_a_model_name_is_ignored(self):
         self.h.update_agent("orig", model="--settings=/tmp/evil.json")
         self.supervise()
