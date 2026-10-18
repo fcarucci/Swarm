@@ -1178,8 +1178,6 @@ def _reuse_identity(agent_id: str, job: str, payload: dict, name: str | None = N
 
 
 def _gate_judge(board, agent_id: str, job: str, payload: dict) -> bool:
-    if _drive_job(board.cfg, job):
-        return True  # drive roles are prompt instructions
     me = next((a for a in board.agents(job, include_departed=False) if a.agent_key == agent_id), None)
     if me is None or me.role != "judge":
         return True
@@ -1255,10 +1253,6 @@ def _gate_ci(board, agent_id: str, payload: dict, cfg: dict) -> bool:
 def _gate_verifier(board, agent_id: str, is_verifier: bool, payload: dict) -> bool:
     """A verifier's writing tools and spawns are refused, and so are shell commands that look like
     they write (best effort, swarm.shellguard). True = go ahead."""
-    if is_verifier:
-        job = board.route(agent_id).member_job
-        if job and _drive_job(board.cfg, job):
-            return True
     if not is_verifier:
         return True
     host = current_host()
@@ -1403,8 +1397,6 @@ def _goal_roles(board, agent_id: str, job: str, payload: dict, marker: dict | No
     if prompt is None:
         prompt = _spawn_prompt(payload, agent_id)
     wants = _role(payload, agent_id, prompt) == "judge"
-    if wants and cfg is not None and _drive_job(cfg, job):
-        wants = False   # in a drive job the judge is the driver's launch (ledger), never a prompt tag
     is_judge = wants and board.take_judge_launch(agent_id, job)
     js = board.job_status(job)
     goal, judge = (js.goal, js.judge) if js else (None, None)
@@ -1601,7 +1593,6 @@ def _enrol_resumed(board, agent_id: str, resume: dict, payload: dict, cfg: dict)
               f"restart isn't needed. Stop now: end your turn without further tool calls.")
         return
     _record_enrolment(cfg, agent_id, job, payload.get("session_id"), payload)
-    _drive_judge_flag(board, cfg, agent_id, job, payload, resume)
     if coordinator:
         from swarm import enrolment
         from swarm.board.autoinit import store_key
@@ -1640,24 +1631,6 @@ def _reuse_identity_resumed(board, agent_id: str, resume: dict, payload: dict, c
         _log_error("resumed identity", agent_id, exc)
 
 
-def _drive_judge_flag(board, cfg: dict, agent_id: str, job: str, payload: dict, resume: dict) -> None:
-    """A driver-launched launch whose ledger-authorized role is judge takes the job's judge launch (QA bug 4): the
-    flag comes from the host-private launch and the launch's receipted role (drivegate.is_drive_judge), never
-    from a tag in the prompt. Never raises: a launch that is not a judge stays a worker."""
-    try:
-        from swarm import drivegate
-        if drivegate.is_drive_judge(cfg, board, job, payload, resume=resume):
-            board.take_judge_launch(agent_id, job)
-    except Exception as exc:
-        _log_error("drive judge", agent_id, exc)
-
-
-def _drive_job(cfg: dict, job: str) -> bool:
-    """Whether `job` is a drive job on this host (drivegate.drive_job: a ledger, readable or not)."""
-    from swarm import drivegate
-    return drivegate.drive_job(cfg, job)
-
-
 def _first_call_of_resumed(board, agent_id: str, job: str) -> bool:
     """Whether this tool call is the first of a session `swarm resume` started: its launch (a row with
     resume_of) was claimed up front, so it is a member already, but it has not been welcomed yet."""
@@ -1669,7 +1642,7 @@ def _supervise_off(board, cfg: dict, job: str) -> str | None:
     """Why no replacement may join now (a kill switch: [supervise] enabled, supervise.off, the
     job's --no-supervise), or None."""
     from swarm.supervisor.settings import off_reason
-    why = off_reason(cfg, drive=_drive_job(cfg, job))   # a drive launch ignores [supervise] enabled
+    why = off_reason(cfg)
     if why:
         return why
     js = board.job_status(job)
@@ -1831,7 +1804,6 @@ def _judge_recorded_verdict(board, agent_id: str) -> bool:
     if js is None:
         return False
     data = board.job_data(job)
-    gen = None   # no drive generations any more: a leftover drive.generation must not hide a verdict
     def current(record):
         if not record or record.get('judge') != me.name:
             return False
@@ -1858,8 +1830,6 @@ def _judge_recorded_verdict(board, agent_id: str) -> bool:
     if artifact is not None:
         verdict = review.artifact_verdicts(board, job).get(artifact)
         return bool(current(verdict) and (handoff is None or review.covered(handoff, verdict)))
-    if gen:
-        return False
     at, joined = js.verdict_at, me.joined_at
     if at is None or js.verdict_by != me.name:
         return False
@@ -2394,8 +2364,8 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
     if resume is not None:   # a supervisor replacement's root session: it is the member
         agent_id = resume["resume"].get("agent_key") or sid
     elif not agent_id and _replacement_token():
-        if event in ("turn", "done"):   # a drive launch whose marker is gone is still gated, and its receipts written
-            _drive_event(event, cfg, payload, None)
+        if event in ("turn", "done"):   # a launch whose marker is gone is not gated (no run file names it)
+            _launch_gate(event, cfg, payload, None)
         return 0   # a session started by (or inside) a replacement that isn't it: never an orchestrator
     if event == "session-end" and current_host().completes_on(event):
         _codex_session_end(cfg, sid, agent_id if resume is None and agent_id != sid else None, payload)
@@ -2405,7 +2375,7 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
     elif event == "session-stop" and agent_id:
         return 0   # harness subagents use SubagentStop
 
-    if event in ("turn", "done") and _drive_event(event, cfg, payload, resume):
+    if event == "turn" and _launch_gate(event, cfg, payload, resume):
         return 0   # refused: the denial is written
 
     lease = _CURRENT.get('lease')
@@ -2512,19 +2482,12 @@ def _unchecked_verifier_write(payload: dict, agent_id: str) -> bool:
 
 
 
-# --- drive jobs (spec 3.4, 3.11, 4.0, 4.5): the logic is in swarm.drivegate --------------------------------
-
-def kick(now=time.time) -> bool:
-    """Wake the session drivers (swarm.drivegate.kick touches the wake files; the CLI calls that one, because this
-    module is not in the directory edition). True when a wake file was touched; never raises."""
-    from swarm import drivegate
-    return drivegate.kick(now)
-
+# --- launches: the sandbox is in swarm.drivegate ----------------------------------------------------------
 
 def _wake_drivers(event: str, cfg: dict, payload: dict) -> None:
-    """Spec 3.11 [T21]: a hook's board write wakes the session drivers of the board (its wake file). Not for
-    PreToolUse, and after a tool call only when it ran a swarm command (the CLI touches too, unless a sandbox
-    keeps it out of the private directory). Nothing on a host that never activated a drive job. Never raises."""
+    """A hook's board write wakes the pass of the board (its wake file). Not for PreToolUse, and after a tool
+    call only when it ran a swarm command (the CLI touches too, unless a sandbox keeps it out of the private
+    directory). Never raises."""
     try:
         if event == "turn":
             return
@@ -2535,54 +2498,40 @@ def _wake_drivers(event: str, cfg: dict, payload: dict) -> None:
         from swarm.supervisor import wake
         wake.touch_cfg(cfg)
     except Exception as exc:
-        _log_error("drive wake", str(payload.get("agent_id") or payload.get("session_id")), exc)
+        _log_error("wake", str(payload.get("agent_id") or payload.get("session_id")), exc)
 
 
-def _drive_event(event: str, cfg: dict, payload: dict, resume: dict | None) -> bool:
-    """The drive gate of PreToolUse (every call of every session, before anything else a hook does: a join, a
-    first call and a launch of an unbound job included) and the receipts of PostToolUse. True when the call was
+def _launch_gate(event: str, cfg: dict, payload: dict, resume: dict | None) -> bool:
+    """The launch sandbox of PreToolUse (every call, before anything else a hook does). True when the call was
     refused (the denial is written). The payload's own agent_id is what tells a main session from a subagent.
-    A session of a drive job (a launch, its subagents, the requester) never holds a fast-path lease: the shell
-    entry would serve its next calls without Python, and with them the gate and the receipts."""
-    from swarm import paths
-    if not (paths.share_dir() / "supervisor" / "drive").is_dir():
-        return False   # no drive job was ever activated on this host: nothing below applies (and nothing is imported)
+    A launch (or a subagent of one) never holds a fast-path lease: the shell entry would serve its next calls
+    without Python, and with them the gate."""
+    if event != "turn":
+        return False
     ctx = None
     try:
         from swarm import drivegate
-        host = current_host()
         try:
             ctx = drivegate.classify(cfg, payload, resume, _resume_binding)
         except Exception as exc:
-            _log_error("drive classify", str(payload.get("agent_id") or payload.get("session_id")), exc)
+            _log_error("launch classify", str(payload.get("agent_id") or payload.get("session_id")), exc)
             _no_lease(payload)
-            if event == "turn":     # fail closed: a session that cannot be classified on a drive host retries
-                _deny("[swarm] The drive gate could not classify this session; retry the call.")
-                return True
-        if ctx is not None:
-            _no_lease(payload)
-        if event == "done":
-            drivegate.drop_grants(cfg, payload, host)   # a grant never outlives its call
-            drivegate.post_tool(cfg, payload, host, resume=resume, resume_lookup=_resume_binding)
             return False
-        why = drivegate.pre_tool(cfg, payload, host, resume=resume, resume_lookup=_resume_binding, ctx=ctx)
-        if why is None:
-            try:   # who runs a control command, for the CLI (swarm.person): before it runs, if it may run
-                drivegate.write_grants(cfg, payload, host, ctx)
-            except Exception as exc:
-                _log_error("drive grant", str(payload.get("agent_id") or payload.get("session_id")), exc)
-    except Exception as exc:   # never break the agent (a known drive launch's errors are refused inside pre_tool)
-        _log_error("drive", str(payload.get("agent_id") or payload.get("session_id")), exc)
+        if ctx is None:
+            return False
+        _no_lease(payload)
+        why = drivegate.pre_tool(cfg, payload, current_host(), resume=resume, resume_lookup=_resume_binding, ctx=ctx)
+    except Exception as exc:   # never break the agent (a known launch's errors are refused inside pre_tool)
+        _log_error("launch gate", str(payload.get("agent_id") or payload.get("session_id")), exc)
         return False
     if why is None:
         return False
-    _deny(f"[swarm] Refused in a drive job: {why}. Land work with `swarm land`; queue launches "
-          f"with `swarm run`.")
+    _deny(f"[swarm] Refused in a launch: {why}. Land work with `swarm land`; queue launches with `swarm run`.")
     return True
 
 
 def _no_lease(payload: dict) -> None:
-    """End this session's fast-path lease and issue no new one (see _drive_event). Never raises."""
+    """End this session's fast-path lease and issue no new one (see _launch_gate). Never raises."""
     try:
         from swarm import fastpath
         fastpath.invalidate(payload)
