@@ -442,19 +442,11 @@ SELECT j.job, j.status, j.description, j.task, j.outcome, j.created_by, j.sessio
        (SELECT count(*) FROM blockers b WHERE b.job=j.job AND b.state='open'
          AND (b.protection_rule='always' OR (b.protection_rule='addressed' AND b.waiting_on <> 'external')
               OR b.until>now())) AS protected_blockers,
-       -- what `status` shows (base.derive_job_status): closed jobs their status, open ones waiting /
-       -- active / waiting (goal not met: a goal without a met verdict and nobody started, running
-       -- or idle; no sweep closes it) / idle
+       -- what `status` shows (base.derive_job_status): a closed job its status; an open one "waiting" only while a
+       -- `swarm ask` question is open, else "active" (owner's rule of 2026-10-17: no other wait state)
        CASE WHEN j.status <> 'active' THEN j.status
-            WHEN EXISTS (SELECT 1 FROM blockers b WHERE b.job=j.job AND b.state='open') THEN 'waiting'
-            WHEN COALESCE(j.waiting_on, '') <> '' THEN 'waiting'
-            WHEN COALESCE(s.started, 0) + COALESCE(s.running, 0) > 0 THEN 'active'
-            WHEN COALESCE(j.goal, '') <> '' AND j.verdict IS DISTINCT FROM 'met'
-                 AND j.verdict IS DISTINCT FROM 'unreachable' AND COALESCE(s.idle, 0) = 0 THEN 'waiting (goal not met)'
-            WHEN greatest(s.last_contact_at, m.last_post_at,
-                          CASE WHEN j.activated_at <= now() THEN j.activated_at END,
-                          CASE WHEN j.created_at <= now() THEN j.created_at END) > now() - make_interval(mins => {idle}) THEN 'active'
-            ELSE 'idle'
+            WHEN EXISTS (SELECT 1 FROM blockers b WHERE b.job=j.job AND b.state='open' AND b.kind='question') THEN 'waiting'
+            ELSE 'active'
        END AS shown_status
   FROM jobs j
   LEFT JOIN LATERAL (

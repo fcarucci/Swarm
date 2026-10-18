@@ -33,7 +33,12 @@ class SnapshotBoard:
         # Each idle or dead agent's newest post, taken in the same statement (agentview.last_post).
         self._last_posts = {(m.job, m.agent_name): m for m in rows(Message, row[9] if len(row) > 9 else [])}
         from swarm.review import pipeline_status
-        self.job_rows = [replace(job, **pipeline_status(self.plugin_data.get(job.job)))
+        questions = {}
+        for b in self.blocker_rows:   # open `swarm ask` questions, as job_status counts them (_with_questions)
+            if b.kind == "question" and b.state == "open":
+                questions[b.job] = questions.get(b.job, 0) + 1
+        self.job_rows = [replace(job, open_questions=questions.get(job.job, 0),
+                                 **pipeline_status(self.plugin_data.get(job.job)))
                          for job in self.job_rows]
 
     def now(self):

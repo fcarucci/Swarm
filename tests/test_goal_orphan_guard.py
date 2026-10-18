@@ -91,8 +91,9 @@ class OrphanGuardTests(unittest.TestCase):
         self.h.conn.execute("UPDATE jobs SET created_at = now() - interval '10 hours', "
                             "activated_at = now() + interval '10 hours' WHERE job = 'f'")
         js = self.board.job_status("f")
-        self.assertEqual(base.derive_job_status(js, 30, self.board.now()), "idle")
-        self.assertEqual(self.h.shown_status("f"), "idle")
+        # an open job is active unless a question is open (no idle state since 2026-10-17); view and Python agree
+        self.assertEqual(base.derive_job_status(js, 30, self.board.now()), "active")
+        self.assertEqual(self.h.shown_status("f"), "active")
 
 
 if __name__ == "__main__":
