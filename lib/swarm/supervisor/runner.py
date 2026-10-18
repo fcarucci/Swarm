@@ -1132,6 +1132,36 @@ def _marker_session(marker: str) -> str | None:
     return str(sid) if sid else None
 
 
+def _enrol_native_session(board, cfg: dict, run: dict, key: str) -> None:
+    """Bind a trusted native launch's discovered session without relying on hooks.
+
+    Called only for the runner's own thread.started event, before publishing the
+    session to its broker. Never infer an assignment from a client name/session.
+    """
+    from swarm import enrolment
+    from swarm.board.autoinit import store_key
+    launch_id = run.get("launch_id")
+    expected = "launch:" + str(launch_id)
+    restart = next((r for r in board.restarts(run["job"]) if r.id == run["restart_id"]), None)
+    task = next((r for r in board.launches(run["job"]) if r.launch_id == launch_id), None)
+    agents = board.agents(run["job"], include_departed=True)
+    old = next((a for a in agents if a.agent_key == expected), None)
+    current = next((a for a in agents if a.agent_key == key), None)
+    if (run.get("harness") != "codex" or not launch_id or run.get("resume_of") != expected or restart is None
+            or restart.ended_at is not None or restart.launch_id != launch_id
+            or restart.new_agent_key not in (None, key) or task is None or task.state != "running"
+            or old is None or old.ended_at is None or old.name != run["name"] or old.role != task.role
+            or (current is None and board.active_agent_name(key) is not None)
+            or (current is not None and (current.ended_at is not None
+                or not _replacement_row(current, run) or current.name != run["name"]))):
+        raise ValueError("native session does not match its live assigned launch")
+    if board.claim_resume(key, expected, run["job"]) != run["name"]:
+        raise ValueError("native launch predecessor cannot be claimed")
+    board.record_route(key, key, "final", run["job"])
+    enrolment.write(store_key(cfg), job=run["job"], agent_key=key, harness=run["harness"],
+                    session_id=key, cwd=run["cwd"])
+
+
 def _agent_row(cfg, job, key):
     from swarm.board import open_board
     with open_board(cfg) as b:
@@ -1468,6 +1498,15 @@ def _execute(cfg: dict, run: dict, *, popen, clock, sleep, poll: float, board_ev
                         continue
                     if isinstance(ev, dict) and ev.get("type") == "thread.started" and ev.get("thread_id"):
                         tid = str(ev["thread_id"])
+                        if run.get("launch_id"):
+                            try:
+                                from swarm.board import open_board
+                                with open_board(cfg) as b:
+                                    _enrol_native_session(b, cfg, run, tid)
+                                    b.set_restart_agent(rid, tid)
+                            except Exception as exc:
+                                log(f"native session binding of restart {rid} refused: {type(exc).__name__}")
+                                continue  # no broker identity until trusted enrollment succeeds
                         run["agent_key"] = tid
                         markers.bind_session(Path(run["marker"]), tid)
                         try:

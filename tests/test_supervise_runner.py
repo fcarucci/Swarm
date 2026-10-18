@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 import json
 import os
@@ -507,6 +508,106 @@ class BoardNamespaceTests(RunnerBase):
             self.assertEqual(runner.reap(self.cfg, b), 0)
         self.assertTrue(legacy.exists())
         self.assertIsNone(self.restart().outcome)
+
+
+class NativeTaskIdentityTests(RunnerBase):
+    def setUp(self):
+        with mock.patch('support.E2E_BACKEND', 'sqlite'):
+            super().setUp()
+
+    def test_hookless_native_session_reports_own_task_then_releases_dependency(self):
+        import subprocess
+        from swarm import dependencies, enrolment, launchproto, passcmd
+        from swarm.supervisor import launchbroker
+        sid = '00000000-0000-4000-8000-0000000000ab'
+        artifact = 'main@' + 'a' * 40
+        staged = []
+        with self.board() as board:
+            board.open_job('N', None, None, None, 'owner', goal='Native task lifecycle')
+            for name, depends in (('author', []), ('next', ['author'])):
+                row = dependencies.register(board, 'N', 1, name, artifact=artifact, depends=depends,
+                    role='engineer', harness='codex', model='gpt-6-astra', workdir=str(self.workdir),
+                    brief='Verify exact source', queued_by='owner')
+            author = board.get_launch('N', 1, 'author')
+            with mock.patch('swarm.supervisor.launch.codex_command', return_value=['codex']):
+                passcmd._start_one(board, self.cfg, 'N', author, 1.0, lambda cfg, run: staged.append(run))
+        enrolment.write_job(store_key(self.cfg), job='N', harness='codex', session_id='owner', cwd=str(self.workdir))
+        run = staged[0]
+        with self.board() as board:
+            board.open_job('FOREIGN', None, None, None, 'owner', goal='Other running launch')
+            foreign = board.allocate_name('foreign-running-session', 'FOREIGN', 'engineer')
+            board.record_route('foreign-running-session', 'foreign-running-session', 'final', 'FOREIGN')
+            with self.assertRaises(ValueError):
+                runner._enrol_native_session(board, self.cfg, run, 'foreign-running-session')
+            self.assertEqual(board.active_agent_name('foreign-running-session'), foreign)
+            self.assertEqual(board.route('foreign-running-session').session_id, 'foreign-running-session')
+        run['argv'] = [fake(self.bin / 'codex', "cat >/dev/null; echo '{\"type\":\"thread.started\",\"thread_id\":\"" + sid + "\"}'\n")]
+        directory = self.tmp / 'own-broker'
+        directory.mkdir()
+        body = launchproto.parse_cli(['task', 'report', '--job', 'N', '--name', 'author',
+            '--generation', '1', '--artifact', artifact, '--outcome', 'passed', '--reason', 'exact native source',
+            '--as', 'forged-name'], str(self.workdir))
+        def execute_cli(cmd, **kw):
+            cmd = list(cmd)
+            cmd[3] = cmd[3].replace('rc = cli.main(argv)',
+                'from unittest.mock import patch\nwith patch("swarm.dependencies.wake", return_value=None):\n    rc = cli.main(argv)')
+            return subprocess.run(cmd, **kw)
+        finish = runner.finish
+        def report_before_normal_end(cfg, current, outcome):
+            broker = launchbroker.LaunchBroker(current, str(directory), workdir=str(self.workdir),
+                forbid=[], launch_dir=str(self.tmp / 'launch'), config=str(self.config), host_pid=None,
+                runner=execute_cli)
+            rc, out, err = broker.do_cli(body)
+            self.assertEqual(rc, 0, err.decode())
+            self.assertIn(b'evidence recorded', out)
+            with self.board() as board:
+                agent = next(a for a in board.agents('N') if a.agent_key == sid)
+                self.assertEqual((agent.name, agent.resume_of), (current['name'], current['resume_of']))
+                self.assertEqual(board.route(sid).session_id, sid)
+                self.assertTrue(enrolment.owns(store_key(cfg), sid, 'N'))
+                joined = agent.joined_at
+                runner._enrol_native_session(board, cfg, current, sid)
+                runner._enrol_native_session(board, cfg, current, sid)
+                self.assertEqual(next(a for a in board.agents('N') if a.agent_key == sid).joined_at, joined)
+                self.assertIsNotNone(dependencies.block_reason(board, board.get_launch('N', 1, 'next')))
+                other = board.allocate_name('other-session', 'N', 'engineer')
+                board.record_route('other-session', 'other-session', 'final', 'N')
+            enrolment.write(store_key(cfg), job='N', agent_key='other-session', harness='codex',
+                session_id='other-session', cwd=str(self.workdir))
+
+            with self.board() as board:
+                for foreign in ({**current, 'launch_id': 'foreign-running-launch'},
+                                {**current, 'resume_of': 'other-session'}):
+                    with self.assertRaises(ValueError):
+                        runner._enrol_native_session(board, cfg, foreign, sid)
+                with self.assertRaises(ValueError):
+                    runner._enrol_native_session(board, cfg, current, 'other-session')
+                self.assertEqual(board.route('other-session').session_id, 'other-session')
+                self.assertEqual(enrolment.find(store_key(cfg), 'other-session').session_id, 'other-session')
+            for name in (current['name'], other):
+                bad = launchbroker.LaunchBroker({**current, 'agent_key': 'other-session', 'name': name},
+                    str(directory), workdir=str(self.workdir), forbid=[], launch_dir=str(self.tmp / 'launch'),
+                    config=str(self.config), host_pid=None, runner=execute_cli)
+                self.assertEqual(bad.do_cli(body)[0], 1)
+            return finish(cfg, current, outcome)
+        with mock.patch.object(runner, '_launch_argv', side_effect=lambda cfg, r: (r['argv'], None)), \
+             mock.patch.object(runner, 'finish', side_effect=report_before_normal_end), \
+             mock.patch('swarm.dependencies.wake', return_value=None):
+            self.assertEqual(self.execute(run), 'completed')
+        with self.board() as board:
+            passcmd._settle(board, 'N', self.cfg)
+            author = board.get_launch('N', 1, 'author')
+            nxt = board.get_launch('N', 1, 'next')
+            self.assertEqual(author.state, 'done')
+            with self.assertRaises(ValueError):
+                runner._enrol_native_session(board, self.cfg, run, sid)
+            self.assertEqual(dependencies.evidence(board, author)['actor'], run['name'])
+            self.assertIsNone(dependencies.block_reason(board, nxt))
+            successors = []
+            with mock.patch('swarm.supervisor.launch.codex_command', return_value=['codex']):
+                passcmd._start_one(board, self.cfg, 'N', nxt, 1.0, lambda cfg, r: successors.append(r))
+            self.assertEqual(len(successors), 1)
+            self.assertNotEqual(successors[0]['launch_id'], run['launch_id'])
 
 
 class RunnerTests(RunnerBase):
