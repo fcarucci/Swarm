@@ -129,7 +129,7 @@ def open_question(ctx, board, job, actor, to, text, options=None, default=None, 
     with board._blocker_lock(job):
         b = board.open_blocker(job, 'question', to, text, until=until,
                                default_value=default, created_by=actor,
-                               launch=launch, generation=None)
+                               launch=launch)
         save_question(ctx, board, b, {'text': text, 'options': options, 'default': default,
                                      'blocks': blocks, 'asked_by': actor})
     pointer = f' (answer: swarm answer {b.id} ...)'

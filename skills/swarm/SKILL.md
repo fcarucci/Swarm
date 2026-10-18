@@ -240,7 +240,7 @@ do with an event is the business of the plugin or skill that posts it.
 
 ## Goal jobs and `swarm pass`
 
-A job with a goal is kept moving by `swarm pass`, a stateless sweep the hooks run before tool calls (at most once a minute per host) and anyone can run by hand. There is no session driver, no timer, no ledger and no hold.
+A job with a goal is kept moving by `swarm pass`, a stateless sweep the hooks run before tool calls (at most once a minute per host) and anyone can run by hand. There is no session driver, no timer and no hold.
 
 - **States:** a job is `active`, `waiting` (only while a question asked with `swarm ask --to <person>` is open), or closed: `completed`, `failed`, `cancelled`. Nothing else.
 - **Activate:** `swarm activate --job J --goal G`, then queue the lead: `swarm run --job J --name lead-1 --role lead --brief PATH --workdir DIR`.

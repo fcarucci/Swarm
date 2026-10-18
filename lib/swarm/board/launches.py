@@ -143,8 +143,6 @@ class MemoryLaunches:
 
 
 def launches_schema(pg=False):
-    id_type = "bigserial PRIMARY KEY" if pg else "INTEGER PRIMARY KEY AUTOINCREMENT"
-    ts = "timestamptz" if pg else "TEXT"
     real = "double precision" if pg else "REAL"
     big = "bigint" if pg else "INTEGER"
     alter = "ALTER TABLE restarts ADD COLUMN IF NOT EXISTS {} {};\n" if pg else ""
@@ -156,32 +154,63 @@ def launches_schema(pg=False):
 CREATE UNIQUE INDEX IF NOT EXISTS restarts_action_attempt ON restarts (job, action_id, attempt)
  WHERE action_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS restarts_launch_id ON restarts (launch_id) WHERE launch_id IS NOT NULL;
-CREATE TABLE IF NOT EXISTS launches (
- id {id_type}, job TEXT NOT NULL REFERENCES jobs(job) ON DELETE CASCADE, generation {big} NOT NULL,
+{launches_table(pg, "IF NOT EXISTS launches")}
+"""
+
+
+def launches_table(pg, name):
+    id_type = "bigserial PRIMARY KEY" if pg else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    ts = "timestamptz" if pg else "TEXT"
+    big = "bigint" if pg else "INTEGER"
+    return f"""CREATE TABLE {name} (
+ id {id_type}, job TEXT NOT NULL REFERENCES jobs(job) ON DELETE CASCADE,
  name TEXT NOT NULL, role TEXT NOT NULL, harness TEXT NOT NULL CHECK (harness IN ('claude', 'codex')),
  model TEXT, workdir TEXT NOT NULL, brief TEXT NOT NULL,
  state TEXT NOT NULL CHECK (state IN ('queued', 'running', 'done', 'failed')),
  attempts {big} NOT NULL DEFAULT 0, last_outcome TEXT, queued_by TEXT NOT NULL,
  revision {big} NOT NULL DEFAULT 1, agent_key TEXT, session_id TEXT, updated_at {ts} NOT NULL, launch_id TEXT,
- UNIQUE (job, generation, name));
-"""
+ UNIQUE (job, name));"""
+
+
+def _drop_launch_generation(c, pg):
+    """Boards from before the drive purge have launches.generation NOT NULL and UNIQUE (job, generation, name);
+    rebuild the table without it, keeping the newest row per (job, name)."""
+    if pg:
+        old = c.execute("SELECT 1 FROM information_schema.columns WHERE table_name='launches' "
+                        "AND column_name='generation' AND table_schema=current_schema()").fetchone()
+    else:
+        old = any(r[1] == "generation" for r in c.execute("PRAGMA table_info(launches)").fetchall())
+    if not old:
+        return
+    c.execute("ALTER TABLE launches RENAME TO launches_gen")
+    c.execute(launches_table(pg, "launches"))
+    c.execute(f"INSERT INTO launches ({LAUNCH_COLS}) SELECT {LAUNCH_COLS} FROM launches_gen "
+              "WHERE id IN (SELECT MAX(id) FROM launches_gen GROUP BY job, name)")
+    c.execute("DROP TABLE launches_gen")
+    if pg:
+        c.execute("SELECT setval(pg_get_serial_sequence('launches', 'id'), "
+                  "COALESCE((SELECT MAX(id) FROM launches), 1), EXISTS(SELECT 1 FROM launches))")
 
 
 def migrate_launches(c, pg=False):
-    """One transactional copy from pre-26 storage. Repeated setup is harmless."""
+    """One transactional copy from pre-26 storage, then the generation column's removal. Repeated setup is harmless."""
     if pg:
         exists = c.execute(f"SELECT to_regclass('{LEGACY_TABLE}')").fetchone()[0] is not None
     else:
         exists = c.execute(f"SELECT 1 FROM sqlite_master WHERE type='table' AND name='{LEGACY_TABLE}'").fetchone() is not None
-    if not exists:
-        return
+    if exists:
+        _copy_legacy_launches(c, pg)
+    _drop_launch_generation(c, pg)
+
+
+def _copy_legacy_launches(c, pg):
     cols = LAUNCH_COLS.replace("name,", LEGACY_NAME + ",").replace("brief,", "brief_path,")
     cols = cols.replace("attempts,", "launches,").replace("queued_by", "requested_by")
     expr = cols.replace("state,", "CASE state WHEN 'requested' THEN 'queued' WHEN 'idle' THEN 'done' "
                         "WHEN 'released' THEN 'done' WHEN 'refused' THEN 'failed' "
                         "WHEN 'cancelled' THEN 'failed' WHEN 'running' THEN "
                         "CASE WHEN launch_id IS NULL THEN 'done' ELSE 'running' END ELSE state END,")
-    c.execute(f"INSERT INTO launches (generation, {LAUNCH_COLS}) SELECT 1, {expr} FROM {LEGACY_TABLE} WHERE true ON CONFLICT DO NOTHING")
+    c.execute(f"INSERT INTO launches ({LAUNCH_COLS}) SELECT {expr} FROM {LEGACY_TABLE} WHERE true ON CONFLICT DO NOTHING")
     c.execute(f"DROP TABLE {LEGACY_TABLE}")
     if pg:
         c.execute("SELECT setval(pg_get_serial_sequence('launches', 'id'), "
@@ -240,9 +269,9 @@ class SqlLaunches:
         with self._launch_tx() as c:
             now = self._launch_time(self.now())
             row = self._exec(c,
-                "INSERT INTO launches (job, generation, name, role, harness, model, workdir, brief, "
-                "queued_by, state, updated_at) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, 'queued', ?) "
-                "ON CONFLICT (job, generation, name) DO UPDATE SET role=excluded.role, harness=excluded.harness, "
+                "INSERT INTO launches (job, name, role, harness, model, workdir, brief, "
+                "queued_by, state, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?) "
+                "ON CONFLICT (job, name) DO UPDATE SET role=excluded.role, harness=excluded.harness, "
                 "model=excluded.model, workdir=excluded.workdir, brief=excluded.brief, "
                 "queued_by=excluded.queued_by, state='queued', last_outcome=NULL, session_id=NULL, agent_key=NULL, "
                 "revision=launches.revision+1, updated_at=excluded.updated_at "

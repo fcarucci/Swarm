@@ -98,7 +98,7 @@ class LaunchMigration(unittest.TestCase):
                 b.queue_launch("J", state, role="engineer", harness="claude", model="haiku", workdir="/work",
                                brief="B.md", queued_by="lead")
             with b._tx() as c:
-                c.execute("CREATE TABLE seats AS SELECT id, job, generation, name AS seat, role, harness, model, "
+                c.execute("CREATE TABLE seats AS SELECT id, job, name AS seat, role, harness, model, "
                           "workdir, brief AS brief_path, state, attempts AS launches, last_outcome, "
                           "queued_by AS requested_by, revision, agent_key, session_id, updated_at, launch_id FROM launches")
                 c.execute("UPDATE seats SET state=seat, launch_id=CASE WHEN seat='running' THEN 'live' ELSE NULL END")
@@ -113,6 +113,34 @@ class LaunchMigration(unittest.TestCase):
             self.assertIsNone(b._conn.execute("SELECT name FROM sqlite_master WHERE name='seats'").fetchone())
             self.assertEqual(b.queue_launch("J", "failed", role="engineer", harness="claude", model="haiku",
                                             workdir="/work", brief="B.md", queued_by="lead").state, "queued")
+
+    def test_sqlite_rebuilds_launches_without_the_generation_column(self):
+        from swarm.board import setup_board
+        h = drive_backends()["sqlite"](self.id())
+        self.addCleanup(h.close)
+        h.reset()
+        with h.board() as b:
+            b.open_job("J", None, None, None, "me", goal="g")
+            b.queue_launch("J", "a", role="engineer", harness="claude", model="haiku", workdir="/work",
+                           brief="B.md", queued_by="lead")
+            with b._tx() as c:
+                c.execute("ALTER TABLE launches RENAME TO launches_new")
+                c.execute("CREATE TABLE launches (id INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL, "
+                          "generation INTEGER NOT NULL, name TEXT NOT NULL, role TEXT NOT NULL, harness TEXT NOT NULL, "
+                          "model TEXT, workdir TEXT NOT NULL, brief TEXT NOT NULL, state TEXT NOT NULL, "
+                          "attempts INTEGER NOT NULL DEFAULT 0, last_outcome TEXT, queued_by TEXT NOT NULL, "
+                          "revision INTEGER NOT NULL DEFAULT 1, agent_key TEXT, session_id TEXT, "
+                          "updated_at TEXT NOT NULL, launch_id TEXT, UNIQUE (job, generation, name))")
+                c.execute("INSERT INTO launches SELECT id, job, 1, name, role, harness, model, workdir, brief, state, "
+                          "attempts, last_outcome, queued_by, revision, agent_key, session_id, updated_at, launch_id "
+                          "FROM launches_new")
+                c.execute("DROP TABLE launches_new")
+        setup_board(h.cfg, {})
+        setup_board(h.cfg, {})
+        with h.board() as b:
+            cols = [r[1] for r in b._conn.execute("PRAGMA table_info(launches)")]
+            self.assertNotIn("generation", cols)
+            self.assertEqual([r.name for r in b.launches("J")], ["a"])
 
     def test_file_backend_reads_legacy_rows_as_launches(self):
         h = drive_backends()["file"](self.id())

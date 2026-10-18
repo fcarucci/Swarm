@@ -444,7 +444,7 @@ CREATE TABLE IF NOT EXISTS blockers (
  state TEXT NOT NULL CHECK(state IN ('open','resolved','expired')), created_by TEXT,
  created_at {timestamp} NOT NULL, resolved_by TEXT, resolved_how TEXT, resolved_at {timestamp},
  protection_rule TEXT NOT NULL DEFAULT 'addressed' CHECK(protection_rule IN ('addressed','always','deadline')),
- {LEGACY_LAUNCH_COLUMN} TEXT, generation INTEGER);
+ {LEGACY_LAUNCH_COLUMN} TEXT);
 CREATE INDEX IF NOT EXISTS blockers_job_state ON blockers(job,state,id);
 CREATE TABLE IF NOT EXISTS blocker_events (
  id {id_type}, blocker BIGINT NOT NULL REFERENCES blockers(id), at {timestamp} NOT NULL,
@@ -460,16 +460,13 @@ def migrate_sql(c, pg=False):
         c.execute("ALTER TABLE blockers ADD COLUMN IF NOT EXISTS protection_rule TEXT NOT NULL DEFAULT 'addressed' CHECK(protection_rule IN ('addressed','always','deadline'))")
     elif "protection_rule" not in {r[1] for r in c.execute("PRAGMA table_info(blockers)")}:
         c.execute("ALTER TABLE blockers ADD COLUMN protection_rule TEXT NOT NULL DEFAULT 'addressed' CHECK(protection_rule IN ('addressed','always','deadline'))")
-    # schema 25: the launch a blocker concerns (NULL: the job's own); `generation` is an unused legacy column
+    # schema 25: the launch a blocker concerns (NULL: the job's own)
     if pg:
         c.execute(f"ALTER TABLE blockers ADD COLUMN IF NOT EXISTS {LEGACY_LAUNCH_COLUMN} TEXT")
-        c.execute("ALTER TABLE blockers ADD COLUMN IF NOT EXISTS generation integer")
     else:
         have = {r[1] for r in c.execute("PRAGMA table_info(blockers)")}
         if LEGACY_LAUNCH_COLUMN not in have:
             c.execute(f"ALTER TABLE blockers ADD COLUMN {LEGACY_LAUNCH_COLUMN} TEXT")
-        if "generation" not in have:
-            c.execute("ALTER TABLE blockers ADD COLUMN generation INTEGER")
     c.execute("UPDATE blockers SET protection_rule='deadline' WHERE kind='wait'")
     if pg:
         c.execute("SELECT job FROM jobs WHERE waiting_on IS NOT NULL FOR UPDATE")
