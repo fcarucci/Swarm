@@ -1448,7 +1448,7 @@ WRITE_METHODS = (
     "save_transcript", "refresh_transcript", "mark_capture_failed", "rotate_transcripts",
     "save_memory_ref", "mark_memory_refs_checked", "delete_memory_refs",
     "open_blocker", "resolve_blocker", "reopen_blocker", "comment_blocker", "expire_blockers", "_overdue_blocker",
-    "queue_launch", "set_launch_state", "claim_drive_launch", "renew_drive_locks", "release_drive_locks",
+    "queue_launch", "set_launch_state", "claim_drive_launch", "reopen_failed_job", "renew_drive_locks", "release_drive_locks",
     "post_event", "ack_events",
     "pause_job", "begin_resume", "record_resume_outcome", "set_message_cap",
 )
@@ -2485,6 +2485,15 @@ class Board(abc.ABC):
     def queue_launch(self, job: str, generation: int, name: str, *, role: str, harness: str,
                      model: str | None, workdir: str, brief: str, queued_by: str) -> Launch:
         """Queue by name, in any state. Every call creates a new queue version; names never die."""
+
+    @abc.abstractmethod
+    def failed_launch_retries(self) -> list[tuple[str, _dt.datetime, int, int]]:
+        """Failed jobs with a fresh queued `swarm run` fact: job, failed_at, launch id, revision."""
+
+    @abc.abstractmethod
+    def reopen_failed_job(self, job: str, failed_at: _dt.datetime, launch_id: int, revision: int) -> bool:
+        """Atomically reopen only that failed epoch and fresh queued request; preserve owner limits.
+        Retire pre-failure queued work. Cancellation/completion or a changed request refuses the CAS."""
 
     @abc.abstractmethod
     def launches(self, job: str, generation: int | None = None, include_closed: bool = True) -> list[Launch]:

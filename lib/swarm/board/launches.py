@@ -19,6 +19,7 @@ LEGACY_NAME = "se" "at"
 LEGACY_TABLE = LEGACY_NAME + "s"  # schema-25 table, retained only for migration
 LOCK_COLS = "key, holder, job, generation, launch_id, host, expires_at, path"
 STATE_FIELDS = ("agent_key", "session_id", "last_outcome")
+SUPERSEDED = "superseded by new run"
 _NAME = re.compile(r"[a-z][a-z0-9_~-]{0,63}")
 
 
@@ -69,6 +70,35 @@ class _Refused(Exception):
 
 
 class MemoryLaunches:
+    def failed_launch_retries(self):
+        s = self._s()
+        with s.lock:
+            return [(r["job"], s.jobs[r["job"]]["finished_at"], r["id"], r["revision"])
+                    for r in s.launches if r["state"] == "queued" and r["queued_by"] == "swarm run"
+                    and (j := s.jobs.get(r["job"])) and j["status"] == "failed"
+                    and j.get("finished_at") and r["updated_at"] > j["finished_at"]]
+
+    def reopen_failed_job(self, job, failed_at, launch_id, revision):
+        s = self._s()
+        with s.lock:
+            j = s.jobs.get(job)
+            if not j or j["status"] != "failed" or not failed_at or j.get("finished_at") != failed_at:
+                return False
+            if not any(r["job"] == job and r["id"] == launch_id and r["revision"] == revision
+                       and r["state"] == "queued" and r["queued_by"] == "swarm run"
+                       and r["updated_at"] > failed_at for r in s.launches):
+                return False
+            for row in s.launches:
+                if row["job"] == job and row["state"] == "queued" and row["updated_at"] <= failed_at:
+                    row.update(state="failed", last_outcome=SUPERSEDED, revision=row["revision"] + 1,
+                               updated_at=self.now())
+            max_hours = j.get("max_hours")
+            self.open_job(job, None, None, None, None)
+            self.set_job_max_hours(job, max_hours)
+            self.set_job_data(job, "pass_acked", None)
+            self.set_job_data(job, "pass_notified", None)
+            return True
+
     def queue_launch(self, job, generation, name, *, role, harness, model, workdir, brief, queued_by):
         check_launch(name, generation, role, harness, workdir, brief, queued_by)
         s = self._s()
@@ -124,6 +154,8 @@ class MemoryLaunches:
                            max_job_running=4, ruling=False, lock_paths=None):
         s = self._s()
         with s.lock:
+            if s.jobs.get(job, {}).get("status") != "active":
+                return None
             row = next((r for r in s.launches if r["id"] == launch_row_id), None)
             if (row is None or row["job"] != job or row["generation"] != generation
                     or row["revision"] != queue_version or row["state"] != "queued"):
@@ -245,6 +277,36 @@ def migrate_launches(c, pg=False):
 class SqlLaunches:
     _launch_pg = False
 
+    def failed_launch_retries(self):
+        rows = self._exec(self._conn,
+            "SELECT j.job, j.finished_at, l.id, l.revision FROM launches l JOIN jobs j ON j.job=l.job "
+            "WHERE j.status='failed' AND j.finished_at IS NOT NULL AND l.state='queued' "
+            "AND l.queued_by='swarm run' AND l.updated_at > j.finished_at ORDER BY l.id").fetchall()
+        return [(job, self._launch_time_out(at), lid, rev) for job, at, lid, rev in rows]
+
+    def reopen_failed_job(self, job, failed_at, launch_id, revision):
+        if failed_at is None:
+            return False
+        with self._launch_tx() as c:
+            suffix = " FOR UPDATE" if self._launch_pg else ""
+            j = self._exec(c, "SELECT status, finished_at, max_hours FROM jobs WHERE job=?" + suffix,
+                           (job,)).fetchone()
+            if not j or j[0] != "failed" or self._launch_time_out(j[1]) != failed_at:
+                return False
+            fresh = self._exec(c, "SELECT id FROM launches WHERE job=? AND id=? AND revision=? "
+                               "AND state='queued' AND queued_by='swarm run' AND updated_at > ?" + suffix,
+                               (job, launch_id, revision, self._launch_time(failed_at))).fetchone()
+            if not fresh:
+                return False
+            self._exec(c, "UPDATE launches SET state='failed', last_outcome=?, revision=revision+1, "
+                       "updated_at=? WHERE job=? AND state='queued' AND updated_at <= ?",
+                       (SUPERSEDED, self._launch_time(self.now()), job, self._launch_time(failed_at)))
+            self.open_job(job, None, None, None, None)
+            self.set_job_max_hours(job, j[2])
+            self.set_job_data(job, "pass_acked", None)
+            self.set_job_data(job, "pass_notified", None)
+            return True
+
     def _sx(self, sql):
         return sql.replace("?", "%s") if self._launch_pg else sql
 
@@ -352,11 +414,15 @@ class SqlLaunches:
                 if self._launch_pg:
                     for key in ("restarts:" + job, "restarts-host:" + host):
                         c.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (key,))
+                    status = self._exec(c, "SELECT status FROM jobs WHERE job=? FOR UPDATE", (job,)).fetchone()
+                    if status is None or status[0] != "active":
+                        raise _Refused("job is not active")
                 moved = self._exec(c,
                     "UPDATE launches SET state='running', revision=revision+1, attempts=attempts+1, "
                     "updated_at=?, launch_id=? WHERE id=? AND job=? AND generation=? AND revision=? "
                     "AND state='queued' AND NOT EXISTS (SELECT 1 FROM restarts WHERE "
-                    "restarts.launch_id=launches.launch_id AND ended_at IS NULL) RETURNING id",
+                    "restarts.launch_id=launches.launch_id AND ended_at IS NULL) "
+                    "AND EXISTS (SELECT 1 FROM jobs WHERE jobs.job=launches.job AND jobs.status='active') RETURNING id",
                     (self._launch_time(self.now()), launch_id, launch_row_id, job, generation, queue_version)).fetchone()
                 if moved is None:
                     raise _Refused("launch moved or previous attempt still running")

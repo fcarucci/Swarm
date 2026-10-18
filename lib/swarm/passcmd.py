@@ -48,7 +48,9 @@ def handoff(board, job: str):
     """(hand-off, artifact) of the job's latest DONE hand-off, or None. review.latest_handoffs reads every
     form a hand-off takes on the board (`DONE main@sha | summary`, `DONE "artifact"`, `swarm done`)."""
     from swarm.review import latest_handoffs
-    found = latest_handoffs(board, job)
+    from swarm.board.base import run_start
+    js = board.job_status(job)
+    found = [h for h in latest_handoffs(board, job) if js is None or h.created_at >= run_start(js)]
     if not found:
         return None
     last = found[-1]
@@ -194,6 +196,9 @@ def _start_queued(board, cfg: dict, job: str, starter) -> tuple[list[str], str |
     reached)."""
     from swarm.supervisor import command
     acts = []
+    js = board.job_status(job)
+    if js is None or js.status != "active":
+        return acts, None
     cap = max_cost_usd(board, cfg, job)
     for row in sorted((x for x in board.launches(job, include_closed=False) if x.state == "queued"),
                       key=lambda x: x.id):
@@ -218,11 +223,32 @@ OWNER_INPUT = ("HOST-RESULT", "OWNER", "PUSH-RESULT")   # posts that hand a lead
 def _attempts(board, job: str, since: _dt.datetime) -> int:
     """Lead and judge launches that were queued or ended since `since`, or since the newest owner input
     (a HOST-RESULT or OWNER post): a lead that hands work to the owner and exits is progressing, not stuck."""
+    from swarm.board.base import run_start
+    from swarm.board.launches import SUPERSEDED
+    js = board.job_status(job)
+    if js is not None:
+        since = max(since, run_start(js))
     for m in reversed(board.recent_messages(200, job)):
         if m.message.startswith(OWNER_INPUT):
             since = max(since, m.created_at)
             break
-    return sum(1 for row in board.launches(job) if row.role in ("lead", "judge") and row.updated_at >= since)
+    starts = {r.launch_id: r.at for r in board.restarts(job) if r.launch_id}
+    return sum(1 for row in board.launches(job) if row.role in ("lead", "judge")
+               and row.last_outcome != SUPERSEDED and (starts.get(row.launch_id) or row.updated_at) >= since)
+
+
+def _run_launch(board, js, name):
+    """A historical judge/relead name cannot consume the current run's hand-off."""
+    from swarm.board.base import run_start
+    from swarm.board.launches import SUPERSEDED
+    row = board.get_launch(js.job, 1, name)
+    if row is None or row.last_outcome == SUPERSEDED or row.updated_at < run_start(js):
+        return None
+    if row.launch_id and row.state != "queued":
+        previous = next((r for r in board.restarts(js.job) if r.launch_id == row.launch_id), None)
+        if previous is not None and previous.at < run_start(js):
+            return None
+    return row
 
 
 def _queue(board, job: str, name: str, role: str, brief: str, workdir: str) -> None:
@@ -308,7 +334,7 @@ def _advance(board, cfg: dict, js, now: _dt.datetime, starter) -> list[str]:
         return acts + [_fail(board, job, "no work dir is known for its launches (swarm run --workdir)", now)]
     if found is not None:
         key = _key(artifact)
-        if judged == "not_met" and board.get_launch(job, 1, f"relead-{key}") is None:   # once per artifact
+        if judged == "not_met" and _run_launch(board, js, f"relead-{key}") is None:   # once per artifact/run
             if _attempts(board, job, msg.created_at) >= LEAD_ATTEMPTS:
                 return acts + [_fail(board, job, f"no met verdict after {LEAD_ATTEMPTS} launches", now)]
             steps = js.verdict_next or js.verdict_reason or "see the verdict"
@@ -316,7 +342,7 @@ def _advance(board, cfg: dict, js, now: _dt.datetime, starter) -> list[str]:
             _queue(board, job, f"relead-{key}", "lead", _lead_brief(js, steps), workdir)
             return acts + [f"{job}: re-queued the lead for {artifact} (not met)"]
         if judged is None:   # one judge per artifact, never again
-            if board.get_launch(job, 1, f"judge-{key}") is None:
+            if _run_launch(board, js, f"judge-{key}") is None:
                 _queue(board, job, f"judge-{key}", "judge", _judge_brief(js, artifact), workdir)
                 return acts + [f"{job}: judge queued for {artifact}"]
             return acts + [_fail(board, job, f"the judge of {artifact} ended with no verdict", now)]
@@ -352,7 +378,7 @@ def on_not_met(board, cfg: dict, job: str, *, now: _dt.datetime | None = None, s
     if workdir is None:
         return _fail(board, job, "no work dir is known for its launches (swarm run --workdir)", now)
     name = f"relead-{key}"
-    row = board.get_launch(job, 1, name)
+    row = _run_launch(board, js, name)
     if row is None or row.state in ("done", "failed", "cancelled"):
         steps = js.verdict_next or js.verdict_reason or "see the verdict"
         board.post(job, PASS_NAME, f"NOT MET {artifact}: {steps}"[:200])
@@ -394,6 +420,9 @@ def run_pass(board, cfg: dict, *, now: _dt.datetime | None = None, starter=None)
     now = now or board.now()
     board.expire_blockers(now)
     acts = []
+    for job, failed_at, launch_id, revision in board.failed_launch_retries():
+        if board.reopen_failed_job(job, failed_at, launch_id, revision):
+            acts.append(f"{job}: new run for fresh queued work")
     for js in board.jobs():
         try:
             acts += _advance(board, cfg, js, now, starter)

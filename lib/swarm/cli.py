@@ -4704,6 +4704,11 @@ def _board_ack(board, cfg: dict, args) -> int | None:
 
 def _board_run(board, cfg: dict, args) -> int | None:
     from swarm import passcmd
+    js = board.job_status(args.job)
+    if js is None or js.status not in ("active", "failed"):
+        print("swarm run: queue work only for an active or failed job; owner-closed jobs stay closed",
+              file=sys.stderr)
+        return 1
     try:
         # the job's work dir (where re-queued leads and judges run) is the lead's, or the first one given:
         # an engineer's own worktree must never become it

@@ -8,6 +8,28 @@ from support import add_backend_variants, drive_backends
 
 
 class LaunchQueue(unittest.TestCase):
+    def test_claim_refuses_closed_jobs_without_reserving_spend(self):
+        for state in ("failed", "completed", "cancelled", "paused"):
+            with self.subTest(state=state):
+                row = self.queue()
+                self.b.close_job("J", state, "closed")
+                self.assertIsNone(self.claim(row, state))
+                self.assertEqual(self.b.restarts("J"), [])
+
+    def test_failed_retry_is_bound_to_latest_queue_revision_and_preserves_limits(self):
+        self.b.set_job_max_hours("J", 7)
+        self.b.set_job_data("J", "max_cost_usd", "3")
+        self.b.close_job("J", "failed", "exhausted")
+        failed_at = self.b.job_status("J").finished_at
+        old = self.queue(queued_by="swarm run")
+        row = self.queue(queued_by="swarm run")
+        self.assertFalse(self.b.reopen_failed_job("J", failed_at, old.id, old.revision))
+        self.assertEqual(self.b.job_status("J").status, "failed")
+        self.assertTrue(self.b.reopen_failed_job("J", failed_at, row.id, row.revision))
+        self.assertEqual(self.b.job_status("J").max_hours, 7)
+        self.assertEqual(self.b.job_data("J")["max_cost_usd"], "3")
+        self.assertFalse(self.b.reopen_failed_job("J", failed_at, row.id, row.revision))
+
     harness_factory = staticmethod(drive_backends()["memory"])
 
     def setUp(self):
