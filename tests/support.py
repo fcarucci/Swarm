@@ -285,12 +285,6 @@ class MemoryHarness:
     def set_available(self, flag: bool) -> None:
         self.store.available = flag
 
-    # ---- planting drive rows as another host or a corrupt store could leave them
-    def plant_drive_lock(self, **row) -> None:
-        """A drive lock row (key, holder, job, generation, launch_id, host, expires_at, path), as is."""
-        with self.store.lock:
-            self.store.drive_locks.append(dict(path=None, **row))
-
     def delete_restarts(self) -> None:
         """Every restart row, gone (a lock whose launch row was deleted)."""
         with self.store.lock:
@@ -340,7 +334,7 @@ class FileHarness(MemoryHarness):
             s.blocker_events, s.next_blocker_event_id = [], 1
             s.events, s.next_event_id = [], 1
             s.bg_commands, s.next_bg_id = [], 1
-            s.launches, s.next_launch_id, s.drive_locks = [], 1, []
+            s.launches, s.next_launch_id = [], 1
             s.message_max_chars = None   # setup seeds it from the config again
         setup_board(self.cfg, pool)
 
@@ -435,7 +429,7 @@ class PostgresHarness:
     def reset(self, pool=SMALL_POOL) -> None:
         self.conn.execute("TRUNCATE messages, agents, jobs, name_pool, agent_routes, transcripts, transcript_image_refs, "
                           "memory_ref_images, memory_refs, transcript_images, restarts, job_pauses, blocker_events, blockers, events, "
-                          "bg_commands, launches, drive_locks")
+                          "bg_commands, launches")
         with self.conn.cursor() as cur:
             cur.executemany("INSERT INTO name_pool (name, source) VALUES (%s, %s)",
                             [(n, s) for s, names in pool.items() for n in names])
@@ -505,12 +499,6 @@ class PostgresHarness:
     def backdate_event(self, event_id: int, seconds_ago: float) -> None:
         self._backdate("events", "id", event_id, {"created_at": seconds_ago})
 
-    def plant_drive_lock(self, **row) -> None:
-        row = dict(path=None, **row)
-        self.conn.execute("INSERT INTO drive_locks (key, holder, job, generation, launch_id, host, expires_at, path) "
-                          "VALUES (%(key)s, %(holder)s, %(job)s, %(generation)s, %(launch_id)s, %(host)s, "
-                          "%(expires_at)s, %(path)s)", row)
-
     def delete_restarts(self) -> None:
         self.conn.execute("DELETE FROM restarts")
 
@@ -557,7 +545,7 @@ class SqliteHarness:
                                      "DELETE FROM agent_routes; DELETE FROM transcripts; DELETE FROM restarts; DELETE FROM job_pauses; "
                                      "DELETE FROM memory_ref_images; DELETE FROM memory_refs; "
                                      "DELETE FROM transcript_image_refs; DELETE FROM transcript_images; "
-                                     "DELETE FROM drive_locks; DELETE FROM launches; DELETE FROM board_meta; COMMIT;")
+                                     "DELETE FROM launches; DELETE FROM board_meta; COMMIT;")
         setup_board(self.cfg, pool)
 
     def board(self, **board_overrides):
@@ -576,12 +564,6 @@ class SqliteHarness:
 
     def _ago(self, seconds: float) -> dt.datetime:
         return dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=seconds)
-
-    def plant_drive_lock(self, **row) -> None:
-        row = dict(path=None, **row)
-        row["expires_at"] = self.sqlite_board._ts(row["expires_at"])
-        self._db().execute("INSERT INTO drive_locks (key, holder, job, generation, launch_id, host, expires_at, path) "
-                           "VALUES (:key, :holder, :job, :generation, :launch_id, :host, :expires_at, :path)", row)
 
     def delete_restarts(self) -> None:
         self._db().execute("DELETE FROM restarts")

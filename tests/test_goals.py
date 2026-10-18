@@ -228,7 +228,6 @@ class VerdictTests(GoalEnv):
         rc, out, _ = self.cli("verdict", "--job", "J", "--as", self.judge, "not_met",
                               "--reason", "no drill", "--next", "run the drill in scripts/drill.sh")
         self.assertEqual((rc, out.splitlines()[0]), (0, "verdict not_met recorded for J, and posted on the board"))
-        self.assertRegex(out.splitlines()[-1], r"^swarm-record: kind=verdict id=[1-9]\d* rev=1$")
         j = self.job()
         self.assertEqual((j.verdict_reason, j.verdict_next), ("no drill", "run the drill in scripts/drill.sh"))
         self.cli("verdict", "--job", "J", "--as", self.judge, "met", "drill", "ran")

@@ -107,7 +107,7 @@ class ViewContract:
 
     def test_an_unreachable_verdict_settles_the_judge_and_the_quiet_workers(self):
         n = self.evidence()
-        self.b.record_verdict("j", n["judge"], "unreachable", "cannot", details="report", scope="goal", generation=1)
+        self.b.record_verdict("j", n["judge"], "unreachable", "cannot", details="report", scope="goal")
         self.h.backdate_job("j", verdict_at=10 * HOUR)
         self.assertEqual(self.status(n["judge"]), "finished")   # recorded verdict unreachable
         self.assertEqual(self.status(n["qa"]), "finished")      # went quiet before the goal was settled

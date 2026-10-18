@@ -78,7 +78,6 @@ class MemoryStore:
         self.next_blocker_event_id = 1
         self.launches: list[dict] = []            # drive launches (schema 25), by id
         self.next_launch_id = 1
-        self.drive_locks: list[dict] = []      # drive locks (schema 25), by key
         self.events: list[dict] = []           # external events (Board.post_event), by id
         self.next_event_id = 1
         self.bg_commands: list[dict] = []      # background commands (Board.bg_start), by id
@@ -151,8 +150,7 @@ def reset_store(name: str = "default") -> MemoryStore:
                      "transcript_bodies", "image_bodies", "next_id", "schema_version",
                      "restarts", "next_restart_id", "memory_refs", "pauses", "next_pause_id",
                      "message_max_chars", "meta", "blockers", "blocker_events", "next_blocker_id", "next_blocker_event_id",
-                     "events", "next_event_id", "bg_commands", "next_bg_id", "launches", "next_launch_id",
-                     "drive_locks"):
+                     "events", "next_event_id", "bg_commands", "next_bg_id", "launches", "next_launch_id"):
             setattr(store, attr, getattr(fresh, attr))
         store.touch(messages=True)
     return store
@@ -160,7 +158,7 @@ def reset_store(name: str = "default") -> MemoryStore:
 
 # Verdict fields of a job, cleared when it is (re-)opened.
 _NO_VERDICT = {"verdict": None, "verdict_reason": None, "verdict_next": None, "verdict_by": None, "verdict_at": None,
-               "verdict_details": None, "verdict_scope": None, "verdict_generation": None,
+               "verdict_details": None, "verdict_scope": None,
                "verdict_candidate": None, "verdict_req": None}
 
 # ---- purge steps (store lock held; each returns whether it changed anything) -----------
@@ -626,7 +624,7 @@ class MemoryBoard(MemoryLaunches, MemoryBlockers, MemoryEvents, MemoryBgCommands
 
     def record_verdict(self, job: str, judge_name: str, verdict: str, reason: str,
                        next_steps: str | None = None, artifact: str | None = None,
-                       details: str | None = None, *, scope: str = "artifact", generation: int | None = None,
+                       details: str | None = None, *, scope: str = "artifact",
                        open_count: int | None = None, progress: bool | None = None,
                        candidate: str | None = None, req: str | None = None,
                        message_id: int | None = None) -> bool:
@@ -644,9 +642,9 @@ class MemoryBoard(MemoryLaunches, MemoryBlockers, MemoryEvents, MemoryBgCommands
             at = self.now()
             j.update(verdict=verdict, verdict_reason=reason, verdict_next=next_steps, verdict_by=judge_name, verdict_at=at,
                      verdict_details=details, verdict_details_at=at if details else None,
-                     verdict_scope=scope, verdict_generation=generation, verdict_candidate=candidate, verdict_req=req,
+                     verdict_scope=scope, verdict_candidate=candidate, verdict_req=req,
                      plugin_data=verdict_data(j.get('plugin_data'), artifact, verdict, reason, next_steps, judge_name, at,
-                                              scope=scope, generation=generation, open_count=open_count,
+                                              scope=scope, open_count=open_count,
                                               progress=progress, candidate=candidate, req=req, message_id=message_id))
             s.touch()
             return True
@@ -1267,7 +1265,7 @@ class MemoryBoard(MemoryLaunches, MemoryBlockers, MemoryEvents, MemoryBgCommands
             closed_by=j.get("closed_by"), supervise=j.get("supervise", True),
             verdict_next=j.get("verdict_next"), max_hours=j.get("max_hours"),
             waiting_until=j.get("waiting_until"), verdict_scope=j.get("verdict_scope"),
-            verdict_generation=j.get("verdict_generation"), verdict_candidate=j.get("verdict_candidate"),
+            verdict_candidate=j.get("verdict_candidate"),
             verdict_req=j.get("verdict_req"), **pipeline_status(j.get("plugin_data")))
 
         return rollup(js, self.blockers(j["job"]), now)

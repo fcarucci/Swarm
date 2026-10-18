@@ -12,7 +12,7 @@ from .base import Blocker, BlockerEvent, CapExceeded, normalize_message
 
 LEGACY_LAUNCH_COLUMN = "se" "at"  # the persisted schema-25 column stays unchanged
 FIELDS = ("id, job, kind, waiting_on, reason, until, default_value, state, created_by, created_at, resolved_by, "
-          f"resolved_how, resolved_at, protection_rule, {LEGACY_LAUNCH_COLUMN}, generation")
+          f"resolved_how, resolved_at, protection_rule, {LEGACY_LAUNCH_COLUMN}")
 EVENT_FIELDS = "id, blocker, at, actor, event, detail"
 
 
@@ -167,7 +167,7 @@ class MemoryBlockers(BlockerLifecycle):
 
     def open_blocker(
         self, job, kind, waiting_on, reason, until=None, default_value=None, created_by=None,
-        launch=None, generation=None,
+        launch=None,
     ):
         check_blocker(kind, waiting_on, reason)
         with self._s().lock:
@@ -191,7 +191,6 @@ class MemoryBlockers(BlockerLifecycle):
                 resolved_at=None,
                 protection_rule=self._blocker_protection_rule(kind),
                 launch=launch,
-                generation=generation,
             )
             s.next_blocker_id += 1
             s.blockers.append(row)
@@ -349,7 +348,7 @@ class SqlBlockers(BlockerLifecycle):
 
     def open_blocker(
         self, job, kind, waiting_on, reason, until=None, default_value=None, created_by=None,
-        launch=None, generation=None,
+        launch=None,
     ):
         check_blocker(kind, waiting_on, reason)
         with self._blocker_lock(job) as c:
@@ -358,7 +357,7 @@ class SqlBlockers(BlockerLifecycle):
                 raise ValueError(f"{job} is not an open job")
             row = self._blocker_execute(
                 c,
-                f"INSERT INTO blockers (job,kind,waiting_on,reason,until,default_value,state,created_by,created_at,protection_rule,{LEGACY_LAUNCH_COLUMN},generation) VALUES (?,?,?,?,?,?,'open',?,?,?,?,?) RETURNING "
+                f"INSERT INTO blockers (job,kind,waiting_on,reason,until,default_value,state,created_by,created_at,protection_rule,{LEGACY_LAUNCH_COLUMN}) VALUES (?,?,?,?,?,?,'open',?,?,?,?) RETURNING "
                 + FIELDS,
                 (
                     job,
@@ -371,7 +370,6 @@ class SqlBlockers(BlockerLifecycle):
                     self._blocker_time(self.now()),
                     self._blocker_protection_rule(kind),
                     launch,
-                    generation,
                 ),
             ).fetchone()
             result = self._blocker_row(row)
@@ -462,7 +460,7 @@ def migrate_sql(c, pg=False):
         c.execute("ALTER TABLE blockers ADD COLUMN IF NOT EXISTS protection_rule TEXT NOT NULL DEFAULT 'addressed' CHECK(protection_rule IN ('addressed','always','deadline'))")
     elif "protection_rule" not in {r[1] for r in c.execute("PRAGMA table_info(blockers)")}:
         c.execute("ALTER TABLE blockers ADD COLUMN protection_rule TEXT NOT NULL DEFAULT 'addressed' CHECK(protection_rule IN ('addressed','always','deadline'))")
-    # schema 25: the drive launch and generation a blocker concerns (NULL: the job's own)
+    # schema 25: the launch a blocker concerns (NULL: the job's own); `generation` is an unused legacy column
     if pg:
         c.execute(f"ALTER TABLE blockers ADD COLUMN IF NOT EXISTS {LEGACY_LAUNCH_COLUMN} TEXT")
         c.execute("ALTER TABLE blockers ADD COLUMN IF NOT EXISTS generation integer")

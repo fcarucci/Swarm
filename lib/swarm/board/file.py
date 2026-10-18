@@ -590,7 +590,6 @@ class FileStore(MemoryStore):
         from .launches import LEGACY_TABLE, migrated_launch
         self.launches = state.get("launches") or [migrated_launch(r) for r in state.get(LEGACY_TABLE, [])]
         self.next_launch_id = int(state.get("next_launch_id") or state.get("next_launch_row_id") or state.get("next_se" "at_id") or 1)
-        self.drive_locks = [d for d in state.get("drive_locks", []) if not d["key"].startswith("wt:")]
         self.events = state.get("events") or []
         self.next_event_id = int(state.get("next_event_id") or 1)
         self.bg_commands = state.get("bg_commands") or []   # schema 24
@@ -640,7 +639,7 @@ class FileStore(MemoryStore):
                "pauses": self.pauses, "next_pause_id": self.next_pause_id,
                "blockers": self.blockers, "blocker_events": self.blocker_events,
                "next_blocker_id": self.next_blocker_id, "next_blocker_event_id": self.next_blocker_event_id,
-               "launches": self.launches, "next_launch_id": self.next_launch_id, "drive_locks": self.drive_locks,
+               "launches": self.launches, "next_launch_id": self.next_launch_id,
                "events": self.events, "next_event_id": self.next_event_id,
                "bg_commands": self.bg_commands, "next_bg_id": self.next_bg_id}
         if self.message_max_chars is not None:   # schema 15: the board's message cap

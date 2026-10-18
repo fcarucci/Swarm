@@ -193,11 +193,10 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS verdict_by text;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS verdict_at timestamptz;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS completion_forced boolean NOT NULL DEFAULT false;
 -- Schema version 25: typed verdicts. The CHECK accepts `unreachable`; the latest verdict's scope,
--- drive generation, candidate and requirements digest (NULL for older and non-drive verdicts).
+-- candidate and requirements digest (NULL for older verdicts).
 ALTER TABLE jobs DROP CONSTRAINT IF EXISTS jobs_verdict_check;
 ALTER TABLE jobs ADD CONSTRAINT jobs_verdict_check CHECK (verdict IN ('met', 'not_met', 'unreachable'));
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS verdict_scope text;
-ALTER TABLE jobs ADD COLUMN IF NOT EXISTS verdict_generation integer;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS verdict_candidate text;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS verdict_req text;
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS judge boolean NOT NULL DEFAULT false;
@@ -436,7 +435,7 @@ SELECT j.job, j.status, j.description, j.task, j.outcome, j.created_by, j.sessio
        j.project, j.goal, j.verdict, j.verdict_reason, j.verdict_by, j.verdict_at, j.completion_forced,
        (SELECT a.name FROM agents a WHERE a.job = j.job AND a.judge AND a.left_at IS NULL) AS judge,
        j.waiting_on, j.waiting_since, j.closed_by, j.supervise, j.verdict_next,
-       j.max_hours, j.waiting_until, j.verdict_scope, j.verdict_generation, j.verdict_candidate, j.verdict_req,
+       j.max_hours, j.waiting_until, j.verdict_scope, j.verdict_candidate, j.verdict_req,
        COALESCE((SELECT json_agg(row_to_json(b) ORDER BY b.id) FROM blockers b
                  WHERE b.job=j.job AND b.state='open'), '[]'::json) AS blockers,
        (SELECT count(*) FROM blockers b WHERE b.job=j.job AND b.state='open') AS open_blockers,
@@ -500,7 +499,7 @@ _JOB_STATUS_COLS = ("job, status, description, task, outcome, created_by, sessio
                     "dead_or_left, messages, last_activity_at, project, goal, verdict, verdict_reason, "
                     "verdict_by, verdict_at, completion_forced, judge, waiting_on, waiting_since, closed_by, "
                     "supervise, verdict_next, max_hours, waiting_until, open_blockers, protected_blockers, "
-                    "verdict_scope, verdict_generation, verdict_candidate, verdict_req")
+                    "verdict_scope, verdict_candidate, verdict_req")
 _MESSAGE_COLS = "id, created_at, job, agent_name, to_agent, message"
 _MESSAGE_COLS_M = ", ".join("m." + c.strip() for c in _MESSAGE_COLS.split(","))
 _RESTART_COLS = RESTART_COLS   # Restart field order (base.py)
@@ -1177,7 +1176,7 @@ class PostgresBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
             "task = COALESCE(EXCLUDED.task, jobs.task), session_id = COALESCE(EXCLUDED.session_id, jobs.session_id), "
             "project = COALESCE(EXCLUDED.project, jobs.project), goal = COALESCE(EXCLUDED.goal, jobs.goal), "
             "verdict = NULL, verdict_reason = NULL, verdict_next = NULL, verdict_by = NULL, verdict_at = NULL, verdict_details = NULL, "
-            "verdict_scope = NULL, verdict_generation = NULL, verdict_candidate = NULL, verdict_req = NULL, "
+            "verdict_scope = NULL, verdict_candidate = NULL, verdict_req = NULL, "
             "completion_forced = false, spawns = 0, waiting_on = NULL, waiting_since = NULL, "
             "waiting_until = NULL, max_hours = NULL, closed_by = NULL",
             (job, description, task, session_id, created_by, project, goal))
@@ -1370,7 +1369,7 @@ class PostgresBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
             if row[0] != goal:
                 self._conn.execute("UPDATE jobs SET goal = %s, verdict = NULL, verdict_reason = NULL, "
                     "verdict_next = NULL, verdict_by = NULL, verdict_at = NULL, verdict_details = NULL, "
-                    "verdict_scope = NULL, verdict_generation = NULL, verdict_candidate = NULL, verdict_req = NULL, "
+                    "verdict_scope = NULL, verdict_candidate = NULL, verdict_req = NULL, "
                     "plugin_data = %s WHERE job = %s",
                     (goal, clear_verdict_data(row[1]), job))
             return True
@@ -1406,7 +1405,7 @@ class PostgresBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
 
     def record_verdict(self, job: str, judge_name: str, verdict: str, reason: str,
                        next_steps: str | None = None, artifact: str | None = None,
-                       details: str | None = None, *, scope: str = "artifact", generation: int | None = None,
+                       details: str | None = None, *, scope: str = "artifact",
                        open_count: int | None = None, progress: bool | None = None,
                        candidate: str | None = None, req: str | None = None,
                        message_id: int | None = None) -> bool:
@@ -1425,11 +1424,11 @@ class PostgresBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
             at = self.now()
             self._conn.execute("UPDATE jobs SET verdict = %s, verdict_reason = %s, verdict_next = %s, "
                 "verdict_by = %s, verdict_at = %s, verdict_details = %s, verdict_details_at = %s, verdict_scope = %s, "
-                "verdict_generation = %s, verdict_candidate = %s, verdict_req = %s, plugin_data = %s WHERE job = %s",
-                (verdict, reason, next_steps, judge_name, at, details, at if details else None, scope, generation,
+                "verdict_candidate = %s, verdict_req = %s, plugin_data = %s WHERE job = %s",
+                (verdict, reason, next_steps, judge_name, at, details, at if details else None, scope,
                  candidate, req,
                  verdict_data(row[0], artifact, verdict, reason, next_steps, judge_name, at, scope=scope,
-                              generation=generation, open_count=open_count, progress=progress,
+                              open_count=open_count, progress=progress,
                               candidate=candidate, req=req, message_id=message_id), job))
             return True
 

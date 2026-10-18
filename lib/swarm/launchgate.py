@@ -64,7 +64,7 @@ def launch_context(cfg: dict, board_key: str, payload: dict, resume=None, resume
     return ctx
 
 
-def drive_targets(board_key: str, ctx: Ctx) -> set[str]:
+def protected_branches(board_key: str, ctx: Ctx) -> set[str]:
     """The branch names no launch may push to: what the owner record names (target_branch / target_branches),
     and, for the coding recipe (the default when the record says nothing), main and master. The artifact
     recipe has no target."""
@@ -209,7 +209,7 @@ def pre_tool(cfg: dict, payload: dict, host, *, resume=None, resume_lookup=None,
                 return why
         command = _command_of(host, payload)
         if command:
-            why = shellguard.drive_command_refusal(command, lambda: drive_targets(bk, ctx),
+            why = shellguard.launch_command_refusal(command, lambda: protected_branches(bk, ctx),
                                                    branch_of=_branch_of(payload, command),
                                                    cwd=cwd)
             if why:

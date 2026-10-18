@@ -16,7 +16,7 @@ from unittest import mock
 from support import SANDBOX  # noqa: F401  (puts lib/ on sys.path)
 
 from swarm import shellguard
-from swarm.shellguard import drive_command_refusal as refuse
+from swarm.shellguard import launch_command_refusal as refuse
 
 T = ["main", "master"]
 
@@ -745,12 +745,12 @@ class Splitting(unittest.TestCase):
         cmd = "git push origin feat/a"
         for _ in range(12):
             cmd = "sh -c " + shlex.quote(cmd)
-        self.assertIn("too deeply", shellguard.drive_command_refusal(cmd, ["main"]))
+        self.assertIn("too deeply", shellguard.launch_command_refusal(cmd, ["main"]))
         self.assertIn("too deeply", shellguard.readonly_write_reason(cmd))
         deep = "eval " * 3000 + "git push origin feat/a"
-        self.assertIn("too deeply", shellguard.drive_command_refusal(deep, ["main"]))     # no RecursionError
+        self.assertIn("too deeply", shellguard.launch_command_refusal(deep, ["main"]))     # no RecursionError
         shallow = "sh -c " + shlex.quote("sh -c " + shlex.quote("git push origin feat/a"))
-        self.assertIsNone(shellguard.drive_command_refusal(shallow, ["main"]))
+        self.assertIsNone(shellguard.launch_command_refusal(shallow, ["main"]))
 
 
 class ReadOnlyWrites(unittest.TestCase):

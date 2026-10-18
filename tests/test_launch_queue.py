@@ -27,7 +27,7 @@ class LaunchQueue(unittest.TestCase):
     def claim(self, row, suffix="1", **over):
         fields = dict(job="J", action_id="gen1|launch|" + row.name + "|-|0|" + suffix,
                       attempt=1, launch_id=row.name + suffix, launch_row_id=row.id, queue_version=row.revision,
-                      harness=row.harness, reserve_usd=1, reserve_minutes=1, locks=[], lock_seconds=60,
+                      harness=row.harness, reserve_usd=1, reserve_minutes=1,
                       max_job_running=4)
         fields.update(over)
         return self.b.claim_launch(**fields)
@@ -54,7 +54,6 @@ class LaunchQueue(unittest.TestCase):
         self.assertIsNotNone(self.claim(rows[0], max_job_running=2))
         self.assertIsNotNone(self.claim(rows[1], max_job_running=2))
         self.assertIsNone(self.claim(rows[2], max_job_running=2))
-        self.assertEqual(self.b.drive_locks("wt:"), [])
         self.assertEqual(self.b.get_launch("J", "c").state, "queued")
 
     def test_host_cap_is_optional_and_independent(self):

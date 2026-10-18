@@ -80,12 +80,11 @@ def _board_verdict(board, cfg: dict, args) -> int:
     if text is None:
         return 1
     scope = _verdict_scope(args)
-    generation = None   # no drive generations: the verdict carries no generation
     from swarm.spool import VerdictUnbound
     try:
         message_id = deliver_verdict(board, args.job, args.name, args.verdict, text[0], text[1],
                                      getattr(args, "artifact", None), getattr(args, "details_text", None),
-                                     scope=scope, generation=generation,
+                                     scope=scope,
                                      open_count=getattr(args, "open_count", None),
                                      progress=True if getattr(args, "progress", None) else None,
                                      candidate=getattr(args, "candidate", None), req=getattr(args, "req", None))
@@ -103,7 +102,6 @@ def _board_verdict(board, cfg: dict, args) -> int:
     from swarm.fastpath import changed
     changed(args.job)
     print(f"verdict {args.verdict} recorded for {args.job}, and posted on the board")
-    print(f"swarm-record: kind=verdict id={message_id} rev=1")
     if args.verdict == "not_met":   # the judge itself starts the next run; nobody waits for the pass
         from swarm import passcmd
         try:

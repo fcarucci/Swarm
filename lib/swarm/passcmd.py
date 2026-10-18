@@ -161,7 +161,7 @@ def _start_one(board, cfg: dict, job: str, row, reserve: float, starter) -> str 
     r = board.claim_launch(job=job, action_id=f"pass|{row.name}|{row.revision}",
                            attempt=row.attempts + 1, launch_id=launch_id, launch_row_id=row.id,
                            queue_version=row.revision, harness=row.harness, reserve_usd=reserve,
-                           reserve_minutes=minutes, locks=[], lock_seconds=3600,
+                           reserve_minutes=minutes,
                            max_job_running=MAX_JOB_RUNNING)
     if r is None:
         return None

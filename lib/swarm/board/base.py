@@ -134,8 +134,8 @@ RESTART_OUTCOMES = ("running", "completed", "timeout", "max_turns", "failed", "n
 # VERDICT_DETAILS_MAX bytes; nullable, read with .get() so old rows and clients keep working).
 # 24 the bg_commands table: an agent's background shell commands as the `swarm bg` wrapper
 # recorded them (pid, pgid, /proc start ticks, tag), so orphans can be listed and reaped safely.
-# 25 typed verdicts: the verdict CHECK accepts `unreachable`; jobs.verdict_scope, verdict_generation,
-# verdict_candidate and verdict_req hold the latest verdict's scope, drive generation, candidate and req.
+# 25 typed verdicts: the verdict CHECK accepts `unreachable`; jobs.verdict_scope,
+# verdict_candidate and verdict_req hold the latest verdict's scope, candidate and req.
 SCHEMA_VERSION = 26
 
 VERDICT_DETAILS_MAX = 64 * 1024   # bytes of UTF-8: the largest `swarm verdict --details` report
@@ -575,7 +575,6 @@ class Blocker:
     resolved_at: _dt.datetime | None = None
     protection_rule: str = "addressed"
     launch: str | None = None          # schema 25: the drive launch it concerns (None: the job)
-    generation: int | None = None    # schema 25: the drive generation it was opened in
 
 
 @dataclass(frozen=True)
@@ -702,10 +701,9 @@ class JobStatus:
     evidence_command: str | None = None
     finalize: str | None = None
     verdict_artifact: str | None = None
-    # Schema 25: the latest verdict's scope (VERDICT_SCOPES), the drive generation it was given in,
+    # Schema 25: the latest verdict's scope (VERDICT_SCOPES),
     # and the candidate and requirements digest it judged (None for legacy and non-drive verdicts).
     verdict_scope: str | None = None
-    verdict_generation: int | None = None
     verdict_candidate: str | None = None
     verdict_req: str | None = None
 
@@ -759,8 +757,6 @@ class Restart:
     tokens_out: int | None = None
 
 
-MAX_LOCK_SECONDS = 24 * 3600   # a drive lock lasts at most a day, and a renewal reaches at most that far
-
 RESTART_COLS = ("id, job, agent_key, attempt, at, reason, old_agent_key, new_agent_key, harness, host, "
                 "os_user, minutes_cap, ended_at, outcome, action_id, launch_id, reserved_usd, cost_usd, "
                 "tokens_in, tokens_out")   # the Restart field order, for every backend's SELECT
@@ -792,19 +788,6 @@ class Launch:
     session_id: str | None
     updated_at: _dt.datetime
     launch_id: str | None = None
-
-
-@dataclass(frozen=True)
-class DriveLock:
-    """A drive lock (schema 25): `key` is held by `holder` (the action) for launch `launch_id` on
-    `host` until `expires_at`. `path` is the worktree root of a `wt:` lock (None otherwise)."""
-    key: str
-    holder: str
-    job: str
-    launch_id: str
-    host: str
-    expires_at: _dt.datetime
-    path: str | None = None
 
 
 def restart_reserved_minutes(r: Restart) -> float:
@@ -1437,7 +1420,7 @@ WRITE_METHODS = (
     "save_transcript", "refresh_transcript", "mark_capture_failed", "rotate_transcripts",
     "save_memory_ref", "mark_memory_refs_checked", "delete_memory_refs",
     "open_blocker", "resolve_blocker", "reopen_blocker", "comment_blocker", "expire_blockers", "_overdue_blocker",
-    "queue_launch", "set_launch_state", "claim_launch", "renew_drive_locks", "release_drive_locks",
+    "queue_launch", "set_launch_state", "claim_launch",
     "post_event", "ack_events",
     "pause_job", "begin_resume", "record_resume_outcome", "set_message_cap",
 )
@@ -1995,10 +1978,9 @@ class Board(abc.ABC):
     @abc.abstractmethod
     def open_blocker(self, job: str, kind: str, waiting_on: str, reason: str,
                      until: _dt.datetime | None = None, default_value: str | None = None,
-                     created_by: str | None = None, launch: str | None = None,
-                     generation: int | None = None) -> Blocker:
+                     created_by: str | None = None, launch: str | None = None) -> Blocker:
         """Open a blocker on an active job, append opened, and return its immutable record.
-        launch and generation (schema 25) name the drive launch and generation it concerns."""
+        launch (schema 25) names the launch it concerns."""
 
     @abc.abstractmethod
     def blockers(self, job: str | None = None, include_closed: bool = False) -> list[Blocker]:
@@ -2217,13 +2199,13 @@ class Board(abc.ABC):
     @abc.abstractmethod
     def record_verdict(self, job: str, judge_name: str, verdict: str, reason: str,
                        next_steps: str | None = None, artifact: str | None = None,
-                       details: str | None = None, *, scope: str = "artifact", generation: int | None = None,
+                       details: str | None = None, *, scope: str = "artifact",
                        open_count: int | None = None, progress: bool | None = None,
                        candidate: str | None = None, req: str | None = None,
                        message_id: int | None = None) -> bool:
         """The judge's verdict on the job's goal: only if `judge_name` is the job's ACTIVE judge
         (else False, nothing stored). Sets verdict (one of VERDICTS, anything else raises),
-        scope (VERDICT_SCOPES; unknown raises), generation, candidate and req (kept as the latest
+        scope (VERDICT_SCOPES; unknown raises), candidate and req (kept as the latest
         verdict's, None when absent). check_verdict_args refuses (ValueError, nothing stored) an
         `unreachable` without details and, on a drive job, a not_met goal/artifact verdict without
         open_count; open_count and progress are kept in the artifact's verdict record.
@@ -2479,25 +2461,10 @@ class Board(abc.ABC):
     @abc.abstractmethod
     def claim_launch(self, *, job: str, action_id: str, attempt: int, launch_id: str,
                            launch_row_id: int, queue_version: int, harness: str, reserve_usd: float,
-                           reserve_minutes: float, locks: list[str], lock_seconds: float,
-                           max_host_running: int | None = None, max_job_running: int = 4,
-                           ruling: bool = False, lock_paths: dict[str, str] | None = None) -> Restart | None:
+                           reserve_minutes: float, max_host_running: int | None = None,
+                           max_job_running: int = 4, ruling: bool = False) -> Restart | None:
         """Atomically start a queue version with a unique restart row and this job's concurrency cap.
         An optional host cap is independent. Workdirs are never locked."""
-
-    @abc.abstractmethod
-    def renew_drive_locks(self, launch_id: str, expires_at: _dt.datetime, *, job: str, holder: str) -> int:
-        """Set expires_at of the launch's locks of this job and holder that have not expired yet. A lapsed
-        lock is never revived. expires_at must lie in the future, at most MAX_LOCK_SECONDS ahead (ValueError
-        otherwise). The number of rows renewed."""
-
-    @abc.abstractmethod
-    def release_drive_locks(self, launch_id: str, *, job: str, holder: str) -> int:
-        """Delete the launch's locks of this job and holder. The number of rows deleted."""
-
-    @abc.abstractmethod
-    def drive_locks(self, prefix: str = "") -> list[DriveLock]:
-        """The drive locks whose key starts with prefix, by key."""
 
     @abc.abstractmethod
     def was_replaced(self, agent_key: str) -> bool:

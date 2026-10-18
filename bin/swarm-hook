@@ -77,12 +77,10 @@ case "${1:-}" in turn|done)
     # `swarm join`, `verdict`, `done`, `review` and `land` are rewritten to the caller's own identity by the Python hook.
     case "$PAYLOAD" in *spawn_agent*|*followup_task*|*SendMessage*|*\"Agent\"*|*\"Task\"*|*memory*|*remember*) VALID="";; esac
     case "$PAYLOAD" in *swarm*join*|*swarm*verdict*|*swarm*done*|*swarm*review*|*swarm*land*|*swarm*ask*|*swarm*answer*) VALID="";; esac
-    # A drive control command's record line always reaches Python (its receipt), lease or not.
-    case "$PAYLOAD" in *"swarm-record: kind="*) VALID="";; esac
-    # Drive control commands get their caller's grant from the Python hook (launchgate).
+    # `swarm run` and `swarm halt` are decided by the Python hook (launchgate), never served by a lease.
     # (NOLEASE, not VALID: the cached marker directory stays valid, only the lease is not used.)
     NOLEASE=""
-    case "$PAYLOAD" in *swarm*halt*|*swarm*run*|*swarm*goal-ready*|*swarm*drive*|*swarm*deactivate*) NOLEASE=1;; esac
+    case "$PAYLOAD" in *swarm*halt*|*swarm*run*) NOLEASE=1;; esac
     # PreToolUse only, and only its tool_input (never a tool's output): a background shell call is
     # rewritten to run under `swarm bg`, and a CI wait (gh run watch, gh pr checks --watch, a
     # gh/curl poll loop) is refused, by the Python hook. A gh word must start a command (after a
@@ -210,9 +208,6 @@ fi
 MD="${MD:-$HOME/.local/state/swarm/active}"
 ACTIVE=""
 for MARKER in "$MD"/*.json; do [ -f "$MARKER" ] && { ACTIVE=1; break; }; done
-# A drive control command's record line (`swarm-record: kind=...`, spec 4.5) always reaches Python, even with no
-# marker left: `swarm deactivate` removes the job's marker, and the PostToolUse hook writes the requester's receipt.
-[ -n "$ACTIVE" ] || { [ "${1:-}" = done ] && case "$PAYLOAD" in *"swarm-record: kind="*) ACTIVE=1;; esac; }
 [ -n "$ACTIVE" ] || { [ "$H" = codex ] && [ "${1:-}" = session-end ]; } || exit 0
 # Never build the venv from a hook (slow, networked): session-start's bootstrap does that.
 [ -x "$V/bin/python" ] || { cat >/dev/null; exit 0; }

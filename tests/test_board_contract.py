@@ -2201,7 +2201,7 @@ class BoardContract:
 
 
 class DriveVerdicts:
-    """Schema 25 typed verdicts: `unreachable`, the scope, generation, candidate and req a verdict
+    """Schema 25 typed verdicts: `unreachable`, the scope, candidate and req a verdict
     carries, and the open count a drive job's not_met must give. A mixin: each backend's contract
     class runs these on its own store."""
 
@@ -2214,36 +2214,35 @@ class DriveVerdicts:
     def test_unreachable_requires_details(self):
         judge = self.judged_goal()
         with self.assertRaises(ValueError):
-            self.b.record_verdict("J", judge, "unreachable", "cannot", scope="goal", generation=1)
+            self.b.record_verdict("J", judge, "unreachable", "cannot", scope="goal")
         with self.assertRaises(ValueError):
-            self.b.record_verdict("J", judge, "unreachable", "cannot", details=" \n ", scope="goal", generation=1)
+            self.b.record_verdict("J", judge, "unreachable", "cannot", details=" \n ", scope="goal")
         self.assertIsNone(self.b.job_status("J").verdict)   # refused: nothing stored
         self.assertTrue(self.b.record_verdict("J", judge, "unreachable", "cannot", details="# why\n...",
-                                              scope="goal", generation=1))
+                                              scope="goal"))
         js = self.b.job_status("J")
-        self.assertEqual((js.verdict, js.verdict_scope, js.verdict_generation), ("unreachable", "goal", 1))
+        self.assertEqual((js.verdict, js.verdict_scope), ("unreachable", "goal"))
         self.assertEqual(self.b.verdict_details("J").details, "# why\n...")
 
-    def test_scope_generation_candidate_and_req_are_stored(self):
+    def test_scope_candidate_and_req_are_stored(self):
         judge = self.judged_goal()
         sha = "a" * 40
         self.assertTrue(self.b.record_verdict("J", judge, "met", "ok", artifact=f"feat/x@{sha}", scope="artifact",
-                                              generation=2, candidate=sha, req="sha256:abc"))
+                                              candidate=sha, req="sha256:abc"))
         js = self.b.job_status("J")
-        self.assertEqual((js.verdict, js.verdict_scope, js.verdict_generation, js.verdict_candidate, js.verdict_req),
-                         ("met", "artifact", 2, sha, "sha256:abc"))
+        self.assertEqual((js.verdict, js.verdict_scope, js.verdict_candidate, js.verdict_req),
+                         ("met", "artifact", sha, "sha256:abc"))
         self.assertTrue(self.b.record_verdict("J", judge, "not_met", "again", "fix it"))
         js = self.b.job_status("J")
-        self.assertEqual((js.verdict_scope, js.verdict_generation, js.verdict_candidate, js.verdict_req),
-                         ("artifact", None, None, None))
+        self.assertEqual((js.verdict_scope, js.verdict_candidate, js.verdict_req),
+                         ("artifact", None, None))
 
     def test_unreachable_judges_the_goal_or_a_ruling_not_one_artifact(self):
         judge = self.judged_goal()
         with self.assertRaises(ValueError):
             self.b.record_verdict("J", judge, "unreachable", "cannot", details="report", scope="artifact")
         self.assertIsNone(self.b.job_status("J").verdict)
-        self.assertTrue(self.b.record_verdict("J", judge, "unreachable", "cannot", details="report", scope="ruling",
-                                              generation=2))
+        self.assertTrue(self.b.record_verdict("J", judge, "unreachable", "cannot", details="report", scope="ruling"))
         self.assertEqual(self.b.job_status("J").verdict_scope, "ruling")
 
     def test_unknown_scope_is_refused(self):
@@ -2263,42 +2262,42 @@ class DriveVerdicts:
     def test_a_drive_not_met_with_no_open_criteria_is_accepted(self):
         from swarm.review import artifact_verdicts
         judge = self.judged_goal()
-        self.assertTrue(self.b.record_verdict("J", judge, "not_met", "why", "next", scope="goal", generation=1,
+        self.assertTrue(self.b.record_verdict("J", judge, "not_met", "why", "next", scope="goal",
                                               open_count=0))
         ref = "feat/x@" + "d" * 40
         self.assertTrue(self.b.record_verdict("J", judge, "not_met", "why", "next", artifact=ref, scope="artifact",
-                                              generation=1, open_count=0, message_id=11))   # bound, as delivered
+                                              open_count=0, message_id=11))   # bound, as delivered
         self.assertEqual(artifact_verdicts(self.b, "J")[ref]["open"], 0)
 
-    def test_artifact_verdict_record_keeps_scope_generation_and_progress(self):
+    def test_artifact_verdict_record_keeps_scope_and_progress(self):
         from swarm.review import artifact_verdicts
         judge = self.judged_goal()
         ref = "feat/x@" + "b" * 40
         self.assertTrue(self.b.record_verdict("J", judge, "not_met", "why", "next", artifact=ref, scope="artifact",
-                                              generation=3, open_count=2, progress=True, candidate="b" * 40,
+                                              open_count=2, progress=True, candidate="b" * 40,
                                               req="sha256:r", message_id=12))   # bound, as delivered
         rec = artifact_verdicts(self.b, "J")[ref]
-        self.assertEqual((rec["scope"], rec["generation"], rec["open"], rec["progress"], rec["candidate"], rec["req"]),
-                         ("artifact", 3, 2, True, "b" * 40, "sha256:r"))
+        self.assertEqual((rec["scope"], rec["open"], rec["progress"], rec["candidate"], rec["req"]),
+                         ("artifact", 2, True, "b" * 40, "sha256:r"))
 
     def test_a_new_goal_clears_the_typed_verdict(self):
         judge = self.judged_goal()
-        self.assertTrue(self.b.record_verdict("J", judge, "met", "ok", scope="goal", generation=1,
+        self.assertTrue(self.b.record_verdict("J", judge, "met", "ok", scope="goal",
                                               candidate="c" * 40, req="sha256:r"))
         self.assertTrue(self.b.set_job_goal("J", "a new goal"))
         js = self.b.job_status("J")
-        self.assertEqual((js.goal, js.verdict, js.verdict_scope, js.verdict_generation, js.verdict_candidate,
-                          js.verdict_req), ("a new goal", None, None, None, None, None))
+        self.assertEqual((js.goal, js.verdict, js.verdict_scope, js.verdict_candidate,
+                          js.verdict_req), ("a new goal", None, None, None, None))
 
     def test_reopening_clears_the_typed_verdict(self):
         judge = self.judged_goal()
         self.assertTrue(self.b.record_verdict("J", judge, "unreachable", "no", details="report", scope="goal",
-                                              generation=1, candidate="c" * 40, req="sha256:r"))
+                                              candidate="c" * 40, req="sha256:r"))
         self.assertTrue(self.b.close_job("J", "failed", "unreachable: no"))
         self.b.open_job("J", None, None, None, "me")
         js = self.b.job_status("J")
-        self.assertEqual((js.verdict, js.verdict_scope, js.verdict_generation, js.verdict_candidate, js.verdict_req),
-                         (None, None, None, None, None))
+        self.assertEqual((js.verdict, js.verdict_scope, js.verdict_candidate, js.verdict_req),
+                         (None, None, None, None))
 
 
 class DriveHelpers:
@@ -2313,13 +2312,12 @@ class DriveHelpers:
         fields.update(over)
         return self.b.queue_launch(job, name, **fields)
 
-    def claim(self, s, *, locks=(), paths=None, launch_id=None, action=None, attempt=1, ruling=False,
-              max_host_running=4, lock_seconds=4200):
+    def claim(self, s, *, launch_id=None, action=None, attempt=1, ruling=False,
+              max_host_running=4):
         return self.b.claim_launch(
             job=s.job,
             action_id=action or f"1|launch|{s.name}", attempt=attempt, launch_id=launch_id or f"L-{s.name}-{attempt}",
             launch_row_id=s.id, queue_version=s.revision, harness="claude", reserve_usd=5, reserve_minutes=60,
-            locks=list(locks), lock_paths=dict(paths or {}), lock_seconds=lock_seconds,
             max_host_running=max_host_running, ruling=ruling)
 
     @staticmethod
@@ -2361,12 +2359,11 @@ cfg, launch, root, start = json.loads(os.environ["SWARM_RACE_CFG"]), sys.argv[1]
 root = os.path.normpath(os.path.abspath(root)).replace(os.sep, "/")
 b = open_board(cfg)
 s = b.get_launch("J", launch)
-key = "wt:" + hashlib.sha256(root.encode()).hexdigest()
 time.sleep(max(0.0, start - time.time()))
 won = b.claim_launch(job="J", action_id="1|launch|" + launch, attempt=1,
                            launch_id="L-" + launch, launch_row_id=s.id, queue_version=s.revision, harness="claude",
-                           reserve_usd=5, reserve_minutes=60, locks=[key], lock_paths={key: root},
-                           lock_seconds=4200, max_host_running=4) is not None
+                           reserve_usd=5, reserve_minutes=60,
+                           max_host_running=4) is not None
 print("won" if won else "lost")
 """
 
@@ -2534,7 +2531,7 @@ class PostgresSpecificTests(unittest.TestCase):
         conn.execute("UPDATE board_meta SET value = %s WHERE key = 'schema_version'", (str(version),))
         self.b.set_job_data("j", "engineering-team.optional", "build_engineer")
         # the old views predate the typed verdict columns (schema 25): compare without them too
-        typed = {"verdict_scope", "verdict_generation", "verdict_candidate", "verdict_req"}
+        typed = {"verdict_scope", "verdict_candidate", "verdict_req"}
         legacy_job_cols = ", ".join(c.strip() for c in _JOB_STATUS_COLS.split(",")
                                     if c.strip() not in typed
                                     and (version == 18 or c.strip() not in {"open_blockers", "protected_blockers"}))
@@ -2545,7 +2542,7 @@ class PostgresSpecificTests(unittest.TestCase):
         before = [conn.execute(q).fetchall() for q in queries]
         columns = conn.execute("SELECT table_name, column_name, data_type FROM information_schema.columns "
                                "WHERE table_name IN ('agent_status', 'job_status') "
-                               "AND column_name NOT IN ('blockers', 'open_blockers', 'protected_blockers', 'title', 'verdict_scope', 'verdict_generation', 'verdict_candidate', 'verdict_req') "
+                               "AND column_name NOT IN ('blockers', 'open_blockers', 'protected_blockers', 'title', 'verdict_scope', 'verdict_candidate', 'verdict_req') "
                                "ORDER BY table_name, ordinal_position").fetchall()
         for _ in range(2):  # migration and idempotent re-init
             type(self.b).setup(self.h.cfg, SMALL_POOL)
@@ -2556,7 +2553,7 @@ class PostgresSpecificTests(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT table_name, column_name, data_type "
                                           "FROM information_schema.columns "
                                           "WHERE table_name IN ('agent_status', 'job_status') "
-                                          "AND column_name NOT IN ('blockers', 'open_blockers', 'protected_blockers', 'title', 'verdict_scope', 'verdict_generation', 'verdict_candidate', 'verdict_req') "
+                                          "AND column_name NOT IN ('blockers', 'open_blockers', 'protected_blockers', 'title', 'verdict_scope', 'verdict_candidate', 'verdict_req') "
                                           "ORDER BY table_name, ordinal_position").fetchall(), columns)
 
     def test_ids_become_visible_in_order(self):

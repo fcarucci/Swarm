@@ -442,7 +442,7 @@ class SpoolFlushBoundsTests(Env):
 
     def test_a_bound_drive_verdict_delivery_shares_the_budget_too(self):
         """A typed (drive) verdict is recorded, posted and bound: all three calls under the one budget."""
-        spool.spool_verdict(self.cfg, "J", "A", "met", "done", None, scope="goal", generation=2,
+        spool.spool_verdict(self.cfg, "J", "A", "met", "done", None, scope="goal",
                             candidate="feat/x@abc1234", req="d" * 64)
         limits, calls = [], []
         clock = ManualClock()

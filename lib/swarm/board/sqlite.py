@@ -345,7 +345,6 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("jobs", "verdict_details_at", "TEXT"),   # schema 23: the verdict_at the report belongs to
     ("jobs", "verdict_details", "TEXT"),   # schema 23: the judge's full Markdown report
     ("jobs", "verdict_scope", "TEXT"),        # schema 25: the latest verdict's scope (VERDICT_SCOPES)
-    ("jobs", "verdict_generation", "INTEGER"),   # schema 25: the drive generation it was given in
     ("jobs", "verdict_candidate", "TEXT"),    # schema 25: the candidate it judged
     ("jobs", "verdict_req", "TEXT"),          # schema 25: the requirements digest it judged
     ("restarts", "action_id", "TEXT"),        # schema 25: the drive action a launch claim is for
@@ -817,7 +816,7 @@ class SqliteBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
             "session_id = COALESCE(excluded.session_id, jobs.session_id), "
             "project = COALESCE(excluded.project, jobs.project), goal = COALESCE(excluded.goal, jobs.goal), "
             "verdict = NULL, verdict_reason = NULL, verdict_next = NULL, verdict_by = NULL, verdict_at = NULL, verdict_details = NULL, "
-            "verdict_scope = NULL, verdict_generation = NULL, verdict_candidate = NULL, verdict_req = NULL, "
+            "verdict_scope = NULL, verdict_candidate = NULL, verdict_req = NULL, "
             "completion_forced = 0, spawns = 0, waiting_on = NULL, waiting_since = NULL, "
             "waiting_until = NULL, max_hours = NULL, closed_by = NULL",
             (job, description, task, session_id, created_by, project, goal, now, now))
@@ -981,7 +980,7 @@ class SqliteBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
                 from swarm.review import clear_verdict_data
                 c.execute("UPDATE jobs SET goal = ?, verdict = NULL, verdict_reason = NULL, "
                           "verdict_next = NULL, verdict_by = NULL, verdict_at = NULL, verdict_details = NULL, "
-                          "verdict_scope = NULL, verdict_generation = NULL, verdict_candidate = NULL, verdict_req = NULL, "
+                          "verdict_scope = NULL, verdict_candidate = NULL, verdict_req = NULL, "
                           "plugin_data = ? WHERE job = ?",
                           (goal, clear_verdict_data(row[1]), job))
             return True
@@ -1016,7 +1015,7 @@ class SqliteBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
 
     def record_verdict(self, job: str, judge_name: str, verdict: str, reason: str,
                        next_steps: str | None = None, artifact: str | None = None,
-                       details: str | None = None, *, scope: str = "artifact", generation: int | None = None,
+                       details: str | None = None, *, scope: str = "artifact",
                        open_count: int | None = None, progress: bool | None = None,
                        candidate: str | None = None, req: str | None = None,
                        message_id: int | None = None) -> bool:
@@ -1035,11 +1034,11 @@ class SqliteBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
             at = self.now()
             c.execute("UPDATE jobs SET verdict = ?, verdict_reason = ?, verdict_next = ?, verdict_by = ?, "
                 "verdict_at = ?, verdict_details = ?, verdict_details_at = ?, verdict_scope = ?, "
-                "verdict_generation = ?, verdict_candidate = ?, verdict_req = ?, plugin_data = ? WHERE job = ?",
+                "verdict_candidate = ?, verdict_req = ?, plugin_data = ? WHERE job = ?",
                 (verdict, reason, next_steps, judge_name, at.isoformat(), details, at.isoformat() if details else None,
-                 scope, generation, candidate, req,
+                 scope, candidate, req,
                  verdict_data(row[0], artifact, verdict, reason, next_steps, judge_name, at, scope=scope,
-                              generation=generation, open_count=open_count, progress=progress,
+                              open_count=open_count, progress=progress,
                               candidate=candidate, req=req, message_id=message_id), job))
             return True
 
@@ -1557,14 +1556,14 @@ class SqliteBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
                  "(SELECT count(*) FROM messages m WHERE m.job = jobs.job), "
                  "(SELECT max(created_at) FROM messages m WHERE m.job = jobs.job AND NOT (m.agent_name = 'swarm' AND m.message LIKE 'Blocker % expired:%')), "
                  "(SELECT a.name FROM agents a WHERE a.job = jobs.job AND a.judge AND a.left_at IS NULL), "
-                 "verdict_next, max_hours, waiting_until, plugin_data, verdict_scope, verdict_generation, "
+                 "verdict_next, max_hours, waiting_until, plugin_data, verdict_scope, "
                  "verdict_candidate, verdict_req")
 
     def _job_status(self, c: sqlite3.Connection, r, now: _dt.datetime) -> JobStatus:
         (job, status, desc, task, outcome, by, session, created, activated, finished, project, goal,
          verdict, reason, verdict_by, verdict_at, forced, waiting_on, waiting_since, closed_by,
          supervise, n_messages, last_message, judge, verdict_next, max_hours, waiting_until, plugin_data,
-         verdict_scope, verdict_generation, verdict_candidate, verdict_req) = r
+         verdict_scope, verdict_candidate, verdict_req) = r
         sts = self._agent_statuses(c, job, now, with_messages=False)
         stamps = [a.last_contact_at for a in sts] + ([_dt_(last_message)] if last_message else [])
         count = lambda *st: sum(1 for a in sts if a.status in st)  # noqa: E731
@@ -1580,7 +1579,7 @@ class SqliteBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
             completion_forced=bool(forced), judge=judge, waiting_on=waiting_on,
             waiting_since=_dt_(waiting_since), closed_by=closed_by, supervise=bool(supervise),
             verdict_next=verdict_next, max_hours=max_hours, waiting_until=_dt_(waiting_until),
-            verdict_scope=verdict_scope, verdict_generation=verdict_generation, verdict_candidate=verdict_candidate,
+            verdict_scope=verdict_scope, verdict_candidate=verdict_candidate,
             verdict_req=verdict_req,
             **pipeline_status(plugin_data))
 

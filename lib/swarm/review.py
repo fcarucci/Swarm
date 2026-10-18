@@ -102,7 +102,7 @@ def latest_handoffs(board, job: str, messages=None) -> list[Handoff]:
 
 def verdict_data(raw: str | None, artifact: str | None, verdict: str, reason: str,
                  next_steps: str | None, judge: str, at: dt.datetime, *, scope: str = 'artifact',
-                 generation: int | None = None, open_count: int | None = None, progress: bool | None = None,
+                 open_count: int | None = None, progress: bool | None = None,
                  candidate: str | None = None, req: str | None = None,
                  message_id: int | None = None) -> str:
     """New job-data JSON, written atomically with the legacy latest-verdict columns.
@@ -122,7 +122,7 @@ def verdict_data(raw: str | None, artifact: str | None, verdict: str, reason: st
     else:
         return json.dumps(data, ensure_ascii=False)
     fields = dict(artifact=artifact, verdict=verdict, reason=reason, next_steps=next_steps, judge=judge,
-                  at=at.isoformat(), scope=scope, generation=generation, open=open_count, progress=progress,
+                  at=at.isoformat(), scope=scope, open=open_count, progress=progress,
                   candidate=candidate, req=req)
     if message_id is not None:   # 0: recorded, binding pending (deliver_verdict's first write)
         fields['message_id'] = message_id
@@ -156,13 +156,8 @@ def _chunked(data: dict, key: str):
     return json.loads(''.join(data[f'{key}.{i}'] for i in range(count)))
 
 
-def verdict_text(verdict: str, reason: str, *, scope: str = 'artifact', generation: int | None = None,
-                 candidate: str | None = None, req: str | None = None) -> str:
-    """The VERDICT message: a goal or ruling verdict names what it judges, so a reader
-    holding the message can tell (before the reason: the board caps a message's length)."""
-    if scope in ('goal', 'ruling') and generation is not None:
-        return (f"VERDICT {verdict} [{scope} gen={generation} candidate={candidate or '-'} req={req or '-'}]: "
-                f"{reason}")
+def verdict_text(verdict: str, reason: str) -> str:
+    """The VERDICT message."""
     return f"VERDICT {verdict}: {reason}"
 
 

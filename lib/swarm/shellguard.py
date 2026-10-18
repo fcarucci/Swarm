@@ -637,7 +637,7 @@ def _effective_prog(word: str) -> str:
     """The program name `word` runs as: its own name when that names a shell or interpreter; else, for a bare name
     found on PATH or an absolute path, the real name of the compiled program it resolves to when THAT is a shell
     or interpreter (rbash -> bash, a symlink `mysh` -> dash). A relative path is resolved by the caller, which
-    knows the directory (drive_command_refusal)."""
+    knows the directory (launch_command_refusal)."""
     base = _norm(word)
     if _family(base) is not None:
         return base
@@ -2014,8 +2014,8 @@ _UNCHECKED = ("A shell is allowed only as `sh -c '<literal>'` in a drive job: co
               "pipe, a here-string, a heredoc, <(...), a variable and $(...) cannot be checked")
 
 
-def drive_command_refusal(command: str, targets=(), *, branch_of=None, cwd=None) -> str | None:
-    """Why a drive launch may not run `command` (its reason, for the agent), or None. `targets` are the
+def launch_command_refusal(command: str, targets=(), *, branch_of=None, cwd=None) -> str | None:
+    """Why a launch may not run `command` (its reason, for the agent), or None. `targets` are the
     branch names a push may not update (the recipe's target, e.g. "main"; compared without case), or a
     function giving them (called only when a push or an inline script needs them).
     `branch_of(directory)` names the branch checked out in `directory` (the -C value, None for where the

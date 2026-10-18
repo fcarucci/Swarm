@@ -199,13 +199,12 @@ class BlockerContract:
             [e.event for e in self.b.blocker_events(question.id)], ["opened", "overdue"]
         )
 
-    def test_launch_and_generation_round_trip(self):
-        a = self.b.open_blocker("j", "question", "@EL", "which launch", launch="eng-a", generation=1)
-        self.assertEqual((a.launch, a.generation), ("eng-a", 1))
+    def test_launch_round_trip(self):
+        a = self.b.open_blocker("j", "question", "@EL", "which launch", launch="eng-a")
+        self.assertEqual(a.launch, "eng-a")
         self.assertEqual(self.b.blocker(a.id).launch, "eng-a")
-        self.assertEqual(self.b.blockers("j")[0].generation, 1)
         plain = self.b.open_blocker("j", "question", "human", "anything")
-        self.assertEqual((plain.launch, plain.generation), (None, None))
+        self.assertEqual(plain.launch, None)
         self.assertEqual(self.b.blocker(plain.id).launch, None)
 
 
@@ -496,7 +495,7 @@ class MigrationContract:
         # The snapshot reads through current queries, which select agents.title (schema 20): give
         # the old fixture just that nullable column, as the migration would, nothing else.
         # schema 25 adds the typed-verdict columns the same way (the old fixture has none of them)
-        typed = (("verdict_scope", "TEXT"), ("verdict_generation", "INTEGER"),
+        typed = (("verdict_scope", "TEXT"),
                  ("verdict_candidate", "TEXT"), ("verdict_req", "TEXT"))
         # schema 25 also adds the persisted blocker column and blockers.generation (the drive launch a blocker concerns)
         if self.h.name == "sqlite":
@@ -549,7 +548,7 @@ class MigrationContract:
             judge = b.allocate_name("judge25", "j")
             self.assertTrue(b.claim_judge("judge25", "j"))
             self.assertTrue(b.record_verdict("j", judge, "unreachable", "cannot", details="# why",
-                                             scope="goal", generation=1))
+                                             scope="goal"))
             self.assertEqual((b.job_status("j").verdict, b.job_status("j").verdict_scope), ("unreachable", "goal"))
 
     @classmethod

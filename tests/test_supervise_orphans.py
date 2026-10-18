@@ -137,8 +137,7 @@ class OrphansTest(unittest.TestCase):
         b.open_job("J", "desc", "build parser", None, "tester", goal="done")
         judge = b.allocate_name("jk", "J")
         self.assertTrue(b.claim_judge("jk", "J"))
-        self.assertTrue(b.record_verdict("J", judge, "unreachable", "cannot", details="report", scope="goal",
-                                         generation=1))
+        self.assertTrue(b.record_verdict("J", judge, "unreachable", "cannot", details="report", scope="goal"))
         b.agent_stopped("jk")   # no agent left at work: only the settled verdict can refuse the resume
         restored = Restored("codex", "briefing", ("codex", "exec", "-"), "/work", "continue", None, None)
         started = []

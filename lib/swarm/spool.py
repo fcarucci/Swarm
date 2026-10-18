@@ -189,24 +189,24 @@ def _valid_metadata(m) -> bool:
     return valid_metadata(m)
 
 
-def typed_verdict_fields(scope: str | None = None, generation: int | None = None, open_count: int | None = None,
+def typed_verdict_fields(scope: str | None = None, open_count: int | None = None,
                          progress: bool | None = None, candidate: str | None = None,
                          req: str | None = None) -> dict:
     """The typed verdict fields that were given (the artifact scope is the default and is left out),
     as the board's record_verdict takes them as keywords."""
-    fields = {"scope": scope if scope not in (None, "artifact") else None, "generation": generation,
+    fields = {"scope": scope if scope not in (None, "artifact") else None,
               "open_count": open_count, "progress": progress, "candidate": candidate, "req": req}
     return {k: v for k, v in fields.items() if v is not None}
 
 
 def spool_verdict(cfg: dict, job: str, name: str, verdict: str, reason: str,
                   next_steps: str | None = None, artifact: str | None = None,
-                  details: str | None = None, *, scope: str | None = None, generation: int | None = None,
+                  details: str | None = None, *, scope: str | None = None,
                   open_count: int | None = None, progress: bool | None = None, candidate: str | None = None,
                   req: str | None = None) -> Path:
     """Queue a `swarm verdict`; whether `name` is the job's judge is checked on delivery. The typed
     fields (schema 25) are queued with it, and replayed on delivery."""
-    typed = typed_verdict_fields(scope, generation, open_count, progress, candidate, req)
+    typed = typed_verdict_fields(scope, open_count, progress, candidate, req)
     return _spool(cfg, {"job": job, "name": name, "verdict": verdict, "reason": reason,
                         "next": next_steps, "artifact": artifact,
                         **({"details": details} if details else {}), **typed}, ".vrd")
@@ -479,7 +479,7 @@ class VerdictUnbound(Exception):
 
 def deliver_verdict(board, job: str, name: str, verdict: str, reason: str,
                     next_steps: str | None = None, artifact: str | None = None,
-                    details: str | None = None, *, scope: str = "artifact", generation: int | None = None,
+                    details: str | None = None, *, scope: str = "artifact",
                     open_count: int | None = None, progress: bool | None = None,
                     candidate: str | None = None, req: str | None = None) -> int:
     """Record a judge's verdict and post it on the job's board. Returns the id of the posted VERDICT
@@ -487,8 +487,8 @@ def deliver_verdict(board, job: str, name: str, verdict: str, reason: str,
     posted because `name` is not the job's active judge. VerdictUnbound when the verdict was posted but its
     binding write was refused (the judge changed in between): the record keeps message_id 0, which no
     reader accepts (review.bound_verdict), and a VERDICT-VOID post says so on the board. Shared by `swarm
-    verdict` and the spool. A goal or ruling verdict is bound to its candidate, never to a hand-off artifact;
-    its VERDICT message names the generation, scope, candidate and req it judges (review.verdict_text)."""
+    verdict` and the spool. A goal or ruling verdict is bound to its candidate, never to a hand-off artifact.
+    """
     if artifact is None and scope == "artifact":
         from swarm.review import latest_handoffs, judge_artifact, branch_revision
         leading, separator, _ = reason.partition(':')
@@ -498,11 +498,11 @@ def deliver_verdict(board, job: str, name: str, verdict: str, reason: str,
         if artifact is None and handoffs:
             artifact = handoffs[-1].artifact
     # the typed fields go only when given, so a verdict without them is recorded as before
-    typed = {k: v for k, v in (("scope", None if scope == "artifact" else scope), ("generation", generation),
+    typed = {k: v for k, v in (("scope", None if scope == "artifact" else scope),
                                ("open_count", open_count), ("progress", progress), ("candidate", candidate),
                                ("req", req)) if v is not None}
     # Only the active judge may record (the board checks that under its lock), so the verdict is recorded
-    # first and posted second. A typed verdict (a drive job's: it carries its generation, scope, counts) is
+    # first and posted second. A typed verdict (a drive job's: it carries its scope, counts) is
     # bound to the posted message: its first write marks it pending (message_id 0, which no reader accepts:
     # review.bound_verdict), the second, under the same checks, stores the message id. An untyped verdict (a
     # job that is not driven) is one write, as before binding existed (a legacy artifact verdict). Every call
@@ -513,8 +513,7 @@ def deliver_verdict(board, job: str, name: str, verdict: str, reason: str,
     if not recorded:
         return 0
     from swarm.review import verdict_text
-    posted = board.post(job, name, verdict_text(verdict, reason, scope=scope, generation=generation,
-                                                candidate=candidate, req=req))
+    posted = board.post(job, name, verdict_text(verdict, reason))
     posted_id = getattr(posted, "id", None)
     if bind and not board.record_verdict(job, name, verdict, reason, next_steps, artifact, details,
                                          message_id=posted_id, **typed):
@@ -529,14 +528,12 @@ def deliver_verdict(board, job: str, name: str, verdict: str, reason: str,
 
 
 def _typed_from_record(m: dict) -> tuple:
-    """(scope, generation, open_count, progress, candidate, req) of a queued verdict; a ValueError when
+    """(scope, open_count, progress, candidate, req) of a queued verdict; a ValueError when
     one is malformed (the record then goes to .bad)."""
-    scope, generation, open_count, progress, candidate, req = (
-        m.get(k) for k in ("scope", "generation", "open_count", "progress", "candidate", "req"))
+    scope, open_count, progress, candidate, req = (
+        m.get(k) for k in ("scope", "open_count", "progress", "candidate", "req"))
     if scope is not None and scope not in VERDICT_SCOPES:
         raise ValueError("unknown verdict scope")
-    if generation is not None and (type(generation) is not int or generation < 1):
-        raise ValueError("generation is not a count")
     if open_count is not None and (type(open_count) is not int or open_count < 0):
         raise ValueError("open_count is not a count")
     if progress is not None and type(progress) is not bool:
@@ -544,7 +541,7 @@ def _typed_from_record(m: dict) -> tuple:
     for text in (candidate, req):
         if text is not None and (not isinstance(text, str) or not text.strip()):
             raise ValueError("candidate or req is not a nonempty string")
-    return scope, generation, open_count, progress, candidate, req
+    return scope, open_count, progress, candidate, req
 
 
 def _deliver_spooled_verdict(board, rec: tuple) -> bool:

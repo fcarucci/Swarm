@@ -64,14 +64,12 @@ class BoundVerdict(unittest.TestCase):
 
 class GoalBinding(unittest.TestCase):
     def test_goal_records_are_not_artifact_verdicts(self):
-        raw = verdict_data(None, None, "met", "all held", None, "Judge", NOW, scope="goal", generation=2,
+        raw = verdict_data(None, None, "met", "all held", None, "Judge", NOW, scope="goal",
                            candidate="feat/x@abc1234", req="r" * 64, message_id=88)
         self.assertEqual(artifact_verdicts(_Board(raw), "J"), {})
 
-    def test_the_verdict_text_names_what_a_goal_verdict_judges(self):
+    def test_the_verdict_text(self):
         self.assertEqual(verdict_text("met", "ok"), "VERDICT met: ok")
-        self.assertEqual(verdict_text("met", "ok", scope="goal", generation=2, candidate="c@1234567", req="r"),
-                         "VERDICT met [goal gen=2 candidate=c@1234567 req=r]: ok")
 
     def test_goal_verdict_has_no_record(self):
         raw = verdict_data(None, None, "met", "all held", None, "Judge", NOW, scope="goal",

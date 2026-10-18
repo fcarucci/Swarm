@@ -303,12 +303,11 @@ class VerdictDetailsCliTests(GoalEnv):
         self.assertEqual(list(self.spool_dir.glob("*.vrd")), [])
 
     def test_a_queued_unreachable_carries_its_details_and_scope(self):
-        spool.spool_verdict(self.cfg, "J", self.judge, "unreachable", "cannot", None, None, REPORT, scope="goal",
-                            generation=1)
+        spool.spool_verdict(self.cfg, "J", self.judge, "unreachable", "cannot", None, None, REPORT, scope="goal")
         with self.board() as b:
             self.assertEqual(spool.flush_spool(b, self.cfg), 1)
             js = b.job_status("J")
-            self.assertEqual((js.verdict, js.verdict_scope, js.verdict_generation), ("unreachable", "goal", 1))
+            self.assertEqual((js.verdict, js.verdict_scope), ("unreachable", "goal"))
             self.assertEqual(b.verdict_details("J").details, REPORT)
 
     def test_a_queued_unreachable_without_details_goes_to_bad(self):
@@ -321,13 +320,13 @@ class VerdictDetailsCliTests(GoalEnv):
         self.assertFalse(any("verdict refused" in m for m in posted), posted)   # rejected on load, not on the board
 
     def test_a_queued_verdict_with_a_malformed_typed_field_goes_to_bad(self):
-        for field, value in (("open_count", -1), ("generation", 0), ("progress", "yes"), ("scope", "whole-job")):
+        for field, value in (("open_count", -1), ("progress", "yes"), ("scope", "whole-job")):
             with self.subTest(field=field):
                 spool.spool_verdict(self.cfg, "J", self.judge, "met", "ok", **{field: value})
         with self.board() as b:
             self.assertEqual(spool.flush_spool(b, self.cfg), 0)
             self.assertIsNone(b.job_status("J").verdict)
-        self.assertEqual(len(list(self.spool_dir.glob("*.bad"))), 4)
+        self.assertEqual(len(list(self.spool_dir.glob("*.bad"))), 3)
 
     def test_typed_verdict_fields_survive_the_offline_spool(self):
         self.h.set_available(False)
@@ -348,12 +347,12 @@ class VerdictDetailsCliTests(GoalEnv):
 
     def test_a_spooled_goal_verdict_keeps_candidate_and_req(self):
         """Task 2's surviving spool mutant: both fields are in the queued file and on the delivered job."""
-        path = spool.spool_verdict(self.cfg, "J", self.judge, "met", "goal met", scope="goal", generation=1,
+        path = spool.spool_verdict(self.cfg, "J", self.judge, "met", "goal met", scope="goal",
                                    candidate="c" * 40, req="sha256:r")
         queued = json.loads(path.read_text())
         self.assertEqual((queued["candidate"], queued["req"], queued["scope"]), ("c" * 40, "sha256:r", "goal"))
-        self.assertEqual(spool.typed_verdict_fields("goal", 1, None, None, "c" * 40, "sha256:r"),
-                         {"scope": "goal", "generation": 1, "candidate": "c" * 40, "req": "sha256:r"})
+        self.assertEqual(spool.typed_verdict_fields("goal", None, None, "c" * 40, "sha256:r"),
+                         {"scope": "goal", "candidate": "c" * 40, "req": "sha256:r"})
         only_req = json.loads(spool.spool_verdict(self.cfg, "J", self.judge, "met", "again", scope="goal",
                                                   req="sha256:r").read_text())
         self.assertNotIn("candidate", only_req)

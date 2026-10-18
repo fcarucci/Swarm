@@ -11,13 +11,12 @@ import getpass
 import re
 
 from swarm import compat
-from .base import MAX_LOCK_SECONDS, LAUNCH_STATES, LAUNCH_HARNESSES, DriveLock, Launch, RESTART_COLS, Restart
+from .base import LAUNCH_STATES, LAUNCH_HARNESSES, Launch, RESTART_COLS, Restart
 
 LAUNCH_COLS = ("id, job, name, role, harness, model, workdir, brief, state, attempts, "
                "last_outcome, queued_by, revision, agent_key, session_id, updated_at, launch_id")
 LEGACY_NAME = "se" "at"
 LEGACY_TABLE = LEGACY_NAME + "s"  # schema-25 table, retained only for migration
-LOCK_COLS = "key, holder, job, launch_id, host, expires_at, path"
 STATE_FIELDS = ("agent_key", "session_id", "last_outcome")
 _NAME = re.compile(r"[a-z][a-z0-9_~-]{0,63}")
 
@@ -30,13 +29,6 @@ def check_launch(name, role, harness, workdir, brief, queued_by):
     for what, value in (("role", role), ("workdir", workdir), ("brief", brief), ("queued_by", queued_by)):
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"launch {what} must be nonempty")
-
-
-def check_renewal(now, expires_at):
-    if not isinstance(expires_at, _dt.datetime) or expires_at.tzinfo is None:
-        raise ValueError("a renewal needs a timezone-aware time")
-    if not now < expires_at <= now + _dt.timedelta(seconds=MAX_LOCK_SECONDS):
-        raise ValueError("a renewal must lie in the future, at most a lock's maximum lifetime ahead")
 
 
 def _check_state(state, fields, current=None):
@@ -117,8 +109,8 @@ class MemoryLaunches:
             return Launch(**row)
 
     def claim_launch(self, *, job, action_id, attempt, launch_id, launch_row_id, queue_version,
-                           harness, reserve_usd, reserve_minutes, locks, lock_seconds, max_host_running=None,
-                           max_job_running=4, ruling=False, lock_paths=None):
+                           harness, reserve_usd, reserve_minutes, max_host_running=None,
+                           max_job_running=4, ruling=False):
         s = self._s()
         with s.lock:
             row = next((r for r in s.launches if r["id"] == launch_row_id), None)
@@ -136,14 +128,7 @@ class MemoryLaunches:
             if any((r["job"], r.get("action_id"), r["attempt"]) == (job, action_id, attempt)
                    or r.get("launch_id") == launch_id for r in s.restarts):
                 return None
-            kept_locks = [k for k in locks if not k.startswith("wt:")]
-            if any(d["key"] in kept_locks for d in s.drive_locks):
-                return None
             now = self.now()
-            for key in kept_locks:
-                s.drive_locks.append(dict(key=key, holder=action_id, job=job, generation=1,
-                                          launch_id=launch_id, host=host,
-                                          expires_at=now + _dt.timedelta(seconds=lock_seconds), path=None))
             restart = dict(id=s.next_restart_id, job=job, agent_key=action_id, attempt=attempt, at=now,
                            reason=f"drive:{action_id}", old_agent_key=f"launch:{launch_id}", new_agent_key=None,
                            harness=harness, host=host, os_user=getpass.getuser(), minutes_cap=float(reserve_minutes),
@@ -155,37 +140,6 @@ class MemoryLaunches:
                        updated_at=now, launch_id=launch_id)
             s.touch()
             return Restart(**restart)
-
-    def renew_drive_locks(self, launch_id, expires_at, *, job, holder):
-        now = self.now()
-        check_renewal(now, expires_at)
-        s = self._s()
-        with s.lock:
-            n = 0
-            for d in s.drive_locks:
-                if (d["launch_id"] == launch_id and d["job"] == job and d["holder"] == holder
-                        and d["expires_at"] > now):
-                    d["expires_at"] = expires_at
-                    n += 1
-            if n:
-                s.touch()
-            return n
-
-    def release_drive_locks(self, launch_id, *, job, holder):
-        s = self._s()
-        with s.lock:
-            before = len(s.drive_locks)
-            s.drive_locks[:] = [d for d in s.drive_locks
-                                if not (d["launch_id"] == launch_id and d["job"] == job and d["holder"] == holder)]
-            if len(s.drive_locks) != before:
-                s.touch()
-            return before - len(s.drive_locks)
-
-    def drive_locks(self, prefix=""):
-        s = self._s()
-        with s.lock:
-            return [DriveLock(**d) for d in sorted(s.drive_locks, key=lambda d: d["key"])
-                    if d["key"].startswith(prefix)]
 
 
 def launches_schema(pg=False):
@@ -210,10 +164,6 @@ CREATE TABLE IF NOT EXISTS launches (
  attempts {big} NOT NULL DEFAULT 0, last_outcome TEXT, queued_by TEXT NOT NULL,
  revision {big} NOT NULL DEFAULT 1, agent_key TEXT, session_id TEXT, updated_at {ts} NOT NULL, launch_id TEXT,
  UNIQUE (job, generation, name));
-CREATE TABLE IF NOT EXISTS drive_locks (
- key TEXT PRIMARY KEY, holder TEXT NOT NULL, job TEXT NOT NULL, generation {big} NOT NULL,
- launch_id TEXT NOT NULL, host TEXT NOT NULL, expires_at {ts} NOT NULL, path TEXT);
-CREATE INDEX IF NOT EXISTS drive_locks_launch ON drive_locks (launch_id);
 """
 
 
@@ -233,7 +183,6 @@ def migrate_launches(c, pg=False):
                         "CASE WHEN launch_id IS NULL THEN 'done' ELSE 'running' END ELSE state END,")
     c.execute(f"INSERT INTO launches (generation, {LAUNCH_COLS}) SELECT 1, {expr} FROM {LEGACY_TABLE} WHERE true ON CONFLICT DO NOTHING")
     c.execute(f"DROP TABLE {LEGACY_TABLE}")
-    c.execute("DELETE FROM drive_locks WHERE key LIKE 'wt:%'")
     if pg:
         c.execute("SELECT setval(pg_get_serial_sequence('launches', 'id'), "
                   "COALESCE((SELECT MAX(id) FROM launches), 1), EXISTS(SELECT 1 FROM launches))")
@@ -338,8 +287,8 @@ class SqlLaunches:
             return self._launch_obj(Launch, LAUNCH_COLS, row) if row else None
 
     def claim_launch(self, *, job, action_id, attempt, launch_id, launch_row_id, queue_version,
-                           harness, reserve_usd, reserve_minutes, locks, lock_seconds, max_host_running=None,
-                           max_job_running=4, ruling=False, lock_paths=None):
+                           harness, reserve_usd, reserve_minutes, max_host_running=None,
+                           max_job_running=4, ruling=False):
         try:
             with self._launch_tx() as c:
                 host = compat.node()
@@ -363,14 +312,6 @@ class SqlLaunches:
                                    (host,)).fetchone()[0]
                     if n >= int(max_host_running):
                         raise _Refused("host cap")
-                for key in sorted(k for k in locks if not k.startswith("wt:")):
-                    locked = self._exec(c, "INSERT INTO drive_locks "
-                        "(key, holder, job, generation, launch_id, host, expires_at, path) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, NULL) ON CONFLICT DO NOTHING RETURNING key",
-                        (key, action_id, job, launch_id, host,
-                         self._launch_time(self.now() + _dt.timedelta(seconds=lock_seconds)))).fetchone()
-                    if locked is None:
-                        raise _Refused("destination lease held")
                 row = self._exec(c,
                     "INSERT INTO restarts (job, agent_key, attempt, at, reason, old_agent_key, harness, host, "
                     "os_user, minutes_cap, action_id, launch_id, reserved_usd) "
@@ -392,19 +333,3 @@ class SqlLaunches:
                 r[i] = self._launch_time_out(r[i])
         return Restart(*r)
 
-    def renew_drive_locks(self, launch_id, expires_at, *, job, holder):
-        now = self.now()
-        check_renewal(now, expires_at)
-        with self._launch_tx() as c:
-            return self._exec(c, "UPDATE drive_locks SET expires_at = ? WHERE launch_id = ? AND job = ? "
-                              "AND holder = ? AND expires_at > ?",
-                              (self._launch_time(expires_at), launch_id, job, holder, self._launch_time(now))).rowcount
-
-    def release_drive_locks(self, launch_id, *, job, holder):
-        with self._launch_tx() as c:
-            return self._exec(c, "DELETE FROM drive_locks WHERE launch_id = ? AND job = ? AND holder = ?",
-                              (launch_id, job, holder)).rowcount
-
-    def drive_locks(self, prefix=""):
-        rows = self._exec(self._conn, "SELECT " + LOCK_COLS + " FROM drive_locks ORDER BY key").fetchall()
-        return [self._launch_obj(DriveLock, LOCK_COLS, r) for r in rows if r[0].startswith(prefix)]
