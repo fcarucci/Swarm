@@ -325,5 +325,19 @@ class DependentTasks(PassCmd):
 
 
 
+    def test_tasks_external_reporter_replacement_cannot_inherit_old_seat_authority(self):
+        from swarm import dependencies
+        actor = self.b.allocate_name('old-external', 'J', 'engineer')
+        self.register('qa', reporter=actor)
+        self.b.close_agent('old-external', 'replaced')
+        self.assertEqual(self.b.claim_resume('replacement-external', 'old-external', 'J'), actor)
+        with self.assertRaises(ValueError):
+            dependencies.report(self.b, 'J', 1, 'qa', artifact='main@' + 'a' * 40,
+                                outcome='passed', reason='same display name is a new identity', actor=actor)
+        self.assertEqual(self.b.events('J'), [])
+        self.assertEqual(self.register('qa', reporter=actor).state, 'queued', 'repeated registration preserves the original pinned seat')
+
+
+
 from support import add_backend_variants
 add_backend_variants(globals(), DependentTasks)
