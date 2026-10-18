@@ -1,7 +1,7 @@
 {
   "name": "swarm",
   "displayName": "Swarm",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "description": "Agents that coordinate through a shared message board, in Claude Code and Codex: names, roster, messages before every tool call, verifiers, judges, project memory. Tool-call hooks act only inside an active swarm job; the first session sets up a venv, a launcher and config; it installs no system timer. See README: What Swarm changes on your machine.",
   "author": {
     "name": "Francesco Carucci",

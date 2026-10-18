@@ -5,14 +5,31 @@ section here, so every release adds a `## [x.y.z] - YYYY-MM-DD` section (see `sc
 Keep entries short and user-facing: one line per change, what it does, not how.
 
 ## [Unreleased]
-- **A judged head never parks a job on a person.** "Same head handed off twice", "head already judged" and the old per-generation judge cap are now a scheduled wait (5 to 30 min backoff) shown as `waiting on: lead or coordinator`; every queued launch (a person's `swarm run`, the lead's engineers, reviewers, integrators) still runs, only re-judging the same head is withheld; an unresolved hand-off (`head unknown`) never counts as a repeat; goal-hold watermarks left by older drivers are released on the first pass. The only remaining person wait is a lead's BLOCKED that names a person.
 
-- Fix driver.log portability checks on Windows and macOS; normalize log newlines and keep rotation bounded.
+## [0.4.0] - 2026-10-18
 
-- Fix Windows portability of the F03 driver cache and release tests while preserving POSIX permission checks.
+### Removed
+- **The session driver is gone**, with its ledgers, holds (goal, ruling, budget, person), receipts gating, tamper checks, rollovers and the `swarm drive` / `halt` / `unhalt` commands. Nothing parks a job any more.
+- **Person-only command gating is gone.** `deactivate`, `ack` and every other command work from any session, agent hosts included.
+- Session, round, attempt and wall-clock caps. The only limit is the job's `max_cost_usd` (`[pass] max_cost_usd`, default 200).
 
-- **A ruling never cancels running engineers or the lead.** It waits for them (a visible hold), and a ledger-only ruling is cancelled while engineers are queued or running.
-- `swarm watch --compact` rolls finished and lost agents into one WORKERS summary per job, keeps live agents with tool/launch and last-post age, and avoids clock-only redraws.
+### Added
+- **`swarm pass`**: a stateless sweep the hooks run before tool calls (at most once a minute per host). It starts queued launches, runs one judge per hand-off, closes a met job completed, re-queues the lead on not_met, and fails a job after three lead launches with no hand-off, on the cost cap, or on an expired question.
+- **`swarm ack --job J`** stops a failed job's notices, which repeat every 30 minutes until acknowledged.
+- **A judge's not_met starts the next lead run itself**, with the verdict's `--next` as the lead's brief.
+- **`swarm review`** is a plain board command again: `REVIEW <artifact> VERIFIED|CHANGES <report>` under the reviewer's own name.
+
+### Changed
+- **A job is only ever active, waiting (on an open `swarm ask` question to a person), completed, failed or cancelled.** `idle`, `waiting (goal not met)`, `wait --on` as a state and the hold words are gone.
+- An open goal job with no agent working, nothing queued and no open question for 30 minutes ends failed with a notice.
+- `swarm watch` and `swarm status --job` hide finished agents by default (`--all-agents` shows them).
+- A hand-off is any `DONE <ref> | summary` post (quoted or not) or `swarm done --artifact`.
+- Posts to a launch nobody holds are queued for its next holder again.
+- The swarm and engineering-team skills describe goal jobs on `swarm pass`.
+- A lead that asks the owner for a host step (`HOST-REQUEST`, `PUSH-REQUEST`, `ASTRA-REQUEST` ...) and exits is handing off work: no new lead starts until a `*-RESULT` or `OWNER` post answers (up to 90 minutes), and any such post resets the attempt count.
+- The CLI's own board row and roleless rows that never ran a tool no longer count as agents working on a job.
+- A job the owner reopens continues with a lead even when its last artifact was judged before the reopen.
+- Launches no longer carry a generation, and `swarm land` is gone with the drive integrator.
 
 ## [0.3.3] - 2026-10-16
 
