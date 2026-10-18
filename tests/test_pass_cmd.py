@@ -72,6 +72,26 @@ class PassCmd(unittest.TestCase):
         argv = self.runs[0]["argv"]
         self.assertEqual(argv[argv.index("-m") + 1], "gpt-6.1-sol")
 
+    def test_native_role_protection_reaches_both_harnesses_and_persisted_run(self):
+        for host in ('codex', 'claude'):
+            for role in ('judge', 'reviewer', 'security_reviewer', 'verifier', 'qa', 'engineer'):
+                with self.subTest(host=host, role=role):
+                    job = host + '-' + role
+                    self.b.open_job(job, None, None, None, 'owner', goal='Role protection')
+                    row = self.b.queue_launch(job, 1, 'stage', role=role, harness=host, model=None,
+                        workdir='/work/shared', brief='role scope', queued_by='owner')
+                    runs = []
+                    with mock.patch('swarm.supervisor.launch.codex_command', return_value=['codex']):
+                        passcmd._start_one(self.b, self.cfg, job, row, 1.0, lambda cfg, run: runs.append(run))
+                    self.assertEqual(len(runs), 1)
+                    expected = role in ('judge', 'reviewer', 'security_reviewer')
+                    self.assertEqual(runs[0].get('read_only'), expected)
+                    argv = runs[0]['argv']
+                    if host == 'codex':
+                        self.assertEqual(argv[argv.index('--sandbox') + 1], 'read-only' if expected else 'workspace-write')
+                    else:
+                        self.assertEqual('--disallowedTools' in argv, expected)
+
     def open_restarts(self):
         return [r for r in self.b.restarts("J") if r.ended_at is None]
 

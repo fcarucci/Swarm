@@ -1471,7 +1471,11 @@ for args in (['status', '--job', 'J'], ['read', '--job', 'J'],
     assert r.returncode == 0, r.stderr
 for path in DENIED:
     try:
-        Path(path).write_text('escape')
+        if path.endswith('planted.py'):
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            os.close(fd)
+        else:
+            Path(path).write_text('escape')
     except OSError as e:
         assert e.errno in (errno.EROFS, errno.EACCES, errno.ENOENT), (path, e)
     else:
@@ -1488,9 +1492,25 @@ assert not Path(HIDDEN).exists()
                 code = "DENIED=" + repr(denied) + ";HIDDEN=" + repr(str(h / "private-sentinel")) + "\n" + code
                 # Prepare the same policy and mounts as a native exec launch, then
                 # exercise them with Codex's local sandbox command (no model/API).
-                native = [CODEX, 'exec', '--sandbox', 'read-only' if read_only else 'workspace-write',
-                          '--skip-git-repo-check', '-']
-                argv = launchhome.wrap(self.cfg, native, job="J", launch=launch, workdir=wt, read_only=read_only)
+                # Exercise persisted native role -> pass launcher -> runner jail;
+                # do not hand-set read_only on the fixture launch.
+                from swarm import dependencies, passcmd
+                harness = support.drive_backends()['memory'](self.id() + launch)
+                self.addCleanup(harness.close)
+                harness.reset()
+                cfg = harness.cfg
+                cfg['supervise'] = {'allowed_workdirs': [str(self.work)]}
+                staged = []
+                with harness.board() as board:
+                    board.open_job('J', None, None, None, 'owner', goal='Native role protection')
+                    row = dependencies.register(board, 'J', 1, launch, artifact='source@exact', depends=[],
+                        role='judge' if read_only else 'engineer', harness='codex', model='gpt-6-astra',
+                        workdir=wt, brief='Probe assigned role protection', queued_by='owner')
+                    with mock.patch('swarm.supervisor.launch.codex_command', return_value=[CODEX]):
+                        passcmd._start_one(board, cfg, 'J', row, 1.0, lambda cfg, run: staged.append(run))
+                self.assertEqual(len(staged), 1)
+                argv, why = runner._launch_argv(cfg, staged[0])
+                self.assertIsNone(why)
                 argv = argv[:argv.index('--') + 1] + [CODEX, 'sandbox', '--', sys.executable, '-I', '-c', code]
                 calls = []
                 run = {"harness": "codex", "agent_key": str(uuid.uuid4()), "name": "Own", "cwd": wt}
@@ -1505,6 +1525,12 @@ assert not Path(HIDDEN).exists()
                 self.assertEqual(r.returncode, 0, r.stderr)
                 self.assertEqual((h / 'broker/probe').read_text(), 'own broker only')
                 self.assertEqual(config.read_bytes(), before)
+                spec = json.loads(argv[3])
+                modes = {b[1]: b[2] for b in spec['binds']}
+                self.assertEqual(modes[wt], 'ro' if read_only else 'rw')
+                self.assertEqual(modes[str(self.work / 'repo/.git')], 'ro' if read_only else 'rw')
+                profile_source = next(b[0] for b in spec['binds'] if b[1] == str(config))
+                self.assertTrue(profile_source.endswith('codex-review.toml' if read_only else 'codex-author.toml'))
                 self.assertEqual(len(calls), 3)
                 self.assertIn("--as=Own", cli_argv(calls[-1]))
 

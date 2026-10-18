@@ -171,8 +171,10 @@ def _start_one(board, cfg: dict, job: str, row, reserve: float, starter) -> str 
         model = launch.replacement_model(cfg, row.harness, row.role, row.model)
         workdir = os.path.realpath(row.workdir)
         from swarm.dependencies import prompt
+        from swarm.driveroles import is_read_only_role
+        read_only = is_read_only_role(row.role)
         spec = launch.spec_for(cfg, row.harness, prompt=prompt(row), workdir=workdir, model=model,
-                               minutes=minutes, budget_usd=reserve, drive=True)
+                               minutes=minutes, budget_usd=reserve, drive=True, read_only=read_only)
         marker = markers.write_resume_marker(cfg, job, r.id, resume_of=old, name=name,
                                              harness=row.harness, session_id=spec.session_id)
         if spec.session_id:
@@ -181,7 +183,7 @@ def _start_one(board, cfg: dict, job: str, row, reserve: float, starter) -> str 
                "resume_of": old, "marker": str(marker), "argv": list(spec.argv), "cwd": spec.cwd,
                "stdin": spec.stdin, "session_id": spec.session_id, "limit_seconds": minutes * 60,
                "enrol_seconds": float(settings(cfg)["enrol_minutes"]) * 60, "config": None,
-               "board": _store_key(cfg), "launch_id": launch_id, "launch": row.name}
+               "board": _store_key(cfg), "launch_id": launch_id, "launch": row.name, "read_only": read_only}
         current_job = board.job_status(job)
         if current_job is None or current_job.status != "active":
             board.finish_restart(r.id, "cancelled")

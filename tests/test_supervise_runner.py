@@ -524,6 +524,11 @@ class NativeTaskIdentityTests(RunnerBase):
         staged = []
         with self.board() as board:
             board.open_job('N', None, None, None, 'owner', goal='Native task lifecycle')
+            # Reserve the foreign actor before the native predecessor is closed;
+            # otherwise the random free-name pool can give it that reserved name.
+            board.open_job('FOREIGN', None, None, None, 'owner', goal='Other running launch')
+            foreign = board.allocate_name('foreign-running-session', 'FOREIGN', 'engineer')
+            board.record_route('foreign-running-session', 'foreign-running-session', 'final', 'FOREIGN')
             for name, depends in (('author', []), ('next', ['author'])):
                 row = dependencies.register(board, 'N', 1, name, artifact=artifact, depends=depends,
                     role='engineer', harness='codex', model='gpt-6-astra', workdir=str(self.workdir),
@@ -534,9 +539,6 @@ class NativeTaskIdentityTests(RunnerBase):
         enrolment.write_job(store_key(self.cfg), job='N', harness='codex', session_id='owner', cwd=str(self.workdir))
         run = staged[0]
         with self.board() as board:
-            board.open_job('FOREIGN', None, None, None, 'owner', goal='Other running launch')
-            foreign = board.allocate_name('foreign-running-session', 'FOREIGN', 'engineer')
-            board.record_route('foreign-running-session', 'foreign-running-session', 'final', 'FOREIGN')
             with self.assertRaises(ValueError):
                 runner._enrol_native_session(board, self.cfg, run, 'foreign-running-session')
             self.assertEqual(board.active_agent_name('foreign-running-session'), foreign)
