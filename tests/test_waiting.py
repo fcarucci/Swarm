@@ -27,6 +27,14 @@ def js(status="active", waiting_on=None, started=0, running=0, last_minutes_ago=
 
 
 class DeriveJobStatusTests(unittest.TestCase):
+    def test_live_agents_override_every_wait_input(self):
+        from dataclasses import replace
+        for live in ({"started": 1}, {"running": 1}):
+            with self.subTest(live=live):
+                state = replace(js(open_questions=2, waiting_on="owner decision", **live), open_blockers=3)
+                self.assertEqual(derive_job_status(state, 5, NOW), "active")
+                self.assertEqual(derive_job_status(replace(state, status="paused"), 5, NOW), "paused")
+
     def test_words(self):
         self.assertEqual(derive_job_status(js(status="completed", waiting_on="x"), 5, NOW), "completed")
         self.assertEqual(derive_job_status(js(open_questions=1), 5, NOW), "waiting")   # a question to a person
@@ -38,6 +46,40 @@ class DeriveJobStatusTests(unittest.TestCase):
 
 
 class WaitCliTests(RoutingEnv):
+    def test_agent_lifecycle_commands_do_not_change_job_or_blockers(self):
+        self.activate("J")
+        with self.board() as b:
+            b.set_waiting("J", "existing context")
+            before = b.job_status("J")
+            blockers = b.blockers("J", include_closed=True)
+        for command, tail in (("wait", ["--on", "new context"]), ("resume", []),
+                              ("activate", []), ("deactivate", []), ("pause", ["--wait", "0"])):
+            for env in ("CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID"):
+                with self.subTest(command=command, env=env), mock.patch.dict(os.environ, {env: "agent-session"}):
+                    rc, _, err = self.cli(command, "--job", "J", *tail)
+                    self.assertNotEqual(rc, 0)
+                    self.assertIn("status", err)
+                with self.board() as b:
+                    self.assertEqual(b.job_status("J"), before)
+                    self.assertEqual(b.blockers("J", include_closed=True), blockers)
+
+    def test_enrolled_agent_cannot_clear_identity_to_set_status(self):
+        self.activate("J")
+        self.spawn("a1", "[swarm job: J]\nwork")
+        for command in ("swarm wait --job J --on pause", "env -i swarm resume --job J",
+                        "env -u CODEX_THREAD_ID swarm --config /tmp/cfg deactivate --job J",
+                        "sh -c 'swarm pause --job J'", "swarm activate --job J",
+                        "env -i python3 -m swarm.cli wait --job J --on x",
+                        "env -i python3 -B -m swarm.cli deactivate --job J"):
+            with self.subTest(command=command):
+                out = self.hook("turn", agent_id="a1", tool_name="Bash", tool_input={"command": command})
+                self.assertIsNotNone(out)
+                self.assertIn("hookSpecificOutput", out)
+                self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "deny")
+        with self.board() as b:
+            self.assertEqual(b.job_status("J").status, "active")
+            self.assertEqual(b.blockers("J"), [])
+
     def test_who_shows_an_empty_goal_job_as_active(self):
         """A goal job nobody works on is not "waiting": `swarm pass` re-queues its lead or fails it."""
         rc, _, err = self.cli('activate', '--job', 'J', '--goal', 'deliver report')

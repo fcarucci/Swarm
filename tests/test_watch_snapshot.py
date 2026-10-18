@@ -15,6 +15,27 @@ SESSION = "11111111-aaaa-bbbb-cccc-000000000001"
 
 
 class SnapshotTests(unittest.TestCase):
+    def test_postgres_snapshot_counts_questions_from_its_blocker_rows(self):
+        import dataclasses
+        from swarm.watchdata import SnapshotBoard
+        question = self.board.open_blocker("J1", "question", "Francesco", "go on?")
+        raw = dataclasses.asdict(self.board.job_status("J1"))
+        raw.pop("open_questions")  # PostgreSQL job_status predates the Python-only question count.
+        snapshot = SnapshotBoard(self.board, [self.board.now(), [raw], [], [], [], {}, {},
+                                               [dataclasses.asdict(question)], {}])
+        self.assertEqual(swarm._job_status_word(snapshot, snapshot.job_status("J1"), snapshot.now()), "waiting")
+
+    def test_watch_frames_show_active_with_a_question_and_live_agent(self):
+        self.board.allocate_name("worker", "J1")
+        self.board.tool_started("worker", "Bash")
+        self.board.open_blocker("J1", "question", "Francesco", "go on?")
+        for compact in (False, True):
+            with self.subTest(compact=compact):
+                snap = self.snapshot(compact)
+                frame = "\n".join(self.render(snap, self.view(compact), (180, 50)))
+                self.assertNotIn("J1 [waiting]", frame)
+                self.assertIn("active", frame)
+
     def setUp(self):
         self.h = MemoryHarness("watch-snapshot")
         self.addCleanup(self.h.close)

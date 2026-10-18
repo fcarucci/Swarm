@@ -19,6 +19,28 @@ class BlockerContract:
         self.addCleanup(self.b.close)
         self.b.open_job("j", None, None, None, None, goal="ship")
 
+    def test_live_agents_override_questions_until_the_last_agent_finishes(self):
+        self.b.allocate_name("worker", "j")
+        self.b.open_blocker("j", "question", "human", "pick a colour")
+        self.b.set_waiting("j", "legacy wait context")
+        for running in (False, True):
+            if running:
+                self.b.tool_started("worker", "Bash")
+            state = self.b.job_status("j")
+            self.assertEqual(derive_job_status(state, 5, self.b.now()), "active")
+            if hasattr(self.h, "shown_status"):
+                self.assertEqual(self.h.shown_status("j"), "active")
+            if hasattr(self.b, "watch_snapshot"):
+                view = self.b.watch_snapshot("j", None, 60, 0)
+                self.assertEqual(derive_job_status(view.job_status("j"), 5, view.now()), "active")
+        self.b.agent_stopped("worker")
+        self.assertEqual(derive_job_status(self.b.job_status("j"), 5, self.b.now()), "waiting")
+        if hasattr(self.h, "shown_status"):
+            self.assertEqual(self.h.shown_status("j"), "waiting")
+        if hasattr(self.b, "watch_snapshot"):
+            view = self.b.watch_snapshot("j", None, 60, 0)
+            self.assertEqual(derive_job_status(view.job_status("j"), 5, view.now()), "waiting")
+
     def test_multiple_blockers_and_audit_history(self):
         a = self.b.open_blocker("j", "question", "human", "pick a colour", created_by="Alice")
         c = self.b.open_blocker("j", "question", "@EL", "pick a format")

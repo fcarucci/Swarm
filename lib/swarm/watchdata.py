@@ -1,5 +1,6 @@
 """A complete PostgreSQL watch draw, fetched in one statement and rendered locally."""
 import time
+from collections import Counter
 from dataclasses import fields, replace
 from datetime import datetime
 from swarm.board.base import AgentStatus, JobStatus, Message, Restart, Blocker, parse_job_data
@@ -29,6 +30,9 @@ class SnapshotBoard:
         self.restart_rows = rows(Restart,row[4])
         self.hidden, self.checks = row[5] or {}, row[6] or {}
         self.blocker_rows = rows(Blocker, row[7]) if len(row) > 7 else []
+        questions = Counter(b.job for b in self.blocker_rows if b.kind == "question" and b.state == "open")
+        self.job_rows = [replace(job, open_questions=questions.get(job.job, job.open_questions))
+                         for job in self.job_rows]
         self.plugin_data = row[8] or {} if len(row) > 8 else {}
         # Each idle or dead agent's newest post, taken in the same statement (agentview.last_post).
         self._last_posts = {(m.job, m.agent_name): m for m in rows(Message, row[9] if len(row) > 9 else [])}

@@ -1375,6 +1375,26 @@ def iter_commands(command: str, _depth: int = 0):
         yield from _walk(split_commands(command), _depth)
 
 
+def job_lifecycle_command(command: str) -> str | None:
+    """An agent-visible lifecycle command, including env wrappers and nested literal shells."""
+    from swarm.cli import JOB_LIFECYCLE_COMMANDS
+    for prog, args, _ in iter_commands(command):
+        if re.fullmatch(r"python(?:\d+(?:\.\d+)*)?(?:\.exe)?", prog):
+            i = 0
+            while i < len(args) and args[i].startswith("-") and args[i] not in ("-m", "-c", "--"):
+                i += 2 if args[i] in ("-W", "-X") else 1
+            if args[i:i + 2] == ["-m", "swarm.cli"]:
+                prog, args = "swarm", args[i + 2:]
+        if prog != "swarm":
+            continue
+        i = 0
+        while i < len(args) and args[i].startswith("-"):
+            i += 2 if args[i] in ("--config", "--host") else 1
+        if i < len(args) and args[i] in JOB_LIFECYCLE_COMMANDS:
+            return args[i]
+    return None
+
+
 def _nested_texts(command: str, _depth: int = 0) -> list[str]:
     """`command` and every shell text a command in it runs, for a caller that scans text."""
     out = [command]

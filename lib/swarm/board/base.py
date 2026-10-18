@@ -1143,11 +1143,14 @@ WAITING_GOAL = "waiting (goal not met)"   # the shown status of a goal job nobod
 def derive_job_status(js: JobStatus, idle_minutes: float, now: _dt.datetime) -> str:
     """What `status` and `watch` show for a job. A closed job shows its stored status (completed,
     failed, cancelled, paused). An open one is "waiting" only while a question asked with
-    `swarm ask` to a person is open, else "active": `swarm pass` keeps an open job moving (it
-    starts queued launches, re-queues the lead, runs the judge or fails the job), so there is no
+    `swarm ask` to a person is open and no agent is started or running, else "active".
+    `swarm pass` keeps an open job moving (it starts queued launches, re-queues the lead,
+    runs the judge or fails the job), so there is no
     other wait state (owner's rule of 2026-10-17). idle_minutes and now are kept for callers."""
     if js.status != "active":
         return js.status
+    if js.started or js.running:
+        return "active"
     if js.open_questions:
         return "waiting"
     return "active"

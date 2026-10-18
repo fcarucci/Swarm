@@ -133,27 +133,25 @@ class CodexHookTests(Env):
             route = b.route(start["agent_id"])
         self.assertEqual((route.state, route.job), ("final", None))           # two jobs, no tag: joins none
 
-    def test_activate_from_codex_refuses_a_second_job_in_the_same_session(self):
-        # SWARM_HOST: these tests may themselves run inside Claude Code (its variables are set)
-        with mock.patch.dict(os.environ, {"CODEX_SESSION_ID": self.sid, "CODEX_THREAD_ID": self.sid,
-                                          "SWARM_HOST": "codex"}):
-            rc, _, err = self.cli("activate", "--job", "fixture")
+    def test_owner_binding_codex_refuses_a_second_job_in_the_same_session(self):
+        with mock.patch.dict(os.environ, {"SWARM_HOST": "codex"}):
+            rc, _, err = self.cli("activate", "--job", "fixture", "--session", self.sid)
             self.assertEqual(rc, 0, err)
-            rc, _, err = self.cli("activate", "--job", "other")
+            rc, _, err = self.cli("activate", "--job", "other", "--session", self.sid)
             self.assertEqual(rc, 1)
             self.assertIn('"fixture" is already active in this Codex session', err)
-            rc, _, err = self.cli("activate", "--job", "fixture")       # the same job again: fine
+            rc, _, err = self.cli("activate", "--job", "fixture", "--session", self.sid)
             self.assertEqual(rc, 0, err)
         self.assertFalse((self.markers / "other.json").exists())
 
-    def test_attach_from_codex_refuses_a_second_job_in_the_same_session(self):
+    def test_owner_attaching_codex_refuses_a_second_job_in_the_same_session(self):
         rc, _, err = self.cli("activate", "--job", "other")                  # active, bound to no session
         self.assertEqual(rc, 0, err)
-        env = {"CODEX_SESSION_ID": self.sid, "CODEX_THREAD_ID": self.sid, "SWARM_HOST": "codex"}
+        env = {"SWARM_HOST": "codex"}
         with mock.patch.dict(os.environ, env):
-            rc, _, err = self.cli("activate", "--job", "fixture")
+            rc, _, err = self.cli("activate", "--job", "fixture", "--session", self.sid)
             self.assertEqual(rc, 0, err)
-            rc, _, err = self.cli("activate", "--job", "other", "--attach")
+            rc, _, err = self.cli("activate", "--job", "other", "--attach", "--session", self.sid)
         self.assertEqual(rc, 1)
         self.assertIn('"fixture" is already active in this Codex session', err)
         self.assertEqual([p.name for p in self.markers.glob("other--*.json")], [])

@@ -5,6 +5,12 @@ message board. Hooks deliver new messages and track jobs and agents; an optional
 checks whether the job's goal is met. Use the skills to run the work and `swarm watch`
 to follow it.
 
+Swarm derives job status from state. An open job with a started or running agent shows
+**active**, even with an unanswered question. With no live agent, it shows **waiting** only
+for an unanswered question to a person. Agents report facts and ask questions; they cannot
+run `activate`, `deactivate`, `pause`, `resume`, or `wait` to set status. Owner lifecycle
+commands run from a terminal outside an agent session.
+
 ## Skills in this plugin
 
 - [`swarm`](skills/swarm/SKILL.md): the machinery for jobs, the board, hooks, judges,

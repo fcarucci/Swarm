@@ -429,8 +429,7 @@ class HookTests(Env):
             b.post("J", "Homer Simpson", "hello")
             activated = b.job_status("J").activated_at
         self.config.write_text(self.config.read_text() + '[models.codex]\nworker = "gpt-test"\n')
-        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "t", "CODEX_SESSION_ID": "codex-sess",
-                                          "SWARM_HOST": "codex"}):
+        with mock.patch.dict(os.environ, {"SWARM_HOST": "codex"}):
             rc, out, err = self.cli("activate", "--job", "J", "--attach", "--session", "codex-sess")
         self.assertEqual(rc, 0, err)
         self.assertIn("attached", out)

@@ -444,10 +444,9 @@ def _instructions(name: str, job: str, cfg: dict, goal: str | None = None, judge
     lines.append("- When you finish something another agent could check, post `DONE: <what, and how "
                  "to check it>`. Verifiers (shown as (verifier) in the roster) check such claims "
                  "and answer VERIFIED or FAILED with evidence: fix what fails.")
-    lines.append(f"- Before you end your turn to wait for background work that will wake you (a "
-                 f"monitor, a long remote run, a lock), run `{_bin()} wait --job {_q(job)} --on "
-                 f"\"<what you wait for>\"`: a job whose agents have all finished auto-closes "
-                 f"after a quiet spell otherwise. Once it is over: `{_bin()} resume --job {_q(job)}`.")
+    lines.append("- Swarm derives job status: live agents mean active. Report background work and "
+                 "blockers as facts; ask a specific question when a person must decide. Agents "
+                 "cannot run activate, deactivate, pause, resume or wait to set job status.")
     lines += _board_lines(name, job, cap, cfg)
     lines += _spawn_lines(cfg, job)
     return "\n".join(lines)
@@ -2380,6 +2379,13 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
         _CURRENT["host"] = hosts.get(hosts.detect_hook_host(host_flag, payload, os.environ))
     except KeyError:   # a host this version has no adapter for: do nothing
         return 0
+    if event == "turn":
+        from swarm.shellguard import job_lifecycle_command
+        command = current_host().shell_command(payload)
+        if command and job_lifecycle_command(command):
+            _deny("[swarm] Agents cannot set job status. Report facts or ask a specific question; "
+                  "Swarm derives the status. Owner lifecycle commands must run outside the agent.")
+            return 0
     if event in ('start', 'stop', 'session-stop', 'session-end') and os.environ.get('SWARM_HOOK_FASTPATH'):
         from swarm.fastpath import invalidate
         invalidate(payload)
