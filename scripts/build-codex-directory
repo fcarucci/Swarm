@@ -45,6 +45,9 @@ TOP_FILES = ("LICENSE", "NOTICE", "PRIVACY.md", "SECURITY.md", "THIRD_PARTY_NOTI
              "config.example.toml")
 EXCLUDE_NAMES = {"winhook.py", "hooks.py", "SKILL.cdx.md", ".DS_Store", ".gitignore", ".gitattributes"}
 EXCLUDE_DIRS = {"__pycache__", "node_modules", "tests", "tools", ".git"}
+# These native commands also belong to the instruction-only edition. A development build
+# before their sources are tracked must fail here rather than publish a ZIP whose CLI cannot load.
+REQUIRED_RUNTIME = ("task_cli", "session_cli", "statusview", "dependencies")
 ZIP_TIME = (2026, 1, 1, 0, 0, 0)
 
 
@@ -125,6 +128,11 @@ def collect(root: Path) -> dict[str, bytes]:
         rel = path.relative_to(root)
         if wanted(rel) and path.is_file():
             files[rel.as_posix()] = path.read_bytes()
+    missing = [f"lib/swarm/{name}.py" for name in REQUIRED_RUNTIME
+               if f"lib/swarm/{name}.py" not in files]
+    if missing:
+        raise SystemExit("build-codex-directory: missing required runtime: " + ", ".join(missing)
+                         + "; track the sources before building")
     for skill in SKILLS:                       # the instruction-only text replaces SKILL.md in the ZIP
         cdx = root / "skills" / skill / "SKILL.cdx.md"
         if cdx.is_file():

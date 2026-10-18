@@ -9,12 +9,14 @@ import hashlib
 import json
 import os
 import re
+import runpy
 import subprocess
 import sys
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 from support import ROOT  # noqa: F401  (sets sys.path)
 
@@ -101,6 +103,21 @@ class CodexDirectoryTests(unittest.TestCase):
         self.assertIn("requirements-postgres.txt", wanted)
         for name in sorted(wanted):
             self.assertIn(name, self.names)
+
+    def test_native_command_helpers_are_shipped_and_work_without_hooks(self):
+        for name in ('task_cli', 'session_cli', 'statusview', 'dependencies'):
+            self.assertIn(f'lib/swarm/{name}.py', self.names)
+        with tempfile.TemporaryDirectory(prefix="swarm-cdx-home-") as h:
+            for command in ('task', 'session', 'status'):
+                self.assertIn('usage:', self.cli(Path(h), command, '--help'))
+
+    def test_build_refuses_an_incomplete_runtime_instead_of_publishing_a_broken_zip(self):
+        builder = runpy.run_path(str(SCRIPT))
+        collect = builder['collect']
+        selected = [p for p in builder['tracked'](ROOT) if p.name != 'task_cli.py']
+        with mock.patch.dict(collect.__globals__, tracked=lambda root: selected):
+            with self.assertRaisesRegex(SystemExit, 'missing required runtime.*task_cli.py'):
+                collect(ROOT)
 
     def test_sizes_and_no_archives(self):
         self.assertLessEqual(len(self.names), 512)
