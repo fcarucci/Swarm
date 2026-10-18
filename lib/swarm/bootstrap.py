@@ -1535,7 +1535,6 @@ def doctor(host: str | None = None, *, config: Path | None = None, claude_plugin
         checks += _capture_failed_check(cfg)
         checks += _bg_orphans_check(cfg)
     checks += supervisor_checks(cfg, host)
-    checks += _receipt_failures_check()
     if cfg_ok:
         checks += _launch_sandbox_checks(cfg)
     return checks
@@ -1760,43 +1759,6 @@ def _transcripts_users_check(cfg: dict) -> list[Check]:
     if excerpts_on:
         detail += "; memory excerpts are readable by every OS user sharing the board role"
     return [Check("transcripts users", None, detail, fix)]
-
-
-RECEIPT_FAILURE_HOURS = 24.0
-RECEIPT_LOG_TAIL = 64 * 1024   # the newest bytes of receipt-failures.log doctor reads (the hook cuts the file back too)
-
-
-def _receipt_failures_check() -> list[Check]:
-    """A drive hook could not write a receipt (or a record disagreed with what was submitted) in the last 24 h
-    (receipt-failures.log in the host dir): the driver then ignores that control record, so a launch or a
-    hand-off stalls. Reads the tail of the log, so a long log never hides a fresh failure."""
-    import time
-    from swarm import paths, safefs
-    try:
-        with safefs.dir_fd(paths.host_dir(), create=False) as d:
-            tail = safefs.read_tail(d, "receipt-failures.log", RECEIPT_LOG_TAIL)
-    except (OSError, FileNotFoundError):
-        return []
-    if tail is None:
-        return []
-    data, dropped = tail
-    lines = data.decode("utf-8", "replace").splitlines()
-    if dropped and lines:
-        lines = lines[1:]        # the first line of a cut tail is partial
-    now = time.time()
-    recent = []
-    for line in lines:
-        head = line.split(" ", 1)[0]
-        if head.isdigit() and now - float(head) < RECEIPT_FAILURE_HOURS * 3600:
-            recent.append(line)
-    if not recent:
-        return []
-    return [Check("drive receipts", False,
-                  f"{len(recent)} control record receipt(s) could not be written in the last "
-                  f"{RECEIPT_FAILURE_HOURS:.0f} h; the driver ignores those records (last: "
-                  f"{recent[-1][:160]})",
-                  "fix the host directory (~/.local/share/swarm/host) so receipts can be written, then "
-                  "re-send the failed command")]
 
 
 PENDING_FINAL_WARN_HOURS = 1.0   # doctor: an ended agent without a final transcript this long is shown

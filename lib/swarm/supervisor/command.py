@@ -162,9 +162,8 @@ def candidates(board, cfg: dict, sup: dict, *, job: str | None = None, now=None,
         # The job still needs work and supervise is enabled.
         if (job and js.job != job) or not js.supervise or js.status != "active" or js.verdict in SETTLED_VERDICTS:
             continue
-        from swarm.supervisor.orphans import drive_gate, human_question
-        gate = drive_gate(board, cfg, js.job)   # None: a plain job, held by its job-level wait
-        if gate is None and js.waiting_on and not js.waiting_on.startswith("supervisor: restarting "):
+        from swarm.supervisor.orphans import human_question
+        if js.waiting_on and not js.waiting_on.startswith("supervisor: restarting "):
             continue
         if human_question(board, js, cfg):
             continue
@@ -176,8 +175,6 @@ def candidates(board, cfg: dict, sup: dict, *, job: str | None = None, now=None,
             if a.ended_at is None or not (a.left_reason or "").startswith(STUCK_PREFIX):
                 continue
             if a.agent_key in replaced or a.name in active_names:
-                continue
-            if gate and a.name in gate:   # a drive launch with an open question waits; the others go on
                 continue
             rec = enrolment_of(cfg, a, js.job)
             if rec is None:
@@ -199,9 +196,8 @@ def _invalid(board, job: str, agent_key: str, cfg: dict | None = None):
         return "the job is closed", js, None
     if js.verdict in SETTLED_VERDICTS:
         return f"the job has a {js.verdict} verdict", js, None
-    from swarm.supervisor.orphans import drive_gate, human_question
-    gate = drive_gate(board, cfg, job)   # None: a plain job, held by its job-level wait
-    if gate is None and js.waiting_on and not js.waiting_on.startswith("supervisor: restarting "):
+    from swarm.supervisor.orphans import human_question
+    if js.waiting_on and not js.waiting_on.startswith("supervisor: restarting "):
         return "the job is waiting on a human or external event", js, None
     if not js.supervise:
         return "supervise is off for the job", js, None
@@ -213,8 +209,6 @@ def _invalid(board, job: str, agent_key: str, cfg: dict | None = None):
         return "its agent row is gone or active", js, a
     if any(x.name == a.name and x.ended_at is None for x in rows):
         return "its name is active again", js, a
-    if gate and a.name in gate:
-        return "its launch has an unanswered question", js, a
     if any(r.old_agent_key == agent_key for r in board.restarts(job=job)):
         return "it was already replaced", js, a
     if cfg is not None and enrolment_of(cfg, a, job) is None:

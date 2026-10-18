@@ -290,7 +290,6 @@ def learnings_gate(cfg: dict, board, js, args) -> int:
         from swarm import person
         from swarm.board.autoinit import store_key
         try:
-            person.forget()
             how = person.require("deactivate --no-learn", js.job, board_key=store_key(cfg), who=None)
         except person.PersonRefused as exc:
             print(term_safe(str(exc)), file=sys.stderr)

@@ -634,13 +634,13 @@ class MemoryBoard(MemoryLaunches, MemoryBlockers, MemoryEvents, MemoryBgCommands
         if verdict not in VERDICTS:
             raise BoardError(f"unknown verdict {verdict!r}")
         details = check_verdict_details(details)
-        from swarm.review import drive_job, verdict_data
+        from swarm.review import verdict_data
         s = self._s()
         with s.lock:
             judge, j = self._active_judge(job), s.jobs.get(job)
             if j is None or judge is None or judge["name"] != judge_name:
                 return False
-            check_verdict_args(verdict, scope, details, open_count, drive_job(j.get('plugin_data')))
+            check_verdict_args(verdict, scope, details)
             at = self.now()
             j.update(verdict=verdict, verdict_reason=reason, verdict_next=next_steps, verdict_by=judge_name, verdict_at=at,
                      verdict_details=details, verdict_details_at=at if details else None,

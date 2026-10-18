@@ -32,13 +32,6 @@ def protects(blocker, now):
     return rule == "always" or (rule == "addressed" and blocker.waiting_on != "external") or bounded
 
 
-def open_question_launches(board, job, generation):
-    """The drive launches with an open question in `generation` of `job`: the per-launch gate of spec 3.10.
-    A question asked outside a drive job has no launch and never counts."""
-    return {b.launch for b in board.blockers(job)
-            if b.kind == "question" and b.launch is not None and b.generation == generation}
-
-
 def rollup(js, rows, now):
     if not rows or js.status not in ("active", "paused"):
         return dataclasses.replace(js, open_blockers=0, protected_blockers=0, open_questions=0)
@@ -86,12 +79,7 @@ class BlockerLifecycle:
             open_by_job.setdefault(b.job, []).append(b)
         for js in self.jobs(True):
             rows = open_by_job.get(js.job, ())
-            # Drive jobs expire their questions only through the driver, from the ledger's deadline (spec 3.10 [RR3]).
-            # (the board's claim, or a ledger on this host: Board.drive_job_claimed)
-            drive = bool(rows) and self.drive_job_claimed(js.job)
             for b in rows:
-                if drive:
-                    continue
                 # Legacy waits pause with the job; decision deadlines continue.
                 if b.kind == "wait" and js.status != "active":
                     continue

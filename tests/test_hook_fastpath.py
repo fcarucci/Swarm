@@ -89,19 +89,13 @@ class ShellFastPathTests(unittest.TestCase):
             self.assertTrue(run('done','posted\nswarm-record: kind=deactivate id=3 rev=1\n'))
             self.assertFalse(run('done','ordinary output\n'), 'a call with no record line ran Python without a marker')
             self.assertFalse(run('turn','swarm-record: kind=deactivate id=3 rev=1'), 'only PostToolUse is let through')
-            # a host-private drive ledger counts like a marker (the agent-writable markers can be removed)
-            led=home/'.local/share/swarm/supervisor/drive'; led.mkdir(parents=True)
-            (led/'x.json').write_text('{}')
-            self.assertTrue(run('turn','ordinary'), 'a drive ledger did not keep the hook on')
-            (led/'x.json').unlink()
-            self.assertFalse(run('turn','ordinary'))
             # a live lease does not hide a record line from Python
             (fp/'live').write_text('9999999999\n'); (fp/'board-J').write_text('g\n'); (fp/'agent-session-s').write_text('9999999999\nJ\ng\n')
             self.assertTrue(run('done','swarm-record: kind=halt id=1 rev=1\n'))
 
     def test_a_drive_control_command_is_never_served_by_a_lease(self):
         """PreToolUse of `swarm halt|launch|goal-ready|drive|deactivate` always reaches Python, which writes the
-        caller's grant (drivegate.write_grants); an ordinary call of the same session is served by its lease."""
+        caller's grant (launchgate); an ordinary call of the same session is served by its lease."""
         with tempfile.TemporaryDirectory() as td:
             home=Path(td); hd=home/'.local/share/swarm/host'; hd.mkdir(parents=True,mode=0o700)
             fp=hd/'fastpath'; fp.mkdir(mode=0o700)

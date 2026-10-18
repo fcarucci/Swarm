@@ -2260,29 +2260,9 @@ class DriveVerdicts:
         self.assertTrue(goal_is_unmet("g", None))
         self.assertFalse(goal_is_unmet(None, None))
 
-    def test_drive_job_not_met_must_say_how_many_criteria_are_open(self):
-        judge = self.judged_goal()
-        self.assertTrue(self.b.set_job_data("J", "drive.enabled", "1"))
-        with self.assertRaises(ValueError):
-            self.b.record_verdict("J", judge, "not_met", "why", "next", scope="goal", generation=1)
-        with self.assertRaises(ValueError):
-            self.b.record_verdict("J", judge, "not_met", "why", "next", scope="goal", generation=1, open_count=-1)
-        self.assertIsNone(self.b.job_status("J").verdict)
-        self.assertTrue(self.b.record_verdict("J", judge, "not_met", "why", "next", scope="goal", generation=1,
-                                              open_count=3))
-        self.assertEqual(self.b.job_status("J").verdict, "not_met")
-        self.assertTrue(self.b.record_verdict("J", judge, "met", "done", scope="goal", generation=1))
-
-    def test_a_drive_ruling_not_met_needs_no_open_count(self):
-        judge = self.judged_goal()
-        self.assertTrue(self.b.set_job_data("J", "drive.enabled", "1"))
-        self.assertTrue(self.b.record_verdict("J", judge, "not_met", "why", "next", scope="ruling", generation=2))
-        self.assertEqual(self.b.job_status("J").verdict_scope, "ruling")
-
     def test_a_drive_not_met_with_no_open_criteria_is_accepted(self):
         from swarm.review import artifact_verdicts
         judge = self.judged_goal()
-        self.assertTrue(self.b.set_job_data("J", "drive.enabled", "1"))
         self.assertTrue(self.b.record_verdict("J", judge, "not_met", "why", "next", scope="goal", generation=1,
                                               open_count=0))
         ref = "feat/x@" + "d" * 40
@@ -2293,7 +2273,6 @@ class DriveVerdicts:
     def test_artifact_verdict_record_keeps_scope_generation_and_progress(self):
         from swarm.review import artifact_verdicts
         judge = self.judged_goal()
-        self.assertTrue(self.b.set_job_data("J", "drive.enabled", "1"))
         ref = "feat/x@" + "b" * 40
         self.assertTrue(self.b.record_verdict("J", judge, "not_met", "why", "next", artifact=ref, scope="artifact",
                                               generation=3, open_count=2, progress=True, candidate="b" * 40,

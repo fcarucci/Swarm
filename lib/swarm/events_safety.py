@@ -76,57 +76,8 @@ def _orchestrators(board, job: str, roles) -> list:
     return [r for r in board.roster(job) if r.active and (r.role or "").lower() in roles]
 
 
-class DriveLedgers(dict):
-    """job -> ledger, plus `unreadable`: the ledger directory could not be read in full (a planted lock, a bad
-    file), so which jobs are drive jobs is not known and the watchdog must not act on a guess."""
-    unreadable = False
-
-
-def drive_ledgers(cfg: dict) -> DriveLedgers:
-    """The unfinished host-private ledger of every drive job owned by this host. The board's `drive.enabled`
-    flag is board-writable and decides nothing here (spec 4.0): a job is a drive job for the watchdog only when
-    this host holds its ledger. Empty when there is no ledger directory. When it cannot be read, the result
-    is empty with `unreadable` set: it fails closed (no model call is made, see report)."""
-    import os
-    from swarm.board.autoinit import store_key
-    from swarm.supervisor import ledger, settings
-    out = DriveLedgers()
-    try:
-        if not os.path.lexists(settings.private_dir() / ledger.SUBDIR):
-            return out
-        entries = ledger.unfinished(store_key(cfg))
-    except Exception:
-        out.unreadable = True
-        return out
-    for e in entries:
-        if isinstance(e, ledger.Ledger):
-            out[e.job] = e
-        else:
-            out.unreadable = True            # a bad entry: its job is unknown
-    return out
-
-
-def driver_stale(led, cfg: dict, now: _dt.datetime) -> bool:
-    """The driver has not completed a pass over this ledger for more than two stall periods (2x timer_minutes)."""
-    from swarm.supervisor import settings
-    try:
-        last = led.last_pass or led.activated_at
-        t = _aware(_dt.datetime.fromisoformat(last))
-        return (now - t).total_seconds() > 2 * 60 * float(settings.settings(cfg)["timer_minutes"])
-    except Exception:
-        return True
-
-
-def check_job(board, s: dict, js, now: _dt.datetime, drive=None, cfg=None) -> list[Problem]:
-    """`drive`: the drive ledgers of this host (drive_ledgers). A drive job gets no waiter-stale, unacked, unread or
-    stalled alerts (nobody waits for it; the driver raises DRIVER-STALLED), but one outside check: its driver
-    has not passed for more than two stall periods (2x [supervise] timer_minutes)."""
+def check_job(board, s: dict, js, now: _dt.datetime) -> list[Problem]:
     job, out = js.job, []
-    if drive and job in drive:
-        if cfg is not None and driver_stale(drive[job], cfg, now):
-            out.append(Problem(job, "driver-stalled", "the driver has not passed over this drive job for more "
-                               "than two stall periods (is the session driver running? `swarm drive run` drives it by hand)"))
-        return out
     pending = _pending(board, job)
     old = [e for e in pending if getattr(e, "to", None) in (None, "") or str(e.to).lstrip("@") in
            {str(r).lower() for r in s["orchestrator_roles"]} | {"pm"}]
@@ -190,16 +141,9 @@ def check(board, cfg: dict, now=None, *, listener_up=None, health=None) -> list[
             problems.append(Problem(None, "listener-down", "the events listener is not answering"))
     if s["enabled"]:
         problems += helper_problems(health, n)
-    drive = drive_ledgers(cfg)
-    seen = set()
     for js in board.jobs(False):
-        seen.add(js.job)
         if js.status == "active":
-            problems += check_job(board, s, js, n, drive, cfg)
-    for job in sorted(set(drive) - seen):    # a paused drive job is not in the active list: still watched
-        js = board.job_status(job)
-        if js is not None and js.status == "paused":
-            problems += check_job(board, s, js, n, drive, cfg)
+            problems += check_job(board, s, js, n)
     return problems
 
 
@@ -246,7 +190,6 @@ def report(board, cfg: dict, problems: list[Problem], now=None, run=subprocess.r
     s = events_listener.settings(cfg)
     n = _now(now)
     bucket = int(n.timestamp() // (s["alert_repeat_minutes"] * 60))
-    drive = drive_ledgers(cfg)      # once per report: a drive job, or an unreadable ledger, gets no model call
     jobs = {p.job for p in problems if p.job}
     if any(p.job is None for p in problems):
         jobs |= {js.job for js in board.jobs(False) if js.status == "active"}
@@ -254,7 +197,7 @@ def report(board, cfg: dict, problems: list[Problem], now=None, run=subprocess.r
     for job in sorted(jobs):
         mine = [p for p in problems if p.job in (job, None)]
         text = "SWARM-ALERT " + "; ".join(f"{p.code}: {p.text}" for p in mine)
-        line = None if (job in drive or drive.unreadable) else triage(board, cfg, job, mine, run=run)   # no model call outside a launch
+        line = triage(board, cfg, job, mine, run=run)
         if line:
             text = f"SWARM-ALERT {line} [{', '.join(p.code for p in mine)}]"
         text = text[:events_listener.TEXT_MAX]

@@ -2834,7 +2834,6 @@ def _parser() -> argparse.ArgumentParser:
     po.add_argument("--key", help="the agent's key (instead of --as: its name is looked up)")
     po.add_argument("--to", help="an agent's name, or @role (@EL, @PM, @QA, @judge, @build_engineer, ...)")
     po.add_argument("message", nargs="+")
-    from swarm import land_cli; land_cli.add_parser(sub)
     cf = sub.add_parser("config", help="show or change a setting: `config board.message_max_chars` prints "
                         "the board's message cap, `config board.message_max_chars 500` changes it")
     cf.add_argument("key", nargs="?", help="board.message_max_chars (omit to list the settings)")
@@ -4329,7 +4328,6 @@ def _read_details(source: str) -> str:
 
 from swarm.verdict_cli import (_board_verdict, _verdict_details_line, _verdict_scope,  # noqa: E402,F401
                                _verdict_show, _verdict_text)
-from swarm.land_cli import _board_land  # noqa: E402
 
 
 def _board_read(board, cfg: dict, args) -> None:
@@ -4522,15 +4520,6 @@ def _board_status(board, cfg: dict, args) -> None:
         print(term_safe(line))
 
 
-def _drive_join_judge_refused(board, cfg: dict, args) -> bool:
-    """In a drive job, `join --judge` grants nothing unless the joining session is the driver's judge launch
-    (drivegate.is_drive_judge: its launch record and receipted role). Plain jobs: never refused here."""
-    from swarm import drivegate   # (hooks.py is not in the Codex directory edition)
-    if not drivegate.drive_job(cfg, args.job):
-        return False
-    return not drivegate.is_drive_judge(cfg, board, args.job, {"session_id": args.key})
-
-
 def _board_join(board, cfg: dict, args) -> int:
     """Allocate (or return) the agent's name. --judge / --verifier give agents that run outside
     Claude Code the launch the hooks give a tagged subagent: they have no hooks, so the CLI is how
@@ -4539,10 +4528,6 @@ def _board_join(board, cfg: dict, args) -> int:
     if board.active_agent_name(args.key) is None:   # allocate_name never revives a stuck close
         print(f"refused: {name} ({args.key}) was closed as stuck by the swarm supervisor and "
               f"can't rejoin: its replacement does the work", file=sys.stderr)
-        return 1
-    if args.judge and _drive_join_judge_refused(board, cfg, args):
-        print(f"refused: job {args.job} is driven: only the driver's judge launch is its judge (a join "
-              f"cannot claim it)", file=sys.stderr)
         return 1
     if args.judge and not board.take_judge_launch(args.key, args.job):
         print("refused: another agent holds the judge launch", file=sys.stderr)
@@ -4763,7 +4748,6 @@ BOARD_COMMANDS = {
     "done": _board_done,
     "config": _board_config,
     "verdict": _board_verdict,
-    "land": _board_land,
     "wait": _board_wait,
     "pause": _board_pause,
     "resume": _board_resume,
@@ -4920,18 +4904,8 @@ def _dispatch(args) -> int:
         rc = _run_command(cfg, args)
         if not rc:
             PLUGINS.run_after(args.cmd, args)
-        _wake(cfg, args)
         return rc
-    rc = _run_command(cfg, args)
-    _wake(cfg, args)
-    return rc
-
-
-def _wake(cfg: dict, args) -> None:
-    """A board write wakes the session drivers (spec 3.11 [T21]: the board's wake file). Never raises."""
-    if not _reads_only(args) and args.cmd not in ("doctor", "hook", "tail", "watch", "notices"):
-        from swarm.supervisor import wake
-        wake.touch_cfg(cfg)
+    return _run_command(cfg, args)
 
 
 def _run_command(cfg: dict, args) -> int:

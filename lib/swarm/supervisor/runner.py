@@ -1193,8 +1193,6 @@ def execute(cfg: dict, run: dict, *, popen=subprocess.Popen, clock=time.monotoni
         return _execute(cfg, run, popen=popen, clock=clock, sleep=sleep, poll=poll, board_every=board_every)
     finally:
         os.close(lock_fd)
-        from swarm.supervisor import wake
-        wake.touch_cfg(cfg)   # spec 3.11 [T21]: a runner's exit wakes the session drivers (after its lock is free)
 
 
 def open_workdir(cfg: dict, path: str, check=None) -> tuple[int | None, str | None]:

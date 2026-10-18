@@ -87,8 +87,7 @@ class LaunchHomeCase(unittest.TestCase):
         self.work = self.home / "work"
         self.cfg = {"drive": {"launch_git_name": "Launch", "launch_git_email": "launch@example.test"},
                     "supervise": {"allowed_workdirs": [str(self.work)]}}
-        for p in (mock.patch.dict(os.environ, {"HOME": str(self.home), "USERPROFILE": str(self.home)}),
-                  mock.patch("swarm.supervisor.launchhome.pinned_paths", lambda cfg: [])):
+        for p in (mock.patch.dict(os.environ, {"HOME": str(self.home), "USERPROFILE": str(self.home)}),):
             p.start()
             self.addCleanup(p.stop)
 
@@ -232,7 +231,7 @@ class LaunchAllowTest(LaunchHomeCase):
         self.assertEqual(got["permissions"]["deny"], ["Bash(rm:*)"])
         allow = got["permissions"]["allow"]
         self.assertEqual(allow[0], "Read")
-        for c in ("post", "read", "done", "review", "verdict", "goal-ready", "land", "ask", "answer", "run",
+        for c in ("post", "read", "done", "review", "verdict", "goal-ready", "ask", "answer", "run",
                   "who", "status"):
             self.assertIn(f"Bash(swarm {c}:*)", allow)
         self.assertIn("Bash(make test:*)", allow)
@@ -295,17 +294,6 @@ class SpecTest(LaunchHomeCase):
         with self.assertRaises(launchhome.LaunchIsolationError):
             self.spec(str(wt))
 
-    def test_pins_outside_the_home_are_covered(self):
-        with mock.patch("swarm.supervisor.launchhome.pinned_paths", lambda cfg: ["/srv/keys/id", f"{self.home}/.ssh/x"]):
-            spec, _ = self.spec()
-        self.assertEqual(spec["cover"], ["/srv/keys/id"])   # inside the home it is simply not bound
-
-    @unittest.skipIf(sys.platform == "win32", "POSIX paths in the fixture (Windows: 0.3.1)")
-    def test_pin_paths(self):
-        owner = {"credentials": {"a": "ssh-key:/k/id", "b": "ssh-agent:/run/a.sock", "c": "helper:/usr/bin/gh x"},
-                 "config_dirs": {"c": "/cfg/gh"}}
-        self.assertEqual(sorted(launchhome._pin_paths(owner)), ["/cfg/gh", "/k/id", "/k/id.pub", "/run/a.sock"])
-
     def test_platform_lists(self):
         self.assertIn("Library/Application Support/gh", launchhome.platform_cover("darwin"))
         self.assertIn("AppData/Roaming/GitHub CLI", launchhome.platform_cover("win32"))
@@ -320,13 +308,6 @@ class FailClosedTest(LaunchHomeCase):
         p = mock.patch.object(launchhome, "jail_platform", lambda platform=None: True)
         p.start()
         self.addCleanup(p.stop)
-
-    def test_unreadable_pins_refuse(self):
-        mock.patch.stopall()
-        with mock.patch.dict(os.environ, {"HOME": str(self.home), "USERPROFILE": str(self.home)}), \
-                mock.patch("swarm.supervisor.ledger.unfinished", side_effect=OSError("boom")):
-            with self.assertRaises(launchhome.LaunchIsolationError):
-                launchhome.pinned_paths(self.cfg)
 
     def test_config_cannot_turn_isolation_off(self):
         self.cfg["drive"]["launch_isolation"] = "off"
@@ -621,7 +602,7 @@ class TypedProtocolTest(BrokerCase):
 
     def test_rr10_abbreviated_and_explicit_identity_is_never_passed(self):
         for argv in (["post", "--job", "J", "--a", "Bart", "x"], ["post", "--job", "J", "--a=Bart", "x"],
-                     ["land", "--job", "J", "--ke", "OTHER"], ["review", "--job", "J", "verified", "--k", "OTHER"],
+                     ["review", "--job", "J", "verified", "--k", "OTHER"],
                      ["done", "--job", "J", "--ke", "OTHER"], ["read", "--job", "J", "--sess", "x"]):
             rc, _, _ = self.cli(argv)
             self.assertEqual(rc, 2, argv)

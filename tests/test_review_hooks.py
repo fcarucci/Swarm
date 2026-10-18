@@ -238,15 +238,6 @@ class ReviewHookTests(GoalEnv):
         self.assertIn('TypeError: bad timestamp', out['reason'])
         self.assertNotIn('board is unavailable', out['reason'])
 
-    def test_ruling_verdict_allows_stop_with_pending_artifact(self):
-        self.done()
-        with self.board() as b:
-            b.set_job_data('J', 'drive.generation', '2')
-            from swarm.spool import deliver_verdict
-            self.assertTrue(deliver_verdict(b, 'J', self.judge, 'not_met', 'missing review', 'staff review',
-                                           scope='ruling', generation=2, candidate='a' * 40, req='r1'))
-        self.assertIsNone(self.hook('stop', agent_id='judge-1'))
-
     def test_pending_external_evidence_always_concludes_not_met(self):
         self.done()
         with self.board() as b:

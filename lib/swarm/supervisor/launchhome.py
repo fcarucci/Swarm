@@ -329,7 +329,7 @@ def _read_person(path: Path) -> bytes | None:
         os.close(fd)
 
 
-LAUNCH_SWARM_COMMANDS = ("post", "read", "done", "review", "verdict", "goal-ready", "land", "ask", "answer", "run",
+LAUNCH_SWARM_COMMANDS = ("post", "read", "done", "review", "verdict", "goal-ready", "ask", "answer", "run",
                        "who", "status",
                        "remember", "recall", "learn")   # the memory life cycle: every launch stores or declares; a learner learns
 LAUNCH_ALLOW = tuple(f"Bash(swarm {c}:*)" for c in LAUNCH_SWARM_COMMANDS) + ("Bash(make test:*)",)
@@ -448,45 +448,6 @@ def _seed_standing_rules(h: int, source: Path) -> None:
 
 
 # --- what the launch sees -----------------------------------------------------------------------------
-
-def _pin_paths(owner: dict) -> list[str]:
-    """The paths a drive job's pinned credentials name: ssh keys (and their .pub), agent sockets, gh dirs."""
-    out = []
-    for pin in (owner.get("credentials") or {}).values():
-        kind, _, value = str(pin).partition(":")
-        if kind == "ssh-key" and os.path.isabs(value):
-            out += [value, value + ".pub"]
-        elif kind == "ssh-agent" and os.path.isabs(value):
-            out.append(value)
-    out += [str(d) for d in (owner.get("config_dirs") or {}).values() if d and os.path.isabs(str(d))]
-    return out
-
-
-def pinned_paths(cfg: dict) -> list[str]:
-    """The credential paths pinned by every drive job with an owner record on this host.
-    LaunchIsolationError when they cannot be read (rr6: a launch is never started with a pin unknown)."""
-    from swarm import enrolment
-    from swarm.board.autoinit import store_key
-    from swarm.supervisor import ledger
-    out: list[str] = []
-    try:
-        bk = store_key(cfg)
-        found = ledger.unfinished(bk)
-        jobs = [x for x in found if isinstance(x, ledger.Ledger)]
-        if any(not isinstance(x, ledger.Ledger) for x in found):
-            raise LaunchIsolationError("a drive ledger on this host cannot be read, so its pinned credentials "
-                                     "are unknown")
-        for led in jobs:
-            rec = enrolment.find_job_owner(bk, led.job, strict=True)
-            if rec is not None and rec.owner:
-                out += _pin_paths(rec.owner)
-    except LaunchIsolationError:
-        raise
-    except Exception as exc:
-        raise LaunchIsolationError(f"the pinned credentials of this host's drive jobs cannot be read "
-                                 f"({type(exc).__name__}: {exc}); not started") from exc
-    return out
-
 
 def platform_cover(platform: str | None = None) -> tuple:
     """Home-relative credential paths of `platform` (sys.platform) a platform jail must hide."""
@@ -620,7 +581,7 @@ def jail_spec(cfg: dict, launch_home: Path, workdir: str | None, home: Path | No
     for p in overlays:     # after the work tree and git dir: their hooks and config read-only
         if os.path.exists(p):
             binds.append([p, p, "ro"])
-    cover = [p for p in pinned_paths(cfg) + _list(cfg, "launch_cover_paths") if not _under(p, h)]
+    cover = [p for p in _list(cfg, "launch_cover_paths") if not _under(p, h)]
     return {"home": h, "home_base": f"{sh}/home", "tmp": f"{sh}/tmp", "binds": binds, "cover": cover,
             "runtime_dir": f"/run/user/{os.getuid()}" if hasattr(os, "getuid") else None, "cwd": workdir or h,
             "path_prepend": [f"{h}/.swarm-launch/bin"],
@@ -787,7 +748,7 @@ def probe(cfg: dict, *, network: bool = False, run=None, available=None, no_user
             return None, f"unavailable: {why}"
         return None, BEST_EFFORT_NOTE.format(platform=sys.platform) + f": {reason}"
     home = str(paths.home())
-    targets = [f"{home}/{p}" for p in PROBE_PATHS] + pinned_paths(cfg)
+    targets = [f"{home}/{p}" for p in PROBE_PATHS]
     argv = wrap(cfg, ["sh", "-c", PROBE, "probe", *targets], job="_doctor", launch="probe",
                 probe=lambda: (True, ""))
     env = dict(os.environ)

@@ -18,49 +18,6 @@ def local_record(cfg, js):
     return enrolment.find_job(key, js.job)
 
 
-def _ledger_state(board, cfg, job):
-    """(drive, generation, bad) of `job`. A drive job is one the host's ledger holds or whose board row
-    claims drive (`drive.enabled`). `bad`: the ledger exists but cannot be read (it fails closed). The
-    generation is the ledger's, None without one. Without `cfg` only the board's claim is read."""
-    claimed = (board.job_data(job) or {}).get("drive.enabled") == "1"
-    if cfg is None:
-        return claimed, None, False
-    import os
-    from swarm.board.autoinit import store_key
-    from swarm.supervisor import ledger, settings
-    if not os.path.lexists(settings.private_dir() / ledger.SUBDIR):
-        return claimed, None, False   # no ledger directory here; a read must not create one (dry runs change nothing)
-    try:
-        if not ledger.exists(store_key(cfg), job):
-            return claimed, None, False
-        led = ledger.load(store_key(cfg), job)
-    except (ledger.LedgerBadError, settings.PrivateDirError):
-        return True, None, True
-    if led is not None and led.terminal is None:
-        return True, led.generation, False
-    return claimed, None, False       # none, or a finished ledger: a reopened plain job is not driven
-
-
-def drive_view(board, cfg, job):
-    """(drive, generation) of `job` (see _ledger_state)."""
-    drive, generation, _bad = _ledger_state(board, cfg, job)
-    return drive, generation
-
-
-def drive_gate(board, cfg, job):
-    """None for a job that is not a drive job; otherwise the launches the job's questions hold (spec 3.10). A
-    drive job's own waits and questions gate only the launches that asked them. With an unreadable ledger the
-    gate fails closed: every launch that asked any open question, and the coordinator, are held."""
-    from swarm.board.blockers import open_question_launches
-    drive, generation, bad = _ledger_state(board, cfg, job)
-    if not drive:
-        return None
-    if bad:
-        asked = {b.launch for b in board.blockers(job) if b.kind == "question" and b.launch is not None}
-        return frozenset(asked | {"lead"})
-    return frozenset(open_question_launches(board, job, generation))
-
-
 def coordinator_launch(name):
     """The launch that coordinates a drive job (the lead, or a successor lead)."""
     return name == "lead" or name.startswith("lead~")
@@ -68,9 +25,7 @@ def coordinator_launch(name):
 
 def human_question(board, js, cfg=None):
     """An unanswered question addressed to the owner/user is an external wait. Never for a drive job:
-    its questions gate their own launches (drive_gate), not the job."""
-    if drive_gate(board, cfg, js.job) is not None:
-        return False
+    its questions gate their own launches, not the job."""
     from swarm.owners import person_names
     humans = person_names(board, js.job, js)
     answered = set()
@@ -86,15 +41,10 @@ def eligible(board, cfg, js, sup, now):
     from swarm.cli import OrchestratorWatch
     if js.status != "active" or not js.supervise:
         return False
-    if drive_view(board, cfg, js.job)[0]:
-        return False          # the driver restarts its own launches; never a generic orphan coordinator
-    gate = drive_gate(board, cfg, js.job)
-    if gate is None and js.waiting_on and not js.waiting_on.startswith(WAITING_PREFIX):
+    if js.waiting_on and not js.waiting_on.startswith(WAITING_PREFIX):
         return False  # all explicit external/human waits stay under owner control
     if human_question(board, js, cfg):
         return False
-    if gate and any(coordinator_launch(launch) for launch in gate):
-        return False  # the coordinator itself waits on a question: it is not restarted
     cutoff = now - dt.timedelta(minutes=sup["orphan_minutes"])
     activity = quiet_start(js, now=now)
     if activity > cutoff or js.started or js.running or js.idle:

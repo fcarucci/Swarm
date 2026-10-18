@@ -73,14 +73,6 @@ class OrphansTest(unittest.TestCase):
                 old = getattr(self.b.js, attr); setattr(self.b.js, attr, value)
                 self.run_pass(); setattr(self.b.js, attr, old)
         self.resume.assert_not_called()
-    def test_a_drive_job_is_never_restarted_by_the_generic_pass(self):
-        self.b.job_data = lambda job: {"drive.enabled": "1"}
-        self.run_pass()
-        self.resume.assert_not_called()
-        self.b.job_data = lambda job: {}
-        self.run_pass()
-        self.assertEqual(self.resume.call_count, 1)
-
     def test_a_reopened_job_is_not_an_orphan_for_its_old_silence(self):
         self.b.js.activated_at = NOW - dt.timedelta(minutes=5)         # reopened; the last activity was 2 h ago
         self.run_pass()

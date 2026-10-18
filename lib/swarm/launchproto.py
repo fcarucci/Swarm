@@ -64,8 +64,6 @@ SCHEMA: dict = {
     "goal-ready": {"id": None, "fields": {"job": ("str", "--job"), "candidate": ("str", "--candidate"),
                                           "add_requirements": ("paths", "--add-requirements")},
                    "required": ("job",)},
-    "land": {"id": "key", "fields": {"job": ("str", "--job"), "artifact": ("str", "--artifact")},
-             "required": ("job",)},
     "ask": {"id": "key", "fields": {"job": ("str", "--job"), "to": ("str", "--to"), "text": ("list", None),
                                     "options": ("text", "--options"), "default": ("text", "--default"),
                                     "expires": ("str", "--expires"), "blocks": ("str", "--blocks")},

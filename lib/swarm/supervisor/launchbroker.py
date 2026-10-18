@@ -386,27 +386,12 @@ class LaunchBroker:
             raise Refused(f"requirement {path} is not a regular file of the work tree (a link, or too large)")
         return [f"--add-requirements-pinned={path}\n{self._store(data, made)}"]
 
-    def _grant(self, argv: list[str]) -> tuple:
-        """For a control command that needs its caller attested (drivegate.GRANT_SUBS): the broker writes the
-        grant itself, for the launch its launch record names. (board key, job, grant id) or Nones."""
-        from swarm import drivegate
-        if not argv or argv[0] not in drivegate.GRANT_SUBS or self.cfg is None:
-            return None, None, None
-        from swarm.board.autoinit import store_key
-        bk = store_key(self.cfg)
-        ctx = drivegate.launch_context(self.cfg, bk, {"session_id": self.session()})
-        full = ["--config", self.config, *argv]
-        rid = drivegate.write_grant_argv(self.cfg, full, ctx, self.host_pid)
-        ns = drivegate.parse_swarm(full) if rid else None
-        return bk, getattr(ns, "job", None), rid
-
     def do_cli(self, req) -> tuple[int, bytes, bytes]:
-        from swarm import receipts, launchproto
+        from swarm import launchproto
         command, fields = launchproto.validate(req, self.run.get("job") or None)   # fills/checks --job (own job)
         if self.session() is None:
             raise Refused("the launch's session is not known yet (a Codex launch before its thread started)")
         made: list = []
-        grant = (None, None, None)
         try:
             argv = launchproto.build_argv(
                 command, fields, key=self.session(), name=self.run.get("name"),
@@ -416,15 +401,8 @@ class LaunchBroker:
             if command == "run" and "workdir" not in fields:
                 argv[2:2] = [f"--workdir={self.workdir}"]
             limit = CLI_WAIT_TIMEOUT if command == "wait" else CLI_TIMEOUT
-            grant = self._grant(argv)
             return self._exec(argv, None, limit)
         finally:
-            bk, job, rid = grant
-            if rid:
-                try:
-                    receipts.drop(bk, job, "grant", rid)   # used up by the command, or never: none outlives it
-                except Exception:
-                    pass
             for p in made:
                 try:
                     os.unlink(p)

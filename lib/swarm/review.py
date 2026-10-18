@@ -100,11 +100,6 @@ def latest_handoffs(board, job: str, messages=None) -> list[Handoff]:
         found[key] = handoff
     return sorted(found.values(), key=lambda item: item.id)
 
-def drive_job(raw: str | None) -> bool:
-    """Whether a job's job-data marks it a drive job (`drive.enabled`, copied from the ledger)."""
-    return parse_job_data(raw).get('drive.enabled') == '1'
-
-
 def verdict_data(raw: str | None, artifact: str | None, verdict: str, reason: str,
                  next_steps: str | None, judge: str, at: dt.datetime, *, scope: str = 'artifact',
                  generation: int | None = None, open_count: int | None = None, progress: bool | None = None,
@@ -118,18 +113,12 @@ def verdict_data(raw: str | None, artifact: str | None, verdict: str, reason: st
     for no reader. A record written without a message id (a direct board call) has no such field: a legacy
     artifact verdict, never a drive goal or ruling verdict.
     An artifact verdict is stored under `pipeline.verdict.<hash of the artifact>`, bound to its artifact.
-    A goal or ruling verdict of a drive generation is stored under drive_verdict_key(): one record per
-    (generation, scope, candidate, req), so a verdict on another candidate never replaces or stands in for
-    it (its artifact is None); without a generation it has no record.
-    The record keeps its scope, drive generation, open count (acceptance criteria still unmet), progress
-    flag, candidate and requirements digest, for the drive pipeline to read.
+    A goal or ruling verdict (no artifact) has no record: only the legacy latest-verdict columns carry it.
     """
     data = parse_job_data(raw)
     data['pipeline.verdict_artifact'] = artifact or ''
     if artifact is not None:
         key = 'pipeline.verdict.' + hashlib.sha256(artifact.encode()).hexdigest()[:32]
-    elif scope in ('goal', 'ruling') and generation is not None:
-        key = drive_verdict_key(generation, scope, candidate, req)
     else:
         return json.dumps(data, ensure_ascii=False)
     fields = dict(artifact=artifact, verdict=verdict, reason=reason, next_steps=next_steps, judge=judge,
@@ -144,12 +133,6 @@ def verdict_data(raw: str | None, artifact: str | None, verdict: str, reason: st
     data[key] = str(len(chunks))
     data.update({f'{key}.{i}': chunk for i, chunk in enumerate(chunks)})
     return json.dumps(data, ensure_ascii=False)
-
-
-def drive_verdict_key(generation: int, scope: str, candidate: str | None, req: str | None) -> str:
-    """The job-data key of a goal or ruling verdict: per generation, scope and (candidate, req) digest."""
-    digest = hashlib.sha256(f"{candidate or ''}\0{req or ''}".encode()).hexdigest()[:32]
-    return f'drive.verdict.{generation}.{scope}.{digest}'
 
 
 def bound_verdict(record, *, legacy_ok: bool = False) -> dict | None:
@@ -173,22 +156,6 @@ def _chunked(data: dict, key: str):
     return json.loads(''.join(data[f'{key}.{i}'] for i in range(count)))
 
 
-def drive_verdict(board, job: str, generation: int, scope: str, candidate: str | None,
-                  req: str | None) -> dict | None:
-    """The bound goal or ruling verdict on exactly this (generation, scope, candidate, req), or None. The
-    consumer still checks the message id against the board and the verdict's receipt (spec 4.0)."""
-    data = board.job_data(job)
-    try:
-        rec = _chunked(data, drive_verdict_key(generation, scope, candidate, req))
-    except (KeyError, ValueError, TypeError):
-        return None
-    rec = bound_verdict(rec)
-    if rec is None or (rec.get('generation'), rec.get('scope'), rec.get('candidate'), rec.get('req')) != (
-            generation, scope, candidate, req):
-        return None
-    return rec
-
-
 def verdict_text(verdict: str, reason: str, *, scope: str = 'artifact', generation: int | None = None,
                  candidate: str | None = None, req: str | None = None) -> str:
     """The VERDICT message: a goal or ruling verdict of a drive generation names what it judges, so a reader
@@ -199,30 +166,10 @@ def verdict_text(verdict: str, reason: str, *, scope: str = 'artifact', generati
     return f"VERDICT {verdict}: {reason}"
 
 
-def is_drive_job(board, job: str, data: dict | None = None) -> bool:
-    """Whether `job` is driven: its board row claims it (drive.enabled), or this host holds a drive ledger
-    for it (a bad one included). Either is enough: a writer that clears the board claim does not turn a drive
-    job's verdict rules back into the legacy ones."""
-    data = board.job_data(job) if data is None else data
-    if data.get('drive.enabled') == '1':
-        return True
-    try:
-        from swarm.board.autoinit import store_key
-        from swarm.supervisor import ledger
-        cfg = getattr(board, 'cfg', None)
-        if cfg is None:
-            return False
-        return ledger.exists(store_key(cfg), job)
-    except Exception:
-        return False
-
-
-def artifact_verdicts(board, job: str, *, drive: bool | None = None) -> dict[str, dict]:
+def artifact_verdicts(board, job: str) -> dict[str, dict]:
     """The artifact verdicts of `job` by artifact. Every record goes through bound_verdict(); a record with
-    no message id at all (written before verdict binding, or by a direct board call) counts only in a job
-    that is not driven (`drive`: is_drive_job() when not given)."""
+    no message id at all (written before verdict binding, or by a direct board call) still counts."""
     data = board.job_data(job)
-    legacy_ok = not (is_drive_job(board, job, data) if drive is None else drive)
     result = {}
     for key, count in data.items():
         if not re.fullmatch(r'pipeline\.verdict\.[0-9a-f]{32}', key):
@@ -231,7 +178,7 @@ def artifact_verdicts(board, job: str, *, drive: bool | None = None) -> dict[str
             count = int(count)
             if not 0 < count <= 10000:
                 continue
-            record = bound_verdict(json.loads(''.join(data[f'{key}.{i}'] for i in range(count))), legacy_ok=legacy_ok)
+            record = bound_verdict(json.loads(''.join(data[f'{key}.{i}'] for i in range(count))), legacy_ok=True)
             if record is not None and record['verdict'] in ('met', 'not_met'):
                 result[record['artifact']] = record
         except (KeyError, ValueError, TypeError):

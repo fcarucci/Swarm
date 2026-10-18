@@ -1812,15 +1812,6 @@ def _judge_recorded_verdict(board, agent_id: str) -> bool:
         at = at.replace(tzinfo=dt.timezone.utc) if at.tzinfo is None else at
         joined = joined.replace(tzinfo=dt.timezone.utc) if joined.tzinfo is None else joined
         return at >= joined
-    # Goal/ruling records need no artifact hand-off. Check them before artifact/recipe work.
-    for key in data:
-        if key.startswith('drive.verdict.') and key.count('.') == 4:
-            try:
-                record = review.bound_verdict(review._chunked(data, key))
-                if current(record):
-                    return True
-            except (KeyError, ValueError, TypeError):
-                continue
     if any(current(record) for record in review.artifact_verdicts(board, job).values()):
         return True
     artifact = review.judge_artifact(board, job, agent_id)
@@ -2328,7 +2319,6 @@ def run_hook(event: str, cfg: dict, host: str | None = None) -> int:
     _CURRENT["stop_verdict"] = False
     try:
         _handle(event, cfg, host)
-        _wake_drivers(event, cfg, _CURRENT.get("payload") or {})
         if event == "turn":   # once a minute at most, from the hook every session runs before each tool call
             _pass_sweep(cfg)
     finally:
@@ -2482,24 +2472,7 @@ def _unchecked_verifier_write(payload: dict, agent_id: str) -> bool:
 
 
 
-# --- launches: the sandbox is in swarm.drivegate ----------------------------------------------------------
-
-def _wake_drivers(event: str, cfg: dict, payload: dict) -> None:
-    """A hook's board write wakes the pass of the board (its wake file). Not for PreToolUse, and after a tool
-    call only when it ran a swarm command (the CLI touches too, unless a sandbox keeps it out of the private
-    directory). Never raises."""
-    try:
-        if event == "turn":
-            return
-        if event == "done":
-            host = _CURRENT.get("host")
-            if host is None or "swarm" not in (host.shell_command(payload) or ""):
-                return
-        from swarm.supervisor import wake
-        wake.touch_cfg(cfg)
-    except Exception as exc:
-        _log_error("wake", str(payload.get("agent_id") or payload.get("session_id")), exc)
-
+# --- launches: the sandbox is in swarm.launchgate ----------------------------------------------------------
 
 def _launch_gate(event: str, cfg: dict, payload: dict, resume: dict | None) -> bool:
     """The launch sandbox of PreToolUse (every call, before anything else a hook does). True when the call was
@@ -2510,9 +2483,9 @@ def _launch_gate(event: str, cfg: dict, payload: dict, resume: dict | None) -> b
         return False
     ctx = None
     try:
-        from swarm import drivegate
+        from swarm import launchgate
         try:
-            ctx = drivegate.classify(cfg, payload, resume, _resume_binding)
+            ctx = launchgate.classify(cfg, payload, resume, _resume_binding)
         except Exception as exc:
             _log_error("launch classify", str(payload.get("agent_id") or payload.get("session_id")), exc)
             _no_lease(payload)
@@ -2520,7 +2493,7 @@ def _launch_gate(event: str, cfg: dict, payload: dict, resume: dict | None) -> b
         if ctx is None:
             return False
         _no_lease(payload)
-        why = drivegate.pre_tool(cfg, payload, current_host(), resume=resume, resume_lookup=_resume_binding, ctx=ctx)
+        why = launchgate.pre_tool(cfg, payload, current_host(), resume=resume, resume_lookup=_resume_binding, ctx=ctx)
     except Exception as exc:   # never break the agent (a known launch's errors are refused inside pre_tool)
         _log_error("launch gate", str(payload.get("agent_id") or payload.get("session_id")), exc)
         return False

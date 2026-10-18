@@ -79,7 +79,7 @@ case "${1:-}" in turn|done)
     case "$PAYLOAD" in *swarm*join*|*swarm*verdict*|*swarm*done*|*swarm*review*|*swarm*land*|*swarm*ask*|*swarm*answer*) VALID="";; esac
     # A drive control command's record line always reaches Python (its receipt), lease or not.
     case "$PAYLOAD" in *"swarm-record: kind="*) VALID="";; esac
-    # Drive control commands get their caller's grant from the Python hook (drivegate.write_grants).
+    # Drive control commands get their caller's grant from the Python hook (launchgate).
     # (NOLEASE, not VALID: the cached marker directory stays valid, only the lease is not used.)
     NOLEASE=""
     case "$PAYLOAD" in *swarm*halt*|*swarm*run*|*swarm*goal-ready*|*swarm*drive*|*swarm*deactivate*) NOLEASE=1;; esac
@@ -169,15 +169,7 @@ if [ -d "$HD" ] && [ ! -L "$HD" ] && [ -O "$HD" ]; then
   case "$(ls -ld "$HD" 2>/dev/null)" in drwx------*) PRIV="$HD";; esac
 fi
 if [ "${1:-}" = "session-start" ]; then
-  # A host with a drive ledger: Python starts this session's driver if it owns a drive job (spec 3.11 [T21]).
-  DRIVE=""
-  for MARKER in "$HOME/.local/share/swarm/supervisor/drive"/*.json; do [ -f "$MARKER" ] && { DRIVE=1; break; }; done
-  if [ -n "$DRIVE" ] && [ -n "$PRIV" ] && [ -x "$V/bin/python" ]; then
-    PYTHONPATH="$D/lib${PYTHONPATH:+:$PYTHONPATH}" "$V/bin/python" -m swarm.cli hook $HOSTARG session-start \
-      >/dev/null 2>>"$PRIV/hook-stderr.log" || true
-  else
-    cat >/dev/null
-  fi
+  cat >/dev/null
   if [ -z "$PRIV" ]; then   # no safe place for the stamps: nothing runs; say so (a fixed text only)
     MSG="[swarm] setup problem: ~/.local/share/swarm/host is not a private (0700, not a symlink) directory of yours, so the swarm hooks do nothing. See \`swarm doctor\`."
     printf '{"systemMessage": "%s"}\n' "$MSG"
@@ -218,9 +210,6 @@ fi
 MD="${MD:-$HOME/.local/state/swarm/active}"
 ACTIVE=""
 for MARKER in "$MD"/*.json; do [ -f "$MARKER" ] && { ACTIVE=1; break; }; done
-# A drive ledger (host-private, supervisor/drive) counts like a marker: removing the agent-writable markers must not
-# drop the drive gate.
-[ -n "$ACTIVE" ] || for MARKER in "$HOME/.local/share/swarm/supervisor/drive"/*.json; do [ -f "$MARKER" ] && { ACTIVE=1; break; }; done
 # A drive control command's record line (`swarm-record: kind=...`, spec 4.5) always reaches Python, even with no
 # marker left: `swarm deactivate` removes the job's marker, and the PostToolUse hook writes the requester's receipt.
 [ -n "$ACTIVE" ] || { [ "${1:-}" = done ] && case "$PAYLOAD" in *"swarm-record: kind="*) ACTIVE=1;; esac; }

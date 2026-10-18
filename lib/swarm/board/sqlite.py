@@ -1024,14 +1024,14 @@ class SqliteBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
         if verdict not in VERDICTS:
             raise BoardError(f"unknown verdict {verdict!r}")
         details = check_verdict_details(details)
-        from swarm.review import drive_job, verdict_data
+        from swarm.review import verdict_data
         with self._tx() as c:
             row = c.execute("SELECT plugin_data FROM jobs WHERE job = ? AND EXISTS "
                 "(SELECT 1 FROM agents WHERE job = ? AND name = ? AND judge AND left_at IS NULL)",
                 (job, job, judge_name)).fetchone()
             if row is None:
                 return False
-            check_verdict_args(verdict, scope, details, open_count, drive_job(row[0]))
+            check_verdict_args(verdict, scope, details)
             at = self.now()
             c.execute("UPDATE jobs SET verdict = ?, verdict_reason = ?, verdict_next = ?, verdict_by = ?, "
                 "verdict_at = ?, verdict_details = ?, verdict_details_at = ?, verdict_scope = ?, "

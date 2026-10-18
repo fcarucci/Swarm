@@ -1,27 +1,5 @@
-"""Person authority and caller identity for drive control commands (spec 3.4 [G6], [F17], 4.0, 4.3 [F5]).
-
-Who runs a control command is never taken from the environment: CLAUDE_CODE_SESSION_ID / CODEX_* are set by
-whoever starts the process, and an agent can export another session's id or unset its own (`env -u`). The
-caller comes from a **grant**, a host-private receipt (swarm.receipts, kind "grant") that the unsandboxed
-PreToolUse hook writes before the command runs (drivegate.write_grants), from the same contexts as Task 5's
-receipts: the job's requester MAIN session (requester_context: the ledger's requester_session, no agent_id),
-or the launch the host-private chain names (launch_context: marker, run file, ledger intent). It is bound to
-args_sha of the submitted argv (drivegate.submitted_argv, computed here from the parsed arguments), to the
-job's incarnation and generation, lives GRANT_SECONDS, and is used up by the first command that takes it
-(receipts.take). A subagent never gets one. A Codex launch cannot write one (its sandbox is the boundary) nor
-use one up (the unlink fails in the sandbox). A same-user unsandboxed Claude launch could write one itself: that is the
-guardrail line of spec 4.0 [F24].
-
-Person authority (halt, unhalt, launch cancel, a person's launch, drive repair) is held by exactly two
-callers ([G6] reconciling [F17]):
-  (a) the job's requester session, by its grant;
-  (b) a person at a terminal: no grant, no agent host around the process (no host session variables and no
-      claude/codex ancestor process), not an enrolled session, and a `y` typed on /dev/tty.
-Every other caller is refused, in particular any process under an agent host without a grant (an agent that
-unset its session variables, a nested shell the hook cannot read, a subagent). The tty path is a guardrail,
-not a boundary, against a same-user agent (spec 4.0): an agent that escapes its process tree (setsid under
-another parent) and drives a pty it owns can still answer. The grant authorizes an agent host's caller; the
-tty is defence-in-depth for a human outside any agent host."""
+"""Caller identity helpers for control commands: the host process of a command, the launch broker's attestation,
+and the (now permissive) person gate in require()."""
 from __future__ import annotations
 
 import os
@@ -51,7 +29,6 @@ class Caller:
         return self.launch is None and self.action_id.startswith("requester:")
 
 
-_TAKEN: dict = {}
 # A jailed launch's broker (Task 20) attests the commands it runs for the launch with a per-call SECRET (env), whose
 # record (the launch's session pid, an expiry) only the broker writes, in the supervisor's private dir, under the
 # secret's hash. A bare variable an agent sets attests nothing: without the record it names, it is ignored (rr19).
@@ -126,31 +103,6 @@ def host_pid(parent_of=None, pid: int | None = None, max_hops: int = 40) -> int 
             found = pid
         pid = ppid
     return found
-
-
-def forget() -> None:
-    """Start a new command: the next caller() takes a grant again (drive_cli calls it per handler)."""
-    _TAKEN.clear()
-
-
-def caller(board_key: str, job: str, led, args, now: float | None = None) -> Caller | None:
-    """The caller the hook attested for this exact command (`args`, the parsed arguments) of `job` (`led`: its
-    ledger, None when it does not read), or None. The grant is used up on the first call; later calls in the
-    same command return the same answer."""
-    from swarm import drivegate, receipts
-    rid = drivegate.grant_id(args, host_pid())
-    key = (board_key, job, rid)
-    if key in _TAKEN:
-        return _TAKEN[key]
-    inc, gen = ((led.incarnation, led.generation) if led is not None
-                else (receipts.GRANT_INCARNATION_NO_LEDGER, 1))
-    r = receipts.take(board_key, job, "grant", rid, rev=1, incarnation=inc, generation=gen,
-                      now=time.time() if now is None else now)
-    who = None
-    if r is not None and r.content_sha == receipts.content_sha("grant", {"argv_sha": rid}) and r.args_sha == rid:
-        who = Caller(r.launch, r.action_id)
-    _TAKEN[key] = who
-    return who
 
 
 CODEX_ENV = ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED")

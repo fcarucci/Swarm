@@ -294,21 +294,6 @@ class VerdictDetailsCliTests(GoalEnv):
         self.assertEqual(rc, 0)
         self.assertIn("1. The drill was never run.", out)
 
-    def test_a_drive_jobs_not_met_must_give_its_open_count_and_progress_is_kept(self):
-        with self.board() as b:
-            self.assertTrue(b.set_job_data("J", "drive.enabled", "1"))
-        rc, _, err = self.verdict("--artifact", "a1", "not_met", "--reason", "r", "--next", "n")
-        self.assertEqual(rc, 1)
-        self.assertIn("open_count", err)
-        rc, _, err = self.verdict("--artifact", "a1", "--open", "2", "--progress", "yes", "--candidate", "c" * 40,
-                                  "not_met", "--reason", "r", "--next", "n")
-        self.assertEqual(rc, 0, err)
-        from swarm.review import artifact_verdicts
-        with self.board() as b:
-            rec = artifact_verdicts(b, "J")["a1"]
-        self.assertEqual((rec["open"], rec["progress"], rec["candidate"], rec["scope"]),
-                         (2, True, "c" * 40, "artifact"))
-
     def test_an_unreachable_verdict_is_refused_not_queued_when_the_board_is_down(self):
         self.h.set_available(False)
         self.addCleanup(self.h.set_available, True)
@@ -316,17 +301,6 @@ class VerdictDetailsCliTests(GoalEnv):
         self.assertEqual(rc, 1)
         self.assertIn("not queued", err)
         self.assertEqual(list(self.spool_dir.glob("*.vrd")), [])
-
-    def test_a_queued_drive_not_met_without_open_count_is_refused_on_delivery(self):
-        with self.board() as b:
-            self.assertTrue(b.set_job_data("J", "drive.enabled", "1"))
-        spool.spool_verdict(self.cfg, "J", self.judge, "not_met", "why", "fix", "a1")
-        with self.board() as b:
-            self.assertEqual(spool.flush_spool(b, self.cfg), 0)
-            self.assertIsNone(b.job_status("J").verdict)
-            posted = [m.message for m in b.recent_messages(20, job="J")]
-        self.assertTrue(any(m.startswith("verdict refused: ") and "open_count" in m for m in posted), posted)
-        self.assertEqual(len(list(self.spool_dir.glob("*.bad"))), 1)
 
     def test_a_queued_unreachable_carries_its_details_and_scope(self):
         spool.spool_verdict(self.cfg, "J", self.judge, "unreachable", "cannot", None, None, REPORT, scope="goal",
@@ -356,8 +330,6 @@ class VerdictDetailsCliTests(GoalEnv):
         self.assertEqual(len(list(self.spool_dir.glob("*.bad"))), 4)
 
     def test_typed_verdict_fields_survive_the_offline_spool(self):
-        with self.board() as b:
-            self.assertTrue(b.set_job_data("J", "drive.enabled", "1"))
         self.h.set_available(False)
         self.addCleanup(self.h.set_available, True)
         rc, _, err = self.verdict("--artifact", "a1", "--scope", "goal", "--open", "3", "--progress", "yes",
@@ -376,8 +348,6 @@ class VerdictDetailsCliTests(GoalEnv):
 
     def test_a_spooled_goal_verdict_keeps_candidate_and_req(self):
         """Task 2's surviving spool mutant: both fields are in the queued file and on the delivered job."""
-        with self.board() as b:
-            self.assertTrue(b.set_job_data("J", "drive.enabled", "1"))
         path = spool.spool_verdict(self.cfg, "J", self.judge, "met", "goal met", scope="goal", generation=1,
                                    candidate="c" * 40, req="sha256:r")
         queued = json.loads(path.read_text())

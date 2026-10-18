@@ -141,12 +141,10 @@ SCHEMA_VERSION = 26
 VERDICT_DETAILS_MAX = 64 * 1024   # bytes of UTF-8: the largest `swarm verdict --details` report
 
 
-def check_verdict_args(verdict: str, scope: str, details: str | None, open_count: int | None,
-                       drive: bool) -> None:
+def check_verdict_args(verdict: str, scope: str, details: str | None) -> None:
     """The rules every backend's record_verdict applies before it stores anything (ValueError):
     a known scope; an `unreachable` verdict carries its report (details, already checked by
-    check_verdict_details: None when blank); on a drive job a not_met judging the goal or an
-    artifact says how many acceptance criteria are still open (open_count, a count of 0 or more)."""
+    check_verdict_details: None when blank)."""
     if scope not in VERDICT_SCOPES:
         raise ValueError(f"unknown verdict scope {scope!r}: one of {', '.join(VERDICT_SCOPES)}")
     if verdict == "unreachable" and scope == "artifact":
@@ -155,10 +153,6 @@ def check_verdict_args(verdict: str, scope: str, details: str | None, open_count
     if verdict == "unreachable" and details is None:
         raise ValueError("an unreachable verdict needs its report (details): what was tried, why the goal "
                          "cannot be met, and what would change that")
-    if drive and verdict == "not_met" and scope in ("goal", "artifact"):
-        if type(open_count) is not int or open_count < 0:
-            raise ValueError("a not_met verdict on a drive job must give open_count: how many acceptance "
-                             "criteria are still unmet (0 or more)")
 
 
 def check_verdict_details(details: str | None) -> str | None:
@@ -1642,16 +1636,6 @@ class Board(abc.ABC):
         (activated_at), the agents and the verdict are kept, so the job auto-closes again, as
         the same run, once it is quiet. Returns whether it reverted."""
 
-    def drive_job_claimed(self, job: str) -> bool:
-        """Whether `job` belongs to the driver, so no core sweep may close, restart or answer for it:
-        its board row claims drive mode (`drive.enabled`), or a ledger exists for it on this host
-        (`self.drive_ledger(job)`, set by cli.sweep_jobs: the ledger is host-private, the claim is
-        only a board row a writer could clear)."""
-        if self.job_data(job).get("drive.enabled") == "1":
-            return True
-        check = getattr(self, "drive_ledger", None)
-        return bool(check and check(job))
-
     def sweep_auto_close(self, minutes: float, watch=None) -> list[AutoClosed]:
         """Close every open job whose agents are all done and that has been quiet for `minutes`
         (`[job] auto_close_minutes`; 0 or less: nothing). Returns what it closed.
@@ -1674,7 +1658,7 @@ class Board(abc.ABC):
         before = self.now() - _dt.timedelta(minutes=minutes)
         closed = []
         for js in self.jobs(False):
-            if not auto_close_candidate(js, before) or self.drive_job_claimed(js.job) or self._waits_on_person(js):
+            if not auto_close_candidate(js, before) or self._waits_on_person(js):
                 continue
             run = run_agents(self.agents(js.job), run_start(js))
             if not any(a.status in ("completed", "left") for a in run) or \
@@ -1755,8 +1739,6 @@ class Board(abc.ABC):
         self.expire_blockers(now)
         closed = []
         for js in self.jobs(False):
-            if self.drive_job_claimed(js.job):
-                continue   # the driver ends its own jobs: no stale-waiting, stall or orphan close
             seen_activity = js.last_activity_at
             js = self._clear_expired_wait(js, now)
             action = self._stale_waiting_action(js, now, stale_waiting_minutes, stale_waiting_close_minutes,

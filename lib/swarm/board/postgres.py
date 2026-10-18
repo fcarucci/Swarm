@@ -1419,14 +1419,14 @@ class PostgresBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
         if verdict not in VERDICTS:
             raise BoardError(f"unknown verdict {verdict!r}")
         details = check_verdict_details(details)
-        from swarm.review import drive_job, verdict_data
+        from swarm.review import verdict_data
         with self._conn.transaction():
             row = self._conn.execute("SELECT plugin_data FROM jobs WHERE job = %s AND EXISTS "
                 "(SELECT 1 FROM agents WHERE job = %s AND name = %s AND judge AND left_at IS NULL) "
                 "FOR UPDATE", (job, job, judge_name)).fetchone()
             if row is None:
                 return False
-            check_verdict_args(verdict, scope, details, open_count, drive_job(row[0]))
+            check_verdict_args(verdict, scope, details)
             at = self.now()
             self._conn.execute("UPDATE jobs SET verdict = %s, verdict_reason = %s, verdict_next = %s, "
                 "verdict_by = %s, verdict_at = %s, verdict_details = %s, verdict_details_at = %s, verdict_scope = %s, "

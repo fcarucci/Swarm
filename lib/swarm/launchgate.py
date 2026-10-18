@@ -10,7 +10,7 @@ import contextlib
 import dataclasses
 import os
 
-from swarm import driveroles, receipts, shellguard
+from swarm import shellguard
 
 DEFAULT_TARGETS = ("main", "master")   # the branches no launch may push to
 HOOK_INIT_TIMEOUT = 4.0
@@ -18,10 +18,8 @@ HOOK_INIT_TIMEOUT = 4.0
 SPAWN_REFUSAL = ("a spawn by {who} is refused: launches are staffed by the lead's `swarm run` (the "
                  "supervisor launches and budgets them), never by subagents")
 
-# Kept for callers that later engineers delete (person.py, launchbroker.py, cli.py): no control command
-# needs a caller grant any more, so GRANT_SUBS is empty and drive_job is always False.
-GRANT_SUBS: tuple = ()
-_ARGV_SKIP = ("config", "cmd", "scmd", "no_color", "func")
+LEAD_ROLE = "engineering_lead"
+JUDGE_ROLES = ("judge", "goal_judge", "ruling_judge")
 
 
 @dataclasses.dataclass
@@ -142,8 +140,8 @@ def launch_policy(cfg: dict, board_key: str, ctx: Ctx, board=None) -> Policy:
         if own and board is not None:
             with contextlib.suppress(Exception):
                 board.close()
-    return Policy(read_only=False, judge=driveroles.is_judge_role(role),
-                  lead=role == driveroles.LEAD_ROLE, known=role is not None)
+    return Policy(read_only=False, judge=isinstance(role, str) and role.lower() in JUDGE_ROLES,
+                  lead=role == LEAD_ROLE, known=role is not None)
 
 
 # --- PreToolUse -------------------------------------------------------------------------------------
@@ -253,33 +251,3 @@ def _branch_of(payload: dict, command: str):
             os.path.join(cwd or os.getcwd(), directory) if directory else cwd)
         return head_branch(base)
     return branch_of
-
-
-# --- shims for modules later engineers clean up ---------------------------------------------------------
-
-def submitted_argv(ns) -> list[str]:
-    """The exact submitted argument vector as the parser read it, defaults included, in a fixed order."""
-    out = [str(ns.cmd)] + ([str(ns.scmd)] if getattr(ns, "scmd", None) else [])
-    for key in sorted(vars(ns)):
-        v = getattr(ns, key)
-        if key in _ARGV_SKIP or v is None or v is False or callable(v):
-            continue
-        flag = "--" + key.replace("_", "-")
-        if v is True:
-            out.append(flag)
-        elif isinstance(v, (list, tuple)):
-            for x in v:
-                out += [flag, str(x)]
-        else:
-            out += [flag, str(v)]
-    return out
-
-
-def grant_id(ns, pid=None) -> str:
-    """The id person.caller looks a grant up by (nothing writes grants any more)."""
-    return receipts.args_sha(submitted_argv(ns) + [f"--config={getattr(ns, 'config', None)}", f"host-pid={pid}"])
-
-
-def drive_job(cfg: dict, job: str) -> bool:
-    """No job is a drive job any more."""
-    return False
