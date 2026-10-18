@@ -136,7 +136,9 @@ RESTART_OUTCOMES = ("running", "completed", "timeout", "max_turns", "failed", "n
 # recorded them (pid, pgid, /proc start ticks, tag), so orphans can be listed and reaped safely.
 # 25 typed verdicts: the verdict CHECK accepts `unreachable`; jobs.verdict_scope, verdict_generation,
 # verdict_candidate and verdict_req hold the latest verdict's scope, drive generation, candidate and req.
-SCHEMA_VERSION = 26
+# 27 refreshes status views: ended turns are idle immediately and jobs without working agents
+# are idle. agent_status appends turn_ended_at; older clients' explicit columns remain valid.
+SCHEMA_VERSION = 27
 
 VERDICT_DETAILS_MAX = 64 * 1024   # bytes of UTF-8: the largest `swarm verdict --details` report
 
@@ -562,6 +564,7 @@ class AgentStatus:
     left_reason: str | None = None
     resume_of: str | None = None
     title: str | None = None
+    turn_ended_at: _dt.datetime | None = None  # explicit hook signal, distinct from silence
 
 
 @dataclass(frozen=True)
@@ -1142,18 +1145,17 @@ WAITING_GOAL = "waiting (goal not met)"   # the shown status of a goal job nobod
 
 def derive_job_status(js: JobStatus, idle_minutes: float, now: _dt.datetime) -> str:
     """What `status` and `watch` show for a job. A closed job shows its stored status (completed,
-    failed, cancelled, paused). An open one is "waiting" only while a question asked with
-    `swarm ask` to a person is open and no agent is started or running, else "active".
-    `swarm pass` keeps an open job moving (it starts queued launches, re-queues the lead,
-    runs the judge or fails the job), so there is no
-    other wait state (owner's rule of 2026-10-17). idle_minutes and now are kept for callers."""
+    failed, cancelled, paused). Working agents make it active; an unanswered question makes
+    it waiting only when nobody works. Otherwise it is idle, including queued work that has
+    not started. The scheduler must progress that work, but its intention is not activity.
+    idle_minutes and now are kept for callers."""
     if js.status != "active":
         return js.status
     if js.started or js.running:
         return "active"
     if js.open_questions:
         return "waiting"
-    return "active"
+    return "idle"
 
 
 def run_start(js: JobStatus) -> _dt.datetime:
@@ -1392,13 +1394,14 @@ def check_event(kind, key, text, to, source) -> tuple[str, str, str, str | None,
 
 def derive_agent_status(state: str, current_tool: str | None, tool_started_at: _dt.datetime | None,
                         last_contact_at: _dt.datetime, now: _dt.datetime, *, idle_minutes: int,
-                        dead_minutes: int, tool_timeout_minutes: int) -> str:
+                        dead_minutes: int, tool_timeout_minutes: int,
+                        turn_ended_at: _dt.datetime | None = None) -> str:
     """The derived status of an agent, first matching rule wins:
 
       1. state in (completed, left, dead)                          -> state
       2. current_tool set and tool_started_at > now - tool_timeout  -> running
       3. last_contact_at < now - dead_minutes                       -> dead
-      4. last_contact_at < now - idle_minutes                       -> idle
+      4. turn_ended_at set, or silent past idle_minutes              -> idle
       5. otherwise                                                  -> state (started/running)
 
     Idle and dead are derived rather than stored because an agent that stopped talking cannot
@@ -1417,7 +1420,7 @@ def derive_agent_status(state: str, current_tool: str | None, tool_started_at: _
         return "running"
     if last_contact_at < now - _dt.timedelta(minutes=dead_minutes):
         return "dead"
-    if last_contact_at < now - _dt.timedelta(minutes=idle_minutes):
+    if turn_ended_at is not None or last_contact_at < now - _dt.timedelta(minutes=idle_minutes):
         return "idle"
     return state
 

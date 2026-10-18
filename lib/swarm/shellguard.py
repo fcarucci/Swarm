@@ -1377,15 +1377,25 @@ def iter_commands(command: str, _depth: int = 0):
 
 def job_lifecycle_command(command: str, _depth: int = 0) -> str | None:
     """An agent-visible lifecycle command, including env wrappers and nested literal shells."""
+    from swarm.cli import changes_job_lifecycle
+    return _swarm_command_matching(command, changes_job_lifecycle, _depth)
+
+
+def session_binding_command(command: str) -> str | None:
+    """A coordinator binding command, whose authorization depends on hook identity."""
+    return _swarm_command_matching(command, lambda parsed: parsed.cmd == "session")
+
+
+def _swarm_command_matching(command: str, predicate, _depth: int = 0) -> str | None:
     if _depth > _MAX_NEST:
         return None
     import contextlib
     import io
-    from swarm.cli import _parser, changes_job_lifecycle
+    from swarm.cli import _parser
     for prog, args, _ in iter_commands(command):
         if prog == CODE:
             for literal in _literal_process_commands(args[0]):
-                found = job_lifecycle_command(literal, _depth + 1)
+                found = _swarm_command_matching(literal, predicate, _depth + 1)
                 if found:
                     return found
             continue
@@ -1403,7 +1413,7 @@ def job_lifecycle_command(command: str, _depth: int = 0) -> str | None:
                 parsed, _ = _parser().parse_known_args(args)
         except SystemExit:
             continue  # An invalid CLI invocation cannot change the job.
-        if changes_job_lifecycle(parsed):
+        if predicate(parsed):
             return parsed.cmd
     return None
 

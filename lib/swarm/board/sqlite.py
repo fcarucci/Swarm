@@ -1367,11 +1367,12 @@ class SqliteBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
     # ---- derived status ---------------------------------------------------------------
 
     def _derive(self, state: str, current_tool, tool_started_at, last_seen: _dt.datetime,
-                now: _dt.datetime) -> str:
+                now: _dt.datetime, turn_ended_at=None) -> str:
         b = self.board_cfg
         return derive_agent_status(state, current_tool, tool_started_at, last_seen, now,
                                    idle_minutes=int(b["idle_minutes"]), dead_minutes=int(b["dead_minutes"]),
-                                   tool_timeout_minutes=int(b["tool_timeout_minutes"]))
+                                   tool_timeout_minutes=int(b["tool_timeout_minutes"]),
+                                   turn_ended_at=turn_ended_at)
 
     def _agent_statuses(self, c: sqlite3.Connection, job: str, now: _dt.datetime,
                         include_departed: bool = True, with_messages: bool = True) -> list[AgentStatus]:
@@ -1379,18 +1380,18 @@ class SqliteBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
         msgs = "a.message_count" if with_messages else "0"
         active = "" if include_departed else " AND left_at IS NULL"
         out = []
-        for r in c.execute(f"SELECT {_AGENT_COLS}, {msgs} FROM agents a WHERE job = ?{active} "
+        for r in c.execute(f"SELECT {_AGENT_COLS}, {msgs}, a.turn_ended_at FROM agents a WHERE job = ?{active} "
                            "ORDER BY left_at IS NOT NULL, joined_at", (job,)):
             (key, name, ajob, role, host, joined, seen, left, state, calls, tool, tool_at, post_at,
-             judge, verifier, harness, model, os_user, left_reason, resume_of, title, messages) = r
+             judge, verifier, harness, model, os_user, left_reason, resume_of, title, messages, turn_end) = r
             last_seen = _dt_(seen)
             out.append(AgentStatus(
                 job=ajob, name=name, role="judge" if judge else "verifier" if verifier else role,
-                status=self._derive(state, tool, _dt_(tool_at), last_seen, now), current_tool=tool,
+                status=self._derive(state, tool, _dt_(tool_at), last_seen, now, _dt_(turn_end)), current_tool=tool,
                 tool_calls=calls, messages=messages, joined_at=_dt_(joined), last_contact_at=last_seen,
                 last_post_at=_dt_(post_at), ended_at=_dt_(left), host=host, agent_key=key,
                 harness=harness, model=model, os_user=os_user, left_reason=left_reason,
-                resume_of=resume_of, title=title))
+                resume_of=resume_of, title=title, turn_ended_at=_dt_(turn_end)))
         return out
 
     def agents(self, job: str, include_departed: bool = True) -> list[AgentStatus]:

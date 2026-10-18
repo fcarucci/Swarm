@@ -1120,7 +1120,7 @@ def _job_status_word(board, j, now) -> str:
 def _job_heading(board, j, now, color: bool = False) -> str:
     """A job and its shared display state, plus the wait context when present."""
     shown = _job_status_word(board, j, now)
-    waiting = _waiting_word(j, now)
+    waiting = _job_status_context(board, j, now)
     orchestrator = _orchestrator_wait(board, j, now)
     return (f"{term_safe(j.job)} [{_paint_status(shown, shown, color)}]"
             + (f" · {term_safe(waiting)}" if waiting else "")
@@ -1132,7 +1132,7 @@ def _empty_agents_note(board, job, now) -> str:
     j = board.job_status(job)
     if j is not None:
         shown = _job_status_word(board, j, now)
-        if shown.startswith("waiting") or shown == "paused":
+        if shown.startswith("waiting") or shown in ("paused", "idle"):
             return "(" + _job_heading(board, j, now) + ")"
     return "(no agents yet)"
 
@@ -1165,6 +1165,11 @@ def _waiting_word(j, now) -> str:
     return f"{j.waiting_on} · {since}" + _until_note(j, now)
 
 
+def _job_status_context(board, j, now) -> str:
+    from swarm.statusview import job_context
+    return job_context(board, j, now)
+
+
 def open_and_paused(board, include_closed: bool) -> list:
     """The jobs a listing shows: with include_closed all of them, else the active ones plus the paused
     ones (board.jobs(False) is active only: the sweeps and the supervisor rely on that)."""
@@ -1185,10 +1190,10 @@ def jobs_overview(board, include_closed: bool, color: bool, sup: dict | None = N
     table = [[j.job, _job_status_word(board, j, now), str(j.agents), str(j.running + j.started), str(j.idle),
               str(j.completed), str(j.dead_or_left), str(j.messages), _ago(j.activated_at, now),
               _ago(j.last_activity_at, now), _ago(j.finished_at, now), _verdict_word(j),
-              _waiting_word(j, now), _workers_cell(board, j), j.description or ""]
+              _job_status_context(board, j, now), _workers_cell(board, j), j.description or ""]
              for j in rows]
     return _table(["JOB", "STATUS", "AGENTS", "RUNNING", "IDLE", "DONE", "LEFT/DEAD", "MSGS",
-                   "ACTIVATED", "LAST ACTIVITY", "FINISHED", "VERDICT", "WAITING ON", "WORKERS", "DESCRIPTION"],
+                   "ACTIVATED", "LAST ACTIVITY", "FINISHED", "VERDICT", "CONTEXT", "WORKERS", "DESCRIPTION"],
                   table, color, status_col=1)
 
 
@@ -1254,6 +1259,8 @@ def job_detail(board, job: str, color: bool, recent_minutes: int | None = None, 
     details_line = _verdict_details_line(board, job) if j.verdict else None
     head = [f"job        {ts(job)}  [{_paint_status(shown, shown, color)}]", activated,
             f"activity   {j.messages} messages, last {_ago(j.last_activity_at, now)}"]
+    if shown in ("idle", "waiting"):
+        head.append("context    " + ts(_job_status_context(board, j, now)))
     if j.agents:
         head.append("agents     " + _rollup_text(board, job, now).removeprefix("agents: "))
     # (field value, its line): a line is shown only when its field is set.
@@ -2278,7 +2285,13 @@ class _Replay:
         now, cfg = self.now(), self._snap._age_cfg
 
         def one(x):
-            return age_agent(x, now, cfg) if isinstance(x, AgentStatus) else x
+            if isinstance(x, AgentStatus):
+                return age_agent(x, now, cfg)
+            from swarm.board.base import JobStatus
+            if isinstance(x, JobStatus):
+                from swarm.statusview import age_job
+                return age_job(x, self._snap.data.values(), now, cfg)
+            return x
         if isinstance(result, list):
             return [one(x) for x in result]
         if isinstance(result, tuple) and result and isinstance(result[0], list):

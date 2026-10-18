@@ -410,6 +410,7 @@ _AGENT_STATUS_SQL = """CASE
          WHEN a.current_tool IS NOT NULL
               AND a.tool_started_at > now() - make_interval(mins => {tool_timeout}) THEN 'running'
          WHEN a.last_seen < now() - make_interval(mins => {dead}) THEN 'dead'
+         WHEN a.turn_ended_at IS NOT NULL THEN 'idle'
          WHEN a.last_seen < now() - make_interval(mins => {idle}) THEN 'idle'
          ELSE a.state
        END"""
@@ -423,7 +424,8 @@ SELECT a.job, a.name, CASE WHEN a.judge THEN 'judge' WHEN a.verifier THEN 'verif
        a.current_tool, a.tool_calls,
        a.message_count AS messages,
        a.joined_at, a.last_seen AS last_contact_at, a.last_post_at, a.left_at AS ended_at,
-       a.host, a.agent_key, a.harness, a.model, a.os_user, a.left_reason, a.resume_of, a.title
+       a.host, a.agent_key, a.harness, a.model, a.os_user, a.left_reason, a.resume_of, a.title,
+       a.turn_ended_at
   FROM agents a;
 
 DROP VIEW IF EXISTS job_status;
@@ -454,7 +456,7 @@ SELECT j.job, j.status, j.description, j.task, j.outcome, j.created_by, j.sessio
             WHEN COALESCE(s.started, 0) + COALESCE(s.running, 0) > 0 THEN 'active'
             WHEN EXISTS (SELECT 1 FROM blockers b WHERE b.job=j.job AND b.state='open'
                          AND b.kind='question') THEN 'waiting'
-            ELSE 'active'
+            ELSE 'idle'
        END AS shown_status
   FROM jobs j
   LEFT JOIN LATERAL (
@@ -493,7 +495,7 @@ CHANNEL_STATE = "swarm_state"
 # Column lists for status queries. JobStatus rows map by column name.
 _AGENT_STATUS_COLS = ("job, name, role, status, current_tool, tool_calls, messages, joined_at, "
                       "last_contact_at, last_post_at, ended_at, host, agent_key, harness, model, os_user, "
-                      "left_reason, resume_of, title")
+                      "left_reason, resume_of, title, turn_ended_at")
 _JOB_STATUS_COLS = ("job, status, description, task, outcome, created_by, session_id, created_at, "
                     "activated_at, finished_at, agents, started, running, idle, completed, "
                     "dead_or_left, messages, last_activity_at, project, goal, verdict, verdict_reason, "
@@ -1517,7 +1519,9 @@ class PostgresBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
             (SELECT jsonb_agg(to_jsonb(b) ORDER BY id) FROM blockers b
               WHERE state = 'open' AND job IN (SELECT job FROM selected)),
             (SELECT jsonb_object_agg(job,plugin_data) FROM jobs WHERE job IN (SELECT job FROM selected)),
-            (SELECT jsonb_agg(to_jsonb(p)) FROM lastposts p)
+            (SELECT jsonb_agg(to_jsonb(p)) FROM lastposts p),
+            (SELECT jsonb_agg(to_jsonb(l) ORDER BY id) FROM launches l
+              WHERE state IN ('queued', 'running') AND job IN (SELECT job FROM selected))
         """.replace('{agent_cols}', agent_cols)
         row = self._conn.execute(query, {"jobs": list(jobs), "sessions": list(sessions), "recent": recent_minutes,
                                          "limit": limit, "after": after_id}).fetchone()

@@ -89,7 +89,7 @@ class BoardContract:
                 self.assertNotIn("parked [active]", text)
                 self.assertNotIn("no agents yet", text)
                 if not paused:
-                    self.assertRegex(text, r"30-minute watch · \d+s")
+                    self.assertRegex(text, r"Q\d+ -> Francesco: 30-minute watch: go on\?")
 
     def test_parked_session_watch_headers_and_rollups(self):
         from swarm.cli import _watch_header
@@ -2845,9 +2845,9 @@ class PostgresSchemaUpgrade(SchemaUpgradeTests, unittest.TestCase):
 
 
 class SchemaVersionPin(unittest.TestCase):
-    def test_schema_version_is_26(self):
+    def test_schema_version_is_27(self):
         from swarm.board import SCHEMA_VERSION
-        self.assertEqual(SCHEMA_VERSION, 26)
+        self.assertEqual(SCHEMA_VERSION, 27)
 
 
 from support import gate_backends  # noqa: E402

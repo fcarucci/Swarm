@@ -38,11 +38,11 @@ class DeriveJobStatusTests(unittest.TestCase):
     def test_words(self):
         self.assertEqual(derive_job_status(js(status="completed", waiting_on="x"), 5, NOW), "completed")
         self.assertEqual(derive_job_status(js(open_questions=1), 5, NOW), "waiting")   # a question to a person
-        self.assertEqual(derive_job_status(js(waiting_on="the user"), 5, NOW), "active")  # `wait --on` is not a state
+        self.assertEqual(derive_job_status(js(waiting_on="the user"), 5, NOW), "idle")  # `wait --on` is not a state
         self.assertEqual(derive_job_status(js(running=1), 5, NOW), "active")
         self.assertEqual(derive_job_status(js(started=1), 5, NOW), "active")
-        self.assertEqual(derive_job_status(js(last_minutes_ago=2), 5, NOW), "active")   # just now
-        self.assertEqual(derive_job_status(js(), 5, NOW), "active")   # quiet, but `swarm pass` moves it: never idle
+        self.assertEqual(derive_job_status(js(last_minutes_ago=2), 5, NOW), "idle")   # just now
+        self.assertEqual(derive_job_status(js(), 5, NOW), "idle")   # scheduling intention is not activity
 
 
 class WaitCliTests(RoutingEnv):
@@ -132,13 +132,13 @@ class WaitCliTests(RoutingEnv):
         rc, out, _ = self.cli("wait", "--job", "J", "--on", "the", "user's", "answers")
         self.assertEqual(rc, 0)
         self.assertIn("J is waiting on: the user's answers", out)
-        self.assertRegex(self.status_row(), r"^J\s+active\s.*the user's answers · \d+s")
+        self.assertRegex(self.status_row(), r"^J\s+idle\s.*wait -> external: the user's answers")
         rc, out, _ = self.cli("status", "--job", "J", "--no-color")
-        self.assertIn("job        J  [active]", out)
+        self.assertIn("job        J  [idle]", out)
         self.assertRegex(out, r"waiting    on the user's answers, since \d+s ago")
         rc, out, _ = self.cli("resume", "--job", "J")
         self.assertEqual((rc, out), (0, "J is no longer waiting\n"))
-        self.assertRegex(self.status_row(), r"^J\s+active\s")
+        self.assertRegex(self.status_row(), r"^J\s+idle\s")
 
     def test_wait_needs_an_open_job(self):
         rc, _, err = self.cli("wait", "--job", "nope", "--on", "x")
@@ -148,7 +148,7 @@ class WaitCliTests(RoutingEnv):
     def test_idle_when_nobody_works_and_no_reason(self):
         self.activate("J")
         self.backdate_job_activity("J")
-        self.assertRegex(self.status_row(), r"^J\s+active\s")   # no idle state: `swarm pass` moves or fails it
+        self.assertRegex(self.status_row(), r"^J\s+idle\s")   # no agents have started work
 
     def test_an_agent_joining_ends_the_wait(self):
         self.activate("J")
@@ -192,7 +192,7 @@ class WaitUntilTests(RoutingEnv):
         rc, out, _ = self.cli("status", "--job", "J", "--no-color")
         self.assertRegex(out, r"waiting    on the build slot, since \d+s ago, until \d{4}-\d\d-\d\d \d\d:\d\d \(protected from auto-close\)")
         rc, out, _ = self.cli("status", "--no-color")
-        self.assertRegex(next(l for l in out.splitlines() if l.startswith("J ")), r"the build slot · \d+[smh] · until \d\d:\d\d")
+        self.assertRegex(next(l for l in out.splitlines() if l.startswith("J ")), r"wait -> external: the build slot.*until \d\d:\d\d")
 
     def test_wait_rejects_for_with_until_and_a_past_time(self):
         self.activate("J")

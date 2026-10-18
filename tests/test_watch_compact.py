@@ -88,7 +88,7 @@ class CompactWorkersTests(Env):
             finished = b.allocate_name("k0", "K", "engineer")
         self.h.update_agent("k0", state="completed", left_at=self.now)
         lines = self.frame()
-        k = lines.index("K [active]")
+        k = next(i for i, line in enumerate(lines) if line.startswith("K [idle]"))
         self.assertEqual(lines[k + 1].strip(), "WORKERS: 0 working, 0 waiting, 1 finished, 0 lost")
         self.assertFalse(any(finished in line for line in lines))
         self.assertEqual(sum("WORKERS:" in line for line in lines), 2)

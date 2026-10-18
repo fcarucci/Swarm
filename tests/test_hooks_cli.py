@@ -55,6 +55,11 @@ class Env(unittest.TestCase):
                                                "CODEX_SESSION_ID": ""})
         patcher.start()
         self.addCleanup(patcher.stop)
+        # Ordinary CLI/hook tests never start durable background services. Listener integration
+        # tests override this boundary explicitly with their own process/lock fixtures.
+        detached = mock.patch('swarm.events_listener.start_detached', return_value=os.getpid())
+        detached.start()
+        self.addCleanup(detached.stop)
         for var in HOST_ENV:   # set when the tests run inside Claude Code or Codex
             os.environ.pop(var, None)
         self.error_log = home / ".local/share/swarm/host/hook-errors.log"   # host-only
@@ -275,7 +280,7 @@ class CliTests(Env):
                                   "adopt_running": False})
         _, out, _ = self.cli("status")
         self.assertRegex(out.splitlines()[0], r"^JOB\s+STATUS\s+AGENTS\s+RUNNING\s+IDLE\s+DONE\s+LEFT/DEAD\s+MSGS")
-        self.assertRegex(out.splitlines()[1], r"^J\s+active\s+0\s+0\s+0\s+0\s+0\s+0\s.*the job$")
+        self.assertRegex(out.splitlines()[1], r"^J\s+idle\s+0\s+0\s+0\s+0\s+0\s+0\s.*the job$")
         self.cli("join", "--job", "J", "--key", "k1", "--role", "worker")
         _, out, _ = self.cli("status", "--job", "J")
         self.assertIn("job        J  [active]\n", out)
@@ -338,7 +343,7 @@ class CliTests(Env):
         self.assertEqual(self.cli("leave", "--key", "kb")[1], "left\n")
         rc, out, err = self.cli("leave", "--key", "kb")  # already gone: say so, don't claim "left"
         self.assertEqual((rc, out, err), (1, "", "no active agent matched\n"))
-        self.assertEqual(self.cli("who", "--job", "J")[1], "")
+        self.assertIn("J [idle]", self.cli("who", "--job", "J")[1])
         self.assertEqual(self.cli("purge")[1], "purged\n")
         self.assertEqual(self.cli("job", "J2", "--description", "d")[1], "J2\n")
 

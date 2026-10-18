@@ -1051,7 +1051,7 @@ class MemoryBoard(MemoryLaunches, MemoryBlockers, MemoryEvents, MemoryBgCommands
         return derive_agent_status(
             a["state"], a["current_tool"], a["tool_started_at"], a["last_seen"], now,
             idle_minutes=int(b["idle_minutes"]), dead_minutes=int(b["dead_minutes"]),
-            tool_timeout_minutes=int(b["tool_timeout_minutes"]))
+            tool_timeout_minutes=int(b["tool_timeout_minutes"]), turn_ended_at=a.get("turn_ended_at"))
 
     def _count_messages(self, a: dict) -> int:
         """The messages `a` posted to its job since it joined (what agents.message_count keeps)."""
@@ -1071,7 +1071,7 @@ class MemoryBoard(MemoryLaunches, MemoryBlockers, MemoryEvents, MemoryBgCommands
                            agent_key=a["agent_key"], harness=a.get("harness"),
                            model=a.get("model"), os_user=a.get("os_user"),
                            left_reason=a.get("left_reason"), resume_of=a.get("resume_of"),
-                           title=a.get("title"))
+                           title=a.get("title"), turn_ended_at=a.get("turn_ended_at"))
 
     def agents(self, job: str, include_departed: bool = True) -> list[AgentStatus]:
         s = self._s()

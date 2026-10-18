@@ -2357,6 +2357,12 @@ def run_hook(event: str, cfg: dict, host: str | None = None) -> int:
     _CURRENT["stop_verdict"] = False
     try:
         _handle(event, cfg, host)
+        if event in ("stop", "session-stop", "session-end"):
+            try:
+                from swarm import dependencies
+                dependencies.wake(cfg)
+            except Exception as exc:
+                _log_error("terminal reconciliation", "", exc)
         _wake_drivers(event, cfg, _CURRENT.get("payload") or {})
         if event == "turn":   # once a minute at most, from the hook every session runs before each tool call
             _pass_sweep(cfg)
@@ -2380,12 +2386,18 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
     except KeyError:   # a host this version has no adapter for: do nothing
         return 0
     if event == "turn":
-        from swarm.shellguard import job_lifecycle_command
+        from swarm.shellguard import job_lifecycle_command, session_binding_command
         command = current_host().shell_command(payload)
         if command and job_lifecycle_command(command):
             _deny("[swarm] Agents cannot set job status. Report facts or ask a specific question; "
                   "Swarm derives the status. Owner lifecycle commands must run outside the agent.")
             return 0
+        if command and session_binding_command(command):
+            from swarm.session_cli import is_enrolled_session
+            if payload.get("agent_id") or is_enrolled_session(cfg, payload.get("session_id")):
+                _deny("[swarm] An enrolled agent cannot reassign its coordinator. "
+                      "The authorized root session must perform this operation.")
+                return 0
     if event in ('start', 'stop', 'session-stop', 'session-end') and os.environ.get('SWARM_HOOK_FASTPATH'):
         from swarm.fastpath import invalidate
         invalidate(payload)

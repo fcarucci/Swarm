@@ -3,7 +3,7 @@ import time
 from collections import Counter
 from dataclasses import fields, replace
 from datetime import datetime
-from swarm.board.base import AgentStatus, JobStatus, Message, Restart, Blocker, parse_job_data
+from swarm.board.base import AgentStatus, JobStatus, Message, Restart, Blocker, Launch, parse_job_data
 
 
 def rows(cls, data):
@@ -36,6 +36,7 @@ class SnapshotBoard:
         self.plugin_data = row[8] or {} if len(row) > 8 else {}
         # Each idle or dead agent's newest post, taken in the same statement (agentview.last_post).
         self._last_posts = {(m.job, m.agent_name): m for m in rows(Message, row[9] if len(row) > 9 else [])}
+        self.launch_rows = rows(Launch, row[10] if len(row) > 10 else [])
         from swarm.review import pipeline_status
         self.job_rows = [replace(job, **pipeline_status(self.plugin_data.get(job.job)))
                          for job in self.job_rows]
@@ -87,6 +88,11 @@ class SnapshotBoard:
     def restarts(self, job=None, **kwargs):
         return [r for r in self.restart_rows if job is None or r.job == job]
 
+    def launches(self, job, generation=None, include_closed=True):
+        return [r for r in self.launch_rows if r.job == job
+                and (generation is None or r.generation == generation)
+                and (include_closed or r.state in ("queued", "running"))]
+
     def verification_counts(self, job):
         return tuple(self.checks.get(job,(0,0)))
 
@@ -121,7 +127,8 @@ def age_agent(a, now, board_cfg):
     status = derive_agent_status(a.status, None, None, a.last_contact_at, now,
                                  idle_minutes=board_cfg.get("idle_minutes", 5),
                                  dead_minutes=board_cfg.get("dead_minutes", 30),
-                                 tool_timeout_minutes=board_cfg.get("tool_timeout_minutes", 60))
+                                 tool_timeout_minutes=board_cfg.get("tool_timeout_minutes", 60),
+                                 turn_ended_at=a.turn_ended_at)
     return a if status == a.status else replace(a, status=status)
 
 

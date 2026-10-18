@@ -1382,6 +1382,16 @@ def _execute(cfg: dict, run: dict, *, popen, clock, sleep, poll: float, board_ev
         _keep_output_tail(rid, run["board"])
         finish(cfg, run, "refused")
         return "refused"
+    # Workdir/jail preparation can outlive the initial admission check. An owner cancellation
+    # during that preparation must be observed before the model process is started.
+    off = _kill_switch(cfg, run)
+    if off:
+        os.close(wfd)
+        run.update(exited=True, outcome="cancelled", agent_key=run.get("session_id"), refused_reason=off)
+        write_run(run)
+        _keep_output_tail(rid, run["board"])
+        finish(cfg, run, "cancelled")
+        return "cancelled"
     import secrets
     run["run_tag"] = f"r{rid}-{secrets.token_hex(8)}"
     from swarm.supervisor.settings import settings
@@ -1592,6 +1602,11 @@ def finish(cfg: dict, run: dict, outcome: str) -> bool:
         run.update(board_done=True, outcome=run.get("outcome") or outcome)
         _save_progress(run)
         _save_progress(run)
+    try:
+        from swarm import dependencies
+        dependencies.wake(cfg)
+    except Exception as exc:
+        log(f"terminal reconciliation wake deferred: {type(exc).__name__}")
     bad_marker = _marker_problem(cfg, run)
     if bad_marker:
         log(f"restart {run['restart_id']}: {bad_marker}; not removed")

@@ -777,11 +777,11 @@ class AutoCloseCliTests(Env):
         self.activate()
         self.assertFalse(self.seen().exists())
 
-    def test_workers_are_told_to_mark_the_job_waiting_before_they_park(self):
+    def test_workers_are_told_to_report_facts_without_setting_job_status(self):
         self.activate()
         text = self.context(self.hook("start", agent_id="agent-1"))
-        self.assertIn("wait --job 'J' --on", text)
-        self.assertIn("resume --job 'J'", text)
+        self.assertIn("Swarm derives job status", text)
+        self.assertIn("Agents cannot run activate, deactivate, pause, resume, wait or job", text)
 
     def test_watch_and_tail_sweep_at_most_once_a_minute(self):
         clock = [1000.0]
