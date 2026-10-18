@@ -15,6 +15,11 @@ from swarm import events_listener as el, cli
 
 
 class InternalReconciliation(unittest.TestCase):
+    def setUp(self):
+        guard = mock.patch.object(el, '_reconciler_guard', side_effect=contextlib.nullcontext)
+        guard.start()
+        self.addCleanup(guard.stop)
+
     def listener(self, cfg=None, board=None, logs=None):
         self.assertTrue(hasattr(el.Listener, 'reconcile_due'), 'listener must reconcile durable work internally')
         return el.Listener(cfg or {'events': {'enabled': False}, 'pass': {'max_cost_usd': 7}},

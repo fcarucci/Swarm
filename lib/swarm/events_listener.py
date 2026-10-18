@@ -233,6 +233,7 @@ class Listener:
         self.cfg = settings(cfg)
         self.full_cfg = cfg
         self.config_stamp = _reconcile_stamp(cfg)
+        self.runtime_identity = _runtime_identity()
         self.external = self.cfg["enabled"] and bool(registry.event_sources)
         self.reconcile_enabled = reconcile
         self.write_reconcile_health = write_reconcile_health or _write_reconcile_health
@@ -362,7 +363,7 @@ class Listener:
         try:
             self._next_reconcile = now + RECONCILE_INTERVAL
             health = {"pid": os.getpid(), "config": _reconcile_config(self.full_cfg), "stamp": self.config_stamp, "beat": time.time(),
-                      "state": "ready"}
+                      "state": "ready", "runtime": self.runtime_identity}
             try:
                 from swarm import passcmd
                 with self.board_factory() as board:
@@ -555,6 +556,19 @@ def _reconcile_config(cfg: dict) -> str:
     return os.path.realpath(str(value)) if value else ""
 
 
+def _runtime_identity(lib=None) -> dict:
+    """Identity of the installed code, captured once by each listener before running passes."""
+    import hashlib
+    from pathlib import Path
+    from swarm import paths
+    lib = Path(lib or paths.LIB_DIR).resolve()
+    digest = hashlib.sha256()
+    for path in sorted((lib / "swarm").rglob("*.py")):
+        digest.update(path.relative_to(lib).as_posix().encode() + b"\0")
+        digest.update(path.read_bytes())
+    return {"lib": str(lib), "digest": digest.hexdigest()}
+
+
 def _reconcile_stamp(cfg: dict):
     try:
         return os.stat(_reconcile_config(cfg)).st_mtime_ns
@@ -647,7 +661,7 @@ def start_detached(cfg: dict, popen=None, *, reconcile=False, lock_fd=None) -> i
     return proc.pid
 
 
-def ensure_reconciler(cfg: dict) -> str | None:
+def _ensure_reconciler(cfg: dict) -> str | None:
     """Coalesce startup under the existing listener lock; never require external event sources.
     None means started/already running; an actionable error is returned without starting a duplicate.
     """
@@ -660,6 +674,8 @@ def ensure_reconciler(cfg: dict) -> str | None:
                 return "events listener uses another config or lacks reconciliation; restart it with --reconcile"
             if health.get("stamp") != _reconcile_stamp(cfg):
                 return "events listener config changed; restart the existing listener to load it"
+            if health.get("runtime") != _runtime_identity():
+                return "events listener runtime is obsolete or unverified; upgrade the supported reconciler service"
             if time.time() - float(health.get("beat", 0)) > RECONCILE_STALE_SECONDS:
                 return "events listener holds its lock but reconciliation heartbeat is stale"
             if health.get("state") not in ("ready", "starting"):
@@ -667,7 +683,7 @@ def ensure_reconciler(cfg: dict) -> str | None:
             return None
         try:
             health = {"config": _reconcile_config(cfg), "stamp": _reconcile_stamp(cfg),
-                      "state": "starting", "beat": time.time(), "pid": 0}
+                      "state": "starting", "beat": time.time(), "pid": 0, "runtime": _runtime_identity()}
             _write_reconcile_health(health)
             pid = start_detached(cfg, reconcile=True, lock_fd=fd)
             _write_reconcile_health({**health, "pid": pid})
@@ -676,6 +692,180 @@ def ensure_reconciler(cfg: dict) -> str | None:
         return None
     except Exception as exc:
         return f"cannot start events reconciler ({type(exc).__name__})"
+
+
+def _reconciler_guard():
+    """Serialize hook startup with the explicit service handoff, never the job launch lock."""
+    from swarm.supervisor import privfs
+    import contextlib
+    import fcntl
+    @contextlib.contextmanager
+    def held():
+        with privfs.dir_fd() as directory:
+            fd = privfs.lock(directory, "events-lifecycle.lock")
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                yield
+            finally:
+                os.close(fd)
+    return held()
+
+
+def ensure_reconciler(cfg: dict) -> str | None:
+    try:
+        with _reconciler_guard():
+            return _ensure_reconciler(cfg)
+    except BlockingIOError:
+        return "events reconciler service upgrade/startup in progress; retry"
+    except Exception as exc:
+        return f"cannot check events reconciler ({type(exc).__name__})"
+
+
+def _native_listener_argv(cfg, python):
+    return [python, "-m", "swarm.cli", "--config", _reconcile_config(cfg), "events", "serve", "--reconcile"]
+
+
+class _ListenerProcess:
+    """Linux pidfd binds signaling to this process, even if its numerical PID is later reused."""
+    def __init__(self, pid, proc="/proc"):
+        from pathlib import Path
+        self.pid = pid
+        self.fd = os.pidfd_open(pid)
+        self.proc = Path(proc) / str(pid)
+
+    def verify(self, cfg, expected_lib):
+        import select
+        if select.select([self.fd], [], [], 0)[0]:
+            raise ValueError("recorded listener already exited; retry")
+        if self.proc.stat().st_uid != os.getuid():
+            raise ValueError("listener uid mismatch")
+        argv = self.proc.joinpath("cmdline").read_bytes().rstrip(b"\0").decode().split("\0")
+        if len(argv) != 8 or argv[1:] != _native_listener_argv(cfg, argv[0])[1:]:
+            raise ValueError("listener cmdline/config mismatch")
+        if (os.path.realpath(argv[0]) != os.path.realpath(sys.executable)
+                or os.path.realpath(self.proc / "exe") != os.path.realpath(sys.executable)):
+            raise ValueError("listener interpreter mismatch")
+        env = dict(item.split(b"=", 1) for item in self.proc.joinpath("environ").read_bytes().split(b"\0") if b"=" in item)
+        if env.get(b"PYTHONPATH", b"").decode() != str(expected_lib):
+            raise ValueError("listener runtime PYTHONPATH mismatch")
+        target = os.stat(_lock_path(), follow_symlinks=False)
+        for file in self.proc.joinpath("fd").iterdir():
+            try:
+                st = file.stat()
+                info = self.proc.joinpath("fdinfo", file.name).read_text()
+            except OSError:
+                continue
+            if (st.st_dev, st.st_ino) == (target.st_dev, target.st_ino) and re.search(
+                    r"(?m)^lock:\s+\d+: FLOCK\s+ADVISORY\s+WRITE\s", info):
+                return
+        raise ValueError("listener does not own exclusive listener lock")
+
+    def terminate(self):
+        import signal
+        signal.pidfd_send_signal(self.fd, signal.SIGTERM)
+
+    def wait(self, timeout):
+        import select
+        return bool(select.select([self.fd], [], [], timeout)[0])
+
+    def close(self):
+        os.close(self.fd)
+
+
+class _ReconcilerService:
+    def __init__(self, name="swarm-reconciler.service", run=None):
+        if not re.fullmatch(r"[A-Za-z0-9_.@-]+\.service", name):
+            raise ValueError("invalid reconciler service name")
+        self.name, self.run = name, run or subprocess.run
+
+    def command(self, *args):
+        from swarm.supervisor.systemd import manager_env
+        result = self.run(["systemctl", "--user", *args], env=manager_env(), capture_output=True,
+                          text=True, timeout=20)
+        if result.returncode:
+            raise ValueError("reconciler user service command failed; inspect systemctl --user status " + self.name)
+        return result.stdout
+
+    def verify(self, cfg):
+        import shlex
+        from swarm import paths
+        raw = self.command("show", self.name, "--property=LoadState,ExecStart,Environment,EnvironmentFiles,UnsetEnvironment,PassEnvironment,KillMode,Restart,ActiveState")
+        properties = dict(line.split("=", 1) for line in raw.splitlines() if "=" in line)
+        commands = re.findall(r"\{ path=([^;]+?) ; argv\[\]=(.*?) ;", properties.get("ExecStart", ""))
+        executable, arguments = commands[0] if len(commands) == 1 else ("", "")
+        argv = shlex.split(arguments)
+        if (properties.get("LoadState") != "loaded" or properties.get("KillMode") != "process"
+                or properties.get("Restart") != "on-failure" or properties.get("ActiveState") != "inactive"
+                or executable != sys.executable
+                or argv != _native_listener_argv(cfg, sys.executable)
+                or any(properties.get(k) for k in ("EnvironmentFiles", "UnsetEnvironment", "PassEnvironment"))
+                or f"PYTHONPATH={paths.LIB_DIR}" not in shlex.split(properties.get("Environment", ""))):
+            raise ValueError("install/load the inactive supported reconciler service with current runtime and KillMode=process first")
+
+    def start(self):
+        self.command("start", self.name)
+
+    def wait_ready(self, cfg, timeout):
+        from swarm import paths
+        expected, deadline = _runtime_identity(), time.monotonic() + timeout
+        pause = threading.Event()
+        while True:
+            health = _read_reconcile_health()
+            if (health.get("runtime") == expected and health.get("config") == _reconcile_config(cfg)
+                    and health.get("stamp") == _reconcile_stamp(cfg) and health.get("state") == "ready"
+                    and 0 <= time.time() - float(health.get("beat", 0)) <= RECONCILE_STALE_SECONDS):
+                pid = int(self.command("show", self.name, "--property=MainPID", "--value").strip())
+                if pid > 1 and health.get("pid") == pid:
+                    process = _ListenerProcess(pid)
+                    try:
+                        process.verify(cfg, str(paths.LIB_DIR))
+                    finally:
+                        process.close()
+                    return
+            if time.monotonic() >= deadline:
+                raise ValueError("reconciler service has no verified healthy current-runtime listener; inspect its journal")
+            pause.wait(min(0.05, max(0, deadline - time.monotonic())))
+
+
+def upgrade_reconciler(cfg: dict, expected_old_lib: str, *, service="swarm-reconciler.service",
+                       process_factory=None, service_manager=None, timeout=10) -> str | None:
+    """Owner upgrade operation: validate preinstalled service, retire only the proven listener.
+    Hooks only detect mismatches. No unit installation, worker signals, or detached fallback.
+    """
+    process = None
+    try:
+        if not _reconcile_config(cfg) or not os.path.isabs(expected_old_lib):
+            raise ValueError("explicit config and expected old runtime path are required")
+        with _reconciler_guard():
+            manager = service_manager or _ReconcilerService(service)
+            manager.verify(cfg)  # fail before any signal when service recovery is unavailable
+            fd = take_lock()
+            if fd is not None:
+                os.close(fd)
+                raise ValueError("listener lock is free; start the supported service normally")
+            health = _read_reconcile_health()
+            pid = health.get("pid")
+            if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 1:
+                raise ValueError("listener health has no exact recorded PID")
+            process = (process_factory or _ListenerProcess)(pid)
+            process.verify(cfg, expected_old_lib)
+            process.terminate()
+            if not process.wait(timeout):
+                raise ValueError("verified listener did not exit after SIGTERM; no replacement started")
+            fd = take_lock()
+            if fd is None:
+                raise ValueError("listener lock remains held; no replacement started")
+            os.close(fd)
+            manager.start()  # ordinary service still has to acquire the exclusive listener lock
+            manager.wait_ready(cfg, timeout)
+        return None
+    except ValueError as exc:
+        return str(exc)
+    except Exception as exc:
+        return f"reconciler upgrade refused ({type(exc).__name__}); inspect listener and user service"
+    finally:
+        if process is not None:
+            process.close()
 
 
 def _listener_lock():
