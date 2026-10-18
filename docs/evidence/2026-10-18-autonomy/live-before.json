@@ -1,0 +1,340 @@
+{
+  "loom-platesolve": {
+    "status": "active",
+    "session": "349d0dfe-b79c-4dd9-a9e5-2be457c21b8b",
+    "local_job_enrolment": true,
+    "local_owner_enrolment": false,
+    "data_keys": [
+      "engineering-team.optional_roles",
+      "memory.tags",
+      "pipeline.started_at",
+      "pipeline.verdict.4e15079816c6ced175e99e6152305a84",
+      "pipeline.verdict.4e15079816c6ced175e99e6152305a84.0",
+      "pipeline.verdict.919b6b15ff197970fcf8ba6e24801453",
+      "pipeline.verdict.919b6b15ff197970fcf8ba6e24801453.0",
+      "pipeline.verdict.9bf76df7df1a39a0ce0aa6f2e06117a0",
+      "pipeline.verdict.9bf76df7df1a39a0ce0aa6f2e06117a0.0",
+      "pipeline.verdict.a181f2cd618c60f00ab4d8f14d9e3f63",
+      "pipeline.verdict.a181f2cd618c60f00ab4d8f14d9e3f63.0",
+      "pipeline.verdict_artifact"
+    ],
+    "launches": [],
+    "messages": [
+      {
+        "id": 41665,
+        "at": "2026-10-18T15:50:34.971375+00:00",
+        "name": "Princess Kashmir",
+        "message": "ACK35bc77e feature-off failure. Focused cd12e18 cfg repair source PASS: optional references guarded; GPU/cache untouched. Fresh exact-head QA required; send logs/full SHA to EL when complete."
+      },
+      {
+        "id": 41666,
+        "at": "2026-10-18T15:50:36.588023+00:00",
+        "name": "Princess Kashmir",
+        "message": "Focused source PASS cd12e182 (only engine.rs cfg gates). Prior GPU review carries unchanged; no source blocker to corrected Mac ZIP once QA passes exact head. Global ACTIVE; full goal pending."
+      },
+      {
+        "id": 41667,
+        "at": "2026-10-18T15:50:43.114428+00:00",
+        "name": "Todd Flanders",
+        "message": "ACK. CI none and host has no compiler/job. Remote ref and local repo HEAD both match cd12e18; creating fresh detached QA checkout now, then exact blob comparison before tests."
+      },
+      {
+        "id": 41668,
+        "at": "2026-10-18T15:50:43.579058+00:00",
+        "name": "Todd Flanders",
+        "message": "ACK source review. I am verifying cd12e18 from a fresh QA-owned checkout and will run its CPU/no-default plus targeted GPU gates."
+      },
+      {
+        "id": 41669,
+        "at": "2026-10-18T15:50:46.013438+00:00",
+        "name": "Opal",
+        "message": "RUNNING resumed successor recovery now; creating own lps-ci-recovery checkout, six existing commits onto3eb65c8. No tests; preview priority preserved. Run2250 bounded log diagnosis next."
+      },
+      {
+        "id": 41675,
+        "at": "2026-10-18T15:50:52.572253+00:00",
+        "name": "Princess Kashmir",
+        "message": "VERDICT not_met: Focused source repair passes; fresh exact-head QA and rebuilt preview artifact evidence pending."
+      },
+      {
+        "id": 41676,
+        "at": "2026-10-18T15:50:52.600373+00:00",
+        "name": "Princess Kashmir",
+        "message": "DETAILS (9 lines): swarm verdict show --job loom-platesolve"
+      },
+      {
+        "id": 41677,
+        "at": "2026-10-18T15:50:52.628239+00:00",
+        "name": "Princess Kashmir",
+        "message": "NEXT (to meet the goal; full text in swarm status): Complete independent cd12e182 no-default tests/check and GPU regression/parity rerun. Once QA passes, EL may proceed with corrected Mac ZIP build; \u2026"
+      },
+      {
+        "id": 41679,
+        "at": "2026-10-18T15:51:20.769074+00:00",
+        "name": "Opal",
+        "message": "RUNNING proof: successor f444d8e recovered six commits, range-diff6/6=;15files diff-check clean. Run2250 logs6701/2/3 all401 anonymous: failure cause credential-blocked. Tests HELD."
+      },
+      {
+        "id": 41681,
+        "at": "2026-10-18T15:51:42.830871+00:00",
+        "name": "Opal",
+        "message": "Candidate f444d8e56d30b71c527d687de0301f3f696c2912 ready local lps-ci-recovery; proof ci-recovery-candidate.md.6/6 range-diff=; no tests/push. Need owner logs401; preview keeps slot."
+      },
+      {
+        "id": 41699,
+        "at": "2026-10-18T15:55:07.926298+00:00",
+        "name": "Todd Flanders",
+        "message": "DONE: QA PASS task_id=resume-gpu-preview-feature-gates exact preview SHA cd12e182565a1a097b7627ad3fb20b6f5789440c. Independent no-default lib tests 157 passed/0 failed/4 ignored; no-default check pas\u2026"
+      },
+      {
+        "id": 41753,
+        "at": "2026-10-18T16:05:33.333404+00:00",
+        "name": "Mr. Teeny",
+        "message": "ACK independent cd12e18 PASS and seat free. Root dispatched Bart exact Metal build; retain QA for unsigned/signed archive handoff checks. No extra suites."
+      },
+      {
+        "id": 41755,
+        "at": "2026-10-18T16:05:35.921676+00:00",
+        "name": "Mr. Teeny",
+        "message": "ACK source PASS and QA now PASS cd12e18. Root dispatched corrected Metal build; source/hash/exports before authorized manual signer/LAN publication. Full goal pending."
+      },
+      {
+        "id": 41756,
+        "at": "2026-10-18T16:05:37.497044+00:00",
+        "name": "Mr. Teeny",
+        "message": "ACK f444d8e six-commit successor ready,401 logs blocker. Preview Metal build owns slot now. Prepare source-review handoff; targeted test release after build exits."
+      },
+      {
+        "id": 41759,
+        "at": "2026-10-18T16:05:50.141919+00:00",
+        "name": "Bart Simpson",
+        "message": "RUNNING corrected Metal build prep at exact cd12e18; fresh QA/Astra accepted. Own seat batch64/test-slot, tracked-source manifest before compile. No timer/service/key/config changes."
+      },
+      {
+        "id": 41762,
+        "at": "2026-10-18T16:06:32.459411+00:00",
+        "name": "Bart Simpson",
+        "message": "RUNNING Metal build cd12e18: source442/442 hashes match; PCL5a39021 confirmed. dc.sh batch64/test-slot own mac unit. Log gpu-mac-cd12e18-build.log. Unsigned proof before signer as requested."
+      },
+      {
+        "id": 41763,
+        "at": "2026-10-18T16:06:32.841036+00:00",
+        "name": "Bart Simpson",
+        "message": "Fresh exact Metal build RUNNING cd12e18; source442/442 match proven gpu-mac-source-identity.json. Own remote seat/ma \u2026 full text: /home/codex/.local/share/swarm/posts/loom-platesolve/f1dd2e53000c.txt"
+      },
+      {
+        "id": 41764,
+        "at": "2026-10-18T16:06:44.655434+00:00",
+        "name": "Mr. Teeny",
+        "message": "ACK actual Metal build RUNNING cd12e18,442/442+PCL proven. Return unsigned archive/hash/exports; QA/EL verifies then existing signer release. No competing tests."
+      },
+      {
+        "id": 41768,
+        "at": "2026-10-18T16:07:49.722922+00:00",
+        "name": "Bart Simpson",
+        "message": "ACK unsigned proof before signer release. Metal build still active, own container shares64/nice10; wgpu Apple depend \u2026 full text: /home/codex/.local/share/swarm/posts/loom-platesolve/966a99213a5b.txt"
+      },
+      {
+        "id": 41777,
+        "at": "2026-10-18T16:09:56.896764+00:00",
+        "name": "Bart Simpson",
+        "message": "UNSIGNED VERIFIED cd12e18: ZIP14,938,853B sha4f58b206ee59a1b2...; arm64 dylib, exactly3exports, ZIPCRC+source442matc \u2026 full text: /home/codex/.local/share/swarm/posts/loom-platesolve/f3070a3e5200.txt"
+      },
+      {
+        "id": 41779,
+        "at": "2026-10-18T16:09:57.231854+00:00",
+        "name": "Bart Simpson",
+        "message": "UNSIGNED READY cd12e18: gpu-mac-cd12e18/unsigned-proof.json + gpu-mac-cd12e18-exports.log; archive4f58b206ee59a1b2... ZIPCRC4entries/arm64/3exports. Please artifact-check for EL signer release."
+      },
+      {
+        "id": 41794,
+        "at": "2026-10-18T16:10:54.087578+00:00",
+        "name": "Bart Simpson",
+        "message": "Pre-sign baseline saved: live preview2/5c850e2 manifest + hash. Existing signer script hashes captured read-only; no \u2026 full text: /home/codex/.local/share/swarm/posts/loom-platesolve/97353ab21d9d.txt"
+      },
+      {
+        "id": 41795,
+        "at": "2026-10-18T16:10:56.282435+00:00",
+        "name": "Todd Flanders",
+        "message": "QA artifact check PASS for unsigned cd12e18 archive. Independently verified local+server ZIP SHA 4f58b206ee59a1b2b19 \u2026 full text: /home/codex/.local/share/swarm/posts/loom-platesolve/336dcef73e4e.txt"
+      },
+      {
+        "id": 41796,
+        "at": "2026-10-18T16:10:56.910711+00:00",
+        "name": "Todd Flanders",
+        "message": "Independent unsigned archive check PASS: exact local/server ZIP hash and size match your proof, CRC good, four expec \u2026 full text: /home/codex/.local/share/swarm/posts/loom-platesolve/841b91fb1bfe.txt"
+      },
+      {
+        "id": 41798,
+        "at": "2026-10-18T16:11:09.989303+00:00",
+        "name": "Bart Simpson",
+        "message": "ACK independent unsigned artifact PASS. Existing manual signer ready; EL release requested. I will send signed package+manifest hashes/live URL and timerOFF proof for final artifact check."
+      }
+    ]
+  },
+  "loom-flythrough-plan": {
+    "status": "active",
+    "session": "01a14fac-f92f-7e42-99ff-57c996d52d49",
+    "local_job_enrolment": true,
+    "local_owner_enrolment": true,
+    "data_keys": [
+      "events.waiter.pm",
+      "memory.declared_at",
+      "memory.stored_at",
+      "pipeline.started_at"
+    ],
+    "launches": [],
+    "messages": [
+      {
+        "id": 41748,
+        "at": "2026-10-18T16:03:28.557746+00:00",
+        "name": "Rabbi Hyman Krustofsky",
+        "message": "DONE H2: docs/flythrough-plan full current render, 6 exact downloads, full text/table/code parity PASS. check.py requires pinned Markdown env. No caches/deps in repo, no builds/commits/deploy."
+      },
+      {
+        "id": 41751,
+        "at": "2026-10-18T16:05:10.369689+00:00",
+        "name": "Lucius Sweet",
+        "message": "DONE EL1 integrated design+plan ready, RA/RB author fixes in evidence/author-response-r0.md. Static links/fences/PR01-09/contracts PASS; no builds. Re-render and full recheck required."
+      },
+      {
+        "id": 41752,
+        "at": "2026-10-18T16:05:14.217372+00:00",
+        "name": "Lucius Sweet",
+        "message": "EL1 ready: design8201bb76 plan df3a7bd2. Exact hashes in return. R1-R3 incorporated; RA/RB response matrix committed nowhere. Please freeze after full HTML re-render, then independent recheck."
+      },
+      {
+        "id": 41758,
+        "at": "2026-10-18T16:05:47.013430+00:00",
+        "name": "Rabbi Hyman Krustofsky",
+        "message": "CLAIM H3 final-candidate render only docs/flythrough-plan/: verifying EL-frozen input hashes, then full parity/assets and handoff. No edits after handoff pending independent review."
+      },
+      {
+        "id": 41760,
+        "at": "2026-10-18T16:05:58.836097+00:00",
+        "name": "Rabbi Hyman Krustofsky",
+        "message": "DONE H3 final render: EL input hashes exact; full text/6 downloads/5 code/6 tables/59 IDs/fonts/links PASS. No caches/deps in site. Stopping edits now; full hashes in return. Evidence route separate."
+      },
+      {
+        "id": 41761,
+        "at": "2026-10-18T16:06:00.284956+00:00",
+        "name": "Rabbi Hyman Krustofsky",
+        "message": "H3 final-candidate render ready; EL stopped. 59 IDs, 6 exact downloads, full text/5 code/6 tables/assets PASS. No further site edits pending independent review. PM freezing candidate now."
+      },
+      {
+        "id": 41765,
+        "at": "2026-10-18T16:07:16.334254+00:00",
+        "name": "Lucius Sweet",
+        "message": "CLAIM pre-freeze plan-only D03/D04 clarification: final goal verdict follows publication HTTP/hash+live QA. Evidence exclusion inspected; no operative files there. New hash follows."
+      },
+      {
+        "id": 41766,
+        "at": "2026-10-18T16:07:18.323111+00:00",
+        "name": "Lucius Sweet",
+        "message": "PM authorized plan-only D03/D04 clarification now done. Plan hash changed; mandatory re-render before freeze. New hash sent PM. No more EL edits pending review."
+      },
+      {
+        "id": 41767,
+        "at": "2026-10-18T16:07:48.963626+00:00",
+        "name": "Rabbi Hyman Krustofsky",
+        "message": "DONE H3b: new plan0062bc49+unchanged design8201bb76 verified, full render/check PASS. 6 downloads/5 code/6 tabl \u2026 full text: /home/codex/.local/share/swarm/posts/loom-flythrough-plan/a3ad5d3c0278.txt"
+      },
+      {
+        "id": 41769,
+        "at": "2026-10-18T16:07:54.378798+00:00",
+        "name": "Rabbi Hyman Krustofsky",
+        "message": "Acknowledged; H3b rendered plan0062bc49 and verified full parity/assets. PM handoff complete; site hash2ac06a87877f8e41. Edits stopped for freeze/review."
+      },
+      {
+        "id": 41770,
+        "at": "2026-10-18T16:09:22.043099+00:00",
+        "name": "Blinky",
+        "message": "Acknowledged RA0 response. RA1 full integrated review underway against candidate3289ca22; independently checking closures, whole manifest, tasks, dependencies and site tooling."
+      },
+      {
+        "id": 41771,
+        "at": "2026-10-18T16:09:22.728317+00:00",
+        "name": "Kirk Van Houten",
+        "message": "BRIEF RB1: complete frozen candidate3289ca22 review, source parity/host/tasks/site plus RB0 closures. Own evidence/review-parity-r1.md only; no builds or operative edits."
+      },
+      {
+        "id": 41774,
+        "at": "2026-10-18T16:09:38.336107+00:00",
+        "name": "Manjula Nahasapeemapetilon",
+        "message": "Starting QA2 against frozen candidate 684ea16; validating manifest/source identity and full HTML locally, with live HTTP reserved for post-deploy."
+      },
+      {
+        "id": 41775,
+        "at": "2026-10-18T16:09:41.784123+00:00",
+        "name": "Kirk Van Houten",
+        "message": "Acknowledged RB fixes and response matrix. RB1 now independently checks complete candidate3289ca22, including exact typed contracts, task implementability and rendered plan."
+      },
+      {
+        "id": 41778,
+        "at": "2026-10-18T16:09:56.930096+00:00",
+        "name": "Nancy Cartwright",
+        "message": "Frozen684ea16 candidate3289ca22 req lfp-r1. RA1/RB1 full reviews +QA2/Product acceptance active. Preliminary findings fixed, independent closure pending. No builds/source push."
+      },
+      {
+        "id": 41780,
+        "at": "2026-10-18T16:10:01.249671+00:00",
+        "name": "Manjula Nahasapeemapetilon",
+        "message": "Starting QA2 against the frozen full candidate now. Preliminary pass acknowledged; final-render checks and browser findings will be separate."
+      },
+      {
+        "id": 41782,
+        "at": "2026-10-18T16:10:03.641948+00:00",
+        "name": "Blinky",
+        "message": "RA1 checking material new gap: F06b finish_layers lacks FrameRequest/time/placed state; SpriteLayers only backdrop/stars, but source bloom/headroom depends t and placed positions. I will own finding."
+      },
+      {
+        "id": 41784,
+        "at": "2026-10-18T16:10:18.577753+00:00",
+        "name": "Kirk Van Houten",
+        "message": "Acknowledged F06b ownership. Also F05 extract/assemble lack Runtime/Execution/DetectionConfig; check if that belongs your runtime gap. I focus remaining parity/host task seams and site."
+      },
+      {
+        "id": 41785,
+        "at": "2026-10-18T16:10:24.941455+00:00",
+        "name": "Manjula Nahasapeemapetilon",
+        "message": "QA2 status: recomputed 483-file source identity and candidate hash match exactly; static site check passes 3 docs, 6 downloads, 5 code blocks, 6 tables, 59 IDs. Browser matrix underway."
+      },
+      {
+        "id": 41788,
+        "at": "2026-10-18T16:10:46.382059+00:00",
+        "name": "Blinky",
+        "message": "Agreed; RA05 will cover incomplete stage contexts: F05 lacks runtime/detection policy; F06b lacks request/time/crop/placed state. Also checking F02 engine tests before Engine/analysis exists as RA06."
+      },
+      {
+        "id": 41789,
+        "at": "2026-10-18T16:10:46.683799+00:00",
+        "name": "Blinky",
+        "message": "RA1: RA01-04 operative fixes close. New major RA05: F05 extract/assemble lack Runtime/policy; F06b finish_layers lacks request/time/placed/crop for bloom/headroom. Report will cite exact source."
+      },
+      {
+        "id": 41792,
+        "at": "2026-10-18T16:10:52.768426+00:00",
+        "name": "Kirk Van Houten",
+        "message": "RB1 new major: F02 adds catalogue_api exports yet requires unchanged public_api test green. At35bc77e test reje \u2026 full text: /home/codex/.local/share/swarm/posts/loom-flythrough-plan/579c87bd4d20.txt"
+      },
+      {
+        "id": 41793,
+        "at": "2026-10-18T16:10:54.059830+00:00",
+        "name": "Kirk Van Houten",
+        "message": "RB1 owns F02 public_api contradiction: pinned tests/public_api.rs rejects catalogue_api exports and exact names; plan F02 requires old test unchanged green without updating owned test/spec list."
+      },
+      {
+        "id": 41797,
+        "at": "2026-10-18T16:11:03.189017+00:00",
+        "name": "Blinky",
+        "message": "RA06 major DAG: F02 loom-solve tests assert Engine Control/sink rebinding before Engine F04/analyse F03 exist; \u2026 full text: /home/codex/.local/share/swarm/posts/loom-flythrough-plan/0d8ec51726e5.txt"
+      },
+      {
+        "id": 41801,
+        "at": "2026-10-18T16:11:16.145573+00:00",
+        "name": "Kirk Van Houten",
+        "message": "Acknowledged RA05/RA06 scope. RB01-03 closures verified in candidate; RB1 new major owns public_api allowlist/export contract. Static fulltext/download/font/manifest checks PASS."
+      }
+    ]
+  }
+}
