@@ -118,3 +118,25 @@ class TerminalReconciliationErrors(Env):
         self.assertIn('listener startup refused', self.error_log.read_text())
         with self.board() as board:
             self.assertEqual(board.jobs(include_closed=True), [])
+
+
+class NativeRootReconciliationErrors(Env):
+    def test_no_goal_native_worker_root_retains_then_clears_own_startup_error(self):
+        from swarm import enrolment
+        from swarm.board.autoinit import store_key
+        self.cli('activate', '--job', 'J', '--session', 'coordinator')
+        worker = 'native-worker-root'
+        with self.board() as board:
+            board.allocate_name(worker, 'J')
+            board.record_route(worker, worker, 'final', 'J')
+        enrolment.write(store_key(self.cfg), job='J', agent_key=worker, harness='codex',
+                        session_id=worker, cwd=str(self.tmp))
+        reason = 'native root listener startup failed'
+        with mock.patch.object(dependencies, 'wake', return_value=reason):
+            self.hook('session-stop', agent_id=None, session=worker, host='codex')
+        with self.board() as board:
+            self.assertEqual(board.job_data('J').get('task.reconciler_error'), reason)
+        with mock.patch.object(dependencies, 'wake', return_value=None):
+            self.hook('session-stop', agent_id=None, session=worker, host='codex')
+        with self.board() as board:
+            self.assertIsNone(board.job_data('J').get('task.reconciler_error'))

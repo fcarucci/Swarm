@@ -272,6 +272,9 @@ class ReviewHookTests(GoalEnv):
         self.done('b')
         self.verdict('a')
         self.verdict('b')
+        # Artifact verdicts cover those handoffs; the original goal needs its own ruling.
+        with self.board() as b:
+            self.assertTrue(b.record_verdict('J', self.judge, 'met', 'original goal verified', scope='goal'))
         self.hook('stop', agent_id='judge-1')
         self.hook('stop', agent_id='w1')
         with self.board() as b:

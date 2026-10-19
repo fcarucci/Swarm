@@ -2768,6 +2768,7 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 
 | command | what it does |
 |---|---|
+| `create --job J --goal TEXT --task TEXT --workdir ABS --request-id ACTUAL_USER_MSG_ID [--display-session GROUP]` | create a new job atomically from its authorized root hook; the request ID records the actual user request, and display grouping grants no authority; existing jobs and lifecycle are preserved |
 | `init [--no-hooks]` | create the storage if missing, the schema and the name pool. Every other command does this by itself when needed (see [Automatic initialisation](#automatic-initialisation)). The hooks ship with the plugin; `--no-hooks` is ignored |
 | `install-hooks` | obsolete: the hooks ship with the plugin (`hooks/hooks.json`, `hooks/codex-hooks.json`); prints that and writes nothing. `migrate` removes the old install's entries |
 | `bootstrap [--host claude\|codex] [--quiet]` | set the swarm up for this host: venv, launcher, config, board, host setup, migrate (see [First run and updates](#first-run-and-updates)); run automatically in the background at the first session of each plugin version. `--quiet` prints only the steps that need you |

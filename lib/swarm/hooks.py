@@ -2456,12 +2456,24 @@ def _terminal_reconciliation(cfg: dict) -> None:
             _log_error("terminal reconciliation", agent_id or sid or "", RuntimeError(why))
     if not agent_id and not sid:
         return
+    # A terminal wake is global, but metadata belongs only to this host's enrolled
+    # participant. Unknown keys and no-goal roots need no second board connection.
+    from swarm import enrolment
+    from swarm.board.autoinit import store_key
+    key = store_key(cfg)
+    # Native/headless worker roots have no agent_id: their private agent key is sid.
+    rec = enrolment.find(key, agent_id or sid)
+    jobs = {rec.job} if rec and rec.session_id == sid and rec.harness == current_host().name else set()
+    if not agent_id and not jobs:
+        for marker in _markers(cfg):
+            if marker.get('session_id') != sid or not marker.get('goal'):
+                continue
+            rec = enrolment.find_job(key, marker['job'])
+            if rec and rec.session_id == sid and rec.harness == current_host().name:
+                jobs.add(rec.job)
+    if not jobs:
+        return
     with open_board(cfg, init_timeout=HOOK_INIT_TIMEOUT) as board:
-        if agent_id:
-            jobs = {board.route(agent_id).member_job} - {None}
-        else:
-            jobs = {board.route(sid).member_job} - {None}
-            jobs.update(m['job'] for m in _markers(cfg) if m.get('session_id') == sid)
         for job in jobs:
             board.set_job_data(job, "task.reconciler_error", why)
 

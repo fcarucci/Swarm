@@ -519,6 +519,7 @@ way its own host does it. `swarm status --job <job>` shows each agent's HOST and
 ## Command reference (`${CLAUDE_PLUGIN_ROOT}/bin/swarm …`)
 | command | what it does |
 |---|---|
+| `create --job J --goal TEXT --task TEXT --workdir ABS --request-id ACTUAL_USER_MSG_ID [--display-session GROUP]` | create a new job atomically from its authorized root hook; the request ID records the actual user request, and display grouping grants no authority; existing jobs and lifecycle are preserved |
 | `init [--no-hooks]` | create the storage if missing, plus the schema and name pool (every command does this by itself when needed); the hooks ship with the plugin in `hooks/hooks.json` |
 | `install-hooks` | legacy (pre-plugin installs wrote hooks into `~/.claude/settings.json`); the plugin's hooks come from `hooks/hooks.json` (Codex: `hooks/codex-hooks.json`), and `swarm migrate` retires the old entries; writes nothing |
 | `bootstrap [--host claude\|codex] [--quiet]` | set the swarm up for this host by hand: venv, `~/.local/bin/swarm`, config, board, host setup (Codex: `~/.codex/config.toml`), `migrate`. The plugin runs it by itself, in the background, at the first session start of each plugin version |

@@ -312,6 +312,9 @@ class Tainted:
     def jobs(self, *a, **kw):
         return [self._t(j, "job", *self._JOB_TEXT) for j in self.inner.jobs(*a, **kw)]
 
+    def shown_jobs(self, *a, **kw):
+        return [self._t(j, "job", *self._JOB_TEXT) for j in self.inner.shown_jobs(*a, **kw)]
+
     def restarts(self, job=None, *a, **kw):
         return self.inner.restarts(untaint(job), *a, **kw)
 
