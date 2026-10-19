@@ -130,13 +130,15 @@ class SupersedeContract:
 
     def test_ack_and_retention_cannot_resurrect_superseded_obligation(self):
         event_id, _ = self.supersede()
-        self.b.ack_events('J', [event_id], 'EL')
+        self.b.ack_events('J', [e.id for e in self.b.events('J')], 'EL')
         # Other retained activity keeps the job present while aged acked events are purged.
         from unittest import mock
         with mock.patch.object(self.b, 'now', return_value=self.b.now()+dt.timedelta(days=10)):
             self.b.post('J', 'EL', 'job still active')
             self.b.purge()
         self.assertTrue(any(e.id==event_id for e in self.b.events('J')))
+        self.assertEqual([(r['name'], r['state']) for r in dependencies.describe(self.b, 'J')],
+                         [('corrected-review', 'done')])
         self.assertFalse(any(r['name']=='old-review' for r in dependencies.describe(self.b, 'J')))
 
     def test_queued_superseded_task_does_not_block_goal_judge_or_pollute_cached_context(self):

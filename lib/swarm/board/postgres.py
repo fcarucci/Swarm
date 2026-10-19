@@ -1181,7 +1181,7 @@ class PostgresBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
         conn.execute("DELETE FROM agent_routes WHERE created_at < now() - make_interval(days => %s)", (days,))
         conn.execute("DELETE FROM restarts WHERE at < now() - make_interval(days => %s)", (days,))
         conn.execute("DELETE FROM events WHERE created_at < now() - make_interval(days => %s) "
-                     "AND ((acked_at IS NOT NULL AND kind <> 'TASK-SUPERSEDE') OR job NOT IN (SELECT job FROM jobs))", (days,))
+                     "AND ((acked_at IS NOT NULL AND kind NOT IN ('TASK-EVIDENCE','TASK-SUPERSEDE')) OR job NOT IN (SELECT job FROM jobs))", (days,))
         conn.execute("DELETE FROM bg_commands WHERE job NOT IN (SELECT job FROM jobs) "
                      "OR ended_at < now() - make_interval(days => %s)", (days,))
 
