@@ -1448,7 +1448,7 @@ def load_name_pool(data_dir: Path = DATA_DIR) -> dict[str, list[str]]:
 # checks at the end of each transaction, SQLite's connection is mode=ro). read_unread/read_new
 # are writes only when they advance the cursor.
 WRITE_METHODS = (
-    "purge", "create_job_once", "ensure_job", "open_job", "close_job", "auto_close_job", "undo_auto_close", "recover_auto_close",
+    "purge", "supersede_task", "create_job_once", "ensure_job", "open_job", "close_job", "auto_close_job", "undo_auto_close", "recover_auto_close",
     "sweep_auto_close", "bind_job_session", "reassign_job_session", "allocate_name", "claim_judge", "take_judge_launch", "claim_verifier",
     "set_waiting", "set_job_max_hours", "set_job_goal", "move_agent", "sweep_expiry", "reserve_spawn", "record_verdict", "tool_started", "record_route",
     "claim_route", "tool_finished", "agent_stopped", "set_agent_role", "set_agent_title", "set_agent_runtime",
@@ -2122,6 +2122,23 @@ class Board(abc.ABC):
 
     # ---- external events (schema 21) ----------------------------------------------------
 
+    def supersede_task(self, job, generation, name, *, artifact, replacement,
+                       replacement_generation, replacement_artifact, reason, actor):
+        """Record immutable task supersession atomically against native launch claims.
+
+        Caller authorization belongs to task_cli; this dedicated write validates all task,
+        evidence, run and activity guards. No job, launch or evidence row changes.
+        """
+        from swarm.dependencies import _supersede_task
+        with self._task_tx(job):
+            result = _supersede_task(self, job, generation, name, artifact=artifact,
+                replacement=replacement, replacement_generation=replacement_generation,
+                replacement_artifact=replacement_artifact, reason=reason, actor=actor)
+        if result[1]:
+            from swarm.fastpath import changed
+            changed(job)
+        return result
+
     def post_event(self, job: str, kind: str, key: str, text: str, to: str | None = None,
                    source: str | None = None) -> tuple[int, bool]:
         """Record an external event for the orchestrator (to None), an agent (its name) or a role
@@ -2131,6 +2148,8 @@ class Board(abc.ABC):
         stored, for a bad kind/key/to/source, empty text, or a job that doesn't exist; text is
         normalized to one line and cut to EVENT_TEXT_MAX), then _insert_event; a new event wakes
         every waiter (Postgres NOTIFY; the others poll) and invalidates the hooks' fast-path lease."""
+        if kind == 'TASK-SUPERSEDE':
+            raise ValueError('TASK-SUPERSEDE is reserved for the authorized task supersession API')
         kind, key, text, to, source = check_event(kind, key, text, to, source)
         result = self._insert_event(job, kind, key, text, to, source)
         if result[1]:

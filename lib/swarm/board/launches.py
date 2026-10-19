@@ -70,6 +70,11 @@ class _Refused(Exception):
 
 
 class MemoryLaunches:
+    @contextlib.contextmanager
+    def _task_tx(self, job):
+        with self._s().lock:
+            yield
+
     def failed_launch_retries(self):
         s = self._s()
         with s.lock:
@@ -286,6 +291,15 @@ def migrate_launches(c, pg=False):
 
 class SqlLaunches:
     _launch_pg = False
+
+    @contextlib.contextmanager
+    def _task_tx(self, job):
+        with self._launch_tx() as c:
+            if self._launch_pg:
+                self._exec(c, "SELECT job FROM jobs WHERE job=? FOR UPDATE", (job,)).fetchall()
+                self._exec(c, "SELECT id FROM launches WHERE job=? ORDER BY id FOR UPDATE", (job,)).fetchall()
+                self._exec(c, "SELECT agent_key FROM agents WHERE job=? ORDER BY agent_key FOR UPDATE", (job,)).fetchall()
+            yield
 
     def failed_launch_retries(self):
         rows = self._exec(self._conn,

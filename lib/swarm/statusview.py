@@ -25,7 +25,7 @@ def job_context(board, j, now) -> str:
                     for t in tasks if t['state'] != 'done']
         if data.get('task.blocker') and all(t['state'] == 'done' for t in tasks):
             reasons.append(str(data['task.blocker']))
-        named = {t['name'] for t in tasks}
+        named = {t['name'] for t in dependencies.describe(board, j.job, include_superseded=True)}
         reasons += [(f"queued launch: {r.name}" if r.state == 'queued'
                      else f"launch {r.name}: awaiting runner completion")
                     for r in board.launches(j.job, include_closed=False) if r.name not in named]

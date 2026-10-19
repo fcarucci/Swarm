@@ -10,7 +10,7 @@ term_safe = cli.term_safe
 def configure(sub):
     tk = sub.add_parser("task", help="persist exact-artifact engineering dependencies before ending a turn")
     tks = tk.add_subparsers(dest="task_cmd", required=True)
-    for action in ("add", "report", "list"):
+    for action in ("add", "report", "list", "supersede"):
         tp = tks.add_parser(action)
         tp.add_argument("--job", required=True)
         if action == "list":
@@ -20,7 +20,12 @@ def configure(sub):
         tp.add_argument("--generation", type=int, default=1)
         tp.add_argument("--artifact", required=True)
         tp.add_argument("--as", dest="actor")
-        if action == "report":
+        if action == "supersede":
+            tp.add_argument("--replacement", required=True)
+            tp.add_argument("--replacement-generation", type=int, required=True)
+            tp.add_argument("--replacement-artifact", required=True)
+            tp.add_argument("--reason", required=True)
+        elif action == "report":
             tp.add_argument("--outcome", choices=("passed", "failed"), required=True)
             tp.add_argument("--reason", required=True)
         else:
@@ -37,7 +42,7 @@ def run(board, cfg: dict, args) -> int:
     from swarm import dependencies, enrolment, hosts
     from swarm.board.autoinit import store_key
     if args.task_cmd == "list":
-        rows = dependencies.describe(board, args.job)
+        rows = dependencies.describe(board, args.job, include_superseded=True)
         if args.json:
             print(json.dumps(rows))
         else:
@@ -64,7 +69,17 @@ def run(board, cfg: dict, args) -> int:
         print("swarm task: this host has no trusted enrolment for the job", file=sys.stderr)
         return 1
     try:
-        if args.task_cmd == "add":
+        if args.task_cmd == "supersede":
+            from swarm import task_authority
+            actual_actor = task_authority.take(board, cfg, args)
+            _, created = board.supersede_task(args.job, args.generation, args.name,
+                artifact=args.artifact, replacement=args.replacement,
+                replacement_generation=args.replacement_generation,
+                replacement_artifact=args.replacement_artifact, reason=args.reason, actor=actual_actor)
+            print("task supersession recorded" if created else "task supersession already recorded; audit preserved")
+            if not created:
+                return 0
+        elif args.task_cmd == "add":
             from swarm.supervisor.command import workdir_problem
             why = workdir_problem(cfg, args.workdir)
             if why:

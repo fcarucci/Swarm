@@ -349,7 +349,7 @@ def _advance(board, cfg: dict, js, now: _dt.datetime, starter) -> list[str]:
         return acts + [_fail(board, job, f"Q{expired[0].id} expired unanswered: {expired[0].reason}", now)]
     if questions:
         return acts   # waits on a person's answer: the only wait there is
-    from swarm.dependencies import advance, describe
+    from swarm.dependencies import advance, describe, spec, supersession
     task_rows = describe(board, job)
     task_acts = advance(board, job)
     if task_acts is not None:
@@ -369,7 +369,8 @@ def _advance(board, cfg: dict, js, now: _dt.datetime, starter) -> list[str]:
         return acts + [f"{job}: completed ({artifact})"]
     if judged == "unreachable":
         return acts + [_fail(board, job, f"judge: unreachable ({js.verdict_reason or artifact})", now)]
-    if _running(board, job) or any(r.state == "queued" for r in board.launches(job, include_closed=False)):
+    if _running(board, job) or any(r.state == "queued" and not (spec(r) is not None and supersession(board, r))
+                                  for r in board.launches(job, include_closed=False)):
         return acts
     if any(a.status in ("started", "running") and not _observer(a) for a in board.agents(job, include_departed=False)):
         return acts

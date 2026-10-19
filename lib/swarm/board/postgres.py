@@ -514,7 +514,7 @@ _CONTEXT_REVISION_SQL = """md5(
     coalesce((SELECT string_agg(id::text || ':' || revision::text, ',' ORDER BY id)
                 FROM launches WHERE job=s.job), '') || chr(1) ||
     coalesce((SELECT string_agg(id::text || ':' || key || ':' || text, ',' ORDER BY id)
-                FROM events WHERE job=s.job AND kind='TASK-EVIDENCE'), ''))"""
+                FROM events WHERE job=s.job AND kind IN ('TASK-EVIDENCE','TASK-SUPERSEDE')), ''))"""
 _RESTART_COLS = RESTART_COLS   # Restart field order (base.py)
 
 # The debounce drain after a wake-up: collects what is already on the wire (as watch did).
@@ -1181,7 +1181,7 @@ class PostgresBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
         conn.execute("DELETE FROM agent_routes WHERE created_at < now() - make_interval(days => %s)", (days,))
         conn.execute("DELETE FROM restarts WHERE at < now() - make_interval(days => %s)", (days,))
         conn.execute("DELETE FROM events WHERE created_at < now() - make_interval(days => %s) "
-                     "AND (acked_at IS NOT NULL OR job NOT IN (SELECT job FROM jobs))", (days,))
+                     "AND ((acked_at IS NOT NULL AND kind <> 'TASK-SUPERSEDE') OR job NOT IN (SELECT job FROM jobs))", (days,))
         conn.execute("DELETE FROM bg_commands WHERE job NOT IN (SELECT job FROM jobs) "
                      "OR ended_at < now() - make_interval(days => %s)", (days,))
 
@@ -1580,7 +1580,7 @@ class PostgresBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
             (SELECT jsonb_agg(to_jsonb(l) ORDER BY id) FROM launches l
               WHERE job IN (SELECT job FROM selected)),
             (SELECT jsonb_agg(to_jsonb(e) || jsonb_build_object('to', e.to_target) ORDER BY id)
-               FROM events e WHERE kind='TASK-EVIDENCE' AND job IN (SELECT job FROM selected)),
+               FROM events e WHERE kind IN ('TASK-EVIDENCE','TASK-SUPERSEDE') AND job IN (SELECT job FROM selected)),
             (SELECT jsonb_object_agg(s.job, {_CONTEXT_REVISION_SQL}) FROM selected s)
         """.replace('{agent_cols}', agent_cols)
         row = self._conn.execute(query, {"jobs": list(jobs), "sessions": list(sessions), "recent": recent_minutes,

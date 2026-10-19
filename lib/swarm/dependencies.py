@@ -14,6 +14,7 @@ from swarm.board.base import JOB_DATA_VALUE_MAX
 
 PREFIX = 'SWARM_TASK_V1\n'
 KIND = 'TASK-EVIDENCE'
+SUPERSEDE_KIND = 'TASK-SUPERSEDE'
 
 
 def spec(row):
@@ -37,6 +38,121 @@ def evidence(board, row):
         if event.kind == KIND and event.key == key:
             return json.loads(event.text)
     return None
+
+
+def _identity(row):
+    value = spec(row)
+    return dict(id=row.id, name=row.name, generation=row.generation, revision=row.revision,
+                job=row.job, role=row.role, run=value['run'], artifact=value['artifact'],
+                brief_sha=hashlib.sha256(row.brief.encode()).hexdigest())
+
+
+def _supersede_key(row):
+    return hashlib.sha256(json.dumps(_identity(row), sort_keys=True).encode()).hexdigest()
+
+
+def supersession(board, row):
+    """Return a complete dedicated audit bound to exact tasks and immutable evidence.
+
+    Generic legacy event writers have a smaller payload cap. Partial or damaged records
+    never count as authorization and never crash obligation or snapshot readers.
+    """
+    key = _supersede_key(row)
+    for event in board.events(row.job):
+        if event.kind != SUPERSEDE_KIND or event.key != key or event.source != 'swarm-task':
+            continue
+        try:
+            value = json.loads(event.text)
+            if (not isinstance(value, dict) or set(value) != {'v','old','replacement','reason','actor','at','evidence_sha'}
+                    or value['v'] != 1 or value['old'] != _identity(row)
+                    or not isinstance(value['replacement'], dict) or not value['reason'] or not value['actor']):
+                continue
+            replacement = value['replacement']
+            new = board.get_launch(row.job, replacement['generation'], replacement['name'])
+            if new is None or spec(new) is None or replacement != _identity(new) or new.state != 'done':
+                continue
+            accepted = evidence(board, new)
+            if (not accepted or accepted.get('outcome') != 'passed' or value['evidence_sha'] != hashlib.sha256(
+                    json.dumps(accepted, sort_keys=True).encode()).hexdigest()):
+                continue
+            dt.datetime.fromisoformat(value['at'])
+            return value
+        except (ValueError, TypeError, KeyError, AttributeError):
+            continue
+    return None
+
+
+def _working(board, row):
+    value = spec(row)
+    if row.state == 'running' or any(r.launch_id == row.launch_id and r.ended_at is None
+                                     for r in board.restarts(row.job) if row.launch_id):
+        return True
+    if value.get('reporter_key'):
+        agent = next((a for a in board.agents(row.job, include_departed=True)
+                      if a.agent_key == value['reporter_key']), None)
+        return bool(agent and agent.ended_at is None and getattr(agent, 'turn_ended_at', None) is None)
+    return False
+
+
+def _supersede_task(board, job, generation, name, *, artifact, replacement,
+                    replacement_generation, replacement_artifact, reason, actor):
+    """Called only by the dedicated board transaction; no lifecycle rows are changed."""
+    if not isinstance(reason, str) or not reason.strip() or len(reason) > 1000:
+        raise ValueError('supersession requires a nonempty reason of at most 1000 characters')
+    if not isinstance(actor, str) or not actor.strip():
+        raise ValueError('supersession requires an authenticated actor')
+    old = board.get_launch(job, generation, name)
+    new = board.get_launch(job, replacement_generation, replacement)
+    if old is None or new is None or spec(old) is None or spec(new) is None:
+        raise ValueError('old and replacement must be existing native tasks in the same job')
+    if old.id == new.id:
+        raise ValueError('a task cannot supersede itself')
+    ov, nv = spec(old), spec(new)
+    if ov['artifact'] != artifact or nv['artifact'] != replacement_artifact or old.role != new.role:
+        raise ValueError('task artifact identities and replacement role must match the declared contract')
+    if not _current(board, old, ov) or not _current(board, new, nv) or ov['run'] != nv['run']:
+        raise ValueError('both tasks must belong to the current job run')
+    expected = dict(v=1, old=_identity(old), replacement=_identity(new), reason=reason, actor=actor)
+    prior = supersession(board, old)
+    if prior is not None:
+        if any(prior.get(k) != value for k, value in expected.items()):
+            raise ValueError('task already has a conflicting immutable supersession')
+        event = next(e for e in board.events(job) if e.kind == SUPERSEDE_KIND and e.key == _supersede_key(old))
+        return event.id, False
+    if any(e.kind == SUPERSEDE_KIND and e.key == _supersede_key(old) for e in board.events(job)):
+        raise ValueError('task has a conflicting or invalid immutable supersession audit')
+    if board.job_status(job).status != 'active':
+        raise ValueError('new supersession requires the existing active job')
+    for row in (old, new):
+        if any(other.name == row.name and other.generation > row.generation
+               for other in board.launches(job) if spec(other) is not None):
+            raise ValueError('supersession requires the latest generation of both tasks')
+    if _working(board, old):
+        raise ValueError('old task still has an active runner or reporter turn')
+    accepted = evidence(board, new)
+    if (new.state != 'done' or not accepted or accepted.get('outcome') != 'passed'
+            or block_reason(board, new) is not None):
+        raise ValueError('replacement requires passed exact-artifact evidence and an ended turn')
+    try:
+        reported_at = dt.datetime.fromisoformat(accepted['at'])
+        settled = new.updated_at >= reported_at
+    except (KeyError, TypeError, ValueError):
+        settled = False
+    if nv.get('reporter_key'):
+        # reconcile_external writes done only after the evidence-reporting turn ended.
+        # That durable settlement remains valid when the same agent later starts other work.
+        settled = settled and accepted.get('actor') == nv.get('reporter')
+    else:
+        settled = settled and any(r.launch_id == new.launch_id and r.ended_at is not None
+            and r.ended_at >= reported_at and r.outcome == 'completed' for r in board.restarts(job))
+    if not settled:
+        raise ValueError('replacement has no terminal settlement after its exact evidence')
+    expected.update(at=board.now().isoformat(), evidence_sha=hashlib.sha256(
+        json.dumps(accepted, sort_keys=True).encode()).hexdigest())
+    text = json.dumps(expected, sort_keys=True, separators=(',', ':'))
+    if len(text) > 64 * 1024:
+        raise ValueError('supersession audit exceeds 64 KiB')
+    return board._insert_event(job, SUPERSEDE_KIND, _supersede_key(old), text, None, 'swarm-task')
 
 
 def register(board, job, generation, name, *, artifact, depends, role, harness, model,
@@ -94,6 +210,8 @@ def report(board, job, generation, name, *, artifact, outcome, reason, actor):
     value = spec(row) if row else None
     if value is None:
         raise ValueError('unknown task')
+    if supersession(board, row):
+        raise ValueError('superseded task cannot accept new evidence')
     if artifact != value['artifact']:
         raise ValueError('evidence artifact does not match task artifact')
     if not _current(board, row, value):
@@ -130,6 +248,8 @@ def block_reason(board, row, *, launching=False):
         return None
     if not _current(board, row, value):
         return 'superseded by a newer job run'
+    if supersession(board, row):
+        return 'superseded by an explicitly reviewed replacement task'
     if any(other.name == row.name and other.generation > row.generation for other in board.launches(row.job)
            if other.queued_by == 'swarm task'):
         return 'superseded by a newer task generation'
@@ -150,6 +270,8 @@ def block_reason(board, row, *, launching=False):
                  and other.generation > dep.generation and other.queued_by == 'swarm task']
         if newer:
             return f'dependency {name} superseded by task generation {max(other.generation for other in newer)}'
+        if supersession(board, dep):
+            return f'dependency {name} superseded; its original artifact contract is not replaced'
         if dep.state == 'failed':
             return f'dependency {name} failed: {dep.last_outcome or "runner failed"}'
         ev = evidence(board, dep)
@@ -162,7 +284,7 @@ def block_reason(board, row, *, launching=False):
     return None
 
 
-def describe(board, job):
+def describe(board, job, *, include_superseded=False):
     rows = []
     data = board.job_data(job)
     launches = board.launches(job)
@@ -178,10 +300,16 @@ def describe(board, job):
             continue
         if data.get('pipeline.superseded.' + hashlib.sha256(value['artifact'].encode()).hexdigest()[:32]):
             continue
+        audit = supersession(board, row)
+        if audit and not include_superseded:
+            continue
         reason = block_reason(board, row)
         ev = evidence(board, row)
         state = row.state
-        if reason:
+        if audit:
+            state, reason = 'superseded', ('replaced by ' + audit['replacement']['name'] +
+                ' generation ' + str(audit['replacement']['generation']) + ': ' + audit['reason'])
+        elif reason:
             state = 'blocked'
         elif state == 'queued' and value.get('reporter'):
             state, reason = 'blocked', 'waiting for external evidence/turn end: ' + value['reporter']
@@ -217,7 +345,7 @@ def reconcile_external(board, job):
 def advance(board, job):
     """Task jobs own their lifecycle until every stage is successfully evidenced and quiescent."""
     for row in board.launches(job, include_closed=False):
-        if row.state == 'queued' and spec(row) is not None:
+        if row.state == 'queued' and spec(row) is not None and not supersession(board, row):
             why = block_reason(board, row)
             if why and (why.startswith('superseded') or why.startswith('artifact superseded')):
                 board.set_launch_state(row.id, row.revision, 'failed', job=job, last_outcome=why)

@@ -2518,6 +2518,8 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
         from swarm import owner_create
         try:
             owner_create.attest(cfg, payload, current_host())
+            from swarm import task_authority
+            task_authority.attest(cfg, payload, current_host())
         except (OSError, ValueError) as exc:
             _deny("[swarm] " + str(exc))
             return 0

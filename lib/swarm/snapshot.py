@@ -98,11 +98,11 @@ def context_revision(board, job) -> str:
     supplied = getattr(board, 'context_revisions', None)
     if isinstance(supplied, dict) and job in supplied:
         return supplied[job]
-    from swarm.dependencies import KIND
+    from swarm.dependencies import KIND, SUPERSEDE_KIND
     current = board.job_status(job)
     values = {'data': board.job_data(job), 'run': _plain(current.activated_at or current.created_at) if current else None,
               'launches': [(r.id, r.revision) for r in board.launches(job)],
-              'evidence': [(e.id, e.key, e.text) for e in board.events(job) if e.kind == KIND]}
+              'evidence': [(e.id, e.key, e.text) for e in board.events(job) if e.kind in (KIND, SUPERSEDE_KIND)]}
     return hashlib.md5(dumps(values).encode()).hexdigest()
 
 

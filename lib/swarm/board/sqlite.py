@@ -800,7 +800,7 @@ class SqliteBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
                   (keep,))
         c.execute("DELETE FROM agent_routes WHERE created_at < ?", (keep,))
         c.execute("DELETE FROM restarts WHERE at < ?", (keep,))
-        c.execute("DELETE FROM events WHERE created_at < ? AND (acked_at IS NOT NULL "
+        c.execute("DELETE FROM events WHERE created_at < ? AND ((acked_at IS NOT NULL AND kind <> 'TASK-SUPERSEDE') "
                   "OR job NOT IN (SELECT job FROM jobs))", (keep,))
         c.execute("DELETE FROM bg_commands WHERE job NOT IN (SELECT job FROM jobs) "
                   "OR (ended_at IS NOT NULL AND ended_at < ?)", (keep,))

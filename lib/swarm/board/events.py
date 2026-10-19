@@ -76,7 +76,7 @@ def drop_old_events(s, keep: dt.datetime) -> bool:
     """Retention: acked events older than `keep`, and events of jobs that no longer exist."""
     before = len(s.events)
     s.events = [e for e in s.events
-                if e["job"] in s.jobs and (e["acked_at"] is None or e["created_at"] >= keep)]
+                if e["job"] in s.jobs and (e["kind"] == "TASK-SUPERSEDE" or e["acked_at"] is None or e["created_at"] >= keep)]
     return len(s.events) != before
 
 
