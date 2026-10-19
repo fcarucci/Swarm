@@ -831,8 +831,15 @@ On Postgres, re-run `swarm init` after changing `idle_minutes`, `dead_minutes` o
 
 Jailed Codex launches use a private, read-only copy of the owner's configuration with a
 launch permission profile. The profile keeps the role's source permissions and adds write
-access only to its typed broker directory under `~/.swarm-launch/broker`; the rest of the
-scratch home stays read-only to tools. Reviewer/judge worktrees and git directories remain
+access to its typed broker directory under `~/.swarm-launch/broker`; the rest of the
+scratch home stays read-only to tools. Writer roles also receive exact Git metadata grants
+within their validated outer mounts, so native Codex tools can stage and commit in an
+independent clone. Git config, config.worktree, hooks and configuration includes remain
+read-only, including absent control files. Linked worktrees receive their own admin
+directory and shared objects/refs storage, never the shared Git root or sibling admin
+directories. Git can report a blocked optional `packed-refs.lock` attempt even when a
+linked-worktree commit succeeds; shared-root maintenance and packed-ref updates remain
+unsupported. Automatic maintenance is disabled in the launch's private Git config. Reviewer/judge worktrees and git directories remain
 read-only in both sandbox layers. The owner's config is never edited. Off and best-effort
 launches retain their existing sandbox arguments. This requires Codex named permission
 profiles with built-in `:read-only`/`:workspace` inheritance; unsupported clients fail closed.

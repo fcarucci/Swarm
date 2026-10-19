@@ -29,6 +29,7 @@ import glob
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path, PurePosixPath
@@ -353,7 +354,8 @@ def launch_settings(person: bytes | None) -> str:
     return json.dumps({**data, "permissions": perms}, indent=2)
 
 
-def prepare(cfg: dict, job: str, launch: str, *, codex_policy: bool = False) -> Path:
+def prepare(cfg: dict, job: str, launch: str, *, codex_policy: bool = False,
+            git_permissions: tuple = ((), ()), disable_git_maintenance: bool = False) -> Path:
     """Create/refresh the private directory without following links.
 
     Only an actual jailed Codex contract opts into Codex policy preparation.
@@ -380,12 +382,17 @@ def prepare(cfg: dict, job: str, launch: str, *, codex_policy: bool = False) -> 
         h = fds[-1]
         for sub in ("home", "tmp", "claude", "codex", ".ssh", "broker", "bin", "gh"):
             os.close(safefs.open_sub(h, sub, strict_mode=0o700))
-        privfs.write_atomic(h, "gitconfig", gitconfig_text(cfg))
+        gitconfig = gitconfig_text(cfg)
+        if disable_git_maintenance:
+            # Authors may commit, but shared-repository maintenance is not a launch task.
+            gitconfig += "[maintenance]\n\tauto = false\n[gc]\n\tauto = 0\n"
+        privfs.write_atomic(h, "gitconfig", gitconfig)
         if codex_settings is not None:
             from swarm.supervisor.launchpermissions import codex_config
             for read_only, name in ((False, "codex-author.toml"), (True, "codex-review.toml")):
                 try:
-                    text = codex_config(codex_settings, f"{home}/.swarm-launch/broker", read_only=read_only)
+                    text = codex_config(codex_settings, f"{home}/.swarm-launch/broker", read_only=read_only,
+                                        git_write_paths=git_permissions[0], git_read_paths=git_permissions[1])
                 except (ValueError, UnicodeError) as exc:
                     raise LaunchIsolationError("the private Codex launch policy cannot be prepared safely") from exc
                 privfs.write_atomic(h, name, text, 0o400)
@@ -564,6 +571,89 @@ def _path_dirs(home: str) -> list[str]:
 
 
 HARNESS_EXES = ("claude", "codex", "node")
+
+
+def codex_git_permissions(cfg: dict, workdir: str | None) -> tuple[tuple, tuple]:
+    """A strict subset of the validated outer Git mounts, retaining administrative controls.
+
+    Linked worktrees receive their own admin directory and only the common object/ref
+    storage needed to commit, never the common root or another worktree's index.
+    """
+    if not workdir:
+        return (), ()
+    if os.path.realpath(workdir) != os.path.normpath(workdir) or os.path.islink(os.path.join(workdir, '.git')):
+        raise LaunchIsolationError("native Git permissions require canonical worktree and Git paths")
+    gitdir, common = git_dirs(cfg, workdir)
+    if gitdir is None:
+        return (), ()
+    for directory in {gitdir, common}:
+        if hasattr(os, "getuid") and os.stat(directory).st_uid != os.getuid():
+            raise LaunchIsolationError("native Git metadata must belong to the launch user")
+        for pointer in ('commondir', 'gitdir'):
+            if os.path.islink(os.path.join(directory, pointer)):
+                raise LaunchIsolationError("native Git metadata pointers must not be symbolic links")
+    writes = {gitdir}
+    if gitdir != common:
+        for child in ('objects', 'refs', 'logs/refs'):
+            path = os.path.join(common, child)
+            if os.path.exists(path):
+                if not os.path.isdir(path) or os.path.realpath(path) != path:
+                    raise LaunchIsolationError("native shared Git storage must be a canonical directory")
+                writes.add(path)
+    worktrees = os.path.join(common, 'worktrees')
+    if os.path.islink(worktrees):
+        raise LaunchIsolationError('native worktree administration must not be a symbolic link')
+    reads = {worktrees}
+    for directory in {gitdir, common}:
+        for child in ('config', 'config.worktree', 'hooks'):
+            path = os.path.join(directory, child)
+            # An absent path under the already read-only common root is protected by
+            # its parent. Explicit absent reads there prevent bwrap starting at all.
+            if directory == gitdir or os.path.lexists(path):
+                if os.path.islink(path):
+                    raise LaunchIsolationError("native Git controls must not be symbolic links")
+                reads.add(path)
+        for child in ('commondir', 'gitdir'):
+            path = os.path.join(directory, child)
+            if os.path.exists(path):
+                reads.add(path)
+    # Git includes are configuration too. Discover origins without reading host/global
+    # configuration or exposing its values, and protect only files already visible in the
+    # outer worktree/Git mounts. A profile must never grant a new host path.
+    for config in tuple(reads):
+        if os.path.basename(config) not in ('config', 'config.worktree') or not os.path.isfile(config):
+            continue
+        try:
+            result = subprocess.run(
+                ['git', 'config', '--file', config, '--includes', '--null', '--show-origin',
+                 '--list'], cwd=workdir, capture_output=True, timeout=5,
+                env={'PATH': os.environ.get('PATH', os.defpath), 'GIT_CONFIG_NOSYSTEM': '1',
+                     'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_COUNT': '0'})
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise LaunchIsolationError('cannot validate native Git configuration origins') from error
+        if result.returncode:
+            raise LaunchIsolationError('cannot validate native Git configuration origins')
+        fields = result.stdout.split(b'\0')
+        for origin, entry in zip(fields[0:-1:2], fields[1:-1:2]):
+            if not origin.startswith(b'file:'):
+                raise LaunchIsolationError('unexpected native Git configuration origin')
+            path = os.path.abspath(os.path.join(workdir, os.fsdecode(origin[5:])))
+            candidates = [path]
+            key, _, value = entry.partition(b'\n')
+            if key == b'include.path' or (key.startswith(b'includeif.') and key.endswith(b'.path')):
+                include = os.fsdecode(value)
+                if '%(' in include:
+                    raise LaunchIsolationError('unsupported native Git configuration include expansion')
+                candidates.append(os.path.abspath(os.path.join(os.path.dirname(path), os.path.expanduser(include))))
+            for candidate in candidates:
+                if _under(candidate, workdir) or _under(candidate, common):
+                    if os.path.realpath(candidate) != candidate or (os.path.exists(candidate) and
+                                                                   not os.path.isfile(candidate)):
+                        raise LaunchIsolationError('native Git configuration origins must be canonical files')
+                    # An absent include below a read-only parent already cannot be created.
+                    if os.path.exists(candidate) or any(_under(candidate, root) for root in writes):
+                        reads.add(candidate)
+    return tuple(sorted(writes)), tuple(sorted(reads))
 
 
 def _exe_dirs(home: str, names) -> list[str]:
@@ -769,7 +859,13 @@ def wrap(cfg: dict, argv: list, *, job: str, launch: str, workdir: str | None = 
                                  "`swarm supervise launch-isolation off` to accept launches that can read them")
     from swarm.supervisor.launchpermissions import codex_argv, is_codex_exec
     codex_policy = is_codex_exec(argv)
-    h = prepare(cfg, job, launch, codex_policy=codex_policy)
+    git_permissions = codex_git_permissions(cfg, workdir) if codex_policy and not read_only else ((), ())
+    h = prepare(cfg, job, launch, codex_policy=codex_policy, git_permissions=git_permissions,
+                disable_git_maintenance=codex_policy and not read_only and bool(git_permissions[0]))
+    # Resolve again immediately before constructing the mounts: a rewritten gitdir
+    # pointer may not redirect a policy prepared for another metadata directory.
+    if codex_policy and not read_only and codex_git_permissions(cfg, workdir) != git_permissions:
+        raise LaunchIsolationError("native Git metadata changed during launch preparation")
     spec = jail_spec(cfg, h, workdir, exes=(str(argv[0]),) if argv else (), read_only=read_only,
                      codex_policy=codex_policy)
     argv = codex_argv(argv)

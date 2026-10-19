@@ -35,7 +35,8 @@ def _literal(value) -> str:
     raise ValueError("unsupported Codex config value")
 
 
-def codex_config(raw: bytes, broker: str, *, read_only: bool) -> str:
+def codex_config(raw: bytes, broker: str, *, read_only: bool,
+                 git_write_paths=(), git_read_paths=()) -> str:
     """Keep user values, replacing only sandbox selection for the private launch.
 
     Legacy sandbox_mode overrides named permissions, including in legacy profiles.
@@ -59,6 +60,14 @@ def codex_config(raw: bytes, broker: str, *, read_only: bool) -> str:
     permissions[PROFILE] = {"extends": ":read-only" if read_only else ":workspace",
                             "filesystem": {os.path.dirname(os.path.dirname(broker)): "read", broker: "write"},
                             "network": {"enabled": False}}
+    if not read_only:
+        filesystem = permissions[PROFILE]["filesystem"]
+        for paths, access in ((git_write_paths, "write"), (git_read_paths, "read")):
+            for path in paths:
+                if (not isinstance(path, str) or not os.path.isabs(path) or path == os.path.sep or
+                        os.path.normpath(path) != path or any(ch in path for ch in "\x00*?[]")):
+                    raise ValueError("Codex Git permission paths must be exact normalized absolute paths")
+                filesystem[path] = access
     rendered = "".join(_literal(k) + " = " + _literal(v) + "\n" for k, v in data.items())
     # Refuse rather than silently changing semantics if a new TOML type appears.
     if _literal(tomllib.loads(rendered)) != _literal(data):
