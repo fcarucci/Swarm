@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import secrets
 import time
 
 from swarm import enrolment, hosts, person, safefs
@@ -110,9 +111,24 @@ def attest(cfg,payload,host):
     call=payload.get('tool_use_id') or payload.get('tool_call_id')
     if not pid or not isinstance(call,str) or not call:
         raise ValueError('trusted host process and tool-call identity are required')
+    request=_digest([store_key(cfg),audit['session'],audit['request_id']])
+    intent_name='create-intent-'+request+'.json'
+    identity={'board':store_key(cfg),'fields':fields,'audit':audit}
+    with enrolment.coordinator_lock(store_key(cfg),'__create_requests__'), enrolment._dir(create=True) as directory:
+        raw=safefs.read(directory,intent_name,LIMIT)
+        if raw is None:
+            intent={**identity,'nonce':secrets.token_hex(32)}
+            safefs.write_atomic(directory,intent_name,json.dumps(intent),durable=True)
+        else:
+            intent=json.loads(raw)
+            if any(intent.get(k)!=v for k,v in identity.items()):
+                raise ValueError('creation request conflicts with its private intent')
+            if not isinstance(intent.get('nonce'),str) or len(intent['nonce'])!=64:
+                raise ValueError('invalid private creation intent')
+    request_hash=_digest([fields,audit,intent['nonce']])
     name=_grant_key(cfg,fields,audit['session'],pid)
     record={'v':1,'board':store_key(cfg),'fields':fields,'audit':audit,'pid':pid,
-            'call':call,'expires':time.time()+TTL}
+            'call':call,'expires':time.time()+TTL,'request_hash':request_hash}
     with enrolment._dir(create=True) as directory:
         safefs.write_atomic(directory,name,json.dumps(record),durable=True)
     return True
@@ -134,7 +150,7 @@ def _take(cfg,args):
                 or not time.time()<record.get('expires',0)<=time.time()+TTL):
             raise ValueError('invalid or expired creation grant')
         safefs.unlink(directory,name)
-    return fields,record['audit']
+    return fields,record['audit'],record['request_hash']
 
 
 def _bootstrap(cfg, board, fields, audit, receipt, request):
@@ -175,9 +191,8 @@ def run(cfg,args):
     from swarm import cli
     try:
         with enrolment.coordinator_lock(store_key(cfg),args.job):
-            fields,audit=_take(cfg,args)
+            fields,audit,request_hash=_take(cfg,args)
             request=_digest([store_key(cfg),audit['session'],audit['request_id']])
-            request_hash=_digest([fields,audit])
             with open_board(cfg) as board:
                 receipt=board.create_job_once(args.job,args.description,args.task,
                     args.display_session or audit['session'],'owner requester',

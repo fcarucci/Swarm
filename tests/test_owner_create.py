@@ -144,3 +144,20 @@ class OwnerCreate(Env):
         with mock.patch.object(cli,'_write_marker',side_effect=race):
             self.assertEqual(self.cli(*self.argv)[0],0)
         self.assertFalse(cli._marker(self.cfg,'new-job').exists())
+
+    def test_forged_board_receipt_cannot_mint_private_creation_authority(self):
+        import hashlib
+        audit={'session':self.sid,'request_id':'msg-human','text_sha':'a'*64}
+        args=owner_create._command(self.payload,self.host)
+        fields=owner_create._fields(args)
+        request=owner_create._digest([store_key(self.cfg),self.sid,'msg-human'])
+        with self.board() as b:
+            b.open_job('new-job',None,None,self.sid,'other',goal='existing')
+            now=b.job_status('new-job').created_at
+            fake={'job':'new-job','session_id':self.sid,'request_id':request,
+                  'request_hash':owner_create._digest([fields,audit]),'created_at':now.isoformat()}
+            b._write_meta('create-job-once:'+hashlib.sha256(request.encode()).hexdigest(),json.dumps(fake))
+        owner_create.attest(self.cfg,self.payload,self.host)
+        self.assertNotEqual(self.cli(*self.argv)[0],0)
+        from swarm import enrolment
+        self.assertIsNone(enrolment.find_job_owner(store_key(self.cfg),'new-job'))
