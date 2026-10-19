@@ -95,7 +95,7 @@ class HookRecovery(Env):
             with mock.patch.object(passcmd, 'recover_auto_close', side_effect=repair), \
                     mock.patch.object(passcmd, '_advance', return_value=[]) as advance:
                 acts = passcmd.run_pass(board, self.cfg)
-            self.assertTrue(any('J: recovery error' in a for a in acts))
+            self.assertTrue(any('J: pass error Recovery' in a for a in acts))
             self.assertTrue(any(call.args[2].job == 'other' for call in advance.call_args_list))
 
     def test_stale_activation_proof_does_not_bind_a_new_run(self):

@@ -503,7 +503,7 @@ def run_pass(board, cfg: dict, *, now: _dt.datetime | None = None, starter=None)
             if recover_auto_close(board, cfg, js.job):
                 acts.append(f"{js.job}: restored unfinished automatically closed run")
         except Exception as exc:
-            acts.append(f"{js.job}: recovery error {type(exc).__name__}: {exc}")
+            acts.append(f"{js.job}: pass error Recovery {type(exc).__name__}: {exc}")
     for job, failed_at, launch_id, revision in board.failed_launch_retries():
         if board.reopen_failed_job(job, failed_at, launch_id, revision):
             acts.append(f"{job}: new run for fresh queued work")
