@@ -202,5 +202,25 @@ class MultiJobRoutingTests(Env):
         self.assertIsNone(self.agent(self.child, job='fixture'))
         self.assertIsNone(self.agent(self.child, job='other'))
 
+    def test_jobhex_routes_hyphenated_job_without_invalid_task_characters(self):
+        job = 'loom-preprocess-port'
+        self.activate_fixture_job(job)
+        task = 'jobhex__' + job.encode().hex() + '__engineering_lead__port'
+        self.assertRegex(task, r'^[a-z0-9_]+$')
+        self.rename_child('/root/' + task)
+        p = self.spawn_payload()
+        p['tool_input']['task_name'] = task
+        self.call('turn', p)
+        self.call('done', {**p, 'tool_response': {'task_name': '/root/' + task}})
+        self.replay('SubagentStart', F.payloads('SubagentStart')[0])
+        self.assertIsNotNone(self.agent(self.child, job=job))
+        self.assertEqual(self.agent(self.child, job=job).role, 'engineering_lead')
+
+    def test_invalid_jobhex_is_explicitly_refused(self):
+        for value in ('zz', 'f', 'ff', '2f657463', ''):
+            p = self.spawn_payload()
+            p['tool_input']['task_name'] = 'jobhex__' + value + '__engineer__api'
+            self.assertIsNotNone(self.denied(self.call('turn', p)))
+
 # Keep helper fixture class out of unittest discovery.
 del _CodexHookTests

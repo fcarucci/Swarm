@@ -276,7 +276,7 @@ both at once (see [One job, both hosts](#one-job-both-hosts)). What differs, as 
 |---|---|---|
 | plugin hooks | `hooks/hooks.json`, active once installed | `hooks/codex-hooks.json`; you must trust them in `/hooks`, and again after every update that changes them |
 | spawn tool | `Agent` | `spawn_agent` (the prompt is its `message`) |
-| which job a subagent joins | the job its `[swarm job: <job>]` tag names; one session can run several jobs | the authorized root's explicit `job__JOB__ROLE__TASK` spawn input, bound to the exact returned child; nested children inherit their parent job; legacy `activate` still refuses a second job |
+| which job a subagent joins | the job its `[swarm job: <job>]` tag names; one session can run several jobs | the authorized root's explicit `jobhex__UTF8HEXJOB__ROLE__TASK` spawn input, bound to the exact returned child; nested children inherit their parent job; legacy `activate` still refuses a second job |
 | role | `[swarm role: <role>]` in the prompt | `<role>__<task>` task name; legacy `verifier...` / `judge...` prefixes also work |
 | title | `[swarm title: <text>]` in the prompt, or `swarm title` | the spawn message is encrypted: the agent runs `swarm title` itself |
 | an agent's own spawns | need the job's tag and a `[swarm spawn: <why>]` line, within the caps and depth | only the caps and depth are checked; the spawn is announced on the board and the agent is told to say there why |
@@ -1146,9 +1146,11 @@ subagent's spawn prompt:
 | `[swarm spawn: <why>]` | required in the prompt of a subagent spawned by a swarm agent |
 
 In Codex the spawn prompt (`spawn_agent`'s `message`) is encrypted, so none of these can be
-read reliably there. With several jobs, use `task_name="job__JOB__ROLE__TASK"` at the root;
+read reliably there. With several jobs, use `task_name="jobhex__UTF8HEXJOB__ROLE__TASK"` at the root;
 a visible explicit job tag in trusted spawn input also selects the job. Conflicting or ambiguous
-job selection is refused. PostToolUse binds only the actual returned child, resolving a
+job selection is refused. `UTF8HEXJOB` is the lowercase UTF-8 hex encoding of the exact
+job name; this preserves hyphens while keeping task names lowercase letters, digits and
+underscores. Legacy `job__JOB__ROLE__TASK` still works for valid native task names. PostToolUse binds only the actual returned child, resolving a
 canonical task path against unique native first-header metadata, its exact parent, and root
 ancestry. A child that starts before that result stays pending. Existing members are never
 rebound, nested children inherit their exact parent job, and follow-ups preserve membership.
@@ -1905,7 +1907,7 @@ digits or underscores, start with a letter, and contain no double underscore.
 | Host | How to request a role |
 |---|---|
 | Claude Code | A separate `[swarm role: product_manager]` line in the child's prompt, alongside the job tag |
-| Codex | `task_name="product_manager__spec"` within one job, or `job__JOB__product_manager__spec` for an explicit root job |
+| Codex | `task_name="product_manager__spec"` within one job, or `jobhex__UTF8HEXJOB__product_manager__spec` for an explicit root job |
 
 In Codex, role and task parsing is the same before spawning and when reading the child's
 rollout. The explicit `__` form takes precedence; `judge_assistant__research` is a custom

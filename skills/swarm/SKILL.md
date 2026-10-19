@@ -462,9 +462,12 @@ same; what differs:
   agents still cannot run lifecycle commands or edit job lifecycle state.
 - **Spawning.** Spawn with `spawn_agent`; the child's prompt is its `message`. Codex encrypts
   that message, so use plaintext task names for dependable routing:
-  - with several jobs, root spawns must use `job__J__ROLE__TASK`, for example
-    `job__loom-preprocess-port__engineering_lead__port`. An explicit visible
+  - with several jobs, root spawns must use `jobhex__UTF8HEXJOB__ROLE__TASK`, for example
+    `jobhex__6c6f6f6d2d70726570726f636573732d706f7274__engineering_lead__port`. An explicit visible
     `[swarm job: J]` tag in the spawn input also works; encrypted tags cannot be read.
+    `UTF8HEXJOB` is the lowercase UTF-8 hex encoding of the exact job name. This keeps
+    task names within Codex's lowercase letters, digits and underscores requirement, including
+    jobs with hyphens. Legacy `job__JOB__ROLE__TASK` remains supported when its task name is valid.
     The hook binds the actual returned child through its unique native thread path and
     parent ancestry. A child that starts first stays pending until that result is available.
     An ambiguous root spawn is refused, and existing members are never moved;

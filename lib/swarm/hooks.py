@@ -916,7 +916,7 @@ def _codex_spawn_job(board, cfg: dict, sid: str, payload: dict) -> str | None:
             raise ValueError("explicit job is not bound to this root session")
         return tag
     if len(bound) > 1:
-        raise ValueError("multiple jobs: use task_name job__JOB__ROLE__TASK or an explicit [swarm job: JOB] tag")
+        raise ValueError("multiple jobs: use task_name jobhex__UTF8HEXJOB__ROLE__TASK or an explicit [swarm job: JOB] tag")
     return next(iter(bound), None)
 
 
@@ -926,7 +926,10 @@ def _codex_spawn_post(board, cfg: dict, sid: str, payload: dict) -> None:
     child = spawned_id(payload)
     if not child:
         return
-    job = _codex_spawn_job(board, cfg, sid, payload)
+    try:
+        job = _codex_spawn_job(board, cfg, sid, payload)
+    except ValueError:
+        return
     if not job:
         return
     route = board.route(child)

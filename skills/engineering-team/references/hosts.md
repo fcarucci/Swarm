@@ -139,8 +139,9 @@ swarm post --job J --as "PM name" --to "EL name" "Capacity: one next invocation;
 
 Claude routes multiple jobs by prompt tags. An authorized Codex root can create another
 job with `swarm create --job J --goal TEXT --task TEXT --workdir ABS
---request-id ACTUAL_USER_MSG_ID`, then route root spawns with `job__J__ROLE__TASK`.
-Encrypted prompt tags cannot select a job. Nested children inherit their exact parent job;
+--request-id ACTUAL_USER_MSG_ID`, then route root spawns with `jobhex__UTF8HEXJOB__ROLE__TASK`.
+`UTF8HEXJOB` is the lowercase UTF-8 hex encoding of the exact job name, so hyphens
+remain supported without invalid native task characters. Encrypted prompt tags cannot select a job. Nested children inherit their exact parent job;
 follow-ups preserve membership. Legacy `activate` retains its one-job guard.
 A configured second session/host sharing the board uses the native owner-authorized
 session binding route without reopening the job. That session uses its own durable PM key, built from the same job

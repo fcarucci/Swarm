@@ -340,16 +340,32 @@ def _dig(node, path: tuple[str, ...]):
 
 
 def job_task(task_name: str) -> tuple[str, str] | None:
-    """Explicit plaintext routing envelope: job__JOB__ROLE__TASK."""
-    match = re.fullmatch(r"job__([A-Za-z0-9][A-Za-z0-9_.-]{0,127})__([a-z][a-z0-9_]{0,63})__(.+)", task_name or "")
-    if match and "__" not in match[1] and "__" not in match[2]:
-        return match[1], match[2] + "__" + match[3]
+    """jobhex__UTF8HEXJOB__ROLE__TASK keeps native task names lowercase/underscore safe."""
+    from swarm.jobmarkers import JOB_NAME
+    from swarm.roles import valid_name
+    if not isinstance(task_name, str):
+        return None
+    parts = task_name.split('__', 3)
+    if len(parts) != 4 or parts[0] not in ('job', 'jobhex'):
+        return None
+    prefix, job, role, task = parts
+    if prefix == 'jobhex':
+        if not re.fullmatch(r'(?:[0-9a-f]{2}){1,64}', job):
+            return None
+        try:
+            job = bytes.fromhex(job).decode('utf-8')
+        except (ValueError, UnicodeError):
+            return None
+    if JOB_NAME.fullmatch(job) and valid_name(role) and task.strip():
+        return job, role + '__' + task
     return None
 
 
 def spawn_job(tool_input: dict) -> str | None:
     """Read only explicit caller input; conflicting routing instructions fail closed."""
     task = job_task(tool_input.get("task_name", ""))
+    if str(tool_input.get("task_name", "")).startswith("jobhex__") and task is None:
+        raise ValueError("invalid explicit jobhex task name")
     tags = {line.strip()[len("[swarm job:"):-1].strip()
             for line in str(tool_input.get("message", "")).splitlines()
             if line.strip().startswith("[swarm job:") and line.strip().endswith("]")}
