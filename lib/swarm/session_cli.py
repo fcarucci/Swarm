@@ -99,3 +99,12 @@ def _run(cfg: dict, args) -> int:
         print(f'{args.job}: session {old or "unbound"} -> {args.session}; {owner}; {routing}')
         print('workers remain in their original sessions; lifecycle and history preserved')
     return 0
+
+
+def configure(sub):
+    se = sub.add_parser("session", help="reassign an existing job coordinator without reopening it")
+    se.add_argument("--job", required=True)
+    target = se.add_mutually_exclusive_group(required=True)
+    target.add_argument("--session", help="new coordinator session id")
+    target.add_argument("--clear", action="store_true", help="clear only the pane binding; preserve ownership and routing")
+    se.add_argument("--no-routing", action="store_true", help="preserve hook routing while rebinding pane and existing local coordinator records")

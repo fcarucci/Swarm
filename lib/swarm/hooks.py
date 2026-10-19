@@ -2423,6 +2423,12 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
     except KeyError:   # a host this version has no adapter for: do nothing
         return 0
     if event == "turn":
+        from swarm import owner_create
+        try:
+            owner_create.attest(cfg, payload, current_host())
+        except (OSError, ValueError) as exc:
+            _deny("[swarm] " + str(exc))
+            return 0
         from swarm.shellguard import job_lifecycle_command, session_binding_command
         command = current_host().shell_command(payload)
         if command and job_lifecycle_command(command):
