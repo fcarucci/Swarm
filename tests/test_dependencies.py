@@ -32,6 +32,45 @@ class DependentTasks(PassCmd):
         self.b.finish_restart(restart.id, 'completed')
         self.b.close_agent('worker-' + name, 'done')
 
+    def test_tasks_long_blocker_summary_does_not_interrupt_normal_pass(self):
+        from swarm import dependencies
+        from swarm.board.base import JOB_DATA_VALUE_MAX
+        names = [f'blocked-{i:02}-' + 'x' * 40 for i in range(40)]
+        for name in names:
+            self.register(name, ['missing-predecessor'])
+        original = {row.name: row.brief for row in self.b.launches('J')}
+        blocked = dependencies.describe(self.b, 'J')
+        summary = '; '.join(f'{row["name"]}: {row["reason"]}' for row in blocked)
+        self.assertGreater(len(summary), JOB_DATA_VALUE_MAX)
+        self.register('ready-stage')
+        actions = self.pass_()
+        self.assertFalse(any('pass error' in action for action in actions), actions)
+        self.assertEqual([run['launch'] for run in self.runs], ['ready-stage'])
+        self.assertEqual(self.b.job_data('J')['task.blocker'], summary[:JOB_DATA_VALUE_MAX])
+        self.assertEqual({row.name: row.brief for row in self.b.launches('J') if row.name in original}, original)
+        self.assertEqual([row for row in dependencies.describe(self.b, 'J') if row['name'] in names], blocked)
+        # A subsequent sweep must still dispatch new independent ready work.
+        self.register('next-ready-stage')
+        actions = self.pass_()
+        self.assertFalse(any('pass error' in action for action in actions), actions)
+        self.assertEqual([run['launch'] for run in self.runs], ['ready-stage', 'next-ready-stage'])
+
+    def test_tasks_completed_summary_bounds_long_remaining_goal(self):
+        from swarm import dependencies
+        from swarm.board.base import JOB_DATA_VALUE_MAX
+        self.register('qa')
+        self.pass_()
+        self.evidence('qa')
+        self.finish('qa')
+        reason = 'remaining work ' + 'x' * JOB_DATA_VALUE_MAX
+        self.verdict('not_met', reason, artifact='other@' + 'b' * 40)
+        actions = self.pass_()
+        self.assertFalse(any('pass error' in action for action in actions), actions)
+        expected = 'declared tasks passed; remaining job goal: ' + reason
+        self.assertEqual(self.b.job_data('J')['task.blocker'], expected[:JOB_DATA_VALUE_MAX])
+        self.assertEqual(self.job().verdict_reason, reason)
+        self.assertEqual(dependencies.describe(self.b, 'J')[0]['state'], 'done')
+
     def test_tasks_queued_gate_prevents_starting_missing_dependency(self):
         spec = {'version': 1, 'artifact': 'main@' + 'a' * 40, 'depends': ['qa'],
                 'brief': 'Build approved source', 'run': self.job().activated_at.isoformat(),

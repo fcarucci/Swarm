@@ -10,6 +10,8 @@ import datetime as dt
 import hashlib
 import json
 
+from swarm.board.base import JOB_DATA_VALUE_MAX
+
 PREFIX = 'SWARM_TASK_V1\n'
 KIND = 'TASK-EVIDENCE'
 
@@ -224,7 +226,7 @@ def advance(board, job):
     if not rows:
         return None
     blocked = [r for r in rows if r['state'] == 'blocked']
-    board.set_job_data(job, 'task.blocker', '; '.join(f'{r["name"]}: {r["reason"]}' for r in blocked)[:4000] or None)
+    board.set_job_data(job, 'task.blocker', '; '.join(f'{r["name"]}: {r["reason"]}' for r in blocked)[:JOB_DATA_VALUE_MAX] or None)
     complete = all(r['state'] == 'done' for r in rows)
     busy = any(a.status in ('started', 'running') and a.role not in ('owner', 'orchestrator', 'requester')
                for a in board.agents(job, include_departed=False))
@@ -233,7 +235,7 @@ def advance(board, job):
     # stages permit goal acceptance; they never manufacture a met verdict or completion contract.
     if complete:
         remaining = js.verdict_next or js.verdict_reason or 'awaiting full job goal acceptance'
-        board.set_job_data(job, 'task.blocker', 'declared tasks passed; remaining job goal: ' + remaining)
+        board.set_job_data(job, 'task.blocker', ('declared tasks passed; remaining job goal: ' + remaining)[:JOB_DATA_VALUE_MAX])
         from swarm.passcmd import handoff
         found = handoff(board, job)
         if (not busy and not any(r.ended_at is None for r in board.restarts(job))
