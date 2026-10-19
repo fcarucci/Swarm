@@ -67,7 +67,8 @@ class MultiJobRoutingTests(Env):
             self.assertNotEqual(b.route(self.child).job, 'other')
 
     def test_nested_spawn_inherits_parent_and_rejects_cross_job(self):
-        self.cli('join', '--job', 'other', '--key', self.child)
+        root_spawn = self.spawn_payload()
+        self.call('done', {**root_spawn, 'tool_response': {'agent_id': self.child}})
         self.replay('PreToolUse', self.child_payloads('PreToolUse')[0])
         p = self.spawn_payload('fixture', parent=self.child)
         p['transcript_path'] = str(next(self.codex_home.glob(f'sessions/*/*/*/*{self.child}.jsonl')))
@@ -139,7 +140,8 @@ class MultiJobRoutingTests(Env):
 
     def test_actual_nested_canonical_result_inherits_exact_parent_job(self):
         import json
-        self.cli('join', '--job', 'other', '--key', self.child)
+        root_spawn = self.spawn_payload()
+        self.call('done', {**root_spawn, 'tool_response': {'agent_id': self.child}})
         self.replay('PreToolUse', self.child_payloads('PreToolUse')[0])
         grandchild = self.ids['grandchild']['thread']
         roll = next(self.codex_home.glob(f'sessions/*/*/*/*{grandchild}.jsonl'))
@@ -154,6 +156,51 @@ class MultiJobRoutingTests(Env):
         start = next(x for x in F.payloads('SubagentStart') if x['agent_id'] == grandchild)
         self.replay('SubagentStart', start)
         self.assertIsNotNone(self.agent(grandchild, job='other'))
+
+    def test_forged_board_route_has_no_private_spawn_authority(self):
+        with self.board() as b:
+            b.record_route(self.child, self.sid, 'unverified', 'other')
+        self.replay('SubagentStart', F.payloads('SubagentStart')[0])
+        self.assertIsNone(self.agent(self.child, job='other'))
+        self.assertIsNone(self.agent(self.child, job='fixture'))
+
+    def test_private_receipt_requires_same_native_child_identity(self):
+        import json
+        p = self.spawn_payload()
+        self.call('done', {**p, 'tool_response': {'task_name': '/root/job__other__engineer__api'}})
+        roll = next(self.codex_home.glob(f'sessions/*/*/*/*{self.child}.jsonl'))
+        lines = roll.read_text().splitlines()
+        meta = json.loads(lines[0])
+        meta['payload']['source']['subagent']['thread_spawn']['parent_thread_id'] = self.ids['grandchild']['thread']
+        roll.write_text('\n'.join([json.dumps(meta), *lines[1:]]) + '\n')
+        self.replay('SubagentStart', F.payloads('SubagentStart')[0])
+        self.assertIsNone(self.agent(self.child, job='other'))
+
+    def test_board_only_parent_cannot_authorize_nested_job_binding(self):
+        self.cli('join', '--job', 'other', '--key', self.child)
+        p = self.spawn_payload(parent=self.child)
+        p['tool_input']['task_name'] = 'engineer__api'
+        grandchild = self.ids['grandchild']['thread']
+        self.call('done', {**p, 'tool_response': {'agent_id': grandchild}})
+        start = next(x for x in F.payloads('SubagentStart') if x['agent_id'] == grandchild)
+        self.replay('SubagentStart', start)
+        self.assertIsNone(self.agent(grandchild, job='other'))
+
+    def test_private_spawn_receipt_scope_and_cached_job_must_match(self):
+        from swarm import codex_bindings
+        from unittest import mock
+        p = self.spawn_payload()
+        self.call('done', {**p, 'tool_response': {'agent_id': self.child}})
+        self.assertIsNotNone(codex_bindings.read(self.cfg, self.sid, self.child))
+        self.assertIsNone(codex_bindings.read(self.cfg, self.ids['grandchild']['thread'], self.child))
+        self.assertIsNone(codex_bindings.read(self.cfg, self.sid, self.ids['grandchild']['thread']))
+        with mock.patch.object(codex_bindings, 'store_key', return_value='another-board'):
+            self.assertIsNone(codex_bindings.read(self.cfg, self.sid, self.child))
+        with self.board() as b:
+            b.record_route(self.child, self.sid, 'unverified', 'fixture')
+        self.replay('SubagentStart', F.payloads('SubagentStart')[0])
+        self.assertIsNone(self.agent(self.child, job='fixture'))
+        self.assertIsNone(self.agent(self.child, job='other'))
 
 # Keep helper fixture class out of unittest discovery.
 del _CodexHookTests

@@ -256,11 +256,15 @@ def _route_new(board, event: str, agent_id: str, sid: str, bound: dict, unbound:
                payload: dict, cfg: dict) -> None:
     """Route an agent with no active board row and enrol it (or say why not, once)."""
     route = board.route(agent_id)
-    if current_host().name == 'codex' and route.state == 'unverified' and route.job in bound and route.session_id == sid:
-        if not board.claim_route(agent_id, sid, 'unverified', 'final', route.job):
+    if current_host().name == 'codex' and route.state == 'unverified' and not route.member_job:
+        from swarm import codex_bindings
+        receipt = codex_bindings.read(cfg, sid, agent_id)
+        job = receipt['job'] if receipt and receipt['job'] == route.job and route.session_id == sid else None
+        if job in bound:
+            if not board.claim_route(agent_id, sid, 'unverified', 'final', job):
+                return
+            _enrol(board, event, agent_id, job, payload, cfg, sid, bound[job])
             return
-        _enrol(board, event, agent_id, route.job, payload, cfg, sid, bound[route.job])
-        return
     if current_host().name == 'codex' and len(bound) > 1 and not route.member_job:
         if route.state is None:
             board.claim_route(agent_id, sid, None, 'pending')
@@ -897,12 +901,16 @@ def _codex_spawn_job(board, cfg: dict, sid: str, payload: dict) -> str | None:
     bound, _ = _session_markers(cfg, sid)
     parent = payload.get("agent_id")
     if parent:
+        from swarm import enrolment
+        from swarm.board.autoinit import store_key
         member = board.hook_member(parent)
-        if not member or member.job not in bound:
-            raise ValueError("spawn parent has no bound job")
-        if tag and tag != member.job:
+        private = enrolment.find(store_key(cfg), parent)
+        if (not member or member.job not in bound or private is None or
+                private.job != member.job or private.session_id != sid or private.harness != 'codex'):
+            raise ValueError("spawn parent has no privately enrolled bound job")
+        if tag and tag != private.job:
             raise ValueError("child must inherit its parent's exact job")
-        return member.job
+        return private.job
     if tag:
         if tag not in bound:
             raise ValueError("explicit job is not bound to this root session")
@@ -925,6 +933,9 @@ def _codex_spawn_post(board, cfg: dict, sid: str, payload: dict) -> None:
     if route.member_job or route.job or route.state == 'final':
         return
     if route.session_id and route.session_id != sid:
+        return
+    from swarm import codex_bindings
+    if not codex_bindings.write(cfg, payload, child, job):
         return
     board.claim_route(child, sid, route.state, 'unverified', job)
 
