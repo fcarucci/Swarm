@@ -65,3 +65,59 @@ class OwnerCreate(Env):
     def test_lifecycle_guard_still_blocks_activate_and_job(self):
         self.assertNotEqual(self.cli('activate','--job','new-job')[0],0)
         self.assertNotEqual(self.cli('job','new-job')[0],0)
+
+    def test_retry_respects_explicit_routing_stop_on_still_active_job(self):
+        owner_create.attest(self.cfg,self.payload,self.host);self.assertEqual(self.cli(*self.argv)[0],0)
+        from swarm import enrolment
+        enrolment.disable_job_routing(store_key(self.cfg),'new-job')
+        cli.remove_marker(cli._marker(self.cfg,'new-job'))
+        owner_create.attest(self.cfg,self.payload,self.host);self.assertEqual(self.cli(*self.argv)[0],0)
+        self.assertFalse(cli._marker(self.cfg,'new-job').exists())
+        self.assertTrue(enrolment.job_routing_disabled(enrolment.find_job(store_key(self.cfg),'new-job')))
+
+    def test_retry_preserves_reassigned_board_and_private_proof(self):
+        owner_create.attest(self.cfg,self.payload,self.host);self.assertEqual(self.cli(*self.argv)[0],0)
+        from swarm import enrolment
+        bk=store_key(self.cfg)
+        with self.board() as b:b.reassign_job_session('new-job','new-owner',expected_session=self.sid)
+        enrolment.reassign_coordinator_records(enrolment.coordinator_records(bk,'new-job'),'new-owner')
+        data={'job':'new-job','session_id':'new-owner'};cli._write_marker(cli._marker(self.cfg,'new-job'),data)
+        owner_create.attest(self.cfg,self.payload,self.host);self.assertEqual(self.cli(*self.argv)[0],0)
+        self.assertEqual(enrolment.find_job(bk,'new-job').session_id,'new-owner')
+        self.assertEqual(cli._read_marker(cli._marker(self.cfg,'new-job')),data)
+
+    def test_display_session_is_distinct_from_hook_authority(self):
+        self.argv+=['--display-session','pane-session'];self.payload['tool_input']['command']=self.command()
+        owner_create.attest(self.cfg,self.payload,self.host);self.assertEqual(self.cli(*self.argv)[0],0)
+        with self.board() as b:self.assertEqual(b.job_status('new-job').session_id,'pane-session')
+        from swarm import enrolment
+        self.assertEqual(enrolment.find_job(store_key(self.cfg),'new-job').session_id,self.sid)
+
+    def test_grant_is_single_use(self):
+        owner_create.attest(self.cfg,self.payload,self.host)
+        self.assertEqual(self.cli(*self.argv)[0],0)
+        self.assertNotEqual(self.cli(*self.argv)[0],0)
+
+    def test_root_provenance_rejects_assistant_and_inherited_user_items(self):
+        self.audit.stop()
+        from swarm.hosts import codex
+        path=self.tmp/'rollout.jsonl'
+        def write(source='cli',role='user',sid=None):
+            path.write_text('\n'.join(json.dumps(x) for x in [
+                {'type':'session_meta','payload':{'id':sid or self.sid,'source':source}},
+                {'type':'response_item','payload':{'type':'message','id':'msg-human','role':role,
+                 'content':[{'type':'input_text','text':'Start a new swarm for the port.'}]}}])+'\n')
+        with mock.patch.object(codex,'find_rollout',return_value=path):
+            write();self.assertEqual(owner_create.root_request(self.cfg,self.payload,self.host,'msg-human')['session'],self.sid)
+            for values in [dict(role='assistant'),dict(source={'subagent':{'thread_spawn':{'depth':1}}}),dict(sid='other')]:
+                write(**values)
+                with self.assertRaises(ValueError):owner_create.root_request(self.cfg,self.payload,self.host,'msg-human')
+
+    def test_root_hook_grants_but_worker_hook_denies(self):
+        got=self.hook('turn',agent_id=None,session=self.sid,host='codex',tool_name='Bash',
+            tool_use_id='actual-tool',tool_input={'command':self.command()})
+        self.assertNotEqual((got or {}).get('hookSpecificOutput',{}).get('permissionDecision'),'deny')
+        self.assertEqual(self.cli(*self.argv)[0],0)
+        got=self.hook('turn',agent_id='child',session=self.sid,host='codex',tool_name='Bash',
+            tool_use_id='child-tool',tool_input={'command':self.command()})
+        self.assertEqual(got['hookSpecificOutput']['permissionDecision'],'deny')

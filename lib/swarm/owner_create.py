@@ -13,6 +13,7 @@ import time
 
 from swarm import enrolment, hosts, person, safefs
 from swarm.board import open_board
+from swarm.board.base import BoardError
 from swarm.board.autoinit import store_key
 from swarm.jobmarkers import JOB_NAME
 
@@ -27,6 +28,7 @@ def configure(sub):
     p.add_argument('--task', default='')
     p.add_argument('--description', default='')
     p.add_argument('--workdir', required=True)
+    p.add_argument('--display-session', help='pane grouping only; hook authority stays with the actual root')
     p.add_argument('--request-id', required=True, help='actual root user message id, for provenance (not NLP authorization)')
 
 
@@ -46,7 +48,10 @@ def _fields(args):
     path = Path(args.workdir)
     if not path.is_absolute() or not path.is_dir():
         raise ValueError('workdir must be an existing absolute directory')
-    return dict(job=args.job,goal=args.goal,task=args.task,description=args.description,
+    if args.display_session is not None:
+        from swarm.cli import valid_session_id
+        if not valid_session_id(args.display_session):raise ValueError('invalid display session')
+    return dict(job=args.job,goal=args.goal,task=args.task,description=args.description,display_session=args.display_session,
                 workdir=os.path.realpath(path),request_id=args.request_id)
 
 
@@ -86,6 +91,7 @@ def _grant_key(cfg, fields, session, pid):
 def _command(payload,host):
     from swarm.drivegate import simple_call,parse_swarm
     command=host.shell_command(payload) or ''
+    if 'swarm' not in command:return None
     argv=simple_call(command)
     if argv is None:return None
     parsed=parse_swarm(argv)
@@ -131,31 +137,54 @@ def _take(cfg,args):
     return fields,record['audit']
 
 
+def _bootstrap(cfg, board, fields, audit, receipt, request):
+    """Finish only this new creation's local setup; never refresh later authority."""
+    from swarm import cli
+    current=board.job_status(fields['job'])
+    if (current is None or current.status!='active' or current.created_at.isoformat()!=receipt['created_at']
+            or current.session_id!=receipt['session_id']):
+        return
+    name='create-complete-'+request+'.json'
+    with enrolment._dir(create=True) as directory:
+        if safefs.read(directory,name,LIMIT) is not None:return
+    bk=store_key(cfg);job=fields['job'];sid=audit['session']
+    owner=enrolment.find_job_owner(bk,job,strict=True)
+    rec=enrolment.find_job(bk,job)
+    if (owner is not None and owner.session_id!=sid) or (rec is not None and rec.session_id!=sid):return
+    if rec is not None and enrolment.job_routing_disabled(rec):return
+    if owner is None:
+        enrolment.write_job_owner(bk,job=job,harness='codex',session_id=sid,cwd=fields['workdir'])
+    if rec is None:
+        enrolment.write_job(bk,job=job,harness='codex',session_id=sid,cwd=fields['workdir'])
+    marker=cli._marker(cfg,job)
+    data={'job':job,'session_id':sid,'cwd':fields['workdir'],'goal':True,'create_request':request}
+    if marker.exists() and cli._read_marker(marker)!=data:
+        raise ValueError('existing marker conflicts with creation receipt')
+    created=not marker.exists()
+    if created:cli._write_marker(marker,data)
+    after=board.job_status(job)
+    if (after is None or after.status!='active' or after.created_at!=current.created_at
+            or after.session_id!=current.session_id):
+        if created:cli.remove_marker(marker,keep=lambda p:cli._read_marker(p)!=data)
+        return
+    with enrolment._dir(create=True) as directory:
+        safefs.write_atomic(directory,name,json.dumps({'receipt':receipt,'audit':audit}),durable=True)
+
+
 def run(cfg,args):
     from swarm import cli
     try:
         with enrolment.coordinator_lock(store_key(cfg),args.job):
             fields,audit=_take(cfg,args)
-            request=_digest([audit['session'],audit['request_id']])
+            request=_digest([store_key(cfg),audit['session'],audit['request_id']])
             request_hash=_digest([fields,audit])
             with open_board(cfg) as board:
-                receipt=board.create_job_once(args.job,args.description,args.task,audit['session'],'owner requester',
+                receipt=board.create_job_once(args.job,args.description,args.task,
+                    args.display_session or audit['session'],'owner requester',
                     goal=args.goal,request_id=request,request_hash=request_hash)
-                current=board.job_status(args.job)
-                # A retry after completion or purge only returns the immutable receipt.
-                if current is not None and current.status=='active' and current.created_at.isoformat()==receipt['created_at']:
-                    bk=store_key(cfg)
-                    owner=enrolment.find_job_owner(bk,args.job)
-                    if owner is None:
-                        enrolment.write_job_owner(bk,job=args.job,harness='codex',session_id=audit['session'],cwd=fields['workdir'])
-                    enrolment.write_job(bk,job=args.job,harness='codex',session_id=audit['session'],cwd=fields['workdir'])
-                    marker=cli._marker(cfg,args.job)
-                    data={'job':args.job,'session_id':audit['session'],'cwd':fields['workdir'],'goal':True,'create_request':request}
-                    if marker.exists() and cli._read_marker(marker)!=data:
-                        raise ValueError('existing marker conflicts with creation receipt')
-                    cli._write_marker(marker,data)
+                _bootstrap(cfg,board,fields,audit,receipt,request)
         print(f'{args.job}: creation receipt {request[:12]}; existing lifecycle preserved')
         return 0
-    except (OSError,ValueError,BlockingIOError) as exc:
+    except (OSError,ValueError,BoardError) as exc:
         print('swarm create: '+cli.term_safe(str(exc)),file=sys.stderr)
         return 1
