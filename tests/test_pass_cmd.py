@@ -52,6 +52,45 @@ class PassCmd(unittest.TestCase):
         return self.b.queue_launch("J", 1, name, role=role, harness="claude", model=None,
                                    workdir="/work/shared", brief="B", queued_by=queued_by)
 
+    def test_configured_session_cap_reaches_native_harness_and_reservation(self):
+        self.cfg["pass"] = {"session_usd_cap": 10}
+        self.b.queue_launch("J", 1, "bounded", role="engineer", harness="codex", model="gpt-6-astra",
+                            workdir="/work/shared", brief="B", queued_by="me")
+        with mock.patch("swarm.supervisor.launch.codex_command", return_value=["codex"]):
+            self.pass_()
+        self.assertEqual(len(self.runs), 1)
+        argv = self.runs[0]["argv"]
+        self.assertIn("features.rollout_budget.limit_tokens=1000000", argv)
+        self.assertEqual(argv[argv.index("-m") + 1], "gpt-6-astra")
+        self.assertEqual(argv[argv.index("--sandbox") + 1], "workspace-write")
+        self.assertEqual(self.open_restarts()[0].reserved_usd, 10)
+
+    def test_configured_session_cap_uses_only_remaining_job_budget(self):
+        self.cfg["pass"] = {"session_usd_cap": 10}
+        self.b.set_job_data("J", "max_cost_usd", "15")
+        for name in ("first", "second"):
+            self.queue(name, role="engineer")
+        self.pass_()
+        self.assertEqual([r.reserved_usd for r in self.open_restarts()], [10, 5])
+        self.assertEqual([r["argv"][r["argv"].index("--max-budget-usd") + 1]
+                          for r in self.runs], ["10", "5"])
+        self.assertEqual(passcmd.spent_usd(self.b, "J"), 15)
+
+    def test_default_session_cap_remains_two_usd(self):
+        self.queue("default", role="engineer")
+        self.pass_()
+        self.assertEqual(self.open_restarts()[0].reserved_usd, 2)
+
+    def test_invalid_session_cap_fails_before_claim_or_runner(self):
+        self.queue("invalid", role="engineer")
+        for value in (0, -1, float("inf"), float("nan"), True, "bad"):
+            with self.subTest(value=value):
+                self.cfg["pass"] = {"session_usd_cap": value}
+                with self.assertRaisesRegex(ValueError, "session_usd_cap"):
+                    passcmd._start_queued(self.b, self.cfg, "J", self.starter)
+                self.assertEqual(self.b.restarts("J"), [])
+                self.assertEqual(self.runs, [])
+
     def test_native_explicit_codex_model_survives_enforced_worker_default(self):
         self.cfg["models"] = {"mode": "enforce", "codex": {"worker": "gpt-6.1-sol"}}
         self.b.queue_launch("J", 1, "explicit", role="engineer", harness="codex", model="gpt-6-astra",

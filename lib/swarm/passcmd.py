@@ -80,6 +80,18 @@ def spent_usd(board, job: str) -> float:
     return total
 
 
+def session_usd_cap(cfg: dict) -> float:
+    """Owner-configured native launch reservation; job admission still enforces its cap."""
+    raw = ((cfg or {}).get("pass") or {}).get("session_usd_cap", LAUNCH_USD)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError("[pass] session_usd_cap must be a positive finite number of USD") from None
+    if isinstance(raw, bool) or not math.isfinite(value) or value <= 0:
+        raise ValueError("[pass] session_usd_cap must be a positive finite number of USD")
+    return value
+
+
 STALE_RESTART_GRACE_MINUTES = 30   # past a launch's own time limit: its restart is an orphan (the runner died)
 
 
@@ -212,13 +224,14 @@ def _start_queued(board, cfg: dict, job: str, starter) -> tuple[list[str], str |
     if js is None or js.status != "active":
         return acts, None
     cap = max_cost_usd(board, cfg, job)
+    per_session = session_usd_cap(cfg)
     for row in sorted((x for x in board.launches(job, include_closed=False) if x.state == "queued"),
                       key=lambda x: x.id):
         from swarm.dependencies import block_reason
         if block_reason(board, row, launching=True):
             continue
         spent = spent_usd(board, job)
-        reserve = min(LAUNCH_USD, cap - spent)
+        reserve = min(per_session, cap - spent)
         if reserve <= 0:
             return acts, f"cost cap reached: ${spent:.2f} of max_cost_usd ${cap:g}"
         why = command.workdir_problem(cfg, row.workdir)

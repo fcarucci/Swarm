@@ -269,6 +269,12 @@ finalize_enabled = true
 # it here for every job, per job at activation (`--max-cost-usd N`, `--ruling-reserve-usd N`,
 # `--budget KEY=VALUE`, `--model ROLE=MODEL`), or on a running job with `swarm drive budget|models`.
 # The values shown are the shipped defaults. See docs/REFERENCE.md#drive-mode.
+[pass]
+# Native task launches reserve this much USD, clipped to the remaining job max_cost_usd.
+# Codex converts the reservation at drive.codex_usd_per_mtok into an enabled rollout cap;
+# Claude receives --max-budget-usd. This is separate from the legacy [drive] session cap.
+session_usd_cap = 2
+
 [drive]
 max_sessions = 60                   # launches, all launches and kinds; exhausted: a ruling becomes due
 max_rounds = 8                      # judged rounds per artifact group; exhausted: a ruling
