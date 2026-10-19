@@ -430,7 +430,7 @@ def _notices(board, now: _dt.datetime) -> list[str]:
     """Repeat the notice of every failed job not yet acked, once per NOTICE_MINUTES."""
     acts = []
     for js in board.jobs(include_closed=True):
-        if js.status != "failed" or not managed(board, js.job):
+        if js.status != "failed" or js.started or js.running or not managed(board, js.job):
             continue
         data = board.job_data(js.job)
         if data.get("pass_acked"):

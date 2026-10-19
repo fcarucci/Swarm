@@ -452,8 +452,8 @@ SELECT j.job, j.status, j.description, j.task, j.outcome, j.created_by, j.sessio
               OR b.until>now())) AS protected_blockers,
        -- Match base.derive_job_status: live agents override pending questions. Legacy
        -- waits and other blockers remain context, never a job status.
-       CASE WHEN j.status <> 'active' THEN j.status
-            WHEN COALESCE(s.started, 0) + COALESCE(s.running, 0) > 0 THEN 'active'
+       CASE WHEN COALESCE(s.started, 0) + COALESCE(s.running, 0) > 0 THEN 'active'
+            WHEN j.status <> 'active' THEN j.status
             WHEN EXISTS (SELECT 1 FROM blockers b WHERE b.job=j.job AND b.state='open'
                          AND b.kind='question') THEN 'waiting'
             ELSE 'idle'
@@ -997,17 +997,23 @@ def _agent_match(agent_key: str | None, name: str | None) -> tuple[str, tuple]:
     return ("agent_key = %s", (agent_key,)) if agent_key else ("name = %s", (name,))
 
 
-_SCOPE_SQL = """
+def _display_open_sql(alias):
+    """Cheap read-only scope selection, independent of raw lifecycle admission."""
+    return (f"({alias}.status IN ('active','paused') OR EXISTS (SELECT 1 FROM agent_status a "
+            f"WHERE a.job={alias}.job AND a.status IN ('started','running')))")
+
+
+_SCOPE_SQL = f"""
             SELECT job FROM jobs WHERE job = ANY(%(jobs)s::text[])
             UNION
-            SELECT job FROM jobs WHERE session_id = ANY(%(sessions)s::text[]) AND status IN ('active','paused')
+            SELECT job FROM jobs WHERE session_id = ANY(%(sessions)s::text[]) AND {_display_open_sql('jobs')}
             UNION
             SELECT (SELECT x.job FROM jobs x WHERE x.session_id = s
-                      AND NOT EXISTS (SELECT 1 FROM jobs y WHERE y.session_id = s AND y.status IN ('active','paused'))
+                      AND NOT EXISTS (SELECT 1 FROM jobs y WHERE y.session_id = s AND {_display_open_sql('y')})
                     ORDER BY COALESCE(x.finished_at,x.created_at) DESC, x.job DESC LIMIT 1)
               FROM unnest(%(sessions)s::text[]) s
             UNION
-            SELECT job FROM jobs WHERE status IN ('active','paused')
+            SELECT job FROM jobs WHERE {_display_open_sql('jobs')}
                AND cardinality(%(jobs)s::text[]) = 0 AND cardinality(%(sessions)s::text[]) = 0
 """
 
@@ -2161,9 +2167,9 @@ class PostgresBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
         rows = self._fetch(JobStatus, f"""
             WITH shown AS MATERIALIZED (
                 SELECT job FROM jobs WHERE session_id = %s
-                  AND (status IN ('active','paused') OR job = (
+                  AND ({_display_open_sql('jobs')} OR job = (
                     SELECT job FROM jobs WHERE session_id = %s
-                      AND NOT EXISTS (SELECT 1 FROM jobs WHERE session_id = %s AND status IN ('active','paused'))
+                      AND NOT EXISTS (SELECT 1 FROM jobs WHERE session_id = %s AND {_display_open_sql('jobs')})
                     ORDER BY COALESCE(finished_at, created_at) DESC, job DESC LIMIT 1))
             )
             SELECT {_JOB_STATUS_COLS} FROM job_status WHERE job IN (SELECT job FROM shown)

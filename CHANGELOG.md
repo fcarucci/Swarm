@@ -16,6 +16,9 @@ Keep entries short and user-facing: one line per change, what it does, not how.
 
 ## [0.3.5] - 2026-10-18
 
+- Current working agents keep status, watch and snapshots active even when an older terminal record remains; lifecycle history and cancellation controls stay intact.
+- Automatic completion and orphan expiry preserve unfinished goals and tasks; recovered routing retains explicit stop intent and reports recovery failures.
+- Native Codex session enrollment and task scheduling preserve role restrictions, requested models and isolated task evidence.
 - Native task snapshots include completed prerequisites and verification evidence, and refresh their context after missed notifications.
 - Reconciler health detects obsolete loaded code; guarded service handoffs verify the runtime and prevent duplicate listeners.
 - Terminal hook and runner wake failures remain visible without preventing agent completion.

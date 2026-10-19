@@ -138,7 +138,9 @@ RESTART_OUTCOMES = ("running", "completed", "timeout", "max_turns", "failed", "n
 # verdict_candidate and verdict_req hold the latest verdict's scope, drive generation, candidate and req.
 # 27 refreshes status views: ended turns are idle immediately and jobs without working agents
 # are idle. agent_status appends turn_ended_at; older clients' explicit columns remain valid.
-SCHEMA_VERSION = 27
+# 28 refreshes shown_status priority: current work is active even when a historical terminal
+# lifecycle record remains. Raw lifecycle columns and scheduler admission are unchanged.
+SCHEMA_VERSION = 28
 
 VERDICT_DETAILS_MAX = 64 * 1024   # bytes of UTF-8: the largest `swarm verdict --details` report
 
@@ -1145,17 +1147,23 @@ WAITING_GOAL = "waiting (goal not met)"   # the shown status of a goal job nobod
 
 def derive_job_status(js: JobStatus, idle_minutes: float, now: _dt.datetime) -> str:
     """What `status` and `watch` show for a job. A closed job shows its stored status (completed,
-    failed, cancelled, paused). Working agents make it active; an unanswered question makes
+    failed, cancelled, paused) once no agents work. Current working agents always make it active;
+    the stored lifecycle still controls scheduling and cancellation. An unanswered question makes
     it waiting only when nobody works. Otherwise it is idle, including queued work that has
     not started. The scheduler must progress that work, but its intention is not activity.
     idle_minutes and now are kept for callers."""
-    if js.status != "active":
-        return js.status
     if js.started or js.running:
         return "active"
+    if js.status != "active":
+        return js.status
     if js.open_questions:
         return "waiting"
     return "idle"
+
+
+def display_open(js: JobStatus) -> bool:
+    """Read-only display inclusion; never use this predicate to admit scheduled work."""
+    return js.status in ('active', 'paused') or bool(js.started or js.running)
 
 
 def run_start(js: JobStatus) -> _dt.datetime:
@@ -2865,8 +2873,12 @@ class Board(abc.ABC):
         """Only open jobs of the session, in jobs() order; if none, its last finished job
         by (coalesce(finished_at, created_at), job). Select before computing status rollups."""
         rows = self.session_jobs(session)
-        active = [j for j in rows if j.status in ("active", "paused")]
+        active = [j for j in rows if display_open(j)]
         return active or ([max(rows, key=lambda j: (j.finished_at or j.created_at, j.job))] if rows else [])
+
+    def shown_jobs(self, include_closed: bool = False) -> list[JobStatus]:
+        """Jobs for status/watch. `jobs()` deliberately retains raw scheduler semantics."""
+        return [j for j in self.jobs(True) if include_closed or display_open(j)]
 
     # ---- transcripts ([transcripts]; bin/transcripts.py does the capturing) ---------------
 

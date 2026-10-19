@@ -1650,13 +1650,18 @@ class SqliteBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
     def session_shown_jobs(self, session: str) -> list[JobStatus]:
         with self._tx(write=False) as c:
             rows = c.execute(f"SELECT {self._JOB_COLS} FROM jobs WHERE session_id = ? "
-                             "AND (status IN ('active', 'paused') OR job = (SELECT job FROM jobs WHERE session_id = ? "
-                             "AND NOT EXISTS (SELECT 1 FROM jobs WHERE session_id = ? AND status IN ('active', 'paused')) "
-                             "ORDER BY COALESCE(finished_at, created_at) DESC, job DESC LIMIT 1)) "
+                             "AND (status IN ('active', 'paused') OR EXISTS (SELECT 1 FROM agents a "
+                             "WHERE a.job=jobs.job AND a.left_at IS NULL)) "
                              "ORDER BY COALESCE(activated_at, created_at), job",
-                             (session, session, session)).fetchall()
+                             (session,)).fetchall()
             now = self.now()
-            return [self._job_status(c, r, now) for r in rows]
+            from .base import display_open
+            selected = [j for r in rows if display_open(j := self._job_status(c, r, now))]
+            if selected:
+                return selected
+            last = c.execute(f"SELECT {self._JOB_COLS} FROM jobs WHERE session_id=? "
+                             "ORDER BY COALESCE(finished_at, created_at) DESC, job DESC LIMIT 1", (session,)).fetchone()
+            return [self._job_status(c, last, now)] if last else []
 
     # ---- change notification -----------------------------------------------------------
 

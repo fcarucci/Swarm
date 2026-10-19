@@ -33,7 +33,8 @@ class DeriveJobStatusTests(unittest.TestCase):
             with self.subTest(live=live):
                 state = replace(js(open_questions=2, waiting_on="owner decision", **live), open_blockers=3)
                 self.assertEqual(derive_job_status(state, 5, NOW), "active")
-                self.assertEqual(derive_job_status(replace(state, status="paused"), 5, NOW), "paused")
+                for terminal in ("paused", "completed", "cancelled", "failed"):
+                    self.assertEqual(derive_job_status(replace(state, status=terminal), 5, NOW), "active")
 
     def test_words(self):
         self.assertEqual(derive_job_status(js(status="completed", waiting_on="x"), 5, NOW), "completed")

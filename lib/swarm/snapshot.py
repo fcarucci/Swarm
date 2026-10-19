@@ -146,8 +146,7 @@ def _selected_jobs(board, scope: Scope):
         for session in scope.sessions:
             yield from board.session_shown_jobs(session)
     else:
-        yield from board.jobs()
-        yield from (j for j in board.jobs(True) if j.status == "paused")
+        yield from board.shown_jobs()
 
 
 def _scope_jobs(board, scope: Scope) -> list:

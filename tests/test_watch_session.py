@@ -96,6 +96,15 @@ class SessionWatchTests(Env):
         self.assertIn("hello-from-a", text)
         self.assertNotIn("hello-from-b", text)
 
+    def test_idle_lifecycle_active_job_keeps_session_watch_alive(self):
+        clock = Clock()
+        idle = swarm.IdleExit(30, clock)
+        self.activate("JA", S1)
+        self.frame(S1, idle)
+        clock.t += 31
+        self.frame(S1, idle)
+        self.assertFalse(idle.expired(), "owner may resume an open idle job")
+
     def test_closed_job_stays_shown_and_starts_the_linger(self):
         clock = Clock()
         idle = swarm.IdleExit(30, clock)

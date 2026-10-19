@@ -4,6 +4,8 @@ def job_context(board, j, now) -> str:
     """Exact registered reasons for a job without working agents; never infer a human wait."""
     from swarm.cli import _job_status_word
     shown = _job_status_word(board, j, now)
+    if shown == 'active' and j.status != 'active':
+        return f"current agents working; prior {j.status}: {j.outcome or 'terminal lifecycle record'}"
     if shown not in ("waiting", "idle"):
         from swarm.cli import _waiting_word
         return _waiting_word(j, now)

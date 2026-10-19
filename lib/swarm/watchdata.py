@@ -71,6 +71,10 @@ class SnapshotBoard:
     def jobs(self, include_closed=False):
         return [j for j in self.job_rows if include_closed or j.status == 'active']
 
+    def shown_jobs(self, include_closed=False):
+        from swarm.board.base import display_open
+        return [j for j in self.job_rows if include_closed or display_open(j)]
+
     def session_jobs(self, session):
         return [j for j in self.job_rows if j.session_id == session]
 

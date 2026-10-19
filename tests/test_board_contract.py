@@ -2845,9 +2845,9 @@ class PostgresSchemaUpgrade(SchemaUpgradeTests, unittest.TestCase):
 
 
 class SchemaVersionPin(unittest.TestCase):
-    def test_schema_version_is_27(self):
+    def test_schema_version_is_28(self):
         from swarm.board import SCHEMA_VERSION
-        self.assertEqual(SCHEMA_VERSION, 27)
+        self.assertEqual(SCHEMA_VERSION, 28)
 
 
 from support import gate_backends  # noqa: E402

@@ -1173,12 +1173,8 @@ def _job_status_context(board, j, now) -> str:
 
 
 def open_and_paused(board, include_closed: bool) -> list:
-    """The jobs a listing shows: with include_closed all of them, else the active ones plus the paused
-    ones (board.jobs(False) is active only: the sweeps and the supervisor rely on that)."""
-    rows = board.jobs(include_closed)
-    if not include_closed:
-        rows = rows + [j for j in board.jobs(True) if j.status == "paused"]
-    return rows
+    """Display inclusion is separate from the raw lifecycle used by schedulers."""
+    return board.shown_jobs(include_closed)
 
 
 def jobs_overview(board, include_closed: bool, color: bool, sup: dict | None = None,
@@ -1207,7 +1203,7 @@ def _rollup_text(board, job: str, now=None) -> str:
 
 def _workers_cell(board, j) -> str:
     """The WORKERS column: the rollup of an open job's agents (orchestrators not counted), "-" once closed."""
-    if j.status not in ("active", "paused"):
+    if _job_status_word(board, j, board.now()) not in ("active", "idle", "waiting", "paused"):
         return "-"
     return agentview.rollup(agentview.annotate(board, j.job, board.agents(j.job))).short()
 
@@ -2073,7 +2069,7 @@ def _watch_frame(board, job: str | None, interval: float, color: bool, interacti
     if session:
         srows, _fetched = session_jobs(board, session)
         if view.get("idle_exit") is not None:
-            view["idle_exit"].observe(any(j.status == "active" for j in srows))
+            view["idle_exit"].observe(any(j.status == "active" or j.started or j.running for j in srows))
     if view.get("compact"):
         return _compact_frame(board, job, color, view, srows, cols, rows - 1)
     out, pinned = _watch_header(board, job, interval, color, interactive, now, recent,
