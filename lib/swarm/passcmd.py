@@ -19,6 +19,7 @@ A failed job notifies its owner on the board, again every NOTICE_MINUTES, until 
 from __future__ import annotations
 
 import datetime as _dt
+import errno
 import hashlib
 import json
 import math
@@ -541,7 +542,9 @@ def run_pass(board, cfg: dict, *, now: _dt.datetime | None = None, starter=None)
             if recover_auto_close(board, cfg, js.job):
                 acts.append(f"{js.job}: restored unfinished automatically closed run")
         except Exception as exc:
-            acts.append(f"{js.job}: pass error Recovery {type(exc).__name__}: {exc}")
+            # A nonblocking coordinator lock held by another operation is retried next pass.
+            if not isinstance(exc, BlockingIOError) or exc.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
+                acts.append(f"{js.job}: pass error Recovery {type(exc).__name__}: {exc}")
     for job, failed_at, launch_id, revision in board.failed_launch_retries():
         if board.reopen_failed_job(job, failed_at, launch_id, revision):
             acts.append(f"{job}: new run for fresh queued work")
@@ -550,7 +553,9 @@ def run_pass(board, cfg: dict, *, now: _dt.datetime | None = None, starter=None)
             if repair_open_routing(board, cfg, js.job):
                 acts.append(f"{js.job}: restored trusted coordinator hook routing")
         except Exception as exc:
-            acts.append(f"{js.job}: pass error Routing {type(exc).__name__}: {exc}")
+            # Routing can defer while independent board-native work still advances below.
+            if not isinstance(exc, BlockingIOError) or exc.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
+                acts.append(f"{js.job}: pass error Routing {type(exc).__name__}: {exc}")
         if js.status != 'active':
             continue
         try:

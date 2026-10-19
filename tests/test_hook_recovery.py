@@ -1,5 +1,6 @@
 """Recovery restores hook routing without changing owner decisions or caller identity."""
 import json
+import errno
 import threading
 from unittest import mock
 from test_hooks_cli import Env
@@ -24,6 +25,59 @@ class HookRecovery(Env):
 
     def bindings(self):
         return [cli._read_marker(p) for p in cli._job_markers(self.cfg, 'J')]
+
+    def contended_pass(self, already_recovered):
+        entered, release = threading.Event(), threading.Event()
+        def hold_coordinator_lock():
+            with enrolment.coordinator_lock(store_key(self.cfg), 'J'):
+                entered.set()
+                release.wait(10)
+        with self.board() as board:
+            if already_recovered:
+                self.assertTrue(board.recover_auto_close('J'))
+                task_job = 'J'
+            else:
+                task_job = 'independent'
+                board.open_job(task_job, None, None, None, 'owner', goal='Independent task')
+                dependencies.register(board, task_job, 1, 'independent-stage', artifact='other@abc',
+                    depends=[], role='engineer', harness='codex', model=None, workdir=str(self.tmp),
+                    brief='Independent ready work', queued_by='owner')
+            runs = []
+            worker = threading.Thread(target=hold_coordinator_lock)
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(3))
+                with mock.patch('swarm.supervisor.command.workdir_problem', return_value=None), \
+                        mock.patch('swarm.supervisor.markers.write_resume_marker', return_value=self.tmp / 'resume'):
+                    actions = passcmd.run_pass(board, self.cfg, starter=lambda cfg, run: runs.append(run))
+                self.assertFalse(any('pass error' in action for action in actions), actions)
+                self.assertEqual([run['job'] for run in runs], [task_job])
+                self.assertEqual(board.job_status('J').status, 'active' if already_recovered else 'cancelled')
+                self.assertEqual(self.bindings(), [], 'routing repair must wait for the lock holder')
+            finally:
+                release.set()
+                worker.join(3)
+            self.assertFalse(worker.is_alive())
+            with mock.patch('swarm.supervisor.command.workdir_problem', return_value=None), \
+                    mock.patch('swarm.supervisor.markers.write_resume_marker', return_value=self.tmp / 'resume'):
+                actions = passcmd.run_pass(board, self.cfg, starter=lambda cfg, run: runs.append(run))
+            self.assertFalse(any('pass error' in action for action in actions), actions)
+            self.assertEqual(board.job_status('J').status, 'active')
+            self.assertTrue(any(m.get('session_id') == self.sid for m in self.bindings()))
+            self.assertEqual(len(runs), 1 if already_recovered else 2)
+
+    def test_recovery_lock_contention_defers_until_next_pass_without_starving_ready_task(self):
+        self.contended_pass(already_recovered=False)
+
+    def test_routing_lock_contention_defers_without_blocking_native_ready_task(self):
+        self.contended_pass(already_recovered=True)
+
+    def test_non_contention_blocking_io_errors_remain_visible(self):
+        for operation, phase in (('recover_auto_close', 'Recovery'), ('repair_open_routing', 'Routing')):
+            with self.subTest(operation=operation), self.board() as board:
+                with mock.patch.object(passcmd, operation, side_effect=BlockingIOError(errno.EIO, 'disk failure')):
+                    actions = passcmd.run_pass(board, self.cfg, starter=lambda *_: None)
+                self.assertTrue(any(f'pass error {phase} BlockingIOError' in action for action in actions), actions)
 
     def test_failed_marker_creation_can_retry_without_stranding_open_job(self):
         with self.board() as board:
