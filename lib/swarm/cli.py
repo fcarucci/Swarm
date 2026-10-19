@@ -54,6 +54,8 @@ import time
 import tomllib
 from pathlib import Path
 
+from swarm.enrolment import coordinator_command
+
 from swarm import edition  # noqa: E402
 from swarm.paths import PLUGIN_ROOT as SKILL_DIR  # noqa: E402  (the old name, kept for callers)
 # Every board-derived string is shown through term_safe: a control character in a post,
@@ -3246,18 +3248,8 @@ def valid_session_id(session: str) -> bool:
     return isinstance(session, str) and SESSION_ID.fullmatch(session) is not None
 
 
+@coordinator_command
 def cmd_activate(cfg: dict, args) -> int:
-    from swarm import enrolment
-    from swarm.board.autoinit import store_key
-    try:
-        with enrolment.coordinator_lock(store_key(cfg), args.job):
-            return _cmd_activate_locked(cfg, args)
-    except BlockingIOError:
-        print("swarm activate: another coordinator operation is in progress; retry", file=sys.stderr)
-        return 1
-
-
-def _cmd_activate_locked(cfg: dict, args) -> int:
     from swarm.board import open_board
     from swarm import hosts, safefs
     from swarm.jobmarkers import JOB_NAME
@@ -3433,19 +3425,8 @@ def _completion_refusal(js) -> str | None:
             f"override with --force (recorded).")
 
 
+@coordinator_command
 def cmd_deactivate(cfg: dict, args) -> int:
-    # Serialize explicit teardown with local routing recovery/reassignment.
-    from swarm import enrolment
-    from swarm.board.autoinit import store_key
-    try:
-        with enrolment.coordinator_lock(store_key(cfg), args.job):
-            return _cmd_deactivate_locked(cfg, args)
-    except BlockingIOError:
-        print("swarm deactivate: another coordinator operation is in progress; retry", file=sys.stderr)
-        return 1
-
-
-def _cmd_deactivate_locked(cfg: dict, args) -> int:
     from swarm.board import AUTO_CLOSED_BY, open_board
     marker = _marker(cfg, args.job)
     completing = args.status == "completed"

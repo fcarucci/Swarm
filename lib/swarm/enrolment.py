@@ -482,3 +482,19 @@ def coordinator_lock(board_key: str, job: str):
             yield
         finally:
             _COORDINATOR_LOCKS.reset(token)
+
+
+def coordinator_command(command):
+    """Serialize owner activation/teardown with recovery and coordinator reassignment."""
+    import functools
+    import sys
+    @functools.wraps(command)
+    def run(cfg, args):
+        from swarm.board.autoinit import store_key
+        try:
+            with coordinator_lock(store_key(cfg), args.job):
+                return command(cfg, args)
+        except BlockingIOError:
+            print('swarm: another coordinator operation is in progress; retry', file=sys.stderr)
+            return 1
+    return run
