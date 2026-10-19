@@ -360,15 +360,73 @@ def spawn_job(tool_input: dict) -> str | None:
     return next(iter(tags), None)
 
 
+def _first_meta(path: Path | None) -> dict:
+    """Only the thread's own first header; forked parent headers are never evidence."""
+    if path is None or path.is_symlink() or path.name.endswith('.zst'):
+        return {}
+    try:
+        with path.open() as stream:
+            line = stream.readline(1 << 20)
+        entry = json.loads(line)
+        meta = entry.get('payload') if entry.get('type') == 'session_meta' else None
+        if not isinstance(meta, dict):
+            return {}
+        thread = meta.get('id')
+        return meta if isinstance(thread, str) and THREAD_ID.fullmatch(thread) and path.name.endswith(f'-{thread}.jsonl') else {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def _root_ancestor(thread: str, root: str) -> bool:
+    seen = set()
+    for _ in range(64):
+        if thread in seen:
+            return False
+        seen.add(thread)
+        meta = _first_meta(find_rollout(thread))
+        if meta.get('id') != thread:
+            return False
+        if thread == root:
+            return isinstance(meta.get('source'), str)
+        thread = _dig(meta.get('source'), ('subagent', 'thread_spawn', 'parent_thread_id'))
+        if not isinstance(thread, str) or not THREAD_ID.fullmatch(thread):
+            return False
+    return False
+
+
 def spawned_id(payload: dict) -> str | None:
+    """Real V2 results return task_name, resolved against unique native parent+path headers."""
     response = payload.get("tool_response")
     if isinstance(response, str):
         try:
             response = json.loads(response)
         except ValueError:
             return None
-    value = response.get("agent_id") if isinstance(response, dict) else None
-    return value if isinstance(value, str) and THREAD_ID.fullmatch(value) else None
+    if not isinstance(response, dict):
+        return None
+    value = response.get('agent_id')
+    if isinstance(value, str) and THREAD_ID.fullmatch(value):
+        return value
+    path = response.get('task_name')
+    parent = payload.get('agent_id') or payload.get('session_id')
+    root = payload.get('session_id')
+    task = (payload.get('tool_input') or {}).get('task_name')
+    if not all(isinstance(v, str) and v for v in (path, parent, root, task)):
+        return None
+    parent_meta = _first_meta(find_rollout(parent))
+    parent_path = _dig(parent_meta.get('source'), CODEX_AGENT_PATH) if parent != root else '/root'
+    if not parent_path or path != parent_path + '/' + task or not _root_ancestor(parent, root):
+        return None
+    matches = set()
+    home = codex_home()
+    for pattern in ('sessions/*/*/*/rollout-*.jsonl', 'archived_sessions/**/rollout-*.jsonl'):
+        for rollout in home.glob(pattern):
+            meta = _first_meta(rollout)
+            source = meta.get('source')
+            if (_dig(source, CODEX_AGENT_PATH) == path and
+                    _dig(source, ('subagent', 'thread_spawn', 'parent_thread_id')) == parent):
+                matches.add(meta['id'])
+    return next(iter(matches)) if len(matches) == 1 else None
 
 
 def _role_of_name(task_name: str) -> str | None:

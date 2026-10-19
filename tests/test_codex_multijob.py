@@ -107,5 +107,53 @@ class MultiJobRoutingTests(Env):
         with self.board() as b:
             self.assertEqual(b.route(self.child).job, 'other')
 
+    def test_actual_canonical_task_result_binds_exact_thread(self):
+        p = self.spawn_payload()
+        self.call('turn', p)
+        self.replay('SubagentStart', F.payloads('SubagentStart')[0])
+        self.call('done', {**p, 'tool_response': {'task_name': '/root/job__other__engineer__api'}})
+        self.replay('PreToolUse', self.child_payloads('PreToolUse')[0])
+        self.assertIsNotNone(self.agent(self.child, job='other'))
+
+    def test_canonical_result_requires_exact_parent_and_unique_path(self):
+        import json
+        p = self.spawn_payload()
+        roll = next(self.codex_home.glob(f'sessions/*/*/*/*{self.child}.jsonl'))
+        lines = roll.read_text().splitlines()
+        meta = json.loads(lines[0])
+        meta['payload']['source']['subagent']['thread_spawn']['parent_thread_id'] = self.ids['grandchild']['thread']
+        roll.write_text('\n'.join([json.dumps(meta), *lines[1:]]) + '\n')
+        self.call('done', {**p, 'tool_response': {'task_name': '/root/job__other__engineer__api'}})
+        with self.board() as b:
+            self.assertIsNone(b.route(self.child).job)
+        meta['payload']['source']['subagent']['thread_spawn']['parent_thread_id'] = self.sid
+        roll.write_text('\n'.join([json.dumps(meta), *lines[1:]]) + '\n')
+        duplicate_id = '00000000-0000-4000-8000-000000000099'
+        duplicate = roll.with_name('rollout-duplicate-' + duplicate_id + '.jsonl')
+        meta['payload']['id'] = duplicate_id
+        duplicate.write_text('\n'.join([json.dumps(meta), *lines[1:]]) + '\n')
+        self.call('done', {**p, 'tool_response': {'task_name': '/root/job__other__engineer__api'}})
+        with self.board() as b:
+            self.assertIsNone(b.route(self.child).job)
+            self.assertIsNone(b.route(duplicate_id).job)
+
+    def test_actual_nested_canonical_result_inherits_exact_parent_job(self):
+        import json
+        self.cli('join', '--job', 'other', '--key', self.child)
+        self.replay('PreToolUse', self.child_payloads('PreToolUse')[0])
+        grandchild = self.ids['grandchild']['thread']
+        roll = next(self.codex_home.glob(f'sessions/*/*/*/*{grandchild}.jsonl'))
+        lines = roll.read_text().splitlines()
+        meta = json.loads(lines[0])
+        path = '/root/job__other__engineer__api/engineer__nested'
+        meta['payload']['source']['subagent']['thread_spawn']['agent_path'] = path
+        roll.write_text('\n'.join([json.dumps(meta), *lines[1:]]) + '\n')
+        p = self.spawn_payload(parent=self.child)
+        p['tool_input']['task_name'] = 'engineer__nested'
+        self.call('done', {**p, 'tool_response': {'task_name': path}})
+        start = next(x for x in F.payloads('SubagentStart') if x['agent_id'] == grandchild)
+        self.replay('SubagentStart', start)
+        self.assertIsNotNone(self.agent(grandchild, job='other'))
+
 # Keep helper fixture class out of unittest discovery.
 del _CodexHookTests
