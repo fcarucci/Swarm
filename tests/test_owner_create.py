@@ -161,3 +161,11 @@ class OwnerCreate(Env):
         self.assertNotEqual(self.cli(*self.argv)[0],0)
         from swarm import enrolment
         self.assertIsNone(enrolment.find_job_owner(store_key(self.cfg),'new-job'))
+
+    def test_interrupted_bootstrap_retry_reuses_private_intent(self):
+        owner_create.attest(self.cfg,self.payload,self.host)
+        with mock.patch.object(owner_create,'_bootstrap',side_effect=OSError('interrupted')):
+            self.assertNotEqual(self.cli(*self.argv)[0],0)
+        owner_create.attest(self.cfg,self.payload,self.host)
+        self.assertEqual(self.cli(*self.argv)[0],0)
+        self.assertTrue(cli._marker(self.cfg,'new-job').exists())
