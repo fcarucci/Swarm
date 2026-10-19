@@ -169,3 +169,17 @@ class OwnerCreate(Env):
         owner_create.attest(self.cfg,self.payload,self.host)
         self.assertEqual(self.cli(*self.argv)[0],0)
         self.assertTrue(cli._marker(self.cfg,'new-job').exists())
+
+    def test_reopen_before_private_write_cannot_recover_stale_authority(self):
+        from swarm import enrolment,passcmd
+        owner_create.attest(self.cfg,self.payload,self.host)
+        original=enrolment.write_job
+        def race(*args,**kwargs):
+            with self.board() as b:
+                b.close_job('new-job','completed','done',closed_by='owner')
+                b.open_job('new-job',None,None,self.sid,'owner',goal='later run')
+            return original(*args,**kwargs)
+        with mock.patch.object(enrolment,'write_job',side_effect=race):
+            self.assertEqual(self.cli(*self.argv)[0],0)
+        with self.board() as b:self.assertFalse(passcmd.repair_open_routing(b,self.cfg,'new-job'))
+        self.assertFalse(cli._marker(self.cfg,'new-job').exists())

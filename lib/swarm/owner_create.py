@@ -5,6 +5,7 @@ The trusted root coordinator has the delegated creation capability. Workers neve
 """
 from __future__ import annotations
 import hashlib
+import datetime as dt
 import json
 import os
 from pathlib import Path
@@ -164,14 +165,15 @@ def _bootstrap(cfg, board, fields, audit, receipt, request):
     with enrolment._dir(create=True) as directory:
         if safefs.read(directory,name,LIMIT) is not None:return
     bk=store_key(cfg);job=fields['job'];sid=audit['session']
+    created=dt.datetime.fromisoformat(receipt['created_at']).timestamp()
     owner=enrolment.find_job_owner(bk,job,strict=True)
     rec=enrolment.find_job(bk,job)
     if (owner is not None and owner.session_id!=sid) or (rec is not None and rec.session_id!=sid):return
     if rec is not None and enrolment.job_routing_disabled(rec):return
     if owner is None:
-        enrolment.write_job_owner(bk,job=job,harness='codex',session_id=sid,cwd=fields['workdir'])
+        enrolment.write_job_owner(bk,job=job,harness='codex',session_id=sid,cwd=fields['workdir'],now=created)
     if rec is None:
-        enrolment.write_job(bk,job=job,harness='codex',session_id=sid,cwd=fields['workdir'])
+        enrolment.write_job(bk,job=job,harness='codex',session_id=sid,cwd=fields['workdir'],now=created)
     marker=cli._marker(cfg,job)
     data={'job':job,'session_id':sid,'cwd':fields['workdir'],'goal':True,'create_request':request}
     if marker.exists() and cli._read_marker(marker)!=data:
