@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from swarm import compat
 import shutil
 import subprocess
@@ -338,9 +339,42 @@ def _dig(node, path: tuple[str, ...]):
     return node
 
 
+def job_task(task_name: str) -> tuple[str, str] | None:
+    """Explicit plaintext routing envelope: job__JOB__ROLE__TASK."""
+    match = re.fullmatch(r"job__([A-Za-z0-9][A-Za-z0-9_.-]{0,127})__([a-z][a-z0-9_]{0,63})__(.+)", task_name or "")
+    if match and "__" not in match[1] and "__" not in match[2]:
+        return match[1], match[2] + "__" + match[3]
+    return None
+
+
+def spawn_job(tool_input: dict) -> str | None:
+    """Read only explicit caller input; conflicting routing instructions fail closed."""
+    task = job_task(tool_input.get("task_name", ""))
+    tags = {line.strip()[len("[swarm job:"):-1].strip()
+            for line in str(tool_input.get("message", "")).splitlines()
+            if line.strip().startswith("[swarm job:") and line.strip().endswith("]")}
+    if task:
+        tags.add(task[0])
+    if len(tags) > 1:
+        raise ValueError("conflicting explicit job routing")
+    return next(iter(tags), None)
+
+
+def spawned_id(payload: dict) -> str | None:
+    response = payload.get("tool_response")
+    if isinstance(response, str):
+        try:
+            response = json.loads(response)
+        except ValueError:
+            return None
+    value = response.get("agent_id") if isinstance(response, dict) else None
+    return value if isinstance(value, str) and THREAD_ID.fullmatch(value) else None
+
+
 def _role_of_name(task_name: str) -> str | None:
     from swarm.roles import from_task_name
-    return from_task_name(task_name)
+    envelope = job_task(task_name)
+    return from_task_name(envelope[1] if envelope else task_name)
 
 
 def _own_rollout(payload: dict, agent_id: str) -> Path | None:

@@ -256,6 +256,17 @@ def _route_new(board, event: str, agent_id: str, sid: str, bound: dict, unbound:
                payload: dict, cfg: dict) -> None:
     """Route an agent with no active board row and enrol it (or say why not, once)."""
     route = board.route(agent_id)
+    if current_host().name == 'codex' and route.state == 'unverified' and route.job in bound and route.session_id == sid:
+        if not board.claim_route(agent_id, sid, 'unverified', 'final', route.job):
+            return
+        _enrol(board, event, agent_id, route.job, payload, cfg, sid, bound[route.job])
+        return
+    if current_host().name == 'codex' and len(bound) > 1 and not route.member_job:
+        if route.state is None:
+            board.claim_route(agent_id, sid, None, 'pending')
+        if event == 'turn':
+            _deny('[swarm] Child routing is pending the trusted spawn result; retry after the parent spawn completes.')
+        return
     resumed = _resumed_job(route, bound)
     started_here = event == "start" or (route.state in ("pending", "unverified") and route.session_id == sid)
     if event == "turn" and not started_here:
@@ -341,6 +352,11 @@ def _spawn_depth(payload: dict, agent_id: str) -> int | None:
 def _spawn_refusal(board, agent_id: str, member, payload: dict, cfg: dict) -> str | None:
     """None if this Agent call may go ahead (it is then counted and announced), else why not."""
     sp, job = cfg["spawn"], member.job
+    if current_host().name == 'codex':
+        try:
+            _codex_spawn_job(board, cfg, payload.get('session_id'), payload)
+        except ValueError as exc:
+            return str(exc)
     per_agent, per_job = int(sp["max_per_agent"]), int(sp["max_per_job"])
     max_depth, min_chars = int(sp["max_depth"]), int(sp["min_justification_chars"])
     call = current_host().spawn_call(payload.get("tool_input") or {})
@@ -875,6 +891,44 @@ def _apply_model(cfg: dict, payload: dict, role: str, *, fallback: str = "worker
         _set_input_rewrite(host.input_rewrite_output(host.rewrite_spawn_model(ti, model)))
 
 
+def _codex_spawn_job(board, cfg: dict, sid: str, payload: dict) -> str | None:
+    from swarm.hosts.codex import spawn_job
+    tag = spawn_job(payload.get("tool_input") or {})
+    bound, _ = _session_markers(cfg, sid)
+    parent = payload.get("agent_id")
+    if parent:
+        member = board.hook_member(parent)
+        if not member or member.job not in bound:
+            raise ValueError("spawn parent has no bound job")
+        if tag and tag != member.job:
+            raise ValueError("child must inherit its parent's exact job")
+        return member.job
+    if tag:
+        if tag not in bound:
+            raise ValueError("explicit job is not bound to this root session")
+        return tag
+    if len(bound) > 1:
+        raise ValueError("multiple jobs: use task_name job__JOB__ROLE__TASK or an explicit [swarm job: JOB] tag")
+    return next(iter(bound), None)
+
+
+def _codex_spawn_post(board, cfg: dict, sid: str, payload: dict) -> None:
+    """Bind only the actual returned child, never an existing member or decided route."""
+    from swarm.hosts.codex import spawned_id
+    child = spawned_id(payload)
+    if not child:
+        return
+    job = _codex_spawn_job(board, cfg, sid, payload)
+    if not job:
+        return
+    route = board.route(child)
+    if route.member_job or route.job or route.state == 'final':
+        return
+    if route.session_id and route.session_id != sid:
+        return
+    board.claim_route(child, sid, route.state, 'unverified', job)
+
+
 def _orchestrator_spawn(cfg: dict, sid: str | None, payload: dict) -> None:
     """The orchestrator's own spawn (no agent_id): the role's model, if the child will join a
     job, the way _pick routes it: its tag names a job bound to this session or claimable by it,
@@ -888,6 +942,12 @@ def _orchestrator_spawn(cfg: dict, sid: str | None, payload: dict) -> None:
     host = current_host()
     call = host.spawn_call(payload.get("tool_input") or {})
     tag = _tag_of(call.prompt)
+    if host.name == 'codex':
+        try:
+            tag = _codex_spawn_job(None, cfg, sid, payload)
+        except ValueError as exc:
+            _deny(f"[swarm] Spawn refused: {exc}")
+            return
     if (tag is not None and (tag in bound or tag in unbound)) or (tag is None and len(bound or unbound) == 1):
         prompt = call.prompt if host.reads_prompt_tags else ""
         _apply_model(cfg, payload, models.role_of(prompt, False, host.spawn_role_hint(call)))
@@ -1959,6 +2019,8 @@ def _on_event(board, event: str, agent_id: str, sid: str | None, bound: dict, un
         _capture_stopped(board, cfg, agent_id, sid, payload, deadline)
         _sweep(board, cfg, event, agent_id, payload, deadline)
         return
+    if event == 'done' and current_host().name == 'codex' and current_host().is_spawn(payload):
+        _codex_spawn_post(board, cfg, sid, payload)
     if event == "done":  # PostToolUse: the tool call finished; bookkeeping, and memory provenance
         lease = _CURRENT.get('lease')
         if lease and lease.enabled:
@@ -2476,6 +2538,10 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
         if len(markers) == 1:
             lease.capture(next(iter(markers)))
             lease.allowed = True
+    if not agent_id and event == 'done' and current_host().name == 'codex' and current_host().is_spawn(payload):
+        from swarm.board import open_board
+        with open_board(cfg, init_timeout=HOOK_INIT_TIMEOUT) as board:
+            _codex_spawn_post(board, cfg, sid, payload)
     if not agent_id:  # main session: note that it is at work; its spawns get models per role
         if event != "session-stop" and (not lease or not lease.enabled or lease.due):
             _orchestrator_seen(event, cfg, sid, payload)

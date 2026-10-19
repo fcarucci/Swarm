@@ -167,7 +167,7 @@ class CodexHookTests(Env):
         self.replay("PreToolUse", self.child_payloads("PreToolUse")[0])     # message readable, but encrypted
         with self.board() as b:
             route = b.route(start["agent_id"])
-        self.assertEqual((route.state, route.job), ("final", None))           # two jobs, no tag: joins none
+        self.assertEqual((route.state, route.job), ("pending", None))         # await exact parent spawn result
 
     def test_owner_binding_codex_refuses_a_second_job_in_the_same_session(self):
         with mock.patch.dict(os.environ, {"SWARM_HOST": "codex"}):
