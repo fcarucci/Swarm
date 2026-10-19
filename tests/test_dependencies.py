@@ -1,4 +1,5 @@
 """Durable exact-artifact stage gates through the real launch queue and pass."""
+import sys
 import datetime as dt
 import json
 from pathlib import Path
@@ -10,6 +11,11 @@ from swarm import passcmd
 
 
 class DependentTasks(PassCmd):
+    def setUp(self):
+        super().setUp()
+        # The starter records argv; spec validation needs no installed model executable.
+        self.cfg.setdefault('harness', {}).setdefault('codex', {})['command'] = [sys.executable]
+
     def register(self, name, deps=(), artifact='main@' + 'a' * 40, **kw):
         from swarm import dependencies
         return dependencies.register(self.b, 'J', 1, name, artifact=artifact, depends=list(deps),

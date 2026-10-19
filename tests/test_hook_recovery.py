@@ -1,4 +1,5 @@
 """Recovery restores hook routing without changing owner decisions or caller identity."""
+import sys
 import json
 import errno
 import threading
@@ -12,6 +13,8 @@ from swarm.board.base import AUTO_CLOSED_BY
 class HookRecovery(Env):
     def setUp(self):
         super().setUp()
+        # The injected starter simulates execution; resolve an available test executable.
+        self.cfg.setdefault('harness', {}).setdefault('codex', {})['command'] = [sys.executable]
         self.sid = 'original-session'
         with self.board() as board:
             board.open_job('J', None, None, 'display-session', 'owner', goal='Full task')

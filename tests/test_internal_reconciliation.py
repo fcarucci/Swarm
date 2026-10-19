@@ -1,4 +1,5 @@
 """Internal listener reconciliation without HTTP, plugins, or orchestrator turns."""
+import sys
 import contextlib
 import inspect
 import io
@@ -178,6 +179,8 @@ class DurableReconciliation(unittest.TestCase):
         board.queue_launch('J', 1, 'build', role='engineer', harness='codex', model=None,
                            workdir='/work', brief='build exact artifact', queued_by='swarm run')
         cfg = {**harness.cfg, 'events': {'enabled': False}}
+        # Only the injected starter executes: validate argv without a local Codex install.
+        cfg.setdefault('harness', {}).setdefault('codex', {})['command'] = [sys.executable]
         runs = []
         def listener():
             return el.Listener(cfg, NS(event_sources={}), lambda: contextlib.nullcontext(board),

@@ -2,6 +2,7 @@
 
 No production config, real agent/model process, user service, or live job is touched.
 """
+import sys
 import json
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -16,6 +17,8 @@ ARTIFACT = 'reviewed/swarm@' + 'a' * 40
 class TerminalDependencyHandoff(Env):
     def setUp(self):
         super().setUp()
+        # The injected starter simulates execution; resolve an available test executable.
+        self.cfg.setdefault('harness', {}).setdefault('codex', {})['command'] = [sys.executable]
         self.assertEqual(self.cli('activate', '--job', 'J', '--session', 'sess-1')[0], 0)
         self.cfg['models'] = {'mode': 'enforce', 'codex': {'engineer': 'gpt-6.1-sol'}}
         self.runs, self.wakes = [], []

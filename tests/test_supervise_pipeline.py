@@ -71,6 +71,13 @@ class PipelineTests(unittest.TestCase):
         self.b.close_agent(key, 'review complete')
         self.b.finish_restart(run['restart_id'], 'completed')
 
+    def accept_goal(self, candidate='reports/outage.md'):
+        judge = self.b.allocate_name('whole-goal-judge', 'J', 'judge')
+        self.assertTrue(self.b.claim_judge('whole-goal-judge', 'J'))
+        self.assertTrue(self.b.record_verdict('J', judge, 'met', 'Independent whole-goal acceptance',
+                                            scope='goal', candidate=candidate))
+        self.b.close_agent('whole-goal-judge', 'goal assessed')
+
     def finish_latest(self, post=None, outcome='completed'):
         key, run = self.enroll_latest()
         if post:
@@ -124,6 +131,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIn('[swarm role: finalizer]', self.launched[-1]['stdin'])
         self.assertIn('swarm learn', self.launched[-1]['stdin'])
         self.finish_latest('FINALIZED reports/outage.md')
+        self.accept_goal()
         self.tick()
         self.assertEqual(len(self.launched), 2)
         self.assertEqual(self.b.job_status('J').status, 'completed')
@@ -409,10 +417,23 @@ class PipelineTests(unittest.TestCase):
         self.assertFalse(review.auto_close_pending(self.b, 'J'))
 
 
+    def test_finalized_artifact_alone_does_not_accept_whole_goal(self):
+        self.done(); self.tick(); self.conclude(); self.tick()
+        self.finish_latest('FINALIZED reports/outage.md')
+        before = self.b.job_status('J')
+        self.assertEqual((before.verdict, before.verdict_scope), ('met', 'artifact'))
+        self.tick()
+        after = self.b.job_status('J')
+        self.assertEqual(after.status, 'active')
+        self.assertEqual((after.verdict, after.verdict_scope, after.verdict_at),
+                         (before.verdict, before.verdict_scope, before.verdict_at))
+        self.assertEqual(len(self.launched), 2)
+
     def test_finalization_executor_exit_completes_job_on_next_timer(self):
         self.done(); self.tick(); self.conclude(); self.tick()
         self.assertEqual(self.b.job_status('J').status, 'active')
         self.finish_latest('FINALIZED reports/outage.md', outcome='failed')
+        self.accept_goal()
         with mock.patch('swarm.cli._drop_auto_closed_markers') as cleanup:
             self.tick()
         self.assertEqual(self.b.job_status('J').status, 'completed')
@@ -424,6 +445,7 @@ class PipelineTests(unittest.TestCase):
         self.done(); self.tick(); self.conclude(); self.tick()
         key, run = self.enroll_latest()
         self.b.post('J', run['name'], 'FINALIZED reports/outage.md')
+        self.accept_goal()
         self.tick()
         self.assertEqual(self.b.job_status('J').status, 'active')
         self.b.close_agent(key, 'exited'); self.tick()
@@ -434,6 +456,7 @@ class PipelineTests(unittest.TestCase):
     def test_completion_dry_run_and_failed_close_retry_without_merge(self):
         self.done(); self.tick(); self.conclude(); self.tick()
         self.finish_latest('FINALIZED reports/outage.md')
+        self.accept_goal()
         self.tick(dry_run=True)
         self.assertEqual(self.b.job_status('J').status, 'active')
         with mock.patch.object(self.b, 'auto_close_job', return_value=None):
@@ -449,7 +472,7 @@ class PipelineTests(unittest.TestCase):
         self.assertLess(prompt.index('First run swarm learn'), prompt.index('Only after learning succeeds'))
 
 
-    def test_completion_ignores_latest_not_met_for_superseded_revision(self):
+    def test_completion_requires_goal_acceptance_after_superseded_revision_verdict(self):
         self.recipe.side_effect = lambda cfg, board, job, artifact, **kw: {'artifact_group': 'branch'}
         self.done('S'); self.tick(); self.conclude(ref='S')
         self.done('T'); self.tick(); self.conclude(ref='T'); self.tick()
@@ -459,6 +482,9 @@ class PipelineTests(unittest.TestCase):
         self.b.record_verdict('J', name, 'not_met', 'Old S rejected', 'Fix old S', artifact='S')
         self.b.close_agent('stale-judge', 'done')
         self.assertEqual(self.b.job_status('J').verdict, 'not_met')
+        self.tick()
+        self.assertEqual(self.b.job_status('J').status, 'active', 'artifact evidence cannot accept the whole goal')
+        self.accept_goal(candidate='T')
         self.tick()
         self.assertEqual(self.b.job_status('J').status, 'completed')
         self.assertFalse(self.b.job_status('J').completion_forced)
