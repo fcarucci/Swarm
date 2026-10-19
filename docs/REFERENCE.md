@@ -2849,6 +2849,10 @@ Global option: `--config PATH` (default `$SWARM_CONFIG`, else `~/.config/swarm/c
 | `goal-ready --job J --candidate REF@SHA [--add-requirements PATH]...` | the lead or a person declares the goal ready for the judge; the requirement files it names are pinned (added, never replaced) |
 | `hook [--host claude\|codex] start\|turn\|done\|stop\|session-start` | hook entry point, reads hook JSON on stdin (called by `swarm-hook`, not by hand) |
 
+Native Codex accounting uses the configured `[drive] codex_usd_per_mtok` flat proxy rate on raw input plus output, including cached input. It estimates policy-priced usage rather than a provider bill. The rate is pinned in each new native run and reported with its usage source at settlement; existing ledger entries are never repriced. If a failed turn has no result usage, a complete private captured transcript for the same fresh session and single task can supply its final cumulative counts. Invalid, missing, resumed or forked evidence retains an explicitly labelled reservation estimate.
+
+The reservation limits admission against the job budget; it is not a hard per-session spending ceiling. Codex rollout units can exclude cached input, while this flat proxy includes it, so settlement can exceed the reservation. No live dollar guard is implemented: stdout lacks per-response usage and the existing safe transcript reader captures complete bounded files rather than incremental trusted usage. A future guard needs reviewed incremental capture and must account for in-flight response overshoot. No ledger credit follows from this difference alone.
+
 ## Security model and known limits
 
 What runs where:

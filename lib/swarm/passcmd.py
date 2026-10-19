@@ -197,6 +197,9 @@ def _start_one(board, cfg: dict, job: str, row, reserve: float, starter) -> str 
                "stdin": spec.stdin, "session_id": spec.session_id, "limit_seconds": minutes * 60,
                "enrol_seconds": float(settings(cfg)["enrol_minutes"]) * 60, "config": None,
                "board": _store_key(cfg), "launch_id": launch_id, "launch": row.name, "read_only": read_only}
+        if row.harness == "codex":
+            # The same flat proxy rate used by spec_for to size this launch's rollout allowance.
+            run["codex_usd_per_mtok"] = float((cfg.get("drive") or {}).get("codex_usd_per_mtok", 10))
         current_job = board.job_status(job)
         if current_job is None or current_job.status != "active":
             board.finish_restart(r.id, "cancelled")

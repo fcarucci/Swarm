@@ -227,6 +227,9 @@ def run_problem(cfg: dict, run, restart_id: int | None = None) -> str | None:
     for k in ("started_epoch", "launch_epoch"):
         if run.get(k) is not None and not _is_num(run[k]):
             return f"{k} is not a number"
+    if "codex_usd_per_mtok" in run and (not _is_num(run["codex_usd_per_mtok"]) or
+                                       run["codex_usd_per_mtok"] <= 0):
+        return "codex_usd_per_mtok is not a positive finite proxy rate"
     for k in ("child_pid", "child_pgid", "runner_pid"):
         if run.get(k) is not None and (not _is_int(run[k]) or run[k] <= 1):
             return f"{k} is not a process id"
@@ -658,6 +661,7 @@ class Usage:
     cost_usd: float | None   # Claude's total_cost_usd; None for Codex (the driver prices its tokens)
     tokens_in: int
     tokens_out: int
+    cached_input_tokens: int | None = None
 
 
 BINARY_FAILURE = "could not start the session:"   # the runner's own line when the binary can't run
@@ -727,7 +731,10 @@ def parse_usage(harness: str, stdout_tail: str) -> Usage | None:
         # direction for the budget. Verify against a live `codex exec --json` capture.
         tin = sum(_count(t["usage"].get("input_tokens")) for t in turns)
         tout = sum(_count(t["usage"].get("output_tokens")) for t in turns)
-        return Usage(None, tin, tout)
+        cached = [t["usage"].get("cached_input_tokens") for t in turns]
+        valid_cached = all(_is_int(c) and 0 <= c <= _count(t["usage"].get("input_tokens"))
+                           for c, t in zip(cached, turns))
+        return Usage(None, tin, tout, sum(cached) if valid_cached else None)
     return None
 
 
@@ -768,6 +775,47 @@ def _price(cfg: dict, tokens: int) -> float:
     return tokens * rate / 1_000_000
 
 
+def _final_codex_usage(text: str, key: str | None) -> Usage | None:
+    """Cumulative usage from one finished, matching fresh task; never sum token_count snapshots.
+
+    This is harness telemetry, not a provider bill. Require a complete single-task transcript:
+    resumed/multi-task histories need a baseline and are deliberately not reconciled here.
+    """
+    if not key:
+        return None
+    try:
+        events = [json.loads(line) for line in text.splitlines() if line.strip()]
+    except ValueError:
+        return None
+    if any(not isinstance(o, dict) for o in events):
+        return None
+    metas = [o.get("payload") for o in events if o.get("type") == "session_meta"]
+    if len(metas) != 1 or not isinstance(metas[0], dict) or metas[0].get("id") != key \
+            or metas[0].get("forked_from_id") is not None:
+        return None
+    payloads = [o["payload"] for o in events if o.get("type") == "event_msg"
+                and isinstance(o.get("payload"), dict)]
+    starts = [(i, p) for i, p in enumerate(payloads) if p.get("type") == "task_started"]
+    ends = [(i, p) for i, p in enumerate(payloads) if p.get("type") == "task_complete"]
+    if len(starts) != 1 or len(ends) != 1:
+        return None
+    si, start = starts[0]
+    ei, end = ends[0]
+    if not start.get("turn_id") or start["turn_id"] != end.get("turn_id") or ei <= si:
+        return None
+    counts = [p.get("info") for p in payloads[si + 1:ei] if p.get("type") == "token_count"]
+    if not counts or not isinstance(counts[-1], dict):
+        return None
+    usage = counts[-1].get("total_token_usage")
+    keys = ("input_tokens", "cached_input_tokens", "output_tokens", "total_tokens")
+    if not isinstance(usage, dict) or any(not _is_int(usage.get(k)) or usage[k] < 0 for k in keys):
+        return None
+    tin, cached, tout, total = (usage[k] for k in keys)
+    if cached > tin or total != tin + tout:
+        return None
+    return Usage(None, tin, tout, cached)
+
+
 def _read_drive_usage(cfg: dict, run: dict) -> None:
     """Once per drive run: read what the session cost from its kept output tail and keep it in the run
     (cost_usd, tokens_in, tokens_out; None when unreadable: the ledger then charges the reservation)
@@ -781,9 +829,29 @@ def _read_drive_usage(cfg: dict, run: dict) -> None:
     except Exception:
         pass
     u = parse_usage(run["harness"], text)
-    cost = None if u is None else (u.cost_usd if u.cost_usd is not None else _price(cfg, u.tokens_in + u.tokens_out))
+    source = "harness_result" if u is not None else "reservation_estimate"
+    argv = run.get("argv") or []
+    resumed = any(argv[i:i + 2] == ["exec", "resume"] for i in range(len(argv) - 1))
+    if u is None and run["harness"] == "codex" and not resumed:
+        from swarm.supervisor import privfs
+        try:
+            with _runs_fd(run["board"], create=False) as d:
+                data = privfs.read(d, f"r{int(run['restart_id'])}.transcript.jsonl", LAUNCH_TRANSCRIPT_MAX)
+            if data is not None:
+                u = _final_codex_usage(data.decode("utf-8", "replace"), run.get("agent_key"))
+                if u is not None:
+                    source = "final_transcript"
+        except (OSError, ValueError):
+            pass  # missing or unsafe evidence keeps the explicit reservation estimate
+    pricing = {"drive": {"codex_usd_per_mtok": run["codex_usd_per_mtok"]}} \
+        if "codex_usd_per_mtok" in run else cfg  # legacy unpinned runs retain their old policy
+    if run["harness"] == "codex":
+        run.setdefault("codex_usd_per_mtok", float((cfg.get("drive") or {}).get("codex_usd_per_mtok", 10)))
+    cost = None if u is None else (u.cost_usd if u.cost_usd is not None else _price(pricing, u.tokens_in + u.tokens_out))
     run.update(usage_read=True, cost_usd=cost, tokens_in=None if u is None else u.tokens_in,
                tokens_out=None if u is None else u.tokens_out,
+               cached_input_tokens=None if u is None else u.cached_input_tokens,
+               usage_source=source, cost_basis="flat_raw_token_proxy" if run["harness"] == "codex" else "harness_reported_usd",
                outage=classify_failure(run["harness"], text) == "outage")
 
 
@@ -1681,6 +1749,10 @@ def _finish_row_and_post(b, run: dict, outcome: str, poster: str) -> None:
     if not recorded:
         attempt = next((r.attempt for r in b.restarts(job=run["job"]) if r.id == run["restart_id"]), "?")
         why = f" ({run['refused_reason']})" if run.get("refused_reason") else ""
+        if run.get("cost_basis") == "flat_raw_token_proxy":
+            price = f"proxy USD {run['cost_usd']:g}" if run.get("cost_usd") is not None else "proxy reservation estimate"
+            why += (f"; {price}, {run['codex_usd_per_mtok']:g}/M raw, "
+                    f"cache={run.get('cached_input_tokens')}, {run['usage_source']}")
         run["post_pending"] = f"{run['name']} (restart {attempt}) ended: {outcome}{why}"
         write_run(run)   # an OSError here defers the finish: nothing is lost
     transitioned = b.finish_restart(run["restart_id"], outcome, **spent)

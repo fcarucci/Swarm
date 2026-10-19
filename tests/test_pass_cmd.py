@@ -111,6 +111,15 @@ class PassCmd(unittest.TestCase):
         argv = self.runs[0]["argv"]
         self.assertEqual(argv[argv.index("-m") + 1], "gpt-6.1-sol")
 
+    def test_native_codex_pricing_is_pinned_at_launch(self):
+        self.cfg["drive"] = {"codex_usd_per_mtok": 12.5}
+        self.b.queue_launch("J", 1, "priced", role="engineer", harness="codex", model=None,
+                            workdir="/work/shared", brief="B", queued_by="me")
+        with mock.patch("swarm.supervisor.launch.codex_command", return_value=["codex"]):
+            self.pass_()
+        self.assertEqual(self.runs[0].get("codex_usd_per_mtok"), 12.5)
+        self.assertIn("features.rollout_budget.limit_tokens=160000", self.runs[0]["argv"])
+
     def test_native_role_protection_reaches_both_harnesses_and_persisted_run(self):
         for host in ('codex', 'claude'):
             for role in ('judge', 'reviewer', 'security_reviewer', 'verifier', 'qa', 'engineer'):
