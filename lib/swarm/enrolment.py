@@ -498,3 +498,36 @@ def coordinator_command(command):
             print('swarm: another coordinator operation is in progress; retry', file=sys.stderr)
             return 1
     return run
+
+
+def _routing_stop_name(board_key, job):
+    return 'routing-stop-' + _digest(board_key, job) + '.json'
+
+
+def disable_job_routing(board_key: str, job: str) -> None:
+    """Preserve explicit local deactivation intent even if the database is unavailable."""
+    rec = find_job(board_key, job)
+    if rec is not None:
+        _store(rec, _routing_stop_name(board_key, job))
+
+
+def job_routing_disabled(rec: Record) -> bool:
+    name = _routing_stop_name(rec.board_key, rec.job)
+    with _dir(create=False) as directory:
+        if not safefs.exists(directory, name):
+            return False
+        try:
+            data = safefs.read(directory, name, RECORD_MAX)
+        except FileNotFoundError:
+            return False
+        if data is None:
+            raise ValueError('routing stop proof is unsafe or unreadable')
+        stopped = _parse_checked(data)
+    if stopped.kind != 'job' or (stopped.board_key, stopped.job) != (rec.board_key, rec.job):
+        raise ValueError('routing stop proof does not match the job')
+    return stopped.created_at >= rec.created_at
+
+
+def stop_job_routing(cfg: dict, job: str) -> None:
+    from swarm.board.autoinit import store_key
+    disable_job_routing(store_key(cfg), job)

@@ -54,7 +54,7 @@ import time
 import tomllib
 from pathlib import Path
 
-from swarm.enrolment import coordinator_command
+from swarm.enrolment import coordinator_command, stop_job_routing
 
 from swarm import edition  # noqa: E402
 from swarm.paths import PLUGIN_ROOT as SKILL_DIR  # noqa: E402  (the old name, kept for callers)
@@ -3483,7 +3483,7 @@ def cmd_deactivate(cfg: dict, args) -> int:
                 board.close()
             print(f"bank not deleted; job remains unchanged: {term_safe(exc)}", file=sys.stderr)
             return 1
-    # first, so the board goes quiet even if the db write fails; never unlinked without its lock
+    stop_job_routing(cfg, args.job)  # preserve owner intent through DB failure
     markers = [marker] + [m for m in marker.parent.glob(f"{safe_job(args.job)}--*.json")
                           if _read_marker(m).get("job") == args.job]
     stuck = [m for m in markers if not remove_marker(m)]

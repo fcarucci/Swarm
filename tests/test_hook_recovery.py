@@ -104,3 +104,46 @@ class HookRecovery(Env):
         with self.board() as board:
             self.assertTrue(passcmd.recover_auto_close(board, self.cfg, 'J'))
         self.assertEqual(self.bindings(), [])
+
+    def test_pass_repairs_routing_of_already_recovered_open_run(self):
+        with self.board() as board:
+            self.assertTrue(board.recover_auto_close('J'))  # historical version reopened without routing
+            with mock.patch.object(passcmd, '_advance', return_value=[]):
+                passcmd.run_pass(board, self.cfg)
+        self.assertTrue(any(m['session_id'] == self.sid for m in self.bindings()))
+
+    def test_pass_does_not_undo_explicit_local_routing_stop(self):
+        enrolment.disable_job_routing(store_key(self.cfg), 'J')
+        with self.board() as board:
+            self.assertTrue(board.recover_auto_close('J'))
+            with mock.patch.object(passcmd, '_advance', return_value=[]):
+                passcmd.run_pass(board, self.cfg)
+        self.assertEqual(self.bindings(), [])
+
+    def test_new_trusted_activation_supersedes_local_routing_stop(self):
+        enrolment.disable_job_routing(store_key(self.cfg), 'J')
+        old = enrolment.find_job(store_key(self.cfg), 'J')
+        enrolment.write_job(store_key(self.cfg), job='J', harness='codex', session_id=self.sid,
+                            cwd=str(self.tmp), now=old.created_at + 1)
+        with self.board() as board:
+            self.assertTrue(board.recover_auto_close('J'))
+            with mock.patch.object(passcmd, '_advance', return_value=[]):
+                passcmd.run_pass(board, self.cfg)
+        self.assertTrue(any(m['session_id'] == self.sid for m in self.bindings()))
+
+    def test_explicit_deactivate_persists_stop_before_removing_marker(self):
+        with self.board() as board:
+            self.assertTrue(board.recover_auto_close('J'))
+        rec = enrolment.find_job(store_key(self.cfg), 'J')
+        rc, _, err = self.cli('deactivate', '--job', 'J', '--force')
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(enrolment.job_routing_disabled(rec))
+
+    def test_routing_failure_does_not_block_native_tasks_in_same_job(self):
+        with self.board() as board:
+            self.assertTrue(board.recover_auto_close('J'))
+            with mock.patch.object(passcmd, 'repair_open_routing', side_effect=OSError('disk full')), \
+                    mock.patch.object(passcmd, '_advance', return_value=[]) as advance:
+                acts = passcmd.run_pass(board, self.cfg)
+            self.assertTrue(any(': pass error Routing' in a for a in acts))
+            self.assertTrue(any(call.args[2].job == 'J' for call in advance.call_args_list))

@@ -443,50 +443,68 @@ def _notices(board, now: _dt.datetime) -> list[str]:
     return acts
 
 
-def recover_auto_close(board, cfg: dict, job: str) -> bool:
-    """Recover the same run and its local hook binding from private activation proof.
-
-    Display-session reassignment is not hook ancestry. Never derive a coordinator from
-    a writable board row, overwrite an existing binding, or revive an explicit closure.
-    """
+def _restore_hook_binding(board, cfg, job, js):
+    """Restore a missing coordinator binding from this host's current private proof."""
     from swarm import enrolment, cli, safefs
     from swarm.board.autoinit import store_key
+    rec = enrolment.find_job(store_key(cfg), job)
+    if (rec is None or not rec.session_id or not cli.valid_session_id(rec.session_id)
+            or rec.created_at < (js.activated_at or js.created_at).timestamp()
+            or enrolment.job_routing_disabled(rec)):
+        return None
+    bindings = [cli._read_marker(p) for p in cli._job_markers(cfg, job)]
+    if any(m.get('session_id') == rec.session_id and 'resume' not in m for m in bindings):
+        return None
+    marker = cli._marker(cfg, job).with_name(f'{cli.safe_job(job)}--{cli.safe_job(rec.session_id)}.json')
+    data = {'job': job, 'session_id': rec.session_id, 'cwd': rec.cwd,
+            'adopt_running': True, 'attached': True, **({'goal': True} if js.goal else {})}
+    # Activation, teardown and reassignment share the coordinator lock. Publish complete
+    # JSON atomically so an interrupted write leaves recovery retryable.
+    with safefs.dir_fd(marker.parent, create=True) as directory:
+        if safefs.exists(directory, marker.name):
+            raise FileExistsError('conflicting recovery hook binding')
+        safefs.write_atomic(directory, marker.name, json.dumps(data), durable=True)
+    return marker, data
+
+
+def repair_open_routing(board, cfg, job):
+    """Normal reconciliation repairs lost local markers; never changes job/agent state."""
+    from swarm import enrolment
+    from swarm.board.autoinit import store_key
+    if not cfg or 'hook' not in cfg:
+        return False
+    key = store_key(cfg)
+    if enrolment.find_job(key, job) is None:
+        return False
+    with enrolment.coordinator_lock(key, job):
+        js = board.job_status(job)
+        if js is None or js.status != 'active':
+            return False
+        return _restore_hook_binding(board, cfg, job, js) is not None
+
+
+def recover_auto_close(board, cfg: dict, job: str) -> bool:
+    """Recover the same run and routing without reviving agents or owner-closed jobs."""
+    from swarm import enrolment, cli
+    from swarm.board.autoinit import store_key
+    from swarm.board.base import AUTO_CLOSED_BY
     from swarm.review import erroneous_auto_close
     if not cfg or 'hook' not in cfg:
         return board.recover_auto_close(job)
-    from swarm.board.base import AUTO_CLOSED_BY
     observed = board.job_status(job)
     if (observed is None or observed.status not in ('completed', 'cancelled')
             or observed.closed_by != AUTO_CLOSED_BY):
         return False
-    key = store_key(cfg)
-    with enrolment.coordinator_lock(key, job):
-        # Prepare the binding before reopening. A failed write leaves the closed run
-        # retryable; the backend still rechecks exact closure/obligations atomically.
+    with enrolment.coordinator_lock(store_key(cfg), job):
         if not erroneous_auto_close(board, job):
             return False
-        rec = enrolment.find_job(key, job)
-        js = board.job_status(job)
-        if (rec is None or not rec.session_id or not cli.valid_session_id(rec.session_id)
-                or rec.created_at < (js.activated_at or js.created_at).timestamp()):
-            return board.recover_auto_close(job)
-        bindings = [cli._read_marker(p) for p in cli._job_markers(cfg, job)]
-        if any(m.get('session_id') == rec.session_id and 'resume' not in m for m in bindings):
-            return board.recover_auto_close(job)
-        marker = cli._marker(cfg, job).with_name(f'{cli.safe_job(job)}--{cli.safe_job(rec.session_id)}.json')
-        data = {'job': job, 'session_id': rec.session_id, 'cwd': rec.cwd,
-                'adopt_running': True, 'attached': True, **({'goal': True} if js.goal else {})}
-        # Activation, teardown and reassignment share the coordinator lock. Publish
-        # complete JSON atomically so an interrupted write leaves recovery retryable.
-        with safefs.dir_fd(marker.parent, create=True) as directory:
-            if safefs.exists(directory, marker.name):
-                raise FileExistsError('conflicting recovery hook binding')
-            safefs.write_atomic(directory, marker.name, json.dumps(data), durable=True)
+        # Prepare before reopening: an I/O failure leaves recovery retryable.
+        created = _restore_hook_binding(board, cfg, job, board.job_status(job))
         if board.recover_auto_close(job):
             return True
-        # A concurrent authoritative board decision wins. Remove only our binding,
-        # with the normal inode lock, never a replacement written by activation.
-        cli.remove_marker(marker, keep=lambda p: cli._read_marker(p) != data)
+        if created is not None:
+            marker, data = created
+            cli.remove_marker(marker, keep=lambda p: cli._read_marker(p) != data)
         return False
 
 
@@ -508,6 +526,11 @@ def run_pass(board, cfg: dict, *, now: _dt.datetime | None = None, starter=None)
         if board.reopen_failed_job(job, failed_at, launch_id, revision):
             acts.append(f"{job}: new run for fresh queued work")
     for js in board.jobs():
+        try:
+            if repair_open_routing(board, cfg, js.job):
+                acts.append(f"{js.job}: restored trusted coordinator hook routing")
+        except Exception as exc:
+            acts.append(f"{js.job}: pass error Routing {type(exc).__name__}: {exc}")
         try:
             acts += _advance(board, cfg, js, now, starter)
         except Exception as exc:   # one job's trouble never stops the others
