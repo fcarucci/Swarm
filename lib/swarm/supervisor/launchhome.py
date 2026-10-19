@@ -617,42 +617,45 @@ def codex_git_permissions(cfg: dict, workdir: str | None) -> tuple[tuple, tuple]
             path = os.path.join(directory, child)
             if os.path.exists(path):
                 reads.add(path)
-    # Git includes are configuration too. Discover origins without reading host/global
-    # configuration or exposing its values, and protect only files already visible in the
-    # outer worktree/Git mounts. A profile must never grant a new host path.
-    for config in tuple(reads):
-        if os.path.basename(config) not in ('config', 'config.worktree') or not os.path.isfile(config):
+    # Parse each include separately, even behind inactive includeIf conditions:
+    # --includes alone skips those files and therefore their nested include targets.
+    # Never inspect or grant a host path outside the validated outer mounts.
+    pending = [path for path in reads if os.path.basename(path) in ('config', 'config.worktree')]
+    visited = set()
+    while pending:
+        config = pending.pop()
+        if config in visited:
+            continue
+        visited.add(config)
+        if len(visited) > 128:
+            raise LaunchIsolationError('native Git configuration include graph is too large')
+        if not (_under(config, workdir) or _under(config, common)):
+            raise LaunchIsolationError('native Git includes must stay within validated repository mounts')
+        if os.path.realpath(config) != config or (os.path.exists(config) and not os.path.isfile(config)):
+            raise LaunchIsolationError('native Git configuration origins must be canonical files')
+        # Missing workspace includes are writable via :workspace as well as Git grants.
+        # A missing file below a read-only common parent already cannot be created.
+        if os.path.exists(config) or any(_under(config, root) for root in (workdir, *writes)):
+            reads.add(config)
+        if not os.path.exists(config):
             continue
         try:
             result = subprocess.run(
-                ['git', 'config', '--file', config, '--includes', '--null', '--show-origin',
-                 '--list'], cwd=workdir, capture_output=True, timeout=5,
+                ['git', 'config', '--file', config, '--no-includes', '--null', '--list'],
+                cwd=workdir, capture_output=True, timeout=5,
                 env={'PATH': os.environ.get('PATH', os.defpath), 'GIT_CONFIG_NOSYSTEM': '1',
                      'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_COUNT': '0'})
         except (OSError, subprocess.TimeoutExpired) as error:
             raise LaunchIsolationError('cannot validate native Git configuration origins') from error
         if result.returncode:
             raise LaunchIsolationError('cannot validate native Git configuration origins')
-        fields = result.stdout.split(b'\0')
-        for origin, entry in zip(fields[0:-1:2], fields[1:-1:2]):
-            if not origin.startswith(b'file:'):
-                raise LaunchIsolationError('unexpected native Git configuration origin')
-            path = os.path.abspath(os.path.join(workdir, os.fsdecode(origin[5:])))
-            candidates = [path]
+        for entry in result.stdout.split(b'\0'):
             key, _, value = entry.partition(b'\n')
             if key == b'include.path' or (key.startswith(b'includeif.') and key.endswith(b'.path')):
                 include = os.fsdecode(value)
                 if '%(' in include:
                     raise LaunchIsolationError('unsupported native Git configuration include expansion')
-                candidates.append(os.path.abspath(os.path.join(os.path.dirname(path), os.path.expanduser(include))))
-            for candidate in candidates:
-                if _under(candidate, workdir) or _under(candidate, common):
-                    if os.path.realpath(candidate) != candidate or (os.path.exists(candidate) and
-                                                                   not os.path.isfile(candidate)):
-                        raise LaunchIsolationError('native Git configuration origins must be canonical files')
-                    # An absent include below a read-only parent already cannot be created.
-                    if os.path.exists(candidate) or any(_under(candidate, root) for root in writes):
-                        reads.add(candidate)
+                pending.append(os.path.abspath(os.path.join(os.path.dirname(config), os.path.expanduser(include))))
     return tuple(sorted(writes)), tuple(sorted(reads))
 
 

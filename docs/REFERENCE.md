@@ -835,7 +835,9 @@ access to its typed broker directory under `~/.swarm-launch/broker`; the rest of
 scratch home stays read-only to tools. Writer roles also receive exact Git metadata grants
 within their validated outer mounts, so native Codex tools can stage and commit in an
 independent clone. Git config, config.worktree, hooks and configuration includes remain
-read-only, including absent control files. Linked worktrees receive their own admin
+read-only, including absent control files and nested includes behind inactive conditions.
+Includes outside the validated repository mounts or unsupported path expansions prevent
+launch. Linked worktrees receive their own admin
 directory and shared objects/refs storage, never the shared Git root or sibling admin
 directories. Git can report a blocked optional `packed-refs.lock` attempt even when a
 linked-worktree commit succeeds; shared-root maintenance and packed-ref updates remain

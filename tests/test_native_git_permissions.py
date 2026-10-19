@@ -1,6 +1,5 @@
 """Real nested Codex Git capabilities in the existing role-aware launch jail (no model/API)."""
 import json
-import os
 import subprocess
 import sys
 import unittest
@@ -13,7 +12,7 @@ from swarm.supervisor import launchhome
 
 @unittest.skipUnless(isolation.CAN_JAIL and isolation.CODEX, 'needs native Codex and Linux user namespaces')
 class NativeGitPermissions(isolation.LaunchHomeCase):
-    def probe(self, layout, *, read_only, include_config=False, empty_include=False, conditional_include=False):
+    def probe(self, layout, *, read_only, include_config=False, empty_include=False, conditional_include=False, workspace_include=False, nested_include=False):
         repo = self.work / (layout + '-repo')
         self.git('init', '-q', str(repo))
         self.git('-C', str(repo), 'commit', '-q', '--allow-empty', '-m', 'base')
@@ -28,16 +27,19 @@ class NativeGitPermissions(isolation.LaunchHomeCase):
         gitdir, common = launchhome.git_dirs(self.cfg, str(workdir))
         included = None
         if include_config:
-            included = Path(common) / 'approved-include'
+            included = (workdir / 'runtime-config') if workspace_include else Path(common) / 'approved-include'
             if empty_include != 'missing':
-                included.write_text('' if empty_include else '[alias]\n\tshow-status = status\n')
+                included.write_text('[include]\n\tpath = ../nested-runtime-config\n' if nested_include else
+                                    '' if empty_include else '[alias]\n\tshow-status = status\n')
             self.git('-C', str(workdir), 'config',
                      'includeIf.onbranch:never-active.path' if conditional_include else 'include.path',
-                     './approved-include')
+                     '../runtime-config' if workspace_include else './approved-include')
         protected = [str(Path(d) / name) for d in {gitdir, common}
                      for name in ('config', 'config.worktree', 'hooks/native-forbidden-hook')]
         if included:
             protected.append(str(included))
+        if nested_include:
+            protected.append(str(workdir / 'nested-runtime-config'))
         if layout == 'linked':
             self.git('-C', str(repo), 'worktree', 'add', '-q', str(self.work / 'sibling-worktree'), '-b', 'other-owner')
             protected.append(str(Path(common) / 'worktrees/sibling-worktree/index'))
@@ -167,6 +169,18 @@ print(json.dumps(out))
         self.assertEqual(out['commit']['rc'], 0, out)
         self.assertTrue(all(value is not None for value in out['protected'].values()), out)
 
+    def test_writer_cannot_create_missing_configuration_include_in_workspace(self):
+        out, _ = self.probe('own', read_only=False, include_config=True,
+                            empty_include='missing', workspace_include=True)
+        self.assertEqual(out['commit']['rc'], 0, out)
+        self.assertTrue(all(value is not None for value in out['protected'].values()), out)
+
+    def test_writer_cannot_create_nested_configuration_behind_inactive_include(self):
+        out, _ = self.probe('own', read_only=False, include_config=True,
+                            conditional_include=True, nested_include=True)
+        self.assertEqual(out['commit']['rc'], 0, out)
+        self.assertTrue(all(value is not None for value in out['protected'].values()), out)
+
 
 class NativeGitProfileValidation(isolation.LaunchHomeCase):
     def test_linked_grants_do_not_include_common_root_or_sibling_admin(self):
@@ -199,7 +213,7 @@ class NativeGitProfileValidation(isolation.LaunchHomeCase):
         with self.assertRaises(launchhome.LaunchIsolationError):
             launchhome.codex_git_permissions(self.cfg, workdir)
 
-    def test_git_pointer_change_during_preparation_fails_closed(self):
+    def test_git_configuration_change_during_preparation_fails_closed(self):
         workdir = self.worktree()
         prepare = launchhome.prepare
         def changed(*args, **kwargs):
@@ -211,3 +225,21 @@ class NativeGitProfileValidation(isolation.LaunchHomeCase):
             with self.assertRaisesRegex(launchhome.LaunchIsolationError, 'changed during launch'):
                 launchhome.wrap(self.cfg, [isolation.CODEX or 'codex', 'exec', '--skip-git-repo-check', '-'],
                                 job='J', launch='changed', workdir=workdir, probe=lambda: (True, ''))
+
+    def test_configuration_include_cannot_expand_outer_mount_access(self):
+        workdir = self.worktree()
+        outside = self.home / 'private-config'
+        outside.write_text('[alias]\n\tx = status\n')
+        self.git('-C', workdir, 'config', 'includeIf.onbranch:inactive.path', str(outside))
+        with self.assertRaisesRegex(launchhome.LaunchIsolationError, 'validated repository mounts'):
+            launchhome.codex_git_permissions(self.cfg, workdir)
+
+    def test_cyclic_inactive_includes_are_bounded(self):
+        workdir = self.worktree()
+        first, second = (Path(workdir) / name for name in ('first-config', 'second-config'))
+        first.write_text('[include]\n\tpath = second-config\n')
+        second.write_text('[include]\n\tpath = first-config\n')
+        self.git('-C', workdir, 'config', 'includeIf.onbranch:inactive.path', str(first))
+        _, reads = launchhome.codex_git_permissions(self.cfg, workdir)
+        self.assertIn(str(first), reads)
+        self.assertIn(str(second), reads)
