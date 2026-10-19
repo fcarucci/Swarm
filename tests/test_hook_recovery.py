@@ -147,3 +147,45 @@ class HookRecovery(Env):
                 acts = passcmd.run_pass(board, self.cfg)
             self.assertTrue(any(': pass error Routing' in a for a in acts))
             self.assertTrue(any(call.args[2].job == 'J' for call in advance.call_args_list))
+
+    def test_remote_close_during_restore_removes_only_created_binding(self):
+        with self.board() as board:
+            board.recover_auto_close('J')
+            original = passcmd._restore_hook_binding
+            def close_during_restore(*args):
+                result = original(*args)
+                board.close_job('J', 'cancelled', 'remote owner', closed_by='owner')
+                return result
+            with mock.patch.object(passcmd, '_restore_hook_binding', side_effect=close_during_restore):
+                self.assertFalse(passcmd.repair_open_routing(board, self.cfg, 'J'))
+        self.assertEqual(self.bindings(), [])
+
+    def test_new_run_during_restore_cannot_inherit_old_binding(self):
+        with self.board() as board:
+            board.recover_auto_close('J')
+            original = passcmd._restore_hook_binding
+            def new_run_during_restore(*args):
+                result = original(*args)
+                board.close_job('J', 'cancelled', 'remote owner', closed_by='owner')
+                board.open_job('J', None, None, 'new-session', 'owner')
+                return result
+            with mock.patch.object(passcmd, '_restore_hook_binding', side_effect=new_run_during_restore):
+                self.assertFalse(passcmd.repair_open_routing(board, self.cfg, 'J'))
+        self.assertEqual(self.bindings(), [])
+
+    def test_pass_retires_recovered_binding_after_later_remote_close(self):
+        with self.board() as board:
+            board.recover_auto_close('J')
+            self.assertTrue(passcmd.repair_open_routing(board, self.cfg, 'J'))
+            board.close_job('J', 'cancelled', 'remote owner', closed_by='owner')
+            with mock.patch.object(passcmd, '_advance', return_value=[]):
+                passcmd.run_pass(board, self.cfg)
+        self.assertEqual(self.bindings(), [])
+
+    def test_routing_stop_is_durable_before_marker_removal(self):
+        from swarm import safefs
+        with mock.patch.object(safefs, 'write_atomic', wraps=safefs.write_atomic) as write:
+            enrolment.disable_job_routing(store_key(self.cfg), 'J')
+        calls = [c for c in write.call_args_list if c.args[1].startswith('routing-stop-')]
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0].kwargs.get('durable'))

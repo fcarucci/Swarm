@@ -226,12 +226,12 @@ def _dir(create: bool):
         os.close(fd)
 
 
-def _store(rec: Record, name: str) -> Record:
+def _store(rec: Record, name: str, *, durable: bool = False) -> Record:
     _validate(rec)
     body = json.dumps({"v": FORMAT, **asdict(rec)}, sort_keys=True)
     lock = coordinator_lock(rec.board_key, rec.job) if rec.kind in ("job", "owner") else contextlib.nullcontext()
     with lock, _dir(create=True) as d:
-        safefs.write_atomic(d, name, body)
+        safefs.write_atomic(d, name, body, durable=durable)
     return rec
 
 
@@ -508,7 +508,7 @@ def disable_job_routing(board_key: str, job: str) -> None:
     """Preserve explicit local deactivation intent even if the database is unavailable."""
     rec = find_job(board_key, job)
     if rec is not None:
-        _store(rec, _routing_stop_name(board_key, job))
+        _store(rec, _routing_stop_name(board_key, job), durable=True)
 
 
 def job_routing_disabled(rec: Record) -> bool:

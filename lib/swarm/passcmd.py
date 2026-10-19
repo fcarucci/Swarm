@@ -457,7 +457,8 @@ def _restore_hook_binding(board, cfg, job, js):
         return None
     marker = cli._marker(cfg, job).with_name(f'{cli.safe_job(job)}--{cli.safe_job(rec.session_id)}.json')
     data = {'job': job, 'session_id': rec.session_id, 'cwd': rec.cwd,
-            'adopt_running': True, 'attached': True, **({'goal': True} if js.goal else {})}
+            'adopt_running': True, 'attached': True, 'recovered_run': (js.activated_at or js.created_at).isoformat(),
+            **({'goal': True} if js.goal else {})}
     # Activation, teardown and reassignment share the coordinator lock. Publish complete
     # JSON atomically so an interrupted write leaves recovery retryable.
     with safefs.dir_fd(marker.parent, create=True) as directory:
@@ -465,6 +466,15 @@ def _restore_hook_binding(board, cfg, job, js):
             raise FileExistsError('conflicting recovery hook binding')
         safefs.write_atomic(directory, marker.name, json.dumps(data), durable=True)
     return marker, data
+
+
+def _retire_recovered_routing(cfg, job, js):
+    from swarm import cli
+    run = (js.activated_at or js.created_at).isoformat() if js and js.status == 'active' else None
+    for marker in cli._job_markers(cfg, job):
+        data = cli._read_marker(marker)
+        if 'recovered_run' in data and data['recovered_run'] != run:
+            cli.remove_marker(marker, keep=lambda p: cli._read_marker(p) != data)
 
 
 def repair_open_routing(board, cfg, job):
@@ -478,9 +488,19 @@ def repair_open_routing(board, cfg, job):
         return False
     with enrolment.coordinator_lock(key, job):
         js = board.job_status(job)
+        _retire_recovered_routing(cfg, job, js)
         if js is None or js.status != 'active':
             return False
-        return _restore_hook_binding(board, cfg, job, js) is not None
+        created = _restore_hook_binding(board, cfg, job, js)
+        current = board.job_status(job)
+        if (current is None or current.status != 'active'
+                or (current.activated_at or current.created_at) != (js.activated_at or js.created_at)):
+            if created is not None:
+                from swarm import cli
+                marker, data = created
+                cli.remove_marker(marker, keep=lambda p: cli._read_marker(p) != data)
+            return False
+        return created is not None
 
 
 def recover_auto_close(board, cfg: dict, job: str) -> bool:
@@ -525,12 +545,14 @@ def run_pass(board, cfg: dict, *, now: _dt.datetime | None = None, starter=None)
     for job, failed_at, launch_id, revision in board.failed_launch_retries():
         if board.reopen_failed_job(job, failed_at, launch_id, revision):
             acts.append(f"{job}: new run for fresh queued work")
-    for js in board.jobs():
+    for js in board.jobs(include_closed=True):
         try:
             if repair_open_routing(board, cfg, js.job):
                 acts.append(f"{js.job}: restored trusted coordinator hook routing")
         except Exception as exc:
             acts.append(f"{js.job}: pass error Routing {type(exc).__name__}: {exc}")
+        if js.status != 'active':
+            continue
         try:
             acts += _advance(board, cfg, js, now, starter)
         except Exception as exc:   # one job's trouble never stops the others
