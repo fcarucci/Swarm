@@ -141,7 +141,7 @@ def _bootstrap(cfg, board, fields, audit, receipt, request):
     """Finish only this new creation's local setup; never refresh later authority."""
     from swarm import cli
     current=board.job_status(fields['job'])
-    if (current is None or current.status!='active' or current.created_at.isoformat()!=receipt['created_at']
+    if (current is None or current.status!='active' or (current.activated_at or current.created_at).isoformat()!=receipt['created_at']
             or current.session_id!=receipt['session_id']):
         return
     name='create-complete-'+request+'.json'
@@ -163,7 +163,7 @@ def _bootstrap(cfg, board, fields, audit, receipt, request):
     created=not marker.exists()
     if created:cli._write_marker(marker,data)
     after=board.job_status(job)
-    if (after is None or after.status!='active' or after.created_at!=current.created_at
+    if (after is None or after.status!='active' or (after.activated_at or after.created_at)!=(current.activated_at or current.created_at)
             or after.session_id!=current.session_id):
         if created:cli.remove_marker(marker,keep=lambda p:cli._read_marker(p)!=data)
         return

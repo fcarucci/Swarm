@@ -121,3 +121,26 @@ class OwnerCreate(Env):
         got=self.hook('turn',agent_id='child',session=self.sid,host='codex',tool_name='Bash',
             tool_use_id='child-tool',tool_input={'command':self.command()})
         self.assertEqual(got['hookSpecificOutput']['permissionDecision'],'deny')
+
+    def test_incomplete_creation_never_bootstraps_reopened_run(self):
+        owner_create.attest(self.cfg,self.payload,self.host)
+        with mock.patch.object(owner_create,'_bootstrap'):
+            self.assertEqual(self.cli(*self.argv)[0],0)
+        with self.board() as b:
+            b.close_job('new-job','completed','done',closed_by='owner')
+            b.open_job('new-job',None,None,self.sid,'owner',goal='later run')
+        owner_create.attest(self.cfg,self.payload,self.host)
+        self.assertEqual(self.cli(*self.argv)[0],0)
+        self.assertFalse(cli._marker(self.cfg,'new-job').exists())
+
+    def test_remote_reopen_during_bootstrap_removes_new_marker(self):
+        owner_create.attest(self.cfg,self.payload,self.host)
+        original=cli._write_marker
+        def race(path,data):
+            original(path,data)
+            with self.board() as b:
+                b.close_job('new-job','completed','done',closed_by='owner')
+                b.open_job('new-job',None,None,self.sid,'owner',goal='later run')
+        with mock.patch.object(cli,'_write_marker',side_effect=race):
+            self.assertEqual(self.cli(*self.argv)[0],0)
+        self.assertFalse(cli._marker(self.cfg,'new-job').exists())
