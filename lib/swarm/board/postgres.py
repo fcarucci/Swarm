@@ -1181,6 +1181,20 @@ class PostgresBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
 
     # ---- jobs --------------------------------------------------------------------
 
+    @contextlib.contextmanager
+    def _create_job_transaction(self):
+        with self._conn.transaction():
+            # Requests span arbitrary names, so serialize this small creation transaction.
+            self._conn.execute("SELECT pg_advisory_xact_lock(hashtext('swarm-create-job-once'))")
+            yield
+
+    def _insert_created_job(self, job, description, task, session_id, created_by, goal, now):
+        return self._conn.execute(
+            "INSERT INTO jobs (job, description, task, session_id, created_by, goal, "
+            "created_at, activated_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
+            "ON CONFLICT (job) DO NOTHING RETURNING job",
+            (job, description, task, session_id, created_by, goal, now, now)).fetchone() is not None
+
     def ensure_job(self, job: str, description: str | None = None,
                    created_by: str | None = None) -> None:
         self._conn.execute(

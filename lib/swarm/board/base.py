@@ -1440,7 +1440,7 @@ def load_name_pool(data_dir: Path = DATA_DIR) -> dict[str, list[str]]:
 # checks at the end of each transaction, SQLite's connection is mode=ro). read_unread/read_new
 # are writes only when they advance the cursor.
 WRITE_METHODS = (
-    "purge", "ensure_job", "open_job", "close_job", "auto_close_job", "undo_auto_close", "recover_auto_close",
+    "purge", "create_job_once", "ensure_job", "open_job", "close_job", "auto_close_job", "undo_auto_close", "recover_auto_close",
     "sweep_auto_close", "bind_job_session", "reassign_job_session", "allocate_name", "claim_judge", "take_judge_launch", "claim_verifier",
     "set_waiting", "set_job_max_hours", "set_job_goal", "move_agent", "sweep_expiry", "reserve_spawn", "record_verdict", "tool_started", "record_route",
     "claim_route", "tool_finished", "agent_stopped", "set_agent_role", "set_agent_title", "set_agent_runtime",
@@ -1586,6 +1586,37 @@ class Board(abc.ABC):
         never touched (retention follows the memory: provenance.prune)."""
 
     # ---- jobs --------------------------------------------------------------------
+
+    def create_job_once(self, job: str, description: str | None, task: str | None,
+                        session_id: str, created_by: str | None, *, goal: str | None,
+                        request_id: str, request_hash: str) -> dict[str, str]:
+        """Atomically create an absent job and return its immutable creation receipt.
+
+        A request id is board-wide. Its exact hash, job and session must match on retry;
+        retries return the original receipt without touching even a closed/purged job.
+        Existing names are refused, never updated or reopened. Receipts are retained in
+        board metadata independently of job retention. Callers hash all request content.
+        """
+        for name, value in (("job", job), ("session_id", session_id),
+                            ("request_id", request_id), ("request_hash", request_hash)):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} must be a nonempty string")
+        key = "create-job-once:" + hashlib.sha256(request_id.encode()).hexdigest()
+        identity = dict(job=job, session_id=session_id, request_id=request_id,
+                        request_hash=request_hash)
+        with self._create_job_transaction():
+            prior = self._read_meta(key)
+            if prior is not None:
+                receipt = json.loads(prior)
+                if any(receipt.get(k) != v for k, v in identity.items()):
+                    raise BoardError("creation request conflicts with its existing receipt")
+                return receipt
+            now = self.now()
+            if not self._insert_created_job(job, description, task, session_id, created_by, goal, now):
+                raise BoardError(f"job {job!r} already exists; CREATE-NEW cannot change it")
+            receipt = dict(identity, created_at=now.isoformat())
+            self._write_meta(key, json.dumps(receipt, sort_keys=True))
+            return receipt
 
     @abc.abstractmethod
     def ensure_job(self, job: str, description: str | None = None,

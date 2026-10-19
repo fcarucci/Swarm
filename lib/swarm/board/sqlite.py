@@ -814,6 +814,16 @@ class SqliteBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
                   "jobs.description) WHERE excluded.description IS NOT NULL",
                   (job, description, created_by, self._now()))
 
+    def _create_job_transaction(self):
+        return self._tx()
+
+    def _insert_created_job(self, job, description, task, session_id, created_by, goal, now):
+        return self._c().execute(
+            "INSERT INTO jobs (job, description, task, session_id, created_by, goal, "
+            "created_at, activated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (job) DO NOTHING",
+            (job, description, task, session_id, created_by, goal, _ts(now), _ts(now))).rowcount > 0
+
     def ensure_job(self, job: str, description: str | None = None,
                    created_by: str | None = None) -> None:
         self._ensure_job(self._c(), job, description, created_by)

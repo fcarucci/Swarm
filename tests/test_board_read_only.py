@@ -52,6 +52,8 @@ class _Base:
         """(label, call) for a spread of write methods."""
         return [
             ("post", lambda: b.post("J", self.name, "more", agent_key="k")),
+            ("create_job_once", lambda: b.create_job_once("J2", None, None, "root", None,
+                                                          goal=None, request_id="r", request_hash="h")),
             ("open_job", lambda: b.open_job("J2", None, None, None, None)),
             ("allocate_name", lambda: b.allocate_name("k2", "J")),
             ("close_agent", lambda: b.close_agent("k", "stuck:dead")),

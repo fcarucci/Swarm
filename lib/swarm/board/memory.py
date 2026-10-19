@@ -21,6 +21,7 @@ rows in `MemoryStore.agents` / `.jobs` / `.messages`, which tests may backdate d
 from __future__ import annotations
 
 import copy
+import contextlib
 import datetime as _dt
 import getpass
 import random
@@ -344,6 +345,27 @@ class MemoryBoard(MemoryLaunches, MemoryBlockers, MemoryEvents, MemoryBgCommands
                "waiting_until": None, "max_hours": None, "closed_by": None}
         row.update(fields)
         return row
+
+    @contextlib.contextmanager
+    def _create_job_transaction(self):
+        s = self._s()
+        with s.lock:
+            jobs, meta, version = s.jobs.copy(), s.meta.copy(), s.state_version
+            try:
+                yield
+            except BaseException:
+                s.jobs, s.meta, s.state_version = jobs, meta, version
+                raise
+
+    def _insert_created_job(self, job, description, task, session_id, created_by, goal, now):
+        s = self._s()
+        if job in s.jobs:
+            return False
+        s.jobs[job] = self._new_job(job, description=description, task=task,
+                                  session_id=session_id, created_by=created_by, goal=goal,
+                                  created_at=now, activated_at=now)
+        s.touch()
+        return True
 
     def ensure_job(self, job: str, description: str | None = None,
                    created_by: str | None = None) -> None:
