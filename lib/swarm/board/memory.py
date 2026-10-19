@@ -389,6 +389,10 @@ class MemoryBoard(MemoryLaunches, MemoryBlockers, MemoryEvents, MemoryBgCommands
                 from swarm.review import auto_close_pending
                 if auto_close_pending(self, job):
                     return False
+            if guard and guard.obligations_clear and j:
+                from swarm.review import orphan_obligations_pending
+                if orphan_obligations_pending(self, job, j.get('goal'), j.get('verdict')):
+                    return False
             self._close(job, j, status, outcome, forced, closed_by)
             return j is not None
 
@@ -445,7 +449,7 @@ class MemoryBoard(MemoryLaunches, MemoryBlockers, MemoryEvents, MemoryBgCommands
         s = self._s()
         with s.lock:
             j = s.jobs.get(job)
-            if j is None or j["status"] != "completed" or j.get("closed_by") != AUTO_CLOSED_BY \
+            if j is None or j["status"] not in (("completed", "cancelled") if invalid_only else ("completed",)) or j.get("closed_by") != AUTO_CLOSED_BY \
                     or j["finished_at"] != closed_at:
                 return False
             if invalid_only:

@@ -245,7 +245,7 @@ class ExpiryContract:
     def test_a_met_goal_job_is_still_swept_and_a_changed_goal_is_guarded_again(self):
         self.job(age=2 * HOUR, agents={"jj": 0}, goal="ship it")
         self.assertTrue(self.b.claim_judge("jj", "j"))
-        self.assertTrue(self.b.record_verdict("j", self.b.active_agent_name("jj"), "met", "ok", None))
+        self.assertTrue(self.b.record_verdict("j", self.b.active_agent_name("jj"), "met", "ok", None, scope="goal"))
         self.h.backdate_agent("jj", last_seen=2 * HOUR)
         self.assertEqual([c.job for c in self.sweep()], ["j"])
         self.job("k", age=2 * HOUR)            # no goal: the orphan rule still applies

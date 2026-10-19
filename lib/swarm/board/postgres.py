@@ -1214,6 +1214,10 @@ class PostgresBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
                                          (job,)).fetchone()
                 if not row or not guard.allows(*row) or any(protects(b, self.now()) for b in self.blockers(job)):
                     return False
+                if guard.obligations_clear:
+                    from swarm.review import orphan_obligations_pending
+                    if orphan_obligations_pending(self, job, row[0], row[1]):
+                        return False
                 if guard.settled and not guard.pending_ok and row[0] and row[2] is None:
                     from swarm.review import auto_close_pending
                     if auto_close_pending(self, job):
@@ -1270,9 +1274,10 @@ class PostgresBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
                 from swarm.review import erroneous_auto_close
                 if not erroneous_auto_close(self, job):
                     return False
+            statuses = "('completed', 'cancelled')" if invalid_only else "('completed')"
             return self._conn.execute(
                 "UPDATE jobs SET status = 'active', finished_at = NULL, outcome = NULL, closed_by = NULL "
-                "WHERE job = %s AND status = 'completed' AND closed_by = %s AND finished_at = %s "
+                f"WHERE job = %s AND status IN {statuses} AND closed_by = %s AND finished_at = %s "
                 "RETURNING job", (job, AUTO_CLOSED_BY, closed_at)).fetchone() is not None
 
     def set_job_max_hours(self, job: str, hours: float | None) -> bool:

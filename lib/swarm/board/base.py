@@ -1205,6 +1205,7 @@ class CloseGuard:
     max_hours: float | None = None
     pending_ok: bool = False   # a close that is not completed work, so it need not wait for pipeline finalization
 
+    obligations_clear: bool = False  # orphan cancellation must recheck goal/task obligations atomically
     def allows(self, goal: str | None, verdict: str | None, max_hours: float | None) -> bool:
         if self.settled:
             return not goal_is_unmet(goal, verdict)
@@ -1647,7 +1648,9 @@ class Board(abc.ABC):
         is never undone). Then status active, finished_at, outcome and closed_by None; the run
         (activated_at), the agents and the verdict are kept, so the job auto-closes again, as
         the same run, once it is quiet. With invalid_only, additionally prove the stored
-        automatic completion invalid under the same backend lock. Returns whether it reverted."""
+        automatic completion invalid under the same backend lock. This mode also permits a proven
+        erroneous automatic orphan cancellation; unconditional undo never reopens cancellation.
+        Returns whether it reverted."""
 
     def recover_auto_close(self, job: str) -> bool:
         """Normal reconciliation/admission repairs only a proven erroneous automatic close.
@@ -1656,7 +1659,7 @@ class Board(abc.ABC):
         and authoritative goal acceptance therefore win over a stale observer.
         """
         js = self.job_status(job)
-        if js is None or js.status != 'completed' or js.closed_by != AUTO_CLOSED_BY:
+        if js is None or js.status not in ('completed', 'cancelled') or js.closed_by != AUTO_CLOSED_BY:
             return False
         return self.undo_auto_close(job, js.finished_at, invalid_only=True)
 
@@ -1877,7 +1880,7 @@ class Board(abc.ABC):
                        goal_stall_hours: float, watch) -> ExpiryAction | None:
         """What sweep_expiry should do with this job from the rollup alone: the stall close, else
         the orphan close, else nothing. The stall rule is checked first; a goal job has no orphan rule."""
-        from swarm.review import auto_close_pending
+        from swarm.review import auto_close_pending, orphan_obligations_pending
         if js.goal and js.max_hours is None and auto_close_pending(self, js.job):
             return None
         unmet = goal_unmet(js)
@@ -1888,9 +1891,11 @@ class Board(abc.ABC):
                 now - self.progress_at(js, grace=js.waiting_until) >= _dt.timedelta(hours=cap):
             guard = CloseGuard(False, js.goal, js.max_hours) if unmet else CloseGuard()
             return ExpiryAction("failed", stall_outcome(js, cap), cap, guard)
-        if not unmet and js.max_hours != 0 and orphaned(js, now, orphan_minutes) and not (watch is not None and watch(js.job).active()):
+        if (not unmet and js.max_hours != 0 and orphaned(js, now, orphan_minutes)
+                and not (watch is not None and watch(js.job).active())
+                and not orphan_obligations_pending(self, js.job, js.goal, js.verdict)):
             return ExpiryAction("cancelled", f"auto-closed: no live agents for {orphan_minutes:g} min", None,
-                                CloseGuard())
+                                CloseGuard(obligations_clear=True))
         return None
 
     def _expiry_holds(self, action: ExpiryAction, now_js: JobStatus | None, seen_activity,

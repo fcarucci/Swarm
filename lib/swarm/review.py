@@ -343,6 +343,19 @@ def completion_pending(board, job: str, goal: str | None, verdict: str | None) -
     return verdict != 'met'
 
 
+def orphan_obligations_pending(board, job: str, goal: str | None, verdict: str | None) -> bool:
+    """An orphan may retain the legacy unreachable outcome only without unfinished tasks.
+
+    An artifact-only verdict never settles the original goal; the completed-work contract
+    otherwise supplies the same task, candidate and finalization checks as quiet completion.
+    """
+    js = board.job_status(job)
+    if verdict == 'unreachable' and js.verdict_scope != 'artifact':
+        from swarm.dependencies import describe
+        return any(t['state'] != 'done' for t in describe(board, job))
+    return completion_pending(board, job, goal, verdict)
+
+
 def erroneous_auto_close(board, job: str) -> bool:
     """Proven obsolete core completion, never an inferred owner/legacy decision.
 
@@ -352,9 +365,15 @@ def erroneous_auto_close(board, job: str) -> bool:
     from swarm.board.base import AUTO_CLOSED_BY
     from swarm.dependencies import describe
     js = board.job_status(job)
-    if not (js and js.status == 'completed' and js.closed_by == AUTO_CLOSED_BY
+    if not (js and js.status in ('completed', 'cancelled') and js.closed_by == AUTO_CLOSED_BY
             and not js.completion_forced and js.finished_at):
         return False
+    if js.status == 'cancelled':
+        # Only the core orphan rule is known to have mistaken artifact MET/tasks for settlement.
+        # Other automatic cancellations and new work after closure are not evidence.
+        if (not re.fullmatch(r'auto-closed: no live agents for [0-9]+(?:\.[0-9]+)? min', js.outcome or '')
+                or not orphan_obligations_pending(board, job, js.goal, js.verdict)):
+            return False
     if (js.goal and js.verdict_scope == 'artifact' and js.verdict == 'met'
             and js.verdict_at and js.verdict_at <= js.finished_at):
         return True

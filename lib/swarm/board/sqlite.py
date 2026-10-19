@@ -846,6 +846,10 @@ class SqliteBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
                 row = c.execute("SELECT goal, verdict, max_hours FROM jobs WHERE job = ?", (job,)).fetchone()
                 if not row or not guard.allows(*row) or any(protects(b, self.now()) for b in self.blockers(job)):
                     return False
+                if guard.obligations_clear:
+                    from swarm.review import orphan_obligations_pending
+                    if orphan_obligations_pending(self, job, row[0], row[1]):
+                        return False
                 if guard.settled and not guard.pending_ok and row[0] and row[2] is None:
                     from swarm.review import auto_close_pending
                     if auto_close_pending(self, job):
@@ -902,9 +906,10 @@ class SqliteBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
                 from swarm.review import erroneous_auto_close
                 if not erroneous_auto_close(self, job):
                     return False
+            statuses = "('completed', 'cancelled')" if invalid_only else "('completed')"
             return c.execute(
                 "UPDATE jobs SET status = 'active', finished_at = NULL, outcome = NULL, closed_by = NULL "
-                "WHERE job = ? AND status = 'completed' AND closed_by = ? AND finished_at = ?",
+                f"WHERE job = ? AND status IN {statuses} AND closed_by = ? AND finished_at = ?",
                 (job, AUTO_CLOSED_BY, _ts(closed_at))).rowcount > 0
 
     def set_job_max_hours(self, job: str, hours: float | None) -> bool:
