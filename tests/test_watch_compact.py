@@ -57,7 +57,7 @@ class CompactWorkersTests(Env):
             self.assertNotIn("ago ago", line)
         self.assertIn("(build)", self.agent_lines(self.frame())[0])
 
-    def test_idle_and_waiting_stay_visible_but_left_and_handoff_are_summarized(self):
+    def test_idle_rows_are_hidden_while_waiting_and_rollup_remain_visible(self):
         self.h.update_agent("w0", current_tool=None)
         self.h.backdate_agent("w0", last_seen=10 * 60)
         with self.board() as b:
@@ -69,10 +69,40 @@ class CompactWorkersTests(Env):
         self.h.update_agent("w3", state="left")
         lines = self.frame()
         live = self.agent_lines(lines)
-        self.assertEqual(len(live), 2)
-        self.assertIn(" idle ", live[0])
-        self.assertIn(" waiting ", live[1])
+        self.assertEqual(len(live), 1)
+        self.assertNotIn(self.names['w0'], '\n'.join(live))
+        self.assertIn(" waiting ", live[0])
+        self.assertTrue(any("1 idle (no reason given)" in line for line in lines))
+        self.assertTrue(any(self.names['w0'] in line and ' idle ' in line
+                            for line in self.agent_lines(self.frame(compact=False, all_agents=True))))
         self.assertTrue(any("13 finished, 1 lost" in line for line in lines))
+
+    def test_all_idle_job_and_messages_remain_without_idle_rows_or_state_changes(self):
+        with self.board() as board:
+            for i in range(3):
+                board.agent_turn_ended(f'w{i}')
+            before = board.agents('J')
+        for all_agents in (False, True):
+            with self.subTest(all_agents=all_agents):
+                lines = self.frame(all_agents=all_agents)
+                self.assertTrue(any(line.startswith('J [idle]') for line in lines))
+                self.assertEqual(self.agent_lines(lines), [])
+                self.assertTrue(any('0 working, 0 waiting, 3 idle (no reason given), 12 finished, 1 lost'
+                                    in line for line in lines))
+                self.assertIn('MESSAGES', lines)
+                self.assertTrue(any('working' in line for line in lines[lines.index('MESSAGES') + 1:]))
+        with self.board() as board:
+            self.assertEqual(board.agents('J'), before)
+
+    def test_started_and_running_rows_stay_visible_when_idle_row_is_hidden(self):
+        with self.board() as board:
+            self.names['started'] = board.allocate_name('started', 'J', 'engineer')
+            board.agent_turn_ended('w0')
+        lines = self.agent_lines(self.frame())
+        self.assertEqual(len(lines), 3)
+        self.assertTrue(any(self.names['started'] in line and ' started ' in line for line in lines))
+        self.assertEqual(sum(' running ' in line for line in lines), 2)
+        self.assertFalse(any(self.names['w0'] in line for line in lines))
 
     def test_old_finished_agents_are_counted_without_hidden_rows(self):
         for i in range(3, 15):

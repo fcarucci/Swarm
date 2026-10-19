@@ -2031,7 +2031,7 @@ def _compact_frame(board, job: str | None, color: bool, view: dict, rows: list |
             agents = board.agents(j.job)
         agents = agentview.annotate(board, j.job, agents, now)
         out += [_compact_agent_line(a, NATURAL, color, now) for a in agents
-                if a.status in ("running", "started", "idle", "waiting")]
+                if a.status in ("running", "started", "waiting")]
         if agents:
             line = "WORKERS: " + agentview.rollup(agents).text()
             out.append("  " + (_sgr(2, line) if color else line))
