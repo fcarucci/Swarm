@@ -256,12 +256,16 @@ def _route_new(board, event: str, agent_id: str, sid: str, bound: dict, unbound:
                payload: dict, cfg: dict) -> None:
     """Route an agent with no active board row and enrol it (or say why not, once)."""
     route = board.route(agent_id)
-    if current_host().name == 'codex' and route.state == 'unverified' and not route.member_job:
+    if current_host().name == 'codex' and route.state in ('pending', 'unverified') and not route.member_job:
         from swarm import codex_bindings
         receipt = codex_bindings.read(cfg, sid, agent_id)
-        job = receipt['job'] if receipt and receipt['job'] == route.job and route.session_id == sid else None
+        # A start can insert pending after PostToolUse reads the cache but before its
+        # claim. The private receipt remains authoritative when that cache claim loses.
+        cache_matches = receipt and (receipt['job'] == route.job or
+                                      (route.state == 'pending' and route.job is None))
+        job = receipt['job'] if cache_matches and route.session_id == sid else None
         if job in bound:
-            if not board.claim_route(agent_id, sid, 'unverified', 'final', job):
+            if not board.claim_route(agent_id, sid, route.state, 'final', job):
                 return
             _enrol(board, event, agent_id, job, payload, cfg, sid, bound[job])
             return

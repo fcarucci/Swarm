@@ -222,5 +222,28 @@ class MultiJobRoutingTests(Env):
             p['tool_input']['task_name'] = 'jobhex__' + value + '__engineer__api'
             self.assertIsNotNone(self.denied(self.call('turn', p)))
 
+    def test_start_race_losing_post_cache_claim_recovers_from_private_receipt(self):
+        from swarm import codex_bindings
+        from unittest import mock
+        original_write = codex_bindings.write
+
+        def start_between_receipt_and_cache_claim(cfg, payload, child, job):
+            written = original_write(cfg, payload, child, job)
+            with self.board() as board:
+                board.claim_route(child, self.sid, None, 'pending')
+            return written
+
+        payload = self.spawn_payload()
+        self.call('turn', payload)
+        with mock.patch.object(codex_bindings, 'write', side_effect=start_between_receipt_and_cache_claim):
+            self.call('done', {**payload, 'tool_response': {'agent_id': self.child}})
+        with self.board() as board:
+            self.assertEqual((board.route(self.child).state, board.route(self.child).job), ('pending', None))
+        self.assertIsNotNone(codex_bindings.read(self.cfg, self.sid, self.child))
+        self.replay('PreToolUse', self.child_payloads('PreToolUse')[0])
+        self.assertIsNotNone(self.agent(self.child, job='other'))
+        with self.board() as board:
+            self.assertEqual((board.route(self.child).state, board.route(self.child).job), ('final', 'other'))
+
 # Keep helper fixture class out of unittest discovery.
 del _CodexHookTests
