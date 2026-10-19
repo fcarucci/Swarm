@@ -137,9 +137,13 @@ requests and handoffs with `--to` only after resolving the current name:
 swarm post --job J --as "PM name" --to "EL name" "Capacity: one next invocation; return revised staffing in docs/team/engineering.md"
 ```
 
-Claude can route multiple jobs by prompt tags. Codex allows one job per session;
-prompt tags cannot select another job. A configured second session/host sharing the
-board uses the native owner-authorized session binding route without reopening the job. That session uses its own durable PM key, built from the same job
+Claude routes multiple jobs by prompt tags. An authorized Codex root can create another
+job with `swarm create --job J --goal TEXT --task TEXT --workdir ABS
+--request-id ACTUAL_USER_MSG_ID`, then route root spawns with `job__J__ROLE__TASK`.
+Encrypted prompt tags cannot select a job. Nested children inherit their exact parent job;
+follow-ups preserve membership. Legacy `activate` retains its one-job guard.
+A configured second session/host sharing the board uses the native owner-authorized
+session binding route without reopening the job. That session uses its own durable PM key, built from the same job
 and its own host/session identity; never transfer or reuse the first session's key. Agree
 one PM scheduler; do not create competing ownership or dispatch loops.
 
