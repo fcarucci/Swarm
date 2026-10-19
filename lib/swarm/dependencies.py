@@ -38,7 +38,7 @@ def evidence(board, row):
 
 
 def register(board, job, generation, name, *, artifact, depends, role, harness, model,
-             workdir, brief, queued_by, reporter=None):
+             workdir, brief, queued_by, reporter=None, cfg=None):
     """Atomically insert a task once; repeated identical registration preserves all lifecycle state.
 
     reporter names an external agent already in an active turn whose completion must be witnessed,
@@ -47,7 +47,8 @@ def register(board, job, generation, name, *, artifact, depends, role, harness, 
     """
     from swarm.board.base import run_start
     from swarm.board.launches import check_launch
-    board.recover_auto_close(job)
+    from swarm.passcmd import recover_auto_close
+    recover_auto_close(board, cfg or {}, job)
     js = board.job_status(job)
     if js is None:
         raise ValueError(f'{job} is not an open job')

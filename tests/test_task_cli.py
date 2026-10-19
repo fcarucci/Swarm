@@ -57,12 +57,47 @@ class TaskCLI(Env):
             rc, _, err = self.cli(*args)
         self.assertEqual(rc, 1)
         self.assertIn('assigned enrolled agent session', err)
-        with mock.patch.dict(os.environ, {'CODEX_THREAD_ID': 'qa-thread', 'CODEX_SESSION_ID': 'qa-session'}):
+        with mock.patch.dict(os.environ, {'CODEX_THREAD_ID': 'qa-seat', 'CODEX_SESSION_ID': 'qa-session'}):
             rc, out, err = self.cli(*args)
         self.assertEqual(rc, 0, err)
         self.assertIn('evidence recorded', out)
         with self.board() as board:
             self.assertEqual(len(board.events('J')), 1)
+
+    def child_report(self, thread, session='root-session'):
+        args = ('task', 'report', '--job', 'J', '--name', 'qa', '--artifact', 'main@' + 'a' * 40,
+                '--outcome', 'passed', '--reason', 'checked exact source', '--as', self.child_name)
+        with mock.patch.dict(os.environ, {'CODEX_THREAD_ID': thread, 'CODEX_SESSION_ID': session}):
+            return self.cli(*args)
+
+    def trusted_child_task(self):
+        self.trust_job()
+        with self.board() as board:
+            self.child_name = board.allocate_name('child-thread', 'J', 'qa')
+            board.record_route('child-thread', 'root-session', 'final', 'J')
+        enrolment.write(store_key(self.cfg), job='J', agent_key='child-thread', harness='codex',
+                        session_id='root-session', cwd=str(self.tmp))
+        self.assertEqual(self.add('--reporter', self.child_name)[0], 0)
+
+    def test_child_can_report_using_own_thread_without_root_route(self):
+        self.trusted_child_task()
+        with self.board() as board:
+            board.record_route('child-thread', None, 'final', 'J')
+        rc, out, err = self.child_report('child-thread')
+        self.assertEqual(rc, 0, err)
+        self.assertIn('evidence recorded', out)
+
+    def test_sibling_cannot_report_as_child_sharing_root_session(self):
+        self.trusted_child_task()
+        rc, _, err = self.child_report('sibling-thread')
+        self.assertEqual(rc, 1, 'a shared root route must not authorize sibling evidence')
+        self.assertIn('assigned enrolled agent session', err)
+
+    def test_parent_cannot_report_as_child_sharing_root_session(self):
+        self.trusted_child_task()
+        rc, _, err = self.child_report('root-session')
+        self.assertEqual(rc, 1, 'a parent must not attest a child task')
+        self.assertIn('assigned enrolled agent session', err)
 
     def test_native_task_startup_failure_persists_concrete_reason(self):
         self.trust_job()

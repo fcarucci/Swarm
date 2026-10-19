@@ -443,6 +443,53 @@ def _notices(board, now: _dt.datetime) -> list[str]:
     return acts
 
 
+def recover_auto_close(board, cfg: dict, job: str) -> bool:
+    """Recover the same run and its local hook binding from private activation proof.
+
+    Display-session reassignment is not hook ancestry. Never derive a coordinator from
+    a writable board row, overwrite an existing binding, or revive an explicit closure.
+    """
+    from swarm import enrolment, cli, safefs
+    from swarm.board.autoinit import store_key
+    from swarm.review import erroneous_auto_close
+    if not cfg or 'hook' not in cfg:
+        return board.recover_auto_close(job)
+    from swarm.board.base import AUTO_CLOSED_BY
+    observed = board.job_status(job)
+    if (observed is None or observed.status not in ('completed', 'cancelled')
+            or observed.closed_by != AUTO_CLOSED_BY):
+        return False
+    key = store_key(cfg)
+    with enrolment.coordinator_lock(key, job):
+        # Prepare the binding before reopening. A failed write leaves the closed run
+        # retryable; the backend still rechecks exact closure/obligations atomically.
+        if not erroneous_auto_close(board, job):
+            return False
+        rec = enrolment.find_job(key, job)
+        js = board.job_status(job)
+        if (rec is None or not rec.session_id or not cli.valid_session_id(rec.session_id)
+                or rec.created_at < (js.activated_at or js.created_at).timestamp()):
+            return board.recover_auto_close(job)
+        bindings = [cli._read_marker(p) for p in cli._job_markers(cfg, job)]
+        if any(m.get('session_id') == rec.session_id and 'resume' not in m for m in bindings):
+            return board.recover_auto_close(job)
+        marker = cli._marker(cfg, job).with_name(f'{cli.safe_job(job)}--{cli.safe_job(rec.session_id)}.json')
+        data = {'job': job, 'session_id': rec.session_id, 'cwd': rec.cwd,
+                'adopt_running': True, 'attached': True, **({'goal': True} if js.goal else {})}
+        # Activation, teardown and reassignment share the coordinator lock. Publish
+        # complete JSON atomically so an interrupted write leaves recovery retryable.
+        with safefs.dir_fd(marker.parent, create=True) as directory:
+            if safefs.exists(directory, marker.name):
+                raise FileExistsError('conflicting recovery hook binding')
+            safefs.write_atomic(directory, marker.name, json.dumps(data), durable=True)
+        if board.recover_auto_close(job):
+            return True
+        # A concurrent authoritative board decision wins. Remove only our binding,
+        # with the normal inode lock, never a replacement written by activation.
+        cli.remove_marker(marker, keep=lambda p: cli._read_marker(p) != data)
+        return False
+
+
 def run_pass(board, cfg: dict, *, now: _dt.datetime | None = None, starter=None) -> list[str]:
     """One pass over every open job. Returns what it did (empty when nothing needed doing)."""
     if starter is None:
@@ -452,8 +499,11 @@ def run_pass(board, cfg: dict, *, now: _dt.datetime | None = None, starter=None)
     board.expire_blockers(now)
     acts = []
     for js in board.jobs(include_closed=True):
-        if board.recover_auto_close(js.job):
-            acts.append(f"{js.job}: restored unfinished automatically closed run")
+        try:
+            if recover_auto_close(board, cfg, js.job):
+                acts.append(f"{js.job}: restored unfinished automatically closed run")
+        except Exception as exc:
+            acts.append(f"{js.job}: recovery error {type(exc).__name__}: {exc}")
     for job, failed_at, launch_id, revision in board.failed_launch_retries():
         if board.reopen_failed_job(job, failed_at, launch_id, revision):
             acts.append(f"{job}: new run for fresh queued work")

@@ -46,9 +46,15 @@ def run(board, cfg: dict, args) -> int:
                                 f"{row['artifact']} {row['reason']}"))
         return 0
     bk = store_key(cfg)
-    sid = hosts.cli_session_id(os.environ)
+    # Codex children inherit the coordinator's CODEX_SESSION_ID; only the current
+    # thread identifies the worker. A shared root route never authorizes a sibling.
+    codex = hosts.detect_cli_host(os.environ) == 'codex'
+    sid = (os.environ.get('CODEX_THREAD_ID') or hosts.cli_session_id(os.environ)) if codex else hosts.cli_session_id(os.environ)
+    def is_caller(a):
+        return bool(sid and (a.agent_key == sid or (
+            not codex and board.route(a.agent_key).session_id == sid)))
     members = board.agents(args.job, include_departed=False)
-    session_agents = [a for a in members if sid and (a.agent_key == sid or board.route(a.agent_key).session_id == sid)]
+    session_agents = [a for a in members if is_caller(a)]
     actor = args.actor or (session_agents[0].name if len(session_agents) == 1 else cli._blocker_actor(board, cfg))
     agent = next((a for a in members if a.name == actor), None)
     # Ordinary job enrolment grants task registration, never drive-owner authority. Evidence
@@ -65,11 +71,11 @@ def run(board, cfg: dict, args) -> int:
                 raise ValueError(why)
             row = dependencies.register(board, args.job, args.generation, args.name,
                 artifact=args.artifact, depends=args.depends, role=args.role, harness=args.harness,
-                model=args.model, workdir=args.workdir, brief=args.brief, queued_by=actor, reporter=args.reporter)
+                model=args.model, workdir=args.workdir, brief=args.brief, queued_by=actor, reporter=args.reporter, cfg=cfg)
             print(term_safe(f"{row.name}: {row.state}; dependencies persisted"))
         else:
             if (agent is None or not sid or not enrolment.owns(bk, agent.agent_key, args.job)
-                    or (agent.agent_key != sid and board.route(agent.agent_key).session_id != sid)):
+                    or not is_caller(agent)):
                 raise ValueError("task evidence requires the assigned enrolled agent session")
             _, created = dependencies.report(board, args.job, args.generation, args.name,
                 artifact=args.artifact, outcome=args.outcome, reason=args.reason, actor=actor)

@@ -2032,6 +2032,16 @@ def _on_event(board, event: str, agent_id: str, sid: str | None, bound: dict, un
             return
     if member.job not in bound:  # its job is not (or no longer) one of this session's
         return
+    if board.route(agent_id).session_id is None:
+        # A manually joined worker has membership but no trusted hook enrollment.
+        # Only its own real hook under the privately recorded coordinator can bind it.
+        from swarm import enrolment
+        from swarm.board.autoinit import store_key
+        activation = enrolment.find_job(store_key(cfg), member.job)
+        if activation is not None and activation.harness == current_host().name and activation.session_id == sid:
+            board.record_route(agent_id, sid, 'final', member.job)
+            _record_enrolment(cfg, agent_id, member.job, sid, payload)
+            board.set_agent_runtime(agent_id, current_host().name, payload.get('model'))
     if member.verify_tag:
         member = _verify_route(board, agent_id, sid, member, bound, unbound, payload, cfg)
         if member is None:

@@ -3247,6 +3247,17 @@ def valid_session_id(session: str) -> bool:
 
 
 def cmd_activate(cfg: dict, args) -> int:
+    from swarm import enrolment
+    from swarm.board.autoinit import store_key
+    try:
+        with enrolment.coordinator_lock(store_key(cfg), args.job):
+            return _cmd_activate_locked(cfg, args)
+    except BlockingIOError:
+        print("swarm activate: another coordinator operation is in progress; retry", file=sys.stderr)
+        return 1
+
+
+def _cmd_activate_locked(cfg: dict, args) -> int:
     from swarm.board import open_board
     from swarm import hosts, safefs
     from swarm.jobmarkers import JOB_NAME
@@ -3423,6 +3434,18 @@ def _completion_refusal(js) -> str | None:
 
 
 def cmd_deactivate(cfg: dict, args) -> int:
+    # Serialize explicit teardown with local routing recovery/reassignment.
+    from swarm import enrolment
+    from swarm.board.autoinit import store_key
+    try:
+        with enrolment.coordinator_lock(store_key(cfg), args.job):
+            return _cmd_deactivate_locked(cfg, args)
+    except BlockingIOError:
+        print("swarm deactivate: another coordinator operation is in progress; retry", file=sys.stderr)
+        return 1
+
+
+def _cmd_deactivate_locked(cfg: dict, args) -> int:
     from swarm.board import AUTO_CLOSED_BY, open_board
     marker = _marker(cfg, args.job)
     completing = args.status == "completed"

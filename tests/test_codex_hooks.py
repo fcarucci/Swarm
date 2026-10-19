@@ -64,6 +64,42 @@ class CodexHookTests(Env):
 
     # ---- enrolment and routing
 
+    def test_manual_join_is_enrolled_by_own_real_hook_after_activation(self):
+        from swarm import enrolment
+        from swarm.board.autoinit import store_key
+        self.activate_fixture_job()
+        enrolment.write_job(store_key(self.cfg), job='fixture', harness='codex',
+                            session_id=self.sid, cwd=str(self.tmp))
+        self.cli('join', '--job', 'fixture', '--key', self.child, '--role', 'engineer')
+        self.replay('PreToolUse', self.child_payloads('PreToolUse')[0])
+        with self.board() as board:
+            self.assertEqual(board.route(self.child).session_id, self.sid)
+        self.assertTrue(enrolment.owns(store_key(self.cfg), self.child, 'fixture'))
+        self.assertGreater(self.agent(self.child, job='fixture').tool_calls, 0)
+
+    def test_auto_close_recovery_restores_original_hook_binding(self):
+        from swarm import enrolment, passcmd
+        from swarm.board.autoinit import store_key
+        from swarm.board.base import AUTO_CLOSED_BY
+        self.start_child()
+        enrolment.write_job(store_key(self.cfg), job='fixture', harness='codex',
+                            session_id=self.sid, cwd=str(self.tmp))
+        with self.board() as board:
+            board.set_job_goal('fixture', 'Complete unfinished work')
+            from swarm import dependencies
+            dependencies.register(board, 'fixture', 1, 'pending', artifact='source@abc',
+                depends=[], role='engineer', harness='codex', model=None, workdir=str(self.tmp),
+                brief='Finish work', queued_by='owner')
+            board.close_job('fixture', 'cancelled', 'auto-closed: no live agents for 30 min',
+                            closed_by=AUTO_CLOSED_BY)
+            swarm._drop_auto_closed_markers(board, self.cfg)
+            self.assertFalse(swarm._job_markers(self.cfg, 'fixture'))
+            with mock.patch.object(passcmd, '_advance', return_value=[]):
+                passcmd.run_pass(board, self.cfg)
+        self.assertTrue(swarm._job_markers(self.cfg, 'fixture'))
+        self.replay('PreToolUse', self.child_payloads('PreToolUse')[0])
+        self.assertEqual(self.agent(self.child, job='fixture').status, 'running')
+
     def test_custom_role_from_task_name_is_visible_and_survives_followup(self):
         self.rename_child("/root/product_manager__spec")
         self.start_child()
