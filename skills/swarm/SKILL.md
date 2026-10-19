@@ -1,6 +1,6 @@
 ---
 name: swarm
-description: Run a swarm of agents that coordinate through a shared message board (Postgres, or SQLite or plain files on one machine). Use when launching several subagents on one job that need to talk to each other (claims, findings, warnings, handoffs), in Claude Code or Codex. Each agent gets a unique Simpsons-character name, is told how to post, and automatically sees messages that are new since its last turn. A Claude Code session can run several swarms at once: tag each subagent prompt with its job's `[swarm job: <job>]` line (a Codex session runs one).
+description: Run a swarm of agents that coordinate through a shared message board (Postgres, or SQLite or plain files on one machine). Use when launching several subagents on one job that need to talk to each other (claims, findings, warnings, handoffs), in Claude Code or Codex. Each agent gets a unique Simpsons-character name, is told how to post, and automatically sees messages that are new since its last turn. Claude Code and an authorized Codex root can run several jobs: Claude routes by prompt tags, Codex by explicit job task names.
 ---
 
 # swarm: agents that coordinate through a message board
@@ -288,7 +288,8 @@ user asks for one. Don't run duplicate jobs: merge similar ones (`swarm job merg
 2. **Spawn the subagents, with the tag line in every prompt.** Put `[swarm job: <job>]` on a
    line of its own in each subagent's prompt, always. It is what routes the subagent to its job:
    - **One Claude Code session can run several swarms at once.** Activate each job; each
-     subagent joins the job its tag names. (A Codex session runs one job: see [Codex](#codex).)
+     subagent joins the job its tag names. An authorized Codex root uses explicit job task
+     names for several jobs: see [Codex](#codex).
    - Untagged, a subagent joins the session's job only if the session has exactly one. With
      several jobs active and no tag, it joins none (logged in `~/.local/share/swarm/host/routing.log`).
    - A tag naming a job that isn't active in this session joins nothing, and the subagent is
@@ -451,14 +452,25 @@ same; what differs:
   (`<plugin root>/skills/swarm/SKILL.md`). Run `<plugin root>/bin/swarm activate ...`: it binds
   the job to the calling Codex session by itself and prints `swarm command: <absolute path>`,
   the path to use from then on (`~/.local/bin/swarm` works too once it exists).
-- **One job per Codex session.** `activate` (and `activate --attach`) refuses a second job in
-  the same Codex session: deactivate the first, or use another session. Reuse means the
-  session's own job; a new job needs a new session.
+- **Several jobs in one Codex root.** An authorized root can create a separate job with
+  `swarm create --job J --goal TEXT --task TEXT --workdir ABS --request-id ACTUAL_USER_MSG_ID`.
+  The actual user message ID records the request; the trusted root hook supplies authority.
+  Children and enrolled agents cannot create jobs. Creation is atomic and create-only: it
+  cannot reopen or edit an existing job. `--display-session PANE_GROUP` optionally groups the
+  display; it does not confer root authority. The existing session keeps its other jobs and
+  needs no extra pane. Legacy `activate` and `activate --attach` retain their one-job guard;
+  agents still cannot run lifecycle commands or edit job lifecycle state.
 - **Spawning.** Spawn with `spawn_agent`; the child's prompt is its `message`. Codex encrypts
-  that message, so the hooks can't read tag lines in it (leave them in or out, they have no
-  effect). Instead:
-  - every child of the session joins the session's job (hence one job per session);
-  - the **task name** sets the role: use `<role>__<task>`, for example
+  that message, so use plaintext task names for dependable routing:
+  - with several jobs, root spawns must use `job__J__ROLE__TASK`, for example
+    `job__loom-preprocess-port__engineering_lead__port`. An explicit visible
+    `[swarm job: J]` tag in the spawn input also works; encrypted tags cannot be read.
+    The hook binds the actual returned child through its unique native thread path and
+    parent ancestry. A child that starts first stays pending until that result is available.
+    An ambiguous root spawn is refused, and existing members are never moved;
+  - nested children inherit their exact parent's job; a conflicting job is refused.
+    Follow-ups preserve the child's job;
+  - the **task name** sets the role: within one job use `<role>__<task>`, for example
     `product_manager__spec`, `engineering_lead__plan`, `engineer__api`, `qa__e2e`,
     `verifier__acceptance` or `judge__final`. Role names use the identifier syntax above;
     the task suffix must be nonempty. The explicit form is checked first, so

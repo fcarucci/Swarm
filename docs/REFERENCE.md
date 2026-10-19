@@ -276,7 +276,7 @@ both at once (see [One job, both hosts](#one-job-both-hosts)). What differs, as 
 |---|---|---|
 | plugin hooks | `hooks/hooks.json`, active once installed | `hooks/codex-hooks.json`; you must trust them in `/hooks`, and again after every update that changes them |
 | spawn tool | `Agent` | `spawn_agent` (the prompt is its `message`) |
-| which job a subagent joins | the job its `[swarm job: <job>]` tag names; one session can run several jobs | the session's job: Codex encrypts spawn messages, so tags can't be read, and a session runs one job at a time (`activate` refuses a second) |
+| which job a subagent joins | the job its `[swarm job: <job>]` tag names; one session can run several jobs | the authorized root's explicit `job__JOB__ROLE__TASK` spawn input, bound to the exact returned child; nested children inherit their parent job; legacy `activate` still refuses a second job |
 | role | `[swarm role: <role>]` in the prompt | `<role>__<task>` task name; legacy `verifier...` / `judge...` prefixes also work |
 | title | `[swarm title: <text>]` in the prompt, or `swarm title` | the spawn message is encrypted: the agent runs `swarm title` itself |
 | an agent's own spawns | need the job's tag and a `[swarm spawn: <why>]` line, within the caps and depth | only the caps and depth are checked; the spawn is announced on the board and the agent is told to say there why |
@@ -974,8 +974,12 @@ session at once: Claude Code sets `CLAUDE_CODE_SESSION_ID` in its Bash tool, and
 in its shell. `--session <id>` overrides it. Run from a plain terminal, the marker stays unbound
 until the first session that *spawns* a subagent claims it, atomically under a file lock. Once a
 marker is bound, subagents of other sessions are ignored, so two sessions running at once can't
-join each other's jobs. A Codex session can have only one job active: its subagents can't say
-which job they belong to, so `activate` refuses a second one there.
+join each other's jobs. Legacy Codex `activate` refuses a second job. An authorized root can
+create another job with `swarm create --job J --goal TEXT --task TEXT --workdir ABS
+--request-id ACTUAL_USER_MSG_ID`. The trusted root hook provides authority; the actual user
+message ID is audit evidence. Creation is atomic and create-only, preserves existing jobs, and
+needs no extra pane. Children cannot create jobs. Optional `--display-session PANE_GROUP`
+controls display grouping independently of root authority.
 
 `activate` prints `swarm command: <absolute path>` (the plugin's `bin/swarm`, the command the
 orchestrating agent should use from then on), then the tag lines.
@@ -1005,7 +1009,7 @@ is how you replace the auto-close outcome with a real summary.
 reopening it: activate the job in a Claude Code session, then attach a Codex session to it (or
 the other way round). The attached session gets its own marker; its subagents join the same
 board, routed the way their host does it, and the job's run, verdict and history stay as they
-are. It fails if the job isn't active, and in Codex it counts as the session's one job. Both
+are. It fails if the job isn't active; legacy Codex `activate --attach` keeps its one-job guard. Both
 sessions must use the same board (a shared Postgres, or both on one machine). Every agent row
 records its host, shown as HOST in `status --job` and after the name in `who`. `deactivate`
 removes this machine's markers of the job, the attached ones included.
@@ -1142,16 +1146,21 @@ subagent's spawn prompt:
 | `[swarm spawn: <why>]` | required in the prompt of a subagent spawned by a swarm agent |
 
 In Codex the spawn prompt (`spawn_agent`'s `message`) is encrypted, so none of these can be
-read there. Instead, every subagent of a Codex session joins the session's one job; a task name
-`<role>__<task>` sets the role, while legacy names beginning with `verifier` or `judge` select
-those built-in roles only when the name has no `__`; and a swarm agent's spawn is checked against
-the caps and the depth only (see [Hosts](#hosts-claude-code-and-codex)).
+read reliably there. With several jobs, use `task_name="job__JOB__ROLE__TASK"` at the root;
+a visible explicit job tag in trusted spawn input also selects the job. Conflicting or ambiguous
+job selection is refused. PostToolUse binds only the actual returned child, resolving a
+canonical task path against unique native first-header metadata, its exact parent, and root
+ancestry. A child that starts before that result stays pending. Existing members are never
+rebound, nested children inherit their exact parent job, and follow-ups preserve membership.
+Within one job, `<role>__<task>` still sets the role; legacy names beginning with `verifier` or
+`judge` select those built-in roles only without `__`. Agent spawns retain cap and depth checks
+(see [Hosts](#hosts-claude-code-and-codex)).
 
 ### Several swarms in one session
 
-One Claude Code session can run several swarm jobs at once (a Codex session can't: see
-above): activate each one, and tag every
-subagent prompt with its job. A subagent is routed in this order:
+Claude Code and an authorized Codex root can run several jobs at once. Codex uses the
+create-only root operation and explicit job task names described above. For Claude Code,
+activate each job and tag every subagent prompt with its job. Claude routing uses this order:
 
 1. **Tag.** The job its tag names, if that job is active and bound to this session (or unbound,
    and the subagent started after activation: it claims it). A tag naming anything else joins
@@ -1896,7 +1905,7 @@ digits or underscores, start with a letter, and contain no double underscore.
 | Host | How to request a role |
 |---|---|
 | Claude Code | A separate `[swarm role: product_manager]` line in the child's prompt, alongside the job tag |
-| Codex | `task_name="product_manager__spec"`: a role, two underscores, and a nonempty task suffix |
+| Codex | `task_name="product_manager__spec"` within one job, or `job__JOB__product_manager__spec` for an explicit root job |
 
 In Codex, role and task parsing is the same before spawning and when reading the child's
 rollout. The explicit `__` form takes precedence; `judge_assistant__research` is a custom
