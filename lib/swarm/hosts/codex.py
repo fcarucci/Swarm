@@ -2,8 +2,8 @@
 namespace glued on ("collaborationspawn_agent"), so tool names match by suffix. Its arguments are
 task_name (plaintext), fork_turns and message, which V2 encrypts ("gAAAAA..."): the child gets it
 as an agent_message whose content is a plaintext header plus encrypted_content, so the swarm's
-prompt tags can't be read on Codex V2 (routing uses the session's bound job, the role the task
-name). Each thread has its own rollout
+prompt tags can't be read on Codex V2. Multi-job routing uses explicit job__JOB__ROLE__TASK
+names or visible spawn tags and the exact child returned by PostToolUse; roles use task names. Each thread has its own rollout
 $CODEX_HOME/sessions/Y/M/D/rollout-<ts>-<thread>.jsonl whose first line is its session_meta
 (payload.source carries depth and agent_path; a forked child's rollout has the parent's
 session_meta after its own). The hooks' session_id is the root thread id, agent_id the

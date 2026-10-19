@@ -73,6 +73,7 @@ class MultiJobRoutingTests(Env):
         p['transcript_path'] = str(next(self.codex_home.glob(f'sessions/*/*/*/*{self.child}.jsonl')))
         self.assertIsNotNone(self.denied(self.call('turn', p)))
         p['tool_input']['task_name'] = 'engineer__api'
+        self.assertIsNone(self.denied(self.call('turn', p)))
         grandchild = self.ids['grandchild']['thread']
         self.call('done', {**p, 'tool_response': {'agent_id': grandchild}})
         start = next(x for x in F.payloads('SubagentStart') if x['agent_id'] == grandchild)
