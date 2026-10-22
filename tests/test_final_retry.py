@@ -161,7 +161,7 @@ class HookOutOfTimeTests(FinalRetryEnv):
         row = self.row("a1")
         self.assertEqual((row.final, row.failed), (True, None))
 
-    def test_a_kill_switch_stops_the_retries(self):
+    def test_a_kill_switch_does_not_stop_final_capture_retries(self):
         from swarm.supervisor import settings as st
         self.activate()
         self.fresh_stamp()
@@ -171,12 +171,9 @@ class HookOutOfTimeTests(FinalRetryEnv):
         st.off_file().parent.mkdir(parents=True, exist_ok=True)
         st.off_file().write_text("")
         with self.board() as b:
-            self.assertEqual(lost.retry_slow_finals(b, self.cfg, time.monotonic() + 100), 0)
-        self.assertIsNone(self.row("a1"))
-        st.off_file().unlink()
-        with self.board() as b:
-            lost.retry_slow_finals(b, self.cfg, time.monotonic() + 100)
+            self.assertEqual(lost.retry_slow_finals(b, self.cfg, time.monotonic() + 100), 1)
         self.assertTrue(self.row("a1").final)
+        st.off_file().unlink()
 
     def test_the_retry_stays_inside_the_pass_budget(self):
         self.activate()

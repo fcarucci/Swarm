@@ -64,31 +64,10 @@ def decide(sup: dict, *, lineage: str, job_restarts: list[Restart],
     cutoff = now - _dt.timedelta(hours=24)
     mine = sorted((r for r in job_restarts if r.agent_key == lineage and r.at > cutoff),
                   key=lambda r: r.id)
-    if outage_started is not None and any(
-            r.reason == "outage" and r.at >= outage_started for r in mine):
-        return Decision(False, "already restarted once after the board outage", cap="outage")
-
-    per_agent, per_job = int(sup["max_restarts_per_agent"]), int(sup["max_restarts_per_job"])
-    if len(mine) >= per_agent:
-        return Decision(False, f"restart budget spent ({len(mine)}/{per_agent} restarts of this "
-                               f"agent; [supervise] max_restarts_per_agent)", cap="agent")
-    if len(job_restarts) >= per_job:
-        return Decision(False, f"the job's restart budget is spent ({len(job_restarts)}/{per_job}; "
-                               f"[supervise] max_restarts_per_job)", cap="job")
-
-    job_used = sum(reserved_minutes(r, now) for r in job_restarts)
-    day_used = sum(reserved_minutes(r, now) for r in host_restarts)
-    job_left = float(sup["max_restart_minutes"]) - job_used
-    day_left = float(sup["daily_restart_minutes"]) - day_used
-    minutes = min(float(sup["max_minutes"]), job_left, day_left)
-    if minutes < float(sup["min_minutes"]):
-        if day_left <= job_left:
-            return Decision(False, f"today's restart minutes on this host are spent ({day_used:.0f}/"
-                                   f"{sup['daily_restart_minutes']}; [supervise] "
-                                   "daily_restart_minutes)", cap="daily_minutes")
-        return Decision(False, f"the job's restart minutes are spent ({job_used:.0f}/"
-                               f"{sup['max_restart_minutes']}; [supervise] "
-                               "max_restart_minutes)", cap="job_minutes")
+    # These totals remain in restart rows for audit and reporting, but cannot exhaust a job's
+    # ability to recover. Each replacement still has its configured wall-clock limit, and the
+    # host concurrency ceiling remains an atomic launch guard.
+    minutes = float(sup["max_minutes"])
 
     if outage_started is None:
         steps = sup["backoff_minutes"]

@@ -140,7 +140,8 @@ RESTART_OUTCOMES = ("running", "completed", "timeout", "max_turns", "failed", "n
 # are idle. agent_status appends turn_ended_at; older clients' explicit columns remain valid.
 # 28 refreshes shown_status priority: current work is active even when a historical terminal
 # lifecycle record remains. Raw lifecycle columns and scheduler admission are unchanged.
-SCHEMA_VERSION = 28
+# 29 adds immutable native completion receipts without rewriting historical failures.
+SCHEMA_VERSION = 29
 
 VERDICT_DETAILS_MAX = 64 * 1024   # bytes of UTF-8: the largest `swarm verdict --details` report
 
@@ -719,6 +720,7 @@ class JobStatus:
     verdict_generation: int | None = None
     verdict_candidate: str | None = None
     verdict_req: str | None = None
+    native_completed_at: _dt.datetime | None = None  # immutable audited receipt; raw lifecycle remains unchanged
 
 
 def details_if_bound(details: str, verdict: str, by: str | None, at, plugin_data: str | None,
@@ -1154,6 +1156,8 @@ def derive_job_status(js: JobStatus, idle_minutes: float, now: _dt.datetime) -> 
     idle_minutes and now are kept for callers."""
     if js.started or js.running:
         return "active"
+    if js.native_completed_at is not None:
+        return 'completed'
     if js.status != "active":
         return js.status
     if js.open_questions:
@@ -1448,6 +1452,7 @@ def load_name_pool(data_dir: Path = DATA_DIR) -> dict[str, list[str]]:
 # checks at the end of each transaction, SQLite's connection is mode=ro). read_unread/read_new
 # are writes only when they advance the cursor.
 WRITE_METHODS = (
+    'settle_late_review', 'finalize_late_review',
     "purge", "supersede_task", "create_job_once", "ensure_job", "open_job", "close_job", "auto_close_job", "undo_auto_close", "recover_auto_close",
     "sweep_auto_close", "bind_job_session", "reassign_job_session", "allocate_name", "claim_judge", "take_judge_launch", "claim_verifier",
     "set_waiting", "set_job_max_hours", "set_job_goal", "move_agent", "sweep_expiry", "reserve_spawn", "record_verdict", "tool_started", "record_route",
@@ -1490,6 +1495,37 @@ class Board(abc.ABC):
     """A connection to the message board. Use as a context manager, or call close().
 
     Construction connects eagerly and raises BoardUnavailable if storage is unreachable."""
+
+    @abc.abstractmethod
+    def native_failure_provenance(self, job: str) -> dict | None:
+        """Recognized native no-handoff close: original notice and ended launch identities.
+
+        Unknown legacy, owner/manual and cancellation records return None. Read-only.
+        """
+
+    @abc.abstractmethod
+    def completion_receipt(self, job: str) -> dict | None:
+        """Latest immutable backend-native audited completion receipt; never job-data text."""
+
+    @abc.abstractmethod
+    def finalization_receipt(self, job: str) -> dict | None:
+        """Latest authenticated native executor finalization receipt. Read-only."""
+
+    @abc.abstractmethod
+    def settle_late_review(self, job: str) -> dict | None:
+        """Revalidate the private native review and all current evidence under the job transaction.
+
+        Append a deduplicated completion receipt and event atomically; never alter the
+        historical status/outcome/closure/activation/goal. No arbitrary receipt input.
+        Unmet gates return None; completed retries return their original receipt.
+        """
+
+    @abc.abstractmethod
+    def finalize_late_review(self, job: str) -> dict | None:
+        """Consume an already authenticated private executor intent, revalidate acceptance,
+        and atomically bind its visibility post and deduplicated native proof. No arbitrary
+        proof input; no lifecycle, ownership or launch changes. Unmet gates return None.
+        """
 
     # True for a board opened by `open_read_only` on a backend that supports it (file, SQLite):
     # it creates, writes, truncates and renames nothing, and every write raises ReadOnlyBoard.
@@ -2605,8 +2641,13 @@ class Board(abc.ABC):
 
     @abc.abstractmethod
     def set_launch_state(self, launch_row_id: int, expected_revision: int, state: str, *, job: str,
-                         **fields) -> Launch | None:
-        """CAS settlement. A stale completion cannot overwrite a new queue version."""
+                         task_turn_agent_key: str | None = None,
+                         task_reported_at: _dt.datetime | None = None, **fields) -> Launch | None:
+        """CAS settlement. A stale completion cannot overwrite a new queue version.
+
+        The task-turn fields settle a managed task row from its exact reported, ended turn while
+        its native runner may still be open. They do not finish or rewrite the runner record.
+        """
 
     @abc.abstractmethod
     def claim_drive_launch(self, *, job: str, generation: int, action_id: str, attempt: int, launch_id: str,

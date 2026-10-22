@@ -231,29 +231,33 @@ class PipelineTests(unittest.TestCase):
         self.done(); self.tick(); self.conclude(); self.done(summary='Changed after verdict'); self.tick()
         self.assertIn('[swarm role: judge]', self.launched[-1]['stdin'])
 
-    def test_owner_proof_and_kill_switches_and_human_wait(self):
+    def test_paused_status_and_human_wait_still_hold_pipeline(self):
         self.done()
-        for field, value in [('status', 'paused'), ('supervise', False), ('waiting_on', 'owner approval')]:
+        for field, value in [('status', 'paused'), ('waiting_on', 'owner approval')]:
             with self.subTest(field=field):
                 self.h.update_job('J', **{field: value})
                 self.tick()
                 self.assertFalse(self.launched)
-                self.h.update_job('J', status='active', supervise=True, waiting_on=None)
+                self.h.update_job('J', status='active', waiting_on=None)
         with mock.patch('swarm.supervisor.orphans.local_record', return_value=None):
             self.assertEqual(self.tick(), set())
         with mock.patch('swarm.supervisor.orphans.human_question', return_value=True):
             self.tick()
+    def test_pipeline_enabled_preference_does_not_hold_valid_work(self):
+        self.done()
         self.cfg['pipeline']['enabled'] = False
-        self.assertEqual(self.tick(), set())
-        self.assertFalse(self.launched)
+        self.h.update_job('J', supervise=False)
+        self.tick()
+        self.assertEqual(len(self.launched), 1)
+        self.assertIn('[swarm role: judge]', self.launched[0]['stdin'])
 
-    def test_limits_gave_up_and_no_launch(self):
+    def test_attempt_history_does_not_gate_a_pipeline_replacement(self):
         self.done(); self.tick(); self.conclude('not_met', next_steps='Fix analysis')
         self.sup['max_restarts_per_job'] = 1
         self.tick(); self.tick()
         gave_up = [m for m in self.b.messages_after(0, 'J') if m.message.startswith('GAVE UP')]
-        self.assertEqual(len(gave_up), 1)
-        self.assertEqual(len(self.launched), 1)
+        self.assertEqual(gave_up, [])
+        self.assertEqual(len(self.launched), 2)
 
     def test_backoff_before_fix_and_failed_launch_retry(self):
         self.done(); self.tick(); self.conclude('not_met', next_steps='Fix report')

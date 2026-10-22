@@ -46,7 +46,8 @@ def _check_state(state, fields, current=None):
     if state == current and set(fields) <= {"session_id", "agent_key"}:
         return
     if state not in ("done", "failed") and not (state == "queued" and
-            fields.get("last_outcome") in ("halted", "interrupted by pause", "interrupted by driver restart", "blocked", "driver-error")):
+            fields.get("last_outcome") in ("halted", "interrupted by pause", "interrupted by driver restart",
+                                             "interrupted native turn", "blocked", "driver-error")):
         raise ValueError("only queue_launch or claim_drive_launch may queue or start a launch")
     if set(fields) - set(STATE_FIELDS):
         raise ValueError("unknown launch settlement field")
@@ -138,19 +139,37 @@ class MemoryLaunches:
     def get_launch(self, job, generation, name):
         return next((r for r in self.launches(job, generation) if r.name == name), None)
 
-    def set_launch_state(self, launch_row_id, expected_revision, state, *, job, **fields):
+    def set_launch_state(self, launch_row_id, expected_revision, state, *, job,
+                         task_turn_agent_key=None, task_reported_at=None, **fields):
         s = self._s()
         with s.lock:
             row = next((r for r in s.launches if r["id"] == launch_row_id and r["job"] == job), None)
             if row is None or row["revision"] != expected_revision:
                 return None
             _check_state(state, fields, row["state"])
+            task_turn_ended = task_turn_agent_key is not None or task_reported_at is not None
+            if task_turn_ended and (task_turn_agent_key is None or task_reported_at is None
+                                    or row["queued_by"] != "swarm task" or state not in ("done", "failed")):
+                raise ValueError("task turn settlement requires a managed task terminal outcome")
+            if task_turn_ended:
+                restart = next((r for r in s.restarts if r["launch_id"] == row["launch_id"]
+                                and r["ended_at"] is None), None)
+                agent = s.agents.get(task_turn_agent_key)
+                if (restart is None or restart["new_agent_key"] != task_turn_agent_key or agent is None
+                        or agent["job"] != job or agent["role"] != row["role"]
+                        or agent.get("current_tool") is not None or agent.get("tool_started_at") is not None):
+                    return None
+                terminal_at = max((value for value in (agent.get("left_at"), agent.get("turn_ended_at"))
+                                   if value is not None), default=None)
+                if terminal_at is None or terminal_at < task_reported_at:
+                    return None
             if row["state"] == state and all(row[k] == v for k, v in fields.items()):
                 return None
             if row["state"] == "running" and any(r["launch_id"] == row["launch_id"] and
-                    r["ended_at"] is None for r in s.restarts):
+                    r["ended_at"] is None for r in s.restarts) and not task_turn_ended:
                 raise ValueError("launch is still open: end it first")
-            if state == "queued" and row["state"] == "running":
+            if (state == "queued" and row["state"] == "running"
+                    and fields.get("last_outcome") != "interrupted native turn"):
                 row["attempts"] = max(0, row["attempts"] - 1)
             row.update(fields, state=state, revision=row["revision"] + 1, updated_at=self.now())
             s.touch()
@@ -161,12 +180,14 @@ class MemoryLaunches:
                            max_job_running=4, ruling=False, lock_paths=None, max_cost_usd=None):
         s = self._s()
         with s.lock:
-            if s.jobs.get(job, {}).get("status") != "active":
-                return None
             row = next((r for r in s.launches if r["id"] == launch_row_id), None)
             if (row is None or row["job"] != job or row["generation"] != generation
                     or row["revision"] != queue_version or row["state"] != "queued"):
                 return None
+            if s.jobs.get(job, {}).get("status") != 'active':
+                from swarm.late_review import admitted
+                if not admitted(self, self.cfg, job, Launch(**row)):
+                    return None
             from swarm.dependencies import block_reason
             if block_reason(self, Launch(**row), launching=True):
                 return None
@@ -179,7 +200,7 @@ class MemoryLaunches:
                 return None
             host = compat.node()
             live = [r for r in s.restarts if r["ended_at"] is None]
-            if sum(r["job"] == job for r in live) >= int(max_job_running):
+            if max_job_running is not None and sum(r["job"] == job for r in live) >= int(max_job_running):
                 return None
             if max_host_running is not None and sum(r["host"] == host for r in live) >= int(max_host_running):
                 return None
@@ -407,7 +428,8 @@ class SqlLaunches:
                          (job, generation, name)).fetchone()
         return self._launch_obj(Launch, LAUNCH_COLS, row) if row else None
 
-    def set_launch_state(self, launch_row_id, expected_revision, state, *, job, **fields):
+    def set_launch_state(self, launch_row_id, expected_revision, state, *, job,
+                         task_turn_agent_key=None, task_reported_at=None, **fields):
         with self._launch_tx() as c:
             row = self._exec(c, f"SELECT {LAUNCH_COLS} FROM launches WHERE id=? AND job=?",
                              (launch_row_id, job)).fetchone()
@@ -418,12 +440,39 @@ class SqlLaunches:
             if current.revision != expected_revision or (current.state == state and
                     all(getattr(current, k) == v for k, v in fields.items())):
                 return None
+            task_turn_ended = task_turn_agent_key is not None or task_reported_at is not None
+            if task_turn_ended and (task_turn_agent_key is None or task_reported_at is None
+                                    or current.queued_by != "swarm task" or state not in ("done", "failed")):
+                raise ValueError("task turn settlement requires a managed task terminal outcome")
+            if task_turn_ended:
+                restart_sql = ("SELECT new_agent_key FROM restarts "
+                               "WHERE launch_id=? AND ended_at IS NULL")
+                if self._launch_pg:
+                    restart_sql += " FOR UPDATE"
+                restart = self._exec(c, restart_sql, (current.launch_id,)).fetchone()
+                agent_sql = ("SELECT job, role, left_at, turn_ended_at, current_tool, tool_started_at FROM agents "
+                             "WHERE agent_key=?")
+                if self._launch_pg:
+                    agent_sql += " FOR UPDATE"
+                agent = self._exec(c, agent_sql, (task_turn_agent_key,)).fetchone()
+                if (restart is None or restart[0] != task_turn_agent_key or agent is None
+                        or agent[0] != job or agent[1] != current.role
+                        or agent[4] is not None or agent[5] is not None):
+                    return None
+                terminal_values = [value for value in agent[2:4] if value is not None]
+                if not terminal_values:
+                    return None
+                terminal_at = max(value if isinstance(value, _dt.datetime)
+                                  else _dt.datetime.fromisoformat(value) for value in terminal_values)
+                if terminal_at < task_reported_at:
+                    return None
             if current.state == "running" and self._exec(c,
                     "SELECT 1 FROM restarts WHERE launch_id=? AND ended_at IS NULL",
-                    (current.launch_id,)).fetchone():
+                    (current.launch_id,)).fetchone() and not task_turn_ended:
                 raise ValueError("launch is still open: end it first")
             assignments = "".join(f", {k}=?" for k in fields)
-            if state == "queued" and current.state == "running":
+            if (state == "queued" and current.state == "running"
+                    and fields.get("last_outcome") != "interrupted native turn"):
                 assignments += ", attempts=CASE WHEN attempts>0 THEN attempts-1 ELSE 0 END"
             row = self._exec(c, "UPDATE launches SET state=?, revision=revision+1, updated_at=?" + assignments +
                              f" WHERE id=? AND job=? AND revision=? RETURNING {LAUNCH_COLS}",
@@ -440,12 +489,17 @@ class SqlLaunches:
                 if self._launch_pg:
                     for key in ("restarts:" + job, "restarts-host:" + host):
                         c.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (key,))
-                    status = self._exec(c, "SELECT status FROM jobs WHERE job=? FOR UPDATE", (job,)).fetchone()
-                    if status is None or status[0] != "active":
-                        raise _Refused("job is not active")
+                status = self._exec(c, 'SELECT status FROM jobs WHERE job=?' +
+                                    (' FOR UPDATE' if self._launch_pg else ''), (job,)).fetchone()
                 stored = self._exec(c, f"SELECT {LAUNCH_COLS} FROM launches WHERE id=? AND job=? AND generation=?",
                                     (launch_row_id, job, generation)).fetchone()
                 current = self._launch_obj(Launch, LAUNCH_COLS, stored) if stored else None
+                if status is None:
+                    raise _Refused('job missing')
+                if status[0] != 'active':
+                    from swarm.late_review import admitted
+                    if not admitted(self, self.cfg, job, current):
+                        raise _Refused('job is not active or an admitted closed review')
                 from swarm.dependencies import block_reason
                 if current is None or block_reason(self, current, launching=True):
                     raise _Refused("task dependency gate")
@@ -459,13 +513,13 @@ class SqlLaunches:
                     "updated_at=?, launch_id=? WHERE id=? AND job=? AND generation=? AND revision=? "
                     "AND state='queued' AND NOT EXISTS (SELECT 1 FROM restarts WHERE "
                     "restarts.launch_id=launches.launch_id AND ended_at IS NULL) "
-                    "AND EXISTS (SELECT 1 FROM jobs WHERE jobs.job=launches.job AND jobs.status='active') RETURNING id",
-                    (self._launch_time(self.now()), launch_id, launch_row_id, job, generation, queue_version)).fetchone()
+                    "AND EXISTS (SELECT 1 FROM jobs WHERE jobs.job=launches.job AND jobs.status=?) RETURNING id",
+                    (self._launch_time(self.now()), launch_id, launch_row_id, job, generation, queue_version, status[0])).fetchone()
                 if moved is None:
                     raise _Refused("launch moved or previous attempt still running")
                 n = self._exec(c, "SELECT count(*) FROM restarts WHERE job=? AND ended_at IS NULL",
                                (job,)).fetchone()[0]
-                if n >= int(max_job_running):
+                if max_job_running is not None and n >= int(max_job_running):
                     raise _Refused("job cap")
                 if max_host_running is not None:
                     n = self._exec(c, "SELECT count(*) FROM restarts WHERE host=? AND ended_at IS NULL",

@@ -5,14 +5,15 @@ section here, so every release adds a `## [x.y.z] - YYYY-MM-DD` section (see `sc
 Keep entries short and user-facing: one line per change, what it does, not how.
 
 ## [Unreleased]
-- **A judged head never parks a job on a person.** "Same head handed off twice", "head already judged" and the old per-generation judge cap are now a scheduled wait (5 to 30 min backoff) shown as `waiting on: lead or coordinator`; every queued launch (a person's `swarm run`, the lead's engineers, reviewers, integrators) still runs, only re-judging the same head is withheld; an unresolved hand-off (`head unknown`) never counts as a repeat; goal-hold watermarks left by older drivers are released on the first pass. The only remaining person wait is a lead's BLOCKED that names a person.
 
+## [0.3.6] - 2026-10-22
+
+- Jobs keep advancing after retry exhaustion, transient runner failures, supervisor limits, and terminal hook delivery; queued work remains recoverable instead of being stranded.
+- Recovery and late review use the exact original coordinator and preserve closure, request, artifact, cancellation, and native completion evidence without requiring private host grants.
 - Fix driver.log portability checks on Windows and macOS; normalize log newlines and keep rotation bounded.
-
 - Fix Windows portability of the F03 driver cache and release tests while preserving POSIX permission checks.
-
-- **A ruling never cancels running engineers or the lead.** It waits for them (a visible hold), and a ledger-only ruling is cancelled while engineers are queued or running.
-- `swarm watch --compact` rolls finished and lost agents into one WORKERS summary per job, keeps live agents with tool/launch and last-post age, and avoids clock-only redraws.
+- A ruling waits for active engineers and leads, and a ledger-only ruling is cancelled while work is queued or running.
+- `swarm watch --compact` summarizes finished and lost agents per job while retaining live-agent activity and avoiding clock-only redraws.
 
 ## [0.3.5] - 2026-10-18
 

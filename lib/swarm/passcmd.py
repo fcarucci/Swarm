@@ -12,7 +12,7 @@ Per open job, in this order:
   4. a launch running or queued, or an agent working: nothing more to start;
   5. a DONE hand-off not yet judged: one judge launch for that artifact (never again for it);
      not_met: the judge's next steps are posted and the lead is re-queued once for that artifact;
-  6. no hand-off: the lead is re-queued; after LEAD_ATTEMPTS launches with no new hand-off the job fails.
+  6. no hand-off: the lead is re-queued; after LEAD_ATTEMPTS attempts its brief asks it to replan.
 
 A failed job notifies its owner on the board, again every NOTICE_MINUTES, until `swarm ack`.
 """
@@ -30,11 +30,11 @@ import uuid
 
 from swarm import paths
 
-LEAD_ATTEMPTS = 3                 # launches with no new hand-off before the job fails
+LEAD_ATTEMPTS = 3                 # after this many attempts, ask the lead to replan
 NOTICE_MINUTES = 30               # a failed job's notice is repeated this often until acked
 LAUNCH_USD = 2.0                  # what one launch reserves of the job's max_cost_usd
 DEFAULT_MAX_COST_USD = 200.0      # the job's max_cost_usd when neither the job nor [pass] sets one
-MAX_JOB_RUNNING = 4               # launches running at once per job
+MAX_JOB_RUNNING = 4               # resource capacity; queued work remains pending when full
 THROTTLE_SECONDS = 60             # the hooks run a pass at most this often per host
 PASS_NAME = "swarm pass"
 BRIEF_MAX = 64 * 1024
@@ -95,7 +95,7 @@ def session_usd_cap(cfg: dict) -> float:
 STALE_RESTART_GRACE_MINUTES = 30   # past a launch's own time limit: its restart is an orphan (the runner died)
 
 
-def _settle(board, job: str, cfg: dict | None = None, now: _dt.datetime | None = None) -> None:
+def _settle(board, job: str, cfg: dict | None = None, now: _dt.datetime | None = None) -> set[str]:
     """A running launch whose restart has ended takes the restart's outcome: done when completed,
     else failed. A launch whose restart is still open stays running, unless the restart is older
     than the launch time limit plus a grace: then its runner is gone (a crashed or replaced
@@ -115,12 +115,40 @@ def _settle(board, job: str, cfg: dict | None = None, now: _dt.datetime | None =
         if now - r.at > _dt.timedelta(minutes=cap + STALE_RESTART_GRACE_MINUTES):
             board.finish_restart(r.id, "failed")
     ended = {r.launch_id: r for r in board.restarts(job) if r.launch_id and r.ended_at is not None}
+    settled_failed = {}
+    from swarm.dependencies import (evidence, interrupted_pending_outcome,
+                                    interrupted_pending_revision, spec)
+    agents = {a.agent_key: a for a in board.agents(job, include_departed=True)}
+
+    def interrupted(row, restart):
+        agent = agents.get(restart.new_agent_key or restart.old_agent_key)
+        turn_ended = getattr(agent, "turn_ended_at", None) if agent is not None else None
+        return (spec(row) is not None and agent is not None
+                and (agent.ended_at is not None or turn_ended is not None)
+                and not (agent.status in ("started", "running") and turn_ended is None)
+                and evidence(board, row) is None)
+
+    # A question can stop _advance after settlement. Keep only exact interrupted task launches
+    # eligible across that return; ordinary failures and historical launch rows are not retried.
+    for row in board.launches(job):
+        restart = ended.get(row.launch_id)
+        pending_revision = interrupted_pending_revision(row.last_outcome)
+        if (row.state == "failed" and pending_revision == row.revision
+                and row.launch_id and restart is not None and restart.outcome == "failed"
+                and interrupted(row, restart)):
+            settled_failed[row.launch_id] = row.revision
     for row in board.launches(job, include_closed=False):
         if row.state != "running" or row.launch_id not in ended:
             continue
-        outcome = ended[row.launch_id].outcome or "failed"
-        board.set_launch_state(row.id, row.revision, "done" if outcome == "completed" else "failed",
-                               job=job, last_outcome=outcome)
+        restart = ended[row.launch_id]
+        outcome = restart.outcome or "failed"
+        state = "done" if outcome == "completed" else "failed"
+        retry_candidate = state == "failed" and outcome == "failed" and interrupted(row, restart)
+        last_outcome = interrupted_pending_outcome(row.revision + 1) if retry_candidate else outcome
+        updated = board.set_launch_state(row.id, row.revision, state, job=job, last_outcome=last_outcome)
+        if updated is not None and retry_candidate:
+            settled_failed[row.launch_id] = updated.revision
+    return settled_failed
 
 
 OBSERVER_ROLES = ("owner", "orchestrator", "requester")
@@ -164,6 +192,11 @@ def _start_one(board, cfg: dict, job: str, row, reserve: float, starter) -> str 
     race): the next pass tries again."""
     from swarm.supervisor import launch, markers
     from swarm.supervisor.settings import settings
+    from swarm import late_review
+    js = board.job_status(job)
+    review = bool(js and js.status != 'active' and late_review.admitted(board, cfg, job, row))
+    if js is None or (js.status != 'active' and not review):
+        return None
     minutes = float(settings(cfg)["max_minutes"])
     launch_id = f"{row.name}-{uuid.uuid4().hex[:8]}"
     # The session enrols as the replacement of a departed predecessor (hooks._enrol_resumed ->
@@ -183,7 +216,7 @@ def _start_one(board, cfg: dict, job: str, row, reserve: float, starter) -> str 
     try:
         model = launch.replacement_model(cfg, row.harness, row.role, row.model)
         workdir = os.path.realpath(row.workdir)
-        from swarm.dependencies import prompt
+        from swarm.dependencies import prompt, spec as task_spec
         from swarm.driveroles import is_read_only_role
         read_only = is_read_only_role(row.role)
         spec = launch.spec_for(cfg, row.harness, prompt=prompt(row), workdir=workdir, model=model,
@@ -196,12 +229,17 @@ def _start_one(board, cfg: dict, job: str, row, reserve: float, starter) -> str 
                "resume_of": old, "marker": str(marker), "argv": list(spec.argv), "cwd": spec.cwd,
                "stdin": spec.stdin, "session_id": spec.session_id, "limit_seconds": minutes * 60,
                "enrol_seconds": float(settings(cfg)["enrol_minutes"]) * 60, "config": None,
-               "board": _store_key(cfg), "launch_id": launch_id, "launch": row.name, "read_only": read_only}
+               "board": _store_key(cfg), "launch_id": launch_id, "launch": row.name, "read_only": read_only,
+               "managed_task": task_spec(row) is not None}
         if row.harness == "codex":
             # The same flat proxy rate used by spec_for to size this launch's rollout allowance.
             run["codex_usd_per_mtok"] = float((cfg.get("drive") or {}).get("codex_usd_per_mtok", 10))
+        if review:
+            late_review.bind_start(board, cfg, row, r, run)
         current_job = board.job_status(job)
-        if current_job is None or current_job.status != "active":
+        current_row = board.get_launch(job, row.generation, row.name)
+        if current_job is None or (current_job.status != "active" and not
+                (review and late_review.admitted(board, cfg, job, current_row, run))):
             board.finish_restart(r.id, "cancelled")
             current_row = board.get_launch(job, row.generation, row.name)
             if current_row is not None and current_row.state == "running":
@@ -219,8 +257,7 @@ def _start_one(board, cfg: dict, job: str, row, reserve: float, starter) -> str 
 
 
 def _start_queued(board, cfg: dict, job: str, starter) -> tuple[list[str], str | None]:
-    """Start the job's queued launches. (actions, the reason the job must fail: the cost cap is
-    reached)."""
+    """Start every eligible queued launch without letting a configured cost estimate strand work."""
     from swarm.supervisor import command
     acts = []
     js = board.job_status(job)
@@ -236,7 +273,7 @@ def _start_queued(board, cfg: dict, job: str, starter) -> tuple[list[str], str |
         spent = spent_usd(board, job)
         reserve = min(per_session, cap - spent)
         if reserve <= 0:
-            return acts, f"cost cap reached: ${spent:.2f} of max_cost_usd ${cap:g}"
+            return acts, f"cost capacity exhausted: ${spent:.2f} of configured max_cost_usd ${cap:g}"
         why = command.workdir_problem(cfg, row.workdir)
         if why:
             board.set_launch_state(row.id, row.revision, "failed", job=job, last_outcome="refused")
@@ -280,6 +317,23 @@ def _run_launch(board, js, name):
         if previous is not None and previous.at < run_start(js):
             return None
     return row
+
+
+def _next_relead_name(board, job: str, artifact_key: str) -> str:
+    """Return the live re-lead for this artifact, or allocate the next durable name."""
+    prefix = f"relead-{artifact_key}"
+    matching = [r for r in board.launches(job) if r.role == "lead"
+                and (r.name == prefix or r.name.startswith(prefix + "-"))]
+    for row in reversed(matching):
+        if row.state not in ("done", "failed", "cancelled"):
+            return row.name
+    names = {r.name for r in matching}
+    if prefix not in names:
+        return prefix
+    suffix = 2
+    while f"{prefix}-{suffix}" in names:
+        suffix += 1
+    return f"{prefix}-{suffix}"
 
 
 def _queue(board, job: str, name: str, role: str, brief: str, workdir: str, cfg: dict | None = None) -> None:
@@ -342,17 +396,23 @@ def _advance(board, cfg: dict, js, now: _dt.datetime, starter) -> list[str]:
     if not managed(board, job):
         why = _empty(board, js, now)   # a job is active only while someone works on it
         return [_fail(board, job, why, now)] if why else []
-    _settle(board, job, cfg, now)
+    # A task report plus its assigned actor's ended turn is sufficient to settle the task.
+    # Reconcile it before starting dependents; runner/session completion remains audit data.
+    from swarm.dependencies import reconcile_external
+    reconcile_external(board, job)
+    settled_failed = _settle(board, job, cfg, now)
     acts, cost_reason = _start_queued(board, cfg, job, starter)
     if cost_reason:
-        return acts + [_fail(board, job, cost_reason, now)]
+        board.post(job, PASS_NAME, notice(job, cost_reason))
+        return acts
     questions = [b for b in board.blockers(job) if b.kind == "question"]
     expired = [b for b in questions if b.until is not None and b.until <= now]
     if expired:
         return acts + [_fail(board, job, f"Q{expired[0].id} expired unanswered: {expired[0].reason}", now)]
     if questions:
         return acts   # waits on a person's answer: the only wait there is
-    from swarm.dependencies import advance, describe, spec, supersession
+    from swarm.dependencies import advance, describe, reconcile_interrupted_turns, spec, supersession
+    reconcile_interrupted_turns(board, job, settled_launch_revisions=settled_failed)
     task_rows = describe(board, job)
     task_acts = advance(board, job)
     if task_acts is not None:
@@ -382,12 +442,17 @@ def _advance(board, cfg: dict, js, now: _dt.datetime, starter) -> list[str]:
         return acts + [_fail(board, job, "no work dir is known for its launches (swarm run --workdir)", now)]
     if found is not None:
         key = _key(artifact)
-        if judged == "not_met" and _run_launch(board, js, f"relead-{key}") is None:   # once per artifact/run
-            if _attempts(board, job, msg.created_at) >= LEAD_ATTEMPTS:
-                return acts + [_fail(board, job, f"no met verdict after {LEAD_ATTEMPTS} launches", now)]
+        if judged == "not_met":
             steps = js.verdict_next or js.verdict_reason or "see the verdict"
+            attempts = _attempts(board, job, msg.created_at)
+            if attempts >= LEAD_ATTEMPTS:
+                steps = (f"Replan after {attempts} lead attempts; do not repeat the same approach. "
+                         f"Address the latest verdict: {steps}")
+            name = _next_relead_name(board, job, key)
+            if _run_launch(board, js, name) is not None:
+                return acts
             board.post(job, PASS_NAME, f"NOT MET {artifact}: {steps}"[:200])
-            _queue(board, job, f"relead-{key}", "lead", _lead_brief(js, steps), workdir, cfg)
+            _queue(board, job, name, "lead", _lead_brief(js, steps), workdir, cfg)
             return acts + [f"{job}: re-queued the lead for {artifact} (not met)"]
         if judged is None:   # one judge per artifact, never again
             judge_name = f"goal-judge-{key}" if task_rows else f"judge-{key}"
@@ -398,10 +463,14 @@ def _advance(board, cfg: dict, js, now: _dt.datetime, starter) -> list[str]:
         since = msg.created_at
     else:
         since = js.activated_at or js.created_at
-    if _attempts(board, job, since) >= LEAD_ATTEMPTS:
-        return acts + [_fail(board, job, f"{LEAD_ATTEMPTS} launches with no hand-off (DONE)", now)]
+    attempts = _attempts(board, job, since)
     name = f"lead-{len([r for r in board.launches(job) if r.role == 'lead']) + 1}"
-    _queue(board, job, name, "lead", _lead_brief(js, js.verdict_next or js.verdict_reason or ""), workdir, cfg)
+    extra = js.verdict_next or js.verdict_reason or ""
+    if attempts >= LEAD_ATTEMPTS:
+        extra = (f"Replan after {attempts} lead attempts; do not repeat the same approach. "
+                 f"Inspect current work and choose a concrete next step. {extra}")
+        board.post(job, PASS_NAME, f"No hand-off after {attempts} lead attempts; re-planning the lead.")
+    _queue(board, job, name, "lead", _lead_brief(js, extra), workdir, cfg)
     return acts + [f"{job}: queued {name}"]
 
 
@@ -421,12 +490,10 @@ def on_not_met(board, cfg: dict, job: str, *, now: _dt.datetime | None = None, s
     artifact = js.verdict_artifact or (found[1] if found else "the job")
     key = _key(artifact)
     since = found[0].created_at if found else (js.activated_at or js.created_at)
-    if _attempts(board, job, since) >= LEAD_ATTEMPTS:
-        return _fail(board, job, f"no met verdict after {LEAD_ATTEMPTS} launches", now)
     workdir = _workdir(board, job)
     if workdir is None:
         return _fail(board, job, "no work dir is known for its launches (swarm run --workdir)", now)
-    name = f"relead-{key}"
+    name = _next_relead_name(board, job, key)
     row = _run_launch(board, js, name)
     if row is None or row.state in ("done", "failed", "cancelled"):
         steps = js.verdict_next or js.verdict_reason or "see the verdict"
@@ -439,7 +506,8 @@ def on_not_met(board, cfg: dict, job: str, *, now: _dt.datetime | None = None, s
         starter = runner.start
     acts, cost_reason = _start_queued(board, cfg, job, starter)
     if cost_reason:
-        return _fail(board, job, cost_reason, now)
+        board.post(job, PASS_NAME, notice(job, cost_reason))
+        return f"{job}: queued work is waiting for cost capacity"
     return "; ".join(acts) or f"{job}: {name} queued"
 
 
@@ -447,7 +515,7 @@ def _notices(board, now: _dt.datetime) -> list[str]:
     """Repeat the notice of every failed job not yet acked, once per NOTICE_MINUTES."""
     acts = []
     for js in board.jobs(include_closed=True):
-        if js.status != "failed" or js.started or js.running or not managed(board, js.job):
+        if js.status != "failed" or js.native_completed_at or js.started or js.running or not managed(board, js.job):
             continue
         data = board.job_data(js.job)
         if data.get("pass_acked"):
@@ -546,6 +614,53 @@ def recover_auto_close(board, cfg: dict, job: str) -> bool:
         return False
 
 
+def run_job_pass(board, cfg: dict, job: str, *, now: _dt.datetime | None = None, starter=None) -> list[str]:
+    """Advance one active job under a stable per-job lock.
+
+    Terminal hooks can race the ordinary host pass, so both paths use this lock
+    around the check-and-queue transition. Different jobs retain independent locks.
+    """
+    import hashlib
+
+    d = paths.state_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    lock_path = d / f"pass-job-{hashlib.sha256(job.encode('utf-8')).hexdigest()}.lock"
+    try:
+        import fcntl
+    except ImportError:  # Windows
+        fcntl = None
+    if fcntl is None:
+        try:
+            import msvcrt
+        except ImportError as exc:
+            raise RuntimeError("no supported per-job pass lock on this platform") from exc
+
+    with open(lock_path, "a+b") as lock:
+        if fcntl is not None:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        else:
+            lock.seek(0, 2)
+            if lock.tell() == 0:
+                lock.write(b"\\0")
+                lock.flush()
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            js = board.job_status(job)
+            if js is None or js.status != "active":
+                return []
+            if starter is None:
+                from swarm.supervisor import runner
+                starter = runner.start
+            return _advance(board, cfg, js, now or board.now(), starter)
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+            else:
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+
+
 def run_pass(board, cfg: dict, *, now: _dt.datetime | None = None, starter=None) -> list[str]:
     """One pass over every open job. Returns what it did (empty when nothing needed doing)."""
     if starter is None:
@@ -567,6 +682,11 @@ def run_pass(board, cfg: dict, *, now: _dt.datetime | None = None, starter=None)
             acts.append(f"{job}: new run for fresh queued work")
     for js in board.jobs(include_closed=True):
         try:
+            from swarm import late_review
+            late = late_review.reconcile(board, cfg, js.job, starter)
+            if late is not None:
+                acts += late
+                continue
             if repair_open_routing(board, cfg, js.job):
                 acts.append(f"{js.job}: restored trusted coordinator hook routing")
         except Exception as exc:
@@ -576,7 +696,7 @@ def run_pass(board, cfg: dict, *, now: _dt.datetime | None = None, starter=None)
         if js.status != 'active':
             continue
         try:
-            acts += _advance(board, cfg, js, now, starter)
+            acts += run_job_pass(board, cfg, js.job, now=now, starter=starter)
         except Exception as exc:   # one job's trouble never stops the others
             acts.append(f"{js.job}: pass error {type(exc).__name__}: {exc}")
     return acts + _notices(board, now)

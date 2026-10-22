@@ -23,6 +23,17 @@ class TaskProtocol(unittest.TestCase):
         self.assertEqual(argv, ['task', 'report', '--job=J', '--name=qa', '--generation=1',
             '--artifact=main@abc', '--outcome=passed', '--reason=exact source checked', '--as=Lisa'])
 
+    def test_supersede_is_available_through_bounded_native_launch(self):
+        req = launchproto.parse_cli(['task', 'supersede', '--job', 'J', '--name', 'old',
+            '--generation', '2', '--artifact', 'old@abc', '--replacement', 'new',
+            '--replacement-generation', '3', '--replacement-artifact', 'new@def',
+            '--reason', 'exact evidence accepted', '--as', 'forged'], '.')
+        command, fields = launchproto.validate(req, 'J')
+        argv = launchproto.build_argv(command, fields, key='sid', name='Lisa', file_path=str)
+        self.assertEqual(argv, ['task', 'supersede', '--job=J', '--name=old', '--generation=2',
+            '--artifact=old@abc', '--replacement=new', '--replacement-generation=3',
+            '--replacement-artifact=new@def', '--reason=exact evidence accepted', '--as=Lisa'])
+
     def test_registration_alias_dependencies_and_inline_brief_are_typed(self):
         req = launchproto.parse_cli(['task', 'add', '--job', 'J', '--name', 'judge',
             '--generation', '2', '--artifact', 'main@abc', '--depends', 'qa', '--depends', 'review',

@@ -170,24 +170,39 @@ class PassCmd(unittest.TestCase):
         self.pass_()
         self.assertEqual(len(self.runs), 1)   # running and not re-started
 
-    def test_concurrency_cap_holds_the_rest_queued(self):
+    def test_concurrency_cap_holds_queued_work_then_resumes_when_capacity_frees(self):
         self.queue("lead-1")
         self.queue("lead-2")
         with mock.patch.object(passcmd, "MAX_JOB_RUNNING", 1):
             self.pass_()
         self.assertEqual(self.b.get_launch("J", 1, "lead-1").state, "running")
         self.assertEqual(self.b.get_launch("J", 1, "lead-2").state, "queued")
+        self.b.finish_restart(self.open_restarts()[0].id, "completed")
+        self.pass_()
+        self.assertEqual(self.b.get_launch("J", 1, "lead-2").state, "running")
 
-    def test_cost_cap_fails_the_job_with_a_notice(self):
+    def test_cost_cap_keeps_queued_work_active_without_overspending(self):
         self.b.set_job_data("J", "max_cost_usd", "1")
         self.queue("lead-1")
         self.pass_()
         self.b.finish_restart(self.open_restarts()[0].id, "completed", cost_usd=1.0)
         self.queue("lead-2")
         self.pass_()
-        self.assertEqual(self.job().status, "failed")
-        self.assertIn("cost cap reached", self.job().outcome)
-        self.assertTrue(any("NOTICE J failed" in m.message for m in self.b.recent_messages(5, "J")))
+        self.assertEqual(self.job().status, "active")
+        self.assertEqual(self.b.get_launch("J", 1, "lead-2").state, "queued")
+        self.assertEqual(len(self.open_restarts()), 0)
+        self.assertTrue(any("cost capacity exhausted" in m.message for m in self.b.recent_messages(5, "J")))
+
+    def test_cost_capacity_replans_to_remaining_budget(self):
+        self.b.set_job_data("J", "max_cost_usd", "1")
+        self.queue("lead-1")
+        self.pass_()
+        self.b.finish_restart(self.open_restarts()[0].id, "completed", cost_usd=0.5)
+        self.queue("lead-2")
+        self.pass_()
+        self.assertEqual(self.job().status, "active")
+        self.assertEqual(self.b.get_launch("J", 1, "lead-2").state, "running")
+        self.assertEqual(self.open_restarts()[0].reserved_usd, 0.5)
 
     def test_open_question_waits_and_nothing_else_starts(self):
         self.b.open_blocker("J", "question", "alice", "ship now?", until=self.b.now() + _dt.timedelta(hours=1),
@@ -203,16 +218,14 @@ class PassCmd(unittest.TestCase):
         self.assertEqual(self.job().status, "failed")
         self.assertIn("expired unanswered", self.job().outcome)
 
-    def test_no_hand_off_relaunches_the_lead_then_fails_after_three(self):
-        for _ in range(12):
+    def test_no_hand_off_retries_after_three_without_failing_the_job(self):
+        for _ in range(16):
             self.pass_()
             for r in self.open_restarts():
                 self.b.finish_restart(r.id, "failed")
-            if self.job().status != "active":
-                break
-        self.assertEqual(self.job().status, "failed")
-        self.assertEqual(len(self.runs), passcmd.LEAD_ATTEMPTS)
-        self.assertEqual(sorted(r.name for r in self.b.launches("J")), ["lead-1", "lead-2", "lead-3"])
+        self.assertEqual(self.job().status, "active")
+        self.assertGreater(len(self.runs), passcmd.LEAD_ATTEMPTS)
+        self.assertIn("lead-4", [r.name for r in self.b.launches("J")])
 
     def test_a_hand_off_is_judged_once_and_met_completes_the_job(self):
         artifact = self.hand_off()
@@ -236,6 +249,16 @@ class PassCmd(unittest.TestCase):
         self.assertEqual([r.name for r in relead], ["relead-" + passcmd._key(artifact)])
         self.assertIn("add tests", relead[0].brief)
         self.assertEqual(self.job().status, "active")
+
+    def test_repeated_not_met_callback_does_not_create_another_relead(self):
+        artifact = self.hand_off()
+        self.pass_()
+        self.pass_()
+        self.verdict("not_met", "tests missing", next_steps="add tests", artifact=artifact)
+        passcmd.on_not_met(self.b, self.cfg, "J", start=False)
+        passcmd.on_not_met(self.b, self.cfg, "J", start=False)
+        relead = [r for r in self.b.launches("J") if r.name.startswith("relead-")]
+        self.assertEqual([r.name for r in relead], ["relead-" + passcmd._key(artifact)])
 
     def test_failed_job_notice_repeats_until_acked(self):
         self.b.open_blocker("J", "question", "alice", "ship now?", until=self.b.now() - _dt.timedelta(minutes=1),
@@ -379,7 +402,7 @@ class FailedRestart(PassCmd):
         self.assertEqual(judge.state, "queued")
 
     def test_three_old_attempts_do_not_exhaust_the_new_run(self):
-        self.test_no_hand_off_relaunches_the_lead_then_fails_after_three()
+        self.test_no_hand_off_retries_after_three_without_failing_the_job()
         self.queue("fresh", queued_by="swarm run")
         self.pass_()
         for restart in self.open_restarts():
@@ -457,8 +480,8 @@ class FailedRestart(PassCmd):
         self.queue("fresh", queued_by="swarm run")
         self.pass_()
         self.assertEqual(len(self.runs), 1)
-        self.assertEqual(self.job().status, "failed")
-        self.assertIn("cost cap reached", self.job().outcome)
+        self.assertEqual(self.job().status, "active")
+        self.assertEqual(self.b.get_launch("J", 1, "fresh").state, "queued")
 
     def test_engine_never_launches_on_completed_cancelled_or_paused_jobs(self):
         for state in ("completed", "cancelled", "paused"):

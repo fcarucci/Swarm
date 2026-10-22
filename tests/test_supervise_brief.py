@@ -54,7 +54,7 @@ class BriefTests(TranscriptEnv):
         self.assertTrue(b.text.startswith("[swarm job: J]\nYou are resuming"))
         self.assertIn(f"You are resuming {self.name}'s work after it stopped (stuck:dead). "
                       "Check the board first; do not redo finished steps.", b.text)
-        self.assertIn("restart 1 of at most 2", b.text)
+        self.assertIn("Restart 1;", b.text)
         self.assertIn("Parse the logs and report.", b.text)
         self.assertIn("claimed the parser; step 1 done", b.text)
         self.assertIn("please also cover dates", b.text)
@@ -308,8 +308,8 @@ class BriefTests(TranscriptEnv):
         self.assertIn("Parse the logs and report.", b.text)
         self.assertIn("REP1 step 59", b.text)
         self.assertIn("REP1: migrated the schema", b.text)
-        self.assertIn("restart 2 of at most 2", b.text)
-        self.assertNotIn("restart 1 of at most 2", b.text)          # no nested earlier brief
+        self.assertIn("Restart 2;", b.text)
+        self.assertNotIn("Restart 1;", b.text)                     # no nested earlier brief
         self.assertEqual(b.text.count("## Your original task"), 1)
         self.assertIn("transcript show --job 'J' --key 'rep1'", b.text)
         self.assertIn("transcript show --job 'J' --key 'orig'", b.text)   # the original run, for the task
@@ -318,7 +318,7 @@ class BriefTests(TranscriptEnv):
     def test_a_short_attempt_does_not_nest_its_brief(self):
         b = self._second_restart(3)
         self.assertIn("REP1 step 2", b.text)
-        self.assertNotIn("restart 1 of at most 2", b.text)
+        self.assertNotIn("Restart 1;", b.text)
         self.assertEqual(b.text.count("You are resuming"), 1)
 
     def test_a_huge_original_task_leaves_room_for_the_latest_tail(self):

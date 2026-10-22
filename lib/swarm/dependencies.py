@@ -15,6 +15,20 @@ from swarm.board.base import JOB_DATA_VALUE_MAX
 PREFIX = 'SWARM_TASK_V1\n'
 KIND = 'TASK-EVIDENCE'
 SUPERSEDE_KIND = 'TASK-SUPERSEDE'
+INTERRUPTED_PENDING_PREFIX = 'interrupted native turn pending@'
+
+
+def interrupted_pending_outcome(revision):
+    return f'{INTERRUPTED_PENDING_PREFIX}{revision}'
+
+
+def interrupted_pending_revision(value):
+    if not isinstance(value, str) or not value.startswith(INTERRUPTED_PENDING_PREFIX):
+        return None
+    try:
+        return int(value[len(INTERRUPTED_PENDING_PREFIX):])
+    except ValueError:
+        return None
 
 
 def spec(row):
@@ -325,21 +339,72 @@ def describe(board, job, *, include_superseded=False):
 def reconcile_external(board, job):
     for row in board.launches(job, include_closed=False):
         value = spec(row)
-        if value is None or row.state != 'queued' or not value.get('reporter') or block_reason(board, row):
+        if value is None:
+            continue
+        native_running = row.state == 'running' and not value.get('reporter')
+        external_queued = row.state == 'queued' and bool(value.get('reporter'))
+        if not (native_running or external_queued):
+            continue
+        if external_queued and block_reason(board, row):
+            continue
+        if native_running and (not _current(board, row, value) or supersession(board, row)):
             continue
         ev = evidence(board, row)
         if not ev:
             continue
-        agent = next((a for a in board.agents(job, include_departed=True) if a.agent_key == value['reporter_key']), None)
+        if native_running:
+            restart = next((r for r in board.restarts(job) if r.launch_id == row.launch_id), None)
+            agent_key = restart.new_agent_key if restart is not None else None
+        else:
+            agent_key = value['reporter_key']
+        agent = next((a for a in board.agents(job, include_departed=True)
+                      if a.agent_key == agent_key), None) if agent_key else None
+        if agent is None or agent.name != ev.get('actor') or agent.role != row.role:
+            continue
         # A stop hook persists turn_ended_at. Mere heartbeat/contact never ends a turn.
         reported_at = dt.datetime.fromisoformat(ev['at'])
-        if agent is None:
-            continue
         terminal_at = agent.ended_at or getattr(agent, 'turn_ended_at', None)
         if terminal_at is None or terminal_at < reported_at:
             continue
         board.set_launch_state(row.id, row.revision, 'done' if ev['outcome'] == 'passed' else 'failed',
-                               job=job, last_outcome='external evidence: ' + ev['outcome'])
+                               task_turn_agent_key=agent.agent_key if native_running else None,
+                               task_reported_at=reported_at if native_running else None,
+                               job=job, last_outcome=('native task evidence: ' if native_running
+                                                     else 'external evidence: ') + ev['outcome'])
+
+
+def reconcile_interrupted_turns(board, job, *, settled_launch_revisions=None):
+    """Requeue an incomplete native task only after its exact runner and turn have ended.
+
+    A Codex turn-end marker alone is not terminal: the session may receive another turn.
+    The runner restart must also be closed as failed, and the assigned agent must still
+    have an ended turn. Cancellation and evidence are never retried.
+    """
+    js = board.job_status(job)
+    if js is None or js.status != "active":
+        return
+    agents = {a.agent_key: a for a in board.agents(job, include_departed=True)}
+    restarts = board.restarts(job)
+    settled_launch_revisions = dict(settled_launch_revisions or {})
+    for row in board.launches(job, include_closed=bool(settled_launch_revisions)):
+        expected_revision = settled_launch_revisions.get(row.launch_id)
+        newly_failed = (row.state == "failed" and expected_revision is not None
+                        and row.revision == expected_revision
+                        and row.last_outcome == interrupted_pending_outcome(expected_revision))
+        if (row.state != "running" and not newly_failed) or spec(row) is None or not row.launch_id:
+            continue
+        restart = next((r for r in reversed(restarts) if r.launch_id == row.launch_id), None)
+        if restart is None or restart.ended_at is None or restart.outcome != "failed":
+            continue
+        agent_key = restart.new_agent_key or restart.old_agent_key
+        agent = agents.get(agent_key)
+        if agent is None or (agent.ended_at is None and agent.turn_ended_at is None):
+            continue
+        # Evidence, if present, is authoritative and must not be converted into a retry.
+        if evidence(board, row):
+            continue
+        board.set_launch_state(row.id, row.revision, "queued", job=job,
+                               last_outcome="interrupted native turn")
 
 
 def advance(board, job):
@@ -350,6 +415,7 @@ def advance(board, job):
             if why and (why.startswith('superseded') or why.startswith('artifact superseded')):
                 board.set_launch_state(row.id, row.revision, 'failed', job=job, last_outcome=why)
     reconcile_external(board, job)
+    reconcile_interrupted_turns(board, job)
     rows = describe(board, job)
     if not rows:
         return None

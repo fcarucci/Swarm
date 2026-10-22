@@ -435,7 +435,7 @@ class PostgresHarness:
     def reset(self, pool=SMALL_POOL) -> None:
         self.conn.execute("TRUNCATE messages, agents, jobs, name_pool, agent_routes, transcripts, transcript_image_refs, "
                           "memory_ref_images, memory_refs, transcript_images, restarts, job_pauses, blocker_events, blockers, events, "
-                          "bg_commands, launches, drive_locks")
+                          "bg_commands, launches, drive_locks, completion_receipts, finalization_receipts")
         with self.conn.cursor() as cur:
             cur.executemany("INSERT INTO name_pool (name, source) VALUES (%s, %s)",
                             [(n, s) for s, names in pool.items() for n in names])
@@ -557,7 +557,8 @@ class SqliteHarness:
                                      "DELETE FROM agent_routes; DELETE FROM transcripts; DELETE FROM restarts; DELETE FROM job_pauses; "
                                      "DELETE FROM memory_ref_images; DELETE FROM memory_refs; "
                                      "DELETE FROM transcript_image_refs; DELETE FROM transcript_images; "
-                                     "DELETE FROM drive_locks; DELETE FROM launches; DELETE FROM board_meta; COMMIT;")
+                                     "DELETE FROM drive_locks; DELETE FROM launches; DELETE FROM completion_receipts; "
+                                     "DELETE FROM finalization_receipts; DELETE FROM board_meta; COMMIT;")
         setup_board(self.cfg, pool)
 
     def board(self, **board_overrides):

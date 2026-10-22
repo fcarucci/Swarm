@@ -65,6 +65,10 @@ class OrphansTest(unittest.TestCase):
         for text in ("Build parser", "Already pushed", "#42", "no live agents", "do not redo", "fix parser test"):
             self.assertIn(text, args["restart_note"])
         self.assertEqual(len(self.state["orphan_restarts"]["J"]), 1)
+    def test_job_supervise_preference_does_not_hold_orphan_restart(self):
+        self.b.js.supervise = False
+        self.run_pass()
+        self.resume.assert_called_once()
     def test_paused_closed_human_wait_and_live_agents_excluded(self):
         for attr, value in (("status", "paused"), ("status", "completed"),
                             ("waiting_on", "Francesco approval / open question"),

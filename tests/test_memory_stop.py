@@ -1,6 +1,4 @@
-"""The SubagentStop memory gate (hooks._memory_stop): an agent that ends normally must have stored a
-memory (`swarm remember`) or declared none (`swarm remember --none`). Otherwise the stop is blocked
-once, and the next stop goes through, marked unharvested for the learnings step. Never loops."""
+"""SubagentStop records missing learnings as metadata without holding task progress."""
 from unittest import mock
 
 from test_hindsight import HindsightEnv
@@ -44,16 +42,9 @@ class MemoryStopTests(HindsightEnv):
         with self.board() as b:
             self.assertEqual(learnings.unharvested(b, "J"), [])
 
-    def test_neither_is_blocked_once_then_allowed_and_marked_unharvested(self):
+    def test_neither_blocks_the_stop_and_marks_unharvested_immediately(self):
         out = self.stop()
-        self.assertTrue(self.blocked(out), out)
-        self.assertIn(f"{hooks._bin()} remember", out["reason"])
-        self.assertIn("--none", out["reason"])
-        self.assertIsNone(self.status().ended_at)          # still active: the stop was refused
-
-        out = self.stop(again=True)
         self.assertFalse(self.blocked(out), out)
-        self.assertIsNotNone(self.status().ended_at)       # now completed
         with self.board() as b:
             marks = learnings.unharvested(b, "J")
         self.assertEqual(len(marks), 1, marks)

@@ -453,12 +453,41 @@ SELECT j.job, j.status, j.description, j.task, j.outcome, j.created_by, j.sessio
        -- Match base.derive_job_status: live agents override pending questions. Legacy
        -- waits and other blockers remain context, never a job status.
        CASE WHEN COALESCE(s.started, 0) + COALESCE(s.running, 0) > 0 THEN 'active'
+            WHEN native_completion.created_at IS NOT NULL THEN 'completed'
             WHEN j.status <> 'active' THEN j.status
             WHEN EXISTS (SELECT 1 FROM blockers b WHERE b.job=j.job AND b.state='open'
                          AND b.kind='question') THEN 'waiting'
             ELSE 'idle'
-       END AS shown_status
+       END AS shown_status, native_completion.created_at AS native_completed_at
   FROM jobs j
+  LEFT JOIN LATERAL (
+    SELECT r.created_at FROM completion_receipts r WHERE r.job=j.job
+      AND j.status='failed' AND j.closed_by='swarm pass' AND NOT j.completion_forced
+      AND r.body::jsonb->'closure'->>'goal'=j.goal
+      AND r.body::jsonb->'closure'->>'outcome'=j.outcome
+      AND (r.body::jsonb->'closure'->>'finished_at')::timestamptz=j.finished_at
+      AND (r.body::jsonb->'closure'->>'activated_at')::timestamptz IS NOT DISTINCT FROM j.activated_at
+      AND j.verdict='met' AND j.verdict_scope='goal'
+      AND r.body::jsonb->>'candidate'=j.verdict_candidate AND r.body::jsonb->>'req'=j.verdict_req
+      AND (r.body::jsonb->>'verdict_at')::timestamptz=j.verdict_at
+      AND swarm_native_evidence_matches(j.plugin_data, r.body::jsonb->'verdict_chunks')
+      AND j.waiting_on IS NULL
+      AND (r.body::jsonb->'projection_fence'->>'done')::bigint =
+          (SELECT coalesce(max(id),0) FROM messages WHERE job=j.job AND left(message,5)='DONE ')
+      AND (r.body::jsonb->'projection_fence'->>'launches')::bigint =
+          (SELECT coalesce(max(id),0) FROM launches WHERE job=j.job)
+      AND (r.body::jsonb->'projection_fence'->>'launch_revisions')::bigint =
+          (SELECT coalesce(sum(revision),0) FROM launches WHERE job=j.job)
+      AND (r.body::jsonb->'projection_fence'->>'restarts')::bigint =
+          (SELECT coalesce(max(id),0) FROM restarts WHERE job=j.job)
+      AND (r.body::jsonb->'projection_fence'->>'background')::bigint =
+          (SELECT coalesce(max(id),0) FROM bg_commands WHERE job=j.job)
+      AND (r.body::jsonb->'projection_fence'->>'blockers')::bigint =
+          (SELECT coalesce(max(id),0) FROM blockers WHERE job=j.job)
+      AND (r.body::jsonb->'projection_fence'->>'task_evidence')::bigint =
+          (SELECT coalesce(max(id),0) FROM events WHERE job=j.job AND kind IN ('TASK-EVIDENCE','TASK-SUPERSEDE'))
+    ORDER BY r.created_at DESC LIMIT 1
+  ) native_completion ON true
   LEFT JOIN LATERAL (
     -- Job listings need no per-agent message counts, including for closed jobs.
     SELECT a.job, sum(a.n)::bigint AS agents,
@@ -501,7 +530,7 @@ _JOB_STATUS_COLS = ("job, status, description, task, outcome, created_by, sessio
                     "dead_or_left, messages, last_activity_at, project, goal, verdict, verdict_reason, "
                     "verdict_by, verdict_at, completion_forced, judge, waiting_on, waiting_since, closed_by, "
                     "supervise, verdict_next, max_hours, waiting_until, open_blockers, protected_blockers, "
-                    "verdict_scope, verdict_generation, verdict_candidate, verdict_req")
+                    "verdict_scope, verdict_generation, verdict_candidate, verdict_req, native_completed_at")
 _MESSAGE_COLS = "id, created_at, job, agent_name, to_agent, message"
 _MESSAGE_COLS_M = ", ".join("m." + c.strip() for c in _MESSAGE_COLS.split(","))
 # Evaluated for alias s in both the atomic snapshot and the cheap repair fingerprint.
@@ -927,6 +956,14 @@ def _install_schema(conn: psycopg.Connection, b: dict) -> None:
         conn.execute(events_schema(True))
         conn.execute(bg_schema(True))   # schema 24
         conn.execute(launches_schema(True))
+        conn.execute(settlements_schema(True))
+        conn.execute('''CREATE OR REPLACE FUNCTION swarm_native_evidence_matches(raw text, expected jsonb)
+            RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS $$
+            BEGIN
+              IF expected IS NULL OR expected='{}'::jsonb THEN RETURN false; END IF;
+              RETURN coalesce(raw::jsonb @> expected, false);
+            EXCEPTION WHEN OTHERS THEN RETURN false;
+            END $$''')
         migrate_launches(conn, pg=True)   # schema 25: launches, drive locks, the claim's restart columns
         conn.execute("""
     CREATE OR REPLACE FUNCTION swarm_keep_blocked_jobs() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -1022,9 +1059,10 @@ from .blockers import SqlBlockers, sql_schema, migrate_sql, rollup, protects
 from .launches import SqlLaunches, launches_schema, migrate_launches
 from .events import SqlEvents, sql_schema as events_schema
 from .bgcmds import SqlBgCommands, sql_schema as bg_schema
+from .settlements import SqlSettlements, sql_schema as settlements_schema
 
 
-class PostgresBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
+class PostgresBoard(SqlSettlements, SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
     _launch_pg = True
     _blocker_pg = True
     _event_pg = True
@@ -1455,9 +1493,6 @@ class PostgresBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
             if job_row is None or agent_row is None:
                 return SpawnGrant(False, 0, 0, "member")
             mine, total = agent_row[0], job_row[0]
-            refused = "agent" if mine >= per_agent else "job" if total >= per_job else None
-            if refused:
-                return SpawnGrant(False, mine, total, refused)
             conn.execute("UPDATE agents SET spawns = spawns + 1 WHERE agent_key = %s", (agent_key,))
             conn.execute("UPDATE jobs SET spawns = spawns + 1 WHERE job = %s", (job,))
             return SpawnGrant(True, mine + 1, total + 1)
@@ -1603,7 +1638,8 @@ class PostgresBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
                    || '|' || coalesce((extract(epoch from finished_at) * 1000000)::bigint::text, '')
                    || '|' || open_blockers || '|' || protected_blockers
                    || '|' || md5(coalesce(goal, '') || chr(1) || coalesce(description, ''))
-                   || '|' || {_CONTEXT_REVISION_SQL} AS s, job
+                   || '|' || {_CONTEXT_REVISION_SQL}
+                   || '|' || coalesce((extract(epoch from native_completed_at) * 1000000)::bigint::text, '') AS s, job
               FROM job_status s WHERE job IN (SELECT job FROM scope)
           ), vis AS MATERIALIZED (
             SELECT job || '|' || agent_key || '|'

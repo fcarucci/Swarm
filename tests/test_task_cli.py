@@ -12,7 +12,7 @@ class TaskCLI(Env):
     def setUp(self):
         super().setUp()
         with self.board() as board:
-            board.open_job('J', None, None, None, 'owner', goal='Full engineering project')
+            board.open_job('J', None, None, 'root-session', 'owner', goal='Full engineering project')
         self.wake = mock.patch('swarm.dependencies.wake', return_value=None)
         self.wake.start()
         self.addCleanup(self.wake.stop)
@@ -28,35 +28,32 @@ class TaskCLI(Env):
     def trust_job(self):
         enrolment.write_job(store_key(self.cfg), job='J', harness='codex', session_id='owner', cwd=str(self.tmp))
 
-    def test_native_registration_requires_existing_trusted_enrolment(self):
-        rc, _, err = self.add()
-        self.assertEqual(rc, 1)
-        self.assertIn('trusted enrolment', err)
+    def test_native_registration_uses_exact_live_member_without_host_grant(self):
         with self.board() as board:
-            self.assertEqual(board.launches('J'), [])
-        self.trust_job()
-        rc, out, err = self.add()
+            name = board.allocate_name('task-author', 'J', 'engineering_lead')
+            board.record_route('task-author', 'root-session', 'final', 'J')
+        with mock.patch.dict(os.environ, {'CODEX_THREAD_ID': 'task-author', 'CODEX_SESSION_ID': 'root-session'}):
+            rc, out, err = self.add()
         self.assertEqual(rc, 0, err)
+        self.assertIn('qa: queued', out)
         rc, out, err = self.cli('task', 'list', '--job', 'J', '--json')
         self.assertEqual(rc, 0, err)
         self.assertEqual([(r['name'], r['state']) for r in json.loads(out)], [('qa', 'ready')])
         self.assertIsNone(enrolment.find_job_owner(store_key(self.cfg), 'J'), 'task registration cannot mint drive authority')
 
     def test_native_observer_cannot_attest_existing_external_agent(self):
-        self.trust_job()
         with self.board() as board:
             name = board.allocate_name('qa-seat', 'J', 'qa')
             board.record_route('qa-seat', 'qa-session', 'final', 'J')
-        enrolment.write(store_key(self.cfg), job='J', agent_key='qa-seat', harness='codex',
-                        session_id='qa-session', cwd=str(self.tmp))
-        rc, _, err = self.add('--reporter', name)
+        with mock.patch.dict(os.environ, {'CODEX_THREAD_ID': 'root-session', 'CODEX_SESSION_ID': 'root-session'}):
+            rc, _, err = self.add('--reporter', name)
         self.assertEqual(rc, 0, err)
         args = ('task', 'report', '--job', 'J', '--name', 'qa', '--artifact', 'main@' + 'a' * 40,
                 '--outcome', 'passed', '--reason', 'checked exact source', '--as', name)
         with mock.patch.dict(os.environ, {'CODEX_THREAD_ID': 'observer-thread', 'CODEX_SESSION_ID': 'observer-session'}):
             rc, _, err = self.cli(*args)
         self.assertEqual(rc, 1)
-        self.assertIn('assigned enrolled agent session', err)
+        self.assertIn('exact assigned actor session', err)
         with mock.patch.dict(os.environ, {'CODEX_THREAD_ID': 'qa-seat', 'CODEX_SESSION_ID': 'qa-session'}):
             rc, out, err = self.cli(*args)
         self.assertEqual(rc, 0, err)
@@ -71,13 +68,12 @@ class TaskCLI(Env):
             return self.cli(*args)
 
     def trusted_child_task(self):
-        self.trust_job()
         with self.board() as board:
             self.child_name = board.allocate_name('child-thread', 'J', 'qa')
             board.record_route('child-thread', 'root-session', 'final', 'J')
-        enrolment.write(store_key(self.cfg), job='J', agent_key='child-thread', harness='codex',
-                        session_id='root-session', cwd=str(self.tmp))
-        self.assertEqual(self.add('--reporter', self.child_name)[0], 0)
+        with mock.patch.dict(os.environ, {'CODEX_THREAD_ID': 'root-session', 'CODEX_SESSION_ID': 'root-session'}):
+            rc, out, err = self.add('--reporter', self.child_name)
+        self.assertEqual(rc, 0, err)
 
     def test_child_can_report_using_own_thread_without_root_route(self):
         self.trusted_child_task()
@@ -87,22 +83,31 @@ class TaskCLI(Env):
         self.assertEqual(rc, 0, err)
         self.assertIn('evidence recorded', out)
 
+    def test_assigned_actor_report_does_not_need_private_agent_grant(self):
+        self.trusted_child_task()
+        with self.board() as board:
+            board.record_route('child-thread', None, 'final', 'J')
+        with mock.patch('swarm.enrolment.owns', return_value=False):
+            rc, out, err = self.child_report('child-thread')
+        self.assertEqual(rc, 0, err)
+        self.assertIn('evidence recorded', out)
+
     def test_sibling_cannot_report_as_child_sharing_root_session(self):
         self.trusted_child_task()
         rc, _, err = self.child_report('sibling-thread')
         self.assertEqual(rc, 1, 'a shared root route must not authorize sibling evidence')
-        self.assertIn('assigned enrolled agent session', err)
+        self.assertIn('exact assigned actor session', err)
 
     def test_parent_cannot_report_as_child_sharing_root_session(self):
         self.trusted_child_task()
         rc, _, err = self.child_report('root-session')
         self.assertEqual(rc, 1, 'a parent must not attest a child task')
-        self.assertIn('assigned enrolled agent session', err)
+        self.assertIn('exact assigned actor session', err)
 
     def test_native_task_startup_failure_persists_concrete_reason(self):
-        self.trust_job()
         with mock.patch('swarm.dependencies.wake', return_value='listener launch refused by OS'):
-            rc, out, err = self.add()
+            with mock.patch.dict(os.environ, {'CODEX_THREAD_ID': 'root-session', 'CODEX_SESSION_ID': 'root-session'}):
+                rc, out, err = self.add()
         self.assertEqual(rc, 0, err)
         self.assertIn('listener launch refused', err)
         with self.board() as board:

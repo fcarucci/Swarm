@@ -130,6 +130,8 @@ def verdict_data(raw: str | None, artifact: str | None, verdict: str, reason: st
         key = 'pipeline.verdict.' + hashlib.sha256(artifact.encode()).hexdigest()[:32]
     elif scope in ('goal', 'ruling') and generation is not None:
         key = drive_verdict_key(generation, scope, candidate, req)
+    elif scope == 'goal':
+        key = 'pipeline.goal_verdict'
     else:
         return json.dumps(data, ensure_ascii=False)
     fields = dict(artifact=artifact, verdict=verdict, reason=reason, next_steps=next_steps, judge=judge,
@@ -314,7 +316,7 @@ def auto_close_pending(board, job: str) -> bool:
 def clear_verdict_data(raw: str | None) -> str:
     """A different goal starts judging afresh without losing evidence/finalize settings."""
     return json.dumps({k: v for k, v in parse_job_data(raw).items()
-                       if not k.startswith(('pipeline.verdict.', 'pipeline.judge.', 'pipeline.superseded.'))
+                       if not k.startswith(('pipeline.verdict.', 'pipeline.goal_verdict', 'pipeline.judge.', 'pipeline.superseded.'))
                        and k != 'pipeline.verdict_artifact'}, ensure_ascii=False)
 
 

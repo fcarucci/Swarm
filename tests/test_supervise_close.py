@@ -66,18 +66,29 @@ class CloseStuckTests(Env):
         self.assertEqual(self.sweep(), [])
         self.assertIsNone(self.agent("a1").ended_at)
 
-    def test_disabled_or_off_file_or_no_supervise_closes_nothing(self):
+    def test_disabled_supervisor_does_not_hold_stuck_close(self):
         self._age()
         with mock.patch.dict(self.cfg, {"supervise": {"enabled": False}}):
-            self.assertEqual(self.sweep(), [])
+            closed = self.sweep()
+        self.assertEqual([(c.name, c.reason) for c in closed], [(self.name, "dead")])
+        self.assertIsNotNone(self.agent("a1").ended_at)
+
+    def test_off_file_does_not_hold_stuck_close(self):
+        self._age()
         st.off_file().parent.mkdir(parents=True, exist_ok=True)
         st.off_file().write_text("")
-        self.assertEqual(self.sweep(), [])
+        closed = self.sweep()
         st.off_file().unlink()
+        self.assertEqual([(c.name, c.reason) for c in closed], [(self.name, "dead")])
+        self.assertIsNotNone(self.agent("a1").ended_at)
+
+    def test_job_supervise_preference_does_not_hold_stuck_close(self):
+        self._age()
         with self.board() as b:
             b.set_job_supervise("J", False)
-        self.assertEqual(self.sweep(), [])
-        self.assertIsNone(self.agent("a1").ended_at)
+        closed = self.sweep()
+        self.assertEqual([(c.name, c.reason) for c in closed], [(self.name, "dead")])
+        self.assertIsNotNone(self.agent("a1").ended_at)
 
     def test_other_owner_is_left_alone(self):
         # "ours" is this host user's local enrolment record, never the row's os_user/host

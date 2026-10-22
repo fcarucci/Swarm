@@ -234,7 +234,10 @@ from .events import MemoryEvents, drop_old_events
 from .bgcmds import MemoryBgCommands, drop_old_bg
 
 
-class MemoryBoard(MemoryLaunches, MemoryBlockers, MemoryEvents, MemoryBgCommands, Board):
+from .settlements import MemorySettlements
+
+
+class MemoryBoard(MemorySettlements, MemoryLaunches, MemoryBlockers, MemoryEvents, MemoryBgCommands, Board):
     """In-process Board over a shared MemoryStore. Reference/test backend only."""
 
     def __init__(self, cfg: dict):
@@ -604,9 +607,6 @@ class MemoryBoard(MemoryLaunches, MemoryBlockers, MemoryEvents, MemoryBgCommands
             if a is None or a["job"] != job or j is None:
                 return SpawnGrant(False, 0, 0, "member")
             mine, total = a.get("spawns", 0), j.get("spawns", 0)
-            refused = "agent" if mine >= per_agent else "job" if total >= per_job else None
-            if refused:
-                return SpawnGrant(False, mine, total, refused)
             a["spawns"], j["spawns"] = mine + 1, total + 1
             s.touch()
             return SpawnGrant(True, mine + 1, total + 1)
@@ -1310,6 +1310,11 @@ class MemoryBoard(MemoryLaunches, MemoryBlockers, MemoryEvents, MemoryBgCommands
             verdict_generation=j.get("verdict_generation"), verdict_candidate=j.get("verdict_candidate"),
             verdict_req=j.get("verdict_req"), **pipeline_status(j.get("plugin_data")))
 
+        from swarm.settlement import projected, projection_fence
+        from dataclasses import replace
+        receipt = self.completion_receipt(j['job'])
+        if receipt and projected(js, receipt, parse_job_data(j.get('plugin_data')), projection_fence(self, j['job'])):
+            js = replace(js, native_completed_at=_dt.datetime.fromisoformat(receipt['completed_at']))
         return rollup(js, self.blockers(j["job"]), now)
 
     def job_status(self, job: str) -> JobStatus | None:

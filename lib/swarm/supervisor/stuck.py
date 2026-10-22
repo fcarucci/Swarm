@@ -90,23 +90,23 @@ def _spent(deadline: float | None) -> bool:
 
 
 def find_stuck_owned(board, cfg: dict, now=None, deadline: float | None = None) -> list[tuple]:
-    """(job status, agent, reason) for each of this machine+user's stuck agents on open,
-    supervised jobs; [] when the supervisor is off. Read-only. Orphaned: the job's
-    orchestrator on this machine is gone and every active agent of the job (anyone's) is dead
-    (an agent in a timed-out tool call is a live process: its job isn't orphaned). Stops scanning once `deadline` (time.monotonic()) has passed:
-    the jobs not scanned are the next sweep's."""
+    """(job status, agent, reason) for each of this machine+user's stuck agents on active jobs.
+
+    Orphaned: the job's orchestrator on this machine is gone and every active agent of the job
+    (anyone's) is dead (an agent in a timed-out tool call is a live process: its job isn't
+    orphaned). Stops scanning once `deadline` (time.monotonic()) has passed; jobs not scanned
+    are left for the next sweep.
+    """
     from swarm import transcripts
     from swarm.supervisor import outage
-    from swarm.supervisor.settings import enabled, settings
-    if not enabled(cfg):
-        return []
+    from swarm.supervisor.settings import settings
     sup, bcfg = settings(cfg), cfg["board"]
     out = outage.current()
     found = []
     for js in board.jobs(False):
         if _spent(deadline):
             break
-        if not js.supervise or js.status != "active":
+        if js.status != "active":
             continue
         from swarm.supervisor.orphans import drive_gate, drive_view, human_question
         if drive_view(board, cfg, js.job)[0]:

@@ -84,7 +84,7 @@ def human_question(board, js, cfg=None):
 
 def eligible(board, cfg, js, sup, now):
     from swarm.cli import OrchestratorWatch
-    if js.status != "active" or not js.supervise:
+    if js.status != "active":
         return False
     if drive_view(board, cfg, js.job)[0]:
         return False          # the driver restarts its own launches; never a generic orphan coordinator

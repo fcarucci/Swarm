@@ -4,6 +4,10 @@ def job_context(board, j, now) -> str:
     """Exact registered reasons for a job without working agents; never infer a human wait."""
     from swarm.cli import _job_status_word
     shown = _job_status_word(board, j, now)
+    if shown == 'completed' and j.native_completed_at:
+        return f'audited full-goal completion; historical {j.status}: {j.outcome or "terminal lifecycle record"}'
+    if shown == 'failed' and board.job_data(j.job).get('late_review.pending'):
+        return 'audited completion pending: ' + board.job_data(j.job)['late_review.pending']
     if shown == 'active' and j.status != 'active':
         return f"current agents working; prior {j.status}: {j.outcome or 'terminal lifecycle record'}"
     if shown not in ("waiting", "idle"):

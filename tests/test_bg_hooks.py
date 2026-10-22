@@ -1,5 +1,5 @@
-"""swarm-orphans through the hooks and the CLI: a member's CI wait is refused with the exact
-`swarm ci wait` to run instead; a member's background Bash call is rewritten to run under
+"""swarm-orphans through the hooks and the CLI: a member's CI shell polling command is allowed;
+a member's background Bash call is rewritten to run under
 `swarm bg` and recorded; a finished agent's commands get a detached reap; `bg list`, `bg reap`,
 `status --job`, `deactivate`, the auto-close sweep, the supervisor pass and `doctor` all see
 orphans."""
@@ -61,13 +61,9 @@ class BgHookEnv(GoalEnv):
 # --------------------------------------------------------------------------- A: CI waits
 
 class CiWaitGuardTests(BgHookEnv):
-    def test_gh_run_watch_is_refused_and_says_the_plugin_is_missing(self):
+    def test_gh_run_watch_is_not_denied_when_the_plugin_is_missing(self):
         why = self.denied(self.bash("w1", "gh run watch 123 --interval 60"))
-        self.assertIsNotNone(why)
-        self.assertIn("`gh run watch`", why)
-        self.assertIn("plugin", why)
-        self.assertIn("not installed or is disabled", why)
-        self.assertNotIn(" ci wait --repo", why)   # never a command that doesn't exist here
+        self.assertIsNone(why)
 
     def test_one_shot_checks_and_other_commands_pass(self):
         for cmd in ("gh run view 123 --json conclusion", "gh pr checks 7", "git commit -m 'no gh run watch'",
@@ -79,26 +75,24 @@ class CiWaitGuardTests(BgHookEnv):
                         tool_input={"command": "gh run watch 1"}, transcript_path=self.main_transcript())
         self.assertIsNone(self.denied(out or {}))
 
-    def test_judge_may_verify_once_but_not_watch(self):
+    def test_judge_may_watch_ci_without_a_plugin(self):
         self.activate_goal("G")
         self.spawn_judge("judge-1", job="G")
         self.assertIsNone(self.denied(self.bash("judge-1", "gh run view 99 --json conclusion")))
-        self.assertIsNotNone(self.denied(self.bash("judge-1", "gh run watch 99")))
+        self.assertIsNone(self.denied(self.bash("judge-1", "gh run watch 99")))
 
 
 class CiWaitWithPluginTests(BgHookEnv):
     plugins_disabled = ("engineering-team", "ask-answer")   # the ci plugin is loaded
 
-    def test_refusal_gives_the_exact_replacement_from_the_work_dir(self):
+    def test_ci_wait_is_not_denied_with_a_plugin_loaded(self):
         repo = fake_repo(self.tmp / "repo")
         why = self.denied(self.bash("w1", "gh run watch 123", cwd=repo))
-        self.assertIn(f"ci wait --repo acme/rocket --sha {SHA}", why)
-        self.assertIn(f"ci status --repo acme/rocket --sha {SHA}", why)
-        self.assertIn("gh run view <run-id> --json conclusion` is still allowed", why)
+        self.assertIsNone(why)
 
-    def test_repo_flag_wins_and_unknowns_are_placeholders(self):
+    def test_repo_flag_does_not_trigger_a_plugin_refusal(self):
         why = self.denied(self.bash("w1", "gh run watch 5 -R other/thing", cwd=self.tmp))
-        self.assertIn("ci wait --repo other/thing --sha '<exact head SHA>'", why)
+        self.assertIsNone(why)
 
 
 class CiWaitShellguardTests(BgHookEnv):
@@ -123,7 +117,7 @@ class CiWaitShellguardTests(BgHookEnv):
                     "watch -n 60 gh run list", "gh pr checks 7 --watch",
                     "for i in 1 2 3; do gh api repos/o/r/actions/runs; sleep 9; done"):
             self.assertIsNotNone(shellguard.ci_wait(cmd), cmd)
-            self.assertIsNotNone(self.denied(self.bash("w1", cmd)), cmd)
+            self.assertIsNone(self.denied(self.bash("w1", cmd)), cmd)
 
     def test_a_loop_elsewhere_a_piped_list_and_heredoc_bodies_are_not_waits(self):
         for cmd in ("for i in 1 2; do echo $i; done; gh run view 1 --json conclusion",
@@ -182,10 +176,12 @@ class BackgroundRewriteTests(BgHookEnv):
         inner = shlex.split(cmd)[-1]
         self.assertEqual(inner, "/x/bin/swarm join --job J --key w1")
 
-    def test_ci_refusal_beats_the_wrap(self):
+    def test_ci_watch_without_plugin_uses_normal_background_wrap(self):
         out = self.bash("w1", "gh run watch 3", background=True)
-        self.assertIsNotNone(self.denied(out))
-        self.assertIsNone(self.rewritten(out))
+        self.assertIsNone(self.denied(out))
+        command = self.rewritten(out)
+        self.assertIsNotNone(command)
+        self.assertTrue(command.endswith("-- 'gh run watch 3'"))
 
     def test_stop_spawns_a_delayed_reap_for_its_own_running_commands(self):
         with mock.patch.object(bg, "spawn_reaper") as spawn:

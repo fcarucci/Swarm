@@ -163,7 +163,7 @@ def _stored_body(board, job: str, agent_key: str) -> bytes | None:
         return None
 
 
-def build_brief(board, cfg: dict, js, a, reason: str, attempt: int, max_attempts: int,
+def build_brief(board, cfg: dict, js, a, reason: str, attempt: int, max_attempts: int | None = None,
                 partial: bool | str = False) -> Brief:
     """`partial`: the stored transcript is not the final one (the final capture failed): its tail
     is labelled PARTIAL, or with `partial` itself when it is a label (a capture-failed row that
@@ -214,7 +214,7 @@ def build_brief(board, cfg: dict, js, a, reason: str, attempt: int, max_attempts
             source = "task name + first post" if name else "first post"
             task = f"task name: {name}" if name else ""
     head = "\n".join([tag_line(js.job), HEADER.format(name=a.name, reason=reason),
-                      f"This is restart {attempt} of at most {max_attempts}. You run headless: nobody "
+                  f"Restart {attempt}; continue from current work and replan as needed. You run headless: nobody "
                       f"answers questions, so decide and act; post progress on the board. You cannot "
                       f"spawn subagents.", UNTRUSTED])
     if a.role == "coordinator":

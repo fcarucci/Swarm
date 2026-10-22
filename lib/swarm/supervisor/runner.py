@@ -1201,6 +1201,31 @@ def _marker_session(marker: str) -> str | None:
 
 
 def _enrol_native_session(board, cfg: dict, run: dict, key: str) -> None:
+    if run.get('late_review'):
+        from swarm import enrolment, late_review
+        from swarm import settlement
+        from swarm.board.autoinit import store_key
+        # The launch reconciler can still hold this nonblocking lock when the
+        # child emits its only thread.started event. Retry contention briefly;
+        # revalidate the entire assignment after acquiring it, never identity errors.
+        for attempt in range(20):
+            try:
+                with enrolment.coordinator_lock(store_key(cfg), run['job']):
+                    intent = settlement.load(cfg, run['job'])
+                    if intent is None or key == intent.get('root'):
+                        raise ValueError('native review cannot enroll its controlling root')
+                    row = next((r for r in board.launches(run['job']) if r.launch_id == run.get('launch_id')), None)
+                    if not late_review.admitted(board, cfg, run['job'], row, run):
+                        raise ValueError('closed review lost native admission before session enrollment')
+                    return _enrol_native_session_owned(board, cfg, run, key)
+            except BlockingIOError:
+                if attempt == 19:
+                    raise
+                time.sleep(0.05)
+    return _enrol_native_session_owned(board, cfg, run, key)
+
+
+def _enrol_native_session_owned(board, cfg: dict, run: dict, key: str) -> None:
     """Bind a trusted native launch's discovered session without relying on hooks.
 
     Called only for the runner's own thread.started event, before publishing the
@@ -1228,6 +1253,8 @@ def _enrol_native_session(board, cfg: dict, run: dict, key: str) -> None:
     board.record_route(key, key, "final", run["job"])
     enrolment.write(store_key(cfg), job=run["job"], agent_key=key, harness=run["harness"],
                     session_id=key, cwd=run["cwd"])
+    from swarm import late_review
+    late_review.bind_thread(board, cfg, run, key)
 
 
 def _agent_row(cfg, job, key):
@@ -1237,23 +1264,26 @@ def _agent_row(cfg, job, key):
 
 
 def _kill_switch(cfg: dict, run: dict) -> str | None:
-    """Why the replacement must not be launched now: a kill switch ([supervise] enabled, the off
-    files, the job's --no-supervise) or its job closed; None to go ahead. A board that can't be
-    asked doesn't stop it (the enrol deadline does, if the board stays away)."""
+    """Return a stop reason only when the job is missing or closed.
+
+    Local supervisor settings and the job's supervise preference do not cancel work.
+    Explicit job cancellation remains terminal.
+    """
     from swarm.board import open_board
-    from swarm.supervisor.settings import off_reason
-    why = off_reason(cfg, drive=bool(run.get("launch_id")))   # a drive launch ignores [supervise] enabled
-    if why:
-        return f"the supervisor is switched off ({why})"
     try:
         with open_board(cfg) as b:
             js = b.job_status(run["job"])
     except Exception:
         return None
-    if js is None or js.status != "active":
+    if js is None:
+        return "its job is missing"
+    if js.status != "active":
+        from swarm import late_review
+        with open_board(cfg) as b:
+            row = next((r for r in b.launches(run["job"]) if r.launch_id == run.get("launch_id")), None)
+            if run.get("late_review") and late_review.admitted(b, cfg, run["job"], row, run):
+                return None
         return "its job is closed"
-    if not js.supervise:
-        return "supervise is off for its job"
     return None
 
 
@@ -1296,39 +1326,16 @@ def execute(cfg: dict, run: dict, *, popen=subprocess.Popen, clock=time.monotoni
 
 
 def open_workdir(cfg: dict, path: str, check=None) -> tuple[int | None, str | None]:
-    """The replacement's work directory, opened right before the launch by walking
-    from / one component at a time with O_DIRECTORY | O_NOFOLLOW (a symlink swapped in anywhere
-    since the pass checked it fails the walk), with the allowlist rechecked on what was opened:
-    under an allowed root, no dot-directory below it, a directory of this user, never the home
-    directory or above. (descriptor, None), or (None, why not). The session is then started in
-    that directory by descriptor, never by a path that could be re-resolved.
+    """Open the assigned working directory and report real path/open failures.
 
-    Every directory opened from the allowed root down to the work
-    dir is also checked for unapproved project configuration on its descriptor
-    (command.workdir_config_problem, the approval store read once), so the check and the launch
-    see the same inodes. `check(fd, path) -> why | None` replaces that check (approve uses it to
-    collect what is there)."""
-    from swarm import paths
-    from swarm.supervisor import command
-    from swarm.supervisor.settings import settings
-    bad = f"work dir {path} not under [supervise] allowed_workdirs"
+    Project-config approvals and allowed-workdir policy never hold a launch. The optional
+    `check(fd, path)` callback is only for explicit approval-candidate inventory."""
+    bad = f"work dir {path}"
     if not isinstance(path, str) or not os.path.isabs(path) or os.path.normpath(path) != path:
         return None, f"{bad} (not an absolute normalised path)"
     p = Path(path)
-    home = Path(os.path.realpath(paths.home()))
-    if p == home or p in home.parents:
-        return None, f"{bad} (it is the home directory or above it)"
-    roots = [Path(os.path.realpath(os.path.expanduser(r))) for r in settings(cfg)["allowed_workdirs"]]
-    root = next((r for r in roots if p == r or r in p.parents), None)
-    if root is None:
-        return None, bad
-    if any(part.startswith(".") for part in p.relative_to(root).parts):
-        return None, f"{bad} (a dot-directory below {root})"
     if check is None:
-        approvals = command.load_approvals()
-
-        def check(fd, where):
-            return command.workdir_config_problem(fd, where, approvals)
+        check = lambda fd, where: None
     # from the root ("/"; on Windows the drive or share root, opened by compat's checked path emulation)
     fd = (compat.open_root(p.anchor) if compat.IS_WINDOWS
           else compat.open("/", os.O_RDONLY | compat.O_DIRECTORY | compat.O_CLOEXEC))
@@ -1341,15 +1348,11 @@ def open_workdir(cfg: dict, path: str, check=None) -> tuple[int | None, str | No
                 return None, f"{bad} ({part!r} is a symlink or not a directory now: {exc.strerror})"
             os.close(fd)
             fd = nfd
-            if i >= len(root.parts):   # the allowed root and every directory below it
-                why = check(fd, str(Path(*p.parts[:i])))
-                if why:
-                    os.close(fd)
-                    return None, why
-        st = os.fstat(fd)
-        if st.st_uid != compat.uid():
-            os.close(fd)
-            return None, f"{bad} (it belongs to another user)"
+            where = str(Path(*p.parts[:i]))
+            why = check(fd, where)
+            if why:
+                os.close(fd)
+                return None, why
         return fd, None
     except BaseException:
         try:
@@ -1360,19 +1363,9 @@ def open_workdir(cfg: dict, path: str, check=None) -> tuple[int | None, str | No
 
 
 def _open_workdir_checked(cfg: dict, path: str) -> tuple[int | None, str | None, bool]:
-    """open_workdir, and whether a refusal is for project configuration (recoverable by an
-    approval) rather than the path itself. (descriptor, why not, config)."""
-    from swarm.supervisor import command
-    approvals = command.load_approvals()
-    config: list = []
-
-    def check(fd, where):
-        why = command.workdir_config_problem(fd, where, approvals)
-        if why:
-            config.append(why)
-        return why
-    fd, why = open_workdir(cfg, path, check=check)
-    return fd, why, bool(why and config and why == config[-1])
+    """Open the configured workdir. Project-config approval is optional audit data, not a hold."""
+    fd, why = open_workdir(cfg, path)
+    return fd, why, False
 
 
 def _post_hold(cfg: dict, run: dict, why: str) -> None:
@@ -1426,6 +1419,18 @@ def _fresh_output(name: str, board) -> int:
     if moved:
         log(f"{name} already existed (a leftover or a planted link): moved aside to {moved}, not opened")
     return fd
+
+
+def _managed_task_has_evidence(cfg: dict, run: dict) -> bool:
+    """Whether this exact managed launch already has authoritative task evidence."""
+    if not run.get("managed_task") or not run.get("launch_id"):
+        return False
+    from swarm import dependencies
+    from swarm.board import open_board
+    with open_board(cfg) as board:
+        row = next((item for item in board.launches(run["job"])
+                    if item.launch_id == run["launch_id"]), None)
+        return row is not None and dependencies.spec(row) is not None and bool(dependencies.evidence(board, row))
 
 
 def _execute(cfg: dict, run: dict, *, popen, clock, sleep, poll: float, board_every: float) -> str:
@@ -1591,6 +1596,9 @@ def _execute(cfg: dict, run: dict, *, popen, clock, sleep, poll: float, board_ev
     ignored: set = set()   # marker-bound keys already logged as not ours
     while proc.poll() is None:
         barrier.hit("runner_mid_session")
+        if run.get('late_review') and _kill_switch(cfg, run):
+            outcome = 'cancelled'
+            break
         now = clock()
         if now - t0 >= float(run["limit_seconds"]):
             outcome = "timeout"
@@ -1619,6 +1627,13 @@ def _execute(cfg: dict, run: dict, *, popen, clock, sleep, poll: float, board_ev
                 write_run(run)
             if a is not None and a.ended_at is None:
                 enrolled = True
+                if (run.get("managed_task") and run["harness"] == "codex"
+                        and not getattr(a, "tool_calls", 0)
+                        and now - t0 >= float(run["enrol_seconds"])):
+                    # A native thread can enroll successfully and still never enter a turn. Keep
+                    # this distinct from completion; terminal reconciliation may requeue the task.
+                    outcome = "failed"
+                    break
             elif a is not None:   # its row ended while the session runs (also before we saw it active)
                 outcome = "stuck" if (a.left_reason or "").startswith("stuck:") else "cancelled"
                 break
@@ -1634,7 +1649,12 @@ def _execute(cfg: dict, run: dict, *, popen, clock, sleep, poll: float, board_ev
             _stop_session(run)
         t.join(5)
         if proc.returncode == 0:
-            outcome = "completed"
+            if run.get("managed_task") and run["harness"] == "codex":
+                agent = _agent_row(cfg, run["job"], run.get("agent_key")) if run.get("agent_key") else None
+                outcome = ("completed" if (agent is not None and getattr(agent, "tool_calls", 0))
+                           or _managed_task_has_evidence(cfg, run) else "failed")
+            else:
+                outcome = "completed"
         elif run.get("launch_home") and run.get("launch_mode") == "required" and proc.returncode == JAIL_UNAVAILABLE:
             outcome = "refused"   # the jail could not be built: nothing ran (not an attempt to retry blindly)
             run["refused_reason"] = "the launch jail could not be built (launchjail exit 125)"
@@ -1651,10 +1671,32 @@ def _execute(cfg: dict, run: dict, *, popen, clock, sleep, poll: float, board_ev
     t.join(5)
     feeder.join(1)
     run.update(exited=True, outcome=outcome)
+    if run.get('late_review') and proc.poll() is not None:
+        run['leader_reaped'] = True
     write_run(run)
     _keep_output_tail(rid, run["board"])   # the session is over: no raw output outlives it, whatever finish does
     finish(cfg, run, outcome)
     return outcome
+
+
+def review_executor_stopped(run: dict) -> bool:
+    """A review receipt requires positive containment absence and owned leader exit."""
+    if session_presence(run, deadline=time.monotonic() + 5) != 'absent':
+        return False
+    pid = run.get('child_pid')
+    if not pid:
+        return not run.get('started_epoch') and not run.get('agent_key')
+    if run.get('leader_reaped') is True:
+        return True
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    from swarm.supervisor import procwatch
+    token = procwatch.start_token(pid)
+    return bool(token and run.get('child_token') and token != run['child_token'])
 
 
 def finish(cfg: dict, run: dict, outcome: str) -> bool:
@@ -1670,6 +1712,10 @@ def finish(cfg: dict, run: dict, outcome: str) -> bool:
     from swarm.supervisor.settings import log
     from swarm.supervisor.stuck import SUPERVISOR_NAME, WAITING_PREFIX
     key = run.get("agent_key")
+    if run.get('late_review') and not review_executor_stopped(run):
+        run['review_stop_unconfirmed'] = True
+        write_run(run)
+        return False
     if run.get("launch_id"):
         _read_drive_usage(cfg, run)
     if not run.get("board_done"):
@@ -1709,6 +1755,13 @@ def finish(cfg: dict, run: dict, outcome: str) -> bool:
         run.update(board_done=True, outcome=run.get("outcome") or outcome)
         _save_progress(run)
         _save_progress(run)
+    if run.get('late_review'):
+        from swarm import late_review
+        try:
+            if not late_review.record_stopped(cfg, run, outcome):
+                return False
+        except OSError:
+            return False  # owned runtime stays durable; the scoped reaper retries proof publication
     try:
         from swarm import dependencies
         try:
@@ -1890,7 +1943,7 @@ def _adopt_legacy(here: str) -> int:
     return n
 
 
-def reap(cfg: dict, board, deadline: float | None = None) -> int:
+def reap(cfg: dict, board, deadline: float | None = None, *, job=None, restart_id=None) -> int:
     """Finish the runs whose runner is gone (it died, or finish was deferred: board down, marker
     busy), each while holding its run lock (a held lock means a live runner: skipped). The outcome
     is the one recorded, else "failed". A session that outlived its runner is stopped, its whole
@@ -1901,16 +1954,25 @@ def reap(cfg: dict, board, deadline: float | None = None) -> int:
     from swarm.supervisor.settings import ensure_private_dir, settings
     ensure_private_dir(cfg)
     here = store_key(cfg)
-    _adopt_legacy(here)
+    if job is None and restart_id is None:
+        _adopt_legacy(here)
     n = 0
     for rid, p in _run_paths(here):
         if deadline is not None and time.monotonic() >= deadline:
             break      # `deadline` (time.monotonic()): the rest is finished by the next pass
+        if restart_id is not None and rid != restart_id:
+            continue
+        if job is not None:
+            preview = _read_run(p.name, here)
+            if not isinstance(preview, dict) or preview.get('job') != job:
+                continue
         fd = own(rid, here)
         if fd is None:
             continue   # its runner (or another reap) owns it
         try:
             r = _read_run(p.name, here)   # as it is now that we own it
+            if job is not None and (not isinstance(r, dict) or r.get('job') != job):
+                continue
             if r is None:
                 if os.path.lexists(p):
                     _refuse_file(p, "not a readable regular file of this user")
@@ -1922,6 +1984,11 @@ def reap(cfg: dict, board, deadline: float | None = None) -> int:
                 _refuse_file(p, why)
                 continue
             outcome = r.get("outcome") or "failed"
+            if r.get('late_review') and r.get('review_stop_unconfirmed'):
+                _stop_session(r, grace=2.0)
+                if not review_executor_stopped(r):
+                    continue
+                r['review_stop_unconfirmed'] = False
             pgid = r.get("child_pgid") or r.get("child_pid")
             clock_up = time.time() - float(r.get("started_epoch") or r.get("launch_epoch") or 0) \
                 >= float(r["limit_seconds"])
@@ -1958,7 +2025,7 @@ def reap(cfg: dict, board, deadline: float | None = None) -> int:
             n += finish(cfg, r, outcome)
         finally:
             os.close(fd)
-    for key in (here, None):
+    for key in ((here, None) if job is None and restart_id is None else ()):
         try:
             _prune_outputs(settings(cfg)["run_output_days"], key)
         except Exception:

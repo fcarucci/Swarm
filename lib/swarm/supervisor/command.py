@@ -20,12 +20,9 @@ and, through the shared database role, by another OS user, so no board field dec
 An agent is this host user's to replace only if the unsandboxed hook enrolled it here: a
 host-private enrolment record (swarm.enrolment) for this board and agent key, of the row's job.
 The replacement's work dir and harness come from that record only (never from the board's copy
-of the transcript or from an orchestrator marker); a row whose harness disagrees is refused. The
-work dir is still checked against [supervise] allowed_workdirs, and a dir holding project
-configuration (workdir_config_problem: .claude/settings*.json, .claude/hooks, .claude/agents,
-.mcp.json, .codex, AGENTS.override.md, in it or in a parent up to the allowed root) must have
-been approved out of band (`swarm supervise approve`): each file's hash is recorded in the
-private approval store (approved.json), and a changed file is unapproved again."""
+of the transcript or from an orchestrator marker); a row whose harness disagrees is refused.
+Progress does not depend on path allowlists or project-config approval; the assigned path must
+still identify an existing directory that the runner can open."""
 from __future__ import annotations
 
 import datetime as _dt
@@ -159,8 +156,9 @@ def candidates(board, cfg: dict, sup: dict, *, job: str | None = None, now=None,
     host_rs = _host_restarts(board)
     found = []
     for js in board.jobs(False):
-        # The job still needs work and supervise is enabled.
-        if (job and js.job != job) or not js.supervise or js.status != "active" or js.verdict in SETTLED_VERDICTS:
+        # The job still needs work. The per-job supervise preference is advisory;
+        # it must not strand a valid job when this host is recovering its agents.
+        if (job and js.job != job) or js.status != "active" or js.verdict in SETTLED_VERDICTS:
             continue
         from swarm.supervisor.orphans import drive_gate, human_question
         gate = drive_gate(board, cfg, js.job)   # None: a plain job, held by its job-level wait
@@ -203,8 +201,6 @@ def _invalid(board, job: str, agent_key: str, cfg: dict | None = None):
     gate = drive_gate(board, cfg, job)   # None: a plain job, held by its job-level wait
     if gate is None and js.waiting_on and not js.waiting_on.startswith("supervisor: restarting "):
         return "the job is waiting on a human or external event", js, None
-    if not js.supervise:
-        return "supervise is off for the job", js, None
     if human_question(board, js, cfg):
         return "the job has an unanswered owner question", js, None
     rows = board.agents(job)
@@ -248,36 +244,16 @@ def workdir_for(cfg: dict, record) -> str | None:
 
 
 def workdir_problem(cfg: dict, workdir: str) -> str | None:
-    """Why a replacement may not run in `workdir`, or None. The
-    work directory came from board data agents can fake (it now comes from the enrolment
-    record; this stays as defence in depth), and a replacement trusts it (a Codex one may write all of it, a Claude one
-    loads its project settings). So an allowlist: its real path lies under one of [supervise]
-    allowed_workdirs (default ~/src), with no dot-directory below that root, is a directory of
-    this user, and is never the home directory or above it."""
+    """Return only concrete workdir errors; allowlist, dot-path and owner policies do not hold work."""
     import stat as _stat
-    from swarm import paths
-    from swarm.supervisor.settings import settings
     w = Path(os.path.realpath(workdir))
-    bad = f"work dir {w} not under [supervise] allowed_workdirs"
-    home = Path(os.path.realpath(paths.home()))
-    if w == home or w in home.parents:
-        return f"{bad} (it is the home directory or above it)"
-    for r in settings(cfg)["allowed_workdirs"]:
-        root = Path(os.path.realpath(os.path.expanduser(r)))
-        if w != root and root not in w.parents:
-            continue
-        if any(part.startswith(".") for part in w.relative_to(root).parts):
-            return f"{bad} (a dot-directory below {root})"
-        try:
-            st = os.stat(w)
-        except OSError:
-            return f"{bad} (it doesn't exist)"
-        if not _stat.S_ISDIR(st.st_mode):
-            return f"{bad} (not a directory)"
-        if st.st_uid != compat.uid():
-            return f"{bad} (it belongs to another user)"
-        return None
-    return bad
+    try:
+        st = os.stat(w)
+    except OSError as exc:
+        return f"work dir {w} can't be opened ({exc.strerror or exc})"
+    if not _stat.S_ISDIR(st.st_mode):
+        return f"work dir {w} is not a directory"
+    return None
 
 
 # ---- project configuration in a work dir and its approval store
@@ -447,9 +423,9 @@ def load_approvals() -> set:
 
 def approval_candidates(cfg: dict, directory: str) -> list[dict]:
     """What `swarm supervise approve <directory>` would approve: [{"dir", "file", "sha256"}] for
-    every piece of project configuration in the directory and its parents up to the allowed root,
-    read through the same descriptor walk the runner launches through. ValueError when the
-    directory is not an allowed work dir, or holds configuration that can't be approved."""
+    project configuration in that directory, read through the same descriptor walk the runner
+    launches through. ValueError when the directory cannot be opened or contains configuration
+    that cannot be inspected."""
     from swarm.supervisor import runner
     path = os.path.realpath(os.path.expanduser(str(directory)))
     why = workdir_problem(cfg, path)
@@ -458,7 +434,8 @@ def approval_candidates(cfg: dict, directory: str) -> list[dict]:
     out: list[dict] = []
 
     def collect(fd: int, where: str):
-        out.extend({"dir": where, "file": rel, "sha256": sha} for rel, sha in config_hits(fd, where))
+        if where == path:
+            out.extend({"dir": where, "file": rel, "sha256": sha} for rel, sha in config_hits(fd, where))
         return None
     fd, why = runner.open_workdir(cfg, path, check=collect)
     if fd is None:
@@ -634,16 +611,16 @@ def clean_resume_markers(board, cfg: dict) -> int:
 
 
 def _switched_off_now(cfg: dict, board=None, job: str | None = None, *, drive: bool = False) -> str | None:
-    """A kill switch thrown since the pass began (the off files; with a board, the job's
-    --no-supervise): why, or None. Read fresh. `drive`: a drive launch, not gated by [supervise] enabled."""
-    from swarm.supervisor.settings import off_reason
-    why = off_reason(cfg, drive=drive)
-    if why:
-        return f"the supervisor was switched off ({why})"
-    if board is not None:
-        js = board.job_status(job)
-        if js is None or not js.supervise or js.status != "active":
-            return "supervise is off for the job, or the job closed"
+    """Return a terminal stop only when the job is no longer active.
+
+    Local supervisor settings and the job's supervise preference do not gate progress.
+    An explicit job cancellation or close remains terminal.
+    """
+    if board is None:
+        return None
+    js = board.job_status(job)
+    if js is None or js.status != "active":
+        return "the job is missing or closed"
     return None
 
 
@@ -687,8 +664,7 @@ def _act(board, cfg: dict, sup: dict, c: Candidate, state: dict, *, start_runner
     reason = "outage" if c.outage else a.left_reason
     max_job = int(sup["max_restarts_per_job"])
     partial = _ensure_final_transcript(board, cfg, js, a)
-    b = br.build_brief(board, cfg, js, a, a.left_reason, d.attempt, int(sup["max_restarts_per_agent"]),
-                       partial=partial)
+    b = br.build_brief(board, cfg, js, a, a.left_reason, d.attempt, partial=partial)
     workdir = workdir_for(cfg, rec)
     binary = sup.get(f"{harness}_bin") if harness in ("claude", "codex") else None
     row_harness = a.harness or "claude"
@@ -727,17 +703,13 @@ def _act(board, cfg: dict, sup: dict, c: Candidate, state: dict, *, start_runner
         return False
     workdir = os.path.realpath(workdir)   # only the checked real path goes to the runner
     model = launch.replacement_model(cfg, harness, a.role, a.model)
-    from swarm.supervisor.settings import today_start
-    # every cap the decision used, checked again with the insert (atomically: other passes, other
-    # OS users' passes and other hosts may have recorded restarts since)
-    r = board.record_restart(js.job, c.lineage, a.agent_key, reason, harness, d.minutes, max_per_job=max_job,
-                             max_job_minutes=float(sup["max_restart_minutes"]),
-                             max_host_running=int(sup["max_concurrent_replacements"]),
-                             max_host_minutes=float(sup["daily_restart_minutes"]), day_start=today_start())
-    if r is None:   # replaced meanwhile, or a cap was reached meanwhile: next pass sees which
-        log(f"not restarting {a.name} on {js.job} (for now): already replaced, or a cap was reached "
-            f"meanwhile (the job's restarts or minutes, or this host's running replacements or "
-            f"minutes); checked again next pass")
+    # Attempt/minute totals remain auditable, not terminal limits. Atomically enforce only the
+    # host concurrency ceiling here; the per-replacement wall-clock cap is still in `d.minutes`.
+    r = board.record_restart(js.job, c.lineage, a.agent_key, reason, harness, d.minutes,
+                             max_host_running=int(sup["max_concurrent_replacements"]))
+    if r is None:   # replaced meanwhile or host concurrency filled meanwhile: next pass retries
+        log(f"not restarting {a.name} on {js.job} (for now): already replaced, or the host's "
+            "replacement concurrency changed meanwhile; checked again next pass")
         return False
     marker = None
     launched = False
@@ -760,7 +732,7 @@ def _act(board, cfg: dict, sup: dict, c: Candidate, state: dict, *, start_runner
                "board": store_key(cfg)}
         # posted before the runner starts: a replacement that ends at once posts its end after
         board.post(js.job, SUPERVISOR_NAME,
-                   f"restarted {a.name} (attempt {d.attempt}/{sup['max_restarts_per_agent']}): "
+                   f"restarted {a.name} (attempt {d.attempt}): "
                    f"{a.left_reason}; {model or 'default model'}, up to {d.minutes:.0f} min")
         (start_runner or runner.start)(cfg, run)
         launched = True
@@ -803,17 +775,18 @@ def _caps_lines(board, sup: dict, job: str | None, running: int) -> list[str]:
     from swarm.supervisor import budget
     now = board.now()
     used = sum(budget.charged_minutes(r, now) for r in _host_restarts(board))
-    lines = [f"caps: daily {used:.0f}/{sup['daily_restart_minutes']} min on this host, running "
-             f"{running}/{sup['max_concurrent_replacements']}, per agent {sup['max_restarts_per_agent']}, "
-             f"per replacement {sup['max_minutes']} min / {sup['max_turns']} turns"]
+    lines = [f"limits: running {running}/{sup['max_concurrent_replacements']} replacements, "
+             f"per replacement {sup['max_minutes']} min / {sup['max_turns']} turns; "
+             f"usage: {used:.0f} restart minutes on this host today"]
     for js in board.jobs(False):
         if job and js.job != job:
             continue
         rs = board.restarts(job=js.job)
         if rs or not js.supervise:
-            lines.append(f"caps {js.job}: " + ("supervise off (--no-supervise)" if not js.supervise else
-                         f"restarts {len(rs)}/{sup['max_restarts_per_job']}, minutes "
-                         f"{sum(budget.charged_minutes(r, now) for r in rs):.0f}/{sup['max_restart_minutes']}"))
+            preference = "; supervisor preference off" if not js.supervise else ""
+            lines.append(f"usage {js.job}: {len(rs)} recorded restarts, "
+                         f"{sum(budget.charged_minutes(r, now) for r in rs):.0f} charged minutes"
+                         f"{preference}")
     return lines
 
 
@@ -902,8 +875,8 @@ def _dry_run(board, cfg: dict, sup: dict, job, now, say, scope_ok, config_path="
         elif d.go and (hold := _dry_run_hold(cfg, c)):
             say(f"would hold {c.agent.name} on {c.js.job} for approval (nothing recorded): {hold}")
         elif d.go:
-            say(f"would restart {c.agent.name} on {c.js.job} (attempt {d.attempt}/"
-                f"{sup['max_restarts_per_agent']}, up to {d.minutes:.0f} min): {c.agent.left_reason}")
+            say(f"would restart {c.agent.name} on {c.js.job} (attempt {d.attempt}, "
+                f"up to {d.minutes:.0f} min): {c.agent.left_reason}")
         else:
             say(f"not restarting {c.agent.name} on {c.js.job}: {d.why}")
     for js, a in unenrolled:
@@ -1021,7 +994,7 @@ def run_pass(cfg: dict, *, dry_run: bool = False, job: str | None = None, say=pr
     from swarm.board import BoardUnavailable
     from swarm.supervisor import runner
     from swarm.supervisor.settings import (PrivateDirError, SettingsError, ensure_private_dir, load_state,
-                                           save_state, settings, switched_off)
+                                           save_state, settings)
     try:
         sup = settings(cfg)
         from swarm.supervisor import pipeline
@@ -1029,13 +1002,6 @@ def run_pass(cfg: dict, *, dry_run: bool = False, job: str | None = None, say=pr
     except (SettingsError, ValueError) as exc:
         print(f"swarm supervise: {exc}", file=sys.stderr)
         return 1
-    if not sup["enabled"]:
-        say("supervisor disabled ([supervise] enabled = false): nothing to do")
-        return 0
-    off = switched_off()
-    if off is not None:
-        say(f"supervisor off ({off} exists): nothing to do")
-        return 0
     try:
         ensure_private_dir(cfg, create=not dry_run)
     except (PrivateDirError, OSError) as exc:

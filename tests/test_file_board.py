@@ -149,14 +149,14 @@ class FileBoardProcessTests(unittest.TestCase):
         self.assertEqual(len(winners), 1, res)
         self.assertEqual(self.b.job_status("j").judge, self.b.active_agent_name(winners[0]))
 
-    def test_concurrent_spawns_never_exceed_the_caps(self):
+    def test_concurrent_spawns_are_all_counted_without_policy_caps(self):
         for i in range(8):
             self.b.allocate_name(f"k{i}", "j")
         res = _run(_spawn, [(self.path, f"k{i}", 3) for i in range(8)])
         per_agent = {k: sum(g) for k, g in res.items()}
-        self.assertEqual(sum(per_agent.values()), 5, res)       # per_job cap
-        self.assertTrue(all(n <= 2 for n in per_agent.values()), res)
-        self.assertEqual(self.b.reserve_spawn("k0", "j", 99, 99).job_spawns, 6)  # count kept on disk
+        self.assertEqual(sum(per_agent.values()), 24, res)
+        self.assertTrue(all(n == 3 for n in per_agent.values()), res)
+        self.assertEqual(self.b.reserve_spawn("k0", "j", 99, 99).job_spawns, 25)
 
     def test_many_writers_unique_increasing_ids_and_readers_never_skip(self):
         writers, per, nreaders = 20, 50, 3

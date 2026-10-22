@@ -92,6 +92,13 @@ SCHEMA: dict = {
         "required": ("job", "name", "artifact", "outcome", "reason")},
     "task list": {"id": None, "fields": {"job": ("str", "--job"), "json": ("bool", "--json")},
                   "required": ("job",)},
+    "task supersede": {"id": "as", "fields": {
+        "job": ("str", "--job"), "name": ("str", "--name"), "generation": ("str", "--generation"),
+        "artifact": ("str", "--artifact"), "replacement": ("str", "--replacement"),
+        "replacement_generation": ("str", "--replacement-generation"),
+        "replacement_artifact": ("str", "--replacement-artifact"), "reason": ("text", "--reason")},
+        "required": ("job", "name", "artifact", "replacement", "replacement_generation",
+                     "replacement_artifact", "reason")},
     "remember": {"id": "as", "fields": {"job": ("str", "--job"), "tags": ("repeat", "--tags"),
                                         "none": ("text", "--none"), "fact": ("list", None)},
                  "required": ("job",)},
@@ -223,7 +230,7 @@ def validate(req, own_job=None) -> tuple[str, dict]:
         raise ProtocolError("unknown command")
     spec = SCHEMA[command]
     for name, v in fields.items():
-        if (name in IDENTITY or name.lstrip("_") in IDENTITY) and not (command in ("run", "task add", "task report") and name == "name"):
+        if (name in IDENTITY or name.lstrip("_") in IDENTITY) and not (command in ("run", "task add", "task report", "task supersede") and name == "name"):
             raise ProtocolError(f"field {name} names a caller: the broker sets who the launch is")
         if name not in spec["fields"]:
             raise ProtocolError(f"unknown field {name!r} for {command}")

@@ -582,9 +582,10 @@ from .blockers import SqlBlockers, sql_schema, migrate_sql, rollup, protects
 from .launches import SqlLaunches, launches_schema, migrate_launches
 from .events import SqlEvents, sql_schema as events_schema
 from .bgcmds import SqlBgCommands, sql_schema as bg_schema
+from .settlements import SqlSettlements, sql_schema as settlements_schema
 
 
-class SqliteBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
+class SqliteBoard(SqlSettlements, SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
     _blocker_pg = False
     _launch_pg = False
     _event_pg = False
@@ -670,7 +671,7 @@ class SqliteBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
                             conn.execute(COUNT_BACKFILL)
                 for trigger in COUNT_TRIGGERS:
                     conn.execute(trigger)
-                for statement in (sql_schema() + events_schema() + bg_schema() + launches_schema()).split(";"):
+                for statement in (sql_schema() + events_schema() + bg_schema() + launches_schema() + settlements_schema()).split(";"):
                     if statement.strip(): conn.execute(statement)
                 migrate_launches(conn)
                 migrate_sql(conn)
@@ -1046,9 +1047,6 @@ class SqliteBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
             if job_row is None or agent_row is None:
                 return SpawnGrant(False, 0, 0, "member")
             mine, total = agent_row[0], job_row[0]
-            refused = "agent" if mine >= per_agent else "job" if total >= per_job else None
-            if refused:
-                return SpawnGrant(False, mine, total, refused)
             c.execute("UPDATE agents SET spawns = spawns + 1 WHERE agent_key = ?", (agent_key,))
             c.execute("UPDATE jobs SET spawns = spawns + 1 WHERE job = ?", (job,))
             return SpawnGrant(True, mine + 1, total + 1)
@@ -1624,6 +1622,11 @@ class SqliteBoard(SqlBlockers, SqlLaunches, SqlEvents, SqlBgCommands, Board):
             verdict_req=verdict_req,
             **pipeline_status(plugin_data))
 
+        from swarm.settlement import projected, projection_fence
+        from dataclasses import replace
+        receipt = self.completion_receipt(job)
+        if receipt and projected(js, receipt, parse_job_data(plugin_data), projection_fence(self, job)):
+            js = replace(js, native_completed_at=_dt.datetime.fromisoformat(receipt['completed_at']))
         return rollup(js, self.blockers(job), now)
 
     def job_status(self, job: str) -> JobStatus | None:

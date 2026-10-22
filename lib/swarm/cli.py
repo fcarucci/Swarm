@@ -2913,6 +2913,8 @@ def _parser() -> argparse.ArgumentParser:
     rv.add_argument("--as", dest="name", help="the reviewing agent's name")
     from swarm import task_cli
     task_cli.configure(sub)
+    from swarm import late_review
+    late_review.configure(sub)
     rn = sub.add_parser("run", help="queue a named launch for the job: `swarm pass` (or the hooks) starts it "
                                     "when the job's concurrency and cost caps allow")
     rn.add_argument("--job", required=True); rn.add_argument("--name", required=True)
@@ -4542,7 +4544,8 @@ def _board_status(board, cfg: dict, args) -> None:
     print(job_detail(board, args.job, color, recent, "--all-agents to show", rows, sup=sup))
     for launch in board.launches(args.job):
         reason = f": {launch.last_outcome}" if launch.last_outcome else ""
-        print(term_safe(f"launch {launch.name}: {launch.state} ({launch.role}, attempts {launch.attempts}){reason}"))
+        print(term_safe(f"launch record (not roster state): {launch.name}: {launch.state} "
+                         f"({launch.role}, attempts {launch.attempts}){reason}"))
     line = bg_line(board, args.job) if board.job_status(args.job) else None
     if line:
         print(line)
@@ -4814,6 +4817,8 @@ BOARD_COMMANDS = {
     "review": _board_review,
     "run": _board_run,
     "task": lambda board, cfg, args: __import__("swarm.task_cli", fromlist=["run"]).run(board, cfg, args),
+    "late-review": lambda board, cfg, args: __import__("swarm.late_review", fromlist=["run"]).run(board, cfg, args),
+    "late-finalize": lambda board, cfg, args: __import__("swarm.late_review", fromlist=["run"]).run(board, cfg, args),
     "transcript": _board_transcript,
     "memory": _board_memory,
 }

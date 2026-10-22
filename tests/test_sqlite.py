@@ -129,19 +129,19 @@ class SqliteProcessConcurrencyTests(unittest.TestCase):
         judges = [a for a in self.b.agents("j") if a.role == "judge"]
         self.assertEqual([a.agent_key for a in judges], wins)
 
-    def test_concurrent_reserve_spawn_never_exceeds_the_caps(self):
+    def test_concurrent_reserve_spawn_counts_every_valid_member(self):
         keys = [f"k{i}" for i in range(6)]
         for k in keys:
             self.b.allocate_name(k, "j")
-        results = _run(_reserve, [(self.h.cfg, k, 3) for k in keys])   # 18 tries, job cap 5
+        results = _run(_reserve, [(self.h.cfg, k, 3) for k in keys])
         self.assertEqual(len(results), 18)
         granted = [r for r in results if r[1]]
-        self.assertEqual(len(granted), 5)
-        self.assertEqual(sorted(r[3] for r in granted), [1, 2, 3, 4, 5])  # each grant its own count
+        self.assertEqual(len(granted), 18)
+        self.assertEqual(sorted(r[3] for r in granted), list(range(1, 19)))
         per_agent = {k: sum(1 for r in granted if r[0] == k) for k in keys}
-        self.assertTrue(all(n <= 2 for n in per_agent.values()), per_agent)
+        self.assertTrue(all(n == 3 for n in per_agent.values()), per_agent)
         spawns = self.h._db().execute("SELECT spawns FROM jobs WHERE job = 'j'").fetchone()[0]
-        self.assertEqual(spawns, 5)
+        self.assertEqual(spawns, 18)
 
     def test_concurrent_posts_have_unique_ordered_ids_and_readers_skip_nothing(self):
         writers, per_writer, readers = 6, 40, 3

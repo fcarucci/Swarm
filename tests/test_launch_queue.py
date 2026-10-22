@@ -71,7 +71,7 @@ class LaunchQueue(unittest.TestCase):
         self.b.finish_restart(running.id, "failed")
         self.assertIsNotNone(self.claim(again, "2"))
 
-    def test_same_workdir_runs_concurrently_until_this_jobs_cap(self):
+    def test_same_workdir_waits_for_job_capacity(self):
         rows = [self.queue(n) for n in ("a", "b", "c")]
         self.assertIsNotNone(self.claim(rows[0], max_job_running=2))
         self.assertIsNotNone(self.claim(rows[1], max_job_running=2))

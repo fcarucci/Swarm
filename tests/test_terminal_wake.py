@@ -1,5 +1,10 @@
 """Terminal lifecycle events wake durable reconciliation after their state is visible."""
 from unittest import mock
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from threading import Event, Lock
+from types import SimpleNamespace
+import tempfile
 
 from test_hooks_cli import Env
 from test_supervise_runner import RunnerBase
@@ -25,6 +30,78 @@ class HookWakeTests(Env):
         with mock.patch.object(dependencies, 'wake', side_effect=OSError('unavailable')) as wake:
             self.hook('session-end', agent_id=None, host='codex')
         self.assertEqual(wake.call_count, 1)
+
+    def test_terminal_hook_runs_only_enrolled_job_and_reports_pass_error(self):
+        from swarm import hooks
+
+        self.cli('activate', '--job', 'J', '--session', 'sess-1')
+        self.hook('start', agent_id='a', host='codex')
+        with mock.patch('swarm.passcmd.run_job_pass', create=True,
+                        return_value=['J: pass error RuntimeError: broken']) as run_job_pass, \
+                mock.patch.object(hooks, '_log_error') as log_error:
+            self.hook('stop', agent_id='a', host='codex')
+
+        self.assertEqual(run_job_pass.call_count, 1)
+        self.assertEqual(run_job_pass.call_args.args[2], 'J')
+        log_error.assert_called_once()
+        self.assertIn('pass error', str(log_error.call_args))
+
+    def test_concurrent_job_passes_serialize_per_job_not_globally(self):
+        from swarm import passcmd
+
+        class Board:
+            def job_status(self, job):
+                return SimpleNamespace(job=job, status='active')
+
+            def now(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(passcmd.paths, 'state_dir', return_value=Path(tmp)), \
+                mock.patch.object(passcmd, '_advance') as advance:
+            first_j_entered = Event()
+            second_j_entered = Event()
+            k_entered = Event()
+            release_first_j = Event()
+            guard = Lock()
+            active = {'J': 0, 'K': 0}
+            calls = {'J': 0, 'K': 0}
+            overlaps = []
+
+            def do_advance(_board, _cfg, js, _now, _starter):
+                with guard:
+                    calls[js.job] += 1
+                    if active[js.job]:
+                        overlaps.append(js.job)
+                    active[js.job] += 1
+                    ordinal = calls[js.job]
+                if js.job == 'J' and ordinal == 1:
+                    first_j_entered.set()
+                    self.assertTrue(release_first_j.wait(2))
+                elif js.job == 'J':
+                    second_j_entered.set()
+                else:
+                    k_entered.set()
+                with guard:
+                    active[js.job] -= 1
+                return []
+
+            advance.side_effect = do_advance
+            board = Board()
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                first = pool.submit(passcmd.run_job_pass, board, {}, 'J')
+                self.assertTrue(first_j_entered.wait(1))
+                second = pool.submit(passcmd.run_job_pass, board, {}, 'J')
+                independent = pool.submit(passcmd.run_job_pass, board, {}, 'K')
+                self.assertTrue(k_entered.wait(1), 'a different job should advance independently')
+                self.assertFalse(second_j_entered.wait(.05), 'same-job pass must wait for its lock')
+                release_first_j.set()
+                first.result(timeout=2)
+                second.result(timeout=2)
+                independent.result(timeout=2)
+
+            self.assertEqual(calls, {'J': 2, 'K': 1})
+            self.assertEqual(overlaps, [])
 
 
 class RunnerWakeTests(RunnerBase):

@@ -1355,7 +1355,7 @@ class BoardContract:
         self.assertFalse(self.b.set_waiting("j", "closed jobs don't wait"))
         self.assertIn("j", [x.job for x in self.b.jobs(include_closed=True)])
 
-    def test_spawns_are_capped_per_agent_and_per_job(self):
+    def test_spawn_counts_are_atomic_but_never_cap_valid_members(self):
         self.b.open_job("j", None, None, None, "me")
         for k in ("a", "b", "c"):
             self.b.allocate_name(k, "j")
@@ -1364,19 +1364,20 @@ class BoardContract:
         self.assertEqual((g.granted, g.agent_spawns, g.job_spawns, g.refused), (True, 1, 1, None))
         self.assertTrue(self.b.reserve_spawn("a", "j", 2, 3).granted)
         g = self.b.reserve_spawn("a", "j", 2, 3)
-        self.assertEqual((g.granted, g.agent_spawns, g.job_spawns, g.refused), (False, 2, 2, "agent"))
+        self.assertEqual((g.granted, g.agent_spawns, g.job_spawns, g.refused), (True, 3, 3, None))
         self.assertTrue(self.b.reserve_spawn("b", "j", 2, 3).granted)
         g = self.b.reserve_spawn("c", "j", 2, 3)
-        self.assertEqual((g.granted, g.agent_spawns, g.job_spawns, g.refused), (False, 0, 3, "job"))
-        self.assertTrue(self.b.reserve_spawn("x", "other", 2, 3).granted)   # per job
+        self.assertEqual((g.granted, g.agent_spawns, g.job_spawns, g.refused), (True, 1, 5, None))
+        self.assertTrue(self.b.reserve_spawn("x", "other", 2, 3).granted)
         self.assertEqual(self.b.reserve_spawn("x", "j", 2, 3).refused, "member")
         self.assertEqual(self.b.reserve_spawn("nobody", "j", 2, 3).refused, "member")
-        self.b.agent_stopped("b")   # a departed agent's spawns still count for the job
-        self.assertEqual(self.b.reserve_spawn("c", "j", 2, 3).refused, "job")
-        self.b.open_job("j", None, None, None, "me")   # a new run of the job starts from zero
+        self.b.agent_stopped("b")
+        g = self.b.reserve_spawn("c", "j", 2, 3)
+        self.assertEqual((g.granted, g.agent_spawns, g.job_spawns, g.refused), (True, 2, 6, None))
+        self.b.open_job("j", None, None, None, "me")
         self.assertTrue(self.b.reserve_spawn("c", "j", 2, 3).granted)
 
-    def test_concurrent_spawns_never_exceed_the_job_cap(self):
+    def test_concurrent_spawns_are_all_counted_without_policy_cap(self):
         self.b.open_job("j", None, None, None, "me")
         keys = [f"k{i}" for i in range(6)]
         for k in keys:
@@ -1397,7 +1398,7 @@ class BoardContract:
             t.join(120)
             self.assertFalse(t.is_alive(), "board worker did not finish before fixture cleanup")
         self.assertEqual(errors, [])
-        self.assertEqual(sorted(grants), [False] * 4 + [True] * 2)
+        self.assertEqual(sorted(grants), [True] * 6)
 
     def test_forced_completion_is_recorded(self):
         self.b.open_job("j", None, None, None, "me", goal="g")

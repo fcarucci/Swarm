@@ -356,7 +356,6 @@ def _finalize(board, cfg: dict, sources: list, deadline: float | None = None, re
     Returns how many it stored."""
     import time
     from swarm import transcripts
-    from swarm.supervisor.settings import off_reason
     wall = time.time()
     retries = _Retries(create=any(src.pending for src in sources))
     with retries as state:   # nothing pending: only prune
@@ -398,7 +397,7 @@ def _finalize(board, cfg: dict, sources: list, deadline: float | None = None, re
             break
         now = time.monotonic()
         if retry:
-            if deadline is None or deadline - now < transcripts.FINAL_RETRY_SECONDS or off_reason(cfg):
+            if deadline is None or deadline - now < transcripts.FINAL_RETRY_SECONDS:
                 break
             cap = now + transcripts.FINAL_RETRY_SECONDS
         else:

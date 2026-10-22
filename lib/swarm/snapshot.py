@@ -399,7 +399,7 @@ def fingerprint_of_rows(jobs, agents, max_id: int, statuses: bool = True, blocke
         return (f"{j['job']}|{j.get('lifecycle_status', j['status'])}|{j['agents']}|{j['messages']}|{_usec(j.get('last_activity_at'))}"
                 f"|{_text(j.get('waiting_on'))}|{_text(j.get('verdict'))}|{_text(j.get('judge'))}"
                 f"|{_usec(j.get('finished_at'))}|{j.get('open_blockers', 0)}|{j.get('protected_blockers', 0)}|{gd}"
-                f"|{j.get('context_revision', '')}")
+                f"|{j.get('context_revision', '')}|{_usec(j.get('native_completed_at'))}")
     jc, jd = _digest([job_line(j) for j in jobs])
 
     def shown(a) -> str:

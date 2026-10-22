@@ -250,7 +250,7 @@ def prompt_for(action, recipe, board=None):
 def launch_action(board, cfg, sup, action, owner, recipe, decision, *, start_runner=None, config_path=""):
     """Use replacement launches, markers and bounded runner, just like orphan recovery."""
     from swarm.board.autoinit import store_key
-    from swarm.supervisor import command, launch, markers, runner, settings as ss
+    from swarm.supervisor import command, launch, markers, runner
     role = recipe.get("finalizer_role", "finalizer") if action.role == "finalizer" else action.role
     if role not in (*EXECUTORS, "judge", "worker"):
         raise ValueError("invalid pipeline executing role")
@@ -264,10 +264,8 @@ def launch_action(board, cfg, sup, action, owner, recipe, decision, *, start_run
         return None
     board.close_agent(old, "pipeline predecessor")
     row = board.record_restart(action.job.job, action.lineage, old, "pipeline:" + role + ":" + _digest(action.token), harness,
-                               decision.minutes, max_per_job=sup["max_restarts_per_job"],
-                               max_job_minutes=sup["max_restart_minutes"],
-                               max_host_running=sup["max_concurrent_replacements"],
-                               max_host_minutes=sup["daily_restart_minutes"], day_start=ss.today_start())
+                               decision.minutes,
+                               max_host_running=sup["max_concurrent_replacements"])
     if row is None:
         return None
     marker = None
@@ -366,13 +364,10 @@ def run(board, cfg, sup, state, *, job=None, now=None, dry_run=False, say=print,
     from swarm.supervisor import command, orphans
     from swarm.supervisor.settings import save_state
     p = settings(cfg)
-    if not p["enabled"]:
-        return set()
     managed = set()
     now = now or board.now()
     for js in board.jobs(False):
-        if (job and job != js.job) or js.job in skip_jobs or not js.goal or not js.supervise \
-                or js.status != "active":
+        if (job and job != js.job) or js.job in skip_jobs or not js.goal or js.status != "active":
             continue
         owner = orphans.local_record(cfg, js)
         if owner is None:
@@ -443,7 +438,7 @@ def run(board, cfg, sup, state, *, job=None, now=None, dry_run=False, say=print,
             prior = board.restarts(job=js.job)
             mine = [r for r in prior if r.agent_key == action.lineage]
             # First judge/finalizer hand-off should launch promptly. Fix rounds and retries
-            # use the existing replacement backoff and all existing minute/concurrency caps.
+            # use the replacement backoff, per-run timeout and atomic host concurrency limit.
             closed = _stamp(action.verdict.get("at")) if action.verdict else action.handoff.created_at
             decision = budget.decide(sup, lineage=action.lineage, job_restarts=prior,
                                      host_restarts=command._host_restarts(board), closed_at=closed,

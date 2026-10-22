@@ -28,6 +28,16 @@ class StatusTests(Env):
         self.assertIn("started (restarted ×1)", out)
         self.assertRegex(out, r"supervise  on: restarts 1/6, minutes \d+/180")
 
+    def test_queued_launch_is_distinguished_from_current_roster(self):
+        with self.board() as b:
+            b.queue_launch("J", 1, "lead-1", role="engineering_lead", harness="codex",
+                           model="gpt-6-luna", workdir="/tmp/work", brief="continue recovery",
+                           queued_by="owner requester")
+        rc, out, err = self.cli("status", "--job", "J", "--all-agents", "--no-color")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("started (restarted ×1)", out)
+        self.assertIn("launch record (not roster state): lead-1: queued", out)
+
     def test_no_supervise_job_line(self):
         with self.board() as b:
             b.set_job_supervise("J", False)

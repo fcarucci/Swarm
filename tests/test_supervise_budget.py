@@ -1,4 +1,4 @@
-"""budget.decide: every rail, in order."""
+"""Supervisor attempt history stays observable without becoming a progress gate."""
 from __future__ import annotations
 
 import datetime as dt
@@ -51,7 +51,7 @@ class DayRowsTests(unittest.TestCase):
         sup = dict(SUP, daily_restart_minutes=100)
         d = budget.decide(sup, lineage="root", job_restarts=[], host_restarts=budget.day_rows([running], day),
                           closed_at=NOW - 60 * M, now=NOW, running=0)
-        self.assertEqual(d.minutes, 40.0)
+        self.assertEqual(d.minutes, float(sup["max_minutes"]))
 
 
 class DecideTests(unittest.TestCase):
@@ -76,35 +76,34 @@ class DecideTests(unittest.TestCase):
                                        host_restarts=three, closed_at=NOW - 60 * M,
                                        now=NOW, running=0).go)
 
-    def test_agent_budget(self):
+    def test_agent_attempt_history_does_not_block_recovery(self):
         two = [r(), r(), r()]
         d = decide(job_restarts=two, host_restarts=two)
-        self.assertEqual((d.go, d.cap), (False, "agent"))
-        self.assertIn("3/3", d.why)
+        self.assertEqual((d.go, d.attempt, d.minutes), (True, 4, 60.0))
 
     def test_agent_cap_resets_after_rolling_24_hours(self):
         old = [r(at_min=25 * 60), r(at_min=26 * 60), r(at_min=27 * 60)]
         self.assertTrue(decide(job_restarts=old, host_restarts=[]).go)
 
-    def test_job_budget(self):
+    def test_job_attempt_history_does_not_block_recovery(self):
         six = [r(root=f"x{i}") for i in range(6)]
         d = decide(job_restarts=six, host_restarts=six)
-        self.assertEqual((d.go, d.cap), (False, "job"))
+        self.assertEqual((d.go, d.attempt, d.minutes), (True, 1, 60.0))
 
-    def test_job_minutes(self):
+    def test_job_minute_history_does_not_block_a_bounded_attempt(self):
         used = [r(root="a", ran=60), r(root="b", ran=60), r(root="c", ran=58)]
         d = decide(job_restarts=used, host_restarts=used)
-        self.assertEqual((d.go, d.cap), (False, "job_minutes"))
+        self.assertEqual((d.go, d.minutes), (True, float(SUP["max_minutes"])))
 
-    def test_minutes_cut_to_what_is_left(self):
+    def test_per_restart_timeout_is_not_cut_by_aggregate_minute_history(self):
         used = [r(root="a", ran=60), r(root="b", ran=90, cap=90)]
         d = decide(job_restarts=used, host_restarts=used)
-        self.assertEqual((d.go, d.minutes), (True, 30.0))
+        self.assertEqual((d.go, d.minutes), (True, float(SUP["max_minutes"])))
 
-    def test_daily_minutes_across_jobs(self):
+    def test_daily_minute_history_does_not_block_a_bounded_attempt(self):
         day = [r(root=f"d{i}", job=f"K{i}", ran=60) for i in range(8)]
         d = decide(host_restarts=day)
-        self.assertEqual((d.go, d.cap), (False, "daily_minutes"))
+        self.assertEqual((d.go, d.minutes), (True, float(SUP["max_minutes"])))
 
     def test_running_restart_from_previous_local_date_counts_toward_daily_cap(self):
         previous_date = NOW.astimezone().date() - dt.timedelta(days=1)
@@ -115,7 +114,7 @@ class DecideTests(unittest.TestCase):
         d = budget.decide(sup, lineage="root", job_restarts=[],
                           host_restarts=[running], closed_at=NOW - 60 * M,
                           now=NOW, running=0)
-        self.assertEqual((d.go, d.cap), (False, "daily_minutes"))
+        self.assertEqual((d.go, d.minutes), (True, float(sup["max_minutes"])))
 
     def test_running_charged_by_elapsed_and_refused_free(self):
         running = r(at_min=20, ended=False)
@@ -128,7 +127,7 @@ class DecideTests(unittest.TestCase):
         sup = dict(SUP, daily_restart_minutes=100)
         d = budget.decide(sup, lineage="root", job_restarts=[], host_restarts=[just_started],
                           closed_at=NOW - 60 * M, now=NOW, running=0)
-        self.assertEqual((d.go, d.minutes), (True, 40.0))   # not 99: the running one may use 60
+        self.assertEqual((d.go, d.minutes), (True, float(sup["max_minutes"])))
         self.assertEqual(budget.reserved_minutes(just_started, NOW), 60.0)
         self.assertEqual(budget.reserved_minutes(r(ran=10), NOW), 10.0)
 
@@ -137,14 +136,14 @@ class DecideTests(unittest.TestCase):
         self.assertEqual((d.go, d.cap), (False, None))
         self.assertIn("2/2", d.why)
 
-    def test_outage_death_restarted_once_without_backoff(self):
+    def test_outage_retries_remain_available_with_accounted_attempts(self):
         start = NOW - 50 * M
         d = decide(closed_at=NOW - 0.5 * M, outage_started=start)
         self.assertTrue(d.go)
         again = [r(at_min=5, ran=1, reason="outage")]
         d = decide(job_restarts=again, host_restarts=again,
                    closed_at=NOW - 0.5 * M, outage_started=start)
-        self.assertEqual((d.go, d.cap), (False, "outage"))
+        self.assertEqual((d.go, d.attempt), (True, 2))
 
     def test_backoff_after_failed_attempt(self):
         failed = [r(at_min=3, ran=0.1, outcome="failed")]

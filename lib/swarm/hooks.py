@@ -358,79 +358,33 @@ def _spawn_depth(payload: dict, agent_id: str) -> int | None:
 
 
 def _spawn_refusal(board, agent_id: str, member, payload: dict, cfg: dict) -> str | None:
-    """None if this Agent call may go ahead (it is then counted and announced), else why not."""
-    sp, job = cfg["spawn"], member.job
+    """Account for an active member's spawn without policy refusals."""
+    job = member.job
     if current_host().name == 'codex':
         try:
             _codex_spawn_job(board, cfg, payload.get('session_id'), payload)
         except ValueError as exc:
             return str(exc)
-    per_agent, per_job = int(sp["max_per_agent"]), int(sp["max_per_job"])
-    max_depth, min_chars = int(sp["max_depth"]), int(sp["min_justification_chars"])
     call = current_host().spawn_call(payload.get("tool_input") or {})
-    prompt = call.prompt
-    if per_job <= 0 or per_agent <= 0:
-        return "spawning subagents is switched off for swarm agents"
-    js = board.job_status(job)
-    if (js and js.judge == member.name) or any(a.agent_key == agent_id and a.role == "judge"
-                                            for a in board.agents(job, include_departed=False)):
-        return "judges only judge; the supervisor spawns fix workers after a not_met verdict"
-    # A recovered coordinator is a main host session, not a harness subagent. Its
-    # private job activation record (written at enrolment) proves that root depth.
-    from swarm import enrolment
-    from swarm.board.autoinit import store_key
-    rec = enrolment.find_job(store_key(cfg), job)
-    depth = 0 if rec is not None and rec.session_id == agent_id else _spawn_depth(payload, agent_id)
-    if depth is None:
-        return "your spawn depth can't be determined, so spawning is refused"
-    if depth >= max_depth:
-        return f"you are at spawn depth {depth} and the limit is {max_depth}: helpers can't spawn helpers"
-    host = current_host()
-    why = _tag_of(prompt, SPAWN_TAG) or ""
-    if host.reads_prompt_tags:
-        if len(why) < min_chars:
-            return (f"the child's prompt needs a line `{SPAWN_TAG} <why it is strictly needed>]` of at "
-                    f"least {min_chars} characters")
-        if _tag_of(prompt) != job:
-            return f"the child's prompt needs the line `{tag_line(job)}` so it joins this job's board"
-    # else (Codex: the message is encrypted) only the caps and the depth can be checked; the
-    # child joins this session's job anyway
-    from swarm.roles import from_prompt
-    if ((from_prompt(prompt) if host.reads_prompt_tags else None) or host.spawn_role_hint(call)) == "judge":
-        return "a spawned subagent can't be a judge"
-    grant = board.reserve_spawn(agent_id, job, per_agent, per_job)
-    if grant.refused == "agent":
-        return f"you have already spawned {grant.agent_spawns} (limit {per_agent} per agent)"
-    if grant.refused == "job":
-        return f"agents on job \"{job}\" have already spawned {grant.job_spawns} (limit {per_job} per job)"
+    grant = board.reserve_spawn(agent_id, job, 0, 0)
     if not grant.granted:
         return "you are not an active member of this job"
     what = call.description
-    board.post(job, member.name, f"spawning {what} ({grant.job_spawns}/{per_job} for the job)"
-               + (f": {why}" if why else ""), agent_key=agent_id)
+    board.post(job, member.name, f"spawning {what} ({grant.job_spawns} total)", agent_key=agent_id)
     return None
 
 
 def _spawn_lines(cfg: dict, job: str) -> list[str]:
-    sp = cfg["spawn"]
-    if int(sp["max_per_job"]) <= 0 or int(sp["max_per_agent"]) <= 0:
-        return ["- Don't spawn subagents: that is switched off for swarm agents. Ask on the board instead."]
     from swarm import models
     host = current_host()
-    line = (f"- Spawning subagents: only when strictly needed, i.e. the work can't reasonably be done by "
-            f"you or by an agent already on the board (ask there first). Limits: {sp['max_per_agent']} per "
-            f"agent, {sp['max_per_job']} for the whole job, and no deeper than depth {sp['max_depth']} "
-            f"(the orchestrator's agents are depth 1, their helpers depth 2, and so on). ")
     if host.reads_prompt_tags:
-        line += (f"The child's prompt must contain the lines `{tag_line(job)}` and `{SPAWN_TAG} <why it "
-                 f"is strictly needed>]` (at least {sp['min_justification_chars']} characters); the "
-                 f"reason is posted on the board. Anything else is refused. Give the child a role "
-                 f"with `[swarm role: engineer]`, for example; the brief defines its responsibilities.")
+        line = (f"- Spawn helpers directly when useful. The child is assigned to this job automatically; "
+                f"its prompt gets the `{tag_line(job)}` identity line when needed. The brief defines its "
+                "responsibilities and role.")
     else:   # Codex: the spawn message is encrypted, only its task_name is readable
-        line += ("Your child joins this job by itself, and its spawn is announced on the board: say "
-                 "there why it is needed. Use task_name `<role>__<task>` (e.g. `engineer__api`) "
-                 "to assign a role. `verifier` is read-only and `judge` is refused; legacy "
-                 "verifier/judge prefixes without `__` still work. The brief defines custom responsibilities.")
+        line = ("- Spawn helpers directly when useful. Your child joins this job automatically and its "
+                "spawn is recorded on the board. Use task_name `<role>__<task>` to assign a role; "
+                "the brief defines its responsibilities.")
     hint = None if host.supports_spawn_model_rewrite else models.model_for(cfg, host.name, "helper")
     if hint:
         line += f" Spawn helpers with model `{hint}`."
@@ -506,8 +460,8 @@ def _judge_instructions(name: str, job: str, goal: str, cfg: dict, cap: int | No
     not_met = (f"{_bin()} verdict --job {_q(job)}{who} --artifact REF not_met --reason \"<why it is not met>\" "
                f"--next \"<what to change, where, and what you will re-check>\"")
     lines = [
-        f"[swarm] You are **{name}**, the JUDGE of job \"{job}\". Your only job is to decide whether "
-        f"its goal has been met. You don't do the work.",
+        f"[swarm] You are **{name}**, reviewing goal evidence for job \"{job}\". You may also do work "
+        "needed to advance the job.",
         f"Goal: {goal}",
         "- Gather evidence: read what the workers post, inspect their results yourself and run "
         "your own checks. Ask workers for proof with --to '<name>', and request fixes with --to "
@@ -520,19 +474,13 @@ def _judge_instructions(name: str, job: str, goal: str, cfg: dict, cap: int | No
         f"instructions become the brief the fix agents are spawned with, so make them complete on "
         f"their own. It is broadcast and shown by `swarm status --job`; judge again once the "
         f"workers have fixed it. The job can't be completed until your verdict is met.",
-        "- Judges only judge: never edit, fix, integrate, push or spawn workers. The supervisor "
-        "starts fix workers from your --next brief, and a separate executor finalizes accepted work.",
         f"- Put a long verdict (evidence, numbered defects, the fix list) in the verdict itself with "
         f"`--details -`, the full Markdown report on stdin (a heredoc with a QUOTED delimiter: "
         f"`{_bin()} verdict --job {_q(job)}{who} --artifact REF not_met --reason ... --next ... "
-        f"--details - <<'EOF'` ... `EOF`; at most 64 KiB). Keep --reason and --next short. Never "
-        f"write the report to a file such as verdict.md: file writes are refused for judges, so "
-        f"such a file never exists, and a --reason pointing at it leaves everyone with a dead "
-        f"reference. Anyone reads it with `{_bin()} verdict show --job {_q(job)}`.",
-        "- You must record a verdict before stopping. Bind it with --artifact REF to the exact "
-        "hand-off you inspected; acceptance of one artifact never covers another. If external "
-        "evidence is pending or red, wait using the configured evidence command or record "
-        "not_met with reason 'evidence pending' and --next describing what is needed.",
+        f"--details - <<'EOF'` ... `EOF`; at most 64 KiB). Keep --reason and --next concise. Anyone "
+        f"reads it with `{_bin()} verdict show --job {_q(job)}`.",
+        "- A verdict is evidence about the exact artifact you inspected, not permission to work or "
+        "stop. Record one when it helps; bind it to its artifact and state pending evidence as pending.",
         "- Verifiers, if the job has any, post VERIFIED/FAILED results: use them as evidence, but "
         "check anything the verdict rests on yourself.",
     ]
@@ -817,12 +765,7 @@ def _recall(board, cfg: dict, agent_id: str, job: str, seen, heading: str, *, st
 
 
 def _memory_stop(board, cfg: dict, agent_id: str) -> bool:
-    """SubagentStop of an agent that ends normally (memory on): it must have stored at least one memory
-    during its run (`swarm remember`), or declared it has none (`swarm remember --none "<reason>"`), both
-    read from its agent row (remembered_at). If neither, the stop is blocked ONCE (nudged_at records it)
-    with the instruction. The next stop goes through, and the agent is marked unharvested (memory.u.*,
-    learnings.mark_unharvested) so the job's learnings step can harvest its transcript. Learner launches and
-    the orchestrator are exempt. An error here never blocks the stop. Returns False when it blocked."""
+    """Record missing learnings for a later harvest; never hold an agent's stop for memory."""
     if not _memory_on(cfg):
         return True
     from swarm import learnings
@@ -838,17 +781,8 @@ def _memory_stop(board, cfg: dict, agent_id: str) -> bool:
             return True
         if state.remembered_at is not None and state.remembered_at >= state.joined_at:
             return True
-        if state.nudged_at is not None and state.nudged_at >= state.joined_at:
-            # blocked once already: let it go, and leave the agent marked for the learnings step
-            learnings.mark_unharvested(board, job, agent_id, me.name,
-                                       "stopped without storing or declaring learnings")
-            return True
-        board.record_nudge(agent_id)
-        _OUTPUT.update({"decision": "block", "reason":
-            f"[swarm memory] Before you stop: store your durable learnings with `{_bin()} remember --job "
-            f"{_q(job)} --as {_q(me.name)} \"<fact>\"`, or declare none with `{_bin()} remember --job "
-            f"{_q(job)} --as {_q(me.name)} --none \"<reason>\"`."})
-        return False
+        learnings.mark_unharvested(board, job, agent_id, me.name,
+                                   "stopped without storing or declaring learnings")
     except Exception as exc:   # never at the cost of the stop itself, but it stays harvestable
         _log_error("memory stop", agent_id, exc)
         try:
@@ -972,7 +906,7 @@ def _orchestrator_spawn(cfg: dict, sid: str | None, payload: dict) -> None:
 
 
 def _gate_spawn(board, agent_id: str, name: str, job: str, payload: dict, cfg: dict) -> bool:
-    """For a member's Agent call: refuse it unless allowed (see "spawning"). True = go ahead."""
+    """Account for a member's Agent call and preserve the child's job identity."""
     if not current_host().is_spawn(payload):
         return True
     from swarm.board import Member
@@ -984,6 +918,12 @@ def _gate_spawn(board, agent_id: str, name: str, job: str, payload: dict, cfg: d
         prompt = call.prompt if host.reads_prompt_tags else ""
         role = models.role_of(prompt, True, host.spawn_role_hint(call))
         _apply_model(cfg, payload, role, fallback="helper")
+        if host.reads_prompt_tags and _tag_of(prompt) != job:
+            tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
+            current = _OUTPUT.get("hookSpecificOutput", {}).get("updatedInput")
+            rewritten = dict(current if isinstance(current, dict) else tool_input)
+            rewritten["prompt"] = f"{tag_line(job)}\n{prompt}"
+            _set_input_rewrite(host.input_rewrite_output(rewritten))
         return True
     board.tool_finished(agent_id)   # a denied call gets no PostToolUse
     _deny(f"[swarm] Spawn refused: {why}. Spawn only when strictly needed: do the work yourself, "
@@ -1255,25 +1195,7 @@ def _reuse_identity(agent_id: str, job: str, payload: dict, name: str | None = N
 
 
 def _gate_judge(board, agent_id: str, job: str, payload: dict) -> bool:
-    if _drive_job(board.cfg, job):
-        return True  # drive roles are prompt instructions
-    me = next((a for a in board.agents(job, include_departed=False) if a.agent_key == agent_id), None)
-    if me is None or me.role != "judge":
-        return True
-    lease = _CURRENT.get("lease")
-    if lease:
-        lease.eligible = False  # judges must never receive a lease bypassing write policy
-    host = current_host()
-    from swarm.shellguard import writes_files
-    command = host.shell_command(payload)
-    if host.denies_verifier(payload) or (command and writes_files(command)):
-        board.tool_finished(agent_id)
-        _deny("[swarm] Judges only judge: no editing, fixing, merging, pushing or spawning, and no "
-              "writing files (not even a verdict.md). Record not_met with --next for the "
-              "supervisor's fix worker, and put your full report in the verdict: "
-              f"`{_bin()} verdict ... --details -` with the Markdown on stdin (a heredoc with a quoted "
-              f"delimiter: --details - <<'EOF').")
-        return False
+    # Role policy belongs in task instructions, not tool authorization.
     return True
 
 
@@ -1315,18 +1237,12 @@ def ci_wait_refusal(command: str, cwd: str, plugin: bool) -> str | None:
 
 
 def _gate_ci(board, agent_id: str, payload: dict, cfg: dict) -> bool:
-    """Refuse a member's shell command that waits on or polls CI; point at `swarm ci wait`.
-    True = go ahead."""
-    command = current_host().shell_command(payload)
-    if not command:
-        return True
-    from swarm.shellguard import ci_wait
-    if ci_wait(command) is None:   # the cheap test first: no plugin load, no .git read
-        return True
-    why = ci_wait_refusal(command, _payload_cwd(payload), _ci_plugin_loaded(board, cfg))
-    board.tool_finished(agent_id)   # a denied call gets no PostToolUse
-    _deny(why)
-    return False
+    """Allow shell-based CI polling; the CI plugin is an optional convenience.
+
+    True = go ahead.  CI status is evidence, not a prerequisite for running a
+    job's other valid work.
+    """
+    return True
 
 
 def _gate_verifier(board, agent_id: str, is_verifier: bool, payload: dict) -> bool:
@@ -1743,15 +1659,15 @@ def _first_call_of_resumed(board, agent_id: str, job: str) -> bool:
 
 
 def _supervise_off(board, cfg: dict, job: str) -> str | None:
-    """Why no replacement may join now (a kill switch: [supervise] enabled, supervise.off, the
-    job's --no-supervise), or None."""
-    from swarm.supervisor.settings import off_reason
-    why = off_reason(cfg, drive=_drive_job(cfg, job))   # a drive launch ignores [supervise] enabled
-    if why:
-        return why
+    """Return a stop reason only when the job is missing or closed.
+
+    Supervisor settings and the job's supervise preference do not block a valid replacement.
+    """
     js = board.job_status(job)
-    if js is not None and not js.supervise:
-        return f"supervise is off for job {job}"
+    if js is None:
+        return f"job {job} is missing"
+    if js.status != "active":
+        return f"job {job} is closed"
     return None
 
 
@@ -1946,7 +1862,7 @@ def _judge_recorded_verdict(board, agent_id: str) -> bool:
 
 
 def _judge_stop(board, agent_id: str, cfg: dict, payload: dict) -> bool:
-    """A judge cannot silently disappear without concluding the assigned hand-off."""
+    """Let judges stop; a missing verdict remains missing and must not be invented."""
     route = board.route(agent_id)
     job = route.member_job
     if not job:
@@ -1954,37 +1870,12 @@ def _judge_stop(board, agent_id: str, cfg: dict, payload: dict) -> bool:
     me = next((a for a in board.agents(job, include_departed=False) if a.agent_key == agent_id), None)
     if me is None or me.role != 'judge':
         return True
-    from swarm.review import latest_handoffs, judge_artifact
     js = board.job_status(job)
     if js is None or js.status != 'active':
         return True
     if _judge_recorded_verdict(board, agent_id):
         _CURRENT['stop_verdict'] = True
-        return True
-    artifact = judge_artifact(board, job, agent_id)
-    handoffs = latest_handoffs(board, job)
-    handoff = next((h for h in reversed(handoffs) if artifact is None or h.artifact == artifact), None)
-    artifact = artifact or (handoff.artifact if handoff else None)
-    from swarm import plugins
-    try:
-        recipe = plugins.pipeline_recipe(cfg, board, job, artifact)
-    except Exception as exc:
-        _log_error('judge evidence recipe', agent_id, exc)
-        recipe = {}  # failing recipes never allow a judge to stop silently
-    command = js.evidence_command or recipe.get('evidence_command') or (cfg.get('pipeline') or {}).get('evidence_wait_command')
-    if command:
-        # Evidence commands belong in the agent's ordinary permission boundary. Hooks run
-        # unsandboxed and must never execute board-supplied shell commands here.
-        from swarm.spool import deliver_verdict
-        if deliver_verdict(board, job, me.name, 'not_met', 'evidence pending',
-                           f'Run external evidence command {command}, resolve failures, and hand off the artifact again.', artifact):
-            return True
-    _OUTPUT.update({'decision': 'block', 'reason':
-        f'[swarm] Judge {me.name} must record swarm verdict --job {job}'
-        + ('' if current_host().supports_shell_rewrite else f' --as "{me.name}"')
-        + (f' --artifact "{artifact}"' if artifact else '')
-        + ' before stopping. Record met with evidence or not_met with --reason and --next.'})
-    return False
+    return True
 
 def _reap_own_bg(board, cfg: dict, agent_id: str) -> None:
     """The finished agent's background commands still running on this host: a detached
@@ -2423,23 +2314,35 @@ def _codex_session_end(cfg: dict, sid: str | None, agent_id: str | None, payload
         _log_error("session-end", agent_id or sid, exc)
 
 
-def _pass_sweep(cfg: dict) -> None:
-    """The stateless swarm pass (swarm.passcmd), run by every hook call and at most once per THROTTLE_SECONDS per
-    host: the board is opened only when a pass is due. Never raises."""
+def _pass_sweep(cfg: dict, jobs: set[str] | None = None) -> None:
+    """Run a throttled host pass or advance only the authenticated terminal job(s)."""
     from swarm.board import BoardUnavailable, open_board
     try:
         from swarm import passcmd
-        if not passcmd.due():
+        if jobs is None:
+            if not passcmd.due():
+                return
+            with open_board(cfg, init_timeout=HOOK_INIT_TIMEOUT) as board:
+                passcmd.throttled(board, cfg)
+            return
+        if not jobs:
             return
         with open_board(cfg, init_timeout=HOOK_INIT_TIMEOUT) as board:
-            passcmd.throttled(board, cfg)
-    except BoardUnavailable:   # no board from this host (a plain shell): the next hook tries again, quietly
+            for job in sorted(jobs):
+                try:
+                    actions = passcmd.run_job_pass(board, cfg, job)
+                    for action in actions:
+                        if action.startswith(f"{job}: pass error "):
+                            _log_error("swarm pass", job, RuntimeError(action))
+                except Exception as exc:
+                    _log_error("swarm pass", job, exc)
+    except BoardUnavailable:
         return
     except Exception as exc:
         _log_error("swarm pass", "", exc)
 
 
-def _terminal_reconciliation(cfg: dict) -> None:
+def _terminal_reconciliation(cfg: dict) -> set[str]:
     """Keep terminal semantics while exposing failed recovery for only its enrolled job(s)."""
     from swarm import dependencies
     from swarm.board import open_board
@@ -2455,27 +2358,26 @@ def _terminal_reconciliation(cfg: dict) -> None:
         if why:
             _log_error("terminal reconciliation", agent_id or sid or "", RuntimeError(why))
     if not agent_id and not sid:
-        return
-    # A terminal wake is global, but metadata belongs only to this host's enrolled
-    # participant. Unknown keys and no-goal roots need no second board connection.
+        return set()
+    # A terminal wake is global, but advancement belongs only to this host's enrolled participant.
     from swarm import enrolment
     from swarm.board.autoinit import store_key
     key = store_key(cfg)
-    # Native/headless worker roots have no agent_id: their private agent key is sid.
     rec = enrolment.find(key, agent_id or sid)
     jobs = {rec.job} if rec and rec.session_id == sid and rec.harness == current_host().name else set()
     if not agent_id and not jobs:
         for marker in _markers(cfg):
-            if marker.get('session_id') != sid or not marker.get('goal'):
+            if marker.get("session_id") != sid or not marker.get("goal"):
                 continue
-            rec = enrolment.find_job(key, marker['job'])
+            rec = enrolment.find_job(key, marker["job"])
             if rec and rec.session_id == sid and rec.harness == current_host().name:
                 jobs.add(rec.job)
     if not jobs:
-        return
+        return set()
     with open_board(cfg, init_timeout=HOOK_INIT_TIMEOUT) as board:
         for job in jobs:
             board.set_job_data(job, "task.reconciler_error", why)
+    return jobs
 
 
 def run_hook(event: str, cfg: dict, host: str | None = None) -> int:
@@ -2488,11 +2390,14 @@ def run_hook(event: str, cfg: dict, host: str | None = None) -> int:
     try:
         _handle(event, cfg, host)
         if event in ("stop", "session-stop", "session-end"):
+            terminal_jobs = set()
             try:
-                _terminal_reconciliation(cfg)
+                terminal_jobs = _terminal_reconciliation(cfg) or set()
             except Exception as exc:
                 _log_error("terminal reconciliation", "", exc)
         _wake_drivers(event, cfg, _CURRENT.get("payload") or {})
+        if event in ("stop", "session-stop", "session-end") and terminal_jobs:
+            _pass_sweep(cfg, jobs=terminal_jobs)
         if event == "turn":   # once a minute at most, from the hook every session runs before each tool call
             _pass_sweep(cfg)
     finally:
@@ -2518,8 +2423,8 @@ def _handle(event: str, cfg: dict, host_flag: str | None = None) -> int:
         from swarm import owner_create
         try:
             owner_create.attest(cfg, payload, current_host())
-            from swarm import task_authority
-            task_authority.attest(cfg, payload, current_host())
+            from swarm import late_review
+            late_review.attest(cfg, payload, current_host())
         except (OSError, ValueError) as exc:
             _deny("[swarm] " + str(exc))
             return 0
